@@ -737,7 +737,8 @@ func (dm *DatabaseManager) GetDecision(id string) (map[string]interface{}, error
 		gotID, content      string
 		tags, metadata      sql.NullString
 		createdAt, updatedAt int64
-		weight, reinforcement int64
+		weight             float64
+		reinforcement      int64
 	)
 	if err := row.Scan(&gotID, &content, &tags, &metadata, &createdAt, &updatedAt, &weight, &reinforcement); err != nil {
 		if err == sql.ErrNoRows {
@@ -858,7 +859,8 @@ func (dm *DatabaseManager) ListDecisions(filter DecisionFilter) ([]map[string]in
 			id, content         string
 			tags, metadata      sql.NullString
 			createdAt, updatedAt int64
-			weight, reinforcement int64
+			weight             float64
+			reinforcement      int64
 		)
 		if err := rows.Scan(&id, &content, &tags, &metadata, &createdAt, &updatedAt, &weight, &reinforcement); err != nil {
 			return nil, fmt.Errorf("scan decision: %w", err)
@@ -950,7 +952,8 @@ func (dm *DatabaseManager) GetTheory(id string) (map[string]interface{}, error) 
 		gotID, content           string
 		tags, metadata           sql.NullString
 		createdAt, updatedAt     int64
-		weight, reinforcement    int64
+		weight                  float64
+		reinforcement           int64
 	)
 	if err := row.Scan(&gotID, &content, &tags, &metadata, &createdAt, &updatedAt, &weight, &reinforcement); err != nil {
 		return nil, fmt.Errorf("get theory %s: %w", id, err)
@@ -1058,7 +1061,8 @@ func (dm *DatabaseManager) ListTheories(filter TheoryFilter) ([]map[string]inter
 			gotID, content         string
 			tags, metadata         sql.NullString
 			createdAt, updatedAt   int64
-			weight, reinforcement  int64
+			weight                float64
+			reinforcement         int64
 		)
 		if err := rows.Scan(&gotID, &content, &tags, &metadata, &createdAt, &updatedAt, &weight, &reinforcement); err != nil {
 			return nil, fmt.Errorf("scan theory row: %w", err)

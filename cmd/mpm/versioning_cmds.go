@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
@@ -114,6 +115,19 @@ func handleDiff(args []string) int {
 // so each input line is identified as unchanged, removed, or
 // inserted.
 //
+// 2026-09-11 follow-up (T82): the 2026-09-10 fix was structurally
+// correct (line-mode encoding) but the render loop still iterated
+// over individual bytes inside d.Text, prefixing every byte. The
+// output for `diff-lines alpha beta` was therefore `-a-l-p-h-a+b+e+t+a`
+// — a per-character concatenation rather than a per-line prefix.
+// This second pass writes one prefix per decoded line and appends a
+// newline after each so the rendered shape is:
+//
+//   -alpha
+//   +beta
+//
+// which is what `mpm debug diff-lines` documented as producing.
+//
 // The character-level DiffPrettyText path is preserved in handleDiff
 // (above), which is for memory version diffs where the content is
 // typically a full document and semantic cleanup is meaningful.
@@ -132,11 +146,14 @@ func handleDiffLines(args []string) int {
 	diffs := dmp.DiffMain(chars1, chars2, false)
 	diffs = dmp.DiffCharsToLines(diffs, lineArray)
 
-	// Render the line-mode diff with explicit prefixes. Unchanged
-	// lines get a leading space; inserted lines get `+`; deleted
-	// lines get `-`. Empty input on either side produces a
-	// well-defined all-insert or all-delete output rather than the
-	// previous concatenated-character garbage.
+	// Render the line-mode diff with explicit per-line prefixes.
+	// Unchanged lines get a leading space; inserted lines get `+`;
+	// deleted lines get `-`. DiffCharsToLines emits d.Text that
+	// already contains the original line strings (possibly several
+	// lines joined by '\n'), so we split on '\n' and emit one prefix
+	// per line — never per byte. A trailing newline after every line
+	// (including the last) keeps the output consumable by downstream
+	// tools (line counts, `wc -l`, diff post-processors).
 	var b []byte
 	for _, d := range diffs {
 		prefix := byte(' ')
@@ -146,10 +163,27 @@ func handleDiffLines(args []string) int {
 		case diffmatchpatch.DiffDelete:
 			prefix = '-'
 		}
-		for i := 0; i < len(d.Text); i++ {
-			c := d.Text[i]
+		// Empty diff entries (can appear when one side is empty)
+		// still emit a newline so the line accounting stays even.
+		if d.Text == "" {
 			b = append(b, prefix)
-			b = append(b, c)
+			b = append(b, '\n')
+			continue
+		}
+		for _, line := range strings.Split(d.Text, "\n") {
+			// The library's encoding collapses runs of identical
+			// lines; an emitted line is never the empty trailing
+			// fragment after a final '\n', so we don't need to
+			// special-case it. A line of literal "" can arise from
+			// the library's split semantics on a trailing newline;
+			// skip those so we don't emit blank "+\n" / "-\n" /
+			// " \n" lines that don't correspond to a real input line.
+			if line == "" {
+				continue
+			}
+			b = append(b, prefix)
+			b = append(b, line...)
+			b = append(b, '\n')
 		}
 	}
 	fmt.Print(string(b))

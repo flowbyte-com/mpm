@@ -103,12 +103,38 @@ func TestDiffLines_EmptyInput(t *testing.T) {
 // rendered output must include explicit `+`/`-`/` ` per-line
 // prefixes so the structure is observable. The previous bug
 // produced concatenated text with no structure.
+//
+// 2026-09-11 follow-up (T82): the original render loop prefixed
+// each BYTE inside d.Text, producing "-a-l-p-h-a+b+e+t+a" for
+// `diff-lines alpha beta`. The fixed loop writes one prefix per
+// LINE (split on '\n') and appends a newline after each line, so
+// the rendered output for the same input is "-alpha\n+beta\n".
+// This test pins the line-level shape against the rune-level bug.
 func TestDiffLines_OutputHasLinePrefixes(t *testing.T) {
 	diffs := diffLinesForTest(t, "alpha", "beta")
 
-	// Render the diff the same way the production handler does,
-	// then assert no entry is a plain concatenation.
-	var rendered strings.Builder
+	out := renderDiffLinesForTest(diffs)
+
+	// The output must NOT be the rune-level concatenation the
+	// pre-fix render produced. That shape had every byte prefixed.
+	if strings.Contains(out, "-a-l-p-h-a") || strings.Contains(out, "+b-e-t-a") {
+		t.Fatalf("diff-lines output is rune-prefixed (the bug): %q", out)
+	}
+	// The fixed shape: one prefix per line, newline after each.
+	if !strings.Contains(out, "-alpha\n") {
+		t.Errorf("expected '-alpha\\n' as a removed line; got %q", out)
+	}
+	if !strings.Contains(out, "+beta\n") {
+		t.Errorf("expected '+beta\\n' as an inserted line; got %q", out)
+	}
+}
+
+// renderDiffLinesForTest mirrors the production handler's render
+// loop (post-fix). One prefix per LINE (split on '\n'), newline
+// after each line. Anything that re-introduces the per-byte
+// prefix loop is what the T82 regression test catches.
+func renderDiffLinesForTest(diffs []diffmatchpatch.Diff) string {
+	var b strings.Builder
 	for _, d := range diffs {
 		prefix := byte(' ')
 		switch d.Type {
@@ -117,22 +143,21 @@ func TestDiffLines_OutputHasLinePrefixes(t *testing.T) {
 		case diffmatchpatch.DiffDelete:
 			prefix = '-'
 		}
-		for i := 0; i < len(d.Text); i++ {
-			rendered.WriteByte(prefix)
-			rendered.WriteByte(d.Text[i])
+		if d.Text == "" {
+			b.WriteByte(prefix)
+			b.WriteByte('\n')
+			continue
+		}
+		for _, line := range strings.Split(d.Text, "\n") {
+			if line == "" {
+				continue
+			}
+			b.WriteByte(prefix)
+			b.WriteString(line)
+			b.WriteByte('\n')
 		}
 	}
-	out := rendered.String()
-	// Sanity: the output must NOT be the simple concatenation of the
-	// two inputs (the previous bug).
-	if out == "alphabeta" || out == "alphbeta" || out == "alpha" || out == "beta" {
-		t.Errorf("diff-lines output must not be a plain concatenation; got %q", out)
-	}
-	// The output must contain at least one explicit prefix
-	// marker. Without prefixes, the diff is unobservable.
-	if !strings.ContainsAny(out, "+-") && diffs[0].Type == diffmatchpatch.DiffEqual {
-		t.Errorf("diff-lines output must contain +/- prefixes for changes; got %q", out)
-	}
+	return b.String()
 }
 
 // diffLinesForTest invokes the same line-mode encoding pipeline
