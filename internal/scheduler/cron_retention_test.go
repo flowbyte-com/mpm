@@ -16,7 +16,6 @@ package scheduler
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -857,15 +856,6 @@ func TestCronSweep_SweepUnderManyDifferentCapValues(t *testing.T) {
 	}
 }
 
-// freshID returns a unique cron wake id for use in parameterized
-// test cases where we re-seed into a fresh DB per case.
-var freshIDCounter int64
-
-func freshID(i int) string {
-	freshIDCounter++
-	return fmt.Sprintf("cron-fresh-%d-%d", i, freshIDCounter)
-}
-
 // TestCronSweep_PreservesExistingSchemaMetadata — defensive
 // regression for the metadata preservation contract.
 //
@@ -906,7 +896,3 @@ func TestCronSweep_PreservesExistingSchemaMetadata(t *testing.T) {
 		t.Errorf("expiration reason missing: %s", metadata)
 	}
 }
-
-// ensure sql package is used (some helpers in this file call into
-// s.db.QueryRow without importing sql directly).
-var _ = sql.LevelDefault
