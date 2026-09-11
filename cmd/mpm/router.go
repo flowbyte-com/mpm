@@ -843,6 +843,10 @@ func handleOps(args []string) int {
 		return handleIntegration(subArgs)
 
 	// — Backup & Restore & Ingest —
+	case "backup":
+		return handleBackup(append([]string{"backup"}, subArgs...))
+	case "restore-db":
+		return handleRestoreDB(append([]string{"restore-db"}, subArgs...))
 	case "ingest":
 		return handleIngest(append([]string{"ingest"}, subArgs...))
 	case "cascade":

@@ -568,14 +568,19 @@ func (dm *DatabaseManager) ReinforceMemory(id string, delta int) error {
 	// that `RowsAffected()` alone could miss. Under concurrent
 	// weaken we cannot pin a precise post-state here, but we can
 	// still confirm the row is on disk and within the model bounds.
-	var postWeight, postReinf int
+	//
+	// weight is REAL — fractional values are valid (post-fix T27;
+	// pre-fix this scanned into int which panicked on any non-integer
+	// value). reinforcement_count is INTEGER.
+	var postWeight float64
+	var postReinf int
 	if err := dm.db.QueryRow(
 		`SELECT weight, reinforcement_count FROM memories WHERE id = ?`, id,
 	).Scan(&postWeight, &postReinf); err != nil {
 		return fmt.Errorf("reinforce memory: post-update read-back: %w", err)
 	}
 	if postWeight < 0 || postWeight > 100 {
-		return fmt.Errorf("reinforce memory: read-back weight out of bounds (%d)", postWeight)
+		return fmt.Errorf("reinforce memory: read-back weight out of bounds (%g)", postWeight)
 	}
 	if postReinf < 0 {
 		return fmt.Errorf("reinforce memory: read-back reinforcement_count negative (%d)", postReinf)
@@ -708,14 +713,16 @@ func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
 	}
 
 	// Defense Triad rule 3: read-back proves persistence.
-	var postWeight, postReinf int
+	// weight is REAL — fractional values are valid (T27 fix).
+	var postWeight float64
+	var postReinf int
 	if err := dm.db.QueryRow(
 		`SELECT weight, reinforcement_count FROM memories WHERE id = ?`, id,
 	).Scan(&postWeight, &postReinf); err != nil {
 		return fmt.Errorf("weaken memory: post-update read-back: %w", err)
 	}
 	if postWeight < 0 {
-		return fmt.Errorf("weaken memory: read-back weight out of bounds (%d)", postWeight)
+		return fmt.Errorf("weaken memory: read-back weight out of bounds (%g)", postWeight)
 	}
 	if postReinf < 0 {
 		return fmt.Errorf("weaken memory: read-back reinforcement_count out of bounds (%d)", postReinf)

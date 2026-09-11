@@ -1168,14 +1168,18 @@ func (dm *DatabaseManager) WeakenMemoryTool(memoryID string, delta int) (map[str
 	// post-state. weight_before / reinforcement_count_before are
 	// returned as approximations derived from the formula (callers that
 	// need exact pre-state can re-derive from response values).
-	var postWeight, postReinf int
+	//
+	// weight is REAL — fractional values are valid (T27 fix);
+	// reinforcement_count is INTEGER.
+	var postWeight float64
+	var postReinf int
 	if err := dm.db.QueryRow(
 		`SELECT weight, reinforcement_count FROM memories WHERE id = ?`, memoryID,
 	).Scan(&postWeight, &postReinf); err != nil {
 		return nil, fmt.Errorf("weaken: post-update read-back: %w", err)
 	}
 	if postWeight < 1 {
-		return nil, fmt.Errorf("weaken: read-back weight below floor (%d)", postWeight)
+		return nil, fmt.Errorf("weaken: read-back weight below floor (%g)", postWeight)
 	}
 	if postReinf < 0 {
 		return nil, fmt.Errorf("weaken: read-back reinforcement_count negative (%d)", postReinf)
@@ -1201,7 +1205,7 @@ func (dm *DatabaseManager) WeakenMemoryTool(memoryID string, delta int) (map[str
 		"reinforcement_count": postReinf,
 		"floor_hit":           floorHit,
 		"note":                fmt.Sprintf("weight %s after -%d (weight_loss=%d, reinforcement_count=%d)",
-			strconv.Itoa(postWeight), delta, weightLoss, postReinf),
+			strconv.FormatFloat(postWeight, 'g', -1, 64), delta, weightLoss, postReinf),
 	}, nil
 }
 
