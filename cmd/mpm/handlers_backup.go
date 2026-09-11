@@ -164,6 +164,41 @@ func handleRestoreDB(args []string) int {
 		return respond("", fmt.Sprintf("Restore failed (read): %v\n", err), 1)
 	}
 
+	// STEP 1.5 (2026-09-11 driver-compat shim): preprocess the dump
+	// before validation to apply two driver-compat rewrites that the
+	// validator still accepts but mattn/go-sqlite3 cannot execute:
+	//
+	//   1. Drop `INSERT INTO sqlite_schema` (and the legacy
+	//      `sqlite_master` alias). `sqlite3 .dump` emits one such row
+	//      per database object — they're how the shadow-table
+	//      restoration path rebuilds virtual-table metadata. mattn's
+	//      driver returns `table sqlite_master may not be modified`
+	//      if we try to execute them. The catalog rows are redundant:
+	//      the `CREATE TABLE` and `CREATE VIRTUAL TABLE` statements
+	//      earlier in the dump already register every object with the
+	//      schema. The validator still ALLOWS them (it's not a
+	//      security boundary — the catalog rows only describe objects
+	//      the validator already approved) — we just don't execute.
+	//
+	//   2. Promote `CREATE TABLE <name>` to `CREATE TABLE IF NOT EXISTS
+	//      <name>`. Real-world restore targets are typically a fresh
+	//      DB or one whose schema has drifted slightly from the dump
+	//      (e.g. an in-progress migration already added a few tables).
+	//      The dump's bare CREATE TABLE would then fail with "table
+	//      X already exists" — aborting the entire restore transaction
+	//      and wasting all the prior statements. IF NOT EXISTS makes
+	//      the restore idempotent against pre-existing tables while
+	//      still creating any that are missing. This is a benign
+	//      rewrite: the validator already accepts both forms, and the
+	//      IF NOT EXISTS semantics are a strict subset of the bare
+	//      CREATE TABLE semantics (creating tables only if they don't
+	//      exist).
+	//
+	// Both rewrites happen BEFORE validation so the validator sees the
+	// final form and reports statement numbers that match what will be
+	// executed.
+	content = preprocessDumpForRestore(content)
+
 	// STEP 2 (T78 contract): validate the dump against the allow-list
 	// before any destructive mutation. The canonical validator rejects
 	// ATTACH / DETACH / SELECT / DELETE / UPDATE / DROP / ALTER /
@@ -216,7 +251,20 @@ func handleRestoreDB(args []string) int {
 
 	// Open a fresh connection. Using mattn/go-sqlite3 directly (no CLI subprocess)
 	// prevents the shell-injection vector present in the old sqlite3 .read approach.
-	db, err := sql.Open("sqlite3", dbPath)
+	//
+	// The DSN uses `_txlock=immediate` so the very first statement we
+	// issue (PRAGMA foreign_keys=OFF) acquires an IMMEDIATE lock. This
+	// prevents the race where the outer Begin() succeeds at deferred
+	// lock level but a subsequent CREATE TABLE statement tries to
+	// upgrade and finds another connection has sneaked in between —
+	// which on a hot DB can cause the tx to commit/rollback
+	// implicitly. `_busy_timeout=5000` matches the canonical MPM
+	// connection DSN so we wait briefly for the lock instead of
+	// returning SQLITE_BUSY. The 2026-09-11 Stage 0 restore
+	// regression surfaced this when the validator's pre-pass changed
+	// the statement shape and the inner Exec began racing with the
+	// fresh DB's auto-checkpoint.
+	db, err := sql.Open("sqlite3", dbPath+"?_txlock=immediate&_busy_timeout=5000")
 	if err != nil {
 		return restoreFromBackup(dbPath, preDeleteCopy, "open", err)
 	}
@@ -245,6 +293,18 @@ func handleRestoreDB(args []string) int {
 	// the outer Go transaction (database/sql refuses nested transactions).
 	// The validator already approved these as safe transaction-control
 	// statements; the outer Go tx serves the same atomicity guarantee.
+	//
+	// Skip INSERT INTO sqlite_schema / sqlite_master as well. The
+	// `sqlite3 .dump` tool emits these to re-populate the system catalog
+	// for every object, but mattn/go-sqlite3 (the driver used here)
+	// returns `table sqlite_master may not be modified` if we try to
+	// execute them. The catalog rows are redundant: the `CREATE TABLE`
+	// and `CREATE VIRTUAL TABLE` statements earlier in the dump already
+	// register every object with the schema. Dropping these rows is
+	// semantically a no-op for restore purposes. The validator still
+	// ALLOWS them (it's not a security boundary — the catalog rows
+	// only describe objects the validator already approved) — the skip
+	// is purely a driver-compat shim.
 	for i, stmt := range statements {
 		upper := strings.ToUpper(strings.TrimSpace(stmt))
 		first := strings.Fields(upper)
@@ -252,6 +312,20 @@ func handleRestoreDB(args []string) int {
 			switch first[0] {
 			case "BEGIN", "COMMIT", "ROLLBACK", "END":
 				continue
+			}
+			// INSERT INTO sqlite_schema / sqlite_master — driver-compat skip.
+			if first[0] == "INSERT" && len(first) >= 3 && first[1] == "INTO" {
+				// The token may be glued to a column list (no whitespace
+				// between `sqlite_schema` and `(`) — extract the bare name.
+				tbl := first[2]
+				if i := strings.IndexAny(tbl, "("); i >= 0 {
+					tbl = tbl[:i]
+				}
+				tbl = strings.ToLower(tbl)
+				if tbl == "sqlite_schema" || tbl == "sqlite_master" ||
+					tbl == "sqlite_temp_schema" || tbl == "sqlite_temp_master" {
+					continue
+				}
 			}
 		}
 		if _, err := tx.Exec(stmt); err != nil {
@@ -277,6 +351,50 @@ func handleRestoreDB(args []string) int {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+// preprocessDumpForRestore applies driver-compat rewrites to a dump
+// before validation. See the comment in handleRestoreDB for the why.
+// The rewrites are line-based (one statement per line is not guaranteed
+// by the dump format — `sqlite3 .dump` writes many statements per line
+// for compactness — so we use a line-by-line pass for the safe
+// rewrites that always start at the beginning of a line).
+func preprocessDumpForRestore(content []byte) []byte {
+	var b strings.Builder
+	b.Grow(len(content))
+	for _, line := range strings.Split(string(content), "\n") {
+		upper := strings.ToUpper(strings.TrimSpace(line))
+		// Skip `INSERT INTO sqlite_schema`/`sqlite_master`/`sqlite_temp_*` lines.
+		if strings.HasPrefix(upper, "INSERT INTO SQLITE_SCHEMA") ||
+			strings.HasPrefix(upper, "INSERT INTO SQLITE_MASTER") ||
+			strings.HasPrefix(upper, "INSERT INTO SQLITE_TEMP_SCHEMA") ||
+			strings.HasPrefix(upper, "INSERT INTO SQLITE_TEMP_MASTER") {
+			continue
+		}
+		// Promote `CREATE TABLE <name>` to `CREATE TABLE IF NOT EXISTS <name>`.
+		if strings.HasPrefix(upper, "CREATE TABLE ") &&
+			!strings.HasPrefix(upper, "CREATE TABLE IF NOT EXISTS ") {
+			line = "CREATE TABLE IF NOT EXISTS " + line[len("CREATE TABLE "):]
+		}
+		// Promote `CREATE INDEX <name>` to `CREATE INDEX IF NOT EXISTS <name>`.
+		// A fresh or partially-migrated DB may already have the index
+		// from a prior migration; without IF NOT EXISTS the dump's
+		// CREATE INDEX would fail with "index already exists" and
+		// abort the entire restore transaction. IF NOT EXISTS is a
+		// strict subset of bare CREATE INDEX (creates only if absent).
+		// Handle CREATE UNIQUE INDEX (compound keyword) as well.
+		if strings.HasPrefix(upper, "CREATE INDEX ") &&
+			!strings.HasPrefix(upper, "CREATE INDEX IF NOT EXISTS ") {
+			line = "CREATE INDEX IF NOT EXISTS " + line[len("CREATE INDEX "):]
+		}
+		if strings.HasPrefix(upper, "CREATE UNIQUE INDEX ") &&
+			!strings.HasPrefix(upper, "CREATE UNIQUE INDEX IF NOT EXISTS ") {
+			line = "CREATE UNIQUE INDEX IF NOT EXISTS " + line[len("CREATE UNIQUE INDEX "):]
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return []byte(b.String())
+}
 
 // restoreFromBackup undoes a destructive restore attempt by moving
 // the `.pre-restore` file back to the canonical DB path. Invoked

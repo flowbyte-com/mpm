@@ -238,12 +238,22 @@ func (s *WhyService) explainMemoryLike(id string, report *WhyReport) (*WhyReport
 
 // detectKind probes the memories table for the id across the
 // canonical substrate collections, then falls back to first-class
-// non-memory tables (works). Returns the first match.
+// non-memory tables (lessons_base, works). Returns the first match.
 // Returns (kind, map, nil) on hit; ("", nil, error) on miss.
 //
 // The collection set mirrors what an operator might plausibly want to
 // introspect (per RFC §'mpm why' the intent is "any artifact in the
 // substrate"). Add new collections here when they become introspectable.
+//
+// T64 2026-09-11: lessons now live in a dedicated `lessons_base` table
+// (a sibling of `memories`), reached via an `INSTEAD OF` trigger on the
+// `lessons` view. The pre-fix code only probed the `memories` table
+// with collection='lessons', which the new schema never writes to — so
+// every lesson id returned "no artifact found" even though the row was
+// trivially resolvable in lessons_base. The fix probes lessons_base
+// after the memories loop misses, returning kind="lesson" so the rest
+// of the why report (evidence, confidence, retrieval) works the same
+// way it does for memory kinds.
 func (s *WhyService) detectKind(id string) (string, map[string]interface{}, error) {
 	collections := []string{
 		"memories",
@@ -285,26 +295,113 @@ func (s *WhyService) detectKind(id string) (string, map[string]interface{}, erro
 			}
 		}
 	}
+	// T64 fix: probe the lessons_base table directly. Lessons have
+	// lived in a dedicated table since the migrateLessonsToView
+	// migration; the `lessons` view (backed by INSTEAD OF triggers on
+	// lessons_base) is the canonical read path but is not queryable
+	// by the id-only probe used here. fetchLesson handles both NULL
+	// session_id / content_hash columns and returns a map in the
+	// same shape fetchFromCollection does for memory kinds so the
+	// downstream provenance / evidence loaders stay generic.
+	if row, lerr := s.fetchLesson(id); lerr == nil && row != nil {
+		return "lesson", row, nil
+	}
 	// F15: works are first-class artifacts with their own table — probe it
 	// so `mpm why <work-id>` resolves instead of reporting "(unknown)".
-	row, werr := s.fetchWork(id)
-	if werr == nil && row != nil {
+	if row, werr := s.fetchWork(id); werr == nil && row != nil {
 		return "work", row, nil
 	}
-	return "", nil, fmt.Errorf("no artifact found for id %q (probed %d standard collections + works)", id, len(collections))
+	return "", nil, fmt.Errorf("no artifact found for id %q (probed %d standard collections + lessons_base + works)", id, len(collections))
+}
+
+// fetchLesson reads a lessons_base row by id for `mpm why`. The lessons
+// table is the canonical home of lesson content (lessons collection in
+// memories is legacy and the new schema writes only to lessons_base
+// via the migrateLessonsToView migration). The map shape mirrors
+// fetchFromCollection so the downstream provenance / evidence loaders
+// stay generic.
+//
+// T64 2026-09-11: the pre-fix why probe only looked at `memories`
+// where collection='lessons', which the new schema never populates —
+// so every valid lesson id returned "no artifact found". This fetcher
+// is the dedicated fallback after the memories loop misses.
+//
+// Lesson schema (verified 2026-09-11 from the restored pre-probe dump):
+//   id TEXT PRIMARY KEY,
+//   type TEXT NOT NULL DEFAULT 'insight',
+//   content TEXT NOT NULL,
+//   tags JSON,
+//   reinforcement_count INTEGER,
+//   source_session_id TEXT,    (nullable)
+//   created TEXT NOT NULL,
+//   content_hash TEXT,         (nullable)
+//   retrieval_priority REAL,
+//   importance REAL,
+//   confidence REAL,
+//   deleted_at INTEGER.        (nullable)
+//
+// The `created` column is TEXT (ISO8601), not INTEGER like memories —
+// that's intentional in the lessons schema and we emit it verbatim in
+// the output map.
+func (s *WhyService) fetchLesson(id string) (map[string]interface{}, error) {
+	row := s.dm.QueryRowTracked(`
+		SELECT id, type, content, tags, reinforcement_count, source_session_id,
+		       created, content_hash, retrieval_priority, importance, confidence, deleted_at
+		FROM lessons_base WHERE id = ? AND deleted_at IS NULL LIMIT 1
+	`, id)
+	var outID, lessonType, content, created string
+	var tagsJSON, sessID, contentHash sql.NullString
+	var reinf int
+	var retrievalPriority, importance, confidence float64
+	var deletedAt sql.NullInt64
+	if err := row.Scan(&outID, &lessonType, &content, &tagsJSON, &reinf, &sessID,
+		&created, &contentHash, &retrievalPriority, &importance, &confidence, &deletedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil // not a lesson — expected miss
+		}
+		return nil, fmt.Errorf("lesson probe scan: %w", err)
+	}
+	out := map[string]interface{}{
+		"id":             outID,
+		"collection":     "lessons",
+		"type":           lessonType,
+		"content":        content,
+		"weight":         int64(int(retrievalPriority)),
+		"importance":     importance,
+		"confidence":     confidence,
+		"reinforcement_count": reinf,
+		"created":        created,
+	}
+	if sessID.Valid {
+		out["session_id"] = sessID.String
+	}
+	if tagsJSON.Valid {
+		out["tags"] = tagsJSON.String
+	}
+	return out, nil
 }
 
 // fetchWork reads a works row by id for `mpm why`. Timestamps are INTEGER
 // Unix-epoch seconds; they are emitted under the same map keys the memory
 // path uses so provenanceFromMap handles both uniformly. Returns nil when
 // not found or on query failure (probe semantics).
+//
+// T64 2026-09-11 fix: the pre-fix scan declared `verification` and
+// `session_id` as raw `string`, which failed with `converting NULL to
+// string is unsupported` whenever the work had no verification row or
+// no session id. The error returned from Scan is NOT sql.ErrNoRows, so
+// detectKind's `continue` swallowed it as a "not a work" miss and the
+// why probe reported "no artifact found" for otherwise-valid works.
+// Both columns are now sql.NullString — the map only includes the
+// verification key when it's actually populated.
 func (s *WhyService) fetchWork(id string) (map[string]interface{}, error) {
 	row := s.dm.QueryRowTracked(`
 		SELECT id, title, content, status, verification, session_id, created_at, updated_at
 		FROM works WHERE id = ? LIMIT 1
 	`, id)
-	var outID, title, status, verification string
+	var outID, title, status string
 	var content sql.NullString
+	var verification sql.NullString
 	var sessID sql.NullString
 	var createdAt, updatedAt sql.NullInt64
 	if err := row.Scan(&outID, &title, &content, &status, &verification, &sessID, &createdAt, &updatedAt); err != nil {
@@ -314,11 +411,10 @@ func (s *WhyService) fetchWork(id string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("work probe scan: %w", err)
 	}
 	out := map[string]interface{}{
-		"id":           outID,
-		"collection":   "works",
-		"title":        title,
-		"status":       status,
-		"verification": verification,
+		"id":         outID,
+		"collection": "works",
+		"title":      title,
+		"status":     status,
 	}
 	if content.Valid && content.String != "" {
 		out["content"] = content.String
@@ -326,6 +422,9 @@ func (s *WhyService) fetchWork(id string) (map[string]interface{}, error) {
 		// Title is the work's identifying text; use it for the identity
 		// preview rather than rendering an empty artifact.
 		out["content"] = title
+	}
+	if verification.Valid {
+		out["verification"] = verification.String
 	}
 	if sessID.Valid {
 		out["session_id"] = sessID.String

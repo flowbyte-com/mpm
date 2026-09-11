@@ -105,6 +105,66 @@ func TestDumpValidator_CommentTokenBoundary(t *testing.T) {
 	}
 }
 
+// TestDumpValidator_LineCommentInsideString is the 2026-09-11 regression
+// test for the Stage 0 pre-probe restore blocker. The pre-fix
+// stripSQLComments was string-literal blind: it treated any `--` as
+// comment-start, even inside a single-quoted string value. That caused
+// the comment-strip loop to consume the rest of the line — including
+// any `''` quote escapes that splitSQLStatements relies on to keep
+// string-literal state in sync. The downstream parser would then
+// misclassify a `;` later in the string as a statement boundary and
+// trip on the orphan fragment.
+//
+// Pre-fix repro (truncated from the pre-probe dump, lesson about
+// `git log --since=<binary-mtime>` inside the lesson content):
+//
+//	INSERT INTO memories VALUES('id1', 'cmd -- flag and binary''s stuff', ...);
+//	INSERT INTO memories VALUES('id2', 'next row', ...);
+//
+// The first INSERT is one statement. Pre-fix the validator split it on
+// the `--` (treating it as a comment) and then on a `;` inside the
+// string (because the consumed line also ate the `''` escape, leaving
+// the parser's quote state out of sync). The orphan fragment started
+// with `s` or whatever came after `--`, but more importantly the next
+// row got parsed as a new statement that began with `s` or whatever
+// prefix was leaked — none of which started with an allowed keyword.
+//
+// Post-fix: `--` inside a single-quoted string is treated as literal
+// content; only `--` outside strings is treated as a comment marker.
+func TestDumpValidator_LineCommentInsideString(t *testing.T) {
+	v := NewDumpValidator([]string{"memories"})
+
+	// The minimum reproducer: a single `--` inside a string value, then
+	// a `;` that terminates the row, then a second valid row.
+	content := "INSERT INTO memories VALUES('id1','cmd -- flag inside string','','','','','','',1.0,0,'',NULL,NULL,NULL);\n" +
+		"INSERT INTO memories VALUES('id2','next row','','','','','','',1.0,0,'',NULL,NULL,NULL);\n"
+	if err := v.Validate(content); err != nil {
+		t.Fatalf("validator must accept `--` inside string literal, got: %v", err)
+	}
+
+	// The Stage 0 actual reproducer: a `''` quote escape later in the
+	// same string, after the `--`. This is the precise pattern from the
+	// pre-probe dump that split the second row from the first.
+	content2 := "INSERT INTO memories VALUES('id1','cmd -- flag and binary''s stuff here','','','','','','',1.0,0,'',NULL,NULL,NULL);\n" +
+		"INSERT INTO memories VALUES('id2','next row','','','','','','',1.0,0,'',NULL,NULL,NULL);\n"
+	if err := v.Validate(content2); err != nil {
+		t.Fatalf("validator must accept `''` escape after `--` inside string, got: %v", err)
+	}
+
+	// Block comment inside a string: must also be treated as content.
+	content3 := "INSERT INTO memories VALUES('id1','cmd /* fake */ flag','','','','','','',1.0,0,'',NULL,NULL,NULL);\n"
+	if err := v.Validate(content3); err != nil {
+		t.Fatalf("validator must accept `/* */` inside string literal, got: %v", err)
+	}
+
+	// And the existing bypass-defense guarantee must still hold: a
+	// real `--` line comment OUTSIDE strings must still strip cleanly.
+	content4 := "-- ATTACH DATABASE 'evil'\nINSERT INTO memories VALUES('id1','x','','','','','','',1.0,0,'',NULL,NULL,NULL);\n"
+	if err := v.Validate(content4); err != nil {
+		t.Fatalf("validator must still accept dump with leading line comment, got: %v", err)
+	}
+}
+
 // TestDumpValidator_EmptyContent confirms that empty/whitespace-only
 // dumps don't trigger false positives.
 func TestDumpValidator_EmptyContent(t *testing.T) {
@@ -139,6 +199,64 @@ func TestDumpValidator_RejectsUnknownKeyword(t *testing.T) {
 		if err := v.Validate(content); err == nil {
 			t.Errorf("expected reject for %q, got nil error", content)
 		}
+	}
+}
+
+// TestDumpValidator_FTS5ShadowTables pins the 2026-09-11 pre-probe restore
+// regression. The dump from a database with FTS5 virtual tables contains
+// `CREATE TABLE` statements for the shadow tables (`<base>_fts_data`,
+// `_fts_idx`, `_fts_content`, `_fts_docsize`, `_fs_config`) that SQLite
+// creates internally when the virtual table is built. The pre-fix
+// allow-list (a plain `map[string]bool` of explicit table names) did not
+// cover them, so any FTS5-enabled restore was rejected.
+//
+// Post-fix: the validator recognises the shadow-table suffixes and accepts
+// them when the corresponding `<base>_fts` virtual table is on the
+// explicit allow-list. The base MUST still be allow-listed — i.e. you
+// cannot smuggle shadow tables in for an FTS module that wasn't already
+// declared in the canonical schema. This test exercises all five
+// suffixes plus the security boundary (a shadow for a non-allow-listed
+// base must still be rejected).
+func TestDumpValidator_FTS5ShadowTables(t *testing.T) {
+	v := NewDumpValidator([]string{"memories", "memories_fts"})
+
+	allowedShadowTables := []string{
+		"memories_fts_data",
+		"memories_fts_idx",
+		"memories_fts_content",
+		"memories_fts_docsize",
+		"memories_fts_config",
+	}
+	for _, tbl := range allowedShadowTables {
+		// CREATE TABLE
+		create := "CREATE TABLE '" + tbl + "'(id INTEGER PRIMARY KEY, block BLOB);"
+		if err := v.Validate(create); err != nil {
+			t.Errorf("CREATE on shadow table %s should be accepted, got: %v", tbl, err)
+		}
+		// INSERT
+		insert := "INSERT INTO " + tbl + " VALUES(1, X'00');"
+		if err := v.Validate(insert); err != nil {
+			t.Errorf("INSERT into shadow table %s should be accepted, got: %v", tbl, err)
+		}
+	}
+
+	// Security boundary: a shadow table whose base is NOT on the allow-list
+	// must still be rejected. This is what stops the shadow-table pattern
+	// from being an injection vector.
+	disallowedShadows := []string{
+		"CREATE TABLE 'evil_fts_data'(id INTEGER PRIMARY KEY);",
+		"CREATE TABLE 'sessions_fts_data'(id INTEGER PRIMARY KEY);", // sessions_fts not on allow-list
+		"INSERT INTO evil_fts_content VALUES(1, 'x');",
+	}
+	for _, content := range disallowedShadows {
+		if err := v.Validate(content); err == nil {
+			t.Errorf("shadow table for non-allow-listed base must be rejected: %q", content)
+		}
+	}
+
+	// Make sure the non-shadow tail suffix isn't mistaken for a shadow table.
+	if err := v.Validate("CREATE TABLE 'memories_ft_data'(id INTEGER PRIMARY KEY);"); err == nil {
+		t.Errorf("table with non-shadow suffix must be rejected")
 	}
 }
 

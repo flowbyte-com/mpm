@@ -237,6 +237,15 @@ func sectionHelpContent(section string) (string, bool) {
   default help stays small. Future waves may promote the most-used
   commands (backup, review) to root-level aliases.`, true
 
+	case "observability":
+		// T5 2026-09-11: `observability` was the pre-Wave-2 help topic
+		// name. The section was renamed to `reflection` per the
+		// observability→reflection help pointer (see
+		// mpm-2026-09-10-cli-contract-cleanup.md). Forward to the
+		// canonical reflection page so operators using muscle memory
+		// still get useful output instead of
+		// `no help available for 'observability'`.
+		fallthrough
 	case "reflection":
 		return `Reflection — observability and synthesis surface (Wave 2+)
 

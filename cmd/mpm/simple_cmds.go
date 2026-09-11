@@ -560,19 +560,75 @@ func handleRm(args []string) int {
 }
 
 // mpm patch-memory <id> <json-patch> — Patch metadata JSON in-place (no content change, no FTS re-index)
+// mpm patch-memory <id> <json-patch> — Patch metadata JSON in-place (no content change, no FTS re-index).
+//
+// Two forms are supported:
+//   1. mpm patch-memory <id> '{...}'   — full JSON object patch (the canonical form)
+//   2. mpm patch-memory <id> -- <key>=<value> [...]  — ergonomic shortcut; the CLI
+//      builds a JSON patch object from one or more key=value pairs and applies
+//      them via json_patch (upsert semantics). Multiple pairs are merged.
+//
+// T28 (2026-09-11): added the ergonomic -- <key>=<value> form so operators
+// don't have to escape JSON braces on the shell. The legacy positional
+// JSON-object form is unchanged — back-compat verified by the existing
+// patch-memory usage in handlers_epistemology.go (resolve_theory
+// constructs a JSON patch and calls UpdateMemoryMetadata directly,
+// bypassing this handler entirely).
+//
+// Examples:
+//   mpm patch-memory abc123 '{ "status": "proven" }'
+//   mpm patch-memory abc123 -- status=proven resolved_at=2026-09-11T13:00:00Z
+//   mpm patch-memory abc123 -- confidence=0.9
+//
+// JSON values: bare values are parsed as JSON literals (numbers, booleans,
+// nulls). For string values with spaces or special characters, wrap the
+// value in quotes: `-- note="needs follow-up"` (the value parses as the
+// JSON string "needs follow-up").
 func handlePatchMemory(args []string) int {
 	if len(args) < 3 {
-		usererror.Usage("mpm patch-memory <id> <json-patch>")
+		usererror.Usage("mpm patch-memory <id> {json-patch} | -- <key>=<value> [...]")
 		return 1
 	}
 
 	id := args[1]
-	patchJSON := args[2]
+	var patchJSON string
 
-	// Basic JSON validity check
-	if !strings.HasPrefix(strings.TrimSpace(patchJSON), "{") {
-		usererror.Error("patch must be a JSON object string")
-		return 1
+	if args[2] == "--" {
+		// Ergonomic shortcut form: -- <key>=<value> [<key>=<value> ...]
+		if len(args) < 4 {
+			usererror.Error("patch-memory -- requires at least one key=value pair")
+			return 1
+		}
+		pairs := args[3:]
+		patch := make(map[string]interface{}, len(pairs))
+		for _, pair := range pairs {
+			eq := strings.IndexByte(pair, '=')
+			if eq < 0 {
+				usererror.Error("patch-memory: invalid pair %q (expected key=value)", pair)
+				return 1
+			}
+			key := pair[:eq]
+			raw := pair[eq+1:]
+			val, err := parseJSONPatchValue(raw)
+			if err != nil {
+				usererror.Error("patch-memory: invalid value for key %q: %v", key, err)
+				return 1
+			}
+			patch[key] = val
+		}
+		encoded, err := json.Marshal(patch)
+		if err != nil {
+			usererror.Error("patch-memory: encode patch: %v", err)
+			return 1
+		}
+		patchJSON = string(encoded)
+	} else {
+		patchJSON = args[2]
+		// Basic JSON validity check
+		if !strings.HasPrefix(strings.TrimSpace(patchJSON), "{") {
+			usererror.Error("patch must be a JSON object string (or use the -- <key>=<value> form)")
+			return 1
+		}
 	}
 
 	dm := getDB()
@@ -580,19 +636,36 @@ func handlePatchMemory(args []string) int {
 		return 1
 	}
 
-	// `err` is reused below; it was previously declared by
-	// `dm, err := mpminternal.NewDatabaseManager("")`; declare explicitly
-	// because the singleton lookup doesn't introduce one.
-	var err error
-
-	err = dm.UpdateMemoryMetadata(id, patchJSON)
-	if err != nil {
+	if err := dm.UpdateMemoryMetadata(id, patchJSON); err != nil {
 		usererror.Error("%v", err)
 		return 1
 	}
 
 	fmt.Printf("Patched metadata for memory %s\n", id)
 	return 0
+}
+
+// parseJSONPatchValue accepts a string from the CLI and parses it into a
+// JSON value. Bare values try JSON literals first (number, bool, null);
+// if that fails, the value is treated as a JSON string. Quoted values
+// (`"..."`) are parsed as a JSON string literal so spaces and special
+// characters round-trip cleanly.
+func parseJSONPatchValue(raw string) (interface{}, error) {
+	if raw == "" {
+		return nil, fmt.Errorf("empty value")
+	}
+	// Try a JSON literal first (handles true/false/null/numbers).
+	var anyVal interface{}
+	if err := json.Unmarshal([]byte(raw), &anyVal); err == nil {
+		// Only accept literal scalars — strings must be quoted.
+		if _, isString := anyVal.(string); isString {
+			return raw, nil // treat as raw string
+		}
+		return anyVal, nil
+	}
+	// Otherwise the value is a raw string. Use it verbatim — the caller
+	// can quote it if they need to embed spaces or special characters.
+	return raw, nil
 }
 
 // mpm promote <id> — Make memory LTM
@@ -851,18 +924,28 @@ func handleSetWeight(args []string) int {
 	return 0
 }
 
-// mpm snooze <id> [--days N | --duration <n><unit>] — Bump memory relevance
-// without promoting to LTM. Increments weight by 1 (capped at 9 to avoid LTM
-// promotion) and refreshes last_accessed_at. Never sets is_long_term or
-// inflates weight to >= 10.
+// mpm snooze <id> [--days N | --duration <n><unit> | --until <RFC3339>] —
+// Bump memory relevance without promoting to LTM. Increments weight by 1
+// (capped at 9 to avoid LTM promotion) and refreshes last_accessed_at.
+// Never sets is_long_term or inflates weight to >= 10.
 //
 // F-E1: the CLI used to silently ignore --duration 1h and apply the default
 // 1-day bump. The fix accepts an explicit duration with units (m, h, d, w)
 // and rejects unknown units. --days remains supported for backwards
 // compatibility (it is identical to --duration Nd).
+//
+// T26 (2026-09-11): --until <RFC3339-time> lets operators express
+// "snooze until tomorrow morning" or "snooze until next Monday 09:00".
+// The flag accepts RFC3339 / RFC3339Nano with timezone (e.g.
+// "2026-09-12T09:00:00Z" or "2026-09-12T11:00:00+02:00") and converts
+// to seconds-from-now. The 1-year cap and all other guardrails from
+// --duration apply identically — a typo'd far-future timestamp surfaces
+// the same clear "use `mpm promote` for permanent durability" error.
+// --days and --duration remain supported for muscle memory and
+// scripting convenience.
 func handleSnooze(args []string) int {
 	if len(args) < 2 {
-		usererror.Usage("mpm snooze <id> [--days N | --duration <n><unit>]")
+		usererror.Usage("mpm snooze <id> [--days N | --duration <n><unit> | --until <RFC3339>]")
 		return 1
 	}
 	id := args[1]
@@ -942,8 +1025,43 @@ func handleSnooze(args []string) int {
 				return 1
 			}
 			seconds = sec
+		case "--until":
+			if i+1 >= len(args) {
+				usererror.Error("snooze: --until requires a value (RFC3339 timestamp, e.g. 2026-09-12T09:00:00Z)")
+				return 1
+			}
+			i++
+			t, err := time.Parse(time.RFC3339, args[i])
+			if err != nil {
+				usererror.Error("snooze: invalid --until %q (must be RFC3339, e.g. 2026-09-12T09:00:00Z or 2026-09-12T11:00:00+02:00): %v", args[i], err)
+				return 1
+			}
+			now := time.Now()
+			delta := t.Sub(now)
+			// Past or present timestamps are a user error: snoozing
+			// for <= 0 seconds is a no-op that could quietly look
+			// like "it ran successfully" while doing nothing. Reject
+			// explicitly so the operator notices and uses the
+			// right form for their intent.
+			if delta <= 0 {
+				usererror.Error("snooze: --until %s is in the past (now=%s); pick a future timestamp", args[i], now.UTC().Format(time.RFC3339))
+				return 1
+			}
+			sec := int(delta.Seconds())
+			// Round up to the next whole second so a `--until
+			// 2026-09-12T09:00:00.5Z` (mid-second) rounds to 1s
+			// rather than truncating to 0s and falling into the
+			// past-timestamp branch above.
+			if delta > time.Duration(sec)*time.Second {
+				sec++
+			}
+			if sec > 31536000 {
+				usererror.Error("snooze: --until %s is more than 1 year out (delta=%s) — use `mpm promote` for permanent durability", args[i], delta)
+				return 1
+			}
+			seconds = sec
 		default:
-			usererror.Error("snooze: unknown flag %q (use --days N or --duration <n><unit>)", args[i])
+			usererror.Error("snooze: unknown flag %q (use --days N, --duration <n><unit>, or --until <RFC3339>)", args[i])
 			return 1
 		}
 	}

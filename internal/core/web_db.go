@@ -682,6 +682,17 @@ func (dm *DatabaseManager) ChallengeAndReinforce(id string, delta int) error {
 // WeakenMemory decrements reinforcement count and reduces weight.
 // Errors when the id matches no row (no silent no-op success).
 //
+// Weight floor contract (T24 2026-09-11): the floor is 1.0 across every
+// weight-modifying primitive. AdjustMemoryWeight, WeakenMemoryTool,
+// and the legacy_weight view all use MAX(weight - ..., 1); ReinforceMemory
+// only adds weight so the floor doesn't apply, but a fractional starting
+// weight could decay via the synthesis / lifecycle paths and still
+// never cross below 1.0. The pre-fix WeakenMemory used MAX(weight - ?, 0),
+// which let a large weaken pass produce weight=0.0 — a state that's
+// incompatible with the scoring model (which assumes weight>=1) and
+// downstream filters (e.g. embedding_migration.go's `weight < 1.0`
+// check for synthetic memories).
+//
 // Atomicity (alpha remediation 2026-08-27): the mutation is a single
 // SQL UPDATE so SQLite WAL mode serializes concurrent writers. The
 // read-back assertion (Defense Triad rule 3) confirms the post-update
@@ -696,7 +707,7 @@ func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
 	res, err := dm.db.Exec(`
 		UPDATE memories
 		SET reinforcement_count = MAX(reinforcement_count - ?, 0),
-		    weight = MAX(weight - ?, 0),
+		    weight = MAX(weight - ?, 1),
 		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
 	`, delta, weightLoss, id)
@@ -714,6 +725,9 @@ func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
 
 	// Defense Triad rule 3: read-back proves persistence.
 	// weight is REAL — fractional values are valid (T27 fix).
+	// Floor check mirrors the SQL MAX(weight - ?, 1) — the post-state
+	// must land >= 1.0. A post-state < 1.0 means either the SQL floor
+	// is misconfigured or an INSTEAD OF trigger swallowed the UPDATE.
 	var postWeight float64
 	var postReinf int
 	if err := dm.db.QueryRow(
@@ -721,8 +735,8 @@ func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
 	).Scan(&postWeight, &postReinf); err != nil {
 		return fmt.Errorf("weaken memory: post-update read-back: %w", err)
 	}
-	if postWeight < 0 {
-		return fmt.Errorf("weaken memory: read-back weight out of bounds (%g)", postWeight)
+	if postWeight < 1.0 {
+		return fmt.Errorf("weaken memory: read-back weight below floor (%g)", postWeight)
 	}
 	if postReinf < 0 {
 		return fmt.Errorf("weaken memory: read-back reinforcement_count out of bounds (%d)", postReinf)
