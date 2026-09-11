@@ -2082,10 +2082,10 @@ func loadActiveForAdmission() activeAdmission {
 	if err != nil {
 		return out
 	}
-	if len(st.Modes) > 0 {
-		out.Mode = st.Modes[0]
+	if modes := st.ModesSlice(); len(modes) > 0 {
+		out.Mode = modes[0]
 	}
-	out.Persona = st.Persona
+	out.Persona = st.PersonaString()
 	return out
 }
 
@@ -2232,7 +2232,7 @@ func GetSystemPrompt() string {
 	var parts []string
 
 	// Ephemeral persona intercept: fetch from system_config
-	if active.Persona == "ephemeral" {
+	if active.PersonaString() == "ephemeral" {
 		if dm := getDBConcrete(); dm != nil {
 			if ep, epErr := mpminternal.GetEphemeralPersona(dm); epErr == nil {
 				if fm, fmErr := mpminternal.FormatEphemeralPersonaAsFrontmatter(ep); fmErr == nil {
@@ -2241,7 +2241,7 @@ func GetSystemPrompt() string {
 			}
 		}
 	} else {
-		personaPath := filepath.Join(config.GetMPMDir(), "persona", active.Persona+".md")
+		personaPath := filepath.Join(config.GetMPMDir(), "persona", active.PersonaString()+".md")
 		if data, err := os.ReadFile(personaPath); err == nil {
 			if content := extractFrontmatterDirective(string(data)); content != "" {
 				parts = append(parts, content)
@@ -2249,7 +2249,7 @@ func GetSystemPrompt() string {
 		}
 	}
 
-	for _, mode := range active.Modes {
+	for _, mode := range active.ModesSlice() {
 		modePath := filepath.Join(config.GetMPMDir(), "mode", mode+".md")
 		if data, err := os.ReadFile(modePath); err == nil {
 			if content := extractFrontmatterDirective(string(data)); content != "" {

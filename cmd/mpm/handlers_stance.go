@@ -59,12 +59,15 @@ func handleStanceAssume(args []string) int {
 		return respond("", fmt.Sprintf("Error reading active.json: %v\n", err), 1)
 	}
 
-	// Update mode/persona; leave the unspecified one as-is
+	// Update mode/persona; leave the unspecified one as-is. Pointer
+	// assignment preserves the explicit-clear / explicit-select semantics.
 	if mode != "-" {
-		active.Modes = []string{mode}
+		m := []string{mode}
+		active.Modes = &m
 	}
 	if persona != "-" {
-		active.Persona = persona
+		p := persona
+		active.Persona = &p
 	}
 	active.Updated = time.Now().UTC().Format(time.RFC3339)
 	if err := mpminternal.SaveActiveJSON(active); err != nil {
@@ -156,12 +159,13 @@ func handleStanceSynthesize(args []string) int {
 		return respond("", fmt.Sprintf("Error saving ephemeral persona: %v\n", err), 1)
 	}
 
-	// Update active.json to point to ephemeral
+	// Update active.json to point to ephemeral (pointer assignment).
 	active, err := mpminternal.LoadActiveJSON()
 	if err != nil {
 		return respond("", fmt.Sprintf("Error reading active.json: %v\n", err), 1)
 	}
-	active.Persona = "ephemeral"
+	eph := "ephemeral"
+	active.Persona = &eph
 	active.Updated = time.Now().UTC().Format(time.RFC3339)
 	if err := mpminternal.SaveActiveJSON(active); err != nil {
 		return respond("", fmt.Sprintf("Error saving active.json: %v\n", err), 1)
@@ -220,7 +224,7 @@ func handleOpsPromote() int {
 	if err != nil {
 		return respond("", fmt.Sprintf("Error reading active.json: %v\n", err), 1)
 	}
-	active.Persona = ep.Name
+	active.Persona = &ep.Name
 	active.Updated = time.Now().UTC().Format(time.RFC3339)
 	if err := mpminternal.SaveActiveJSON(active); err != nil {
 		return respond("", fmt.Sprintf("Error saving active.json: %v\n", err), 1)

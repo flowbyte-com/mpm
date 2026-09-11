@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -116,7 +115,14 @@ func (pm *PersonaManager) List() ([]*Persona, error) {
 
 	var personas []*Persona
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+		if entry.IsDir() {
+			continue
+		}
+		// Eligibility gate: must be a Markdown definition file. README.md
+		// and other documentation entries are rejected unconditionally here
+		// so a README carrying valid frontmatter (e.g. `name: README`)
+		// cannot become a selectable persona.
+		if !IsDefinitionFile(entry.Name()) {
 			continue
 		}
 		p, err := parsePersonaFile(filepath.Join(pm.Dir, entry.Name()))
@@ -140,69 +146,64 @@ func (pm *PersonaManager) Validate(name string) bool {
 	return err == nil
 }
 
-// GetActive returns the active persona name from the active file
+// GetActive returns the active persona name from the active file.
+// Returns "" if the file is missing or unreadable.
+//
+// v spec 2026-09-11: callers that need to distinguish "explicit clear"
+// from "absent" should consult ActiveState.IsPersonaExplicitClear /
+// IsPersonaAbsent. The plain string return cannot represent that
+// distinction.
 func (pm *PersonaManager) GetActive() (string, error) {
-	data, err := os.ReadFile(pm.ActiveFile)
+	active, err := LoadActiveJSON()
 	if err != nil {
 		return "", err
 	}
-
-	type activeState struct {
-		Persona string   `json:"persona"`
-		Modes   []string `json:"modes"`
-		Updated string   `json:"updated"`
-	}
-	var active activeState
-	if err := json.Unmarshal(data, &active); err != nil {
-		active = activeState{}
-	}
-
-	return active.Persona, nil
+	return active.PersonaString(), nil
 }
 
-// SetActive updates the active persona
-// If the name is not a valid persona, it is set to empty string (system falls back to default).
-// Also writes config/current_persona so detectActiveContext() (cmd/mpm/handlers.go)
-// injects the same value into memory metadata. The "auto" sentinel is skipped —
-// it's a feature flag, not a real persona.
+// GetActiveState returns the full ActiveState from the canonical
+// active.json. New code should prefer this over GetActive so callers
+// can distinguish explicit-clear from absent. The legacy mirror file
+// (config/current_persona) is NOT consulted.
+func (pm *PersonaManager) GetActiveState() (*ActiveState, error) {
+	return LoadActiveJSON()
+}
+
+// SetActive updates the active persona via the canonical ActiveState.
+// Pointer semantics:
+//
+//	personaName == ""  → explicit clear (writes "" into active.json)
+//	personaName == "x" → explicit selection (writes "x")
+//	personaName invalid → does NOT touch active.json (returns error)
+//
+// The pointer-aware encoding preserves the user's intent across reads.
+// Also writes config/current_persona (legacy mirror) for back-compat
+// with third-party readers; that file is NOT consulted by any MPM
+// read path.
 func (pm *PersonaManager) SetActive(personaName string) error {
-	data, err := os.ReadFile(pm.ActiveFile)
+	if personaName != "" && !pm.Validate(personaName) {
+		return fmt.Errorf("persona not found: %s", personaName)
+	}
+
+	active, err := LoadActiveJSON()
 	if err != nil {
 		return err
 	}
-
-	type activeState struct {
-		Persona string   `json:"persona"`
-		Modes   []string `json:"modes"`
-		Updated string   `json:"updated"`
-	}
-	var active activeState
-	if err := json.Unmarshal(data, &active); err != nil {
-		active = activeState{}
-	}
-
-	// Only set if valid, otherwise leave empty (triggers default fallback)
-	if personaName == "" || pm.Validate(personaName) {
-		active.Persona = personaName
-	} else {
-		active.Persona = ""
-	}
-	active.Updated = time.Now().Format(time.RFC3339)
-
-	newData, err := json.MarshalIndent(active, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(pm.ActiveFile, newData, 0644); err != nil {
+	// Pointer assignment preserves intent: nil=absent, &""=explicit clear,
+	// &"name"=explicit selection.
+	p := personaName
+	active.Persona = &p
+	active.Updated = time.Now().UTC().Format(time.RFC3339)
+	if err := SaveActiveJSON(active); err != nil {
 		return err
 	}
 
-	// Mirror to config/current_persona so memory metadata injection sees the
-	// same value the user just selected. Skip the "auto" sentinel.
-	if active.Persona != "" && active.Persona != "auto" {
+	// Mirror to config/current_persona for legacy readers. Skip the "auto"
+	// sentinel — it's a feature flag, not a real persona.
+	if personaName != "" && personaName != "auto" {
 		path := filepath.Join(filepath.Dir(pm.ActiveFile), "config", "current_persona")
 		_ = os.MkdirAll(filepath.Dir(path), 0700)
-		_ = os.WriteFile(path, []byte(active.Persona), 0644)
+		_ = os.WriteFile(path, []byte(personaName), 0644)
 	} else {
 		path := filepath.Join(filepath.Dir(pm.ActiveFile), "config", "current_persona")
 		_ = os.Remove(path)

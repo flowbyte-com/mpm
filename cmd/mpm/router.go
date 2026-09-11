@@ -1428,7 +1428,7 @@ func isBlankActive(active *mpminternal.ActiveState) bool {
 	if active == nil {
 		return true
 	}
-	return active.Persona == "" && len(active.Modes) == 0
+	return active.PersonaString() == "" && len(active.ModesSlice()) == 0
 }
 
 // isatty returns true if f is a real interactive terminal.

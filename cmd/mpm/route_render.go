@@ -137,15 +137,21 @@ func applyRouteToActive(report mpminternal.RoutingReport) {
 		return
 	}
 
-	next := *current // shallow copy — Modes slice is replaced wholesale below
+	next := *current // shallow copy — pointer fields are replaced wholesale below
 	changed := false
 
-	if report.SelectedPersona != "" && report.SelectedPersona != current.Persona {
-		next.Persona = report.SelectedPersona
+	currentPersona := current.PersonaString()
+	if report.SelectedPersona != "" && report.SelectedPersona != currentPersona {
+		// Pointer assignment: explicit selection. Distinguishes from
+		// absent (nil) and explicit-clear (&"").
+		p := report.SelectedPersona
+		next.Persona = &p
 		changed = true
 	}
-	if len(report.SelectedModes) > 0 && !equalStringSlices(report.SelectedModes, current.Modes) {
-		next.Modes = append([]string(nil), report.SelectedModes...)
+	if len(report.SelectedModes) > 0 && !equalStringSlices(report.SelectedModes, current.ModesSlice()) {
+		// Pointer assignment: explicit selection.
+		m := append([]string(nil), report.SelectedModes...)
+		next.Modes = &m
 		changed = true
 	}
 
@@ -157,6 +163,31 @@ func applyRouteToActive(report mpminternal.RoutingReport) {
 	if err := mpminternal.SaveActiveJSON(&next); err != nil {
 		if isatty(os.Stderr) {
 			usererror.Warn("route --apply: save active.json: %v", err)
+		}
+	}
+
+	// Mirror writeback: keep config/current_persona and config/current_mode
+	// in sync with active.json so legacy readers (third-party consumers
+	// still pointing at the mirror files) see the new selection. This
+	// fixes the read-path divergence where route --apply previously
+	// updated active.json but not the legacy mirror files.
+	if next.Persona != nil && *next.Persona != "" && *next.Persona != "auto" {
+		personaMirror := filepath.Join(config.GetMPMDir(), "config", "current_persona")
+		_ = os.MkdirAll(filepath.Dir(personaMirror), 0700)
+		_ = os.WriteFile(personaMirror, []byte(*next.Persona), 0644)
+	}
+	if next.Modes != nil {
+		var firstMode string
+		for _, m := range *next.Modes {
+			if m != "" && m != "auto" {
+				firstMode = m
+				break
+			}
+		}
+		if firstMode != "" {
+			modeMirror := filepath.Join(config.GetMPMDir(), "config", "current_mode")
+			_ = os.MkdirAll(filepath.Dir(modeMirror), 0700)
+			_ = os.WriteFile(modeMirror, []byte(firstMode), 0644)
 		}
 	}
 }

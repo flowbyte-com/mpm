@@ -980,7 +980,7 @@ func handleHint(args []string) int {
 	retrievalThreshold := -3.0
 	if active, err := mpminternal.LoadActiveJSON(); err == nil {
 		mm := mpminternal.NewModeManager(config.GetMPMDir())
-		for _, name := range active.Modes {
+		for _, name := range active.ModesSlice() {
 			if m, err := mm.Get(name); err == nil {
 				retrievalLimit = m.RetrievalLimit
 				retrievalThreshold = m.RetrievalThreshold

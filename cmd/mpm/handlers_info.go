@@ -53,10 +53,17 @@ type infoOutput struct {
 }
 
 type infoWorkspace struct {
-	ActiveModes    string `json:"active_modes"`
-	ActivePersona  string `json:"active_persona"`
-	ActiveUpdated  string `json:"active_updated,omitempty"`
-	ActiveJSONLoad string `json:"active_json_load,omitempty"` // error string when active.json failed
+	// ActiveModes is the canonical plural representation of the
+	// multi-mode selection. Replaces the pre-2026-09-11 comma-joined
+	// singular string. New consumers should use this list directly.
+	ActiveModes    []string `json:"active_modes"`
+	// ActiveModeSource is the aggregate resolver source for the
+	// multi-mode selection ("explicit" | "fallback" | "empty").
+	ActiveModeSource   string   `json:"active_mode_source,omitempty"`
+	ActivePersona  string   `json:"active_persona"`
+	ActivePersonaSource string `json:"active_persona_source,omitempty"`
+	ActiveUpdated  string   `json:"active_updated,omitempty"`
+	ActiveJSONLoad string   `json:"active_json_load,omitempty"` // error string when active.json failed
 }
 
 type infoDatabase struct {
@@ -142,8 +149,8 @@ func collectInfo(dm *mpminternal.DatabaseManager) infoOutput {
 		DataDir: config.GetMPMDir(),
 		DBPath:  dm.DBPath(),
 		Workspace: infoWorkspace{
-			ActiveModes:   "(none)",
-			ActivePersona: "(default)",
+			ActiveModes:   []string{},
+			ActivePersona: "",
 		},
 		Database: infoDatabase{
 			Path:   dm.DBPath(),
@@ -161,16 +168,15 @@ func collectInfo(dm *mpminternal.DatabaseManager) infoOutput {
 		},
 	}
 
-	// Workspace — active mode / persona from active.json.
+	// Workspace — active mode / persona from active.json, resolved via
+	// the canonical resolver. Plural modes + per-field source vocab.
 	if active, err := mpminternal.LoadActiveJSON(); err == nil {
-		out.Workspace.ActiveModes = "(none)"
-		if len(active.Modes) > 0 {
-			out.Workspace.ActiveModes = strings.Join(active.Modes, ", ")
-		}
-		out.Workspace.ActivePersona = "(default)"
-		if active.Persona != "" {
-			out.Workspace.ActivePersona = active.Persona
-		}
+		modeRes := mpminternal.ResolveActiveModes(dm, active.Modes)
+		out.Workspace.ActiveModes = modeRes.Names()
+		out.Workspace.ActiveModeSource = modeRes.Source
+		personaRes := mpminternal.ResolveActivePersonaIntent(dm, active.Persona)
+		out.Workspace.ActivePersona = personaRes.Name
+		out.Workspace.ActivePersonaSource = personaRes.Source
 		out.Workspace.ActiveUpdated = active.Updated
 	} else {
 		out.Workspace.ActiveJSONLoad = err.Error()
@@ -222,8 +228,20 @@ func renderInfoHuman(out infoOutput) {
 	fmt.Println()
 
 	fmt.Println("Workspace")
-	fmt.Printf("  active modes     : %s\n", out.Workspace.ActiveModes)
-	fmt.Printf("  active persona   : %s\n", out.Workspace.ActivePersona)
+	if len(out.Workspace.ActiveModes) == 0 {
+		fmt.Printf("  active modes     : <none>%s\n", sourceTag(out.Workspace.ActiveModeSource))
+	} else {
+		fmt.Printf("  active modes     : %s%s\n",
+			strings.Join(out.Workspace.ActiveModes, ", "),
+			sourceTag(out.Workspace.ActiveModeSource))
+	}
+	if out.Workspace.ActivePersona == "" {
+		fmt.Printf("  active persona   : <none>%s\n", sourceTag(out.Workspace.ActivePersonaSource))
+	} else {
+		fmt.Printf("  active persona   : %s%s\n",
+			out.Workspace.ActivePersona,
+			sourceTag(out.Workspace.ActivePersonaSource))
+	}
 	if out.Workspace.ActiveUpdated != "" {
 		fmt.Printf("  active updated   : %s\n", out.Workspace.ActiveUpdated)
 	} else if out.Workspace.ActiveJSONLoad != "" {
@@ -328,6 +346,15 @@ func listSkillsForInfo(dm *mpminternal.DatabaseManager) []string {
 type scheduledTaskInfo struct {
 	id      string
 	nextRun string
+}
+
+// sourceTag formats the resolver source for human display. Empty or
+// "explicit" source renders as no tag (the common case is no tag).
+func sourceTag(s string) string {
+	if s == "" || s == "explicit" {
+		return ""
+	}
+	return " [" + s + "]"
 }
 
 // listScheduledTasksForInfo returns the configured scheduled tasks.

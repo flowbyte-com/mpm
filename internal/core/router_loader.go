@@ -74,7 +74,15 @@ func loadComponents(dir string, kind ComponentKind) ([]*Component, error) {
 
 	var components []*Component
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+		if entry.IsDir() {
+			continue
+		}
+		// Eligibility gate: must be a Markdown definition file. README.md
+		// and other documentation entries are rejected unconditionally —
+		// matches the manager loaders so the router and CLI see the same
+		// vocabulary. A README carrying valid-looking frontmatter (e.g.
+		// `name: README`) must never become a routing target.
+		if !IsDefinitionFile(entry.Name()) {
 			continue
 		}
 

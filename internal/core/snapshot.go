@@ -358,17 +358,19 @@ func loadExecutionContext(_ context.Context, wc WrapperContext) (*ExecutionConte
 		return nil, &SnapshotError{Op: "resolve", Field: "execution.mode", Err: fmt.Errorf("load active.json: %w", err)}
 	}
 
-	// modes is []string; if "auto" is in the list, surface "auto" as the
-	// mode. Otherwise join the list with comma — matches active.json's
-	// multi-mode semantics.
+	// state.Modes is *[]string (pointer-aware): nil = absent; &[] = explicit
+	// clear; &[…] = explicit selection. Join with comma only when at least
+	// one mode is present; empty/absent modes produce "" rather than ",".
 	mode := ""
-	if len(state.Modes) > 0 {
-		mode = strings.Join(state.Modes, ",")
+	if state.Modes != nil && len(*state.Modes) > 0 {
+		mode = strings.Join(*state.Modes, ",")
 	}
 
+	// state.Persona is *string: nil = absent; &"" = explicit clear;
+	// &"name" = explicit. PersonaString collapses nil and &"" to "".
 	return &ExecutionContext{
 		Mode:           mode,
-		Persona:        state.Persona,
+		Persona:        state.PersonaString(),
 		ConfidenceBand: wc.ConfidenceBand,
 		ReasoningDepth: wc.ReasoningDepth,
 		CapturedAt:     time.Now().UTC().Format(time.RFC3339),

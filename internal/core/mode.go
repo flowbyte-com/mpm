@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,7 +131,14 @@ func (mm *ModeManager) List() ([]*Mode, error) {
 
 	var modes []*Mode
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+		if entry.IsDir() {
+			continue
+		}
+		// Eligibility gate: must be a Markdown definition file. README.md
+		// and other documentation entries are rejected unconditionally here
+		// so a README carrying valid frontmatter (e.g. `name: README`)
+		// cannot become a selectable mode.
+		if !IsDefinitionFile(entry.Name()) {
 			continue
 		}
 		m, err := parseModeFile(filepath.Join(mm.Dir, entry.Name()))
@@ -156,65 +162,62 @@ func (mm *ModeManager) Validate(name string) bool {
 	return err == nil
 }
 
-// GetActive returns the active modes from the active file
+// GetActive returns the active modes from the canonical active.json.
+// Returns nil if the file is missing or unreadable.
+//
+// v spec 2026-09-11: callers that need to distinguish "explicit clear"
+// from "absent" should consult ActiveState.IsModesExplicitClear /
+// IsModesAbsent. The plain slice return cannot represent that
+// distinction.
 func (mm *ModeManager) GetActive() ([]string, error) {
-	data, err := os.ReadFile(mm.ActiveFile)
+	active, err := LoadActiveJSON()
 	if err != nil {
 		return nil, err
 	}
-
-	type activeState struct {
-		Persona string   `json:"persona"`
-		Modes   []string `json:"modes"`
-		Updated string   `json:"updated"`
-	}
-	var active activeState
-	if err := json.Unmarshal(data, &active); err != nil {
-		active = activeState{}
-	}
-	return active.Modes, nil
+	return active.ModesSlice(), nil
 }
 
-// SetActive updates the active modes
-// Invalid mode names are silently removed from the list.
-// Also writes the first real mode to config/current_mode so that
-// detectActiveContext() (cmd/mpm/handlers.go) injects it into memory metadata.
+// GetActiveState returns the full ActiveState from the canonical
+// active.json. New code should prefer this over GetActive so callers
+// can distinguish explicit-clear from absent.
+func (mm *ModeManager) GetActiveState() (*ActiveState, error) {
+	return LoadActiveJSON()
+}
+
+// SetActive updates the active modes via the canonical ActiveState.
+// Pointer semantics:
+//
+//	modes == nil OR len==0  → explicit clear (writes [] into active.json)
+//	modes == […]            → explicit selection (writes the slice)
+//
+// Invalid mode names are silently removed from the input list.
+// Also writes the first non-"auto" mode to config/current_mode for
+// back-compat with legacy readers. The mirror file is NOT consulted
+// by any MPM read path.
 func (mm *ModeManager) SetActive(modes []string) error {
-	data, err := os.ReadFile(mm.ActiveFile)
-	if err != nil {
-		return err
-	}
-
-	type activeState struct {
-		Persona string   `json:"persona"`
-		Modes   []string `json:"modes"`
-		Updated string   `json:"updated"`
-	}
-	var active activeState
-	if err := json.Unmarshal(data, &active); err != nil {
-		active = activeState{}
-	}
-
-	// Filter to only valid modes
+	// Filter to only valid modes. Empty input (nil or []) is honoured as
+	// explicit clear — no validation needed.
 	valid := make([]string, 0, len(modes))
 	for _, m := range modes {
 		if mm.Validate(m) {
 			valid = append(valid, m)
 		}
 	}
-	active.Modes = valid
-	active.Updated = time.Now().Format(time.RFC3339)
 
-	newData, err := json.MarshalIndent(active, "", "  ")
+	active, err := LoadActiveJSON()
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(mm.ActiveFile, newData, 0644); err != nil {
+	// Pointer assignment preserves intent: nil=absent, &[]=explicit clear,
+	// &[…]=explicit selection.
+	active.Modes = &valid
+	active.Updated = time.Now().UTC().Format(time.RFC3339)
+	if err := SaveActiveJSON(active); err != nil {
 		return err
 	}
 
-	// Mirror the first non-"auto" mode to config/current_mode so the memory
-	// metadata injection sees the same value the user just selected.
+	// Mirror the first non-"auto" mode to config/current_mode for legacy
+	// readers. The "auto" sentinel is a feature flag, not a real mode.
 	writeConfigCurrentMode(mm.ActiveFile, valid)
 	return nil
 }

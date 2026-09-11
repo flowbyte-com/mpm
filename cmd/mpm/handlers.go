@@ -26,26 +26,44 @@ var dbManagerOnce sync.Once
 var activeMode string
 var activePersona string
 
-// detectActiveContext reads the current mode and persona from config files.
-// These values are injected into memory metadata on every AddMemory call.
+// detectActiveContext reads the current mode and persona from the
+// canonical active.json file (NOT the legacy config/current_* mirror
+// files). These values are injected into memory metadata on every
+// AddMemory call.
 //
-// v spec 2026-08-04: each requested name is run through
-// internal.ResolveActivePersona / ResolveActiveMode so a stale
-// legacy config/current_* file pointing at a deleted .md file falls
-// back to system/standard instead of silently injecting a dangling
-// name into memory metadata.
+// v spec 2026-09-11 (selector hardening): the canonical resolver runs
+// against active.json and returns the multi-mode collection + persona
+// resolution. Memory metadata injection uses the FIRST resolved mode
+// for the legacy `active_mode` field (back-compat with consumers that
+// only know the singular schema) — the full multi-mode collection is
+// preserved in active.json and surfaced through wake context as
+// active_modes.
+//
+// The legacy config/current_* files remain written by PersonaManager
+// and ModeManager SetActive paths (back-compat with third-party
+// readers); they are NOT consulted here because they pre-date the
+// pointer-aware intent model and cannot represent "explicit clear".
 func detectActiveContext() (mode, persona string) {
 	dm := getDBConcrete()
-	modePath := filepath.Join(config.GetMPMDir(), "config", "current_mode")
-	if data, err := os.ReadFile(modePath); err == nil {
-		rawMode := strings.TrimSpace(string(data))
-		mode = internal.ResolveActiveMode(dm, rawMode)
+	active, err := internal.LoadActiveJSON()
+	if err != nil {
+		return "", ""
 	}
-	personaPath := filepath.Join(config.GetMPMDir(), "config", "current_persona")
-	if data, err := os.ReadFile(personaPath); err == nil {
-		rawPersona := strings.TrimSpace(string(data))
-		persona = internal.ResolveActivePersona(dm, rawPersona)
+	// Multi-mode resolution. For memory metadata injection we use the
+	// first non-empty, non-"auto" mode name as the legacy singular
+	// "active_mode" field. If a multi-mode selection is in force, the
+	// full collection is still preserved in active.json and surfaced
+	// through wake context (active_modes); only the metadata
+	// back-compat field collapses to first.
+	modeRes := internal.ResolveActiveModes(dm, active.Modes)
+	for _, n := range modeRes.Names() {
+		if n != "" && n != "auto" {
+			mode = n
+			break
+		}
 	}
+	personaRes := internal.ResolveActivePersonaIntent(dm, active.Persona)
+	persona = personaRes.Name
 	return
 }
 

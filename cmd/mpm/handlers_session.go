@@ -4,11 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/usererror"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
@@ -244,21 +241,15 @@ func handleWake(args []string) int {
 		}
 	}
 
-	// Identity fallback: read active.json for persona and modes
+	// Identity fallback: read active.json for persona and modes via the
+// canonical pointer-aware loader (no local duplicate struct — the
+// drift between local activeState and the canonical ActiveState was a
+// pre-2026-09-11 source of bugs).
 	var activeMode, activePersona string
-	mpmDir := config.GetMPMDir()
-	activePath := filepath.Join(mpmDir, "active.json")
-	if data, err := os.ReadFile(activePath); err == nil {
-		type activeState struct {
-			Persona string   `json:"persona"`
-			Modes   []string `json:"modes"`
-		}
-		var active activeState
-		if json.Unmarshal(data, &active) == nil {
-			activePersona = active.Persona
-			if len(active.Modes) > 0 {
-				activeMode = strings.Join(active.Modes, ", ")
-			}
+	if active, err := mpminternal.LoadActiveJSON(); err == nil {
+		activePersona = active.PersonaString()
+		if modes := active.ModesSlice(); len(modes) > 0 {
+			activeMode = strings.Join(modes, ", ")
 		}
 	}
 

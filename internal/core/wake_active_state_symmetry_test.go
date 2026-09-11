@@ -230,19 +230,25 @@ func TestReadActiveState_BothDefaultsMissing_ReturnsEmptySilently(t *testing.T) 
 }
 
 func TestReadActiveState_OneDefaultMissing_OtherStillDefaults(t *testing.T) {
+	// v spec 2026-09-11 (selector hardening): explicit clear (persona="",
+	// modes=[]) is now distinguishable from absent fields, and explicit
+	// clear returns empty (SourceEmpty) — NOT fallback to default.
+	// This test now pins the new contract for explicit-clear.
 	root := t.TempDir()
 	overrideMPMDir(t, root)
-	// Only persona/default.md exists.
+	// Only persona/default.md exists. Active.json carries explicit-clear
+	// (persona="", modes=[]) — both fields should resolve empty, NOT to
+	// default.
 	writePersonaModeFile(t, root, "persona", "default")
 	writeActiveJSON(t, root, `{"persona":"","modes":[]}`)
 
 	dm := NewTestDM(t)
 	mode, persona := readActiveState(dm)
 	if mode != "" {
-		t.Errorf("only persona default present → mode=%q, want empty", mode)
+		t.Errorf("explicit clear modes → mode=%q, want empty (no default injection)", mode)
 	}
-	if persona != "default" {
-		t.Errorf("only persona default present → persona=%q, want %q", persona, "default")
+	if persona != "" {
+		t.Errorf("explicit clear persona → persona=%q, want empty (no default injection)", persona)
 	}
 
 	// Inverse.
@@ -253,11 +259,11 @@ func TestReadActiveState_OneDefaultMissing_OtherStillDefaults(t *testing.T) {
 
 	dm2 := NewTestDM(t)
 	mode2, persona2 := readActiveState(dm2)
-	if mode2 != "default" {
-		t.Errorf("only mode default present → mode=%q, want %q", mode2, "default")
+	if mode2 != "" {
+		t.Errorf("explicit clear modes → mode=%q, want empty (no default injection)", mode2)
 	}
 	if persona2 != "" {
-		t.Errorf("only mode default present → persona=%q, want empty", persona2)
+		t.Errorf("explicit clear persona → persona=%q, want empty (no default injection)", persona2)
 	}
 }
 

@@ -71,8 +71,24 @@ type WakeContextData struct {
 	SessionPreviousEndedAt int64  `json:"session_previous_ended_at"`
 
 	// Orientation — the "what just happened" half.
-	ActiveMode            string `json:"active_mode"`
+	//
+	// ActiveMode is the legacy singular form, kept for back-compat with
+	// pre-2026-09-11 consumers. Definition (v spec 2026-09-11):
+	//   * zero modes           → ""
+	//   * one or more modes    → FIRST resolved mode (NOT comma-joined)
+	// ActiveModes is the canonical plural form for the 0..N contract.
+	// ActiveModeSource is the aggregate resolution source for the
+	// multi-mode selection as a whole ("explicit" / "fallback" / "empty");
+	// see active_state.go for the source vocabulary.
+	ActiveMode            string   `json:"active_mode"`
+	ActiveModes           []string `json:"active_modes"`
+	ActiveModeSource      string   `json:"active_mode_source"`
+	// ActivePersonaSource mirrors the per-persona resolution source
+	// ("explicit" / "fallback" / "empty"). New consumers should consult
+	// this to distinguish explicit user selection from system default
+	// fallback from explicit clear.
 	ActivePersona         string `json:"active_persona"`
+	ActivePersonaSource   string `json:"active_persona_source"`
 	RecentTopics          []string `json:"recent_topics"`
 	// RecentTopicsTruncated is set by enforceSizeLimit when the topics
 	// array had to be shed to stay under MaxWakeContextBytes. The
@@ -251,41 +267,56 @@ func EnforceSizeLimit(data *WakeContextData) ([]byte, error) {
 	return b, nil
 }
 
-// readActiveState reads {MPM_DIR}/active.json via the shared loader in
-// xitl.go. Missing/unreadable file returns empty strings with no error —
-// the wake context is still useful without mode/persona metadata.
+// readActiveState reads {MPM_DIR}/active.json via the canonical loader
+// and resolves persona and modes through the pointer-aware resolver.
+// Returns the singular-string projections for back-compat with tests and
+// callers that pre-date the 0..N mode contract:
 //
-// v spec 2026-08-04: each requested name is run through
-// ResolveActivePersona / ResolveActiveMode so a stale active.json
-// pointing at a deleted .md file falls back to system/standard with
-// an audit-log entry, instead of booting the agent with a blank
-// context window. dm is passed through so the fallback path can log.
+//	mode    = first resolved mode name (or "")
+//	persona = resolved persona name (or "")
 //
-// Work item 8ffa1c070b7a6793 (2026-09-10): the caller is symmetric now.
-// Previously mode resolution was gated on `len(active.Modes) > 0`, so an
-// active.json without a `modes` field produced `active_mode=""` while
-// `active_persona` still fell back to "default" via the resolver. The
-// resolver already handles empty input the same way as persona
-// resolution does (active_state_test.go::TestResolveActivePersona_Empty_FallsBackToDefault
-// / TestResolveActiveMode_RequestedMissing_FallsBackToDefault), so we
-// drop the gate and let the resolver be the single authoritative
-// fallback path. Symmetry contract:
+// For the full multi-mode collection + per-field source metadata use
+// readActiveStateFull.
 //
-//	requested value exists and is valid  → use requested
-//	requested is empty/unset/invalid     → try "default"
-//	"default" exists                     → return "default"
-//	"default" missing                    → return "" silently
+// v spec 2026-09-11 (selector hardening): the resolver distinguishes:
 //
-// applies identically to mode and persona.
+//	1. explicit selection  → SourceExplicit
+//	2. explicit clear      → SourceEmpty
+//	3. absent / uninit    → default fallback (SourceFallback or SourceEmpty)
+//	4. stale / invalid    → drop (modes) or fallback (persona); SourceFallback
+//
+// Persona is 0..1, modes are 0..N. Multi-mode storage is honoured here:
+// each entry is validated independently and stale entries are dropped
+// rather than being collapsed into a single invalid value (the
+// pre-refactor bug was: comma-joined "x,y" → os.Stat("x,y.md") → default).
 func readActiveState(dm *DatabaseManager) (mode, persona string) {
 	active, err := LoadActiveJSON()
 	if err != nil {
 		return "", ""
 	}
-	rawMode := strings.Join(active.Modes, ", ")
-	mode = ResolveActiveMode(dm, rawMode)
-	persona = ResolveActivePersona(dm, active.Persona)
+	mr := ResolveActiveModes(dm, active.Modes)
+	pr := ResolveActivePersonaIntent(dm, active.Persona)
+	if names := mr.Names(); len(names) > 0 {
+		mode = names[0]
+	}
+	persona = pr.Name
 	return mode, persona
+}
+
+// readActiveStateFull returns the rich resolver output for both
+// selector dimensions. Use this when you need the multi-mode
+// collection, per-entry sources, or the Missing diagnostics. The
+// wake context renderer uses this internally to populate
+// ActiveModeSource / ActivePersonaSource / ActiveModes.
+func readActiveStateFull(dm *DatabaseManager) (ModeResolution, Resolution) {
+	active, err := LoadActiveJSON()
+	if err != nil {
+		return ModeResolution{Modes: []ResolvedMode{}, Source: SourceEmpty},
+			Resolution{Name: "", Source: SourceEmpty}
+	}
+	modes := ResolveActiveModes(dm, active.Modes)
+	persona := ResolveActivePersonaIntent(dm, active.Persona)
+	return modes, persona
 }
 
 // GatherWakeContext returns the wake context, populating active mode/persona
@@ -403,7 +434,16 @@ func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextD
 		data.LastHandoff = h
 	}
 
-	data.ActiveMode, data.ActivePersona = readActiveState(dm)
+	modeRes, personaRes := readActiveStateFull(dm)
+	// Legacy singular field: first mode or empty (NOT comma-joined —
+	// singular back-compat must not invent a multi-mode string).
+	if names := modeRes.Names(); len(names) > 0 {
+		data.ActiveMode = names[0]
+	}
+	data.ActiveModeSource = modeRes.Source
+	data.ActiveModes = modeRes.Names()
+	data.ActivePersona = personaRes.Name
+	data.ActivePersonaSource = personaRes.Source
 	// Budget envelope (locked 2026-07-06): 5 tactical + 5 strategic.
 	// Recent Memories was pulled at limit=10 but the renderer caps at 5,
 	// so the 10→5 swap at the DB layer matches the rendering budget and
@@ -754,16 +794,43 @@ func (dm *DatabaseManager) ReadWakeContext() (string, error) {
 // .claude/mpm-mcp/server.py.
 func formatWakeContext(d WakeContextData) string {
 	var lines []string
-	mode := d.ActiveMode
-	if mode == "" {
-		mode = "default"
+	// Multi-mode rendering. Each resolved mode is listed; if any have a
+	// non-explicit source (fallback / stale-dropped), we surface the
+	// source tag inline so the agent can distinguish explicit user
+	// selection from system fallback. Singular-mode and zero-mode are
+	// both rendered honestly — the singular back-compat field is NOT
+	// used to derive display.
+	modeLine := "**Modes:**"
+	if len(d.ActiveModes) == 0 {
+		modeLine += " <none>"
+		if d.ActiveModeSource == SourceEmpty {
+			modeLine += " [empty]"
+		}
+	} else {
+		for i, m := range d.ActiveModes {
+			if i > 0 {
+				modeLine += ","
+			}
+			modeLine += " " + m
+			if d.ActiveModeSource == SourceFallback {
+				modeLine += " [fallback]"
+			}
+		}
 	}
-	lines = append(lines, "**Mode:** "+mode)
+	lines = append(lines, modeLine)
 	persona := d.ActivePersona
+	personaLine := "**Persona:**"
 	if persona == "" {
-		persona = "default"
+		personaLine += " <none>"
+	} else {
+		personaLine += " " + persona
 	}
-	lines = append(lines, "**Persona:** "+persona)
+	if d.ActivePersonaSource == SourceFallback {
+		personaLine += " [fallback]"
+	} else if d.ActivePersonaSource == SourceEmpty {
+		personaLine += " [empty]"
+	}
+	lines = append(lines, personaLine)
 	if len(d.RecentTopics) > 0 {
 		lines = append(lines, "**Recent Topics:** "+strings.Join(d.RecentTopics, ", "))
 	}

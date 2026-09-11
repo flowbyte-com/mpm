@@ -108,8 +108,8 @@ func buildStatusData(dm *mpminternal.DatabaseManager, startTime time.Time) statu
 
 	active, err := mpminternal.LoadActiveJSON()
 	if err == nil {
-		d.modeState, d.modeValues = stateForMode(active.Modes)
-		d.personaState, d.personaValues = stateForPersona(active.Persona)
+		d.modeState, d.modeValues = stateForMode(active.ModesSlice())
+		d.personaState, d.personaValues = stateForPersona(active.PersonaString())
 	}
 	return d
 }

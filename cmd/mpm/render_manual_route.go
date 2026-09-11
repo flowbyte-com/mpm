@@ -27,17 +27,20 @@ func renderManualRoute(workspace string, active *mpminternal.ActiveState) (strin
 	}
 	// Skip the sentinel values explicitly — they shouldn't reach this path
 	// (the gate in handleRoute catches them) but defense in depth.
-	if active.Persona == "auto" {
-		active.Persona = ""
+	personaStr := active.PersonaString()
+	if personaStr == "auto" {
+		empty := ""
+		active.Persona = &empty
+		personaStr = ""
 	}
-	cleanedModes := make([]string, 0, len(active.Modes))
-	for _, m := range active.Modes {
+	cleanedModes := make([]string, 0, len(active.ModesSlice()))
+	for _, m := range active.ModesSlice() {
 		if m != "auto" {
 			cleanedModes = append(cleanedModes, m)
 		}
 	}
 
-	if active.Persona == "" && len(cleanedModes) == 0 {
+	if personaStr == "" && len(cleanedModes) == 0 {
 		// After stripping sentinels, nothing left — treat as blank.
 		return "", nil
 	}
@@ -54,15 +57,15 @@ func renderManualRoute(workspace string, active *mpminternal.ActiveState) (strin
 		parts = append(parts, fmt.Sprintf("mode=%s", modeName), "", string(content), "", "---", "")
 	}
 
-	if active.Persona != "" {
-		content, err := os.ReadFile(filepath.Join(workspace, "persona", active.Persona+".md"))
+	if personaStr != "" {
+		content, err := os.ReadFile(filepath.Join(workspace, "persona", personaStr+".md"))
 		if err != nil {
 			// Persona missing — render modes only and surface a marker so
 			// the operator sees the drift.
-			body := strings.Join(parts, "\n") + "\n\n[persona " + active.Persona + " not found on disk]"
+			body := strings.Join(parts, "\n") + "\n\n[persona " + personaStr + " not found on disk]"
 			return "<system-reminder>\n" + body + "\n</system-reminder>", nil
 		}
-		parts = append(parts, fmt.Sprintf("persona=%s", active.Persona), "", string(content))
+		parts = append(parts, fmt.Sprintf("persona=%s", personaStr), "", string(content))
 	}
 
 	return strings.Join(parts, "\n") + "\n</system-reminder>", nil

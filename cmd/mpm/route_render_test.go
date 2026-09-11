@@ -721,9 +721,11 @@ func TestApplyRouteToActive(t *testing.T) {
 	workspace := t.TempDir()
 	t.Setenv("MPM_WORKSPACE", workspace)
 
+	seedPersona := "default"
+	seedModes := []string{"programming"}
 	seed := mpminternal.ActiveState{
-		Persona: "default",
-		Modes:   []string{"programming"},
+		Persona: &seedPersona,
+		Modes:   &seedModes,
 		Updated: "2026-06-26T10:07:39+01:00",
 	}
 	if err := mpminternal.SaveActiveJSON(&seed); err != nil {
@@ -781,11 +783,11 @@ func TestApplyRouteToActive(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load after: %v", err)
 			}
-			if after.Persona != tt.wantPersona {
-				t.Errorf("Persona = %q, want %q", after.Persona, tt.wantPersona)
+			if after.PersonaString() != tt.wantPersona {
+				t.Errorf("Persona = %q, want %q", after.PersonaString(), tt.wantPersona)
 			}
-			if !equalStringSlices(after.Modes, tt.wantModes) {
-				t.Errorf("Modes = %v, want %v", after.Modes, tt.wantModes)
+			if !equalStringSlices(after.ModesSlice(), tt.wantModes) {
+				t.Errorf("Modes = %v, want %v", after.ModesSlice(), tt.wantModes)
 			}
 
 			afterInfo, statErr := os.Stat(mpminternal.ActiveJSONPath())
@@ -832,9 +834,11 @@ func TestHandleRoute_ApplyFlag(t *testing.T) {
 		"---\nname: venkat\npatterns: architecture\n---\n\nVenkat persona body.\n")
 	t.Setenv("MPM_ROUTE_WORKSPACE", workspace)
 
+	autoPersona := "auto"
+	autoModes := []string{"auto"}
 	if err := mpminternal.SaveActiveJSON(&mpminternal.ActiveState{
-		Persona: "auto",
-		Modes:   []string{"auto"},
+		Persona: &autoPersona,
+		Modes:   &autoModes,
 		Updated: "2026-01-01T00:00:00Z",
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -850,11 +854,11 @@ func TestHandleRoute_ApplyFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got.Persona != "venkat" {
-		t.Errorf("Persona = %q, want \"venkat\" (apply should have written route persona)", got.Persona)
+	if got.PersonaString() != "venkat" {
+		t.Errorf("Persona = %q, want \"venkat\" (apply should have written route persona)", got.PersonaString())
 	}
-	if !equalStringSlices(got.Modes, []string{"architect"}) {
-		t.Errorf("Modes = %v, want [architect]", got.Modes)
+	if !equalStringSlices(got.ModesSlice(), []string{"architect"}) {
+		t.Errorf("Modes = %v, want [architect]", got.ModesSlice())
 	}
 	if got.Updated == "2026-01-01T00:00:00Z" {
 		t.Errorf("Updated = %q, want new timestamp", got.Updated)

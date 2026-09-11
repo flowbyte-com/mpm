@@ -20,6 +20,8 @@ func handlePersona(args []string) int {
 		return handlePersonaList()
 	case "active":
 		return handlePersonaActive()
+	case "show":
+		return handlePersonaShow(args[1:])
 	case "set":
 		return handlePersonaSet(args[1:])
 	case "clear":
@@ -38,13 +40,21 @@ func handlePersonaHelp() int {
 Usage:
   mpm persona                   Interactive persona selection (TUI, auto-compiles)
   mpm persona list              List available personas
+  mpm persona show <name>       Inspect a persona definition (frontmatter + body)
   mpm persona active            Show active persona
   mpm persona set <name>        Set active persona
-  mpm persona clear             Clear active persona
+  mpm persona clear             Clear active persona (explicit, not fallback)
 
 Examples:
   mpm persona                   # Pick one persona, auto-compiles
   mpm persona set 808
+  mpm persona show critic        # Print frontmatter + body of persona/critic.md
+  mpm persona clear              # After this, wake shows active_persona=""
+
+Notes:
+  • 'clear' sets persona to "" in active.json — wake context distinguishes
+    explicit-clear (source=empty) from bootstrap (source=fallback).
+  • 'show' reads the actual .md on disk; README.md is never selectable.
 `
 	return respond(output, "", 0)
 }
@@ -113,6 +123,59 @@ func handlePersonaClear() int {
 	}
 
 	return respond("Persona cleared.\n", "", 0)
+}
+
+// handlePersonaShow reads the persona <name>.md file from the canonical
+// persona/ directory and prints its frontmatter (key=value) plus body.
+// Mirrors handlePersonaList's "list is filesystem-backed" invariant —
+// there is no hard-coded persona vocabulary. README.md is rejected
+// unconditionally by the manager's IsDefinitionFile gate before this
+// function is reached.
+func handlePersonaShow(args []string) int {
+	if len(args) == 0 {
+		return respond("", "Usage: mpm persona show <name>\n", 1)
+	}
+	name := args[0]
+
+	// Reject README-style names at the CLI layer too — defense in depth
+	// on top of the manager's IsDefinitionFile filter.
+	if internal.IsDocumentationFile(name) || internal.IsDocumentationFile(name+".md") {
+		return respond("", fmt.Sprintf("Not a selectable persona: %q (documentation file)\n", name), 1)
+	}
+
+	pm := internal.NewPersonaManager("")
+	p2, err := pm.Get(name)
+	if err != nil {
+		return respond("", fmt.Sprintf("Persona not found: %s\n", name), 1)
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("# Persona: %s\n\n", p2.Name))
+	if p2.Title != "" {
+		b.WriteString(fmt.Sprintf("Title:       %s\n", p2.Title))
+	}
+	if p2.Version != "" {
+		b.WriteString(fmt.Sprintf("Version:     %s\n", p2.Version))
+	}
+	if p2.Status != "" {
+		b.WriteString(fmt.Sprintf("Status:      %s\n", p2.Status))
+	}
+	if p2.Description != "" {
+		b.WriteString(fmt.Sprintf("Description: %s\n", p2.Description))
+	}
+	if p2.Voice != "" {
+		b.WriteString(fmt.Sprintf("Voice:       %s\n", p2.Voice))
+	}
+	if p2.Emoji != "" {
+		b.WriteString(fmt.Sprintf("Emoji:       %s\n", p2.Emoji))
+	}
+	if p2.Content != "" {
+		b.WriteString("\n---\n\n")
+		b.WriteString(p2.Content)
+		if !strings.HasSuffix(p2.Content, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	return respond(b.String(), "", 0)
 }
 
 func handlePersonaSelect() int {

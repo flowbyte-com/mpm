@@ -22,6 +22,8 @@ func handleMode(args []string) int {
 		return handleModeHelp()
 	case "list":
 		return handleModeList()
+	case "show":
+		return handleModeShow(args[1:])
 	case "active":
 		return handleModeActive()
 	case "add":
@@ -44,15 +46,26 @@ func handleModeHelp() int {
 Usage:
   mpm mode                   Interactive multi-mode selection (TUI, auto-compiles)
   mpm mode list              List available modes
-  mpm mode active            Show active modes
+  mpm mode show <name>       Inspect a mode definition (frontmatter + body)
+  mpm mode active            Show active modes (plural)
   mpm mode add <name>        Add a mode to active list
   mpm mode remove <name>     Remove a mode from active list
-  mpm mode clear             Clear all active modes
+  mpm mode clear             Clear all active modes (explicit, not fallback)
 
 Examples:
   mpm mode                   # Pick multiple modes, auto-compiles
   mpm mode add developer
   mpm mode remove developer
+  mpm mode show debugging    # Print frontmatter + body of mode/debugging.md
+  mpm mode clear              # After this, wake shows active_modes=[]
+
+Notes:
+  • 'add' is idempotent — adding an already-active mode is a no-op.
+  • Multiple modes can be active simultaneously (e.g. add debugging
+    then add forensic — both are preserved in active.modes array).
+  • 'clear' writes [] to active.json — wake context distinguishes
+    explicit-clear (source=empty) from bootstrap (source=fallback).
+  • 'show' reads the actual .md on disk; README.md is never selectable.
 `
 	return respond(output, "", 0)
 }
@@ -168,6 +181,68 @@ func handleModeClear() int {
 	}
 
 	return respond("All modes cleared.\n", "", 0)
+}
+
+// handleModeShow reads the mode <name>.md file from the canonical
+// mode/ directory and prints its frontmatter (key=value) plus body.
+// Mirrors handleModeList's "list is filesystem-backed" invariant —
+// there is no hard-coded mode vocabulary. README.md is rejected
+// unconditionally by the manager's IsDefinitionFile gate before this
+// function is reached.
+func handleModeShow(args []string) int {
+	if len(args) == 0 {
+		return respond("", "Usage: mpm mode show <name>\n", 1)
+	}
+	name := args[0]
+
+	// Reject README-style names at the CLI layer too — defense in depth.
+	if internal.IsDocumentationFile(name) || internal.IsDocumentationFile(name+".md") {
+		return respond("", fmt.Sprintf("Not a selectable mode: %q (documentation file)\n", name), 1)
+	}
+
+	mm := internal.NewModeManager("")
+	m, err := mm.Get(name)
+	if err != nil {
+		return respond("", fmt.Sprintf("Mode not found: %s\n", name), 1)
+	}
+	var b strings.Builder
+	displayName := m.Name
+	if displayName == "" {
+		displayName = m.Title
+	}
+	b.WriteString(fmt.Sprintf("# Mode: %s\n\n", displayName))
+	if m.Title != "" && m.Title != displayName {
+		b.WriteString(fmt.Sprintf("Title:    %s\n", m.Title))
+	}
+	if m.Version != "" {
+		b.WriteString(fmt.Sprintf("Version:  %s\n", m.Version))
+	}
+	if m.Status != "" {
+		b.WriteString(fmt.Sprintf("Status:   %s\n", m.Status))
+	}
+	if m.Description != "" {
+		b.WriteString(fmt.Sprintf("Description: %s\n", m.Description))
+	}
+	if m.Purpose != "" {
+		b.WriteString(fmt.Sprintf("Purpose:  %s\n", m.Purpose))
+	}
+	if m.Checklist != "" {
+		b.WriteString(fmt.Sprintf("Checklist: %s\n", m.Checklist))
+	}
+	if m.AntiPatterns != "" {
+		b.WriteString(fmt.Sprintf("Anti-patterns: %s\n", m.AntiPatterns))
+	}
+	if m.Tools != "" {
+		b.WriteString(fmt.Sprintf("Tools:    %s\n", m.Tools))
+	}
+	if m.Content != "" {
+		b.WriteString("\n---\n\n")
+		b.WriteString(m.Content)
+		if !strings.HasSuffix(m.Content, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	return respond(b.String(), "", 0)
 }
 
 func handleModeSelect() int {
