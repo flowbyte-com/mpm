@@ -760,6 +760,7 @@ var commandsWithSubcommandDispatch = map[string]bool{
 	"work":        true, // status|show|clear|promote|item
 	"session":     true, // add|search|show|shred|list
 	"lesson":      true, // add|show|list|search|shred
+	"skill":       true, // add|list|show|search|workshop
 	"ops":         true, // doctor|gc|synthesize|...
 	"call":        true, // <tool> --payload
 	"kb":          true, // memory|lesson|skill|topic|...

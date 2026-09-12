@@ -214,11 +214,23 @@ func handleReadSkill(args []string) int {
 //
 //	mpm skill workshop --file request.json
 //	echo '{"mode":"form",...}' | mpm skill workshop
+//	mpm skill workshop --help
 //
 // The payload may be a bare WorkshopRequest, or already wrapped in
 // {action:"workshop", params:{...}}. Bare payloads are wrapped
 // automatically so the user does not need to know the MCP envelope.
+//
+// `--help` short-circuits to printSkillWorkshopHelp() (matches the
+// pattern in handleSaveSkill at handlers_skill.go:25-29). Without it,
+// the JSON parser below would reject `--help` as "unknown flag" and
+// operators would have nowhere to discover the schema.
 func handleSkillWorkshop(args []string) int {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			printSkillWorkshopHelp()
+			return 0
+		}
+	}
 	var path string
 	i := 0
 	for i < len(args) {
@@ -302,4 +314,132 @@ func mapToWorkshopRequest(src interface{}, dst *internal.WorkshopRequest) error 
 		return err
 	}
 	return json.Unmarshal(b, dst)
+}
+
+// printSkillWorkshopHelp prints the canonical usage for
+// `mpm skill workshop`. This is the operator-facing help page for the
+// form/refine pipeline; it documents the boundary vocabulary, the
+// change_type requirement, the three outcomes, and one complete
+// example per mode using the actual current schema. A user reading
+// only this page should have enough information to invoke the
+// workshop without consulting the substrate source.
+//
+// Source of truth: docs/archive/2026-08-28-mpm-skill-workshop-design.md
+// and agent_installation/mpm-agent-protocol.md §3.1.
+func printSkillWorkshopHelp() {
+	fmt.Println(`mpm skill workshop — Skills Workshop (form | refine)
+
+What it does
+  The Skills Workshop is the structured workflow for turning a repeated,
+  non-obvious experience into a durable, reusable skill. It runs the
+  same pipeline whether invoked from this CLI or from the MCP
+  mpm_skills tool with action="workshop". The CLI is a thin shim —
+  all validation lives in the substrate.
+
+Modes
+  form    Author a NEW skill. The proposal becomes the candidate
+          record. Decision-model gate decides whether it is published
+          or returned as a candidate (the agent then accepts/rejects).
+
+  refine  Revise an EXISTING skill. The "intent" field is the skill's
+          current name. "change_type" is REQUIRED and selects the
+          version bump deterministically (see change_type below).
+
+Required inputs (both modes)
+  mode                  "form" or "refine"
+  intent                (refine only) the existing skill's name
+  change_type           (refine only) see below
+  decision_model        see "Decision model" below
+  proposal              name | version | when_to_use | steps | ...
+
+Decision model
+  decision_model.reusability        integer 0..5
+  decision_model.non_obviousness    integer 0..5
+  decision_model.stability          integer 0..5
+  decision_model.leverage           integer 0..5
+  decision_model.boundary           one of: procedure | judgment | knowledge
+
+  Total = sum of the four axes (0..20).
+
+  Decision rule:
+    boundary != procedure      -> rejected (non-procedure is not skill-worthy)
+    total <= 3                 -> rejected
+    total 4..5                 -> candidate
+    total >= 6                 -> published (subject to when_to_use, duplicate,
+                                  validation downgrades)
+
+change_type (refine only — REQUIRED)
+  correction       patch     (1.0.0 -> 1.0.1)
+  extension        minor     (1.0.0 -> 1.1.0)
+  restructuring    minor     (1.0.0 -> 1.1.0)
+  purpose_change   major     (1.0.0 -> 2.0.0)
+
+  The workshop derives the next version from change_type + the
+  existing skill's current version. Do NOT pick the version yourself —
+  supply change_type and let the pipeline enforce the bump.
+
+Outcomes
+  published   Skill was written through the normal skill persistence
+              path. For refine, the prior version is deprecated via
+              SaveSkillAndDeprecatePrior. "skill_id" is populated.
+  candidate   Workshop generated a proposal but did not publish.
+              Inspect decision_model / duplicate_check / validation.
+              "save_payload" is the exact params dict to hand off to
+              "mpm_skills save" if you accept the candidate.
+  rejected    Not skill-worthy. "reason" names the gate that fired.
+
+Usage
+  mpm skill workshop --file <path>      # read WorkshopRequest JSON
+  cat request.json | mpm skill workshop # read from stdin
+
+The JSON payload may be a bare WorkshopRequest, or already wrapped in
+{"action":"workshop","params":{...}}. Bare payloads are accepted.
+
+Examples
+
+  # form — author a new skill
+  mpm skill workshop --file form.json
+  # form.json:
+  {
+    "mode": "form",
+    "decision_model": {
+      "reusability": 2, "non_obviousness": 2, "stability": 2, "leverage": 2,
+      "boundary": "procedure"
+    },
+    "proposal": {
+      "name": "release-checklist",
+      "version": "1.0.0",
+      "domain": "release",
+      "description": "Pre-release smoke checks for MPM changes",
+      "when_to_use": "before cutting a release, smoke-checking migrations, scheduler, and CLI",
+      "steps": [{"call": "run the smoke test"}],
+      "constraints": []
+    },
+    "task_context": "Repeated pre-release sequence",
+    "workflow_description": "check migrations, scheduler, CLI",
+    "failure_recovery": ""
+  }
+
+  # refine — bump a correction on an existing skill
+  mpm skill workshop --file refine.json
+  # refine.json:
+  {
+    "mode": "refine",
+    "intent": "release-checklist",
+    "change_type": "correction",
+    "decision_model": {
+      "reusability": 2, "non_obviousness": 2, "stability": 2, "leverage": 2,
+      "boundary": "procedure"
+    },
+    "proposal": {
+      "name": "release-checklist",
+      "version": "1.0.1",
+      "description": "Pre-release smoke checks for MPM changes",
+      "when_to_use": "before cutting a release, smoke-checking migrations, scheduler, and CLI",
+      "steps": [{"call": "run the smoke test"}]
+    }
+  }
+
+MCP equivalent (canonical for agents)
+  mpm call mpm_skills --payload '{"action":"workshop","params":{<workshop_request>}}'`)
 }

@@ -1313,7 +1313,7 @@ mpm decide              # Record a decision
 mpm theorize            # Propose a theory
 mpm decision add|resolve|help   # Decision ledger subcommands
 mpm theory add|resolve|help     # Theory subcommands
-mpm skill add|list|show|search|help  # Skill management subcommands
+mpm skill add|list|show|search|workshop|help  # Skill management subcommands
 
 # Session & context
 mpm continue            # Session-resumption dashboard (working context, wake, stats)
@@ -1601,7 +1601,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`set-weight`** — Set stored weight 0–100 (decay/LTM/provenance; does not affect current retrieval ranking — see §6.3)
 - **`show`** — Show memory details
 - **`shred`** — Hard-delete memory
-- **`skill`** — Skill CRUD
+- **`skill`** — Skill CRUD + Workshop (`mpm skill workshop --help` for the form/refine pipeline)
 - **`snooze`** — Suppress from recall (temporary)
 - **`stats`** — Show memory statistics
 - **`status`** — Show system status

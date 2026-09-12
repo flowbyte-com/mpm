@@ -231,6 +231,14 @@ func handleSkill(args []string) int {
 	switch sub {
 	case "add":
 		return handleSaveSkill(rest)
+	case "save":
+		// `mpm skill save --file <path>` is the legacy alias for
+		// `mpm skill add` (documented in handleSaveSkillHelp). The
+		// R9-T52 regression test pins that `mpm skill save --help`
+		// surfaces the save-skill help page; routing it through
+		// handleSaveSkill preserves the contract and the
+		// documented discoverability.
+		return handleSaveSkill(rest)
 	case "list":
 		return handleListSkills(rest)
 	case "show":
@@ -449,7 +457,9 @@ Subcommands:
   list      List skills (alias for list-skills)
   show      Read a skill by name (alias for read-skill)
   search    Skill search (reserved — use mpm call search_references today)
-  workshop  Run the skill workshop (form | refine) — guided skill-formation workflow
+  workshop  Run the skill workshop (form | refine) — guided skill-formation workflow.
+            Run "mpm skill workshop --help" for the full schema, boundary vocabulary,
+            change_type options, and JSON examples.
 
 Examples:
   mpm skill add --file path/to/SKILL.md
