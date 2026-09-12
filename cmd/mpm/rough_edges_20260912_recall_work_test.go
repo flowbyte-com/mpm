@@ -91,6 +91,7 @@ func TestRough_Item4_BoundQueryEcho(t *testing.T) {
 // but stays rejected for create, where the substrate hardcodes open and
 // a permissive gate would mask typos (Round 9 T57 rationale preserved).
 func TestRough_Item9_StatusAllListOnly(t *testing.T) {
+	t.Setenv("MPM_WORKSPACE", t.TempDir()) // hermetic: see grammar test note
 	if code := runWorkItemArgsForTest([]string{"list", "--status", "all"}); code != 0 {
 		t.Errorf("list --status all exited %d, want 0", code)
 	}

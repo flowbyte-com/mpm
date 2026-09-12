@@ -97,6 +97,12 @@ func TestWorkItemCLI_FlagOrdering(t *testing.T) {
 // locks in the canonical invocation grammar so a future refactor
 // that re-introduces the flag-as-subcommand bug will fail loudly.
 func TestWorkItemCLI_GrammarContract(t *testing.T) {
+	// Hermetic workspace: the create invocations below write real rows
+	// via handleCall→openCallDM→NewDatabaseManager(""), which resolves
+	// MPM_WORKSPACE dynamically. Without this, the test creates
+	// "My Title"/"Just Title" work items in the operator's live DB on
+	// every suite run (observed 2026-09-12). Rough-edge closure item 9.
+	t.Setenv("MPM_WORKSPACE", t.TempDir())
 	// Each entry asserts that this invocation succeeds (exit 0) —
 	// the user-facing contract is "these invocations must work".
 	invocations := [][]string{
