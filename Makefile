@@ -197,10 +197,14 @@ lint:
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed. Run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"; exit 1; }
 	golangci-lint run ./...
 
-# Clean build artifacts
+# Clean build artifacts. Also removes stray root-level binaries: a bare
+# `go build ./cmd/mpm` (without -o bin/ and without the FTS5 flags)
+# drops a non-canonical, non-FTS5 `mpm` at the repo root that shadows
+# nothing but confuses everything. Canonical output is bin/ only.
 clean:
 	rm -rf $(BUILD_DIR)
-	@echo "🧹 Cleaned $(BUILD_DIR)/"
+	rm -f ./mpm ./mpm-critic ./mpm-scheduler ./mpm-mcp ./mpm-telemetry
+	@echo "🧹 Cleaned $(BUILD_DIR)/ (plus stray root binaries)"
 
 # Refresh all currently supported locally-installed MPM agent-integration
 # artifacts from the canonical repository sources. Safe to re-run (each

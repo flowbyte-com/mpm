@@ -17,6 +17,8 @@ bin/
 /mpm
 /mpm-critic
 /mpm-scheduler
+/mpm-mcp
+/mpm-telemetry
 /gen-cli
 
 # mpm-agent is a sibling project at ../mpm-agent, not a subdir.
