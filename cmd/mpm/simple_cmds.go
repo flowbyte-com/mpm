@@ -1545,6 +1545,32 @@ func handleRefShow(args []string) int {
 
 	ref, err := dm.GetReference(id)
 	if err != nil {
+		// Rough-edge closure 2026-09-12 (item 7): `reference search`
+		// surfaces chunk IDs, so an operator will naturally paste one
+		// here. Resolve a chunk ID to its parent document instead of
+		// failing — document and chunk identity stay distinct
+		// internally (reference_docs vs reference_chunks); this is
+		// purely a UX resolution at the display boundary.
+		var docID string
+		if cerr := dm.SQLDB().QueryRow(
+			`SELECT doc_id FROM reference_chunks WHERE id = ?`, id,
+		).Scan(&docID); cerr == nil && docID != "" {
+			ref, err = dm.GetReference(docID)
+			if err == nil && ref != nil {
+				fmt.Printf("(resolved chunk %s to reference %s)\n", id, docID)
+			}
+		}
+	}
+	if err != nil {
+		if jsonOutput {
+			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": "Reference not found: " + id})
+			fmt.Println(string(data))
+		} else {
+			usererror.Error("Reference not found: %s", id)
+		}
+		return 1
+	}
+	if ref == nil {
 		if jsonOutput {
 			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": "Reference not found: " + id})
 			fmt.Println(string(data))
@@ -1682,6 +1708,7 @@ func handleRefSearch(args []string) int {
 		type chunkResult struct {
 			DocID      string  `json:"doc_id"`
 			DocTitle   string  `json:"doc_title"`
+			ChunkID    string  `json:"chunk_id"`
 			ChunkIndex int     `json:"chunk_index"`
 			Content    string  `json:"content"`
 			Score      float64 `json:"score"`
@@ -1692,10 +1719,12 @@ func handleRefSearch(args []string) int {
 			if dt, ok := c["doc_title"].(string); ok {
 				docTitle = dt
 			}
-			docID := ""
-			if did, ok := c["id"].(string); ok {
-				docID = did
-			}
+			// Rough-edge closure 2026-09-12 (item 7): `id` is the
+			// CHUNK id; the document id is `doc_id`. Pre-fix DocID
+			// was filled from `id`, sending consumers to `reference
+			// show <chunk-id>` which failed. Both are now explicit.
+			docID, _ := c["doc_id"].(string)
+			chunkID, _ := c["id"].(string)
 			idxVal := c["chunk_index"]
 			idx := 0
 			switch v := idxVal.(type) {
@@ -1716,6 +1745,7 @@ func handleRefSearch(args []string) int {
 			results = append(results, chunkResult{
 				DocID:      docID,
 				DocTitle:   docTitle,
+				ChunkID:    chunkID,
 				ChunkIndex: idx,
 				Content:    content,
 				Score:      score,
@@ -1749,7 +1779,11 @@ func handleRefSearch(args []string) int {
 			idx = int(v)
 		}
 		idStr, _ := c["id"].(string)
-		fmt.Printf("[%s chunk %d] %s\n%s\n\n", docTitle, idx, idStr[:min(len(idStr), 8)], content)
+		docIDStr, _ := c["doc_id"].(string)
+		// Item 7: print both identities so the next operation is
+		// obvious — `reference show` accepts either (chunk IDs
+		// resolve to their parent document).
+		fmt.Printf("[%s chunk %d] chunk %s (ref %s)\n%s\n\n       → mpm reference show %s\n\n", docTitle, idx, idStr[:min(len(idStr), 8)], docIDStr[:min(len(docIDStr), 16)], content, docIDStr)
 	}
 	return 0
 }

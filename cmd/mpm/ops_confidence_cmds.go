@@ -49,7 +49,46 @@ func parseOpsConfidenceArgs(args []string) (map[string]interface{}, string, erro
 	return payload, sub, nil
 }
 
+// printOpsConfidenceHelp renders the `mpm ops confidence` surface. The
+// canonical machine surface remains `mpm call mpm_confidence`; this help
+// keeps the friendly alias discoverable without duplicating the engine.
+func printOpsConfidenceHelp() {
+	fmt.Print(`mpm ops confidence — Confidence / evidence engine (friendly alias)
+
+Usage:
+  mpm ops confidence <subcommand> --artifact <id> [--artifact-type memory] [--limit N] [--window-days N]
+
+Subcommands:
+  show        Current confidence snapshot for an artifact
+  recompute   Recompute confidence from evidence now
+  changes     Recent confidence changes (last 24h)
+  trend       Confidence trend over --window-days (default 30)
+  explain     Evidence breakdown + reasoning trace
+  history     Full confidence_history timeline
+
+Canonical machine surface:
+  mpm call mpm_confidence --payload '{"action":"show","params":{"artifact_id":"<id>"}}'
+
+Examples:
+  mpm ops confidence show --artifact abc123
+  mpm ops confidence explain --artifact abc123
+  mpm ops confidence history --artifact abc123 --limit 20
+`)
+}
+
 func handleOpsConfidence(args []string) int {
+	// R3: --help / -h / "help" short-circuit. Without this, `mpm ops
+	// confidence --help` fell into parseOpsConfidenceArgs as sub="--help"
+	// ("unknown subcommand") and `mpm ops confidence show --help`
+	// surfaced the misleading "--artifact is required". Same defect
+	// class fixed on the memory/topic/lesson leaves; the ops surface
+	// was missed. Rough-edge closure 2026-09-12 (item 6).
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			printOpsConfidenceHelp()
+			return 0
+		}
+	}
 	payload, sub, err := parseOpsConfidenceArgs(args)
 	if err != nil {
 		printError("%v", err)
