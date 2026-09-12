@@ -1462,7 +1462,12 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL`).Scan(&deleted); err != nil {
 		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: deleted count failed, defaulting to 0: %v", err), "", AuditContext{})
 	}
-	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE is_long_term = 1 AND deleted_at IS NULL`).Scan(&ltm); err != nil {
+	// CLI acceptance 2026-09-12: LTM uses the canonical IsLTMMemory
+	// definition (is_long_term flag OR weight>=10, see ltm.go) so this
+	// agrees with `mpm status` (countMemories weight>=10). Pre-fix this
+	// counted only the flag and disagreed with status on every
+	// high-weight non-promoted row.
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE (is_long_term = 1 OR weight >= 10) AND deleted_at IS NULL`).Scan(&ltm); err != nil {
 		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: ltm count failed, defaulting to 0: %v", err), "", AuditContext{})
 	}
 	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE reinforcement_count > 0 AND deleted_at IS NULL`).Scan(&reinforced); err != nil {

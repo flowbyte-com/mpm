@@ -435,14 +435,26 @@ func handleMemoryAdd(args []string) int {
 			Note              string                   `json:"note,omitempty"`
 			SuggestedTopics   []map[string]interface{} `json:"suggested_topics,omitempty"`
 		}
-		result := jsonResult{
-			Success: true,
-			ID:      mem.ID,
-			Content: echoContent,
-			Tags:    tagsList,
-			Weight:  weightArg,
-			Pointer: "mpm://memory/" + mem.ID,
-		}
+	result := jsonResult{
+		Success: true,
+		ID:      mem.ID,
+		Content: echoContent,
+		Tags:    tagsList,
+		// CLI acceptance 2026-09-12: when the operator did NOT pass
+		// --weight, echo the persisted column value (mem.Weight) so the
+		// JSON envelope agrees with `mpm call mpm_memory save` (which
+		// reports the normalized column, e.g. default 5). When the
+		// operator DID pass --weight, preserve the F-H4 echo contract
+		// (report what was asked for, e.g. 7.5) so parser bugs stay
+		// visible. Pre-fix this always echoed the raw arg (0.5 default),
+		// disagreeing with the canonical surface on every default add.
+		Pointer: "mpm://memory/" + mem.ID,
+	}
+	if weightSet {
+		result.Weight = weightArg
+	} else {
+		result.Weight = float64(mem.Weight)
+	}
 		if truncated {
 			result.ContentTruncated = true
 			result.ContentBytes = len(mem.Content)

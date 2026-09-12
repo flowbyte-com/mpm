@@ -883,6 +883,28 @@ func handleWeaken(args []string) int {
 		return 1
 	}
 
+	// CLI acceptance 2026-09-12: WeakenMemory clamps at weight 1 in SQL
+	// (MAX(weight-?,1)), so a weaken at the floor changes nothing. Report
+	// the floor explicitly instead of claiming a decrement that did not
+	// happen — mirrors the handleFeedback floor message.
+	if updated, gerr := dm.GetMemory(id); gerr == nil && updated != nil {
+		var w float64
+		var ok bool
+		switch val := updated["weight"].(type) {
+		case float64:
+			w, ok = val, true
+		case float32:
+			w, ok = float64(val), true
+		case int64:
+			w, ok = float64(val), true
+		case int:
+			w, ok = float64(val), true
+		}
+		if ok && w <= 1 {
+			fmt.Printf("Weakened memory %s (-%d) — at minimum weight (1)\n", id, delta)
+			return 0
+		}
+	}
 	fmt.Printf("Weakened memory %s (-%d)\n", id, delta)
 	return 0
 }
