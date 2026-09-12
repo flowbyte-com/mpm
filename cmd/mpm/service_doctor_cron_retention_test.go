@@ -346,3 +346,75 @@ func TestDoctorService_checkScheduler_ConstantsMatchCanonical(t *testing.T) {
 			check.CronRetention.CatchUpLimit, scheduler.CronRetentionCatchUpLimit)
 	}
 }
+
+// TestDoctorService_cronRetentionToStatus_Boundaries pins the
+// verdict matrix at the documented boundary values so a future
+// regression that re-introduces a dead branch (or breaks the
+// capacity threshold ladder) is caught immediately.
+//
+// Backlog is seeded based on real time.Now() so the diagnostic —
+// which reads wall-clock time — sees rows that are properly aged at
+// the moment the test runs. All cases are in steady phase
+// (uptime >> 2h) so the steady-state classification rules apply.
+func TestDoctorService_cronRetentionToStatus_Boundaries(t *testing.T) {
+	dm := newTestDMForCmd(t)
+	svc := NewDoctorService(dm)
+
+	realNow := time.Now()
+	startedAt := realNow.Add(-6 * time.Hour) // uptime > 2h → steady
+
+	statePath, restoreSchedulerPath := withFakeSchedulerState(t)
+	defer restoreSchedulerPath()
+	writeFakeSchedulerState(t, statePath, startedAt, realNow.Add(-30*time.Second))
+
+	type tc struct {
+		eligible      int    // rows seeded, all > 1h old
+		wantStatus    string // expected diagnostic verdict
+		desc          string
+	}
+	cases := []tc{
+		{0, "PASS", "no eligible backlog (steady, post-sweep)"},
+		{60, "PASS", "eligible at normal-cap boundary (just before next sweep)"},
+		{61, "WARN", "eligible one row above normal cap (sustained retention debt)"},
+		{100, "WARN", "eligible mid-range above normal cap"},
+		{239, "WARN", "eligible just below catch-up threshold"},
+		{240, "WARN", "eligible at catch-up threshold"},
+		{360, "WARN", "eligible at severe-boundary (2 * CatchUpLimit)"},
+		{361, "FAIL", "eligible one row above severe-boundary"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.desc, func(t *testing.T) {
+			// Fresh DB per case so row counts are deterministic.
+			fresh := newTestDMForCmd(t)
+			freshSvc := NewDoctorService(fresh)
+
+			// Seed c.eligible rows, all comfortably older than 1h so
+			// they're all eligible at real-now.
+			for i := 0; i < c.eligible; i++ {
+				_, err := fresh.SQLDB().Exec(`
+					INSERT INTO scheduled_wakes (id, reason, target_time, fired, fired_at, created_by, metadata)
+					VALUES (?, ?, ?, 0, NULL, 'test', ?)
+				`, fmt.Sprintf("test-boundary-%s-%d", c.desc, i),
+					"test cron row",
+					realNow.Add(-time.Duration(70+i) * time.Minute).Unix(), // > 1h old
+					`{"kind":"cron","source":"cron","task_id":"epistemic-compaction","directive_id":"mpm-seed-epistemic-compaction-policy"}`,
+				)
+				if err != nil {
+					t.Fatalf("seed row %d: %v", i, err)
+				}
+			}
+
+			check := freshSvc.checkScheduler()
+			if check.Status != c.wantStatus {
+				t.Errorf("eligible=%d → status=%q, want %q (msg: %q)",
+					c.eligible, check.Status, c.wantStatus, check.Message)
+			}
+			if check.CronRetention.EligibleBacklog != c.eligible {
+				t.Errorf("eligible_backlog field = %d, want %d (probe mismatch)",
+					check.CronRetention.EligibleBacklog, c.eligible)
+			}
+		})
+		_ = svc // silence unused-var if no subtests are skipped
+	}
+}

@@ -391,17 +391,24 @@ func (s *DoctorService) cronEligibleBacklog(nowUnix int64) (int, error) {
 // cronRetentionToStatus maps the retention fields onto PASS/WARN/FAIL.
 // Classification ladder:
 //
-//	PASS — eligible backlog within the normal cap (60). The next sweep
-//	       is expected to clear it. Catch-up not engaged.
+//	PASS — eligible backlog at or below the normal sweep capacity (60).
+//	       A single normal sweep can clear the entire pool.
 //
-//	WARN — eligible backlog exceeds the normal cap (60) in steady state
-//	       past an expected sweep opportunity, OR backlog has crossed
-//	       the catch-up threshold (240). The system is operating in
-//	       catch-up mode or has missed a sweep boundary.
+//	WARN — eligible backlog above normal capacity. The system has
+//	       accumulated retention debt beyond what a single sweep can
+//	       retire. Sustained WARN means multiple sweeps have been
+//	       missed OR catch-up mode has been engaged (≥ 240).
 //
-//	FAIL — eligible backlog > 2 * CronRetentionCatchUpLimit (360). Means
-//	       multiple sweeps have been missed and the daemon is not
+//	FAIL — eligible backlog > 2 * CronRetentionCatchUpLimit (360).
+//	       Multiple sweeps have been missed and the daemon is not
 //	       retiring rows at the expected rate.
+//
+// Limitation: the diagnostic does not persist lastSweepUnix, so it
+// cannot directly distinguish "between-sweep pulse with backlog
+// just over 60" from "persistent retention debt". The classification
+// uses capacity thresholds honestly — eligible > 60 means "at least
+// one normal sweep couldn't clear the backlog" — and surfaces the
+// limitation via the Phase + interpretation fields.
 func cronRetentionToStatus(c *CronRetentionStatus) string {
 	if c == nil {
 		return "WARN"
@@ -416,13 +423,8 @@ func cronRetentionToStatus(c *CronRetentionStatus) string {
 	if c.EligibleBacklog >= scheduler.CronRetentionCatchUpThreshold {
 		return "WARN"
 	}
-	if c.Phase == "steady" {
-		// Steady-state: backlog past an expected sweep opportunity
-		// AND beyond what a normal sweep can clear (60) → WARN.
-		if c.EligibleBacklog > scheduler.CronRetentionNormalLimit &&
-			c.LastExpectedSweepAgoSec > int64(scheduler.CronRetentionCadence.Seconds()) {
-			return "WARN"
-		}
+	if c.Phase == "steady" && c.EligibleBacklog > scheduler.CronRetentionNormalLimit {
+		return "WARN"
 	}
 	return "PASS"
 }
