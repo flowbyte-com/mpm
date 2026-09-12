@@ -457,6 +457,44 @@ type DoctorCheck struct {
 	Message  string
 	Details  []string
 	Duration string
+
+	// CronRetention is populated by the Scheduler check and gives
+	// machines and humans an honest read of the cron-wake retention
+	// state. Without it, a healthy startup-stabilization or steady-
+	// state pool of ~60-120 cron rows looks like a "growing backlog"
+	// to a fresh agent. See service_doctor.go:checkScheduler for the
+	// classification logic.
+	CronRetention *CronRetentionStatus `json:"cron_retention,omitempty"`
+}
+
+// CronRetentionStatus captures the diagnostic-contract fields for
+// cron-wake retention. Constants come from
+// internal/scheduler.CronRetention* — never duplicated here — so the
+// diagnostic and the runtime share one source of truth.
+//
+// Phase semantics:
+//
+//	startup_stabilization — uptime < 2 * CronRetentionCadence.
+//	    The first runOnce sweep seeds the cadence; the +1h gate-pass
+//	    finds 0 eligible (strict-< excludes the row inserted at
+//	    runOnce); the first ACTUAL retirement lands at +2h. Backlog
+//	    observed during this window is the expected retention pool.
+//	steady — uptime >= 2 * CronRetentionCadence. Backlog should
+//	    pulse between ~0 (immediately after a sweep) and ~60 (just
+//	    before the next sweep). Persistent nonzero backlog past an
+//	    expected sweep opportunity is degraded.
+type CronRetentionStatus struct {
+	Pending                     int    `json:"pending"`
+	EligibleBacklog             int    `json:"eligible_backlog"`
+	RetentionWindowSec          int64  `json:"retention_window_seconds"`
+	SweepCadenceSec             int64  `json:"sweep_cadence_seconds"`
+	NormalLimit                 int    `json:"normal_limit"`
+	CatchUpLimit                int    `json:"catchup_limit"`
+	Phase                       string `json:"phase"`
+	SchedulerUptimeSec          int64  `json:"scheduler_uptime_seconds"`
+	LastExpectedSweepAgoSec     int64  `json:"last_expected_sweep_ago_seconds"`
+	SecondsUntilNextExpectedSweep int64  `json:"seconds_until_next_expected_sweep"`
+	Interpretation              string `json:"interpretation,omitempty"`
 }
 
 // DoctorReport is the full diagnostic report

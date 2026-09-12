@@ -102,8 +102,67 @@ func (r *DoctorRenderer) Render(report *DoctorReport) error {
 				return err
 			}
 		}
+		// Cron-retention interpretation: surface the diagnostic-contract
+		// fields (pending, eligible, retention phase, scheduler uptime)
+		// so a fresh agent can distinguish startup stabilization from
+		// steady state from genuine degradation without reading source.
+		if cr := check.CronRetention; cr != nil {
+			r.renderCronRetention(cr)
+		}
 	}
 	return nil
+}
+
+// renderCronRetention emits a compact, human-readable block of the
+// cron-retention diagnostic under a Scheduler check. Always renders
+// when CronRetention is present (PASS or otherwise) — the operator's
+// signal is the Phase/EligibleBacklog context, not just the verdict.
+func (r *DoctorRenderer) renderCronRetention(cr *CronRetentionStatus) {
+	indent := "        "
+	line := lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("#cccccc"))
+	if r.useEmoji {
+		// TTY: subtle gray.
+		line = lipgloss.NewStyle().Faint(true)
+	}
+	if cr.Phase != "" {
+		fmt.Fprintf(r.out, "%s%s\n", indent, line.Render(fmt.Sprintf("Cron retention phase: %s", cr.Phase)))
+	}
+	if cr.SchedulerUptimeSec > 0 {
+		fmt.Fprintf(r.out, "%s%s\n", indent, line.Render(fmt.Sprintf("Scheduler uptime: %s",
+			formatSchedulerDuration(time.Duration(cr.SchedulerUptimeSec)*time.Second))))
+	}
+	fmt.Fprintf(r.out, "%s%s\n", indent, line.Render(fmt.Sprintf(
+		"Pending cron wakes: %d · eligible backlog: %d · retention window: %s · cadence: %s",
+		cr.Pending, cr.EligibleBacklog,
+		formatSchedulerDuration(time.Duration(cr.RetentionWindowSec)*time.Second),
+		formatSchedulerDuration(time.Duration(cr.SweepCadenceSec)*time.Second),
+	)))
+	if cr.LastExpectedSweepAgoSec > 0 {
+		fmt.Fprintf(r.out, "%s%s\n", indent, line.Render(fmt.Sprintf(
+			"Last expected sweep: %s ago · next expected sweep: %s",
+			formatSchedulerDuration(time.Duration(cr.LastExpectedSweepAgoSec)*time.Second),
+			formatSchedulerDuration(time.Duration(cr.SecondsUntilNextExpectedSweep)*time.Second),
+		)))
+	}
+	if cr.Interpretation != "" {
+		explain := lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("#999999"))
+		fmt.Fprintf(r.out, "%s%s\n", indent, explain.Render("→ "+cr.Interpretation))
+	}
+}
+
+// formatSchedulerDuration formats a Duration in compact human form.
+// "1h 25m" / "25m 14s" / "14s". Zero or negative values render as "—".
+func formatSchedulerDuration(d time.Duration) string {
+	if d <= 0 {
+		return "—"
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm %ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
 }
 
 // markerFor returns ✓ (PASS), ⚠ (WARN), or ✗ (FAIL) when useEmoji is true;

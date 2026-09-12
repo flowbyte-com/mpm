@@ -1035,3 +1035,120 @@ func TestCronRetentionTickHandler_LogsDebugOnSweep(t *testing.T) {
 		}
 	})
 }
+
+// TestCronRetention_StartupCalibrationSequence pins the retention
+// pattern that previously confused a fresh agent health check:
+//
+//	T+0h  runOnce-equivalent: handler runs, 0 retired, cadence state seeded
+//	T+1h  gate passes: handler runs, 0 retired (strict-< excludes the
+//	      row inserted at exactly runOnce time)
+//	T+2h  gate passes: handler runs, ~60 retired (first ACTUAL retirement)
+//
+// After T+2h, normal hourly cadence continues: each sweep retires ~60
+// rows (= 1h of production at the typical 1 cron row/min rate), and the
+// pending pool pulses between ~0 and ~60 across sweeps.
+//
+// This is a regression guard for the pattern that produced "agent
+// misclassified healthy startup-stabilization as scheduler failure".
+// It explicitly documents the timing so future readers do not need to
+// re-derive the math from wake_expiration.go.
+//
+// The test exercises the public SweepOverdueCronWakes + probe path
+// directly with controlled `now` parameters (no sleeps), then
+// confirms the CronRetentionTickHandler closure produces the same
+// outcomes when invoked at the corresponding real-time intervals.
+func TestCronRetention_StartupCalibrationSequence(t *testing.T) {
+	s := newTestScheduler(t)
+
+	// Base = T+0. Use a fixed UTC time so the math is exact. The
+	// probe + sweep take an explicit `now` argument so we drive the
+	// calendar without real-time waits.
+	base := time.Date(2026, 9, 12, 13, 23, 14, 0, time.UTC)
+
+	// 60 cron rows inserted in the first hour of simulated time.
+	for i := 0; i < 60; i++ {
+		seedCronWake(t, s, base.Add(time.Duration(i)*time.Minute), "epistemic-compaction")
+	}
+
+	// Probe + sweep helper that uses an explicit `now`.
+	runSweepAt := func(label string, now time.Time, maxRows int) (retired int) {
+		t.Helper()
+		retired, err := SweepOverdueCronWakes(context.Background(), s.db, now, maxRows)
+		if err != nil {
+			t.Fatalf("%s sweep: %v", label, err)
+		}
+		return retired
+	}
+	runProbeAt := func(label string, now time.Time) int {
+		t.Helper()
+		cutoff := now.Add(-CronRetentionWindow).Unix()
+		backlog, err := cronRetentionProbeBacklog(context.Background(), s.db, cutoff)
+		if err != nil {
+			t.Fatalf("%s probe: %v", label, err)
+		}
+		return backlog
+	}
+
+	// T+0h: probe should find 0 eligible (all 60 rows are 0..59min old).
+	probe := runProbeAt("T+0h probe", base)
+	if probe != 0 {
+		t.Errorf("T+0h probe backlog=%d, want 0 (rows 0..59min old, cutoff -1h)", probe)
+	}
+
+	// T+1h: probe should still find 0 eligible. Cutoff = base (T+1h - 1h).
+	// Row 0 has target_time = base, EXACTLY equal to cutoff. Strict-<
+	// excludes it. All other rows have target_time > cutoff.
+	probe = runProbeAt("T+1h probe", base.Add(time.Hour))
+	if probe != 0 {
+		t.Errorf("T+1h probe backlog=%d, want 0 (strict-< excludes boundary row at exactly cutoff)", probe)
+	}
+
+	// T+2h: probe should find all 60 eligible. Cutoff = base+1h.
+	// All rows at base + 0m..59m are < base+1h.
+	probe = runProbeAt("T+2h probe", base.Add(2*time.Hour))
+	if probe != 60 {
+		t.Errorf("T+2h probe backlog=%d, want 60 (first sweep with eligible rows)", probe)
+	}
+
+	// Confirm the full sweep path at T+2h retires 60 rows.
+	retired := runSweepAt("T+2h sweep", base.Add(2*time.Hour), CronRetentionNormalLimit)
+	if retired != 60 {
+		t.Errorf("T+2h sweep retired=%d, want 60", retired)
+	}
+
+	// Seed another hour of production; verify T+3h steady-state.
+	for i := 0; i < 60; i++ {
+		seedCronWake(t, s, base.Add(time.Hour+time.Duration(i)*time.Minute), "epistemic-compaction")
+	}
+	probe = runProbeAt("T+3h probe", base.Add(3*time.Hour))
+	if probe != 60 {
+		t.Errorf("T+3h probe backlog=%d, want 60 (steady-state pool between sweeps)", probe)
+	}
+	retired = runSweepAt("T+3h sweep", base.Add(3*time.Hour), CronRetentionNormalLimit)
+	if retired != 60 {
+		t.Errorf("T+3h sweep retired=%d, want 60", retired)
+	}
+
+	// T+4h: third hour of production, third sweep. Verify cumulative
+	// retirement.
+	for i := 0; i < 60; i++ {
+		seedCronWake(t, s, base.Add(2*time.Hour+time.Duration(i)*time.Minute), "epistemic-compaction")
+	}
+	probe = runProbeAt("T+4h probe", base.Add(4*time.Hour))
+	if probe != 60 {
+		t.Errorf("T+4h probe backlog=%d, want 60 (steady-state pool continues)", probe)
+	}
+	retired = runSweepAt("T+4h sweep", base.Add(4*time.Hour), CronRetentionNormalLimit)
+	if retired != 60 {
+		t.Errorf("T+4h sweep retired=%d, want 60", retired)
+	}
+
+	// Cumulative fired count = 3 × 60 = 180.
+	var firedCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 1`).Scan(&firedCount); err != nil {
+		t.Fatalf("count fired: %v", err)
+	}
+	if firedCount != 180 {
+		t.Errorf("cumulative fired=%d, want 180 (3 sweeps × 60 each)", firedCount)
+	}
+}

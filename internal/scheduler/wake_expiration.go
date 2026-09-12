@@ -280,6 +280,41 @@ func NotificationExpirationTickHandler(ctx context.Context, db *sql.DB) func(ctx
 // the row (fired=1, fired_at=now, audit note) so it drops out of the
 // wakes_overdue doctor counter and out of any `WHERE fired=0` query.
 //
+// Diagnostic contract for `mpm doctor` / `mpm status`. The cron-wake
+// retention is intentionally visible to operators via the
+// CronRetentionStatus struct surfaced under the Scheduler check. The
+// contract:
+//
+//	Phase=startup_stabilization: uptime < 2*CronRetentionCadence (2h).
+//	    Recent cron wakes are expected retained. Backlog is the normal
+//	    pool; first ACTUAL retirement occurs at T+2h (see startup
+//	    calibration below).
+//	Phase=steady: uptime >= 2h. Pending cron pool pulses between ~0
+//	    (just after a sweep) and ~60 (just before the next sweep).
+//	    Approximately one retention-window of recent cron rows is the
+//	    steady-state contract — NOT a fixed count.
+//
+// Startup calibration sequence (T=process_started_unix):
+//
+//	T+0h  runOnce-equivalent: handler runs immediately at startup.
+//	    state.lastSweepUnix=0 → gate `0 > 0` is false → sweep runs.
+//	    No rows eligible (just inserted). lastSweepUnix advances.
+//	T+1h  next gate-pass: handler runs. Diff=3600s. Cutoff=T+0h.
+//	    Row 0 has target_time EXACTLY equal to cutoff. Strict-<
+//	    excludes it. Sweep retires 0.
+//	T+2h  next gate-pass: handler runs. Cutoff=T+1h. Rows 0..59 are
+//	    all < cutoff. Sweep retires ~60 (the first ACTUAL retirement).
+//	T+3h+ normal hourly cadence: each sweep retires ~60 rows.
+//
+// See TestCronRetention_StartupCalibrationSequence in
+// cron_retention_test.go for the regression test that pins this
+// pattern.
+//
+// If the cron-retention diagnostic surfaces a backlog that exceeds
+// the recoverable cadence/capacity (CronRetentionCatchUpThreshold=240),
+// the doctor escalates to WARN/FAIL — see cmd/mpm/service_doctor.go
+// cronRetentionToStatus for the classification ladder.
+//
 // This is structurally identical to the notification sweep above — the
 // difference is the kind filter and the bounds.
 //
