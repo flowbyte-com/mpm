@@ -54,6 +54,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -538,6 +539,9 @@ type cronRetentionState struct {
 //  3. Choose cap: catch-up mode (180) when probe >= 240, else normal (60).
 //  4. Run SweepOverdueCronWakes with the chosen cap.
 //  5. Update lastSweepUnix on success.
+//  6. Emit a Debug-level log line so operators can distinguish
+//     sweep-ran-and-retired vs sweep-ran-but-nothing-eligible, and
+//     normal vs catch-up cap. Cadence-gated skips stay silent.
 //
 // Step 2 is the only DB query on idle ticks (step 1 short-circuits
 // without touching the DB). Probe is bounded by the constant
@@ -550,7 +554,7 @@ type cronRetentionState struct {
 // tick handler closure, which is single-goroutine by scheduler
 // design (dispatchTickHandlers is synchronous — see scheduler.go:400).
 // No locking required.
-func CronRetentionTickHandler(ctx context.Context, db *sql.DB) func(ctx context.Context) error {
+func CronRetentionTickHandler(ctx context.Context, db *sql.DB, log *slog.Logger) func(ctx context.Context) error {
 	state := &cronRetentionState{}
 	return func(ctx context.Context) error {
 		now := time.Now()
@@ -566,11 +570,13 @@ func CronRetentionTickHandler(ctx context.Context, db *sql.DB) func(ctx context.
 		}
 
 		cap := CronRetentionNormalLimit
-		if backlog >= CronRetentionCatchUpThreshold {
+		catchUp := backlog >= CronRetentionCatchUpThreshold
+		if catchUp {
 			cap = CronRetentionCatchUpLimit
 		}
 
-		if _, err := SweepOverdueCronWakes(ctx, db, now, cap); err != nil {
+		retired, err := SweepOverdueCronWakes(ctx, db, now, cap)
+		if err != nil {
 			return fmt.Errorf("cron retention sweep: %w", err)
 		}
 
@@ -578,7 +584,20 @@ func CronRetentionTickHandler(ctx context.Context, db *sql.DB) func(ctx context.
 		// transient error leaves lastSweepUnix untouched so the
 		// next tick retries the probe + sweep.
 		state.lastSweepUnix = nowUnix
-		_ = backlog // suppress unused warning under no-error path
+
+		// Debug-level visibility for the once-per-hour happy path.
+		// Distinguishes "ran and retired N" from "ran but nothing
+		// eligible" and normal from catch-up cap. Cadence-gated
+		// skips (the common case) stay silent.
+		if log != nil {
+			log.Debug("cron retention sweep complete",
+				"eligible_backlog", backlog,
+				"retired", retired,
+				"cap", cap,
+				"catch_up", catchUp,
+				"cutoff_unix", cutoff,
+			)
+		}
 		return nil
 	}
 }

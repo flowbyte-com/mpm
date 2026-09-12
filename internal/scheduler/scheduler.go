@@ -201,7 +201,7 @@ func New(db *sql.DB, log *slog.Logger) (*Scheduler, error) {
 	// This sweep is cadence-gated (every 60min) inside its own
 	// handler, so registering it on every tick is cheap — most
 	// calls return immediately without touching the DB.
-	s.RegisterTickHandler("cron_retention", CronRetentionTickHandler(context.Background(), db))
+	s.RegisterTickHandler("cron_retention", CronRetentionTickHandler(context.Background(), db, log))
 	return s, nil
 }
 

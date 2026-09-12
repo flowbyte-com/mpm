@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
@@ -291,7 +293,7 @@ func TestCronSweepTickHandler_GatesOnCadence(t *testing.T) {
 		seedCronWake(t, s, now.Add(-time.Duration(i+2)*time.Hour), "epistemic-compaction")
 	}
 
-	handler := CronRetentionTickHandler(context.Background(), s.db)
+	handler := CronRetentionTickHandler(context.Background(), s.db, discardLogger())
 
 	// First call should retire up to the normal cap (60).
 	if err := handler(context.Background()); err != nil {
@@ -335,7 +337,7 @@ func TestCronSweepTickHandler_PicksCatchUpCapOnLargeBacklog(t *testing.T) {
 		seedCronWake(t, s, now.Add(-time.Duration(i+2)*time.Hour), "epistemic-compaction")
 	}
 
-	handler := CronRetentionTickHandler(context.Background(), s.db)
+	handler := CronRetentionTickHandler(context.Background(), s.db, discardLogger())
 	if err := handler(context.Background()); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -359,7 +361,7 @@ func TestCronSweepTickHandler_PicksCatchUpCapOnLargeBacklog(t *testing.T) {
 // verifies the backlog does not grow without bound.
 func TestCronSweepTickHandler_ProductionRateBounded(t *testing.T) {
 	s := newTestScheduler(t)
-	handler := CronRetentionTickHandler(context.Background(), s.db)
+	handler := CronRetentionTickHandler(context.Background(), s.db, discardLogger())
 
 	// Simulate 3 hours of cron production at 60 rows/hour = 180 rows
 	// total. Each row's target_time must be past CronRetentionWindow
@@ -477,8 +479,8 @@ func TestCronSweepTickHandler_ConcurrentSafe(t *testing.T) {
 		seedCronWake(t, s, now.Add(-time.Duration(i+2)*time.Hour), "epistemic-compaction")
 	}
 
-	h1 := CronRetentionTickHandler(context.Background(), s.db)
-	h2 := CronRetentionTickHandler(context.Background(), s.db)
+	h1 := CronRetentionTickHandler(context.Background(), s.db, discardLogger())
+	h2 := CronRetentionTickHandler(context.Background(), s.db, discardLogger())
 
 	// Run them concurrently — each handler has its own cadence
 	// state so the gate does not serialize them.
@@ -724,7 +726,7 @@ func TestCronSweep_DatabaseNotUsedByHandlerBeyondProbe(t *testing.T) {
 	// Seed one eligible row so the first sweep does work.
 	seedCronWake(t, s, now.Add(-2*time.Hour), "epistemic-compaction")
 
-	handler := CronRetentionTickHandler(context.Background(), s.db)
+	handler := CronRetentionTickHandler(context.Background(), s.db, discardLogger())
 
 	// First call: does work, advances lastSweepUnix.
 	if err := handler(context.Background()); err != nil {
@@ -895,4 +897,141 @@ func TestCronSweep_PreservesExistingSchemaMetadata(t *testing.T) {
 	if !strings.Contains(metadata, CronRetentionReasonValue) {
 		t.Errorf("expiration reason missing: %s", metadata)
 	}
+}
+
+// discardLogger returns an slog.Logger that drops all output. Used by
+// tests that exercise the cron-retention tick handler but do not
+// assert on log shape — keeps test output clean without coupling to
+// text formatting.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
+}
+
+// TestCronRetentionTickHandler_LogsDebugOnSweep pins the new debug
+// observability for the cron-retention sweep. Operators reading the
+// scheduler log should be able to tell at a glance whether a sweep
+// ran with rows eligible vs. nothing eligible, and whether the
+// normal or catch-up cap was applied — without changing retention
+// behavior.
+//
+// Cadence-gated skips stay silent (they're the common case and
+// would be noisy at 60s intervals).
+func TestCronRetentionTickHandler_LogsDebugOnSweep(t *testing.T) {
+	t.Run("retired rows: emits debug with retired, cap, catch_up=false", func(t *testing.T) {
+		s := newTestSchedulerWithCaptureLogger(t)
+		now := time.Now()
+
+		// 5 obsolete cron rows, all eligible.
+		for i := 0; i < 5; i++ {
+			seedCronWake(t, s, now.Add(-time.Duration(i+2)*time.Hour), "epistemic-compaction")
+		}
+
+		handler := CronRetentionTickHandler(context.Background(), s.db, s.log)
+		if err := handler(context.Background()); err != nil {
+			t.Fatalf("handler: %v", err)
+		}
+
+		entries := s.captureLogs()
+		var sweep map[string]any
+		for _, e := range entries {
+			if msg, _ := e["msg"].(string); msg == "cron retention sweep complete" {
+				sweep = e
+				break
+			}
+		}
+		if sweep == nil {
+			t.Fatalf("expected 'cron retention sweep complete' debug line; entries: %+v", entries)
+		}
+		if sweep["level"] != "DEBUG" {
+			t.Errorf("level = %v, want DEBUG", sweep["level"])
+		}
+		if got, _ := sweep["retired"].(float64); int(got) != 5 {
+			t.Errorf("retired = %v, want 5", sweep["retired"])
+		}
+		if got, _ := sweep["eligible_backlog"].(float64); int(got) != 5 {
+			t.Errorf("eligible_backlog = %v, want 5", sweep["eligible_backlog"])
+		}
+		if got, _ := sweep["cap"].(float64); int(got) != CronRetentionNormalLimit {
+			t.Errorf("cap = %v, want %d (normal)", sweep["cap"], CronRetentionNormalLimit)
+		}
+		if got, _ := sweep["catch_up"].(bool); got {
+			t.Errorf("catch_up = true, want false (only 5 rows)")
+		}
+		if _, ok := sweep["cutoff_unix"].(float64); !ok {
+			t.Errorf("cutoff_unix missing or wrong type: %T", sweep["cutoff_unix"])
+		}
+	})
+
+	t.Run("nothing eligible: emits debug with retired=0, no log on cadence skip", func(t *testing.T) {
+		s := newTestSchedulerWithCaptureLogger(t)
+		// No seeded cron rows — backlog will be 0.
+
+		handler := CronRetentionTickHandler(context.Background(), s.db, s.log)
+		if err := handler(context.Background()); err != nil {
+			t.Fatalf("handler: %v", err)
+		}
+
+		entries := s.captureLogs()
+		var sweep map[string]any
+		for _, e := range entries {
+			if msg, _ := e["msg"].(string); msg == "cron retention sweep complete" {
+				sweep = e
+				break
+			}
+		}
+		if sweep == nil {
+			t.Fatalf("expected debug line even with backlog=0; entries: %+v", entries)
+		}
+		if got, _ := sweep["retired"].(float64); int(got) != 0 {
+			t.Errorf("retired = %v, want 0", sweep["retired"])
+		}
+		if got, _ := sweep["eligible_backlog"].(float64); int(got) != 0 {
+			t.Errorf("eligible_backlog = %v, want 0", sweep["eligible_backlog"])
+		}
+
+		// Second call within cadence must be silent.
+		if err := handler(context.Background()); err != nil {
+			t.Fatalf("handler second call: %v", err)
+		}
+		entriesAfterSkip := s.captureLogs()
+		for _, e := range entriesAfterSkip {
+			if msg, _ := e["msg"].(string); msg == "cron retention sweep complete" {
+				t.Errorf("cadence-gated skip emitted a log line: %+v", e)
+			}
+		}
+	})
+
+	t.Run("large backlog: catch_up=true, cap=CronRetentionCatchUpLimit", func(t *testing.T) {
+		s := newTestSchedulerWithCaptureLogger(t)
+		now := time.Now()
+
+		// Seed CronRetentionCatchUpThreshold (240) rows so the
+		// probe returns >= threshold and catch-up mode triggers.
+		for i := 0; i < CronRetentionCatchUpThreshold; i++ {
+			seedCronWake(t, s, now.Add(-time.Duration(i+2)*time.Hour), "epistemic-compaction")
+		}
+
+		handler := CronRetentionTickHandler(context.Background(), s.db, s.log)
+		if err := handler(context.Background()); err != nil {
+			t.Fatalf("handler: %v", err)
+		}
+
+		entries := s.captureLogs()
+		var sweep map[string]any
+		for _, e := range entries {
+			if msg, _ := e["msg"].(string); msg == "cron retention sweep complete" {
+				sweep = e
+				break
+			}
+		}
+		if sweep == nil {
+			t.Fatalf("expected debug line on catch-up sweep; entries: %+v", entries)
+		}
+		if got, _ := sweep["catch_up"].(bool); !got {
+			t.Errorf("catch_up = false, want true (backlog >= threshold)")
+		}
+		if got, _ := sweep["cap"].(float64); int(got) != CronRetentionCatchUpLimit {
+			t.Errorf("cap = %v, want %d (catch-up)", sweep["cap"], CronRetentionCatchUpLimit)
+		}
+	})
 }
