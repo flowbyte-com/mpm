@@ -662,15 +662,51 @@ func handleMemoryShow(args []string) int {
 		}
 	}
 	if len(args) == 0 {
-		return respond("", "Usage: mpm memory show <id>", 1)
+		return respond("", "Usage: mpm memory show <id> [--json]", 1)
 	}
 
-	id := args[0]
+	// Rough-edge closure 2026-09-12 (item 3): `--json` (any position)
+	// emits a structured envelope instead of being silently ignored.
+	cleaned, wantJSON := stripMemoryFlagToken(args, "--json", "-j")
+	if len(cleaned) == 0 {
+		return respond("", "Usage: mpm memory show <id> [--json]", 1)
+	}
+
+	id := cleaned[0]
 	store := getMemoryStore()
 
 	mem, err := store.GetByID(id, "memories")
 	if err != nil || mem == nil {
+		if wantJSON {
+			out, _ := json.Marshal(map[string]interface{}{"success": false, "error": fmt.Sprintf("Memory not found: %s", id)})
+			return respond(string(out)+"\n", "", 1)
+		}
 		return respond("", fmt.Sprintf("Memory not found: %s\n", id), 1)
+	}
+
+	if wantJSON {
+		// Bounded inline echo with pointer for long content — same
+		// wire-bound contract as `memory add --json` (audit F4), so a
+		// pointer-backed memory never floods a machine consumer.
+		echoContent, truncated := mpminternal.BoundInlineContent(mem.Content)
+		env := map[string]interface{}{
+			"success":             true,
+			"id":                  mem.ID,
+			"content":             echoContent,
+			"pointer":             "mpm://memory/" + mem.ID,
+			"collection":          mem.Collection,
+			"tags":                mem.Tags,
+			"weight":              mem.Weight,
+			"reinforcement_count": mem.ReinforcementCount,
+			"created_at":          mem.CreatedAt,
+		}
+		if truncated {
+			env["content_truncated"] = true
+			env["content_bytes"] = len(mem.Content)
+			env["note"] = "content stored in full; inline echo bounded — retrieve via mpm call mpm_memory show with projection full"
+		}
+		out, _ := json.Marshal(env)
+		return respond(string(out)+"\n", "", 0)
 	}
 
 	var output strings.Builder

@@ -47,7 +47,33 @@ func handleCall(args []string) int {
 			"success": false,
 			"error":   "usage: mpm call <tool_name> [--payload <json> | --payload-file <path>] | (stdin)",
 		})
-		printError("usage: mpm call <tool_name> [--payload <json> | --payload-file <path>] | (stdin)")
+		// Rough-edge closure 2026-09-12 (item 2): the exit-code
+		// contract is pinned here and in TestRough_Item2_ExitContract.
+		// NOTE: `mpm call --help` is intercepted by the router's
+		// generic command help, so this bare-call usage is the
+		// discoverable contract surface for the machine boundary.
+		// It goes to stderr: stdout keeps carrying only the JSON
+		// envelope (F1 — stdout-only adapters).
+		fmt.Fprint(os.Stderr, `usage: mpm call <tool_name> [--payload <json> | --payload-file <path>] | (stdin)
+
+Payload sources (priority): --payload, --payload-file, stdin.
+
+Exit-code contract (callers read BOTH signals):
+  exit 0  request handled; inspect the JSON envelope on stdout.
+          Application outcomes — including {"success":false} validations
+          such as unknown actions or bad field values — exit 0 here by
+          design (same handlers serve MCP, where process exit codes do
+          not exist). Shell scripts MUST check the "success" field.
+  exit 1  transport failure: unknown tool, malformed JSON payload,
+          unreadable payload file, DB open failure, or a handler-level
+          Go error. The stdout envelope still carries {"success":false,
+          "error":...} so stdout-only adapters keep working (F1).
+
+Friendly CLI commands follow the Unix convention directly: validation
+failures print a human message on stderr and exit non-zero. Bare
+unknown tokens are the one exception — they fall through to
+smart-recall search (exit 0 on empty results) by design.
+`)
 		return 1
 	}
 

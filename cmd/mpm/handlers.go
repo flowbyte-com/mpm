@@ -166,7 +166,7 @@ Usage:
                                   mpm_memory action=save verb
   mpm memory search <query>      Search memories
   mpm memory search-term <term>  List memories matching term (500 char snippets)
-  mpm memory show <id>           Show memory by ID
+  mpm memory show <id> [--json]  Show memory by ID (structured JSON with --json)
   mpm memory delete <id>         Soft-delete memory by ID (reversible via restore)
   mpm memory restore <id>        Restore a soft-deleted memory by ID
   mpm memory shred <id>          Permanent destruction of memory by ID (irreversible)

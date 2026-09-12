@@ -47,9 +47,25 @@ func init() {
 	// route slog through io.Discard so operational INFO doesn't pollute
 	// the JSON envelope on stdout's adjacent stderr stream. Operators can
 	// restore the diagnostic stream with MPM_VERBOSE=1.
+	//
+	// Rough-edge closure 2026-09-12 (item 1): routine human-facing CLI
+	// invocations (`mpm status`, `mpm --help`, ...) default to WARN so
+	// successful commands are quiet except for their intended result.
+	// MPM_VERBOSE=1 (machine mode) explicitly asks for the diagnostic
+	// stream, so it restores INFO. The logging package default stays
+	// INFO for daemons and library consumers; only this CLI entry
+	// point quiets itself, and an explicit MPM_LOG=info|debug always
+	// wins.
 	if isMachineMode(os.Args) && os.Getenv("MPM_VERBOSE") == "" {
 		logging.SetupWithWriter(io.Discard)
 	} else {
+		if os.Getenv("MPM_LOG") == "" {
+			if os.Getenv("MPM_VERBOSE") != "" {
+				os.Setenv("MPM_LOG", "info")
+			} else {
+				os.Setenv("MPM_LOG", "warn")
+			}
+		}
 		logging.Setup()
 	}
 

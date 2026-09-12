@@ -142,7 +142,7 @@ func NewRouter() *CommandRouter {
 		"challenge":       {Name: "challenge", Description: "Flag memory as obsolete (atomic theory + patch; use 'restore' subcommand to undo)", MinArgs: 1, MaxArgs: 2},
 		"theories":        {Name: "theories", Description: "List theories [pending|resolved|all]", MinArgs: 0},
 		"decisions":       {Name: "decisions", Description: "List decisions", MinArgs: 0},
-		"call":            {Name: "call", Description: "Universal tool boundary (JSON): mpm call <tool> [--payload <json>] [--payload-file <path>] | (stdin)", MinArgs: 1},
+		"call":            {Name: "call", Description: "Universal tool boundary (JSON): mpm call <tool> [--payload <json>] [--payload-file <path>] | (stdin)", MinArgs: 0},
 		"evidence":        {Name: "evidence", Description: "Manage evidence (add|list) — confidence foundation", MinArgs: 0},
 
 		// Knowledge Base — entity-centric namespace (reads + writes)

@@ -357,12 +357,23 @@ func handleWorkItem(args []string) int {
 	// the persisted-state vocabulary (internal/core/work.go); we do
 	// NOT add `in_progress` as a stored lifecycle value because it
 	// does not appear in isValidWorkTransition's switch.
+	//
+	// Rough-edge closure 2026-09-12 (item 9): `all` is a valid LIST
+	// filter (no status constraint) — advertised by `work item list
+	// --help`, accepted by the substrate (validWorkStatuses), and
+	// expected by the grammar contract test. It is meaningless for
+	// create (AddWork hardcodes open), so it stays rejected there.
+	// The pre-fix gate rejected `all` everywhere, failing the
+	// documented `list --status all` form.
 	if s, ok := params["status"].(string); ok && s != "" {
-		switch s {
-		case "open", "done", "cancelled":
-			// canonical, ok
-		default:
-			usererror.Error("mpm work item: --status %q is not a canonical lifecycle state (use open|done|cancelled)", s)
+		allowed := s == "open" || s == "done" || s == "cancelled" ||
+			(s == "all" && sub == "list")
+		if !allowed {
+			if sub == "list" {
+				usererror.Error("mpm work item: --status %q is not a valid list filter (use open|done|cancelled|all)", s)
+			} else {
+				usererror.Error("mpm work item: --status %q is not a canonical lifecycle state (use open|done|cancelled)", s)
+			}
 			return 1
 		}
 	}
@@ -623,6 +634,18 @@ Flags:
 
 The 'work' command never exposes the implementation name 'scratchpad';
 internally the substrate's existing scratchpad APIs are used.
+
+Session identity (standalone CLI): every process mints a fresh random
+session id unless you pin one. Multi-command working-context workflows
+must reuse the same identity — export MPM_SESSION_ID once per shell
+(or pass --session-id to each invocation):
+
+  export MPM_SESSION_ID=my-task-1
+  mpm work status     # same session every time now
+
+Without pinning, status/show in separate invocations see different
+(empty) sessions. This is inherent to standalone processes — there is
+no daemon or watcher keeping shell sessions alive — so pin explicitly.
 
 The 'item' subcommand is a discoverable facade over "mpm call mpm_work";
 see "mpm work item help" for the durable work-item vocabulary.

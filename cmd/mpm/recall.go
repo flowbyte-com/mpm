@@ -228,7 +228,7 @@ func handleRecall(args []string) int {
 			return usererror.Error("Semantic search failed: %v", err)
 		}
 		if len(hybridResults) == 0 {
-			fmt.Printf("No memories found for: %s\n", query)
+			fmt.Printf("No memories found for: %s\n", boundQueryEcho(query))
 			return 0
 		}
 		// Render hybrid results as recall entries and output
@@ -505,7 +505,7 @@ func handleRecall(args []string) int {
 	}
 
 	if len(entries) == 0 {
-		fmt.Printf("No memories found for: %s\n", query)
+		fmt.Printf("No memories found for: %s\n", boundQueryEcho(query))
 		return 0
 	}
 
@@ -733,6 +733,29 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, w
 
 	rows, err := db.Query(ftsQuery, args...)
 	if err == nil && useFTS {
+		// Rough-edge closure 2026-09-12 (item 4): FTS5 can succeed
+		// with zero rows for queries whose syntax excludes the very
+		// documents the operator means (e.g. a pasted verbatim blob
+		// where `-` parses as NOT, or a 30 KB token run the ranker
+		// cannot satisfy). `memory search` (FullTextSearch) falls back
+		// to LIKE on zero rows; recall must not silently report none
+		// where search finds the document. Probe the count with the
+		// identical MATCH + filters and fall back to the substring
+		// path below when nothing matched. A COUNT probe is used
+		// instead of buffering because callers scan *sql.Rows
+		// directly and the probe is index-served.
+		//
+		// Probe errors (<=0 covers 0 AND -1) also fall back: *sql.Rows
+		// is lazy, so a MATCH syntax failure may surface only at scan
+		// time — where handleRecall never checks rows.Err() and the
+		// failure degrades into silent zero rows. The probe is eager
+		// (QueryRow+Scan), so it observes the failure the lazy rows
+		// would hide; since it runs the identical MATCH, a probe
+		// failure means the SELECT would fail too.
+		if ftsHitCount(db, query, collection, since, until, weightBelow, before) <= 0 {
+			rows.Close()
+			return likeFallbackQuery(db, query, collection, since, until, weightBelow, before, limit)
+		}
 		return rows, nil
 	}
 	if err == nil && !useFTS {
@@ -747,12 +770,23 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, w
 	}
 
 	likePattern := "%" + query + "%"
-	// Column order MUST match the FTS5 query above (id, content, session_id,
-	// tags, metadata, created_at, reinforcement_count, weight, last_accessed_at,
-	// reference_id). The Scan destination in handleRecall has 10 args; if
-	// this drifts the count mismatch surfaces as a runtime crash on the
-	// very first recall — which is what bit the stranger test when FTS5
-	// init failed in the hermetic workspace.
+	return likeFallbackQueryWith(db, likePattern, collection, since, until, weightBelow, before, limit)
+}
+
+// likeFallbackQuery runs the substring fallback for a text query with the
+// same time/weight filters as the FTS path.
+func likeFallbackQuery(db *sql.DB, query, collection, since, until string, weightBelow int, before string, limit int) (*sql.Rows, error) {
+	return likeFallbackQueryWith(db, "%"+query+"%", collection, since, until, weightBelow, before, limit)
+}
+
+// likeFallbackQueryWith is the shared LIKE implementation. Column order
+// MUST match the FTS5 query above (id, content, session_id,
+// tags, metadata, created_at, reinforcement_count, weight, last_accessed_at,
+// reference_id). The Scan destination in handleRecall has 10 args; if
+// this drifts the count mismatch surfaces as a runtime crash on the
+// very first recall — which is what bit the stranger test when FTS5
+// init failed in the hermetic workspace.
+func likeFallbackQueryWith(db *sql.DB, likePattern, collection, since, until string, weightBelow int, before string, limit int) (*sql.Rows, error) {
 	likeQuery := `
 		SELECT id, content, session_id, tags, metadata, created_at,
 		       COALESCE(reinforcement_count, 0) as reinforcement_count,
@@ -763,7 +797,7 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, w
 		WHERE deleted_at IS NULL AND collection = ?` + mpminternal.MemoryExpireClause + `
 		  AND (content LIKE ? OR tags LIKE ?)`
 
-	args = []interface{}{collection, likePattern, likePattern}
+	args := []interface{}{collection, likePattern, likePattern}
 
 	if since != "" {
 		likeQuery += " AND created_at >= ?"
@@ -786,6 +820,59 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, w
 	args = append(args, limit)
 
 	return db.Query(likeQuery, args...)
+}
+
+// ftsHitCount probes how many live memories satisfy the FTS5 MATCH with
+// the identical filters keywordSearchWithTime applies. Returns 0 when
+// nothing matches, or -1 when the probe itself fails (e.g. MATCH syntax
+// the query string triggers, such as `-` parsed as NOT or a bare token
+// FTS5 reads as a column name). Callers treat <= 0 as "fall back to
+// LIKE": the probe is eager while *sql.Rows is lazy, so a probe failure
+// means the SELECT would fail at scan time too. The probe mirrors the
+// SELECT filters exactly: collection, since/until (same 23:59:59
+// suffix), before, weightBelow, plus the shared expiry clause.
+func ftsHitCount(db *sql.DB, query, collection, since, until string, weightBelow int, before string) int {
+	q := `
+		SELECT COUNT(*)
+		FROM memories m
+		JOIN memories_fts fts ON m.rowid = fts.rowid
+		WHERE m.deleted_at IS NULL` + mpminternal.MemoryExpireClauseM + `
+		  AND memories_fts MATCH ?
+		  AND m.collection = ?`
+	args := []interface{}{query, collection}
+	if since != "" {
+		q += " AND m.created_at >= ?"
+		args = append(args, since)
+	}
+	if until != "" {
+		q += " AND m.created_at <= ?"
+		args = append(args, until+" 23:59:59")
+	}
+	if before != "" {
+		q += " AND m.created_at < ?"
+		args = append(args, before)
+	}
+	if weightBelow > 0 {
+		q += " AND m.weight < ?"
+		args = append(args, weightBelow)
+	}
+	var n int
+	if err := db.QueryRow(q, args...).Scan(&n); err != nil {
+		return -1
+	}
+	return n
+}
+
+// boundQueryEcho keeps the no-results message readable when the query
+// itself is pathological (e.g. a pasted 30 KB verbatim blob). Queries at
+// or under 200 bytes print verbatim; longer ones print a prefix plus
+// their byte length so the operator can see what was attempted.
+func boundQueryEcho(query string) string {
+	const maxEcho = 200
+	if len(query) <= maxEcho {
+		return query
+	}
+	return fmt.Sprintf("%s... [%d bytes total]", query[:maxEcho], len(query))
 }
 
 func stripMarkdown(s string) string {

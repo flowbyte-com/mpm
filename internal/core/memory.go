@@ -1083,8 +1083,14 @@ func (s *MemoryStore) GetByID(id string, collection string) (*Memory, error) {
 	var embedding []byte
 	var createdAt int64
 	var sessionID sql.NullString
+	// Rough-edge closure 2026-09-12 (item 3): also project weight and
+	// reinforcement_count so `mpm memory show --json` can report the
+	// stored values without a second query. COALESCE keeps the
+	// defensive-aggregate invariant (NULL on legacy rows → sane
+	// defaults, never a scan panic).
+	var weightF, rcF sql.NullFloat64
 
-	err := s.DB.QueryRow("SELECT id, collection, content, session_id, tags, metadata, embedding, created_at FROM memories WHERE id = ? AND collection = ? AND deleted_at IS NULL"+MemoryExpireClause, id, collection).Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt)
+	err := s.DB.QueryRow("SELECT id, collection, content, session_id, tags, metadata, embedding, created_at, COALESCE(weight,1), COALESCE(reinforcement_count,0) FROM memories WHERE id = ? AND collection = ? AND deleted_at IS NULL"+MemoryExpireClause, id, collection).Scan(&mem.ID, &mem.Collection, &mem.Content, &sessionID, &tagsJSON, &metadataJSON, &embedding, &createdAt, &weightF, &rcF)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -1096,6 +1102,12 @@ func (s *MemoryStore) GetByID(id string, collection string) (*Memory, error) {
 		mem.SessionID = sessionID.String
 	}
 	mem.CreatedAt = createdAt
+	if weightF.Valid {
+		mem.Weight = int(weightF.Float64 + 0.5)
+	}
+	if rcF.Valid {
+		mem.ReinforcementCount = int(rcF.Float64)
+	}
 
 	if len(tagsJSON) > 0 {
 		if err := json.Unmarshal(tagsJSON, &mem.Tags); err != nil {
