@@ -3707,14 +3707,22 @@ func handleAnnotateCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 // accepted via payload key "mpm_session_id" but production code
 // should leave it empty and let the canonical allocator run.
 func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	// Identity reads. Order of precedence:
-	//   - framework_session_id: canonical key. Empty when absent.
+	// Identity reads. Order of precedence (canonical first):
+	//   - framework_session_id: canonical host-owned key. Empty when absent.
 	//   - session_id:           legacy key. Routes into the legacy
 	//                           session_id column. Empty when absent.
 	// Both may be empty (Pi, Hermes without hooks) — that's normal.
-	frameworkSessionID := getString(p, "framework_session_id")
+	//
+	// 2026-09-12 reconciliation note: mpm_session_id and
+	// framework_session_id are accepted on the payload for forward
+	// compatibility with wip/session-identity-rework, but the
+	// canonical CoreDB.EndSession surface (which writes those fields)
+	// lives on the WIP. The payload keys are silently accepted here
+	// so callers using the WIP can speak to this build without parse
+	// errors; they will be persisted once the WIP merges.
+	_ = getString(p, "framework_session_id")
 	sessionID := getString(p, "session_id")
-	explicitMPMSessionID := getString(p, "mpm_session_id")
+	_ = getString(p, "mpm_session_id")
 
 	summary := getString(p, "summary")
 	if summary == "" {
@@ -3750,20 +3758,28 @@ func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		return nil, err
 	}
 
-	h, err := dm.EndSessionV2(sessionID, frameworkSessionID, explicitMPMSessionID,
-		summary, state, commitments, openQuestions)
+	// 55f3a5ea originally called dm.EndSessionV2 here to surface
+	// mpm_session_id / framework_session_id on the write surface, but
+	// EndSessionV2 lives on wip/session-identity-rework and the core
+	// substrate's behaviour for these fields is still in flight. Roll
+	// back to the canonical EndSession so the handoff read/write
+	// surfaces stay self-consistent without the WIP. The
+	// mpm_session_id / framework_session_id additions on the wake
+	// context read surface are preserved (data.MPMSessionID /
+	// data.FrameworkSessionID exposed in handleReadWakeContext).
+	// When the WIP merges, this call site can swap to EndSessionV2
+	// again without further ceremony.
+	h, err := dm.EndSession(sessionID, summary, state, commitments, openQuestions)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
-		"success":             true,
-		"handoff":             h,
-		"handoff_id":          h.ID,
-		"mpm_session_id":       h.MPMSessionID,
-		"framework_session_id": h.FrameworkSessionID,
-		"session_id":          h.SessionID,
-		"message":             "handoff written. Pending work surfaces via mpm_work; open questions via mpm_theories.",
-		"open_questions":      h.OpenQuestions,
+		"success":        true,
+		"handoff":        h,
+		"handoff_id":     h.ID,
+		"session_id":     h.SessionID,
+		"message":        "handoff written. Pending work surfaces via mpm_work; open questions via mpm_theories.",
+		"open_questions": h.OpenQuestions,
 	}, nil
 }
 

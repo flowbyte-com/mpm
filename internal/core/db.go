@@ -2076,16 +2076,13 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("session_handoffs session_id optional migration failed: %w", err)
 	}
-	// session_handoffs mpm_session_id + framework_session_id — adds
-	// two additive nullable columns and a non-unique index for
-	// correlation queries. See migration_session_handoffs_mpm_session_id.go
-	// for the rationale (sticky mpm_session_id persisted in active.json
-	// as the authoritative current lifecycle identity; framework_session_id
-	// is host-owned and nullable).
-	if err := MigrateSessionHandoffsMPMSessionID(tx); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("session_handoffs mpm_session_id migration failed: %w", err)
-	}
+	// session_handoffs mpm_session_id + framework_session_id — registration
+	// intentionally deferred until the matching
+	// migration_session_handoffs_mpm_session_id.go lands on a branch that
+	// also ships the session-identity rework (currently preserved on
+	// wip/session-identity-rework). Adding the registration here without
+	// the migration source breaks the build — see reconciliation note
+	// from 2026-09-12.
 	// created_at_backfill_v1 — repairs rows whose created_at was
 	// inserted as NULL by the pre-fix seed path. read_directives
 	// scans created_at into a non-NULL Go string, so a single

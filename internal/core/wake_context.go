@@ -67,6 +67,16 @@ type WakeContextData struct {
 	SessionID               string `json:"session_id"`
 	SessionCurrentID        string `json:"session_current_id"`
 	SessionPreviousID       string `json:"session_previous_id"`
+	// MPMSessionID — MPM-owned session identity (sticky across
+	// CLI/MCP/process boundaries within one interaction lifecycle).
+	// Populated by active.json (wip/session-identity-rework) and by
+	// the canonical session-identity surface. Empty string on a fresh
+	// workspace until the first handoff write allocates it.
+	MPMSessionID            string `json:"mpm_session_id,omitempty"`
+	// FrameworkSessionID — host-owned session identifier. Optional;
+	// empty when the calling host has no native session id (Pi, Hermes
+	// without hooks, Claude Code without MPM_SESSION_ID).
+	FrameworkSessionID      string `json:"framework_session_id,omitempty"`
 	SessionStartedAt        int64  `json:"session_started_at"`
 	SessionPreviousEndedAt int64  `json:"session_previous_ended_at"`
 
