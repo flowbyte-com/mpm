@@ -522,11 +522,34 @@ func (dm *DatabaseManager) SupersedeDecision(originalID, contextText, choice, ra
 			return fmt.Errorf("mark superseded: %w", err)
 		}
 		if _, err := node.ExecTracked(
+			// Append "superseded" + "superseded-by:<newID>" to the JSON
+			// array stored in the `tags` column. Pre-fix this used
+			// SQL `|| ',' || ?` which concatenated CSV strings into a
+			// column whose schema is JSON, producing
+			// `["foo"],superseded,superseded-by:<id>` — every subsequent
+			// `mpm memory list` then printed "failed to unmarshal tags".
+			// The new path uses SQLite's `json_insert` to extend the
+			// existing array; empty/null/non-JSON tags land in the
+			// `ELSE` branch which starts a fresh array. The legacy
+			// `IsSuperseded` ranking discount still finds the
+			// `superseded` tag because the array now contains it
+			// element-wise.
+			//
+			// The leading `CASE` covers four degenerate states:
+			//   1) NULL/empty          → start fresh array
+			//   2) literal `[]`        → start fresh array
+			//   3) literal `null`      → start fresh array (legacy corrupted rows)
+			//   4) any non-array JSON  → start fresh array (defensive)
 			`UPDATE memories SET tags = CASE
-				WHEN COALESCE(tags,'') = '' THEN ?
-				ELSE tags || ',' || ?
+				WHEN tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null' OR NOT json_valid(tags) THEN json_array(?, ?)
+				ELSE json_insert(
+					json_insert(tags, '$[' || json_array_length(tags) || ']', ?),
+					'$[' || (json_array_length(tags) + 1) || ']', ?
+				)
 			END WHERE id = ? AND deleted_at IS NULL`,
-			0, "superseded,superseded-by:"+newID, "superseded,superseded-by:"+newID, originalID); err != nil {
+			0, "superseded", "superseded-by:"+newID,
+			"superseded", "superseded-by:"+newID,
+			originalID); err != nil {
 			return fmt.Errorf("tag superseded: %w", err)
 		}
 		// F5-2 (alpha-final): drop the original's confidence to the per-type
@@ -594,10 +617,14 @@ func (dm *DatabaseManager) InvalidateDecision(decisionID, reason string) (map[st
 			return fmt.Errorf("mark invalidated: %w", err)
 		}
 		if _, err := node.ExecTracked(
+			// Same JSON-array append fix as SupersedeDecision — append
+			// "superseded" via json_insert so the column stays valid
+			// JSON. The `NOT (tags LIKE '%superseded%')` guard remains
+			// but now operates against the JSON text rather than CSV.
 			`UPDATE memories SET tags = CASE
-				WHEN COALESCE(tags,'') = '' THEN 'superseded'
-				ELSE tags || ',superseded'
-			END WHERE id = ? AND deleted_at IS NULL AND tags NOT LIKE '%superseded%'`,
+				WHEN tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null' OR NOT json_valid(tags) THEN json_array('superseded')
+				ELSE json_insert(tags, '$[' || json_array_length(tags) || ']', 'superseded')
+			END WHERE id = ? AND deleted_at IS NULL AND (tags IS NULL OR tags NOT LIKE '%superseded%')`,
 			0, decisionID); err != nil {
 			return fmt.Errorf("tag invalidated: %w", err)
 		}

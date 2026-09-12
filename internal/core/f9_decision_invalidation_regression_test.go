@@ -114,41 +114,20 @@ func TestF9_SupersededDecisionDiscountedInRetrievalRanking(t *testing.T) {
 }
 
 // isSupersededFromMapF9 adapts the GetMemory map shape to IsSuperseded.
+// The `tags` column holds `["superseded","superseded-by:<id>"]` (JSON array),
+// so parse it as JSON rather than splitting by comma. The pre-fix code path
+// read a CSV-style `["a","b"],superseded` blob and split on commas, which
+// silently misclassified decisions after the JSON-array fix landed.
 func isSupersededFromMapF9(mem map[string]interface{}) bool {
 	if mem == nil {
 		return false
 	}
 	tagsStr, _ := mem["tags"].(string)
-	tags := make([]string, 0)
-	for _, t := range splitComma(tagsStr) {
-		tags = append(tags, t)
+	var tags []string
+	if err := json.Unmarshal([]byte(tagsStr), &tags); err != nil {
+		return false
 	}
 	return IsSuperseded(tags)
-}
-
-func splitComma(s string) []string {
-	out := make([]string, 0)
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == ',' {
-			out = append(out, trimSpace(s[start:i]))
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		out = append(out, trimSpace(s[start:]))
-	}
-	return out
-}
-
-func trimSpace(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
-		s = s[1:]
-	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
-		s = s[:len(s)-1]
-	}
-	return s
 }
 
 func TestF9_InvalidateRetiresWithoutReplacement(t *testing.T) {

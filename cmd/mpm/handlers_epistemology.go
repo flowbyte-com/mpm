@@ -161,29 +161,12 @@ func handleProposeTheory(args []string) int {
 // runs (just mark the theory resolved; no slash).
 func handleResolveTheory(args []string) int {
 	if len(args) < 2 {
-		return respond("", "Usage: mpm resolve_theory <id> <conclusion> [--winner=<memory_id>]", 1)
+		return respond("", "Usage: mpm resolve_theory <id> <conclusion> [--winner=<memory_id>] [--note <text>]", 1)
 	}
 
-	id := args[0]
-	conclusion := strings.Join(args[1:], " ")
-	// Strip --winner=<memory_id> from conclusion (it might be at the
-	// end if the operator pasted it there, or interspersed). The
-	// cleanest way is to scan args for the flag and remove it.
-	winnerID := ""
-	filtered := make([]string, 0, len(args))
-	for _, a := range args {
-		if strings.HasPrefix(a, "--winner=") {
-			winnerID = strings.TrimPrefix(a, "--winner=")
-			continue
-		}
-		filtered = append(filtered, a)
-	}
-	if len(filtered) >= 2 {
-		id = filtered[0]
-		conclusion = strings.Join(filtered[1:], " ")
-	} else {
-		id = filtered[0]
-		conclusion = ""
+	id, conclusion, winnerID, note, err := splitResolveTheoryArgs(args)
+	if err != nil {
+		return respond("", err.Error()+"\n", 1)
 	}
 	// Reject empty conclusion so a stray `mpm resolve_theory <id>` doesn't
 	// resolve the theory without recording what was learned.
@@ -259,6 +242,9 @@ func handleResolveTheory(args []string) int {
 		"conclusion":  conclusion,
 		"resolved_at": now,
 	}
+	if note != "" {
+		patch["note"] = note
+	}
 	patchJSON, _ := json.Marshal(patch)
 
 	if err := dm.UpdateMemoryMetadata(id, string(patchJSON)); err != nil {
@@ -273,6 +259,52 @@ func handleResolveTheory(args []string) int {
 	}
 
 	return respond("", fmt.Sprintf("✅ Theory resolved: %s — %s\n", id, conclusion), 0)
+}
+
+// splitResolveTheoryArgs splits the positional arguments of
+// `mpm resolve_theory` into id, conclusion, --winner flag value, and
+// --note flag value. Supports both `--note=VALUE` and `--note VALUE`
+// (space-separated) forms — the latter requires dropping TWO adjacent
+// args. Pre-fix only --winner was filtered; --note leaked into the
+// conclusion slot and the parser rejected the whole command.
+func splitResolveTheoryArgs(args []string) (id, conclusion, winnerID, note string, err error) {
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--winner="):
+			winnerID = strings.TrimPrefix(a, "--winner=")
+		case strings.HasPrefix(a, "--note="):
+			note = strings.TrimPrefix(a, "--note=")
+		case a == "--note":
+			// Sentinel marker — drop this token AND the next (the value).
+			filtered = append(filtered, "__CONSUMED_NEXT__")
+		default:
+			filtered = append(filtered, a)
+		}
+	}
+	resolved := make([]string, 0, len(filtered))
+	skipNext := false
+	for _, a := range filtered {
+		if a == "__CONSUMED_NEXT__" {
+			skipNext = true
+			continue
+		}
+		if skipNext {
+			skipNext = false
+			if note == "" {
+				note = a
+			}
+			continue
+		}
+		resolved = append(resolved, a)
+	}
+	if len(resolved) >= 2 {
+		id = resolved[0]
+		conclusion = strings.Join(resolved[1:], " ")
+	} else if len(resolved) == 1 {
+		id = resolved[0]
+	}
+	return
 }
 
 // handleRecordDecision parses structured decision text and saves to the decisions collection.

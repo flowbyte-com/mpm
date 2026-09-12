@@ -2076,6 +2076,16 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("session_handoffs session_id optional migration failed: %w", err)
 	}
+	// session_handoffs mpm_session_id + framework_session_id — adds
+	// two additive nullable columns and a non-unique index for
+	// correlation queries. See migration_session_handoffs_mpm_session_id.go
+	// for the rationale (sticky mpm_session_id persisted in active.json
+	// as the authoritative current lifecycle identity; framework_session_id
+	// is host-owned and nullable).
+	if err := MigrateSessionHandoffsMPMSessionID(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("session_handoffs mpm_session_id migration failed: %w", err)
+	}
 	// created_at_backfill_v1 — repairs rows whose created_at was
 	// inserted as NULL by the pre-fix seed path. read_directives
 	// scans created_at into a non-NULL Go string, so a single
@@ -2084,6 +2094,15 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	if err := MigrateMemoriesCreatedAtBackfill(tx); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("created_at backfill migration failed: %w", err)
+	}
+	// tags_json_normalize_v1 — repair legacy corrupted `memories.tags`
+	// rows produced by SupersedeDecision/InvalidateDecision before the
+	// JSON-array fix landed. Without this, every `mpm memory list`
+	// prints "failed to unmarshal tags" warnings for any decision that
+	// went through supersede/invalidate pre-fix. Idempotent via sentinel.
+	if err := MigrateTagsJSONNormalize(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("tags JSON normalize migration failed: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration tx: %w", err)

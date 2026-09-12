@@ -1209,6 +1209,23 @@ func handleRefAdd(args []string) int {
 		return 1
 	}
 
+	// R-3 (2026-09-12 CLI acceptance pass): Go's `flag` package silently
+	// stops parsing at the first positional argument. Any --flag VALUE
+	// placed AFTER the file path is dropped without complaint — the
+	// ingest then writes the reference with the default (empty) tag
+	// set, leaving the operator confused about why their --tag was
+	// ignored. We catch the post-positional flag shape explicitly so
+	// the failure mode is loud rather than silent.
+	if fs.NArg() >= 1 {
+		posIdx := indexOfFirstPositional(args[1:], fs)
+		for i := posIdx + 1; i < len(args[1:]); i++ {
+			tok := args[1:][i]
+			if len(tok) >= 2 && tok[0] == '-' && tok[1] == '-' {
+				return usererror.Error("flag %q must come BEFORE the file path (Go flag package convention): try `mpm reference add %s %s`", tok, strings.TrimPrefix(tok, "--"), args[1+posIdx])
+			}
+		}
+	}
+
 	if *urlFlag != "" {
 		return usererror.Error("--url is reserved for a future release. " +
 			"In the meantime, download the document (curl/wget) and pass the local path to `mpm reference add <file>`. " +
@@ -1392,6 +1409,28 @@ func handleRefAdd(args []string) int {
 		}
 	}
 	return 0
+}
+
+// indexOfFirstPositional returns the index (within args) of the first
+// token that Go's `flag` package treated as a positional argument. Used
+// by `mpm reference add` to detect --flag tokens that came AFTER the
+// positional file path — Go's flag package silently drops them, leaving
+// operators wondering why their --tag was ignored. The helper exists so
+// the post-positional flag check can emit a clear "move the flag before
+// the file" error rather than failing silently.
+func indexOfFirstPositional(args []string, fs *flag.FlagSet) int {
+	// fs.Args() preserves order of parsed positional args. Find the
+	// first one in the original args slice.
+	if fs.NArg() == 0 {
+		return len(args)
+	}
+	first := fs.Arg(0)
+	for i, a := range args {
+		if a == first {
+			return i
+		}
+	}
+	return len(args)
 }
 
 // handleRefList lists all reference documents
