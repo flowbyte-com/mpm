@@ -2346,9 +2346,15 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		"context_version":     data.ContextVersion,
 		"generated_at":        data.GeneratedAt,
 		"as_of":               data.AsOf,
-		// Identity — session_id retained as the v3 alias for
-		// SessionCurrentID. New v4 callers should prefer the split
-		// fields below; older callers can keep using session_id.
+		// Identity — 2026-09-11 session-identity pass adds the
+		// explicit three-ID surface:
+		//   - mpm_session_id        — MPM-owned. REQUIRED going forward.
+		//   - framework_session_id  — host-owned. Optional.
+		//   - session_id            — v3 alias for back-compat (now equal
+		//                             to mpm_session_id, NOT read from the
+		//                             dormant sessions table).
+		"mpm_session_id":              data.MPMSessionID,
+		"framework_session_id":        data.FrameworkSessionID,
 		"session_id":                 data.SessionID,
 		"session_current_id":         data.SessionCurrentID,
 		"session_previous_id":       data.SessionPreviousID,
@@ -2432,7 +2438,14 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 // heavy recent_memories / available_skills / global_rules /
 // overdue_wakes arrays into the boot prompt. The full WakeContextData
 // remains available via the default and `projection:"full"` paths.
+//
+// 2026-09-11 session-identity pass: the compact surface now carries
+// the explicit mpm_session_id and framework_session_id fields so
+// agents can see the three-ID identity in a small payload. SessionID
+// remains the v3 legacy alias for back-compat.
 type CompactWakeContext struct {
+	MPMSessionID       string   `json:"mpm_session_id"`
+	FrameworkSessionID string   `json:"framework_session_id,omitempty"`
 	SessionID          string   `json:"session_id"`
 	SessionCurrentID   string   `json:"session_current_id"`
 	SessionStartedAt   int64    `json:"session_started_at"`
@@ -2462,14 +2475,16 @@ func handleReadWakeContextCompact(dm mpminternal.CoreDB) (interface{}, error) {
 	}
 
 	compact := CompactWakeContext{
-		SessionID:         data.SessionID,
-		SessionCurrentID:  data.SessionCurrentID,
-		SessionStartedAt:  data.SessionStartedAt,
-		ActiveMode:        data.ActiveMode,
-		ActivePersona:     data.ActivePersona,
-		AuditSummary:      data.AuditSummary,
-		OpenWorkIDs:       []string{}, // invariant 3 — non-nil empty slice
-		RecentArtifactIDs: []string{}, // invariant 3 — non-nil empty slice
+		MPMSessionID:       data.MPMSessionID,
+		FrameworkSessionID: data.FrameworkSessionID,
+		SessionID:          data.SessionID,
+		SessionCurrentID:   data.SessionCurrentID,
+		SessionStartedAt:   data.SessionStartedAt,
+		ActiveMode:         data.ActiveMode,
+		ActivePersona:      data.ActivePersona,
+		AuditSummary:       data.AuditSummary,
+		OpenWorkIDs:        []string{}, // invariant 3 — non-nil empty slice
+		RecentArtifactIDs:  []string{}, // invariant 3 — non-nil empty slice
 	}
 	if data.LastHandoff != nil {
 		compact.LastHandoffSummary = data.LastHandoff.Summary
@@ -3660,15 +3675,41 @@ func handleAnnotateCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 // carries the full continuity picture — accepted fields are never
 // silently dropped.
 //
-// session_id is OPTIONAL. Callers without an external session identifier
-// (e.g. Claude Code, which boots without `MPM_SESSION_ID` and has no
-// native UUID) may pass an empty string — the handoff is still preserved,
-// keyed only on the MPM-generated id and created_at. See EndSession for
-// the full identity model. Multiple handoffs with empty session_id are
-// allowed to coexist (each NULL session_id is distinct under the UNIQUE
-// constraint).
+// Identity model (2026-09-11): three correlated IDs:
+//   - mpm_session_id        — REQUIRED (auto-allocated from active.json
+//                              when not supplied). Sticky across
+//                              CLI/MCP/process boundaries within one
+//                              interaction lifecycle. NEVER filled with
+//                              a framework ID as a convenience.
+//   - framework_session_id  — OPTIONAL host-owned ID. NULL when absent.
+//                              Read from payload key
+//                              "framework_session_id" (canonical); the
+//                              legacy key "session_id" still routes
+//                              into the legacy session_id column for
+//                              back-compat callers.
+//   - session_id (legacy)    — UNIQUE nullable column. Back-compat
+//                              surface. New code should prefer
+//                              framework_session_id.
+//
+// mpm_session_id is ALWAYS allocated on every write (the handoff
+// tool is an INTERACTION BOUNDARY — invariant #4). The first write
+// in a fresh workspace allocates; subsequent writes reuse the same
+// id. framework_session_id is the caller-supplied host id, never
+// synthesized.
+//
+// Caller-supplied mpm_session_id override (rare, mostly tests) is
+// accepted via payload key "mpm_session_id" but production code
+// should leave it empty and let the canonical allocator run.
 func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	// Identity reads. Order of precedence:
+	//   - framework_session_id: canonical key. Empty when absent.
+	//   - session_id:           legacy key. Routes into the legacy
+	//                           session_id column. Empty when absent.
+	// Both may be empty (Pi, Hermes without hooks) — that's normal.
+	frameworkSessionID := getString(p, "framework_session_id")
 	sessionID := getString(p, "session_id")
+	explicitMPMSessionID := getString(p, "mpm_session_id")
+
 	summary := getString(p, "summary")
 	if summary == "" {
 		return nil, fmt.Errorf("summary is required")
@@ -3681,7 +3722,7 @@ func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	// F13: commitments/open_questions are PERSISTED, not dropped. The
 	// previous "Option B" silently ignored them on this surface while the
 	// plugins still advertised them — an accepted-then-discarded field,
-	// exactly the data-loss class the audit flags. EndSession already
+	// exactly the data-loss class the audit flags. EndSessionV2 already
 	// persists both columns and read-backs the row; the wake context
 	// renders open_questions for the next session.
 	//
@@ -3703,26 +3744,38 @@ func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		return nil, err
 	}
 
-	h, err := dm.EndSession(sessionID, summary, state, commitments, openQuestions)
+	h, err := dm.EndSessionV2(sessionID, frameworkSessionID, explicitMPMSessionID,
+		summary, state, commitments, openQuestions)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
-		"success":        true,
-		"handoff":        h,
-		"handoff_id":     h.ID,
-		"session_id":     h.SessionID,
-		"message":        "handoff written. Pending work surfaces via mpm_work; open questions via mpm_theories.",
-		"open_questions": h.OpenQuestions,
+		"success":             true,
+		"handoff":             h,
+		"handoff_id":          h.ID,
+		"mpm_session_id":       h.MPMSessionID,
+		"framework_session_id": h.FrameworkSessionID,
+		"session_id":          h.SessionID,
+		"message":             "handoff written. Pending work surfaces via mpm_work; open questions via mpm_theories.",
+		"open_questions":      h.OpenQuestions,
 	}, nil
 }
 
-// handleHandoffRead returns the most recent handoff. The wake context
+// handleHandoffRead returns a handoff by explicit id when one is given
+// (`handoff_id`, with bare `id` accepted per the D-8.1 family convention),
+// otherwise the most recent handoff. The wake context
 // surfaces unread handoffs automatically; this tool is for explicit
 // re-reads of any handoff (read or unread).
 //
+// CLI acceptance 2026-09-12: pre-fix the id params were ignored and the
+// latest handoff was always returned — a read-after-shred returned a
+// DIFFERENT live handoff with success:true instead of not-found.
+//
 // Args:
 //
+//	--handoff_id / --id (optional) explicit handoff to return; unknown
+//	             ids yield success:true + handoff:nil (same shape as the
+//	             no-handoffs case) instead of a wrong record.
 //	--mark_read (optional) "true" to mark the returned handoff as read
 //	             after returning; default false. The wake context marks
 //	             its own reads — this tool does not by default so the
@@ -3746,7 +3799,14 @@ func handleHandoffRead(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 
 	var h *internal.Handoff
 	var err error
-	if unreadOnly {
+	// Explicit id wins over latest/unread selection.
+	wantID, _ := p["handoff_id"].(string)
+	if wantID == "" {
+		wantID, _ = p["id"].(string)
+	}
+	if wantID != "" {
+		h, err = dm.GetHandoffByID(wantID)
+	} else if unreadOnly {
 		h, err = dm.GetLatestUnreadHandoff()
 	} else {
 		h, err = dm.GetLatestHandoff()
