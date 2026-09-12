@@ -192,7 +192,10 @@ func TestContract_Weaken_SymmetricFloor(t *testing.T) {
 	assert.Equal(t, -3, out["delta"])
 	assert.Equal(t, 2, out["weight_loss"], "weight_loss = (delta+1)/2 = (3+1)/2 = 2")
 	assert.Equal(t, -3, out["reinforcement_delta"])
-	assert.Equal(t, 8, out["weight"], "weight = 10 - 2 = 8")
+	// weight is REAL in the schema (T27 fractional support) — the
+	// response is scanned into a float64, so compare against float64
+	// not int. The SQL contract is weight = MAX(weight - loss, 1).
+	assert.Equal(t, float64(8), out["weight"], "weight = 10 - 2 = 8")
 	assert.Equal(t, 5, out["reinforcement_count"], "reinforcement_count = 8 - 3 = 5")
 	assert.Equal(t, false, out["floor_hit"])
 }
@@ -216,7 +219,8 @@ func TestContract_Weaken_FloorProtection(t *testing.T) {
 	out, err := dm.WeakenMemoryTool("mem-wk-floor", 5)
 	require.NoError(t, err)
 
-	assert.Equal(t, 1, out["weight"], "weight must floor at 1, never drop below")
+	// weight is REAL — float64 in the Go response.
+	assert.Equal(t, float64(1), out["weight"], "weight must floor at 1, never drop below")
 	assert.Equal(t, true, out["floor_hit"], "floor_hit flag must surface when weight_after is at the floor")
 	assert.Equal(t, 1, out["reinforcement_count"])
 }

@@ -11,9 +11,15 @@
 //	    weight = MIN(weight + (delta+1)/2, 100)
 //	WeakenMemory(id, delta):
 //	    rc    = MAX(rc - delta, 0)
-//	    weight = MAX(weight - (delta+1)/2, 0)
+//	    weight = MAX(weight - (delta+1)/2, 1)
 //
-// (See internal/core/web_db.go:481 and :631.)
+// Floor-at-1 (T24, 2026-09-11): the substrate floor for `weight` is 1.0
+// across every weight-modifying primitive (WeakenMemory, WeakenMemoryTool,
+// AdjustMemoryWeight, legacy_weight). Pre-fix the floor was 0.0 and the
+// tests below reflected that — they're updated to assert the canonical
+// floor-at-1 contract. See internal/core/web_db.go:682-700 for the full
+// rationale (scoring model assumes weight >= 1; embedding_migration
+// filters synthetic memories by `weight < 1.0`).
 //
 // The oracle test exercises every cell of that matrix so the concurrency
 // expectations derive from observed sequential behaviour, not from a
@@ -102,9 +108,9 @@ func TestWeightSemanticOracle_WeakenReinforce_ReverseOrder(t *testing.T) {
 	}
 
 	wAfterW, rcAfterW := readState(t, dm, id)
-	// weight = MAX(1 - 2, 0) = 0; rc = MAX(R-3, 0).
-	if wAfterW != 0 {
-		t.Errorf("after weaken -3 from weight=1: weight=%v, want 0", wAfterW)
+	// Floor-at-1 (T24): weight = MAX(1 - 2, 1) = 1 (not 0); rc = MAX(R-3, 0).
+	if wAfterW != 1 {
+		t.Errorf("after weaken -3 from weight=1: weight=%v, want 1 (floor)", wAfterW)
 	}
 	wantRCAfterW := rcBefore - 3
 	if wantRCAfterW < 0 {
@@ -119,8 +125,8 @@ func TestWeightSemanticOracle_WeakenReinforce_ReverseOrder(t *testing.T) {
 	}
 
 	wFinal, rcFinal := readState(t, dm, id)
-	// Reverse-order oracle: weight = MIN(0 + 3, 100) = 3; rc = MAX(R-3,0) + 5.
-	const wantWeightRev = 3.0
+	// Reverse-order oracle: weight = MIN(1 + 3, 100) = 4; rc = MAX(R-3,0) + 5.
+	const wantWeightRev = 4.0
 	if wFinal != wantWeightRev {
 		t.Errorf("REVERSE ORACLE: weight=%v, want %v", wFinal, wantWeightRev)
 	}
@@ -217,13 +223,20 @@ func TestWeightSemanticOracle_NoUpdateLostUnderConcurrent(t *testing.T) {
 		// Coupled closure invariant: (rc, weight) must be one of two
 		// valid serializations. Any other pair means an operation was
 		// silently dropped OR the floor logic differs from the SQL.
+		//
+		// Closure (T24 floor-at-1):
+		//   reinforce first  → (rc=5, w=4) → weaken → (rc=2, w=2)
+		//   weaken    first  → (rc=0, w=1) → reinforce → (rc=5, w=4)
+		// Pre-T24 the floor was 0 and the weaken-first path could reach
+		// (rc=5, w=3); the canonical floor at 1 raises both serializations
+		// to land at w=4 instead, leaving (5,3) unreachable.
 		switch {
 		case rcFinal == 2 && wFinal == 2:
 			reinforceFirstCount++
-		case rcFinal == 5 && wFinal == 3:
+		case rcFinal == 5 && wFinal == 4:
 			weakenFirstCount++
 		default:
-			t.Errorf("iter=%d: (rc=%d, weight=%v) not in closure set {(2,2),(5,3)} — operation lost or floor differs",
+			t.Errorf("iter=%d: (rc=%d, weight=%v) not in closure set {(2,2),(5,4)} — operation lost or floor differs",
 				iter, rcFinal, wFinal)
 		}
 
@@ -469,9 +482,9 @@ func TestWeightSemanticOracle_HighContention_WeakenOnly(t *testing.T) {
 
 	// rc started at 0, every weaken subtracts 1 but MAX(.., 0) clamps
 	// at 0, so rc stays at 0 throughout. weight: 50 - 160 = -110
-	// clamped to 0.
+	// clamped to 1 (floor-at-1, T24 2026-09-11).
 	const wantRC = 0
-	const wantW = 0.0
+	const wantW = 1.0
 	if rc != wantRC {
 		t.Errorf("weaken-only stress: rc=%d, want %d", rc, wantRC)
 	}

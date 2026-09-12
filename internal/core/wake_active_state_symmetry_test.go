@@ -370,10 +370,21 @@ func TestGatherWakeContext_ExplicitModeAndPersona_Respected(t *testing.T) {
 
 // TestReadWakeContext_HumanFormat_DefaultDefault renders the
 // human-readable format that hosts like the Claude Code and Pi
-// integrations parse. Pre-fix this string said `Mode: ` (empty) and
-// `Persona: default` — an asymmetric identity pair that confused
-// wake-rendering hosts. Post-fix it must say `Mode: default` and
-// `Persona: default`.
+// integrations parse.
+//
+// 8ffa1c070b7a6793 (W-001 wake context regression) introduced the
+// multi-mode format with `**Modes:**` (plural heading for the
+// multi-mode collection) plus inline `[fallback]` / `[empty]` source
+// tags. The test setup writes a mode and persona file at "default"
+// but omits the `modes` / `persona` keys in active.json — the resolver
+// therefore falls back to the default files and surfaces the source
+// tag inline.
+//
+// The expected post-fix rendering for this case is
+// `**Modes:** default [fallback]` and `**Persona:** default [fallback]`.
+// Pre-fix the singular `**Mode:** default` was rendered without the
+// source tag, which masked the absence of an explicit pointer and
+// confused wake-rendering hosts.
 func TestReadWakeContext_HumanFormat_DefaultDefault(t *testing.T) {
 	root := t.TempDir()
 	overrideMPMDir(t, root)
@@ -386,12 +397,12 @@ func TestReadWakeContext_HumanFormat_DefaultDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadWakeContext: %v", err)
 	}
-	// formatWakeContext uses markdown bold: `**Mode:** default`.
-	if !wakeContains(rendered, "**Mode:** default") {
-		t.Errorf("regression 8ffa1c070b7a6793: human-format wake context missing '**Mode:** default'; got:\n%s", rendered)
+	// Post-8ffa1c070b7a6793 format (multi-mode + source tag):
+	if !wakeContains(rendered, "**Modes:** default [fallback]") {
+		t.Errorf("human-format wake context missing '**Modes:** default [fallback]'; got:\n%s", rendered)
 	}
-	if !wakeContains(rendered, "**Persona:** default") {
-		t.Errorf("human-format wake context missing '**Persona:** default'; got:\n%s", rendered)
+	if !wakeContains(rendered, "**Persona:** default [fallback]") {
+		t.Errorf("human-format wake context missing '**Persona:** default [fallback]'; got:\n%s", rendered)
 	}
 }
 

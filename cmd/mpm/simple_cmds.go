@@ -807,6 +807,18 @@ func handleFeedback(args []string) int {
 
 // handleReinforce is the public command handler for `mpm reinforce`.
 func handleReinforce(args []string) int {
+	// R3 short-circuit: --help / -h / "help" reach the handler as a
+	// literal token (router-level parseFlags rewrites --help to
+	// "help"). Without this, `mpm reinforce --help` falls through as
+	// "no row with id help (not found, deleted, or expired)" — a DB-
+	// styled error instead of help text. Mirrors the pattern in
+	// handleMemoryAdd (handlers_memory.go:138-142).
+	for _, a := range args[1:] {
+		if a == "-h" || a == "--help" || a == "help" {
+			usererror.Usage("mpm reinforce <id> [delta]")
+			return 1
+		}
+	}
 	if len(args) < 2 {
 		usererror.Usage("mpm reinforce <id> [delta]")
 		return 1
@@ -849,6 +861,15 @@ func handleReinforce(args []string) int {
 
 // mpm weaken <id> [delta] — Decrement reinforcement
 func handleWeaken(args []string) int {
+	// R3 short-circuit — see handleReinforce's mirror comment for the
+	// rationale. Without this, `mpm weaken --help` surfaces "no row
+	// with id help" instead of help text.
+	for _, a := range args[1:] {
+		if a == "-h" || a == "--help" || a == "help" {
+			usererror.Usage("mpm weaken <id> [delta]")
+			return 1
+		}
+	}
 	if len(args) < 2 {
 		usererror.Usage("mpm weaken <id> [delta]")
 		return 1

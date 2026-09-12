@@ -12,20 +12,25 @@
 // (Defense Triad rule 3) so a silent-promotion cannot slip past
 // RowsAffected. eaac79a is the production change.
 //
-// The actual SQL contract (see web_db.go:481 and :631):
+// The actual SQL contract (see web_db.go:535 and :701):
 //
 //	ReinforceMemory(id, delta):
 //	    rc    += delta
 //	    weight = MIN(weight + (delta+1)/2, 100)
 //	WeakenMemory(id, delta):
 //	    rc    = MAX(rc - delta, 0)
-//	    weight = MAX(weight - (delta+1)/2, 0)
+//	    weight = MAX(weight - (delta+1)/2, 1)
 //
-// Because both ops use floors that interact non-commutatively when the
-// starting state is small (e.g. weight=1), the closure invariant is
-// a *coupled pair*: (rc, weight) ∈ {(2,2), (5,3)} when starting from
-// (rc=0, weight=1). The test asserts BOTH the rc and the weight so a
-// lost-update on either field is caught.
+// Floor-at-1 (T24, 2026-09-11): the substrate floor is 1 across every
+// weight-modifying primitive. Pre-fix the floor was 0 and weaken-first
+// could drive weight below 1 — the closure invariant then read
+// {(2,2), (5,3)} for the (weight=1) seed. After T24 weaken-first floors
+// at weight=1, so the post-weaken reinforce path lands at weight=4 and
+// the closure expands to {(2,2), (5,4)}.
+//
+// The test below (weight=2 seed) inherits the same floor effect:
+// weaken-first now lands at weight=1 (not 0), and the subsequent
+// reinforce gains +3, leaving the closure at {(2,3), (5,4)}.
 package internal
 
 import (
@@ -37,12 +42,12 @@ import (
 // SQL-level mutation survives concurrent reinforce/weaken operations
 // across many iterations. Each iter resets weight=2 (the prior test's
 // baseline — chosen because weight=2 + reinforce +5 → 5, then weaken -2
-// → 3 AND weight=2 → weaken 0 → 0, then reinforce +3 → 3, both yield
-// weight=3 regardless of serialization) and asserts the coupled closure
-// invariant. From weight=2 the only valid outcome is weight=3; the rc
-// closure is (rc=5) when reinforce lands first and (rc=2) when weaken
-// lands first, because weaken's rc subtract hits the floor at 0 if
-// rc was already 0 when it ran.
+// → 3 AND weight=2 → weaken 1 → 1 (T24 floor), then reinforce +3 → 4,
+// yielding weight ∈ {3, 4} depending on serialization) and asserts
+// the coupled closure invariant. From weight=2 the valid outcomes
+// are:
+//   reinforce-first  → (rc=2, w=3)
+//   weaken-first     → (rc=5, w=4)  (T24: pre-fix this was (rc=5, w=3))
 func TestReinforceWeaken_Concurrent_NoUpdateLost(t *testing.T) {
 	dm := newTestFileDM(t)
 	id := seedWeight(t, dm, 2)
@@ -77,17 +82,18 @@ func TestReinforceWeaken_Concurrent_NoUpdateLost(t *testing.T) {
 		).Scan(&w, &rc); err != nil {
 			t.Fatalf("iter=%d read: %v", iter, err)
 		}
-		// From (weight=2, rc=0):
-		//   reinforce-first: weight=MIN(2+3,100)=5, weaken weight=MAX(5-2,0)=3, rc=MAX(5-3,0)=2  → (w=3, rc=2)
-		//   weaken-first:    weight=MAX(2-2,0)=0, reinforce weight=MIN(0+3,100)=3, rc=MAX(0-3,0)+5=5 → (w=3, rc=5)
-		// So weight=3 in both serializations; rc is in {2, 5}.
-		const wantW = 3.0
-		if w != wantW {
-			t.Errorf("iter=%d: final weight=%v, want %v", iter, w, wantW)
-		}
-		if rc != 2 && rc != 5 {
-			t.Errorf("iter=%d: final rc=%d, want 2 or 5 (one of the two ops was lost)",
-				iter, rc)
+		// Closure set with T24 floor-at-1:
+		//   reinforce-first: weight=MIN(2+3,100)=5, weaken weight=MAX(5-2,1)=3, rc=MAX(5-3,0)=2  → (w=3, rc=2)
+		//   weaken-first:    weight=MAX(2-2,1)=1, reinforce weight=1+3=4, rc=MAX(0-3,0)+5=5 → (w=4, rc=5)
+		// So weight ∈ {3, 4} and the rc/weight are coupled.
+		switch {
+		case rc == 2 && w == 3:
+			// reinforce-first serialization
+		case rc == 5 && w == 4:
+			// weaken-first serialization (T24 floor-at-1)
+		default:
+			t.Errorf("iter=%d: (rc=%d, w=%v) not in closure {(2,3),(5,4)} — operation lost or floor differs",
+				iter, rc, w)
 		}
 	}
 }

@@ -2195,8 +2195,14 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 			// validation pattern below; explicit empty ≠ invalid value).
 		case "compact":
 			return handleReadWakeContextCompact(dm)
+		case "full":
+			// 2026-09-12 acceptance pass: callers that pre-date the
+			// W-001 compact-projection split still pass projection="full"
+			// explicitly. The W-001 contract collapsed "full" into the
+			// default (omitted) branch — accept the alias so old
+			// integrations don't break.
 		default:
-			return nil, fmt.Errorf("unknown projection %q; canonical values: [compact]", projection)
+			return nil, fmt.Errorf("unknown projection %q; canonical values: [compact, full]", projection)
 		}
 	}
 

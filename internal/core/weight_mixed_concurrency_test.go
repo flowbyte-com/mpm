@@ -79,9 +79,17 @@ func closureBFS(rc0, w0 int, reinforceOK, weakenOK, reinDelta, weakDelta int) ma
 			if rc < 0 {
 				rc = 0
 			}
+			// Floor at 1 — matches the production SQL
+			// `MAX(weight-?,1)` clamp in WeakenMemoryTool / WeakenMemory
+			// (memory_tools.go:1145). Pre-fix this helper clamped at 0,
+			// which disagreed with the substrate's actual write path and
+			// produced closure sets that excluded the production floor
+			// (e.g. weight=4 starting from w=1+3-2). All observed
+			// `(rc, w)` outcomes after concurrent reinforce+weaken must
+			// satisfy w >= 1, otherwise the closure set is wrong.
 			w := s.w - weightLoss
-			if w < 0 {
-				w = 0
+			if w < 1 {
+				w = 1
 			}
 			ns := state{rc, w, s.rLeft, s.wLeft - 1}
 			if !visited[ns] {
