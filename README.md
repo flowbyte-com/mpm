@@ -229,7 +229,7 @@ Reusable knowledge that survives across tasks — best practices, warnings, patt
 
 #### Skill
 
-Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, mpm_context action=proactive_recall_hint). See §9 for the full authoring and discovery surface.
+Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, mpm_context action=proactive_recall_hint). New and revised procedures are evaluated through the **Skills Workshop** before publication; see §9 for the full authoring and discovery surface.
 
 #### Evidence
 
@@ -1601,7 +1601,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`set-weight`** — Set stored weight 0–100 (decay/LTM/provenance; does not affect current retrieval ranking — see §6.3)
 - **`show`** — Show memory details
 - **`shred`** — Hard-delete memory
-- **`skill`** — Skill CRUD + Workshop (`mpm skill workshop --help` for the form/refine pipeline)
+- **`skill`** — Skill CRUD + workshop (form | refine)
 - **`snooze`** — Suppress from recall (temporary)
 - **`stats`** — Show memory statistics
 - **`status`** — Show system status
@@ -1836,7 +1836,7 @@ The `Exit Criteria` line is the discipline that prevents context crunch: without
 
 The `retrieval_metadata` table is a 1:1 mapping with any cognitive node (Memory, Lesson, Decision, Theory, Skill). It tracks two signals: how often a node was surfaced into agent working memory (`reuse_count`, `last_retrieved_at`), and how often it actively helped produce durable knowledge (`success_count`). The schema is observability only — search ranking, FTS sorting, and cognitive-object schemas are unchanged. Future rankers can consult `retrieval_metadata` to blend a reuse-adjusted score; today `DefaultRanker` returns the FTS score unchanged.
 
-**Automatic instrumentation.** The agent never manages these stats explicitly. Every `mpm_context action=read_wake_context` boot, every `mpm_memory action=query` result, every `mpm_lessons action=query` result, and every `read_skill` call increments `reuse_count` and updates `last_retrieved_at` via `RecordRetrieval` — fire-and-forget, errors swallowed so telemetry never blocks the user-facing path.
+**Automatic instrumentation.** The agent never manages these stats explicitly. Every `mpm_context action=read_wake_context` boot, every `mpm_memory action=query` result, every `mpm_lessons action=query` result, and every `mpm_skills action=read` call increments `reuse_count` and updates `last_retrieved_at` via `RecordRetrieval` — fire-and-forget, errors swallowed so telemetry never blocks the user-facing path.
 
 **Provenance Proxy via `mpm_lessons action=save`.** When the agent distils a lesson, the optional `source_ids` array credits each cited node with a `success_count` increment via `IncrementSuccess` (INSERT-or-UPDATE). A node that was already retrieved has its `success_count` bumped; a node cited from prior-session memory but not surfaced this turn gets a fresh row with `success_count=1, reuse_count=0`. The "Provenance Proxy" name reflects the design intent: from any successful lesson, the system can trace back to the cognitive nodes that informed it, even when those nodes were never re-read in the session where the lesson was synthesized.
 
@@ -1977,32 +1977,168 @@ The complete frontmatter contract: `name` (required), `version` (required semver
 
 ##### Authoring
 
-Three paths, all routed through the secret/poison scanner — no write path bypasses `ScanContentForWrite`, enforced by both `TestScannerCoverage_AllMemoriesWritersScanContent` (static AST walk) and `TestScannerCoverage_SkillsWritePaths` (runtime end-to-end check):
+Three paths exist, each routed through the secret/poison scanner — no write path bypasses `ScanContentForWrite`, enforced by both `TestScannerCoverage_AllMemoriesWritersScanContent` (static AST walk) and `TestScannerCoverage_SkillsWritePaths` (runtime end-to-end check):
 
-| Path | Use case |
+| Path | When to use it |
 |---|---|
-| `mpm call save_skill --payload '{"name":"...","version":"...","content":"...","author_agent":"..."}'` | Programmatic creation by the agent or operator |
-| `mpm save-skill --file path/to/SKILL.md` | Operator curation from terminal |
+| `mpm save-skill --file path/to/SKILL.md` | Operator curation from terminal — you have a finished markdown file with frontmatter |
+| `mpm call mpm_skills --payload '{"action":"save","params":{...}}'` | Programmatic creation by the agent — the caller already has content and version |
+| `mpm skill workshop --file request.json` | Guided formation or refinement — see the Skills Workshop section below |
+
+The first two paths assume the caller already knows the skill is worth storing. The third path is the **formation/refinement gate**: it evaluates whether the proposed procedure actually belongs in the procedural-memory layer, derives a deterministic version when refining, and only writes when the decision model + validation + duplicate checks agree.
 
 Saving the same `(name, version)` pair requires `force=true` — silent overwrites are rejected. Saving a new version for an existing name flips the prior version's `is_latest` to `0` in the same transaction and stamps `supersedes` linkage, so older versions remain queryable but no longer advertise themselves as current.
+
+##### Skills Workshop
+
+The Skills Workshop is the formation/refinement gate for procedural knowledge — the missing layer between "we keep rediscovering this procedure" and "this skill is durable." It extends the existing `mpm_skills` tool with a single `workshop` action; the underlying persistence and validation architecture is unchanged. Both the CLI (`mpm skill workshop`) and the MCP aggregator (`mpm_skills` action `workshop`) call the same canonical `internal.RunWorkshop` pipeline — the CLI is a thin JSON-loading shim, not a duplicate pipeline.
+
+The Workshop exists because *not every useful observation is a skill*. Skills compete for discovery attention, share the substrate with lessons and memories, and require maintenance. The Workshop gates publication so that:
+
+- a **procedure** (a "how to act" that the agent will repeat) becomes a skill
+- **judgment** (reasoning/choice guidance) and **knowledge** (information to recall) are rejected and routed elsewhere — to `mpm_lessons save` or `mpm_memory save`, not to the skill collection
+
+The agent's role is to **form** or **refine**; the Workshop's role is to decide whether the proposal is skill-shaped and, if so, to write it.
+
+**The decision model.** Each request carries a `decision_model` that scores the proposal along four axes (each integer 0..5) plus a `boundary` enum:
+
+| Field | Range / values | Meaning |
+|---|---|---|
+| `reusability` | 0–5 | How often will this procedure recur across sessions or contexts? |
+| `non_obviousness` | 0–5 | How hidden is this from existing documentation or skill catalog? |
+| `stability` | 0–5 | How unlikely is the procedure to change materially in the near term? |
+| `leverage` | 0–5 | How much downstream value does reusing this procedure unlock? |
+| `boundary` | `procedure`, `judgment`, `knowledge` | What kind of knowledge is this? See below |
+
+`boundary` is the gate that distinguishes a skill from a lesson or a memory:
+
+- `procedure` — "how to act." Eligible for the skill layer.
+- `judgment` — "how to choose." Reasoning/decision guidance; route to `mpm_lessons` or `mpm_decisions` instead.
+- `knowledge` — "what to know." Information recall; route to `mpm_memory` instead.
+
+The numeric total (`reusability + non_obviousness + stability + leverage`, range 0–20) is the *first* gate, but not the only one. The full outcome path is:
+
+1. `boundary != procedure` → **rejected** (the workshop refuses to publish non-procedures regardless of score).
+2. `total <= 3` → **rejected**.
+3. `total 4..5` → **candidate** — return the proposal so the caller can decide whether to publish it via a direct `mpm_skills save`.
+4. `total >= 6` → **published**, *subject to* later downgrade. The Workshop runs additional checks (when_to_use quality, duplicate detection against existing skills, frontmatter validation). Any of those checks can flip a `published` to `candidate` before the row is written.
+
+`mpm skill workshop --help` is the exhaustive invocation reference (boundary vocabulary, change_type mapping, full JSON envelope).
+
+**Form.** `mode: "form"` is the path for a *new* skill. The caller supplies a proposed procedure as the `proposal` (name, version, when_to_use, steps, constraints). Publication is not automatic merely because the caller requested a skill — the decision model + validation + duplicate checks decide. The three outcomes:
+
+- **`published`** — the skill was written through the canonical skill persistence path (`SaveSkill` → secret/poison scanner → `collection='skills'` insert). `skill_id` is populated and the row appears in `<available_skills>` on subsequent wake contexts.
+- **`candidate`** — the proposal was generated but did not pass every gate. The response carries a `save_payload` — the exact `params` dict to hand to `mpm_skills` action `save` if the caller wants to publish anyway. Candidates are *not* silently persisted.
+- **`rejected`** — not skill-worthy. `reason` names the gate (e.g. `decision_total_below_threshold`, `non-procedure boundary: knowledge`, `refine_target_not_found`). The caller may save a memory or lesson instead.
+
+Idempotence: a second `form` request with the same `(name, version)` and the same content hash returns the existing `skill_id` without rewriting — safe to retry on transient failures.
+
+```bash
+# Form — author a new skill
+mpm skill workshop --file form.json
+```
+```json
+// form.json
+{
+  "mode": "form",
+  "decision_model": {
+    "reusability": 2, "non_obviousness": 2, "stability": 2, "leverage": 2,
+    "boundary": "procedure"
+  },
+  "proposal": {
+    "name": "release-checklist",
+    "version": "1.0.0",
+    "domain": "release",
+    "description": "Pre-release smoke checks for MPM changes",
+    "when_to_use": "before cutting a release, smoke-checking migrations, scheduler, and CLI",
+    "steps": [{"call": "run the smoke test"}],
+    "constraints": []
+  },
+  "task_context": "Repeated pre-release sequence",
+  "workflow_description": "check migrations, scheduler, CLI"
+}
+```
+
+The MCP equivalent for agents:
+
+```bash
+mpm call mpm_skills --payload '{
+  "action": "workshop",
+  "params": { /* same fields as the form.json above */ }
+}'
+```
+
+**Refine.** `mode: "refine"` is the path for changing an *existing* skill while preserving lineage. The caller supplies:
+
+- `intent` — the name of the existing skill being refined.
+- `change_type` — the kind of change, from a fixed enum. The Workshop derives the next semantic version deterministically; the caller does *not* supply the next version directly.
+
+| `change_type` | Version effect |
+|---|---|
+| `correction` | patch (1.0.0 → 1.0.1) |
+| `extension` | minor (1.0.0 → 1.1.0) |
+| `restructuring` | minor (1.0.0 → 1.1.0) |
+| `purpose_change` | major (1.0.0 → 2.0.0) |
+
+If `proposal.version` does not match the deterministic bump, the Workshop surfaces a `version_bump_mismatch` and returns the proposal as a candidate rather than publishing a wrong-versioned row. The prior skill row stays queryable; the new version is inserted alongside it with `supersedes` linkage, and the prior row flips `is_latest=0` in the same transaction.
+
+```bash
+# Refine — bump a correction on an existing skill
+mpm skill workshop --file refine.json
+```
+```json
+// refine.json
+{
+  "mode": "refine",
+  "intent": "release-checklist",
+  "change_type": "correction",
+  "decision_model": {
+    "reusability": 2, "non_obviousness": 2, "stability": 2, "leverage": 2,
+    "boundary": "procedure"
+  },
+  "proposal": {
+    "name": "release-checklist",
+    "version": "1.0.1",
+    "description": "Pre-release smoke checks for MPM changes",
+    "when_to_use": "before cutting a release, smoke-checking migrations, scheduler, and CLI",
+    "steps": [{"call": "run the smoke test"}]
+  }
+}
+```
+
+**Where the Workshop fits in the lifecycle.** The Workshop is a layer in the existing skill lifecycle, not a separate subsystem:
+
+```
+experience / proposed procedure
+            ↓
+       Skills Workshop     ← gate: decision model + validation + duplicate check
+            ↓
+       published skill      ← saved through normal `mpm_skills` save path
+            ↓
+       discovery / read / proactive_recall_hint
+```
+
+The Workshop does not introduce a separate registry, persistence layer, or MCP tool. It is one action on `mpm_skills` and one CLI subcommand on `mpm skill`. Agents that already discover skills via `mpm_context action=proactive_recall_hint` see Workshop-published rows on the very next wake — no separate catalog refresh.
 
 ##### Discovery
 
 Three tiers, in increasing specificity:
 
-1. **Inventory** — `mpm call list_skills` (CLI: `mpm list-skills`). Returns one row per name with the highest-version row's id, name, version, when_to_use, is_global, weight. Used by wake context to render an `<available_skills>` block bounded to the top 20 by weight.
-2. **Read** — `mpm call read_skill --payload '{"name":"agentshell"}'` (or `"skill_id":"skill:agentshell-v2.0.0"`). Returns the full Skill struct with parsed frontmatter and body.
+1. **Inventory** — `mpm call mpm_skills --payload '{"action":"list","params":{"scope":"all"}}'` (CLI: `mpm list-skills`). Returns one row per name with the highest-version row's id, name, version, when_to_use, is_global, weight. Used by wake context to render an `<available_skills>` block bounded to the top 20 by weight.
+2. **Read** — `mpm call mpm_skills --payload '{"action":"read","params":{"name":"agentshell"}}'` (or `"skill_id":"skill:agentshell-v2.0.0"`). Returns the full Skill struct with parsed frontmatter and body.
 3. **Proactive** — `mpm_context action=proactive_recall_hint` surfaces a skill when conversation keywords overlap its `when_to_use`. Same scoring path as memories: FTS5 BM25 + cosine + Shared Premium for `is_global=1` rows. `weight` and `reinforcement_count` are surfaced in the hint metadata but do not influence the ranking order.
 
 ##### Versioning
 
 Skill names are stable identifiers; versions are slug-suffixed in the row id. Saving `agentshell` v1.0.0 produces the row id `skill:agentshell-v1.0.0`; v2.0.0 produces `skill:agentshell-v2.0.0`. The id format `skill:<name>-v<semver>` is deterministic — re-running the save with the same args hits the same row, which is how `mpm ops init skills` detects drift (it computes `contentHash(seed)` and compares against the existing row's stored `metadata.content_hash`).
 
+For revision via the Skills Workshop, `change_type` selects the bump deterministically (see Skills Workshop → Refine).
+
 ##### Sharing
 
-`mpm call promote_skill_to_global --payload '{"skill_id":"skill:agentshell-v2.0.0","confirm":true}` flips `is_global=1` on the canonical row in place. **Operator-gated**: `confirm` must be `true`; the privilege-escalation guard (`collection='skills'` filter on the existence check and UPDATE) prevents a non-skill id from being elevated through this path. The metadata patch stamps `derived_from_skill_id` and `promoted_at` for forensic tracing. Shared skills appear in `list_skills` with `scope="shared"` and get the Shared Premium boost (1.20× shared, 1.35× shared+rules) in hybrid-search scoring.
+`mpm call mpm_skills --payload '{"action":"promote_to_global","params":{"skill_id":"skill:agentshell-v2.0.0","confirm":true}}'` flips `is_global=1` on the canonical row in place. **Operator-gated**: `confirm` must be `true`; the privilege-escalation guard (`collection='skills'` filter on the existence check and UPDATE) prevents a non-skill id from being elevated through this path. The metadata patch stamps `derived_from_skill_id` and `promoted_at` for forensic tracing. Shared skills appear in the list with `scope="shared"` and get the Shared Premium boost (1.20× shared, 1.35× shared+rules) in hybrid-search scoring.
 
-Removal is the soft-delete `delete_skill` (`shred_memory`-style): sets `deleted_at` on the row. The scanner treats `deleted_at IS NULL` as the live-row gate everywhere, so the row vanishes from every list/read/proactive path atomically without breaking foreign keys.
+Removal is the soft-delete `mpm_skills` action `delete`: sets `deleted_at` on the row. The scanner treats `deleted_at IS NULL` as the live-row gate everywhere, so the row vanishes from every list/read/proactive path atomically without breaking foreign keys.
 
 ##### LTM by default
 

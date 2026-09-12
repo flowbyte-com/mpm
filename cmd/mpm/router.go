@@ -99,7 +99,7 @@ func NewRouter() *CommandRouter {
 		"decision": {Name: "decision", Description: "Decision CRUD"},
 		"why":      {Name: "why", Description: "Show artifact provenance (evidence + confidence + retrieval)"},
 		"theory":   {Name: "theory", Description: "Theory CRUD"},
-		"skill":    {Name: "skill", Description: "Skill CRUD"},
+		"skill":    {Name: "skill", Description: "Skill CRUD + workshop (form | refine)"},
 
 		// Tour (cognitive-interface RFC Wave 4) — onboarding walkthrough.
 		"tour": {Name: "tour", Description: "Walk through cognitive verbs (--demo auto-runs each step; --step N jumps)"},
