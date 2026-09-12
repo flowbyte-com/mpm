@@ -506,6 +506,56 @@ func parseDecisionArgs(args []string) (string, string, string, string, string, [
 		return contextText, choice, rationale, tagsStr, "", leftovers
 	}
 
+	// CLI acceptance 2026-09-12: bare `key=value` form (`mpm decide
+	// context="..." choice="..." rationale="..."`, as taught by `mpm tour`
+	// step 4 and the decision help examples). Pre-fix these fell through
+	// as leftovers and the whole string landed in CHOICE with empty
+	// CONTEXT/RATIONALE — a silent malformation on the onboarding path.
+	// Match a leading `key=` (case-insensitive) for the four known keys;
+	// anything else stays a leftover so free text containing "=" is
+	// unaffected. Surrounding quotes/backslash-quotes (from programmatic
+	// callers like the tour demo) are stripped.
+	var rest []string
+	kvFound := false
+	for _, tok := range leftovers {
+		key, val, hasEq := strings.Cut(tok, "=")
+		switch strings.ToLower(key) {
+		case "context", "choice", "rationale", "tags":
+			if hasEq {
+				val = strings.TrimSpace(val)
+				// Strip programmatic backslash-escapes then shell quotes.
+				val = strings.ReplaceAll(val, `\"`, `"`)
+				val = strings.ReplaceAll(val, `\'`, `'`)
+				if len(val) >= 2 {
+					if (val[0] == '"' && val[len(val)-1] == '"') ||
+						(val[0] == '\'' && val[len(val)-1] == '\'') {
+						val = val[1 : len(val)-1]
+					}
+				}
+				switch strings.ToLower(key) {
+				case "context":
+					contextText = val
+				case "choice":
+					choice = val
+				case "rationale":
+					rationale = val
+				case "tags":
+					tagsStr = val
+				}
+				kvFound = true
+				continue
+			}
+		}
+		rest = append(rest, tok)
+	}
+	if kvFound {
+		if choice == "" && len(rest) > 0 {
+			choice = strings.TrimSpace(strings.Join(rest, " "))
+			rest = nil
+		}
+		return contextText, choice, rationale, tagsStr, "", rest
+	}
+
 	// Legacy token form
 	input := strings.Join(args, " ")
 	contextText = extractField(input, "CONTEXT:")

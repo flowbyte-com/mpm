@@ -98,3 +98,43 @@ func TestCLIAcceptance_WeakenFloorMessage(t *testing.T) {
 	).Scan(&w))
 	require.InDelta(t, 1.0, w, 0.001, "weight must never go below the floor of 1")
 }
+
+// TestCLIAcceptance_DecideBareKeyValue pins the 2026-09-12 acceptance
+// fix: `mpm decide context="..." choice="..." rationale="..."` (the form
+// taught by `mpm tour` step 4 and the decision help examples) must parse
+// into structured fields. Pre-fix the whole string landed in CHOICE with
+// empty CONTEXT/RATIONALE. Mirrors the M3 theory-parser precedent
+// (TestParseTheoryArgs_BareKeyValue).
+func TestCLIAcceptance_DecideBareKeyValue(t *testing.T) {
+	ctx, choice, rat, tags, _, leftovers := parseDecisionArgs([]string{
+		`context="tour step"`,
+		`choice="continue"`,
+		`rationale="because stable"`,
+	})
+	require.Equal(t, "tour step", ctx)
+	require.Equal(t, "continue", choice)
+	require.Equal(t, "because stable", rat)
+	require.Equal(t, "", tags)
+	require.Empty(t, leftovers)
+}
+
+// TestCLIAcceptance_DecideBareKeyValue_BackslashQuotes covers the tour
+// demo's programmatic path, which historically passed backslash-escaped
+// quotes through splitKeyValueArgs.
+func TestCLIAcceptance_DecideBareKeyValue_BackslashQuotes(t *testing.T) {
+	args := splitKeyValueArgs(`context=\"tour step\" choice=\"continue\" rationale=\"because stable\"`)
+	ctx, choice, rat, _, _, _ := parseDecisionArgs(args)
+	require.Equal(t, "tour step", ctx)
+	require.Equal(t, "continue", choice)
+	require.Equal(t, "because stable", rat)
+}
+
+// TestCLIAcceptance_DecideFreeTextUnaffected guards the fix: plain free
+// text (including text containing "=" that does not start with a known
+// key) still lands in choice.
+func TestCLIAcceptance_DecideFreeTextUnaffected(t *testing.T) {
+	_, choice, _, _, _, _ := parseDecisionArgs([]string{"just", "some", "free", "text"})
+	require.Equal(t, "just some free text", choice)
+	_, choice2, _, _, _, _ := parseDecisionArgs([]string{"a=b"})
+	require.Equal(t, "a=b", choice2)
+}

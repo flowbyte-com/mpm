@@ -84,8 +84,8 @@ var tourSteps = []tourStep{
 	{
 		Title:       "decide",
 		Description: "Record a decision with rationale. The substrate remembers the context, the choice, and the reasoning — so future-you can re-litigate it.",
-		Command:     `mpm decide context=\"<why now>\" choice=\"<what>\" rationale=\"<why this choice>\"`,
-		DemoArg:     `context=\"tour step\" choice=\"continue\" rationale=\"because the cognitive interface is now stable across waves 1-4\"`,
+		Command:     `mpm decide --context "<why now>" --choice "<what>" --rationale "<why this choice>"`,
+		DemoArg:     `context="tour step" choice="continue" rationale="because the cognitive interface is now stable across waves 1-4"`,
 	},
 	{
 		Title:       "continue",
