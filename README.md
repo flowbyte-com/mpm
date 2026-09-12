@@ -229,7 +229,7 @@ Reusable knowledge that survives across tasks — best practices, warnings, patt
 
 #### Skill
 
-Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, mpm_context action=proactive_recall_hint). New and revised procedures are evaluated through the **Skills Workshop** before publication; see §9 for the full authoring and discovery surface.
+Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, mpm_context action=proactive_recall_hint). New and revised procedures can be evaluated through the **Skills Workshop** before publication; see §9 for the full authoring and discovery surface.
 
 #### Evidence
 
@@ -1995,7 +1995,7 @@ The Skills Workshop is the formation/refinement gate for procedural knowledge �
 
 The Workshop exists because *not every useful observation is a skill*. Skills compete for discovery attention, share the substrate with lessons and memories, and require maintenance. The Workshop gates publication so that:
 
-- a **procedure** (a "how to act" that the agent will repeat) becomes a skill
+- only a **procedure** (a "how to act" that the agent will repeat) is eligible to become a skill
 - **judgment** (reasoning/choice guidance) and **knowledge** (information to recall) are rejected and routed elsewhere — to `mpm_lessons save` or `mpm_memory save`, not to the skill collection
 
 The agent's role is to **form** or **refine**; the Workshop's role is to decide whether the proposal is skill-shaped and, if so, to write it.
@@ -2118,7 +2118,7 @@ experience / proposed procedure
        discovery / read / proactive_recall_hint
 ```
 
-The Workshop does not introduce a separate registry, persistence layer, or MCP tool. It is one action on `mpm_skills` and one CLI subcommand on `mpm skill`. Agents that already discover skills via `mpm_context action=proactive_recall_hint` see Workshop-published rows on the very next wake — no separate catalog refresh.
+The Workshop does not introduce a separate registry, persistence layer, or MCP tool. It is one action on `mpm_skills` and one CLI subcommand on `mpm skill`. Workshop-published rows immediately become eligible for subsequent wake and discovery results — the wake skill catalogue is bounded by weight, so a particular new row is not guaranteed to appear in the top N, but no separate catalog refresh is required.
 
 ##### Discovery
 
