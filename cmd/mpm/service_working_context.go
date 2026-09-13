@@ -30,6 +30,7 @@
 package main
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -67,6 +68,12 @@ type MemoryWriter interface {
 	// supplied lineage tag (typically "from-scratchpad:<sessionID>").
 	// Returns the new memory id.
 	SaveMemory(content string, lineageTag string) (string, error)
+	// FindPromotionByLineage returns the canonical id of an existing
+	// memory whose tags include the supplied lineage tag, or "" if
+	// none exists. Used by Promote for idempotency: a retry after a
+	// partial success (memory saved but scratchpad delete failed)
+	// returns the existing memory id rather than creating a duplicate.
+	FindPromotionByLineage(lineageTag string) (string, error)
 }
 
 // NewWorkingContextService wires the service to its dependencies.
@@ -130,6 +137,14 @@ func (s *WorkingContextService) GetCurrent(sessionID string) (*WorkingContext, e
 //     success with the new memory id. The promoted memory exists;
 //     a stale scratchpad will TTL out via decay_at.
 //
+// Idempotency (defect A retry safety, 2026-09-13 acceptance):
+// before saving, the service queries the canonical memory substrate
+// for any existing memory tagged with the lineage key. If one
+// exists, the service returns that id without creating a duplicate.
+// This makes retry-after-partial-success safe — the second promote
+// finds the memory that the first promote already created and
+// returns it as the result, with no second insert.
+//
 // Lineage: the new memory is tagged with "from-scratchpad:<sessionID>"
 // via the injected MemoryWriter. This is the cross-cutting policy
 // behaviour that earned this service its existence.
@@ -148,18 +163,36 @@ func (s *WorkingContextService) Promote(sessionID string) (*PromoteResult, error
 		return nil, fmt.Errorf("working context for session %s has expired; nothing to promote", sessionID)
 	}
 
-	content := buildPromoteContent(wc)
 	lineage := fmt.Sprintf("from-scratchpad:%s", sessionID)
+
+	// Idempotency check: if a memory with this lineage already
+	// exists, a previous promote succeeded (or partially succeeded)
+	// and we must NOT create a duplicate. Return the existing id
+	// so the operator's retry sees the same outcome.
+	existingID, lookupErr := s.memoryWriter.FindPromotionByLineage(lineage)
+	if lookupErr != nil {
+		return nil, fmt.Errorf("promote: idempotency lookup failed: %w", lookupErr)
+	}
+	if existingID != "" {
+		return &PromoteResult{
+			MemoryID:  existingID,
+			SessionID: sessionID,
+			Thesis:    wc.Thesis,
+		}, nil
+	}
+
+	content := buildPromoteContent(wc)
 	memoryID, err := s.memoryWriter.SaveMemory(content, lineage)
 	if err != nil {
 		return nil, fmt.Errorf("promote: save memory failed: %w", err)
 	}
 
 	if delErr := s.store.Delete(sessionID); delErr != nil {
-		// Promoted memory exists; scratchpad delete failed. Log and
-		// continue. Operator can run `mpm work clear` to retry the
-		// delete explicitly.
-		usererror.Warn("promoted memory %s created but scratchpad delete failed: %v", memoryID, delErr)
+		// Memory was created. The idempotency check above means a
+		// retry will return the same memory id; the stale scratchpad
+		// will TTL out via decay_at, OR the operator can run
+		// `mpm work clear` to retry the delete explicitly.
+		usererror.Warn("promoted memory %s created but scratchpad delete failed: %v (retry-safe via idempotency)", memoryID, delErr)
 	}
 
 	return &PromoteResult{
@@ -239,4 +272,39 @@ func (w *DatabaseManagerMemoryWriter) SaveMemory(content string, lineageTag stri
 		"memories", content, "", tags, nil, nil,
 		false, 5, "", "0.5", "0.5", "",
 	)
+}
+
+// FindPromotionByLineage returns the canonical id of an existing
+// memory tagged with the supplied lineage tag, or "" if none exists.
+// Used by WorkingContextService.Promote to make retries idempotent.
+//
+// Implementation: scans memories whose tags JSON array contains the
+// lineage value (via EXISTS + json_each). Returns the first match by
+// created_at desc — a session_id should map to exactly one promotion
+// in practice, but the LIMIT 1 + order keeps the response deterministic
+// even if an operator manually creates a second.
+func (w *DatabaseManagerMemoryWriter) FindPromotionByLineage(lineageTag string) (string, error) {
+	if w.dm == nil {
+		return "", errors.New("nil database manager")
+	}
+	if lineageTag == "" {
+		return "", nil
+	}
+	// Use the DM's tracked query so it goes through the audit/observability
+	// layer. SELECT id (no content) for speed — we just need the pointer.
+	var id string
+	row := w.dm.QueryRowTracked(`
+		SELECT id FROM memories
+		WHERE deleted_at IS NULL
+		  AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, lineageTag)
+	if err := row.Scan(&id); err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", err
+	}
+	return id, nil
 }

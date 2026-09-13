@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"github.com/flowbyte-com/mpm-core/usererror"
 	"log/slog"
 	"os"
@@ -225,13 +226,26 @@ func handleExport(args []string) int {
 
 	var writer *csv.Writer
 	var outputFile *os.File
+	// outputTarget is where format writers send their output. Defaults
+	// to stdout; switches to the --output file when requested. Status
+	// messages always go to stderr (via usererror.Notice) so they don't
+	// pollute a stdout-mode export.
+	outputTarget := io.Writer(os.Stdout)
+	usedFile := false
 
 	if *output != "" {
+		// Defect B (2026-09-13 acceptance): pre-fix the JSON path
+		// hardcoded os.Stdout regardless of --output. The output file
+		// was created and truncated but nothing was ever written to
+		// it — a 0-byte file with stdout JSON next to it. The fix
+		// routes the writer to the file when --output is set.
 		outputFile, err = os.Create(*output)
 		if err != nil {
 			return usererror.Error("Cannot create output file: %v", err)
 		}
 		defer outputFile.Close()
+		outputTarget = outputFile
+		usedFile = true
 
 		if *format == "csv" {
 			writer = csv.NewWriter(outputFile)
@@ -239,14 +253,14 @@ func handleExport(args []string) int {
 	}
 
 	if *format == "json" {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(outputTarget)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(memories); err != nil {
 			return usererror.Error("JSON encode failed: %v", err)
 		}
 	} else if *format == "csv" {
 		if writer == nil {
-			writer = csv.NewWriter(os.Stdout)
+			writer = csv.NewWriter(outputTarget)
 		}
 		defer writer.Flush()
 
@@ -276,7 +290,11 @@ func handleExport(args []string) int {
 		}
 	}
 
-	usererror.Notice("Exported %d memories", len(memories))
+	if usedFile {
+		usererror.Notice("Exported %d memories to %s", len(memories), *output)
+	} else {
+		usererror.Notice("Exported %d memories", len(memories))
+	}
 	return 0
 }
 
