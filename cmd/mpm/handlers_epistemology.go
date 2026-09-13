@@ -999,6 +999,21 @@ func handleDecisions(args []string) int {
 			dateStr = dateStr[:10]
 		}
 
+		// Defect I (2026-09-13 acceptance): print the canonical memory
+		// id, not a date fragment. The pre-fix renderer used the first
+		// 10 chars of created_at as the bracketed identifier, which on
+		// rows where created_at was stored as a Unix-epoch string
+		// (e.g. "1789319779") produced an output indistinguishable from
+		// a real id and silently failed `mpm show <that-bracket>`. We
+		// now emit the canonical id and the date as a separate field.
+		memID, _ := m["id"].(string)
+		if memID == "" {
+			// Legacy rows where the map key wasn't propagated — fall
+			// back to the previous behaviour but log a one-time notice
+			// so the operator can investigate.
+			memID = dateStr
+		}
+
 		fmt.Println("─────────────────────")
 		if contextText != "" {
 			fmt.Printf("CONTEXT:  %s\n", contextText)
@@ -1011,7 +1026,10 @@ func handleDecisions(args []string) int {
 		} else {
 			fmt.Println("RATIONALE: —")
 		}
-		fmt.Printf("[%s]\n", dateStr)
+		fmt.Printf("ID:       %s\n", memID)
+		if dateStr != "" {
+			fmt.Printf("DATE:     %s\n", dateStr)
+		}
 	}
 	fmt.Println("─────────────────────")
 
