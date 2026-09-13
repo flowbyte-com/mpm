@@ -6455,23 +6455,38 @@ func (dm *DatabaseManager) UpdateWorkWithContext(workID, title, content, statusS
 	}
 	prov := dm.provenanceFromContext(ac)
 	directiveIDs := dm.GetActiveDirectiveIDs(ac.FrameworkName)
-	var eventType WorkEventType
+
+	// Defect D (2026-09-13 acceptance): a multi-field update (both
+	// title and content) used to drop one of the fields. The pre-fix
+	// switch only set eventType for the FIRST non-empty field it saw,
+	// so a combined `update <id> --title X --content Y` produced a
+	// single TitleUpdated event with both fields stored on the event
+	// row, but the projection applied only title — the live `works`
+	// row kept the old content. The fix emits one event per supplied
+	// field within a single transaction so history + projection
+	// agree on every field that was changed.
+	var events []WorkEvent
 	switch {
 	case statusStr != "":
 		switch WorkStatus(statusStr) {
 		case WorkStatusDone:
-			eventType = WorkEventTypeCompleted
+			events = append(events, WorkEvent{EventType: WorkEventTypeCompleted, InvocationID: prov.InvocationID, DirectiveIDs: directiveIDs})
 		case WorkStatusCancelled:
-			eventType = WorkEventTypeCancelled
+			events = append(events, WorkEvent{EventType: WorkEventTypeCancelled, InvocationID: prov.InvocationID, DirectiveIDs: directiveIDs})
 		case WorkStatusOpen:
-			eventType = WorkEventTypeReopened
+			events = append(events, WorkEvent{EventType: WorkEventTypeReopened, InvocationID: prov.InvocationID, DirectiveIDs: directiveIDs})
 		default:
 			return nil, fmt.Errorf("invalid status %q; must be open, done, or cancelled", statusStr)
 		}
+	case title != "" && content != "":
+		events = append(events,
+			WorkEvent{EventType: WorkEventTypeTitleUpdated, Title: title, InvocationID: prov.InvocationID, DirectiveIDs: directiveIDs},
+			WorkEvent{EventType: WorkEventTypeContentUpdated, Content: content, InvocationID: prov.InvocationID, DirectiveIDs: directiveIDs},
+		)
 	case title != "":
-		eventType = WorkEventTypeTitleUpdated
+		events = append(events, WorkEvent{EventType: WorkEventTypeTitleUpdated, Title: title, InvocationID: prov.InvocationID, DirectiveIDs: directiveIDs})
 	case content != "":
-		eventType = WorkEventTypeContentUpdated
+		events = append(events, WorkEvent{EventType: WorkEventTypeContentUpdated, Content: content, InvocationID: prov.InvocationID, DirectiveIDs: directiveIDs})
 	default:
 		return nil, fmt.Errorf("at least one of status, title, or content is required for update")
 	}
@@ -6479,14 +6494,12 @@ func (dm *DatabaseManager) UpdateWorkWithContext(workID, title, content, statusS
 		dm.LogAudit(AuditWarn, "work", "deprecated update status=X path used", "", AuditContext{"work_id": workID, "status": statusStr})
 	}
 	err := dm.WithTx(func(node DBNode) error {
-		_, err := dm.AppendWorkEvent(workID, WorkEvent{
-			EventType:    eventType,
-			Title:        title,
-			Content:      content,
-			InvocationID: prov.InvocationID,
-			DirectiveIDs: directiveIDs,
-		}, prov, node)
-		return err
+		for _, ev := range events {
+			if _, err := dm.AppendWorkEvent(workID, ev, prov, node); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err

@@ -6418,17 +6418,20 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 				return nil, err
 			}
 			content, _ := mem["content"].(string)
+			// Defect C (2026-09-13 acceptance): pre-fix this branch
+			// defaulted maxB=512 when the caller passed max_bytes=0,
+			// which silently bounded full-content retrieval and broke
+			// the documented pointer contract. The fix: when the
+			// caller does NOT request a cap (max_bytes absent or 0),
+			// the resolver returns the FULL stored content — the
+			// pointer architecture is the deterministic full-retrieval
+			// path. Callers that want a bound pass an explicit
+			// max_bytes. The bounded echo on save/query responses is
+			// unrelated and stays in place.
 			maxB := int(maxBytes)
-			if maxB <= 0 {
-				maxB = 512
-			}
-			bounded := len(content) > maxB
-			if bounded {
-				// Use same bounding helper as query path (first 256 truncation is for wake;
-				// here we bound to maxB).
-				if len(content) > maxB {
-					content = content[:maxB]
-				}
+			bounded := maxB > 0 && len(content) > maxB
+			if bounded && len(content) > maxB {
+				content = content[:maxB]
 			}
 			_ = dm.RecordRetrieval(ptr.ID, "memory")
 			resp := map[string]interface{}{
@@ -6463,17 +6466,13 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 				return nil, err
 			}
 			_ = dm.RecordRetrieval(ptr.ID, "lesson")
-			// 2026-09-05 audit remediation pass 3 defect C.12 (P2):
-			// mpm://lesson/<id> CLI fallback hard-coded bounded:false
-			// regardless of content length vs max_bytes. Compute
-			// bounded from len(content) > maxBytes to match the work
-			// case at handlers.go:5563 and the MCP resolver path.
+			// Defect C (2026-09-13 acceptance): see memory-case comment.
+			// max_bytes=0 means caller did NOT request a cap; return
+			// full content. The lesson's bounded echo on other paths
+			// (save/query) is independent.
 			lessonContent := lesson.Content
 			lessonMaxB := int(maxBytes)
-			if lessonMaxB <= 0 {
-				lessonMaxB = 512
-			}
-			lessonBounded := len(lessonContent) > lessonMaxB
+			lessonBounded := lessonMaxB > 0 && len(lessonContent) > lessonMaxB
 			if lessonBounded {
 				lessonContent = lessonContent[:lessonMaxB]
 			}
@@ -6498,15 +6497,9 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 			}
 			content, _ := mem["content"].(string)
 			_ = dm.RecordRetrieval(ptr.ID, "theory")
-			// 2026-09-05 audit remediation pass 3 defect C.12 (P2):
-			// mpm://theory/<id> CLI fallback hard-coded bounded:false.
-			// Compute bounded from len(content) > maxBytes to match
-			// the lesson/work/MCP-resolver paths.
+			// Defect C (2026-09-13 acceptance): see memory-case comment.
 			theoryMaxB := int(maxBytes)
-			if theoryMaxB <= 0 {
-				theoryMaxB = 512
-			}
-			theoryBounded := len(content) > theoryMaxB
+			theoryBounded := theoryMaxB > 0 && len(content) > theoryMaxB
 			if theoryBounded {
 				content = content[:theoryMaxB]
 			}
@@ -6529,11 +6522,9 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 			if work.Content != "" {
 				content = work.Title + "\n\n" + work.Content
 			}
+			// Defect C (2026-09-13 acceptance): see memory-case comment.
 			maxB := int(maxBytes)
-			if maxB <= 0 {
-				maxB = 512
-			}
-			bounded := len(content) > maxB
+			bounded := maxB > 0 && len(content) > maxB
 			if bounded && len(content) > maxB {
 				content = content[:maxB]
 			}

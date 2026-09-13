@@ -127,3 +127,63 @@ func idempotencyCheckBeforeSaveMemory(src string) bool {
 	}
 	return findIdx < saveIdx
 }
+
+// TestResolverMemory_FullContentByDefault pins defect C: when the
+// caller does NOT request a max_bytes cap, the resolver returns the
+// FULL stored content. Pre-fix the CLI fallback capped at 512 bytes
+// regardless, silently bounding full-content retrieval.
+func TestResolverMemory_FullContentByDefault(t *testing.T) {
+	src := readServiceSource(t, "../../internal/core/tools/handlers.go")
+	// The fallback path is inside a switch on `case "memory":` (and
+	// lesson/theory/work). The shape we pin:
+	//   bounded := maxB > 0 && len(content) > maxB
+	// — the maxB > 0 guard means a missing/zero cap does NOT bound.
+	if !strings.Contains(src, "bounded := maxB > 0 && len(content) > maxB") &&
+		!strings.Contains(src, "lessonBounded := lessonMaxB > 0") {
+		t.Fatalf("resolver memory/lesson fallback must not bound when caller passes max_bytes=0 (defect C)")
+	}
+	if strings.Contains(src, "if maxB <= 0 {\n\t\t\t\tmaxB = 512\n\t\t\t}") {
+		t.Fatalf("resolver must not silently cap max_bytes=0 to 512 (defect C regression)")
+	}
+}
+
+// TestSaveResponse_HasFullPointerWhenTruncated pins defect C: the
+// save response exposes `full_pointer` when the inline echo is
+// bounded, so the caller has a deterministic retrieval path. Pre-fix
+// the note said "retrieve via mpm_memory query or mpm_blob_read" but
+// mpm_blob_read returned "no DB row for blob" because no blob was
+// ever created.
+func TestSaveResponse_HasFullPointerWhenTruncated(t *testing.T) {
+	src := readServiceSource(t, "../../internal/core/memory_tools.go")
+	if !strings.Contains(src, `result["full_pointer"]`) {
+		t.Fatalf("save response must include full_pointer when content is truncated (defect C)")
+	}
+	// The user-facing note string must NOT direct callers to
+	// mpm_blob_read — that path returns "no DB row for blob" because
+	// memory storage does not spill to blob. The deterministic full
+	// retrieval path is `mpm_resolve <full_pointer>`.
+	if strings.Contains(src, `"content stored in full; inline echo bounded — retrieve via mpm_memory query or mpm_blob_read"`) {
+		t.Fatalf("save response note must NOT direct callers to mpm_blob_read (defect C regression)")
+	}
+}
+
+// TestWorkUpdate_TitleAndContentBothApplied pins defect D: a combined
+// title+content update must emit BOTH events so the projection
+// applies both fields. Pre-fix the first non-empty branch won, the
+// other field's value was dropped at projection time.
+func TestWorkUpdate_TitleAndContentBothApplied(t *testing.T) {
+	src := readServiceSource(t, "../../internal/core/db.go")
+	// The combined case must produce TWO WorkEvent entries — one
+	// TitleUpdated and one ContentUpdated.
+	if !strings.Contains(src, "WorkEventTypeTitleUpdated, Title: title") {
+		t.Fatalf("UpdateWorkWithContext combined path must emit TitleUpdated event with title value")
+	}
+	if !strings.Contains(src, "WorkEventTypeContentUpdated, Content: content") {
+		t.Fatalf("UpdateWorkWithContext combined path must emit ContentUpdated event with content value")
+	}
+	// And the switch case `title != "" && content != ""` must select
+	// both, not just the first non-empty.
+	if !strings.Contains(src, `case title != "" && content != ""`) {
+		t.Fatalf("UpdateWorkWithContext must have an explicit combined (title+content) case (defect D)")
+	}
+}

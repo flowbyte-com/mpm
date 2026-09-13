@@ -229,7 +229,17 @@ func (dm *DatabaseManager) saveMemoryWithContextImpl(
 	if truncated {
 		result["content_truncated"] = true
 		result["content_bytes"] = len(mem.Content)
-		result["note"] = "content stored in full; inline echo bounded — retrieve via mpm_memory query or mpm_blob_read"
+		// Defect C (2026-09-13 acceptance): the pre-fix note told
+		// callers to "retrieve via mpm_memory query or mpm_blob_read",
+		// but mpm_blob_read returned "no DB row for blob" because no
+		// blob was ever created — the spill-to-blob path didn't
+		// trigger. The fix surfaces `full_pointer` (the canonical
+		// deterministic retrieval path) and corrects the note.
+		// `mpm_resolve mpm://memory/<id>` returns the FULL stored
+		// content (the resolver's CLI-fallback default cap was 512
+		// bytes pre-fix; that's now opt-in via explicit max_bytes).
+		result["full_pointer"] = "mpm://memory/" + mem.ID
+		result["note"] = "content stored in full; inline echo bounded — retrieve full via mpm_resolve <full_pointer>"
 	}
 	if len(applied) > 0 {
 		result["theory_resolutions_applied"] = applied
