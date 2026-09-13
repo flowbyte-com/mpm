@@ -7,7 +7,7 @@
 | Agent / framework | Hermes (minimax-oauth provider, hermes-agent CLI) |
 | Integration path | `~/.mpm/agent_installation/hermes-mpm/` |
 | Native mechanism | Hermes MCP client (`mcp_servers` in `~/.hermes/config.yaml`) + `.hermes.md` behavioural instruction file (walked up from cwd to git root) |
-| MPM interface used | `mpm-mcp` stdio server (compact 3-tool MCP surface via JSON-RPC over stdio; full 21-tool substrate Registry + 2 Standalones reachable via `mpm call <tool> --payload '{...}'`) |
+| MPM interface used | `mpm-mcp` stdio server (compact 3-tool MCP surface via JSON-RPC over stdio; full 22-tool surface = 21 substrate Registry entries + `mpm_help` discovery closure, reachable via `mpm call <tool> --payload '{...}'` or via `MPM_EXPOSE_ALL_TOOLS=1`) |
 | Auto-load mechanism | MCP server auto-spawned from `mcp_servers` config; `.hermes.md` walked up from cwd at session start |
 | MPM binary actually resolved | `$HOME/.mpm/bin/mpm-mcp` (canonical, absolute path) |
 | Database actually used | `$HOME/.mpm/src/db/mpm.db` (the canonical install root; the symlink tree also exposes the same inode via `$HOME/projects/mpm/src/db/mpm.db` and `$HOME/.openclaw/workspace/projects/mpm/src/db/mpm.db`) |
@@ -54,13 +54,16 @@ project source tree — see *DB path invariance* below).
 | `mcp__mpm__mpm_context` | Session state, wake context, directives, mode routing |
 | `mcp__mpm__mpm_help` | Capability discovery (full Registry enumeration + CLI fallback) |
 
-**Full substrate surface** (21 Registry entries + 2 Standalones):
-reachable via the universal machine interface
+**Full substrate surface** (22 MCP registrations = 21 substrate Registry
+entries + `mpm_help` discovery closure): reachable via the universal
+machine interface
 `mpm call <tool> --payload '{"action":"<op>","params":{...}}'` from any
 subprocess. Setting `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block
 restores the legacy full-surface exposure to the MCP server's
 `tools/list`. See `cmd/mpm-mcp/instructions_primer.txt` for the canonical
-Registry.
+Registry. The Registry itself holds exactly 21 entries; `mpm_help` is
+the discovery closure registered at server init by `cmd/mpm-mcp` (not
+part of the Registry slice).
 
 **DB path invariance:** All three paths resolve to the same inode:
 

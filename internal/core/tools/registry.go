@@ -21,8 +21,8 @@
 //     maintenance for no behavior win.
 //
 //   - Registry is a package-level slice (not a map). Linear scan is fine
-//     for 33 tools; explicit ordering makes the file readable. If we
-//     ever need faster lookup, a name→index map can be built at init.
+//     for 21 substrate entries; explicit ordering makes the file readable.
+//     If we ever need faster lookup, a name→index map can be built at init.
 package tools
 
 import (
