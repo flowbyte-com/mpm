@@ -24,6 +24,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/flowbyte-com/mpm-core/usererror"
 	"strings"
 	"time"
 
@@ -114,8 +116,7 @@ func handleHandoffWriteCLI(args []string) int {
 		"params": payload,
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "handoff write: "+err.Error())
-		return 1
+		return usererror.Error("handoff write: %v", err)
 	}
 	id, _ := out["id"].(string)
 	fmt.Printf("✓ handoff written (id=%s)\n", id)
@@ -136,8 +137,7 @@ func handleHandoffReadCLI(args []string) int {
 		"params": map[string]interface{}{"handoff_id": args[0]},
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "handoff read: "+err.Error())
-		return 1
+		return usererror.Error("handoff read: %v", err)
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -155,8 +155,7 @@ func handleHandoffListCLI(args []string) int {
 	for _, a := range args {
 		if strings.HasPrefix(a, "--limit=") {
 			if _, err := fmt.Sscanf(strings.TrimPrefix(a, "--limit="), "%d", &limit); err != nil {
-				fmt.Fprintf(os.Stderr, "handoff list: invalid --limit value: %v\n", err)
-				return 1
+				return usererror.Error("handoff list: invalid --limit value: %v", err)
 			}
 		}
 		if a == "--unread" {
@@ -171,8 +170,7 @@ func handleHandoffListCLI(args []string) int {
 		},
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "handoff list: "+err.Error())
-		return 1
+		return usererror.Error("handoff list: %v", err)
 	}
 	handoffs, _ := out["handoffs"].([]interface{})
 	if len(handoffs) == 0 {
@@ -203,8 +201,7 @@ func handleHandoffShredCLI(args []string) int {
 		"params": map[string]interface{}{"handoff_id": args[0]},
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "handoff shred: "+err.Error())
-		return 1
+		return usererror.Error("handoff shred: %v", err)
 	}
 	fmt.Printf("⚠ handoff %s shredded (not recoverable)\n", args[0])
 	return 0
