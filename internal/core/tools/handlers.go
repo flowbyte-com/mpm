@@ -2549,6 +2549,15 @@ func fetchRecentMemoriesByCollection(dm mpminternal.CoreDB, collection string, l
 		return []map[string]interface{}{}
 	}
 	defer rows.Close()
+	// Defect L (2026-09-13 acceptance): pre-fix the wake-context
+	// pointer was always `mpm://memory/<id>` regardless of the row's
+	// typed kind. The resolver supports typed URIs (`mpm://theory/`,
+	// `mpm://decision/`) but the wake emitter never used them. The
+	// fix threads the collection discriminator through to pointer
+	// construction: theories → `mpm://theory/<id>`, decisions →
+	// `mpm://decision/<id>`, lessons (separate helper below) →
+	// `mpm://lesson/<id>`, everything else → `mpm://memory/<id>`.
+	pointerKind := memoryPointerKindForCollection(collection)
 	out := make([]map[string]interface{}, 0, limit)
 	for rows.Next() {
 		var id, content, createdAt string
@@ -2574,7 +2583,7 @@ func fetchRecentMemoriesByCollection(dm mpminternal.CoreDB, collection string, l
 		out = append(out, map[string]interface{}{
 			"id":         id,
 			"summary":    summary,
-			"pointer":    "mpm://memory/" + id,
+			"pointer":    pointerKind + "/" + id,
 			"created_at": createdAt,
 		})
 	}
@@ -2582,6 +2591,23 @@ func fetchRecentMemoriesByCollection(dm mpminternal.CoreDB, collection string, l
 		out = []map[string]interface{}{}
 	}
 	return out
+}
+
+// memoryPointerKindForCollection maps a memories.collection value to
+// the canonical pointer kind used in wake-context emission. Single-
+// table kinds use their public name; everything else falls back to
+// `memory`. Keep this in sync with handleMpmResolve's whitelist at
+// handlers.go (mpm://blob/, work/, memory/, lesson/, theory/) — the
+// wake context and the resolver agree on what they recognize.
+func memoryPointerKindForCollection(collection string) string {
+	switch collection {
+	case "theories":
+		return "mpm://theory"
+	case "decisions":
+		return "mpm://decision"
+	default:
+		return "mpm://memory"
+	}
 }
 
 // scrubChallengeIdentifier removes internal challenge metadata lines

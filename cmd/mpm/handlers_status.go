@@ -83,7 +83,17 @@ func stateForPersona(activePersona string) (state string, values []string) {
 
 func buildStatusData(dm *mpminternal.DatabaseManager, startTime time.Time) statusData {
 	var d statusData
-	d.uptime = formatUptime(time.Since(startTime))
+	// Defect N (2026-09-13 acceptance): pre-fix this used
+	// `formatUptime(time.Since(startTime))` which is the CLI
+	// process start time — every short-lived invocation saw
+	// "Uptime: 0s" regardless of how long the substrate had been
+	// alive. The fix reads scheduler.state's process_started_unix
+	// (the same source `mpm doctor` uses) so the dashboard shows
+	// the canonical scheduler uptime. If the state file is
+	// missing or unreadable, fall back to CLI process uptime
+	// with a clearly-labelled "process uptime" so the operator
+	// isn't misled.
+	d.uptime = schedulerUptimeOrFallback(dm, startTime)
 	d.memTotal, _ = countMemories(dm, "")
 	d.memLTM, _ = countMemories(dm, "weight >= 10")
 	d.theoryTotal, _ = countMemories(dm, "collection = 'theories'")
@@ -100,18 +110,70 @@ func buildStatusData(dm *mpminternal.DatabaseManager, startTime time.Time) statu
 	d.synthMerged, d.synthLast = getSynthesisStats(dm)
 	d.recentEvents = getRecentWatchdogEvents(dm, 3)
 
-	// Default to "none" — the absence of an active selection is always
-	// visible (never silent). Overridden below if a real value is found
-	// or if LoadActiveJSON fails (in which case the defaults persist).
-	d.modeState, d.modeValues = "none", []string{}
-	d.personaState, d.personaValues = "none", []string{}
-
-	active, err := mpminternal.LoadActiveJSON()
-	if err == nil {
-		d.modeState, d.modeValues = stateForMode(active.ModesSlice())
-		d.personaState, d.personaValues = stateForPersona(active.PersonaString())
-	}
+	// Defect M (2026-09-13 acceptance): pre-fix this used a parallel
+	// fallback ("none" when active.json was empty) that disagreed with
+	// the canonical resolver used by `mpm info` and the wake context.
+	// Operators saw `mpm status` show "Mode: none" while wake payload
+	// showed `active_mode: default`. The fix uses the same canonical
+	// resolvers so all three surfaces agree on what the active value
+	// is — including the "default" fallback when active.json is
+	// uninitialised.
+	d.modeState, d.modeValues = resolveStatusMode(dm)
+	d.personaState, d.personaValues = resolveStatusPersona(dm)
 	return d
+}
+
+// schedulerUptimeOrFallback returns the scheduler uptime from the
+// scheduler.state file, formatted for the dashboard. Falls back to
+// the CLI process uptime (clearly labelled) if the state file is
+// missing or unreadable. The fallback label matters because a 0s
+// uptime on a long-running substrate was misleading — saying
+// "process uptime: 0s" tells the operator what they're looking at.
+func schedulerUptimeOrFallback(dm *mpminternal.DatabaseManager, startTime time.Time) string {
+	// Look at the same watchdog snapshot path the cron-retention
+	// classification uses. We only need the process_started_unix
+	// field; a malformed JSON file or a missing field falls back
+	// to the process uptime so the dashboard never lies.
+	statePath := dm.WatchdogPath()
+	if statePath != "" {
+		if data, err := os.ReadFile(statePath); err == nil {
+			var snap struct {
+				ProcessStartedUnix int64 `json:"process_started_unix"`
+			}
+			if err := json.Unmarshal(data, &snap); err == nil && snap.ProcessStartedUnix > 0 {
+				return formatUptime(time.Since(time.Unix(snap.ProcessStartedUnix, 0)))
+			}
+		}
+	}
+	return formatUptime(time.Since(startTime)) + " (process)"
+}
+
+// resolveStatusMode uses the canonical mode resolver and returns
+// the {state, values} pair the dashboard expects. Empty active.json
+// falls back to "default" via ResolveActiveMode, matching wake and
+// info surfaces.
+func resolveStatusMode(dm *mpminternal.DatabaseManager) (state string, values []string) {
+	resolved := mpminternal.ResolveActiveMode(dm, "")
+	if resolved == "" {
+		return "none", []string{}
+	}
+	if resolved == "auto" {
+		return "auto", []string{"auto"}
+	}
+	return "one", []string{resolved}
+}
+
+// resolveStatusPersona uses the canonical persona resolver and
+// returns the {state, values} pair the dashboard expects.
+func resolveStatusPersona(dm *mpminternal.DatabaseManager) (state string, values []string) {
+	resolved := mpminternal.ResolveActivePersona(dm, "")
+	if resolved == "" {
+		return "none", []string{}
+	}
+	if resolved == "auto" || resolved == "ephemeral" {
+		return "auto", []string{resolved}
+	}
+	return "one", []string{resolved}
 }
 
 // formatModeLine renders the dashboard's "Mode: ..." line from a

@@ -216,3 +216,73 @@ func TestEvidence_ListIncludesLegacyMemoryRows(t *testing.T) {
 		t.Fatalf("ListEvidence must include legacy artifact_type='memory' rows (defect G back-compat)")
 	}
 }
+
+// TestTasksList_NextRunNotLastRun pins defect K: `mpm tasks list`
+// must show NEXT RUN and LAST RUN as separate columns. Pre-fix the
+// NEXT RUN column was overwritten by LAST RUN when the task had
+// ever fired, with a "(last)" suffix that read as a label rather
+// than a correction. The contract is: NEXT RUN = scheduled next
+// execution time; LAST RUN = previous execution time; both can be
+// present at once; never substitute one for the other.
+func TestTasksList_NextRunNotLastRun(t *testing.T) {
+	src := readServiceSource(t, "handlers_tasks.go")
+	// The header must include both NEXT RUN (UTC) and LAST RUN (UTC)
+	// as separate columns. The exact tab-spacing is tabwriter's
+	// responsibility; we just assert both labels are present.
+	if !strings.Contains(src, "NEXT RUN (UTC)") || !strings.Contains(src, "LAST RUN (UTC)") {
+		t.Fatalf("tasks list must show NEXT RUN and LAST RUN as separate columns (defect K)")
+	}
+	// The renderer must NOT overwrite nextRun with LastRunAt — that
+	// was the pre-fix bug. The legacy pattern (interpolated) was:
+	//   nextRun = mpminternal.FormatOptionalUnixSeconds(t.LastRunAt) + " (last)"
+	if strings.Contains(src, "FormatOptionalUnixSeconds(t.LastRunAt) + \" (last)\"") {
+		t.Fatalf("tasks list renderer must NOT substitute LAST RUN for NEXT RUN (defect K regression)")
+	}
+}
+
+// TestWakeContext_TypedPointers pins defect L: `mpm wake` recent
+// artifacts must carry typed pointers (`mpm://theory/<id>`,
+// `mpm://decision/<id>`) instead of the universal
+// `mpm://memory/<id>` regardless of the row's collection. The
+// resolver supports typed URIs; the wake emitter just didn't use
+// them.
+func TestWakeContext_TypedPointers(t *testing.T) {
+	src := readServiceSource(t, "../../internal/core/tools/handlers.go")
+	if !strings.Contains(src, "memoryPointerKindForCollection") {
+		t.Fatalf("wake context must map collection → typed pointer kind (defect L)")
+	}
+}
+
+// TestStatus_UsesCanonicalResolver pins defect M: `mpm status`
+// mode/persona must use the canonical resolver
+// (ResolveActiveMode/ResolveActivePersona) — same as wake and info.
+// Pre-fix this used a parallel fallback ("none" when active.json
+// was empty) that disagreed with the canonical path.
+func TestStatus_UsesCanonicalResolver(t *testing.T) {
+	src := readServiceSource(t, "handlers_status.go")
+	if !strings.Contains(src, "resolveStatusMode(dm)") {
+		t.Fatalf("handleStatus must use canonical mode resolver (defect M)")
+	}
+	if !strings.Contains(src, "resolveStatusPersona(dm)") {
+		t.Fatalf("handleStatus must use canonical persona resolver (defect M)")
+	}
+	// The handler must call ResolveActiveMode(dm, "") so the
+	// canonical "default" fallback kicks in for uninitialised state.
+	if !strings.Contains(src, "ResolveActiveMode(dm, \"\")") {
+		t.Fatalf("status mode must call ResolveActiveMode with empty requested (canonical default fallback)")
+	}
+}
+
+// TestStatus_UptimeNotProcessStart pins defect N: `mpm status`
+// uptime must NOT be the CLI process start time. Pre-fix every
+// short invocation showed "Uptime: 0s" regardless of substrate age.
+// The fix reads scheduler.state's process_started_unix.
+func TestStatus_UptimeNotProcessStart(t *testing.T) {
+	src := readServiceSource(t, "handlers_status.go")
+	if !strings.Contains(src, "schedulerUptimeOrFallback(dm, startTime)") {
+		t.Fatalf("handleStatus must compute uptime from scheduler.state, not CLI process start (defect N)")
+	}
+	if !strings.Contains(src, "process_started_unix") {
+		t.Fatalf("schedulerUptimeOrFallback must read scheduler.state's process_started_unix field")
+	}
+}

@@ -135,15 +135,25 @@ func handleTasksList(args []string) int {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tCRON\tDIRECTIVE_ID\tSTATUS\tNEXT RUN (UTC)")
-	fmt.Fprintln(w, "----\t----\t----\t-----------\t------\t--------------")
+	fmt.Fprintln(w, "ID\tNAME\tCRON\tDIRECTIVE_ID\tSTATUS\tNEXT RUN (UTC)\tLAST RUN (UTC)")
+	fmt.Fprintln(w, "----\t----\t----\t-----------\t------\t--------------\t--------------")
 	for _, t := range tasks {
+		// Defect K (2026-09-13 acceptance): pre-fix the renderer
+		// overwrote NEXT RUN with LAST RUN when the task had ever
+		// fired. Operators saw "next run" actually be the past
+		// execution time, with a "(last)" suffix that read as a
+		// label rather than a correction. The fix: NEXT RUN shows
+		// NextRunAt always; LAST RUN is a separate column shown
+		// only when the task has fired.
 		nextRun := mpminternal.FormatUnixSeconds(t.NextRunAt)
+		var lastRun string
 		if t.LastRunAt != nil {
-			nextRun = mpminternal.FormatOptionalUnixSeconds(t.LastRunAt) + " (last)"
+			lastRun = mpminternal.FormatOptionalUnixSeconds(t.LastRunAt)
+		} else {
+			lastRun = "—"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			t.ID, t.Name, t.CronExpr, t.DirectiveID, t.Status, nextRun)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			t.ID, t.Name, t.CronExpr, t.DirectiveID, t.Status, nextRun, lastRun)
 	}
 	w.Flush()
 	return 0
