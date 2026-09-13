@@ -25,8 +25,8 @@ func TestDoctorService_checkEmbeddings(t *testing.T) {
 	if check.Status != "PASS" {
 		t.Fatalf("empty DB: got status %q, want PASS (msg: %q)", check.Status, check.Message)
 	}
-	if check.Message != "0 memories, all from real provider" {
-		t.Fatalf("empty DB: got message %q, want '0 memories, all from real provider'", check.Message)
+	if check.Message != "0 memories with provider-generated embeddings (stored)" {
+		t.Fatalf("empty DB: got message %q, want '0 memories with provider-generated embeddings (stored)'", check.Message)
 	}
 }
 

@@ -160,7 +160,15 @@ func (s *DoctorService) checkEmbeddings() DoctorCheck {
 		check.Message = fmt.Sprintf("%d / %d without embedding — run `mpm ops backfill-embeddings`", nullCount, total)
 	default:
 		check.Status = "PASS"
-		check.Message = fmt.Sprintf("%d memories, all from real provider", total)
+		// Final release-pass wording (defect: doctor said "all from real
+		// provider" while the embedding-provider check said "no
+		// provider configured" — apparently contradictory). The two
+		// checks now distinguish historical vs current state:
+		// stored vectors are provider-generated (passive voice — does
+		// not claim the provider is still reachable); the
+		// EmbeddingProvider check reports whether NEW embeddings can
+		// be generated.
+		check.Message = fmt.Sprintf("%d memories with provider-generated embeddings (stored)", total)
 	}
 	return check
 }
@@ -455,18 +463,30 @@ func cronRetentionToMessage(c *CronRetentionStatus) string {
 	}
 }
 
-// actionableOverdueVerdict preserves the existing wake-overdue semantics.
-// Returns severity (0=PASS, 1=WARN, 2=FAIL), message, details.
+// actionableOverdueVerdict surfaces wake backlog as a domain work
+// concern, NOT a scheduler daemon failure. Final release-pass
+// correction (2026-09-13): the previous code conflated the two —
+// "5+ wakes overdue" was reported as FAIL with the suggestion to
+// restart mpm-scheduler. That conflation misleads operators: the
+// scheduler daemon can be healthy (steady uptime, healthy sweep
+// cadence, no cron backlog) while domain work is overdue. The
+// scheduler daemon's own health is reported separately by the
+// CronRetentionStatus fields (uptime, last sweep, etc.).
+//
+// Overdue wakes here mean: there are domain tasks (cascade reconciles,
+// review reminders) that should have run by now and haven't. They
+// are a backlog, not a daemon failure. The verdict caps at WARN
+// regardless of count; an empty backlog is PASS.
 func actionableOverdueVerdict(overdue int64) (int, string, []string) {
 	if overdue == 0 {
 		return 0, "no overdue wakes", nil
 	}
 	if overdue <= 5 {
 		return 1, fmt.Sprintf("%d wake(s) overdue", overdue),
-			[]string{"Check 'mpm status' for daemon health; 'journalctl --user -u mpm-scheduler' if needed."}
+			[]string{"Domain work backlog — not a scheduler daemon failure. Run 'mpm ops review --stale' to triage."}
 	}
-	return 2, fmt.Sprintf("%d wakes overdue — scheduler may be stalled", overdue),
-		[]string{"Restart mpm-scheduler: 'systemctl --user restart mpm-scheduler'."}
+	return 1, fmt.Sprintf("%d wakes overdue", overdue),
+		[]string{"Domain work backlog — not a scheduler daemon failure. Run 'mpm ops review --stale' to triage."}
 }
 
 func statusSeverity(status string) int {
