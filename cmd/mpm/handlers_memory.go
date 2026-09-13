@@ -89,7 +89,12 @@ func handlePrimeDirectives() int {
 	}
 
 	var output strings.Builder
-	output.WriteString("\n\xf0\x9f\x9b\xb8 808 PRIME DIRECTIVES \xf0\x9f\x9b\xb8\n")
+	// Canonical sentence-case section heading. Replaces the pre-fix
+	// "808 PRIME DIRECTIVES" banner (which leaked framework branding
+	// and rendered ALL CAPS into a product surface that uses
+	// sentence-case everywhere else). The compact horizontal rule
+	// below mirrors the visual grammar used by mpm doctor / mpm info.
+	output.WriteString("\nDirectives\n")
 	output.WriteString("\xe2\x94\x81\xe2\x95\x90\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\n\n")
 
 	count := 0
