@@ -76,7 +76,7 @@ func NewRouter() *CommandRouter {
 		"reference": {Name: "reference", Description: "Manage reference documents", MinArgs: 1},
 		"topic":     {Name: "topic", Description: "Manage topics", MinArgs: 1},
 		"session":   {Name: "session", Description: "Manage sessions", MinArgs: 1},
-		"handoff":   {Name: "handoff", Description: "Manage handoffs (write|read|list|shred)", MinArgs: 1},
+		"handoff":   {Name: "handoff", Description: "Manage handoffs (write|read|list|shred)"},
 		"lesson":    {Name: "lesson", Description: "Manage lessons", MinArgs: 1},
 		"memory":    {Name: "memory", Description: "Manage memories", MinArgs: 1},
 
@@ -243,7 +243,13 @@ func (r *CommandRouter) Execute(args []string) int {
 		}
 		// fall through — let the handler dispatch the subcommand help.
 	}
-	if len(args) > 1 && args[1] == "help" && cmdName != "help" {
+	// A literal "help" as the second token (args[1]) is the rewrite
+	// artifact of `-h`/`--help` for non-dispatching commands. For
+	// commands that dispatch subcommands (`mpm skill help`,
+	// `mpm handoff help`, etc.), args[1] == "help" is a real subcommand
+	// invocation that the handler must see — so route to the handler
+	// in that case and let it print the subcommand's own help page.
+	if len(args) > 1 && args[1] == "help" && cmdName != "help" && !commandsWithSubcommandDispatch[cmdName] {
 		return r.handleCommandHelp(cmdName, cmd)
 	}
 
