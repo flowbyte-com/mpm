@@ -352,12 +352,17 @@ func handleTopicPromote(args []string) int {
 	id := args[0]
 	store := getMemoryStore()
 
-	err := store.PromoteTopicToMemory(id, "memories", nil)
+	// Defect J (2026-09-13 acceptance): capture the new memory's
+	// canonical id from PromoteTopicToMemory's return value. The
+	// pre-fix signature returned only error, so the CLI had no way to
+	// surface the new memory's pointer — operators copied the TOPIC id
+	// into a follow-up `mpm show` and got "not found".
+	memID, err := store.PromoteTopicToMemory(id, "memories", nil)
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to promote topic: %v", err), 1)
 	}
 
-	return respond(fmt.Sprintf("Topic promoted to memory: %s\n", id), "", 0)
+	return respond(fmt.Sprintf("Topic %s promoted to memory: %s\n", id, memID), "", 0)
 }
 
 func handleTopicList(args []string) int {

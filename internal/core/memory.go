@@ -2240,11 +2240,19 @@ func (s *MemoryStore) ClearMirror() error {
 // - Creates a memory record from the topic content
 // - Sets source_type = 'topic' in memory metadata
 // - Deactivates the original topic (is_active = 0)
-func (s *MemoryStore) PromoteTopicToMemory(topicID string, collection string, tags []string) error {
+//
+// Returns the canonical ID of the newly-created memory plus a nil
+// error on success. The pre-fix signature returned only error, which
+// forced the CLI handler to print the TOPIC id in its success message
+// (defect J, 2026-09-13 acceptance) — operators copying that "id" into
+// a follow-up `mpm show` call hit "not found". The new signature
+// returns the new memory id so handlers can surface the canonical
+// pointer to operators.
+func (s *MemoryStore) PromoteTopicToMemory(topicID string, collection string, tags []string) (string, error) {
 	if s.DB == nil {
 		// Try to initialize database if not already done
 		if err := s.InitSQLite(); err != nil {
-			return fmt.Errorf("failed to initialize database: %v", err)
+			return "", fmt.Errorf("failed to initialize database: %v", err)
 		}
 	}
 
@@ -2256,15 +2264,15 @@ func (s *MemoryStore) PromoteTopicToMemory(topicID string, collection string, ta
 	`, topicID).Scan(&topicName, &topicDesc, &isActive)
 
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("topic not found: %s", topicID)
+		return "", fmt.Errorf("topic not found: %s", topicID)
 	}
 	if err != nil {
-		return fmt.Errorf("error querying topic: %v", err)
+		return "", fmt.Errorf("error querying topic: %v", err)
 	}
 
 	// Only promote if topic is active
 	if isActive == 0 {
-		return fmt.Errorf("topic is already deactivated: %s", topicID)
+		return "", fmt.Errorf("topic is already deactivated: %s", topicID)
 	}
 
 	// Prepare content from topic name and description
@@ -2281,9 +2289,9 @@ func (s *MemoryStore) PromoteTopicToMemory(topicID string, collection string, ta
 		"timestamp":   time.Now().UTC().Format(time.RFC3339),
 	}
 
-	_, err = s.AddMemory(content, collection, tags, metadata, "", "topic")
+	mem, err := s.AddMemory(content, collection, tags, metadata, "", "topic")
 	if err != nil {
-		return fmt.Errorf("failed to add memory from topic: %v", err)
+		return "", fmt.Errorf("failed to add memory from topic: %v", err)
 	}
 
 	// Deactivate the original topic
@@ -2291,10 +2299,10 @@ func (s *MemoryStore) PromoteTopicToMemory(topicID string, collection string, ta
 		UPDATE topics SET is_active = 0, updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?
 	`, topicID)
 	if err != nil {
-		return fmt.Errorf("failed to deactivate topic: %v", err)
+		return "", fmt.Errorf("failed to deactivate topic: %v", err)
 	}
 
-	return nil
+	return mem.ID, nil
 }
 
 // SearchSessions performs FTS5 search on sessions (stored in memories table with collection='sessions')
