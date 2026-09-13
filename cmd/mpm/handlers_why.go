@@ -64,20 +64,18 @@ func handleWhy(args []string) int {
 		return 1
 	}
 
-	// Explicit --kind wins over auto-detection. Skill: prefix always
-	// wins because it's the canonical skill id shape.
-	if kind == "" && !strings.HasPrefix(id, "skill:") {
-		// auto-detect runs in the service via Explain.
-	} else if kind != "" {
-		// The service's auto-detect probes memories/decisions/theories
-		// in order. For explicit kind we short-circuit: probe only the
-		// requested collection. For simplicity in v1, we still call
-		// Explain which detects — passing the kind as a hint is a
-		// future enhancement.
-		_ = kind
+	// Validate --kind against the canonical set so a typo produces a
+	// clear error instead of silently aliasing to auto-detect. Auto-
+	// detect is the fallback when --kind is unset.
+	switch kind {
+	case "", "memory", "decision", "theory", "skill", "lesson", "work":
+		// canonical set; pass through to ExplainWithHint
+	default:
+		usererror.Error("mpm why: --kind %q is not a canonical artifact kind (use memory|decision|theory|skill|lesson|work or omit for auto-detect)", kind)
+		return 1
 	}
 
-	report, err := svc.Explain(id)
+	report, err := svc.ExplainWithHint(id, kind)
 	if err != nil {
 		usererror.Error("why: %v", err)
 		return 1

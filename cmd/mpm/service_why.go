@@ -132,13 +132,35 @@ func NewWhyService(dm *mpminternal.DatabaseManager) *WhyService {
 }
 
 // Explain takes an artifact id (or `kind:id` shorthand) and assembles
-// the WhyReport. Auto-detects the kind: prefixed `skill:` always wins;
-// otherwise checks memory, decision, theory collections in order.
+// the WhyReport. Auto-detects the kind across all canonical collections.
+// Skill: prefix always wins because it's the canonical skill id shape.
 //
-// Returns (nil, nil) with SkipReason set if the artifact cannot be
+// Returns (report, nil) with SkipReason set if the artifact cannot be
 // located — operators get an actionable "not found" message instead
 // of an opaque error.
+//
+// For the explicit-kind path (used when the operator passes --kind on
+// the CLI), call ExplainWithHint so a kind/id mismatch surfaces as
+// "not found in <kind>" rather than silently aliasing to the first
+// matching collection.
 func (s *WhyService) Explain(id string) (*WhyReport, error) {
+	return s.ExplainWithHint(id, "")
+}
+
+// ExplainWithHint is the kind-aware entry point used by `mpm why
+// --kind <kind> <id>`. When hint is empty, it behaves identically to
+// Explain (auto-detect). When hint is non-empty, it pins the kind
+// and probes only the requested collection so a kind/id mismatch
+// surfaces immediately instead of silently aliasing.
+//
+// Hint semantics (defect H, 2026-09-13 acceptance):
+//   hint=""    → auto-detect (probe collections until first match)
+//   hint="X"   → use X as authoritative kind; probe only that collection
+//
+// Valid hint values are the canonical kinds: memory, decision, theory,
+// skill, lesson, work. Other values return an error from the handler
+// before ExplainWithHint is called.
+func (s *WhyService) ExplainWithHint(id, hint string) (*WhyReport, error) {
 	if id == "" {
 		return nil, fmt.Errorf("id is required")
 	}
@@ -147,11 +169,24 @@ func (s *WhyService) Explain(id string) (*WhyReport, error) {
 		GeneratedAt: time.Now().UTC(),
 	}
 
-	// Kind auto-detection. Skill ids always win via prefix (canonical
-	// shape). Otherwise probe the standard collections.
+	// Skill ids always win via prefix (canonical shape) regardless of
+	// hint — operators passing skill:foo expect skill handling.
 	if strings.HasPrefix(id, "skill:") {
 		report.ArtifactKind = "skill"
+	} else if hint != "" {
+		// Explicit --kind: probe only the requested collection so a
+		// kind/id mismatch surfaces immediately rather than silently
+		// aliasing to the first matching collection.
+		report.ArtifactKind = hint
+		if row, ferr := s.fetchByKind(id, hint); ferr == nil && row != nil {
+			report.Identity = identityFromMap(row, hint)
+			report.Provenance = provenanceFromMap(row)
+		} else {
+			report.SkipReason = fmt.Sprintf("no artifact found for id %q in kind %q", id, hint)
+			return report, nil
+		}
 	} else {
+		// Auto-detect across collections.
 		k, artifactMap, err := s.detectKind(id)
 		if err != nil {
 			report.SkipReason = err.Error()
@@ -254,6 +289,14 @@ func (s *WhyService) explainMemoryLike(id string, report *WhyReport) (*WhyReport
 // after the memories loop misses, returning kind="lesson" so the rest
 // of the why report (evidence, confidence, retrieval) works the same
 // way it does for memory kinds.
+//
+// fetchByKind is the authoritative-kind counterpart to detectKind.
+// When the caller passes --kind (hint), only the requested kind's
+// collection is probed so a kind/id mismatch surfaces immediately
+// instead of silently aliasing to the first matching collection.
+// Mapping mirrors detectKind: kind "memory" probes collection
+// "memories"; "decision" → "decisions"; "theory" → "theories";
+// "skill" → "skills"; "lesson" → lessons_base; "work" → works.
 func (s *WhyService) detectKind(id string) (string, map[string]interface{}, error) {
 	collections := []string{
 		"memories",
@@ -312,6 +355,36 @@ func (s *WhyService) detectKind(id string) (string, map[string]interface{}, erro
 		return "work", row, nil
 	}
 	return "", nil, fmt.Errorf("no artifact found for id %q (probed %d standard collections + lessons_base + works)", id, len(collections))
+}
+
+// fetchByKind is the authoritative-kind counterpart to detectKind.
+// When the caller passes --kind (hint), only the requested kind's
+// collection is probed so a kind/id mismatch surfaces immediately
+// instead of silently aliasing to the first matching collection.
+// Mapping mirrors detectKind: kind "memory" probes collection
+// "memories"; "decision" → "decisions"; "theory" → "theories";
+// "skill" → "skills"; "lesson" → lessons_base; "work" → works.
+//
+// Returns (nil, nil) when no row exists for the requested kind — the
+// caller's explain path maps that to a "not found in <kind>" message
+// rather than an opaque error.
+func (s *WhyService) fetchByKind(id, kind string) (map[string]interface{}, error) {
+	switch kind {
+	case "memory":
+		return s.fetchFromCollection(id, "memories")
+	case "decision":
+		return s.fetchFromCollection(id, "decisions")
+	case "theory":
+		return s.fetchFromCollection(id, "theories")
+	case "skill":
+		return s.fetchFromCollection(id, "skills")
+	case "lesson":
+		return s.fetchLesson(id)
+	case "work":
+		return s.fetchWork(id)
+	default:
+		return nil, fmt.Errorf("unsupported kind %q (canonical: memory|decision|theory|skill|lesson|work)", kind)
+	}
 }
 
 // fetchLesson reads a lessons_base row by id for `mpm why`. The lessons
