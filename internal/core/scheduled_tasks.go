@@ -188,11 +188,16 @@ func ProcessScheduledTasks(db *sql.DB) (int, error) {
 
 	now := time.Now().UTC()
 
+	// Bind `now` as int64. next_run_at is INTEGER; go-sqlite3 serializes
+	// time.Time as RFC3339 TEXT, and SQLite's affinity rules then order
+	// numeric before TEXT — so positive INTEGER next_run_at values match
+	// `<= <TEXT>` regardless of magnitude. See TestProcessDueTasks_RespectsFutureNextRun.
+	nowUnix := now.Unix()
 	rows, err := tx.Query(`
 		SELECT id, cron_expr, directive_id
 		FROM scheduled_tasks
 		WHERE status = ? AND next_run_at <= ?
-	`, ScheduledTaskActive, now)
+	`, ScheduledTaskActive, nowUnix)
 	if err != nil {
 		return 0, fmt.Errorf("fetch due tasks: %w", err)
 	}

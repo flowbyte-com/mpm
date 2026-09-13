@@ -344,13 +344,18 @@ func TestProcessDueTasks_PausesOnPoisonCron(t *testing.T) {
 
 func TestProcessDueTasks_SkipsPaused(t *testing.T) {
 	dm := newScheduledTaskDM(t)
-	past := time.Now().UTC().Add(-1 * time.Minute)
+	// Use .Unix() for INTEGER columns — passing time.Time directly
+	// serializes as RFC3339 TEXT via go-sqlite3, and SQLite stores it
+	// as TEXT (since the text is not losslessly convertible to
+	// integer) despite the column's INTEGER affinity. The fixture
+	// must assert real integer semantics.
+	pastUnix := time.Now().UTC().Add(-1 * time.Minute).Unix()
 	_, err := dm.db.Exec(`
 		INSERT INTO scheduled_tasks
 		(id, name, cron_expr, directive_id, status, next_run_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, "paused-task", "Paused", "0 3 * * *", "mpm-seed-pp", ScheduledTaskPaused,
-		past, past, past)
+		pastUnix, pastUnix, pastUnix)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -360,6 +365,197 @@ func TestProcessDueTasks_SkipsPaused(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("paused task should not be processed, got %d", n)
+	}
+}
+
+// TestProcessDueTasks_RespectsFutureNextRun is the regression test for
+// the SQL type-coercion bug where ProcessScheduledTasks bound a
+// time.Time value (serialized as RFC3339 TEXT by go-sqlite3) to the
+// `next_run_at <= ?` comparison. `next_run_at` has INTEGER affinity;
+// the bound TEXT cannot be losslessly converted to numeric, so SQLite
+// leaves it as TEXT. Per type-affinity rules, numeric values sort
+// before TEXT, so positive INTEGER `next_run_at` values satisfied
+// `<= <TEXT>` regardless of magnitude — every active task matched
+// on every tick. A daily-at-03:00 task fired every minute instead of
+// every 24 hours.
+//
+// The multi-tick + restart assertions below pin the failure modes the
+// production incident surfaced:
+//
+//   1. tick 1: only the past-due task matches; the future task is
+//      untouched
+//   2. tick 1 processes the past task, materialises exactly one wake,
+//      rolls that task's next_run_at forward to its next cron
+//      occurrence, leaves the future task's next_run_at untouched
+//   3. tick 2 (in-process, the next 60s scheduler tick): no task is
+//      due, so nothing is processed and no wake is added
+//   4. close + reopen the on-disk DM (the next daemon restart):
+//      rolled next_run_at persists; a fresh tick still processes zero
+//      and adds zero wakes
+func TestProcessDueTasks_RespectsFutureNextRun(t *testing.T) {
+	dm := newScheduledTaskDM(t)
+	now := time.Now().UTC()
+	futureUnix := now.Add(1 * time.Hour).Unix()
+	pastUnix := now.Add(-1 * time.Minute).Unix()
+
+	for _, row := range []struct {
+		id        string
+		nextRunAt int64
+	}{
+		{"future-task", futureUnix},
+		{"past-task", pastUnix},
+	} {
+		_, err := dm.db.Exec(`
+			INSERT INTO scheduled_tasks
+			(id, name, cron_expr, directive_id, status, next_run_at, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, row.id, row.id, "0 3 * * *", "mpm-seed-reg", ScheduledTaskActive,
+			row.nextRunAt, now.Unix(), now.Unix())
+		if err != nil {
+			t.Fatalf("seed %s: %v", row.id, err)
+		}
+	}
+
+	// Tick 1
+	n, err := dm.ProcessDueTasks()
+	if err != nil {
+		t.Fatalf("ProcessDueTasks tick1: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("tick1: expected 1 task processed (past only), got %d — future-scheduled task was incorrectly matched", n)
+	}
+
+	var reason string
+	if err := dm.db.QueryRow(`
+		SELECT reason FROM scheduled_wakes
+		WHERE created_by = ? ORDER BY rowid DESC LIMIT 1
+	`, CronCreatedBy).Scan(&reason); err != nil {
+		t.Fatalf("QueryRow newest wake: %v", err)
+	}
+	if strings.Contains(reason, "future-task") {
+		t.Errorf("future-task should not have been processed; wake reason references it: %q", reason)
+	}
+	if !strings.Contains(reason, "past-task") {
+		t.Errorf("newest wake should reference past-task, got %q", reason)
+	}
+
+	// future-task.next_run_at must be untouched
+	var futureNextRun int64
+	if err := dm.db.QueryRow(`SELECT next_run_at FROM scheduled_tasks WHERE id = ?`,
+		"future-task").Scan(&futureNextRun); err != nil {
+		t.Fatalf("QueryRow future-task: %v", err)
+	}
+	if futureNextRun != futureUnix {
+		t.Errorf("future-task.next_run_at should be untouched: got %d, want %d", futureNextRun, futureUnix)
+	}
+
+	// past-task.next_run_at must have rolled forward to a future time
+	var pastNextRun int64
+	if err := dm.db.QueryRow(`SELECT next_run_at FROM scheduled_tasks WHERE id = ?`,
+		"past-task").Scan(&pastNextRun); err != nil {
+		t.Fatalf("QueryRow past-task: %v", err)
+	}
+	if pastNextRun <= now.Unix() {
+		t.Errorf("past-task.next_run_at should have rolled forward, got %d (now=%d)", pastNextRun, now.Unix())
+	}
+
+	// Tick 2 — must NOT rematerialize anything
+	wakesBefore := countWakes(t, dm)
+	n2, err := dm.ProcessDueTasks()
+	if err != nil {
+		t.Fatalf("ProcessDueTasks tick2: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("tick2: expected 0 tasks processed (no task is due), got %d", n2)
+	}
+	wakesAfter := countWakes(t, dm)
+	if wakesAfter != wakesBefore {
+		t.Errorf("tick2: wake count changed from %d to %d — duplicate occurrence materialized", wakesBefore, wakesAfter)
+	}
+
+	// Restart persistence: rollover must survive a fresh DatabaseManager
+	// opened against the same on-disk SQLite file (i.e. the next daemon
+	// restart). We use a separate on-disk DM pair rooted at t.TempDir()
+	// so the reopen is real, not a same-handle fallback.
+	ws := t.TempDir()
+	dmDisk, err := NewDatabaseManager(ws)
+	if err != nil {
+		t.Fatalf("new on-disk DM: %v", err)
+	}
+	// NewDatabaseManager runs the baseline seed (epistemic-compaction
+	// scheduled task). Wipe it so the test counts are deterministic
+	// and only reflect the two tasks this test inserts.
+	if _, err := dmDisk.db.Exec(`DELETE FROM scheduled_tasks`); err != nil {
+		t.Fatalf("clear baseline scheduled_tasks: %v", err)
+	}
+	for _, row := range []struct {
+		id        string
+		nextRunAt int64
+	}{
+		{"future-task", futureUnix},
+		{"past-task", pastUnix},
+	} {
+		if _, err := dmDisk.db.Exec(`
+			INSERT INTO scheduled_tasks
+			(id, name, cron_expr, directive_id, status, next_run_at, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, row.id, row.id, "0 3 * * *", "mpm-seed-reg", ScheduledTaskActive,
+			row.nextRunAt, now.Unix(), now.Unix()); err != nil {
+			t.Fatalf("disk seed %s: %v", row.id, err)
+		}
+	}
+
+	// Disk tick 1: process the past task, roll next_run_at forward
+	nDisk1, err := dmDisk.ProcessDueTasks()
+	if err != nil {
+		t.Fatalf("disk tick1: %v", err)
+	}
+	if nDisk1 != 1 {
+		t.Errorf("disk tick1: expected 1 processed, got %d", nDisk1)
+	}
+
+	var rolledNextRun int64
+	if err := dmDisk.db.QueryRow(`SELECT next_run_at FROM scheduled_tasks WHERE id = ?`,
+		"past-task").Scan(&rolledNextRun); err != nil {
+		t.Fatalf("disk read rolled: %v", err)
+	}
+	if rolledNextRun <= now.Unix() {
+		t.Fatalf("disk rolled next_run_at must be in future: got %d, now=%d", rolledNextRun, now.Unix())
+	}
+	diskWakesBefore := countWakes(t, dmDisk)
+
+	// Close the DM and reopen a fresh one against the same workspace
+	// — this is the actual scheduler-restart semantics.
+	if err := dmDisk.Close(); err != nil {
+		t.Fatalf("close disk DM: %v", err)
+	}
+	dmDisk2, err := NewDatabaseManager(ws)
+	if err != nil {
+		t.Fatalf("reopen disk DM: %v", err)
+	}
+	defer dmDisk2.Close()
+
+	// Persisted rollover survives reopen
+	var reopenNextRun int64
+	if err := dmDisk2.db.QueryRow(`SELECT next_run_at FROM scheduled_tasks WHERE id = ?`,
+		"past-task").Scan(&reopenNextRun); err != nil {
+		t.Fatalf("reopen read past-task: %v", err)
+	}
+	if reopenNextRun != rolledNextRun {
+		t.Errorf("rolled next_run_at did not persist across reopen: pre-close=%d post-reopen=%d", rolledNextRun, reopenNextRun)
+	}
+
+	// Tick 2 (post-reopen): must process 0 and add no wakes
+	nDisk2, err := dmDisk2.ProcessDueTasks()
+	if err != nil {
+		t.Fatalf("disk tick2 (post-reopen): %v", err)
+	}
+	if nDisk2 != 0 {
+		t.Errorf("disk tick2 (post-reopen): expected 0 processed, got %d — rollover not persisted", nDisk2)
+	}
+	diskWakesAfter := countWakes(t, dmDisk2)
+	if diskWakesAfter != diskWakesBefore {
+		t.Errorf("disk tick2 (post-reopen): wake count changed from %d to %d — duplicate across restart", diskWakesBefore, diskWakesAfter)
 	}
 }
 
