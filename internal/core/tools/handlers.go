@@ -6420,11 +6420,19 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		return nil, fmt.Errorf("uri is required")
 	}
 	maxBytes, _ := payload["max_bytes"].(float64) // JSON numbers are float64
+	full, _ := payload["full"].(bool)
 
 	// Parse the mpm:// URI locally (mpm-core cannot import main module's pointer).
 	ptr, err := parsePointerURI(uri)
 	if err != nil {
 		return nil, err
+	}
+
+	// full=true bypasses the inline-bound cap (max_bytes=0 → no cap).
+	// Callers wanting a custom bound pass max_bytes explicitly; full
+	// always wins when both are set.
+	if full {
+		maxBytes = 0
 	}
 
 	// Phase 2: all four kinds are supported.
@@ -6444,19 +6452,18 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 				return nil, err
 			}
 			content, _ := mem["content"].(string)
-			// Defect C (2026-09-13 acceptance): pre-fix this branch
-			// defaulted maxB=512 when the caller passed max_bytes=0,
-			// which silently bounded full-content retrieval and broke
-			// the documented pointer contract. The fix: when the
-			// caller does NOT request a cap (max_bytes absent or 0),
-			// the resolver returns the FULL stored content — the
-			// pointer architecture is the deterministic full-retrieval
-			// path. Callers that want a bound pass an explicit
-			// max_bytes. The bounded echo on save/query responses is
-			// unrelated and stays in place.
+			// Final release-pass contract (defect C): ordinary pointer
+			// resolution is bounded to the inline save-echo cap so
+			// agent-facing responses stay compact. Callers that want
+			// the complete payload pass full=true (handled upstream
+			// at line 6435) or a large max_bytes. Without either,
+			// this is the safe default — bounded projection.
 			maxB := int(maxBytes)
-			bounded := maxB > 0 && len(content) > maxB
-			if bounded && len(content) > maxB {
+			if maxB <= 0 {
+				maxB = mpminternal.DefaultMaxInlineContentBytes
+			}
+			bounded := len(content) > maxB
+			if bounded {
 				content = content[:maxB]
 			}
 			_ = dm.RecordRetrieval(ptr.ID, "memory")
@@ -6492,13 +6499,16 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 				return nil, err
 			}
 			_ = dm.RecordRetrieval(ptr.ID, "lesson")
-			// Defect C (2026-09-13 acceptance): see memory-case comment.
-			// max_bytes=0 means caller did NOT request a cap; return
-			// full content. The lesson's bounded echo on other paths
-			// (save/query) is independent.
+			// Final release-pass contract (defect C): bounded
+			// projection by default; full content via full=true or
+			// large max_bytes. See memory-case comment for the
+			// rationale.
 			lessonContent := lesson.Content
 			lessonMaxB := int(maxBytes)
-			lessonBounded := lessonMaxB > 0 && len(lessonContent) > lessonMaxB
+			if lessonMaxB <= 0 {
+				lessonMaxB = mpminternal.DefaultMaxInlineContentBytes
+			}
+			lessonBounded := len(lessonContent) > lessonMaxB
 			if lessonBounded {
 				lessonContent = lessonContent[:lessonMaxB]
 			}
@@ -6523,9 +6533,14 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 			}
 			content, _ := mem["content"].(string)
 			_ = dm.RecordRetrieval(ptr.ID, "theory")
-			// Defect C (2026-09-13 acceptance): see memory-case comment.
+			// Final release-pass contract (defect C): bounded
+			// projection by default; full content via full=true or
+			// large max_bytes.
 			theoryMaxB := int(maxBytes)
-			theoryBounded := theoryMaxB > 0 && len(content) > theoryMaxB
+			if theoryMaxB <= 0 {
+				theoryMaxB = mpminternal.DefaultMaxInlineContentBytes
+			}
+			theoryBounded := len(content) > theoryMaxB
 			if theoryBounded {
 				content = content[:theoryMaxB]
 			}
@@ -6548,10 +6563,15 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 			if work.Content != "" {
 				content = work.Title + "\n\n" + work.Content
 			}
-			// Defect C (2026-09-13 acceptance): see memory-case comment.
+			// Final release-pass contract (defect C): bounded
+			// projection by default; full content via full=true or
+			// large max_bytes.
 			maxB := int(maxBytes)
-			bounded := maxB > 0 && len(content) > maxB
-			if bounded && len(content) > maxB {
+			if maxB <= 0 {
+				maxB = mpminternal.DefaultMaxInlineContentBytes
+			}
+			bounded := len(content) > maxB
+			if bounded {
 				content = content[:maxB]
 			}
 			_ = dm.RecordRetrieval(ptr.ID, "work")

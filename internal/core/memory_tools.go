@@ -229,17 +229,16 @@ func (dm *DatabaseManager) saveMemoryWithContextImpl(
 	if truncated {
 		result["content_truncated"] = true
 		result["content_bytes"] = len(mem.Content)
-		// Defect C (2026-09-13 acceptance): the pre-fix note told
-		// callers to "retrieve via mpm_memory query or mpm_blob_read",
-		// but mpm_blob_read returned "no DB row for blob" because no
-		// blob was ever created — the spill-to-blob path didn't
-		// trigger. The fix surfaces `full_pointer` (the canonical
-		// deterministic retrieval path) and corrects the note.
-		// `mpm_resolve mpm://memory/<id>` returns the FULL stored
-		// content (the resolver's CLI-fallback default cap was 512
-		// bytes pre-fix; that's now opt-in via explicit max_bytes).
-		result["full_pointer"] = "mpm://memory/" + mem.ID
-		result["note"] = "content stored in full; inline echo bounded — retrieve full via mpm_resolve <full_pointer>"
+		// Final release-pass contract (defect C): ordinary pointer
+		// resolution (mpm://memory/<id>) returns a bounded projection;
+		// full content requires the explicit full=true flag.
+		// full_pointer carries the marker so the deterministic
+		// full-retrieval path is unambiguous. The previous
+		// "retrieve via mpm_memory query or mpm_blob_read" note
+		// pointed at a path that never existed for memory storage
+		// (no spill-to-blob for memories).
+		result["full_pointer"] = "mpm://memory/" + mem.ID + "?full=true"
+		result["note"] = "content stored in full; inline echo bounded — retrieve full via mpm_resolve <full_pointer> with full=true"
 	}
 	if len(applied) > 0 {
 		result["theory_resolutions_applied"] = applied

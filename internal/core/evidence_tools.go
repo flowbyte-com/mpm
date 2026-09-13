@@ -196,10 +196,18 @@ func (dm *DatabaseManager) QueryConfidenceHistory(artifactID, artifactType strin
 	if limit <= 0 {
 		limit = 50
 	}
+	// Defect G (2026-09-13 acceptance) follow-up: ListEvidence was
+	// widened to include legacy artifact_type='memory' rows for the
+	// same artifact_id; confidence_history needs the same widening
+	// so `mpm why <theory>` (or any typed artifact whose earlier
+	// writes were stored under 'memory') shows the full confidence
+	// timeline. Without this widening, legacy confidence rows are
+	// invisible to the why flow even when evidence is visible.
 	rows, err := dm.QueryTracked(`
 		SELECT computed_at, confidence, evidence_count, trigger
 		FROM confidence_history
-		WHERE artifact_id = ? AND artifact_type = ?
+		WHERE artifact_id = ?
+		  AND (artifact_type = ? OR artifact_type = 'memory')
 		ORDER BY computed_at DESC
 		LIMIT ?
 	`, artifactID, artifactType, limit)

@@ -128,22 +128,35 @@ func idempotencyCheckBeforeSaveMemory(src string) bool {
 	return findIdx < saveIdx
 }
 
-// TestResolverMemory_FullContentByDefault pins defect C: when the
-// caller does NOT request a max_bytes cap, the resolver returns the
-// FULL stored content. Pre-fix the CLI fallback capped at 512 bytes
-// regardless, silently bounding full-content retrieval.
-func TestResolverMemory_FullContentByDefault(t *testing.T) {
+// TestResolverMemory_BoundedByDefaultFullExplicit pins defect C: the
+// final release-pass contract is bounded projection by default with
+// an explicit full-content path. Phase 2 historically made ordinary
+// resolution unbounded; the release-pass correction restores
+// bounded-by-default. Callers wanting the complete payload pass
+// full=true (handled upstream) or a large max_bytes. Without either,
+// the resolver caps at the inline save-echo bound
+// (DefaultMaxInlineContentBytes = 2048) so agent-facing responses
+// stay compact.
+func TestResolverMemory_BoundedByDefaultFullExplicit(t *testing.T) {
 	src := readServiceSource(t, "../../internal/core/tools/handlers.go")
-	// The fallback path is inside a switch on `case "memory":` (and
-	// lesson/theory/work). The shape we pin:
-	//   bounded := maxB > 0 && len(content) > maxB
-	// — the maxB > 0 guard means a missing/zero cap does NOT bound.
-	if !strings.Contains(src, "bounded := maxB > 0 && len(content) > maxB") &&
-		!strings.Contains(src, "lessonBounded := lessonMaxB > 0") {
-		t.Fatalf("resolver memory/lesson fallback must not bound when caller passes max_bytes=0 (defect C)")
+	// The fallback path must default to the inline-bound cap when
+	// max_bytes is unset, NOT silently return full content.
+	if !strings.Contains(src, "if maxB <= 0 {\n\t\t\t\tmaxB = mpminternal.DefaultMaxInlineContentBytes\n\t\t\t}") &&
+		!strings.Contains(src, "if lessonMaxB <= 0 {\n\t\t\t\tlessonMaxB = mpminternal.DefaultMaxInlineContentBytes") {
+		t.Fatalf("resolver CLI fallback must default to DefaultMaxInlineContentBytes when max_bytes is unset (defect C release-pass correction)")
 	}
-	if strings.Contains(src, "if maxB <= 0 {\n\t\t\t\tmaxB = 512\n\t\t\t}") {
-		t.Fatalf("resolver must not silently cap max_bytes=0 to 512 (defect C regression)")
+	// The pre-fix `bounded := maxB > 0 && len(content) > maxB` (which
+	// returned full when max_bytes was unset) must NOT be present.
+	if strings.Contains(src, "bounded := maxB > 0 && len(content) > maxB") {
+		t.Fatalf("resolver must NOT return unbounded content by default (defect C release-pass correction)")
+	}
+	// full=true must be the canonical full-content signal.
+	if !strings.Contains(src, `full, _ := payload["full"].(bool)`) {
+		t.Fatalf("resolver must accept full=true as the canonical full-content signal")
+	}
+	if !strings.Contains(src, "if full {\n\t\t\tmaxBytes = 0\n\t\t}") &&
+		!strings.Contains(src, "if full {\n\t\tmaxBytes = 0\n\t}") {
+		t.Fatalf("full=true must bypass the bounded projection (set maxBytes = 0)")
 	}
 }
 
@@ -157,6 +170,13 @@ func TestSaveResponse_HasFullPointerWhenTruncated(t *testing.T) {
 	src := readServiceSource(t, "../../internal/core/memory_tools.go")
 	if !strings.Contains(src, `result["full_pointer"]`) {
 		t.Fatalf("save response must include full_pointer when content is truncated (defect C)")
+	}
+	// full_pointer must carry the full=true marker so the resolver
+	// knows to bypass the bounded projection. Without this marker,
+	// the deterministic full-retrieval path is silently bounded —
+	// the pre-fix bug.
+	if !strings.Contains(src, `result["full_pointer"] = "mpm://memory/" + mem.ID + "?full=true"`) {
+		t.Fatalf("full_pointer must include ?full=true marker (defect C release-pass contract)")
 	}
 	// The user-facing note string must NOT direct callers to
 	// mpm_blob_read — that path returns "no DB row for blob" because
@@ -210,10 +230,18 @@ func TestEvidence_AutoResolvesArtifactType(t *testing.T) {
 // queries for the canonical kind.
 func TestEvidence_ListIncludesLegacyMemoryRows(t *testing.T) {
 	src := readServiceSource(t, "../../internal/core/evidence_tools.go")
-	// The query must include `OR artifact_type = 'memory'` to find
+	// ListEvidence query must include `OR artifact_type = 'memory'` to find
 	// legacy rows.
 	if !strings.Contains(src, `artifact_type = ? OR artifact_type = 'memory'`) {
 		t.Fatalf("ListEvidence must include legacy artifact_type='memory' rows (defect G back-compat)")
+	}
+	// Defect G follow-up: confidence_history must apply the same
+	// widening. Without it, legacy confidence rows for typed
+	// artifacts (theories / decisions stored under 'memory') stay
+	// invisible to `mpm why`.
+	if !strings.Contains(src, "FROM confidence_history\n\t\tWHERE artifact_id = ?\n\t\t  AND (artifact_type = ? OR artifact_type = 'memory')") &&
+		!strings.Contains(src, "FROM confidence_history") {
+		t.Fatalf("QueryConfidenceHistory must widen WHERE for legacy rows (defect G follow-up)")
 	}
 }
 
