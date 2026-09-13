@@ -849,15 +849,60 @@ func handleMemoryList(args []string) int {
 			return handleMemoryHelp()
 		}
 	}
+	// Defect R (2026-09-13 acceptance): --json must not be silently
+	// ignored. Same contract as handleMemoryShow / handleMemorySearch:
+	// strip the flag, then emit the canonical envelope.
+	cleaned, wantJSON := stripMemoryFlagToken(args, "--json", "-j")
+	if len(cleaned) > 0 {
+		// Accept any trailing positional as a no-op for forward-compat
+		// (e.g. `mpm memory list --limit 20` once we wire --limit) —
+		// today `mpm memory list` ignores positionals beyond --json.
+		_ = cleaned
+	}
 	store := getMemoryStore()
 
 	memories, err := store.GetRecent(20)
 	if err != nil {
+		if wantJSON {
+			out, _ := json.Marshal(map[string]interface{}{"success": false, "error": fmt.Sprintf("Failed to list memories: %v", err)})
+			return respond(string(out)+"\n", "", 1)
+		}
 		return respond("", fmt.Sprintf("Failed to list memories: %v", err), 1)
 	}
 
 	if len(memories) == 0 {
+		if wantJSON {
+			out, _ := json.Marshal(map[string]interface{}{"success": true, "count": 0, "memories": []interface{}{}})
+			return respond(string(out)+"\n", "", 0)
+		}
 		return respond("No memories stored.\n", "", 0)
+	}
+
+	if wantJSON {
+		// Canonical envelope: {success, count, memories: [...]}.
+		// Each memory carries the bounded-projection fields plus a
+		// pointer for full retrieval via mpm_resolve.
+		rows := make([]map[string]interface{}, 0, len(memories))
+		for _, mem := range memories {
+			echoContent, _ := mpminternal.BoundInlineContent(mem.Content)
+			row := map[string]interface{}{
+				"id":                  mem.ID,
+				"content":             echoContent,
+				"pointer":             "mpm://memory/" + mem.ID,
+				"collection":          mem.Collection,
+				"tags":                mem.Tags,
+				"weight":              mem.Weight,
+				"reinforcement_count": mem.ReinforcementCount,
+				"created_at":          mem.CreatedAt,
+			}
+			rows = append(rows, row)
+		}
+		out, _ := json.Marshal(map[string]interface{}{
+			"success":  true,
+			"count":    len(rows),
+			"memories": rows,
+		})
+		return respond(string(out)+"\n", "", 0)
 	}
 
 	var output strings.Builder
