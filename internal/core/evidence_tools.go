@@ -122,11 +122,22 @@ func (dm *DatabaseManager) ListEvidence(artifactID, artifactType string) (map[st
 	// returns evidence that the CLI marks as gone — a count and identity
 	// divergence between the two surfaces. The audit-trail intact / derivation
 	// clean contract documented in ListEvidenceForArtifact applies here too.
+	//
+	// Defect G (2026-09-13 acceptance): pre-fix this query was strictly
+	// `(artifact_id, artifact_type)` equality, so legacy rows whose
+	// artifact_type was stored as "memory" (the old CLI default) were
+	// invisible to a why/list call asking for kind=theory. The fix is
+	// a two-query union: first the canonical kind, then a fallback
+	// to artifact_type='memory' for the same artifact_id. Old rows
+	// remain on disk; new writes (post-fix CLI) carry the correct
+	// kind. Both are visible here so callers see the full evidence
+	// trail regardless of which wrote them.
 	rows, err := dm.QueryTracked(`
 		SELECT id, artifact_id, artifact_type, type, source_group, strength,
 		       independence_factor, created_by, created_at, expires_at, notes
 		FROM evidence
-		WHERE artifact_id = ? AND artifact_type = ?
+		WHERE artifact_id = ?
+		  AND (artifact_type = ? OR artifact_type = 'memory')
 		  AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
 		ORDER BY created_at DESC
 	`, artifactID, artifactType)

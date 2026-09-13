@@ -187,3 +187,32 @@ func TestWorkUpdate_TitleAndContentBothApplied(t *testing.T) {
 		t.Fatalf("UpdateWorkWithContext must have an explicit combined (title+content) case (defect D)")
 	}
 }
+
+// TestEvidence_AutoResolvesArtifactType pins defect G: the evidence
+// CLI must auto-resolve artifact_type from the artifact_id when the
+// caller does not pass --artifact-type. The pre-fix default of
+// "memory" silently stored every evidence row against the wrong
+// kind, breaking the why/list surfaces for typed artifacts.
+func TestEvidence_AutoResolvesArtifactType(t *testing.T) {
+	src := readServiceSource(t, "evidence_cmds.go")
+	if !strings.Contains(src, "ResolveArtifactType") {
+		t.Fatalf("handleEvidenceAdd must call ResolveArtifactType when --artifact-type is unset")
+	}
+	if !strings.Contains(src, `"artifact_type_set"`) {
+		t.Fatalf("parseEvidenceAddArgs must distinguish explicit --artifact-type from auto-resolve")
+	}
+}
+
+// TestEvidence_ListIncludesLegacyMemoryRows pins defect G backward
+// compat: ListEvidence's WHERE clause must include legacy rows whose
+// artifact_type='memory' so old data is visible. New writes carry the
+// correct kind; old writes carry "memory". Both must appear in
+// queries for the canonical kind.
+func TestEvidence_ListIncludesLegacyMemoryRows(t *testing.T) {
+	src := readServiceSource(t, "../../internal/core/evidence_tools.go")
+	// The query must include `OR artifact_type = 'memory'` to find
+	// legacy rows.
+	if !strings.Contains(src, `artifact_type = ? OR artifact_type = 'memory'`) {
+		t.Fatalf("ListEvidence must include legacy artifact_type='memory' rows (defect G back-compat)")
+	}
+}

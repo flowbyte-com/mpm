@@ -19,7 +19,16 @@ import (
 func parseEvidenceAddArgs(args []string) (map[string]interface{}, error) {
 	fs := flag.NewFlagSet("evidence-add", flag.ContinueOnError)
 	artifactID := fs.String("artifact", "", "artifact id (required)")
-	artifactType := fs.String("artifact-type", "memory", "artifact type (memory/theory/decision/lesson)")
+	// Defect G (2026-09-13 acceptance): the pre-fix default was
+	// "memory", which silently wrote every evidence row with
+	// artifact_type=memory regardless of whether the artifact was a
+	// theory, decision, lesson, etc. The why flow then queried with
+	// the public kind and found nothing. The fix leaves the default
+	// empty so the caller can pass an explicit override or rely on
+	// the handler-level auto-resolution (which calls
+	// ResolveArtifactType on the artifact_id and stores the
+	// canonical kind on the row).
+	artifactType := fs.String("artifact-type", "", "artifact type (default: auto-resolve from artifact id)")
 	evType := fs.String("type", "", "evidence type (required)")
 	source := fs.String("source", "", "source group (required)")
 	strength := fs.String("strength", "", "strength in [-1, 1]; defaults to type's registry value")
@@ -28,12 +37,13 @@ func parseEvidenceAddArgs(args []string) (map[string]interface{}, error) {
 	notes := fs.String("note", "", "optional notes")
 	notesAlias := fs.String("notes", "", "deprecated alias for --note")
 	fs.Usage = func() {
-		fmt.Println("Usage: mpm evidence add --artifact <id> --type <t> --source <s> --by <c> [--note <text>]")
+		fmt.Println("Usage: mpm evidence add --artifact <id> --type <t> --source <s> --by <c> [--artifact-type <kind>] [--note <text>]")
 		fmt.Println()
 		fmt.Println("Flags:")
 		fs.PrintDefaults()
 		fmt.Println()
 		fmt.Println("Note: --notes (plural) is a deprecated alias for --note.")
+		fmt.Println("Note: --artifact-type defaults to auto-resolve from --artifact.")
 	}
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -74,9 +84,15 @@ func parseEvidenceAddArgs(args []string) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--independence: %w", err)
 	}
+	// Resolve artifact_type at the parser boundary so the handler
+	// receives a non-empty kind. If the caller passed --artifact-type,
+	// honor it (validated below). Otherwise leave empty and let the
+	// handler call ResolveArtifactType.
+	resolvedType := *artifactType
 	return map[string]interface{}{
 		"artifact_id":         *artifactID,
-		"artifact_type":       *artifactType,
+		"artifact_type":       resolvedType,
+		"artifact_type_set":   *artifactType != "", // distinguishes explicit from auto
 		"type":                *evType,
 		"source_group":        *source,
 		"strength":            s,
@@ -102,9 +118,31 @@ func handleEvidenceAdd(args []string) int {
 	// interface. The singleton is always a *DatabaseManager, so the
 	// type assertion is safe; the nil check above guards it.
 	dm := getDB().(*mpminternal.DatabaseManager)
+
+	artifactType, _ := payload["artifact_type"].(string)
+	// Defect G (2026-09-13 acceptance): the pre-fix default of
+	// "memory" silently wrote the wrong artifact_type for any
+	// typed artifact (theory, decision, lesson, work). The why
+	// flow then queried with the public kind and returned empty
+	// evidence/confidence rows. The fix auto-resolves the type from
+	// the artifact_id when the caller didn't pass --artifact-type
+	// explicitly, so theory evidence is stored as type=theory,
+	// decision evidence as type=decision, etc. Backward compat:
+	// the resolver's collection-to-type mapping matches what the
+	// schema migration already uses, so old explicit overrides
+	// continue to work.
+	if payload["artifact_type_set"] == false {
+		resolved, resolveErr := dm.ResolveArtifactType(payload["artifact_id"].(string))
+		if resolveErr != nil {
+			printError("--artifact-type is required when --artifact <id> cannot be resolved to a known kind (id=%q not found)", payload["artifact_id"].(string))
+			return 1
+		}
+		artifactType = resolved
+	}
+
 	in := mpminternal.EvidenceInput{
 		ArtifactID:         payload["artifact_id"].(string),
-		ArtifactType:       payload["artifact_type"].(string),
+		ArtifactType:       artifactType,
 		Type:               payload["type"].(string),
 		SourceGroup:        payload["source_group"].(string),
 		Strength:           payload["strength"].(float64),
@@ -116,7 +154,7 @@ func handleEvidenceAdd(args []string) int {
 		printError("add evidence: %v", err)
 		return 1
 	}
-	out, _ := json.Marshal(map[string]interface{}{"success": true, "artifact_id": in.ArtifactID, "type": in.Type})
+	out, _ := json.Marshal(map[string]interface{}{"success": true, "artifact_id": in.ArtifactID, "artifact_type": in.ArtifactType, "type": in.Type})
 	respond(string(out), "", 0)
 	return 0
 }
