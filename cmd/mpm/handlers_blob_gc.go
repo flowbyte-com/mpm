@@ -19,6 +19,20 @@ var blobGC_DB mpminternal.CoreDB
 // handleBlobGC implements `mpm blob gc`.
 // Two passes: GCExpired (delete expired blobs) then GCSweepOrphans (delete orphaned files).
 func handleBlobGC(args []string) int {
+	// Defect 9 (2026-09-13 acceptance): mpm blob gc --help used to
+	// execute a non-dry-run GC because the router's isSubcommandHelp
+	// fall-through routed "help" to this handler without a short-
+	// circuit. Without this guard, `--help` is a destructive mutation
+	// vector. (The pre-fix acceptance observed "only showed generic
+	// blob help" — but the actual code path runs the GC; with no
+	// expired blobs and no orphans, the output is silent and looks
+	// like help-only output. The fix ensures `--help` is inert.)
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" || arg == "help" {
+			printBlobHelp()
+			return 0
+		}
+	}
 	dryRun := false
 	for _, arg := range args {
 		if arg == "--dry-run" || arg == "-n" {

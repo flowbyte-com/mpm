@@ -721,11 +721,9 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 	case "resolve_theory":
 		printResolveTheoryHelp()
 		return 0
-	case "save-skill", "skill":
+	case "save-skill":
 		// Round 9 T52: dedicated help page documents the required
 		// `version` frontmatter field and --version CLI flag.
-		// `skill` is the cognitive-verb alias for `save-skill`; both
-		// route through handleSaveSkill.
 		return handleSaveSkillHelp()
 	}
 	if helpFunc != nil {

@@ -14,6 +14,16 @@ import (
 // ============================================================================
 
 func handleShred(args []string) int {
+	// Defect class (2026-09-13 acceptance): `mpm shred --help` used
+	// to reach this handler with args[0]="help" treated as the
+	// target type, then fall through to a non-existent case and
+	// surface an opaque error. requireHelpShortCircuit routes --help
+	// to the shred help page and exits 0.
+	if requireHelpShortCircuit(args, func() {
+		handleShredHelp()
+	}) {
+		return 0
+	}
 	if len(args) < 1 {
 		return handleShredHelp()
 	}

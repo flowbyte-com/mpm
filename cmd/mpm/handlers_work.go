@@ -199,6 +199,17 @@ func handleWorkShow(args []string) int {
 // handleWorkClear removes the current working context.
 // Idempotent — no current context yields a no-op with a friendly message.
 func handleWorkClear(args []string) int {
+	// Defect 1 (2026-09-13 acceptance): mpm work clear --help used to
+	// actually clear the working context because the router's
+	// isSubcommandHelp fall-through routed "help" to this handler
+	// without a short-circuit. Without this guard, `--help` after the
+	// subcommand name is a destructive mutation vector.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			printWorkHelp()
+			return 0
+		}
+	}
 	sessionID, _ := workCommonFlags(args, false)
 	dm := getDBConcrete()
 	if dm == nil {
@@ -216,6 +227,17 @@ func handleWorkClear(args []string) int {
 // handleWorkPromote promotes the working context to a permanent memory.
 // Prints the new memory id. Use --json for machine-readable output.
 func handleWorkPromote(args []string) int {
+	// Defect 2 (2026-09-13 acceptance): mpm work promote --help used
+	// to enter the promotion path because the router's
+	// isSubcommandHelp fall-through routed "help" to this handler
+	// without a short-circuit. Without this guard, `--help` after the
+	// subcommand name is a destructive mutation vector.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			printWorkHelp()
+			return 0
+		}
+	}
 	sessionID, jsonOutput := workCommonFlags(args, true)
 	dm := getDBConcrete()
 	if dm == nil {

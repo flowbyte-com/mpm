@@ -25,6 +25,30 @@ import (
 	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
+// requireHelpShortCircuit scans args for any help token (-h, --help, or
+// the parseFlags-rewritten literal "help") and invokes helpFn if any is
+// found. Returns true if help was consumed — the caller MUST bail out
+// with exit 0 in that case.
+//
+// Use this at the entry of any handler that takes a positional ID or
+// scope as data, so `mpm <verb> <id> --help` cannot mutate state.
+//
+// Origin (2026-09-13 acceptance): the help-safety bug class surfaced
+// across 9 commands (work clear, work promote, memory snooze, skill
+// list, skill search, skill show, skill --help parent, kb reference,
+// blob gc). The pre-fix handlers had per-handler inconsistent help
+// guards — some had the R3 sweep, most didn't. This helper centralizes
+// the pattern so every data-taking handler has the same protection.
+func requireHelpShortCircuit(args []string, helpFn func()) bool {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			helpFn()
+			return true
+		}
+	}
+	return false
+}
+
 // int64FromMap extracts an int64 from a DB-projection map.
 //
 // Returns (value, true) on a clean type match. Returns (default, false) when
