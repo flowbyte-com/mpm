@@ -102,6 +102,16 @@ func handleLessonAdd(args []string) int {
 	jsonOutput, filteredArgs := ExtractJSONFlag(args)
 	args = filteredArgs
 
+	// Defect F (2026-09-13 acceptance): pre-fix this loop had a
+	// "first positional wins, swallow the rest" anti-pattern. After
+	// capturing content from the first non-flag token, it appended
+	// any subsequent non-flag tokens to content AND then skipped
+	// every remaining flag. Result: `mpm lesson add "x" --type
+	// warning --tags a,b` stored content "x" with the default
+	// lessonType "insight" and no tags — silently ignored. The fix
+	// walks the full arg list linearly, hoisting --type/--tags out
+	// of the positional stream regardless of position.
+	var contentParts []string
 	i := 0
 	for i < len(args) {
 		switch args[i] {
@@ -110,31 +120,24 @@ func handleLessonAdd(args []string) int {
 				lessonType = args[i+1]
 				i += 2
 			} else {
-				i++
+				return respond("", "--type requires a value (warning|practice|insight)", 1)
 			}
 		case "--tags":
 			if i+1 < len(args) {
 				tags = strings.Split(args[i+1], ",")
 				i += 2
 			} else {
-				i++
+				return respond("", "--tags requires a value", 1)
 			}
 		default:
-			// First non-flag arg is the content; consume it and stop
-			content = args[i]
-			// Check if there are more args that aren't flags
+			if strings.HasPrefix(args[i], "--") {
+				return respond("", fmt.Sprintf("unknown flag %q (supported: --type, --tags)", args[i]), 1)
+			}
+			contentParts = append(contentParts, args[i])
 			i++
-			for i < len(args) && !strings.HasPrefix(args[i], "--") {
-				content += " " + args[i]
-				i++
-			}
-			// Skip any remaining flags
-			for i < len(args) {
-				i++
-			}
-			break
 		}
 	}
+	content = strings.Join(contentParts, " ")
 
 	if content == "" {
 		return respond("", "Usage: mpm lesson add <content>", 1)

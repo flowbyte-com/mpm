@@ -29,7 +29,7 @@ import (
 func handleAdd(args []string) int {
 	fs := flag.NewFlagSet("add", flag.ContinueOnError)
 	collection := fs.String("collection", "memories", "Collection name")
-	tag := fs.String("tag", "", "Tag to add (can specify multiple)")
+	tag := fs.String("tags", "", "Tag to add (can specify multiple, comma-separated)")
 	session := fs.String("session", "", "Session ID to associate")
 	weight := fs.Float64("weight", float64(mpminternal.DefaultMemoryWeight), "Initial weight (canonical default matches mpm_memory save)")
 	ttl := fs.String("ttl", "", "Time to live (e.g., 7d, 24h)")
@@ -37,14 +37,14 @@ func handleAdd(args []string) int {
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm add [flags] <content>")
 		fmt.Println("Flags:")
-		fmt.Println("  --tag <a,b,c>     Comma-separated tags")
+		fmt.Println("  --tags <a,b,c>    Comma-separated tags")
 		fmt.Println("  --weight <0-100> Initial weight (canonical default matches mpm_memory save)")
 		fmt.Println("  --collection <c> Collection name (default memories)")
 		fmt.Println("  --ttl <duration> Time to live (e.g. 7d, 24h)")
 		fmt.Println("Notes:")
 		fmt.Println("  To add content starting with '-' or '--', prefix with '--' to")
 		fmt.Println("  terminate flag parsing: mpm add -- '---yaml-front-matter'")
-		fmt.Println("Example: mpm add --tag personal,important 'Remember to call mom'")
+		fmt.Println("Example: mpm add --tags personal,important 'Remember to call mom'")
 	}
 
 	// Pre-scan: Go's flag.Parse switches to positional-only mode once a
@@ -52,8 +52,17 @@ func handleAdd(args []string) int {
 	// would silently absorb `--weight 5` as content. The same pattern is
 	// used in handleMemoryAdd (handlers_memory.go) — pull all known
 	// flags out before the positional content so flag.Parse sees them.
+	//
+	// Defect E (2026-09-13 acceptance): the pre-fix list used "--tag"
+	// (singular) but the help text and `mpm remember` documented
+	// "--tags" (plural). Operator invocations of `mpm remember "x"
+	// --tags foo,bar --weight 7` had the trailing `--tags foo,bar
+	// --weight 7` silently absorbed into content (because the flag was
+	// not in the reorder list and flag.Parse saw positional content),
+	// while weight applied correctly. The fix is to use --tags here
+	// too so all `mpm add`-family commands agree.
 	cleaned := reorderFlagsBeforePositionals(args[1:],
-		"--collection", "--tag", "--session", "--weight", "--ttl", "--json")
+		"--collection", "--tags", "--session", "--weight", "--ttl", "--json")
 
 	// Parse with standard flag parser, which handles arbitrary argument ordering.
 	// After parsing, fs.Args() contains the positional arguments (the content).
@@ -678,6 +687,15 @@ func parseJSONPatchValue(raw string) (interface{}, error) {
 
 // mpm promote <id> — Make memory LTM
 func handlePromote(args []string) int {
+	// Defect class (2026-09-13 acceptance): a "help" token at any
+	// position used to be consumed as the id positional, mutating
+	// state. requireHelpShortCircuit routes --help to a usage
+	// message and bails out before any DB call.
+	if requireHelpShortCircuit(args, func() {
+		usererror.Usage("mpm promote <id>")
+	}) {
+		return 0
+	}
 	if len(args) < 2 {
 		usererror.Usage("mpm promote <id>")
 		return 1
@@ -931,6 +949,14 @@ func handleWeaken(args []string) int {
 }
 // mpm set-weight <id> <weight> — Set weight directly
 func handleSetWeight(args []string) int {
+	// Defect class (2026-09-13 acceptance): see handleSnooze's mirror
+	// comment — centralize help-safety so `--help` after the id
+	// positional is inert.
+	if requireHelpShortCircuit(args, func() {
+		usererror.Usage("mpm set-weight <id> <weight>")
+	}) {
+		return 0
+	}
 	if len(args) < 3 {
 		usererror.Usage("mpm set-weight <id> <weight>")
 		return 1
@@ -994,7 +1020,19 @@ func handleSetWeight(args []string) int {
 // the same clear "use `mpm promote` for permanent durability" error.
 // --days and --duration remain supported for muscle memory and
 // scripting convenience.
+//
+// Defect 3 (2026-09-13 acceptance): mpm memory snooze --help and
+// mpm snooze --help used to reach this handler with "help" as the
+// id positional, then mutate state against a non-existent memory
+// named "help". Centralized help-safe guard via the shared helper
+// ensures --help is inert regardless of the dispatch path
+// (top-level vs memory namespace).
 func handleSnooze(args []string) int {
+	if requireHelpShortCircuit(args, func() {
+		usererror.Usage("mpm snooze <id> [--days N | --duration <n><unit> | --until <RFC3339>]")
+	}) {
+		return 0
+	}
 	if len(args) < 2 {
 		usererror.Usage("mpm snooze <id> [--days N | --duration <n><unit> | --until <RFC3339>]")
 		return 1
@@ -2241,6 +2279,15 @@ func enrichCandidate(dm *mpminternal.DatabaseManager, active activeAdmission) (s
 
 // handleRef routes reference subcommands
 func handleRef(args []string) int {
+	// Defect 8 (2026-09-13 acceptance): `mpm kb reference --help`
+	// reached the default arm, called printRefHelp, discarded its
+	// return value, and exited 1 — operators saw help text plus a
+	// non-zero exit code. Help requests must always exit 0.
+	if requireHelpShortCircuit(args, func() {
+		printRefHelp()
+	}) {
+		return 0
+	}
 	if len(args) < 1 {
 		_ = printRefHelp()
 		return 1

@@ -59,8 +59,8 @@ func TestHandleAdd_FlagAfterContent(t *testing.T) {
 			wantWeight:  7,
 		},
 		{
-			name:        "--tag after content",
-			args:        []string{"add", "tagged test", "--tag", "foo,bar"},
+			name:        "--tags after content",
+			args:        []string{"add", "tagged test", "--tags", "foo,bar"},
 			wantContent: "tagged test",
 			// 2026-09-10 cleanup: the canonical save default is 0.5
 			// (legacy float scale), which normalizeWeightToColumn
@@ -69,6 +69,11 @@ func TestHandleAdd_FlagAfterContent(t *testing.T) {
 			// tool path's 0.5 (column=5). Both surfaces now agree at
 			// 5. Tests that exercised the divergent CLI default
 			// (this one) are updated to the canonical value.
+			//
+			// 2026-09-13 acceptance: --tags (plural) is the canonical
+			// flag name; the pre-fix --tag (singular) is replaced so
+			// the help text matches the parser and the documented
+			// muscle-memory form actually works.
 			wantWeight:  5,
 			wantTags:    `["foo","bar"]`,
 		},
