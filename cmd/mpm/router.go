@@ -76,6 +76,7 @@ func NewRouter() *CommandRouter {
 		"reference": {Name: "reference", Description: "Manage reference documents", MinArgs: 1},
 		"topic":     {Name: "topic", Description: "Manage topics", MinArgs: 1},
 		"session":   {Name: "session", Description: "Manage sessions", MinArgs: 1},
+		"handoff":   {Name: "handoff", Description: "Manage handoffs (write|read|list|shred)", MinArgs: 1},
 		"lesson":    {Name: "lesson", Description: "Manage lessons", MinArgs: 1},
 		"memory":    {Name: "memory", Description: "Manage memories", MinArgs: 1},
 
@@ -379,6 +380,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleTopic(args[1:])
 	case "session":
 		return handleSession(args[1:])
+	case "handoff":
+		return handleHandoff(args[1:])
 	case "lesson":
 		return handleLesson(args[1:])
 	case "hint":
@@ -757,6 +760,7 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 var commandsWithSubcommandDispatch = map[string]bool{
 	"work":        true, // status|show|clear|promote|item
 	"session":     true, // add|search|show|shred|list
+	"handoff":     true, // write|read|list|shred
 	"lesson":      true, // add|show|list|search|shred
 	"skill":       true, // add|list|show|search|workshop
 	"ops":         true, // doctor|gc|synthesize|...

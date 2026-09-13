@@ -443,3 +443,63 @@ Examples
 MCP equivalent (canonical for agents)
   mpm call mpm_skills --payload '{"action":"workshop","params":{<workshop_request>}}'`)
 }
+// handleSkillDelete is `mpm skill delete <id>` — soft delete. The
+// substrate marks the row's deleted_at; the row remains readable
+// (per the soft-delete contract) and is recoverable via
+// `mpm skill add --force` which resurrects the same id.
+//
+// Final release-pass: this is the canonical CLI surface for
+// skill retirement that the lifecycle matrix called out as a
+// gap. The previous CLI required `mpm call mpm_skills
+// --payload '{"action":"delete","params":{...}}'` — that path
+// remains available; this CLI surface is the discoverable one.
+//
+// Skill id form: skill:<name>-v<version> (e.g. skill:agentshell-v1.0.0).
+// The legacy "name version" pair is also accepted.
+func handleSkillDelete(args []string) int {
+	if len(args) == 0 {
+		printError("usage: mpm skill delete <skill-id>")
+		return 1
+	}
+	dm := getDB()
+	if dm == nil {
+		return 1
+	}
+	skillID := args[0]
+	if err := dm.ShredSkill(skillID); err != nil {
+		printError("skill delete: %v", err)
+		return 1
+	}
+	fmt.Printf("✓ skill %s retired (recoverable via mpm skill add --force)\n", skillID)
+	return 0
+}
+
+// handleSkillShred is `mpm skill shred <id>` — permanent deletion.
+// Unlike delete, shred is NOT recoverable. The row is removed
+// with cascade cleanup of dependent rows (topic_memberships,
+// confidence_history).
+//
+// Final release-pass: this is the canonical CLI surface for
+// skill destruction that the lifecycle matrix called out as a
+// gap. The substrate implements shred via a hard DELETE on the
+// memories row plus the cascade; pre-fix the CLI had no surface
+// for it at all.
+//
+// This is destructive. Confirm intent before invoking.
+func handleSkillShred(args []string) int {
+	if len(args) == 0 {
+		printError("usage: mpm skill shred <skill-id>")
+		return 1
+	}
+	dm := getDB()
+	if dm == nil {
+		return 1
+	}
+	skillID := args[0]
+	if err := dm.PermanentlyShredSkill(skillID); err != nil {
+		printError("skill shred: %v", err)
+		return 1
+	}
+	fmt.Printf("⚠ skill %s permanently shredded (not recoverable)\n", skillID)
+	return 0
+}

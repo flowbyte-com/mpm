@@ -834,6 +834,53 @@ func (dm *DatabaseManager) ShredSkill(skillID string) error {
 	return nil
 }
 
+// PermanentlyShredSkill is the destructive complement of ShredSkill.
+// Whereas ShredSkill does a soft-delete (sets deleted_at; the row
+// remains readable until resurrected via `mpm skill add --force`),
+// PermanentlyShredSkill removes the row outright with cascade
+// cleanup of dependent rows in topic_memberships and
+// confidence_history. Not recoverable.
+//
+// Final release-pass: this is the substrate path the canonical
+// `mpm skill shred` CLI surfaces. Idempotent — a missing id is a
+// no-op (matches ShredSkill's contract per tool-behavioral-contract.md
+// §I-C.9).
+func (dm *DatabaseManager) PermanentlyShredSkill(skillID string) error {
+	db := dm.SQLDB()
+	if db == nil {
+		return fmt.Errorf("db not initialized")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin shred tx: %w", err)
+	}
+	defer tx.Rollback()
+	// Cascade cleanup first — keeps dependents consistent even if
+	// the final DELETE itself is a no-op.
+	if _, err := tx.Exec(
+		`DELETE FROM topic_memberships WHERE memory_id IN (SELECT id FROM memories WHERE id = ? AND collection = 'skills')`,
+		skillID,
+	); err != nil {
+		return fmt.Errorf("shred skill: cleanup topic_memberships: %w", err)
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM confidence_history WHERE artifact_id = ? AND artifact_type = 'skill'`,
+		skillID,
+	); err != nil {
+		return fmt.Errorf("shred skill: cleanup confidence_history: %w", err)
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM memories WHERE id = ? AND collection = 'skills'`,
+		skillID,
+	); err != nil {
+		return fmt.Errorf("shred skill: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("shred skill: commit: %w", err)
+	}
+	return nil
+}
+
 // (ErrSkillNotFound removed in C.9 revert — see ShredSkill doc
 // above and docs/tool-behavioral-contract.md for the project-wide
 // not-found semantics policy that now governs this path.)

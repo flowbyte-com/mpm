@@ -362,6 +362,9 @@ type CoreDB interface {
 	SaveSkill(name, version, content, authorAgent string, force bool) (string, error)
 	PromoteSkillToGlobal(skillID string, confirm bool) error
 	ShredSkill(skillID string) error
+	// PermanentlyShredSkill is the destructive complement of ShredSkill:
+	// hard DELETE plus cascade cleanup. Not recoverable. Idempotent.
+	PermanentlyShredSkill(skillID string) error
 
 	// ─── Retrieval metadata (Observability Layer, 2026-07-26) ─────
 	// Fire-and-forget telemetry for adaptive retrieval. Called from

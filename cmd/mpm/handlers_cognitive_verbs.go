@@ -250,6 +250,16 @@ func handleSkill(args []string) int {
 		return handleSkillSearch(rest)
 	case "workshop":
 		return handleSkillWorkshop(rest)
+	case "delete":
+		// Final release-pass: skill lifecycle completeness. Soft
+		// delete — recoverable via `mpm skill add --force` (which
+		// resurrects the soft-deleted row with the same id).
+		return handleSkillDelete(rest)
+	case "shred":
+		// Final release-pass: permanent deletion. Unlike delete,
+		// shred is not recoverable; the row is removed with cascade
+		// cleanup of dependent topic_memberships and confidence_history.
+		return handleSkillShred(rest)
 	case "help", "-h", "--help":
 		printSkillHelp()
 		return 0
@@ -460,11 +470,15 @@ Subcommands:
   workshop  Run the skill workshop (form | refine) — guided skill-formation workflow.
             Run "mpm skill workshop --help" for the full schema, boundary vocabulary,
             change_type options, and JSON examples.
+  delete    Soft-delete a skill (recoverable via add --force)
+  shred     Permanently delete a skill (not recoverable)
 
 Examples:
   mpm skill add --file path/to/SKILL.md
   mpm skill list
   mpm skill show agentshell
+  mpm skill delete skill:agentshell-v1.0.0
+  mpm skill shred skill:agentshell-v1.0.0
   mpm skill workshop --file request.json`)
 }
 
