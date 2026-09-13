@@ -1264,25 +1264,19 @@ func handleRefAdd(args []string) int {
 	// (preserving the current architecture) and we surface an explicit
 	// error so operators are not silently misled.
 	urlFlag := fs.String("url", "", "DEPRECATED stub: URL ingestion is not yet supported (alpha-4.1.2 D-005). Downloads the URL into a local file first, then re-run.")
-	if err := fs.Parse(args[1:]); err != nil {
+	// Defect O (2026-09-13 acceptance): the pre-fix parser required
+	// --tag/--reason/--chunk-size BEFORE the file path. The documented
+	// shape (`mpm reference add <file> [--tag tags]`) puts the flags
+	// AFTER the positional, which Go's stdlib `flag` silently drops.
+	// The pre-fix code rejected the documented shape with a "flag
+	// must come BEFORE the file path" error — the help and the
+	// parser were inconsistent. The fix uses reorderFlagsBeforePositionals
+	// (the same helper `mpm add` uses) so the canonical
+	// `mpm reference add <file> --tag foo` syntax works.
+	cleaned := reorderFlagsBeforePositionals(args[1:],
+		"--tag", "--reason", "--chunk-size", "--json")
+	if err := fs.Parse(cleaned); err != nil {
 		return 1
-	}
-
-	// R-3 (2026-09-12 CLI acceptance pass): Go's `flag` package silently
-	// stops parsing at the first positional argument. Any --flag VALUE
-	// placed AFTER the file path is dropped without complaint — the
-	// ingest then writes the reference with the default (empty) tag
-	// set, leaving the operator confused about why their --tag was
-	// ignored. We catch the post-positional flag shape explicitly so
-	// the failure mode is loud rather than silent.
-	if fs.NArg() >= 1 {
-		posIdx := indexOfFirstPositional(args[1:], fs)
-		for i := posIdx + 1; i < len(args[1:]); i++ {
-			tok := args[1:][i]
-			if len(tok) >= 2 && tok[0] == '-' && tok[1] == '-' {
-				return usererror.Error("flag %q must come BEFORE the file path (Go flag package convention): try `mpm reference add %s %s`", tok, strings.TrimPrefix(tok, "--"), args[1+posIdx])
-			}
-		}
 	}
 
 	if *urlFlag != "" {

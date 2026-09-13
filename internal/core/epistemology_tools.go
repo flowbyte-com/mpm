@@ -617,14 +617,20 @@ func (dm *DatabaseManager) InvalidateDecision(decisionID, reason string) (map[st
 			return fmt.Errorf("mark invalidated: %w", err)
 		}
 		if _, err := node.ExecTracked(
-			// Same JSON-array append fix as SupersedeDecision — append
-			// "superseded" via json_insert so the column stays valid
-			// JSON. The `NOT (tags LIKE '%superseded%')` guard remains
-			// but now operates against the JSON text rather than CSV.
+			// Defect Q (2026-09-13 acceptance): pre-fix this added the
+			// tag 'superseded' on invalidate — wrong semantics. A
+			// replacement decision (which was a 'supersede' target)
+			// that was later invalidated ended with tag 'superseded'
+			// even though it was not itself superseded; the tag now
+			// correctly says 'invalidated'. The JSON-array append
+			// (json_insert + CASE for null/empty/degenerate rows)
+			// is the same pattern SupersedeDecision uses, with the
+			// token swapped to 'invalidated' and the dedupe guard
+			// updated to match.
 			`UPDATE memories SET tags = CASE
-				WHEN tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null' OR NOT json_valid(tags) THEN json_array('superseded')
-				ELSE json_insert(tags, '$[' || json_array_length(tags) || ']', 'superseded')
-			END WHERE id = ? AND deleted_at IS NULL AND (tags IS NULL OR tags NOT LIKE '%superseded%')`,
+				WHEN tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null' OR NOT json_valid(tags) THEN json_array('invalidated')
+				ELSE json_insert(tags, '$[' || json_array_length(tags) || ']', 'invalidated')
+			END WHERE id = ? AND deleted_at IS NULL AND (tags IS NULL OR tags NOT LIKE '%invalidated%')`,
 			0, decisionID); err != nil {
 			return fmt.Errorf("tag invalidated: %w", err)
 		}

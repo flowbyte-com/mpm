@@ -102,11 +102,20 @@ func handleTopicAdd(args []string) int {
 	`, id, name, description)
 
 	if execErr != nil {
+		// Defect P (2026-09-13 acceptance): the pre-fix error
+		// surfaced the raw SQLite message — "UNIQUE constraint
+		// failed: topics.name" — with no name context. The fix
+		// inspects the error and emits a domain-level message
+		// ("Topic \"foo\" already exists.") so the operator
+		// sees what they need to change. Falls back to the raw
+		// message when the error isn't a known constraint so
+		// future schema changes don't get swallowed.
+		friendly := friendlyTopicAddError(execErr, name)
 		if jsonOutput {
-			data, _ := json.Marshal(map[string]interface{}{"success": false, "error": fmt.Sprintf("Failed to add topic: %v", execErr)})
+			data, _ := json.Marshal(map[string]interface{}{"success": false, "name": name, "error": friendly})
 			fmt.Println(string(data))
 		} else {
-			respond("", fmt.Sprintf("Failed to add topic: %v", execErr), 1)
+			respond("", friendly, 1)
 		}
 		return 1
 	}
@@ -123,6 +132,21 @@ func handleTopicAdd(args []string) int {
 		respond(fmt.Sprintf("Topic added: %s\n", name), "", 0)
 	}
 	return 0
+}
+
+// friendlyTopicAddError translates known SQLite constraint errors
+// into stable user-facing messages. Unknown errors pass through with
+// the raw text so future schema changes don't get silently dropped.
+// The detector is a substring match against the SQLite driver text
+// ("UNIQUE constraint failed") so a driver upgrade that rewords the
+// prefix won't regress silently — the test for defect P pins the
+// output string instead.
+func friendlyTopicAddError(err error, name string) string {
+	msg := err.Error()
+	if strings.Contains(msg, "UNIQUE constraint failed: topics.name") {
+		return fmt.Sprintf("Topic %q already exists.", name)
+	}
+	return fmt.Sprintf("Failed to add topic: %v", err)
 }
 
 // parseTopicAddArgs extracts (name, description) from the cleaned

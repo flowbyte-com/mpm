@@ -286,3 +286,62 @@ func TestStatus_UptimeNotProcessStart(t *testing.T) {
 		t.Fatalf("schedulerUptimeOrFallback must read scheduler.state's process_started_unix field")
 	}
 }
+
+// TestTopicAdd_FriendlyDuplicateError pins defect P: the user-facing
+// duplicate-topic error must be domain-shaped ("Topic \"foo\"
+// already exists.") rather than the raw SQLite message
+// ("UNIQUE constraint failed: topics.name").
+func TestTopicAdd_FriendlyDuplicateError(t *testing.T) {
+	src := readServiceSource(t, "handlers_topic.go")
+	if !strings.Contains(src, "friendlyTopicAddError") {
+		t.Fatalf("handleTopicAdd must translate raw SQLite errors via friendlyTopicAddError (defect P)")
+	}
+	if !strings.Contains(src, `Topic %q already exists.`) {
+		t.Fatalf("duplicate-topic error must use the canonical domain-shaped message (defect P)")
+	}
+}
+
+// TestReferenceAdd_AcceptsPostPositionalFlags pins defect O: the
+// documented syntax `mpm reference add <file> --tag foo` must work.
+// Pre-fix the parser rejected post-positional flags with "must come
+// BEFORE the file path" — the help text and the parser disagreed.
+// The fix uses reorderFlagsBeforePositionals.
+func TestReferenceAdd_AcceptsPostPositionalFlags(t *testing.T) {
+	src := readServiceSource(t, "simple_cmds.go")
+	// The exact flag list spans multiple lines; check for the
+	// individual flag tokens rather than the full call shape.
+	hasTag := strings.Contains(src, `"--tag"`)
+	hasReason := strings.Contains(src, `"--reason"`)
+	hasChunkSize := strings.Contains(src, `"--chunk-size"`)
+	if !(hasTag && hasReason && hasChunkSize) {
+		t.Fatalf("handleRefAdd must reorder --tag/--reason/--chunk-size before positionals (defect O)")
+	}
+	if !strings.Contains(src, "reorderFlagsBeforePositionals(args[1:],") {
+		t.Fatalf("handleRefAdd must use reorderFlagsBeforePositionals on args[1:] (defect O)")
+	}
+	// The pre-fix post-positional guard must be removed.
+	if strings.Contains(src, "flag %q must come BEFORE the file path (Go flag package convention)") {
+		t.Fatalf("handleRefAdd must NOT reject post-positional flags (defect O regression)")
+	}
+}
+
+// TestInvalidateDecision_AddsInvalidatedTagNotSuperseded pins defect
+// Q: invalidating a decision must add the 'invalidated' tag, not
+// 'superseded'. Pre-fix the tag was 'superseded' regardless of
+// operation, so a replacement decision that was later invalidated
+// ended with tag 'superseded' — a false-positive on "is this
+// decision superseded?" queries.
+func TestInvalidateDecision_AddsInvalidatedTagNotSuperseded(t *testing.T) {
+	src := readServiceSource(t, "../../internal/core/epistemology_tools.go")
+	// The new InvalidateDecision must use 'invalidated' as the tag
+	// token in its JSON-array append. The pre-fix used 'superseded'
+	// — pin the absence.
+	if !strings.Contains(src, `json_array('invalidated')`) {
+		t.Fatalf("InvalidateDecision must add 'invalidated' tag, not 'superseded' (defect Q)")
+	}
+	// Specifically the second occurrence (the actual InvalidateDecision
+	// path, not SupersedeDecision).
+	if !strings.Contains(src, `json_insert(tags, '$[' || json_array_length(tags) || ']', 'invalidated')`) {
+		t.Fatalf("InvalidateDecision JSON-array append must use 'invalidated' token (defect Q)")
+	}
+}
