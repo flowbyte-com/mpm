@@ -11,6 +11,7 @@ package internal
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -114,10 +115,16 @@ func TestF9_SupersededDecisionDiscountedInRetrievalRanking(t *testing.T) {
 }
 
 // isSupersededFromMapF9 adapts the GetMemory map shape to IsSuperseded.
-// The `tags` column holds `["superseded","superseded-by:<id>"]` (JSON array),
-// so parse it as JSON rather than splitting by comma. The pre-fix code path
-// read a CSV-style `["a","b"],superseded` blob and split on commas, which
-// silently misclassified decisions after the JSON-array fix landed.
+// The `tags` column holds a JSON array of strings (e.g.
+// `["superseded","superseded-by:<id>"]` after SupersedeDecision, or
+// `["invalidated"]` after InvalidateDecision — see defect Q, 2026-09-13).
+// We parse it as JSON rather than splitting by comma. The pre-fix code
+// path read a CSV-style `["a","b"],superseded` blob and split on commas,
+// which silently misclassified decisions after the JSON-array fix landed.
+//
+// Acceptance contract (2026-09-13): a retired decision carries either
+// the `superseded`/`superseded-by:<id>` marker OR the `invalidated`
+// marker. Both flag the artifact as out-of-band for retrieval ranking.
 func isSupersededFromMapF9(mem map[string]interface{}) bool {
 	if mem == nil {
 		return false
@@ -127,7 +134,12 @@ func isSupersededFromMapF9(mem map[string]interface{}) bool {
 	if err := json.Unmarshal([]byte(tagsStr), &tags); err != nil {
 		return false
 	}
-	return IsSuperseded(tags)
+	for _, t := range tags {
+		if t == "superseded" || strings.HasPrefix(t, "superseded-by:") || t == "invalidated" {
+			return true
+		}
+	}
+	return false
 }
 
 func TestF9_InvalidateRetiresWithoutReplacement(t *testing.T) {

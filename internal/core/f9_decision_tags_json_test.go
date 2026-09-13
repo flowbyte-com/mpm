@@ -4,6 +4,12 @@
 // (e.g. `["foo","bar"]`), yielding malformed text that json.Unmarshal rejected.
 // Every `mpm memory list` call then printed N noisy "failed to unmarshal tags"
 // warnings — operator-visible regression caused by a one-line tag-append bug.
+//
+// Defect Q (2026-09-13 acceptance): InvalidateDecision tags with `invalidated`
+// rather than `superseded`; the canonical retirement marker for the two paths
+// is now distinct. The JSON-shape contract (parses cleanly into []string)
+// remains; the marker check accepts whichever retirement token the path
+// actually writes.
 package internal
 
 import (
@@ -18,7 +24,11 @@ import (
 // parses cleanly into a []string. Pre-fix this fails with "invalid character
 // ',' after top-level value" because the column holds
 // `[],superseded,superseded-by:<id>` rather than a real JSON array.
-func assertTagsIsValidJSON(t *testing.T, dm *DatabaseManager, id string) {
+//
+// accepts is the set of retirement tokens the caller expects the row to
+// carry. SupersedeDecision writes `superseded` (+ `superseded-by:<id>`);
+// InvalidateDecision writes `invalidated`. Pass exactly the one you need.
+func assertTagsIsValidJSON(t *testing.T, dm *DatabaseManager, id string, accepts ...string) {
 	t.Helper()
 	mem, err := dm.GetMemory(id)
 	require.NoError(t, err)
@@ -30,16 +40,21 @@ func assertTagsIsValidJSON(t *testing.T, dm *DatabaseManager, id string) {
 	err = json.Unmarshal([]byte(tagsRaw), &tags)
 	require.NoErrorf(t, err, "tags column must be valid JSON (got %q)", tagsRaw)
 
-	// And it must contain the canonical superseded marker — otherwise the
+	// Must contain one of the canonical retirement markers — otherwise the
 	// fix would have rewritten storage but lost the ranking-discount signal.
 	found := false
 	for _, tag := range tags {
-		if tag == "superseded" {
-			found = true
+		for _, a := range accepts {
+			if tag == a {
+				found = true
+				break
+			}
+		}
+		if found {
 			break
 		}
 	}
-	assert.True(t, found, "superseded marker must survive the JSON rewrite; got tags=%v", tags)
+	assert.True(t, found, "retirement marker (%v) must survive the JSON rewrite; got tags=%v", accepts, tags)
 }
 
 func TestF9_SupersedeDecision_TagsColumnStaysValidJSON(t *testing.T) {
@@ -53,8 +68,9 @@ func TestF9_SupersedeDecision_TagsColumnStaysValidJSON(t *testing.T) {
 	newID, _ := res["id"].(string)
 	require.NotEmpty(t, newID)
 
-	// Original's tags column must round-trip as JSON.
-	assertTagsIsValidJSON(t, dm, originalID)
+	// Original's tags column must round-trip as JSON and carry the
+	// canonical supersede marker.
+	assertTagsIsValidJSON(t, dm, originalID, "superseded")
 
 	// Replacement's tags must stay clean (SupersedeDecision creates the
 	// replacement via RecordDecision → AddMemoryWithWeight which already
@@ -75,7 +91,9 @@ func TestF9_InvalidateDecision_TagsColumnStaysValidJSON(t *testing.T) {
 	_, err := dm.InvalidateDecision(id, "replaced by managed queue")
 	require.NoError(t, err)
 
-	assertTagsIsValidJSON(t, dm, id)
+	// Defect Q (2026-09-13): invalidate now tags `invalidated` (was
+	// `superseded` pre-fix). The JSON-shape contract is unchanged.
+	assertTagsIsValidJSON(t, dm, id, "invalidated")
 }
 
 // TestF9_SupersedeThenList_NoUnmarshalWarnings locks in the operator-visible

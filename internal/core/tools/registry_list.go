@@ -693,9 +693,9 @@ Each component responds independently and in parallel. One component's failure d
 	{
 		Name:        "mpm_resolve",
 		Description: `Resolve a mpm:// URI to its content. Phase 2 supports mpm://blob/<id>, mpm://work/<id>, mpm://memory/<id>, mpm://lesson/<id>, and mpm://theory/<id>.
-Use when: you have a pointer from a previous result and need to dereference it to get the actual content. This is the dereferencing step — you get back the full content of whatever the pointer refers to.
-max_bytes applies a soft materialization ceiling for large results.`,
-		Schema:      json.RawMessage(`{"type":"object","properties":{"uri":{"type":"string","description":"mpm://blob/|work/|memory/|lesson/|theory/<id>"},"max_bytes":{"type":"integer","description":"Phase 2: caller-requested materialization ceiling in bytes"}},"required":["uri"]}`),
+Use when: you have a pointer from a previous result and need to dereference it to get the actual content. This is the dereferencing step — you get back the bounded projection by default; pass full=true to retrieve the complete unabridged payload.
+max_bytes applies a soft materialization ceiling for large results. full=true bypasses that ceiling.`,
+		Schema:      json.RawMessage(`{"type":"object","properties":{"uri":{"type":"string","description":"mpm://blob/|work/|memory/|lesson/|theory/<id>"},"max_bytes":{"type":"integer","description":"Phase 2: caller-requested materialization ceiling in bytes"},"full":{"type":"boolean","description":"Bypass the bounded inline projection; return the complete payload. Default false (bounded)."}},"required":["uri"]}`),
 		Handler:     handleMpmResolve,
 	},
 	// ── Memory primitives ──

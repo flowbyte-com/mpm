@@ -154,7 +154,10 @@ func handleHandoffListCLI(args []string) int {
 	unreadOnly := false
 	for _, a := range args {
 		if strings.HasPrefix(a, "--limit=") {
-			fmt.Sscanf(strings.TrimPrefix(a, "--limit="), "%d", &limit)
+			if _, err := fmt.Sscanf(strings.TrimPrefix(a, "--limit="), "%d", &limit); err != nil {
+				fmt.Fprintf(os.Stderr, "handoff list: invalid --limit value: %v\n", err)
+				return 1
+			}
 		}
 		if a == "--unread" {
 			unreadOnly = true
