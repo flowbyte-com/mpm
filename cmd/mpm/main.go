@@ -519,7 +519,12 @@ type DoctorReport struct {
 	Passed      int
 	Warnings    int
 	Failed      int
-	Checks      []DoctorCheck
+	// Informational checks (e.g. absent optional features like
+	// embedding model) are tallied separately so they cannot
+	// inflate warning counts nor be confused with healthy PASS.
+	// 2026-09-14 release-pass.
+	Informational int
+	Checks        []DoctorCheck
 }
 
 // Colors for terminal output (ANSI)

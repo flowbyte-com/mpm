@@ -44,6 +44,7 @@ const (
 	MarkerPass = "✓"
 	MarkerWarn = "⚠"
 	MarkerFail = "✗"
+	MarkerInfo = "○" // neutral / informational (not a pass, not a failure)
 )
 
 // Heading prints the canonical command heading. Form: "MPM · <Command>".
@@ -118,7 +119,10 @@ func Error(w io.Writer, text string) error {
 	return err
 }
 
-// Marker renders a status marker (✓ ⚠ ✗) tinted by status.
+// Marker renders a status marker (✓ ⚠ ✗ ○) tinted by status.
+// "INFO" renders the neutral marker (○) — informational, not a
+// successful check, not a failure. Use INFO for absent optional
+// features (e.g. embedding model when embeddings are optional).
 func Marker(w io.Writer, status string) error {
 	var m string
 	var c string
@@ -129,6 +133,8 @@ func Marker(w io.Writer, status string) error {
 		m, c = MarkerWarn, WarningColor
 	case "FAIL":
 		m, c = MarkerFail, ErrorColor
+	case "INFO":
+		m, c = MarkerInfo, LabelColor
 	default:
 		m = " "
 		c = LabelColor

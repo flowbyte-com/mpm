@@ -64,8 +64,12 @@ func TestDoctorService_checkEmbeddingProvider(t *testing.T) {
 				ProviderName: "null",
 				Status:       mpminternal.EmbeddingStatusNull,
 			},
-			wantStatus: "WARN",
-			wantMsg:    "no embedding provider configured",
+			// 2026-09-14 release-pass: embedding is OPTIONAL.
+			// Absence alone is the neutral "INFO" status — neither
+			// a successful check (PASS) nor a failure (WARN/FAIL).
+			// Only configured-but-broken states remain WARN.
+			wantStatus: "INFO",
+			wantMsg:    "not configured · optional",
 		},
 		{
 			name: "profile configured and reachable",

@@ -80,6 +80,14 @@ func (s *DoctorService) Check() (*DoctorReport, error) {
 			report.Warnings++
 		case "FAIL":
 			report.Failed++
+		case "INFO":
+			// 2026-09-14 release-pass: informational checks do
+			// NOT increment warning or pass counts. The neutral
+			// marker (○) renders alongside PASS / WARN / FAIL
+			// but the overall summary excludes INFO so absence
+			// of an optional feature cannot make the substrate
+			// appear unhealthy.
+			report.Informational++
 		}
 	}
 	report.TotalChecks = len(report.Checks)
@@ -194,8 +202,16 @@ func (s *DoctorService) checkEmbeddingProvider() DoctorCheck {
 		check.Message = "intentionally disabled"
 		return check
 	case cfg.Source == mpminternal.EmbeddingSourceAbsent:
-		check.Status = "WARN"
-		check.Message = "no embedding provider configured"
+		// 2026-09-14 release-pass: embedding is OPTIONAL. Absence
+		// alone is informational — neither a successful check (PASS)
+		// nor a failure (WARN/FAIL). Use the neutral status "INFO"
+		// so the renderer emits the neutral marker (○) and the
+		// tally does not increment warning counts. The wording
+		// follows the canonical dashboard row so doctor / dashboard /
+		// readiness all agree.
+		check.Status = "INFO"
+		check.Message = "not configured · optional"
+		check.Details = []string{"semantic / vector similarity retrieval is unavailable when absent; lexical and structured retrieval remain available."}
 		return check
 	case cfg.Status == mpminternal.EmbeddingStatusConfigured:
 		note := ""

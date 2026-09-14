@@ -152,8 +152,11 @@ func formatSchedulerDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
 }
 
-// markerFor returns ✓ (PASS), ⚠ (WARN), or ✗ (FAIL) when useEmoji is true;
-// "[PASS]"/"[WARN]"/"[FAIL]" otherwise.
+// markerFor returns ✓ (PASS), ⚠ (WARN), ✗ (FAIL), or ○ (INFO) when
+// useEmoji is true; "[PASS]"/"[WARN]"/"[FAIL]"/"[INFO]" otherwise.
+// "INFO" is the neutral status for absent optional features
+// (e.g. embedding model when embeddings are optional); the marker
+// does NOT imply a successful check.
 func markerFor(status string, useEmoji bool) string {
 	if useEmoji {
 		switch status {
@@ -163,6 +166,8 @@ func markerFor(status string, useEmoji bool) string {
 			return "⚠"
 		case "FAIL":
 			return "✗"
+		case "INFO":
+			return "○"
 		}
 	}
 	return fmt.Sprintf("[%s]", status)
@@ -174,23 +179,32 @@ func markerFor(status string, useEmoji bool) string {
 //   PASS — all 5 checks healthy
 //   WARN — 2 warnings, 3 passed (no failures)
 //   FAIL — 1 failure, 1 warning, 3 passed
+//
+// 2026-09-14 release-pass: informational checks (status=INFO) are
+// excluded from the tally so an absent optional feature does not
+// appear unhealthy. Informational count is appended to the
+// summary line so the operator can still see it.
 func overallSummary(report *DoctorReport, useEmoji bool) string {
 	total := report.TotalChecks
 	if total == 0 {
 		return "no checks ran"
 	}
+	infoSuffix := ""
+	if report.Informational > 0 {
+		infoSuffix = fmt.Sprintf(" · %d informational", report.Informational)
+	}
 	if report.Failed > 0 {
-		return fmt.Sprintf("%d failure%s, %d warning%s, %d passed",
+		return fmt.Sprintf("%d failure%s, %d warning%s, %d passed%s",
 			report.Failed, plural(report.Failed),
 			report.Warnings, plural(report.Warnings),
-			report.Passed)
+			report.Passed, infoSuffix)
 	}
 	if report.Warnings > 0 {
-		return fmt.Sprintf("%d warning%s, %d passed",
+		return fmt.Sprintf("%d warning%s, %d passed%s",
 			report.Warnings, plural(report.Warnings),
-			report.Passed)
+			report.Passed, infoSuffix)
 	}
-	return fmt.Sprintf("all %d checks healthy", total)
+	return fmt.Sprintf("all %d checks healthy%s", total, infoSuffix)
 }
 
 // plural returns "s" for non-1 counts; "" for 1.
