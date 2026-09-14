@@ -34,19 +34,21 @@ func handleStatus(args []string) int {
 // the text dashboard (printStatusDashboard) and the JSON output
 // (printStatusJSON). Single source of truth so the two views cannot drift.
 type statusData struct {
-	uptime        string
-	modeState     string   // none | one | many | auto
-	modeValues    []string // empty when state="none", one entry when "one"/"auto", many when "many"
-	personaState  string   // none | one | auto
-	personaValues []string // empty when "none", one entry when "one"/"auto"
-	memTotal      int
-	memLTM        int
-	theoryTotal   int
-	theoryPend    int
-	theoryResolv  int
-	decisions     int
-	synthMerged   int
-	synthLast     string
+	uptime         string
+	modeState      string   // none | one | many | auto
+	modeValues     []string // empty when state="none", one entry when "one"/"auto", many when "many"
+	modeSource     string   // 2026-09-14: resolution source tag ("[fallback]" / "[explicit]" / "")
+	personaState   string   // none | one | auto
+	personaValues  []string // empty when "none", one entry when "one"/"auto"
+	personaSource  string   // 2026-09-14: resolution source tag
+	memTotal       int
+	memLTM         int
+	theoryTotal    int
+	theoryPend     int
+	theoryResolv   int
+	decisions      int
+	synthMerged    int
+	synthLast      string
 	recentEvents  []watchdogEvent
 }
 
@@ -120,23 +122,27 @@ func buildStatusData(dm *mpminternal.DatabaseManager, startTime time.Time) statu
 	// resolvers so all three surfaces agree on what the active value
 	// is — including the "default" fallback when active.json is
 	// uninitialised.
-	d.modeState, d.modeValues = resolveStatusMode(dm)
-	d.personaState, d.personaValues = resolveStatusPersona(dm)
+	d.modeState, d.modeValues, d.modeSource = resolveStatusMode(dm)
+	d.personaState, d.personaValues, d.personaSource = resolveStatusPersona(dm)
 	return d
 }
 
 // schedulerUptimeOrFallback returns the scheduler uptime from the
-// scheduler.state file, formatted for the dashboard. Falls back to
-// the CLI process uptime (clearly labelled) if the state file is
-// missing or unreadable. The fallback label matters because a 0s
-// uptime on a long-running substrate was misleading — saying
-// "process uptime: 0s" tells the operator what they're looking at.
+// canonical scheduler.state.json file (the same source
+// `mpm doctor`'s Scheduler row reads via service_doctor.go's
+// schedulerStatePath). Falls back to the CLI process uptime
+// (clearly labelled) if the state file is missing or unreadable.
+//
+// 2026-09-14 release-pass: the pre-fix implementation read
+// `dm.WatchdogPath()` (which is the per-DB watchdog.jsonl — a
+// query-observability log, NOT the scheduler heartbeat). The
+// watchdog.jsonl format has no `process_started_unix` field, so
+// the unmarshal always failed and the function always fell back
+// to "(process)" uptime — producing the long-standing
+// `Uptime : 0s (process)` regression. The fix reads the
+// canonical scheduler.state.json instead.
 func schedulerUptimeOrFallback(dm *mpminternal.DatabaseManager, startTime time.Time) string {
-	// Look at the same watchdog snapshot path the cron-retention
-	// classification uses. We only need the process_started_unix
-	// field; a malformed JSON file or a missing field falls back
-	// to the process uptime so the dashboard never lies.
-	statePath := dm.WatchdogPath()
+	statePath := schedulerStatePath()
 	if statePath != "" {
 		if data, err := os.ReadFile(statePath); err == nil {
 			var snap struct {
@@ -154,39 +160,109 @@ func schedulerUptimeOrFallback(dm *mpminternal.DatabaseManager, startTime time.T
 // the {state, values} pair the dashboard expects. Empty active.json
 // falls back to "default" via ResolveActiveMode, matching wake and
 // info surfaces.
-func resolveStatusMode(dm *mpminternal.DatabaseManager) (state string, values []string) {
-	resolved := mpminternal.ResolveActiveMode(dm, "")
-	if resolved == "" {
-		return "none", []string{}
+//
+// 2026-09-14 release-pass: returns the ModeResolution so the
+// caller can label the value with the resolution source
+// ([fallback] for default-bootstrap, [explicit] for a real user
+// selection). This matches the `mpm info` presentation
+// (`active modes : default [fallback]`) so the two surfaces do
+// not disagree about which mode is in effect.
+func resolveStatusMode(dm *mpminternal.DatabaseManager) (state string, values []string, sourceLabel string) {
+	resolution := mpminternal.ResolveActiveModes(dm, nil)
+	names := resolution.Names()
+	switch resolution.Source {
+	case mpminternal.SourceEmpty:
+		return "none", []string{}, ""
+	case mpminternal.SourceFallback:
+		if len(names) > 0 {
+			return "one", names, "[fallback]"
+		}
+		return "none", []string{}, ""
+	case mpminternal.SourceExplicit:
+		if len(names) == 0 {
+			return "none", []string{}, ""
+		}
+		if len(names) == 1 {
+			return "one", names, "[explicit]"
+		}
+		return "many", names, "[explicit]"
+	default:
+		if len(names) == 0 {
+			return "none", []string{}, ""
+		}
+		return "one", names, ""
 	}
-	if resolved == "auto" {
-		return "auto", []string{"auto"}
-	}
-	return "one", []string{resolved}
 }
 
 // resolveStatusPersona uses the canonical persona resolver and
-// returns the {state, values} pair the dashboard expects.
-func resolveStatusPersona(dm *mpminternal.DatabaseManager) (state string, values []string) {
+// returns the {state, values, sourceLabel} triple the dashboard
+// expects. 2026-09-14 release-pass: the source label
+// (`[fallback]` / `[explicit]`) is appended to the rendered line
+// so status and info agree on which persona is in effect.
+func resolveStatusPersona(dm *mpminternal.DatabaseManager) (state string, values []string, sourceLabel string) {
+	// Mirror the mode resolver's canonical-source approach by
+	// reading the canonical resolver's ModeResolution-style output.
+	// ResolveActivePersona's contract is a single-string return, so
+	// we classify the result based on active.json presence.
+	if active, err := mpminternal.LoadActiveJSON(); err == nil {
+		var explicit string
+		if active.Persona != nil {
+			explicit = *active.Persona
+		}
+		resolved := mpminternal.ResolveActivePersona(dm, "")
+		if explicit == "" && resolved != "" {
+			// No explicit persona in active.json — the value is
+			// the resolver's default fallback.
+			if resolved == "auto" || resolved == "ephemeral" {
+				return "auto", []string{resolved}, ""
+			}
+			return "one", []string{resolved}, "[fallback]"
+		}
+		if resolved == "auto" || resolved == "ephemeral" {
+			return "auto", []string{resolved}, ""
+		}
+		return "one", []string{resolved}, "[explicit]"
+	}
 	resolved := mpminternal.ResolveActivePersona(dm, "")
 	if resolved == "" {
-		return "none", []string{}
+		return "none", []string{}, ""
 	}
 	if resolved == "auto" || resolved == "ephemeral" {
-		return "auto", []string{resolved}
+		return "auto", []string{resolved}, ""
 	}
-	return "one", []string{resolved}
+	return "one", []string{resolved}, ""
+}
+
+// trimBrackets strips the surrounding `[...]` decoration from a
+// source label so the JSON wire shape emits a clean enum
+// (`fallback` / `explicit` / `auto` / `ephemeral`).
+func trimBrackets(s string) string {
+	if len(s) >= 2 && s[0] == '[' && s[len(s)-1] == ']' {
+		return s[1 : len(s)-1]
+	}
+	return s
 }
 
 // formatModeLine renders the dashboard's "Mode: ..." line from a
 // {state, values} pair. Cardinality is explicit in the text so a
 // reader doesn't have to count entries.
-func formatModeLine(state string, values []string) string {
+//
+// 2026-09-14 release-pass: includes the resolution source label
+// (e.g. "[fallback]" or "[explicit]") so the line matches `mpm
+// info`'s `active modes : default [fallback]` wording. Without
+// the label, status showed `Mode: one (default)` while info
+// showed `active modes : default [fallback]` — same value, two
+// different presentations.
+func formatModeLine(state string, values []string, sourceLabel string) string {
 	switch state {
 	case "none":
 		return "Mode: none"
 	case "one":
-		return fmt.Sprintf("Mode: one (%s)", values[0])
+		name := values[0]
+		if sourceLabel != "" {
+			return fmt.Sprintf("Mode: %s %s", name, sourceLabel)
+		}
+		return fmt.Sprintf("Mode: %s", name)
 	case "many":
 		return fmt.Sprintf("Mode: many (%s)", strings.Join(values, ", "))
 	case "auto":
@@ -198,12 +274,20 @@ func formatModeLine(state string, values []string) string {
 // formatPersonaLine renders the dashboard's "Persona: ..." line.
 // For auto-state with ephemeral values, looks up the ephemeral persona's
 // display name to give the operator a more useful "loaded:" hint.
-func formatPersonaLine(state string, values []string, dm *mpminternal.DatabaseManager) string {
+//
+// 2026-09-14 release-pass: includes the resolution source label so
+// the line matches `mpm info`'s `active persona : default
+// [fallback]` wording.
+func formatPersonaLine(state string, values []string, sourceLabel string, dm *mpminternal.DatabaseManager) string {
 	switch state {
 	case "none":
 		return "Persona: none"
 	case "one":
-		return fmt.Sprintf("Persona: one (%s)", values[0])
+		name := values[0]
+		if sourceLabel != "" {
+			return fmt.Sprintf("Persona: %s %s", name, sourceLabel)
+		}
+		return fmt.Sprintf("Persona: %s", name)
 	case "auto":
 		if len(values) > 0 && values[0] == "ephemeral" {
 			if ep, epErr := mpminternal.GetEphemeralPersona(dm); epErr == nil {
@@ -228,8 +312,8 @@ func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) 
 	render.Heading(os.Stdout, "System Status")
 	render.Divider(os.Stdout)
 	render.KeyValue(os.Stdout, "Uptime", d.uptime)
-	render.Plain(os.Stdout, "  "+formatModeLine(d.modeState, d.modeValues))
-	render.Plain(os.Stdout, "  "+formatPersonaLine(d.personaState, d.personaValues, dm))
+	render.Plain(os.Stdout, "  "+formatModeLine(d.modeState, d.modeValues, d.modeSource))
+	render.Plain(os.Stdout, "  "+formatPersonaLine(d.personaState, d.personaValues, d.personaSource, dm))
 	render.KeyValue(os.Stdout, "Memories", fmt.Sprintf("%d total | %d LTM", d.memTotal, d.memLTM))
 	render.KeyValue(os.Stdout, "Theories", fmt.Sprintf("%d total | %d pending | %d resolved", d.theoryTotal, d.theoryPend, d.theoryResolv))
 	render.KeyValue(os.Stdout, "Decisions", fmt.Sprintf("%d total", d.decisions))
@@ -249,14 +333,22 @@ func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) 
 // modeStateJSON / personaStateJSON are the wire shape for the
 // status JSON output. Both use the {state, values} form so consumers
 // can branch on cardinality without parsing the string.
+//
+// 2026-09-14 release-pass: `source` carries the resolution source
+// (`fallback` / `explicit` / `auto` / `ephemeral`) so consumers
+// can distinguish a real user selection from the resolver's
+// default fallback. The legacy JSON shape was additive —
+// consumers reading only `state` / `values` continue to work.
 type modeStateJSON struct {
 	State  string   `json:"state"`
 	Values []string `json:"values"`
+	Source string   `json:"source,omitempty"`
 }
 
 type personaStateJSON struct {
 	State  string   `json:"state"`
 	Values []string `json:"values"`
+	Source string   `json:"source,omitempty"`
 }
 
 // printStatusJSON emits the status dashboard as a JSON object.
@@ -281,8 +373,8 @@ func printStatusJSON(dm *mpminternal.DatabaseManager, startTime time.Time) int {
 		RecentEvents []jsonEvent      `json:"recent_events,omitempty"`
 	}{
 		Uptime:    d.uptime,
-		Mode:      modeStateJSON{State: d.modeState, Values: d.modeValues},
-		Persona:   personaStateJSON{State: d.personaState, Values: d.personaValues},
+		Mode:      modeStateJSON{State: d.modeState, Values: d.modeValues, Source: trimBrackets(d.modeSource)},
+		Persona:   personaStateJSON{State: d.personaState, Values: d.personaValues, Source: trimBrackets(d.personaSource)},
 		Memories:  memCounts{Total: d.memTotal, LTM: d.memLTM},
 		Theories:  thCounts{Total: d.theoryTotal, Pending: d.theoryPend, Resolved: d.theoryResolv},
 		Decisions: d.decisions,

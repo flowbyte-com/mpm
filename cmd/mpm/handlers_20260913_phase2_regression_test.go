@@ -286,6 +286,11 @@ func TestWakeContext_TypedPointers(t *testing.T) {
 // (ResolveActiveMode/ResolveActivePersona) — same as wake and info.
 // Pre-fix this used a parallel fallback ("none" when active.json
 // was empty) that disagreed with the canonical path.
+//
+// 2026-09-14 release-pass: the canonical mode resolver is now
+// ResolveActiveModes (pointer-aware) rather than the singular
+// ResolveActiveMode string API. The resolver's source tag is
+// surfaced in the rendered line so status and info agree.
 func TestStatus_UsesCanonicalResolver(t *testing.T) {
 	src := readServiceSource(t, "handlers_status.go")
 	if !strings.Contains(src, "resolveStatusMode(dm)") {
@@ -294,10 +299,13 @@ func TestStatus_UsesCanonicalResolver(t *testing.T) {
 	if !strings.Contains(src, "resolveStatusPersona(dm)") {
 		t.Fatalf("handleStatus must use canonical persona resolver (defect M)")
 	}
-	// The handler must call ResolveActiveMode(dm, "") so the
-	// canonical "default" fallback kicks in for uninitialised state.
-	if !strings.Contains(src, "ResolveActiveMode(dm, \"\")") {
-		t.Fatalf("status mode must call ResolveActiveMode with empty requested (canonical default fallback)")
+	// The mode resolver must call the canonical resolver (either
+	// pointer-aware ResolveActiveModes or the legacy singular
+	// ResolveActiveMode) so the canonical "default" fallback kicks
+	// in for uninitialised state.
+	if !strings.Contains(src, "ResolveActiveModes(dm, nil)") &&
+		!strings.Contains(src, "ResolveActiveMode(dm, \"\")") {
+		t.Fatalf("status mode must call canonical resolver (ResolveActiveModes or ResolveActiveMode)")
 	}
 }
 
