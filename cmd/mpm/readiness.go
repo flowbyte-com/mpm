@@ -151,6 +151,19 @@ func ReadReadiness(dm *mpminternal.DatabaseManager) []ReadinessItem {
 	// backlogs are a workflow signal worth surfacing.
 	items = append(items, checkPendingTheoriesCount(dm))
 
+	// 7. Wake backlog — actionable Doctor warning. Reuses the
+	// same data source as Doctor's checkWakeBacklog so the
+	// dashboard and Doctor agree dynamically. Items surface as
+	// WARN when actionable backlog exists; the dashboard's
+	// attentionSummary aggregates them into a single line.
+	items = append(items, checkWakeBacklogReady(dm))
+
+	// 8. Review backlog — same pattern: reuses Doctor's
+	// checkReviewBacklog data source (GetSpacedReinforcementReview).
+	// Surfaces WARN when there are memories due for spaced
+	// reinforcement review.
+	items = append(items, checkReviewBacklogReady(dm))
+
 	// If we auto-started the scheduler, suffix the scheduler
 	// item's detail with the timestamp so the operator can see
 	// when the side effect happened.
@@ -159,6 +172,63 @@ func ReadReadiness(dm *mpminternal.DatabaseManager) []ReadinessItem {
 	}
 
 	return items
+}
+
+// checkWakeBacklogReady mirrors service_doctor.go's
+// checkWakeBacklog data source (HealthCheck["wakes_overdue"])
+// for use in the dashboard readiness stream. Same query, same
+// severity mapping (WARN when > 0, OK when 0) — the dashboard
+// must agree with Doctor dynamically so the operator sees
+// actionable backlog in both surfaces.
+func checkWakeBacklogReady(dm *mpminternal.DatabaseManager) ReadinessItem {
+	if dm == nil {
+		return ReadinessItem{Name: "Wake backlog", OK: true, Detail: "(no db)"}
+	}
+	hc, err := dm.HealthCheck()
+	if err != nil {
+		return ReadinessItem{Name: "Wake backlog", OK: false, Detail: "could not query wake backlog"}
+	}
+	overdue, _ := hc["wakes_overdue"].(int64)
+	if overdue == 0 {
+		return ReadinessItem{Name: "Wake backlog", OK: true, Detail: "no overdue wakes"}
+	}
+	item := ReadinessItem{
+		Name:   "Wake backlog",
+		OK:     false,
+		Level:  readinessLevelWarn,
+		Detail: fmt.Sprintf("%d wake(s) overdue", overdue),
+		Hint:   "run `mpm doctor` for diagnostics",
+	}
+	return item
+}
+
+// checkReviewBacklogReady mirrors service_doctor.go's
+// checkReviewBacklog data source (GetSpacedReinforcementReview)
+// for use in the dashboard readiness stream. Same query, same
+// severity (WARN when > 0 memories due).
+func checkReviewBacklogReady(dm *mpminternal.DatabaseManager) ReadinessItem {
+	if dm == nil {
+		return ReadinessItem{Name: "Review backlog", OK: true, Detail: "(no db)"}
+	}
+	items, err := dm.GetSpacedReinforcementReview(14, 100)
+	if err != nil {
+		return ReadinessItem{Name: "Review backlog", OK: false, Detail: "could not query review candidates"}
+	}
+	n := len(items)
+	if n == 0 {
+		return ReadinessItem{Name: "Review backlog", OK: true, Detail: "no memories due for review"}
+	}
+	hint := "Run `mpm ops review` to clear the backlog."
+	if n > 5 {
+		hint = "Run `mpm ops review --stale` to clear the backlog."
+	}
+	return ReadinessItem{
+		Name:   "Review backlog",
+		OK:     false,
+		Level:  readinessLevelWarn,
+		Detail: fmt.Sprintf("%d memories due for spaced review", n),
+		Hint:   hint,
+	}
 }
 
 // checkSchedulerWithAutoStart reads the mpm-scheduler PID; if 0,
