@@ -1325,9 +1325,11 @@ func printCapabilityHelp() {
 // Output Helpers
 // ============================================================================
 
-// PrintHelp shows the lipgloss-styled help menu
+// PrintHelp shows the help menu via the canonical visual grammar
+// (cmd/mpm/render). Replaces the legacy lipgloss-bordered help
+// implementation that was removed in the 2026-09-14 release-pass.
 func PrintHelp() {
-	printHelp()
+	printCognitiveHelp()
 }
 
 func (r *CommandRouter) unknownCommand(name string) {

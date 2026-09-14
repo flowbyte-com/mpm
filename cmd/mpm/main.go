@@ -16,14 +16,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
-
 	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/logging"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/synth"
 	"github.com/flowbyte-com/mpm-core/usererror"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 // ============================================================================
@@ -1463,37 +1463,13 @@ type helpCmd struct {
 }
 
 var (
-	helpGold    = lipgloss.Color("220")
-	helpCyan    = lipgloss.Color("87")
-	helpMagenta = lipgloss.Color("213")
-	helpDim     = lipgloss.Color("245")
-	helpGreen   = lipgloss.Color("84")
-	helpBorder  = lipgloss.Color("99")
-
-	helpTitle = lipgloss.NewStyle().
-			Foreground(helpGold).
-			Bold(true).
-			Align(lipgloss.Center)
-
-	helpSection = lipgloss.NewStyle().
-			Foreground(helpMagenta).
-			Bold(true).
-			Padding(1, 0, 0, 0)
-
-	helpCommand = lipgloss.NewStyle().
-			Foreground(helpCyan)
-
-	helpDesc = lipgloss.NewStyle().
-			Foreground(helpDim)
-
-	helpBorderStyle = lipgloss.NewStyle().
-			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(helpBorder).
-			Padding(1, 2)
-
-	helpTip = lipgloss.NewStyle().
-		Foreground(helpDim).
-		Italic(true)
+	// 2026-09-14 release-pass: the legacy lipgloss help styles
+	// (helpGold, helpCyan, helpMagenta, helpDim, helpGreen, helpBorder,
+	// helpTitle, helpSection, helpCommand, helpDesc, helpBorderStyle, helpTip)
+	// have been removed. The canonical visual grammar lives in
+	// cmd/mpm/render and is shared with Doctor / Info / Status.
+	// Help surfaces route through render.Heading / render.Section /
+	// render.Label / render.Plain / render.Hint / render.BlankLine.
 )
 
 // PrintQuicklinks displays the compact dashboard when `mpm` is run
@@ -1830,105 +1806,23 @@ func parseSQLiteTimestamp(s string) time.Time {
 	return time.Time{}
 }
 
-// printHelp displays the mpm help text with lipgloss styling
-func printHelp() {
-	dailyCmds := buildHelpSection("Daily Commands", []helpCmd{
-		{"<query>", "Search memories (default when called with a bare string)", false},
-		{"add <text>", "Add a new memory", false},
-		{"add -i", "Interactive add — opens $EDITOR", false},
-		{"ls", "List memories", false},
-		{"show <id>", "Show memory details", false},
-		{"rm <id>", "Delete a memory", false},
-		{"call <tool>", "Universal machine interface", false},
-		{"wake", "Show last session context", false},
-		{"status", "System status dashboard", false},
-		{"version", "Show version info", false},
-		{"help", "Show this help", false},
-	})
+// printHelp is removed in the 2026-09-14 release-pass. The canonical
+// cognitive-help panel lives in printCognitiveHelp() (cmd/mpm/handlers_help.go)
+// and is routed from PrintHelp() (cmd/mpm/router.go). The legacy
+// lipgloss-bordered presentation, the centered " mpm · Memory Persistence
+// Module" title, and the "Your long-term memory, always within reach"
+// tagline have been removed; the canonical visual grammar is now shared
+// with Doctor / Info / Status.
 
-	opsSection := buildHelpSection("Engine Room (ops)", []helpCmd{
-		{"ops", "Maintenance, diagnostics, synthesis, and more", true},
-	})
+// buildHelpSection is removed alongside printHelp — the legacy help
+// presentation has been replaced by the canonical renderer.
 
-	kbSection := buildHelpSection("Knowledge Base (kb)", []helpCmd{
-		{"kb", "Entity-centric memory interface (memory|topic|lesson|session|reference)", true},
-	})
-
-	debugSection := buildHelpSection("Debug", []helpCmd{
-		{"debug", "Low-level inspection tools (history|diff|patch-memory|shred)", true},
-	})
-
-	alsoSection := buildHelpSection("Also available via ops", []helpCmd{
-		{"mode | persona", "", false},
-		{"wake | directives | switch | status", "", false},
-		{"doctor | maintain | gc | prune", "", false},
-		{"stats | export | synthesize", "", false},
-		{"integration export-mcp", "Emit canonical MCP config for Claude Code / Hermes / OpenClaw", false},
-		{"backup | restore-db | ingest", "", false},
-		{"backfill-embeddings", "", false},
-		{"gateway", "", false},
-		{"hint | theories | decisions", "", false},
-	})
-
-	mainStyle := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(helpBorder).
-		Padding(1, 2).
-		Margin(1)
-
-	titleStyle := lipgloss.NewStyle().
-		Foreground(helpGold).
-		Bold(true).
-		Align(lipgloss.Center).
-		Render(" mpm  ·  Memory Persistence Module")
-
-	subtitleStyle := lipgloss.NewStyle().
-		Foreground(helpCyan).
-		Align(lipgloss.Center).
-		Render("Your long-term memory, always within reach")
-
-	content := "\n" + titleStyle + "\n" + subtitleStyle + "\n\n" +
-		dailyCmds + "\n" +
-		opsSection + "\n" +
-		kbSection + "\n" +
-		debugSection + "\n" +
-		alsoSection + "\n"
-
-	fmt.Println(mainStyle.Render(content))
-}
-
-// buildHelpSection creates a styled section with commands, left-aligned
-func buildHelpSection(title string, cmds []helpCmd) string {
-	subStyle := lipgloss.NewStyle().Foreground(helpMagenta).Render("▸")
-
-	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString(helpSection.Render(title))
-	b.WriteString("\n")
-
-	for _, c := range cmds {
-		// Build indicators
-		indicators := ""
-		if c.hasSubs {
-			indicators += subStyle
-		}
-		if indicators == "" {
-			indicators = "  "
-		} else {
-			indicators += " "
-		}
-
-		cmdStr := helpCommand.Render(c.name)
-		descStr := helpDesc.Render(c.desc)
-		// Left-aligned: indicator + command + description
-		line := fmt.Sprintf("  %s%s  %s\n", indicators, cmdStr, descStr)
-		b.WriteString(line)
-	}
-	return b.String()
-}
-
-// printGatewayHelp outputs gateway-specific help with lipgloss styling
+// printGatewayHelp outputs gateway-specific help via the canonical
+// visual grammar (cmd/mpm/render). Replaces the prior lipgloss-styled
+// presentation in the 2026-09-14 release-pass.
 func printGatewayHelp() int {
+	render.Heading(os.Stdout, "Gateway")
+	render.BlankLine(os.Stdout)
 	gatewayCmds := []helpCmd{
 		{"help", "Show this help", false},
 		{"start", "Start or connect to gateway", false},
@@ -1936,19 +1830,11 @@ func printGatewayHelp() int {
 		{"restart", "Restart the gateway", false},
 		{"status", "Show gateway status", false},
 	}
-
-	var b strings.Builder
-	b.WriteString("\n")
 	for _, c := range gatewayCmds {
-		cmdStr := helpCommand.Render(c.name)
-		descStr := helpDesc.Render(c.desc)
-		b.WriteString(fmt.Sprintf("  %s  %s\n", cmdStr, descStr))
+		render.Label(os.Stdout, c.name, c.desc)
 	}
-
-	b.WriteString("\n")
-	b.WriteString(helpTip.Render("  mpm gateway start  # Start/restart gateway"))
-
-	fmt.Print(b.String() + "\n\n")
+	render.BlankLine(os.Stdout)
+	render.Hint(os.Stdout, "mpm gateway start — start or restart the gateway.")
 	return 0
 }
 

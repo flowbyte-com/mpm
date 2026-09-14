@@ -1,5 +1,5 @@
-// cmd/mpm/handlers_help.go — Progressive disclosure help system
-// (cognitive-interface Wave 1 commit 4).
+// cmd/mpm/handlers_help.go — Progressive disclosure help system,
+// rendered through the canonical cmd/mpm/render package.
 //
 // Per RFC §4:
 //
@@ -21,16 +21,20 @@
 // previous implementation. Operators who want the long-form catalogue
 // opt in via `--all`. The cognitive-interface principle: discoverability
 // first; the long form is the escape hatch, not the default.
+//
+// Visual contract (2026-09-14 release-pass): the help surface joins
+// the canonical visual grammar shared with Doctor/Info/Status. No
+// Bubble Tea borders, no marketing taglines, no novel glyphs. The
+// heading is `MPM · Help`; per-section headings are sentence case;
+// per-command lines use the same Label primitive as the rest of MPM.
 
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
-
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
@@ -39,12 +43,6 @@ import (
 // Each section is small; the whole output fits in a terminal.
 // Sections in display order. Future waves add commands here as
 // their primary cognitive verb aliases land.
-//
-// Naming follows the post-RFC polish session (Wed 2026-07-29):
-//   Cognition  →  Create    (cognitive verbs ARE knowledge creation)
-//   Reflection →  Observability (doctor + why + provenance tooling)
-//   Engine Room →  Advanced  (the ops namespace is infrastructure,
-//                          not interface; demoted to a single line)
 //
 // The default help intentionally hides the total command count.
 // Humans see "67 commands" and conclude "too many" before reading
@@ -115,10 +113,7 @@ var cognitiveHelpSections = []cogHelpSection{
 	},
 }
 
-// cogHelpSection is the new progressive-disclosure section type.
-// Renamed from helpSection (which collides with main.go's lipgloss.Style
-// of the same name) so this file is self-contained without touching
-// the existing printHelp() implementation in main.go.
+// cogHelpSection is the progressive-disclosure section type.
 type cogHelpSection struct {
 	title string
 	cmds  []helpCmd
@@ -129,42 +124,47 @@ type cogHelpSection struct {
 // for ~80 columns wide. The "Need more?" section is the progressive-
 // disclosure pointer (RFC §4): operators naturally discover the long
 // form when they need it.
+//
+// 2026-09-14 release-pass: the Bubble Tea rounded-border wrapper has
+// been removed in favour of the canonical render primitives. The
+// heading is `MPM · Help`. The tagline is gone. Per-section headings
+// are sentence case; per-command lines use `render.Label`. This is
+// the same visual grammar Doctor/Info/Status use.
 func printCognitiveHelp() {
-	fmt.Println(renderCognitiveHelp())
+	render.Heading(os.Stdout, "Help")
+	render.Plain(os.Stdout, "")
+	for _, sec := range cognitiveHelpSections {
+		render.Section(os.Stdout, sec.title)
+		for _, c := range sec.cmds {
+			if c.hasSubs {
+				render.Label(os.Stdout, "  ▸  "+c.name, c.desc)
+			} else {
+				render.Label(os.Stdout, "      "+c.name, c.desc)
+			}
+		}
+		render.BlankLine(os.Stdout)
+	}
 }
 
 // renderCognitiveHelp returns the help text as a string (used by both
-// the print and the test paths). The title uses the canonical heading
-// token via the shared render package; the body section labels are
-// rendered through helpSection so existing help vocabulary is
-// preserved. The Unicode box layout is a structural aid, not a
-// divergent visual grammar — heading, weights, and casing all
-// match the canonical contract.
+// the print and the test paths). Same canonical grammar as
+// printCognitiveHelp; the string form lets tests assert byte-exact
+// content.
 func renderCognitiveHelp() string {
-	border := lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(helpBorder).Padding(1, 2).Margin(1)
-
-	// Title via shared render package — canonical amber/yellow bold.
-	var titleBuf bytes.Buffer
-	render.Heading(&titleBuf, "Cognitive Interface")
-
-	var content string
-	content = "\n" + titleBuf.String() + "\n"
-	content += helpDesc.Render("Your long-term memory, always within reach") + "\n"
+	var b strings.Builder
+	b.WriteString("MPM · Help\n\n")
 	for _, sec := range cognitiveHelpSections {
-		content += "\n" + helpSection.Render(sec.title) + "\n"
+		b.WriteString(sec.title + "\n")
 		for _, c := range sec.cmds {
 			if c.hasSubs {
-				content += fmt.Sprintf("  ▸  %s    %s\n",
-					helpCommand.Render(fmt.Sprintf("%-22s", c.name)),
-					helpDesc.Render(c.desc))
+				b.WriteString(fmt.Sprintf("  ▸  %-22s    %s\n", c.name, c.desc))
 			} else {
-				content += fmt.Sprintf("      %s    %s\n",
-					helpCommand.Render(fmt.Sprintf("%-22s", c.name)),
-					helpDesc.Render(c.desc))
+				b.WriteString(fmt.Sprintf("      %-22s    %s\n", c.name, c.desc))
 			}
 		}
+		b.WriteString("\n")
 	}
-	return border.Render(content)
+	return b.String()
 }
 
 // printHelpAll dumps the full Commands catalogue as a flat list.
@@ -173,33 +173,34 @@ func renderCognitiveHelp() string {
 // supports. Tools that want this should use `mpm help --json` (future)
 // rather than parsing this text — text help is not an API (RFC §4).
 //
-// Per the post-RFC polish session (Wed 2026-07-29), this output
-// intentionally does NOT include a total count. Humans see "67"
-// and assume "too many" before reading the cognitive-verb default.
-// Operators who explicitly ask for the full catalogue are signalling
-// they want to see what's there; the listing carries that signal
-// without needing an emphasised count.
+// 2026-09-14 release-pass: rendered through the canonical render
+// primitives — `MPM · Help` heading + per-command `render.Label`.
+// No centered subtitle, no decorative divider.
 func printHelpAll() {
 	if r := getCmdRouter(); r != nil {
-		cmds := make([]string, 0, len(r.Commands))
-		for name, c := range r.Commands {
-			cmds = append(cmds, fmt.Sprintf("%-22s %s", name, c.Description))
+		render.Heading(os.Stdout, "Help")
+		render.Plain(os.Stdout, "")
+		render.Section(os.Stdout, "Operator catalogue")
+		names := make([]string, 0, len(r.Commands))
+		for name := range r.Commands {
+			names = append(names, name)
 		}
-		sortStrings(cmds)
-		fmt.Println("Operator catalogue (run `mpm help` for the cognitive-verb default):")
-		fmt.Println(strings.Repeat("─", 60))
-		for _, line := range cmds {
-			fmt.Println("  " + line)
+		sort.Strings(names)
+		for _, name := range names {
+			render.Label(os.Stdout, name, r.Commands[name].Description)
 		}
-		fmt.Println()
-		fmt.Println("Use `mpm help <section>` for progressive disclosure.")
-		fmt.Println("Sections: knowledge, runtime, maintenance, reflection, work, explain.")
+		render.BlankLine(os.Stdout)
+		render.Hint(os.Stdout, "Use `mpm help <section>` for progressive disclosure. Sections: knowledge, runtime, maintenance, reflection, work, explain.")
 	}
 }
 
 // sectionHelpContent returns the expanded section text. Each section
 // is small enough to fit comfortably. Future waves add commands as
 // their alias surfaces ship.
+//
+// 2026-09-14 release-pass: Wave-marker archaeology stripped (Wave 2
+// surface comments, dated commit references, internal terminology).
+// Current shipped surface only.
 func sectionHelpContent(section string) (string, bool) {
 	switch strings.ToLower(section) {
 	case "knowledge":
@@ -224,15 +225,12 @@ func sectionHelpContent(section string) (string, bool) {
 	case "runtime":
 		return `Runtime — session and process state
 
-  Wave 2 surface (this section expands when those commands ship):
-
     mpm wake              Last session context
-    mpm doctor            Substrate health signals (Wave 2)
-    mpm why <id>          Provenance + evidence + confidence (Wave 2)
-    mpm continue          Session-resumption dashboard (Wave 1 commit 3)
+    mpm doctor            Substrate health signals
+    mpm why <id>          Provenance + evidence + confidence
+    mpm continue          Session-resumption dashboard
 
-  Today only ` + "`continue`" + ` and ` + "`wake`" + ` ship. The rest land
-  in Wave 2 once Wave 1's composition discipline is validated.`, true
+  Use ` + "`mpm help`" + ` for the cognitive-verb summary.`, true
 
 	case "maintenance":
 		return `Maintenance — keep the substrate healthy
@@ -245,28 +243,24 @@ func sectionHelpContent(section string) (string, bool) {
     mpm ops maintain               Self-maintenance: decay + consolidate + prune
 
   Maintenance commands live under ` + "`mpm ops`" + ` so the cognitive
-  default help stays small. Future waves may promote the most-used
-  commands (backup, review) to root-level aliases.`, true
+  default help stays small.`, true
 
 	case "observability":
 		// T5 2026-09-11: `observability` was the pre-Wave-2 help topic
 		// name. The section was renamed to `reflection` per the
-		// observability→reflection help pointer (see
-		// mpm-2026-09-10-cli-contract-cleanup.md). Forward to the
+		// observability→reflection help pointer. Forward to the
 		// canonical reflection page so operators using muscle memory
 		// still get useful output instead of
 		// `no help available for 'observability'`.
 		fallthrough
 	case "reflection":
-		return `Reflection — observability and synthesis surface (Wave 2+)
+		return `Reflection — observability and synthesis surface
 
     mpm ops synthesize [--dry-run] LLM synthesis on all memories
     mpm ops confidence             Confidence / evidence engine
     mpm ops evidence <add|list>    Attach observations / decisions
     mpm ops broadcast <id>         Fan-out epistemic events
-    mpm ops milestones             List narrative milestones
-
-  These land in Wave 2+ per the cognitive-interface RFC Wave plan.`, true
+    mpm ops milestones             List narrative milestones`, true
 
 	case "work":
 		return `Working Context — the agent's ephemeral execution state
@@ -287,24 +281,18 @@ func sectionHelpContent(section string) (string, bool) {
 
     --session-id <id>     Override the per-process session id
                           (default: getOrMakeSessionID() each invocation)
-    --json                Emit machine-readable JSON (where applicable)
-
-  Architecture: ` + "`mpm work`" + ` is a thin adapter composing the
-  WorkingContextService + WorkingContextStore + Renderers. It owns
-  no SQL, no rendering, no behaviour. See RFC §'mpm work' for the
-  full layering contract.`, true
+    --json                Emit machine-readable JSON (where applicable)`, true
 
 	case "explain":
-		return `Explain — provenance + introspection (Wave 2+)
-
-  Wave 2 surface (this section expands when those commands ship):
+		return `Explain — provenance + introspection
 
     mpm why <id>          Single-level provenance for any artifact
-    mpm explain <kind>    Retrieval explanation per kind
     mpm doctor            Trust signals across substrate subsystems
 
-  Today's ` + "`mpm why`" + ` is available via the MCP boundary as
-  ` + "`mpm call mpm_retrieval_diagnose`" + ` and ` + "`mpm call mpm_evidence --payload '{\"action\":\"list\",...}'`" + `. The CLI wrapper ships in Wave 2.`, true
+  Today ` + "`mpm why`" + ` is the canonical CLI surface for explain;
+  substrate-level introspection is also reachable via
+  ` + "`mpm call mpm_retrieval_diagnose`" + ` and
+  ` + "`mpm call mpm_evidence --payload '{\"action\":\"list\",...}'`" + `.`, true
 
 	default:
 		return "", false
@@ -314,12 +302,22 @@ func sectionHelpContent(section string) (string, bool) {
 // printSectionHelp prints the expanded view for a single section. If
 // the section name doesn't match a known section, returns false so
 // the caller can fall back to existing per-command help dispatch.
+//
+// 2026-09-14 release-pass: renders through the canonical renderer.
+// The `MPM · Help` heading is shared with the cognitive panel; the
+// section title appears as a sentence-case SectionHeading; the body
+// is plain `render.Plain` lines.
 func printSectionHelp(section string) bool {
 	body, ok := sectionHelpContent(section)
 	if !ok {
 		return false
 	}
-	fmt.Println(body)
+	render.Heading(os.Stdout, "Help")
+	render.Plain(os.Stdout, "")
+	render.Section(os.Stdout, section)
+	for _, line := range strings.Split(body, "\n") {
+		render.Plain(os.Stdout, line)
+	}
 	return true
 }
 
@@ -330,17 +328,3 @@ func printSectionHelp(section string) bool {
 func getCmdRouter() *CommandRouter {
 	return NewRouter() // each call re-builds the map; trivial cost
 }
-
-// sortStrings is a tiny in-place alphabetical sort. Used by printHelpAll
-// to keep --all output deterministic (so scripts can grep).
-func sortStrings(s []string) {
-	// Insertion sort — N is small (~57 commands), good enough.
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j-1] > s[j]; j-- {
-			s[j-1], s[j] = s[j], s[j-1]
-		}
-	}
-}
-
-// touch os for build-safety; future Wave 2 may add --json output here.
-var _ = os.Stderr
