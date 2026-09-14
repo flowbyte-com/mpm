@@ -299,6 +299,51 @@ func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool) 
 // Each batch stays independently atomic — the per-batch transaction
 // boundary is inside CompactEpistemology. The drain loop holds NO
 // transaction across iterations.
+// CompactEpistemologyDrain is the public drain-mode compact surface.
+// Loops the per-batch primitive (CompactEpistemology) until no
+// eligible raw memories remain, the per-invocation batch cap is hit,
+// the pressure threshold condition is satisfied, or a batch fails.
+// The 50-item LLM context safeguard applies on every batch — only the
+// loop boundary was added.
+//
+// StopReason taxonomy (see result struct doc):
+//
+//   - "no_work"             substrate was empty from the start.
+//   - "completed"           every eligible row was consumed.
+//   - "threshold_reached"   force=false and the raw count fell to/at
+//                           the threshold; eligible rows remain.
+//   - "max_batches_reached" safety cap hit; eligible rows remain.
+//   - "failure"             mid-drain batch failure (success=false).
+//
+// 2026-09-14 release-pass: the existing compactDrainMaxBatchesHardCap
+// (100) IS the bounded-execution safeguard for this orchestrator.
+// The per-batch SynthesizeCompactLesson call now routes through
+// the Plan-aware DoLLMRequestWithPlan helper, which classifies
+// failures (transient=1 retry, auth=0, rate=conditional, malformed=1
+// repair) and the per-batch Plan rejects further attempts after
+// MaxRetries+MaxRepairs. The drain-level batch count is the
+// outer cap.
+//
+// force semantics: passed through to each per-batch call.
+//
+//   - force=false — compact RELIEVES pressure. The drain stops as
+//     soon as the pressure threshold condition is satisfied
+//     (raw_count <= threshold). Eligible raw memories may remain.
+//     This is the default reflex to epistemic_pressure.exceeded=true.
+//   - force=true  — compact DRAINS everything. The threshold gate is
+//     bypassed; the drain continues until the substrate is empty or
+//     the per-invocation safety cap is hit.
+//
+// The 50-item batch safety is unrelated to force — every batch is
+// capped at compactBatchSize regardless of force or threshold.
+//
+// maxBatches semantics:
+//   - 0 or negative: use compactDrainMaxBatchesDefault (20).
+//   - positive: use as-is, capped at compactDrainMaxBatchesHardCap (100).
+//
+// Each batch stays independently atomic — the per-batch transaction
+// boundary is inside CompactEpistemology. The drain loop holds NO
+// transaction across iterations.
 func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force bool, maxBatches int) (*CompactEpistemologyDrainResult, error) {
 	if maxBatches <= 0 {
 		maxBatches = compactDrainMaxBatchesDefault

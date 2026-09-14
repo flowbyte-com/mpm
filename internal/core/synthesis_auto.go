@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -472,16 +473,27 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 
 	result, err := client.Synthesize(llmCtx, fragments)
 	if err != nil {
-		// On failure: log to watchdog, do not block ingestion
+		// On failure: log to watchdog, do not block ingestion.
+		// 2026-09-14 release-pass: the bounded-execution
+		// safeguard tags its stops with a stable reason; the
+		// watchdog records the reason for telemetry and
+		// operator diagnosis (without leaking secrets — the
+		// watchdog stores machine-stable fields, not the
+		// raw prompt body).
 		truncated := content
 		if len(truncated) > 120 {
 			truncated = truncated[:120] + "..."
 		}
-		logWatchdogOp(dm, "synthesize_failed", map[string]interface{}{
+		fields := map[string]interface{}{
 			"content":   truncated,
 			"error":     err.Error(),
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
-		})
+		}
+		if errors.Is(err, synth.ErrBoundedPlanExceeded) {
+			fields["bounded_safeguard"] = "stopped"
+			fields["safeguard_reason"] = err.Error()
+		}
+		logWatchdogOp(dm, "synthesize_failed", fields)
 		return
 	}
 

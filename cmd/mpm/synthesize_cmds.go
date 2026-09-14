@@ -87,6 +87,24 @@ func handleSynthesize(args []string) int {
 		return 0
 	}
 
+	// 2026-09-14 release-pass: the runaway-execution safeguard
+	// caps per-invocation batches. The CLI scan iterates every
+	// memory; each iteration is one AutoSynthesize call (one
+	// semantic stage). The safeguard's AbsoluteMaxBatchesPerInvocation
+	// bounds the loop so a single `mpm synthesize` cannot
+	// fan out into an unbounded number of LLM calls.
+	//
+	// Operators with truly large substrates run the scan in
+	// multiple invocations (e.g. by `created_at` windows). That
+	// is the bounded shape the safeguard requires.
+	if len(all) > mpminternal.AbsoluteMaxBatchesPerInvocation {
+		fmt.Printf(
+			"⚠️  %d memories exceed the safeguard's per-invocation batch ceiling (%d). Narrow the input and re-run.\n",
+			len(all), mpminternal.AbsoluteMaxBatchesPerInvocation)
+		fmt.Println("    (compute a smaller scope with `mpm memory list --limit N` and re-invoke the synthesizer)")
+		return 1
+	}
+
 	processed := 0
 	for _, m := range all {
 		if dryRun {

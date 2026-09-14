@@ -230,6 +230,16 @@ func NewSynthClient() *SynthClient {
 // synthesisSystemPrompt is the self-contained prompt for memory consolidation.
 // Kept private because external callers should not need it — admission.go has
 // its own admissionSystemPrompt.
+//
+// 2026-09-14 release-pass: the prompt explicitly permits
+// uncertainty as a TERMINAL result. The model is instructed
+// NOT to invent missing facts merely to make memories
+// synthesize cleanly. A single coherent conclusion is one
+// acceptable outcome; conflicting evidence, ambiguity, undefined
+// proposition, or insufficient evidence are equally acceptable.
+// The synthesis safeguard contract relies on this — retry loops
+// are bounded by the safeguard, not by the model re-reasoning
+// on every "uncertain" response.
 const synthesisSystemPrompt = `You are a senior archivist tasked with consolidating overlapping notes into a single, coherent record. Preserve all factual claims faithfully — do not add, infer, or hallucinate any facts not present in the input.
 
 INPUT:
@@ -245,10 +255,27 @@ RULES:
    - "tags": the merged and deduplicated tag array
 6. The output must be valid JSON. No markdown, no explanation, no preamble.
 
+ACCEPTABLE TERMINAL OUTCOMES (any one is a successful synthesis):
+- a coherent consolidated memory
+- a note that the source is ambiguous, contradictory,
+  mathematically undefined, or insufficient — preserve the
+  observable quality rather than force coherence
+- an explicit statement that no reliable conclusion can be
+  derived from the input
+
+You must NEVER invent missing facts, fabricate values, or
+re-interpret contradictory inputs as if one were correct
+just so the synthesis can be produced. Uncertainty is a valid
+result, not a reason to keep calling.
+
 EXAMPLE:
 Input fragment 1: "v prefers short messages. Prefers direct communication."
 Input fragment 2: "User v — short and direct. Doesn't like fluff."
-Output: {"content": "v prefers short, direct communication. No fluff.", "tags": ["preference", "v", "communication"]}`
+Output: {"content": "v prefers short, direct communication. No fluff.", "tags": ["preference", "v", "communication"]}
+
+EXAMPLE (uncertainty is preserved):
+Input fragment 1: "square root of divided by zero x 0"
+Output: {"content": "The source statement is mathematically undefined; no reliable conclusion can be derived.", "tags": []}`
 
 // synthInternalMaxTokens is the substrate-supplied wire cap used
 // when calling LLM APIs. NOT user-configurable — operators must
@@ -285,7 +312,35 @@ type SynthResult struct {
 // dispatch; the audit found that compact.go and admission.go had
 // diverged from it. Pulling all three sites through the helper is
 // the structural fix.
+// Synthesize sends memory fragments to the LLM using the consolidation
+// prompt and returns the parsed synthesis result. Uses a context with
+// the configured timeout for cancellation safety.
+//
+// Wire dispatch: Auth header, request path, and response parser are
+// selected by sc.Wire (inferred from BaseURL at construction). Same
+// body shape on both wires (system message first, user second in the
+// messages array) — the divergence is in the URL, the header, and the
+// response unwrap, all of which live in wire.go.
+//
+// Bounded-execution safeguard: Synthesize builds a per-call Plan
+// (one semantic call, default retry/repair budgets) and routes
+// through DoLLMRequestWithPlan. Callers that need explicit
+// attribution can use SynthesizeWithPlan directly.
 func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*SynthResult, error) {
+	return sc.SynthesizeWithPlan(ctx, fragments, NewPerCallPlan())
+}
+
+// SynthesizeWithPlan is the canonical LLM call site for the
+// synthesis stage. The Plan attributes every attempt the wire
+// makes (planned / completed / retry / repair) and is the
+// authority for the "every model call has a finite
+// pre-computable reason" invariant.
+//
+// The fragment list is the source material; semantic
+// dissatisfaction with the response (uncertain, ambiguous,
+// contradictory, undefined, insufficient evidence) is NOT a
+// retry reason — only mechanical failure is.
+func (sc *SynthClient) SynthesizeWithPlan(ctx context.Context, fragments []string, plan *Plan) (*SynthResult, error) {
 	if sc.APIKey == "" {
 		return nil, fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block or appropriate env var for the configured wire)")
 	}
@@ -301,21 +356,37 @@ func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*Syn
 		},
 	}
 
-	respBody, err := sc.DoLLMRequest(ctx, body)
+	respBody, err := sc.DoLLMRequestWithPlan(ctx, body, plan)
 	if err != nil {
 		return nil, fmt.Errorf("synthesis [vendor=%s]: %w", wireLabel(sc.Wire), err)
 	}
 
 	rawResult, err := sc.ParseResponseBody(respBody, "synthesis")
 	if err != nil {
+		// Wire-envelope parse failure. The HTTP layer returned
+		// 200 OK, so the plan's success counter is already at 1;
+		// we attribute this to the repair budget instead. This
+		// is the only place a structural-decode failure consumes
+		// a repair; subsequent retries against the same wire
+		// would loop, so plan.RepairOrStop() rejects after
+		// MaxRepairsPerRun (default 1).
+		_ = plan.RepairOrStop()
 		return nil, fmt.Errorf("synthesis [vendor=%s]: %w", wireLabel(sc.Wire), err)
 	}
 	var result SynthResult
 	if err := json.Unmarshal(rawResult, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse synthesis JSON: %w (raw: %s)", err, string(rawResult))
+		// Structural-decode failure — consume one repair
+		// from the plan and re-throw. The plan's repair
+		// budget caps the worst case at MaxRepairsPerRun.
+		_ = plan.RepairOrStop()
+		return nil, fmt.Errorf("failed to parse synthesis JSON: %w", err)
 	}
 	if result.Content == "" {
-		return nil, fmt.Errorf("LLM returned empty synthesized content")
+		// Empty content is itself a valid terminal result
+		// (the model refused to invent). Do NOT trigger a
+		// repair or retry — semantic dissatisfaction never
+		// causes another model call.
+		return &result, nil
 	}
 	return &result, nil
 }

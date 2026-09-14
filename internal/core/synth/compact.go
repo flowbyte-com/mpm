@@ -29,6 +29,14 @@ import (
 // {"title":"", "body":"", "tags":[]} is a valid response that the
 // orchestrator treats as a schema refusal (empty fields trigger
 // Validate() to fail).
+//
+// 2026-09-14 release-pass: the prompt permits uncertainty as a
+// terminal outcome. Conflicting evidence, ambiguity, undefined
+// proposition, or insufficient evidence are equally valid results;
+// the model is instructed to preserve rather than force coherence.
+// This is required for the bounded-execution safeguard — retry
+// loops are bounded by the safeguard and never by the model
+// re-reasoning on every "uncertain" response.
 const compactLessonSystemPrompt = `You are an epistemic consolidator. Given a batch of raw memories separated by "---MEMORY---" markers, synthesize a single durable lesson that captures their shared insight.
 
 Return JSON matching this exact schema (no preamble, no markdown fences, no explanation):
@@ -42,7 +50,20 @@ Rules:
 - Title is a noun phrase, not a sentence.
 - Body is durable knowledge, not specific facts from the batch.
 - Tags are short kebab-case identifiers (e.g., "wakes-filter", "epistemic-compaction").
-- If the batch is too noisy to synthesize, return {"title":"", "body":"", "tags":[]} — the orchestrator treats empty fields as a refusal.`
+
+ACCEPTABLE TERMINAL OUTCOMES (any one is a successful synthesis):
+- a coherent consolidated lesson
+- a refusal sentinel {"title":"", "body":"", "tags":[]} when the
+  batch is contradictory, ambiguous, mathematically undefined,
+  or insufficiently specified. Preserve the refusal — do not
+  invent a lesson just to fill the schema.
+- an explicit body that names the contradiction and refuses to
+  force a conclusion
+
+You must NEVER fabricate values, soften contradictions, or
+re-interpret opposing inputs as if one were correct just so the
+JSON can be produced. Uncertainty is a valid result, not a
+reason to keep calling.`
 
 // SynthesizeCompactLesson sends the raw memories to the LLM with the
 // strict-JSON compact prompt and returns the model's text response as
@@ -54,15 +75,27 @@ Rules:
 // orchestrator level, where domain validation can inspect and the
 // data plane can stay pristine (no DB writes on parse failure).
 //
-// HTTP transport: routes through doLLMRequest — wire-aware path
-// selection (/messages vs /chat/completions) and auth header
-// (X-Api-Key vs Authorization: Bearer) come from sc.Wire, which is
-// inferred from BaseURL at construction time. Retry policy (one
-// retry on 5xx with 3s backoff, fail-fast on 4xx) is centralized in
-// the helper so all three call sites behave identically. Post-M3
-// audit H-1: prior version hardcoded /messages + X-Api-Key which
-// broke OpenRouter and OpenAI-protocol vendors.
+// Bounded-execution safeguard: SynthesizeCompactLesson builds a
+// per-call Plan (one semantic call, default retry/repair budgets)
+// and routes through DoLLMRequestWithPlan. Callers that need
+// explicit attribution use SynthesizeCompactLessonWithPlan.
+//
+// HTTP transport: routes through DoLLMRequestWithPlan —
+// wire-aware path selection (/messages vs /chat/completions)
+// and auth header (X-Api-Key vs Authorization: Bearer) come from
+// sc.Wire, which is inferred from BaseURL at construction time.
+// Retry policy is now policy-driven (transient=1 retry, auth=0,
+// rate-limit=conditional, malformed=1 repair). Post-M3 audit
+// H-1: prior version hardcoded /messages + X-Api-Key which broke
+// OpenRouter and OpenAI-protocol vendors.
 func (sc *SynthClient) SynthesizeCompactLesson(ctx context.Context, rawMemories []string) (string, error) {
+	return sc.SynthesizeCompactLessonWithPlan(ctx, rawMemories, NewPerCallPlan())
+}
+
+// SynthesizeCompactLessonWithPlan is the canonical LLM call
+// site for the compact_epistemology lesson stage. The Plan
+// attributes the call to the orchestrator's run budget.
+func (sc *SynthClient) SynthesizeCompactLessonWithPlan(ctx context.Context, rawMemories []string, plan *Plan) (string, error) {
 	if sc.APIKey == "" {
 		return "", fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block or appropriate env var for the configured wire)")
 	}
@@ -78,13 +111,16 @@ func (sc *SynthClient) SynthesizeCompactLesson(ctx context.Context, rawMemories 
 		},
 	}
 
-	respBody, err := sc.DoLLMRequest(ctx, body)
+	respBody, err := sc.DoLLMRequestWithPlan(ctx, body, plan)
 	if err != nil {
 		return "", fmt.Errorf("compact_lesson: %w", err)
 	}
 
 	rawResult, err := sc.ParseResponseBody(respBody, "compact_lesson")
 	if err != nil {
+		// Wire-level parse failure (non-200 envelope):
+		// consume a repair and re-throw.
+		_ = plan.RepairOrStop()
 		return "", fmt.Errorf("compact_lesson: %w", err)
 	}
 	return string(rawResult), nil

@@ -783,7 +783,47 @@ For CLI changes, add explicit built-binary smoke commands relevant to the modifi
 
 ---
 
-## 21. Production-state safety during acceptance
+## 21. LLM-backed bounded execution
+
+LLM-backed operations MUST have a finite, pre-computable
+execution plan. Every model call must be attributable to one of:
+
+- a planned semantic stage
+- one permitted mechanical retry
+- the single permitted repair
+
+Semantic uncertainty is a valid terminal result and MUST
+NEVER trigger open-ended retries. "Uncertain", "ambiguous",
+"contradictory", "undefined", "insufficient evidence" are each
+a successful semantic outcome — the safeguard is the authority
+on attempts, not the model's verdict.
+
+Retries are reserved for bounded mechanical failure:
+
+| Failure class                | Retries | Notes                                 |
+|------------------------------|---------|---------------------------------------|
+| 5xx / connection / timeout    | 1       | the only permitted retry              |
+| 401 / 403 / billing          | 0       | zero retries, fail-fast               |
+| 429                          | 0 or 1  | one retry ONLY if Retry-After bounded  |
+| Malformed wire response      | 1 repair| the only permitted repair             |
+
+Failure classes are NOT a retry reason: "the LLM was
+uncertain", "the LLM said it could not tell", "the LLM
+returned empty content". Those are valid answers — the run
+terminates successfully without another model call.
+
+User-visible output-token limits are NOT a runaway-execution
+safeguard. Bound execution by calls / stages / recursion,
+not by truncating successful output. Output-token caps
+were explicitly removed from user-facing config in an
+earlier release pass; the bounded-execution contract holds
+regardless of any stored `max_tokens` value (legacy alpha
+installations that still carry the field have NO effect on
+the safeguard).
+
+---
+
+## 22. Production-state safety during acceptance
 
 Treat the user's real MPM substrate as production state.
 

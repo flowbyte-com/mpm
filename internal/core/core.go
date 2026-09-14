@@ -14,7 +14,18 @@ import (
 	"time"
 
 	"github.com/flowbyte-com/mpm-core/seed"
+	"github.com/flowbyte-com/mpm-core/synth"
 )
+
+// AbsoluteMaxBatchesPerInvocation is the per-invocation batch
+// ceiling the runaway-execution safeguard enforces. Re-exported
+// from the synth package so callers outside the core package
+// (e.g. cmd/mpm/synthesize_cmds.go) can refer to the same
+// constant by a stable import path.
+//
+// 2026-09-14 release-pass: see internal/core/synth/safeguard.go
+// for the rationale and the contract.
+const AbsoluteMaxBatchesPerInvocation = synth.AbsoluteMaxBatchesPerInvocation
 
 // DecisionFilter narrows the result set for ListDecisions. The zero value
 // returns all active (non-superseded, non-invalidated) decisions up to the
