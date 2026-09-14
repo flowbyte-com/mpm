@@ -25,8 +25,14 @@ func TestDoctorService_checkEmbeddings(t *testing.T) {
 	if check.Status != "PASS" {
 		t.Fatalf("empty DB: got status %q, want PASS (msg: %q)", check.Status, check.Message)
 	}
-	if check.Message != "0 memories with provider-generated embeddings (stored)" {
-		t.Fatalf("empty DB: got message %q, want '0 memories with provider-generated embeddings (stored)'", check.Message)
+	// Final release-pass wording: label is "Stored embeddings" so the
+	// historical-vs-current distinction is explicit in the rendered
+	// output. Message stays in passive voice.
+	if check.Name != "Stored embeddings" {
+		t.Fatalf("got label %q, want 'Stored embeddings'", check.Name)
+	}
+	if check.Message != "0 memories, all provider-generated" {
+		t.Fatalf("empty DB: got message %q, want '0 memories, all provider-generated'", check.Message)
 	}
 }
 

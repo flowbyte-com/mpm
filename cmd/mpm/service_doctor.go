@@ -68,6 +68,7 @@ func (s *DoctorService) Check() (*DoctorReport, error) {
 	report.Checks = append(report.Checks, s.checkEmbeddingProvider())
 	report.Checks = append(report.Checks, s.checkWorkingContextOrphans())
 	report.Checks = append(report.Checks, s.checkScheduler())
+	report.Checks = append(report.Checks, s.checkWakeBacklog())
 	report.Checks = append(report.Checks, s.checkReviewBacklog())
 
 	// Tally.
@@ -168,7 +169,15 @@ func (s *DoctorService) checkEmbeddings() DoctorCheck {
 		// not claim the provider is still reachable); the
 		// EmbeddingProvider check reports whether NEW embeddings can
 		// be generated.
-		check.Message = fmt.Sprintf("%d memories with provider-generated embeddings (stored)", total)
+		//
+		// Final-pass wording: label this row "Stored embeddings" so
+		// the historical-vs-current distinction is unambiguous in
+		// the rendered output (the Embedding provider row directly
+		// below is the forward-looking signal). The label change is
+		// in service_doctor.go's Check.Name; the message stays in
+		// passive voice so it doesn't claim current provider state.
+		check.Name = "Stored embeddings"
+		check.Message = fmt.Sprintf("%d memories, all provider-generated", total)
 	}
 	return check
 }
@@ -242,22 +251,15 @@ func (s *DoctorService) checkWorkingContextOrphans() DoctorCheck {
 	return check
 }
 
-// checkScheduler inspects overdue wakes via HealthCheck and adds a
-// cron-wake retention interpretation so a fresh agent can distinguish
-// healthy startup-stabilization / steady-state from genuine degradation.
+// checkScheduler inspects scheduler daemon health: cron-wake retention,
+// scheduler.state.json heartbeat (uptime, last-tick liveness). This is
+// the DAEMON HEALTH signal — distinct from the Wake backlog check,
+// which surfaces application-domain work that should have run by now.
 //
-// Two passes:
-//
-//  1. CronRetentionStatus — derived from the canonical scheduler
-//     constants (window, cadence, normal/catchup limits) plus the live
-//     scheduled_wakes row counts and the scheduler.state.json heartbeat.
-//     This is the diagnostic-contract surface; the message and details
-//     below narrate it in human terms.
-//
-//  2. Status — the WORST of actionable-overdue (existing wakes_overdue
-//     from HealthCheck) and retention health (from this function). The
-//     existing semantics for actionable wakes are preserved verbatim;
-//     the cron-retention interpretation only ADDS information.
+// Final release-pass correction (2026-09-14): the previous code combined
+// the daemon-health verdict with the actionable-overdue verdict, so a
+// healthy scheduler with a domain-work backlog was reported as a
+// scheduler daemon failure. The two are now separate DoctorCheck rows.
 func (s *DoctorService) checkScheduler() DoctorCheck {
 	check := DoctorCheck{Name: "Scheduler"}
 
@@ -266,32 +268,51 @@ func (s *DoctorService) checkScheduler() DoctorCheck {
 	// HealthCheck are unavailable.
 	check.CronRetention = s.cronRetentionStatus()
 
-	// Existing actionable-overdue check (preserved verbatim).
+	// Daemon-only verdict. HealthCheck is used purely for the cron
+	// retention surface here; actionable-overdue is reported by
+	// checkWakeBacklog.
 	hc, err := s.dm.HealthCheck()
 	if err != nil {
-		// HealthCheck unavailable — fall back to cron-retention verdict
-		// alone, surfaced in CronRetention.
 		check.Status = cronRetentionToStatus(check.CronRetention)
 		check.Message = cronRetentionToMessage(check.CronRetention)
 		return check
 	}
-	overdue, _ := hc["wakes_overdue"].(int64)
 
-	// Combined verdict: take the WORST of (actionable overdue severity,
-	// cron retention severity) so neither signal is masked by the other.
-	retStatus := cronRetentionToStatus(check.CronRetention)
-	retSeverity := statusSeverity(retStatus)
-	overdueSeverity, overdueMsg, overdueDetails := actionableOverdueVerdict(overdue)
-
-	if overdueSeverity > retSeverity {
-		check.Status = overdueSeverityToStatus(overdueSeverity)
-		check.Message = overdueMsg
-		check.Details = overdueDetails
-	} else {
-		check.Status = retStatus
-		check.Message = cronRetentionToMessage(check.CronRetention)
-	}
+	// Cron retention severity alone drives the Scheduler row status.
+	check.Status = cronRetentionToStatus(check.CronRetention)
+	check.Message = cronRetentionToMessage(check.CronRetention)
+	_ = hc
 	return check
+}
+
+// checkWakeBacklog counts actionable overdue wakes (domain work that
+// should have run by now and hasn't). Distinct from checkScheduler:
+// a healthy scheduler daemon with a backlog is a domain-work concern,
+// not a daemon failure. The verdict caps at WARN regardless of count.
+func (s *DoctorService) checkWakeBacklog() DoctorCheck {
+	check := DoctorCheck{Name: "Wake backlog"}
+	hc, err := s.dm.HealthCheck()
+	if err != nil {
+		check.Status = "WARN"
+		check.Message = "could not query wake backlog"
+		return check
+	}
+	overdue, _ := hc["wakes_overdue"].(int64)
+	_, msg, details := actionableOverdueVerdict(overdue)
+	check.Status = overdueSeverityToStatus(statusSeverityForOverdue(overdue))
+	check.Message = msg
+	check.Details = details
+	return check
+}
+
+// statusSeverityForOverdue maps the actionable-overdue count to a
+// severity tier (0=PASS, 1=WARN). Backlog is never FAIL — a daemon can
+// have an enormous backlog while remaining healthy.
+func statusSeverityForOverdue(overdue int64) int {
+	if overdue == 0 {
+		return 0
+	}
+	return 1
 }
 
 // cronRetentionStatus computes the diagnostic-contract fields from the

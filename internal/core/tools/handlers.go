@@ -6458,13 +6458,25 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 			// the complete payload pass full=true (handled upstream
 			// at line 6435) or a large max_bytes. Without either,
 			// this is the safe default — bounded projection.
-			maxB := int(maxBytes)
-			if maxB <= 0 {
-				maxB = mpminternal.DefaultMaxInlineContentBytes
-			}
-			bounded := len(content) > maxB
-			if bounded {
-				content = content[:maxB]
+			//
+			// full=true is an EXPLICIT opt-in to unbounded retrieval
+			// — the bounded fallback must NOT fire, or the caller's
+			// intent is silently dropped. Use a sentinel (full) rather
+			// than overloading maxB=0 (which is also the unset default).
+			var bounded bool
+			if full {
+				// full=true: explicit opt-in to unbounded content.
+				// Caller accepts that the payload may be large.
+				bounded = false
+			} else {
+				maxB := int(maxBytes)
+				if maxB <= 0 {
+					maxB = mpminternal.DefaultMaxInlineContentBytes
+				}
+				bounded = len(content) > maxB
+				if bounded {
+					content = content[:maxB]
+				}
 			}
 			_ = dm.RecordRetrieval(ptr.ID, "memory")
 			resp := map[string]interface{}{
@@ -6566,13 +6578,22 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 			// Final release-pass contract (defect C): bounded
 			// projection by default; full content via full=true or
 			// large max_bytes.
-			maxB := int(maxBytes)
-			if maxB <= 0 {
-				maxB = mpminternal.DefaultMaxInlineContentBytes
-			}
-			bounded := len(content) > maxB
-			if bounded {
-				content = content[:maxB]
+			//
+			// full=true must bypass the bounded fallback so the
+			// caller's explicit opt-in is honoured — see the
+			// matching fix on the memory branch above.
+			var bounded bool
+			if full {
+				bounded = false
+			} else {
+				maxB := int(maxBytes)
+				if maxB <= 0 {
+					maxB = mpminternal.DefaultMaxInlineContentBytes
+				}
+				bounded = len(content) > maxB
+				if bounded {
+					content = content[:maxB]
+				}
 			}
 			_ = dm.RecordRetrieval(ptr.ID, "work")
 			return map[string]interface{}{
