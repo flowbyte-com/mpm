@@ -365,20 +365,24 @@ func resolveEmbeddingConfig(cfg *config.Config) *EmbeddingConfig {
 		}
 	}
 
-	// 3. env fallback
-	endpoint := os.Getenv("OLLAMA_ENDPOINT")
-	model := os.Getenv("OLLAMA_MODEL")
-	if endpoint != "" || model != "" {
-		if endpoint == "" {
-			endpoint = "http://localhost:11434/api/embed"
-		}
-		if model == "" {
-			model = "nomic-embed-text"
-		}
+	// 3. env fallback — Ollama first (historical precedence),
+	// then OpenAI-compatible (added in the 2026-09-14
+	// capability-oriented expansion). Provider-specific env
+	// vars win over the generic OPENAI_API_KEY so operators
+	// with multiple keys set still route correctly.
+	if endpoint, model, ok := ollamaEnvFallback(); ok {
 		return &EmbeddingConfig{
 			Source:       EmbeddingSourceEnvFallback,
 			ProviderName: "ollama:" + model,
 			Provider:     NewOllamaProvider(endpoint, model),
+			Status:       EmbeddingStatusConfigured,
+		}
+	}
+	if endpoint, model, ok := openAICompatEnvFallback(); ok {
+		return &EmbeddingConfig{
+			Source:       EmbeddingSourceEnvFallback,
+			ProviderName: "openai-compatible:" + model,
+			Provider:     NewOpenAICompatibleProvider(endpoint, model, ""),
 			Status:       EmbeddingStatusConfigured,
 		}
 	}
@@ -392,6 +396,89 @@ func resolveEmbeddingConfig(cfg *config.Config) *EmbeddingConfig {
 	}
 }
 
+// ollamaEnvFallback returns the canonical Ollama env-fallback
+// tuple (endpoint, model, true) when OLLAMA_ENDPOINT or
+// OLLAMA_MODEL is set. False means no Ollama fallback was
+// configured. Preserves the pre-2026-09-14 precedence: the
+// Ollama env vars take priority over the OpenAI-compatible
+// fallback so existing operators don't see a silent swap.
+func ollamaEnvFallback() (endpoint, model string, ok bool) {
+	endpoint = os.Getenv("OLLAMA_ENDPOINT")
+	model = os.Getenv("OLLAMA_MODEL")
+	if endpoint == "" && model == "" {
+		return "", "", false
+	}
+	if endpoint == "" {
+		endpoint = "http://localhost:11434/api/embed"
+	}
+	if model == "" {
+		model = "nomic-embed-text"
+	}
+	return endpoint, model, true
+}
+
+// openAICompatEnvFallback returns the OpenAI-compatible env
+// fallback tuple (endpoint, model, true) when one of the
+// provider-specific endpoint env vars is set AND a key env
+// var is present. False means no OpenAI-compatible fallback
+// was configured.
+//
+// Provider-specific env var precedence (most-specific match
+// first):
+//   - OPENAI_ENDPOINT    + OPENAI_API_KEY
+//   - OPENROUTER_ENDPOINT+ OPENROUTER_API_KEY
+//   - OAI_COMPAT_ENDPOINT + any *_API_KEY   (generic)
+//
+// The API key env var is consumed inside NewOpenAICompatibleProvider
+// at runtime — we don't inject it into the env here.
+func openAICompatEnvFallback() (endpoint, model string, ok bool) {
+	if endpoint = os.Getenv("OPENAI_ENDPOINT"); endpoint != "" {
+		if !hasAnyKeyEnv("OPENAI_API_KEY") {
+			return "", "", false
+		}
+		model = os.Getenv("OPENAI_EMBEDDING_MODEL")
+		if model == "" {
+			model = "text-embedding-3-small"
+		}
+		return endpoint, model, true
+	}
+	if endpoint = os.Getenv("OPENROUTER_ENDPOINT"); endpoint != "" {
+		if !hasAnyKeyEnv("OPENROUTER_API_KEY") {
+			return "", "", false
+		}
+		model = os.Getenv("OPENROUTER_EMBEDDING_MODEL")
+		if model == "" {
+			model = "openai/text-embedding-3-small"
+		}
+		return endpoint, model, true
+	}
+	if endpoint = os.Getenv("OAI_COMPAT_ENDPOINT"); endpoint != "" {
+		if !hasAnyKeyEnv("OPENAI_API_KEY", "OPENROUTER_API_KEY") {
+			return "", "", false
+		}
+		model = os.Getenv("OAI_COMPAT_EMBEDDING_MODEL")
+		if model == "" {
+			model = "text-embedding-3-small"
+		}
+		return endpoint, model, true
+	}
+	return "", "", false
+}
+
+// hasAnyKeyEnv reports whether at least one of the named env
+// vars is non-empty. Used by openAICompatEnvFallback to require
+// the operator to opt in to the OpenAI-compatible fallback
+// explicitly via a key env var — a bare OPENAI_ENDPOINT without
+// any key is rejected.
+func hasAnyKeyEnv(names ...string) bool {
+	for _, n := range names {
+		if os.Getenv(n) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func validateEmbeddingProfile(p *config.Profile) error {
 	if p.Provider == "" {
 		return fmt.Errorf("embedding profile %q: provider is required", p.Name)
@@ -403,18 +490,22 @@ func validateEmbeddingProfile(p *config.Profile) error {
 	// longer Ollama-exclusive. OpenAI-compatible endpoints
 	// (LocalAI, LM Studio, vLLM, llama.cpp, HF TEI) speak
 	// `/v1/embeddings` and are first-class.
+	//
+	// "openai" and "openrouter" are explicit first-class
+	// provider names but reuse the OpenAI-compatible transport
+	// (same wire shape, same auth header).
 	switch p.Provider {
-	case "ollama", "openai-compatible":
+	case "ollama", "openai-compatible", "openai", "openrouter":
 		return nil
 	}
-	return fmt.Errorf("embedding profile %q: provider %q is not implemented (supported: \"ollama\", \"openai-compatible\")", p.Name, p.Provider)
+	return fmt.Errorf("embedding profile %q: provider %q is not implemented (supported: \"ollama\", \"openai\", \"openai-compatible\", \"openrouter\")", p.Name, p.Provider)
 }
 
 func buildProvider(p *config.Profile) (EmbeddingProvider, error) {
 	switch p.Provider {
 	case "ollama":
 		return NewOllamaProvider(p.BaseURL, p.Model), nil
-	case "openai-compatible":
+	case "openai-compatible", "openai", "openrouter":
 		return NewOpenAICompatibleProvider(p.BaseURL, p.Model, p.APIKey), nil
 	}
 	return nil, fmt.Errorf("buildProvider: no implementation for provider %q", p.Provider)

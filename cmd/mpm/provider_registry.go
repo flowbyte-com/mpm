@@ -111,8 +111,7 @@ var canonicalProviders = []ProviderDefinition{
 	},
 
 	// B: OpenAI-compatible. Synthesis uses wireOpenAI dispatch;
-	// embeddings use the new OpenAICompatibleProvider added
-	// in this pass.
+	// embeddings use the OpenAICompatibleProvider.
 	{
 		ID:              "openai-compatible",
 		DisplayName:     "OpenAI-compatible (LocalAI / LM Studio / vLLM)",
@@ -129,33 +128,90 @@ var canonicalProviders = []ProviderDefinition{
 		ID:              "anthropic",
 		DisplayName:     "Anthropic",
 		Capabilities:    CapGenerate,
-		DefaultModel:    "claude-3-5-sonnet",
+		DefaultModel:    "claude-haiku-4-5",
 		DefaultBaseURL:  "https://api.anthropic.com/v1",
 		NeedsAPIKey:     true,
 	},
 
+	// B: Cohere exposes an OpenAI-compat endpoint at
+	// api.cohere.com/v1. Capability is generate + embed
+	// (Cohere has native embed-v4.0).
+	{
+		ID:              "cohere",
+		DisplayName:     "Cohere",
+		Capabilities:    CapGenerate | CapEmbed,
+		DefaultModel:    "command-a-03-2025",
+		DefaultBaseURL:  "https://api.cohere.com/v1",
+		NeedsAPIKey:     true,
+	},
+
 	// B: OpenAI API proper. Embedding via /v1/embeddings uses
-	// the new OpenAICompatibleProvider (it speaks the same
-	// wire). Default model for embedding is a sensible
-	// flagship, not exhaustive.
+	// the OpenAICompatibleProvider (same wire).
 	{
 		ID:              "openai",
 		DisplayName:     "OpenAI",
 		Capabilities:    CapGenerate | CapEmbed,
-		DefaultModel:    "gpt-4o",
+		DefaultModel:    "gpt-5-luna",
 		DefaultBaseURL:  "https://api.openai.com/v1",
 		NeedsAPIKey:     true,
 	},
 
-	// B: MiniMax is Anthropic-protocol. Already in the
-	// historical wizardPresets; preserved with its
-	// anthropic-compatible base URL.
+	// B: Google Gemini exposes an OpenAI-compat endpoint at
+	// generativelanguage.googleapis.com/v1beta/openai.
+	// Capability is generate + embed (Gemini Embedding is
+	// a first-class model family).
+	{
+		ID:              "google-gemini",
+		DisplayName:     "Google Gemini",
+		Capabilities:    CapGenerate | CapEmbed,
+		DefaultModel:    "gemini-3.0-pro",
+		DefaultBaseURL:  "https://generativelanguage.googleapis.com/v1beta/openai",
+		NeedsAPIKey:     true,
+	},
+
+	// B: MiniMax is Anthropic-protocol.
 	{
 		ID:              "minimax",
 		DisplayName:     "MiniMax",
 		Capabilities:    CapGenerate,
 		DefaultModel:    "MiniMax-M2.7",
 		DefaultBaseURL:  "https://api.minimax.io/anthropic/v1",
+		NeedsAPIKey:     true,
+	},
+
+	// B: Mistral AI exposes an OpenAI-compat endpoint at
+	// api.mistral.ai/v1.
+	{
+		ID:              "mistral",
+		DisplayName:     "Mistral AI",
+		Capabilities:    CapGenerate,
+		DefaultModel:    "mistral-medium-3-5",
+		DefaultBaseURL:  "https://api.mistral.ai/v1",
+		NeedsAPIKey:     true,
+	},
+
+	// B: OpenRouter is the multi-model aggregator. It
+	// exposes an OpenAI-compat endpoint at
+	// openrouter.ai/api/v1. Capability is generate + embed
+	// (OpenRouter surfaces embedding-capable models from its
+	// catalogue; we filter by capability at the model
+	// layer).
+	{
+		ID:              "openrouter",
+		DisplayName:     "OpenRouter",
+		Capabilities:    CapGenerate | CapEmbed,
+		DefaultModel:    "openrouter/free",
+		DefaultBaseURL:  "https://openrouter.ai/api/v1",
+		NeedsAPIKey:     true,
+	},
+
+	// B: xAI exposes an OpenAI-compat endpoint at api.x.ai/v1.
+	{
+		ID:              "xai",
+		DisplayName:     "xAI",
+		Capabilities:    CapGenerate,
+		DefaultModel:    "grok-4.6",
+		DefaultBaseURL:  "https://api.x.ai/v1",
 		NeedsAPIKey:     true,
 	},
 
@@ -260,37 +316,78 @@ func presetForID(id string) (ProviderDefinition, bool) {
 // per provider. Each catalog includes a small set of widely-
 // deployed models. Operators are not punished for picking a
 // non-flagship; the Custom entry guarantees forward compatibility.
+//
+// 2026-09-14 catalogue refresh: stale models (claude-3-*, gpt-4o-era
+// "main" defaults, retired Gemini preview models) have been removed
+// from the normal preset lists. Each list now contains current
+// supported generation/embedding models per the release-pass brief.
+// OpenRouter uses live discovery via /api/v1/models; this catalog is
+// the fallback only.
 var modelCatalogFor = func(providerID string) []string {
 	switch providerID {
 	case "openai":
 		return []string{
-			"gpt-4o",
-			"gpt-4o-mini",
-			"o3",
-			"o3-mini",
-			"o4-mini",
+			"gpt-5-luna",
+			"gpt-5-sol",
+			"gpt-5-terra",
+			"text-embedding-3-large",
+			"text-embedding-3-small",
 		}
 	case "anthropic":
 		return []string{
-			"claude-3-5-haiku",
-			"claude-3-5-sonnet",
-			"claude-3-opus",
+			"claude-haiku-4-5",
+			"claude-opus-4-5",
 			"claude-sonnet-4-5",
+		}
+	case "cohere":
+		return []string{
+			"command-a-03-2025",
+			"command-r-plus",
+			"embed-v4.0",
+		}
+	case "google-gemini":
+		return []string{
+			"gemini-3.0-pro",
+			"gemini-3.0-flash",
+			"gemini-2.5-pro",
+			"gemini-embedding-001",
 		}
 	case "minimax":
 		return []string{
 			"MiniMax-M2.7",
 			"MiniMax-M2.7-highspeed",
 		}
+	case "mistral":
+		return []string{
+			"mistral-large-3",
+			"mistral-medium-3-5",
+			"mistral-small-2603",
+		}
 	case "ollama":
 		// Ollama: discovery is preferred over a preset catalog.
-		// The catalog is a fallback used only when /api/tags is
+		// The catalog is a fallback only when /api/tags is
 		// unreachable. Empty here signals "discover if you can".
 		return nil
 	case "openai-compatible":
 		// Operator-supplied. We have no model catalog for
 		// arbitrary compatible endpoints.
 		return nil
+	case "openrouter":
+		// OpenRouter's catalogue is large and changes often.
+		// We discover via /api/v1/models at runtime (see
+		// openRouterCatalog() in detect_embedding.go). This
+		// list is the offline fallback when discovery fails —
+		// just the OpenRouter Free Router preset, so the operator
+		// always has at least one path forward.
+		return []string{
+			"openrouter/free",
+		}
+	case "xai":
+		return []string{
+			"grok-4.6",
+			"grok-4.3",
+			"grok-build-0.1",
+		}
 	}
 	return nil
 }

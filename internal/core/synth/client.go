@@ -118,25 +118,65 @@ func NewSynthClient() *SynthClient {
 		}
 	}
 	if sc.APIKey == "" {
-		// Env-var fallback. The legacy MINIMAX_API_KEY works
-		// for the default Anthropic-protocol wire (which is
-		// what MiniMax itself speaks). For OpenAI-protocol
-		// wires (OpenRouter, OpenAI native, LM Studio),
-		// OPENROUTER_API_KEY or OPENAI_API_KEY are the
-		// matching env vars. Wire inference picks the right
-		// one based on BaseURL.
+		// Env-var fallback. Provider-specific env vars win
+		// over generic ones so e.g. an operator with both
+		// OPENAI_API_KEY and OPENROUTER_API_KEY set still uses
+		// the right one for the matched wire. The lookup
+		// order is "most-specific match first" — OpenRouter
+		// wins for openrouter URLs, OpenAI for openai.com, etc.
+		//
+		// 2026-09-14 release-pass: extended for the new
+		// capability-oriented provider catalogue
+		// (Cohere/Google/Mistral/OpenRouter/xAI all OpenAI-compat
+		// at their canonical base URLs).
 		sc.Wire = inferWire(sc.BaseURL)
+		lu := strings.ToLower(sc.BaseURL)
 		switch sc.Wire {
 		case wireOpenAI:
-			if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
-				sc.APIKey = key
-			} else if key := os.Getenv("OPENAI_API_KEY"); key != "" {
-				sc.APIKey = key
+			switch {
+			case strings.Contains(lu, "openrouter"):
+				if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+					sc.APIKey = key
+				} else if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+					sc.APIKey = key
+				}
+			case strings.Contains(lu, "googleapis"):
+				if key := os.Getenv("GEMINI_API_KEY"); key != "" {
+					sc.APIKey = key
+				} else if key := os.Getenv("GOOGLE_API_KEY"); key != "" {
+					sc.APIKey = key
+				} else if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+					sc.APIKey = key
+				}
+			case strings.Contains(lu, "x.ai"):
+				if key := os.Getenv("XAI_API_KEY"); key != "" {
+					sc.APIKey = key
+				} else if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+					sc.APIKey = key
+				}
+			case strings.Contains(lu, "mistral.ai"):
+				if key := os.Getenv("MISTRAL_API_KEY"); key != "" {
+					sc.APIKey = key
+				} else if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+					sc.APIKey = key
+				}
+			case strings.Contains(lu, "cohere.com"):
+				if key := os.Getenv("COHERE_API_KEY"); key != "" {
+					sc.APIKey = key
+				} else if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+					sc.APIKey = key
+				}
+			default:
+				if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+					sc.APIKey = key
+				} else if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+					sc.APIKey = key
+				}
 			}
 		default:
 			if key := os.Getenv("MINIMAX_API_KEY"); key != "" {
 				sc.APIKey = key
-			} else if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+			} else if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
 				sc.APIKey = key
 			}
 		}

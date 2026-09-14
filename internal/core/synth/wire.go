@@ -48,7 +48,9 @@ const (
 // inferWire returns the wire shape implied by a base URL. The heuristic
 // covers the common cases operators will hit in practice:
 //
-//   - Hostname keywords: openrouter / openai / lmstudio / ollama
+//   - Hostname keywords: openrouter / openai / googleapis / groq / cerebras
+//     / fireworks / x.ai / mistral.ai / cohere.com / lmstudio / ollama
+//   - Path signals:    /openai/ in the path
 //   - Local-host shortcuts: localhost, 127.0.0.1
 //   - LM Studio default port: 1234 (LM Studio's local listener)
 //
@@ -62,6 +64,14 @@ const (
 // Operators with a custom Anthropic-protocol endpoint on a generic
 // localhost can disambiguate by including "anthropic" in the URL.
 //
+// 2026-09-14 release-pass: extended to cover the new
+// capability-oriented provider catalogue — Google Gemini
+// (Generative Language API exposes an OpenAI-compat surface at
+// /v1beta/openai), xAI (api.x.ai/v1), Mistral AI (api.mistral.ai/v1),
+// Cohere (api.cohere.com/v1 since 2024 OpenAI-compat launch). Each
+// provider's first-class provider definition names the canonical
+// base URL so the heuristic matches without operator override.
+//
 // Case-insensitive — URL casing varies across providers.
 func inferWire(baseURL string) wireShape {
 	lu := strings.ToLower(baseURL)
@@ -70,6 +80,13 @@ func inferWire(baseURL string) wireShape {
 		strings.Contains(lu, "openai.com"),
 		strings.Contains(lu, "/openai/"),
 		strings.HasSuffix(lu, "/openai"),
+		strings.Contains(lu, "googleapis"), // Gemini's OpenAI-compat endpoint lives under generativelanguage.googleapis.com
+		strings.Contains(lu, "x.ai"),
+		strings.Contains(lu, "mistral.ai"),
+		strings.Contains(lu, "cohere.com"),
+		strings.Contains(lu, "groq.com"),
+		strings.Contains(lu, "cerebras.ai"),
+		strings.Contains(lu, "fireworks.ai"),
 		strings.Contains(lu, "lmstudio"),
 		strings.Contains(lu, "ollama") || strings.Contains(lu, ":11434"),
 		strings.Contains(lu, "localhost"),

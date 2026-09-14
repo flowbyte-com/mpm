@@ -638,9 +638,12 @@ func handleConfigInteractive(c *config.Config) int {
 	mergeProfileDefaults(&prof, preset.defaults)
 
 	// Model prompt — preserve existing model on empty input.
-	model := promptString(rwFromStdin(), "Model", prof.Model)
-	if model != "" {
-		prof.Model = strings.TrimSpace(model)
+	// For providers with a curated catalog (or live
+	// discovery, e.g. OpenRouter), show a numbered menu;
+	// Custom is entry 1, remainder alphabetical. Operators
+	// always have the Custom option to type any model.
+	if m := promptModelFromCatalog(rwFromStdin(), preset.id, prof.Model); m != "" {
+		prof.Model = m
 	}
 
 	// 2026-09-14 release-pass: LLM-role validation. If the
@@ -1227,6 +1230,105 @@ func promptSecret(rw *bufio.Reader, label, def string) string {
 	fmt.Print(prompt)
 	raw, _ := rw.ReadString('\n')
 	return strings.TrimSpace(raw)
+}
+
+// modelMenuEntry is one row in the model picker. ID is the
+// canonical model string; Label is the display label; Source
+// distinguishes "Custom (manual)" from catalog entries.
+type modelMenuEntry struct {
+	id       string
+	label    string
+	isCustom bool
+}
+
+// promptModelFromCatalog presents a numbered model menu when the
+// chosen provider has a curated catalog (or, for OpenRouter,
+// live discovery). Custom is entry 1; the remainder is the
+// catalog sorted alphabetically.
+//
+// When the provider has no catalog (Ollama uses discovery;
+// Custom has nothing to offer), the function falls back to a
+// freeform prompt — preserving the existing behaviour for
+// discovery-only and operator-curated providers.
+//
+// The returned string is the chosen model ID, or the operator's
+// freeform input. Empty input preserves any existing prof.Model.
+func promptModelFromCatalog(rw *bufio.Reader, providerID, current string) string {
+	catalog := modelMenuCatalogFor(providerID)
+	if len(catalog) == 0 {
+		// No catalog — fall back to freeform prompt.
+		return promptString(rw, "Model", current)
+	}
+	entries := []modelMenuEntry{
+		{id: "", label: "Custom model (I know what I'm doing)", isCustom: true},
+	}
+	for _, m := range catalog {
+		entries = append(entries, modelMenuEntry{id: m, label: m})
+	}
+	defaultIdx := 0 // Custom is the default — matches the Provider menu.
+	if current != "" {
+		for i, e := range entries {
+			if e.id == current {
+				defaultIdx = i
+				break
+			}
+		}
+	}
+	fmt.Println()
+	fmt.Println("  Model")
+	for i, e := range entries {
+		fmt.Printf("    %d. %s\n", i+1, e.label)
+	}
+	fmt.Printf("\n  Choose [%d-%d] (default: %d): ", 1, len(entries), defaultIdx+1)
+	raw, _ := rw.ReadString('\n')
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = strconv.Itoa(defaultIdx + 1)
+	}
+	n, err := strconvAtoi(raw)
+	if err != nil || n < 1 || n > len(entries) {
+		fmt.Println("  invalid choice; aborting")
+		return ""
+	}
+	chosen := entries[n-1]
+	if chosen.isCustom {
+		// Custom: prompt for the freeform model string.
+		return promptString(rw, "Model", current)
+	}
+	return chosen.id
+}
+
+// modelMenuCatalogFor returns the catalog to offer in the model
+// picker for providerID, or nil when no menu is appropriate
+// (Ollama uses live discovery, Custom has nothing to suggest).
+//
+// The brief pins the contract: Custom first, remainder
+// alphabetical, deterministic. Catalog source order is already
+// alphabetical (from modelCatalogFor + openRouterCatalogForView),
+// so we pass through unchanged.
+func modelMenuCatalogFor(providerID string) []string {
+	switch providerID {
+	case "openrouter":
+		return openRouterCatalogForView()
+	case "ollama":
+		// Ollama uses live discovery via /api/tags at wizard
+		// time. We don't pre-load here because the discovery
+		// may stall in the wizard context. Operators pick
+		// Custom and type the model name when Ollama is
+		// running but the probe is slow / down. The Ollama
+		// menu is populated by the embedding-detect surface.
+		return nil
+	case "custom":
+		return nil
+	case "openai-compatible":
+		// Operator-supplied. No flagship to suggest.
+		return nil
+	}
+	// Static catalogue providers (OpenAI, Anthropic, Cohere,
+	// Google Gemini, Mistral, MiniMax, xAI) all have
+	// curated entries. Empty slice means "use freeform only".
+	catalog := modelCatalogFor(providerID)
+	return catalog
 }
 
 // confirmPrompt reads a Y/n confirmation.
