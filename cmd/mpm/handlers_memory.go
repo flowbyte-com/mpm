@@ -14,6 +14,8 @@ import (
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/synth"
 	"github.com/flowbyte-com/mpm-core/usererror"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 // memoryMaxFileBytes caps the --file payload size accepted by
@@ -906,7 +908,8 @@ func handleMemoryList(args []string) int {
 	}
 
 	var output strings.Builder
-	output.WriteString(fmt.Sprintf("Recent %d memories:\n\n", len(memories)))
+	render.Heading(&output, "Memory list")
+	output.WriteString(fmt.Sprintf("%d memories\n\n", len(memories)))
 
 	for _, mem := range memories {
 		snippet := mem.Content
