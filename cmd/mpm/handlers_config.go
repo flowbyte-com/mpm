@@ -645,6 +645,34 @@ func handleConfigInteractive(c *config.Config) int {
 		prof.Model = strings.TrimSpace(model)
 	}
 
+	// 2026-09-14 release-pass: LLM-role validation. If the
+	// selected model is positively identified as embedding-only,
+	// reject BEFORE the generation-specific prompts (Max
+	// tokens). The rejection message names the model verbatim
+	// and points at the embedding configuration path. We probe
+	// the runtime's capability metadata (authoritative) and
+	// fall back to a small name list when the probe is
+	// unavailable. Unknown capability = accept (preserves
+	// custom-provider flexibility per the brief).
+	//
+	// We resolve provider/base_url from the live prompt state
+	// rather than prof.Provider/prof.BaseURL so the validator
+	// sees the same values the operator just typed. This keeps
+	// "Custom" + http://127.0.0.1:11434/ — Ollama-compatible —
+	// inside the probe path.
+	if prof.Model != "" {
+		resolvedProvider := preset.id
+		resolvedBaseURL := prof.BaseURL
+		switch ValidateLLMRole(resolvedProvider, prof.Model, resolvedBaseURL) {
+		case RoleEmbeddingOnly:
+			fmt.Println()
+			fmt.Println(RejectEmbeddingOnlyLLM(prof.Model))
+			fmt.Println()
+			fmt.Println("Aborted.")
+			return 1
+		}
+	}
+
 	// Base URL prompt — preserve the operator's existing URL when
 	// non-empty, even if the chosen preset has a different default.
 	// This is the silent-overwrite fix: a custom endpoint must not
@@ -1550,6 +1578,26 @@ func handleProfileSet(c *config.Config, name, key, value string) int {
 	case "provider":
 		p.Provider = value
 	case "model":
+		// 2026-09-14 release-pass: route the `model` setter
+		// through the same role-validation boundary the
+		// wizard uses. An embedding-only model assigned to an
+		// LLM-bound profile is rejected before the config is
+		// written — the brief explicitly forbids an
+		// embedding model reaching the LLM prompt path
+		// through a normal public surface.
+		//
+		// The validator is skipped when the profile is
+		// explicitly bound to `Components["embedding"]` (the
+		// operator wants an embedding model there) or when the
+		// provider is not Ollama-like (custom remote endpoints
+		// with unknown capability are accepted to preserve
+		// flexibility).
+		if !isEmbeddingBoundProfile(c, name) {
+			if decision := ValidateLLMRole(p.Provider, value, p.BaseURL); decision == RoleEmbeddingOnly {
+				fmt.Println(RejectEmbeddingOnlyLLM(value))
+				return 1
+			}
+		}
 		p.Model = value
 	case "base_url", "endpoint", "baseurl":
 		p.BaseURL = value
@@ -1589,6 +1637,17 @@ func handleProfileSet(c *config.Config, name, key, value string) int {
 	}
 	fmt.Printf("✓ profile %q %s set to %q\n", name, key, value)
 	return 0
+}
+
+// isEmbeddingBoundProfile reports whether the profile is
+// the active binding for Components["embedding"]. When true,
+// the LLM-role validator is bypassed — the operator wants an
+// embedding model in this profile by design.
+func isEmbeddingBoundProfile(c *config.Config, profileName string) bool {
+	if c == nil || c.Components == nil {
+		return false
+	}
+	return c.Components["embedding"] == profileName
 }
 
 func handleProfileRemove(c *config.Config, name string) int {
