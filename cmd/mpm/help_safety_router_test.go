@@ -52,6 +52,8 @@ var helpSafetyMatrix = []helpSafetyCase{
 	{Command: []string{"doctor", "--help"}, WantNoMutation: true},
 	{Command: []string{"why", "--help"}, WantNoMutation: true},
 	{Command: []string{"directives", "--help"}, WantNoMutation: true},
+	{Command: []string{"lifecycle", "--help"}, WantNoMutation: true},
+	{Command: []string{"lifecycle", "theory", "--help"}, WantNoMutation: true},
 	{Command: []string{"version", "--help"}, WantNoMutation: true},
 	{Command: []string{"backup", "list", "--help"}, WantNoMutation: true},
 	{Command: []string{"export", "status", "--help"}, WantNoMutation: true},

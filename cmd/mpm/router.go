@@ -128,6 +128,7 @@ func NewRouter() *CommandRouter {
 		"restore":    {Name: "restore", Description: "Restore soft-deleted memory", MinArgs: 1},
 		"restore-db": {Name: "restore-db", Description: "Restore database from SQL dump", MinArgs: 1},
 		"directives": {Name: "directives", Description: "Show behavioral directives"},
+		"lifecycle":  {Name: "lifecycle", Description: "Lifecycle asymmetry notes for artifact families", MinArgs: 0, MaxArgs: 1},
 		"status":     {Name: "status", Description: "Show system status", MinArgs: 0},
 		"persona":    {Name: "persona", Description: "Manage personas"},
 		"ops":        {Name: "ops", Description: "Engine-room operations (maintenance, diagnostics)"},
@@ -374,6 +375,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleRef(args[1:])
 	case "directives":
 		return handlePrimeDirectives()
+	case "lifecycle":
+		return handleLifecycleHelp(args[1:])
 	case "status":
 		return handleStatus(args[1:])
 	case "memory":
