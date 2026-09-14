@@ -213,3 +213,56 @@ func TestInstallSh_DataDirMode0700(t *testing.T) {
 			"none of the canonical forms found: %v", positive)
 	}
 }
+
+// TestInstallSh_PATHShadowDetection (2026-09-14 release-pass) pins
+// the PATH-shadow warning in install.sh. After symlinking
+// ~/.local/bin/mpm -> $PREFIX/bin/mpm, the script must check
+// `command -v mpm` and compare canonicalized paths
+// (readlink -f). If they differ, the script must warn the
+// operator showing both resolved and expected paths. The
+// shadowing binary is NEVER removed automatically.
+//
+// Required literals (must all appear in install.sh):
+//   - `command -v mpm`
+//   - `readlink -f`
+//   - `expected canonical install` (warning label)
+//   - `will NOT be removed automatically` (safety contract)
+func TestInstallSh_PATHShadowDetection(t *testing.T) {
+	data, err := os.ReadFile("../scripts/install.sh")
+	if err != nil {
+		if data, err = os.ReadFile("install.sh"); err != nil {
+			t.Fatalf("read install.sh: %v", err)
+		}
+	}
+	body := string(data)
+
+	required := []string{
+		"command -v mpm",
+		"readlink -f",
+		"expected canonical install",
+		"will NOT be removed automatically",
+	}
+	for _, want := range required {
+		if !strings.Contains(body, want) {
+			t.Errorf("install.sh must contain %q (PATH-shadow detection); not found", want)
+		}
+	}
+
+	// Negative: the shadowing binary must NEVER be auto-removed.
+	// A regex match is too fragile for shell; we check for the
+	// absence of any `rm.*$(command -v mpm|which mpm)` pattern
+	// anywhere in the script. A casual reader sees the
+	// `will NOT be removed automatically` warning above; this
+	// negative check is the safety-belt.
+	banned := []string{
+		`rm -f "$(command -v mpm)"`,
+		`rm -f $(command -v mpm)`,
+		`rm -f $(which mpm)`,
+		`rm -f "$(which mpm)"`,
+	}
+	for _, bad := range banned {
+		if strings.Contains(body, bad) {
+			t.Errorf("install.sh must NEVER auto-remove shadowing binary: %q must not appear", bad)
+		}
+	}
+}

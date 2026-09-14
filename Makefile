@@ -81,6 +81,14 @@ build:
 # (repo cloned somewhere other than $HOME/.mpm), this target copies the
 # build output into the canonical location. No sudo — the canonical
 # location is always user-writable.
+#
+# 2026-09-14 release-pass: this target is intended for development
+# workflows. For the canonical user-facing install — including
+# ~/.local/bin/mpm symlinks, PATH integration, and the user-level
+# systemd unit — run ./scripts/install.sh. The two routes produce
+# the same canonical layout ($PREFIX/bin/) for the binaries
+# themselves; scripts/install.sh adds the PATH surface that
+# `make install` does not.
 install: build
 	@echo "🚀 Verifying canonical install at $(PREFIX)/bin/..."
 	@mkdir -p $(PREFIX)/bin
@@ -95,6 +103,9 @@ install: build
 	    echo "    (bin/ is the canonical location; no copy needed)"; \
 	fi
 	@echo "✓ Canonical binaries at $(PREFIX)/bin/: $(BINARY_NAME) $(MCP_BINARY) $(SCHED_BINARY) $(CRITIC_BINARY) $(TELEMETRY_BINARY)"
+	@echo ""
+	@echo "ℹ  For the full user install (PATH symlinks + systemd unit),"
+	@echo "    run: ./scripts/install.sh"
 
 # Install the mpm-scheduler systemd user service.
 # The unit is templated for the standard ~/projects/mpm layout; override

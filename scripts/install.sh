@@ -446,6 +446,33 @@ phase_symlinks() {
             warn "  but existing sessions need: export PATH=\"\$HOME/.local/bin:\$PATH\""
             ;;
     esac
+
+    # PATH-shadow detection (2026-09-14 release-pass). If `command -v mpm`
+    # resolves to a path other than the canonical $PREFIX/bin/mpm
+    # (via the symlink chain $LOCAL_BIN/mpm -> $PREFIX/bin/mpm), warn
+    # the operator. We compare canonicalized paths (readlink -f) so the
+    # check survives symlink chains. The shadowing binary is NEVER
+    # removed automatically — the operator decides what to do. (A stale
+    # repo-root `./mpm` binary was the most common offender; see
+    # scripts/install.sh history.)
+    if command -v mpm >/dev/null 2>&1; then
+        local resolved
+        resolved=$(command -v mpm 2>/dev/null) || true
+        if [ -n "$resolved" ] && command -v readlink >/dev/null 2>&1; then
+            local canonical_resolved canonical_expected
+            canonical_resolved=$(readlink -f "$resolved" 2>/dev/null) || canonical_resolved="$resolved"
+            canonical_expected=$(readlink -f "$PREFIX/bin/mpm" 2>/dev/null) || canonical_expected="$PREFIX/bin/mpm"
+            if [ "$canonical_resolved" != "$canonical_expected" ]; then
+                warn "  PATH-shadow detected: \`command -v mpm\` -> $canonical_resolved"
+                warn "  expected canonical install:                 $canonical_expected"
+                warn "  the shadowing executable will NOT be removed automatically."
+                warn "  resolve by fixing your shell PATH (remove the shadowing directory)"
+                warn "  or replacing the binary at the shadowing path."
+            else
+                log "  \`command -v mpm\` -> $canonical_resolved  (canonical)"
+            fi
+        fi
+    fi
 }
 
 phase_data_dir() {
