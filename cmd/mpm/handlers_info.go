@@ -31,6 +31,8 @@ import (
 	"github.com/flowbyte-com/mpm-core/config"
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 // infoOutput is the JSON shape for `mpm info --json`. The human-readable
@@ -216,88 +218,85 @@ func collectInfo(dm *mpminternal.DatabaseManager) infoOutput {
 
 // renderInfoHuman prints the canonical human-readable form. It
 // intentionally mirrors the JSON section ordering one-to-one so the
-// two surfaces stay co-aligned.
+// two surfaces stay co-aligned. Rendered through the shared render
+// package — no inline lipgloss, no ad-hoc styling.
 func renderInfoHuman(out infoOutput) {
-	fmt.Println("MPM · Installation identity")
-	fmt.Println()
+	render.Heading(os.Stdout, "Installation identity")
+	render.BlankLine(os.Stdout)
 
-	fmt.Println("Identity")
-	fmt.Printf("  version          : %s\n", out.Version)
-	fmt.Printf("  data directory   : %s\n", out.DataDir)
-	fmt.Printf("  database path    : %s\n", out.DBPath)
-	fmt.Println()
+	render.Section(os.Stdout, "Identity")
+	render.Label(os.Stdout, "version", out.Version)
+	render.Label(os.Stdout, "data directory", out.DataDir)
+	render.Label(os.Stdout, "database path", out.DBPath)
+	render.BlankLine(os.Stdout)
 
-	fmt.Println("Workspace")
+	render.Section(os.Stdout, "Workspace")
 	if len(out.Workspace.ActiveModes) == 0 {
-		fmt.Printf("  active modes     : <none>%s\n", sourceTag(out.Workspace.ActiveModeSource))
+		render.Label(os.Stdout, "active modes", "<none>"+sourceTag(out.Workspace.ActiveModeSource))
 	} else {
-		fmt.Printf("  active modes     : %s%s\n",
-			strings.Join(out.Workspace.ActiveModes, ", "),
-			sourceTag(out.Workspace.ActiveModeSource))
+		render.Label(os.Stdout, "active modes", strings.Join(out.Workspace.ActiveModes, ", ")+sourceTag(out.Workspace.ActiveModeSource))
 	}
 	if out.Workspace.ActivePersona == "" {
-		fmt.Printf("  active persona   : <none>%s\n", sourceTag(out.Workspace.ActivePersonaSource))
+		render.Label(os.Stdout, "active persona", "<none>"+sourceTag(out.Workspace.ActivePersonaSource))
 	} else {
-		fmt.Printf("  active persona   : %s%s\n",
-			out.Workspace.ActivePersona,
-			sourceTag(out.Workspace.ActivePersonaSource))
+		render.Label(os.Stdout, "active persona", out.Workspace.ActivePersona+sourceTag(out.Workspace.ActivePersonaSource))
 	}
 	if out.Workspace.ActiveUpdated != "" {
-		fmt.Printf("  active updated   : %s\n", out.Workspace.ActiveUpdated)
+		render.Label(os.Stdout, "active updated", out.Workspace.ActiveUpdated)
 	} else if out.Workspace.ActiveJSONLoad != "" {
-		fmt.Printf("  active.json load : ⚠ %s\n", out.Workspace.ActiveJSONLoad)
+		render.Label(os.Stdout, "active.json load", "⚠ "+out.Workspace.ActiveJSONLoad)
 	}
-	fmt.Println()
+	render.BlankLine(os.Stdout)
 
-	fmt.Println("Database")
-	fmt.Printf("  path             : %s\n", out.Database.Path)
+	render.Section(os.Stdout, "Database")
+	render.Label(os.Stdout, "path", out.Database.Path)
 	if out.Database.Health == "ok" {
-		fmt.Printf("  health           : ✓ ok\n")
+		render.Label(os.Stdout, "health", "✓ ok")
 	} else {
-		fmt.Printf("  health           : ⚠ %s\n", out.Database.Error)
+		render.Label(os.Stdout, "health", "⚠ "+out.Database.Error)
 	}
 	if out.Database.Stats != nil {
 		for _, k := range []string{"total", "active", "ltm", "deleted", "never_accessed", "expired"} {
 			if v, ok := out.Database.Stats[k]; ok && v != nil {
-				fmt.Printf("  %-16s : %v\n", k, v)
+				render.Label(os.Stdout, k, fmt.Sprintf("%v", v))
 			}
 		}
 	} else {
-		fmt.Println("  stats            : (unavailable)")
+		render.Label(os.Stdout, "stats", "(unavailable)")
 	}
-	fmt.Println()
+	render.BlankLine(os.Stdout)
 
-	fmt.Println("Skills")
+	render.Section(os.Stdout, "Skills")
 	if out.Skills.Count == 0 {
-		fmt.Println("  registered skills: (none)")
+		render.Label(os.Stdout, "registered skills", "(none)")
 	} else {
-		fmt.Printf("  registered skills: %d\n", out.Skills.Count)
+		render.Label(os.Stdout, "registered skills", fmt.Sprintf("%d", out.Skills.Count))
 		for _, s := range out.Skills.Names {
-			fmt.Printf("    - %s\n", s)
+			render.Plainf(os.Stdout, "    - %s\n", s)
 		}
 	}
-	fmt.Println()
+	render.BlankLine(os.Stdout)
 
-	fmt.Println("Scheduler")
+	render.Section(os.Stdout, "Scheduler")
 	if out.Scheduler.Running {
-		fmt.Printf("  mpm-scheduler    : running (pid %d)\n", out.Scheduler.PID)
+		render.Label(os.Stdout, "mpm-scheduler", fmt.Sprintf("running (pid %d)", out.Scheduler.PID))
 	} else {
-		fmt.Println("  mpm-scheduler    : not running (start with 'systemctl --user start mpm-scheduler')")
+		render.Label(os.Stdout, "mpm-scheduler", "not running (start with 'systemctl --user start mpm-scheduler')")
 	}
 	if len(out.Scheduler.ScheduledTasks) == 0 {
-		fmt.Println("  scheduled tasks  : (none)")
+		render.Label(os.Stdout, "scheduled tasks", "(none)")
 	} else {
-		fmt.Printf("  scheduled tasks  : %d\n", len(out.Scheduler.ScheduledTasks))
+		render.Label(os.Stdout, "scheduled tasks", fmt.Sprintf("%d", len(out.Scheduler.ScheduledTasks)))
 		for _, t := range out.Scheduler.ScheduledTasks {
-			fmt.Printf("    - %s (next: %s)\n", t.ID, t.NextRun)
+			render.Plainf(os.Stdout, "    - %s (next: %s)\n", t.ID, t.NextRun)
 		}
 	}
-	fmt.Println()
+	render.BlankLine(os.Stdout)
 
-	fmt.Println("Runtime")
-	fmt.Printf("  hostname         : %s\n", out.Runtime.Hostname)
-	fmt.Printf("  pid              : %d\n", out.Runtime.PID)
-	fmt.Println()
+	render.Section(os.Stdout, "Runtime")
+	render.Label(os.Stdout, "hostname", out.Runtime.Hostname)
+	render.Label(os.Stdout, "pid", fmt.Sprintf("%d", out.Runtime.PID))
+	render.BlankLine(os.Stdout)
 }
 
 // emitInfoJSON renders the typed payload as indented JSON on stdout.

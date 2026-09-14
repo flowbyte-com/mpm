@@ -7,6 +7,11 @@
 //   Renderer consumes DoctorReport (built by DoctorService). NEVER
 //   calls services, NEVER calls commands. Pure presentation.
 //
+// All rendering goes through the shared render package — the inline
+// lipgloss.NewStyle calls remaining here are the cron-retention block
+// (dim-gray prose) and the canonical heading token, both mirrored
+// from render.Heading / render.Hint for consistency.
+//
 // TTY detection happens in the handler before the renderer is
 // constructed so the renderer's behaviour matches the channel.
 
@@ -18,6 +23,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 // DoctorRenderer writes a DoctorReport to a stream.
@@ -58,15 +65,15 @@ func (r *DoctorRenderer) Render(report *DoctorReport) error {
 		return fmt.Errorf("nil doctor report")
 	}
 
-	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffb700"))
-	if _, err := fmt.Fprintln(r.out, title.Render("MPM · Doctor")); err != nil {
+	// Heading + timestamp routed through the shared render package
+	// so the heading token stays canonical across the product.
+	if err := render.Heading(r.out, "Doctor"); err != nil {
 		return err
 	}
-	subtitle := lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("#999999"))
-	if _, err := fmt.Fprintln(r.out, subtitle.Render(nowRFC3339())); err != nil {
+	if err := render.Timestamp(r.out, nowRFC3339()); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(r.out); err != nil {
+	if err := render.BlankLine(r.out); err != nil {
 		return err
 	}
 
@@ -77,30 +84,19 @@ func (r *DoctorRenderer) Render(report *DoctorReport) error {
 	} else if report.Warnings > 0 {
 		overallStatus = "WARN"
 	}
-	if _, err := fmt.Fprintf(r.out, "%s %s\n",
-		markerFor(overallStatus, r.useEmoji),
-		overallSummary(report, r.useEmoji),
-	); err != nil {
+	if err := render.Marker(r.out, overallStatus); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(r.out); err != nil {
+	if _, err := fmt.Fprintf(r.out, " %s\n", overallSummary(report, r.useEmoji)); err != nil {
+		return err
+	}
+	if err := render.BlankLine(r.out); err != nil {
 		return err
 	}
 
 	for _, check := range report.Checks {
-		marker := markerFor(check.Status, r.useEmoji)
-		if _, err := fmt.Fprintf(r.out, "%s  %-22s %s\n",
-			marker,
-			check.Name,
-			check.Message,
-		); err != nil {
+		if err := render.CheckRow(r.out, check.Status, check.Name, check.Message, check.Details); err != nil {
 			return err
-		}
-		for _, d := range check.Details {
-			hint := lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("#999999"))
-			if _, err := fmt.Fprintf(r.out, "        %s\n", hint.Render("→ "+d)); err != nil {
-				return err
-			}
 		}
 		// Cron-retention interpretation: surface the diagnostic-contract
 		// fields (pending, eligible, retention phase, scheduler uptime)

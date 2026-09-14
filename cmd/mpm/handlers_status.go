@@ -10,6 +10,8 @@ import (
 	mpminternal "github.com/flowbyte-com/mpm-core"
 
 	"github.com/flowbyte-com/mpm-core/usererror"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 // handleStatus shows the system status dashboard. Supports --json / -j
@@ -221,25 +223,27 @@ func formatPersonaLine(state string, values []string, dm *mpminternal.DatabaseMa
 func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) {
 	d := buildStatusData(dm, startTime)
 
-	fmt.Println("MPM · System Status")
-	fmt.Println("────────────────────────────────────")
-	fmt.Printf("Uptime:    %s\n", d.uptime)
-	fmt.Printf("  %s\n", formatModeLine(d.modeState, d.modeValues))
-	fmt.Printf("  %s\n", formatPersonaLine(d.personaState, d.personaValues, dm))
-	fmt.Printf("Memories:  %d total | %d LTM\n", d.memTotal, d.memLTM)
-	fmt.Printf("Theories:  %d total | %d pending | %d resolved\n", d.theoryTotal, d.theoryPend, d.theoryResolv)
-	fmt.Printf("Decisions: %d total\n", d.decisions)
-	fmt.Printf("Synthesis: %d merged | last: %s\n", d.synthMerged, d.synthLast)
+	// Rendered through the shared render package — no inline lipgloss,
+	// no ad-hoc styling. Same heading token as doctor/why.
+	render.Heading(os.Stdout, "System Status")
+	render.Divider(os.Stdout)
+	render.KeyValue(os.Stdout, "Uptime", d.uptime)
+	render.Plain(os.Stdout, "  "+formatModeLine(d.modeState, d.modeValues))
+	render.Plain(os.Stdout, "  "+formatPersonaLine(d.personaState, d.personaValues, dm))
+	render.KeyValue(os.Stdout, "Memories", fmt.Sprintf("%d total | %d LTM", d.memTotal, d.memLTM))
+	render.KeyValue(os.Stdout, "Theories", fmt.Sprintf("%d total | %d pending | %d resolved", d.theoryTotal, d.theoryPend, d.theoryResolv))
+	render.KeyValue(os.Stdout, "Decisions", fmt.Sprintf("%d total", d.decisions))
+	render.KeyValue(os.Stdout, "Synthesis", fmt.Sprintf("%d merged | last: %s", d.synthMerged, d.synthLast))
 	if len(d.recentEvents) > 0 {
-		fmt.Println("────────────────────────────────────")
-		fmt.Println("Recent events:")
+		render.Divider(os.Stdout)
+		render.Section(os.Stdout, "Recent events")
 		for _, e := range d.recentEvents {
-			fmt.Printf("  %s %s\n", e.op, e.detail)
+			render.Plainf(os.Stdout, "  %s %s\n", e.op, e.detail)
 		}
 	}
-	fmt.Println("────────────────────────────────────")
-	fmt.Println("Run `mpm help` for daily commands.")
-	fmt.Println("Run `mpm ops help` for engine room.")
+	render.Divider(os.Stdout)
+	render.Hint(os.Stdout, "Run `mpm help` for daily commands.")
+	render.Hint(os.Stdout, "Run `mpm ops help` for engine room.")
 }
 
 // modeStateJSON / personaStateJSON are the wire shape for the

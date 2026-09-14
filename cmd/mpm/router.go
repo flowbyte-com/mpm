@@ -507,6 +507,15 @@ func (r *CommandRouter) parseFlags(args []string) []string {
 // ============================================================================
 
 func (r *CommandRouter) handleVersion() int {
+	// Final release-pass contract: --json is explicit-or-error.
+	// `version` does NOT support --json; silently falling back to
+	// text mode is the anti-pattern the brief calls out. Reject.
+	for _, a := range os.Args[1:] {
+		if a == "--json" || a == "-j" {
+			fmt.Fprintln(os.Stderr, "{\"error\":\"version does not support --json\"}")
+			return 1
+		}
+	}
 	fmt.Printf("MPM mpm %s\n", buildVersion)
 	return 0
 }
