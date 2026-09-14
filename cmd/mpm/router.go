@@ -110,7 +110,9 @@ func NewRouter() *CommandRouter {
 		"info": {Name: "info", Description: "Show install identity (version, database, models, scheduler, skills, persona, counts)"},
 
 		// Configuration wizard (Wed 2026-07-29 polish session).
-		"config": {Name: "config", Description: "Configure AI provider (interactive wizard or scripted set|get|show|edit)"},
+		// 2026-09-14 release-pass: description accurately distinguishes
+		// LLM provider from embedding model configuration.
+		"config": {Name: "config", Description: "Configure LLM and embedding profiles (wizard | show | get | set | profile | component | detect-embedding)"},
 
 		// Skills — versioned procedure rows with frontmatter + body
 		"save-skill":  {Name: "save-skill", Description: "Save skill from markdown file (--file, --name, --version, --force)", MinArgs: 0},
@@ -742,6 +744,15 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 	case "resolve_theory":
 		printResolveTheoryHelp()
 		return 0
+	case "why":
+		printWhyHelp()
+		return 0
+	case "config":
+		// 2026-09-14 release-pass: `mpm config --help` reaches the
+		// canonical config help page (was previously the generic
+		// 3-line "Configure AI provider" fallback).
+		printConfigHelp()
+		return 0
 	case "save-skill":
 		// Round 9 T52: dedicated help page documents the required
 		// `version` frontmatter field and --version CLI flag.
@@ -792,6 +803,7 @@ var commandsWithSubcommandDispatch = map[string]bool{
 	"integration": true, // export-mcp
 	"self-heal":   true, // (ops subcommand pattern)
 	"why":         true, // (uses subcommand-style args)
+	"config":      true, // show|get|set|edit|validate|profile|component|capability|detect-embedding
 }
 
 // isSubcommandHelp reports whether the given args (post-parseFlags, with

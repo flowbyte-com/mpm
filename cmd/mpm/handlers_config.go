@@ -67,6 +67,8 @@ import (
 	"github.com/flowbyte-com/mpm-core/config"
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 // handleConfig is the entry point for `mpm config [...]`. Dispatches
@@ -74,6 +76,16 @@ import (
 func handleConfig(args []string) int {
 	if len(args) == 0 {
 		return handleConfigInteractive(loadOrInitConfig())
+	}
+	// 2026-09-14 release-pass: `--help` / `-h` / "help" (the
+	// parseFlags rewrite) at the dispatcher level short-circuits
+	// to the canonical config help. Only when the FIRST positional
+	// is a help flag — subcommands with their own help pages
+	// (profile / component / detect-embedding) handle help
+	// themselves via their own short-circuit.
+	if args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		printConfigHelp()
+		return 0
 	}
 	switch args[0] {
 	case "show", "list":
@@ -101,6 +113,14 @@ func handleConfig(args []string) int {
 	case "capability":
 		return handleConfigCapability(args[1:])
 	case "detect-embedding":
+		// 2026-09-14 release-pass: detect-embedding has its own help
+		// page (`mpm config detect-embedding --help`).
+		for _, a := range args[1:] {
+			if a == "-h" || a == "--help" || a == "help" {
+				printConfigDetectEmbeddingHelp()
+				return 0
+			}
+		}
 		cmd := &DetectEmbeddingCmd{}
 		for i := 1; i < len(args); i++ {
 			switch {
@@ -1241,66 +1261,107 @@ func splitProviderModel(s string) (provider, model string) {
 // Help
 // ---------------------------------------------------------------------------
 
-// printConfigHelp prints the mpm config help block.
+// printConfigHelp prints the mpm config help block via the canonical
+// visual grammar (cmd/mpm/render). 2026-09-14 release-pass:
+//
+//   - Heading is `MPM · Config` (was `mpm config — Configure the AI
+//     provider`).
+//   - Wording distinguishes "LLM provider" from "Embedding model".
+//   - The legacy synth block is documented as read-only migration
+//     history, not a configuration surface.
 func printConfigHelp() {
-	fmt.Println(`mpm config — Configure the AI provider
+	render.Heading(os.Stdout, "Config")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "LLM provider and embedding model configuration")
+	render.Plain(os.Stdout, "MPM distinguishes two provider roles:")
+	render.Label(os.Stdout, "LLM provider", "used for generation and reasoning-backed capabilities (synthesis, critic/review)")
+	render.Label(os.Stdout, "Embedding model", "used for semantic / vector similarity retrieval — OPTIONAL; absence is informational, not a defect")
+	render.BlankLine(os.Stdout)
 
-Configuration model (v0.1):
+	render.Section(os.Stdout, "Configuration model (v0.1)")
+	render.Label(os.Stdout, "profiles", "named execution profiles (provider, model, base_url, api_key, ...). profiles[\"default\"] is the canonical fallback for every component that has no explicit binding.")
+	render.Label(os.Stdout, "components", "optional component → profile bindings. components[\"embedding\"] identifies the embedding profile.")
+	render.Label(os.Stdout, "capabilities", "optional capability → component bindings. Canonical v0.1 defaults: reviewer→critic, reflect→critic, planner→memory, summarise→memory. Use 'mpm config capability set <cap> <component>' to override.")
+	render.Label(os.Stdout, "legacy synth", "read-only migration history; pre-profiles installs left a top-level 'synth' block on disk that new code never writes. Migrate by running 'mpm config profile add default'.")
+	render.BlankLine(os.Stdout)
 
-  profiles        Named execution profiles (provider, model, base_url,
-                  api_key, ...). profiles["default"] is the canonical
-                  fallback for every component that has no explicit binding.
+	render.Section(os.Stdout, "Usage")
+	render.Label(os.Stdout, "mpm config", "interactive wizard (writes profiles.default)")
+	render.Label(os.Stdout, "mpm config show | list", "show current configuration")
+	render.Label(os.Stdout, "mpm config get <key>", "get one value")
+	render.Label(os.Stdout, "mpm config set <key> <value>", "set one value on profiles.default")
+	render.Label(os.Stdout, "mpm config edit", "open mpm_config.json in $EDITOR")
+	render.Label(os.Stdout, "mpm config validate", "validate configuration shape")
+	render.Label(os.Stdout, "mpm config profile ...", "add / list / get / set / remove profiles — see 'mpm config profile --help'")
+	render.Label(os.Stdout, "mpm config component ...", "list / get / set component → profile bindings — see 'mpm config component --help'")
+	render.Label(os.Stdout, "mpm config capability ...", "list / get / set capability → component bindings")
+	render.Label(os.Stdout, "mpm config detect-embedding [--apply <name>] [--force]", "probe Ollama for embedding-capable models; --apply writes a profile and binds components.embedding. See 'mpm config detect-embedding --help'")
+	render.BlankLine(os.Stdout)
 
-  components      Optional component → profile bindings.
-                  components["embedding"] identifies the embedding profile.
+	render.Section(os.Stdout, "Keys (canonical names; aliases accepted)")
+	render.Label(os.Stdout, "model, api_key (alias: token), base_url (alias: endpoint), max_tokens, timeout_seconds, synthesis_enabled", "")
+	render.BlankLine(os.Stdout)
 
-  capabilities    Optional capability → component bindings. Skills and
-                  capability-shaped callers address capabilities; the
-                  canonical v0.1 defaults are:
-                    reviewer  → critic
-                    reflect   → critic
-                    planner   → memory
-                    summarise → memory
-                  Use 'mpm config capability set <cap> <component>' to override.
+	render.Section(os.Stdout, "Examples")
+	render.Plain(os.Stdout, "  mpm config set api_key $OPENAI_API_KEY")
+	render.Plain(os.Stdout, "  mpm config set model gpt-4o")
+	render.Plain(os.Stdout, "  mpm config set endpoint https://api.openai.com/v1")
+	render.Plain(os.Stdout, "  mpm config set synthesis_enabled false")
+	render.BlankLine(os.Stdout)
 
-  legacy synth    Top-level 'synth' block from pre-profiles installs is
-                  read for backward compatibility but never written by
-                  new code. Migrate by running
-                  'mpm config profile add default'.
+	render.Hint(os.Stdout, "API keys are persisted to mpm_config.json (file mode 0600). 'mpm config show' redacts them; 'mpm config get api_key' returns the full key for the operator's own use.")
+	render.Hint(os.Stdout, "Config file: ~/.mpm/mpm_config.json (path resolved via the workspace; $EDITOR is opened on this file for 'mpm config edit').")
+}
 
-API keys are persisted to mpm_config.json (file mode 0600). 'mpm config show'
-redacts them; 'mpm config get api_key' returns the full key for the operator's
-own use.
+// printConfigProfileHelp prints `mpm config profile --help` via the
+// canonical visual grammar. Subcommand-specific help surfaces were
+// unreachable from `--help` prior to the 2026-09-14 release-pass.
+func printConfigProfileHelp() {
+	render.Heading(os.Stdout, "Config profile")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Manage named execution profiles")
+	render.Plain(os.Stdout, "A profile binds provider / model / base_url / api_key and")
+	render.Plain(os.Stdout, "is referenced by component bindings or used directly.")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Subcommands")
+	render.Label(os.Stdout, "mpm config profile add [name]", "interactive wizard; pass a name to skip the prompt")
+	render.Label(os.Stdout, "mpm config profile list", "render all profiles")
+	render.Label(os.Stdout, "mpm config profile get <name>", "show one profile")
+	render.Label(os.Stdout, "mpm config profile set <name> <key> <value>", "set one field (provider, model, base_url, api_key, temperature, max_tokens, timeout_seconds, reasoning)")
+	render.Label(os.Stdout, "mpm config profile remove <name>", "delete; refused if any component binds to this profile")
+	render.BlankLine(os.Stdout)
+	render.Hint(os.Stdout, "Run 'mpm config profile add default' once on a fresh install to seed the canonical fallback profile.")
+}
 
-Usage:
-  mpm config                       Interactive wizard (writes profiles.default)
-  mpm config show | list            Show current configuration
-  mpm config get <key>             Get one value
-  mpm config set <key> <value>     Set one value on profiles.default
-  mpm config edit                  Open mpm_config.json in $EDITOR
-  mpm config validate              Validate configuration shape
-  mpm config profile ...           Add / list / get / set / remove profiles
-  mpm config component ...         list / get / set component → profile bindings
-  mpm config capability ...        list / get / set capability → component bindings
-  mpm config detect-embedding [--apply <name>] [--force]
-                                Probe Ollama for embedding-capable
-                                models; --apply writes a profile and
-                                binds components.embedding. --force
-                                overwrites an existing profile or
-                                rebinds the component binding.
+// printConfigComponentHelp prints `mpm config component --help`.
+func printConfigComponentHelp() {
+	render.Heading(os.Stdout, "Config component")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Component → profile bindings")
+	render.Plain(os.Stdout, "Components are runtime subsystems (memory, critic, scheduler).")
+	render.Plain(os.Stdout, "A binding maps a component to a profile; absent bindings")
+	render.Plain(os.Stdout, "fall back to profiles[\"default\"].")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Subcommands")
+	render.Label(os.Stdout, "mpm config component list", "render all bindings")
+	render.Label(os.Stdout, "mpm config component get <component>", "show one binding")
+	render.Label(os.Stdout, "mpm config component set <component> <profile>", "set or replace a binding")
+	render.BlankLine(os.Stdout)
+}
 
-Keys (canonical names; aliases accepted):
-  model, api_key (alias: token), base_url (alias: endpoint),
-  max_tokens, timeout_seconds, synthesis_enabled
-
-Examples:
-  mpm config set api_key $OPENAI_API_KEY
-  mpm config set model gpt-4o
-  mpm config set endpoint https://api.openai.com/v1
-  mpm config set synthesis_enabled false
-
-Config file: ~/.mpm/mpm_config.json (path resolved via the
-workspace; $EDITOR is opened on this file for 'mpm config edit'.)`)
+// printConfigDetectEmbeddingHelp prints `mpm config detect-embedding --help`.
+func printConfigDetectEmbeddingHelp() {
+	render.Heading(os.Stdout, "Config detect-embedding")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Probe Ollama for embedding-capable models")
+	render.Plain(os.Stdout, "Detection enumerates candidates — it does NOT imply")
+	render.Plain(os.Stdout, "configuration. To persist a choice, pass --apply.")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Flags")
+	render.Label(os.Stdout, "--apply <name>", "write a profile named <name> and bind components.embedding to it")
+	render.Label(os.Stdout, "--force", "overwrite an existing profile or rebind an existing component")
+	render.BlankLine(os.Stdout)
+	render.Hint(os.Stdout, "Without --apply, the probe is informational only and does not modify mpm_config.json.")
 }
 
 // (syscall imported for isatty() — package main already in scope.)
@@ -1321,6 +1382,16 @@ var _ = syscall.Stdin
 //                                                  any component binds
 //                                                  to this profile
 func handleConfigProfile(args []string) int {
+	// 2026-09-14 release-pass: --help / -h / "help" (the
+	// parseFlags rewrite) at any position short-circuits to the
+	// canonical profile help page. Without this, `mpm config
+	// profile --help` collapsed to the generic registry fallback.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			printConfigProfileHelp()
+			return 0
+		}
+	}
 	if len(args) == 0 {
 		usererror.Error("mpm config profile <sub> — need one of: add, list, get, set, remove")
 		return 1
@@ -1591,6 +1662,14 @@ func strconvAtoiFloat(s string) (float64, error) {
 //   mpm config component get <component>     Show one binding
 //   mpm config component set <comp> <profile> Set binding
 func handleConfigComponent(args []string) int {
+	// 2026-09-14 release-pass: --help / -h / "help" (the
+	// parseFlags rewrite) short-circuit.
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			printConfigComponentHelp()
+			return 0
+		}
+	}
 	if len(args) == 0 {
 		usererror.Error("mpm config component <sub> — need one of: list, get, set")
 		return 1

@@ -29,6 +29,13 @@ type helpSafetyCase struct {
 
 // helpSafetyMatrix is the canonical list of public commands to verify.
 // Each row invokes the command with --help and asserts no mutation.
+//
+// 2026-09-14 release-pass: extend the matrix with the newly fixed
+// nested help surfaces (mpm why, mpm config + profile/component/
+// detect-embedding subcommands). Both --help and -h are tested for
+// every nested surface; positional `help` is NOT in the matrix
+// because the router contract intentionally supports it only for
+// top-level commands that lack subcommand dispatch.
 var helpSafetyMatrix = []helpSafetyCase{
 	{Command: []string{"help"}, WantNoMutation: true},
 	{Command: []string{"memory", "list", "--help"}, WantNoMutation: true},
@@ -51,12 +58,21 @@ var helpSafetyMatrix = []helpSafetyCase{
 	{Command: []string{"info", "--help"}, WantNoMutation: true},
 	{Command: []string{"doctor", "--help"}, WantNoMutation: true},
 	{Command: []string{"why", "--help"}, WantNoMutation: true},
+	{Command: []string{"why", "-h"}, WantNoMutation: true},
 	{Command: []string{"directives", "--help"}, WantNoMutation: true},
 	{Command: []string{"lifecycle", "--help"}, WantNoMutation: true},
 	{Command: []string{"lifecycle", "theory", "--help"}, WantNoMutation: true},
 	{Command: []string{"version", "--help"}, WantNoMutation: true},
 	{Command: []string{"backup", "list", "--help"}, WantNoMutation: true},
 	{Command: []string{"export", "status", "--help"}, WantNoMutation: true},
+	{Command: []string{"config", "--help"}, WantNoMutation: true},
+	{Command: []string{"config", "-h"}, WantNoMutation: true},
+	{Command: []string{"config", "profile", "--help"}, WantNoMutation: true},
+	{Command: []string{"config", "profile", "-h"}, WantNoMutation: true},
+	{Command: []string{"config", "component", "--help"}, WantNoMutation: true},
+	{Command: []string{"config", "component", "-h"}, WantNoMutation: true},
+	{Command: []string{"config", "detect-embedding", "--help"}, WantNoMutation: true},
+	{Command: []string{"config", "detect-embedding", "-h"}, WantNoMutation: true},
 }
 
 // TestHelpSafety_RouterLevelSweep proves --help / -h perform no
