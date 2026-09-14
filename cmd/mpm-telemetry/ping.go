@@ -11,6 +11,16 @@ import (
 )
 
 func runPing(args []string) error {
+	// 2026-09-14 release-pass: help flags exit 0 BEFORE
+	// workspace/socket validation. Pre-fix this branch
+	// short-circuited to "MPM_WORKSPACE is required" on
+	// `mpm-telemetry ping --help`, which was a help-safety
+	// defect (help requested an env var the operator was
+	// trying to discover).
+	if hasHelpFlag(args) {
+		writeHelpPing(os.Stdout, buildVersion)
+		return nil
+	}
 	workspace := os.Getenv("MPM_WORKSPACE")
 	if workspace == "" {
 		return fmt.Errorf("MPM_WORKSPACE is required")

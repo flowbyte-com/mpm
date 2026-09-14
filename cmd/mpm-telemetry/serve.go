@@ -13,6 +13,16 @@ import (
 )
 
 func runServe(args []string) error {
+	// 2026-09-14 release-pass: short-circuit on help flags BEFORE
+	// any side effect (workspace resolution, socket derivation,
+	// database open). The main dispatcher catches --help at the
+	// top level; this guard catches a direct call to runServe from
+	// an internal test path so help is inert even if invoked
+	// without the dispatcher in front.
+	if hasHelpFlag(args) {
+		writeHelpServe(os.Stdout, buildVersion)
+		return nil
+	}
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	quiet := fs.Bool("quiet", false, "suppress startup banner")
 	if err := fs.Parse(args); err != nil {

@@ -5,12 +5,20 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
 
 func runCost(args []string) error {
+	// 2026-09-14 release-pass: help flags exit 0 BEFORE flag
+	// parsing or workspace resolution. Pre-fix the help path
+	// raised `--pricing is required` instead of showing help.
+	if hasHelpFlag(args) {
+		writeHelpCost(os.Stdout, buildVersion)
+		return nil
+	}
 	fs := flag.NewFlagSet("cost", flag.ContinueOnError)
 	pricingPath := fs.String("pricing", "", "path to pricing catalog JSON (required)")
 	sinceCutoff := fs.Int64("since", 0, "Unix epoch seconds; only count rows newer than this")

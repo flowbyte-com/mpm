@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
 	"os/exec"
 	"time"
 
@@ -12,6 +13,13 @@ import (
 )
 
 func runObserve(args []string) error {
+	// 2026-09-14 release-pass: help flags exit 0 BEFORE flag
+	// parsing or workspace resolution. Pre-fix the help path
+	// raised an unrelated error instead of showing help.
+	if hasHelpFlag(args) {
+		writeHelpObserve(os.Stdout, buildVersion)
+		return nil
+	}
 	fs := flag.NewFlagSet("observe", flag.ContinueOnError)
 	since := fs.Int64("since", 0, "Unix epoch seconds; default = now-7d")
 	threshold := fs.Int64("threshold", 100000, "high-token threshold (input + output)")

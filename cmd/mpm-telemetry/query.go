@@ -13,6 +13,14 @@ import (
 )
 
 func runQuery(args []string) error {
+	// 2026-09-14 release-pass: help flags exit 0 BEFORE
+	// workspace/DB resolution. Pre-fix the help path silently
+	// fell through to `MPM_WORKSPACE is required` instead of
+	// showing the help page.
+	if hasHelpFlag(args) {
+		writeHelpQuery(os.Stdout, buildVersion)
+		return nil
+	}
 	if len(args) < 1 {
 		return fmt.Errorf("usage: query invocation <id> | query session <id> | query since <unix-seconds>")
 	}
