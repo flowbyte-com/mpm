@@ -24,7 +24,7 @@ func handleSwitch(args []string) int {
 		return 1
 	}
 
-	fmt.Println("⚡ MPM Context Switcher")
+	fmt.Println("MPM · Context Switcher")
 	fmt.Println("─────────────────────────────────────────")
 	fmt.Printf("Active Persona: %s\n", active.PersonaString())
 	fmt.Printf("Active Modes:  %s\n", strings.Join(active.ModesSlice(), ", "))
@@ -63,7 +63,7 @@ func handleSwitch(args []string) int {
 		return 1
 	}
 
-	fmt.Printf("\n⚡ Context updated: [Persona: %s] | [Modes: %s]\n",
+	fmt.Printf("\nContext updated: [Persona: %s] | [Modes: %s]\n",
 		active.PersonaString(), strings.Join(active.ModesSlice(), ", "))
 	return 0
 }

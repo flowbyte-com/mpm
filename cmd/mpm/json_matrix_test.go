@@ -76,15 +76,13 @@ func TestJSONMatrix_SupportedCommands_Contract(t *testing.T) {
 
 	cases := []jsonContractCase{
 		{Family: "memory list", Command: []string{"memory", "list", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"success", "count", "memories"}},
+		{Family: "lesson list", Command: []string{"lesson", "list", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"lessons"}},
+		{Family: "decisions list", Command: []string{"decisions", "list"}, WantSuccess: true, WantEnvelopeKeys: []string{"status", "count", "decisions"}},
+		{Family: "theories list", Command: []string{"theories", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"success", "filter", "count", "theories"}},
+		{Family: "evidence list", Command: []string{"evidence", "list"}, WantSuccess: true, WantEnvelopeKeys: []string{"success", "count", "evidence"}},
+		{Family: "handoff list", Command: []string{"handoff", "list", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"success", "count", "handoffs"}},
 		{Family: "info", Command: []string{"info", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"version", "database", "workspace"}},
 		{Family: "doctor", Command: []string{"doctor", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"checks", "timestamp"}, WantExitCodes: []int{0, 1, 2}},
-
-		// SkipJSON: surfaces known gaps so they remain visible until closed.
-		{Family: "decision list", Command: []string{"decision", "list", "--json"}, SkipJSON: true},
-		{Family: "theory list", Command: []string{"theory", "list", "--json"}, SkipJSON: true},
-		{Family: "lesson list", Command: []string{"lesson", "list", "--json"}, SkipJSON: true},
-		{Family: "evidence list", Command: []string{"evidence", "list", "--json"}, SkipJSON: true},
-		{Family: "handoff list", Command: []string{"handoff", "list", "--json"}, SkipJSON: true},
 	}
 
 	for _, c := range cases {

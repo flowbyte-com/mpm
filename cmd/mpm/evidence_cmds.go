@@ -245,6 +245,6 @@ func handleEvidenceList(args []string) int {
 		resp["artifact_type"] = artifactType
 	}
 	out, _ := json.Marshal(resp)
-	respond(string(out), "", 0)
+	respond(string(out)+"\n", "", 0)
 	return 0
 }

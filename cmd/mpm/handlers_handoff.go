@@ -152,7 +152,12 @@ func handleHandoffListCLI(args []string) int {
 	}
 	limit := 20
 	unreadOnly := false
+	jsonOutput := false
 	for _, a := range args {
+		if a == "--json" || a == "-j" {
+			jsonOutput = true
+			continue
+		}
 		if strings.HasPrefix(a, "--limit=") {
 			if _, err := fmt.Sscanf(strings.TrimPrefix(a, "--limit="), "%d", &limit); err != nil {
 				return usererror.Error("handoff list: invalid --limit value: %v", err)
@@ -173,6 +178,21 @@ func handleHandoffListCLI(args []string) int {
 		return usererror.Error("handoff list: %v", err)
 	}
 	handoffs, _ := out["handoffs"].([]interface{})
+	if handoffs == nil {
+		handoffs = []interface{}{}
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]interface{}{
+			"success": true,
+			"count":   len(handoffs),
+			"handoffs": handoffs,
+		})
+		return 0
+	}
+
 	if len(handoffs) == 0 {
 		fmt.Println("No handoffs.")
 		return 0

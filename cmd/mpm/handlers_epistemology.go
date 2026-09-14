@@ -778,8 +778,15 @@ func handleTheories(args []string) int {
 // it against a hermetic database.
 func runTheories(dm mpminternal.CoreDB, args []string) int {
 	filter := "all"
-	if len(args) > 0 {
-		filter = args[0]
+	jsonOutput := false
+	for _, a := range args {
+		if a == "--json" || a == "-j" {
+			jsonOutput = true
+			continue
+		}
+		if filter == "all" {
+			filter = a
+		}
 	}
 	switch filter {
 	case "list", "ls":
@@ -807,6 +814,16 @@ func runTheories(dm mpminternal.CoreDB, args []string) int {
 	}
 
 	if len(memories) == 0 {
+		if jsonOutput {
+			out, _ := json.Marshal(map[string]interface{}{
+				"success":  true,
+				"filter":   filter,
+				"count":    0,
+				"theories": []interface{}{},
+			})
+			fmt.Println(string(out))
+			return 0
+		}
 		return respond("", "No theories yet. Run `mpm propose_theory` to propose your first theory.\n", 0)
 	}
 
@@ -821,7 +838,13 @@ func runTheories(dm mpminternal.CoreDB, args []string) int {
 		}
 	}
 
-	count := 0
+	type theoryRow struct {
+		ID                 string `json:"id"`
+		Content            string `json:"content"`
+		Status             string `json:"status"`
+		ValidationCriteria string `json:"validation_criteria,omitempty"`
+	}
+	var rows []theoryRow
 	for _, m := range memories {
 		content, _ := m["content"].(string)
 		id, _ := m["id"].(string)
@@ -844,19 +867,42 @@ func runTheories(dm mpminternal.CoreDB, args []string) int {
 			display = display[:80] + "..."
 		}
 
-		fmt.Printf("[%s] %s  [status: %s]\n", id, display, status)
-		count++
+		if jsonOutput {
+			vc, _ := meta["validation_criteria"].(string)
+			rows = append(rows, theoryRow{
+				ID:                 id,
+				Content:            display,
+				Status:             status,
+				ValidationCriteria: vc,
+			})
+		} else {
+			fmt.Printf("[%s] %s  [status: %s]\n", id, display, status)
 
-		if vc, ok := meta["validation_criteria"].(string); ok && vc != "" {
-			vcDisplay := vc
-			if len(vcDisplay) > 60 {
-				vcDisplay = vcDisplay[:60] + "..."
+			if vc, ok := meta["validation_criteria"].(string); ok && vc != "" {
+				vcDisplay := vc
+				if len(vcDisplay) > 60 {
+					vcDisplay = vcDisplay[:60] + "..."
+				}
+				fmt.Printf("      validation: %s\n", vcDisplay)
 			}
-			fmt.Printf("      validation: %s\n", vcDisplay)
 		}
 	}
 
-	if count == 0 {
+	if jsonOutput {
+		if rows == nil {
+			rows = []theoryRow{}
+		}
+		out, _ := json.Marshal(map[string]interface{}{
+			"success":  true,
+			"filter":   filter,
+			"count":    len(rows),
+			"theories": rows,
+		})
+		fmt.Println(string(out))
+		return 0
+	}
+
+	if len(rows) == 0 && filter != "all" {
 		fmt.Printf("No %s theories found.\n", filter)
 	}
 
