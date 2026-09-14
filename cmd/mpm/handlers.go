@@ -82,11 +82,16 @@ func clearActiveContext() {
 
 // respond prints output/error and returns an exit code.
 // This replaces the old sendResponse() that wrote JSON over a socket.
+// Error output is newline-terminated so downstream consumers can
+// rely on a stable line-based format.
 func respond(output, errMsg string, exitCode int) int {
 	if output != "" {
 		fmt.Print(output)
 	}
 	if errMsg != "" {
+		if errMsg[len(errMsg)-1] != '\n' {
+			errMsg += "\n"
+		}
 		fmt.Fprint(os.Stderr, errMsg)
 	}
 	return exitCode
