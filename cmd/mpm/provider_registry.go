@@ -15,10 +15,10 @@
 //   - The role validator (ValidateLLMRole) for capability
 //     filtering — Ollama capability probing, embedding-only
 //     rejection, etc.
-//   - The embedding discovery surface (`mpm config
-//     detect-embedding`), which probes Ollama +
-//     OpenAI-compatible localhost endpoints regardless of which
-//     branded IDs exist in the registry.
+//   - Internal capability probes (kept inside
+//     `cmd/mpm/detect_embedding.go` for role validation,
+//     capability-classified views, and tests), and the
+//     capability-orientation rules.
 //
 // Public wizard choices, persisted legacy/current provider IDs,
 // and internal transport adapters are intentionally separated:
@@ -243,9 +243,9 @@ var canonicalProviders = []ProviderDefinition{
 	// exposes an OpenAI-compat endpoint at
 	// openrouter.ai/api/v1. DefaultModel is empty per the
 	// simplification rule (OpenRouter Free Router is not
-	// advertised). Embedding discovery at
-	// `mpm config detect-embedding` still probes
-	// /api/v1/models when reachable.
+	// advertised). The capability-orientation layer still
+	// recognises OpenRouter for backwards compatibility
+	// with existing profiles by ID.
 	{
 		ID:              "openrouter",
 		DisplayName:     "OpenRouter",

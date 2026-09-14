@@ -22,20 +22,32 @@
 //                                    Anthropic-compatible / Ollama)
 //                                    on the second prompt. Branded
 //                                    provider presets are removed
-//                                    from the public UX (runtime
-//                                    still resolves existing
-//                                    Profiles[...].Provider IDs
-//                                    for backwards compatibility).
+//                                    from the public UX. The
+//                                    wizard covers BOTH LLM and
+//                                    embedding configuration;
+//                                    output-token limits are NOT
+//                                    user-configurable. Manual
+//                                    configuration is the single
+//                                    public configuration path —
+//                                    no discovery / auto-apply /
+//                                    catalogue.
 //
-//   mpm config show | list          Print current synth block.
+//   mpm config show | list          Print current config.
 //
 //   mpm config get <key>             Print one value.
 //                                    Keys: model, api_key, base_url,
-//                                    max_tokens, timeout_seconds.
+//                                    timeout_seconds.
 //                                    Aliases: 'token' → api_key,
 //                                    'endpoint' → base_url.
+//                                    max_tokens is deprecated; GET
+//                                    returns "(removed)".
 //
-//   mpm config set <key> <value>     Set one value, persist.
+//   mpm config set <key> <value>     Set one value, persist. Same
+//                                    key list as `get`; max_tokens
+//                                    returns a "removed in v0.1-final"
+//                                    error so legacy setters don't
+//                                    silently write a knob the
+//                                    runtime ignores.
 //
 //   mpm config edit                  Open mpm_config.json in $EDITOR.
 //
@@ -88,8 +100,14 @@ func handleConfig(args []string) int {
 	// parseFlags rewrite) at the dispatcher level short-circuits
 	// to the canonical config help. Only when the FIRST positional
 	// is a help flag — subcommands with their own help pages
-	// (profile / component / detect-embedding) handle help
-	// themselves via their own short-circuit.
+	// (profile / component) handle help themselves via their own
+	// short-circuit.
+	//
+	// 2026-09-14 final-simplification: detect-embedding has been
+	// retired from the public CLI. The string is still recognised
+	// here as a soft-deprecated alias; callers receive a
+	// `migrate-to-manual` message so legacy scripts do not silently
+	// mutate config.
 	if args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
 		printConfigHelp()
 		return 0
@@ -99,13 +117,13 @@ func handleConfig(args []string) int {
 		return handleConfigShow(loadOrInitConfig())
 	case "get":
 		if len(args) < 2 {
-			usererror.Error("mpm config get <key>\n  keys: model, api_key, base_url, max_tokens, timeout_seconds\n  aliases: token=api_key, endpoint=base_url")
+			usererror.Error("mpm config get <key>\n  keys: model, api_key, base_url, timeout_seconds\n  aliases: token=api_key, endpoint=base_url")
 			return 1
 		}
 		return handleConfigGet(loadOrInitConfig(), args[1])
 	case "set":
 		if len(args) < 3 {
-			usererror.Error("mpm config set <key> <value>\n  keys: model, api_key, base_url, max_tokens, timeout_seconds")
+			usererror.Error("mpm config set <key> <value>\n  keys: model, api_key, base_url, timeout_seconds\n  aliases: token=api_key, endpoint=base_url\n  max_tokens is removed in v0.1-final; runtime supplies its own value")
 			return 1
 		}
 		return handleConfigSet(loadOrInitConfig(), args[1], strings.Join(args[2:], " "))
@@ -120,32 +138,35 @@ func handleConfig(args []string) int {
 	case "capability":
 		return handleConfigCapability(args[1:])
 	case "detect-embedding":
-		// 2026-09-14 release-pass: detect-embedding has its own help
-		// page (`mpm config detect-embedding --help`).
-		for _, a := range args[1:] {
-			if a == "-h" || a == "--help" || a == "help" {
-				printConfigDetectEmbeddingHelp()
-				return 0
-			}
-		}
-		cmd := &DetectEmbeddingCmd{}
-		for i := 1; i < len(args); i++ {
-			switch {
-			case args[i] == "--apply" && i+1 < len(args):
-				cmd.Apply = args[i+1]
-				i++
-			case args[i] == "--force":
-				cmd.Force = true
-			}
-		}
-		return cmd.Run()
+		// 2026-09-14 final-simplification: detect-embedding is
+		// removed from the public CLI. The verb is retained only as
+		// a soft-deprecated alias so legacy scripts do not crash;
+		// it prints a migration message and exits 1. The capability
+		// probes still live in cmd/mpm/detect_embedding.go for
+		// internal use (role validation, tests).
+		return handleDetectEmbeddingRemoved(args[1:])
 	case "help", "-h", "--help":
 		printConfigHelp()
 		return 0
 	default:
-		usererror.Error("mpm config: unknown subcommand %q\n\n  Available: show, get, set, edit, validate, profile, component, capability, detect-embedding, (no args = interactive wizard)", args[0])
+		usererror.Error("mpm config: unknown subcommand %q\n\n  Available: show, get, set, edit, validate, profile, component, capability, (no args = interactive wizard)", args[0])
 		return 1
 	}
+}
+
+// handleDetectEmbeddingRemoved prints a clear migration message
+// for `mpm config detect-embedding` invocations. The subcommand
+// was retired in the 2026-09-14 final-simplification pass; manual
+// configuration via `mpm config profile add <name>` + `mpm config
+// component set embedding <name>` is the canonical replacement.
+func handleDetectEmbeddingRemoved(rest []string) int {
+	fmt.Println("`mpm config detect-embedding` was retired in v0.1-final.")
+	fmt.Println("Embedding configuration is now manual via the Custom protocol picker.")
+	fmt.Println("Run `mpm config` for the interactive wizard,")
+	fmt.Println("or:")
+	fmt.Println("  mpm config profile add embedding --provider custom --model <id> --base-url <url>")
+	fmt.Println("  mpm config component set embedding embedding")
+	return 1
 }
 
 // loadOrInitConfig returns the loaded config. The wizard / set / get paths
@@ -286,7 +307,11 @@ func handleConfigShow(c *config.Config) int {
 		fmt.Printf("    model        : %s\n", s.Model)
 		fmt.Printf("    api key      : %s\n", redactAPIKey(s.APIKey))
 		fmt.Printf("    base url     : %s\n", s.BaseURL)
-		fmt.Printf("    max tokens   : %d\n", s.MaxTokens)
+		// 2026-09-14 final-simplification: max_tokens is removed
+		// from the user-facing contract; any value on disk is
+		// ignored at runtime. Surface a stale marker rather than
+		// printing the value (which would imply it is honored).
+		fmt.Println("    max tokens   : (removed in v0.1-final; runtime supplies its own)")
 		fmt.Printf("    timeout secs : %d\n", s.TimeoutSecs)
 		fmt.Printf("    vendor chain : %d vendor(s)\n", len(s.Vendors))
 	}
@@ -760,8 +785,6 @@ func handleConfigInteractive(c *config.Config) int {
 		fmt.Println("            OAI_COMPAT_API_KEY / ANTHROPIC_API_KEY are")
 		fmt.Println("            accepted when not specified here.")
 	}
-	fmt.Println("  Max tokens: maximum output tokens for generation.")
-	fmt.Println("               applies to LLM only, NOT to embeddings.")
 	fmt.Println()
 
 	// Apply protocol defaults ONLY to fields the operator
@@ -835,15 +858,11 @@ func handleConfigInteractive(c *config.Config) int {
 		}
 	}
 
-	// Max tokens + timeout (rarely customised, default-only).
-	tokens := promptString(rwFromStdin(), "Max tokens", intToStr(prof.MaxTokens))
-	if tokens != "" {
-		if n, err := strconvAtoi(tokens); err == nil && n > 0 {
-			prof.MaxTokens = n
-		}
-	} else if existing.MaxTokens > 0 {
-		prof.MaxTokens = existing.MaxTokens
-	}
+	// Timeout (rarely customised, default-only). 2026-09-14
+// final-simplification: Max tokens is NOT user-configurable;
+// the substrate supplies its own internal value at wire time.
+// The wizard does not prompt for it and the profile value is
+// never honoured.
 	timeout := promptString(rwFromStdin(), "Timeout seconds", intToStr(prof.TimeoutSecs))
 	if timeout != "" {
 		if n, err := strconvAtoi(timeout); err == nil && n > 0 {
@@ -898,7 +917,7 @@ func handleConfigInteractive(c *config.Config) int {
 	fmt.Printf("  model      : %s\n", prof.Model)
 	fmt.Printf("  base url   : %s\n", prof.BaseURL)
 	fmt.Printf("  api key    : %s\n", redactAPIKey(prof.APIKey))
-	fmt.Printf("  max tokens : %d\n", prof.MaxTokens)
+	fmt.Println("  max tokens : (supplied by runtime)")
 	fmt.Printf("  timeout    : %d\n", prof.TimeoutSecs)
 	fmt.Println()
 	if !confirmPrompt(rwFromStdin(), "Save?") {
@@ -980,18 +999,17 @@ func displayModelOrEmpty(m string) string {
 }
 
 // wizardEmbeddingStep presents the embedding subsystem in the
-// wizard without re-implementing detect-embedding. Embeddings are
-// OPTIONAL — absence is informational, not a fault.
+// wizard. Embeddings are OPTIONAL — absence is informational, not
+// a fault.
 //
-// 2026-09-14 simplification: the public menu offers:
+// 2026-09-14 final-simplification: the public menu offers ONLY:
 //   1. Leave unchanged (or skip if not configured)
-//   2. Detect (probe Ollama + OpenAI-compatible localhost)
-//   3. Configure manually (Custom + protocol)
+//   2. Configure manually (Custom + protocol)
+//   3. Disable embedding
 //
-// Branded provider menus (Ollama/OpenAI/OpenRouter/etc.) are NOT
-// surfaced — manual embedding configuration goes through Custom
-// + the protocol picker. Auto-detect preserves the convenience
-// path; manual configuration preserves operator control.
+// The previous auto-detect option was retired in the same
+// pass — MPM does not discover or select models for the
+// operator. Manual configuration is the single public path.
 func wizardEmbeddingStep(c *config.Config) {
 	fmt.Println("Embedding (optional — semantic/vector retrieval)")
 	embedCfg := mpminternal.DefaultEmbeddingConfig()
@@ -1006,18 +1024,13 @@ func wizardEmbeddingStep(c *config.Config) {
 		fmt.Println("  current: not configured")
 	}
 	fmt.Println("  1. Leave unchanged")
-	fmt.Println("  2. Detect local embedding model")
-	fmt.Println("  3. Configure manually (Custom)")
-	fmt.Println("  4. Disable embedding")
+	fmt.Println("  2. Configure manually (Custom)")
+	fmt.Println("  3. Disable embedding")
 	choice := promptString(rwFromStdin(), "Choice", "1")
 	switch strings.TrimSpace(choice) {
 	case "2":
-		// Delegate to the canonical detect-embedding probe.
-		cmd := &DetectEmbeddingCmd{}
-		cmd.Run()
-	case "3":
 		wizardEmbeddingCustom(c)
-	case "4":
+	case "3":
 		if c.Components == nil {
 			c.Components = map[string]string{}
 		}
@@ -1220,8 +1233,12 @@ func configLookup(c *config.Config, key string) (string, error) {
 			return prof.APIKey, nil
 		case "base_url":
 			return prof.BaseURL, nil
+		// 2026-09-14 final-simplification: max_tokens is removed
+		// from the user-facing contract. The wire value is
+		// substrate-supplied. GET surfaces "(removed)" so
+		// scripts reading legacy values get a stable marker.
 		case "max_tokens":
-			return intToStr(prof.MaxTokens), nil
+			return "(removed)", nil
 		case "timeout_seconds":
 			return intToStr(prof.TimeoutSecs), nil
 		}
@@ -1236,12 +1253,12 @@ func configLookup(c *config.Config, key string) (string, error) {
 		case "base_url":
 			return c.Synth.BaseURL, nil
 		case "max_tokens":
-			return intToStr(c.Synth.MaxTokens), nil
+			return "(removed)", nil
 		case "timeout_seconds":
 			return intToStr(c.Synth.TimeoutSecs), nil
 		}
 	}
-	return "", fmt.Errorf("mpm config get: unknown key %q (valid keys: model, api_key, base_url, max_tokens, timeout_seconds, synthesis_enabled)", key)
+	return "", fmt.Errorf("mpm config get: unknown key %q (valid keys: model, api_key, base_url, timeout_seconds, synthesis_enabled)", key)
 }
 
 // configApply mutates the loaded config in place. Pure mutation
@@ -1279,11 +1296,12 @@ func configApply(c *config.Config, key, val string) error {
 	case "base_url":
 		prof.BaseURL = val
 	case "max_tokens":
-		n, err := strconvAtoi(val)
-		if err != nil || n <= 0 {
-			return fmt.Errorf("max_tokens must be a positive integer (got %q)", val)
-		}
-		prof.MaxTokens = n
+		// 2026-09-14 final-simplification: max_tokens is no
+		// longer user-configurable. Refuse silently rather than
+		// accepting a value the runtime ignores — operators
+		// deserve a clear error so the knob doesn't quietly
+		// "work" in the wrong direction.
+		return fmt.Errorf("max_tokens is no longer user-configurable; runtime supplies its own max_tokens value (output-token limits can silently truncate work and are not a cost-control mechanism)")
 	case "timeout_seconds":
 		n, err := strconvAtoi(val)
 		if err != nil || n <= 0 {
@@ -1291,7 +1309,7 @@ func configApply(c *config.Config, key, val string) error {
 		}
 		prof.TimeoutSecs = n
 	default:
-		return fmt.Errorf("mpm config set: unknown key %q (valid keys: model, api_key, base_url, max_tokens, timeout_seconds, synthesis_enabled)", key)
+		return fmt.Errorf("mpm config set: unknown key %q (valid keys: model, api_key, base_url, timeout_seconds, synthesis_enabled)", key)
 	}
 	c.Profiles["default"] = prof
 	return nil
@@ -1302,8 +1320,12 @@ func configApply(c *config.Config, key, val string) error {
 //   "apikey"      → "api_key"
 //   "endpoint"    → "base_url"
 //   "base-url"    → "base_url"
-//   "max"         → "max_tokens"
 //   "timeout"     → "timeout_seconds"
+//
+// 2026-09-14 final-simplification: max / max_tokens /
+// max_output_tokens aliases are no longer recognised — the
+// key is reserved so a stable error message names it by
+// its canonical form.
 func configCanonicalKey(key string) string {
 	k := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
 	switch k {
@@ -1311,8 +1333,6 @@ func configCanonicalKey(key string) string {
 		return "api_key"
 	case "endpoint", "baseurl", "base_url":
 		return "base_url"
-	case "max", "maxtokens", "max_tokens":
-		return "max_tokens"
 	case "timeout", "timeoutsecs", "timeout_seconds":
 		return "timeout_seconds"
 	case "model":
@@ -1481,104 +1501,12 @@ func promptSecret(rw *bufio.Reader, label, def string) string {
 	return strings.TrimSpace(raw)
 }
 
-// modelMenuEntry is one row in the model picker. ID is the
-// canonical model string; Label is the display label; Source
-// distinguishes "Custom (manual)" from catalog entries.
-type modelMenuEntry struct {
-	id       string
-	label    string
-	isCustom bool
-}
-
-// promptModelFromCatalog presents a numbered model menu when the
-// chosen provider has a curated catalog (or, for OpenRouter,
-// live discovery). Custom is entry 1; the remainder is the
-// catalog sorted alphabetically.
-//
-// When the provider has no catalog (Ollama uses discovery;
-// Custom has nothing to offer), the function falls back to a
-// freeform prompt — preserving the existing behaviour for
-// discovery-only and operator-curated providers.
-//
-// The returned string is the chosen model ID, or the operator's
-// freeform input. Empty input preserves any existing prof.Model.
-func promptModelFromCatalog(rw *bufio.Reader, providerID, current string) string {
-	catalog := modelMenuCatalogFor(providerID)
-	if len(catalog) == 0 {
-		// No catalog — fall back to freeform prompt.
-		return promptString(rw, "Model", current)
-	}
-	entries := []modelMenuEntry{
-		{id: "", label: "Custom model (I know what I'm doing)", isCustom: true},
-	}
-	for _, m := range catalog {
-		entries = append(entries, modelMenuEntry{id: m, label: m})
-	}
-	defaultIdx := 0 // Custom is the default — matches the Provider menu.
-	if current != "" {
-		for i, e := range entries {
-			if e.id == current {
-				defaultIdx = i
-				break
-			}
-		}
-	}
-	fmt.Println()
-	fmt.Println("  Model")
-	for i, e := range entries {
-		fmt.Printf("    %d. %s\n", i+1, e.label)
-	}
-	fmt.Printf("\n  Choose [%d-%d] (default: %d): ", 1, len(entries), defaultIdx+1)
-	raw, _ := rw.ReadString('\n')
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		raw = strconv.Itoa(defaultIdx + 1)
-	}
-	n, err := strconvAtoi(raw)
-	if err != nil || n < 1 || n > len(entries) {
-		fmt.Println("  invalid choice; aborting")
-		return ""
-	}
-	chosen := entries[n-1]
-	if chosen.isCustom {
-		// Custom: prompt for the freeform model string.
-		return promptString(rw, "Model", current)
-	}
-	return chosen.id
-}
-
-// modelMenuCatalogFor returns the catalog to offer in the model
-// picker for providerID, or nil when no menu is appropriate
-// (Ollama uses live discovery, Custom has nothing to suggest).
-//
-// The brief pins the contract: Custom first, remainder
-// alphabetical, deterministic. Catalog source order is already
-// alphabetical (from modelCatalogFor + openRouterCatalogForView),
-// so we pass through unchanged.
-func modelMenuCatalogFor(providerID string) []string {
-	switch providerID {
-	case "openrouter":
-		return openRouterCatalogForView()
-	case "ollama":
-		// Ollama uses live discovery via /api/tags at wizard
-		// time. We don't pre-load here because the discovery
-		// may stall in the wizard context. Operators pick
-		// Custom and type the model name when Ollama is
-		// running but the probe is slow / down. The Ollama
-		// menu is populated by the embedding-detect surface.
-		return nil
-	case "custom":
-		return nil
-	case "openai-compatible":
-		// Operator-supplied. No flagship to suggest.
-		return nil
-	}
-	// Static catalogue providers (OpenAI, Anthropic, Cohere,
-	// Google Gemini, Mistral, MiniMax, xAI) all have
-	// curated entries. Empty slice means "use freeform only".
-	catalog := modelCatalogFor(providerID)
-	return catalog
-}
+// 2026-09-14 final-simplification: promptModelFromCatalog +
+// modelMenuCatalogFor + modelMenuEntry are removed. The
+// public wizard walks every operator-supplied model as a
+// freeform prompt (`promptString(rw, "Model", current)`).
+// The previous model-menu helper existed solely to render
+// branded catalogues; the catalogues are gone.
 
 // confirmPrompt reads a Y/n confirmation.
 func confirmPrompt(rw *bufio.Reader, label string) bool {
@@ -1649,29 +1577,30 @@ func splitProviderModel(s string) (provider, model string) {
 func printConfigHelp() {
 	render.Heading(os.Stdout, "Config")
 	render.BlankLine(os.Stdout)
-	render.Section(os.Stdout, "LLM provider and embedding model configuration")
-	render.Plain(os.Stdout, "MPM is a substrate, not a provider catalogue. Manual")
-	render.Plain(os.Stdout, "configuration is Custom + protocol-driven.")
-	render.Label(os.Stdout, "LLM provider", "used for generation and reasoning-backed capabilities (synthesis, critic/review). Manual config exposes Custom only; pick a protocol (OpenAI-compatible / Anthropic-compatible / Ollama).")
-	render.Label(os.Stdout, "Embedding model", "used for semantic / vector similarity retrieval — OPTIONAL; absence is informational, not a defect.")
+	render.Section(os.Stdout, "Manual configuration only")
+	render.Plain(os.Stdout, "MPM does not maintain provider/model catalogues and does")
+	render.Plain(os.Stdout, "not discover or select models for the operator. Manual")
+	render.Plain(os.Stdout, "configuration via Custom + protocol is the single public")
+	render.Plain(os.Stdout, "path. Branded menus and embedding probe are removed")
+	render.Plain(os.Stdout, "from v0.1-final.")
 	render.BlankLine(os.Stdout)
 
-	render.Section(os.Stdout, "Manual configuration (Custom)")
-	render.Plain(os.Stdout, "Run `mpm config` (interactive wizard) or")
-	render.Plain(os.Stdout, "`mpm config profile add <name>` to create profiles.")
-	render.Plain(os.Stdout, "Custom lets you connect any supported endpoint.")
-	render.Plain(os.Stdout, "  Common examples:")
-	render.Plain(os.Stdout, "    OpenAI-compatible:")
-	render.Plain(os.Stdout, "      https://api.openai.com/v1")
-	render.Plain(os.Stdout, "      https://openrouter.ai/api/v1")
-	render.Plain(os.Stdout, "      http://localhost:1234/v1")
-	render.Plain(os.Stdout, "    Anthropic-compatible:")
-	render.Plain(os.Stdout, "      https://api.anthropic.com/v1")
-	render.Plain(os.Stdout, "    Ollama (local):")
-	render.Plain(os.Stdout, "      http://127.0.0.1:11434")
+	render.Section(os.Stdout, "LLM provider")
+	render.Label(os.Stdout, "Provider", "Custom")
+	render.Label(os.Stdout, "Protocol", "OpenAI-compatible / Anthropic-compatible / Ollama")
+	render.Label(os.Stdout, "Model", "freeform — the model ID expected by your endpoint")
+	render.Label(os.Stdout, "Base URL", "freeform — API endpoint used to reach the model")
+	render.Label(os.Stdout, "API key", "freeform — credential required by the endpoint; leave empty only if authentication is not required")
 	render.BlankLine(os.Stdout)
-	render.Plain(os.Stdout, "Existing profiles with branded provider IDs (openai,")
-	render.Plain(os.Stdout, "anthropic, ollama, ...) continue to load and wire unchanged.")
+
+	render.Section(os.Stdout, "Embedding model")
+	render.Plain(os.Stdout, "Embeddings are optional and power semantic/vector retrieval.")
+	render.Plain(os.Stdout, "Lexical and structured retrieval continue to work without them.")
+	render.Label(os.Stdout, "Provider", "Custom")
+	render.Label(os.Stdout, "Protocol", "OpenAI-compatible / Ollama")
+	render.Label(os.Stdout, "Model", "freeform — the embedding model ID")
+	render.Label(os.Stdout, "Base URL", "freeform — API endpoint used to reach the embedding model")
+	render.Label(os.Stdout, "API key", "freeform — credential required by the endpoint; leave empty only if authentication is not required")
 	render.BlankLine(os.Stdout)
 
 	render.Section(os.Stdout, "Configuration model (v0.1)")
@@ -1682,7 +1611,7 @@ func printConfigHelp() {
 	render.BlankLine(os.Stdout)
 
 	render.Section(os.Stdout, "Usage")
-	render.Label(os.Stdout, "mpm config", "interactive wizard (writes profiles.default; Custom + protocol)")
+	render.Label(os.Stdout, "mpm config", "interactive wizard (writes profiles.default; Custom + protocol; covers both LLM and embedding)")
 	render.Label(os.Stdout, "mpm config show | list", "show current configuration")
 	render.Label(os.Stdout, "mpm config get <key>", "get one value")
 	render.Label(os.Stdout, "mpm config set <key> <value>", "set one value on profiles.default")
@@ -1691,20 +1620,21 @@ func printConfigHelp() {
 	render.Label(os.Stdout, "mpm config profile ...", "add / list / get / set / remove profiles — see 'mpm config profile --help'")
 	render.Label(os.Stdout, "mpm config component ...", "list / get / set component → profile bindings — see 'mpm config component --help'")
 	render.Label(os.Stdout, "mpm config capability ...", "list / get / set capability → component bindings")
-	render.Label(os.Stdout, "mpm config detect-embedding [--apply <name>] [--force]", "probe Ollama + OpenAI-compatible localhost endpoints for embedding-capable models; --apply writes a profile and binds components.embedding. See 'mpm config detect-embedding --help'")
 	render.BlankLine(os.Stdout)
 
 	render.Section(os.Stdout, "Keys (canonical names; aliases accepted)")
-	render.Label(os.Stdout, "model, api_key (alias: token), base_url (alias: endpoint), max_tokens, timeout_seconds, synthesis_enabled", "")
+	render.Label(os.Stdout, "model, api_key (alias: token), base_url (alias: endpoint), timeout_seconds, synthesis_enabled", "")
 	render.BlankLine(os.Stdout)
 
 	render.Section(os.Stdout, "Examples")
-	render.Plain(os.Stdout, "  mpm config profile add default --provider custom --model gpt-5 \\")
-	render.Plain(os.Stdout, "      --base-url https://api.openai.com/v1")
+	render.Plain(os.Stdout, "  mpm config profile add default --provider custom --model <id> \\")
+	render.Plain(os.Stdout, "      --base-url <url>")
 	render.Plain(os.Stdout, "  mpm config profile set default api_key <key>")
 	render.Plain(os.Stdout, "  mpm config set synthesis_enabled false")
 	render.BlankLine(os.Stdout)
 
+	render.Hint(os.Stdout, "Output-token limits are NOT user-configurable. Runtime supplies its own max_tokens value; operators cannot truncate generation through config.")
+	render.Hint(os.Stdout, "Existing profiles with branded provider IDs (openai, anthropic, ollama, openrouter, ...) continue to load and wire unchanged.")
 	render.Hint(os.Stdout, "API keys are persisted to mpm_config.json (file mode 0600). 'mpm config show' redacts them; 'mpm config get api_key' returns the full key for the operator's own use.")
 	render.Hint(os.Stdout, "Config file: ~/.mpm/mpm_config.json (path resolved via the workspace; $EDITOR is opened on this file for 'mpm config edit').")
 }
@@ -1712,6 +1642,11 @@ func printConfigHelp() {
 // printConfigProfileHelp prints `mpm config profile --help` via the
 // canonical visual grammar. Subcommand-specific help surfaces were
 // unreachable from `--help` prior to the 2026-09-14 release-pass.
+//
+// 2026-09-14 final-simplification: max_tokens removed from the
+// profile setter's documented key list. The field stays on the
+// profile struct for backwards-compatible JSON parsing but is
+// never honored at runtime.
 func printConfigProfileHelp() {
 	render.Heading(os.Stdout, "Config profile")
 	render.BlankLine(os.Stdout)
@@ -1723,7 +1658,7 @@ func printConfigProfileHelp() {
 	render.Label(os.Stdout, "mpm config profile add [name]", "interactive wizard; pass a name to skip the prompt")
 	render.Label(os.Stdout, "mpm config profile list", "render all profiles")
 	render.Label(os.Stdout, "mpm config profile get <name>", "show one profile")
-	render.Label(os.Stdout, "mpm config profile set <name> <key> <value>", "set one field (provider, model, base_url, api_key, temperature, max_tokens, timeout_seconds, reasoning)")
+	render.Label(os.Stdout, "mpm config profile set <name> <key> <value>", "set one field (provider, model, base_url, api_key, temperature, timeout_seconds, reasoning)")
 	render.Label(os.Stdout, "mpm config profile remove <name>", "delete; refused if any component binds to this profile")
 	render.BlankLine(os.Stdout)
 	render.Hint(os.Stdout, "Run 'mpm config profile add default' once on a fresh install to seed the canonical fallback profile.")
@@ -1743,22 +1678,6 @@ func printConfigComponentHelp() {
 	render.Label(os.Stdout, "mpm config component get <component>", "show one binding")
 	render.Label(os.Stdout, "mpm config component set <component> <profile>", "set or replace a binding")
 	render.BlankLine(os.Stdout)
-}
-
-// printConfigDetectEmbeddingHelp prints `mpm config detect-embedding --help`.
-func printConfigDetectEmbeddingHelp() {
-	render.Heading(os.Stdout, "Config detect-embedding")
-	render.BlankLine(os.Stdout)
-	render.Section(os.Stdout, "Probe embedding-capable providers")
-	render.Plain(os.Stdout, "Detection enumerates Ollama and OpenAI-compatible localhost endpoints")
-	render.Plain(os.Stdout, "and classifies models by capability. It does NOT imply")
-	render.Plain(os.Stdout, "configuration. To persist a choice, pass --apply.")
-	render.BlankLine(os.Stdout)
-	render.Section(os.Stdout, "Flags")
-	render.Label(os.Stdout, "--apply <name>", "write a profile named <name> and bind components.embedding to it")
-	render.Label(os.Stdout, "--force", "overwrite an existing profile or rebind an existing component")
-	render.BlankLine(os.Stdout)
-	render.Hint(os.Stdout, "Without --apply, the probe is informational only and does not modify mpm_config.json.")
 }
 
 // (syscall imported for isatty() — package main already in scope.)
@@ -1810,7 +1729,7 @@ func handleConfigProfile(args []string) int {
 		return handleProfileGet(loadOrInitConfig(), args[1])
 	case "set":
 		if len(args) < 4 {
-			usererror.Error("mpm config profile set <name> <key> <value>\n  keys: provider, model, base_url, api_key, temperature, max_tokens, timeout_seconds, reasoning")
+			usererror.Error("mpm config profile set <name> <key> <value>\n  keys: provider, model, base_url, api_key, temperature, timeout_seconds, reasoning")
 			return 1
 		}
 		return handleProfileSet(loadOrInitConfig(), args[1], args[2], strings.Join(args[3:], " "))
@@ -1919,9 +1838,10 @@ func handleProfileList(c *config.Config) int {
 		if p.Temperature != nil {
 			fmt.Printf("    temperature : %.2f\n", *p.Temperature)
 		}
-		if p.MaxTokens > 0 {
-			fmt.Printf("    max tokens  : %d\n", p.MaxTokens)
-		}
+		// 2026-09-14 final-simplification: max_tokens is no
+		// longer a user-facing knob; runtime supplies its own
+		// value. Surfacing an old stored value would imply it
+		// is honoured, so omit it from `mpm config profile list`.
 		if p.TimeoutSecs > 0 {
 			fmt.Printf("    timeout sec : %d\n", p.TimeoutSecs)
 		}
@@ -1951,9 +1871,10 @@ func handleProfileGet(c *config.Config, name string) int {
 	if p.Temperature != nil {
 		fmt.Printf("  temperature : %.2f\n", *p.Temperature)
 	}
-	if p.MaxTokens > 0 {
-		fmt.Printf("  max tokens  : %d\n", p.MaxTokens)
-	}
+	// 2026-09-14 final-simplification: max_tokens is no
+	// longer a user-facing knob; runtime supplies its own
+	// value. Surfacing an old stored value would imply it
+	// is honoured, so omit it from `mpm config profile get`.
 	if p.TimeoutSecs > 0 {
 		fmt.Printf("  timeout sec : %d\n", p.TimeoutSecs)
 	}
@@ -2008,13 +1929,13 @@ func handleProfileSet(c *config.Config, name, key, value string) int {
 			return 1
 		}
 		p.Temperature = &t
-	case "max_tokens", "maxtokens", "max":
-		n, err := strconvAtoi(value)
-		if err != nil || n <= 0 {
-			usererror.Error("max_tokens must be a positive integer (got %q)", value)
-			return 1
-		}
-		p.MaxTokens = n
+	case "max_tokens", "max_output_tokens", "maxtokens", "max":
+		// 2026-09-14 final-simplification: max_tokens is
+		// removed from the user-facing contract. Refuse with
+		// a clear error so legacy scripts that try to set it
+		// get a stable marker rather than silent acceptance.
+		usererror.Error("max_tokens is no longer user-configurable; runtime supplies its own max_tokens value (output-token limits are not a cost-control mechanism)")
+		return 1
 	case "timeout_seconds", "timeout":
 		n, err := strconvAtoi(value)
 		if err != nil || n <= 0 {
@@ -2025,7 +1946,7 @@ func handleProfileSet(c *config.Config, name, key, value string) int {
 	case "reasoning":
 		p.Reasoning = value
 	default:
-		usererror.Error("unknown profile field %q (try: provider, model, base_url, api_key, temperature, max_tokens, timeout_seconds, reasoning)", key)
+		usererror.Error("unknown profile field %q (try: provider, model, base_url, api_key, temperature, timeout_seconds, reasoning)", key)
 		return 1
 	}
 	c.Profiles[name] = p

@@ -422,79 +422,11 @@ func probeOpenAICompat(base string) *probeResult {
 	// fabricate a recommendation.
 	return r
 }
+// 2026-09-14 final-simplification: probeOpenRouter and
+// openRouterCatalogForView are removed. Live /api/v1/models
+// discovery existed solely to populate the public OpenRouter
+// model menu; that menu is gone. Capability-classified views
+// for OpenRouter still resolve by provider ID via the
+// registry; runtime wire inference keys off the base URL
+// substring the same way.
 
-// probeOpenRouter hits the OpenRouter /api/v1/models endpoint and
-// returns the catalogue of currently-supported model IDs.
-//
-// OpenRouter exposes a much larger model catalogue than the
-// offline modelCatalogFor fallback. We use it as the source of
-// truth for the OpenRouter menu; the brief explicitly forbids
-// baking in a giant fixed list.
-//
-// The probe is best-effort: short timeout, no auth required for
-// the public models endpoint (OpenRouter's auth-protected
-// variant lives at /api/v1/auth/key, which we don't call).
-// Returns nil when unreachable.
-//
-// 2026-09-14 release-pass: kept narrow on purpose — we only
-// extract the model IDs. Capability metadata (whether a given
-// ID supports embeddings) is not surfaced by OpenRouter's free
-// catalogue; embedding remains capability-positive-evidence only
-// via Ollama. This is documented at cmd/mpm/provider_registry.go.
-func probeOpenRouter() []string {
-	endpoint := os.Getenv("OPENROUTER_ENDPOINT")
-	if endpoint == "" {
-		endpoint = "https://openrouter.ai/api/v1"
-	}
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get(strings.TrimRight(endpoint, "/") + "/models")
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
-	body, _ := io.ReadAll(resp.Body)
-	var modelsResp struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&modelsResp); err != nil {
-		return nil
-	}
-	ids := make([]string, 0, len(modelsResp.Data))
-	for _, m := range modelsResp.Data {
-		if m.ID != "" {
-			ids = append(ids, m.ID)
-		}
-	}
-	return ids
-}
-
-// openRouterCatalogForView returns the model list for an
-// OpenRouter-flavoured view. Live discovery via /api/v1/models
-// is the canonical path; an empty result on probe failure is
-// expected — the 2026-09-14 simplification pass removed the
-// branded `openrouter/free` fallback because the public wizard
-// surface does not advertise OpenRouter presets at all (operators
-// type the current model ID at the Custom prompt). Internal
-// callers that want a stable preset can pipe through Custom at
-// runtime.
-//
-// Stable alphabetical sort: caller prepends Custom at index 0;
-// the rest is sorted case-insensitive with a deterministic
-// tiebreak on the original string.
-func openRouterCatalogForView() []string {
-	catalog := probeOpenRouter()
-	sort.SliceStable(catalog, func(i, j int) bool {
-		li := strings.ToLower(catalog[i])
-		lj := strings.ToLower(catalog[j])
-		if li != lj {
-			return li < lj
-		}
-		return catalog[i] < catalog[j]
-	})
-	return catalog
-}

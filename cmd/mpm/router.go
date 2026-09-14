@@ -113,7 +113,7 @@ func NewRouter() *CommandRouter {
 		// Configuration wizard (Wed 2026-07-29 polish session).
 		// 2026-09-14 release-pass: description accurately distinguishes
 		// LLM provider from embedding model configuration.
-		"config": {Name: "config", Description: "Configure LLM and embedding profiles (wizard | show | get | set | profile | component | detect-embedding)"},
+		"config": {Name: "config", Description: "Configure LLM and embedding profiles manually (wizard | show | get | set | profile | component | capability)"},
 
 		// Skills — versioned procedure rows with frontmatter + body
 		"save-skill":  {Name: "save-skill", Description: "Save skill from markdown file (--file, --name, --version, --force)", MinArgs: 0},
@@ -820,7 +820,7 @@ var commandsWithSubcommandDispatch = map[string]bool{
 	"integration": true, // export-mcp
 	"self-heal":   true, // (ops subcommand pattern)
 	"why":         true, // (uses subcommand-style args)
-	"config":      true, // show|get|set|edit|validate|profile|component|capability|detect-embedding
+	"config":      true, // show|get|set|edit|validate|profile|component|capability
 }
 
 // isSubcommandHelp reports whether the given args (post-parseFlags, with

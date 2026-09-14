@@ -68,16 +68,26 @@ type SynthClient struct {
 // the profile wins. The legacy Synth block is a compatibility read for
 // installs that haven't migrated yet; modern configs configure
 // Profiles["default"] (or bind Components["synth"] to a named profile).
+//
+// Output-token limits: NOT user-configurable. The substrate supplies
+// its own internal max_tokens value at wire time; any
+// Profiles[...].MaxTokens or legacy cfg.Synth.MaxTokens values are
+// IGNORED at construction time. The field stays on the profile struct
+// for backwards-compatible JSON parsing (legacy alpha installs may
+// still have it on disk), but the runtime never honors it. This
+// prevents low values such as max_tokens=10 from silently truncating
+// long-running synthesis jobs through user configuration.
 func NewSynthClient() *SynthClient {
 	cfg, err := config.LoadConfig()
 	sc := &SynthClient{
 		Model:     "MiniMax-M2.7",
 		BaseURL:   "https://api.minimax.io/anthropic/v1",
-		MaxTokens: 1024,
+		MaxTokens: synthInternalMaxTokens, // substrate-supplied default; never user-configurable
 		Timeout:   300 * time.Second,
 	}
 	// 1. Legacy Synth block first — sets the baseline. Modern profiles
-	// below override the legacy fields.
+	// below override the legacy fields. MaxTokens is intentionally
+	// NOT read here — see the function-level comment above.
 	if err == nil && cfg != nil && cfg.Synth != nil {
 		if cfg.Synth.Model != "" {
 			sc.Model = cfg.Synth.Model
@@ -85,9 +95,7 @@ func NewSynthClient() *SynthClient {
 		if cfg.Synth.BaseURL != "" {
 			sc.BaseURL = cfg.Synth.BaseURL
 		}
-		if cfg.Synth.MaxTokens > 0 {
-			sc.MaxTokens = cfg.Synth.MaxTokens
-		}
+		// MaxTokens: ignored. Substrate default applies.
 		if cfg.Synth.TimeoutSecs > 0 {
 			sc.Timeout = time.Duration(cfg.Synth.TimeoutSecs) * time.Second
 		}
@@ -97,7 +105,7 @@ func NewSynthClient() *SynthClient {
 	}
 	// 2. Canonical: Profiles["default"] (resolved through ProfileFor so an
 	// explicit Components["synth"] binding also wins). Overrides the
-	// legacy Synth block above.
+	// legacy Synth block above. MaxTokens is intentionally NOT read.
 	if err == nil && cfg != nil {
 		if prof := cfg.ProfileFor("synth"); prof != nil {
 			if prof.Model != "" {
@@ -106,9 +114,7 @@ func NewSynthClient() *SynthClient {
 			if prof.BaseURL != "" {
 				sc.BaseURL = prof.BaseURL
 			}
-			if prof.MaxTokens > 0 {
-				sc.MaxTokens = prof.MaxTokens
-			}
+			// MaxTokens: ignored. Substrate default applies.
 			if prof.TimeoutSecs > 0 {
 				sc.Timeout = time.Duration(prof.TimeoutSecs) * time.Second
 			}
@@ -243,6 +249,19 @@ EXAMPLE:
 Input fragment 1: "v prefers short messages. Prefers direct communication."
 Input fragment 2: "User v — short and direct. Doesn't like fluff."
 Output: {"content": "v prefers short, direct communication. No fluff.", "tags": ["preference", "v", "communication"]}`
+
+// synthInternalMaxTokens is the substrate-supplied wire cap used
+// when calling LLM APIs. NOT user-configurable — operators must
+// not be able to set this through `mpm config`, the wizard, or
+// the profile struct. The value prioritises successful task
+// completion; truncation is not a cost-control mechanism.
+//
+// 2026-09-14 final-simplification: lowered legacy user-set values
+// (such as the alpha-era default of 1024) cannot truncate long
+// synthesis work through user configuration. Pick a value large
+// enough for the worst realistic consolidated memory (~64k input
+// tokens + ~4k output tokens is comfortably under the cap).
+const synthInternalMaxTokens = 16384
 
 // SynthResult is the LLM output structure for synthesis calls.
 // Exported because SynthClientInterface returns it.

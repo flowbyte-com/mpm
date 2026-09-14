@@ -51,16 +51,14 @@ var configHelpSafetyMatrix = []configHelpSafetyCase{
 		ExpectedSubs: "Config component",
 		Disallowed:   "Configure the AI provider",
 	},
-	{
-		Command:      []string{"config", "detect-embedding", "--help"},
-		ExpectedSubs: "Config detect-embedding",
-		Disallowed:   "Configure the AI provider",
-	},
-	{
-		Command:      []string{"config", "detect-embedding", "-h"},
-		ExpectedSubs: "Config detect-embedding",
-		Disallowed:   "Configure the AI provider",
-	},
+	// 2026-09-14 final-simplification: detect-embedding is
+	// retired from the public CLI. The verb is retained only as
+	// a soft-deprecated alias that surfaces a migration message
+	// and exits non-zero. The `--help`/`-h` paths inherit the
+	// same retirement; matrix below covers only the surviving
+	// canonical config surfaces. The retired-message behaviour
+	// is pinned in release_pass_20260914_config_simplification_test.go
+	// (TestFinal_P_DetectEmbeddingHelpAlsoRetired).
 	{
 		// Plain `mpm config --help` reaches the canonical config page.
 		Command:      []string{"config", "--help"},

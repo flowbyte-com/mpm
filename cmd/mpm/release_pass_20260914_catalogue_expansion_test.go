@@ -223,36 +223,16 @@ func TestSimplify_WireInferenceSubstringsRetained(t *testing.T) {
 	}
 }
 
-// --- D: Custom model entry remains the model-menu Custom slot ---
-
-// TestSimplify_ModelMenuCustomAlwaysFirst — when a model menu
-// is shown (e.g. for embedding discovery or a future surface),
-// the Custom entry remains at index 0 per the canonical contract
-// (CLI_AGENT_RULES §9). The branded presets are gone, but
-// Custom + freeform stays.
-func TestSimplify_ModelMenuCustomAlwaysFirst(t *testing.T) {
-	cat := modelMenuCatalogFor("ollama")
-	// ollama has no static catalog; it uses live discovery.
-	// If the catalog is non-empty, the menu layer prepends
-	// Custom before display. We assert by checking the
-	// helper returns nil (which the menu layer treats as
-	// "freeform-only, Custom is the only entry").
-	if cat != nil {
-		t.Errorf("modelMenuCatalogFor(ollama) must return nil; got %v", cat)
-	}
-}
-
-// TestSimplify_CatalogueHelpersDontLeakBrandedLists — no public
-// helper returns a branded model list. This pins N (no public
-// manual menu depends on hard-coded catalogues).
-func TestSimplify_CatalogueHelpersDontLeakBrandedLists(t *testing.T) {
-	for _, pid := range []string{"openai", "anthropic", "cohere", "google-gemini", "mistral", "xai"} {
-		cat := modelMenuCatalogFor(pid)
-		if len(cat) != 0 {
-			t.Errorf("modelMenuCatalogFor(%q) leaked branded list %v", pid, cat)
-		}
-	}
-}
+// --- D (deleted): Custom model entry remains the model-menu Custom slot ---
+//
+// 2026-09-14 final-simplification: promptModelFromCatalog +
+// modelMenuCatalogFor are removed. There is no model menu to
+// pin anymore — operators type the model freeform at the Custom
+// prompt. The previous TestSimplify_ModelMenuCustomAlwaysFirst
+// and TestSimplify_CatalogueHelpersDontLeakBrandedLists are
+// superseded by TestFinal_D_ModelFreeform +
+// TestFinal_C_NoModelCatalogue + TestSimplify_NoBrandedModelPresets
+// (see release_pass_20260914_config_simplification_test.go).
 
 // presetIDs is a small helper that extracts the id of each
 // wizard.choice. Returns a fresh slice; callers may mutate.

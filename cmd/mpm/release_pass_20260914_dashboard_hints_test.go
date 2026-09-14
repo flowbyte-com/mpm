@@ -47,7 +47,9 @@ func TestDashboard_AbsentLLMHintsCanonicalConfigCommand(t *testing.T) {
 // TestDashboard_AbsentEmbeddingHintsCanonicalConfigCommand
 // (case Z). With no embedding profile configured, the
 // dashboard's Embedding row hint must include the canonical
-// command `mpm config detect-embedding --apply`.
+// `mpm config` command (Custom + protocol manual path).
+// 2026-09-14 final-simplification: detect-embedding is retired
+// from the public CLI; the hint must NOT mention it.
 func TestDashboard_AbsentEmbeddingHintsCanonicalConfigCommand(t *testing.T) {
 	bin := buildDashboardBin(t)
 	ws := t.TempDir()
@@ -58,8 +60,11 @@ func TestDashboard_AbsentEmbeddingHintsCanonicalConfigCommand(t *testing.T) {
 	if !strings.Contains(dashOut, "Embedding model") {
 		t.Fatalf("dashboard must surface Embedding model row; got:\n%s", dashOut)
 	}
-	if !strings.Contains(dashOut, "mpm config detect-embedding") {
-		t.Errorf("dashboard Embedding hint must include canonical `mpm config detect-embedding` command; got:\n%s", dashOut)
+	if !strings.Contains(dashOut, "mpm config") {
+		t.Errorf("dashboard Embedding hint must include canonical `mpm config` command; got:\n%s", dashOut)
+	}
+	if strings.Contains(dashOut, "detect-embedding") {
+		t.Errorf("dashboard Embedding hint must NOT mention the retired detect-embedding command; got:\n%s", dashOut)
 	}
 }
 

@@ -431,7 +431,7 @@ func checkEmbeddings() ReadinessItem {
 			Name:   "Embedding model",
 			OK:     true,
 			Detail: "not configured · optional",
-			Hint:   "semantic retrieval is unavailable when absent; configure via `mpm config component set embedding <profile>` or `mpm config detect-embedding [--apply]`",
+			Hint:   "semantic retrieval is unavailable when absent; configure via `mpm config` (Custom + protocol) and bind components.embedding to the new profile",
 		})
 	}
 	// Should not reach here; treat as failure so unhandled states

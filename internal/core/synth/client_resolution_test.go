@@ -19,6 +19,10 @@ func writeConfigFile(t *testing.T, path, content string) {
 // resolution: a config with Profiles["default"] populates the SynthClient
 // from the canonical profile. The legacy top-level `synth` block is no
 // longer required.
+//
+// 2026-09-14 final-simplification: max_tokens is NOT user-configurable;
+// the substrate-supplied value (synthInternalMaxTokens) wins regardless
+// of what the profile carries on disk.
 func TestNewSynthClient_ProfilesDefaultCanonical(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("MPM_WORKSPACE", dir)
@@ -47,8 +51,10 @@ func TestNewSynthClient_ProfilesDefaultCanonical(t *testing.T) {
 	if sc.APIKey != "profile-key" {
 		t.Errorf("expected APIKey from Profiles[default], got %q", sc.APIKey)
 	}
-	if sc.MaxTokens != 2048 {
-		t.Errorf("expected MaxTokens=2048 from Profiles[default], got %d", sc.MaxTokens)
+	// MaxTokens is NOT user-configurable; substrate default wins.
+	if sc.MaxTokens != synthInternalMaxTokens {
+		t.Errorf("MaxTokens must use substrate default %d (user-set 2048 ignored); got %d",
+			synthInternalMaxTokens, sc.MaxTokens)
 	}
 	if sc.Timeout.Seconds() != 120 {
 		t.Errorf("expected Timeout=120s from Profiles[default], got %v", sc.Timeout)
@@ -85,6 +91,10 @@ func TestNewSynthClient_ComponentsBindingWins(t *testing.T) {
 // TestNewSynthClient_LegacySynthFallback pins the migration path:
 // pre-profiles configs with only a top-level `synth` block continue
 // to work via the legacy migration fallback.
+//
+// 2026-09-14 final-simplification: legacy max_tokens values are
+// ignored at construction; only Model / BaseURL / APIKey / Timeout
+// are honoured.
 func TestNewSynthClient_LegacySynthFallback(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("MPM_WORKSPACE", dir)
@@ -107,8 +117,36 @@ func TestNewSynthClient_LegacySynthFallback(t *testing.T) {
 	if sc.APIKey != "legacy-key" {
 		t.Errorf("expected APIKey from legacy synth block, got %q", sc.APIKey)
 	}
-	if sc.MaxTokens != 512 {
-		t.Errorf("expected MaxTokens=512 from legacy synth block, got %d", sc.MaxTokens)
+	if sc.MaxTokens != synthInternalMaxTokens {
+		t.Errorf("MaxTokens must use substrate default %d (legacy 512 ignored); got %d",
+			synthInternalMaxTokens, sc.MaxTokens)
+	}
+}
+
+// TestNewSynthClient_LegacyMaxTokensCannotTruncate pins the security
+// posture: a stored max_tokens=10 (or any other low value) on a
+// legacy alpha install must NOT silently propagate into the runtime.
+// The substrate supplies its own internal max_tokens at construction
+// regardless of the value the JSON carries on disk.
+func TestNewSynthClient_LegacyMaxTokensCannotTruncate(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", dir)
+
+	cfgFile := filepath.Join(dir, "mpm_config.json")
+	writeConfigFile(t, cfgFile, `{
+  "synth": {
+    "model": "LegacyModel",
+    "api_key": "legacy-key",
+    "base_url": "https://api.legacy.example/anthropic/v1",
+    "max_tokens": 10,
+    "timeout_seconds": 60
+  }
+}`)
+
+	sc := NewSynthClient()
+	if sc.MaxTokens <= 10 {
+		t.Errorf("legacy max_tokens=10 must NOT truncate; got MaxTokens=%d (substrate default %d must win)",
+			sc.MaxTokens, synthInternalMaxTokens)
 	}
 }
 

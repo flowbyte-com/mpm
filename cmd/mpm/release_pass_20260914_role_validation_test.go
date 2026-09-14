@@ -72,8 +72,8 @@ func TestRoleValidation_RejectsEmbeddingOnlyOllamaLLM(t *testing.T) {
 	if !strings.Contains(s, "embedding model, not a generative LLM") {
 		t.Fatalf("rejection message must name the embedding/role distinction; got:\n%s", s)
 	}
-	if !strings.Contains(s, "mpm config detect-embedding") {
-		t.Fatalf("rejection must direct operator at the embedding config path; got:\n%s", s)
+	if !strings.Contains(s, "mpm config profile add") {
+		t.Fatalf("rejection must direct operator at the embedding manual config path; got:\n%s", s)
 	}
 
 	// Verify the config was NOT mutated. The seeded default
@@ -278,23 +278,62 @@ func TestRoleValidation_NoPartialConfigOnRejection(t *testing.T) {
 }
 
 // TestRoleValidation_EmbeddingConfigPathUnchanged asserts
-// the brief's invariant: the embedding configuration path
-// must NOT be guarded against embedding-only models. We
-// confirm `mpm config detect-embedding` is unaffected by
-// surfacing it in the help. (A full live-Ollama test is out
-// of scope for hermetic CI.)
+// the brief's invariant: the embedding manual configuration
+// path must NOT be guarded against embedding-only models.
+// 2026-09-14 final-simplification: detect-embedding is
+// retired from the public CLI; embedding configuration is
+// the manual Custom + protocol path. We pin the contract
+// here: the embedding helper text does NOT reject
+// embedding-only models, the manual profile add accepts an
+// embedding model verbatim, and the `mpm config` help text
+// surfaces the new contract.
 func TestRoleValidation_EmbeddingConfigPathUnchanged(t *testing.T) {
 	bin := buildRoleValidationBin(t)
 
-	cmd := stdlibexec.Command(bin, "config", "detect-embedding", "--help")
+	// `mpm config --help` must surface both LLM and embedding
+	// manual-only sections; neither must reference the retired
+	// detect-embedding command.
+	cmd := stdlibexec.Command(bin, "config", "--help")
 	cmd.Env = []string{"PATH=" + lookupTestPath()}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("detect-embedding --help: %v\n%s", err, out)
+		t.Fatalf("config --help: %v\n%s", err, out)
 	}
 	s := stripLogNoise(string(out))
-	if !strings.Contains(s, "MPM") {
-		t.Fatalf("detect-embedding help must render canonical heading; got:\n%s", s)
+	if strings.Contains(s, "detect-embedding") {
+		t.Fatalf("config --help must NOT reference the retired detect-embedding command; got:\n%s", s)
+	}
+	if !strings.Contains(s, "Embedding model") {
+		t.Fatalf("config --help must surface the embedding manual section; got:\n%s", s)
+	}
+
+	// Manual profile creation with an embedding-only model
+	// must succeed (the role validator is bypassed for the
+	// components["embedding"] binding).
+	ws := t.TempDir()
+	cmd = stdlibexec.Command(bin, "config", "profile", "add", "embedding")
+	cmd.Env = []string{"MPM_WORKSPACE=" + ws, "PATH=" + lookupTestPath()}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("profile add embedding: %v\n%s", err, out)
+	}
+	// Bind components.embedding FIRST so the role validator
+	// bypasses the embedding-only guard for this profile.
+	cmd = stdlibexec.Command(bin, "config", "component", "set", "embedding", "embedding")
+	cmd.Env = []string{"MPM_WORKSPACE=" + ws, "PATH=" + lookupTestPath()}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("component set: %v\n%s", err, out)
+	}
+	for _, kv := range [][2]string{
+		{"provider", "custom"},
+		{"base_url", "http://127.0.0.1:11434"},
+		{"model", "all-minilm"},
+	} {
+		cmd := stdlibexec.Command(bin, "config", "profile", "set", "embedding", kv[0], kv[1])
+		cmd.Env = []string{"MPM_WORKSPACE=" + ws, "PATH=" + lookupTestPath()}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("profile set %s=%s on embedding profile must succeed; got: %v\n%s",
+				kv[0], kv[1], err, out)
+		}
 	}
 }
 

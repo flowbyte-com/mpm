@@ -1,38 +1,24 @@
 // release_pass_20260914_openrouter_test.go — OpenRouter
-// regressions for the 2026-09-14 config-simplification pass.
+// regressions for the 2026-09-14 final-simplification pass.
 //
-// The catalogue-expansion pass made OpenRouter a branded provider
-// with public menu presence. The simplification pass removed that
-// public menu presence but PRESERVES OpenRouter at the runtime
-// layer:
+// 2026-09-14 final-simplification: openRouterCatalogForView
+// (the live /api/v1/models discovery helper) is removed. The
+// openrouter-branded menu path is gone; manual Custom +
+// protocol configuration is the single public path. The
+// runtime registry still resolves provider=openrouter for
+// backwards compatibility (existing profiles load and wire
+// unchanged).
 //
-//   * Existing profiles with provider=openrouter continue to load
-//     and wire correctly (L — backward compatibility).
-//   * Internal registry still resolves provider=openrouter by
-//     string.
-//   * Wire inference (internal/core/synth) still routes
-//     openrouter.ai → wireOpenAI.
-//   * `mpm config detect-embedding` still uses
-//     `openRouterCatalogForView` for live /api/v1/models discovery.
-//   * Live discovery of OpenRouter model IDs works at the embedding
-//     detection surface; failure falls back to empty (no preset
-//     advertised, per the brief).
+// These tests pin the backwards-compat guarantees only. Live
+// discovery tests are removed (no public surface consumes
+// the catalog and no internal capability code depends on it).
 //
-// These tests cover exactly those guarantees. Public menu tests
-// (OpenRouter appearing in the LLM wizard, openrouter/free being a
-// model preset) were REMOVED with the simplification pass — see
-// release_pass_20260914_catalogue_expansion_test.go for the new
-// contract pinning.
-//
-// All tests hermetic via t.TempDir() and httptest fake servers.
+// All tests hermetic via t.TempDir().
 
 package main
 
 import (
-	"encoding/json"
 	stdlibexec "os/exec"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,8 +26,8 @@ import (
 )
 
 // TestOpenRouter_BackwardsCompatRegistryResolution — the runtime
-// registry still resolves provider=openrouter by string (L).
-// An existing operator profile must continue to load and wire
+// registry still resolves provider=openrouter by string. An
+// existing operator profile must continue to load and wire
 // without errors.
 func TestOpenRouter_BackwardsCompatRegistryResolution(t *testing.T) {
 	p, ok := presetForID("openrouter")
@@ -58,7 +44,7 @@ func TestOpenRouter_BackwardsCompatRegistryResolution(t *testing.T) {
 
 // TestOpenRouter_BackwardsCompatProfileLoads — a stored profile
 // with provider=openrouter loads under `mpm config show` without
-// being rewritten as "custom" (L). Runtime resolution by ID is
+// being rewritten as "custom". Runtime resolution by ID is
 // preserved; the wizard does NOT silently rewrite existing
 // profiles.
 func TestOpenRouter_BackwardsCompatProfileLoads(t *testing.T) {
@@ -77,9 +63,6 @@ func TestOpenRouter_BackwardsCompatProfileLoads(t *testing.T) {
 		t.Fatalf("write seed: %v", err)
 	}
 
-	// `mpm config show` must surface the openrouter profiles
-	// unchanged; the api_key is redacted in display but the
-	// provider/model/base_url are not mutated.
 	cmd := stdlibexec.Command(bin, "config", "show")
 	cmd.Env = []string{"MPM_WORKSPACE=" + ws, "PATH=" + lookupTestPath()}
 	out, err := cmd.CombinedOutput()
@@ -97,8 +80,6 @@ func TestOpenRouter_BackwardsCompatProfileLoads(t *testing.T) {
 		t.Errorf("config show must surface the secondary OpenRouter profile; got:\n%s", s)
 	}
 
-	// On-disk file MUST preserve the keys verbatim (config show
-	// only redacts on display).
 	body, err := os.ReadFile(filepath.Join(ws, "mpm_config.json"))
 	if err != nil {
 		t.Fatalf("read config: %v", err)
@@ -112,57 +93,6 @@ func TestOpenRouter_BackwardsCompatProfileLoads(t *testing.T) {
 	}
 	if !strings.Contains(roundTripped, "anthropic/claude-3.5-sonnet") {
 		t.Errorf("OpenRouter model lost on round-trip; got:\n%s", roundTripped)
-	}
-}
-
-// TestOpenRouter_LiveDiscoveryStillWorks — `openRouterCatalogForView`
-// still discovers live model IDs from /api/v1/models (the
-// embedding discovery surface depends on it). The simplification
-// did NOT remove live discovery — only the static preset fallback.
-func TestOpenRouter_LiveDiscoveryStillWorks(t *testing.T) {
-	srv := newFakeOpenRouter(t, []string{
-		"anthropic/claude-3.5-sonnet",
-		"openai/text-embedding-3-small",
-		"google/gemini-2.5-pro",
-	})
-	defer srv.Close()
-	t.Setenv("OPENROUTER_ENDPOINT", srv.URL+"/")
-
-	catalog := openRouterCatalogForView()
-	if len(catalog) == 0 {
-		t.Fatalf("live discovery must populate the catalog when /api/v1/models responds")
-	}
-	for _, want := range []string{
-		"anthropic/claude-3.5-sonnet",
-		"openai/text-embedding-3-small",
-		"google/gemini-2.5-pro",
-	} {
-		found := false
-		for _, m := range catalog {
-			if m == want {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("live discovery catalog missing %q; got %v", want, catalog)
-		}
-	}
-}
-
-// TestOpenRouter_DiscoveryFailureReturnsEmpty — when /api/v1/models
-// is unreachable, the catalog falls back to empty (no static
-// preset advertised). Operators are not given a fake fallback;
-// they type the model name freeform at the Custom prompt.
-func TestOpenRouter_DiscoveryFailureReturnsEmpty(t *testing.T) {
-	t.Setenv("OPENROUTER_ENDPOINT", "http://127.0.0.1:1/")
-	catalog := openRouterCatalogForView()
-	// Empty on probe failure: the brief removed the static
-	// `openrouter/free` preset.
-	for _, m := range catalog {
-		if m == "openrouter/free" {
-			t.Errorf("openrouter/free must NOT be advertised as a preset; got %v", catalog)
-		}
 	}
 }
 
@@ -181,24 +111,9 @@ func TestOpenRouter_NotInPublicWizardMenu(t *testing.T) {
 
 // --- helpers ---
 
-// newFakeOpenRouter stands up a minimal /api/v1/models fake
-// server with the given model IDs in the response.
-func newFakeOpenRouter(t *testing.T, ids []string) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/models") {
-			http.NotFound(w, r)
-			return
-		}
-		data := make([]map[string]string, len(ids))
-		for i, id := range ids {
-			data[i] = map[string]string{"id": id}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": data})
-	}))
-	return srv
-}
+// stripLogNoise, lookupTestPath, and indexAnyLine live in
+// release_pass_20260914_dashboard_test.go (same package); no
+// duplicates here.
 
 // buildOpenRouterBin builds a fresh mpm binary in a temp dir for
 // OpenRouter tests.

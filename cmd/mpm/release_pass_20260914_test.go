@@ -63,11 +63,16 @@ func TestRelease_20260914_ConfigSubcommandHelp(t *testing.T) {
 		t.Skip("mpm binary not found; run `make build` first")
 	}
 	workspace := t.TempDir()
+	// 2026-09-14 final-simplification: detect-embedding is
+	// retired. The catch-all subcommand help matrix covers
+	// only the surviving canonical config surfaces. The
+	// retired-verb message is pinned in
+	// release_pass_20260914_config_simplification_test.go
+	// (TestFinal_P_DetectEmbeddingHelpAlsoRetired).
 	for _, args := range [][]string{
 		{"config", "--help"},
 		{"config", "profile", "--help"},
 		{"config", "component", "--help"},
-		{"config", "detect-embedding", "--help"},
 	} {
 		stdout, _, _ := runMpmParity(t, bin, workspace, args...)
 		out := string(stdout)

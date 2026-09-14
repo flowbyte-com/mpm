@@ -180,22 +180,27 @@ func isOllamaLikeEndpoint(provider, baseURL string) bool {
 //   LLM provider    → synthesis / generative features
 //   Embedding model → semantic / vector retrieval
 //   Use:
-//     mpm config detect-embedding
-//     mpm config detect-embedding --apply
+//     mpm config profile add <name> --provider custom
+//     mpm config component set embedding <name>
 //
 // The model argument is the rejected model name (verbatim).
 // Returned as a single multi-line string so callers can print
 // it directly. Kept in this file (not the wizard) so non-
 // interactive paths (`mpm config profile set model`) can reuse
 // the same wording.
+//
+// 2026-09-14 final-simplification: the previous hint referenced
+// `mpm config detect-embedding`. That subcommand was removed in
+// the same pass; manual Custom + protocol configuration is the
+// canonical replacement.
 func RejectEmbeddingOnlyLLM(model string) string {
 	return fmt.Sprintf(
 		"%q is an embedding model, not a generative LLM.\n\n"+
 			"  LLM provider    → synthesis / generative features\n"+
 			"  Embedding model → semantic / vector retrieval\n\n"+
 			"Use:\n"+
-			"  mpm config detect-embedding\n"+
-			"  mpm config detect-embedding --apply",
+			"  mpm config profile add <name> --provider custom --model <id> --base-url <url>\n"+
+			"  mpm config component set embedding <name>",
 		model,
 	)
 }

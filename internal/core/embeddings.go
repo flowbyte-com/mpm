@@ -5,9 +5,10 @@
 // to OLLAMA_ENDPOINT / OLLAMA_MODEL env vars when the binding is
 // absent. The reserved sentinel "disabled" opts out cleanly.
 //
-// There is no runtime network probing. Operators who want to
-// discover reachable providers run `mpm config detect-embedding`,
-// which is explicitly diagnostic.
+// There is no runtime network probing. Manual configuration via
+// `mpm config profile add <name> --provider custom ...` is the
+// canonical public surface; the previously-documented diagnostic
+// probe path has been retired from the public CLI.
 //
 // See docs/superpowers/specs/2026-09-03-mpm-embedding-provider-design.md
 // for the full design.
@@ -558,8 +559,9 @@ func ResetEmbedConfigForTest() {
 //   3. components.embedding absent → OLLAMA_* env fallback
 //   4. neither → NullProvider
 //
-// No network probing at any step. Probing lives in
-// `mpm config detect-embedding`.
+// No network probing at any step. Operators configure manually
+// via `mpm config profile add <name> --provider custom ...` and
+// `mpm config component set embedding <name>`.
 func DefaultEmbeddingConfig() *EmbeddingConfig {
 	if testEmbedConfig != nil {
 		return testEmbedConfig
