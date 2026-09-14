@@ -50,7 +50,16 @@ var helpSafetyMatrix = []helpSafetyCase{
 	{Command: []string{"reference", "list", "--help"}, WantNoMutation: true},
 	{Command: []string{"task", "list", "--help"}, WantNoMutation: true},
 	{Command: []string{"evidence", "list", "--help"}, WantNoMutation: true},
-	{Command: []string{"confidence", "show", "--help"}, WantNoMutation: true},
+	// 2026-09-14 release-pass: confidence is intentionally NOT a
+	// top-level CLI command. The canonical surface is
+	// `mpm ops confidence <sub>` (always JSON) plus
+	// `mpm why <id>` (per-event confidence, human-readable).
+	// The matrix retains the legacy case to guard against a
+	// future regression that re-introduces a top-level
+	// `mpm confidence` command. Today it errors (unknown
+	// command); the assertion is informational, not blocking.
+	{Command: []string{"ops", "confidence", "show", "--help"}, WantNoMutation: true},
+	{Command: []string{"confidence", "show", "--help"}, WantNoMutation: true}, // legacy case: top-level is unknown
 	{Command: []string{"handoff", "list", "--help"}, WantNoMutation: true},
 	{Command: []string{"scratchpad", "read", "--help"}, WantNoMutation: true},
 	{Command: []string{"wake", "list", "--help"}, WantNoMutation: true},

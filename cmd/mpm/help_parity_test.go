@@ -149,9 +149,18 @@ func TestHelpParity_TopLevelHelpMatchesRouterTree(t *testing.T) {
 	output := string(stdout)
 
 	// A subset of commands that must appear in the full catalog.
+	//
+	// 2026-09-14 release-pass: `confidence` is intentionally NOT
+	// advertised as a top-level CLI command. The canonical public
+	// surface is `mpm ops confidence <sub>` (engine-room namespace)
+	// plus `mpm why <id>` (per-event confidence in human-readable
+	// form). The MCP tool `mpm_confidence` is the machine surface.
+	// The test requires `ops` (the namespace) — the confidence
+	// subcommand is enumerated by `mpm ops help` and verified
+	// by confidence_intentional_asymmetry_test.go.
 	required := []string{
 		"doctor", "status", "info", "memory", "lesson", "decision",
-		"theory", "skill", "topic", "reference", "evidence", "confidence",
+		"theory", "skill", "topic", "reference", "evidence", "ops",
 		"handoff", "work", "tasks", "wake", "lifecycle",
 	}
 	for _, cmd := range required {

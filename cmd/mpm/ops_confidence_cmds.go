@@ -9,16 +9,25 @@ import (
 	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
-// round 9 T46-T48: extend the `mpm ops confidence` subcommand to
-// expose `explain` and `history` as thin CLI adapters over the
-// underlying mpm_confidence functionality (the substrate tool at
-// internal/core/tools handles action=explain|history directly). The
-// pre-fix surface offered only show/recompute/changes/trend — a
-// smoke test running `mpm ops confidence explain <id>` got "unknown
-// subcommand" rather than the parity-with-mpm_call surface. The fix
-// routes explain/history through the same actions the MCP/CALL
-// surface accepts and updates the usage strings/help to advertise
-// the full surface.
+// handleOpsConfidence — intentional CLI asymmetry for confidence.
+//
+// Confidence is intentionally NOT a top-level `mpm confidence`
+// command. The canonical public surface is:
+//
+//   mpm ops confidence <show|recompute|changes|trend|explain|history> --artifact <id>
+//     — JSON-only engine-room surface (machine-friendly).
+//
+//   mpm why <id> [--kind <memory|decision|theory|skill|lesson|work>]
+//     — human-readable per-event confidence + provenance for any
+//       artifact.
+//
+//   mpm call mpm_confidence --payload '{"action":"...","params":{...}}'
+//     — universal machine interface via the MCP substrate.
+//
+// The CLI is a thin adapter over the substrate's mpm_confidence
+// tool (internal/core/tools); it is JSON-only by design so the
+// shape matches the MCP action envelope. Use `mpm why` for
+// human-readable confidence views.
 func parseOpsConfidenceArgs(args []string) (map[string]interface{}, string, error) {
 	if len(args) == 0 {
 		return nil, "", fmt.Errorf("subcommand required: show|recompute|changes|trend|explain|history")
