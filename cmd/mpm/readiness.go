@@ -287,9 +287,17 @@ func checkDatabase(dm *mpminternal.DatabaseManager) ReadinessItem {
 //
 //   absent             → OK=true, "not configured · optional"
 //   disabled           → OK=true, "intentionally disabled"
-//   configured         → OK=true, "configured · model=<name>"
+//   configured         → OK=true, "<model> · <provider>"
 //   unavailable        → OK=false, "configured but unreachable"
 //   misconfigured      → OK=false, "misconfigured: <reason>"
+//
+// The configured message is rendered as `<model> · <provider>` via
+// formatProviderModel — NOT `model=<provider-name>`. The canonical
+// wire shape is `<host>:<model>` (cfg.ProviderName); this helper
+// reformats it for human display. This avoids the misleading
+// "model=ollama" presentation where the host name is mistaken for
+// the model name. The detail stays in the user-facing `<model> ·
+// <provider>` form across doctor, readiness, and dashboard surfaces.
 func checkEmbeddings() ReadinessItem {
 	cfg := mpminternal.DefaultEmbeddingConfig()
 	switch {
@@ -303,13 +311,13 @@ func checkEmbeddings() ReadinessItem {
 		return ReadinessItem{
 			Name:   "Embedding model",
 			OK:     true,
-			Detail: "configured · model=" + cfg.ProviderName,
+			Detail: formatProviderModel(cfg.ProviderName),
 		}
 	case cfg.Status == mpminternal.EmbeddingStatusUnreachable:
 		return ReadinessItem{
 			Name:   "Embedding model",
 			OK:     false,
-			Detail: "configured but unreachable",
+			Detail: formatProviderModel(cfg.ProviderName) + " · unreachable",
 			Hint:   "verify the provider endpoint is reachable, then run `mpm readiness` again",
 		}
 	case cfg.Status == mpminternal.EmbeddingStatusMisconfigured:

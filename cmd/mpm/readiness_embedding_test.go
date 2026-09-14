@@ -33,8 +33,10 @@ func TestReadinessChecker_checkEmbeddings(t *testing.T) {
 				ProviderName: "ollama:nomic-embed-text",
 				Status:       mpminternal.EmbeddingStatusConfigured,
 			},
+			// 2026-09-14 release-pass: presentation reformats
+			// `<host>:<model>` wire into `<model> · <Provider>`.
 			wantOK:   true,
-			wantNote: "configured · model=ollama:nomic-embed-text",
+			wantNote: "nomic-embed-text · Ollama",
 		},
 		{
 			name: "configured but unreachable",
@@ -45,8 +47,10 @@ func TestReadinessChecker_checkEmbeddings(t *testing.T) {
 				Status:       mpminternal.EmbeddingStatusUnreachable,
 				LastError:    errors.New("connection refused"),
 			},
+			// 2026-09-14 release-pass: unreachable detail uses the
+			// same `<model> · <Provider>` reformat.
 			wantOK:   false,
-			wantNote: "configured but unreachable",
+			wantNote: "nomic-embed-text · Ollama · unreachable",
 		},
 		{
 			name: "misconfigured",

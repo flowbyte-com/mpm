@@ -79,8 +79,12 @@ func TestDoctorService_checkEmbeddingProvider(t *testing.T) {
 				ProviderName: "ollama:nomic-embed-text",
 				Status:       mpminternal.EmbeddingStatusConfigured,
 			},
+			// 2026-09-14 release-pass: presentation reformats
+			// the canonical `<host>:<model>` wire shape into the
+			// human-facing `<model> · <Provider>` form. The
+			// underlying wire shape is unchanged.
 			wantStatus: "PASS",
-			wantMsg:    `provider "ollama:nomic-embed-text" reachable`,
+			wantMsg:    `nomic-embed-text · Ollama`,
 		},
 		{
 			name: "profile configured — unreachable",
@@ -92,7 +96,7 @@ func TestDoctorService_checkEmbeddingProvider(t *testing.T) {
 				LastError:    errors.New("connection refused"),
 			},
 			wantStatus: "WARN",
-			wantMsg:    `provider "ollama:nomic-embed-text" unreachable: connection refused`,
+			wantMsg:    `nomic-embed-text · Ollama unreachable: connection refused`,
 		},
 		{
 			name: "profile configured — misconfigured",
@@ -103,8 +107,11 @@ func TestDoctorService_checkEmbeddingProvider(t *testing.T) {
 				Status:       mpminternal.EmbeddingStatusMisconfigured,
 				LastError:    errors.New("profile \"broken\" referenced by components.embedding does not exist"),
 			},
+			// Misconfigured case keeps the original phrasing
+			// (`misconfigured: <reason>`) — the model/provider
+			// reformat only applies when both are known.
 			wantStatus: "WARN",
-			wantMsg:    `provider misconfigured: profile "broken" referenced by components.embedding does not exist`,
+			wantMsg:    `misconfigured: profile "broken" referenced by components.embedding does not exist`,
 		},
 		{
 			name: "env fallback — legacy",
@@ -114,7 +121,7 @@ func TestDoctorService_checkEmbeddingProvider(t *testing.T) {
 				Status:       mpminternal.EmbeddingStatusConfigured,
 			},
 			wantStatus: "PASS",
-			wantMsg:    `provider "ollama:nomic-embed-text" reachable (legacy env fallback)`,
+			wantMsg:    `nomic-embed-text · Ollama (legacy env fallback)`,
 		},
 	}
 
@@ -151,20 +158,22 @@ func TestDoctorService_Check_aggregatesEmbeddingProvider(t *testing.T) {
 		t.Fatalf("Check() returned error: %v", err)
 	}
 
-	// Find the Embedding provider check.
+	// Find the Embedding model check. 2026-09-14 release-pass
+	// renamed the row from "Embedding provider" → "Embedding model"
+	// to match the canonical terminology across all surfaces.
 	var found bool
 	for _, c := range report.Checks {
-		if c.Name == "Embedding provider" {
+		if c.Name == "Embedding model" {
 			found = true
 			if c.Status != "PASS" {
-				t.Errorf("Embedding provider check status = %q, want PASS", c.Status)
+				t.Errorf("Embedding model check status = %q, want PASS", c.Status)
 			}
 			if c.Message != "intentionally disabled" {
-				t.Errorf("Embedding provider message = %q, want 'intentionally disabled'", c.Message)
+				t.Errorf("Embedding model message = %q, want 'intentionally disabled'", c.Message)
 			}
 		}
 	}
 	if !found {
-		t.Error("Embedding provider check not found in report.Checks")
+		t.Error("Embedding model check not found in report.Checks")
 	}
 }

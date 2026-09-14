@@ -193,8 +193,16 @@ func (s *DoctorService) checkEmbeddings() DoctorCheck {
 // checkEmbeddingProvider reads the canonical EmbeddingConfig and surfaces
 // the four provider states per spec §7.1 table.
 // Does NOT perform a network probe; reads the cached config snapshot.
+//
+// 2026-09-14 release-pass: renamed "Embedding provider" → "Embedding model"
+// to match the canonical terminology across all surfaces. The message
+// format is `<model> · <provider>` parsed from the canonical
+// `provider:model` wire shape (cfg.ProviderName). Absent state uses
+// Status="INFO" (neutral — neither PASS nor WARN/FAIL) so the renderer
+// emits the neutral ○ marker and the tally does not increment
+// warning counts.
 func (s *DoctorService) checkEmbeddingProvider() DoctorCheck {
-	check := DoctorCheck{Name: "Embedding provider"}
+	check := DoctorCheck{Name: "Embedding model"}
 	cfg := mpminternal.DefaultEmbeddingConfig()
 	switch {
 	case cfg.IntentionallyDisabled:
@@ -202,13 +210,9 @@ func (s *DoctorService) checkEmbeddingProvider() DoctorCheck {
 		check.Message = "intentionally disabled"
 		return check
 	case cfg.Source == mpminternal.EmbeddingSourceAbsent:
-		// 2026-09-14 release-pass: embedding is OPTIONAL. Absence
-		// alone is informational — neither a successful check (PASS)
-		// nor a failure (WARN/FAIL). Use the neutral status "INFO"
-		// so the renderer emits the neutral marker (○) and the
-		// tally does not increment warning counts. The wording
-		// follows the canonical dashboard row so doctor / dashboard /
-		// readiness all agree.
+		// Absence alone is informational. The rendered marker is
+		// the neutral ○ (not ✓), and the tally does not increment
+		// warning counts. Only configured-but-broken states warn.
 		check.Status = "INFO"
 		check.Message = "not configured · optional"
 		check.Details = []string{"semantic / vector similarity retrieval is unavailable when absent; lexical and structured retrieval remain available."}
@@ -219,20 +223,58 @@ func (s *DoctorService) checkEmbeddingProvider() DoctorCheck {
 			note = " (legacy env fallback)"
 		}
 		check.Status = "PASS"
-		check.Message = fmt.Sprintf("provider %q reachable%s", cfg.ProviderName, note)
+		check.Message = formatProviderModel(cfg.ProviderName) + note
 		return check
 	case cfg.Status == mpminternal.EmbeddingStatusUnreachable:
 		check.Status = "WARN"
-		check.Message = fmt.Sprintf("provider %q unreachable: %v", cfg.ProviderName, cfg.LastError)
+		check.Message = fmt.Sprintf("%s unreachable: %v", formatProviderModel(cfg.ProviderName), cfg.LastError)
 		return check
 	case cfg.Status == mpminternal.EmbeddingStatusMisconfigured:
 		check.Status = "WARN"
-		check.Message = fmt.Sprintf("provider misconfigured: %v", cfg.LastError)
+		check.Message = fmt.Sprintf("misconfigured: %v", cfg.LastError)
 		return check
 	}
 	check.Status = "WARN"
 	check.Message = "unknown embedding state"
 	return check
+}
+
+// formatProviderModel converts the canonical `<host>:<model>` wire
+// shape (see internal/core/embeddings.go: providerName) to the
+// user-facing `<model> · <Provider>` form. Examples:
+//
+//	"ollama:nomic-embed-text"  → "nomic-embed-text · Ollama"
+//	"openai:text-embedding-3"   → "text-embedding-3 · OpenAI"
+//	"null"                       → "not configured"
+//
+// The provider host is capitalised. The same provider/model split
+// is performed by splitProviderModel in handlers_config.go; this
+// helper exists only to add the `<model> · <Provider>` reformatting.
+// This is presentation only — the underlying wire shape is unchanged.
+func formatProviderModel(providerName string) string {
+	if providerName == "" || providerName == "null" {
+		return "not configured"
+	}
+	host, model := splitProviderModel(providerName)
+	if model == "" {
+		// No colon — pass through verbatim. Same fallback as
+		// handlers_config.go.
+		return providerName
+	}
+	return model + " · " + titleCaseASCII(host)
+}
+
+// titleCaseASCII capitalises the first ASCII letter. Examples:
+// "ollama" → "Ollama", "openai" → "OpenAI", "custom" → "Custom".
+// ASCII-only is adequate for the canonical provider hosts.
+func titleCaseASCII(s string) string {
+	if s == "" {
+		return s
+	}
+	if s[0] >= 'a' && s[0] <= 'z' {
+		return string(s[0]-32) + s[1:]
+	}
+	return s
 }
 
 // checkWorkingContextOrphans counts scratchpads past decay_at.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 	"golang.org/x/sys/unix"
 	"os"
 )
@@ -598,6 +599,14 @@ func (r *CommandRouter) handleHelp(args []string) int {
 		// RECOMMENDED 7: surface the canonical evidence-type
 		// documentation under `mpm help evidence` so the vocabulary
 		// is discoverable without grepping source.
+		//
+		// 2026-09-14 release-pass: prepend the canonical
+		// `MPM · Evidence` heading so this surface uses the same
+		// heading token as every other help page. The body
+		// (`EvidenceTypeHelp`) remains unchanged so the
+		// evidence-type catalogue content is identical.
+		render.Heading(os.Stdout, "Evidence")
+		render.BlankLine(os.Stdout)
 		fmt.Println(mpminternal.EvidenceTypeHelp())
 		return 0
 	case "ops":
@@ -709,6 +718,14 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 		// RECOMMENDED 7: surface the canonical evidence-type
 		// documentation under `mpm help evidence` so the vocabulary
 		// is discoverable without grepping source.
+		//
+		// 2026-09-14 release-pass: prepend the canonical
+		// `MPM · Evidence` heading so this surface uses the same
+		// heading token as every other help page. The body
+		// (`EvidenceTypeHelp`) remains unchanged so the
+		// evidence-type catalogue content is identical.
+		render.Heading(os.Stdout, "Evidence")
+		render.BlankLine(os.Stdout)
 		fmt.Println(mpminternal.EvidenceTypeHelp())
 		return 0
 	case "ops":

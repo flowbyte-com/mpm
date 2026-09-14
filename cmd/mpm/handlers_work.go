@@ -516,9 +516,104 @@ func handleWorkItem(args []string) int {
 		return 1
 	}
 
+	// 2026-09-14 release-pass: `mpm work item list` shares the
+	// structured row data between human mode and JSON mode. The
+	// CLI handler calls the canonical ListWorkRows helper directly
+	// (the same helper the substrate's mpm_work JSON path uses),
+	// renders the canonical `MPM · Work item list` heading in
+	// human mode, and preserves the JSON envelope when --json is
+	// passed. The handler does NOT call another CLI surface and
+	// parse its JSON output.
+	if action == "list" {
+		return handleWorkItemList(params)
+	}
+
 	payload := map[string]interface{}{"action": action, "params": params}
 	enc, _ := json.Marshal(payload)
 	return handleCall([]string{"mpm_work", "--payload", string(enc)})
+}
+
+// handleWorkItemList renders the `mpm work item list` surface.
+func handleWorkItemList(params map[string]interface{}) int {
+	dm := getDBConcrete()
+	if dm == nil {
+		return 1
+	}
+	jsonOutput := false
+	if v, ok := params["json"].(bool); ok {
+		jsonOutput = v
+	}
+	status, _ := params["status"].(string)
+	if status == "" {
+		status = "open"
+	}
+	limit := 0
+	if v, ok := params["limit"]; ok {
+		switch x := v.(type) {
+		case float64:
+			limit = int(x)
+		case int:
+			limit = x
+		case int64:
+			limit = int(x)
+		}
+	}
+	rows, err := mpminternal.ListWorkRows(dm, status, limit)
+	if err != nil {
+		return respond("", fmt.Sprintf("work item list: %v", err), 1)
+	}
+	if jsonOutput {
+		// JSON mode: preserve the canonical envelope shape
+		// (success/works/count).
+		out := map[string]interface{}{
+			"success": true,
+			"works":   rows,
+			"count":   len(rows),
+		}
+		enc, _ := json.Marshal(out)
+		fmt.Println(string(enc))
+		return 0
+	}
+	// Human mode: canonical visual grammar.
+	render.Heading(os.Stdout, "Work item list")
+	render.BlankLine(os.Stdout)
+	if len(rows) == 0 {
+		render.Plain(os.Stdout, fmt.Sprintf("No %s work items.", status))
+		return 0
+	}
+	for _, row := range rows {
+		id, _ := row["id"].(string)
+		title, _ := row["title"].(string)
+		st, _ := row["status"].(string)
+		verification, _ := row["verification"].(string)
+		render.Label(os.Stdout, "  "+id, title)
+		var hintParts []string
+		if st != "" {
+			hintParts = append(hintParts, "status: "+st)
+		}
+		if verification != "" {
+			hintParts = append(hintParts, "verification: "+verification)
+		}
+		hintParts = append(hintParts, "created: "+mpminternal.FormatUnixSeconds(toInt64(row["created_at"])))
+		render.Hint(os.Stdout, strings.Join(hintParts, " · "))
+	}
+	return 0
+}
+
+// toInt64 converts an int-shaped interface{} (JSON wire: float64)
+// to int64. Returns 0 on type-mismatch / nil.
+func toInt64(v interface{}) int64 {
+	switch x := v.(type) {
+	case float64:
+		return int64(x)
+	case int:
+		return int64(x)
+	case int64:
+		return x
+	case int32:
+		return int64(x)
+	}
+	return 0
 }
 
 // parseWorkItemArgs extracts --status / --limit / --note / --content flags
@@ -586,8 +681,15 @@ func parseWorkItemArgs(rest []string) (map[string]interface{}, []string, error) 
 		case strings.HasPrefix(a, "--reason="):
 			params["reason"] = strings.TrimPrefix(a, "--reason=")
 			i++
+		case a == "--json" || a == "-j":
+			// 2026-09-14 release-pass: --json flag is honoured by
+			// handleWorkItemList (list subcommand) for machine-readable
+			// output. Other item subcommands ignore it (their JSON
+			// path is via `mpm call mpm_work`).
+			params["json"] = true
+			i++
 		case strings.HasPrefix(a, "--"):
-			return nil, nil, fmt.Errorf("unknown flag %q (supported: --status, --limit, --note, --content, --title, --reason)", a)
+			return nil, nil, fmt.Errorf("unknown flag %q (supported: --status, --limit, --note, --content, --title, --reason, --json)", a)
 		default:
 			positional = append(positional, a)
 			i++

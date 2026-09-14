@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -97,11 +98,32 @@ func TestOutputPolicy_ContextCanceled(t *testing.T) {
 
 func TestOutputPolicy_NoBlobStoreReference(t *testing.T) {
 	// Architecture guard: ensure no blobstore import exists in output_policy.go.
-	thisFile := filepath.Join(os.Getenv("MPM_WORKSPACE"),
-		"internal/core/tools/output_policy.go")
-	if thisFile == "/" || thisFile == "" {
-		cwd, _ := os.Getwd()
-		thisFile = filepath.Join(cwd, "output_policy.go")
+	//
+	// 2026-09-14 release-pass: the fallback to cwd-based lookup
+	// now also covers the empty-MPM_WORKSPACE case (where the
+	// previous fallback only triggered for `/` or `""`). When
+	// MPM_WORKSPACE is unset, filepath.Join("", "...path...")
+	// produces a relative path that `go test` cannot resolve from
+	// the test-binary working directory. Resolve against the source
+	// directory via runtime.Caller so the test is hermetic and does
+	// not require MPM_WORKSPACE in the environment.
+	//
+	// MPM_WORKSPACE is honoured when set so operators can verify
+	// against a non-standard install layout.
+	ws := os.Getenv("MPM_WORKSPACE")
+	var thisFile string
+	if ws != "" {
+		thisFile = filepath.Join(ws, "internal/core/tools/output_policy.go")
+	}
+	if thisFile == "" {
+		// Resolve output_policy.go relative to this test file's
+		// source directory. runtime.Caller(0) returns this test
+		// file's path; the source file sits next to it.
+		_, thisTestFile, _, ok := runtime.Caller(0)
+		if !ok {
+			t.Fatalf("could not resolve test file path")
+		}
+		thisFile = filepath.Join(filepath.Dir(thisTestFile), "output_policy.go")
 	}
 	content, err := os.ReadFile(thisFile)
 	require.NoError(t, err)

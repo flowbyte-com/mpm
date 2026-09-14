@@ -80,7 +80,7 @@ func handleCreateWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	if err != nil {
 		return nil, err
 	}
-	return workToMapWork(w), nil
+	return mpminternal.WorkRowToMap(w), nil
 }
 
 // validWorkStatuses enumerates the accepted values for the `status`
@@ -108,19 +108,9 @@ func handleListWorks(dm mpminternal.CoreDB, p map[string]interface{}) (interface
 			strings.Join(validWorkStatuses, ", "), status,
 		)
 	}
-	var works []*mpminternal.Work
-	var err error
-	if status == "all" {
-		works, err = dm.ListAllWorks()
-	} else {
-		works, err = dm.ListWorksByStatus(status)
-	}
-	if err != nil {
-		return nil, err
-	}
 	// Optional limit param.
+	limit := 0
 	if limVal, ok := p["limit"]; ok {
-		var limit int
 		switch v := limVal.(type) {
 		case float64:
 			limit = int(v)
@@ -129,21 +119,22 @@ func handleListWorks(dm mpminternal.CoreDB, p map[string]interface{}) (interface
 		case int64:
 			limit = int(v)
 		}
-		if limit > 0 && limit < len(works) {
-			works = works[:limit]
-		}
 	}
-	result := make([]map[string]interface{}, len(works))
-	for i, w := range works {
-		result[i] = workToMapWork(w)
+	// 2026-09-14 release-pass: rows come from the canonical
+	// mpminternal.ListWorkRows helper (in internal/core/work_rows.go).
+	// The same helper is called by the human-mode CLI handler in
+	// cmd/mpm/handlers_work.go — both paths consume identical data.
+	rows, err := mpminternal.ListWorkRows(dm, status, limit)
+	if err != nil {
+		return nil, err
 	}
 	// F14: enveloped response. The bare-array shape made error vs success
 	// indistinguishable at the wire and diverged from every sibling list
 	// (mpm_handoff list, lessons search, memory query — all envelopes).
 	return map[string]interface{}{
 		"success": true,
-		"works":   result,
-		"count":   len(result),
+		"works":   rows,
+		"count":   len(rows),
 	}, nil
 }
 
@@ -156,7 +147,7 @@ func handleShowWork(dm mpminternal.CoreDB, p map[string]interface{}) (interface{
 	if err != nil {
 		return nil, workNotFoundHint(err, workID)
 	}
-	return workToMapWork(w), nil
+	return mpminternal.WorkRowToMap(w), nil
 }
 
 // Thin handlers: parse payload, delegate to db.go event-sourced API.
@@ -171,7 +162,7 @@ func handleUpdateWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	if err != nil {
 		return nil, workNotFoundHint(err, workID)
 	}
-	return workToMapWork(w), nil
+	return mpminternal.WorkRowToMap(w), nil
 }
 
 func handleCompleteWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
@@ -208,7 +199,7 @@ func handleCompleteWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	if err != nil {
 		return nil, workNotFoundHint(err, workID)
 	}
-	return workToMapWork(w), nil
+	return mpminternal.WorkRowToMap(w), nil
 }
 
 func handleCancelWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
@@ -232,7 +223,7 @@ func handleCancelWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	if err != nil {
 		return nil, workNotFoundHint(err, workID)
 	}
-	return workToMapWork(w), nil
+	return mpminternal.WorkRowToMap(w), nil
 }
 
 // handleHistoryWork returns the full event history for a work item,
@@ -317,7 +308,7 @@ func handleReopenWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	if err != nil {
 		return nil, workNotFoundHint(err, workID)
 	}
-	return workToMapWork(w), nil
+	return mpminternal.WorkRowToMap(w), nil
 }
 
 // handleResolveContradictionWork is the F6-1 / T20-1 agent-facing recovery
@@ -350,29 +341,14 @@ func handleResolveContradictionWork(dm mpminternal.CoreDB, p map[string]interfac
 	if err != nil {
 		return nil, err
 	}
-	return workToMapWork(w), nil
+	return mpminternal.WorkRowToMap(w), nil
 }
 
-func workToMapWork(w *mpminternal.Work) map[string]interface{} {
-	m := map[string]interface{}{
-		"id":           w.ID,
-		"title":        w.Title,
-		"status":       w.Status,
-		"verification": w.Verification,
-		"created_at":   w.CreatedAt,
-		"updated_at":   w.UpdatedAt,
-	}
-	if w.Content != "" {
-		m["content"] = w.Content
-	}
-	if w.CompletedAt != nil {
-		m["completed_at"] = *w.CompletedAt
-	}
-	if w.SessionID != "" {
-		m["session_id"] = w.SessionID
-	}
-	return m
-}
+// workToMapWork was removed in the 2026-09-14 release-pass. The
+// canonical implementation lives in internal/core/work_rows.go
+// (mpminternal.WorkRowToMap) so both the substrate's mpm_work JSON
+// path and the human-mode CLI handler consume identical structured
+// rows.
 
 func workEventToMap(e *mpminternal.WorkEvent) map[string]interface{} {
 	m := map[string]interface{}{

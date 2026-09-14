@@ -2323,18 +2323,27 @@ func handleRef(args []string) int {
 }
 
 func printRefHelp() int {
-	fmt.Println(`mpm reference - Reference library
-Usage:
-  mpm reference add <file> [--tag tags]    Ingest a document
-  mpm reference ls                          List all references
-  mpm reference show <id>                   Show reference with chunks
-  mpm reference search <query>              Search reference content
-  mpm reference used                        Show most-retrieved references
-  mpm reference interactions                Show recent retrieval events
-  mpm reference admit [--limit N] [--dry-run]   Run admission function on candidates
-  mpm reference shred <id>                   Delete a reference
-
-Supported formats: .txt, .md, .html, .epub, .pdf`)
+	// 2026-09-14 release-pass: migrated to the canonical visual
+	// grammar (render.Heading + render.Section + render.Label) so
+	// every help page uses the same heading format (`MPM · <Name>`)
+	// and the same subcommand enumeration style.
+	render.Heading(os.Stdout, "Reference")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Reference library")
+	render.Plain(os.Stdout, "Usage:")
+	render.Plain(os.Stdout, "  mpm reference <subcommand> [args]")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Subcommands")
+	render.Label(os.Stdout, "add <file> [--tag tags]", "ingest a document")
+	render.Label(os.Stdout, "ls", "list all references")
+	render.Label(os.Stdout, "show <id>", "show reference with chunks")
+	render.Label(os.Stdout, "search <query>", "search reference content")
+	render.Label(os.Stdout, "used", "show most-retrieved references")
+	render.Label(os.Stdout, "interactions", "show recent retrieval events")
+	render.Label(os.Stdout, "admit [--limit N] [--dry-run]", "run admission function on candidates")
+	render.Label(os.Stdout, "shred <id>", "delete a reference")
+	render.BlankLine(os.Stdout)
+	render.Hint(os.Stdout, "Supported formats: .txt, .md, .html, .epub, .pdf")
 	return 0
 }
 
