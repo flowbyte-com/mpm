@@ -85,7 +85,7 @@ type synthClientAdapter struct {
 
 // Query implements ModelClient.
 func (a *synthClientAdapter) Query(ctx context.Context, prompt string) (string, error) {
-	res, err := a.sc.Synthesize(ctx, []string{prompt})
+	res, err := a.sc.SynthesizeWithPlan(ctx, []string{prompt}, synth.NewPerCallPlan())
 	if err != nil {
 		return "", fmt.Errorf("orchestration: %w", err)
 	}

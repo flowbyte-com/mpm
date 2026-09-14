@@ -120,21 +120,20 @@ type CompactEpistemologyResult struct {
 // 1000+ raw in ~20 calls.
 const compactBatchSize = 50
 
-// compactDrainMaxBatchesDefault is the per-invocation safety cap on
-// the number of LLM-bounded batches the drain will process. 20
-// batches × 50 raw = 1000 raw memories per invocation, matching the
-// original design rationale ("draining a backlog of 1000+ raw in
-// ~20 calls"). Prevents runaway LLM cost when new eligible raw
-// memories arrive faster than the drain can consume them, and makes
-// the absolute worst-case cost of a single compact call bounded.
-const compactDrainMaxBatchesDefault = 20
+// compactDrainMaxBatchesDefault is the per-invocation safety cap
+// on the number of LLM-bounded batches the drain will process.
+// 2026-09-14 tightening pass: lowered from 20 to 8 to align with
+// the safeguard package's MaxSemanticStagesPerInvocation. One
+// invocation must be small enough to never become a large
+// provider-cost event; work above this ceiling is reported
+// back to the caller (RawRemaining) for bounded-continuation.
+const compactDrainMaxBatchesDefault = 8
 
-// compactDrainMaxBatchesHardCap is the absolute upper bound accepted
-// from callers (regardless of what they pass). 100 batches × 50 raw
-// = 5000 raw memories — large enough for any realistic backlog,
-// small enough to keep a single invocation bounded. Callers passing
+// compactDrainMaxBatchesHardCap is the absolute upper bound
+// accepted from callers (regardless of what they pass). 8 batches
+// × 50 raw = 400 raw memories per invocation. Callers passing
 // a value above this are silently clamped, not rejected.
-const compactDrainMaxBatchesHardCap = 100
+const compactDrainMaxBatchesHardCap = 8
 
 // CompactEpistemologyDrainResult is the wire-format return shape for
 // the drain-mode compact operation. Aggregates per-batch results from
@@ -350,6 +349,13 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 	}
 	if maxBatches > compactDrainMaxBatchesHardCap {
 		maxBatches = compactDrainMaxBatchesHardCap
+	}
+	// 2026-09-14 tightening pass: enforce the safeguard's
+	// per-invocation stage ceiling. Even if a caller passes a
+	// smaller hard-cap later, this clamp is the operative
+	// truth: 8 stages per invocation.
+	if maxBatches > MaxSemanticStagesPerInvocation {
+		maxBatches = MaxSemanticStagesPerInvocation
 	}
 
 	result := &CompactEpistemologyDrainResult{

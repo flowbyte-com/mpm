@@ -87,22 +87,18 @@ func handleSynthesize(args []string) int {
 		return 0
 	}
 
-	// 2026-09-14 release-pass: the runaway-execution safeguard
-	// caps per-invocation batches. The CLI scan iterates every
-	// memory; each iteration is one AutoSynthesize call (one
-	// semantic stage). The safeguard's AbsoluteMaxBatchesPerInvocation
-	// bounds the loop so a single `mpm synthesize` cannot
-	// fan out into an unbounded number of LLM calls.
-	//
-	// Operators with truly large substrates run the scan in
-	// multiple invocations (e.g. by `created_at` windows). That
-	// is the bounded shape the safeguard requires.
-	if len(all) > mpminternal.AbsoluteMaxBatchesPerInvocation {
-		fmt.Printf(
-			"⚠️  %d memories exceed the safeguard's per-invocation batch ceiling (%d). Narrow the input and re-run.\n",
-			len(all), mpminternal.AbsoluteMaxBatchesPerInvocation)
-		fmt.Println("    (compute a smaller scope with `mpm memory list --limit N` and re-invoke the synthesizer)")
-		return 1
+	// 2026-09-14 tightening pass: BOUNDED CONTINUATION. The
+	// safeguard's per-invocation stage ceiling is 8. The CLI
+	// scan processes up to that many memories per call,
+	// reports Remaining, and exits cleanly. Re-invocation
+	// resumes from canonical substrate state — content-hash
+	// dedup is durable, so already-synthesized rows are
+	// skipped on the next run. Continuation is the bounded
+	// shape; rejection is not.
+	ceiling := mpminternal.MaxSemanticStagesPerInvocation
+	total := len(all)
+	if total > ceiling {
+		all = all[:ceiling]
 	}
 
 	processed := 0
@@ -117,8 +113,17 @@ func handleSynthesize(args []string) int {
 		time.Sleep(1 * time.Second) // rate-limit: 1 call/sec
 	}
 
+	remaining := total - processed
 	if dryRun {
-		fmt.Printf("Dry-run: %d memory(ies) would be checked for near-misses.\n", processed)
+		fmt.Printf("Dry-run: %d memory(ies) processed; %d remaining.\n", processed, remaining)
+	} else if remaining > 0 {
+		fmt.Println()
+		fmt.Println("MPM · Synthesis")
+		fmt.Printf("  Synthesized: %d\n", processed)
+		fmt.Printf("  Remaining eligible: %d\n", remaining)
+		fmt.Println()
+		fmt.Println("Bounded execution limit reached for this invocation.")
+		fmt.Println("Run `mpm synthesize` again to continue.")
 	} else {
 		fmt.Printf("✅ Synthesis scan complete: %d memory(ies) checked.\n", processed)
 	}

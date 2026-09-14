@@ -471,7 +471,7 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 		defer cancel()
 	}
 
-	result, err := client.Synthesize(llmCtx, fragments)
+	result, err := client.SynthesizeWithPlan(llmCtx, fragments, synth.NewPerCallPlan())
 	if err != nil {
 		// On failure: log to watchdog, do not block ingestion.
 		// 2026-09-14 release-pass: the bounded-execution

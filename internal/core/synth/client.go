@@ -320,33 +320,41 @@ type SynthResult struct {
 // selected by sc.Wire (inferred from BaseURL at construction). Same
 // body shape on both wires (system message first, user second in the
 // messages array) — the divergence is in the URL, the header, and the
-// response unwrap, all of which live in wire.go.
-//
-// Bounded-execution safeguard: Synthesize builds a per-call Plan
-// (one semantic call, default retry/repair budgets) and routes
-// through DoLLMRequestWithPlan. Callers that need explicit
-// attribution can use SynthesizeWithPlan directly.
-func (sc *SynthClient) Synthesize(ctx context.Context, fragments []string) (*SynthResult, error) {
-	return sc.SynthesizeWithPlan(ctx, fragments, NewPerCallPlan())
+// attemptRepairIfFree consumes the recovery slot as RepairKind
+// and re-issues via the wire helper in Recovery mode. The wire
+// helper does NOT call AttemptFresh in recovery mode, so the
+// recovery slot is consumed exactly once.
+func (sc *SynthClient) attemptRepairIfFree(ctx context.Context, body map[string]interface{}, plan *Plan, fingerprint uint64) ([]byte, error) {
+	if err := plan.AttemptRecovery(fingerprint, RecoveryRepair); err != nil {
+		return nil, err
+	}
+	respBody, err := sc.DoLLMRequestWithPlan(ctx, body, plan, AttemptRecovery)
+	if err != nil {
+		return nil, err
+	}
+	return respBody, nil
 }
 
 // SynthesizeWithPlan is the canonical LLM call site for the
 // synthesis stage. The Plan attributes every attempt the wire
-// makes (planned / completed / retry / repair) and is the
-// authority for the "every model call has a finite
-// pre-computable reason" invariant.
+// makes and is the authority for the "every model call has a
+// finite pre-computable reason" invariant.
 //
-// The fragment list is the source material; semantic
-// dissatisfaction with the response (uncertain, ambiguous,
-// contradictory, undefined, insufficient evidence) is NOT a
-// retry reason — only mechanical failure is.
+// Semantic dissatisfaction with the response (uncertain,
+// ambiguous, contradictory, undefined, insufficient evidence)
+// is NOT a retry reason — only mechanical failure is.
+//
+// 2026-09-14 tightening pass:
+//   - Wire-envelope / structural-decode / empty-Content
+//     failures consume the single recovery slot for
+//     RepairKind.
+//   - Empty Content is mechanical failure, NOT semantic
+//     uncertainty.
 func (sc *SynthClient) SynthesizeWithPlan(ctx context.Context, fragments []string, plan *Plan) (*SynthResult, error) {
 	if sc.APIKey == "" {
 		return nil, fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block or appropriate env var for the configured wire)")
 	}
-
 	userContent := strings.Join(fragments, "\n---MEMORY---\n")
-
 	body := map[string]interface{}{
 		"model":      sc.Model,
 		"max_tokens": sc.MaxTokens,
@@ -355,38 +363,51 @@ func (sc *SynthClient) SynthesizeWithPlan(ctx context.Context, fragments []strin
 			{"role": "user", "content": userContent},
 		},
 	}
-
-	respBody, err := sc.DoLLMRequestWithPlan(ctx, body, plan)
+	fingerprint := fingerprintFromBody(body)
+	respBody, err := sc.DoLLMRequestWithPlan(ctx, body, plan, AttemptFresh)
 	if err != nil {
 		return nil, fmt.Errorf("synthesis [vendor=%s]: %w", wireLabel(sc.Wire), err)
 	}
-
 	rawResult, err := sc.ParseResponseBody(respBody, "synthesis")
 	if err != nil {
-		// Wire-envelope parse failure. The HTTP layer returned
-		// 200 OK, so the plan's success counter is already at 1;
-		// we attribute this to the repair budget instead. This
-		// is the only place a structural-decode failure consumes
-		// a repair; subsequent retries against the same wire
-		// would loop, so plan.RepairOrStop() rejects after
-		// MaxRepairsPerRun (default 1).
-		_ = plan.RepairOrStop()
-		return nil, fmt.Errorf("synthesis [vendor=%s]: %w", wireLabel(sc.Wire), err)
+		respBody2, err2 := sc.attemptRepairIfFree(ctx, body, plan, fingerprint)
+		if err2 != nil {
+			return nil, fmt.Errorf("synthesis [vendor=%s]: wire-envelope parse failed; repair: %w", wireLabel(sc.Wire), err2)
+		}
+		rawResult, err = sc.ParseResponseBody(respBody2, "synthesis")
+		if err != nil {
+			return nil, fmt.Errorf("synthesis [vendor=%s]: wire-envelope parse still fails on repair attempt: %w", wireLabel(sc.Wire), err)
+		}
 	}
 	var result SynthResult
 	if err := json.Unmarshal(rawResult, &result); err != nil {
-		// Structural-decode failure — consume one repair
-		// from the plan and re-throw. The plan's repair
-		// budget caps the worst case at MaxRepairsPerRun.
-		_ = plan.RepairOrStop()
-		return nil, fmt.Errorf("failed to parse synthesis JSON: %w", err)
+		respBody2, err2 := sc.attemptRepairIfFree(ctx, body, plan, fingerprint)
+		if err2 != nil {
+			return nil, fmt.Errorf("failed to parse synthesis JSON; repair: %w", err2)
+		}
+		rawResult2, err := sc.ParseResponseBody(respBody2, "synthesis")
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse synthesis JSON on repair attempt: %w", err)
+		}
+		if err := json.Unmarshal(rawResult2, &result); err != nil {
+			return nil, fmt.Errorf("failed to parse synthesis JSON on repair attempt: %w", err)
+		}
 	}
 	if result.Content == "" {
-		// Empty content is itself a valid terminal result
-		// (the model refused to invent). Do NOT trigger a
-		// repair or retry — semantic dissatisfaction never
-		// causes another model call.
-		return &result, nil
+		respBody2, err2 := sc.attemptRepairIfFree(ctx, body, plan, fingerprint)
+		if err2 != nil {
+			return nil, fmt.Errorf("synthesis [vendor=%s]: empty provider response (mechanical failure); repair: %w", wireLabel(sc.Wire), err2)
+		}
+		rawResult2, err := sc.ParseResponseBody(respBody2, "synthesis")
+		if err != nil {
+			return nil, fmt.Errorf("synthesis [vendor=%s]: empty response on repair attempt: %w", wireLabel(sc.Wire), err)
+		}
+		if err := json.Unmarshal(rawResult2, &result); err != nil {
+			return nil, fmt.Errorf("synthesis [vendor=%s]: empty response on repair attempt: %w", wireLabel(sc.Wire), err)
+		}
+		if result.Content == "" {
+			return nil, fmt.Errorf("synthesis [vendor=%s]: empty provider response on repair attempt (twice); mechanical failure — stop", wireLabel(sc.Wire))
+		}
 	}
 	return &result, nil
 }

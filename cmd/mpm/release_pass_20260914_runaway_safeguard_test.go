@@ -29,19 +29,21 @@ import (
 	"testing"
 )
 
-// TestRunawaySafeguard_SynthesizeBoundedByBatchCeiling — the
-// `mpm synthesize` CLI surface refuses to fan out beyond the
-// safeguard's batch ceiling. The CLI prints a hint that points
-// the operator at the canonical bounded shape (smaller scope,
-// multiple invocations). This is the case-N acceptance test.
-func TestRunawaySafeguard_SynthesizeBoundedByBatchCeiling(t *testing.T) {
+// TestRunawaySafeguard_SynthesizeBoundedContinuation — case R
+// from the matrix. The CLI scan with >8 eligible items must
+// process the bounded subset and report remaining work for
+// bounded-continuation. Re-invocation resumes from canonical
+// substrate state (content-hash dedup is durable).
+func TestRunawaySafeguard_SynthesizeBoundedContinuation(t *testing.T) {
 	bin := buildRunawayBin(t)
 	ws := t.TempDir()
 
-	// 75 UNIQUE memories is above the safeguard's 50-batch
+	// 30 UNIQUE memories — well above the safeguard's 8-stage
 	// ceiling. Each one carries a distinct counter so FTS5
-	// dedup does not collapse them.
-	for i := 0; i < 75; i++ {
+	// dedup does not collapse them. The CLI must process
+	// only 8 per invocation and report Remaining=22 (after
+	// the bounded subset).
+	for i := 0; i < 30; i++ {
 		cmd := stdlibexec.Command(bin, "memory", "add",
 			"square root of divided by zero x 0 attempt",
 		)
@@ -49,9 +51,6 @@ func TestRunawaySafeguard_SynthesizeBoundedByBatchCeiling(t *testing.T) {
 			"MPM_WORKSPACE="+ws,
 			"PATH="+lookupTestPath(),
 		)
-		// Stamp a unique payload via stdin or env-tied args.
-		// We use the second positional as a unique suffix
-		// (operator-readable via `mpm memory add <body>`).
 		cmd.Args = append(cmd.Args, "uid="+itoaRef(i))
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("seed memory %d: %v\n%s", i, err, out)
@@ -61,14 +60,14 @@ func TestRunawaySafeguard_SynthesizeBoundedByBatchCeiling(t *testing.T) {
 	cmd := stdlibexec.Command(bin, "synthesize")
 	cmd.Env = []string{"MPM_WORKSPACE=" + ws, "PATH=" + lookupTestPath()}
 	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("expected safeguard to refuse; got success:\n%s", out)
+	if err != nil {
+		t.Fatalf("synthesize: %v\n%s", err, out)
 	}
 	s := stripLogNoise(string(out))
-	if !strings.Contains(s, "ceiling") &&
-		!strings.Contains(s, "too large") &&
-		!strings.Contains(s, "narrow") {
-		t.Errorf("safeguard message must mention the ceiling or \"too large\"; got:\n%s", s)
+	if !strings.Contains(s, "Synthesized") ||
+		!strings.Contains(s, "Remaining eligible") ||
+		!strings.Contains(s, "Bounded execution limit reached") {
+		t.Errorf("bounded-continuation output missing; got:\n%s", s)
 	}
 }
 

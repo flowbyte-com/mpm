@@ -17,15 +17,19 @@ import (
 	"github.com/flowbyte-com/mpm-core/synth"
 )
 
-// AbsoluteMaxBatchesPerInvocation is the per-invocation batch
+// MaxSemanticStagesPerInvocation is the per-invocation stage
 // ceiling the runaway-execution safeguard enforces. Re-exported
 // from the synth package so callers outside the core package
 // (e.g. cmd/mpm/synthesize_cmds.go) can refer to the same
 // constant by a stable import path.
 //
-// 2026-09-14 release-pass: see internal/core/synth/safeguard.go
-// for the rationale and the contract.
-const AbsoluteMaxBatchesPerInvocation = synth.AbsoluteMaxBatchesPerInvocation
+// 2026-09-14 tightening pass: this constant was lowered from
+// 50 to 8 (per-invocation budget), aligning with the
+// bounded-execution philosophy that one top-level invocation
+// must be small enough to never become a large provider-cost
+// event. See internal/core/synth/safeguard.go for the
+// invariant and rationale.
+const MaxSemanticStagesPerInvocation = synth.MaxSemanticStagesPerInvocation
 
 // DecisionFilter narrows the result set for ListDecisions. The zero value
 // returns all active (non-superseded, non-invalidated) decisions up to the

@@ -95,6 +95,10 @@ func (sc *SynthClient) SynthesizeCompactLesson(ctx context.Context, rawMemories 
 // SynthesizeCompactLessonWithPlan is the canonical LLM call
 // site for the compact_epistemology lesson stage. The Plan
 // attributes the call to the orchestrator's run budget.
+//
+// 2026-09-14 tightening pass: parse failures consume the
+// recovery slot for RepairKind (single slot shared with
+// transient retries). A second failure stops the run.
 func (sc *SynthClient) SynthesizeCompactLessonWithPlan(ctx context.Context, rawMemories []string, plan *Plan) (string, error) {
 	if sc.APIKey == "" {
 		return "", fmt.Errorf("no API key configured (set api_key in mpm_config.json synth block or appropriate env var for the configured wire)")
@@ -110,18 +114,30 @@ func (sc *SynthClient) SynthesizeCompactLessonWithPlan(ctx context.Context, rawM
 			{"role": "user", "content": userContent},
 		},
 	}
+	fingerprint := fingerprintFromBody(body)
 
-	respBody, err := sc.DoLLMRequestWithPlan(ctx, body, plan)
+	respBody, err := sc.DoLLMRequestWithPlan(ctx, body, plan, AttemptFresh)
 	if err != nil {
 		return "", fmt.Errorf("compact_lesson: %w", err)
 	}
 
 	rawResult, err := sc.ParseResponseBody(respBody, "compact_lesson")
 	if err != nil {
-		// Wire-level parse failure (non-200 envelope):
-		// consume a repair and re-throw.
-		_ = plan.RepairOrStop()
-		return "", fmt.Errorf("compact_lesson: %w", err)
+		// Parse failure: allocate recovery slot as RepairKind
+		// and re-issue in recovery mode (the wire helper does
+		// NOT call AttemptFresh in recovery mode, so the
+		// recovery slot is consumed exactly once).
+		if errR := plan.AttemptRecovery(fingerprint, RecoveryRepair); errR != nil {
+			return "", fmt.Errorf("compact_lesson parse failed; %w", errR)
+		}
+		respBody2, err2 := sc.DoLLMRequestWithPlan(ctx, body, plan, AttemptRecovery)
+		if err2 != nil {
+			return "", fmt.Errorf("compact_lesson repair: %w", err2)
+		}
+		rawResult, err = sc.ParseResponseBody(respBody2, "compact_lesson")
+		if err != nil {
+			return "", fmt.Errorf("compact_lesson repair parse still fails: %w", err)
+		}
 	}
 	return string(rawResult), nil
 }

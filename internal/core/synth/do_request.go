@@ -1,25 +1,28 @@
 // do_request.go — wire-aware central HTTP helper for all LLM call sites.
 //
-// 2026-09-14 release-pass: replaced the ad-hoc retry loop with a
-// policy-driven Plan + FailureClass dispatch. The plan enforces
-// a finite pre-computable retry/repair budget per run; the
-// classifier maps HTTP statuses (and net.OpError-shaped messages)
-// to one of:
+// 2026-09-14 release-pass: every call here routes through Plan's
+// recovery slot. There is exactly ONE recovery slot per stage,
+// shared between transient retry and structural repair. The
+// classification table:
 //
-//   - FailureTransientTransport (5xx, conn-reset, EOF, timeout)
-//     -> permit up to MaxRetriesPerStage retries.
-//   - FailureAuth (401, 403, 402 billing) -> zero retries, fail.
-//   - FailureRateLimit (429) -> one retry only if the response
-//     carries a bounded Retry-After hint within the run deadline;
-//     otherwise stop and report.
-//   - FailureInvalidMachineResponse (200 OK, malformed body) ->
-//     the call site treats this as a repair attempt, attributed
-//     to the plan's repair budget.
+//   FailureClass              | Recovery slot used? | Notes
+//   --------------------------|---------------------|----------------------------
+//   transient_transport      | yes (RetryKind)     | one attempt max
+//   auth / billing / 403      | NO                 | stop immediately
+//   rate_limit (no RA)        | NO                 | stop immediately
+//   rate_limit (RA <= 10s)    | yes (RetryKind)     | one attempt max
+//   rate_limit (RA > 10s)     | NO                 | stop immediately
+//   unknown 4xx               | NO                 | conservative; stop
 //
-// Each plan provides a finite retry/repair ceiling; the
-// dispatcher increments plan.RetryOrStop on permitted retries
-// and stops the run when the budget is exhausted. Callers must
-// hold a Plan instance and pass it to DoLLMRequestWithPlan.
+// Auth/billing refusals cannot retry. Unknown 4xx (e.g. 400
+// bad payload) cannot retry. The conservative default for
+// anything we don't recognise is "stop" — better to lose a
+// single run than to retry blindly.
+//
+// Structural-decode / empty-content failures are handled at the
+// call site (Synthesize / SynthesizeCompactLesson) — they
+// consume the recovery slot for RepairKind, not RetryKind.
+
 package synth
 
 import (
@@ -37,181 +40,221 @@ import (
 )
 
 // ErrInvalidMachineResponse is returned by DoLLMRequestWithPlan
-// when the server returned 200 OK but the body could not be read
-// — for the alpha it only covers transport read failures
-// (separate from the call site's structural-decode failure,
-// which is reported as FailureInvalidMachineResponse at the
-// call site and consumes the repair budget).
+// when the server returned 200 OK but the body could not be
+// read. Call sites treat this as FailureInvalidMachineResponse
+// and consume the recovery slot via AttemptRecovery(RepairKind).
 var ErrInvalidMachineResponse = errors.New("synth: invalid machine response")
 
-// DoLLMRequest is the historical entry point. It builds a
-// per-call plan (1 semantic call, default retry/repair budgets)
-// and delegates to DoLLMRequestWithPlan.
+// retryAfterSecondsLimit is the threshold at which a
+// Retry-After value is honoured. Anything above the threshold
+// means "wait too long" — stop and surface the provider's
+// directive instead of sleeping inside the run.
+//
+// 10 seconds is the operative rule: provider response budgets
+// of <= 10s are reasonable for a synthesis run; budgets above
+// that suggest the provider is genuinely throttled and the
+// operator's run should fail rather than sleep.
+const retryAfterSecondsLimit = 10
+
+// maxRetryDelay is the upper bound on how long doOnce sleeps
+// before its single recovery attempt.
+const maxRetryDelay = retryAfterSecondsLimit * time.Second
+
+// AttemptMode labels the kind of attempt being made against
+// the plan. The plan categorises attempts into Fresh and
+// Recovery, enforcing the "2 attempts per stage" rule (1
+// fresh + 1 recovery slot, the slot is consumed by retry OR
+// repair, never both).
+type AttemptMode int
+
+const (
+	AttemptFresh AttemptMode = iota
+	AttemptRecovery
+)
+
+// DoLLMRequest is the historical entry point that builds a
+// per-call plan and delegates to DoLLMRequestWithPlan.
 func (sc *SynthClient) DoLLMRequest(ctx context.Context, body map[string]interface{}) ([]byte, error) {
-	return sc.DoLLMRequestWithPlan(ctx, body, NewPerCallPlan())
+	return sc.DoLLMRequestWithPlan(ctx, body, NewPerCallPlan(), AttemptFresh)
 }
 
-// requestCallcounter is a debug-only monotonic counter used by
-// tests to verify behaviour without exposing the Plan. Not
-// exported.
+// requestCallcounter is a debug-only monotonic counter used
+// by tests to verify behaviour without exposing the Plan.
+// Production code MUST NOT consult this.
 var requestCallcounter atomic.Int64
 
-// LastRequestCalls returns the test-only call count. Cleared
-// by ResetCallcounter. Production code MUST NOT consult this.
+// LastRequestCalls returns the test-only call count.
 func LastRequestCalls() int64 { return requestCallcounter.Load() }
 
 // ResetCallcounter clears the test-only counter.
 func ResetCallcounter() { requestCallcounter.Store(0) }
 
 // DoLLMRequestWithPlan routes a single semantic LLM attempt
-// through the bounded-execution plan. Each call:
+// through the Plan's bounded-execution guard. The mode
+// argument tells the helper whether the call is the FIRST
+// fresh attempt (AttemptFresh) or a recovery attempt after
+// the caller has already classified the failure as
+// structural / reparable (AttemptRecovery).
 //
-//   1. Acquires one entry in the plan via Plan.AcquireOrStop.
-//      The first attempt is the "fresh semantic" attempt; a
-//      transient failure retry follows via Plan.RetryOrStop.
-//   2. Builds the request body (JSON marshalled once per
-//      call attempt). Marshalling failures are not retried —
-//      they are programmer errors.
-//   3. Sends to the wire. The response is classified by
-//      ClassifyFailure (status code or transport-error
-//      message). The plan's AllowRetry decision follows.
-//   4. On 200 OK, returns the raw body. The caller parses it
-//      into its wire-specific shape (existing ParseResponseBody
-//      pattern); structural parse failure at the call site is
-//      reported back through the plan's repair budget.
+// Fresh-mode flow:
+//   1. plan.AttemptFresh(fingerprint)
+//   2. wire attempt
+//   3. if transient_transport OR bounded 429 →
+//      consume recovery slot (RetryKind), retry ONCE
+//   4. if auth / unbounded 429 / unknown 4xx → stop
+//   5. on 200 → return raw body
+//
+// Recovery-mode flow (caller has classified the failure as
+// FailureInvalidMachineResponse; recovery slot already
+// allocated to RepairKind via plan.AttemptRecovery BEFORE
+// this call):
+//   1. wire attempt
+//   2. on 200 → return raw body
+//   3. on any failure → stop (no second recovery; per-stage
+//      cap = 2 means after THIS call we're done)
 //
 // Returns the raw response body on success. Returns
 // ErrBoundedPlanExceeded if the safeguard trips, or a typed
-// error for auth / billing / rate limit failures.
-func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string]interface{}, plan *Plan) ([]byte, error) {
+// error for auth / billing / rate-limit failures.
+func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string]interface{}, plan *Plan, mode AttemptMode) ([]byte, error) {
 	requestCallcounter.Add(1)
 	if plan == nil {
 		plan = NewPerCallPlan()
 	}
-	// Stage fingerprint — derived from the marshalled body
-	// (post-normalisation) — is the duplicate-stage guard's
-	// input. We hash the body bytes; same body + same wire
-	// = same fingerprint. The first attempt acquires with
-	// this fingerprint; a permitted retry re-acquires via
-	// the same path (RetryOrStop increments retryCalls).
 	fingerprint := fingerprintFromBody(body)
 
-	// Marshal the body once; transport attempts re-use it.
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal llm request: %w", err)
 	}
 
-	// First attempt (fresh semantic): count a planned call.
-	if err := plan.AcquireOrStop(fingerprint); err != nil {
-		return nil, err
-	}
-
-	// Transient retry loop — bounded by plan.MaxRetriesPerStage.
-	// Each retry is permitted through plan.RetryOrStop before
-	// it is allowed to fire over the wire.
-	var lastErr error
-	maxRetries := plan.MaxRetries
-	if maxRetries < 0 {
-		maxRetries = 0
-	}
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			// Permitted retry — increment the counter first
-			// (RetryOrStop halts the loop on budget exhaustion).
-			if err := plan.RetryOrStop(); err != nil {
-				return nil, err
-			}
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(3 * time.Second):
-			}
+	switch mode {
+	case AttemptFresh:
+		if err := plan.AttemptFresh(fingerprint); err != nil {
+			return nil, err
 		}
+	case AttemptRecovery:
+		// Caller has already allocated the recovery slot via
+		// AttemptRecovery(fpr, RepairKind). We do NOT call
+		// AttemptFresh here — that would count a duplicate
+		// fresh attempt and the plan would refuse.
+	default:
+		return nil, fmt.Errorf("invalid AttemptMode: %d", mode)
+	}
 
-		respBody, class, httpStatus, err := sc.doOnce(ctx, payload)
+	respBody, class, httpStatus, err := sc.doOnce(ctx, payload)
+	if err == nil && class == 0 {
+		plan.RecordSuccess()
+		return respBody, nil
+	}
+	if err != nil {
+		if httpStatus > 0 {
+			class = classifyFromStatus(httpStatus)
+		} else {
+			class = classifyFromStatus(0)
+		}
+	}
+	plan.RecordFailure(class)
+
+	// Recovery-mode attempts never retry. The slot is already
+	// consumed; a second failure stops the stage.
+	if mode == AttemptRecovery {
+		return nil, fmt.Errorf("API request failed on recovery attempt (%s): %s",
+			class, errString(err, httpStatus))
+	}
+
+	// Fresh-mode: classify → either consume retry slot + retry,
+	// or fail-fast.
+	switch class {
+	case FailureAuth:
+		return nil, fmt.Errorf("provider refused request (%s): %s",
+			class, errString(err, httpStatus))
+
+	case FailureRateLimit:
+		retryAfterSeconds, retryable := retryAfterBoundedSeconds()
+		if !retryable {
+			return nil, fmt.Errorf("provider rate-limited; Retry-After unbounded or > %ds: %s",
+				retryAfterSecondsLimit, errString(err, httpStatus))
+		}
+		if err := plan.AttemptRecovery(fingerprint, RecoveryRetry); err != nil {
+			return nil, err
+		}
+		delay := time.Duration(retryAfterSeconds) * time.Second
+		if delay > maxRetryDelay {
+			delay = maxRetryDelay
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+		respBody, class, httpStatus, err = sc.doOnce(ctx, payload)
 		if err == nil && class == 0 {
-			plan.AccountSuccess()
+			plan.RecordSuccess()
 			return respBody, nil
 		}
-
 		if err != nil {
-			// Prefer the status-based classifier for non-zero
-			// statuses — fallback to the string-based classifier
-			// only when the wire never produced a status.
 			if httpStatus > 0 {
 				class = classifyFromStatus(httpStatus)
 			} else {
-				class = classifyTransient(httpStatus, err.Error())
+				class = classifyFromStatus(0)
 			}
 		}
-		plan.AccountFailure(class)
+		plan.RecordFailure(class)
+		return nil, fmt.Errorf("provider rate-limited; recovery attempt failed (%s): %s",
+			class, errString(err, httpStatus))
 
-		// Auth / billing / quota refusal: zero retries.
-		if class == FailureAuth {
-			return nil, fmt.Errorf("provider refused request (%s): %s",
-				class, errString(err, httpStatus))
+	case FailureTransientTransport:
+		if err := plan.AttemptRecovery(fingerprint, RecoveryRetry); err != nil {
+			return nil, err
 		}
-
-		// Rate limit: at most ONE retry only when the response
-		// gives a bounded retry path (Retry-After within
-		// remaining deadline). The plan's retry budget caps
-		// the worst case to MaxRetriesPerStage anyway.
-		if class == FailureRateLimit {
-			if attempt >= maxRetries {
-				return nil, fmt.Errorf("provider rate-limited; no retries remaining: %s",
-					errString(err, httpStatus))
+		// Transient retry: short, ctx-aware backoff. We do NOT
+		// apply provider 429 directives here — those live on the
+		// rate-limit branch.
+		const transientBackoff = 1 * time.Second
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(transientBackoff):
+		}
+		respBody, class, httpStatus, err = sc.doOnce(ctx, payload)
+		if err == nil && class == 0 {
+			plan.RecordSuccess()
+			return respBody, nil
+		}
+		if err != nil {
+			if httpStatus > 0 {
+				class = classifyFromStatus(httpStatus)
+			} else {
+				class = classifyFromStatus(0)
 			}
-			// Inspect Retry-After; if it would extend past
-			// the run deadline (or is malformed), stop.
-			if !retryAfterIsBounded(httpStatus, "") {
-				return nil, fmt.Errorf("provider rate-limited; retry-after %q not bounded: %s",
-					retryAfterFromCache(), errString(err, httpStatus))
-			}
-			lastErr = err
-			continue
 		}
+		plan.RecordFailure(class)
+		return nil, fmt.Errorf("API request failed after recovery (%s): %s",
+			class, errString(err, httpStatus))
 
-		// Transport failure (5xx, timeout, EOF, conn reset):
-		// retry up to MaxRetriesPerStage. Note: any class
-		// OTHER than auth/rate/transient (i.e. FailureUnknown
-		// for unknown 4xx etc.) is non-retriable and falls
-		// through immediately, stopping the loop on the
-		// first attempt — that is the desired 4xx fail-fast.
-		if class == FailureTransientTransport && attempt < maxRetries {
-			lastErr = err
-			continue
-		}
-
-		// Non-retriable failure (FailureUnknown — e.g. 400
-		// bad payload, 422 unprocessable, etc.) or last
-		// attempt of a transient series. Stop the loop now:
-		// returning here on attempt=0 means exactly ONE
-		// network hit for non-retriable failures, and on
-		// attempt=maxRetries means the retry budget is
-		// exhausted.
+	default:
 		if err != nil {
 			return nil, fmt.Errorf("API request failed (%s): %w", class, err)
 		}
 		return nil, fmt.Errorf("API returned HTTP %d: %s", httpStatus, string(respBody))
 	}
-
-	if lastErr != nil {
-		return nil, fmt.Errorf("API request failed after retries: %w", lastErr)
-	}
-	return nil, errors.New("API request failed: no response body")
 }
 
 // doOnce executes the HTTP exchange. Returns (body, class,
 // httpStatus, err). When err == nil, class is the zero value
-// (success). When err != nil, class is computed by the caller
-// via classifyTransient (in case the classifier wants the
-// status code AND the error string).
+// (success). When err != nil, class is computed by
+// classifyFromStatus when a status is present, and
+// FailureTransientTransport otherwise (no status → transport
+// failure). The Retry-After response header (if present) is
+// captured into lastRetryAfterHeader so the rate-limit
+// branch above can consult it without re-parsing.
 func (sc *SynthClient) doOnce(ctx context.Context, payload []byte) ([]byte, FailureClass, int, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST",
 		sc.BaseURL+sc.Wire.path(), bytes.NewReader(payload))
 	if err != nil {
-		return nil, FailureUnknown, 0, fmt.Errorf("build request: %w", err)
+		return nil, FailureTransientTransport, 0,
+			fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	authName, authValue := sc.Wire.authHeader(sc.APIKey)
@@ -220,8 +263,15 @@ func (sc *SynthClient) doOnce(ctx context.Context, payload []byte) ([]byte, Fail
 	client := &http.Client{Timeout: sc.Timeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		// No HTTP exchange — treat as transient transport.
-		return nil, FailureUnknown, 0, fmt.Errorf("API request failed: %w", err)
+		return nil, FailureTransientTransport, 0,
+			fmt.Errorf("API request failed: %w", err)
+	}
+	// Capture Retry-After BEFORE reading the body so the policy
+	// dispatcher sees it on every fresh-mode call.
+	if ra := resp.Header.Get("Retry-After"); ra != "" {
+		recordRetryAfter(ra)
+	} else {
+		recordRetryAfter("")
 	}
 	respBody, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
@@ -232,15 +282,16 @@ func (sc *SynthClient) doOnce(ctx context.Context, payload []byte) ([]byte, Fail
 	if resp.StatusCode == http.StatusOK {
 		return respBody, 0, resp.StatusCode, nil
 	}
-	// Non-OK — classify from status alone.
 	return respBody, classifyFromStatus(resp.StatusCode), resp.StatusCode,
 		fmt.Errorf("API returned HTTP %d: %s", resp.StatusCode, string(respBody))
 }
 
 // classifyFromStatus maps an HTTP status code to a failure
-// class. Codes that genuinely mean "stop retrying" map to
-// FailureAuth / FailureRateLimit / FailureTransientTransport
-// as appropriate.
+// class. 4xx codes that mean "you broke something" or "I
+// refuse" map to FailureAuth / FailureRateLimit /
+// FailureTransientTransport as appropriate. The default is
+// FailureUnknown — treated conservatively as non-retriable
+// by the policy dispatcher.
 func classifyFromStatus(status int) FailureClass {
 	switch {
 	case status == 401 || status == 403 || status == 402:
@@ -255,8 +306,7 @@ func classifyFromStatus(status int) FailureClass {
 
 // errString returns the most informative of (error, status).
 // Used in error message formatting; never returns the body
-// byte slice verbatim (operator may have leaked sensitive
-// input via the prompt — we render status only).
+// byte slice verbatim.
 func errString(err error, status int) string {
 	if err != nil {
 		return err.Error()
@@ -264,20 +314,17 @@ func errString(err error, status int) string {
 	return fmt.Sprintf("HTTP %d", status)
 }
 
-// lastRetryAfterHeader is captured between doOnce calls so
-// ClassifyRetryAfter can consult it without re-parsing. The
+// lastRetryAfterHeader is captured between doOnce calls. The
 // value is process-global; that is acceptable because the
-// safeguard is per-run and operators do not normally run
-// concurrent synth jobs.
+// safeguard is per-run.
 var lastRetryAfterHeader atomic.Value
 
-func setLastRetryAfter(s string) {
+func recordRetryAfter(s string) {
 	lastRetryAfterHeader.Store(s)
 }
 
 // retryAfterFromCache returns the most-recently-observed
-// Retry-After header value (string-typed). Used by the
-// rate-limit handler. Returns "" when never set.
+// Retry-After header value (string-typed).
 func retryAfterFromCache() string {
 	v := lastRetryAfterHeader.Load()
 	if v == nil {
@@ -289,29 +336,48 @@ func retryAfterFromCache() string {
 	return ""
 }
 
-// retryAfterIsBounded is a stub. The full implementation will
-// parse the Retry-After value and compare against the run
-// deadline. For the alpha, we accept any non-empty value
-// as "bounded" — a stricter check goes in a follow-up pass
-// once the failure-mode tests pin the policy.
-func retryAfterIsBounded(_ int, _ string) bool {
-	return retryAfterFromCache() != ""
+// retryAfterBoundedSeconds parses Retry-After (integer-seconds
+// or HTTP-date) and returns (seconds, retryable). For
+// integer-seconds, the bound is retryAfterSecondsLimit (10s).
+//
+// HTTP-date Retry-After is the spec-defined form (RFC 7231 §7.1.3).
+// We parse it with the same package stdlib parser. If parsing
+// fails, treat as unbounded and stop.
+func retryAfterBoundedSeconds() (int, bool) {
+	ra := retryAfterFromCache()
+	if ra == "" {
+		return 0, false
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil {
+		if n < 0 {
+			return 0, false
+		}
+		if n > retryAfterSecondsLimit {
+			return n, false
+		}
+		return n, true
+	}
+	t, err := http.ParseTime(ra)
+	if err != nil {
+		return 0, false
+	}
+	now := time.Now()
+	d := int(t.Sub(now).Seconds())
+	if d < 0 {
+		return 0, true
+	}
+	if d > retryAfterSecondsLimit {
+		return d, false
+	}
+	return d, true
 }
 
-// fingerprintFromBody returns a 64-bit FNV hash of the body's
-// marshalled bytes. The same logical stage (same model ID,
-// same prompt content, same temperature) produces the same
-// fingerprint across retry attempts. The Plan keys
-// fingerprints for duplicate-stage detection.
+// fingerprintFromBody returns a 64-bit FNV hash of the body
+// marshalled bytes.
 func fingerprintFromBody(body map[string]interface{}) uint64 {
 	if body == nil {
 		return 0
 	}
-	// Use only the structural keys we care about: "model"
-	// and the user message bytes. Marshal the body once and
-	// hash. We deliberately include the prompt content so
-	// the fingerprint catches true semantic duplicates even
-	// when the LLM call returns a "different" response.
 	b, err := json.Marshal(body)
 	if err != nil {
 		return 0
@@ -319,8 +385,7 @@ func fingerprintFromBody(body map[string]interface{}) uint64 {
 	return fnvSum64(b)
 }
 
-// fnvSum64 is a tiny FNV-1a implementation. The map-reduce
-// not pulling in a new dependency.
+// fnvSum64 is a tiny FNV-1a implementation.
 func fnvSum64(b []byte) uint64 {
 	const (
 		offset uint64 = 14695981039346656037
@@ -333,30 +398,3 @@ func fnvSum64(b []byte) uint64 {
 	}
 	return h
 }
-
-// parseRetryAfter accepts a Retry-After header value and
-// returns the seconds-delta it implies. Returns -1 when the
-// value is malformed. The Retry-After can be either an HTTP
-// date or a delta-seconds value; this helper handles the
-// delta-seconds case (the common shape for LLM providers).
-//
-// Kept exported via the package's test exports so the
-// failure-mode tests can drive it directly.
-func parseRetryAfter(s string) int {
-	if s == "" {
-		return -1
-	}
-	v, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil {
-		return -1
-	}
-	if v < 0 {
-		return -1
-	}
-	return v
-}
-
-// recordRetryAfter is exported indirectly via lastRetryAfterHeader
-// only when the wire layer captures the header. For the alpha
-// the wire layer is responsible for capturing via setLastRetryAfter.
-func recordRetryAfter(ra string) { setLastRetryAfter(ra) }

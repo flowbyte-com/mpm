@@ -786,40 +786,74 @@ For CLI changes, add explicit built-binary smoke commands relevant to the modifi
 ## 21. LLM-backed bounded execution
 
 LLM-backed operations MUST have a finite, pre-computable
-execution plan. Every model call must be attributable to one of:
+execution plan. Every model call is attributable to one of:
 
 - a planned semantic stage
-- one permitted mechanical retry
-- the single permitted repair
+- a single permitted mechanical recovery (retry OR repair;
+  never both)
 
-Semantic uncertainty is a valid terminal result and MUST
-NEVER trigger open-ended retries. "Uncertain", "ambiguous",
-"contradictory", "undefined", "insufficient evidence" are each
-a successful semantic outcome — the safeguard is the authority
-on attempts, not the model's verdict.
+The two-attempts-per-stage rule is auditable in two lines:
 
-Retries are reserved for bounded mechanical failure:
+    per stage:  provider_calls <= 2            (1 fresh + 1 recovery)
+    per run:    provider_calls <= planned_stages * 2
 
-| Failure class                | Retries | Notes                                 |
-|------------------------------|---------|---------------------------------------|
-| 5xx / connection / timeout    | 1       | the only permitted retry              |
-| 401 / 403 / billing          | 0       | zero retries, fail-fast               |
-| 429                          | 0 or 1  | one retry ONLY if Retry-After bounded  |
-| Malformed wire response      | 1 repair| the only permitted repair             |
+The recovery slot is single-shot per stage. Once used,
+further attempts against the same fingerprint are refused.
+The recovery's KIND is recorded (Retry or Repair) and the
+plan refuses a second recovery of any kind for that stage.
 
-Failure classes are NOT a retry reason: "the LLM was
-uncertain", "the LLM said it could not tell", "the LLM
-returned empty content". Those are valid answers — the run
-terminates successfully without another model call.
+Top-level per-invocation stage ceiling:
+
+    MaxSemanticStagesPerInvocation = 8
+
+so one top-level invocation can make at most 16 provider
+calls (8 stages × 2 attempts each). Operators with truly
+larger substrates run multiple invocations and rely on
+bounded continuation rather than expanding the per-
+invocation ceiling.
+
+Failure-class policy:
+
+| Failure class                | Recovery | Notes                                |
+|------------------------------|----------|--------------------------------------|
+| valid semantic result        | 0        | semantic uncertainty is success     |
+| explicit uncertainty refusal | 0        | terminal success                     |
+| 401 / 402 / 403              | 0        | zero retries, fail-fast              |
+| unknown 4xx                  | 0        | conservative; stop                  |
+| 429 no Retry-After           | 0        | provider refusal; stop              |
+| 429 Retry-After > 10s        | 0        | "wait too long"; stop               |
+| 429 Retry-After <= 10s       | 1 (Retry)| the only permitted retry           |
+| transient 5xx / conn / EOF   | 1 (Retry)| the only permitted retry           |
+| malformed / empty body       | 1 (Repair)| empty `Content` is mechanical failure, not semantic uncertainty |
+| second failure after recovery| STOP    | no third attempt                    |
+
+429 Retry-After accepts integer-seconds AND HTTP-date forms
+within the 10-second bound; outside that, the run stops.
+
+Empty model `Content` is mechanical failure, NOT a valid
+uncertainty result. An empty provider response is ambiguous
+(bug, parse failure, blank generation); the only valid
+uncertainty surface is an explicit refusal explanation.
+
+Context-window size is NOT a justification for cumulative
+provider calls. Context windows apply per REQUEST, not
+cumulatively across the run. The reason for the stage
+ceiling is bounded autonomous execution and bounded
+cumulative provider usage per invocation.
+
+Bounded continuation: when more work remains than the
+per-invocation stage ceiling allows, the call site stops
+cleanly, returns a continuation indicator (e.g. Remaining
+eligible), and exits. Re-invocation resumes from canonical
+substrate state — content-hash dedup is durable, so already-
+synthesized rows are skipped on the next run. Continuation
+is the bounded shape; refusing is not.
 
 User-visible output-token limits are NOT a runaway-execution
-safeguard. Bound execution by calls / stages / recursion,
-not by truncating successful output. Output-token caps
-were explicitly removed from user-facing config in an
-earlier release pass; the bounded-execution contract holds
-regardless of any stored `max_tokens` value (legacy alpha
-installations that still carry the field have NO effect on
-the safeguard).
+safeguard. Output-token caps were explicitly removed from
+user-facing config in an earlier release pass; the bounded-
+execution contract holds regardless of any stored
+`max_tokens` value.
 
 ---
 
