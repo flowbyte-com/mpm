@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/flowbyte-com/mpm-core/usererror"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 func handleProposeTheory(args []string) int {
@@ -824,7 +827,9 @@ func runTheories(dm mpminternal.CoreDB, args []string) int {
 			fmt.Println(string(out))
 			return 0
 		}
-		return respond("", "No theories yet. Run `mpm propose_theory` to propose your first theory.\n", 0)
+		render.Heading(os.Stdout, "Theories")
+		render.Plain(os.Stdout, "No theories yet. Run `mpm propose_theory` to propose your first theory.")
+		return 0
 	}
 
 	statusMatches := func(status, filter string) bool {
@@ -876,14 +881,14 @@ func runTheories(dm mpminternal.CoreDB, args []string) int {
 				ValidationCriteria: vc,
 			})
 		} else {
-			fmt.Printf("[%s] %s  [status: %s]\n", id, display, status)
+			render.Plain(os.Stdout, fmt.Sprintf("[%s] %s  [status: %s]", id, display, status))
 
 			if vc, ok := meta["validation_criteria"].(string); ok && vc != "" {
 				vcDisplay := vc
 				if len(vcDisplay) > 60 {
 					vcDisplay = vcDisplay[:60] + "..."
 				}
-				fmt.Printf("      validation: %s\n", vcDisplay)
+				render.Plain(os.Stdout, fmt.Sprintf("      validation: %s", vcDisplay))
 			}
 		}
 	}
@@ -903,7 +908,7 @@ func runTheories(dm mpminternal.CoreDB, args []string) int {
 	}
 
 	if len(rows) == 0 && filter != "all" {
-		fmt.Printf("No %s theories found.\n", filter)
+		render.Plain(os.Stdout, fmt.Sprintf("No %s theories found.", filter))
 	}
 
 	return 0

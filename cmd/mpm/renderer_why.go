@@ -6,11 +6,11 @@
 //   Renderer consumes WhyReport (built by WhyService). NEVER calls
 //   services, NEVER calls commands. Pure presentation.
 //
-// The render is intentionally text-mode (no emoji markers) — the
-// why report is information-dense and emoji-on-every-line makes it
-// harder to read. The DoctorRenderer uses ✓/⚠/✗ because it's a
-// glanceable dashboard; the WhyRenderer writes paragraphs because
-// it's an explanation.
+// Migrated to the shared render package (cmd/mpm/render/) so the
+// heading token, dim secondary text, and section labels use the
+// canonical visual contract. The Why report is information-dense —
+// no emoji markers; paragraphs read as explanation. Status markers
+// are reserved for the Doctor dashboard.
 
 package main
 
@@ -20,8 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
 	mpminternal "github.com/flowbyte-com/mpm-core"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 // WhyRenderer writes a WhyReport to a stream.
@@ -38,7 +39,6 @@ func NewWhyRenderer(out io.Writer) *WhyRenderer {
 }
 
 // Render writes the WhyReport. Sections:
-//
 //   - Identity       (id, kind, content preview, weight, LTM flag)
 //   - Provenance     (created/updated/last-accessed, session)
 //   - Evidence       (count + top-N rows)
@@ -54,94 +54,120 @@ func (r *WhyRenderer) Render(report *WhyReport) error {
 		return fmt.Errorf("nil why report")
 	}
 
-	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffb700"))
-	subtitle := lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("#999999"))
-	section := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffb700"))
-
-	if _, err := fmt.Fprintln(r.out, title.Render("MPM · Why")); err != nil {
+	// Heading + timestamp routed through the shared render package.
+	if err := render.Heading(r.out, "Why"); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(r.out, "%s\n\n", subtitle.Render(
-		report.GeneratedAt.Format("2006-01-02 15:04:05 UTC"))); err != nil {
+	if err := render.Timestamp(r.out, report.GeneratedAt.Format("2006-01-02 15:04:05 UTC")); err != nil {
+		return err
+	}
+	if err := render.BlankLine(r.out); err != nil {
 		return err
 	}
 
 	if report.SkipReason != "" {
-		muted := lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("#999999"))
-		fmt.Fprintln(r.out, muted.Render(report.SkipReason))
+		if _, err := fmt.Fprintln(r.out, report.SkipReason); err != nil {
+			return err
+		}
 		return nil
 	}
 
-	fmt.Fprintf(r.out, "Artifact: %s\n", report.ArtifactID)
-	fmt.Fprintf(r.out, "Kind:     %s\n", report.ArtifactKind)
-	fmt.Fprintln(r.out)
+	if err := render.Label(r.out, "Artifact", report.ArtifactID); err != nil {
+		return err
+	}
+	if err := render.Label(r.out, "Kind", report.ArtifactKind); err != nil {
+		return err
+	}
+	if err := render.BlankLine(r.out); err != nil {
+		return err
+	}
 
 	if report.Identity != nil {
-		fmt.Fprintln(r.out, section.Render("Identity"))
+		if err := render.Section(r.out, "Identity"); err != nil {
+			return err
+		}
 		r.renderIdentity(report.Identity)
-		fmt.Fprintln(r.out)
+		if err := render.BlankLine(r.out); err != nil {
+			return err
+		}
 	}
 
 	if report.Provenance != nil {
-		fmt.Fprintln(r.out, section.Render("Provenance"))
+		if err := render.Section(r.out, "Provenance"); err != nil {
+			return err
+		}
 		r.renderProvenance(report.Provenance)
-		fmt.Fprintln(r.out)
+		if err := render.BlankLine(r.out); err != nil {
+			return err
+		}
 	}
 
-	fmt.Fprintln(r.out, section.Render(fmt.Sprintf("Evidence (%d observations)", report.EvidenceCount)))
+	if err := render.Section(r.out, fmt.Sprintf("Evidence (%d observations)", report.EvidenceCount)); err != nil {
+		return err
+	}
 	r.renderEvidence(report.EvidenceRows)
-	fmt.Fprintln(r.out)
+	if err := render.BlankLine(r.out); err != nil {
+		return err
+	}
 
-	fmt.Fprintln(r.out, section.Render(fmt.Sprintf("Confidence history (%d events)", len(report.ConfidenceHistory))))
+	if err := render.Section(r.out, fmt.Sprintf("Confidence history (%d events)", len(report.ConfidenceHistory))); err != nil {
+		return err
+	}
 	r.renderConfidence(report.ConfidenceHistory)
-	fmt.Fprintln(r.out)
+	if err := render.BlankLine(r.out); err != nil {
+		return err
+	}
 
 	if report.Retrieval != nil {
-		fmt.Fprintln(r.out, section.Render("Retrieval"))
+		if err := render.Section(r.out, "Retrieval"); err != nil {
+			return err
+		}
 		r.renderRetrieval(report.Retrieval)
-		fmt.Fprintln(r.out)
+		if err := render.BlankLine(r.out); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func (r *WhyRenderer) renderIdentity(id *WhyIdentity) {
 	if id == nil {
-		fmt.Fprintln(r.out, "  (none)")
+		render.Plain(r.out, "  (none)")
 		return
 	}
 	preview := id.Content
 	if len(preview) > 240 {
 		preview = preview[:240] + "…"
 	}
-	fmt.Fprintf(r.out, "  content : %s\n", preview)
+	render.Label(r.out, "content", preview)
 	if len(id.Tags) > 0 {
-		fmt.Fprintf(r.out, "  tags    : %s\n", strings.Join(id.Tags, ", "))
+		render.Label(r.out, "tags", strings.Join(id.Tags, ", "))
 	}
 	ltm := "no"
 	if id.IsLTM {
 		ltm = "yes"
 	}
-	fmt.Fprintf(r.out, "  weight  : %d    LTM: %s\n", id.Weight, ltm)
+	render.Label(r.out, "weight", fmt.Sprintf("%d    LTM: %s", id.Weight, ltm))
 }
 
 func (r *WhyRenderer) renderProvenance(p *WhyProvenance) {
 	if p == nil {
-		fmt.Fprintln(r.out, "  (none)")
+		render.Plain(r.out, "  (none)")
 		return
 	}
-	fmt.Fprintf(r.out, "  created    : %s\n", formatTSOr(p.CreatedAt, "(unknown)"))
-	fmt.Fprintf(r.out, "  updated    : %s\n", formatTSOr(p.UpdatedAt, "(unknown)"))
+	render.Label(r.out, "created", formatTSOr(p.CreatedAt, "(unknown)"))
+	render.Label(r.out, "updated", formatTSOr(p.UpdatedAt, "(unknown)"))
 	if p.LastAccessed != nil {
-		fmt.Fprintf(r.out, "  accessed   : %s\n", p.LastAccessed.Format("2006-01-02 15:04:05 UTC"))
+		render.Label(r.out, "accessed", p.LastAccessed.Format("2006-01-02 15:04:05 UTC"))
 	} else {
-		fmt.Fprintln(r.out, "  accessed   : (never)")
+		render.Label(r.out, "accessed", "(never)")
 	}
 	if p.SessionID != "" {
-		fmt.Fprintf(r.out, "  session_id : %s\n", p.SessionID)
+		render.Label(r.out, "session_id", p.SessionID)
 	}
-	fmt.Fprintf(r.out, "  framework  : %s\n", orUnknown(p.FrameworkName))
-	fmt.Fprintf(r.out, "  adapter    : %s\n", orUnknown(p.FrameworkAdapter))
-	fmt.Fprintf(r.out, "  model      : %s\n", orUnknown(p.ModelName))
+	render.Label(r.out, "framework", orUnknown(p.FrameworkName))
+	render.Label(r.out, "adapter", orUnknown(p.FrameworkAdapter))
+	render.Label(r.out, "model", orUnknown(p.ModelName))
 }
 
 // orUnknown returns v when non-empty, "(unknown)" otherwise. Used so the
@@ -156,7 +182,7 @@ func orUnknown(v string) string {
 
 func (r *WhyRenderer) renderEvidence(rows []EvidenceRow) {
 	if len(rows) == 0 {
-		fmt.Fprintln(r.out, "  (no evidence attached)")
+		render.Plain(r.out, "  (no evidence attached)")
 		return
 	}
 	maxRows := 5
@@ -185,7 +211,7 @@ func (r *WhyRenderer) renderEvidence(rows []EvidenceRow) {
 
 func (r *WhyRenderer) renderConfidence(rows []ConfidenceRow) {
 	if len(rows) == 0 {
-		fmt.Fprintln(r.out, "  (no confidence events recorded)")
+		render.Plain(r.out, "  (no confidence events recorded)")
 		return
 	}
 	maxRows := 5
@@ -199,12 +225,12 @@ func (r *WhyRenderer) renderConfidence(rows []ConfidenceRow) {
 }
 
 func (r *WhyRenderer) renderRetrieval(ret *WhyRetrieval) {
-	fmt.Fprintf(r.out, "  reuse_count   : %d\n", ret.ReuseCount)
-	fmt.Fprintf(r.out, "  success_count : %d\n", ret.SuccessCount)
+	render.Label(r.out, "reuse_count", fmt.Sprintf("%d", ret.ReuseCount))
+	render.Label(r.out, "success_count", fmt.Sprintf("%d", ret.SuccessCount))
 	if ret.LastRetrievedAt != nil {
-		fmt.Fprintf(r.out, "  last_retrieved: %s\n", mpminternal.FormatUnixSeconds(*ret.LastRetrievedAt))
+		render.Label(r.out, "last_retrieved", mpminternal.FormatUnixSeconds(*ret.LastRetrievedAt))
 	} else {
-		fmt.Fprintln(r.out, "  last_retrieved: (never)")
+		render.Label(r.out, "last_retrieved", "(never)")
 	}
 }
 

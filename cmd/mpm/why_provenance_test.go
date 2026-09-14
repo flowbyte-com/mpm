@@ -33,9 +33,9 @@ func TestMpmWhy_UnknownFallbackForLegacyArtifact(t *testing.T) {
 	_ = r.Render(report)
 	output := sb.String()
 
-	assert.Contains(t, output, "framework  : (unknown)\n")
-	assert.Contains(t, output, "adapter    : (unknown)\n")
-	assert.Contains(t, output, "model      : (unknown)\n")
+	assert.Contains(t, output, "framework : (unknown)\n")
+	assert.Contains(t, output, "adapter : (unknown)\n")
+	assert.Contains(t, output, "model : (unknown)\n")
 }
 
 // TestMpmWhy_ProvenanceFieldsPopulated tests that loadArtifactProvenance

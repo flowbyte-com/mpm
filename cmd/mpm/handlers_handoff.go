@@ -24,13 +24,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-
-	"github.com/flowbyte-com/mpm-core/usererror"
 	"strings"
 	"time"
 
+	"github.com/flowbyte-com/mpm-core/usererror"
+
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/tools"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 // handleHandoff dispatches `mpm handoff <sub>`. Subcommands:
@@ -194,15 +196,18 @@ func handleHandoffListCLI(args []string) int {
 	}
 
 	if len(handoffs) == 0 {
-		fmt.Println("No handoffs.")
+		render.Heading(os.Stdout, "Handoff list")
+		render.Plain(os.Stdout, "No handoffs.")
 		return 0
 	}
+	render.Heading(os.Stdout, "Handoff list")
+	render.Plain(os.Stdout, fmt.Sprintf("%d handoffs", len(handoffs)))
 	for _, h := range handoffs {
 		hm, _ := h.(map[string]interface{})
 		if hm == nil {
 			continue
 		}
-		fmt.Printf("[%v] %s\n", hm["id"], hm["summary"])
+		render.Plain(os.Stdout, fmt.Sprintf("[%v] %s", hm["id"], hm["summary"]))
 	}
 	return 0
 }

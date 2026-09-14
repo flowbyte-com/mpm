@@ -13,6 +13,8 @@ import (
 	"os"
 
 	"github.com/flowbyte-com/mpm-core"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 func handleSaveSkill(args []string) int {
@@ -152,13 +154,14 @@ func handleListSkills(args []string) int {
 		printError("list skills: %v", err)
 		return 1
 	}
-	fmt.Printf("Skills (%d, scope=%s):\n", len(skills), scope)
+	render.Heading(os.Stdout, "Skills")
+	render.Plain(os.Stdout, fmt.Sprintf("%d skills, scope=%s", len(skills), scope))
 	for _, s := range skills {
 		marker := "  "
 		if s.IsGlobal {
 			marker = "* "
 		}
-		fmt.Printf("%s%s v%s — %s (weight=%d)\n", marker, s.Name, s.Version, s.WhenToUse, s.Weight)
+		render.Plain(os.Stdout, fmt.Sprintf("%s%s v%s — %s (weight=%d)", marker, s.Name, s.Version, s.WhenToUse, s.Weight))
 	}
 	return 0
 }

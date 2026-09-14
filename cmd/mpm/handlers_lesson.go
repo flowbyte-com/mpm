@@ -3,9 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/flowbyte-com/mpm-core"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 func handleLesson(args []string) int {
@@ -208,7 +211,8 @@ func handleLessonList(args []string) int {
 		if jsonOutput {
 			fmt.Println(`{"lessons": [], "message": "No lessons stored"}`)
 		} else {
-			respond("No lessons stored.\n", "", 0)
+			render.Heading(os.Stdout, "Lesson list")
+			render.Plain(os.Stdout, "No lessons stored.")
 		}
 		return 0
 	}
@@ -236,19 +240,18 @@ func handleLessonList(args []string) int {
 		return 0
 	}
 
-	var output strings.Builder
-	output.WriteString(fmt.Sprintf("Lessons (%d):\n\n", len(lessons)))
+	render.Heading(os.Stdout, "Lesson list")
+	render.Plain(os.Stdout, fmt.Sprintf("%d lessons\n", len(lessons)))
 	for _, l := range lessons {
 		typeLabel := string(l.Type)
-		output.WriteString(fmt.Sprintf("[%s] [%s] %s\n", l.ID, typeLabel, l.Created[:10]))
+		render.Plain(os.Stdout, fmt.Sprintf("[%s] [%s] %s", l.ID, typeLabel, l.Created[:10]))
 		snippet := l.Content
 		if len(snippet) > 100 {
 			snippet = snippet[:100] + "..."
 		}
-		output.WriteString(fmt.Sprintf("    %s\n\n", snippet))
+		render.Plain(os.Stdout, fmt.Sprintf("    %s", snippet))
 	}
-
-	return respond(output.String(), "", 0)
+	return 0
 }
 
 func handleLessonSearch(args []string) int {

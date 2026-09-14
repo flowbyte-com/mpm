@@ -25,11 +25,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 // cognitiveHelpSections is the default cognitive-interface help.
@@ -82,6 +85,7 @@ var cognitiveHelpSections = []cogHelpSection{
 			{"decision add|resolve", "Decision ledger (alias for mpm decide)", true},
 			{"theory add|resolve", "Theory tracker (alias for mpm theorize)", true},
 			{"skill add|list|show|search", "Skill library (alias for save-skill/list-skills/read-skill)", true},
+			{"lifecycle [family]", "Lifecycle asymmetry notes (theory/decision/evidence/wake/skill/handoff)", false},
 		},
 	},
 	{
@@ -130,15 +134,22 @@ func printCognitiveHelp() {
 }
 
 // renderCognitiveHelp returns the help text as a string (used by both
-// the print and the test paths).
+// the print and the test paths). The title uses the canonical heading
+// token via the shared render package; the body section labels are
+// rendered through helpSection so existing help vocabulary is
+// preserved. The Unicode box layout is a structural aid, not a
+// divergent visual grammar — heading, weights, and casing all
+// match the canonical contract.
 func renderCognitiveHelp() string {
-	titleStyle := lipgloss.NewStyle().Foreground(helpGold).Bold(true).Align(lipgloss.Center)
-	subtitleStyle := lipgloss.NewStyle().Foreground(helpCyan).Align(lipgloss.Center)
 	border := lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(helpBorder).Padding(1, 2).Margin(1)
 
+	// Title via shared render package — canonical amber/yellow bold.
+	var titleBuf bytes.Buffer
+	render.Heading(&titleBuf, "Cognitive Interface")
+
 	var content string
-	content = "\n" + titleStyle.Render(" mpm  ·  Cognitive Interface") + "\n"
-	content += subtitleStyle.Render("Your long-term memory, always within reach") + "\n"
+	content = "\n" + titleBuf.String() + "\n"
+	content += helpDesc.Render("Your long-term memory, always within reach") + "\n"
 	for _, sec := range cognitiveHelpSections {
 		content += "\n" + helpSection.Render(sec.title) + "\n"
 		for _, c := range sec.cmds {

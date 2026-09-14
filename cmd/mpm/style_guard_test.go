@@ -16,6 +16,7 @@
 package main
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -28,24 +29,40 @@ import (
 // styleGuardAllowlist lists files exempt from the renderer-only
 // invariant. Each entry is a path relative to the cmd/mpm directory.
 // Keep this list small and documented — every entry is a known
-// exception, and adding one requires a comment explaining why.
+// IMPLEMENTATION exception (debug, internal scaffolding, or
+// documentation-only references to historical branding). Files
+// containing USER-FACING public output must NOT be allowlisted —
+// they must migrate to the shared render package.
+//
+// All non-implementation visual concerns must use the shared render
+// package. The brief allows a Unicode-box border on the help panel
+// for STRUCTURAL purposes only — its text content (title, section
+// labels, body) flows through the shared package so the visual
+// grammar matches the rest of MPM.
 var styleGuardAllowlist = map[string]string{
-	"render/render.go":         "the shared renderer package itself",
-	"handlers_help.go":         "in-product help panel uses a stable Unicode-box grammar; not migrated to render.Heading because the panel is interactive",
-	"handlers_tour.go":         "in-product tour uses independent lipgloss styles; documented exemption",
-	"style_guard_test.go":      "the guard itself references style patterns",
+	"render/render.go":            "the shared renderer package itself",
+	"handlers_tour.go":            "in-product tour uses independent lipgloss styles; documented implementation exemption",
+	"style_guard_test.go":         "the guard itself references style patterns",
 	"style_guard_helpers_test.go": "test scaffolding",
-	"json_matrix_test.go":      "test scaffolding references style primitives for documentation",
-	"help_safety_router_test.go": "test scaffolding",
-	"renderer_doctor.go":       "legacy file retained for compatibility; uses render package for Heading",
-	"renderer_why.go":          "legacy file retained for compatibility; migrated to render.CheckRow",
-	"renderer_dashboard.go":    "legacy file retained for compatibility",
-	"renderer_terminal.go":     "legacy file retained for compatibility",
-	"route_render.go":          "legacy route-rendering helper; not a public handler",
-	"render_manual_route.go":   "legacy manual-route rendering; not a public handler",
-	"main.go":                  "owns the cognitive-interface help panel and the TUI selector; not a per-command handler",
-	"tty_select.go":            "TUI selector for the cognitive-interface panel; pairs with main.go",
-	"handlers_memory.go":       "doc comments reference historical 808 PRIME branding as removed — not user-facing output",
+	"json_matrix_test.go":         "test scaffolding references style primitives for documentation",
+	"help_safety_router_test.go":  "test scaffolding",
+	"help_parity_test.go":         "test scaffolding",
+	"error_matrix_test.go":        "test scaffolding",
+	"renderer_dashboard.go":      "compatibility shim for legacy dashboard renderers; not a public handler",
+	"renderer_terminal.go":       "compatibility shim for legacy terminal helpers; not a public handler",
+	"route_render.go":            "legacy route-rendering helper; not a public handler",
+	"render_manual_route.go":     "legacy manual-route rendering; not a public handler",
+	"main.go":                    "owns the cognitive-interface help panel and the TUI selector",
+	"tty_select.go":              "TUI selector for the cognitive-interface panel",
+	"handlers_memory.go":         "doc comments reference historical 808 PRIME branding as removed — not user-facing output",
+}
+
+// structuralLipglossAllowlist lists SPECIFIC lipgloss.NewStyle
+// call sites that are structural (border/box framing) rather than
+// visual-content styling. These define the frame of a Unicode box;
+// the content inside the box is rendered through the shared package.
+var structuralLipglossAllowlist = map[string]string{
+	"handlers_help.go:144": "Unicode-box border style for the cognitive-interface help panel — STRUCTURAL (frame), not visual-content. The title / section labels / body inside the box are routed through the shared render package.",
 }
 
 // TestStyleGuard_PublicHandlersDoNotInventStyles asserts no public
@@ -70,18 +87,19 @@ func TestStyleGuard_PublicHandlersDoNotInventStyles(t *testing.T) {
 			continue
 		}
 		t.Run(rel, func(t *testing.T) {
-			checkFileForStyleDrift(t, file)
+			checkFileForStyleDrift(t, file, rel)
 		})
 	}
 }
 
 // checkFileForStyleDrift runs static checks on a single Go file:
 //  1. No raw ANSI escape sequences (\x1b[)
-//  2. No independent lipgloss.NewStyle construction (only allowed in render/)
+//  2. No independent lipgloss.NewStyle construction (only allowed in render/
+//     or the structuralLipglossAllowlist for box/border framing)
 //  3. No duplicated color constants (e.g. hex strings starting with # that
 //     match the render palette — checked heuristically)
 //  4. No decorative banners with 808 / PRIME / T<N> / F<N>
-func checkFileForStyleDrift(t *testing.T, path string) {
+func checkFileForStyleDrift(t *testing.T, path, rel string) {
 	t.Helper()
 	src, err := readFile(path)
 	if err != nil {
@@ -111,10 +129,19 @@ func checkFileForStyleDrift(t *testing.T, path string) {
 			return true
 		}
 		if sel.Sel.Name == "NewStyle" {
-			// Allow only in the render package.
-			if !strings.Contains(path, "/render/") && !strings.HasSuffix(path, "render.go") {
-				t.Errorf("%s: lipgloss.NewStyle outside render package — route through render package primitives", path)
+			// Allow only in the render package OR a structural
+			// (border/box framing) exemption with justification.
+			if strings.Contains(path, "/render/") || strings.HasSuffix(path, "render.go") {
+				return true
 			}
+			// Check the structural allowlist by file:line.
+			pos := fset.Position(call.Pos())
+			key := rel + ":" + fmt.Sprintf("%d", pos.Line)
+			if _, ok := structuralLipglossAllowlist[key]; ok {
+				return true
+			}
+			t.Errorf("%s: lipgloss.NewStyle outside render package at line %d — route through render package primitives or document in structuralLipglossAllowlist",
+				path, pos.Line)
 		}
 		if sel.Sel.Name == "NewRenderer" {
 			if !strings.Contains(path, "/render/") && !strings.HasSuffix(path, "render.go") {

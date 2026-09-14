@@ -22,8 +22,6 @@ import (
 	"io"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
-
 	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
@@ -115,34 +113,27 @@ func (r *DoctorRenderer) Render(report *DoctorReport) error {
 // signal is the Phase/EligibleBacklog context, not just the verdict.
 func (r *DoctorRenderer) renderCronRetention(cr *CronRetentionStatus) {
 	indent := "        "
-	line := lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("#cccccc"))
-	if r.useEmoji {
-		// TTY: subtle gray.
-		line = lipgloss.NewStyle().Faint(true)
-	}
 	if cr.Phase != "" {
-		fmt.Fprintf(r.out, "%s%s\n", indent, line.Render(fmt.Sprintf("Cron retention phase: %s", cr.Phase)))
+		fmt.Fprintf(r.out, "%sCron retention phase: %s\n", indent, cr.Phase)
 	}
 	if cr.SchedulerUptimeSec > 0 {
-		fmt.Fprintf(r.out, "%s%s\n", indent, line.Render(fmt.Sprintf("Scheduler uptime: %s",
-			formatSchedulerDuration(time.Duration(cr.SchedulerUptimeSec)*time.Second))))
+		fmt.Fprintf(r.out, "%sScheduler uptime: %s\n", indent,
+			formatSchedulerDuration(time.Duration(cr.SchedulerUptimeSec)*time.Second))
 	}
-	fmt.Fprintf(r.out, "%s%s\n", indent, line.Render(fmt.Sprintf(
-		"Pending cron wakes: %d · eligible backlog: %d · retention window: %s · cadence: %s",
-		cr.Pending, cr.EligibleBacklog,
+	fmt.Fprintf(r.out, "%sPending cron wakes: %d · eligible backlog: %d · retention window: %s · cadence: %s\n",
+		indent, cr.Pending, cr.EligibleBacklog,
 		formatSchedulerDuration(time.Duration(cr.RetentionWindowSec)*time.Second),
 		formatSchedulerDuration(time.Duration(cr.SweepCadenceSec)*time.Second),
-	)))
+	)
 	if cr.LastExpectedSweepAgoSec > 0 {
-		fmt.Fprintf(r.out, "%s%s\n", indent, line.Render(fmt.Sprintf(
-			"Last expected sweep: %s ago · next expected sweep: %s",
+		fmt.Fprintf(r.out, "%sLast expected sweep: %s ago · next expected sweep: %s\n",
+			indent,
 			formatSchedulerDuration(time.Duration(cr.LastExpectedSweepAgoSec)*time.Second),
 			formatSchedulerDuration(time.Duration(cr.SecondsUntilNextExpectedSweep)*time.Second),
-		)))
+		)
 	}
 	if cr.Interpretation != "" {
-		explain := lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("#999999"))
-		fmt.Fprintf(r.out, "%s%s\n", indent, explain.Render("→ "+cr.Interpretation))
+		render.Hint(r.out, cr.Interpretation)
 	}
 }
 
