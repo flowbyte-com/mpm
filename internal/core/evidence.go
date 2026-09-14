@@ -69,6 +69,11 @@ func AllEvidenceTypes() []evidenceType {
 // types, including their default strength and a short semantic gloss.
 // The string is suitable for `mpm help evidence` / `mpm evidence --help`
 // / CLI usage strings without further formatting.
+//
+// 2026-09-14 release-pass: the archaeology prefix
+// `v1 evidence types (single source of truth: internal/core/evidence.go):`
+// is removed. The evidence types are documented as a clean product
+// surface — the source-tree location is internal plumbing.
 func EvidenceTypeHelp() string {
 	glosses := map[string]string{
 		"observation":        "agent observation (default strength too low to verify alone; needs corroboration)",
@@ -78,7 +83,7 @@ func EvidenceTypeHelp() string {
 		"decision_outcome":   "designated verifier — observed downstream outcome of a decision",
 		"external_reference": "pointer to an external document / API response (moderate weight)",
 	}
-	out := "v1 evidence types (single source of truth: internal/core/evidence.go):\n"
+	out := "Evidence types:\n"
 	for _, e := range AllEvidenceTypes() {
 		gloss, ok := glosses[e.Name]
 		if !ok {

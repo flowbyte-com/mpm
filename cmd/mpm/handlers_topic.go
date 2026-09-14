@@ -8,6 +8,8 @@ import (
 
 	"github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 func handleTopic(args []string) int {
@@ -40,28 +42,33 @@ func handleTopic(args []string) int {
 }
 
 func handleTopicHelp() int {
-	output := `mpm topic - Topic operations
-
-Usage:
-  mpm topic add <name> [description]    Add a new topic
-  mpm topic add --name <name> [--description <text>]
-                                        Same, with explicit flags (2026-09-10
-                                        fix — --name X no longer creates a
-                                        topic literally named "--name")
-  mpm topic search <query>            Search topics
-  mpm topic show <id>                  Show topic by ID
-  mpm topic promote <id>               Promote topic to memory
-  mpm topic shred <id>                 Secure delete topic
-  mpm topic list                       List topics
-
-Examples:
-  mpm topic add "golang patterns" "Things to remember about Go"
-  mpm topic add --name "alpha" --description "alpha project topics"
-  mpm topic search "golang"
-  mpm topic show abc123
-  mpm topic promote abc123
-`
-	return respond(output, "", 0)
+	// 2026-09-14 release-pass: rendered through the canonical
+	// visual grammar (cmd/mpm/render). The dated "2026-09-10
+	// fix — --name X no longer creates a topic literally named
+	// '--name'" archaeology is removed. The current supported
+	// syntax is documented only.
+	var b strings.Builder
+	render.Heading(&b, "Topic")
+	render.BlankLine(&b)
+	render.Section(&b, "Usage")
+	render.Plain(&b, "  mpm topic <subcommand> [args]")
+	render.BlankLine(&b)
+	render.Section(&b, "Subcommands")
+	render.Label(&b, "add <name> [description]", "add a new topic")
+	render.Label(&b, "add --name <name> [--description <text>]", "add a new topic with explicit flags")
+	render.Label(&b, "search <query>", "search topics")
+	render.Label(&b, "show <id>", "show topic by id")
+	render.Label(&b, "promote <id>", "promote topic to memory")
+	render.Label(&b, "shred <id>", "secure delete topic")
+	render.Label(&b, "list", "list topics")
+	render.BlankLine(&b)
+	render.Section(&b, "Examples")
+	render.Plain(&b, "  mpm topic add \"golang patterns\" \"Things to remember about Go\"")
+	render.Plain(&b, "  mpm topic add --name \"alpha\" --description \"alpha project topics\"")
+	render.Plain(&b, "  mpm topic search \"golang\"")
+	render.Plain(&b, "  mpm topic show abc123")
+	render.Plain(&b, "  mpm topic promote abc123")
+	return respond(b.String(), "", 0)
 }
 
 func handleTopicAdd(args []string) int {

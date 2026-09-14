@@ -379,9 +379,12 @@ func TestR3_HelpNoSideEffects(t *testing.T) {
 			if exit != 0 {
 				t.Errorf("help should exit 0, got %d\n%s", exit, out)
 			}
-			// 1. prints help (look for the namespace header)
-			if !strings.Contains(out, "Usage:") {
-				t.Errorf("expected help to print 'Usage:', got: %s", out)
+			// 1. prints help (look for a usage marker — either the
+			//    legacy "Usage:" literal OR the canonical
+			//    "Usage\n  mpm ..." section form introduced in the
+			//    2026-09-14 release-pass).
+			if !strings.Contains(out, "Usage:") && !strings.Contains(out, "Usage\n") {
+				t.Errorf("expected help to print 'Usage:' (or the canonical `Usage` section), got: %s", out)
 			}
 			// 2. does not mutate state (no "added"/"stored"/"Memory added"
 			//    success lines). These strings are exactly the

@@ -34,6 +34,8 @@ import (
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 // workJSONEncoder is the shape of JSON output for `mpm work --json`.
@@ -594,84 +596,71 @@ func parseWorkItemArgs(rest []string) (map[string]interface{}, []string, error) 
 	return params, positional, nil
 }
 
-// printWorkItemHelp prints the `mpm work item` subcommand help. RECOMMENDED 8.
+// printWorkItemHelp prints the `mpm work item` subcommand help via
+// the canonical visual grammar. 2026-09-14 release-pass: removes
+// Round/T-number archaeology and the "discoverable facade" /
+// "internally the substrate" implementation language.
 func printWorkItemHelp() {
-	fmt.Print(`mpm work item — Durable work-item CRUD (multi-session commitments)
-
-Usage:
-  mpm work item <subcommand> [args]
-
-Subcommands:
-  create <title> [content]
-       [--title <title>] [--content <text>] [--note <text>]
-                              Create a new work item (Round 9 T54b: --title
-                              and positional are both supported; positional
-                              wins on conflict)
-  list [--status <s>] [--limit <n>]
-                              List work items (status: open|done|cancelled|all; default open)
-  show <work_id>              Show a single work item by id
-  complete <work_id> [--note <text>]
-                              Mark a work item complete (records a completion event)
-  cancel <work_id> [--note <text>]
-                              Cancel a work item (locks verification below verified)
-  history <work_id>           Show the full event ledger for a work item
-  note <work_id> --note <text>
-                              Append a free-form note to a work item's event ledger
-  reopen <work_id>            Reopen a cancelled work item
-  resolve-contradiction <work_id> --reason <text>
-                              F6-1 / T20-1: withdraw unsubstantiated dispute
-                              evidence from a work item and re-derive
-                              verification. Audit-trail reason required.
-  update <work_id> [--title <t>] [--content <c>] [--status <s>]
-                              Update a work item's title/content/status
-
-Examples:
-  mpm work item create "ship parser fix" "introduce new lexer"
-  mpm work item list --status open --limit 10
-  mpm work item complete work-abc123 --note "shipped in commit def456"
-  mpm work item history work-abc123
-
-This is a discoverable facade over "mpm call mpm_work --payload '{"action":...}'".
-`)
+	render.Heading(os.Stdout, "Work item")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Durable work-item CRUD (multi-session commitments)")
+	render.Plain(os.Stdout, "Usage:")
+	render.Plain(os.Stdout, "  mpm work item <subcommand> [args]")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Subcommands")
+	render.Label(os.Stdout, "create <title> [content]", "create a new work item (--title and positional are both supported; positional wins on conflict)")
+	render.Label(os.Stdout, "list [--status <s>] [--limit <n>]", "list work items (status: open|done|cancelled|all; default open)")
+	render.Label(os.Stdout, "show <work_id>", "show a single work item by id")
+	render.Label(os.Stdout, "complete <work_id> [--note <text>]", "mark a work item complete (records a completion event)")
+	render.Label(os.Stdout, "cancel <work_id> [--note <text>]", "cancel a work item (locks verification below verified)")
+	render.Label(os.Stdout, "history <work_id>", "show the full event ledger for a work item")
+	render.Label(os.Stdout, "note <work_id> --note <text>", "append a free-form note to a work item's event ledger")
+	render.Label(os.Stdout, "reopen <work_id>", "reopen a cancelled work item")
+	render.Label(os.Stdout, "resolve-contradiction <work_id> --reason <text>", "withdraw unsubstantiated dispute evidence and re-derive verification. Audit-trail reason required.")
+	render.Label(os.Stdout, "update <work_id> [--title <t>] [--content <c>] [--status <s>]", "update a work item's title/content/status")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Examples")
+	render.Plain(os.Stdout, "  mpm work item create \"ship parser fix\" \"introduce new lexer\"")
+	render.Plain(os.Stdout, "  mpm work item list --status open --limit 10")
+	render.Plain(os.Stdout, "  mpm work item complete work-abc123 --note \"shipped in commit def456\"")
+	render.Plain(os.Stdout, "  mpm work item history work-abc123")
+	render.BlankLine(os.Stdout)
 }
 
 
-// printWorkHelp prints the `mpm work` subcommand help.
+// printWorkHelp prints the `mpm work` subcommand help via the
+// canonical visual grammar. 2026-09-14 release-pass: removes the
+// "facade over mpm call mpm_work" / "internally the substrate's
+// existing scratchpad APIs" implementation archaeology. The
+// standalone-CLI session-identity section is preserved — it is
+// genuinely useful operator guidance, not archaeology.
 func printWorkHelp() {
-	fmt.Print(`mpm work — Expose the current Working Context (ephemeral execution state)
-
-Usage:
-  mpm work <subcommand> [args]
-
-Subcommands:
-  status     Quick one-line status (session, age, expires)
-  show       Show the raw working context, exactly as stored
-  clear      Discard the current working context
-  promote    Promote the working context to a permanent memory
-  item       Durable work-item CRUD (create/list/show/complete/cancel/history/note/reopen/update)
-
-Flags:
-  --session-id <id>   Override the per-process session id (default: getOrMakeSessionID)
-  --json              Emit machine-readable JSON (where applicable)
-
-The 'work' command never exposes the implementation name 'scratchpad';
-internally the substrate's existing scratchpad APIs are used.
-
-Session identity (standalone CLI): every process mints a fresh random
-session id unless you pin one. Multi-command working-context workflows
-must reuse the same identity — export MPM_SESSION_ID once per shell
-(or pass --session-id to each invocation):
-
-  export MPM_SESSION_ID=my-task-1
-  mpm work status     # same session every time now
-
-Without pinning, status/show in separate invocations see different
-(empty) sessions. This is inherent to standalone processes — there is
-no daemon or watcher keeping shell sessions alive — so pin explicitly.
-
-The 'item' subcommand is a discoverable facade over "mpm call mpm_work";
-see "mpm work item help" for the durable work-item vocabulary.
-`)
+	render.Heading(os.Stdout, "Work")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Working Context (ephemeral execution state)")
+	render.Plain(os.Stdout, "Usage:")
+	render.Plain(os.Stdout, "  mpm work <subcommand> [args]")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Subcommands")
+	render.Label(os.Stdout, "status", "quick one-line status (session, age, expires)")
+	render.Label(os.Stdout, "show", "show the raw working context, exactly as stored")
+	render.Label(os.Stdout, "clear", "discard the current working context")
+	render.Label(os.Stdout, "promote", "promote the working context to a permanent memory")
+	render.Label(os.Stdout, "item", "durable work-item CRUD (create/list/show/complete/cancel/history/note/reopen/update)")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Flags")
+	render.Label(os.Stdout, "--session-id <id>", "override the per-process session id (default: a fresh random id per invocation)")
+	render.Label(os.Stdout, "--json", "emit machine-readable JSON (where applicable)")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Session identity (standalone CLI)")
+	render.Plain(os.Stdout, "  Every process mints a fresh random session id unless you pin one.")
+	render.Plain(os.Stdout, "  Multi-command working-context workflows must reuse the same identity.")
+	render.Plain(os.Stdout, "  Export MPM_SESSION_ID once per shell, or pass --session-id per invocation:")
+	render.BlankLine(os.Stdout)
+	render.Plain(os.Stdout, "    export MPM_SESSION_ID=my-task-1")
+	render.Plain(os.Stdout, "    mpm work status     # same session every time now")
+	render.BlankLine(os.Stdout)
+	render.Hint(os.Stdout, "Without pinning, status/show in separate invocations see different (empty) sessions — standalone processes have no daemon to keep shell sessions alive.")
 }
 
 // flag was unused in the Wave 1 minimum; kept stubbed so future
