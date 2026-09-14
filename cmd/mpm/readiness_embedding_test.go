@@ -23,7 +23,7 @@ func TestReadinessChecker_checkEmbeddings(t *testing.T) {
 				IntentionallyDisabled: true,
 			},
 			wantOK:   true,
-			wantNote: "embedding intentionally disabled",
+			wantNote: "intentionally disabled",
 		},
 		{
 			name: "configured and reachable",
@@ -34,7 +34,7 @@ func TestReadinessChecker_checkEmbeddings(t *testing.T) {
 				Status:       mpminternal.EmbeddingStatusConfigured,
 			},
 			wantOK:   true,
-			wantNote: "embedding provider reachable",
+			wantNote: "configured · model=ollama:nomic-embed-text",
 		},
 		{
 			name: "configured but unreachable",
@@ -46,7 +46,7 @@ func TestReadinessChecker_checkEmbeddings(t *testing.T) {
 				LastError:    errors.New("connection refused"),
 			},
 			wantOK:   false,
-			wantNote: "embedding provider configured but unreachable",
+			wantNote: "configured but unreachable",
 		},
 		{
 			name: "misconfigured",
@@ -58,7 +58,7 @@ func TestReadinessChecker_checkEmbeddings(t *testing.T) {
 				LastError:    errors.New("profile \"broken\" does not exist"),
 			},
 			wantOK:   false,
-			wantNote: "embedding provider misconfigured: profile \"broken\" does not exist",
+			wantNote: "misconfigured: profile \"broken\" does not exist",
 		},
 		{
 			name: "absent — no provider configured",
@@ -67,8 +67,11 @@ func TestReadinessChecker_checkEmbeddings(t *testing.T) {
 				ProviderName: "null",
 				Status:       mpminternal.EmbeddingStatusNull,
 			},
-			wantOK:   false, // spec §7.2: absent is WARN; ReadinessItem has no tri-state, so WARN maps to OK=false
-			wantNote: "no embedding provider configured",
+			// 2026-09-14 release-pass: embedding is optional;
+			// absence is informational (OK=true) and the row reads
+			// "not configured · optional".
+			wantOK:   true,
+			wantNote: "not configured · optional",
 		},
 	}
 

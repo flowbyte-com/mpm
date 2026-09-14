@@ -277,55 +277,63 @@ func checkDatabase(dm *mpminternal.DatabaseManager) ReadinessItem {
 	return ReadinessItem{Name: "Database connected", OK: true}
 }
 
-// checkEmbeddings reports embedding provider state per spec §7.2 table:
-//   disabled            → OK=true, "embedding intentionally disabled"
-//   configured         → OK=true, "embedding provider reachable"
-//   unavailable        → OK=false, "embedding provider configured but unreachable"
-//   misconfigured      → OK=false, "embedding provider misconfigured: <reason>"
-//   absent             → OK=true, "no embedding provider configured"
+// checkEmbeddings reports embedding provider state.
+//
+// 2026-09-14 release-pass: renamed "Embeddings available" →
+// "Embedding model" for canonical terminology. The absent case is
+// now OK=true (informational) — embedding is optional and absence
+// alone is not a defect. Only configured-but-unreachable and
+// configured-but-misconfigured remain warnings.
+//
+//   absent             → OK=true, "not configured · optional"
+//   disabled           → OK=true, "intentionally disabled"
+//   configured         → OK=true, "configured · model=<name>"
+//   unavailable        → OK=false, "configured but unreachable"
+//   misconfigured      → OK=false, "misconfigured: <reason>"
 func checkEmbeddings() ReadinessItem {
 	cfg := mpminternal.DefaultEmbeddingConfig()
 	switch {
 	case cfg.IntentionallyDisabled:
 		return ReadinessItem{
-			Name:   "Embeddings available",
+			Name:   "Embedding model",
 			OK:     true,
-			Detail: "embedding intentionally disabled",
+			Detail: "intentionally disabled",
 		}
 	case cfg.Status == mpminternal.EmbeddingStatusConfigured:
 		return ReadinessItem{
-			Name:   "Embeddings available",
+			Name:   "Embedding model",
 			OK:     true,
-			Detail: "embedding provider reachable",
+			Detail: "configured · model=" + cfg.ProviderName,
 		}
 	case cfg.Status == mpminternal.EmbeddingStatusUnreachable:
 		return ReadinessItem{
-			Name:   "Embeddings available",
+			Name:   "Embedding model",
 			OK:     false,
-			Detail: "embedding provider configured but unreachable",
+			Detail: "configured but unreachable",
 			Hint:   "verify the provider endpoint is reachable, then run `mpm readiness` again",
 		}
 	case cfg.Status == mpminternal.EmbeddingStatusMisconfigured:
 		return ReadinessItem{
-			Name:   "Embeddings available",
+			Name:   "Embedding model",
 			OK:     false,
-			Detail: fmt.Sprintf("embedding provider misconfigured: %v", cfg.LastError),
+			Detail: fmt.Sprintf("misconfigured: %v", cfg.LastError),
 		}
 	case cfg.Source == mpminternal.EmbeddingSourceAbsent:
-		// Spec §7.2: absent is WARN. ReadinessItem has no tri-state;
-		// WARN is mapped to OK=false so the binary go/no-go signal
-		// honestly reflects that semantic retrieval is a no-op.
+		// Absent is informational only — embedding is optional,
+		// and absence does not block substrate health. The
+		// readiness row uses the neutral marker so it does not
+		// increment warning counts.
 		return ReadinessItem{
-			Name:   "Embeddings available",
-			OK:     false,
-			Detail: "no embedding provider configured",
-			Hint:   "configure a provider via `mpm config component set embedding <profile>`, or `mpm config detect-embedding [--apply]`",
+			Name:   "Embedding model",
+			OK:     true,
+			Detail: "not configured · optional",
+			Hint:   "semantic retrieval is unavailable when absent; configure via `mpm config component set embedding <profile>` or `mpm config detect-embedding [--apply]`",
 		}
 	}
 	// Should not reach here; treat as failure so unhandled states
 	// surface honestly instead of silently reporting ready.
 	return ReadinessItem{
-		Name:   "Embeddings available",
+		Name:   "Embedding model",
 		OK:     false,
 		Detail: "unknown embedding state",
 		Hint:   "run `mpm doctor` for diagnostics",

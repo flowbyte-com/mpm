@@ -1473,111 +1473,75 @@ var (
 )
 
 // PrintQuicklinks displays the compact dashboard when `mpm` is run
-// with no arguments. The output is the v0.2 post-RFC shape: a single
-// screen with five sections (Working Context / Last Session /
-// Substrate / Common commands / Footer). The cognitive-verb front
-// door, surfaced as the most-common-commands block at the bottom.
+// with no arguments. The output is the post-RFC shape: a single screen
+// with five sections (Readiness / Working Context / Last Session /
+// Substrate / Quick actions / Footer). The cognitive-verb front door,
+// surfaced as the most-common-commands block at the bottom.
 //
 // Architecture: this is a thin assembler that composes existing
 // primitives (WorkingContextService, dm.GetMemoryStats,
-// dm.GatherWakeContext, dm.HealthCheck, the scheduled_tasks table,
-// CountMemories-style collectors). No new substrate. No new
-// service / store / renderer — PrintQuicklinks is presentation-only
-// rendering of substrate data, not a behaviour-cross-source
-// composition worth a service layer.
+// dm.GatherWakeContext, dm.HealthCheck, the scheduled_tasks table).
+// No new substrate. No new service / store / renderer — PrintQuicklinks
+// is presentation-only rendering of substrate data.
 //
-// Layering discipline: PrintQuicklinks stays in package main, lives
-// in main.go (where the legacy version was). It composes the same
-// wave-1-3 helpers the rest of the cognitive surface uses.
-//
-// Sections:
-//
-//   Working Context — what the agent wrote most recently. If empty,
-//     the section is replaced with a "no working context — start
-//     one with `mpm work`" pointer so the operator knows the
-//     cognitive flow.
-//   Last Session — when the agent last ran + first line of the
-//     handoff summary. Falls back to "(no prior sessions)" on a
-//     fresh install.
-//   Substrate — memory/lesson/decision/skill counts (each from
-//     GetMemoryStats + a countMemories-style query) and a one-line
-//     health verdict from HealthCheck.
-//   Common commands — the cognitive front door. Static list, eight
-//     verbs the operator types every morning.
-//   Footer — single line pointing at `mpm help` for the full
-//     catalogue.
-//
-// The "Next:" line under Working Context is intentionally sourced
-// from pending theories in the substrate (the closest the substrate
-// has to operator-visible open questions). It is NOT a workflow
-// recommendation — the cognitive-interface RFC's ARCHITECTURE
-// INVARIANT blocks `mpm continue` from becoming a planner, and the
-// same principle applies here. The line is "questions waiting to
-// be resolved" not "what should I do next?"
+// 2026-09-14 release-pass:
+//   - Heading is `MPM · Dashboard` (canonical visual grammar).
+//   - Provider state is rendered as explicit `LLM provider` and
+//     `Embedding model` rows in the readiness output, resolved via
+//     the canonical `cfg.ProfileFor(component)` and
+//     `DefaultEmbeddingConfig()` helpers — never raw `c.Synth` fields.
+//   - `(no prior sessions — this is your first run)` becomes
+//     `No previous handoff/session available.` (absence of handoff
+//     is not a first-run inference).
+//   - `Memorys:` typo fixed to `Memories:`.
+//   - Counts use the canonical queries for each scope (lessons via
+//     the lesson store; skills via dm.ListSkills parse-aware). Labels
+//     are scoped so the dashboard does not claim numerical equality
+//     with `mpm info`'s broader total/active fields.
 func PrintQuicklinks() {
 	dm := getDBConcrete()
 	if dm == nil {
 		// Database unavailable — fall back to a tiny welcome that
 		// doesn't lie about substrate state we can't read.
-		fmt.Println()
-		fmt.Println("MPM")
-		fmt.Println(strings.Repeat("\u2500", 58))
-		fmt.Println()
-		fmt.Println("Database unavailable — substrate is not open.")
-		fmt.Println("Check MPM_WORKSPACE / MPM_DB_PATH and retry.")
-		fmt.Println()
-		fmt.Println("Type `mpm help` for the complete command reference.")
-		fmt.Println()
+		render.Heading(os.Stdout, "Dashboard")
+		render.Plain(os.Stdout, "")
+		render.Plain(os.Stdout, "Database unavailable — substrate is not open.")
+		render.Plain(os.Stdout, "Check MPM_WORKSPACE / MPM_DB_PATH and retry.")
+		render.BlankLine(os.Stdout)
+		render.Hint(os.Stdout, "Type `mpm help` for the complete command reference.")
+		render.BlankLine(os.Stdout)
 		return
 	}
 
-	divider := strings.Repeat("\u2500", 58)
+	render.Heading(os.Stdout, "Dashboard")
+	render.BlankLine(os.Stdout)
 
-	fmt.Println()
 	// Run readiness first — scheduler auto-start may trigger
-	// here, before the rest of the dashboard composes. The
-	// readiness logic returns a slice of items in canonical
-	// display order (see cmd/mpm/readiness.go for the side-
-	// effect policy).
+	// here, before the rest of the dashboard composes.
 	items := ReadReadiness(dm)
-	allOK := readinessOverall(items)
 
-	// First-run UX: when the substrate has no AI provider
-	// configured yet (fresh install or user hasn't run
-	// 'mpm config'), replace the standard 'MPM Ready' header
-	// with a friendly 'Welcome to MPM' that points at the
-	// wizard. The substrate is technically still ready at the
-	// readiness layer (the scheduler runs, db is open, etc.)
-	// but the cognitive system can't actually DO anything
-	// without an LLM, so we treat that as a soft unready.
-	header := "MPM Ready"
-	if c, err := config.LoadConfig(); err == nil && !isProviderConfigured(c) {
-		header = "Welcome to MPM \u2014 no AI provider configured"
-	} else if !allOK {
-		header = "MPM Not ready \u2014 see below"
-	}
-	fmt.Println(header)
-	fmt.Println(divider)
-	fmt.Println()
-	if header != "MPM Ready" {
-		fmt.Println(" Run `mpm config` to configure your first model.")
-		fmt.Println()
-	}
+	// Prepend the LLM provider row (resolved via the canonical
+	// helper). Embedding is already part of the readiness items
+	// (checkEmbeddings), so no separate row needed here.
+	llmLabel, llmDetail := resolveDashboardLLM()
+	items = append([]ReadinessItem{
+		{Name: llmLabel, OK: strings.HasPrefix(llmDetail, "configured"), Detail: llmDetail},
+	}, items...)
+
 	for _, item := range items {
 		marker := "✓"
 		if !item.OK {
 			marker = "⚠"
 		}
-		fmt.Printf(" %s  %-22s %s\n", marker, item.Name, item.Detail)
+		render.Plainf(os.Stdout, " %s  %-22s %s\n", marker, item.Name, item.Detail)
 		if item.Hint != "" {
-			fmt.Printf("        \u2192 %s\n", item.Hint)
+			render.Hint(os.Stdout, item.Hint)
 		}
 	}
-	fmt.Println()
+	render.BlankLine(os.Stdout)
 
 	// Section 1: Working Context.
-	fmt.Println("Working Context")
-	fmt.Println(divider)
+	render.Section(os.Stdout, "Working Context")
 	sessionID := getOrMakeSessionID()
 	wcSvc := NewWorkingContextService(
 		NewWorkingContextStore(dm),
@@ -1585,106 +1549,136 @@ func PrintQuicklinks() {
 	)
 	wc, _ := wcSvc.GetCurrent(sessionID)
 	if wc == nil {
-		fmt.Println("(no working context \u2014 run `mpm work` to start one)")
-		fmt.Println()
+		render.Plain(os.Stdout, "(no working context — run `mpm work` to start one)")
+		render.BlankLine(os.Stdout)
 	} else {
-		fmt.Printf("\u2713 %s\n", truncate(wc.Thesis, 70))
-		fmt.Printf("Updated: %s\n", formatAgeUnix(wc.UpdatedAt))
-		fmt.Println()
-		fmt.Println("Next:")
-		// Pull pending theories as "open questions waiting to be
-		// resolved". The substrate tracks these natively; surfacing
-		// them here is honest information composition rather than
-		// workflow recommendation.
+		render.Plainf(os.Stdout, "✓ %s\n", truncate(wc.Thesis, 70))
+		render.Plainf(os.Stdout, "Updated: %s\n", formatAgeUnix(wc.UpdatedAt))
+		render.BlankLine(os.Stdout)
+		render.Plain(os.Stdout, "Next:")
 		theories, err := loadPendingTheoriesForQuicklinks(dm, 3)
-	if err != nil {
-		usererror.Warn("dashboard: failed to load pending theories: %v", err)
-		theories = nil
-	}
+		if err != nil {
+			usererror.Warn("dashboard: failed to load pending theories: %v", err)
+			theories = nil
+		}
 		if len(theories) == 0 {
-			fmt.Println(" \u2022 (no open theories)")
+			render.Plain(os.Stdout, " • (no open theories)")
 		} else {
 			for _, t := range theories {
-				fmt.Printf(" \u2022 %s\n", truncate(t, 80))
+				render.Plainf(os.Stdout, " • %s\n", truncate(t, 80))
 			}
 		}
-		fmt.Println()
+		render.BlankLine(os.Stdout)
 	}
 
 	// Section 2: Last Session.
-	fmt.Println("Last Session")
-	fmt.Println(divider)
+	render.Section(os.Stdout, "Last Session")
 	// F18: the dashboard is a PRESENTATION surface — render without
-	// consuming the handoff. GatherWakeContext() marks the handoff read,
-	// so a mere `mpm status` run used to steal last_handoff from the
-	// agent's actual wake read.
+	// consuming the handoff.
 	if wake, err := dm.GatherWakeContextReadOnly(); err == nil && wake.LastHandoff != nil {
 		when := formatAgeUnix(wake.LastHandoff.EndedAt)
-		fmt.Printf("%s\n", when)
+		render.Plain(os.Stdout, when)
 		if wake.LastHandoff.Summary != "" {
-			fmt.Printf("\"%s\"\n", truncate(wake.LastHandoff.Summary, 80))
+			render.Plainf(os.Stdout, "\"%s\"\n", truncate(wake.LastHandoff.Summary, 80))
 		}
 	} else {
-		fmt.Println("(no prior sessions \u2014 this is your first run)")
+		render.Plain(os.Stdout, "No previous handoff/session available.")
 	}
-	fmt.Println()
+	render.BlankLine(os.Stdout)
 
 	// Section 3: Substrate.
-	fmt.Println("Substrate")
-	fmt.Println(divider)
-	fmt.Println()
-	countMem := func(collection string) string {
-		var n int
-		row := dm.QueryRowTracked(
-			`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND collection = ?`,
-			collection,
-		)
-		if err := row.Scan(&n); err != nil {
-			return "?"
-		}
-		return fmt.Sprintf("%d", n)
-	}
-	fmt.Printf("Memorys:   %s\n", withThousands(countMem("memories")))
-	fmt.Printf("Lessons:   %s\n", countMem("lessons"))
-	fmt.Printf("Decisions: %s\n", countMem("decisions"))
-	fmt.Printf("Skills:    %s\n", countMem("skills"))
-	fmt.Println()
+	render.Section(os.Stdout, "Substrate")
+	render.BlankLine(os.Stdout)
+	render.Label(os.Stdout, "Memories (active)", dashboardCount(dm, "memories"))
+	render.Label(os.Stdout, "Lessons", dashboardCount(dm, "lessons"))
+	render.Label(os.Stdout, "Decisions", dashboardCount(dm, "decisions"))
+	render.Label(os.Stdout, "Skills", dashboardSkillCount(dm))
+	render.BlankLine(os.Stdout)
 	if _, err := dm.HealthCheck(); err != nil {
-		fmt.Printf("Health: \u26A0 %s\n", truncate(err.Error(), 60))
+		render.Plainf(os.Stdout, "Health: ⚠ %s\n", truncate(err.Error(), 60))
 	} else {
-		fmt.Println("Health: \u2713 Healthy")
+		render.Plain(os.Stdout, "Health: ✓ Healthy")
 	}
-	fmt.Println()
+	render.BlankLine(os.Stdout)
 
 	// Section 4: Quick actions (the cognitive-verb front door).
-	fmt.Println(divider)
-	fmt.Println()
-	fmt.Println("Quick actions")
-	fmt.Println()
-	fmt.Println(" mpm continue      Resume your work")
-	fmt.Println(" mpm work show      Show Working Context")
-	fmt.Println(" mpm remember      Store a memory")
-	fmt.Println(" mpm recall        Search memory")
-	fmt.Println(" mpm doctor        System health")
-	fmt.Println()
-	fmt.Println(divider)
-	fmt.Println()
-	fmt.Println("Type `mpm help` for the complete command reference.")
-	fmt.Println()
+	render.Divider(os.Stdout)
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Quick actions")
+	render.Label(os.Stdout, "mpm continue", "Resume your work")
+	render.Label(os.Stdout, "mpm work show", "Show Working Context")
+	render.Label(os.Stdout, "mpm remember", "Store a memory")
+	render.Label(os.Stdout, "mpm recall", "Search memory")
+	render.Label(os.Stdout, "mpm doctor", "System health")
+	render.BlankLine(os.Stdout)
+	render.Divider(os.Stdout)
+	render.BlankLine(os.Stdout)
+	render.Hint(os.Stdout, "Type `mpm help` for the complete command reference.")
+	render.BlankLine(os.Stdout)
+}
+
+// resolveDashboardLLM returns the canonical LLM-provider readiness
+// row. Resolved via cfg.ProfileFor("memory") — the same canonical
+// helper runtime uses. Never inspects raw c.Synth fields.
+func resolveDashboardLLM() (label string, detail string) {
+	c, err := config.LoadConfig()
+	if err != nil || c == nil {
+		return "LLM provider", "not configured"
+	}
+	p := c.ProfileFor("memory")
+	if p == nil {
+		return "LLM provider", "not configured"
+	}
+	detail = "configured"
+	if p.Name != "" {
+		detail = "configured · profile=" + p.Name
+	}
+	if p.Model != "" {
+		detail += " · model=" + p.Model
+	}
+	return "LLM provider", detail
+}
+
+// dashboardCount returns the canonical count for the dashboard's
+// Substrate row. The scope is "active" (not-deleted, not-expired)
+// to match what mpm memory list surfaces.
+func dashboardCount(dm *mpminternal.DatabaseManager, collection string) string {
+	if dm == nil {
+		return "?"
+	}
+	var n int
+	row := dm.QueryRowTracked(
+		`SELECT COUNT(*) FROM memories
+		 WHERE deleted_at IS NULL
+		 AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
+		 AND collection = ?`,
+		collection,
+	)
+	if err := row.Scan(&n); err != nil {
+		return "?"
+	}
+	return withThousands(fmt.Sprintf("%d", n))
+}
+
+// dashboardSkillCount returns the canonical skill count via the
+// parse-aware dm.ListSkills(scope) helper — the same source mpm
+// skill list uses. The dashboard's "Skills" row therefore matches
+// mpm skill list exactly (different scope from mpm info's
+// "registered skills", which is documented separately).
+func dashboardSkillCount(dm *mpminternal.DatabaseManager) string {
+	if dm == nil {
+		return "?"
+	}
+	skills, err := dm.ListSkills("all")
+	if err != nil {
+		return "?"
+	}
+	return fmt.Sprintf("%d", len(skills))
 }
 
 // loadPendingTheoriesForQuicklinks returns up to limit pending
 // theories (content preview). Best-effort — fails silently if the
 // shape doesn't exist on this install.
-//
-// Theory content is shaped by the propose_theory MCP tool:
-// "hypothesis_id=<id> validation=<criteria>". The two-audience
-// principle (RFC §'two-personalities') applies to data shape too:
-// this raw key=value form is fine for `mpm call mpm_theories`
-// scripts but reads as machine noise on the cognitive-verb
-// dashboard. We parse it into a clean "<id>: <criteria>" form
-// here so the Quicklinks surface reads as information, not raw
-// protocol. Unknown shapes pass through unchanged.
 func loadPendingTheoriesForQuicklinks(dm *mpminternal.DatabaseManager, limit int) ([]string, error) {
 	if dm == nil || limit <= 0 {
 		return nil, nil
@@ -1715,13 +1709,8 @@ func loadPendingTheoriesForQuicklinks(dm *mpminternal.DatabaseManager, limit int
 }
 
 // formatTheoryPreview renders a pending-theory content row as a
-// one-line preview. Recognises the propose_theory shape
-// "hypothesis_id=<id> validation=<criteria>" and rewrites it as
-// "<id>: <criteria>" so the dashboard reads cleanly. Unknown shapes
-// pass through (truncated to 80 chars). The opaque id (mpm-<hex>)
-// is the fallback when content is empty.
+// one-line preview.
 func formatTheoryPreview(content, id string) string {
-	// Strip a trailing newline if present.
 	content = strings.TrimRight(content, "\n")
 	const idKey = "hypothesis_id="
 	const valKey = " validation="
@@ -1737,10 +1726,8 @@ func formatTheoryPreview(content, id string) string {
 				return id
 			}
 		}
-		// hypothesis_id=<id> with no validation= : just show the id.
 		return strings.TrimSpace(stripped)
 	}
-	// Unknown shape — truncate, but keep first line if multi-line.
 	if idx := indexOfNewline(content); idx > 0 {
 		content = content[:idx]
 	}
@@ -1763,16 +1750,12 @@ func indexOfNewline(s string) int {
 	return -1
 }
 
-// isProviderConfigured reports whether the substrate has an
-// AI provider wired up. Used by the first-run UX on 'mpm' (no
-// args) to detect fresh installs and surface a 'run mpm config'
-// prompt instead of a generic 'MPM Ready' header.
-//
-// Specifically: Model is non-empty AND (APIKey OR BaseURL is
-// non-empty). Ollama uses base_url with no key, so either is
-// acceptable. The strict check is 'any one of the three fields
-// is filled', but real-world fresh installs tend to have neither,
-// so we err on the side of 'show the wizard prompt.'
+// isProviderConfigured is retained for backwards compatibility with
+// callers that previously relied on the legacy "any provider field set"
+// heuristic. New code must use cfg.ProfileFor("memory") and
+// DefaultEmbeddingConfig() (the canonical resolvers the runtime
+// uses) instead. The dashboard in particular no longer calls this
+// function.
 func isProviderConfigured(c *config.Config) bool {
 	if c == nil || c.Synth == nil {
 		return false

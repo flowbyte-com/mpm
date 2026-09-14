@@ -313,29 +313,28 @@ func emitInfoJSON(out infoOutput) int {
 }
 
 // listSkillsForInfo returns skill names (best-effort; never blocks).
+//
+// 2026-09-14 release-pass: now uses `dm.ListSkills(scope)` — the
+// same parse-aware, dedup-by-name source that `mpm skill list`
+// uses. Pre-fix this function issued a raw SQL query that returned
+// the stored row count without parsing frontmatter, so `mpm info`
+// reported `registered skills: 0` while `mpm skill list` showed 1.
+// The two surfaces must agree; this is the canonical resolution.
 func listSkillsForInfo(dm *mpminternal.DatabaseManager) []string {
 	if dm == nil {
 		return nil
 	}
-	rows, err := dm.QueryTracked(
-		`SELECT id, name FROM memories WHERE collection = 'skills' AND deleted_at IS NULL
-		 ORDER BY created_at DESC LIMIT 25`,
-	)
+	skills, err := dm.ListSkills("all")
 	if err != nil {
+		usererror.Warn("listSkillsForInfo: %v", err)
 		return nil
 	}
-	defer rows.Close()
-	out := []string{}
-	for rows.Next() {
-		var id, name string
-		if err := rows.Scan(&id, &name); err != nil {
-			usererror.Warn("listSkillsForInfo: failed to scan skill row, skipping: %v", err)
-			continue
-		}
-		if name != "" {
-			out = append(out, name)
+	out := make([]string, 0, len(skills))
+	for _, s := range skills {
+		if s.Name != "" {
+			out = append(out, s.Name)
 		} else {
-			out = append(out, id)
+			out = append(out, s.ID)
 		}
 	}
 	return out
