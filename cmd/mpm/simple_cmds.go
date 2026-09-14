@@ -18,6 +18,8 @@ import (
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/synth"
 	"github.com/flowbyte-com/mpm-core/usererror"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 // =============================================================================
@@ -1509,9 +1511,11 @@ func handleRefList(args []string) int {
 	if len(refs) == 0 {
 		if *jsonOutput {
 			fmt.Println(`{"references": [], "message": "No references stored"}`)
-		} else {
-			fmt.Println("No references stored")
+			return 0
 		}
+		// 2026-09-14 release-pass: canonical visual grammar.
+		render.Heading(os.Stdout, "Reference list")
+		render.Plain(os.Stdout, "No references stored.")
 		return 0
 	}
 
@@ -1566,7 +1570,7 @@ func handleRefList(args []string) int {
 		return 0
 	}
 
-	fmt.Println("\nReferences:")
+	render.Heading(os.Stdout, "Reference list")
 	for _, r := range refs {
 		tags := ""
 		if t, ok := r["tags"].(string); ok && t != "" {
@@ -1577,7 +1581,7 @@ func handleRefList(args []string) int {
 		case int64:
 			chunks = int(c)
 		case int:
-			chunks = c
+			chunks = int(c)
 		case int32:
 			chunks = int(c)
 		}
@@ -1589,12 +1593,10 @@ func handleRefList(args []string) int {
 		refTitle, _ := r["title"].(string)
 		freshness, _ := r["freshness"].(string)
 		// F-G1/F-G2: surface the freshness classifier so operators
-		// can spot stale/historical refs at a glance. Without this,
-		// a backdated 5-year-old ref looks identical to a fresh one
-		// in the listing.
-		freshnessBadge := ""
+		// can spot stale/historical refs at a glance.
+		freshnessSuffix := ""
 		if freshness != "" && freshness != "current" {
-			freshnessBadge = fmt.Sprintf(" {%s}", freshness)
+			freshnessSuffix = " {" + freshness + "}"
 		}
 		reason := ""
 		if rr, ok := r["import_reason"].(string); ok && rr != "" {
@@ -1602,18 +1604,27 @@ func handleRefList(args []string) int {
 			if len(r) > 100 {
 				r = r[:97] + "..."
 			}
-			reason = fmt.Sprintf("\n       reason: %s", r)
+			reason = r
 		}
-		fmt.Printf("  %s | %s | %d chunks |%s%s\n",
-			refID[:min(len(refID), 16)],
-			refTitle,
-			chunks,
-			tags,
-			freshnessBadge)
+		idShort := refID
+		if len(idShort) > 16 {
+			idShort = idShort[:16]
+		}
+		// 2026-09-14 release-pass: canonical visual grammar.
+		render.Label(os.Stdout, "  "+idShort, refTitle)
+		hintParts := []string{fmt.Sprintf("%d chunks", chunks)}
+		if tags != "" {
+			hintParts = append(hintParts, tags)
+		}
+		if freshnessSuffix != "" {
+			hintParts = append(hintParts, freshnessSuffix)
+		}
+		render.Hint(os.Stdout, strings.Join(hintParts, " · "))
 		if created != "" {
-			fmt.Printf("       created: %s%s\n", created, reason)
-		} else if reason != "" {
-			fmt.Printf("       %s\n", reason[1:]) // strip leading newline
+			render.Hint(os.Stdout, "created: "+created)
+		}
+		if reason != "" {
+			render.Hint(os.Stdout, "reason: "+reason)
 		}
 	}
 	return 0

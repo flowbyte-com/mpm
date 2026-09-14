@@ -25,6 +25,8 @@ import (
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 // handleTasksCommand is the router entry for `mpm tasks <subcommand>`.
@@ -130,10 +132,17 @@ func handleTasksList(args []string) int {
 		return 1
 	}
 	if len(tasks) == 0 {
-		fmt.Println("No scheduled tasks. Use 'mpm tasks upsert' to add one.")
+		// 2026-09-14 release-pass: canonical visual grammar.
+		render.Heading(os.Stdout, "Tasks")
+		render.Plain(os.Stdout, "No scheduled tasks. Use `mpm tasks upsert` to add one.")
 		return 0
 	}
 
+	// 2026-09-14 release-pass: heading via the canonical renderer,
+	// tabwriter retained for column alignment. The release-pass
+	// requirement is "preserve existing JSON contracts, not
+	// manufacture new ones" — no --json flag is added here.
+	render.Heading(os.Stdout, "Tasks")
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tNAME\tCRON\tDIRECTIVE_ID\tSTATUS\tNEXT RUN (UTC)\tLAST RUN (UTC)")
 	fmt.Fprintln(w, "----\t----\t----\t-----------\t------\t--------------\t--------------")

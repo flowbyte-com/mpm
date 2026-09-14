@@ -405,6 +405,23 @@ func handleTopicList(args []string) int {
 	}
 	defer rows.Close()
 
+	type topicRow struct {
+		id, name, description string
+	}
+	var topics []topicRow
+	for rows.Next() {
+		var id, name, description, created string
+		if err := rows.Scan(&id, &name, &description, &created); err != nil {
+			usererror.Warn("handleTopicList: %v", err)
+			return 1
+		}
+		_ = created
+		if len(description) > 100 {
+			description = description[:100] + "..."
+		}
+		topics = append(topics, topicRow{id: id, name: name, description: description})
+	}
+
 	if jsonOutput {
 		type topicEntry struct {
 			ID          string `json:"id"`
@@ -412,53 +429,25 @@ func handleTopicList(args []string) int {
 			Description string `json:"description"`
 			CreatedAt   string `json:"created_at"`
 		}
-		result := make([]topicEntry, 0)
-		scanErr := func() error {
-			for rows.Next() {
-				var id, name, description, created string
-				if err := rows.Scan(&id, &name, &description, &created); err != nil {
-					return fmt.Errorf("scanning topic list row: %w", err)
-				}
-				result = append(result, topicEntry{
-					ID:          id,
-					Name:        name,
-					Description: description,
-					CreatedAt:   created,
-				})
-			}
-			return nil
-		}()
-		if scanErr != nil {
-			usererror.Warn("handleTopicList: %v", scanErr)
-			return 1
+		result := make([]topicEntry, 0, len(topics))
+		for _, t := range topics {
+			result = append(result, topicEntry{ID: t.id, Name: t.name, Description: t.description})
 		}
 		data, _ := json.Marshal(map[string]interface{}{"topics": result})
 		fmt.Println(string(data))
 		return 0
 	}
 
+	// 2026-09-14 release-pass: human mode uses the canonical visual
+	// grammar. Heading is `MPM · Topic list`; per-row format is
+	// `[id] name` + indented description (truncated to 100 chars).
 	var output strings.Builder
-	output.WriteString("Topics:\n\n")
-
-	scanErr := func() error {
-		for rows.Next() {
-			var id, name, description, created string
-			if err := rows.Scan(&id, &name, &description, &created); err != nil {
-				return fmt.Errorf("scanning topic output row: %w", err)
-			}
-			if len(description) > 100 {
-				description = description[:100] + "..."
-			}
-			output.WriteString(fmt.Sprintf("[%s] %s\n", id, name))
-			if description != "" {
-				output.WriteString(fmt.Sprintf("    %s\n", description))
-			}
+	output.WriteString("MPM · Topic list\n\n")
+	for _, t := range topics {
+		output.WriteString(fmt.Sprintf("  [%s] %s\n", t.id, t.name))
+		if t.description != "" {
+			output.WriteString(fmt.Sprintf("      %s\n", t.description))
 		}
-		return nil
-	}()
-	if scanErr != nil {
-		usererror.Warn("handleTopicList: %v", scanErr)
-		return 1
 	}
 
 	return respond(output.String(), "", 0)

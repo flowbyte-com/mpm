@@ -24,15 +24,17 @@ import (
 	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
-const decisionsListDivider = "─────────────────────"
+// decisionsListDivider matches the canonical render.Divider glyph
+// (`─` × 60). 2026-09-14 release-pass: the canonical renderer
+// emits exactly one Divider line per decision record.
+var decisionsListDivider = strings.Repeat("─", 60)
 
-// countDecisionRows returns how many formatted decision records appear in
-// the output. Each record prints an opening divider, four content lines
-// (CONTEXT, CHOICE, RATIONALE, [date]), and the loop emits one final
-// closing divider after the last record — so N records produce N+1
-// divider lines.
+// countDecisionRows returns how many formatted decision records appear
+// in the output. 2026-09-14 release-pass: the canonical renderer
+// emits exactly one Divider per record (no closing divider), so the
+// count is the raw substring count.
 func countDecisionRows(out string) int {
-	return strings.Count(out, decisionsListDivider) - 1
+	return strings.Count(out, decisionsListDivider)
 }
 
 // countDecisionsInDB returns the live count of decisions rows via direct

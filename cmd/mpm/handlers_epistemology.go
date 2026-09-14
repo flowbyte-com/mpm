@@ -827,7 +827,7 @@ func runTheories(dm mpminternal.CoreDB, args []string) int {
 			fmt.Println(string(out))
 			return 0
 		}
-		render.Heading(os.Stdout, "Theories")
+		render.Heading(os.Stdout, "Theory list")
 		render.Plain(os.Stdout, "No theories yet. Run `mpm propose_theory` to propose your first theory.")
 		return 0
 	}
@@ -850,6 +850,7 @@ func runTheories(dm mpminternal.CoreDB, args []string) int {
 		ValidationCriteria string `json:"validation_criteria,omitempty"`
 	}
 	var rows []theoryRow
+	emitted := 0
 	for _, m := range memories {
 		content, _ := m["content"].(string)
 		id, _ := m["id"].(string)
@@ -881,16 +882,21 @@ func runTheories(dm mpminternal.CoreDB, args []string) int {
 				ValidationCriteria: vc,
 			})
 		} else {
-			render.Plain(os.Stdout, fmt.Sprintf("[%s] %s  [status: %s]", id, display, status))
+			// 2026-09-14 release-pass: human mode uses the canonical
+			// visual grammar. Heading is `MPM · Theory list`; per-row
+			// format is `[id] <preview>` followed by the validation
+			// criteria line when present.
+			render.Label(os.Stdout, "  ["+id+"] "+display, "[status: "+status+"]")
 
 			if vc, ok := meta["validation_criteria"].(string); ok && vc != "" {
 				vcDisplay := vc
 				if len(vcDisplay) > 60 {
 					vcDisplay = vcDisplay[:60] + "..."
 				}
-				render.Plain(os.Stdout, fmt.Sprintf("      validation: %s", vcDisplay))
+				render.Hint(os.Stdout, "validation: "+vcDisplay)
 			}
 		}
+		emitted++
 	}
 
 	if jsonOutput {
@@ -910,6 +916,7 @@ func runTheories(dm mpminternal.CoreDB, args []string) int {
 	if len(rows) == 0 && filter != "all" {
 		render.Plain(os.Stdout, fmt.Sprintf("No %s theories found.", filter))
 	}
+	_ = emitted // reserved for future summary line
 
 	return 0
 }
@@ -1007,7 +1014,11 @@ func handleDecisions(args []string) int {
 	}
 
 	if len(memories) == 0 {
-		return respond("", "No decisions recorded yet. Run `mpm record_decision` to log your first decision.\n", 0)
+		// 2026-09-14 release-pass: canonical visual grammar.
+		var out strings.Builder
+		render.Heading(&out, "Decision list")
+		render.Plain(&out, "No decisions recorded yet. Run `mpm record_decision` to log your first decision.")
+		return respond(out.String(), "", 0)
 	}
 
 	// Pointer-indirection sweep F-S-2 (docs/pointer-indirection-sweep-2026-09-05.md):
@@ -1029,6 +1040,7 @@ func handleDecisions(args []string) int {
 		memories = memories[:limit]
 	}
 
+	firstRow := true
 	for _, m := range memories {
 		content, _ := m["content"].(string)
 		createdAt, _ := m["created_at"].(string)
@@ -1045,10 +1057,7 @@ func handleDecisions(args []string) int {
 			choice = strings.TrimSpace(choice[7:])
 		}
 
-		dateStr := createdAt
-		if len(dateStr) >= 10 {
-			dateStr = dateStr[:10]
-		}
+		dateStr := formatDecisionDate(createdAt)
 
 		// Defect I (2026-09-13 acceptance): print the canonical memory
 		// id, not a date fragment. The pre-fix renderer used the first
@@ -1065,26 +1074,55 @@ func handleDecisions(args []string) int {
 			memID = dateStr
 		}
 
-		fmt.Println("─────────────────────")
+		// 2026-09-14 release-pass: human mode uses the canonical
+		// visual grammar. Each decision renders as a small block
+		// of Label rows (Context / Choice / Rationale / ID) with
+		// the human-readable Date as a Hint line.
+		if firstRow {
+			render.Heading(os.Stdout, "Decision list")
+			firstRow = false
+		}
+		render.Divider(os.Stdout)
 		if contextText != "" {
-			fmt.Printf("CONTEXT:  %s\n", contextText)
+			render.Label(os.Stdout, "Context", contextText)
 		} else {
-			fmt.Println("CONTEXT:  —")
+			render.Label(os.Stdout, "Context", "—")
 		}
-		fmt.Printf("CHOICE:   %s\n", choice)
+		render.Label(os.Stdout, "Choice", choice)
 		if rationale != "" {
-			fmt.Printf("RATIONALE: %s\n", rationale)
+			render.Label(os.Stdout, "Rationale", rationale)
 		} else {
-			fmt.Println("RATIONALE: —")
+			render.Label(os.Stdout, "Rationale", "—")
 		}
-		fmt.Printf("ID:       %s\n", memID)
+		render.Label(os.Stdout, "ID", memID)
 		if dateStr != "" {
-			fmt.Printf("DATE:     %s\n", dateStr)
+			render.Hint(os.Stdout, "date: "+dateStr)
 		}
 	}
-	fmt.Println("─────────────────────")
-
 	return 0
+}
+
+// formatDecisionDate returns a human-readable date for the given
+// created_at string. Handles both ISO datetimes (e.g.
+// "2026-09-14T11:00:00Z") and Unix-epoch strings (e.g.
+// "1789320593"). Uses the canonical FormatUnixSeconds formatter
+// already used by tasks list / memory list / handoff list; no
+// decision-only formatting rule is introduced. Returns the raw
+// string if neither parse succeeds.
+func formatDecisionDate(s string) string {
+	if s == "" {
+		return ""
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC().Format("2006-01-02 15:04:05 UTC")
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
+		return t.UTC().Format("2006-01-02 15:04:05 UTC")
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return mpminternal.FormatUnixSeconds(n)
+	}
+	return s
 }
 
 // handleHint checks recent conversation context for epistemologically relevant
