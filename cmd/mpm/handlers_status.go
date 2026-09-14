@@ -221,7 +221,7 @@ func formatPersonaLine(state string, values []string, dm *mpminternal.DatabaseMa
 func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) {
 	d := buildStatusData(dm, startTime)
 
-	fmt.Println("⚡ MPM · System Status")
+	fmt.Println("MPM · System Status")
 	fmt.Println("────────────────────────────────────")
 	fmt.Printf("Uptime:    %s\n", d.uptime)
 	fmt.Printf("  %s\n", formatModeLine(d.modeState, d.modeValues))
