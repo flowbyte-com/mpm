@@ -80,7 +80,7 @@ func TestJSONMatrix_SupportedCommands_Contract(t *testing.T) {
 		{Family: "decisions list", Command: []string{"decisions", "list"}, WantSuccess: true, WantEnvelopeKeys: []string{"status", "count", "decisions"}},
 		{Family: "theories list", Command: []string{"theories", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"success", "filter", "count", "theories"}},
 		{Family: "evidence list", Command: []string{"evidence", "list"}, WantSuccess: true, WantEnvelopeKeys: []string{"success", "count", "evidence"}},
-		{Family: "handoff list", Command: []string{"handoff", "list", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"success", "count", "handoffs"}},
+		{Family: "handoff list", Command: []string{"handoff", "list", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"success", "count", "results"}},
 		{Family: "info", Command: []string{"info", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"version", "database", "workspace"}},
 		{Family: "doctor", Command: []string{"doctor", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"checks", "timestamp"}, WantExitCodes: []int{0, 1, 2}},
 	}

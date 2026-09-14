@@ -528,6 +528,17 @@ func handleWorkItem(args []string) int {
 		return handleWorkItemList(params)
 	}
 
+	// 2026-09-14 release-pass: normalise work-id inputs through
+	// NormalizeWorkID so every `mpm work item <sub>` command
+	// accepts the canonical `mpm://work/<id>` pointer form in
+	// addition to the bare id. The bare id is unchanged; the
+	// pointer form has its prefix stripped. This is the single
+	// chokepoint — every work subcommand that accepts a work_id
+	// goes through here before the substrate sees it.
+	if rawID, ok := params["work_id"].(string); ok && rawID != "" {
+		params["work_id"] = NormalizeWorkID(rawID)
+	}
+
 	payload := map[string]interface{}{"action": action, "params": params}
 	enc, _ := json.Marshal(payload)
 	return handleCall([]string{"mpm_work", "--payload", string(enc)})

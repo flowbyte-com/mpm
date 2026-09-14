@@ -64,6 +64,11 @@ import (
 //   Hint:    optional next-action hint — used when the operator
 //            should run a specific command to resolve the issue
 //            (typically `mpm doctor`).
+//   Level:   0=OK (renders ✓), 1=INFO (renders ○ neutral), 2=WARN
+//            (renders ⚠). Absent → 0 for backwards compatibility.
+//            INFO distinguishes "optional subsystem absent" from
+//            "OK" so the dashboard can use the neutral marker
+//            instead of implying "missing = success".
 //
 // Hint is intentionally separate from Detail because the two
 // serve different reading modes: Detail explains the state,
@@ -73,14 +78,35 @@ type ReadinessItem struct {
 	OK     bool
 	Detail string
 	Hint   string
+	Level  int
+}
+
+// readinessLevel constants. Use the named constants rather than
+// magic numbers at every callsite so future additions (FAIL etc.)
+// land in one place.
+const (
+	readinessLevelOK   = 0
+	readinessLevelInfo = 1
+	readinessLevelWarn = 2
+)
+
+// MarkReadinessINFO returns a copy of it with Level set to INFO.
+// Callers use this for optional subsystems (absent embedding, no
+// LLM configured) so the dashboard renders the neutral ○ marker
+// instead of ✓ (which would imply "missing = successful check").
+func MarkReadinessINFO(it ReadinessItem) ReadinessItem {
+	it.Level = readinessLevelInfo
+	it.OK = true // INFO is still OK for the overall health tally.
+	return it
 }
 
 // readinessOverall checks all items and returns true only if every
 // item is OK. Items where OK=false contribute to the verdict
-// surfaced in the dashboard header.
+// surfaced in the dashboard header. INFO items do NOT contribute
+// to the verdict — absence is informational, not a failure.
 func readinessOverall(items []ReadinessItem) bool {
 	for _, it := range items {
-		if !it.OK {
+		if !it.OK && it.Level != readinessLevelInfo {
 			return false
 		}
 	}
@@ -329,14 +355,14 @@ func checkEmbeddings() ReadinessItem {
 	case cfg.Source == mpminternal.EmbeddingSourceAbsent:
 		// Absent is informational only — embedding is optional,
 		// and absence does not block substrate health. The
-		// readiness row uses the neutral marker so it does not
-		// increment warning counts.
-		return ReadinessItem{
+		// readiness row uses the neutral ○ marker so it does not
+		// imply "missing = successful check".
+		return MarkReadinessINFO(ReadinessItem{
 			Name:   "Embedding model",
 			OK:     true,
 			Detail: "not configured · optional",
 			Hint:   "semantic retrieval is unavailable when absent; configure via `mpm config component set embedding <profile>` or `mpm config detect-embedding [--apply]`",
-		}
+		})
 	}
 	// Should not reach here; treat as failure so unhandled states
 	// surface honestly instead of silently reporting ready.

@@ -172,16 +172,26 @@ func handleHandoffListCLI(args []string) int {
 	out, err := toolsCall(dm, mpminternal.ActiveContext{}, "mpm_handoff", map[string]interface{}{
 		"action": "list",
 		"params": map[string]interface{}{
-			"limit":       limit,
-			"unread_only": unreadOnly,
+			"limit":  limit,
+			"unread": unreadOnly,
 		},
 	})
 	if err != nil {
 		return usererror.Error("handoff list: %v", err)
 	}
-	handoffs, _ := out["handoffs"].([]interface{})
+	// 2026-09-14 release-pass: substrate emits canonical envelope
+	// {success, count, results}. The `results` slice is typed
+	// `[]*Handoff` (struct pointers) inside the substrate, but
+	// the CLI receives it as `interface{}`. A direct
+	// `out["results"].([]interface{})` type assertion returns
+	// nil for the typed slice — the pre-fix bug was BOTH a
+	// wrong-key read AND a missing type-conversion round-trip.
+	// Round-trip via JSON so the canonical envelope shape
+	// (objects as maps with string keys) reaches the human and
+	// JSON renderers.
+	handoffs := decodeHandoffResults(out)
 	if handoffs == nil {
-		handoffs = []interface{}{}
+		handoffs = []map[string]interface{}{}
 	}
 
 	if jsonOutput {
@@ -190,7 +200,7 @@ func handleHandoffListCLI(args []string) int {
 		_ = enc.Encode(map[string]interface{}{
 			"success": true,
 			"count":   len(handoffs),
-			"handoffs": handoffs,
+			"results": handoffs,
 		})
 		return 0
 	}
@@ -202,14 +212,42 @@ func handleHandoffListCLI(args []string) int {
 	}
 	render.Heading(os.Stdout, "Handoff list")
 	render.Plain(os.Stdout, fmt.Sprintf("%d handoffs", len(handoffs)))
-	for _, h := range handoffs {
-		hm, _ := h.(map[string]interface{})
-		if hm == nil {
-			continue
-		}
+	for _, hm := range handoffs {
 		render.Plain(os.Stdout, fmt.Sprintf("[%v] %s", hm["id"], hm["summary"]))
 	}
 	return 0
+}
+
+// decodeHandoffResults extracts the `results` slice from the
+// substrate's list envelope and normalises each entry to a
+// `map[string]interface{}`. The substrate stores the slice as
+// `[]*Handoff` (typed struct pointers); without this helper the
+// CLI's type assertion to `[]interface{}` returns nil and the
+// renderer shows "No handoffs" even when rows exist.
+//
+// JSON round-trip is intentional: the canonical wire shape is
+// JSON, so the conversion is loss-free for the fields
+// `handleHandoffListCLI` actually consumes (id, summary).
+func decodeHandoffResults(out map[string]interface{}) []map[string]interface{} {
+	if out == nil {
+		return nil
+	}
+	raw, ok := out["results"]
+	if !ok || raw == nil {
+		return nil
+	}
+	// Round-trip through JSON so typed struct pointers and
+	// interface{} both land as map[string]interface{} at the
+	// call site.
+	enc, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var asList []map[string]interface{}
+	if err := json.Unmarshal(enc, &asList); err != nil {
+		return nil
+	}
+	return asList
 }
 
 func handleHandoffShredCLI(args []string) int {

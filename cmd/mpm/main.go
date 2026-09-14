@@ -1528,15 +1528,40 @@ func PrintQuicklinks() {
 	// Prepend the LLM provider row (resolved via the canonical
 	// helper). Embedding is already part of the readiness items
 	// (checkEmbeddings), so no separate row needed here.
+	//
+	// 2026-09-14 release-pass: an absent LLM is INFO, not WARN.
+	// MPM core (memory/lesson/decision/handoff/work CRUD,
+	// wake context, schema, doctor) is fully usable without an
+	// LLM. Synthesis features (mpm synth) require an LLM; their
+	// unavailability is informational, not a defect. The
+	// dashboard renders the absent case with the neutral ○
+	// marker so the operator can SEE the state without it
+	// triggering the health/attention warning count.
 	llmLabel, llmDetail := resolveDashboardLLM()
-	items = append([]ReadinessItem{
-		{Name: llmLabel, OK: strings.HasPrefix(llmDetail, "configured"), Detail: llmDetail},
-	}, items...)
+	llmOK := strings.HasPrefix(llmDetail, "configured")
+	llmItem := ReadinessItem{Name: llmLabel, OK: llmOK, Detail: llmDetail}
+	if !llmOK {
+		llmItem = MarkReadinessINFO(llmItem)
+		llmItem.Hint = "synthesis features (mpm synth) require an LLM; core CRUD remains fully usable"
+	}
+	items = append([]ReadinessItem{llmItem}, items...)
 
 	for _, item := range items {
+		// 2026-09-14 release-pass: tri-state marker. INFO items
+		// (Level=1) render with the neutral ○ glyph so an absent
+		// optional subsystem (e.g. embedding model not configured)
+		// does not imply "missing = successful check". The Doctor
+		// uses the same Level semantic.
 		marker := "✓"
-		if !item.OK {
+		switch item.Level {
+		case readinessLevelInfo:
+			marker = "○"
+		case readinessLevelWarn:
 			marker = "⚠"
+		default:
+			if !item.OK {
+				marker = "⚠"
+			}
 		}
 		render.Plainf(os.Stdout, " %s  %-22s %s\n", marker, item.Name, item.Detail)
 		if item.Hint != "" {
@@ -1594,15 +1619,45 @@ func PrintQuicklinks() {
 	// Section 3: Substrate.
 	render.Section(os.Stdout, "Substrate")
 	render.BlankLine(os.Stdout)
-	render.Label(os.Stdout, "Memories (active)", dashboardCount(dm, "memories"))
-	render.Label(os.Stdout, "Lessons", dashboardCount(dm, "lessons"))
+	// 2026-09-14 release-pass: dashboard counts MUST use the same
+	// canonical source the authoritative status/info surface uses,
+	// not a hand-rolled SQL filter on a single collection. Pre-fix
+	// `dashboardCount(dm, "lessons")` queried `SELECT COUNT(*) FROM
+	// memories WHERE collection = 'lessons'` but lessons live in the
+	// `lessons_base` table (a separate store, NOT a `memories`
+	// collection), so the dashboard always reported 0 even when
+	// `mpm lesson list` showed real lessons. Same class for
+	// memories: filtering on `collection = 'memories'` excluded
+	// valid memories stored in other collections.
+	//
+	// `countMemories(dm, "")` and the new `countLessons(dm)`
+	// helper are the canonical sources; the dashboard and
+	// `mpm info` / `mpm status` therefore agree dynamically.
+	render.Label(os.Stdout, "Memories (active)", dashboardMemoryCount(dm))
+	render.Label(os.Stdout, "Lessons", dashboardLessonCount(dm))
 	render.Label(os.Stdout, "Decisions", dashboardCount(dm, "decisions"))
 	render.Label(os.Stdout, "Skills", dashboardSkillCount(dm))
 	render.BlankLine(os.Stdout)
+	// 2026-09-14 release-pass: split Health into two distinct
+	// semantics so Doctor warnings (overdue wakes, review
+	// backlog) don't masquerade as "system unhealthy" while the
+	// runtime is genuinely fine.
+	//
+	//   System health  — runtime/database/service liveness
+	//                    (mpm.HealthCheck). Failure here IS a
+	//                    system-level defect.
+	//   Attention      — actionable cognitive/maintenance backlog
+	//                    surfaced by Doctor/readiness (overdue
+	//                    wakes, review backlog). Not a failure;
+	//                    just a "look at this" hint.
 	if _, err := dm.HealthCheck(); err != nil {
-		render.Plainf(os.Stdout, "Health: ⚠ %s\n", truncate(err.Error(), 60))
+		render.Plainf(os.Stdout, "System health   ⚠ %s\n", truncate(err.Error(), 60))
 	} else {
-		render.Plain(os.Stdout, "Health: ✓ Healthy")
+		render.Plain(os.Stdout, "System health   ✓ Healthy")
+	}
+	attention := attentionSummary(items)
+	if attention != "" {
+		render.Plain(os.Stdout, attention)
 	}
 	render.BlankLine(os.Stdout)
 
@@ -1644,22 +1699,61 @@ func resolveDashboardLLM() (label string, detail string) {
 	return "LLM provider", detail
 }
 
+// dashboardMemoryCount returns the canonical active-memory count
+// for the dashboard. Uses the exact same predicate as
+// `countMemories(dm, "")` (cmd/mpm/handlers_status.go:411), which
+// is the source `mpm status` and `mpm info` use. The predicate
+// is: deleted_at IS NULL AND (expires_at IS NULL OR expires_at >
+// now). This is the canonical "active" definition.
+//
+// 2026-09-14 release-pass: pre-fix the dashboard filtered on
+// `collection = 'memories'` which excluded valid memories stored
+// under other collections, undercounting by the difference
+// between the broad active total and the memories-collection
+// subset.
+func dashboardMemoryCount(dm *mpminternal.DatabaseManager) string {
+	if dm == nil {
+		return "?"
+	}
+	n, err := countMemories(dm, "")
+	if err != nil {
+		return "?"
+	}
+	return withThousands(fmt.Sprintf("%d", n))
+}
+
+// dashboardLessonCount returns the canonical lesson count for
+// the dashboard. Lessons live in the `lessons_base` table (NOT a
+// `memories` collection), so the dashboard must call the lesson
+// store directly — querying `memories WHERE collection =
+// 'lessons'` returns zero on every install.
+//
+// 2026-09-14 release-pass: this helper delegates to
+// `dm.ListLessons("")` (cmd/mpm/handlers_lesson.go:205) — the
+// same source `mpm lesson list` uses. Dashboard and lesson list
+// therefore agree dynamically.
+func dashboardLessonCount(dm *mpminternal.DatabaseManager) string {
+	if dm == nil {
+		return "?"
+	}
+	lessons, err := dm.ListLessons("")
+	if err != nil {
+		return "?"
+	}
+	return withThousands(fmt.Sprintf("%d", len(lessons)))
+}
+
 // dashboardCount returns the canonical count for the dashboard's
-// Substrate row. The scope is "active" (not-deleted, not-expired)
-// to match what mpm memory list surfaces.
+// Substrate row for collections stored in the `memories` table
+// (theories, decisions). Uses the canonical active predicate
+// (deleted_at IS NULL AND not-expired) so it agrees with
+// `mpm status` / `mpm info`.
 func dashboardCount(dm *mpminternal.DatabaseManager, collection string) string {
 	if dm == nil {
 		return "?"
 	}
-	var n int
-	row := dm.QueryRowTracked(
-		`SELECT COUNT(*) FROM memories
-		 WHERE deleted_at IS NULL
-		 AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
-		 AND collection = ?`,
-		collection,
-	)
-	if err := row.Scan(&n); err != nil {
+	n, err := countMemories(dm, "collection = '"+collection+"'")
+	if err != nil {
 		return "?"
 	}
 	return withThousands(fmt.Sprintf("%d", n))
@@ -1679,6 +1773,39 @@ func dashboardSkillCount(dm *mpminternal.DatabaseManager) string {
 		return "?"
 	}
 	return fmt.Sprintf("%d", len(skills))
+}
+
+// attentionSummary inspects the readiness items and returns a
+// one-line "Attention" summary if any item reports a warning
+// (non-INFO, non-OK). Returns "" when nothing needs attention.
+//
+// 2026-09-14 release-pass: this is the dashboard's bridge to
+// Doctor's warning surface without re-implementing the warning
+// logic. Doctor computes the warnings; the dashboard simply
+// aggregates them into a single "Attention" line so the operator
+// can SEE that there's work to do without the dashboard turning
+// the whole substrate red.
+func attentionSummary(items []ReadinessItem) string {
+	var warns int
+	for _, it := range items {
+		if it.Level == readinessLevelWarn || (!it.OK && it.Level != readinessLevelInfo) {
+			warns++
+		}
+	}
+	if warns == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Attention       ⚠ %d warning%s — run `mpm doctor`", warns, pluralSuffix(warns))
+}
+
+// pluralSuffix returns "s" when n != 1 and "" when n == 1.
+// Local name to avoid the `plural` symbol already declared in
+// renderer_doctor.go.
+func pluralSuffix(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // loadPendingTheoriesForQuicklinks returns up to limit pending
