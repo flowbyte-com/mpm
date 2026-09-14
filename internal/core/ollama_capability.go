@@ -117,8 +117,12 @@ func ProbeOllamaCapabilities(baseURL, model string) (ModelCapabilities, error) {
 
 // normalizeOllamaHost accepts the same URL shapes
 // OllamaProvider does (bare host, /api/embed, /api/embeddings)
-// and returns the host with no path so the helper can build
-// /api/show and /api/tags paths itself.
+// and returns the host with no path AND no trailing slash so
+// the helper can build /api/show and /api/tags paths without
+// producing double slashes. Trailing slash matters because
+// `host + "/api/show"` becomes `host//api/show` otherwise, and
+// some Ollama-compatible endpoints (LocalAI, test fakes)
+// route by exact path.
 func normalizeOllamaHost(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" || u.Host == "" {
@@ -128,7 +132,12 @@ func normalizeOllamaHost(raw string) (string, error) {
 	if u.Path != "" && u.Path != "/" {
 		u.Path = ""
 	}
-	return u.String(), nil
+	// url.Parse keeps a trailing "/" if the input had one. Strip
+	// the path explicitly so the returned host has no trailing
+	// slash — otherwise `host + "/api/show"` doubles up.
+	result := u.String()
+	result = strings.TrimSuffix(result, "/")
+	return result, nil
 }
 
 // probeOllamaShow POSTs /api/show and parses the

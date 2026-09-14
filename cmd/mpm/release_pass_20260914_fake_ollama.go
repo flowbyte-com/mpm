@@ -22,8 +22,13 @@ import (
 )
 
 // fakeOllamaOpts configures the in-process Ollama test server.
-// Both ShowCapabilities and TagsCapabilities are checked:
-// /api/show is tried first, then /api/tags is the fallback.
+// ShowCapabilities provides per-model capability metadata
+// served at /api/show. TagsCapabilities (optional) provides
+// the per-model listing served at /api/tags — if empty, the
+// server enumerates the keys of ShowCapabilities so the
+// detector can find models even when only the show endpoint
+// is configured. This mirrors how a real Ollama instance
+// always reports every installed model on /api/tags.
 type fakeOllamaOpts struct {
 	ShowCapabilities map[string][]string
 	TagsCapabilities map[string][]string
@@ -60,9 +65,20 @@ func startFakeOllama(t *testing.T, opts fakeOllamaOpts) *httptest.Server {
 	})
 
 	mux.HandleFunc("/api/tags", func(w http.ResponseWriter, r *http.Request) {
-		var models []map[string]interface{}
-		for name, caps := range opts.TagsCapabilities {
-			models = append(models, map[string]interface{}{
+		models := opts.TagsCapabilities
+		if len(models) == 0 {
+			// Default to the keys of ShowCapabilities so the
+			// detector can iterate every model the show probe
+			// knows about. The real Ollama always returns all
+			// installed models on /api/tags.
+			models = map[string][]string{}
+			for k, v := range opts.ShowCapabilities {
+				models[k] = v
+			}
+		}
+		var out []map[string]interface{}
+		for name, caps := range models {
+			out = append(out, map[string]interface{}{
 				"name": name,
 				"details": map[string]interface{}{
 					"capabilities": caps,
@@ -71,7 +87,7 @@ func startFakeOllama(t *testing.T, opts fakeOllamaOpts) *httptest.Server {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"models": models,
+			"models": out,
 		})
 	})
 

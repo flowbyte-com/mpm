@@ -519,37 +519,34 @@ func pluralForN(n int) string {
 // Each preset carries the canonical base_url + model that an operator can
 // accept by default or override per-field. "custom" is the no-default
 // fallback for operators who know what they're doing.
-var wizardPresets = []choice{
-	{id: "minimax", label: "MiniMax (anthropic-compatible)", defaults: config.Profile{
-		Provider: "minimax",
-		Model:    "MiniMax-M2.7",
-		BaseURL:  "https://api.minimax.io/anthropic/v1",
-	}},
-	{id: "openai", label: "OpenAI", defaults: config.Profile{
-		Provider: "openai",
-		Model:    "gpt-4o",
-		BaseURL:  "https://api.openai.com/v1",
-	}},
-	{id: "ollama", label: "Ollama (local)", defaults: config.Profile{
-		Provider: "ollama",
-		Model:    "llama3",
-		BaseURL:  "http://localhost:11434/v1",
-	}},
-	{id: "anthropic", label: "Anthropic direct", defaults: config.Profile{
-		Provider: "anthropic",
-		Model:    "claude-3-5-sonnet",
-		BaseURL:  "https://api.anthropic.com/v1",
-	}},
-	{id: "custom", label: "Custom (I know what I'm doing)", defaults: config.Profile{}},
+//
+// 2026-09-14 release-pass: derived from the canonical provider
+// registry (cmd/mpm/provider_registry.go) so the wizard menu
+// shares its source-of-truth with the embedding wizard, the
+// detection surface, and the help text. Custom is always entry 1;
+// the remainder is sorted alphabetically by DisplayName.
+func wizardPresets() []choice {
+	llms := providersFor(CapGenerate)
+	out := make([]choice, len(llms))
+	for i, p := range llms {
+		out[i] = choice{
+			id:    p.ID,
+			label: p.DisplayName,
+			defaults: config.Profile{
+				Provider: p.ID,
+				Model:    p.DefaultModel,
+				BaseURL:  p.DefaultBaseURL,
+			},
+		}
+	}
+	return out
 }
 
 // presetIDForProvider maps an existing provider string to a preset id,
 // or "custom" when the provider does not match a known preset.
 func presetIDForProvider(provider string) string {
-	for _, p := range wizardPresets {
-		if p.id == provider {
-			return p.id
-		}
+	if _, ok := presetForID(provider); ok {
+		return provider
 	}
 	return "custom"
 }
@@ -621,7 +618,8 @@ func handleConfigInteractive(c *config.Config) int {
 	if prof.Provider != "" {
 		defaultPresetID = presetIDForProvider(prof.Provider)
 	}
-	preset := promptChoiceDefault(rwFromStdin(), "Provider", wizardPresets, defaultPresetID)
+	presets := wizardPresets()
+	preset := promptChoiceDefault(rwFromStdin(), "Provider", presets, defaultPresetID)
 	if preset == nil {
 		fmt.Println("Aborted.")
 		return 0
@@ -1323,7 +1321,7 @@ func printConfigHelp() {
 	render.Label(os.Stdout, "mpm config profile ...", "add / list / get / set / remove profiles — see 'mpm config profile --help'")
 	render.Label(os.Stdout, "mpm config component ...", "list / get / set component → profile bindings — see 'mpm config component --help'")
 	render.Label(os.Stdout, "mpm config capability ...", "list / get / set capability → component bindings")
-	render.Label(os.Stdout, "mpm config detect-embedding [--apply <name>] [--force]", "probe Ollama for embedding-capable models; --apply writes a profile and binds components.embedding. See 'mpm config detect-embedding --help'")
+	render.Label(os.Stdout, "mpm config detect-embedding [--apply <name>] [--force]", "probe Ollama + OpenAI-compatible localhost endpoints for embedding-capable models; --apply writes a profile and binds components.embedding. See 'mpm config detect-embedding --help'")
 	render.BlankLine(os.Stdout)
 
 	render.Section(os.Stdout, "Keys (canonical names; aliases accepted)")
@@ -1381,8 +1379,9 @@ func printConfigComponentHelp() {
 func printConfigDetectEmbeddingHelp() {
 	render.Heading(os.Stdout, "Config detect-embedding")
 	render.BlankLine(os.Stdout)
-	render.Section(os.Stdout, "Probe Ollama for embedding-capable models")
-	render.Plain(os.Stdout, "Detection enumerates candidates — it does NOT imply")
+	render.Section(os.Stdout, "Probe embedding-capable providers")
+	render.Plain(os.Stdout, "Detection enumerates Ollama and OpenAI-compatible localhost endpoints")
+	render.Plain(os.Stdout, "and classifies models by capability. It does NOT imply")
 	render.Plain(os.Stdout, "configuration. To persist a choice, pass --apply.")
 	render.BlankLine(os.Stdout)
 	render.Section(os.Stdout, "Flags")

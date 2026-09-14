@@ -302,7 +302,46 @@ Where practical, dashboard attention state should reuse the same data sources an
 
 ---
 
-## 9. Optional provider semantics
+## 9. Provider and model menus
+
+### Provider ordering
+
+In provider-selection menus, `Custom` is always entry 1.
+All remaining providers are sorted alphabetically by display name (case-insensitive), with a deterministic ID-based tiebreak.
+
+Sort order is NOT derived from map iteration, hand order, or recommendation metadata. Use the canonical `providersFor(capability)` helper.
+
+### Model ordering
+
+When manual model entry is offered, `Custom model` is entry 1.
+Remaining models are sorted alphabetically (case-insensitive), with a deterministic tiebreak on the original model string.
+
+Recommendation metadata may display `(recommended)` but MUST NOT reorder the choices.
+
+### Capability orientation
+
+Configuration and discovery are capability-oriented rather than vendor-exclusive.
+A provider that supports `embed` is a valid embedding choice regardless of its vendor name.
+A provider that supports `generate` is a valid LLM choice regardless of its vendor name.
+
+The canonical capability enum is `generate` and `embed`. A model may support one, both, or `unknown` (no positive evidence yet). Unknown is NOT false.
+
+Do not encode `provider == "ollama" → embedding` or `provider == "openai" → generation`. Capability is the contract.
+
+### Actionable dashboard state
+
+When a configurable dashboard component is absent or degraded, the hint row must include the canonical command used to configure or repair it.
+
+Examples:
+
+- absent LLM: `run 'mpm config' to configure one`
+- absent embedding: `run 'mpm config detect-embedding --apply' to configure one`
+
+Do not make dashboard hints enormous. Detailed capability/degradation explanation can remain in Doctor/help.
+
+---
+
+## 10. Optional provider semantics
 
 ### Embeddings
 
@@ -334,7 +373,7 @@ Do not present absent optional LLM configuration as a global system failure.
 
 ---
 
-## 10. Counts must use canonical stores
+## 11. Counts must use canonical stores
 
 Dashboard and summary counts must use the same canonical definition as their authoritative CLI surfaces.
 
@@ -361,7 +400,7 @@ Prefer shared helpers over duplicated SQL predicates.
 
 ---
 
-## 11. IDs, pointers, and round-trip behavior
+## 12. IDs, pointers, and round-trip behavior
 
 Any identifier or URI presented to the user as a usable reference must round-trip through the relevant user-facing CLI.
 
@@ -389,7 +428,7 @@ Do not silently coerce a pointer from another artifact type.
 
 ---
 
-## 12. Work-item ID contract
+## 13. Work-item ID contract
 
 Commands that accept a work-item ID must support both:
 
@@ -415,7 +454,7 @@ If more work-item commands are added later, they inherit the same rule unless ex
 
 ---
 
-## 13. Handoff semantics
+## 14. Handoff semantics
 
 Do not assume every surface means the same thing by “latest handoff”.
 
@@ -483,7 +522,7 @@ Do not “fix” these surfaces merely because their outputs differ. The distinc
 
 ---
 
-## 14. Wire-contract consistency
+## 15. Wire-contract consistency
 
 CLI/substrate boundaries must use one canonical field name and one canonical parameter name.
 
@@ -509,7 +548,7 @@ Typed Go values must not be assumed to satisfy generic type assertions without p
 
 ---
 
-## 15. Shared UX does not require shared implementation
+## 16. Shared UX does not require shared implementation
 
 Sibling binaries may follow the same CLI conventions without importing the main `mpm` CLI implementation.
 
@@ -541,7 +580,7 @@ UX consistency does not justify architectural coupling.
 
 ---
 
-## 16. Version surfaces
+## 17. Version surfaces
 
 Operator-facing binaries should expose build identity consistently where practical.
 
@@ -564,7 +603,7 @@ Help pages may include the build identity when useful.
 
 ---
 
-## 17. Error behavior
+## 18. Error behavior
 
 Errors should be:
 
@@ -583,7 +622,7 @@ Malformed pointers, invalid filters, invalid IDs, and missing required values sh
 
 ---
 
-## 18. Testing rules
+## 19. Testing rules
 
 Every CLI defect fixed must receive a regression that fails against the pre-fix behavior.
 
@@ -638,7 +677,7 @@ Source inspection and handler tests do not override observed built-binary behavi
 
 ---
 
-## 19. Standard verification commands
+## 20. Standard verification commands
 
 For changes affecting the main codebase, run:
 
@@ -662,7 +701,7 @@ For CLI changes, add explicit built-binary smoke commands relevant to the modifi
 
 ---
 
-## 20. Production-state safety during acceptance
+## 21. Production-state safety during acceptance
 
 Treat the user's real MPM substrate as production state.
 
@@ -688,7 +727,7 @@ Do not clean up real-world fixture state before a bug has been reproduced and va
 
 ---
 
-## 21. Release/readiness rules
+## 22. Release/readiness rules
 
 Do not declare a CLI surface READY when:
 
@@ -718,7 +757,7 @@ Do not use “READY” as a synonym for “the patch compiled”.
 
 ---
 
-## 22. Scope discipline
+## 23. Scope discipline
 
 When given a targeted CLI defect:
 
@@ -733,7 +772,7 @@ If a separate issue is discovered, record it and classify it instead of silently
 
 ---
 
-## 23. Agent checklist before modifying a CLI surface
+## 24. Agent checklist before modifying a CLI surface
 
 Before changing CLI behavior, verify:
 
@@ -756,7 +795,7 @@ If any answer is unclear, investigate before editing.
 
 ---
 
-## 24. Final rule
+## 25. Final rule
 
 Prefer consistency over invention.
 

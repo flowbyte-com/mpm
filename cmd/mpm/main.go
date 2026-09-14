@@ -1542,7 +1542,7 @@ func PrintQuicklinks() {
 	llmItem := ReadinessItem{Name: llmLabel, OK: llmOK, Detail: llmDetail}
 	if !llmOK {
 		llmItem = MarkReadinessINFO(llmItem)
-		llmItem.Hint = "synthesis features (mpm synth) require an LLM; core CRUD remains fully usable"
+		llmItem.Hint = "synthesis features (mpm synth) require an LLM; run `mpm config` to configure one"
 	}
 	items = append([]ReadinessItem{llmItem}, items...)
 

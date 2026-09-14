@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,99 @@ type NullProvider struct{}
 
 func (NullProvider) Embed(text string) ([]float32, error) { return nil, nil }
 func (NullProvider) Name() string                         { return "null" }
+
+// OpenAICompatibleProvider hits an OpenAI-compatible `/v1/embeddings`
+// endpoint. Covers LocalAI, LM Studio's embeddings tab, vLLM,
+// llama.cpp-compatible servers, and any host that speaks the
+// OpenAI embedding protocol.
+//
+// 2026-09-14 release-pass: the previous design was Ollama-only.
+// Embedding capability is now provider-neutral: any endpoint that
+// accepts `{input, model}` and returns `{data:[{embedding:[...]}]}` is
+// supported. This matches the wire dispatch already used for LLM
+// synthesis (`internal/core/synth/wire.go:inferWire`).
+type OpenAICompatibleProvider struct {
+	Endpoint string // e.g. "http://localhost:1234/v1"
+	Model    string // e.g. "text-embedding-3-small"
+	APIKey   string // optional — local servers may not require one
+	Timeout  time.Duration
+	client   *http.Client
+}
+
+func NewOpenAICompatibleProvider(endpoint, model, apiKey string) *OpenAICompatibleProvider {
+	if endpoint == "" {
+		endpoint = "http://localhost:1234/v1"
+	}
+	if model == "" {
+		model = "text-embedding-3-small"
+	}
+	return &OpenAICompatibleProvider{
+		Endpoint: endpoint,
+		Model:    model,
+		APIKey:   apiKey,
+		Timeout:  30 * time.Second,
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+	}
+}
+
+func (p *OpenAICompatibleProvider) Embed(text string) ([]float32, error) {
+	payload := map[string]interface{}{
+		"input": text,
+		"model": p.Model,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("embed: marshal: %w", err)
+	}
+
+	// OpenAI-compatible endpoints expect POST {endpoint}/embeddings.
+	// The user-supplied endpoint may already include /v1; tolerate
+	// both forms.
+	u := strings.TrimRight(p.Endpoint, "/")
+	if !strings.HasSuffix(u, "/embeddings") {
+		u = u + "/embeddings"
+	}
+
+	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("embed: new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if p.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.APIKey)
+	}
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("embed: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("embed: endpoint returned %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// OpenAI shape: {"data":[{"embedding":[...], "index":0, "object":"embedding"}], ...}
+	var result struct {
+		Data []struct {
+			Embedding []float32 `json:"embedding"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("embed: decode: %w", err)
+	}
+	if len(result.Data) == 0 || len(result.Data[0].Embedding) == 0 {
+		return nil, fmt.Errorf("embed: endpoint returned no embedding for model %q", p.Model)
+	}
+	return result.Data[0].Embedding, nil
+}
+
+func (p *OpenAICompatibleProvider) Name() string {
+	return "openai-compatible:" + p.Model
+}
 
 // OllamaProvider hits a local Ollama endpoint for embeddings.
 //
@@ -305,16 +399,23 @@ func validateEmbeddingProfile(p *config.Profile) error {
 	if p.Model == "" {
 		return fmt.Errorf("embedding profile %q: model is required", p.Name)
 	}
-	if p.Provider != "ollama" {
-		return fmt.Errorf("embedding profile %q: provider %q is not implemented (only \"ollama\" is supported by this spec)", p.Name, p.Provider)
+	// 2026-09-14 release-pass: embedding capability is no
+	// longer Ollama-exclusive. OpenAI-compatible endpoints
+	// (LocalAI, LM Studio, vLLM, llama.cpp, HF TEI) speak
+	// `/v1/embeddings` and are first-class.
+	switch p.Provider {
+	case "ollama", "openai-compatible":
+		return nil
 	}
-	return nil
+	return fmt.Errorf("embedding profile %q: provider %q is not implemented (supported: \"ollama\", \"openai-compatible\")", p.Name, p.Provider)
 }
 
 func buildProvider(p *config.Profile) (EmbeddingProvider, error) {
 	switch p.Provider {
 	case "ollama":
 		return NewOllamaProvider(p.BaseURL, p.Model), nil
+	case "openai-compatible":
+		return NewOpenAICompatibleProvider(p.BaseURL, p.Model, p.APIKey), nil
 	}
 	return nil, fmt.Errorf("buildProvider: no implementation for provider %q", p.Provider)
 }
