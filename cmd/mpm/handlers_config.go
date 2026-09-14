@@ -15,10 +15,17 @@
 //
 // Surface:
 //
-//   mpm config                       Interactive wizard over the
-//                                    synth block. Preset choices
-//                                    for MiniMax / OpenAI / Ollama
-//                                    / Anthropic / Custom.
+//   mpm config                       Interactive wizard. Public
+//                                    menu exposes ONLY Custom —
+//                                    the operator picks a protocol
+//                                    (OpenAI-compatible /
+//                                    Anthropic-compatible / Ollama)
+//                                    on the second prompt. Branded
+//                                    provider presets are removed
+//                                    from the public UX (runtime
+//                                    still resolves existing
+//                                    Profiles[...].Provider IDs
+//                                    for backwards compatibility).
 //
 //   mpm config show | list          Print current synth block.
 //
@@ -515,40 +522,120 @@ func pluralForN(n int) string {
 // Interactive wizard
 // ---------------------------------------------------------------------------
 
-// wizardPresets enumerates the canned provider presets the wizard offers.
-// Each preset carries the canonical base_url + model that an operator can
-// accept by default or override per-field. "custom" is the no-default
-// fallback for operators who know what they're doing.
+// wizardPresets returns the public provider menu for the manual
+// configuration wizard. Per the 2026-09-14 config-simplification
+// pass, the public menu exposes ONLY Custom:
 //
-// 2026-09-14 release-pass: derived from the canonical provider
-// registry (cmd/mpm/provider_registry.go) so the wizard menu
-// shares its source-of-truth with the embedding wizard, the
-// detection surface, and the help text. Custom is always entry 1;
-// the remainder is sorted alphabetically by DisplayName.
+//   Provider
+//     1. Custom
+//
+// Branded provider menus (MiniMax, OpenAI, Anthropic, Cohere,
+// Google Gemini, Mistral, Ollama, OpenRouter, xAI, etc.) are
+// deliberately NOT shown. The runtime registry still resolves
+// existing Profiles[...].Provider IDs by string — see
+// `presetForID` and `providersFor` in cmd/mpm/provider_registry.go
+// — so an operator who already saved a profile under a branded ID
+// (e.g. provider=openai) keeps it after re-running the wizard.
+// All wizard-driven NEW profiles are written with provider="custom"
+// and a chosen protocol hint in base_url.
+//
+// The Custom preset's `defaults` are intentionally empty — the
+// wizard asks for the protocol on the next prompt (see
+// `wizardProtocolPresets` below), then for model / base URL /
+// API key / max tokens, applying protocol-derived defaults to
+// empty fields only.
 func wizardPresets() []choice {
-	llms := providersFor(CapGenerate)
-	out := make([]choice, len(llms))
-	for i, p := range llms {
-		out[i] = choice{
-			id:    p.ID,
-			label: p.DisplayName,
-			defaults: config.Profile{
-				Provider: p.ID,
-				Model:    p.DefaultModel,
-				BaseURL:  p.DefaultBaseURL,
-			},
-		}
+	return []choice{
+		{
+			id:       "custom",
+			label:    "Custom",
+			defaults: config.Profile{Provider: "custom"},
+		},
 	}
-	return out
 }
 
-// presetIDForProvider maps an existing provider string to a preset id,
-// or "custom" when the provider does not match a known preset.
+// wizardProtocolPresets returns the public protocol menu shown
+// after Custom. The protocol choice drives the base URL default,
+// whether an API key is required, and what wire the runtime will
+// speak for the profile.
+//
+// Protocol choices reflect actual implemented transports —
+// OpenAI-compatible (Bearer-token, /chat/completions),
+// Anthropic-compatible (x-api-key, /v1/messages), and Ollama
+// (no-auth local daemon). No "Custom HTTP" or other unimplemented
+// shapes are exposed.
+func wizardProtocolPresets() []choice {
+	return []choice{
+		{
+			id:    "openai-compatible",
+			label: "OpenAI-compatible",
+			defaults: config.Profile{
+				BaseURL: "https://api.openai.com/v1",
+			},
+			needsAPIKey: true,
+		},
+		{
+			id:    "anthropic-compatible",
+			label: "Anthropic-compatible",
+			defaults: config.Profile{
+				BaseURL: "https://api.anthropic.com/v1",
+			},
+			needsAPIKey: true,
+		},
+		{
+			id:    "ollama",
+			label: "Ollama (local)",
+			defaults: config.Profile{
+				BaseURL: "http://127.0.0.1:11434",
+			},
+			needsAPIKey: false,
+		},
+	}
+}
+
+// promptProtocol asks the operator to pick a protocol; returns nil
+// on abort. The Custom provider entry is the only path into this
+// prompt — branded entry points are not exposed at the public
+// wizard surface.
+func promptProtocol(rw *bufio.Reader, header string) *choice {
+	presets := wizardProtocolPresets()
+	return promptChoiceDefault(rw, header, presets, "openai-compatible")
+}
+
+// presetIDForProvider maps an existing provider string to a
+// preset id, or "custom" when the provider does not match a known
+// preset. Used by the wizard to default its provider-picker
+// selection to the operator's existing configuration without
+// introducing a branded menu entry.
 func presetIDForProvider(provider string) string {
+	if provider == "" {
+		return "custom"
+	}
 	if _, ok := presetForID(provider); ok {
 		return provider
 	}
 	return "custom"
+}
+
+// protocolForBaseURL heuristically selects the protocol preset
+// that best matches a stored base URL. Used when an operator
+// re-enters the wizard with an existing profile: the protocol
+// picker defaults to the protocol that matches the existing base
+// URL pattern, so the operator doesn't have to re-pick it.
+//
+// The fallback is "openai-compatible" because it is the most
+// widely-deployed wire. Operators override by selecting at the
+// prompt.
+func protocolForBaseURL(baseURL string) string {
+	lu := strings.ToLower(baseURL)
+	switch {
+	case strings.Contains(lu, "anthropic.com"),
+		strings.Contains(lu, "minimax"):
+		return "anthropic-compatible"
+	case strings.Contains(lu, "ollama"), strings.Contains(lu, ":11434"):
+		return "ollama"
+	}
+	return "openai-compatible"
 }
 
 // handleConfigInteractive runs the wizard. Each prompt uses stdin;
@@ -611,13 +698,11 @@ func handleConfigInteractive(c *config.Config) int {
 	}
 	prof := c.Profiles["default"]
 
-	// Preset choice: default to the preset matching the existing
-	// provider (or "custom" if no preset matches). This avoids the
-	// silent-overwrite behaviour of always-defaulting-to-MiniMax.
+	// Preset choice: per the 2026-09-14 simplification,
+	// `wizardPresets()` returns only "Custom". The default
+	// remains "custom" — there is no longer an alphabetical
+	// branded menu to default into.
 	defaultPresetID := "custom"
-	if prof.Provider != "" {
-		defaultPresetID = presetIDForProvider(prof.Provider)
-	}
 	presets := wizardPresets()
 	preset := promptChoiceDefault(rwFromStdin(), "Provider", presets, defaultPresetID)
 	if preset == nil {
@@ -625,25 +710,74 @@ func handleConfigInteractive(c *config.Config) int {
 		return 0
 	}
 
-	// Snapshot the existing profile BEFORE applying preset defaults.
+	// Snapshot the existing profile BEFORE applying defaults.
 	// We use this snapshot to detect which fields the operator
-	// already populated so the wizard doesn't silently overwrite a
-	// custom base_url when only the provider matched a preset.
+	// already populated so the wizard doesn't silently overwrite
+	// a custom base_url/model/api_key when only the protocol
+	// selection matched a preset.
 	existing := prof
 	hadBaseURL := existing.BaseURL != ""
+	hadModel := existing.Model != ""
 	hadKey := existing.APIKey != ""
 
-	// Apply preset defaults ONLY to fields the operator hasn't set.
-	// Existing values win; preset defaults fill empty fields.
-	mergeProfileDefaults(&prof, preset.defaults)
+	// Public wizard UX: Custom + protocol picker.
+	// After Custom, prompt the operator to choose a wire
+	// protocol (OpenAI-compatible / Anthropic-compatible /
+	// Ollama). Branded provider IDs are not exposed.
+	//
+	// The protocol picker is the Stable abstraction; the
+	// runtime infers wire from base_url at construction time
+	// (see inferWire in internal/core/synth/wire.go). The
+	// chosen protocol's defaults (base_url only) flow into
+	// the profile. The operator may override the URL after.
+	_ = protocolForBaseURL // helper retained for future state-aware flows
+	protocol := promptProtocol(rwFromStdin(), "Protocol")
+	if protocol == nil {
+		fmt.Println("Aborted.")
+		return 0
+	}
 
-	// Model prompt — preserve existing model on empty input.
-	// For providers with a curated catalog (or live
-	// discovery, e.g. OpenRouter), show a numbered menu;
-	// Custom is entry 1, remainder alphabetical. Operators
-	// always have the Custom option to type any model.
-	if m := promptModelFromCatalog(rwFromStdin(), preset.id, prof.Model); m != "" {
-		prof.Model = m
+	// Print protocol-specific helper text up front, before
+	// the model / URL / key prompts. Brief: keep helper text
+	// concise — answer "what is this field?" + one or two
+	// realistic examples + whether it's optional.
+	fmt.Println()
+	fmt.Println("Custom lets you connect any supported endpoint.")
+	fmt.Println()
+	fmt.Println("  Model:    the model ID expected by your provider")
+	fmt.Println("            (a hosted model, an OpenRouter model ID,")
+	fmt.Println("            or a local Ollama tag).")
+	fmt.Println("  Base URL: API endpoint for the provider.")
+	fmt.Println("            e.g.  https://api.openai.com/v1")
+	fmt.Println("                  https://api.anthropic.com/v1")
+	fmt.Println("                  http://127.0.0.1:11434")
+	if !protocol.needsAPIKey {
+		fmt.Println("  API key:  optional for this protocol; leave empty")
+		fmt.Println("            if your endpoint does not require one.")
+	} else {
+		fmt.Println("  API key:  provider credential.")
+		fmt.Println("            env vars MPM_LLM_API_KEY / ")
+		fmt.Println("            OAI_COMPAT_API_KEY / ANTHROPIC_API_KEY are")
+		fmt.Println("            accepted when not specified here.")
+	}
+	fmt.Println("  Max tokens: maximum output tokens for generation.")
+	fmt.Println("               applies to LLM only, NOT to embeddings.")
+	fmt.Println()
+
+	// Apply protocol defaults ONLY to fields the operator
+	// hasn't set. Existing values win; protocol defaults fill
+	// empty fields.
+	mergeProfileDefaults(&prof, protocol.defaults)
+
+	// Model prompt — operators type the model freeform.
+	// The previous provider-catalog menu is gone; the wizard
+	// is intentionally schema-light. Existing model preserved
+	// on empty input.
+	model := promptString(rwFromStdin(), "Model", prof.Model)
+	if model != "" {
+		prof.Model = strings.TrimSpace(model)
+	} else if hadModel {
+		prof.Model = existing.Model
 	}
 
 	// 2026-09-14 release-pass: LLM-role validation. If the
@@ -656,13 +790,11 @@ func handleConfigInteractive(c *config.Config) int {
 	// unavailable. Unknown capability = accept (preserves
 	// custom-provider flexibility per the brief).
 	//
-	// We resolve provider/base_url from the live prompt state
-	// rather than prof.Provider/prof.BaseURL so the validator
-	// sees the same values the operator just typed. This keeps
-	// "Custom" + http://127.0.0.1:11434/ — Ollama-compatible —
-	// inside the probe path.
+	// Resolved provider mirrors the protocol; the validator
+	// gates "all-minilm"-class names regardless of protocol
+	// choice.
 	if prof.Model != "" {
-		resolvedProvider := preset.id
+		resolvedProvider := protocol.id
 		resolvedBaseURL := prof.BaseURL
 		switch ValidateLLMRole(resolvedProvider, prof.Model, resolvedBaseURL) {
 		case RoleEmbeddingOnly:
@@ -674,11 +806,11 @@ func handleConfigInteractive(c *config.Config) int {
 		}
 	}
 
-	// Base URL prompt — preserve the operator's existing URL when
-	// non-empty, even if the chosen preset has a different default.
-	// This is the silent-overwrite fix: a custom endpoint must not
-	// be replaced by the preset base_url just because the provider
-	// name happens to match.
+	// Base URL prompt — preserve the operator's existing URL
+	// when non-empty, even if the chosen protocol has a different
+	// default. This is the silent-overwrite fix: a custom endpoint
+	// must not be replaced by the protocol base_url just because
+	// the protocol selection matched.
 	baseURL := promptString(rwFromStdin(), "Base URL", prof.BaseURL)
 	if baseURL != "" {
 		prof.BaseURL = strings.TrimSpace(baseURL)
@@ -687,10 +819,10 @@ func handleConfigInteractive(c *config.Config) int {
 		prof.BaseURL = existing.BaseURL
 	}
 
-	// API key prompt — only if preset needs it (skip for Ollama).
-	// Also skip when the provider is "ollama" by existing config.
-	needsKey := preset.id != "ollama" && prof.Provider != "ollama"
-	if needsKey {
+	// API key prompt — only if protocol requires it (skip
+	// for Ollama/local). Honour existing key on empty input
+	// unless (unchanged) is shown.
+	if protocol.needsAPIKey {
 		var keyDefault string
 		if hadKey {
 			keyDefault = "(unchanged)"
@@ -721,13 +853,24 @@ func handleConfigInteractive(c *config.Config) int {
 		prof.TimeoutSecs = existing.TimeoutSecs
 	}
 
-	// If the operator had no provider set AND the preset didn't supply
-	// one (custom), the wizard is in a degenerate state — refuse to
-	// save and tell the operator what they need to do.
-	if prof.Provider == "" && preset.id == "custom" {
+	// Refuse to save when the wizard collected no usable profile
+	// state — model + base URL are the minimum to be useful. This
+// guards against the wizard silently writing an empty profile on
+// a fresh install.
+	if prof.Model == "" && prof.BaseURL == "" && !hadModel && !hadBaseURL {
 		fmt.Println()
-		fmt.Println("A provider is required. Use `mpm config profile set default provider <name>` for non-interactive configuration, or re-run the wizard and choose a preset.")
+		fmt.Println("A model or base URL is required. Run `mpm config profile set default model <id>` for non-interactive configuration, or re-run the wizard and provide a model or URL.")
 		return 1
+	}
+
+	// Public wizard always writes provider="custom" (the only
+	// public provider menu entry). Runtime infers wire from
+	// base_url at construction time. Existing profiles that had
+	// a branded provider ID keep it via the snapshot path above
+	// (the wizard never overwrites an already-set
+	// prof.Provider).
+	if prof.Provider == "" {
+		prof.Provider = "custom"
 	}
 
 	// Embedding step: surface the embedding subsystem, default to
@@ -836,13 +979,21 @@ func displayModelOrEmpty(m string) string {
 	return m
 }
 
-// wizardEmbeddingStep presents the embedding subsystem in the wizard
-// without re-implementing detect-embedding. When embedding is already
-// configured, defaults to "leave unchanged". Offers auto-detect as a
-// sub-prompt that delegates to the same Ollama probe used by
-// `mpm config detect-embedding`.
+// wizardEmbeddingStep presents the embedding subsystem in the
+// wizard without re-implementing detect-embedding. Embeddings are
+// OPTIONAL — absence is informational, not a fault.
+//
+// 2026-09-14 simplification: the public menu offers:
+//   1. Leave unchanged (or skip if not configured)
+//   2. Detect (probe Ollama + OpenAI-compatible localhost)
+//   3. Configure manually (Custom + protocol)
+//
+// Branded provider menus (Ollama/OpenAI/OpenRouter/etc.) are NOT
+// surfaced — manual embedding configuration goes through Custom
+// + the protocol picker. Auto-detect preserves the convenience
+// path; manual configuration preserves operator control.
 func wizardEmbeddingStep(c *config.Config) {
-	fmt.Println("Embedding")
+	fmt.Println("Embedding (optional — semantic/vector retrieval)")
 	embedCfg := mpminternal.DefaultEmbeddingConfig()
 	if embedCfg.IntentionallyDisabled {
 		fmt.Println("  current: intentionally disabled")
@@ -855,8 +1006,8 @@ func wizardEmbeddingStep(c *config.Config) {
 		fmt.Println("  current: not configured")
 	}
 	fmt.Println("  1. Leave unchanged")
-	fmt.Println("  2. Detect local Ollama embedding model")
-	fmt.Println("  3. Configure manually (`mpm config profile ...` + `mpm config component set embedding <name>`)")
+	fmt.Println("  2. Detect local embedding model")
+	fmt.Println("  3. Configure manually (Custom)")
 	fmt.Println("  4. Disable embedding")
 	choice := promptString(rwFromStdin(), "Choice", "1")
 	switch strings.TrimSpace(choice) {
@@ -864,6 +1015,8 @@ func wizardEmbeddingStep(c *config.Config) {
 		// Delegate to the canonical detect-embedding probe.
 		cmd := &DetectEmbeddingCmd{}
 		cmd.Run()
+	case "3":
+		wizardEmbeddingCustom(c)
 	case "4":
 		if c.Components == nil {
 			c.Components = map[string]string{}
@@ -873,6 +1026,101 @@ func wizardEmbeddingStep(c *config.Config) {
 	default:
 		fmt.Println("Embedding unchanged.")
 	}
+}
+
+// wizardEmbeddingCustom walks the operator through manual
+// embedding configuration via Custom + protocol picker. There
+// is NO "Max tokens" prompt on this path — embeddings have no
+// generation context. The protocol set is smaller than the LLM
+// path (OpenAI-compatible + Ollama only); Anthropic-compatible
+// is removed because Anthropic exposes no native /embeddings
+// endpoint.
+func wizardEmbeddingCustom(c *config.Config) {
+	fmt.Println()
+	fmt.Println("Embedding · Custom")
+	fmt.Println("Custom lets you connect any supported embedding endpoint.")
+	fmt.Println()
+	fmt.Println("  Examples:")
+	fmt.Println("    OpenAI-compatible:")
+	fmt.Println("      http://localhost:1234/v1")
+	fmt.Println("      http://localhost:8000/v1")
+	fmt.Println("      https://api.openai.com/v1")
+	fmt.Println("    Ollama:")
+	fmt.Println("      http://127.0.0.1:11434")
+	fmt.Println()
+	fmt.Println("  Embeddings are optional; lexical/structured")
+	fmt.Println("  retrieval still works without them.")
+	fmt.Println()
+
+	// Embedding-protocol picker. Subset of the LLM protocol
+	// list (no Anthropic-compatible — it has no native
+	// /embeddings endpoint).
+	embedProtocols := []choice{
+		{
+			id:    "openai-compatible",
+			label: "OpenAI-compatible",
+			defaults: config.Profile{
+				BaseURL: "https://api.openai.com/v1",
+			},
+			needsAPIKey: true,
+		},
+		{
+			id:    "ollama",
+			label: "Ollama (local)",
+			defaults: config.Profile{
+				BaseURL: "http://127.0.0.1:11434",
+			},
+			needsAPIKey: false,
+		},
+	}
+	protocol := promptChoiceDefault(rwFromStdin(), "Protocol", embedProtocols, "openai-compatible")
+	if protocol == nil {
+		fmt.Println("Aborted.")
+		return
+	}
+
+	prof := config.Profile{Name: "embedding", Provider: "custom"}
+	mergeProfileDefaults(&prof, protocol.defaults)
+
+	model := promptString(rwFromStdin(), "Model", "")
+	if model != "" {
+		prof.Model = strings.TrimSpace(model)
+	}
+	baseURL := promptString(rwFromStdin(), "Base URL", prof.BaseURL)
+	if baseURL != "" {
+		prof.BaseURL = strings.TrimSpace(baseURL)
+	}
+	if protocol.needsAPIKey {
+		key := promptSecret(rwFromStdin(), "API key (leave empty if not required)", "")
+		if key != "" {
+			prof.APIKey = strings.TrimSpace(key)
+		}
+	}
+
+	if prof.Model == "" || prof.BaseURL == "" {
+		fmt.Println("A model and base URL are required to bind an embedding profile.")
+		return
+	}
+
+	// Embedding profiles skip role validation (an embedding
+	// profile is precisely what should hold an embedding
+	// model). The wizard creates the profile + binding and
+	// saves.
+	if c.Profiles == nil {
+		c.Profiles = map[string]config.Profile{}
+	}
+	if c.Components == nil {
+		c.Components = map[string]string{}
+	}
+	c.Profiles["embedding"] = prof
+	c.Components["embedding"] = "embedding"
+	if err := config.SaveConfig(c); err != nil {
+		fmt.Println("Failed to save config:", err)
+		return
+	}
+	fmt.Println()
+	fmt.Printf("✓ embedded profile \"embedding\" (provider=%s, model=%s)\n", prof.Provider, prof.Model)
+	fmt.Println("✓ bound components.embedding = embedding")
 }
 
 // wizardCriticStep presents the only specialist model that matters in
@@ -1151,9 +1399,10 @@ func mergeProfileDefaults(target *config.Profile, src config.Profile) {
 
 // choice is one row in a numbered-choice prompt.
 type choice struct {
-	id       string
-	label    string
-	defaults config.Profile
+	id          string
+	label       string
+	defaults    config.Profile
+	needsAPIKey bool // protocol preset hint; LLM/embedding path consults this
 }
 
 // rwFromStdin returns a buffered reader around stdin. Used by
@@ -1401,9 +1650,28 @@ func printConfigHelp() {
 	render.Heading(os.Stdout, "Config")
 	render.BlankLine(os.Stdout)
 	render.Section(os.Stdout, "LLM provider and embedding model configuration")
-	render.Plain(os.Stdout, "MPM distinguishes two provider roles:")
-	render.Label(os.Stdout, "LLM provider", "used for generation and reasoning-backed capabilities (synthesis, critic/review)")
-	render.Label(os.Stdout, "Embedding model", "used for semantic / vector similarity retrieval — OPTIONAL; absence is informational, not a defect")
+	render.Plain(os.Stdout, "MPM is a substrate, not a provider catalogue. Manual")
+	render.Plain(os.Stdout, "configuration is Custom + protocol-driven.")
+	render.Label(os.Stdout, "LLM provider", "used for generation and reasoning-backed capabilities (synthesis, critic/review). Manual config exposes Custom only; pick a protocol (OpenAI-compatible / Anthropic-compatible / Ollama).")
+	render.Label(os.Stdout, "Embedding model", "used for semantic / vector similarity retrieval — OPTIONAL; absence is informational, not a defect.")
+	render.BlankLine(os.Stdout)
+
+	render.Section(os.Stdout, "Manual configuration (Custom)")
+	render.Plain(os.Stdout, "Run `mpm config` (interactive wizard) or")
+	render.Plain(os.Stdout, "`mpm config profile add <name>` to create profiles.")
+	render.Plain(os.Stdout, "Custom lets you connect any supported endpoint.")
+	render.Plain(os.Stdout, "  Common examples:")
+	render.Plain(os.Stdout, "    OpenAI-compatible:")
+	render.Plain(os.Stdout, "      https://api.openai.com/v1")
+	render.Plain(os.Stdout, "      https://openrouter.ai/api/v1")
+	render.Plain(os.Stdout, "      http://localhost:1234/v1")
+	render.Plain(os.Stdout, "    Anthropic-compatible:")
+	render.Plain(os.Stdout, "      https://api.anthropic.com/v1")
+	render.Plain(os.Stdout, "    Ollama (local):")
+	render.Plain(os.Stdout, "      http://127.0.0.1:11434")
+	render.BlankLine(os.Stdout)
+	render.Plain(os.Stdout, "Existing profiles with branded provider IDs (openai,")
+	render.Plain(os.Stdout, "anthropic, ollama, ...) continue to load and wire unchanged.")
 	render.BlankLine(os.Stdout)
 
 	render.Section(os.Stdout, "Configuration model (v0.1)")
@@ -1414,7 +1682,7 @@ func printConfigHelp() {
 	render.BlankLine(os.Stdout)
 
 	render.Section(os.Stdout, "Usage")
-	render.Label(os.Stdout, "mpm config", "interactive wizard (writes profiles.default)")
+	render.Label(os.Stdout, "mpm config", "interactive wizard (writes profiles.default; Custom + protocol)")
 	render.Label(os.Stdout, "mpm config show | list", "show current configuration")
 	render.Label(os.Stdout, "mpm config get <key>", "get one value")
 	render.Label(os.Stdout, "mpm config set <key> <value>", "set one value on profiles.default")
@@ -1431,9 +1699,9 @@ func printConfigHelp() {
 	render.BlankLine(os.Stdout)
 
 	render.Section(os.Stdout, "Examples")
-	render.Plain(os.Stdout, "  mpm config set api_key $OPENAI_API_KEY")
-	render.Plain(os.Stdout, "  mpm config set model gpt-4o")
-	render.Plain(os.Stdout, "  mpm config set endpoint https://api.openai.com/v1")
+	render.Plain(os.Stdout, "  mpm config profile add default --provider custom --model gpt-5 \\")
+	render.Plain(os.Stdout, "      --base-url https://api.openai.com/v1")
+	render.Plain(os.Stdout, "  mpm config profile set default api_key <key>")
 	render.Plain(os.Stdout, "  mpm config set synthesis_enabled false")
 	render.BlankLine(os.Stdout)
 
@@ -1579,25 +1847,54 @@ func handleProfileAdd(c *config.Config, name string) int {
 	}
 	p := config.Profile{Name: name}
 	if isatty(os.Stdin) {
-		p.Provider = strings.TrimSpace(promptString(rwFromStdin(), "Provider (openai/anthropic/ollama/custom)", "custom"))
+		// 2026-09-14 simplification: interactive profile add
+		// walks through Custom + protocol picker + helper
+		// text, mirroring the canonical `mpm config`
+		// wizard. The legacy "Provider (openai/anthropic/
+		// ollama/custom)" raw prompt is gone — branded
+		// provider IDs are not exposed in the public UX;
+		// operators who want a branded ID set it via
+		// `mpm config profile set <name> provider <id>`.
+		fmt.Println()
+		fmt.Println("Custom lets you connect any supported endpoint.")
+		fmt.Println()
+		fmt.Println("  Model:    the model ID expected by your provider")
+		fmt.Println("  Base URL: API endpoint for the provider")
+		fmt.Println("  API key:  provider credential (optional for local endpoints)")
+		fmt.Println()
+
+		protocol := promptProtocol(rwFromStdin(), "Protocol")
+		if protocol == nil {
+			fmt.Println("Aborted.")
+			return 0
+		}
+		mergeProfileDefaults(&p, protocol.defaults)
+		p.Provider = "custom"
+
 		p.Model = strings.TrimSpace(promptString(rwFromStdin(), "Model", ""))
-		p.BaseURL = strings.TrimSpace(promptString(rwFromStdin(), "Base URL", ""))
-		if p.Provider != "ollama" {
-			p.APIKey = strings.TrimSpace(promptSecret(rwFromStdin(), "API key", ""))
+		baseURL := promptString(rwFromStdin(), "Base URL", p.BaseURL)
+		if baseURL != "" {
+			p.BaseURL = strings.TrimSpace(baseURL)
+		}
+		if protocol.needsAPIKey {
+			key := promptSecret(rwFromStdin(), "API key (leave empty if not required)", "")
+			if key != "" {
+				p.APIKey = strings.TrimSpace(key)
+			}
 		}
 		tempStr := promptString(rwFromStdin(), "Temperature (0.0-2.0)", "0.2")
 		if t, err := strconvAtoiFloat(tempStr); err == nil {
 			p.Temperature = &t
 		}
 	} else {
-		fmt.Printf("Created empty profile %q. Use 'mpm config profile set %s <key> <value>' to fill.\n", name, name)
+		fmt.Printf("Created empty profile %q. Use `mpm config profile set %s <key> <value>` to fill.\n", name, name)
 	}
 	c.Profiles[name] = p
 	if err := config.SaveConfig(c); err != nil {
 		usererror.Error("saving config: %v", err)
 		return 1
 	}
-	fmt.Printf("✓ profile %q added\n", name)
+	fmt.Printf("\u2713 profile %q added\n", name)
 	return 0
 }
 

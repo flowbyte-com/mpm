@@ -302,42 +302,98 @@ Where practical, dashboard attention state should reuse the same data sources an
 
 ---
 
-## 9. Provider and model menus
+## 9. Provider and model configuration
 
-### Provider ordering
+### Manual configuration is Custom + protocol
 
-In provider-selection menus, `Custom` is always entry 1.
-All remaining providers are sorted alphabetically by display name (case-insensitive), with a deterministic ID-based tiebreak.
+Manual provider configuration (`mpm config`, `mpm config profile add`)
+exposes ONLY `Custom`. Branded provider menus (Anthropic / Cohere /
+Google Gemini / MiniMax / Mistral / Ollama / OpenAI / OpenAI-compatible /
+OpenRouter / xAI, etc.) are NOT surfaced at the public wizard prompt.
 
-Sort order is NOT derived from map iteration, hand order, or recommendation metadata. Use the canonical `providersFor(capability)` helper.
+After `Custom`, the operator picks a **protocol**:
 
-### Model ordering
+- `OpenAI-compatible` — works with OpenAI, OpenRouter, Mistral,
+  LocalAI, LM Studio, vLLM, and any other Bearer-token
+  `/v1/chat/completions` endpoint.
+- `Anthropic-compatible` — works with Anthropic, MiniMax, and any
+  other `x-api-key` `/v1/messages` endpoint.
+- `Ollama` — local daemon, no authentication.
 
-When manual model entry is offered, `Custom model` is entry 1.
-Remaining models are sorted alphabetically (case-insensitive), with a deterministic tiebreak on the original model string.
+The protocol choice drives the default `base_url` and whether an API
+key is required; the operator can override any field. Public
+protocol choices MUST reflect actual implemented transports — do not
+expose "Custom HTTP" or other unimplemented shapes.
 
-Recommendation metadata may display `(recommended)` but MUST NOT reorder the choices.
+Branding / vendor menus are intentionally absent from public UX so
+operators do not need to track vendor rebrandings across MPM
+releases. MPM is a substrate, not a provider catalogue.
 
-### Capability orientation
+### Existing profile compatibility
 
-Configuration and discovery are capability-oriented rather than vendor-exclusive.
-A provider that supports `embed` is a valid embedding choice regardless of its vendor name.
-A provider that supports `generate` is a valid LLM choice regardless of its vendor name.
+Existing profiles with branded provider IDs (`provider=openai`,
+`provider=anthropic`, `provider=ollama`, `provider=openrouter`,
+`provider=minimax`, ...) MUST continue to load and wire correctly
+without the operator having to rename them. The runtime registry
+resolves each ID to a wire and capability set; this resolution is
+INTERNAL and never appears in the public wizard menu.
 
-The canonical capability enum is `generate` and `embed`. A model may support one, both, or `unknown` (no positive evidence yet). Unknown is NOT false.
+Persistence shape:
 
-Do not encode `provider == "ollama" → embedding` or `provider == "openai" → generation`. Capability is the contract.
+```json
+{
+  "provider": "openai",        // historical, preserved
+  "model": "...",               // freeform; operator types any current ID
+  "base_url": "...",
+  "api_key": "..."
+}
+```
+
+New wizard-driven profiles are written with `provider: "custom"`.
+Runtime wire inference decides which adapter speaks (`inferWire`
+keys off the base URL substring; see `internal/core/synth/wire.go`).
+
+### Model presets are not advertised
+
+MPM does NOT maintain vendor model-string lists (no `gpt-4o`,
+`claude-3-...`, `gemini-2.5-...`, `grok-...`, `mistral-...`,
+`command-...`, `openrouter/free`, etc.) in the public menu.
+Operators type the current model ID at the Custom prompt. Do not
+add branded model presets to `modelCatalogFor`; new releases do
+not have to track vendor rebrandings.
+
+### Capability orientation is structural
+
+Configuration and discovery are capability-oriented rather than
+vendor-exclusive. A provider that supports `embed` is a valid
+embedding choice regardless of its vendor name. A provider that
+supports `generate` is a valid LLM choice regardless of its
+vendor name.
+
+The canonical capability enum is `generate` and `embed`. A model may
+support one, both, or `unknown` (no positive evidence yet). Unknown is
+NOT false.
+
+Do not encode `provider == "ollama" → embedding` or
+`provider == "openai" → generation`. Capability is the contract.
+
+The capability-orientation contract is INTERNAL — it underpins
+wire dispatch and the role validator. It is NOT a menu-selection
+rule for branded providers.
 
 ### Actionable dashboard state
 
-When a configurable dashboard component is absent or degraded, the hint row must include the canonical command used to configure or repair it.
+When a configurable dashboard component is absent or degraded, the hint
+row must include the canonical command used to configure or repair
+it.
 
 Examples:
 
 - absent LLM: `run 'mpm config' to configure one`
 - absent embedding: `run 'mpm config detect-embedding --apply' to configure one`
 
-Do not make dashboard hints enormous. Detailed capability/degradation explanation can remain in Doctor/help.
+Do not make dashboard hints enormous. Detailed
+capability/degradation explanation can remain in Doctor/help.
 
 ---
 

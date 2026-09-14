@@ -473,22 +473,21 @@ func probeOpenRouter() []string {
 	return ids
 }
 
-// openRouterCatalogForView returns the model list for the
-// OpenRouter menu. Live discovery is preferred; the offline
-// fallback (just `openrouter/free`) keeps the operator
-// forward-compatible when the probe fails or is offline.
+// openRouterCatalogForView returns the model list for an
+// OpenRouter-flavoured view. Live discovery via /api/v1/models
+// is the canonical path; an empty result on probe failure is
+// expected — the 2026-09-14 simplification pass removed the
+// branded `openrouter/free` fallback because the public wizard
+// surface does not advertise OpenRouter presets at all (operators
+// type the current model ID at the Custom prompt). Internal
+// callers that want a stable preset can pipe through Custom at
+// runtime.
 //
-// Stable alphabetical sort: Custom stays first (added by the
-// caller); the rest is sorted case-insensitive with a
-// deterministic tiebreak on the original string.
+// Stable alphabetical sort: caller prepends Custom at index 0;
+// the rest is sorted case-insensitive with a deterministic
+// tiebreak on the original string.
 func openRouterCatalogForView() []string {
 	catalog := probeOpenRouter()
-	if len(catalog) == 0 {
-		// Offline fallback: keep just the stable router
-		// preset so the operator always has at least one
-		// path forward when discovery is unavailable.
-		catalog = modelCatalogFor("openrouter")
-	}
 	sort.SliceStable(catalog, func(i, j int) bool {
 		li := strings.ToLower(catalog[i])
 		lj := strings.ToLower(catalog[j])

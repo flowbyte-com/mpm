@@ -1,29 +1,56 @@
 // cmd/mpm/provider_registry.go — Canonical provider registry.
 //
-// 2026-09-14 release-pass: the LLM wizard, the embedding
-// wizard, the detection surface, and the help text previously
-// each carried their own hand-ordered provider arrays. The
-// release-pass contract collapses every public provider surface
-// to one canonical registry keyed by capability.
+// 2026-09-14 config-simplification pass: MPM is a substrate, not
+// a provider catalogue. Public wizard UX exposes ONLY Custom;
+// branded presets are deliberately removed from the menus users
+// see. The registry below is the INTERNAL truth — used by:
 //
-// Each provider declares its capabilities as a semantic enum
-// (generate / embed) rather than by vendor name. A provider may
-// support one capability or both. The LLM menu is derived by
-// filtering `Capabilities{Generate: true}` (plus the universal
-// "custom" entry); the embedding menu is derived by filtering
-// `Capabilities{Embed: true}`.
+//   - Runtime profile resolution by ID (`presetForID`). Existing
+//     profiles written under a branded provider ID
+//     (provider=openai, provider=anthropic, provider=ollama,
+//     etc.) MUST continue to load and wire correctly without
+//     the operator having to rename them. The provider ID is
+//     the address; the registry resolves it to wire, capability,
+//     and base URL hints.
+//   - The role validator (ValidateLLMRole) for capability
+//     filtering — Ollama capability probing, embedding-only
+//     rejection, etc.
+//   - The embedding discovery surface (`mpm config
+//     detect-embedding`), which probes Ollama +
+//     OpenAI-compatible localhost endpoints regardless of which
+//     branded IDs exist in the registry.
 //
-// Ordering (release-pass hard requirement):
+// Public wizard choices, persisted legacy/current provider IDs,
+// and internal transport adapters are intentionally separated:
 //
-//   - Custom is ALWAYS entry 1 (the brief explicitly carves it
-//     out of alphabetical ordering — experts who know their
-//     endpoint should not have to scroll past branded providers).
+//   - Public wizards (the `mpm config` interactive LLM/embedding
+//     prompts, `mpm config profile add`, `mpm config` help text)
+//     surface ONLY Custom + a protocol picker (OpenAI-compatible
+//     / Anthropic-compatible / Ollama). The wizard writes
+//     `provider: "custom"` and a base URL; runtime wire
+//     inference decides which adapter speaks.
+//   - Persisted provider IDs (Profiles[...].Provider) keep their
+//     historical values so existing configs continue to load
+//     unchanged. Runtime falls through to base-URL wire inference
+//     for any ID.
+//
+// Branded model catalogues (GPT families, Claude families,
+// Gemini families, Grok, Mistral, Command, OpenRouter Free
+// Router, etc.) are no longer advertised by the wizard. Each
+// operator types the current model ID freeform in the Custom
+// path; the canonical model strings live with the provider, not
+// in this substrate.
+//
+// Ordering (capability-oriented public-API contract that still
+// applies when callers do want the full registry view, e.g. for
+// diagnostic surfaces or future operator tooling):
+//
+//   - Custom is ALWAYS entry 1.
 //   - All remaining entries are sorted alphabetically by
 //     DisplayName, case-insensitive, deterministic.
 //
-// The registry is intentionally minimal — no discovery, no
-// network. Discovery lives in cmd/mpm/detect_embedding.go and
-// feeds the registry's model catalog at render time.
+// The registry carries NO network IO. Discovery lives in
+// cmd/mpm/detect_embedding.go.
 
 package main
 
@@ -110,8 +137,13 @@ var canonicalProviders = []ProviderDefinition{
 		NeedsAPIKey:     false,
 	},
 
-	// B: OpenAI-compatible. Synthesis uses wireOpenAI dispatch;
-	// embeddings use the OpenAICompatibleProvider.
+	// A: OpenAI-compatible. The canonical "wire" abstraction
+	// surfaced through the public wizard when the operator picks
+	// Custom + OpenAI-compatible protocol. Synthesis uses
+	// wireOpenAI dispatch; embeddings use the
+	// OpenAICompatibleProvider. DefaultBaseURL is a localhost
+	// example only (LM Studio on 1234 is the most common local
+	// endpoint); operators override per their stack.
 	{
 		ID:              "openai-compatible",
 		DisplayName:     "OpenAI-compatible (LocalAI / LM Studio / vLLM)",
@@ -124,93 +156,112 @@ var canonicalProviders = []ProviderDefinition{
 	// B: Anthropic-protocol. Synthesis supports wireAnthropic;
 	// embeddings are NOT available (Anthropic has no native
 	// /embeddings endpoint). Capability is CapGenerate only.
+	// DefaultModel is empty per the simplification rule
+	// (operators type any current Anthropic model ID at the
+	// Custom prompt; runtime reads Profiles[...].Model verbatim).
 	{
 		ID:              "anthropic",
 		DisplayName:     "Anthropic",
 		Capabilities:    CapGenerate,
-		DefaultModel:    "claude-haiku-4-5",
+		DefaultModel:    "",
 		DefaultBaseURL:  "https://api.anthropic.com/v1",
 		NeedsAPIKey:     true,
 	},
 
 	// B: Cohere exposes an OpenAI-compat endpoint at
-	// api.cohere.com/v1. Capability is generate + embed
-	// (Cohere has native embed-v4.0).
+	// api.cohere.com/v1 for CHAT / GENERATION only. Cohere's
+	// Embed v2 endpoint uses a different request shape
+	// (input_type, embedding_types) and is NOT covered by the
+	// OpenAI-compat surface. Capability is therefore
+	// CapGenerate only. DefaultModel is empty per the
+	// simplification rule.
 	{
 		ID:              "cohere",
 		DisplayName:     "Cohere",
-		Capabilities:    CapGenerate | CapEmbed,
-		DefaultModel:    "command-a-03-2025",
+		Capabilities:    CapGenerate,
+		DefaultModel:    "",
 		DefaultBaseURL:  "https://api.cohere.com/v1",
 		NeedsAPIKey:     true,
 	},
 
 	// B: OpenAI API proper. Embedding via /v1/embeddings uses
-	// the OpenAICompatibleProvider (same wire).
+	// the OpenAICompatibleProvider (same wire). DefaultModel is
+	// left empty deliberately — the public wizard does NOT
+	// advertise a flagship OpenAI model. Existing operators
+	// who've set DefaultModel manually continue to use it;
+	// runtime reads Profiles[...].Model verbatim.
 	{
 		ID:              "openai",
 		DisplayName:     "OpenAI",
 		Capabilities:    CapGenerate | CapEmbed,
-		DefaultModel:    "gpt-5-luna",
+		DefaultModel:    "",
 		DefaultBaseURL:  "https://api.openai.com/v1",
 		NeedsAPIKey:     true,
 	},
 
 	// B: Google Gemini exposes an OpenAI-compat endpoint at
 	// generativelanguage.googleapis.com/v1beta/openai.
-	// Capability is generate + embed (Gemini Embedding is
-	// a first-class model family).
+	// Capability is generate + embed. DefaultModel is empty
+	// per the simplification rule.
 	{
 		ID:              "google-gemini",
 		DisplayName:     "Google Gemini",
 		Capabilities:    CapGenerate | CapEmbed,
-		DefaultModel:    "gemini-3.0-pro",
+		DefaultModel:    "",
 		DefaultBaseURL:  "https://generativelanguage.googleapis.com/v1beta/openai",
 		NeedsAPIKey:     true,
 	},
 
-	// B: MiniMax is Anthropic-protocol.
+	// B: MiniMax is Anthropic-protocol. DefaultModel is empty per
+	// the simplification rule (operators type any current MiniMax
+	// model ID at the Custom prompt).
 	{
 		ID:              "minimax",
 		DisplayName:     "MiniMax",
 		Capabilities:    CapGenerate,
-		DefaultModel:    "MiniMax-M2.7",
+		DefaultModel:    "",
 		DefaultBaseURL:  "https://api.minimax.io/anthropic/v1",
 		NeedsAPIKey:     true,
 	},
 
 	// B: Mistral AI exposes an OpenAI-compat endpoint at
-	// api.mistral.ai/v1.
+	// api.mistral.ai/v1 for both chat and embeddings. The
+	// `/v1/embeddings` endpoint accepts the OpenAI-shaped
+	// `{input, model}` payload, so the existing
+	// OpenAICompatibleProvider works against Mistral unchanged.
+	// DefaultModel is empty per the simplification rule.
 	{
 		ID:              "mistral",
 		DisplayName:     "Mistral AI",
-		Capabilities:    CapGenerate,
-		DefaultModel:    "mistral-medium-3-5",
+		Capabilities:    CapGenerate | CapEmbed,
+		DefaultModel:    "",
 		DefaultBaseURL:  "https://api.mistral.ai/v1",
 		NeedsAPIKey:     true,
 	},
 
 	// B: OpenRouter is the multi-model aggregator. It
 	// exposes an OpenAI-compat endpoint at
-	// openrouter.ai/api/v1. Capability is generate + embed
-	// (OpenRouter surfaces embedding-capable models from its
-	// catalogue; we filter by capability at the model
-	// layer).
+	// openrouter.ai/api/v1. DefaultModel is empty per the
+	// simplification rule (OpenRouter Free Router is not
+	// advertised). Embedding discovery at
+	// `mpm config detect-embedding` still probes
+	// /api/v1/models when reachable.
 	{
 		ID:              "openrouter",
 		DisplayName:     "OpenRouter",
 		Capabilities:    CapGenerate | CapEmbed,
-		DefaultModel:    "openrouter/free",
+		DefaultModel:    "",
 		DefaultBaseURL:  "https://openrouter.ai/api/v1",
 		NeedsAPIKey:     true,
 	},
 
 	// B: xAI exposes an OpenAI-compat endpoint at api.x.ai/v1.
+	// DefaultModel is empty per the simplification rule.
 	{
 		ID:              "xai",
 		DisplayName:     "xAI",
 		Capabilities:    CapGenerate,
-		DefaultModel:    "grok-4.6",
+		DefaultModel:    "",
 		DefaultBaseURL:  "https://api.x.ai/v1",
 		NeedsAPIKey:     true,
 	},
@@ -229,20 +280,23 @@ var canonicalProviders = []ProviderDefinition{
 
 // Deliberately NOT exposed as menu entries (D — future work):
 //
-//   - AWS Bedrock: requires AWS SigV4 signing. Out of scope for
-//     this release.
+//   - AWS Bedrock: requires AWS SigV4 signing. Out of scope.
 //   - Azure OpenAI: protocol-compatible with OpenAI but
-//     deployment-name routing differs. Operators can use the
-//     Custom entry with the Azure endpoint until a first-class
+//     deployment-name routing differs. Operators reach Azure
+//     via Custom + the Azure endpoint until a first-class
 //     adapter lands.
-//   - Google Gemini / Vertex AI: different auth + protocol.
-//     Future work.
-//   - Cohere: different API shape.
+//   - Google Vertex AI: different auth + protocol. Operators
+//     reach Vertex via Custom + the Vertex endpoint.
 //   - Voyage AI: different API shape.
-//   - Hugging Face TEI: OpenAI-compatible `/v1/embeddings`; can
-//     be reached today via the openai-compatible entry with a
-//     custom base URL. Promoting to a first-class entry is
-//     future work once we want TEI-specific model catalogs.
+//   - Hugging Face TEI: OpenAI-compatible `/v1/embeddings`;
+//     reachable today via Custom + OpenAI-compatible protocol
+//     + the TEI endpoint. Promoting to a first-class entry is
+//     future work.
+//
+// Public wizard menus expose ONLY Custom + a protocol picker.
+// All branded entries in the slice above remain for backwards-
+// compatible runtime profile resolution by ID — see the file
+// header comment for the layering.
 
 // providersFor returns the providers that support capability
 // c, sorted with Custom first and the remainder alphabetical
@@ -309,87 +363,48 @@ func presetForID(id string) (ProviderDefinition, bool) {
 }
 
 // modelCatalogFor returns the curated model preset list for a
-// provider, for use when no live discovery is available. The
-// Custom entry gets an empty list (operator types the model).
+// provider. Used internally by runtime code that needs a fallback
+// list (e.g. `openRouterCatalogForView` when live `/api/v1/models`
+// discovery is unavailable). Public wizard UX does NOT consult this
+// map — the public menu path goes through Custom + freeform model
+// entry, which keeps the substrate free of vendor rename churn.
 //
-// 2026-09-14 release-pass: do NOT hard-code a single flagship
-// per provider. Each catalog includes a small set of widely-
-// deployed models. Operators are not punished for picking a
-// non-flagship; the Custom entry guarantees forward compatibility.
+// 2026-09-14 config-simplification: do not advertise branded model
+// catalogues. MPM does not maintain model-string lists per vendor
+// (claude-*, gpt-*, gemini-*, grok-*, mistral-*, command-*,
+// OpenRouter Free Router, etc.). Operators type the current model
+// ID at the Custom prompt; new releases do not have to track
+// vendor rebrandings.
 //
-// 2026-09-14 catalogue refresh: stale models (claude-3-*, gpt-4o-era
-// "main" defaults, retired Gemini preview models) have been removed
-// from the normal preset lists. Each list now contains current
-// supported generation/embedding models per the release-pass brief.
-// OpenRouter uses live discovery via /api/v1/models; this catalog is
-// the fallback only.
+// All entries return nil (empty list) so callers fall through to
+// their discovery paths or freeform prompts. The function signature
+// is preserved for backwards compat with internal callers; new code
+// should NOT add branded presets here.
 var modelCatalogFor = func(providerID string) []string {
 	switch providerID {
-	case "openai":
-		return []string{
-			"gpt-5-luna",
-			"gpt-5-sol",
-			"gpt-5-terra",
-			"text-embedding-3-large",
-			"text-embedding-3-small",
-		}
-	case "anthropic":
-		return []string{
-			"claude-haiku-4-5",
-			"claude-opus-4-5",
-			"claude-sonnet-4-5",
-		}
-	case "cohere":
-		return []string{
-			"command-a-03-2025",
-			"command-r-plus",
-			"embed-v4.0",
-		}
-	case "google-gemini":
-		return []string{
-			"gemini-3.0-pro",
-			"gemini-3.0-flash",
-			"gemini-2.5-pro",
-			"gemini-embedding-001",
-		}
-	case "minimax":
-		return []string{
-			"MiniMax-M2.7",
-			"MiniMax-M2.7-highspeed",
-		}
-	case "mistral":
-		return []string{
-			"mistral-large-3",
-			"mistral-medium-3-5",
-			"mistral-small-2603",
-		}
 	case "ollama":
-		// Ollama: discovery is preferred over a preset catalog.
-		// The catalog is a fallback only when /api/tags is
-		// unreachable. Empty here signals "discover if you can".
+		// Live discovery via /api/tags is the canonical path.
+		// Empty here is intentional — operator types or discovery
+		// populates.
 		return nil
 	case "openai-compatible":
-		// Operator-supplied. We have no model catalog for
-		// arbitrary compatible endpoints.
 		return nil
 	case "openrouter":
-		// OpenRouter's catalogue is large and changes often.
-		// We discover via /api/v1/models at runtime (see
-		// openRouterCatalog() in detect_embedding.go). This
-		// list is the offline fallback when discovery fails —
-		// just the OpenRouter Free Router preset, so the operator
-		// always has at least one path forward.
-		return []string{
-			"openrouter/free",
-		}
-	case "xai":
-		return []string{
-			"grok-4.6",
-			"grok-4.3",
-			"grok-build-0.1",
-		}
+		// Live discovery (probeOpenRouter) is preferred. The
+		//// inline empty return signals "discover when possible".
+		return nil
 	}
 	return nil
+}
+
+// modelCatalogIsEmpty is a small helper for code that wants to
+// express "no branded preset" semantically without nil-checks at
+// every callsite. Returns true when the model catalog for the given
+// provider ID is nil/empty (i.e. the registry has no branded
+// presets for it). New code may use this to gate UI that would
+// otherwise depend on branded presets.
+func modelCatalogIsEmpty(providerID string) bool {
+	return len(modelCatalogFor(providerID)) == 0
 }
 
 // modelSortKey returns the comparison key used for model

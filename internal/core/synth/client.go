@@ -118,17 +118,19 @@ func NewSynthClient() *SynthClient {
 		}
 	}
 	if sc.APIKey == "" {
-		// Env-var fallback. Provider-specific env vars win
-		// over generic ones so e.g. an operator with both
-		// OPENAI_API_KEY and OPENROUTER_API_KEY set still uses
-		// the right one for the matched wire. The lookup
-		// order is "most-specific match first" — OpenRouter
-		// wins for openrouter URLs, OpenAI for openai.com, etc.
+		// Env-var fallback. Each provider reads its OWN
+		// env var only — no cross-provider fallthrough.
 		//
-		// 2026-09-14 release-pass: extended for the new
-		// capability-oriented provider catalogue
-		// (Cohere/Google/Mistral/OpenRouter/xAI all OpenAI-compat
-		// at their canonical base URLs).
+		// 2026-09-14 release-pass credential-isolation:
+		// OpenRouter must NOT consume OPENAI_API_KEY and
+		// vice versa. Generic OpenAI-compatible endpoints
+		// require the dedicated OAI_COMPAT_API_KEY env
+		// var (or an explicit profile api_key). The
+		// provider-specific lookup is keyed off the
+		// canonical base URL's domain substring.
+		//
+		// This is a strict lookup: no provider can
+		// accidentally inherit another provider's secret.
 		sc.Wire = inferWire(sc.BaseURL)
 		lu := strings.ToLower(sc.BaseURL)
 		switch sc.Wire {
@@ -137,39 +139,40 @@ func NewSynthClient() *SynthClient {
 			case strings.Contains(lu, "openrouter"):
 				if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
 					sc.APIKey = key
-				} else if key := os.Getenv("OPENAI_API_KEY"); key != "" {
-					sc.APIKey = key
 				}
 			case strings.Contains(lu, "googleapis"):
 				if key := os.Getenv("GEMINI_API_KEY"); key != "" {
 					sc.APIKey = key
 				} else if key := os.Getenv("GOOGLE_API_KEY"); key != "" {
 					sc.APIKey = key
-				} else if key := os.Getenv("OPENAI_API_KEY"); key != "" {
-					sc.APIKey = key
 				}
 			case strings.Contains(lu, "x.ai"):
 				if key := os.Getenv("XAI_API_KEY"); key != "" {
-					sc.APIKey = key
-				} else if key := os.Getenv("OPENAI_API_KEY"); key != "" {
 					sc.APIKey = key
 				}
 			case strings.Contains(lu, "mistral.ai"):
 				if key := os.Getenv("MISTRAL_API_KEY"); key != "" {
 					sc.APIKey = key
-				} else if key := os.Getenv("OPENAI_API_KEY"); key != "" {
-					sc.APIKey = key
 				}
 			case strings.Contains(lu, "cohere.com"):
 				if key := os.Getenv("COHERE_API_KEY"); key != "" {
 					sc.APIKey = key
-				} else if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+				}
+			case strings.Contains(lu, "openai.com"),
+				strings.Contains(lu, "/openai/"),
+				strings.HasSuffix(lu, "/openai"):
+				if key := os.Getenv("OPENAI_API_KEY"); key != "" {
 					sc.APIKey = key
 				}
 			default:
-				if key := os.Getenv("OPENAI_API_KEY"); key != "" {
-					sc.APIKey = key
-				} else if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+				// Generic OpenAI-compatible endpoints:
+				// require the dedicated OAI_COMPAT_API_KEY env
+				// var. OPENAI_API_KEY and OPENROUTER_API_KEY
+				// are NEVER read here — operators with a local
+				// LM Studio / LocalAI / vLLM endpoint MUST
+				// configure a separate key (or set the
+				// profile's api_key explicitly).
+				if key := os.Getenv("OAI_COMPAT_API_KEY"); key != "" {
 					sc.APIKey = key
 				}
 			}
@@ -202,11 +205,17 @@ func NewSynthClient() *SynthClient {
 				"cfg.Profiles[default].api_key (canonical)",
 				"cfg.Profiles[<Components[synth] binding>].api_key (canonical)",
 				"cfg.Synth.api_key (legacy migration)",
-				"env MINIMAX_API_KEY (default wire)",
-				"env OPENAI_API_KEY (openai wire)",
-				"env OPENROUTER_API_KEY (any wire)",
+				"env ANTHROPIC_API_KEY (anthropic wire)",
+				"env MINIMAX_API_KEY (anthropic wire)",
+				"env OPENAI_API_KEY (openai wire, openai.com)",
+				"env OPENROUTER_API_KEY (openai wire, openrouter)",
+				"env GEMINI_API_KEY (openai wire, googleapis)",
+				"env XAI_API_KEY (openai wire, x.ai)",
+				"env MISTRAL_API_KEY (openai wire, mistral.ai)",
+				"env COHERE_API_KEY (openai wire, cohere.com)",
+				"env OAI_COMPAT_API_KEY (openai wire, generic compatible)",
 			},
-			"remediation", "set api_key on cfg.Profiles[default] (canonical) or cfg.Synth.api_key (legacy migration) or one of the env vars above; do not commit the secret to version control — inject at runtime",
+			"remediation", "set api_key on cfg.Profiles[default] (canonical) or cfg.Synth.api_key (legacy migration) or the dedicated *_API_KEY env var for the chosen provider; do not commit the secret to version control — inject at runtime",
 		)
 	}
 	return sc

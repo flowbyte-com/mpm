@@ -1,16 +1,28 @@
 // release_pass_20260914_openrouter_test.go — OpenRouter
-// regressions (release-pass brief cases A-J).
+// regressions for the 2026-09-14 config-simplification pass.
 //
-//   A. OpenRouter appears as provider.
-//   B. OpenRouter is in correct alphabetical position.
-//   C. Base URL is exactly the canonical OpenRouter API URL.
-//   D. OpenRouter uses its own API-key configuration.
-//   E. openrouter/free is offered as a model/router preset.
-//   F. openrouter/free is NOT represented as a separate provider.
-//   G. choosing it produces provider=openrouter, model=openrouter/free.
-//   H. role validation accepts it as generate-capable/router.
-//   I. OpenRouter discovery failure still leaves Custom + stable router preset.
-//   J. config save/load round-trips OpenRouter without mutation.
+// The catalogue-expansion pass made OpenRouter a branded provider
+// with public menu presence. The simplification pass removed that
+// public menu presence but PRESERVES OpenRouter at the runtime
+// layer:
+//
+//   * Existing profiles with provider=openrouter continue to load
+//     and wire correctly (L — backward compatibility).
+//   * Internal registry still resolves provider=openrouter by
+//     string.
+//   * Wire inference (internal/core/synth) still routes
+//     openrouter.ai → wireOpenAI.
+//   * `mpm config detect-embedding` still uses
+//     `openRouterCatalogForView` for live /api/v1/models discovery.
+//   * Live discovery of OpenRouter model IDs works at the embedding
+//     detection surface; failure falls back to empty (no preset
+//     advertised, per the brief).
+//
+// These tests cover exactly those guarantees. Public menu tests
+// (OpenRouter appearing in the LLM wizard, openrouter/free being a
+// model preset) were REMOVED with the simplification pass — see
+// release_pass_20260914_catalogue_expansion_test.go for the new
+// contract pinning.
 //
 // All tests hermetic via t.TempDir() and httptest fake servers.
 
@@ -27,286 +39,36 @@ import (
 	"testing"
 )
 
-// TestOpenRouter_A_AppearsAsProvider — OpenRouter is in the
-// canonical providers registry.
-func TestOpenRouter_A_AppearsAsProvider(t *testing.T) {
-	llms := providersFor(CapGenerate)
-	found := false
-	for _, p := range llms {
-		if p.ID == "openrouter" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("openrouter must be a registered LLM provider; got IDs: %v", providerIDs(llms))
-	}
-}
-
-// TestOpenRouter_B_AlphabeticalPosition — OpenRouter sorts in
-// its canonical position. "OpenRouter" < "OpenAI-compatible"
-// alphabetically? No: "OpenAI-compatible" < "OpenRouter"
-// because the first differs at index 6 ('-' < 'r').
-//
-// Wait — that's "openai-compatible" vs "openrouter". Let me
-// check: "openai" is at index 6; "openrouter" is at index 6 too
-// (the 'r' in 'openrouter' vs 'a' in 'openai'). So
-// "openai-compatible" < "openrouter" because "openai" < "openrouter"
-// prefix-ordering wins. Confirmed by the brief's expected order.
-func TestOpenRouter_B_AlphabeticalPosition(t *testing.T) {
-	llms := providersFor(CapGenerate)
-	var positions []string
-	for _, p := range llms {
-		positions = append(positions, p.ID)
-	}
-	// The OpenRouter position must be after OpenAI-compatible
-	// and before xAI (case-insensitive alphabetical).
-	wantPrev := "openai-compatible"
-	wantNext := "xai"
-	for i, id := range positions {
-		if id != "openrouter" {
-			continue
-		}
-		if i > 0 && positions[i-1] != wantPrev {
-			t.Errorf("OpenRouter should follow %s; got %s", wantPrev, positions[i-1])
-		}
-		if i+1 < len(positions) && positions[i+1] != wantNext {
-			t.Errorf("OpenRouter should precede %s; got %s", wantNext, positions[i+1])
-		}
-		return
-	}
-	t.Fatalf("OpenRouter missing from LLM view: %v", positions)
-}
-
-// TestOpenRouter_C_CanonicalBaseURL — OpenRouter's base URL is
-// the canonical OpenRouter API URL.
-func TestOpenRouter_C_CanonicalBaseURL(t *testing.T) {
+// TestOpenRouter_BackwardsCompatRegistryResolution — the runtime
+// registry still resolves provider=openrouter by string (L).
+// An existing operator profile must continue to load and wire
+// without errors.
+func TestOpenRouter_BackwardsCompatRegistryResolution(t *testing.T) {
 	p, ok := presetForID("openrouter")
 	if !ok {
-		t.Fatalf("openrouter must be registered")
+		t.Fatalf("provider=openrouter must still resolve through presetForID for backwards compatibility")
 	}
 	if p.DefaultBaseURL != "https://openrouter.ai/api/v1" {
-		t.Errorf("OpenRouter base URL = %q, want %q", p.DefaultBaseURL, "https://openrouter.ai/api/v1")
+		t.Errorf("openrouter base URL = %q, want canonical OpenRouter URL", p.DefaultBaseURL)
+	}
+	if !p.Has(CapGenerate) {
+		t.Errorf("openrouter must support CapGenerate for backwards compatibility")
 	}
 }
 
-// TestOpenRouter_D_OwnAPIKey — OpenRouter uses its own API key
-// configuration (NeedsAPIKey=true) so the operator's
-// OPENAI_API_KEY does not silently route to OpenRouter.
-func TestOpenRouter_D_OwnAPIKey(t *testing.T) {
-	p, ok := presetForID("openrouter")
-	if !ok {
-		t.Fatalf("openrouter must be registered")
-	}
-	if !p.NeedsAPIKey {
-		t.Errorf("OpenRouter must require its own API key (OPENROUTER_API_KEY)")
-	}
-}
-
-// TestOpenRouter_E_FreeIsModelPreset — "openrouter/free" is in
-// the OpenRouter model catalog.
-func TestOpenRouter_E_FreeIsModelPreset(t *testing.T) {
-	models := modelCatalogFor("openrouter")
-	found := false
-	for _, m := range models {
-		if m == "openrouter/free" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("openrouter/free must be in the OpenRouter catalog; got %v", models)
-	}
-}
-
-// TestOpenRouter_F_NotASeparateProvider — "openrouter-free" is
-// not a separate provider entry.
-func TestOpenRouter_F_NotASeparateProvider(t *testing.T) {
-	if _, ok := presetForID("openrouter-free"); ok {
-		t.Errorf("openrouter-free must NOT be a separate provider")
-	}
-	if _, ok := presetForID("openrouter_free"); ok {
-		t.Errorf("openrouter_free must NOT be a separate provider")
-	}
-}
-
-// TestOpenRouter_G_ProfileShape — Choosing the OpenRouter Free
-// router produces a profile with provider=openrouter and
-// model=openrouter/free. We exercise the non-interactive path:
-//   `mpm config profile add <name>` then
-//   `mpm config profile set <name> provider openrouter` etc.
-func TestOpenRouter_G_ProfileShape(t *testing.T) {
-	bin := buildOpenRouterBin(t)
-	ws := t.TempDir()
-
-	// Step 1: add the profile.
-	cmd := stdlibexec.Command(bin, "config", "profile", "add", "openrouter-embedding")
-	cmd.Env = []string{"MPM_WORKSPACE=" + ws, "PATH=" + lookupTestPath()}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("profile add: %v\n%s", err, out)
-	}
-
-	// Step 2: populate the three fields.
-	for _, kv := range [][2]string{
-		{"provider", "openrouter"},
-		{"base_url", "https://openrouter.ai/api/v1"},
-		{"model", "openrouter/free"},
-	} {
-		cmd := stdlibexec.Command(bin, "config", "profile", "set", "openrouter-embedding", kv[0], kv[1])
-		cmd.Env = []string{"MPM_WORKSPACE=" + ws, "PATH=" + lookupTestPath()}
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("profile set %s=%s: %v\n%s", kv[0], kv[1], err, out)
-		}
-	}
-
-	// Read back via `mpm config profile list`.
-	cmd = stdlibexec.Command(bin, "config", "profile", "list")
-	cmd.Env = []string{"MPM_WORKSPACE=" + ws, "PATH=" + lookupTestPath()}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("profile list: %v\n%s", err, out)
-	}
-	s := stripLogNoise(string(out))
-	if !strings.Contains(s, "openrouter/free") {
-		t.Errorf("profile list must surface the chosen model; got:\n%s", s)
-	}
-	if !strings.Contains(s, "openrouter-embedding") {
-		t.Errorf("profile list must surface the new profile; got:\n%s", s)
-	}
-
-	// Inspect mpm_config.json directly: the saved profile MUST
-	// have provider=openrouter (not a fake "openrouter-free"
-	// provider) and model=openrouter/free.
-	body, err := os.ReadFile(filepath.Join(ws, "mpm_config.json"))
-	if err != nil {
-		t.Fatalf("read config: %v", err)
-	}
-	var cfg struct {
-		Profiles map[string]struct {
-			Provider string `json:"provider"`
-			Model    string `json:"model"`
-			BaseURL  string `json:"base_url"`
-		} `json:"profiles"`
-	}
-	if err := json.Unmarshal(body, &cfg); err != nil {
-		t.Fatalf("parse config: %v\n%s", err, body)
-	}
-	prof, ok := cfg.Profiles["openrouter-embedding"]
-	if !ok {
-		t.Fatalf("openrouter-embedding profile missing in saved config: %s", body)
-	}
-	if prof.Provider != "openrouter" {
-		t.Errorf("provider = %q, want openrouter", prof.Provider)
-	}
-	if prof.Model != "openrouter/free" {
-		t.Errorf("model = %q, want openrouter/free", prof.Model)
-	}
-	if prof.BaseURL != "https://openrouter.ai/api/v1" {
-		t.Errorf("base_url = %q, want canonical OpenRouter URL", prof.BaseURL)
-	}
-}
-
-// TestOpenRouter_H_RoleValidationAccepts — OpenRouter Free
-// passes the role validator: it is generate-capable (router
-// model that the operator explicitly chose).
-func TestOpenRouter_H_RoleValidationAccepts(t *testing.T) {
-	// Resolve provider from registry.
-	p, ok := presetForID("openrouter")
-	if !ok {
-		t.Fatalf("openrouter must be registered")
-	}
-	// OpenRouter Free is a router/forwarding endpoint that
-	// returns generated text. The role validator's "unknown
-	// capability = accept" rule covers it (the validator is
-	// permissive for unknown models on OpenAI-compatible
-	// endpoints).
-	decision := ValidateLLMRole(p.ID, "openrouter/free", p.DefaultBaseURL)
-	if decision == RoleEmbeddingOnly {
-		t.Errorf("openrouter/free must NOT be classified as embedding-only; got %v", decision)
-	}
-	// Acceptable: RoleValid (positive evidence from a
-	// future capability probe) or RoleUnknown (probe failed
-	// → permissive custom contract).
-	if decision != RoleValid && decision != RoleUnknown {
-		t.Errorf("openrouter/free role decision = %v, want RoleValid or RoleUnknown", decision)
-	}
-}
-
-// TestOpenRouter_I_DiscoveryFailureFallback — When the live
-// /api/v1/models endpoint is unreachable, the OpenRouter
-// catalog falls back to the stable `openrouter/free` preset.
-// Custom is still offered first.
-func TestOpenRouter_I_DiscoveryFailureFallback(t *testing.T) {
-	// Force the discovery endpoint to be unreachable.
-	t.Setenv("OPENROUTER_ENDPOINT", "http://127.0.0.1:1/")
-	catalog := openRouterCatalogForView()
-	if len(catalog) == 0 {
-		t.Fatalf("openRouterCatalogForView must return at least the stable preset on probe failure; got empty")
-	}
-	found := false
-	for _, m := range catalog {
-		if m == "openrouter/free" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("stable preset openrouter/free missing from fallback catalog; got %v", catalog)
-	}
-	// Catalog must remain alphabetical on the fallback path.
-	for i := 1; i < len(catalog); i++ {
-		if strings.ToLower(catalog[i-1]) > strings.ToLower(catalog[i]) {
-			t.Errorf("fallback catalog not alphabetical: %v", catalog)
-			break
-		}
-	}
-}
-
-// TestOpenRouter_I_DiscoverySuccessIncludesLiveCatalogue —
-// When /api/v1/models responds, the live catalogue wins over
-// the offline fallback. The Custom entry is added by the
-// menu helper at render time (NOT here).
-func TestOpenRouter_I_DiscoverySuccessIncludesLiveCatalogue(t *testing.T) {
-	srv := newFakeOpenRouter(t, []string{
-		"openrouter/free",
-		"anthropic/claude-3.5-sonnet",
-		"openai/gpt-5-luna",
-		"google/gemini-2.5-pro",
-	})
-	defer srv.Close()
-	t.Setenv("OPENROUTER_ENDPOINT", srv.URL+"/")
-
-	catalog := openRouterCatalogForView()
-	if len(catalog) == 0 {
-		t.Fatalf("live catalog must be non-empty")
-	}
-	for _, want := range []string{"anthropic/claude-3.5-sonnet", "openai/gpt-5-luna", "google/gemini-2.5-pro"} {
-		found := false
-		for _, m := range catalog {
-			if m == want {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("live catalog missing %q; got %v", want, catalog)
-		}
-	}
-}
-
-// TestOpenRouter_J_RoundTrip — Config save + load round-trips
-// the OpenRouter profile without mutation. The `mpm config
-// show` surface redacts api_key (correct behaviour — secrets
-// are not echoed); the on-disk file MUST preserve the key
-// verbatim across a load+save cycle.
-func TestOpenRouter_J_RoundTrip(t *testing.T) {
+// TestOpenRouter_BackwardsCompatProfileLoads — a stored profile
+// with provider=openrouter loads under `mpm config show` without
+// being rewritten as "custom" (L). Runtime resolution by ID is
+// preserved; the wizard does NOT silently rewrite existing
+// profiles.
+func TestOpenRouter_BackwardsCompatProfileLoads(t *testing.T) {
 	bin := buildOpenRouterBin(t)
 	ws := t.TempDir()
 
 	seeded := `{
   "profiles": {
-    "default": {"provider":"openai","model":"gpt-5-luna","base_url":"https://api.openai.com/v1","api_key":"KEEP"},
-    "openrouter-embedding": {"provider":"openrouter","model":"openrouter/free","base_url":"https://openrouter.ai/api/v1","api_key":"ORKEY"}
+    "default": {"provider":"openrouter","model":"anthropic/claude-3.5-sonnet","base_url":"https://openrouter.ai/api/v1","api_key":"ORKEY"},
+    "openrouter-embedding": {"provider":"openrouter","model":"openai/text-embedding-3-small","base_url":"https://openrouter.ai/api/v1","api_key":"ORKEY"}
   },
   "components": {"memory":"default","embedding":"openrouter-embedding"}
 }`
@@ -315,8 +77,9 @@ func TestOpenRouter_J_RoundTrip(t *testing.T) {
 		t.Fatalf("write seed: %v", err)
 	}
 
-	// `mpm config show` redacts api_key in display. The OpenRouter
-	// model + provider names MUST surface.
+	// `mpm config show` must surface the openrouter profiles
+	// unchanged; the api_key is redacted in display but the
+	// provider/model/base_url are not mutated.
 	cmd := stdlibexec.Command(bin, "config", "show")
 	cmd.Env = []string{"MPM_WORKSPACE=" + ws, "PATH=" + lookupTestPath()}
 	out, err := cmd.CombinedOutput()
@@ -324,15 +87,18 @@ func TestOpenRouter_J_RoundTrip(t *testing.T) {
 		t.Fatalf("config show: %v\n%s", err, out)
 	}
 	s := stripLogNoise(string(out))
-	if !strings.Contains(s, "openrouter/free") {
-		t.Errorf("config show must surface OpenRouter Free router; got:\n%s", s)
+	if !strings.Contains(s, "openrouter") {
+		t.Errorf("config show must surface provider=openrouter; got:\n%s", s)
+	}
+	if !strings.Contains(s, "anthropic/claude-3.5-sonnet") {
+		t.Errorf("config show must preserve the existing OpenRouter model; got:\n%s", s)
 	}
 	if !strings.Contains(s, "openrouter-embedding") {
-		t.Errorf("config show must surface the OpenRouter profile; got:\n%s", s)
+		t.Errorf("config show must surface the secondary OpenRouter profile; got:\n%s", s)
 	}
 
-	// Read back the on-disk file: keys preserved verbatim
-	// (config show only redacts on display).
+	// On-disk file MUST preserve the keys verbatim (config show
+	// only redacts on display).
 	body, err := os.ReadFile(filepath.Join(ws, "mpm_config.json"))
 	if err != nil {
 		t.Fatalf("read config: %v", err)
@@ -341,25 +107,79 @@ func TestOpenRouter_J_RoundTrip(t *testing.T) {
 	if !strings.Contains(roundTripped, "ORKEY") {
 		t.Errorf("OpenRouter API key was lost on load+save round-trip; got:\n%s", roundTripped)
 	}
-	if !strings.Contains(roundTripped, "KEEP") {
-		t.Errorf("OpenAI API key was lost on load+save round-trip; got:\n%s", roundTripped)
+	if !strings.Contains(roundTripped, "openrouter") {
+		t.Errorf("OpenRouter provider was lost on round-trip; got:\n%s", roundTripped)
 	}
-	if !strings.Contains(roundTripped, "openrouter/free") {
-		t.Errorf("OpenRouter model was lost on round-trip; got:\n%s", roundTripped)
+	if !strings.Contains(roundTripped, "anthropic/claude-3.5-sonnet") {
+		t.Errorf("OpenRouter model lost on round-trip; got:\n%s", roundTripped)
+	}
+}
+
+// TestOpenRouter_LiveDiscoveryStillWorks — `openRouterCatalogForView`
+// still discovers live model IDs from /api/v1/models (the
+// embedding discovery surface depends on it). The simplification
+// did NOT remove live discovery — only the static preset fallback.
+func TestOpenRouter_LiveDiscoveryStillWorks(t *testing.T) {
+	srv := newFakeOpenRouter(t, []string{
+		"anthropic/claude-3.5-sonnet",
+		"openai/text-embedding-3-small",
+		"google/gemini-2.5-pro",
+	})
+	defer srv.Close()
+	t.Setenv("OPENROUTER_ENDPOINT", srv.URL+"/")
+
+	catalog := openRouterCatalogForView()
+	if len(catalog) == 0 {
+		t.Fatalf("live discovery must populate the catalog when /api/v1/models responds")
+	}
+	for _, want := range []string{
+		"anthropic/claude-3.5-sonnet",
+		"openai/text-embedding-3-small",
+		"google/gemini-2.5-pro",
+	} {
+		found := false
+		for _, m := range catalog {
+			if m == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("live discovery catalog missing %q; got %v", want, catalog)
+		}
+	}
+}
+
+// TestOpenRouter_DiscoveryFailureReturnsEmpty — when /api/v1/models
+// is unreachable, the catalog falls back to empty (no static
+// preset advertised). Operators are not given a fake fallback;
+// they type the model name freeform at the Custom prompt.
+func TestOpenRouter_DiscoveryFailureReturnsEmpty(t *testing.T) {
+	t.Setenv("OPENROUTER_ENDPOINT", "http://127.0.0.1:1/")
+	catalog := openRouterCatalogForView()
+	// Empty on probe failure: the brief removed the static
+	// `openrouter/free` preset.
+	for _, m := range catalog {
+		if m == "openrouter/free" {
+			t.Errorf("openrouter/free must NOT be advertised as a preset; got %v", catalog)
+		}
+	}
+}
+
+// TestOpenRouter_NotInPublicWizardMenu — the OpenRouter branded
+// menu entry is gone from public wizard UX. wizardPresets shows
+// only Custom; the operator uses Custom + openai-compatible
+// protocol + base URL for OpenRouter.
+func TestOpenRouter_NotInPublicWizardMenu(t *testing.T) {
+	presets := wizardPresets()
+	for _, p := range presets {
+		if p.id == "openrouter" {
+			t.Errorf("public wizard must NOT surface openrouter as a menu entry; got %v", presetIDs(presets))
+		}
 	}
 }
 
 // --- helpers ---
-
-// providerIDs extracts the IDs from a slice of providers for
-// clearer assertion failures.
-func providerIDs(ps []ProviderDefinition) []string {
-	ids := make([]string, len(ps))
-	for i, p := range ps {
-		ids[i] = p.ID
-	}
-	return ids
-}
 
 // newFakeOpenRouter stands up a minimal /api/v1/models fake
 // server with the given model IDs in the response.
@@ -391,3 +211,7 @@ func buildOpenRouterBin(t *testing.T) string {
 	}
 	return bin
 }
+
+// stripLogNoise, lookupTestPath, and indexAnyLine live in
+// release_pass_20260914_dashboard_test.go (same package); no
+// duplicates here.

@@ -21,7 +21,6 @@ package main
 
 import (
 	"encoding/json"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -157,28 +156,25 @@ func TestProviderRegistry_PresetForIDUnknown(t *testing.T) {
 	}
 }
 
-// TestProviderRegistry_ModelCatalogNotHandOrdered (cases E, F) —
-// The model catalog for each provider is sorted alphabetically.
-// Custom models can be supplied but are not in any catalog.
+// TestProviderRegistry_ModelCatalogEmptyPerSimplification pins the
+// 2026-09-14 simplification contract: branded model catalogues
+// (GPT families, Claude families, Gemini families, Grok, Mistral,
+// Command, OpenRouter Free Router, etc.) are NOT advertised by
+// `modelCatalogFor`. MPM is a substrate, not a provider catalogue;
+// operators type the current model ID freeform at the Custom
+// prompt.
 //
-// Recommendation metadata (e.g. "recommended") MUST NOT reorder
-// the list — the catalog is the source of truth, and the
-// wizard will display them in catalog order.
-func TestProviderRegistry_ModelCatalogNotHandOrdered(t *testing.T) {
-	for _, provider := range []string{"openai", "anthropic", "minimax"} {
+// Each branded provider ID's catalog is empty/nil. Custom remains
+// the public entry path that accepts any model string.
+func TestProviderRegistry_ModelCatalogEmptyPerSimplification(t *testing.T) {
+	for _, provider := range []string{
+		"openai", "anthropic", "minimax", "ollama",
+		"cohere", "google-gemini", "mistral", "xai",
+		"openrouter", "openai-compatible",
+	} {
 		catalog := modelCatalogFor(provider)
-		if len(catalog) < 2 {
-			t.Errorf("catalog for %q must have multiple entries to test ordering; got %v", provider, catalog)
-			continue
-		}
-		sorted := make([]string, len(catalog))
-		copy(sorted, catalog)
-		sort.Strings(sorted)
-		for i, name := range catalog {
-			if name != sorted[i] {
-				t.Errorf("catalog for %q not alphabetical: %v vs sorted %v", provider, catalog, sorted)
-				break
-			}
+		if len(catalog) != 0 {
+			t.Errorf("modelCatalogFor(%q) must be empty (no branded presets); got %v", provider, catalog)
 		}
 	}
 }

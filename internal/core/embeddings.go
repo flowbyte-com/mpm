@@ -433,6 +433,8 @@ func ollamaEnvFallback() (endpoint, model string, ok bool) {
 // at runtime — we don't inject it into the env here.
 func openAICompatEnvFallback() (endpoint, model string, ok bool) {
 	if endpoint = os.Getenv("OPENAI_ENDPOINT"); endpoint != "" {
+		// Credential isolation: OPENAI_ENDPOINT reads ONLY
+		// OPENAI_API_KEY. OPENROUTER_API_KEY is NOT consulted.
 		if !hasAnyKeyEnv("OPENAI_API_KEY") {
 			return "", "", false
 		}
@@ -443,6 +445,8 @@ func openAICompatEnvFallback() (endpoint, model string, ok bool) {
 		return endpoint, model, true
 	}
 	if endpoint = os.Getenv("OPENROUTER_ENDPOINT"); endpoint != "" {
+		// Credential isolation: OPENROUTER_ENDPOINT reads ONLY
+		// OPENROUTER_API_KEY. OPENAI_API_KEY is NOT consulted.
 		if !hasAnyKeyEnv("OPENROUTER_API_KEY") {
 			return "", "", false
 		}
@@ -453,7 +457,13 @@ func openAICompatEnvFallback() (endpoint, model string, ok bool) {
 		return endpoint, model, true
 	}
 	if endpoint = os.Getenv("OAI_COMPAT_ENDPOINT"); endpoint != "" {
-		if !hasAnyKeyEnv("OPENAI_API_KEY", "OPENROUTER_API_KEY") {
+		// Credential isolation: generic OpenAI-compatible
+		// endpoints read ONLY OAI_COMPAT_API_KEY (the dedicated
+		// generic key). OPENAI_API_KEY and OPENROUTER_API_KEY
+		// are NEVER consulted — operators with a local LM Studio
+		// / LocalAI / vLLM endpoint MUST configure a separate
+		// key (or set the profile's api_key explicitly).
+		if !hasAnyKeyEnv("OAI_COMPAT_API_KEY") {
 			return "", "", false
 		}
 		model = os.Getenv("OAI_COMPAT_EMBEDDING_MODEL")
