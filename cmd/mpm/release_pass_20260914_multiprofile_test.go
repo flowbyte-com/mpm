@@ -1018,6 +1018,26 @@ func TestMulti_AF_NoBrandedCatalogueInHelp(t *testing.T) {
 }
 
 // AG. Dangling binding surfaced as invalid.
+//   2026-09-15 verification at HEAD 20c16c08:
+//
+//   Fixture: Profiles["default"] = valid generative profile;
+//            Components["critic"] = "missing" (dangling).
+//
+//   Truthful contract (verified at HEAD 20c16c08):
+//     - Runtime falls through to Profiles["default"]
+//       (ProfileFor("critic") returns Name="default"; ModelFactory
+//       returns a non-nil client). This is the preserved
+//       pre-2026-09-15 behaviour — the runtime must not silently
+//       lose a model when an operator's binding is broken.
+//     - The CLI surfaces the dangling state explicitly so the
+//       operator sees the misconfig and rebinds:
+//         binding_source = "explicit, invalid"
+//         valid = false
+//         configured_profile = "missing"  (raw operator binding)
+//         effective_profile = "default"   (runtime-resolved fallback)
+//       Human output renders the binding string + "(explicit, invalid)"
+//       tag (does not show the resolved profile name in the human list
+//       view — that's the JSON envelope's job).
 func TestMulti_AG_DanglingBindingSurfacedAsInvalid(t *testing.T) {
 	bin := buildRunawayBin(t)
 	ws := t.TempDir()
@@ -1029,10 +1049,16 @@ func TestMulti_AG_DanglingBindingSurfacedAsInvalid(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(seed), 0600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	// Human output: binding string + (explicit, invalid) tag.
 	humanOut, _ := runMpmCommand(t, bin, ws, "config", "component", "list")
 	if !strings.Contains(humanOut, "invalid") {
 		t.Errorf("human component list must mark dangling binding as invalid; got:\n%s", humanOut)
 	}
+	if !strings.Contains(humanOut, "missing") {
+		t.Errorf("human component list must preserve the raw operator binding string; got:\n%s", humanOut)
+	}
+
+	// JSON envelope: full contract — the truthful report lives here.
 	jsonOut, _ := runMpmCommand(t, bin, ws, "config", "component", "list", "--json")
 	env := mustParseJSONList(t, jsonOut, "components")
 	found := false
@@ -1045,6 +1071,15 @@ func TestMulti_AG_DanglingBindingSurfacedAsInvalid(t *testing.T) {
 			}
 			if m["binding_source"] != "explicit, invalid" {
 				t.Errorf("binding_source must be 'explicit, invalid'; got: %v", m["binding_source"])
+			}
+			if m["configured_profile"] != "missing" {
+				t.Errorf("configured_profile must preserve raw operator binding 'missing'; got: %v", m["configured_profile"])
+			}
+			// Runtime falls through to Profiles["default"]; effective_profile
+			// must report that, NOT null. This pins the truthful contract:
+			// the CLI oracle and the runtime oracle agree on the resolved profile.
+			if m["effective_profile"] != "default" {
+				t.Errorf("effective_profile must be 'default' (runtime falls through to Profiles[default]); got: %v", m["effective_profile"])
 			}
 		}
 	}
