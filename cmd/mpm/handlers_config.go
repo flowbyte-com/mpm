@@ -1741,7 +1741,24 @@ func handleConfigProfile(args []string) int {
 		if len(args) >= 2 {
 			name = args[1]
 		}
-		return handleProfileAdd(loadOrInitConfig(), name)
+		// Allow scriptable material-field flags. Unknown flags (without
+		// --) preserve the legacy positional shape, so we only strip
+		// well-known long-form flags here.
+		rest, provider := extractStringFlag(args[2:], "--provider")
+		rest, model := extractStringFlag(rest, "--model")
+		rest, baseURL := extractStringFlag(rest, "--base-url")
+		rest, endpoint := extractStringFlag(rest, "--endpoint")
+		rest, apiKey := extractStringFlag(rest, "--api-key")
+		if baseURL == "" && endpoint != "" {
+			baseURL = endpoint
+		}
+		return handleProfileAdd(loadOrInitConfig(), name, profileAddOpts{
+			Provider: provider,
+			Model:    model,
+			BaseURL:  baseURL,
+			APIKey:   apiKey,
+			restArgs: rest,
+		})
 	case "list":
 		_, wantJSON := stripMemoryFlagToken(args[1:], "--json", "-j")
 		if wantJSON {
@@ -1779,9 +1796,27 @@ func handleConfigProfile(args []string) int {
 	}
 }
 
-func handleProfileAdd(c *config.Config, name string) int {
+// profileAddOpts is the optional parameter bag for handleProfileAdd.
+// When supplied via CLI flags (`--provider`, `--model`, `--base-url`,
+// `--api-key`), handleProfileAdd applies them before save so a scriptable
+// complete-add is probe-eligible immediately. restArgs captures any
+// remaining positional arguments the operator might have passed (kept
+// for forward-compat with future flags).
+type profileAddOpts struct {
+	Provider string
+	Model    string
+	BaseURL  string
+	APIKey   string
+	restArgs []string
+}
+
+func handleProfileAdd(c *config.Config, name string, opts ...profileAddOpts) int {
 	if c.Profiles == nil {
 		c.Profiles = map[string]config.Profile{}
+	}
+	var opt profileAddOpts
+	if len(opts) > 0 {
+		opt = opts[0]
 	}
 	if name == "" {
 		if !isatty(os.Stdin) {
@@ -1799,7 +1834,25 @@ func handleProfileAdd(c *config.Config, name string) int {
 		return 1
 	}
 	p := config.Profile{Name: name}
-	if isatty(os.Stdin) {
+	// Scriptable path: --provider/--model/--base-url flags supplied on
+	// the command line. These populate the profile so a complete add
+	// CAN be probed immediately after save.
+	if opt.Provider != "" {
+		p.Provider = opt.Provider
+	}
+	if opt.Model != "" {
+		p.Model = opt.Model
+	}
+	if opt.BaseURL != "" {
+		p.BaseURL = opt.BaseURL
+	}
+	if opt.APIKey != "" {
+		p.APIKey = opt.APIKey
+	}
+	if !isatty(os.Stdin) && (opt.Provider != "" || opt.Model != "" || opt.BaseURL != "" || opt.APIKey != "") {
+		// Scriptable complete add — skip the interactive wizard and
+		// apply the supplied material fields verbatim.
+	} else if isatty(os.Stdin) {
 		// 2026-09-14 simplification: interactive profile add
 		// walks through Custom + protocol picker + helper
 		// text, mirroring the canonical `mpm config`
@@ -1848,6 +1901,14 @@ func handleProfileAdd(c *config.Config, name string) int {
 		return 1
 	}
 	fmt.Printf("\u2713 profile %q added\n", name)
+
+	// Best-effort post-save probe. The save has already committed
+	// regardless of probe outcome. Fires whenever the resulting
+	// profile becomes structurally executable (CanProbe=true);
+	// incomplete profiles are NOT classified as runtime failures.
+	// The second argument is "always consider this material" — the
+	// helper short-circuits to no-op when CanProbe is false.
+	probeProfileAfterSave(p, true)
 	return 0
 }
 
@@ -1995,28 +2056,45 @@ func handleProfileSet(c *config.Config, name, key, value string) int {
 	// configured profile with the real adapter and prints a hint.
 	// Non-material fields (temperature, reasoning, timeout) don't
 	// trigger because they don't change the fingerprint.
-	probeAfterSet(p, key)
+	probeProfileAfterSave(p, isMaterialChange(p, key))
 	return 0
 }
 
-// probeAfterSet runs a single best-effort probe against p if the
-// material-field change produced a structurally executable profile.
-// Errors are rendered as a UX hint, never as a save failure. Non-material
-// keys are silently ignored.
-func probeAfterSet(p config.Profile, key string) {
+// isMaterialChange reports whether key is a material field whose change
+// should trigger a post-save probe. Material fields alter the connection
+// fingerprint; non-material fields (temperature, reasoning, timeout) do
+// not.
+func isMaterialChange(p config.Profile, key string) bool {
 	materialKeys := map[string]bool{
 		"provider": true, "model": true, "base_url": true, "endpoint": true,
 		"api_key": true, "token": true,
 	}
+	if key == "" {
+		// Empty key signals "the entire profile was just created with
+		// material fields supplied" (handleProfileAdd path).
+		return probe.CanProbe(&p)
+	}
 	if !materialKeys[strings.ToLower(strings.ReplaceAll(key, "-", "_"))] {
+		return false
+	}
+	return true
+}
+
+// probeProfileAfterSave fires a single best-effort probe against p. It is
+// the canonical post-save verification shared by `handleProfileSet`
+// (when the changed field is material) and `handleProfileAdd` (when the
+// profile becomes executable). Errors are rendered as a UX hint, never
+// as a save failure.
+//
+// Caller passes isMaterialChange=true iff the change could have altered
+// the connection fingerprint. The probe is skipped when the profile is
+// not structurally executable (mid-construction) regardless of the flag.
+func probeProfileAfterSave(p config.Profile, isMaterialChange bool) {
+	if !isMaterialChange {
 		return
 	}
 	if !probe.CanProbe(&p) {
 		// Profile is mid-construction; do not flag a runtime failure.
-		return
-	}
-	cfg, err := config.LoadConfig()
-	if err != nil || cfg == nil {
 		return
 	}
 	dm := getDBConcrete()
@@ -2028,24 +2106,32 @@ func probeAfterSet(p config.Profile, key string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	results, err := probe.RunActiveProbes(ctx, cfg, dm)
-	if err != nil || len(results) == 0 {
-		return
-	}
-	// Print UX line for the affected profile (matching fingerprint).
-	myFp := probe.ComputeFingerprint(probe.FingerprintInput{
-		Provider:   p.Provider,
-		Model:      p.Model,
-		BaseURL:    p.BaseURL,
-		Credential: p.APIKey,
-	})
-	for _, r := range results {
-		if r.Fingerprint != myFp {
+	// ProbeSingle operates on the supplied profile directly. We
+	// deliberately do NOT require component routing here — a complete
+	// profile is probe-eligible on its own, and the operator-facing UX
+	// line ("Connection verified · …") should appear regardless of
+	// whether the profile is bound to a component yet. Routing-based
+	// Doctor performs its own dispatch via RunActiveProbes.
+	result, _ := probe.ProbeSingle(ctx, dm, &p)
+	printProbeOnSaveHint(result)
+}
+
+// extractStringFlag removes `--name <value>` from args and returns the
+// cleaned argv and the value ("" if absent). Long-form flag only; the
+// single-dash variant isn't supported to keep the scriptable surface
+// explicit. Used by `profile add`'s scriptable path.
+func extractStringFlag(args []string, name string) ([]string, string) {
+	out := make([]string, 0, len(args))
+	value := ""
+	for i := 0; i < len(args); i++ {
+		if args[i] == name && i+1 < len(args) {
+			value = args[i+1]
+			i++ // skip the value too
 			continue
 		}
-		printProbeOnSaveHint(r)
-		return
+		out = append(out, args[i])
 	}
+	return out, value
 }
 
 // printProbeOnSaveHint emits the user-facing verification line. Saved

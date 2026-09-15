@@ -43,9 +43,14 @@ const probeUserPrompt = "Reply with exactly two words: OK READY"
 // Ollama / LM Studio can take 8-10s for first-load model materialisation).
 const ProbeTimeoutForDoctor = 12 * time.Second
 
-// ProbeTimeoutForConfigSave is a slightly tighter per-probe timeout for the
-// post-save probe — we want the operator's command to return promptly.
-const ProbeTimeoutForConfigSave = 5 * time.Second
+// ProbeTimeoutForConfigSave is a tight per-probe timeout for the post-save
+// probe — the operator's `mpm config profile set/add` command must NOT
+// block visibly on an unreachable endpoint. If the endpoint doesn't
+// answer quickly, we surface timeout as the failure class and return
+// promptly so the operator's CLI returns within ~2s. Real inference
+// health is verified via `mpm doctor`, which uses the longer Doctor
+// deadline above.
+const ProbeTimeoutForConfigSave = 1500 * time.Millisecond
 
 // probeGenerative executes a single generative probe against a profile
 // resolved through the live config. It:
@@ -65,6 +70,13 @@ const ProbeTimeoutForConfigSave = 5 * time.Second
 // `dm` may be nil — the probe is hermetic on the network side and does
 // not touch the database.
 func probeGenerative(ctx context.Context, p *config.Profile, kind ProbeKind) ProbeResult {
+	return probeGenerativeWithTimeout(ctx, p, kind, ProbeTimeoutForDoctor)
+}
+
+// probeGenerativeWithTimeout is the variant that lets callers override
+// the per-probe HTTP client timeout. The shorter of (timeout) and the
+// caller's context deadline wins.
+func probeGenerativeWithTimeout(ctx context.Context, p *config.Profile, kind ProbeKind, timeout time.Duration) ProbeResult {
 	start := time.Now()
 
 	if p == nil || p.Provider == "" || p.Model == "" || p.BaseURL == "" {
@@ -85,7 +97,7 @@ func probeGenerative(ctx context.Context, p *config.Profile, kind ProbeKind) Pro
 		Model:     p.Model,
 		APIKey:    p.APIKey,
 		BaseURL:   p.BaseURL,
-		Timeout:   ProbeTimeoutForDoctor,
+		Timeout:   timeout,
 		MaxTokens: probeMaxTokens,
 		Wire:      synth.InferWire(p.BaseURL),
 	}
