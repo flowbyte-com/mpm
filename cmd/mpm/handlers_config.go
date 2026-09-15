@@ -76,9 +76,11 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1577,6 +1579,17 @@ func splitProviderModel(s string) (provider, model string) {
 func printConfigHelp() {
 	render.Heading(os.Stdout, "Config")
 	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Multi-profile support")
+	render.Plain(os.Stdout, "MPM can store multiple named model profiles.")
+	render.Plain(os.Stdout, "Components explicitly bind to profiles.")
+	render.Plain(os.Stdout, "Multiple LLM profiles and a separate embedding profile may coexist.")
+	render.Plain(os.Stdout, "MPM does not silently auto-route or fail over between profiles.")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Config resolution vs runtime failover")
+	render.Plain(os.Stdout, "unbound component → default profile is CONFIG RESOLUTION, not failover.")
+	render.Plain(os.Stdout, "Once a component resolves to profile X, a provider failure on X")
+	render.Plain(os.Stdout, "must never cause a request to profile Y.")
+	render.BlankLine(os.Stdout)
 	render.Section(os.Stdout, "Manual configuration only")
 	render.Plain(os.Stdout, "MPM does not maintain provider/model catalogues and does")
 	render.Plain(os.Stdout, "not discover or select models for the operator. Manual")
@@ -1647,6 +1660,10 @@ func printConfigHelp() {
 // profile setter's documented key list. The field stays on the
 // profile struct for backwards-compatible JSON parsing but is
 // never honored at runtime.
+//
+// 2026-09-15 release-pass: --json parity on list/get. api_key is
+// redacted in JSON output (same as human output) — the operator's
+// secret-retrieval surface is `mpm config get api_key` (human mode).
 func printConfigProfileHelp() {
 	render.Heading(os.Stdout, "Config profile")
 	render.BlankLine(os.Stdout)
@@ -1656,10 +1673,10 @@ func printConfigProfileHelp() {
 	render.BlankLine(os.Stdout)
 	render.Section(os.Stdout, "Subcommands")
 	render.Label(os.Stdout, "mpm config profile add [name]", "interactive wizard; pass a name to skip the prompt")
-	render.Label(os.Stdout, "mpm config profile list", "render all profiles")
-	render.Label(os.Stdout, "mpm config profile get <name>", "show one profile")
+	render.Label(os.Stdout, "mpm config profile list", "render all profiles (--json for machine output)")
+	render.Label(os.Stdout, "mpm config profile get <name>", "show one profile (--json for machine output; api_key redacted)")
 	render.Label(os.Stdout, "mpm config profile set <name> <key> <value>", "set one field (provider, model, base_url, api_key, temperature, timeout_seconds, reasoning)")
-	render.Label(os.Stdout, "mpm config profile remove <name>", "delete; refused if any component binds to this profile")
+	render.Label(os.Stdout, "mpm config profile remove <name>", "delete; refused if any component binds to this profile (lists all bindings on refusal)")
 	render.BlankLine(os.Stdout)
 	render.Hint(os.Stdout, "Run 'mpm config profile add default' once on a fresh install to seed the canonical fallback profile.")
 }
@@ -1674,9 +1691,10 @@ func printConfigComponentHelp() {
 	render.Plain(os.Stdout, "fall back to profiles[\"default\"].")
 	render.BlankLine(os.Stdout)
 	render.Section(os.Stdout, "Subcommands")
-	render.Label(os.Stdout, "mpm config component list", "render all bindings")
-	render.Label(os.Stdout, "mpm config component get <component>", "show one binding")
+	render.Label(os.Stdout, "mpm config component list", "render all bindings (--json for machine output)")
+	render.Label(os.Stdout, "mpm config component get <component>", "show one binding (--json for machine output)")
 	render.Label(os.Stdout, "mpm config component set <component> <profile>", "set or replace a binding")
+	render.Label(os.Stdout, "mpm config component unset <component>", "remove a binding (canonical surface; falls back to default)")
 	render.BlankLine(os.Stdout)
 }
 
@@ -1720,11 +1738,22 @@ func handleConfigProfile(args []string) int {
 		}
 		return handleProfileAdd(loadOrInitConfig(), name)
 	case "list":
+		_, wantJSON := stripMemoryFlagToken(args[1:], "--json", "-j")
+		if wantJSON {
+			return respond(encodeProfileListJSON(loadOrInitConfig()), "", 0)
+		}
 		return handleProfileList(loadOrInitConfig())
 	case "get":
 		if len(args) < 2 {
 			usererror.Error("mpm config profile get <name>")
 			return 1
+		}
+		_, wantJSON := stripMemoryFlagToken(args[2:], "--json", "-j")
+		if wantJSON {
+			if _, ok := loadOrInitConfig().Profiles[args[1]]; !ok {
+				return respond(encodeErrorEnvelope(`profile "`+args[1]+`" not found`), "", 1)
+			}
+			return respond(encodeProfileJSON(args[1], loadOrInitConfig()), "", 0)
 		}
 		return handleProfileGet(loadOrInitConfig(), args[1])
 	case "set":
@@ -1974,11 +2003,26 @@ func handleProfileRemove(c *config.Config, name string) int {
 		usererror.Error("profile %q not found", name)
 		return 1
 	}
+	// 2026-09-15 release-pass: collect EVERY binding to this
+	// profile so the error lists all of them. The previous
+	// early-return on the first match hid bindings; the brief
+	// explicitly forbids silently clearing or rebinding.
+	bindings := make([]string, 0, 4)
 	for comp, bound := range c.Components {
 		if bound == name {
-			usererror.Error("cannot remove profile %q: component %q is bound to it\n  unbind first: 'mpm config component set %s <other-profile>'", name, comp, comp)
-			return 1
+			bindings = append(bindings, comp)
 		}
+	}
+	if len(bindings) > 0 {
+		sort.Strings(bindings)
+		// Stable, indented, quoted listing.
+		lines := make([]string, len(bindings))
+		for i, b := range bindings {
+			lines[i] = "  " + strconv.Quote(b)
+		}
+		usererror.Error("cannot remove profile %q.\nIt is currently used by:\n%s\nRebind or unset those components first.",
+			name, strings.Join(lines, "\n"))
+		return 1
 	}
 	delete(c.Profiles, name)
 	if err := config.SaveConfig(c); err != nil {
@@ -2034,7 +2078,40 @@ func strconvAtoiFloat(s string) (float64, error) {
 // Component subcommands (mpm config component <sub>)
 // ---------------------------------------------------------------------------
 
-// handleConfigComponent routes component binding subcommands.
+// componentPostUnsetReport returns the human-readable effect of
+// unsetting the given component, derived from the real runtime
+// resolver for that component. Embedding uses the canonical
+// mpminternal.ResolveEmbeddingConfig(c); generative components
+// use the canonical config.ResolveProfile.
+//
+// 2026-09-15 release-pass: semantics are NOT one universal
+// "inherits default" rule. Embedding is OPTIONAL and uses its
+// own resolver — the existence of Profiles["default"] does NOT
+// cause embedding to inherit a generative default.
+func componentPostUnsetReport(c *config.Config, component string) string {
+	if component == "embedding" {
+		cfg := mpminternal.ResolveEmbeddingConfig(c)
+		switch cfg.Source {
+		case mpminternal.EmbeddingSourceProfile:
+			return fmt.Sprintf("Embedding source: profile (%s)", cfg.ProfileName)
+		case mpminternal.EmbeddingSourceEnvFallback:
+			return fmt.Sprintf("Embedding source: env (provider=%s)", cfg.ProviderName)
+		case mpminternal.EmbeddingSourceDisabled:
+			return "Embedding source: disabled"
+		case mpminternal.EmbeddingSourceAbsent:
+			return "Embedding source: absent"
+		}
+		return "Embedding source: unknown"
+	}
+	// Generative components — use the canonical ResolveProfile.
+	r := c.ResolveProfile(component)
+	if r.Profile == nil {
+		return "No profile resolves; the component has no model."
+	}
+	return fmt.Sprintf("Effective profile: %q (source=%s)", r.Profile.Name, r.Source)
+}
+
+
 //
 //   mpm config component list                Render all bindings
 //   mpm config component get <component>     Show one binding
@@ -2049,16 +2126,24 @@ func handleConfigComponent(args []string) int {
 		}
 	}
 	if len(args) == 0 {
-		usererror.Error("mpm config component <sub> — need one of: list, get, set")
+		usererror.Error("mpm config component <sub> — need one of: list, get, set, unset")
 		return 1
 	}
 	switch args[0] {
 	case "list":
+		_, wantJSON := stripMemoryFlagToken(args[1:], "--json", "-j")
+		if wantJSON {
+			return respond(encodeComponentListJSON(loadOrInitConfig()), "", 0)
+		}
 		return handleComponentList(loadOrInitConfig())
 	case "get":
 		if len(args) < 2 {
 			usererror.Error("mpm config component get <name>")
 			return 1
+		}
+		_, wantJSON := stripMemoryFlagToken(args[2:], "--json", "-j")
+		if wantJSON {
+			return respond(encodeComponentJSON(args[1], loadOrInitConfig()), "", 0)
 		}
 		return handleComponentGet(loadOrInitConfig(), args[1])
 	case "set":
@@ -2067,10 +2152,37 @@ func handleConfigComponent(args []string) int {
 			return 1
 		}
 		return handleComponentSet(loadOrInitConfig(), args[1], args[2])
+	case "unset":
+		if len(args) < 2 {
+			usererror.Error("mpm config component unset <component>")
+			return 1
+		}
+		return handleComponentUnset(loadOrInitConfig(), args[1])
 	default:
-		usererror.Error("mpm config component: unknown subcommand %q — try list|get|set", args[0])
+		usererror.Error("mpm config component: unknown subcommand %q — try list|get|set|unset", args[0])
 		return 1
 	}
+}
+
+// handleComponentUnset removes a component → profile binding. The
+// existing `set ... ""` empty-string path is preserved for
+// backwards compat; `unset` is the canonical surface.
+//
+// Post-unset, the report derives from the REAL runtime resolver
+// for the component (embedding uses mpminternal.ResolveEmbeddingConfig;
+// generative uses config.ResolveProfile) so the operator sees
+// the actual effective state, not a hand-wave.
+func handleComponentUnset(c *config.Config, component string) int {
+	if c.Components == nil {
+		c.Components = map[string]string{}
+	}
+	delete(c.Components, component)
+	if err := config.SaveConfig(c); err != nil {
+		usererror.Error("saving config: %v", err)
+		return 1
+	}
+	fmt.Printf("✓ component %q unbound\n  %s\n", component, componentPostUnsetReport(c, component))
+	return 0
 }
 
 // knownComponents is the v0.1 allow-list for components. The
@@ -2090,7 +2202,8 @@ func handleComponentList(c *config.Config) int {
 		if bound == "" {
 			bound = "(default)"
 		}
-		fmt.Printf("  %-12s → %s\n", comp, bound)
+		tag := componentBindingSourceTag(c, comp, bound)
+		fmt.Printf("  %-12s → %-22s %s\n", comp, bound, tag)
 	}
 	return 0
 }
@@ -2100,8 +2213,50 @@ func handleComponentGet(c *config.Config, component string) int {
 	if bound == "" {
 		bound = "(default)"
 	}
-	fmt.Printf("  %s → %s\n", component, bound)
+	tag := componentBindingSourceTag(c, component, bound)
+	fmt.Printf("  %s → %s %s\n", component, bound, tag)
 	return 0
+}
+
+// componentBindingSourceTag returns the canonical explicit-vs-inherited
+// tag for a component binding. Embedding uses the embedding source enum;
+// generative components use config.ResolveProfile. A dangling explicit
+// binding (operator-set name that doesn't exist in Profiles) is
+// surfaced as "(explicit, invalid)".
+//
+// 2026-09-15 release-pass: this is the CLI's contract — config fallback
+// is CONFIG RESOLUTION, not runtime failover. The tag lets operators
+// see whether a binding is operator-set or inherited.
+func componentBindingSourceTag(c *config.Config, component, bound string) string {
+	if component == "embedding" {
+		cfg := mpminternal.ResolveEmbeddingConfig(c)
+		switch cfg.Source {
+		case mpminternal.EmbeddingSourceProfile:
+			return "(" + cfg.Source.String() + ": " + cfg.ProfileName + ")"
+		default:
+			return "(" + cfg.Source.String() + ")"
+		}
+	}
+	// Generative component. ProfileFor falls through to default
+	// when an explicit binding points at a missing profile (preserved
+	// behaviour); the CLI's tag detects this and surfaces it as
+	// "(explicit, invalid)" so the operator can rebind.
+	r := c.ResolveProfile(component)
+	if r.ConfiguredName != "" {
+		if _, ok := c.Profiles[r.ConfiguredName]; ok {
+			return "(explicit)"
+		}
+		return "(explicit, invalid)"
+	}
+	switch r.Source {
+	case config.ResolutionDefault:
+		return "(inherited, default)"
+	case config.ResolutionLegacy:
+		return "(inherited, legacy)"
+	case config.ResolutionUnconfigured:
+		return "(unconfigured)"
+	}
+	return "(" + string(r.Source) + ")"
 }
 
 func handleComponentSet(c *config.Config, component, profile string) int {
@@ -2162,11 +2317,19 @@ func handleConfigCapability(args []string) int {
 	}
 	switch args[0] {
 	case "list":
+		_, wantJSON := stripMemoryFlagToken(args[1:], "--json", "-j")
+		if wantJSON {
+			return respond(encodeCapabilityListJSON(loadOrInitConfig()), "", 0)
+		}
 		return handleCapabilityList(loadOrInitConfig())
 	case "get":
 		if len(args) < 2 {
 			usererror.Error("mpm config capability get <capability>")
 			return 1
+		}
+		_, wantJSON := stripMemoryFlagToken(args[2:], "--json", "-j")
+		if wantJSON {
+			return respond(encodeCapabilityJSON(args[1], loadOrInitConfig()), "", 0)
 		}
 		return handleCapabilityGet(loadOrInitConfig(), args[1])
 	case "set":
@@ -2236,4 +2399,262 @@ func handleCapabilitySet(c *config.Config, capability, component string) int {
 	}
 	fmt.Printf("✓ capability %q → component %q\n", capability, component)
 	return 0
+}
+
+// ---------------------------------------------------------------------------
+// JSON envelopes (--json parity for profile / component / capability)
+// ---------------------------------------------------------------------------
+//
+// 2026-09-15 release-pass: JSON output uses the SAME redaction policy
+// as human output. api_key is `redactAPIKey(p.APIKey)`, never the full
+// secret. The operator's secret-retrieval surface is
+// `mpm config get api_key` (human mode); JSON is not privileged.
+//
+// Field names are snake_case and stable. `count` matches `len(array)`.
+
+// profileJSONShape is the canonical per-profile JSON row.
+type profileJSONShape struct {
+	Name           string  `json:"name"`
+	Provider       string  `json:"provider"`
+	Model          string  `json:"model"`
+	BaseURL        string  `json:"base_url,omitempty"`
+	APIKey         string  `json:"api_key"` // redacted — same as human output
+	Temperature    *float64 `json:"temperature,omitempty"`
+	TimeoutSeconds int     `json:"timeout_seconds,omitempty"`
+	Reasoning      string  `json:"reasoning,omitempty"`
+}
+
+func toProfileJSON(p config.Profile, name string) profileJSONShape {
+	return profileJSONShape{
+		Name:           name,
+		Provider:       p.Provider,
+		Model:          p.Model,
+		BaseURL:        p.BaseURL,
+		APIKey:         redactAPIKey(p.APIKey),
+		Temperature:    p.Temperature,
+		TimeoutSeconds: p.TimeoutSecs,
+		Reasoning:      p.Reasoning,
+	}
+}
+
+type profileListEnvelope struct {
+	Success  bool               `json:"success"`
+	Count    int                `json:"count"`
+	Profiles []profileJSONShape `json:"profiles"`
+}
+
+func encodeProfileListJSON(c *config.Config) string {
+	names := sortedKeysForConfig(c.Profiles)
+	rows := make([]profileJSONShape, 0, len(names))
+	for _, n := range names {
+		rows = append(rows, toProfileJSON(c.Profiles[n], n))
+	}
+	b, err := json.MarshalIndent(profileListEnvelope{
+		Success: true, Count: len(rows), Profiles: rows,
+	}, "", "  ")
+	if err != nil {
+		return `{"success":false,"error":"json marshal failed"}`
+	}
+	return string(b) + "\n"
+}
+
+type profileEnvelope struct {
+	Success bool             `json:"success"`
+	Profile profileJSONShape `json:"profile"`
+}
+
+func encodeProfileJSON(name string, c *config.Config) string {
+	p, ok := c.Profiles[name]
+	if !ok {
+		return encodeErrorEnvelope(`profile "` + name + `" not found`)
+	}
+	b, err := json.MarshalIndent(profileEnvelope{
+		Success: true, Profile: toProfileJSON(p, name),
+	}, "", "  ")
+	if err != nil {
+		return `{"success":false,"error":"json marshal failed"}`
+	}
+	return string(b) + "\n"
+}
+
+type componentJSONShape struct {
+	Component         string `json:"component"`
+	ConfiguredProfile string `json:"configured_profile"`
+	EffectiveProfile  string `json:"effective_profile"`
+	BindingSource     string `json:"binding_source"`
+	Valid             bool   `json:"valid"`
+}
+
+type componentListEnvelope struct {
+	Success    bool                `json:"success"`
+	Count      int                 `json:"count"`
+	Components []componentJSONShape `json:"components"`
+}
+
+func encodeComponentListJSON(c *config.Config) string {
+	comps := sortedKeysForConfig(c.Components)
+	rows := make([]componentJSONShape, 0, len(comps))
+	for _, comp := range comps {
+		rows = append(rows, componentRecordForJSON(c, comp))
+	}
+	b, err := json.MarshalIndent(componentListEnvelope{
+		Success: true, Count: len(rows), Components: rows,
+	}, "", "  ")
+	if err != nil {
+		return `{"success":false,"error":"json marshal failed"}`
+	}
+	return string(b) + "\n"
+}
+
+type componentEnvelope struct {
+	Success   bool              `json:"success"`
+	Component componentJSONShape `json:"component"`
+}
+
+func encodeComponentJSON(component string, c *config.Config) string {
+	b, err := json.MarshalIndent(componentEnvelope{
+		Success:   true,
+		Component: componentRecordForJSON(c, component),
+	}, "", "  ")
+	if err != nil {
+		return `{"success":false,"error":"json marshal failed"}`
+	}
+	return string(b) + "\n"
+}
+
+// componentRecordForJSON derives the operator-meaningful resolution
+// for a component using the canonical resolvers. Embedding uses the
+// embedding source enum; generative components use config.ResolveProfile.
+//
+// 2026-09-15 contract:
+//   - `binding_source` mirrors the human label (explicit / default /
+//     legacy / unconfigured) for generative components; for embedding,
+//     it maps to the EmbeddingSource.String() value
+//     (profile / env / disabled / absent).
+//   - `valid` is false when an explicit binding points at a missing
+//     profile (dangling). The CLI does NOT silently clear or rebind;
+//     the operator sees the misconfig and rebinds.
+//
+// Dangling bindings: ProfileFor falls through to Profiles["default"]
+// (preserved pre-2026-09-15 behaviour), but the operator-meaningful
+// record exposes the dangling state explicitly so the operator can
+// see and rebind.
+func componentRecordForJSON(c *config.Config, component string) componentJSONShape {
+	rec := componentJSONShape{
+		Component:         component,
+		ConfiguredProfile: c.Components[component],
+		BindingSource:     "unconfigured",
+		Valid:             true,
+	}
+	if component == "embedding" {
+		cfg := mpminternal.ResolveEmbeddingConfig(c)
+		rec.BindingSource = cfg.Source.String()
+		if cfg.Source == mpminternal.EmbeddingSourceProfile {
+			rec.EffectiveProfile = cfg.ProfileName
+		} else {
+			rec.EffectiveProfile = cfg.ProviderName
+		}
+		return rec
+	}
+	r := c.ResolveProfile(component)
+	rec.BindingSource = string(r.Source)
+	if r.ConfiguredName != "" {
+		// Operator-set explicit binding. Detect dangling by
+		// checking whether the configured name resolves.
+		if _, ok := c.Profiles[r.ConfiguredName]; !ok {
+			rec.Valid = false
+			rec.BindingSource = "explicit, invalid"
+		}
+	}
+	if r.Profile != nil {
+		rec.EffectiveProfile = r.Profile.Name
+	}
+	return rec
+}
+
+type capabilityJSONShape struct {
+	Capability        string `json:"capability"`
+	ConfiguredProfile string `json:"configured_component"`
+	BindingSource     string `json:"binding_source"`
+	Valid             bool   `json:"valid"`
+}
+
+// capabilityRecordForJSON resolves a capability's component binding.
+// Capabilities map to COMPONENT names (not profile names), so the
+// resolution is one-step: capability → component (no further profile
+// lookup at this layer). The CLI surfaces the component the
+// capability is bound to, and whether that binding is operator-set or
+// from config.DefaultCapabilities.
+func capabilityRecordForJSON(c *config.Config, capability string) capabilityJSONShape {
+	rec := capabilityJSONShape{Capability: capability, Valid: true}
+	if c != nil && c.Capabilities != nil {
+		if v, ok := c.Capabilities[capability]; ok && v != "" {
+			rec.ConfiguredProfile = v
+			rec.BindingSource = "explicit"
+			return rec
+		}
+	}
+	if def, ok := config.DefaultCapabilities[capability]; ok {
+		rec.ConfiguredProfile = def
+		rec.BindingSource = "default"
+		return rec
+	}
+	rec.BindingSource = "unconfigured"
+	return rec
+}
+
+type capabilityListEnvelope struct {
+	Success     bool                 `json:"success"`
+	Count       int                  `json:"count"`
+	Capabilities []capabilityJSONShape `json:"capabilities"`
+}
+
+func encodeCapabilityListJSON(c *config.Config) string {
+	// When the operator hasn't customised capabilities, surface the
+	// canonical defaults so the JSON envelope matches the human
+	// `mpm config capability list` output exactly.
+	keys := sortedKeysForConfig(c.Capabilities)
+	if len(keys) == 0 {
+		for k := range config.DefaultCapabilities {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+	}
+	rows := make([]capabilityJSONShape, 0, len(keys))
+	for _, k := range keys {
+		rows = append(rows, capabilityRecordForJSON(c, k))
+	}
+	b, err := json.MarshalIndent(capabilityListEnvelope{
+		Success: true, Count: len(rows), Capabilities: rows,
+	}, "", "  ")
+	if err != nil {
+		return `{"success":false,"error":"json marshal failed"}`
+	}
+	return string(b) + "\n"
+}
+
+type capabilityEnvelope struct {
+	Success    bool               `json:"success"`
+	Capability capabilityJSONShape `json:"capability"`
+}
+
+func encodeCapabilityJSON(capability string, c *config.Config) string {
+	b, err := json.MarshalIndent(capabilityEnvelope{
+		Success:    true,
+		Capability: capabilityRecordForJSON(c, capability),
+	}, "", "  ")
+	if err != nil {
+		return `{"success":false,"error":"json marshal failed"}`
+	}
+	return string(b) + "\n"
+}
+
+// encodeErrorEnvelope returns a single-line JSON error object on
+// stdout. Used for --json misses; exit code is set by the caller.
+func encodeErrorEnvelope(msg string) string {
+	b, _ := json.MarshalIndent(map[string]interface{}{
+		"success": false,
+		"error":   msg,
+	}, "", "  ")
+	return string(b) + "\n"
 }

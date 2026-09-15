@@ -73,6 +73,13 @@ const (
 // base URL so the heuristic matches without operator override.
 //
 // Case-insensitive — URL casing varies across providers.
+// InferWire is the exported form of inferWire, used by callers
+// (CLI, tests) that need to determine the wire protocol from a
+// base URL outside the package.
+func InferWire(baseURL string) wireShape {
+	return inferWire(baseURL)
+}
+
 func inferWire(baseURL string) wireShape {
 	lu := strings.ToLower(baseURL)
 	switch {

@@ -184,9 +184,54 @@ func SaveConfig(c *Config) error {
 	return nil
 }
 
-// ProfileFor resolves the Profile to use for a substrate component.
+// ResolutionSource describes where an effective profile came from.
+// Used by the CLI to surface explicit-vs-inherited without duplicating
+// the resolver's logic. The CLI ("mpm config component list") renders
+// this label so operators can see whether a binding is operator-set,
+// inherited from the default profile, inherited from legacy Synth, or
+// unconfigured.
 //
-// Resolution order:
+// Embedding uses its own resolver (`ResolveEmbeddingConfig`) — the
+// embedding source enum (`profile` / `env` / `disabled` / `absent`)
+// is the authoritative source for that component and is rendered
+// separately.
+type ResolutionSource string
+
+const (
+	ResolutionExplicit     ResolutionSource = "explicit"
+	ResolutionDefault      ResolutionSource = "default"
+	ResolutionLegacy       ResolutionSource = "legacy"
+	ResolutionUnconfigured ResolutionSource = "unconfigured"
+)
+
+// ProfileResolution describes the operator-meaningful resolution for a
+// component.
+//
+//   Profile        — defensive copy of the resolved *Profile, or nil
+//                    when nothing resolves OR when an explicit binding
+//                    points at a missing profile (dangling).
+//   Source         — where the resolution came from; used by the CLI
+//                    to render the explicit-vs-inherited distinction.
+//   ConfiguredName — the raw value of Components[component] (the
+//                    operator's explicit binding string) or "" when
+//                    no explicit binding exists.
+//   Valid          — false when an explicit binding points at a
+//                    missing profile (dangling binding). The CLI
+//                    surfaces this distinctly so the operator can
+//                    rebind or remove.
+type ProfileResolution struct {
+	Profile        *Profile
+	Source         ResolutionSource
+	ConfiguredName string
+	Valid          bool
+}
+
+// ResolveProfile is the CANONICAL resolution implementation for
+// generative components. ProfileFor delegates to this — there is
+// exactly one precedence chain in the package. Embedding is NOT
+// routed through here; it uses ResolveEmbeddingConfig instead.
+//
+// Resolution order (preserved verbatim from the original ProfileFor):
 //
 //  1. Explicit binding in Config.Components[component]:
 //     e.g. Components["critic"] = "review" → returns Profiles["review"].
@@ -195,69 +240,135 @@ func SaveConfig(c *Config) error {
 //     path — operators with the pre-profiles config still get a
 //     working substrate. The Synth-derived profile is reported
 //     as Name="default".
-//  4. Returns nil when nothing can be resolved.
+//  4. Returns nil-profile ResolutionUnconfigured when nothing can
+//     be resolved.
 //
-// Substrate callers should ask by component name — never pick
-// provider/model themselves. The `profiles` map and the
-// `components` map are the operator-facing routing surface; new
-// components (Planner, Researcher, etc.) just add a new binding.
+// Sentinel behaviour (preserved verbatim from the original
+// ProfileFor):
+//
+//   - Components["embedding"] == "disabled" → Profile nil, Source
+//     ResolutionUnconfigured, ConfiguredName "disabled". The
+//     embedding resolver maps this to IntentionallyDisabled.
+//   - Components[non-embedding] == "disabled" → Profile nil,
+//     Source ResolutionUnconfigured, ConfiguredName "disabled"
+//     (the binding is treated as missing; we do NOT silently fall
+//     through to Profiles["default"]). Generative components
+//     cannot inherit a profile whose literal name is "disabled".
 //
 // Returns a defensive copy so callers cannot mutate the in-memory
-// profile via pointer. Returns nil when nothing can be resolved —
-// callers must handle that explicitly (e.g. "no model configured"
-// error paths).
-func (c *Config) ProfileFor(component string) *Profile {
+// profile via pointer.
+func (c *Config) ResolveProfile(component string) ProfileResolution {
 	if c == nil {
-		return nil
+		return ProfileResolution{Source: ResolutionUnconfigured, Valid: true}
 	}
-	// Embedding sentinel: "disabled" is reserved for components.embedding
-	// and returns nil so the embedding resolver can map it to
-	// IntentionallyDisabled. Other components treat "disabled" as a
-	// missing binding (misconfigured).
-	if component == "embedding" && c.Components != nil {
-		if name, ok := c.Components["embedding"]; ok && name == "disabled" {
-			return nil
+	// configuredName carries the operator-set binding string
+	// through to the fallback paths. The CLI uses it to surface
+	// "(explicit, invalid)" when an explicit binding points at a
+	// missing profile (dangling). The runtime's ProfileFor still
+	// falls through to Profiles["default"] in that case (preserved
+	// pre-2026-09-15 behaviour).
+	configuredName := ""
+	if c.Components != nil {
+		if name, ok := c.Components[component]; ok {
+			configuredName = name
 		}
 	}
-	// Non-embedding "disabled" binding: also return nil so callers do not
-	// silently get the default profile when a component is intentionally
-	// bound to "disabled".
-	if component != "embedding" && c.Components != nil {
-		if name, ok := c.Components[component]; ok && name == "disabled" {
-			return nil
+	// Embedding sentinel: "disabled" is reserved for components.embedding
+	// and resolves to nil-profile Unconfigured so the embedding resolver
+	// can map it to IntentionallyDisabled.
+	if component == "embedding" && configuredName == "disabled" {
+		return ProfileResolution{
+			Source:         ResolutionUnconfigured,
+			ConfiguredName: "disabled",
+			Valid:          true,
+		}
+	}
+	// Non-embedding "disabled" binding: also resolves to nil-profile
+	// Unconfigured so callers do not silently get the default profile
+	// when a generative component is bound to "disabled".
+	if component != "embedding" && configuredName == "disabled" {
+		return ProfileResolution{
+			Source:         ResolutionUnconfigured,
+			ConfiguredName: "disabled",
+			Valid:          true,
 		}
 	}
 	// 1. Explicit binding in Components.
-	if c.Components != nil {
-		if name, ok := c.Components[component]; ok && name != "" {
-			if p, ok := c.Profiles[name]; ok {
-				cp := p
-				cp.Name = name
-				return &cp
+	if configuredName != "" {
+		if p, ok := c.Profiles[configuredName]; ok {
+			cp := p
+			cp.Name = configuredName
+			return ProfileResolution{
+				Profile:        &cp,
+				Source:         ResolutionExplicit,
+				ConfiguredName: configuredName,
+				Valid:          true,
 			}
 		}
+		// Dangling explicit binding — fall through to default but
+		// record the operator's intent.
 	}
 	// 2. Fallback to "default" profile.
 	if c.Profiles != nil {
 		if p, ok := c.Profiles["default"]; ok {
 			cp := p
 			cp.Name = "default"
-			return &cp
+			return ProfileResolution{
+				Profile:        &cp,
+				Source:         ResolutionDefault,
+				ConfiguredName: configuredName,
+				Valid:          true,
+			}
 		}
 	}
 	// 3. Legacy Synth block as migration path.
 	if c.Synth != nil && (c.Synth.Model != "" || c.Synth.APIKey != "" || c.Synth.BaseURL != "") {
-		return &Profile{
-			Name:        "default",
-			Provider:    inferProviderFromURL(c.Synth.BaseURL),
-			Model:       c.Synth.Model,
-			BaseURL:     c.Synth.BaseURL,
-			APIKey:      c.Synth.APIKey,
-			MaxTokens:   c.Synth.MaxTokens,
-			TimeoutSecs: c.Synth.TimeoutSecs,
+		return ProfileResolution{
+			Profile: &Profile{
+				Name:        "default",
+				Provider:    inferProviderFromURL(c.Synth.BaseURL),
+				Model:       c.Synth.Model,
+				BaseURL:     c.Synth.BaseURL,
+				APIKey:      c.Synth.APIKey,
+				MaxTokens:   c.Synth.MaxTokens,
+				TimeoutSecs: c.Synth.TimeoutSecs,
+			},
+			Source:         ResolutionLegacy,
+			ConfiguredName: configuredName,
+			Valid:          true,
 		}
 	}
-	return nil
+	return ProfileResolution{
+		Source:         ResolutionUnconfigured,
+		ConfiguredName: configuredName,
+		Valid:          true,
+	}
+}
+
+// ProfileFor is a true delegate over ResolveProfile. Existing call
+// sites get the same behaviour they had before the refactor:
+//
+//   - explicit binding to a real profile → returns a defensive copy
+//   - explicit binding to a missing profile → returns nil (the
+//     delegate below maps Valid:false → nil)
+//   - "disabled" sentinel for embedding or any generative component
+//     → returns nil
+//   - default profile fallback → returns Profiles["default"] copy
+//   - legacy Synth fallback → returns Synth-derived Profile
+//   - nothing resolves → returns nil
+//
+// The structural invariant `ProfileFor cannot drift from
+// ResolveProfile` is enforced by construction: ProfileFor
+// contains no independent resolution logic.
+func (c *Config) ProfileFor(component string) *Profile {
+	if c == nil {
+		return nil
+	}
+	r := c.ResolveProfile(component)
+	if !r.Valid {
+		return nil
+	}
+	return r.Profile
 }
 
 // DefaultComponentProfile returns the binding for a component as a

@@ -397,6 +397,21 @@ func resolveEmbeddingConfig(cfg *config.Config) *EmbeddingConfig {
 	}
 }
 
+// ResolveEmbeddingConfig is the read-only canonical embedding
+// resolver exposed for callers (CLI: cmd/mpm/handlers_config.go)
+// that need to inspect the SAME EmbeddingConfig the runtime would
+// use for a given *config.Config object.
+//
+// It is a thin wrapper over the internal resolveEmbeddingConfig —
+// there is exactly one precedence chain in this package; the CLI
+// uses this helper so its oracle and the runtime oracle share one
+// path. The CLI does NOT call DefaultEmbeddingConfig() (which
+// reloads global state via LoadConfig); it always passes the same
+// *config.Config object the operator is editing.
+func ResolveEmbeddingConfig(cfg *config.Config) *EmbeddingConfig {
+	return resolveEmbeddingConfig(cfg)
+}
+
 // ollamaEnvFallback returns the canonical Ollama env-fallback
 // tuple (endpoint, model, true) when OLLAMA_ENDPOINT or
 // OLLAMA_MODEL is set. False means no Ollama fallback was

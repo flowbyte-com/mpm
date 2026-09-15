@@ -406,6 +406,72 @@ New wizard-driven profiles are written with `provider: "custom"`.
 Runtime wire inference decides which adapter speaks (`inferWire`
 keys off the base URL substring; see `internal/core/synth/wire.go`).
 
+### Multi-profile contract
+
+MPM supports multiple named execution profiles simultaneously. The
+data model is:
+
+    profiles: <name> → {provider, model, base_url, api_key, ...}
+    components: <component-name> → <profile-name>
+
+Properties:
+
+- Multiple LLM profiles may coexist. Each profile may have a
+  distinct provider, model, base_url, and api_key.
+- One profile may serve the embedding role while several LLM
+  profiles coexist. Embedding and LLM bindings are independent.
+- Components explicitly bind to profiles. A binding determines
+  the model that component uses. Editing one profile MUST NOT
+  mutate unrelated profiles or bindings.
+- MPM does not silently auto-route or fail over between profiles.
+  A provider failure does not cause MPM to try another profile.
+- Removing a bound profile fails safely with a list of every
+  component currently bound to it. MPM does not silently clear
+  bindings or rebind to another profile.
+- Public profile creation is Custom + protocol. Branded provider
+  menus are not exposed; legacy branded profiles (provider=openai,
+  anthropic, ollama, openrouter, ...) continue to load and run.
+
+Config fallback (unbound → default) is CONFIG RESOLUTION, not
+runtime failover. Once a component resolves to profile X, a
+provider failure on X must never cause a request to profile Y.
+
+When a binding is absent, `mpm config component list` exposes the
+effective source so the operator can distinguish:
+
+    explicit     — operator-set `components[name] = "<profile>"`
+    default      — no binding; `Profiles["default"]` resolves it
+    legacy       — no binding and no default; legacy `Synth` block
+    unconfigured — no binding and no fallback resolves
+
+JSON output exposes the same distinction via the `binding_source`
+field on each component/capability record. Embedding is special —
+its `binding_source` maps to the runtime `EmbeddingSource` enum
+(`profile` / `env` / `disabled` / `absent`), not to the generic
+four-value list above. These four values are mutually distinct;
+the CLI must report exactly one of them per embedding state, never
+phrases such as "profile via env-driven resolution" or "inherited
+via env-fallback or absent".
+
+A dangling binding (explicit `components[name] = "<profile>"` where
+`<profile>` does not exist) is surfaced as `binding_source:
+"explicit"` with `valid: false` and `effective_profile: null`. The
+operator must rebind or remove the dangling reference.
+
+JSON envelopes for `mpm config profile {list,get} --json` and
+`mpm config component {list,get} --json` use the SAME redaction
+policy as human output: `api_key` is `first4...last4` (or `****`
+when shorter than 12 chars). The full secret is NEVER exposed
+through these surfaces. The operator's secret-retrieval surface
+is `mpm config get api_key` (human mode); JSON is not privileged.
+
+The CLI's canonical resolver for generative components is
+`config.ResolveProfile(component)`; for embedding it is
+`mpminternal.ResolveEmbeddingConfig(c)`. Both helpers take the
+`*config.Config` the operator is editing — neither reloads
+global state via `LoadConfig()`. CLI rendering and the runtime
+share one resolution path.
+
 ### Actionable dashboard state
 
 When a configurable dashboard component is absent or degraded, the
