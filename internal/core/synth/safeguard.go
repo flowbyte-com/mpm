@@ -224,9 +224,24 @@ type Plan struct {
 	stages map[uint64]*stageState
 
 	// counters — incremented under mu.
+	//
+	// 2026-09-15 accounting-naming nit: the recovery slot
+	// counters are split to make the JSON contract exact.
+	// `retryCalls` counts RecoveryRetry only, `repairCalls`
+	// counts RecoveryRepair only, and `recoveryCalls` is the
+	// total (sum of the two). Pin:
+	//
+	//   recoveryCalls == retryCalls + repairCalls
+	//   actualProviderCalls <= plannedStages * 2
+	//   recoveryCalls <= plannedStages
+	//
+	// Each per-stage slot contributes exactly one entry to
+	// `recoveryCalls` (either Retry OR Repair, never both),
+	// so the upper bound is `plannedStages`.
 	completedStages        int
-	recoveryCalls          int // semantic retry calls
-	repairCalls            int // semantic repair calls
+	recoveryCalls          int // total recovery calls = retry + repair
+	retryCalls             int // subset: RecoveryRetry allocations
+	repairCalls            int // subset: RecoveryRepair allocations
 	actualProviderCalls    int // total wire hits so far
 	exhausted              bool
 	lastFailureClass       FailureClass
@@ -244,15 +259,29 @@ type stageState struct {
 
 // Stats is the read-only factual snapshot a Plan exposes for
 // telemetry / diagnostics. Stable JSON shape.
+//
+// 2026-09-15 naming nit: counter JSON tags are now semantically
+// exact. The contract:
+//
+//   recovery_calls        total recovery slots consumed
+//   retry_calls           subset: RecoveryRetry allocations
+//   repair_calls          subset: RecoveryRepair allocations
+//
+// Pins (enforced by TestSafeguard_StatsInvariants):
+//
+//   recovery_calls == retry_calls + repair_calls
+//   actual_provider_calls <= planned_stages * 2
+//   recovery_calls <= planned_stages
 type Stats struct {
-	PlannedStages        int          `json:"planned_stages"`
-	CompletedStages      int          `json:"completed_stages"`
-	RecoveryCalls        int          `json:"retry_calls"`
-	RepairCalls          int          `json:"repair_calls"`
-	ActualProviderCalls  int          `json:"actual_provider_calls"`
-	Exhausted            bool         `json:"exhausted"`
-	StopReason           string       `json:"stop_reason,omitempty"`
-	LastFailureClass     FailureClass `json:"last_failure_class"`
+	PlannedStages       int          `json:"planned_stages"`
+	CompletedStages     int          `json:"completed_stages"`
+	RecoveryCalls       int          `json:"recovery_calls"`
+	RetryCalls          int          `json:"retry_calls"`
+	RepairCalls         int          `json:"repair_calls"`
+	ActualProviderCalls int          `json:"actual_provider_calls"`
+	Exhausted           bool         `json:"exhausted"`
+	StopReason          string       `json:"stop_reason,omitempty"`
+	LastFailureClass    FailureClass `json:"last_failure_class"`
 }
 
 // PlanOption is a builder option for NewPlan.
@@ -318,6 +347,7 @@ func (p *Plan) Stats() Stats {
 		PlannedStages:       p.PlannedStages,
 		CompletedStages:     p.completedStages,
 		RecoveryCalls:       p.recoveryCalls,
+		RetryCalls:          p.retryCalls,
 		RepairCalls:         p.repairCalls,
 		ActualProviderCalls: p.actualProviderCalls,
 		Exhausted:           p.exhausted,
@@ -393,12 +423,18 @@ func (p *Plan) AttemptRecovery(fingerprint uint64, kind RecoveryKind) error {
 	st.recoveryUsed = true
 	st.recoveryKind = kind
 
+	// 2026-09-15 accounting-naming nit: keep the subset and
+	// total counters in lock-step. retryCalls and repairCalls
+	// are mutually exclusive per stage (the slot is consumed
+	// by exactly one), so the pin `recoveryCalls == retryCalls
+	// + repairCalls` is preserved by construction here.
 	switch kind {
 	case RecoveryRetry:
-		p.recoveryCalls++
+		p.retryCalls++
 	case RecoveryRepair:
 		p.repairCalls++
 	}
+	p.recoveryCalls++
 	p.actualProviderCalls++
 	if p.actualProviderCalls > absoluteCallCeilingPerInvocation {
 		return p.stopLocked(fmt.Sprintf(
@@ -448,8 +484,8 @@ func (p *Plan) StoppedReason() string {
 	s := p.Stats()
 	return fmt.Sprintf(
 		"bounded-execution safeguard triggered. "+
-			"planned=%d completed=%d retry=%d repair=%d provider_calls=%d last_failure=%s",
-		s.PlannedStages, s.CompletedStages, s.RecoveryCalls, s.RepairCalls,
+			"planned=%d completed=%d recovery=%d retry=%d repair=%d provider_calls=%d last_failure=%s",
+		s.PlannedStages, s.CompletedStages, s.RecoveryCalls, s.RetryCalls, s.RepairCalls,
 		s.ActualProviderCalls, s.LastFailureClass)
 }
 

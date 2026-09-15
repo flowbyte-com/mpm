@@ -96,7 +96,7 @@ func TestSafeguard_A_NormalSuccessOneProviderCall(t *testing.T) {
 	}
 	s := plan.Stats()
 	if s.CompletedStages != 1 || s.ActualProviderCalls != 1 ||
-		s.RecoveryCalls != 0 || s.RepairCalls != 0 ||
+		s.RecoveryCalls != 0 || s.RetryCalls != 0 || s.RepairCalls != 0 ||
 		s.Exhausted {
 		t.Errorf("plan stats wrong: %+v", s)
 	}
@@ -125,7 +125,7 @@ func TestSafeguard_B_SquareRootSentinel(t *testing.T) {
 	}
 	s := plan.Stats()
 	if s.ActualProviderCalls != 1 || s.RecoveryCalls != 0 ||
-		s.RepairCalls != 0 || s.Exhausted {
+		s.RetryCalls != 0 || s.RepairCalls != 0 || s.Exhausted {
 		t.Errorf("plan stats wrong for uncertainty: %+v", s)
 	}
 }
@@ -172,7 +172,7 @@ func TestSafeguard_D_5xxThenSuccessTwoCalls(t *testing.T) {
 		t.Errorf("attempts = %d, want 2 (1 fresh + 1 retry)", got)
 	}
 	s := plan.Stats()
-	if s.RecoveryCalls != 1 || s.RepairCalls != 0 {
+	if s.RecoveryCalls != 1 || s.RetryCalls != 1 || s.RepairCalls != 0 {
 		t.Errorf("retry/repair stats wrong: %+v", s)
 	}
 }
@@ -202,7 +202,7 @@ func TestSafeguard_E_5xxThenMalformedStops(t *testing.T) {
 		t.Errorf("attempts = %d, want 2 (1 fresh + 1 retry); NO third call", got)
 	}
 	s := plan.Stats()
-	if s.RecoveryCalls != 1 || s.RepairCalls != 0 {
+	if s.RecoveryCalls != 1 || s.RetryCalls != 1 || s.RepairCalls != 0 {
 		t.Errorf("recovery slot must be allocated to retry only: %+v", s)
 	}
 	if !s.Exhausted {
@@ -233,7 +233,7 @@ func TestSafeguard_F_MalformedThenValidRepair(t *testing.T) {
 		t.Errorf("attempts = %d, want 2", got)
 	}
 	s := plan.Stats()
-	if s.RecoveryCalls != 0 || s.RepairCalls != 1 {
+	if s.RecoveryCalls != 1 || s.RetryCalls != 0 || s.RepairCalls != 1 {
 		t.Errorf("recovery slot must be allocated to repair: %+v", s)
 	}
 }
@@ -262,7 +262,7 @@ func TestSafeguard_G_MalformedThen5xxStops(t *testing.T) {
 		t.Errorf("attempts = %d, want 2 (1 fresh + 1 repair); NO retry", got)
 	}
 	s := plan.Stats()
-	if s.RepairCalls != 1 || s.RecoveryCalls != 0 {
+	if s.RepairCalls != 1 || s.RecoveryCalls != 1 || s.RetryCalls != 0 {
 		t.Errorf("recovery was repair, not retry: %+v", s)
 	}
 }
@@ -323,7 +323,7 @@ func TestSafeguard_I_EmptyResponseTwiceFails(t *testing.T) {
 		t.Errorf("attempts = %d, want 2 (1 fresh + 1 repair attempt)", got)
 	}
 	s := plan.Stats()
-	if s.RepairCalls != 1 {
+	if s.RepairCalls != 1 || s.RecoveryCalls != 1 || s.RetryCalls != 0 {
 		t.Errorf("recovery must be allocated as repair on empty: %+v", s)
 	}
 }
@@ -582,7 +582,7 @@ func TestSafeguard_RecoverySlotSingleAllocation(t *testing.T) {
 		t.Errorf("second recovery slot must be refused (slot already used for Retry)")
 	}
 	s := plan.Stats()
-	if s.RecoveryCalls != 1 || s.RepairCalls != 0 {
+	if s.RecoveryCalls != 1 || s.RetryCalls != 1 || s.RepairCalls != 0 {
 		t.Errorf("recovery/repair stats wrong: %+v", s)
 	}
 }
@@ -617,9 +617,9 @@ func TestSafeguard_AbsoluteCeilingRefused(t *testing.T) {
 
 // TestSafeguard_StatsJSONStable — the Stats struct must be
 // JSON-marshalable with the brief-pinned stable fields:
-// planned_stages, completed_stages, retry_calls,
-// repair_calls, actual_provider_calls, exhausted,
-// last_failure_class.
+// planned_stages, completed_stages, recovery_calls,
+// retry_calls, repair_calls, actual_provider_calls,
+// exhausted, last_failure_class.
 func TestSafeguard_StatsJSONStable(t *testing.T) {
 	plan, err := NewBoundedPlan(2)
 	if err != nil {
@@ -640,7 +640,8 @@ func TestSafeguard_StatsJSONStable(t *testing.T) {
 	type wireStats struct {
 		PlannedStages       int    `json:"planned_stages"`
 		CompletedStages     int    `json:"completed_stages"`
-		RecoveryCalls       int    `json:"retry_calls"`
+		RecoveryCalls       int    `json:"recovery_calls"`
+		RetryCalls          int    `json:"retry_calls"`
 		RepairCalls         int    `json:"repair_calls"`
 		ActualProviderCalls int    `json:"actual_provider_calls"`
 		Exhausted           bool   `json:"exhausted"`
@@ -651,6 +652,7 @@ func TestSafeguard_StatsJSONStable(t *testing.T) {
 		PlannedStages:       s.PlannedStages,
 		CompletedStages:     s.CompletedStages,
 		RecoveryCalls:       s.RecoveryCalls,
+		RetryCalls:          s.RetryCalls,
 		RepairCalls:         s.RepairCalls,
 		ActualProviderCalls: s.ActualProviderCalls,
 		Exhausted:           s.Exhausted,
@@ -663,6 +665,7 @@ func TestSafeguard_StatsJSONStable(t *testing.T) {
 		"\"planned_stages\":2",
 		"\"actual_provider_calls\":4",
 		"\"exhausted\":false",
+		"\"recovery_calls\":2",
 		"\"retry_calls\":0",
 		"\"repair_calls\":2",
 	} {
@@ -670,4 +673,97 @@ func TestSafeguard_StatsJSONStable(t *testing.T) {
 			t.Errorf("expected %q in wire JSON; got: %s", want, b)
 		}
 	}
+}
+
+// TestSafeguard_StatsInvariants — pins the three user-named
+// accounting invariants across every stage shape the matrix
+// exercises:
+//
+//   recovery_calls == retry_calls + repair_calls
+//   actual_provider_calls <= planned_stages * 2
+//   recovery_calls <= planned_stages
+//
+// The first is maintained by AttemptRecovery's switch (one
+// of `retryCalls` / `repairCalls` is incremented per slot);
+// the second is the bounded-execution contract; the third is
+// the per-stage single-slot rule (retry XOR repair, never
+// both).
+func TestSafeguard_StatsInvariants(t *testing.T) {
+	cases := []struct {
+		name string
+		kind RecoveryKind
+	}{
+		{"fresh-only", RecoveryNone}, // zero recovery
+		{"retry-slot", RecoveryRetry},
+		{"repair-slot", RecoveryRepair},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := NewPerCallPlan()
+			fpr := uint64(1)
+			if err := plan.AttemptFresh(fpr); err != nil {
+				t.Fatalf("fresh: %v", err)
+			}
+			if tc.kind != RecoveryNone {
+				if err := plan.AttemptRecovery(fpr, tc.kind); err != nil {
+					t.Fatalf("recovery(%v): %v", tc.kind, err)
+				}
+			}
+			s := plan.Stats()
+			// Pin 1: total = retry + repair.
+			if s.RecoveryCalls != s.RetryCalls+s.RepairCalls {
+				t.Errorf("pin violated: recovery_calls=%d != retry_calls(%d) + repair_calls(%d)",
+					s.RecoveryCalls, s.RetryCalls, s.RepairCalls)
+			}
+			// Pin 2: actual_provider_calls <= planned_stages * 2.
+			if s.ActualProviderCalls > s.PlannedStages*2 {
+				t.Errorf("pin violated: actual_provider_calls=%d > planned_stages*2=%d",
+					s.ActualProviderCalls, s.PlannedStages*2)
+			}
+			// Pin 3: recovery_calls <= planned_stages.
+			if s.RecoveryCalls > s.PlannedStages {
+				t.Errorf("pin violated: recovery_calls=%d > planned_stages=%d",
+					s.RecoveryCalls, s.PlannedStages)
+			}
+		})
+	}
+
+	// Multi-stage case: 8 stages, half retry, half repair.
+	t.Run("mixed-8-stages", func(t *testing.T) {
+		plan, err := NewBoundedPlan(8)
+		if err != nil {
+			t.Fatalf("plan build: %v", err)
+		}
+		for s := 0; s < 8; s++ {
+			fpr := uint64(s + 1)
+			if err := plan.AttemptFresh(fpr); err != nil {
+				t.Fatalf("stage %d fresh: %v", s, err)
+			}
+			kind := RecoveryRetry
+			if s%2 == 1 {
+				kind = RecoveryRepair
+			}
+			if err := plan.AttemptRecovery(fpr, kind); err != nil {
+				t.Fatalf("stage %d recovery: %v", s, err)
+			}
+		}
+		s := plan.Stats()
+		if s.RecoveryCalls != 8 {
+			t.Errorf("recovery_calls=%d, want 8", s.RecoveryCalls)
+		}
+		if s.RetryCalls != 4 || s.RepairCalls != 4 {
+			t.Errorf("split wrong: retry=%d repair=%d (want 4/4)", s.RetryCalls, s.RepairCalls)
+		}
+		if s.RecoveryCalls != s.RetryCalls+s.RepairCalls {
+			t.Errorf("mixed: pin violated: recovery_calls=%d != retry(%d)+repair(%d)",
+				s.RecoveryCalls, s.RetryCalls, s.RepairCalls)
+		}
+		if s.ActualProviderCalls != 16 {
+			t.Errorf("actual_provider_calls=%d, want 16 (planned_stages*2)", s.ActualProviderCalls)
+		}
+		if s.RecoveryCalls > s.PlannedStages {
+			t.Errorf("pin violated: recovery_calls=%d > planned_stages=%d",
+				s.RecoveryCalls, s.PlannedStages)
+		}
+	})
 }

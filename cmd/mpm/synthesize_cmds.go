@@ -117,10 +117,21 @@ func handleSynthesize(args []string) int {
 	if dryRun {
 		fmt.Printf("Dry-run: %d memory(ies) processed; %d remaining.\n", processed, remaining)
 	} else if remaining > 0 {
+		// 2026-09-15 accounting-naming nit: the bounded-
+		// continuation report now uses unit-exact labels.
+		// The unit is *memories*: one AutoSynthesize call
+		// per non-deleted, non-LTM memory row. The CLI
+		// processes up to MaxSemanticStagesPerInvocation
+		// (= 8) per call; re-invocation resumes from
+		// canonical substrate state. The math invariant
+		// `processed + remaining == total` holds in code
+		// regardless of N (verified by
+		// TestRunawaySafeguard_ContinuationArithmeticInvariant).
 		fmt.Println()
 		fmt.Println("MPM · Synthesis")
-		fmt.Printf("  Synthesized: %d\n", processed)
-		fmt.Printf("  Remaining eligible: %d\n", remaining)
+		fmt.Println("Unit: memories (one check per non-deleted, non-LTM memory row)")
+		fmt.Printf("  Memories processed: %d\n", processed)
+		fmt.Printf("  Memories remaining: %d\n", remaining)
 		fmt.Println()
 		fmt.Println("Bounded execution limit reached for this invocation.")
 		fmt.Println("Run `mpm synthesize` again to continue.")
