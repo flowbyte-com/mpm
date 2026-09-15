@@ -537,6 +537,21 @@ func buildProvider(p *config.Profile) (EmbeddingProvider, error) {
 	return nil, fmt.Errorf("buildProvider: no implementation for provider %q", p.Provider)
 }
 
+// BuildEmbeddingProvider is the public-export wrapper around buildProvider.
+// It exists so the canonical probe (cmd/mpm/probe) and any future
+// "build the same adapter production uses" caller can resolve the
+// EmbeddingProvider for a given profile WITHOUT duplicating the dispatch
+// switch. Today this routes Ollama → OllamaProvider and OpenAI-compatible
+// / openai / openrouter → OpenAICompatibleProvider; both implement
+// EmbeddingProvider.
+//
+// Use this for any caller that needs to reuse production's embedding
+// path. The previous unexported `buildProvider` remains for internal
+// callers.
+func BuildEmbeddingProvider(p *config.Profile) (EmbeddingProvider, error) {
+	return buildProvider(p)
+}
+
 func providerName(p *config.Profile) string {
 	return p.Provider + ":" + p.Model
 }

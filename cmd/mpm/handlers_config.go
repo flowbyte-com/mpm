@@ -76,6 +76,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -84,10 +85,13 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
-	"github.com/flowbyte-com/mpm-core/config"
 	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/usererror"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/probe"
 
 	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
@@ -553,8 +557,8 @@ func pluralForN(n int) string {
 // configuration wizard. Per the 2026-09-14 config-simplification
 // pass, the public menu exposes ONLY Custom:
 //
-//   Provider
-//     1. Custom
+//	Provider
+//	  1. Custom
 //
 // Branded provider menus (MiniMax, OpenAI, Anthropic, Cohere,
 // Google Gemini, Mistral, Ollama, OpenRouter, xAI, etc.) are
@@ -861,10 +865,10 @@ func handleConfigInteractive(c *config.Config) int {
 	}
 
 	// Timeout (rarely customised, default-only). 2026-09-14
-// final-simplification: Max tokens is NOT user-configurable;
-// the substrate supplies its own internal value at wire time.
-// The wizard does not prompt for it and the profile value is
-// never honoured.
+	// final-simplification: Max tokens is NOT user-configurable;
+	// the substrate supplies its own internal value at wire time.
+	// The wizard does not prompt for it and the profile value is
+	// never honoured.
 	timeout := promptString(rwFromStdin(), "Timeout seconds", intToStr(prof.TimeoutSecs))
 	if timeout != "" {
 		if n, err := strconvAtoi(timeout); err == nil && n > 0 {
@@ -876,8 +880,8 @@ func handleConfigInteractive(c *config.Config) int {
 
 	// Refuse to save when the wizard collected no usable profile
 	// state — model + base URL are the minimum to be useful. This
-// guards against the wizard silently writing an empty profile on
-// a fresh install.
+	// guards against the wizard silently writing an empty profile on
+	// a fresh install.
 	if prof.Model == "" && prof.BaseURL == "" && !hadModel && !hadBaseURL {
 		fmt.Println()
 		fmt.Println("A model or base URL is required. Run `mpm config profile set default model <id>` for non-interactive configuration, or re-run the wizard and provide a model or URL.")
@@ -1005,9 +1009,9 @@ func displayModelOrEmpty(m string) string {
 // a fault.
 //
 // 2026-09-14 final-simplification: the public menu offers ONLY:
-//   1. Leave unchanged (or skip if not configured)
-//   2. Configure manually (Custom + protocol)
-//   3. Disable embedding
+//  1. Leave unchanged (or skip if not configured)
+//  2. Configure manually (Custom + protocol)
+//  3. Disable embedding
 //
 // The previous auto-detect option was retired in the same
 // pass — MPM does not discover or select models for the
@@ -1318,11 +1322,12 @@ func configApply(c *config.Config, key, val string) error {
 }
 
 // configCanonicalKey normalises an input key to its canonical form.
-//   "token"       → "api_key"
-//   "apikey"      → "api_key"
-//   "endpoint"    → "base_url"
-//   "base-url"    → "base_url"
-//   "timeout"     → "timeout_seconds"
+//
+//	"token"       → "api_key"
+//	"apikey"      → "api_key"
+//	"endpoint"    → "base_url"
+//	"base-url"    → "base_url"
+//	"timeout"     → "timeout_seconds"
 //
 // 2026-09-14 final-simplification: max / max_tokens /
 // max_output_tokens aliases are no longer recognised — the
@@ -1707,14 +1712,14 @@ var _ = syscall.Stdin
 
 // handleConfigProfile routes profile management subcommands.
 //
-//   mpm config profile add [name]                   Interactive wizard /
-//                                                  accept-name-from-stdin
-//   mpm config profile list                       Render all profiles
-//   mpm config profile get <name>                  Show one profile
-//   mpm config profile set <name> <key> <value>    Set one field
-//   mpm config profile remove <name>               Delete; refuse if
-//                                                  any component binds
-//                                                  to this profile
+//	mpm config profile add [name]                   Interactive wizard /
+//	                                               accept-name-from-stdin
+//	mpm config profile list                       Render all profiles
+//	mpm config profile get <name>                  Show one profile
+//	mpm config profile set <name> <key> <value>    Set one field
+//	mpm config profile remove <name>               Delete; refuse if
+//	                                               any component binds
+//	                                               to this profile
 func handleConfigProfile(args []string) int {
 	// 2026-09-14 release-pass: --help / -h / "help" (the
 	// parseFlags rewrite) at any position short-circuits to the
@@ -1984,7 +1989,79 @@ func handleProfileSet(c *config.Config, name, key, value string) int {
 		return 1
 	}
 	fmt.Printf("✓ profile %q %s set to %q\n", name, key, value)
+
+	// Best-effort post-save probe. The save has already committed
+	// regardless of probe outcome; the probe merely validates the
+	// configured profile with the real adapter and prints a hint.
+	// Non-material fields (temperature, reasoning, timeout) don't
+	// trigger because they don't change the fingerprint.
+	probeAfterSet(p, key)
 	return 0
+}
+
+// probeAfterSet runs a single best-effort probe against p if the
+// material-field change produced a structurally executable profile.
+// Errors are rendered as a UX hint, never as a save failure. Non-material
+// keys are silently ignored.
+func probeAfterSet(p config.Profile, key string) {
+	materialKeys := map[string]bool{
+		"provider": true, "model": true, "base_url": true, "endpoint": true,
+		"api_key": true, "token": true,
+	}
+	if !materialKeys[strings.ToLower(strings.ReplaceAll(key, "-", "_"))] {
+		return
+	}
+	if !probe.CanProbe(&p) {
+		// Profile is mid-construction; do not flag a runtime failure.
+		return
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil || cfg == nil {
+		return
+	}
+	dm := getDBConcrete()
+	// Force DB initialization if it hasn't already been opened. The
+	// profile-set path doesn't otherwise need DB access, but the probe
+	// needs to persist results to system_config[model_probe_results].
+	if dm == nil {
+		dm = getDBConcrete()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	results, err := probe.RunActiveProbes(ctx, cfg, dm)
+	if err != nil || len(results) == 0 {
+		return
+	}
+	// Print UX line for the affected profile (matching fingerprint).
+	myFp := probe.ComputeFingerprint(probe.FingerprintInput{
+		Provider:   p.Provider,
+		Model:      p.Model,
+		BaseURL:    p.BaseURL,
+		Credential: p.APIKey,
+	})
+	for _, r := range results {
+		if r.Fingerprint != myFp {
+			continue
+		}
+		printProbeOnSaveHint(r)
+		return
+	}
+}
+
+// printProbeOnSaveHint emits the user-facing verification line. Saved
+// the profile regardless of probe outcome; the hint is best-effort.
+func printProbeOnSaveHint(r probe.ProbeResult) {
+	switch r.Status {
+	case probe.ProbeHealthy:
+		fmt.Printf("✓ Connection verified · %s · %s · %dms\n", r.Provider, r.Model, r.LatencyMs)
+	default:
+		summary := r.ErrorSummary
+		if summary == "" {
+			summary = r.Status.String()
+		}
+		fmt.Printf("✗ Verification failed · %s\n", summary)
+		fmt.Println("Configuration was saved.")
+	}
 }
 
 // isEmbeddingBoundProfile reports whether the profile is
@@ -2111,11 +2188,9 @@ func componentPostUnsetReport(c *config.Config, component string) string {
 	return fmt.Sprintf("Effective profile: %q (source=%s)", r.Profile.Name, r.Source)
 }
 
-
-//
-//   mpm config component list                Render all bindings
-//   mpm config component get <component>     Show one binding
-//   mpm config component set <comp> <profile> Set binding
+// mpm config component list                Render all bindings
+// mpm config component get <component>     Show one binding
+// mpm config component set <comp> <profile> Set binding
 func handleConfigComponent(args []string) int {
 	// 2026-09-14 release-pass: --help / -h / "help" (the
 	// parseFlags rewrite) short-circuit.
@@ -2293,18 +2368,18 @@ func handleComponentSet(c *config.Config, component, profile string) int {
 
 // handleConfigCapability routes capability binding subcommands.
 //
-//   mpm config capability list                Render all bindings
-//   mpm config capability get <capability>    Show one binding
-//   mpm config capability set <cap> <comp>    Bind capability to component
+//	mpm config capability list                Render all bindings
+//	mpm config capability get <capability>    Show one binding
+//	mpm config capability set <cap> <comp>    Bind capability to component
 //
 // Capabilities are the operator-meaningful vocabulary that Skills and
 // runtime code address. Components are the substrate-specific
 // functions that fulfil them. Default v0.1 capabilities:
 //
-//   planner   → memory
-//   reviewer  → critic
-//   reflect   → critic
-//   summarise → memory
+//	planner   → memory
+//	reviewer  → critic
+//	reflect   → critic
+//	summarise → memory
 //
 // Operators can override any of these or add their own. The runtime
 // resolves at skill-execution time: skill says 'I need reviewer',
@@ -2414,14 +2489,14 @@ func handleCapabilitySet(c *config.Config, capability, component string) int {
 
 // profileJSONShape is the canonical per-profile JSON row.
 type profileJSONShape struct {
-	Name           string  `json:"name"`
-	Provider       string  `json:"provider"`
-	Model          string  `json:"model"`
-	BaseURL        string  `json:"base_url,omitempty"`
-	APIKey         string  `json:"api_key"` // redacted — same as human output
+	Name           string   `json:"name"`
+	Provider       string   `json:"provider"`
+	Model          string   `json:"model"`
+	BaseURL        string   `json:"base_url,omitempty"`
+	APIKey         string   `json:"api_key"` // redacted — same as human output
 	Temperature    *float64 `json:"temperature,omitempty"`
-	TimeoutSeconds int     `json:"timeout_seconds,omitempty"`
-	Reasoning      string  `json:"reasoning,omitempty"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+	Reasoning      string   `json:"reasoning,omitempty"`
 }
 
 func toProfileJSON(p config.Profile, name string) profileJSONShape {
@@ -2486,8 +2561,8 @@ type componentJSONShape struct {
 }
 
 type componentListEnvelope struct {
-	Success    bool                `json:"success"`
-	Count      int                 `json:"count"`
+	Success    bool                 `json:"success"`
+	Count      int                  `json:"count"`
 	Components []componentJSONShape `json:"components"`
 }
 
@@ -2507,7 +2582,7 @@ func encodeComponentListJSON(c *config.Config) string {
 }
 
 type componentEnvelope struct {
-	Success   bool              `json:"success"`
+	Success   bool               `json:"success"`
 	Component componentJSONShape `json:"component"`
 }
 
@@ -2604,8 +2679,8 @@ func capabilityRecordForJSON(c *config.Config, capability string) capabilityJSON
 }
 
 type capabilityListEnvelope struct {
-	Success     bool                 `json:"success"`
-	Count       int                  `json:"count"`
+	Success      bool                  `json:"success"`
+	Count        int                   `json:"count"`
 	Capabilities []capabilityJSONShape `json:"capabilities"`
 }
 
@@ -2634,7 +2709,7 @@ func encodeCapabilityListJSON(c *config.Config) string {
 }
 
 type capabilityEnvelope struct {
-	Success    bool               `json:"success"`
+	Success    bool                `json:"success"`
 	Capability capabilityJSONShape `json:"capability"`
 }
 

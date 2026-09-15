@@ -8,6 +8,7 @@ import (
 	"time"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
 
 	"github.com/flowbyte-com/mpm-core/usererror"
 
@@ -34,21 +35,21 @@ func handleStatus(args []string) int {
 // the text dashboard (printStatusDashboard) and the JSON output
 // (printStatusJSON). Single source of truth so the two views cannot drift.
 type statusData struct {
-	uptime         string
-	modeState      string   // none | one | many | auto
-	modeValues     []string // empty when state="none", one entry when "one"/"auto", many when "many"
-	modeSource     string   // 2026-09-14: resolution source tag ("[fallback]" / "[explicit]" / "")
-	personaState   string   // none | one | auto
-	personaValues  []string // empty when "none", one entry when "one"/"auto"
-	personaSource  string   // 2026-09-14: resolution source tag
-	memTotal       int
-	memLTM         int
-	theoryTotal    int
-	theoryPend     int
-	theoryResolv   int
-	decisions      int
-	synthMerged    int
-	synthLast      string
+	uptime        string
+	modeState     string   // none | one | many | auto
+	modeValues    []string // empty when state="none", one entry when "one"/"auto", many when "many"
+	modeSource    string   // 2026-09-14: resolution source tag ("[fallback]" / "[explicit]" / "")
+	personaState  string   // none | one | auto
+	personaValues []string // empty when "none", one entry when "one"/"auto"
+	personaSource string   // 2026-09-14: resolution source tag
+	memTotal      int
+	memLTM        int
+	theoryTotal   int
+	theoryPend    int
+	theoryResolv  int
+	decisions     int
+	synthMerged   int
+	synthLast     string
 	recentEvents  []watchdogEvent
 }
 
@@ -314,6 +315,12 @@ func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) 
 	render.KeyValue(os.Stdout, "Uptime", d.uptime)
 	render.Plain(os.Stdout, "  "+formatModeLine(d.modeState, d.modeValues, d.modeSource))
 	render.Plain(os.Stdout, "  "+formatPersonaLine(d.personaState, d.personaValues, d.personaSource, dm))
+	// Models health row — read-only on the probe cache; never network IO.
+	if cfg, err := config.LoadConfig(); err == nil && cfg != nil {
+		renderModelsDashboard(os.Stdout, dm, cfg)
+	} else {
+		renderModelsDashboard(os.Stdout, nil, nil)
+	}
 	render.KeyValue(os.Stdout, "Memories", fmt.Sprintf("%d total | %d LTM", d.memTotal, d.memLTM))
 	render.KeyValue(os.Stdout, "Theories", fmt.Sprintf("%d total | %d pending | %d resolved", d.theoryTotal, d.theoryPend, d.theoryResolv))
 	render.KeyValue(os.Stdout, "Decisions", fmt.Sprintf("%d total", d.decisions))

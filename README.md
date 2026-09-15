@@ -1324,7 +1324,8 @@ mpm work promote        # Promote Working Context to permanent memory
 
 # Provenance & diagnostics
 mpm why <id>            # Artifact provenance — evidence chain, confidence, retrieval stats
-mpm doctor              # Trust-signal diagnostics (5 checks: DB, embeddings, working context, scheduler, review)
+mpm doctor              # Active trust-signal diagnostics (now actively verifies configured model connectivity through real provider probes)
+mpm status              # Compact dashboard — Uptime / Mode / Models / counts (Models line shows recent verified health; never probes network)
 mpm info                # Installation identity — version, paths, models, skills, counts
 mpm tour                # Interactive 6-step walkthrough of cognitive verbs
 mpm tour --demo         # Auto-run each step with sample arguments
@@ -1557,7 +1558,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`decision`** — Decision CRUD
 - **`decisions`** — List decisions
 - **`directives`** — Show behavioral directives
-- **`doctor`** — Run substrate diagnostics (--deep-scan for FTS/integrity audit, --explain for FTS5 query plan)
+- **`doctor`** — Active trust-signal diagnostics: runs structural checks AND performs real network probes of every configured generative + embedding profile. Concurrent, 12s per-probe timeout, persists recent results to `system_config[model_probe_results]`. (--deep-scan for FTS/integrity audit, --explain for FTS5 query plan)
 - **`drills`** — Behavioural drill execution + compatibility matrix (list|show|run|report)
 - **`evidence`** — Manage evidence (add|list) — confidence foundation
 - **`export`** — Export memories to JSON
@@ -2289,6 +2290,26 @@ MPM is designed for long-running autonomous operation: SQLite WAL mode, dead-let
 > These patterns exist because the next architectural threat is no longer bad design — it is implementation debt. Too many artifact types, too many lifecycle states, too many special cases, too much intelligence expected from the substrate. The antidote is the same as §7's: strict enums, invariants pinned by property tests, append-only records, boring storage. Default to no.
 
 This section is the operator-facing view of the same model: what runs, when, and what to do when it fails.
+
+### Model Connectivity Probes
+
+`mpm` distinguishes four states for every configured model binding:
+
+- **configured** — the profile JSON parses; provider / model / base_url are non-empty.
+- **reachable** — a real HTTP transport completes against the configured endpoint.
+- **working** — a real inference request (generation OR embedding) succeeds through the production provider adapter with non-empty, parseable output.
+- **healthy** — `working == true` AND the result is fresh (≤ 5 min).
+
+`configured ≠ working`. A profile with an API key and model name is not automatically healthy.
+
+| Surface | Behaviour |
+| --- | --- |
+| `mpm doctor` | Performs an active real-network probe of every generative + embedding binding. Concurrent (4 fan-out), 12s per-probe timeout, persists bounded results to `system_config[model_probe_results]`. |
+| `mpm` / `mpm status` | Read-only on the probe cache. Renders `Models  ✓ N/N healthy · checked Ns ago`. Stale or missing cache surfaces `? not recently verified · run 'mpm doctor'`. **Never blocks on the network.** |
+| `mpm config profile set <name> <material-field>` | After each material-field save that produces a structurally complete profile, fires a single best-effort probe and prints `✓ Connection verified · …` or `✗ Verification failed · … / Configuration was saved.` |
+| Disabled (`Components["embedding"] == "disabled"`) | Reported as neutral — excluded from the health denominator. |
+
+The probe exercises MPM's real inference path via `synth.SynthClient.DoLLMRequest` and the `EmbeddingProvider` factory — there is no second HTTP code path or alternative wire library. Failed probes never roll back valid configuration: provider outages (cold local models, transient rate limits, mid-provision credentials) are legitimate intermediate states.
 
 ### Self-Healing Integrity Loop
 

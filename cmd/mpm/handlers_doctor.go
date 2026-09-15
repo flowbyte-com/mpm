@@ -20,11 +20,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/usererror"
+
+	"github.com/flowbyte-com/mpm/cmd/mpm/probe"
 )
 
 // handleDoctor runs DoctorService.Check and renders the report.
@@ -66,13 +72,22 @@ func handleDoctor(args []string) int {
 		return 1
 	}
 
+	// Model connectivity probes — runs concurrently with bounded fan-out,
+	// persists results to system_config[model_probe_results]. Errors per
+	// profile become DoctorCheck rows alongside the structural report.
+	if cfg, lerr := config.LoadConfig(); lerr == nil && cfg != nil {
+		if pres, perr := probe.RunActiveProbes(context.Background(), cfg, dm); perr == nil && len(pres) > 0 {
+			report.Checks = append(report.Checks, modelChecksFromProbes(pres)...)
+		}
+	}
+
 	if wantJSON {
 		// JSON output — never routes through the human renderer.
 		// Use os.Stdout directly so the contract holds even when
 		// isatty returns true.
 		out := struct {
-			Timestamp string                 `json:"timestamp"`
-			Summary   map[string]interface{} `json:"summary"`
+			Timestamp string                   `json:"timestamp"`
+			Summary   map[string]interface{}   `json:"summary"`
 			Checks    []map[string]interface{} `json:"checks"`
 		}{
 			Timestamp: nowRFC3339(),
@@ -128,6 +143,59 @@ func doctorChecksToJSON(checks []DoctorCheck) []map[string]interface{} {
 			"message": c.Message,
 			"details": c.Details,
 		})
+	}
+	return out
+}
+
+// modelChecksFromProbes converts probe results into DoctorCheck rows. One
+// row per (fingerprint, components[C]) tuple already provided by the probe
+// result. Disabled rows surface as INFO; partial outages as WARN; healthy
+// as PASS; total failures as FAIL.
+func modelChecksFromProbes(results []probe.ProbeResult) []DoctorCheck {
+	out := make([]DoctorCheck, 0, len(results))
+	for _, r := range results {
+		name := "Models"
+		if len(r.Components) > 0 {
+			// Use the first component label as the row name (memory,
+			// critic, embedding, etc.); additional components share the
+			// underlying profile and are listed in the message.
+			name = strings.Title(r.Components[0])
+		}
+		check := DoctorCheck{Name: name}
+		switch r.Status {
+		case probe.ProbeHealthy:
+			check.Status = "PASS"
+			check.Message = fmt.Sprintf("%s · %s · %dms",
+				r.Provider, r.Model, r.LatencyMs)
+		case probe.ProbeDisabled:
+			check.Status = "INFO"
+			check.Message = "intentionally disabled"
+		case probe.ProbeAuthFailed:
+			check.Status = "WARN"
+			check.Message = fmt.Sprintf("%s · auth failed: %s", r.Provider, r.ErrorSummary)
+		case probe.ProbeModelNotFound:
+			check.Status = "WARN"
+			check.Message = fmt.Sprintf("%s · model not found", r.Provider)
+		case probe.ProbeUnreachable:
+			check.Status = "FAIL"
+			check.Message = fmt.Sprintf("%s · unreachable", r.Provider)
+		case probe.ProbeTimeout:
+			check.Status = "FAIL"
+			check.Message = fmt.Sprintf("%s · timeout", r.Provider)
+		case probe.ProbeInvalidResponse:
+			check.Status = "WARN"
+			check.Message = fmt.Sprintf("%s · invalid response", r.Provider)
+		default:
+			check.Status = "WARN"
+			check.Message = r.ErrorSummary
+			if check.Message == "" {
+				check.Message = "unknown"
+			}
+		}
+		if r.ErrorSummary != "" && check.Status != "PASS" && check.Status != "INFO" {
+			check.Details = []string{r.ErrorSummary}
+		}
+		out = append(out, check)
 	}
 	return out
 }
