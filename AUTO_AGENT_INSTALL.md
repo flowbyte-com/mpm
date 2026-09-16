@@ -191,12 +191,33 @@ Do not assume a hard-coded user path.
 After installation verify:
 
 ```bash
-command -v mpm
-mpm --help
-mpm --version
+command -v mpm || true
 ```
 
-If `mpm` is not resolvable, determine the installed binary location before changing PATH.
+If bare `mpm` resolves in the current shell, use it. If not, locate
+the canonical installed binary or wrapper produced by the installer —
+typically:
+
+```text
+$HOME/.mpm/bin/mpm
+```
+
+(or whatever path the current installer reports). Then verify with the
+resolved absolute path:
+
+```bash
+<resolved-mpm> --help
+<resolved-mpm> --version
+```
+
+Do not treat missing current-session `PATH` resolution as installation
+failure when the canonical installed path works — Section 6 explains
+why a freshly-created `~/.local/bin` may not appear in the current
+session.
+
+If `mpm` is not resolvable and the canonical installed path cannot be
+located, stop and surface the location reported by the installer
+before changing `PATH`.
 
 ---
 
@@ -240,13 +261,29 @@ Only these two binaries are symlinked. Internal daemons
 `~/.mpm/bin/` and are invoked by systemd, never by the user. Putting
 them on PATH would invite accidental direct invocation and drift.
 
-Verify:
+Verify the symlinks themselves (no `PATH` assumption required):
 
 ```bash
-command -v mpm            # expect: /home/<user>/.local/bin/mpm
-command -v mpm-mcp        # expect: /home/<user>/.local/bin/mpm-mcp
-mpm --version
+ls -l "$HOME/.local/bin/mpm" "$HOME/.local/bin/mpm-mcp"
+# expect each line to point at $HOME/.mpm/bin/...
 ```
+
+Then confirm the canonical wrapper works regardless of current-session
+`PATH` resolution:
+
+```bash
+"$HOME/.local/bin/mpm" --version
+```
+
+Optionally check whether `mpm` resolves by name in the current shell:
+
+```bash
+command -v mpm || true
+```
+
+If it does, great. If not, see the current-shell guidance below — it
+is expected on a freshly-created `~/.local/bin` and is not an install
+failure.
 
 ## What NOT to do
 
@@ -270,14 +307,29 @@ symlink mechanism was designed to prevent.
 
 If `~/.local/bin` is missing from the user's current `PATH`
 (expected when the directory was created after the current login
-session started — see above), surface a warning
-and instruct the user to add it themselves:
+session started — see above), the user has two immediate options
+without persisting a new shell startup entry:
 
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"   # user does this, not the agent
+```text
+1. use the canonical installed absolute path:
+       $HOME/.local/bin/mpm   (or $HOME/.mpm/bin/mpm if the
+       ~/.local/bin symlink is somehow unavailable)
+
+2. or, for the duration of the current shell only:
+       export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Do **not** perform the edit on the user's behalf.
+A new login session will normally pick `~/.local/bin` up where the
+user's login configuration already supports it (for example the
+standard `~/.profile` conditional that prepends `$HOME/.local/bin`
+when the directory exists).
+
+Do **not** instruct the user — and certainly do not let an install
+agent — to append another persistent `export PATH=...` line to
+`.bashrc`, `.profile`, `.zshrc`, or any other startup file. The
+`~/.local/bin` symlink is the durable mechanism; one startup-file
+mutation per host is enough, and that one is the user's to make (or
+not).
 
 ## Non-interactive agents and services (mandatory `mpmBin`)
 
