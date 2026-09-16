@@ -407,7 +407,7 @@ phase_binaries() {
 #!/bin/sh
 # mpm CLI wrapper — installed by scripts/install.sh
 # Routes CLI to the per-user workspace regardless of CWD.
-# Override at invocation: `MPM_WORKSPACE=/tmp/foo mpm call …`
+# Override at invocation: MPM_WORKSPACE=/tmp/foo mpm call …
 exec env MPM_WORKSPACE=\${MPM_WORKSPACE:-${DATA_ROOT}} ${PREFIX}/bin/mpm.real "\$@"
 WRAPPER
     chmod 0755 "$PREFIX/bin/mpm"

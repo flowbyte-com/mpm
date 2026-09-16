@@ -473,3 +473,127 @@ func TestInstallSh_NextStepsUseCanonicalPath(t *testing.T) {
 		t.Errorf("install.sh must preserve the conditional seeding hint (phase_validate emits it when directives are missing); not found")
 	}
 }
+
+// TestInstallSh_WrapperHeredocHasNoCommandSubstitution pins the
+// wrapper heredoc in install.sh against accidental command-
+// substitution constructs.
+//
+// The wrapper heredoc uses an UNQUOTED delimiter (`<<WRAPPER`)
+// so that ${DATA_ROOT} and ${PREFIX} expand at install time and
+// the installed wrapper can route to the install-time binary
+// path. The unquoted delimiter, however, also means Bash performs
+// $(...) and `...` substitution inside the heredoc — a stray
+// backtick (or $() ) in what looks like a comment will try to
+// execute the contents during install.
+//
+// INSTALL-003: the wrapper comment used Markdown-style backticks
+// around an example invocation:
+//
+//	# Override at invocation: `MPM_WORKSPACE=/tmp/foo mpm call …`
+//
+// Bash tried to execute `MPM_WORKSPACE=/tmp/foo mpm call …` during
+// install, failing with "line N: mpm: command not found" on hosts
+// where `mpm` was not yet on PATH (i.e. the entire target user
+// base — fresh Linux Mint / Ubuntu hosts running the installer for
+// the first time).
+//
+// This test pins:
+//  1. No backticks inside the wrapper heredoc (would be command
+//     substitution; the wrapper file is not the only casualty —
+//     the install aborts).
+//  2. No $(...) patterns inside the wrapper heredoc (same hazard
+//     class).
+//  3. The override example remains as inert comment text (without
+//     the backticks that previously broke install).
+//  4. The intended install-time and runtime variable expansions
+//     (${DATA_ROOT}, ${PREFIX}, \${MPM_WORKSPACE:-...}, "\$@")
+//     remain in the heredoc.
+func TestInstallSh_WrapperHeredocHasNoCommandSubstitution(t *testing.T) {
+	data, err := os.ReadFile("../scripts/install.sh")
+	if err != nil {
+		if data, err = os.ReadFile("install.sh"); err != nil {
+			t.Fatalf("read install.sh: %v", err)
+		}
+	}
+	body := string(data)
+
+	// Extract the wrapper heredoc content. The heredoc is the only
+	// `<<WRAPPER ... WRAPPER` block in install.sh. The start
+	// marker is `<<WRAPPER`; the end marker is a line whose first
+	// non-whitespace token is `WRAPPER` (no leading whitespace per
+	// shell heredoc semantics).
+	const startMarker = "<<WRAPPER"
+	const endMarker = "WRAPPER"
+
+	startIdx := strings.Index(body, startMarker)
+	if startIdx == -1 {
+		t.Fatalf("install.sh must contain the wrapper heredoc start marker %q", startMarker)
+	}
+	afterStart := startIdx + len(startMarker)
+
+	var heredoc strings.Builder
+	foundEnd := false
+	for _, line := range strings.Split(body[afterStart:], "\n") {
+		if strings.TrimSpace(line) == endMarker {
+			foundEnd = true
+			break
+		}
+		heredoc.WriteString(line)
+		heredoc.WriteString("\n")
+	}
+	if !foundEnd {
+		t.Fatalf("install.sh must contain the wrapper heredoc end marker line %q", endMarker)
+	}
+	heredocContent := heredoc.String()
+
+	// (1) No backticks inside the heredoc.
+	if strings.Contains(heredocContent, "`") {
+		t.Errorf("wrapper heredoc must not contain backticks (would be interpreted as command substitution since the heredoc delimiter is unquoted); offending heredoc:\n%s", heredocContent)
+	}
+
+	// (2) No $(...) patterns inside the heredoc.
+	if strings.Contains(heredocContent, "$(") {
+		t.Errorf("wrapper heredoc must not contain $(...) patterns (would be interpreted as command substitution since the heredoc delimiter is unquoted); offending heredoc:\n%s", heredocContent)
+	}
+
+	// (3) The override example is preserved as inert comment text.
+	//    We assert the line is still a comment and still contains
+	//    the example invocation, without the substituted-backtick
+	//    variant that triggered INSTALL-003.
+	requiredComment := []string{
+		"# Override at invocation:",
+		"MPM_WORKSPACE=/tmp/foo mpm call",
+	}
+	for _, want := range requiredComment {
+		if !strings.Contains(heredocContent, want) {
+			t.Errorf("wrapper heredoc must preserve the override example as inert comment text; missing %q in:\n%s", want, heredocContent)
+		}
+	}
+	// Negative: the pre-fix Markdown backtick form must NOT appear.
+	const preFixBackticks = "`MPM_WORKSPACE=/tmp/foo mpm call"
+	if strings.Contains(heredocContent, preFixBackticks) {
+		t.Errorf("wrapper heredoc contains the pre-fix INSTALL-003 form %q (backticks trigger command substitution); offending heredoc:\n%s", preFixBackticks, heredocContent)
+	}
+
+	// (4) Install-time expansions must be preserved.
+	installTimeExpansions := []string{
+		"${DATA_ROOT}",
+		"${PREFIX}/bin/mpm.real",
+	}
+	for _, want := range installTimeExpansions {
+		if !strings.Contains(heredocContent, want) {
+			t.Errorf("wrapper heredoc must preserve install-time expansion %q (do not quote the heredoc delimiter or disturb the intentional expansions); missing in:\n%s", want, heredocContent)
+		}
+	}
+
+	// (5) Runtime escaped expansions must be preserved.
+	runtimeExpansions := []string{
+		`\$@`,
+		`\${MPM_WORKSPACE:-${DATA_ROOT}}`,
+	}
+	for _, want := range runtimeExpansions {
+		if !strings.Contains(heredocContent, want) {
+			t.Errorf("wrapper heredoc must preserve runtime-escaped expansion %q; missing in:\n%s", want, heredocContent)
+		}
+	}
+}
