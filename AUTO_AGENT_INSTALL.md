@@ -674,9 +674,11 @@ tree and is impossible to audit.
    handoff before closure), but it is communicated through the
    existing agent instruction surface — not by creating new files
    under `agent_installation/`.
-4. Do not modify the user's shell startup files, the framework's
-   config directory beyond what is required for `mpm call` to resolve,
-   or the MPM repository layout.
+4. Do not modify the user's shell startup files or the MPM
+   repository layout. Do not modify the unsupported framework's
+   runtime configuration either — the fail-closed fallback is the
+   canonical `mpm call` CLI surface only, with no host integration
+   entries of any kind.
 
 ## What is forbidden
 
@@ -686,9 +688,10 @@ performed by an automated installer:
 - Creating a new directory under `agent_installation/<framework>/`
 - Writing any TypeScript, JavaScript, Python, or shell file under
   `agent_installation/` claiming to be a native integration
-- Modifying the framework's runtime config (e.g. `~/.openclaw/`,
-  `~/.config/opencode/`) beyond the minimum required to point at the
-  existing `~/.local/bin/mpm-mcp` MCP server entry
+- Modifying the unsupported framework's runtime config (e.g.
+  `~/.openclaw/`, `~/.config/opencode/`) to add MCP, plugin, hook,
+  or other native-integration entries — including any minimal
+  pointer at `~/.local/bin/mpm-mcp`. The fallback is CLI-only.
 - Generating "stub" plugin manifests that defer the actual integration
 - Patching `mpm-agent-protocol.md` or any other file under
   `agent_installation/` to "make it work" for the missing framework
