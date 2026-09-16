@@ -724,3 +724,104 @@ func TestInstallSh_NoDirectiveWordingInSuccessPath(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallSh_CompletionTipNoNewShellsLeak pins the 2026-09-16
+// fresh-profile follow-up: the INSTALL COMPLETE block previously
+// contained a multi-line tip claiming `~/.local/bin/mpm is on PATH
+// for NEW shells (XDG default)`. That wording was empirically
+// inaccurate (a fresh Linux Mint terminal inside a graphical login
+// inherits the desktop PATH and does NOT process .profile) and
+// also leaked the internal `phase_validate` function name and the
+// obsolete `prime directives` terminology into user-facing output.
+//
+// The post-fix wording is shorter and accurate: a new login session
+// normally picks the PATH up; until then, use the canonical binary
+// path directly. No internal implementation names, no stale
+// terminology, no redundant directive-seeding guidance (the
+// validation step already prints that in its missing-directives
+// branch).
+//
+// Required negative pins (any of these in install.sh source = fail):
+//   - "NEW shells"           — inaccurate PATH promise
+//   - "phase_validate" in any log/warn string  — internal impl name
+//     leak (the function NAME itself is fine — it has to be called
+//     somewhere; only the user-facing log lines must not contain it)
+//   - "prime directives"     — obsolete terminology
+//
+// Required positive pin:
+//   - "new login session"    — the accurate fix
+//   - "$cli" still present   — canonical binary path guidance
+func TestInstallSh_CompletionTipNoNewShellsLeak(t *testing.T) {
+	data, err := os.ReadFile("../scripts/install.sh")
+	if err != nil {
+		if data, err = os.ReadFile("install.sh"); err != nil {
+			t.Fatalf("read install.sh: %v", err)
+		}
+	}
+	body := string(data)
+
+	// Negative pin 1: "NEW shells" must not appear ANYWHERE in the
+	// script — there is no legitimate use of this exact phrase.
+	if strings.Contains(body, "NEW shells") {
+		t.Errorf("install.sh must not contain %q (inaccurate PATH promise — new interactive shells inside a graphical login do NOT process .profile)", "NEW shells")
+	}
+
+	// Negative pin 2: "phase_validate" must not appear in any
+	// user-facing log/warn/printf string. The function name itself
+	// is fine (it's how mode_install calls the phase); only the
+	// user-visible output must not leak it. We extract every
+	// `log "..."` / `warn "..."` argument body and assert none of
+	// them contain the banned substring.
+	if strings.Contains(body, "NEW shells") {
+		// Re-run the line scan only if we found NEW shells (above);
+		// otherwise the line-scan below is the substantive one.
+	}
+	phaseValidateLeak := false
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, `log "`) && !strings.HasPrefix(trimmed, `warn "`) && !strings.HasPrefix(trimmed, `printf "`) {
+			continue
+		}
+		if strings.Contains(line, "phase_validate") {
+			phaseValidateLeak = true
+			t.Errorf("install.sh user-facing log/warn line leaks internal impl name %q:\n  %s", "phase_validate", line)
+		}
+	}
+	if !phaseValidateLeak {
+		_ = phaseValidateLeak // silence unused-var check if no leak
+	}
+
+	// Negative pin 3: "prime directives" must not appear in any
+	// user-facing log/warn/printf string. We use the same line-scan
+	// approach — the term may appear in internal comments.
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, `log "`) && !strings.HasPrefix(trimmed, `warn "`) && !strings.HasPrefix(trimmed, `printf "`) {
+			continue
+		}
+		if strings.Contains(line, "prime directives") {
+			t.Errorf("install.sh user-facing log/warn line uses obsolete terminology %q:\n  %s", "prime directives", line)
+		}
+	}
+
+	// Positive pins — the post-fix guidance fragments must appear.
+	// "new login session" is the accurate framing. "$cli" — the
+	// local variable that holds the canonical binary path — keeps
+	// the helper path-runnable advice runnable.
+	required := []string{
+		"new login session",
+	}
+	for _, want := range required {
+		if !strings.Contains(body, want) {
+			t.Errorf("install.sh INSTALL COMPLETE tip must contain %q (accurate PATH fix framing)", want)
+		}
+	}
+
+	// The canonical-path next-step commands (which the previous
+	// canonical-path fix pinned) must remain runnable — i.e. the
+	// tip must still mention the runnable path form, not strip it
+	// while removing the stale wording.
+	if !strings.Contains(body, "$cli") {
+		t.Errorf("install.sh INSTALL COMPLETE tip must reference the canonical $cli path variable (runnable until ~/.local/bin is on PATH)")
+	}
+}

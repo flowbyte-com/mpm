@@ -28,8 +28,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/flowbyte-com/mpm-core/config"
 	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/usererror"
 
 	"github.com/flowbyte-com/mpm/cmd/mpm/render"
@@ -44,35 +44,44 @@ import (
 // as a generic map because they evolve as new counters land; the
 // `null` for "unavailable" matches the human "(unavailable)" line.
 type infoOutput struct {
-	Version    string                 `json:"version"`
-	DataDir    string                 `json:"data_directory"`
-	DBPath     string                 `json:"db_path"`
-	Workspace  infoWorkspace          `json:"workspace"`
-	Database   infoDatabase           `json:"database"`
-	Skills     infoSkills             `json:"skills"`
-	Scheduler  infoScheduler          `json:"scheduler"`
-	Runtime    infoRuntime            `json:"runtime"`
+	Version   string        `json:"version"`
+	DataDir   string        `json:"data_directory"`
+	DBPath    string        `json:"db_path"`
+	Workspace infoWorkspace `json:"workspace"`
+	Database  infoDatabase  `json:"database"`
+	Skills    infoSkills    `json:"skills"`
+	Scheduler infoScheduler `json:"scheduler"`
+	Runtime   infoRuntime   `json:"runtime"`
 }
 
 type infoWorkspace struct {
 	// ActiveModes is the canonical plural representation of the
 	// multi-mode selection. Replaces the pre-2026-09-11 comma-joined
 	// singular string. New consumers should use this list directly.
-	ActiveModes    []string `json:"active_modes"`
+	ActiveModes []string `json:"active_modes"`
 	// ActiveModeSource is the aggregate resolver source for the
 	// multi-mode selection ("explicit" | "fallback" | "empty").
-	ActiveModeSource   string   `json:"active_mode_source,omitempty"`
-	ActivePersona  string   `json:"active_persona"`
+	ActiveModeSource    string `json:"active_mode_source,omitempty"`
+	ActivePersona       string `json:"active_persona"`
 	ActivePersonaSource string `json:"active_persona_source,omitempty"`
-	ActiveUpdated  string   `json:"active_updated,omitempty"`
-	ActiveJSONLoad string   `json:"active_json_load,omitempty"` // error string when active.json failed
+	ActiveUpdated       string `json:"active_updated,omitempty"`
+	ActiveJSONLoad      string `json:"active_json_load,omitempty"` // error string when active.json failed
 }
 
 type infoDatabase struct {
 	Path   string                 `json:"path"`
-	Health string                 `json:"health"`            // "ok" or "degraded"
+	Health string                 `json:"health"` // "ok" or "degraded"
 	Error  string                 `json:"error,omitempty"`
-	Stats  map[string]interface{} `json:"stats,omitempty"`   // may be nil if unavailable
+	Stats  map[string]interface{} `json:"stats,omitempty"` // may be nil if unavailable
+	// Directives is the live count of active directives. Computed
+	// via the canonical countDirectives helper so the human form
+	// agrees with `mpm status`'s `Directives : N active` row.
+	// Go-only: NOT serialized to JSON (json:"-") because adding a
+	// new key to the existing stats map would change the machine-
+	// readable shape. Future consumers that need the directives
+	// count programmatically can call `mpm call mpm_context
+	// read_directives` directly.
+	Directives int `json:"-"`
 }
 
 type infoSkills struct {
@@ -192,6 +201,14 @@ func collectInfo(dm *mpminternal.DatabaseManager) infoOutput {
 	if stats, err := dm.GetMemoryStats(); err == nil {
 		out.Database.Stats = stats
 	}
+	// Active-directives count via the same canonical helper
+	// `mpm status` uses (cmd/mpm/handlers_status.go::countDirectives).
+	// Reusing it here means the two surfaces cannot drift on
+	// directive accounting — same NULL-safe predicate, same
+	// scope (active = non-deleted + non-expired).
+	if n, err := countDirectives(dm); err == nil {
+		out.Database.Directives = n
+	}
 
 	// Skills.
 	if names := listSkillsForInfo(dm); len(names) > 0 {
@@ -255,12 +272,24 @@ func renderInfoHuman(out infoOutput) {
 	} else {
 		render.Label(os.Stdout, "health", "⚠ "+out.Database.Error)
 	}
+	// Memory stats use the humanized labels and combined
+	// "N total | N active | N LTM" line so the bare `total`
+	// count doesn't look like "the database is empty" when it
+	// really means "no ordinary memories" — they're two
+	// different things. Directives are a separate artifact
+	// class with their own count line, mirroring the dashboard.
 	if out.Database.Stats != nil {
-		for _, k := range []string{"total", "active", "ltm", "deleted", "never_accessed", "expired"} {
-			if v, ok := out.Database.Stats[k]; ok && v != nil {
-				render.Label(os.Stdout, k, fmt.Sprintf("%v", v))
-			}
-		}
+		total, _ := out.Database.Stats["total"].(int)
+		active, _ := out.Database.Stats["active"].(int)
+		ltm, _ := out.Database.Stats["ltm"].(int)
+		deleted, _ := out.Database.Stats["deleted"].(int)
+		neverAccessed, _ := out.Database.Stats["never_accessed"].(int)
+		expired, _ := out.Database.Stats["expired"].(int)
+		render.Label(os.Stdout, "memories", fmt.Sprintf("%d total | %d active | %d LTM", total, active, ltm))
+		render.Label(os.Stdout, "directives", fmt.Sprintf("%d active", out.Database.Directives))
+		render.Label(os.Stdout, "deleted memories", fmt.Sprintf("%d", deleted))
+		render.Label(os.Stdout, "never accessed", fmt.Sprintf("%d", neverAccessed))
+		render.Label(os.Stdout, "expired", fmt.Sprintf("%d", expired))
 	} else {
 		render.Label(os.Stdout, "stats", "(unavailable)")
 	}

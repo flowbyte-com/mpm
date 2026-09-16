@@ -136,30 +136,45 @@ func TestDashboard_MemoryCountMatchesCanonical(t *testing.T) {
 	}
 }
 
-// extractInfoActiveCount pulls the standalone `active : <count>`
-// row out of the `Database` section of `mpm info`. This is the
-// canonical anchor for the dashboard's Memories (active) row.
+// extractInfoActiveCount pulls the active-memory count from the
+// `memories : <n> total | <n> active | <n> LTM` line in the
+// `Database` section of `mpm info`. This is the canonical anchor
+// for the dashboard's Memories (active) row.
 //
-// Strict: only lines that match the exact `active : <digits>`
-// shape count. Lines like `active modes : <none>` are filtered
-// out by requiring the prefix to be the exact word "active"
-// followed by `:`.
+// 2026-09-16 fresh-profile UX cleanup: pre-fix the Database block
+// rendered the active count as a standalone `active : <digits>`
+// line. The post-fix form factors it into the combined
+// `memories : <n> total | <n> active | <n> LTM` line so the bare
+// `active` token doesn't read as "the database is empty" when
+// it really means "no active ordinary memories". This extractor
+// parses the middle segment.
 func extractInfoActiveCount(t *testing.T, out string) int {
 	t.Helper()
 	for _, line := range strings.Split(out, "\n") {
 		trimmed := strings.TrimSpace(line)
-		// Strict shape: "active : <digits>". Avoid matching
-		// "active modes" or "active persona" which appear
-		// earlier in the info output.
-		if !strings.HasPrefix(trimmed, "active :") {
+		// Combined shape: "memories : <n> total | <n> active | <n> LTM"
+		// We extract the <n> immediately before " active " (the
+		// middle segment of the three-part pipe-separated line).
+		// Anchoring on "memories :" avoids matching the workspace
+		// lines like "active modes : <none>".
+		if !strings.HasPrefix(trimmed, "memories :") {
 			continue
 		}
-		fields := strings.Fields(trimmed)
-		// fields: ["active", ":", "<n>"]
-		if len(fields) != 3 {
+		// Split on " | " to isolate the middle "N active" segment.
+		parts := strings.Split(trimmed, " | ")
+		if len(parts) != 3 {
 			continue
 		}
-		return atoiOrZero(fields[2])
+		// Middle segment: "<n> active"
+		mid := strings.TrimSpace(parts[1])
+		// Expect trailing " active" (the word, not a prefix).
+		if !strings.HasSuffix(mid, " active") {
+			continue
+		}
+		// Strip " active" suffix to get "<n>".
+		nStr := strings.TrimSuffix(mid, " active")
+		// Should now be a digit string.
+		return atoiOrZero(nStr)
 	}
 	t.Fatalf("could not extract info active count from:\n%s", out)
 	return -1
