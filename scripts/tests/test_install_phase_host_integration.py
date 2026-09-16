@@ -80,13 +80,29 @@ class _PhaseHostIntegrationDriver(unittest.TestCase):
     def _cleanup(self):
         shutil.rmtree(self._tmp, ignore_errors=True)
 
-    def _make_fake_openclaw(self) -> Path:
+    def _make_fake_openclaw(self, scenario: str = "active-restart-ok") -> Path:
         """Create a fake ``openclaw`` binary on disk that records every
         invocation. The script writes a JSON line to ``$RECORD_FILE``
         for each subcommand (``mcp list``, ``mcp show``, ``mcp add``,
-        ``mcp set``, ``gateway restart``) with the args received. This
-        is enough to capture both the ``mcp add`` flag form and the
-        ``mcp set`` JSON payload form."""
+        ``mcp set``, ``gateway restart``, ``gateway status``) with
+        the args received. This is enough to capture both the
+        ``mcp add`` flag form and the ``mcp set`` JSON payload form.
+
+        The ``scenario`` argument picks what the fake does for the
+        ``gateway`` subcommands:
+
+          * ``active-restart-ok``     — status returns "active";
+            restart exits 0 within 1s.
+          * ``active-restart-fail``   — status returns "active";
+            restart exits 1 within 1s.
+          * ``active-restart-hang``   — status returns "active";
+            restart sleeps 60s (the installer's timeout / kill-after
+            must rescue the call; we measure wall-time below the
+            timeout bound to assert no leak).
+          * ``inactive``              — status returns "inactive";
+            restart exits 0 (should NOT be called).
+          * ``failed``                — status returns "failed";
+            restart exits 0 (should NOT be called)."""
         bindir = self._tmp / "fakebin"
         bindir.mkdir()
         record_file = self._tmp / "calls.jsonl"
@@ -98,14 +114,14 @@ class _PhaseHostIntegrationDriver(unittest.TestCase):
             #!/usr/bin/env bash
             set -uo pipefail
             RECORD_FILE={record_file}
-            # Skip argv[0] (program name), join the rest as a JSON array.
-            args_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@")
+            SCENARIO={scenario}
             subcmd="$1"; shift || true
             case "$subcmd" in
               mcp)
                 case "$1" in
                   add|set|list|show)
                     op="$1"; shift
+                    args_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@")
                     if [ "$op" = "set" ]; then
                       payload="$1"
                       printf '{{"cmd":"mcp set","payload":%s}}\\n' "$(printf '%s' "$payload" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" >> "$RECORD_FILE"
@@ -116,13 +132,110 @@ class _PhaseHostIntegrationDriver(unittest.TestCase):
                 esac
                 ;;
               gateway)
-                printf '{{"cmd":"gateway %s","args":%s}}\\n' "$1" "$args_json" >> "$RECORD_FILE"
+                op="$1"; shift
+                case "$op" in
+                  status)
+                    printf '{{"cmd":"gateway status","scenario":%s}}\\n' '"'$SCENARIO'"' >> "$RECORD_FILE"
+                    case "$SCENARIO" in
+                      active-restart-ok|active-restart-fail|active-restart-hang)
+                        echo "active"
+                        exit 0
+                        ;;
+                      inactive)
+                        echo "inactive"
+                        exit 0
+                        ;;
+                      failed)
+                        echo "failed"
+                        exit 1
+                        ;;
+                      *)
+                        echo "inactive"
+                        exit 0
+                        ;;
+                    esac
+                    ;;
+                  restart)
+                    printf '{{"cmd":"gateway restart","scenario":%s}}\\n' '"'$SCENARIO'"' >> "$RECORD_FILE"
+                    case "$SCENARIO" in
+                      active-restart-ok)
+                        exit 0
+                        ;;
+                      active-restart-fail)
+                        exit 1
+                        ;;
+                      active-restart-hang)
+                        # Hold the connection long enough that the
+                        # installer's timeout / kill-after MUST rescue
+                        # it. The test asserts wall-time stays under
+                        # the installer's bound.
+                        sleep 60
+                        ;;
+                      *)
+                        exit 0
+                        ;;
+                    esac
+                    ;;
+                esac
                 ;;
             esac
             exit 0
         """))
         fake.chmod(0o755)
         self._record_file = record_file
+        return bindir
+
+    def _make_fake_systemctl(self, gateway_state: str) -> Path:
+        """Create a fake ``systemctl`` that pretends the
+        ``openclaw-gateway.service`` unit is in the requested state.
+
+        The installer's gateway-state probe is
+        ``systemctl --user is-active openclaw-gateway.service``:
+
+          * rc=0  → active
+          * rc=3  → inactive (also printed: "inactive")
+          * rc=4  → not-found (also printed: "inactive")
+          * any other rc → treat as inactive
+
+        The fake matches this contract so the installer's
+        state-detection branch in the test environment behaves
+        like a real systemd host. Other ``systemctl`` invocations
+        pass through to whatever is on PATH (most aren't reached
+        in the host-integration test path).
+        """
+        bindir = self._tmp / "fakebin"
+        bindir.mkdir(exist_ok=True)
+        fake = bindir / "systemctl"
+        fake.write_text(textwrap.dedent(f"""\
+            #!/usr/bin/env bash
+            # Pass through to real systemctl for subcommands we
+            # don't fake — keeps unrelated installers/test phases
+            # working. Only intercept the gateway-state probe.
+            if [ "$1" = "--user" ] && [ "$2" = "is-active" ] && [ "$3" = "openclaw-gateway.service" ]; then
+              case "{gateway_state}" in
+                active)
+                  echo "active"
+                  exit 0
+                  ;;
+                failed)
+                  # Failed state: stdout "failed", non-zero rc.
+                  echo "failed"
+                  exit 3
+                  ;;
+                not-found)
+                  # No such unit: rc=4 per systemctl(1).
+                  exit 4
+                  ;;
+                *)
+                  # inactive / unknown / anything else.
+                  echo "inactive"
+                  exit 3
+                  ;;
+              esac
+            fi
+            exec /usr/bin/systemctl "$@"
+        """))
+        fake.chmod(0o755)
         return bindir
 
     def _stage_lib(self) -> Path:
@@ -143,12 +256,24 @@ class _PhaseHostIntegrationDriver(unittest.TestCase):
         return project
 
     def _drive(self, project: Path, prefix: Path, data_root: Path,
-               bindir: Path | None) -> dict:
+               bindir: Path | None,
+               systemctl_gateway_state: str | None = None) -> dict:
         """Source install.sh in a subprocess with controlled env and
         invoke ``phase_host_integration``. ``bindir`` is prepended to
         PATH so the fake ``openclaw`` is found first; pass ``None``
         for the no-openclaw branch (which uses a hermetic PATH that
-        excludes any system openclaw)."""
+        excludes any system openclaw).
+
+        ``systemctl_gateway_state`` controls the fake ``systemctl``'s
+        response to ``--user is-active openclaw-gateway.service``:
+          - "active"    → returns active (rc=0)
+          - "inactive"  → returns inactive (rc=3)
+          - "failed"    → returns failed (rc=3)
+          - "not-found" → returns rc=4 (treated as inactive)
+          - None        → no fake systemctl staged; the installer's
+            ``command -v systemctl`` check falls back to a real
+            binary (or no state detection if systemctl is absent).
+        """
         driver = project / "scripts" / "_drive.sh"
         env_lines = [
             "export PROJECT_ROOT=" + str(project),
@@ -225,6 +350,10 @@ class PhaseHostIntegrationAddPath(_PhaseHostIntegrationDriver):
 
     def test_add_omits_mode_and_persona(self):
         bindir = self._make_fake_openclaw()
+        # The default add path exercises the installer's add
+        # branch on the "active" gateway (so the test continues
+        # to drive the restart path that the pre-fix code took).
+        self._make_fake_systemctl(gateway_state="active")
         project = self._stage_lib()
         prefix = self._tmp / "home" / ".mpm"
         data_root = prefix
@@ -280,6 +409,10 @@ class PhaseHostIntegrationSetPath(_PhaseHostIntegrationDriver):
     def test_set_omits_mode_and_persona(self):
         bindir = self._tmp / "fakebin"
         bindir.mkdir(exist_ok=True)
+        # Stage a fake systemctl that reports the gateway as
+        # active so the test exercises the set path under the
+        # same conditions as the original test driver.
+        self._make_fake_systemctl(gateway_state="active")
         self._record_file = self._tmp / "calls.jsonl"
         payload_file = self._tmp / "mcp_set_payload.json"
         # Single fake openclaw that prints the list marker (so the
@@ -380,6 +513,316 @@ class PhaseHostIntegrationNoOpenclaw(_PhaseHostIntegrationDriver):
         self.assertIn(
             "openclaw not detected", result["stderr"],
             "skip message must explain why MCP registration was skipped",
+        )
+
+
+class PhaseHostIntegrationGatewayInactive(_PhaseHostIntegrationDriver):
+    """When the OpenClaw gateway is NOT active (inactive, failed,
+    disabled, not installed), the installer must still register the
+    MPM MCP entry but must NOT attempt to start or restart the
+    gateway. The OpenClaw lifecycle conflict on the pristine ``x``
+    profile (an interactive ``openclaw-onboard`` already owned the
+    gateway state) caused the installer to hang for ~44s while
+    ``openclaw gateway restart`` polled an already-failed service.
+
+    The fix: capture the gateway state BEFORE registering the MCP
+    entry; if the gateway is not active, register only and print an
+    informational message that registration will load on next
+    gateway start. No restart, no hang."""
+
+    def test_inactive_gateway_skips_restart(self):
+        bindir = self._make_fake_openclaw(scenario="inactive")
+        # Stage a fake systemctl reporting inactive so the
+        # installer's state-detection branch sees an inactive unit.
+        self._make_fake_systemctl(gateway_state="inactive")
+        project = self._stage_lib()
+        prefix = self._tmp / "home" / ".mpm"
+        data_root = prefix
+
+        result = self._drive(project, prefix, data_root, bindir)
+        self.assertEqual(
+            result["returncode"], 0,
+            f"phase_host_integration must NOT exit non-zero on "
+            f"inactive-gateway state:\n  stderr: {result['stderr']}",
+        )
+
+        # Registration MUST have happened.
+        mcp_calls = [c for c in result["calls"]
+                     if c.get("cmd") in ("mcp add", "mcp set")]
+        self.assertEqual(
+            len(mcp_calls), 1,
+            f"inactive-gateway state must still register the MCP "
+            f"entry; got calls={result['calls']!r}",
+        )
+
+        # Restart MUST NOT have happened.
+        restart_calls = [c for c in result["calls"]
+                         if c.get("cmd") == "gateway restart"]
+        self.assertEqual(
+            len(restart_calls), 0,
+            f"inactive-gateway state must NOT call gateway restart; "
+            f"got calls={result['calls']!r}",
+        )
+
+        # Status SHOULD have been queried (state captured BEFORE
+        # registration so the post-registration gateway state isn't
+        # the one we act on).
+        status_calls = [c for c in result["calls"]
+                        if c.get("cmd") == "gateway status"]
+        self.assertEqual(
+            len(status_calls), 1,
+            f"installer must query gateway state before deciding to "
+            f"restart; got calls={result['calls']!r}",
+        )
+
+        # Informational message should explain why no restart.
+        self.assertIn(
+            "not currently active", result["stderr"],
+            f"inactive-gateway path must print an informational "
+            f"message about the deferred restart:\n  stderr: {result['stderr']}",
+        )
+
+    def test_failed_gateway_skips_restart(self):
+        """Failed gateway state must also skip the restart. The
+        pristine ``x`` profile observed exactly this — systemd
+        retried the gateway until it hit its start limit and entered
+        ``failed``. The installer must NOT try to repair OpenClaw's
+        lifecycle; it only registers MPM with OpenClaw and reports
+        success."""
+        bindir = self._make_fake_openclaw(scenario="failed")
+        # Failed state: systemctl rc=3 + "failed" stdout. The
+        # installer must treat any non-zero rc as inactive.
+        self._make_fake_systemctl(gateway_state="failed")
+        project = self._stage_lib()
+        prefix = self._tmp / "home" / ".mpm"
+        data_root = prefix
+
+        result = self._drive(project, prefix, data_root, bindir)
+        self.assertEqual(
+            result["returncode"], 0,
+            f"phase_host_integration must NOT exit non-zero on "
+            f"failed-gateway state:\n  stderr: {result['stderr']}",
+        )
+
+        mcp_calls = [c for c in result["calls"]
+                     if c.get("cmd") in ("mcp add", "mcp set")]
+        self.assertEqual(len(mcp_calls), 1)
+
+        restart_calls = [c for c in result["calls"]
+                         if c.get("cmd") == "gateway restart"]
+        self.assertEqual(
+            len(restart_calls), 0,
+            f"failed-gateway state must NOT call gateway restart; "
+            f"got calls={result['calls']!r}",
+        )
+
+        # Failed-state advice must NOT say "run openclaw gateway
+        # restart manually" — that advice simply recreates the
+        # same problem the installer just avoided.
+        self.assertNotIn(
+            "run manually: openclaw gateway restart",
+            result["stderr"],
+            f"failed-gateway state must not push the user to run "
+            f"`openclaw gateway restart` (it would just fail again):\n"
+            f"  stderr: {result['stderr']}",
+        )
+
+
+class PhaseHostIntegrationGatewayActive(_PhaseHostIntegrationDriver):
+    """When the OpenClaw gateway is ACTIVE, the installer registers the
+    MCP entry and performs a bounded restart so the running gateway can
+    reload the MCP configuration. The restart must have a hard
+    timeout (≈10–15s) so an OpenClaw CLI command can never stall the
+    installer."""
+
+    def test_active_gateway_registers_then_restarts(self):
+        bindir = self._make_fake_openclaw(scenario="active-restart-ok")
+        # Active state: systemctl says the unit is active.
+        self._make_fake_systemctl(gateway_state="active")
+        project = self._stage_lib()
+        prefix = self._tmp / "home" / ".mpm"
+        data_root = prefix
+
+        result = self._drive(project, prefix, data_root, bindir)
+        self.assertEqual(
+            result["returncode"], 0,
+            f"phase_host_integration failed in active-gateway path:\n"
+            f"  stderr: {result['stderr']}",
+        )
+
+        # Both registration and restart must have happened, and the
+        # status query MUST have preceded the registration (state
+        # captured before the restart decision).
+        cmd_sequence = [c.get("cmd") for c in result["calls"]]
+        self.assertIn(
+            "gateway status", cmd_sequence,
+            f"installer must query gateway status before restart; "
+            f"got sequence={cmd_sequence!r}",
+        )
+        self.assertIn(
+            "gateway restart", cmd_sequence,
+            f"active gateway must trigger restart; got sequence={cmd_sequence!r}",
+        )
+
+        # Registration must come between status and restart.
+        status_idx = cmd_sequence.index("gateway status")
+        restart_idx = cmd_sequence.index("gateway restart")
+        mcp_indices = [i for i, c in enumerate(cmd_sequence)
+                       if c in ("mcp add", "mcp set")]
+        self.assertTrue(len(mcp_indices) == 1,
+                        f"expected exactly one mcp call, got {cmd_sequence!r}")
+        mcp_idx = mcp_indices[0]
+        self.assertLess(
+            status_idx, mcp_idx,
+            f"status MUST come before registration; got sequence={cmd_sequence!r}",
+        )
+        self.assertLess(
+            mcp_idx, restart_idx,
+            f"registration MUST come before restart; got sequence={cmd_sequence!r}",
+        )
+
+        self.assertIn("✓", result["stderr"],
+                      "active restart success path must surface ✓ marker")
+
+    def test_active_restart_failure_is_warn_only(self):
+        """When the active restart fails (non-zero exit), the
+        installer must NOT abort installation. WARN-only, with
+        MPM registration already saved."""
+        bindir = self._make_fake_openclaw(scenario="active-restart-fail")
+        self._make_fake_systemctl(gateway_state="active")
+        project = self._stage_lib()
+        prefix = self._tmp / "home" / ".mpm"
+        data_root = prefix
+
+        result = self._drive(project, prefix, data_root, bindir)
+        self.assertEqual(
+            result["returncode"], 0,
+            f"active-gateway restart failure must NOT exit non-zero; "
+            f"got rc={result['returncode']}:\n  stderr: {result['stderr']}",
+        )
+        # Must have tried the restart and printed a WARN.
+        self.assertIn(
+            "gateway restart", [c.get("cmd") for c in result["calls"]],
+            "installer must have attempted the restart",
+        )
+        # WARN-only: stderr should mention restart + continue / saved /
+        # MPM registration survives.
+        stderr_lower = result["stderr"].lower()
+        self.assertTrue(
+            ("warn" in stderr_lower or "failed" in stderr_lower),
+            f"failed-restart path must surface a WARN / failure note:\n"
+            f"  stderr: {result['stderr']}",
+        )
+
+    def test_active_restart_hang_is_bounded(self):
+        """When the active restart hangs (OpenClaw CLI never returns
+        within its internal health-check window), the installer's
+        timeout / kill-after must rescue the call. Wall-time MUST stay
+        well under OpenClaw's ~44s internal retry budget, and NO long-
+        running child process may be left behind after the installer
+        exits.
+
+        The fake's ``active-restart-hang`` scenario sleeps for 60s.
+        The installer's bound must rescue it; we allow up to ~25s of
+        wall-time (the timeout bound plus a generous margin for shell
+        fork/exec overhead) — well below OpenClaw's 44s retry window.
+        """
+        bindir = self._make_fake_openclaw(scenario="active-restart-hang")
+        self._make_fake_systemctl(gateway_state="active")
+        project = self._stage_lib()
+        prefix = self._tmp / "home" / ".mpm"
+        data_root = prefix
+
+        import time
+        t0 = time.monotonic()
+        result = self._drive(project, prefix, data_root, bindir)
+        wall_time = time.monotonic() - t0
+
+        self.assertEqual(
+            result["returncode"], 0,
+            f"hang-detected restart must NOT exit non-zero:\n"
+            f"  stderr: {result['stderr']}",
+        )
+        # The whole install phase must finish well under 30s. The
+        # 44s OpenClaw internal retry was the regression baseline;
+        # we assert <30s to give the installer a generous bound
+        # while still catching a complete failure to bound.
+        self.assertLess(
+            wall_time, 30.0,
+            f"installer's gateway-restart path did not bound its "
+            f"OpenClaw call (took {wall_time:.1f}s); the install.sh "
+            f"timeout / kill-after must rescue a hanging child. "
+            f"The pre-fix behaviour was ~44s.",
+        )
+        # WARN must mention the timeout.
+        stderr_lower = result["stderr"].lower()
+        self.assertTrue(
+            ("timed out" in stderr_lower or "timeout" in stderr_lower),
+            f"hung-restart path must surface a timeout WARN:\n"
+            f"  stderr: {result['stderr']}",
+        )
+        # No zombie child process: after the install phase exits, the
+        # hang-sleeping fake must have been killed by the installer's
+        # timeout / kill-after. Verify by polling: if any process
+        # under self._tmp / "fakebin" is still running, it's a leak.
+        # We give the system a moment to reap the SIGKILL.
+        time.sleep(0.5)
+        import subprocess as _sp
+        try:
+            ps = _sp.check_output(
+                ["pgrep", "-af", "sleep 60"], text=True, timeout=5,
+            )
+            # Filter to processes whose parent is gone (or that match
+            # the fake's path). A leaked sleep would show up here.
+            leaked = [
+                line for line in ps.splitlines()
+                if str(self._tmp) in line
+            ]
+            self.assertEqual(
+                leaked, [],
+                f"installer left a hanging child behind:\n"
+                + "\n".join(f"  {l}" for l in leaked),
+            )
+        except _sp.CalledProcessError:
+            # pgrep exits 1 when no match — that's the success case.
+            pass
+
+
+class PhaseHostIntegrationStateOrder(_PhaseHostIntegrationDriver):
+    """Sequencing invariant: the gateway state MUST be captured BEFORE
+    the restart decision, not inferred from the post-registration
+    state. The fake records the call sequence, and the test asserts
+    the canonical order: status → mcp add/set → restart."""
+
+    def test_status_precedes_registration(self):
+        bindir = self._make_fake_openclaw(scenario="active-restart-ok")
+        self._make_fake_systemctl(gateway_state="active")
+        project = self._stage_lib()
+        prefix = self._tmp / "home" / ".mpm"
+        data_root = prefix
+
+        result = self._drive(project, prefix, data_root, bindir)
+        seq = [c.get("cmd") for c in result["calls"]]
+        # Status must be the first gateway call.
+        first_gw_call = next(
+            (i, c) for i, c in enumerate(seq)
+            if c in ("gateway status", "gateway restart")
+        )
+        self.assertEqual(
+            first_gw_call[1], "gateway status",
+            f"first gateway call must be `gateway status` (state "
+            f"capture before registration/restart); got "
+            f"sequence={seq!r}",
+        )
+        # And the MCP call must come after the status call.
+        mcp_idx = next(
+            i for i, c in enumerate(seq)
+            if c in ("mcp add", "mcp set")
+        )
+        self.assertGreater(
+            mcp_idx, first_gw_call[0],
+            f"registration must come AFTER gateway status; got "
+            f"sequence={seq!r}",
         )
 
 

@@ -644,6 +644,74 @@ phase_host_integration() {
 
     log "openclaw detected — registering mpm MCP"
 
+    # ── Capture OpenClaw gateway state BEFORE registration ──────────
+    # We must decide whether to restart the gateway based on its
+    # state at install-start, NOT after. Reasons:
+    #   1. On the pristine ``x`` profile, an interactive
+    #      openclaw-onboard process already owned the gateway
+    #      lifecycle state. The systemd service had entered
+    #      ``failed`` because it could not acquire that lock.
+    #      ``openclaw gateway restart`` then polled the failed
+    #      service for ~44s before returning. Installation
+    #      appeared hung.
+    #   2. Restarting an already-failed service from inside an
+    #      installer is a layering violation: MPM should not try
+    #      to repair another application's lifecycle.
+    #
+    # Detection method: ``systemctl --user is-active`` on the
+    # canonical ``openclaw-gateway.service`` unit. This is a
+    # fast local call that doesn't depend on OpenClaw CLI being
+    # responsive. We default to "inactive" on any error path so
+    # the installer never blocks on an unresponsive systemd.
+    local openclaw_gateway_state="inactive"
+    # Primary detection: ``openclaw gateway status`` is fast (local
+    # dbus/state-file read) and is the canonical OpenClaw API for
+    # lifecycle state. We capture state BEFORE registering the MCP
+    # entry so a failed/already-restarting gateway doesn't surprise us
+    # with a 44s stall (the pristine ``x`` profile's pre-fix
+    # symptom).
+    set +e
+    local _gw_status_output _gw_status_rc
+    _gw_status_output=$(openclaw gateway status 2>/dev/null)
+    _gw_status_rc=$?
+    set -e
+    # ``openclaw gateway status`` typically prints one of:
+    #   "active"   "inactive"   "failed"   "not-found"   ""   (on rc!=0)
+    # The exit code and the first-word stdout are both signals; we
+    # prefer the stdout word because the rc semantics vary across
+    # OpenClaw versions. Any non-"active" first word = inactive.
+    if [ "$_gw_status_rc" -eq 0 ]; then
+        local _first_word
+        _first_word=$(printf '%s' "$_gw_status_output" | awk 'NR==1{print $1; exit}')
+        if [ "$_first_word" = "active" ]; then
+            openclaw_gateway_state="active"
+        fi
+    fi
+    # Fallback / sanity-check: if OpenClaw's status subcommand was
+    # absent (older versions) or ambiguous, ask systemd. We treat
+    # this as a secondary signal — never as the authoritative
+    # answer — because OpenClaw's own state semantics are what the
+    # user actually sees. Default to inactive on any error so the
+    # installer never blocks on an unresponsive systemd.
+    if [ "$openclaw_gateway_state" != "active" ] \
+        && command -v systemctl >/dev/null 2>&1; then
+        local _gw_rc
+        set +e
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 3 systemctl --user is-active openclaw-gateway.service >/dev/null 2>&1
+        else
+            systemctl --user is-active openclaw-gateway.service >/dev/null 2>&1
+        fi
+        _gw_rc=$?
+        set -e
+        # ``systemctl is-active`` returns 0=active, 3=inactive,
+        # 4=not-found. Anything else (including timeout 124 or
+        # 137) = treat as inactive so we never block.
+        if [ "$_gw_rc" -eq 0 ]; then
+            openclaw_gateway_state="active"
+        fi
+    fi
+
     # MPM_ACTIVE_MODE / MPM_ACTIVE_PERSONA are intentionally NOT injected
     # here. MPM resolves mode/persona from env at request time via
     # internal/core/mpmcli.ActiveContextFromEnv(), which returns "" when
@@ -669,12 +737,51 @@ JSON
             --env "MPM_WORKSPACE=$DATA_ROOT"
     fi
 
-    log "  restarting gateway to load MCP config"
-    if openclaw gateway restart; then
-        log "  ✓ gateway restarted"
-    else
-        warn "  gateway restart failed — run manually: openclaw gateway restart"
+    # ── Branch on captured state ──────────────────────────────────────
+    # Only restart the gateway if it was ACTIVE at install-start.
+    # Otherwise the registration is saved and will load on the
+    # next gateway start (operator-controlled).
+    if [ "$openclaw_gateway_state" != "active" ]; then
+        log "  ✓ MPM MCP registered with OpenClaw"
+        log "  OpenClaw gateway is not currently active; registration will load on next gateway start"
+        return 0
     fi
+
+    log "  restarting active OpenClaw gateway to load MCP config"
+    # Bounded restart — ``--kill-after=5`` guarantees that if the
+    # soft timeout (15s) fires the child is SIGKILL'd within 5s
+    # more. No long-running OpenClaw process may be left behind.
+    # The bound is small enough that an unresponsive gateway never
+    # stalls the installer past ~20s and well under the ~44s OpenClaw
+    # internal health-check window.
+    #
+    # The restart runs under ``set +e`` because we deliberately
+    # want to inspect the timeout exit code (124=timeout,
+    # 137=kill-after, 0=success, non-zero=failure). With
+    # ``set -e`` active, those non-zero exits would terminate the
+    # installer before the rc can be captured.
+    local _restart_rc
+    set +e
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --kill-after=5 15 openclaw gateway restart >/dev/null 2>&1
+    else
+        # No GNU ``timeout``: best-effort, no bound. This branch is
+        # only reached on systems lacking coreutils, which is rare.
+        openclaw gateway restart >/dev/null 2>&1
+    fi
+    _restart_rc=$?
+    set -e
+    case "$_restart_rc" in
+        0)
+            log "  ✓ OpenClaw gateway restarted"
+            ;;
+        124|137)
+            warn "  OpenClaw gateway restart timed out; MPM registration is saved and installation will continue"
+            ;;
+        *)
+            warn "  OpenClaw gateway restart failed (rc=$_restart_rc); MPM registration is saved and installation will continue"
+            ;;
+    esac
 }
 
 phase_validate() {
