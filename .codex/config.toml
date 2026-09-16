@@ -1,5 +1,0 @@
-[mcp_servers.mpm]
-command = "./bin/mpm-mcp"
-
-[mcp_servers.mpm.env]
-MPM_WORKSPACE = "."
