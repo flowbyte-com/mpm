@@ -45,7 +45,7 @@ func handlePrimeDirectives() int {
 	rows, err := store.DB.Query(`
 		SELECT id, collection, content, metadata, created_at
 		FROM memories
-		WHERE (collection = 'directives' OR is_prime_directive = 1)
+		WHERE (collection = 'directives' OR COALESCE(is_prime_directive, 0) = 1)
 		  AND deleted_at IS NULL
 		ORDER BY created_at ASC
 	`)

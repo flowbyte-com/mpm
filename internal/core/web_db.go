@@ -1457,15 +1457,20 @@ func (dm *DatabaseManager) SearchTopics(q string, limit int) ([]map[string]inter
 // counts, so `mpm info` reported a larger memory population than
 // `mpm status` — and a fresh install reported 5 "active memories"
 // that were actually the baseline-cognitive-bootstrap directives.
-// Each query below now excludes the directive-identification pair
-// so this surface agrees with the dashboard.
+//
+// The exclusion is NULL-safe via COALESCE so NULL values in the
+// flag column (imported, legacy, or manually-created rows) are
+// treated as "not a directive" rather than UNKNOWN. See
+// `countMemories` in cmd/mpm/handlers_status.go for the matching
+// dashboard predicate; this is the same canonical form so the
+// two surfaces can never disagree.
 func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	stats := make(map[string]interface{})
 
 	// Basic counts. Each one is best-effort — log audit and default to 0 on failure.
 	var total, active, deleted, ltm, reinforced, neverAccessed, expired int
-	// Canonical directive-exclusion used by every count below.
-	const directiveExcl = `collection != 'directives' AND is_prime_directive != 1`
+	// Canonical NULL-safe directive-exclusion used by every count below.
+	const directiveExcl = `NOT (collection = 'directives' OR COALESCE(is_prime_directive, 0) = 1)`
 	err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE ` + directiveExcl).Scan(&total)
 	if err != nil {
 		return nil, err

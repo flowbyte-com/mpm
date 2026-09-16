@@ -32,7 +32,7 @@ import (
 func (dm *DatabaseManager) ReadDirectives() ([]map[string]interface{}, error) {
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, content, metadata, created_at FROM memories
-		WHERE (collection = 'directives' OR is_prime_directive = 1)
+		WHERE (collection = 'directives' OR COALESCE(is_prime_directive, 0) = 1)
 		  AND deleted_at IS NULL
 		ORDER BY created_at ASC
 	`)
@@ -79,12 +79,12 @@ func (dm *DatabaseManager) ReadDirectives() ([]map[string]interface{}, error) {
 //
 // Tiered sources (tiered fallback seeding, 2026-08-19):
 //
-//	1. Local constitutional baseline — always present (seeded at boot by
-//	   initUnifiedSchema via seed.ApplyDirectives).
-//	2. Shared overlay — when MPM_SHARED_DB is attached, shared.memories
-//	   directive rows are merged additively. Rows are deduplicated by
-//	   stable id; a shared row with the same id as a local row wins
-//	   (org-wide policy overrides the local copy).
+//  1. Local constitutional baseline — always present (seeded at boot by
+//     initUnifiedSchema via seed.ApplyDirectives).
+//  2. Shared overlay — when MPM_SHARED_DB is attached, shared.memories
+//     directive rows are merged additively. Rows are deduplicated by
+//     stable id; a shared row with the same id as a local row wins
+//     (org-wide policy overrides the local copy).
 //
 // Returned rows are sorted by id ASC for deterministic agent wake order.
 func (dm *DatabaseManager) ReadDirectivesForFramework(fw string) ([]map[string]interface{}, error) {
@@ -140,7 +140,7 @@ func (dm *DatabaseManager) ReadDirectivesForFramework(fw string) ([]map[string]i
 func (dm *DatabaseManager) queryDirectivesScope(schemaPrefix string, scopedVal interface{}) ([]map[string]interface{}, error) {
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, content, metadata, created_at FROM `+schemaPrefix+`memories
-		WHERE (collection = 'directives' OR is_prime_directive = 1)
+		WHERE (collection = 'directives' OR COALESCE(is_prime_directive, 0) = 1)
 		  AND COALESCE(deleted_at, 0) = 0
 		  AND (
 		    json_extract(metadata, '$.scope') IS NULL

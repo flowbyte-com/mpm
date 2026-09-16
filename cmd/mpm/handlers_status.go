@@ -431,6 +431,15 @@ func countMemories(dm *mpminternal.DatabaseManager, where string) (int, error) {
 	// the status dashboard must exclude them — they are reported
 	// separately on the dashboard's `Directives : N active` row.
 	//
+	// Exclusion is NULL-safe: COALESCE(is_prime_directive, 0) = 1
+	// treats a NULL flag as "not a directive" so imported,
+	// legacy, or manually-created rows with NULL in the flag
+	// column still count as ordinary memories. The previous
+	// `is_prime_directive != 1` form was NOT NULL-safe: a row
+	// with `is_prime_directive = NULL` evaluated the comparison
+	// to UNKNOWN, the whole AND predicate to UNKNOWN, and the
+	// row was silently hidden from memory counts.
+	//
 	// Excluding them at the countMemories boundary keeps every
 	// existing call-site (memTotal, memLTM, theoryTotal,
 	// decisions) correct without each having to repeat the
@@ -438,7 +447,7 @@ func countMemories(dm *mpminternal.DatabaseManager, where string) (int, error) {
 	// is the dedicated countDirectives function below.
 	var query string
 	var args []interface{}
-	directiveExclusion := `collection != 'directives' AND is_prime_directive != 1`
+	directiveExclusion := `NOT (collection = 'directives' OR COALESCE(is_prime_directive, 0) = 1)`
 	if where == "" {
 		// D-5.2: apply the canonical EXPIRE filter (expires_at IS NULL
 		// OR expires_at > now). The prior code only filtered deleted_at,
@@ -463,15 +472,17 @@ func countMemories(dm *mpminternal.DatabaseManager, where string) (int, error) {
 // countDirectives returns the number of active (non-deleted,
 // non-expired) directives in the memories table. The canonical
 // identifier is `collection = 'directives'` (the MCP path);
-// the legacy `is_prime_directive = 1` column is included so
-// pre-F19 rows remain visible. Mirrors the query used by
-// `mpm call mpm_context --payload '{"action":"read_directives"}'`
-// so the dashboard's `Directives : N active` count matches
-// what the agent sees via the wake-context read path.
+// the legacy `is_prime_directive` column is also included via
+// COALESCE so pre-F19 rows with the flag set AND imported
+// rows with NULL flags are both visible. Mirrors the query
+// used by `mpm call mpm_context --payload
+// '{"action":"read_directives"}'` so the dashboard's
+// `Directives : N active` count matches what the agent sees
+// via the wake-context read path.
 func countDirectives(dm *mpminternal.DatabaseManager) (int, error) {
 	var count int
 	const query = `SELECT COUNT(*) FROM memories
-		WHERE (collection = 'directives' OR is_prime_directive = 1)
+		WHERE (collection = 'directives' OR COALESCE(is_prime_directive, 0) = 1)
 		  AND deleted_at IS NULL
 		  AND (expires_at IS NULL OR expires_at > strftime('%s','now'))`
 	if err := dm.SQLDB().QueryRow(query).Scan(&count); err != nil {

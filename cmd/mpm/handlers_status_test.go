@@ -343,3 +343,275 @@ func TestBuildStatusData_DirectivesAndMemoriesCountedSeparately(t *testing.T) {
 		t.Errorf("memLTM delta: got %d, want 0 (none of the seeded memories has weight >= 10)", got)
 	}
 }
+
+// TestBuildStatusData_NullSafeDirectiveExclusion pins the 2026-09-16
+// NULL-safety follow-up to bc7ce686. The pre-fix exclusion predicate
+// `is_prime_directive != 1` is NOT NULL-safe in SQL: for a row with
+// `is_prime_directive = NULL`, the comparison evaluates to UNKNOWN,
+// so the whole AND predicate becomes UNKNOWN, and the row is
+// silently excluded from memory counts.
+//
+// Imported, legacy, or manually-created memories can legally have
+// `is_prime_directive = NULL` even when they are clearly ordinary
+// memories (collection != 'directives'). The previous fix would
+// hide them from the dashboard entirely.
+//
+// The canonical NULL-safe predicate is:
+//
+//	NOT (collection = 'directives' OR COALESCE(is_prime_directive, 0) = 1)
+//
+// so NULL in the flag column is treated as "not a directive".
+// COALESCE(NULL, 0) = 0, and `0 = 1` is FALSE — the row passes
+// through as an ordinary memory.
+//
+// This test seeds all three identification paths and asserts:
+//
+//   - ordinary memory with NULL flag IS counted (the bug surface)
+//   - canonical directive (collection='directives') IS NOT counted
+//   - legacy directive (flag=1, non-directives collection) IS NOT counted
+//   - directive count itself includes BOTH canonical and legacy
+func TestBuildStatusData_NullSafeDirectiveExclusion(t *testing.T) {
+	ws := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", ws)
+	dm, err := mpminternal.NewDatabaseManager(ws)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+
+	dBaseline := buildStatusData(dm, time.Now())
+
+	// (1) Ordinary memory with NULL is_prime_directive — the
+	// canonical bug surface. collection != 'directives' makes it
+	// obviously ordinary; the NULL flag must NOT hide it.
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, metadata, is_prime_directive, weight, created_at)
+		VALUES (?, 'default', ?, '{"weight":1}', NULL, 1, CAST(strftime('%s','now') AS INTEGER))
+	`, "ordinary-null", "ordinary memory with NULL flag")
+	if err != nil {
+		t.Fatalf("seed ordinary-null: %v", err)
+	}
+
+	// (2) Canonical directive — collection='directives' with flag=NULL.
+	// Should be excluded from memTotal, counted in directives.
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, metadata, is_prime_directive, weight, created_at)
+		VALUES (?, 'directives', ?, '{"is_prime_directive":1}', NULL, 10, CAST(strftime('%s','now') AS INTEGER))
+	`, "canonical-null", "canonical directive with NULL flag")
+	if err != nil {
+		t.Fatalf("seed canonical-null: %v", err)
+	}
+
+	// (3) Legacy directive — collection != 'directives', flag=1.
+	// Should be excluded from memTotal, counted in directives.
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, metadata, is_prime_directive, weight, created_at)
+		VALUES (?, 'legacy_collection', ?, '{"is_prime_directive":1}', 1, 10, CAST(strftime('%s','now') AS INTEGER))
+	`, "legacy-flag", "legacy directive with flag=1, non-directives collection")
+	if err != nil {
+		t.Fatalf("seed legacy-flag: %v", err)
+	}
+
+	d := buildStatusData(dm, time.Now())
+
+	// memTotal must grow by exactly 1 — the ordinary-null row. The
+	// canonical-null and legacy-flag rows must NOT contribute.
+	if got := d.memTotal - dBaseline.memTotal; got != 1 {
+		t.Errorf("memTotal delta: got %d, want 1 (the NULL-flag ordinary memory must count; directives must be excluded)", got)
+	}
+
+	// memLTM also grows by 1 (the ordinary row, weight=1 → not LTM; but
+	// the canonical-null has weight=10 which IS LTM. So actually:
+	// ordinary-null weight=1 → not LTM (NOT counted in LTM)
+	// canonical-null weight=10 → directive (excluded from LTM)
+	// legacy-flag weight=10 → directive (excluded from LTM)
+	// So memLTM delta should be 0. The bug fix has to not flip this.
+	if got := d.memLTM - dBaseline.memLTM; got != 0 {
+		t.Errorf("memLTM delta: got %d, want 0 (ordinary has weight=1, directives excluded regardless of flag/collection)", got)
+	}
+
+	// directives must grow by exactly 2 — canonical-null + legacy-flag.
+	if got := d.directives - dBaseline.directives; got != 2 {
+		t.Errorf("directives delta: got %d, want 2 (canonical + legacy; both identification paths must contribute)", got)
+	}
+}
+
+// TestCountMemories_NullSafeDirectiveExclusion covers the same
+// NULL-safety contract at the countMemories boundary specifically —
+// independent of the buildStatusData aggregation layer. This is
+// the regression a future refactor of countMemories cannot
+// silently reintroduce.
+func TestCountMemories_NullSafeDirectiveExclusion(t *testing.T) {
+	ws := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", ws)
+	dm, err := mpminternal.NewDatabaseManager(ws)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+
+	// Capture baseline BEFORE seeding so the assertion measures the
+	// delta attributable to our four seeded rows.
+	baselineOrd, err := countMemories(dm, "")
+	if err != nil {
+		t.Fatalf("baseline memTotal: %v", err)
+	}
+	baselineDir, err := countDirectives(dm)
+	if err != nil {
+		t.Fatalf("baseline directives: %v", err)
+	}
+
+	// Seed the four canonical rows that exercise every combination
+	// of directive-identification pair.
+	rows := []struct {
+		id      string
+		coll    string
+		primeV  interface{}
+		comment string
+	}{
+		{"ord-null", "default", nil, "ordinary memory, NULL flag (the bug surface)"},
+		{"ord-zero", "default", 0, "ordinary memory, flag=0"},
+		{"dir-canon", "directives", nil, "canonical directive, NULL flag"},
+		{"dir-legacy", "default", 1, "legacy directive, flag=1, non-directives collection"},
+	}
+	for _, r := range rows {
+		_, err := dm.SQLDB().Exec(`
+			INSERT INTO memories (id, collection, content, metadata, is_prime_directive, weight, created_at)
+			VALUES (?, ?, ?, '{}', ?, 1, CAST(strftime('%s','now') AS INTEGER))
+		`, r.id, r.coll, r.comment, r.primeV)
+		if err != nil {
+			t.Fatalf("seed %s: %v", r.id, err)
+		}
+	}
+
+	// memTotal must grow by 2 (ord-null + ord-zero). The two
+	// directive rows (dir-canon, dir-legacy) must NOT count toward
+	// memTotal regardless of which identification criterion matched.
+	afterOrd, err := countMemories(dm, "")
+	if err != nil {
+		t.Fatalf("after memTotal: %v", err)
+	}
+	if got := afterOrd - baselineOrd; got != 2 {
+		t.Errorf("countMemories delta: got %d, want 2 (ord-null + ord-zero; the NULL-flag ordinary row must count, directives must be excluded)", got)
+	}
+
+	// directives count must grow by 2 (dir-canon + dir-legacy).
+	afterDir, err := countDirectives(dm)
+	if err != nil {
+		t.Fatalf("after directives: %v", err)
+	}
+	if got := afterDir - baselineDir; got != 2 {
+		t.Errorf("countDirectives delta: got %d, want 2 (dir-canon + dir-legacy; both identification paths must contribute)", got)
+	}
+}
+
+// TestMemoryStats_StatusAndInfoAgreeOnNullSafeCount pins the
+// semantic alignment between `mpm status` (countMemories),
+// `mpm info` (GetMemoryStats["active"]), and the canonical
+// health-check field memories_active. All three queries must
+// return the same count for the same database — they use the
+// same NULL-safe directive-exclusion predicate, so they can
+// never drift on ordinary-memory accounting.
+//
+// The test seeds a NULL-flag ordinary memory plus several
+// directive variants and asserts the three surfaces agree.
+func TestMemoryStats_StatusAndInfoAgreeOnNullSafeCount(t *testing.T) {
+	ws := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", ws)
+	dm, err := mpminternal.NewDatabaseManager(ws)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+
+	// Seed a NULL-flag ordinary memory plus one of each directive
+	// variant. The NULL-flag row is the regression target — it
+	// must show up in all three memory counts.
+	seeds := []struct {
+		id     string
+		coll   string
+		prime  interface{}
+		weight int
+	}{
+		// Ordinary with NULL flag (the bug surface).
+		{"ord-null-1", "default", nil, 1},
+		{"ord-null-2", "default", nil, 5},
+		// Canonical directive (collection + NULL flag).
+		{"dir-canon-null", "directives", nil, 10},
+		// Legacy directive (flag=1, non-directives collection).
+		{"dir-legacy", "default", 1, 10},
+	}
+	for _, s := range seeds {
+		_, err := dm.SQLDB().Exec(`
+			INSERT INTO memories (id, collection, content, metadata, is_prime_directive, weight, created_at)
+			VALUES (?, ?, 'content-'||?, '{}', ?, ?, CAST(strftime('%s','now') AS INTEGER))
+		`, s.id, s.coll, s.id, s.prime, s.weight)
+		if err != nil {
+			t.Fatalf("seed %s: %v", s.id, err)
+		}
+	}
+
+	// Surface 1: countMemories("") — what `mpm status` renders as MemTotal.
+	memTotal, err := countMemories(dm, "")
+	if err != nil {
+		t.Fatalf("countMemories: %v", err)
+	}
+
+	// Surface 2: GetMemoryStats["active"] — what `mpm info` renders as "active".
+	stats, err := dm.GetMemoryStats()
+	if err != nil {
+		t.Fatalf("GetMemoryStats: %v", err)
+	}
+	infoActive, ok := stats["active"].(int)
+	if !ok {
+		t.Fatalf("GetMemoryStats[\"active\"] missing or wrong type: %T %v", stats["active"], stats["active"])
+	}
+
+	// Surface 3: memories_active health-check field (run via the
+	// same code path HealthCheck uses).
+	healthStats, err := dm.HealthCheck()
+	if err != nil {
+		t.Fatalf("HealthCheck: %v", err)
+	}
+	memActive, ok := healthStats["memories_active"].(int64)
+	if !ok {
+		t.Fatalf("HealthCheck[memories_active] missing or wrong type: %T %v", healthStats["memories_active"], healthStats["memories_active"])
+	}
+
+	// All three must agree on the ordinary-memory count (the two
+	// ord-null rows; the two directive rows must be excluded
+	// from each surface). The exact number depends on what the
+	// baseline-cognitive-bootstrap seed wrote (it does NOT
+	// include NULL-flag ordinary memories, so the deltas from
+	// baseline are deterministic).
+	if memTotal != infoActive {
+		t.Errorf("countMemories (%d) disagrees with GetMemoryStats[active] (%d); NULL-flag ordinary memories must count identically on both surfaces", memTotal, infoActive)
+	}
+	if int64(memTotal) != memActive {
+		t.Errorf("countMemories (%d) disagrees with HealthCheck[memories_active] (%d); all three memory-count surfaces must share the canonical NULL-safe predicate", memTotal, memActive)
+	}
+
+	// Stronger assertion: every surface must reflect the two
+	// ord-null seeds as ordinary memories. We can't pin absolute
+	// numbers (baseline seed varies), but we can pin the delta:
+	// build a "counted" baseline first, then re-count after.
+	preOrd, err := countMemories(dm, "")
+	if err != nil {
+		t.Fatalf("preOrd: %v", err)
+	}
+	// Insert another NULL-flag ordinary row.
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, metadata, is_prime_directive, weight, created_at)
+		VALUES (?, 'default', 'extra', '{}', NULL, 1, CAST(strftime('%s','now') AS INTEGER))
+	`, "ord-null-extra")
+	if err != nil {
+		t.Fatalf("seed ord-null-extra: %v", err)
+	}
+	postOrd, err := countMemories(dm, "")
+	if err != nil {
+		t.Fatalf("postOrd: %v", err)
+	}
+	if got := postOrd - preOrd; got != 1 {
+		t.Errorf("NULL-flag ordinary memory delta: got %d, want 1 (every memory-count surface must use the NULL-safe predicate)", got)
+	}
+}
