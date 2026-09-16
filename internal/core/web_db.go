@@ -1446,20 +1446,34 @@ func (dm *DatabaseManager) SearchTopics(q string, limit int) ([]map[string]inter
 	return topics, nil
 }
 
-// GetMemoryStats returns comprehensive memory statistics
+// GetMemoryStats returns comprehensive memory statistics.
+//
+// 2026-09-16 fresh-profile fix: directives are stored in the
+// `memories` table (collection='directives' for the canonical path,
+// is_prime_directive=1 for legacy rows). They are surfaced as their
+// own row on the dashboard / in `mpm status` and must NOT inflate
+// the canonical active-memory count surfaced here. Pre-fix this
+// method lumped directives into the `active` / `ltm` / `never_accessed`
+// counts, so `mpm info` reported a larger memory population than
+// `mpm status` — and a fresh install reported 5 "active memories"
+// that were actually the baseline-cognitive-bootstrap directives.
+// Each query below now excludes the directive-identification pair
+// so this surface agrees with the dashboard.
 func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	stats := make(map[string]interface{})
 
 	// Basic counts. Each one is best-effort — log audit and default to 0 on failure.
 	var total, active, deleted, ltm, reinforced, neverAccessed, expired int
-	err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&total)
+	// Canonical directive-exclusion used by every count below.
+	const directiveExcl = `collection != 'directives' AND is_prime_directive != 1`
+	err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE ` + directiveExcl).Scan(&total)
 	if err != nil {
 		return nil, err
 	}
-	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`).Scan(&active); err != nil {
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND ` + directiveExcl).Scan(&active); err != nil {
 		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: active count failed, defaulting to 0: %v", err), "", AuditContext{})
 	}
-	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL`).Scan(&deleted); err != nil {
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL AND ` + directiveExcl).Scan(&deleted); err != nil {
 		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: deleted count failed, defaulting to 0: %v", err), "", AuditContext{})
 	}
 	// CLI acceptance 2026-09-12: LTM uses the canonical IsLTMMemory
@@ -1467,16 +1481,16 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	// agrees with `mpm status` (countMemories weight>=10). Pre-fix this
 	// counted only the flag and disagreed with status on every
 	// high-weight non-promoted row.
-	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE (is_long_term = 1 OR weight >= 10) AND deleted_at IS NULL`).Scan(&ltm); err != nil {
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE (is_long_term = 1 OR weight >= 10) AND deleted_at IS NULL AND ` + directiveExcl).Scan(&ltm); err != nil {
 		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: ltm count failed, defaulting to 0: %v", err), "", AuditContext{})
 	}
-	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE reinforcement_count > 0 AND deleted_at IS NULL`).Scan(&reinforced); err != nil {
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE reinforcement_count > 0 AND deleted_at IS NULL AND ` + directiveExcl).Scan(&reinforced); err != nil {
 		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: reinforced count failed, defaulting to 0: %v", err), "", AuditContext{})
 	}
-	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE last_accessed_at IS NULL AND reinforcement_count = 0 AND deleted_at IS NULL`).Scan(&neverAccessed); err != nil {
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE last_accessed_at IS NULL AND reinforcement_count = 0 AND deleted_at IS NULL AND ` + directiveExcl).Scan(&neverAccessed); err != nil {
 		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: never_accessed count failed, defaulting to 0: %v", err), "", AuditContext{})
 	}
-	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now') AND deleted_at IS NULL`).Scan(&expired); err != nil {
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now') AND deleted_at IS NULL AND ` + directiveExcl).Scan(&expired); err != nil {
 		dm.LogAudit(AuditWarn, "web_db", fmt.Sprintf("GetMemoryStats: expired count failed, defaulting to 0: %v", err), "", AuditContext{})
 	}
 

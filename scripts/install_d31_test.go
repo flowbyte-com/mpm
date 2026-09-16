@@ -597,3 +597,130 @@ func TestInstallSh_WrapperHeredocHasNoCommandSubstitution(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallSh_PathWarningDoesNotPromiseNewShellsFixPath pins the
+// 2026-09-16 fresh-profile fix for the installer's PATH warning
+// wording. Pre-fix the on-PATH warning said:
+//
+//	~/.local/bin is NOT on your current PATH
+//	new shells will pick it up automatically (XDG default)
+//
+// This was inaccurate. ~/.profile conditionally adds ~/.local/bin
+// to PATH, but ordinary new terminal windows inside an existing
+// graphical login inherit the desktop environment and do NOT
+// necessarily process .profile. So `bash -ic 'command -v mpm'`
+// failed on the fresh `x` profile while `bash -lc 'command -v mpm'`
+// succeeded. The wording promised a fix that wasn't reliably real.
+//
+// The fix tells the operator what actually works: a new LOGIN
+// session will normally pick it up (because that's when the
+// shell sources .profile), and for the installer's shell they
+// can either export PATH or invoke the canonical binary path
+// directly.
+//
+// The test:
+//
+//  1. Negatively pins the pre-fix wording (must NOT appear).
+//  2. Positively pins the post-fix wording fragments:
+//     - "a new login session will normally pick it up" (or
+//     equivalent accurate description)
+//     - "export PATH=" (the actionable export instruction)
+//     - "this shell" / "for this shell" (frames the export as
+//     shell-scoped, not global environment mutation)
+func TestInstallSh_PathWarningDoesNotPromiseNewShellsFixPath(t *testing.T) {
+	data, err := os.ReadFile("../scripts/install.sh")
+	if err != nil {
+		if data, err = os.ReadFile("install.sh"); err != nil {
+			t.Fatalf("read install.sh: %v", err)
+		}
+	}
+	body := string(data)
+
+	// Negative: the pre-fix wording promised new shells would
+	// pick the PATH up automatically. That promise was empirically
+	// false on the fresh `x` profile (graphical login inherits
+	// env from the desktop session, .profile is not processed).
+	preFixPromises := []string{
+		"new shells will pick it up automatically",
+	}
+	for _, bad := range preFixPromises {
+		if strings.Contains(body, bad) {
+			t.Errorf("install.sh contains pre-fix promise %q (empirically inaccurate on graphical-login hosts); wording must describe what actually works (new login session, not generic new shells)", bad)
+		}
+	}
+
+	// Positive: the post-fix wording frames the fix as scoped to
+	// the current shell AND points at a new login session as the
+	// reliable longer-term fix. The exact phrasing wording is allowed
+	// to vary (so a future copy-edit doesn't fail the pin) — we just
+	// require the actionable hints are present.
+	requiredHints := []string{
+		// Shell-scoped export instruction.
+		"export PATH=",
+		// Reliable fix framing: a fresh login session is what
+		// processes .profile. "login session" / "login shell" / "login
+		// again" all qualify; we pin the substring "login" so any
+		// of the natural phrasings passes.
+		"login",
+		// Frames the export as scoped to this session (NOT a
+		// permanent environment mutation by the installer).
+		"this shell",
+	}
+	for _, want := range requiredHints {
+		if !strings.Contains(body, want) {
+			t.Errorf("install.sh PATH warning must contain %q (actionable fix guidance); not found", want)
+		}
+	}
+}
+
+// TestInstallSh_NoDirectiveWordingInSuccessPath pins the 2026-09-16
+// fresh-profile fix for the install-validation messaging: the success
+// path must say "✓ directives present (N)" — not the obsolete
+// "prime directives present (N)". The terminology has moved from
+// "prime directives" to "directives"; the install script's user-facing
+// output must reflect the current term.
+//
+// The pre-fix wording lives in phase_validate. The seeding hint
+// (when directives are missing) still says "to seed the baseline,
+// run: $PREFIX/bin/mpm ops init directives" — that line uses the
+// current term and is preserved.
+//
+// The test:
+//
+//  1. Asserts the success-path wording "directives present" exists.
+//  2. Negatively pins the obsolete "prime directives" wording in
+//     user-facing log/warn strings (NOT in code comments, the DB
+//     column name, the metadata key, or internal Go identifiers —
+//     those are stable technical surfaces and out of scope).
+func TestInstallSh_NoDirectiveWordingInSuccessPath(t *testing.T) {
+	data, err := os.ReadFile("../scripts/install.sh")
+	if err != nil {
+		if data, err = os.ReadFile("install.sh"); err != nil {
+			t.Fatalf("read install.sh: %v", err)
+		}
+	}
+	body := string(data)
+
+	// Positive: the success-path wording must exist.
+	positive := []string{
+		`directives present (`,
+	}
+	for _, want := range positive {
+		if !strings.Contains(body, want) {
+			t.Errorf("install.sh must contain current terminology %q in phase_validate success path; not found", want)
+		}
+	}
+
+	// Negative: the obsolete "prime directives" wording must NOT
+	// appear in user-facing log/warn strings. We pin the exact
+	// log lines (which were the actual surface the user saw).
+	preFixUserFacing := []string{
+		`log "  ✓ prime directives present (`,
+		`warn "  ! no prime directives found"`,
+	}
+	for _, bad := range preFixUserFacing {
+		if strings.Contains(body, bad) {
+			t.Errorf("install.sh contains obsolete user-facing wording %q (must use 'directives' / 'no directives' current terminology)", bad)
+		}
+	}
+}

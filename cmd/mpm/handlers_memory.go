@@ -50,7 +50,7 @@ func handlePrimeDirectives() int {
 		ORDER BY created_at ASC
 	`)
 	if err != nil {
-		return respond("", fmt.Sprintf("Error querying prime directives: %v\n", err), 1)
+		return respond("", fmt.Sprintf("Error querying directives: %v\n", err), 1)
 	}
 	defer rows.Close()
 
@@ -82,7 +82,7 @@ func handlePrimeDirectives() int {
 			return 1
 		}
 		if len(directives) == 0 {
-			fmt.Println(`{"directives": [], "message": "No prime directives found"}`)
+			fmt.Println(`{"directives": [], "message": "No directives found"}`)
 		} else {
 			data, _ := json.Marshal(map[string]interface{}{"directives": directives})
 			fmt.Println(string(data))
@@ -126,7 +126,7 @@ func handlePrimeDirectives() int {
 	}
 
 	if count == 0 {
-		output.WriteString("No prime directives found. Run the session that defines them.\n")
+		output.WriteString("No directives found. Run the session that defines them.\n")
 	}
 
 	output.WriteString("\xe2\x94\x81\xe2\x95\x90\xe2\x94\x81\xe2\x95\x90\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\n")
@@ -192,11 +192,11 @@ func handleMemoryAdd(args []string) int {
 	jsonOutput := false
 	expiresIn := ""
 	interactive := false
-	factArg := ""    // --fact <text>: alternative to positional content (matches mpm_memory action=save payload field name)
-	fileArg := ""    // --file <path>: read content from file (F-A3 fix — no silent 64KB truncation)
-	tagsArg := ""    // --tags <csv>: comma-separated tags
+	factArg := ""                                         // --fact <text>: alternative to positional content (matches mpm_memory action=save payload field name)
+	fileArg := ""                                         // --file <path>: read content from file (F-A3 fix — no silent 64KB truncation)
+	tagsArg := ""                                         // --tags <csv>: comma-separated tags
 	weightArg := float64(mpminternal.DefaultMemoryWeight) // --weight <0-100>: weight; default matches mpm_memory save (canonical)
-	weightSet := false // tracks whether --weight was actually supplied (so we can tell "user passed 0" from "user didn't pass anything")
+	weightSet := false                                    // tracks whether --weight was actually supplied (so we can tell "user passed 0" from "user didn't pass anything")
 	contentArgs := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -426,42 +426,42 @@ func handleMemoryAdd(args []string) int {
 		// want it should call `mpm memory suggest` explicitly.
 		echoContent, truncated := mpminternal.BoundInlineContent(mem.Content)
 		type jsonResult struct {
-			Success           bool                     `json:"success"`
-			ID                string                   `json:"id"`
-			Content           string                   `json:"content"`
+			Success bool   `json:"success"`
+			ID      string `json:"id"`
+			Content string `json:"content"`
 			// Echo tags/weight so the operator can verify at the CLI that
 			// the flags were applied — not just that the call returned
 			// success. Production incident: silent-failure shape hid the
 			// fact that --tags/--weight weren't recognized; the user
 			// only saw the bug when they queried sqlite3 directly.
-			Tags              []string                 `json:"tags,omitempty"`
-			Weight            float64                  `json:"weight,omitempty"`
-			Pointer           string                   `json:"pointer"`
-			ContentTruncated  bool                     `json:"content_truncated,omitempty"`
-			ContentBytes      int                      `json:"content_bytes,omitempty"`
-			Note              string                   `json:"note,omitempty"`
-			SuggestedTopics   []map[string]interface{} `json:"suggested_topics,omitempty"`
+			Tags             []string                 `json:"tags,omitempty"`
+			Weight           float64                  `json:"weight,omitempty"`
+			Pointer          string                   `json:"pointer"`
+			ContentTruncated bool                     `json:"content_truncated,omitempty"`
+			ContentBytes     int                      `json:"content_bytes,omitempty"`
+			Note             string                   `json:"note,omitempty"`
+			SuggestedTopics  []map[string]interface{} `json:"suggested_topics,omitempty"`
 		}
-	result := jsonResult{
-		Success: true,
-		ID:      mem.ID,
-		Content: echoContent,
-		Tags:    tagsList,
-		// CLI acceptance 2026-09-12: when the operator did NOT pass
-		// --weight, echo the persisted column value (mem.Weight) so the
-		// JSON envelope agrees with `mpm call mpm_memory save` (which
-		// reports the normalized column, e.g. default 5). When the
-		// operator DID pass --weight, preserve the F-H4 echo contract
-		// (report what was asked for, e.g. 7.5) so parser bugs stay
-		// visible. Pre-fix this always echoed the raw arg (0.5 default),
-		// disagreeing with the canonical surface on every default add.
-		Pointer: "mpm://memory/" + mem.ID,
-	}
-	if weightSet {
-		result.Weight = weightArg
-	} else {
-		result.Weight = float64(mem.Weight)
-	}
+		result := jsonResult{
+			Success: true,
+			ID:      mem.ID,
+			Content: echoContent,
+			Tags:    tagsList,
+			// CLI acceptance 2026-09-12: when the operator did NOT pass
+			// --weight, echo the persisted column value (mem.Weight) so the
+			// JSON envelope agrees with `mpm call mpm_memory save` (which
+			// reports the normalized column, e.g. default 5). When the
+			// operator DID pass --weight, preserve the F-H4 echo contract
+			// (report what was asked for, e.g. 7.5) so parser bugs stay
+			// visible. Pre-fix this always echoed the raw arg (0.5 default),
+			// disagreeing with the canonical surface on every default add.
+			Pointer: "mpm://memory/" + mem.ID,
+		}
+		if weightSet {
+			result.Weight = weightArg
+		} else {
+			result.Weight = float64(mem.Weight)
+		}
 		if truncated {
 			result.ContentTruncated = true
 			result.ContentBytes = len(mem.Content)
@@ -551,9 +551,9 @@ func handleMemorySearch(args []string) int {
 			})
 		}
 		body, _ := json.Marshal(map[string]interface{}{
-			"success": true,
-			"query":   query,
-			"count":   len(memories),
+			"success":  true,
+			"query":    query,
+			"count":    len(memories),
 			"memories": items,
 		})
 		return respond(string(body)+"\n", "", 0)

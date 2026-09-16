@@ -44,6 +44,7 @@ type statusData struct {
 	personaSource string   // 2026-09-14: resolution source tag
 	memTotal      int
 	memLTM        int
+	directives    int
 	theoryTotal   int
 	theoryPend    int
 	theoryResolv  int
@@ -101,6 +102,11 @@ func buildStatusData(dm *mpminternal.DatabaseManager, startTime time.Time) statu
 	d.uptime = schedulerUptimeOrFallback(dm, startTime)
 	d.memTotal, _ = countMemories(dm, "")
 	d.memLTM, _ = countMemories(dm, "weight >= 10")
+	// Directives live in the memories table but are surfaced as
+	// their own row on the dashboard. countMemories already
+	// excludes them from the memory totals above, so this is
+	// the authoritative count for the Directives row.
+	d.directives, _ = countDirectives(dm)
 	d.theoryTotal, _ = countMemories(dm, "collection = 'theories'")
 	d.decisions, _ = countMemories(dm, "collection = 'decisions'")
 	d.theoryPend, _ = countTheoriesByStatus(dm, "pending")
@@ -322,6 +328,7 @@ func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) 
 		renderModelsDashboard(os.Stdout, nil, nil)
 	}
 	render.KeyValue(os.Stdout, "Memories", fmt.Sprintf("%d total | %d LTM", d.memTotal, d.memLTM))
+	render.KeyValue(os.Stdout, "Directives", fmt.Sprintf("%d active", d.directives))
 	render.KeyValue(os.Stdout, "Theories", fmt.Sprintf("%d total | %d pending | %d resolved", d.theoryTotal, d.theoryPend, d.theoryResolv))
 	render.KeyValue(os.Stdout, "Decisions", fmt.Sprintf("%d total", d.decisions))
 	render.KeyValue(os.Stdout, "Synthesis", fmt.Sprintf("%d merged | last: %s", d.synthMerged, d.synthLast))
@@ -374,18 +381,20 @@ func printStatusJSON(dm *mpminternal.DatabaseManager, startTime time.Time) int {
 		Mode         modeStateJSON    `json:"mode"`
 		Persona      personaStateJSON `json:"persona"`
 		Memories     memCounts        `json:"memories"`
+		Directives   int              `json:"directives"`
 		Theories     thCounts         `json:"theories"`
 		Decisions    int              `json:"decisions"`
 		Synthesis    synthCounts      `json:"synthesis"`
 		RecentEvents []jsonEvent      `json:"recent_events,omitempty"`
 	}{
-		Uptime:    d.uptime,
-		Mode:      modeStateJSON{State: d.modeState, Values: d.modeValues, Source: trimBrackets(d.modeSource)},
-		Persona:   personaStateJSON{State: d.personaState, Values: d.personaValues, Source: trimBrackets(d.personaSource)},
-		Memories:  memCounts{Total: d.memTotal, LTM: d.memLTM},
-		Theories:  thCounts{Total: d.theoryTotal, Pending: d.theoryPend, Resolved: d.theoryResolv},
-		Decisions: d.decisions,
-		Synthesis: synthCounts{Merged: d.synthMerged, Last: d.synthLast},
+		Uptime:     d.uptime,
+		Mode:       modeStateJSON{State: d.modeState, Values: d.modeValues, Source: trimBrackets(d.modeSource)},
+		Persona:    personaStateJSON{State: d.personaState, Values: d.personaValues, Source: trimBrackets(d.personaSource)},
+		Memories:   memCounts{Total: d.memTotal, LTM: d.memLTM},
+		Directives: d.directives,
+		Theories:   thCounts{Total: d.theoryTotal, Pending: d.theoryPend, Resolved: d.theoryResolv},
+		Decisions:  d.decisions,
+		Synthesis:  synthCounts{Merged: d.synthMerged, Last: d.synthLast},
 	}
 	for _, e := range d.recentEvents {
 		out.RecentEvents = append(out.RecentEvents, jsonEvent{Op: e.op, Detail: e.detail})
@@ -416,24 +425,57 @@ type synthCounts struct {
 }
 
 func countMemories(dm *mpminternal.DatabaseManager, where string) (int, error) {
+	// Directives live in the `memories` table alongside ordinary
+	// memories (collection='directives' for the canonical path,
+	// is_prime_directive=1 for legacy rows). The memory counts on
+	// the status dashboard must exclude them — they are reported
+	// separately on the dashboard's `Directives : N active` row.
+	//
+	// Excluding them at the countMemories boundary keeps every
+	// existing call-site (memTotal, memLTM, theoryTotal,
+	// decisions) correct without each having to repeat the
+	// filter — the only call that explicitly includes directives
+	// is the dedicated countDirectives function below.
 	var query string
 	var args []interface{}
+	directiveExclusion := `collection != 'directives' AND is_prime_directive != 1`
 	if where == "" {
 		// D-5.2: apply the canonical EXPIRE filter (expires_at IS NULL
 		// OR expires_at > now). The prior code only filtered deleted_at,
 		// so an expired memory continued to count toward memTotal.
 		query = `SELECT COUNT(*) FROM memories
 			WHERE deleted_at IS NULL
-			AND (expires_at IS NULL OR expires_at > strftime('%s','now'))`
+			AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
+			AND ` + directiveExclusion
 	} else {
 		query = `SELECT COUNT(*) FROM memories
 			WHERE deleted_at IS NULL
 			AND (expires_at IS NULL OR expires_at > strftime('%s','now'))
-			AND ` + where
+			AND ` + directiveExclusion + ` AND ` + where
 	}
 	var count int
 	if err := dm.SQLDB().QueryRow(query, args...).Scan(&count); err != nil {
 		return 0, fmt.Errorf("countMemories: %w", err)
+	}
+	return count, nil
+}
+
+// countDirectives returns the number of active (non-deleted,
+// non-expired) directives in the memories table. The canonical
+// identifier is `collection = 'directives'` (the MCP path);
+// the legacy `is_prime_directive = 1` column is included so
+// pre-F19 rows remain visible. Mirrors the query used by
+// `mpm call mpm_context --payload '{"action":"read_directives"}'`
+// so the dashboard's `Directives : N active` count matches
+// what the agent sees via the wake-context read path.
+func countDirectives(dm *mpminternal.DatabaseManager) (int, error) {
+	var count int
+	const query = `SELECT COUNT(*) FROM memories
+		WHERE (collection = 'directives' OR is_prime_directive = 1)
+		  AND deleted_at IS NULL
+		  AND (expires_at IS NULL OR expires_at > strftime('%s','now'))`
+	if err := dm.SQLDB().QueryRow(query).Scan(&count); err != nil {
+		return 0, fmt.Errorf("countDirectives: %w", err)
 	}
 	return count, nil
 }

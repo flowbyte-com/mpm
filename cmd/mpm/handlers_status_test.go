@@ -16,6 +16,7 @@
 package main
 
 import (
+	"fmt"
 	"strconv"
 	"testing"
 	"time"
@@ -217,5 +218,128 @@ func TestBuildStatusData_TheoryResolvedCountsProvenPlusDisproven(t *testing.T) {
 	}
 	if d.theoryResolv != 3 {
 		t.Errorf("theoryResolv (proven+disproven): got %d, want 3", d.theoryResolv)
+	}
+}
+
+// seedDirective inserts a directive memory row so buildStatusData can
+// be driven from a known directive population. The canonical
+// identifier is `collection = 'directives'` (matches the MCP read
+// path); the legacy `is_prime_directive` column is also written so
+// the helper exercises both identification paths.
+func seedDirective(t *testing.T, dm *mpminternal.DatabaseManager, id string) {
+	t.Helper()
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, metadata, is_prime_directive, weight, created_at)
+		VALUES (?, 'directives', ?, '{"is_prime_directive":1}', 1, 10, CAST(strftime('%s','now') AS INTEGER))
+	`, id, "directive content "+id)
+	if err != nil {
+		t.Fatalf("seed directive %q: %v", id, err)
+	}
+}
+
+// TestBuildStatusData_DirectivesExcludedFromMemoryTotals pins the
+// 2026-09-16 fresh-profile fix: directives are stored in the
+// `memories` table (collection='directives') but they must NOT
+// inflate the dashboard's Memories row. Pre-fix the dashboard
+// reported `Memories : 5 total | 5 LTM` on a pristine install
+// because the canonical `countMemories` query counted ALL
+// non-deleted memories including directives. The fix excludes
+// directives from the memory count AND adds a separate `Directives`
+// row to the dashboard.
+//
+// The test asserts on deltas (capturing the baseline-cognitive-bootstrap
+// counts that NewDatabaseManager seeds) so it remains robust to
+// additions/removals from the baseline set. It proves:
+//
+//   - memTotal does NOT grow when only directives are seeded
+//     (i.e. directives do not inflate the memory totals)
+//   - directives DOES grow by the seeded-directive count
+//     (i.e. the Directives row reports the right count)
+func TestBuildStatusData_DirectivesExcludedFromMemoryTotals(t *testing.T) {
+	ws := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", ws)
+	dm, err := mpminternal.NewDatabaseManager(ws)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+
+	// Baseline (post-boot) counts — NewDatabaseManager runs the
+	// baseline-cognitive-bootstrap seed which writes a handful of
+	// canonical directives. The test must measure deltas against
+	// this baseline, not absolute counts, so it remains stable if
+	// the seed set is amended.
+	dBaseline := buildStatusData(dm, time.Now())
+
+	// Seed 5 additional directives (after the baseline) — mirrors
+	// what an operator adding directives via `mpm call mpm_memory save`
+	// would observe.
+	const extraDirectives = 5
+	for i := 0; i < extraDirectives; i++ {
+		seedDirective(t, dm, fmt.Sprintf("extra-dir-%d", i))
+	}
+
+	d := buildStatusData(dm, time.Now())
+
+	if got := d.directives - dBaseline.directives; got != extraDirectives {
+		t.Errorf("directives delta: got %d, want %d (counting extraDirectives we just seeded)", got, extraDirectives)
+	}
+
+	// The whole point of this fix: adding directives must not
+	// move the memTotal counter at all. Pre-fix, d.memTotal would
+	// grow by `extraDirectives` and the dashboard would lie.
+	if got := d.memTotal - dBaseline.memTotal; got != 0 {
+		t.Errorf("memTotal delta: got %d, want 0 (directives must not inflate memory totals)", got)
+	}
+	if got := d.memLTM - dBaseline.memLTM; got != 0 {
+		t.Errorf("memLTM delta: got %d, want 0 (directives must not inflate LTM totals)", got)
+	}
+}
+
+// TestBuildStatusData_DirectivesAndMemoriesCountedSeparately verifies
+// the same fix at a higher-cardinality boundary: when both directives
+// AND genuine user memories are present, each is reported on its own
+// dashboard row without bleeding into the other. This is the case the
+// pre-fix dashboard got most confused about — a fresh install with
+// later user memories would show the directive count lumped into the
+// memory count and grow over time without the user realising.
+func TestBuildStatusData_DirectivesAndMemoriesCountedSeparately(t *testing.T) {
+	ws := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", ws)
+	dm, err := mpminternal.NewDatabaseManager(ws)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+
+	dBaseline := buildStatusData(dm, time.Now())
+
+	// 3 extra directives + 7 ordinary memories (all on top of the
+	// baseline-cognitive-bootstrap seed).
+	const extraDirectives = 3
+	const extraMemories = 7
+	for i := 0; i < extraDirectives; i++ {
+		seedDirective(t, dm, fmt.Sprintf("extra-dir-%d", i))
+	}
+	for i := 0; i < extraMemories; i++ {
+		_, err := dm.SQLDB().Exec(`
+			INSERT INTO memories (id, collection, content, metadata, weight, created_at)
+			VALUES (?, 'memories', ?, '{"weight":1}', 1, CAST(strftime('%s','now') AS INTEGER))
+		`, fmt.Sprintf("extra-mem-%d", i), fmt.Sprintf("user memory %d", i))
+		if err != nil {
+			t.Fatalf("seed memory %d: %v", i, err)
+		}
+	}
+
+	d := buildStatusData(dm, time.Now())
+
+	if got := d.directives - dBaseline.directives; got != extraDirectives {
+		t.Errorf("directives delta: got %d, want %d", got, extraDirectives)
+	}
+	if got := d.memTotal - dBaseline.memTotal; got != extraMemories {
+		t.Errorf("memTotal delta: got %d, want %d (must count ordinary memories only, not directives)", got, extraMemories)
+	}
+	if got := d.memLTM - dBaseline.memLTM; got != 0 {
+		t.Errorf("memLTM delta: got %d, want 0 (none of the seeded memories has weight >= 10)", got)
 	}
 }

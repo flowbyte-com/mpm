@@ -453,12 +453,28 @@ phase_symlinks() {
     # We don't error because (a) some shells source PATH lazily, and
     # (b) many agents spawn subprocesses with an explicit PATH that
     # already includes ~/.local/bin. The warning is just a heads-up.
+    #
+    # 2026-09-16 fresh-profile fix: pre-fix wording claimed "new shells
+    # will pick it up automatically (XDG default)". That is empirically
+    # inaccurate. ~/.profile conditionally adds ~/.local/bin to PATH,
+    # but ordinary new terminal windows inside an existing graphical
+    # login inherit the desktop environment and do NOT process
+    # .profile. So `bash -ic 'command -v mpm'` fails on a fresh
+    # install while `bash -lc 'command -v mpm'` succeeds. The accurate
+    # framing is: a new LOGIN session will normally pick it up
+    # (because that's when the shell sources .profile); for the
+    # current shell, the operator must either export PATH or invoke
+    # the canonical binary path directly. The installer never modifies
+    # the parent shell environment.
     case ":${PATH:-}:" in
         *":$LOCAL_BIN:"*) log "  $LOCAL_BIN is on PATH (good)" ;;
         *)
             warn "  $LOCAL_BIN is NOT on your current PATH"
-            warn "  new shells will pick it up automatically (XDG default)"
-            warn "  but existing sessions need: export PATH=\"\$HOME/.local/bin:\$PATH\""
+            warn "  a new login session will normally pick it up automatically"
+            warn "  for this shell, use:"
+            warn "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+            warn "  or invoke:"
+            warn "    $PREFIX/bin/mpm"
             ;;
     esac
 
@@ -698,7 +714,7 @@ phase_validate() {
         fi
     fi
 
-    # 5. Prime directives seeded (warn-only — install does not auto-seed)
+    # 5. Directives seeded (warn-only — install does not auto-seed)
     local directives_count=0
     local directives_json
     directives_json=$("$PREFIX/bin/mpm" call mpm_context --payload '{"action":"read_directives","params":{}}' 2>/dev/null \
@@ -707,9 +723,9 @@ phase_validate() {
         directives_count="$directives_json"
     fi
     if [ "$directives_count" -gt 0 ]; then
-        log "  ✓ prime directives present ($directives_count)"
+        log "  ✓ directives present ($directives_count)"
     else
-        warn "  ! no prime directives found"
+        warn "  ! no directives found"
         warn "    the agent will boot without cognitive bootstrap"
         warn "    to seed the baseline, run: $PREFIX/bin/mpm ops init directives"
     fi

@@ -215,6 +215,87 @@ func TestTightenFilePerms0600_LogsReportStructure(t *testing.T) {
 	}
 }
 
+// TestTightenFilePerms0600_OptionalFilesAbsentQuietSkip pins the
+// 2026-09-16 fresh-profile fix: `active.json` and `toxicphrases.txt`
+// are root-level targets in the sweep, but they are OPTIONAL — they
+// only get created when something needs to write them. On a pristine
+// install both files are absent, and the sweep must NOT log a WARN
+// or count the missing files as Errors.
+//
+// Pre-fix: tightenOneFile called os.Stat and on ENOENT logged
+// `file perms sweep: stat failed path=active.json err="stat ...:
+// no such file or directory"` and bumped report.Errors++. That
+// surfaced two WARN lines on every fresh `mpm status` run before
+// any other output, polluting the CLI startup noise on hosts where
+// nothing was actually wrong.
+//
+// The fix recognises ENOENT as a quiet no-op (the file simply
+// doesn't exist yet — there is nothing to tighten). Real
+// permission/stat failures still surface as Errors so the sweep
+// retains its diagnostic value.
+func TestTightenFilePerms0600_OptionalFilesAbsentQuietSkip(t *testing.T) {
+	root := t.TempDir()
+	// Empty mpm dir: NO active.json, NO toxicphrases.txt, NO
+	// scheduler.lock, NO src/db, NO backups. This mirrors the
+	// fresh-install state.
+
+	report, err := TightenFilePerms0600(root)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	// No Errors — optional files being absent must NOT count
+	// as a stat failure.
+	if report.Errors != 0 {
+		t.Errorf("Errors on pristine install with absent optional files: want 0, got %d", report.Errors)
+	}
+	// No Checked — nothing existed to inspect.
+	if report.Checked != 0 {
+		t.Errorf("Checked on pristine install: want 0, got %d", report.Checked)
+	}
+	if report.Changed != 0 {
+		t.Errorf("Changed on pristine install: want 0, got %d", report.Changed)
+	}
+	if report.Skipped != 0 {
+		t.Errorf("Skipped on pristine install: want 0, got %d", report.Skipped)
+	}
+}
+
+// TestTightenFilePerms0600_OnlySchedulerLockPresent covers the
+// intermediate case where SOME root-level files exist but the
+// optional ones don't. scheduler.lock is created by mpm-scheduler
+// on first boot; active.json is created on first mode/persona
+// selection; toxicphrases.txt may never be created. The sweep
+// must tighten the present file and silently no-op on the absent
+// optional ones — no Errors, no WARN noise.
+func TestTightenFilePerms0600_OnlySchedulerLockPresent(t *testing.T) {
+	root := t.TempDir()
+	lockPath := filepath.Join(root, "scheduler.lock")
+	if err := os.WriteFile(lockPath, []byte("pid=1"), 0o644); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	report, err := TightenFilePerms0600(root)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if report.Errors != 0 {
+		t.Errorf("Errors with absent optional files: want 0, got %d", report.Errors)
+	}
+	if report.Checked != 1 {
+		t.Errorf("Checked: want 1 (only scheduler.lock present), got %d", report.Checked)
+	}
+	if report.Changed != 1 {
+		t.Errorf("Changed: want 1 (scheduler.lock should be tightened), got %d", report.Changed)
+	}
+	// active.json + toxicphrases.txt still absent; the sweep must
+	// have left them alone silently.
+	for _, name := range []string{"active.json", "toxicphrases.txt"} {
+		if _, err := os.Stat(filepath.Join(root, name)); !os.IsNotExist(err) {
+			t.Errorf("%s must remain absent after sweep; got stat err=%v", name, err)
+		}
+	}
+}
+
 // reportSummary is a tiny helper used by tests + callers to format
 // the report for stdout / log output. Kept here so the test can
 // sanity-check the format.

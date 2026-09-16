@@ -163,9 +163,26 @@ func tightenDir(mpmDir, sub string, recursive bool, patterns []globMatcher, repo
 // tightenOneFile applies 0600 to a single file. Logs at WARN on
 // failure (e.g., file owned by another user, chmod EPERM). Updates
 // the report counters.
+//
+// Missing files are a quiet no-op: every target in the sweep
+// (active.json, toxicphrases.txt, scheduler.lock, the rotated
+// mirror.jsonl siblings, backup snapshots) is optional — created
+// only when something writes it. ENOENT means "nothing to tighten
+// yet", not a stat failure. Real permission/stat errors (EPERM,
+// EIO, EACCES, …) still surface as WARN + Errors++ so genuine
+// problems stay visible. Without this distinction the sweep
+// emitted two WARN lines on every `mpm status` run before any
+// dashboard output, polluting CLI startup on hosts where
+// nothing was actually wrong.
 func tightenOneFile(path, rel string, report *FilepermsReport) {
 	info, err := os.Stat(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// File simply isn't on disk yet — normal on a fresh
+			// install. Nothing to tighten, no diagnostic value in
+			// logging it. Skip silently.
+			return
+		}
 		slog.Warn("file perms sweep: stat failed",
 			"path", rel, "err", err)
 		report.Errors++
