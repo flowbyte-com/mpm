@@ -1507,14 +1507,18 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	stats["never_accessed"] = neverAccessed
 	stats["expired"] = expired
 
-	// By collection
+	// By collection — applies the same canonical directiveExcl
+	// predicate as the scalar counters above so the breakdown
+	// agrees with `total` (no directive rows leaking via their
+	// collection name).
 	collRows, err := dm.db.Query(`
 		SELECT collection, COUNT(*) as count FROM memories
-		WHERE deleted_at IS NULL GROUP BY collection ORDER BY count DESC
+		WHERE deleted_at IS NULL AND ` + directiveExcl + `
+		GROUP BY collection ORDER BY count DESC
 	`)
 	if err == nil {
 		defer collRows.Close()
-		var byCollection []map[string]interface{}
+		byCollection := []map[string]interface{}{}
 		for collRows.Next() {
 			var coll string
 			var count int
@@ -1525,20 +1529,24 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 			byCollection = append(byCollection, map[string]interface{}{"collection": coll, "count": count})
 		}
 		stats["by_collection"] = byCollection
+	} else {
+		stats["by_collection"] = []map[string]interface{}{}
 	}
 
-	// By tag (top 20)
+	// By tag (top 20) — applies directiveExcl so directive-derived
+	// tags (e.g. prime_directive, directive) don't pollute the
+	// ordinary-memory tag distribution.
 	tagRows, err := dm.db.Query(`
 		SELECT json_each.value as tag, COUNT(*) as count
 		FROM memories, json_each(memories.tags)
-		WHERE deleted_at IS NULL
+		WHERE deleted_at IS NULL AND ` + directiveExcl + `
 		GROUP BY json_each.value
 		ORDER BY count DESC
 		LIMIT 20
 	`)
 	if err == nil {
 		defer tagRows.Close()
-		var byTag []map[string]interface{}
+		byTag := []map[string]interface{}{}
 		for tagRows.Next() {
 			var tag string
 			var count int
@@ -1549,17 +1557,19 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 			byTag = append(byTag, map[string]interface{}{"tag": tag, "count": count})
 		}
 		stats["by_tag"] = byTag
+	} else {
+		stats["by_tag"] = []map[string]interface{}{}
 	}
 
-	// Reinforcement distribution
+	// Reinforcement distribution — applies directiveExcl.
 	distRows, err := dm.db.Query(`
 		SELECT reinforcement_count, COUNT(*) as count
-		FROM memories WHERE deleted_at IS NULL
+		FROM memories WHERE deleted_at IS NULL AND ` + directiveExcl + `
 		GROUP BY reinforcement_count ORDER BY reinforcement_count
 	`)
 	if err == nil {
 		defer distRows.Close()
-		var dist []map[string]interface{}
+		dist := []map[string]interface{}{}
 		for distRows.Next() {
 			var rc, count int
 			if err := distRows.Scan(&rc, &count); err != nil {
@@ -1569,10 +1579,18 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 			dist = append(dist, map[string]interface{}{"reinforcement_count": rc, "count": count})
 		}
 		stats["reinforce_dist"] = dist
+	} else {
+		stats["reinforce_dist"] = []map[string]interface{}{}
 	}
 
 	// ── Epistemic Provenance Registry (ISR Telemetry) ──────────────────────
-	// Nested grouping: agent → model/compute → persona
+	// Nested grouping: agent → model/compute → persona. The
+	// directiveExcl predicate must apply here too: the bootstrap
+	// `mpm_ops_init` agent writes the directive rows, and without
+	// the exclusion its registry entry would surface in
+	// `mpm info`'s Database block with `total_memories` /
+	// `active_memories` counts that contradict the
+	// aggregate `total: 0` on a directive-only database.
 	isrRows, err := dm.db.Query(`
 		SELECT COALESCE(json_extract(metadata, '$.provenance.agent'), 'unknown') as agent,
 		       COALESCE(json_extract(metadata, '$.provenance.model'), 'unknown') as model,
@@ -1582,6 +1600,7 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 		       SUM(CASE WHEN weight > 1 THEN 1 ELSE 0 END) as active
 		FROM memories
 		WHERE deleted_at IS NULL
+		  AND ` + directiveExcl + `
 		  AND json_extract(metadata, '$.provenance.agent') IS NOT NULL
 		GROUP BY json_extract(metadata, '$.provenance.agent'),
 		         json_extract(metadata, '$.provenance.model'),
@@ -1647,8 +1666,11 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 				})
 		}
 
-		// Serialize to nested maps for JSON/display compatibility
-		var registry []map[string]interface{}
+		// Serialize to nested maps for JSON/display compatibility.
+		// Initialise as an empty (non-nil) slice so the empty-stats
+		// case marshals to `[]` rather than `null` — JSON consumers
+		// expect a stable list shape.
+		registry := []map[string]interface{}{}
 		for _, a := range agents {
 			var models []map[string]interface{}
 			for _, m := range a.models {
@@ -1678,9 +1700,14 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 			})
 		}
 
-		if len(registry) > 0 {
-			stats["provenance_registry"] = registry
-		}
+		// Always set provenance_registry — even when no ordinary
+		// memories remain. The empty-slice encoding (``[]`` in JSON)
+		// is part of the documented wire shape, not an
+		// "absent means empty" convention. Consumers that look up
+		// the key expect to find a stable list-shaped value.
+		stats["provenance_registry"] = registry
+	} else {
+		stats["provenance_registry"] = []map[string]interface{}{}
 	}
 
 	return stats, nil
