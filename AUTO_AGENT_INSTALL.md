@@ -44,7 +44,7 @@ For the current repository:
 
 | Framework | Adapter(s) | Native integration | Persistent behavioral instruction surface |
 |---|---|---|---|
-| OpenClaw | `openclaw-mpm-memory/` + `openclaw-mpm-auto-mode-persona/` | OpenClaw plugins | `SOUL.md` for the OpenClaw agent behavior; also inspect the current OpenClaw adapter documentation for any host-loaded `AGENTS.md` material |
+| OpenClaw | OpenClaw adapter directories `openclaw-mpm-memory/` + `openclaw-mpm-auto-mode-persona/` (plugin IDs per each `openclaw.plugin.json`; see Section 8) | OpenClaw plugins | `SOUL.md` for the OpenClaw agent behavior; also inspect the current OpenClaw adapter documentation for any host-loaded `AGENTS.md` material |
 | Claude Code | `claude-code-mpm/` | MCP via `mpm-mcp` | `CLAUDE.md` |
 | OpenCode | `opencode-mpm/` | OpenCode plugin using `mpm call` | `AGENTS.md` |
 | Hermes | `hermes-mpm/` | MCP via `mpm-mcp` | `.hermes.md` / `HERMES.md` according to the adapter documentation |
@@ -58,7 +58,9 @@ The shared behavioral protocol is:
 agent_installation/mpm-agent-protocol.md
 ```
 
-Read it before constructing a new framework adapter.
+A human maintainer authoring a future adapter through normal review
+reads it as part of that work. An automated install agent does not
+construct adapters (see Sections 12–13).
 
 ---
 
@@ -215,8 +217,22 @@ The canonical `scripts/install.sh` (the **only** install path; the legacy
 ~/.local/bin/mpm-mcp  ->  ~/.mpm/bin/mpm-mcp    (MCP stdio server)
 ```
 
-`~/.local/bin` is the freedesktop.org-standard user-PATH location and
-is on `PATH` by default in every modern Linux shell (bash, zsh, fish).
+`~/.local/bin` is the conventional per-user executable location.
+
+Many Linux login environments add it to `PATH` automatically when
+present — but only at login time. If the directory is created after
+the current login session starts (which is exactly what happens when
+`scripts/install.sh` creates it mid-session), the current
+shell/session may not gain it automatically. A new login
+session will normally pick it up where the user's login profile or
+distribution configuration already supports it (for example the
+standard `~/.profile` conditional that prepends `$HOME/.local/bin`
+when the directory exists).
+
+Concretely: after a fresh install, the installing shell can still
+resolve `mpm` only via its absolute path until a new login session
+begins. This is expected and is not an install failure.
+
 The symlinks are idempotent — re-running the installer replaces them.
 
 Only these two binaries are symlinked. Internal daemons
@@ -252,8 +268,9 @@ defaults. Mutating these files from an installer is a hostile act
 that creates the exact `PATH`-corruption / shell-state-drift the
 symlink mechanism was designed to prevent.
 
-If `~/.local/bin` is missing from the user's current `PATH` (rare —
-most distros source `/etc/profile.d/` to add it), surface a warning
+If `~/.local/bin` is missing from the user's current `PATH`
+(expected when the directory was created after the current login
+session started — see above), surface a warning
 and instruct the user to add it themselves:
 
 ```bash
@@ -392,22 +409,43 @@ Respect Pi's documented context-file precedence.
 
 ### OpenClaw
 
-OpenClaw currently has **two complementary MPM plugins**:
+OpenClaw currently has **two complementary MPM plugins**, kept in two
+OpenClaw adapter directories:
 
 ```text
-agent_installation/openclaw-mpm-memory/
-agent_installation/openclaw-mpm-auto-mode-persona/
+Adapter directories:
+  agent_installation/openclaw-mpm-memory/
+  agent_installation/openclaw-mpm-auto-mode-persona/
 ```
+
+These directory names exist for repository readability. They are not
+necessarily the identity OpenClaw itself loads or displays. The
+authoritative plugin identity in each case is the `id` field in that
+adapter's `openclaw.plugin.json` manifest (mirrored by the `PLUGIN_ID`
+constant in its `index.js` and used in its `plugins.entries.*` config
+keys) — inspect the manifest before quoting an ID. At the time of
+writing those IDs are:
+
+```text
+Plugin IDs (per openclaw.plugin.json):
+  openclaw-mpm-memory
+  openclaw-mpm-auto-mode-persona
+```
+
+(Do not confuse these with the npm package names such as
+`@openclaw/mpm-memory`, which are a separate namespace.)
 
 They are not interchangeable.
 
-`openclaw-mpm-memory` provides the MPM-backed memory capability plus wake-context/provenance integration.
+The `openclaw-mpm-memory` plugin provides the MPM-backed memory capability plus wake-context/provenance integration.
 
-`openclaw-mpm-auto-mode-persona` provides per-turn mode/persona routing.
+The `openclaw-mpm-auto-mode-persona` plugin provides per-turn mode/persona routing.
 
 Inspect both README files and manifests before installing.
 
-**Wake context** is delivered by `openclaw-mpm-memory` via the
+**Wake context** is delivered by the `openclaw-mpm-memory` plugin
+(plugin ID — adapter directory
+`agent_installation/openclaw-mpm-memory/`) via the
 `session_start` → `agent_turn_prepare` typed-hook chain (returning
 `prependContext`). This is automatic and **does not** require any
 persistent MPM instruction block in `SOUL.md` or `AGENTS.md`. The
@@ -416,6 +454,34 @@ the cache read (in `agent_turn_prepare`) comes from the hook context
 (`ctx.sessionKey`), not from the event payload. The
 `openclaw-mpm-memory/tests/runtime_injection.test.js` regression guard
 pins this contract.
+
+Automatic wake delivery does not remove the behavioral contract.
+Distinguish the two layers defined in Section 2:
+
+```text
+wake-context delivery
+    = runtime/plugin behavior
+    = automatic through the OpenClaw MPM plugin hook chain
+    = the installer MUST NOT duplicate wake-injection instructions
+      into SOUL.md/AGENTS.md to replicate what the hooks already do
+
+behavioral adoption
+    = still required where applicable, covering e.g.:
+      durable persistence expectations (persist during work)
+      skill discovery/use
+      handoff behavior before genuine session closure
+      cross-session source-of-truth rules
+      recovery/fallback behavior (mpm call escape hatch)
+    = governed by the persistent behavioral contract
+      (Section 9; agent_installation/mpm-agent-protocol.md),
+      which controls when/how the agent uses MPM during work
+```
+
+In short: the OpenClaw runtime plugin can provide wake context
+automatically while the persistent behavioral contract still governs
+what the agent does with MPM once it is working. Do not duplicate
+automatic wake-injection instructions unnecessarily, and do not treat
+automatic wake delivery as a reason to skip behavioral adoption.
 
 For OpenClaw's gateway, remember that plugin subprocesses may not inherit the user's interactive PATH. Use the adapter's supported `mpmBin` configuration when required.
 
@@ -536,8 +602,10 @@ tree and is impossible to audit.
 ## Required fail-closed behavior
 
 1. Install/configure MPM core normally (Section 5) so the `mpm` and
-   `mpm-mcp` binaries are available on PATH via the `~/.local/bin`
-   symlinks (Section 6).
+   `mpm-mcp` binaries are installed with the `~/.local/bin`
+   symlinks (Section 6). Note the Section 6 login-timing caveat: the
+   current shell may need the absolute path until a new login session
+   begins.
 2. Print a clear diagnostic to the user:
    ```text
    MPM agent install: FAIL-CLOSED
@@ -579,17 +647,23 @@ the gap and stop, not invent the artifact.
 
 ---
 
-# 13. Store newly created adapter material correctly
+# 13. New framework adapters are maintainer-authored (not installer-created)
 
-If a framework has no existing adapter and new adapter files must be created, keep them under:
+An automated install agent MUST NOT create a new framework adapter.
+Section 12 is the complete policy for the no-adapter case: fail closed,
+install/verify MPM core only, fall back to the canonical `mpm call`
+surface, and report that a hand-authored reviewed adapter is required.
+
+A native integration for a new framework is a hand-authored,
+version-controlled artifact produced by a repository maintainer through
+normal review — never a side effect of running an installation. Such
+work keeps new material under:
 
 ```text
 agent_installation/<framework>/
 ```
 
-Do not scatter them through the root of the repository.
-
-Use a structure consistent with the existing adapters, for example:
+with a structure consistent with the existing adapters, for example:
 
 ```text
 agent_installation/<framework>/
@@ -600,9 +674,14 @@ agent_installation/<framework>/
         <installer>.py
 ```
 
-Only add plugin/extension source if a genuine native integration has been implemented.
+and ships only when a genuine native integration has been implemented
+and reviewed. This section exists solely to orient a human maintainer
+doing that future work; it is not an instruction to any automated
+installer, and it does not authorise one to write repository
+integration material.
 
-The root `AUTO_AGENT_INSTALL.md` should remain the generic dispatcher, not a dumping ground for framework-specific code.
+The root `AUTO_AGENT_INSTALL.md` remains the generic dispatcher, not a
+dumping ground for framework-specific code.
 
 ---
 
@@ -621,7 +700,21 @@ retired tool names are absent from current instructions
 
 For MCP integrations, inspect the actual current tool registry where practical.
 
-The current default initial MCP surface (the model-facing one at session start, with `MPM_EXPOSE_ALL_TOOLS` unset) exposes **3 tools**: `mpm_memory`, `mpm_context`, `mpm_help`. The full internal substrate surface is **22 tools** (21 Registry entries + the `mpm_help` discovery closure registered via cmd/mpm-mcp); reachable on hosts that set `MPM_EXPOSE_ALL_TOOLS=1` in their MCP env block, or via the universal `mpm call <tool> --payload '…'` CLI fallback. Do not hard-code either number into new framework-specific documentation if the integration can derive tool information from the current registry.
+The current default initial MCP surface (the model-facing one at session start, with `MPM_EXPOSE_ALL_TOOLS` unset) exposes **3 tools**: `mpm_memory`, `mpm_context`, `mpm_help`. The full internal substrate surface is **22 tools** (21 Registry entries + the `mpm_help` discovery closure registered via cmd/mpm-mcp); reachable on hosts that set `MPM_EXPOSE_ALL_TOOLS=1` in their MCP env block, or via the universal `mpm call <tool> --payload '…'` CLI fallback.
+
+Implementation sources (authoritative; re-derive the numbers from
+these rather than trusting this paragraph): the 3-tool default is
+`defaultCoreTools` filtered by `coreToolFilter` in `cmd/mpm-mcp/main.go`;
+the 21 Registry entries live in `internal/core/tools/registry_list.go`
+(pinned by `TestCompactSurface_FullRegistryPreserved` with `want = 21`);
+`mpm_help` is registered as a closure in `cmd/mpm-mcp/tools.go`
+(`makeHelpHandler` iterates the live Registry, so its `list` output
+derives the count at runtime instead of hard-coding it).
+
+Do not hard-code either number into new framework-specific
+documentation or adapter logic: derive the surface from the live
+Registry (via `mpm_help action=list` or `tools.ByName`) so future
+Registry growth does not silently desynchronise downstream adapters.
 
 ---
 
@@ -666,6 +759,13 @@ the agent's persistent instruction file does not contain the MPM contract
 Check the installed working file.
 
 Confirm that it contains the correct current managed section and refers to the current tool surface.
+
+(For OpenClaw, apply the Section 8 distinction: automatic
+wake-context delivery via the plugin hook chain satisfies the wake
+layer, while the behavioral contract — persistence, skill discovery,
+handoff, source-of-truth, recovery — is still adopted where
+applicable. Do not demand a duplicated wake-injection block as proof
+of adoption.)
 
 For a fresh agent session, verify at least:
 
@@ -761,7 +861,7 @@ retired mpm_session tool registrations
 obsolete lifecycle hooks
 ```
 
-The runtime's current session continuity contract uses the split handoff/scratchpad surfaces at the substrate layer. On the model-facing MCP surface, handoff is reached through `mpm_context action=write_handoff` (the substrate `mpm_handoff` tool is no longer in the default initial 3-tool surface; see `docs/CONTEXT_EXPOSURE.md` for the compact-surface architecture).
+The runtime's current session continuity contract uses the split handoff/scratchpad surfaces at the substrate layer. On the model-facing MCP surface, handoff is reached through `mpm_context action=write_handoff` (the substrate `mpm_handoff` tool is no longer in the default initial 3-tool surface; see Section 14 for the authoritative implementation sources).
 
 The old `mpm_session` name may still exist in compatibility/history code. That is not a reason to expose it as a current agent tool.
 
@@ -794,7 +894,11 @@ Do not print secrets.
 
 Normally this document is for installing MPM into the user's environment, not for altering the project source.
 
-If a new unsupported framework adapter is genuinely created, then repository changes are expected.
+An automated install agent must not create repository integration
+material for an unsupported framework (see Sections 12–13). If
+repository changes are nevertheless expected, that means a human
+maintainer is hand-authoring a reviewed adapter outside this
+install flow — not that the installer performed one.
 
 Before writing:
 
@@ -814,7 +918,7 @@ The installation is complete only when all applicable items are true:
 
 ```text
 [ ] Current agent/framework identified
-[ ] Matching adapter found, or new adapter created under agent_installation/<framework>/
+[ ] Matching adapter found under agent_installation/, or no-adapter fail-closed path followed (core only + mpm call fallback; no adapter created)
 [ ] Existing adapter documentation inspected
 [ ] MPM core installed/built
 [ ] Required binaries available
@@ -872,17 +976,30 @@ identify current agent
 inspect agent_installation/
         |
         +---- adapter exists ----> use it
+        |                             |
+        |                             v
+        |                      install behavioral contract
+        |                             |
+        |                             v
+        |                      configure integration
+        |                             |
+        |                             v
+        |                      verify real runtime
         |
-        +---- no adapter --------> create a minimal documented adapter
-                                      |
-                                      v
-                               install behavioral contract
-                                      |
-                                      v
-                               configure integration
-                                      |
-                                      v
-                               verify real runtime
+        +---- no adapter --------> FAIL CLOSED (Section 12)
+                                       |
+                                       v
+                                install/verify MPM core only
+                                       |
+                                       v
+                                expose/use canonical `mpm call`
+                                fallback where appropriate
+                                       |
+                                       v
+                                report that a hand-authored
+                                reviewed adapter is required
+                                (do NOT create repository
+                                integration material)
 ```
 
 The completed installation should leave the user with both:
