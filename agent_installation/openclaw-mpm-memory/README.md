@@ -19,35 +19,69 @@ into every OpenClaw session via OpenClaw's native hook API.
 ## Install
 
 ```bash
-# 1. Link the plugin (dev / alpha-MV; no published tarball yet)
-openclaw plugins install ./openclaw-mpm-memory --link
+# 0. Prerequisites: install MPM core (root scripts/install.sh) and OpenClaw.
+#    The adapter installer below verifies both are present and will point
+#    you at scripts/install.sh if MPM is missing.
 
-# 2. Install/verify MPM on PATH (idempotent — skips if already installed)
+# 1. Run the adapter installer (CWD-independent).
 ./install.sh
+```
 
-# 3. Enable the plugin entry
-openclaw config set plugins.entries.openclaw-mpm-memory.enabled true
+`./install.sh` is the canonical entry point and performs the full
+OpenClaw-specific setup in the correct order:
 
-# 4. Switch the slot to this plugin
-openclaw config set plugins.slots.memory openclaw-mpm-memory
+```text
+1. Locate MPM via canonical paths:
+     $HOME/.mpm/bin/mpm            (canonical install root)
+     $HOME/.local/bin/mpm          (canonical user symlink)
+     command -v mpm                (last-resort PATH lookup)
+   Bare `mpm` resolution is intentionally NOT the first check —
+   on a freshly-created ~/.local/bin the current login session may
+   not have it on PATH yet. The resolved binary is verified by
+   absolute path before any plugin config is written.
 
-# 5. (Optional, recommended) Silence memory-core
+2. Install/link this plugin into OpenClaw:
+     openclaw plugins install <adapter-dir> --link
+   The path passed to `plugins install` is resolved from BASH_SOURCE[0],
+   so the script works from any current working directory.
+
+3. Enable the plugin entry:
+     openclaw plugins enable openclaw-mpm-memory
+
+4. Persist plugin config (always written together):
+     config.mpmBin                                 = <absolute path to mpm>
+     hooks.allowConversationAccess                 = true
+     hooks.allowPromptInjection                    = true
+   Both hook flags are required: `agent_turn_prepare` falls in
+   OpenClaw's `promptInjectionHookNameSet` (needs
+   `allowPromptInjection=true`) AND in `conversationHookNameSet`
+   (needs `allowConversationAccess=true` for non-bundled plugins).
+   Without both, the plugin runs but wake-context injection is
+   silently blocked at register time.
+
+5. Switch plugins.slots.memory to openclaw-mpm-memory.
+
+6. Surface (not auto-apply) the recommended memory-core silence one-liner.
+
+7. Bounded safe gateway restart (`openclaw gateway restart --safe --wait <bounded>`).
+   Skipped silently if no gateway service exists (Docker / minimal env).
+
+8. Verify (openclaw plugins inspect + plugins list).
+
+Re-running `./install.sh` is safe and idempotent. If the OpenClaw
+CLI is not on PATH, the installer prints the exact next step rather
+than partially configuring the plugin.
+
+### Memory-core coexistence
+
+`./install.sh` does **not** modify `plugins.entries.memory-core.enabled`.
+That is an operator policy decision: some installs keep both the
+stock memory-core and this plugin running and rely on
+`plugins.slots.memory` to direct which one serves. The installer
+prints the recommended one-liner at the end:
+
+```bash
 openclaw config set plugins.entries.memory-core.enabled false
-
-# 6. (Required since 0.1.3) Opt in to typed hooks so wake-context injection works
-# Both flags are required: `agent_turn_prepare` falls in OpenClaw's
-# `promptInjectionHookNameSet` (requires `allowPromptInjection=true`) AND in
-# `conversationHookNameSet` (requires `allowConversationAccess=true` for
-# non-bundled plugins). Without these, the plugin runs but the typed hooks
-# are silently blocked at register time.
-openclaw config set plugins.entries.openclaw-mpm-memory.hooks.allowConversationAccess true
-openclaw config set plugins.entries.openclaw-mpm-memory.hooks.allowPromptInjection true
-
-# 7. Restart the gateway
-openclaw gateway restart
-
-# 8. Verify — should return ok:true with zero findings
-openclaw doctor --lint --only core/doctor/memory-search --json
 ```
 
 ## Wake Context Injection
@@ -230,14 +264,16 @@ spawn mpm ENOENT` at gateway boot, and every `memory_search` /
 **Fix:** set `mpmBin` to the absolute path of the `mpm` binary:
 
 ```bash
-openclaw config set plugins.entries.openclaw-mpm-memory.config.mpmBin "$(command -v mpm)"
+openclaw config set plugins.entries.openclaw-mpm-memory.config.mpmBin "<absolute path to mpm>"
 openclaw gateway restart
 ```
 
-The bundled `install.sh` does this automatically when an `openclaw` CLI is
-on PATH, so fresh installs are unaffected. This hit was filed and fixed in
-0.1.3 (2026-09-02) after a clean reinstall on a host where the interactive
-shell PATH differed from the systemd unit's PATH.
+The bundled `./install.sh` discovers MPM through the canonical install
+paths (`$HOME/.mpm/bin/mpm` then `$HOME/.local/bin/mpm` then
+`command -v mpm`) and writes the resolved absolute path into
+`mpmBin` automatically. Fresh installs are unaffected. This hit was
+filed and fixed in 0.1.3 (2026-09-02) after a clean reinstall on a host
+where the interactive shell PATH differed from the systemd unit's PATH.
 
 ## Failure Modes (All Fail-Open)
 
