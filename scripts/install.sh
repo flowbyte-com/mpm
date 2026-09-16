@@ -731,17 +731,29 @@ mode_install() {
     phase_host_integration
     phase_validate
     note "INSTALL COMPLETE"
+    # Use the canonical path so the next-steps commands are runnable
+    # in the installer's own shell (where ~/.local/bin may not yet
+    # be on PATH — see phase_symlinks' on-PATH warning). Defining
+    # `cli` once avoids backslash-escape gymnastics inside the log
+    # double-quoted strings below.
+    local cli="$PREFIX/bin/mpm"
     log "  Mode:       USER-SPACE (no sudo, no /var/lib/mpm)"
-    log "  CLI:        $PREFIX/bin/mpm (wrapper) -> $PREFIX/bin/mpm.real"
+    log "  CLI:        $cli (wrapper) -> $PREFIX/bin/mpm.real"
     log "  PATH:       $LOCAL_BIN/mpm + $LOCAL_BIN/mpm-mcp  (via symlinks)"
     log "  Daemon:     $(systemctl --user is-active $SERVICE_NAME) ($SERVICE_DST)"
     log "  Logs:       journalctl --user -u $SERVICE_NAME -f"
     log "  Data root:  $DATA_ROOT"
     log ""
     log "next steps (manual):"
-    log "  mpm ops init directives   # seed prime directives (cognitive rules)"
-    log "  mpm status                # verify DB reachable"
-    log "  mpm call read_wake_context   # first agent tool call"
+    log "  $cli status                # verify DB reachable"
+    log "  $cli call read_wake_context  # first agent tool call"
+    log ""
+    log "tip: ~/.local/bin/mpm is on PATH for NEW shells (XDG default);"
+    log "     for the installer's shell right now, use $cli directly"
+    log "     until you start a fresh shell. mpm ops init directives is"
+    log "     NOT listed because phase_validate already confirmed the prime"
+    log "     directives are present; the seeding command appears only when"
+    log "     validation detects they are missing."
     log ""
     log "configuration (required for LLM-backed features — synthesis, critic, review):"
     log "  config file:    $DATA_ROOT/mpm_config.json (canonical; checked first)"

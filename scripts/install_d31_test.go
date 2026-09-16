@@ -374,3 +374,102 @@ func TestInstallSh_PATHShadowDetection(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallSh_NextStepsUseCanonicalPath pins the post-install
+// completion guidance so it is internally consistent with the rest
+// of install.sh's contract:
+//
+//   - The success-path "next steps" commands must use the canonical
+//     binary path (resolved via a `cli="$PREFIX/bin/mpm"` local var,
+//     which renders as e.g. `/home/v/.mpm/bin/mpm`), not bare `mpm`.
+//     Bare `mpm` only resolves in shells where ~/.local/bin is already
+//     on PATH; on a fresh Linux Mint / Ubuntu host the installer ran
+//     in a non-login shell where that directory is NOT yet on PATH.
+//     The on-PATH warning was emitted during phase_symlinks, but the
+//     next-steps message itself must be runnable in that same shell
+//     — otherwise the user copies a command, pastes it, and gets
+//     `mpm: command not found`.
+//
+//   - The "mpm ops init directives" line must NOT appear in the
+//     success-path next-steps. phase_validate already emits a
+//     warn-only hint with the canonical path when directives are
+//     absent (so the seeding command is reachable exactly when
+//     needed). Printing it unconditionally after a successful
+//     install contradicts the validation step's
+//     "✓ prime directives present" status and prompts a redundant
+//     command.
+//
+// The test accepts any of three acceptable forms in install.sh
+// (whichever the current style uses): `"$PREFIX/bin/mpm"`,
+// `\"$PREFIX/bin/mpm\"` (escaped inside a double-quoted log arg),
+// or `$cli` (local-var indirection). All three render to the same
+// runnable canonical path. We just need to ensure the bare `mpm`
+// form does NOT appear in the next-steps block.
+func TestInstallSh_NextStepsUseCanonicalPath(t *testing.T) {
+	data, err := os.ReadFile("../scripts/install.sh")
+	if err != nil {
+		if data, err = os.ReadFile("install.sh"); err != nil {
+			t.Fatalf("read install.sh: %v", err)
+		}
+	}
+	body := string(data)
+
+	// Positive: the next-steps block must contain at least one
+	// canonical-path form for each verification command. Accept
+	// any of the three idioms the script may use; the contract is
+	// "rendered output is runnable", not "exact variable name".
+	canonicalForms := []string{
+		// Most common: a local `cli="$PREFIX/bin/mpm"` variable.
+		`$cli status`,
+		`$cli call read_wake_context`,
+		// Inline (no local var): escaped quotes inside a double-quoted
+		// log string.
+		`\"$PREFIX/bin/mpm\" status`,
+		`\"$PREFIX/bin/mpm\" call read_wake_context`,
+		// Inline (no local var, no escaping needed because the path
+		// is the start of a shell command, not inside a log arg).
+		`"$PREFIX/bin/mpm" status`,
+		`"$PREFIX/bin/mpm" call read_wake_context`,
+	}
+	statusFound := false
+	readWakeFound := false
+	for _, form := range canonicalForms {
+		if strings.Contains(body, form) {
+			if strings.Contains(form, "status") {
+				statusFound = true
+			}
+			if strings.Contains(form, "read_wake_context") {
+				readWakeFound = true
+			}
+		}
+	}
+	if !statusFound {
+		t.Errorf("install.sh next-steps must contain a canonical-path form of `... status` (runnable in any shell); none of the acceptable forms were found")
+	}
+	if !readWakeFound {
+		t.Errorf("install.sh next-steps must contain a canonical-path form of `... call read_wake_context` (runnable in any shell); none of the acceptable forms were found")
+	}
+
+	// Negative: the pre-fix bare-mpm forms MUST NOT appear as
+	// next-steps lines. (The bare `mpm` string is allowed in
+	// comments, conditional seeding hints, and the phase_symlinks
+	// PATH-shadow detection — we only pin the next-steps block.)
+	preFixNextSteps := []string{
+		`log "  mpm status                # verify DB reachable"`,
+		`log "  mpm call read_wake_context   # first agent tool call"`,
+		`log "  mpm ops init directives   # seed prime directives (cognitive rules)"`,
+	}
+	for _, bad := range preFixNextSteps {
+		if strings.Contains(body, bad) {
+			t.Errorf("install.sh contains pre-fix bare-mpm form %q; next-steps must use the canonical binary path and the seeding line is redundant after a successful validation", bad)
+		}
+	}
+
+	// Positive (preservation): the conditional seeding hint that
+	// the validation step emits WHEN directives are missing must
+	// still exist. That's the only place the seeding command
+	// belongs — visible exactly when needed.
+	if !strings.Contains(body, "ops init directives") {
+		t.Errorf("install.sh must preserve the conditional seeding hint (phase_validate emits it when directives are missing); not found")
+	}
+}
