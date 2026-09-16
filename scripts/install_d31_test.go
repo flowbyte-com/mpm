@@ -227,6 +227,114 @@ func TestInstallSh_DataDirMode0700(t *testing.T) {
 //   - `readlink -f`
 //   - `expected canonical install` (warning label)
 //   - `will NOT be removed automatically` (safety contract)
+//
+// TestInstallSh_DieHelperMessageContract pins the die() helper
+// contract. The helper must:
+//   - print the FIRST argument verbatim as the error message
+//   - exit with the SECOND argument as the exit code (default 1)
+//
+// Pre-fix the helper was `die() { err "$*"; exit "${2:-1}"; }` which
+// joined ALL positional arguments with a space, leaking the exit
+// code into the rendered message:
+//
+//	die "Go not found in PATH" 1
+//	→ ERROR: Go not found in PATH 1
+//	→ exit 1
+//
+// (The "1" at the end of the message was the trailing exit-code
+// argument, joined by "$*".) The fix is `$1` for the message and
+// `${2:-1}` for the exit code. This test pins both halves so a
+// future refactor can't reintroduce either bug.
+//
+// Required literal: `die()  { err "$1"; exit "${2:-1}"; }` (with
+// the double-space style match so this isn't tied to whitespace
+// formatting decisions in unrelated edits).
+func TestInstallSh_DieHelperMessageContract(t *testing.T) {
+	data, err := os.ReadFile("../scripts/install.sh")
+	if err != nil {
+		if data, err = os.ReadFile("install.sh"); err != nil {
+			t.Fatalf("read install.sh: %v", err)
+		}
+	}
+	body := string(data)
+
+	// Required: the post-fix helper form must appear. Use the exact
+	// spacing of the current style (double space between `die()` and
+	// `{`) so this test is stable against cosmetic edits that don't
+	// change the helper's semantics.
+	const fixedHelper = `die()  { err "$1"; exit "${2:-1}"; }`
+	if !strings.Contains(body, fixedHelper) {
+		t.Errorf("install.sh must contain the fixed die helper %q (use $1 for message, ${2:-1} for exit code); not found", fixedHelper)
+	}
+
+	// Negative: the pre-fix broken form must NOT appear. If a future
+	// refactor reintroduces `"$*"` as the message, the trailing exit
+	// code will leak back into the rendered output.
+	const brokenHelper = `die()  { err "$*"; exit "${2:-1}"; }`
+	if strings.Contains(body, brokenHelper) {
+		t.Errorf("install.sh contains the pre-fix die helper %q (uses $* which joins all args into the message — leaks exit code); must use $1 for message", brokenHelper)
+	}
+}
+
+// TestInstallSh_GoDiscoveryFallback pins the installer's Go discovery
+// behaviour to mirror the Makefile (Makefile:53). install.sh must:
+//  1. Prefer Go found via PATH (`command -v go`).
+//  2. Fall back to `/usr/local/go/bin/go` when not on PATH but the
+//     binary is executable. This is the standard install path on
+//     Ubuntu / Linux Mint / Debian and many CI images — Go is
+//     extracted to /usr/local/go but the directory is not on PATH
+//     for non-login shells.
+//  3. Fail only if NEITHER location has a usable `go`.
+//  4. Store the resolved executable in a `GO_BIN` variable and use
+//     it consistently (no second `command -v go` lookup that could
+//     disagree with the first).
+//
+// Pre-fix install.sh only did `command -v go`, which fails on a
+// fresh Mint/Ubuntu install where `/usr/local/go/bin/go` exists but
+// isn't yet on PATH. The Makefile already handled this case; the
+// installer was the lagging surface.
+func TestInstallSh_GoDiscoveryFallback(t *testing.T) {
+	data, err := os.ReadFile("../scripts/install.sh")
+	if err != nil {
+		if data, err = os.ReadFile("install.sh"); err != nil {
+			t.Fatalf("read install.sh: %v", err)
+		}
+	}
+	body := string(data)
+
+	// Positive 1: the fallback path must appear at least once with
+	// the standard location. The exact form may vary (test -x,
+	// [ -x ], command -v fallback chain) but the literal path must
+	// be present so a future refactor can't drop the fallback.
+	if !strings.Contains(body, "/usr/local/go/bin/go") {
+		t.Errorf("install.sh must include the /usr/local/go/bin/go fallback path (matches Makefile:53); not found")
+	}
+
+	// Positive 2: a GO_BIN variable must be defined and used. The
+	// variable name is part of the contract — the message says
+	// "resolved the executable into a variable". We accept either
+	// `GO_BIN=` or `${GO_BIN}` form to be resilient to quoting
+	// style changes.
+	hasDef := strings.Contains(body, "GO_BIN=")
+	hasUse := strings.Contains(body, "${GO_BIN}") || strings.Contains(body, "$GO_BIN")
+	if !hasDef || !hasUse {
+		t.Errorf("install.sh must define and use a GO_BIN variable (def=%v, use=%v); expected both halves of the contract", hasDef, hasUse)
+	}
+
+	// Negative: the pre-fix form `command -v go >/dev/null 2>&1 || die ...`
+	// MUST NOT appear as the SOLE prereq check. A two-line form that
+	// resolves via a variable is fine; the bare PATH-only check that
+	// fails on /usr/local/go installs must be gone.
+	barePreflightOnly := []string{
+		`command -v go >/dev/null 2>&1 || die "Go not found in PATH" 1`,
+	}
+	for _, bad := range barePreflightOnly {
+		if strings.Contains(body, bad) {
+			t.Errorf("install.sh contains the pre-fix Go-only check %q; must accept /usr/local/go/bin/go as a fallback", bad)
+		}
+	}
+}
+
 func TestInstallSh_PATHShadowDetection(t *testing.T) {
 	data, err := os.ReadFile("../scripts/install.sh")
 	if err != nil {

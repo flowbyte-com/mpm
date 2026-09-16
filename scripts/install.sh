@@ -101,7 +101,7 @@ SERVICE_DST=""
 log()  { printf '%s %s\n' "$LOG_PREFIX" "$*" >&2; }
 warn() { printf '%s WARN: %s\n' "$LOG_PREFIX" "$*" >&2; }
 err()  { printf '%s ERROR: %s\n' "$LOG_PREFIX" "$*" >&2; }
-die()  { err "$*"; exit "${2:-1}"; }
+die()  { err "$1"; exit "${2:-1}"; }
 note() { printf '\n%s ===== %s =====\n' "$LOG_PREFIX" "$*" >&2; }
 
 # ---------- helpers ----------
@@ -229,13 +229,28 @@ inspect_existing_state() {
 }
 
 # ---------- preflight ----------
+# Resolve go consistently with the Makefile (Makefile:53): prefer
+# `$PATH`, fall back to the canonical Go install location. Fresh
+# Linux Mint / Ubuntu installs and many CI images have Go extracted
+# to /usr/local/go but the directory isn't on PATH for non-login
+# shells. Requiring the user to mutate PATH just to run the
+# installer would be hostile; mirror the Makefile's resolution
+# instead.
+GO_BIN=""
+if command -v go >/dev/null 2>&1; then
+    GO_BIN="$(command -v go)"
+elif [ -x /usr/local/go/bin/go ]; then
+    GO_BIN="/usr/local/go/bin/go"
+fi
+export GO_BIN
+
 check_prereqs() {
     log "checking prerequisites..."
-    command -v go >/dev/null 2>&1 || die "Go not found in PATH" 1
+    [ -n "$GO_BIN" ] || die "Go not found in PATH or at /usr/local/go/bin/go" 1
     command -v systemctl >/dev/null 2>&1 || die "systemctl not found (systemd required)" 1
     [ -d "$PROJECT_ROOT" ] || die "project root not found: $PROJECT_ROOT" 1
     [ -f "$PROJECT_ROOT/Makefile" ] || die "Makefile not found in $PROJECT_ROOT" 1
-    log "  ✓ go:       $(command -v go)"
+    log "  ✓ go:       $GO_BIN"
     log "  ✓ systemd:  present"
     log "  ✓ project:  $PROJECT_ROOT"
 }

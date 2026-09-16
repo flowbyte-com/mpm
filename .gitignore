@@ -190,6 +190,7 @@ audit.md
 docs/audit-*.md
 
 # Local agent config + reference corpora — never tracked.
+.codex/
 .opencode/
 reference/
 CLAUDE.md
