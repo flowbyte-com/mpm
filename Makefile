@@ -249,7 +249,8 @@ refresh-installed:
 	    --snippet $(AGENT_INSTALL_DIR)/mpm-claude-code/templates/CLAUDE.md.snippet \
 	    || { echo "    FAIL: Claude Code refresh failed" >&2; exit 3; }
 	@echo ""
-	@echo "    [3/N] OpenCode: refreshing $(HOME)/.config/opencode/AGENTS.md"
+	@echo "    [3/N] OpenCode: refreshing install + AGENTS.md"
+	@bash $(AGENT_INSTALL_DIR)/mpm-opencode/install.sh || { echo "    FAIL: OpenCode install failed" >&2; exit 4; }
 	@python3 $(AGENT_INSTALL_DIR)/mpm-opencode/scripts/install_agents_instructions.py \
 	    --scope user \
 	    --target $(HOME)/.config/opencode/AGENTS.md \

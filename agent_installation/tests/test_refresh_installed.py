@@ -80,6 +80,15 @@ class RefreshInstalledTargetRegistered(unittest.TestCase):
             "refresh-installed recipe must invoke install_claude_instructions.py",
         )
 
+    def test_recipe_invokes_opencode_install_sh(self):
+        # mpm-opencode's install.sh performs the namespace-refresh
+        # migration (opencode.jsonc stale entry → canonical path) plus
+        # the dist/ rebuild. refresh-installed must invoke it.
+        self.assertIn(
+            "mpm-opencode/install.sh", self.recipe_body,
+            "refresh-installed recipe must invoke mpm-opencode/install.sh for namespace refresh",
+        )
+
     def test_recipe_invokes_opencode_and_pi_installer(self):
         # OpenCode and Pi share the same installer filename but live in
         # different adapter directories — both invocations should appear.

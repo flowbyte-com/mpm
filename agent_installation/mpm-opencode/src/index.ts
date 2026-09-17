@@ -336,6 +336,16 @@ async function pingHealth(bin: string): Promise<HealthCheckResult> {
  * Emit a loud warning to the OpenCode boot log. The Plugin contract
  * returns Promise<Hooks>; we don't have a logger reference, so we
  * use console.warn which surfaces in the standard OpenCode log.
+ *
+ * Warning contract (2026-09-17 follow-up):
+ *   The plugin resolves the MPM binary ONCE at module load and caches
+ *   it for the lifetime of the process. Per-call tools still spawn
+ *   the resolved binary (which is fine when resolution succeeded),
+ *   but tools WILL NOT auto-recover during the same process if MPM
+ *   is installed AFTER OpenCode already booted. The warning makes
+ *   this explicit so the operator is not surprised by the failure.
+ *   Restart OpenCode (or the affected workspace) after installing
+ *   MPM to pick up the canonical binary.
  */
 function emitBootWarning(bin: string, reason: string): void {
 	// List the actual discovery paths we attempted so the operator can
@@ -345,7 +355,7 @@ function emitBootWarning(bin: string, reason: string): void {
 	// by resolveMpmBinary() above.
 	const lines = [
 		``,
-		`⚠ mpm-opencode BOOT WARNING: mpm health check failed`,
+		`⚠ mpm-opencode BOOT WARNING: mpm could not be resolved at OpenCode startup`,
 		`  reason: ${reason}`,
 		`  resolved mpm: ${bin}`,
 		`  discovery audit:`,
@@ -355,7 +365,10 @@ function emitBootWarning(bin: string, reason: string): void {
 				(a.resolved ? `, resolved=${a.resolved}` : "") +
 				")",
 		),
-		`  tools will fail-open on each call until mpm is reachable.`,
+		`  action: install/repair MPM at one of the paths above, then restart OpenCode.`,
+		`  note: tools fail-open on each call (soft error envelope) until mpm is reachable.`,
+		`  note: this process will not auto-rediscover mpm if it is installed later —`,
+		`        the resolved binary is cached at module load.`,
 		``,
 	];
 	for (const line of lines) console.warn(line);

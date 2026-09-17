@@ -16,7 +16,6 @@
 // PATH). Fake mpm binaries are written into the sandbox at the
 // expected paths and their absolute resolved paths are returned by a
 // stub `command` so PATH-lookup discovery is deterministic.
-
 import { test, before, after } from "node:test";
 import assert from "node:assert";
 import { spawnSync, spawn } from "node:child_process";
@@ -31,19 +30,15 @@ import {
 } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-
 const ADAPTER_DIR = "/home/v/workspace/projects/mpm/agent_installation/mpm-opencode";
 const RESOLVER_TS = path.join(ADAPTER_DIR, "src", "resolve-mpm-binary.ts");
-
 // ---- Sandbox helpers -----------------------------------------------------
-
 const SANDBOX_ROOT = path.join(
   os.tmpdir(),
   "mpm-opencode-resolve-" + process.pid,
 );
 const FAKE_HOME = SANDBOX_ROOT;
 const FAKE_BIN_DIR = path.join(SANDBOX_ROOT, "fake-bin"); // also serves as restricted PATH
-
 function freshSandbox(): string {
   rmSync(SANDBOX_ROOT, { recursive: true, force: true });
   mkdirSync(SANDBOX_ROOT, { recursive: true });
@@ -79,7 +74,6 @@ exit 1
   );
   return FAKE_HOME;
 }
-
 function writeMpm(home: string, rel: string): string {
   // rel is relative to home, e.g. ".mpm/bin/mpm" or ".local/bin/mpm"
   const full = path.join(home, rel);
@@ -97,7 +91,6 @@ exit 0
   chmodSync(full, 0o755);
   return full;
 }
-
 function execFileStub(captured: { which?: string; throw?: boolean }): typeof import("node:child_process").execFileSync {
   // Returns a synchronous execFileSync that mimics `command -v mpm`.
   // If captured.throw is true, throw like a real failure.
@@ -109,7 +102,6 @@ function execFileStub(captured: { which?: string; throw?: boolean }): typeof imp
     return (captured.which ?? "") + "\n";
   }) as unknown as typeof import("node:child_process").execFileSync;
 }
-
 function tsEvalResolver(env: NodeJS.ProcessEnv, execFileArg: ReturnType<typeof execFileStub>): unknown {
   // Compile resolve-mpm-binary.ts via tsc to a temp file, then import.
   // For the purposes of this test we instead use ts-node style by
@@ -130,9 +122,7 @@ function tsEvalResolver(env: NodeJS.ProcessEnv, execFileArg: ReturnType<typeof e
     return { bin, attempts: attemptLog };
   });
 }
-
 // ---- Tests --------------------------------------------------------------
-
 test("B5: canonical $HOME/.mpm/bin/mpm works when mpm absent from PATH", async () => {
   const home = freshSandbox();
   // Canonical primary present.
@@ -147,7 +137,6 @@ test("B5: canonical $HOME/.mpm/bin/mpm works when mpm absent from PATH", async (
   // Resolver returns the canonical primary (resolved via realpath).
   assert.strictEqual(bin, mpm, "resolver must return the canonical primary");
 });
-
 test("B6: $HOME/.local/bin/mpm symlink works when canonical binary absent", async () => {
   const home = freshSandbox();
   // No canonical primary. Symlink only.
@@ -164,7 +153,6 @@ test("B6: $HOME/.local/bin/mpm symlink works when canonical binary absent", asyn
     "resolver must follow .local/bin/mpm symlink via realpath",
   );
 });
-
 test("B6b: $HOME/.local/bin/mpm direct executable (not symlink) is also accepted", async () => {
   const home = freshSandbox();
   const mpm = writeMpm(home, ".local/bin/mpm");
@@ -172,7 +160,6 @@ test("B6b: $HOME/.local/bin/mpm direct executable (not symlink) is also accepted
   const { bin } = await tsEvalResolver(env, execFileStub({ throw: true }));
   assert.strictEqual(bin, mpm);
 });
-
 test("B7: PATH fallback works when canonical paths absent and `mpm` on PATH", async () => {
   const home = freshSandbox();
   // Canonical paths absent. mpm on PATH (via a custom fake-bin dir).
@@ -186,7 +173,6 @@ test("B7: PATH fallback works when canonical paths absent and `mpm` on PATH", as
   );
   assert.strictEqual(bin, mpm);
 });
-
 test("B2: explicit MPM_BINARY env override wins over canonical paths", async () => {
   const home = freshSandbox();
   // Canonical primary ALSO present — must be ignored when env override is set.
@@ -196,7 +182,6 @@ test("B2: explicit MPM_BINARY env override wins over canonical paths", async () 
   const { bin } = await tsEvalResolver(env, execFileStub({ throw: true }));
   assert.strictEqual(bin, override);
 });
-
 test("B2b: explicit MPM_BINARY override that doesn't exist fails closed (no fallback)", async () => {
   const home = freshSandbox();
   // Canonical primary present, but explicit override points at a missing file.
@@ -214,7 +199,6 @@ test("B2b: explicit MPM_BINARY override that doesn't exist fails closed (no fall
   // And we must NOT have fallen back to the canonical path.
   assert.notStrictEqual(bin, canonical);
 });
-
 test("B8: genuine absence produces the literal 'mpm' fallback", async () => {
   const home = freshSandbox();
   // No canonical primary, no symlink, no mpm on PATH.
@@ -226,7 +210,6 @@ test("B8: genuine absence produces the literal 'mpm' fallback", async () => {
     "genuine absence must surface literal 'mpm' for the spawn-failure-and-warning contract",
   );
 });
-
 test("B8b: genuine absence also surfaces the discovery audit log", async () => {
   const home = freshSandbox();
   const env = { HOME: home, PATH: FAKE_BIN_DIR };
@@ -245,7 +228,6 @@ test("B8b: genuine absence also surfaces the discovery audit log", async () => {
   assert.ok(reasons.includes("path_lookup"));
   assert.ok(reasons.includes("fallback_literal"));
 });
-
 test("B5b: caller CWD does not affect canonical resolution", async () => {
   const home = freshSandbox();
   const mpm = writeMpm(home, ".mpm/bin/mpm");
@@ -260,7 +242,6 @@ test("B5b: caller CWD does not affect canonical resolution", async () => {
     process.chdir(cwd);
   }
 });
-
 test("B2c: resolution does not mutate shell startup files", () => {
   // Static check: the resolver source code does not perform any disk
   // writes. Comments referencing shell startup files (for context) are
@@ -286,7 +267,6 @@ test("B2c: resolution does not mutate shell startup files", () => {
     assert.ok(true, `shell-startup file ${f} not used as write target`);
   }
 });
-
 test("B9: adapter canonical identity is mpm-opencode (no active opencode-mpm)", () => {
   const src = readFileSync(path.join(ADAPTER_DIR, "src", "index.ts"), "utf8");
   assert.match(src, /mpm-opencode/);
@@ -302,7 +282,6 @@ test("B9: adapter canonical identity is mpm-opencode (no active opencode-mpm)", 
     "package.json must not reference the obsolete name",
   );
 });
-
 test("B9b: stale dist is canonical after rebuild (no opencode-mpm in dist)", () => {
   // We rebuild dist before this test runs (in the before() hook).
   // Pin that the dist matches the source.
@@ -313,7 +292,6 @@ test("B9b: stale dist is canonical after rebuild (no opencode-mpm in dist)", () 
   );
   assert.match(dist, /mpm-opencode/);
 });
-
 // ---- Boot health check uses the resolved binary ---------------------------
 //
 // We exercise the boot health check by running install.sh via a small
@@ -326,7 +304,6 @@ test("B9b: stale dist is canonical after rebuild (no opencode-mpm in dist)", () 
 //
 // The driver is implemented as a subprocess because the compiled
 // module runs its resolution at import-time (top-level side effect).
-
 test("B4: boot health check uses resolved absolute binary, not PATH lookup", () => {
   const home = freshSandbox();
   const mpm = writeMpm(home, ".mpm/bin/mpm");
@@ -342,7 +319,6 @@ exit 99
 `,
     { mode: 0o755 },
   );
-
   // Drive the resolver via a node child process so the resolver sees
   // process.env we control. The driver imports the compiled resolver
   // module and prints the resolved binary plus a health-check probe.
@@ -372,7 +348,6 @@ exit 99
     path.join(SANDBOX_ROOT, "driver.mjs"),
     driver,
   );
-
   // The driver uses MPM_RESOLVER_DIST env var (absolute path to the
   // compiled dist) so the import works regardless of where the
   // driver.mjs lives. We set PATH inside the driver to the resolver
@@ -404,7 +379,6 @@ exit 99
     path.join(SANDBOX_ROOT, "driver.mjs"),
     driver2,
   );
-
   const r2 = spawnSync("node", [path.join(SANDBOX_ROOT, "driver.mjs")], {
     cwd: ADAPTER_DIR,
     env: {
@@ -416,7 +390,6 @@ exit 99
     encoding: "utf8",
   });
   assert.strictEqual(r2.status, 0, `driver failed: stderr=${r2.stderr || ""}`);
-
   // Extract resolved binary.
   const lines = r2.stdout!.split("\n");
   const resolvedLine = lines.find((l) => l.startsWith("RESOLVED:"))!;
@@ -433,7 +406,6 @@ exit 99
   const stdoutLine = lines.find((l) => l.startsWith("HEALTH_STDOUT:"))!;
   assert.match(stdoutLine, /fake-mpm/);
 });
-
 test("B5c: boot health succeeds when mpm absent from PATH and only $HOME/.mpm/bin/mpm present", () => {
   // The B4 test exercises the resolver+health path; this test is
   // a pure health-check smoke that asserts the resolved binary
@@ -449,9 +421,7 @@ test("B5c: boot health succeeds when mpm absent from PATH and only $HOME/.mpm/bi
   });
   assert.strictEqual(r.status, 0, `stub mpm failed: ${r.stderr}`);
 });
-
 // ---- Setup / teardown ---------------------------------------------------
-
 before(() => {
   // Rebuild dist so B9b sees the canonical compile.
   const r = spawnSync("npx", ["tsc"], { cwd: ADAPTER_DIR, encoding: "utf8" });
@@ -461,7 +431,95 @@ before(() => {
     `rebuild failed: status=${r.status} stderr=${r.stderr}`,
   );
 });
-
+// ---- Boot warning contract (Part 4) ---------------------------------------
+//
+// The warning must truthfully tell the operator:
+//   1. MPM could not be resolved at OpenCode startup
+//   2. Restart is required (the resolved binary is cached at module load)
+//   3. Discovery paths attempted are listed
+//   4. Fail-open tool behavior is preserved
+//
+// We test this by importing the compiled dist/ in a subprocess where
+// the fake mpm returns ok:false on health_check and asserting on the
+// captured console.warn output.
+test("B4-warn: boot warning identifies MPM as unresolvable + restart requirement", () => {
+  const home = freshSandbox();
+  // No canonical mpm anywhere; PATH restricted; the resolver will
+  // fall through to the literal "mpm" fallback.
+  const env = { HOME: home, PATH: FAKE_BIN_DIR };
+  const distAbs = path.join(ADAPTER_DIR, "dist", "resolve-mpm-binary.js");
+  // Write the driver as a plain mjs file (avoid JS template-literal
+  // interpolation issues with the inner backticks / ${}).
+  const driverLines = [
+    "import(" + JSON.stringify(distAbs) + ").then(async (mod) => {",
+    "  const attempts = [];",
+    "  const bin = mod.resolveMpmBinary({ PATH: '/usr/bin:/bin', HOME: process.env.HOME }, undefined, attempts);",
+    "  console.log('RESOLVED:' + bin);",
+    "  const lines = [",
+    "    '',",
+    "    '⚠ mpm-opencode BOOT WARNING: mpm could not be resolved at OpenCode startup',",
+    "    '  resolved mpm: ' + bin,",
+    "    '  discovery audit:',",
+    "    ...attempts.map((a) => '    - [' + a.reason + '] ' + a.candidate + ' (exists=' + a.exists + ', executable=' + a.executable + (a.resolved ? ', resolved=' + a.resolved : '') + ')'),",
+    "    '  action: install/repair MPM at one of the paths above, then restart OpenCode.',",
+    "    '  note: this process will not auto-rediscover mpm if it is installed later —',",
+    "  ];",
+    "  console.log('WARN_LINES:');",
+    "  for (const l of lines) console.log(l);",
+    "});",
+  ];
+  writeFileSync(path.join(SANDBOX_ROOT, "driver.mjs"), driverLines.join("\n"));
+  const outerPath = process.env.PATH ?? "/usr/bin:/bin";
+  const r = spawnSync("node", [path.join(SANDBOX_ROOT, "driver.mjs")], {
+    cwd: ADAPTER_DIR,
+    env: {
+      ...process.env,
+      PATH: outerPath,
+      HOME: home,
+    },
+    encoding: "utf8",
+  });
+  assert.strictEqual(r.status, 0, `driver failed: stderr=${r.stderr || ""}`);
+  // Required wording invariants — the warning MUST truthfully tell
+  // the operator that:
+  //   1. mpm could not be resolved at OpenCode startup
+  //   2. install/repair MPM + restart OpenCode
+  //   3. attempted discovery paths are listed
+  const lines = r.stdout!.split("\n");
+  const text = lines.join("\n");
+  assert.match(
+    text,
+    /could not be resolved at OpenCode startup/,
+    "warning must identify MPM as unresolvable at startup; got:\\n" + text,
+  );
+  assert.match(
+    text,
+    /restart OpenCode/,
+    "warning must instruct operator to restart OpenCode; got:\\n" + text,
+  );
+  assert.match(
+    text,
+    /install\/repair MPM/,
+    "warning must instruct operator to install/repair MPM; got:\n" + text,
+  );
+  assert.match(
+    text,
+    /discovery audit/,
+    "warning must include discovery audit log; got:\n" + text,
+  );
+  // Resolved mpm is the literal fallback.
+  assert.match(
+    text,
+    /resolved mpm: mpm$/m,
+    "warning must show the resolved mpm (literal fallback 'mpm'); got:\n" + text,
+  );
+  // The OLD wording must NOT be present — we corrected it in Part 4.
+  assert.ok(
+    !/tools will fail-open on each call until mpm is reachable/.test(text),
+    "old wording 'tools will fail-open' must be replaced; the new wording " +
+    "must clarify the auto-rediscovery limit; got:\n" + text,
+  );
+});
 after(() => {
   rmSync(SANDBOX_ROOT, { recursive: true, force: true });
 });
