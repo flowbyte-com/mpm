@@ -30,13 +30,13 @@
 #                 erasure on SSD/CoW/snapshot/journaled storage.
 #
 # Usage:
-#   ./uninstall.sh                    # runtime-only uninstall
-#   ./uninstall.sh --dry-run          # preview what would happen
-#   ./uninstall.sh --purge            # also delete data + config
-#   ./uninstall.sh --shred            # --purge + best-effort overwrite
-#   ./uninstall.sh --purge --yes      # noninteractive purge
-#   ./uninstall.sh --shred --yes      # noninteractive shred
-#   ./uninstall.sh --help             # full help
+#   ./mpm/uninstall.sh                    # runtime-only uninstall
+#   ./mpm/uninstall.sh --dry-run          # preview what would happen
+#   ./mpm/uninstall.sh --purge            # also delete data + config
+#   ./mpm/uninstall.sh --shred            # --purge + best-effort overwrite
+#   ./mpm/uninstall.sh --purge --yes      # noninteractive purge
+#   ./mpm/uninstall.sh --shred --yes      # noninteractive shred
+#   ./mpm/uninstall.sh --help             # full help
 #
 # Exit codes:
 #   0   success (or dry-run completed)
@@ -66,8 +66,11 @@ while [ -L "$SCRIPT_PATH" ]; do
     esac
 done
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
-# PROJECT_ROOT is the directory containing this script. Used for self-removal
-# staging and for printing what tree we're acting on.
+# uninstall.sh lives at <repo>/mpm/uninstall.sh. REPO_ROOT is its
+# grandparent. PROJECT_ROOT is kept equal to SCRIPT_DIR for self-removal
+# staging and printing — but REPO_ROOT is the explicit hook for any
+# future repo-wide path resolution.
+readonly REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 readonly PROJECT_ROOT="$SCRIPT_DIR"
 readonly SCRIPT_NAME="uninstall.sh"
 
@@ -83,14 +86,14 @@ usage() {
 $SCRIPT_NAME — MPM substrate removal tool (user-facing, host-agnostic).
 
 Usage:
-  $SCRIPT_NAME                     # runtime-only uninstall (data preserved)
-  $SCRIPT_NAME --dry-run           # preview default uninstall
-  $SCRIPT_NAME --purge --dry-run   # preview purge scope
-  $SCRIPT_NAME --shred --dry-run   # preview shred scope
-  $SCRIPT_NAME --purge             # remove runtime + persistent state
-  $SCRIPT_NAME --shred             # remove + best-effort secure overwrite
-  $SCRIPT_NAME --purge --yes       # noninteractive purge
-  $SCRIPT_NAME --shred --yes       # noninteractive shred
+  ./mpm/uninstall.sh                     # runtime-only uninstall (data preserved)
+  ./mpm/uninstall.sh --dry-run           # preview default uninstall
+  ./mpm/uninstall.sh --purge --dry-run   # preview purge scope
+  ./mpm/uninstall.sh --shred --dry-run   # preview shred scope
+  ./mpm/uninstall.sh --purge             # remove runtime + persistent state
+  ./mpm/uninstall.sh --shred             # remove + best-effort secure overwrite
+  ./mpm/uninstall.sh --purge --yes       # noninteractive purge
+  ./mpm/uninstall.sh --shred --yes       # noninteractive shred
 
 Flags:
   --dry-run       Print the destruction plan; perform no mutations.
@@ -209,14 +212,21 @@ PURGE_PATHS=(
 # Refuse to act on a destructive root that resolves to a forbidden path.
 # Usage: validate_destructive_root "label" "/path/to/root"
 #
-# Defensive checks (spec §14):
-#   - empty string
-#   - resolves to "/", ".", "..", "$HOME"
-#   - parent resolves to "/" (would shred top-level filesystem area)
-#   - parent resolves to "$HOME" (would shred the user's home root)
-#   - resolves to a path that is NOT under the canonical MPM install
-#     prefix ($HOME/.mpm) — defence in depth against operator typo /
-#     environment-variable injection / symlink redirection.
+# Safety model (spec §14, narrow form):
+#   * Reject empty / `/` / `.` / `..` / `$HOME` outright.
+#   * Accept ONLY paths that resolve to an explicit allowlisted
+#     canonical MPM-owned root OR a descendant of one. The allowlist
+#     is intentionally hard-coded — we do NOT use broad path-shape
+#     heuristics, because those would either over-reject legitimate
+#     canonical roots (e.g. `$HOME/.mpm`, whose parent is `$HOME`)
+#     or under-reject arbitrary top-level HOME children.
+#
+# Allowlisted canonical MPM-owned roots:
+#   $HOME/.mpm               (the canonical install prefix)
+#   $HOME/.config/mpm        (XDG-owned env / config dir)
+#
+# Everything else — including `$HOME/something` where something is
+# NOT `.mpm` or `.config/mpm` — is rejected.
 validate_destructive_root() {
     local label="$1"
     local raw="$2"
@@ -251,35 +261,18 @@ validate_destructive_root() {
         die "refusing to act on $label = HOME ('$resolved')" 4
     fi
 
-    # Reject top-level filesystem areas: any destructive root whose
-    # parent is "/" or "$HOME" is too broad. Examples: "/src/db" or
-    # "/home/v/foo" — both are forbidden. The canonical MPM install is
-    # $HOME/.mpm, so destructive roots must be at least three levels
-    # deep beneath $HOME.
-    local parent
-    parent="$(dirname -- "$resolved")"
-    case "$parent" in
-        "/"|"$home_resolved")
-            die "refusing to act on $label = '$resolved' (parent '$parent' too broad)" 4
-            ;;
-    esac
-
-    # Defence-in-depth: reject anything NOT under a known MPM-owned
-    # canonical path. The canonical MPM install is $HOME/.mpm, plus
-    # a small set of XDG-known MPM-owned dirs that are NOT under that
-    # install root (env file, etc.). This catches operator typos, env
-    # injection, and symlink redirection to non-MPM paths.
+    # Accept ONLY paths under the explicit allowlist of canonical
+    # MPM-owned roots. Anything else — including arbitrary top-level
+    # HOME children like `$HOME/foobar` — is rejected.
     case "$resolved" in
-        # Canonical install root.
+        # Canonical install root ($HOME/.mpm) and descendants.
         "$home_resolved/".mpm) ;;
         "$home_resolved/".mpm/*) ;;
-        # XDG-owned MPM dirs (env file at ~/.config/mpm/mpm.env).
-        # Listed explicitly; NOT a "search the home tree" — these are
-        # hard-coded XDG spec paths that MPM owns.
+        # XDG-owned MPM config root ($HOME/.config/mpm) and descendants.
         "$home_resolved/".config/mpm) ;;
         "$home_resolved/".config/mpm/*) ;;
         *)
-            die "refusing to act on $label = '$resolved' (not under a canonical MPM-owned root)" 4
+            die "refusing to act on $label = '$resolved' (not under an allowlisted canonical MPM root: \$HOME/.mpm or \$HOME/.config/mpm)" 4
             ;;
     esac
 
@@ -378,26 +371,38 @@ build_plan() {
         fi
     done
 
-    # 8. Shred targets (--shred only): every regular file under
-    #    the MPM-owned data root, plus a few additional sensitive roots.
-    #    Add the canonical DB root as a shred root if it exists.
-    local db_root="$DATA_ROOT/src/db"
-    if [ -d "$db_root" ]; then
-        local validated_db
-        validated_db="$(validate_destructive_root "shred db root" "$db_root")" || exit 4
-        PLAN_SHRED_DIRS+=("$validated_db")
-        while IFS= read -r -d '' f; do
-            PLAN_SHRED_FILES+=("$f")
-        done < <(find "$validated_db" -xdev -type f -print0 2>/dev/null || true)
-    fi
-    # Also shred the config file (single sensitive regular file).
+    # 8. Shred targets (--shred only): every regular file under each
+    #    authoritative sensitive MPM root. No filename allowlist — the
+    #    invariant is that ANY regular file beneath these roots is
+    #    sensitive (DB content, backups, logs, future arbitrary files).
+    #
+    #    Authoritative shred roots:
+    #      $DATA_ROOT/src/db/   — SQLite DB + WAL/SHM + mirror + watchdog
+    #                             + telemetry + backups + future files
+    #      $DATA_ROOT/backups/  — backup trees (incl. critic-pre)
+    #      $DATA_ROOT/logs/     — runtime + cognitive logs
+    #
+    #    Plus standalone sensitive regular files:
+    #      $DATA_ROOT/mpm_config.json   — config (may carry provider keys)
+    #      $ENV_DIR/mpm.env             — provider / env secrets
+    local shred_root
+    for shred_root in "$DATA_ROOT/src/db" "$DATA_ROOT/backups" "$DATA_ROOT/logs"; do
+        if [ -d "$shred_root" ]; then
+            local validated_root
+            validated_root="$(validate_destructive_root "shred root $shred_root" "$shred_root")" || exit 4
+            PLAN_SHRED_DIRS+=("$validated_root")
+            while IFS= read -r -d '' f; do
+                PLAN_SHRED_FILES+=("$f")
+            done < <(find "$validated_root" -xdev -type f -print0 2>/dev/null || true)
+        fi
+    done
+    # Standalone sensitive regular files.
     local cfg="$DATA_ROOT/mpm_config.json"
     if [ -f "$cfg" ]; then
         local validated_cfg
         validated_cfg="$(validate_destructive_root "shred config" "$cfg")" || exit 4
         PLAN_SHRED_FILES+=("$validated_cfg")
     fi
-    # And the env file (may contain provider keys).
     local envf="$ENV_DIR/mpm.env"
     if [ -f "$envf" ]; then
         local validated_env

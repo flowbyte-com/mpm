@@ -72,7 +72,7 @@ fi
 
 # Canonical MPM install — same resolution rule as mpm-opencode/src/index.ts
 # and mpm-memory-openclaw/install.sh. Order matters: the substrate install
-# (root install.sh) writes ~/.mpm/bin/mpm and symlinks it into
+# (mpm/install.sh) writes ~/.mpm/bin/mpm and symlinks it into
 # ~/.local/bin/mpm. We accept either. We never rely on PATH resolution
 # alone — on a freshly-created ~/.local/bin the current login session
 # may not have it on PATH yet (proved in clean-profile Linux Mint test).

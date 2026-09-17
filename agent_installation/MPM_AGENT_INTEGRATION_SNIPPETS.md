@@ -530,7 +530,7 @@ unavailable).
 ```
 git clone <repo> ~/.openclaw/workspace/projects/mpm  # or symlink
 cd ~/.openclaw/workspace/projects/mpm/mpm-memory-openclaw
-./install.sh
+./mpm/install.sh
 ```
 
 For installation details and validation evidence, see

@@ -51,7 +51,7 @@ If any of these fail, install MPM first:
 ```bash
 git clone https://github.com/flowbyte-com/mpm ~/projects/mpm
 cd ~/projects/mpm
-./install.sh                # full install: build + binaries + systemd user unit + lingering
+./mpm/install.sh                # full install: build + binaries + systemd user unit + lingering
 mpm ops init directives             # baseline cognitive bootstrap (idempotent)
 ```
 

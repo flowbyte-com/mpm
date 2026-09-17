@@ -3,7 +3,7 @@
 > **Audience:** both humans and agents. Prose explains *why*. Commands are the
 > *what*. Both finish the section with the same understanding.
 >
-> **TL;DR:** `./install.sh` — done. No sudo required.
+> **TL;DR:** `./mpm/install.sh` — done. No sudo required.
 
 Install the MPM cognitive substrate in your user context. Result: a
 production-grade agent stack with everything in `$HOME`, isolated from
@@ -31,7 +31,7 @@ has been removed.
 
 ---
 
-## 1. Recommended install: `./install.sh`
+## 1. Recommended install: `./mpm/install.sh`
 
 > **Why this is the default:** a single command, no sudo, runs entirely in
 > your user context. The script detects existing legacy system services and
@@ -44,7 +44,7 @@ has been removed.
 ```bash
 git clone https://github.com/flowbyte-com/mpm ~/projects/mpm
 cd ~/projects/mpm
-./install.sh
+./mpm/install.sh
 ```
 
 What the script does, in order:
@@ -72,7 +72,7 @@ What the script does, in order:
 ### 1b. Validate
 
 ```bash
-./install.sh --validate       # same checks the install script runs
+./mpm/install.sh --validate       # same checks the install script runs
 ```
 
 Or manually:
@@ -141,9 +141,9 @@ into the database. Re-running is safe — local edits are preserved.
 | `--yes` | Skip confirmation prompts |
 
 ```bash
-./install.sh --check           # safe, no changes
-./install.sh --dry-run         # show what would happen
-./install.sh --uninstall       # remove artifacts (data preserved)
+./mpm/install.sh --check           # safe, no changes
+./mpm/install.sh --dry-run         # show what would happen
+./mpm/install.sh --uninstall       # remove artifacts (data preserved)
 ```
 
 > The `--system` flag and `MPM_SYSTEM=1` env form have been removed. MPM
@@ -160,9 +160,9 @@ into the database. Re-running is safe — local edits are preserved.
 > `Wants=mpm-scheduler.service` can be evaluated, so `Restart=` does not help.
 > The fix is a `~/.config/autostart/mpm-post-decrypt.desktop` entry that runs
 > `systemctl --user daemon-reload && systemctl --user start mpm-scheduler.service`
-> on every graphical login (post-decrypt). `install.sh` detects this case
+> on every graphical login (post-decrypt). `mpm/install.sh` detects this case
 > via `mount` + `findmnt` + the `/home/.ecryptfs/$USER` marker and writes the
-> autostart entry automatically; `install.sh --uninstall` removes it.
+> autostart entry automatically; `mpm/uninstall.sh` removes it.
 > The `.desktop` `Comment=` line carries the string `071911bc`. It is not a
 > lesson ID: it resolves to no row in any substrate table and to no git object in
 > this repository, and its origin is unknown. The autostart mechanism was
@@ -320,7 +320,7 @@ why pre-compute `next_run_at`) documented in [README §9.3](../README.md#agentic
 > per-host install/verify/uninstall walkthroughs. The recommended
 > install (Section 1) auto-wires the OpenClaw adapter when it detects
 > the `openclaw` binary; the other four adapters ship their own
-> `./install.sh` and Python snippet installers. Re-run the host adapter
+> `./mpm/install.sh` and Python snippet installers. Re-run the host adapter
 > installer after switching hosts. No `sudo` is required at any point —
 > every command below runs in the user's context.
 
@@ -395,7 +395,7 @@ hermes mcp list | grep mpm             # expect: mpm ... ✓ enabled
 ## 4. Uninstall
 
 ```bash
-./install.sh --uninstall
+./mpm/install.sh --uninstall
 ```
 
 Removes: `~/.mpm/bin/` (all five binaries + wrapper), `~/.local/bin/mpm`,
@@ -421,7 +421,7 @@ sudo rm -f /etc/systemd/system/mpm-scheduler.service
 
 ## 5. Path cheat sheet
 
-`./install.sh` is the only install path. All paths below are
+`./mpm/install.sh` is the only install path. All paths below are
 user-owned; no `/usr/local` or `/var/lib/mpm` exists.
 
 | Path | Owner | Purpose |
@@ -452,10 +452,10 @@ without losing agent state; runtime data persists across `git pull`.
 | Install fails: "systemd required" | `systemctl --version` | Install systemd (most distros have it) |
 | `systemctl --user` fails with "Failed to connect to bus" | `loginctl show-user $USER --property=Linger` | `loginctl enable-linger $USER` (set `Linger=yes`) |
 | Service won't start: "permission denied" on data dir | `ls -la ~/.mpm/` | `chown -R $USER:$USER ~/.mpm` |
-| Service won't start after reboot on encrypted home | `findmnt /home` | Use `./install.sh` (full install flow handles linger + drop-in); or manually `systemctl --user edit mpm-scheduler` to add the post-decrypt delay described below. |
+| Service won't start after reboot on encrypted home | `findmnt /home` | Use `./mpm/install.sh` (full install flow handles linger + drop-in); or manually `systemctl --user edit mpm-scheduler` to add the post-decrypt delay described below. |
 | `mpm-scheduler`: DB not found in logs | `systemctl --user show mpm-scheduler -p Environment` | Set `MPM_DB_PATH` in `~/.config/mpm/mpm.env`, or `systemctl --user edit mpm-scheduler` |
-| `mpm-scheduler` stays `inactive` after reboot on encrypted `/home` | `systemctl --user is-active mpm-scheduler` returns `inactive`; `journalctl --user -u mpm-scheduler` shows no entries since boot | The autostart fix should have handled this — `~/.config/autostart/mpm-post-decrypt.desktop` runs `daemon-reload && start mpm-scheduler.service` on every graphical login. Verify the file exists; if missing, re-run `./install.sh` (it re-detects via `mount` + `findmnt` + `/home/.ecryptfs/$USER` and reinstalls the `.desktop`). If your workload runs unattended with no graphical login (cron / system timers only), opt out by removing the `.desktop` and adding a drop-in: `systemctl --user edit mpm-scheduler` → under `[Service]` add `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'` to delay-start until the mount is up. Commit `14ac32b` introduced the detection/wiring. |
-| CLI fails: "no such file: mpm.real" | `ls -la ~/.mpm/bin/mpm*` | Re-run `./install.sh` to restore the wrapper |
+| `mpm-scheduler` stays `inactive` after reboot on encrypted `/home` | `systemctl --user is-active mpm-scheduler` returns `inactive`; `journalctl --user -u mpm-scheduler` shows no entries since boot | The autostart fix should have handled this — `~/.config/autostart/mpm-post-decrypt.desktop` runs `daemon-reload && start mpm-scheduler.service` on every graphical login. Verify the file exists; if missing, re-run `./mpm/install.sh` (it re-detects via `mount` + `findmnt` + `/home/.ecryptfs/$USER` and reinstalls the `.desktop`). If your workload runs unattended with no graphical login (cron / system timers only), opt out by removing the `.desktop` and adding a drop-in: `systemctl --user edit mpm-scheduler` → under `[Service]` add `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'` to delay-start until the mount is up. Commit `14ac32b` introduced the detection/wiring. |
+| CLI fails: "no such file: mpm.real" | `ls -la ~/.mpm/bin/mpm*` | Re-run `./mpm/install.sh` to restore the wrapper |
 | CLI reads from wrong DB (e.g. `~/projects/mpm/src/db/mpm.db`) | `which mpm`; `head -1 $(which mpm)` | The `mpm` binary must be a wrapper (`#!/bin/sh`), not the raw binary. Re-run install. |
 | Spawn ENOENT when host tries to launch mpm-mcp | `ls -l ~/.mpm/bin/mpm-mcp` (or `bin/mpm-mcp` in source tree) | If missing: `make build`. If not executable: `chmod +x`. Then re-register with correct path. |
 | `mpm` not found on PATH after install | `command -v mpm`; `echo $PATH` | Verify `~/.local/bin` is on PATH: most shells pick it up via `/etc/profile.d/` defaults. If not: `export PATH="$HOME/.local/bin:$PATH"`. Internal daemons (mpm-scheduler, mpm-critic, mpm-telemetry) are NOT on PATH by design — they are invoked by systemd, never directly. |
@@ -502,7 +502,7 @@ saved before the resolver existed — those rows carry partial snapshots.
 ## See also
 
 - [README.md](../README.md) — cognitive model, design, full reference
-- [install.sh](../install.sh) — the install script (read the source)
+- [install.sh](../mpm/install.sh) — the install script (read the source)
 - [scripts/](../scripts/) — utility scripts (smoke tests, completion, etc.)
 - [contrib/systemd/](../contrib/systemd/) — unit file templates (user only; the legacy system template has been removed)
 - [OpenClaw docs](https://docs.openclaw.ai) — platform reference

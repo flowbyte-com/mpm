@@ -81,20 +81,31 @@ HISTORICAL_ALLOWLIST_FILES = (
     REPO_ROOT / "agent_installation" / "mpm-memory-openclaw" / "VALIDATION-2026-08-19.md",
 )
 
-# Files that intentionally mention the legacy plugin id `openclaw-mpm-memory`
-# because they implement or test the one-time legacy-id reconciliation
-# step in the OpenClaw memory adapter installer. These references are
-# not stale — they are the canonical "this is the legacy id we are
-# migrating from" declarations, and removing them would break the
-# migration.
+# Files that intentionally mention legacy namespace strings because
+# they implement or test the one-time migration away from those names.
+# These references are NOT stale — they are the canonical "this is the
+# legacy namespace we are migrating FROM" declarations. Removing them
+# would break the migration logic they pin.
+#
+# This exemption is NARROW: it covers only files whose job is to handle
+# the migration (the installer's legacy-id probe + the migration tests).
+# It does NOT broadly exempt the entire adapter directory — new code,
+# prose, or runtime identifiers must use the canonical mpm-* namespace.
 MIGRATION_AWARE_FILES = {
-    # The installer itself — declares LEGACY_PLUGIN_ID and uses it to
-    # probe for legacy config to migrate.
+    # The OpenClaw memory adapter installer — declares LEGACY_PLUGIN_ID
+    # and uses it to probe for legacy config to migrate.
     "agent_installation/mpm-memory-openclaw/install.sh",
-    # The installer tests — assert the legacy id is absent from active
-    # surfaces (manifest, index.js) and that the migration step is
-    # silent when the legacy id is not present.
+    # The OpenClaw memory installer tests — assert the legacy id is
+    # absent from active surfaces (manifest, index.js) and that the
+    # migration step is silent when the legacy id is not present.
     "agent_installation/mpm-memory-openclaw/tests/installer.test.js",
+    # The OpenCode adapter installer — uses 'opencode-mpm' in comments
+    # and migration-detection logic to recognise and migrate the legacy
+    # namespace from `opencode-mpm` to `mpm-opencode`.
+    "agent_installation/mpm-opencode/install.sh",
+    # The OpenCode adapter install tests — assert the migration
+    # behavior on the legacy path.
+    "agent_installation/mpm-opencode/tests/test_opencode_install.py",
     # The OpenCode resolver tests — they enumerate the obsolete
     # 'opencode-mpm' name in test descriptions and assertions
     # specifically BECAUSE they pin that the active source no longer
@@ -253,7 +264,7 @@ class TestNamingInvariants(unittest.TestCase):
 
     def test_root_install_sh_remains_host_agnostic(self) -> None:
         """The root install.sh does not reference adapter paths or names."""
-        src = (REPO_ROOT / "install.sh").read_text()
+        src = (REPO_ROOT / "mpm" / "install.sh").read_text()
         for name in FORBIDDEN_NAMES + sorted(CANONICAL_ADAPTERS):
             self.assertNotIn(
                 name,

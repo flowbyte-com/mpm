@@ -23,7 +23,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-UNINSTALL_SH = REPO_ROOT / "uninstall.sh"
+UNINSTALL_SH = REPO_ROOT / "mpm" / "uninstall.sh"
 
 
 def _make_fake_bin_dir(tmp: Path) -> Path:
@@ -127,6 +127,16 @@ def _stage_fake_install(
     if with_random_extra_file:
         # An arbitrary future filename to prove there is no allowlist.
         (mpm / "src/db/random-future-sensitive-file.xyz").write_text("future\n")
+
+    # Sensitive files under backups/ — must also be shredded (no allowlist).
+    (mpm / "backups/critic-pre").mkdir(parents=True, exist_ok=True)
+    (mpm / "backups/critic-pre/snapshot-20260917.json").write_text("snapshot\n")
+    (mpm / "backups/random-copy.bin").write_bytes(b"\x00\x01\x02\x03backup-bytes")
+
+    # Sensitive files under logs/ — must also be shredded.
+    (mpm / "logs").mkdir(parents=True, exist_ok=True)
+    (mpm / "logs/runtime.log").write_text("runtime-log\n")
+    (mpm / "logs/new-format.whatever").write_text("future-format-log\n")
 
     # Runtime locks.
     mpm.joinpath("scheduler.lock").write_text("")
@@ -401,9 +411,19 @@ class TestShred(_UninstallDriver):
         _stage_fake_install(self.fake_home)
         # Snapshot the file count BEFORE the run, since shred removes
         # the files and would make post-run counting meaningless.
-        expected = len([p for p in (self.fake_home / ".mpm/src/db").rglob("*") if p.is_file()])
-        # Plus mpm_config.json + mpm.env (extra sensitive files in shred scope).
-        expected += 2
+        # Sensitive roots covered by --shred:
+        #   $HOME/.mpm/src/db/   (every regular file)
+        #   $HOME/.mpm/backups/  (every regular file)
+        #   $HOME/.mpm/logs/     (every regular file)
+        #   $HOME/.mpm/mpm_config.json
+        #   $HOME/.config/mpm/mpm.env
+        expected = 0
+        for sensitive_root in (".mpm/src/db", ".mpm/backups", ".mpm/logs"):
+            expected += len([
+                p for p in (self.fake_home / sensitive_root).rglob("*")
+                if p.is_file()
+            ])
+        expected += 2  # mpm_config.json + mpm.env
         r = self._run("--shred", "--yes")
         self.assertEqual(r["returncode"], 0, r["stderr"])
         log = self.shred_log.read_text()
@@ -415,6 +435,49 @@ class TestShred(_UninstallDriver):
         ]
         self.assertEqual(len(invocations), expected,
                          f"shred invocations: {len(invocations)} != expected: {expected}")
+
+    def test_15a_shred_covers_backups_root(self):
+        """Every regular file under ~/.mpm/backups/ is shredded."""
+        _stage_fake_install(self.fake_home)
+        r = self._run("--shred", "--yes")
+        self.assertEqual(r["returncode"], 0, r["stderr"])
+        log = self.shred_log.read_text()
+        # Both staged backups files must appear.
+        self.assertIn(str(self.fake_home / ".mpm/backups/critic-pre/snapshot-20260917.json"), log)
+        self.assertIn(str(self.fake_home / ".mpm/backups/random-copy.bin"), log)
+
+    def test_15b_shred_covers_logs_root(self):
+        """Every regular file under ~/.mpm/logs/ is shredded."""
+        _stage_fake_install(self.fake_home)
+        r = self._run("--shred", "--yes")
+        self.assertEqual(r["returncode"], 0, r["stderr"])
+        log = self.shred_log.read_text()
+        self.assertIn(str(self.fake_home / ".mpm/logs/runtime.log"), log)
+        self.assertIn(str(self.fake_home / ".mpm/logs/new-format.whatever"), log)
+
+    def test_15c_shred_handles_arbitrary_filenames_in_each_root(self):
+        """No allowlist: arbitrary future filenames in src/db, backups,
+        and logs must all be shredded."""
+        _stage_fake_install(self.fake_home)
+        # Drop a couple of obviously-future-named files into each root.
+        for rel, name in (
+            (".mpm/src/db", "future-secret.xyz"),
+            (".mpm/backups", "future-backup.qqq"),
+            (".mpm/logs", "future-log.nonsense"),
+        ):
+            (self.fake_home / rel / name).write_text(f"future-{name}")
+        r = self._run("--shred", "--yes")
+        self.assertEqual(r["returncode"], 0, r["stderr"])
+        log = self.shred_log.read_text()
+        for rel, name in (
+            (".mpm/src/db", "future-secret.xyz"),
+            (".mpm/backups", "future-backup.qqq"),
+            (".mpm/logs", "future-log.nonsense"),
+        ):
+            self.assertIn(
+                str(self.fake_home / rel / name), log,
+                f"shred missed arbitrary future filename: {rel}/{name}",
+            )
 
     def test_16_symlinks_inside_db_root_are_not_followed(self):
         """The spec says: do NOT use `find -L`. Symlinks inside the DB
@@ -535,6 +598,41 @@ class TestShred(_UninstallDriver):
         # The evil file must NOT have been shredded.
         self.assertTrue((outside_dir / "evil.db").exists(),
                         "evil.db was shredded despite validation rejection")
+
+    def test_22a_canonical_mpm_root_accepted(self):
+        """Exact $HOME/.mpm and $HOME/.config/mpm must pass validation."""
+        _stage_fake_install(self.fake_home)
+        # Default run: PREFIX=$HOME/.mpm, DATA_ROOT=$HOME/.mpm. This must
+        # succeed (regression against an over-strict parent heuristic that
+        # rejected parent == $HOME).
+        r = self._run("--shred", "--yes")
+        self.assertEqual(r["returncode"], 0, r["stderr"])
+
+    def test_22b_arbitrary_home_child_rejected(self):
+        """Any $HOME/something where something is NOT .mpm/.config/mpm
+        must be rejected with exit 4."""
+        _stage_fake_install(self.fake_home)
+        # Stage a fake dir at $HOME/foobar/src/db and point MPM_DATA_ROOT
+        # at it. Validation must reject because $HOME/foobar is NOT in
+        # the allowlist of canonical MPM roots.
+        bogus = self.fake_home / "foobar"
+        (bogus / "src/db").mkdir(parents=True, exist_ok=True)
+        (bogus / "src/db" / "bogus.db").write_text("bogus\n")
+        env = os.environ.copy()
+        env["HOME"] = str(self.fake_home)
+        env["PATH"] = f"{self.fakebin}:{env.get('PATH', '')}"
+        env["FAKE_SYSTEMCTL_LOG"] = str(self.systemctl_log)
+        env["FAKE_SHRED_LOG"] = str(self.shred_log)
+        env["MPM_DATA_ROOT"] = str(bogus)
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", str(UNINSTALL_SH), "--shred", "--yes"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(result.returncode, 4,
+                         f"expected exit 4 (arbitrary HOME child rejected), "
+                         f"got {result.returncode}; stderr={result.stderr}")
+        # The bogus file must NOT have been shredded.
+        self.assertTrue((bogus / "src/db" / "bogus.db").exists())
 
     def test_23_shred_failure_produces_nonzero_status(self):
         # We test that shred-failure -> exit 6. To do that without
@@ -690,6 +788,16 @@ class TestSafety(_UninstallDriver):
         # Stage directory cleaned up.
         # The fake install tree's src/db should be gone.
         self._assert_absent(self.fake_home / ".mpm/src/db")
+
+    def test_33_mpm_subpath_works_from_arbitrary_cwd(self):
+        """Run from /tmp instead of the repo root. The uninstaller
+        resolves its own location via BASH_SOURCE and must still work
+        from a path one directory deeper than the previous canonical
+        location."""
+        _stage_fake_install(self.fake_home)
+        r = self._run(cwd=Path("/tmp"))
+        self.assertEqual(r["returncode"], 0, r["stderr"])
+        self._assert_absent(self.fake_home / ".mpm/bin/mpm")
 
 
 # ====================================================================

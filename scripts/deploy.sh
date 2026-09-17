@@ -31,7 +31,11 @@ set -euo pipefail
 # process that invoked deploy.sh; we invoke it by absolute path.
 export PATH="$HOME/.mpm/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve repository root explicitly. scripts/deploy.sh lives at
+# <repo>/scripts/deploy.sh, so the repository root is the parent of
+# its directory — not its own directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 INSTALL=1

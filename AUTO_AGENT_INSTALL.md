@@ -169,7 +169,7 @@ Use the repository's canonical MPM installer/build procedure.
 Where available, prefer:
 
 ```text
-install.sh
+mpm/install.sh
 ```
 
 over reimplementing installation manually.
@@ -229,7 +229,7 @@ mechanism — do not improvise.
 
 ## Required mechanism: `~/.local/bin` symlinks
 
-The canonical `install.sh` (the **only** install path; the legacy
+The canonical `mpm/install.sh` (the **only** install path; the legacy
 `--system` mode has been removed) creates two symlinks under
 `~/.local/bin`:
 
@@ -243,7 +243,7 @@ The canonical `install.sh` (the **only** install path; the legacy
 Many Linux login environments add it to `PATH` automatically when
 present — but only at login time. If the directory is created after
 the current login session starts (which is exactly what happens when
-`install.sh` creates it mid-session), the current
+`mpm/install.sh` creates it mid-session), the current
 shell/session may not gain it automatically. A new login
 session will normally pick it up where the user's login profile or
 distribution configuration already supports it (for example the

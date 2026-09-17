@@ -35,10 +35,10 @@ import (
 // rejects (no such tool). We allow `mpm` instead of `$PREFIX/bin/mpm`
 // for resilience to the wrapper-script-prefix change in D-3.2.
 func TestInstallSh_HealthCheckValidationForm(t *testing.T) {
-	data, err := os.ReadFile("../install.sh")
+	data, err := os.ReadFile("../mpm/install.sh")
 	if err != nil {
 		// Try a sibling path in case the working dir differs.
-		if data, err = os.ReadFile("../install.sh"); err != nil {
+		if data, err = os.ReadFile("../mpm/install.sh"); err != nil {
 			t.Fatalf("read install.sh: %v", err)
 		}
 	}
@@ -78,7 +78,7 @@ func TestInstallSh_HealthCheckValidationForm(t *testing.T) {
 // override, so any test/dev environment with a different workspace
 // crashed.
 func TestInstallSh_AcceptsMPMWorkspaceOverride(t *testing.T) {
-	data, err := os.ReadFile("../install.sh")
+	data, err := os.ReadFile("../mpm/install.sh")
 	if err != nil {
 		t.Fatalf("read install.sh: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestInstallSh_AcceptsMPMWorkspaceOverride(t *testing.T) {
 // either the missing canonical form or any reintroduction of the
 // pre-fix form, mirroring the D-3.1 health-check pin in the same file.
 func TestInstallSh_ReadDirectivesValidationForm(t *testing.T) {
-	data, err := os.ReadFile("../install.sh")
+	data, err := os.ReadFile("../mpm/install.sh")
 	if err != nil {
 		t.Fatalf("read install.sh: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestInstallSh_ReadDirectivesValidationForm(t *testing.T) {
 // `0755` patterns for the data directories, or if it omits the
 // `0700` enforcement required by the new contract.
 func TestInstallSh_DataDirMode0700(t *testing.T) {
-	data, err := os.ReadFile("../install.sh")
+	data, err := os.ReadFile("../mpm/install.sh")
 	if err != nil {
 		t.Fatalf("read install.sh: %v", err)
 	}
@@ -250,9 +250,9 @@ func TestInstallSh_DataDirMode0700(t *testing.T) {
 // the double-space style match so this isn't tied to whitespace
 // formatting decisions in unrelated edits).
 func TestInstallSh_DieHelperMessageContract(t *testing.T) {
-	data, err := os.ReadFile("../install.sh")
+	data, err := os.ReadFile("../mpm/install.sh")
 	if err != nil {
-		if data, err = os.ReadFile("../install.sh"); err != nil {
+		if data, err = os.ReadFile("../mpm/install.sh"); err != nil {
 			t.Fatalf("read install.sh: %v", err)
 		}
 	}
@@ -294,9 +294,9 @@ func TestInstallSh_DieHelperMessageContract(t *testing.T) {
 // isn't yet on PATH. The Makefile already handled this case; the
 // installer was the lagging surface.
 func TestInstallSh_GoDiscoveryFallback(t *testing.T) {
-	data, err := os.ReadFile("../install.sh")
+	data, err := os.ReadFile("../mpm/install.sh")
 	if err != nil {
-		if data, err = os.ReadFile("../install.sh"); err != nil {
+		if data, err = os.ReadFile("../mpm/install.sh"); err != nil {
 			t.Fatalf("read install.sh: %v", err)
 		}
 	}
@@ -336,9 +336,9 @@ func TestInstallSh_GoDiscoveryFallback(t *testing.T) {
 }
 
 func TestInstallSh_PATHShadowDetection(t *testing.T) {
-	data, err := os.ReadFile("../install.sh")
+	data, err := os.ReadFile("../mpm/install.sh")
 	if err != nil {
-		if data, err = os.ReadFile("../install.sh"); err != nil {
+		if data, err = os.ReadFile("../mpm/install.sh"); err != nil {
 			t.Fatalf("read install.sh: %v", err)
 		}
 	}
@@ -406,9 +406,9 @@ func TestInstallSh_PATHShadowDetection(t *testing.T) {
 // runnable canonical path. We just need to ensure the bare `mpm`
 // form does NOT appear in the next-steps block.
 func TestInstallSh_NextStepsUseCanonicalPath(t *testing.T) {
-	data, err := os.ReadFile("../install.sh")
+	data, err := os.ReadFile("../mpm/install.sh")
 	if err != nil {
-		if data, err = os.ReadFile("../install.sh"); err != nil {
+		if data, err = os.ReadFile("../mpm/install.sh"); err != nil {
 			t.Fatalf("read install.sh: %v", err)
 		}
 	}
@@ -509,9 +509,9 @@ func TestInstallSh_NextStepsUseCanonicalPath(t *testing.T) {
 //     (${DATA_ROOT}, ${PREFIX}, \${MPM_WORKSPACE:-...}, "\$@")
 //     remain in the heredoc.
 func TestInstallSh_WrapperHeredocHasNoCommandSubstitution(t *testing.T) {
-	data, err := os.ReadFile("../install.sh")
+	data, err := os.ReadFile("../mpm/install.sh")
 	if err != nil {
-		if data, err = os.ReadFile("../install.sh"); err != nil {
+		if data, err = os.ReadFile("../mpm/install.sh"); err != nil {
 			t.Fatalf("read install.sh: %v", err)
 		}
 	}
@@ -628,9 +628,9 @@ func TestInstallSh_WrapperHeredocHasNoCommandSubstitution(t *testing.T) {
 //     - "this shell" / "for this shell" (frames the export as
 //     shell-scoped, not global environment mutation)
 func TestInstallSh_PathWarningDoesNotPromiseNewShellsFixPath(t *testing.T) {
-	data, err := os.ReadFile("../install.sh")
+	data, err := os.ReadFile("../mpm/install.sh")
 	if err != nil {
-		if data, err = os.ReadFile("../install.sh"); err != nil {
+		if data, err = os.ReadFile("../mpm/install.sh"); err != nil {
 			t.Fatalf("read install.sh: %v", err)
 		}
 	}
@@ -693,9 +693,9 @@ func TestInstallSh_PathWarningDoesNotPromiseNewShellsFixPath(t *testing.T) {
 //     column name, the metadata key, or internal Go identifiers —
 //     those are stable technical surfaces and out of scope).
 func TestInstallSh_NoDirectiveWordingInSuccessPath(t *testing.T) {
-	data, err := os.ReadFile("../install.sh")
+	data, err := os.ReadFile("../mpm/install.sh")
 	if err != nil {
-		if data, err = os.ReadFile("../install.sh"); err != nil {
+		if data, err = os.ReadFile("../mpm/install.sh"); err != nil {
 			t.Fatalf("read install.sh: %v", err)
 		}
 	}
@@ -752,9 +752,9 @@ func TestInstallSh_NoDirectiveWordingInSuccessPath(t *testing.T) {
 //   - "new login session"    — the accurate fix
 //   - "$cli" still present   — canonical binary path guidance
 func TestInstallSh_CompletionTipNoNewShellsLeak(t *testing.T) {
-	data, err := os.ReadFile("../install.sh")
+	data, err := os.ReadFile("../mpm/install.sh")
 	if err != nil {
-		if data, err = os.ReadFile("../install.sh"); err != nil {
+		if data, err = os.ReadFile("../mpm/install.sh"); err != nil {
 			t.Fatalf("read install.sh: %v", err)
 		}
 	}

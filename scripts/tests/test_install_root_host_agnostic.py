@@ -48,7 +48,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path("/home/v/workspace/projects/mpm").resolve()
-INSTALL_SH = REPO_ROOT / "install.sh"
+INSTALL_SH = REPO_ROOT / "mpm" / "install.sh"
 
 # Markers in install.sh that prevent the script from running main()
 # during test sourcing. PROJECT_ROOT is computed from $0 inside the
@@ -118,11 +118,11 @@ class _RootInstallDriver(unittest.TestCase):
         root.mkdir(parents=True, exist_ok=True)
         (root / "Makefile").write_text("# test stub\n")
 
-        # install.sh source + sourced-lib form, staged at the repo root
-        # (the canonical layout — install.sh lives at the project root,
-        # not under scripts/).
-        shutil.copy(INSTALL_SH, root / "install.sh")
-        lib = root / "install.sh.lib"
+        # install.sh source + sourced-lib form, staged at the canonical
+        # location (mpm/install.sh under the project root).
+        (root / "mpm").mkdir(parents=True, exist_ok=True)
+        shutil.copy(INSTALL_SH, root / "mpm" / "install.sh")
+        lib = root / "mpm" / "install.sh.lib"
         lib.write_text(build_sourced_lib(INSTALL_SH.read_text()))
 
     def _drive_phases(
@@ -144,7 +144,7 @@ class _RootInstallDriver(unittest.TestCase):
             #!/usr/bin/env bash
             set -uo pipefail
             export PROJECT_ROOT={project_root}
-            source {project_root}/install.sh.lib
+            source {project_root}/mpm/install.sh.lib
             PREFIX={prefix}
             DATA_ROOT={data_root}
             SERVICE_DST=/dev/null

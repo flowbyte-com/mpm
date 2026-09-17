@@ -8,10 +8,10 @@ Headless SQLite substrate for long-lived autonomous systems. Single-process, sin
 make build                          # bin/{mpm, mpm-mcp, mpm-scheduler, mpm-critic, mpm-telemetry}
 make test                           # all Go tests (FTS5 build flags, no race detector)
 make test-race                      # all Go tests WITH the race detector (canonical CI gate)
-./install.sh                        # canonical user-space install (build + systemd + PATH symlinks)
-./uninstall.sh                      # canonical runtime-only uninstall (data preserved)
-./uninstall.sh --purge              # remove runtime + persistent state
-./uninstall.sh --shred              # remove + best-effort secure overwrite
+./mpm/install.sh                        # canonical user-space install (build + systemd + PATH symlinks)
+./mpm/uninstall.sh                      # canonical runtime-only uninstall (data preserved)
+./mpm/uninstall.sh --purge              # remove runtime + persistent state
+./mpm/uninstall.sh --shred              # remove + best-effort secure overwrite
 ./scripts/deploy.sh                 # maintainer: rebuild + restart gateway + mpm-scheduler + mpm-telemetry
 ```
 

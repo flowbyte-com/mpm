@@ -18,10 +18,10 @@
  *        Explicit per-process override (operator-controlled).
  *
  *   2. $HOME/.mpm/bin/mpm
- *        The canonical install root written by install.sh.
+ *        The canonical install root written by mpm/install.sh.
  *
  *   3. $HOME/.local/bin/mpm
- *        The canonical user-symlink created by install.sh.
+ *        The canonical user-symlink created by mpm/install.sh.
  *        If a symlink, resolved through readlink so the spawn uses
  *        the real target (deterministic behaviour).
  *
