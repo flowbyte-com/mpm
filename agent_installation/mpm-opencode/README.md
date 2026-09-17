@@ -208,14 +208,15 @@ There is no shell-based `install.sh` for this adapter — the installer is
 plugin symlink because OpenCode's plugin loader does not auto-link from
 arbitrary paths; it reads `~/.config/opencode/plugin/*` directly.
 
-The plugin reads `MPM_BINARY` from env (defaults to the literal string
-`"mpm"`, resolved via `$PATH`) and `MPM_WORKSPACE` from env
-(defaults to `$HOME/.mpm`, computed by `src/workspace.ts`). If you
-need a deterministic absolute path (so the integration does not
-depend on `$PATH` in the OpenCode runtime), set
-`MPM_BINARY=$HOME/.mpm/bin/mpm` in the OpenCode env block — the
-plugin does not chain fallbacks to the canonical install root
-itself.
+The plugin reads `MPM_BINARY` from env (explicit per-call override)
+and otherwise resolves the MPM binary deterministically via
+`src/resolve-mpm-binary.ts` (canonical `$HOME/.mpm/bin/mpm` →
+`$HOME/.local/bin/mpm` → last-resort `command -v mpm`). The resolved
+absolute path is used by every subprocess invocation — boot health
+check, tool calls, wake-context fetch — so the integration does not
+depend on `$PATH` being sane in the OpenCode runtime env. The
+`MPM_WORKSPACE` env defaults to `$HOME/.mpm` (computed by
+`src/workspace.ts`).
 
 The behavioral section in step 3 is **required** for the agent to
 honor the MPM persistent-state, skill-discovery, and handoff

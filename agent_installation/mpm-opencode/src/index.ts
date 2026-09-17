@@ -46,6 +46,23 @@ import { tool } from "@opencode-ai/plugin";
 import type { Plugin, PluginInput, PluginModule } from "@opencode-ai/plugin";
 import { withWorkspace } from "./workspace.js";
 import type { Model } from "@opencode-ai/sdk";
+import { resolveMpmBinary, type DiscoveryAttempt } from "./resolve-mpm-binary.js";
+
+// --------------------------------------------------------------------------
+// MPM binary resolution
+// --------------------------------------------------------------------------
+//
+// See ./resolve-mpm-binary.ts for the full algorithm. We compute the
+// resolved path once at module load (the OpenCode plugin process has
+// stable env) and audit-log the discovery attempts so the boot
+// warning can name the exact paths tried.
+
+const _discoveryAttempts: DiscoveryAttempt[] = [];
+const RESOLVED_MPM_BINARY: string = resolveMpmBinary(
+	process.env,
+	undefined,
+	_discoveryAttempts,
+);
 
 // --------------------------------------------------------------------------
 // Subprocess adapter
@@ -321,11 +338,23 @@ async function pingHealth(bin: string): Promise<HealthCheckResult> {
  * use console.warn which surfaces in the standard OpenCode log.
  */
 function emitBootWarning(bin: string, reason: string): void {
+	// List the actual discovery paths we attempted so the operator can
+	// diagnose "MPM is installed but the plugin can't find it" without
+	// guessing which one of ~/.mpm/bin/mpm / ~/.local/bin/mpm / PATH is
+	// the canonical install. The audit log is populated at module load
+	// by resolveMpmBinary() above.
 	const lines = [
 		``,
 		`⚠ mpm-opencode BOOT WARNING: mpm health check failed`,
 		`  reason: ${reason}`,
-		`  check that ${bin} exists and is healthy.`,
+		`  resolved mpm: ${bin}`,
+		`  discovery audit:`,
+		..._discoveryAttempts.map(
+			(a) => `    - [${a.reason}] ${a.candidate}` +
+				` (exists=${a.exists}, executable=${a.executable}` +
+				(a.resolved ? `, resolved=${a.resolved}` : "") +
+				")",
+		),
 		`  tools will fail-open on each call until mpm is reachable.`,
 		``,
 	];
@@ -385,7 +414,11 @@ function registerDomainTool(
 // --------------------------------------------------------------------------
 
 const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
-	const bin = process.env.MPM_BINARY ?? "mpm";
+	// Use the cached, deterministic MPM binary resolution. The same
+	// path is used by every tool call and the boot health check, so
+	// the operator sees a consistent resolution across the process.
+	// (See resolveMpmBinary() above for the discovery algorithm.)
+	const bin = RESOLVED_MPM_BINARY;
 
 	// Boot-time health check. Logs to console.warn on failure so the
 	// operator sees it on every OpenCode restart. Per-call failures

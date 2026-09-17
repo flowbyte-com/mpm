@@ -31,6 +31,7 @@ Adapter parity invariants pinned:
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -238,3 +239,69 @@ class InstallerScopeSafety(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoShellStartupMutations(unittest.TestCase):
+    """B3 regression: the installer must NOT modify shell startup files."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="mpm-opencode-shell-"))
+        # Pre-populate fake shell startup files so we can detect mutation.
+        self.fake_home = self.tmpdir / "home"
+        self.fake_home.mkdir(parents=True, exist_ok=True)
+        for fname, content in [
+            (".bashrc", "# original bashrc\n"),
+            (".profile", "# original profile\n"),
+            (".zshrc", "# original zshrc\n"),
+            (".bash_profile", "# original bash_profile\n"),
+        ]:
+            (self.fake_home / fname).write_text(content)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_with_home(self, args: list[str]):
+        env = {k: v for k, v in os.environ.items() if k != "HOME"}
+        env["HOME"] = str(self.fake_home)
+        return subprocess.run(
+            [sys.executable, str(INSTALLER), *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+
+    def test_install_does_not_modify_shell_startup_files(self):
+        target = self.tmpdir / "AGENTS.md"
+        result = self._run_with_home([
+            "--scope", "user",
+            "--target", str(target),
+            "--snippet", str(SNIPPET),
+        ])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # All shell startup files must be untouched.
+        for fname in [".bashrc", ".profile", ".zshrc", ".bash_profile"]:
+            actual = (self.fake_home / fname).read_text()
+            self.assertEqual(
+                actual,
+                "# original " + fname.lstrip(".") + "\n",
+                f"installer must not modify {fname}; got:\n{actual}",
+            )
+
+    def test_install_does_not_path_export_into_rc(self):
+        # Explicit pin: the installer must not write PATH=... into any
+        # startup file. This guards against "helpful" installers that
+        # try to fix shell PATH by editing rc files.
+        target = self.tmpdir / "AGENTS.md"
+        self._run_with_home([
+            "--scope", "user",
+            "--target", str(target),
+            "--snippet", str(SNIPPET),
+        ])
+        for fname in [".bashrc", ".profile", ".zshrc"]:
+            text = (self.fake_home / fname).read_text()
+            for bad in ["PATH=", "export PATH", ".mpm/bin", "MPM_BINARY="]:
+                self.assertNotIn(
+                    bad, text,
+                    f"startup file {fname} must not contain {bad!r}; got:\n{text}",
+                )
