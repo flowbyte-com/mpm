@@ -132,7 +132,7 @@ func main() {
 	//                    unknown frameworks surface as status='error'
 	//                    rows in drill_runs, never as silent failures.
 	// openclaw_ingest  → per-tick file watcher at /home/v/.mpm/run/ingest.md.
-	//                    Drains the openclaw-mpm-memory plugin's
+	//                    Drains the mpm-memory-openclaw plugin's
 	//                    memory-flush output into scheduled_wakes (kind
 	//                    ephemeral_compaction_ready). Lives behind
 	//                    safety rails (path allowlist, symlink refuse,

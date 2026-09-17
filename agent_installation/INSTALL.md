@@ -117,7 +117,7 @@ Both paths converge on:
     `mcp__mpm__` for Hermes, bare for OpenCode and Pi).
   - The host-specific wrapper markers (`<!-- BEGIN/END MPM-MANAGED
     SECTION:… -->` for Claude/OpenCode/Pi, `<!-- BEGIN/END MPM-MANAGED
-    BLOCK:hermes-mpm -->` for Hermes).
+    BLOCK:mpm-hermes -->` for Hermes).
 
 If you cannot or do not want to run the installer, copy the example
 for your host from the top of the snippets file and paste it into the
@@ -158,13 +158,13 @@ the same MPM install and database.
 > **Adoption note (OpenClaw is the exception).** Most hosts require
 > editing a persistent-instruction file (CLAUDE.md / AGENTS.md /
 > .hermes.md) to teach the agent the MPM behavioral contract.
-> **OpenClaw does not.** The `openclaw-mpm-memory` plugin adopts the
+> **OpenClaw does not.** The `mpm-memory-openclaw` plugin adopts the
 > wake invariant through the OpenClaw typed-hook chain
 > (`session_start` → `agent_turn_prepare` returning `prependContext`).
 > The plugin fetches the wake context, caches it per session, and
 > injects it into the agent prompt — the agent therefore wakes from MPM
 > without any SOUL.md / AGENTS.md / CLAUDE.md edit. The same hook chain
-> is documented in [`openclaw-mpm-memory/index.js`](./openclaw-mpm-memory/index.js)
+> is documented in [`mpm-memory-openclaw/index.js`](./mpm-memory-openclaw/index.js)
 > (`api.on("session_start", ...)` + `api.on("agent_turn_prepare", ...)`).
 
 ### What gets installed
@@ -172,8 +172,8 @@ the same MPM install and database.
 | Surface | Where | Mechanism |
 |---|---|---|
 | **MCP stdio bundle** | OpenClaw runtime config (not in this repo) | `mcp.servers.mpm.command`, `mcp.servers.mpm.env.MPM_WORKSPACE` |
-| **Memory slot plugin** | `~/.openclaw/extensions/openclaw-mpm-memory/` | OpenClaw plugin (`kind:"memory"`); routes `memory_search`/`memory_get` to MPM. **Also wires the wake-context adoption hooks (`session_start` + `agent_turn_prepare` returning `prependContext`) and implements OpenClaw's memory-runtime classification contract — this is how OpenClaw adopts the wake invariant without a persistent-instruction file edit.** |
-| **Auto-mode/persona plugin** *(optional)* | `~/.openclaw/extensions/openclaw-mpm-auto-mode-persona/` | OpenClaw plugin; per-turn mode/persona injection via `mpm route --apply` |
+| **Memory slot plugin** | `~/.openclaw/extensions/mpm-memory-openclaw/` | OpenClaw plugin (`kind:"memory"`); routes `memory_search`/`memory_get` to MPM. **Also wires the wake-context adoption hooks (`session_start` + `agent_turn_prepare` returning `prependContext`) and implements OpenClaw's memory-runtime classification contract — this is how OpenClaw adopts the wake invariant without a persistent-instruction file edit.** |
+| **Auto-mode/persona plugin** *(optional)* | `~/.openclaw/extensions/mpm-auto-mode-persona-openclaw/` | OpenClaw plugin; per-turn mode/persona injection via `mpm route --apply` |
 
 ### Installation
 
@@ -198,7 +198,7 @@ openclaw gateway restart
 > MCP server entry.
 
 A canonical `.mcp.json` snapshot lives at
-[`openclaw-mpm-memory/.mcp.json`](./openclaw-mpm-memory/.mcp.json) for
+[`mpm-memory-openclaw/.mcp.json`](./mpm-memory-openclaw/.mcp.json) for
 reproducibility.
 
 **Strengths.** Deterministic absolute binary path (PATH-independent).
@@ -210,12 +210,12 @@ disposes on mid-session gateway restart — recovery is to fall back to
 #### Step 2 — Memory slot plugin (read-only, satisfies doctor check)
 
 ```bash
-cd openclaw-mpm-memory
-openclaw plugins install ./openclaw-mpm-memory --link
+cd mpm-memory-openclaw
+openclaw plugins install ./mpm-memory-openclaw --link
 ./install.sh                                               # idempotent bootstrap; persists allowConversationAccess=true
-openclaw config set plugins.entries.openclaw-mpm-memory.enabled true
-openclaw config set plugins.entries.openclaw-mpm-memory.hooks.allowPromptInjection true   # required for agent_turn_prepare
-openclaw config set plugins.slots.memory openclaw-mpm-memory
+openclaw config set plugins.entries.mpm-memory-openclaw.enabled true
+openclaw config set plugins.entries.mpm-memory-openclaw.hooks.allowPromptInjection true   # required for agent_turn_prepare
+openclaw config set plugins.slots.memory mpm-memory-openclaw
 openclaw gateway restart
 openclaw doctor --lint --only core/doctor/memory-search --json   # expect ok:true
 ```
@@ -234,19 +234,19 @@ sources — scratchpad + explicit memories).
 #### Step 3 — Auto-route plugin (optional; turn-key mode/persona injection)
 
 ```bash
-openclaw plugins install ./openclaw-mpm-auto-mode-persona --link
-openclaw plugins inspect openclaw-mpm-auto-mode-persona --runtime --json
+openclaw plugins install ./mpm-auto-mode-persona-openclaw --link
+openclaw plugins inspect mpm-auto-mode-persona-openclaw --runtime --json
 ```
 
 On every inbound prompt, this plugin shells out to `mpm route --apply`
 and appends MPM's returned `<system-reminder>` block to the bootstrap
 prompt. Lets MPM own mode/persona switching without touching OpenClaw
-core. Configuration (per `openclaw-mpm-auto-mode-persona/README.md`):
+core. Configuration (per `mpm-auto-mode-persona-openclaw/README.md`):
 
 ```yaml
 plugins:
   entries:
-    openclaw-mpm-auto-mode-persona:
+    mpm-auto-mode-persona-openclaw:
       config:
         enabled: true        # default true
         mpmBin: mpm          # PATH-resolved
@@ -279,7 +279,7 @@ mpm recall --semantic "smoke test"
 
 #### Wake-context delivery is automatic
 
-The `openclaw-mpm-memory` plugin uses the OpenClaw typed-hook chain
+The `mpm-memory-openclaw` plugin uses the OpenClaw typed-hook chain
 (`session_start` → `agent_turn_prepare` returning `prependContext`) to
 inject MPM wake context into the agent prompt **without** any persistent
 instruction block in `SOUL.md` or `AGENTS.md`. The sessionKey used to
@@ -309,7 +309,7 @@ lands. The cache still wins on subsequent turns in the same session.
 `classifyWorkspaceMemoryPaths` (returns `[]`). This stops the gateway's
 separate automatic BOOTSRAP.md / USER.md memory-context pipeline from
 excluding the MPM slot for "missing provenance classification" — see
-the openclaw-mpm-memory README for the failure mode this prevents.
+the mpm-memory-openclaw README for the failure mode this prevents.
 
 ### Uninstall
 
@@ -323,11 +323,11 @@ openclaw config set mcp.servers.mpm.command ''              # or remove the line
 openclaw gateway restart
 
 # Memory slot plugin
-openclaw plugins uninstall openclaw-mpm-memory
+openclaw plugins uninstall mpm-memory-openclaw
 openclaw config set plugins.slots.memory memory-core          # restore default
 
 # Auto-route plugin
-openclaw plugins uninstall openclaw-mpm-auto-mode-persona
+openclaw plugins uninstall mpm-auto-mode-persona-openclaw
 openclaw gateway restart
 ```
 
@@ -370,22 +370,22 @@ For per-project CLAUDE.md override: copy `CLAUDE.md.snippet` into a
 project-local `.claude/CLAUDE.md` or `<project>/CLAUDE.md` and run:
 
 ```bash
-python3 ~/.mpm/agent_installation/claude-code-mpm/scripts/install_claude_instructions.py \
+python3 ~/.mpm/agent_installation/mpm-claude-code/scripts/install_claude_instructions.py \
     --scope project \
     --target <project>/.claude/CLAUDE.md \
-    --snippet ~/.mpm/agent_installation/claude-code-mpm/templates/CLAUDE.md.snippet
+    --snippet ~/.mpm/agent_installation/mpm-claude-code/templates/CLAUDE.md.snippet
 ```
 
 ### Installation
 
 ```bash
-cd ~/.mpm/agent_installation/claude-code-mpm
+cd ~/.mpm/agent_installation/mpm-claude-code
 ./install.sh                                              # one-shot: MCP + CLAUDE.md
 ```
 
 The install script:
 1. Backs up any existing `~/.claude/.mcp.json` to
-   `~/.claude/backups/claude-code-mpm-<TS>/`.
+   `~/.claude/backups/mpm-claude-code-<TS>/`.
 2. Materializes `.mcp.json.template` into `~/.claude/.mcp.json` with
    `${HOME}` substituted.
 3. **Merges** with any existing `mcpServers` — never clobbers other
@@ -451,7 +451,7 @@ the tool list).
 Removes the `mpm` entry from `~/.claude/.mcp.json` (or removes the
 file if it was the only entry) and strips the managed section from
 `~/.claude/CLAUDE.md`. Original state is preserved in
-`~/.claude/backups/claude-code-mpm-<TS>/`.
+`~/.claude/backups/mpm-claude-code-<TS>/`.
 
 ### Provenance configuration
 
@@ -492,7 +492,7 @@ regenerate.
 
 | File / dir | Managed by | Purpose |
 |---|---|---|
-| `~/.config/opencode/plugin/opencode-mpm` | Symlink (manual or installer) | OpenCode plugin entry (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full 22-tool substrate registry) |
+| `~/.config/opencode/plugin/mpm-opencode` | Symlink (manual or installer) | OpenCode plugin entry (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full 22-tool substrate registry) |
 | `<project>/AGENTS.md` (or `~/.config/opencode/AGENTS.md`) | `install_agents_instructions.py` | Persistent instructions: MPM behavioral protocol in a managed block |
 | `~/.mpm/bin/mpm` | External (Makefile + scripts/install.sh) | `mpm` binary on `$PATH` |
 
@@ -512,17 +512,17 @@ the user-level one when both exist.
 
 ```bash
 # 1. install the plugin into opencode's plugin dir
-ln -s "$HOME/.mpm/agent_installation/opencode-mpm" \
-      "$HOME/.config/opencode/plugin/opencode-mpm"
+ln -s "$HOME/.mpm/agent_installation/mpm-opencode" \
+      "$HOME/.config/opencode/plugin/mpm-opencode"
 
 # 2. make sure ~/.mpm/bin/mpm is on PATH (the plugin's PATH-resolved
 #    default is `mpm`; this exports the canonical install root)
 export PATH=$HOME/.mpm/bin:$PATH
 
 # 3. install the AGENTS.md behavioral section (user scope):
-python3 ~/.mpm/agent_installation/opencode-mpm/scripts/install_agents_instructions.py \
+python3 ~/.mpm/agent_installation/mpm-opencode/scripts/install_agents_instructions.py \
     --scope user \
-    --snippet ~/.mpm/agent_installation/opencode-mpm/templates/AGENTS.md.snippet
+    --snippet ~/.mpm/agent_installation/mpm-opencode/templates/AGENTS.md.snippet
 
 # 4. (re)start opencode — the plugin will register and emit the boot
 #    health check
@@ -546,8 +546,8 @@ grep -c 'BEGIN MPM-MANAGED SECTION:opencode-instructions' \
 # expect: 1
 
 # End-to-end via the plugin's exposed tool:
-# (in OpenCode): "use mpm__mpm_memory action=save to remember that opencode-mpm integration smoke test passed"
-mpm recall --semantic "opencode-mpm integration smoke test"
+# (in OpenCode): "use mpm__mpm_memory action=save to remember that mpm-opencode integration smoke test passed"
+mpm recall --semantic "mpm-opencode integration smoke test"
 ```
 
 ### Wake-context delivery — `experimental.chat.system.transform`
@@ -565,7 +565,7 @@ is `mpm call mpm_context --payload '{"action":"read_wake_context",…}'`
 ### Build (only needed if you edit the plugin source)
 
 ```bash
-cd ~/.mpm/agent_installation/opencode-mpm
+cd ~/.mpm/agent_installation/mpm-opencode
 npm install
 npm run build
 # emits dist/index.js (the runtime entry) and dist/index.d.ts
@@ -575,10 +575,10 @@ npm run build
 
 ```bash
 # Remove the plugin symlink:
-rm "$HOME/.config/opencode/plugin/opencode-mpm"
+rm "$HOME/.config/opencode/plugin/mpm-opencode"
 
 # Strip the managed section from AGENTS.md:
-python3 ~/.mpm/agent_installation/opencode-mpm/scripts/install_agents_instructions.py \
+python3 ~/.mpm/agent_installation/mpm-opencode/scripts/install_agents_instructions.py \
     --scope user \
     --uninstall
 
@@ -649,9 +649,9 @@ behavioral section** for a specific project:
 
 ```bash
 cd /path/to/project
-python3 ~/.mpm/agent_installation/hermes-mpm/scripts/install_hermes_instructions.py \
+python3 ~/.mpm/agent_installation/mpm-hermes/scripts/install_hermes_instructions.py \
     --target-dir /path/to/project \
-    --snippet ~/.mpm/agent_installation/hermes-mpm/templates/hermes.md.snippet
+    --snippet ~/.mpm/agent_installation/mpm-hermes/templates/hermes.md.snippet
 ```
 
 The installer writes `/path/to/project/.hermes.md` with leading
@@ -669,7 +669,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
 # expect: 3   (default initial surface; MPM_EXPOSE_ALL_TOOLS=1 → 22)
 
 # 2. .hermes.md was written with exactly one managed block:
-grep -c '<!-- BEGIN MPM-MANAGED BLOCK:hermes-mpm -->' /path/to/project/.hermes.md
+grep -c '<!-- BEGIN MPM-MANAGED BLOCK:mpm-hermes -->' /path/to/project/.hermes.md
 # expect: 1
 
 # 3. The skill is loadable (Hermes-side):
@@ -684,7 +684,7 @@ mpm call mpm_system --payload '{"action":"health_check","params":{}}' \
 ### Uninstall
 
 ```bash
-python3 ~/.mpm/agent_installation/hermes-mpm/scripts/install_hermes_instructions.py \
+python3 ~/.mpm/agent_installation/mpm-hermes/scripts/install_hermes_instructions.py \
     --target-dir /path/to/project \
     --uninstall
 ```
@@ -716,7 +716,7 @@ would be empty, and writes a backup before mutation.
 
 Pi participates in the MPM substrate via:
 
-1. **Pi extension.** `pi-mpm/index.ts` registers a **17-tool subset**
+1. **Pi extension.** `mpm-pi/index.ts` registers a **17-tool subset**
    of the full 22-tool MPM registry (14 Domain Tools via Fat RPC + 3
    Standalones: `mpm_retrieval_diagnose`, `log_to_changelog`,
    `request_review`). Tools in the full registry not exposed here
@@ -758,12 +758,12 @@ refresh path is the typed `mpm_context` tool action
 
 ```bash
 # 1. Add the extension path to ~/.pi/agent/settings.json:
-#    "extensions": ["~/.mpm/agent_installation/pi-mpm"]
+#    "extensions": ["~/.mpm/agent_installation/mpm-pi"]
 
 # 2. Install the AGENTS.md behavioral section (global scope):
-python3 ~/.mpm/agent_installation/pi-mpm/scripts/install_agents_instructions.py \
+python3 ~/.mpm/agent_installation/mpm-pi/scripts/install_agents_instructions.py \
     --scope user \
-    --snippet ~/.mpm/agent_installation/pi-mpm/templates/AGENTS.md.snippet
+    --snippet ~/.mpm/agent_installation/mpm-pi/templates/AGENTS.md.snippet
 
 # 3. Make sure `mpm` is on PATH (Pi spawns `mpm` as a subprocess):
 export PATH=$HOME/.mpm/bin:$PATH
@@ -781,15 +781,15 @@ grep -c '<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->' \
 #    :tools — expect mpm_memory, mpm_handoff, mpm_scratchpad, mpm_wakes, ...
 
 # 3. End-to-end via a Pi session:
-#    "use mpm_memory action=save to remember that pi-mpm integration smoke test passed"
-mpm recall --semantic "pi-mpm integration smoke test"
+#    "use mpm_memory action=save to remember that mpm-pi integration smoke test passed"
+mpm recall --semantic "mpm-pi integration smoke test"
 ```
 
 ### Uninstall
 
 ```bash
 # Remove the extension entry from settings.json, then:
-python3 ~/.mpm/agent_installation/pi-mpm/scripts/install_agents_instructions.py \
+python3 ~/.mpm/agent_installation/mpm-pi/scripts/install_agents_instructions.py \
     --scope user \
     --uninstall
 ```
@@ -825,25 +825,25 @@ host-specific snippet installer without re-wiring the MCP server:
 
 ```bash
 # Claude Code (already has MCP wiring, just needs CLAUDE.md):
-python3 ~/.mpm/agent_installation/claude-code-mpm/scripts/install_claude_instructions.py \
+python3 ~/.mpm/agent_installation/mpm-claude-code/scripts/install_claude_instructions.py \
     --scope user --home "$HOME" \
     --target ~/.claude/CLAUDE.md \
-    --snippet ~/.mpm/agent_installation/claude-code-mpm/templates/CLAUDE.md.snippet
+    --snippet ~/.mpm/agent_installation/mpm-claude-code/templates/CLAUDE.md.snippet
 
 # OpenCode:
-python3 ~/.mpm/agent_installation/opencode-mpm/scripts/install_agents_instructions.py \
+python3 ~/.mpm/agent_installation/mpm-opencode/scripts/install_agents_instructions.py \
     --scope user \
-    --snippet ~/.mpm/agent_installation/opencode-mpm/templates/AGENTS.md.snippet
+    --snippet ~/.mpm/agent_installation/mpm-opencode/templates/AGENTS.md.snippet
 
 # Hermes (per project):
-python3 ~/.mpm/agent_installation/hermes-mpm/scripts/install_hermes_instructions.py \
+python3 ~/.mpm/agent_installation/mpm-hermes/scripts/install_hermes_instructions.py \
     --target-dir /path/to/project \
-    --snippet ~/.mpm/agent_installation/hermes-mpm/templates/hermes.md.snippet
+    --snippet ~/.mpm/agent_installation/mpm-hermes/templates/hermes.md.snippet
 
 # Pi:
-python3 ~/.mpm/agent_installation/pi-mpm/scripts/install_agents_instructions.py \
+python3 ~/.mpm/agent_installation/mpm-pi/scripts/install_agents_instructions.py \
     --scope user \
-    --snippet ~/.mpm/agent_installation/pi-mpm/templates/AGENTS.md.snippet
+    --snippet ~/.mpm/agent_installation/mpm-pi/templates/AGENTS.md.snippet
 ```
 
 For hosts not yet in this directory, copy a snippet from any of the
@@ -886,7 +886,7 @@ contract honest.
 | `mpm-mcp` boots but tools/list returns 0 tools | Binary built without FTS5 tag | Rebuild with `-tags fts5 -DSQLITE_ENABLE_FTS5=1` |
 | `db_path` in health_check differs across hosts | MPM_DB_PATH / MPM_WORKSPACE / symlink drift | Set `MPM_REQUIRED_DB_PATH` in `~/.config/mpm/mpm.env` to the canonical DB path; restart scheduler |
 | Claude Code's `mpm__*` tools don't appear | MCP bundle not reloaded after install.sh | Restart Claude Code (mcpServers are loaded at session start) |
-| OpenClaw doctor check still fails after install | `plugins.slots.memory` not set | `openclaw config set plugins.slots.memory openclaw-mpm-memory` |
+| OpenClaw doctor check still fails after install | `plugins.slots.memory` not set | `openclaw config set plugins.slots.memory mpm-memory-openclaw` |
 | Hermes `.hermes.md` not picked up | Project not under a git root | Verify `_find_hermes_md` would walk into the directory; install `--target /path/to/.hermes.md` explicitly |
 | Pi extension not visible in `:tools` | Extension path wrong in settings.json | Check `~/.pi/agent/settings.json` `"extensions"` array; restart Pi |
 | Installer refuses to modify target file | Corrupted managed block (one marker without the other) | Restore from `~/.claude/CLAUDE.md.bak.<TS>` (or analogous `.bak.*`) or hand-remove the orphan marker, then re-run installer |
@@ -929,9 +929,9 @@ rollback points are available.
 - [`README.md`](./README.md) — orientation, supported hosts, design principle
 - [`mpm-agent-protocol.md`](./mpm-agent-protocol.md) — canonical behavioral protocol
 - Each host's own README / SKILL.md:
-  - [`claude-code-mpm/README.md`](./claude-code-mpm/README.md)
-  - [`opencode-mpm/README.md`](./opencode-mpm/README.md)
-  - [`openclaw-mpm-memory/README.md`](./openclaw-mpm-memory/README.md)
-  - [`openclaw-mpm-auto-mode-persona/README.md`](./openclaw-mpm-auto-mode-persona/README.md)
-  - [`hermes-mpm/SKILL.md`](./hermes-mpm/SKILL.md)
-  - [`pi-mpm/README.md`](./pi-mpm/README.md)
+  - [`mpm-claude-code/README.md`](./mpm-claude-code/README.md)
+  - [`mpm-opencode/README.md`](./mpm-opencode/README.md)
+  - [`mpm-memory-openclaw/README.md`](./mpm-memory-openclaw/README.md)
+  - [`mpm-auto-mode-persona-openclaw/README.md`](./mpm-auto-mode-persona-openclaw/README.md)
+  - [`mpm-hermes/SKILL.md`](./mpm-hermes/SKILL.md)
+  - [`mpm-pi/README.md`](./mpm-pi/README.md)

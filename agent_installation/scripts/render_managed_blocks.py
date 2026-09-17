@@ -33,7 +33,7 @@ Usage (developer workflow):
     python3 render_managed_blocks.py --check
 
     # Render one adapter only (debugging):
-    python3 render_managed_blocks.py --only opencode-mpm
+    python3 render_managed_blocks.py --only mpm-opencode
 
     # Print the universal canonical block to stdout and exit:
     python3 render_managed_blocks.py --dump canonical
@@ -65,7 +65,7 @@ from typing import Iterable
 
 ADAPTERS: list[dict] = [
     {
-        "name": "claude-code-mpm",
+        "name": "mpm-claude-code",
         "tool_prefix": "mpm__",
         "snippet_path": "templates/CLAUDE.md.snippet",
         "copy_paste_outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->",
@@ -73,7 +73,7 @@ ADAPTERS: list[dict] = [
         "header": (
             "# MPM (Memory Persistence Module) — Claude Code integration.\n"
             "\n"
-            "> **Managed by the claude-code-mpm plugin.** Edit the canonical\n"
+            "> **Managed by the mpm-claude-code plugin.** Edit the canonical\n"
             "> managed block in\n"
             "> `~/.mpm/agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md`,\n"
             "> not this file. The plugin's installer regenerates this section\n"
@@ -84,7 +84,7 @@ ADAPTERS: list[dict] = [
             "\n"
             "## Session-start hook (auto-injected wake)\n"
             "\n"
-            "The `claude-code-mpm` installer wires a `SessionStart` hook\n"
+            "The `mpm-claude-code` installer wires a `SessionStart` hook\n"
             "into `~/.claude/settings.json` and materializes the hook\n"
             "command at `~/.claude/hooks/mpm-session-start`. The hook\n"
             "fetches wake context via `mpm__mpm_context` action\n"
@@ -108,13 +108,13 @@ ADAPTERS: list[dict] = [
         ),
     },
     {
-        "name": "opencode-mpm",
+        "name": "mpm-opencode",
         "tool_prefix": "",
         "snippet_path": "templates/AGENTS.md.snippet",
         "copy_paste_outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->",
         "copy_paste_outer_end": "<!-- END MPM-MANAGED SECTION:opencode-instructions -->",
         "header": (
-            "> The opencode-mpm plugin handles session-start wake-context\n"
+            "> The mpm-opencode plugin handles session-start wake-context\n"
             "> injection automatically via its\n"
             "> `experimental.chat.system.transform` hook. This AGENTS.md\n"
             "> section adds the **behavioral** layer (handoff discipline,\n"
@@ -127,7 +127,7 @@ ADAPTERS: list[dict] = [
             "\n"
             "## OpenCode-specific notes\n"
             "\n"
-            "The opencode-mpm plugin's `experimental.chat.system.transform`\n"
+            "The mpm-opencode plugin's `experimental.chat.system.transform`\n"
             "hook handles wake-context injection automatically — you do not\n"
             "need to call `read_wake_context` manually at session start.\n"
             "\n"
@@ -141,7 +141,7 @@ ADAPTERS: list[dict] = [
         ),
     },
     {
-        "name": "pi-mpm",
+        "name": "mpm-pi",
         "tool_prefix": "",
         "snippet_path": "templates/AGENTS.md.snippet",
         "copy_paste_outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->",
@@ -164,8 +164,8 @@ ADAPTERS: list[dict] = [
             "  2. AGENTS.md in any parent directory of cwd (walking up)\n"
             "  3. AGENTS.md in cwd (current project)\n"
             "\n"
-            "The pi-mpm extension at\n"
-            "`~/.mpm/agent_installation/pi-mpm/` registers the typed\n"
+            "The mpm-pi extension at\n"
+            "`~/.mpm/agent_installation/mpm-pi/` registers the typed\n"
             "transport for MPM tools; this AGENTS.md adds the behavioral\n"
             "layer (wake, persist, handoff, recovery).\n"
             "\n"
@@ -174,11 +174,11 @@ ADAPTERS: list[dict] = [
         ),
     },
     {
-        "name": "hermes-mpm",
+        "name": "mpm-hermes",
         "tool_prefix": "mcp__mpm__",
         "snippet_path": "templates/hermes.md.snippet",
-        "copy_paste_outer_begin": "<!-- BEGIN MPM MANAGED BLOCK:hermes-mpm -->",
-        "copy_paste_outer_end": "<!-- END MPM MANAGED BLOCK:hermes-mpm -->",
+        "copy_paste_outer_begin": "<!-- BEGIN MPM MANAGED BLOCK:mpm-hermes -->",
+        "copy_paste_outer_end": "<!-- END MPM MANAGED BLOCK:mpm-hermes -->",
         "header": (
             "> Hermes uses `.hermes.md` (or `HERMES.md`) at the project\n"
             "> root as the persistent behavioral instruction surface — it\n"

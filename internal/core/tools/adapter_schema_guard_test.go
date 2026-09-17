@@ -26,11 +26,11 @@ type callSite struct {
 
 // TestAdapterCallsites_MatchGoSchema is the structural enforcement of
 // lesson 6df12582cbdb9c0c (mpm_lessons): when the Go MCP registry
-// renames or removes a tool, every subprocess adapter (openclaw-mpm-memory,
-// pi-mpm, claude-code-mpm, hermes-mpm, etc.) MUST be updated in the same
+// renames or removes a tool, every subprocess adapter (mpm-memory-openclaw,
+// mpm-pi, mpm-claude-code, mpm-hermes, etc.) MUST be updated in the same
 // commit cycle, or this test fails.
 //
-// The original failure mode: openclaw-mpm-memory kept calling
+// The original failure mode: mpm-memory-openclaw kept calling
 // `query_long_term_memory` after the 33 → 13 aggregator redesign.
 // The plugin's `callMpm(...)` invocations silently 404'd inside
 // OpenClaw's memory-slot adapter, surfacing as `disabled:true`
@@ -116,7 +116,7 @@ func TestAdapterCallsites_MatchGoSchema(t *testing.T) {
 
 	// Walk every adapter file and extract callMpm(...) callSites.
 	// Two patterns are recognised: `callMpm(...)` (JS/TS pattern used
-	// by openclaw + pi-mpm) and the underlying `callMpmTool(...)`
+	// by openclaw + mpm-pi) and the underlying `callMpmTool(...)`
 	// (openclaw's wrapper). Both share the same (tool, payload) shape.
 	var sites []callSite
 

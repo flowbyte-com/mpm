@@ -227,7 +227,7 @@ clean:
 #     user-scope instruction file (CLAUDE.md / AGENTS.md). Installers are
 #     idempotent; on a no-op they print a confirmation and exit 0.
 #   Hermes — skipped here (no installed managed block exists in this
-#     environment; the hermes-mpm SKILL.md documents the manual flow).
+#     environment; the mpm-hermes SKILL.md documents the manual flow).
 #   OpenClaw — uses runtime injection (no persistent managed block); refresh
 #     via its own install.sh which is a separate concern (plugin wiring, not
 #     instruction-file refresh).
@@ -243,23 +243,23 @@ refresh-installed:
 	@cd $(AGENT_INSTALL_DIR) && python3 scripts/render_managed_blocks.py || { echo "    FAIL: render_managed_blocks.py failed" >&2; exit 2; }
 	@echo ""
 	@echo "    [2/N] Claude Code: refreshing $(HOME)/.claude/CLAUDE.md"
-	@python3 $(AGENT_INSTALL_DIR)/claude-code-mpm/scripts/install_claude_instructions.py \
+	@python3 $(AGENT_INSTALL_DIR)/mpm-claude-code/scripts/install_claude_instructions.py \
 	    --scope user --home $(HOME) \
 	    --target $(HOME)/.claude/CLAUDE.md \
-	    --snippet $(AGENT_INSTALL_DIR)/claude-code-mpm/templates/CLAUDE.md.snippet \
+	    --snippet $(AGENT_INSTALL_DIR)/mpm-claude-code/templates/CLAUDE.md.snippet \
 	    || { echo "    FAIL: Claude Code refresh failed" >&2; exit 3; }
 	@echo ""
 	@echo "    [3/N] OpenCode: refreshing $(HOME)/.config/opencode/AGENTS.md"
-	@python3 $(AGENT_INSTALL_DIR)/opencode-mpm/scripts/install_agents_instructions.py \
+	@python3 $(AGENT_INSTALL_DIR)/mpm-opencode/scripts/install_agents_instructions.py \
 	    --scope user \
 	    --target $(HOME)/.config/opencode/AGENTS.md \
-	    --snippet $(AGENT_INSTALL_DIR)/opencode-mpm/templates/AGENTS.md.snippet \
+	    --snippet $(AGENT_INSTALL_DIR)/mpm-opencode/templates/AGENTS.md.snippet \
 	    || { echo "    FAIL: OpenCode refresh failed" >&2; exit 4; }
 	@echo ""
 	@echo "    [4/N] Pi: refreshing $(HOME)/.pi/agent/AGENTS.md"
-	@python3 $(AGENT_INSTALL_DIR)/pi-mpm/scripts/install_agents_instructions.py \
+	@python3 $(AGENT_INSTALL_DIR)/mpm-pi/scripts/install_agents_instructions.py \
 	    --scope user \
-	    --snippet $(AGENT_INSTALL_DIR)/pi-mpm/templates/AGENTS.md.snippet \
+	    --snippet $(AGENT_INSTALL_DIR)/mpm-pi/templates/AGENTS.md.snippet \
 	    || { echo "    FAIL: Pi refresh failed" >&2; exit 5; }
 	@echo ""
 	@echo "    [5/N] Hermes: no persistent managed block to refresh (skipping)"

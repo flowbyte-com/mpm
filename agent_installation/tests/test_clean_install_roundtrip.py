@@ -2,8 +2,8 @@
 test_clean_install_roundtrip.py — Verify clean install/uninstall
 round-trips for each host adapter using the regenerated snippets.
 
-For each of the four file-based adapters (claude-code-mpm, opencode-mpm,
-pi-mpm, hermes-mpm), this test:
+For each of the four file-based adapters (mpm-claude-code, mpm-opencode,
+mpm-pi, mpm-hermes), this test:
 
   1. Creates a fresh empty target file (or a target with pre-existing
      user content).
@@ -55,32 +55,32 @@ _render = _load_render_module()
 # Per-adapter installer invocation. Each entry maps the adapter name to
 # the installer CLI args and the expected managed-section regex.
 INSTALLERS = {
-    "claude-code-mpm": {
-        "installer": AGENT_INSTALLATION / "claude-code-mpm/scripts/install_claude_instructions.py",
-        "snippet": AGENT_INSTALLATION / "claude-code-mpm/templates/CLAUDE.md.snippet",
+    "mpm-claude-code": {
+        "installer": AGENT_INSTALLATION / "mpm-claude-code/scripts/install_claude_instructions.py",
+        "snippet": AGENT_INSTALLATION / "mpm-claude-code/templates/CLAUDE.md.snippet",
         "managed_begin": "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->",
         "managed_end": "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->",
         "extra_args": ["--scope", "user", "--home", str(Path.home())],
     },
-    "opencode-mpm": {
-        "installer": AGENT_INSTALLATION / "opencode-mpm/scripts/install_agents_instructions.py",
-        "snippet": AGENT_INSTALLATION / "opencode-mpm/templates/AGENTS.md.snippet",
+    "mpm-opencode": {
+        "installer": AGENT_INSTALLATION / "mpm-opencode/scripts/install_agents_instructions.py",
+        "snippet": AGENT_INSTALLATION / "mpm-opencode/templates/AGENTS.md.snippet",
         "managed_begin": "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->",
         "managed_end": "<!-- END MPM-MANAGED SECTION:opencode-instructions -->",
         "extra_args": ["--scope", "user"],
     },
-    "pi-mpm": {
-        "installer": AGENT_INSTALLATION / "pi-mpm/scripts/install_agents_instructions.py",
-        "snippet": AGENT_INSTALLATION / "pi-mpm/templates/AGENTS.md.snippet",
+    "mpm-pi": {
+        "installer": AGENT_INSTALLATION / "mpm-pi/scripts/install_agents_instructions.py",
+        "snippet": AGENT_INSTALLATION / "mpm-pi/templates/AGENTS.md.snippet",
         "managed_begin": "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->",
         "managed_end": "<!-- END MPM-MANAGED SECTION:pi-instructions -->",
         "extra_args": [],  # Pi installer defaults to user scope
     },
-    "hermes-mpm": {
-        "installer": AGENT_INSTALLATION / "hermes-mpm/scripts/install_hermes_instructions.py",
-        "snippet": AGENT_INSTALLATION / "hermes-mpm/templates/hermes.md.snippet",
-        "managed_begin": "<!-- BEGIN MPM-MANAGED BLOCK:hermes-mpm -->",
-        "managed_end": "<!-- END MPM-MANAGED BLOCK:hermes-mpm -->",
+    "mpm-hermes": {
+        "installer": AGENT_INSTALLATION / "mpm-hermes/scripts/install_hermes_instructions.py",
+        "snippet": AGENT_INSTALLATION / "mpm-hermes/templates/hermes.md.snippet",
+        "managed_begin": "<!-- BEGIN MPM-MANAGED BLOCK:mpm-hermes -->",
+        "managed_end": "<!-- END MPM-MANAGED BLOCK:mpm-hermes -->",
         "extra_args": [],  # --target-dir provided per-call
     },
 }
@@ -144,7 +144,7 @@ class CleanInstallRoundTrip(unittest.TestCase):
                             *cfg["extra_args"],
                             "--target", str(target),
                             "--snippet", str(cfg["snippet"])]
-                    if name == "hermes-mpm":
+                    if name == "mpm-hermes":
                         # Hermes installer takes --target, not --target-dir
                         pass  # already handled
                     proc = _run(args)
@@ -279,7 +279,7 @@ class DriftTestFailsOnMutatedSnippet(unittest.TestCase):
     """
 
     def test_drift_check_detects_mutation(self):
-        snippet = INSTALLERS["opencode-mpm"]["snippet"]
+        snippet = INSTALLERS["mpm-opencode"]["snippet"]
         original = snippet.read_text(encoding="utf-8")
         mutated = original + "\n<!-- drift-marker -->\n"
         try:

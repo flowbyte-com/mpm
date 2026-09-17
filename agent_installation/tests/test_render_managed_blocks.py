@@ -273,7 +273,7 @@ class CopyPasteExampleParity(unittest.TestCase):
         self.fail(f"adapter {name!r} not in ADAPTERS list")
 
     def test_claude_copy_paste_matches_rendered(self):
-        a = self._adapter("claude-code-mpm")
+        a = self._adapter("mpm-claude-code")
         actual = _render.extract_copy_paste_block(
             self.text, a["copy_paste_outer_begin"],
             a["copy_paste_outer_end"], a["name"],
@@ -284,7 +284,7 @@ class CopyPasteExampleParity(unittest.TestCase):
         )
 
     def test_opencode_copy_paste_matches_rendered(self):
-        a = self._adapter("opencode-mpm")
+        a = self._adapter("mpm-opencode")
         actual = _render.extract_copy_paste_block(
             self.text, a["copy_paste_outer_begin"],
             a["copy_paste_outer_end"], a["name"],
@@ -295,7 +295,7 @@ class CopyPasteExampleParity(unittest.TestCase):
         )
 
     def test_pi_copy_paste_matches_rendered(self):
-        a = self._adapter("pi-mpm")
+        a = self._adapter("mpm-pi")
         actual = _render.extract_copy_paste_block(
             self.text, a["copy_paste_outer_begin"],
             a["copy_paste_outer_end"], a["name"],
@@ -306,7 +306,7 @@ class CopyPasteExampleParity(unittest.TestCase):
         )
 
     def test_hermes_copy_paste_matches_rendered(self):
-        a = self._adapter("hermes-mpm")
+        a = self._adapter("mpm-hermes")
         actual = _render.extract_copy_paste_block(
             self.text, a["copy_paste_outer_begin"],
             a["copy_paste_outer_end"], a["name"],
@@ -351,12 +351,12 @@ class AdapterExclusion(unittest.TestCase):
     def test_openclaw_not_in_adapter_list(self):
         names = {a["name"] for a in _render.ADAPTERS}
         self.assertNotIn(
-            "openclaw-mpm-memory", names,
-            "openclaw-mpm-memory uses runtime injection — must not be in ADAPTERS",
+            "mpm-memory-openclaw", names,
+            "mpm-memory-openclaw uses runtime injection — must not be in ADAPTERS",
         )
         self.assertNotIn(
-            "openclaw-mpm-auto-mode-persona", names,
-            "openclaw-mpm-auto-mode-persona uses runtime injection — must not be in ADAPTERS",
+            "mpm-auto-mode-persona-openclaw", names,
+            "mpm-auto-mode-persona-openclaw uses runtime injection — must not be in ADAPTERS",
         )
 
 

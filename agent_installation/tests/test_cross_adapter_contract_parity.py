@@ -136,20 +136,20 @@ _PERSIST_FAMILIES = ("memory", "decisions", "lessons", "topics", "references")
 # the adapter name alone because the conventions differ (e.g.,
 # `install_claude_instructions.py` vs `install_agents_instructions.py`).
 _INSTALLERS = {
-    "claude-code-mpm": AGENT_INSTALLATION / "claude-code-mpm/scripts/install_claude_instructions.py",
-    "opencode-mpm":    AGENT_INSTALLATION / "opencode-mpm/scripts/install_agents_instructions.py",
-    "pi-mpm":          AGENT_INSTALLATION / "pi-mpm/scripts/install_agents_instructions.py",
-    "hermes-mpm":      AGENT_INSTALLATION / "hermes-mpm/scripts/install_hermes_instructions.py",
+    "mpm-claude-code": AGENT_INSTALLATION / "mpm-claude-code/scripts/install_claude_instructions.py",
+    "mpm-opencode":    AGENT_INSTALLATION / "mpm-opencode/scripts/install_agents_instructions.py",
+    "mpm-pi":          AGENT_INSTALLATION / "mpm-pi/scripts/install_agents_instructions.py",
+    "mpm-hermes":      AGENT_INSTALLATION / "mpm-hermes/scripts/install_hermes_instructions.py",
 }
 
 # Per-host extra CLI args for the installer. Each adapter's installer
 # takes different scope flags and home-dir overrides; this is a
 # test-only concern (the render script does not invoke installers).
 _EXTRA_INSTALL_ARGS = {
-    "claude-code-mpm": ["--scope", "user", "--home", str(Path.home())],
-    "opencode-mpm":    ["--scope", "user"],
-    "pi-mpm":          [],
-    "hermes-mpm":      [],
+    "mpm-claude-code": ["--scope", "user", "--home", str(Path.home())],
+    "mpm-opencode":    ["--scope", "user"],
+    "mpm-pi":          [],
+    "mpm-hermes":      [],
 }
 
 # Outer markers the installer actually emits in the target file. These
@@ -160,21 +160,21 @@ _EXTRA_INSTALL_ARGS = {
 # hyphen; others use MPM-MANAGED SECTION). The cross-adapter test counts
 # the installer-emitted markers, not the canonical-source wrappers.
 _INSTALL_OUTER_MARKERS = {
-    "claude-code-mpm": (
+    "mpm-claude-code": (
         "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->",
         "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->",
     ),
-    "opencode-mpm": (
+    "mpm-opencode": (
         "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->",
         "<!-- END MPM-MANAGED SECTION:opencode-instructions -->",
     ),
-    "pi-mpm": (
+    "mpm-pi": (
         "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->",
         "<!-- END MPM-MANAGED SECTION:pi-instructions -->",
     ),
-    "hermes-mpm": (
-        "<!-- BEGIN MPM-MANAGED BLOCK:hermes-mpm -->",
-        "<!-- END MPM-MANAGED BLOCK:hermes-mpm -->",
+    "mpm-hermes": (
+        "<!-- BEGIN MPM-MANAGED BLOCK:mpm-hermes -->",
+        "<!-- END MPM-MANAGED BLOCK:mpm-hermes -->",
     ),
 }
 
@@ -571,43 +571,43 @@ class InstallerContentAwareRefresh(unittest.TestCase):
         )
 
     def test_claude_code_installer_is_content_aware(self):
-        self._assert_content_aware(ADAPTERS["claude-code-mpm"]["installer"])
+        self._assert_content_aware(ADAPTERS["mpm-claude-code"]["installer"])
 
     def test_opencode_installer_is_content_aware(self):
-        self._assert_content_aware(ADAPTERS["opencode-mpm"]["installer"])
+        self._assert_content_aware(ADAPTERS["mpm-opencode"]["installer"])
 
     def test_pi_installer_is_content_aware(self):
-        self._assert_content_aware(ADAPTERS["pi-mpm"]["installer"])
+        self._assert_content_aware(ADAPTERS["mpm-pi"]["installer"])
 
     def test_hermes_installer_is_content_aware(self):
-        self._assert_content_aware(ADAPTERS["hermes-mpm"]["installer"])
+        self._assert_content_aware(ADAPTERS["mpm-hermes"]["installer"])
 
 
 # --- adapter test case classes (built dynamically) -------------------------
 
 
 class Test_ClaudeCode(AdapterContractMixin, unittest.TestCase):
-    snippet_path = ADAPTERS["claude-code-mpm"]["snippet"]
-    tool_prefix = ADAPTERS["claude-code-mpm"]["tool_prefix"]
-    persist_families = ADAPTERS["claude-code-mpm"]["persist_families"]
+    snippet_path = ADAPTERS["mpm-claude-code"]["snippet"]
+    tool_prefix = ADAPTERS["mpm-claude-code"]["tool_prefix"]
+    persist_families = ADAPTERS["mpm-claude-code"]["persist_families"]
 
 
 class Test_OpenCode(AdapterContractMixin, unittest.TestCase):
-    snippet_path = ADAPTERS["opencode-mpm"]["snippet"]
-    tool_prefix = ADAPTERS["opencode-mpm"]["tool_prefix"]
-    persist_families = ADAPTERS["opencode-mpm"]["persist_families"]
+    snippet_path = ADAPTERS["mpm-opencode"]["snippet"]
+    tool_prefix = ADAPTERS["mpm-opencode"]["tool_prefix"]
+    persist_families = ADAPTERS["mpm-opencode"]["persist_families"]
 
 
 class Test_Pi(AdapterContractMixin, unittest.TestCase):
-    snippet_path = ADAPTERS["pi-mpm"]["snippet"]
-    tool_prefix = ADAPTERS["pi-mpm"]["tool_prefix"]
-    persist_families = ADAPTERS["pi-mpm"]["persist_families"]
+    snippet_path = ADAPTERS["mpm-pi"]["snippet"]
+    tool_prefix = ADAPTERS["mpm-pi"]["tool_prefix"]
+    persist_families = ADAPTERS["mpm-pi"]["persist_families"]
 
 
 class Test_Hermes(AdapterContractMixin, unittest.TestCase):
-    snippet_path = ADAPTERS["hermes-mpm"]["snippet"]
-    tool_prefix = ADAPTERS["hermes-mpm"]["tool_prefix"]
-    persist_families = ADAPTERS["hermes-mpm"]["persist_families"]
+    snippet_path = ADAPTERS["mpm-hermes"]["snippet"]
+    tool_prefix = ADAPTERS["mpm-hermes"]["tool_prefix"]
+    persist_families = ADAPTERS["mpm-hermes"]["persist_families"]
 
 
 # --- canonical-source tool-reference stability contract ---------------------

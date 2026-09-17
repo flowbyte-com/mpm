@@ -167,7 +167,7 @@ the plugin install hook
 **Marker convention:** the block must sit between
 `<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->` and
 `<!-- END MPM-MANAGED SECTION:opencode-instructions -->`.
-**Manual verification (no installer):** the `opencode-mpm` plugin
+**Manual verification (no installer):** the `mpm-opencode` plugin
 reads `AGENTS.md` at session start AND injects wake context
 automatically via its `experimental.chat.system.transform` hook.
 Verify with `opencode run` against a project containing the file;
@@ -284,7 +284,7 @@ flag-style markers apply at every Pi-supported installation depth.
 **Manual verification (no installer):** start a Pi session against
 a directory containing the file with `--no-context-files` disabled
 (default). The agent should have wake context auto-injected by the
-`pi-mpm` extension's `session_start` hook, and should be able to
+`mpm-pi` extension's `session_start` hook, and should be able to
 record a handoff via the extension's typed transport (or via
 `mpm call mpm_handoff --payload '{"action":"write","params":…}'`
 on hosts without the full surface).
@@ -392,7 +392,7 @@ canonical protocol, not this block, for behavioural changes.
 
 **Target file:** `<project>/.hermes.md` (or `HERMES.md`).
 **Marker convention:** Hermes does not enforce a managed-block
-convention. The installer uses a leading `<!-- BEGIN MPM MANAGED BLOCK:hermes-mpm -->`
+convention. The installer uses a leading `<!-- BEGIN MPM MANAGED BLOCK:mpm-hermes -->`
 comment block as a stable re-install anchor; the canonical
 managed-block markers from this file (the universal
 `<!-- BEGIN MPM MANAGED BLOCK -->` pair) live inside it.
@@ -406,7 +406,7 @@ surface is restored by setting `MPM_EXPOSE_ALL_TOOLS=1` on the
 MCP env block (which exposes `mcp__mpm__mpm_handoff` directly).
 
 ```markdown
-<!-- BEGIN MPM MANAGED BLOCK:hermes-mpm -->
+<!-- BEGIN MPM MANAGED BLOCK:mpm-hermes -->
 <!-- BEGIN MPM MANAGED BLOCK -->
 <!-- source: agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md -->
 <!-- The full behavioural protocol is canonical at ~/.mpm/agent_installation/mpm-agent-protocol.md -->
@@ -501,7 +501,7 @@ canonical protocol, not this block, for behavioural changes.
    `mpm call` writes to the same substrate with the same
    provenance attribution as the native transport.
 <!-- END MPM MANAGED BLOCK -->
-<!-- END MPM MANAGED BLOCK:hermes-mpm -->
+<!-- END MPM MANAGED BLOCK:mpm-hermes -->
 ```
 
 ## OpenClaw
@@ -510,7 +510,7 @@ OpenClaw uses runtime injection rather than a persistent MPM
 instruction block.
 
 There is no MPM-managed Markdown file you write to. OpenClaw's
-`openclaw-mpm-memory` and `openclaw-mpm-auto-mode-persona`
+`mpm-memory-openclaw` and `mpm-auto-mode-persona-openclaw`
 plugins handle wake-context injection at session start — the
 agent receives the same seven invariants automatically through
 the system prompt, never through a file you maintain.
@@ -529,12 +529,12 @@ unavailable).
 
 ```
 git clone <repo> ~/.openclaw/workspace/projects/mpm  # or symlink
-cd ~/.openclaw/workspace/projects/mpm/openclaw-mpm-memory
+cd ~/.openclaw/workspace/projects/mpm/mpm-memory-openclaw
 ./install.sh
 ```
 
 For installation details and validation evidence, see
-[`openclaw-mpm-memory/README.md`](./openclaw-mpm-memory/README.md)
+[`mpm-memory-openclaw/README.md`](./mpm-memory-openclaw/README.md)
 and the OpenClaw row in `INSTALL.md`.
 
 If you are not using OpenClaw, you can stop reading. The rest of
@@ -680,7 +680,7 @@ target file, host wrapper markers, and verification command for each host.
 | Claude Code | `~/.claude/CLAUDE.md` (user-scope) or `<project>/CLAUDE.md` (project-scope via `--scope project`) | `<!-- BEGIN/END MPM-MANAGED SECTION:claude-code-instructions -->` | `claude --version && head -5 ~/.claude/CLAUDE.md && jq '.hooks.SessionStart' ~/.claude/settings.json` |
 | OpenCode | `~/.config/opencode/AGENTS.md` (user) or `<project>/AGENTS.md` (project) | `<!-- BEGIN/END MPM-MANAGED SECTION:opencode-instructions -->` | open a project in OpenCode; agent's system prompt contains MPM wake content |
 | Pi | `~/.pi/agent/AGENTS.md` (global) or `<project>/AGENTS.md` (per-project; Pi walks up from cwd) | `<!-- BEGIN/END MPM-MANAGED SECTION:pi-instructions -->` | start a Pi session against the containing project; agent's system prompt contains MPM wake content |
-| Hermes | `<project>/.hermes.md` (or `HERMES.md`) | `<!-- BEGIN/END MPM MANAGED BLOCK:hermes-mpm -->` (installer anchor); canonical block markers nested inside | start a Hermes session in the project; compact MCP surface contains `mcp__mpm__mpm_context` action `read_wake_context` |
+| Hermes | `<project>/.hermes.md` (or `HERMES.md`) | `<!-- BEGIN/END MPM MANAGED BLOCK:mpm-hermes -->` (installer anchor); canonical block markers nested inside | start a Hermes session in the project; compact MCP surface contains `mcp__mpm__mpm_context` action `read_wake_context` |
 
 For each host, when editing the persistent file by hand:
 

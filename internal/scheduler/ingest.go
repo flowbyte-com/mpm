@@ -1,7 +1,7 @@
 // internal/scheduler/ingest.go
 //
 // OpenClaw memory-flush ingest handler. Watches the canonical path
-// the openclaw-mpm-memory plugin's flushPlanResolver writes to, ingests
+// the mpm-memory-openclaw plugin's flushPlanResolver writes to, ingests
 // the file as a wake row in scheduled_wakes, and deletes the source.
 //
 // Architecture (2026-08-13):
@@ -9,7 +9,7 @@
 //   OpenClaw compaction fires (token threshold hit)
 //        │
 //        ▼
-//   openclaw-mpm-memory plugin (Task 2 — flushPlanResolver writes to
+//   mpm-memory-openclaw plugin (Task 2 — flushPlanResolver writes to
 //   relativePath: ".mpm/run/ingest.md" relative to workspaceDir, which
 //   for the main session resolves to /home/v/.mpm/run/ingest.md)
 //        │
@@ -65,7 +65,7 @@ import (
 )
 
 // openclawIngestDefaultPath is the absolute canonical target the
-// openclaw-mpm-memory plugin writes to. Kept as a const so the path
+// mpm-memory-openclaw plugin writes to. Kept as a const so the path
 // allowlist is structurally enforced, not configurable per-instance
 // in production. Changing this requires editing both this file and
 // the plugin's flushPlanResolver together.
@@ -219,7 +219,7 @@ func (h *IngestHandler) tickHandler(ctx context.Context) error {
 		fmt.Sprintf("%d", nowUnix), // absolute epoch
 		"",                          // theory_id
 		"",                          // recurring_rule
-		"openclaw-mpm-memory-ingest",
+		"mpm-memory-openclaw-ingest",
 		metadata,
 	); serr != nil {
 		h.logger.Warn("ingest: ScheduleWake failed",

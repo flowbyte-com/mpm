@@ -1,0 +1,28 @@
+{
+  "name": "@openclaw/mpm-auto-mode-persona-openclaw",
+  "version": "0.1.0",
+  "description": "Auto mode/persona switch for OpenClaw — calls `mpm route --apply` per turn and injects the rendered <system-reminder> into SOUL.md.",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "openclaw": ">=2026.7.1"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ]
+  }
+}

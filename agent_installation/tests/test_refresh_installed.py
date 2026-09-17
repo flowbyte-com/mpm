@@ -84,12 +84,12 @@ class RefreshInstalledTargetRegistered(unittest.TestCase):
         # OpenCode and Pi share the same installer filename but live in
         # different adapter directories — both invocations should appear.
         self.assertIn(
-            "opencode-mpm/scripts/install_agents_instructions.py", self.recipe_body,
-            "refresh-installed recipe must invoke opencode-mpm's installer",
+            "mpm-opencode/scripts/install_agents_instructions.py", self.recipe_body,
+            "refresh-installed recipe must invoke mpm-opencode's installer",
         )
         self.assertIn(
-            "pi-mpm/scripts/install_agents_instructions.py", self.recipe_body,
-            "refresh-installed recipe must invoke pi-mpm's installer",
+            "mpm-pi/scripts/install_agents_instructions.py", self.recipe_body,
+            "refresh-installed recipe must invoke mpm-pi's installer",
         )
 
     def test_post_refresh_render_check_is_invoked(self):
@@ -120,20 +120,20 @@ class RefreshInstalledPathsResolve(unittest.TestCase):
 
     def test_claude_code_installer_exists(self):
         self.assertTrue(
-            (AGENT_INSTALL_DIR / "claude-code-mpm" / "scripts" / "install_claude_instructions.py").is_file(),
-            "claude-code-mpm installer missing",
+            (AGENT_INSTALL_DIR / "mpm-claude-code" / "scripts" / "install_claude_instructions.py").is_file(),
+            "mpm-claude-code installer missing",
         )
 
     def test_opencode_installer_exists(self):
         self.assertTrue(
-            (AGENT_INSTALL_DIR / "opencode-mpm" / "scripts" / "install_agents_instructions.py").is_file(),
-            "opencode-mpm installer missing",
+            (AGENT_INSTALL_DIR / "mpm-opencode" / "scripts" / "install_agents_instructions.py").is_file(),
+            "mpm-opencode installer missing",
         )
 
     def test_pi_installer_exists(self):
         self.assertTrue(
-            (AGENT_INSTALL_DIR / "pi-mpm" / "scripts" / "install_agents_instructions.py").is_file(),
-            "pi-mpm installer missing",
+            (AGENT_INSTALL_DIR / "mpm-pi" / "scripts" / "install_agents_instructions.py").is_file(),
+            "mpm-pi installer missing",
         )
 
     def test_hermes_installer_exists(self):
@@ -142,17 +142,17 @@ class RefreshInstalledPathsResolve(unittest.TestCase):
         # block step (no installed managed block in this environment).
         # The script itself must still exist on disk.
         self.assertTrue(
-            (AGENT_INSTALL_DIR / "hermes-mpm" / "scripts" / "install_hermes_instructions.py").is_file(),
-            "hermes-mpm installer missing",
+            (AGENT_INSTALL_DIR / "mpm-hermes" / "scripts" / "install_hermes_instructions.py").is_file(),
+            "mpm-hermes installer missing",
         )
 
     def test_all_template_snippets_exist(self):
         """The installers consume these per-host rendered snippets."""
         expected = {
-            "claude-code-mpm": "claude-code-mpm/templates/CLAUDE.md.snippet",
-            "opencode-mpm":    "opencode-mpm/templates/AGENTS.md.snippet",
-            "pi-mpm":          "pi-mpm/templates/AGENTS.md.snippet",
-            "hermes-mpm":      "hermes-mpm/templates/hermes.md.snippet",
+            "mpm-claude-code": "mpm-claude-code/templates/CLAUDE.md.snippet",
+            "mpm-opencode":    "mpm-opencode/templates/AGENTS.md.snippet",
+            "mpm-pi":          "mpm-pi/templates/AGENTS.md.snippet",
+            "mpm-hermes":      "mpm-hermes/templates/hermes.md.snippet",
         }
         for name, rel in expected.items():
             path = AGENT_INSTALL_DIR / rel

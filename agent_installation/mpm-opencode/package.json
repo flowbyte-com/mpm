@@ -1,0 +1,27 @@
+{
+  "name": "mpm-opencode",
+  "version": "0.1.0",
+  "description": "MPM (Memory Persistence Module) for OpenCode — 17 typed tools (14 Domain Tools + 3 standalones) over the lightweight 'Fat RPC' mpm registry. Replaces the legacy 77-tool plugin.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.4.9",
+    "@types/node": "^25.9.3",
+    "typescript": "^5.7.0"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "^1.4.9"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

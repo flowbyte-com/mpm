@@ -185,10 +185,10 @@ PI_INSTALLED = Path(os.path.expanduser("~/.pi/agent/AGENTS.md"))
 # fix-history in test_render_managed_blocks.py / test_clean_install_roundtrip.py
 # / test_cross_adapter_contract_parity.py / test_refresh_installed.py.
 AGENT_INSTALLATION = Path(__file__).resolve().parent.parent
-HERMES_SNIPPET = AGENT_INSTALLATION / "hermes-mpm" / "templates" / "hermes.md.snippet"
-OPENCODE_SNIPPET = AGENT_INSTALLATION / "opencode-mpm" / "templates" / "AGENTS.md.snippet"
-CLAUDE_SNIPPET = AGENT_INSTALLATION / "claude-code-mpm" / "templates" / "CLAUDE.md.snippet"
-PI_SNIPPET = AGENT_INSTALLATION / "pi-mpm" / "templates" / "AGENTS.md.snippet"
+HERMES_SNIPPET = AGENT_INSTALLATION / "mpm-hermes" / "templates" / "hermes.md.snippet"
+OPENCODE_SNIPPET = AGENT_INSTALLATION / "mpm-opencode" / "templates" / "AGENTS.md.snippet"
+CLAUDE_SNIPPET = AGENT_INSTALLATION / "mpm-claude-code" / "templates" / "CLAUDE.md.snippet"
+PI_SNIPPET = AGENT_INSTALLATION / "mpm-pi" / "templates" / "AGENTS.md.snippet"
 
 
 SURFACES = [

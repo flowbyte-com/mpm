@@ -93,8 +93,8 @@ func TestIngest_NormalFileInsertsWake(t *testing.T) {
 	if got["fired"].(int64) != 0 {
 		t.Errorf("fired = %v, want 0 (this wake is what the agent will see on next wake_context)", got["fired"])
 	}
-	if got["created_by"] != "openclaw-mpm-memory-ingest" {
-		t.Errorf("created_by = %v, want openclaw-mpm-memory-ingest", got["created_by"])
+	if got["created_by"] != "mpm-memory-openclaw-ingest" {
+		t.Errorf("created_by = %v, want mpm-memory-openclaw-ingest", got["created_by"])
 	}
 	var meta map[string]interface{}
 	if err := json.Unmarshal([]byte(got["metadata"].(string)), &meta); err != nil {

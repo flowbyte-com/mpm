@@ -59,7 +59,7 @@ type schedulerState struct {
 //
 // Atomic write pattern: write to <target>.tmp, then os.Rename to
 // <target>. Because both paths share the same filesystem (per POSIX
-// rename(2) atomicity), a concurrent reader — the CLI, the opencode-mpm
+// rename(2) atomicity), a concurrent reader — the CLI, the mpm-opencode
 // plugin — observes either the old valid state or the new valid state,
 // never a half-written buffer. Direct os.WriteFile / os.OpenFile +
 // O_TRUNC would race the reader's os.ReadFile and could surface a

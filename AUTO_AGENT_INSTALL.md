@@ -29,12 +29,12 @@ find agent_installation -maxdepth 3 -type f | sort
 The current repository contains these host integrations:
 
 ```text
-agent_installation/claude-code-mpm/
-agent_installation/hermes-mpm/
-agent_installation/openclaw-mpm-memory/
-agent_installation/openclaw-mpm-auto-mode-persona/
-agent_installation/opencode-mpm/
-agent_installation/pi-mpm/
+agent_installation/mpm-claude-code/
+agent_installation/mpm-hermes/
+agent_installation/mpm-memory-openclaw/
+agent_installation/mpm-auto-mode-persona-openclaw/
+agent_installation/mpm-opencode/
+agent_installation/mpm-pi/
 agent_installation/mpm-agent-protocol.md
 ```
 
@@ -44,11 +44,11 @@ For the current repository:
 
 | Framework | Adapter(s) | Native integration | Persistent behavioral instruction surface |
 |---|---|---|---|
-| OpenClaw | OpenClaw adapter directories `openclaw-mpm-memory/` + `openclaw-mpm-auto-mode-persona/` (plugin IDs per each `openclaw.plugin.json`; see Section 8) | OpenClaw plugins | `SOUL.md` for the OpenClaw agent behavior; also inspect the current OpenClaw adapter documentation for any host-loaded `AGENTS.md` material |
-| Claude Code | `claude-code-mpm/` | MCP via `mpm-mcp` | `CLAUDE.md` |
-| OpenCode | `opencode-mpm/` | OpenCode plugin using `mpm call` | `AGENTS.md` |
-| Hermes | `hermes-mpm/` | MCP via `mpm-mcp` | `.hermes.md` / `HERMES.md` according to the adapter documentation |
-| Pi | `pi-mpm/` | Pi extension using `mpm call` | `AGENTS.md` or `CLAUDE.md` according to Pi's context-file rules |
+| OpenClaw | OpenClaw adapter directories `mpm-memory-openclaw/` + `mpm-auto-mode-persona-openclaw/` (plugin IDs per each `openclaw.plugin.json`; see Section 8) | OpenClaw plugins | `SOUL.md` for the OpenClaw agent behavior; also inspect the current OpenClaw adapter documentation for any host-loaded `AGENTS.md` material |
+| Claude Code | `mpm-claude-code/` | MCP via `mpm-mcp` | `CLAUDE.md` |
+| OpenCode | `mpm-opencode/` | OpenCode plugin using `mpm call` | `AGENTS.md` |
+| Hermes | `mpm-hermes/` | MCP via `mpm-mcp` | `.hermes.md` / `HERMES.md` according to the adapter documentation |
+| Pi | `mpm-pi/` | Pi extension using `mpm call` | `AGENTS.md` or `CLAUDE.md` according to Pi's context-file rules |
 
 The adapter directory is the implementation-specific source of truth.
 
@@ -385,7 +385,7 @@ Inspect the adapter directory's current README/INSTALL/SKILL material.
 Use:
 
 ```text
-agent_installation/claude-code-mpm/
+agent_installation/mpm-claude-code/
 ```
 
 Install/configure the current `mpm-mcp` integration and install the managed MPM section into the appropriate `CLAUDE.md`.
@@ -393,8 +393,8 @@ Install/configure the current `mpm-mcp` integration and install the managed MPM 
 Use the supplied installer:
 
 ```text
-claude-code-mpm/install.sh
-claude-code-mpm/scripts/install_claude_instructions.py
+mpm-claude-code/install.sh
+mpm-claude-code/scripts/install_claude_instructions.py
 ```
 
 Do not hand-copy the snippet when the installer can do it safely.
@@ -404,7 +404,7 @@ Do not hand-copy the snippet when the installer can do it safely.
 Use:
 
 ```text
-agent_installation/opencode-mpm/
+agent_installation/mpm-opencode/
 ```
 
 Install the OpenCode plugin and install the managed MPM section into the appropriate `AGENTS.md`.
@@ -412,8 +412,8 @@ Install the OpenCode plugin and install the managed MPM section into the appropr
 Use:
 
 ```text
-opencode-mpm/scripts/install_agents_instructions.py
-opencode-mpm/templates/AGENTS.md.snippet
+mpm-opencode/scripts/install_agents_instructions.py
+mpm-opencode/templates/AGENTS.md.snippet
 ```
 
 Follow the adapter documentation for user/global versus project scope.
@@ -423,7 +423,7 @@ Follow the adapter documentation for user/global versus project scope.
 Use:
 
 ```text
-agent_installation/hermes-mpm/
+agent_installation/mpm-hermes/
 ```
 
 Follow `SKILL.md` and the supplied installer for the Hermes behavioral section.
@@ -437,7 +437,7 @@ Do not assume `AGENTS.md` for Hermes just because another agent uses it.
 Use:
 
 ```text
-agent_installation/pi-mpm/
+agent_installation/mpm-pi/
 ```
 
 The extension provides the MPM tools; the managed behavioral section goes into the Pi-compatible context file.
@@ -445,7 +445,7 @@ The extension provides the MPM tools; the managed behavioral section goes into t
 The supplied installer is:
 
 ```text
-pi-mpm/scripts/install_agents_instructions.py
+mpm-pi/scripts/install_agents_instructions.py
 ```
 
 Use the documented scope:
@@ -466,8 +466,8 @@ OpenClaw adapter directories:
 
 ```text
 Adapter directories:
-  agent_installation/openclaw-mpm-memory/
-  agent_installation/openclaw-mpm-auto-mode-persona/
+  agent_installation/mpm-memory-openclaw/
+  agent_installation/mpm-auto-mode-persona-openclaw/
 ```
 
 These directory names exist for repository readability. They are not
@@ -480,8 +480,8 @@ writing those IDs are:
 
 ```text
 Plugin IDs (per openclaw.plugin.json):
-  openclaw-mpm-memory
-  openclaw-mpm-auto-mode-persona
+  mpm-memory-openclaw
+  mpm-auto-mode-persona-openclaw
 ```
 
 (Do not confuse these with the npm package names such as
@@ -489,22 +489,22 @@ Plugin IDs (per openclaw.plugin.json):
 
 They are not interchangeable.
 
-The `openclaw-mpm-memory` plugin provides the MPM-backed memory capability plus wake-context/provenance integration.
+The `mpm-memory-openclaw` plugin provides the MPM-backed memory capability plus wake-context/provenance integration.
 
-The `openclaw-mpm-auto-mode-persona` plugin provides per-turn mode/persona routing.
+The `mpm-auto-mode-persona-openclaw` plugin provides per-turn mode/persona routing.
 
 Inspect both README files and manifests before installing.
 
-**Wake context** is delivered by the `openclaw-mpm-memory` plugin
+**Wake context** is delivered by the `mpm-memory-openclaw` plugin
 (plugin ID — adapter directory
-`agent_installation/openclaw-mpm-memory/`) via the
+`agent_installation/mpm-memory-openclaw/`) via the
 `session_start` → `agent_turn_prepare` typed-hook chain (returning
 `prependContext`). This is automatic and **does not** require any
 persistent MPM instruction block in `SOUL.md` or `AGENTS.md`. The
 sessionKey used to correlate the cache write (in `session_start`) with
 the cache read (in `agent_turn_prepare`) comes from the hook context
 (`ctx.sessionKey`), not from the event payload. The
-`openclaw-mpm-memory/tests/runtime_injection.test.js` regression guard
+`mpm-memory-openclaw/tests/runtime_injection.test.js` regression guard
 pins this contract.
 
 Automatic wake delivery does not remove the behavioral contract.
