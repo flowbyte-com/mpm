@@ -1,10 +1,10 @@
 """
 test_install_root_host_agnostic.py — Regression coverage for the
-host-agnostic boundary of ``scripts/install.sh``.
+host-agnostic boundary of ``install.sh``.
 
 Architectural contract (post 2026-09-16 cleanup):
 
-  Root ``scripts/install.sh`` installs the MPM substrate ONLY. It is
+  Root ``install.sh`` installs the MPM substrate ONLY. It is
   intentionally host/framework agnostic: it does not detect, invoke,
   register with, or restart any agent framework (OpenClaw, Claude
   Code, OpenCode, Pi, Hermes, …). Framework-specific MCP / plugin
@@ -48,7 +48,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path("/home/v/workspace/projects/mpm").resolve()
-INSTALL_SH = REPO_ROOT / "scripts" / "install.sh"
+INSTALL_SH = REPO_ROOT / "install.sh"
 
 # Markers in install.sh that prevent the script from running main()
 # during test sourcing. PROJECT_ROOT is computed from $0 inside the
@@ -111,18 +111,18 @@ class _RootInstallDriver(unittest.TestCase):
           - a ``bin/mpm`` that ``phase_validate`` calls (it runs
             ``mpm call mpm_system --payload '{"action":"health_check"}'``
             and ``mpm call mpm_context --payload '{"action":"read_directives",…}'``)
-          - the script itself at ``scripts/install.sh``
+          - the script itself at the repo root ``install.sh``
         """
         # Makefile stub: check_prereqs only verifies it exists;
         # phase_build is not exercised in these tests.
         root.mkdir(parents=True, exist_ok=True)
         (root / "Makefile").write_text("# test stub\n")
 
-        # install.sh source + sourced-lib form.
-        scripts = root / "scripts"
-        scripts.mkdir(parents=True, exist_ok=True)
-        shutil.copy(INSTALL_SH, scripts / "install.sh")
-        lib = scripts / "install.sh.lib"
+        # install.sh source + sourced-lib form, staged at the repo root
+        # (the canonical layout — install.sh lives at the project root,
+        # not under scripts/).
+        shutil.copy(INSTALL_SH, root / "install.sh")
+        lib = root / "install.sh.lib"
         lib.write_text(build_sourced_lib(INSTALL_SH.read_text()))
 
     def _drive_phases(
@@ -138,13 +138,13 @@ class _RootInstallDriver(unittest.TestCase):
         fake host binary is visible to install.sh's ``command -v``
         probes. Returns the subprocess result.
         """
-        driver = project_root / "scripts" / "_drive_phases.sh"
+        driver = project_root / "_drive_phases.sh"
         phase_calls = "\n    ".join(phases)
         driver.write_text(textwrap.dedent(f"""\
             #!/usr/bin/env bash
             set -uo pipefail
             export PROJECT_ROOT={project_root}
-            source {project_root}/scripts/install.sh.lib
+            source {project_root}/install.sh.lib
             PREFIX={prefix}
             DATA_ROOT={data_root}
             SERVICE_DST=/dev/null

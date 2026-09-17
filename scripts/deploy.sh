@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# deploy.sh — refresh the live mpm binaries and restart dependent services.
+# scripts/deploy.sh — refresh the live mpm binaries and restart dependent services.
 #
-# Usage:  ./deploy.sh
+# Maintainer/release tooling. Not a user-facing entry point.
+#
+# Usage:  ./scripts/deploy.sh
 #
 # Pipeline (no sudo; canonical install is always user-writable):
 #   1. make install                       — rebuild + sync to $HOME/.mpm/bin/

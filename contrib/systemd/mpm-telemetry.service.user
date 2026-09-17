@@ -4,7 +4,7 @@ Description=MPM telemetry collector (USER-level, Phase 2)
 #   https://github.com/flowbyte-com/mpm
 #
 # This is the USER-level unit and the DEFAULT install target.
-# scripts/install.sh installs it to
+# install.sh installs it to
 # $HOME/.config/systemd/user/mpm-telemetry.service.
 #
 # Canonical install layout: $HOME/.mpm/bin/ for binaries, $HOME/.mpm/ for

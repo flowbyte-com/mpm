@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# scripts/install.sh — MPM user-space install (alpha baseline)
+# install.sh — MPM user-space install (alpha baseline)
 #
 # Provisions the MPM cognitive substrate in a single user's context,
 # no root required. This is the only install path; the legacy
@@ -59,11 +59,15 @@
 #     ~/.local/bin/mpm-mcp. Internal daemons never appear there.
 #
 # Usage:
-#   ./scripts/install.sh              # full user-space install (no sudo)
-#   ./scripts/install.sh --check      # preflight only (no changes)
-#   ./scripts/install.sh --dry-run    # print intended actions
-#   ./scripts/install.sh --validate   # post-install check
-#   ./scripts/install.sh --uninstall  # remove installed artifacts
+#   ./install.sh              # full user-space install (no sudo)
+#   ./install.sh --check      # preflight only (no changes)
+#   ./install.sh --dry-run    # print intended actions
+#   ./install.sh --validate   # post-install check
+#   ./install.sh --uninstall  # remove installed artifacts
+#
+# (The dedicated uninstaller at ./uninstall.sh is the canonical removal
+# entry point — it supports --dry-run / --purge / --shred. This script
+# keeps --uninstall as a thin alias for backward compatibility.)
 #
 # Environment overrides:
 #   PREFIX       Install prefix (default: $HOME/.mpm)
@@ -88,7 +92,7 @@ set -euo pipefail
 # ---------- constants ----------
 readonly SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-readonly PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+readonly PROJECT_ROOT="$SCRIPT_DIR"
 readonly SERVICE_NAME="mpm-scheduler"
 # Read-only migration warning target. The script NEVER writes here and
 # NEVER invokes sudo. Legacy data migration is the operator's job.
@@ -411,7 +415,7 @@ phase_binaries() {
 
     cat > "$PREFIX/bin/mpm" <<WRAPPER
 #!/bin/sh
-# mpm CLI wrapper — installed by scripts/install.sh
+# mpm CLI wrapper — installed by install.sh
 # Routes CLI to the per-user workspace regardless of CWD.
 # Override at invocation: MPM_WORKSPACE=/tmp/foo mpm call …
 exec env MPM_WORKSPACE=\${MPM_WORKSPACE:-${DATA_ROOT}} ${PREFIX}/bin/mpm.real "\$@"
@@ -491,7 +495,7 @@ phase_symlinks() {
     # check survives symlink chains. The shadowing binary is NEVER
     # removed automatically — the operator decides what to do. (A stale
     # repo-root `./mpm` binary was the most common offender; see
-    # scripts/install.sh history.)
+    # install.sh history.)
     if command -v mpm >/dev/null 2>&1; then
         local resolved
         resolved=$(command -v mpm 2>/dev/null) || true

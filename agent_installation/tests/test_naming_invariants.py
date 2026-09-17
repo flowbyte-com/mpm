@@ -251,14 +251,14 @@ class TestNamingInvariants(unittest.TestCase):
 
     # ---- Boundary invariants -----------------------------------------
 
-    def test_root_scripts_install_sh_remains_host_agnostic(self) -> None:
-        """The root scripts/install.sh does not reference adapter paths or names."""
-        src = (REPO_ROOT / "scripts" / "install.sh").read_text()
+    def test_root_install_sh_remains_host_agnostic(self) -> None:
+        """The root install.sh does not reference adapter paths or names."""
+        src = (REPO_ROOT / "install.sh").read_text()
         for name in FORBIDDEN_NAMES + sorted(CANONICAL_ADAPTERS):
             self.assertNotIn(
                 name,
                 src,
-                f"scripts/install.sh must not reference '{name}' — it is host-agnostic",
+                f"install.sh must not reference '{name}' — it is host-agnostic",
             )
 
     def test_auto_agent_install_md_references_only_canonical(self) -> None:

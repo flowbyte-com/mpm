@@ -1,5 +1,5 @@
 """
-test_install_phase_binaries.py — Regression coverage for scripts/install.sh
+test_install_phase_binaries.py — Regression coverage for install.sh
 
 Pins the contract for ``phase_binaries``:
 
@@ -48,7 +48,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path("/home/v/workspace/projects/mpm").resolve()
-INSTALL_SH = REPO_ROOT / "scripts" / "install.sh"
+INSTALL_SH = REPO_ROOT / "install.sh"
 
 # Markers in install.sh that prevent the script from running main()
 # during test sourcing. PROJECT_ROOT is computed from $0 inside the
@@ -110,12 +110,13 @@ class _PhaseBinariesDriver(unittest.TestCase):
                 p.write_text(sentinel)
             p.chmod(0o755)
         self._last_sentinel = sentinel
-        # Stage install.sh itself (not strictly required for phase_binaries
-        # but useful for debugging failures).
-        scripts = root / "scripts"
-        scripts.mkdir(parents=True, exist_ok=True)
-        shutil.copy(INSTALL_SH, scripts / "install.sh")
-        lib = scripts / "install.sh.lib"
+        # Stage install.sh itself at the project root (not under
+        # scripts/) — the canonical layout is install.sh at the repo
+        # root and scripts/deploy.sh under scripts/. We copy install.sh
+        # to the project root so the sourced-lib sees the same paths
+        # the real installer would.
+        shutil.copy(INSTALL_SH, root / "install.sh")
+        lib = root / "install.sh.lib"
         lib.write_text(build_sourced_lib(INSTALL_SH.read_text()))
 
     def _drive(self, project_root: Path, prefix: Path, data_root: Path) -> dict:
@@ -125,7 +126,7 @@ class _PhaseBinariesDriver(unittest.TestCase):
         ``PROJECT_ROOT``/``PREFIX``/``DATA_ROOT`` are exported so the
         unquoted heredoc in phase_binaries expands them into the wrapper.
         """
-        driver = project_root / "scripts" / "_drive.sh"
+        driver = project_root / "_drive.sh"
         # install.sh declares PREFIX/DATA_ROOT/SERVICE_DST as bare
         # variable assignments at the top (NOT readonly), so any export
         # we do before sourcing is wiped. We source first, then assign
@@ -134,7 +135,7 @@ class _PhaseBinariesDriver(unittest.TestCase):
             #!/usr/bin/env bash
             set -uo pipefail
             export PROJECT_ROOT={project_root}
-            source {project_root}/scripts/install.sh.lib
+            source {project_root}/install.sh.lib
             PREFIX={prefix}
             DATA_ROOT={data_root}
             SERVICE_DST=/dev/null

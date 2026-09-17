@@ -19,9 +19,9 @@ into every OpenClaw session via OpenClaw's native hook API.
 ## Install
 
 ```bash
-# 0. Prerequisites: install MPM core (root scripts/install.sh) and OpenClaw.
+# 0. Prerequisites: install MPM core (root install.sh) and OpenClaw.
 #    The adapter installer below verifies both are present and will point
-#    you at scripts/install.sh if MPM is missing.
+#    you at install.sh if MPM is missing.
 
 # 1. Run the adapter installer (CWD-independent).
 ./install.sh

@@ -4,7 +4,7 @@ Description=MPM universal wake executor (USER-level, alpha default)
 #   https://github.com/flowbyte-com/mpm
 #
 # This is the USER-level unit and the DEFAULT install target as of
-# the alpha release. scripts/install.sh installs it to
+# the alpha release. install.sh installs it to
 # $HOME/.config/systemd/user/mpm-scheduler.service and the install
 # flow does NOT require root. The system-level alternative
 # (mpm-scheduler.service.system) is reachable via `sudo ./install.sh --system`.
@@ -21,7 +21,7 @@ Description=MPM universal wake executor (USER-level, alpha default)
 # before they appear, so Wants= are never evaluated. Restart=on-failure
 # does not recover because the failure is during initial load, not
 # runtime crash. See commit 14ac32b.
-# Fix installed by scripts/install.sh on ecryptfs hosts:
+# Fix installed by install.sh on ecryptfs hosts:
 #   ~/.config/autostart/mpm-post-decrypt.desktop runs after decrypt:
 #     systemctl --user daemon-reload; systemctl --user start mpm-scheduler
 #   plus secondary: systemctl --user add-wants graphical-session.target mpm-scheduler

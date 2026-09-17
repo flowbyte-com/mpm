@@ -104,8 +104,9 @@ Do not, without explicit authorization:
 Commands such as:
 
 ```bash
-./scripts/install.sh
-./deploy.sh
+./install.sh
+./uninstall.sh
+./scripts/deploy.sh
 systemctl --user restart ...
 ```
 

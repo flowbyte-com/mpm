@@ -47,7 +47,7 @@
 #     rather than failing the whole install.
 #
 # Does NOT modify shell startup files. Does NOT touch the MPM substrate
-# install (that lives in the root scripts/install.sh; this adapter
+# install (that lives in the root install.sh; this adapter
 # assumes the operator ran that first OR this installer will bootstrap
 # if it is missing).
 #
@@ -85,7 +85,7 @@ if [ -z "$PLUGIN_ID" ]; then
 fi
 
 # MPM canonical locations. Order matters: the substrate install (root
-# scripts/install.sh) writes ~/.mpm/bin/mpm and symlinks it into
+# install.sh) writes ~/.mpm/bin/mpm and symlinks it into
 # ~/.local/bin/mpm. We accept either. We never rely on PATH resolution
 # alone — on a freshly-created ~/.local/bin the current login session
 # may not have it on PATH yet (proved in clean-profile Linux Mint test).
@@ -158,25 +158,25 @@ if ! locate_mpm; then
     warn "mpm not found; bootstrapping via MPM_BOOTSTRAP_URL"
     if command -v curl >/dev/null 2>&1; then
       if ! curl -fsSL "$MPM_BOOTSTRAP_URL" | bash; then
-        err "MPM bootstrap failed. Run the root scripts/install.sh once, then re-run this installer."
+        err "MPM bootstrap failed. Run the root install.sh once, then re-run this installer."
         exit 1
       fi
     elif command -v wget >/dev/null 2>&1; then
       if ! wget -qO- "$MPM_BOOTSTRAP_URL" | bash; then
-        err "MPM bootstrap failed. Run the root scripts/install.sh once, then re-run this installer."
+        err "MPM bootstrap failed. Run the root install.sh once, then re-run this installer."
         exit 1
       fi
     else
-      err "mpm not found and neither curl nor wget is available. Run scripts/install.sh first."
+      err "mpm not found and neither curl nor wget is available. Run install.sh first."
       exit 1
     fi
     # Re-resolve after bootstrap.
     if ! locate_mpm; then
-      err "mpm still not resolvable after bootstrap. Run scripts/install.sh manually, then re-run this installer."
+      err "mpm still not resolvable after bootstrap. Run install.sh manually, then re-run this installer."
       exit 1
     fi
   else
-    err "mpm not found on this host. Run scripts/install.sh from the repo root, then re-run this installer."
+    err "mpm not found on this host. Run install.sh from the repo root, then re-run this installer."
     err "  Canonical paths checked: $MPM_CANONICAL_PRIMARY, $MPM_CANONICAL_SYMLINK"
     err "  To bootstrap from a URL in unattended flows, set MPM_BOOTSTRAP_URL=<url>."
     exit 1
@@ -187,7 +187,7 @@ fi
 # authoritative "mpm is working" check; we never call bare `mpm` because
 # the gateway-relevant test is whether the absolute path resolves.
 if ! "$MPM_BIN" --version >/dev/null 2>&1; then
-  err "mpm binary at $MPM_BIN is present but does not execute cleanly. Re-run scripts/install.sh."
+  err "mpm binary at $MPM_BIN is present but does not execute cleanly. Re-run install.sh."
   exit 1
 fi
 log "mpm version: $("$MPM_BIN" --version 2>&1 | head -n1)"

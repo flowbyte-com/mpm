@@ -33,7 +33,7 @@
 //  11. memory-core is NOT modified by the installer (operator policy)
 //  12. absolute mpmBin is persisted
 //  13. no shell startup files (.bashrc/.zshrc/.profile) are modified
-//  14. no root scripts/install.sh OpenClaw behavior is reintroduced
+//  14. no root install.sh OpenClaw behavior is reintroduced
 //  15. gateway restart uses `openclaw gateway restart --safe` (NOT
 //      `--safe --wait`: those flags are mutually exclusive in 2026.9.4)
 //  16. gateway restart is bounded by an outer timeout — a hanging
@@ -775,7 +775,7 @@ function freshHomeDir(label) {
 }
 
 function installCanonicalMpmAt(homeDir, { symlinkOnly = false } = {}) {
-  // Mirror the real root scripts/install.sh layout under a per-test $HOME
+  // Mirror the real root install.sh layout under a per-test $HOME
   // so the adapter installer can resolve MPM via its canonical discovery
   // order without us putting the per-test home on PATH.
   const primaryDir = path.join(homeDir, ".mpm", "bin");
@@ -1046,11 +1046,11 @@ test("installer fails closed when MPM is absent AND no bootstrap URL is set", as
     "installer must surface a clear 'mpm not found' diagnostic");
 });
 
-test("installer does not call root scripts/install.sh OpenClaw hooks (no openclaw invocation outside this adapter)", async () => {
+test("installer does not call root install.sh OpenClaw hooks (no openclaw invocation outside this adapter)", async () => {
   const home = freshHomeDir("root-no-host");
   clearInvocations();
   clearFakeUninstalledFlag();
-  // The root scripts/install.sh is host-agnostic (per the 2026-09-16
+  // The root install.sh is host-agnostic (per the 2026-09-16
   // cleanup). This installer must not delegate to it. We assert by
   // counting openclaw invocations: they are all sourced from this
   // adapter's logic, never from a root installer call.
@@ -1383,13 +1383,13 @@ test("idempotent rerun still writes both hook flags and absolute mpmBin", async 
   assert.ok(m[1].startsWith("/"), `mpmBin must be absolute; got: ${m[1]}`);
 });
 
-test("root scripts/install.sh remains host-agnostic (the adapter is the only place that touches openclaw)", async () => {
-  // The previous fix removed all openclaw calls from scripts/install.sh.
+test("root install.sh remains host-agnostic (the adapter is the only place that touches openclaw)", async () => {
+  // The previous fix removed all openclaw calls from install.sh.
   // This test re-pins that boundary.
   const root = path.join(ADAPTER_DIR, "..", "..", "scripts", "install.sh");
   const src = readFileSync(root, "utf8");
   assert.ok(!/openclaw/.test(src),
-    "scripts/install.sh must not reference openclaw anywhere");
+    "install.sh must not reference openclaw anywhere");
 });
 
 test("plugin state inspection uses bounded `openclaw plugins inspect` (outer timeout applied)", async () => {

@@ -16,7 +16,7 @@
 #                              (mpm, mpm-mcp, mpm-scheduler, mpm-critic, mpm-telemetry)
 #   make install             - Verify binaries are at $(PREFIX)/bin/ (canonical). No copy step.
 #   make service-scheduler   - Install mpm-scheduler systemd USER unit
-#                              (fails on encrypted home dirs — use scripts/install.sh instead)
+#                              (fails on encrypted home dirs — use install.sh instead)
 #   make service             - Alias for service-scheduler
 #   make clean               - Remove bin/
 #   make test                - Run tests
@@ -24,7 +24,7 @@
 #   make help                - Show this help
 #
 # RECOMMENDED INSTALL PATH:
-#   ./scripts/install.sh
+#   ./install.sh
 # This single command builds, installs binaries + wrapper at $HOME/.mpm/bin/,
 # creates ~/.local/bin symlinks for `mpm` and `mpm-mcp`, installs the
 # USER-level systemd unit, registers with OpenClaw if present, and
@@ -36,7 +36,7 @@ SCHED_BINARY := mpm-scheduler
 CRITIC_BINARY := mpm-critic
 TELEMETRY_BINARY := mpm-telemetry
 BUILD_DIR   := bin
-# Canonical install prefix: $HOME/.mpm (matches DATA_ROOT in scripts/install.sh).
+# Canonical install prefix: $HOME/.mpm (matches DATA_ROOT in install.sh).
 # Override with `make install PREFIX=/somewhere` for non-standard layouts.
 PREFIX      ?= $(HOME)/.mpm
 SERVICE_NAME := mpm-scheduler
@@ -85,9 +85,9 @@ build:
 # 2026-09-14 release-pass: this target is intended for development
 # workflows. For the canonical user-facing install — including
 # ~/.local/bin/mpm symlinks, PATH integration, and the user-level
-# systemd unit — run ./scripts/install.sh. The two routes produce
+# systemd unit — run ./install.sh. The two routes produce
 # the same canonical layout ($PREFIX/bin/) for the binaries
-# themselves; scripts/install.sh adds the PATH surface that
+# themselves; install.sh adds the PATH surface that
 # `make install` does not.
 install: build
 	@echo "🚀 Verifying canonical install at $(PREFIX)/bin/..."
@@ -105,7 +105,7 @@ install: build
 	@echo "✓ Canonical binaries at $(PREFIX)/bin/: $(BINARY_NAME) $(MCP_BINARY) $(SCHED_BINARY) $(CRITIC_BINARY) $(TELEMETRY_BINARY)"
 	@echo ""
 	@echo "ℹ  For the full user install (PATH symlinks + systemd unit),"
-	@echo "    run: ./scripts/install.sh"
+	@echo "    run: ./install.sh"
 
 # Install the mpm-scheduler systemd user service.
 # The unit is templated for the standard ~/projects/mpm layout; override
@@ -118,11 +118,11 @@ install: build
 # ⚠  This target installs a USER-level systemd unit. It silently fails
 #    on hosts with encrypted home directories (eCryptfs/LUKS). For the
 #    full install flow (PATH symlinks, MCP registration, validation),
-#    use scripts/install.sh instead.
+#    use install.sh instead.
 service-scheduler:
 	@echo "⚠  This target installs a USER-level systemd unit."
 	@echo "   It silently fails on encrypted home directories."
-	@echo "   For the full install flow, use: scripts/install.sh"
+	@echo "   For the full install flow, use: install.sh"
 	@echo ""
 	@install -Dm644 $(SERVICE_SRC) $(SERVICE_DST)
 	@systemctl --user daemon-reload

@@ -51,7 +51,7 @@ If any of these fail, install MPM first:
 ```bash
 git clone https://github.com/flowbyte-com/mpm ~/projects/mpm
 cd ~/projects/mpm
-./scripts/install.sh                # full install: build + binaries + systemd user unit + lingering
+./install.sh                # full install: build + binaries + systemd user unit + lingering
 mpm ops init directives             # baseline cognitive bootstrap (idempotent)
 ```
 
@@ -494,7 +494,7 @@ regenerate.
 |---|---|---|
 | `~/.config/opencode/plugin/mpm-opencode` | Symlink (manual or installer) | OpenCode plugin entry (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full 22-tool substrate registry) |
 | `<project>/AGENTS.md` (or `~/.config/opencode/AGENTS.md`) | `install_agents_instructions.py` | Persistent instructions: MPM behavioral protocol in a managed block |
-| `~/.mpm/bin/mpm` | External (Makefile + scripts/install.sh) | `mpm` binary on `$PATH` |
+| `~/.mpm/bin/mpm` | External (Makefile + install.sh) | `mpm` binary on `$PATH` |
 
 ### User scope
 
