@@ -373,6 +373,36 @@ for v in "$legacy_entry_mpmBin" "$legacy_entry_enabled" "$legacy_entry_hook_aca"
 done
 
 # Step D: classify ownership.
+#
+# Precedence (strongest to weakest — config-only fallback is LAST):
+#
+#   A. inspect_root_match       live `plugins inspect` returns a rootDir
+#                                matching the canonical former path
+#   B. inspect_root_different   live inspect returns a DIFFERENT existing
+#                                rootDir → CONFLICT (refuse, do not fall
+#                                through to config-only)
+#   C. registry_path_match       installRecords[id].sourcePath matches
+#                                the canonical former path
+#   D. registry_path_different   installRecords[id] points at another
+#                                EXISTING path → CONFLICT (refuse, do not
+#                                fall through to config-only)
+#   E. slot_points_to_legacy     plugins.slots.memory == legacy id
+#                                (config-only fallback; only used when A-D
+#                                produced no ownership verdict)
+#   F. entry_key_present         plugins.entries.<id>.<k> non-empty
+#                                (config-only fallback; same gating)
+#   G. no_evidence               nothing to migrate → no-op
+#
+# CRITICAL SAFETY PROPERTY:
+#   B and D always win over E/F. The fallback chain (E → F) only runs
+#   when neither A-D produced an ownership verdict. An unrelated plugin
+#   that genuinely owns the legacy id and points at a different source
+#   will always be detected via inspect or registry (whichever survives)
+#   before config-only evidence is consulted. Config-only evidence is
+#   only ever used to claim ownership of an id that has no
+#   inspect/registry ownership record (typical real-world case after
+#   git mv: install record survives but inspect fails because the
+#   linked directory vanished).
 legacy_ownership="none"
 legacy_evidence="no_evidence"
 legacy_conflict_path=""
@@ -407,23 +437,27 @@ paths_match() {
 # also accept the bare non-empty case (Python's "True" is the only path that
 # produces capital-T — we accept it as a safety net).
 if [ "$legacy_inspect_ok" = "true" ] || [ "$legacy_inspect_ok" = "True" ] || [ "$legacy_inspect_ok" = "1" ]; then
-  # inspect succeeded — strongest evidence.
+  # inspect succeeded — strongest evidence (A or B).
   if [ -n "$legacy_inspect_root" ] && paths_match "$legacy_inspect_root" "$LEGACY_ADAPTER_DIR"; then
     legacy_ownership="owned"
     legacy_evidence="inspect_root_match:$legacy_inspect_root"
   elif [ -n "$legacy_inspect_root" ]; then
+    # B: inspect_root_different — STOP HERE. Do NOT fall through to
+    # registry/config fallback. An unrelated plugin owns the legacy id.
     legacy_ownership="conflict"
     legacy_conflict_path="$legacy_inspect_root"
     legacy_evidence="inspect_root_different:$legacy_inspect_root"
   fi
 elif [ -n "$legacy_registry_source" ] || [ -n "$legacy_registry_install" ]; then
-  # inspect unavailable but registry shows an install record.
+  # inspect unavailable but registry shows an install record (C or D).
   for rp in "$legacy_registry_source" "$legacy_registry_install"; do
     if [ -n "$rp" ] && paths_match "$rp" "$LEGACY_ADAPTER_DIR"; then
       legacy_ownership="owned"
       legacy_evidence="registry_path_match:$rp"
       break
     elif [ -n "$rp" ] && [ -e "$rp" ]; then
+      # D: registry_path_different — STOP HERE. Do NOT fall through to
+      # config fallback. An unrelated plugin owns the legacy id.
       legacy_ownership="conflict"
       legacy_conflict_path="$rp"
       legacy_evidence="registry_path_different:$rp"
@@ -432,10 +466,16 @@ elif [ -n "$legacy_registry_source" ] || [ -n "$legacy_registry_install" ]; then
   done
 fi
 
-# If inspect / registry could not establish ownership, fall back to
-# config evidence. The legacy plugin id `openclaw-mpm-memory` was
-# repo-owned; if config keys reference it, we claim ownership unless
-# stronger evidence above contradicts.
+# Config-only fallback (E, F). ONLY consulted when neither inspect nor
+# registry produced an ownership verdict (i.e. the legacy id has no
+# surviving install record at all). If we reach here with
+# legacy_ownership still "none", inspect AND registry both failed
+# to find the legacy id in OpenClaw's data — the typical real-world
+# post-git-mv state. The legacy plugin id `openclaw-mpm-memory` is
+# repo-owned; if config keys still reference it, we claim ownership
+# unless stronger evidence above contradicted (which cannot happen
+# because stronger evidence would have set ownership to owned or
+# conflict before reaching this block).
 if [ "$legacy_ownership" = "none" ]; then
   if [ "$legacy_slot_val" = "$LEGACY_PLUGIN_ID" ]; then
     legacy_ownership="owned"
@@ -518,12 +558,58 @@ case "$legacy_ownership" in
     # the uninstall may fail with "plugin not found". That is fine:
     # the config is migrated and the legacy id has no remaining
     # config-backed state. We treat non-zero as WARN.
+    #
+    # Post-uninstall reconciliation: re-probe the legacy id so we can
+    # distinguish the three observable outcomes:
+    #
+    #   legacy_uninstall_rc=0          → uninstall succeeded
+    #   legacy_uninstall_rc!=0 + probe ok:false → install record was already
+    #                                       gone (doctor --fix swept it; this
+    #                                       is the benign pre-existing case)
+    #   legacy_uninstall_rc!=0 + probe ok:true  → STALE INSTALL STILL PRESENT;
+    #                                       escalate to WARN with a clear
+    #                                       operator-facing message naming
+    #                                       the remaining cleanup commands.
+    #
+    # The legacy id being unselected as the memory slot AND having no
+    # entry-key references is sufficient for "no competing MPM memory
+    # plugin id". A surviving but unselected registry record is a
+    # non-selected fossil and is acceptable.
+    legacy_uninstall_rc=0
     if timeout "${OPENCLAW_PLUGIN_INSTALL_TIMEOUT}s" \
         openclaw plugins uninstall "$LEGACY_PLUGIN_ID" \
           >>"$INSTALL_LOG" 2>&1; then
+      legacy_uninstall_rc=0
       log "  uninstalled legacy plugin id '$LEGACY_PLUGIN_ID'"
     else
-      log "  legacy plugin id '$LEGACY_PLUGIN_ID' has no live install record (config is migrated)"
+      legacy_uninstall_rc=1
+      log "  openclaw plugins uninstall returned non-zero for '$LEGACY_PLUGIN_ID'"
+    fi
+    # Reconciliation probe: does the legacy id still resolve to a live
+    # install record? Re-use the inspect path; a non-empty legacy rootDir
+    # means the record is still there.
+    legacy_post_probe_root="$(extract_json_field "plugin.rootDir" \
+      "$(timeout "${OPENCLAW_PLUGIN_INSPECT_TIMEOUT}s" \
+        openclaw plugins inspect "$LEGACY_PLUGIN_ID" --json 2>/dev/null || true)")"
+    if [ -n "$legacy_post_probe_root" ]; then
+      # Stale install record survived. This is the dangerous case —
+      # the install record still points at the canonical former path,
+      # which no longer exists, so OpenClaw will surface a 'plugin
+      # path not found' warning until the operator cleans it up.
+      warn "  legacy plugin id '$LEGACY_PLUGIN_ID' still has a live install record at"
+      warn "    $legacy_post_probe_root"
+      warn "  the legacy id is no longer selected as the memory slot and its config"
+      warn "  entries are gone, so it will not compete with the canonical plugin."
+      warn "  operator cleanup (one of):"
+      warn "    openclaw plugins uninstall $LEGACY_PLUGIN_ID"
+      warn "    openclaw doctor --fix"
+      warn "  re-run this installer after cleanup."
+    else
+      if [ "$legacy_uninstall_rc" -ne 0 ]; then
+        log "  legacy plugin id '$LEGACY_PLUGIN_ID' has no live install record (install record was already swept; config is migrated)"
+      else
+        log "  legacy plugin id '$LEGACY_PLUGIN_ID' has no live install record (verified post-uninstall)"
+      fi
     fi
     ;;
 esac
