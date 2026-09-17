@@ -40,15 +40,28 @@ OpenClaw-specific setup in the correct order:
    not have it on PATH yet. The resolved binary is verified by
    absolute path before any plugin config is written.
 
-2. Install/link this plugin into OpenClaw:
-     openclaw plugins install <adapter-dir> --link
-   The path passed to `plugins install` is resolved from BASH_SOURCE[0],
-   so the script works from any current working directory.
+2. Inspect existing plugin state via `openclaw plugins inspect --json`.
+   The installer distinguishes three cases (verified against OpenClaw
+   2026.9.4):
+     absent              — plugin id not in the registry → fresh install.
+     linked-from-here    — plugin id registered and rootDir equals
+                           this adapter's directory → skip install step.
+     conflicting         — plugin id registered but rootDir points
+                           elsewhere → hard error, no overwrite.
 
-3. Enable the plugin entry:
+3. Install (only when state was "absent"):
+     openclaw plugins install <adapter-dir> --link --force --accept-capabilities
+   The three flags are the documented 2026.9.4 contract for installing
+   a non-ClawHub local source that declares capabilities (this plugin
+   declares memory_search, memory_get). See "Trust / capability
+   acknowledgement" below. The installer refuses to fall back to a
+   non-link install if the link install fails — that would silently
+   change the deployment topology and hide the real cause.
+
+4. Enable the plugin entry:
      openclaw plugins enable openclaw-mpm-memory
 
-4. Persist plugin config (always written together):
+5. Persist plugin config (always written together, on every rerun):
      config.mpmBin                                 = <absolute path to mpm>
      hooks.allowConversationAccess                 = true
      hooks.allowPromptInjection                    = true
@@ -59,18 +72,35 @@ OpenClaw-specific setup in the correct order:
    Without both, the plugin runs but wake-context injection is
    silently blocked at register time.
 
-5. Switch plugins.slots.memory to openclaw-mpm-memory.
+6. Switch plugins.slots.memory to openclaw-mpm-memory.
 
-6. Surface (not auto-apply) the recommended memory-core silence one-liner.
+7. Surface (not auto-apply) the recommended memory-core silence one-liner.
 
-7. Bounded safe gateway restart (`openclaw gateway restart --safe --wait <bounded>`).
-   Skipped silently if no gateway service exists (Docker / minimal env).
+8. Bounded safe gateway lifecycle. Two probes, each bounded TWICE
+   (outer `timeout` + the CLI's own --timeout where supported):
+     openclaw gateway status --json --timeout <ms>     (RPC probe)
+     openclaw gateway restart --safe                   (drain + restart)
+   `--safe --wait` is INVALID in 2026.9.4 (the CLI help says
+   "--wait ... not compatible with --force or --safe"). `--safe`
+   already has bounded-wait semantics; the outer `timeout` is the
+   hard cap. If the gateway is absent / unhealthy, the restart is
+   skipped silently — config above is already persisted and will
+   apply on the next gateway start.
 
-8. Verify (openclaw plugins inspect + plugins list).
+9. Verify (openclaw plugins inspect + plugins list).
 
-Re-running `./install.sh` is safe and idempotent. If the OpenClaw
-CLI is not on PATH, the installer prints the exact next step rather
-than partially configuring the plugin.
+### Re-running (idempotency)
+
+Re-running `./install.sh` on a host where the plugin is already
+correctly linked from THIS adapter's path is genuinely idempotent for
+the install step: no `openclaw plugins install` is reissued, no trust
+warning is emitted, no `installedAt` timestamp is bumped. The config
+writes (mpmBin + both hook flags + slot) ARE re-applied on every run,
+so a fresh OpenClaw config is re-seeded correctly.
+
+If the plugin is already registered but pointing at a different source
+(state "conflicting"), the installer refuses with a clear operator
+action and does not silently overwrite the unrelated source.
 
 ### Memory-core coexistence
 
@@ -83,6 +113,46 @@ prints the recommended one-liner at the end:
 ```bash
 openclaw config set plugins.entries.memory-core.enabled false
 ```
+
+### Trust / capability acknowledgement
+
+OpenClaw 2026.9.4 distinguishes three orthogonal concerns at plugin
+install time, and the installer handles each deliberately:
+
+```text
+A. Trust of the local source
+   `--force` acknowledges the "non-ClawHub" trust gate. The CLI prints:
+     WARNING - Installing plugin from local path: <path>
+     This source is outside ClawHub review and trust metadata.
+     Only continue if you trust the publisher, package contents, and
+     install source.
+   The installer passes `--force` automatically because this is a
+   first-party adapter from the MPM repository, the operator is the
+   publisher, and the source path is resolved from BASH_SOURCE[0] (not
+   taken from argv).
+
+B. Capability consent
+   `--accept-capabilities` consents to the plugin's declared surface
+   (memory_search, memory_get). Without this flag, 2026.9.4 returns
+     "Plugin X requires capability consent. The plugin was not
+      updated. Re-run the same `openclaw plugins install` or `openclaw
+      plugins update` command with --accept-capabilities, keeping its
+      source and other options."
+   The installer passes `--accept-capabilities` automatically on a
+   fresh install. For a re-run on an already-linked plugin, no install
+   is issued at all, so this flag is not relevant.
+
+C. Overwrite of an existing plugin
+   `--force` ALSO means "overwrite an existing plugin or hook pack".
+   The installer never uses that side-effect blindly: it inspects
+   `plugins.entries.<id>.rootDir` first and only enters the install
+   path on the "absent" branch. The "conflicting" branch fails closed
+   with a clear operator action (uninstall or rename) — we never
+   silently seize another installation.
+
+If you are reviewing this adapter and want to audit the operator
+action of a given install, the installer's full CLI transcript is
+appended to `/tmp/openclaw-mpm-memory-install.log`.
 
 ## Wake Context Injection
 
@@ -265,7 +335,7 @@ spawn mpm ENOENT` at gateway boot, and every `memory_search` /
 
 ```bash
 openclaw config set plugins.entries.openclaw-mpm-memory.config.mpmBin "<absolute path to mpm>"
-openclaw gateway restart
+openclaw gateway restart --safe
 ```
 
 The bundled `./install.sh` discovers MPM through the canonical install
