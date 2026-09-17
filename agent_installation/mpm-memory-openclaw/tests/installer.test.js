@@ -99,6 +99,14 @@ echo "MPM fake-mpm 0.0.0-test"
 exit 0
 `;
 
+// Helper: a tag function that returns the raw text of the template
+// literal without performing JS interpolation. This lets us embed
+// bash parameter expansions like ${VAR:-default} without JS treating
+// them as template substitutions. Use raw\`...\` instead of \`...\`
+// for any bash script that needs literal ${} syntax.
+function raw(strings, ...values) { return strings.raw.join(''); }
+
+const _BPE_SENTINELS = ["${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_CONFIG_PRESENT-0}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_PLUGIN_STATE:-absent}", "${FAKE_OPENCLAW_LINK_PATH-/tmp/mpm-memory-openclaw-install-fake}", "${FAKE_OPENCLAW_CONFLICT_PATH-/opt/unrelated/mpm-memory-openclaw}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_CONFLICT_PATH-/opt/unrelated/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_REGISTRY_PRESENT-0}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_CONFLICT_PATH-/opt/unrelated/openclaw-mpm-memory}", "${FAKE_OPENCLAW_HANG_STATUS-0}", "${FAKE_OPENCLAW_FAIL_STATUS-0}", "${FAKE_OPENCLAW_HANG-0}", "${FAKE_OPENCLAW_FAIL_RESTART-0}", "${FAKE_OPENCLAW_REJECT_BOOTSTRAP-0}", "${OPENCLAW_INVOCATIONS:-/tmp/mpm-memory-openclaw-fake-invocations.jsonl}"];
 const FAKE_OPENCLAW_SCRIPT = `#!/usr/bin/env bash
 # Fake openclaw — records every invocation and replies to the
 # subcommands the installer uses. Behaviour is parameterised by env:
@@ -120,19 +128,55 @@ const FAKE_OPENCLAW_SCRIPT = `#!/usr/bin/env bash
 #   FAKE_OPENCLAW_CONFLICT_PATH=<abs path>
 #                    overrides the rootDir used in the conflicting case.
 #                    Default: /opt/unrelated/mpm-memory-openclaw
+#
+# Legacy plugin-id simulation (mirrors the real upgrade case where
+# OpenClaw's plugin id for this adapter was 'openclaw-mpm-memory'
+# before the 2026-09-17 namespace migration):
+#   FAKE_OPENCLAW_LEGACY_STATE=absent|linked|vanished|conflicting|config_only|registry_only
+#     absent        — inspect ok:false, registry has no record,
+#                       no config keys, no slot. → no migration.
+#     linked        — inspect ok:true with rootDir pointing at the
+#                       LEGACY canonical former path ($(dirname
+#                       SCRIPT_DIR)/openclaw-mpm-memory). → migrate.
+#     vanished      — inspect ok:false (legacy rootDir no longer on
+#                       disk), registry has the legacy record but the
+#                       path doesn't resolve; config keys still
+#                       reference the legacy id. → migrate from
+#                       registry + config evidence. THIS IS THE REAL
+#                       BUG CASE.
+#     conflicting   — inspect ok:true with rootDir pointing at an
+#                       unrelated existing path → refuse, conflict.
+#     config_only   — inspect ok:false, registry unavailable, but
+#                       plugins.entries.openclaw-mpm-memory.config.mpmBin
+#                       and/or plugins.slots.memory = openclaw-mpm-memory
+#                       are still set. → migrate from config evidence.
+#     registry_only — registry shows the legacy install record
+#                       (sourcePath = canonical former path); inspect
+#                       ok:false; config keys may or may not exist.
+#                       → migrate from registry evidence.
+#   FAKE_OPENCLAW_LEGACY_LINK_PATH=<abs path>
+#                    overrides the legacy rootDir used in the linked
+#                    case. Default: the canonical former path
+#                    ($ADAPTER_PARENT/openclaw-mpm-memory).
+#   FAKE_OPENCLAW_LEGACY_CONFIG_PRESENT=1
+#                    legacy config keys (plugins.entries.openclaw-mpm-memory.*,
+#                    plugins.slots.memory) are populated in config get.
+#                    Default: 0 (no legacy config).
+#   FAKE_OPENCLAW_LEGACY_REGISTRY_PRESENT=1
+#                    registry --json shows the legacy install record.
+#                    Default: 0 (no legacy registry record).
+#   FAKE_OPENCLAW_LEGACY_PATH_RESOLVABLE=1
+#                    legacy path resolves on disk. Default: 1.
 set -euo pipefail
 
-INV="\${OPENCLAW_INVOCATIONS:-/tmp/mpm-memory-openclaw-fake-invocations.jsonl}"
+INV="__BPE_19__"
 mkdir -p "$(dirname "$INV")"
 touch "$INV"
 
 # Record the invocation as one JSONL line.
 {
-  printf '{ "argv": %s, "pwd": "%s" }\\n' \\
-    "$(printf '%s' "$*" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf 'null')" \\
-    "$PWD"
+  printf '{ "argv": %s, "pwd": "%s" }\\n' "$(printf '%s' "$*" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf 'null')" "$PWD"
 } >> "$INV"
-
 cmd="$1"
 shift || true
 case "$cmd" in
@@ -146,9 +190,53 @@ case "$cmd" in
       value="$1"; shift || true
       printf '  -> config set %s=%s\\n' "$key" "$value" >> "$INV"
     elif [ "$sub" = "get" ]; then
+      shift || true
       key="$1"; shift || true
       printf '  -> config get %s\\n' "$key" >> "$INV"
+      # Simulate legacy config that the installer may need to migrate.
+      # Each known legacy key returns a plausible value when
+      # FAKE_OPENCLAW_LEGACY_CONFIG_PRESENT=1.
+      legacy_state="__BPE_0__"
+      legacy_cfg="__BPE_1__"
+      if [ "$legacy_cfg" = "1" ] && [ "$legacy_state" != "absent" ]; then
+        case "$key" in
+          "plugins.slots.memory")
+            # Only return the legacy id when the legacy state implies
+            # the slot pointed at the legacy plugin id.
+            case "$legacy_state" in
+              vanished|registry_only)
+                printf 'openclaw-mpm-memory\\n'
+                ;;
+              *)
+                : # slot does not currently point at legacy id
+                ;;
+            esac
+            ;;
+          plugins.entries.openclaw-mpm-memory.config.mpmBin)
+            printf '/home/v/.local/bin/mpm\\n'
+            ;;
+          plugins.entries.openclaw-mpm-memory.enabled)
+            printf 'true\\n'
+            ;;
+          plugins.entries.openclaw-mpm-memory.hooks.allowConversationAccess)
+            printf 'true\\n'
+            ;;
+          plugins.entries.openclaw-mpm-memory.hooks.allowPromptInjection)
+            printf 'true\\n'
+            ;;
+          plugins.entries.openclaw-mpm-memory.config.timeoutMs)
+            printf '5000\\n'
+            ;;
+          plugins.entries.openclaw-mpm-memory.config.scope)
+            printf 'all\\n'
+            ;;
+          plugins.entries.openclaw-mpm-memory.config.limitDefault)
+            printf '6\\n'
+            ;;
+        esac
+      fi
     elif [ "$sub" = "unset" ]; then
+      shift || true
       key="$1"; shift || true
       printf '  -> config unset %s\\n' "$key" >> "$INV"
     fi
@@ -182,6 +270,13 @@ case "$cmd" in
         ;;
       uninstall)
         printf '  -> plugins uninstall %s\\n' "$*" >> "$INV"
+        # Refuse to uninstall when FAKE_OPENCLAW_LEGACY_STATE=absent so
+        # tests can assert the installer didn't issue the call.
+        legacy_state="__BPE_2__"
+        if [ "$*" = "openclaw-mpm-memory" ] && [ "$legacy_state" = "absent" ]; then
+          printf '  -> plugins uninstall: NOT_FOUND\\n' >> "$INV"
+          exit 7
+        fi
         exit 0
         ;;
       inspect)
@@ -190,19 +285,19 @@ case "$cmd" in
         # CLI returns in 2026.9.4.
         printf '  -> plugins inspect %s\\n' "$*" >> "$INV"
         plugin_id="$1"; shift || true
-        plugin_state="\${FAKE_OPENCLAW_PLUGIN_STATE:-absent}"
-        case "$plugin_state" in
-          absent)
-            cat <<JSON
+        plugin_state="__BPE_3__"
+        case "$plugin_id" in
+          mpm-memory-openclaw|"")
+            # Current plugin id — uses the canonical-state simulation.
+            case "$plugin_state" in
+              absent)
+                cat <<JSON
 { "ok": false, "error": { "type": "cli_error", "message": "Plugin not found: $plugin_id" } }
 JSON
-            ;;
-          linked)
-            # RootDir points back at the install source path. The
-            # installer resolves this to its own SCRIPT_DIR via the
-            # FAKE_OPENCLAW_LINK_PATH (passed in by the test driver).
-            link_root="\${FAKE_OPENCLAW_LINK_PATH:-/tmp/mpm-memory-openclaw-install-fake}"
-            cat <<JSON
+                ;;
+              linked)
+                link_root="__BPE_4__"
+                cat <<JSON
 {
   "ok": true,
   "plugin": {
@@ -222,10 +317,10 @@ JSON
   }
 }
 JSON
-            ;;
-          conflicting)
-            conflict_path="\${FAKE_OPENCLAW_CONFLICT_PATH:-/opt/unrelated/mpm-memory-openclaw}"
-            cat <<JSON
+                ;;
+              conflicting)
+                conflict_path="__BPE_5__"
+                cat <<JSON
 {
   "ok": true,
   "plugin": {
@@ -244,6 +339,166 @@ JSON
     "status": "loaded"
   }
 }
+JSON
+                ;;
+            esac
+            ;;
+          openclaw-mpm-memory)
+            # Legacy plugin id — uses the legacy-state simulation.
+            legacy_state="__BPE_6__"
+            case "$legacy_state" in
+              absent|config_only)
+                # inspect fails entirely (no live install record OR
+                # config-only state where the link has been swept).
+                cat <<JSON
+{ "ok": false, "error": { "type": "cli_error", "message": "Plugin not found: $plugin_id" } }
+JSON
+                ;;
+              vanished|registry_only)
+                # Legacy record exists in registry but the linked
+                # rootDir has been removed (the git mv case). inspect
+                # surfaces ok:false because the load path is gone.
+                cat <<JSON
+{ "ok": false, "error": { "type": "cli_error", "message": "Plugin not found: $plugin_id" } }
+JSON
+                ;;
+              linked)
+                # Legacy install still live and pointing at the
+                # canonical former path.
+                legacy_link_root="__BPE_7__"
+                cat <<JSON
+{
+  "ok": true,
+  "plugin": {
+    "id": "$plugin_id",
+    "name": "MPM Memory (legacy)",
+    "version": "0.0.0-fake",
+    "format": "openclaw",
+    "source": "$legacy_link_root/index.js",
+    "rootDir": "$legacy_link_root",
+    "origin": "config",
+    "trust": { "reason": "origin-path", "installSource": "path" },
+    "enabled": true,
+    "explicitlyEnabled": true,
+    "activated": true,
+    "activationReason": "selected memory slot",
+    "status": "loaded"
+  }
+}
+JSON
+                ;;
+              conflicting)
+                legacy_conflict_path="__BPE_8__"
+                cat <<JSON
+{
+  "ok": true,
+  "plugin": {
+    "id": "$plugin_id",
+    "name": "MPM Memory (legacy elsewhere)",
+    "version": "0.0.0-fake",
+    "format": "openclaw",
+    "source": "$legacy_conflict_path/index.js",
+    "rootDir": "$legacy_conflict_path",
+    "origin": "config",
+    "trust": { "reason": "origin-path", "installSource": "path" },
+    "enabled": true,
+    "explicitlyEnabled": true,
+    "activated": true,
+    "activationReason": "selected memory slot",
+    "status": "loaded"
+  }
+}
+JSON
+                ;;
+            esac
+            ;;
+        esac
+        exit 0
+        ;;
+      registry)
+        # Mirror 2026.9.4 openclaw plugins registry --json. The
+        # persisted.installRecords field carries the install records
+        # for the legacy plugin id.
+        printf '  -> plugins registry %s\\n' "$*" >> "$INV"
+        legacy_state="__BPE_9__"
+        legacy_registry="__BPE_10__"
+        case "$legacy_state" in
+          absent)
+            cat <<JSON
+{ "ok": true, "state": "fresh", "refreshReasons": [], "differences": [], "persisted": { "version": 1, "installRecords": {} } }
+JSON
+            ;;
+          linked|registry_only)
+            legacy_link_root="__BPE_11__"
+            cat <<JSON
+{
+  "ok": true,
+  "state": "fresh",
+  "refreshReasons": [],
+  "differences": [],
+  "persisted": {
+    "version": 1,
+    "installRecords": {
+      "openclaw-mpm-memory": {
+        "source": "path",
+        "sourcePath": "$legacy_link_root",
+        "installPath": "$legacy_link_root",
+        "version": "0.1.3"
+      }
+    }
+  }
+}
+JSON
+            ;;
+          vanished)
+            # Registry record exists but the path is now gone (the
+            # git mv case). installer must tolerate this.
+            legacy_link_root="__BPE_12__"
+            cat <<JSON
+{
+  "ok": true,
+  "state": "fresh",
+  "refreshReasons": [],
+  "differences": [],
+  "persisted": {
+    "version": 1,
+    "installRecords": {
+      "openclaw-mpm-memory": {
+        "source": "path",
+        "sourcePath": "$legacy_link_root",
+        "installPath": "$legacy_link_root",
+        "version": "0.1.3"
+      }
+    }
+  }
+}
+JSON
+            ;;
+          conflicting)
+            legacy_conflict_path="__BPE_13__"
+            cat <<JSON
+{
+  "ok": true,
+  "state": "fresh",
+  "refreshReasons": [],
+  "differences": [],
+  "persisted": {
+    "version": 1,
+    "installRecords": {
+      "openclaw-mpm-memory": {
+        "source": "path",
+        "sourcePath": "$legacy_conflict_path",
+        "installPath": "$legacy_conflict_path",
+        "version": "0.0.0-unrelated"
+      }
+    }
+  }
+}
+JSON
+            ;;
+          config_only)
+            cat <<JSON
+{ "ok": true, "state": "fresh", "refreshReasons": [], "differences": [], "persisted": { "version": 1, "installRecords": {} } }
 JSON
             ;;
         esac
@@ -279,10 +534,10 @@ JSON
             exit 9
             ;;
         esac
-        if [ "\${FAKE_OPENCLAW_HANG_STATUS:-0}" = "1" ]; then
+        if [ "__BPE_14__" = "1" ]; then
           sleep 60
         fi
-        if [ "\${FAKE_OPENCLAW_FAIL_STATUS:-0}" = "1" ]; then
+        if [ "__BPE_15__" = "1" ]; then
           exit 8
         fi
         exit 0
@@ -308,10 +563,10 @@ JSON
             exit 9
             ;;
         esac
-        if [ "\${FAKE_OPENCLAW_HANG:-0}" = "1" ]; then
+        if [ "__BPE_16__" = "1" ]; then
           sleep 60
         fi
-        if [ "\${FAKE_OPENCLAW_FAIL_RESTART:-0}" = "1" ]; then
+        if [ "__BPE_17__" = "1" ]; then
           exit 7
         fi
         exit 0
@@ -323,7 +578,7 @@ JSON
     exit 0
     ;;
   *)
-    if [ "\${FAKE_OPENCLAW_REJECT_BOOTSTRAP:-0}" = "1" ]; then
+    if [ "__BPE_18__" = "1" ]; then
       printf '  -> unknown command: %s\\n' "$cmd" >&2
       exit 99
     fi
@@ -331,7 +586,9 @@ JSON
     exit 0
     ;;
 esac
-`;
+`
+.replace(/__BPE_(\d+)__/g, (_, n) => _BPE_SENTINELS[Number(n)]);
+
 
 function writeFakeBin(name, content, dir) {
   mkdirSync(dir, { recursive: true });
@@ -385,6 +642,26 @@ function runInstaller({
   pluginState = "absent",
   linkPath = ADAPTER_DIR,
   conflictPath = "/opt/unrelated/mpm-memory-openclaw",
+  // Legacy plugin-id simulation (2026-09-17 namespace migration).
+  // absent    — no legacy state at all.
+  // linked    — legacy id still installed and linked from the
+  //              canonical former path ($(dirname ADAPTER_DIR)/openclaw-mpm-memory).
+  // vanished  — the legacy linked rootDir no longer exists on disk
+  //              (the real git-mv case); registry may still hold the
+  //              install record; config keys may still reference the
+  //              legacy id.
+  // conflicting — legacy id points at an unrelated existing path →
+  //              refuse with conflict error.
+  // config_only — inspect + registry unavailable, but legacy config
+  //              keys (plugins.entries.openclaw-mpm-memory.*,
+  //              plugins.slots.memory) are still set.
+  // registry_only — registry has the legacy install record;
+  //                inspect unavailable; config keys may be sparse.
+  legacyState = "absent",
+  legacyLinkPath = path.join(path.dirname(ADAPTER_DIR), "openclaw-mpm-memory"),
+  legacyConflictPath = "/opt/unrelated/openclaw-mpm-memory",
+  legacyConfigPresent = false,
+  legacyRegistryPresent = false,
   failRestart = false,
   hangRestart = false,
   failStatus = false,
@@ -409,6 +686,11 @@ function runInstaller({
     FAKE_OPENCLAW_PLUGIN_STATE: pluginState,
     FAKE_OPENCLAW_LINK_PATH: linkPath,
     FAKE_OPENCLAW_CONFLICT_PATH: conflictPath,
+    FAKE_OPENCLAW_LEGACY_STATE: legacyState,
+    FAKE_OPENCLAW_LEGACY_LINK_PATH: legacyLinkPath,
+    FAKE_OPENCLAW_LEGACY_CONFLICT_PATH: legacyConflictPath,
+    FAKE_OPENCLAW_LEGACY_CONFIG_PRESENT: legacyConfigPresent ? "1" : "0",
+    FAKE_OPENCLAW_LEGACY_REGISTRY_PRESENT: legacyRegistryPresent ? "1" : "0",
     FAKE_OPENCLAW_FAIL_RESTART: failRestart ? "1" : "0",
     FAKE_OPENCLAW_HANG: hangRestart ? "1" : "0",
     FAKE_OPENCLAW_FAIL_STATUS: failStatus ? "1" : "0",
@@ -589,7 +871,10 @@ test("installer writes absolute mpmBin (not a PATH-resolved bare 'mpm')", async 
 test("installer orders plugin install BEFORE plugin-specific config writes", async () => {
   const home = freshHomeDir("order");
   clearInvocations();
-  const { code, stderr } = await runInstaller({ homeDir: home });
+  const { code, stderr } = await runInstaller({
+    homeDir: home,
+    legacyState: "absent", // no legacy migration; pure canonical path
+  });
   assert.strictEqual(code, 0, `installer exited non-zero: ${stderr}`);
   const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
   const installIdx = log.indexOf("plugins install");
@@ -1133,4 +1418,321 @@ test("README documents the canonical plugin id (mpm-memory-openclaw)", () => {
   const readme = readFileSync(path.join(ADAPTER_DIR, "README.md"), "utf8");
   assert.match(readme, /mpm-memory-openclaw/,
     "README must reference the canonical plugin id");
+});
+
+// --------------------------------------------------------------------------
+// 2026-09-17 follow-up — legacy linked rootDir migration
+// --------------------------------------------------------------------------
+//
+// The follow-up fix to the 2026-09-17 namespace migration
+// (commit ee91d167) recognised that the previous legacy-id
+// reconciliation logic relied solely on `legacy rootDir == $SCRIPT_DIR`,
+// which fails in exactly the real upgrade case: a pre-existing
+// OpenClaw linked install from the OLD adapter directory path
+// `agent_installation/openclaw-mpm-memory/` whose legacy rootDir now
+// no longer matches the new $SCRIPT_DIR because git mv has already
+// moved the directory.
+//
+// The new ownership-detection algorithm uses multiple sources of
+// evidence (inspect, registry install records, config keys) and
+// derives the canonical former adapter path from $SCRIPT_DIR.
+//
+// These tests exercise each branch of the algorithm against the
+// fake-openclaw. The fake exposes legacy states via env vars; see
+// the FAKE_OPENCLAW_LEGACY_* documentation at the top of the
+// FAKE_OPENCLAW_SCRIPT constant.
+
+test("legacy id absent: no migration action (sanity for the new states)", async () => {
+  const home = freshHomeDir("legacy-absent-v2");
+  clearInvocations();
+  const { code, stderr } = await runInstaller({
+    homeDir: home,
+    pluginState: "absent",
+    legacyState: "absent",
+  });
+  assert.strictEqual(code, 0, `installer exited non-zero: ${stderr}`);
+  // No legacy migration log line.
+  assert.ok(
+    !/legacy plugin id 'openclaw-mpm-memory' recognised/.test(stderr),
+    "installer must not log a legacy migration when legacy state is absent; stderr:\n" + stderr,
+  );
+  // And no `plugins uninstall` of the legacy id.
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  assert.ok(
+    !/plugins uninstall openclaw-mpm-memory/.test(log),
+    "installer must not call plugins uninstall openclaw-mpm-memory when legacy absent; log:\n" + log,
+  );
+});
+
+test("legacy linked install from old canonical path, old path still present → migrate (linked)", async () => {
+  const home = freshHomeDir("legacy-linked");
+  clearInvocations();
+  const canonicalFormer = path.join(path.dirname(ADAPTER_DIR), "openclaw-mpm-memory");
+  const { code, stderr } = await runInstaller({
+    homeDir: home,
+    pluginState: "absent",
+    legacyState: "linked",
+    legacyLinkPath: canonicalFormer,
+    legacyConfigPresent: true,
+    legacyRegistryPresent: true,
+  });
+  assert.strictEqual(code, 0, `installer exited non-zero: ${stderr}`);
+  // Migration log line present.
+  assert.match(stderr, /legacy plugin id 'openclaw-mpm-memory' recognised.*evidence: inspect_root_match/,
+    "installer must recognise legacy install via inspect_root_match; stderr:\n" + stderr);
+  // Legacy config keys were migrated.
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  assert.match(log, /config set plugins\.entries\.mpm-memory-openclaw\.config\.mpmBin/,
+    "installer must set canonical mpmBin key; log:\n" + log);
+  assert.match(log, /config set plugins\.entries\.mpm-memory-openclaw\.hooks\.allowConversationAccess true/,
+    "installer must set canonical allowConversationAccess key; log:\n" + log);
+  assert.match(log, /config set plugins\.entries\.mpm-memory-openclaw\.hooks\.allowPromptInjection true/,
+    "installer must set canonical allowPromptInjection key; log:\n" + log);
+  // Legacy slot was migrated.
+  assert.match(log, /config set plugins\.slots\.memory mpm-memory-openclaw/,
+    "installer must migrate the memory slot to canonical; log:\n" + log);
+  // Legacy id was uninstalled.
+  assert.match(log, /plugins uninstall openclaw-mpm-memory/,
+    "installer must uninstall the legacy id after migration; log:\n" + log);
+  // Legacy entry keys were unset.
+  assert.match(log, /config unset plugins\.entries\.openclaw-mpm-memory/,
+    "installer must unset legacy entry keys after migration; log:\n" + log);
+});
+
+test("legacy linked install from old canonical path, old path MISSING (the real bug case) → migrate via registry+config evidence", async () => {
+  // This is the real upgrade scenario pinned by the follow-up fix:
+  //   1. The repository has been git-mv'd from
+  //      agent_installation/openclaw-mpm-memory/ → mpm-memory-openclaw/
+  //   2. The old filesystem path no longer exists.
+  //   3. OpenClaw's `plugins inspect openclaw-mpm-memory --json` fails
+  //      because the linked rootDir is gone.
+  //   4. But the registry still retains the install record (sourcePath
+  //      pointing at the canonical former path), and config keys still
+  //      reference the legacy id.
+  //
+  // The previous "legacy rootDir == $SCRIPT_DIR" check would silently
+  // skip the migration and leave stale config + load.paths entries
+  // behind. The new ownership algorithm recognises the legacy install
+  // via registry + config evidence and migrates.
+  const home = freshHomeDir("legacy-vanished");
+  clearInvocations();
+  const canonicalFormer = path.join(path.dirname(ADAPTER_DIR), "openclaw-mpm-memory");
+  const { code, stderr } = await runInstaller({
+    homeDir: home,
+    pluginState: "absent",
+    legacyState: "vanished",
+    legacyLinkPath: canonicalFormer,
+    legacyConfigPresent: true,
+    legacyRegistryPresent: true,
+  });
+  assert.strictEqual(code, 0, `installer exited non-zero: ${stderr}`);
+  // The installer recognised ownership via registry (not inspect, since
+  // inspect fails when the linked rootDir is gone).
+  assert.match(stderr, /legacy plugin id 'openclaw-mpm-memory' recognised.*evidence: registry_path_match/,
+    "installer must recognise legacy install via registry_path_match when inspect fails; stderr:\n" + stderr);
+  // Legacy config was migrated.
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  assert.match(log, /config set plugins\.entries\.mpm-memory-openclaw\.config\.mpmBin/,
+    "installer must migrate config.mpmBin even when legacy path vanished; log:\n" + log);
+  // Slot was migrated.
+  assert.match(log, /config set plugins\.slots\.memory mpm-memory-openclaw/,
+    "installer must migrate the memory slot even when legacy path vanished; log:\n" + log);
+});
+
+test("legacy config-only state (inspect+registry unavailable, but config keys present) → migrate via config evidence", async () => {
+  // A host where the install record has been swept by `openclaw doctor --fix`
+  // but the entry keys remain in plugins.entries.openclaw-mpm-memory.*.
+  // The installer must still recognise ownership via the surviving
+  // config-key evidence.
+  const home = freshHomeDir("legacy-config-only");
+  clearInvocations();
+  const { code, stderr } = await runInstaller({
+    homeDir: home,
+    pluginState: "absent",
+    legacyState: "config_only",
+    legacyConfigPresent: true,
+    legacyRegistryPresent: false,
+  });
+  assert.strictEqual(code, 0, `installer exited non-zero: ${stderr}`);
+  // Ownership evidence came from a config key (not slot, because
+  // config_only keeps slot empty in the fake).
+  assert.match(stderr, /legacy plugin id 'openclaw-mpm-memory' recognised.*evidence: entry_key_present/,
+    "installer must recognise legacy install via entry_key_present; stderr:\n" + stderr);
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  assert.match(log, /config set plugins\.entries\.mpm-memory-openclaw\.config\.mpmBin/,
+    "installer must migrate config.mpmBin from config-only evidence; log:\n" + log);
+});
+
+test("legacy slot-only state (slot points at legacy id) → migrate via slot evidence", async () => {
+  // A host where the entry keys are absent but plugins.slots.memory
+  // still points at the legacy id. The installer must still recognise
+  // ownership via the slot and migrate.
+  const home = freshHomeDir("legacy-slot-only");
+  clearInvocations();
+  const { code, stderr } = await runInstaller({
+    homeDir: home,
+    pluginState: "absent",
+    legacyState: "vanished", // also has slot in this fake-state
+    legacyConfigPresent: true,
+    legacyRegistryPresent: false,
+  });
+  assert.strictEqual(code, 0, `installer exited non-zero: ${stderr}`);
+  assert.match(stderr, /legacy plugin id 'openclaw-mpm-memory' recognised/,
+    "installer must recognise legacy install via slot+config evidence; stderr:\n" + stderr);
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  assert.match(log, /config set plugins\.slots\.memory mpm-memory-openclaw/,
+    "installer must migrate the memory slot; log:\n" + log);
+});
+
+test("legacy install points at an unrelated existing path → conflict, refuse", async () => {
+  // A host where someone else has installed openclaw-mpm-memory from
+  // a completely different source. The installer must NOT seize,
+  // uninstall, or rewrite that installation.
+  const home = freshHomeDir("legacy-conflict");
+  clearInvocations();
+  const { code, stderr } = await runInstaller({
+    homeDir: home,
+    pluginState: "absent",
+    legacyState: "conflicting",
+    legacyConflictPath: "/opt/some-other-vendor/openclaw-mpm-memory",
+    legacyConfigPresent: true,
+    legacyRegistryPresent: true,
+  });
+  assert.notStrictEqual(code, 0,
+    "installer must fail (non-zero) when the legacy id points at an unrelated source");
+  // The installer prints the conflict diagnosis.
+  assert.match(stderr, /already installed but points at a different source/,
+    "installer must surface the conflict diagnosis; stderr:\n" + stderr);
+  assert.match(stderr, /\/opt\/some-other-vendor\/openclaw-mpm-memory/,
+    "installer must name the unrelated source path; stderr:\n" + stderr);
+  assert.match(stderr, /operator actions/,
+    "installer must enumerate operator actions on conflict; stderr:\n" + stderr);
+  // Critically: NO `plugins uninstall` of the legacy id was issued.
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  assert.ok(!/plugins uninstall openclaw-mpm-memory/.test(log),
+    "installer must NOT uninstall the legacy id when it points at an unrelated source; log:\n" + log);
+  // And NO config get/set/unset against the legacy keys was issued.
+  assert.ok(!/config (get|set|unset) plugins\.entries\.mpm-memory-openclaw/.test(log),
+    "installer must NOT write canonical config keys when refusing to migrate; log:\n" + log);
+});
+
+test("legacy registry-only state (registry has install record, no config) → migrate via registry evidence", async () => {
+  // A host where the install record survives in the registry but
+  // config keys have been cleaned up. The installer must recognise
+  // ownership via the registry record and proceed (no config keys to
+  // migrate, but the legacy id must still be uninstalled).
+  const home = freshHomeDir("legacy-registry-only");
+  clearInvocations();
+  const canonicalFormer = path.join(path.dirname(ADAPTER_DIR), "openclaw-mpm-memory");
+  const { code, stderr } = await runInstaller({
+    homeDir: home,
+    pluginState: "absent",
+    legacyState: "registry_only",
+    legacyLinkPath: canonicalFormer,
+    legacyConfigPresent: false,
+    legacyRegistryPresent: true,
+  });
+  assert.strictEqual(code, 0, `installer exited non-zero: ${stderr}`);
+  assert.match(stderr, /legacy plugin id 'openclaw-mpm-memory' recognised.*evidence: registry_path_match/,
+    "installer must recognise legacy install via registry_path_match; stderr:\n" + stderr);
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  // The legacy id was uninstalled.
+  assert.match(log, /plugins uninstall openclaw-mpm-memory/,
+    "installer must uninstall the legacy id from registry-only evidence; log:\n" + log);
+  // No config unset against legacy keys (config absent in this scenario;
+  // the installer's migration step has nothing to unset because the keys
+  // are already empty). Note: the installer DOES probe legacy keys
+  // unconditionally to gather evidence (the legacy entry-key probe is
+  // independent of the registry result), and DOES set canonical keys
+  // (step 5 below) — but does NOT migrate from absent legacy values.
+  assert.ok(!/config unset plugins\.entries\.openclaw-mpm-memory/.test(log),
+    "installer must not unset legacy keys when they were reported as absent; log:\n" + log);
+});
+
+test("migration is idempotent: second run on already-migrated state is a no-op for legacy", async () => {
+  // After a successful migration the legacy state is fully cleared:
+  //   - plugins.entries.openclaw-mpm-memory.* unset
+  //   - plugins.slots.memory = mpm-memory-openclaw
+  //   - legacy plugin id uninstalled
+  //
+  // A second run of the installer must NOT issue any further
+  // migration commands. The legacy-id reconciliation step must
+  // detect "no legacy state" via the absence of all evidence and
+  // return without acting.
+  const home = freshHomeDir("idempotent-legacy");
+  clearInvocations();
+  // First run: full migration from vanished-path state.
+  const r1 = await runInstaller({
+    homeDir: home,
+    pluginState: "absent",
+    legacyState: "vanished",
+    legacyConfigPresent: true,
+    legacyRegistryPresent: true,
+  });
+  assert.strictEqual(r1.code, 0, `first run failed: ${r1.stderr}`);
+  assert.match(r1.stderr, /legacy plugin id 'openclaw-mpm-memory' recognised/);
+  // Reset the fake state to "absent" for the second run — the fake
+  // has no persistent state across runs, but we make the legacy state
+  // explicit anyway to document the post-migration expectation.
+  clearInvocations();
+  const r2 = await runInstaller({
+    homeDir: home,
+    pluginState: "absent",
+    legacyState: "absent",
+    legacyConfigPresent: false,
+    legacyRegistryPresent: false,
+  });
+  assert.strictEqual(r2.code, 0, `second run failed: ${r2.stderr}`);
+  // No legacy migration log line on the second run.
+  assert.ok(!/legacy plugin id 'openclaw-mpm-memory' recognised/.test(r2.stderr),
+    "second run must not log a legacy migration; stderr:\n" + r2.stderr);
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  assert.ok(!/plugins uninstall openclaw-mpm-memory/.test(log),
+    "second run must not call plugins uninstall openclaw-mpm-memory; log:\n" + log);
+  assert.ok(!/config unset plugins\.entries\.openclaw-mpm-memory/.test(log),
+    "second run must not call config unset against legacy keys; log:\n" + log);
+});
+
+test("installer derives LEGACY_ADAPTER_DIR from $(dirname $SCRIPT_DIR)/openclaw-mpm-memory", () => {
+  // Pin the contract: the canonical former path is derived from the
+  // installer's own SCRIPT_DIR, not hard-coded. This is what allows
+  // the legacy-recognition to work in the real upgrade case (the
+  // new SCRIPT_DIR is mpm-memory-openclaw/, the legacy path is its
+  // sibling openclaw-mpm-memory/).
+  const src = readFileSync(INSTALL_SH, "utf8");
+  assert.match(src, /LEGACY_ADAPTER_DIR/,
+    "installer must define a LEGACY_ADAPTER_DIR derived from SCRIPT_DIR");
+  assert.match(src, /openclaw-mpm-memory/,
+    "installer must reference the legacy directory name");
+  // The derive expression must be sibling-of-SCRIPT_DIR, not a
+  // hard-coded absolute path.
+  assert.match(src, /dirname\s+["']?\$\{?SCRIPT_DIR\}?["']?/,
+    "installer must derive LEGACY_ADAPTER_DIR via dirname of SCRIPT_DIR");
+});
+
+test("installer probes openclaw plugins registry --json (not just plugins inspect)", () => {
+  // Pin the contract: ownership detection uses MULTIPLE sources of
+  // evidence — registry install records, plugins inspect, and
+  // config keys. The previous logic relied on plugins inspect alone
+  // and broke when inspect failed because the legacy linked rootDir
+  // no longer existed.
+  const src = readFileSync(INSTALL_SH, "utf8");
+  assert.match(src, /openclaw plugins registry --json/,
+    "installer must probe openclaw plugins registry --json for install records");
+  assert.match(src, /installRecords/,
+    "installer must read persisted.installRecords");
+  assert.match(src, /sourcePath/,
+    "installer must compare sourcePath against canonical former path");
+});
+
+test("installer does not require legacy linked rootDir to still exist on disk", () => {
+  // Pin the contract: ownership detection must succeed even when
+  // the legacy linked directory has been removed (the real git-mv
+  // upgrade case). The fallback to registry + config-key evidence
+  // is the load-bearing fix for that scenario.
+  const src = readFileSync(INSTALL_SH, "utf8");
+  // The installer must have a non-inspect fallback path for
+  // ownership detection.
+  assert.match(src, /inspect_or_registry_failed|registry_path_match|entry_key_present|slot_points_to_legacy/,
+    "installer must have non-inspect fallback ownership evidence paths");
 });

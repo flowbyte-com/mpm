@@ -212,38 +212,84 @@ fi
 #
 # The canonical plugin id for this adapter changed from
 # `openclaw-mpm-memory` to `mpm-memory-openclaw` in the 2026-09-17
-# namespace migration. Both ids resolve to the same plugin code at this
-# path; OpenClaw's plugin registry, however, keys config by id. A host
-# that previously ran an older install carries entries under the legacy
-# id (e.g. plugins.entries.openclaw-mpm-memory.config.mpmBin,
-# plugins.slots.memory=openclaw-mpm-memory, plugins.entries.openclaw-mpm-memory.enabled).
+# namespace migration. OpenClaw's plugin registry, however, keys
+# config by id. A host that previously ran an older install carries
+# entries under the legacy id (plugins.entries.openclaw-mpm-memory.*,
+# plugins.slots.memory=openclaw-mpm-memory) — these persist
+# INDEPENDENTLY of whether the legacy linked directory still exists on
+# disk.
 #
-# Strategy (alpha-friendly, minimal):
-#   1. Probe the legacy id via `plugins inspect` (bounded timeout).
-#   2. If the legacy id is NOT registered → nothing to migrate, skip.
-#   3. If the legacy id IS registered and points at $SCRIPT_DIR →
-#      it is THIS adapter under the old name. Migrate:
-#        plugins.entries.openclaw-mpm-memory.{config,enabled,hooks}
-#            → plugins.entries.mpm-memory-openclaw.{config,enabled,hooks}
-#        plugins.slots.memory = openclaw-mpm-memory
-#            → plugins.slots.memory = mpm-memory-openclaw
-#      then `openclaw plugins uninstall openclaw-mpm-memory` to
-#      release the legacy id.
-#   4. If the legacy id is registered but points elsewhere → leave it
-#      alone (it is a different installation, not ours to seize).
+# The CRITICAL real-world upgrade case this section handles: the
+# repository has been git-mv'd from `agent_installation/openclaw-mpm-memory/`
+# to `agent_installation/mpm-memory-openclaw/`. The old linked directory
+# no longer exists. A naive "legacy rootDir == $SCRIPT_DIR" ownership
+# test FAILS in exactly this case (the new $SCRIPT_DIR is a different
+# path from the legacy recorded rootDir) and silently leaves stale
+# config behind, with `openclaw config validate` continuing to report
+# `plugins.load.paths: plugin path not found: ...openclaw-mpm-memory`.
 #
-# Each migration step is independent — failures are logged and
-# non-fatal, but the operator can rerun the installer until the legacy
-# id is gone. We do NOT silently leave both ids active.
+# Ownership evidence (strongest to weakest):
+#
+#   1. inspect_root_match      legacy rootDir from `plugins inspect`
+#                               resolves to the canonical former path
+#                               ($(dirname "$SCRIPT_DIR")/openclaw-mpm-memory)
+#   2. inspect_root_different  legacy rootDir resolves to some other
+#                               existing path → CONFLICT, refuse
+#   3. registry_path_match     install record under legacy id has
+#                               sourcePath / installPath matching the
+#                               canonical former path
+#   4. registry_path_different install record has a different existing
+#                               path → CONFLICT, refuse
+#   5. inspect_or_registry_failed
+#                               inspect / registry unavailable (the
+#                               path has vanished); fall back to
+#                               config-key evidence
+#   6. slot_points_to_legacy   plugins.slots.memory = openclaw-mpm-memory
+#   7. entry_key_present       plugins.entries.openclaw-mpm-memory.<k>
+#                               has a non-empty value for any known key
+#   8. no_evidence             nothing to migrate; no-op
+#
+# Cases 1, 3, 5-with-6, 5-with-7, 6, 7 → OWNED → migrate
+# Cases 2, 4 → CONFLICT → fail closed with operator action
+# Case 8 → no action
+#
+# We do NOT blindly trust `plugins inspect` succeeding — the linked
+# directory may have been renamed out from under the registry record.
+# We do NOT silently leave both ids active.
+#
+# Each migration step is independent — failures are logged as WARN
+# (the operator can rerun the installer until the legacy id is gone)
+# but the installer never fails the install because a single legacy
+# key was missing.
 
 LEGACY_PLUGIN_ID="openclaw-mpm-memory"
-legacy_inspect="$(timeout "${OPENCLAW_PLUGIN_INSPECT_TIMEOUT}s" \
-  openclaw plugins inspect "$LEGACY_PLUGIN_ID" --json 2>/dev/null || true)"
-legacy_state="absent"
-legacy_existing_root=""
-if [ -n "$legacy_inspect" ] && command -v python3 >/dev/null 2>&1; then
-  legacy_parsed="$(
-    printf '%s\n' "$legacy_inspect" | python3 -c '
+# Canonical former adapter directory: the pre-2026-09-17 sibling of
+# $SCRIPT_DIR. Used to recognize ownership when the legacy path no
+# longer exists on disk — the realpath comparison below tolerates
+# either form (path still present or already removed).
+LEGACY_ADAPTER_DIR_RAW="$(cd "$(dirname "$SCRIPT_DIR")" 2>/dev/null && printf '%s/openclaw-mpm-memory' "$(_q="${PWD:-}"; printf '%s' "$_q")")"
+# Resolve via readlink -f when the path exists; otherwise normalize
+# the literal we built above. readlink -f fails on missing paths, so
+# we try, then fall back to a manual resolution.
+if [ -d "$(dirname "$SCRIPT_DIR")/openclaw-mpm-memory" ]; then
+  LEGACY_ADAPTER_DIR="$(cd "$(dirname "$SCRIPT_DIR")/openclaw-mpm-memory" 2>/dev/null && pwd -P)" \
+    || LEGACY_ADAPTER_DIR="$(dirname "$SCRIPT_DIR")/openclaw-mpm-memory"
+else
+  LEGACY_ADAPTER_DIR="$(dirname "$SCRIPT_DIR")/openclaw-mpm-memory"
+fi
+OUR_REAL="$(cd "$SCRIPT_DIR" && pwd -P 2>/dev/null || printf '%s' "$SCRIPT_DIR")"
+LEGACY_REAL="$LEGACY_ADAPTER_DIR"
+
+# Helper: try to read a JSON field out of an openclaw command. Returns
+# empty if the command failed or the JSON did not contain the field.
+# Tolerates the config-warnings header that the CLI prints before JSON.
+extract_json_field() {
+  local field="$1"
+  local input="$2"
+  if [ -z "$input" ] || ! command -v python3 >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '%s\n' "$input" | FIELD="$field" python3 -c '
 import json, sys
 raw = sys.stdin.read()
 lines = raw.split("\n")
@@ -258,31 +304,179 @@ try:
     data = json.loads("\n".join(lines[start:]))
 except Exception:
     sys.exit(0)
-if not data.get("ok", True):
+import os
+field = os.environ.get("FIELD", "")
+# Walk dotted field path through nested dicts.
+node = data
+for part in field.split("."):
+    if isinstance(node, dict):
+        node = node.get(part)
+    elif isinstance(node, list):
+        try:
+            node = node[int(part)]
+        except (ValueError, IndexError):
+            sys.exit(0)
+    else:
+        sys.exit(0)
+    if node is None:
+        sys.exit(0)
+if isinstance(node, (dict, list)):
     sys.exit(0)
-plugin = data.get("plugin") or {}
-print(plugin.get("rootDir", ""))
-' 2>/dev/null || true
-  )"
-  if [ -n "$legacy_parsed" ]; then
-    legacy_state="present"
-    legacy_existing_root="$legacy_parsed"
+print(node)
+' 2>/dev/null
+}
+
+# Helper: extract a list of strings from a JSON field. Used for
+# installRecords[id].sourcePath etc. (each is a string, but we accept
+# lists to be defensive).
+extract_json_field_or_empty() {
+  local field="$1" input="$2"
+  extract_json_field "$field" "$input"
+}
+
+# Step A: probe the legacy plugin id. inspect may fail (linked root
+# vanished) — that is NOT a reason to skip migration.
+legacy_inspect="$(timeout "${OPENCLAW_PLUGIN_INSPECT_TIMEOUT}s" \
+  openclaw plugins inspect "$LEGACY_PLUGIN_ID" --json 2>/dev/null || true)"
+legacy_inspect_root="$(extract_json_field "plugin.rootDir" "$legacy_inspect")"
+legacy_inspect_ok="$(extract_json_field "ok" "$legacy_inspect")"
+
+# Step B: probe the registry for install records. registry may also
+# fail (e.g. when the entire config is invalid because of the stale
+# load paths). We treat that as "no registry evidence available" and
+# rely on config keys below.
+legacy_registry="$(timeout "${OPENCLAW_PLUGIN_INSPECT_TIMEOUT}s" \
+  openclaw plugins registry --json 2>/dev/null || true)"
+legacy_registry_source="$(extract_json_field "persisted.installRecords.${LEGACY_PLUGIN_ID}.sourcePath" "$legacy_registry")"
+legacy_registry_install="$(extract_json_field "persisted.installRecords.${LEGACY_PLUGIN_ID}.installPath" "$legacy_registry")"
+
+# Step C: probe legacy config keys (these survive even when the linked
+# directory is gone — this is what makes the vanished-path case
+# observable).
+legacy_slot_val="$(timeout "${OPENCLAW_CONFIG_TIMEOUT}s" \
+  openclaw config get plugins.slots.memory 2>/dev/null || true)"
+legacy_to_canonical_migrate_get() {
+  timeout "${OPENCLAW_CONFIG_TIMEOUT}s" \
+    openclaw config get "plugins.entries.$LEGACY_PLUGIN_ID.$1" 2>/dev/null \
+    || true
+}
+legacy_entry_mpmBin="$(legacy_to_canonical_migrate_get "config.mpmBin")"
+legacy_entry_enabled="$(legacy_to_canonical_migrate_get "enabled")"
+legacy_entry_hook_aca="$(legacy_to_canonical_migrate_get "hooks.allowConversationAccess")"
+legacy_entry_hook_api="$(legacy_to_canonical_migrate_get "hooks.allowPromptInjection")"
+legacy_entry_has_value=""
+for v in "$legacy_entry_mpmBin" "$legacy_entry_enabled" "$legacy_entry_hook_aca" "$legacy_entry_hook_api"; do
+  case "$v" in
+    ""|"null"|"undefined") ;;
+    *) legacy_entry_has_value=1; break ;;
+  esac
+done
+
+# Step D: classify ownership.
+legacy_ownership="none"
+legacy_evidence="no_evidence"
+legacy_conflict_path=""
+
+# Helper: compare two paths even if one doesn't exist. We compare
+# both the readlink -f resolved form (when possible) and the literal
+# form so a missing legacy directory still matches a recorded literal
+# path that points at the same canonical former location.
+paths_match() {
+  local a="$1" b="$2"
+  # Empty-arg guard — both sides must be non-empty.
+  if [ -z "$a" ] || [ -z "$b" ]; then
+    return 1
+  fi
+  # Exact literal match.
+  if [ "$a" = "$b" ]; then
+    return 0
+  fi
+  # Both resolved via pwd -P when readable.
+  local ra rb
+  ra="$(cd "$a" 2>/dev/null && pwd -P)" || ra="$a"
+  rb="$(cd "$b" 2>/dev/null && pwd -P)" || rb="$b"
+  if [ "$ra" = "$rb" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Python's json.dumps renders JSON booleans as "true"/"false" (lowercase).
+# Our extractor prints them verbatim. The empty-string fallthrough covers the
+# inspect unavailable / non-OK cases. We accept "true", "True", "1", and
+# also accept the bare non-empty case (Python's "True" is the only path that
+# produces capital-T — we accept it as a safety net).
+if [ "$legacy_inspect_ok" = "true" ] || [ "$legacy_inspect_ok" = "True" ] || [ "$legacy_inspect_ok" = "1" ]; then
+  # inspect succeeded — strongest evidence.
+  if [ -n "$legacy_inspect_root" ] && paths_match "$legacy_inspect_root" "$LEGACY_ADAPTER_DIR"; then
+    legacy_ownership="owned"
+    legacy_evidence="inspect_root_match:$legacy_inspect_root"
+  elif [ -n "$legacy_inspect_root" ]; then
+    legacy_ownership="conflict"
+    legacy_conflict_path="$legacy_inspect_root"
+    legacy_evidence="inspect_root_different:$legacy_inspect_root"
+  fi
+elif [ -n "$legacy_registry_source" ] || [ -n "$legacy_registry_install" ]; then
+  # inspect unavailable but registry shows an install record.
+  for rp in "$legacy_registry_source" "$legacy_registry_install"; do
+    if [ -n "$rp" ] && paths_match "$rp" "$LEGACY_ADAPTER_DIR"; then
+      legacy_ownership="owned"
+      legacy_evidence="registry_path_match:$rp"
+      break
+    elif [ -n "$rp" ] && [ -e "$rp" ]; then
+      legacy_ownership="conflict"
+      legacy_conflict_path="$rp"
+      legacy_evidence="registry_path_different:$rp"
+      break
+    fi
+  done
+fi
+
+# If inspect / registry could not establish ownership, fall back to
+# config evidence. The legacy plugin id `openclaw-mpm-memory` was
+# repo-owned; if config keys reference it, we claim ownership unless
+# stronger evidence above contradicts.
+if [ "$legacy_ownership" = "none" ]; then
+  if [ "$legacy_slot_val" = "$LEGACY_PLUGIN_ID" ]; then
+    legacy_ownership="owned"
+    legacy_evidence="slot_points_to_legacy"
+  elif [ -n "$legacy_entry_has_value" ]; then
+    legacy_ownership="owned"
+    legacy_evidence="entry_key_present"
   fi
 fi
 
-if [ "$legacy_state" = "present" ]; then
-  our_real="$(cd "$SCRIPT_DIR" && pwd -P 2>/dev/null || printf '%s' "$SCRIPT_DIR")"
-  their_real="$(cd "$legacy_existing_root" 2>/dev/null && pwd -P 2>/dev/null || printf '%s' "$legacy_existing_root")"
-  if [ "$their_real" = "$our_real" ]; then
-    log "legacy plugin id '$LEGACY_PLUGIN_ID' found, pointing at this adapter — migrating to '$PLUGIN_ID'"
-    # Migrate config: openclaw config patch {old: new} preserves nested structure.
-    # Each property is patched individually because the schema is per-key.
+# Step E: act on the ownership verdict.
+case "$legacy_ownership" in
+  none)
+    : # no migration needed
+    ;;
+  conflict)
+    err "legacy plugin id '$LEGACY_PLUGIN_ID' is already installed but points at a different source:"
+    err "  recorded source: $legacy_conflict_path"
+    err "  this adapter:    $SCRIPT_DIR"
+    err "  expected former canonical location of this adapter:"
+    err "    $LEGACY_ADAPTER_DIR"
+    err "this installer will not seize an unrelated plugin installation."
+    err "operator actions:"
+    err "  (a) if the existing '$LEGACY_PLUGIN_ID' is a stale install of THIS adapter from"
+    err "      an unrelated copy, uninstall it manually, then re-run $0:"
+    err "        openclaw plugins uninstall $LEGACY_PLUGIN_ID"
+    err "        $0"
+    err "  (b) if the existing '$LEGACY_PLUGIN_ID' is from a completely different source,"
+    err "      leave it alone and rename this adapter's id in $SCRIPT_DIR/openclaw.plugin.json"
+    exit 1
+    ;;
+  owned)
+    log "legacy plugin id '$LEGACY_PLUGIN_ID' recognised as this adapter (evidence: $legacy_evidence) — migrating to '$PLUGIN_ID'"
+    # Migrate each entry key individually. Each migration is wrapped
+    # in its own bounded call; failure on one key does not abort the
+    # rest, so a stale config with partial legacy state cleans up
+    # gracefully on re-run.
     legacy_to_canonical_migrate() {
       local key="$1"
-      # Read the legacy value, write it under the canonical key, then unset the legacy key.
       local val
-      val="$(timeout "${OPENCLAW_CONFIG_TIMEOUT}s" \
-        openclaw config get "plugins.entries.$LEGACY_PLUGIN_ID.$key" 2>/dev/null || true)"
+      val="$(legacy_to_canonical_migrate_get "$key")"
       case "$val" in
         ""|"null"|"undefined")
           : # legacy key absent or unset
@@ -309,9 +503,7 @@ if [ "$legacy_state" = "present" ]; then
     legacy_to_canonical_migrate "hooks.allowConversationAccess"
     legacy_to_canonical_migrate "hooks.allowPromptInjection"
     # Migrate the memory slot if it pointed at the legacy id.
-    slot_val="$(timeout "${OPENCLAW_CONFIG_TIMEOUT}s" \
-      openclaw config get plugins.slots.memory 2>/dev/null || true)"
-    if [ "$slot_val" = "$LEGACY_PLUGIN_ID" ]; then
+    if [ "$legacy_slot_val" = "$LEGACY_PLUGIN_ID" ]; then
       if timeout "${OPENCLAW_CONFIG_TIMEOUT}s" \
           openclaw config set plugins.slots.memory "$PLUGIN_ID" \
             >>"$INSTALL_LOG" 2>&1; then
@@ -321,17 +513,20 @@ if [ "$legacy_state" = "present" ]; then
       fi
     fi
     # Uninstall the legacy id now that config has been migrated.
+    # Best-effort — if the install record has already been swept by
+    # `openclaw doctor --fix` (which removes stale load.paths entries)
+    # the uninstall may fail with "plugin not found". That is fine:
+    # the config is migrated and the legacy id has no remaining
+    # config-backed state. We treat non-zero as WARN.
     if timeout "${OPENCLAW_PLUGIN_INSTALL_TIMEOUT}s" \
         openclaw plugins uninstall "$LEGACY_PLUGIN_ID" \
           >>"$INSTALL_LOG" 2>&1; then
       log "  uninstalled legacy plugin id '$LEGACY_PLUGIN_ID'"
     else
-      warn "  failed to uninstall legacy plugin id '$LEGACY_PLUGIN_ID' (config is migrated; safe to remove manually)"
+      log "  legacy plugin id '$LEGACY_PLUGIN_ID' has no live install record (config is migrated)"
     fi
-  else
-    log "legacy plugin id '$LEGACY_PLUGIN_ID' present but pointing at $legacy_existing_root — not ours, leaving untouched"
-  fi
-fi
+    ;;
+esac
 
 # --------------------------------------------------------------------------
 # 4. Inspect existing plugin state
