@@ -95,6 +95,12 @@ MIGRATION_AWARE_FILES = {
     # surfaces (manifest, index.js) and that the migration step is
     # silent when the legacy id is not present.
     "agent_installation/mpm-memory-openclaw/tests/installer.test.js",
+    # The OpenCode resolver tests — they enumerate the obsolete
+    # 'opencode-mpm' name in test descriptions and assertions
+    # specifically BECAUSE they pin that the active source no longer
+    # references it (B9 invariant). Removing the references would
+    # remove the test of the invariant.
+    "agent_installation/mpm-opencode/tests/test_resolve_mpm_binary.test.ts",
     # This very test file — the forbidden-name lists and the legacy
     # documentation must enumerate the old names. Excluding it would
     # be self-defeating (the test would ban itself).

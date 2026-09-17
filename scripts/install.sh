@@ -6,6 +6,15 @@
 # no root required. This is the only install path; the legacy
 # /var/lib/mpm + system systemd mode has been removed.
 #
+# Ownership boundary (host-agnostic contract, enforced since 2026-09-16):
+#   This script owns the MPM substrate ONLY. It is intentionally
+#   host/framework agnostic: it does NOT detect, invoke, register
+#   with, or restart any agent framework (OpenClaw, Claude Code,
+#   OpenCode, Pi, Hermes, …). Framework-specific MCP / plugin
+#   wiring lives exclusively under agent_installation/ and is
+#   installed by each host's own installer. See AUTO_AGENT_INSTALL.md
+#   for framework discovery and per-host dispatch.
+#
 # What this script does:
 #   1. Builds binaries (mpm, mpm-mcp, mpm-scheduler, mpm-critic, mpm-telemetry)
 #   2. Installs binaries to $HOME/.mpm/bin/ (canonical — same root as data)
@@ -26,12 +35,17 @@
 #      script NEVER touches /var/lib/mpm, NEVER invokes sudo, and NEVER
 #      tears down a legacy system unit. The legacy `--system` install
 #      path has been removed.
-#   9. Registers the MCP server with OpenClaw if present
-#  10. Validates end-to-end
-#  11. On ecryptfs encrypted homes (linger + default.target invisibility),
+#   9. Validates the substrate end-to-end (mpm health_check, scheduler
+#      service, lock file, directives count).
+#  10. On ecryptfs encrypted homes (linger + default.target invisibility),
 #      installs an XDG autostart entry ~/.config/autostart/mpm-post-decrypt.desktop
 #      that runs after login/decrypt: daemon-reload + start scheduler (and
 #      telemetry if present), plus graphical-session.target Wants as secondary.
+#
+# Migration guidance: framework-specific setup (OpenClaw MCP, Claude
+# Code instructions, OpenCode plugin, etc.) belongs under
+# agent_installation/<host>-mpm/ and is installed by that host's
+# own installer.
 #
 # Multi-tenant / multi-user safety:
 #   - No root required for the default flow; everything lives in $HOME
@@ -137,20 +151,16 @@ detect_os() {
     fi
 }
 
+# Detect the init system. systemd is the only supported init; the
+# legacy `--system` install path that wrote to /etc/systemd/system
+# has been removed (see AUTO_AGENT_INSTALL.md for host-specific
+# wiring; this script owns the MPM substrate only).
 detect_init_system() {
     if command -v systemctl >/dev/null 2>&1 && \
        ([ -d /run/systemd/system ] || [ -d /run/user/"$(id -u)"/systemd ]); then
         echo "systemd"
     else
         echo "none"
-    fi
-}
-
-detect_openclaw() {
-    if command -v openclaw >/dev/null 2>&1; then
-        echo "yes"
-    else
-        echo "no"
     fi
 }
 
@@ -273,10 +283,6 @@ preflight() {
     local os
     os=$(detect_os)
     log "OS:           $os (tested on Ubuntu 24.04)"
-
-    local openclaw
-    openclaw=$(detect_openclaw)
-    log "openclaw:     $openclaw"
 
     check_prereqs
     detect_legacy
@@ -633,156 +639,6 @@ EOF
     systemctl --user daemon-reload 2>/dev/null || true
 }
 
-phase_host_integration() {
-    note "HOST INTEGRATION"
-    if ! command -v openclaw >/dev/null 2>&1; then
-        log "openclaw not detected — skipping MCP registration"
-        log "  (after installing openclaw, run manually:)"
-        log "    openclaw mcp add mpm --command $PREFIX/bin/mpm-mcp --env MPM_WORKSPACE=$DATA_ROOT"
-        return 0
-    fi
-
-    log "openclaw detected — registering mpm MCP"
-
-    # ── Capture OpenClaw gateway state BEFORE registration ──────────
-    # We must decide whether to restart the gateway based on its
-    # state at install-start, NOT after. Reasons:
-    #   1. On the pristine ``x`` profile, an interactive
-    #      openclaw-onboard process already owned the gateway
-    #      lifecycle state. The systemd service had entered
-    #      ``failed`` because it could not acquire that lock.
-    #      ``openclaw gateway restart`` then polled the failed
-    #      service for ~44s before returning. Installation
-    #      appeared hung.
-    #   2. Restarting an already-failed service from inside an
-    #      installer is a layering violation: MPM should not try
-    #      to repair another application's lifecycle.
-    #
-    # Detection method: ``systemctl --user is-active`` on the
-    # canonical ``openclaw-gateway.service`` unit. This is a
-    # fast local call that doesn't depend on OpenClaw CLI being
-    # responsive. We default to "inactive" on any error path so
-    # the installer never blocks on an unresponsive systemd.
-    local openclaw_gateway_state="inactive"
-    # Primary detection: ``openclaw gateway status`` is fast (local
-    # dbus/state-file read) and is the canonical OpenClaw API for
-    # lifecycle state. We capture state BEFORE registering the MCP
-    # entry so a failed/already-restarting gateway doesn't surprise us
-    # with a 44s stall (the pristine ``x`` profile's pre-fix
-    # symptom).
-    set +e
-    local _gw_status_output _gw_status_rc
-    _gw_status_output=$(openclaw gateway status 2>/dev/null)
-    _gw_status_rc=$?
-    set -e
-    # ``openclaw gateway status`` typically prints one of:
-    #   "active"   "inactive"   "failed"   "not-found"   ""   (on rc!=0)
-    # The exit code and the first-word stdout are both signals; we
-    # prefer the stdout word because the rc semantics vary across
-    # OpenClaw versions. Any non-"active" first word = inactive.
-    if [ "$_gw_status_rc" -eq 0 ]; then
-        local _first_word
-        _first_word=$(printf '%s' "$_gw_status_output" | awk 'NR==1{print $1; exit}')
-        if [ "$_first_word" = "active" ]; then
-            openclaw_gateway_state="active"
-        fi
-    fi
-    # Fallback / sanity-check: if OpenClaw's status subcommand was
-    # absent (older versions) or ambiguous, ask systemd. We treat
-    # this as a secondary signal — never as the authoritative
-    # answer — because OpenClaw's own state semantics are what the
-    # user actually sees. Default to inactive on any error so the
-    # installer never blocks on an unresponsive systemd.
-    if [ "$openclaw_gateway_state" != "active" ] \
-        && command -v systemctl >/dev/null 2>&1; then
-        local _gw_rc
-        set +e
-        if command -v timeout >/dev/null 2>&1; then
-            timeout 3 systemctl --user is-active openclaw-gateway.service >/dev/null 2>&1
-        else
-            systemctl --user is-active openclaw-gateway.service >/dev/null 2>&1
-        fi
-        _gw_rc=$?
-        set -e
-        # ``systemctl is-active`` returns 0=active, 3=inactive,
-        # 4=not-found. Anything else (including timeout 124 or
-        # 137) = treat as inactive so we never block.
-        if [ "$_gw_rc" -eq 0 ]; then
-            openclaw_gateway_state="active"
-        fi
-    fi
-
-    # MPM_ACTIVE_MODE / MPM_ACTIVE_PERSONA are intentionally NOT injected
-    # here. MPM resolves mode/persona from env at request time via
-    # internal/core/mpmcli.ActiveContextFromEnv(), which returns "" when
-    # unset — and the substrate applies its own default/default contract.
-    # Hardcoding framework-specific defaults (e.g. "programming"/
-    # "correspondent") at install time was a pre-2026-08-29 drift that
-    # leaked old mode taxonomy into every MCP registration.
-    if openclaw mcp list 2>/dev/null | grep -q -- '^- mpm$'; then
-        log "  mpm MCP exists — updating via 'set'"
-        openclaw mcp set mpm "$(cat <<JSON
-{
-  "command": "$PREFIX/bin/mpm-mcp",
-  "env": {
-    "MPM_WORKSPACE": "$DATA_ROOT"
-  }
-}
-JSON
-)"
-    else
-        log "  mpm MCP not registered — adding"
-        openclaw mcp add mpm \
-            --command "$PREFIX/bin/mpm-mcp" \
-            --env "MPM_WORKSPACE=$DATA_ROOT"
-    fi
-
-    # ── Branch on captured state ──────────────────────────────────────
-    # Only restart the gateway if it was ACTIVE at install-start.
-    # Otherwise the registration is saved and will load on the
-    # next gateway start (operator-controlled).
-    if [ "$openclaw_gateway_state" != "active" ]; then
-        log "  ✓ MPM MCP registered with OpenClaw"
-        log "  OpenClaw gateway is not currently active; registration will load on next gateway start"
-        return 0
-    fi
-
-    log "  restarting active OpenClaw gateway to load MCP config"
-    # Bounded restart — ``--kill-after=5`` guarantees that if the
-    # soft timeout (15s) fires the child is SIGKILL'd within 5s
-    # more. No long-running OpenClaw process may be left behind.
-    # The bound is small enough that an unresponsive gateway never
-    # stalls the installer past ~20s and well under the ~44s OpenClaw
-    # internal health-check window.
-    #
-    # The restart runs under ``set +e`` because we deliberately
-    # want to inspect the timeout exit code (124=timeout,
-    # 137=kill-after, 0=success, non-zero=failure). With
-    # ``set -e`` active, those non-zero exits would terminate the
-    # installer before the rc can be captured.
-    local _restart_rc
-    set +e
-    if command -v timeout >/dev/null 2>&1; then
-        timeout --kill-after=5 15 openclaw gateway restart >/dev/null 2>&1
-    else
-        # No GNU ``timeout``: best-effort, no bound. This branch is
-        # only reached on systems lacking coreutils, which is rare.
-        openclaw gateway restart >/dev/null 2>&1
-    fi
-    _restart_rc=$?
-    set -e
-    case "$_restart_rc" in
-        0)
-            log "  ✓ OpenClaw gateway restarted"
-            ;;
-        124|137)
-            warn "  OpenClaw gateway restart timed out; MPM registration is saved and installation will continue"
-            ;;
-        *)
-            warn "  OpenClaw gateway restart failed (rc=$_restart_rc); MPM registration is saved and installation will continue"
-            ;;
-    esac
-}
 
 phase_validate() {
     note "VALIDATION"
@@ -812,16 +668,7 @@ phase_validate() {
         warn "  ! lock file not found (daemon may not have ticked yet)"
     fi
 
-    # 4. MCP registration (if openclaw present)
-    if command -v openclaw >/dev/null 2>&1; then
-        if openclaw mcp show mpm 2>/dev/null | grep -q "MPM_WORKSPACE.*$DATA_ROOT"; then
-            log "  ✓ MCP registration points at $DATA_ROOT"
-        else
-            warn "  ! MCP registration may be stale — verify with 'openclaw mcp show mpm'"
-        fi
-    fi
-
-    # 5. Directives seeded (warn-only — install does not auto-seed)
+    # 4. Directives seeded (warn-only — install does not auto-seed)
     local directives_count=0
     local directives_json
     directives_json=$("$PREFIX/bin/mpm" call mpm_context --payload '{"action":"read_directives","params":{}}' 2>/dev/null \
@@ -851,7 +698,6 @@ mode_install() {
     phase_symlinks
     phase_data_dir
     phase_service
-    phase_host_integration
     phase_validate
     note "INSTALL COMPLETE"
     # Use the canonical path so the next-steps commands are runnable
@@ -910,7 +756,6 @@ mode_dry_run() {
         log "  ecryptfs detected → install ~/.config/autostart/mpm-post-decrypt.desktop (daemon-reload + start after decrypt)"
         log "  and: systemctl --user add-wants graphical-session.target mpm-scheduler.service (secondary)"
     fi
-    log "  openclaw mcp add/set mpm (if openclaw detected)"
     log "  validate via systemctl status + mpm health_check"
     log ""
     log "dry run complete (no changes made)"
