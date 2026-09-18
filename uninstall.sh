@@ -636,6 +636,33 @@ apply_plan() {
             fi
         done
     fi
+
+    # 10. Remove the install prefix itself when it is canonical and
+    # the running script is staged off-tree. --shred's secure-overwrite
+    # contract is meaningless if the install/uninstall scripts and
+    # leftover bin/ remain afterwards. We only do this when:
+    #   (a) MODE is --purge or --shred (destructive), AND
+    #   (b) DRY_RUN=0 (not a dry-run), AND
+    #   (c) MPM_UNINSTALL_STAGED=1 (we are running from the staged
+    #       copy; the staged copy's REPO_ROOT is OUTSIDE PREFIX, so
+    #       `rm -rf $PREFIX` cannot interrupt our own source tree).
+    # Validate $PREFIX through the same guard we use everywhere else.
+    if [ "$MODE" != "default" ] && [ "$DRY_RUN" = "0" ] && [ "${MPM_UNINSTALL_STAGED:-0}" = "1" ]; then
+        local validated_prefix
+        validated_prefix="$(validate_destructive_root "install prefix" "$PREFIX" 2>/dev/null || true)"
+        if [ -n "$validated_prefix" ] && [ -d "$validated_prefix" ]; then
+            # Use a sentinel that survives the rm-rf so we can log success.
+            local sentinel="$validated_prefix/.mpm-uninstall-finalizing"
+            : > "$sentinel" 2>/dev/null || true
+            rm -rf -- "$validated_prefix" 2>/dev/null || warn "could not fully remove $validated_prefix"
+            if [ ! -e "$validated_prefix" ]; then
+                log "removed: $validated_prefix (install prefix)"
+                log "install prefix gone: $validated_prefix"
+            else
+                warn "install prefix still present after rm -rf: $validated_prefix"
+            fi
+        fi
+    fi
 }
 
 # ---------- confirmation ----------
@@ -781,8 +808,13 @@ EOF
     log "Remove or refresh them using the corresponding agent_installation adapter."
 
     if [ -n "${MPM_UNINSTALL_STAGED_AT:-}" ]; then
-        # We were re-executed from a staged copy. Clean up.
+        # We were re-executed from a staged copy. Clean up both the
+        # staged file and its parent directory (the parent was created
+        # by mktemp -d and is otherwise abandoned).
+        local staged_dir
+        staged_dir="$(dirname -- "${MPM_UNINSTALL_STAGED_AT}")"
         rm -rf -- "${MPM_UNINSTALL_STAGED_AT}" 2>/dev/null || true
+        rm -rf -- "$staged_dir" 2>/dev/null || true
         log "removed staged copy at ${MPM_UNINSTALL_STAGED_AT}"
     fi
 }

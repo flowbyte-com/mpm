@@ -544,31 +544,31 @@ phase_data_dir() {
     # so idempotence does not preserve an insecure state.
     # Track per-path state so the log distinguishes newly-created
     # directories from pre-existing ones (truthful output).
-    if [ -e "$DATA_ROOT/src/db" ]; then
-        _preexisted=1
-    else
-        _preexisted=0
-    fi
+    #
+    # Pre-existence is decided BEFORE `install -d` runs, by inspecting
+    # the inode (or any kind of entry) at the target path. We do NOT
+    # infer creation from the directory existing AFTER `install -d`,
+    # because `install -d` is idempotent — running it on an existing
+    # directory must not be misreported as a creation.
+    _preexisted_src_db=0
+    [ -e "$DATA_ROOT/src/db" ] && _preexisted_src_db=1
     install -d -m 0700 "$DATA_ROOT/src/db"
     chmod 0700 "$DATA_ROOT/src/db"
-    if [ "$_preexisted" = "1" ]; then
-        log "  validated existing $DATA_ROOT/src/db (mode 0700)"
+    if [ "$_preexisted_src_db" = "1" ]; then
+        log "  verified existing $DATA_ROOT/src/db (mode 0700)"
     else
         log "  created $DATA_ROOT/src/db (mode 0700)"
     fi
-    if [ -e "$DATA_ROOT/backups/critic-pre" ]; then
-        _preexisted=1
-    else
-        _preexisted=0
-    fi
+    _preexisted_backups=0
+    [ -e "$DATA_ROOT/backups/critic-pre" ] && _preexisted_backups=1
     install -d -m 0700 "$DATA_ROOT/backups/critic-pre"
     chmod 0700 "$DATA_ROOT/backups/critic-pre"
-    if [ "$_preexisted" = "1" ]; then
-        log "  validated existing $DATA_ROOT/backups/critic-pre (mode 0700)"
+    if [ "$_preexisted_backups" = "1" ]; then
+        log "  verified existing $DATA_ROOT/backups/critic-pre (mode 0700)"
     else
         log "  created $DATA_ROOT/backups/critic-pre (mode 0700)"
     fi
-    unset _preexisted
+    unset _preexisted_src_db _preexisted_backups
 
     if [ ! -f "$DATA_ROOT/src/db/mpm.db" ]; then
         log "  no database at $DATA_ROOT/src/db/mpm.db"
