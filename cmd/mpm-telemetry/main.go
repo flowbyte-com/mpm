@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
 
@@ -53,6 +54,13 @@ func topLevelVersionFlag(argv []string) bool {
 }
 
 func main() {
+	// 2026-09-18 hardening pass: every MPM executable capable of
+	// creating persistent/sensitive state must run with process
+	// umask 0077 so files inherit private default permissions
+	// regardless of ambient shell umask. Call BEFORE any file
+	// creation / DB open / goroutine that may write to disk.
+	config.EnforcePrivateUmask()
+
 	telemetry.SetBuildVersion(buildVersion)
 
 	// 1. Top-level version flag: --version / -V at the top level

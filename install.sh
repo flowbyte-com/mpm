@@ -576,6 +576,44 @@ phase_data_dir() {
     else
         log "  database present at $DATA_ROOT/src/db/mpm.db"
     fi
+
+    # 2026-09-18 hardening pass: existing-DB-tree permission
+    # normalization. Forward enforcement is handled by the
+    # process-wide umask in the binaries (see EnforcePrivateUmask),
+    # but pre-existing state created before that hardening — or by
+    # an old install that used a permissive umask — is normalized
+    # here on every install/repair pass. Scope is intentionally
+    # limited to $DATA_ROOT/src/db (NOT the whole data root, NOT
+    # the install tree).
+    #
+    # Invariants enforced:
+    #   - directories under src/db/   -> 0700
+    #   - regular files under src/db/  -> 0600
+    # Symlinks are NOT followed (no -L) so external targets are
+    # never chmod'd. Filenames with whitespace/newlines are handled
+    # by the NUL-delimited -print0/-read.
+    if [ -d "$DATA_ROOT/src/db" ]; then
+        local db_root
+        db_root="$(cd "$DATA_ROOT/src/db" && pwd)"
+        local _fixed=0 _checked=0
+        while IFS= read -r -d '' p; do
+            _checked=$((_checked + 1))
+            # Tighten directories to 0700. Skip symlinks.
+            if [ -L "$p" ]; then
+                continue
+            fi
+            if [ -d "$p" ]; then
+                chmod 0700 "$p" 2>/dev/null && _fixed=$((_fixed + 1))
+            elif [ -f "$p" ]; then
+                chmod 0600 "$p" 2>/dev/null && _fixed=$((_fixed + 1))
+            fi
+        done < <(find "$db_root" -mindepth 1 -print0 2>/dev/null)
+        # Touch the root too in case it was permissive.
+        chmod 0700 "$db_root" 2>/dev/null || true
+        if [ "$_fixed" -gt 0 ]; then
+            log "  tightened DB-tree perms: $_fixed entr(ies) (out of $_checked)"
+        fi
+    fi
 }
 
 phase_service() {

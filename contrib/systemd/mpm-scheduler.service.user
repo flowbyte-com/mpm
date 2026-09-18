@@ -46,6 +46,14 @@ Environment=MPM_CRITIC_BIN=%h/.mpm/bin/mpm-critic
 
 EnvironmentFile=-%h/.config/mpm/mpm.env
 
+# 2026-09-18 hardening pass: pin the service-creation umask to 0077
+# so any file the scheduler process creates (logs, watchdog,
+# SQLite sidecars, runtime state) inherits private defaults
+# regardless of the launching shell's umask. Should not be
+# weakened. The mpm-scheduler binary ALSO calls EnforcePrivateUmask
+# at startup as a redundant defense-in-depth line.
+UMask=0077
+
 # Hardening (light — tighten further as your security model demands)
 NoNewPrivileges=true
 PrivateTmp=true

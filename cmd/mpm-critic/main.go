@@ -31,12 +31,18 @@ import (
 
 	mpmcore "github.com/flowbyte-com/mpm-core"
 
+	"github.com/flowbyte-com/mpm-core/config"
+
 	"github.com/flowbyte-com/mpm/internal/critic"
 	"github.com/flowbyte-com/mpm-core/mpmcli"
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
 
 func main() {
+	// 2026-09-18 hardening pass: process umask 0077 BEFORE any DB
+	// open or file creation.
+	config.EnforcePrivateUmask()
+
 	var (
 		dbPath = flag.String("db", os.Getenv("MPM_DB_PATH"),
 			"Path to mpm.db (default: $MPM_DB_PATH or src/db/mpm.db via DatabaseManager)")

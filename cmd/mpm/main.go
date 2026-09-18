@@ -302,6 +302,11 @@ type PreFlightCheck struct {
 }
 
 func main() {
+	// 2026-09-18 hardening pass: process umask 0077 BEFORE the dir-
+	// perms check, BEFORE any DB open, BEFORE any goroutine that may
+	// write to disk. See internal/core/config/umask.go.
+	config.EnforcePrivateUmask()
+
 	// Security gate: refuse to start (and refuse to allow auto-heal
 	// to silently proceed) if the runtime dir perms are wider than 0700
 	// AND the current user can't chmod. Auto-heals succeed; only fatal

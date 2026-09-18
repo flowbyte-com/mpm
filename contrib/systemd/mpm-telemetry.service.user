@@ -34,6 +34,13 @@ Environment=MPM_TELEMETRY_DB=%h/.mpm/src/db/telemetry.db
 
 EnvironmentFile=-%h/.config/mpm/mpm.env
 
+# 2026-09-18 hardening pass: pin service-creation umask to 0077 so
+# telemetry SQLite + sidecars inherit private defaults regardless
+# of launching shell umask. Should not be weakened. The
+# mpm-telemetry binary ALSO calls EnforcePrivateUmask at startup
+# as a redundant defense-in-depth line.
+UMask=0077
+
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

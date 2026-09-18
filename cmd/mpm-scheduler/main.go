@@ -30,6 +30,10 @@ import (
 )
 
 func main() {
+	// 2026-09-18 hardening pass: process umask 0077 BEFORE any DB
+	// open or file creation. See internal/core/config/umask.go.
+	mpmcore_config.EnforcePrivateUmask()
+
 	var (
 		interval = flag.Duration("interval", 60*time.Second,
 			"System-maintenance cadence (default 60s). Bounds the cross-process wake-dispatch latency to min(interval, time_to_next_deadline). Min 1s.")

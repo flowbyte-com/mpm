@@ -37,6 +37,7 @@ import (
 	"github.com/flowbyte-com/mpm/internal/blobstore"
 	"github.com/flowbyte-com/mpm-core/tools"
 	"github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/logging"
 	"github.com/flowbyte-com/mpm-core/mpmcli"
 )
@@ -131,6 +132,10 @@ var instructionsPrimer string
 // point, so Evaluate() is pure string matching with zero parsing overhead.
 
 func main() {
+	// 2026-09-18 hardening pass: process umask 0077 BEFORE any DB
+	// open, log setup, or tool registration that may write to disk.
+	config.EnforcePrivateUmask()
+
 	// Alpha-4 D-004/W-004: mpm-mcp is a stdio MCP server — its
 	// stdout/stderr stream is the protocol boundary. Discard operational
 	// INFO by default so the protocol stays parseable. Operators can
