@@ -47,7 +47,7 @@
 #     rather than failing the whole install.
 #
 # Does NOT modify shell startup files. Does NOT touch the MPM substrate
-# install (that lives in the mpm/install.sh; this adapter
+# install (that lives in the install.sh; this adapter
 # assumes the operator ran that first OR this installer will bootstrap
 # if it is missing).
 #
@@ -158,12 +158,12 @@ if ! locate_mpm; then
     warn "mpm not found; bootstrapping via MPM_BOOTSTRAP_URL"
     if command -v curl >/dev/null 2>&1; then
       if ! curl -fsSL "$MPM_BOOTSTRAP_URL" | bash; then
-        err "MPM bootstrap failed. Run the mpm/install.sh once, then re-run this installer."
+        err "MPM bootstrap failed. Run the install.sh once, then re-run this installer."
         exit 1
       fi
     elif command -v wget >/dev/null 2>&1; then
       if ! wget -qO- "$MPM_BOOTSTRAP_URL" | bash; then
-        err "MPM bootstrap failed. Run the mpm/install.sh once, then re-run this installer."
+        err "MPM bootstrap failed. Run the install.sh once, then re-run this installer."
         exit 1
       fi
     else

@@ -48,7 +48,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path("/home/v/workspace/projects/mpm").resolve()
-INSTALL_SH = REPO_ROOT / "mpm" / "install.sh"
+INSTALL_SH = REPO_ROOT / "install.sh"
 
 # Markers in install.sh that prevent the script from running main()
 # during test sourcing. PROJECT_ROOT is computed from $0 inside the
@@ -110,11 +110,10 @@ class _PhaseBinariesDriver(unittest.TestCase):
                 p.write_text(sentinel)
             p.chmod(0o755)
         self._last_sentinel = sentinel
-        # Stage install.sh at the canonical location (mpm/install.sh) so
-        # the sourced-lib sees the same paths the real installer would.
-        (root / "mpm").mkdir(parents=True, exist_ok=True)
-        shutil.copy(INSTALL_SH, root / "mpm" / "install.sh")
-        lib = root / "mpm" / "install.sh.lib"
+        # Stage install.sh at the canonical location (repo root) so the
+        # sourced-lib sees the same paths the real installer would.
+        shutil.copy(INSTALL_SH, root / "install.sh")
+        lib = root / "install.sh.lib"
         lib.write_text(build_sourced_lib(INSTALL_SH.read_text()))
 
     def _drive(self, project_root: Path, prefix: Path, data_root: Path) -> dict:
@@ -133,7 +132,7 @@ class _PhaseBinariesDriver(unittest.TestCase):
             #!/usr/bin/env bash
             set -uo pipefail
             export PROJECT_ROOT={project_root}
-            source {project_root}/mpm/install.sh.lib
+            source {project_root}/install.sh.lib
             PREFIX={prefix}
             DATA_ROOT={data_root}
             SERVICE_DST=/dev/null

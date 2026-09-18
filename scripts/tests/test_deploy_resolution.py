@@ -6,7 +6,7 @@ scripts/deploy.sh lives at <repo>/scripts/deploy.sh — its parent is
 the repository root, NOT the script's directory. This test confirms
 that deploy.sh, when invoked from an arbitrary CWD, correctly
 identifies its REPO_ROOT and resolves a path that exists only at the
-repo root (mpm/install.sh).
+repo root (install.sh).
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ class TestDeployRepoRootResolution(unittest.TestCase):
 
     def test_deploy_sh_resolves_repo_root_when_invoked_from_arbitrary_cwd(self):
         """Run deploy.sh --no-install from /tmp and verify it can locate
-        mpm/install.sh via its REPO_ROOT resolution. The simplest proof:
+        install.sh via its REPO_ROOT resolution. The simplest proof:
         deploy.sh should NOT fail with "cannot find Makefile" or
         similar — it must `cd` to the correct REPO_ROOT."""
         # We use --no-install to skip actual builds; deploy.sh still does

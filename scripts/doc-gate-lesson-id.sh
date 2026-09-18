@@ -29,7 +29,7 @@ PROBLEM_SURFACE_FILES=(
   README.md
   docs/INSTALL.md
   agent_installation/INSTALL.md
-  mpm/install.sh
+  install.sh
   contrib/systemd/mpm-scheduler.service.user
 )
 

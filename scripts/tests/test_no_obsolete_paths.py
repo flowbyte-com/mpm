@@ -1,22 +1,26 @@
 """
 test_no_obsolete_paths.py — Regression coverage for the lifecycle-layout
-restructure (2026-09-17, follow-up).
+restructure (2026-09-17, second correction).
 
 Architectural contract:
 
-  Canonical lifecycle layout (post this commit):
+  Canonical lifecycle layout (this commit):
 
-    mpm/install.sh        — public substrate installer
-    mpm/uninstall.sh      — public substrate uninstaller
-    scripts/deploy.sh     — maintainer / release tooling
-    agent_installation/   — host/framework integrations (unchanged)
+    install.sh             — public substrate installer
+    uninstall.sh           — public substrate uninstaller
+    scripts/deploy.sh      — maintainer / release tooling
+    agent_installation/    — host/framework integrations (unchanged)
 
-  Active operational source/docs MUST NOT reference the obsolete paths
+  Production canonical install prefix is $HOME/.mpm (== repo root when
+  checked out into ~/.mpm). Therefore the in-tree canonical paths map
+  directly to $HOME/.mpm/{install.sh, uninstall.sh, scripts/deploy.sh}.
+
+  Active operational source/docs MUST NOT reference the obsolete layouts
   (each was formerly an active canonical path):
 
-    scripts/install.sh   — formerly here; canonical is mpm/install.sh
-    ./install.sh         — formerly here; canonical is mpm/install.sh
-    ./uninstall.sh       — formerly here; canonical is mpm/uninstall.sh
+    mpm/install.sh       — formerly here; canonical is install.sh
+    mpm/uninstall.sh     — formerly here; canonical is uninstall.sh
+    scripts/install.sh   — formerly here; canonical is install.sh
 
   Adapter-local install.sh files (e.g. agent_installation/mpm-*/install.sh)
   are NOT subject to this invariant — they are their own installer.
@@ -53,17 +57,24 @@ EXCLUDED_PATH_PREFIXES = (
 # Patterns that count as "the path is actually used as a path" (not a
 # narrative mention). We only flag matches where the line uses the
 # path as an instruction or invocation form.
+#
+# Forbidden active-use patterns (each was formerly an active canonical
+# path in the wrong layout):
+#   * mpm/install.sh / mpm/uninstall.sh — formerly the wrong nested layout;
+#     production-side ~/.mpm/{install,uninstall}.sh is NOT matched because
+#     the negative lookbehind `(?<!\.)` rejects a leading `.`.
+#   * scripts/install.sh               — formerly the old layout.
+#
+# The current canonical ./install.sh / ./uninstall.sh are NOT forbidden
+# here; they are enforced by the canonical-file assertions below.
 FORBIDDEN_PATH_PATTERNS = [
     # Old layout: scripts/install.sh was formerly the active path.
     re.compile(r"\bscripts/install\.sh\b"),
-    # New layout: root-level ./install.sh was formerly forbidden; canonical is now mpm/install.sh.
-    # And root-level ./uninstall.sh was formerly forbidden; canonical is now mpm/uninstall.sh.
-    re.compile(r"(?<![/\w])\./install\.sh\b"),     # matches bare form; was formerly the active path
-    re.compile(r"(?<![/\w])\./uninstall\.sh\b"),
-    # Bare root-level invocation: `install.sh --foo` was formerly the form without a path prefix.
-    # (We accept `mpm/install.sh` and `scripts/deploy.sh`.)
-    re.compile(r"(?<![/\w.])install\.sh\s+--"),
-    re.compile(r"(?<![/\w.])uninstall\.sh\s+--"),
+    # Wrong nested layout: mpm/install.sh was formerly nested under mpm/;
+    # canonical is now install.sh at the repo root. Production-side
+    # ~/.mpm/install.sh is allowed (negative lookbehind rejects `.`).
+    re.compile(r"(?<![/\w.])mpm/install\.sh\b"),     # matches bare form; was formerly the nested layout
+    re.compile(r"(?<![/\w.])mpm/uninstall\.sh\b"),
 ]
 
 
@@ -79,9 +90,9 @@ def _list_tracked_files() -> list[str]:
 def _is_active_operational(rel: str) -> bool:
     """Active operational surface — top-level docs and operational
     tooling. Adapter directories are explicitly excluded because each
-    adapter has its own install.sh that's referenced from inside the
-    adapter directory; that relative `./install.sh` path (formerly the
-    active form) is outside this invariant."""
+    adapter has its own install.sh (the relative `./install.sh` form
+    inside the adapter directory was formerly outside this invariant
+    and remains so)."""
     if rel in HISTORICAL_FILES_ALLOWLIST:
         return False
     if any(rel.startswith(p) for p in EXCLUDED_PATH_PREFIXES):
@@ -138,7 +149,7 @@ class TestNoObsoleteInstallPaths(unittest.TestCase):
             self.fail(
                 "active operational files reference forbidden lifecycle paths:\n"
                 f"{msg}\n"
-                "Use the canonical 'mpm/install.sh' / 'mpm/uninstall.sh' / "
+                "Use the canonical 'install.sh' / 'uninstall.sh' / "
                 "'scripts/deploy.sh'."
             )
 
@@ -147,16 +158,16 @@ class TestCanonicalLifecycleFiles(unittest.TestCase):
     """Spec §1: the canonical lifecycle files exist where expected, are
     executable, and legacy locations are gone."""
 
-    def test_mpm_install_sh_exists(self):
+    def test_install_sh_exists(self):
         self.assertTrue(
-            (REPO_ROOT / "mpm" / "install.sh").is_file(),
-            "mpm/install.sh missing",
+            (REPO_ROOT / "install.sh").is_file(),
+            "install.sh missing at repo root",
         )
 
-    def test_mpm_uninstall_sh_exists(self):
+    def test_uninstall_sh_exists(self):
         self.assertTrue(
-            (REPO_ROOT / "mpm" / "uninstall.sh").is_file(),
-            "mpm/uninstall.sh missing",
+            (REPO_ROOT / "uninstall.sh").is_file(),
+            "uninstall.sh missing at repo root",
         )
 
     def test_scripts_deploy_sh_exists(self):
@@ -170,31 +181,31 @@ class TestCanonicalLifecycleFiles(unittest.TestCase):
         self.assertTrue(mode & stat.S_IXUSR,
                         f"{label} is not executable (mode={oct(mode & 0o777)})")
 
-    def test_mpm_install_sh_is_executable(self):
-        self._assert_executable(REPO_ROOT / "mpm" / "install.sh", "mpm/install.sh")
+    def test_install_sh_is_executable(self):
+        self._assert_executable(REPO_ROOT / "install.sh", "install.sh")
 
-    def test_mpm_uninstall_sh_is_executable(self):
-        self._assert_executable(REPO_ROOT / "mpm" / "uninstall.sh", "mpm/uninstall.sh")
+    def test_uninstall_sh_is_executable(self):
+        self._assert_executable(REPO_ROOT / "uninstall.sh", "uninstall.sh")
 
     def test_scripts_deploy_sh_is_executable(self):
         self._assert_executable(REPO_ROOT / "scripts" / "deploy.sh", "scripts/deploy.sh")
 
-    def test_no_install_sh_at_repo_root(self):
+    def test_no_mpm_install_sh(self):
         self.assertFalse(
-            (REPO_ROOT / "install.sh").exists(),
-            "root-level install.sh still exists; should have been moved to mpm/install.sh",
+            (REPO_ROOT / "mpm" / "install.sh").exists(),
+            "mpm/install.sh still exists; was formerly the nested layout; canonical is install.sh at the repo root",
         )
 
-    def test_no_uninstall_sh_at_repo_root(self):
+    def test_no_mpm_uninstall_sh(self):
         self.assertFalse(
-            (REPO_ROOT / "uninstall.sh").exists(),
-            "root-level uninstall.sh still exists; should have been moved to mpm/uninstall.sh",
+            (REPO_ROOT / "mpm" / "uninstall.sh").exists(),
+            "mpm/uninstall.sh still exists; was formerly the nested layout; canonical is uninstall.sh at the repo root",
         )
 
     def test_no_scripts_install_sh(self):
         self.assertFalse(
             (REPO_ROOT / "scripts" / "install.sh").exists(),
-            "scripts/install.sh still exists; was formerly the active path; canonical is mpm/install.sh",
+            "scripts/install.sh still exists; was formerly the active path; canonical is install.sh",
         )
 
     def test_no_deploy_sh_at_repo_root(self):

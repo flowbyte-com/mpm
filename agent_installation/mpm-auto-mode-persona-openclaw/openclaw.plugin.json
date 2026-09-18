@@ -1,7 +1,7 @@
 {
   "id": "mpm-auto-mode-persona-openclaw",
   "name": "MPM Auto Mode & Persona",
-  "description": "Per-turn mode/persona auto-switching via `mpm route --apply`. Capture the user prompt, spawn MPM's router, inject the rendered <system-reminder> into SOUL.md. Requires MPM installed and on PATH (`~/.local/bin/mpm` via mpm/install.sh).",
+  "description": "Per-turn mode/persona auto-switching via `mpm route --apply`. Capture the user prompt, spawn MPM's router, inject the rendered <system-reminder> into SOUL.md. Requires MPM installed and on PATH (`~/.local/bin/mpm` via install.sh).",
   "activation": {
     "onStartup": true
   },

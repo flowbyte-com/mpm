@@ -4,7 +4,7 @@ Description=MPM telemetry collector (USER-level, Phase 2)
 #   https://github.com/flowbyte-com/mpm
 #
 # This is the USER-level unit and the DEFAULT install target.
-# mpm/install.sh installs it to
+# install.sh installs it to
 # $HOME/.config/systemd/user/mpm-telemetry.service.
 #
 # Canonical install layout: $HOME/.mpm/bin/ for binaries, $HOME/.mpm/ for
@@ -38,11 +38,11 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-# Ensure the runtime directory exists before ExecStart. mpm/install.sh creates
+# Ensure the runtime directory exists before ExecStart. install.sh creates
 # %h/.mpm and %h/.mpm/src/db but not %h/.mpm/runtime; this guards against
 # fresh-machine cold start (no %h/.mpm at all), partial installs where the
 # data root exists but runtime/ was wiped, and first-boot races where the unit
-# fires before the operator has run mpm/install.sh. -p is idempotent so this is
+# fires before the operator has run install.sh. -p is idempotent so this is
 # safe on every restart.
 # telemetry.db itself is created by SQLite once its parent dir exists; do
 # not pre-create it here.

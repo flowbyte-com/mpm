@@ -30,13 +30,13 @@
 #                 erasure on SSD/CoW/snapshot/journaled storage.
 #
 # Usage:
-#   ./mpm/uninstall.sh                    # runtime-only uninstall
-#   ./mpm/uninstall.sh --dry-run          # preview what would happen
-#   ./mpm/uninstall.sh --purge            # also delete data + config
-#   ./mpm/uninstall.sh --shred            # --purge + best-effort overwrite
-#   ./mpm/uninstall.sh --purge --yes      # noninteractive purge
-#   ./mpm/uninstall.sh --shred --yes      # noninteractive shred
-#   ./mpm/uninstall.sh --help             # full help
+#   ./uninstall.sh                    # runtime-only uninstall
+#   ./uninstall.sh --dry-run          # preview what would happen
+#   ./uninstall.sh --purge            # also delete data + config
+#   ./uninstall.sh --shred            # --purge + best-effort overwrite
+#   ./uninstall.sh --purge --yes      # noninteractive purge
+#   ./uninstall.sh --shred --yes      # noninteractive shred
+#   ./uninstall.sh --help             # full help
 #
 # Exit codes:
 #   0   success (or dry-run completed)
@@ -66,11 +66,9 @@ while [ -L "$SCRIPT_PATH" ]; do
     esac
 done
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
-# uninstall.sh lives at <repo>/mpm/uninstall.sh. REPO_ROOT is its
-# grandparent. PROJECT_ROOT is kept equal to SCRIPT_DIR for self-removal
-# staging and printing — but REPO_ROOT is the explicit hook for any
-# future repo-wide path resolution.
-readonly REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+# uninstall.sh lives at the repo root. REPO_ROOT is its own directory,
+# which is also the canonical install prefix in production ($HOME/.mpm).
+readonly REPO_ROOT="$SCRIPT_DIR"
 readonly PROJECT_ROOT="$SCRIPT_DIR"
 readonly SCRIPT_NAME="uninstall.sh"
 
@@ -86,14 +84,14 @@ usage() {
 $SCRIPT_NAME — MPM substrate removal tool (user-facing, host-agnostic).
 
 Usage:
-  ./mpm/uninstall.sh                     # runtime-only uninstall (data preserved)
-  ./mpm/uninstall.sh --dry-run           # preview default uninstall
-  ./mpm/uninstall.sh --purge --dry-run   # preview purge scope
-  ./mpm/uninstall.sh --shred --dry-run   # preview shred scope
-  ./mpm/uninstall.sh --purge             # remove runtime + persistent state
-  ./mpm/uninstall.sh --shred             # remove + best-effort secure overwrite
-  ./mpm/uninstall.sh --purge --yes       # noninteractive purge
-  ./mpm/uninstall.sh --shred --yes       # noninteractive shred
+  ./uninstall.sh                     # runtime-only uninstall (data preserved)
+  ./uninstall.sh --dry-run           # preview default uninstall
+  ./uninstall.sh --purge --dry-run   # preview purge scope
+  ./uninstall.sh --shred --dry-run   # preview shred scope
+  ./uninstall.sh --purge             # remove runtime + persistent state
+  ./uninstall.sh --shred             # remove + best-effort secure overwrite
+  ./uninstall.sh --purge --yes       # noninteractive purge
+  ./uninstall.sh --shred --yes       # noninteractive shred
 
 Flags:
   --dry-run       Print the destruction plan; perform no mutations.

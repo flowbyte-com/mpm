@@ -104,8 +104,8 @@ Do not, without explicit authorization:
 Commands such as:
 
 ```bash
-./mpm/install.sh
-./mpm/uninstall.sh
+./install.sh
+./uninstall.sh
 ./scripts/deploy.sh
 systemctl --user restart ...
 ```

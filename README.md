@@ -656,11 +656,11 @@ cd ~/projects/mpm
 make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic, bin/mpm-telemetry
 ```
 
-The single binary lives at `bin/mpm`. Try it without installing anything — no daemon setup, no service registration, no config files. (`make install` is optional; it verifies/syncs all five binaries to `$HOME/.mpm/bin` — the canonical install prefix. For a full systemd + OpenClaw install, run `./mpm/install.sh` — the canonical path. The companion daemons `mpm-mcp` and `mpm-scheduler` install together when you want autonomous operation — see §5.2.)
+The single binary lives at `bin/mpm`. Try it without installing anything — no daemon setup, no service registration, no config files. (`make install` is optional; it verifies/syncs all five binaries to `$HOME/.mpm/bin` — the canonical install prefix. For a full systemd + OpenClaw install, run `./install.sh` — the canonical path. The companion daemons `mpm-mcp` and `mpm-scheduler` install together when you want autonomous operation — see §5.2.)
 
 ### 5.2 Run it as a daemon
 
-This section shows the daemon + systemd setup manually, for transparency and for operators who want to customize individual steps. If you don't need that control, run `./mpm/install.sh` instead — it does most of the below (build, install to `~/.mpm/bin`, `make service-scheduler`, `systemctl --user enable --now`, the eCryptfs autostart workaround, and OpenClaw wiring) in one idempotent step. `mpm ops init directives` (see [§5.2 step "Seed the baseline cognitive directives"](#seed-the-baseline-cognitive-directives-recommended-once-after-install)) is **not** part of `install.sh` — it is a separate post-install command by design (the installer prints it as a `next steps` hint at the end). `make service-telemetry` likewise is a separate manual step. Use the manual steps below when you need to pin a specific version, point a unit at a non-canonical install path, or otherwise deviate from the canonical layout.
+This section shows the daemon + systemd setup manually, for transparency and for operators who want to customize individual steps. If you don't need that control, run `./install.sh` instead — it does most of the below (build, install to `~/.mpm/bin`, `make service-scheduler`, `systemctl --user enable --now`, the eCryptfs autostart workaround, and OpenClaw wiring) in one idempotent step. `mpm ops init directives` (see [§5.2 step "Seed the baseline cognitive directives"](#seed-the-baseline-cognitive-directives-recommended-once-after-install)) is **not** part of `install.sh` — it is a separate post-install command by design (the installer prints it as a `next steps` hint at the end). `make service-telemetry` likewise is a separate manual step. Use the manual steps below when you need to pin a specific version, point a unit at a non-canonical install path, or otherwise deviate from the canonical layout.
 
 For autonomous operation — the scheduler dispatches system-kind wakes (critic audits, snapshots, GC, broadcasts) on a 60s ticker, and `mpm-mcp` exposes MPM to MCP hosts (Claude Code, OpenClaw) over stdio:
 
@@ -694,9 +694,9 @@ journalctl --user -u mpm-telemetry -f              # follow logs
 > `Wants=mpm-scheduler.service` can be evaluated, so `Restart=` does not help.
 > The fix is a `~/.config/autostart/mpm-post-decrypt.desktop` entry that runs
 > `systemctl --user daemon-reload && systemctl --user start mpm-scheduler.service`
-> on every graphical login (post-decrypt). `mpm/install.sh` detects this case
+> on every graphical login (post-decrypt). `install.sh` detects this case
 > via `mount` + `findmnt` + the `/home/.ecryptfs/$USER` marker and writes the
-> autostart entry automatically; `mpm/uninstall.sh` removes it.
+> autostart entry automatically; `uninstall.sh` removes it.
 >
 > Operators on systems without an agent wake path (cron-driven unattended tasks,
 > headless deployments) can opt out by removing the autostart entry and instead

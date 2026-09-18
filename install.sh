@@ -59,13 +59,13 @@
 #     ~/.local/bin/mpm-mcp. Internal daemons never appear there.
 #
 # Usage:
-#   ./mpm/install.sh              # full user-space install (no sudo)
-#   ./mpm/install.sh --check      # preflight only (no changes)
-#   ./mpm/install.sh --dry-run    # print intended actions
-#   ./mpm/install.sh --validate   # post-install check
-#   ./mpm/install.sh --uninstall  # remove installed artifacts
+#   ./install.sh              # full user-space install (no sudo)
+#   ./install.sh --check      # preflight only (no changes)
+#   ./install.sh --dry-run    # print intended actions
+#   ./install.sh --validate   # post-install check
+#   ./install.sh --uninstall  # remove installed artifacts
 #
-# (The dedicated uninstaller at ./mpm/uninstall.sh is the canonical
+# (The dedicated uninstaller at ./uninstall.sh is the canonical
 # removal entry point — it supports --dry-run / --purge / --shred.
 # This script keeps --uninstall as a thin alias for backward
 # compatibility.)
@@ -93,10 +93,9 @@ set -euo pipefail
 # ---------- constants ----------
 readonly SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-# install.sh now lives at <repo>/mpm/install.sh — its parent is the
-# repository root. Derive REPO_ROOT explicitly rather than equating it
-# to SCRIPT_DIR, so paths like <repo>/agent_installation resolve correctly.
-readonly REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+# install.sh lives at the repo root. REPO_ROOT is its own directory,
+# which is also the canonical install prefix in production ($HOME/.mpm).
+readonly REPO_ROOT="$SCRIPT_DIR"
 # PROJECT_ROOT stays equal to SCRIPT_DIR (the installer's working
 # directory) for backward-compatibility with code that has historically
 # referred to $PROJECT_ROOT for build/script locations — but for new
@@ -424,7 +423,7 @@ phase_binaries() {
 
     cat > "$PREFIX/bin/mpm" <<WRAPPER
 #!/bin/sh
-# mpm CLI wrapper — installed by mpm/install.sh
+# mpm CLI wrapper — installed by install.sh
 # Routes CLI to the per-user workspace regardless of CWD.
 # Override at invocation: MPM_WORKSPACE=/tmp/foo mpm call …
 exec env MPM_WORKSPACE=\${MPM_WORKSPACE:-${DATA_ROOT}} ${PREFIX}/bin/mpm.real "\$@"
@@ -543,9 +542,33 @@ phase_data_dir() {
     # pattern (`internal/blobstore/fs.go` MkdirAll + os.Chmod): a
     # pre-existing permissive directory is corrected on re-install,
     # so idempotence does not preserve an insecure state.
-    install -d -m 0700 "$DATA_ROOT/src/db" "$DATA_ROOT/backups/critic-pre"
-    chmod 0700 "$DATA_ROOT/src/db" "$DATA_ROOT/backups/critic-pre"
-    log "  created $DATA_ROOT/{src/db,backups/critic-pre} (mode 0700)"
+    # Track per-path state so the log distinguishes newly-created
+    # directories from pre-existing ones (truthful output).
+    if [ -e "$DATA_ROOT/src/db" ]; then
+        _preexisted=1
+    else
+        _preexisted=0
+    fi
+    install -d -m 0700 "$DATA_ROOT/src/db"
+    chmod 0700 "$DATA_ROOT/src/db"
+    if [ "$_preexisted" = "1" ]; then
+        log "  validated existing $DATA_ROOT/src/db (mode 0700)"
+    else
+        log "  created $DATA_ROOT/src/db (mode 0700)"
+    fi
+    if [ -e "$DATA_ROOT/backups/critic-pre" ]; then
+        _preexisted=1
+    else
+        _preexisted=0
+    fi
+    install -d -m 0700 "$DATA_ROOT/backups/critic-pre"
+    chmod 0700 "$DATA_ROOT/backups/critic-pre"
+    if [ "$_preexisted" = "1" ]; then
+        log "  validated existing $DATA_ROOT/backups/critic-pre (mode 0700)"
+    else
+        log "  created $DATA_ROOT/backups/critic-pre (mode 0700)"
+    fi
+    unset _preexisted
 
     if [ ! -f "$DATA_ROOT/src/db/mpm.db" ]; then
         log "  no database at $DATA_ROOT/src/db/mpm.db"

@@ -23,7 +23,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-UNINSTALL_SH = REPO_ROOT / "mpm" / "uninstall.sh"
+UNINSTALL_SH = REPO_ROOT / "uninstall.sh"
 
 
 def _make_fake_bin_dir(tmp: Path) -> Path:
