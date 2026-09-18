@@ -478,6 +478,9 @@ print_plan() {
         else
             for f in "${PLAN_PURGE_DIRS[@]}"; do log "  $f"; done
         fi
+        log ""
+        log "install prefix to delete after destructive cleanup:"
+        log "  $PREFIX (install prefix)"
     fi
 
     if [ "$MODE" = "shred" ]; then
@@ -637,23 +640,28 @@ apply_plan() {
         done
     fi
 
-    # 10. Remove the install prefix itself when it is canonical and
-    # the running script is staged off-tree. --shred's secure-overwrite
-    # contract is meaningless if the install/uninstall scripts and
-    # leftover bin/ remain afterwards. We only do this when:
+    # 10. Remove the install prefix itself when destructive mode is
+    # active and this is not a dry-run. --purge and --shred both remove
+    # the install prefix completely (along with the persistent state
+    # underneath); default uninstall preserves the install tree.
+    #
+    # Staging (MPM_UNINSTALL_STAGED=1) is an implementation mechanism,
+    # not a semantic prerequisite. The condition for prefix removal is
+    # purely about destructive intent + non-dry-run + safe root:
     #   (a) MODE is --purge or --shred (destructive), AND
     #   (b) DRY_RUN=0 (not a dry-run), AND
-    #   (c) MPM_UNINSTALL_STAGED=1 (we are running from the staged
-    #       copy; the staged copy's REPO_ROOT is OUTSIDE PREFIX, so
-    #       `rm -rf $PREFIX` cannot interrupt our own source tree).
-    # Validate $PREFIX through the same guard we use everywhere else.
-    if [ "$MODE" != "default" ] && [ "$DRY_RUN" = "0" ] && [ "${MPM_UNINSTALL_STAGED:-0}" = "1" ]; then
+    #   (c) PREFIX passes validate_destructive_root.
+    #
+    # Safety rationale for removal in non-staged runs: when the
+    # running script lives OUTSIDE PREFIX (e.g., an external copy),
+    # `rm -rf $PREFIX` cannot interrupt the running process because
+    # the script is not on $PREFIX. The staged-execution path also
+    # funnels here, but with the additional guarantee that the
+    # staged copy's REPO_ROOT is OUTSIDE PREFIX.
+    if [ "$MODE" != "default" ] && [ "$DRY_RUN" = "0" ]; then
         local validated_prefix
         validated_prefix="$(validate_destructive_root "install prefix" "$PREFIX" 2>/dev/null || true)"
         if [ -n "$validated_prefix" ] && [ -d "$validated_prefix" ]; then
-            # Use a sentinel that survives the rm-rf so we can log success.
-            local sentinel="$validated_prefix/.mpm-uninstall-finalizing"
-            : > "$sentinel" 2>/dev/null || true
             rm -rf -- "$validated_prefix" 2>/dev/null || warn "could not fully remove $validated_prefix"
             if [ ! -e "$validated_prefix" ]; then
                 log "removed: $validated_prefix (install prefix)"
