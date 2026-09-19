@@ -725,4 +725,291 @@ test("S. missing adapter directory is tolerated (graceful skip)", async () => {
     "must NOT attempt uninstall of missing auto adapter; log:\n" + log);
 });
 
+// --------------------------------------------------------------------------
+// Phase 1 (2026-09-19) — legacy ownership precedence.
+// Pins the strict evidence model for legacy plugin ids:
+//   A. inspect rootDir matches historical legacy adapter path → owned
+//   B. inspect rootDir is a DIFFERENT existing path       → conflict
+//   C. registry installRecords[id].sourcePath matches      → owned
+//   D. registry sourcePath is a DIFFERENT existing path    → conflict
+//   E. slot points to legacy id (only when no A/B/C/D verdict) → owned
+//   F. legacy entries have non-empty value (only when no A/B/C/D) → owned
+//   G. no source metadata AND no E/F evidence               → ambiguous
+// Conflicting source MUST override E/F fallbacks (B/D win).
+// --------------------------------------------------------------------------
+
+// LEG-1: legacy id + old canonical MPM source → removed
+test("LEG-1. legacy id with inspect rootDir matching historical MPM source → removed", async () => {
+  const { home } = freshHome("LEG-1");
+  const r = await runUninstaller({
+    homeDir: home,
+    extraEnv: {
+      // Inspect returns rootDir = the legacy adapter path. The
+      // uninstaller computes its expected legacy path from
+      // $SCRIPT_DIR/openclaw-mpm-memory which realpath-resolves
+      // to the same path → inspect_root_match → owned.
+      FAKE_OPENCLAW_LEGACY_MEMORY_STATE: "linked",
+      FAKE_OPENCLAW_LEGACY_MEMORY_PATH:
+        path.join(AGENT_INSTALLATION, "openclaw-mpm-memory"),
+      FAKE_OPENCLAW_LEGACY_AUTO_STATE: "linked",
+      FAKE_OPENCLAW_LEGACY_AUTO_PATH:
+        path.join(AGENT_INSTALLATION, "openclaw-mpm-auto-mode-persona"),
+    },
+  });
+  assert.strictEqual(r.code, 0, `uninstaller exited non-zero: ${r.stderr}`);
+  const log = readInvocationsRaw();
+  assert.match(log,
+    /plugins uninstall (--force )?openclaw-mpm-memory\b/,
+    "must uninstall legacy memory id (inspect_root_match evidence); log:\n" + log);
+  assert.match(log,
+    /plugins uninstall (--force )?openclaw-mpm-auto-mode-persona\b/,
+    "must uninstall legacy auto id (inspect_root_match evidence); log:\n" + log);
+});
+
+// LEG-2: legacy id + registry old canonical MPM source → removed
+test("LEG-2. legacy id with registry installRecords pointing at historical MPM source → removed", async () => {
+  const { home } = freshHome("LEG-2");
+  const r = await runUninstaller({
+    homeDir: home,
+    extraEnv: {
+      // Inspect fails (returns ok:false); registry has the legacy
+      // install record pointing at the canonical legacy adapter
+      // path → registry_path_match → owned.
+      FAKE_OPENCLAW_LEGACY_MEMORY_STATE: "vanished",
+      FAKE_OPENCLAW_LEGACY_MEMORY_REGISTRY_PATH:
+        path.join(AGENT_INSTALLATION, "openclaw-mpm-memory"),
+      FAKE_OPENCLAW_LEGACY_AUTO_STATE: "vanished",
+      FAKE_OPENCLAW_LEGACY_AUTO_REGISTRY_PATH:
+        path.join(AGENT_INSTALLATION, "openclaw-mpm-auto-mode-persona"),
+    },
+  });
+  assert.strictEqual(r.code, 0, `uninstaller exited non-zero: ${r.stderr}`);
+  const log = readInvocationsRaw();
+  assert.match(log,
+    /plugins uninstall (--force )?openclaw-mpm-memory\b/,
+    "must uninstall legacy memory id via registry_path_match; log:\n" + log);
+  assert.match(log,
+    /plugins uninstall (--force )?openclaw-mpm-auto-mode-persona\b/,
+    "must uninstall legacy auto id via registry_path_match; log:\n" + log);
+});
+
+// LEG-3: legacy id + unexpected inspect source → conflict, untouched
+test("LEG-3. legacy id with inspect rootDir at UNRELATED existing path → conflict, untouched", async () => {
+  const { home, aiRoot } = freshHome("LEG-3");
+  // Create an EXISTING unrelated directory for the conflict path.
+  // The uninstaller only classifies as conflict when the
+  // rootDir/sourcePath resolves to an existing path; a non-
+  // existent path falls through to the ambiguous verdict.
+  const unrelMemory = path.join(aiRoot, "unrelated-memory");
+  const unrelAuto = path.join(aiRoot, "unrelated-auto");
+  mkdirSync(unrelMemory, { recursive: true });
+  mkdirSync(unrelAuto, { recursive: true });
+  const r = await runUninstaller({
+    homeDir: home,
+    extraEnv: {
+      FAKE_OPENCLAW_LEGACY_MEMORY_STATE: "linked_at_alt",
+      FAKE_OPENCLAW_LEGACY_MEMORY_PATH: unrelMemory,
+      FAKE_OPENCLAW_LEGACY_AUTO_STATE: "linked_at_alt",
+      FAKE_OPENCLAW_LEGACY_AUTO_PATH: unrelAuto,
+    },
+  });
+  // Conflict is a non-fatal refusal; the uninstaller still exits 0
+  // but logs a WARN and skips the uninstall.
+  assert.strictEqual(r.code, 0, `uninstaller exited non-zero: ${r.stderr}`);
+  assert.match(r.stderr, /refusing to uninstall.*unrelated rootDir/,
+    "must surface the conflict refusal; stderr:\n" + r.stderr);
+  const log = readInvocationsRaw();
+  assert.ok(!/plugins uninstall (--force )?openclaw-mpm-memory\b/.test(log),
+    "must NOT call plugins uninstall for legacy id with conflicting rootDir; log:\n" + log);
+  assert.ok(!/plugins uninstall (--force )?openclaw-mpm-auto-mode-persona\b/.test(log),
+    "must NOT call plugins uninstall for legacy auto id with conflicting rootDir; log:\n" + log);
+});
+
+// LEG-4: legacy id + unexpected registry source → conflict, untouched
+test("LEG-4. legacy id with registry install record at UNRELATED existing path → conflict, untouched", async () => {
+  const { home, aiRoot } = freshHome("LEG-4");
+  // Existing unrelated directories required for the conflict path.
+  const unrelMemory = path.join(aiRoot, "unrelated-memory");
+  const unrelAuto = path.join(aiRoot, "unrelated-auto");
+  mkdirSync(unrelMemory, { recursive: true });
+  mkdirSync(unrelAuto, { recursive: true });
+  const r = await runUninstaller({
+    homeDir: home,
+    extraEnv: {
+      FAKE_OPENCLAW_LEGACY_MEMORY_STATE: "vanished",
+      FAKE_OPENCLAW_LEGACY_MEMORY_REGISTRY_PATH: unrelMemory,
+      FAKE_OPENCLAW_LEGACY_AUTO_STATE: "vanished",
+      FAKE_OPENCLAW_LEGACY_AUTO_REGISTRY_PATH: unrelAuto,
+    },
+  });
+  assert.strictEqual(r.code, 0, `uninstaller exited non-zero: ${r.stderr}`);
+  assert.match(r.stderr, /refusing to uninstall.*unrelated/,
+    "must surface the conflict refusal from registry evidence; stderr:\n" + r.stderr);
+  const log = readInvocationsRaw();
+  assert.ok(!/plugins uninstall (--force )?openclaw-mpm-memory\b/.test(log),
+    "must NOT call plugins uninstall when registry shows conflict; log:\n" + log);
+});
+
+// LEG-5: legacy id + slot fallback, no source verdict → removable
+test("LEG-5. legacy id with no source verdict AND slot points to legacy → removable (slot fallback)", async () => {
+  const { home } = freshHome("LEG-5");
+  const r = await runUninstaller({
+    homeDir: home,
+    extraEnv: {
+      // Inspect + registry have no source verdict. The memory
+      // slot currently points to the legacy memory id → owned
+      // via slot_points_to_legacy.
+      FAKE_OPENCLAW_LEGACY_MEMORY_STATE: "ambiguous",
+      FAKE_OPENCLAW_MEMORY_SLOT: "openclaw-mpm-memory",
+      // Auto legacy has neither slot nor entries; should be ambiguous.
+      FAKE_OPENCLAW_LEGACY_AUTO_STATE: "ambiguous",
+    },
+  });
+  assert.strictEqual(r.code, 0, `uninstaller exited non-zero: ${r.stderr}`);
+  const log = readInvocationsRaw();
+  assert.match(log,
+    /plugins uninstall (--force )?openclaw-mpm-memory\b/,
+    "must uninstall legacy memory id via slot fallback; log:\n" + log);
+  // The auto legacy has no slot/config fallback → ambiguous, no uninstall.
+  assert.ok(!/plugins uninstall (--force )?openclaw-mpm-auto-mode-persona\b/.test(log),
+    "must NOT uninstall auto legacy when no fallback evidence; log:\n" + log);
+});
+
+// LEG-6: legacy id + entries fallback, no source verdict → removable
+test("LEG-6. legacy id with no source verdict AND entries have non-empty value → removable (config fallback)", async () => {
+  const { home } = freshHome("LEG-6");
+  const r = await runUninstaller({
+    homeDir: home,
+    extraEnv: {
+      // No inspect / registry verdict. Memory slot does NOT point
+      // to legacy. The legacy entries subtree has a non-empty
+      // config.mpmBin (or enabled) value → owned via
+      // entry_key_present.
+      FAKE_OPENCLAW_LEGACY_MEMORY_STATE: "entries_only",
+      FAKE_OPENCLAW_LEGACY_MEMORY_ENTRY_VALUE: "/home/v/.local/bin/mpm",
+      FAKE_OPENCLAW_LEGACY_AUTO_STATE: "entries_only",
+      FAKE_OPENCLAW_LEGACY_AUTO_ENTRY_VALUE: "/home/v/.local/bin/mpm",
+    },
+  });
+  assert.strictEqual(r.code, 0, `uninstaller exited non-zero: ${r.stderr}`);
+  const log = readInvocationsRaw();
+  assert.match(log,
+    /plugins uninstall (--force )?openclaw-mpm-memory\b/,
+    "must uninstall legacy memory id via entries fallback; log:\n" + log);
+  assert.match(log,
+    /plugins uninstall (--force )?openclaw-mpm-auto-mode-persona\b/,
+    "must uninstall legacy auto id via entries fallback; log:\n" + log);
+});
+
+// LEG-7: legacy id + no ownership evidence → ambiguous, preserved
+test("LEG-7. legacy id with NO ownership evidence at all → ambiguous, preserved", async () => {
+  const { home } = freshHome("LEG-7");
+  const r = await runUninstaller({
+    homeDir: home,
+    extraEnv: {
+      // Inspect fails. Registry has no install record. Slot does
+      // NOT point to legacy. Entries are empty. → ambiguous.
+      FAKE_OPENCLAW_LEGACY_MEMORY_STATE: "ambiguous",
+      FAKE_OPENCLAW_LEGACY_AUTO_STATE: "ambiguous",
+    },
+  });
+  assert.strictEqual(r.code, 0, `uninstaller exited non-zero: ${r.stderr}`);
+  assert.match(r.stderr, /no ownership evidence/,
+    "must surface the ambiguous verdict; stderr:\n" + r.stderr);
+  const log = readInvocationsRaw();
+  assert.ok(!/plugins uninstall (--force )?openclaw-mpm-memory\b/.test(log),
+    "must NOT call plugins uninstall for ambiguous legacy id; log:\n" + log);
+  assert.ok(!/plugins uninstall (--force )?openclaw-mpm-auto-mode-persona\b/.test(log),
+    "must NOT call plugins uninstall for ambiguous legacy auto id; log:\n" + log);
+});
+
+// LEG-8: conflicting inspect rootDir MUST override slot fallback (B > E)
+test("LEG-8. conflicting inspect rootDir overrides slot fallback (B wins over E)", async () => {
+  const { home, aiRoot } = freshHome("LEG-8");
+  // Existing unrelated directory required for the conflict path.
+  const unrelMemory = path.join(aiRoot, "unrelated-memory");
+  mkdirSync(unrelMemory, { recursive: true });
+  const r = await runUninstaller({
+    homeDir: home,
+    extraEnv: {
+      // Inspect returns a DIFFERENT existing rootDir → conflict (B).
+      // Slot ALSO points to the legacy id (E). Per the precedence,
+      // B wins; we must NOT uninstall.
+      FAKE_OPENCLAW_LEGACY_MEMORY_STATE: "linked_at_alt",
+      FAKE_OPENCLAW_LEGACY_MEMORY_PATH: unrelMemory,
+      FAKE_OPENCLAW_MEMORY_SLOT: "openclaw-mpm-memory",
+    },
+  });
+  assert.strictEqual(r.code, 0);
+  assert.match(r.stderr, /refusing to uninstall/,
+    "must surface conflict refusal despite slot fallback evidence; stderr:\n" + r.stderr);
+  const log = readInvocationsRaw();
+  assert.ok(!/plugins uninstall (--force )?openclaw-mpm-memory\b/.test(log),
+    "must NOT uninstall legacy id when conflict overrides slot fallback; log:\n" + log);
+});
+
+// LEG-9: conflicting registry source MUST override entries fallback (D > F)
+test("LEG-9. conflicting registry sourcePath overrides entries fallback (D wins over F)", async () => {
+  const { home, aiRoot } = freshHome("LEG-9");
+  // Existing unrelated directory required for the conflict path.
+  const unrelMemory = path.join(aiRoot, "unrelated-memory");
+  mkdirSync(unrelMemory, { recursive: true });
+  const r = await runUninstaller({
+    homeDir: home,
+    extraEnv: {
+      // Inspect fails. Registry has install record at a DIFFERENT
+      // existing path → conflict (D). Entries also have a
+      // non-empty value (F). Per precedence, D wins; refuse.
+      FAKE_OPENCLAW_LEGACY_MEMORY_STATE: "vanished",
+      FAKE_OPENCLAW_LEGACY_MEMORY_REGISTRY_PATH: unrelMemory,
+      FAKE_OPENCLAW_LEGACY_MEMORY_ENTRY_VALUE: "/home/v/.local/bin/mpm",
+    },
+  });
+  assert.strictEqual(r.code, 0);
+  assert.match(r.stderr, /refusing to uninstall/,
+    "must surface conflict refusal despite entries fallback evidence; stderr:\n" + r.stderr);
+  const log = readInvocationsRaw();
+  assert.ok(!/plugins uninstall (--force )?openclaw-mpm-memory\b/.test(log),
+    "must NOT uninstall when registry conflict overrides entries fallback; log:\n" + log);
+});
+
+// LEG-10: unrelated plugins remain unchanged across legacy cases
+test("LEG-10. unrelated plugin entries remain untouched across legacy scenarios", async () => {
+  const { home } = freshHome("LEG-10");
+  const r = await runUninstaller({
+    homeDir: home,
+    extraEnv: {
+      FAKE_OPENCLAW_LEGACY_MEMORY_STATE: "ambiguous",
+      FAKE_OPENCLAW_LEGACY_AUTO_STATE: "ambiguous",
+    },
+  });
+  assert.strictEqual(r.code, 0);
+  const log = readInvocationsRaw();
+  assert.ok(!/config (get|set|unset) plugins\.entries\.anthropic/.test(log),
+    "must NOT touch unrelated entries; log:\n" + log);
+  assert.ok(!/config (get|set|unset) plugins\.entries\.memory-core/.test(log),
+    "must NOT touch unrelated memory-core entry; log:\n" + log);
+});
+
+// LEG-11: dry-run with legacy ambiguity remains mutation-free
+test("LEG-11. dry-run remains mutation-free when legacy ids are ambiguous", async () => {
+  const { home } = freshHome("LEG-11");
+  const r = await runUninstaller({
+    homeDir: home,
+    dryRun: true,
+    extraEnv: {
+      FAKE_OPENCLAW_LEGACY_MEMORY_STATE: "ambiguous",
+      FAKE_OPENCLAW_LEGACY_AUTO_STATE: "linked",
+      FAKE_OPENCLAW_LEGACY_AUTO_PATH:
+        path.join(AGENT_INSTALLATION, "openclaw-mpm-auto-mode-persona"),
+    },
+  });
+  assert.strictEqual(r.code, 0);
+  const log = readInvocationsRaw();
+  assert.ok(!/plugins uninstall/.test(log),
+    "dry-run must NOT call plugins uninstall; log:\n" + log);
+  assert.ok(!/config set/.test(log),
+    "dry-run must NOT call config set; log:\n" + log);
+});
+
 console.log("test_uninstall_openclaw.mjs loaded.");

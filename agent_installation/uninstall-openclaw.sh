@@ -115,6 +115,17 @@ CANONICAL_ID_AUTO="$(read_plugin_id_from_manifest \
 LEGACY_ID_MEMORY="openclaw-mpm-memory"
 LEGACY_ID_AUTO="openclaw-mpm-auto-mode-persona"
 
+# Historical (canonical former) adapter source paths. The legacy
+# adapter directories lived at $SCRIPT_DIR/openclaw-mpm-memory and
+# $SCRIPT_DIR/openclaw-mpm-auto-mode-persona — siblings of the
+# canonical adapters, since the pre-2026-09-17 namespace migration
+# git-mv'd them to the current mpm-<adapter>-openclaw names. The
+# install.sh's LEGACY_ADAPTER_DIR uses the same derivation:
+# $(dirname "$CANONICAL_ADAPTER_DIR")/<legacy-dir-name>.
+# (Resolved later, after real_adapter_dir is defined.)
+LEGACY_ADAPTER_DIR_MEMORY="$SCRIPT_DIR/openclaw-mpm-memory"
+LEGACY_ADAPTER_DIR_AUTO="$SCRIPT_DIR/openclaw-mpm-auto-mode-persona"
+
 # CLI timeout budgets. Each openclaw command is bounded by an outer
 # `timeout` wrapper; we don't rely on the CLI's own --timeout for
 # every command because not every subcommand supports it.
@@ -234,6 +245,10 @@ real_adapter_dir() {
 
 OUR_REAL_MEMORY="$(real_adapter_dir "$ADAPTER_MEMORY_DIR" || true)"
 OUR_REAL_AUTO="$(real_adapter_dir "$ADAPTER_AUTO_DIR" || true)"
+# Now resolve the historical (legacy) adapter source paths using the
+# same realpath comparison as for canonical adapters.
+LEGACY_REAL_MEMORY="$(real_adapter_dir "$LEGACY_ADAPTER_DIR_MEMORY" || true)"
+LEGACY_REAL_AUTO="$(real_adapter_dir "$LEGACY_ADAPTER_DIR_AUTO" || true)"
 
 # JSON field extractor (mirrors install.sh). Returns empty if the
 # JSON is missing the field or python3 isn't available.
@@ -329,6 +344,134 @@ probe_plugin() {
   printf '%s\n%s\n' "$verdict" "$root_dir"
 }
 
+# Probe a legacy plugin id with strict ownership precedence.
+#
+# The legacy ids (openclaw-mpm-memory, openclaw-mpm-auto-mode-persona)
+# are repo-owned. We must NOT delete an unrelated plugin that happens
+# to claim one of those ids; we require actual ownership evidence.
+#
+# Outputs three lines: <verdict>\n<root_or_evidence>\n<evidence_kind>.
+#
+# Verdict values (mirrors install.sh's precedence):
+#
+#   absent    — id not in registry.
+#   owned     — strong source evidence OR (no source evidence but a
+#               weak fallback evidence of MPM ownership).
+#   conflict  — id registered at an UNRELATED existing source path;
+#               refuse to delete.
+#   ambiguous — id absent OR (no source metadata AND no weak
+#               fallback evidence); do not delete by name alone.
+#
+# Evidence precedence:
+#   A. inspect rootDir matches legacy adapter path   → owned
+#   B. inspect rootDir resolves to a DIFFERENT existing path
+#      → conflict (do NOT fall through to fallback)
+#   C. registry installRecords[id].sourcePath /
+#      installPath matches legacy adapter path       → owned
+#   D. registry sourcePath / installPath resolves to
+#      a DIFFERENT existing path                     → conflict
+#   E. (no source verdict) AND plugins.slots.memory = legacy-id
+#      → owned (weak fallback)
+#   F. (no source verdict) AND plugins.entries.<id>.*
+#      has any non-empty value                       → owned (weak fallback)
+#   G. (no source verdict) AND no fallback evidence  → ambiguous
+#
+# Cases B and D always win over E and F. The fallback chain (E, F)
+# only runs when neither A–D produced a verdict.
+probe_legacy_plugin() {
+  local plugin_id="$1"
+  local expected_legacy_real="$2"
+  local inspect_out registry_out
+  local ok root_dir verdict evidence_path
+  verdict="ambiguous"
+  evidence_path=""
+  local_evidence_kind=""
+
+  # Step 1: inspect (strong evidence: A or B).
+  inspect_out="$(timeout "${INSPECT_TIMEOUT}s" \
+    openclaw plugins inspect "$plugin_id" --json 2>/dev/null || true)"
+  ok="$(extract_json_field "ok" "$inspect_out")"
+  case "$ok" in
+    true|True|1)
+      root_dir="$(extract_json_field "plugin.rootDir" "$inspect_out")"
+      if [ -n "$root_dir" ] && paths_match "$root_dir" "$expected_legacy_real"; then
+        verdict="owned"
+        evidence_path="$root_dir"
+        local_evidence_kind="inspect_root_match"
+      elif [ -n "$root_dir" ] && [ -e "$root_dir" ]; then
+        verdict="conflict"
+        evidence_path="$root_dir"
+        local_evidence_kind="inspect_root_different"
+      fi
+      ;;
+    false|False|0|"")
+      : # inspect unavailable or missing; fall through to registry
+      ;;
+  esac
+
+  # Step 2: registry (strong evidence: C or D), only if inspect was
+  # not definitive.
+  if [ "$verdict" = "ambiguous" ]; then
+    registry_out="$(timeout "${INSPECT_TIMEOUT}s" \
+      openclaw plugins registry --json 2>/dev/null || true)"
+    local rp_source rp_install rp
+    rp_source="$(extract_json_field \
+      "persisted.installRecords.${plugin_id}.sourcePath" "$registry_out")"
+    rp_install="$(extract_json_field \
+      "persisted.installRecords.${plugin_id}.installPath" "$registry_out")"
+    for rp in "$rp_source" "$rp_install"; do
+      if [ -z "$rp" ]; then continue; fi
+      if paths_match "$rp" "$expected_legacy_real"; then
+        verdict="owned"
+        evidence_path="$rp"
+        local_evidence_kind="registry_path_match"
+        break
+      elif [ -e "$rp" ]; then
+        verdict="conflict"
+        evidence_path="$rp"
+        local_evidence_kind="registry_path_different"
+        break
+      fi
+    done
+  fi
+
+  # Step 3: weak fallback (E or F), only when no source verdict.
+  # We only enter here when verdict is still "ambiguous" (no
+  # inspect OR registry source verdict). Cases B and D are already
+  # handled above; we cannot reach here with verdict="conflict".
+  if [ "$verdict" = "ambiguous" ]; then
+    local slot_val
+    slot_val="$(timeout "${CONFIG_TIMEOUT}s" \
+      openclaw config get plugins.slots.memory 2>/dev/null || true)"
+    if [ "$slot_val" = "$plugin_id" ]; then
+      verdict="owned"
+      evidence_path="<slot_fallback>"
+      local_evidence_kind="slot_points_to_legacy"
+    fi
+  fi
+  if [ "$verdict" = "ambiguous" ]; then
+    local ev_mpmBin ev_enabled
+    ev_mpmBin="$(timeout "${CONFIG_TIMEOUT}s" \
+      openclaw config get "plugins.entries.${plugin_id}.config.mpmBin" \
+        2>/dev/null || true)"
+    ev_enabled="$(timeout "${CONFIG_TIMEOUT}s" \
+      openclaw config get "plugins.entries.${plugin_id}.enabled" \
+        2>/dev/null || true)"
+    case "$ev_mpmBin$ev_enabled" in
+      *null*) ;;
+      *)
+        if [ -n "$ev_mpmBin" ] || [ -n "$ev_enabled" ]; then
+          verdict="owned"
+          evidence_path="<config_fallback>"
+          local_evidence_kind="entry_key_present"
+        fi
+        ;;
+    esac
+  fi
+
+  printf '%s\n%s\n%s\n' "$verdict" "$evidence_path" "$local_evidence_kind"
+}
+
 # Probe the memory slot ownership.
 probe_slot() {
   local slot_val
@@ -368,40 +511,34 @@ if [ -n "$CANONICAL_ID_AUTO" ]; then
   PLAN_ROWS="${PLAN_ROWS}CANONICAL|mpm-auto-mode-persona-openclaw|$CANONICAL_ID_AUTO|$PR_VERDICT|$PR_ROOT
 "
 fi
-# Legacy ids: any registered plugin under these namespaces is
-# treated as legacy-owned (because no other plugin should claim
-# these names — they were the pre-2026-09-17 namespace for the
-# canonical adapters). The ownership precedence matches install.sh.
-# We probe and then override the verdict: a "conflict" classification
-# from probe_plugin only fires when expected_real is set; for legacy
-# ids we passed expected_real="" so conflict was already
-# suppressed. We additionally translate "owned" to apply for any
-# registered legacy plugin regardless of rootDir — the namespace
-# itself is the ownership signal.
-PR_OUT="$(probe_plugin "$LEGACY_ID_MEMORY" "")"
+# Legacy ids: use the strict ownership precedence (probe_legacy_plugin)
+# that mirrors install.sh. We require actual ownership evidence:
+#   A. inspect rootDir matches the historical legacy adapter path; OR
+#   B. registry install record matches the historical legacy adapter
+#      path; OR
+#   C. weak fallback: legacy slot or legacy entries have non-empty
+#      values (only when no source verdict exists).
+# Anything else (conflict or ambiguous) is reported and NOT removed
+# by name alone. We must NOT seize an unrelated plugin that happens
+# to claim one of these legacy ids.
+PR_OUT="$(probe_legacy_plugin "$LEGACY_ID_MEMORY" "$LEGACY_REAL_MEMORY")"
 PR_VERDICT="$(printf '%s\n' "$PR_OUT" | sed -n '1p')"
 PR_ROOT="$(printf '%s\n' "$PR_OUT" | sed -n '2p')"
-# If the legacy plugin is registered, it's ours; the namespace is
-# the ownership signal, not the rootDir.
-case "$PR_VERDICT" in
-  unresolvable|conflict) PR_VERDICT="owned" ;;
-esac
-PLAN_ROWS="${PLAN_ROWS}LEGACY|mpm-memory-openclaw|$LEGACY_ID_MEMORY|$PR_VERDICT|$PR_ROOT
+PR_EVIDENCE="$(printf '%s\n' "$PR_OUT" | sed -n '3p')"
+PLAN_ROWS="${PLAN_ROWS}LEGACY|mpm-memory-openclaw|$LEGACY_ID_MEMORY|$PR_VERDICT|$PR_ROOT|$PR_EVIDENCE
 "
-PR_OUT="$(probe_plugin "$LEGACY_ID_AUTO" "")"
+PR_OUT="$(probe_legacy_plugin "$LEGACY_ID_AUTO" "$LEGACY_REAL_AUTO")"
 PR_VERDICT="$(printf '%s\n' "$PR_OUT" | sed -n '1p')"
 PR_ROOT="$(printf '%s\n' "$PR_OUT" | sed -n '2p')"
-case "$PR_VERDICT" in
-  unresolvable|conflict) PR_VERDICT="owned" ;;
-esac
-PLAN_ROWS="${PLAN_ROWS}LEGACY|mpm-auto-mode-persona-openclaw|$LEGACY_ID_AUTO|$PR_VERDICT|$PR_ROOT
+PR_EVIDENCE="$(printf '%s\n' "$PR_OUT" | sed -n '3p')"
+PLAN_ROWS="${PLAN_ROWS}LEGACY|mpm-auto-mode-persona-openclaw|$LEGACY_ID_AUTO|$PR_VERDICT|$PR_ROOT|$PR_EVIDENCE
 "
 
 CURRENT_SLOT="$(probe_slot)"
 
 # Render the plan in human-readable form.
 log "plan:"
-printf '%s\n' "$PLAN_ROWS" | while IFS='|' read -r ROW_KIND ROW_ADAPTER ROW_ID ROW_VERDICT ROW_ROOT; do
+printf '%s\n' "$PLAN_ROWS" | while IFS='|' read -r ROW_KIND ROW_ADAPTER ROW_ID ROW_VERDICT ROW_ROOT ROW_EVIDENCE; do
   [ -z "$ROW_VERDICT" ] && continue
   case "$ROW_VERDICT" in
     absent)
@@ -417,6 +554,10 @@ printf '%s\n' "$PLAN_ROWS" | while IFS='|' read -r ROW_KIND ROW_ADAPTER ROW_ID R
       ;;
     unresolvable)
       printf '  [skip]    %-25s %-35s registered but rootDir unresolvable\n' \
+        "$ROW_ADAPTER" "$ROW_ID" >&2
+      ;;
+    ambiguous)
+      printf '  [ambig]   %-25s %-35s no ownership evidence (will not remove by name alone)\n' \
         "$ROW_ADAPTER" "$ROW_ID" >&2
       ;;
     *)
@@ -468,8 +609,8 @@ CHANGED=0
 
 uninstall_one() {
   local row="$1"
-  local row_kind row_id row_verdict row_root
-  IFS='|' read -r row_kind row_adapter row_id row_verdict row_root <<EOF
+  local row_kind row_id row_verdict row_root row_evidence
+  IFS='|' read -r row_kind row_adapter row_id row_verdict row_root row_evidence <<EOF
 $row
 EOF
   case "$row_verdict" in
@@ -515,6 +656,10 @@ EOF
     conflict)
       warn "refusing to uninstall $row_id — registered at unrelated rootDir=$row_root"
       warn "  this plugin is owned by a different source; manual operator action required"
+      ;;
+    ambiguous)
+      warn "not uninstalling $row_id — no ownership evidence (state=$row_verdict, evidence=$row_evidence)"
+      warn "  ownership cannot be proven for this id; manual operator action required"
       ;;
     absent|unresolvable|"")
       log "  $row_id: nothing to do (state=$row_verdict)"
