@@ -232,41 +232,53 @@ test("wake context fetch failure does not throw", async () => {
 // --------------------------------------------------------------------------
 // Provenance — resolve_exec_env simulation
 // --------------------------------------------------------------------------
+//
+// Stage 2B (2026-09-19): session identity is stamped as
+// MPM_PROVENANCE_PARENT_INVOCATION_ID (canonical, read by the
+// substrate's provenance resolver) instead of the previously-used
+// MPM_PROVENANCE_SESSION_KEY (silently dropped by provenance.go).
+// The OpenClaw sessionKey semantically IS the parent invocation ID
+// of every call made from that session.
 
-test("resolve_exec_env contributes openclaw framework id", () => {
-  // Simulates the actual plugin's resolve_exec_env handler
+test("resolve_exec_env contributes openclaw framework id and parent invocation", () => {
+  // Mirrors the actual plugin's resolve_exec_env handler.
   function resolveExecEnv(event) {
     const env = {
       MPM_PROVENANCE_FRAMEWORK: "openclaw",
     };
     if (event?.sessionKey) {
-      env.MPM_PROVENANCE_SESSION_KEY = event.sessionKey;
+      env.MPM_PROVENANCE_PARENT_INVOCATION_ID = event.sessionKey;
     }
     return env;
   }
 
   const result = resolveExecEnv({ sessionKey: "agent:main:main:2026-08-25" });
   assert.strictEqual(result.MPM_PROVENANCE_FRAMEWORK, "openclaw");
-  assert.strictEqual(result.MPM_PROVENANCE_SESSION_KEY, "agent:main:main:2026-08-25");
+  assert.strictEqual(
+    result.MPM_PROVENANCE_PARENT_INVOCATION_ID,
+    "agent:main:main:2026-08-25",
+    "sessionKey must be stamped as MPM_PROVENANCE_PARENT_INVOCATION_ID so " +
+    "the substrate's provenance resolver picks it up via ActiveContextFromEnv"
+  );
 });
 
-test("resolve_exec_env omits sessionKey when not provided", () => {
+test("resolve_exec_env omits parent invocation id when sessionKey is not provided", () => {
   function resolveExecEnv(event) {
     const env = { MPM_PROVENANCE_FRAMEWORK: "openclaw" };
-    if (event?.sessionKey) env.MPM_PROVENANCE_SESSION_KEY = event.sessionKey;
+    if (event?.sessionKey) env.MPM_PROVENANCE_PARENT_INVOCATION_ID = event.sessionKey;
     return env;
   }
 
   const result = resolveExecEnv({});
   assert.strictEqual(result.MPM_PROVENANCE_FRAMEWORK, "openclaw");
-  assert.strictEqual("MPM_PROVENANCE_SESSION_KEY" in result, false);
+  assert.strictEqual("MPM_PROVENANCE_PARENT_INVOCATION_ID" in result, false);
 });
 
 test("resolve_exec_env does not fabricate MPM_PROVENANCE_MODEL", () => {
   // OpenClaw hook context does not expose model name — intentionally unset
   function resolveExecEnv(event) {
     const env = { MPM_PROVENANCE_FRAMEWORK: "openclaw" };
-    if (event?.sessionKey) env.MPM_PROVENANCE_SESSION_KEY = event.sessionKey;
+    if (event?.sessionKey) env.MPM_PROVENANCE_PARENT_INVOCATION_ID = event.sessionKey;
     // MPM_PROVENANCE_MODEL: intentionally omitted — OpenClaw does not expose model in hook context
     return env;
   }
@@ -274,7 +286,31 @@ test("resolve_exec_env does not fabricate MPM_PROVENANCE_MODEL", () => {
   const result = resolveExecEnv({ sessionKey: "test" });
   assert.strictEqual("MPM_PROVENANCE_MODEL" in result, false);
   assert.strictEqual("MPM_PROVENANCE_INVOCATION_ID" in result, false);
-  assert.strictEqual("MPM_PROVENANCE_PARENT_INVOCATION_ID" in result, false);
+  // PARENT_INVOCATION_ID IS set when sessionKey is provided — that is the
+  // canonical session-identity surface (not fabricated, just propagated).
+  assert.strictEqual(
+    "MPM_PROVENANCE_PARENT_INVOCATION_ID" in result,
+    true,
+    "parent invocation id must be set when sessionKey is available"
+  );
+});
+
+test("resolve_exec_env never uses the dropped MPM_PROVENANCE_SESSION_KEY name", () => {
+  // Regression guard: the legacy _SESSION_KEY name was silently dropped by
+  // the substrate's provenance resolver. Future edits must not reintroduce it.
+  function resolveExecEnv(event) {
+    const env = { MPM_PROVENANCE_FRAMEWORK: "openclaw" };
+    if (event?.sessionKey) env.MPM_PROVENANCE_PARENT_INVOCATION_ID = event.sessionKey;
+    return env;
+  }
+
+  const result = resolveExecEnv({ sessionKey: "agent:main:main" });
+  assert.strictEqual(
+    "MPM_PROVENANCE_SESSION_KEY" in result,
+    false,
+    "_SESSION_KEY was silently dropped by the substrate; use the canonical " +
+    "MPM_PROVENANCE_PARENT_INVOCATION_ID name instead."
+  );
 });
 
 // --------------------------------------------------------------------------

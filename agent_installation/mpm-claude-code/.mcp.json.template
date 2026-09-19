@@ -24,14 +24,18 @@
     "particular MPM_WORKSPACE env var layout). The health_check response",
     "carries the resolved db_path so operators can verify convergence.",
     "",
-    "Why MPM_FRAMEWORK=claude-code (legacy alias):",
+    "Why MPM_PROVENANCE_FRAMEWORK=claude-code (canonical) is set, alongside",
+    "the legacy MPM_FRAMEWORK=claude-code alias:",
     "the canonical framework-identification env var for mpm-mcp is",
     "MPM_PROVENANCE_FRAMEWORK (read first by mpmcli.ActiveContextFromEnv in",
     "internal/core/mpmcli/mpmcli.go); MPM_FRAMEWORK remains a legacy alias",
-    "that ActiveContextFromEnv reads as a fallback. This template keeps",
-    "MPM_FRAMEWORK so existing installs continue to attribute correctly",
-    "without materialization churn; new callers should prefer the canonical",
-    "MPM_PROVENANCE_FRAMEWORK name. mpm-mcp's audit_hook",
+    "that ActiveContextFromEnv reads as a fallback. We set BOTH because:",
+    "  (a) MPM_PROVENANCE_FRAMEWORK is canonical per README §1945; future",
+    "      substrate versions may drop the legacy alias.",
+    "  (b) MPM_FRAMEWORK preserves backward compatibility with older",
+    "      mpm-mcp binaries that did not yet read MPM_PROVENANCE_FRAMEWORK.",
+    "Both names resolve to the same ActiveContext.FrameworkName value, so",
+    "this is additive rather than competing. mpm-mcp's audit_hook",
     "(cmd/mpm-mcp/audit_hook.go) and artifact_provenance writes both use",
     "ac.FrameworkName as the canonical source. Without either var,",
     "framework_name falls through to the default 'mcp' value and",
@@ -70,6 +74,7 @@
       "args": [],
       "env": {
         "MPM_WORKSPACE": "${HOME}/.mpm",
+        "MPM_PROVENANCE_FRAMEWORK": "claude-code",
         "MPM_FRAMEWORK": "claude-code"
       }
     }

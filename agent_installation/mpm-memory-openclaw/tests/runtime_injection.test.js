@@ -240,18 +240,29 @@ test("runtime injection: heartbeat_prompt_contribution also delivers wake", asyn
   assert.ok(result.prependContext.includes(FAKE_WAKE));
 });
 
-test("runtime injection: resolve_exec_env attaches MPM_PROVENANCE_SESSION_KEY", async () => {
+test("runtime injection: resolve_exec_env attaches MPM_PROVENANCE_PARENT_INVOCATION_ID", async () => {
   const { stdout } = await runDriver();
   const lines = stdout.split("\n").reverse();
   const resultLine = lines.find((l) => l.startsWith("EXEC_ENV:"));
   assert.ok(resultLine);
   const env = JSON.parse(resultLine.slice("EXEC_ENV:".length));
   assert.strictEqual(env.MPM_PROVENANCE_FRAMEWORK, "openclaw");
+  // Stage 2B: sessionKey is stamped as the canonical
+  // MPM_PROVENANCE_PARENT_INVOCATION_ID so the substrate's
+  // provenance resolver picks it up. Legacy MPM_PROVENANCE_SESSION_KEY
+  // was silently dropped by provenance.go.
   assert.ok(
-    typeof env.MPM_PROVENANCE_SESSION_KEY === "string" &&
-      env.MPM_PROVENANCE_SESSION_KEY.length > 0,
-    "MPM_PROVENANCE_SESSION_KEY must be populated from ctx.sessionKey; got: " +
+    typeof env.MPM_PROVENANCE_PARENT_INVOCATION_ID === "string" &&
+      env.MPM_PROVENANCE_PARENT_INVOCATION_ID.length > 0,
+    "MPM_PROVENANCE_PARENT_INVOCATION_ID must be populated from ctx.sessionKey; got: " +
       JSON.stringify(env)
+  );
+  // Regression: the dropped _SESSION_KEY name must not reappear.
+  assert.strictEqual(
+    "MPM_PROVENANCE_SESSION_KEY" in env,
+    false,
+    "MPM_PROVENANCE_SESSION_KEY is silently dropped by the substrate; " +
+    "use the canonical MPM_PROVENANCE_PARENT_INVOCATION_ID instead."
   );
 });
 

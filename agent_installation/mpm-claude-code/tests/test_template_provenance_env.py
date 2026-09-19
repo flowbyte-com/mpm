@@ -3,21 +3,28 @@ test_template_provenance_env.py — Regression coverage for the Claude Code
 MPM framework-identification env contract.
 
 The canonical wire contract for framework identification on the
-mpm-mcp subprocess is **MPM_FRAMEWORK**, not MPM_PROVENANCE_FRAMEWORK.
+mpm-mcp subprocess is **MPM_PROVENANCE_FRAMEWORK**. The legacy alias
+MPM_FRAMEWORK remains a fallback read by mpmcli.ActiveContextFromEnv.
 
 See:
-  - internal/core/mpmcli/mpmcli.go: ActiveContextFromEnv reads MPM_FRAMEWORK
-    and populates ActiveContext.FrameworkName
-  - internal/core/mpmcli/mpmcli_test.go: TestActiveContextFromEnv_MPM_FRAMEWORK
-    pins the directive-scope transport contract
+  - internal/core/mpmcli/mpmcli.go: ActiveContextFromEnv reads
+    MPM_PROVENANCE_FRAMEWORK first and falls back to MPM_FRAMEWORK.
+  - internal/core/mpmcli/mpmcli_test.go: TestActiveContextFromEnv_FrameworkPrecedence
+    pins the MPM_PROVENANCE_FRAMEWORK > MPM_FRAMEWORK > "mcp" precedence.
   - cmd/mpm-mcp/audit_hook.go: mpm-mcp's recordToolInvocation uses
-    ac.FrameworkName (overridable via MPM_FRAMEWORK)
-  - README.md §1827: "How a framework identifies itself" — explicitly
-    documents MPM_FRAMEWORK=<id> as the canonical wire value.
+    ac.FrameworkName (which ActiveContextFromEnv populated from the env
+    var chain above).
+  - README.md §1945: "How a framework identifies itself" — explicitly
+    documents MPM_PROVENANCE_FRAMEWORK=<id> as the canonical name.
 
-Before this fix: only 2 of 5477 artifact_provenance rows attributed to
-claude-code framework because the template omitted MPM_FRAMEWORK. Recorded
-2026-08-28 during theory-backlog triage session.
+Stage 2B update (2026-09-19): the template now sets both
+MPM_PROVENANCE_FRAMEWORK (canonical) AND MPM_FRAMEWORK (legacy alias)
+so existing installs continue to attribute correctly while future
+substrate versions that drop the alias still attribute correctly.
+
+Before this fix family: only 2 of 5477 artifact_provenance rows
+attributed to claude-code framework because the template omitted
+MPM_FRAMEWORK. Recorded 2026-08-28.
 
 This test pins the contract so the regression cannot recur.
 """
@@ -54,11 +61,24 @@ class TemplateFrameworkEnvContract(unittest.TestCase):
         self.env = data["mcpServers"]["mpm"]["env"]
 
     def test_framework_env_var_is_claude_code(self):
-        # Per README §1827 — MPM_FRAMEWORK is the canonical framework-id var.
+        # Per README §1945 — MPM_PROVENANCE_FRAMEWORK is canonical.
+        self.assertEqual(
+            self.env.get("MPM_PROVENANCE_FRAMEWORK"),
+            "claude-code",
+            "MPM_PROVENANCE_FRAMEWORK must be 'claude-code' (canonical per "
+            "README §1945 and the precedence test in mpmcli_test.go)",
+        )
+
+    def test_legacy_framework_alias_preserved(self):
+        # Older mpm-mcp binaries read MPM_FRAMEWORK instead of the canonical
+        # var. Setting both lets installs migrate forward without re-render
+        # of the materialized ~/.claude/.mcp.json.
         self.assertEqual(
             self.env.get("MPM_FRAMEWORK"),
             "claude-code",
-            "MPM_FRAMEWORK must be 'claude-code' (the documented wire value)",
+            "Legacy MPM_FRAMEWORK alias must remain set for backward compat; "
+            "ActiveContextFromEnv reads it as a fallback when "
+            "MPM_PROVENANCE_FRAMEWORK is absent.",
         )
 
     def test_workspace_env_var_preserved(self):
@@ -94,22 +114,16 @@ class TemplateFrameworkEnvContract(unittest.TestCase):
             )
 
     def test_does_not_use_wrong_var_names(self):
-        # Regression guard against the FIRST draft of this fix which used
-        # MPM_PROVENANCE_FRAMEWORK instead of MPM_FRAMEWORK. The former is
-        # not consumed by mpmcli.ActiveContextFromEnv (the canonical reader);
-        # setting it would not propagate to mpm-mcp's audit_hook.
-        self.assertNotIn(
-            "MPM_PROVENANCE_FRAMEWORK",
-            self.env,
-            "MPM_PROVENANCE_FRAMEWORK is NOT the canonical framework-id var; "
-            "use MPM_FRAMEWORK per README §1827. Setting the wrong var makes the "
-            "fix a no-op.",
-        )
+        # MPM_PROVENANCE_ACTOR_KIND is intentionally not exposed by the
+        # substrate's wire contract — mpm-mcp's audit_hook hardcodes
+        # actor_kind='agent' on every MCP dispatch, so a static
+        # MPM_PROVENANCE_ACTOR_KIND=agent would imply a contract this
+        # codebase does not implement. Don't introduce it.
         self.assertNotIn(
             "MPM_PROVENANCE_ACTOR_KIND",
             self.env,
-            "MPM_PROVENANCE_ACTOR_KIND has no documentary backing in the legacy "
-            "wire contract; mpm-mcp's audit_hook hardcodes actor_kind='agent'. "
+            "MPM_PROVENANCE_ACTOR_KIND has no documentary backing in the wire "
+            "contract; mpm-mcp's audit_hook hardcodes actor_kind='agent'. "
             "Don't introduce it here.",
         )
 
@@ -127,11 +141,17 @@ class MaterializedConfigInSync(unittest.TestCase):
         self.env = data["mcpServers"]["mpm"]["env"]
 
     def test_installed_config_has_claude_code_framework(self):
+        # Canonical wins; legacy alias is acceptable as fallback.
+        framework = (
+            self.env.get("MPM_PROVENANCE_FRAMEWORK")
+            or self.env.get("MPM_FRAMEWORK")
+        )
         self.assertEqual(
-            self.env.get("MPM_FRAMEWORK"),
+            framework,
             "claude-code",
-            f"Materialized MPM_FRAMEWORK={self.env.get('MPM_FRAMEWORK')!r}; "
-            "claude-code MCP calls will not be attributed correctly without this.",
+            f"Materialized framework={framework!r}; claude-code MCP calls "
+            "will not be attributed correctly without MPM_PROVENANCE_FRAMEWORK "
+            "or MPM_FRAMEWORK set to 'claude-code'.",
         )
 
     def test_installed_config_no_static_model(self):

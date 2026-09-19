@@ -233,7 +233,17 @@ the typed-hook wake path.
 | Env var | Value | Source |
 |---------|-------|--------|
 | `MPM_PROVENANCE_FRAMEWORK` | `"openclaw"` | Fixed |
-| `MPM_PROVENANCE_SESSION_KEY` | OpenClaw `sessionKey` | Hook context |
+| `MPM_PROVENANCE_PARENT_INVOCATION_ID` | OpenClaw `sessionKey` | Hook context |
+
+Stage 2B (2026-09-19): the canonical session-identity env var is
+`MPM_PROVENANCE_PARENT_INVOCATION_ID`, not the previously-used
+`MPM_PROVENANCE_SESSION_KEY`. The substrate's provenance resolver
+(`internal/core/provenance.go` via `ActiveContextFromEnv` →
+`provenanceFromContext`) reads `MPM_PROVENANCE_PARENT_INVOCATION_ID`
+and stamps it into `EffectiveProvenance.ParentInvocationID`. The
+legacy `_SESSION_KEY` name was silently dropped by the resolver,
+which is why `artifact_provenance` never received OpenClaw session
+identity before this rename.
 
 `MPM_PROVENANCE_MODEL` and `MPM_PROVENANCE_INVOCATION_ID` are intentionally
 **not** set — OpenClaw's hook context does not expose model name or

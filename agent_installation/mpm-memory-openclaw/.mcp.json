@@ -4,12 +4,26 @@
     "Source of truth for the OpenClaw runtime: configure via",
     "  openclaw config set mcp.servers.mpm.command \"$HOME/.mpm/bin/mpm-mcp\"",
     "  openclaw config set mcp.servers.mpm.env.MPM_WORKSPACE \"$HOME/.mpm\"",
+    "  openclaw config set mcp.servers.mpm.env.MPM_PROVENANCE_FRAMEWORK \"openclaw\"",
+    "",
     "MPM_ACTIVE_MODE / MPM_ACTIVE_PERSONA are intentionally NOT set here.",
     "MPM resolves mode/persona from env at request time via",
     "internal/core/mpmcli.ActiveContextFromEnv() and falls back to its",
     "own default/default contract when unset. Hardcoding framework-",
     "specific defaults at install/MCP-wiring time was a pre-2026-08-29",
     "drift that leaked an old mode taxonomy into every registration.",
+    "",
+    "PROVENANCE: MPM_PROVENANCE_FRAMEWORK=openclaw MUST be set on the",
+    "mpm-mcp launch env so OpenClaw-authored writes are attributed to",
+    "the openclaw framework instead of the generic 'mcp' transport",
+    "default. Without this, recent_activity and artifact_provenance",
+    "record framework_name='mcp' for every OpenClaw-driven call, which",
+    "loses the host identity that contextual routing relies on.",
+    "",
+    "The plugin's resolve_exec_env hook handles the shell-out path",
+    "(env-var injection on every exec tool call); the MCP path is",
+    "covered here at the mpm-mcp launch boundary instead. Both paths",
+    "now converge on framework_name='openclaw' in tool_invocations.",
     "",
     "or merge this file directly via the OpenClaw MCP import path.",
     "",
@@ -27,7 +41,8 @@
       "command": "$HOME/.mpm/bin/mpm-mcp",
       "args": [],
       "env": {
-        "MPM_WORKSPACE": "$HOME/.mpm"
+        "MPM_WORKSPACE": "$HOME/.mpm",
+        "MPM_PROVENANCE_FRAMEWORK": "openclaw"
       }
     }
   }

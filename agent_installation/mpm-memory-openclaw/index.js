@@ -61,7 +61,18 @@
 // call, providing framework attribution for MPM's audit trail:
 //
 //   MPM_PROVENANCE_FRAMEWORK=openclaw
-//   MPM_PROVENANCE_SESSION_KEY=<current sessionKey, if available>
+//   MPM_PROVENANCE_PARENT_INVOCATION_ID=<current sessionKey, if available>
+//
+// Stage 2B (2026-09-19): the canonical session-identity surface is
+// MPM_PROVENANCE_PARENT_INVOCATION_ID, not the previously-used
+// MPM_PROVENANCE_SESSION_KEY. OpenClaw's sessionKey is the
+// agent-of-this-session identifier; the substrate's provenance
+// resolver (internal/core/provenance.go) reads
+// MPM_PROVENANCE_PARENT_INVOCATION_ID via ActiveContextFromEnv and
+// stamps it into EffectiveProvenance.ParentInvocationID. The legacy
+// _SESSION_KEY name was silently dropped by the substrate, so
+// session attribution never reached artifact_provenance. Renaming
+// the env var to the canonical _PARENT_INVOCATION_ID closes that gap.
 //
 // OpenClaw does not expose model name or invocation ID in the hook context,
 // so those fields are left unset (never fabricated).
@@ -194,7 +205,9 @@ async function callMpmTool(tool, payload, opts) {
  * @param {string} opts.mpmBin
  * @param {number} opts.timeoutMs
  * @param {string} opts.frameworkId  — provenance framework identifier
- * @param {string} [opts.sessionKey] — OpenClaw sessionKey for provenance
+ * @param {string} [opts.sessionKey] — OpenClaw sessionKey for provenance;
+ *   stamped as MPM_PROVENANCE_PARENT_INVOCATION_ID (canonical) so the
+ *   substrate's provenance resolver picks it up.
  * @returns {Promise<string>}
  */
 async function fetchWakeContext(opts) {
@@ -204,7 +217,7 @@ async function fetchWakeContext(opts) {
     MPM_LOG_FORMAT: "json",
     MPM_PROVENANCE_FRAMEWORK: frameworkId,
   };
-  if (sessionKey) env.MPM_PROVENANCE_SESSION_KEY = sessionKey;
+  if (sessionKey) env.MPM_PROVENANCE_PARENT_INVOCATION_ID = sessionKey;
 
   return new Promise((resolve) => {
     let child;
@@ -676,12 +689,19 @@ export default definePluginEntry({
         MPM_PROVENANCE_FRAMEWORK: MPM_FRAMEWORK_ID,
       };
       // OpenClaw sessionKey is the closest equivalent to Claude Code's
-      // CLAUDE_SESSION_ID. Prefer ctx.sessionKey (the actual location
-      // for this hook too) and fall back to event.sessionKey for any
-      // caller that mirrors it on the event.
+      // CLAUDE_SESSION_ID. Stamp it as MPM_PROVENANCE_PARENT_INVOCATION_ID
+      // — the canonical env var the substrate's provenance resolver reads
+      // (via ActiveContextFromEnv → provenanceFromContext →
+      // EffectiveProvenance.ParentInvocationID). The previous
+      // MPM_PROVENANCE_SESSION_KEY name was silently dropped by the
+      // substrate, leaving session identity invisible to artifact_provenance.
+      //
+      // Prefer ctx.sessionKey (the actual location for this hook too)
+      // and fall back to event.sessionKey for any caller that mirrors
+      // it on the event.
       const sessionKey = ctx?.sessionKey || event?.sessionKey;
       if (sessionKey) {
-        env.MPM_PROVENANCE_SESSION_KEY = sessionKey;
+        env.MPM_PROVENANCE_PARENT_INVOCATION_ID = sessionKey;
       }
       // Model name is not available in the OpenClaw hook context.
       // MPM_PROVENANCE_MODEL is intentionally omitted rather than
