@@ -17,17 +17,86 @@ Zero core modification. Pure transport adapter. MPM owns the selector (three-sta
 ## Install
 
 ```bash
-# From this directory (dev / alpha-MV):
-openclaw plugins install ./mpm-auto-mode-persona-openclaw --link
-
-# From a published tarball (later):
-openclaw plugins install npm-pack:./mpm-auto-mode-persona-openclaw-0.1.0.tgz
-
-# Verify:
-openclaw plugins inspect mpm-auto-mode-persona-openclaw --runtime --json
+# From this directory (CWD-independent):
+./install.sh
 ```
 
-Requires MPM installed at the canonical location `$HOME/.mpm/bin/mpm` (alpha default), or reachable on PATH (or set the absolute path via `config.mpmBin` — see [Configuration](#configuration)). The auto-switch is silently a no-op when `mpm` cannot be resolved.
+`./install.sh` is the canonical entry point and performs the full
+OpenClaw-specific setup in the correct order:
+
+1. Locate MPM via the canonical install paths
+   (`$HOME/.mpm/bin/mpm` first, then `$HOME/.local/bin/mpm`).
+   The OpenClaw gateway runs under systemd --user with a stripped
+   PATH; a PATH-resolved `mpm` (the manifest's documented default)
+   fails at runtime with `spawn mpm ENOENT`. `install.sh` persists
+   the resolved absolute path into `plugins.entries.<id>.config.mpmBin`.
+2. Inspect existing plugin state via `openclaw plugins inspect --json`.
+   The installer distinguishes three cases (verified against OpenClaw
+   2026.9.5):
+     absent              — plugin id not in the registry → fresh install.
+     linked-from-here    — plugin id registered and rootDir equals
+                           this adapter's directory → skip install step.
+     conflicting         — plugin id registered but rootDir points
+                           elsewhere → hard error, no overwrite.
+3. Install (only when state was "absent"):
+     openclaw plugins install . --link --force --accept-capabilities
+   The three flags are the documented 2026.9.4 contract for installing
+   a non-ClawHub local source that declares capabilities.
+4. Persist absolute mpmBin (PATH-gotcha mitigation).
+5. Converge pending state migration
+   (`openclaw update repair`) — otherwise the install record stays
+   in "state migration pending" state and `openclaw doctor` warns.
+6. Bounded safe gateway restart (when reachable; if update repair
+   stopped the gateway, systemd --user will auto-restart it).
+7. Verify (openclaw plugins inspect + plugins list).
+
+### Re-running (idempotency)
+
+Re-running `./install.sh` on a host where the plugin is already
+correctly linked from THIS adapter's directory is genuinely idempotent
+for the install step: no `openclaw plugins install` is reissued, no
+trust warning is emitted, no `installedAt` timestamp is bumped.
+The `update repair` step IS reissued on every run, which is harmless
+(idempotent) but may briefly surface a "stopping the managed
+gateway" log line.
+
+### Manual override of the install
+
+If you cannot run `install.sh`, the bare-minimum sequence the
+adapter installer performs is:
+
+```bash
+openclaw plugins install . --link --force --accept-capabilities
+openclaw config set plugins.entries.mpm-auto-mode-persona-openclaw.config.mpmBin /home/v/.mpm/bin/mpm
+openclaw update repair    # converge pending state migration
+```
+
+The bounded gateway restart is then left to systemd. `install.sh`
+is the supported path; the bare CLI sequence above is for
+diagnostics only.
+
+### Verify after install
+
+```bash
+openclaw plugins inspect mpm-auto-mode-persona-openclaw --json     # confirm enabled, rootDir matches
+openclaw doctor --lint --json | grep -i migration                   # confirm no pending migration
+```
+
+### Uninstall
+
+The plugin is part of the host-level MPM OpenClaw integration. To
+remove BOTH this plugin and `mpm-memory-openclaw` atomically, use the
+host-level uninstaller at
+`agent_installation/uninstall-openclaw.sh`. Do NOT just
+`openclaw plugins uninstall` this id by hand — the plugin entries
+and any sibling plugin state are tied together and a partial
+uninstall leaves a broken state. The host-level uninstaller is
+idempotent and refuses to seize unrelated plugin installations.
+
+Requires MPM installed at the canonical location `$HOME/.mpm/bin/mpm`
+(alpha default), or reachable on PATH (or set the absolute path via
+`config.mpmBin` — see [Configuration](#configuration)). The
+auto-switch is silently a no-op when `mpm` cannot be resolved.
 
 ## Configuration
 
