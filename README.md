@@ -43,11 +43,12 @@ This is one document. It is long because MPM covers ground. Read by audience:
 |---|---|---|
 | **A curious reader** evaluating MPM | §1 — §3 | §6 (skim) |
 | **A new operator** wiring MPM into an agent | §1, §5 (Quick Start) | §8 (CLI), §9 (Runtime) |
-| **A contributor** reading code or writing patches | §1 — §7 | Appendices A, B, C |
+| **A contributor** reading code or writing patches | §1 — §7 | Appendices A, B, C, F |
 | **An agent author** integrating via MCP or `mpm call` | §5, §6.4 (MCP), §6.5 (Shared Epistemology) | §8 (CLI parity table) |
 | **Future me** returning after months away | §3 (axioms), §10 (reliability) | Appendix C (enforcement patterns) |
+| **An operator on call** chasing a stuck queue or a broken skill | §9 (Runtime), §10 (Reliability) | Appendix D (cascades), Appendix E (capabilities) |
 
-Every section is self-contained enough to read in isolation.
+Every section is self-contained enough to read in isolation. This document is the whole contract — the architecture, the operator reference, and the implementation specifications are all here. Nothing in it defers to a document you have to go and find.
 
 ### Table of Contents
 
@@ -71,6 +72,9 @@ Every section is self-contained enough to read in isolation.
 - [Appendix A: Shared Epistemology Implementation](#appendix-a-shared-epistemology-implementation)
 - [Appendix B: Arc 2 (Active Dissemination) Implementation](#appendix-b-arc-2-active-dissemination-implementation)
 - [Appendix C: Enforcement Patterns](#appendix-c-enforcement-patterns)
+- [Appendix D: Epistemic Cascades — Operator Reference](#appendix-d-epistemic-cascades--operator-reference)
+- [Appendix E: Capability Lifecycle — Specification](#appendix-e-capability-lifecycle--specification)
+- [Appendix F: CLI & Command Architecture](#appendix-f-cli--command-architecture)
 - [Community & Security](#community--security)
 - [License](#license)
 
@@ -614,21 +618,21 @@ The cascade is split into two phases because the invalidation path is hot (every
   return to caller in <1ms
 ```
 
-The invalidation transaction writes the intent (`status='pending'`) and returns within the same atomic transaction as the trigger. The materialization is asynchronous — operators run `mpm cascade materialize` from `cron` or `systemd` timers, and each invocation drains the outbox then exits. There is no new daemon and no per-CLI latency tax.
+The invalidation transaction writes the intent (`status='pending'`) and returns within the same atomic transaction as the trigger. Materialization is asynchronous: `cascade_drain` runs as a registered tick handler on `mpm-scheduler`, claiming and draining pending intents under a per-tick wall-clock budget. There is no hidden per-CLI background drain and no latency tax on the write path. `mpm cascade materialize` is the foreground escape hatch for one-shot drains and post-incident catch-up — see [Appendix D.2](#d2-how-the-outbox-gets-drained).
 
 **Depth limit and the depth-4 audit.**
 
-The cascade recurses: invalidating a downstream artifact may itself be a foundation for further artifacts. The depth is capped at **3** (`CascadeMaxDepth`) — beyond that, the substrate still records the intent but appends a CRITICAL audit entry and suppresses the spawn, preventing pathological fan-out from a single root invalidation. The audit log carries the chain so an operator can examine what was suppressed and decide whether to widen the cap.
+The cascade recurses: invalidating a downstream artifact may itself be a foundation for further artifacts. The depth is capped at **3** (`MaxCascadeDepth`) — beyond that, the substrate still records the intent but appends a CRITICAL audit entry and suppresses the spawn, preventing pathological fan-out from a single root invalidation. The audit log carries the chain so an operator can examine what was suppressed and decide whether to widen the cap.
 
 **The wake throttle.**
 
 When cascade intents materialize into pending theories, the change must surface to the agent's wake context. `check_wakes` caps **cascade-kind wakes at 3 per call** (`MaxCascadeWakePerCheck`) — so a 50-intent cascade materialization doesn't flood the agent on the next call. Non-cascade wakes (notification, cron, system) are interleaved normally and unaffected by the cap; the throttle is per-call, not global.
 
-**Why a CLI subcommand, not a daemon.** MPM is CLI-only — the watch daemon was deprecated in commit `6588cb8` and hard-removed in `215fd09`, and the materializer is invoked from `mpm cascade materialize`. Operators schedule the invocation from `cron` or `systemd`, each call drains the outbox and exits. This avoids the latency tax of a hidden per-CLI background drain and respects the architecture's "no moving parts" principle.
+**Why a scheduler tick, not a standalone daemon.** The watch daemon was deprecated in commit `6588cb8` and hard-removed in `215fd09`. The drain now rides the scheduler you are already running for wakes and system tasks, rather than adding a second moving part — and when you are not running the scheduler at all, `mpm cascade materialize` drains the queue in the foreground and exits.
 
 **Inspecting dead letters.**
 
-Reasons a cascade intent might end up dead-lettered (`status='failed'`): the scanner rejected the synthesized theory, the FTS5 insert failed, or the SQLite write was retried past `MaxRetries` (default 5). Inspect with `mpm cascade list-dead-letters` — both the failed intent's `terminal_error` and the outbox summary (`pending / processing / materialized / failed`) are surfaced for the operator.
+Reasons a cascade intent might end up dead-lettered (`status='failed'`): the scanner rejected the synthesized theory, the FTS5 insert failed, the SQLite write was retried past `MaxRetries` (default 3), or the intent exceeded the depth cap. Inspect with `mpm cascade list-dead-letters` — both the failed intent's `terminal_error` and the outbox summary (`pending / processing / materialized / failed`) are surfaced for the operator.
 
 ```
 mpm cascade materialize            # drain the outbox (default: until empty)
@@ -636,7 +640,9 @@ mpm cascade materialize --once     # process one batch and exit
 mpm cascade list-dead-letters      # show failed intents and outbox summary
 ```
 
-The outbox is durable; a crash mid-materialize leaves the row with `status='processing'` and the next materialization reclaims it via stale-recovery (`updated_at` filter). Every operation is in `docs/archive/epistemic-cascades.md` (operator-facing schema, queries, knob reference).
+The outbox is durable; a crash mid-materialize leaves the row with `status='processing'` and the next materialization reclaims it via stale-recovery (`updated_at` filter), preserving `attempt_count` so a poison pill still dead-letters instead of retrying forever.
+
+Cascades also run in a **positive** direction: when a foundation crosses the proven threshold, downstream artifacts that explicitly declared they *assume the foundation is false* are surfaced for re-evaluation too. That opt-in is explicit and never inferred. The outbox schema, the queries, every tunable constant, the polarity contract, and the troubleshooting path are in [Appendix D](#appendix-d-epistemic-cascades--operator-reference).
 
 ---
 
@@ -660,7 +666,7 @@ The single binary lives at `bin/mpm`. Try it without installing anything — no 
 
 ### 5.2 Run it as a daemon
 
-This section shows the daemon + systemd setup manually, for transparency and for operators who want to customize individual steps. If you don't need that control, run `./install.sh` instead — it does most of the below (build, install to `~/.mpm/bin`, `make service-scheduler`, `systemctl --user enable --now`, the eCryptfs autostart workaround, and OpenClaw wiring) in one idempotent step. `mpm ops init directives` (see [§5.2 step "Seed the baseline cognitive directives"](#seed-the-baseline-cognitive-directives-recommended-once-after-install)) is **not** part of `install.sh` — it is a separate post-install command by design (the installer prints it as a `next steps` hint at the end). `make service-telemetry` likewise is a separate manual step. Use the manual steps below when you need to pin a specific version, point a unit at a non-canonical install path, or otherwise deviate from the canonical layout.
+This section shows the daemon + systemd setup manually, for transparency and for operators who want to customize individual steps. If you don't need that control, run `./install.sh` instead — it does most of the below (build, install to `~/.mpm/bin`, `make service-scheduler`, `systemctl --user enable --now`, the eCryptfs autostart workaround, and OpenClaw wiring) in one idempotent step. `mpm ops init directives` (see the "Seed the baseline cognitive directives" step in [§5.2](#52-run-it-as-a-daemon)) is **not** part of `install.sh` — it is a separate post-install command by design (the installer prints it as a `next steps` hint at the end). `make service-telemetry` likewise is a separate manual step. Use the manual steps below when you need to pin a specific version, point a unit at a non-canonical install path, or otherwise deviate from the canonical layout.
 
 For autonomous operation — the scheduler dispatches system-kind wakes (critic audits, snapshots, GC, broadcasts) on a 60s ticker, and `mpm-mcp` exposes MPM to MCP hosts (Claude Code, OpenClaw) over stdio:
 
@@ -880,7 +886,9 @@ The execution-profile abstraction is the substrate's primitive for this routing:
 
 The CLI surface (`mpm config profile|component|capability`) lets operators configure the routing without writing code. The MCP surface (`mpm call request_review ...`) lets agents invoke multi-component reviews against the same routing — the substrate's first orchestration primitive.
 
-For the full design — including the substrate-side primitives, the `Daily` / `Create` / `Knowledge` taxonomy, and the no-hardcoded-component-names discipline — see `docs/archive/cli-design.md`.
+**No hard-coded component names.** Nothing in the substrate, and nothing in a skill, may name an operator's component directly. A skill names a *capability*; the install maps that capability to a component; the component maps to a profile; the profile names the provider and model. Every layer of that chain is resolved at runtime, which is what makes a skill portable across installs that named their components differently.
+
+The command surface built on top of this routing — the two CLI personalities, the layered Stores → Services → Formatters → Encoders → Renderers → Commands stack, and the help taxonomy — is specified in [Appendix F](#appendix-f-cli--command-architecture).
 
 ### 6.2 Confidence Engine
 
@@ -1055,7 +1063,40 @@ MCP tool results pass through several size caps as they travel outward; the four
 | `mpm_blob_search` scan window (bytes) | 256 KiB | `internal/core/tools/handlers.go:6120` (`serverMaxBytes`) | **Scan window**, not response-size cap: the regex/literal search reads through this many bytes of the underlying blob per call. Default `max_bytes` is 50 KiB (50 × 1024); a caller asking beyond the 256 KiB ceiling has it capped to `serverMaxBytes`. The response itself is bounded by `max_matches × snippet-length`, so the 20 KiB spill boundary applies normally. | caller-controlled per call (within ceiling) |
 | Memory query per-call `limit` ceiling | 200 | `internal/core/tools/handlers.go:6240` (`maxQueryLimit`) | Hard ceiling on the `limit` parameter for memory/lessons/theories/decisions searches via MCP. A caller asking beyond 200 has the request capped; this caps the response-count fan-out so a runaway `limit` can't trigger a massive FTS5 + vector scan. Documented default is 5 (no silent coercion; a `limit=0` request returns zero rows by design). | not user-overridable |
 
-These are not in conflict — they are layered. A tool response above 20 KiB becomes a pointer envelope; the pointer then resolves bounded to 512 B by default; an explicit `mpm_blob_read` returns up to 256 KiB in one go (still gated by the 20 KiB envelope boundary at the response layer for MCP transport). The audit that motivated the latest changes (10 K → 20 K, lesson/theory pointer bounding) is at `docs/pointer-indirection-audit-2026-09-05.md`; the per-tool historical spill distribution that calibrated the 20 K value is in the same document's §Step 2.
+These are not in conflict — they are layered. A tool response above 20 KiB becomes a pointer envelope; the pointer then resolves bounded to 512 B by default; an explicit `mpm_blob_read` returns up to 256 KiB in one go (still gated by the 20 KiB envelope boundary at the response layer for MCP transport).
+
+##### How the 20 KiB boundary was calibrated
+
+The spill threshold was raised from 10 240 B to 20 480 B on 2026-09-05 after measuring the real spill distribution rather than guessing. The sample was 134 live blobs, tokenized with tiktoken-go (`cl100k_base`) — Anthropic's tokenizer is closed-source, and cl100k is the standard BPE reference, typically landing within ±15 % of Anthropic counts on mixed prose-and-JSON content.
+
+| `source_tool` | n | bytes p50 | bytes p90 | bytes max | tokens p50 |
+|---|---|---|---|---|---|
+| `mpm_blob_read` | 39 | 20 868 | 76 641 | 236 751 | 6 672 |
+| `mpm_context` | 36 | 14 503 | 15 514 | 16 012 | 4 405 |
+| `mpm_handoff` | 1 | 10 407 | 10 407 | 10 407 | 2 796 |
+| `mpm_lessons` | 3 | 145 963 | 145 963 | 145 963 | 37 316 |
+| `mpm_memory` | 1 | 19 358 | 19 358 | 19 358 | 4 786 |
+| `mpm_resolve` | 51 | 16 313 | 27 476 | 150 768 | 4 817 |
+| `mpm_work` | 3 | 34 248 | 34 248 | 85 786 | 10 849 |
+
+Against the old 10 240 B threshold: 3.7 % of spills were within 1.25×, 33.6 % within 1.5×, 73.9 % within 2×, and 6.7 % exceeded 10×.
+
+Four conclusions shaped the current numbers:
+
+1. **Token density on real MPM payloads is ~0.32 tokens per byte** — close to the `bytes/4` rule of thumb, slightly above it. Either is fine for rough sizing; the tokenizer is the source of truth.
+2. **The old threshold sat well below the median spill.** The median spill was 1.6× the threshold, meaning the system was mostly spilling responses that had only just crossed the boundary — paying a round trip for payloads that would have been cheaper inline. Doubling the boundary keeps the pointer mechanism for genuinely large results and stops taxing moderate ones.
+3. **`mpm_lessons` was the worst offender by an order of magnitude** — three blobs at ~146 KB each, ~37 K tokens per spill, from returning full lesson texts in batches. This is why `projection=summary` is the default for lessons and memory, with a 256-rune bound and a pointer alongside.
+4. **`mpm_blob_read` is the only path that can chain.** Its own result can re-spill when a caller requests `max_bytes` above the threshold, producing resolver chasing rather than a single round trip. The 256 KiB server ceiling bounds the chain.
+
+**Scanner parity.** Spilling cannot be used to dodge content scanning. The spill is a *return-side* mechanism: write-side scanning (`isSensitiveContent` + `isPoisoned`) runs at the substrate INSERT sites, before the bytes exist anywhere the spill could reach. There is no path by which input content of unknown provenance arrives at `blobstore.Put`.
+
+**Blob file permissions.** The blobstore creates its directory with `os.MkdirAll(blobDir, 0o700)` and writes blob files at `0600`. Note that `os.MkdirAll` does not *correct* the mode of a directory that already exists, so an install whose blob directory predates that code can retain a looser mode. Blobs restored or copied by hand can likewise carry the permissions they were copied with. If you inherited a blob directory, check it:
+
+```bash
+stat -c '%a %n' ~/.mpm/blobs
+find ~/.mpm/blobs -type f ! -perm 600 -printf '%m %p\n'
+chmod 700 ~/.mpm/blobs && find ~/.mpm/blobs -type f -exec chmod 600 {} +
+```
 
 ### 6.5 Multi-Agent Shared Epistemology (Layers 0–4)
 
@@ -1940,7 +1981,48 @@ mpm call mpm_context --payload '{"action":"read_directives","params":{}}'
 # → response: { "success":true, "directives":[...], "count":N, "framework":"openclaw" }
 ```
 
-**Full contract:** `docs/archive/directives.md` — grammar, evaluation pipeline, precedence rules, conflict boundaries, authoring rules for operators.
+##### Precedence and conflicts
+
+1. **Additive, not replacement.** Framework-specific directives augment global directives. They never overwrite or suppress a global invariant.
+2. **Tiered overlay.** With a shared DB attached, `ReadDirectivesForFramework` returns the union of the local baseline and the shared overlay, deduplicated by id. On an id collision the **shared row wins** — the shared DB is the multi-agent authority. Sorting is by ascending id, so the returned set is byte-stable across runs.
+3. **Deterministic ordering.** Within an active set, directives are ordered by ascending `StableID`.
+4. **Conflict boundaries.** Two directives carrying contradictory behavioural rules are an authoring defect in the seed registry, not a runtime condition to resolve. There is no override weighting and no numerical priority field — deliberately, because a priority field turns every authoring mistake into a silent precedence puzzle.
+
+##### Tiered fallback seeding
+
+```text
+Tier 1  LOCAL bootstrap  ── always seeded at NewDatabaseManager boot
+Tier 2  SHARED overlay   ── union when MPM_SHARED_DB is attached
+```
+
+The constitutional baseline directives are auto-seeded into the **local** store at boot: `NewDatabaseManager` runs `seed.ApplyDirectives` after `initUnifiedSchema`, so a standalone runtime with no attached shared DB is never directive-blind. The hermetic test constructor (`NewDatabaseManagerForDB` + `InitSchema`) deliberately does not seed, so fixtures assert against their own rows.
+
+Seeding is idempotent, keyed on stable id:
+
+| Row state | Outcome |
+|---|---|
+| Live, content matches the seed | Skipped |
+| Live, content has drifted | Operator's edit preserved, flagged `Updated` |
+| Absent | Inserted (`Created`) |
+| Soft-deleted | **Revived** with current seed content (`Created`) |
+
+The revive case matters: a shredded baseline still occupies the stable-id primary key, so a plain `INSERT OR IGNORE` would be silently swallowed while reporting "Created". The baseline is non-negotiable, so re-init undeletes it. That makes `mpm ops init directives` the documented recovery path after an accidental shred or a decay sweep.
+
+##### Liveness is sentinel-agnostic
+
+Legacy installs wrote `deleted_at = 0`; current code writes `NULL` and soft-deletes with a Unix-epoch value. Both `ReadDirectivesForFramework` and the seed dedup treat liveness as `COALESCE(deleted_at, 0) = 0`, so a legacy database surfaces its directives instead of silently reporting an empty baseline. Operators with pre-2026-08-19 databases should normalize once:
+
+```sql
+UPDATE memories SET deleted_at = NULL WHERE deleted_at = 0;
+```
+
+This also restores visibility of any other `deleted_at = 0` memories, which every current reader treats as live.
+
+##### Authoring rules
+
+1. **Constitutional invariants must be global.** Any rule governing storage integrity, transaction safety, write read-backs, or audit retention uses `scope = "global"`.
+2. **No framework assumptions in global directives.** Write them in third-person, framework-neutral language. Never reference a specific CLI flag, JSON-RPC envelope quirk, or harness hook in a global directive.
+3. **Framework directives must be additive.** Keep them to integration mechanics, local context constraints, and tool-invocation ergonomics — never behaviour that belongs to every agent.
 
 #### Skills (Procedural Memory)
 
@@ -2158,7 +2240,7 @@ Idempotent. Local edits to a seeded skill are preserved and surfaced as drift in
 
 *Stateful, executable artifacts with a lifecycle (draft → linted → validated → probation → active → degraded → fractured) — discoverable via `mpm capability <subcommand>`, sealed at the storage-layer CHECK constraint.*
 
-Capabilities are MPM's answer to "how does an agent actually *do* something with the substrate, not just remember about it?" Where a skill says *how* (a procedure the agent interprets), a capability is the artifact that gets *invoked* — a typed source-code payload (bash / python / jq), a declared execution domain (sandbox / restricted / trusted / operator), and a telemetry trail that feeds the fracture detector. The full lifecycle is specified in `docs/archive/capability-lifecycle.md`; this section is the operator-facing surface.
+Capabilities are MPM's answer to "how does an agent actually *do* something with the substrate, not just remember about it?" Where a skill says *how* (a procedure the agent interprets), a capability is the artifact that gets *invoked* — a typed source-code payload (bash / python / jq), a declared execution domain (sandbox / restricted / trusted / operator), and a telemetry trail that feeds the fracture detector. The full lifecycle — state machine, transition table, the four tables, the forge pipeline, the executor's per-domain `bwrap` contract, the fracture and rollback cascades, and the six-layer security model — is specified in [Appendix E](#appendix-e-capability-lifecycle--specification). This section is the operator-facing surface.
 
 ##### Bootstrapping the Tier 1 primitive set
 
@@ -2502,7 +2584,7 @@ The conceptual vocabulary of MPM. Implementation-specific terms (decay, wake, LT
 
 **Memory.** A general fact, observation, or synthesized insight.
 
-**Projection Principle.** The substrate records facts, and records facts about facts (events, invocations). The substrate never records views of facts (projections, scores, summaries). Every view is computed from authoritative state at read time. Commands and CLI surfaces may evolve. Truth may not. See `docs/archive/architecture.md`.
+**Projection Principle.** MPM is *closed under observation*: every node, action, and lifecycle event is introspectable through the substrate itself. Maintaining that closure requires five commitments — the substrate records facts; it records facts about facts (events, invocations); it **never** records views of facts (projections, scores, summaries); every view is computed from authoritative state at read time; and commands and CLI surfaces may evolve, but truth may not. This is the principle the architecture is built on. The Projection Test below is its operational form, applied at PR review.
 
 **Projection Test.** A design constraint applied before adding any new table, column, cache, score, or summary: if the value can be computed from authoritative state at read time, do not persist it. The burden of proof is on persistence. See CLAUDE.md.
 
@@ -2756,7 +2838,7 @@ The asymmetry: local contradictions are NOT written to `shared.contradiction_log
 
 This appendix is the runtime deep dive behind Arc 2. The narrative above says *what* the layer does; this section says *how* it does it.
 
-Arc 2 is shipped at `efec046` (2026-07-07). All smoke tests + unit tests green. The pre-implementation design rationale is preserved in the commit message and the `arc-2-design.md` history entry (no longer a living document — superseded by this appendix).
+Arc 2 is shipped at `efec046` (2026-07-07). All smoke tests + unit tests green. The pre-implementation design rationale is preserved in the commit message; this appendix supersedes it.
 
 ## B.1 Schema (as-built)
 
@@ -3022,6 +3104,877 @@ The cognitive loop closes through the existing wake context: when self-heal esca
 - **Brittle unit tests on forever-drifting formulas.** A test that pins `assert(decay(0) == 1.0)` breaks the moment the formula changes. Pattern 2 rejects this.
 
 The discipline is the same in every case: when in doubt, escalate. The agent's wake context is the escalation surface. The user's attention is the final arbiter.
+
+---
+
+## Appendix D: Epistemic Cascades — Operator Reference
+
+**Cross-references:** §4.8 (the conceptual model), Appendix C.4 (self-heal whitelist + escalation).
+
+§4.8 says *what* a cascade is and *why* it exists. This appendix is the operator surface: the two cascade directions, the outbox schema, the queries you actually run, every tunable constant, and the troubleshooting path when nothing materialises.
+
+### D.1 Two directions, one machine
+
+Cascades run in two directions. Both share the outbox table, the materializer, the wake machinery, and the atomicity guarantees. They differ in trigger surface, polarity contract, and the hypothesis text the materializer writes.
+
+| | Negative cascade | Positive cascade |
+|---|---|---|
+| Foundation event | becomes invalid / disproven | becomes proven / crosses the confidence ceiling |
+| Trigger reasons | `theory_disproven`, `memory_shredded`, `confidence_floor` | `foundation_proven`, `confidence_ceiling` |
+| Discovery path | `dependencies` JSON **or** `epistemic_provenance` rows (any polarity, including NULL) | `epistemic_provenance` rows **only**, filtered to `polarity='assumes_false'` |
+| Downstream eligibility | decisions and theories | decisions and theories that explicitly opted in via `polarity='assumes_false'` |
+| Hypothesis framing | "foundation invalidated; review whether the downstream conclusion still holds" | "foundation proven; review whether the downstream conclusion still holds now that the foundation is established" |
+
+The trigger surfaces are deliberately *not* symmetric. Bare `dependencies` JSON entries cannot fire a positive cascade because the JSON carries no polarity field at all — they are structurally excluded from the positive discovery path, not merely NULL-defaulted. Opt-in via JSON is impossible by construction.
+
+Every cascade event creates one **cascade intent** per downstream artifact. The materializer converts each intent into a **pending re-evaluation theory**, written through `ProposeTheoryWithExtras` — the standard theory write path, so the scanner and FTS5 apply exactly as they do to a hand-written theory. There is no parallel write surface.
+
+### D.2 How the outbox gets drained
+
+```
+NORMAL OPERATION
+mpm-scheduler
+   → cascade_drain handler (registered tick handler)
+   → claim pending intents (atomic claim inside BEGIN IMMEDIATE)
+   → materialize each intent into a re-evaluation theory
+   → schedule cascade wakes for the agent
+```
+
+`cascade_drain` is registered as a tick handler in `cmd/mpm-scheduler/main.go`. There is no auto-starting background goroutine on the `DatabaseManager`, and no second scheduling mechanism.
+
+`mpm cascade materialize` is the **foreground escape hatch** — the same materializer with no time budget, because the operator has chosen to wait. Use it when you don't want to run `mpm-scheduler` for a one-shot drain, or when you need to clear a backlog outside the tick cycle (post-incident catch-up, manual cleanup, CI smoke test).
+
+| Flag | Default | Description |
+|---|---|---|
+| `--once` | `false` | Run one batch and exit |
+| `--max-iterations N` | `0` (unbounded) | Bound the number of batches; exits code `2` on timeout |
+| `--poll-interval T` | `5s` | Sleep between empty-queue polls (minimum `1s`) |
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Queue drained successfully |
+| `1` | Runtime error |
+| `2` | `--max-iterations` exceeded |
+
+```bash
+mpm cascade materialize --once             # single batch
+mpm cascade materialize --max-iterations 10  # bounded, with operator oversight
+mpm cascade list-dead-letters              # failed intents + outbox summary
+```
+
+### D.3 Outbox schema
+
+```sql
+CREATE TABLE epistemic_cascade_outbox (
+    id                       TEXT PRIMARY KEY,
+    invalidation_event_id    TEXT NOT NULL,   -- stable event ID for causal tracing
+    dead_artifact_id         TEXT NOT NULL,
+    dead_artifact_type       TEXT NOT NULL,   -- 'memory' | 'decision' | 'theory'
+    downstream_artifact_id   TEXT NOT NULL,
+    downstream_artifact_type TEXT NOT NULL,   -- 'decision' | 'theory' only
+    trigger_evidence_id      TEXT,
+    cascade_depth            INTEGER NOT NULL DEFAULT 0,
+    reason                   TEXT NOT NULL,   -- e.g. 'memory_shredded', 'theory_disproven'
+    status                   TEXT NOT NULL,   -- 'pending' | 'processing' | 'materialized' | 'failed'
+    materialized_theory_id   TEXT,            -- set after successful materialization
+    attempt_count            INTEGER NOT NULL DEFAULT 0,
+    next_retry_at            INTEGER,         -- unix epoch seconds; NULL = eligible now
+    terminal_error           TEXT,
+    created_at               INTEGER NOT NULL,
+    updated_at               INTEGER NOT NULL
+);
+
+-- Idempotent dedup within one invalidation event
+UNIQUE(dead_artifact_id, downstream_artifact_id, invalidation_event_id)
+```
+
+Indexes:
+
+```sql
+idx_epistemic_cascade_outbox_event        ON epistemic_cascade_outbox(invalidation_event_id);
+idx_epistemic_cascade_outbox_dead         ON epistemic_cascade_outbox(dead_artifact_id);
+idx_epistemic_cascade_outbox_status_retry ON epistemic_cascade_outbox(status, next_retry_at);
+```
+
+### D.4 Queries you will actually run
+
+```sql
+-- Pending intents waiting to be materialized
+SELECT id, dead_artifact_id, downstream_artifact_id, cascade_depth, reason
+FROM epistemic_cascade_outbox
+WHERE status = 'pending'
+ORDER BY created_at ASC;
+
+-- Dead letters requiring operator review
+SELECT id, dead_artifact_id, downstream_artifact_id, cascade_depth,
+       terminal_error, attempt_count, created_at
+FROM epistemic_cascade_outbox
+WHERE status = 'failed'
+ORDER BY updated_at DESC;
+
+-- Outbox summary
+SELECT status, COUNT(*) FROM epistemic_cascade_outbox GROUP BY status;
+
+-- Every materialized cascade theory
+SELECT id, metadata
+FROM memories
+WHERE collection = 'theories'
+  AND json_extract(metadata, '$.cascade') = 1;
+```
+
+`mpm cascade list-dead-letters` wraps the second query and always exits `0`, printing the summary even when there are no dead letters:
+
+```
+CASCADE DEAD-LETTER INTENTS (status=failed)
+ID              EVENT_ID  DEAD_TYPE  DOWN_TYPE  DOWN_ID    DEPTH  ATTEMPTS  TERMINAL_ERROR
+intent-abc123   evt-xyz   memory     decision   abc123456  4      3         depth exceeded MaxCascadeDepth
+
+Outbox summary — pending=2 processing=0 materialized=15 failed=1
+```
+
+### D.5 What a generated cascade theory looks like
+
+The **subject** of the generated theory is always the downstream artifact. The hypothesis and validation criteria are written about `downstream_artifact_id`; the foundation is cited as a dependency, not reviewed as the subject.
+
+The foundation appears in two places:
+
+1. **`dependencies` column** — a JSON array containing `[dead_artifact_id]`. This is the discoverable citation that lets the theory participate in later cascades.
+2. **`metadata.cascade.*`** — `cascade: true`, `cascade_version: 1`, `dead_artifact_id`, `dead_artifact_type`, `downstream_artifact_id`, `downstream_artifact_type`, `cascade_depth`, `generated_at` (RFC3339), and `trigger_evidence_id` when the trigger carried one.
+
+The theory also gets a row in `artifact_provenance` with `parent_artifact_id = dead_artifact_id`, so the causal chain can be walked forensically.
+
+**Polarity is absent, not defaulted.** The materializer writes the `artifact_provenance` row but never an `epistemic_provenance` row, so a generated cascade theory has *no* polarity row at all. It is invisible to the positive-direction discovery query. That is a deliberate safety property: even if a future change introduced a positive trigger that defaulted to `assumes_true`, generated cascade theories still could not be discovered through the polarity path, because the row does not exist.
+
+**Recursion.** A generated cascade theory *can* be picked up by a later negative cascade — its `dependencies` JSON names the foundation, and the negative discovery path queries that JSON. It *cannot* be picked up by a later positive cascade, for the reason above. Recursion is bounded by `cascade_depth`:
+
+| Depth | Meaning |
+|---|---|
+| 0 | Root invalidation event |
+| 1 | Direct downstream cascade theory |
+| 2 | Cascade of a depth-1 cascade theory |
+| 3 | Final permitted recursive cascade |
+| 4+ | Suppressed; `CRITICAL` audit event; intent enters dead-letter state |
+
+### D.6 Polarity as a safety invariant
+
+The `epistemic_provenance.polarity` column carries a CHECK constraint restricting it to NULL, `'assumes_true'`, or `'assumes_false'`.
+
+| Value | Behaviour for positive cascades |
+|---|---|
+| NULL | Inert. Pre-existing citations and every call without an explicit polarity land here. |
+| `'assumes_false'` | Explicit opt-in: "this downstream assumes the source is false." When the source is proven, the dependent surfaces for re-evaluation. |
+| `'assumes_true'` | Stored per the storage contract, but no trigger surface fires on it today. Reserved. |
+
+> Polarity is **never inferred** — not from citation content, not from keyword or negation detection in natural language, not from semantic similarity, not from dependency structure. The design is explicit-only.
+
+A downstream that negates its foundation in plain English but never passes `polarity='assumes_false'` to `RecordProvenance` will not fire a positive cascade. That is the intended behaviour, not a gap.
+
+### D.7 Threshold-crossing detectors
+
+Cascades fire on the **crossing event**, not on arbitrary confidence movement. A decrease that stays above the floor does nothing; an increase that stays below the ceiling does nothing.
+
+Negative (`internal/core/evidence_store.go`):
+
+```go
+crossed := (!hasOldConf || oldConf >= HardConfidenceInvalidationThreshold) &&
+    conf < HardConfidenceInvalidationThreshold
+```
+
+Positive:
+
+```go
+ceilingCrossed := (!hasOldConf || oldConf < HardConfidenceProvenThreshold) &&
+    conf >= HardConfidenceProvenThreshold
+```
+
+The `!hasOldConf` clause treats a brand-new confidence record as if its prior value sat on the safe side of the boundary. Once an artifact is below the floor, further recomputes that stay below do **not** re-trigger.
+
+### D.8 Wake delivery cap
+
+`CheckPendingWakes` caps cascade-kind wakes at `MaxCascadeWakePerCheck = 3` per call.
+
+> The cap throttles **delivery**, not intent creation. It never discards, suppresses, or coalesces pending intents — those live in `epistemic_cascade_outbox` and are unaffected. It only bounds how many cascade-flavoured wake rows surface to the agent in a single `check_wakes` call.
+
+Notification and cron wakes are unaffected. Nine pending cascade wakes drain over three `check_wakes` calls: 3, 3, 3.
+
+```sql
+SELECT * FROM scheduled_wakes
+WHERE metadata LIKE '%"kind":"cascade"%'
+ORDER BY target_time ASC;
+```
+
+### D.9 Drain budget semantics
+
+`cascade_drain` runs under a per-tick wall-clock budget and logs a `cascade drain yielded` line with one of four `yield_reason` values:
+
+| `yield_reason` | Operational meaning |
+|---|---|
+| `queue_empty` | Outbox drained. Normal completion; handler exits until the next tick. |
+| `budget_exhausted` | Budget consumed before the queue drained. Pending intents remain. Expected under load — the next tick resumes. |
+| `context_cancelled` | Scheduler shut down mid-tick. Expected on daemon stop; the next start picks up where it left off. |
+| `error` | Real handler or DB failure during a batch. An `AuditWarn` plus a structured `Error` line are written. Investigate. |
+
+`budget_exhausted` is **not** a failure. If you see it consistently, either raise `CascadeDrainOptions.Budget` or look at why the backlog is large (`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status='pending'`). The scheduler's 60s tick leaves 30s of headroom for the default drain budget.
+
+### D.10 Retry, backoff, and atomicity
+
+| Attempt | Backoff |
+|---|---|
+| 1 | 2 seconds |
+| 2 | 4 seconds |
+| 3 | 8 seconds |
+
+After `MaxRetries = 3`, the intent enters dead-letter state (`status='failed'`) and a `CRITICAL` audit event records the intent ID, source and downstream IDs, attempt count, and terminal error.
+
+| Failure | Behaviour |
+|---|---|
+| Outbox INSERT fails | Root mutation rolls back — invalidation and outbox can never diverge. |
+| Theory creation fails | Exponential backoff; after `MaxRetries` → dead-letter + `CRITICAL` audit event. |
+| Depth exceeds the limit | Intent suppressed at materialisation; dead-letter + `CRITICAL` audit event. |
+| Materializer crashes mid-batch | Restart recovery: `status='processing'` rows older than the 5-minute staleness window reset to `pending` on the next claim. `attempt_count` is **preserved** across recoveries, so a poison pill that gets SIGKILL'd mid-process still accumulates retries and eventually dead-letters. |
+| Wake insert fails after materialisation | `wake_scheduled` stays `0`; `ReconcileUnscheduledCascadeWakes` re-books it on the next sweep. The theory is durable; only the wake-booking is recoverable. |
+
+Dedup is structural: `UNIQUE(dead_artifact_id, downstream_artifact_id, invalidation_event_id)` means one root invalidation cannot produce duplicate intents for the same downstream. `markMaterialized` is idempotent — re-running on an already-materialised row yields the same theory, since theory identity is `invalidation_event_id + downstream_artifact_id`.
+
+### D.11 Dependency discovery
+
+Negative cascades combine two edge sources when discovering downstream targets:
+
+1. **Explicit `dependencies` JSON** — theories listing the dead artifact ID.
+2. **Typed provenance citations** — `epistemic_provenance` rows created when `source_ids` are passed to `RecordDecision` or `ProposeTheory`.
+
+Only `decision` and `theory` downstreams are eligible (`isEligibleCascadeType`). Lessons and global rules are excluded by design — see the scope table in §4.8.
+
+Positive cascades use path 2 only. `discoverPositiveCascadeTargets` never consults the JSON path.
+
+### D.12 Federation
+
+With `MPM_SHARED_DB` attached, cascade intents are written atomically to both the local and shared `epistemic_cascade_outbox` tables. The local materializer processes the local outbox; the shared outbox is available to cross-agent shared-materializer instances. The `epistemic_provenance` federated read path surfaces citations from both databases.
+
+### D.13 Configuration knobs
+
+| Knob | Default | Notes |
+|---|---|---|
+| `MaxCascadeDepth` | `3` | Storage-level ceiling on `cascade_depth`. |
+| `MaxCascadeWakePerCheck` | `3` | Wake delivery cap per `check_wakes` call. |
+| `MaxRetries` | `3` | Retries before dead-letter. |
+| `CascadeMaterializerOptions.WakeDelay` | `1s` | Delay before scheduling the cascade wake. `0` disables. |
+| `CascadeMaterializerOptions.BatchSize` | `10` | Intents claimed per `MaterializeBatch` call. |
+| `CascadeDrainOptions.Budget` | `30s` | Per-tick wall-clock budget for `cascade_drain`. |
+| `CascadeDrainOptions.BatchSize` | `10` | Claim size per inner-loop iteration. |
+| `HardConfidenceInvalidationThreshold` | `0.3` | Confidence floor for the negative trigger. |
+| `HardConfidenceProvenThreshold` | `0.8` | Confidence ceiling for the positive trigger. |
+| `PolarityAssumesTrue` | `"assumes_true"` | Storage contract; no trigger surface fires on it. |
+| `PolarityAssumesFalse` | `"assumes_false"` | Opt-in polarity for `foundation_proven` / `confidence_ceiling`. |
+
+All are constants in `internal/core/`; the materializer options are also settable via `NewCascadeMaterializer(dm, opts)`.
+
+### D.14 Troubleshooting: "I shredded a root directive but nothing materialised"
+
+1. Is `mpm-scheduler` running? Look for `cascade drain yielded` lines.
+2. Is the outbox non-empty?
+   ```bash
+   sqlite3 src/db/mpm.db "SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE status='pending';"
+   ```
+3. Is the handler yielding `budget_exhausted` every tick? Check `intents_materialized` per tick and raise `CascadeDrainOptions.Budget` if you need a faster drain after a large blast.
+4. Are intents sitting in `status='failed'`? Inspect with `mpm cascade list-dead-letters`.
+
+### D.15 Terminology
+
+| Term | Meaning |
+|---|---|
+| foundation | The artifact whose epistemic state changed. Stored as `dead_artifact_id` even when the change is positive — the column name reflects the feature's negative-direction origin. |
+| foundation invalidation | Negative-direction event: a foundation becomes invalid or disproven. |
+| foundation proven | Positive-direction event: a foundation crosses the proven threshold. |
+| downstream artifact | The artifact that cited or depended on the foundation and is now subject to re-evaluation. Used interchangeably with *dependent*. |
+| cascade intent | One row in `epistemic_cascade_outbox`. `pending → processing → materialized \| failed`. |
+| cascade theory | The pending theory materialised from an intent; identified by `cascade=true` in metadata. Also called a *re-evaluation theory*, because the downstream needs conscious re-assessment rather than automatic rewriting. |
+| cascade wake | A wake row with `metadata.kind='cascade'` that surfaces the re-evaluation theory to the agent. |
+| invalidation event | The causal event ID shared by every intent produced from one trigger invocation. Stable across the chain. |
+
+---
+
+## Appendix E: Capability Lifecycle — Specification
+
+**Cross-references:** §9 (Capabilities — the operator-facing surface), Appendix D (the cascade machinery this subsystem reuses).
+
+§9 describes what a capability is and how an operator bootstraps one. This appendix is the specification: the state machine, the four tables, the forge pipeline, the executor's sandbox contract, the two cascades, and the security model.
+
+A capability is a **stateful artifact**, not an executable blob. Its lifecycle is enforced by a strict state machine in SQLite, and every transition is an auditable row in a dedicated events table. Trust is earned rather than granted: a capability proposes for `sandbox` or `restricted`, and `trusted` is reached only after track record accumulates in the lower domains. Execution is wrapped in `bwrap` per domain, and `source_hash` is verified on every invocation.
+
+The design follows the same philosophy as the epistemic cascade: every state transition is an observable row, every cascade is an idempotent intent in an outbox, every escalation is a wake to a human or agent. **Failure is a state transition, not an exception.** No silent recovery, no magic constants, no unverified execution.
+
+### E.1 The state machine
+
+```
+                      operator approval / auto (sandbox only)
+                                   │
+  ┌───────┐  lint   ┌────────┐ dry-run ┌───────────┐ probation ┌────────┐
+  │ draft ├────────▶│ linted ├────────▶│ validated ├──────────▶│ active │
+  └───┬───┘         └────┬───┘         └───────────┘           └───┬────┘
+      │                  │                                         │
+      │ update           │ dependency fracture                     │
+      ▼                  ▼                                         │
+  ┌───────┐        ┌────────────┐                                  │
+  │ draft │        │   needs_   │◀──────────────┐                   │
+  │ (rev) │        │  revision  │               │                   │
+  └───────┘        └─────┬──────┘               │                   │
+      ▲                  │ agent submits fix    │                   │
+      └──────────────────┘                      │                   │
+                                                │                   │
+  ┌──────────┐ 3 fail/60s ┌───────────┐ tolerance breach            │
+  │ degraded ├───────────▶│ fractured │                             │
+  │          │◀───────────┤           │   ┌─────────────┐           │
+  └──────────┘  recovery  └─────┬─────┘   │ rolled_back │◀──────────┘
+                                │ operator└──────┬──────┘
+                                ▼                ▼ lineage walk
+                          ┌─────────┐      ┌──────────┐
+                          │ retired │      │ ancestor │
+                          └─────────┘      │ revived  │
+                                           └──────────┘
+```
+
+| State | Description | Callable? | Cascade emitter? |
+|---|---|---|---|
+| `draft` | Initial state after `propose_skill`; awaiting forge validation | no | no |
+| `linted` | Static analysis passed (shellcheck, `py_compile`, ruff) | no | no |
+| `validated` | Dry-run in the `bwrap` sandbox passed; ready for the probation gate | no | no |
+| `probation` | Receiving invocations to accumulate track record | yes (sandbox) | no |
+| `active` | Live version; passed probation; observation window begins | yes (per domain) | yes (on fracture) |
+| `degraded` | Failure rate exceeded the soft threshold; still callable | yes (with warning) | no |
+| `fractured` | 3 failures in 60s; emits a cascade if `author_theory_id` is set | no | **yes** |
+| `needs_revision` | Demoted from `fractured`; the agent can rewrite or abandon | no | no |
+| `rolled_back` | A revision failed its observation window; lineage preserved | no | no |
+| `retired` | Permanent end-of-life: superseded, abandoned, or operator-killed | no | no |
+
+### E.2 Transition table
+
+| From | To | Trigger | Side effects |
+|---|---|---|---|
+| `draft` | `linted` | forge lint pass | none |
+| `linted` | `validated` | forge dry-run exit 0 in `bwrap` | none |
+| `validated` | `probation` | operator approval, or automatic when `requested_domain='sandbox'` | snapshot predecessor → `metadata.baseline_at_proposal` (if a revision); set `A.superseded_by_id = B.id` |
+| `probation` | `active` | `success_count >= probation_required_success_count` AND `failure_rate <= probation_max_failure_rate` | `promoted_at = now`; predecessor → `retired` |
+| `active` | `degraded` | `failure_rate > soft_threshold` (default `0.20`) | none — still callable |
+| `degraded` | `active` | `failure_rate < soft_threshold` for 5 consecutive invocations | none |
+| `degraded` | `fractured` | 3 failures in 60s | emit cascade wake; if `author_theory_id` is set, write to `epistemic_cascade_outbox` |
+| `active` | `needs_revision` | explicit operator flag | attach the operator note to `metadata.operator_notes` |
+| `fractured` | `needs_revision` | automatic on detection | attach `last_failure_stderr` to `metadata.failure_trace` |
+| `needs_revision` | `draft` | agent submits a fix (`propose_skill` with `created_from_id`) | old row → `retired`; revision lineage preserved |
+| `active` | `rolled_back` | observation-window tolerance breach | full rollback transaction (E.7) including downstream shatter |
+| `*` | `retired` | explicit operator action, or superseded by a successful promotion | none |
+
+Any transition not in this table is a forge bug. The validator refuses it, and the storage-layer `CHECK` constraint refuses the state itself.
+
+### E.3 Policy parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `probation_required_success_count` | `5` | Successful invocations needed to exit probation |
+| `probation_max_failure_rate` | `0.10` | Failure-rate ceiling during probation |
+| `soft_threshold_failure_rate` | `0.20` | Above this, `active` → `degraded` |
+| `fracture_window_seconds` | `60` | Time window for the failure cluster |
+| `fracture_count_threshold` | `3` | Failures within the window that trigger `fractured` |
+| `observation_window_invocations` | `100` | Invocations after promotion during which rollback is possible |
+| `observation_window_hours` | `24` | Time bound on the observation window |
+| `success_rate_delta_tolerance` | `-0.02` | Minimum acceptable `success_rate` delta vs baseline |
+| `latency_ratio_tolerance` | `2.0` | Maximum acceptable `avg_latency_ms` ratio vs baseline |
+| `probation_max_hours` | `168` | Probation timeout; on expiry → `needs_revision`, reason `probation_timeout` |
+| `invocation_ttl_sandbox_hours` | `24` | GC retention for sandbox-domain invocations |
+| `invocation_ttl_restricted_hours` | `72` | GC retention for restricted-domain invocations |
+| `invocation_ttl_trusted_hours` | `168` | GC retention for trusted-domain invocations |
+| `invocation_ttl_operator_hours` | `0` | GC retention for operator-domain invocations (`0` = indefinite) |
+
+Every parameter is stamped at proposal time into `metadata.policy_snapshot`. Runtime reads the column-stamped values, never live config — so changing a default never silently re-judges a capability that was proposed under the old policy.
+
+### E.4 Schema
+
+Four tables, all using INTEGER Unix-epoch seconds and the standard `created_at` / `updated_at` / `deleted_at` soft-delete pattern.
+
+**`capabilities`** — the artifact itself.
+
+```sql
+CREATE TABLE capabilities (
+    id              TEXT PRIMARY KEY,                -- ULID
+    name            TEXT NOT NULL UNIQUE,            -- slug: ^[a-z][a-z0-9_]{2,63}$
+    purpose         TEXT NOT NULL,                   -- 20–500 chars; dedup input
+    source_code     TEXT NOT NULL,                   -- ≤64 KB, ≤500 lines
+    source_language TEXT NOT NULL DEFAULT 'bash',    -- bash | python | jq
+    source_hash     TEXT NOT NULL,                   -- SHA-256 at proposal time
+
+    -- Lifecycle
+    state            TEXT NOT NULL DEFAULT 'draft'
+                     CHECK (state IN (
+                         'draft','linted','validated','probation','active',
+                         'degraded','needs_revision','fractured','rolled_back','retired'
+                     )),
+    execution_domain TEXT NOT NULL DEFAULT 'sandbox'
+                     CHECK (execution_domain IN ('sandbox','restricted','trusted','operator')),
+    state_changed_at INTEGER NOT NULL,
+
+    -- Lineage (causal-graph participation)
+    author_theory_id TEXT,                           -- optional FK → theories(id)
+    author_agent     TEXT,
+    created_from_id  TEXT,                           -- revision parent
+    superseded_by_id TEXT,                           -- set on dedup or shadowing
+
+    -- Empirical metrics
+    success_count       INTEGER NOT NULL DEFAULT 0,
+    failure_count       INTEGER NOT NULL DEFAULT 0,
+    fracture_count      INTEGER NOT NULL DEFAULT 0,  -- distinct from failure_count
+    last_invoked_at     INTEGER,
+    last_failure_at     INTEGER,
+    last_failure_stderr TEXT,                        -- surfaced in needs_revision
+    avg_latency_ms      REAL NOT NULL DEFAULT 0,
+
+    -- Probation policy (stamped at proposal; not magic constants)
+    probation_required_success_count INTEGER NOT NULL DEFAULT 5,
+    probation_max_failure_rate       REAL    NOT NULL DEFAULT 0.10,
+    promoted_at                      INTEGER,
+
+    -- Discovery (FTS5 + cosine dedup)
+    embedding BLOB,
+    tags      TEXT NOT NULL DEFAULT '[]',            -- JSON array
+
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted_at INTEGER,
+    metadata   TEXT NOT NULL DEFAULT '{}',
+
+    FOREIGN KEY (author_theory_id) REFERENCES theories(id)     ON DELETE SET NULL,
+    FOREIGN KEY (created_from_id)  REFERENCES capabilities(id) ON DELETE SET NULL,
+    FOREIGN KEY (superseded_by_id) REFERENCES capabilities(id) ON DELETE SET NULL
+);
+```
+
+The canonical "live tool" lookup — the one the executor runs — is:
+
+```sql
+SELECT * FROM capabilities
+WHERE name = ? AND state = 'active' AND superseded_by_id IS NULL AND deleted_at IS NULL
+LIMIT 1;
+```
+
+**`capability_invocations`** — pure execution telemetry. Synthetic events never land here.
+
+```sql
+CREATE TABLE capability_invocations (
+    id                  TEXT PRIMARY KEY,
+    capability_id       TEXT NOT NULL,
+    invoked_at          INTEGER NOT NULL,
+    exit_code           INTEGER NOT NULL,
+    duration_ms         INTEGER NOT NULL,
+    stderr              TEXT,           -- truncated; full text in metadata
+    invocation_context  TEXT,           -- JSON: caller, sanitized args
+    cascade_invalidated BOOLEAN NOT NULL DEFAULT 0,
+    FOREIGN KEY (capability_id) REFERENCES capabilities(id) ON DELETE CASCADE
+);
+```
+
+**`capability_dependencies`** — the junction table whose reverse lookups power every cascade walker.
+
+```sql
+CREATE TABLE capability_dependencies (
+    capability_id TEXT NOT NULL,
+    depends_on_id TEXT NOT NULL,
+    added_at      INTEGER NOT NULL,
+    PRIMARY KEY (capability_id, depends_on_id),
+    FOREIGN KEY (capability_id) REFERENCES capabilities(id) ON DELETE CASCADE,
+    FOREIGN KEY (depends_on_id) REFERENCES capabilities(id) ON DELETE CASCADE
+);
+```
+
+The recursive walker, used by both the fracture cascade and the downstream shatter:
+
+```sql
+WITH RECURSIVE downstream AS (
+    SELECT capability_id, 0 AS depth FROM capability_dependencies
+    WHERE depends_on_id = ?root
+    UNION ALL
+    SELECT cd.capability_id, d.depth + 1
+    FROM capability_dependencies cd
+    JOIN downstream d ON cd.depends_on_id = d.capability_id
+    WHERE d.depth < ?max_depth
+)
+SELECT c.id, c.name, c.state, c.execution_domain, d.depth
+FROM capabilities c JOIN downstream d ON c.id = d.capability_id
+WHERE c.state IN ('active','degraded','probation')
+ORDER BY d.depth ASC;
+```
+
+`max_depth` defaults to `5`; deeper transitive dependencies surface as operator warnings rather than being auto-shattered.
+
+**`capability_events`** — state transitions and synthetic events, kept strictly separate from invocations so metrics aggregation never has to filter state changes out of telemetry.
+
+```sql
+CREATE TABLE capability_events (
+    id            TEXT PRIMARY KEY,
+    capability_id TEXT NOT NULL,
+    event_type    TEXT NOT NULL,
+    occurred_at   INTEGER NOT NULL,
+    actor         TEXT NOT NULL,   -- 'forge' | 'scheduler' | 'operator:<id>' | 'agent:<id>'
+    from_state    TEXT,
+    to_state      TEXT,
+    reason        TEXT,
+    related_id    TEXT,            -- predecessor on rollback; dead dep on shatter
+    metadata      TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY (capability_id) REFERENCES capabilities(id) ON DELETE CASCADE
+);
+```
+
+| `event_type` | When emitted | Required fields |
+|---|---|---|
+| `promotion` | state → `active` from probation | `from_state`, `to_state`, `metadata.policy_snapshot` |
+| `demotion` | any state regression not from the observation window | `from_state`, `to_state` |
+| `fracture` | state → `fractured` | `metadata.failure_cluster`, `metadata.triggering_invocations` |
+| `rollback` | observation-window tolerance breach | `related_id=predecessor.id`, `metadata.tolerance_breached` |
+| `dependency_shatter` | downstream shatter | `related_id=upstream.id`, `metadata.cascade_depth` |
+| `retirement` | state → `retired` | `from_state`, `metadata.reason` |
+| `supersede` | shadow flag set during probation | `related_id=candidate.id` |
+| `source_hash_mismatch` | runtime tamper detected | `metadata.observed_hash`, `metadata.expected_hash` |
+| `operator_approval` | `mpm capability grant-operator` | actor, `metadata.reason` |
+
+### E.5 The forge
+
+The forge turns a `propose_skill` payload into a `linted → validated → probation` capability. Three entry points share one validation sequence wrapped in a single SQLite transaction:
+
+- `mpm skill forge` — proposal intake (operator or agent)
+- `mpm skill forge-now <id>` — urgent foreground validation, operator-gated
+- `skill_forge_tick` on `mpm-scheduler` — 60s background sweep
+
+**Payload shape:**
+
+```json
+{
+  "name": "git_status_porcelain",
+  "purpose": "Show git working tree status in porcelain v1 format, suitable for parsing",
+  "source_code": "git status --porcelain",
+  "source_language": "bash",
+  "requested_domain": "restricted",
+  "tags": ["git", "vcs", "status"],
+  "depends_on": ["cap_abc123_git_auth_v1"],
+  "author_theory_id": "theo_abc123",
+  "expected_io": {
+    "args": "none",
+    "stdout_shape": "newline-delimited porcelain v1",
+    "exit_codes": {"0": "ok", "128": "not a git repo"}
+  },
+  "metadata": {
+    "rationale": "Agent repeatedly needs working tree state before commit",
+    "failure_modes": ["not in git repo", "permission denied"]
+  }
+}
+```
+
+| Field | Required | Validation |
+|---|---|---|
+| `name` | yes | slug `^[a-z][a-z0-9_]{2,63}$`; unique against `state IN ('active','probation','linted','validated')` |
+| `purpose` | yes | 20–500 chars. Too short is meaningless; too long is usually hallucination. Also the dedup input. |
+| `source_code` | yes | ≤64 KB and ≤500 lines — a structural cap, not a style guide |
+| `source_language` | yes | `bash` \| `python` \| `jq`. Each new language means a new validator; extend cautiously. |
+| `requested_domain` | yes | `sandbox` \| `restricted` \| `trusted`. **Never `operator`** — agents cannot self-propose it. |
+| `tags` | no | FTS5 surface; drives `list_skills` filters |
+| `depends_on` | no | every ID must be `state='active'` at proposal time |
+| `author_theory_id` | no | epistemic lineage; when set, `fractured` fires the epistemic cascade |
+| `replaces_id` | no | bypasses the dedup check for that one ID (E.6); forge sets `created_from_id=replaces_id` |
+| `expected_io` | no | contract declaration, compared against actual behaviour at probation |
+| `metadata` | no | free-form; survives round-trip |
+
+**The pipeline, in order, atomic** — each step must pass, and failure aborts the transaction:
+
+| # | Step | Validator | On failure |
+|---|---|---|---|
+| 1 | Schema validation | Go struct tags + manual checks | reject with field-level errors |
+| 2 | Name uniqueness | `SELECT 1 FROM capabilities WHERE name=? AND state NOT IN ('retired','rolled_back')` | reject, or accept as a revision if `created_from_id` is given |
+| 3 | Source size cap | `len(source_code) <= 65536 AND line_count <= 500` | reject |
+| 4 | Scanner pass | `isSensitiveContent` + `isPoisonedCode` patterns (E.9) | reject; mirror to `mirror.jsonl` |
+| 5 | Linter pass | `shellcheck -f json` (bash); `python -m py_compile` + `ruff check` (python) | reject with lint errors |
+| 6 | Dependency check | every `depends_on` ID exists and is `active` | reject, naming the dead dep |
+| 7 | Domain policy | `requested_domain != 'trusted'` for drafts | reject |
+| 8 | Dedup check | cosine similarity of the `purpose` embedding against `state IN ('active','probation')`, threshold `0.92`; bypassed for `replaces_id` only | return a `superseded_by` pointer to the existing capability |
+| 9 | Dry-run | `bwrap` execution with dummy args; expect `exit_code=0` | reject |
+| 10 | Source hash | `SHA-256(source_code)` → `source_hash` | — |
+| 11 | Insert | `state='validated'` after a dry-run, or `'linted'` when the dry-run was skipped | — |
+| 12 | Audit | `capability_events` row, `event_type='lint_pass'` or `'dry_run_pass'` | — |
+
+Rejections are structured, mirroring the `mirror.jsonl` blocked-content pattern:
+
+```json
+{
+  "status": "rejected",
+  "capability_id": null,
+  "reasons": [
+    {"step": "scanner", "pattern": "rm_rf_variable", "line": 3, "snippet": "rm -rf $TARGET"},
+    {"step": "domain_policy", "message": "draft cannot request domain=trusted"}
+  ]
+}
+```
+
+**Probation mechanics.** Each invocation increments `success_count` or `failure_count`. The forge checks both conditions on every invocation, and when both hold the state moves to `active`, `promoted_at` is stamped, and a `promotion` event is written. If probation criteria fail to materialise within `probation_max_hours`, the capability auto-transitions to `needs_revision` with `reason="probation_timeout"`.
+
+### E.6 Revisions and forks
+
+A revision (`mpm skill update <id>`) creates a **new** row with `created_from_id = parent.id` and re-enters the pipeline from step 1. The original stays `active` until the revision reaches `probation`, at which point `original.superseded_by_id = revision.id` is set as a shadow flag. When the revision reaches `active`, the original is `retired` with `metadata.reason='superseded_by_revision'`.
+
+A fork (`replaces_id`) exists for the case where the agent has *diagnosed* a flaw that hasn't yet surfaced as a fracture. Without the field, the dedup check would permanently block the replacement, because the new capability's purpose necessarily scores above `0.92` against the flawed predecessor. Setting `replaces_id`:
+
+1. bypasses dedup for that one ID — every other capability is still checked;
+2. sets `created_from_id = replaces_id` automatically, giving the rollback walker a lineage path back to the predecessor;
+3. otherwise flows through the standard pipeline with identical shadow and revive mechanics.
+
+| Field | Agent intent | Database mechanics |
+|---|---|---|
+| `created_from_id` | Continuous iteration — small improvements and bug fixes on a working concept | New row; lineage walker finds the parent |
+| `replaces_id` | Explicit fork — the existing capability is known-broken and the agent walks away from its lineage | New row; dedup bypass for that ID; lineage walker still finds the parent |
+
+The mechanics are identical; the distinction lives in the agent's intent and in the audit log, where `retirement` records `metadata.reason` as `superseded_by_revision` or `superseded_by_fork`.
+
+### E.7 The executor
+
+One Go function turns a `(capability, args, env)` triple into a `(exit_code, stdout, stderr, duration_ms)` result. Every invocation — agent, scheduler, or operator — flows through it, and it enforces seven things in order:
+
+1. the capability is live (`state='active'`, `superseded_by_id IS NULL`);
+2. `source_hash` matches the DB row;
+3. `execution_domain` matches the wrapper selection;
+4. `bwrap` for sandbox and restricted, direct exec for trusted and operator;
+5. the timeout from `metadata.max_runtime_ms` (default 30 000);
+6. an invocation record is written and capability metrics are updated;
+7. the fracture cluster (3-in-60s) is evaluated.
+
+**sandbox** — the default for new proposals:
+
+```
+bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /bin /bin \
+      --ro-bind /etc/resolv.conf /etc/resolv.conf \
+      --tmpfs /tmp --tmpfs /home \
+      --unshare-net --unshare-pid --new-session --die-with-parent \
+      --chdir /tmp -- <script> <args>
+```
+
+**restricted** — sandbox plus the project bind mount and any capability-declared paths:
+
+```
+bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /bin /bin \
+      --bind <project_dir> <project_dir> \
+      --bind <declared_path_N> <declared_path_N> \
+      --tmpfs /tmp --unshare-pid --new-session --die-with-parent \
+      --chdir <project_dir> -- <script> <args>
+```
+
+Network stays unshared in restricted. The proposal declares `metadata.allowed_paths` listing every writable path; any other write attempt fails inside `bwrap`, and the executor maps that failure to a fracture-eligible error.
+
+**trusted** and **operator** execute directly with `source_hash` still enforced. The operator domain additionally requires `metadata.operator_approved_at` to be non-zero, and the call site must present an operator token enforced at the CLI/MCP layer before `Invoke` is reached.
+
+**`source_hash` verification is mandatory before every invocation, in every domain.** If the live source code doesn't match what the DB recorded at proposal time, the capability fractures immediately, a `source_hash_mismatch` event records observed versus expected, and the operator gets a wake. There is no skip-verification mode.
+
+| Resource | Default | Configurable via |
+|---|---|---|
+| Wall clock | 30s | `metadata.max_runtime_ms` |
+| Memory | 512 MB | `metadata.max_memory_mb` (`bwrap --rlimit-as`) |
+| Open FDs | 256 | `metadata.max_fds` (`bwrap --rlimit-nofile`) |
+| Output size | 16 MB | hard cap; stdout and stderr truncate beyond it |
+
+A timeout emits `event_type='fracture'` with `metadata.reason='timeout'`. Memory and FD exhaustion behave the same way.
+
+### E.8 The two cascades
+
+Both are symmetric to the epistemic cascade in Appendix D: the upstream event writes an outbox intent, and a materializer drains it.
+
+**Fracture cascade.** When a capability transitions to `fractured`:
+
+1. If `author_theory_id` is set, write an `epistemic_cascade_outbox` row with `dead_artifact_id=<theory>` and `reason='capability_fractured'`. The existing cascade materializer handles it from there.
+2. Always walk `capability_dependencies` for downstream capabilities. Each downstream in `state IN ('active','degraded','probation')` transitions to `needs_revision`, gets a `dependency_shatter` event with `related_id=<upstream>`, and — if it has its own `author_theory_id` — its own epistemic outbox row.
+3. Emit a notification wake: *"Skill '<name>' fractured. Downstream skills demoted: <list>."*
+
+The whole thing is one transaction: outbox row, state transitions, events, and wake commit together or not at all.
+
+**Rollback cascade.** When an active capability breaches tolerance inside its observation window (`success_rate_delta < -0.02` or `latency_ratio > 2.0`), the substrate walks lineage backward via `created_from_id` to find the closest retired ancestor and revives it. The walk is cycle-safe — a depth cap of 32 plus a path-string revisit guard — and `ORDER BY depth ASC` selects the immediate parent rather than a sibling branch that happened to retire later. For a chain A→B→C where C rolls back, B is the revival target; if B is itself fractured the walk continues to A.
+
+If the revival UPDATE returns `rowcount=0` — the "both broken" case — the transaction rolls back and a second one marks the revision `rolled_back` with `metadata.escalated=true`, writes a `rollback` event with `reason='predecessor_unavailable'`, and schedules a highest-priority operator wake. The `escalated` flag is observable via `mpm skill show <id>` but is deliberately **not** a separate state — the state enum stays clean, and the substrate refuses to silently pick a poison.
+
+### E.9 Security model
+
+Defense in depth. Each layer backstops the previous; none is sufficient alone.
+
+| Layer | Mechanism | Role | Bypassable? |
+|---|---|---|---|
+| 1 | Regex scanner | Fast-fail heuristic; refuses obvious cases early to save compute | **Yes** — trivially, via string concatenation, indirect expansion, or encoding. Not a security boundary. |
+| 2 | Linter | Catches semantic issues regex misses (unquoted vars, injection patterns) | **Yes** — same bypass class as layer 1 |
+| 3 | Dry-run in `bwrap` | Catches runtime errors before promotion | Partial — catches crashes, not intent |
+| 4 | `bwrap` execution wrapper | **The actual security boundary.** Read-only binds, `--unshare-net`, no writable paths outside declared surfaces | No — structural; the kernel enforces it |
+| 5 | `source_hash` verification | Defeats runtime tampering of the source on disk | No — the comparison is deterministic |
+| 6 | Domain ladder | Claimed scope versus granted scope; promotion requires track record | No — enforced at promotion time |
+
+**The regex scanner is not the security boundary.** A hallucinated `TARGET="r"; TARGET+="m"; $TARGET -rf /` passes layer 1 (the literal string never appears), passes layer 2 (the linter sees a script building a string at runtime), and reaches layer 4 — where `bwrap` refuses to write outside the bind mounts and the script dies. The system stays safe even if every regex pattern is bypassed. The scanner's job is to refuse obvious cases cheaply; `bwrap`'s job is to make arbitrary damage impossible. Conflating the two is how security reviews go wrong.
+
+The 19-pattern secret scanner that gates every memory write is extended with `isPoisonedCode` patterns for `source_code`:
+
+| Pattern ID | Severity |
+|---|---|
+| `rm_rf_variable`, `rm_rf_root` | critical |
+| `curl_pipe_sh`, `wget_pipe_sh` | critical |
+| `reverse_shell_bash`, `reverse_shell_nc` | critical |
+| `hardcoded_aws_key`, `hardcoded_private_key` | critical (already covered by the base scanner) |
+| `dd_destructive`, `mkfs_unmounted` | critical |
+| `absolute_path_write_root` | high |
+| `chmod_777` | medium |
+
+Blocked proposals are mirrored to `mirror.jsonl` with the `capability_source_code` tag and never reach the database.
+
+**The domain ladder:**
+
+```
+sandbox
+  │  50 successful invocations, failure_rate ≤ 0.05, no fractures
+  ▼
+restricted
+  │  500 successful invocations, failure_rate ≤ 0.02, no fractures in 30d
+  ▼
+trusted
+  ▲
+  │  NEVER reachable by capability proposal
+  │
+operator  ◀──── mpm skill elevate (operator-only)
+```
+
+| Domain | Network | Filesystem writes |
+|---|---|---|
+| `sandbox` | none (`--unshare-net`) | none — read-only binds plus tmpfs |
+| `restricted` | none | declared paths only |
+| `trusted` | host network | full filesystem (operator-trusted) |
+| `operator` | host network | full filesystem (operator-trusted) |
+
+A capability that needs network access must reach `trusted` first, and the forge's domain policy makes that structurally enforced rather than merely documented.
+
+### E.10 Command surface
+
+```
+mpm skill propose   --payload <json>              # submit a draft
+mpm skill show      <id>                          # state, metrics, lineage
+mpm skill list      [--state=X] [--domain=Y]      # filterable inventory
+mpm skill audit     <id> [--limit=N] [--since=T]  # full lineage diff
+mpm skill update    <id> --payload <json>         # propose a revision
+mpm skill rollback  <id> [--reason=X]             # explicit operator rollback
+mpm skill retire    <id> [--reason=X]             # explicit operator retirement
+mpm skill forge-now <id>                          # urgent foreground validation
+mpm skill invoke    <id> [args...]                # direct invocation (testing/operator)
+mpm skill promote   <id>                          # operator override of the probation gate
+mpm skill elevate   <id>                          # operator-only domain elevation
+mpm skill gc                                      # invocation-table TTL sweep
+```
+
+---
+
+## Appendix F: CLI & Command Architecture
+
+**Cross-references:** §6.1 (execution-profile routing), §8 (the CLI reference itself).
+
+§8 lists the commands. This appendix is the discipline behind them: why the CLI has two personalities, what a command is allowed to contain, and the layering that keeps the human surface from drifting away from the substrate.
+
+The governing idea: **the CLI reflects the cognitive architecture, not the storage architecture.** It is an interface and discoverability surface, not a second implementation. Almost all of it is aliases, routing, help, and thin orchestration over handlers that already exist.
+
+### F.1 The seven principles
+
+These override implementation convenience.
+
+**1. Stable contracts.** MCP tool names are API contracts — `record_decision`, `save_lesson`, `save_skill`, `read_wake_context`, `flush_scratchpad`. They do not get renamed. Compatibility beats aesthetics.
+
+**2. Intent at the CLI.** Humans express intentions; agents integrate against contracts. So the CLI exposes intentions — `mpm remember`, `mpm continue`, `mpm recall`, `mpm why`, `mpm doctor` — and dispatches internally to the same handlers the MCP surface calls.
+
+**3. One engine, two interfaces.** The human interface is small, discoverable, intent-driven, and for daily use. The operator interface is explicit, scriptable, complete, and stable. Both dispatch to one implementation. Business logic is never duplicated between them.
+
+**4. Progressive disclosure.** The number of commands is not the problem; discoverability is. Default help exposes roughly eight primary commands, with everything else behind `mpm help <section>` and `mpm help --all`. Help output is **not** an API — operators who want scriptable discovery use `mpm help --json`. There is deliberately no `--legacy` flat-help mode, because maintaining a mirror of the old shape locks in drift.
+
+**5. Prefer aliases over renames.** A better name is added, never substituted. The old command stays, documented under the operator interface.
+
+**6. Composition discipline.** Human commands compose existing queries; they never reimplement them. `mpm continue` has no queries of its own for working context, recent decisions, or loaded skills — it calls the existing `wake`, `read_scratchpad`, `query_decisions`, and `list_skills` paths. If a contributor starts reimplementing those inside a human-mode command, stop them. Duplicated query logic is how a cognitive substrate rots silently: the CLI and the substrate quietly disagree about what "the same data" means.
+
+**7. Commands are adapters, not dependencies.** The CLI mirrors the MCP-vs-substrate separation:
+
+```
+SQLite
+   ↓
+Stores      ← query types wrapping SQLite. One per major domain table cluster
+               (working context, wake context, memories, decisions, skills,
+               theories, status). They own ONLY queries; no behaviour.
+   ↓
+Services    ← behavioural units. Earn their existence by owning behaviour that
+               crosses stores or carries rules (validation, expiry,
+               orchestration, aggregation).
+   ↓
+Formatters  ← pure data transformation. Reshape a model into a presentation
+               shape (WorkingContext → DashboardSection). Stateless.
+   ↓
+Encoders    ← serialisation. JSONEncoder, YAMLEncoder. NOT rendering.
+   ↓
+Renderers   ← output-medium adapters. TerminalRenderer, DashboardRenderer.
+               Consume formatters (or models directly) and write to the terminal.
+   ↓
+Commands    ← tiny adapters (~30 LOC). Compose services; hand off to formatters,
+               renderers, encoders. NEVER call another command. NEVER own SQL.
+               NEVER own behaviour. NEVER own presentation.
+```
+
+### F.2 Services must pay for themselves
+
+A service that merely wraps a store — `TheoryService{repo.ListRecent()}` — is accidental complexity. Delete it and inline the store call at every call site and nothing is lost. That is the test.
+
+Real services own real behaviour:
+
+- **WorkingContextService** — `Load()`, `Validate(state)`, `Expire()`, `Promote()`, `Clear()`. Behaviour spanning persistence, validation, lifecycle, and policy.
+- **ContinueService** — `Compose(sectionOwners...)` orchestrates five subsystems into the `continue` dashboard. Composition *is* behaviour.
+- **DoctorService** — `Check()` aggregates six-plus telemetry paths into one trust signal. Aggregation *is* behaviour.
+
+Not services — these are stores, and should be named as such: anything of the shape `type FooService struct{}; func (s *FooService) Get() { return s.repo.Get() }`.
+
+> **Commands do not compose commands. Commands compose services.**
+
+### F.3 Two anti-patterns this forecloses
+
+**The Unix trap.** `exec.Command("mpm", "work", "show")` and parsing stdout *feels* clean, because from the outside every CLI command is a program. Inside Go it is not: you end up negotiating stdout, exit codes, JSON-versus-text modes, recursive CLI invocation, and duplicated formatting paths. You script yourself. Git does not implement `git status` by shelling out to `git diff` and parsing output; both call the same plumbing.
+
+**Model/rendering coupling.** A direct `work.Render()` call looks like the fix for the above, but it welds the model to one presentation. The moment `mpm work show --json` lands, or someone wants syntax highlighting in `work show` and compact Markdown in the `continue` dashboard, model and rendering have to be untangled with no clean migration path. The presentation layer is not the model.
+
+Formatters, encoders, and renderers are three different concerns. A formatter reshapes for a presentation context; an encoder serialises to a machine-readable form; a renderer writes a presentation-shaped thing to a terminal. **JSON is serialisation, not rendering.**
+
+```
+mpm work show                  →  workingCtxSvc.Load()
+                                  workingCtxFormatter.Format(model)   → MarkdownModel
+                                  terminalRenderer.Render(markdownModel)
+
+mpm work show --json           →  workingCtxSvc.Load()
+                                  jsonEncoder.Encode(model)
+
+mpm continue                   →  [services per section]
+                                  [formatters reshaping for dashboard sections]
+                                  dashboardRenderer.Render(sections...)
+```
+
+The command never sees the model raw. The service never sees a renderer. The renderer never sees a store.
+
+### F.4 Help taxonomy
+
+Default `mpm help` groups by cognitive function rather than by subsystem:
+
+```
+MPM
+
+Daily              Knowledge          Working Context    Maintenance
+-----              ---------          ---------------    -----------
+continue           memory             work               backup
+remember           lesson                                restore
+recall             skill                                 review
+doctor             decision
+why                theory
+
+Need more?  mpm help knowledge · mpm help work · mpm help --all
+```
+
+Dozens of commands at first contact is the failure mode this avoids.
+
+### F.5 Non-goals
+
+The CLI surface explicitly does not: rename MCP tools, redesign storage or the SQLite schema, change routing semantics, introduce workflow automation or planning behaviour, recommend actions, remove compatibility aliases, or maintain a flat-help compatibility mode.
 
 ---
 
