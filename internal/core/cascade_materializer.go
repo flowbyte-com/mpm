@@ -39,7 +39,9 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -174,6 +176,37 @@ const (
 
 // processIntent handles a single claimed intent end-to-end.
 func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent CascadeIntent) processResult {
+	// ── Downstream liveness check ─────────────────────────────────────────
+	// Before producing a cascade theory (and its wake), verify the
+	// downstream artifact still exists and is not superseded. A cascade
+	// materialization asks the operator to "review whether the downstream
+	// artifact's conclusions still hold without this foundation" — but if
+	// the downstream was already superseded (replaced by a successor) or
+	// hard-deleted, the review is moot. Persisting the wake and the theory
+	// anyway leaves ghost work in the wake backlog (lesson 06f57b1d: the
+	// investigation that surfaced this fix).
+	//
+	// Defensive contract: check downstream first, before the depth guard,
+	// so a stale-target intent costs almost nothing when rejected.
+	if skip, reason := cm.downstreamNotLive(intent); skip {
+		cm.dm.LogAudit(AuditInfo, "cascade-materializer",
+			fmt.Sprintf("cascade intent %s skipped: downstream %s is no longer live (%s)",
+				intent.ID, intent.DownstreamArtifactID, reason),
+			"", AuditContext{
+				"intent_id":              intent.ID,
+				"dead_artifact_id":       intent.DeadArtifactID,
+				"downstream_artifact_id": intent.DownstreamArtifactID,
+				"invalidation_event_id":  intent.InvalidationEventID,
+				"skip_reason":            reason,
+			})
+		if err := cm.markFailed(intent.ID, "downstream no longer live: "+reason); err != nil {
+			cm.dm.LogAudit(AuditError, "cascade-materializer",
+				fmt.Sprintf("failed to mark stale-downstream intent %s as failed: %v",
+					intent.ID, err), "", nil)
+		}
+		return resultSuppressed
+	}
+
 	// ── Depth guard ────────────────────────────────────────────────────────
 	// Intents already at or below MaxCascadeDepth are processed normally.
 	// Intents at depth > MaxCascadeDepth are suppressed and produce a
@@ -611,6 +644,85 @@ func (cm *CascadeMaterializer) markFailed(intentID, terminalError string) error 
 		WHERE id = ?
 	`, terminalError, now, intentID)
 	return err
+}
+
+// downstreamNotLive reports whether the cascade intent's downstream
+// artifact is still alive and worth a cascade review. Returns
+// (true, reason) when the cascade should be suppressed:
+//
+//   - downstream hard-deleted ("not found") — no successor to review
+//   - downstream superseded — the supersede operation already
+//     replaced the artifact with a successor; the operator took
+//     responsibility for the new artifact; the cascade review
+//     would be moot (review an artifact the operator already
+//     decided to replace).
+//
+// Returns (false, "") when the downstream is live OR when the
+// downstream is superseded but the chain still has a live successor
+// that genuinely depends on the original foundation. (Cascades are
+// not auto-retargeted: the operator who performed the supersede
+// already owns the successor's review; we do not silently re-open
+// it via cascade wake. See lesson d6fed1df — the fix supersedes
+// it: the MATERIALIZER (not the reconciler) walks supersede
+// edges; the action is to skip, not to retarget.)
+//
+// Implementation note: live-ness is judged by the canonical
+// memories row, not by the cascade outbox's downstream_artifact_type
+// column. The cascade metadata captures the operator-set intent at
+// enqueue time and may carry type drift when an invalidating
+// surface (memory_shred, confidence_floor) mis-labels the dead
+// artifact's type. Reading the memories row at materialization
+// time is the authoritative check.
+//
+// Defensive: a missing memories row OR a present memories row with
+// superseded metadata.json -> superseded_by OR a present row
+// with the "superseded" tag (per IsSuperseded) all qualify as
+// "not live". Returns the specific reason so the audit row
+// (caller's responsibility) can carry the diagnostic.
+func (cm *CascadeMaterializer) downstreamNotLive(intent CascadeIntent) (skip bool, reason string) {
+	if intent.DownstreamArtifactID == "" {
+		return false, ""
+	}
+
+	mem, err := cm.dm.GetMemory(intent.DownstreamArtifactID)
+	if err != nil {
+		// Hard-deleted OR collection/type that GetMemory doesn't
+		// recognize. Either way: not live.
+		return true, "downstream not found"
+	}
+
+	// The memories row exists. Two live-ness tests:
+	//
+	//   1. metadata.superseded_by is set (canonical supersede marker).
+	//   2. The "superseded" tag is present (legacy / redundant-records).
+	//
+	// SupersedeDecision writes BOTH (defense in depth: hybrid_search
+	// discounts superseded rows via tags; the metadata pointer is the
+	// canonical chain edge). Reading either is sufficient.
+	metaStr, _ := mem["metadata"].(string)
+	if metaStr != "" {
+		var meta map[string]interface{}
+		if err := json.Unmarshal([]byte(metaStr), &meta); err == nil {
+			if sup, _ := meta["superseded_by"].(string); sup != "" {
+				return true, fmt.Sprintf("downstream superseded by %s", sup)
+			}
+		}
+	}
+
+	tagsStr, _ := mem["tags"].(string)
+	if tagsStr != "" {
+		// tags column is JSON-array per schema. Parse defensively.
+		var tags []string
+		if err := json.Unmarshal([]byte(tagsStr), &tags); err == nil {
+			for _, t := range tags {
+				if t == "superseded" || strings.HasPrefix(t, "superseded-by:") {
+					return true, "downstream superseded (tag marker)"
+				}
+			}
+		}
+	}
+
+	return false, ""
 }
 
 // requeueIntent updates the attempt count and next-retry timestamp for

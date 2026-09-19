@@ -2058,6 +2058,14 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("cascade wake_scheduled migration failed: %w", err)
 	}
+	// 2026-09-19 release-pass: fired_by column on scheduled_wakes so
+	// explicit operator/agent resolutions (wake-resolver) can be told
+	// apart from automatic cascade materializer / reconciler firings.
+	// Idempotent via wake_resolver_fired_by_v1 sentinel.
+	if err := MigrateWakeResolverFiredBy(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("wake resolver fired_by migration failed: %w", err)
+	}
 	// Positive-direction (constructive) cascade: polarity column on
 	// epistemic_provenance. Idempotent via the schema_migrations sentinel
 	// pattern. See migration_epistemic_provenance_polarity.go for the

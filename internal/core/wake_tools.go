@@ -180,6 +180,153 @@ func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, recurringR
 	}, nil
 }
 
+// ResolveWake marks a wake fired=1 with fired_at=now and returns the
+// resolution outcome. The lifecycle contract:
+//   - This is the explicit, audited mechanism for an agent (or operator
+//     tool) to mark a wake resolved without having to consume it through
+//     the CheckPendingWakes delivery path.
+//   - The action is IDEMPOTENT: re-running on an already-fired wake
+//     returns fired=true with no audit row written (avoids audit noise
+//     from retries / double-clicks). It is NOT destructive: it does
+//     not delete the wake row, only flips fired=1. The wake remains
+//     visible via `mpm_wakes list --include_fired` for the audit trail.
+//
+// 2026-09-19 release-pass: surface for lesson 9b9f286c (mpm_wakes
+// lacks explicit resolution). Pre-fix the only way to retire a
+// non-scheduled-task wake was to delete the row directly via SQL
+// (which an operator correctly refused to do) or to wait for the
+// cascade materializer's downstream liveness guard (added in the
+// same pass) to skip materialization. ResolveWake is the
+// operator-friendly path for retiring historical ghost wakes that
+// the new guard cannot retroactively erase.
+//
+// Refusal semantics:
+//   - wake_id not found → (false, "wake_not_found")
+//   - wake_id references a scheduled_tasks row → rejected (the
+//     schedule rows are owned by `delete_task`; mixing the two
+//     surfaces would let an agent accidentally retire a recurring
+//     schedule).
+//   - already fired → (true, "already_resolved") — no-op success.
+//   - cascade wake resolved with the supplied reason → (true,
+//     "resolved") and an audit row is emitted.
+//
+// Safe-credential contract: reason is bounded to the enum below; no
+// arbitrary string is accepted. result_reference, if supplied, is
+// recorded verbatim in the audit row's context (not on the wake
+// row) — secrets should never be passed as the reference; if the
+// caller needs to record sensitive evidence, the canonical evidence
+// tool is the right surface.
+func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference string) (resolved bool, status string, err error) {
+	if wakeID == "" {
+		return false, "missing_wake_id", fmt.Errorf("resolve wake: wake_id is required")
+	}
+	if !isValidWakeResolveReason(reason) {
+		return false, "invalid_reason", fmt.Errorf("resolve wake: reason %q is invalid — must be one of reconciled|obsolete|superseded|already_satisfied", reason)
+	}
+
+	// Single tx: look up + atomic claim. The UPDATE with WHERE
+	// fired=0 prevents two concurrent resolve calls from racing
+	// the same wake to a "double-resolved" audit row.
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return false, "tx_begin_failed", fmt.Errorf("resolve wake: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var fired int
+	var createdBy string
+	var metadata string
+	row := tx.QueryRow(`
+		SELECT fired, created_by, COALESCE(metadata, '')
+		FROM scheduled_wakes WHERE id = ?
+	`, wakeID)
+	if scanErr := row.Scan(&fired, &createdBy, &metadata); scanErr != nil {
+		if scanErr == sql.ErrNoRows {
+			return false, "wake_not_found", fmt.Errorf("resolve wake: wake %q not found", wakeID)
+		}
+		return false, "lookup_failed", fmt.Errorf("resolve wake: lookup: %w", scanErr)
+	}
+
+	// Refuse to act on scheduled_tasks-owned rows. The schedule
+	// row has a separate lifecycle (delete_task / upsert_task) and
+	// retiring a wake via the cascade-resolution surface would
+	// silently bypass the schedule owner's controls. The canonical
+	// discriminator is the metadata.kind column: cascade / cron /
+	// notification wakes flow through scheduled_wakes; scheduled
+	// recurring task rows live in a separate table.
+	if !strings.Contains(metadata, `"kind":`) {
+		return false, "not_a_wake",
+			fmt.Errorf("resolve wake: row %q is not a wake row (no metadata.kind; use delete_task for scheduled tasks)", wakeID)
+	}
+
+	if fired != 0 {
+		// Already resolved — idempotent no-op. No audit row.
+		if err := tx.Commit(); err != nil {
+			return false, "tx_commit_failed", fmt.Errorf("resolve wake: commit no-op: %w", err)
+		}
+		return true, "already_resolved", nil
+	}
+
+	now := time.Now().Unix()
+	res, execErr := tx.Exec(`
+		UPDATE scheduled_wakes
+		SET fired = 1, fired_at = ?, fired_by = ?
+		WHERE id = ? AND fired = 0
+	`, now, "wake-resolver", wakeID)
+	if execErr != nil {
+		return false, "update_failed", fmt.Errorf("resolve wake: update: %w", execErr)
+	}
+	affected, raErr := res.RowsAffected()
+	if raErr != nil {
+		return false, "rows_affected_failed", fmt.Errorf("resolve wake: rows-affected: %w", raErr)
+	}
+	if affected == 0 {
+		// Lost the race (another resolver fired this wake first).
+		// Treat as already_resolved — the audit trail will reflect
+		// whichever resolver won.
+		if err := tx.Commit(); err != nil {
+			return false, "tx_commit_failed", fmt.Errorf("resolve wake: commit race: %w", err)
+		}
+		return true, "already_resolved", nil
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, "tx_commit_failed", fmt.Errorf("resolve wake: commit: %w", err)
+	}
+
+	// Forensic log — every wake resolution is a state transition.
+	// The audit row carries the wake id, the canonical reason, the
+	// actor ("wake-resolver" sentinel — distinguishes operator-
+	// initiated resolutions from automatic materializer/reconciler
+	// firings), the wake's original creator (so an investigator can
+	// tell which subsystem enqueued the wake), and the optional
+	// result reference (a pointer, NOT the raw content of the
+	// resolution — e.g. the theory id that was disproven, the new
+	// artifact id that superseded the downstream).
+	dm.LogAudit(AuditInfo, "wake-resolver",
+		fmt.Sprintf("resolve_wake %s reason=%s", wakeID, reason),
+		"",
+		AuditContext{
+			"wake_id":          wakeID,
+			"reason":           reason,
+			"created_by":       createdBy,
+			"resolved_at":      now,
+			"result_reference": resultReference,
+		})
+	return true, "resolved", nil
+}
+
+// isValidWakeResolveReason reports whether reason is one of the canonical
+// resolution reasons. The set is intentionally bounded so the audit
+// taxonomy is stable across operators and agent scripts.
+func isValidWakeResolveReason(reason string) bool {
+	switch reason {
+	case "reconciled", "obsolete", "superseded", "already_satisfied":
+		return true
+	}
+	return false
+}
+
 // CheckPendingWakes returns every wake where fired=0 AND target_time <= now,
 // marks them fired=1 with fired_at=now, and returns them in chronological
 // order. Returns an empty slice when nothing is due (NOT an error).

@@ -319,6 +319,7 @@ type CoreDB interface {
 	ListScheduledWakes(includeFired, overdueOnly bool, limit int) ([]map[string]interface{}, error)
 	DigestScheduledWakes(topN int) (map[string]interface{}, error)
 	FireStaleFoundationWakes(deletedArtifactID string) (int, error)
+	ResolveWake(wakeID, reason, resultReference string) (resolved bool, status string, err error)
 
 	// ─── Scheduled Tasks (Agentic Cron) ─────────────────────────────
 	// Recurring agentic workflows. The mpm-scheduler daemon's 60s tick

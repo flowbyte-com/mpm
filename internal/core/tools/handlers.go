@@ -5804,6 +5804,8 @@ func handleMpmWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload
 		return handleListWakes(dm, ac, params)
 	case "digest":
 		return handleDigestWakes(dm, ac, params)
+	case "resolve":
+		return handleResolveWake(dm, ac, params)
 	case "upsert_task":
 		return handleUpsertScheduledTask(dm, ac, params)
 	case "list_tasks":
@@ -5811,8 +5813,85 @@ func handleMpmWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload
 	case "delete_task":
 		return handleDeleteScheduledTask(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_wakes. Valid actions include schedule, check, check_pending_event, list, digest, upsert_task, list_tasks, delete_task", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_wakes. Valid actions include schedule, check, check_pending_event, list, digest, resolve, upsert_task, list_tasks, delete_task", action)
 	}
+}
+
+// handleResolveWake is the explicit wake-resolution action surfaced
+// in 2026-09-19 to close lesson 9b9f286c (mpm_wakes lacks explicit
+// resolution). Lifecycle contract:
+//
+//   - Marks fired=1 with fired_at=now and fired_by="wake-resolver".
+//   - Idempotent: re-running on an already-fired wake returns
+//     success with status="already_resolved" and no new audit row.
+//     No double-fire noise from retries or double-clicks.
+//   - Refuses scheduled_tasks-owned rows (no metadata.kind →
+//     "not_a_wake"). Scheduled tasks have their own lifecycle
+//     (`delete_task`); mixing the surfaces would let an agent
+//     accidentally retire a recurring schedule.
+//
+// Required params:
+//
+//   - wake_id: the wake to resolve (string, required).
+//   - reason:  canonical enum — reconciled | obsolete |
+//     superseded | already_satisfied (string, required).
+//
+// Optional params:
+//
+//   - result_reference: opaque pointer (e.g. theory id that was
+//     disproven, new artifact id that superseded the downstream)
+//     recorded in the audit row's context for the investigator.
+//     Not persisted on the wake row itself — secrets should
+//     never pass through this surface.
+//
+// Safe-credential contract: positionally injects NO credential.
+// The reason is bounded to the canonical enum; if the operator
+// needs to record sensitive evidence, the canonical evidence
+// tool is the right surface.
+func handleResolveWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	wakeID, _ := p["wake_id"].(string)
+	if wakeID == "" {
+		// Backward-compat: also accept id and wakeId for callers
+		// who default to the canonical shape used by other
+		// mpm_* actions.
+		wakeID, _ = p["id"].(string)
+	}
+	if wakeID == "" {
+		wakeID, _ = p["wakeId"].(string)
+	}
+	if wakeID == "" {
+		return nil, fmt.Errorf("resolve wake: wake_id is required (or id / wakeId)")
+	}
+	reason, _ := p["reason"].(string)
+	if reason == "" {
+		return nil, fmt.Errorf("resolve wake: reason is required — must be one of reconciled|obsolete|superseded|already_satisfied")
+	}
+	resultReference, _ := p["result_reference"].(string)
+
+	resolved, status, err := dm.ResolveWake(wakeID, reason, resultReference)
+	if err != nil {
+		// Not every error is a failure to surface to the agent.
+		// For the "refused but recoverable" states (wake_not_found,
+		// not_a_wake, invalid_reason), the error message already
+		// names the cause; the agent can correct the call and
+		// retry. The `success:false` envelope makes the refusal
+		// machine-readable too.
+		return map[string]interface{}{
+			"success": false,
+			"status":  status,
+			"wake_id": wakeID,
+			"reason":  reason,
+			"error":   err.Error(),
+		}, nil
+	}
+	return map[string]interface{}{
+		"success":         true,
+		"resolved":        resolved,
+		"status":          status,
+		"wake_id":         wakeID,
+		"reason":          reason,
+		"result_reference": resultReference,
+	}, nil
 }
 
 func handleMpmTheories(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {

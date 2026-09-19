@@ -344,11 +344,12 @@ Lifecycle asymmetry: promote_to_global is one-way / additive. The local row is p
 		Handler: handleMpmSkills,
 	},
 	{
-		Name: "mpm_wakes",
+Name: "mpm_wakes",
 		Description: `Deferred work triggers scheduled for future execution.
 Use when: you need to schedule a check-in, reminder, or follow-up task to fire automatically at a specific time without the agent running continuously. Wakes survive agent restarts — the scheduler fires them regardless of what session is active.
 Tasks (upsert_task) are recurring cron-style triggers; one-shot wakes (schedule) fire once and are marked fired.
 Lifecycle asymmetry: delete_task is permanent removal of the task row. For reversibility / preserving history, prefer upsert_task with status='paused' (the row stays, the scheduler skips it, you can flip back to 'active' later without losing state).
+The resolve action is the explicit, audited mechanism for retiring a non-scheduled-task wake without consuming it through the delivery path (the CheckPendingWakes / list cycle). Idempotent; refuses scheduled_tasks-owned rows. Required params: wake_id, reason (reconciled|obsolete|superseded|already_satisfied). The reason taxonomy is canonical and bounded — see internal/core/wake_tools.go:isValidWakeResolveReason.
 
 Cron-wake retention model (the bookkeeping rows emitted by recurring cron tasks):
 
@@ -356,14 +357,14 @@ Cron-wake retention model (the bookkeeping rows emitted by recurring cron tasks)
 - These rows are intentionally retained for ~1 hour (CronRetentionWindow), then retired by the cron-retention sweep in wake_expiration.go.
 - Sweep cadence is ~1 hour; normal cap is 60 rows per sweep; catch-up cap is 180 rows when the eligible backlog >= 240.
 - Strict '<' cutoff means a row is only eligible after it is strictly more than 1 hour old.
-- After a fresh daemon start, the first actual row retirement normally occurs around T+2h (the runOnce sweep at +0h seeds the cadence, the +1h gate-pass finds 0 eligible due to the strict-'< cutoff, and the +2h sweep is the first to retire rows). Subsequent sweeps run every hour.
+- After a fresh daemon start, the first actual row retirement normally occurs around T+2h (the runOnce sweep at +0h seeds the cadence, the +1h gate-pass finds 0 eligible due to the strict-'<' cutoff, and the +2h sweep is the first to retire rows). Subsequent sweeps run every hour.
 - At steady state, the pending cron-wake pool oscillates between ~0 (just after a sweep) and ~60 (just before the next). ~1 retention-window of recent cron rows is the steady-state contract — NOT a fixed count.
 - Diagnose retention health via 'mpm doctor' (which surfaces the cron_retention phase + backlog + sweep timing) or 'mpm status --json'. A nonzero eligible backlog is normal between sweep opportunities; only backlog past an expected sweep opportunity is degraded.
 - The retention logic itself is in internal/scheduler/wake_expiration.go (CronRetention* constants and CronRetentionTickHandler).`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["schedule","check","check_pending_event","list","digest","upsert_task","list_tasks","delete_task"]},
+				"action": {"type": "string", "enum": ["schedule","check","check_pending_event","list","digest","resolve","upsert_task","list_tasks","delete_task"]},
 				"params": {
 					"type": "object",
 					"properties": {
@@ -382,7 +383,10 @@ Cron-wake retention model (the bookkeeping rows emitted by recurring cron tasks)
 						"name":         {"type": "string"},
 						"cron_expr":    {"type": "string"},
 						"directive_id": {"type": "string"},
-						"status":      {"type": "string", "enum": ["active","paused"]}
+						"status":      {"type": "string", "enum": ["active","paused"]},
+						"wake_id":      {"type": "string", "description": "resolve action: the wake to retire. id / wakeId also accepted."},
+						"resolve_reason":   {"type": "string", "enum": ["reconciled","obsolete","superseded","already_satisfied"], "description": "resolve action: canonical reason taxonomy"},
+						"result_reference": {"type": "string", "description": "resolve action: opaque pointer recorded in audit (e.g. theory id that was disproven, new artifact id that superseded the downstream)"}
 					},
 					"additionalProperties": true
 				}
