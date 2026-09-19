@@ -453,12 +453,12 @@ func TestRecentActivity_UnknownActorInDefaultFeed(t *testing.T) {
 // include_system=true is accepted (for legacy callers) but recent_activity
 // no longer surfaces system/diagnostic/maintenance actions even with
 // the flag set — the substrate cannot truthfully provide "all system
-// activity". Use mpm_system for that. A deprecation audit row is
-// emitted by the handler when include_system=true is passed.
+// activity". Use mpm_system for that.
 //
-// The deprecation note in the test asserts the contract: the
-// feed shape is the SAME with or without IncludeSystem; only
-// mutating actions are surfaced.
+// Crucially, recent_activity MUST be observational: passing the
+// parameter must NOT produce any durable audit/system mutation. The
+// legacy "log deprecation to system_audit_log" behaviour was an
+// observer-effect violation; this test pins that removal.
 func TestRecentActivity_IncludeSystemDeprecated(t *testing.T) {
 	dm := NewTestSharedDM(t)
 	base := int64(1700000000)
@@ -482,6 +482,34 @@ func TestRecentActivity_IncludeSystemDeprecated(t *testing.T) {
 		InvocationID: "inv-isd-maint",
 	})
 
+	// Snapshot baseline counts of every durable table a parameter
+	// choice could conceivably write to.
+	type counts struct {
+		Audit      int
+		Memories   int
+		Works      int
+		Wakes      int
+		Handoffs   int
+		Scratchpad int
+	}
+	snap := func() counts {
+		var c counts
+		row := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM system_audit_log WHERE component='recent_activity'`)
+		_ = row.Scan(&c.Audit)
+		row = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM memories`)
+		_ = row.Scan(&c.Memories)
+		row = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM works`)
+		_ = row.Scan(&c.Works)
+		row = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM scheduled_wakes`)
+		_ = row.Scan(&c.Wakes)
+		row = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM session_handoffs`)
+		_ = row.Scan(&c.Handoffs)
+		row = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM ephemeral_scratchpad`)
+		_ = row.Scan(&c.Scratchpad)
+		return c
+	}
+	before := snap()
+
 	// include_system=true is a no-op for content; feed shape is the
 	// same as include_system=false. Only the single mutation is
 	// surfaced.
@@ -499,7 +527,27 @@ func TestRecentActivity_IncludeSystemDeprecated(t *testing.T) {
 		t.Errorf("returned event action = %q, want save", res.Events[0].Action)
 	}
 
-	// include_system=false for symmetry.
+	// The recent_activity tool's own observation MUST NOT touch any
+	// durable table (audit, memories, works, wakes, handoffs,
+	// scratchpad). The tool's own tool_invocations row is recorded
+	// by the dispatcher audit hook on every mpm call — that is
+	// ordinary external invocation telemetry, not the recent_activity
+	// tool itself writing.
+	after := snap()
+	if after.Audit != before.Audit {
+		t.Errorf("include_system=true produced %d new audit rows (must be 0): before=%d after=%d",
+			after.Audit-before.Audit, before.Audit, after.Audit)
+	}
+	if after.Memories != before.Memories ||
+		after.Works != before.Works ||
+		after.Wakes != before.Wakes ||
+		after.Handoffs != before.Handoffs ||
+		after.Scratchpad != before.Scratchpad {
+		t.Errorf("include_system=true mutated a domain table: before=%+v after=%+v",
+			before, after)
+	}
+
+	// include_system=false for symmetry: feed shape identical.
 	resNoSys, err := dm.RecentActivityWithMeta(RecentActivityQueryParams{Limit: 50})
 	if err != nil {
 		t.Fatalf("RecentActivityWithMeta no-system: %v", err)
@@ -507,6 +555,48 @@ func TestRecentActivity_IncludeSystemDeprecated(t *testing.T) {
 	if len(resNoSys.Events) != len(res.Events) {
 		t.Errorf("include_system flag changes feed shape: with=%d without=%d",
 			len(res.Events), len(resNoSys.Events))
+	}
+}
+
+// TestRecentActivity_ObserverEffectInvariants (#30):
+// Direct regression for the Stage-2A acceptance gap: every recent_activity
+// parameter combination (default, filtered, with include_system) must NOT
+// write a new audit row. The dispatcher audit hook records the call
+// itself (ordinary external telemetry) — that is expected and is NOT
+// recent_activity's own doing. The check is on the tool's own
+// recent_activity audit-row component, not on the audit table globally.
+func TestRecentActivity_ObserverEffectInvariants(t *testing.T) {
+	dm := NewTestSharedDM(t)
+	base := int64(1700000000)
+	seedToolInvocation(t, dm, seedArgs{
+		ID: "oei-1", Tool: "mpm_memory", Action: "save",
+		FrameworkName: "openclaw", ActorKind: "agent",
+		StartedAt: base, CompletedAt: base + 1,
+		InvocationID: "inv-oei-1",
+	})
+
+	// Baseline: count of recent_activity audit rows.
+	var before int
+	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM system_audit_log WHERE component='recent_activity'`).Scan(&before)
+
+	cases := []RecentActivityQueryParams{
+		{Limit: 10},
+		{Limit: 50, IncludeSystem: true},
+		{Limit: 100, ActorKind: "agent"},
+		{Limit: 50, FrameworkName: "openclaw"},
+		{Limit: 50, ActorKind: "human"},
+	}
+	for _, p := range cases {
+		if _, err := dm.RecentActivityWithMeta(p); err != nil {
+			t.Fatalf("RecentActivityWithMeta(%+v): %v", p, err)
+		}
+	}
+
+	var after int
+	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM system_audit_log WHERE component='recent_activity'`).Scan(&after)
+	if after != before {
+		t.Errorf("recent_activity produced %d new audit rows (must be 0): before=%d after=%d",
+			after-before, before, after)
 	}
 }
 

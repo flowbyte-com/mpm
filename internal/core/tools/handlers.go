@@ -6440,9 +6440,18 @@ func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 	sessionID, _ := p["session_id"].(string)
 	artifactType, _ := p["artifact_type"].(string)
 
-	// include_system is now a no-op; we accept the parameter to
-	// keep legacy callers compiling but log a deprecation note so
-	// operators notice if a tool template still relies on it.
+	// include_system is a strict no-op kept for legacy callers. The
+	// substrate cannot truthfully provide comprehensive system audit
+	// coverage from tool_invocations (cascade-materializer,
+	// cascade-reconciler, scheduler-retention, GC, migration do not
+	// all flow through tool_invocations), so the parameter is
+	// accepted as input and silently ignored.
+	//
+	// recent_activity MUST be observational: a parameter choice must
+	// NEVER produce a durable semantic/audit mutation. The legacy
+	// deprecation audit-row insert was an observer-effect violation;
+	// it is removed here. Callers wanting structured system audit
+	// should use mpm_system (query_audit_log, list_clusters).
 	includeSystem := false
 	if v, present := p["include_system"]; present && v != nil {
 		switch b := v.(type) {
@@ -6450,14 +6459,6 @@ func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 			includeSystem = b
 		default:
 			return nil, fmt.Errorf("recent_activity: include_system must be bool, got %T", v)
-		}
-		if includeSystem {
-			// Non-fatal deprecation note. The recent_activity feed
-			// is now system-activity-free by design (see tool
-			// description); use mpm_system for the audit surface.
-			if lgr := dm.SQLDB(); lgr != nil {
-				_, _ = lgr.Exec(`INSERT INTO system_audit_log(level, component, message) VALUES ('warn','recent_activity','include_system=true is deprecated; recent_activity excludes system activity by design. Use mpm_system query_audit_log for system audit.')`)
-			}
 		}
 	}
 
