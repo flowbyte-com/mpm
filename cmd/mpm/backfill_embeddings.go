@@ -67,7 +67,7 @@ func handleBackfillEmbeddings(args []string) int {
 	if cfg.Source == mpminternal.EmbeddingSourceAbsent ||
 		cfg.Source == mpminternal.EmbeddingSourceDisabled ||
 		cfg.IntentionallyDisabled {
-		return usererror.Errorf(fmt.Sprintf("refusing to backfill: embedding provider is %s.\nResolve one of:\n  - Run `mpm config profile add <name> --provider custom --model <id> --base-url <url>` to configure.\n  - Set `components[\"embedding\"]` in mpm_config.json to a real profile.\n  - Remove the `\"disabled\"` sentinel from `components[\"embedding\"]`.\n  - Set OLLAMA_ENDPOINT and OLLAMA_MODEL in the environment.",
+		return usererror.Errorf(fmt.Sprintf("refusing to backfill: embedding provider is %s.\nResolve one of:\n  - Run `mpm config profile add <name> --model <id> --base-url <url>` then `mpm config profile set <name> provider custom` to configure.\n  - Set `components[\"embedding\"]` in mpm_config.json to a real profile.\n  - Remove the `\"disabled\"` sentinel from `components[\"embedding\"]`.\n  - Set OLLAMA_ENDPOINT and OLLAMA_MODEL in the environment.",
 			providerStateLabel(cfg)))
 	}
 	fmt.Printf("⚡ Embedding backfill using %s\n", cfg.Provider.Name())

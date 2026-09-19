@@ -744,9 +744,17 @@ func (s *DoctorService) checkMemoryLLM() DoctorCheck {
 	if configuredName == "" {
 		check.Status = "WARN"
 		check.Message = "no profile configured"
+		// Remediation uses ONLY the public `profile add` contract:
+		// `--model` and `--base-url` (the flags advertised in
+		// `mpm config profile add --help`). `--provider` is an
+		// undocumented escape hatch on `profile add`; for branded
+		// provider IDs the canonical path is
+		// `mpm config profile set <name> provider <id>` against
+		// an existing profile. Doctor must not advertise flags the
+		// CLI does not list in its help surface.
 		check.Details = []string{
-			"Run 'mpm config component set memory <profile>' to bind a generative profile.",
-			"Use 'mpm config profile add <name> --provider <id> --model <id> --base-url <url>' to create one first.",
+			"Run 'mpm config profile add <name> --model <model> --base-url <url>' to create a profile,",
+			"then 'mpm config component set memory <name>' to bind it.",
 		}
 		return check
 	}
@@ -766,13 +774,15 @@ func (s *DoctorService) checkMemoryLLM() DoctorCheck {
 	// default-profile fallback is also missing. ProfileFor returns
 	// nil for this combination; we surface the operator's intent
 	// (the literal binding name) in the message so the remediation
-	// command is unambiguous.
+	// command is unambiguous. The recommended `profile add` form
+	// uses ONLY the documented noninteractive flags (--model,
+	// --base-url) per the public CLI contract.
 	p := cfg.ProfileFor("memory")
 	if p == nil {
 		check.Status = "WARN"
 		check.Message = fmt.Sprintf("profile %q not found", configuredName)
 		check.Details = []string{
-			fmt.Sprintf("Run 'mpm config profile add %s --provider <id> --model <id> --base-url <url>' to create it, or 'mpm config component set memory <other>' to rebind.", configuredName),
+			fmt.Sprintf("Run 'mpm config profile add %s --model <model> --base-url <url>' to create it, or 'mpm config component set memory <other>' to rebind.", configuredName),
 		}
 		return check
 	}
@@ -780,8 +790,12 @@ func (s *DoctorService) checkMemoryLLM() DoctorCheck {
 	// D. profile exists but lacks a material field. The message
 	// names the missing field(s) but NEVER includes the credential
 	// (api_key) or any value-bearing secret. The remediation
-	// command uses the safe canonical path (hidden prompt /
-	// --stdin) — never a positional argv secret.
+	// command uses the canonical `profile set` path — one
+	// command per missing field — and lists ONLY the fields
+	// that are actually missing (so we don't tell the operator
+	// to re-set fields that are already present). Placeholders
+	// (<id>, <model>, <url>) are abstract; values must come from
+	// the operator's environment, never from argv.
 	var missing []string
 	if p.Provider == "" {
 		missing = append(missing, "provider")
@@ -795,9 +809,12 @@ func (s *DoctorService) checkMemoryLLM() DoctorCheck {
 	if len(missing) > 0 {
 		check.Status = "WARN"
 		check.Message = fmt.Sprintf("profile %q incomplete (missing: %s)", p.Name, strings.Join(missing, ", "))
-		check.Details = []string{
-			fmt.Sprintf("Run 'mpm config profile set %s provider <id>' (and model, base_url) to complete the profile.", p.Name),
+		var details []string
+		for _, f := range missing {
+			details = append(details,
+				fmt.Sprintf("Run 'mpm config profile set %s %s <value>' to complete the profile.", p.Name, f))
 		}
+		check.Details = details
 		return check
 	}
 

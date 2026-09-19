@@ -180,7 +180,8 @@ func isOllamaLikeEndpoint(provider, baseURL string) bool {
 //   LLM provider    → synthesis / generative features
 //   Embedding model → semantic / vector retrieval
 //   Use:
-//     mpm config profile add <name> --provider custom
+//     mpm config profile add <name> --model <id> --base-url <url>
+//     mpm config profile set <name> provider custom
 //     mpm config component set embedding <name>
 //
 // The model argument is the rejected model name (verbatim).
@@ -199,7 +200,8 @@ func RejectEmbeddingOnlyLLM(model string) string {
 			"  LLM provider    → synthesis / generative features\n"+
 			"  Embedding model → semantic / vector retrieval\n\n"+
 			"Use:\n"+
-			"  mpm config profile add <name> --provider custom --model <id> --base-url <url>\n"+
+			"  mpm config profile add <name> --model <id> --base-url <url>\n"+
+			"  mpm config profile set <name> provider custom\n"+
 			"  mpm config component set embedding <name>",
 		model,
 	)

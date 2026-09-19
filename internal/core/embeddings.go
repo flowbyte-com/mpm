@@ -6,9 +6,11 @@
 // absent. The reserved sentinel "disabled" opts out cleanly.
 //
 // There is no runtime network probing. Manual configuration via
-// `mpm config profile add <name> --provider custom ...` is the
-// canonical public surface; the previously-documented diagnostic
-// probe path has been retired from the public CLI.
+// `mpm config profile add <name> --model <id> --base-url <url>`
+// (followed by `mpm config profile set <name> provider <id>` if
+// the operator wants a branded provider id) is the canonical
+// public surface; the previously-documented diagnostic probe
+// path has been retired from the public CLI.
 //
 // See docs/superpowers/specs/2026-09-03-mpm-embedding-provider-design.md
 // for the full design.
@@ -590,7 +592,8 @@ func ResetEmbedConfigForTest() {
 //   4. neither → NullProvider
 //
 // No network probing at any step. Operators configure manually
-// via `mpm config profile add <name> --provider custom ...` and
+// via `mpm config profile add <name> --model <id> --base-url <url>`,
+// then `mpm config profile set <name> provider <id>` and
 // `mpm config component set embedding <name>`.
 func DefaultEmbeddingConfig() *EmbeddingConfig {
 	if testEmbedConfig != nil {

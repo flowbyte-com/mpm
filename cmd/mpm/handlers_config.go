@@ -187,7 +187,8 @@ func handleDetectEmbeddingRemoved(rest []string) int {
 	fmt.Println("Embedding configuration is now manual via the Custom protocol picker.")
 	fmt.Println("Run `mpm config` for the interactive wizard,")
 	fmt.Println("or:")
-	fmt.Println("  mpm config profile add embedding --provider custom --model <id> --base-url <url>")
+	fmt.Println("  mpm config profile add embedding --model <id> --base-url <url>")
+	fmt.Println("  mpm config profile set embedding provider custom")
 	fmt.Println("  mpm config component set embedding embedding")
 	return 1
 }

@@ -129,7 +129,7 @@ func (c *DetectEmbeddingCmd) Run() int {
 
 	if len(report.candidates) == 0 {
 		fmt.Println("No embedding-capable endpoint detected.")
-		fmt.Println("Configure one explicitly with `mpm config profile add <name> --provider openai-compatible --model <model> --base-url <url>` and `mpm config component set embedding <name>`.")
+		fmt.Println("Configure one explicitly with `mpm config profile add <name> --model <model> --base-url <url>`, then `mpm config profile set <name> provider <id>` and `mpm config component set embedding <name>`.")
 		fmt.Println()
 		fmt.Println("No configuration has been changed.")
 		return 0
@@ -220,9 +220,9 @@ type probeResult struct {
 // viable embedding candidates — one per (Source, Model) pair —
 // sorted by (Source, Model) so the recommendation is reproducible.
 type detectReport struct {
-	ollama      *probeResult
+	ollama       *probeResult
 	openaiCompat *probeResult
-	candidates  []embeddingCandidate
+	candidates   []embeddingCandidate
 }
 
 // detectEmbeddingCandidates runs the discovery probes. Each
@@ -422,6 +422,7 @@ func probeOpenAICompat(base string) *probeResult {
 	// fabricate a recommendation.
 	return r
 }
+
 // 2026-09-14 final-simplification: probeOpenRouter and
 // openRouterCatalogForView are removed. Live /api/v1/models
 // discovery existed solely to populate the public OpenRouter
@@ -429,4 +430,3 @@ func probeOpenAICompat(base string) *probeResult {
 // for OpenRouter still resolve by provider ID via the
 // registry; runtime wire inference keys off the base URL
 // substring the same way.
-
