@@ -28,11 +28,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/flowbyte-com/mpm-core/config"
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm/internal/scheduler"
 )
@@ -51,7 +54,20 @@ func NewDoctorService(dm *mpminternal.DatabaseManager) *DoctorService {
 	return &DoctorService{dm: dm}
 }
 
-// Check runs every per-subsystem check and aggregates the verdict.
+// Check runs every per-subsystem check and assembles the base
+// DoctorReport. The base report is tallied before returning so
+// callers that only inspect the base checks (e.g. tests) see
+// populated counters. The handler appends probe-derived rows
+// (Embedding / Critic) AFTER Check returns and then calls
+// Tally(report) again so the count reflects every row the
+// operator will see in the rendered output.
+//
+// Tally is idempotent — the second call in handleDoctor
+// overwrites the first with the full picture. The structural
+// invariant is "every visible row is counted exactly once";
+// when to call Tally is a layer-of-concern choice, not a
+// correctness choice.
+//
 // Returns (*DoctorReport, nil) on partial degradation. Returns
 // (nil, error) only when the database is completely unreachable.
 func (s *DoctorService) Check() (*DoctorReport, error) {
@@ -70,16 +86,48 @@ func (s *DoctorService) Check() (*DoctorReport, error) {
 	report.Checks = append(report.Checks, s.checkScheduler())
 	report.Checks = append(report.Checks, s.checkWakeBacklog())
 	report.Checks = append(report.Checks, s.checkReviewBacklog())
+	report.Checks = append(report.Checks, s.checkMemoryLLM())
 
-	// Tally.
-	for _, c := range report.Checks {
+	// Tally the base checks so callers that only inspect this
+	// report see populated counters. handleDoctor re-tallies
+	// after appending probe rows; idempotency keeps both safe.
+	report.Tally()
+	_ = startTime // reserved for per-check timing in future waves
+
+	return report, nil
+}
+
+// Tally walks report.Checks and updates the summary counters
+// (Passed / Warnings / Failed / Informational). The handler MUST
+// call this AFTER every row has been appended — including probe-
+// derived rows, which the base Check() does not produce.
+//
+// Invariant: Tally is the single source of truth for the
+// summary line. Every row with a non-empty Status participates
+// exactly once; INFO rows increment Informational (not Warnings)
+// so an absent optional feature cannot make the substrate
+// appear unhealthy.
+//
+// 2026-09-19 release-pass: previously the tally ran inside
+// Check() BEFORE the probe layer appended its rows, producing
+// a summary that visibly undercounted the operator's view
+// (e.g. "5 passed" when seven ✓ rows were on screen). The
+// tally is now deferred so it sees exactly what the renderer
+// renders.
+func (r *DoctorReport) Tally() {
+	r.Passed = 0
+	r.Warnings = 0
+	r.Failed = 0
+	r.Informational = 0
+	r.TotalChecks = len(r.Checks)
+	for _, c := range r.Checks {
 		switch c.Status {
 		case "PASS":
-			report.Passed++
+			r.Passed++
 		case "WARN":
-			report.Warnings++
+			r.Warnings++
 		case "FAIL":
-			report.Failed++
+			r.Failed++
 		case "INFO":
 			// 2026-09-14 release-pass: informational checks do
 			// NOT increment warning or pass counts. The neutral
@@ -87,13 +135,9 @@ func (s *DoctorService) Check() (*DoctorReport, error) {
 			// but the overall summary excludes INFO so absence
 			// of an optional feature cannot make the substrate
 			// appear unhealthy.
-			report.Informational++
+			r.Informational++
 		}
 	}
-	report.TotalChecks = len(report.Checks)
-	_ = startTime // reserved for per-check timing in future waves
-
-	return report, nil
 }
 
 // checkDatabase inspects integrity + busy_retries via HealthCheck.
@@ -615,6 +659,157 @@ func (s *DoctorService) checkReviewBacklog() DoctorCheck {
 	check.Status = "WARN"
 	check.Message = fmt.Sprintf("%d memories due for spaced review (>5 considered backlog)", n)
 	check.Details = []string{"Run 'mpm ops review --stale' to clear the backlog."}
+	return check
+}
+
+// checkMemoryLLM inspects the canonical generative profile binding
+// for memory operations (synthesis, planning, summarising). This is
+// the primary/general LLM row Doctor surfaces; the runtime resolves
+// it via cfg.ProfileFor("memory") (see cmd/mpm/main.go:resolveDashboardLLM
+// and internal/core/synth/client.go:NewSynthClient). Distinct from the
+// Critic slot (which is review-only) and the Embedding slot (which is
+// retrieval-only).
+//
+// Memory LLM is classified as REQUIRED for normal LLM-backed MPM work:
+// absence surfaces as WARN (not INFO) so operators see it on the
+// Doctor trust-signal flagship. This asymmetry vs Embedding
+// (INFO when absent) is intentional and matches the runtime contract:
+// synthesis is required for memory consolidation; embedding is a
+// retrieval-augmentation feature the substrate degrades gracefully
+// without.
+//
+// Verdict matrix:
+//
+//	A. mpm_config.json absent (fresh install / test env) → INFO
+//	B. mpm_config.json unreadable                       → WARN
+//	C. no binding (Components["memory"] empty)           → WARN
+//	D. binding == "disabled" sentinel                    → INFO
+//	E. binding points at a missing profile name         → WARN
+//	   (and no Profiles["default"] fallback)
+//	F. profile exists but required field missing        → WARN
+//	   (provider / model / base_url — credential
+//	   state is NEVER included in the message)
+//	G. profile bound and structurally complete         → PASS
+//
+// The "config absent" branch (A) is INFO rather than WARN because
+// it matches the dashboard's resolveDashboardLLM behaviour and
+// avoids spurious warnings in test scenarios that don't write a
+// mpm_config.json. A real operator with a configured install will
+// always have the file present, so the WARN surface there is
+// accurate. The asymmetry vs Embedding (also INFO when absent) is
+// consistent: when the substrate has no configured providers at
+// all, the trust-signal flagship should not light up.
+//
+// Actual endpoint reachability is reported separately by the probe
+// layer (Critic row — when the profile fingerprint dedupes critic
+// and memory into a single network probe). This check deliberately
+// performs no IO; it shares the same fingerprint with Critic, so a
+// second probe would duplicate network traffic for the same target.
+func (s *DoctorService) checkMemoryLLM() DoctorCheck {
+	check := DoctorCheck{Name: "Memory LLM"}
+
+	// A. Distinguish "config file missing" from "config exists
+	// but Components[memory] is unset". config.LoadConfig hides
+	// the not-exist path behind an empty-defaults return; we
+	// stat directly so the operator-facing verdict can be
+	// honest about whether a config file is present at all.
+	if _, statErr := os.Stat(config.ConfigPath()); errors.Is(statErr, fs.ErrNotExist) {
+		check.Status = "INFO"
+		check.Message = "no config file present"
+		check.Details = []string{
+			"Run 'mpm config' to set up a generative profile, or `mpm doctor` from a configured workspace.",
+		}
+		return check
+	}
+
+	cfg, err := config.LoadConfig()
+	if err != nil || cfg == nil {
+		// B. Config unreadable — we cannot diagnose the binding.
+		// Fail safe as WARN rather than silently dropping the row,
+		// so a config-file permission error surfaces on Doctor.
+		check.Status = "WARN"
+		check.Message = "could not read mpm_config.json"
+		check.Details = []string{
+			"Run 'mpm config show' to inspect the config or 'mpm doctor' as the config-owning user.",
+		}
+		return check
+	}
+
+	// Raw operator-set binding name. Empty string means "not bound";
+	// the ProfileFor fallback chain is treated as a config-resolution
+	// courtesy, not an explicit binding, so Doctor surfaces it.
+	configuredName := cfg.DefaultComponentProfile("memory")
+
+	// A. binding missing — Components["memory"] is unset.
+	if configuredName == "" {
+		check.Status = "WARN"
+		check.Message = "no profile configured"
+		check.Details = []string{
+			"Run 'mpm config component set memory <profile>' to bind a generative profile.",
+			"Use 'mpm config profile add <name> --provider <id> --model <id> --base-url <url>' to create one first.",
+		}
+		return check
+	}
+
+	// B. binding == "disabled" sentinel — only meaningful for the
+	// embedding component (per config.ResolveProfile); for memory
+	// we surface INFO with the same wording the embedding check
+	// uses for its disabled state, so operators see one consistent
+	// vocabulary.
+	if configuredName == "disabled" {
+		check.Status = "INFO"
+		check.Message = "intentionally disabled"
+		return check
+	}
+
+	// C. binding points at a profile that does NOT exist AND the
+	// default-profile fallback is also missing. ProfileFor returns
+	// nil for this combination; we surface the operator's intent
+	// (the literal binding name) in the message so the remediation
+	// command is unambiguous.
+	p := cfg.ProfileFor("memory")
+	if p == nil {
+		check.Status = "WARN"
+		check.Message = fmt.Sprintf("profile %q not found", configuredName)
+		check.Details = []string{
+			fmt.Sprintf("Run 'mpm config profile add %s --provider <id> --model <id> --base-url <url>' to create it, or 'mpm config component set memory <other>' to rebind.", configuredName),
+		}
+		return check
+	}
+
+	// D. profile exists but lacks a material field. The message
+	// names the missing field(s) but NEVER includes the credential
+	// (api_key) or any value-bearing secret. The remediation
+	// command uses the safe canonical path (hidden prompt /
+	// --stdin) — never a positional argv secret.
+	var missing []string
+	if p.Provider == "" {
+		missing = append(missing, "provider")
+	}
+	if p.Model == "" {
+		missing = append(missing, "model")
+	}
+	if p.BaseURL == "" {
+		missing = append(missing, "base_url")
+	}
+	if len(missing) > 0 {
+		check.Status = "WARN"
+		check.Message = fmt.Sprintf("profile %q incomplete (missing: %s)", p.Name, strings.Join(missing, ", "))
+		check.Details = []string{
+			fmt.Sprintf("Run 'mpm config profile set %s provider <id>' (and model, base_url) to complete the profile.", p.Name),
+		}
+		return check
+	}
+
+	// E. profile bound and structurally complete — PASS.
+	// Message uses the canonical `<model> · <Provider>` form
+	// (formatProviderModel helper) so it matches the Embedding
+	// model row. Network reachability is intentionally NOT
+	// asserted here — that's the probe layer's job (Critic
+	// row), which shares this profile's fingerprint and
+	// therefore performs one IO, not two.
+	check.Status = "PASS"
+	check.Message = formatProviderModel(p.Provider + ":" + p.Model)
 	return check
 }
 

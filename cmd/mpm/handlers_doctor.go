@@ -81,6 +81,12 @@ func handleDoctor(args []string) int {
 		}
 	}
 
+	// Tally AFTER every row (base + probe) is appended so the
+	// summary line reflects exactly what the renderer will show.
+	// See service_doctor.go:DoctorReport.Tally for the canonical
+	// counting rules.
+	report.Tally()
+
 	if wantJSON {
 		// JSON output — never routes through the human renderer.
 		// Use os.Stdout directly so the contract holds even when
