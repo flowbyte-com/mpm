@@ -68,6 +68,17 @@ openclaw plugins enable mpm-auto-mode-persona-openclaw    # re-enable
 openclaw plugins uninstall mpm-auto-mode-persona-openclaw # remove entirely
 ```
 
+## Uninstall
+
+This plugin is part of the host-level MPM OpenClaw integration. To
+remove BOTH this plugin and `mpm-memory-openclaw` atomically, use the
+host-level uninstaller at
+`agent_installation/uninstall-openclaw.sh`. Do NOT just
+`openclaw plugins uninstall` this id by hand — the plugin entries
+and any sibling plugin state are tied together and a partial
+uninstall leaves a broken state. The host-level uninstaller is
+idempotent and refuses to seize unrelated plugin installations.
+
 ## Post-alpha cleanup
 
 - ~~Module-level `sessionReminders` Map → proper session-context plumbing~~ **Closed 2026-08-05.** Consume-and-clear in the `agent:bootstrap` hook bounds the Map at "concurrently processing turns" (typically ≤1 per session). Leak + stale-injection both closed. Proper per-session plumbing is still architecturally cleaner if/when sub-agents start sharing the cache.

@@ -313,22 +313,50 @@ the mpm-memory-openclaw README for the failure mode this prevents.
 
 ### Uninstall
 
-### Uninstall
-
-The three surfaces uninstall independently:
+The OpenClaw MPM integration uninstalls as a unit via the host-level
+uninstaller:
 
 ```bash
-# MCP wiring — edit OpenClaw runtime config
-openclaw config set mcp.servers.mpm.command ''              # or remove the line
-openclaw gateway restart
+# From the agent_installation directory:
+./uninstall-openclaw.sh --dry-run   # show the plan first
+./uninstall-openclaw.sh --yes       # confirm and execute
+```
 
+What this removes:
+- Both canonical plugin registrations (`mpm-memory-openclaw`,
+  `mpm-auto-mode-persona-openclaw`)
+- Legacy plugin ids (`openclaw-mpm-memory`,
+  `openclaw-mpm-auto-mode-persona`) when present and clearly ours
+- Per-plugin config under `plugins.entries.<id>` (including hook
+  flags)
+- Plugin load paths under `plugins.load.paths`
+- Memory slot reset (only when the slot pointed at one of our
+  plugins)
+
+What this deliberately preserves:
+- OpenClaw itself (binary, gateway service, workspace, logs)
+- The MPM substrate (`~/.mpm`, `~/.local/bin/mpm`, mpm scheduler
+  state, wakes, memories, theories)
+- Unrelated OpenClaw plugin registrations
+- Unrelated `openclaw.json` config keys
+- Shell startup files, user workspace data
+
+The uninstaller is idempotent and refuses to seize plugin
+registrations whose recorded `rootDir` does not match the canonical
+adapter directory. Re-running on a clean host is a no-op.
+
+Manual equivalent (only if you cannot run the host-level script):
+
+```bash
 # Memory slot plugin
 openclaw plugins uninstall mpm-memory-openclaw
 openclaw config set plugins.slots.memory memory-core          # restore default
 
 # Auto-route plugin
 openclaw plugins uninstall mpm-auto-mode-persona-openclaw
-openclaw gateway restart
+openclaw plugins uninstall openclaw-mpm-memory               # legacy, if present
+openclaw plugins uninstall openclaw-mpm-auto-mode-persona    # legacy, if present
+openclaw gateway restart --safe
 ```
 
 ### OpenClaw-specific recovery

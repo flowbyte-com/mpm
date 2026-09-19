@@ -160,6 +160,21 @@ One-line entry points (full procedure in INSTALL.md):
 | Hermes | (config already in `~/.hermes/config.yaml`; run `mpm-hermes/scripts/install_hermes_instructions.py` for the behavioral section) |
 | Pi | add `~/.mpm/agent_installation/mpm-pi` to `~/.pi/agent/settings.json` `extensions` |
 
+To remove the OpenClaw MPM integration cleanly (BOTH canonical
+plugins + legacy ids + memory slot — without touching the MPM
+substrate or OpenClaw itself):
+
+```bash
+./uninstall-openclaw.sh --dry-run   # show the plan first
+./uninstall-openclaw.sh --yes       # confirm and execute
+```
+
+The uninstaller is idempotent and refuses to seize plugin
+registrations whose recorded source path does not match the canonical
+adapter directory. Re-running on a clean host is a no-op. The
+substrate (`~/.mpm`, `~/.local/bin/mpm`) and the gateway service are
+preserved.
+
 ## Documentation map
 
 | Document | What it covers |

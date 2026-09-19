@@ -89,6 +89,18 @@ OpenClaw-specific setup in the correct order:
 
 9. Verify (openclaw plugins inspect + plugins list).
 
+### Uninstall
+
+The adapter is part of the host-level MPM OpenClaw integration. To
+remove BOTH this plugin and `mpm-auto-mode-persona-openclaw`
+atomically, use the host-level uninstaller at
+`agent_installation/uninstall-openclaw.sh` (see the README at
+`agent_installation/README.md`). Do NOT just `openclaw plugins
+uninstall` this id by hand — the plugin entries, hook flags, and
+memory slot are tied together and a partial uninstall leaves a
+broken state. The host-level uninstaller is idempotent and refuses
+to seize unrelated plugin installations.
+
 ### Re-running (idempotency)
 
 Re-running `./install.sh` on a host where the plugin is already
