@@ -18,6 +18,14 @@ const (
 	ActorKindAgent  = "agent"  // host agent framework invocation: openclaw, pi, opencode, claude-code, hermes, mcp
 	ActorKindDrill  = "drill"  // synthetic harness-driven invocation (test fixtures)
 	ActorKindSystem = "system" // substrate-internal subsystem (cascade, gc, scheduler) — rarely via tool_invocations
+	// ActorKindUnknown: the framework is neither a known agent framework
+	// nor the canonical CLI default (empty/mpm-cli), AND the raw
+	// actor_kind cannot be trusted as human (because an unknown
+	// framework could itself be a shim around an agent we have not
+	// catalogued). Honest representation of unresolved provenance —
+	// surfaced in the default semantic feed so a future agent doesn't
+	// silently mis-attribute a foreign-framework write.
+	ActorKindUnknown = "unknown"
 )
 
 // Known host-agent frameworks. These are the canonical wire strings
@@ -47,9 +55,15 @@ var knownAgentFrameworks = map[string]struct{}{
 //     pi/opencode/claude-code/hermes) always classify as agent,
 //     because the framework identity is more reliable than the
 //     raw actor_kind value (which had a known historical bug).
-//  3. raw actor_kind for mpm-cli / empty / unknown framework
-//     (the operator CLI or unrecognized transport — accept the
-//     raw value as-is, then fall back to human).
+//  3. canonical CLI path — empty / "mpm-cli" framework trusts
+//     the raw value when explicit, falls back to human. This is
+//     the audit_hook default: mpm-cli is operator CLI, never an
+//     agent.
+//  4. unknown framework — anything outside the known set AND not
+//     the canonical CLI path. The framework is foreign or
+//     unrecognized, so the raw actor_kind is NOT trustworthy (an
+//     agent shim could write raw=human to impersonate an operator).
+//     Honest classification: "unknown".
 //
 // The function is PURE — no DB access, no I/O. Callers must supply
 // raw values from the tool_invocations row.
@@ -68,19 +82,30 @@ func EffectiveActorKind(rawActorKind, frameworkName string) string {
 	//    path: rows like (raw=human, framework=openclaw) that
 	//    were written by the pre-fix audit_hook normalize to
 	//    agent here. No agent framework legitimately identifies
-	//    as framework_name="mpm-cli", so mpm-cli always means
-	//    human (operator CLI).
+	//    as framework_name="mpm-cli".
 	if _, ok := knownAgentFrameworks[frameworkName]; ok {
 		return ActorKindAgent
 	}
 
-	// 3. mpm-cli / empty / unknown framework — accept explicit
-	//    human/agent from the raw value, then default to human.
-	if rawActorKind == ActorKindAgent || rawActorKind == ActorKindHuman {
-		return rawActorKind
+	// 3. Canonical CLI path. Empty framework OR explicit
+	//    framework_name="mpm-cli" identifies the operator CLI;
+	//    raw human/agent is trusted, anything else defaults to
+	//    human. This preserves the audit_hook default for the
+	//    mpm binary invoked from a shell.
+	if frameworkName == "" || frameworkName == "mpm-cli" {
+		if rawActorKind == ActorKindAgent || rawActorKind == ActorKindHuman {
+			return rawActorKind
+		}
+		return ActorKindHuman
 	}
 
-	return ActorKindHuman
+	// 4. Unknown framework. We have no provenance evidence for
+	//    the framework AND cannot trust the raw actor_kind (a
+	//    foreign-framework shim could write raw=human to look
+	//    human). Honest classification is "unknown" — surfaced
+	//    in the default semantic feed so it isn't silently
+	//    relabeled as a human operator.
+	return ActorKindUnknown
 }
 
 // IsAgentFramework returns true if frameworkName is one of the
@@ -281,4 +306,33 @@ var toolClassMap = map[string]ActionClass{
 // durable write that belongs in the default recent_activity feed.
 func IsMutating(tool, action string) bool {
 	return ClassifyAction(tool, action) == ActionClassMutating
+}
+
+// ActionClassMapHas reports whether an exact (tool, action) entry
+// exists in the explicit actionClassMap. Exported so the tools
+// package's registry-completeness test can assert that every
+// registered public pair has an intentional classification without
+// having to redefine the map.
+func ActionClassMapHas(key string) (ActionClass, bool) {
+	v, ok := actionClassMap[key]
+	return v, ok
+}
+
+// ToolClassMapHas reports whether a tool-level default exists in
+// toolClassMap. Exported for the same reason as ActionClassMapHas.
+func ToolClassMapHas(tool string) (ActionClass, bool) {
+	v, ok := toolClassMap[tool]
+	return v, ok
+}
+
+// KnownAgentFrameworkNames returns the sorted list of canonical
+// host-agent framework names. Exported for tests and for
+// documentation that needs to enumerate the known set without
+// duplicating the list.
+func KnownAgentFrameworkNames() []string {
+	out := make([]string, 0, len(knownAgentFrameworks))
+	for k := range knownAgentFrameworks {
+		out = append(out, k)
+	}
+	return out
 }

@@ -221,6 +221,12 @@ type CoreDB interface {
 	// classifiers). Read-only. See activity_classifier.go and
 	// recent_activity.go for the contract.
 	RecentActivity(p RecentActivityQueryParams) ([]RecentActivityEvent, error)
+	// RecentActivityWithMeta is the canonical implementation. It
+	// returns scan metadata (Truncated, HistoryExhausted, ScannedRows,
+	// ScanLimit) alongside the events so callers can distinguish a
+	// true short history from a scan-budget-truncated result. See
+	// recent_activity.go for the bounded-pagination contract.
+	RecentActivityWithMeta(p RecentActivityQueryParams) (RecentActivityResult, error)
 
 	// ─── Ingest ──────────────────────────────────────────────────────
 	IngestOpenClaw(sourcePath string, batchSize int, importBatch string, dryRun bool) (*IngestStats, error)

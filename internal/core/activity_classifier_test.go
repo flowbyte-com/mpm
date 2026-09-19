@@ -52,11 +52,16 @@ func TestEffectiveActorKind_CanonicalFrameworks(t *testing.T) {
 		// the mpm-cli path (no known-agent-framework match).
 		{"mpm-cli with explicit agent", "agent", "mpm-cli", ActorKindAgent},
 
-		// Unknown framework: conservative human fallback.
-		{"unknown framework empty raw", "", "custom-x", ActorKindHuman},
-		{"unknown framework explicit human", "human", "custom-x", ActorKindHuman},
+		// Unknown framework: cannot reliably classify as human. A
+		// foreign-framework shim could write raw=human to impersonate
+		// an operator. Honest classification is "unknown", surfaced
+		// in the default semantic feed so the activity is not
+		// silently mis-attributed.
+		{"unknown framework empty raw", "", "custom-x", ActorKindUnknown},
+		{"unknown framework explicit human", "human", "custom-x", ActorKindUnknown},
+		{"unknown framework explicit agent", "agent", "custom-x", ActorKindUnknown},
 
-		// Empty everything: human fallback.
+		// Empty everything: human fallback (CLI default).
 		{"empty everything", "", "", ActorKindHuman},
 	}
 	for _, c := range cases {

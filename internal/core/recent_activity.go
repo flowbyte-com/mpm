@@ -4,7 +4,10 @@
 //   - reads from tool_invocations (the only persistent tool-call audit);
 //   - applies EffectiveActorKind for historical-normalization correctness;
 //   - applies ClassifyAction to include only semantic mutating actions;
-//   - enriches with domain tables where deterministic linkage exists.
+//   - enriches with domain tables where deterministic linkage exists;
+//   - uses bounded pagination so a sparse semantic feed can always
+//     surface the newest matching events regardless of intervening
+//     read-only traffic.
 //
 // It is read-only. No DB writes except for its own tool_invocations
 // row (recorded by the audit hook, classified as read_only so it
@@ -46,11 +49,21 @@ type RecentActivityEvent struct {
 type RecentActivityQueryParams struct {
 	Limit         int    // default 20, hard max 100
 	Since         int64  // unix seconds; 0 = no lower bound
-	ActorKind     string // filter by effective actor_kind (human/agent/all)
+	ActorKind     string // filter by effective actor_kind (human/agent/all/unknown)
 	FrameworkName string // exact match
 	SessionID     string // exact match
-	ArtifactType  string // exact match on category
-	IncludeSystem bool   // if true, also include maintenance/diagnostic actions
+	ArtifactType  string // exact match on category (== tool_name)
+	// IncludeSystem is retained for legacy callers and is now a no-op:
+	// the substrate's tool_invocations does NOT comprehensively cover
+	// cascade-materializer / cascade-reconciler / scheduler-retention
+	// / GC / migration writes, so a parameter that promised "include
+	// all system activity" would be misleading. The accurate surface
+	// for system audit is mpm_system (query_audit_log, list_clusters)
+	// — recent_activity now answers ONLY "what semantic durable
+	// activity happened", which is what agents need for continuity.
+	// The field is kept as a struct member so callers that pass it
+	// silently compile and run; the handler logs a deprecation note.
+	IncludeSystem bool
 }
 
 // RecentActivityDefaults holds the canonical default/hard limits.
@@ -59,13 +72,83 @@ const (
 	RecentActivityHardMaxLimit = 100
 )
 
+// Bounded-pagination constants for RecentActivityWithMeta.
+//
+// recentActivityPageSize: rows visited per iteration. Sized so a single
+// page is well under the SQLite practical step cost while still
+// amortising query-plan overhead.
+//
+// recentActivityScanCap: hard upper bound on raw rows visited per
+// request. Even with 0.1% semantic density this surfaces ≥2 events
+// per typical limit=100 query, and the worst case is honestly
+// reported via Truncated=true.
+//
+// recentActivityScanMultiplier: per-request scan budget scales with
+// the requested limit so small queries stay cheap and large queries
+// still find their target.
+const (
+	recentActivityPageSize         = 200
+	recentActivityScanCap          = 2000
+	recentActivityScanMultiplier    = 20
+)
+
+// RecentActivityResult extends RecentActivity with scan metadata so
+// callers can distinguish a true short history from a truncated scan.
+//
+//   - Events           : the matching semantic events, newest-first.
+//   - HistoryExhausted : true when the scan walked every row in the
+//                        bounded WHERE filter and stopped because the
+//                        table ran out (not because a ceiling hit).
+//   - Truncated        : true when the internal scan budget was hit
+//                        before the requested number of matching
+//                        events was collected; more matching events
+//                        MAY exist further back in history.
+//   - ScannedRows      : total raw tool_invocations rows visited
+//                        across all pages.
+//   - ScanLimit        : the safety ceiling applied (raw rows).
+//
+// Count is ALWAYS len(Events) — the wire envelope derives the count
+// from the slice length to prevent the count/length drift class.
+type RecentActivityResult struct {
+	Events           []RecentActivityEvent `json:"events"`
+	HistoryExhausted bool                  `json:"history_exhausted"`
+	Truncated        bool                  `json:"truncated"`
+	ScannedRows      int                   `json:"scanned_rows"`
+	ScanLimit        int                   `json:"scan_limit"`
+}
+
 // RecentActivity returns the bounded recent semantic activity
 // stream for the calling agent. Read-only: never mutates DB state
 // other than its own tool_invocations row (which is excluded by
-// ClassifyAction).
+// ClassifyAction). Returns just the events slice; callers needing
+// scan metadata use RecentActivityWithMeta.
 func (dm *DatabaseManager) RecentActivity(p RecentActivityQueryParams) ([]RecentActivityEvent, error) {
+	res, err := dm.RecentActivityWithMeta(p)
+	if err != nil {
+		return nil, err
+	}
+	return res.Events, nil
+}
+
+// RecentActivityWithMeta is the canonical implementation. It walks
+// tool_invocations newest-first in fixed-size pages, applying the
+// SQL-level filters that are safe to push down (result_status,
+// since, framework_name, session_id, tool_name) and post-classifying
+// each row for action class and effective actor. The scan terminates
+// when one of:
+//
+//   - the requested number of matching events is collected,
+//   - the table runs out of rows (HistoryExhausted=true),
+//   - the safety ceiling is reached (Truncated=true).
+//
+// The scan budget is bounded by recentActivityScanCap; a request
+// asking for limit=N can scan at most recentActivityScanCap raw
+// rows. This means a sparse semantic feed can always find the
+// newest N matching events (subject to the absolute scan cap), but
+// also that extremely sparse histories honestly report Truncated.
+func (dm *DatabaseManager) RecentActivityWithMeta(p RecentActivityQueryParams) (RecentActivityResult, error) {
 	if dm == nil || dm.db == nil {
-		return nil, fmt.Errorf("RecentActivity: db not initialized")
+		return RecentActivityResult{}, fmt.Errorf("RecentActivity: db not initialized")
 	}
 
 	// Bound the limit.
@@ -77,8 +160,21 @@ func (dm *DatabaseManager) RecentActivity(p RecentActivityQueryParams) ([]Recent
 		limit = RecentActivityHardMaxLimit
 	}
 
-	// Build WHERE clause incrementally.
-	where := []string{"1=1"}
+	// Compute scan budget: scale with limit but bound absolutely.
+	scanLimit := limit * recentActivityScanMultiplier
+	if scanLimit < recentActivityPageSize {
+		scanLimit = recentActivityPageSize
+	}
+	if scanLimit > recentActivityScanCap {
+		scanLimit = recentActivityScanCap
+	}
+
+	// Build the SQL WHERE clause from push-down-safe filters only.
+	// result_status='success' is pushed so the scan does not waste
+	// time on failed invocations; classification/actor filters are
+	// computed post-row since they depend on map lookups, not raw
+	// column equality.
+	where := []string{"result_status = 'success'"}
 	args := []interface{}{}
 	if p.Since > 0 {
 		where = append(where, "started_at >= ?")
@@ -92,35 +188,96 @@ func (dm *DatabaseManager) RecentActivity(p RecentActivityQueryParams) ([]Recent
 		where = append(where, "session_id = ?")
 		args = append(args, p.SessionID)
 	}
-
-	// Fetch a generous raw candidate pool: tool_invocations may
-	// contain reads that we filter post-classification. We over-fetch
-	// by a bounded factor so we still have mutating rows after the
-	// filter, then trim to limit. Hard cap at 4x to keep the read
-	// bounded regardless of caller-supplied limit.
-	fetchCap := limit * 4
-	if fetchCap > RecentActivityHardMaxLimit*4 {
-		fetchCap = RecentActivityHardMaxLimit * 4
+	if p.ArtifactType != "" {
+		where = append(where, "tool_name = ?")
+		args = append(args, p.ArtifactType)
 	}
 
-	q := `
+	baseQuery := `
 		SELECT id, session_id, tool_name, action, invocation_id,
 		       actor_kind, framework_name, payload_hash, result_status,
 		       started_at, completed_at, duration_ms, error_message
 		FROM tool_invocations
 		WHERE ` + joinWhere(where) + `
-		ORDER BY completed_at DESC, id DESC
-		LIMIT ?`
-	args = append(args, fetchCap)
-
-	rows, err := dm.db.Query(q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("RecentActivity query: %w", err)
-	}
-	defer rows.Close()
+		ORDER BY completed_at DESC, id DESC`
 
 	out := make([]RecentActivityEvent, 0, limit)
+	scanned := 0
+	offset := 0
+	truncated := false
+	historyExhausted := false
+
+	// Bounded pagination: newest-first walk. Terminates when the
+	// matching-event quota is filled, the table runs out, or the
+	// scan budget is hit (latter two are reported honestly via
+	// the result flags).
+	for {
+		pageArgs := append(append([]interface{}{}, args...), recentActivityPageSize, offset)
+		rows, err := dm.db.Query(baseQuery+` LIMIT ? OFFSET ?`, pageArgs...)
+		if err != nil {
+			return RecentActivityResult{}, fmt.Errorf("RecentActivity query: %w", err)
+		}
+
+		pageEvents, pageCount, scanErr := dm.filterActivityPage(rows, p)
+		rows.Close()
+		if scanErr != nil {
+			return RecentActivityResult{}, scanErr
+		}
+		scanned += pageCount
+		out = append(out, pageEvents...)
+
+		if len(out) >= limit {
+			// Trim to exact limit; may have collected more from the
+			// last page than was needed.
+			if len(out) > limit {
+				out = out[:limit]
+			}
+			break
+		}
+
+		if pageCount < recentActivityPageSize {
+			// Page was short — table exhausted for this WHERE.
+			historyExhausted = true
+			break
+		}
+
+		if scanned >= scanLimit {
+			truncated = true
+			break
+		}
+
+		offset += pageCount
+	}
+
+	return RecentActivityResult{
+		Events:           out,
+		HistoryExhausted: historyExhausted,
+		Truncated:        truncated,
+		ScannedRows:      scanned,
+		ScanLimit:        scanLimit,
+	}, nil
+}
+
+// filterActivityPage scans a single page of tool_invocations rows,
+// applies the per-row classification + actor filters, and returns
+// the matching events plus the raw row count actually read.
+//
+// The returned slice is bounded by the requested limit so a single
+// oversized page does not blow past the cap before the caller can
+// terminate the outer pagination loop.
+func (dm *DatabaseManager) filterActivityPage(rows *sql.Rows, p RecentActivityQueryParams) ([]RecentActivityEvent, int, error) {
+	limit := p.Limit
+	if limit <= 0 {
+		limit = RecentActivityDefaultLimit
+	}
+	if limit > RecentActivityHardMaxLimit {
+		limit = RecentActivityHardMaxLimit
+	}
+
+	out := make([]RecentActivityEvent, 0, recentActivityPageSize)
+	read := 0
 	for rows.Next() {
+		read++
 		var (
 			id, sessID, tool, act, invID, actKind, fwk, pHash, status, startedAt, completedAt string
 			dur                                                                                sql.NullInt64
@@ -129,57 +286,58 @@ func (dm *DatabaseManager) RecentActivity(p RecentActivityQueryParams) ([]Recent
 		if err := rows.Scan(&id, &sessID, &tool, &act, &invID,
 			&actKind, &fwk, &pHash, &status,
 			&startedAt, &completedAt, &dur, &errMsg); err != nil {
-			return nil, fmt.Errorf("RecentActivity scan: %w", err)
+			return nil, read, fmt.Errorf("RecentActivity scan: %w", err)
 		}
 
-		// 1. Filter failed invocations out of the default semantic
-		//    activity feed. A failed save is a non-event — no
-		//    semantic durable change happened. Callers wanting
-		//    failures can join tool_invocations directly.
+		// filterActivityPage relies on the SQL push-down of
+		// result_status='success', but defensive-check anyway in case
+		// a future caller reuses this helper without that filter.
 		if status == "error" {
 			continue
 		}
 
-		// 2. Classify the action.
+		// Classification filter. recent_activity is the factual
+		// semantic-activity surface: it answers "what semantic
+		// durable activity happened?" and excludes everything
+		// else by design — read_only queries, lifecycle delivery
+		// side effects (handoff/read, wakes/check, context/read_wake_context),
+		// diagnostic probes (mpm_system/health_check), and substrate
+		// maintenance (mpm_system/gc_run, mpm_system/compact).
+		//
+		// The legacy IncludeSystem switch is now a strict no-op:
+		// the substrate cannot truthfully provide "all system
+		// activity" coverage (cascade-materializer, scheduler
+		// retention, GC, migration writes do not all flow through
+		// tool_invocations). Agents wanting structured system audit
+		// should use mpm_system query_audit_log / list_clusters
+		// instead. The handler logs a deprecation row when a
+		// legacy caller passes IncludeSystem=true.
 		cls := ClassifyAction(tool, act)
-
-		// 3. Exclude by default: read_only, lifecycle delivery,
-		//    diagnostic, maintenance. include_system opts into
-		//    diagnostic + maintenance but never read_only.
-		switch cls {
-		case ActionClassMutating:
-			// keep
-		case ActionClassLifecycle, ActionClassDiagnostic, ActionClassMaintenance:
-			if !p.IncludeSystem {
-				continue
-			}
-		case ActionClassReadOnly:
-			continue
-		default:
+		if cls != ActionClassMutating {
 			continue
 		}
 
-		// 3. Effective actor classification (historical normalization).
+		// Effective actor classification.
 		effectiveKind := EffectiveActorKind(actKind, fwk)
 
-		// 4. Actor_kind filter (post-classification).
+		// Actor filter. Default (empty ActorKind) admits agent +
+		// human + unknown; system and drill are excluded because
+		// they are substrate bookkeeping, not agency-authored
+		// activity. Explicit ActorKind "all" admits every class.
 		if p.ActorKind != "" && p.ActorKind != "all" {
 			if p.ActorKind != effectiveKind {
 				continue
 			}
 		} else if p.ActorKind == "" {
-			// Default: agent + human only. System excluded.
-			if effectiveKind != ActorKindAgent && effectiveKind != ActorKindHuman {
+			switch effectiveKind {
+			case ActorKindAgent, ActorKindHuman, ActorKindUnknown:
+				// keep
+			default:
 				continue
 			}
 		}
 
-		// 5. ArtifactType filter (post-classification; == tool category).
-		if p.ArtifactType != "" && p.ArtifactType != tool {
-			continue
-		}
-
-		// 6. Build the event.
+		// Build the event.
 		ts, _ := parseUnixSec(completedAt)
 		ev := RecentActivityEvent{
 			ID:            id,
@@ -199,8 +357,8 @@ func (dm *DatabaseManager) RecentActivity(p RecentActivityQueryParams) ([]Recent
 			ev.Status = "error"
 		}
 
-		// 7. Deterministic enrichment: pull artifact id from the
-		//    per-tool tables where correlation is by invocation_id.
+		// Deterministic enrichment: pull artifact id from the
+		// per-tool tables where correlation is by invocation_id.
 		if artifactID, hint := dm.enrichActivityEvent(ev); artifactID != "" {
 			ev.ArtifactID = artifactID
 			ev.ArtifactType = tool
@@ -209,10 +367,11 @@ func (dm *DatabaseManager) RecentActivity(p RecentActivityQueryParams) ([]Recent
 
 		out = append(out, ev)
 		if len(out) >= limit {
+			// Caller may stop paginating; cap the page contribution.
 			break
 		}
 	}
-	return out, nil
+	return out, read, nil
 }
 
 // activitySummary produces a bounded, secret-safe semantic summary

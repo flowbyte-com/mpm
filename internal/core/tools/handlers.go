@@ -6382,11 +6382,27 @@ func handleMpmContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 // handleRecentActivity implements mpm_context action=recent_activity.
 // Read-only semantic activity surface: pulls from tool_invocations,
 // classifies via the canonical helpers (EffectiveActorKind,
-// ClassifyAction), enriches deterministically where linkage exists.
-// Default scope: agent + human mutating actions, newest-first,
+// ClassifyAction), enriches deterministically where linkage exists,
+// and uses bounded pagination so a sparse semantic feed can always
+// surface the newest matching events.
+//
+// Default scope: agent + human + unknown mutating actions, newest-first,
 // bounded by RecentActivityDefaultLimit (hard max
 // RecentActivityHardMaxLimit). Excludes read-only queries, handoff
 // delivery side effects, and system/diagnostic bookkeeping.
+//
+// Count is ALWAYS len(events) — derived from the slice so the count
+// invariant is enforced by construction. Scan metadata is surfaced
+// alongside the events so callers can distinguish a true short
+// history (history_exhausted=true) from a truncated scan (truncated=true
+// + scanned_rows/scan_limit reported).
+//
+// include_system is accepted as a no-op for back-compat. The substrate's
+// tool_invocations does NOT comprehensively cover cascade-materializer /
+// cascade-reconciler / scheduler-retention / GC / migration writes,
+// so the old promise of "include all system activity" was misleading.
+// Agents wanting structured system audit should use mpm_system
+// (query_audit_log, list_clusters) instead.
 func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	if dm == nil {
 		return nil, fmt.Errorf("recent_activity: dm is nil")
@@ -6424,6 +6440,9 @@ func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 	sessionID, _ := p["session_id"].(string)
 	artifactType, _ := p["artifact_type"].(string)
 
+	// include_system is now a no-op; we accept the parameter to
+	// keep legacy callers compiling but log a deprecation note so
+	// operators notice if a tool template still relies on it.
 	includeSystem := false
 	if v, present := p["include_system"]; present && v != nil {
 		switch b := v.(type) {
@@ -6432,9 +6451,17 @@ func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		default:
 			return nil, fmt.Errorf("recent_activity: include_system must be bool, got %T", v)
 		}
+		if includeSystem {
+			// Non-fatal deprecation note. The recent_activity feed
+			// is now system-activity-free by design (see tool
+			// description); use mpm_system for the audit surface.
+			if lgr := dm.SQLDB(); lgr != nil {
+				_, _ = lgr.Exec(`INSERT INTO system_audit_log(level, component, message) VALUES ('warn','recent_activity','include_system=true is deprecated; recent_activity excludes system activity by design. Use mpm_system query_audit_log for system audit.')`)
+			}
+		}
 	}
 
-	events, err := dm.RecentActivity(mpminternal.RecentActivityQueryParams{
+	res, err := dm.RecentActivityWithMeta(mpminternal.RecentActivityQueryParams{
 		Limit:         limit,
 		Since:         since,
 		ActorKind:     actorKind,
@@ -6448,15 +6475,20 @@ func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 	}
 
 	return map[string]interface{}{
-		"success":  true,
-		"action":   "recent_activity",
-		"events":   events,
-		"count":    len(events),
-		"limit":    limit,
+		"success":           true,
+		"action":            "recent_activity",
+		"events":            res.Events,
+		"count":             len(res.Events), // derived; enforces invariant
+		"limit":             limit,
+		"truncated":         res.Truncated,
+		"history_exhausted": res.HistoryExhausted,
+		"scanned_rows":      res.ScannedRows,
+		"scan_limit":        res.ScanLimit,
 		"defaults": map[string]interface{}{
-			"actor_scope":  "agent+human",
+			"actor_scope":  "agent+human+unknown",
 			"class_filter": "mutating",
 			"ordering":     "newest-first",
+			"note":         "system activity (drill/system/maintenance) is intentionally excluded — use mpm_system query_audit_log for audit surface",
 		},
 	}, nil
 }
