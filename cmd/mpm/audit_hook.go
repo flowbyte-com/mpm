@@ -77,10 +77,12 @@ func recordToolInvocation(
 	if frameworkName == "" {
 		frameworkName = "mpm-cli"
 	}
-	actorKind := auditActorHuman
-	if frameworkName == "mcp" {
-		actorKind = auditActorMCP
-	}
+	// Use the canonical EffectiveActorKind so the bug-fix
+	// (framework=openclaw → human) cannot reappear in a new
+	// audit-hook variant. Historical rows with the old broken
+	// classification are normalized at read time by the same
+	// helper in recent_activity.go.
+	actorKind := mpminternal.EffectiveActorKind(auditActorHuman, frameworkName)
 
 	var errorMessage string
 	if err != nil {

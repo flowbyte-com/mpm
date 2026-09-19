@@ -6372,9 +6372,93 @@ func handleMpmContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		return handlePromoteToGlobal(dm, ac, params)
 	case "route":
 		return handleRoute(dm, ac, params)
+	case "recent_activity":
+		return handleRecentActivity(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_context. Valid actions include read_wake_context, read_directives, proactive_recall_hint, query_global_rules, record_global_rule, retire_global_rule, promote_to_global, route", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_context. Valid actions include read_wake_context, read_directives, proactive_recall_hint, query_global_rules, record_global_rule, retire_global_rule, promote_to_global, route, recent_activity", action)
 	}
+}
+
+// handleRecentActivity implements mpm_context action=recent_activity.
+// Read-only semantic activity surface: pulls from tool_invocations,
+// classifies via the canonical helpers (EffectiveActorKind,
+// ClassifyAction), enriches deterministically where linkage exists.
+// Default scope: agent + human mutating actions, newest-first,
+// bounded by RecentActivityDefaultLimit (hard max
+// RecentActivityHardMaxLimit). Excludes read-only queries, handoff
+// delivery side effects, and system/diagnostic bookkeeping.
+func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	if dm == nil {
+		return nil, fmt.Errorf("recent_activity: dm is nil")
+	}
+
+	// Parse params with parseLimitStrict semantics where applicable.
+	limit := mpminternal.RecentActivityDefaultLimit
+	if v, present := p["limit"]; present && v != nil {
+		switch n := v.(type) {
+		case float64:
+			limit = int(n)
+		case int:
+			limit = n
+		default:
+			return nil, fmt.Errorf("recent_activity: limit must be int, got %T", v)
+		}
+	}
+
+	var since int64
+	if v, present := p["since"]; present && v != nil {
+		switch n := v.(type) {
+		case float64:
+			since = int64(n)
+		case int64:
+			since = n
+		case int:
+			since = int64(n)
+		default:
+			return nil, fmt.Errorf("recent_activity: since must be int, got %T", v)
+		}
+	}
+
+	actorKind, _ := p["actor_kind"].(string)
+	frameworkName, _ := p["framework_name"].(string)
+	sessionID, _ := p["session_id"].(string)
+	artifactType, _ := p["artifact_type"].(string)
+
+	includeSystem := false
+	if v, present := p["include_system"]; present && v != nil {
+		switch b := v.(type) {
+		case bool:
+			includeSystem = b
+		default:
+			return nil, fmt.Errorf("recent_activity: include_system must be bool, got %T", v)
+		}
+	}
+
+	events, err := dm.RecentActivity(mpminternal.RecentActivityQueryParams{
+		Limit:         limit,
+		Since:         since,
+		ActorKind:     actorKind,
+		FrameworkName: frameworkName,
+		SessionID:     sessionID,
+		ArtifactType:  artifactType,
+		IncludeSystem: includeSystem,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("recent_activity: %w", err)
+	}
+
+	return map[string]interface{}{
+		"success":  true,
+		"action":   "recent_activity",
+		"events":   events,
+		"count":    len(events),
+		"limit":    limit,
+		"defaults": map[string]interface{}{
+			"actor_scope":  "agent+human",
+			"class_filter": "mutating",
+			"ordering":     "newest-first",
+		},
+	}, nil
 }
 
 func handleMpmSystem(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {

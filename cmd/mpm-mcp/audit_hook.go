@@ -56,7 +56,12 @@ func recordToolInvocation(
 	if ac.FrameworkName != "" && ac.FrameworkName != "mcp" {
 		frameworkName = ac.FrameworkName
 	}
-	actorKind := "agent"
+	// Route through the canonical classifier so future MCP writes
+	// match the read-time normalization. EffectiveActorKind keeps
+	// explicit agent/human overrides and reclassifies based on
+	// the framework (openclaw/pi/opencode/claude-code/hermes →
+	// agent; mpm-cli → human).
+	actorKind := core.EffectiveActorKind("agent", frameworkName)
 	sessionID := ac.SessionID
 	if sessionID == "" {
 		sessionID = "mcp-default"

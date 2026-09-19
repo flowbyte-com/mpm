@@ -135,6 +135,23 @@ type WakeContextData struct {
 	// channel ("what got rejected and why").
 	CompletedWorks []WakeContextWork `json:"completed_works"`
 
+	// RecentActivity — Stage 2 cross-surface activity summary. Pulled
+	// from tool_invocations through the canonical EffectiveActorKind
+	// + ClassifyAction filters. Default scope: agent+human mutating
+	// actions, newest first, capped at 10 events to fit the wake-context
+	// byte budget. Each event identifies its actor_kind/framework so
+	// the consumer can distinguish agent vs human vs system writes.
+	// The section is read-only at gather time and never mutates the
+	// underlying tool_invocations row for itself (the recent_activity
+	// query is classified as read_only and so is excluded from the
+	// default semantic activity feed).
+	RecentActivity []WakeContextActivity `json:"recent_activity"`
+	// RecentActivityTruncated is set by enforceSizeLimit when the
+	// recent_activity array had to be shed to stay under
+	// MaxWakeContextBytes. The agent sees the flag and knows the
+	// absence was a cap-induced drop, not "checked, none found".
+	RecentActivityTruncated bool `json:"recent_activity_truncated,omitempty"`
+
 	// Constraints & Capabilities — the "what rules apply, what tools".
 	// GlobalRules only populated when MPM_SHARED_DB is attached.
 	GlobalRules []WakeContextRule `json:"global_rules"`
@@ -195,6 +212,21 @@ type WakeContextRule struct {
 	Weight  int    `json:"weight"`
 }
 
+// WakeContextActivity is the bounded per-event projection of
+// RecentActivityEvent used in the wake-context payload. Trims
+// the public wire shape to a glance-friendly subset so the wake
+// payload stays inside the 32 KB byte budget even on a busy agent.
+type WakeContextActivity struct {
+	ID            string `json:"id"`
+	Timestamp     int64  `json:"timestamp"`
+	ActorKind     string `json:"actor_kind"`
+	FrameworkName string `json:"framework_name,omitempty"`
+	Tool          string `json:"tool"`
+	Action        string `json:"action"`
+	ArtifactID    string `json:"artifact_id,omitempty"`
+	Summary       string `json:"summary"`
+}
+
 // OverdueWake is a single row in the wake-context overdue-wakes
 // surface. Derived from scheduled_wakes where fired=0 AND
 // target_time <= now. Slim payload: id, when it was due, what kind
@@ -248,6 +280,15 @@ func EnforceSizeLimit(data *WakeContextData) ([]byte, error) {
 			if len(data.AvailableSkills) > 0 {
 				data.AvailableSkills = make([]SkillSummary, 0)
 				data.AvailableSkillsTruncated = true
+				b, _ = json.Marshal(data)
+				if len(b) <= MaxWakeContextBytes {
+					return b, nil
+				}
+			}
+		case "recent_activity":
+			if len(data.RecentActivity) > 0 {
+				data.RecentActivity = make([]WakeContextActivity, 0)
+				data.RecentActivityTruncated = true
 				b, _ = json.Marshal(data)
 				if len(b) <= MaxWakeContextBytes {
 					return b, nil
@@ -352,8 +393,12 @@ const MaxWakeContextBytes = 32 * 1024
 // wakeContextTruncatedFieldNames lists the JSON field names whose
 // truncation we surface. Used by tests and by future operator
 // surfaces. Order = shedding priority (first listed = shed first).
+// recent_activity sheds before recent_topics because it is bounded
+// already at 10 entries and is the heaviest single addition to the
+// payload under the Stage 2 cross-surface activity summary.
 var wakeContextTruncatedFieldNames = []string{
 	"available_skills",
+	"recent_activity",
 	"recent_topics",
 }
 
@@ -421,6 +466,7 @@ func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextD
 	data.AvailableSkills = make([]SkillSummary, 0)
 	data.OpenWorks = make([]WakeContextWork, 0)
 	data.CompletedWorks = make([]WakeContextWork, 0)
+	data.RecentActivity = make([]WakeContextActivity, 0)
 
 	// Pull the latest unread handoff. In consume mode the mark-read happens
 	// here so re-reading wake context (e.g. in the same session) doesn't
@@ -516,8 +562,45 @@ func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextD
 	data.ScratchpadOrphans = orphans
 	data.OverdueWakes = dm.gatherOverdueWakes()
 	data.AvailableSkills = populateAvailableSkills(dm, "all")
+	data.RecentActivity = dm.gatherRecentActivity(10)
 
 	return data, nil
+}
+
+// gatherRecentActivity returns the bounded cross-surface activity
+// projection used in the wake-context payload. Defaults: 10 events,
+// agent+human scope, mutating actions only, newest-first. The
+// gathering function is purely a projection — it never mutates
+// durable state (its own tool_invocations row is classified as
+// read_only and excluded from the default semantic activity feed).
+func (dm *DatabaseManager) gatherRecentActivity(limit int) []WakeContextActivity {
+	if dm == nil || dm.db == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	events, err := dm.RecentActivity(RecentActivityQueryParams{
+		Limit: limit,
+	})
+	if err != nil {
+		dm.LogAudit(AuditWarn, "wake_context", "gatherRecentActivity: "+err.Error(), "", AuditContext{})
+		return nil
+	}
+	out := make([]WakeContextActivity, 0, len(events))
+	for _, ev := range events {
+		out = append(out, WakeContextActivity{
+			ID:            ev.ID,
+			Timestamp:     ev.Timestamp,
+			ActorKind:     ev.ActorKind,
+			FrameworkName: ev.FrameworkName,
+			Tool:          ev.Tool,
+			Action:        ev.Action,
+			ArtifactID:    ev.ArtifactID,
+			Summary:       ev.Summary,
+		})
+	}
+	return out
 }
 
 // gatherEpistemicPressure returns the cognitive-load snapshot the agent

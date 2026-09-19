@@ -215,6 +215,13 @@ type CoreDB interface {
 	AuditSummary() string
 	PruneAuditLog(retentionDays int) (int64, error)
 
+	// ─── Recent Activity (Stage 2 surface) ───────────────────────────
+	// RecentActivity returns the bounded semantic recent-activity
+	// stream (tool_invocations filtered through the canonical
+	// classifiers). Read-only. See activity_classifier.go and
+	// recent_activity.go for the contract.
+	RecentActivity(p RecentActivityQueryParams) ([]RecentActivityEvent, error)
+
 	// ─── Ingest ──────────────────────────────────────────────────────
 	IngestOpenClaw(sourcePath string, batchSize int, importBatch string, dryRun bool) (*IngestStats, error)
 	IngestFromAdapter(dbPath string, adapter SchemaAdapter, batchSize int, importBatch string, dryRun bool) (*IngestStats, error)
