@@ -106,7 +106,7 @@ exit 0
 // for any bash script that needs literal ${} syntax.
 function raw(strings, ...values) { return strings.raw.join(''); }
 
-const _BPE_SENTINELS = ["${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_CONFIG_PRESENT-0}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_PLUGIN_STATE:-absent}", "${FAKE_OPENCLAW_LINK_PATH-/tmp/mpm-memory-openclaw-install-fake}", "${FAKE_OPENCLAW_CONFLICT_PATH-/opt/unrelated/mpm-memory-openclaw}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_CONFLICT_PATH-/opt/unrelated/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_REGISTRY_PRESENT-0}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_CONFLICT_PATH-/opt/unrelated/openclaw-mpm-memory}", "${FAKE_OPENCLAW_HANG_STATUS-0}", "${FAKE_OPENCLAW_FAIL_STATUS-0}", "${FAKE_OPENCLAW_HANG-0}", "${FAKE_OPENCLAW_FAIL_RESTART-0}", "${FAKE_OPENCLAW_REJECT_BOOTSTRAP-0}", "${OPENCLAW_INVOCATIONS:-/tmp/mpm-memory-openclaw-fake-invocations.jsonl}"];
+const _BPE_SENTINELS = ["${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_CONFIG_PRESENT-0}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_PLUGIN_STATE:-absent}", "${FAKE_OPENCLAW_LINK_PATH-/tmp/mpm-memory-openclaw-install-fake}", "${FAKE_OPENCLAW_CONFLICT_PATH-/opt/unrelated/mpm-memory-openclaw}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_CONFLICT_PATH-/opt/unrelated/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_REGISTRY_PRESENT-0}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_CONFLICT_PATH-/opt/unrelated/openclaw-mpm-memory}", "${FAKE_OPENCLAW_HANG_STATUS-0}", "${FAKE_OPENCLAW_FAIL_STATUS-0}", "${FAKE_OPENCLAW_HANG-0}", "${FAKE_OPENCLAW_FAIL_RESTART-0}", "${FAKE_OPENCLAW_REJECT_BOOTSTRAP-0}", "${OPENCLAW_INVOCATIONS:-/tmp/mpm-memory-openclaw-fake-invocations.jsonl}", "${FAKE_OPENCLAW_UPDATE_REPAIR_FAIL-0}", "${FAKE_OPENCLAW_UPDATE_REPAIR_HANG-0}", "${FAKE_OPENCLAW_UPDATE_REPAIR_WARN-0}", "${FAKE_OPENCLAW_PRETEND_DIRTY-0}", "${FAKE_OPENCLAW_GATEWAY_DOWN_ON_RESTART_FAIL-0}"];
 const FAKE_OPENCLAW_SCRIPT = `#!/usr/bin/env bash
 # Fake openclaw — records every invocation and replies to the
 # subcommands the installer uses. Behaviour is parameterised by env:
@@ -115,6 +115,25 @@ const FAKE_OPENCLAW_SCRIPT = `#!/usr/bin/env bash
 #   FAKE_OPENCLAW_HANG_STATUS=1      → sleep 60s on gateway status
 #   FAKE_OPENCLAW_FAIL_STATUS=1      → make gateway status exit non-zero
 #   FAKE_OPENCLAW_REJECT_BOOTSTRAP=1 → reject unknown commands
+#
+# 2026.9.5 lifecycle simulation (convergence + verify-after-restart):
+#   FAKE_OPENCLAW_UPDATE_REPAIR_FAIL=1   → make update repair exit non-zero
+#                                          (simulates real convergence failure)
+#   FAKE_OPENCLAW_UPDATE_REPAIR_HANG=1   → sleep 60s on update repair
+#   FAKE_OPENCLAW_UPDATE_REPAIR_WARN=1   → update repair prints the completion-cache
+#                                          warning ("native no-replace move is
+#                                          unavailable on this filesystem") but
+#                                          exits 0 (real behaviour of the CLI)
+#   FAKE_OPENCLAW_PRETEND_DIRTY=1        → before any other action, mark the
+#                                          gateway "dirty" so a restart BEFORE
+#                                          update repair would fail with 78.
+#                                          update repair clears the flag.
+#   FAKE_OPENCLAW_GATEWAY_DOWN_ON_RESTART_FAIL=1
+#                                        → when restart exits non-zero, also
+#                                          mark the gateway as down so the
+#                                          post-restart verify probe fails.
+#                                          Default: post-restart probe still
+#                                          succeeds even when restart failed.
 #
 # Plugin-state simulation (mirrors 2026.9.4 plugins inspect --json):
 #   FAKE_OPENCLAW_PLUGIN_STATE=absent|linked|conflicting
@@ -560,6 +579,16 @@ JSON
         if [ "__BPE_14__" = "1" ]; then
           sleep 60
         fi
+        # DOWN_FLAG simulates the gateway being stopped — either by a
+        # failed restart (FAKE_OPENCLAW_GATEWAY_DOWN_ON_RESTART_FAIL=1)
+        # or by an external operator action. When set, status returns
+        # non-zero so the post-restart verify probe can distinguish
+        # "gateway back up" from "gateway still down".
+        DOWN_FLAG="\${FAKE_OPENCLAW_GATEWAY_DOWN_FLAG:-/tmp/mpm-memory-openclaw-fake-gateway-down-flag}"
+        if [ -f "$DOWN_FLAG" ]; then
+          printf '  -> gateway status: DOWN\\n' >> "$INV"
+          exit 8
+        fi
         if [ "__BPE_15__" = "1" ]; then
           exit 8
         fi
@@ -589,9 +618,64 @@ JSON
         if [ "__BPE_16__" = "1" ]; then
           sleep 60
         fi
+        # 2026.9.5 dirty-state simulation: if the migration identity is
+        # still "dirty" (no update repair has cleared it), a fresh
+        # gateway restart will hit the new migration-inputs consistency
+        # check and exit 78. The fake models that: any restart while the
+        # DIRTY_FLAG is set exits 78 instead of 0.
+        DIRTY_FLAG="\${FAKE_OPENCLAW_DIRTY_FLAG:-/tmp/mpm-memory-openclaw-fake-dirty-flag}"
+        if [ -f "$DIRTY_FLAG" ]; then
+          printf '  -> gateway restart: DIRTY_BLOCKED exit=78\\n' >> "$INV"
+          exit 78
+        fi
         if [ "__BPE_17__" = "1" ]; then
+          # FAKE_OPENCLAW_FAIL_RESTART=1 — generic restart failure
+          # (e.g. timeout). Optionally mark the gateway as down so the
+          # post-restart verify probe fails when the test explicitly
+          # opts into that via FAKE_OPENCLAW_GATEWAY_DOWN_ON_RESTART_FAIL.
+          printf '  -> gateway restart: FAIL_RC=7\\n' >> "$INV"
+          if [ "__BPE_24__" = "1" ]; then
+            DOWN_FLAG="\${FAKE_OPENCLAW_GATEWAY_DOWN_FLAG:-/tmp/mpm-memory-openclaw-fake-gateway-down-flag}"
+            : > "$DOWN_FLAG" 2>/dev/null || true
+          fi
           exit 7
         fi
+        # On success, clear any prior down flag so the post-restart
+        # verify probe sees an up gateway.
+        DOWN_FLAG="\${FAKE_OPENCLAW_GATEWAY_DOWN_FLAG:-/tmp/mpm-memory-openclaw-fake-gateway-down-flag}"
+        rm -f "$DOWN_FLAG" 2>/dev/null || true
+        exit 0
+        ;;
+    esac
+    ;;
+  update)
+    sub="$1"
+    shift || true
+    case "$sub" in
+      repair)
+        printf '  -> update repair %s\\n' "$*" >> "$INV"
+        if [ "__BPE_21__" = "1" ]; then
+          sleep 60
+        fi
+        if [ "__BPE_20__" = "1" ]; then
+          # Real convergence failure: non-zero exit, no "completed
+          # with warnings" diagnostic. Installer must surface this.
+          printf '  -> update repair: CONVERGENCE_FAIL exit=78\\n' >> "$INV"
+          exit 78
+        fi
+        if [ "__BPE_22__" = "1" ]; then
+          # Completion-cache warning path. The CLI prints the warning,
+          # emits "Update finalization completed with warnings.", and
+          # exits 0 because targetConfigConvergence completed. This is
+          # the observed behaviour on v for "native no-replace move
+          # is unavailable on this filesystem".
+          printf '  -> update repair: COMPLETION_CACHE_WARN\\n' >> "$INV"
+          printf 'Completion cache update failed:\\n[openclaw] native no-replace move is unavailable on this filesystem\\nUpdate finalization completed with warnings.\\n' >> "$INV"
+        fi
+        # Successful convergence clears the dirty flag.
+        DIRTY_FLAG="\${FAKE_OPENCLAW_DIRTY_FLAG:-/tmp/mpm-memory-openclaw-fake-dirty-flag}"
+        rm -f "$DIRTY_FLAG" 2>/dev/null || true
+        printf '  -> update repair: CONVERGED exit=0\\n' >> "$INV"
         exit 0
         ;;
     esac
@@ -689,6 +773,11 @@ function runInstaller({
   hangRestart = false,
   failStatus = false,
   hangStatus = false,
+  updateRepairFail = false,
+  updateRepairHang = false,
+  updateRepairWarn = false,
+  pretendDirty = false,
+  gatewayDownOnRestartFail = false,
   extraEnv = {},
 } = {}) {
   // The installer respects $HOME and runs `openclaw` + `mpm` from PATH.
@@ -704,6 +793,8 @@ function runInstaller({
     OPENCLAW_PLUGIN_INSTALL_TIMEOUT: "10",
     OPENCLAW_GATEWAY_RESTART_TIMEOUT: "5",
     OPENCLAW_GATEWAY_STATUS_TIMEOUT: "5",
+    OPENCLAW_GATEWAY_VERIFY_TIMEOUT: "5",
+    OPENCLAW_UPDATE_REPAIR_TIMEOUT: "10",
     OPENCLAW_PLUGIN_INSPECT_TIMEOUT: "5",
     OPENCLAW_CONFIG_TIMEOUT: "5",
     FAKE_OPENCLAW_PLUGIN_STATE: pluginState,
@@ -718,9 +809,24 @@ function runInstaller({
     FAKE_OPENCLAW_HANG: hangRestart ? "1" : "0",
     FAKE_OPENCLAW_FAIL_STATUS: failStatus ? "1" : "0",
     FAKE_OPENCLAW_HANG_STATUS: hangStatus ? "1" : "0",
+    FAKE_OPENCLAW_UPDATE_REPAIR_FAIL: updateRepairFail ? "1" : "0",
+    FAKE_OPENCLAW_UPDATE_REPAIR_HANG: updateRepairHang ? "1" : "0",
+    FAKE_OPENCLAW_UPDATE_REPAIR_WARN: updateRepairWarn ? "1" : "0",
+    FAKE_OPENCLAW_PRETEND_DIRTY: pretendDirty ? "1" : "0",
+    FAKE_OPENCLAW_GATEWAY_DOWN_ON_RESTART_FAIL: gatewayDownOnRestartFail ? "1" : "0",
     ...extraEnv,
   };
   delete env.MPM_BIN;
+
+  // 2026.9.5 simulation: when pretendDirty is true, pre-create the
+  // dirty flag so the first restart would fail with 78 (until update
+  // repair clears it). The flag is per-process — drop any stale one
+  // from a previous run first.
+  const DIRTY_FLAG = "/tmp/mpm-memory-openclaw-fake-dirty-flag";
+  const DOWN_FLAG = "/tmp/mpm-memory-openclaw-fake-gateway-down-flag";
+  try { rmSync(DIRTY_FLAG, { force: true }); } catch {}
+  try { rmSync(DOWN_FLAG, { force: true }); } catch {}
+  if (pretendDirty) writeFileSync(DIRTY_FLAG, "", { mode: 0o644 });
 
   return new Promise((resolve) => {
     const child = spawn("bash", [INSTALL_SH], {
@@ -762,6 +868,9 @@ after(() => {
   // Clean the fake uninstall flag so subsequent test runs (and
   // other consumers on this host) start from a known state.
   try { rmSync("/tmp/mpm-memory-openclaw-fake-uninstalled-flag", { force: true }); } catch {}
+  // 2026.9.5 lifecycle simulation flags — drop so re-runs start fresh.
+  try { rmSync("/tmp/mpm-memory-openclaw-fake-dirty-flag", { force: true }); } catch {}
+  try { rmSync("/tmp/mpm-memory-openclaw-fake-gateway-down-flag", { force: true }); } catch {}
 });
 
 // --------------------------------------------------------------------------
@@ -1885,4 +1994,244 @@ test("installer does not require legacy linked rootDir to still exist on disk", 
   // ownership detection.
   assert.match(src, /inspect_or_registry_failed|registry_path_match|entry_key_present|slot_points_to_legacy/,
     "installer must have non-inspect fallback ownership evidence paths");
+});
+
+// --------------------------------------------------------------------------
+// 2026.9.5 migration-inputs hardening — exit 78 lifecycle robustness
+// --------------------------------------------------------------------------
+//
+// OpenClaw 2026.9.5 introduced a startup migration-inputs consistency
+// check (readStartupMigrationSnapshot / assertStartupConfigUnchanged)
+// that exits 78 when the config was modified too recently before a
+// restart. The 2026-09-19 production failure sequence was:
+//
+//   plugins.install → config.set mpmBin → config.set hooks.* →
+//   config.set plugins.slots.memory → gateway restart --safe →
+//   exit 78 (gateway stopped, systemd refused to restart on 78)
+//
+// The fix: run `openclaw update repair` BETWEEN all plugin/config
+// mutations and the gateway restart. Repair converges the migration
+// identity so the next gateway start sees a settled config.
+//
+// These tests pin the new lifecycle ordering and the post-restart
+// verification step that distinguishes "gateway back up" from
+// "gateway stayed down after a failed restart".
+
+// TEST A — repair ordering: config writes → update repair → gateway
+// status probe → gateway restart → post-restart verify probe.
+// Specifically assert repair occurs AFTER the slot switch and BEFORE
+// the restart command.
+test("A) repair ordering: mpmBin/hooks/slot writes precede update repair which precedes gateway restart", async () => {
+  const home = freshHomeDir("lifecycle-order");
+  clearInvocations();
+  clearFakeUninstalledFlag();
+  const { code, stderr } = await runInstaller({ homeDir: home });
+  assert.strictEqual(code, 0, `installer exited non-zero: ${stderr}`);
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  const mpmBinIdx = log.indexOf("config.mpmBin");
+  const hookACIdx = log.indexOf("hooks.allowConversationAccess");
+  const hookPIIdx = log.indexOf("hooks.allowPromptInjection");
+  const slotIdx = log.indexOf("plugins.slots.memory");
+  const repairIdx = log.indexOf("update repair");
+  const restartIdx = log.indexOf("gateway restart");
+  assert.ok(mpmBinIdx > -1, "must write mpmBin");
+  assert.ok(hookACIdx > -1, "must write allowConversationAccess");
+  assert.ok(hookPIIdx > -1, "must write allowPromptInjection");
+  assert.ok(slotIdx > -1, "must write slots.memory");
+  assert.ok(repairIdx > -1, "must call update repair");
+  assert.ok(restartIdx > -1, "must call gateway restart");
+  assert.ok(mpmBinIdx < repairIdx, "mpmBin write must precede update repair");
+  assert.ok(hookACIdx < repairIdx, "hook writes must precede update repair");
+  assert.ok(slotIdx < repairIdx, "slot switch must precede update repair");
+  assert.ok(repairIdx < restartIdx, "update repair must precede gateway restart");
+  // The post-restart verify probe is the LAST gateway status call.
+  // The installer's first gateway status probe (the "is it reachable?"
+  // gate) happens AFTER update repair (so repair sees the final
+  // config), and BEFORE the restart.
+  const statusPositions = [];
+  let idx = 0;
+  while ((idx = log.indexOf("gateway status", idx + 1)) > -1) {
+    statusPositions.push(idx);
+  }
+  assert.ok(statusPositions.length >= 2,
+    `installer must probe gateway status at least twice (pre + post-restart); got ${statusPositions.length}; log:\n${log}`);
+  assert.ok(statusPositions[0] > repairIdx,
+    `pre-restart gateway status probe (at ${statusPositions[0]}) must come after update repair (at ${repairIdx}); log:\n${log}`);
+  assert.ok(statusPositions[0] < restartIdx,
+    `pre-restart gateway status probe (at ${statusPositions[0]}) must precede gateway restart (at ${restartIdx}); log:\n${log}`);
+  assert.ok(statusPositions[statusPositions.length - 1] > restartIdx,
+    `post-restart gateway status probe must follow gateway restart (at ${restartIdx}); log:\n${log}`);
+});
+
+// TEST B — immediate restart would fail without repair (the 2026.9.5
+// exit-78 race). With the dirty flag pre-set, a restart BEFORE update
+// repair would exit 78. The new installer must call update repair
+// first, which clears the flag, so the subsequent restart succeeds.
+test("B) gateway restart while dirty returns/exits 78; update repair clears dirty state; restart after repair succeeds", async () => {
+  const home = freshHomeDir("lifecycle-dirty");
+  clearInvocations();
+  clearFakeUninstalledFlag();
+  const { code, stderr } = await runInstaller({
+    homeDir: home,
+    pretendDirty: true,
+  });
+  assert.strictEqual(code, 0, `installer exited non-zero: ${stderr}`);
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  assert.match(log, /update repair: CONVERGED/,
+    "update repair must have cleared the dirty flag (CONVERGED diagnostic expected); log:\n" + log);
+  // The restart must NOT have hit the DIRTY_BLOCKED branch — the
+  // installer's call to update repair FIRST cleared the flag.
+  assert.doesNotMatch(log, /DIRTY_BLOCKED/,
+    "restart must NOT be blocked by the dirty flag — update repair must have run first; log:\n" + log);
+  assert.match(log, /gateway restart: SAFE_FLAG_OK/,
+    "restart must have proceeded normally; log:\n" + log);
+});
+
+// TEST C — completion-cache warning is nonfatal. update repair prints
+// the completion-cache warning ("native no-replace move is unavailable
+// on this filesystem") and exits 0. The installer must NOT treat that
+// as failure and must proceed to the restart step.
+test("C) completion-cache warning inside update repair is nonfatal; installer proceeds", async () => {
+  const home = freshHomeDir("lifecycle-warn");
+  clearInvocations();
+  clearFakeUninstalledFlag();
+  const { code, stderr } = await runInstaller({
+    homeDir: home,
+    updateRepairWarn: true,
+  });
+  assert.strictEqual(code, 0,
+    `installer must succeed when update repair emits completion-cache warning; stderr:\n${stderr}`);
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  assert.match(log, /COMPLETION_CACHE_WARN/,
+    "fake must have emitted the completion-cache warning; log:\n" + log);
+  assert.match(log, /update repair: CONVERGED/,
+    "update repair must still report CONVERGED despite the warning; log:\n" + log);
+  assert.match(log, /gateway restart: SAFE_FLAG_OK/,
+    "installer must still issue gateway restart after a warnings-only update repair; log:\n" + log);
+  assert.match(stderr, /update repair converged/,
+    "installer must surface 'update repair converged' for a warnings-only repair; stderr:\n" + stderr);
+});
+
+// TEST D — update repair genuinely fails. The installer must surface
+// this as a clear installer error AND must NOT proceed to a gateway
+// restart that is likely to exit 78.
+test("D) update repair failure is reported; installer does NOT issue gateway restart", async () => {
+  const home = freshHomeDir("lifecycle-repair-fail");
+  clearInvocations();
+  clearFakeUninstalledFlag();
+  const { code, stderr } = await runInstaller({
+    homeDir: home,
+    updateRepairFail: true,
+  });
+  assert.notStrictEqual(code, 0,
+    "installer must exit non-zero when update repair genuinely fails");
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  assert.match(log, /update repair: CONVERGENCE_FAIL/,
+    "fake must have reported update repair convergence failure; log:\n" + log);
+  // Critically: the installer must NOT have issued a restart --safe
+  // when repair failed (a restart would likely exit 78 and leave
+  // the gateway stopped).
+  assert.doesNotMatch(log, /gateway restart/,
+    "installer must NOT issue gateway restart when update repair fails; log:\n" + log);
+  assert.match(stderr, /update repair returned non-zero/,
+    "installer must surface the update repair failure; stderr:\n" + stderr);
+  assert.match(stderr, /status 78\/CONFIG/,
+    "installer must explain the connection to the 2026.9.5 status-78 failure mode; stderr:\n" + stderr);
+  assert.match(stderr, /FAILED\./,
+    "installer must report FAILED rather than Done. when repair fails; stderr:\n" + stderr);
+});
+
+// TEST E — restart command non-zero but gateway is healthy. The
+// restart CLI may time out or refuse for transient reasons while the
+// gateway itself is still up. The installer must NOT falsely fail
+// in that case.
+test("E) restart command non-zero but gateway is healthy; installer does NOT falsely fail", async () => {
+  const home = freshHomeDir("lifecycle-restart-fail-but-healthy");
+  clearInvocations();
+  clearFakeUninstalledFlag();
+  const { code, stderr } = await runInstaller({
+    homeDir: home,
+    failRestart: true,
+    // gatewayDownOnRestartFail stays false — gateway stays up after
+    // the failed restart command.
+  });
+  assert.strictEqual(code, 0,
+    "installer must succeed when restart command fails but gateway stays healthy; stderr:\n" + stderr);
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  assert.match(log, /FAIL_RC=7/,
+    "fake must have reported restart failure; log:\n" + log);
+  assert.match(log, /gateway status/,
+    "post-restart gateway status must have been probed; log:\n" + log);
+  assert.match(stderr, /post-restart gateway reachable/,
+    "post-restart gateway status must have succeeded; stderr:\n" + stderr);
+});
+
+// TEST F — restart command non-zero AND gateway is down. The
+// installer must report this as a hard failure rather than printing
+// a misleading Done.
+test("F) restart command non-zero AND gateway down; installer reports FAILED and exits non-zero", async () => {
+  const home = freshHomeDir("lifecycle-restart-fail-gateway-down");
+  clearInvocations();
+  clearFakeUninstalledFlag();
+  const { code, stderr } = await runInstaller({
+    homeDir: home,
+    failRestart: true,
+    gatewayDownOnRestartFail: true,
+  });
+  assert.notStrictEqual(code, 0,
+    "installer must exit non-zero when restart fails AND gateway is down");
+  const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  assert.match(log, /FAIL_RC=7/,
+    "fake must have reported restart failure; log:\n" + log);
+  assert.match(log, /gateway status: DOWN/,
+    "fake must have reported gateway-down on the post-restart verify probe; log:\n" + log);
+  assert.match(stderr, /post-restart gateway is NOT reachable/,
+    "installer must surface that the gateway is unreachable; stderr:\n" + stderr);
+  assert.match(stderr, /FAILED\./,
+    "installer must report FAILED rather than Done. when gateway is down; stderr:\n" + stderr);
+});
+
+// TEST G — idempotent rerun. After a clean converged install, a
+// second rerun (with the plugin already correctly linked from this
+// adapter's path) must skip the destructive install step and keep
+// the convergence-before-restart ordering.
+test("G) idempotent rerun: no duplicate registrations; convergence-then-restart ordering preserved", async () => {
+  const home = freshHomeDir("lifecycle-idempotent");
+  clearInvocations();
+  clearFakeUninstalledFlag();
+  const r1 = await runInstaller({ homeDir: home });
+  assert.strictEqual(r1.code, 0, `first run failed: ${r1.stderr}`);
+  const firstLog = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  const firstInstallCount = (firstLog.match(/plugins install /g) || []).length;
+  const firstRepairCount = (firstLog.match(/update repair/g) || []).length;
+  assert.ok(firstInstallCount >= 1,
+    `first run on a fresh host must perform at least one plugin install; log:\n${firstLog}`);
+  assert.ok(firstRepairCount >= 1,
+    `first run must call update repair; log:\n${firstLog}`);
+  clearInvocations();
+  clearFakeUninstalledFlag();
+  const r2 = await runInstaller({
+    homeDir: home,
+    pluginState: "linked",
+    linkPath: ADAPTER_DIR,
+  });
+  assert.strictEqual(r2.code, 0, `second run failed: ${r2.stderr}`);
+  const secondLog = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  // On the second run the plugin is already correctly linked from this
+  // adapter's absolute path; the installer must NOT issue `plugins
+  // install` (no destructive re-install, no trust-warning noise).
+  assert.ok(!secondLog.includes("plugins install"),
+    `second run on already-linked plugin must NOT call plugins install; log:\n${secondLog}`);
+  const secondRepairCount = (secondLog.match(/update repair/g) || []).length;
+  // update repair is idempotent and runs on every install — the second
+  // run still re-converges (cheap; a no-op when the identity is already
+  // settled). This pins that the convergence step is not conditional on
+  // having just performed a fresh install.
+  assert.strictEqual(secondRepairCount, firstRepairCount,
+    `rerun must invoke update repair the same number of times as the first run; first=${firstRepairCount} second=${secondRepairCount}; log:\n${secondLog}`);
+  // Ordering: repair must precede restart on the second run too.
+  const repairIdx = secondLog.indexOf("update repair");
+  const restartIdx = secondLog.indexOf("gateway restart");
+  assert.ok(repairIdx > -1 && restartIdx > -1 && repairIdx < restartIdx,
+    `second-run ordering must keep update repair before gateway restart; log:\n${secondLog}`);
 });

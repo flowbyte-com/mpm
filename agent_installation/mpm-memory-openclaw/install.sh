@@ -104,6 +104,8 @@ MPM_CANONICAL_SYMLINK="$HOME_DIR/.local/bin/mpm"
 OPENCLAW_PLUGIN_INSTALL_TIMEOUT="${OPENCLAW_PLUGIN_INSTALL_TIMEOUT:-30}"
 OPENCLAW_GATEWAY_STATUS_TIMEOUT="${OPENCLAW_GATEWAY_STATUS_TIMEOUT:-10}"
 OPENCLAW_GATEWAY_RESTART_TIMEOUT="${OPENCLAW_GATEWAY_RESTART_TIMEOUT:-20}"
+OPENCLAW_GATEWAY_VERIFY_TIMEOUT="${OPENCLAW_GATEWAY_VERIFY_TIMEOUT:-15}"
+OPENCLAW_UPDATE_REPAIR_TIMEOUT="${OPENCLAW_UPDATE_REPAIR_TIMEOUT:-60}"
 OPENCLAW_PLUGIN_INSPECT_TIMEOUT="${OPENCLAW_PLUGIN_INSPECT_TIMEOUT:-10}"
 OPENCLAW_CONFIG_TIMEOUT="${OPENCLAW_CONFIG_TIMEOUT:-10}"
 MPM_BOOTSTRAP_URL="${MPM_BOOTSTRAP_URL:-}"
@@ -837,7 +839,65 @@ if timeout "${OPENCLAW_PLUGIN_INSPECT_TIMEOUT}s" \
 fi
 
 # --------------------------------------------------------------------------
-# 9. Bounded gateway lifecycle (status + restart)
+# 9. Converge OpenClaw state (openclaw update repair)
+# --------------------------------------------------------------------------
+#
+# OpenClaw 2026.9.5 added a startup migration-inputs consistency check
+# (readStartupMigrationSnapshot / assertStartupConfigUnchanged) that
+# refuses to start the gateway with exit 78 if the config was modified
+# too recently before a restart. The error message is "OpenClaw
+# migration inputs changed during startup; refusing to report the
+# gateway ready." Empirically, the trigger window is the few seconds
+# after a `openclaw config set` or `plugins install` write before the
+# next gateway start.
+#
+# The supported convergence primitive is `openclaw update repair`. It
+# runs targetConfigConvergence which writes the final plugin/config
+# inventory into the migration identity, so the next start sees a
+# settled config and the consistency check passes. We run it AFTER all
+# plugin/config/slot mutations performed by this installer are complete
+# and BEFORE any gateway restart.
+#
+# Convergence vs. unrelated finalization:
+#   * `openclaw update repair` returns exit 0 on full convergence OR
+#     convergence-with-warnings. The completion-cache step
+#     ("native no-replace move is unavailable on this filesystem" on
+#     filesystems that lack atomic no-replace renames) is a
+#     finalization-stage warning, NOT a convergence failure. The CLI
+#     prints "Update finalization completed with warnings." and exits 0
+#     when targetConfigConvergence completed. We treat exit 0 as
+#     success and let stdout/stderr diagnostics flow to $INSTALL_LOG.
+#   * Non-zero exit means targetConfigConvergence or a load-bearing
+#     convergence step failed. We treat that as a real failure: the
+#     next gateway start will likely hit the migration-inputs check
+#     and exit 78. The installer surfaces this clearly and refuses to
+#     claim total success.
+#
+# `openclaw update repair` deliberately stops the managed gateway
+# during its lifecycle, so the post-repair gateway status may report
+# stopped. The systemd --user unit restarts the gateway on its own
+# once the repair returns; this installer just verifies the result.
+
+log "converging OpenClaw state (openclaw update repair)"
+REPAIR_OK=1
+REPAIR_RC=0
+if timeout "${OPENCLAW_UPDATE_REPAIR_TIMEOUT}s" \
+    openclaw update repair \
+      >>"$INSTALL_LOG" 2>&1; then
+  log "  update repair converged"
+else
+  REPAIR_OK=0
+  REPAIR_RC=$?
+  warn "update repair returned non-zero (rc=$REPAIR_RC)."
+  warn "  plugin/config state has NOT been fully converged."
+  warn "  the next gateway start may fail with status 78/CONFIG"
+  warn "  (\"migration inputs changed during startup\")."
+  warn "  operator recovery: openclaw update repair && openclaw doctor --fix"
+  warn "  see $INSTALL_LOG"
+fi
+
+# --------------------------------------------------------------------------
+# 10. Bounded gateway lifecycle (status + restart + post-restart verify)
 # --------------------------------------------------------------------------
 #
 # `openclaw gateway status --json` is bounded TWICE:
@@ -852,32 +912,73 @@ fi
 # --safe already has bounded-wait semantics ("may force after the
 # timeout expires"); the outer `timeout` enforces the hard cap.
 #
-# If the gateway is absent / unhealthy / unresponsive, we skip the
-# restart silently and report it. Configuration above is already
-# persisted and will apply on the next gateway start.
+# Post-restart, we probe status a second time with a separate bounded
+# timeout. This is the load-bearing fix for the 2026.9.5 migration
+# refusal: a successful restart --safe that subsequently hits the
+# startup check and exits 78 leaves the gateway stopped, and we MUST
+# surface that rather than print a misleading "Done.".
 
 # Convert status seconds to ms for the CLI flag (CLI requires integer ms).
 status_timeout_ms=$(( OPENCLAW_GATEWAY_STATUS_TIMEOUT * 1000 ))
 [ "$status_timeout_ms" -ge 1000 ] || status_timeout_ms=1000
 
+GATEWAY_RESTART_OK=0
+GATEWAY_REACHABLE_AFTER_RESTART=0
+RESTART_ATTEMPTED=0
+
+# Probe 1: is a gateway reachable right now? If not, the systemd unit
+# (or another supervisor) owns lifecycle and we leave it alone.
 if timeout "${OPENCLAW_GATEWAY_STATUS_TIMEOUT}s" \
    openclaw gateway status --json --timeout "$status_timeout_ms" \
      >/dev/null 2>&1; then
-  log "requesting bounded safe gateway restart (timeout ${OPENCLAW_GATEWAY_RESTART_TIMEOUT}s)"
-  if ! timeout "${OPENCLAW_GATEWAY_RESTART_TIMEOUT}s" \
-      openclaw gateway restart --safe \
-        >>"$INSTALL_LOG" 2>&1; then
-    warn "gateway restart hit the bounded timeout or returned non-zero."
-    warn "The plugin config above is persisted; the operator can restart manually:"
-    warn "  openclaw gateway restart --safe"
+  if [ "$REPAIR_OK" -ne 1 ]; then
+    warn "gateway reachable but update repair did not converge; skipping restart."
+    warn "  issuing restart now is likely to fail with exit 78 and leave"
+    warn "  the gateway stopped. Operator recovery:"
+    warn "    openclaw update repair"
+    warn "    systemctl --user restart openclaw-gateway.service"
+  else
+    RESTART_ATTEMPTED=1
+    log "requesting bounded safe gateway restart (timeout ${OPENCLAW_GATEWAY_RESTART_TIMEOUT}s)"
+    if timeout "${OPENCLAW_GATEWAY_RESTART_TIMEOUT}s" \
+        openclaw gateway restart --safe \
+          >>"$INSTALL_LOG" 2>&1; then
+      GATEWAY_RESTART_OK=1
+    else
+      warn "gateway restart command returned non-zero (bounded timeout or refused)."
+      warn "  the plugin config above is persisted; the operator can re-run:"
+      warn "    openclaw gateway restart --safe"
+    fi
+
+    # Probe 2: is the gateway actually running after the restart?
+    # The 2026.9.5 migration-inputs check fires AFTER our restart
+    # command returns successfully — exit 78 can show up seconds
+    # later. We must verify the gateway came back up.
+    verify_timeout_ms=$(( OPENCLAW_GATEWAY_VERIFY_TIMEOUT * 1000 ))
+    [ "$verify_timeout_ms" -ge 1000 ] || verify_timeout_ms=1000
+    if timeout "${OPENCLAW_GATEWAY_VERIFY_TIMEOUT}s" \
+       openclaw gateway status --json --timeout "$verify_timeout_ms" \
+         >/dev/null 2>&1; then
+      GATEWAY_REACHABLE_AFTER_RESTART=1
+      log "post-restart gateway reachable"
+    else
+      warn "post-restart gateway is NOT reachable."
+      warn "  this is the 2026.9.5 migration-inputs failure mode."
+      warn "  the gateway likely exited 78 during startup."
+      warn "  operator recovery:"
+      warn "    openclaw update repair"
+      warn "    systemctl --user restart openclaw-gateway.service"
+    fi
   fi
 else
   log "no gateway service detected (status timed out or non-responsive); skipping gateway restart."
   log "  config above is persisted and will apply on the next gateway start."
+  log "  if systemd --user owns this gateway it will auto-restart; otherwise"
+  log "  start it manually with: openclaw gateway run"
 fi
 
 # --------------------------------------------------------------------------
-# 10. Verify
+# 11. Verify + final classification
 # --------------------------------------------------------------------------
 
 if timeout "${OPENCLAW_PLUGIN_INSPECT_TIMEOUT}s" \
@@ -885,6 +986,41 @@ if timeout "${OPENCLAW_PLUGIN_INSPECT_TIMEOUT}s" \
   log "plugin visible to openclaw: $PLUGIN_ID"
 else
   warn "openclaw plugins inspect $PLUGIN_ID did not return cleanly; inspect $INSTALL_LOG"
+fi
+
+# Final classification. Failure conditions:
+#   (A) update repair did NOT converge — we know the next start will
+#       hit exit 78 and leave the gateway stopped.
+#   (B) we attempted a restart (gateway was reachable) AND the gateway
+#       is NOT reachable afterward. This catches the 2026.9.5 case
+#       where the restart --safe command returned but the new gateway
+#       process exited 78 during startup, AND the case where the
+#       restart command itself failed and the gateway stayed down.
+# Anything else (gateway unreachable from the start, OR restart
+# succeeded but gateway remained reachable, OR gateway stayed up
+# despite a restart failure) is installer success.
+INSTALL_FAILED=0
+if [ "$REPAIR_OK" -ne 1 ]; then
+  INSTALL_FAILED=1
+elif [ "$RESTART_ATTEMPTED" -eq 1 ] && [ "$GATEWAY_REACHABLE_AFTER_RESTART" -ne 1 ]; then
+  INSTALL_FAILED=1
+fi
+
+if [ "$INSTALL_FAILED" -ne 0 ]; then
+  cat >&2 <<NEXT
+[mpm-memory-openclaw install] FAILED.
+
+The plugin config and slot switch above are persisted, but OpenClaw did
+not settle into a healthy state. Do NOT treat this install as successful.
+
+Operator recovery:
+  openclaw update repair
+  systemctl --user restart openclaw-gateway.service
+  openclaw gateway status --deep
+
+Inspect $INSTALL_LOG for captured openclaw CLI output.
+NEXT
+  exit 1
 fi
 
 cat >&2 <<NEXT
