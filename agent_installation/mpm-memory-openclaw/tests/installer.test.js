@@ -1026,10 +1026,16 @@ test("installer orders plugin install BEFORE plugin-specific config writes", asy
   });
   assert.strictEqual(code, 0, `installer exited non-zero: ${stderr}`);
   const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
+  // Match the actual WRITE invocations against the canonical plugin id.
+  // The legacy probe (config get plugins.entries.openclaw-mpm-memory.*)
+  // ALSO matches the substring "config.mpmBin" etc. but is a READ against
+  // the legacy id — never a plugin-specific config write against the
+  // canonical id, so it must not be counted toward the install-precedes-write
+  // invariant.
   const installIdx = log.indexOf("plugins install");
-  const mpmBinIdx = log.indexOf("config.mpmBin");
-  const hookIdx = log.indexOf("hooks.allowConversationAccess");
-  const slotIdx = log.indexOf("plugins.slots.memory");
+  const mpmBinIdx = log.indexOf('config set plugins.entries.mpm-memory-openclaw.config.mpmBin');
+  const hookIdx = log.indexOf('config set plugins.entries.mpm-memory-openclaw.hooks.allowConversationAccess');
+  const slotIdx = log.indexOf('config set plugins.slots.memory mpm-memory-openclaw');
   assert.ok(installIdx > -1, "must call plugins install");
   assert.ok(mpmBinIdx > -1, "must set config.mpmBin");
   assert.ok(hookIdx > -1, "must set hooks.allowConversationAccess");
@@ -1444,6 +1450,14 @@ test("install order: plugin install MUST be observed before any plugin-specific 
   // Sanity pin that the new state-detection path did not regress the
   // ordering: even on the absent → fresh-install path, the install
   // precedes mpmBin / hooks / slot writes.
+  //
+  // NOTE: we match the canonical WRITE pattern (`config set
+  // plugins.entries.<canonical-id>.*`), NOT just the key name. The
+  // legacy probe reads `config get plugins.entries.openclaw-mpm-memory.*`
+  // and would otherwise match the substring "config.mpmBin" before
+  // install. The legacy probe is read-only against a different plugin
+  // id; it is not a plugin-specific write against the canonical id and
+  // must not count toward the install-precedes-write invariant.
   const home = freshHomeDir("order-new");
   clearInvocations();
   clearFakeUninstalledFlag();
@@ -1451,10 +1465,10 @@ test("install order: plugin install MUST be observed before any plugin-specific 
   assert.strictEqual(code, 0, `installer exited non-zero: ${stderr}`);
   const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
   const installIdx = log.indexOf("plugins install");
-  const mpmBinIdx = log.indexOf("config.mpmBin");
-  const hookACIdx = log.indexOf("hooks.allowConversationAccess");
-  const hookPIIdx = log.indexOf("hooks.allowPromptInjection");
-  const slotIdx = log.indexOf("plugins.slots.memory");
+  const mpmBinIdx = log.indexOf('config set plugins.entries.mpm-memory-openclaw.config.mpmBin');
+  const hookACIdx = log.indexOf('config set plugins.entries.mpm-memory-openclaw.hooks.allowConversationAccess');
+  const hookPIIdx = log.indexOf('config set plugins.entries.mpm-memory-openclaw.hooks.allowPromptInjection');
+  const slotIdx = log.indexOf('config set plugins.slots.memory mpm-memory-openclaw');
   assert.ok(installIdx > -1, "must call plugins install on fresh install");
   assert.ok(mpmBinIdx > -1, "must set config.mpmBin");
   assert.ok(hookACIdx > -1, "must set hooks.allowConversationAccess");
@@ -1495,10 +1509,30 @@ test("idempotent rerun still writes both hook flags and absolute mpmBin", async 
 test("root install.sh remains host-agnostic (the adapter is the only place that touches openclaw)", async () => {
   // The previous fix removed all openclaw calls from install.sh.
   // This test re-pins that boundary.
-  const root = path.join(ADAPTER_DIR, "..", "..", "scripts", "install.sh");
+  //
+  // Path: ~/.mpm/install.sh (the actual user-space installer). Not
+  // ~/.mpm/scripts/install.sh — that path does not exist; this test
+  // previously read a non-existent file and ENOENT'd silently. The
+  // user-space installer is one level above `agent_installation/`,
+  // not under `scripts/`.
+  const root = path.join(ADAPTER_DIR, "..", "..", "install.sh");
   const src = readFileSync(root, "utf8");
+  // The case-sensitive substring `openclaw` (lowercase 'o') pins
+  // behavior. The root installer may legitimately mention "OpenClaw"
+  // (capital 'O') in comments explaining the host-adapter separation
+  // boundary — those references are documentation, not execution.
+  // Forbidding the lowercase token is the load-bearing check.
   assert.ok(!/openclaw/.test(src),
-    "install.sh must not reference openclaw anywhere");
+    "root install.sh must not contain lowercase 'openclaw' (executable patterns only); got matches");
+  // Belt-and-braces: the root installer must not invoke an adapter
+  // install.sh or reference a host-specific adapter source path that
+  // would constitute auto-installing host wiring.
+  assert.ok(!/agent_installation\/[^/]+\/install\.sh/.test(src),
+    "root install.sh must not reference a host-adapter install.sh path");
+  assert.ok(!/~?\/\.openclaw/.test(src),
+    "root install.sh must not reference ~/.openclaw");
+  assert.ok(!/\bplugins install\b|\bplugins enable\b/.test(src),
+    "root install.sh must not issue plugin install/enable commands");
 });
 
 test("plugin state inspection uses bounded `openclaw plugins inspect` (outer timeout applied)", async () => {
