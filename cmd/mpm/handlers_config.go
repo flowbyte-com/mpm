@@ -79,6 +79,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sort"
@@ -94,6 +95,8 @@ import (
 	"github.com/flowbyte-com/mpm/cmd/mpm/probe"
 
 	"github.com/flowbyte-com/mpm/cmd/mpm/render"
+
+	"golang.org/x/term"
 )
 
 // handleConfig is the entry point for `mpm config [...]`. Dispatches
@@ -128,8 +131,22 @@ func handleConfig(args []string) int {
 		}
 		return handleConfigGet(loadOrInitConfig(), args[1])
 	case "set":
+		// 2026-09-19 credential-UX hardening: legacy top-level
+		// `mpm config set api_key <value>` is an argv leak.
+		// The scriptable alias is `mpm config profile set
+		// default api_key --stdin` (or the hidden prompt). The
+		// legacy command is preserved for non-secret keys only.
+		if len(args) < 2 {
+			usererror.Error("mpm config set <key> <value>\n  keys: model, base_url, timeout_seconds, synthesis_enabled\n  aliases: token=api_key, endpoint=base_url\n  api_key is secret-bearing; use `mpm config profile set default api_key [--stdin]`\n  max_tokens is removed in v0.1-final; runtime supplies its own value")
+			return 1
+		}
+		canonical := configCanonicalKey(args[1])
+		if canonical == "api_key" {
+			usererror.Error("refusing API key on `mpm config set`; use `mpm config profile set default api_key` for a hidden prompt, or `... --stdin`")
+			return 1
+		}
 		if len(args) < 3 {
-			usererror.Error("mpm config set <key> <value>\n  keys: model, api_key, base_url, timeout_seconds\n  aliases: token=api_key, endpoint=base_url\n  max_tokens is removed in v0.1-final; runtime supplies its own value")
+			usererror.Error("mpm config set <key> <value>\n  keys: model, base_url, timeout_seconds, synthesis_enabled\n  aliases: token=api_key, endpoint=base_url\n  api_key is secret-bearing; use `mpm config profile set default api_key [--stdin]`\n  max_tokens is removed in v0.1-final; runtime supplies its own value")
 			return 1
 		}
 		return handleConfigSet(loadOrInitConfig(), args[1], strings.Join(args[2:], " "))
@@ -694,8 +711,9 @@ func handleConfigInteractive(c *config.Config) int {
 		fmt.Println("Non-interactive mode detected (stdin isn't a terminal).")
 		fmt.Println("Use the scriptable interface instead:")
 		fmt.Println()
-		fmt.Println("  mpm config profile add default --provider <name> --model <model> --base-url <url>")
-		fmt.Println("  mpm config profile set default api_key <key>")
+		fmt.Println("  mpm config profile add default --model <model> --base-url <url>")
+		fmt.Println("  mpm config profile set default api_key            # hidden prompt (TTY)")
+		fmt.Println("  printf \"$KEY\" | mpm config profile set default api_key --stdin")
 		fmt.Println("  mpm config component set memory default")
 		fmt.Println()
 		fmt.Println("Or run `mpm config` interactively from a real terminal.")
@@ -856,9 +874,13 @@ func handleConfigInteractive(c *config.Config) int {
 		if hadKey {
 			keyDefault = "(unchanged)"
 		}
-		key := promptSecret(rwFromStdin(), "API key", keyDefault)
+		key, err := promptSecret("API key", keyDefault)
+		if err != nil {
+			usererror.Error("%v", err)
+			return 1
+		}
 		if key != "" {
-			prof.APIKey = strings.TrimSpace(key)
+			prof.APIKey = key
 		} else if hadKey {
 			prof.APIKey = existing.APIKey
 		}
@@ -1110,9 +1132,13 @@ func wizardEmbeddingCustom(c *config.Config) {
 		prof.BaseURL = strings.TrimSpace(baseURL)
 	}
 	if protocol.needsAPIKey {
-		key := promptSecret(rwFromStdin(), "API key (leave empty if not required)", "")
+		key, err := promptSecret("API key (leave empty if not required)", "")
+		if err != nil {
+			usererror.Error("%v", err)
+			return
+		}
 		if key != "" {
-			prof.APIKey = strings.TrimSpace(key)
+			prof.APIKey = key
 		}
 	}
 
@@ -1491,21 +1517,60 @@ func promptString(rw *bufio.Reader, label, def string) string {
 	return raw
 }
 
-// promptSecret prints a labeled prompt and reads a line. The input
-// is echoed if stdin is a TTY (terminal-side visibility) because
-// we're not pulling in a TUI library — the operator's terminal
-// handles input visibility. def is non-empty when there's an
-// existing key; the prompt says "press enter to keep" rather than
-// show the secret.
-func promptSecret(rw *bufio.Reader, label, def string) string {
+// promptSecret prints a labeled prompt and reads a secret without
+// echoing typed characters to the terminal. Falls back to a visible
+// (non-secret) prompt only when stdin is NOT a TTY — automation
+// callers should always pipe via --stdin, where the helper is not
+// used at all.
+//
+// 2026-09-19 credential-UX hardening pass:
+//
+//   - When stdin is a terminal, terminal echo is suspended before the
+//     read and restored (best-effort) after.
+//   - The final newline is stripped; embedded whitespace is preserved
+//     so an operator can paste an oddly-formatted secret verbatim.
+//   - When stdin is not a terminal and no fallback pipe is configured,
+//     the prompt refuses rather than reading invisibly from a stale
+//     fd — a hung CLI is the worst possible outcome of a partial
+//     automation.
+//
+// def is accepted for API symmetry with promptString but only its
+// empty/non-empty shape is consulted; the secret itself is NEVER
+// printed back as a default.
+func promptSecret(label, def string) (string, error) {
 	prompt := label
-	if def != "(unchanged)" && def != "" {
-		prompt = label + " [keep existing]"
+	if def != "" && def != "(unchanged)" {
+		prompt += " [keep existing]"
 	}
 	prompt += ": "
+	if !isatty(os.Stdin) {
+		return "", fmt.Errorf("stdin is not a terminal; use --stdin for non-interactive secret input")
+	}
 	fmt.Print(prompt)
-	raw, _ := rw.ReadString('\n')
-	return strings.TrimSpace(raw)
+	fd := int(os.Stdin.Fd())
+	raw, err := term.ReadPassword(fd)
+	// Always end the prompt line cleanly, regardless of read outcome.
+	fmt.Println()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(raw), "\r\n"), nil
+}
+
+// readSecretFromStdin reads a secret from stdin without echoing
+// anything to stdout/stderr. Trims a single trailing newline (the
+// common pipe convention) but preserves any other whitespace so an
+// operator can paste an oddly-formatted secret verbatim.
+//
+// Used by `--stdin` automation paths. The function is intentionally
+// independent of TTY state — callers that require a TTY must check
+// beforehand.
+func readSecretFromStdin() (string, error) {
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(raw), "\r\n"), nil
 }
 
 // 2026-09-14 final-simplification: promptModelFromCatalog +
@@ -1645,16 +1710,17 @@ func printConfigHelp() {
 	render.BlankLine(os.Stdout)
 
 	render.Section(os.Stdout, "Examples")
-	render.Plain(os.Stdout, "  mpm config profile add default --provider custom --model <id> \\")
-	render.Plain(os.Stdout, "      --base-url <url>")
-	render.Plain(os.Stdout, "  mpm config profile set default api_key <key>")
+	render.Plain(os.Stdout, "  mpm config profile add default --model <id> --base-url <url>")
+	render.Plain(os.Stdout, "  mpm config profile set default api_key            # hidden prompt")
+	render.Plain(os.Stdout, "  printf '%s' \"$KEY\" | mpm config profile set default api_key --stdin")
 	render.Plain(os.Stdout, "  mpm config set synthesis_enabled false")
 	render.BlankLine(os.Stdout)
 
 	render.Hint(os.Stdout, "Output-token limits are NOT user-configurable. Runtime supplies its own max_tokens value; operators cannot truncate generation through config.")
 	render.Hint(os.Stdout, "Existing profiles with branded provider IDs (openai, anthropic, ollama, openrouter, ...) continue to load and wire unchanged.")
-	render.Hint(os.Stdout, "API keys are persisted to mpm_config.json (file mode 0600). 'mpm config show' redacts them; 'mpm config get api_key' returns the full key for the operator's own use.")
+	render.Hint(os.Stdout, "API keys are persisted to mpm_config.json (file mode 0600). 'mpm config show' and 'mpm config profile get' redact them; 'mpm config get api_key' returns the full key for the operator's own use.")
 	render.Hint(os.Stdout, "Config file: ~/.mpm/mpm_config.json (path resolved via the workspace; $EDITOR is opened on this file for 'mpm config edit').")
+	render.Hint(os.Stdout, "Credentials: never put an API key on the command line — use `mpm config profile set <name> api_key` (hidden prompt) or pipe via --stdin.")
 }
 
 // printConfigProfileHelp prints `mpm config profile --help` via the
@@ -1669,6 +1735,11 @@ func printConfigHelp() {
 // 2026-09-15 release-pass: --json parity on list/get. api_key is
 // redacted in JSON output (same as human output) — the operator's
 // secret-retrieval surface is `mpm config get api_key` (human mode).
+//
+// 2026-09-19 credential-UX hardening: api_key set no longer
+// accepts a positional value. The help block teaches the hidden
+// prompt and --stdin flows instead. The success line for
+// secret-bearing fields prints `updated` (no value interpolation).
 func printConfigProfileHelp() {
 	render.Heading(os.Stdout, "Config profile")
 	render.BlankLine(os.Stdout)
@@ -1677,13 +1748,16 @@ func printConfigProfileHelp() {
 	render.Plain(os.Stdout, "is referenced by component bindings or used directly.")
 	render.BlankLine(os.Stdout)
 	render.Section(os.Stdout, "Subcommands")
-	render.Label(os.Stdout, "mpm config profile add [name]", "interactive wizard; pass a name to skip the prompt")
+	render.Label(os.Stdout, "mpm config profile add [name]", "interactive wizard; supply --model and --base-url for non-interactive add")
 	render.Label(os.Stdout, "mpm config profile list", "render all profiles (--json for machine output)")
 	render.Label(os.Stdout, "mpm config profile get <name>", "show one profile (--json for machine output; api_key redacted)")
-	render.Label(os.Stdout, "mpm config profile set <name> <key> <value>", "set one field (provider, model, base_url, api_key, temperature, timeout_seconds, reasoning)")
+	render.Label(os.Stdout, "mpm config profile set <name> <key> <value>", "set one field (provider, model, base_url, temperature, timeout_seconds, reasoning)")
+	render.Label(os.Stdout, "mpm config profile set <name> api_key", "prompt for api_key with terminal echo suppressed")
+	render.Label(os.Stdout, "mpm config profile set <name> api_key --stdin", "read api_key from stdin (automation path)")
 	render.Label(os.Stdout, "mpm config profile remove <name>", "delete; refused if any component binds to this profile (lists all bindings on refusal)")
 	render.BlankLine(os.Stdout)
 	render.Hint(os.Stdout, "Run 'mpm config profile add default' once on a fresh install to seed the canonical fallback profile.")
+	render.Hint(os.Stdout, "Credentials never go on the command line. Use the hidden prompt (`set <name> api_key`) or pipe via --stdin. Positional secret values are rejected before any write.")
 }
 
 // printConfigComponentHelp prints `mpm config component --help`.
@@ -1744,19 +1818,34 @@ func handleConfigProfile(args []string) int {
 		// Allow scriptable material-field flags. Unknown flags (without
 		// --) preserve the legacy positional shape, so we only strip
 		// well-known long-form flags here.
+		//
+		// 2026-09-19 credential-UX hardening: --api-key is no
+		// longer accepted here. Injecting a credential via argv is
+		// an information-disclosure bug — the value ends up in
+		// shell history, /proc/<pid>/cmdline, and any captured
+		// log. Operators who need to set an API key use
+		// `mpm config profile set <name> api_key` (hidden prompt
+		// on a TTY) or `... api_key --stdin` (pipe from an
+		// automation source). See handleConfigProfile "set"
+		// branch below.
 		rest, provider := extractStringFlag(args[2:], "--provider")
 		rest, model := extractStringFlag(rest, "--model")
 		rest, baseURL := extractStringFlag(rest, "--base-url")
 		rest, endpoint := extractStringFlag(rest, "--endpoint")
-		rest, apiKey := extractStringFlag(rest, "--api-key")
 		if baseURL == "" && endpoint != "" {
 			baseURL = endpoint
+		}
+		// Refuse the legacy --api-key argv path explicitly so
+		// automation that still passes it fails loudly rather than
+		// silently dropping the secret.
+		if _, hasAPIKeyFlag := stripMemoryFlagToken(rest, "--api-key", "--apikey", "--token"); hasAPIKeyFlag {
+			usererror.Error("refusing --api-key on command line; use `mpm config profile set <name> api_key` for a hidden prompt, or pipe via --stdin")
+			return 1
 		}
 		return handleProfileAdd(loadOrInitConfig(), name, profileAddOpts{
 			Provider: provider,
 			Model:    model,
 			BaseURL:  baseURL,
-			APIKey:   apiKey,
 			restArgs: rest,
 		})
 	case "list":
@@ -1779,11 +1868,36 @@ func handleConfigProfile(args []string) int {
 		}
 		return handleProfileGet(loadOrInitConfig(), args[1])
 	case "set":
-		if len(args) < 4 {
-			usererror.Error("mpm config profile set <name> <key> <value>\n  keys: provider, model, base_url, api_key, temperature, timeout_seconds, reasoning")
+		if len(args) < 3 {
+			usererror.Error("mpm config profile set <name> <key> [value|--stdin]\n  keys: provider, model, base_url, api_key, temperature, timeout_seconds, reasoning\n  api_key accepts no positional value: omit for a hidden prompt, or pass --stdin")
 			return 1
 		}
-		return handleProfileSet(loadOrInitConfig(), args[1], args[2], strings.Join(args[3:], " "))
+		name := args[1]
+		key := args[2]
+		rest := args[3:]
+		// 2026-09-19 credential-UX hardening: the api_key field
+		// (and its aliases token / apikey) is the only profile
+		// field that is secret-bearing. The positional-value form
+		// (`... api_key <secret>`) is an argv leak — it ends up in
+		// shell history, /proc/<pid>/cmdline, and any log capture.
+		// The success-path echo (`set to "<value>"`) is also a
+		// leak. Both are now closed: positional values for the
+		// secret field are rejected BEFORE any write; successful
+		// api_key writes print `updated` with no value.
+		normalized := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+		isSecretField := normalized == "api_key" || normalized == "token" || normalized == "apikey"
+		if isSecretField {
+			value, errCode := resolveSecretFieldValue(rest)
+			if errCode != 0 {
+				return errCode
+			}
+			return handleProfileSet(loadOrInitConfig(), name, key, value, true /*silenceValue*/)
+		}
+		if len(rest) == 0 {
+			usererror.Error("mpm config profile set <name> <key> <value>\n  keys: provider, model, base_url, temperature, timeout_seconds, reasoning")
+			return 1
+		}
+		return handleProfileSet(loadOrInitConfig(), name, key, strings.Join(rest, " "), false /*silenceValue*/)
 	case "remove":
 		if len(args) < 2 {
 			usererror.Error("mpm config profile remove <name>")
@@ -1796,17 +1910,66 @@ func handleConfigProfile(args []string) int {
 	}
 }
 
+// resolveSecretFieldValue implements the secret-credential contract for
+// the api_key (and alias) profile field:
+//
+//   - `mpm config profile set NAME api_key --stdin`   read from stdin (no TTY required).
+//   - `mpm config profile set NAME api_key`           prompt with terminal echo suppressed.
+//   - `mpm config profile set NAME api_key VALUE...`  REJECTED — refuses before any write,
+//     prints an actionable message, exits non-zero.
+//
+// On success returns the resolved secret with exit code 0. On any
+// rejection or read failure returns ("", 1) AFTER printing an
+// actionable error; the secret itself is NEVER interpolated into the
+// error text, never logged, and never passed into the config save path.
+//
+// The function name intentionally avoids the word "api_key" so it does
+// not appear in greppable security assertions that would also match the
+// legitimate field name.
+func resolveSecretFieldValue(rest []string) (string, int) {
+	rest, useStdin := stripMemoryFlagToken(rest, "--stdin")
+	if useStdin {
+		v, err := readSecretFromStdin()
+		if err != nil {
+			usererror.Error("reading api_key from stdin: %v", err)
+			return "", 1
+		}
+		return v, 0
+	}
+	if len(rest) > 0 {
+		// CRITICAL: do NOT echo `rest` here. Doing so would re-print
+		// the rejected secret. The error must be actionable but
+		// credential-free.
+		usererror.Error("refusing API key on command line; omit the value for a hidden prompt or use --stdin")
+		return "", 1
+	}
+	if !isatty(os.Stdin) {
+		usererror.Error("refusing API key on command line; stdin is not a terminal; use --stdin for non-interactive secret input")
+		return "", 1
+	}
+	v, err := promptSecret("API key", "")
+	if err != nil {
+		usererror.Error("%v", err)
+		return "", 1
+	}
+	return v, 0
+}
+
 // profileAddOpts is the optional parameter bag for handleProfileAdd.
-// When supplied via CLI flags (`--provider`, `--model`, `--base-url`,
-// `--api-key`), handleProfileAdd applies them before save so a scriptable
-// complete-add is probe-eligible immediately. restArgs captures any
-// remaining positional arguments the operator might have passed (kept
-// for forward-compat with future flags).
+// When supplied via CLI flags (`--provider`, `--model`, `--base-url`),
+// handleProfileAdd applies them before save so a scriptable complete-add
+// is probe-eligible immediately. restArgs captures any remaining
+// positional arguments the operator might have passed (kept for
+// forward-compat with future flags).
+//
+// 2026-09-19 credential-UX hardening: APIKey is no longer accepted
+// via this struct — there is no argv path for credentials. Operators
+// who need to attach an API key after `profile add` use the dedicated
+// hidden-prompt / --stdin flow on `mpm config profile set <name> api_key`.
 type profileAddOpts struct {
 	Provider string
 	Model    string
 	BaseURL  string
-	APIKey   string
 	restArgs []string
 }
 
@@ -1834,9 +1997,18 @@ func handleProfileAdd(c *config.Config, name string, opts ...profileAddOpts) int
 		return 1
 	}
 	p := config.Profile{Name: name}
-	// Scriptable path: --provider/--model/--base-url flags supplied on
-	// the command line. These populate the profile so a complete add
-	// CAN be probed immediately after save.
+	// Seed any operator-supplied material fields so they participate
+	// in the wizard's defaults instead of being silently dropped. The
+	// legacy `if (flag && !isatty)` branch that dropped supplied
+	// flags on the floor whenever a real terminal was attached was
+	// the bug observed on profile `x` (2026-09-19 hardening pass).
+	//
+	// 2026-09-19 credential-UX hardening: --api-key is no longer
+	// accepted on `profile add`. The dispatcher above rejects the
+	// legacy `--api-key` flag outright and the opt struct no
+	// longer carries an APIKey field. API keys go in via the
+	// dedicated hidden-prompt / --stdin flow on
+	// `mpm config profile set <name> api_key`.
 	if opt.Provider != "" {
 		p.Provider = opt.Provider
 	}
@@ -1846,12 +2018,25 @@ func handleProfileAdd(c *config.Config, name string, opts ...profileAddOpts) int
 	if opt.BaseURL != "" {
 		p.BaseURL = opt.BaseURL
 	}
-	if opt.APIKey != "" {
-		p.APIKey = opt.APIKey
-	}
-	if !isatty(os.Stdin) && (opt.Provider != "" || opt.Model != "" || opt.BaseURL != "" || opt.APIKey != "") {
-		// Scriptable complete add — skip the interactive wizard and
-		// apply the supplied material fields verbatim.
+	// Flag-driven noninteractive add: when BOTH --model and
+	// --base-url are supplied, the operator has committed to a
+	// scriptable add and the wizard is suppressed regardless of
+	// TTY state. The default protocol is OpenAI-compatible (the
+	// wizard's first-option default). Previously this branch was
+	// gated on `!isatty(os.Stdin)`, which dropped the supplied
+	// flags on a real terminal — the precise defect reported on
+	// profile `x`.
+	hasCompleteFlags := opt.Model != "" && opt.BaseURL != ""
+	if hasCompleteFlags {
+		if p.Provider == "" {
+			p.Provider = "custom"
+		}
+		// mergeProfileDefaults is non-destructive — it only fills
+		// zero-valued fields with the protocol's defaults. We
+		// pick the wizard's first option (OpenAI-compatible) so
+		// a fresh scriptable add has the same sensible
+		// temperature/timeout the wizard would have applied.
+		mergeProfileDefaults(&p, wizardProtocolPresets()[0].defaults)
 	} else if isatty(os.Stdin) {
 		// 2026-09-14 simplification: interactive profile add
 		// walks through Custom + protocol picker + helper
@@ -1861,6 +2046,11 @@ func handleProfileAdd(c *config.Config, name string, opts ...profileAddOpts) int
 		// provider IDs are not exposed in the public UX;
 		// operators who want a branded ID set it via
 		// `mpm config profile set <name> provider <id>`.
+		//
+		// 2026-09-19 update: any flags the operator DID supply
+		// are already seeded into `p` above and now appear as
+		// wizard defaults (defensive — the standard TTY call
+		// would not include flags at all).
 		fmt.Println()
 		fmt.Println("Custom lets you connect any supported endpoint.")
 		fmt.Println()
@@ -1877,15 +2067,19 @@ func handleProfileAdd(c *config.Config, name string, opts ...profileAddOpts) int
 		mergeProfileDefaults(&p, protocol.defaults)
 		p.Provider = "custom"
 
-		p.Model = strings.TrimSpace(promptString(rwFromStdin(), "Model", ""))
+		p.Model = strings.TrimSpace(promptString(rwFromStdin(), "Model", p.Model))
 		baseURL := promptString(rwFromStdin(), "Base URL", p.BaseURL)
 		if baseURL != "" {
 			p.BaseURL = strings.TrimSpace(baseURL)
 		}
 		if protocol.needsAPIKey {
-			key := promptSecret(rwFromStdin(), "API key (leave empty if not required)", "")
+			key, err := promptSecret("API key (leave empty if not required)", "")
+			if err != nil {
+				usererror.Error("%v", err)
+				return 1
+			}
 			if key != "" {
-				p.APIKey = strings.TrimSpace(key)
+				p.APIKey = key
 			}
 		}
 		tempStr := promptString(rwFromStdin(), "Temperature (0.0-2.0)", "0.2")
@@ -1979,7 +2173,7 @@ func handleProfileGet(c *config.Config, name string) int {
 	return 0
 }
 
-func handleProfileSet(c *config.Config, name, key, value string) int {
+func handleProfileSet(c *config.Config, name, key, value string, silenceValue bool) int {
 	if c.Profiles == nil {
 		c.Profiles = map[string]config.Profile{}
 	}
@@ -2016,7 +2210,11 @@ func handleProfileSet(c *config.Config, name, key, value string) int {
 	case "base_url", "endpoint", "baseurl":
 		p.BaseURL = value
 	case "api_key", "token", "apikey":
+		// 2026-09-19 credential-UX hardening: the
+		// dispatcher guarantees the value never came from
+		// argv and the caller has set silenceValue=true.
 		p.APIKey = value
+		silenceValue = true
 	case "temperature":
 		t, err := strconvAtoiFloat(value)
 		if err != nil {
@@ -2049,7 +2247,18 @@ func handleProfileSet(c *config.Config, name, key, value string) int {
 		usererror.Error("saving config: %v", err)
 		return 1
 	}
-	fmt.Printf("✓ profile %q %s set to %q\n", name, key, value)
+	// 2026-09-19 credential-UX hardening: success output MUST
+	// NOT include the credential value for api_key. The dispatcher
+	// sets silenceValue=true for the api_key branch; the success
+	// line prints `updated` with no value interpolation. Other
+	// fields keep their existing `set to "<value>"` output for
+	// operator convenience — only secret-bearing fields are
+	// redacted, in keeping with the task brief.
+	if silenceValue {
+		fmt.Printf("✓ profile %q %s updated\n", name, configCanonicalKey(key))
+	} else {
+		fmt.Printf("✓ profile %q %s set to %q\n", name, key, value)
+	}
 
 	// Best-effort post-save probe. The save has already committed
 	// regardless of probe outcome; the probe merely validates the

@@ -101,7 +101,7 @@ For non-interactive configuration (CI, scripts, agent-managed hosts):
 
 ```bash
 mpm config profile add default --provider openai --model gpt-4o --base-url https://api.openai.com/v1
-mpm config profile set default api_key "$OPENAI_API_KEY"
+printf '%s' "$OPENAI_API_KEY" | mpm config profile set default api_key --stdin
 mpm config component set memory default
 ```
 

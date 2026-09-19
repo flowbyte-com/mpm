@@ -23,13 +23,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	stdlibexec "os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
-	stdlibexec "os/exec"
 	"testing"
+	"time"
 
 	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/synth"
@@ -103,10 +103,15 @@ func TestMulti_A_FirstCustomLLMProfile(t *testing.T) {
 		t.Fatalf("profile add: %v", err)
 	}
 	const secret = "sk-aaa-very-long-secret-1234567890"
-	if _, err := runMpmCommand(t, bin, ws,
-		"config", "profile", "set", "primary", "api_key", secret,
-	); err != nil {
-		t.Fatalf("profile set api_key: %v", err)
+	// 2026-09-19 credential-UX hardening: positional secret on
+	// the command line is rejected; the canonical automation path
+	// is stdin.
+	setStdinCmd := stdlibexec.Command(bin,
+		"config", "profile", "set", "primary", "api_key", "--stdin")
+	setStdinCmd.Env = clearEmbeddingEnv(ws)
+	setStdinCmd.Stdin = strings.NewReader(secret + "\n")
+	if out, err := setStdinCmd.CombinedOutput(); err != nil {
+		t.Fatalf("profile set api_key (--stdin): %v\n%s", err, out)
 	}
 	out, err := runMpmCommand(t, bin, ws, "config", "profile", "get", "primary")
 	if err != nil {
@@ -203,7 +208,8 @@ func TestMulti_D_AllThreeCoexistAfterRoundTrip(t *testing.T) {
 }
 
 // E. Embedding profile is created with the role validator bypass
-//    when components.embedding is already bound to it.
+//
+//	when components.embedding is already bound to it.
 func TestMulti_E_EmbeddingProfileCreated(t *testing.T) {
 	bin := buildRunawayBin(t)
 	ws := t.TempDir()
@@ -533,9 +539,10 @@ func TestMulti_Q_SaveReloadRoundTrip(t *testing.T) {
 }
 
 // R. Secrets redacted in HUMAN output of profile list and profile get.
-// `mpm config profile add` does not accept --api-key non-interactively
-// in this build (the wizard prompts for the key). Use `profile set`
-// after `add` to populate the secret, then verify redaction.
+// 2026-09-19 credential-UX hardening: `profile add` no longer
+// accepts --api-key; the canonical secret-bearing flow is
+// `profile set <name> api_key --stdin`. The non-secret fields
+// (provider / model / base_url) keep their --flag surface.
 func TestMulti_R_SecretsRedactedInHumanOutput(t *testing.T) {
 	bin := buildRunawayBin(t)
 	ws := t.TempDir()
@@ -543,8 +550,16 @@ func TestMulti_R_SecretsRedactedInHumanOutput(t *testing.T) {
 	runMpmCommand(t, bin, ws, "config", "profile", "add", "primary",
 		"--provider", "custom", "--model", "model-a",
 		"--base-url", "https://a.invalid/v1")
-	if _, err := runMpmCommand(t, bin, ws, "config", "profile", "set", "primary", "api_key", secret); err != nil {
-		t.Fatalf("profile set api_key: %v", err)
+	// 2026-09-19 hardening: pass the secret via --stdin so it
+	// never enters argv. runMpmCommand pipes stdin via cmd.Stdin
+	// (see runMpmCommand); for --stdin to take effect we feed
+	// the secret explicitly.
+	setCmd := stdlibexec.Command(bin,
+		"config", "profile", "set", "primary", "api_key", "--stdin")
+	setCmd.Env = clearEmbeddingEnv(ws)
+	setCmd.Stdin = strings.NewReader(secret + "\n")
+	if out, err := setCmd.CombinedOutput(); err != nil {
+		t.Fatalf("profile set api_key --stdin: %v\n%s", err, out)
 	}
 	outList, _ := runMpmCommand(t, bin, ws, "config", "profile", "list")
 	if strings.Contains(outList, secret) {
@@ -570,8 +585,12 @@ func TestMulti_R2_SecretsRedactedInJSONOutput(t *testing.T) {
 	runMpmCommand(t, bin, ws, "config", "profile", "add", "primary",
 		"--provider", "custom", "--model", "model-a",
 		"--base-url", "https://a.invalid/v1")
-	if _, err := runMpmCommand(t, bin, ws, "config", "profile", "set", "primary", "api_key", secret); err != nil {
-		t.Fatalf("profile set api_key: %v", err)
+	setCmd := stdlibexec.Command(bin,
+		"config", "profile", "set", "primary", "api_key", "--stdin")
+	setCmd.Env = clearEmbeddingEnv(ws)
+	setCmd.Stdin = strings.NewReader(secret + "\n")
+	if out, err := setCmd.CombinedOutput(); err != nil {
+		t.Fatalf("profile set api_key --stdin: %v\n%s", err, out)
 	}
 	outList, _ := runMpmCommand(t, bin, ws, "config", "profile", "list", "--json")
 	if strings.Contains(outList, secret) {
@@ -1018,26 +1037,27 @@ func TestMulti_AF_NoBrandedCatalogueInHelp(t *testing.T) {
 }
 
 // AG. Dangling binding surfaced as invalid.
-//   2026-09-15 verification at HEAD 20c16c08:
 //
-//   Fixture: Profiles["default"] = valid generative profile;
-//            Components["critic"] = "missing" (dangling).
+//	2026-09-15 verification at HEAD 20c16c08:
 //
-//   Truthful contract (verified at HEAD 20c16c08):
-//     - Runtime falls through to Profiles["default"]
-//       (ProfileFor("critic") returns Name="default"; ModelFactory
-//       returns a non-nil client). This is the preserved
-//       pre-2026-09-15 behaviour — the runtime must not silently
-//       lose a model when an operator's binding is broken.
-//     - The CLI surfaces the dangling state explicitly so the
-//       operator sees the misconfig and rebinds:
-//         binding_source = "explicit, invalid"
-//         valid = false
-//         configured_profile = "missing"  (raw operator binding)
-//         effective_profile = "default"   (runtime-resolved fallback)
-//       Human output renders the binding string + "(explicit, invalid)"
-//       tag (does not show the resolved profile name in the human list
-//       view — that's the JSON envelope's job).
+//	Fixture: Profiles["default"] = valid generative profile;
+//	         Components["critic"] = "missing" (dangling).
+//
+//	Truthful contract (verified at HEAD 20c16c08):
+//	  - Runtime falls through to Profiles["default"]
+//	    (ProfileFor("critic") returns Name="default"; ModelFactory
+//	    returns a non-nil client). This is the preserved
+//	    pre-2026-09-15 behaviour — the runtime must not silently
+//	    lose a model when an operator's binding is broken.
+//	  - The CLI surfaces the dangling state explicitly so the
+//	    operator sees the misconfig and rebinds:
+//	      binding_source = "explicit, invalid"
+//	      valid = false
+//	      configured_profile = "missing"  (raw operator binding)
+//	      effective_profile = "default"   (runtime-resolved fallback)
+//	    Human output renders the binding string + "(explicit, invalid)"
+//	    tag (does not show the resolved profile name in the human list
+//	    view — that's the JSON envelope's job).
 func TestMulti_AG_DanglingBindingSurfacedAsInvalid(t *testing.T) {
 	bin := buildRunawayBin(t)
 	ws := t.TempDir()

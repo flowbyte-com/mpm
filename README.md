@@ -760,11 +760,10 @@ mpm ops stats
 mpm wake               # last session context
 
 # Swap the LLM provider — e.g. OpenRouter (any model, including the free tier):
-mpm config profile add router                           # interactive wizard on TTY; non-interactive creates an empty profile
+mpm config profile add router --model openai/gpt-4o-mini --base-url https://openrouter.ai/api/v1
 mpm config profile set router provider openrouter
-mpm config profile set router model openai/gpt-4o-mini
-mpm config profile set router base_url https://openrouter.ai/api/v1
-mpm config profile set router api_key <your openrouter key>
+mpm config profile set router api_key                     # hidden prompt (no echo)
+                                                        # or: printf '%s' "$KEY" | mpm config profile set router api_key --stdin
 mpm config component set memory router                   # bind memory writes to the new profile
                                                         # (auth header + endpoint are inferred from base_url)
 

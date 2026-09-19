@@ -798,8 +798,9 @@ mode_install() {
     log "  config file:    $DATA_ROOT/mpm_config.json (canonical; checked first)"
     log "  env-file path:  ~/.config/mpm/mpm.env (optional override; systemd unit sources it via EnvironmentFile=-)"
     log "  setup:          mpm config profile add default --model <model> --base-url <url>"
-    log "                  mpm config profile set default api_key <key>   # writes 0600 to mpm_config.json"
-    log "                  mpm config component set memory default         # bind component to profile"
+    log "                  mpm config profile set default api_key            # hidden prompt (no echo)"
+    log "                  mpm config component set memory default            # bind component to profile"
+    log "  automation:     printf '%s' \"\$KEY\" | mpm config profile set default api_key --stdin"
     log "  the installer did NOT create, store, request, or echo any API key or secret."
 }
 
