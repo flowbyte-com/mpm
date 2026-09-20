@@ -24,35 +24,68 @@ import (
 // RecentActivityEvent is the public wire shape for one semantic
 // activity record. Stable field names — do not rename without
 // bumping ContextVersion.
+//
+// Identity dimensions exposed on each event (Stage 2C.1):
+//
+//   SessionID            — legacy per-process dispatcher grouping
+//                          (from getOrMakeSessionID). Distinct from
+//                          canonical identities. Retained for
+//                          back-compat.
+//   MPMSessionID         — canonical MPM-owned continuity session.
+//                          Empty when no active MPM session existed
+//                          at audit time (or pre-Stage-2C.1 row).
+//   FrameworkSessionID   — host-owned native session identity.
+//                          Empty when host has no native session.
+//   InvocationID         — per-call correlation ID. Unique per call.
+//   ParentInvocationID   — causal lineage to the spawning invocation,
+//                          if any. Empty for root invocations.
 type RecentActivityEvent struct {
-	ID              string `json:"id"`
-	Timestamp       int64  `json:"timestamp"`     // unix seconds, completed_at
-	ActorKind       string `json:"actor_kind"`    // semantic (effective)
-	RawActorKind    string `json:"raw_actor_kind,omitempty"`
-	ActorID         string `json:"actor_id,omitempty"`
-	FrameworkName   string `json:"framework_name,omitempty"`
-	SessionID       string `json:"session_id,omitempty"`
-	InvocationID    string `json:"invocation_id,omitempty"`
-	ParentInvocationID string `json:"parent_invocation_id,omitempty"`
-	Tool            string `json:"tool"`
-	Action          string `json:"action"`
-	Category        string `json:"category"`        // mpm_memory / mpm_work / etc.
-	ArtifactType    string `json:"artifact_type,omitempty"`
-	ArtifactID      string `json:"artifact_id,omitempty"`
-	Status          string `json:"status"`          // success / error
-	Summary         string `json:"summary"`         // bounded, secret-safe
-	EnrichmentHint  string `json:"enrichment_hint,omitempty"` // e.g. "work_id:abc123"
+	ID                  string `json:"id"`
+	Timestamp           int64  `json:"timestamp"`     // unix seconds, completed_at
+	ActorKind           string `json:"actor_kind"`    // semantic (effective)
+	RawActorKind        string `json:"raw_actor_kind,omitempty"`
+	ActorID             string `json:"actor_id,omitempty"`
+	FrameworkName       string `json:"framework_name,omitempty"`
+	SessionID           string `json:"session_id,omitempty"`
+	MPMSessionID        string `json:"mpm_session_id,omitempty"`
+	FrameworkSessionID  string `json:"framework_session_id,omitempty"`
+	InvocationID        string `json:"invocation_id,omitempty"`
+	ParentInvocationID  string `json:"parent_invocation_id,omitempty"`
+	Tool                string `json:"tool"`
+	Action              string `json:"action"`
+	Category            string `json:"category"`        // mpm_memory / mpm_work / etc.
+	ArtifactType        string `json:"artifact_type,omitempty"`
+	ArtifactID          string `json:"artifact_id,omitempty"`
+	Status              string `json:"status"`          // success / error
+	Summary             string `json:"summary"`         // bounded, secret-safe
+	EnrichmentHint      string `json:"enrichment_hint,omitempty"` // e.g. "work_id:abc123"
 }
 
 // RecentActivityQueryParams is the bounded query input. Bounded by
 // design — no unbounded history, no crafted DSL.
+//
+// Identity filters (Stage 2C.1) are independent exact-match columns.
+// They MUST NOT collapse into one another:
+//
+//   SessionID           — filters tool_invocations.session_id
+//                          (legacy per-process dispatcher grouping).
+//   MPMSessionID        — filters tool_invocations.mpm_session_id
+//                          (canonical MPM continuity session).
+//   FrameworkSessionID  — filters tool_invocations.framework_session_id
+//                          (host-owned native session).
+//
+// A query that supplies only SessionID does NOT consult the
+// mpm_session_id column, and vice versa. The contract is exact-match
+// per column; no proximity/timestamp/PID/framework-name inference.
 type RecentActivityQueryParams struct {
-	Limit         int    // default 20, hard max 100
-	Since         int64  // unix seconds; 0 = no lower bound
-	ActorKind     string // filter by effective actor_kind (human/agent/all/unknown)
-	FrameworkName string // exact match
-	SessionID     string // exact match
-	ArtifactType  string // exact match on category (== tool_name)
+	Limit              int    // default 20, hard max 100
+	Since              int64  // unix seconds; 0 = no lower bound
+	ActorKind          string // filter by effective actor_kind (human/agent/all/unknown)
+	FrameworkName      string // exact match
+	SessionID          string // exact match — legacy dispatcher grouping
+	MPMSessionID       string // exact match — canonical MPM continuity session
+	FrameworkSessionID string // exact match — host-owned native session
+	ArtifactType       string // exact match on category (== tool_name)
 	// IncludeSystem is retained for legacy callers and is now a no-op:
 	// the substrate's tool_invocations does NOT comprehensively cover
 	// cascade-materializer / cascade-reconciler / scheduler-retention
@@ -188,6 +221,14 @@ func (dm *DatabaseManager) RecentActivityWithMeta(p RecentActivityQueryParams) (
 		where = append(where, "session_id = ?")
 		args = append(args, p.SessionID)
 	}
+	if p.MPMSessionID != "" {
+		where = append(where, "mpm_session_id = ?")
+		args = append(args, p.MPMSessionID)
+	}
+	if p.FrameworkSessionID != "" {
+		where = append(where, "framework_session_id = ?")
+		args = append(args, p.FrameworkSessionID)
+	}
 	if p.ArtifactType != "" {
 		where = append(where, "tool_name = ?")
 		args = append(args, p.ArtifactType)
@@ -196,7 +237,8 @@ func (dm *DatabaseManager) RecentActivityWithMeta(p RecentActivityQueryParams) (
 	baseQuery := `
 		SELECT id, session_id, tool_name, action, invocation_id,
 		       actor_kind, framework_name, payload_hash, result_status,
-		       started_at, completed_at, duration_ms, error_message
+		       started_at, completed_at, duration_ms, error_message,
+		       mpm_session_id, framework_session_id
 		FROM tool_invocations
 		WHERE ` + joinWhere(where) + `
 		ORDER BY completed_at DESC, id DESC`
@@ -282,10 +324,12 @@ func (dm *DatabaseManager) filterActivityPage(rows *sql.Rows, p RecentActivityQu
 			id, sessID, tool, act, invID, actKind, fwk, pHash, status, startedAt, completedAt string
 			dur                                                                                sql.NullInt64
 			errMsg                                                                             sql.NullString
+			mpmSID, fwSID                                                                      sql.NullString
 		)
 		if err := rows.Scan(&id, &sessID, &tool, &act, &invID,
 			&actKind, &fwk, &pHash, &status,
-			&startedAt, &completedAt, &dur, &errMsg); err != nil {
+			&startedAt, &completedAt, &dur, &errMsg,
+			&mpmSID, &fwSID); err != nil {
 			return nil, read, fmt.Errorf("RecentActivity scan: %w", err)
 		}
 
@@ -352,6 +396,12 @@ func (dm *DatabaseManager) filterActivityPage(rows *sql.Rows, p RecentActivityQu
 			Category:      tool,
 			Status:        status,
 			Summary:       activitySummary(tool, act, effectiveKind),
+		}
+		if mpmSID.Valid && mpmSID.String != "" {
+			ev.MPMSessionID = mpmSID.String
+		}
+		if fwSID.Valid && fwSID.String != "" {
+			ev.FrameworkSessionID = fwSID.String
 		}
 		if errMsg.Valid && errMsg.String != "" {
 			ev.Status = "error"

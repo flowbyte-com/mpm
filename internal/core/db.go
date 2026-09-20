@@ -2094,6 +2094,16 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("session_handoffs mpm_session_id migration failed: %w", err)
 	}
+	// tool_invocations mpm_session_id + framework_session_id — additive
+	// ALTER TABLE migration that surfaces the canonical session
+	// identity dimensions on the audit substrate so recent_activity
+	// can filter by either dimension. Both nullable so pre-existing
+	// rows remain valid (their original session_id is unchanged).
+	// Idempotent via tool_invocations_session_identity_v1 sentinel.
+	if err := MigrateToolInvocationsSessionIdentity(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("tool_invocations session_identity migration failed: %w", err)
+	}
 	// created_at_backfill_v1 — repairs rows whose created_at was
 	// inserted as NULL by the pre-fix seed path. read_directives
 	// scans created_at into a non-NULL Go string, so a single

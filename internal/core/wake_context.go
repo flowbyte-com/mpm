@@ -217,15 +217,26 @@ type WakeContextRule struct {
 // RecentActivityEvent used in the wake-context payload. Trims
 // the public wire shape to a glance-friendly subset so the wake
 // payload stays inside the 32 KB byte budget even on a busy agent.
+//
+// Identity dimensions exposed on each event (Stage 2C.1):
+//   - SessionID            — legacy per-process dispatcher grouping.
+//   - MPMSessionID         — canonical MPM continuity session.
+//   - FrameworkSessionID   — host-owned native session identity.
+// The three are independent columns on tool_invocations; the
+// wake-context payload mirrors them as independent fields so
+// downstream routing can pick the right axis without recomputing.
 type WakeContextActivity struct {
-	ID            string `json:"id"`
-	Timestamp     int64  `json:"timestamp"`
-	ActorKind     string `json:"actor_kind"`
-	FrameworkName string `json:"framework_name,omitempty"`
-	Tool          string `json:"tool"`
-	Action        string `json:"action"`
-	ArtifactID    string `json:"artifact_id,omitempty"`
-	Summary       string `json:"summary"`
+	ID                 string `json:"id"`
+	Timestamp          int64  `json:"timestamp"`
+	ActorKind          string `json:"actor_kind"`
+	FrameworkName      string `json:"framework_name,omitempty"`
+	SessionID          string `json:"session_id,omitempty"`
+	MPMSessionID       string `json:"mpm_session_id,omitempty"`
+	FrameworkSessionID string `json:"framework_session_id,omitempty"`
+	Tool               string `json:"tool"`
+	Action             string `json:"action"`
+	ArtifactID         string `json:"artifact_id,omitempty"`
+	Summary            string `json:"summary"`
 }
 
 // OverdueWake is a single row in the wake-context overdue-wakes
@@ -609,14 +620,17 @@ func (dm *DatabaseManager) gatherRecentActivity(limit int) []WakeContextActivity
 	out := make([]WakeContextActivity, 0, len(events))
 	for _, ev := range events {
 		out = append(out, WakeContextActivity{
-			ID:            ev.ID,
-			Timestamp:     ev.Timestamp,
-			ActorKind:     ev.ActorKind,
-			FrameworkName: ev.FrameworkName,
-			Tool:          ev.Tool,
-			Action:        ev.Action,
-			ArtifactID:    ev.ArtifactID,
-			Summary:       ev.Summary,
+			ID:                 ev.ID,
+			Timestamp:          ev.Timestamp,
+			ActorKind:          ev.ActorKind,
+			FrameworkName:      ev.FrameworkName,
+			SessionID:          ev.SessionID,
+			MPMSessionID:       ev.MPMSessionID,
+			FrameworkSessionID: ev.FrameworkSessionID,
+			Tool:               ev.Tool,
+			Action:             ev.Action,
+			ArtifactID:         ev.ArtifactID,
+			Summary:            ev.Summary,
 		})
 	}
 	return out

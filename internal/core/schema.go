@@ -1122,19 +1122,21 @@ var CommonIndexes = []string{
 	// drill scorers read "give me all calls in session X in time order" —
 	// so it lives in BaseTables rather than CommonIndexes.
 	`CREATE TABLE IF NOT EXISTS tool_invocations (
-		id              TEXT PRIMARY KEY,
-		session_id      TEXT NOT NULL,
-		tool_name       TEXT NOT NULL,
-		action          TEXT NOT NULL,
-		invocation_id   TEXT NOT NULL,
-		actor_kind      TEXT NOT NULL,
-		framework_name  TEXT,
-		payload_hash    TEXT NOT NULL,
-		result_status   TEXT NOT NULL CHECK (result_status IN ('success','error')),
-		started_at      INTEGER NOT NULL,
-		completed_at    INTEGER,
-		duration_ms     INTEGER,
-		error_message   TEXT
+		id                   TEXT PRIMARY KEY,
+		session_id           TEXT NOT NULL,
+		tool_name            TEXT NOT NULL,
+		action               TEXT NOT NULL,
+		invocation_id        TEXT NOT NULL,
+		actor_kind           TEXT NOT NULL,
+		framework_name       TEXT,
+		payload_hash         TEXT NOT NULL,
+		result_status        TEXT NOT NULL CHECK (result_status IN ('success','error')),
+		started_at           INTEGER NOT NULL,
+		completed_at         INTEGER,
+		duration_ms          INTEGER,
+		error_message        TEXT,
+		mpm_session_id       TEXT,
+		framework_session_id TEXT
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_tool_invocations_session
 		ON tool_invocations(session_id, started_at DESC);`,
@@ -1142,6 +1144,10 @@ var CommonIndexes = []string{
 		ON tool_invocations(invocation_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_tool_invocations_tool_time
 		ON tool_invocations(tool_name, started_at DESC);`,
+	`CREATE INDEX IF NOT EXISTS idx_tool_invocations_mpm_session
+		ON tool_invocations(mpm_session_id, completed_at DESC);`,
+	`CREATE INDEX IF NOT EXISTS idx_tool_invocations_framework_session
+		ON tool_invocations(framework_session_id, completed_at DESC);`,
 
 	// idx_provenance_parent_invocation: powers the agent invocation
 	// tree reconstruction query (WHERE parent_invocation_id = ?).

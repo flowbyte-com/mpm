@@ -69,6 +69,24 @@ func recordToolInvocation(
 		invocationID = uuid.NewString()
 	}
 	id := uuid.NewString()
+	// Three independent session dimensions (Stage 2C.1):
+	//
+	//   session_id           — legacy / local dispatcher grouping
+	//                          (per-process UUID from
+	//                          getOrMakeSessionID). Distinct from
+	//                          both canonical identities by design.
+	//   mpm_session_id       — MPM-owned continuity identity from
+	//                          ActiveContext. Empty when no active
+	//                          MPM session exists for the dispatch
+	//                          (fresh workspace, before first
+	//                          acquire). NEVER synthesized from
+	//                          session_id.
+	//   framework_session_id — host-owned native session identity
+	//                          from ActiveContext (=
+	//                          MPM_PROVENANCE_FRAMEWORK_SESSION_ID).
+	//                          Empty when host has no native
+	//                          session. NEVER synthesized from
+	//                          mpm_session_id or session_id.
 	sessionID := ac.SessionID
 	if sessionID == "" {
 		sessionID = "cli-default"
@@ -89,16 +107,27 @@ func recordToolInvocation(
 		errorMessage = err.Error()
 	}
 
+	// Helper: write nullable column or NULL.
+	nullStr := func(s string) interface{} {
+		if s == "" {
+			return nil
+		}
+		return s
+	}
+
 	_, auditErr := dm.Exec(`
 		INSERT INTO tool_invocations
 		    (id, session_id, tool_name, action, invocation_id,
 		     actor_kind, framework_name, payload_hash, result_status,
-		     started_at, completed_at, duration_ms, error_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     started_at, completed_at, duration_ms, error_message,
+		     mpm_session_id, framework_session_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, sessionID, toolName, action, invocationID,
 		actorKind, frameworkName, sha256OfPayload(payload), resultStatus,
 		startedAt.Unix(), completedAt.Unix(), completedAt.Sub(startedAt).Milliseconds(),
 		errorMessage,
+		nullStr(ac.MPMSessionID),
+		nullStr(ac.FrameworkSessionID),
 	)
 	if auditErr != nil {
 		slog.Warn("audit insert failed", "tool", toolName, "err", auditErr.Error())
