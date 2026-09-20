@@ -662,10 +662,47 @@ func resolveExplicitArtifact(dm *DatabaseManager, id string) (string, bool) {
 // For each unresolved id, the function increments the unresolved
 // count so CandidateGenerationDiag can surface it. Unresolved ids
 // do NOT produce fake candidates.
-func addExplicitReferenceCandidates(dm *DatabaseManager, q ContextQuery, acc map[string]*candidateAccumulator) int {
-	unresolved := 0
-	for _, id := range q.ArtifactIDs {
+// addExplicitReferenceCandidates surfaces caller-supplied
+// artifact ids (q.ArtifactIDs) as first-class candidates with
+// reason `explicit_reference`. An explicit reference is the
+// strongest deterministic context signal: it must surface even
+// when no other relationship exists.
+//
+// For each unresolved id, the function increments the unresolved
+// count so CandidateGenerationDiag can surface it. Unresolved ids
+// do NOT produce fake candidates.
+//
+// Bound contract (Stage 2D.2):
+//   - limits.ExplicitRef caps the number of resolved candidates
+//     emitted (per-source). Default 8.
+//   - limits.ExplicitRefInputMax caps the number of q.ArtifactIDs
+//     entries actually probed. Default 64. Caller cannot force
+//     unbounded scans; truncated ids increment
+//     UnresolvedExplicitRefs as InputTruncated.
+//   - Both bounds default via DefaultCandidateLimits().
+func addExplicitReferenceCandidates(dm *DatabaseManager, q ContextQuery, limits CandidateLimits, acc map[string]*candidateAccumulator) (unresolved, inputTruncated int) {
+	maxProbe := limits.ExplicitRefInputMax
+	if maxProbe <= 0 {
+		maxProbe = 64
+	}
+	maxEmit := limits.ExplicitRef
+	if maxEmit <= 0 {
+		maxEmit = 8
+	}
+	emitted := 0
+	for i, id := range q.ArtifactIDs {
 		if id == "" {
+			continue
+		}
+		if i >= maxProbe {
+			inputTruncated++
+			continue
+		}
+		if emitted >= maxEmit {
+			// Reached emit cap; remaining (within probe cap) are
+			// not probed because the emit budget is full. They
+			// count as input-truncated for diagnostics.
+			inputTruncated++
 			continue
 		}
 		kind, ok := resolveExplicitArtifact(dm, id)
@@ -678,11 +715,14 @@ func addExplicitReferenceCandidates(dm *DatabaseManager, q ContextQuery, acc map
 		a.summary = "" // selection-stage materialization
 		addReason(a, ReasonExplicitReference)
 		markSource(a, "explicit_reference")
+		emitted++
 		// If this artifact is superseded, also surface the
 		// canonical successor as a candidate with explicit linkage
 		// between them. This preserves "A is historical, B is
 		// canonical current" as a deterministic chain the
-		// downstream selector can observe.
+		// downstream selector can observe. The successor does
+		// NOT count against the explicit_ref emit cap — it is
+		// structural metadata about the predecessor.
 		if kind == "theory" {
 			var successor sql.NullString
 			if err := dm.db.QueryRow(
@@ -691,9 +731,6 @@ func addExplicitReferenceCandidates(dm *DatabaseManager, q ContextQuery, acc map
 				id,
 			).Scan(&successor); err == nil && successor.Valid && successor.String != "" {
 				addRelated(a, successor.String)
-				// Also surface the successor as its own
-				// candidate so downstream selectors see BOTH
-				// the historical A and the canonical B.
 				if _, exists := acc[candidateKey("theory", successor.String)]; !exists {
 					b := ensureCandidate(acc, "theory", successor.String)
 					b.pointer = "mpm://theory/" + successor.String
@@ -705,7 +742,7 @@ func addExplicitReferenceCandidates(dm *DatabaseManager, q ContextQuery, acc map
 			}
 		}
 	}
-	return unresolved
+	return unresolved, inputTruncated
 }
 
 // pointerForKind returns the canonical mpm:// URI for a resolved

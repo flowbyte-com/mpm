@@ -40,6 +40,20 @@ At the beginning of a new agent session, **before any substantive work**:
   skills, and other bounded wake information exposed by the current
   wake-context projection). The full field list lives on the
   `WakeContextData` struct in `internal/core/wake_context.go`.
+- When the wake projection does not surface what you need, or when
+  the user prompt asks "what might matter?" / "what should I look
+  at?" / "what's structurally relevant?", invoke
+  `mpm_context contextual_candidates` for a deterministic, bounded,
+  pointer-first candidate set with structural reasons. This surface
+  is observational (does not mutate persistent state), bounded
+  (default global cap 50, per-source caps enforced), and
+  reason-tagged (every candidate carries one or more bounded reason
+  tokens — open_work, overdue_wake, explicit_reference,
+  cascade_pending, handoff_for_current_context, supersession_chain,
+  …). It is NOT relevance-ranked and does NOT use LLM/embeddings;
+  every candidate is equally weighted. Stage 2E will add the
+  selection-stage ranking layer on top; for now this surface is the
+  authoritative pre-ranking candidate set.
 - Recover prior decisions, lessons, work-in-progress, and unresolved
   threads. Decisions surface lives behind `mpm_decisions show | list |
   query`; lessons behind `mpm_lessons search | list`; in-flight work

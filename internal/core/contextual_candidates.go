@@ -64,31 +64,42 @@ type ContextQuery struct {
 // CandidateLimits bounds per-source and total candidate counts. A
 // zero value uses DefaultCandidateLimits.
 type CandidateLimits struct {
-	Work       int `json:"work,omitempty"`       // active work + recent
-	Handoff    int `json:"handoff,omitempty"`    // latest relevant
-	Activity   int `json:"activity,omitempty"`   // recent semantic
-	Epistemic  int `json:"epistemic,omitempty"`  // theory/decision/lesson/evidence
-	Cascade    int `json:"cascade,omitempty"`    // cascade obligations
-	Wake       int `json:"wake,omitempty"`       // overdue + pending
-	Scratchpad int `json:"scratchpad,omitempty"` // active scratchpad items
-	Topic      int `json:"topic,omitempty"`      // topic-bounded neighbors
-	Global     int `json:"global,omitempty"`     // total cap after dedup
+	Work        int `json:"work,omitempty"`         // active work + recent
+	Handoff     int `json:"handoff,omitempty"`      // latest relevant
+	Activity    int `json:"activity,omitempty"`     // recent semantic
+	Epistemic   int `json:"epistemic,omitempty"`    // theory/decision/lesson/evidence
+	Cascade     int `json:"cascade,omitempty"`      // cascade obligations
+	Wake        int `json:"wake,omitempty"`         // overdue + pending
+	Scratchpad  int `json:"scratchpad,omitempty"`   // active scratchpad items
+	Topic       int `json:"topic,omitempty"`        // topic-bounded neighbors
+	ExplicitRef int `json:"explicit_ref,omitempty"` // caller-supplied artifact ids
+	Global      int `json:"global,omitempty"`       // total cap after dedup
+	// ExplicitRefInputMax bounds the number of q.ArtifactIDs
+	// entries actually probed; callers cannot force unbounded
+	// scans. Truncated ids increment UnresolvedExplicitRefs.
+	ExplicitRefInputMax int `json:"explicit_ref_input_max,omitempty"`
 }
 
 // DefaultCandidateLimits returns the canonical bounded defaults for
 // Stage 2D. Tuned for a wake-context-friendly output (≤ ~50 dedup
 // candidates, with per-source caps that preserve diversity).
+// Sum of per-source bounds: 51 (43 prior + 8 explicit_ref). With
+// Global=50, default behaviour may truncate by at most 1 candidate
+// when every source is fully populated, so the diversity policy is
+// the protective guarantee, not the cap arithmetic.
 func DefaultCandidateLimits() CandidateLimits {
 	return CandidateLimits{
-		Work:       8,
-		Handoff:    3,
-		Activity:   8,
-		Epistemic:  8,
-		Cascade:    4,
-		Wake:       4,
-		Scratchpad: 4,
-		Topic:      4,
-		Global:     50,
+		Work:                8,
+		Handoff:             3,
+		Activity:            8,
+		Epistemic:           8,
+		Cascade:             4,
+		Wake:                4,
+		Scratchpad:          4,
+		Topic:               4,
+		ExplicitRef:         8,
+		Global:              50,
+		ExplicitRefInputMax: 64,
 	}
 }
 
@@ -173,6 +184,11 @@ type CandidateGenerationDiag struct {
 	// UnresolvedExplicitRefs counts explicit caller-supplied
 	// ArtifactIDs that did not resolve to a known MPM artifact.
 	UnresolvedExplicitRefs int `json:"unresolved_explicit_refs"`
+	// InputTruncated counts explicit ArtifactIDs that were
+	// NOT probed because ExplicitRefInputMax was reached. These
+	// are NOT the same as UnresolvedExplicitRefs (the latter
+	// were probed and found nothing).
+	InputTruncated int `json:"input_truncated"`
 	// TotalRaw is the pre-dedup unique-key count.
 	TotalRaw int `json:"total_raw"`
 	// TotalAfterDedup is the post-dedup unique-key count (before
@@ -316,7 +332,7 @@ func (dm *DatabaseManager) GenerateContextualCandidates(q ContextQuery) (Candida
 
 	// ── Source I: explicit caller-supplied artifact references
 	before = len(acc)
-	unresolvedExplicitRefs := addExplicitReferenceCandidates(dm, q, acc)
+	unresolvedExplicitRefs, inputTruncated := addExplicitReferenceCandidates(dm, q, limits, acc)
 	emittedBySource["explicit_reference"] = len(acc) - before
 	_ = record // quiet unused if all source helpers don't return considered
 
@@ -351,6 +367,7 @@ func (dm *DatabaseManager) GenerateContextualCandidates(q ContextQuery) (Candida
 			EmittedBySource:        emittedBySource,
 			FinalBySource:          finalBySource,
 			UnresolvedExplicitRefs: unresolvedExplicitRefs,
+			InputTruncated:         inputTruncated,
 			TotalRaw:               len(acc),
 			TotalAfterDedup:        len(out),
 			GlobalCapApplied:       globalCapApplied,
@@ -379,54 +396,197 @@ type candidateAccumulator struct {
 	summary              string
 }
 
-// materialize converts the accumulator map into a sorted,
-// bounded []Candidate. Deterministic order: by kind ascending,
-// then by artifact_id ascending.
+// diversityMustSurviveReasons enumerates the structural reasons
+// that, when present on a candidate, guarantee that candidate
+// survives global-cap truncation. These are caller-context and
+// live-obligation signals; they must not be silently dropped by
+// diversity arithmetic.
+//
+// The list is closed and ordered; order matters because
+// tie-breaks within Pass 1 follow this sequence.
+var diversityMustSurviveReasons = []string{
+	string(ReasonExplicitReference), // caller-supplied; first-class
+	string(ReasonOverdueWake),       // imminent obligation
+	string(ReasonCascadePending),    // unresolved downstream
+	string(ReasonHandoffForContext), // session continuity
+	string(ReasonOpenWork),          // explicit active work
+}
+
+// materialCandidate constructs a Candidate from an accumulator
+// entry. Used by materialize and the diversity policy.
+func materialCandidate(a *candidateAccumulator) Candidate {
+	reasons := setToSortedSlice(a.reasons)
+	relatedIDs := setToSortedSlice(a.relatedIDs)
+	sources := setToSortedSlice(a.sources)
+	id := a.kind + ":" + a.artifactID
+	summary := a.summary
+	if len(summary) > 200 {
+		summary = summary[:200]
+	}
+	return Candidate{
+		ID:                   id,
+		Kind:                 a.kind,
+		ArtifactID:           a.artifactID,
+		Pointer:              a.pointer,
+		Timestamp:            a.timestamp,
+		ActorKind:            a.actorKind,
+		FrameworkName:        a.frameworkName,
+		MPMSessionID:         a.mpmSessionID,
+		FrameworkSessionID:   a.fwSessionID,
+		Reasons:              reasons,
+		RelatedIDs:           relatedIDs,
+		LifecycleState:       a.lifecycleState,
+		RelationshipPolarity: a.relationshipPolarity,
+		Source:               strings.Join(sources, ","),
+		Summary:              summary,
+	}
+}
+
+// materialize converts the accumulator map into a sorted, bounded
+// []Candidate using a deterministic diversity policy.
+//
+// Algorithm (NO numeric scoring; NO ranking):
+//
+// PASS 0 — sort all candidates by (kind, artifact_id) for
+//
+//	deterministic ordering.
+//
+// PASS 1 — retain every candidate carrying any
+//
+//	diversityMustSurviveReason (in reason-priority order).
+//	This guarantees explicit caller refs, overdue wakes,
+//	pending cascades, handoff continuity, and open work
+//	survive regardless of cap pressure.
+//
+// PASS 2 — fill remaining slots by source-category round-robin:
+//
+//	iterate populated source categories in fixed order,
+//	drawing the next-best candidate from each, until the
+//	cap is reached. Tie-break within a source category
+//	follows the PASS 0 sort.
+//
+// The result is structural, deterministic, and observably
+// category-balanced. Stage 2E may rank the survivors; this layer
+// only guarantees representation.
 func materialize(acc map[string]*candidateAccumulator, globalCap int) []Candidate {
-	out := make([]Candidate, 0, len(acc))
+	all := make([]Candidate, 0, len(acc))
 	for _, a := range acc {
-		reasons := setToSortedSlice(a.reasons)
-		relatedIDs := setToSortedSlice(a.relatedIDs)
-		sources := setToSortedSlice(a.sources)
-		// Stable, deterministic id is kind + ":" + artifact_id.
-		id := a.kind + ":" + a.artifactID
-		// Cap summary length defensively (any caller-supplied
-		// description gets truncated to 200 chars to keep the
-		// candidate envelope bounded).
-		summary := a.summary
-		if len(summary) > 200 {
-			summary = summary[:200]
-		}
-		out = append(out, Candidate{
-			ID:                   id,
-			Kind:                 a.kind,
-			ArtifactID:           a.artifactID,
-			Pointer:              a.pointer,
-			Timestamp:            a.timestamp,
-			ActorKind:            a.actorKind,
-			FrameworkName:        a.frameworkName,
-			MPMSessionID:         a.mpmSessionID,
-			FrameworkSessionID:   a.fwSessionID,
-			Reasons:              reasons,
-			RelatedIDs:           relatedIDs,
-			LifecycleState:       a.lifecycleState,
-			RelationshipPolarity: a.relationshipPolarity,
-			Source:               strings.Join(sources, ","),
-			Summary:              summary,
-		})
+		all = append(all, materialCandidate(a))
 	}
-	// Deterministic sort: kind, then artifact_id.
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Kind != out[j].Kind {
-			return out[i].Kind < out[j].Kind
+	// PASS 0: deterministic baseline order.
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].Kind != all[j].Kind {
+			return all[i].Kind < all[j].Kind
 		}
-		return out[i].ArtifactID < out[j].ArtifactID
+		return all[i].ArtifactID < all[j].ArtifactID
 	})
-	// Apply global cap.
-	if globalCap > 0 && len(out) > globalCap {
-		out = out[:globalCap]
+
+	if globalCap <= 0 || len(all) <= globalCap {
+		return all
 	}
-	return out
+
+	// PASS 1: must-survive reasons.
+	retained := make([]Candidate, 0, globalCap)
+	retainedID := make(map[string]struct{}, globalCap)
+	addRetained := func(c Candidate) bool {
+		if len(retained) >= globalCap {
+			return false
+		}
+		if _, dup := retainedID[c.ID]; dup {
+			return true
+		}
+		retained = append(retained, c)
+		retainedID[c.ID] = struct{}{}
+		return true
+	}
+	for _, reason := range diversityMustSurviveReasons {
+		for _, c := range all {
+			if !hasReason(c, reason) {
+				continue
+			}
+			if !addRetained(c) {
+				break
+			}
+		}
+		if len(retained) >= globalCap {
+			break
+		}
+	}
+
+	if len(retained) >= globalCap {
+		return retained
+	}
+
+	// PASS 2: round-robin fill by source category. Source is a
+	// comma-joined string (a candidate may carry multiple
+	// sources); the primary source is the first comma-token.
+	sourceOrder := []string{
+		"explicit_reference",
+		"work",
+		"handoff",
+		"cascade",
+		"wake",
+		"epistemic",
+		"activity",
+		"scratchpad",
+		"topic",
+	}
+	// Build per-source buckets in PASS 0 order.
+	buckets := make(map[string][]Candidate, len(sourceOrder))
+	for _, c := range all {
+		if _, dup := retainedID[c.ID]; dup {
+			continue
+		}
+		primary := primarySource(c.Source)
+		buckets[primary] = append(buckets[primary], c)
+	}
+	// Round-robin over the populated source order. Each pass
+	// takes the next un-retained candidate from each bucket;
+	// buckets exhaust naturally when empty.
+	advanced := true
+	for advanced && len(retained) < globalCap {
+		advanced = false
+		for _, src := range sourceOrder {
+			if len(retained) >= globalCap {
+				break
+			}
+			bucket := buckets[src]
+			if len(bucket) == 0 {
+				continue
+			}
+			// Pop the front (PASS 0 order).
+			c := bucket[0]
+			buckets[src] = bucket[1:]
+			if _, dup := retainedID[c.ID]; dup {
+				advanced = true
+				continue
+			}
+			retained = append(retained, c)
+			retainedID[c.ID] = struct{}{}
+			advanced = true
+		}
+	}
+
+	return retained
+}
+
+// hasReason reports whether the candidate carries the given
+// reason string.
+func hasReason(c Candidate, r string) bool {
+	for _, cr := range c.Reasons {
+		if cr == r {
+			return true
+		}
+	}
+	return false
+}
+
+// primarySource returns the first comma-token of a Source field.
+func primarySource(s string) string {
+	if i := strings.IndexByte(s, ','); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 func setToSortedSlice(s map[string]struct{}) []string {
@@ -444,7 +604,8 @@ func setToSortedSlice(s map[string]struct{}) []string {
 func isZeroLimits(l CandidateLimits) bool {
 	return l.Work == 0 && l.Handoff == 0 && l.Activity == 0 &&
 		l.Epistemic == 0 && l.Cascade == 0 && l.Wake == 0 &&
-		l.Scratchpad == 0 && l.Topic == 0 && l.Global == 0
+		l.Scratchpad == 0 && l.Topic == 0 && l.ExplicitRef == 0 &&
+		l.Global == 0 && l.ExplicitRefInputMax == 0
 }
 
 // candidateKey returns the deterministic merge key.
