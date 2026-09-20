@@ -228,6 +228,14 @@ type CoreDB interface {
 	// recent_activity.go for the bounded-pagination contract.
 	RecentActivityWithMeta(p RecentActivityQueryParams) (RecentActivityResult, error)
 
+	// ─── Contextual Candidates (Stage 2D surface) ─────────────────
+	// GenerateContextualCandidates produces a deterministic bounded
+	// candidate set answering "what from the shared cognitive state
+	// might matter to the current agent". Read-only, no LLM, no
+	// embeddings. The result carries structural reasons per
+	// candidate. See contextual_candidates.go.
+	GenerateContextualCandidates(q ContextQuery) (CandidateGenerationResult, error)
+
 	// ─── Ingest ──────────────────────────────────────────────────────
 	IngestOpenClaw(sourcePath string, batchSize int, importBatch string, dryRun bool) (*IngestStats, error)
 	IngestFromAdapter(dbPath string, adapter SchemaAdapter, batchSize int, importBatch string, dryRun bool) (*IngestStats, error)

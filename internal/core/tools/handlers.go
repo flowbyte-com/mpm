@@ -6374,8 +6374,10 @@ func handleMpmContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		return handleRoute(dm, ac, params)
 	case "recent_activity":
 		return handleRecentActivity(dm, ac, params)
+	case "contextual_candidates":
+		return handleContextualCandidates(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_context. Valid actions include read_wake_context, read_directives, proactive_recall_hint, query_global_rules, record_global_rule, retire_global_rule, promote_to_global, route, recent_activity", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_context. Valid actions include read_wake_context, read_directives, proactive_recall_hint, query_global_rules, record_global_rule, retire_global_rule, promote_to_global, route, recent_activity, contextual_candidates", action)
 	}
 }
 
