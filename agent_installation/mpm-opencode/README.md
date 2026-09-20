@@ -138,7 +138,7 @@ Variables set:
 | Variable | Value |
 |---|---|
 | `MPM_PROVENANCE_FRAMEWORK` | `opencode` |
-| `MPM_PROVENANCE_PARENT_INVOCATION_ID` | OpenCode session ID |
+| `MPM_PROVENANCE_FRAMEWORK_SESSION_ID` | OpenCode `ctx.sessionID` |
 
 Additionally, **every programmatic tool call** (via the 17 registered typed tools) includes provenance env vars via `callMpmWithProvenance`:
 | Variable | Value |
@@ -146,7 +146,17 @@ Additionally, **every programmatic tool call** (via the 17 registered typed tool
 | `MPM_PROVENANCE_FRAMEWORK` | `opencode` |
 | `MPM_PROVENANCE_MODEL` | Current model ID (e.g., `deepseek-v4-flash-free`) |
 | `MPM_PROVENANCE_INVOCATION_ID` | Unique per-call UUID (`inv_...`) |
-| `MPM_PROVENANCE_PARENT_INVOCATION_ID` | OpenCode session ID |
+| `MPM_PROVENANCE_FRAMEWORK_SESSION_ID` | OpenCode `ctx.sessionID` |
+
+Stage 2C.2 (2026-09-20): OpenCode's `ctx.sessionID` is the host's
+continuing conversation/session identity, NOT an invocation-lineage
+ancestor. It maps to the canonical framework-session slot so the
+substrate records it as framework-owned session identity on
+`tool_invocations.framework_session_id`,
+`artifact_provenance.framework_session_id`, and
+`session_handoffs.framework_session_id`. The
+`MPM_PROVENANCE_PARENT_INVOCATION_ID` slot stays empty unless OpenCode
+separately exposes a true causal parent invocation identifier.
 
 These match the [Claude Code integration's provenance variables](agent_installation/mpm-claude-code/CLAUDE_CODE_INTEGRATION.md#12-provenance-environment-variables).
 

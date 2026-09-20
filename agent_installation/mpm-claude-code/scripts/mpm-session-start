@@ -22,7 +22,15 @@ if [ -n "${CLAUDE_INVOCATION_ID:-}" ]; then
   export MPM_PROVENANCE_INVOCATION_ID="$CLAUDE_INVOCATION_ID"
 fi
 if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
-  export MPM_PROVENANCE_PARENT_INVOCATION_ID="$CLAUDE_SESSION_ID"
+  # Stage 2C.2: CLAUDE_SESSION_ID is Claude Code's native conversational
+  # /session identity, NOT an invocation-lineage ancestor. It maps to the
+  # canonical MPM_PROVENANCE_FRAMEWORK_SESSION_ID slot so the substrate
+  # stamps it onto tool_invocations.framework_session_id and
+  # session_handoffs.framework_session_id.
+  # Parent-invocation lineage (MPM_PROVENANCE_PARENT_INVOCATION_ID) is
+  # only set when Claude Code separately exposes a true causal parent
+  # invocation identifier, which it does not today.
+  export MPM_PROVENANCE_FRAMEWORK_SESSION_ID="$CLAUDE_SESSION_ID"
 fi
 
 # Workspace: prefer MPM_WORKSPACE (canonical install root), fall back to

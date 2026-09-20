@@ -61,18 +61,28 @@
 // call, providing framework attribution for MPM's audit trail:
 //
 //   MPM_PROVENANCE_FRAMEWORK=openclaw
-//   MPM_PROVENANCE_PARENT_INVOCATION_ID=<current sessionKey, if available>
+//   MPM_PROVENANCE_FRAMEWORK_SESSION_ID=<current sessionKey, if available>
 //
-// Stage 2B (2026-09-19): the canonical session-identity surface is
-// MPM_PROVENANCE_PARENT_INVOCATION_ID, not the previously-used
-// MPM_PROVENANCE_SESSION_KEY. OpenClaw's sessionKey is the
-// agent-of-this-session identifier; the substrate's provenance
-// resolver (internal/core/provenance.go) reads
-// MPM_PROVENANCE_PARENT_INVOCATION_ID via ActiveContextFromEnv and
-// stamps it into EffectiveProvenance.ParentInvocationID. The legacy
-// _SESSION_KEY name was silently dropped by the substrate, so
-// session attribution never reached artifact_provenance. Renaming
-// the env var to the canonical _PARENT_INVOCATION_ID closes that gap.
+// Stage 2C.2 (2026-09-20): OpenClaw's sessionKey is the native
+// host-conversation /session identity. It maps to the canonical
+// MPM_PROVENANCE_FRAMEWORK_SESSION_ID slot so the substrate stamps
+// it onto tool_invocations.framework_session_id and
+// session_handoffs.framework_session_id.
+//
+// Stage 2B (2026-09-19, superseded): the previous slot was
+// MPM_PROVENANCE_PARENT_INVOCATION_ID, which conflated host session
+// identity with invocation-lineage ancestry. The substrate
+// (internal/core/provenance.go) stamps
+// MPM_PROVENANCE_PARENT_INVOCATION_ID into
+// EffectiveProvenance.ParentInvocationID → artifact_provenance.parent_invocation_id,
+// which is a causal-lineage field, not a session-identity field. The
+// Stage 2B env-var rename from _SESSION_KEY to _PARENT_INVOCATION_ID
+// caused OpenClaw session identity to contaminate
+// artifact_provenance.parent_invocation_id on every call. Stage 2C.2
+// moves sessionKey to the correct FRAMEWORK_SESSION_ID slot and
+// leaves PARENT_INVOCATION_ID empty unless OpenClaw separately
+// exposes a true causal parent invocation identifier (it does not
+// today).
 //
 // OpenClaw does not expose model name or invocation ID in the hook context,
 // so those fields are left unset (never fabricated).
@@ -206,8 +216,12 @@ async function callMpmTool(tool, payload, opts) {
  * @param {number} opts.timeoutMs
  * @param {string} opts.frameworkId  — provenance framework identifier
  * @param {string} [opts.sessionKey] — OpenClaw sessionKey for provenance;
- *   stamped as MPM_PROVENANCE_PARENT_INVOCATION_ID (canonical) so the
- *   substrate's provenance resolver picks it up.
+ *   stamped as MPM_PROVENANCE_FRAMEWORK_SESSION_ID (canonical) so the
+ *   substrate's provenance resolver picks it up as host-session identity.
+ *   Parent-invocation lineage (MPM_PROVENANCE_PARENT_INVOCATION_ID) is
+ *   intentionally NOT populated by this hook — OpenClaw does not expose
+ *   a causal parent invocation identifier, and conflating the two
+ *   polluted artifact_provenance.parent_invocation_id before Stage 2C.2.
  * @returns {Promise<string>}
  */
 async function fetchWakeContext(opts) {
@@ -217,7 +231,7 @@ async function fetchWakeContext(opts) {
     MPM_LOG_FORMAT: "json",
     MPM_PROVENANCE_FRAMEWORK: frameworkId,
   };
-  if (sessionKey) env.MPM_PROVENANCE_PARENT_INVOCATION_ID = sessionKey;
+  if (sessionKey) env.MPM_PROVENANCE_FRAMEWORK_SESSION_ID = sessionKey;
 
   return new Promise((resolve) => {
     let child;
@@ -689,19 +703,28 @@ export default definePluginEntry({
         MPM_PROVENANCE_FRAMEWORK: MPM_FRAMEWORK_ID,
       };
       // OpenClaw sessionKey is the closest equivalent to Claude Code's
-      // CLAUDE_SESSION_ID. Stamp it as MPM_PROVENANCE_PARENT_INVOCATION_ID
-      // — the canonical env var the substrate's provenance resolver reads
-      // (via ActiveContextFromEnv → provenanceFromContext →
-      // EffectiveProvenance.ParentInvocationID). The previous
-      // MPM_PROVENANCE_SESSION_KEY name was silently dropped by the
-      // substrate, leaving session identity invisible to artifact_provenance.
+      // CLAUDE_SESSION_ID — the host's continuing conversation/session
+      // identity. Stage 2C.2: stamp it as
+      // MPM_PROVENANCE_FRAMEWORK_SESSION_ID (canonical host-session
+      // slot) so the substrate's provenance resolver records it as
+      // framework-owned session identity on tool_invocations +
+      // artifact_provenance, NOT as causal invocation lineage.
+      //
+      // History: previously stamped as
+      // MPM_PROVENANCE_PARENT_INVOCATION_ID (Stage 2B), which conflated
+      // host session with invocation ancestry and polluted
+      // artifact_provenance.parent_invocation_id on every OpenClaw call.
+      // The legacy MPM_PROVENANCE_SESSION_KEY name was silently dropped
+      // by the substrate before Stage 2B; that rename to
+      // _PARENT_INVOCATION_ID fixed drop but introduced the
+      // session-vs-lineage conflation this change reverses.
       //
       // Prefer ctx.sessionKey (the actual location for this hook too)
       // and fall back to event.sessionKey for any caller that mirrors
       // it on the event.
       const sessionKey = ctx?.sessionKey || event?.sessionKey;
       if (sessionKey) {
-        env.MPM_PROVENANCE_PARENT_INVOCATION_ID = sessionKey;
+        env.MPM_PROVENANCE_FRAMEWORK_SESSION_ID = sessionKey;
       }
       // Model name is not available in the OpenClaw hook context.
       // MPM_PROVENANCE_MODEL is intentionally omitted rather than

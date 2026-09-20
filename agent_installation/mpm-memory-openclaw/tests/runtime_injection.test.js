@@ -240,21 +240,32 @@ test("runtime injection: heartbeat_prompt_contribution also delivers wake", asyn
   assert.ok(result.prependContext.includes(FAKE_WAKE));
 });
 
-test("runtime injection: resolve_exec_env attaches MPM_PROVENANCE_PARENT_INVOCATION_ID", async () => {
+test("runtime injection: resolve_exec_env attaches MPM_PROVENANCE_FRAMEWORK_SESSION_ID", async () => {
   const { stdout } = await runDriver();
   const lines = stdout.split("\n").reverse();
   const resultLine = lines.find((l) => l.startsWith("EXEC_ENV:"));
   assert.ok(resultLine);
   const env = JSON.parse(resultLine.slice("EXEC_ENV:".length));
   assert.strictEqual(env.MPM_PROVENANCE_FRAMEWORK, "openclaw");
-  // Stage 2B: sessionKey is stamped as the canonical
-  // MPM_PROVENANCE_PARENT_INVOCATION_ID so the substrate's
-  // provenance resolver picks it up. Legacy MPM_PROVENANCE_SESSION_KEY
-  // was silently dropped by provenance.go.
+  // Stage 2C.2: sessionKey is the host's continuing conversation/session
+  // identity. Stamp it as MPM_PROVENANCE_FRAMEWORK_SESSION_ID so the
+  // substrate records it as framework-owned session identity on
+  // tool_invocations + artifact_provenance + handoffs.
   assert.ok(
-    typeof env.MPM_PROVENANCE_PARENT_INVOCATION_ID === "string" &&
-      env.MPM_PROVENANCE_PARENT_INVOCATION_ID.length > 0,
-    "MPM_PROVENANCE_PARENT_INVOCATION_ID must be populated from ctx.sessionKey; got: " +
+    typeof env.MPM_PROVENANCE_FRAMEWORK_SESSION_ID === "string" &&
+      env.MPM_PROVENANCE_FRAMEWORK_SESSION_ID.length > 0,
+    "MPM_PROVENANCE_FRAMEWORK_SESSION_ID must be populated from ctx.sessionKey; got: " +
+      JSON.stringify(env)
+  );
+  // Regression: host session identity must NEVER land in
+  // MPM_PROVENANCE_PARENT_INVOCATION_ID — that slot is reserved for
+  // causal invocation-lineage ancestry. OpenClaw does not expose such
+  // an identifier, so the field must be absent.
+  assert.strictEqual(
+    "MPM_PROVENANCE_PARENT_INVOCATION_ID" in env,
+    false,
+    "MPM_PROVENANCE_PARENT_INVOCATION_ID must NOT be populated from host session identity; " +
+    "that slot is reserved for causal invocation lineage. Got: " +
       JSON.stringify(env)
   );
   // Regression: the dropped _SESSION_KEY name must not reappear.
@@ -262,7 +273,7 @@ test("runtime injection: resolve_exec_env attaches MPM_PROVENANCE_PARENT_INVOCAT
     "MPM_PROVENANCE_SESSION_KEY" in env,
     false,
     "MPM_PROVENANCE_SESSION_KEY is silently dropped by the substrate; " +
-    "use the canonical MPM_PROVENANCE_PARENT_INVOCATION_ID instead."
+    "use the canonical MPM_PROVENANCE_FRAMEWORK_SESSION_ID instead."
   );
 });
 

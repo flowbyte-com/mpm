@@ -315,8 +315,117 @@ class AdapterProvenanceContract(unittest.TestCase):
         self.assertEqual(
             offenders, [],
             "MPM_PROVENANCE_SESSION_KEY is silently dropped by the substrate. "
-            "Use the canonical MPM_PROVENANCE_PARENT_INVOCATION_ID instead. "
+            "Use the canonical MPM_PROVENANCE_FRAMEWORK_SESSION_ID instead. "
             f"Offending files: {offenders}"
+        )
+
+    def test_host_session_never_populates_parent_invocation(self):
+        # Stage 2C.2 regression: native host session identity belongs in
+        # MPM_PROVENANCE_FRAMEWORK_SESSION_ID, NOT in
+        # MPM_PROVENANCE_PARENT_INVOCATION_ID. The latter is reserved for
+        # causal invocation lineage and must never be populated from
+        # $CLAUDE_SESSION_ID, OpenClaw sessionKey, OpenCode
+        # ctx.sessionID, or any other host-native session identifier.
+        #
+        # We scan every adapter's runtime source (excluding this test
+        # file and the README docs) for assignment-style writes to
+        # MPM_PROVENANCE_PARENT_INVOCATION_ID whose right-hand side is
+        # a host session identifier (sessionKey, CLAUDE_SESSION_ID,
+        # ctx.sessionID, sessionID, etc.).
+        #
+        # The two acceptable writers of MPM_PROVENANCE_PARENT_INVOCATION_ID
+        # are: (1) test fixtures that simulate causal lineage; (2) the
+        # Claude Code runtime when it explicitly exposes a separate
+        # parent invocation identifier (which it does not today). Both
+        # are absent today, so the pattern must NOT match any production
+        # source file.
+        bad_assignments = [
+            # OpenClaw patterns
+            (r'env\.MPM_PROVENANCE_PARENT_INVOCATION_ID\s*=\s*.*sessionKey',
+             "OpenClaw sessionKey must not populate MPM_PROVENANCE_PARENT_INVOCATION_ID; "
+             "use MPM_PROVENANCE_FRAMEWORK_SESSION_ID instead."),
+            (r'env\.MPM_PROVENANCE_PARENT_INVOCATION_ID\s*=\s*.*sessionID',
+             "OpenClaw sessionID must not populate MPM_PROVENANCE_PARENT_INVOCATION_ID; "
+             "use MPM_PROVENANCE_FRAMEWORK_SESSION_ID instead."),
+            # OpenCode patterns
+            (r'env\.MPM_PROVENANCE_PARENT_INVOCATION_ID\s*=\s*sessionID',
+             "OpenCode sessionID must not populate MPM_PROVENANCE_PARENT_INVOCATION_ID; "
+             "use MPM_PROVENANCE_FRAMEWORK_SESSION_ID instead."),
+            (r'env\["MPM_PROVENANCE_PARENT_INVOCATION_ID"\]\s*=\s*sessionID',
+             "OpenCode sessionID must not populate MPM_PROVENANCE_PARENT_INVOCATION_ID."),
+            # Claude Code shell pattern
+            (r'export\s+MPM_PROVENANCE_PARENT_INVOCATION_ID="\$CLAUDE_SESSION_ID"',
+             "Claude Code $CLAUDE_SESSION_ID must not populate "
+             "MPM_PROVENANCE_PARENT_INVOCATION_ID; use "
+             "MPM_PROVENANCE_FRAMEWORK_SESSION_ID instead."),
+        ]
+        workspaces = self._adapter_workspace()
+        offenders: list[tuple[str, str, str]] = []
+        for a in ADAPTERS:
+            host_dir = workspaces[a["host_dir"]]
+            for p in _gather_source_files(host_dir):
+                text = _read_text(p)
+                for pattern, msg in bad_assignments:
+                    m = re.search(pattern, text)
+                    if m:
+                        offenders.append((str(p), pattern, msg))
+        self.assertEqual(
+            offenders, [],
+            "Native host session identity must NEVER populate "
+            "MPM_PROVENANCE_PARENT_INVOCATION_ID (causal-lineage slot). "
+            "Use MPM_PROVENANCE_FRAMEWORK_SESSION_ID instead. "
+            f"Offending (file, pattern, message): {offenders}"
+        )
+
+    def test_adapters_propagate_framework_session_id(self):
+        # Stage 2C.2 positive coverage: every adapter that exposes a
+        # native session identifier MUST propagate it through the
+        # canonical MPM_PROVENANCE_FRAMEWORK_SESSION_ID slot. Adapters
+        # that have no native session id (Pi, Hermes) must NOT
+        # fabricate one.
+        # Claude Code + OpenClaw + OpenCode: must write the env var.
+        # Pi + Hermes: must not (no host session concept).
+        propagated = {
+            "mpm-claude-code": True,
+            "mpm-memory-openclaw": True,
+            "mpm-opencode": True,
+            "mpm-pi": False,
+            "mpm-hermes": False,
+        }
+        workspaces = self._adapter_workspace()
+        offenders: list[str] = []
+        for a in ADAPTERS:
+            host_dir = workspaces[a["host_dir"]]
+            expects_write = propagated.get(a["host_dir"], None)
+            if expects_write is None:
+                continue
+            wrote = False
+            for p in _gather_source_files(host_dir):
+                text = _read_text(p)
+                if re.search(
+                    r'MPM_PROVENANCE_FRAMEWORK_SESSION_ID',
+                    text,
+                ):
+                    wrote = True
+                    break
+            if expects_write and not wrote:
+                offenders.append(
+                    f"{a['host_dir']}: must reference "
+                    f"MPM_PROVENANCE_FRAMEWORK_SESSION_ID (Stage 2C.2)"
+                )
+            if not expects_write and wrote:
+                # Pi / Hermes do not have native session ids. If a
+                # future change exposes one, this assertion flips.
+                offenders.append(
+                    f"{a['host_dir']}: writes "
+                    f"MPM_PROVENANCE_FRAMEWORK_SESSION_ID without a "
+                    f"documented host session source — fabrication guard"
+                )
+        self.assertEqual(
+            offenders, [],
+            "Every adapter with a native session id must propagate it "
+            "via MPM_PROVENANCE_FRAMEWORK_SESSION_ID; Pi and Hermes "
+            "must not fabricate one. " + str(offenders)
         )
 
 

@@ -159,9 +159,18 @@ misattributed (they look like unattributed MCP-server calls).
 - `MPM_PROVENANCE_MODEL` — static would be a fabrication. The actual
   model in use is dynamic per session (MiniMax-M2.7 / MiniMax-M3 / opus-5 etc.).
   Leave NULL; mpm-mcp will not lie about model identity.
-- `MPM_PROVENANCE_INVOCATION_ID` and
-  `MPM_PROVENANCE_PARENT_INVOCATION_ID` — must be generated dynamically
+- `MPM_PROVENANCE_INVOCATION_ID` — must be generated dynamically
   per invocation by the framework layer. No sensible static value.
+- `MPM_PROVENANCE_PARENT_INVOCATION_ID` — reserved for causal invocation
+  lineage. Claude Code does not expose a true parent-invocation
+  identifier today, so this slot stays empty.
+- `MPM_PROVENANCE_FRAMEWORK_SESSION_ID` — set at hook time from
+  `$CLAUDE_SESSION_ID` (Claude Code's native conversation/session
+  identifier). The SessionStart hook (`scripts/mpm-session-start`)
+  stamps it onto this slot so the substrate records it as
+  framework-owned session identity on `tool_invocations.framework_session_id`,
+  `artifact_provenance.framework_session_id`, and
+  `session_handoffs.framework_session_id`.
 - `MPM_PROVENANCE_ACTOR_KIND=agent` — redundant with `mpm-mcp`'s
   audit_hook default (`cmd/mpm-mcp/audit_hook.go` hardcodes
   `actor_kind=agent` for every MCP-server call). Adding it would

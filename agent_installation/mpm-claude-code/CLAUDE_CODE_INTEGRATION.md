@@ -44,7 +44,8 @@ framework, model, and invocation chain in its audit trail:
 | `MPM_PROVENANCE_FRAMEWORK` | Caller identity | `mpm-cli` |
 | `MPM_PROVENANCE_MODEL` | Model name | _(empty)_ |
 | `MPM_PROVENANCE_INVOCATION_ID` | This invocation's ID | _(generated)_ |
-| `MPM_PROVENANCE_PARENT_INVOCATION_ID` | Parent invocation ID | _(empty)_ |
+| `MPM_PROVENANCE_PARENT_INVOCATION_ID` | Causal invocation lineage | _(empty)_ |
+| `MPM_PROVENANCE_FRAMEWORK_SESSION_ID` | Native host session identity (`$CLAUDE_SESSION_ID`) | _(empty when absent)_ |
 
 These populate `tool_invocations.framework_name`,
 `tool_invocations.invocation_id`, and `artifact_provenance.model_name`.
@@ -112,9 +113,13 @@ exact same envelope shape.
 
 The hook also exports `MPM_PROVENANCE_FRAMEWORK=claude-code` and (where
 Claude Code provides them) `MPM_PROVENANCE_MODEL`,
-`MPM_PROVENANCE_INVOCATION_ID`, `MPM_PROVENANCE_PARENT_INVOCATION_ID` from
-`$CLAUDE_MODEL` / `$CLAUDE_SESSION_ID` / `$CLAUDE_INVOCATION_ID`. These
-populate MPM's audit trail with the calling framework's identity.
+`MPM_PROVENANCE_INVOCATION_ID`, and `MPM_PROVENANCE_FRAMEWORK_SESSION_ID`
+from `$CLAUDE_MODEL` / `$CLAUDE_INVOCATION_ID` / `$CLAUDE_SESSION_ID`.
+These populate MPM's audit trail with the calling framework's
+identity. `$CLAUDE_SESSION_ID` maps to the framework-session slot
+(NOT to parent invocation — Claude Code does not expose a causal
+parent invocation identifier today, so the
+`MPM_PROVENANCE_PARENT_INVOCATION_ID` slot stays empty).
 
 ### 3.2 Settings Configuration
 

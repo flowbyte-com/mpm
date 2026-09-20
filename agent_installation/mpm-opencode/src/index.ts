@@ -249,9 +249,20 @@ function buildProvenanceEnv(model?: Model, sessionID?: string): Record<string, s
 		env.MPM_PROVENANCE_MODEL = model.id;
 	}
 	if (sessionID) {
-		env.MPM_PROVENANCE_PARENT_INVOCATION_ID = sessionID;
+		// Stage 2C.2: OpenCode's sessionID is the host's continuing
+		// conversation/session identity, NOT an invocation-lineage
+		// ancestor. Stamp it as MPM_PROVENANCE_FRAMEWORK_SESSION_ID so
+		// the substrate records it as framework-owned session identity
+		// on tool_invocations + artifact_provenance + handoffs. The
+		// previous slot MPM_PROVENANCE_PARENT_INVOCATION_ID conflated
+		// host session with invocation ancestry.
+		env.MPM_PROVENANCE_FRAMEWORK_SESSION_ID = sessionID;
 	}
-	// Generate a unique invocation ID for this call
+	// Generate a unique invocation ID for this call. This is the
+	// per-invocation correlation ID; MPM_PROVENANCE_PARENT_INVOCATION_ID
+	// is intentionally NOT set — OpenCode does not expose a causal
+	// parent invocation identifier, and conflating the two polluted
+	// artifact_provenance.parent_invocation_id before Stage 2C.2.
 	env.MPM_PROVENANCE_INVOCATION_ID = `inv_${crypto.randomUUID()}`;
 	return env;
 }

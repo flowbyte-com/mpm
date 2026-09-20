@@ -233,17 +233,27 @@ the typed-hook wake path.
 | Env var | Value | Source |
 |---------|-------|--------|
 | `MPM_PROVENANCE_FRAMEWORK` | `"openclaw"` | Fixed |
-| `MPM_PROVENANCE_PARENT_INVOCATION_ID` | OpenClaw `sessionKey` | Hook context |
+| `MPM_PROVENANCE_FRAMEWORK_SESSION_ID` | OpenClaw `sessionKey` | Hook context |
 
-Stage 2B (2026-09-19): the canonical session-identity env var is
-`MPM_PROVENANCE_PARENT_INVOCATION_ID`, not the previously-used
-`MPM_PROVENANCE_SESSION_KEY`. The substrate's provenance resolver
+Stage 2C.2 (2026-09-20): the canonical session-identity env var is
+`MPM_PROVENANCE_FRAMEWORK_SESSION_ID`. OpenClaw's `sessionKey` is
+the host's continuing conversation/session identity, NOT an
+invocation-lineage ancestor, so it maps to the framework-session
+slot. The substrate's provenance resolver
 (`internal/core/provenance.go` via `ActiveContextFromEnv` →
-`provenanceFromContext`) reads `MPM_PROVENANCE_PARENT_INVOCATION_ID`
-and stamps it into `EffectiveProvenance.ParentInvocationID`. The
-legacy `_SESSION_KEY` name was silently dropped by the resolver,
-which is why `artifact_provenance` never received OpenClaw session
-identity before this rename.
+`provenanceFromContext`) reads `MPM_PROVENANCE_FRAMEWORK_SESSION_ID`
+and stamps it into `EffectiveProvenance.FrameworkSessionID`. The
+substrate also exposes `MPM_PROVENANCE_PARENT_INVOCATION_ID` but
+that slot is reserved for causal invocation lineage — OpenClaw does
+not expose such an identifier, so it stays empty.
+
+Stage 2B (2026-09-19, superseded) had used
+`MPM_PROVENANCE_PARENT_INVOCATION_ID` for sessionKey, which polluted
+`artifact_provenance.parent_invocation_id` with host session identity.
+Stage 2C.2 reverses that conflation. The pre-Stage-2B
+`MPM_PROVENANCE_SESSION_KEY` name was silently dropped by the
+resolver, which is why `artifact_provenance` never received OpenClaw
+session identity before the Stage 2B rename.
 
 `MPM_PROVENANCE_MODEL` and `MPM_PROVENANCE_INVOCATION_ID` are intentionally
 **not** set — OpenClaw's hook context does not expose model name or

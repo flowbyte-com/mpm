@@ -233,21 +233,29 @@ test("wake context fetch failure does not throw", async () => {
 // Provenance — resolve_exec_env simulation
 // --------------------------------------------------------------------------
 //
-// Stage 2B (2026-09-19): session identity is stamped as
-// MPM_PROVENANCE_PARENT_INVOCATION_ID (canonical, read by the
-// substrate's provenance resolver) instead of the previously-used
-// MPM_PROVENANCE_SESSION_KEY (silently dropped by provenance.go).
-// The OpenClaw sessionKey semantically IS the parent invocation ID
-// of every call made from that session.
+// Stage 2C.2 (2026-09-20): session identity is stamped as
+// MPM_PROVENANCE_FRAMEWORK_SESSION_ID (canonical host-session slot,
+// read by the substrate's provenance resolver) instead of the
+// Stage-2B-introduced MPM_PROVENANCE_PARENT_INVOCATION_ID. The
+// _PARENT_INVOCATION_ID slot is reserved for causal invocation
+// lineage; OpenClaw does not expose such an identifier, so it stays
+// empty unless OpenClaw separately provides one in the future.
+//
+// Stage 2B (2026-09-19, superseded) had renamed
+// MPM_PROVENANCE_SESSION_KEY → MPM_PROVENANCE_PARENT_INVOCATION_ID,
+// which conflates host session identity with invocation ancestry and
+// polluted artifact_provenance.parent_invocation_id on every OpenClaw
+// call. Stage 2C.2 moves sessionKey to the correct FRAMEWORK_SESSION_ID
+// slot.
 
-test("resolve_exec_env contributes openclaw framework id and parent invocation", () => {
+test("resolve_exec_env contributes openclaw framework id and framework session id", () => {
   // Mirrors the actual plugin's resolve_exec_env handler.
   function resolveExecEnv(event) {
     const env = {
       MPM_PROVENANCE_FRAMEWORK: "openclaw",
     };
     if (event?.sessionKey) {
-      env.MPM_PROVENANCE_PARENT_INVOCATION_ID = event.sessionKey;
+      env.MPM_PROVENANCE_FRAMEWORK_SESSION_ID = event.sessionKey;
     }
     return env;
   }
@@ -255,43 +263,53 @@ test("resolve_exec_env contributes openclaw framework id and parent invocation",
   const result = resolveExecEnv({ sessionKey: "agent:main:main:2026-08-25" });
   assert.strictEqual(result.MPM_PROVENANCE_FRAMEWORK, "openclaw");
   assert.strictEqual(
-    result.MPM_PROVENANCE_PARENT_INVOCATION_ID,
+    result.MPM_PROVENANCE_FRAMEWORK_SESSION_ID,
     "agent:main:main:2026-08-25",
-    "sessionKey must be stamped as MPM_PROVENANCE_PARENT_INVOCATION_ID so " +
-    "the substrate's provenance resolver picks it up via ActiveContextFromEnv"
+    "sessionKey must be stamped as MPM_PROVENANCE_FRAMEWORK_SESSION_ID so " +
+    "the substrate's provenance resolver picks it up as host-session identity"
+  );
+  // Parent-invocation lineage must NOT be populated from host session.
+  assert.strictEqual(
+    "MPM_PROVENANCE_PARENT_INVOCATION_ID" in result,
+    false,
+    "host session identity must not land in MPM_PROVENANCE_PARENT_INVOCATION_ID; " +
+    "that slot is reserved for causal invocation lineage"
   );
 });
 
-test("resolve_exec_env omits parent invocation id when sessionKey is not provided", () => {
+test("resolve_exec_env omits framework session id when sessionKey is not provided", () => {
   function resolveExecEnv(event) {
     const env = { MPM_PROVENANCE_FRAMEWORK: "openclaw" };
-    if (event?.sessionKey) env.MPM_PROVENANCE_PARENT_INVOCATION_ID = event.sessionKey;
+    if (event?.sessionKey) env.MPM_PROVENANCE_FRAMEWORK_SESSION_ID = event.sessionKey;
     return env;
   }
 
   const result = resolveExecEnv({});
   assert.strictEqual(result.MPM_PROVENANCE_FRAMEWORK, "openclaw");
+  assert.strictEqual("MPM_PROVENANCE_FRAMEWORK_SESSION_ID" in result, false);
+  // And parent-invocation lineage is also absent — we never fabricate.
   assert.strictEqual("MPM_PROVENANCE_PARENT_INVOCATION_ID" in result, false);
 });
 
-test("resolve_exec_env does not fabricate MPM_PROVENANCE_MODEL", () => {
-  // OpenClaw hook context does not expose model name — intentionally unset
+test("resolve_exec_env does not fabricate MPM_PROVENANCE_MODEL or INVOCATION_ID", () => {
+  // OpenClaw hook context does not expose model name — intentionally unset.
+  // INVOCATION_ID is also omitted (it is per-call, not per-session); the
+  // dispatcher mints one when the env var is unset.
   function resolveExecEnv(event) {
     const env = { MPM_PROVENANCE_FRAMEWORK: "openclaw" };
-    if (event?.sessionKey) env.MPM_PROVENANCE_PARENT_INVOCATION_ID = event.sessionKey;
-    // MPM_PROVENANCE_MODEL: intentionally omitted — OpenClaw does not expose model in hook context
+    if (event?.sessionKey) env.MPM_PROVENANCE_FRAMEWORK_SESSION_ID = event.sessionKey;
     return env;
   }
 
   const result = resolveExecEnv({ sessionKey: "test" });
   assert.strictEqual("MPM_PROVENANCE_MODEL" in result, false);
   assert.strictEqual("MPM_PROVENANCE_INVOCATION_ID" in result, false);
-  // PARENT_INVOCATION_ID IS set when sessionKey is provided — that is the
-  // canonical session-identity surface (not fabricated, just propagated).
+  // PARENT_INVOCATION_ID is NEVER set from host session identity.
   assert.strictEqual(
     "MPM_PROVENANCE_PARENT_INVOCATION_ID" in result,
-    true,
-    "parent invocation id must be set when sessionKey is available"
+    false,
+    "parent invocation id must NOT be populated from host session identity; " +
+    "that slot is reserved for causal invocation lineage"
   );
 });
 
@@ -300,7 +318,7 @@ test("resolve_exec_env never uses the dropped MPM_PROVENANCE_SESSION_KEY name", 
   // the substrate's provenance resolver. Future edits must not reintroduce it.
   function resolveExecEnv(event) {
     const env = { MPM_PROVENANCE_FRAMEWORK: "openclaw" };
-    if (event?.sessionKey) env.MPM_PROVENANCE_PARENT_INVOCATION_ID = event.sessionKey;
+    if (event?.sessionKey) env.MPM_PROVENANCE_FRAMEWORK_SESSION_ID = event.sessionKey;
     return env;
   }
 
@@ -309,7 +327,7 @@ test("resolve_exec_env never uses the dropped MPM_PROVENANCE_SESSION_KEY name", 
     "MPM_PROVENANCE_SESSION_KEY" in result,
     false,
     "_SESSION_KEY was silently dropped by the substrate; use the canonical " +
-    "MPM_PROVENANCE_PARENT_INVOCATION_ID name instead."
+    "MPM_PROVENANCE_FRAMEWORK_SESSION_ID name instead."
   );
 });
 
