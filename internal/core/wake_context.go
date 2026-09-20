@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -448,6 +449,24 @@ func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextD
 		// until a future iteration wires GetPreviousSession(); until
 		// then the agent sees "" / 0 and the absence is captured in
 		// the v4 wire format. Future work, not future regression.
+	}
+
+	// Session identity (stage 2C): the canonical MPM-owned session ID
+	// comes from active.json (sticky across CLI/MCP/process
+	// boundaries). The framework-owned session ID is sourced from
+	// MPM_PROVENANCE_FRAMEWORK_SESSION_ID when the adapter sets it,
+	// else "" — never synthesized from MPMSessionID. Both fields
+	// override the legacy SessionID alias when populated so v4
+	// callers see the new contract while v3 callers keep working.
+	data.MPMSessionID = CurrentMPMSessionID()
+	data.FrameworkSessionID = os.Getenv("MPM_PROVENANCE_FRAMEWORK_SESSION_ID")
+	if data.MPMSessionID != "" {
+		// SessionID alias = MPMSessionID when the latter is active.
+		// Back-compat: v3 callers that only read SessionID still see
+		// the canonical identity.
+		data.SessionID = data.MPMSessionID
+		data.SessionCurrentID = data.MPMSessionID
+		data.SessionStartedAt = CurrentMPMSessionIDCreatedAt()
 	}
 
 	// Ensures every list field on data is a non-nil empty slice —

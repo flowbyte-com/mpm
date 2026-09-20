@@ -18,16 +18,18 @@ import (
 // timestamps_unified_v1). Display layer callers format at the boundary via
 // FormatUnixSeconds / FormatOptionalUnixSeconds.
 type Handoff struct {
-	ID            string  `json:"id"`
-	SessionID     string  `json:"session_id"`
-	EndedAt       int64   `json:"ended_at"`
-	EndedState    string  `json:"ended_state"`
-	Summary       string  `json:"summary"`
-	Commitments   []string `json:"commitments"`
-	OpenQuestions []string `json:"open_questions"`
-	ReadAt        *int64  `json:"read_at,omitempty"`
-	ReadBy        string  `json:"read_by,omitempty"`
-	CreatedAt     int64   `json:"created_at"`
+	ID                 string   `json:"id"`
+	SessionID          string   `json:"session_id"`
+	MPMSessionID       string   `json:"mpm_session_id,omitempty"`
+	FrameworkSessionID string   `json:"framework_session_id,omitempty"`
+	EndedAt            int64    `json:"ended_at"`
+	EndedState         string   `json:"ended_state"`
+	Summary            string   `json:"summary"`
+	Commitments        []string `json:"commitments"`
+	OpenQuestions      []string `json:"open_questions"`
+	ReadAt             *int64   `json:"read_at,omitempty"`
+	ReadBy             string   `json:"read_by,omitempty"`
+	CreatedAt          int64    `json:"created_at"`
 }
 
 // EndedState values — kept in sync with the CHECK constraint in schema.go.
@@ -79,11 +81,35 @@ const (
 // fails, returns an error — but never panics. Callers should treat
 // EndSession as best-effort: log the error, move on.
 func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, commitments, openQuestions []string) (*Handoff, error) {
+	// Stage 2C: forward to the canonical three-ID variant. legacy
+	// session_id routes into the session_id column; frameworkSessionID
+	// is empty; explicitMPMSessionID is empty (so AcquireMPMSessionID
+	// allocates the canonical MPM-owned session identity at this
+	// interaction boundary).
+	return dm.EndSessionV2(sessionID, "", "", summary, endedState, commitments, openQuestions)
+}
+
+// EndSessionV2 is the canonical three-ID variant of EndSession.
+// frameworkSessionID is the host-owned ID (empty when none).
+// explicitMPMSessionID, when non-empty, overrides the default
+// AcquireMPMSessionID lookup (used by tests that pin a specific
+// ID; production callers should leave it empty).
+//
+// Identity model:
+//   - mpm_session_id        ← AcquireMPMSessionID() (or explicitMPMSessionID)
+//   - framework_session_id  ← frameworkSessionID (may be empty)
+//   - session_id            ← sessionID (legacy, may be empty)
+//
+// The three columns are written together. UPSERT keyed on the
+// legacy session_id column when non-empty (back-compat); plain
+// INSERT otherwise. mpm_session_id is NEVER unique, so multiple
+// handoffs from the same lifecycle all share the same value.
+func (dm *DatabaseManager) EndSessionV2(sessionID, frameworkSessionID, explicitMPMSessionID, summary, endedState string, commitments, openQuestions []string) (*Handoff, error) {
 	if dm == nil || dm.db == nil {
-		return nil, fmt.Errorf("EndSession: db not initialized")
+		return nil, fmt.Errorf("EndSessionV2: db not initialized")
 	}
 	if summary == "" {
-		return nil, fmt.Errorf("EndSession: summary is required")
+		return nil, fmt.Errorf("EndSessionV2: summary is required")
 	}
 	if endedState == "" {
 		endedState = HandoffClean
@@ -99,98 +125,110 @@ func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, com
 
 	commitJSON, err := json.Marshal(commitments)
 	if err != nil {
-		return nil, fmt.Errorf("EndSession: marshal commitments: %w", err)
+		return nil, fmt.Errorf("EndSessionV2: marshal commitments: %w", err)
 	}
 	questionJSON, err := json.Marshal(openQuestions)
 	if err != nil {
-		return nil, fmt.Errorf("EndSession: marshal open_questions: %w", err)
+		return nil, fmt.Errorf("EndSessionV2: marshal open_questions: %w", err)
+	}
+
+	// Resolve the canonical mpm_session_id. The EndSession call site
+	// is an INTERACTION BOUNDARY (stage 2C invariant #4) — first-use
+	// allocation happens here, not on read paths. The explicit override
+	// is reserved for tests that need to pin a specific value.
+	mpmSessionID := explicitMPMSessionID
+	if mpmSessionID == "" {
+		mpmSessionID = AcquireMPMSessionID()
 	}
 
 	now := time.Now().UTC().Unix()
 	newID := GenerateID()
 
-	// Two write paths depending on whether the caller supplied an
-	// external session identifier:
+	// Three write paths:
 	//
-	//   - non-empty: ON CONFLICT(session_id) DO UPDATE — UPSERT. The
-	//     id is preserved across upserts (existing row's id is
-	//     returned, not the freshly generated one) so external
-	//     references stay valid. created_at moves forward on every
-	//     upsert so the row's age reflects the latest closeout.
-	//     read_at + read_by reset to NULL on every upsert — a handoff
-	//     with new content is, by definition, unread. (Bug surfaced
-	//     2026-07-06: 12 days of agent:main:main closeouts invisible
-	//     to wake because the read_at from the row's first incarnation
-	//     carried over across UPSERTs.)
+	//   1. legacy session_id non-empty: ON CONFLICT(session_id) DO UPDATE.
+	//      UPSERT keyed on the legacy column. mpm_session_id and
+	//      framework_session_id are overwritten in place. id preserved
+	//      across upserts.
 	//
-	//   - empty:     plain INSERT. Stored as SQL NULL on the
-	//     session_id column. The freshly generated id is the row's
-	//     durable identity; multiple NULL rows coexist because SQLite
-	//     treats each NULL as distinct from every other value under
-	//     the UNIQUE constraint.
+	//   2. legacy session_id empty, mpm_session_id non-empty: plain
+	//      INSERT. Multiple rows with the same mpm_session_id are
+	//      allowed (the column is not unique).
+	//
+	//   3. both empty (rare): INSERT with NULL for both columns.
 	if sessionID != "" {
 		_, err = dm.db.Exec(`
 			INSERT INTO session_handoffs
-				(id, session_id, ended_at, ended_state, summary, commitments, open_questions, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+				(id, session_id, mpm_session_id, framework_session_id, ended_at, ended_state, summary, commitments, open_questions, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(session_id) DO UPDATE SET
-				id             = session_handoffs.id,
-				ended_at       = excluded.ended_at,
-				ended_state    = excluded.ended_state,
-				summary        = excluded.summary,
-				commitments    = excluded.commitments,
-				open_questions = excluded.open_questions,
-				created_at     = excluded.created_at,
-				read_at        = NULL,
-				read_by        = NULL`,
-			newID, sessionID, now, endedState, summary,
+				id                  = session_handoffs.id,
+				mpm_session_id      = excluded.mpm_session_id,
+				framework_session_id = excluded.framework_session_id,
+				ended_at            = excluded.ended_at,
+				ended_state         = excluded.ended_state,
+				summary             = excluded.summary,
+				commitments         = excluded.commitments,
+				open_questions      = excluded.open_questions,
+				created_at          = excluded.created_at,
+				read_at             = NULL,
+				read_by             = NULL`,
+			newID, sessionID, mpmSessionID, nullHandoffSessionID(frameworkSessionID),
+			now, endedState, summary,
 			string(commitJSON), string(questionJSON), now,
 		)
 		if err != nil {
-			// Audit the failure — meta-error: even the handoff writer failed.
-			// The UNIQUE-constraint path no longer fires here (upsert handles
-			// it), so any error from this Exec is a real problem: DB locked,
-			// disk full, schema mismatch, etc.
-			dm.LogAudit(AuditWarn, "handoff", "EndSession upsert failed: "+err.Error(), "", AuditContext{
-				"session_id": sessionID,
+			dm.LogAudit(AuditWarn, "handoff", "EndSessionV2 upsert failed: "+err.Error(), "", AuditContext{
+				"session_id":     sessionID,
+				"mpm_session_id": mpmSessionID,
 			})
-			return nil, fmt.Errorf("EndSession: upsert: %w", err)
+			return nil, fmt.Errorf("EndSessionV2: upsert: %w", err)
 		}
 	} else {
 		_, err = dm.db.Exec(`
 			INSERT INTO session_handoffs
-				(id, session_id, ended_at, ended_state, summary, commitments, open_questions, created_at)
-			VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`,
-			newID, now, endedState, summary,
+				(id, session_id, mpm_session_id, framework_session_id, ended_at, ended_state, summary, commitments, open_questions, created_at)
+			VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			newID, mpmSessionID, nullHandoffSessionID(frameworkSessionID),
+			now, endedState, summary,
 			string(commitJSON), string(questionJSON), now,
 		)
 		if err != nil {
-			dm.LogAudit(AuditWarn, "handoff", "EndSession insert (no session_id) failed: "+err.Error(), "", AuditContext{})
-			return nil, fmt.Errorf("EndSession: insert (no session_id): %w", err)
+			dm.LogAudit(AuditWarn, "handoff", "EndSessionV2 insert failed: "+err.Error(), "", AuditContext{
+				"mpm_session_id": mpmSessionID,
+			})
+			return nil, fmt.Errorf("EndSessionV2: insert: %w", err)
 		}
 	}
 
-	// No audit log on the success path. The session_handoffs row IS the
-	// audit trail for session endings — logging the same event to
-	// system_audit_log too was doubling the noise without adding signal.
-	// (Was: AuditWarn with full summary. Removed 2026-06-23. The upsert
-	// continues this principle: silent on success, loud on real error.)
-
-	// Read-back assertion (Defense Triad #3) proves persistence to the
-	// substrate. Returns the canonical id (the one that survived the
-	// upsert, or the freshly generated id on the no-session-id path).
+	// Read-back assertion (Defense Triad #3). Returns the canonical id
+	// (the one that survived the upsert, or the freshly generated id on
+	// the no-session-id path).
 	if sessionID != "" {
 		persisted, err := dm.GetHandoffBySessionID(sessionID)
 		if err != nil {
-			return nil, fmt.Errorf("EndSession: read back: %w", err)
+			return nil, fmt.Errorf("EndSessionV2: read back: %w", err)
 		}
 		return persisted, nil
 	}
 	persisted, err := dm.GetHandoffByID(newID)
 	if err != nil {
-		return nil, fmt.Errorf("EndSession: read back by id: %w", err)
+		return nil, fmt.Errorf("EndSessionV2: read back by id: %w", err)
 	}
 	return persisted, nil
+}
+
+// nullHandoffSessionID converts a string to a sql.NullString. Empty
+// strings surface as Invalid (NULL), which is what the schema expects
+// for framework_session_id when the host has no native session ID.
+// Namespaced to avoid colliding with the nullString helper of the same
+// shape already in db.go (used for read-back nullability in a different
+// context).
+func nullHandoffSessionID(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
 }
 
 // GetHandoffBySessionID returns the handoff row for a session. Returns
@@ -216,13 +254,23 @@ func (dm *DatabaseManager) GetHandoffBySessionID(sessionID string) (*Handoff, er
 		return nil, sql.ErrNoRows
 	}
 	row := dm.db.QueryRow(`
-		SELECT id, session_id, ended_at, ended_state, summary, commitments, open_questions, created_at
+		SELECT id, session_id, mpm_session_id, framework_session_id, ended_at, ended_state, summary, commitments, open_questions, created_at
 		FROM session_handoffs WHERE session_id = ?`, sessionID)
 	var h Handoff
+	var mpmSID, fwSID, sessionIDCol sql.NullString
 	var commitJSON, questionJSON []byte
-	if err := row.Scan(&h.ID, &h.SessionID, &h.EndedAt, &h.EndedState, &h.Summary,
+	if err := row.Scan(&h.ID, &sessionIDCol, &mpmSID, &fwSID, &h.EndedAt, &h.EndedState, &h.Summary,
 		&commitJSON, &questionJSON, &h.CreatedAt); err != nil {
 		return nil, err
+	}
+	if sessionIDCol.Valid {
+		h.SessionID = sessionIDCol.String
+	}
+	if mpmSID.Valid {
+		h.MPMSessionID = mpmSID.String
+	}
+	if fwSID.Valid {
+		h.FrameworkSessionID = fwSID.String
 	}
 	if len(commitJSON) > 0 {
 		_ = json.Unmarshal(commitJSON, &h.Commitments)
@@ -255,7 +303,7 @@ func (dm *DatabaseManager) GetLatestUnreadHandoff() (*Handoff, error) {
 		return nil, fmt.Errorf("GetLatestUnreadHandoff: db not initialized")
 	}
 	row := dm.db.QueryRow(`
-		SELECT id, session_id, ended_at, ended_state, summary, commitments, open_questions, read_at, read_by, created_at
+		SELECT id, session_id, mpm_session_id, framework_session_id, ended_at, ended_state, summary, commitments, open_questions, read_at, read_by, created_at
 		FROM session_handoffs
 		WHERE read_at IS NULL
 		ORDER BY ended_at DESC, rowid DESC
@@ -271,7 +319,7 @@ func (dm *DatabaseManager) GetLatestHandoff() (*Handoff, error) {
 		return nil, fmt.Errorf("GetLatestHandoff: db not initialized")
 	}
 	row := dm.db.QueryRow(`
-		SELECT id, session_id, ended_at, ended_state, summary, commitments, open_questions, read_at, read_by, created_at
+		SELECT id, session_id, mpm_session_id, framework_session_id, ended_at, ended_state, summary, commitments, open_questions, read_at, read_by, created_at
 		FROM session_handoffs
 		ORDER BY ended_at DESC, rowid DESC
 		LIMIT 1`)
@@ -285,7 +333,7 @@ func (dm *DatabaseManager) GetHandoffByID(id string) (*Handoff, error) {
 		return nil, fmt.Errorf("GetHandoffByID: db not initialized")
 	}
 	row := dm.db.QueryRow(`
-		SELECT id, session_id, ended_at, ended_state, summary, commitments, open_questions, read_at, read_by, created_at
+		SELECT id, session_id, mpm_session_id, framework_session_id, ended_at, ended_state, summary, commitments, open_questions, read_at, read_by, created_at
 		FROM session_handoffs
 		WHERE id = ?`, id)
 	return scanHandoff(row)
@@ -336,7 +384,7 @@ func (dm *DatabaseManager) ListHandoffs(limit int, unreadOnly bool) ([]*Handoff,
 		limit = 50
 	}
 	query := `
-		SELECT id, session_id, ended_at, ended_state, summary, commitments, open_questions, read_at, read_by, created_at
+		SELECT id, session_id, mpm_session_id, framework_session_id, ended_at, ended_state, summary, commitments, open_questions, read_at, read_by, created_at
 		FROM session_handoffs`
 	if unreadOnly {
 		query += ` WHERE read_at IS NULL`
@@ -435,13 +483,15 @@ func scanHandoff(row *sql.Row) (*Handoff, error) {
 	var (
 		h            Handoff
 		sessionID    sql.NullString
+		mpmSID       sql.NullString
+		fwSID        sql.NullString
 		commitJSON   string
 		questionJSON string
 		readAt       sql.NullInt64
 		readBy       sql.NullString
 	)
 	err := row.Scan(
-		&h.ID, &sessionID, &h.EndedAt, &h.EndedState, &h.Summary,
+		&h.ID, &sessionID, &mpmSID, &fwSID, &h.EndedAt, &h.EndedState, &h.Summary,
 		&commitJSON, &questionJSON, &readAt, &readBy, &h.CreatedAt,
 	)
 	if err != nil {
@@ -449,6 +499,12 @@ func scanHandoff(row *sql.Row) (*Handoff, error) {
 	}
 	if sessionID.Valid {
 		h.SessionID = sessionID.String
+	}
+	if mpmSID.Valid {
+		h.MPMSessionID = mpmSID.String
+	}
+	if fwSID.Valid {
+		h.FrameworkSessionID = fwSID.String
 	}
 	if readAt.Valid {
 		v := readAt.Int64
@@ -471,13 +527,15 @@ func scanHandoffRows(rows *sql.Rows) (*Handoff, error) {
 	var (
 		h            Handoff
 		sessionID    sql.NullString
+		mpmSID       sql.NullString
+		fwSID        sql.NullString
 		commitJSON   string
 		questionJSON string
 		readAt       sql.NullInt64
 		readBy       sql.NullString
 	)
 	err := rows.Scan(
-		&h.ID, &sessionID, &h.EndedAt, &h.EndedState, &h.Summary,
+		&h.ID, &sessionID, &mpmSID, &fwSID, &h.EndedAt, &h.EndedState, &h.Summary,
 		&commitJSON, &questionJSON, &readAt, &readBy, &h.CreatedAt,
 	)
 	if err != nil {
@@ -485,6 +543,12 @@ func scanHandoffRows(rows *sql.Rows) (*Handoff, error) {
 	}
 	if sessionID.Valid {
 		h.SessionID = sessionID.String
+	}
+	if mpmSID.Valid {
+		h.MPMSessionID = mpmSID.String
+	}
+	if fwSID.Valid {
+		h.FrameworkSessionID = fwSID.String
 	}
 	if readAt.Valid {
 		v := readAt.Int64

@@ -166,6 +166,18 @@ type ActiveState struct {
 	Modes *[]string `json:"modes,omitempty"`
 	// Updated: RFC3339 timestamp of the last write.
 	Updated string `json:"updated"`
+	// MPMSessionID is the MPM-owned session identity, persisted across
+	// CLI/MCP/process boundaries within one interaction lifecycle.
+	// Empty string means "no active MPM session yet". Allocate via
+	// AcquireMPMSessionID at interaction boundaries (handoff write,
+	// scratchpad flush). Rotate via RotateMPMSessionID. Read via
+	// CurrentMPMSessionID. Source of truth — wake/context/doctor
+	// only read; they never allocate.
+	MPMSessionID string `json:"mpm_session_id,omitempty"`
+	// MPMSessionIDCreatedAt is the unix epoch seconds at which the
+	// current MPMSessionID was allocated. Zero when no active
+	// session. Operators can inspect this to gauge session age.
+	MPMSessionIDCreatedAt int64 `json:"mpm_session_id_created_at,omitempty"`
 }
 
 // PersonaString returns the persona as a plain string (empty for both
@@ -576,7 +588,31 @@ type ActiveContext struct {
 	// SessionID is the runtime session UUID. Used by Arc 2 to pull
 	// shared.event_wakes targeted at this session in the WakesPending
 	// fold. Empty for unit tests that don't run a session.
+	//
+	// DEPRECATION NOTE (stage 2C): SessionID remains for back-compat
+	// with callers that already populated it (notably Arc 2 wakes and
+	// the CLI dispatcher). The canonical session identity going forward
+	// is MPMSessionID (MPM-owned, persistent) and FrameworkSessionID
+	// (host-owned). SessionID is a per-process UUID with no
+	// cross-process stickiness — distinct from both new fields by
+	// definition. New code should populate MPMSessionID via
+	// CurrentMPMSessionID(); SessionID remains as the Arc 2 carrier.
 	SessionID string
+	// MPMSessionID is the MPM-owned session identity, persisted across
+	// CLI/MCP/process boundaries within one interaction lifecycle.
+	// Populated from CurrentMPMSessionID() at dispatch time. Empty
+	// string is the normal fresh-workspace state — wake/context/doctor
+	// do not allocate, only handoff writes do (via EndSessionV2).
+	// Distinct from SessionID by design: SessionID is per-process,
+	// MPMSessionID is persistent.
+	MPMSessionID string
+	// FrameworkSessionID is the host-owned session identifier when the
+	// calling framework exposes one. Empty when the host has no native
+	// session ID (Pi, Hermes without hooks, Claude Code without
+	// MPM_SESSION_ID). NEVER filled with the MPM ID as a convenience.
+	// Distinct from both SessionID (per-process) and MPMSessionID
+	// (persistent MPM) by definition.
+	FrameworkSessionID string
 	// Hostname is reported in the shared.sessions heartbeat for
 	// debugging ("who is awake?"). Empty is fine.
 	Hostname string

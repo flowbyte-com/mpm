@@ -33,6 +33,10 @@ func handleSession(args []string) int {
 		return handleShredSession(args[1])
 	case "list":
 		return handleSessionList(args[1:])
+	case "rotate":
+		return handleSessionRotate(args[1:])
+	case "allocate":
+		return handleSessionAllocate(args[1:])
 	default:
 		return handleSessionHelp()
 	}
@@ -47,14 +51,50 @@ Usage:
   mpm session show <id>          Show session by ID
   mpm session shred <id>         Secure delete session
   mpm session list               List recent sessions
+  mpm session rotate             Allocate a fresh mpm_session_id (explicit)
+  mpm session allocate           Allocate mpm_session_id if absent, else reuse
 
 Examples:
   mpm session add "Session notes for project discussion"
   mpm session search "golang"
   mpm session show abc123
   mpm session shred abc123
+  mpm session rotate             # operator-driven new-session boundary
+  mpm session allocate           # ensure a session exists; print its id
 `
 	return respond(output, "", 0)
+}
+
+// handleSessionRotate allocates a fresh mpm_session_id, overwriting
+// the previous one. This is the operator-driven "new session" signal.
+// Use after a long pause, or when starting work that should not
+// correlate with prior session activity.
+//
+// Note: this is the EXPLICIT rotation path. There is no implicit
+// rotation in mpm itself — read paths (wake/context/doctor/health)
+// never rotate, and handoff writes never rotate.
+func handleSessionRotate(args []string) int {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return handleSessionHelp()
+		}
+	}
+	newID := mpminternal.RotateMPMSessionID()
+	return respond(fmt.Sprintf("rotated mpm_session_id: %s\n", newID), "", 0)
+}
+
+// handleSessionAllocate ensures an mpm_session_id exists; if not,
+// allocates one. Otherwise returns the current id (no rotation).
+// Idempotent — safe to call repeatedly. The first call in a fresh
+// workspace allocates; subsequent calls return the same id.
+func handleSessionAllocate(args []string) int {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return handleSessionHelp()
+		}
+	}
+	id := mpminternal.AcquireMPMSessionID()
+	return respond(fmt.Sprintf("mpm_session_id: %s\n", id), "", 0)
 }
 
 func handleSessionAdd(args []string) int {

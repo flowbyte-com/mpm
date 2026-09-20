@@ -154,6 +154,19 @@ smart-recall search (exit 0 on empty results) by design.
 		Mode:       activeMode,
 		Persona:    activePersona,
 		SessionID:  getOrMakeSessionID(),
+		// MPMSessionID is the MPM-owned session identity (active.json
+		// authoritative). Read-only here — wake/context/doctor paths
+		// never allocate. Empty string is the normal fresh-workspace
+		// state; the first handoff write will populate it via
+		// AcquireMPMSessionID. Distinct from SessionID by design:
+		// SessionID is per-process UUID, MPMSessionID is persistent.
+		MPMSessionID: mpminternal.CurrentMPMSessionID(),
+		// FrameworkSessionID is the host-owned session identifier when
+		// the calling framework exposes one (Claude Code via
+		// MPM_PROVENANCE_FRAMEWORK_SESSION_ID, OpenClaw via its
+		// native sessionKey, etc.). Empty when absent. Never
+		// synthesized from MPMSessionID.
+		FrameworkSessionID: os.Getenv("MPM_PROVENANCE_FRAMEWORK_SESSION_ID"),
 		Agent:      resolveAgentID(),
 		Hostname:   resolveHostname(),
 		Model:      os.Getenv("MPM_PROVENANCE_MODEL"),
