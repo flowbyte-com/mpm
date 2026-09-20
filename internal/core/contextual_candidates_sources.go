@@ -26,14 +26,14 @@ import (
 //   - active (open) work rows;
 //   - work whose id is in q.WorkIDs (explicit active work).
 //
-// Returns the number of rows the source's scan actually considered
-// (post-filter) so diagnostics can distinguish "no relevant data"
-// from "generator failure".
-func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
+// Returns (considered, emitted):
+//   - considered: rows inspected across both branches (open scan
+//     rows seen + non-empty WorkIDs lookups attempted).
+//   - emitted:    unique candidate keys contributed to acc.
+func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) (considered, emitted int) {
 	if limit <= 0 {
-		return 0
+		return 0, 0
 	}
-	considered := 0
 
 	// 1. Active work rows, newest-updated first.
 	rows, err := dm.db.Query(`
@@ -44,7 +44,7 @@ func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 		LIMIT ?
 	`, limit)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -64,6 +64,7 @@ func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 		a.mpmSessionID = ""
 		addReason(a, ReasonOpenWork)
 		markSource(a, "work")
+		emitted++
 		for _, w := range q.WorkIDs {
 			if w == id {
 				addReason(a, ReasonReferencedByActiveWork)
@@ -76,6 +77,7 @@ func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 		if id == "" {
 			continue
 		}
+		considered++
 		if _, exists := acc[candidateKey("work", id)]; exists {
 			continue
 		}
@@ -94,8 +96,9 @@ func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 		a.summary = truncate(title, 120)
 		addReason(a, ReasonReferencedByActiveWork)
 		markSource(a, "work")
+		emitted++
 	}
-	return considered
+	return considered, emitted
 }
 
 // ── Source B: handoffs (read-only peek) ─────────────────────────────
@@ -103,14 +106,20 @@ func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 // addHandoffCandidates emits the most recent unread handoff whose
 // mpm_session_id matches q.MPMSessionID (when supplied) OR the
 // latest handoff overall (read-only peek; never mutates read_at).
-func addHandoffCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
+//
+// Returns (considered, emitted):
+//   - considered: handoff rows inspected (1 for the unread path,
+//     1 for the fallback read-or-unread path if invoked).
+//   - emitted:    candidate keys contributed to acc (0 or 1).
+func addHandoffCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) (considered, emitted int) {
 	if limit <= 0 {
-		return 0
+		return 0, 0
 	}
 
 	// Latest unread handoff, peek (MarkLatestHandoffRead would
 	// mutate read_at; we use GetLatestUnreadHandoff explicitly).
 	h, err := dm.GetLatestUnreadHandoff()
+	considered++
 	if err == nil && h != nil {
 		a := ensureCandidate(acc, "handoff", h.ID)
 		a.pointer = "mpm://handoff/" + h.ID
@@ -128,12 +137,14 @@ func addHandoffCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc ma
 		}
 		addReason(a, ReasonHandoffForContext)
 		markSource(a, "handoff")
+		emitted++
 	}
 
 	// Also include the latest read-or-unread handoff as a fallback
 	// candidate if the unread path returned none.
 	if h == nil {
 		fallback, ferr := dm.GetLatestHandoff()
+		considered++
 		if ferr == nil && fallback != nil {
 			a := ensureCandidate(acc, "handoff", fallback.ID)
 			a.pointer = "mpm://handoff/" + fallback.ID
@@ -150,10 +161,11 @@ func addHandoffCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc ma
 			}
 			addReason(a, ReasonHandoffForContext)
 			markSource(a, "handoff")
+			emitted++
 		}
 	}
 	_ = q
-	return 0
+	return considered, emitted
 }
 
 // ── Source C: recent semantic activity ─────────────────────────────
@@ -166,22 +178,22 @@ func addHandoffCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc ma
 //
 // Recent_activity is observational — it does NOT rank. We simply
 // bound the count and tag identity axes.
-func addActivityCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
+func addActivityCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) (considered, emitted int) {
 	if limit <= 0 {
-		return 0
+		return 0, 0
 	}
 
 	res, err := dm.RecentActivityWithMeta(RecentActivityQueryParams{
 		Limit: limit * 2, // over-fetch because activity-class filter below trims
 	})
 	if err != nil {
-		return 0
+		return 0, 0
 	}
-	count := 0
 	for _, ev := range res.Events {
-		if count >= limit {
+		if emitted >= limit {
 			break
 		}
+		considered++
 		if ev.Tool == "" {
 			continue
 		}
@@ -229,10 +241,10 @@ func addActivityCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc m
 			addRelated(a, ev.ArtifactID)
 		}
 		markSource(a, "activity")
-		count++
+		emitted++
 	}
 	_ = q
-	return count
+	return considered, emitted
 }
 
 // activitySummary produces a bounded, secret-safe textual
@@ -291,9 +303,9 @@ func isActivityClassReadOnly(tool, action string) bool {
 // For Stage 2D we take a structural / one-hop expansion: we read
 // confidence_history for trigger events + epistemic_provenance for
 // relationships. We do NOT walk the full graph.
-func addEpistemicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
+func addEpistemicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) (considered, emitted int) {
 	if limit <= 0 {
-		return 0
+		return 0, 0
 	}
 
 	// ── Trigger events from confidence_history
@@ -310,6 +322,7 @@ func addEpistemicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc 
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
+			considered++
 			var id, artifactID, artifactType, trigger string
 			var computedAt int64
 			var confidence float64
@@ -346,10 +359,49 @@ func addEpistemicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc 
 			}
 			a.summary = truncate(buildEpistemicSummary(trigger, ""), 200)
 			markSource(a, "epistemic")
+			emitted++
 		}
 	}
+
+	// ── Polarity from epistemic_provenance (one-hop downstream
+	// scan, bounded). Each downstream_id becomes a candidate
+	// (kind from downstream_type) with the polarity attached.
+	provRows, err := dm.db.Query(`
+		SELECT source_id, source_type, downstream_id, downstream_type, polarity
+		FROM epistemic_provenance
+		WHERE downstream_id IS NOT NULL
+		ORDER BY created_at DESC, id ASC
+		LIMIT ?
+	`, limit)
+	if err == nil {
+		defer provRows.Close()
+		for provRows.Next() {
+			considered++
+			var sourceID, sourceType, downstreamID, downstreamType, polarity string
+			if err := provRows.Scan(&sourceID, &sourceType, &downstreamID, &downstreamType, &polarity); err != nil {
+				dm.LogAudit(AuditWarn, "contextual_candidates", "epistemic_provenance scan: "+err.Error(), "", AuditContext{"source": "epistemic"})
+				continue
+			}
+			if downstreamID == "" {
+				continue
+			}
+			kind := canonicalArtifactKind(downstreamType)
+			a := ensureCandidate(acc, kind, downstreamID)
+			// Polarity is set deterministically from the
+			// provenance row. If multiple provenance rows target
+			// the same downstream_id, last-write wins (stable
+			// because the scan is ORDER BY created_at DESC).
+			if polarity == "assumes_true" || polarity == "assumes_false" {
+				a.relationshipPolarity = polarity
+			}
+			addReason(a, ReasonConfidenceChanged)
+			markSource(a, "epistemic")
+			emitted++
+		}
+	}
+
 	_ = q
-	return 0
+	return considered, emitted
 }
 
 func canonicalArtifactKind(t string) string {
@@ -399,9 +451,9 @@ func buildEpistemicSummary(trigger, reason string) string {
 // downstream_artifact_id is the artifact the cascade invalidates.
 // Resolved/materialized cascades surface as cascade_resolved
 // (audit history, not a live obligation).
-func addCascadeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
+func addCascadeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) (considered, emitted int) {
 	if limit <= 0 {
-		return 0
+		return 0, 0
 	}
 	rows, err := dm.db.Query(`
 		SELECT id, dead_artifact_id, dead_artifact_type,
@@ -413,10 +465,11 @@ func addCascadeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc ma
 		LIMIT ?
 	`, limit)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	defer rows.Close()
 	for rows.Next() {
+		considered++
 		var id, deadID, deadType, downID, downType, eventID, status, reason string
 		var depth int64
 		var createdAt int64
@@ -451,9 +504,10 @@ func addCascadeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc ma
 			addRelated(a, eventID)
 		}
 		markSource(a, "cascade")
+		emitted++
 	}
 	_ = q
-	return 0
+	return considered, emitted
 }
 
 // ── Source F: wakes / obligations ───────────────────────────────────
@@ -469,11 +523,10 @@ func addCascadeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc ma
 // Live obligation taxonomy:
 //   - fired=0, target_time <= now  -> overdue_wake
 //   - fired=0, target_time  > now  -> unresolved_wake
-func addWakeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
+func addWakeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) (considered, emitted int) {
 	if limit <= 0 {
-		return 0
+		return 0, 0
 	}
-	considered := 0
 	now := timeNowUnix()
 	rows, err := dm.db.Query(`
 		SELECT id, target_time, reason, theory_id, created_at
@@ -483,7 +536,7 @@ func addWakeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 		LIMIT ?
 	`, limit)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -508,9 +561,10 @@ func addWakeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 			addReason(a, ReasonUnresolvedWake)
 		}
 		markSource(a, "wake")
+		emitted++
 	}
 	_ = q
-	return considered
+	return considered, emitted
 }
 
 // timeNowUnix is the package-local stub point for current-time
@@ -524,9 +578,9 @@ var timeNowUnix = func() int64 { return time.Now().Unix() }
 // candidates. The scratchpad primary key is session_id; the
 // substrate stores one scratchpad row per session with thesis /
 // supporting JSON columns. Material content is selection-stage.
-func addScratchpadCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
+func addScratchpadCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) (considered, emitted int) {
 	if limit <= 0 {
-		return 0
+		return 0, 0
 	}
 	rows, err := dm.db.Query(`
 		SELECT session_id, created_at, updated_at, decay_at
@@ -535,10 +589,11 @@ func addScratchpadCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc
 		LIMIT ?
 	`, limit)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	defer rows.Close()
 	for rows.Next() {
+		considered++
 		var sessionID string
 		var createdAt, updatedAt int64
 		var decayAt sql.NullInt64
@@ -552,9 +607,10 @@ func addScratchpadCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc
 		a.summary = "" // selection-stage materialization
 		addReason(a, ReasonActiveScratchpad)
 		markSource(a, "scratchpad")
+		emitted++
 	}
 	_ = q
-	return 0
+	return considered, emitted
 }
 
 // ── Source H: topic neighborhood ────────────────────────────────────
@@ -564,9 +620,9 @@ func addScratchpadCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc
 // one-hop (no topic->topic graph walk) and bounded by a per-topic
 // sub-limit to prevent a broad topic from exploding the candidate
 // set.
-func addTopicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
+func addTopicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) (considered, emitted int) {
 	if limit <= 0 || len(q.TopicIDs) == 0 {
-		return 0
+		return 0, 0
 	}
 	// Per-topic sub-limit: divide evenly with a floor of 1.
 	subLimit := limit / len(q.TopicIDs)
@@ -586,6 +642,7 @@ func addTopicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[
 			continue
 		}
 		for rows.Next() {
+			considered++
 			var memID, sessionID string
 			if err := rows.Scan(&memID, &sessionID); err != nil {
 				dm.LogAudit(AuditWarn, "contextual_candidates", "topic scan: "+err.Error(), "", AuditContext{"source": "topic"})
@@ -603,11 +660,12 @@ func addTopicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[
 			addReason(a, ReasonSharesTopic)
 			addRelated(a, topicID)
 			markSource(a, "topic")
+			emitted++
 		}
 		rows.Close()
 	}
 	_ = q
-	return 0
+	return considered, emitted
 }
 
 // ── Source I: explicit caller-supplied artifact references ─────────
@@ -680,7 +738,7 @@ func resolveExplicitArtifact(dm *DatabaseManager, id string) (string, bool) {
 //     unbounded scans; truncated ids increment
 //     UnresolvedExplicitRefs as InputTruncated.
 //   - Both bounds default via DefaultCandidateLimits().
-func addExplicitReferenceCandidates(dm *DatabaseManager, q ContextQuery, limits CandidateLimits, acc map[string]*candidateAccumulator) (unresolved, inputTruncated int) {
+func addExplicitReferenceCandidates(dm *DatabaseManager, q ContextQuery, limits CandidateLimits, acc map[string]*candidateAccumulator) (considered, unresolved, inputTruncated int) {
 	maxProbe := limits.ExplicitRefInputMax
 	if maxProbe <= 0 {
 		maxProbe = 64
@@ -698,6 +756,9 @@ func addExplicitReferenceCandidates(dm *DatabaseManager, q ContextQuery, limits 
 			inputTruncated++
 			continue
 		}
+		// Count every probed id as considered (whether it
+		// resolves or not).
+		considered++
 		if emitted >= maxEmit {
 			// Reached emit cap; remaining (within probe cap) are
 			// not probed because the emit budget is full. They
@@ -731,18 +792,32 @@ func addExplicitReferenceCandidates(dm *DatabaseManager, q ContextQuery, limits 
 				id,
 			).Scan(&successor); err == nil && successor.Valid && successor.String != "" {
 				addRelated(a, successor.String)
-				if _, exists := acc[candidateKey("theory", successor.String)]; !exists {
-					b := ensureCandidate(acc, "theory", successor.String)
+				// The predecessor itself is historical.
+				// lifecycleState="historical" + supersession_chain
+				// reason lets the downstream selector
+				// mechanically distinguish A (historical) from B
+				// (canonical) without fetching arbitrary metadata.
+				a.lifecycleState = "historical"
+				addReason(a, ReasonSupersessionChain)
+				// Look up the successor (it may already be in
+				// acc via the epistemic source). Either way, mark
+				// it with supersession_chain and link back to the
+				// predecessor.
+				b, exists := acc[candidateKey("theory", successor.String)]
+				if !exists {
+					b = ensureCandidate(acc, "theory", successor.String)
 					b.pointer = "mpm://theory/" + successor.String
 					b.lifecycleState = "canonical"
-					addReason(b, ReasonSupersessionChain)
-					addRelated(b, id) // predecessor
+					markSource(b, "explicit_reference")
+				} else {
 					markSource(b, "explicit_reference")
 				}
+				addReason(b, ReasonSupersessionChain)
+				addRelated(b, id) // predecessor
 			}
 		}
 	}
-	return unresolved, inputTruncated
+	return considered, unresolved, inputTruncated
 }
 
 // pointerForKind returns the canonical mpm:// URI for a resolved

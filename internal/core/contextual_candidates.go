@@ -78,6 +78,18 @@ type CandidateLimits struct {
 	// entries actually probed; callers cannot force unbounded
 	// scans. Truncated ids increment UnresolvedExplicitRefs.
 	ExplicitRefInputMax int `json:"explicit_ref_input_max,omitempty"`
+	// WorkIDsInputMax caps how many q.WorkIDs entries are
+	// expanded into the work source.
+	WorkIDsInputMax int `json:"work_ids_input_max,omitempty"`
+	// TopicIDsInputMax caps how many q.TopicIDs entries are
+	// expanded by the topic source.
+	TopicIDsInputMax int `json:"topic_ids_input_max,omitempty"`
+	// QueryTextMaxBytes caps the size of q.QueryText. The
+	// generator does not interpret it (Stage 2E may), but the
+	// bound prevents absurd payloads from being copied
+	// indefinitely. QueryText beyond this size is silently
+	// truncated to the first N bytes.
+	QueryTextMaxBytes int `json:"query_text_max_bytes,omitempty"`
 }
 
 // DefaultCandidateLimits returns the canonical bounded defaults for
@@ -100,6 +112,9 @@ func DefaultCandidateLimits() CandidateLimits {
 		ExplicitRef:         8,
 		Global:              50,
 		ExplicitRefInputMax: 64,
+		WorkIDsInputMax:     32,
+		TopicIDsInputMax:    32,
+		QueryTextMaxBytes:   4096,
 	}
 }
 
@@ -201,6 +216,33 @@ type CandidateGenerationDiag struct {
 
 // ── Reason vocabulary ───────────────────────────────────────────────
 
+// SourceName enumerates the canonical, bounded vocabulary of
+// generator-source names that appear in Candidate.Source. New
+// sources must be added here; the field is the ONLY authoritative
+// reference for source-name vocabulary (Stage 2D.2 §21).
+type SourceName string
+
+const (
+	SourceWork        SourceName = "work"
+	SourceHandoff     SourceName = "handoff"
+	SourceActivity    SourceName = "activity"
+	SourceEpistemic   SourceName = "epistemic"
+	SourceCascade     SourceName = "cascade"
+	SourceWake        SourceName = "wake"
+	SourceScratchpad  SourceName = "scratchpad"
+	SourceTopic       SourceName = "topic"
+	SourceExplicitRef SourceName = "explicit_reference"
+)
+
+// CanonicalSources is the closed ordered list of every
+// generator source. Used for diagnostics initialization and for
+// the diversity-policy source-order round-robin.
+var CanonicalSources = []SourceName{
+	SourceWork, SourceHandoff, SourceActivity, SourceEpistemic,
+	SourceCascade, SourceWake, SourceScratchpad, SourceTopic,
+	SourceExplicitRef,
+}
+
 // CandidateReasonName is the typed bounded vocabulary of reasons
 // that explain why a candidate exists. New reasons must be added
 // here; downstream tools and tests key off these names.
@@ -267,6 +309,31 @@ func (dm *DatabaseManager) GenerateContextualCandidates(q ContextQuery) (Candida
 		limits = DefaultCandidateLimits()
 	}
 
+	// Apply default-only bounds for the new input-cap fields if
+	// the caller didn't set them. (isZeroLimits leaves partial
+	// overrides alone; we fill per-field zeros here so partial
+	// overrides remain possible.)
+	if limits.WorkIDsInputMax == 0 {
+		limits.WorkIDsInputMax = DefaultCandidateLimits().WorkIDsInputMax
+	}
+	if limits.TopicIDsInputMax == 0 {
+		limits.TopicIDsInputMax = DefaultCandidateLimits().TopicIDsInputMax
+	}
+	if limits.QueryTextMaxBytes == 0 {
+		limits.QueryTextMaxBytes = DefaultCandidateLimits().QueryTextMaxBytes
+	}
+
+	// Bound caller-controlled expansion inputs.
+	if len(q.WorkIDs) > limits.WorkIDsInputMax {
+		q.WorkIDs = q.WorkIDs[:limits.WorkIDsInputMax]
+	}
+	if len(q.TopicIDs) > limits.TopicIDsInputMax {
+		q.TopicIDs = q.TopicIDs[:limits.TopicIDsInputMax]
+	}
+	if len(q.QueryText) > limits.QueryTextMaxBytes {
+		q.QueryText = q.QueryText[:limits.QueryTextMaxBytes]
+	}
+
 	// accumulator keyed by candidate ID (kind + artifact_id)
 	acc := make(map[string]*candidateAccumulator)
 
@@ -277,64 +344,71 @@ func (dm *DatabaseManager) GenerateContextualCandidates(q ContextQuery) (Candida
 	emittedBySource := map[string]int{}
 	finalBySource := map[string]int{}
 
-	// Per-source run. The "considered" count is the number of rows
-	// the source's underlying scan actually returned (post-filter,
-	// pre-classification). The "emitted" count is the number of
-	// unique (kind, artifact_id) keys the source contributed to the
-	// accumulator. Both are recorded before the next source runs so
-	// global cap truncation does not skew the per-source audit.
-	record := func(name string, before int) {
-		consideredBySource[name] = 0 // populated by the source itself (if it tracks)
-		emittedBySource[name] = len(acc) - before
-	}
+	// Considered-by-source semantics: the number of authoritative
+	// rows or objects the source's underlying scan inspected
+	// (post-filter, pre-classification). Emitted: number of unique
+	// (kind, artifact_id) keys the source contributed to the
+	// accumulator. Every source reports both so callers can
+	// distinguish "no relevant data" from "generator failed
+	// silently".
+	//
+	// Per-source run pattern: capture the before-bucket size, run
+	// the source helper which both appends candidates AND reports
+	// its considered count via the returned tuple.
 
 	// ── Source A: active work + work-referenced artifacts
 	before := len(acc)
-	workConsidered := addWorkCandidates(dm, q, limits.Work, acc)
-	consideredBySource["work"] = workConsidered
+	workCons, _ := addWorkCandidates(dm, q, limits.Work, acc)
+	consideredBySource["work"] = workCons
 	emittedBySource["work"] = len(acc) - before
 
 	// ── Source B: handoffs (read-only peek path)
 	before = len(acc)
-	_ = addHandoffCandidates(dm, q, limits.Handoff, acc)
+	hanCons, _ := addHandoffCandidates(dm, q, limits.Handoff, acc)
+	consideredBySource["handoff"] = hanCons
 	emittedBySource["handoff"] = len(acc) - before
 
 	// ── Source C: recent semantic activity
 	before = len(acc)
-	_ = addActivityCandidates(dm, q, limits.Activity, acc)
+	actCons, _ := addActivityCandidates(dm, q, limits.Activity, acc)
+	consideredBySource["activity"] = actCons
 	emittedBySource["activity"] = len(acc) - before
 
 	// ── Source D: epistemic dependencies (theories, decisions, lessons, evidence)
 	before = len(acc)
-	_ = addEpistemicCandidates(dm, q, limits.Epistemic, acc)
+	epCons, _ := addEpistemicCandidates(dm, q, limits.Epistemic, acc)
+	consideredBySource["epistemic"] = epCons
 	emittedBySource["epistemic"] = len(acc) - before
 
 	// ── Source E: cascades
 	before = len(acc)
-	_ = addCascadeCandidates(dm, q, limits.Cascade, acc)
+	casCons, _ := addCascadeCandidates(dm, q, limits.Cascade, acc)
+	consideredBySource["cascade"] = casCons
 	emittedBySource["cascade"] = len(acc) - before
 
 	// ── Source F: wakes / obligations
 	before = len(acc)
-	wakesConsidered := addWakeCandidates(dm, q, limits.Wake, acc)
-	consideredBySource["wake"] = wakesConsidered
+	wakeCons, _ := addWakeCandidates(dm, q, limits.Wake, acc)
+	consideredBySource["wake"] = wakeCons
 	emittedBySource["wake"] = len(acc) - before
 
 	// ── Source G: scratchpad
 	before = len(acc)
-	_ = addScratchpadCandidates(dm, q, limits.Scratchpad, acc)
+	spCons, _ := addScratchpadCandidates(dm, q, limits.Scratchpad, acc)
+	consideredBySource["scratchpad"] = spCons
 	emittedBySource["scratchpad"] = len(acc) - before
 
 	// ── Source H: topic neighborhood
 	before = len(acc)
-	_ = addTopicCandidates(dm, q, limits.Topic, acc)
+	topCons, _ := addTopicCandidates(dm, q, limits.Topic, acc)
+	consideredBySource["topic"] = topCons
 	emittedBySource["topic"] = len(acc) - before
 
 	// ── Source I: explicit caller-supplied artifact references
 	before = len(acc)
-	unresolvedExplicitRefs, inputTruncated := addExplicitReferenceCandidates(dm, q, limits, acc)
+	expCons, unresolvedExplicitRefs, inputTruncated := addExplicitReferenceCandidates(dm, q, limits, acc)
+	consideredBySource["explicit_reference"] = expCons
 	emittedBySource["explicit_reference"] = len(acc) - before
-	_ = record // quiet unused if all source helpers don't return considered
 
 	// Deterministic dedup: collapse accumulator entries to a single
 	// candidate per (kind, artifact_id), merging reasons (sorted
@@ -605,7 +679,9 @@ func isZeroLimits(l CandidateLimits) bool {
 	return l.Work == 0 && l.Handoff == 0 && l.Activity == 0 &&
 		l.Epistemic == 0 && l.Cascade == 0 && l.Wake == 0 &&
 		l.Scratchpad == 0 && l.Topic == 0 && l.ExplicitRef == 0 &&
-		l.Global == 0 && l.ExplicitRefInputMax == 0
+		l.Global == 0 && l.ExplicitRefInputMax == 0 &&
+		l.WorkIDsInputMax == 0 && l.TopicIDsInputMax == 0 &&
+		l.QueryTextMaxBytes == 0
 }
 
 // candidateKey returns the deterministic merge key.
