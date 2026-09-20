@@ -1796,10 +1796,10 @@ func TestStage2D2_DiagnosticsCompleteness(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Every source in CanonicalSources must appear in
-	// considered and emitted maps (zero is allowed). final is
-	// built from surviving candidates, so sources that emitted
-	// nothing correctly have no final entry.
+	// Every source in CanonicalSources must appear in ALL THREE
+	// diagnostic maps. Zero values are allowed (and required —
+	// sources that ran but observed/emitted/survived nothing
+	// must still be represented as a 0 entry, not omitted).
 	expected := []string{
 		"work", "handoff", "activity", "epistemic", "cascade",
 		"wake", "scratchpad", "topic", "explicit_reference",
@@ -1809,6 +1809,8 @@ func TestStage2D2_DiagnosticsCompleteness(t *testing.T) {
 		require.True(t, ok, "considered_by_source must contain %q", name)
 		_, ok = res.Diagnostics.EmittedBySource[name]
 		require.True(t, ok, "emitted_by_source must contain %q", name)
+		_, ok = res.Diagnostics.FinalBySource[name]
+		require.True(t, ok, "final_by_source must contain %q", name)
 	}
 }
 

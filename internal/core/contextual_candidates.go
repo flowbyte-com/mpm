@@ -340,9 +340,22 @@ func (dm *DatabaseManager) GenerateContextualCandidates(q ContextQuery) (Candida
 	// Per-source diagnostics. Considered = raw rows the source
 	// observed; Emitted = unique keys the source contributed;
 	// Final = surviving keys after dedup.
+	//
+	// Every canonical source is pre-registered with a zero entry
+	// so the diagnostic maps are structurally stable for agents,
+	// tests, and Stage 2E debugging. A zero value means the source
+	// ran but observed/emitted/survived nothing; the key being
+	// absent would mean the source didn't participate at all
+	// (which can't happen — every source runs unconditionally).
 	consideredBySource := map[string]int{}
 	emittedBySource := map[string]int{}
 	finalBySource := map[string]int{}
+	for _, s := range CanonicalSources {
+		key := string(s)
+		consideredBySource[key] = 0
+		emittedBySource[key] = 0
+		finalBySource[key] = 0
+	}
 
 	// Considered-by-source semantics: the number of authoritative
 	// rows or objects the source's underlying scan inspected
