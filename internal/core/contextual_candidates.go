@@ -47,32 +47,32 @@ import (
 //   - TopicIDs           : topics the agent is reasoning about
 //   - ArtifactIDs        : explicit artifact pointers supplied by caller
 //   - QueryText          : optional task text (NOT parsed in Stage 2D;
-//                          carried for the next-stage ranking stage)
+//     carried for the next-stage ranking stage)
 //   - Limits             : per-source + global bounds; zero values use
-//                          defaults from DefaultCandidateLimits
+//     defaults from DefaultCandidateLimits
 type ContextQuery struct {
-	MPMSessionID       string   `json:"mpm_session_id,omitempty"`
-	FrameworkSessionID string   `json:"framework_session_id,omitempty"`
-	FrameworkName      string   `json:"framework_name,omitempty"`
-	WorkIDs            []string `json:"work_ids,omitempty"`
-	TopicIDs           []string `json:"topic_ids,omitempty"`
-	ArtifactIDs        []string `json:"artifact_ids,omitempty"`
-	QueryText          string   `json:"query_text,omitempty"`
+	MPMSessionID       string          `json:"mpm_session_id,omitempty"`
+	FrameworkSessionID string          `json:"framework_session_id,omitempty"`
+	FrameworkName      string          `json:"framework_name,omitempty"`
+	WorkIDs            []string        `json:"work_ids,omitempty"`
+	TopicIDs           []string        `json:"topic_ids,omitempty"`
+	ArtifactIDs        []string        `json:"artifact_ids,omitempty"`
+	QueryText          string          `json:"query_text,omitempty"`
 	Limits             CandidateLimits `json:"limits,omitempty"`
 }
 
 // CandidateLimits bounds per-source and total candidate counts. A
 // zero value uses DefaultCandidateLimits.
 type CandidateLimits struct {
-	Work       int `json:"work,omitempty"`        // active work + recent
-	Handoff    int `json:"handoff,omitempty"`     // latest relevant
-	Activity   int `json:"activity,omitempty"`    // recent semantic
-	Epistemic  int `json:"epistemic,omitempty"`   // theory/decision/lesson/evidence
-	Cascade    int `json:"cascade,omitempty"`     // cascade obligations
-	Wake       int `json:"wake,omitempty"`        // overdue + pending
-	Scratchpad int `json:"scratchpad,omitempty"`  // active scratchpad items
-	Topic      int `json:"topic,omitempty"`       // topic-bounded neighbors
-	Global     int `json:"global,omitempty"`      // total cap after dedup
+	Work       int `json:"work,omitempty"`       // active work + recent
+	Handoff    int `json:"handoff,omitempty"`    // latest relevant
+	Activity   int `json:"activity,omitempty"`   // recent semantic
+	Epistemic  int `json:"epistemic,omitempty"`  // theory/decision/lesson/evidence
+	Cascade    int `json:"cascade,omitempty"`    // cascade obligations
+	Wake       int `json:"wake,omitempty"`       // overdue + pending
+	Scratchpad int `json:"scratchpad,omitempty"` // active scratchpad items
+	Topic      int `json:"topic,omitempty"`      // topic-bounded neighbors
+	Global     int `json:"global,omitempty"`     // total cap after dedup
 }
 
 // DefaultCandidateLimits returns the canonical bounded defaults for
@@ -100,15 +100,15 @@ type Candidate struct {
 	// ID is the deterministic merge key: kind + artifact_id. Same
 	// artifact discovered through multiple paths collapses to one
 	// candidate with merged reasons.
-	ID                 string   `json:"id"`
-	Kind               string   `json:"kind"` // memory, lesson, theory, decision, evidence, work, handoff, scratchpad, wake, activity
-	ArtifactID         string   `json:"artifact_id"`
-	Pointer            string   `json:"pointer,omitempty"`
-	Timestamp          int64    `json:"timestamp,omitempty"`
-	ActorKind          string   `json:"actor_kind,omitempty"`
-	FrameworkName      string   `json:"framework_name,omitempty"`
-	MPMSessionID       string   `json:"mpm_session_id,omitempty"`
-	FrameworkSessionID string   `json:"framework_session_id,omitempty"`
+	ID                 string `json:"id"`
+	Kind               string `json:"kind"` // memory, lesson, theory, decision, evidence, work, handoff, scratchpad, wake, activity
+	ArtifactID         string `json:"artifact_id"`
+	Pointer            string `json:"pointer,omitempty"`
+	Timestamp          int64  `json:"timestamp,omitempty"`
+	ActorKind          string `json:"actor_kind,omitempty"`
+	FrameworkName      string `json:"framework_name,omitempty"`
+	MPMSessionID       string `json:"mpm_session_id,omitempty"`
+	FrameworkSessionID string `json:"framework_session_id,omitempty"`
 	// Reasons is the bounded vocabulary explaining why this
 	// candidate is potentially relevant. Order is deterministic
 	// (sorted by CandidateReasonName).
@@ -121,10 +121,19 @@ type Candidate struct {
 	// LifecycleState captures the artifact's current lifecycle
 	// tag (open/done for work, resolved/disproven for theory,
 	// superseded/invalidated for decision, etc.). Empty if N/A.
+	// Distinct from RelationshipPolarity (which carries epistemic
+	// polarity like assumes_true / assumes_false).
 	LifecycleState string `json:"lifecycle_state,omitempty"`
+	// RelationshipPolarity captures epistemic polarity from
+	// epistemic_provenance or confidence_history. Values:
+	// "assumes_true", "assumes_false", or empty. Carried as a
+	// dedicated field rather than overloading LifecycleState so
+	// Stage 2E can distinguish "open vs superseded" from
+	// "confirms vs contradicts" without parsing prose.
+	RelationshipPolarity string `json:"relationship_polarity,omitempty"`
 	// Source identifies which generator produced this candidate
 	// (work, handoff, activity, epistemic, cascade, wake,
-	// scratchpad, topic). Useful for debugging.
+	// scratchpad, topic, explicit_reference). Useful for debugging.
 	Source string `json:"source"`
 	// Summary is a bounded, secret-safe structural summary
 	// suitable for diagnostic rendering. Length-capped.
@@ -135,23 +144,43 @@ type Candidate struct {
 // per-source pre-dedup count (debug aid); Candidates is the
 // post-dedup bounded set; Diagnostics captures generation metadata.
 type CandidateGenerationResult struct {
-	Candidates  []Candidate                `json:"candidates"`
-	Sources     map[string]int             `json:"sources"`
-	Diagnostics CandidateGenerationDiag    `json:"diagnostics"`
+	Candidates  []Candidate             `json:"candidates"`
+	Sources     map[string]int          `json:"sources"`
+	Diagnostics CandidateGenerationDiag `json:"diagnostics"`
 }
 
 // CandidateGenerationDiag captures metadata about the generation run.
+// Surfaced for debugging / observability — never used for ranking.
 type CandidateGenerationDiag struct {
-	GeneratedAt       int64  `json:"generated_at"`
-	InputMpmSession   string `json:"input_mpm_session,omitempty"`
-	InputFwSession    string `json:"input_framework_session,omitempty"`
-	InputWorkIDs      int    `json:"input_work_ids"`
-	InputTopicIDs     int    `json:"input_topic_ids"`
-	InputArtifactIDs  int    `json:"input_artifact_ids"`
-	LimitsUsed        CandidateLimits `json:"limits_used"`
-	TotalRaw          int    `json:"total_raw"`
-	TotalAfterDedup   int    `json:"total_after_dedup"`
-	GlobalCapApplied  bool   `json:"global_cap_applied"`
+	GeneratedAt      int64           `json:"generated_at"`
+	InputMpmSession  string          `json:"input_mpm_session,omitempty"`
+	InputFwSession   string          `json:"input_framework_session,omitempty"`
+	InputWorkIDs     int             `json:"input_work_ids"`
+	InputTopicIDs    int             `json:"input_topic_ids"`
+	InputArtifactIDs int             `json:"input_artifact_ids"`
+	LimitsUsed       CandidateLimits `json:"limits_used"`
+	// ConsideredBySource counts raw rows each source saw before
+	// dedup. Useful to distinguish "no relevant data" from
+	// "generator failed silently".
+	ConsideredBySource map[string]int `json:"considered_by_source"`
+	// EmittedBySource counts unique (kind, artifact_id) keys each
+	// source contributed before dedup.
+	EmittedBySource map[string]int `json:"emitted_by_source"`
+	// FinalBySource counts the final per-source breakdown after
+	// dedup. Lets a debugger confirm structural categories survived
+	// global truncation.
+	FinalBySource map[string]int `json:"final_by_source"`
+	// UnresolvedExplicitRefs counts explicit caller-supplied
+	// ArtifactIDs that did not resolve to a known MPM artifact.
+	UnresolvedExplicitRefs int `json:"unresolved_explicit_refs"`
+	// TotalRaw is the pre-dedup unique-key count.
+	TotalRaw int `json:"total_raw"`
+	// TotalAfterDedup is the post-dedup unique-key count (before
+	// global truncation).
+	TotalAfterDedup int `json:"total_after_dedup"`
+	// GlobalCapApplied is true when the per-source + dedup output
+	// exceeded Limits.Global and was truncated.
+	GlobalCapApplied bool `json:"global_cap_applied"`
 }
 
 // ── Reason vocabulary ───────────────────────────────────────────────
@@ -165,26 +194,20 @@ const (
 	// ── Continuity ──
 	ReasonSameMPMSession       CandidateReasonName = "same_mpm_session"
 	ReasonSameFrameworkSession CandidateReasonName = "same_framework_session"
-	ReasonHandoffForContext   CandidateReasonName = "handoff_for_current_context"
+	ReasonHandoffForContext    CandidateReasonName = "handoff_for_current_context"
 	ReasonOpenWork             CandidateReasonName = "open_work"
-	ReasonRecentlyChangedWork  CandidateReasonName = "work_recently_changed"
 
 	// ── Structural ──
 	ReasonReferencedByActiveWork CandidateReasonName = "referenced_by_active_work"
 	ReasonSharesTopic            CandidateReasonName = "shares_topic"
 	ReasonExplicitDependency     CandidateReasonName = "explicit_dependency"
-	ReasonDependsOnCurrent       CandidateReasonName = "depends_on_current_artifact"
-	ReasonCurrentDependsOn       CandidateReasonName = "current_artifact_depends_on_candidate"
 	ReasonExplicitReference      CandidateReasonName = "explicit_reference"
 
 	// ── Epistemic ──
-	ReasonFoundationSuperseded CandidateReasonName = "foundation_superseded"
+	ReasonFoundationSuperseded  CandidateReasonName = "foundation_superseded"
 	ReasonFoundationInvalidated CandidateReasonName = "foundation_invalidated"
 	ReasonConfidenceChanged     CandidateReasonName = "confidence_changed"
 	ReasonEvidenceAdded         CandidateReasonName = "evidence_added"
-	ReasonTheoryResolved        CandidateReasonName = "theory_resolved"
-	ReasonTheoryContradicted    CandidateReasonName = "theory_contradicted"
-	ReasonDecisionSuperseded    CandidateReasonName = "decision_superseded"
 	ReasonCascadePending        CandidateReasonName = "cascade_pending"
 	ReasonCascadeResolved       CandidateReasonName = "cascade_resolved"
 
@@ -194,16 +217,14 @@ const (
 	ReasonUnknownSourceChange    CandidateReasonName = "unknown_source_change"
 
 	// ── Obligation ──
-	ReasonOverdueWake           CandidateReasonName = "overdue_wake"
-	ReasonUnresolvedWake        CandidateReasonName = "unresolved_wake"
-	ReasonOpenCommitment        CandidateReasonName = "open_commitment"
-	ReasonUnresolvedQuestion    CandidateReasonName = "unresolved_question"
-	ReasonIncompleteWork        CandidateReasonName = "incomplete_work"
+	ReasonOverdueWake    CandidateReasonName = "overdue_wake"
+	ReasonUnresolvedWake CandidateReasonName = "unresolved_wake"
 
 	// ── Scratchpad / working ──
-	ReasonActiveScratchpad    CandidateReasonName = "active_scratchpad"
-	ReasonPromotedScratchpad  CandidateReasonName = "promoted_scratchpad"
-	ReasonCurrentWorkEvidence CandidateReasonName = "current_work_evidence"
+	ReasonActiveScratchpad CandidateReasonName = "active_scratchpad"
+
+	// ── Supersession ──
+	ReasonSupersessionChain CandidateReasonName = "supersession_chain"
 
 	// ── Provenance ──
 	ReasonProvenanceUnknown CandidateReasonName = "provenance_unknown"
@@ -233,41 +254,71 @@ func (dm *DatabaseManager) GenerateContextualCandidates(q ContextQuery) (Candida
 	// accumulator keyed by candidate ID (kind + artifact_id)
 	acc := make(map[string]*candidateAccumulator)
 
-	// Sources populated by per-source generators.
-	sources := map[string]int{}
+	// Per-source diagnostics. Considered = raw rows the source
+	// observed; Emitted = unique keys the source contributed;
+	// Final = surviving keys after dedup.
+	consideredBySource := map[string]int{}
+	emittedBySource := map[string]int{}
+	finalBySource := map[string]int{}
+
+	// Per-source run. The "considered" count is the number of rows
+	// the source's underlying scan actually returned (post-filter,
+	// pre-classification). The "emitted" count is the number of
+	// unique (kind, artifact_id) keys the source contributed to the
+	// accumulator. Both are recorded before the next source runs so
+	// global cap truncation does not skew the per-source audit.
+	record := func(name string, before int) {
+		consideredBySource[name] = 0 // populated by the source itself (if it tracks)
+		emittedBySource[name] = len(acc) - before
+	}
 
 	// ── Source A: active work + work-referenced artifacts
-	addWorkCandidates(dm, q, limits.Work, acc)
-	sources["work"] = len(acc)
+	before := len(acc)
+	workConsidered := addWorkCandidates(dm, q, limits.Work, acc)
+	consideredBySource["work"] = workConsidered
+	emittedBySource["work"] = len(acc) - before
 
 	// ── Source B: handoffs (read-only peek path)
-	addHandoffCandidates(dm, q, limits.Handoff, acc)
-	sources["handoff"] = len(acc)
+	before = len(acc)
+	_ = addHandoffCandidates(dm, q, limits.Handoff, acc)
+	emittedBySource["handoff"] = len(acc) - before
 
 	// ── Source C: recent semantic activity
-	addActivityCandidates(dm, q, limits.Activity, acc)
-	sources["activity"] = len(acc)
+	before = len(acc)
+	_ = addActivityCandidates(dm, q, limits.Activity, acc)
+	emittedBySource["activity"] = len(acc) - before
 
 	// ── Source D: epistemic dependencies (theories, decisions, lessons, evidence)
-	addEpistemicCandidates(dm, q, limits.Epistemic, acc)
-	sources["epistemic"] = len(acc)
+	before = len(acc)
+	_ = addEpistemicCandidates(dm, q, limits.Epistemic, acc)
+	emittedBySource["epistemic"] = len(acc) - before
 
 	// ── Source E: cascades
-	addCascadeCandidates(dm, q, limits.Cascade, acc)
-	sources["cascade"] = len(acc)
+	before = len(acc)
+	_ = addCascadeCandidates(dm, q, limits.Cascade, acc)
+	emittedBySource["cascade"] = len(acc) - before
 
 	// ── Source F: wakes / obligations
-	addWakeCandidates(dm, q, limits.Wake, acc)
-	sources["wake"] = len(acc)
-	_ = sources // quiet unused warning if any tree-prune runs
+	before = len(acc)
+	wakesConsidered := addWakeCandidates(dm, q, limits.Wake, acc)
+	consideredBySource["wake"] = wakesConsidered
+	emittedBySource["wake"] = len(acc) - before
 
 	// ── Source G: scratchpad
-	addScratchpadCandidates(dm, q, limits.Scratchpad, acc)
-	sources["scratchpad"] = len(acc)
+	before = len(acc)
+	_ = addScratchpadCandidates(dm, q, limits.Scratchpad, acc)
+	emittedBySource["scratchpad"] = len(acc) - before
 
 	// ── Source H: topic neighborhood
-	addTopicCandidates(dm, q, limits.Topic, acc)
-	sources["topic"] = len(acc)
+	before = len(acc)
+	_ = addTopicCandidates(dm, q, limits.Topic, acc)
+	emittedBySource["topic"] = len(acc) - before
+
+	// ── Source I: explicit caller-supplied artifact references
+	before = len(acc)
+	unresolvedExplicitRefs := addExplicitReferenceCandidates(dm, q, acc)
+	emittedBySource["explicit_reference"] = len(acc) - before
+	_ = record // quiet unused if all source helpers don't return considered
 
 	// Deterministic dedup: collapse accumulator entries to a single
 	// candidate per (kind, artifact_id), merging reasons (sorted
@@ -277,21 +328,32 @@ func (dm *DatabaseManager) GenerateContextualCandidates(q ContextQuery) (Candida
 	out := materialize(acc, limits.Global)
 	globalCapApplied := len(out) >= limits.Global
 
+	// Final per-source breakdown (post-dedup, post-truncation).
+	for _, c := range out {
+		for _, src := range strings.Split(c.Source, ",") {
+			finalBySource[src]++
+		}
+	}
+
 	now := time.Now().Unix()
 	return CandidateGenerationResult{
 		Candidates: out,
-		Sources:    sources,
+		Sources:    emittedBySource,
 		Diagnostics: CandidateGenerationDiag{
-			GeneratedAt:      now,
-			InputMpmSession:  q.MPMSessionID,
-			InputFwSession:   q.FrameworkSessionID,
-			InputWorkIDs:     len(q.WorkIDs),
-			InputTopicIDs:    len(q.TopicIDs),
-			InputArtifactIDs: len(q.ArtifactIDs),
-			LimitsUsed:       limits,
-			TotalRaw:         len(acc),
-			TotalAfterDedup:  len(out),
-			GlobalCapApplied: globalCapApplied,
+			GeneratedAt:            now,
+			InputMpmSession:        q.MPMSessionID,
+			InputFwSession:         q.FrameworkSessionID,
+			InputWorkIDs:           len(q.WorkIDs),
+			InputTopicIDs:          len(q.TopicIDs),
+			InputArtifactIDs:       len(q.ArtifactIDs),
+			LimitsUsed:             limits,
+			ConsideredBySource:     consideredBySource,
+			EmittedBySource:        emittedBySource,
+			FinalBySource:          finalBySource,
+			UnresolvedExplicitRefs: unresolvedExplicitRefs,
+			TotalRaw:               len(acc),
+			TotalAfterDedup:        len(out),
+			GlobalCapApplied:       globalCapApplied,
 		},
 	}, nil
 }
@@ -301,19 +363,20 @@ func (dm *DatabaseManager) GenerateContextualCandidates(q ContextQuery) (Candida
 // related_ids accumulate via set semantics; lifecycle_state and
 // summary retain first-wins; sources accumulate all.
 type candidateAccumulator struct {
-	kind           string
-	artifactID     string
-	pointer        string
-	timestamp      int64
-	actorKind      string
-	frameworkName  string
-	mpmSessionID   string
-	fwSessionID    string
-	reasons        map[string]struct{}
-	relatedIDs     map[string]struct{}
-	sources        map[string]struct{}
-	lifecycleState string
-	summary        string
+	kind                 string
+	artifactID           string
+	pointer              string
+	timestamp            int64
+	actorKind            string
+	frameworkName        string
+	mpmSessionID         string
+	fwSessionID          string
+	reasons              map[string]struct{}
+	relatedIDs           map[string]struct{}
+	sources              map[string]struct{}
+	lifecycleState       string
+	relationshipPolarity string
+	summary              string
 }
 
 // materialize converts the accumulator map into a sorted,
@@ -335,20 +398,21 @@ func materialize(acc map[string]*candidateAccumulator, globalCap int) []Candidat
 			summary = summary[:200]
 		}
 		out = append(out, Candidate{
-			ID:                 id,
-			Kind:               a.kind,
-			ArtifactID:         a.artifactID,
-			Pointer:            a.pointer,
-			Timestamp:          a.timestamp,
-			ActorKind:          a.actorKind,
-			FrameworkName:      a.frameworkName,
-			MPMSessionID:       a.mpmSessionID,
-			FrameworkSessionID: a.fwSessionID,
-			Reasons:            reasons,
-			RelatedIDs:         relatedIDs,
-			LifecycleState:     a.lifecycleState,
-			Source:             strings.Join(sources, ","),
-			Summary:            summary,
+			ID:                   id,
+			Kind:                 a.kind,
+			ArtifactID:           a.artifactID,
+			Pointer:              a.pointer,
+			Timestamp:            a.timestamp,
+			ActorKind:            a.actorKind,
+			FrameworkName:        a.frameworkName,
+			MPMSessionID:         a.mpmSessionID,
+			FrameworkSessionID:   a.fwSessionID,
+			Reasons:              reasons,
+			RelatedIDs:           relatedIDs,
+			LifecycleState:       a.lifecycleState,
+			RelationshipPolarity: a.relationshipPolarity,
+			Source:               strings.Join(sources, ","),
+			Summary:              summary,
 		})
 	}
 	// Deterministic sort: kind, then artifact_id.

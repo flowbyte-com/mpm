@@ -23,16 +23,17 @@ import (
 // ── Source A: active work + work-referenced artifacts ──────────────
 
 // addWorkCandidates emits:
-//   - active (open) work rows, with work_recently_changed reason for
-//     work updated within the per-source limit's recency window;
+//   - active (open) work rows;
 //   - work whose id is in q.WorkIDs (explicit active work).
 //
-// The work-pointer is "mpm://work/<id>". Lifecycle state is the
-// work.status ("open" by default for active work).
-func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) {
+// Returns the number of rows the source's scan actually considered
+// (post-filter) so diagnostics can distinguish "no relevant data"
+// from "generator failure".
+func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
 	if limit <= 0 {
-		return
+		return 0
 	}
+	considered := 0
 
 	// 1. Active work rows, newest-updated first.
 	rows, err := dm.db.Query(`
@@ -43,10 +44,11 @@ func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 		LIMIT ?
 	`, limit)
 	if err != nil {
-		return
+		return 0
 	}
 	defer rows.Close()
 	for rows.Next() {
+		considered++
 		var id, title, status string
 		var verification, sessionID sql.NullString
 		var updatedAt int64
@@ -60,14 +62,8 @@ func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 		a.lifecycleState = status
 		a.summary = truncate(title, 120)
 		a.mpmSessionID = ""
-		// session_id on works is the legacy host-correlation field;
-		// we don't conflate it with mpm_session_id.
 		addReason(a, ReasonOpenWork)
 		markSource(a, "work")
-		// If this work is referenced by an explicit active-work id
-		// supplied in q.WorkIDs, add the structural reason. Since
-		// q.WorkIDs is the same set we are iterating over, the
-		// caller-supplied list re-enforces open_work.
 		for _, w := range q.WorkIDs {
 			if w == id {
 				addReason(a, ReasonReferencedByActiveWork)
@@ -75,9 +71,7 @@ func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 		}
 	}
 
-	// 2. Explicit work ids from caller (already mostly covered by
-	// the active-work scan, but the caller may supply closed/in-
-	// progress ids we want surfaced with a structural reason).
+	// 2. Explicit work ids from caller.
 	for _, id := range q.WorkIDs {
 		if id == "" {
 			continue
@@ -101,6 +95,7 @@ func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 		addReason(a, ReasonReferencedByActiveWork)
 		markSource(a, "work")
 	}
+	return considered
 }
 
 // ── Source B: handoffs (read-only peek) ─────────────────────────────
@@ -108,9 +103,9 @@ func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 // addHandoffCandidates emits the most recent unread handoff whose
 // mpm_session_id matches q.MPMSessionID (when supplied) OR the
 // latest handoff overall (read-only peek; never mutates read_at).
-func addHandoffCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) {
+func addHandoffCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
 	if limit <= 0 {
-		return
+		return 0
 	}
 
 	// Latest unread handoff, peek (MarkLatestHandoffRead would
@@ -132,10 +127,6 @@ func addHandoffCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc ma
 			addReason(a, ReasonSameFrameworkSession)
 		}
 		addReason(a, ReasonHandoffForContext)
-		// Surface open commitments / questions as related ids
-		// (we already emit candidates for them separately via the
-		// obligation pass; here we merely annotate related
-		// artifacts).
 		markSource(a, "handoff")
 	}
 
@@ -161,6 +152,8 @@ func addHandoffCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc ma
 			markSource(a, "handoff")
 		}
 	}
+	_ = q
+	return 0
 }
 
 // ── Source C: recent semantic activity ─────────────────────────────
@@ -173,16 +166,16 @@ func addHandoffCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc ma
 //
 // Recent_activity is observational — it does NOT rank. We simply
 // bound the count and tag identity axes.
-func addActivityCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) {
+func addActivityCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
 	if limit <= 0 {
-		return
+		return 0
 	}
 
 	res, err := dm.RecentActivityWithMeta(RecentActivityQueryParams{
 		Limit: limit * 2, // over-fetch because activity-class filter below trims
 	})
 	if err != nil {
-		return
+		return 0
 	}
 	count := 0
 	for _, ev := range res.Events {
@@ -238,6 +231,8 @@ func addActivityCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc m
 		markSource(a, "activity")
 		count++
 	}
+	_ = q
+	return count
 }
 
 // activitySummary produces a bounded, secret-safe textual
@@ -261,20 +256,20 @@ func activitySummaryEvent(ev RecentActivityEvent) string {
 // contained for hermetic tests.
 func isActivityClassReadOnly(tool, action string) bool {
 	readOnly := map[string]bool{
-		"mpm_context.read_wake_context":    true,
-		"mpm_context.read_directives":     true,
+		"mpm_context.read_wake_context":     true,
+		"mpm_context.read_directives":       true,
 		"mpm_context.proactive_recall_hint": true,
-		"mpm_context.query_global_rules":  true,
-		"mpm_context.route":               true,
-		"mpm_context.recent_activity":     true,
-		"mpm_handoff.read":                true,
-		"mpm_handoff.list":                true,
-		"mpm_wakes.check":                 true,
-		"mpm_wakes.list":                  true,
-		"mpm_scratchpad.read":             true,
-		"mpm_system.health_check":         true,
-		"mpm_system.gc_run":               true,
-		"mpm_system.compact":              true,
+		"mpm_context.query_global_rules":    true,
+		"mpm_context.route":                 true,
+		"mpm_context.recent_activity":       true,
+		"mpm_handoff.read":                  true,
+		"mpm_handoff.list":                  true,
+		"mpm_wakes.check":                   true,
+		"mpm_wakes.list":                    true,
+		"mpm_scratchpad.read":               true,
+		"mpm_system.health_check":           true,
+		"mpm_system.gc_run":                 true,
+		"mpm_system.compact":                true,
 	}
 	key := tool
 	if action != "" {
@@ -296,9 +291,9 @@ func isActivityClassReadOnly(tool, action string) bool {
 // For Stage 2D we take a structural / one-hop expansion: we read
 // confidence_history for trigger events + epistemic_provenance for
 // relationships. We do NOT walk the full graph.
-func addEpistemicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) {
+func addEpistemicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
 	if limit <= 0 {
-		return
+		return 0
 	}
 
 	// ── Trigger events from confidence_history
@@ -349,51 +344,14 @@ func addEpistemicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc 
 			case "decay_tick", "concept_drift", "manual_recompute":
 				addReason(a, ReasonConfidenceChanged)
 			}
-			a.summary = truncate(buildEpistemicSummary(trigger, "", ""), 200)
-			markSource(a, "epistemic")
-		}
-	}
-
-	// ── Citation relationships from epistemic_provenance
-	// Surfaced as the downstream artifact's candidate with the
-	// source artifact listed in related_ids — the downstream's
-	// candidacy is structural ("X cites Y"), and ranking decides
-	// later whether the downstream is selected.
-	prow, perr := dm.db.Query(`
-		SELECT downstream_id, downstream_type, source_id, source_type, created_at
-		FROM epistemic_provenance
-		ORDER BY created_at DESC, id DESC
-		LIMIT ?
-	`, limit)
-	if perr == nil {
-		defer prow.Close()
-		for prow.Next() {
-			var downID, downType, sourceID, sourceType string
-			var createdAt int64
-			if err := prow.Scan(&downID, &downType, &sourceID, &sourceType, &createdAt); err != nil {
-				dm.LogAudit(AuditWarn, "contextual_candidates", "epistemic provenance scan: "+err.Error(), "", AuditContext{"source": "epistemic"})
-				continue
-			}
-			if downID == "" || sourceID == "" {
-				continue
-			}
-			kind := canonicalArtifactKind(downType)
-			a := ensureCandidate(acc, kind, downID)
-			a.timestamp = createdAt
-			addReason(a, ReasonExplicitDependency)
-			addRelated(a, sourceID)
-			a.summary = truncate(sourceType+":"+sourceID, 200)
+			a.summary = truncate(buildEpistemicSummary(trigger, ""), 200)
 			markSource(a, "epistemic")
 		}
 	}
 	_ = q
+	return 0
 }
 
-// canonicalArtifactKind maps the substrate's stored artifact_type
-// strings into the candidate kind vocabulary. Memory kinds map to
-// "memory"; theories to "theory"; decisions to "decision";
-// evidence to "evidence"; everything else falls through to its
-// lowercased type.
 func canonicalArtifactKind(t string) string {
 	t = strings.ToLower(strings.TrimSpace(t))
 	switch t {
@@ -423,15 +381,14 @@ func canonicalArtifactKind(t string) string {
 }
 
 // buildEpistemicSummary constructs a bounded, secret-safe summary
-// from trigger + reason + polarity. It deliberately does NOT
-// deserialize payload — that's selection-stage materialization.
-func buildEpistemicSummary(trigger, reason, polarity string) string {
+// from trigger + reason. It deliberately does NOT deserialize
+// payload — that's selection-stage materialization. Polarity is
+// captured in Candidate.RelationshipPolarity rather than mixed
+// into the summary text.
+func buildEpistemicSummary(trigger, reason string) string {
 	s := trigger
 	if reason != "" {
 		s += ":" + truncate(reason, 80)
-	}
-	if polarity != "" {
-		s += " [" + polarity + "]"
 	}
 	return s
 }
@@ -442,9 +399,9 @@ func buildEpistemicSummary(trigger, reason, polarity string) string {
 // downstream_artifact_id is the artifact the cascade invalidates.
 // Resolved/materialized cascades surface as cascade_resolved
 // (audit history, not a live obligation).
-func addCascadeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) {
+func addCascadeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
 	if limit <= 0 {
-		return
+		return 0
 	}
 	rows, err := dm.db.Query(`
 		SELECT id, dead_artifact_id, dead_artifact_type,
@@ -456,7 +413,7 @@ func addCascadeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc ma
 		LIMIT ?
 	`, limit)
 	if err != nil {
-		return
+		return 0
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -496,37 +453,45 @@ func addCascadeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc ma
 		markSource(a, "cascade")
 	}
 	_ = q
+	return 0
 }
 
 // ── Source F: wakes / obligations ───────────────────────────────────
 
-// addWakeCandidates surfaces overdue + pending wakes with explicit
-// obligation reasons. Already-fired wakes are not included (they
-// represent historical activity, surfaced via Source C).
-func addWakeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) {
+// addWakeCandidates surfaces live-obligation wakes (unfired, not
+// yet reconciled). Includes both overdue AND future-unfired wakes
+// so `unresolved_wake` is reachable for scheduling context. Already-
+// fired wakes are NOT included — they represent historical
+// activity, surfaced via Source C (recent_activity). Bound by
+// the per-source limit; ordered by target_time ascending so the
+// nearest obligations surface first.
+//
+// Live obligation taxonomy:
+//   - fired=0, target_time <= now  -> overdue_wake
+//   - fired=0, target_time  > now  -> unresolved_wake
+func addWakeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
 	if limit <= 0 {
-		return
+		return 0
 	}
+	considered := 0
 	now := timeNowUnix()
 	rows, err := dm.db.Query(`
-		SELECT id, target_time, reason, fired, fired_at, theory_id, created_at, metadata
+		SELECT id, target_time, reason, theory_id, created_at
 		FROM scheduled_wakes
-		WHERE fired = 0 AND target_time <= ?
+		WHERE fired = 0
 		ORDER BY target_time ASC, id ASC
 		LIMIT ?
-	`, now, limit)
+	`, limit)
 	if err != nil {
-		return
+		return 0
 	}
 	defer rows.Close()
 	for rows.Next() {
+		considered++
 		var id, reason string
 		var targetTime, createdAt int64
-		var firedAt sql.NullInt64
-		var fired int
 		var theoryID sql.NullString
-		var metadata sql.NullString
-		if err := rows.Scan(&id, &targetTime, &reason, &fired, &firedAt, &theoryID, &createdAt, &metadata); err != nil {
+		if err := rows.Scan(&id, &targetTime, &reason, &theoryID, &createdAt); err != nil {
 			dm.LogAudit(AuditWarn, "contextual_candidates", "wake scan: "+err.Error(), "", AuditContext{"source": "wake"})
 			continue
 		}
@@ -545,6 +510,7 @@ func addWakeCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 		markSource(a, "wake")
 	}
 	_ = q
+	return considered
 }
 
 // timeNowUnix is the package-local stub point for current-time
@@ -558,9 +524,9 @@ var timeNowUnix = func() int64 { return time.Now().Unix() }
 // candidates. The scratchpad primary key is session_id; the
 // substrate stores one scratchpad row per session with thesis /
 // supporting JSON columns. Material content is selection-stage.
-func addScratchpadCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) {
+func addScratchpadCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
 	if limit <= 0 {
-		return
+		return 0
 	}
 	rows, err := dm.db.Query(`
 		SELECT session_id, created_at, updated_at, decay_at
@@ -569,7 +535,7 @@ func addScratchpadCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc
 		LIMIT ?
 	`, limit)
 	if err != nil {
-		return
+		return 0
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -588,6 +554,7 @@ func addScratchpadCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc
 		markSource(a, "scratchpad")
 	}
 	_ = q
+	return 0
 }
 
 // ── Source H: topic neighborhood ────────────────────────────────────
@@ -597,9 +564,9 @@ func addScratchpadCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc
 // one-hop (no topic->topic graph walk) and bounded by a per-topic
 // sub-limit to prevent a broad topic from exploding the candidate
 // set.
-func addTopicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) {
+func addTopicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[string]*candidateAccumulator) int {
 	if limit <= 0 || len(q.TopicIDs) == 0 {
-		return
+		return 0
 	}
 	// Per-topic sub-limit: divide evenly with a floor of 1.
 	subLimit := limit / len(q.TopicIDs)
@@ -639,6 +606,127 @@ func addTopicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[
 		}
 		rows.Close()
 	}
+	_ = q
+	return 0
+}
+
+// ── Source I: explicit caller-supplied artifact references ─────────
+
+// resolveExplicitArtifact attempts to identify the canonical kind
+// for an artifact id by probing the substrate's known tables in a
+// deterministic order (handoffs, works, lessons, memories). The
+// first hit wins; ambiguous cases (same id exists in multiple
+// tables) are resolved by the probe order.
+//
+// Returns (kind, artifactID, found). When found=false the caller
+// must NOT fabricate a candidate — explicit unresolved refs are
+// reported via CandidateGenerationDiag.UnresolvedExplicitRefs.
+func resolveExplicitArtifact(dm *DatabaseManager, id string) (string, bool) {
+	if id == "" {
+		return "", false
+	}
+	// Handoff — its id is the durable handle.
+	var h string
+	if err := dm.db.QueryRow(`SELECT id FROM session_handoffs WHERE id = ?`, id).Scan(&h); err == nil {
+		return "handoff", true
+	}
+	// Work.
+	if err := dm.db.QueryRow(`SELECT id FROM works WHERE id = ?`, id).Scan(&h); err == nil {
+		return "work", true
+	}
+	// Lesson.
+	if err := dm.db.QueryRow(`SELECT id FROM lessons_base WHERE id = ?`, id).Scan(&h); err == nil {
+		return "lesson", true
+	}
+	// Memory — covers decisions, theories, and plain memories.
+	var collection string
+	if err := dm.db.QueryRow(`SELECT collection FROM memories WHERE id = ?`, id).Scan(&collection); err == nil {
+		switch collection {
+		case "decisions":
+			return "decision", true
+		case "theories":
+			return "theory", true
+		default:
+			return "memory", true
+		}
+	}
+	return "", false
+}
+
+// addExplicitReferenceCandidates surfaces caller-supplied
+// artifact ids (q.ArtifactIDs) as first-class candidates with
+// reason `explicit_reference`. An explicit reference is the
+// strongest deterministic context signal: it must surface even
+// when no other relationship exists.
+//
+// For each unresolved id, the function increments the unresolved
+// count so CandidateGenerationDiag can surface it. Unresolved ids
+// do NOT produce fake candidates.
+func addExplicitReferenceCandidates(dm *DatabaseManager, q ContextQuery, acc map[string]*candidateAccumulator) int {
+	unresolved := 0
+	for _, id := range q.ArtifactIDs {
+		if id == "" {
+			continue
+		}
+		kind, ok := resolveExplicitArtifact(dm, id)
+		if !ok {
+			unresolved++
+			continue
+		}
+		a := ensureCandidate(acc, kind, id)
+		a.pointer = pointerForKind(kind, id)
+		a.summary = "" // selection-stage materialization
+		addReason(a, ReasonExplicitReference)
+		markSource(a, "explicit_reference")
+		// If this artifact is superseded, also surface the
+		// canonical successor as a candidate with explicit linkage
+		// between them. This preserves "A is historical, B is
+		// canonical current" as a deterministic chain the
+		// downstream selector can observe.
+		if kind == "theory" {
+			var successor sql.NullString
+			if err := dm.db.QueryRow(
+				`SELECT json_extract(metadata, '$.superseded_by')
+				   FROM memories WHERE id = ? AND collection = 'theories'`,
+				id,
+			).Scan(&successor); err == nil && successor.Valid && successor.String != "" {
+				addRelated(a, successor.String)
+				// Also surface the successor as its own
+				// candidate so downstream selectors see BOTH
+				// the historical A and the canonical B.
+				if _, exists := acc[candidateKey("theory", successor.String)]; !exists {
+					b := ensureCandidate(acc, "theory", successor.String)
+					b.pointer = "mpm://theory/" + successor.String
+					b.lifecycleState = "canonical"
+					addReason(b, ReasonSupersessionChain)
+					addRelated(b, id) // predecessor
+					markSource(b, "explicit_reference")
+				}
+			}
+		}
+	}
+	return unresolved
+}
+
+// pointerForKind returns the canonical mpm:// URI for a resolved
+// artifact id. Centralized so the explicit-reference generator and
+// other sources stay aligned.
+func pointerForKind(kind, id string) string {
+	switch kind {
+	case "handoff":
+		return "mpm://handoff/" + id
+	case "work":
+		return "mpm://work/" + id
+	case "lesson":
+		return "mpm://lesson/" + id
+	case "decision":
+		return "mpm://decision/" + id
+	case "theory":
+		return "mpm://theory/" + id
+	case "memory":
+		return "mpm://memory/" + id
+	}
+	return ""
 }
 
 // ── utilities ───────────────────────────────────────────────────────

@@ -244,11 +244,11 @@ Do not use when: you are storing raw facts without evidentiary context (mpm_memo
 		Description: `Inspect and reason about the system's certainty regarding any stored artifact.
 Use when: you need to understand how reliable a piece of information is before acting on it; you want to see the evidence weight behind a memory, theory, or decision; you suspect memory degradation and want to audit the system's confidence signal.
 Do not use when: you just want to store a fact (mpm_memory save).`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["show","recompute","explain","history","changes","trend","quality"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
+		Schema:  json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["show","recompute","explain","history","changes","trend","quality"]},"params":{"type":"object","additionalProperties":true}},"required":["action"]}`),
 		Handler: handleMpmConfidence,
 	},
 	{
-		Name:        "mpm_retrieval_diagnose",
+		Name: "mpm_retrieval_diagnose",
 		Description: `Diagnostic for retrieval pipeline failures. Run this when your query returns unexpected results, zero results, or results in the wrong order.
 Use when: you search for something you know is in memory but it doesn't appear; you want to understand why a particular result ranked where it did; you are debugging FTS5 behavior or retrieval ranking.
 Returns per-node diagnostics: BM25 score, reuse count, last-retrieved timestamp, and success count for each node in the result set. Use trace=true for the full 3-stage pipeline breakdown.`,
@@ -275,7 +275,7 @@ Lifecycle asymmetry: promote_to_global is one-way / additive. The local memory r
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["read_wake_context","read_directives","proactive_recall_hint","query_global_rules","record_global_rule","retire_global_rule","promote_to_global","route","recent_activity"]},
+				"action": {"type": "string", "enum": ["read_wake_context","read_directives","proactive_recall_hint","query_global_rules","record_global_rule","retire_global_rule","promote_to_global","route","recent_activity","contextual_candidates"]},
 				"params": {
 					"type": "object",
 					"properties": {
@@ -345,7 +345,7 @@ Lifecycle asymmetry: promote_to_global is one-way / additive. The local row is p
 		Handler: handleMpmSkills,
 	},
 	{
-Name: "mpm_wakes",
+		Name: "mpm_wakes",
 		Description: `Deferred work triggers scheduled for future execution.
 Use when: you need to schedule a check-in, reminder, or follow-up task to fire automatically at a specific time without the agent running continuously. Wakes survive agent restarts — the scheduler fires them regardless of what session is active.
 Tasks (upsert_task) are recurring cron-style triggers; one-shot wakes (schedule) fire once and are marked fired.
@@ -484,7 +484,7 @@ Optional commitments and open_questions are persisted and round-tripped: open_qu
 		Description: `Intra-session volatile working memory for thoughts, partial conclusions, and working context that may not survive to the next session.
 Use when: you are mid-thought on something complex and need to externalize your working state so you can recover if the session crashes; you want to capture a partial result that is not yet ready to be a proper memory; you need to preserve a chain of reasoning that spans multiple turns.
 Promote to memory when the thought is complete and worth preserving. Discard when the thread is abandoned. Scratchpads are not cross-session — they are for within-session resilience only.`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["flush","read","discard","promote"]},"params":{"type":"object","properties":{"session_id":{"type":"string"},"thesis":{"type":"string"},"supporting":{"type":"string"}},"additionalProperties":false}},"required":["action"]}`),
+		Schema:  json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["flush","read","discard","promote"]},"params":{"type":"object","properties":{"session_id":{"type":"string"},"thesis":{"type":"string"},"supporting":{"type":"string"}},"additionalProperties":false}},"required":["action"]}`),
 		Handler: handleMpmScratchpad,
 	},
 
@@ -672,7 +672,7 @@ Per-action semantics:
 		Handler: handleMpmSystem,
 	},
 	{
-		Name:        "log_to_changelog",
+		Name: "log_to_changelog",
 		Description: `Self-report agent work as a structured changelog entry tied to a git commit SHA.
 Use when: you have completed a meaningful unit of work (a fix, a feature, a refactor) and want to record it in the project changelog with a reference to the commit that shipped it. The changelog entry is permanent and queryable.
 
@@ -681,27 +681,27 @@ Optional assertion params (epistemic confirmation / contradiction, see docs/epis
   - contradicts_lesson_id / contradicts_decision_id / contradicts_theory_id (string or array of strings): the named artifacts this commit explicitly shows to be wrong; each produces an evidence row of type 'challenge' (-0.6) and a confidence recompute. A contradiction strong enough to cross confidence below 0.3 triggers the existing cascade invalidation machinery.
 
 Every assertion is explicit-only — no keyword matching, no semantic inference. An empty or absent param is a no-op; both directions can coexist in one call; all assertions and the changelog memory write share a single transaction (all-or-nothing atomicity).`,
-		Schema: json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string","description":"Changelog prose for this commit."},"commit_hash":{"type":"string","description":"Full 40-character SHA-1 of the commit being recorded (strict retrospective contract)."},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."},"confirms_lesson_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Lesson id(s) this commit validates. Each produces one evidence row of type reproduction (+0.85) and a confidence recompute."},"confirms_decision_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Decision id(s) this commit validates. Each produces one evidence row of type reproduction (+0.85) and a confidence recompute."},"confirms_theory_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Theory id(s) this commit validates. Each produces one evidence row of type reproduction (+0.85) and a confidence recompute."},"contradicts_lesson_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Lesson id(s) this commit shows to be wrong. Each produces one evidence row of type challenge (-0.6) and a confidence recompute; crossing confidence below 0.3 triggers the existing cascade invalidation hook."},"contradicts_decision_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Decision id(s) this commit shows to be wrong. Same semantics as contradicts_lesson_id."},"contradicts_theory_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Theory id(s) this commit shows to be wrong. Same semantics as contradicts_lesson_id."}},"required":["fact","commit_hash"]}`),
-		Handler:     handleLogToChangelog,
+		Schema:  json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string","description":"Changelog prose for this commit."},"commit_hash":{"type":"string","description":"Full 40-character SHA-1 of the commit being recorded (strict retrospective contract)."},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."},"confirms_lesson_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Lesson id(s) this commit validates. Each produces one evidence row of type reproduction (+0.85) and a confidence recompute."},"confirms_decision_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Decision id(s) this commit validates. Each produces one evidence row of type reproduction (+0.85) and a confidence recompute."},"confirms_theory_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Theory id(s) this commit validates. Each produces one evidence row of type reproduction (+0.85) and a confidence recompute."},"contradicts_lesson_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Lesson id(s) this commit shows to be wrong. Each produces one evidence row of type challenge (-0.6) and a confidence recompute; crossing confidence below 0.3 triggers the existing cascade invalidation hook."},"contradicts_decision_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Decision id(s) this commit shows to be wrong. Same semantics as contradicts_lesson_id."},"contradicts_theory_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Theory id(s) this commit shows to be wrong. Same semantics as contradicts_lesson_id."}},"required":["fact","commit_hash"]}`),
+		Handler: handleLogToChangelog,
 	},
 	{
-		Name:        "request_review",
+		Name: "request_review",
 		Description: `Concurrent multi-component review: ask multiple independent perspectives to evaluate the same artifact simultaneously.
 Use when: you want cross-validation before committing a significant decision; you need a second opinion on a memory, theory, or architecture choice; you want to stress-test a plan against different agent personas (memory, critic, scheduler) at the same time.
 Each component responds independently and in parallel. One component's failure does not block the others. No consensus synthesis — you read all responses and decide.`,
-		Schema:      json.RawMessage(`{"type":"object","properties":{"components":{"type":"array","items":{"type":"string"},"description":"Substrate component names to review (e.g. ['memory','critic']). Required, at least one."},"prompt":{"type":"string","description":"The instruction sent to every component. Required."},"artifacts":{"type":"array","items":{"type":"string"},"description":"Optional memory ids. Bodies are fetched from the database and passed to every component as pre-resolved text."},"strategy":{"type":"string","enum":["parallel"],"default":"parallel"},"timeout_secs":{"type":"number"}},"required":["components","prompt"]}`),
-		Handler:     handleRequestReview,
+		Schema:  json.RawMessage(`{"type":"object","properties":{"components":{"type":"array","items":{"type":"string"},"description":"Substrate component names to review (e.g. ['memory','critic']). Required, at least one."},"prompt":{"type":"string","description":"The instruction sent to every component. Required."},"artifacts":{"type":"array","items":{"type":"string"},"description":"Optional memory ids. Bodies are fetched from the database and passed to every component as pre-resolved text."},"strategy":{"type":"string","enum":["parallel"],"default":"parallel"},"timeout_secs":{"type":"number"}},"required":["components","prompt"]}`),
+		Handler: handleRequestReview,
 	},
 
 	// ── Phase 1: Pointer / Blob tools ──────────────────────────────────────
 
 	{
-		Name:        "mpm_resolve",
+		Name: "mpm_resolve",
 		Description: `Resolve a mpm:// URI to its content. Phase 2 supports mpm://blob/<id>, mpm://work/<id>, mpm://memory/<id>, mpm://lesson/<id>, and mpm://theory/<id>.
 Use when: you have a pointer from a previous result and need to dereference it to get the actual content. This is the dereferencing step — you get back the bounded projection by default; pass full=true to retrieve the complete unabridged payload.
 max_bytes applies a soft materialization ceiling for large results. full=true bypasses that ceiling.`,
-		Schema:      json.RawMessage(`{"type":"object","properties":{"uri":{"type":"string","description":"mpm://blob/|work/|memory/|lesson/|theory/<id>"},"max_bytes":{"type":"integer","description":"Phase 2: caller-requested materialization ceiling in bytes"},"full":{"type":"boolean","description":"Bypass the bounded inline projection; return the complete payload. Default false (bounded)."}},"required":["uri"]}`),
-		Handler:     handleMpmResolve,
+		Schema:  json.RawMessage(`{"type":"object","properties":{"uri":{"type":"string","description":"mpm://blob/|work/|memory/|lesson/|theory/<id>"},"max_bytes":{"type":"integer","description":"Phase 2: caller-requested materialization ceiling in bytes"},"full":{"type":"boolean","description":"Bypass the bounded inline projection; return the complete payload. Default false (bounded)."}},"required":["uri"]}`),
+		Handler: handleMpmResolve,
 	},
 	// ── Memory primitives ──
 	// (challenge / restore_challenge live as actions under mpm_memory —
@@ -711,20 +711,20 @@ max_bytes applies a soft materialization ceiling for large results. full=true by
 	//  Part C / follow-up commit log.)
 
 	{
-		Name:        "mpm_blob_read",
+		Name: "mpm_blob_read",
 		Description: `Read a raw blob by ID with optional byte offset and server-side size cap.
 Use when: you need the raw bytes of a blob (a spilled tool result, a large document, binary data) and want server-side pagination rather than fetching the entire thing.
 For pointer dereferencing with content type awareness, prefer mpm_resolve.`,
-		Schema:      json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"offset":{"type":"integer","default":0},"max_bytes":{"type":"integer","default":51200}},"required":["id"]}`),
-		Handler:     handleMpmBlobRead,
+		Schema:  json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"offset":{"type":"integer","default":0},"max_bytes":{"type":"integer","default":51200}},"required":["id"]}`),
+		Handler: handleMpmBlobRead,
 	},
 	{
-		Name:        "mpm_blob_search",
+		Name: "mpm_blob_search",
 		Description: `Server-side regex search within a blob's content.
 Use when: you have a blob ID and need to find a specific pattern inside it without downloading and scanning the entire thing. The search runs server-side and returns matching snippets with byte offsets.
 For indexed search across all memories, use mpm_memory query.`,
-		Schema:      json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"query":{"type":"string","maxLength":256},"regex":{"type":"boolean","default":false},"case_insensitive":{"type":"boolean","default":false},"max_matches":{"type":"integer","default":20},"max_bytes":{"type":"integer","default":51200}},"required":["id","query"]}`),
-		Handler:     handleMpmBlobSearch,
+		Schema:  json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"},"query":{"type":"string","maxLength":256},"regex":{"type":"boolean","default":false},"case_insensitive":{"type":"boolean","default":false},"max_matches":{"type":"integer","default":20},"max_bytes":{"type":"integer","default":51200}},"required":["id","query"]}`),
+		Handler: handleMpmBlobSearch,
 	},
 
 	// ── Work primitive ────────────────────────────────────────────────

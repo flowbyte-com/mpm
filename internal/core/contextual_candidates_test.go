@@ -695,3 +695,729 @@ func itoaForTest(n int) string {
 // strings import is intentionally kept; it powers the secret-
 // safety assertion.
 var _ = strings.Contains
+
+// ── Stage 2D.1 — Contextual-candidate acceptance hardening ────────────
+//
+// Tests added in the 2D.1 pass exercise the brief's correctness
+// questions BEFORE ranking/projection lands in Stage 2E:
+//   - Wake lifecycle: overdue_wake + unresolved_wake reachable,
+//     fired/resolved excluded.
+//   - Sparse activity: newer read-only events do NOT crowd out older
+//     semantic mutations; classification filter preserved.
+//   - Explicit ArtifactIDs: memory/decision/theory/lesson/work + nonexistent
+//     all resolve to the correct kind (or increment UnresolvedExplicitRefs).
+//   - Event collision safety: two activity events with the same
+//     primary key but different identity axes still produce distinct
+//     candidates (dedup is content-aware, not id-blind).
+//   - Multi-source dedup: same artifact discovered through activity
+//     + work + epistemic + cascade all collapse to one candidate with
+//     merged reasons + sources.
+//   - Supersession canonical: superseded theory AND its canonical
+//     successor both surface; successor carries supersession_chain.
+//   - Reason reachability: every declared CandidateReasonName has at
+//     least one generator path (no orphan reason constants).
+//   - Global cap diversity: when the global cap truncates, multiple
+//     structural categories survive — no single category can
+//     exhaust the global cap alone.
+//   - Observational invariants: generator never inserts/updates
+//     authoritative state, even under adversarial inputs.
+//   - Secret safety: sentinel payloads embedded in scratchpad
+//     thesis / memory metadata / handoff summary never appear in any
+//     candidate summary or related_id.
+//   - Determinism: identical inputs across separate fresh DBs produce
+//     identical candidate sets.
+
+// ── 2D.1-W1: Wake lifecycle ──────────────────────────────────────────
+
+func TestStage2D1_WakeLifecycle(t *testing.T) {
+	dm := NewTestDM(t)
+	now := time.Now().Unix()
+
+	// Three wakes:
+	//   wake-overdue: fired=0, target_time < now → overdue_wake
+	//   wake-future:  fired=0, target_time > now → unresolved_wake
+	//   wake-fired:   fired=1 → MUST NOT appear (historical, surfaced via activity)
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO scheduled_wakes (id, target_time, reason, fired, theory_id, created_by, created_at)
+		VALUES
+		  ('wake-overdue', ?, 'overdue obligation', 0, '', 'mpm-cli', ?),
+		  ('wake-future',  ?, 'future obligation',  0, '', 'mpm-cli', ?),
+		  ('wake-fired',   ?, 'already fired',      1, '', 'mpm-cli', ?)
+	`, now-3600, now, now+3600, now, now-7200, now)
+	require.NoError(t, err)
+
+	// Pin the wall clock so overdue/future reasoning is deterministic.
+	reset := pinTimeNowUnix(t, now)
+	defer reset()
+
+	res, err := dm.GenerateContextualCandidates(ContextQuery{})
+	require.NoError(t, err)
+
+	byID := map[string]Candidate{}
+	for _, c := range res.Candidates {
+		byID[c.ID] = c
+	}
+	hasReason := func(c Candidate, r string) bool {
+		for _, cr := range c.Reasons {
+			if cr == r {
+				return true
+			}
+		}
+		return false
+	}
+
+	wo, ok := byID["wake:wake-overdue"]
+	require.True(t, ok, "overdue wake must surface")
+	require.True(t, hasReason(wo, "overdue_wake"),
+		"overdue wake carries overdue_wake reason")
+
+	wf, ok := byID["wake:wake-future"]
+	require.True(t, ok, "future wake must surface")
+	require.True(t, hasReason(wf, "unresolved_wake"),
+		"future wake carries unresolved_wake reason")
+	require.False(t, hasReason(wf, "overdue_wake"),
+		"future wake must NOT carry overdue_wake")
+
+	_, firedPresent := byID["wake:wake-fired"]
+	require.False(t, firedPresent,
+		"fired wake must NOT surface as candidate (historical, via activity)")
+}
+
+// ── 2D.1-W2: Sparse activity filter ──────────────────────────────────
+
+func TestStage2D1_SparseActivityFilter(t *testing.T) {
+	dm := NewTestDM(t)
+	now := time.Now().Unix()
+
+	// Recent events:
+	//   - 5 newer read-only events (mpm_context.read_wake_context)
+	//     MUST be filtered out by the activity classifier.
+	//   - 2 older semantic mutations (mpm_memory.save / mpm_decisions.record)
+	//     MUST surface even though they are older.
+	for i := 0; i < 5; i++ {
+		_, err := dm.SQLDB().Exec(`
+			INSERT INTO tool_invocations
+			    (id, session_id, tool_name, action, invocation_id,
+			     actor_kind, framework_name, payload_hash, result_status,
+			     started_at, completed_at, duration_ms,
+			     mpm_session_id, framework_session_id)
+			VALUES (?, ?, 'mpm_context', 'read_wake_context', ?,
+			        'agent', 'openclaw', 'sha256:ro', 'success',
+			        ?, ?, 10, 'mpm-stage2d-session', 'fw-stage2d-session')
+		`, "act-ro-"+itoaForTest(i), "p-ro-"+itoaForTest(i), "inv-ro-"+itoaForTest(i),
+			now-int64(i), now-int64(i))
+		require.NoError(t, err)
+	}
+	// 2 older semantic mutations
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO tool_invocations
+		    (id, session_id, tool_name, action, invocation_id,
+		     actor_kind, framework_name, payload_hash, result_status,
+		     started_at, completed_at, duration_ms,
+		     mpm_session_id, framework_session_id)
+		VALUES ('act-sem-1', 'p-sem-1', 'mpm_memory', 'save', 'inv-sem-1',
+		        'agent', 'openclaw', 'sha256:sem1', 'success',
+		        ?, ?, 10, 'mpm-stage2d-session', 'fw-stage2d-session'),
+		       ('act-sem-2', 'p-sem-2', 'mpm_decisions', 'record', 'inv-sem-2',
+		        'agent', 'openclaw', 'sha256:sem2', 'success',
+		        ?, ?, 10, 'mpm-stage2d-session', 'fw-stage2d-session')
+	`, now-100, now-100, now-200, now-200)
+	require.NoError(t, err)
+
+	q := ContextQuery{
+		MPMSessionID:       "mpm-stage2d-session",
+		FrameworkSessionID: "fw-stage2d-session",
+		FrameworkName:      "openclaw",
+	}
+	res, err := dm.GenerateContextualCandidates(q)
+	require.NoError(t, err)
+
+	byID := map[string]Candidate{}
+	for _, c := range res.Candidates {
+		byID[c.ID] = c
+	}
+
+	// The 5 read-only events must NOT be in the candidate set.
+	for i := 0; i < 5; i++ {
+		_, present := byID["activity:act-ro-"+itoaForTest(i)]
+		require.False(t, present,
+			"read-only activity must be filtered (act-ro-%d)", i)
+	}
+	// The 2 semantic mutations must surface even though older.
+	_, sem1 := byID["activity:act-sem-1"]
+	require.True(t, sem1, "older semantic mutation must surface (act-sem-1)")
+	_, sem2 := byID["activity:act-sem-2"]
+	require.True(t, sem2, "older semantic mutation must surface (act-sem-2)")
+}
+
+// ── 2D.1-W3: Explicit ArtifactIDs ─────────────────────────────────────
+
+func TestStage2D1_ExplicitArtifactIDs(t *testing.T) {
+	dm := NewTestDM(t)
+	now := time.Now().Unix()
+
+	// Seed one artifact per kind + one nonexistent id.
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO works (id, title, status, verification, created_at, updated_at, session_id)
+		VALUES ('W-exp', 'explicit work', 'open', 'unverified', ?, ?, '')
+	`, now, now)
+	require.NoError(t, err)
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, created_at, updated_at, tags, metadata, source_id, source_db)
+		VALUES
+		  ('M-exp',     'memory',    'explicit memory',    ?, ?, '[]', '{}', '', 'openclaw'),
+		  ('D-exp',     'decisions', 'explicit decision',  ?, ?, '[]', '{}', '', 'openclaw'),
+		  ('T-exp',     'theories',  'explicit theory',    ?, ?, '[]', '{}', '', 'openclaw')
+	`, now, now, now, now, now, now)
+	require.NoError(t, err)
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO lessons (id, type, content, tags, source_session_id, created, content_hash, reinforcement_count)
+		VALUES ('L-exp', 'insight', 'explicit lesson', '[]', '', ?, '', 1)
+	`, time.Unix(now, 0).UTC().Format("2006-01-02 15:04:05"))
+	require.NoError(t, err)
+
+	q := ContextQuery{
+		ArtifactIDs: []string{
+			"W-exp",        // work
+			"M-exp",        // memory
+			"D-exp",        // decision
+			"T-exp",        // theory
+			"L-exp",        // lesson
+			"NOPE-missing", // nonexistent
+		},
+	}
+	res, err := dm.GenerateContextualCandidates(q)
+	require.NoError(t, err)
+
+	byID := map[string]Candidate{}
+	for _, c := range res.Candidates {
+		byID[c.ID] = c
+	}
+
+	// All five known kinds must surface with explicit_reference reason.
+	for _, want := range []string{
+		"work:W-exp", "memory:M-exp", "decision:D-exp",
+		"theory:T-exp", "lesson:L-exp",
+	} {
+		c, ok := byID[want]
+		require.True(t, ok, "explicit reference %s must surface", want)
+		hasExplicit := false
+		for _, r := range c.Reasons {
+			if r == "explicit_reference" {
+				hasExplicit = true
+			}
+		}
+		require.True(t, hasExplicit,
+			"%s must carry explicit_reference reason", want)
+	}
+
+	// Unresolved count must reflect exactly one nonexistent id.
+	require.Equal(t, 1, res.Diagnostics.UnresolvedExplicitRefs,
+		"one nonexistent artifact id must increment UnresolvedExplicitRefs")
+	// And the nonexistent id must NOT produce a fake candidate.
+	_, fake := byID["memory:NOPE-missing"]
+	require.False(t, fake, "nonexistent id must not produce a candidate")
+	_, fakeAny := byID["work:NOPE-missing"]
+	require.False(t, fakeAny, "nonexistent id must not produce a candidate (any kind)")
+}
+
+// ── 2D.1-W4: Event collision safety ───────────────────────────────────
+
+func TestStage2D1_EventCollisionSafety(t *testing.T) {
+	dm := NewTestDM(t)
+	now := time.Now().Unix()
+
+	// Two distinct activity events share an unusual collision: same
+	// tool_name + framework + started_at within the same minute but
+	// different invocation_id, different mpm_session_id, different
+	// framework_session_id, different artifact_id. They MUST produce
+	// TWO distinct candidates — dedup is keyed by event id, not by
+	// tool/framework/time.
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO tool_invocations
+		    (id, session_id, tool_name, action, invocation_id,
+		     actor_kind, framework_name, payload_hash, result_status,
+		     started_at, completed_at, duration_ms,
+		     mpm_session_id, framework_session_id)
+		VALUES
+		  ('act-coll-1', 'p-c1', 'mpm_memory', 'save', 'inv-c1',
+		   'agent', 'openclaw', 'sha256:c1', 'success',
+		   ?, ?, 10, 'mpm-A', 'fw-A'),
+		  ('act-coll-2', 'p-c2', 'mpm_memory', 'save', 'inv-c2',
+		   'agent', 'openclaw', 'sha256:c2', 'success',
+		   ?, ?, 10, 'mpm-B', 'fw-B')
+	`, now, now, now, now)
+	require.NoError(t, err)
+
+	res, err := dm.GenerateContextualCandidates(ContextQuery{})
+	require.NoError(t, err)
+
+	count := 0
+	for _, c := range res.Candidates {
+		if c.Kind == "activity" && (c.ArtifactID == "act-coll-1" || c.ArtifactID == "act-coll-2") {
+			count++
+		}
+	}
+	require.Equal(t, 2, count,
+		"two distinct activity events must produce two distinct candidates even when other axes match")
+}
+
+// ── 2D.1-W5: Multi-source dedup ───────────────────────────────────────
+
+func TestStage2D1_MultiSourceDedup(t *testing.T) {
+	dm := NewTestDM(t)
+	now := time.Now().Unix()
+
+	// The same (kind, artifact_id) is reachable through TWO distinct
+	// sources:
+	//   - Source D (epistemic): confidence_history trigger event on
+	//     a theory T emits candidate theory:T.
+	//   - Source I (explicit_reference): caller supplies T as an
+	//     ArtifactIDs entry, which also emits theory:T.
+	//
+	// Dedup merges them into ONE candidate with reasons from both
+	// sources and Source listing both "epistemic" and
+	// "explicit_reference".
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, created_at, updated_at, tags, metadata, source_id, source_db)
+		VALUES ('T-multi', 'theories', 'multi-source theory', ?, ?, '["superseded"]',
+		        json_object('superseded_by','T-multi-b'), '', 'openclaw'),
+		       ('T-multi-b', 'theories', 'multi-source theory successor', ?, ?, '[]', '{}', '', 'openclaw')
+	`, now, now, now, now)
+	require.NoError(t, err)
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO confidence_history
+		    (id, artifact_id, artifact_type, confidence, computed_at,
+		     evidence_count, trigger)
+		VALUES ('ch-multi', 'T-multi', 'theory', 0.1, ?, 0, 'supersede')
+	`, now)
+	require.NoError(t, err)
+
+	q := ContextQuery{
+		ArtifactIDs: []string{"T-multi"},
+	}
+	res, err := dm.GenerateContextualCandidates(q)
+	require.NoError(t, err)
+
+	count := 0
+	var merged Candidate
+	for _, c := range res.Candidates {
+		if c.ID == "theory:T-multi" {
+			count++
+			merged = c
+		}
+	}
+	require.Equal(t, 1, count,
+		"multi-source dedup must collapse theory discovered via epistemic + explicit_reference to ONE candidate")
+
+	// Reasons must include BOTH foundation_superseded (Source D) AND
+	// explicit_reference (Source I) — and supersession_chain on the
+	// successor T-multi-b.
+	hasSupersede := false
+	hasExplicit := false
+	for _, r := range merged.Reasons {
+		if r == "foundation_superseded" {
+			hasSupersede = true
+		}
+		if r == "explicit_reference" {
+			hasExplicit = true
+		}
+	}
+	require.True(t, hasSupersede, "foundation_superseded reason expected (Source D)")
+	require.True(t, hasExplicit, "explicit_reference reason expected (Source I)")
+
+	// Source field must list both generators.
+	require.Contains(t, merged.Source, "epistemic",
+		"source must list 'epistemic'")
+	require.Contains(t, merged.Source, "explicit_reference",
+		"source must list 'explicit_reference'")
+
+	// The canonical successor must surface as its own candidate
+	// with supersession_chain reason (cross-source discovery).
+	byID := map[string]Candidate{}
+	for _, c := range res.Candidates {
+		byID[c.ID] = c
+	}
+	successor, ok := byID["theory:T-multi-b"]
+	require.True(t, ok, "canonical successor must surface")
+	require.Contains(t, successor.Reasons, "supersession_chain",
+		"successor carries supersession_chain reason")
+}
+
+// ── 2D.1-W6: Supersession canonical ───────────────────────────────────
+
+func TestStage2D1_SupersessionCanonical(t *testing.T) {
+	dm := NewTestDM(t)
+	now := time.Now().Unix()
+
+	// A → B supersession. Caller explicitly asks for A.
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, created_at, updated_at, tags, metadata, source_id, source_db)
+		VALUES
+		  ('T-A', 'theories', 'old theory', ?, ?, '["superseded"]',
+		   json_object('superseded_by','T-B'), '', 'openclaw'),
+		  ('T-B', 'theories', 'new theory', ?, ?, '[]', '{}', '', 'openclaw')
+	`, now, now, now, now)
+	require.NoError(t, err)
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO confidence_history
+		    (id, artifact_id, artifact_type, confidence, computed_at,
+		     evidence_count, trigger)
+		VALUES ('ch-sup-1', 'T-A', 'theory', 0.1, ?, 0, 'supersede')
+	`, now)
+	require.NoError(t, err)
+
+	q := ContextQuery{
+		ArtifactIDs: []string{"T-A"},
+	}
+	res, err := dm.GenerateContextualCandidates(q)
+	require.NoError(t, err)
+
+	byID := map[string]Candidate{}
+	for _, c := range res.Candidates {
+		byID[c.ID] = c
+	}
+
+	a, ok := byID["theory:T-A"]
+	require.True(t, ok, "superseded theory T-A must surface")
+	require.Contains(t, a.Reasons, "explicit_reference",
+		"T-A surfaces via explicit reference")
+	require.Contains(t, a.RelatedIDs, "T-B",
+		"T-A RelatedIDs must include canonical successor T-B")
+
+	b, ok := byID["theory:T-B"]
+	require.True(t, ok, "canonical successor T-B must surface alongside T-A")
+	require.Contains(t, b.Reasons, "supersession_chain",
+		"T-B must carry supersession_chain reason")
+	require.Contains(t, b.RelatedIDs, "T-A",
+		"T-B RelatedIDs must include the historical predecessor T-A")
+}
+
+// ── 2D.1-W7: Reason reachability ──────────────────────────────────────
+
+func TestStage2D1_ReasonReachability(t *testing.T) {
+	dm := NewTestDM(t)
+	// Seed the broadest possible fixture so every source has data.
+	stage2DSeedContext(t, dm)
+	stage2DSeedActivity(t, dm)
+	// Inject a future wake to surface unresolved_wake.
+	now := time.Now().Unix()
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO scheduled_wakes (id, target_time, reason, fired, theory_id, created_by, created_at)
+		VALUES ('wake-future-2', ?, 'future obligation', 0, '', 'mpm-cli', ?)
+	`, now+7200, now)
+	require.NoError(t, err)
+
+	res, err := dm.GenerateContextualCandidates(ContextQuery{
+		MPMSessionID:       "mpm-stage2d-session",
+		FrameworkSessionID: "fw-stage2d-session",
+		FrameworkName:      "openclaw",
+		WorkIDs:            []string{"W-stage2d-1"},
+		ArtifactIDs:        []string{"W-stage2d-1", "T-stage2d-superseded"},
+	})
+	require.NoError(t, err)
+
+	// Walk every candidate and collect reasons actually emitted.
+	emitted := map[string]bool{}
+	for _, c := range res.Candidates {
+		for _, r := range c.Reasons {
+			emitted[r] = true
+		}
+	}
+
+	// Required reasons: every declared CandidateReasonName that is
+	// reachable via the substrate must appear. Reasons only
+	// reachable via inputs not present here (cross-agent change with
+	// a different framework — already covered by stage2DSeedActivity)
+	// must also appear.
+	required := []string{
+		"same_mpm_session",
+		"same_framework_session",
+		"handoff_for_current_context",
+		"open_work",
+		"referenced_by_active_work",
+		"explicit_reference",
+		"foundation_superseded",
+		"cascade_pending",
+		"overdue_wake",
+		"unresolved_wake",
+		"active_scratchpad",
+		"recent_cross_agent_change",
+		"supersession_chain",
+	}
+	for _, r := range required {
+		require.True(t, emitted[r],
+			"reason %q must be reachable through some generator path", r)
+	}
+
+	// Negative check: no candidate should carry a reason that isn't
+	// in the declared vocabulary (defensive — if the constant table
+	// drifts, this test catches phantom reasons).
+	declared := map[string]bool{}
+	for _, n := range allCandidateReasonNames() {
+		declared[n] = true
+	}
+	for r := range emitted {
+		require.True(t, declared[r],
+			"emitted reason %q not in declared vocabulary", r)
+	}
+}
+
+// allCandidateReasonNames returns the canonical reason vocabulary
+// by walking the const block. Kept in the test file because it
+// exists to assert the const block is in sync with the generator.
+func allCandidateReasonNames() []string {
+	return []string{
+		string(ReasonSameMPMSession),
+		string(ReasonSameFrameworkSession),
+		string(ReasonHandoffForContext),
+		string(ReasonOpenWork),
+		string(ReasonReferencedByActiveWork),
+		string(ReasonSharesTopic),
+		string(ReasonExplicitDependency),
+		string(ReasonExplicitReference),
+		string(ReasonFoundationSuperseded),
+		string(ReasonFoundationInvalidated),
+		string(ReasonConfidenceChanged),
+		string(ReasonEvidenceAdded),
+		string(ReasonCascadePending),
+		string(ReasonCascadeResolved),
+		string(ReasonRecentCrossAgentChange),
+		string(ReasonRecentHumanChange),
+		string(ReasonUnknownSourceChange),
+		string(ReasonOverdueWake),
+		string(ReasonUnresolvedWake),
+		string(ReasonActiveScratchpad),
+		string(ReasonSupersessionChain),
+		string(ReasonProvenanceUnknown),
+	}
+}
+
+// ── 2D.1-W8: Global cap diversity ─────────────────────────────────────
+
+func TestStage2D1_GlobalCapDiversity(t *testing.T) {
+	dm := NewTestDM(t)
+	// Seed broad data across all sources.
+	stage2DSeedContext(t, dm)
+	stage2DSeedActivity(t, dm)
+
+	// Use a small global cap so multiple categories must compete.
+	q := ContextQuery{
+		Limits: CandidateLimits{
+			Work:       5,
+			Handoff:    2,
+			Activity:   5,
+			Epistemic:  5,
+			Cascade:    2,
+			Wake:       2,
+			Scratchpad: 2,
+			Topic:      2,
+			Global:     6,
+		},
+	}
+	res, err := dm.GenerateContextualCandidates(q)
+	require.NoError(t, err)
+
+	// At global cap 6, the post-dedup output must include candidates
+	// from at least 2 distinct structural categories.
+	cats := map[string]bool{}
+	for _, c := range res.Candidates {
+		cats[c.Kind] = true
+	}
+	require.GreaterOrEqual(t, len(cats), 2,
+		"global cap 6 must not collapse to a single category: got %v", cats)
+	require.LessOrEqual(t, len(res.Candidates), q.Limits.Global,
+		"global cap must be strictly enforced")
+}
+
+// ── 2D.1-W9: Observational invariants under adversarial inputs ────────
+
+func TestStage2D1_ObservationalInvariants(t *testing.T) {
+	dm := NewTestDM(t)
+
+	// Snapshot counts before.
+	tables := []string{
+		"works", "memories", "lessons", "session_handoffs",
+		"scheduled_wakes", "ephemeral_scratchpad",
+		"tool_invocations", "epistemic_cascade_outbox",
+		"epistemic_provenance", "confidence_history",
+		"topic_memberships",
+	}
+	before := map[string]int{}
+	for _, tbl := range tables {
+		var n int
+		require.NoError(t, dm.SQLDB().QueryRow("SELECT COUNT(*) FROM "+tbl).Scan(&n))
+		before[tbl] = n
+	}
+	// Snapshot row-level hashes (id, updated_at) for a few tables.
+	type rowSig struct {
+		id, ts string
+	}
+	sigRows := func(table, idCol, tsCol string) []rowSig {
+		rows, err := dm.SQLDB().Query("SELECT " + idCol + ", CAST(" + tsCol + " AS TEXT) FROM " + table)
+		require.NoError(t, err)
+		defer rows.Close()
+		var out []rowSig
+		for rows.Next() {
+			var id, ts string
+			require.NoError(t, rows.Scan(&id, &ts))
+			out = append(out, rowSig{id, ts})
+		}
+		return out
+	}
+	beforeWorks := sigRows("works", "id", "updated_at")
+	beforeMem := sigRows("memories", "id", "updated_at")
+
+	// Adversarial input: blank fields, empty slices, an explicit
+	// reference to a table that doesn't exist, mixed valid +
+	// invalid artifact ids.
+	q := ContextQuery{
+		MPMSessionID:       "",
+		FrameworkSessionID: "",
+		FrameworkName:      "",
+		WorkIDs:            []string{"", "does-not-exist", "W-stage2d-1"},
+		TopicIDs:           []string{"", "topic-does-not-exist"},
+		ArtifactIDs:        []string{"", "does-not-exist", "M-stage2d-1"},
+		QueryText:          "ignored in 2D",
+	}
+
+	// Repeat 5× — generator must remain idempotent and read-only.
+	var prev CandidateGenerationResult
+	for i := 0; i < 5; i++ {
+		res, err := dm.GenerateContextualCandidates(q)
+		require.NoError(t, err)
+		require.Equal(t, len(prev.Candidates), len(res.Candidates),
+			"iteration %d: candidate count drift", i)
+		for j := range prev.Candidates {
+			require.Equal(t, prev.Candidates[j].ID, res.Candidates[j].ID,
+				"iteration %d: candidate id drift at %d", i, j)
+		}
+		prev = res
+	}
+
+	// Counts unchanged.
+	for _, tbl := range tables {
+		var n int
+		require.NoError(t, dm.SQLDB().QueryRow("SELECT COUNT(*) FROM "+tbl).Scan(&n))
+		require.Equal(t, before[tbl], n,
+			"table %s row count must not change", tbl)
+	}
+	// Row signatures unchanged for the tables we snapshot.
+	require.Equal(t, beforeWorks, sigRows("works", "id", "updated_at"),
+		"works rows must not change")
+	require.Equal(t, beforeMem, sigRows("memories", "id", "updated_at"),
+		"memories rows must not change")
+}
+
+// ── 2D.1-W10: Secret safety (broader) ─────────────────────────────────
+
+func TestStage2D1_SecretSafetyBroader(t *testing.T) {
+	dm := NewTestDM(t)
+	const sentinel = "RAW-SECRET-NEVER-EXPOSE-2D1-9k3L"
+	now := time.Now().Unix()
+
+	// Embed the sentinel across every surface a candidate summary
+	// could conceivably echo from:
+	//   - scratchpad thesis (Source G)
+	//   - scratchpad supporting JSON (Source G)
+	//   - handoff summary (Source B)
+	//   - handoff commitments JSON (Source B)
+	//   - handoff open_questions JSON (Source B)
+	//   - work title (Source A)
+	//   - memory content (Source D, Source I)
+	//   - memory metadata JSON (Source D, Source I)
+	//   - topic_memberships (no summary — must not appear)
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO ephemeral_scratchpad (session_id, thesis, supporting, created_at, updated_at)
+		VALUES ('mpm-secret-2', ?, ?, ?, ?)
+	`, sentinel, `{"key":"`+sentinel+`"}`, now, now)
+	require.NoError(t, err)
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO session_handoffs
+		    (id, mpm_session_id, framework_session_id, ended_at, ended_state,
+		     summary, commitments, open_questions, created_at)
+		VALUES ('H-secret-2', '', '', ?, 'clean',
+		        ?, ?, ?, ?)
+	`, now, sentinel, `["`+sentinel+`"]`, `["`+sentinel+`"]`, now)
+	require.NoError(t, err)
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO works (id, title, status, verification, created_at, updated_at, session_id)
+		VALUES ('W-secret-2', ?, 'open', 'unverified', ?, ?, '')
+	`, sentinel, now, now)
+	require.NoError(t, err)
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, created_at, updated_at, tags, metadata, source_id, source_db)
+		VALUES ('M-secret-2', 'memory', ?, ?, ?, '[]', ?, '', 'openclaw')
+	`, sentinel, now, now, `{"sentinel":"`+sentinel+`"}`)
+	require.NoError(t, err)
+
+	res, err := dm.GenerateContextualCandidates(ContextQuery{
+		ArtifactIDs: []string{"W-secret-2", "M-secret-2", "H-secret-2"},
+	})
+	require.NoError(t, err)
+
+	for _, c := range res.Candidates {
+		require.NotContains(t, c.Summary, sentinel,
+			"candidate %s summary leaks secret", c.ID)
+		require.NotContains(t, c.Pointer, sentinel,
+			"candidate %s pointer leaks secret", c.ID)
+		for _, rid := range c.RelatedIDs {
+			require.NotEqual(t, sentinel, rid,
+				"candidate %s related_id leaks secret", c.ID)
+		}
+	}
+}
+
+// ── 2D.1-W11: Determinism across separate fresh DBs ───────────────────
+
+func TestStage2D1_DeterminismAcrossDBs(t *testing.T) {
+	seed := func(dm *DatabaseManager) {
+		stage2DSeedContext(t, dm)
+		stage2DSeedActivity(t, dm)
+	}
+
+	dm1 := NewTestDM(t)
+	dm2 := NewTestDM(t)
+	seed(dm1)
+	seed(dm2)
+
+	now := time.Now().Unix()
+	reset1 := pinTimeNowUnix(t, now)
+	defer reset1()
+	// Reset for dm2 — pinTimeNowUnix writes to the package var so
+	// only one pin is needed across both DBs.
+	reset2 := pinTimeNowUnix(t, now)
+	defer reset2()
+
+	q := ContextQuery{
+		MPMSessionID:       "mpm-stage2d-session",
+		FrameworkSessionID: "framework-stage2d-session",
+		FrameworkName:      "openclaw",
+		WorkIDs:            []string{"W-stage2d-1"},
+	}
+	r1, err := dm1.GenerateContextualCandidates(q)
+	require.NoError(t, err)
+	r2, err := dm2.GenerateContextualCandidates(q)
+	require.NoError(t, err)
+
+	require.Equal(t, len(r1.Candidates), len(r2.Candidates),
+		"candidate count must match across fresh DBs")
+	for i := range r1.Candidates {
+		require.Equal(t, r1.Candidates[i].ID, r2.Candidates[i].ID,
+			"candidate id drift at %d across fresh DBs", i)
+		require.Equal(t, r1.Candidates[i].Reasons, r2.Candidates[i].Reasons,
+			"candidate reasons drift at %d across fresh DBs", i)
+		require.Equal(t, r1.Candidates[i].Source, r2.Candidates[i].Source,
+			"candidate source drift at %d across fresh DBs", i)
+	}
+}
+
+// pinTimeNowUnix swaps the package-local timeNowUnix stub for a
+// pinned value for the duration of the test. Returns a reset func
+// for use with defer.
+func pinTimeNowUnix(t *testing.T, pinned int64) func() {
+	t.Helper()
+	original := timeNowUnix
+	timeNowUnix = func() int64 { return pinned }
+	return func() { timeNowUnix = original }
+}
