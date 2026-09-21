@@ -27,20 +27,20 @@ import (
 // That's it.
 //
 // INVARIANTS (every field added to this struct must respect these):
-//   1. Humans get prose. Agents get typed signals. The same data can be
-//      rendered both ways (see formatWakeContext for prose, the struct
-//      itself for JSON), but the JSON wire form must always be typed.
-//   2. If a subsystem can create work an agent is expected to perform,
-//      wake_context MUST expose the resulting pending state. This is the
-//      invariant that the 2026-08-13 overdue_wakes patch closed.
-//   3. Lists MUST NOT omit empty values (no omitempty on slice fields).
-//      Absence in the JSON means "schema does not support this signal";
-//      empty array means "checked, none found". The two are different
-//      states and the agent must be able to distinguish them.
-//   4. Payload size is strictly bounded (MaxWakeContextBytes = 32 KB).
-//      If budget is exceeded, fields are truncated in a documented
-//      priority order and *flagged via Truncated booleans*. Wake context
-//      must never silently grow past budget.
+//  1. Humans get prose. Agents get typed signals. The same data can be
+//     rendered both ways (see formatWakeContext for prose, the struct
+//     itself for JSON), but the JSON wire form must always be typed.
+//  2. If a subsystem can create work an agent is expected to perform,
+//     wake_context MUST expose the resulting pending state. This is the
+//     invariant that the 2026-08-13 overdue_wakes patch closed.
+//  3. Lists MUST NOT omit empty values (no omitempty on slice fields).
+//     Absence in the JSON means "schema does not support this signal";
+//     empty array means "checked, none found". The two are different
+//     states and the agent must be able to distinguish them.
+//  4. Payload size is strictly bounded (MaxWakeContextBytes = 32 KB).
+//     If budget is exceeded, fields are truncated in a documented
+//     priority order and *flagged via Truncated booleans*. Wake context
+//     must never silently grow past budget.
 //
 // Wire format version: bump ContextVersion on any non-additive change.
 // Pure additions (new fields, new truncation flags) are safe under the
@@ -50,8 +50,8 @@ type WakeContextData struct {
 	// Metadata — emitted on every read so consumers can detect stale
 	// payloads and (in v5+) reason about which schema they got.
 	ContextVersion string `json:"context_version"` // e.g., "wake-context-v5"
-	GeneratedAt    int64  `json:"generated_at"`     // unix seconds, when the struct was assembled
-	AsOf           int64  `json:"as_of"`            // unix seconds, the substrate-state timestamp
+	GeneratedAt    int64  `json:"generated_at"`    // unix seconds, when the struct was assembled
+	AsOf           int64  `json:"as_of"`           // unix seconds, the substrate-state timestamp
 
 	// Identity — strict superset over v3's session_id field. v3 callers
 	// keep working because SessionID is preserved. v4 callers can use
@@ -65,20 +65,20 @@ type WakeContextData struct {
 	// SessionStartedAt — when SessionCurrentID began (unix epoch).
 	// SessionPreviousEndedAt — when SessionPreviousID ended (unix epoch,
 	//   0 when no previous).
-	SessionID               string `json:"session_id"`
-	SessionCurrentID        string `json:"session_current_id"`
-	SessionPreviousID       string `json:"session_previous_id"`
+	SessionID         string `json:"session_id"`
+	SessionCurrentID  string `json:"session_current_id"`
+	SessionPreviousID string `json:"session_previous_id"`
 	// MPMSessionID — MPM-owned session identity (sticky across
 	// CLI/MCP/process boundaries within one interaction lifecycle).
 	// Populated by active.json (wip/session-identity-rework) and by
 	// the canonical session-identity surface. Empty string on a fresh
 	// workspace until the first handoff write allocates it.
-	MPMSessionID            string `json:"mpm_session_id,omitempty"`
+	MPMSessionID string `json:"mpm_session_id,omitempty"`
 	// FrameworkSessionID — host-owned session identifier. Optional;
 	// empty when the calling host has no native session id (Pi, Hermes
 	// without hooks, Claude Code without MPM_SESSION_ID).
-	FrameworkSessionID      string `json:"framework_session_id,omitempty"`
-	SessionStartedAt        int64  `json:"session_started_at"`
+	FrameworkSessionID     string `json:"framework_session_id,omitempty"`
+	SessionStartedAt       int64  `json:"session_started_at"`
 	SessionPreviousEndedAt int64  `json:"session_previous_ended_at"`
 
 	// Orientation — the "what just happened" half.
@@ -91,23 +91,23 @@ type WakeContextData struct {
 	// ActiveModeSource is the aggregate resolution source for the
 	// multi-mode selection as a whole ("explicit" / "fallback" / "empty");
 	// see active_state.go for the source vocabulary.
-	ActiveMode            string   `json:"active_mode"`
-	ActiveModes           []string `json:"active_modes"`
-	ActiveModeSource      string   `json:"active_mode_source"`
+	ActiveMode       string   `json:"active_mode"`
+	ActiveModes      []string `json:"active_modes"`
+	ActiveModeSource string   `json:"active_mode_source"`
 	// ActivePersonaSource mirrors the per-persona resolution source
 	// ("explicit" / "fallback" / "empty"). New consumers should consult
 	// this to distinguish explicit user selection from system default
 	// fallback from explicit clear.
-	ActivePersona         string `json:"active_persona"`
-	ActivePersonaSource   string `json:"active_persona_source"`
-	RecentTopics          []string `json:"recent_topics"`
+	ActivePersona       string   `json:"active_persona"`
+	ActivePersonaSource string   `json:"active_persona_source"`
+	RecentTopics        []string `json:"recent_topics"`
 	// RecentTopicsTruncated is set by enforceSizeLimit when the topics
 	// array had to be shed to stay under MaxWakeContextBytes. The
 	// agent sees the flag and knows recent_topics is empty *because of
 	// the cap*, not because there were no recent topics.
 	RecentTopicsTruncated bool                `json:"recent_topics_truncated,omitempty"`
-	RecentMemories       []WakeContextMemory `json:"recent_memories"`
-	RecentMilestones     []WakeContextMemory `json:"recent_milestones"`
+	RecentMemories        []WakeContextMemory `json:"recent_memories"`
+	RecentMilestones      []WakeContextMemory `json:"recent_milestones"`
 
 	// Attention & Pending Work — the "what is waiting for me" half.
 	// LastHandoff is the most recent unread handoff from a previous
@@ -168,6 +168,21 @@ type WakeContextData struct {
 	// AuditSummary: prose form (humans get prose). Future v5 may add
 	// a structured audit_block alongside this; for v4 prose stays.
 	AuditSummary string `json:"audit_summary"`
+
+	// ContextualFocus (Stage 2E.3): compact delivery projection of
+	// the contextual routing pipeline (Stage 2D discovery → Stage
+	// 2E.1 selection → Stage 2E.2 bounded materialization →
+	// Stage 2E.3 compact packaging). Additive — legacy fields
+	// remain unchanged. Populated for both delivery and read-only
+	// paths. The ONLY delivery mutation (handoff read marker)
+	// still happens outside this field's computation; the focus
+	// is built BEFORE the handoff is marked read so an unread
+	// handoff can appear in the focus delivered to the receiving
+	// agent. Status may be `available` (projection ran cleanly)
+	// or `degraded` (projection failed; legacy wake context still
+	// returns). Items count equals selected-input count for a
+	// successful projection (1 selected == 1 output).
+	ContextualFocus *ContextualFocus `json:"contextual_focus,omitempty"`
 }
 
 // EpistemicPressureData is the structured payload of the substrate's
@@ -199,8 +214,8 @@ const ScratchpadThesisPreviewMax = 200
 // Phase 2C: changed from Content to Summary + Pointer for bounded orientation.
 type WakeContextMemory struct {
 	ID        string `json:"id"`
-	Summary   string `json:"summary"`  // first 256 chars via SummarizeMemory
-	Pointer   string `json:"pointer"`  // "mpm://memory/<id>"
+	Summary   string `json:"summary"` // first 256 chars via SummarizeMemory
+	Pointer   string `json:"pointer"` // "mpm://memory/<id>"
 	CreatedAt string `json:"created_at"`
 }
 
@@ -222,6 +237,7 @@ type WakeContextRule struct {
 //   - SessionID            — legacy per-process dispatcher grouping.
 //   - MPMSessionID         — canonical MPM continuity session.
 //   - FrameworkSessionID   — host-owned native session identity.
+//
 // The three are independent columns on tool_invocations; the
 // wake-context payload mirrors them as independent fields so
 // downstream routing can pick the right axis without recomputing.
@@ -343,10 +359,10 @@ func EnforceSizeLimit(data *WakeContextData) ([]byte, error) {
 //
 // v spec 2026-09-11 (selector hardening): the resolver distinguishes:
 //
-//	1. explicit selection  → SourceExplicit
-//	2. explicit clear      → SourceEmpty
-//	3. absent / uninit    → default fallback (SourceFallback or SourceEmpty)
-//	4. stale / invalid    → drop (modes) or fallback (persona); SourceFallback
+//  1. explicit selection  → SourceExplicit
+//  2. explicit clear      → SourceEmpty
+//  3. absent / uninit    → default fallback (SourceFallback or SourceEmpty)
+//  4. stale / invalid    → drop (modes) or fallback (persona); SourceFallback
 //
 // Persona is 0..1, modes are 0..N. Multi-mode storage is honoured here:
 // each entry is validated independently and stale entries are dropped
@@ -503,12 +519,47 @@ func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextD
 	// re-show the same handoff. Wake-context timestamp is the read-by
 	// token — distinct from any session_id since the agent may not have one.
 	// Read-only mode peeks: the handoff stays unread for the real consumer.
+	//
+	// Stage 2E.3 integration: the contextual-focus projection is built
+	// BEFORE this handoff read so an unread handoff can appear in the
+	// focus delivered to the receiving agent. The focus must observe
+	// pre-consumption substrate state. We snapshot the handoff via the
+	// existing peek path for focus construction, then perform the
+	// delivery mutation after the projection is built.
 	var h *Handoff
 	var herr error
+
+	// Snapshot the unread handoff (peek) for focus construction. This
+	// does NOT mark it read regardless of markHandoffRead.
+	peek, peekErr := dm.GetLatestUnreadHandoff()
+	if peekErr != nil && !errors.Is(peekErr, sql.ErrNoRows) {
+		dm.LogAudit(AuditWarn, "wake_context", "handoff peek failed: "+peekErr.Error(), "", AuditContext{})
+	}
+
+	// Build the contextual focus projection from authoritative
+	// pre-consumption state. Capture active work IDs first; the
+	// focus builds against the same session/work/topics identity
+	// the legacy wake fields reflect.
+	activeWorkIDs := dm.gatherActiveWorkIDs()
+	focus, focusErr := GatherContextualFocusReadOnly(
+		dm,
+		buildWakeContextFocusQuery(activeWorkIDs),
+		nowUnix,
+		DefaultMaterializationLimits(),
+	)
+	if focusErr != nil {
+		// Should not happen — focus builder returns nil error
+		// and uses status=degraded internally.
+		dm.LogAudit(AuditWarn, "wake_context", "focus build error: "+focusErr.Error(), "", AuditContext{})
+	}
+	if focus != nil {
+		data.ContextualFocus = focus
+	}
+
 	if markHandoffRead {
 		h, herr = dm.MarkLatestHandoffRead("wake-context")
 	} else {
-		h, herr = dm.GetLatestUnreadHandoff()
+		h, herr = peek, peekErr
 	}
 	if herr != nil && !errors.Is(herr, sql.ErrNoRows) {
 		// Non-fatal: log the handoff read failure to audit but continue
@@ -1065,6 +1116,13 @@ func formatWakeContext(d WakeContextData) string {
 			lines = append(lines, fmt.Sprintf("  - %s%s [%s]", w.Title, verif, w.Pointer))
 		}
 	}
+	// Stage 2E.3: compact contextual focus projection. Rendered as
+	// the final orientation block; the agent sees WHY/WHAT/WHERE
+	// for each routed item. Degraded status is surfaced honestly
+	// (legacy wake context remains valid).
+	if d.ContextualFocus != nil {
+		lines = append(lines, formatContextualFocus(d.ContextualFocus))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -1291,9 +1349,9 @@ func classifyScratchpad(decayAtRaw interface{}, now int, sessionExists bool) scr
 // Classification contract (locked 2026-08-22):
 //   - active   : decay_at > now  — still within TTL, not yet recoverable
 //   - expired  : decay_at <= now AND session record exists — TTL crossed
-//               normally; can be promoted or discarded via normal path
+//     normally; can be promoted or discarded via normal path
 //   - orphaned : decay_at <= now AND no session record — broken reference;
-//               cannot auto-recover; operator action required
+//     cannot auto-recover; operator action required
 //
 // The orphan condition is an integrity anomaly, not a lifecycle state.
 // Expired is a normal TTL completion — the vacuum path (gc_run

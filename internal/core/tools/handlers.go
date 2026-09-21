@@ -95,9 +95,9 @@ func normalizeProjection(p map[string]interface{}) (string, error) {
 // mirrored include:
 //
 //   - lessons  — lessons are cognitive-process trace, not source-of-truth
-//                memory; the lesson's own index table is the source.
+//     memory; the lesson's own index table is the source.
 //   - scratchpad_orphans — ephemeral by definition; lives in
-//                          ephemeral_scratchpad, not memories.
+//     ephemeral_scratchpad, not memories.
 //
 // If you need a new collection mirrored, append to the write-side filter
 // in db.go:ChallengeMemoryAsync / contradiction_log.go and add the new
@@ -180,8 +180,8 @@ func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 			"memory_persisted":  true,
 			"embedding_status":  "unavailable",
 			"backfill_required": true,
-			"error":            fmt.Sprintf("embedding provider %q is unreachable: %s", cfg.ProviderName, embedErrStr),
-			"memory_id":        out["id"],
+			"error":             fmt.Sprintf("embedding provider %q is unreachable: %s", cfg.ProviderName, embedErrStr),
+			"memory_id":         out["id"],
 		}, nil
 	}
 
@@ -190,7 +190,7 @@ func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	if cfg.IntentionallyDisabled {
 		return map[string]interface{}{
 			"memory_persisted":  true,
-			"embedding_status":   "disabled",
+			"embedding_status":  "disabled",
 			"backfill_required": false,
 			"memory_id":         out["id"],
 		}, nil
@@ -329,15 +329,15 @@ type RetrievedEntryMetadata struct {
 // and retrieval telemetry. This keeps the recall payload bounded while preserving
 // a cheap re-retrieval path via mpm_resolve.
 type ProjectedMemoryEntry struct {
-	ID                 string                  `json:"id"`
-	Summary            string                  `json:"summary"`          // first 256 chars via SummarizeMemory
-	SummaryTruncated   bool                    `json:"summary_truncated"` // true when the 256-char bound cut content; pointer is the full-retrieval path
-	Pointer            string                  `json:"pointer"`          // "mpm://memory/<id>"
-	Type               string                  `json:"type"`             // always "memory"
-	Tags               []string                `json:"tags,omitempty"`
-	Collection         string                  `json:"collection"`
-	CreatedAt          int64                   `json:"created_at"`
-	ReinforcementCount int                     `json:"reinforcement_count"`
+	ID                 string   `json:"id"`
+	Summary            string   `json:"summary"`           // first 256 chars via SummarizeMemory
+	SummaryTruncated   bool     `json:"summary_truncated"` // true when the 256-char bound cut content; pointer is the full-retrieval path
+	Pointer            string   `json:"pointer"`           // "mpm://memory/<id>"
+	Type               string   `json:"type"`              // always "memory"
+	Tags               []string `json:"tags,omitempty"`
+	Collection         string   `json:"collection"`
+	CreatedAt          int64    `json:"created_at"`
+	ReinforcementCount int      `json:"reinforcement_count"`
 	// Alpha-4.1 F-001: weight is REAL in SQLite (HybridResult.Weight is
 	// float64). Previously declared `int` which silently truncated
 	// values like 7.5 → 7 and surfaced 0 for non-default weights when
@@ -353,14 +353,14 @@ type ProjectedMemoryEntry struct {
 // ProjectedLessonEntry is the Phase 2D pointer-native lesson output shape.
 // Compact lessons are returned in full; the pointer enables re-retrieval.
 type ProjectedLessonEntry struct {
-	ID                 string                  `json:"id"`
-	Summary            string                  `json:"summary"`    // full (lessons are compact)
-	SummaryTruncated   bool                    `json:"summary_truncated"` // true when projection=summary cut the underlying content to 256 chars
-	Pointer            string                  `json:"pointer"`   // "mpm://lesson/<id>"
-	Type               string                  `json:"type"`      // warning/practice/insight
-	Tags               []string                `json:"tags,omitempty"`
-	CreatedAt          string                  `json:"created_at"`
-	ReinforcementCount int                     `json:"reinforcement_count"`
+	ID                 string   `json:"id"`
+	Summary            string   `json:"summary"`           // full (lessons are compact)
+	SummaryTruncated   bool     `json:"summary_truncated"` // true when projection=summary cut the underlying content to 256 chars
+	Pointer            string   `json:"pointer"`           // "mpm://lesson/<id>"
+	Type               string   `json:"type"`              // warning/practice/insight
+	Tags               []string `json:"tags,omitempty"`
+	CreatedAt          string   `json:"created_at"`
+	ReinforcementCount int      `json:"reinforcement_count"`
 	// RetrievalMetadata key always present; null when never retrieved.
 	RetrievalMetadata *RetrievedEntryMetadata `json:"retrieval_metadata"`
 	Rationale         string                  `json:"rationale"`
@@ -605,20 +605,20 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 			isStale := isMemoryStaleForProjection(mem)
 
 			projected = append(projected, ProjectedMemoryEntry{
-				ID:                  id,
-				Summary:             summary,
-				SummaryTruncated:    summaryTruncated,
-				Pointer:             "mpm://memory/" + id,
-				Type:                "memory",
-				Tags:                tags,
-				Collection:          coll,
-				CreatedAt:           int64(createdAt),
-				ReinforcementCount:  reinf,
-				Weight:              weight,
-				RetrievalMetadata:   retMeta,
-				Score:               computeScore(mem),
-				Rationale:           rationale,
-				IsStale:             isStale,
+				ID:                 id,
+				Summary:            summary,
+				SummaryTruncated:   summaryTruncated,
+				Pointer:            "mpm://memory/" + id,
+				Type:               "memory",
+				Tags:               tags,
+				Collection:         coll,
+				CreatedAt:          int64(createdAt),
+				ReinforcementCount: reinf,
+				Weight:             weight,
+				RetrievalMetadata:  retMeta,
+				Score:              computeScore(mem),
+				Rationale:          rationale,
+				IsStale:            isStale,
 			})
 		}
 		summaryResp := map[string]interface{}{
@@ -1020,8 +1020,8 @@ func handleResolveTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 		mpminternal.AuditInfo, "epistemology",
 		fmt.Sprintf("resolve_theory %s -> %s", theoryID, newStatus), "",
 		mpminternal.AuditContext{
-			"theory_id": theoryID,
-			"status":    newStatus,
+			"theory_id":  theoryID,
+			"status":     newStatus,
 			"conclusion": conclusion,
 		},
 	)
@@ -1383,15 +1383,15 @@ func handlePromoteMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 // handleMigrate imports memories from a non-SQLite source file. Wraps the
 // markdown/json migration pipeline for MCP clients.
 //
-// Wire-format: {
-//   "from_path":     "<path>",          # required for stage mode
-//   "format":        "markdown|json|auto", # default "auto" (extension-based)
-//   "label":         "<name>",          # optional batch label
-//   "dry_run":       false,             # optional
-//   "commit":        false,             # stage + immediately promote
-//   "commit_batch":  "<batch_id>",      # alternative: just promote a staged batch
-//   "undo_batch":    "<batch_id>"       # alternative: rollback a batch
-// }
+//	Wire-format: {
+//	  "from_path":     "<path>",          # required for stage mode
+//	  "format":        "markdown|json|auto", # default "auto" (extension-based)
+//	  "label":         "<name>",          # optional batch label
+//	  "dry_run":       false,             # optional
+//	  "commit":        false,             # stage + immediately promote
+//	  "commit_batch":  "<batch_id>",      # alternative: just promote a staged batch
+//	  "undo_batch":    "<batch_id>"       # alternative: rollback a batch
+//	}
 //
 // Returns a map with rows_read, rows_staged, rows_skipped, rows_rejected,
 // batch_id, and (if commit or commit_batch) rows_promoted.
@@ -1782,15 +1782,15 @@ func handleSearchLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 			}
 
 			projected = append(projected, ProjectedLessonEntry{
-				ID:                 id,
-				Summary:            summary,
-				SummaryTruncated:   summaryTruncated,
-				Pointer:            "mpm://lesson/" + id,
-				Type:               lessonType,
-				Tags:               tags,
-				CreatedAt:          created,
-				RetrievalMetadata:   retMeta,
-				Rationale:          rationale,
+				ID:                id,
+				Summary:           summary,
+				SummaryTruncated:  summaryTruncated,
+				Pointer:           "mpm://lesson/" + id,
+				Type:              lessonType,
+				Tags:              tags,
+				CreatedAt:         created,
+				RetrievalMetadata: retMeta,
+				Rationale:         rationale,
 			})
 		}
 		return map[string]interface{}{
@@ -1873,15 +1873,15 @@ func handleListLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 			}
 
 			projected = append(projected, ProjectedLessonEntry{
-				ID:                 id,
-				Summary:            summary,
-				SummaryTruncated:   summaryTruncated,
-				Pointer:            "mpm://lesson/" + id,
-				Type:               lessonType,
-				Tags:               tags,
-				CreatedAt:          created,
-				RetrievalMetadata:   retMeta,
-				Rationale:          rationale,
+				ID:                id,
+				Summary:           summary,
+				SummaryTruncated:  summaryTruncated,
+				Pointer:           "mpm://lesson/" + id,
+				Type:              lessonType,
+				Tags:              tags,
+				CreatedAt:         created,
+				RetrievalMetadata: retMeta,
+				Rationale:         rationale,
 			})
 		}
 		return map[string]interface{}{
@@ -2344,14 +2344,14 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	recentLessons := fetchRecentLessonsForWake(dm, 5)
 
 	result := map[string]interface{}{
-		"success":             true,
+		"success": true,
 		// Wire-format metadata (added with the v4 schema bump). Both
 		// unix-seconds; GeneratedAt = "when the struct was assembled",
 		// AsOf = "what 'now' represented substrate state at". v3 callers
 		// ignore these safely (extra fields are non-additive for them).
-		"context_version":     data.ContextVersion,
-		"generated_at":        data.GeneratedAt,
-		"as_of":               data.AsOf,
+		"context_version": data.ContextVersion,
+		"generated_at":    data.GeneratedAt,
+		"as_of":           data.AsOf,
 		// Identity — 2026-09-11 session-identity pass adds the
 		// explicit three-ID surface:
 		//   - mpm_session_id        — MPM-owned. REQUIRED going forward.
@@ -2359,41 +2359,45 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		//   - session_id            — v3 alias for back-compat (now equal
 		//                             to mpm_session_id, NOT read from the
 		//                             dormant sessions table).
-		"mpm_session_id":              data.MPMSessionID,
-		"framework_session_id":        data.FrameworkSessionID,
-		"session_id":                 data.SessionID,
-		"session_current_id":         data.SessionCurrentID,
+		"mpm_session_id":            data.MPMSessionID,
+		"framework_session_id":      data.FrameworkSessionID,
+		"session_id":                data.SessionID,
+		"session_current_id":        data.SessionCurrentID,
 		"session_previous_id":       data.SessionPreviousID,
 		"session_started_at":        data.SessionStartedAt,
 		"session_previous_ended_at": data.SessionPreviousEndedAt,
-		"active_mode":         data.ActiveMode,
-		"active_persona":       data.ActivePersona,
+		"active_mode":               data.ActiveMode,
+		"active_persona":            data.ActivePersona,
 		// Orientation block.
-		"recent_topics":       data.RecentTopics,
+		"recent_topics":           data.RecentTopics,
 		"recent_topics_truncated": data.RecentTopicsTruncated,
-		"recent_memories":     memRefs,
-		"recent_milestones":   milestoneRefs,
-		"recent_theories":     recentTheories,
-		"recent_lessons":      recentLessons,
-		"recent_decisions":    recentDecisions,
+		"recent_memories":         memRefs,
+		"recent_milestones":       milestoneRefs,
+		"recent_theories":         recentTheories,
+		"recent_lessons":          recentLessons,
+		"recent_decisions":        recentDecisions,
 		// Attention & pending work.
-		"overdue_wakes":       overdueRefs,
-		"open_works":          data.OpenWorks,
+		"overdue_wakes": overdueRefs,
+		"open_works":    data.OpenWorks,
 		// completed_works: RECOMMENDED 10. Pairs with open_works so the
 		// agent sees both "what's waiting on me" and "what I just shipped"
 		// without a separate tool call. Same WakeContextWork shape as
 		// open_works for symmetric parsing. Always emitted (empty list,
 		// not omitempty) so callers can branch on field presence.
-		"completed_works":     data.CompletedWorks,
-		"scratchpad_orphans":  data.ScratchpadOrphans,
-		"last_handoff":        data.LastHandoff,
+		"completed_works":    data.CompletedWorks,
+		"scratchpad_orphans": data.ScratchpadOrphans,
+		"last_handoff":       data.LastHandoff,
 		// Constraints & capabilities.
-		"global_rules":        globalRuleRefs,
-		"available_skills":    skillRefs,
+		"global_rules":               globalRuleRefs,
+		"available_skills":           skillRefs,
 		"available_skills_truncated": data.AvailableSkillsTruncated,
 		// System health.
-		"audit_summary":       data.AuditSummary,
-		"epistemic_pressure":  data.EpistemicPressure,
+		"audit_summary":      data.AuditSummary,
+		"epistemic_pressure": data.EpistemicPressure,
+		// Stage 2E.3: compact contextual focus projection. Additive
+		// on the wake-context delivery surface. Status `available`
+		// or `degraded`; items count equals selected-input count.
+		"contextual_focus": data.ContextualFocus,
 	}
 	// Always surface wakes_pending — even when empty — so the agent can
 	// branch on field presence rather than parsing absence. The Map shape
@@ -2985,12 +2989,12 @@ func handleLogToChangelog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		return nil, err
 	}
 	return map[string]interface{}{
-		"success":         true,
-		"id":              id,
-		"commit_hash":     commitHash,
-		"collection":      "changelog",
-		"confirmations":   len(confirmations),
-		"contradictions":  len(contradictions),
+		"success":        true,
+		"id":             id,
+		"commit_hash":    commitHash,
+		"collection":     "changelog",
+		"confirmations":  len(confirmations),
+		"contradictions": len(contradictions),
 	}, nil
 }
 
@@ -3090,13 +3094,13 @@ func collectContradictionSpecs(p map[string]interface{}, paramName, artifactType
 //   - name (string, required)        — the skill's stable name
 //   - version (string, required)     — semver, e.g. "2.0.0"
 //   - content (string)               — full markdown incl. frontmatter
-//                                      (preferred: explicit frontmatter)
+//     (preferred: explicit frontmatter)
 //   - body (string)                  — markdown body, alternative to
-//                                      content. When body is set, the
-//                                      handler synthesises frontmatter
-//                                      from name/version/author so the
-//                                      caller doesn't have to hand-roll
-//                                      YAML just to save a short skill.
+//     content. When body is set, the
+//     handler synthesises frontmatter
+//     from name/version/author so the
+//     caller doesn't have to hand-roll
+//     YAML just to save a short skill.
 //   - author (string, optional)      — agent name for metadata
 //   - force (bool, optional)         — overwrite when name+version exists
 //
@@ -3505,8 +3509,8 @@ func handleListActiveClusters(dm mpminternal.CoreDB, ac mpminternal.ActiveContex
 		unknown = []internal.ClusterProposal{}
 	}
 	return map[string]interface{}{
-		"success":         true,
-		"known_clusters":  known,
+		"success":          true,
+		"known_clusters":   known,
 		"unknown_clusters": unknown,
 		"count": map[string]int{
 			"known":   len(known),
@@ -3522,7 +3526,7 @@ func handleListActiveClusters(dm mpminternal.CoreDB, ac mpminternal.ActiveContex
 // Wire schema (enforced by JSON-Schema in registry_list.go):
 //   - cluster_key  (required) — primary key from list_active_clusters
 //   - snooze_until (required) — ISO 8601 absolute ("2026-07-12T12:00:00Z")
-//                              OR Go duration ("24h", "7d", "1h30m")
+//     OR Go duration ("24h", "7d", "1h30m")
 //   - reason       (optional) — audit-friendly note
 //
 // The two parsed formats are accepted because the agent's wire format
@@ -3661,12 +3665,12 @@ func handleResolveCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 //
 // Wire schema (enforced by JSON-Schema in registry_list.go):
 //   - cluster_key (required) — primary key (from list_active_clusters
-//                              OR remembered historical key for
-//                              resolved clusters).
+//     OR remembered historical key for
+//     resolved clusters).
 //   - annotation  (required) — substantive insight text; appended to
-//                              the audit trail verbatim.
+//     the audit trail verbatim.
 //   - reason      (optional) — short label (e.g. "post-mortem",
-//                              "week-later-refinement").
+//     "week-later-refinement").
 //
 // Distinct from resolve_cluster: that tool writes a single audit row
 // at resolution time and freezes the cluster. annotate_cluster can be
@@ -3709,19 +3713,19 @@ func handleAnnotateCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 //
 // Identity model (2026-09-11): three correlated IDs:
 //   - mpm_session_id        — REQUIRED (auto-allocated from active.json
-//                              when not supplied). Sticky across
-//                              CLI/MCP/process boundaries within one
-//                              interaction lifecycle. NEVER filled with
-//                              a framework ID as a convenience.
+//     when not supplied). Sticky across
+//     CLI/MCP/process boundaries within one
+//     interaction lifecycle. NEVER filled with
+//     a framework ID as a convenience.
 //   - framework_session_id  — OPTIONAL host-owned ID. NULL when absent.
-//                              Read from payload key
-//                              "framework_session_id" (canonical); the
-//                              legacy key "session_id" still routes
-//                              into the legacy session_id column for
-//                              back-compat callers.
+//     Read from payload key
+//     "framework_session_id" (canonical); the
+//     legacy key "session_id" still routes
+//     into the legacy session_id column for
+//     back-compat callers.
 //   - session_id (legacy)    — UNIQUE nullable column. Back-compat
-//                              surface. New code should prefer
-//                              framework_session_id.
+//     surface. New code should prefer
+//     framework_session_id.
 //
 // mpm_session_id is ALWAYS allocated on every write (the handoff
 // tool is an INTERACTION BOUNDARY — invariant #4). The first write
@@ -3985,11 +3989,11 @@ func handleShredHandoff(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		return nil, err
 	}
 	return map[string]interface{}{
-		"success":  true,
-		"shredded": n > 0,
-		"handoff_id": id,
+		"success":      true,
+		"shredded":     n > 0,
+		"handoff_id":   id,
 		"rows_deleted": n,
-		"message": "handoff shredded",
+		"message":      "handoff shredded",
 	}, nil
 }
 
@@ -4128,9 +4132,9 @@ func handleRecordGlobalRule(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 		mpminternal.AuditInfo, "shared_db",
 		fmt.Sprintf("record_global_rule %s", id), "",
 		mpminternal.AuditContext{
-			"rule_id":  id,
-			"weight":   weight,
-			"tags":     tags,
+			"rule_id":       id,
+			"weight":        weight,
+			"tags":          tags,
 			"is_house_rule": true,
 		},
 	)
@@ -4144,9 +4148,9 @@ func handleRecordGlobalRule(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 		broadcastRationale = "New house rule established by operator."
 	}
 	_, _ = dm.BroadcastMemory(id, mpminternal.BroadcastOpts{
-		Kind:        "rule",
-		Rationale:   broadcastRationale,
-		SourceAgent: ac.Agent,
+		Kind:            "rule",
+		Rationale:       broadcastRationale,
+		SourceAgent:     ac.Agent,
 		SourceSessionID: ac.SessionID,
 	})
 	return map[string]interface{}{
@@ -4819,7 +4823,7 @@ func handleCompactEpistemology(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 		// can decide whether to retry.
 		if result != nil {
 			out := map[string]interface{}{
-				"success":          result.Success,
+				"success":           result.Success,
 				"batches_processed": result.BatchesProcessed,
 				"raw_processed":     result.RawProcessed,
 				"lessons_created":   result.LessonsCreated,
@@ -4838,7 +4842,7 @@ func handleCompactEpistemology(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 
 	// Success or skip path.
 	out := map[string]interface{}{
-		"success":          result.Success,
+		"success":           result.Success,
 		"batches_processed": result.BatchesProcessed,
 		"raw_processed":     result.RawProcessed,
 		"lessons_created":   result.LessonsCreated,
@@ -4946,10 +4950,10 @@ func handleReadScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		return nil, err
 	}
 	return map[string]string{
-		"session_id":  sessionID,
-		"thesis":      thesis,
-		"supporting":  supporting,
-		"updated_at":  updatedAt,
+		"session_id": sessionID,
+		"thesis":     thesis,
+		"supporting": supporting,
+		"updated_at": updatedAt,
 	}, nil
 }
 
@@ -4970,9 +4974,9 @@ func handleDiscardScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 
 // handlePromoteScratchpad is the only multi-table mutation in the scratchpad
 // surface. It atomically:
-//   1. SELECTs the scratchpad row (inside the tx — race window closed)
-//   2. INSERTs a memory via SaveMemoryNode (scanner runs INSIDE the tx)
-//   3. DELETEs the scratchpad row (also inside the tx)
+//  1. SELECTs the scratchpad row (inside the tx — race window closed)
+//  2. INSERTs a memory via SaveMemoryNode (scanner runs INSIDE the tx)
+//  3. DELETEs the scratchpad row (also inside the tx)
 //
 // All three operations share one DBNode (txNode). If the scanner rejects
 // the memory INSERT (poison phrase, sensitive content), WithTx rolls back
@@ -5063,9 +5067,9 @@ func handlePromoteScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 // When trace=true (or trace=true is in the payload), the handler also
 // traces the three stages of the recall pipeline:
 //
-//   Stage 1: raw query → BuildFTS5Query() → final MATCH string
-//   Stage 2: FTS5 row count + BM25 distribution + top 3 IDs
-//   Stage 3: HybridSearch input/output count + discarded-row analysis
+//	Stage 1: raw query → BuildFTS5Query() → final MATCH string
+//	Stage 2: FTS5 row count + BM25 distribution + top 3 IDs
+//	Stage 3: HybridSearch input/output count + discarded-row analysis
 //
 // This is the diagnostic surface for investigating retrieval failures
 // (zero-result queries, short-token drops, hyphen crashes). The
@@ -5205,8 +5209,8 @@ func runRetrievalTrace(dm mpminternal.CoreDB, query, collection, scope string, l
 
 	// ── Stage 2: FTS5 row count + BM25 distribution + top 3 IDs ─────────
 	stage2 := map[string]interface{}{
-		"match_string":     transformedMATCH,
-		"limit_fetched":    limit * 4, // fetch wider than the HybridSearch fetch (limit*2) so we can see what's discarded
+		"match_string":  transformedMATCH,
+		"limit_fetched": limit * 4, // fetch wider than the HybridSearch fetch (limit*2) so we can see what's discarded
 	}
 	if transformedMATCH == "" {
 		stage2["error"] = "BuildFTS5Query returned empty string (would raise sqlite error if sent)"
@@ -5249,8 +5253,8 @@ func runRetrievalTrace(dm mpminternal.CoreDB, query, collection, scope string, l
 				copy(sortedScores, scores)
 				// scores already sorted by bm25 ASC (most negative = best)
 				stage2["bm25"] = map[string]interface{}{
-					"min":    sortedScores[0],                                  // most negative = best match
-					"max":    sortedScores[len(sortedScores)-1],               // least negative = worst match
+					"min":    sortedScores[0],                   // most negative = best match
+					"max":    sortedScores[len(sortedScores)-1], // least negative = worst match
 					"median": sortedScores[len(sortedScores)/2],
 					"count":  len(sortedScores),
 				}
@@ -5312,9 +5316,9 @@ func runRetrievalTrace(dm mpminternal.CoreDB, query, collection, scope string, l
 			stage3["fts5_kept_ids"] = mapKeysToSlice(hybridIDs)
 			if len(discardedScores) > 0 {
 				stage3["discarded_bm25"] = map[string]interface{}{
-					"min":    discardedScores[0],                            // most-negative discarded score
-					"max":    discardedScores[len(discardedScores)-1],      // least-negative discarded score
-					"count":  len(discardedScores),
+					"min":   discardedScores[0],                      // most-negative discarded score
+					"max":   discardedScores[len(discardedScores)-1], // least-negative discarded score
+					"count": len(discardedScores),
 				}
 			} else {
 				stage3["discarded_bm25"] = map[string]interface{}{"count": 0}
@@ -5445,18 +5449,18 @@ func mapKeysToSlice(m map[string]bool) []string {
 //
 // Architectural intent (Wed 2026-07-29 design session):
 //
-//   Adapter layer for the ReviewCoordinator orchestration primitive
-//   (internal/core/orchestration). This handler is responsible for:
+//	Adapter layer for the ReviewCoordinator orchestration primitive
+//	(internal/core/orchestration). This handler is responsible for:
 //
-//     1. Fetching artifact bodies from the database (resolving ids
-//        in the caller's 'artifacts' list to actual text).
-//     2. Building the substrate-side RequestReview payload (a
-//        ReviewRequest — see orchestration/review_coordinator.go).
-//     3. Calling DefaultReviewCoordinator.Execute().
-//     4. Rendering the resulting []ReviewResult via the renderers
-//        package, which returns Markdown-shaped output suitable for
-//        both agent consumers (LLMs parse it back as text) and
-//        humans (operators read the dashboard).
+//	  1. Fetching artifact bodies from the database (resolving ids
+//	     in the caller's 'artifacts' list to actual text).
+//	  2. Building the substrate-side RequestReview payload (a
+//	     ReviewRequest — see orchestration/review_coordinator.go).
+//	  3. Calling DefaultReviewCoordinator.Execute().
+//	  4. Rendering the resulting []ReviewResult via the renderers
+//	     package, which returns Markdown-shaped output suitable for
+//	     both agent consumers (LLMs parse it back as text) and
+//	     humans (operators read the dashboard).
 //
 // The handler is intentionally thin. All the concurrency, timeout,
 // profile resolution, and fan-out live in the engine layer
@@ -5885,11 +5889,11 @@ func handleResolveWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 		}, nil
 	}
 	return map[string]interface{}{
-		"success":         true,
-		"resolved":        resolved,
-		"status":          status,
-		"wake_id":         wakeID,
-		"reason":          reason,
+		"success":          true,
+		"resolved":         resolved,
+		"status":           status,
+		"wake_id":          wakeID,
+		"reason":           reason,
 		"result_reference": resultReference,
 	}, nil
 }
@@ -6179,9 +6183,9 @@ func handleListDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 		rows = []map[string]interface{}{}
 	}
 	return map[string]interface{}{
-		"success": true,
-		"status":  statusOrDefault(status),
-		"count":   len(rows),
+		"success":   true,
+		"status":    statusOrDefault(status),
+		"count":     len(rows),
 		"decisions": rows,
 	}, nil
 }
@@ -6207,9 +6211,9 @@ func handleQueryDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		rows = []map[string]interface{}{}
 	}
 	return map[string]interface{}{
-		"success": true,
-		"query":   query,
-		"count":   len(rows),
+		"success":   true,
+		"query":     query,
+		"count":     len(rows),
 		"decisions": rows,
 	}, nil
 }
@@ -6868,8 +6872,8 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 // resolveMetadataFor projects a stored artifact row into the safe
 // metadata shape returned by mpm_resolve. The CRITICAL invariant is:
 //
-//   top-level `content`  = bounded content (already capped to max_bytes)
-//   `metadata.content`   = MUST NOT echo the original unbounded content
+//	top-level `content`  = bounded content (already capped to max_bytes)
+//	`metadata.content`   = MUST NOT echo the original unbounded content
 //
 // Before this projection existed, handleMpmResolve's CLI fallback set
 // resp["metadata"] = mem verbatim, and the MCP-resolver path set
@@ -6898,7 +6902,7 @@ func resolveMetadataFor(mem map[string]interface{}) map[string]interface{} {
 	}
 	return out
 }
-//
+
 // Key invariants shared with pointer.Parse:
 //   - Rejects URIs containing '?' or '#' (query/fragment components)
 //   - Validates id against ^[a-z0-9-]+$
@@ -7227,16 +7231,16 @@ func parseLimitStrict(v interface{}, def int) (int, error) {
 //
 // Contract:
 //
-//   nil           → def (legitimate omission)
-//   float64       → value
-//   float32       → value
-//   int           → float64(value)
-//   int64         → float64(value)
-//   string        → ERROR (no silent coerce; matches F12-1
-//                          parseWeightStrict)
-//   ""            → ERROR (empty is not a valid number)
-//   whitespace    → ERROR
-//   anything else → ERROR
+//	nil           → def (legitimate omission)
+//	float64       → value
+//	float32       → value
+//	int           → float64(value)
+//	int64         → float64(value)
+//	string        → ERROR (no silent coerce; matches F12-1
+//	                       parseWeightStrict)
+//	""            → ERROR (empty is not a valid number)
+//	whitespace    → ERROR
+//	anything else → ERROR
 //
 // If min is non-zero (e.g. min=0), values below min return an error
 // rather than being silently clamped by downstream code.
@@ -7275,16 +7279,16 @@ func parseFloatStrict(v interface{}, def float64, name string, min float64) (flo
 //
 // Canonical contract:
 //
-//   omitted        → 0 (legitimate default; reads from start)
-//   nil            → 0 (null omission; same as omitted)
-//   0              → 0 (explicit; reads from start)
-//   N (positive)   → N (reads from byte N)
-//   size           → empty read at EOF (has_more=false; not an error)
-//   > size         → empty read past EOF (has_more=false; not an error)
-//   < 0            → ERROR: offset must be non-negative
-//   non-integer    → ERROR: offset must be an integer
-//   string         → ERROR: offset must be an integer
-//   bool / other   → ERROR: offset must be an integer
+//	omitted        → 0 (legitimate default; reads from start)
+//	nil            → 0 (null omission; same as omitted)
+//	0              → 0 (explicit; reads from start)
+//	N (positive)   → N (reads from byte N)
+//	size           → empty read at EOF (has_more=false; not an error)
+//	> size         → empty read past EOF (has_more=false; not an error)
+//	< 0            → ERROR: offset must be non-negative
+//	non-integer    → ERROR: offset must be an integer
+//	string         → ERROR: offset must be an integer
+//	bool / other   → ERROR: offset must be an integer
 //
 // The handler previously used a bare `.(float64)` assertion that
 // silently coerced non-numeric input to 0 and let negative offsets
