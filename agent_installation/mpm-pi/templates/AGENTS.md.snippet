@@ -29,10 +29,34 @@ canonical protocol, not this block, for behavioural changes.
    `read_wake_context` is available. The wake payload carries
    orientation signals (mode, persona, recent topics, recent
    memories, recent milestones, last handoff, open work, overdue
-   scheduled wakes, and a bounded `<available_skills>` catalogue).
+   scheduled wakes, a bounded `<available_skills>` catalogue) AND
+   the additive `<contextual_focus>` projection — bounded inherited
+   working awareness from the routing pipeline (see §1.1).
    Decisions live in `mpm_decisions`; lessons in `mpm_lessons`. Use `params.projection:
    "compact"` for a small id+summary envelope — the full payload
    is the default.
+
+1.1. **Interpret `<contextual_focus>` as inherited working
+   awareness**, not as unquestionable truth. Each item carries
+   `id / kind / artifact_id / pointer` (identity), `band / rationale /
+   why_now` (why it surfaced), `status / detail / truncated` (bounded
+   what-to-know), and supplementary `lifecycle_state` /
+   `selection_triggers` / `compressed_related_ids` where useful. Treat
+   it as bounded inherited context: use it as a durable pointer to
+   investigate, follow `pointer` / `artifact_id` with the appropriate
+   domain tool (`mpm_decisions show`, `mpm_lessons read`,
+   `mpm_memory show`, `mpm_work show`, `mpm_resolve`, etc.) when
+   detail is insufficient. Per-item status (`materialized` /
+   `pointer_only` / `missing` / `unsupported` / `error`) describes
+   whether bounded authoritative detail was available — never whether
+   the item mattered; a `missing` item still carries the pointer and
+   `why_now`. Selection order is preserved exactly; do not re-rank or
+   re-order. If `<contextual_focus>.status == "degraded"` (the
+   projection pipeline itself failed), continue using the legacy wake
+   context and investigate MPM health only if the missing focus
+   materially blocks work — do not chain the diagnostic
+   `contextual_*` actions to compensate. An empty items array is not
+   an error; continue from legacy wake context and current task.
 
 2. **Persist during work, not only at the end.** Use `mpm_memory`
    action `save`, `mpm_decisions` action `record`,

@@ -37,33 +37,111 @@ At the beginning of a new agent session, **before any substantive work**:
   carries recent durable context (active mode and persona, recent
   topics, relevant memories, recent milestones, the last handoff,
   any overdue scheduled wakes, a bounded inventory of available
-  skills, and other bounded wake information exposed by the current
-  wake-context projection). The full field list lives on the
-  `WakeContextData` struct in `internal/core/wake_context.go`.
-- When the wake projection does not surface what you need, or when
-  the user prompt asks "what might matter?" / "what should I look
-  at?" / "what's structurally relevant?", invoke
-  `mpm_context contextual_candidates` for a deterministic, bounded,
-  pointer-first candidate set with structural reasons. This surface
-  is observational (does not mutate persistent state), bounded
-  (default global cap 50, per-source caps enforced), and
-  reason-tagged (every candidate carries one or more bounded reason
-  tokens — open_work, overdue_wake, explicit_reference,
-  cascade_pending, handoff_for_current_context, supersession_chain,
-  …). It is NOT relevance-ranked and does NOT use LLM/embeddings;
-  every candidate is equally weighted. Stage 2E will add the
-  selection-stage ranking layer on top; for now this surface is the
-  authoritative pre-ranking candidate set.
-- Recover prior decisions, lessons, work-in-progress, and unresolved
-  threads. Decisions surface lives behind `mpm_decisions show | list |
-  query`; lessons behind `mpm_lessons search | list`; in-flight work
-  behind `mpm_work list`. None of these are part of the wake payload
-  itself — they are reachable from wake, not carried in it.
+  skills, and the additive `contextual_focus` projection described
+  in §1.1). The full field list lives on the `WakeContextData`
+  struct in `internal/core/wake_context.go`.
+- The wake payload already includes inherited working awareness —
+  you do not need to manually chain `contextual_candidates`,
+  `contextual_selection`, or `contextual_materialization` at session
+  start. Those three are **diagnostic surfaces** for inspecting or
+  debugging the routing pipeline; their integrated result lives in
+  `contextual_focus` (see §1.1).
+- When the wake payload points you at a specific artifact for deeper
+  inspection, follow the pointer with the appropriate domain tool —
+  `mpm_decisions show`, `mpm_lessons read`, `mpm_memory show`,
+  `mpm_work show`, `mpm_resolve`, or whatever the artifact class
+  warrants. Deliberate per-artifact retrieval is fine; bulk listing
+  every substrate category at session start is not the contract.
 - Acknowledge the local substrate state (e.g., daemon uptime if relevant).
 
 **Why this matters:** Skipping wake means arriving amnesic and forcing the
 user to re-explain context already on file. The wake protocol is **how
 future-me starts**.
+
+### 1.1 `contextual_focus` — Inherited working awareness
+
+The `contextual_focus` field on `WakeContextData` is the integrated
+delivery surface of the routing pipeline (Stage 2D discovery →
+Stage 2E.1 selection → Stage 2E.2 bounded materialization →
+Stage 2E.3 compact packaging). Each item carries:
+
+- `id`, `kind`, `artifact_id`, `pointer` — identity envelope
+- `band`, `rationale`, `why_now` — why the item surfaced
+- `status`, `detail`, `truncated` — bounded what-to-know
+- `lifecycle_state`, `selection_triggers`, `compressed_related_ids` —
+  supplementary metadata where useful
+
+Interpret `contextual_focus` as:
+
+- **Bounded inherited working awareness**, not unquestionable truth.
+  Selection routes awareness; it does not replace reasoning or
+  evidence. Evaluate the item against current task state and
+  authoritative substrate rows before treating it as load-bearing.
+- A **durable pointer to investigate**, not a self-contained claim.
+  When `detail` is sufficient, proceed. When it is not, follow the
+  `pointer` / `artifact_id` with the appropriate domain tool.
+- **Preserved through graceful degradation.** Per-item status
+  (`materialized`, `pointer_only`, `missing`, `unsupported`,
+  `error`) describes whether bounded authoritative detail was
+  available — never whether the item mattered. A `missing` item
+  still carries the pointer and `why_now` so the agent can decide
+  whether to investigate deliberately. Do not discard items because
+  detail was unavailable.
+- **Preserved across work surface area.** Items include direct
+  obligations (open work, overdue wakes), continuity (recent handoff,
+  same-session activity), epistemic state (decisions, theories,
+  lessons), and supporting context. The selection order is preserved
+  exactly; do not re-rank or re-order.
+
+When `contextual_focus.status == "degraded"`, the projection
+pipeline itself failed. Continue using the legacy wake context
+(mode/persona/recent topics/recent memories/recent milestones/last
+handoff/open work/etc.); investigate MPM health only if the missing
+focus materially blocks work. Do NOT automatically invoke all three
+diagnostic `contextual_*` actions on a degraded focus — that would
+create an expensive failure cascade.
+
+When `contextual_focus.status == "available"` but the items array is
+empty, no item met the selection bar. That is not an error; continue
+from the legacy wake context and current task.
+
+### 1.2 The three `contextual_*` actions are diagnostic
+
+`mpm_context contextual_candidates`, `mpm_context contextual_selection`,
+and `mpm_context contextual_materialization` exist for diagnostic
+inspection of the routing pipeline. They are NOT part of the normal
+session-start workflow; their integrated result is in
+`contextual_focus`.
+
+Use them when:
+
+- Debugging a routing decision ("why did this candidate surface?" /
+  "why did this candidate get selected?" / "what would this selection
+  materialize to?").
+- Writing tests or operator diagnostics that need to inspect the
+  pipeline directly.
+- Validating a substrate schema change against the canonical policy.
+
+Do not call them to compensate for a degraded or empty focus. Do
+not call them to "see what MPM thinks" at session start — that is
+what `contextual_focus` is for.
+
+### 1.3 Handoff in the wake payload
+
+`read_wake_context` may mark the current unread handoff read
+according to existing lifecycle semantics. The returned context is
+built from pre-consumption state, so the receiving agent still
+receives the handoff (in `last_handoff` and as a focus item where
+selection chooses it) **before** the consumption mutation happens.
+
+Do not call `mpm_handoff` separately before `read_wake_context` —
+the wake delivery path already includes handoff continuity.
+Do not manually call `contextual_materialization` to preserve handoff
+visibility — the focus is already part of the wake payload.
+
+Explicit handoff tools (`mpm_handoff` action `write` / `read`)
+remain available for deliberate investigation, archival, or
+post-session creation.
 
 ---
 
