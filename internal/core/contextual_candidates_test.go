@@ -1114,9 +1114,9 @@ func TestStage2D1_SupersessionCanonical(t *testing.T) {
 //   - evidence_added          (confidence_history evidence_added trigger)
 //   - cascade_resolved        (epistemic_cascade_outbox materialized)
 //   - recent_human_change     (tool_invocations actor_kind=human,
-//                              non-agent framework)
+//     non-agent framework)
 //   - unknown_source_change   (tool_invocations non-human/agent actor
-//                              with non-empty unrecognized framework)
+//     with non-empty unrecognized framework)
 func TestStage2D1_ReasonReachability(t *testing.T) {
 	dm := NewTestDM(t)
 	// Seed the broadest possible fixture so every source has data.
