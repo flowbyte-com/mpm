@@ -1172,3 +1172,63 @@ func TestMaterializer_AuditCorrelation_BackgroundNullCorrelation(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 }
+
+// TestMaterializer_AuditFor_BackgroundNoRecursion pins the recursion
+// regression: when cm.prov == nil, auditFor must call dm.LogAudit
+// (returning normally) and MUST NOT recurse into itself. The
+// previous implementation recursively invoked cm.auditFor(level,
+// component, message, "", ctx) which — with prov still nil —
+// recursed infinitely and crashed the calling test with a stack
+// overflow.
+//
+// This test directly exercises the helper with prov==nil and
+// verifies:
+//   - the call returns within the test timeout (no infinite loop);
+//   - the system_audit_log row is written via the plain LogAudit
+//     path with NULL correlation columns.
+func TestMaterializer_AuditFor_BackgroundNoRecursion(t *testing.T) {
+	dm := hermeticDatabaseManager(t)
+	opts := DefaultCascadeMaterializerOptions()
+	opts.InvocationProvenance = nil // background path
+	mat := NewCascadeMaterializer(dm, opts)
+
+	// done is closed by the goroutine to prove auditFor returned.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		mat.auditFor(AuditInfo, "recursion-fixture",
+			"background path: no recursion", "test_event_code", nil)
+	}()
+
+	select {
+	case <-done:
+		// auditFor returned normally.
+	case <-time.After(2 * time.Second):
+		t.Fatalf("auditFor with prov==nil did not return within 2s; recursion regression")
+	}
+
+	// Verify the row was written via LogAudit (NOT LogAuditForInvocation):
+	// the four correlation columns must be NULL, the component
+	// must match, and the message must match.
+	row := dm.SQLDB().QueryRow(`
+		SELECT component, message,
+		       invocation_id, mpm_session_id, framework_name, framework_session_id
+		FROM system_audit_log
+		WHERE component = 'recursion-fixture'
+		ORDER BY created_at DESC LIMIT 1`)
+	var comp, msg string
+	var inv, mpms, fw, fws sql.NullString
+	if err := row.Scan(&comp, &msg, &inv, &mpms, &fw, &fws); err != nil {
+		t.Fatalf("read audit row: %v", err)
+	}
+	if comp != "recursion-fixture" {
+		t.Errorf("component = %q, want recursion-fixture", comp)
+	}
+	if msg != "background path: no recursion" {
+		t.Errorf("message = %q, want %q", msg, "background path: no recursion")
+	}
+	if inv.Valid || mpms.Valid || fw.Valid || fws.Valid {
+		t.Errorf("background auditFor wrote non-null correlation: %+v",
+			[]string{inv.String, mpms.String, fw.String, fws.String})
+	}
+}

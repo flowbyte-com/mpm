@@ -14,6 +14,7 @@
 package main
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -114,6 +115,95 @@ func TestRecordToolInvocation_NilDMSafe(t *testing.T) {
 	recordToolInvocation(nil, core.ActiveContext{}, "x", nil, time.Now(), time.Now(),
 		"a", "success", nil)
 	// No assertion needed — passing means it didn't panic.
+}
+
+// TestRecordToolInvocation_MCPFourColumnsAndAbsentSession pins the
+// OBSERVABILITY FOUNDATION MCP-side contract: every tool_invocations
+// row written by recordToolInvocation carries the four identity
+// columns (invocation_id, mpm_session_id, framework_name,
+// framework_session_id) populated from the ActiveContext, OR NULL
+// when the caller did not supply a value (absent-native-session
+// case — e.g. Pi/Hermes without hooks). Empty strings are NEVER
+// synthesised across columns; the persisted NULL is the canonical
+// "absent" state.
+func TestRecordToolInvocation_MCPFourColumnsAndAbsentSession(t *testing.T) {
+	dm := newIsolatedTestDM(t)
+
+	// Case A: full ActiveContext (framework supplies native session).
+	started := time.Now().Add(-20 * time.Millisecond)
+	completed := time.Now()
+	const (
+		wantInvocation  = "inv-mcp-fixture"
+		wantMPMSession  = "mpm-mcp-fixture"
+		wantFwName      = "opencode-mcp-fixture"
+		wantFwSession   = "opencode-mcp-sess-fixture"
+	)
+	acFull := core.ActiveContext{
+		SessionID:           "mcp-full",
+		InvocationID:        wantInvocation,
+		MPMSessionID:        wantMPMSession,
+		FrameworkName:       wantFwName,
+		FrameworkSessionID:  wantFwSession,
+	}
+	recordToolInvocation(dm, acFull,
+		"mpm_system", map[string]interface{}{"action": "health_check"},
+		started, completed, "health_check", "success", nil)
+
+	row := dm.SQLDB().QueryRow(`
+		SELECT invocation_id, mpm_session_id, framework_name, framework_session_id, framework_session_id IS NULL
+		FROM tool_invocations
+		WHERE invocation_id = ?
+		ORDER BY rowid DESC LIMIT 1`, wantInvocation)
+	var gotInv, gotMPMS, gotFw, gotFwS string
+	var gotFwSIsNull int
+	if err := row.Scan(&gotInv, &gotMPMS, &gotFw, &gotFwS, &gotFwSIsNull); err != nil {
+		t.Fatalf("scan full AC: %v", err)
+	}
+	if gotInv != wantInvocation {
+		t.Errorf("invocation_id = %q, want %q", gotInv, wantInvocation)
+	}
+	if gotMPMS != wantMPMSession {
+		t.Errorf("mpm_session_id = %q, want %q", gotMPMS, wantMPMSession)
+	}
+	if gotFw != wantFwName {
+		t.Errorf("framework_name = %q, want %q", gotFw, wantFwName)
+	}
+	if gotFwS != wantFwSession {
+		t.Errorf("framework_session_id = %q, want %q", gotFwS, wantFwSession)
+	}
+	if gotFwSIsNull != 0 {
+		t.Errorf("framework_session_id IS NULL = %d, want 0", gotFwSIsNull)
+	}
+
+	// Case B: absent-native-session — ActiveContext has empty
+	// FrameworkSessionID. Persisted column must be SQL NULL, NOT
+	// the empty string (empty-string == NULL invariant).
+	acAbsent := core.ActiveContext{
+		SessionID:    "mcp-absent",
+		InvocationID: "inv-mcp-absent",
+		MPMSessionID: "mpm-mcp-absent",
+		FrameworkName: "pi-no-hooks",
+		// FrameworkSessionID intentionally empty.
+	}
+	recordToolInvocation(dm, acAbsent,
+		"mpm_memory", map[string]interface{}{"action": "show"},
+		started, completed, "show", "success", nil)
+
+	row = dm.SQLDB().QueryRow(`
+		SELECT framework_session_id, framework_session_id IS NULL
+		FROM tool_invocations
+		WHERE invocation_id = ?`, "inv-mcp-absent")
+	var gotFwS2 sql.NullString
+	var gotFwS2IsNull int
+	if err := row.Scan(&gotFwS2, &gotFwS2IsNull); err != nil {
+		t.Fatalf("scan absent AC: %v", err)
+	}
+	if gotFwS2IsNull != 1 {
+		t.Errorf("framework_session_id IS NULL = %d, want 1 (absent-native-session must be NULL, not empty)", gotFwS2IsNull)
+	}
+	if gotFwS2.Valid {
+		t.Errorf("framework_session_id = %q, want NULL (absent-native-session case)", gotFwS2.String)
+	}
 }
 
 // errorString is a tiny error helper so we don't pull in errors/fmt.
