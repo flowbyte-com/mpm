@@ -277,7 +277,7 @@ Lifecycle asymmetry: promote_to_global is one-way / additive. The local memory r
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["read_wake_context","read_directives","proactive_recall_hint","query_global_rules","record_global_rule","retire_global_rule","promote_to_global","route","recent_activity","contextual_candidates"]},
+				"action": {"type": "string", "enum": ["read_wake_context","read_directives","proactive_recall_hint","query_global_rules","record_global_rule","retire_global_rule","promote_to_global","route","recent_activity","contextual_candidates","contextual_selection"]},
 				"params": {
 					"type": "object",
 					"properties": {
