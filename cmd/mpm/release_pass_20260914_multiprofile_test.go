@@ -78,12 +78,55 @@ func clearEmbeddingEnv(workspace string) []string {
 
 // runMpmCommand runs the freshly-built mpm binary against the
 // workspace, with the embedding env cleared by default.
+//
+// KNOWN BASELINE DEFECT B (2026-09-21): pre-fix this helper passed
+// --base-url values like https://*.invalid / *.example.com straight
+// through, which forced `mpm config profile set …` to perform real
+// outbound HTTP probes against reserved/example hosts. Each probe
+// waited ~2s for DNS+TCP timeout; 30+ TestMulti_* tests × 2s drove
+// the cumulative package runtime past the cmd/mpm go-test -timeout
+// budget, hanging whichever test happened to be active when the
+// package timed out.
+//
+// Repair: substitute any --base-url VALUE / base_url=VALUE pair with
+// a local fake probe endpoint that the helper wires up at first use
+// and tears down on test cleanup. The probe target is now hermetic;
+// the test's *semantic* contract (add profile, set fields, component
+// operations round-trip) is unchanged.
 func runMpmCommand(t *testing.T, bin, ws string, args ...string) (string, error) {
 	t.Helper()
+	// Use a per-test fake endpoint so failures are isolated.
+	srv := startFakeProbeEndpoint(t)
+	t.Cleanup(srv.Close)
+	args = substituteBaseURLsForHermetic(args, srv.URL)
 	cmd := stdlibexec.Command(bin, args...)
 	cmd.Env = clearEmbeddingEnv(ws)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// substituteBaseURLsForHermetic rewrites every --base-url VALUE /
+// base_url=VALUE pair so VALUE points at fakeBaseURL + "/v1".
+// Other args pass through unchanged. The hermetic server returns
+// 200 with empty capability JSON for /api/show, /api/tags, and
+// /v1/messages, so probes return promptly.
+func substituteBaseURLsForHermetic(args []string, fakeBaseURL string) []string {
+	out := make([]string, 0, len(args))
+	target := fakeBaseURL + "/v1"
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		out = append(out, a)
+		if a == "--base-url" && i+1 < len(args) {
+			out = append(out, target)
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "base_url=") {
+			out[len(out)-1] = "base_url=" + target
+			continue
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

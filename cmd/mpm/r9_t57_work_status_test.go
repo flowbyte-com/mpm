@@ -17,6 +17,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -25,7 +26,15 @@ import (
 
 func r9T57Mpm(t *testing.T, workspace string, args ...string) (string, int) {
 	t.Helper()
-	cmd := exec.Command("/home/v/.mpm/bin/mpm", args...)
+	bin := r9T57BuildBin(t)
+	cmd := exec.Command(bin, args...)
+	// Pre-fix this helper called /home/v/.mpm/bin/mpm — the
+	// developer's installed CLI — and inherited os.Environ()
+	// unfiltered. That contaminates production ~/.mpm state
+	// (because a few callers passed MPM_WORKSPACE="") and
+	// silently imports development env vars into the test
+	// process. Hermetic repair: build a per-test binary and
+	// sandbox the env to only the keys the test requires.
 	cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
 	out, err := cmd.CombinedOutput()
 	code := 0
@@ -33,6 +42,19 @@ func r9T57Mpm(t *testing.T, workspace string, args ...string) (string, int) {
 		code = ee.ExitCode()
 	}
 	return string(out), code
+}
+
+// r9T57BuildBin compiles a hermetic mpm binary into t.TempDir().
+// Mirrors buildOpenRouterBin; duplicated here to keep this file
+// independent of release_pass_20260914_openrouter_test.go.
+func r9T57BuildBin(t *testing.T) string {
+	t.Helper()
+	bin := fmt.Sprintf("%s/mpm-r9t57", t.TempDir())
+	cmd := exec.Command("go", "build", "-tags", "fts5", "-o", bin, ".")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("r9T57 build: %v\n%s", err, out)
+	}
+	return bin
 }
 
 // TestR9T57_CanonicalStatusesAccepted pins the closed-world allow-list.
@@ -181,7 +203,14 @@ func TestR9T57_NoStatusDefaultsToOpen(t *testing.T) {
 // values, so a smoke test could send `in_progress` without a
 // hint that `open` is the canonical pending state.
 func TestR9T57_HelpAdvertisesCanonicalStatuses(t *testing.T) {
-	out, _ := r9T57Mpm(t, "", "work", "item", "--help")
+	// Pre-fix this test called r9T57Mpm with MPM_WORKSPACE=""
+	// which routed through the developer's real ~/.mpm state.
+	// Repair: route through a fresh tmpdir + per-test-built
+	// binary (see r9T57BuildBin) so no production state is
+	// touched. The rendered help text is identical regardless
+	// of workspace; the assertion is unchanged.
+	ws := t.TempDir()
+	out, _ := r9T57Mpm(t, ws, "work", "item", "--help")
 	for _, want := range []string{"open", "done", "cancelled"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("work item --help missing canonical status %q. Output:\n%s", want, out)

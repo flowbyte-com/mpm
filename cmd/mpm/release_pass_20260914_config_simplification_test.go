@@ -25,9 +25,9 @@
 package main
 
 import (
-	stdlibexec "os/exec"
 	"encoding/json"
 	"os"
+	stdlibexec "os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -239,7 +239,24 @@ func TestFinal_H_AllMiniLMGuardStillActive(t *testing.T) {
 
 // TestFinal_I_UnknownManualModelAccepted — I: a model name the
 // role validator cannot classify is accepted (unknown = permissive).
+//
+// Pre-fix this test pointed base_url at https://api.example.com/v1
+// (an IANA-reserved unreachable host). The post-save probe attempt
+// would then wait for DNS+TCP timeout on every invocation, and the
+// cumulative wait across many Final_* tests exceeded the cmd/mpm
+// package-wide go-test timeout, hanging whichever test happened
+// to be active at the moment the package timed out.
+//
+// Hermetic repair (release_pass_baseline_defect_b_test.go): the
+// test now points base_url at the in-process startFakeProbeEndpoint
+// so probes resolve locally with sub-100ms latency. Test intent —
+// "an unknown manually supplied model can be saved/accepted" —
+// is preserved; only the probe target is reanchored.
 func TestFinal_I_UnknownManualModelAccepted(t *testing.T) {
+	srv := startFakeProbeEndpoint(t)
+	defer srv.Close()
+	baseURL := srv.URL + "/v1"
+
 	bin := buildOpenRouterBin(t)
 	ws := t.TempDir()
 
@@ -250,7 +267,7 @@ func TestFinal_I_UnknownManualModelAccepted(t *testing.T) {
 	}
 	for _, kv := range [][2]string{
 		{"provider", "custom"},
-		{"base_url", "https://api.example.com/v1"},
+		{"base_url", baseURL},
 	} {
 		cmd := stdlibexec.Command(bin, "config", "profile", "set", "custom-unknown", kv[0], kv[1])
 		cmd.Env = []string{"MPM_WORKSPACE=" + ws, "PATH=" + lookupTestPath()}
@@ -458,6 +475,10 @@ func TestFinal_Q_NoAutoApplyRemains(t *testing.T) {
 // in the role validator's fallback list (e.g. "embedding",
 // "embed-", "nomic-embed", etc.).
 func TestFinal_R_UnknownEmbeddingModelAccepted(t *testing.T) {
+	srv := startFakeProbeEndpoint(t)
+	defer srv.Close()
+	baseURL := srv.URL + "/v1"
+
 	bin := buildOpenRouterBin(t)
 	ws := t.TempDir()
 
@@ -473,9 +494,13 @@ func TestFinal_R_UnknownEmbeddingModelAccepted(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("component set: %v\n%s", err, out)
 	}
+	// Pre-fix: base_url was https://api.example-vectors.com/v1
+	// (a reserved/unreachable host). Same hermetic repair as
+	// Final_I — the fake probe endpoint serves /api/show,
+	// /api/tags, /v1/messages locally.
 	for _, kv := range [][2]string{
 		{"provider", "custom"},
-		{"base_url", "https://api.example-vectors.com/v1"},
+		{"base_url", baseURL},
 		{"model", "mystery-vector-model-2026"},
 	} {
 		cmd := stdlibexec.Command(bin, "config", "profile", "set", "embedding", kv[0], kv[1])
