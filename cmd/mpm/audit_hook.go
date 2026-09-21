@@ -29,10 +29,10 @@ import (
 // harness-driven rows from real agent runs so the report command can
 // filter them.
 const (
-	auditActorAgent  = "agent"
-	auditActorHuman  = "human"
-	auditActorDrill  = "drill"
-	auditActorMCP    = "agent" // MCP path still surfaces as "agent"; framework_name='mcp'
+	auditActorAgent = "agent"
+	auditActorHuman = "human"
+	auditActorDrill = "drill"
+	auditActorMCP   = "agent" // MCP path still surfaces as "agent"; framework_name='mcp'
 )
 
 // recordToolInvocation inserts a row into tool_invocations capturing the
@@ -115,23 +115,62 @@ func recordToolInvocation(
 		return s
 	}
 
+	// RUNTIME OUTCOME WIRING (aa04fc2a+): classify the dispatch
+	// outcome at write-time. result_status stays success|error for
+	// compatibility (the existing CHECK constraint enforces the
+	// vocabulary). outcome_class and outcome_code are the new typed
+	// axis; null on success (class is implicit) and the bounded
+	// code on error via the common ClassifyError seam in
+	// internal/core/tool_outcome.go.
+	outcomeClass, outcomeCode := computeToolOutcome(resultStatus, err)
+
 	_, auditErr := dm.Exec(`
 		INSERT INTO tool_invocations
 		    (id, session_id, tool_name, action, invocation_id,
 		     actor_kind, framework_name, payload_hash, result_status,
 		     started_at, completed_at, duration_ms, error_message,
-		     mpm_session_id, framework_session_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     mpm_session_id, framework_session_id,
+		     outcome_class, outcome_code)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, sessionID, toolName, action, invocationID,
 		actorKind, frameworkName, sha256OfPayload(payload), resultStatus,
 		startedAt.Unix(), completedAt.Unix(), completedAt.Sub(startedAt).Milliseconds(),
 		errorMessage,
 		nullStr(ac.MPMSessionID),
 		nullStr(ac.FrameworkSessionID),
+		string(outcomeClass), outcomeCode,
 	)
 	if auditErr != nil {
 		slog.Warn("audit insert failed", "tool", toolName, "err", auditErr.Error())
 	}
+}
+
+// computeToolOutcome returns the closed-vocabulary outcome_class for a
+// completed dispatch. result_status == "success" maps to outcome_class
+// "ok" with empty outcome_code (success is the implicit absence of a
+// typed failure code). result_status == "error" maps through
+// mpminternal.ClassifyError, which recognises typed sentinels,
+// context errors, and a narrow set of well-known message prefixes
+// (see internal/core/tool_outcome.go for the full contract).
+//
+// Degraded-success is NOT wired here: only tool dispatch boundaries
+// produce outcome_class=="degraded", and the existing handler chain
+// has no degraded semantic in normal happy-path routes. Wake-context
+// projection already records contextual_focus.status internally;
+// wiring that to the audit row would require introspecting the
+// payload (brief §14 forbids). Future stage.
+func computeToolOutcome(resultStatus string, err error) (class mpminternal.ToolOutcomeClass, code string) {
+	if resultStatus == "success" {
+		return mpminternal.OutcomeClassOk, ""
+	}
+	class, code = mpminternal.ClassifyError(err)
+	if class == "" {
+		return mpminternal.OutcomeClassInternal, "unclassified"
+	}
+	if !mpminternal.ValidClass(class) {
+		return mpminternal.OutcomeClassInternal, "unclassified"
+	}
+	return class, code
 }
 
 // sqlDBLike is the minimal surface we need to insert audit rows. Both

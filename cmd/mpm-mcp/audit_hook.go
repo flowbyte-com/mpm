@@ -80,6 +80,13 @@ func recordToolInvocation(
 		return s
 	}
 
+	// RUNTIME OUTCOME WIRING (aa04fc2a+): classify the dispatch
+	// outcome at write-time via the same common seam used by the
+	// CLI dispatcher. MCP and CLI rows must not classify the same
+	// error differently merely because transport differs — this is
+	// verified by parity tests below.
+	outcomeClass, outcomeCode := computeToolOutcome(resultStatus, err)
+
 	// OBSERVABILITY FOUNDATION (2026-09-21): populate the four
 	// identity columns that the new schema added. The CLI writer
 	// already does this; the MCP writer historically dropped
@@ -94,18 +101,37 @@ func recordToolInvocation(
 		    (id, session_id, tool_name, action, invocation_id,
 		     actor_kind, framework_name, payload_hash, result_status,
 		     started_at, completed_at, duration_ms, error_message,
-		     mpm_session_id, framework_session_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     mpm_session_id, framework_session_id,
+		     outcome_class, outcome_code)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, sessionID, toolName, action, invocationID,
 		actorKind, frameworkName, sha256OfPayload(payload), resultStatus,
 		startedAt.Unix(), completedAt.Unix(), completedAt.Sub(startedAt).Milliseconds(),
 		errorMessage,
 		nullStr(ac.MPMSessionID),
 		nullStr(ac.FrameworkSessionID),
+		string(outcomeClass), outcomeCode,
 	)
 	if auditErr != nil {
 		slog.Warn("audit insert failed", "tool", toolName, "err", auditErr.Error())
 	}
+}
+
+// computeToolOutcome mirrors cmd/mpm/audit_hook.go::computeToolOutcome
+// — duplicated locally to keep cmd/mpm and cmd/mpm-mcp independent
+// (they already share sha256OfPayload and other small helpers this way).
+// The shared classification seam lives in core.ClassifyError; both
+// audit hooks call it via the same contract, producing identical
+// classification for identical errors regardless of transport.
+func computeToolOutcome(resultStatus string, err error) (class core.ToolOutcomeClass, code string) {
+	if resultStatus == "success" {
+		return core.OutcomeClassOk, ""
+	}
+	class, code = core.ClassifyError(err)
+	if class == "" || !core.ValidClass(class) {
+		return core.OutcomeClassInternal, "unclassified"
+	}
+	return class, code
 }
 
 // sha256OfPayload hashes the JSON-encoded payload so semantically-

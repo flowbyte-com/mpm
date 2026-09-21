@@ -36,6 +36,7 @@
 package internal
 
 import (
+	"context"
 	"errors"
 	"strings"
 )
@@ -178,14 +179,29 @@ func ClassifyError(err error) (ToolOutcomeClass, string) {
 	if err == nil {
 		return OutcomeClassOk, ""
 	}
-	if errors.Is(err, contextCanceledSentinel) {
+	// RUNTIME OUTCOME WIRING (2026-09-21): use real stdlib sentinels
+	// (context.Canceled / context.DeadlineExceeded) so wrapping
+	// preserves the typed signature. The previous local sentinels
+	// only matched against themselves, not against wrapped
+	// production errors.
+	if errors.Is(err, context.Canceled) {
 		return OutcomeClassTimeout, "context_deadline"
 	}
-	if errors.Is(err, contextDeadlineSentinel) {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return OutcomeClassTimeout, "context_deadline"
 	}
 	if errors.Is(err, sqlNoRowsSentinel) {
 		return OutcomeClassNotFound, "artifact_not_found"
+	}
+	// RUNTIME OUTCOME WIRING (2026-09-21): typed sentinel recognition
+	// BEFORE the string-prefix fallback. Brief §3 priority: typed
+	// error → sentinel → typed → string fallback. ErrInvalidWorkTransition
+	// is the canonical typed sentinel for state-machine rejections;
+	// promoting it to a typed class here means future conflict sites
+	// anywhere in the codebase classify correctly without re-typing
+	// message strings.
+	if errors.Is(err, ErrInvalidWorkTransition) {
+		return OutcomeClassConflict, "state_transition_invalid"
 	}
 	msg := err.Error()
 	// Bound checks — only inspect the head so we don't speculate on
@@ -204,6 +220,13 @@ func ClassifyError(err error) (ToolOutcomeClass, string) {
 		return OutcomeClassValidation, "missing_required_field"
 	case strings.Contains(msg, "Valid actions include"):
 		return OutcomeClassValidation, "unknown_action"
+	case strings.Contains(msg, " is required"):
+		// RUNTIME OUTCOME WIRING (2026-09-21): "<param> is required"
+		// is the most common validation form across tools that
+		// don't use the JSON-schema "missing required field" path.
+		// Capturing it here keeps unclassified noise down without
+		// depending on per-tool override registration.
+		return OutcomeClassValidation, "missing_required_field"
 	case strings.Contains(msg, "not found"), strings.HasSuffix(msg, "does not exist"):
 		return OutcomeClassNotFound, "artifact_not_found"
 	case strings.Contains(msg, "SQLITE_BUSY"), strings.Contains(msg, "database is locked"):

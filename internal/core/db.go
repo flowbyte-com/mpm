@@ -290,8 +290,8 @@ func UnmarshalJSON(data string, v interface{}) error {
 // DatabaseManager manages the single unified database
 type DatabaseManager struct {
 	db          *sql.DB
-	dbPath      string // absolute, realpath-resolved path to the SQLite file
-	dbPathRaw   string // raw path passed to NewDatabaseManager (symlinks un-resolved)
+	dbPath      string       // absolute, realpath-resolved path to the SQLite file
+	dbPathRaw   string       // raw path passed to NewDatabaseManager (symlinks un-resolved)
 	sharedStore *MemoryStore // reused for self-maintenance; nil until first access
 
 	watchdogPath string     // path to watchdog.jsonl for query observability
@@ -472,10 +472,10 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 		// shared_path — the path of any attached shared DB, or ""
 		// when federation is off. Same comparison contract applies
 		// if a host pins an expected shared attachment.
-		"db_path":        dm.dbPath,
-		"db_path_raw":    dm.dbPathRaw,
+		"db_path":         dm.dbPath,
+		"db_path_raw":     dm.dbPathRaw,
 		"shared_attached": dm.sharedAttached,
-		"shared_path":    dm.sharedPath,
+		"shared_path":     dm.sharedPath,
 	}
 
 	// Integrity check (PRAGMA quick_check is cheap, runs in <100ms).
@@ -885,7 +885,6 @@ func (dm *DatabaseManager) WithTx(fn func(DBNode) error) (err error) {
 // Begin starts a new database transaction. Exported so packages that import
 // mpm-core (e.g. mpm-core/tools) can begin their own txs for non-atomic
 // provenance writes.
-//
 func (dm *DatabaseManager) Begin() (*sql.Tx, error) {
 	return dm.db.Begin() //nolint:all
 }
@@ -2303,14 +2302,14 @@ func (dm *DatabaseManager) seedBaselineDirectives() error {
 // Contract (parallel to seedBaselineDirectives):
 //
 //   - StableID absent       → Created (UpsertScheduledTask via the
-//                             canonical writer; cron validated and
-//                             next_run_at computed by CalculateNextRun)
+//     canonical writer; cron validated and
+//     next_run_at computed by CalculateNextRun)
 //   - StableID present      → Skipped (no-op). Operator's custom
-//                             cron_expr / name / directive_id / status
-//                             are preserved verbatim.
+//     cron_expr / name / directive_id / status
+//     are preserved verbatim.
 //   - DirectiveID missing   → Missing (the task is skipped; the
-//                             operator can run `mpm ops init
-//                             directives` first and re-run this).
+//     operator can run `mpm ops init
+//     directives` first and re-run this).
 //
 // This runs AFTER seedBaselineDirectives so the canonical
 // directives (specifically mpm-seed-epistemic-compaction-policy)
@@ -4328,7 +4327,7 @@ func ValidateLessonType(lt string) error {
 
 // Lesson represents a learned lesson
 type Lesson struct {
-	ID                 string     `json:"id"`
+	ID                 string         `json:"id"`
 	Type               LessonType     `json:"type"`
 	Content            string         `json:"content"`
 	Tags               []string       `json:"tags"`
@@ -4343,9 +4342,9 @@ type Lesson struct {
 	// rather than a missing field — debugging the underlying NULL is easier when
 	// the field is visible.
 	Created           string  `json:"created"`
-	RetrievalPriority  float64    `json:"retrieval_priority,omitempty"`
-	Importance         float64    `json:"importance,omitempty"`
-	Confidence         float64    `json:"confidence,omitempty"`
+	RetrievalPriority float64 `json:"retrieval_priority,omitempty"`
+	Importance        float64 `json:"importance,omitempty"`
+	Confidence        float64 `json:"confidence,omitempty"`
 }
 
 // lessonsIsView reports whether the lessons object is a view (with
@@ -4369,7 +4368,7 @@ func (dm *DatabaseManager) lessonsIsView() bool {
 }
 
 // sourceSessionIDOrNil converts the empty string to a typed nil so the
-// INSERT writes NULL rather than '' to source_session_id. Without this,
+// INSERT writes NULL rather than ” to source_session_id. Without this,
 // the column holds an empty string and downstream scans treat it as
 // Valid=true (empty-string, not NULL) — a subtle silent-promotion class
 // where the NULL/empty distinction gets lost at the SQL boundary.
@@ -4384,7 +4383,7 @@ func sourceSessionIDOrNil(s string) interface{} {
 }
 
 // nullString converts an empty string to a typed nil so the INSERT writes
-// NULL rather than '' to a nullable TEXT column. This preserves the
+// NULL rather than ” to a nullable TEXT column. This preserves the
 // NULL/empty-string distinction at the SQL boundary.
 func nullString(s string) interface{} {
 	if s == "" {
@@ -4676,11 +4675,11 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 		// session id; we surface this as NULL (not empty-string) so the
 		// schema reflects the truth and downstream readers can rely on
 		// .Valid distinguishing "absent" from "explicitly empty".
-		SourceSessionID:    sql.NullString{String: sourceSessionID, Valid: sourceSessionID != ""},
-		Created:            now,
-		RetrievalPriority:  0.5,
-		Importance:         0.5,
-		Confidence:         InitialConfidence("lesson"),
+		SourceSessionID:   sql.NullString{String: sourceSessionID, Valid: sourceSessionID != ""},
+		Created:           now,
+		RetrievalPriority: 0.5,
+		Importance:        0.5,
+		Confidence:        InitialConfidence("lesson"),
 	}, nil
 }
 
@@ -4828,7 +4827,9 @@ func (dm *DatabaseManager) SearchLessons(query string, limit int) ([]*Lesson, er
 // LIKE on content and on each tag in the tags JSON array.
 //
 // alpha-4 ledger audit fix: the previous form was
-//   WHERE LOWER(content) LIKE ? OR LOWER(tags) LIKE ?
+//
+//	WHERE LOWER(content) LIKE ? OR LOWER(tags) LIKE ?
+//
 // which treats the JSON-encoded tags column as a string. The literal
 // `LOWER('["alpha","beta"]') LIKE '%alpha%'` does match, but only as
 // an accidental substring — the comparison misses tag queries against
@@ -5777,7 +5778,12 @@ func (dm *DatabaseManager) updateWorkStatus(id string, status WorkStatus) (*Work
 		return nil, fmt.Errorf("update work status: read current: %w", err)
 	}
 	if !isValidWorkTransition(current, status) {
-		return nil, fmt.Errorf("work state machine: invalid transition %s → %s for work %s", current, status, id)
+		// RUNTIME OUTCOME WIRING (2026-09-21): wrap ErrInvalidWorkTransition
+		// so callers + ClassifyError observe the typed sentinel. The
+		// underlying human-readable message is preserved (errors.As +
+		// errors.Is both still resolve here).
+		return nil, fmt.Errorf("%w: %s → %s for work %s",
+			ErrInvalidWorkTransition, current, status, id)
 	}
 
 	res, err := dm.db.Exec(`
@@ -6781,10 +6787,10 @@ func (dm *DatabaseManager) RetireGlobalRule(ruleID, reason string, confirm bool)
 		}
 		// Already retired — silent success, no audit row.
 		return map[string]interface{}{
-			"success":        true,
-			"rule_id":        ruleID,
+			"success":         true,
+			"rule_id":         ruleID,
 			"already_retired": true,
-			"retired_at":     existingRetired.Int64,
+			"retired_at":      existingRetired.Int64,
 		}, nil
 	}
 
@@ -7179,7 +7185,10 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 	// against concurrent AppendWorkEvent callers.
 	if newStatus != "" {
 		if !isValidWorkTransition(WorkStatus(currentStatus), WorkStatus(newStatus)) {
-			return nil, fmt.Errorf("work state machine: invalid transition %s → %s for work %s", currentStatus, newStatus, workID)
+			// RUNTIME OUTCOME WIRING (2026-09-21): typed sentinel wrap
+			// (companion site to the UpdateWorkStatus path above).
+			return nil, fmt.Errorf("%w: %s → %s for work %s",
+				ErrInvalidWorkTransition, currentStatus, newStatus, workID)
 		}
 	}
 
@@ -7371,10 +7380,10 @@ func (dm *DatabaseManager) RecordWorkArtifactProvenance(workID string, actorKind
 	if !res.Recorded {
 		tx.Rollback()
 		dm.LogAudit(AuditWarn, "provenance", "RecordWorkArtifactProvenance record failed", "", AuditContext{
-			"work_id":         workID,
-			"reason":          res.ValidationReason,
-			"sql_error":       res.SQLError,
-			"artifact_type":   "work",
+			"work_id":       workID,
+			"reason":        res.ValidationReason,
+			"sql_error":     res.SQLError,
+			"artifact_type": "work",
 		})
 		return
 	}
