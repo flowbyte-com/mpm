@@ -100,7 +100,7 @@ func TestMaterialization_GoldenFixture(t *testing.T) {
 	}
 
 	// Every output must be within detail budget.
-	require.LessOrEqual(t, res.Diagnostics.DetailCharsUsed, res.Diagnostics.DetailBudget,
+	require.LessOrEqual(t, res.Diagnostics.DetailBytesUsed, res.Diagnostics.DetailBudgetBytes,
 		"detail chars used must not exceed budget")
 	require.Equal(t, len(sel.Items), res.Diagnostics.SelectedInputCount,
 		"selected input count must match selection.Items length")
@@ -109,7 +109,7 @@ func TestMaterialization_GoldenFixture(t *testing.T) {
 
 	// No item should have arbitrary full content; detail is bounded.
 	for _, mi := range res.Items {
-		require.LessOrEqual(t, mi.DetailChars, HardMaterializationPerItemCap,
+		require.LessOrEqual(t, mi.DetailBytes, HardMaterializationPerItemCap,
 			"item detail must fit within hard per-item cap")
 	}
 }
@@ -131,17 +131,17 @@ func TestMaterialization_TinyBudget(t *testing.T) {
 	sel := SelectContextualCandidates(toCandidates(cands.Candidates), DefaultSelectionPolicy(), now)
 	require.NotEmpty(t, sel.Items)
 
-	// Deliberately tiny budget: 50 chars total, 20 chars per item.
+	// Deliberately tiny budget: 50 bytes total, 20 bytes per item.
 	res := MaterializeContextualSelection(sel, dm, MaterializationLimits{
-		DetailBudgetChars: 50,
-		PerItemCapChars:   20,
+		DetailBudgetBytes: 50,
+		PerItemByteCap:    20,
 	}, now)
 	require.NotEmpty(t, res.Items)
 	require.Equal(t, len(sel.Items), len(res.Items),
 		"tiny budget must NOT reduce item count — selected items remain pointer-accountable")
 
 	// Detail chars used must be <= budget.
-	require.LessOrEqual(t, res.Diagnostics.DetailCharsUsed, 50)
+	require.LessOrEqual(t, res.Diagnostics.DetailBytesUsed, 50)
 	// Some items must be pointer_only due to budget exhaustion.
 	hasPointerOnly := false
 	for _, mi := range res.Items {
@@ -184,16 +184,16 @@ func TestMaterialization_HugeArtifactCannotMonopolize(t *testing.T) {
 
 	// Per-item cap must apply even on huge content.
 	for _, mi := range res.Items {
-		require.LessOrEqual(t, mi.DetailChars, HardMaterializationPerItemCap)
+		require.LessOrEqual(t, mi.DetailBytes, HardMaterializationPerItemCap)
 		if mi.Kind == "memory" {
 			// The huge content (50_000 chars) MUST be bounded by the
 			// kind materializer (truncate(content, 400)) and MUST NOT
 			// monopolize the global budget.
-			require.LessOrEqual(t, mi.DetailChars, 800,
+			require.LessOrEqual(t, mi.DetailBytes, 800,
 				"huge memory detail must be bounded by the kind materializer")
 			// Bounded content size must be a tiny fraction of the
 			// original 50_000 chars.
-			require.Less(t, mi.DetailChars, 1000)
+			require.Less(t, mi.DetailBytes, 1000)
 		}
 	}
 }
@@ -428,8 +428,8 @@ func TestMaterialization_UTF8Truncation(t *testing.T) {
 
 	// Per-item cap of 5 runes; should truncate to a valid 5-rune prefix.
 	res := MaterializeContextualSelection(sel, dm, MaterializationLimits{
-		DetailBudgetChars: 5000,
-		PerItemCapChars:   5,
+		DetailBudgetBytes: 5000,
+		PerItemByteCap:    5,
 	}, now)
 
 	for _, mi := range res.Items {
@@ -489,12 +489,12 @@ func TestMaterialization_DiagnosticInvariants(t *testing.T) {
 	// selected_input_count == output_item_count.
 	require.Equal(t, res.Diagnostics.SelectedInputCount, res.Diagnostics.OutputItemCount)
 	// detail_chars_used <= detail_budget.
-	require.LessOrEqual(t, res.Diagnostics.DetailCharsUsed, res.Diagnostics.DetailBudget)
+	require.LessOrEqual(t, res.Diagnostics.DetailBytesUsed, res.Diagnostics.DetailBudgetBytes)
 
 	// ByStatus pre-zero for every canonical status.
 	for _, s := range []MaterializationStatus{
 		StatusMaterialized, StatusPointerOnly, StatusMissing,
-		StatusUnsupported, StatusError, StatusSkippedRepeat,
+		StatusUnsupported, StatusError,
 	} {
 		_, ok := res.Diagnostics.ByStatus[string(s)]
 		require.True(t, ok, "by_status must contain %s", s)
@@ -519,13 +519,13 @@ func TestMaterialization_DiagnosticInvariants(t *testing.T) {
 func TestMaterialization_DefaultsReasonableForProduction(t *testing.T) {
 	d := DefaultMaterializationLimits()
 	// Default total budget <= HardMaterializationDetailBudget.
-	require.LessOrEqual(t, d.DetailBudgetChars, HardMaterializationDetailBudget)
-	require.LessOrEqual(t, d.PerItemCapChars, HardMaterializationPerItemCap)
+	require.LessOrEqual(t, d.DetailBudgetBytes, HardMaterializationDetailBudget)
+	require.LessOrEqual(t, d.PerItemByteCap, HardMaterializationPerItemCap)
 	// 10 selected items × 800-char per-item cap = 8000, well above
 	// the 6000 default budget (so the budget IS the gating constraint,
 	// not the per-item cap).
-	require.Equal(t, 6000, d.DetailBudgetChars)
-	require.Equal(t, 800, d.PerItemCapChars)
+	require.Equal(t, 6000, d.DetailBudgetBytes)
+	require.Equal(t, 800, d.PerItemByteCap)
 }
 
 // ── T15. Pointer-only on missing read ──────────────────────
@@ -563,17 +563,77 @@ func TestMaterialization_PointerOnlyOnError(t *testing.T) {
 		"pointer envelope must remain even when detail fails")
 }
 
-// ── T16. ActivityGroupWindow collapses typed-equal events ────
-
-func TestMaterialization_ActivityGroupWindowCollapses(t *testing.T) {
+// ── T15b. Wake-context read-only size comparison (Section 43) ──
+//
+// Per the final clarifications: Stage 2E.2 size comparison MUST NOT
+// invoke the mutating wake-context path. We use
+// GatherWakeContextReadOnly (read-only) and prove before/after that
+// handoff read markers are unchanged.
+func TestMaterialization_WakeContextReadOnlySizeComparison(t *testing.T) {
 	dm := NewTestDM(t)
 	now := time.Now().Unix()
 	reset := pinTimeNowUnix(t, now)
 	defer reset()
 
-	// Build selected items where the SAME (tool, action,
-	// artifact_id) repeats. We construct SelectedItem directly to
-	// avoid relying on substrate state for this invariant.
+	// Seed enough substrate that a real wake-context payload
+	// produces a non-trivial measurement.
+	_, _, _, _, handoffID, _, _, _, _, _ := stage2DSeedContext(t, dm)
+	stage2DSeedActivity(t, dm)
+
+	// Snapshot handoff read state BEFORE.
+	var beforeBM int
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM session_handoffs WHERE read_at IS NOT NULL`).Scan(&beforeBM))
+
+	// Measure read-only wake-context size (does NOT mark handoff read).
+	wcData, err := dm.GatherWakeContextReadOnly()
+	require.NoError(t, err)
+	wcBytes := len([]byte(formatWakeContext(wcData)))
+
+	// Snapshot handoff read state AFTER wake-context measure.
+	var afterWCBM int
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM session_handoffs WHERE read_at IS NOT NULL`).Scan(&afterWCBM))
+	require.Equal(t, beforeBM, afterWCBM,
+		"GatherWakeContextReadOnly must not mutate handoff read markers")
+
+	// Generate materialization size for the same production state.
+	cands, err := dm.GenerateContextualCandidates(ContextQuery{
+		MPMSessionID:       "mpm-stage2d-session",
+		FrameworkSessionID: "fw-stage2d-session",
+		FrameworkName:      "openclaw",
+		WorkIDs:            []string{handoffID},
+	})
+	require.NoError(t, err)
+	sel := SelectContextualCandidates(toCandidates(cands.Candidates), DefaultSelectionPolicy(), now)
+	mat := MaterializeContextualSelection(sel, dm, DefaultMaterializationLimits(), now)
+	matBytes, _ := json.MarshalIndent(mat, "", "  ")
+	_ = matBytes
+
+	// Snapshot handoff read state AFTER materialization.
+	var afterMatBM int
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM session_handoffs WHERE read_at IS NOT NULL`).Scan(&afterMatBM))
+	require.Equal(t, beforeBM, afterMatBM,
+		"materialization must not mutate handoff read markers")
+
+	// Reportable comparison (printed, not asserted — Stage 2E.3
+	// decides delivery-envelope economics).
+	t.Logf("read-only wake context (formatWakeContext): %d bytes", wcBytes)
+	t.Logf("materialization (MaterializeContextualSelection): %d bytes serialized", len(matBytes))
+	t.Logf("materialization detail budget used: %d/%d bytes",
+		mat.Diagnostics.DetailBytesUsed, mat.Diagnostics.DetailBudgetBytes)
+}
+
+func TestMaterialization_OnePerSelectedActivity(t *testing.T) {
+	dm := NewTestDM(t)
+	now := time.Now().Unix()
+	reset := pinTimeNowUnix(t, now)
+	defer reset()
+
+	// Build four selected activity items with IDENTICAL summary
+	// (would have triggered grouping under the old contract).
+	// Stage 2E.2 final clarifications require 1 selected == 1 output.
 	mk := func(id string) SelectedItem {
 		return SelectedItem{
 			Candidate: Candidate{
@@ -591,25 +651,28 @@ func TestMaterialization_ActivityGroupWindowCollapses(t *testing.T) {
 		}
 	}
 	sel := SelectionResult{
-		Items: []SelectedItem{
-			mk("ev-1"), mk("ev-1"), mk("ev-1"), mk("ev-2"),
-		},
+		Items: []SelectedItem{mk("ev-1"), mk("ev-1"), mk("ev-1"), mk("ev-2")},
 	}
-
-	// Default grouping window=2: collapse runs >= 2.
 	res := MaterializeContextualSelection(sel, dm, DefaultMaterializationLimits(), now)
-	// Result length MUST equal input length — grouping must not reduce
-	// the selected count.
 	require.Equal(t, len(sel.Items), len(res.Items),
-		"selected count must be preserved")
-	// At least one item should carry the grouped_repeat status.
-	hasGrouped := false
+		"1 selected activity == 1 materialized output (no grouping)")
+	// Each output retains its own ArtifactID.
+	seen := map[string]bool{}
 	for _, mi := range res.Items {
-		if mi.Status == StatusSkippedRepeat {
-			hasGrouped = true
-		}
+		seen[mi.ArtifactID] = true
 	}
-	require.True(t, hasGrouped, "default grouping must produce at least one grouped_repeat item")
+	for _, id := range []string{"ev-1", "ev-1", "ev-1", "ev-2"} {
+		require.Contains(t, idsFor(t, seen), id)
+	}
+}
+
+func idsFor(t *testing.T, m map[string]bool) []string {
+	t.Helper()
+	out := []string{}
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 // ── Helpers ──────────────────────────────────────────────────

@@ -68,14 +68,11 @@ func handleContextualMaterialization(dm mpminternal.CoreDB, ac mpminternal.Activ
 	// Build limits from caller params (selection_limits + materialization_limits).
 	limits := mpminternal.DefaultMaterializationLimits()
 	if ml, ok := p["materialization_limits"].(map[string]interface{}); ok {
-		if v, ok := ml["detail_budget_chars"].(float64); ok && v > 0 {
-			limits.DetailBudgetChars = int(v)
+		if v, ok := ml["detail_budget_bytes"].(float64); ok && v > 0 {
+			limits.DetailBudgetBytes = int(v)
 		}
-		if v, ok := ml["per_item_cap_chars"].(float64); ok && v > 0 {
-			limits.PerItemCapChars = int(v)
-		}
-		if v, ok := ml["activity_group_window"].(float64); ok {
-			limits.ActivityGroupWindow = int(v)
+		if v, ok := ml["per_item_byte_cap"].(float64); ok && v > 0 {
+			limits.PerItemByteCap = int(v)
 		}
 	}
 	policy := mpminternal.DefaultSelectionPolicy()

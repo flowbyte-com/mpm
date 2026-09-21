@@ -47,66 +47,82 @@ import (
 // ── Public types ─────────────────────────────────────────────
 
 // MaterializationStatus is the closed vocabulary for the per-item
-// materialization outcome. statuses are mutually exclusive per item
-// except for `truncated` which is an orthogonal boolean.
+// materialization outcome. statuses are mutually exclusive per item.
+// `truncated` is an ORTHOGONAL boolean (see MaterializedContextItem);
+// it never appears as a status. The exact invariant:
+//
+//	materialized
+//	+ pointer_only
+//	+ missing
+//	+ unsupported
+//	+ error
+//	    == selected_input_count
+//
+// Every selected item is represented exactly once; grouping is not
+// performed by Stage 2E.2 (selected_input_count == output_item_count).
 type MaterializationStatus string
 
 const (
-	StatusMaterialized  MaterializationStatus = "materialized"
-	StatusPointerOnly   MaterializationStatus = "pointer_only"
-	StatusMissing       MaterializationStatus = "missing"
-	StatusUnsupported   MaterializationStatus = "unsupported"
-	StatusError         MaterializationStatus = "error"
-	StatusSkippedRepeat MaterializationStatus = "grouped_repeat"
+	StatusMaterialized MaterializationStatus = "materialized"
+	StatusPointerOnly  MaterializationStatus = "pointer_only"
+	StatusMissing      MaterializationStatus = "missing"
+	StatusUnsupported  MaterializationStatus = "unsupported"
+	StatusError        MaterializationStatus = "error"
 )
 
 // MaterializationLimits bounds the bounded detail budget.
-// All sizes are CHARACTER counts of the JSON-serialized detail
-// strings (deterministic, no tokenizer dependency).
+// All sizes are UTF-8 BYTE counts of the JSON-serialized Detail
+// strings (deterministic, no tokenizer dependency, no fake token
+// accounting). Truncation occurs only at valid UTF-8 codepoint
+// boundaries.
+//
+// The DETAIL budget governs only the materialized Detail field.
+// Selected metadata envelopes (kind/id/band/rationale/etc.) are NOT
+// budget-counted and are always retained. The total serialized
+// response size is reported separately for diagnostics.
 type MaterializationLimits struct {
-	// DetailBudgetChars is the total budget for the JSON-serialized
-	// detail strings across the whole result. Per-item selection of
+	// DetailBudgetBytes is the total budget for the byte-serialized
+	// Detail strings across the whole result. Per-item selection of
 	// pointer/band/rationale metadata is NOT counted against this
 	// budget — metadata always fits.
-	DetailBudgetChars int `json:"detail_budget_chars,omitempty"`
-	// PerItemCapChars caps any single item's detail length.
-	PerItemCapChars int `json:"per_item_cap_chars,omitempty"`
-	// ActivityGroupWindow is the number of consecutive selected
-	// activity items with identical (tool, action, artifact_id)
-	// that may be collapsed into one entry with a count suffix.
-	// 0 (default) disables grouping.
-	ActivityGroupWindow int `json:"activity_group_window,omitempty"`
+	DetailBudgetBytes int `json:"detail_budget_bytes,omitempty"`
+	// PerItemByteCap caps any single item's Detail length.
+	PerItemByteCap int `json:"per_item_byte_cap,omitempty"`
 }
 
 // DefaultMaterializationLimits returns the canonical Stage 2E.2
 // defaults. Tuned against current read_wake_context payload (~8 KB
 // total) and the production-selected count (10 items).
 //
-//   - DetailBudgetChars: 6000   (one Stage-2E.1 selection × compact per-kind detail)
-//   - PerItemCapChars:    800   (single artifact cannot monopolize)
-//   - ActivityGroupWindow: 2    (collapses repeated (tool, action, artifact_id))
+//   - DetailBudgetBytes: 6000   (one Stage-2E.1 selection × compact per-kind detail)
+//   - PerItemByteCap:    800    (single artifact cannot monopolize)
+//
+// Per-item cap is well below the global default so the global budget
+// IS the gating constraint, not the per-item cap.
 func DefaultMaterializationLimits() MaterializationLimits {
 	return MaterializationLimits{
-		DetailBudgetChars:   6000,
-		PerItemCapChars:     800,
-		ActivityGroupWindow: 2,
+		DetailBudgetBytes: 6000,
+		PerItemByteCap:    800,
 	}
 }
 
 // HardMaterializationLimits are the safety ceilings. Not overridable
-// from the public handler.
+// from the public handler. These are the maximum bounds the
+// materializer will accept; callers asking for larger bounds are
+// silently clamped.
 const (
 	HardMaterializationDetailBudget = 20000
 	HardMaterializationPerItemCap   = 4000
 )
 
 // MaterializedContextItem is one materialized output. Every item
-// retains the Stage-2E.1 selected metadata envelope (pointer/band/
-// rationale/why_now) so an agent can always follow the pointer.
-// Detail is bounded and may be empty when status is pointer_only or
-// missing. Truncated is orthogonal to status.
+// retains the Stage-2E.1 selected metadata envelope so an agent can
+// always follow the pointer. Detail is bounded and may be empty
+// when status is pointer_only / missing / unsupported / error.
+// Truncated is an orthogonal boolean describing whether the
+// Detail was shortened at the per-item cap.
 type MaterializedContextItem struct {
-	// ── Selected metadata envelope (always populated) ──
+	// ── Compact selection-reference envelope (always populated) ──
 	CandidateID          string                   `json:"candidate_id"` // kind:artifact_id
 	Kind                 string                   `json:"kind"`
 	ArtifactID           string                   `json:"artifact_id"`
@@ -115,20 +131,17 @@ type MaterializedContextItem struct {
 	Band                 string                   `json:"band"`
 	Rationale            string                   `json:"rationale"`
 	WhyNow               string                   `json:"why_now"`
-	SelectionReasons     []string                 `json:"selection_reasons,omitempty"`
 	LifecycleState       string                   `json:"lifecycle_state,omitempty"`
 	CombinationMatches   []string                 `json:"combination_matches,omitempty"`
 	CompressedRelatedIDs []string                 `json:"compressed_related_ids,omitempty"`
 	CompressionTriggers  []MaterializationTrigger `json:"compression_triggers,omitempty"`
-	// Summary is the bounded event summary carried by the Stage-2D
-	// generator (e.g. "mpm_memory.save"). Used by activity-grouping
-	// to detect typed-equal repetition.
-	Summary string `json:"summary,omitempty"`
+	ActorKind            string                   `json:"actor_kind,omitempty"`
+	FrameworkName        string                   `json:"framework_name,omitempty"`
 
 	// ── Materialization outcome ──
 	Status      MaterializationStatus `json:"status"`
 	Detail      string                `json:"detail,omitempty"`    // bounded safe representation
-	DetailChars int                   `json:"detail_chars"`        // len(Detail)
+	DetailBytes int                   `json:"detail_bytes"`        // len([]byte(Detail))
 	Truncated   bool                  `json:"truncated,omitempty"` // orthogonal to Status
 	Note        string                `json:"note,omitempty"`      // short status hint
 }
@@ -152,28 +165,27 @@ type MaterializationResult struct {
 // MaterializationDiagnostics captures the run metadata. All canonical
 // statuses / kinds pre-zero-registered.
 type MaterializationDiagnostics struct {
-	MaterializedAt         int64          `json:"materialized_at"`
-	SelectedInputCount     int            `json:"selected_input_count"`
-	OutputItemCount        int            `json:"output_item_count"`
-	DetailCharsUsed        int            `json:"detail_chars_used"`
-	DetailBudget           int            `json:"detail_budget"`
-	TruncatedItemCount     int            `json:"truncated_item_count"`
-	ReadsAttempted         int            `json:"reads_attempted"`
-	ReadsByKind            map[string]int `json:"reads_by_kind"`
-	ByStatus               map[string]int `json:"by_status"`
-	ByKind                 map[string]int `json:"by_kind"`
-	GroupedActivityRepeats int            `json:"grouped_activity_repeats"`
+	MaterializedAt       int64          `json:"materialized_at"`
+	SelectedInputCount   int            `json:"selected_input_count"`
+	OutputItemCount      int            `json:"output_item_count"`
+	DetailBytesUsed      int            `json:"detail_bytes_used"`
+	DetailBudgetBytes    int            `json:"detail_budget_bytes"`
+	TruncatedItemCount   int            `json:"truncated_item_count"`
+	ReadsAttempted       int            `json:"reads_attempted"`
+	ReadsByKind          map[string]int `json:"reads_by_kind"`
+	ByStatus             map[string]int `json:"by_status"`
+	ByKind               map[string]int `json:"by_kind"`
+	SerializedBytesTotal int            `json:"serialized_bytes_total"`
 }
 
 // ── Materializer entry ────────────────────────────────────────
 
 // preItem is the internal per-item record used by
 // MaterializeContextualSelection across PASS 1 (compact safe detail)
-// and PASS 2 (per-item cap + budget allocation). Kept package-local
-// so applyActivityGrouping can operate on it.
+// and PASS 2 (per-item cap + budget allocation). Kept package-local.
 type preItem struct {
 	item  MaterializedContextItem
-	chars int
+	bytes int
 }
 
 // MaterializeContextualSelection turns a Stage-2E.1 SelectionResult
@@ -194,24 +206,24 @@ func MaterializeContextualSelection(
 			Diagnostics: emptyDiag(now, limits, len(selection.Items)),
 		}
 	}
-	if limits.DetailBudgetChars <= 0 {
-		limits.DetailBudgetChars = DefaultMaterializationLimits().DetailBudgetChars
+	if limits.DetailBudgetBytes <= 0 {
+		limits.DetailBudgetBytes = DefaultMaterializationLimits().DetailBudgetBytes
 	}
-	if limits.PerItemCapChars <= 0 {
-		limits.PerItemCapChars = DefaultMaterializationLimits().PerItemCapChars
+	if limits.PerItemByteCap <= 0 {
+		limits.PerItemByteCap = DefaultMaterializationLimits().PerItemByteCap
 	}
-	if limits.DetailBudgetChars > HardMaterializationDetailBudget {
-		limits.DetailBudgetChars = HardMaterializationDetailBudget
+	if limits.DetailBudgetBytes > HardMaterializationDetailBudget {
+		limits.DetailBudgetBytes = HardMaterializationDetailBudget
 	}
-	if limits.PerItemCapChars > HardMaterializationPerItemCap {
-		limits.PerItemCapChars = HardMaterializationPerItemCap
+	if limits.PerItemByteCap > HardMaterializationPerItemCap {
+		limits.PerItemByteCap = HardMaterializationPerItemCap
 	}
 
 	// Pre-zero diagnostics.
 	byStatus := map[string]int{}
 	for _, s := range []MaterializationStatus{
 		StatusMaterialized, StatusPointerOnly, StatusMissing,
-		StatusUnsupported, StatusError, StatusSkippedRepeat,
+		StatusUnsupported, StatusError,
 	} {
 		byStatus[string(s)] = 0
 	}
@@ -224,64 +236,45 @@ func MaterializeContextualSelection(
 		readsByKind[k] = 0
 	}
 
-	// PASS 1: build compact safe detail for every item. Track each
-	// item's char length; track read counts; track activity grouping.
+	// PASS 1: build compact safe detail for every item. Each item
+	// produces exactly one output (1 selected == 1 output). No
+	// grouping is performed in Stage 2E.2.
 	pre := make([]preItem, 0, len(selection.Items))
 	readsAttempted := 0
-	groupedRepeats := 0
 	for _, sel := range selection.Items {
-		mi, reads, grouped := materializeOne(sel, dm, limits, now)
+		mi, reads := materializeOne(sel, dm, limits, now)
 		readsAttempted += reads
-		if grouped {
-			groupedRepeats++
-		}
-		pre = append(pre, preItem{item: mi, chars: utf8.RuneCountInString(mi.Detail)})
+		pre = append(pre, preItem{item: mi, bytes: len([]byte(mi.Detail))})
 		byStatus[string(mi.Status)]++
 		byKind[mi.Kind]++
 		readsByKind[mi.Kind] += reads
-	}
-
-	// PASS 1.5: deterministic activity repetition grouping. Items with
-	// the same Kind + identical (non-empty) Summary that appear in
-	// runs of N >= ActivityGroupWindow are collapsed: the first
-	// item keeps its position; subsequent items in the run are
-	// marked StatusSkippedRepeat and the first item's Detail
-	// gains a " ×N" suffix. Selected count is preserved (every
-	// selected item still appears in the output).
-	if limits.ActivityGroupWindow >= 2 {
-		pre = applyActivityGrouping(pre, limits.ActivityGroupWindow)
-		// Recount grouped_repeats and statuses after grouping pass.
-		for _, p := range pre {
-			byStatus[string(p.item.Status)]++
-			byKind[p.item.Kind]++
-		}
 	}
 
 	// PASS 2: apply per-item cap, then budget-capped detail allocation.
 	// Items that fit the per-item cap are kept verbatim; items that
 	// exceed it are truncated to the cap. Truncated items count
 	// toward the budget.
-	detailChars := 0
+	detailBytes := 0
 	truncatedCount := 0
 	output := make([]MaterializedContextItem, 0, len(pre))
 	for _, p := range pre {
 		// Per-item cap (deterministic rune-safe truncation).
 		item := p.item
-		chars := p.chars
-		if chars > limits.PerItemCapChars {
-			item.Detail = truncateRunes(item.Detail, limits.PerItemCapChars)
-			item.DetailChars = utf8.RuneCountInString(item.Detail)
+		b := p.bytes
+		if b > limits.PerItemByteCap {
+			item.Detail = truncateUTF8(item.Detail, limits.PerItemByteCap)
+			item.DetailBytes = len([]byte(item.Detail))
 			item.Truncated = true
 			truncatedCount++
-			chars = item.DetailChars
+			b = item.DetailBytes
 		}
 		// Budget enforcement: if remaining budget is exhausted, fall
 		// back to pointer-only. The selected metadata envelope is
 		// retained; only Detail is dropped.
-		if detailChars+chars > limits.DetailBudgetChars {
-			if chars > 0 {
+		if detailBytes+b > limits.DetailBudgetBytes {
+			if b > 0 {
 				item.Detail = ""
-				item.DetailChars = 0
+				item.DetailBytes = 0
 				if item.Status == StatusMaterialized {
 					item.Status = StatusPointerOnly
 					item.Note = "budget_exhausted"
@@ -289,26 +282,26 @@ func MaterializeContextualSelection(
 					byStatus[string(StatusPointerOnly)]++
 				}
 			}
-			chars = 0
+			b = 0
 		}
-		detailChars += chars
+		detailBytes += b
 		output = append(output, item)
 	}
 
 	return MaterializationResult{
 		Items: output,
 		Diagnostics: MaterializationDiagnostics{
-			MaterializedAt:         now,
-			SelectedInputCount:     len(selection.Items),
-			OutputItemCount:        len(output),
-			DetailCharsUsed:        detailChars,
-			DetailBudget:           limits.DetailBudgetChars,
-			TruncatedItemCount:     truncatedCount,
-			ReadsAttempted:         readsAttempted,
-			ReadsByKind:            readsByKind,
-			ByStatus:               byStatus,
-			ByKind:                 byKind,
-			GroupedActivityRepeats: groupedRepeats,
+			MaterializedAt:       now,
+			SelectedInputCount:   len(selection.Items),
+			OutputItemCount:      len(output),
+			DetailBytesUsed:      detailBytes,
+			DetailBudgetBytes:    limits.DetailBudgetBytes,
+			TruncatedItemCount:   truncatedCount,
+			ReadsAttempted:       readsAttempted,
+			ReadsByKind:          readsByKind,
+			ByStatus:             byStatus,
+			ByKind:               byKind,
+			SerializedBytesTotal: 0,
 		},
 	}
 }
@@ -317,7 +310,7 @@ func emptyDiag(now int64, limits MaterializationLimits, selected int) Materializ
 	byStatus := map[string]int{}
 	for _, s := range []MaterializationStatus{
 		StatusMaterialized, StatusPointerOnly, StatusMissing,
-		StatusUnsupported, StatusError, StatusSkippedRepeat,
+		StatusUnsupported, StatusError,
 	} {
 		byStatus[string(s)] = 0
 	}
@@ -330,25 +323,27 @@ func emptyDiag(now int64, limits MaterializationLimits, selected int) Materializ
 		readsByKind[k] = 0
 	}
 	return MaterializationDiagnostics{
-		MaterializedAt:     now,
-		SelectedInputCount: selected,
-		OutputItemCount:    0,
-		DetailBudget:       limits.DetailBudgetChars,
-		ReadsByKind:        readsByKind,
-		ByStatus:           byStatus,
-		ByKind:             byKind,
+		MaterializedAt:       now,
+		SelectedInputCount:   selected,
+		OutputItemCount:      0,
+		DetailBudgetBytes:    limits.DetailBudgetBytes,
+		ReadsByKind:          readsByKind,
+		ByStatus:             byStatus,
+		ByKind:               byKind,
+		SerializedBytesTotal: 0,
 	}
 }
 
 // materializeOne turns one SelectedItem into one MaterializedContextItem.
-// Returns (item, reads_attempted, grouped).
+// Returns (item, reads_attempted). One selected item is always one
+// materialized item; no grouping is performed.
 func materializeOne(
 	sel SelectedItem,
 	dm *DatabaseManager,
 	limits MaterializationLimits,
 	now int64,
-) (MaterializedContextItem, int, bool) {
-	// Always-populated envelope.
+) (MaterializedContextItem, int) {
+	// Compact selection-reference envelope (always populated).
 	mi := MaterializedContextItem{
 		CandidateID:          sel.Candidate.ID,
 		Kind:                 sel.Candidate.Kind,
@@ -358,11 +353,11 @@ func materializeOne(
 		Band:                 sel.Band,
 		Rationale:            string(sel.Rationale),
 		WhyNow:               sel.WhyNow,
-		SelectionReasons:     append([]string(nil), sel.SelectionReasons...),
 		LifecycleState:       sel.Candidate.LifecycleState,
 		CombinationMatches:   append([]string(nil), sel.CombinationMatches...),
 		CompressedRelatedIDs: append([]string(nil), sel.CompressedRelatedIDs...),
-		Summary:              sel.Candidate.Summary,
+		ActorKind:            sel.Candidate.ActorKind,
+		FrameworkName:        sel.Candidate.FrameworkName,
 	}
 	for _, t := range sel.CompressionTriggers {
 		mi.CompressionTriggers = append(mi.CompressionTriggers, MaterializationTrigger{
@@ -375,9 +370,6 @@ func materializeOne(
 	if mi.CombinationMatches == nil {
 		mi.CombinationMatches = []string{}
 	}
-	if mi.SelectionReasons == nil {
-		mi.SelectionReasons = []string{}
-	}
 	if mi.CompressedRelatedIDs == nil {
 		mi.CompressedRelatedIDs = []string{}
 	}
@@ -385,17 +377,7 @@ func materializeOne(
 		mi.CompressionTriggers = []MaterializationTrigger{}
 	}
 
-	// Activity grouping: the immediately previous output may have
-	// collapsed a sibling activity event with the same (tool, action,
-	// artifact_id). We collapse by appending the new artifact_id into
-	// the prior item's Detail suffix rather than emitting a second
-	// row. Grouping is handled at this layer (we can compare to
-	// previous via the caller's order). materializeOne itself only
-	// classifies and reads; the caller's wrap-up applies grouping
-	// across consecutive items.
-
 	reads := 0
-	grouped := false
 	switch sel.Candidate.Kind {
 	case "work":
 		mi.Status, mi.Detail, mi.Note = matWork(dm, sel.Candidate.ArtifactID, &reads)
@@ -416,15 +398,14 @@ func materializeOne(
 	case "scratchpad":
 		mi.Status, mi.Detail, mi.Note = matScratchpad(dm, sel.Candidate.ArtifactID, &reads)
 	case "activity":
-		mi.Status, mi.Detail, mi.Note = matActivity(dm, &sel.Candidate, &reads)
+		mi.Status, mi.Detail, mi.Note = matActivity(&sel.Candidate, &reads)
 	default:
 		mi.Status = StatusUnsupported
 		mi.Note = "kind_not_in_canonical_kinds"
 	}
-	mi.DetailChars = utf8.RuneCountInString(mi.Detail)
+	mi.DetailBytes = len([]byte(mi.Detail))
 	_ = limits
-	_ = grouped
-	return mi, reads, grouped
+	return mi, reads
 }
 
 // ── Kind-specific materializers ─────────────────────────────
@@ -629,27 +610,23 @@ func matScratchpad(dm *DatabaseManager, sessionID string, reads *int) (Materiali
 	return StatusMaterialized, detail, ""
 }
 
-func matActivity(dm *DatabaseManager, c *Candidate, reads *int) (MaterializationStatus, string, string) {
+func matActivity(c *Candidate, reads *int) (MaterializationStatus, string, string) {
 	if c == nil || c.ArtifactID == "" {
 		return StatusPointerOnly, "", "missing_id"
 	}
 	// RecentActivityEvent is already bounded and secret-safe; we
 	// do NOT issue a fresh read here. The candidate's Summary is
 	// the bounded event summary built by the Stage-2D activity
-	// source. We do not need a DB read — this counts as 0 reads
-	// to honour the "no repeated identical queries" guidance and
-	// because the relevant bounded facts are already on the
-	// candidate itself.
+	// source. This counts as 0 reads — the bounded facts are
+	// already on the candidate. Each selected activity item is
+	// emitted as its own output (1 selected == 1 output); no grouping.
 	_ = reads
-	_ = dm
 	actorKind := c.ActorKind
 	framework := c.FrameworkName
-	summary := truncate(c.Summary, 200)
-	detail := fmt.Sprintf("tool=%s; action=%s; actor=%s; framework=%s; summary=%s",
-		"", "", actorKind, framework, summary)
-	// The tool/action live on RecentActivityEvent, but we don't have
-	// that struct here. Surface what's on the candidate.
-	if actorKind == "" {
+	summary := truncateUTF8(c.Summary, 200)
+	detail := fmt.Sprintf("actor=%s; framework=%s; summary=%s",
+		actorKind, framework, summary)
+	if actorKind == "" && framework == "" {
 		detail = fmt.Sprintf("summary=%s", summary)
 	}
 	return StatusMaterialized, detail, ""
@@ -704,73 +681,29 @@ func float64Or(m map[string]interface{}, key string, fallback float64) float64 {
 	return fallback
 }
 
-// truncateRunes truncates s to at most maxRunes runes, never
-// splitting a UTF-8 codepoint. Returns s unchanged if it already
-// fits. Pure rune-safe.
-func truncateRunes(s string, maxRunes int) string {
-	if maxRunes <= 0 {
+// truncateUTF8 truncates s to at most maxBytes UTF-8 bytes, never
+// splitting a codepoint. Returns s unchanged if it already fits.
+// Pure rune-safe; returns valid UTF-8.
+func truncateUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 {
 		return ""
 	}
-	if utf8.RuneCountInString(s) <= maxRunes {
+	if len(s) <= maxBytes {
 		return s
 	}
-	out := make([]rune, 0, maxRunes)
-	for i, r := range s {
-		if i >= maxRunes {
-			break
-		}
-		out = append(out, r)
+	// Walk back from the cut to a UTF-8 rune boundary.
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
 	}
-	return string(out)
+	return s[:cut]
 }
 
-// applyActivityGrouping collapses runs of consecutive items where
-// Kind == "activity" and the first item's Summary equals the next
-// item's Summary. The first item keeps its position; subsequent
-// items become StatusSkippedRepeat. The first item's Detail gains a
-// " ×N" suffix so the count is observable in the output.
-//
-// Selection semantics are NOT changed: every input item still appears in
-// the output list (the output count equals input count).
-func applyActivityGrouping(in []preItem, window int) []preItem {
-	if window < 2 || len(in) < 2 {
-		return in
-	}
-	out := make([]preItem, len(in))
-	copy(out, in)
-	i := 0
-	for i < len(out) {
-		if out[i].item.Kind != "activity" || out[i].item.Summary == "" {
-			i++
-			continue
-		}
-		// Find run length.
-		j := i + 1
-		for j < len(out) && out[j].item.Kind == "activity" && out[j].item.Summary == out[i].item.Summary {
-			j++
-		}
-		runLen := j - i
-		if runLen >= window {
-			// Promote first item: append ×N suffix to Detail.
-			suffix := fmt.Sprintf(" (×%d)", runLen)
-			out[i].item.Detail = out[i].item.Detail + suffix
-			out[i].item.Note = fmt.Sprintf("grouped_%d_typed_equal", runLen)
-			out[i].chars = utf8.RuneCountInString(out[i].item.Detail)
-			// Mark subsequent items as grouped_repeat. Their
-			// Detail is dropped (collapsed so it doesn't pollute
-			// the budget) but their metadata envelope remains so
-			// the agent can still follow the pointer for any one.
-			for k := i + 1; k < j; k++ {
-				out[k].item.Status = StatusSkippedRepeat
-				out[k].item.Detail = ""
-				out[k].item.Note = fmt.Sprintf("collapsed_into_%s", out[i].item.ArtifactID)
-				out[k].chars = 0
-			}
-		}
-		i = j
-	}
-	return out
-}
+// applyActivityGrouping is REMOVED in Stage 2E.2 (final clarifications):
+// grouping is not performed at this layer. Each selected activity item
+// remains its own output row with a compact per-event representation.
+// Future context packaging can compress downstream without changing
+// 1 selected == 1 output cardinality here.
 
 // stableJoin is a deterministic string joiner. Used for predictable
 // downstream byte budgets.
