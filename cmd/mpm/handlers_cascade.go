@@ -21,9 +21,41 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
+	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/usererror"
 	"github.com/flowbyte-com/mpm/internal/scheduler"
 )
+
+// cascadeInvocationProvenance assembles the operator-side
+// correlation payload for foreground cascade materialize. The
+// invocation_id is taken from MPM_PROVENANCE_INVOCATION_ID
+// (if the caller supplied one) or generated fresh for this CLI
+// invocation; the framework session is read from
+// MPM_PROVENANCE_FRAMEWORK_SESSION_ID; mpm_session_id is read
+// from CurrentMPMSessionID (the canonical MPM-owned continuity
+// identity, empty when no session has been acquired yet). Empty
+// fields are stored as NULL by the audit path.
+func cascadeInvocationProvenance() *mpminternal.InvocationProvenance {
+	invID := os.Getenv("MPM_PROVENANCE_INVOCATION_ID")
+	if invID == "" {
+		invID = uuid.NewString()
+	}
+	fw := os.Getenv("MPM_PROVENANCE_FRAMEWORK")
+	if fw == "" {
+		fw = os.Getenv("MPM_FRAMEWORK")
+	}
+	if fw == "" {
+		fw = "mpm-cli"
+	}
+	return &mpminternal.InvocationProvenance{
+		InvocationID:      invID,
+		MPMSessionID:      mpminternal.CurrentMPMSessionID(),
+		FrameworkName:     fw,
+		FrameworkSessionID: os.Getenv("MPM_PROVENANCE_FRAMEWORK_SESSION_ID"),
+	}
+}
 
 // handleCascade is the top-level handler for `mpm cascade`.
 func handleCascade(args []string) int {
@@ -122,11 +154,17 @@ func handleCascadeMaterialize(args []string) int {
 	// lifecycle management. The CLI process owns one call sequence.
 	ctx := context.Background()
 
+	// OPERATIONAL AUDIT CORRELATION (2026-09-21): propagate the
+	// tool-originated provenance so system_audit_log rows emitted
+	// during materialize carry the same invocation_id / mpm_session_id
+	// / framework_*_id as the originating tool_invocations row.
+	prov := cascadeInvocationProvenance()
+
 	start := time.Now()
 
 	if *once {
 		// Run one batch and exit.
-		report, err := dm.MaterializeCascadeIntents(ctx, 10)
+		report, err := dm.MaterializeCascadeIntentsFor(ctx, 10, prov)
 		if err != nil {
 			usererror.Error("materialize batch: %v", err)
 			return 1
@@ -160,7 +198,7 @@ func handleCascadeMaterialize(args []string) int {
 		}
 
 		// Run one batch.
-		report, err := dm.MaterializeCascadeIntents(ctx, 10)
+		report, err := dm.MaterializeCascadeIntentsFor(ctx, 10, prov)
 		if err != nil {
 			usererror.Error("materialize batch: %v", err)
 			return 1

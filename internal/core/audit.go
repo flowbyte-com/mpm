@@ -142,6 +142,90 @@ func (dm *DatabaseManager) LogAudit(level AuditLevel, component, message, stack 
 	}
 }
 
+// LogAuditForInvocation is the tool-originated correlator. It writes
+// a system_audit_log row that carries the four identity columns
+// (invocation_id, mpm_session_id, framework_name,
+// framework_session_id) so a maintainer can join
+// system_audit_log against tool_invocations by invocation_id
+// without parsing prose.
+//
+// All four identity fields are optional: a background / daemon
+// invocation passes "" (or the field is genuinely empty when the
+// host has no native session) and the column is stored as NULL.
+// Empty strings are NEVER synthesised across columns. The
+// persisted NULL is the canonical "absent" state.
+//
+// eventCode is the bounded machine-readable identifier for the
+// operational failure. Empty when no stable code applies
+// (informational / non-failure audits). See internal/core/
+// tool_outcome.go for the bounded content-free contract.
+//
+// AuditContext is the existing free-form JSON blob for ad-hoc
+// debug fields (kept for backward compatibility); the new
+// correlation columns are typed and not in ctx.
+//
+// LogAuditForInvocation does NOT trigger audit-cluster detection
+// for AuditInfo rows (gating inherited from LogAudit).
+func (dm *DatabaseManager) LogAuditForInvocation(
+	level AuditLevel, component, message string,
+	invocationID, mpmSessionID, frameworkName, frameworkSessionID, eventCode string,
+	ctx AuditContext,
+) {
+	if dm == nil || dm.db == nil {
+		return
+	}
+	if level != AuditInfo && level != AuditWarn && level != AuditError && level != AuditFatal && level != AuditCritical {
+		fmt.Fprintf(os.Stderr, "audit: invalid level %q, skipping\n", level)
+		return
+	}
+	// LogAudit captures the stack when stack==""; this variant
+	// doesn't take a stack param — the audit row is emitted from
+	// background context, so the cost of capturing runtime.Stack
+	// is justified here too.
+	stack := string(debug.Stack())
+	var ctxJSON sql.NullString
+	if ctx != nil {
+		if b, err := json.Marshal(ctx); err == nil {
+			ctxJSON = sql.NullString{String: string(b), Valid: true}
+		}
+	}
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	if _, err := dm.db.Exec(
+		`INSERT INTO system_audit_log
+		    (id, level, component, message, stack_trace, context, created_at,
+		     invocation_id, mpm_session_id, framework_name,
+		     framework_session_id, event_code)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		GenerateID(), string(level), component, message,
+		sql.NullString{String: truncateStack(stack, 4000), Valid: true},
+		ctxJSON, now,
+		nullStrForAudit(invocationID),
+		nullStrForAudit(mpmSessionID),
+		nullStrForAudit(frameworkName),
+		nullStrForAudit(frameworkSessionID),
+		nullStrForAudit(eventCode),
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "audit insert failed: %v (level=%s component=%s)\n", err, level, component)
+		return
+	}
+	// Same gating as LogAudit: info events do not trigger cluster.
+	if level != AuditInfo {
+		if err := dm.upsertClusterCounter(component, message, now); err != nil {
+			fmt.Fprintf(os.Stderr, "audit cluster upsert failed: %v (component=%s) — raw event preserved; will retry on next event\n", err, component)
+		}
+	}
+}
+
+// nullStrForAudit: empty-string -> SQL NULL. Mirrors the cmd/mpm
+// audit_hook helper but lives in core so any subsystem can call
+// LogAuditForInvocation without importing cmd/mpm.
+func nullStrForAudit(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 // LogSkillWorkshopAudit writes a deliberate state-mutation audit row for
 // workshop outcomes. Never blocks the caller on insert failure — the
 // workshop outcome has already been decided and returned; the audit is

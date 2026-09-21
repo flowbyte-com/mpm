@@ -3124,7 +3124,21 @@ func (dm *DatabaseManager) NewCascadeMaterializer(opts CascadeMaterializerOption
 // mpm-scheduler; there is no shared long-lived materializer on
 // DatabaseManager.
 func (dm *DatabaseManager) MaterializeCascadeIntents(ctx context.Context, limit int) (MaterializationReport, error) {
-	return dm.NewCascadeMaterializer(DefaultCascadeMaterializerOptions()).MaterializeBatch(ctx, limit)
+	return dm.MaterializeCascadeIntentsFor(ctx, limit, nil)
+}
+
+// MaterializeCascadeIntentsFor is the tool-originated correlator for
+// foreground cascade materialize calls. Passing prov=nil is
+// equivalent to MaterializeCascadeIntents (background-style audit
+// rows with NULL correlation). Passing prov writes system_audit_log
+// rows that share invocation_id / mpm_session_id / framework_*_id
+// with the originating tool_invocations row.
+func (dm *DatabaseManager) MaterializeCascadeIntentsFor(
+	ctx context.Context, limit int, prov *InvocationProvenance,
+) (MaterializationReport, error) {
+	opts := DefaultCascadeMaterializerOptions()
+	opts.InvocationProvenance = prov
+	return dm.NewCascadeMaterializer(opts).MaterializeBatch(ctx, limit)
 }
 
 // ==================== CRUD OPERATIONS ====================

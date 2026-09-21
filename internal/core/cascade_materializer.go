@@ -60,6 +60,38 @@ type CascadeMaterializerOptions struct {
 	// scheduled after a successful materialization. Default 1 second.
 	// Set to 0 to disable.
 	WakeDelay time.Duration
+	// InvocationProvenance is OPTIONAL. When set, any system_audit_log
+	// row written while servicing a tool-originated cascade call carries
+	// the four identity columns (invocation_id, mpm_session_id,
+	// framework_name, framework_session_id) so a maintainer can JOIN
+	// tool_invocations against system_audit_log on invocation_id.
+	// Leave nil for background / scheduler invocations where no caller
+	// dispatch exists; the audit rows emit NULL correlation columns
+	// per the documented background-event policy.
+	InvocationProvenance *InvocationProvenance
+}
+
+// InvocationProvenance is the carrier for tool-originated audit
+// correlation. It mirrors the four identity columns on
+// system_audit_log so the same correlation triple can travel
+// through any subsystem that emits audit events from inside a tool
+// dispatch. Empty-string fields are stored as NULL — never
+// synthesised (the persist invariant documented on the audit hooks).
+type InvocationProvenance struct {
+	// InvocationID — required when populated. Empty when the host has
+	// no caller dispatch (background).
+	InvocationID string
+	// MPMSessionID — MPM-owned continuity identity. Empty when no
+	// active MPM session (fresh workspace).
+	MPMSessionID string
+	// FrameworkName — host framework that initiated the dispatch
+	// ("mpm-cli", "mcp", "opencode", …). Empty only for
+	// background-only events.
+	FrameworkName string
+	// FrameworkSessionID — host-owned native session ID. Empty when
+	// the host provides no native session (Pi, Hermes without
+	// hooks). Never synthesised.
+	FrameworkSessionID string
 }
 
 // DefaultCascadeMaterializerOptions returns the standard option set.
@@ -77,6 +109,12 @@ func DefaultCascadeMaterializerOptions() CascadeMaterializerOptions {
 type CascadeMaterializer struct {
 	dm   *DatabaseManager
 	opts CascadeMaterializerOptions
+	// prov carries the optional tool-originated correlation triple
+	// so every audit row emitted while servicing the dispatch can
+	// be joined back to tool_invocations by invocation_id.
+	// Captured at construction time so concurrent materializers do
+	// not race on a shared mutable cell.
+	prov *InvocationProvenance
 }
 
 // NewCascadeMaterializer builds a stateless materializer bound to the
@@ -99,6 +137,10 @@ func NewCascadeMaterializer(dm *DatabaseManager, opts CascadeMaterializerOptions
 	return &CascadeMaterializer{
 		dm:   dm,
 		opts: opts,
+		// prov is read-only after construction; safe for concurrent
+		// callers because each caller instantiates its own materializer
+		// (CLI / scheduler / drill each hold their own pointer).
+		prov: opts.InvocationProvenance,
 	}
 }
 
@@ -189,7 +231,7 @@ func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent Cascade
 	// Defensive contract: check downstream first, before the depth guard,
 	// so a stale-target intent costs almost nothing when rejected.
 	if skip, reason := cm.downstreamNotLive(intent); skip {
-		cm.dm.LogAudit(AuditInfo, "cascade-materializer",
+		cm.auditFor(AuditInfo, "cascade-materializer",
 			fmt.Sprintf("cascade intent %s skipped: downstream %s is no longer live (%s)",
 				intent.ID, intent.DownstreamArtifactID, reason),
 			"", AuditContext{
@@ -200,9 +242,9 @@ func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent Cascade
 				"skip_reason":            reason,
 			})
 		if err := cm.markFailed(intent.ID, "downstream no longer live: "+reason); err != nil {
-			cm.dm.LogAudit(AuditError, "cascade-materializer",
+			cm.auditFor(AuditError, "cascade-materializer",
 				fmt.Sprintf("failed to mark stale-downstream intent %s as failed: %v",
-					intent.ID, err), "", nil)
+					intent.ID, err), "cascade_state_transition_failed", nil)
 		}
 		return resultSuppressed
 	}
@@ -212,10 +254,10 @@ func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent Cascade
 	// Intents at depth > MaxCascadeDepth are suppressed and produce a
 	// CRITICAL audit record.
 	if intent.CascadeDepth > cm.opts.MaxCascadeDepth {
-		cm.dm.LogAudit(AuditCritical, "cascade-materializer",
+		cm.auditFor(AuditCritical, "cascade-materializer",
 			fmt.Sprintf("cascade intent %s suppressed: cascade_depth=%d exceeds MaxCascadeDepth=%d (intent targets downstream=%s)",
 				intent.ID, intent.CascadeDepth, cm.opts.MaxCascadeDepth, intent.DownstreamArtifactID),
-			"", AuditContext{
+			"cascade_depth_exceeded", AuditContext{
 				"intent_id":              intent.ID,
 				"dead_artifact_id":       intent.DeadArtifactID,
 				"dead_artifact_type":     intent.DeadArtifactType,
@@ -226,8 +268,8 @@ func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent Cascade
 			})
 
 		if err := cm.markFailed(intent.ID, "depth exceeded MaxCascadeDepth"); err != nil {
-			cm.dm.LogAudit(AuditError, "cascade-materializer",
-				fmt.Sprintf("failed to mark suppressed intent %s as failed: %v", intent.ID, err), "", nil)
+			cm.auditFor(AuditError, "cascade-materializer",
+				fmt.Sprintf("failed to mark suppressed intent %s as failed: %v", intent.ID, err), "cascade_state_transition_failed", nil)
 		}
 		return resultSuppressed
 	}
@@ -240,8 +282,8 @@ func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent Cascade
 
 	// ── Mark materialized ────────────────────────────────────────────────────
 	if err := cm.markMaterialized(intent.ID, theoryID); err != nil {
-		cm.dm.LogAudit(AuditError, "cascade-materializer",
-			fmt.Sprintf("failed to mark intent %s as materialized (theory=%s): %v", intent.ID, theoryID, err), "", nil)
+		cm.auditFor(AuditError, "cascade-materializer",
+			fmt.Sprintf("failed to mark intent %s as materialized (theory=%s): %v", intent.ID, theoryID, err), "cascade_state_transition_failed", nil)
 	}
 
 	// ── Schedule cascade wake ────────────────────────────────────────────────
@@ -253,16 +295,16 @@ func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent Cascade
 	if cm.opts.WakeDelay > 0 {
 		time.AfterFunc(cm.opts.WakeDelay, func() {
 			if err := cm.scheduleCascadeWake(intent.ID, theoryID, intent.InvalidationEventID); err != nil {
-				cm.dm.LogAudit(AuditError, "cascade-materializer",
+				cm.auditFor(AuditError, "cascade-materializer",
 					fmt.Sprintf("failed to schedule cascade wake for intent=%s theory=%s: %v",
-						intent.ID, theoryID, err), "", nil)
+						intent.ID, theoryID, err), "cascade_wake_schedule_failed", nil)
 			}
 		})
 	} else {
 		if err := cm.scheduleCascadeWake(intent.ID, theoryID, intent.InvalidationEventID); err != nil {
-			cm.dm.LogAudit(AuditError, "cascade-materializer",
+			cm.auditFor(AuditError, "cascade-materializer",
 				fmt.Sprintf("failed to schedule cascade wake for intent=%s theory=%s: %v",
-					intent.ID, theoryID, err), "", nil)
+					intent.ID, theoryID, err), "cascade_wake_schedule_failed", nil)
 		}
 	}
 
@@ -276,10 +318,10 @@ func (cm *CascadeMaterializer) handleMaterializeError(intent CascadeIntent, err 
 
 	if newAttempt >= cm.opts.MaxRetries {
 		// Terminal dead-letter state: emit CRITICAL audit and move to 'failed'.
-		cm.dm.LogAudit(AuditCritical, "cascade-materializer",
+		cm.auditFor(AuditCritical, "cascade-materializer",
 			fmt.Sprintf("cascade intent %s entered dead-letter state after %d attempts: %v",
 				intent.ID, newAttempt, err),
-			"", AuditContext{
+			"cascade_dead_letter", AuditContext{
 				"intent_id":              intent.ID,
 				"dead_artifact_id":       intent.DeadArtifactID,
 				"downstream_artifact_id": intent.DownstreamArtifactID,
@@ -288,8 +330,8 @@ func (cm *CascadeMaterializer) handleMaterializeError(intent CascadeIntent, err 
 			})
 
 		if markErr := cm.markFailed(intent.ID, err.Error()); markErr != nil {
-			cm.dm.LogAudit(AuditError, "cascade-materializer",
-				fmt.Sprintf("failed to mark intent %s as dead-letter: %v", intent.ID, markErr), "", nil)
+			cm.auditFor(AuditError, "cascade-materializer",
+				fmt.Sprintf("failed to mark intent %s as dead-letter: %v", intent.ID, markErr), "cascade_state_transition_failed", nil)
 		}
 		return resultFailed
 	}
@@ -299,8 +341,8 @@ func (cm *CascadeMaterializer) handleMaterializeError(intent CascadeIntent, err 
 	nextRetry := time.Now().Unix() + backoffSeconds
 
 	if requeueErr := cm.requeueIntent(intent.ID, newAttempt, nextRetry); requeueErr != nil {
-		cm.dm.LogAudit(AuditError, "cascade-materializer",
-			fmt.Sprintf("failed to requeue intent %s (attempt %d): %v", intent.ID, newAttempt, requeueErr), "", nil)
+		cm.auditFor(AuditError, "cascade-materializer",
+			fmt.Sprintf("failed to requeue intent %s (attempt %d): %v", intent.ID, newAttempt, requeueErr), "cascade_requeue_failed", nil)
 	}
 
 	return resultSkipped
@@ -847,4 +889,29 @@ func strSliceToInterface(ss []string) []interface{} {
 		out[i] = s
 	}
 	return out
+}
+
+// auditFor is the cascading audit emitter for tool-originated
+// operational events. It wraps LogAuditForInvocation so every
+// audit row written by this materializer automatically carries
+// the four identity columns (invocation_id, mpm_session_id,
+// framework_name, framework_session_id) supplied at
+// construction time. Background / scheduler callers leave
+// InvocationProvenance=nil and the audit row gets NULL correlation,
+// which is the documented background-event contract.
+//
+// eventCode is the bounded machine-readable identifier for the
+// operational failure. Empty when the path has no stable code
+// (background-only skip / info-only records).
+func (cm *CascadeMaterializer) auditFor(level AuditLevel, component, message string, eventCode string, ctx AuditContext) {
+	if cm.prov == nil {
+		// Background path — no caller dispatch. Fall back to plain
+		// LogAudit; correlation columns stay NULL.
+		cm.dm.LogAudit(level, component, message, "", ctx)
+		return
+	}
+	cm.dm.LogAuditForInvocation(level, component, message,
+		cm.prov.InvocationID, cm.prov.MPMSessionID,
+		cm.prov.FrameworkName, cm.prov.FrameworkSessionID,
+		eventCode, ctx)
 }
