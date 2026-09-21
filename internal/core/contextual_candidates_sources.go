@@ -337,21 +337,21 @@ func addEpistemicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc 
 			a.timestamp = computedAt
 			switch trigger {
 			case "supersede":
+				currentID := artifactID
+				currentKind := artifactType
 				addReason(a, ReasonFoundationSuperseded)
-				// Look up the canonical successor from
-				// memories.metadata.superseded_by so the
-				// supersede chain is preserved as a
-				// related_id (audit history).
-				if artifactType == "theory" {
-					var successor sql.NullString
-					if err := dm.db.QueryRow(
-						`SELECT json_extract(metadata, '$.superseded_by')
-						   FROM memories WHERE id = ? AND collection = 'theories'`,
-						artifactID,
-					).Scan(&successor); err == nil && successor.Valid && successor.String != "" {
-						addRelated(a, successor.String)
-					}
-				}
+				// Walk the supersession chain from the
+				// current (historical) artifact through
+				// successors until a non-superseded
+				// canonical endpoint is reached. Each
+				// chain member is emitted as its own
+				// candidate with appropriate lifecycle
+				// state and supersession_chain reason so
+				// Stage 2E.1's compressSupersessionChain
+				// can fire mechanically. Defensive:
+				// bounded, cycle-safe, missing-successor
+				// safe.
+				walkSupersessionChain(dm, acc, currentID, currentKind)
 			case "invalidate":
 				addReason(a, ReasonFoundationInvalidated)
 			case "evidence_added", "evidence_updated":
@@ -404,6 +404,115 @@ func addEpistemicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc 
 
 	_ = q
 	return considered, emitted
+}
+
+// maxSupersessionChainDepth bounds the number of hops a single
+// confidence_history supersede trigger can drive through the
+// metadata.superseded_by pointer chain. Authoritative chains are
+// expected to terminate in 1-3 hops; the bound exists to
+// guarantee termination under cycles and malformed state.
+const maxSupersessionChainDepth = 8
+
+// walkSupersessionChain emits the canonical successor of an
+// authoritative supersede chain as its own candidate, marks the
+// predecessor as historical, attaches supersession_chain reasons,
+// and walks multi-hop chains A->B->C until the canonical endpoint.
+//
+// The predecessor `a` has already been emitted by the caller; this
+// helper:
+//  1. reads metadata.superseded_by for the predecessor,
+//  2. synthesizes the successor candidate if not already present,
+//  3. marks the predecessor's lifecycle_state="historical" and
+//     adds ReasonSupersessionChain,
+//  4. walks forward through intermediate superseded successors
+//     until a non-superseded endpoint (canonical) or a
+//     defensive bound is reached.
+//
+// Defensive behavior:
+//   - missing successor: stops without fabricating a candidate
+//   - cycle: detected via visited-set, stops
+//   - malformed metadata: returns silently
+//   - cross-kind successor: skips (only same-kind chains)
+func walkSupersessionChain(dm *DatabaseManager, acc map[string]*candidateAccumulator, startID, startKind string) {
+	if startID == "" || acc == nil {
+		return
+	}
+	visited := map[string]bool{startID: true}
+	currentID := startID
+	currentKind := startKind
+
+	for hop := 0; hop < maxSupersessionChainDepth; hop++ {
+		var successor sql.NullString
+		var succCollection sql.NullString
+		err := dm.db.QueryRow(
+			`SELECT json_extract(metadata, '$.superseded_by'),
+			        collection
+			   FROM memories
+			   WHERE id = ?`, currentID,
+		).Scan(&successor, &succCollection)
+		if err != nil || !successor.Valid || successor.String == "" {
+			return
+		}
+		nextID := successor.String
+		// Cross-kind: only theories / decisions support the
+		// supersession chain contract today. Stop walking.
+		// The decision contract is structurally identical
+		// but not exercised in this pass.
+		nextKind := currentKind
+		if succCollection.Valid && succCollection.String != "" {
+			nextKind = canonicalArtifactKind(succCollection.String)
+			if nextKind != currentKind {
+				return
+			}
+		}
+		// Cycle detection.
+		if visited[nextID] {
+			return
+		}
+		visited[nextID] = true
+
+		// Mark the current artifact as historical; add chain
+		// reason. The predecessor was already emitted by the
+		// caller on the first iteration; intermediate
+		// predecessors are emitted here.
+		cur := ensureCandidate(acc, currentKind, currentID)
+		cur.lifecycleState = "historical"
+		addReason(cur, ReasonSupersessionChain)
+
+		// Defensive: confirm the successor actually exists as
+		// a memory row before synthesizing it as a candidate.
+		// A broken pointer (metadata.superseded_by references a
+		// non-existent artifact) must NOT fabricate a canonical
+		// successor. The historical predecessor remains
+		// observable (with its RelatedID intact for audit);
+		// only the canonical synthesis step is skipped.
+		var nextExists bool
+		if err := dm.db.QueryRow(
+			`SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?)`, nextID,
+		).Scan(&nextExists); err != nil || !nextExists {
+			return
+		}
+
+		// Synthesize the successor as its own candidate.
+		next := ensureCandidate(acc, nextKind, nextID)
+		if next.lifecycleState == "" {
+			next.lifecycleState = "canonical"
+		}
+		next.pointer = pointerForKind(nextKind, nextID)
+		addReason(next, ReasonSupersessionChain)
+		markSource(next, "epistemic")
+		// Bidirectional related link: predecessor -> successor,
+		// successor -> predecessor. The first link was already
+		// recorded on the predecessor; we mirror it on the
+		// successor so Stage 2E.1 chain walk has both ends.
+		addRelated(cur, nextID)
+		addRelated(next, currentID)
+
+		// Continue walking if the successor is itself
+		// superseded (multi-hop chain).
+		currentID = nextID
+		currentKind = nextKind
+	}
 }
 
 func canonicalArtifactKind(t string) string {

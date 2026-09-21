@@ -728,10 +728,27 @@ func compressSupersessionChain(candidates []Candidate) ([]Candidate, map[string]
 	for _, id := range ids {
 		adj[dense[id]] = adj[dense[id]][:0]
 	}
+	// Build a reverse lookup for bare-id → kind-prefixed-id so
+	// RelatedIDs carrying the bare artifact id (the legacy
+	// contract used by the explicit_reference source and the
+	// supersession successor chain) can still resolve against
+	// chain participants keyed as "kind:id".
+	bare := make(map[string]int, len(ids))
+	for fullID, d := range dense {
+		// Strip leading "<kind>:" prefix if present.
+		if i := strings.IndexByte(fullID, ':'); i > 0 {
+			bare[fullID[i+1:]] = d
+		}
+	}
 	for i, id := range ids {
 		c := candidates[idxByID[id]]
 		for _, rel := range c.RelatedIDs {
 			if j, ok := dense[rel]; ok {
+				adj[i] = append(adj[i], j)
+				adj[j] = append(adj[j], i)
+				continue
+			}
+			if j, ok := bare[rel]; ok {
 				adj[i] = append(adj[i], j)
 				adj[j] = append(adj[j], i)
 			}

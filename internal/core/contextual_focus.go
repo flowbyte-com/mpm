@@ -368,8 +368,8 @@ func (dm *DatabaseManager) gatherActiveWorkIDs() []string {
 //   - MPMSessionID:        CurrentMPMSessionID()
 //   - FrameworkSessionID:  MPM_PROVENANCE_FRAMEWORK_SESSION_ID env
 //   - FrameworkName:       MPM_PROVENANCE_FRAMEWORK env (canonical
-//                          provenance framework name; with fallback
-//                          MPM_FRAMEWORK for legacy adapter support)
+//     provenance framework name; with fallback
+//     MPM_FRAMEWORK for legacy adapter support)
 //   - WorkIDs:             active open work IDs (gatherActiveWorkIDs)
 //
 // It does NOT synthesize QueryText, TopicIDs, or ArtifactIDs

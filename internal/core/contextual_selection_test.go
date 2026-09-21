@@ -193,7 +193,14 @@ func TestSelection_CombinationReachability_Stage2D(t *testing.T) {
 	require.True(t, found,
 		"Stage 2D must produce a candidate carrying explicit_reference combined with a foundation/cascade reason")
 
-	// Run the selector and verify the combination rule fires.
+	// Run the selector and verify the combination rule fires
+	// somewhere — either on the survivor itself, or on a
+	// compressed predecessor via SelectionTrigger.Stage 2D
+	// supersession repair (commit fixing the cross-agent
+	// continuity defect) means the predecessor T-stage2d-superseded
+	// is now compressed into its canonical successor
+	// T-stage2d-active; the predecessor's combination-match name
+	// travels via the successor's compression_triggers.
 	candidates := make([]Candidate, 0, len(res.Candidates))
 	for _, c := range res.Candidates {
 		candidates = append(candidates, c)
@@ -201,8 +208,24 @@ func TestSelection_CombinationReachability_Stage2D(t *testing.T) {
 	policy := DefaultSelectionPolicy()
 	policy.Limits.MaxItems = 50
 	sel := SelectContextualCandidates(candidates, policy, now)
-	require.NotEmpty(t, sel.Diagnostics.CombinationMatches,
-		"selector must report at least one combination match for the seeded fixture")
+
+	foundCombo := len(sel.Diagnostics.CombinationMatches) > 0
+	if !foundCombo {
+		for _, it := range sel.Items {
+			for _, trig := range it.CompressionTriggers {
+				if trig.CombinationName != "" {
+					foundCombo = true
+					break
+				}
+			}
+			if foundCombo {
+				break
+			}
+		}
+	}
+	require.True(t, foundCombo,
+		"selector must report at least one combination match — either on a survivor "+
+			"or on a compressed predecessor via SelectionTrigger")
 }
 
 // ── T4. Supersession compression ──

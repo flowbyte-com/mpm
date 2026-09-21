@@ -307,59 +307,80 @@ func TestCrossAgentContinuity_CanonicalScenario(t *testing.T) {
 
 	// 4.4 — Critical canonical facts recoverable from focus.
 	//
-	// The canonical Stage 2E.3 contract surfaces the work objective,
-	// the unread handoff, and the overdue wake directly. The current
-	// foundation theory is recovered via the superseded predecessor's
-	// `superseded_by` tag pointer (Agent B follows the pointer using
-	// mpm_resolve / mpm_memory show). The current decision is
-	// recovered through the wake's epistemic cascade.
+	// After the Stage 2D supersession-chain repair (commit fixing
+	// the cross-agent continuity defect), the canonical Stage 2E.3
+	// contract surfaces:
+	//   - the work objective
+	//   - the unread handoff
+	//   - the overdue wake
+	//   - the CURRENT CANONICAL THEORY (T-active), not the
+	//     superseded predecessor. The predecessor is compressed
+	//     into the canonical successor via CompressedRelatedIDs;
+	//     its policy importance travels via CompressionTriggers
+	//     on the canonical successor.
 	//
 	// Acceptance §4.4 verifies the routing pipeline delivers
-	// structurally relevant awareness. Whether the active successor
-	// also surfaces as its own item is a Stage 2E.1 selector
-	// policy decision (chain-compression strength), not a
-	// continuity-acceptance failure.
+	// structurally relevant awareness with the CURRENT canonical
+	// state as the primary artifact.
 	focus := data.ContextualFocus.Items
 	byArtifact := map[string]mpminternal.ContextualFocusItem{}
 	for _, it := range focus {
 		byArtifact[it.ArtifactID] = it
 	}
 	mustSurface := []string{
-		ids.workID,    // work objective — direct obligation
-		ids.handoffID, // unread handoff — continuity
-		ids.wakeID,    // overdue wake — obligation
+		ids.workID,           // work objective — direct obligation
+		ids.handoffID,        // unread handoff — continuity
+		ids.wakeID,           // overdue wake — obligation
+		ids.activeTheoryID,   // CURRENT canonical theory (supersession invariant)
 	}
 	for _, must := range mustSurface {
 		if _, ok := byArtifact[must]; !ok {
 			t.Errorf("contextual_focus missing canonical artifact %s", must)
 		}
 	}
-	// 4.5 — Superseded predecessor MUST surface with `change` band
-	// so the agent knows the supersession happened. The active
-	// successor pointer is encoded in the superseded item's tags /
-	// detail; Agent B follows it via mpm_memory show.
-	supersededItem, hasSuperseded := byArtifact[ids.supersededID]
-	if !hasSuperseded {
-		t.Errorf("superseded predecessor %s must surface with change band",
-			ids.supersededID)
-	} else {
-		// Verify the supersede pointer is reachable.
-		found := false
-		for _, it := range focus {
-			if it.ArtifactID == ids.activeTheoryID {
-				found = true
+	// 4.5 — Hard gate: the canonical successor T-active MUST be the
+	// primary delivered artifact for the supersession chain. The
+	// superseded predecessor T-superseded must NOT be delivered as
+	// its own focus item — it travels via CompressedRelatedIDs /
+	// CompressionTriggers on the canonical successor.
+	if supersededItem, leaked := byArtifact[ids.supersededID]; leaked {
+		t.Errorf("supersession hard gate: superseded predecessor %s leaked "+
+			"as its own focus item; canonical successor %s should be "+
+			"the primary artifact",
+			supersededItem.ArtifactID, ids.activeTheoryID)
+	}
+	if active, hasActive := byArtifact[ids.activeTheoryID]; hasActive {
+		// Active successor must carry compressed related IDs
+		// pointing at the historical predecessor. Note that
+		// CompressedRelatedIDs uses the kind-prefixed form
+		// ("theory:<id>") while SelectionTriggers.SourceID uses
+		// the same form.
+		wantPredecessorKey := "theory:" + ids.supersededID
+		foundCompressed := false
+		for _, rid := range active.CompressedRelatedIDs {
+			if rid == wantPredecessorKey {
+				foundCompressed = true
 				break
 			}
 		}
-		if !found {
-			// The superseded item should carry the successor reference
-			// in its detail or as a pointer Agent B can follow.
-			if !strings.Contains(supersededItem.Detail, ids.activeTheoryID) &&
-				len(supersededItem.Pointer) == 0 {
-				t.Errorf("superseded predecessor must carry successor pointer; "+
-					"detail=%q pointer=%q",
-					supersededItem.Detail, supersededItem.Pointer)
+		if !foundCompressed {
+			t.Errorf("canonical successor must carry %s in CompressedRelatedIDs; "+
+				"got %v",
+				wantPredecessorKey, active.CompressedRelatedIDs)
+		}
+		// At least one compression trigger must record the
+		// predecessor's policy importance.
+		hasTrigger := false
+		for _, trig := range active.SelectionTriggers {
+			if trig.SourceID == wantPredecessorKey {
+				hasTrigger = true
+				break
 			}
+		}
+		if !hasTrigger {
+			t.Errorf("canonical successor must carry %s in SelectionTriggers; "+
+				"got %v",
+				wantPredecessorKey, active.SelectionTriggers)
 		}
 	}
 
