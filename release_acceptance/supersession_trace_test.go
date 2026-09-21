@@ -97,13 +97,13 @@ func TestTraceSupersessionPipeline(t *testing.T) {
 			continue
 		}
 		b, _ := json.MarshalIndent(map[string]interface{}{
-			"candidate_id":      it.CandidateID,
-			"artifact_id":        it.ArtifactID,
-			"kind":               it.Kind,
-			"status":             it.Status,
-			"detail":             it.Detail,
+			"candidate_id":         it.CandidateID,
+			"artifact_id":          it.ArtifactID,
+			"kind":                 it.Kind,
+			"status":               it.Status,
+			"detail":               it.Detail,
 			"compression_triggers": it.CompressionTriggers,
-			"compressed_related": it.CompressedRelatedIDs,
+			"compressed_related":   it.CompressedRelatedIDs,
 		}, "", "  ")
 		t.Logf("\n%s", string(b))
 	}

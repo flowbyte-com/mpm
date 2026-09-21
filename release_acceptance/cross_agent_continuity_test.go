@@ -220,7 +220,10 @@ func TestCrossAgentContinuity_CanonicalScenario(t *testing.T) {
 	}
 
 	// ── Phase 1: Agent A writes the canonical scenario.
-	dmA, errA := mpminternal.NewDatabaseManager(""); if errA != nil { t.Fatalf("NewDatabaseManager: %v", errA) }
+	dmA, errA := mpminternal.NewDatabaseManager("")
+	if errA != nil {
+		t.Fatalf("NewDatabaseManager: %v", errA)
+	}
 	if err := dmA.InitSchema(); err != nil {
 		t.Fatalf("InitSchema: %v", err)
 	}
@@ -244,7 +247,10 @@ func TestCrossAgentContinuity_CanonicalScenario(t *testing.T) {
 	// DatabaseManager (Agent B's process).
 	dmA.Close()
 
-	dmB, errB := mpminternal.NewDatabaseManager(""); if errB != nil { t.Fatalf("NewDatabaseManager: %v", errB) }
+	dmB, errB := mpminternal.NewDatabaseManager("")
+	if errB != nil {
+		t.Fatalf("NewDatabaseManager: %v", errB)
+	}
 	defer dmB.Close()
 
 	// After reopen, durable state must be exactly preserved.
@@ -328,10 +334,10 @@ func TestCrossAgentContinuity_CanonicalScenario(t *testing.T) {
 		byArtifact[it.ArtifactID] = it
 	}
 	mustSurface := []string{
-		ids.workID,           // work objective — direct obligation
-		ids.handoffID,        // unread handoff — continuity
-		ids.wakeID,           // overdue wake — obligation
-		ids.activeTheoryID,   // CURRENT canonical theory (supersession invariant)
+		ids.workID,         // work objective — direct obligation
+		ids.handoffID,      // unread handoff — continuity
+		ids.wakeID,         // overdue wake — obligation
+		ids.activeTheoryID, // CURRENT canonical theory (supersession invariant)
 	}
 	for _, must := range mustSurface {
 		if _, ok := byArtifact[must]; !ok {
@@ -425,11 +431,17 @@ func TestCrossAgentContinuity_HandoffDelivery(t *testing.T) {
 		mpmSessionB: "mpm-handoff-B",
 	}
 
-	dmA, errA := mpminternal.NewDatabaseManager(""); if errA != nil { t.Fatalf("NewDatabaseManager: %v", errA) }
+	dmA, errA := mpminternal.NewDatabaseManager("")
+	if errA != nil {
+		t.Fatalf("NewDatabaseManager: %v", errA)
+	}
 	seedAgentACanonical(t, dmA, ids)
 	dmA.Close()
 
-	dmB, errB := mpminternal.NewDatabaseManager(""); if errB != nil { t.Fatalf("NewDatabaseManager: %v", errB) }
+	dmB, errB := mpminternal.NewDatabaseManager("")
+	if errB != nil {
+		t.Fatalf("NewDatabaseManager: %v", errB)
+	}
 	defer dmB.Close()
 
 	// First delivery.
@@ -466,12 +478,18 @@ func TestCrossAgentContinuity_ProcessRestart(t *testing.T) {
 		mpmSessionB: "mpm-restart-B",
 	}
 
-	dmA, errA := mpminternal.NewDatabaseManager(""); if errA != nil { t.Fatalf("NewDatabaseManager: %v", errA) }
+	dmA, errA := mpminternal.NewDatabaseManager("")
+	if errA != nil {
+		t.Fatalf("NewDatabaseManager: %v", errA)
+	}
 	seedAgentACanonical(t, dmA, ids)
 	dmA.Close()
 
 	// Brand-new DatabaseManager — Agent B's process.
-	dmB, errB := mpminternal.NewDatabaseManager(""); if errB != nil { t.Fatalf("NewDatabaseManager: %v", errB) }
+	dmB, errB := mpminternal.NewDatabaseManager("")
+	if errB != nil {
+		t.Fatalf("NewDatabaseManager: %v", errB)
+	}
 	defer dmB.Close()
 
 	data, err := dmB.GatherWakeContextReadOnly()
@@ -491,7 +509,10 @@ func TestCrossAgentContinuity_FutureWakeUnaffected(t *testing.T) {
 	_, cleanup := makeAcceptanceWorkspace(t)
 	defer cleanup()
 
-	dmA, errA := mpminternal.NewDatabaseManager(""); if errA != nil { t.Fatalf("NewDatabaseManager: %v", errA) }
+	dmA, errA := mpminternal.NewDatabaseManager("")
+	if errA != nil {
+		t.Fatalf("NewDatabaseManager: %v", errA)
+	}
 	now := time.Now().Unix()
 	// Direct work first.
 	_, err := dmA.SQLDB().Exec(`
@@ -511,7 +532,10 @@ func TestCrossAgentContinuity_FutureWakeUnaffected(t *testing.T) {
 	}
 	dmA.Close()
 
-	dmB, errB := mpminternal.NewDatabaseManager(""); if errB != nil { t.Fatalf("NewDatabaseManager: %v", errB) }
+	dmB, errB := mpminternal.NewDatabaseManager("")
+	if errB != nil {
+		t.Fatalf("NewDatabaseManager: %v", errB)
+	}
 	defer dmB.Close()
 	data, err := dmB.GatherWakeContextReadOnly()
 	if err != nil {
@@ -537,11 +561,17 @@ func TestCrossAgentContinuity_SessionIdentityProvenance(t *testing.T) {
 		mpmSessionB: "mpm-sess-B",
 	}
 
-	dmA, errA := mpminternal.NewDatabaseManager(""); if errA != nil { t.Fatalf("NewDatabaseManager: %v", errA) }
+	dmA, errA := mpminternal.NewDatabaseManager("")
+	if errA != nil {
+		t.Fatalf("NewDatabaseManager: %v", errA)
+	}
 	seedAgentACanonical(t, dmA, ids)
 	dmA.Close()
 
-	dmB, errB := mpminternal.NewDatabaseManager(""); if errB != nil { t.Fatalf("NewDatabaseManager: %v", errB) }
+	dmB, errB := mpminternal.NewDatabaseManager("")
+	if errB != nil {
+		t.Fatalf("NewDatabaseManager: %v", errB)
+	}
 	defer dmB.Close()
 
 	data, err := dmB.GatherWakeContextReadOnly()
@@ -572,11 +602,17 @@ func TestCrossAgentContinuity_PointerFollowing(t *testing.T) {
 		mpmSessionB: "mpm-pointer-B",
 	}
 
-	dmA, errA := mpminternal.NewDatabaseManager(""); if errA != nil { t.Fatalf("NewDatabaseManager: %v", errA) }
+	dmA, errA := mpminternal.NewDatabaseManager("")
+	if errA != nil {
+		t.Fatalf("NewDatabaseManager: %v", errA)
+	}
 	seedAgentACanonical(t, dmA, ids)
 	dmA.Close()
 
-	dmB, errB := mpminternal.NewDatabaseManager(""); if errB != nil { t.Fatalf("NewDatabaseManager: %v", errB) }
+	dmB, errB := mpminternal.NewDatabaseManager("")
+	if errB != nil {
+		t.Fatalf("NewDatabaseManager: %v", errB)
+	}
 	defer dmB.Close()
 
 	data, err := dmB.GatherWakeContextReadOnly()
@@ -622,7 +658,10 @@ func TestCrossAgentContinuity_NoRoutingPersistence(t *testing.T) {
 		mpmSessionB: "mpm-persist-B",
 	}
 
-	dmA, errA := mpminternal.NewDatabaseManager(""); if errA != nil { t.Fatalf("NewDatabaseManager: %v", errA) }
+	dmA, errA := mpminternal.NewDatabaseManager("")
+	if errA != nil {
+		t.Fatalf("NewDatabaseManager: %v", errA)
+	}
 	seedAgentACanonical(t, dmA, ids)
 	before := snapshotCounts(t, dmA, []string{
 		"works", "memories", "lessons", "session_handoffs",
@@ -630,7 +669,10 @@ func TestCrossAgentContinuity_NoRoutingPersistence(t *testing.T) {
 	})
 	dmA.Close()
 
-	dmB, errB := mpminternal.NewDatabaseManager(""); if errB != nil { t.Fatalf("NewDatabaseManager: %v", errB) }
+	dmB, errB := mpminternal.NewDatabaseManager("")
+	if errB != nil {
+		t.Fatalf("NewDatabaseManager: %v", errB)
+	}
 	defer dmB.Close()
 
 	if _, err := dmB.GatherWakeContextReadOnly(); err != nil {
@@ -661,11 +703,17 @@ func TestCrossAgentContinuity_ReopenDatabaseReadOnlyFromFilePath(t *testing.T) {
 		mpmSessionB: "mpm-reopen-B",
 	}
 
-	dmA, errA := mpminternal.NewDatabaseManager(""); if errA != nil { t.Fatalf("NewDatabaseManager: %v", errA) }
+	dmA, errA := mpminternal.NewDatabaseManager("")
+	if errA != nil {
+		t.Fatalf("NewDatabaseManager: %v", errA)
+	}
 	seedAgentACanonical(t, dmA, ids)
 	dmA.Close()
 
-	dmB, errB := mpminternal.NewDatabaseManager(""); if errB != nil { t.Fatalf("NewDatabaseManager: %v", errB) }
+	dmB, errB := mpminternal.NewDatabaseManager("")
+	if errB != nil {
+		t.Fatalf("NewDatabaseManager: %v", errB)
+	}
 	defer dmB.Close()
 
 	// Confirm Agent B's wake context exposes the work ID across
