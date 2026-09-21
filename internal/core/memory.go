@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/flowbyte-com/mpm-core/config"
 	"encoding/hex"
+	"github.com/flowbyte-com/mpm-core/config"
 )
 
 // NOTE: All code in this file connects through the shared DatabaseManager
@@ -210,6 +210,13 @@ var validTableNames = map[string]bool{
 	"works":               true,
 	"work_events":         true,
 	"capabilities":        true,
+	// OBSERVABILITY FOUNDATION (2026-09-21): allowlisted for the
+	// SafeMigration entries that add the outcome_class /
+	// outcome_code columns on tool_invocations and the correlation
+	// columns on system_audit_log. MemoryStore.addColumnIfNotExists
+	// would otherwise reject the SafeMigrations list and break init.
+	"tool_invocations": true,
+	"system_audit_log": true,
 }
 
 // addColumnIfNotExists adds a column to a table if it doesn't already exist.
@@ -1294,13 +1301,13 @@ func (s *MemoryStore) appendBlockedAttempt(content, reason, attemptType string) 
 
 	digest := sha256.Sum256([]byte(content))
 	logEntry := map[string]interface{}{
-		"timestamp":       time.Now().UTC().Format(time.RFC3339),
-		"reason":          reason,
-		"pattern_family":  family,
-		"content_sha256":  hex.EncodeToString(digest[:]),
-		"content_length":  len(content),
-		"action":          "blocked",
-		"type":            attemptType,
+		"timestamp":      time.Now().UTC().Format(time.RFC3339),
+		"reason":         reason,
+		"pattern_family": family,
+		"content_sha256": hex.EncodeToString(digest[:]),
+		"content_length": len(content),
+		"action":         "blocked",
+		"type":           attemptType,
 	}
 
 	data, _ := json.Marshal(logEntry)

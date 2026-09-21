@@ -645,7 +645,7 @@ var BaseTables = []string{
 // connection: every reference write goes through *DatabaseManager, which
 // holds the unified *sql.DB shared with the rest of MPM.
 //
-// content uses TEXT NOT NULL DEFAULT '' so callers that do not store the
+// content uses TEXT NOT NULL DEFAULT ” so callers that do not store the
 // full source text (the common case for streaming ingest) don't have to
 // supply it explicitly. Older AddReference paths that wrote nothing into
 // content would otherwise fail on the NOT NULL column.
@@ -867,11 +867,36 @@ var CommonIndexes = []string{
 		message     TEXT NOT NULL,
 		stack_trace TEXT,
 		context     JSON,
-		created_at  INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+		created_at  INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		-- OBSERVABILITY FOUNDATION (2026-09-21): optional correlation
+		-- columns. All four are nullable:
+		--   invocation_id        — present when the event was caused by
+		--                          a tool dispatch; absent for scheduler
+		--                          and other daemon-intrinsic events.
+		--   mpm_session_id        — present when the originating
+		--                          interaction has one; absent when fresh
+		--                          workspace (per documented invariant #3).
+		--   framework_name        — host framework that initiated (CLI
+		--                          arms mpm-cli, MCP arms mcp).
+		--   framework_session_id  — host-owned native session ID; NULL
+		--                          when host provides none (Pi, Hermes
+		--                          without hooks). NEVER synthesized
+		--                          from any other field.
+		invocation_id        TEXT,
+		mpm_session_id        TEXT,
+		framework_name        TEXT,
+		framework_session_id  TEXT,
+		-- event_code is the bounded machine-readable identifier for the
+		-- operational event (e.g. db_integrity_failure,
+		-- fts_schema_missing). Empty for legacy rows. Bounded to
+		-- ASCII identifiers by contract; no SQL, paths, or payloads.
+		event_code           TEXT
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_level_created ON system_audit_log(level, created_at);`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_component ON system_audit_log(component);`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_created ON system_audit_log(created_at);`,
+	`CREATE INDEX IF NOT EXISTS idx_audit_invocation ON system_audit_log(invocation_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_audit_event_code ON system_audit_log(event_code);`,
 
 	// audit_cluster_proposals: detector rows for error clusters. A cluster
 	// is (component, message_hash). When the same error fires
@@ -1136,7 +1161,18 @@ var CommonIndexes = []string{
 		duration_ms          INTEGER,
 		error_message        TEXT,
 		mpm_session_id       TEXT,
-		framework_session_id TEXT
+		framework_session_id TEXT,
+		-- outcome_class is a closed enum from internal.ToolOutcomeClass.
+		-- NULL on legacy rows: the historical classification is unknown
+		-- rather than guessed. The reader treats empty string and NULL
+		-- the same way (legacy / unclassified).
+		outcome_class        TEXT,
+		-- outcome_code is a bounded subtype inside the class.
+		-- Empty when outcome_class IS NULL or = 'ok'. The CHECK only
+		-- enforces a vocabulary on outcome_class; codes are free-form
+		-- within their class but must be ASCII identifiers by caller
+		-- contract (see internal.ToolOutcome for the contract).
+		outcome_code         TEXT
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_tool_invocations_session
 		ON tool_invocations(session_id, started_at DESC);`,
@@ -1148,6 +1184,11 @@ var CommonIndexes = []string{
 		ON tool_invocations(mpm_session_id, completed_at DESC);`,
 	`CREATE INDEX IF NOT EXISTS idx_tool_invocations_framework_session
 		ON tool_invocations(framework_session_id, completed_at DESC);`,
+	// Outcomes index: powers "give me all errors by outcome_class this
+	// hour" without scanning the whole table. Composite on (tool_name,
+	// outcome_class, started_at) so Doctor can scope by tool too.
+	`CREATE INDEX IF NOT EXISTS idx_tool_invocations_outcome
+		ON tool_invocations(tool_name, outcome_class, started_at DESC);`,
 
 	// idx_provenance_parent_invocation: powers the agent invocation
 	// tree reconstruction query (WHERE parent_invocation_id = ?).
@@ -1249,17 +1290,17 @@ var SafeMigrations = [][3]string{
 	{"raw_memories", "next_retry", "TEXT"},
 	{"raw_memories", "attempt", "INTEGER DEFAULT 0"},
 	{"memories", "retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
-	{"memories", "importance",         "REAL NOT NULL DEFAULT 0.5"},
-	{"memories", "confidence",         "REAL NOT NULL DEFAULT 0.8"},
+	{"memories", "importance", "REAL NOT NULL DEFAULT 0.5"},
+	{"memories", "confidence", "REAL NOT NULL DEFAULT 0.8"},
 	// is_global marks rows that originated as shared (cross-agent) rules.
 	// Local writes always set 0; shared writes (via record_global_rule or
 	// promote_to_global in Phase 3) set 1. The shared DB schema mirrors
 	// the local DB so this migration is applied to both via attachShared.
-	{"memories", "is_global",          "INTEGER NOT NULL DEFAULT 0"},
-	{"lessons",  "retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
+	{"memories", "is_global", "INTEGER NOT NULL DEFAULT 0"},
+	{"lessons", "retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
 	{"memories", "last_synthesized_at", "INTEGER"},
-	{"lessons",  "importance",         "REAL NOT NULL DEFAULT 0.5"},
-	{"lessons",  "confidence",         "REAL NOT NULL DEFAULT 0.7"},
+	{"lessons", "importance", "REAL NOT NULL DEFAULT 0.5"},
+	{"lessons", "confidence", "REAL NOT NULL DEFAULT 0.7"},
 	// Note: 2026-09-10 lesson lifecycle fix adds a deleted_at tombstone
 	// to lessons_base. The column is added inline during
 	// migrateLessonsToView (line 2443 area) for fresh DBs and via a
@@ -1269,13 +1310,13 @@ var SafeMigrations = [][3]string{
 	// deliberately absent here.
 	{"reference_docs", "import_reason", "TEXT"},
 	{"reference_chunks", "content_hash", "TEXT"},
-	{"reference_chunks", "embedding",     "BLOB"},
+	{"reference_chunks", "embedding", "BLOB"},
 	// dependencies: JSON array of artifact IDs that this theory depends on
 	// (forward edges: theory -> memory/lesson/theory). Populated only on
 	// collection='theories' rows. FireStaleFoundationWakes scans this column
 	// on memory delete to detect "foundational rotted, theory orphaned".
 	// Format: JSON array of strings, e.g. ["mem-abc","les-def"].
-	{"memories", "dependencies",       "TEXT"},
+	{"memories", "dependencies", "TEXT"},
 
 	// work_events migration (Phase 2 work primitive v2):
 	// migrated_at tracks which works rows have been seeded with initial created events.
@@ -1297,7 +1338,33 @@ var SafeMigrations = [][3]string{
 	// min(now - last_accrued_at, process_uptime) so wall-clock time spent
 	// with no mpm process alive cannot leak into runtime.
 	{"memories", "runtime_seconds_since_access", "INTEGER NOT NULL DEFAULT 0"},
-	{"memories", "runtime_last_accrued_at",      "INTEGER"},
+	{"memories", "runtime_last_accrued_at", "INTEGER"},
+
+	// OBSERVABILITY FOUNDATION (2026-09-21): outcome classification on
+	// tool_invocations. The base CREATE TABLE above adds the columns on
+	// fresh databases; these SafeMigrations entries cover existing DBs.
+	// outcome_class is a closed enum from internal.ToolOutcomeClass
+	// (ok|validation|not_found|conflict|degraded|substrate|integration|
+	//  timeout|internal). outcome_code is a bounded subtype within the
+	// class — empty when outcome_class is NULL or 'ok'. Application code
+	// NEVER infers a class from error_message regex at write time (see
+	// internal.ClassifyError rationale in tool_outcome.go).
+	//
+	// The compound index for outcome reads is handled by CommonIndexes
+	// (CREATE INDEX IF NOT EXISTS) so it does not appear here.
+	{"tool_invocations", "outcome_class", "TEXT"},
+	{"tool_invocations", "outcome_code", "TEXT"},
+
+	// OBSERVABILITY FOUNDATION (2026-09-21): correlation columns on
+	// system_audit_log. All four columns are optional; absence is
+	// semantically meaningful (scheduler events have no invocation_id;
+	// Pi has no framework_session_id; fresh workspaces have no
+	// mpm_session_id).
+	{"system_audit_log", "invocation_id", "TEXT"},
+	{"system_audit_log", "mpm_session_id", "TEXT"},
+	{"system_audit_log", "framework_name", "TEXT"},
+	{"system_audit_log", "framework_session_id", "TEXT"},
+	{"system_audit_log", "event_code", "TEXT"},
 
 	// Part 1 — global rule retire surface. NULL = active, non-NULL = retired
 	// timestamp. Soft state transition that preserves the audit row for

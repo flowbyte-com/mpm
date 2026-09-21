@@ -72,16 +72,36 @@ func recordToolInvocation(
 		errorMessage = err.Error()
 	}
 
+	// nullStr: empty-string -> SQL NULL guard (mirrors cmd/mpm/audit_hook.go).
+	nullStr := func(s string) interface{} {
+		if s == "" {
+			return nil
+		}
+		return s
+	}
+
+	// OBSERVABILITY FOUNDATION (2026-09-21): populate the four
+	// identity columns that the new schema added. The CLI writer
+	// already does this; the MCP writer historically dropped
+	// mpm_session_id and framework_session_id, leaving MCP rows
+	// uncorrelated with the active MPM/host session. The persist
+	// invariant (mpm_session_id is MPM-owned and never synthesized
+	// from session_id; framework_session_id is host-owned and
+	// never synthesized from mpm_session_id) is preserved — both
+	// columns are NULL when the caller did not supply a value.
 	_, auditErr := dm.SQLDB().Exec(`
 		INSERT INTO tool_invocations
 		    (id, session_id, tool_name, action, invocation_id,
 		     actor_kind, framework_name, payload_hash, result_status,
-		     started_at, completed_at, duration_ms, error_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		     started_at, completed_at, duration_ms, error_message,
+		     mpm_session_id, framework_session_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, sessionID, toolName, action, invocationID,
 		actorKind, frameworkName, sha256OfPayload(payload), resultStatus,
 		startedAt.Unix(), completedAt.Unix(), completedAt.Sub(startedAt).Milliseconds(),
 		errorMessage,
+		nullStr(ac.MPMSessionID),
+		nullStr(ac.FrameworkSessionID),
 	)
 	if auditErr != nil {
 		slog.Warn("audit insert failed", "tool", toolName, "err", auditErr.Error())
