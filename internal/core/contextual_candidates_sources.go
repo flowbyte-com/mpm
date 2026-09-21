@@ -230,11 +230,13 @@ func addActivityCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc m
 		case "human":
 			addReason(a, ReasonRecentHumanChange)
 		default:
-			if ev.FrameworkName == "" {
-				addReason(a, ReasonProvenanceUnknown)
-			} else {
-				addReason(a, ReasonUnknownSourceChange)
-			}
+			// Actor kind is "unknown" (EffectiveActorKind returns this
+			// only when framework_name is non-empty AND not a known
+			// agent framework). The empty-framework case cannot
+			// reach here — that combination normalizes to "human"
+			// upstream — so the live vocabulary records only
+			// ReasonUnknownSourceChange.
+			addReason(a, ReasonUnknownSourceChange)
 		}
 		// If the event has an artifact id, link it as related.
 		if ev.ArtifactID != "" {

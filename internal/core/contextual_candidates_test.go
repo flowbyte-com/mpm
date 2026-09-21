@@ -1095,13 +1095,34 @@ func TestStage2D1_SupersessionCanonical(t *testing.T) {
 		"T-B RelatedIDs must include the historical predecessor T-A")
 }
 
-// ── 2D.1-W7: Reason reachability ──────────────────────────────────────
-
+// ── 2D.1-W7: Reason reachability (registry-completeness) ─────────────
+//
+// Strengthened contract: every DECLARED CandidateReasonName must be
+// reachable through SOME Stage-2D generator path from authoritative
+// fixture state. The test mechanically iterates the registry (via
+// allCandidateReasonNames) and asserts each declared name appears
+// in candidate Reasons output. A phantom reason (declared but with
+// no generator emitter) makes this test fail with the declared
+// name listed as unreachable.
+//
+// The fixture stage2DSeedReachabilityExtras seeds the seven
+// previously under-asserted-but-real reasons:
+//
+//   - shares_topic            (topic_memberships row + TopicIDs)
+//   - foundation_invalidated  (confidence_history invalidate trigger)
+//   - confidence_changed      (confidence_history decay_tick trigger)
+//   - evidence_added          (confidence_history evidence_added trigger)
+//   - cascade_resolved        (epistemic_cascade_outbox materialized)
+//   - recent_human_change     (tool_invocations actor_kind=human,
+//                              non-agent framework)
+//   - unknown_source_change   (tool_invocations non-human/agent actor
+//                              with non-empty unrecognized framework)
 func TestStage2D1_ReasonReachability(t *testing.T) {
 	dm := NewTestDM(t)
 	// Seed the broadest possible fixture so every source has data.
 	stage2DSeedContext(t, dm)
 	stage2DSeedActivity(t, dm)
+	stage2DSeedReachabilityExtras(t, dm)
 	// Inject a future wake to surface unresolved_wake.
 	now := time.Now().Unix()
 	_, err := dm.SQLDB().Exec(`
@@ -1115,54 +1136,179 @@ func TestStage2D1_ReasonReachability(t *testing.T) {
 		FrameworkSessionID: "fw-stage2d-session",
 		FrameworkName:      "openclaw",
 		WorkIDs:            []string{"W-stage2d-1"},
+		TopicIDs:           []string{"topic-reach-1"},
 		ArtifactIDs:        []string{"W-stage2d-1", "T-stage2d-superseded"},
 	})
 	require.NoError(t, err)
 
 	// Walk every candidate and collect reasons actually emitted.
-	emitted := map[string]bool{}
+	emitted := map[string]int{}
 	for _, c := range res.Candidates {
 		for _, r := range c.Reasons {
-			emitted[r] = true
+			emitted[r]++
 		}
 	}
 
-	// Required reasons: every declared CandidateReasonName that is
-	// reachable via the substrate must appear. Reasons only
-	// reachable via inputs not present here (cross-agent change with
-	// a different framework — already covered by stage2DSeedActivity)
-	// must also appear.
-	required := []string{
-		"same_mpm_session",
-		"same_framework_session",
-		"handoff_for_current_context",
-		"open_work",
-		"referenced_by_active_work",
-		"explicit_reference",
-		"foundation_superseded",
-		"cascade_pending",
-		"overdue_wake",
-		"unresolved_wake",
-		"active_scratchpad",
-		"recent_cross_agent_change",
-		"supersession_chain",
+	// Registry-completeness invariant: every declared reason must
+	// be reachable. We iterate the canonical registry, not a
+	// hand-maintained list, so adding a new declared reason
+	// automatically extends coverage (and a phantom reason with no
+	// emitter makes this assertion fail with the phantom name
+	// listed as unreachable).
+	declared := allCandidateReasonNames()
+	var unreachableReasons []string
+	for _, name := range declared {
+		if emitted[name] == 0 {
+			unreachableReasons = append(unreachableReasons, name)
+		}
 	}
-	for _, r := range required {
-		require.True(t, emitted[r],
-			"reason %q must be reachable through some generator path", r)
-	}
+	require.Empty(t, unreachableReasons,
+		"every declared CandidateReasonName must be reachable through some Stage-2D generator path; unreachable: %v",
+		unreachableReasons)
 
 	// Negative check: no candidate should carry a reason that isn't
-	// in the declared vocabulary (defensive — if the constant table
-	// drifts, this test catches phantom reasons).
-	declared := map[string]bool{}
-	for _, n := range allCandidateReasonNames() {
-		declared[n] = true
+	// in the declared vocabulary (defensive — if the const block
+	// drifts, this catches an emitted reason that's not declared).
+	declaredSet := map[string]bool{}
+	for _, n := range declared {
+		declaredSet[n] = true
 	}
 	for r := range emitted {
-		require.True(t, declared[r],
+		require.True(t, declaredSet[r],
 			"emitted reason %q not in declared vocabulary", r)
 	}
+}
+
+// stage2DSeedReachabilityExtras seeds the eight reasons that were
+// previously under-asserted but confirmed to have real generator
+// emitters. Keeps the reachability test fixture self-contained.
+func stage2DSeedReachabilityExtras(t *testing.T, dm *DatabaseManager) {
+	t.Helper()
+	now := time.Now().Unix()
+
+	// shares_topic: topic_memberships row + a memory in collection=memory
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, created_at, updated_at, tags, metadata, source_id, source_db)
+		VALUES ('M-reach-topic', 'memory', 'reachability fixture topic memory', ?, ?, '[]', '{}', '', 'openclaw')
+	`, now, now)
+	require.NoError(t, err)
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO topic_memberships (memory_id, session_id, topic_id, role, created_at)
+		VALUES ('M-reach-topic', '', 'topic-reach-1', 'related', ?)
+	`, now)
+	require.NoError(t, err)
+
+	// foundation_invalidated: confidence_history trigger='invalidate'
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, created_at, updated_at, tags, metadata, source_id, source_db)
+		VALUES ('T-reach-invalidated', 'theories', 'reachability fixture invalidated theory', ?, ?, '[]', '{}', '', 'openclaw')
+	`, now, now)
+	require.NoError(t, err)
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO confidence_history
+		    (id, artifact_id, artifact_type, confidence, computed_at,
+		     evidence_count, trigger)
+		VALUES ('ch-reach-inv', 'T-reach-invalidated', 'theory', 0.0, ?, 0, 'invalidate')
+	`, now)
+	require.NoError(t, err)
+
+	// confidence_changed: confidence_history trigger='decay_tick'
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, created_at, updated_at, tags, metadata, source_id, source_db)
+		VALUES ('T-reach-confidence', 'theories', 'reachability fixture confidence theory', ?, ?, '[]', '{}', '', 'openclaw')
+	`, now, now)
+	require.NoError(t, err)
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO confidence_history
+		    (id, artifact_id, artifact_type, confidence, computed_at,
+		     evidence_count, trigger)
+		VALUES ('ch-reach-decay', 'T-reach-confidence', 'theory', 0.3, ?, 0, 'decay_tick')
+	`, now)
+	require.NoError(t, err)
+
+	// evidence_added: confidence_history trigger='evidence_added'
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, created_at, updated_at, tags, metadata, source_id, source_db)
+		VALUES ('T-reach-evidence', 'theories', 'reachability fixture evidence theory', ?, ?, '[]', '{}', '', 'openclaw')
+	`, now, now)
+	require.NoError(t, err)
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO confidence_history
+		    (id, artifact_id, artifact_type, confidence, computed_at,
+		     evidence_count, trigger)
+		VALUES ('ch-reach-evid', 'T-reach-evidence', 'theory', 0.6, ?, 1, 'evidence_added')
+	`, now)
+	require.NoError(t, err)
+
+	// cascade_resolved: epistemic_cascade_outbox status='materialized'
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO memories (id, collection, content, created_at, updated_at, tags, metadata, source_id, source_db)
+		VALUES ('D-reach-resolved', 'decisions', 'reachability fixture resolved decision', ?, ?, '[]', '{}', '', 'openclaw')
+	`, now, now)
+	require.NoError(t, err)
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO epistemic_cascade_outbox
+		    (id, invalidation_event_id, dead_artifact_id, dead_artifact_type,
+		     downstream_artifact_id, downstream_artifact_type,
+		     cascade_depth, status, reason, created_at, updated_at)
+		VALUES ('cascade-reach-resolved', 'evt-reach-resolved', 'T-reach-confidence', 'theory',
+		        'D-reach-resolved', 'decision', 1, 'materialized', 'reachability cascade', ?, ?)
+	`, now, now)
+	require.NoError(t, err)
+
+	// recent_human_change: tool_invocations actor_kind='human' with
+	// non-agent framework (raw 'human' with framework NOT in
+	// knownAgentFrameworks survives EffectiveActorKind's reclassify).
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO tool_invocations
+		    (id, session_id, tool_name, action, invocation_id,
+		     actor_kind, framework_name, payload_hash, result_status,
+		     started_at, completed_at, duration_ms,
+		     mpm_session_id, framework_session_id)
+		VALUES ('act-human-1', 'p-human-1', 'mpm_memory', 'save', 'inv-human-1',
+		        'human', 'random-fw-human', 'sha256:human', 'success',
+		        ?, ?, 10, '', '')
+	`, now-30, now-30)
+	require.NoError(t, err)
+
+	// unknown_source_change: tool_invocations actor_kind non-human/non-agent
+	// AND non-empty framework NOT in knownAgentFrameworks. EffectiveActorKind
+	// classifies this as 'unknown' (raw falls through to default), then the
+	// candidate source picks ReasonUnknownSourceChange.
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO tool_invocations
+		    (id, session_id, tool_name, action, invocation_id,
+		     actor_kind, framework_name, payload_hash, result_status,
+		     started_at, completed_at, duration_ms,
+		     mpm_session_id, framework_session_id)
+		VALUES ('act-unknown-1', 'p-unknown-1', 'mpm_memory', 'save', 'inv-unknown-1',
+		        'foreign-shim', 'random-fw-unknown', 'sha256:unknown', 'success',
+		        ?, ?, 10, '', '')
+	`, now-20, now-20)
+	require.NoError(t, err)
+
+	// provenance_unknown — REMOVED: the upstream EffectiveActorKind
+	// contract normalizes raw non-human/non-agent + empty framework to
+	// ActorKindHuman, so ReasonProvenanceUnknown's emission path was
+	// dead code. The reachable semantic case (unknown actor +
+	// non-empty unrecognized framework) is ReasonUnknownSourceChange
+	// above. We retain a third activity row that exercises the empty-
+	// framework classification path (canonical CLI default →
+	// ActorKindHuman → ReasonRecentHumanChange) as a regression guard
+	// so any future change to EffectiveActorKind that re-enables the
+	// empty-framework unknown path is caught by the strengthened
+	// reachability test if a new reason is added.
+	_, err = dm.SQLDB().Exec(`
+		INSERT INTO tool_invocations
+		    (id, session_id, tool_name, action, invocation_id,
+		     actor_kind, framework_name, payload_hash, result_status,
+		     started_at, completed_at, duration_ms,
+		     mpm_session_id, framework_session_id)
+		VALUES ('act-prov-none-1', 'p-prov-none-1', 'mpm_memory', 'save', 'inv-prov-none-1',
+		        'foreign-shim', '', 'sha256:provnone', 'success',
+		        ?, ?, 10, '', '')
+	`, now-15, now-15)
+	require.NoError(t, err)
 }
 
 // allCandidateReasonNames returns the canonical reason vocabulary
@@ -1176,7 +1322,6 @@ func allCandidateReasonNames() []string {
 		string(ReasonOpenWork),
 		string(ReasonReferencedByActiveWork),
 		string(ReasonSharesTopic),
-		string(ReasonExplicitDependency),
 		string(ReasonExplicitReference),
 		string(ReasonFoundationSuperseded),
 		string(ReasonFoundationInvalidated),
@@ -1191,7 +1336,6 @@ func allCandidateReasonNames() []string {
 		string(ReasonUnresolvedWake),
 		string(ReasonActiveScratchpad),
 		string(ReasonSupersessionChain),
-		string(ReasonProvenanceUnknown),
 	}
 }
 
@@ -2110,6 +2254,61 @@ func TestStage2D2_SQLBoundedness(t *testing.T) {
 		require.True(t, strings.Contains(bodyStr, s),
 			"source file must contain %q for SQL boundedness", s)
 	}
+}
+
+// ── 2D.2-W17: Canonical-kind completeness ────────────────────────────
+//
+// Invariant: every Candidate.Kind emitted by GenerateContextualCandidates
+// must be present in CanonicalKinds. A new kind that bypasses the
+// canonical registry breaks Stage 2E.1's pre-zeroed diagnostic
+// vocabulary (TestSelection_CanonicalVocabulariesMatchStage2D).
+//
+// This test runs a rich cross-source fixture (covering every source
+// that emits candidates), then walks every emitted candidate and
+// asserts each Kind is in the canonical registry. The fixture is
+// the same superset that TestStage2D1_ReasonReachability uses; no
+// hand-maintained kind list, no manual count, no fallback "artifact"
+// that would silently pollute the vocabulary.
+func TestStage2D2_CanonicalKindCompleteness(t *testing.T) {
+	dm := NewTestDM(t)
+	stage2DSeedContext(t, dm)
+	stage2DSeedActivity(t, dm)
+	stage2DSeedReachabilityExtras(t, dm)
+
+	now := time.Now().Unix()
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO scheduled_wakes (id, target_time, reason, fired, theory_id, created_by, created_at)
+		VALUES ('wake-future-2', ?, 'future obligation', 0, '', 'mpm-cli', ?)
+	`, now+7200, now)
+	require.NoError(t, err)
+
+	res, err := dm.GenerateContextualCandidates(ContextQuery{
+		MPMSessionID:       "mpm-stage2d-session",
+		FrameworkSessionID: "fw-stage2d-session",
+		FrameworkName:      "openclaw",
+		WorkIDs:            []string{"W-stage2d-1"},
+		TopicIDs:           []string{"topic-reach-1"},
+		ArtifactIDs:        []string{"W-stage2d-1", "T-stage2d-superseded"},
+		Limits: CandidateLimits{
+			Work: 50, Handoff: 50, Activity: 50, Epistemic: 50,
+			Cascade: 50, Wake: 50, Scratchpad: 50, Topic: 50,
+			ExplicitRef: 50, Global: 200,
+		},
+	})
+	require.NoError(t, err)
+
+	canonicalKinds := map[string]bool{}
+	for _, k := range CanonicalKinds {
+		canonicalKinds[k] = true
+	}
+	var nonCanonical []string
+	for _, c := range res.Candidates {
+		if !canonicalKinds[c.Kind] {
+			nonCanonical = append(nonCanonical, c.ID+":"+c.Kind)
+		}
+	}
+	require.Empty(t, nonCanonical,
+		"every emitted Candidate.Kind must be present in CanonicalKinds; noncanonical: %v", nonCanonical)
 }
 
 // ── 2D.2-W16: Test count update ──────────────────────────────────────

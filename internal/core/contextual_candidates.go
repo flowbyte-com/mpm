@@ -243,6 +243,16 @@ var CanonicalSources = []SourceName{
 	SourceExplicitRef,
 }
 
+// CanonicalKinds is the closed ordered list of every artifact
+// kind that can appear as a Candidate.Kind. Stage 2E.1 (selector)
+// reuses this list for pre-zeroed diagnostics. Adding a new kind
+// here requires adding it to the selector's diagnostic vocabulary
+// (verified by TestSelection_CanonicalVocabulariesMatchStage2D).
+var CanonicalKinds = []string{
+	"memory", "lesson", "theory", "decision", "evidence",
+	"work", "handoff", "scratchpad", "wake", "activity",
+}
+
 // CandidateReasonName is the typed bounded vocabulary of reasons
 // that explain why a candidate exists. New reasons must be added
 // here; downstream tools and tests key off these names.
@@ -258,7 +268,6 @@ const (
 	// ── Structural ──
 	ReasonReferencedByActiveWork CandidateReasonName = "referenced_by_active_work"
 	ReasonSharesTopic            CandidateReasonName = "shares_topic"
-	ReasonExplicitDependency     CandidateReasonName = "explicit_dependency"
 	ReasonExplicitReference      CandidateReasonName = "explicit_reference"
 
 	// ── Epistemic ──
@@ -283,9 +292,6 @@ const (
 
 	// ── Supersession ──
 	ReasonSupersessionChain CandidateReasonName = "supersession_chain"
-
-	// ── Provenance ──
-	ReasonProvenanceUnknown CandidateReasonName = "provenance_unknown"
 )
 
 // ── Public entry ────────────────────────────────────────────────────
