@@ -136,7 +136,7 @@ func DefaultContextualFocusConfig(workIDs []string) ContextualFocusBuildConfig {
 		Query: ContextQuery{
 			MPMSessionID:       CurrentMPMSessionID(),
 			FrameworkSessionID: os.Getenv("MPM_PROVENANCE_FRAMEWORK_SESSION_ID"),
-			FrameworkName:      os.Getenv("MPM_PROVENANCE_FRAMEWORK_NAME"),
+			FrameworkName:      os.Getenv("MPM_PROVENANCE_FRAMEWORK"),
 			WorkIDs:            workIDs,
 		},
 	}
@@ -367,7 +367,9 @@ func (dm *DatabaseManager) gatherActiveWorkIDs() []string {
 //
 //   - MPMSessionID:        CurrentMPMSessionID()
 //   - FrameworkSessionID:  MPM_PROVENANCE_FRAMEWORK_SESSION_ID env
-//   - FrameworkName:       MPM_PROVENANCE_FRAMEWORK_NAME env
+//   - FrameworkName:       MPM_PROVENANCE_FRAMEWORK env (canonical
+//                          provenance framework name; with fallback
+//                          MPM_FRAMEWORK for legacy adapter support)
 //   - WorkIDs:             active open work IDs (gatherActiveWorkIDs)
 //
 // It does NOT synthesize QueryText, TopicIDs, or ArtifactIDs
@@ -375,10 +377,14 @@ func (dm *DatabaseManager) gatherActiveWorkIDs() []string {
 // 2E.3 remains structurally deterministic — no LLM, no
 // adaptive routing, no inferred context.
 func buildWakeContextFocusQuery(workIDs []string) ContextQuery {
+	fw := os.Getenv("MPM_PROVENANCE_FRAMEWORK")
+	if fw == "" {
+		fw = os.Getenv("MPM_FRAMEWORK")
+	}
 	return ContextQuery{
 		MPMSessionID:       CurrentMPMSessionID(),
 		FrameworkSessionID: os.Getenv("MPM_PROVENANCE_FRAMEWORK_SESSION_ID"),
-		FrameworkName:      os.Getenv("MPM_PROVENANCE_FRAMEWORK_NAME"),
+		FrameworkName:      fw,
 		WorkIDs:            workIDs,
 	}
 }
