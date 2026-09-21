@@ -116,7 +116,6 @@ func TestHandlePromoteToGlobal_HappyPath(t *testing.T) {
 	}
 }
 
-
 // ── Phase 5a: scheduled_wakes handler tests ───────────────────────────
 
 func TestHandleScheduleWake_HappyPath(t *testing.T) {
@@ -1179,13 +1178,17 @@ func TestHandleHealthCheck_PassesThrough(t *testing.T) {
 
 // TestHandleHealthCheck_ReflectsState pins that the handler reflects
 // domain state — adding a memory bumps memories_active. The boot path
-// seeds the four constitutional directives into file-backed DMs, so
-// the assertion is a delta over the baseline rather than an absolute.
+// seeds the constitutional directives into file-backed DMs, and the
+// HealthCheck contract intentionally excludes directives from the
+// count (they are system policy, not active memory mass), so the
+// fixture baseline MUST apply the same exclusion filter — otherwise
+// the test asserts against a wrong baseline. The handler-side SQL is
+// authoritative: see internal/core/db.go HealthCheck() queries[].
 func TestHandleHealthCheck_ReflectsState(t *testing.T) {
 	dm := newTestSharedDM(t)
 	var baseline int64
 	if err := dm.SQLDB().QueryRow(
-		`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`,
+		`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND NOT (collection = 'directives' OR COALESCE(is_prime_directive, 0) = 1)`,
 	).Scan(&baseline); err != nil {
 		t.Fatalf("baseline count: %v", err)
 	}
@@ -1699,8 +1702,8 @@ func TestExtractParamsOrFail_LoudFailureTopLevelLeakAcrossAllDomainTools(t *test
 	for _, tcase := range tools {
 		t.Run(tcase.name, func(t *testing.T) {
 			_, err := tcase.handler(dm, ac, map[string]interface{}{
-				"action":            "anything",
-				"top_level_leak":    "should fail with schema error",
+				"action":         "anything",
+				"top_level_leak": "should fail with schema error",
 			})
 			if err == nil {
 				t.Fatalf("%s: expected loud failure for top-level leak, got nil", tcase.name)
@@ -2005,7 +2008,7 @@ func (stubProviderOK) Name() string { return "stub-ok" }
 type stubProviderFail struct{ err error }
 
 func (p stubProviderFail) Embed(text string) ([]float32, error) { return nil, p.err }
-func (p stubProviderFail) Name() string                        { return "stub-fail" }
+func (p stubProviderFail) Name() string                         { return "stub-fail" }
 
 // TestHandleSaveToMemory_EmbeddingAvailable verifies that when the embedding
 // provider is reachable, the response is pure success with no embedding_status field.
