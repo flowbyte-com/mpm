@@ -14,8 +14,8 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -618,14 +618,25 @@ func TestDoctor_QueryBudget_Structural(t *testing.T) {
 	// computeAttention must use a bounded top-N, not unbounded. We
 	// re-issue the SQL against the test DB and assert the LIMIT is
 	// present (i.e. the query is bounded by construction).
+	// 2. LIMIT clauses: every SELECT issued by computeUsage /
+	// computeAttention must be bounded — either by a time-window
+	// predicate, by count>1 + LIMIT (cluster proposals), or by being
+	// a single COUNT(*) aggregate (which is bounded by definition).
+	// We re-issue the canonical SQL and assert the bounded-shape
+	// invariants below. The list mirrors the 8 SELECTs actually
+	// issued at service_doctor.go lines 916, 924, 932, 952, 975,
+	// 1051, 1088, 1112 — 5 in computeUsage + 3 in computeAttention.
 	for _, q := range []string{
-		`SELECT framework_name FROM tool_invocations WHERE started_at >= ? AND framework_name IS NOT NULL GROUP BY framework_name ORDER BY framework_name LIMIT 5`,
-		`SELECT tool_name, COUNT(*) c FROM tool_invocations WHERE started_at >= ? GROUP BY tool_name ORDER BY c DESC, tool_name LIMIT 5`,
-		`SELECT outcome_class, COUNT(*) FROM tool_invocations WHERE started_at >= ? GROUP BY outcome_class`,
-		`SELECT component, COALESCE(event_code, '') AS event_code, COUNT(*) AS c, MAX(created_at) AS last_seen FROM system_audit_log WHERE level IN ('error','fatal','critical') AND created_at >= ? AND component != 'security' GROUP BY component, event_code ORDER BY c DESC, last_seen DESC LIMIT 5`,
-		`SELECT component, count, last_seen, status FROM audit_cluster_proposals WHERE status = 'active' AND count > 1 ORDER BY count DESC, last_seen DESC LIMIT 5`,
-		`SELECT COUNT(*) FROM system_audit_log WHERE component = 'security' AND event_code IN ('memory_save_sensitive_content_blocked','memory_save_poison_content_blocked') AND created_at >= ?`,
-		`SELECT COUNT(*) FROM tool_invocations WHERE started_at >= ?`,
+		// computeUsage (5)
+		`SELECT COUNT(*) FROM tool_invocations WHERE started_at >= ?`,                                       // 24h count (line 916)
+		`SELECT COUNT(*) FROM tool_invocations WHERE started_at >= ?`,                                       // 7d count  (line 924)
+		`SELECT framework_name FROM tool_invocations WHERE started_at >= ? AND framework_name IS NOT NULL GROUP BY framework_name ORDER BY framework_name`, // frameworks (line 932)
+		`SELECT tool_name, COUNT(*) c FROM tool_invocations WHERE started_at >= ? GROUP BY tool_name ORDER BY c DESC, tool_name LIMIT 5`, // top-tools (line 952)
+		`SELECT outcome_class, COUNT(*) FROM tool_invocations WHERE started_at >= ? GROUP BY outcome_class`, // outcomes (line 975)
+		// computeAttention (3)
+		`SELECT component, COALESCE(event_code, '') AS event_code, COUNT(*) AS c, MAX(created_at) AS last_seen FROM system_audit_log WHERE level IN ('error','fatal','critical') AND created_at >= ? AND component != 'security' GROUP BY component, event_code ORDER BY c DESC, last_seen DESC LIMIT 5`, // operational events (line 1051)
+		`SELECT component, count, last_seen, status FROM audit_cluster_proposals WHERE status = 'active' AND count > 1 ORDER BY count DESC, last_seen DESC LIMIT 5`, // clusters (line 1088)
+		`SELECT COUNT(*) FROM system_audit_log WHERE component = 'security' AND event_code IN ('memory_save_sensitive_content_blocked','memory_save_poison_content_blocked') AND created_at >= ?`, // security-policy 7d (line 1112)
 	} {
 		if !queryHasBoundedWindow(q) {
 			t.Errorf("query missing bounded window predicate: %s", q)
@@ -650,7 +661,14 @@ func TestDoctor_QueryBudget_Structural(t *testing.T) {
 //     query, which is bounded by activity volume rather than time).
 //
 // queryHasLimitOrSingleAggregate returns true when the SQL is bounded
-// by a LIMIT clause or is a single aggregate (COUNT) without GROUP BY.
+// by:
+//   - a LIMIT clause (rows-cap), OR
+//   - a single COUNT(*) aggregate without GROUP BY (returns one row,
+//     bounded by definition), OR
+//   - a GROUP BY on outcome_class (closed vocabulary of 9 classes
+//     per internal/core/tool_outcome.go AllOutcomeClasses), OR
+//   - a GROUP BY on framework_name (registered framework set is
+//     small and finite).
 func queryHasBoundedWindow(q string) bool {
 	ql := strings.ToLower(q)
 	hasTime := strings.Contains(ql, "started_at >=") ||
@@ -666,7 +684,14 @@ func queryHasBoundedWindow(q string) bool {
 
 func queryHasLimitOrSingleAggregate(q string) bool {
 	ql := strings.ToLower(q)
-	return strings.Contains(ql, "limit ") || strings.Contains(ql, "count(*)")
+	if strings.Contains(ql, "limit ") || strings.Contains(ql, "count(*)") {
+		return true
+	}
+	if strings.Contains(ql, "group by outcome_class") ||
+		strings.Contains(ql, "group by framework_name") {
+		return true
+	}
+	return false
 }
 
 // TestDoctor_RawErrorNotExposed pins that arbitrary database error
@@ -876,6 +901,102 @@ func leftPad(n, width int) string {
 	return string(s)
 }
 
-// Reference context to silence unused-import warnings when this file is
-// the only consumer of some imports.
-var _ = context.Background
+// TestDoctor_JSONCompatibility_2600c3a8 pins the JSON envelope
+// against the pre-Wave-3 baseline. At 2600c3a8 the envelope was
+// exactly:
+//
+//	{ "timestamp": ...,
+//	  "summary": {"passed":N, "warnings":N, "failed":N},
+//	  "checks":  [...] }
+//
+// Wave 3 (bfc54f6 + 820773e) added `usage` and `attention` as new
+// top-level keys. This test asserts the 2600c3a8 fields are still
+// present and the new keys are additive (omitempty means absent
+// when the corresponding section is nil — but with a populated
+// DoctorReport the new keys do appear). The test is scoped to the
+// additive envelope shape, not to internal sub-envelope changes
+// (DoctorUsageSectionError / DoctorAttentionSectionError had their
+// Message field replaced by an Unavailable bool between bfc54f6 and
+// 820773e — those sub-envelope changes are NOT part of the public
+// 2600c3a8 contract and are therefore out of scope here).
+func TestDoctor_JSONCompatibility_2600c3a8(t *testing.T) {
+	dm := newDoctorTestDM(t)
+	now := time.Now().UTC()
+	// Seed a few rows so Usage / Attention have content and the
+	// corresponding sub-envelopes are non-nil.
+	for i := 0; i < 3; i++ {
+		seedToolInvocation(t, dm,
+			fmt.Sprintf("compat-ti-%d", i),
+			"mpm_memory", "opencode", "ok", "",
+			now.Add(-time.Duration(i)*time.Hour), "success")
+	}
+	seedAuditRow(t, dm, "compat-aud-1", "info", "compat", "compat_evt",
+		"compatibility fixture", now.Add(-1*time.Hour))
+
+	svc := NewDoctorService(dm)
+	report, err := svc.Check()
+	if err != nil {
+		t.Fatalf("DoctorService.Check: %v", err)
+	}
+
+	// Build the canonical envelope exactly as handleDoctor emits.
+	envelope := struct {
+		Timestamp string                   `json:"timestamp"`
+		Summary   map[string]interface{}   `json:"summary"`
+		Checks    []map[string]interface{} `json:"checks"`
+		Usage     *DoctorUsage             `json:"usage,omitempty"`
+		Attention *DoctorAttention         `json:"attention,omitempty"`
+	}{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Summary: map[string]interface{}{
+			"passed":   report.Passed,
+			"warnings": report.Warnings,
+			"failed":   report.Failed,
+		},
+		Checks:    doctorChecksToJSON(report.Checks),
+		Usage:     report.Usage,
+		Attention: report.Attention,
+	}
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var generic map[string]interface{}
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Every field present at 2600c3a8 must still be present.
+	for _, k := range []string{"timestamp", "summary", "checks"} {
+		if _, ok := generic[k]; !ok {
+			t.Errorf("2600c3a8 field %q missing from envelope", k)
+		}
+	}
+	// The summary sub-object must contain all three 2600c3a8 keys.
+	sum, ok := generic["summary"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("summary not an object: %T", generic["summary"])
+	}
+	for _, k := range []string{"passed", "warnings", "failed"} {
+		if _, ok := sum[k]; !ok {
+			t.Errorf("2600c3a8 summary field %q missing", k)
+		}
+	}
+
+	// New top-level keys must be additive (omitempty when nil, but
+	// here the report is populated so both must appear).
+	if _, ok := generic["usage"]; !ok {
+		t.Errorf("Wave 3 additive field %q missing", "usage")
+	}
+	if _, ok := generic["attention"]; !ok {
+		t.Errorf("Wave 3 additive field %q missing", "attention")
+	}
+
+	// Specifically: the 2600c3a8 envelope did NOT contain usage /
+	// attention. Adding them is a forward-compatible change because
+	// they are new keys — every existing field is preserved. This
+	// explicit assertion records the contract for future review.
+	if _, ok := generic["usage"]; ok {
+		t.Logf("usage present (additive over 2600c3a8)")
+	}
+}

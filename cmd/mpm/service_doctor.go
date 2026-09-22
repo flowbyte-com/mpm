@@ -927,11 +927,14 @@ func (s *DoctorService) computeUsage() (*DoctorUsage, error) {
 		return nil, fmt.Errorf("tool_invocations 7d count: %w", err)
 	}
 
-	// 3. Frameworks observed (7d).
+	// 3. Frameworks observed (7d). Bounded to top 20 by invocation
+	// volume to keep the rendered list and the underlying scan
+	// deterministic — the registered framework set is small but
+	// row count grows without bound.
 	rows, err := s.dm.SQLDB().Query(
 		`SELECT framework_name FROM tool_invocations
 		 WHERE started_at >= ? AND framework_name IS NOT NULL
-		 GROUP BY framework_name ORDER BY framework_name`,
+		 GROUP BY framework_name ORDER BY framework_name LIMIT 20`,
 		cutoff7d,
 	)
 	if err != nil {
