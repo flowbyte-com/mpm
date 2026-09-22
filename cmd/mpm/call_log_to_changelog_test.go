@@ -1,6 +1,6 @@
 package main
 
-// CLI/MCP parity test for log_to_changelog. The MCP tool and the
+// CLI/MCP parity test for mpm_log_to_changelog. The MCP tool and the
 // CLI handler both route through DatabaseManager.LogChangelogEntry,
 // so this test proves the CLI binding works without duplicating
 // the data-layer test in internal/changelog_mcp_test.go.
@@ -28,7 +28,7 @@ func TestCallLogToChangelog_HappyPath(t *testing.T) {
 	dm := newCLILogChangelogDM(t)
 
 	const hash = "0123456789abcdef0123456789abcdef01234567"
-	result, err := runHandler(dm, "log_to_changelog", map[string]interface{}{
+	result, err := runHandler(dm, "mpm_log_to_changelog", map[string]interface{}{
 		"fact":        "changelog prose for the test commit",
 		"commit_hash": hash,
 		"tags":        "test,smoke",
@@ -50,7 +50,7 @@ func TestCallLogToChangelog_HappyPath(t *testing.T) {
 func TestCallLogToChangelog_RequiresFact(t *testing.T) {
 	dm := newCLILogChangelogDM(t)
 
-	_, err := runHandler(dm, "log_to_changelog", map[string]interface{}{
+	_, err := runHandler(dm, "mpm_log_to_changelog", map[string]interface{}{
 		"commit_hash": "0123456789abcdef0123456789abcdef01234567",
 	})
 	if err == nil {
@@ -64,7 +64,7 @@ func TestCallLogToChangelog_RequiresFact(t *testing.T) {
 func TestCallLogToChangelog_RequiresCommitHash(t *testing.T) {
 	dm := newCLILogChangelogDM(t)
 
-	_, err := runHandler(dm, "log_to_changelog", map[string]interface{}{
+	_, err := runHandler(dm, "mpm_log_to_changelog", map[string]interface{}{
 		"fact": "orphan entry",
 	})
 	if err == nil {
@@ -78,7 +78,7 @@ func TestCallLogToChangelog_RequiresCommitHash(t *testing.T) {
 func TestCallLogToChangelog_RejectsMalformedCommit(t *testing.T) {
 	dm := newCLILogChangelogDM(t)
 
-	_, err := runHandler(dm, "log_to_changelog", map[string]interface{}{
+	_, err := runHandler(dm, "mpm_log_to_changelog", map[string]interface{}{
 		"fact":        "body",
 		"commit_hash": "abc1234", // short hash
 	})
@@ -91,8 +91,8 @@ func TestCallLogToChangelog_RejectsMalformedCommit(t *testing.T) {
 // registry has the binding. If someone removes the entry from
 // the tools.ByName map, this test fails immediately.
 func TestCallLogToChangelog_ToolRegistered(t *testing.T) {
-	_, ok := tools.ByName("log_to_changelog")
+	_, ok := tools.ByName("mpm_log_to_changelog")
 	if !ok {
-		t.Fatal("log_to_changelog not registered in tools.ByName — CLI binding missing")
+		t.Fatal("mpm_log_to_changelog not registered in tools.ByName — CLI binding missing")
 	}
 }

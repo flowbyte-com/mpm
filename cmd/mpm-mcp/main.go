@@ -59,7 +59,7 @@ import (
 //   mpm_work, mpm_theories, mpm_decisions, mpm_lessons, mpm_topics,
 //   mpm_references, mpm_evidence, mpm_confidence, mpm_skills, mpm_wakes,
 //   mpm_scratchpad, mpm_resolve, mpm_blob_read, mpm_blob_search,
-//   mpm_retrieval_diagnose, log_to_changelog, request_review,
+//   mpm_retrieval_diagnose, mpm_log_to_changelog, mpm_request_review,
 //   mpm_system, mpm_handoff (standalone access — preferred path is
 //   through mpm_context action=write_handoff/read_handoff)
 //

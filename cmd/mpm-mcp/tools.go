@@ -303,7 +303,7 @@ var (
 )
 
 // RegisterAllTools registers every entry in tools.Registry on the given
-// MCP server. The "route" tool is special: its handler closes over the
+// MCP server. The "mpm_route" tool is special: its handler closes over the
 // router, which is constructed at server boot. We build it last with
 // the live router instance instead of using the registry stub.
 //
@@ -317,7 +317,7 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 	tools.SetResolver(&artifactResolverAdapter{blobBS: blobAdapter, dm: dm}) // wire Phase 2 mpm_resolve
 	outputPolicy_ = op
 	for _, tool := range tools.Registry {
-		if tool.Name == "route" {
+		if tool.Name == "mpm_route" {
 			continue // registered below with the live router closure
 		}
 		if defaultCoreTools[tool.Name] {
@@ -333,12 +333,12 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 		)
 	}
 
-	// route: needs the live *Router instance, not the registry stub.
+	// mpm_route: needs the live *Router instance, not the registry stub.
 	// The MCP server constructs the router once at boot from mode/*.md
 	// and persona/*.md files; routing per-request is pure string
 	// matching with zero parsing overhead.
 	s.AddTool(
-		mcp.NewTool("route",
+		mcp.NewTool("mpm_route",
 			mcp.WithDescription(
 				"Evaluate a user prompt and auto-select the best-matching MPM mode(s) "+
 					"and persona. Modes use threshold filtering (multiple can activate); "+
