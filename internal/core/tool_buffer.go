@@ -84,7 +84,7 @@ var cognitiveVerbs = map[string]bool{
 	"upsert_scheduled_task": true,
 	"session_end":        true,
 	"session_handoff":    true,
-	"log_to_changelog":   true,
+	"mpm_log_to_changelog": true,
 }
 
 // IsCognitiveVerb returns true iff the named tool is a substrate-internal

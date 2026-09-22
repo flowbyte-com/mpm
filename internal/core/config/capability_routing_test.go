@@ -10,7 +10,7 @@ import (
 // ProfileFor, to the critic profile).
 //
 // This is the LIVE behaviour the runtime now wires up — capabilities
-// influence request_review routing via cfg.ResolveComponents at the
+// influence mpm_request_review routing via cfg.ResolveComponents at the
 // handler boundary.
 func TestCapabilityRouting_DefaultReviewerMapsToCritic(t *testing.T) {
 	cfg := &Config{

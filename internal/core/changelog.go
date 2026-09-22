@@ -9,7 +9,7 @@ package internal
 // every entry carries a CommitHash so the future MPM-memory join is a
 // mathematically certain (commit_hash, mpm_memory_id) merge. Entries
 // from the git log leave MPMMemoryIDs empty; entries that the future
-// log_to_changelog MCP tool produces fill it in.
+// mpm_log_to_changelog MCP tool produces fill it in.
 //
 // This file deliberately depends on nothing project-specific beyond
 // the Go standard library, so it can be unit-tested in isolation and
@@ -30,7 +30,7 @@ import (
 // ChangelogEntry is one row in a release section. For git-sourced
 // entries (the only kind this commit produces) the CommitHash is the
 // authoritative identity; MPMMemoryIDs stays empty. Future
-// log_to_changelog entries will have CommitHash empty and a populated
+// mpm_log_to_changelog entries will have CommitHash empty and a populated
 // MPMMemoryIDs — the synthesis engine reconciles both kinds.
 type ChangelogEntry struct {
 	// Version is the release this entry belongs to, e.g. "1.1.0".
@@ -57,7 +57,7 @@ type ChangelogEntry struct {
 	Body string `json:"body,omitempty"`
 	// MPMMemoryIDs is the join key for the future synthesis engine.
 	// Git-sourced entries leave this empty; agent-sourced entries
-	// populated via the log_to_changelog MCP tool will fill it.
+	// populated via the mpm_log_to_changelog MCP tool will fill it.
 	// Resolved by the synthesis engine as
 	//   for entry in entries:
 	//       if entry.CommitHash != "":

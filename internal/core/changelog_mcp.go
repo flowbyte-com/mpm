@@ -1,7 +1,7 @@
 package internal
 
 // changelog_mcp.go provides the persist-and-locate primitives for
-// the log_to_changelog MCP tool. The tool itself lives in
+// the mpm_log_to_changelog MCP tool. The tool itself lives in
 // cmd/mpm-mcp/tools.go; this file holds the data layer so the
 // function is testable against a per-test in-memory DM without
 // standing up an MCP server.
@@ -124,7 +124,7 @@ func (dm *DatabaseManager) LogChangelogEntry(fact, commitHash string, extraTags 
 		tags,
 		1.0,  // weight 1.0 — changelog memories are permanent, high-importance
 		"0",  // TTL 0 — no expiry
-		ActiveContext{Model: "log_to_changelog"}, // provenance: this memory came from the changelog tool
+		ActiveContext{Model: "mpm_log_to_changelog"}, // provenance: this memory came from the changelog tool
 	)
 	if err != nil {
 		return "", fmt.Errorf("LogChangelogEntry: persist: %w", err)
@@ -186,7 +186,7 @@ type ContradictionSpec struct {
 // contradictions, atomically inside a single transaction.
 //
 // This is the single source of truth for "explicit assertion" wired
-// through log_to_changelog. Per docs/epistemic-confirmation.md, the
+// through mpm_log_to_changelog. Per docs/epistemic-confirmation.md, the
 // mechanism has two directions:
 //
 //   - Confirmation (positive evidence, type='reproduction', default
@@ -333,7 +333,7 @@ func (dm *DatabaseManager) LogChangelogEntryWithConfirmations(
 //   - type='challenge' (default strength -0.6)
 //   - source_group='git' (the contradiction is commit-anchored)
 //   - independence_factor=1.0
-//   - created_by='log_to_changelog:<commit_hash>'
+//   - created_by='mpm_log_to_changelog:<commit_hash>'
 //   - notes='contradicted by changelog entry <commit_hash>'
 //
 // ASYMMETRY vs writeConfirmationInTx: contradiction CAN trigger
@@ -358,7 +358,7 @@ func writeContradictionInTx(node DBNode, spec ContradictionSpec, commitHash stri
 		SourceGroup:        "git",
 		Strength:           -0.6, // DefaultStrength("challenge") at evidence.go:24
 		IndependenceFactor: 1.0,
-		CreatedBy:          fmt.Sprintf("log_to_changelog:%s", commitHash),
+		CreatedBy:          fmt.Sprintf("mpm_log_to_changelog:%s", commitHash),
 		CreatedAt:          time.Now(),
 		Notes:              fmt.Sprintf("contradicted by changelog entry %s", commitHash),
 	}
@@ -393,7 +393,7 @@ func writeConfirmationInTx(node DBNode, conf ConfirmationSpec, commitHash string
 		SourceGroup:        "git",
 		Strength:           0.85, // DefaultStrength("reproduction") at evidence.go:23
 		IndependenceFactor: 1.0,
-		CreatedBy:          fmt.Sprintf("log_to_changelog:%s", commitHash),
+		CreatedBy:          fmt.Sprintf("mpm_log_to_changelog:%s", commitHash),
 		CreatedAt:          time.Now(),
 		Notes:              fmt.Sprintf("confirmed by changelog entry %s", commitHash),
 	}

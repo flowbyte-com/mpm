@@ -171,7 +171,7 @@ func TestClassifyAction_MutatingAndReadOnly(t *testing.T) {
 		{"mpm_wakes", "check", ActionClassLifecycle},
 
 		// CHANGELOG / REVIEW
-		{"log_to_changelog", "write", ActionClassMutating},
+		{"mpm_log_to_changelog", "write", ActionClassMutating},
 
 		// DOCTOR / PROBE — diagnostic, must NOT appear as agent activity.
 		{"mpm_doctor", "probe", ActionClassDiagnostic},

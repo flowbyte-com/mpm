@@ -255,9 +255,9 @@ var actionClassMap = map[string]ActionClass{
 	"mpm_skills/promote_to_global": ActionClassMutating,
 	"mpm_skills/workshop":          ActionClassMutating,
 
-	// log_to_changelog — special tool_name used internally by mpm_handoff
+	// mpm_log_to_changelog — special tool_name used internally by mpm_handoff
 	// sub-routes; classify as mutating if encountered.
-	"log_to_changelog/write": ActionClassMutating,
+	"mpm_log_to_changelog/write": ActionClassMutating,
 
 	// mpm_system — all maintenance; never agent-authored.
 	"mpm_system/gc_run":         ActionClassMaintenance,

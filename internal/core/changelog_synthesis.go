@@ -2,7 +2,7 @@ package internal
 
 // changelog_synthesis.go implements the join between git-sourced
 // ChangelogEntry rows (built by ParseCommitLog in changelog.go) and
-// agent-sourced changelog memories (written via log_to_changelog in
+// agent-sourced changelog memories (written via mpm_log_to_changelog in
 // changelog_mcp.go). The synthesis engine is a pure function: given
 // a ChangelogDocument and a database connection, it returns a new
 // ChangelogDocument with Body fields populated from matching
@@ -53,7 +53,7 @@ type ChangelogMemory struct {
 	Tags    []string
 	// CommitHash is the lowercased hash extracted from the
 	// #commit:<hash> tag. Empty if the memory is not associated
-	// with a specific commit (should not happen for log_to_changelog
+	// with a specific commit (should not happen for mpm_log_to_changelog
 	// memories, but checked defensively).
 	CommitHash string
 }
@@ -88,7 +88,7 @@ type ChangelogSynthesisResult struct {
 //
 // Memories without a #commit:<hash> tag are returned in a separate
 // slice (unkeyed) so the caller can surface them as orphans too.
-// A correctly-invoked log_to_changelog always sets the tag, so
+// A correctly-invoked mpm_log_to_changelog always sets the tag, so
 // unkeyed memories indicate a misuse of the tool or a tag
 // corruption event — worth surfacing.
 func FetchChangelogMemories(db *sql.DB) (indexed map[string][]ChangelogMemory, unkeyed []ChangelogMemory, err error) {
@@ -227,7 +227,7 @@ func SynthesizeChangelog(doc *ChangelogDocument, db *sql.DB) (*ChangelogSynthesi
 				// No commit hash, no possible join. Entry renders
 				// as a plain bullet. (Non-conventional commits
 				// land here; they cannot be annotated by
-				// log_to_changelog because the tool requires a
+				// mpm_log_to_changelog because the tool requires a
 				// commit_hash argument, but a non-conventional
 				// commit is by definition not in the synthesis
 				// scope.)

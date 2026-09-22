@@ -122,7 +122,7 @@ func TestIsCognitiveVerbExhaustive(t *testing.T) {
 		"add_evidence", "challenge_memory", "shred_memory",
 		"add_reference", "save_reference",
 		"flush_scratchpad", "promote_scratchpad", "discard_scratchpad",
-		"session_end", "session_handoff", "log_to_changelog",
+		"session_end", "session_handoff", "mpm_log_to_changelog",
 		"promote_memory", "promote_to_global", "promote_skill_to_global",
 		"record_global_rule",
 	}

@@ -457,7 +457,7 @@ func (c *Config) CapabilityFor(capability string) string {
 // their bound component. Names that don't match any capability pass
 // through unchanged as component names.
 //
-// Used by callers (e.g. request_review) that accept either skill-
+// Used by callers (e.g. mpm_request_review) that accept either skill-
 // vocabulary capability names or direct substrate component names.
 // Preserves explicit component calls:
 //
