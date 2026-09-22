@@ -628,15 +628,15 @@ func TestDoctor_QueryBudget_Structural(t *testing.T) {
 	// 1051, 1088, 1112 — 5 in computeUsage + 3 in computeAttention.
 	for _, q := range []string{
 		// computeUsage (5)
-		`SELECT COUNT(*) FROM tool_invocations WHERE started_at >= ?`,                                       // 24h count (line 916)
-		`SELECT COUNT(*) FROM tool_invocations WHERE started_at >= ?`,                                       // 7d count  (line 924)
+		`SELECT COUNT(*) FROM tool_invocations WHERE started_at >= ?`,                                                                                      // 24h count (line 916)
+		`SELECT COUNT(*) FROM tool_invocations WHERE started_at >= ?`,                                                                                      // 7d count  (line 924)
 		`SELECT framework_name FROM tool_invocations WHERE started_at >= ? AND framework_name IS NOT NULL GROUP BY framework_name ORDER BY framework_name`, // frameworks (line 932)
-		`SELECT tool_name, COUNT(*) c FROM tool_invocations WHERE started_at >= ? GROUP BY tool_name ORDER BY c DESC, tool_name LIMIT 5`, // top-tools (line 952)
-		`SELECT outcome_class, COUNT(*) FROM tool_invocations WHERE started_at >= ? GROUP BY outcome_class`, // outcomes (line 975)
+		`SELECT tool_name, COUNT(*) c FROM tool_invocations WHERE started_at >= ? GROUP BY tool_name ORDER BY c DESC, tool_name LIMIT 5`,                   // top-tools (line 952)
+		`SELECT outcome_class, COUNT(*) FROM tool_invocations WHERE started_at >= ? GROUP BY outcome_class`,                                                // outcomes (line 975)
 		// computeAttention (3)
 		`SELECT component, COALESCE(event_code, '') AS event_code, COUNT(*) AS c, MAX(created_at) AS last_seen FROM system_audit_log WHERE level IN ('error','fatal','critical') AND created_at >= ? AND component != 'security' GROUP BY component, event_code ORDER BY c DESC, last_seen DESC LIMIT 5`, // operational events (line 1051)
-		`SELECT component, count, last_seen, status FROM audit_cluster_proposals WHERE status = 'active' AND count > 1 ORDER BY count DESC, last_seen DESC LIMIT 5`, // clusters (line 1088)
-		`SELECT COUNT(*) FROM system_audit_log WHERE component = 'security' AND event_code IN ('memory_save_sensitive_content_blocked','memory_save_poison_content_blocked') AND created_at >= ?`, // security-policy 7d (line 1112)
+		`SELECT component, count, last_seen, status FROM audit_cluster_proposals WHERE status = 'active' AND count > 1 ORDER BY count DESC, last_seen DESC LIMIT 5`,                                                                                                                                      // clusters (line 1088)
+		`SELECT COUNT(*) FROM system_audit_log WHERE component = 'security' AND event_code IN ('memory_save_sensitive_content_blocked','memory_save_poison_content_blocked') AND created_at >= ?`,                                                                                                        // security-policy 7d (line 1112)
 	} {
 		if !queryHasBoundedWindow(q) {
 			t.Errorf("query missing bounded window predicate: %s", q)
