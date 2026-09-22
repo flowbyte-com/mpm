@@ -49,7 +49,7 @@ passed live.
 |---|---|---|
 | **A. MPM discovery** | **PASS** | `mpm__mpm_system` health_check returned `ok:true`, `db_path:"/home/v/workspace/projects/mpm/src/db/mpm.db"`, `memories_active:1`, `wakes_overdue:0`, `evidence_total:5469`. Plugin boot-time health check also logged OK. |
 | **B. Native agent invocation (memory write)** | **PASS** | `mpm__mpm_memory` action=save returned `success:true`, `id:"2068f6200eef754f"`. CLI equivalent `~/.mpm/bin/mpm call mpm_memory --payload '{"action":"save","params":{…}}'` also worked. |
-| **C. Memory retrieval** | **PASS** | (a) MCP path: `mpm__mpm_memory` action=query returned the saved fact with `count:1`, full content. (b) Plugin path: OpenClaw's native `memory_search` (provided by the `openclaw-mpm-memory` plugin) returned the fact mapped to the OpenClaw hit shape (`path: "mpm://memory/2068f6200eef754f"`, `score: 0.07`, snippet). Both routes resolve to the same artifact. |
+| **C. Memory retrieval** | **PASS** | (a) MCP path: `mpm__mpm_memory` action=query returned the saved fact with `count:1`, full content. (b) Plugin path: OpenClaw's native `mpm_memory_search` (provided by the `openclaw-mpm-memory` plugin) returned the fact mapped to the OpenClaw hit shape (`path: "mpm://memory/2068f6200eef754f"`, `score: 0.07`, snippet). Both routes resolve to the same artifact. |
 | **D. Retrieval diagnostics** | **PASS** | `mpm__explain_retrieval` returned structured diagnostic: BM25 base match score `-4.724079148967775`, reuse count, last retrieved timestamp, success count — NOT opaque text. |
 | **E. Cross-session continuity** | **PASS (live)** | Created a test handoff via `mpm call mpm_session --payload '{"action":"end","params":{…}}'` → returned `handoff_id:"84bd0965b465d416"`. Read it back via `mpm call mpm_session --payload '{"action":"handoff","params":{}}'` → returned the same handoff. The handoff mechanism is fully functional end-to-end. |
 | **Missing MPM handling** | **PASS** | Isolated PATH (no `mpm`): plugin subprocess returns `{disabled:true, unavailable:true, error:"mpm mpm_memory failed: spawn mpm ENOENT"}`. OpenClaw's `openclaw doctor --lint --only core/doctor/memory-search` stayed `ok:true` (the plugin degrades gracefully, doesn't crash the gateway). |
@@ -111,9 +111,9 @@ object), so this is a robustness-of-others observation, not an MPM bug.
   memories through OpenClaw-native tools, the MCP bundle's
   `mpm__mpm_memory` action=save is the only path. The memory plugin
   is read-only by design (it fills a `kind:"memory"` slot whose contract
-  is `memory_search` + `memory_get`; OpenClaw's `memory-core` slot is
+  is `mpm_memory_search` + `mpm_memory_get`; OpenClaw's `memory-core` slot is
   the same way). If a future integration wants to write memories from
-  `memory_search`-shaped calls, that's a plugin extension, not a defect.
+  `mpm_memory_search`-shaped calls, that's a plugin extension, not a defect.
 
 - **The plugin's subprocess path is ~10× slower than the MCP
   aggregator.** Documented as the deferred `mcp fast-path` roadmap item

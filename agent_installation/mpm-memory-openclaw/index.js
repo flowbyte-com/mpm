@@ -1,15 +1,15 @@
 // @openclaw/mpm-memory — Memory slot backed by MPM.
 //
-// Thin transport adapter: the agent's memory_search/memory_get tool calls
-// shell out to `mpm call mpm_memory` (the aggregator MCP tool) with an
-// action-dispatch payload. The 33-tool → 13-aggregator schema collapse
-// (2026-08-11) lets us keep this adapter as ONE call-shape instead of
-// a fan-out across granular tool names. Result shape is mapped onto
-// OpenClaw's expected MemorySearchResult contract (path, startLine,
-// endLine, score, snippet). Hit paths are virtual (mpm://memory/<id>) —
-// the full recalled content lives in the snippet so memory_get only matters
-// when an agent needs the body of a specific id, in which case we
-// re-query with the id.
+// Thin transport adapter: the agent's mpm_memory_search/mpm_memory_get
+// tool calls shell out to `mpm call mpm_memory` (the aggregator MCP
+// tool) with an action-dispatch payload. The 33-tool → 13-aggregator
+// schema collapse (2026-08-11) lets us keep this adapter as ONE
+// call-shape instead of a fan-out across granular tool names. Result
+// shape is mapped onto OpenClaw's expected MemorySearchResult contract
+// (path, startLine, endLine, score, snippet). Hit paths are virtual
+// (mpm://memory/<id>) — the full recalled content lives in the snippet
+// so mpm_memory_get only matters when an agent needs the body of a
+// specific id, in which case we re-query with the id.
 //
 // Boot-time health check: register() pings `mpm call mpm_system` with
 // action:health_check so a missing/broken mpm fails loudly at OpenClaw
@@ -877,7 +877,7 @@ export default definePluginEntry({
     api.registerTool(
       () => ({
         label: "Memory Search (MPM)",
-        name: "memory_search",
+        name: "mpm_memory_search",
         description:
           "Hybrid FTS5 + reinforcement-weighted recall across the agent's MPM long-term memory (lessons, decisions, memories, theories, references). " +
           "Returned hit paths are virtual (mpm://memory/<id>); the recalled content sits in the snippet. " +
@@ -922,16 +922,16 @@ export default definePluginEntry({
           }
         },
       }),
-      { names: ["memory_search"] }
+      { names: ["mpm_memory_search"] }
     );
 
     api.registerTool(
       () => ({
         label: "Memory Get (MPM)",
-        name: "memory_get",
+        name: "mpm_memory_get",
         description:
           "Read a memory entry by virtual path (mpm://memory/<id>). Returns the full recalled content for that id. " +
-          "If the id cannot be resolved, returns {notFound:true}. Note: in most cases the snippet returned by memory_search is sufficient and this tool is not needed.",
+          "If the id cannot be resolved, returns {notFound:true}. Note: in most cases the snippet returned by mpm_memory_search is sufficient and this tool is not needed.",
         parameters: MemoryGetSchema,
         async execute(_callId, params) {
           const path = params.path || "";
@@ -981,7 +981,7 @@ export default definePluginEntry({
           }
         },
       }),
-      { names: ["memory_get"] }
+      { names: ["mpm_memory_get"] }
     );
   },
 });

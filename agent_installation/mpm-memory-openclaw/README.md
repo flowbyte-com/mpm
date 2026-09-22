@@ -1,6 +1,6 @@
 # @openclaw/mpm-memory
 
-MPM-backed memory slot for OpenClaw. Routes `memory_search` and `memory_get`
+MPM-backed memory slot for OpenClaw. Routes `mpm_memory_search` and `mpm_memory_get`
 through MPM's FTS5 + reinforcement-weighted recall, and injects MPM wake context
 into every OpenClaw session via OpenClaw's native hook API.
 
@@ -8,7 +8,7 @@ into every OpenClaw session via OpenClaw's native hook API.
 
 | Surface | Mechanism | Status |
 |---------|-----------|--------|
-| `memory_search` / `memory_get` | Subprocess → `mpm call mpm_memory` | ✅ Works |
+| `mpm_memory_search` / `mpm_memory_get` | Subprocess → `mpm call mpm_memory` | ✅ Works |
 | Wake context injection | `session_start` → `agent_turn_prepare` hooks | ✅ Implemented |
 | Provenance env vars | `resolve_exec_env` hook | ✅ Implemented |
 | `session_end` → work completion | Not implemented | ✅ Correct — intentional |
@@ -53,7 +53,7 @@ OpenClaw-specific setup in the correct order:
      openclaw plugins install <adapter-dir> --link --force --accept-capabilities
    The three flags are the documented 2026.9.4 contract for installing
    a non-ClawHub local source that declares capabilities (this plugin
-   declares memory_search, memory_get). See "Trust / capability
+   declares mpm_memory_search, mpm_memory_get). See "Trust / capability
    acknowledgement" below. The installer refuses to fall back to a
    non-link install if the link install fails — that would silently
    change the deployment topology and hide the real cause.
@@ -145,7 +145,7 @@ A. Trust of the local source
 
 B. Capability consent
    `--accept-capabilities` consents to the plugin's declared surface
-   (memory_search, memory_get). Without this flag, 2026.9.4 returns
+   (mpm_memory_search, mpm_memory_get). Without this flag, 2026.9.4 returns
      "Plugin X requires capability consent. The plugin was not
       updated. Re-run the same `openclaw plugins install` or `openclaw
       plugins update` command with --accept-capabilities, keeping its
@@ -342,7 +342,7 @@ plugins: {
         mpmBin: "$HOME/.mpm/bin/mpm",
         timeoutMs: 5000,           // subprocess timeout; default 5000
         scope: "all",              // "all" | "local" | "shared"; default "all"
-        limitDefault: 6            // default memory_search limit; 1-50
+        limitDefault: 6            // default mpm_memory_search limit; 1-50
       }
     }
   },
@@ -360,8 +360,8 @@ service-level PATH is independent of the user-shell PATH for predictability
 and security.
 
 **Symptom:** plugin logs `health_check failed — mpm mpm_system failed:
-spawn mpm ENOENT` at gateway boot, and every `memory_search` /
-`memory_get` returns `{disabled:true}`.
+spawn mpm ENOENT` at gateway boot, and every `mpm_memory_search` /
+`mpm_memory_get` returns `{disabled:true}`.
 
 **Fix:** set `mpmBin` to the absolute path of the `mpm` binary:
 
@@ -381,12 +381,12 @@ where the interactive shell PATH differed from the systemd unit's PATH.
 
 | Condition | Behaviour |
 |---|---|
-| `mpm` not on PATH / binary not found | `memory_search` returns `{disabled:true, error:"...ENOENT..."}`; health-check log surfaces the config-set hint (added 0.1.3) |
+| `mpm` not on PATH / binary not found | `mpm_memory_search` returns `{disabled:true, error:"...ENOENT..."}`; health-check log surfaces the config-set hint (added 0.1.3) |
 | `mpm` exits non-zero | Tool result includes last 500 chars of stderr/stdout as `error` |
 | Subprocess timeout | `error: "mpm ... timed out after Nms"` |
 | MPM returns zero hits | `results: []`, `total: 0` — normal |
-| `memory_get` on non-virtual path | `{notFound:true, supportedPrefix:"mpm://memory/"}` |
-| `memory_get` for unknown id | `{notFound:true}` |
+| `mpm_memory_get` on non-virtual path | `{notFound:true, supportedPrefix:"mpm://memory/"}` |
+| `mpm_memory_get` for unknown id | `{notFound:true}` |
 | Wake context fetch fails | Agent turn proceeds without wake context (graceful degradation) |
 
 No error throws into the agent turn — every surface has a fail-open path.
@@ -409,7 +409,7 @@ Agent-facing tool schemas accurately declare parameters already supported and va
 
 ## Result Shape
 
-`memory_search` returns OpenClaw-shaped hits with virtual paths
+`mpm_memory_search` returns OpenClaw-shaped hits with virtual paths
 (`mpm://memory/<id>`):
 
 ```json
@@ -442,7 +442,7 @@ Agent-facing tool schemas accurately declare parameters already supported and va
 - **mcp fast-path:** Spawn `mpm-mcp` once at plugin register time, route
   calls over MCP `tools/call` instead of per-call `mpm call` subprocess.
 - **score fusion:** Combine MPM bm25 + reinforcement into a hybrid score.
-- **memory_get by content:** Allow `path: "?query=foo bar"` for ad-hoc reads.
+- **mpm_memory_get by content:** Allow `path: "?query=foo bar"` for ad-hoc reads.
 
 ## License
 

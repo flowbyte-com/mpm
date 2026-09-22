@@ -693,7 +693,7 @@ fi
 #                                    overwriting an unrelated plugin.
 #   --accept-capabilities            Required when the plugin declares
 #                                    capabilities (this plugin does:
-#                                    memory_search, memory_get) and they
+#                                    mpm_memory_search, mpm_memory_get) and they
 #                                    have not been accepted yet. Without
 #                                    this flag, `plugins install` returns
 #                                    "Plugin X requires capability
@@ -833,7 +833,7 @@ if timeout "${OPENCLAW_PLUGIN_INSPECT_TIMEOUT}s" \
      | grep -q '"id": "memory-core"'; then
   memcore_state="$(timeout "${OPENCLAW_CONFIG_TIMEOUT}s" \
     openclaw config get plugins.entries.memory-core.enabled 2>/dev/null || echo "?")"
-  log "memory-core detected (enabled=$memcore_state). The slot assignment above directs memory_search to $PLUGIN_ID."
+  log "memory-core detected (enabled=$memcore_state). The slot assignment above directs mpm_memory_search to $PLUGIN_ID."
   log "To silence memory-core (recommended for clarity, not required):"
   log "  openclaw config set plugins.entries.memory-core.enabled false"
 fi
