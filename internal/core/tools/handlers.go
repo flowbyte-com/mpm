@@ -4487,6 +4487,15 @@ func handleScheduleWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		}
 	}
 
+	// 2026-09-22 release-blocker D-1: the canonical `kind=notification`
+	// default for the wake discriminator is now authored INSIDE
+	// ScheduleWake (the DB-layer producer), not here. This keeps the
+	// policy in one place: every caller of ScheduleWake — the public
+	// handler, the cascade materializer, the wake reconcile loop, and
+	// any future internal producer — gets the same default. See
+	// wake_tools.go ScheduleWake for the producer-side fix; see
+	// wake_tools.go ResolveWake for the consumer-side matcher.
+
 	out, err := dm.ScheduleWake(reason, targetTime, theoryID, recurringRule, createdBy, metadata)
 	if err != nil {
 		return nil, err

@@ -9,15 +9,15 @@
 //
 // Lifecycle of a wake:
 //
-//   1. Agent calls ScheduleWake(reason, target_time, theory_id?, recurring_rule?).
-//      Row written with fired=0.
-//   2. Time passes. No daemon runs. The DB is the only substrate.
-//   3. ANY subsequent MPM call invokes CheckPendingWakes (called by
-//      handlers from within their dispatch). Wakes where fired=0 AND
-//      target_time <= now() are returned in a WakesPending block on the
-//      response, marked fired=1, fired_at=now.
-//   4. The agent sees the wake, evaluates the reason, optionally
-//      resolves a theory, optionally schedules the next wake.
+//  1. Agent calls ScheduleWake(reason, target_time, theory_id?, recurring_rule?).
+//     Row written with fired=0.
+//  2. Time passes. No daemon runs. The DB is the only substrate.
+//  3. ANY subsequent MPM call invokes CheckPendingWakes (called by
+//     handlers from within their dispatch). Wakes where fired=0 AND
+//     target_time <= now() are returned in a WakesPending block on the
+//     response, marked fired=1, fired_at=now.
+//  4. The agent sees the wake, evaluates the reason, optionally
+//     resolves a theory, optionally schedules the next wake.
 //
 // Why no daemon: avoids reintroducing the watcher's long-lived
 // footprint (deprecated 2026-06-26 in commit e1bc707) for a primitive
@@ -145,14 +145,31 @@ func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, recurringR
 	if err != nil {
 		return nil, err
 	}
-	var metaJSON string
-	if metadata != nil {
-		b, err := json.Marshal(metadata)
-		if err != nil {
-			return nil, fmt.Errorf("marshal metadata: %w", err)
-		}
-		metaJSON = string(b)
+	// 2026-09-22 release-blocker D-1: canonical wake default. When
+	// the caller does not supply a `kind` discriminator in the
+	// metadata map, author `kind=notification` here so the persisted
+	// row is consumable by both `CheckPendingWakes` (whose backward-
+	// compat default treats `kind` absent or `notification` as the
+	// notification surface) and `ResolveWake` (whose discriminator
+	// requires `kind` to be present). This is the producer-side
+	// half of the D-1 fix; the consumer-side half lives in
+	// `ResolveWake` (json_extract-based matcher that also accepts
+	// legacy NULL/empty metadata rows). Fix lives here, not in
+	// handleScheduleWake, so every caller of ScheduleWake — the
+	// public handler, the cascade materializer, the wake reconcile
+	// loop, and any future internal producer — gets the same default.
+	if metadata == nil {
+		metadata = map[string]interface{}{}
 	}
+	if _, hasKind := metadata["kind"]; !hasKind {
+		metadata["kind"] = "notification"
+	}
+	var metaJSON string
+	b, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("marshal metadata: %w", err)
+	}
+	metaJSON = string(b)
 	var theoryPtr interface{}
 	if theoryID != "" {
 		theoryPtr = theoryID
@@ -170,12 +187,12 @@ func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, recurringR
 		return nil, fmt.Errorf("insert scheduled_wakes: %w", err)
 	}
 	return map[string]interface{}{
-		"success":      true,
-		"id":           id,
-		"target_time":  absolute,
-		"target_iso":   time.Unix(absolute, 0).UTC().Format(time.RFC3339),
-		"reason":       reason,
-		"theory_id":    theoryID,
+		"success":        true,
+		"id":             id,
+		"target_time":    absolute,
+		"target_iso":     time.Unix(absolute, 0).UTC().Format(time.RFC3339),
+		"reason":         reason,
+		"theory_id":      theoryID,
 		"recurring_rule": recurringRule,
 	}, nil
 }
@@ -254,9 +271,47 @@ func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference st
 	// discriminator is the metadata.kind column: cascade / cron /
 	// notification wakes flow through scheduled_wakes; scheduled
 	// recurring task rows live in a separate table.
-	if !strings.Contains(metadata, `"kind":`) {
+	//
+	// 2026-09-22 release-blocker D-1: the prior substring check
+	// (`strings.Contains(metadata, `"kind":`)`) was brittle — it
+	// missed rows whose `metadata` JSON was NULL or empty (e.g.
+	// rows authored before ScheduleWake authored `kind=notification`
+	// by default), and it conflated "kind absent" with "scheduled
+	// task". The canonical matcher now uses json_extract (the same
+	// surface CheckPendingWakes uses) so that:
+	//   - `json_extract(...) IS NULL`        → notification default
+	//                                           (matches CheckPendingWakes
+	//                                            backward-compat branch)
+	//   - `json_extract(...) = 'notification'` → notification explicit
+	//   - `json_extract(...) = 'cascade'` /
+	//     `json_extract(...) = 'cascade_summary'` → cascade wake
+	// Any of the above is a wake row; anything else is a scheduled
+	// task row and must be retired via delete_task. Note: cascade /
+	// cascade_summary and notification are wake kinds; 'cron' or
+	// other unknown values are scheduled-task kinds.
+	//
+	// Probe via json_extract — empty string and NULL metadata are
+	// tolerated as "no kind supplied". SQLite's json_extract returns
+	// SQL NULL on an empty string input (rather than erroring) so
+	// the COALESCE-via-NullString flow handles it cleanly.
+	var rowKind sql.NullString
+	if err := tx.QueryRow(
+		`SELECT CASE WHEN ? IS NULL OR ? = '' THEN NULL
+		          ELSE json_extract(?, '$.kind') END`,
+		metadata, metadata, metadata,
+	).Scan(&rowKind); err != nil {
+		return false, "lookup_failed", fmt.Errorf("resolve wake: probe kind: %w", err)
+	}
+	kind := ""
+	if rowKind.Valid {
+		kind = rowKind.String
+	}
+	switch kind {
+	case "cascade", "cascade_summary", "notification", "":
+		// wake row, proceed
+	default:
 		return false, "not_a_wake",
-			fmt.Errorf("resolve wake: row %q is not a wake row (no metadata.kind; use delete_task for scheduled tasks)", wakeID)
+			fmt.Errorf("resolve wake: row %q has metadata.kind=%q which is not a wake kind; use delete_task for scheduled tasks", wakeID, kind)
 	}
 
 	if fired != 0 {
@@ -350,10 +405,11 @@ func isValidWakeResolveReason(reason string) bool {
 //     no kind set are excluded by this branch.
 //
 // Cascade wake cap:
-//   When kinds includes "cascade" (or is "*"), cascade wakes
-//   (metadata.kind == "cascade") are limited to MaxCascadeWakePerCheck per
-//   call. Notification and cron wakes are unaffected. Uncapped cascade
-//   wakes remain pending for the next call.
+//
+//	When kinds includes "cascade" (or is "*"), cascade wakes
+//	(metadata.kind == "cascade") are limited to MaxCascadeWakePerCheck per
+//	call. Notification and cron wakes are unaffected. Uncapped cascade
+//	wakes remain pending for the next call.
 func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]map[string]interface{}, error) {
 	nowUnix := now.Unix()
 	tx, err := dm.db.Begin()
@@ -490,7 +546,7 @@ func (dm *DatabaseManager) wakeRowToMap(p struct {
 }, nowUnix int64) map[string]interface{} {
 	row := map[string]interface{}{
 		"id":             p.id,
-		"target_time":     p.targetTime,
+		"target_time":    p.targetTime,
 		"reason":         p.reason,
 		"theory_id":      nullableString(p.theoryID),
 		"recurring_rule": nullableString(p.recurringRule),
@@ -553,16 +609,16 @@ func (dm *DatabaseManager) ListScheduledWakes(includeFired, overdueOnly bool, li
 			return nil, fmt.Errorf("scan wake list row: %w", err)
 		}
 		row := map[string]interface{}{
-			"id":              id,
-			"target_time":     targetTime,
-			"target_iso":      time.Unix(targetTime, 0).UTC().Format(time.RFC3339),
-			"reason":          reason,
-			"theory_id":       nullableString(theoryID),
-			"recurring_rule":  nullableString(recurringRule),
-			"fired":           fired == 1,
-			"fired_at":        nullableInt64(firedAt),
-			"created_by":      createdBy,
-			"created_at":      createdAt,
+			"id":             id,
+			"target_time":    targetTime,
+			"target_iso":     time.Unix(targetTime, 0).UTC().Format(time.RFC3339),
+			"reason":         reason,
+			"theory_id":      nullableString(theoryID),
+			"recurring_rule": nullableString(recurringRule),
+			"fired":          fired == 1,
+			"fired_at":       nullableInt64(firedAt),
+			"created_by":     createdBy,
+			"created_at":     createdAt,
 		}
 		if metadata != nil && *metadata != "" {
 			var meta map[string]interface{}
@@ -659,10 +715,10 @@ func (dm *DatabaseManager) DigestScheduledWakes(topN int) (map[string]interface{
 
 		if len(topOverdue) < topN {
 			topOverdue = append(topOverdue, map[string]interface{}{
-				"reason":        reason,
-				"target_iso":    time.Unix(targetTime, 0).UTC().Format(time.RFC3339),
-				"overdue_secs":  overdueSecs,
-				"theory_id":     nullableString(theoryID),
+				"reason":       reason,
+				"target_iso":   time.Unix(targetTime, 0).UTC().Format(time.RFC3339),
+				"overdue_secs": overdueSecs,
+				"theory_id":    nullableString(theoryID),
 			})
 		}
 		total++
@@ -682,16 +738,16 @@ func (dm *DatabaseManager) DigestScheduledWakes(topN int) (map[string]interface{
 	}
 
 	out := map[string]interface{}{
-		"success":            true,
-		"total_overdue":      total,
+		"success":              true,
+		"total_overdue":        total,
 		"total_pending_future": pendingFuture,
-		"linked_to_theory":   linkedToTheory,
+		"linked_to_theory":     linkedToTheory,
 		"age_buckets": map[string]int{
-			"under_1h":   bucketUnder1h,
-			"1h_to_1d":   bucket1hTo1d,
-			"1d_to_1w":   bucket1dTo1w,
-			"1w_to_1mo":  bucket1wTo1mo,
-			"over_1mo":   bucketOver1mo,
+			"under_1h":  bucketUnder1h,
+			"1h_to_1d":  bucket1hTo1d,
+			"1d_to_1w":  bucket1dTo1w,
+			"1w_to_1mo": bucket1wTo1mo,
+			"over_1mo":  bucketOver1mo,
 		},
 		"top_overdue": topOverdue,
 	}
@@ -757,10 +813,10 @@ func (dm *DatabaseManager) FireStaleFoundationWakes(deletedArtifactID string) (i
 		// unix seconds via time.Time.
 		targetTime := strconv.FormatInt(time.Now().Add(60*time.Second).Unix(), 10)
 		meta := map[string]interface{}{
-			"type":                 "stale_foundation",
-			"theory_id":            theoryID,
-			"missing_artifact_id":  deletedArtifactID,
-			"detected_at":          time.Now().UTC().Format(time.RFC3339Nano),
+			"type":                "stale_foundation",
+			"theory_id":           theoryID,
+			"missing_artifact_id": deletedArtifactID,
+			"detected_at":         time.Now().UTC().Format(time.RFC3339Nano),
 		}
 		reason := fmt.Sprintf("Stale foundation: theory %s depends on missing artifact %s",
 			theoryID, deletedArtifactID)
