@@ -59,7 +59,7 @@ CGO_LDFLAGS := -lm
 # Run filter for make test-release; override with `make test-release RUN='-run TestFoo'`.
 RELEASE_RUN ?=
 
-.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race test-core-precommit lint help refresh-installed
+.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit lint help refresh-installed
 
 all: build
 
@@ -203,6 +203,17 @@ test-core-precommit:
 # RUN forwards to the release_acceptance package; default is all tests.
 test-release: build
 	cd release_acceptance && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -count=1 -tags fts5 $(RELEASE_RUN) ./...
+
+# Aggregate release gate. Composes the broad race-detector suite with
+# the cross-agent continuity / public-CLI subprocess suite. The
+# subprocess suite requires `make build` so bin/mpm is available to
+# the public-CLI test cases; `make test-race` does NOT depend on
+# build (it's the inner dev-loop race gate), so we keep test-race and
+# test-release as separate leaf targets and compose them at the
+# release-gate level rather than threading build into every test-race
+# invocation. Release_acceptance cannot silently fall outside future
+# release validation while this aggregate exists.
+release-gate: test-race test-release
 
 # Run tests with the race detector enabled.
 # Mirrors `make test` but adds `-race`. Both flags are required:
