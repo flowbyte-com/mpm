@@ -224,7 +224,7 @@ func TestParity_MpmTopics_RegistryMatchesDispatcher(t *testing.T) {
 //
 // assertParityForTool skips tools without an enum (e.g. mpm_resolve,
 // mpm_retrieval_diagnose, mpm_blob_read, mpm_blob_search,
-// log_to_changelog, request_review) so the iteration is safe for
+// mpm_log_to_changelog, mpm_request_review) so the iteration is safe for
 // the mixed enum/non-enum registry.
 func TestParity_AllActionTools_LockEverySurface(t *testing.T) {
 	dm := newTestDMForTools(t)

@@ -160,8 +160,8 @@ func TestRegistryIsWrappedAtInit(t *testing.T) {
 		"mpm_scratchpad", // intra-session volatile state: flush/promote are cognitive writes
 		"mpm_system", // migrate / commit (no, that's memory) — audit writes
 		// Standalone tools that are still cognitive.
-		"log_to_changelog",
-		"request_review",
+		"mpm_log_to_changelog",
+		"mpm_request_review",
 	}
 	for _, name := range required {
 		if _, ok := ByName(name); !ok {

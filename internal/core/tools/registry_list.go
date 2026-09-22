@@ -674,7 +674,7 @@ Per-action semantics:
 		Handler: handleMpmSystem,
 	},
 	{
-		Name: "log_to_changelog",
+		Name: "mpm_log_to_changelog",
 		Description: `Self-report agent work as a structured changelog entry tied to a git commit SHA.
 Use when: you have completed a meaningful unit of work (a fix, a feature, a refactor) and want to record it in the project changelog with a reference to the commit that shipped it. The changelog entry is permanent and queryable.
 
@@ -684,15 +684,15 @@ Optional assertion params (epistemic confirmation / contradiction, see docs/epis
 
 Every assertion is explicit-only — no keyword matching, no semantic inference. An empty or absent param is a no-op; both directions can coexist in one call; all assertions and the changelog memory write share a single transaction (all-or-nothing atomicity).`,
 		Schema:  json.RawMessage(`{"type":"object","properties":{"fact":{"type":"string","description":"Changelog prose for this commit."},"commit_hash":{"type":"string","description":"Full 40-character SHA-1 of the commit being recorded (strict retrospective contract)."},"tags":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Tags as a comma-separated string OR a JSON array of strings."},"confirms_lesson_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Lesson id(s) this commit validates. Each produces one evidence row of type reproduction (+0.85) and a confidence recompute."},"confirms_decision_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Decision id(s) this commit validates. Each produces one evidence row of type reproduction (+0.85) and a confidence recompute."},"confirms_theory_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Theory id(s) this commit validates. Each produces one evidence row of type reproduction (+0.85) and a confidence recompute."},"contradicts_lesson_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Lesson id(s) this commit shows to be wrong. Each produces one evidence row of type challenge (-0.6) and a confidence recompute; crossing confidence below 0.3 triggers the existing cascade invalidation hook."},"contradicts_decision_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Decision id(s) this commit shows to be wrong. Same semantics as contradicts_lesson_id."},"contradicts_theory_id":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Theory id(s) this commit shows to be wrong. Same semantics as contradicts_lesson_id."}},"required":["fact","commit_hash"]}`),
-		Handler: handleLogToChangelog,
+		Handler: handleMpmLogToChangelog,
 	},
 	{
-		Name: "request_review",
+		Name: "mpm_request_review",
 		Description: `Concurrent multi-component review: ask multiple independent perspectives to evaluate the same artifact simultaneously.
 Use when: you want cross-validation before committing a significant decision; you need a second opinion on a memory, theory, or architecture choice; you want to stress-test a plan against different agent personas (memory, critic, scheduler) at the same time.
 Each component responds independently and in parallel. One component's failure does not block the others. No consensus synthesis — you read all responses and decide.`,
 		Schema:  json.RawMessage(`{"type":"object","properties":{"components":{"type":"array","items":{"type":"string"},"description":"Substrate component names to review (e.g. ['memory','critic']). Required, at least one."},"prompt":{"type":"string","description":"The instruction sent to every component. Required."},"artifacts":{"type":"array","items":{"type":"string"},"description":"Optional memory ids. Bodies are fetched from the database and passed to every component as pre-resolved text."},"strategy":{"type":"string","enum":["parallel"],"default":"parallel"},"timeout_secs":{"type":"number"}},"required":["components","prompt"]}`),
-		Handler: handleRequestReview,
+		Handler: handleMpmRequestReview,
 	},
 
 	// ── Phase 1: Pointer / Blob tools ──────────────────────────────────────

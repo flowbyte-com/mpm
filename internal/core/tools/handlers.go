@@ -2940,14 +2940,14 @@ func handleExplainConfidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 // ── Release / Changelog ──────────────────────────────────────────────
 //
 // callLogToChangelog writes a changelog memory tied to a specific
-// git commit. Mirrors the MCP log_to_changelog tool exactly — the
+// git commit. Mirrors the MCP mpm_log_to_changelog tool exactly — the
 // CLI/mcp parity is enforced by routing both through
 // DatabaseManager.LogChangelogEntry, which holds the strict
 // retrospective contract (full 40-char SHA-1 required). When the
 // synthesis engine lands, both the MCP tool and this CLI handler
 // will be joined with the git log via the (commit_hash,
 // mpm_memory_id) key in changelog.json.
-func handleLogToChangelog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleMpmLogToChangelog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	fact, _ := p["fact"].(string)
 	commitHash, _ := p["commit_hash"].(string)
 	if fact == "" {
@@ -5445,7 +5445,7 @@ func mapKeysToSlice(m map[string]bool) []string {
 	return out
 }
 
-// handleRequestReview implements the request_review MCP tool.
+// handleMpmRequestReview implements the mpm_request_review MCP tool.
 //
 // Architectural intent (Wed 2026-07-29 design session):
 //
@@ -5468,13 +5468,13 @@ func mapKeysToSlice(m map[string]bool) []string {
 // the renderers package. This handler is the only one in the
 // call chain that knows about the database, the coordinator, and
 // the renderer.
-func handleRequestReview(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+func handleMpmRequestReview(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	// Note on error shape: the TestRegistry_AllToolsExecuteWithoutPanic
 	// harness compares CLI and MCP error strings after stripping the
 	// MCP adapter's "<tool> failed: " prefix via strings.LastIndex(": ").
 	// The CLI side returns the bare error from this handler, so
 	// including the tool name in the error string would create a
-	// permanent drift (CLI: "request_review: ..." vs stripped-MCP:
+	// permanent drift (CLI: "mpm_request_review: ..." vs stripped-MCP:
 	// "..."). Errors below carry only the inner message; the MCP
 	// layer adds the tool-name prefix when wrapping.
 	components := mpminternal.ParseStringSliceOr(p["components"])

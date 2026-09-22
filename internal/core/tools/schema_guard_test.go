@@ -73,7 +73,7 @@ func TestSchemaSupersetOfHandlerPayloadReads(t *testing.T) {
 			continue
 		}
 		// Map handler → tool name: strip "handle" prefix + camel-to-snake
-		// (handleAddEvidence → add_evidence, handleLogToChangelog → log_to_changelog, etc.).
+		// (handleAddEvidence → add_evidence, handleMpmLogToChangelog → mpm_log_to_changelog, etc.).
 		toolName := camelToSnake(strings.TrimPrefix(handlerName, "handle"))
 		props, ok := schemaProps[toolName]
 		if !ok {
@@ -156,7 +156,7 @@ func TestSchemaSupersetOfHandlerPayloadReads(t *testing.T) {
 // camelToSnake converts CamelCase → snake_case, including acronyms.
 // e.g.
 //   "AddEvidence"     → "add_evidence"
-//   "LogToChangelog"  → "log_to_changelog"
+//   "LogToChangelog"  → "mpm_log_to_changelog"
 //   "GCRun"           → "gc_run"        (not "g_c_run")
 //   "XMLHttpRequest"  → "xml_http_request"
 //
@@ -197,12 +197,12 @@ func camelToSnake(s string) string {
 // token lowercase, subsequent tokens capitalized. Acronym collapse
 // (XMLHttpRequest → xml_http_request → XmlHttpRequest) is not needed
 // here because the Registry tool names use simple lower-snake form
-// (add_evidence, log_to_changelog). If a tool name ever uses
+// (add_evidence, mpm_log_to_changelog). If a tool name ever uses
 // acronyms, this helper will need to grow the same boundary logic
 // camelToSnake uses.
 //
 //   "add_evidence"     → "AddEvidence"
-//   "log_to_changelog" → "LogToChangelog"
+//   "mpm_log_to_changelog" → "LogToChangelog"
 //   "gc_run"           → "GcRun"
 func snakeToCamel(s string) string {
 	parts := strings.Split(s, "_")
@@ -467,7 +467,7 @@ func literalFromPayloadIndex(n ast.Node) string {
 //
 // 2026-09-10 hardening update: also recognises `collectConfirmationSpecs(p, "k", type)`
 // and `collectContradictionSpecs(p, "k", type)` style reads. These
-// helpers (handlers.go handleLogToChangelog) take the payload key as a
+// helpers (handlers.go handleMpmLogToChangelog) take the payload key as a
 // string-literal second argument, so the body of the helper does
 // `p[paramName]` — a direct IndexExpr read that this detector cannot
 // see from the call site. Recognising the call-site literal prevents
@@ -675,7 +675,7 @@ func TestSchemaGuard_MpmSkillsList(t *testing.T) {
 }
 
 // TestSchemaGuard_LogToChangelogAssertions locks the schema for the six
-// optional assertion params on log_to_changelog (3 confirms + 3
+// optional assertion params on mpm_log_to_changelog (3 confirms + 3
 // contradicts). These keys are read by the handler via the
 // collectConfirmationSpecs / collectContradictionSpecs helpers rather
 // than direct payload["k"] reads, so the AST-driven
@@ -697,13 +697,13 @@ func TestSchemaGuard_MpmSkillsList(t *testing.T) {
 func TestSchemaGuard_LogToChangelogAssertions(t *testing.T) {
 	var found *Tool
 	for i := range Registry {
-		if Registry[i].Name == "log_to_changelog" {
+		if Registry[i].Name == "mpm_log_to_changelog" {
 			found = &Registry[i]
 			break
 		}
 	}
 	if found == nil {
-		t.Fatal("log_to_changelog not registered")
+		t.Fatal("mpm_log_to_changelog not registered")
 	}
 
 	var schema map[string]interface{}
@@ -712,7 +712,7 @@ func TestSchemaGuard_LogToChangelogAssertions(t *testing.T) {
 	}
 	props, ok := schema["properties"].(map[string]interface{})
 	if !ok {
-		t.Fatal("log_to_changelog schema missing top-level `properties`")
+		t.Fatal("mpm_log_to_changelog schema missing top-level `properties`")
 	}
 
 	// All six assertion keys must be declared in the schema. If any
@@ -728,7 +728,7 @@ func TestSchemaGuard_LogToChangelogAssertions(t *testing.T) {
 	} {
 		prop, ok := props[key].(map[string]interface{})
 		if !ok {
-			t.Errorf("log_to_changelog schema is missing declaration for %q (clients cannot supply what the schema does not advertise — under-declaration drift)", key)
+			t.Errorf("mpm_log_to_changelog schema is missing declaration for %q (clients cannot supply what the schema does not advertise — under-declaration drift)", key)
 			continue
 		}
 		// Each param accepts string OR []string (per the handler's
@@ -737,7 +737,7 @@ func TestSchemaGuard_LogToChangelogAssertions(t *testing.T) {
 		// A future regression that narrows the type would be a
 		// contract drift — pin the shape here.
 		if _, hasOneOf := prop["oneOf"]; !hasOneOf {
-			t.Errorf("log_to_changelog schema param %q must accept string OR []string via oneOf (got %+v)", key, prop)
+			t.Errorf("mpm_log_to_changelog schema param %q must accept string OR []string via oneOf (got %+v)", key, prop)
 		}
 	}
 }

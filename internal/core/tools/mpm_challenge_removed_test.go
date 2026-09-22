@@ -47,7 +47,7 @@ func TestRegistry_mpm_challenge_Retired(t *testing.T) {
 //   - 4 pointer/dedicated tools (mpm_work, mpm_resolve, mpm_blob_read,
 //     mpm_blob_search)
 //   - 1 retrieval diagnostic (mpm_retrieval_diagnose)
-//   - 2 non-MPM standalones (log_to_changelog, request_review)
+//   - 2 non-MPM standalones (mpm_log_to_changelog, mpm_request_review)
 //
 // Change this constant deliberately, with a corresponding update to
 // generator/docs that hard-code the count (e.g. README tool listing,
