@@ -55,7 +55,7 @@ cd ~/projects/mpm
 mpm ops init directives             # baseline cognitive bootstrap (idempotent)
 ```
 
-See the root README's §5 (Quick Start) for the full MPM-side
+See [Technical specification §5 (Quick Start)](../docs/SPEC.md#5-quick-start) for the full MPM-side
 install procedure.
 
 ### Verify FTS5 build flag

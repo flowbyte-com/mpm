@@ -99,7 +99,7 @@ fi
 
 echo "[pre-commit] running threshold-table positive-presence gate..."
 # Every MCP-output-cap constant in production source must have a peer row
-# in the README §6.4 threshold table. Negative (no-stale-phrase) checks are
+# in the SPEC §6.4 threshold table. Negative (no-stale-phrase) checks are
 # covered elsewhere; this is the positive check that catches future
 # threshold additions/removals that bypass the table.
 #
@@ -111,8 +111,8 @@ echo "[pre-commit] running threshold-table positive-presence gate..."
 # REQUIRED_THRESHOLDS list in lock-step — the gate is the structural
 # enforcement, not a soft suggestion.
 if ! bash scripts/doc-gate-threshold-table.sh > /tmp/pre-commit-doc-gate.log 2>&1; then
-  echo "[pre-commit] ABORTING commit: README §6.4 threshold table is missing rows." >&2
-  echo "[pre-commit] Either add the missing row to README.md §6.4, or update" >&2
+  echo "[pre-commit] ABORTING commit: SPEC §6.4 threshold table is missing rows." >&2
+  echo "[pre-commit] Either add the missing row to docs/SPEC.md §6.4, or update" >&2
   echo "[pre-commit] scripts/doc-gate-threshold-table.sh's REQUIRED_THRESHOLDS" >&2
   echo "[pre-commit] if the constant has been removed from source." >&2
   cat /tmp/pre-commit-doc-gate.log >&2
@@ -126,17 +126,17 @@ echo "[pre-commit] running CLI-side-limits positive-presence gate..."
 # Sibling of the §6.4 threshold-table gate above: every CLI-limit
 # constant in cmd/mpm/ (named byte/char caps on input or output,
 # plus row-count defaults for --limit flags) must have a peer row
-# in the README §8 CLI-side-limits table. The two gates are kept
+# in the SPEC §8 CLI-side-limits table. The two gates are kept
 # deliberately separate — §6.4 and §8 are distinct surfaces in the
-# README's own narrative, and conflating them in tooling would blur
+# SPEC's own narrative, and conflating them in tooling would blur
 # a distinction the docs intentionally keep separate.
 #
 # Adding new CLI-limit constants requires updating this gate's
 # REQUIRED_CLI_LIMITS list in lock-step — the gate is the structural
 # enforcement, not a soft suggestion.
 if ! bash scripts/doc-gate-cli-limits.sh > /tmp/pre-commit-cli-gate.log 2>&1; then
-  echo "[pre-commit] ABORTING commit: README §8 CLI-side limits table is missing rows." >&2
-  echo "[pre-commit] Either add the missing row to README.md §8, or update" >&2
+  echo "[pre-commit] ABORTING commit: SPEC §8 CLI-side limits table is missing rows." >&2
+  echo "[pre-commit] Either add the missing row to docs/SPEC.md §8, or update" >&2
   echo "[pre-commit] scripts/doc-gate-cli-limits.sh's REQUIRED_CLI_LIMITS" >&2
   echo "[pre-commit] if the constant has been removed from source." >&2
   cat /tmp/pre-commit-cli-gate.log >&2

@@ -87,10 +87,11 @@ var driftScanPaths = []string{
 	// contract, not the legacy alias.
 	"agent_installation/mpm-claude-code/verify.py",
 
-	// Top-level README. The auto-generated block at the
+	// Technical specification. The auto-generated block at the
 	// <!-- tools:begin/end --> sentinels has no fenced marker the
 	// test can target — scan the whole file.
 	"README.md",
+	"docs/SPEC.md",
 }
 
 // isWhitelisted reports whether the given repo-relative path is

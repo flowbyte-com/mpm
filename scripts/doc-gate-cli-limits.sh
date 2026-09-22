@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# doc-gate-cli-limits.sh — positive-presence check for README §8 CLI
+# doc-gate-cli-limits.sh — positive-presence check for SPEC §8 CLI
 # Reference's "CLI-side input/output limits" table.
 #
 # WHY THIS GATE EXISTS
 # --------------------
-# README §8 (CLI Reference) catalogs every user-facing CLI cap: byte/char
+# SPEC §8 (CLI Reference) catalogs every user-facing CLI cap: byte/char
 # limits on input payloads and rendered output, plus row-count defaults
 # for `--limit` flags. The §6.4 (MCP Integration) threshold table has its
 # own parallel gate (scripts/doc-gate-threshold-table.sh) covering
 # MCP-output caps. These two gates are deliberately separate: §6.4 and §8
-# are distinct surfaces in the README's own narrative, and conflating
+# are distinct surfaces in the SPEC's own narrative, and conflating
 # them in tooling would blur a distinction the docs intentionally keep
 # separate. This is the §8 counterpart.
 #
@@ -28,7 +28,7 @@
 # - Inline `fs.Int("limit", N, ...)` defaults — these are per-command
 #   CLI flag defaults spread across 8+ files in `cmd/mpm/`. Each is
 #   already represented in the auto-generated Command Catalogue block
-#   (README §8.6) and the per-subcommand description prose; gating each
+#   (SPEC §8.6) and the per-subcommand description prose; gating each
 #   against a table row would be excessive and would duplicate the
 #   Command Catalogue's role.
 # - Constants already covered by the §6.4 gate
@@ -38,7 +38,7 @@
 # ------------
 # 1. For each entry in REQUIRED_CLI_LIMITS, run a source-existence regex
 #    against `cmd/mpm/` (production, `_test.go` excluded).
-# 2. Verify the README §8 CLI-side-limits table contains a row whose
+# 2. Verify the SPEC §8 CLI-side-limits table contains a row whose
 #    `Where it lives` column cites the file:line of the constant.
 # 3. Fail the gate if either check fails, naming the constant and the
 #    missing piece.
@@ -53,7 +53,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-README="$REPO_ROOT/README.md"
+SPEC="$REPO_ROOT/docs/SPEC.md"
 
 # Source root to scan. cmd/mpm/ only — cmd/mpm-mcp/ is §6.4 territory.
 SRC_ROOTS=(
@@ -87,15 +87,15 @@ awk '
   /^### CLI-side input\/output limits/ { in_table=1; print; next }
   in_table && /^### / { exit }
   in_table { print }
-' "$README" > /tmp/doc-gate-cli-limits.md
+' "$SPEC" > /tmp/doc-gate-cli-limits.md
 
 # If the section does not exist yet, fall back to searching the whole
 # of §8. This is the bootstrap mode: the section is added as part of
 # the same arc that introduces this gate, so before the section lands
 # the gate will not find any anchors and will fail loudly with
-# "no row in README §8" — that is the intended first run.
+# "no row in SPEC §8" — that is the intended first run.
 if [ ! -s /tmp/doc-gate-cli-limits.md ]; then
-  awk '/^## 8\. CLI Reference/,/^## 9\./' "$README" > /tmp/doc-gate-cli-limits.md
+  awk '/^## 8\. CLI Reference/,/^## 9\./' "$SPEC" > /tmp/doc-gate-cli-limits.md
   FALLBACK=1
 else
   FALLBACK=0
@@ -116,12 +116,12 @@ for entry in "${REQUIRED_CLI_LIMITS[@]}"; do
     continue
   fi
 
-  # 2. README §8 row check. The anchor phrase must appear in the
+  # 2. SPEC §8 row check. The anchor phrase must appear in the
   #    table region.
   if ! grep -qiF "$anchor" /tmp/doc-gate-cli-limits.md; then
-    echo "doc-gate: CLI-side limit '${label}' has no row in README §8." >&2
+    echo "doc-gate: CLI-side limit '${label}' has no row in SPEC §8." >&2
     echo "  Anchor phrase '${anchor}' not found in the §8 CLI-side-limits table." >&2
-    echo "  Add a row to README.md §8's CLI-side input/output limits table" >&2
+    echo "  Add a row to docs/SPEC.md §8's CLI-side input/output limits table" >&2
     echo "  citing this constant's file:line and what it bounds, or update" >&2
     echo "  REQUIRED_CLI_LIMITS if the anchor needs to change." >&2
     fail=1
@@ -132,9 +132,9 @@ rm -f /tmp/doc-gate-cli-limits.md
 
 if [ "$fail" -eq 0 ]; then
   if [ "$FALLBACK" -eq 1 ]; then
-    echo "[doc-gate-cli-limits] OK (${#REQUIRED_CLI_LIMITS[@]} CLI-side limits each have a README §8 row; section anchor not yet created)"
+    echo "[doc-gate-cli-limits] OK (${#REQUIRED_CLI_LIMITS[@]} CLI-side limits each have a SPEC §8 row; section anchor not yet created)"
   else
-    echo "[doc-gate-cli-limits] OK (${#REQUIRED_CLI_LIMITS[@]} CLI-side limits each have a README §8 row)"
+    echo "[doc-gate-cli-limits] OK (${#REQUIRED_CLI_LIMITS[@]} CLI-side limits each have a SPEC §8 row)"
   fi
 fi
 

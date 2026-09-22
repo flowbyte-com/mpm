@@ -101,7 +101,7 @@ you depend on a specific shape; pin a tag if you want stable behaviour.
   causes users to expose credentials, disable security controls,
   misconfigure authentication, or otherwise create a security
   vulnerability. The general "behaviour change without a corresponding
-  README change is a documentation bug" rule lives in `CONTRIBUTING.md`
+  specification change is a documentation bug" rule lives in `CONTRIBUTING.md`
   and is broader than security; only the security-relevant subset
   belongs here.
 

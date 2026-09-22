@@ -11,7 +11,7 @@ other users on the host, secured at 0700/0600 by the installer at
 provisioning time and re-tightened by the binary's startup gate on every
 boot (defence in depth).
 
-For background and design rationale, see [README.md](../README.md).
+For background and design rationale, see [Technical specification](SPEC.md).
 
 ---
 
@@ -310,7 +310,7 @@ injected wake on its next MCP call and reads the directive.
 **Three MCP tools** mirror the CLI for agent-driven automation:
 `upsert_scheduled_task`, `list_scheduled_tasks`, `delete_scheduled_task`.
 Architecture and edge cases (re-upsert semantics, poison-pill handling,
-why pre-compute `next_run_at`) documented in [README §9.3](../README.md#agentic-cron-recurring-tasks).
+why pre-compute `next_run_at`) documented in [Specification: Agentic Cron](SPEC.md#agentic-cron-recurring-tasks).
 
 ## 3. Wire to your host
 
@@ -502,7 +502,7 @@ saved before the resolver existed — those rows carry partial snapshots.
 
 ## See also
 
-- [README.md](../README.md) — cognitive model, design, full reference
+- [Technical specification](SPEC.md) — cognitive model, design, full reference
 - [install.sh](../install.sh) — the install script (read the source)
 - [scripts/](../scripts/) — utility scripts (smoke tests, completion, etc.)
 - [contrib/systemd/](../contrib/systemd/) — unit file templates (user only; the legacy system template has been removed)

@@ -162,7 +162,7 @@ uninstall-service:
 	-@systemctl --user daemon-reload
 	@echo "✓ Removed $(SERVICE_DST) (if it existed)"
 
-# Regenerate the CLI command catalogue in README.md (sent-injected
+# Regenerate the CLI command catalogue in docs/SPEC.md (sent-injected
 # auto-generated block in §8). Walks r.Commands via go/ast — no
 # reflection, no runtime import, source-level extraction. Idempotent.
 gen-cli:
@@ -310,7 +310,7 @@ help:
 	@echo "    make service-scheduler   - Install mpm-scheduler systemd user unit"
 	@echo "    make service             - Alias for service-scheduler"
 	@echo "    make uninstall-service   - Remove the installed systemd user unit"
-	@echo "    make gen-cli             - Regenerate the CLI catalogue in README.md §8"
+	@echo "    make gen-cli             - Regenerate the CLI catalogue in docs/SPEC.md §8"
 	@echo "    make test                - Run go tests"
 	@echo "    make lint                - Run golangci-lint (advisory; not CI-gated)"
 	@echo "    make clean               - Remove bin/"

@@ -14,7 +14,7 @@ See:
   - cmd/mpm-mcp/audit_hook.go: mpm-mcp's recordToolInvocation uses
     ac.FrameworkName (which ActiveContextFromEnv populated from the env
     var chain above).
-  - README.md §1945: "How a framework identifies itself" — explicitly
+  - docs/SPEC.md §1945: "How a framework identifies itself" — explicitly
     documents MPM_PROVENANCE_FRAMEWORK=<id> as the canonical name.
 
 Stage 2B update (2026-09-19): the template now sets both

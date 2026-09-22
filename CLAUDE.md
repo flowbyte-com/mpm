@@ -8,13 +8,14 @@ This file is **not** a second product specification.
 
 Use these sources for different purposes:
 
-* **README.md**: canonical product architecture, user-facing behavior, commands, concepts, interfaces, installation, and current semantics.
+* **README.md**: project overview and entry points for new readers.
+* **docs/SPEC.md**: canonical product architecture, user-facing behavior, commands, concepts, interfaces, installation, and current semantics.
 * **CLAUDE.md**: repository-working rules, validation discipline, safety boundaries, and implementation invariants.
 * **Code + tests**: actual implementation truth.
 
 Do not duplicate product documentation here unless a fact is required to prevent an implementation mistake.
 
-If README, CLAUDE.md, tests, and code disagree:
+If docs/SPEC.md, CLAUDE.md, tests, and code disagree:
 
 1. stop;
 2. identify the disagreement;
@@ -271,7 +272,7 @@ Avoid migrations unless the behavior genuinely requires durable schema evolution
 
 ## 7. CLI and Machine-Interface Changes
 
-User-facing interface truth belongs in README/help/tests, not as duplicated command documentation here.
+User-facing interface truth belongs in docs/SPEC.md/help/tests, not as duplicated command documentation here.
 
 When changing a public surface, check all relevant paths:
 
@@ -280,7 +281,7 @@ When changing a public surface, check all relevant paths:
 * machine/JSON output;
 * `mpm call`;
 * MCP registry/tool behavior where applicable;
-* README documentation;
+* docs/SPEC.md documentation;
 * regression tests.
 
 Do not assume CLI and MCP parity automatically follows from changing one handler.
@@ -384,17 +385,17 @@ When an old commit contains a useful fix, inspect it and reapply the minimal cur
 
 ## 12. Documentation Discipline
 
-README.md is the canonical product document.
+docs/SPEC.md is the canonical product document.
 
 Keep CLAUDE.md focused on **how to work safely on the repository**.
 
-Do not copy large sections of README architecture or command documentation into this file.
+Do not copy large sections of specification architecture or command documentation into this file.
 
 When a product behavior changes:
 
 1. update implementation;
 2. update tests;
-3. update README/help where appropriate;
+3. update docs/SPEC.md/help where appropriate;
 4. update CLAUDE.md only if the change affects contributor safety or repository-working rules.
 
 Avoid creating multiple competing descriptions of the same contract.

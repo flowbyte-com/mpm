@@ -24,7 +24,7 @@ import (
 // A memory is a directive if either it was ingested with
 // collection='directives' (the MCP path) or has is_prime_directive=1
 // (the legacy column-based path). Both identifiers reach the same set
-// once either is set — see the directives section of README.md.
+// once either is set — see the directives section of docs/SPEC.md.
 //
 // ReadDirectives returns ALL directives regardless of scope; it is the
 // admin / CLI / web-DB view. The runtime agent wake path uses

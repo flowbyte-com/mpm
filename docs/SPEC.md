@@ -1591,18 +1591,19 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`capability`** — Manage capabilities (seed, lifecycle, governance)
 - **`cascade`** — Materialize cascade intents
 - **`challenge`** — Flag memory as obsolete (atomic theory + patch; use 'restore' subcommand to undo)
-- **`config`** — Configure AI provider (interactive wizard or scripted set|get|show|edit)
+- **`config`** — Configure LLM and embedding profiles manually (wizard | show | get | set | profile | component | capability)
 - **`continue`** — Resume previous session — composes working context, wake context, decisions, skills, theories
 - **`debug`** — Low-level debugging tools
 - **`decide`** — Record decision (cognitive verb for 'record_decision')
 - **`decision`** — Decision CRUD
 - **`decisions`** — List decisions
 - **`directives`** — Show behavioral directives
-- **`doctor`** — Active trust-signal diagnostics: runs structural checks AND performs real network probes of every configured generative + embedding profile. Concurrent, 12s per-probe timeout, persists recent results to `system_config[model_probe_results]`. (--deep-scan for FTS/integrity audit, --explain for FTS5 query plan)
+- **`doctor`** — Run substrate diagnostics (--deep-scan for FTS/integrity audit, --explain for FTS5 query plan)
 - **`drills`** — Behavioural drill execution + compatibility matrix (list|show|run|report)
 - **`evidence`** — Manage evidence (add|list) — confidence foundation
 - **`export`** — Export memories to JSON
 - **`gc`** — Run decay sweep (--dry-run, --review, --purge)
+- **`handoff`** — Manage handoffs (write|read|list|shred)
 - **`help`** — Show CLI catalogue
 - **`hint`** — Surface context-relevant artifacts
 - **`info`** — Show install identity (version, database, models, scheduler, skills, persona, counts)
@@ -1611,6 +1612,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`kb`** — Knowledge-base operations (memory|topic|lesson|reference)
 - **`learn`** — Curate lesson (cognitive verb for 'mpm lesson add')
 - **`lesson`** — Manage lessons
+- **`lifecycle`** — Lifecycle asymmetry notes for artifact families
 - **`lint`** — Validate router frontmatter (YAML + regex compile)
 - **`list-skills`** — List skills (scope: all|local|shared)
 - **`ls`** — List memories

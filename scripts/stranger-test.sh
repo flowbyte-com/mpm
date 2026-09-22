@@ -4,7 +4,7 @@
 #
 # Simulates a fresh user discovering MPM for the first time. Boots
 # MPM against an isolated $HOME and $MPM_WORKSPACE, then walks the
-# README §5.3 quickstart end to end. Exits non-zero on the first
+# docs/SPEC.md §5.3 quickstart end to end. Exits non-zero on the first
 # command that fails to produce the documented behavior.
 #
 # Usage:
@@ -116,7 +116,7 @@ step() {
     fi
 }
 
-# --- walk the README §5.3 quickstart -----------------------------------------
+# --- walk the docs/SPEC.md §5.3 quickstart -----------------------------------------
 
 echo "[stranger] binary=$MPM_BIN"
 echo "[stranger] HOME=$HOME"

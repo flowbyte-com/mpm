@@ -26,18 +26,18 @@ set -euo pipefail
 
 # Files that touch the ecryptfs daemon-auto-start problem surface.
 PROBLEM_SURFACE_FILES=(
-  README.md
+  docs/SPEC.md
   docs/INSTALL.md
   agent_installation/INSTALL.md
   install.sh
   contrib/systemd/mpm-scheduler.service.user
 )
 
-# The only sanctioned mentions of `071911bc` are the passages in README.md and
+# The only sanctioned mentions of `071911bc` are the passages in docs/SPEC.md and
 # docs/INSTALL.md that document it AS an unresolvable string. Those passages
 # are identified by this anchor phrase; any other mention is drift.
 RESIDUE_ANCHOR='carries the string'
-RESIDUE_FILES=(README.md docs/INSTALL.md)
+RESIDUE_FILES=(docs/SPEC.md docs/INSTALL.md)
 
 # How far from a `24be03ec71a5981f` citation we look for the live pointer.
 # Approximates "same paragraph/section" without parsing Markdown structure.
@@ -67,7 +67,7 @@ for f in "${PROBLEM_SURFACE_FILES[@]}"; do
   fi
 
   # --- Check 2: no unsanctioned mentions of the string at all. -------------
-  # Sanctioned = the README.md / docs/INSTALL.md residue paragraphs that
+  # Sanctioned = the docs/SPEC.md / docs/INSTALL.md residue paragraphs that
   # explicitly document `071911bc` as unresolvable. Everything else is drift.
   while IFS=: read -r lineno text; do
     [[ -n "$lineno" ]] || continue
@@ -75,7 +75,7 @@ for f in "${PROBLEM_SURFACE_FILES[@]}"; do
       continue
     fi
     echo "doc-gate: $f:$lineno mentions \`071911bc\` outside the sanctioned residue." >&2
-    echo "  Only the README.md / docs/INSTALL.md paragraphs documenting it as an" >&2
+    echo "  Only the docs/SPEC.md / docs/INSTALL.md paragraphs documenting it as an" >&2
     echo "  unresolvable string may reference it. Cite commit 14ac32b instead." >&2
     fail=1
   done < <(grep -nE '\b071911bc\b' "$f" || true)

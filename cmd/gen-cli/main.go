@@ -1,4 +1,4 @@
-// cmd/gen-cli/main.go — README generator for the CLI command catalogue.
+// cmd/gen-cli/main.go — specification generator for the CLI command catalogue.
 //
 // Run via:  go run ./cmd/gen-cli
 //
@@ -6,16 +6,16 @@
 //
 // The generator uses go/parser + go/ast to extract the r.Commands
 // map literal from cmd/mpm/router.go and rewrites the block between
-// sentinel comments in README.md with a markdown catalogue.
+// sentinel comments in docs/SPEC.md with a markdown catalogue.
 //
-// Why this exists: manual sync of CLI commands to README is drift-prone
+// Why this exists: manual sync of CLI commands to the specification is drift-prone
 // (same problem the MCP tools catalogue had — fixed via cmd/gen-readme).
 // With this generator, the doc invariant becomes "I added a command
-// to router.go and ran `go run ./cmd/gen-cli` — the README is now correct."
+// to router.go and ran `go run ./cmd/gen-cli` — the specification is now correct."
 //
 // Scope note: this walks r.Commands at the top level. Subcommand
 // surfaces (mpm kb memory list, mpm ops gc, etc.) are dispatched via
-// handlers_*.go and are NOT captured here. The README's manually-
+// handlers_*.go and are NOT captured here. The specification's manually-
 // written subsections for kb/ops/debug remain the source of truth for
 // subcommand enumeration.
 
@@ -45,7 +45,7 @@ type entry struct {
 }
 
 func main() {
-	if err := run("cmd/mpm/router.go", "README.md"); err != nil {
+	if err := run("cmd/mpm/router.go", "docs/SPEC.md"); err != nil {
 		fmt.Fprintf(os.Stderr, "gen_cli: %v\n", err)
 		os.Exit(1)
 	}

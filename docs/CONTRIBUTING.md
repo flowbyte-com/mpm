@@ -12,7 +12,7 @@ that "work" locally and corrupt invariants globally.
 
 ## Before you change code
 
-1. Read [`README.md`](../README.md). It is the user-facing spec; most
+1. Read [`SPEC.md`](SPEC.md). It is the technical specification; most
    architectural intent is summarised there.
 2. Read [`CLAUDE.md`](../CLAUDE.md). It contains the
    repository-specific rules the lead developer relies on day-to-day
@@ -112,7 +112,7 @@ registry/dispatcher drift is caught.
   This runs both modules (the standalone `internal/core/` module and the
   main module). It is slow enough that you should run it before
   opening a PR, not on every save.
-- Stranger test (the hermetic README quickstart gate):
+- Stranger test (the hermetic specification quickstart gate):
   ```bash
   bash scripts/stranger-test.sh
   ```
@@ -180,12 +180,11 @@ PRs that change behaviour should explain:
    including how to migrate if migration is needed.
 3. **Which tests demonstrate the new behaviour** and which tests
    demonstrate that nothing else broke.
-4. **Whether the README or release notes need an update.** A
-   behaviour change without a corresponding README change is a
+4. **Whether the specification or release notes need an update.** A
+   behaviour change without a corresponding specification change is a
    documentation bug.
 5. **Whether anything in `docs/` needs updating.** Architecture
-   shifts go in `docs/archive/architecture.md` (or a sibling). Behaviour
-   shifts go in `README.md`. Cross-cutting shifts go in
+   and behaviour shifts go in `docs/SPEC.md`. Cross-cutting shifts go in
    `docs/archive/RELEASE-NOTES-*.md`.
 
 PRs that claim to add functionality should demonstrate the

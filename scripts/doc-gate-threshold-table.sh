@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# doc-gate-threshold-table.sh — positive-presence check for README §6.4
+# doc-gate-threshold-table.sh — positive-presence check for SPEC §6.4
 # "Output policy and pointer mechanics" threshold table.
 #
 # WHY THIS GATE EXISTS
 # --------------------
-# The threshold table in README.md §6.4 catalogs every layered cap that
+# The threshold table in docs/SPEC.md §6.4 catalogs every layered cap that
 # bounds MCP tool output size (transport spill, inline-echo, pointer
 # resolver, blob-read ceiling, blob-search scan window, etc.). The audit
 # that motivated the table's creation (commit 1527952 "document the four
@@ -32,7 +32,7 @@
 # 1. For each entry in REQUIRED_THRESHOLDS, run a source-existence regex
 #    against production source (internal/core, internal/core/tools,
 #    cmd/mpm, cmd/mpm-mcp). Test files are excluded.
-# 2. Verify the README §6.4 threshold table contains a row mentioning the
+# 2. Verify the SPEC §6.4 threshold table contains a row mentioning the
 #    anchor phrase (case-insensitive literal substring match).
 # 3. Fail the gate if either check fails, naming the constant and the
 #    missing piece.
@@ -58,7 +58,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-README="$REPO_ROOT/README.md"
+SPEC="$REPO_ROOT/docs/SPEC.md"
 
 # Source roots to scan (production only — _test.go is excluded).
 SRC_ROOTS=(
@@ -88,7 +88,7 @@ REQUIRED_THRESHOLDS=(
 
 # Extract the §6.4 threshold-table region (lines between the H3 header and
 # the next H3). Anything outside the table is not a valid row location.
-awk '/^### 6\.4 MCP Integration/,/^### 6\.5/' "$README" > /tmp/doc-gate-6_4.md
+awk '/^### 6\.4 MCP Integration/,/^### 6\.5/' "$SPEC" > /tmp/doc-gate-6_4.md
 
 fail=0
 
@@ -106,11 +106,11 @@ for entry in "${REQUIRED_THRESHOLDS[@]}"; do
     continue
   fi
 
-  # 2. README §6.4 row check. The anchor phrase must appear in the table.
+  # 2. SPEC §6.4 row check. The anchor phrase must appear in the table.
   if ! grep -qiF "$anchor" /tmp/doc-gate-6_4.md; then
-    echo "doc-gate: MCP-output cap '${label}' has no row in README §6.4." >&2
+    echo "doc-gate: MCP-output cap '${label}' has no row in SPEC §6.4." >&2
     echo "  Anchor phrase '${anchor}' not found in the §6.4 threshold table." >&2
-    echo "  Add a row to README.md §6.4 citing this constant's file:line" >&2
+    echo "  Add a row to docs/SPEC.md §6.4 citing this constant's file:line" >&2
     echo "  and what it bounds, or update REQUIRED_THRESHOLDS if the anchor" >&2
     echo "  needs to change." >&2
     fail=1
@@ -120,7 +120,7 @@ done
 rm -f /tmp/doc-gate-6_4.md
 
 if [ "$fail" -eq 0 ]; then
-  echo "[doc-gate-threshold-table] OK (${#REQUIRED_THRESHOLDS[@]} MCP-output-cap constants each have a README §6.4 row)"
+  echo "[doc-gate-threshold-table] OK (${#REQUIRED_THRESHOLDS[@]} MCP-output-cap constants each have a SPEC §6.4 row)"
 fi
 
 exit "$fail"

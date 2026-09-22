@@ -50,14 +50,14 @@ func TestRegistry_mpm_challenge_Retired(t *testing.T) {
 //   - 2 non-MPM standalones (mpm_log_to_changelog, mpm_request_review)
 //
 // Change this constant deliberately, with a corresponding update to
-// generator/docs that hard-code the count (e.g. README tool listing,
+// generator/docs that hard-code the count (e.g. specification tool listing,
 // agent_installation INSTALL.md `expect: 21`, AUTO_AGENT_INSTALL.md).
 func TestRegistry_CurrentToolCount(t *testing.T) {
 	const want = 21
 	if got := len(Registry); got != want {
 		t.Fatalf("Registry has %d tools, want %d. If you added or removed a tool, "+
 			"update this test deliberately and re-run "+
-			"`go run ./cmd/gen-readme` so the README's auto-generated tool listing stays in sync.",
+			"`go run ./cmd/gen-readme` so the specification's auto-generated tool listing stays in sync.",
 			got, want)
 	}
 }
