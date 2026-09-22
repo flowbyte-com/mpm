@@ -172,7 +172,7 @@ the same MPM install and database.
 | Surface | Where | Mechanism |
 |---|---|---|
 | **MCP stdio bundle** | OpenClaw runtime config (not in this repo) | `mcp.servers.mpm.command`, `mcp.servers.mpm.env.MPM_WORKSPACE` |
-| **Memory slot plugin** | `~/.openclaw/extensions/mpm-memory-openclaw/` | OpenClaw plugin (`kind:"memory"`); routes `memory_search`/`memory_get` to MPM. **Also wires the wake-context adoption hooks (`session_start` + `agent_turn_prepare` returning `prependContext`) and implements OpenClaw's memory-runtime classification contract — this is how OpenClaw adopts the wake invariant without a persistent-instruction file edit.** |
+| **Memory slot plugin** | `~/.openclaw/extensions/mpm-memory-openclaw/` | OpenClaw plugin (`kind:"memory"`); routes `mpm_memory_search`/`mpm_memory_get` to MPM. **Also wires the wake-context adoption hooks (`session_start` + `agent_turn_prepare` returning `prependContext`) and implements OpenClaw's memory-runtime classification contract — this is how OpenClaw adopts the wake invariant without a persistent-instruction file edit.** |
 | **Auto-mode/persona plugin** *(optional)* | `~/.openclaw/extensions/mpm-auto-mode-persona-openclaw/` | OpenClaw plugin; per-turn mode/persona injection via `mpm route --apply` |
 
 ### Installation
@@ -221,7 +221,7 @@ openclaw doctor --lint --only core/doctor/memory-search --json   # expect ok:tru
 ```
 
 **Strengths.** Satisfies the OpenClaw doctor check; integrates with
-OpenClaw's existing `memory_search`/`memory_get` tool surface so any
+OpenClaw's existing `mpm_memory_search`/`mpm_memory_get` tool surface so any
 agent that already speaks that contract transparently benefits.
 Fail-open on MPM unavailability (`{disabled:true, error:…}` instead
 of crashing the turn). Boot-time health check + DB path invariant
@@ -746,8 +746,8 @@ Pi participates in the MPM substrate via:
 
 1. **Pi extension.** `mpm-pi/index.ts` registers a **17-tool subset**
    of the full 22-tool MPM registry (14 Domain Tools via Fat RPC + 3
-   Standalones: `mpm_retrieval_diagnose`, `log_to_changelog`,
-   `request_review`). Tools in the full registry not exposed here
+   Standalones: `mpm_retrieval_diagnose`, `mpm_log_to_changelog`,
+   `mpm_request_review`). Tools in the full registry not exposed here
    (`mpm_work`, `mpm_resolve`, `mpm_blob_read`,
    `mpm_blob_search`) remain reachable via `mpm call <tool> --payload
    '<json>'`. Pi auto-loads extensions declared in

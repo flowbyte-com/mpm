@@ -123,7 +123,7 @@ canonical source.
 
 | Host | Adapter directory | Mechanism | Persistent-instruction surface |
 |---|---|---|---|
-| **OpenClaw** | [`mpm-memory-openclaw/`](./mpm-memory-openclaw/) + [`mpm-auto-mode-persona-openclaw/`](./mpm-auto-mode-persona-openclaw/) | OpenClaw plugin (`memory_search`/`memory_get` slot, kind:memory) + auto-mode/persona plugin (turn-key mode/persona injection) | `~/.openclaw/workspace/SOUL.md` + `AGENTS.md` (loaded by OpenClaw runtime) |
+| **OpenClaw** | [`mpm-memory-openclaw/`](./mpm-memory-openclaw/) + [`mpm-auto-mode-persona-openclaw/`](./mpm-auto-mode-persona-openclaw/) | OpenClaw plugin (`mpm_memory_search`/`mpm_memory_get` slot, kind:memory) + auto-mode/persona plugin (turn-key mode/persona injection) | `~/.openclaw/workspace/SOUL.md` + `AGENTS.md` (loaded by OpenClaw runtime) |
 | **Claude Code** | [`mpm-claude-code/`](./mpm-claude-code/) | MCP server (`~/.claude/.mcp.json`, default 3-tool initial surface via `mpm-mcp` — `MPM_EXPOSE_ALL_TOOLS=1` restores the full 22-tool registry) + CLAUDE.md managed block | `~/.claude/CLAUDE.md` (managed-block convention) |
 | **OpenCode** | [`mpm-opencode/`](./mpm-opencode/) | OpenCode plugin (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full 22-tool substrate registry) + AGENTS.md managed block | `<project>/AGENTS.md` or `~/.config/opencode/AGENTS.md` (managed-block convention) |
 | **Hermes** | [`mpm-hermes/`](./mpm-hermes/) | Hermes MCP client (`~/.hermes/config.yaml`, default 3-tool initial surface via `mpm-mcp` — `MPM_EXPOSE_ALL_TOOLS=1` restores the full 22-tool registry) + .hermes.md behavioral section | `<project>/.hermes.md` (or `HERMES.md`, walked from cwd to git root) — persona stays in `~/.hermes/SOUL.md` |
@@ -135,7 +135,7 @@ canonical source.
 |---|---|
 | `mpm-claude-code/` | MCP wiring (`.mcp.json.template` + `install.sh`) + CLAUDE.md behavioral-protocol installer (snippet + Python installer + 27 tests) |
 | `mpm-opencode/` | TypeScript plugin (`src/index.ts`, 17 typed tools + `mpm call` fallback to full registry) + AGENTS.md behavioral-protocol installer (snippet + Python installer) |
-| `mpm-memory-openclaw/` | OpenClaw plugin (`index.js`): `memory_search`/`memory_get` slot + wake-context injection hooks + provenance env var hooks |
+| `mpm-memory-openclaw/` | OpenClaw plugin (`index.js`): `mpm_memory_search`/`mpm_memory_get` slot + wake-context injection hooks + provenance env var hooks |
 | `mpm-auto-mode-persona-openclaw/` | OpenClaw plugin (`index.js`): per-turn `mpm route --apply` invocation + bootstrap injection |
 | `mpm-hermes/` | MCP wiring (config reference in SKILL.md) + .hermes.md behavioral-protocol installer (snippet + Python installer + 19 tests) |
 | `mpm-pi/` | Pi extension (`index.ts`, 17 typed tools + `mpm call` fallback to full registry) + AGENTS.md behavioral-protocol installer (snippet + Python installer + 19 tests) |
