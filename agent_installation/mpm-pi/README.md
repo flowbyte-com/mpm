@@ -53,8 +53,8 @@ Each Domain Tool dispatches on an `action` enum with free-form
 Plus 3 standalone tools with their own parameter schemas:
 
 - `mpm_retrieval_diagnose` — per-node retrieval diagnostic (same ordering as query). Subprocess invocation: `mpm call mpm_retrieval_diagnose`.
-- `log_to_changelog` — self-report work against a git commit SHA
-- `request_review` — concurrent multi-component review
+- `mpm_log_to_changelog` — self-report work against a git commit SHA
+- `mpm_request_review` — concurrent multi-component review
 
 Plus hooks and command:
 

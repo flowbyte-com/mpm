@@ -536,7 +536,7 @@ export default function piMpmExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "log_to_changelog",
+		name: "mpm_log_to_changelog",
 		label: "MPM Log to Changelog",
 		description: "Self-report agent work as a changelog entry tied to a git commit SHA.",
 		parameters: Type.Object({
@@ -549,16 +549,16 @@ export default function piMpmExtension(pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_id, params, _signal, _onUpdate, _ctx) {
-			const r = await callMpm("log_to_changelog", (params as Record<string, unknown>) ?? {});
+			const r = await callMpm("mpm_log_to_changelog", (params as Record<string, unknown>) ?? {});
 			if (!r.success) {
-				return { content: [{ type: "text", text: formatFailure("log_to_changelog", r) }], details: { ok: false } };
+				return { content: [{ type: "text", text: formatFailure("mpm_log_to_changelog", r) }], details: { ok: false } };
 			}
 			return { content: [{ type: "text", text: jsonToText(r.payload) }], details: { ok: true } };
 		},
 	});
 
 	pi.registerTool({
-		name: "request_review",
+		name: "mpm_request_review",
 		label: "MPM Request Review",
 		description:
 			"Concurrent multi-component review. Fetch artifact bodies from memory ids in 'artifacts' and send the same prompt + artifact to every component in 'components'. Strategy must be 'parallel' (v0.1). Returns rendered Markdown with one section per component. Independent results: one component's failure does not abort the others.",
@@ -570,9 +570,9 @@ export default function piMpmExtension(pi: ExtensionAPI) {
 			timeout_secs: Type.Optional(Type.Number({ description: "Optional total timeout in seconds." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, _ctx) {
-			const r = await callMpm("request_review", (params as Record<string, unknown>) ?? {});
+			const r = await callMpm("mpm_request_review", (params as Record<string, unknown>) ?? {});
 			if (!r.success) {
-				return { content: [{ type: "text", text: formatFailure("request_review", r) }], details: { ok: false } };
+				return { content: [{ type: "text", text: formatFailure("mpm_request_review", r) }], details: { ok: false } };
 			}
 			return { content: [{ type: "text", text: jsonToText(r.payload) }], details: { ok: true } };
 		},
