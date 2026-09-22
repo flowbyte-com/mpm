@@ -649,7 +649,7 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 		},
 	});
 
-	tools.log_to_changelog = tool({
+	tools.mpm_log_to_changelog = tool({
 		description: "Self-report agent work as a changelog entry tied to a git commit SHA.",
 		args: {
 			fact: tool.schema.string().describe("The work performed to record."),
@@ -659,13 +659,13 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 		async execute(args, ctx) {
 			const model = (ctx as { model?: Model }).model;
 			const sessionID = (ctx as { sessionID?: string }).sessionID;
-			const r = await callMpmWithProvenance(bin, "log_to_changelog", (args as Record<string, unknown>) ?? {}, { model, sessionID });
-			if (!r.success) return formatFailure("log_to_changelog", r);
+			const r = await callMpmWithProvenance(bin, "mpm_log_to_changelog", (args as Record<string, unknown>) ?? {}, { model, sessionID });
+			if (!r.success) return formatFailure("mpm_log_to_changelog", r);
 			return jsonToText(r.payload);
 		},
 	});
 
-	tools.request_review = tool({
+	tools.mpm_request_review = tool({
 		description:
 			"Concurrent multi-component review. Fetch artifact bodies from memory ids in 'artifacts' and send the same prompt + artifact to every component in 'components'. Strategy must be 'parallel' (v0.1). Returns rendered Markdown with one section per component. Independent results: one component's failure does not abort the others.",
 		args: {
@@ -678,8 +678,8 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 		async execute(args, ctx) {
 			const model = (ctx as { model?: Model }).model;
 			const sessionID = (ctx as { sessionID?: string }).sessionID;
-			const r = await callMpmWithProvenance(bin, "request_review", (args as Record<string, unknown>) ?? {}, { model, sessionID });
-			if (!r.success) return formatFailure("request_review", r);
+			const r = await callMpmWithProvenance(bin, "mpm_request_review", (args as Record<string, unknown>) ?? {}, { model, sessionID });
+			if (!r.success) return formatFailure("mpm_request_review", r);
 			return jsonToText(r.payload);
 		},
 	});
