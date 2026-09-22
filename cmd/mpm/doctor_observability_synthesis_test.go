@@ -1000,3 +1000,11 @@ func TestDoctor_JSONCompatibility_2600c3a8(t *testing.T) {
 		t.Logf("usage present (additive over 2600c3a8)")
 	}
 }
+
+// Doctor wall-clock is captured as an informational log inside
+// TestDoctor_QueryBudget_Structural — single-iter timing is sufficient
+// at the observed scale (~200 invocations/day). Operators measure
+// production latency manually via `time bin/mpm doctor` against their
+// live database. A dedicated benchmark would require *testing.T shims
+// that don't fit the existing helper contract; deferred until scale
+// warrants it.
