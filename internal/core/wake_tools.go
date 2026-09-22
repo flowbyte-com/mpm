@@ -290,15 +290,32 @@ func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference st
 	// cascade_summary and notification are wake kinds; 'cron' or
 	// other unknown values are scheduled-task kinds.
 	//
-	// Probe via json_extract — empty string and NULL metadata are
-	// tolerated as "no kind supplied". SQLite's json_extract returns
-	// SQL NULL on an empty string input (rather than erroring) so
-	// the COALESCE-via-NullString flow handles it cleanly.
+	// 2026-09-22 verification pass: hardened the probe against
+	// pre-fix data with arbitrarily-corrupted metadata. SQLite's
+	// json_extract raises an error on malformed JSON rather than
+	// returning NULL — which would surface as `lookup_failed` and
+	// fail every write through the wake lifecycle for legacy rows.
+	// The matcher now guards the json_extract with json_valid so
+	// malformed input collapses to NULL (which we already accept as
+	// "kind absent" → wake row). Three inputs the legacy compat
+	// branch covers, in order:
+	//   1. metadata IS NULL            → JSON validity probe skipped,
+	//                                    treat as no kind.
+	//   2. metadata == ''              → same.
+	//   3. json_valid(metadata) == 0   → malformed / non-JSON text;
+	//                                    treat as no kind rather
+	//                                    than raising a SQL parse
+	//                                    error.
+	//   4. otherwise                  → SELECT json_extract(...,
+	//                                    '$.kind').
 	var rowKind sql.NullString
 	if err := tx.QueryRow(
-		`SELECT CASE WHEN ? IS NULL OR ? = '' THEN NULL
-		          ELSE json_extract(?, '$.kind') END`,
-		metadata, metadata, metadata,
+		`SELECT CASE
+		    WHEN ? IS NULL OR ? = '' THEN NULL
+		    WHEN json_valid(?) = 0 THEN NULL
+		    ELSE json_extract(?, '$.kind')
+		 END`,
+		metadata, metadata, metadata, metadata,
 	).Scan(&rowKind); err != nil {
 		return false, "lookup_failed", fmt.Errorf("resolve wake: probe kind: %w", err)
 	}
