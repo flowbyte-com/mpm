@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -531,7 +532,95 @@ func (s *MemoryStore) AddMemoryWithWeight(content string, collection string, tag
 		id, err = s.addMemoryDirect(collection, content, sessionID, tags, fullMetadata, embedding, floatWeight, createdAt)
 	}
 	if err != nil {
-		return nil, nil, err
+		// PRESERVE embedErr alongside the save error. Pre-fix this
+		// returned `(nil, nil, err)` which dropped err into the
+		// embed_err slot, causing saveMemoryWithContextImpl to
+		// classify a sensitive-content rejection as the embedding
+		// error and route it to the OutcomeClassInternal fallback
+		// instead of OutcomeClassValidation.
+		return nil, err, embedErr
+	}
+
+	mem := &Memory{
+		ID:                id,
+		Content:           content,
+		Metadata:          metadata,
+		Tags:              tags,
+		CreatedAt:         parseMemoryCreatedAt(createdAt),
+		Source:            source,
+		Embedding:         embedding,
+		Collection:        collection,
+		SessionID:         sessionID,
+		RetrievalPriority: 0.5,
+		Importance:        0.5,
+		Confidence:        InitialConfidence(artifactTypeFromCollection(collection)),
+		Weight:            intWeight,
+	}
+
+	if err := s.appendToMirror(mem); err != nil {
+		slog.Warn("failed to write to mirror", "error", err.Error())
+	}
+	return mem, nil, embedErr
+}
+
+// AddMemoryWithWeightForInvocation is the tool-originated sibling of
+// AddMemoryWithWeight. Same body, same embedding, same appendToMirror
+// invariant — but routes through dm.SaveMemoryNodeForInvocation so the
+// sensitive / poison scanner audit emissions carry the typed
+// invocation_id / mpm_session_id / framework_*_id columns derived
+// from the supplied ActiveContext.
+//
+// Reachable from `mpm call mpm_memory save` (CLI) and the MCP
+// mpm_memory tool via saveMemoryWithContextImpl. Background callers
+// (self-maintenance, RunSelfMaintenance, skill writes) keep using
+// AddMemoryWithWeight so the NULL-correlation audit contract is
+// preserved.
+func (s *MemoryStore) AddMemoryWithWeightForInvocation(content string, collection string, tags []string, metadata map[string]interface{}, sessionID string, source string, weight float64, ac ActiveContext) (*Memory, error, error) {
+	if collection == "" {
+		collection = "memories"
+	}
+	if s.DB == nil {
+		if err := s.InitSQLite(); err != nil {
+			return nil, nil, fmt.Errorf("failed to initialize database: %v", err)
+		}
+	}
+
+	floatWeight := normalizeWeightToColumn(weight)
+	intWeight := int(floatWeight)
+
+	embedding, embedErr := EmbedText(content)
+	createdAt := time.Now().UTC().Format(time.RFC3339)
+	fullMetadata := map[string]interface{}{
+		"source":    source,
+		"created":   createdAt,
+		"tags":      strings.Join(tags, ","),
+		"timestamp": time.Now().Unix(),
+	}
+	for k, v := range metadata {
+		fullMetadata[k] = v
+	}
+
+	var id string
+	var err error
+
+	if s.DM != nil {
+		id, err = s.DM.SaveMemoryNodeForInvocation(collection, content, sessionID, tags, fullMetadata, embedding, floatWeight >= 10.0, floatWeight, "", "0.5", "0.5", createdAt, ac)
+	} else {
+		// Fallback (test fixtures with s.DM == nil) routes through the
+		// legacy addMemoryDirect path, which doesn't thread ac and
+		// therefore can't surface a correlated audit row. Background-
+		// event contract preserved.
+		id, err = s.addMemoryDirect(collection, content, sessionID, tags, fullMetadata, embedding, floatWeight, createdAt)
+	}
+	if err != nil {
+		// PRESERVE embedErr alongside the save error (same fix as
+		// the pre-existing AddMemoryWithWeight above). Without the
+		// %w preservation, the scanner rejection ends up in the
+		// embed_err slot and saveMemoryWithContextImpl's defensive
+		// path classifies it as OutcomeClassInternal/"unclassified"
+		// instead of routing through ClassifyError's typed-sentinel
+		// recognition.
+		return nil, err, embedErr
 	}
 
 	mem := &Memory{
@@ -843,6 +932,23 @@ func init() {
 		}
 	}
 }
+
+// ErrSecurityScannerBlocked is the typed sentinel for saveMemoryRow's
+// sensitive/poison scanner rejections. Wrapped via fmt.Errorf("%w: ...")
+// so ClassifyError can recognise it via errors.Is and route the
+// outcome to OutcomeClassValidation with a bounded code rather than
+// the catch-all OutcomeClassInternal/"unclassified" fallback.
+//
+// This matters operationally: a deliberately-rejected security
+// pattern (a real secret in user-supplied content) must NOT be
+// classified as an MPM substrate failure. Brief §3 priority is
+// "typed error → sentinel → typed → string fallback"; typed wins
+// here, so the operator-facing dashboard never sees a correct
+// policy block reported as a system fault.
+var (
+	ErrSensitiveContentBlocked = errors.New("memory security scanner: sensitive content blocked")
+	ErrPoisonContentBlocked   = errors.New("memory security scanner: poison content blocked")
+)
 
 // isSensitiveContent checks if content contains sensitive data patterns
 func isSensitiveContent(content string) (bool, string) {

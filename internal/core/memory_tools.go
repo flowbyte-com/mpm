@@ -11,7 +11,6 @@
 package internal
 
 import (
-
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -186,9 +185,13 @@ func (dm *DatabaseManager) saveMemoryWithContextImpl(
 		defer func() { dm.perCallProvenanceOverride = nil }()
 	}
 
-	// Use AddMemoryWithWeight so the caller's weight actually reaches the
-	// weight column instead of falling back to the DB default (or Go zero).
-	mem, err, embedErr := store.AddMemoryWithWeight(fact, collection, tags, meta, "", "call", weight)
+	// Use AddMemoryWithWeightForInvocation so the caller's weight actually
+	// reaches the weight column (instead of falling back to the DB default
+	// or Go zero) AND the sensitive / poison scanner emissions surface the
+	// typed invocation_id / mpm_session_id / framework_*_id columns from
+	// ac. This is the bridge that proves tool_invocations.invocation_id
+	// == system_audit_log.invocation_id for the same CLI/MCP dispatch.
+	mem, err, embedErr := store.AddMemoryWithWeightForInvocation(fact, collection, tags, meta, "", "call", weight, ac)
 	if err != nil {
 		return nil, nil, fmt.Errorf("add memory: %w", err)
 	}
@@ -388,13 +391,13 @@ func (dm *DatabaseManager) hybridSearchScopeShared(query string, limit int) ([]m
 //
 // Fetching strategy (the "Federated Fetch Buffer"):
 //
-//	1. Run HybridSearch against local with cfg.Limit=2*limit.
-//	2. Run HybridSearch against shared.memories with cfg.Limit=2*limit.
-//	   Same code path, different schema prefix.
-//	3. Concat (up to 4*limit rows).
-//	4. applySharedPremium: re-rank with the multiplier, slice to `limit`.
-//	   The 2x fetch buffer ensures a shared row promoted by the boost
-//	   doesn't get truncated at the cfg.Limit gate.
+//  1. Run HybridSearch against local with cfg.Limit=2*limit.
+//  2. Run HybridSearch against shared.memories with cfg.Limit=2*limit.
+//     Same code path, different schema prefix.
+//  3. Concat (up to 4*limit rows).
+//  4. applySharedPremium: re-rank with the multiplier, slice to `limit`.
+//     The 2x fetch buffer ensures a shared row promoted by the boost
+//     doesn't get truncated at the cfg.Limit gate.
 func (dm *DatabaseManager) hybridSearchScopeAll(query, collection string, limit int) ([]map[string]interface{}, error) {
 	// 2026-09-05 audit remediation pass 2: the previous shape
 	// coerced `fetch < 10` to 10, which silently overrode the
@@ -542,19 +545,19 @@ func hybridResultsToMaps(mems []HybridResult) []map[string]interface{} {
 			banner = challengeWarning
 		}
 		items = append(items, map[string]interface{}{
-			"id":                    m.ID,
-			"content":               m.Content,
-			"weight":                m.Weight,
-			"tags":                  parseTagsJSONColumn(m.Tags),
-			"collection":            m.Collection,
-			"created_at":            m.CreatedAt,
-			"reinforcement_count":   m.ReinforcementCount,
-			"origin":                m.Origin,
-			"banner":                banner,
-			"is_concept_drift":      m.IsConceptDrift,
-			"is_challenged":         m.IsChallenged,
-			"challenged_theory_id":  m.ChallengedTheoryID,
-			"combined_score":        m.CombinedScore,
+			"id":                   m.ID,
+			"content":              m.Content,
+			"weight":               m.Weight,
+			"tags":                 parseTagsJSONColumn(m.Tags),
+			"collection":           m.Collection,
+			"created_at":           m.CreatedAt,
+			"reinforcement_count":  m.ReinforcementCount,
+			"origin":               m.Origin,
+			"banner":               banner,
+			"is_concept_drift":     m.IsConceptDrift,
+			"is_challenged":        m.IsChallenged,
+			"challenged_theory_id": m.ChallengedTheoryID,
+			"combined_score":       m.CombinedScore,
 		})
 	}
 	return items
@@ -1213,7 +1216,7 @@ func (dm *DatabaseManager) WeakenMemoryTool(memoryID string, delta int) (map[str
 		"weight":              postWeight,
 		"reinforcement_count": postReinf,
 		"floor_hit":           floorHit,
-		"note":                fmt.Sprintf("weight %s after -%d (weight_loss=%d, reinforcement_count=%d)",
+		"note": fmt.Sprintf("weight %s after -%d (weight_loss=%d, reinforcement_count=%d)",
 			strconv.FormatFloat(postWeight, 'g', -1, 64), delta, weightLoss, postReinf),
 	}, nil
 }

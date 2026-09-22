@@ -203,6 +203,17 @@ func ClassifyError(err error) (ToolOutcomeClass, string) {
 	if errors.Is(err, ErrInvalidWorkTransition) {
 		return OutcomeClassConflict, "state_transition_invalid"
 	}
+	// Memory save scanner rejections (sensitive / poison content).
+	// These are deliberate policy enforcement, not MPM substrate
+	// failures. Classify as validation with a bounded code so Doctor
+	// / dashboards never report a correctly-blocked secret as a
+	// system fault.
+	if errors.Is(err, ErrSensitiveContentBlocked) {
+		return OutcomeClassValidation, "sensitive_content_blocked"
+	}
+	if errors.Is(err, ErrPoisonContentBlocked) {
+		return OutcomeClassValidation, "poison_content_blocked"
+	}
 	msg := err.Error()
 	// Bound checks — only inspect the head so we don't speculate on
 	// the variable tail of a stack trace. Each check is intentionally

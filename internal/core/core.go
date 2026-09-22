@@ -84,6 +84,13 @@ type CoreDB interface {
 	SaveMemoryWithContext(fact, collection string, tags []string, weight float64, ttl string, ac ActiveContext) (map[string]interface{}, *Memory, error)
 	SaveMemoryWithContextAndSnapshot(fact, collection string, tags []string, weight float64, ttl string, ac ActiveContext, wc *WrapperContext) (map[string]interface{}, *Memory, error)
 	SaveMemoryNode(node DBNode, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error)
+	// SaveMemoryNodeForInvocation is the tool-originated sibling of
+	// SaveMemoryNode. Routes through the same security scanner but
+	// threads ActiveContext into the audit emission so the resulting
+	// system_audit_log row carries typed invocation_id / mpm_session_id
+	// / framework_*_id columns. Background callers continue to use
+	// SaveMemoryNode (NULL correlation, brief §17 background policy).
+	SaveMemoryNodeForInvocation(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, ac ActiveContext, expiresAt ...time.Time) (string, error)
 
 	// ─── Memory Search & Query ───────────────────────────────────────
 	QueryMemories(collection string, primeOnly bool, limit, offset int) ([]map[string]interface{}, error)

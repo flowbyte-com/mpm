@@ -3268,7 +3268,35 @@ func (dm *DatabaseManager) SaveMemory(collection, content, sessionID string, tag
 // carry the same shape as standalone queries.
 func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
 	id := GenerateID()
-	return saveMemoryRow(node, dm, id, collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, referenceID, retrievalPriority, importance, createdAt, expiresAt...)
+	// Background / non-tool-originated callers pass `ActiveContext{}`,
+	// which keeps the existing NULL-correlation audit behaviour
+	// (brief §17 background-event contract). Tool-originated callers
+	// route through SaveMemoryNodeForInvocation below, which threads
+	// ActiveContext into the audit emission so the row carries the
+	// typed invocation_id / mpm_session_id / framework_*_id columns.
+	return saveMemoryRow(node, dm, id, collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, referenceID, retrievalPriority, importance, createdAt, ActiveContext{}, expiresAt...)
+}
+
+// SaveMemoryNodeForInvocation is the tool-originated sibling of
+// SaveMemoryNode. Same INSERT primitive, same scanner guarantees, but
+// the audit rows emitted by the sensitive/poison scanners carry the
+// four identity columns derived from the supplied ActiveContext. This
+// is the bridge that lets `mpm call mpm_memory save` (CLI) and the
+// MCP mpm_memory tool share one correlation identity from the
+// dispatcher all the way to the system_audit_log row.
+//
+// Background callers must continue to use SaveMemoryNode so that
+// empty-ActiveContext paths keep the NULL-correlation contract.
+//
+// Note: this sibling routes through the non-transactional path
+// (`dm` as the DBNode). The tool-originated save is not currently
+// wrapped in a transaction; tx-aware callers that need ActiveContext
+// correlation must call SaveMemoryNode directly with their own
+// provenance bridge (no such path is reachable today; this sibling
+// is the canonical tool path).
+func (dm *DatabaseManager) SaveMemoryNodeForInvocation(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, ac ActiveContext, expiresAt ...time.Time) (string, error) {
+	id := GenerateID()
+	return saveMemoryRow(dm, dm, id, collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, referenceID, retrievalPriority, importance, createdAt, ac, expiresAt...)
 }
 
 // saveMemoryRow is the shared INSERT primitive that backs both
@@ -3281,7 +3309,15 @@ func (dm *DatabaseManager) SaveMemoryNode(node DBNode, collection, content, sess
 // Watchdog telemetry, IVF cluster assignment, content_hash, and all
 // other insert-time invariants live here so future fields added to
 // the memories schema automatically reach every caller.
-func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
+//
+// The ac parameter is the tool-originated ActiveContext when available
+// (passed by SaveMemoryNodeForInvocation); the background callers
+// (SaveMemoryNode, SaveSkill) pass ActiveContext{}. The sensitive /
+// poison scanner audit emissions switch on ac.InvocationID: when
+// populated they use LogAuditForInvocation (typed correlation
+// columns); when empty they fall back to LogAudit (NULL correlation,
+// per brief §17 background-event policy).
+func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, ac ActiveContext, expiresAt ...time.Time) (string, error) {
 	// Alpha remediation (2026-08-27): reject empty / whitespace-only content.
 	// The validation run found that `mpm remember ""` and `mpm add "   "`
 	// both create memories. A persisted memory must contain meaningful
@@ -3291,25 +3327,30 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 	// emitted before the sensitive / poison scanners so the validation
 	// message is distinct from a security block.
 	if reason := validateMemoryContent(content); reason != "" {
-		dm.LogAudit(AuditWarn, "validation", "empty or whitespace-only memory content rejected", "", AuditContext{
+		emitMemorySaveAudit(dm, ac, AuditWarn, "validation", "empty or whitespace-only memory content rejected", "memory_save_validation_rejected", AuditContext{
 			"reason":    reason,
 			"len_chars": len(content),
 		})
 		return "", fmt.Errorf("memory content is empty or whitespace-only (%s) — provide non-whitespace text", reason)
 	}
 	if isSensitive, reason := isSensitiveContent(content); isSensitive {
-		dm.LogAudit(AuditError, "security", "sensitive content blocked", "", AuditContext{
+		emitMemorySaveAudit(dm, ac, AuditError, "security", "sensitive content blocked", "memory_save_sensitive_content_blocked", AuditContext{
 			"reason":    reason,
 			"len_chars": len(content),
 		})
-		return "", fmt.Errorf("sensitive content detected and blocked: %s", reason)
+		// Wrap with the typed sentinel so ClassifyError can route
+		// this deliberate security-policy rejection to
+		// OutcomeClassValidation. Without the %w wrap, ClassifyError
+		// would fall back to OutcomeClassInternal/"unclassified",
+		// incorrectly signalling an MPM substrate failure.
+		return "", fmt.Errorf("sensitive content detected and blocked: %s: %w", reason, ErrSensitiveContentBlocked)
 	}
 	if isPoisoned, reason := isPoisoned(content); isPoisoned {
-		dm.LogAudit(AuditError, "security", "poison content blocked", "", AuditContext{
+		emitMemorySaveAudit(dm, ac, AuditError, "security", "poison content blocked", "memory_save_poison_content_blocked", AuditContext{
 			"reason":    reason,
 			"len_chars": len(content),
 		})
-		return "", fmt.Errorf("poison content detected and blocked: %s", reason)
+		return "", fmt.Errorf("poison content detected and blocked: %s: %w", reason, ErrPoisonContentBlocked)
 	}
 
 	tagsJSON, _ := json.Marshal(tags)
@@ -3487,6 +3528,32 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 // SaveMemoryNode directly inside a WithTx callback.
 func (dm *DatabaseManager) SaveMemoryWithExtras(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, expiresAt ...time.Time) (string, error) {
 	return dm.SaveMemoryNode(dm, collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, referenceID, retrievalPriority, importance, createdAt, expiresAt...)
+}
+
+// emitMemorySaveAudit is the security/validation audit dispatcher used by
+// saveMemoryRow. When the supplied ActiveContext carries an InvocationID
+// (tool dispatch path), the audit row is written via LogAuditForInvocation
+// with the four typed identity columns; otherwise it falls back to the
+// plain LogAudit so background / self-maintenance / skill writes keep the
+// brief §17 NULL-correlation contract.
+//
+// eventCode is the bounded, content-free, source-authored identifier
+// (see internal/core/tool_outcome.go). One stable code per event shape:
+//   - memory_save_validation_rejected          (whitespace-only)
+//   - memory_save_sensitive_content_blocked    (security scanner)
+//   - memory_save_poison_content_blocked       (poison scanner)
+func emitMemorySaveAudit(dm *DatabaseManager, ac ActiveContext, level AuditLevel, component, message, eventCode string, ctx AuditContext) {
+	if dm == nil {
+		return
+	}
+	if ac.InvocationID != "" {
+		dm.LogAuditForInvocation(level, component, message,
+			ac.InvocationID, ac.MPMSessionID,
+			ac.FrameworkName, ac.FrameworkSessionID,
+			eventCode, ctx)
+		return
+	}
+	dm.LogAudit(level, component, message, "", ctx)
 }
 
 // UpdateMemoryMetadata patches the metadata JSON column for a specific memory ID.

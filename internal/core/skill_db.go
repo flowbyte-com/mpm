@@ -533,7 +533,7 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 		// can read it back without re-parsing the frontmatter. (The id
 		// also encodes it, but json_extract on a JSON column is cleaner
 		// than string surgery on skill:<name>-v<version>.)
-		"version":          version,
+		"version": version,
 	}
 	metaJSON, err := json.Marshal(metadata)
 	if err != nil {
@@ -696,7 +696,7 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 	// above. Skills don't carry embeddings, so IVF assignment is a
 	// no-op here.
 	txDBNode := &txNode{tx: tx, dm: dm}
-	_, err = saveMemoryRow(txDBNode, dm, id, "skills", content, "", tags, metadata, nil, true, 5, "", "", "", "")
+	_, err = saveMemoryRow(txDBNode, dm, id, "skills", content, "", tags, metadata, nil, true, 5, "", "", "", "", ActiveContext{})
 	if err != nil {
 		return "", fmt.Errorf("insert skill: %w", err)
 	}
@@ -1053,7 +1053,7 @@ func (dm *DatabaseManager) SaveSkillAndDeprecatePrior(newSkill *Skill, priorSkil
 	}
 
 	txDBNode := &txNode{tx: tx, dm: dm}
-	_, err = saveMemoryRow(txDBNode, dm, newID, "skills", content, "", tags, metadata, nil, true, 5, "", "", "", "")
+	_, err = saveMemoryRow(txDBNode, dm, newID, "skills", content, "", tags, metadata, nil, true, 5, "", "", "", "", ActiveContext{})
 	if err != nil {
 		return nil, fmt.Errorf("insert new skill: %w", err)
 	}
