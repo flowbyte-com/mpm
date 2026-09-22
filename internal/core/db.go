@@ -2827,6 +2827,24 @@ func (dm *DatabaseManager) initFTSTables() error {
 		`CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, collection, session_id UNINDEXED, tags, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS topics_fts USING fts5(name, description, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(content, tags, tokenize='porter unicode61');`,
+		// 2026-09-22 release-acceptance repair: fts_recovery drops the
+		// INSTEAD OF triggers on the `lessons` view whenever it sees
+		// them reference a missing virtual table. If we recreate the
+		// vtab here without also recreating the INSTEAD OF triggers,
+		// every subsequent INSERT into the lessons view surfaces
+		// "cannot modify lessons because it is a view". The DROP IF
+		// EXISTS + CREATE TRIGGER pair makes the recovery idempotent
+		// (canonical sync triggers for memories/sessions/etc. use
+		// IF NOT EXISTS; the lessons triggers can't because SQLite's
+		// INSTEAD OF trigger syntax requires a name, not IF NOT
+		// EXISTS, in the CREATE statement). See createLessonsViewAndTriggers
+		// for the canonical DDL kept in lockstep with these strings.
+		`DROP TRIGGER IF EXISTS lessons_instead_of_insert`,
+		`CREATE TRIGGER lessons_instead_of_insert INSTEAD OF INSERT ON lessons BEGIN INSERT INTO lessons_base(rowid, id, type, content, tags, reinforcement_count, source_session_id, created, content_hash, retrieval_priority, importance, confidence) VALUES (NEW.rowid, NEW.id, NEW.type, NEW.content, NEW.tags, COALESCE(NEW.reinforcement_count, 1), NEW.source_session_id, NEW.created, NEW.content_hash, COALESCE(NEW.retrieval_priority, 0.5), COALESCE(NEW.importance, 0.5), COALESCE(NEW.confidence, 0.7)); INSERT INTO lessons_fts(rowid, content, tags) VALUES (NEW.rowid, NEW.content, NEW.tags); END;`,
+		`DROP TRIGGER IF EXISTS lessons_instead_of_update`,
+		`CREATE TRIGGER lessons_instead_of_update INSTEAD OF UPDATE ON lessons BEGIN UPDATE lessons_base SET rowid=NEW.rowid, id=NEW.id, type=NEW.type, content=NEW.content, tags=NEW.tags, reinforcement_count=COALESCE(NEW.reinforcement_count, reinforcement_count), source_session_id=NEW.source_session_id, created=NEW.created, content_hash=NEW.content_hash, retrieval_priority=COALESCE(NEW.retrieval_priority, retrieval_priority), importance=COALESCE(NEW.importance, importance), confidence=COALESCE(NEW.confidence, confidence) WHERE rowid=OLD.rowid; DELETE FROM lessons_fts WHERE rowid=OLD.rowid; INSERT INTO lessons_fts(rowid, content, tags) VALUES (NEW.rowid, NEW.content, NEW.tags); END;`,
+		`DROP TRIGGER IF EXISTS lessons_instead_of_delete`,
+		`CREATE TRIGGER lessons_instead_of_delete INSTEAD OF DELETE ON lessons BEGIN DELETE FROM lessons_base WHERE rowid=OLD.rowid; DELETE FROM lessons_fts WHERE rowid=OLD.rowid; END;`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS references_fts USING fts5(title, content, tags, tokenize='porter unicode61');`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS reference_chunks_fts USING fts5(section, content, tokenize='porter unicode61');`,
 

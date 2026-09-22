@@ -56,8 +56,10 @@ VERSION     := $(shell git describe --tags 2>/dev/null || echo "dev")
 BUILD_LDFLAGS := -ldflags "-X main.buildVersion=$(VERSION)"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 CGO_LDFLAGS := -lm
+# Run filter for make test-release; override with `make test-release RUN='-run TestFoo'`.
+RELEASE_RUN ?=
 
-.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli test test-race test-core-precommit lint help refresh-installed
+.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race test-core-precommit lint help refresh-installed
 
 all: build
 
@@ -186,6 +188,21 @@ test:
 test-core-precommit:
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -short -count=1 -tags fts5 ./... \
 		-run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"
+
+# Release acceptance suite — cross-agent continuity, public-CLI parity,
+# supersession trace, scale/e2e boundary tests. Spins up real subprocess
+# invocations of `bin/mpm` so it requires `make build` first; the FTS5
+# build flags must match the production binary or the schema-migration
+# path leaves lessons_fts (and other FTS5 modules) unbuilt, surfacing
+# as "no such table: main.<base>_fts" at INSERT time on the lessons
+# view. This target was previously omitted from `make test` because it
+# is slower (subprocess overhead per case) and has a build-artifact
+# dependency; promoted to a dedicated target so the regression class
+# above cannot recur silently. Run pre-release.
+#
+# RUN forwards to the release_acceptance package; default is all tests.
+test-release: build
+	cd release_acceptance && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -count=1 -tags fts5 $(RELEASE_RUN) ./...
 
 # Run tests with the race detector enabled.
 # Mirrors `make test` but adds `-race`. Both flags are required:
