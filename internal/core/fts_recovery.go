@@ -12,12 +12,12 @@
 // that — see sqlite3 .dump output of any FTS5-enabled DB for the
 // canonical shape:
 //
-//   PRAGMA writable_schema=ON;
-//   INSERT INTO sqlite_schema(...) VALUES(..., 'CREATE VIRTUAL TABLE ...');
-//   CREATE TABLE 'sessions_fts_data'(...);
-//   INSERT INTO sessions_fts_data VALUES(...);
-//   ...
-//   PRAGMA writable_schema=OFF;
+//	PRAGMA writable_schema=ON;
+//	INSERT INTO sqlite_schema(...) VALUES(..., 'CREATE VIRTUAL TABLE ...');
+//	CREATE TABLE 'sessions_fts_data'(...);
+//	INSERT INTO sessions_fts_data VALUES(...);
+//	...
+//	PRAGMA writable_schema=OFF;
 //
 // The validator's reject-CREATE-VIRTUAL-TABLE + driver-compat strip of
 // INSERT-INTO-sqlite_schema combination turns this into an orphan:
@@ -42,7 +42,7 @@
 //  2. For each, check whether the virtual table exists in sqlite_master.
 //  3. If the virtual table is missing AND the shadow tables exist:
 //     a. DROP every shadow table (the search projection is disposable;
-//        we will rebuild from canonical data on recreate).
+//     we will rebuild from canonical data on recreate).
 //     b. CREATE VIRTUAL TABLE with the canonical schema.
 //     c. Re-run the canonical FTS sync trigger DDL.
 //     d. Rebuild from canonical data.
@@ -116,12 +116,12 @@ var ftsShadowSuffixes = []string{
 // the helper is self-contained — extracting the trigger DDL into a
 // shared constant is a separate cleanup).
 type ftsDomain struct {
-	name      string // short name for logs ("memories")
-	vtab      string // virtual table name ("memories_fts")
-	base      string // canonical base table ("memories")
-	cols      string // column list for CREATE VIRTUAL TABLE
-	triggers  []string
-	rebuild   string // INSERT INTO vtab SELECT FROM base WHERE ...
+	name     string // short name for logs ("memories")
+	vtab     string // virtual table name ("memories_fts")
+	base     string // canonical base table ("memories")
+	cols     string // column list for CREATE VIRTUAL TABLE
+	triggers []string
+	rebuild  string // INSERT INTO vtab SELECT FROM base WHERE ...
 }
 
 // canonicalFtsDomains is the list of FTS5 modules MPM manages. Every
@@ -181,7 +181,7 @@ var canonicalFtsDomains = []ftsDomain{
 		// triggers handle sync. The rebuild reads through the view so
 		// it joins lessons_base correctly.
 		triggers: nil,
-		rebuild: `INSERT INTO lessons_fts(rowid, content, tags) SELECT rowid, content, COALESCE(tags,'[]') FROM lessons_base WHERE deleted_at IS NULL`,
+		rebuild:  `INSERT INTO lessons_fts(rowid, content, tags) SELECT rowid, content, COALESCE(tags,'[]') FROM lessons_base WHERE deleted_at IS NULL`,
 	},
 	{
 		name: "references",
@@ -294,9 +294,20 @@ func (dm *DatabaseManager) repairOrphanedFTS5() (int, error) {
 // domain's virtual table is missing. On a fresh install where the
 // trigger doesn't exist yet (also "missing" state), `DROP TRIGGER
 // IF EXISTS` is a no-op.
+//
+// 2026-09-22 release-blocker D-2: this scan must NOT drop
+// INSTEAD OF triggers attached to views. Those triggers (the
+// `lessons_instead_of_*` triple on the `lessons` view in
+// particular) are owned by `migrateLessonsToView` and re-created by
+// `finishOrRepairLessonsView` or by the `ftsStatements` loop, NOT
+// by this recovery path. Letting the substring matcher drop them
+// creates a coupling where a successful FTS recovery leaves the
+// lesson writer surface wedged. The fix is to skip INSTEAD OF
+// triggers here so the canonical recovery path
+// (`migrateLessonsToView`/`finishOrRepairLessonsView`) owns them.
 func (dm *DatabaseManager) dropStaleFTSyncTriggers(d ftsDomain) (int, error) {
 	rows, err := dm.db.Query(
-		`SELECT name FROM sqlite_master WHERE type='trigger' AND sql LIKE ?`,
+		`SELECT name, sql FROM sqlite_master WHERE type='trigger' AND sql LIKE ?`,
 		"%"+d.vtab+"%",
 	)
 	if err != nil {
@@ -305,9 +316,20 @@ func (dm *DatabaseManager) dropStaleFTSyncTriggers(d ftsDomain) (int, error) {
 	defer rows.Close()
 	var names []string
 	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
+		var n, body string
+		if err := rows.Scan(&n, &body); err != nil {
 			return 0, err
+		}
+		// Skip INSTEAD OF triggers — they belong to a view whose
+		// writer surface is owned by migrateLessonsToView /
+		// finishOrRepairLessonsView. They cannot reference a
+		// missing virtual table in a way that fails a writer
+		// (SQLite parses triggers lazily; an attempt to fire
+		// would be what's wedged, but the canonical migration
+		// owns re-creation). See D-2 fix rationale in
+		// fts_recovery_test.go.
+		if strings.Contains(body, "INSTEAD OF") {
+			continue
 		}
 		names = append(names, n)
 	}
@@ -327,9 +349,9 @@ type ftsDomainState int
 
 const (
 	ftsStateClean         ftsDomainState = iota // virtual table present and healthy
-	ftsStateMissing                              // virtual table absent, no shadow tables
-	ftsStateOrphanShadows                        // virtual table absent, shadow tables exist
-	ftsStatePresent                              // virtual table present (handled by initFTSTables)
+	ftsStateMissing                             // virtual table absent, no shadow tables
+	ftsStateOrphanShadows                       // virtual table absent, shadow tables exist
+	ftsStatePresent                             // virtual table present (handled by initFTSTables)
 )
 
 // ftsDomainState reports the current state of one FTS5 domain.

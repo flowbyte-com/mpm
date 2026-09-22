@@ -122,9 +122,9 @@ func TestFtsRecovery_OrphanShadowTables_NoVirtual(t *testing.T) {
 	}
 
 	// Read-back via FTS — confirms the trigger fired and indexed the row.
-// Use a unique single-word token (FTS5's porter tokenizer splits on
-// non-alphanumerics; hyphenated tokens like `post-repair` would require
-// quoting, while single tokens are unambiguous).
+	// Use a unique single-word token (FTS5's porter tokenizer splits on
+	// non-alphanumerics; hyphenated tokens like `post-repair` would require
+	// quoting, while single tokens are unambiguous).
 	var n int
 	if err := db.QueryRow(
 		`SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'postrepairsentinel'`,
@@ -476,4 +476,92 @@ func intToStr(i int) string {
 		i /= 10
 	}
 	return string(ds)
+}
+
+// TestFtsRecovery_PreservesLessonsInsteadOfTriggers pins D-2's
+// load-bearing invariant: repairOrphanedFTS5 must NOT drop INSTEAD OF
+// triggers attached to the lessons view. Those triggers are owned by
+// `migrateLessonsToView` (and re-created there / by the canonical
+// `ftsStatements` loop in initFTSTables), not by this recovery path.
+//
+// Pre-fix, the substring matcher
+// (`SELECT name FROM sqlite_master WHERE type='trigger' AND sql LIKE
+// '%lessons_fts%'`) caught the three `lessons_instead_of_*` triggers
+// and dropped them. The downstream `ftsStatements` loop was supposed
+// to recreate them but only did so reliably on a clean DB — a real
+// production database in this state wedged the lessons writer
+// surface until manual intervention.
+//
+// Post-fix: the matcher's cursor carries the trigger body, and any
+// trigger whose body contains `INSTEAD OF` is skipped. This test
+// installs INSTEAD OF triggers, calls repair, asserts they survive.
+func TestFtsRecovery_PreservesLessonsInsteadOfTriggers(t *testing.T) {
+	db := ftsRecoveryTestDB(t)
+
+	// Mimic the rehearsal state: lessons_base present, lessons_fts
+	// absent (strict-DROP), three INSTEAD OF triggers present whose
+	// bodies reference lessons_fts.
+	mustExec := func(sql string) {
+		t.Helper()
+		if _, err := db.Exec(sql); err != nil {
+			t.Fatalf("setup: %v\nSQL: %s", err, sql)
+		}
+	}
+	mustExec(`CREATE TABLE lessons_base (
+		rowid INTEGER PRIMARY KEY,
+		id TEXT,
+		type TEXT,
+		content TEXT,
+		tags TEXT,
+		retrieval_priority REAL DEFAULT 0.5,
+		importance REAL DEFAULT 0.5,
+		confidence REAL DEFAULT 0.7,
+		deleted_at INTEGER
+	)`)
+	mustExec(`CREATE VIRTUAL TABLE lessons_fts USING fts5(content, tags, tokenize='porter unicode61')`)
+	mustExec(`CREATE VIEW lessons AS SELECT rowid, id, type, content, tags FROM lessons_base`)
+	mustExec(`CREATE TRIGGER lessons_instead_of_insert INSTEAD OF INSERT ON lessons BEGIN
+		INSERT INTO lessons_base(rowid, id, type, content, tags) VALUES (NEW.rowid, NEW.id, NEW.type, NEW.content, NEW.tags);
+		INSERT INTO lessons_fts(rowid, content, tags) VALUES (NEW.rowid, NEW.content, NEW.tags);
+	END`)
+	mustExec(`CREATE TRIGGER lessons_instead_of_update INSTEAD OF UPDATE ON lessons BEGIN
+		UPDATE lessons_base SET id=NEW.id WHERE rowid=OLD.rowid;
+		DELETE FROM lessons_fts WHERE rowid=OLD.rowid;
+		INSERT INTO lessons_fts(rowid, content, tags) VALUES (NEW.rowid, NEW.content, NEW.tags);
+	END`)
+	mustExec(`CREATE TRIGGER lessons_instead_of_delete INSTEAD OF DELETE ON lessons BEGIN
+		DELETE FROM lessons_base WHERE rowid=OLD.rowid;
+		DELETE FROM lessons_fts WHERE rowid=OLD.rowid;
+	END`)
+
+	// Strict-DROP lessons_fts (no IF EXISTS).
+	if _, err := db.Exec(`DROP TABLE lessons_fts`); err != nil {
+		t.Fatalf("strict drop: %v", err)
+	}
+
+	dm := &DatabaseManager{db: db}
+	if _, err := dm.repairOrphanedFTS5(); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+
+	// The three INSTEAD OF triggers must STILL exist — the canonical
+	// migration is responsible for recreating lessons_fts + the
+	// triggers; this helper must not interfere.
+	var remaining int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN
+		('lessons_instead_of_insert','lessons_instead_of_update','lessons_instead_of_delete')`).Scan(&remaining); err != nil {
+		t.Fatalf("probe triggers: %v", err)
+	}
+	if remaining != 3 {
+		names := []string{}
+		rows, _ := db.Query(`SELECT name FROM sqlite_master WHERE type='trigger'`)
+		defer rows.Close()
+		for rows.Next() {
+			var n string
+			_ = rows.Scan(&n)
+			names = append(names, n)
+		}
+		t.Errorf("INSTEAD OF triggers not preserved by repair: got %d, want 3; triggers present: %v",
+			remaining, names)
+	}
 }

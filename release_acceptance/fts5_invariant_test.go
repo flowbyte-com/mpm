@@ -126,6 +126,113 @@ func TestReleaseAcceptance_FTS5Invariant(t *testing.T) {
 			t.Errorf("[orphan] probe lesson insert: %v", err)
 		}
 	})
+
+	// D-2 release-blocker regression. Mirrors the pristine rehearsal
+	// failure exactly: an operator who runs `sqlite3 mpm.db "DROP TABLE
+	// lessons_fts"` (no IF EXISTS) on a real installation expects the
+	// next MPM invocation to recover. The C-scenario above used
+	// `DROP TABLE IF EXISTS` which behaves differently under the mattn
+	// driver (no-op on missing). The strict-DROP version is the one
+	// that actually exercises the recovery path; without a regression
+	// here, a regression in the recovery pipeline that surfaces only
+	// on strict-DROP would pass CI and block the release.
+	//
+	// Asserts the following invariants after re-open:
+	//   1. lessons_fts virtual table is recreated by the recovery path.
+	//   2. lessons_base table is intact.
+	//   3. lessons VIEW is intact (it is the public writer surface).
+	//   4. All three INSTEAD OF triggers exist on the lessons view
+	//      (insert / update / delete). Pre-fix, the
+	//      `repairOrphanedFTS5` substring-matched on `lessons_fts` and
+	//      dropped them; the subsequent `ftsStatements` loop re-ran
+	//      the canonical DROP+CREATE pair, but a real ordering bug
+	//      in some code paths left them absent, which broke every
+	//      write through the lessons view.
+	//   5. A probe INSERT through the lessons view succeeds AND the
+	//      FTS indexer accepts the row (row count in lessons_fts
+	//      matches the lessons_base insert).
+	t.Run("D_strict_drop_lesson_fts_recovery", func(t *testing.T) {
+		root := t.TempDir()
+		dm1, err := mpminternal.NewDatabaseManager(root)
+		if err != nil {
+			t.Fatalf("[D2-strict] first NewDatabaseManager: %v", err)
+		}
+		// Strict-DROP — no IF EXISTS. This is the exact operation a
+		// shell operator runs via `sqlite3 ... "DROP TABLE
+		// lessons_fts"`. Pre-D-fix this left the DB in a state
+		// where the recovery path was not exercised by the
+		// existing IF EXISTS-flavored test.
+		if _, err := dm1.SQLDB().Exec(`DROP TABLE lessons_fts`); err != nil {
+			t.Fatalf("[D2-strict] strict drop vtab: %v", err)
+		}
+		dm1.SQLDB().Close()
+
+		dm2, err := mpminternal.NewDatabaseManager(root)
+		if err != nil {
+			t.Fatalf("[D2-strict] second NewDatabaseManager: %v", err)
+		}
+		defer dm2.SQLDB().Close()
+		db := dm2.SQLDB()
+
+		// Invariant 1: lessons_fts is back.
+		got := listFtsVTabs(t, db)
+		if _, ok := got["lessons_fts"]; !ok {
+			t.Errorf("[D2-strict] lessons_fts MISSING after re-open: vtabs present=%v", got)
+		}
+
+		// Invariant 2: lessons_base is intact.
+		var baseExists int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lessons_base'`).Scan(&baseExists); err != nil {
+			t.Fatalf("[D2-strict] probe lessons_base: %v", err)
+		}
+		if baseExists != 1 {
+			t.Errorf("[D2-strict] lessons_base absent after re-open")
+		}
+
+		// Invariant 3: lessons VIEW (not TABLE) is the writer surface.
+		var objType string
+		if err := db.QueryRow(`SELECT type FROM sqlite_master WHERE name='lessons'`).Scan(&objType); err != nil {
+			t.Fatalf("[D2-strict] probe lessons type: %v", err)
+		}
+		if objType != "view" {
+			t.Errorf("[D2-strict] lessons is %q, want view", objType)
+		}
+
+		// Invariant 4: all three INSTEAD OF triggers exist. This is
+		// the regression the pristine rehearsal surfaced: a real
+		// installation that lost its triggers because fts_recovery
+		// substring-matched and dropped them, with the canonical
+		// CREATE statements never re-firing on the recovery path.
+		var trigCount int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN
+			('lessons_instead_of_insert','lessons_instead_of_update','lessons_instead_of_delete')`).Scan(&trigCount); err != nil {
+			t.Fatalf("[D2-strict] count INSTEAD OF triggers: %v", err)
+		}
+		if trigCount != 3 {
+			t.Errorf("[D2-strict] missing INSTEAD OF triggers on lessons view: got %d, want 3", trigCount)
+		}
+
+		// Invariant 5: probe INSERT round-trips and lands in FTS.
+		if err := insertProbeLesson(t, db); err != nil {
+			t.Errorf("[D2-strict] probe lesson insert: %v", err)
+		}
+		var lessonCount, ftsCount int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM lessons WHERE id='fts-probe-1'`).Scan(&lessonCount); err != nil {
+			t.Fatalf("[D2-strict] count lessons: %v", err)
+		}
+		if lessonCount != 1 {
+			t.Errorf("[D2-strict] probe row did not land in lessons view (count=%d)", lessonCount)
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM lessons_fts`).Scan(&ftsCount); err != nil {
+			// Only fatal if the vtab exists; the IF NOT EXISTS path
+			// may not have run if the build is FTS5-disabled. With
+			// the FTS5 build flag set (test gate), this is fatal.
+			t.Fatalf("[D2-strict] count lessons_fts: %v", err)
+		}
+		if ftsCount < 1 {
+			t.Errorf("[D2-strict] lessons_fts has no rows after recovery (count=%d); trigger chain is broken", ftsCount)
+		}
+	})
 }
 
 func listFtsVTabs(t *testing.T, db *sql.DB) map[string]bool {
