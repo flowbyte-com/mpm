@@ -95,6 +95,8 @@ func handleDoctor(args []string) int {
 			Timestamp string                   `json:"timestamp"`
 			Summary   map[string]interface{}   `json:"summary"`
 			Checks    []map[string]interface{} `json:"checks"`
+			Usage     *DoctorUsage             `json:"usage,omitempty"`
+			Attention *DoctorAttention         `json:"attention,omitempty"`
 		}{
 			Timestamp: nowRFC3339(),
 			Summary: map[string]interface{}{
@@ -102,7 +104,9 @@ func handleDoctor(args []string) int {
 				"warnings": report.Warnings,
 				"failed":   report.Failed,
 			},
-			Checks: doctorChecksToJSON(report.Checks),
+			Checks:    doctorChecksToJSON(report.Checks),
+			Usage:     report.Usage,
+			Attention: report.Attention,
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")

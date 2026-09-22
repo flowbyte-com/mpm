@@ -20,8 +20,10 @@ package main
 import (
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
+	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
@@ -45,16 +47,16 @@ func NewDoctorRenderer(out io.Writer, useEmoji bool) *DoctorRenderer {
 //
 // Output shape:
 //
-//   MPM · Doctor
-//   Generated <timestamp>
+//	MPM · Doctor
+//	Generated <timestamp>
 //
-//   ✓ ALL PASS   (or ⚠ WARNINGS or ✗ FAILURES followed by count)
+//	✓ ALL PASS   (or ⚠ WARNINGS or ✗ FAILURES followed by count)
 //
-//   ✓  Database          integrity ok | 19 pages | 0 busy retries
-//   ⚠  Embeddings        12 / 290 missing (4%) — under threshold
-//        → Run 'mpm ops backfill-embeddings' to fill the gaps.
-//   ✗  Working Context   7 scratchpads past decay_at — cleanup not running
-//        → Run 'mpm ops gc --shred-negative'.
+//	✓  Database          integrity ok | 19 pages | 0 busy retries
+//	⚠  Embeddings        12 / 290 missing (4%) — under threshold
+//	     → Run 'mpm ops backfill-embeddings' to fill the gaps.
+//	✗  Working Context   7 scratchpads past decay_at — cleanup not running
+//	     → Run 'mpm ops gc --shred-negative'.
 //
 // The overall status is computed from the report's PASS/WARN/FAIL tally.
 // The per-row markers mirror the per-check status.
@@ -104,7 +106,127 @@ func (r *DoctorRenderer) Render(report *DoctorReport) error {
 			r.renderCronRetention(cr)
 		}
 	}
+
+	// Additive observability synthesis. Each section is wrapped
+	// in a degraded-safe renderer (Unavailability sentinel shows
+	// the failure without crashing Doctor).
+	if report.Usage != nil {
+		if err := r.renderUsage(report.Usage); err != nil {
+			return err
+		}
+	}
+	if report.Attention != nil {
+		if err := r.renderAttention(report.Attention); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// renderUsage emits the Doctor Usage section. Bounded facts; no
+// full-table dumps. All counts come from indexed tool_invocations
+// reads. Empty / new installs render as zeros, never as fake data.
+func (r *DoctorRenderer) renderUsage(u *DoctorUsage) error {
+	if err := render.Heading(r.out, "Usage"); err != nil {
+		return err
+	}
+	if err := render.BlankLine(r.out); err != nil {
+		return err
+	}
+	if u.Unavailable != nil {
+		fmt.Fprintf(r.out, "  observability history unavailable: %s\n", u.Unavailable.Message)
+		return render.BlankLine(r.out)
+	}
+	fmt.Fprintf(r.out, "  Tool calls          %d today · %d in 7d\n",
+		u.Window24hInvocations, u.Window7dInvocations)
+	if len(u.FrameworksObserved) > 0 {
+		fmt.Fprintf(r.out, "  Frameworks          %s\n", strings.Join(u.FrameworksObserved, " · "))
+	}
+	if len(u.MostUsedTools) > 0 {
+		parts := make([]string, 0, len(u.MostUsedTools))
+		for _, mt := range u.MostUsedTools {
+			parts = append(parts, fmt.Sprintf("%s (%d)", mt.Tool, mt.Count))
+		}
+		fmt.Fprintf(r.out, "  Most used           %s\n", strings.Join(parts, " · "))
+	}
+	if len(u.OutcomeDistribution) > 0 || u.HistoricalUnclassified > 0 {
+		var parts []string
+		// Canonical ordering — same as AllOutcomeClasses.
+		for _, class := range mpminternal.AllOutcomeClasses {
+			if c, ok := u.OutcomeDistribution[string(class)]; ok && c > 0 {
+				parts = append(parts, fmt.Sprintf("%s %d", class, c))
+			}
+		}
+		if u.HistoricalUnclassified > 0 {
+			parts = append(parts, fmt.Sprintf("historical/unclassified %d", u.HistoricalUnclassified))
+		}
+		if len(parts) > 0 {
+			fmt.Fprintf(r.out, "  Outcomes            %s\n", strings.Join(parts, " · "))
+		}
+	}
+	exposeLabel := fmt.Sprintf("%d exposed · %d registered", u.ExposedTools, u.RegisteredTools)
+	if u.MCPExposeAllEnv {
+		exposeLabel += " (MPM_EXPOSE_ALL_TOOLS=1)"
+	}
+	fmt.Fprintf(r.out, "  MCP tools           %s\n", exposeLabel)
+	return render.BlankLine(r.out)
+}
+
+// renderAttention emits the Doctor Attention section. Three sub-areas:
+// operational issues (bounded recent substrate/integration/timeout/internal
+// events), audit clusters (high-volume bounded), and security policy
+// (deliberate blocks — informational only, NOT MPM failures).
+func (r *DoctorRenderer) renderAttention(a *DoctorAttention) error {
+	if err := render.Heading(r.out, "Attention"); err != nil {
+		return err
+	}
+	if err := render.BlankLine(r.out); err != nil {
+		return err
+	}
+	if a.Unavailable != nil {
+		fmt.Fprintf(r.out, "  observability history unavailable: %s\n", a.Unavailable.Message)
+		return render.BlankLine(r.out)
+	}
+	fmt.Fprintf(r.out, "  Operational issues  %d in 7d\n", a.OperationalIssues7d)
+	for _, ev := range a.OperationalEvents {
+		if ev.EventCode != "" {
+			fmt.Fprintf(r.out, "    %s · %s · %d occurrences · last seen %s\n",
+				ev.Component, ev.EventCode, ev.Count,
+				formatUnixTimeAgo(ev.LastSeen))
+		} else {
+			fmt.Fprintf(r.out, "    %s · %d occurrences · last seen %s\n",
+				ev.Component, ev.Count, formatUnixTimeAgo(ev.LastSeen))
+		}
+	}
+	fmt.Fprintf(r.out, "  Audit clusters       %d active\n", len(a.AuditClusters))
+	for _, cl := range a.AuditClusters {
+		fmt.Fprintf(r.out, "    %s · %d occurrences · last seen %s\n",
+			cl.Component, cl.Count, formatUnixTimeAgo(cl.LastSeen))
+	}
+	if a.SecurityEvents7d > 0 {
+		fmt.Fprintf(r.out, "  Security policy      %d blocked sensitive writes in 7d\n",
+			a.SecurityEvents7d)
+	}
+	return render.BlankLine(r.out)
+}
+
+// formatUnixTimeAgo renders a unix timestamp as a relative-time
+// string ("5m ago" / "3h ago" / "2d ago"). Zero means unknown.
+func formatUnixTimeAgo(unix int64) string {
+	if unix <= 0 {
+		return "unknown"
+	}
+	d := time.Since(time.Unix(unix, 0))
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
 }
 
 // renderCronRetention emits a compact, human-readable block of the
@@ -176,9 +298,9 @@ func markerFor(status string, useEmoji bool) string {
 // overallSummary returns the overall-summary line shown after the
 // per-section markers. Examples:
 //
-//   PASS — all 5 checks healthy
-//   WARN — 2 warnings, 3 passed (no failures)
-//   FAIL — 1 failure, 1 warning, 3 passed
+//	PASS — all 5 checks healthy
+//	WARN — 2 warnings, 3 passed (no failures)
+//	FAIL — 1 failure, 1 warning, 3 passed
 //
 // 2026-09-14 release-pass: informational checks (status=INFO) are
 // excluded from the tally so an absent optional feature does not

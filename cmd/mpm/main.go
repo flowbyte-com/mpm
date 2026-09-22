@@ -505,17 +505,17 @@ type DoctorCheck struct {
 //	    before the next sweep). Persistent nonzero backlog past an
 //	    expected sweep opportunity is degraded.
 type CronRetentionStatus struct {
-	Pending                     int    `json:"pending"`
-	EligibleBacklog             int    `json:"eligible_backlog"`
-	RetentionWindowSec          int64  `json:"retention_window_seconds"`
-	SweepCadenceSec             int64  `json:"sweep_cadence_seconds"`
-	NormalLimit                 int    `json:"normal_limit"`
-	CatchUpLimit                int    `json:"catchup_limit"`
-	Phase                       string `json:"phase"`
-	SchedulerUptimeSec          int64  `json:"scheduler_uptime_seconds"`
-	LastExpectedSweepAgoSec     int64  `json:"last_expected_sweep_ago_seconds"`
+	Pending                       int    `json:"pending"`
+	EligibleBacklog               int    `json:"eligible_backlog"`
+	RetentionWindowSec            int64  `json:"retention_window_seconds"`
+	SweepCadenceSec               int64  `json:"sweep_cadence_seconds"`
+	NormalLimit                   int    `json:"normal_limit"`
+	CatchUpLimit                  int    `json:"catchup_limit"`
+	Phase                         string `json:"phase"`
+	SchedulerUptimeSec            int64  `json:"scheduler_uptime_seconds"`
+	LastExpectedSweepAgoSec       int64  `json:"last_expected_sweep_ago_seconds"`
 	SecondsUntilNextExpectedSweep int64  `json:"seconds_until_next_expected_sweep"`
-	Interpretation              string `json:"interpretation,omitempty"`
+	Interpretation                string `json:"interpretation,omitempty"`
 }
 
 // DoctorReport is the full diagnostic report
@@ -530,6 +530,90 @@ type DoctorReport struct {
 	// 2026-09-14 release-pass.
 	Informational int
 	Checks        []DoctorCheck
+	// Usage and Attention are additive Doctor sections that
+	// surface recent tool-originated evidence (from
+	// tool_invocations / system_audit_log / audit_cluster_proposals).
+	// They are nil on partial degradation; the renderer and JSON
+	// envelope treat nil as "unavailable". Adding these fields
+	// does NOT break existing JSON consumers (omitempty).
+	Usage     *DoctorUsage     `json:"usage,omitempty"`
+	Attention *DoctorAttention `json:"attention,omitempty"`
+}
+
+// DoctorUsageSectionError is set when Usage queries failed but the
+// rest of Doctor still ran. The renderer / JSON envelope carry the
+// message so operators can see why Usage is missing.
+type DoctorUsageSectionError struct {
+	Component string `json:"component"`
+	Message   string `json:"message"`
+}
+
+// DoctorAttentionSectionError mirrors UsageSectionError for Attention.
+type DoctorAttentionSectionError struct {
+	Component string `json:"component"`
+	Message   string `json:"message"`
+}
+
+// DoctorUsage is the recent tool-originated evidence surfaced by
+// Doctor. All fields are derived from bounded reads against
+// tool_invocations (24h / 7d windows). Empty / new installs render
+// with zeros; no fake data is synthesised.
+type DoctorUsage struct {
+	Window24hInvocations   int                      `json:"window_24h_invocations"`
+	Window7dInvocations    int                      `json:"window_7d_invocations"`
+	FrameworksObserved     []string                 `json:"frameworks_observed"`
+	MostUsedTools          []DoctorUsedTool         `json:"most_used_tools"`
+	OutcomeDistribution    map[string]int           `json:"outcome_distribution"`
+	HistoricalUnclassified int                      `json:"historical_unclassified"`
+	RegisteredTools        int                      `json:"registered_tools"`
+	ExposedTools           int                      `json:"exposed_tools"`
+	ExposedToolsUnfiltered int                      `json:"exposed_tools_unfiltered"`
+	MCPExposeAllEnv        bool                     `json:"mcp_expose_all_env"`
+	Unavailable            *DoctorUsageSectionError `json:"unavailable,omitempty"`
+}
+
+// DoctorUsedTool is one entry in the top-N tool list.
+type DoctorUsedTool struct {
+	Tool  string `json:"tool"`
+	Count int    `json:"count"`
+}
+
+// DoctorAttention is the historical operational evidence surfaced
+// by Doctor. Three distinct sub-areas:
+//
+//   - OperationalIssues: bounded recent audit_log rows where
+//     level IN (error, fatal, critical) — the substrate-failure
+//     signal. Caller / policy failures (validation / not_found /
+//     conflict) are EXCLUDED.
+//   - AuditClusters: active high-volume clusters.
+//   - SecurityEvents: bounded count of deliberate policy blocks
+//     (sensitive_content_blocked, poison_content_blocked). These
+//     are intentional, NOT MPM failures.
+type DoctorAttention struct {
+	OperationalIssues7d int                          `json:"operational_issues_7d"`
+	OperationalEvents   []DoctorOperationalEvent     `json:"operational_events"`
+	AuditClusters       []DoctorAuditCluster         `json:"audit_clusters"`
+	SecurityEvents7d    int                          `json:"security_events_7d"`
+	Unavailable         *DoctorAttentionSectionError `json:"unavailable,omitempty"`
+}
+
+// DoctorOperationalEvent is one (component, event_code) row from
+// system_audit_log. Event_code may be empty for historical rows
+// (pre-event-code era).
+type DoctorOperationalEvent struct {
+	Component string `json:"component"`
+	EventCode string `json:"event_code,omitempty"`
+	Count     int    `json:"count"`
+	LastSeen  int64  `json:"last_seen_unix"`
+}
+
+// DoctorAuditCluster is one row from audit_cluster_proposals with
+// status='active' and count>1.
+type DoctorAuditCluster struct {
+	Component string `json:"component"`
+	Count     int    `json:"count"`
+	LastSeen  int64  `json:"last_seen_unix"`
+	Status    string `json:"status"`
 }
 
 // Colors for terminal output (ANSI)
@@ -1473,13 +1557,13 @@ type helpCmd struct {
 }
 
 var (
-	// 2026-09-14 release-pass: the legacy lipgloss help styles
-	// (helpGold, helpCyan, helpMagenta, helpDim, helpGreen, helpBorder,
-	// helpTitle, helpSection, helpCommand, helpDesc, helpBorderStyle, helpTip)
-	// have been removed. The canonical visual grammar lives in
-	// cmd/mpm/render and is shared with Doctor / Info / Status.
-	// Help surfaces route through render.Heading / render.Section /
-	// render.Label / render.Plain / render.Hint / render.BlankLine.
+// 2026-09-14 release-pass: the legacy lipgloss help styles
+// (helpGold, helpCyan, helpMagenta, helpDim, helpGreen, helpBorder,
+// helpTitle, helpSection, helpCommand, helpDesc, helpBorderStyle, helpTip)
+// have been removed. The canonical visual grammar lives in
+// cmd/mpm/render and is shared with Doctor / Info / Status.
+// Help surfaces route through render.Heading / render.Section /
+// render.Label / render.Plain / render.Hint / render.BlankLine.
 )
 
 // PrintQuicklinks displays the compact dashboard when `mpm` is run

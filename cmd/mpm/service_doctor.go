@@ -27,16 +27,19 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/flowbyte-com/mpm-core/config"
 	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/tools"
 	"github.com/flowbyte-com/mpm/internal/scheduler"
 )
 
@@ -93,6 +96,30 @@ func (s *DoctorService) Check() (*DoctorReport, error) {
 	// after appending probe rows; idempotency keeps both safe.
 	report.Tally()
 	_ = startTime // reserved for per-check timing in future waves
+
+	// Additive observability synthesis (Doctor Wave 3). Wrapped in
+	// safeCompute so a history-table failure never breaks the
+	// current-health checks above.
+	if usage, usageErr := s.computeUsage(); usageErr == nil {
+		report.Usage = usage
+	} else {
+		report.Usage = &DoctorUsage{
+			Unavailable: &DoctorUsageSectionError{
+				Component: "tool_invocations",
+				Message:   usageErr.Error(),
+			},
+		}
+	}
+	if att, attErr := s.computeAttention(); attErr == nil {
+		report.Attention = att
+	} else {
+		report.Attention = &DoctorAttention{
+			Unavailable: &DoctorAttentionSectionError{
+				Component: "system_audit_log",
+				Message:   attErr.Error(),
+			},
+		}
+	}
 
 	return report, nil
 }
@@ -174,10 +201,11 @@ func (s *DoctorService) checkDatabase() DoctorCheck {
 
 // checkEmbeddings inspects the embedding_source provenance of live memories.
 // Reports per spec §7.1 table:
-//   hash>0 AND provider=0 → FAIL (fully degraded)
-//   hash>0               → WARN (legacy rows present)
-//   null/total > 10%     → WARN (backfill needed)
-//   all real provider    → PASS
+//
+//	hash>0 AND provider=0 → FAIL (fully degraded)
+//	hash>0               → WARN (legacy rows present)
+//	null/total > 10%     → WARN (backfill needed)
+//	all real provider    → PASS
 func (s *DoctorService) checkEmbeddings() DoctorCheck {
 	check := DoctorCheck{Name: "Embeddings"}
 	var total, hashCount, nullCount int
@@ -860,4 +888,231 @@ func readSchedulerStateHeartbeat(path string) (int64, int64, error) {
 		return 0, 0, err
 	}
 	return s.ProcessStartedUnix, s.LastTickUnix, nil
+}
+
+// computeUsage derives the Doctor Usage section from tool_invocations
+// via bounded 24h / 7d windows. All queries are bounded by indexed
+// timestamp predicates; no full-table scans. Returns a sentinel
+// DoctorUsage with Unavailable populated if any query fails so the
+// caller can still render the rest of Doctor.
+func (s *DoctorService) computeUsage() (*DoctorUsage, error) {
+	if s.dm == nil {
+		return nil, fmt.Errorf("nil database manager")
+	}
+	u := &DoctorUsage{
+		OutcomeDistribution: map[string]int{},
+	}
+	now := time.Now().UTC()
+	cutoff24h := now.Add(-24 * time.Hour).Unix()
+	cutoff7d := now.Add(-7 * 24 * time.Hour).Unix()
+
+	// 1. 24h invocation count.
+	if err := s.dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM tool_invocations WHERE started_at >= ?`,
+		cutoff24h,
+	).Scan(&u.Window24hInvocations); err != nil {
+		return nil, fmt.Errorf("tool_invocations 24h count: %w", err)
+	}
+
+	// 2. 7d invocation count.
+	if err := s.dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM tool_invocations WHERE started_at >= ?`,
+		cutoff7d,
+	).Scan(&u.Window7dInvocations); err != nil {
+		return nil, fmt.Errorf("tool_invocations 7d count: %w", err)
+	}
+
+	// 3. Frameworks observed (7d).
+	rows, err := s.dm.SQLDB().Query(
+		`SELECT framework_name FROM tool_invocations
+		 WHERE started_at >= ? AND framework_name IS NOT NULL
+		 GROUP BY framework_name ORDER BY framework_name`,
+		cutoff7d,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("tool_invocations frameworks: %w", err)
+	}
+	for rows.Next() {
+		var fw string
+		if scanErr := rows.Scan(&fw); scanErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("tool_invocations framework scan: %w", scanErr)
+		}
+		u.FrameworksObserved = append(u.FrameworksObserved, fw)
+	}
+	rows.Close()
+
+	// 4. Most-used tools (7d, top 5).
+	rows, err = s.dm.SQLDB().Query(
+		`SELECT tool_name, COUNT(*) c FROM tool_invocations
+		 WHERE started_at >= ?
+		 GROUP BY tool_name ORDER BY c DESC, tool_name LIMIT 5`,
+		cutoff7d,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("tool_invocations top-tools: %w", err)
+	}
+	for rows.Next() {
+		var name string
+		var count int
+		if scanErr := rows.Scan(&name, &count); scanErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("tool_invocations top-tools scan: %w", scanErr)
+		}
+		u.MostUsedTools = append(u.MostUsedTools, DoctorUsedTool{Tool: name, Count: count})
+	}
+	rows.Close()
+
+	// 5. Outcome distribution (7d). Includes legacy NULL outcome_class
+	// rows as "historical/unclassified" — Doctor does not parse
+	// error_message to backfill classification for those.
+	rows, err = s.dm.SQLDB().Query(
+		`SELECT outcome_class, COUNT(*) FROM tool_invocations
+		 WHERE started_at >= ?
+		 GROUP BY outcome_class`,
+		cutoff7d,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("tool_invocations outcomes: %w", err)
+	}
+	for rows.Next() {
+		var class sql.NullString
+		var count int
+		if scanErr := rows.Scan(&class, &count); scanErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("tool_invocations outcomes scan: %w", scanErr)
+		}
+		if class.Valid {
+			u.OutcomeDistribution[class.String] = count
+		} else {
+			u.HistoricalUnclassified = count
+		}
+	}
+	rows.Close()
+
+	// 6. MCP tool registry size + exposure (in-memory, zero DB cost).
+	u.RegisteredTools = len(tools.Registry)
+	u.ExposedTools = defaultCoreToolCount()
+	u.ExposedToolsUnfiltered = u.RegisteredTools
+	u.MCPExposeAllEnv = os.Getenv("MPM_EXPOSE_ALL_TOOLS") != ""
+
+	return u, nil
+}
+
+// defaultCoreToolCount returns the size of the canonical initial MCP
+// surface (3: mpm_memory, mpm_context, mpm_help). The set lives in
+// cmd/mpm-mcp/main.go:78-101; here we hardcode the same count so
+// Doctor does not depend on mpm-mcp internals.
+func defaultCoreToolCount() int { return 3 }
+
+// parseUnixOrZero accepts either a unix-seconds integer or the legacy
+// SQLite datetime format ("YYYY-MM-DD HH:MM:SS") and returns the
+// canonical unix seconds. Zero means unknown / unparseable. Doctor
+// treats both forms so the legacy migration window doesn't crash
+// Attention rendering.
+func parseUnixOrZero(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
+		return t.Unix()
+	}
+	return 0
+}
+
+// computeAttention derives the Doctor Attention section from
+// system_audit_log and audit_cluster_proposals. Three bounded
+// sub-areas; no full-table scans.
+func (s *DoctorService) computeAttention() (*DoctorAttention, error) {
+	if s.dm == nil {
+		return nil, fmt.Errorf("nil database manager")
+	}
+	a := &DoctorAttention{
+		OperationalEvents: []DoctorOperationalEvent{},
+		AuditClusters:     []DoctorAuditCluster{},
+	}
+	now := time.Now().UTC()
+	cutoff7d := now.Add(-7 * 24 * time.Hour).Unix()
+
+	// 1. Operational events: bounded recent audit_log rows where
+	//    level IN (error, fatal, critical). Caller / policy failures
+	//    (validation / not_found / conflict) and intentional security
+	//    blocks are EXCLUDED — those are not MPM operational
+	//    problems.
+	rows, err := s.dm.SQLDB().Query(
+		`SELECT component,
+		        COALESCE(event_code, '') AS event_code,
+		        COUNT(*) AS c,
+		        MAX(created_at) AS last_seen
+		 FROM system_audit_log
+		 WHERE level IN ('error','fatal','critical')
+		   AND created_at >= ?
+		   AND component != 'security'
+		 GROUP BY component, event_code
+		 ORDER BY c DESC, last_seen DESC
+		 LIMIT 5`,
+		cutoff7d,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("system_audit_log operational: %w", err)
+	}
+	for rows.Next() {
+		var ev DoctorOperationalEvent
+		var lastSeenStr string
+		if scanErr := rows.Scan(&ev.Component, &ev.EventCode, &ev.Count, &lastSeenStr); scanErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("system_audit_log operational scan: %w", scanErr)
+		}
+		if t, parseErr := time.Parse("2006-01-02 15:04:05", lastSeenStr); parseErr == nil {
+			ev.LastSeen = t.Unix()
+		}
+		a.OperationalEvents = append(a.OperationalEvents, ev)
+		a.OperationalIssues7d += ev.Count
+	}
+	rows.Close()
+
+	// 2. Active audit clusters (bounded high-volume). last_seen is
+	//    INTEGER per schema, but pre-migration rows may carry the
+	//    legacy TEXT format ("YYYY-MM-DD HH:MM:SS"). Scan into a
+	//    NullString and fall back gracefully so Doctor tolerates the
+	//    mixed-type legacy state without crashing.
+	rows, err = s.dm.SQLDB().Query(
+		`SELECT component, count, last_seen, status FROM audit_cluster_proposals
+		 WHERE status = 'active' AND count > 1
+		 ORDER BY count DESC, last_seen DESC LIMIT 5`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("audit_cluster_proposals: %w", err)
+	}
+	for rows.Next() {
+		var cl DoctorAuditCluster
+		var lastSeenRaw sql.NullString
+		if scanErr := rows.Scan(&cl.Component, &cl.Count, &lastSeenRaw, &cl.Status); scanErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("audit_cluster_proposals scan: %w", scanErr)
+		}
+		if lastSeenRaw.Valid {
+			cl.LastSeen = parseUnixOrZero(lastSeenRaw.String)
+		}
+		a.AuditClusters = append(a.AuditClusters, cl)
+	}
+	rows.Close()
+
+	// 3. Security policy events: bounded count of deliberate
+	//    sensitive / poison content blocks. NOT MPM failures.
+	if err := s.dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM system_audit_log
+		 WHERE component = 'security'
+		   AND event_code IN ('memory_save_sensitive_content_blocked',
+		                     'memory_save_poison_content_blocked')
+		   AND created_at >= ?`,
+		cutoff7d,
+	).Scan(&a.SecurityEvents7d); err != nil {
+		return nil, fmt.Errorf("system_audit_log security: %w", err)
+	}
+
+	return a, nil
 }
