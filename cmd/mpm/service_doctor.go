@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -99,24 +100,28 @@ func (s *DoctorService) Check() (*DoctorReport, error) {
 
 	// Additive observability synthesis (Doctor Wave 3). Wrapped in
 	// safeCompute so a history-table failure never breaks the
-	// current-health checks above.
+	// current-health checks above. Detailed errors stay in the
+	// watchdog / slog channels; Doctor surfaces only a bounded
+	// "unavailable" flag plus component name (no raw Go error).
 	if usage, usageErr := s.computeUsage(); usageErr == nil {
 		report.Usage = usage
 	} else {
+		slog.Warn("doctor usage compute failed", "component", "tool_invocations", "err", usageErr.Error())
 		report.Usage = &DoctorUsage{
 			Unavailable: &DoctorUsageSectionError{
-				Component: "tool_invocations",
-				Message:   usageErr.Error(),
+				Component:   "tool_invocations",
+				Unavailable: true,
 			},
 		}
 	}
 	if att, attErr := s.computeAttention(); attErr == nil {
 		report.Attention = att
 	} else {
+		slog.Warn("doctor attention compute failed", "component", "system_audit_log", "err", attErr.Error())
 		report.Attention = &DoctorAttention{
 			Unavailable: &DoctorAttentionSectionError{
-				Component: "system_audit_log",
-				Message:   attErr.Error(),
+				Component:   "system_audit_log",
+				Unavailable: true,
 			},
 		}
 	}

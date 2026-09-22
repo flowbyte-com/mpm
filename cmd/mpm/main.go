@@ -541,17 +541,23 @@ type DoctorReport struct {
 }
 
 // DoctorUsageSectionError is set when Usage queries failed but the
-// rest of Doctor still ran. The renderer / JSON envelope carry the
-// message so operators can see why Usage is missing.
+// rest of Doctor still ran. The contract intentionally hides the
+// raw Go error string from human and JSON output — operators see
+// only that the section is unavailable and which component failed.
+// The detailed error remains accessible through the standard
+// watchdog / slog channels (see service_doctor.go where the error is
+// caught and discarded) without surfacing arbitrary database
+// paths, SQL fragments, or identifiers in Doctor output.
 type DoctorUsageSectionError struct {
 	Component string `json:"component"`
-	Message   string `json:"message"`
+	// Unavailable is the bounded flag Doctor renders.
+	Unavailable bool `json:"unavailable"`
 }
 
 // DoctorAttentionSectionError mirrors UsageSectionError for Attention.
 type DoctorAttentionSectionError struct {
-	Component string `json:"component"`
-	Message   string `json:"message"`
+	Component   string `json:"component"`
+	Unavailable bool   `json:"unavailable"`
 }
 
 // DoctorUsage is the recent tool-originated evidence surfaced by

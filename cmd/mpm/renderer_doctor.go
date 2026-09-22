@@ -134,7 +134,7 @@ func (r *DoctorRenderer) renderUsage(u *DoctorUsage) error {
 		return err
 	}
 	if u.Unavailable != nil {
-		fmt.Fprintf(r.out, "  observability history unavailable: %s\n", u.Unavailable.Message)
+		fmt.Fprintf(r.out, "  Observability history unavailable: %s\n", u.Unavailable.Component)
 		return render.BlankLine(r.out)
 	}
 	fmt.Fprintf(r.out, "  Tool calls          %d today · %d in 7d\n",
@@ -184,7 +184,7 @@ func (r *DoctorRenderer) renderAttention(a *DoctorAttention) error {
 		return err
 	}
 	if a.Unavailable != nil {
-		fmt.Fprintf(r.out, "  observability history unavailable: %s\n", a.Unavailable.Message)
+		fmt.Fprintf(r.out, "  Observability history unavailable: %s\n", a.Unavailable.Component)
 		return render.BlankLine(r.out)
 	}
 	fmt.Fprintf(r.out, "  Operational issues  %d in 7d\n", a.OperationalIssues7d)
