@@ -781,14 +781,25 @@ fi
 # MPM substrate sanity check (proof of preservation)
 # --------------------------------------------------------------------------
 
-if [ -x /home/v/.mpm/bin/mpm ]; then
-  if /home/v/.mpm/bin/mpm --version >/dev/null 2>&1; then
-    log "MPM substrate preserved: $(/home/v/.mpm/bin/mpm --version 2>&1 | head -n1)"
+# The canonical MPM install layout is $HOME/.mpm/bin/mpm — same root
+# the install.sh script provisions (see OWNERSHIP MODEL comment at the
+# top of this file: "anything under ~/.mpm — binaries, DB, config").
+# The previous hardcoded "/home/v/.mpm/bin/mpm" pointed only at the
+# original author's home directory; on any other user's machine the
+# check always reported "not found" even when MPM was correctly
+# installed at $HOME/.mpm/bin/mpm. HOME is the canonical source for
+# the user-level install root; an unset HOME at uninstall time is a
+# far worse problem than this script can meaningfully recover from.
+MPM_BIN="${HOME}/.mpm/bin/mpm"
+
+if [ -x "$MPM_BIN" ]; then
+  if "$MPM_BIN" --version >/dev/null 2>&1; then
+    log "MPM substrate preserved: $("$MPM_BIN" --version 2>&1 | head -n1)"
   else
-    warn "MPM binary at /home/v/.mpm/bin/mpm is present but does not execute cleanly"
+    warn "MPM binary at $MPM_BIN is present but does not execute cleanly"
   fi
 else
-  warn "/home/v/.mpm/bin/mpm not found — this uninstaller never modified the substrate,"
+  warn "$MPM_BIN not found — this uninstaller never modified the substrate,"
   warn "  but if you expected MPM to be installed, investigate before continuing."
 fi
 

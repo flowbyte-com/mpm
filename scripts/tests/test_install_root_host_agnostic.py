@@ -47,7 +47,13 @@ import unittest
 from pathlib import Path
 
 
-REPO_ROOT = Path("/home/v/workspace/projects/mpm").resolve()
+# Derive the repo root from this file's location rather than a
+# hardcoded author-machine absolute path. The tests live at
+# scripts/tests/<file>.py, so REPO_ROOT is two parents up:
+# scripts/tests -> scripts -> <repo-root>. The previous literal
+# "/home/v/workspace/projects/mpm" pointed at the original author's
+# checkout and resolved to a non-existent path for every other user.
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 INSTALL_SH = REPO_ROOT / "install.sh"
 
 # Markers in install.sh that prevent the script from running main()

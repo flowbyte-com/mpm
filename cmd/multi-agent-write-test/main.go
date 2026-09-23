@@ -3,26 +3,28 @@
 // Stress test for SQLite WAL mode + 5s busy_timeout under concurrent
 // writes from three independent invocation paths:
 //
-//   1. CLI writers — exec.Command("mpm", "memory", "add", ...).
-//      Real-world: agents shelling out from scripts.
-//   2. MCP writers — each worker spawns its own mpm-mcp stdio server,
-//      serializes save() requests through it.
-//      Real-world: Hermes / OpenClaw / Claude Code each owning one
-//      mpm-mcp child.
-//   3. Direct SQLite readers — separate *sql.DB connections running
-//      FTS5 + aggregate queries in a tight loop.
-//      Real-world: the wake scheduler reading scheduled_wakes while
-//      writes are in flight.
+//  1. CLI writers — exec.Command("mpm", "memory", "add", ...).
+//     Real-world: agents shelling out from scripts.
+//  2. MCP writers — each worker spawns its own mpm-mcp stdio server,
+//     serializes save() requests through it.
+//     Real-world: Hermes / OpenClaw / Claude Code each owning one
+//     mpm-mcp child.
+//  3. Direct SQLite readers — separate *sql.DB connections running
+//     FTS5 + aggregate queries in a tight loop.
+//     Real-world: the wake scheduler reading scheduled_wakes while
+//     writes are in flight.
 //
-// Verification gates (per v's Day-5 blueprint, 2026-08-17):
-//   G1: Zero SQLITE_BUSY errors leaked to any caller.
-//   G2: Zero dropped rows — memory_count_delta == successful_writes.
-//   G3: Zero reader latency spikes — max(per-query latency) < 500ms.
+// Verification gates (per the Day-5 blueprint, 2026-08-17):
+//
+//	G1: Zero SQLITE_BUSY errors leaked to any caller.
+//	G2: Zero dropped rows — memory_count_delta == successful_writes.
+//	G3: Zero reader latency spikes — max(per-query latency) < 500ms.
 //
 // Lives at cmd/multi-agent-write-test/ (separate binary, not part of
 // the regular `go test ./...` sweep). Run with:
-//   go run ./cmd/multi-agent-write-test -duration 30s \
-//     -cli-workers 8 -mcp-workers 4 -read-workers 4
+//
+//	go run ./cmd/multi-agent-write-test -duration 30s \
+//	  -cli-workers 8 -mcp-workers 4 -read-workers 4
 package main
 
 import (
@@ -35,6 +37,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -64,13 +67,37 @@ func parseFlags() Config {
 	flag.IntVar(&cfg.CLIWorkers, "cli-workers", 8, "CLI writer goroutines (each execs one mpm CLI at a time)")
 	flag.IntVar(&cfg.MCPWorkers, "mcp-workers", 4, "MCP writer goroutines (each spawns one mpm-mcp)")
 	flag.IntVar(&cfg.ReadWorkers, "read-workers", 4, "direct-Sqlite reader goroutines")
-	flag.StringVar(&cfg.DBPath, "db", "/home/v/.mpm/src/db/mpm.db", "SQLite database path")
-	flag.StringVar(&cfg.MPMBin, "mpm", "/home/v/.mpm/bin/mpm", "mpm CLI binary")
-	flag.StringVar(&cfg.MCPBin, "mcp", "/home/v/.mpm/bin/mpm-mcp", "mpm-mcp stdio server binary")
+	// Flag defaults resolve to the canonical user-level install root
+	// ($HOME/.mpm/...) so this binary works on any host without
+	// pointing at a specific author's checkout. Operators on a
+	// non-default layout override via -db / -mpm / -mcp explicitly.
+	defaultDB, defaultMPMBin, defaultMCPBin := mpmDefaultPaths()
+	flag.StringVar(&cfg.DBPath, "db", defaultDB, "SQLite database path")
+	flag.StringVar(&cfg.MPMBin, "mpm", defaultMPMBin, "mpm CLI binary")
+	flag.StringVar(&cfg.MCPBin, "mcp", defaultMCPBin, "mpm-mcp stdio server binary")
 	flag.StringVar(&cfg.Tag, "tag", "stress-test-day5", "tag applied to every stress-test memory for post-test cleanup")
 	flag.Int64Var(&cfg.SpikeMs, "spike-ms", 500, "reader latency spike threshold in milliseconds")
 	flag.Parse()
 	return cfg
+}
+
+// mpmDefaultPaths returns the user-level canonical paths this
+// harness defaults to: $HOME/.mpm/src/db/mpm.db (database) and
+// $HOME/.mpm/bin/{mpm,mpm-mcp} (binaries). The previous hardcoded
+// "/home/v/.mpm/..." values assumed the original author's home
+// directory. If HOME is unreachable, we fall back to empty strings
+// so flag.Parse surfaces the missing value via the operator's
+// explicit override (the alternative — silently picking another
+// user's path — is worse).
+func mpmDefaultPaths() (db, mpmBin, mcpBin string) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", "", ""
+	}
+	db = filepath.Join(home, ".mpm", "src", "db", "mpm.db")
+	mpmBin = filepath.Join(home, ".mpm", "bin", "mpm")
+	mcpBin = filepath.Join(home, ".mpm", "bin", "mpm-mcp")
+	return db, mpmBin, mcpBin
 }
 
 // ── Shared counters ────────────────────────────────────────────────────
@@ -81,9 +108,9 @@ type Counters struct {
 	WriteOther   atomic.Int64
 	ReadSpikes   atomic.Int64
 
-	mu              sync.Mutex
-	WriteLatencies  []time.Duration
-	ReadLatencies   []time.Duration
+	mu             sync.Mutex
+	WriteLatencies []time.Duration
+	ReadLatencies  []time.Duration
 }
 
 func (c *Counters) RecordWriteLatency(d time.Duration) {
@@ -259,8 +286,8 @@ func (s *mcpSession) sendRPC(method string, params interface{}) (json.RawMessage
 	}
 	line = strings.TrimRight(line, "\r\n")
 	var resp struct {
-		ID     json.RawMessage            `json:"id"`
-		Result json.RawMessage            `json:"result"`
+		ID     json.RawMessage           `json:"id"`
+		Result json.RawMessage           `json:"result"`
 		Error  *struct{ Message string } `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(line), &resp); err != nil {
@@ -287,9 +314,9 @@ func (s *mcpSession) callMemorySave(fact string, tag string) (string, error) {
 		"arguments": map[string]interface{}{
 			"action": "save",
 			"params": map[string]interface{}{
-				"fact":    fact,
-				"tags":    []string{tag},
-				"weight":  1,
+				"fact":   fact,
+				"tags":   []string{tag},
+				"weight": 1,
 			},
 		},
 	})

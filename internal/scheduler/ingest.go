@@ -59,17 +59,37 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	core "github.com/flowbyte-com/mpm-core"
 )
 
-// openclawIngestDefaultPath is the absolute canonical target the
-// mpm-memory-openclaw plugin writes to. Kept as a const so the path
-// allowlist is structurally enforced, not configurable per-instance
-// in production. Changing this requires editing both this file and
-// the plugin's flushPlanResolver together.
-const openclawIngestDefaultPath = "/home/v/.mpm/run/ingest.md"
+// openclawIngestDefaultPath returns the absolute canonical target the
+// mpm-memory-openclaw plugin writes to. The plugin's flushPlanResolver
+// resolves ".mpm/run/ingest.md" relative to the user's MPM data
+// directory (the same root that config.GetMPMDir() returns), so the
+// absolute target here is "$HOME/.mpm/run/ingest.md". Resolving at
+// call time keeps the default home-agnostic — the previous hardcoded
+// literal "/home/v/.mpm/run/ingest.md" assumed the original author's
+// specific user.
+//
+// Kept as a function (not a const) so the path is resolved at process
+// start against the current process's home directory rather than at
+// compile time against whoever happened to run `go build`. Changing
+// this still requires editing the plugin's flushPlanResolver together
+// — the relative resolution convention is shared.
+func openclawIngestDefaultPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		// Fallback to the relative convention. The plugin's
+		// flushPlanResolver writes ".mpm/run/ingest.md" relative to
+		// the workspace; if HOME is unreachable the resolver will
+		// also fail to anchor, so this is a last-ditch best-effort.
+		return filepath.Join(".mpm", "run", "ingest.md")
+	}
+	return filepath.Join(home, ".mpm", "run", "ingest.md")
+}
 
 // openclawIngestMaxBytes is the hard cap on a single ingest file.
 // 64KB is enough for ~16K words of structured markdown — far more
@@ -95,7 +115,7 @@ type IngestHandler struct {
 	logger *slog.Logger
 	// ingestPath is the canonical target the plugin writes to.
 	// Constructor-injected so tests can use a temp file and not
-	// collide with prod. Production passes openclawIngestDefaultPath.
+	// collide with prod. Production passes openclawIngestDefaultPath().
 	ingestPath string
 }
 
@@ -105,7 +125,7 @@ type IngestHandler struct {
 // logger. The handler holds no internal state and is safe to call
 // sequentially from the scheduler tick.
 func NewIngestHandler(dm *core.DatabaseManager, logger *slog.Logger) *IngestHandler {
-	return newIngestHandlerWithPath(dm, logger, openclawIngestDefaultPath)
+	return newIngestHandlerWithPath(dm, logger, openclawIngestDefaultPath())
 }
 
 // newIngestHandlerWithPath is the test seam: lets the ingest target
@@ -217,8 +237,8 @@ func (h *IngestHandler) tickHandler(ctx context.Context) error {
 	if _, serr := h.dm.ScheduleWake(
 		"ephemeral_compaction_ready",
 		fmt.Sprintf("%d", nowUnix), // absolute epoch
-		"",                          // theory_id
-		"",                          // recurring_rule
+		"",                         // theory_id
+		"",                         // recurring_rule
 		"mpm-memory-openclaw-ingest",
 		metadata,
 	); serr != nil {

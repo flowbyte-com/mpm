@@ -179,7 +179,14 @@ func (s *DoctorService) checkDatabase() DoctorCheck {
 	if err != nil {
 		check.Status = "FAIL"
 		check.Message = fmt.Sprintf("health check failed: %v", err)
-		check.Details = []string{"Inspect /home/v/.mpm/src/db/mpm.db and run 'mpm ops doctor --deep-scan' for the integrity report."}
+		// Surface the actual db path this doctor process is bound to,
+		// not a hardcoded author-machine example. Operators on any
+		// host need a path that exists on THEIR machine — the prior
+		// "/home/v/.mpm/src/db/mpm.db" pointed only at the original
+		// author's checkout.
+		check.Details = []string{
+			fmt.Sprintf("Inspect %s and run 'mpm ops doctor --deep-scan' for the integrity report.", s.dm.DBPath()),
+		}
 		return check
 	}
 	if ok, _ := hc["ok"].(bool); !ok {

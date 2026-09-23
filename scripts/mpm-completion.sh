@@ -6,7 +6,7 @@
 # Adds TAB completion for the hidden _suggest_tags command.
 #
 # Installation (bash):
-#   echo "source /home/v/workspace/projects/mpm/scripts/mpm-completion.sh" >> ~/.bashrc
+#   echo "source $MPM_WORKSPACE/scripts/mpm-completion.sh" >> ~/.bashrc
 #
 # Installation (zsh):
 #   Add same to your .zshrc (zsh handles bash completions if emulating bash)
@@ -16,7 +16,28 @@
 #   mpm memory add "content" --tag <TAB>
 #   mpm _suggest_tags <prefix><TAB>
 
-_MPM_COMPLETE_TAGS_CMD="${MPM_WORKSPACE:-/home/v/workspace/projects/mpm}/bin/mpm _suggest_tags"
+# Resolve the mpm binary used for tag suggestions.
+#
+# Resolution order:
+#   1. MPM_WORKSPACE — explicit project directory (set by operators
+#      who cloned mpm to a non-default location). The completion runs
+#      the in-source `bin/mpm` binary which understands the
+#      _suggest_tags command and works against the project's
+#      workspace DB.
+#
+# Fallback: if MPM_WORKSPACE is unset, the completion warns loudly
+# and skips registration. The previous behaviour silently fell back
+# to the original author's checkout path, which pointed at a
+# non-existent location for any other user and produced a confusing
+# "_suggest_tags: command not found" mid-TAB instead of an actionable
+# error at sourcing time.
+if [ -z "${MPM_WORKSPACE:-}" ]; then
+    echo "mpm-completion.sh: MPM_WORKSPACE is not set; skipping tag-completion registration." >&2
+    echo "  export MPM_WORKSPACE=/path/to/mpm  (your mpm checkout)" >&2
+    return 0 2>/dev/null || exit 0
+fi
+
+_MPM_COMPLETE_TAGS_CMD="${MPM_WORKSPACE}/bin/mpm _suggest_tags"
 
 _mpm_tag_complete() {
     local cur prev words cword
