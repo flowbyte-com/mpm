@@ -17,44 +17,13 @@
 package main
 
 import (
-	"fmt"
-	"os"
-	"os/exec"
 	"strings"
 	"testing"
 )
 
 func r9T57Mpm(t *testing.T, workspace string, args ...string) (string, int) {
 	t.Helper()
-	bin := r9T57BuildBin(t)
-	cmd := exec.Command(bin, args...)
-	// Pre-fix this helper called /home/v/.mpm/bin/mpm — the
-	// developer's installed CLI — and inherited os.Environ()
-	// unfiltered. That contaminates production ~/.mpm state
-	// (because a few callers passed MPM_WORKSPACE="") and
-	// silently imports development env vars into the test
-	// process. Hermetic repair: build a per-test binary and
-	// sandbox the env to only the keys the test requires.
-	cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
-	out, err := cmd.CombinedOutput()
-	code := 0
-	if ee, ok := err.(*exec.ExitError); ok {
-		code = ee.ExitCode()
-	}
-	return string(out), code
-}
-
-// r9T57BuildBin compiles a hermetic mpm binary into t.TempDir().
-// Mirrors buildOpenRouterBin; duplicated here to keep this file
-// independent of release_pass_20260914_openrouter_test.go.
-func r9T57BuildBin(t *testing.T) string {
-	t.Helper()
-	bin := fmt.Sprintf("%s/mpm-r9t57", t.TempDir())
-	cmd := exec.Command("go", "build", "-tags", "fts5", "-o", bin, ".")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("r9T57 build: %v\n%s", err, out)
-	}
-	return bin
+	return mpmRun(t, mpmCmd(t), workspace, args...)
 }
 
 // TestR9T57_CanonicalStatusesAccepted pins the closed-world allow-list.

@@ -19,22 +19,13 @@
 package main
 
 import (
-	"os"
-	"os/exec"
 	"strings"
 	"testing"
 )
 
 func r9T66Mpm(t *testing.T, workspace string, args ...string) (string, int) {
 	t.Helper()
-	cmd := exec.Command("/home/v/.mpm/bin/mpm", args...)
-	cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
-	out, err := cmd.CombinedOutput()
-	code := 0
-	if ee, ok := err.(*exec.ExitError); ok {
-		code = ee.ExitCode()
-	}
-	return string(out), code
+	return mpmRun(t, mpmCmd(t), workspace, args...)
 }
 
 // TestR9T66_UnknownFlagRejected pins the headline fix: passing an

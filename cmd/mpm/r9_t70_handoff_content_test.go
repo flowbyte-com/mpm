@@ -19,37 +19,17 @@
 package main
 
 import (
-	"bytes"
-	"os"
-	"os/exec"
 	"strings"
 	"testing"
 )
 
 // r9T70Mpm runs mpm with the test workspace redirected via env.
-// We use os.Environ + explicit MPM_WORKSPACE addition rather than
-// t.Setenv because the child is a separate process.
+// The shared mpmRun helper from exec_helpers_test.go builds a
+// per-test binary and sandboxes the env to only the keys the test
+// requires — no leakage from the operator's host ~/.mpm.
 func r9T70Mpm(t *testing.T, workspace string, args ...string) (string, int) {
 	t.Helper()
-	cmd := exec.Command("/home/v/.mpm/bin/mpm", args...)
-	env := make([]string, 0, len(os.Environ())+1)
-	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "MPM_WORKSPACE=") {
-			env = append(env, e)
-		}
-	}
-	env = append(env, "MPM_WORKSPACE="+workspace)
-	cmd.Env = env
-	var outB, errB bytes.Buffer
-	cmd.Stdout = &outB
-	cmd.Stderr = &errB
-	err := cmd.Run()
-	out := outB.String() + errB.String()
-	code := 0
-	if ee, ok := err.(*exec.ExitError); ok {
-		code = ee.ExitCode()
-	}
-	return out, code
+	return mpmRun(t, mpmCmd(t), workspace, args...)
 }
 
 // TestR9T70_HandoffSummaryAccepted pins the canonical happy path:

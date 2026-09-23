@@ -5,7 +5,16 @@ package blobstore
 // returns the bytes that were Put, before adding any automated test.
 //
 // Run with: go test -tags fts5 -v -run TestRoundTrip_Spot ./internal/blobstore
-// Skips on systems without /home/v/.mpm/blobs (no-op in CI).
+// Skips when neither the live dirs nor the override env vars are set
+// (no-op in CI; the test runs only against a real install).
+//
+// Env overrides (so the test is not bound to a specific user's
+// checkout):
+//   MPM_SPOT_DB       path to a production-shaped mpm.db
+//   MPM_SPOT_BLOB_DIR path to a directory of real blob files
+// If neither is set, the defaults below point at the original
+// author's install; on any other host those paths do not exist
+// and the test skips.
 
 import (
 	"context"
@@ -18,12 +27,17 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const liveDB = "/home/v/workspace/projects/mpm/src/db/mpm.db"
-
 func TestRoundTrip_Spot(t *testing.T) {
-	const blobDir = "/home/v/.mpm/blobs"
+	liveDB := os.Getenv("MPM_SPOT_DB")
+	if liveDB == "" {
+		liveDB = "/home/v/workspace/projects/mpm/src/db/mpm.db"
+	}
+	blobDir := os.Getenv("MPM_SPOT_BLOB_DIR")
+	if blobDir == "" {
+		blobDir = "/home/v/.mpm/blobs"
+	}
 	if _, err := os.Stat(blobDir); err != nil {
-		t.Skipf("live blob dir %s not present; skipping spot-check (%v)", blobDir, err)
+		t.Skipf("live blob dir %s not present; skipping spot-check (override via MPM_SPOT_BLOB_DIR) (%v)", blobDir, err)
 	}
 
 	// 12 real blob IDs spanning every source-tool family in the audit.

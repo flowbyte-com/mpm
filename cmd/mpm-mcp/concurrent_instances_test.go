@@ -26,9 +26,21 @@ import (
 // must both log the "no pidfile singleton" line within the timeout,
 // proving the singleton check no longer rejects the second process.
 func TestConcurrentMcpInstances(t *testing.T) {
-	bin := "/home/v/.openclaw/workspace/projects/mpm/bin/mpm-mcp"
+	// Pre-fix this hardcoded
+	// /home/v/.openclaw/workspace/projects/mpm/bin/mpm-mcp —
+	// the original author's checkout — which broke the test under
+	// any other user. Hermetic repair: build the source tree's
+	// mpm-mcp into t.TempDir() via the shared mcpCmd helper. The
+	// fall-back to a pre-built absolute binary is preserved so a
+	// developer with a freshly-built bin/ can run the test without
+	// waiting for the go build to complete.
+	bin := mcpCmd(t)
 	if _, err := exec.LookPath(bin); err != nil {
-		t.Skipf("mpm-mcp binary not built yet; run `make build` first")
+		prebuilt := "/home/v/.openclaw/workspace/projects/mpm/bin/mpm-mcp"
+		if _, err := exec.LookPath(prebuilt); err != nil {
+			t.Skipf("mpm-mcp binary not built yet; run `make build` first")
+		}
+		bin = prebuilt
 	}
 
 	const N = 3
@@ -102,9 +114,13 @@ func TestConcurrentMcpInstances(t *testing.T) {
 // after startup, no pidfile should exist at the canonical path. The new
 // "no pidfile singleton" log line replaces the old "pidfile=..." line.
 func TestNoPidfileWrittenAfterStartup(t *testing.T) {
-	bin := "/home/v/.openclaw/workspace/projects/mpm/bin/mpm-mcp"
+	bin := mcpCmd(t)
 	if _, err := exec.LookPath(bin); err != nil {
-		t.Skipf("mpm-mcp binary not built yet; run `make build` first")
+		prebuilt := "/home/v/.openclaw/workspace/projects/mpm/bin/mpm-mcp"
+		if _, err := exec.LookPath(prebuilt); err != nil {
+			t.Skipf("mpm-mcp binary not built yet; run `make build` first")
+		}
+		bin = prebuilt
 	}
 
 	cmd := exec.Command(bin)

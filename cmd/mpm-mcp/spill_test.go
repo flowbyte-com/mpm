@@ -104,4 +104,3 @@ func TestSpillEnvelope_Bounded(t *testing.T) {
 	// The payload must not appear in the envelope.
 	assert.NotContains(t, string(envBytes), marker)
 }
-

@@ -21,7 +21,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -29,14 +28,7 @@ import (
 
 func r9T52Mpm(t *testing.T, args ...string) (string, int) {
 	t.Helper()
-	bin := "/home/v/.mpm/bin/mpm"
-	cmd := exec.Command(bin, args...)
-	out, err := cmd.CombinedOutput()
-	code := 0
-	if ee, ok := err.(*exec.ExitError); ok {
-		code = ee.ExitCode()
-	}
-	return string(out), code
+	return mpmRun(t, mpmCmd(t), t.TempDir(), args...)
 }
 
 // TestR9T52_SaveSkillHelpDocumentsVersion pins the help discovery
@@ -82,14 +74,7 @@ name: r9-t52-no-version
 
 	workspaceCmd := func(args ...string) (string, int) {
 		t.Helper()
-		cmd := exec.Command("/home/v/.mpm/bin/mpm", args...)
-		cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
-		out, err := cmd.CombinedOutput()
-		code := 0
-		if ee, ok := err.(*exec.ExitError); ok {
-			code = ee.ExitCode()
-		}
-		return string(out), code
+		return mpmRun(t, mpmCmd(t), workspace, args...)
 	}
 
 	out, code := workspaceCmd("save-skill", "--file", mdPath)
@@ -121,14 +106,7 @@ description: a versioned skill fixture for T52
 
 	workspaceCmd := func(args ...string) (string, int) {
 		t.Helper()
-		cmd := exec.Command("/home/v/.mpm/bin/mpm", args...)
-		cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
-		out, err := cmd.CombinedOutput()
-		code := 0
-		if ee, ok := err.(*exec.ExitError); ok {
-			code = ee.ExitCode()
-		}
-		return string(out), code
+		return mpmRun(t, mpmCmd(t), workspace, args...)
 	}
 
 	out, code := workspaceCmd("save-skill", "--file", mdPath)

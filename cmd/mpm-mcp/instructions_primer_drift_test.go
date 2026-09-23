@@ -11,16 +11,16 @@
 //
 // Two failure modes are caught:
 //
-//   1. The snippets file changes and the primer was not regenerated.
-//      The Python `--check` mode in render_managed_blocks.py catches
-//      this on the Python side; this Go test catches it on the Go
-//      side by re-running the renderer and comparing to the constant
-//      baked into the binary.
+//  1. The snippets file changes and the primer was not regenerated.
+//     The Python `--check` mode in render_managed_blocks.py catches
+//     this on the Python side; this Go test catches it on the Go
+//     side by re-running the renderer and comparing to the constant
+//     baked into the binary.
 //
-//   2. Someone hand-edits instructions_primer.txt (or the
-//      instructionsPrimer constant) without re-running the renderer.
-//      The drift is detected here because the renderer's output
-//      diverges from the checked-in text.
+//  2. Someone hand-edits instructions_primer.txt (or the
+//     instructionsPrimer constant) without re-running the renderer.
+//     The drift is detected here because the renderer's output
+//     diverges from the checked-in text.
 //
 // **Brittleness notice.** This test is INTENTIONALLY strict —
 // byte-for-byte equality between the embedded primer and the
@@ -30,19 +30,19 @@
 // On a failure, the contributor who triggered it must stop and
 // figure out which of two cases they are in:
 //
-//   (a) You changed the canonical managed block (or the renderer's
-//       header/footer template) deliberately. This is fine — the
-//       canonical contract has changed and the primer should track
-//       it. Update the embedded file by re-running
-//       `python3 agent_installation/scripts/render_managed_blocks.py
-//       --dump instructions > cmd/mpm-mcp/instructions_primer.txt`
-//       (the write mode does this automatically). The change goes in
-//       the same commit as the canonical-block edit; the test
-//       message names which direction the drift ran.
+//	(a) You changed the canonical managed block (or the renderer's
+//	    header/footer template) deliberately. This is fine — the
+//	    canonical contract has changed and the primer should track
+//	    it. Update the embedded file by re-running
+//	    `python3 agent_installation/scripts/render_managed_blocks.py
+//	    --dump instructions > cmd/mpm-mcp/instructions_primer.txt`
+//	    (the write mode does this automatically). The change goes in
+//	    the same commit as the canonical-block edit; the test
+//	    message names which direction the drift ran.
 //
-//   (b) You did not intend the change. This is a real regression
-//       against the audited contract; back out the offending edit
-//       before merging.
+//	(b) You did not intend the change. This is a real regression
+//	    against the audited contract; back out the offending edit
+//	    before merging.
 //
 // Do NOT loosen the byte-equality comparison (e.g. by trimming
 // whitespace, dropping lines, or asserting substring-only) to make a

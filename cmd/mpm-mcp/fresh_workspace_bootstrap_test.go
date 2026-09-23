@@ -10,9 +10,9 @@
 //
 // This regression test pins that contract by running mpm-mcp
 // against a freshly empty temp workspace and asserting:
-//   1. mpm-mcp boots without an opaque router-construction fatal.
-//   2. After boot, mode/ and persona/ exist (created by the
-//      bootstrap step).
+//  1. mpm-mcp boots without an opaque router-construction fatal.
+//  2. After boot, mode/ and persona/ exist (created by the
+//     bootstrap step).
 //
 // Test strategy: subprocess invocation. The bootstrap code lives
 // in main() (no exported function to test), so we drive the binary
@@ -46,9 +46,25 @@ import (
 func TestMcpBootstrapsModeAndPersonaDirsOnFreshWorkspace(t *testing.T) {
 	// Resolve the binary the same way the concurrent-instances
 	// regression does. Skip the test if the user hasn't built yet.
-	bin := "/home/v/workspace/projects/mpm/bin/mpm-mcp"
+	//
+	// Pre-fix this hardcoded /home/v/workspace/projects/mpm/bin/mpm-mcp
+	// — the original author's checkout — which broke the test under
+	// any other user. Hermetic repair: build the source tree's
+	// mpm-mcp into t.TempDir() via `go build` and use that. The
+	// fall-back path to the pre-existing absolute binary is
+	// preserved (so a developer running this against their own
+	// pre-installed build still gets a fast no-build test), but
+	// the test no longer requires the exact absolute path.
+	bin := mcpCmd(t)
 	if _, err := exec.LookPath(bin); err != nil {
-		t.Skipf("mpm-mcp binary not built yet; run `make build` first")
+		// Build path failed; fall back to absolute pre-built
+		// binary if present. This keeps the test useful on
+		// developer machines with a freshly-built bin/.
+		prebuilt := "/home/v/workspace/projects/mpm/bin/mpm-mcp"
+		if _, err := exec.LookPath(prebuilt); err != nil {
+			t.Skipf("mpm-mcp binary not built yet; run `make build` first")
+		}
+		bin = prebuilt
 	}
 
 	// Temp workspace — empty, no mode/, no persona/, no mpm.db.

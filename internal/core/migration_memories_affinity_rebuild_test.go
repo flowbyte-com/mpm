@@ -509,8 +509,15 @@ func countNamedObjects(t *testing.T, db *sql.DB, kind, table string) int {
 // findProductionDB looks for a candidate production mpm.db under
 // the user's home and the project working tree. Returns empty
 // string if none is found.
+//
+// Override via MPM_TEST_PROD_DB to point at any other production DB
+// for cross-developer / cross-host runs; the defaults below point at
+// the original author's checkout and are skipped elsewhere.
 func findProductionDB(t *testing.T) string {
 	t.Helper()
+	if override := os.Getenv("MPM_TEST_PROD_DB"); override != "" && pathExists(override) {
+		return override
+	}
 	candidates := []string{
 		"/home/v/workspace/projects/mpm/src/db/mpm.db",
 		"/home/v/.mpm/store.db",
@@ -542,6 +549,7 @@ func hasLegacyShape(t *testing.T, db *sql.DB) bool {
 	}
 	return false
 }
+
 // ───────────────────────── filesystem / shell helpers ─────────────────────────
 
 // pathExists returns true if p is a regular file (or a symlink to one).

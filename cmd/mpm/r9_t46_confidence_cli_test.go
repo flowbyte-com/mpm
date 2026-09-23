@@ -18,21 +18,14 @@
 package main
 
 import (
-	"os/exec"
 	"strings"
 	"testing"
 )
 
 func r9T46OpConfidence(t *testing.T, args ...string) (string, int) {
 	t.Helper()
-	bin := "/home/v/.mpm/bin/mpm"
-	cmd := exec.Command(bin, append([]string{"ops", "confidence"}, args...)...)
-	out, err := cmd.CombinedOutput()
-	code := 0
-	if ee, ok := err.(*exec.ExitError); ok {
-		code = ee.ExitCode()
-	}
-	return string(out), code
+	args = append([]string{"ops", "confidence"}, args...)
+	return mpmRun(t, mpmCmd(t), t.TempDir(), args...)
 }
 
 // TestR9T46_ConfidenceUsageListsAllSix checks that the usage string
@@ -107,15 +100,16 @@ func TestR9T46_ConfidenceShowPreserved(t *testing.T) {
 // `dm.ExplainConfidence` and `dm.QueryConfidenceHistory` methods,
 // so the error envelope shape is what matters (same prefix/path).
 func TestR9T46_ConfidenceSubstrateParity(t *testing.T) {
-	bin := "/home/v/.mpm/bin/mpm"
+	bin := mpmCmd(t)
 
-	cliExplain, _ := exec.Command(bin, "ops", "confidence", "explain",
-		"--artifact", "missing-r9t46-parity").CombinedOutput()
-	callExplain, _ := exec.Command(bin, "call", "mpm_confidence",
-		"--payload", `{"action":"explain","params":{"artifact_id":"missing-r9t46-parity","artifact_type":"memory"}}`).CombinedOutput()
+	ws := t.TempDir()
+	cliExplain, _ := mpmRun(t, bin, ws, "ops", "confidence", "explain",
+		"--artifact", "missing-r9t46-parity")
+	callExplain, _ := mpmRun(t, bin, ws, "call", "mpm_confidence",
+		"--payload", `{"action":"explain","params":{"artifact_id":"missing-r9t46-parity","artifact_type":"memory"}}`)
 
-	cliText := string(cliExplain)
-	callText := string(callExplain)
+	cliText := cliExplain
+	callText := callExplain
 
 	// Both should fail with artifact-not-found shape (not unknown).
 	if !strings.Contains(cliText, "does not exist") {

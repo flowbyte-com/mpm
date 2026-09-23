@@ -2242,7 +2242,13 @@ func TestStage2D2_SQLBoundedness(t *testing.T) {
 	// All candidate-source queries must declare LIMIT. Read the
 	// source file body and assert LIMIT clauses are present for
 	// each source.
-	body, err := os.ReadFile("/home/v/.mpm/internal/core/contextual_candidates_sources.go")
+	//
+	// Pre-fix this hardcoded /home/v/.mpm/internal/core/... — the
+	// original author's install path — which failed at ReadFile under
+	// any other user. Hermetic repair: resolve the path relative to
+	// this test's location (internal/core), so the test reads the
+	// source under test, not a specific user's checkout.
+	body, err := os.ReadFile("contextual_candidates_sources.go")
 	require.NoError(t, err)
 	bodyStr := string(body)
 

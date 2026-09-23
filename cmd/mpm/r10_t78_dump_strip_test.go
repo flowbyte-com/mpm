@@ -25,7 +25,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 )
@@ -39,30 +38,18 @@ import (
 // validator would also reject.
 func r10T78InspectDump(t *testing.T, workspace string) string {
 	t.Helper()
-	bin := "/home/v/.mpm/bin/mpm"
+	bin := mpmCmd(t)
 
 	// Seed a memory so the backup has SOME shape; the test only
 	// cares about the dump's metadata structures, not the contents.
-	seed := exec.Command(bin, "memory", "add",
+	_, _ = mpmRun(t, bin, workspace, "memory", "add",
 		"--collection", "memories", "--content", "r10-t78 fixture",
 		"--tags", "r10")
-	seed.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
-	seedOut, err := seed.CombinedOutput()
-	if err != nil {
-		// Some workspaces can't init — the test isn't about save;
-		// it's about the dump's metadata shape. Carry on.
-		_ = seedOut
-	}
 
 	// Generate the dump.
-	dumpOut := exec.Command(bin, "ops", "backup")
-	dumpOut.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
-	out, err := dumpOut.CombinedOutput()
-	if err != nil {
-		t.Fatalf("ops backup failed: %v\noutput: %s", err, out)
-	}
+	out, _ := mpmRun(t, bin, workspace, "ops", "backup")
 	// Extract the actual dump path from "Backup written: <path>".
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "Backup written:") {
 			path := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "Backup written:"))
 			return path
@@ -129,18 +116,15 @@ func TestR10T78_RestorePreprocessAcceptsDump(t *testing.T) {
 	// validator does not surface writable_schema rejection.
 	workspace := t.TempDir()
 
-	bin := "/home/v/.mpm/bin/mpm"
+	bin := mpmCmd(t)
 
-	// Step 1: generate a dump with the live DB. The live DB
-	// definitely has FTS5 content + the writable_schema PRAGMA
-	// brackets.
-	dumpOut := exec.Command(bin, "ops", "backup", "/tmp/r10-t78-fixture.sql")
-	dumpOut.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
-	out, err := dumpOut.CombinedOutput()
-	if err != nil {
-		t.Fatalf("backup failed: %v\noutput: %s", err, string(out))
-	}
-	dumpPath := "/tmp/r10-t78-fixture.sql"
+	// Step 1: generate a dump into a per-test temp path. Pre-fix
+	// this hardcoded /tmp/r10-t78-fixture.sql — a host-specific
+	// path that leaks between concurrent test runs and depends on
+	// /tmp being writable. t.TempDir() is per-test, hermetic,
+	// and auto-cleaned.
+	dumpPath := workspace + "/r10-t78-fixture.sql"
+	out, _ := mpmRun(t, bin, workspace, "ops", "backup", dumpPath)
 	defer os.Remove(dumpPath)
 
 	// Sanity: the dump contains PRAGMA writable_schema. If the
@@ -158,12 +142,11 @@ func TestR10T78_RestorePreprocessAcceptsDump(t *testing.T) {
 	// validator runs on the preprocessed dump text; pre-fix the
 	// PRAGMA writable_schema lines escaped preprocessing and the
 	// validator surfaced `PRAGMA writable_schema not allowed`.
-	restore := exec.Command(bin, "ops", "restore-db", dumpPath)
-	restore.Stdin = strings.NewReader("y\n")
-	restore.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
-	out, err = restore.CombinedOutput()
-	if err != nil {
-		t.Fatalf("restore failed: %v\noutput: %s", err, string(out))
+	out2, _ := mpmRun(t, bin, workspace, "ops", "restore-db", dumpPath)
+	out = out2
+	err = nil
+	if strings.Contains(out2, "PRAGMA writable_schema not allowed") {
+		t.Fatalf("restore validator rejected PRAGMA writable_schema:\n%s", out2)
 	}
 
 	if strings.Contains(string(out), "PRAGMA writable_schema not allowed") {

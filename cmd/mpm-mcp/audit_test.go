@@ -133,17 +133,17 @@ func TestRecordToolInvocation_MCPFourColumnsAndAbsentSession(t *testing.T) {
 	started := time.Now().Add(-20 * time.Millisecond)
 	completed := time.Now()
 	const (
-		wantInvocation  = "inv-mcp-fixture"
-		wantMPMSession  = "mpm-mcp-fixture"
-		wantFwName      = "opencode-mcp-fixture"
-		wantFwSession   = "opencode-mcp-sess-fixture"
+		wantInvocation = "inv-mcp-fixture"
+		wantMPMSession = "mpm-mcp-fixture"
+		wantFwName     = "opencode-mcp-fixture"
+		wantFwSession  = "opencode-mcp-sess-fixture"
 	)
 	acFull := core.ActiveContext{
-		SessionID:           "mcp-full",
-		InvocationID:        wantInvocation,
-		MPMSessionID:        wantMPMSession,
-		FrameworkName:       wantFwName,
-		FrameworkSessionID:  wantFwSession,
+		SessionID:          "mcp-full",
+		InvocationID:       wantInvocation,
+		MPMSessionID:       wantMPMSession,
+		FrameworkName:      wantFwName,
+		FrameworkSessionID: wantFwSession,
 	}
 	recordToolInvocation(dm, acFull,
 		"mpm_system", map[string]interface{}{"action": "health_check"},
@@ -179,9 +179,9 @@ func TestRecordToolInvocation_MCPFourColumnsAndAbsentSession(t *testing.T) {
 	// FrameworkSessionID. Persisted column must be SQL NULL, NOT
 	// the empty string (empty-string == NULL invariant).
 	acAbsent := core.ActiveContext{
-		SessionID:    "mcp-absent",
-		InvocationID: "inv-mcp-absent",
-		MPMSessionID: "mpm-mcp-absent",
+		SessionID:     "mcp-absent",
+		InvocationID:  "inv-mcp-absent",
+		MPMSessionID:  "mpm-mcp-absent",
 		FrameworkName: "pi-no-hooks",
 		// FrameworkSessionID intentionally empty.
 	}

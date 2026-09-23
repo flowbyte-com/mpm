@@ -29,9 +29,9 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/flowbyte-com/mpm/internal/blobstore"
 	core "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/tools"
+	"github.com/flowbyte-com/mpm/internal/blobstore"
 )
 
 // blobStoreAdapter wraps the concrete *blobstore.FilesystemBackend so it
@@ -122,9 +122,9 @@ func (a *artifactResolverAdapter) resolveBlob(ctx context.Context, p tools.Point
 	return tools.Resolution{
 		Pointer:     "mpm://blob/" + p.ID,
 		ContentType: meta.ContentType,
-		Reader:     io.NopCloser(bytes.NewReader(content)),
-		Metadata:   nil,
-		Bounded:    false,
+		Reader:      io.NopCloser(bytes.NewReader(content)),
+		Metadata:    nil,
+		Bounded:     false,
 	}, nil
 }
 
@@ -188,9 +188,9 @@ func (a *artifactResolverAdapter) resolveMemory(ctx context.Context, p tools.Poi
 	return tools.Resolution{
 		Pointer:     "mpm://memory/" + p.ID,
 		ContentType: "text/plain",
-		Reader:     io.NopCloser(strings.NewReader(content)),
-		Metadata:   stripUnboundedContent(mem),
-		Bounded:    bounded,
+		Reader:      io.NopCloser(strings.NewReader(content)),
+		Metadata:    stripUnboundedContent(mem),
+		Bounded:     bounded,
 	}, nil
 }
 
@@ -239,13 +239,13 @@ func (a *artifactResolverAdapter) resolveLesson(ctx context.Context, p tools.Poi
 	return tools.Resolution{
 		Pointer:     "mpm://lesson/" + p.ID,
 		ContentType: "text/plain",
-		Reader:     io.NopCloser(strings.NewReader(content)),
+		Reader:      io.NopCloser(strings.NewReader(content)),
 		Metadata: map[string]interface{}{
-			"id":                 lesson.ID,
-			"type":               string(lesson.Type),
-			"tags":               lesson.Tags,
+			"id":                  lesson.ID,
+			"type":                string(lesson.Type),
+			"tags":                lesson.Tags,
 			"reinforcement_count": lesson.ReinforcementCount,
-			"created":            lesson.Created,
+			"created":             lesson.Created,
 		},
 		Bounded: bounded,
 	}, nil
@@ -282,7 +282,7 @@ func (a *artifactResolverAdapter) resolveTheory(ctx context.Context, p tools.Poi
 	return tools.Resolution{
 		Pointer:     "mpm://theory/" + p.ID,
 		ContentType: "text/plain",
-		Reader:     io.NopCloser(strings.NewReader(content)),
+		Reader:      io.NopCloser(strings.NewReader(content)),
 		Metadata: map[string]interface{}{
 			"id":         mem["id"],
 			"collection": collection,
@@ -313,7 +313,7 @@ var (
 func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.ActiveContext, router *core.Router, bs *blobstore.FilesystemBackend, op tools.OutputPolicy) {
 	blobStore = bs
 	blobAdapter := &blobStoreAdapter{bs: bs}
-	tools.SetBlobStore(blobAdapter)                                // wire Phase 1 blob tools
+	tools.SetBlobStore(blobAdapter)                                          // wire Phase 1 blob tools
 	tools.SetResolver(&artifactResolverAdapter{blobBS: blobAdapter, dm: dm}) // wire Phase 2 mpm_resolve
 	outputPolicy_ = op
 	for _, tool := range tools.Registry {
@@ -689,10 +689,10 @@ func makeHelpHandler(dm *core.DatabaseManager, ac core.ActiveContext) server.Too
 				})
 			}
 			return jsonResult(map[string]interface{}{
-				"success":           true,
-				"tool_count":        len(rows),
-				"tools":             rows,
-				"discovery_hint":    "Specialist tools not initially exposed via tools/list are still registered and reachable via the host shell using `mpm call <tool>` (see reach_via_cli per row).",
+				"success":            true,
+				"tool_count":         len(rows),
+				"tools":              rows,
+				"discovery_hint":     "Specialist tools not initially exposed via tools/list are still registered and reachable via the host shell using `mpm call <tool>` (see reach_via_cli per row).",
 				"compatibility_mode": "Set MPM_EXPOSE_ALL_TOOLS=1 to revert to the full surface for hosts that need it.",
 			}), nil
 		case "show":

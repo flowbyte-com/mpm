@@ -20,9 +20,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/flowbyte-com/mpm/internal/blobstore"
 	core "github.com/flowbyte-com/mpm-core"
 	tools "github.com/flowbyte-com/mpm-core/tools"
+	"github.com/flowbyte-com/mpm/internal/blobstore"
 )
 
 // mockBlobStore records calls to Put and generates unique IDs for each Put.
@@ -61,11 +61,13 @@ func (m *mockBlobStore) Put(ctx context.Context, r io.Reader, meta blobstore.Met
 func (m *mockBlobStore) Get(ctx context.Context, id string, opts blobstore.GetOptions) (io.ReadCloser, blobstore.Metadata, error) {
 	return nil, blobstore.Metadata{}, errors.New("not implemented")
 }
-func (m *mockBlobStore) Delete(ctx context.Context, id string) error                          { return nil }
+func (m *mockBlobStore) Delete(ctx context.Context, id string) error { return nil }
 func (m *mockBlobStore) Search(ctx context.Context, id string, query blobstore.SearchQuery) ([]blobstore.Match, error) {
 	return nil, nil
 }
-func (m *mockBlobStore) GCExpired(ctx context.Context, now time.Time) (blobstore.GCStats, error) { return blobstore.GCStats{}, nil }
+func (m *mockBlobStore) GCExpired(ctx context.Context, now time.Time) (blobstore.GCStats, error) {
+	return blobstore.GCStats{}, nil
+}
 func (m *mockBlobStore) GCSweepOrphans(ctx context.Context, grace time.Duration) (blobstore.GCStats, error) {
 	return blobstore.GCStats{}, nil
 }
@@ -243,7 +245,7 @@ func TestMCPAdapter_SpillEnvelopeSchema(t *testing.T) {
 // captureHandler implements slog.Handler for Go 1.21+.
 // It records all emitted records so tests can assert on telemetry.
 type captureHandler struct {
-	mu     sync.Mutex
+	mu      sync.Mutex
 	records []slog.Record
 }
 
@@ -256,7 +258,7 @@ func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
 func (h *captureHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
 func (h *captureHandler) WithAttrs(_ []slog.Attr) slog.Handler         { return h }
 func (h *captureHandler) WithName(_ string) slog.Handler               { return h }
-func (h *captureHandler) WithGroup(_ string) slog.Handler             { return h }
+func (h *captureHandler) WithGroup(_ string) slog.Handler              { return h }
 func (h *captureHandler) all() []slog.Record {
 	h.mu.Lock()
 	defer h.mu.Unlock()

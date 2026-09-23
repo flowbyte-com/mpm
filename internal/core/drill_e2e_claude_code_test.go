@@ -51,7 +51,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -264,13 +263,11 @@ func findWorkspaceBin(t *testing.T, name string) string {
 		}
 		root = filepath.Dir(root)
 	}
-	// Also try the absolute path if running from elsewhere.
-	if runtime.GOOS == "linux" {
-		abs := filepath.Join("/home/v/workspace/projects/mpm/bin", name)
-		if _, err := os.Stat(abs); err == nil {
-			return abs
-		}
-	}
+	// Pre-fix this also tried /home/v/workspace/projects/mpm/bin
+	// — the original author's checkout — which broke the test
+	// under any other user. The walk-up loop above is the
+	// canonical path: it finds <repo>/bin/<name> regardless of
+	// cwd, so long as the test runs from inside the repo tree.
 	return ""
 }
 

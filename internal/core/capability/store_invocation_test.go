@@ -588,7 +588,7 @@ func TestHashArgs_OrderPreservation(t *testing.T) {
 func TestSortedEnvKeys(t *testing.T) {
 	env := map[string]string{
 		"PATH":         "/usr/bin",
-		"HOME":         "/home/v",
+		"HOME":         "/tmp/hermetic-test-home",
 		"SECRET_TOKEN": "should-not-appear",
 		"AWS_KEY":      "AKIA...should-not-appear",
 	}

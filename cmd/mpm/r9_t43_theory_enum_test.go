@@ -17,7 +17,6 @@
 package main
 
 import (
-	"os/exec"
 	"strings"
 	"testing"
 )
@@ -26,15 +25,7 @@ import (
 // in a hermetic workspace; returns stdout, exit code.
 func r9T43RunTheoryResolve(t *testing.T, workspace, id, conclusion string) (string, int) {
 	t.Helper()
-	binPath := "/home/v/.mpm/bin/mpm"
-	cmd := exec.Command(binPath, "theory", "resolve", id, conclusion)
-	cmd.Env = append(cmd.Environ(), "MPM_WORKSPACE="+workspace)
-	out, err := cmd.CombinedOutput()
-	code := 0
-	if ee, ok := err.(*exec.ExitError); ok {
-		code = ee.ExitCode()
-	}
-	return string(out), code
+	return mpmRun(t, mpmCmd(t), workspace, "theory", "resolve", id, conclusion)
 }
 
 // TestR9T43_ResolveRejectsUnknownConclusion runs the parser with a
@@ -89,8 +80,7 @@ func TestR9T43_ResolveAcceptsCanonicalValues(t *testing.T) {
 // to enumerate all five canonical conclusions. Pre-fix the help
 // text only documented two; the hidden aliases broke discoverability.
 func TestR9T43_HelpDocumentsAllCanonicalValues(t *testing.T) {
-	binPath := "/home/v/.mpm/bin/mpm"
-
+	bin := mpmCmd(t)
 	expected := []string{"confirmed", "proven", "disproven", "refuted", "invalidated"}
 
 	for _, sub := range [][]string{
@@ -98,9 +88,8 @@ func TestR9T43_HelpDocumentsAllCanonicalValues(t *testing.T) {
 		{"theory", "resolve", "--help"},
 	} {
 		t.Run(strings.Join(sub, "_"), func(t *testing.T) {
-			cmd := exec.Command(binPath, sub...)
-			out, _ := cmd.CombinedOutput()
-			text := string(out)
+			out, _ := mpmRun(t, bin, t.TempDir(), sub...)
+			text := out
 			for _, want := range expected {
 				if !strings.Contains(text, want) {
 					t.Errorf("%v: help text missing canonical conclusion %q. Output:\n%s",
@@ -116,13 +105,9 @@ func TestR9T43_HelpDocumentsAllCanonicalValues(t *testing.T) {
 // instead we verify the canonical mapping is in the help text so
 // smoke tests can rely on it.
 func TestR9T43_StoredStatusMapping(t *testing.T) {
-	binPath := "/home/v/.mpm/bin/mpm"
-	cmd := exec.Command(binPath, "resolve_theory", "--help")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		// --help sometimes returns 0, sometimes non-zero; ignore err.
-	}
-	text := string(out)
+	bin := mpmCmd(t)
+	out, _ := mpmRun(t, bin, t.TempDir(), "resolve_theory", "--help")
+	text := out
 	// The help text must say `status="proven"` for the proven group.
 	if !strings.Contains(text, `status="proven"`) {
 		t.Errorf("help text missing `status=\"proven\"` mapping. Output:\n%s", text)

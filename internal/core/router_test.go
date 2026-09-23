@@ -1,43 +1,56 @@
 package internal
 
 import (
+	"path/filepath"
 	"testing"
 )
 
 func TestRouter_Evaluate(t *testing.T) {
-	router, err := NewRouter("/home/v/workspace/projects/mpm")
+	// Pre-fix this test hardcoded /home/v/workspace/projects/mpm as
+	// the router basePath — the original author's checkout. That
+	// made the test fail under any other Unix user with a
+	// permission-denied error from the NewRouter reload(). Hermetic
+	// repair: resolve the current repository root (the parent of
+	// this test's package directory, internal/core) so the test
+	// exercises the source tree under test, not a specific user's
+	// install.
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	router, err := NewRouter(repoRoot)
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
 
 	tests := []struct {
-		name             string
-		prompt           string
-		wantModes        []string // nil means don't care
+		name              string
+		prompt            string
+		wantModes         []string // nil means don't care
 		wantPersonaNotNil bool
 		wantPersonaName   string // empty means don't care
 	}{
 		{
-			name:             "drafting text triggers architect mode (architecture keyword match)",
-			prompt:           "I need to draft a whitepaper about our Q3 architecture",
+			name:   "drafting text triggers architect mode (architecture keyword match)",
+			prompt: "I need to draft a whitepaper about our Q3 architecture",
 			// 2026-08-07 update: 'write' mode was removed in c7ee6d7
 			// (router tightened to 3+3). 'architecture' now matches
 			// the architect mode pattern, which is the closest fit
 			// for drafting/architectural prose.
-			wantModes:        []string{"architect"},
+			wantModes:         []string{"architect"},
 			wantPersonaNotNil: false,
 		},
 		{
-			name:             "architecture keyword triggers architect mode",
-			prompt:           "Design the system architecture for our new API gateway",
+			name:   "architecture keyword triggers architect mode",
+			prompt: "Design the system architecture for our new API gateway",
 			// RESTORED 2026-06-26 commit 2: architect mode has patterns: now.
 			// design/architecture/api/gateway/system all match.
-			wantModes:        []string{"architect"},
+			wantModes:         []string{"architect"},
 			wantPersonaNotNil: false,
 		},
 		{
-			name:             "research query triggers critic persona (review/critique match)",
-			prompt:           "What are the latest findings on SQLite WAL performance?",
+			name:   "research query triggers critic persona (review/critique match)",
+			prompt: "What are the latest findings on SQLite WAL performance?",
 			// 2026-08-07 update: 'research' mode was removed in c7ee6d7.
 			// 'latest findings' now matches the critic persona's
 			// 'review'/'find flaws' patterns — the closest fit for
@@ -47,9 +60,9 @@ func TestRouter_Evaluate(t *testing.T) {
 			wantPersonaName:   "critic",
 		},
 		{
-			name:             "greeting does not trigger any mode or persona",
-			prompt:           "hello there",
-			wantModes:        nil,
+			name:      "greeting does not trigger any mode or persona",
+			prompt:    "hello there",
+			wantModes: nil,
 			// Revised 2026-06-26: was "falls back to default persona" —
 			// removed the unconditional default fallback. The route hook
 			// must not pollute context windows for short conversational
@@ -57,40 +70,40 @@ func TestRouter_Evaluate(t *testing.T) {
 			wantPersonaNotNil: false,
 		},
 		{
-			name:             "code implementation matches no current mode (architect patterns omit 'implement'/'auth')",
-			prompt:           "Implement the user authentication flow in Go",
+			name:   "code implementation matches no current mode (architect patterns omit 'implement'/'auth')",
+			prompt: "Implement the user authentication flow in Go",
 			// 2026-08-07 update: 'programming' mode was removed in c7ee6d7.
 			// Current architect mode patterns ('design, architecture,
 			// structure, plan, system, subsystem, refactor, scale') do
 			// not include 'implement', 'authentication', or 'flow', so
 			// this prompt matches no mode. Pinning the current behavior.
-			wantModes:        nil,
+			wantModes:         nil,
 			wantPersonaNotNil: false,
 		},
 		{
-			name:             "cross-validation prompt matches no current mode (moe mode removed)",
-			prompt:           "Gemini said: Reflex Engine is a hallucination. claude suggested the same. chatgpt disagreed. Source-check this.",
+			name:   "cross-validation prompt matches no current mode (moe mode removed)",
+			prompt: "Gemini said: Reflex Engine is a hallucination. claude suggested the same. chatgpt disagreed. Source-check this.",
 			// 2026-08-07 update: 'moe' mode was removed in c7ee6d7.
 			// No current mode pattern matches cross-LLM validation
 			// language. The use case is real but the router no longer
 			// covers it — a follow-up should add a 'cross-check' mode.
-			wantModes:        nil,
+			wantModes:         nil,
 			wantPersonaNotNil: false,
 		},
 		{
-			name:             "explicit moe invocation matches no current mode (moe removed)",
-			prompt:           "moe: this gemini output needs verification before we act",
+			name:   "explicit moe invocation matches no current mode (moe removed)",
+			prompt: "moe: this gemini output needs verification before we act",
 			// 2026-08-07 update: 'moe' mode was removed in c7ee6d7.
-			wantModes:        nil,
+			wantModes:         nil,
 			wantPersonaNotNil: false,
 		},
 		{
-			name:             "source-verify language matches no current mode (moe removed)",
-			prompt:           "Cross-validate this claude suggestion about the Reflex Engine. Source-verify before agreeing.",
+			name:   "source-verify language matches no current mode (moe removed)",
+			prompt: "Cross-validate this claude suggestion about the Reflex Engine. Source-verify before agreeing.",
 			// 2026-08-07 update: 'moe' mode was removed in c7ee6d7.
 			// 'cross-validate'/'source-verify' would be a candidate for
 			// a future 'cross-check' mode.
-			wantModes:        nil,
+			wantModes:         nil,
 			wantPersonaNotNil: false,
 		},
 	}
