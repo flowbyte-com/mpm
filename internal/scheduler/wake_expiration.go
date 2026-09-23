@@ -18,12 +18,17 @@
 //
 // What "retire" means. We mark fired=1 with fired_at=now and append
 // an audit note to metadata. The wake:
-//   - drops out of the fires-overdue query (WHERE fired = 0 ...),
+//   - drops out of the wakes_overdue query (WHERE fired = 0 ...),
 //   - drops out of the wakes_overdue doctor counter,
 //   - remains in scheduled_wakes for forensic / audit purposes
 //     (mpm list_wakes --include-fired still returns it),
 //   - gets a stable identifier in metadata so an operator can prove
 //     the row was swept, not lost.
+//
+// Retired rows are functionally equivalent to a fold or ResolveWake
+// acknowledgement: fired=1 means the wake is no longer pending for
+// delivery. The sweep is the bounded-retirement fallback for wakes
+// that never reach the fold because no MPM call arrived in time.
 //
 // What this sweep does NOT do.
 //   - It does not touch wakes with a system kind (snapshot,
@@ -594,7 +599,7 @@ func CronRetentionTickHandler(ctx context.Context, db *sql.DB, log *slog.Logger)
 	return func(ctx context.Context) error {
 		now := time.Now()
 		nowUnix := now.Unix()
-		if state.lastSweepUnix >0 && nowUnix-state.lastSweepUnix < int64(CronRetentionCadence.Seconds()) {
+		if state.lastSweepUnix > 0 && nowUnix-state.lastSweepUnix < int64(CronRetentionCadence.Seconds()) {
 			return nil
 		}
 

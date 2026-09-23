@@ -610,7 +610,7 @@ func TestDispatchClaim_RespectsBusyTimeout_Regression(t *testing.T) {
 // design separates those concerns:
 //
 //   - Scheduler claim (this file): record an audit trail that the
-//     scheduler saw the wake fire. Done via dispatched_at + dispatched_by.
+//     scheduler saw the wake due. Done via dispatched_at + dispatched_by.
 //   - Normal delivery (internal/core/wake_context.go gatherOverdueWakes,
 //     internal/core/wake_tools.go CheckPendingWakes): the wake row stays
 //     in fired=0 until the user/agent acknowledges it via ResolveWake,
@@ -803,9 +803,12 @@ func TestDispatchClaim_SystemKindsUntouched(t *testing.T) {
 }
 
 // TestDispatchClaim_FutureNotClaimedAfterFix preserves the deadline
-// guard invariant after the fired-flip → dispatched_at change: a wake
-// scheduled for the future must NOT be claimed until target_time
-// passes.
+// guard invariant after the 2026-09-23 release-blocker repair split
+// the scheduler's "dispatched" audit (dispatched_at) from the wake's
+// "acknowledged" state (fired=1). The pre-fix code path flipped
+// fired=1 on dispatch; post-fix it stamps dispatched_at and leaves
+// fired=0. A wake scheduled for the future must NOT be claimed until
+// target_time passes.
 func TestDispatchClaim_FutureNotClaimedAfterFix(t *testing.T) {
 	s := newDispatchTestScheduler(t)
 	now := time.Now()

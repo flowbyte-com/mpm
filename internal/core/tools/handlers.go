@@ -5835,7 +5835,9 @@ func handleMpmWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload
 // resolution). Lifecycle contract:
 //
 //   - Marks fired=1 with fired_at=now and fired_by="wake-resolver".
-//   - Idempotent: re-running on an already-fired wake returns
+//     fired=1 here means user/agent acknowledgement — the canonical
+//     state for "wake no longer pending for delivery".
+//   - Idempotent: re-running on an already-acknowledged wake returns
 //     success with status="already_resolved" and no new audit row.
 //     No double-fire noise from retries or double-clicks.
 //   - Refuses scheduled_tasks-owned rows (no metadata.kind →

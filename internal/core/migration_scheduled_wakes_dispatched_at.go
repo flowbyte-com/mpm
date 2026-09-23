@@ -16,7 +16,7 @@
 // New state machine:
 //
 //	fired=0  dispatched_at=NULL        scheduled, target_time not yet reached
-//	fired=0  dispatched_at=<epoch>     scheduler tried to fire; awaiting user/agent acknowledgement
+//	fired=0  dispatched_at=<epoch>     scheduler-dispatched; awaiting user/agent acknowledgement
 //	fired=1                             user/agent acknowledged (via CheckPendingWakes fold or explicit ResolveWake)
 //
 // Idempotent via the scheduled_wakes_dispatched_at_v1 sentinel pattern

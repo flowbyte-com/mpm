@@ -666,7 +666,7 @@ func TestScheduler_NotifyScheduleChanged_NilReceiverSafe(t *testing.T) {
 // TestScheduler_computeEarliestDeadline verifies the deadline query
 // folds both scheduled_wakes (unfired) and scheduled_tasks (active)
 // into a single MIN() and respects the partial-index partitions:
-// fired wakes and paused tasks are excluded.
+// acknowledged (fired=1) wakes and paused tasks are excluded.
 //
 // The wake branch filters to notification-eligible kinds (matching
 // dispatchClaimNextAdHocWake's WHERE clause) so the deadline reflects
@@ -713,7 +713,7 @@ func TestScheduler_computeEarliestDeadline(t *testing.T) {
 			wantOff: -1 * time.Minute,
 		},
 		{
-			name: "fired wake is excluded",
+			name: "acknowledged (fired=1) wake is excluded",
 			setup: func(t *testing.T, s *Scheduler, now time.Time) {
 				seedWake(t, s, "w1", now.Add(1*time.Second), "")
 				mustExec(t, s.db, `UPDATE scheduled_wakes SET fired=1 WHERE id='w1'`)

@@ -1,14 +1,23 @@
 // release_pass_20260923_fired_wake_delivery_test.go — Release-blocking
 // HIGH defect regression at the executable level.
 //
+// File naming note: "fired_wake_delivery" is retained for release-
+// tracking and audit traceability (this test is the executable-level
+// proof that the 2026-09-23 release-blocker repair closes the defect).
+// It does NOT describe the current persisted state machine —
+// `fired=1` post-fix is acknowledgement, never scheduler dispatch.
+// See the state machine below.
+//
 // The defect (caught by the FINAL REAL-CLI ACCEPTANCE PASS):
-//   A scheduler-fired one-shot notification wake scheduled via
+//   A scheduler-dispatched one-shot notification wake scheduled via
 //   `mpm call mpm_wakes schedule` was NOT delivered through the
 //   normal wake/context path. `mpm continue`, `mpm wake`,
 //   `mpm_context read_wake_context`, and the `<system_wake_notification>`
 //   fold on every tool call all returned empty wake surfaces — even
-//   though the scheduler had provably fired the wake
-//   (`fired=true, fired_at=target_time, dispatched_by=mpm-scheduler`).
+//   though the scheduler had provably claimed the wake (pre-fix:
+//   `fired=true, fired_at=target_time, dispatched_by=mpm-scheduler`;
+//   the pre-fix code path used `fired=1` to mean "scheduler
+//   dispatched" — this is what the repair split into two states).
 //   The wake's actual reason/marker was reachable only via
 //   `mpm_wakes list include_fired=true` and the activity-feed audit
 //   row for `mpm_wakes.schedule`.
@@ -27,6 +36,15 @@
 // `internal/scheduler/dispatch.go` doc comment and
 // `internal/core/migration_scheduled_wakes_dispatched_at.go` for the
 // full state-machine contract.
+//
+// State machine (post-fix):
+//
+//	fired=0  dispatched_at=NULL        scheduled; target_time not yet reached
+//	fired=0  dispatched_at=<epoch>     scheduler-dispatched; awaiting
+//	                                  user/agent acknowledgement (fold or
+//	                                  ResolveWake)
+//	fired=1                             acknowledged (fold-consumed or
+//	                                  ResolveWake)
 //
 // This test exercises the EXECUTABLE acceptance path — it spawns a
 // fresh `mpm` binary, schedules a wake, advances the scheduler, and

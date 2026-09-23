@@ -54,14 +54,14 @@ const MaxEventWakesPerPull = 100
 // the receiving side. See shared_event_wakes DDL for the column
 // schema.
 type EventWake struct {
-	WakeID       string `json:"wake_id"`
-	SourceAgent  string `json:"source_agent"`
-	MemoryID     string `json:"memory_id"`
-	Kind         string `json:"kind"`
-	ContentHash  string `json:"content_hash"`
-	Rationale    string `json:"rationale"`
-	CreatedAt    int64  `json:"created_at"`
-	Metadata     string `json:"metadata,omitempty"`
+	WakeID      string `json:"wake_id"`
+	SourceAgent string `json:"source_agent"`
+	MemoryID    string `json:"memory_id"`
+	Kind        string `json:"kind"`
+	ContentHash string `json:"content_hash"`
+	Rationale   string `json:"rationale"`
+	CreatedAt   int64  `json:"created_at"`
+	Metadata    string `json:"metadata,omitempty"`
 }
 
 // BroadcastOpts configures BroadcastMemory. Zero-value defaults
@@ -70,24 +70,24 @@ type EventWake struct {
 // (resolution / arbitration); nil ToAgents → fan out to all
 // active sessions (minus self).
 type BroadcastOpts struct {
-	Kind      string   // 'rule' | 'resolution' | 'arbitration' | 'memory'; "" = auto
-	Rationale string   // the WHY; required unless auto-extractable
-	ToAgents  []string // restrict fan-out; nil = all active (minus self)
-	SourceAgent string // who is doing the broadcasting (for shared.bcast_event_wakes.source_agent)
-	SourceSessionID string // who is doing the broadcasting (skip self in fan-out)
-	DryRun    bool     // compute the report but don't INSERT
+	Kind            string   // 'rule' | 'resolution' | 'arbitration' | 'memory'; "" = auto
+	Rationale       string   // the WHY; required unless auto-extractable
+	ToAgents        []string // restrict fan-out; nil = all active (minus self)
+	SourceAgent     string   // who is doing the broadcasting (for shared.bcast_event_wakes.source_agent)
+	SourceSessionID string   // who is doing the broadcasting (skip self in fan-out)
+	DryRun          bool     // compute the report but don't INSERT
 }
 
 // BroadcastReport is what BroadcastMemory returns. Mirrors the
 // shape that the CLI renders in --json mode.
 type BroadcastReport struct {
-	MemoryID      string                  `json:"memory_id"`
-	Kind          string                  `json:"kind"`
-	Rationale     string                  `json:"rationale"`
-	ContentHash   string                  `json:"content_hash"`
-	Targets       []BroadcastTargetReport `json:"targets"`
-	NewWakes      int                     `json:"new_wakes"`
-	DedupedWakes  int                     `json:"deduped_wakes"`
+	MemoryID     string                  `json:"memory_id"`
+	Kind         string                  `json:"kind"`
+	Rationale    string                  `json:"rationale"`
+	ContentHash  string                  `json:"content_hash"`
+	Targets      []BroadcastTargetReport `json:"targets"`
+	NewWakes     int                     `json:"new_wakes"`
+	DedupedWakes int                     `json:"deduped_wakes"`
 }
 
 // BroadcastTargetReport describes one (session, agent) target in
@@ -452,12 +452,12 @@ func (dm *DatabaseManager) Heartbeat(sessionID, agentID, hostname string, metada
 // `mpm ops active-sessions` introspection command (operator wants
 // to see the fleet).
 type ActiveSession struct {
-	SessionID    string `json:"session_id"`
-	AgentID      string `json:"agent_id"`
-	Hostname     string `json:"hostname,omitempty"`
+	SessionID     string `json:"session_id"`
+	AgentID       string `json:"agent_id"`
+	Hostname      string `json:"hostname,omitempty"`
 	LastHeartbeat string `json:"last_heartbeat"`
-	BootAt       string `json:"boot_at"`
-	Metadata     string `json:"metadata,omitempty"`
+	BootAt        string `json:"boot_at"`
+	Metadata      string `json:"metadata,omitempty"`
 }
 
 func (dm *DatabaseManager) DiscoverActiveSessions() ([]ActiveSession, error) {

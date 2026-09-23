@@ -8,6 +8,16 @@
 // (bounded above by the system-maintenance interval), and drains all
 // currently-due notification-kind wakes atomically.
 //
+// The scheduler's role is the AUDIT TRAIL. dispatchClaimNextAdHocWake
+// stamps dispatched_at and metadata.dispatched_by='mpm-scheduler' on
+// each notification-kind wake at target_time, but it does NOT flip
+// fired=1. The wake stays in fired=0 (visible to the fold) until the
+// user/agent acknowledges it via CheckPendingWakes (opportunistic
+// fold) or explicit ResolveWake. fired=1 means acknowledgement only —
+// never scheduler dispatch. See dispatch.go for the canonical state
+// machine and the 2026-09-23 release-blocker repair that established
+// the split.
+//
 // Two kinds of latency:
 //
 //   - In-process (same OS process as the scheduler): a NotifyScheduleChanged
@@ -23,17 +33,23 @@
 //
 //   - System kinds (snapshot, critic_audit, gc, broadcast, drill,
 //     cascade_summary, cascade, cron) are owned by Tick() and run on
-//     the maintenance ticker (interval — default 60s).
+//     the maintenance ticker (interval — default 60s). Tick() invokes
+//     the registered HandlerFunc for each, then calls MarkFired
+//     (fired=1) once the handler returns. fired=1 here means "the
+//     handler ran" — same column, same semantics, but for system
+//     kinds the acknowledgement transition is internal to the
+//     scheduler (the handler completes the lifecycle).
 //
 //   - Notification-kind and untagged wakes are owned by the deadline-
-//     driven dispatch path (internal/scheduler/dispatch.go). They
-//     fire at target_time, not on a poll cadence.
+//     driven dispatch path (internal/scheduler/dispatch.go). The
+//     scheduler stamps dispatched_at at the deadline — it does NOT
+//     flip fired=1. The wake stays pending for the fold.
 //
 // Three guarantees from the locked architecture (decision 27d7b3c18199e098):
 //
 //  1. Default kind = notification (backward compat). Existing wakes with
 //     no kind tag pass through to the notification dispatch path.
-//  2. Concurrent execution. Independent system wakes fire in parallel
+//  2. Concurrent execution. Independent system kinds run in parallel
 //     goroutines. Serial would re-introduce the SF2 race failure mode.
 //  3. Failure isolation. Non-zero handler exit still marks the wake
 //     fired=1 with metadata.last_error. One wake's failure cannot block
@@ -41,7 +57,8 @@
 //
 // Singleton enforcement is via flock on a PID file so two scheduler
 // instances cannot race on the same wake batch. The atomic UPDATE...
-// RETURNING claim in dispatch.go provides exactly-once fire semantics
+// RETURNING claim in dispatch.go provides exactly-once dispatch
+// semantics (the dispatched_at stamp happens at most once per wake)
 // even when the opportunistic fold in mpm call / mpm-mcp also runs on
 // the same database.
 package scheduler
@@ -283,8 +300,11 @@ func (s *Scheduler) RegisterTickHandler(name string, fn func(ctx context.Context
 }
 
 // QueryDueWakes returns all unfired wakes with target_time <= now.
-// Does NOT mark them fired (notification wakes must remain available for
-// mpm-mcp's opportunistic fold).
+// Does NOT claim or dispatch them — it is a read-only projection used
+// by Tick() to partition system kinds (which Tick() then handles)
+// from notification kinds (which the fold handles). Notification
+// wakes must remain available for the fold until the user/agent
+// acknowledges them.
 func (s *Scheduler) QueryDueWakes(now time.Time) ([]Wake, error) {
 	rows, err := s.db.Query(
 		`SELECT id, target_time, reason, COALESCE(theory_id,''), COALESCE(recurring_rule,''),

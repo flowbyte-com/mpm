@@ -1,28 +1,58 @@
 // wake_tools.go — DM methods for the scheduled_wakes table (Phase 5a).
 //
-// Architecture: stateless, opportunistic scheduling. There is no
-// long-lived process and no time.Ticker. Any MPM call (CLI or MCP) that
-// passes through CheckPendingWakes sees due wakes surfaced in its
-// response payload. The "agent has initiative" effect is achieved by the
-// next tool call after the wake time, regardless of which session or
-// agent issues it.
+// Architecture: opportunistic delivery with scheduler audit. The DB
+// is the durable queue. Three actors cooperate:
+//
+//	a. The scheduler (cmd/mpm-scheduler + internal/scheduler) runs a
+//	   deadline-driven loop that stamps `dispatched_at` on each
+//	   notification-kind wake whose target_time has elapsed. This is
+//	   the AUDIT TRAIL — it records "the scheduler saw this wake and
+//	   when", but it does NOT flip fired=1. The wake stays pending.
+//	   See internal/scheduler/dispatch.go dispatchClaimNextAdHocWake
+//	   and the 2026-09-23 release-blocker repair.
+//
+//	b. The opportunistic fold (cmd/mpm/call.go, cmd/mpm-mcp/tools.go,
+//	   internal/core/tools/handlers.go checkWakesAndFold) runs
+//	   CheckPendingWakes on every MPM call. Notification-kind wakes
+//	   where fired=0 AND target_time <= now are surfaced in a
+//	   WakesPending block (and rendered as a <system_wake_notification>
+//	   XML prefix on MCP responses), then flipped to fired=1 with
+//	   fired_at=now. This is the user/agent acknowledgement path.
+//
+//	c. Explicit operator resolution (handleResolveWake / ResolveWake)
+//	   flips fired=1 with fired_at=now and writes an audit row tagged
+//	   fired_by='wake-resolver'. Same final state as the fold, with
+//	   an explicit audit trail.
 //
 // Lifecycle of a wake:
 //
 //  1. Agent calls ScheduleWake(reason, target_time, theory_id?, recurring_rule?).
-//     Row written with fired=0.
-//  2. Time passes. No daemon runs. The DB is the only substrate.
-//  3. ANY subsequent MPM call invokes CheckPendingWakes (called by
-//     handlers from within their dispatch). Wakes where fired=0 AND
-//     target_time <= now() are returned in a WakesPending block on the
-//     response, marked fired=1, fired_at=now.
+//     Row written with fired=0, dispatched_at=NULL.
+//  2. Time passes. The scheduler's deadline-driven drain stamps
+//     dispatched_at when target_time is reached. fired stays 0.
+//  3. ANY subsequent MPM call invokes CheckPendingWakes via the
+//     fold (called by handlers from within their dispatch). Wakes
+//     where fired=0 AND target_time <= now() are returned in a
+//     WakesPending block on the response, marked fired=1,
+//     fired_at=now.
 //  4. The agent sees the wake, evaluates the reason, optionally
-//     resolves a theory, optionally schedules the next wake.
+//     resolves a theory, optionally schedules the next wake. Or the
+//     operator calls ResolveWake explicitly.
 //
-// Why no daemon: avoids reintroducing the watcher's long-lived
-// footprint (deprecated 2026-06-26 in commit e1bc707) for a primitive
-// that "fire on next contact" covers cleanly. The agent is the
-// scheduling loop. The DB is the queue.
+// State machine:
+//
+//	fired=0  dispatched_at=NULL      scheduled; target_time not yet reached
+//	fired=0  dispatched_at=<epoch>   scheduler-dispatched; awaiting
+//	                                 user/agent acknowledgement (fold or
+//	                                 ResolveWake)
+//	fired=1                           acknowledged (fold-consumed or
+//	                                 ResolveWake)
+//
+// The scheduler is the daemon (introduced post-Phase-5a as the
+// deadline-driven executor). The earlier "no daemon" rationale
+// (deprecated 2026-06-26 in commit e1bc707) predates this daemon; the
+// current design keeps the daemon but constrains its role to the
+// audit trail so it cannot preempt the fold.
 package internal
 
 import (

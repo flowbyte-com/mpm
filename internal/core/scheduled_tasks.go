@@ -69,7 +69,8 @@ const (
 const CronWakePrefix = "cron:"
 
 // CronSource is the metadata.source value set on cron-injected wakes.
-// Lets the agent distinguish cron fires from user/agent-scheduled wakes.
+// Lets the agent distinguish cron-injected wakes from
+// user/agent-scheduled wakes.
 const CronSource = "cron"
 
 // CronWakeKind is the metadata.kind value set on cron-injected wakes.

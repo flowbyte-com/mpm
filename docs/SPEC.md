@@ -1006,7 +1006,7 @@ MPM ships first-party integration adapters for five agent hosts. Each one delive
 
 | Host | Mechanism | Wake delivery |
 |---|---|---|
-| **Claude Code** | MCP server + SessionStart hook | Automatic (host fires `mpm_context` action `read_wake_context` and injects the result as `hookSpecificOutput.additionalContext`) |
+| **Claude Code** | MCP server + SessionStart hook | Automatic (host invokes `mpm_context` action `read_wake_context` and injects the result as `hookSpecificOutput.additionalContext`) |
 | **OpenClaw** | MCP server + typed `session_start` → `agent_turn_prepare` plugin | Automatic (`prependContext` on the first turn) |
 | **OpenCode** | TypeScript plugin (typed tools) + `experimental.chat.system.transform` | Automatic (push into the system prompt before the first model call) |
 | **Pi** | TypeScript extension (typed tools) + `pi.on("session_start")` → `pi.on("before_agent_start")` | Automatic (concatenated onto the system prompt once per session) |
@@ -1700,9 +1700,9 @@ Companion tools: `check_wakes`, `list_wakes`. Architecture: `scheduled_wakes` ta
 **Trade-off vs. a real-time push daemon:** MCP has no server-initiated messages over stdio, so `mpm-mcp` cannot fire a wake back to a sleeping agent. The opportunistic fold is the next-best mechanism — at-most-once-on-next-contact, not real-time. For Wimbledon R1, WC2026 group stage, and monthly Meshal reminder use cases this is sufficient. Real-time push would require an SSE transport change and is deferred.
 #### Autonomous wake execution (mpm-scheduler + mpm-critic)
 
-*System-kind wakes (snapshot, critic, GC, broadcast) fire unattended via the 60s ticker — for the tasks the agent would forget.*
+*System-kind wakes (snapshot, critic, GC, broadcast) execute unattended via the 60s ticker — for the tasks the agent would forget.*
 
-For system-level actions that must run unattended regardless of user presence (pre-flight snapshots, critic audits, GC sweeps, broadcasts), `cmd/mpm-scheduler` is a companion Go daemon that consumes `scheduled_wakes` on a 60s ticker. Wakes tagged with `metadata.kind=snapshot|critic_audit|gc|broadcast` are dispatched to registered handlers and execute inline; untagged wakes pass through to the opportunistic fold unchanged. `cmd/mpm-critic` is the standalone runner for one audit cycle — the scheduler's `critic_audit` handler shells out to it. Install via `make build`; ship under systemd as a user service for persistence. Both binaries are first-class artifacts (Go, no shell wrappers). The two-way bridge with `mpm-mcp`: `CheckPendingWakes` filters system kinds from the opportunistic fold so the two surfaces don't race for the same wake.
+For system-level actions that must run unattended regardless of user presence (pre-flight snapshots, critic audits, GC sweeps, broadcasts), `cmd/mpm-scheduler` is a companion Go daemon that consumes `scheduled_wakes` on a 60s ticker. Wakes tagged with `metadata.kind=snapshot|critic_audit|gc|broadcast` are dispatched to registered handlers and execute inline; after each handler returns, the scheduler calls MarkFired (`fired=1`) which here records that the handler ran — the system-kind acknowledgement transition is internal to the scheduler (no separate user/agent ack is needed). Notification-kind and untagged wakes pass through to the opportunistic fold unchanged. `cmd/mpm-critic` is the standalone runner for one audit cycle — the scheduler's `critic_audit` handler shells out to it. Install via `make build`; ship under systemd as a user service for persistence. Both binaries are first-class artifacts (Go, no shell wrappers). The two-way bridge with `mpm-mcp`: `CheckPendingWakes` filters system kinds from the opportunistic fold so the two surfaces don't race for the same wake.
 #### Agentic Cron (Recurring Tasks)
 
 *Recurring workflows with fail-fast directive validation — catch typos at upsert, not silent wake drops at 3 AM.*
