@@ -134,7 +134,7 @@ The installer merges the SessionStart hook into `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "/home/user/.claude/hooks/mpm-session-start",
+            "command": "$HOME/.claude/hooks/mpm-session-start",
             "timeout": 10
           }
         ]

@@ -6,7 +6,7 @@ behavioral protocol, idempotently.
 Usage:
     python3 install_agents_instructions.py \
         --scope user \                            # or 'project'
-        --target /home/user/project/AGENTS.md \
+        --target "$HOME/project/AGENTS.md" \
         --snippet /path/to/AGENTS.md.snippet
 
 For project scope, --target should be the project's AGENTS.md.
