@@ -84,14 +84,53 @@ class CanonicalProtocol(unittest.TestCase):
             self.assertNotIn(forbidden.lower(), self.text.lower())
 
     def test_host_independent_examples_used(self):
-        # Generic mentions of "MCP", "plugin", or "agent integration" are OK;
-        # host-specific commands are not.
-        # We don't enforce word counts — just ensure file size is reasonable.
-        # Threshold bumped from 20K → 25K chars to accommodate §4.1
-        # (`session != work` lifecycle split) added in the 2026-09-04
-        # cross-adapter integrity audit.
+        # The canonical agent protocol must stay host-independent AND
+        # readable. Two guards:
+        #
+        #   lower bound (> 2,000 chars): a near-empty protocol would
+        #     fail to convey the cross-session continuity contract;
+        #     force substantive content.
+        #
+        #   upper bound (< 28,000 chars): the protocol's intent is to
+        #     be a principles document, not a kitchen-sink reference.
+        #     Above this threshold the file has likely accumulated
+        #     host-specific implementation detail, duplicated host-
+        #     adapter guidance, template syntax that belongs with the
+        #     tool rather than the cross-cutting contract, or prose
+        #     that could be expressed more compactly.
+        #
+        # Threshold history:
+        #   20,000 — initial cap at the MPM agent protocol's creation
+        #     (commit c37903a, 2026-08-26).
+        #   25,000 — bumped for §4.1 "session != work" lifecycle split
+        #     added in the 2026-09-04 cross-adapter integrity audit
+        #     (commit ec3d729).
+        #   28,000 — bumped for §1.1-1.3 contextual continuity contract
+        #     added by the Stage 2E.4 instruction convergence
+        #     (commit 32dd25c, 2026-09-21), which replaced earlier
+        #     prose describing the contextual routing pipeline with
+        #     a bounded semantic interpretation contract.
+        #
+        # This test is intentionally a maintainability heuristic, not
+        # a hard constraint: bumping the ceiling again is acceptable
+        # when a new architectural principle genuinely requires more
+        # normative prose. Trimming the document to fit is preferred
+        # when the growth is template syntax, duplicated guidance, or
+        # implementation detail (template syntax and classifier
+        # enumeration in §8.2 were both trimmed in the 2026-09-23
+        # commit that bumped the ceiling to 28,000).
         self.assertGreater(len(self.text), 2000)
-        self.assertLess(len(self.text), 25000)
+        current = len(self.text)
+        self.assertLess(
+            current, 28000,
+            f"canonical protocol is too large ({current} chars); "
+            f"the upper bound is 28000. Trim template syntax, "
+            f"duplicated host-adapter guidance, or implementation "
+            f"details that duplicate the underlying Go code. "
+            f"If a new architectural principle genuinely requires "
+            f"more normative prose, update the threshold with a "
+            f"documented rationale in this test's docstring.",
+        )
 
 
 class SnippetContract(unittest.TestCase):

@@ -33,43 +33,37 @@
 
 At the beginning of a new agent session, **before any substantive work**:
 
-- Read the MPM wake context — the bounded orientation surface that
-  carries recent durable context (active mode and persona, recent
-  topics, relevant memories, recent milestones, the last handoff,
-  any overdue scheduled wakes, a bounded inventory of available
-  skills, and the additive `contextual_focus` projection described
-  in §1.1). The full field list lives on the `WakeContextData`
-  struct in `internal/core/wake_context.go`.
+- Read the MPM wake context — the bounded orientation surface
+  (active mode and persona, recent topics, memories, milestones, last
+  handoff, overdue wakes, available-skills inventory, and the additive
+  `contextual_focus` projection — §1.1). The full field list lives on
+  the `WakeContextData` struct in `internal/core/wake_context.go`.
 - The wake payload already includes inherited working awareness —
-  you do not need to manually chain `contextual_candidates`,
-  `contextual_selection`, or `contextual_materialization` at session
-  start. Those three are **diagnostic surfaces** for inspecting or
-  debugging the routing pipeline; their integrated result lives in
-  `contextual_focus` (see §1.1).
-- When the wake payload points you at a specific artifact for deeper
-  inspection, follow the pointer with the appropriate domain tool —
-  `mpm_decisions show`, `mpm_lessons read`, `mpm_memory show`,
-  `mpm_work show`, `mpm_resolve`, or whatever the artifact class
-  warrants. Deliberate per-artifact retrieval is fine; bulk listing
-  every substrate category at session start is not the contract.
-- Acknowledge the local substrate state (e.g., daemon uptime if relevant).
+  `contextual_candidates` / `_selection` / `_materialization` are
+  **diagnostic** surfaces for inspecting the routing pipeline; the
+  integrated result is in `contextual_focus`. Do not chain them at
+  session start.
+- When the wake payload points you at a specific artifact, follow
+  the pointer with the appropriate domain tool (`mpm_decisions
+  show`, `mpm_lessons read`, `mpm_memory show`, `mpm_work show`,
+  `mpm_resolve`, or whatever the artifact class warrants). Bulk
+  listing every substrate category at session start is not the
+  contract.
+- Acknowledge local substrate state (e.g. daemon uptime) when
+  relevant.
 
-**Why this matters:** Skipping wake means arriving amnesic and forcing the
-user to re-explain context already on file. The wake protocol is **how
-future-me starts**.
+**Why this matters:** Skipping wake means arriving amnesic and forcing
+the user to re-explain context already on file. The wake protocol is
+**how future-me starts**.
 
 ### 1.1 `contextual_focus` — Inherited working awareness
 
-The `contextual_focus` field on `WakeContextData` is the integrated
-delivery surface of the routing pipeline (Stage 2D discovery →
-Stage 2E.1 selection → Stage 2E.2 bounded materialization →
-Stage 2E.3 compact packaging). Each item carries:
-
-- `id`, `kind`, `artifact_id`, `pointer` — identity envelope
-- `band`, `rationale`, `why_now` — why the item surfaced
-- `status`, `detail`, `truncated` — bounded what-to-know
-- `lifecycle_state`, `selection_triggers`, `compressed_related_ids` —
-  supplementary metadata where useful
+`contextual_focus` is the integrated delivery surface of the routing
+pipeline (Stage 2D discovery → 2E.1 selection → 2E.2 materialization →
+2E.3 packaging). Per-item fields (envelope / "why surfaced" /
+"what to know" / supplementary) are declared on `WakeContextData` in
+`internal/core/wake_context.go`; this section pins the interpretation
+contract, not the schema.
 
 Interpret `contextual_focus` as:
 
@@ -198,18 +192,15 @@ the kind of thing I've handled before." A skill with no `when_to_use`
 hint can still be invoked explicitly via `mpm_skills read`.
 
 **Catalog fallback.** Discovery is proactive; the full catalog is
-reactive. When the agent already knows the skill name (or wants to
-inventory everything available), use `mpm call mpm_skills
-'{"action":"list","params":{"scope":"all"}}'`.
+reactive — `mpm_skills(action="list", scope="all")` for inventory or
+when the skill name is already known.
 
 **No per-turn auto-scan.** Discovery is **context-triggered**, not
 mechanically repeated. Each call costs context; only invoke when the
-task context suggests a remembered procedure would apply.
-
-**Wake context already includes skills.** The `<available_skills>`
-field in the wake payload is the same data source. Discovery adds a
-context-driven filter on top of that inventory; it does not invent
-new skills.
+task context suggests a remembered procedure would apply. The
+`<available_skills>` field in the wake payload is the same inventory;
+discovery adds a context-driven filter, it does not invent new
+skills.
 
 ### 3.1 SKILL FORMATION
 
@@ -232,59 +223,32 @@ underlying persistence and validation architecture is unchanged.
 - Procedures already covered by an existing skill (use proactive discovery first)
 - Facts or preferences (use `mpm memory save` instead)
 
-**Decision-model template** (fill in before calling the workshop):
+**Decision model.** The workshop scores the candidate on four axes
+(reusability, non-obviousness, stability, leverage; each 0–5, total 0–20)
+plus a `boundary` (procedure | judgment | knowledge). The publication
+gate is **total ≥ 6 AND boundary = `procedure`**; anything else
+returns as `candidate` or `rejected`. The full proposal payload
+(name, version, domain, description, `when_to_use`, steps,
+constraints, evidence) is the workshop's response under
+`validation.status == "passed_with_warnings"` or `"failed"` — pass it
+back verbatim to `mpm_skills(action="save", params=<save_payload>)`
+to publish a candidate. The exact field-by-field template lives in
+the workshop's runtime contract (`mpm__mpm_skills` action `workshop`
+description); this protocol only fixes the gating rule.
 
-```markdown
-## Skill Formation Assessment
+**The 3 outcomes:**
 
-**Intent:** <skill name candidate>
-**Mode:** form | refine (existing skill: <name>)
+- `published` — live and surfaced in `<available_skills>`. Read via `mpm_skills read`.
+- `candidate` — proposal generated, not published. Inspect `decision_model`,
+  `duplicate_check`, `validation`, `proposal`. Accept by dispatching the
+  `save_payload` back via `mpm_skills(action="save", ...)`.
+- `rejected` — not skill-worthy. Optionally save a memory or lesson.
 
-### Decision Model
-
-- **Reusability** (0–5): <score> — <one-line reasoning>
-- **Non-obviousness** (0–5): <score> — <one-line reasoning>
-- **Stability** (0–5): <score> — <one-line reasoning>
-- **Leverage** (0–5): <score> — <one-line reasoning>
-- **Boundary**: procedure | judgment | knowledge
-
-**Total**: <0–20>
-**Decision**: publish if total ≥ 6 AND boundary = procedure; else candidate / rejected
-
-### Skill Proposal (if publishing or returning candidate)
-
-- **Name**: <kebab-case>
-- **Version**: <semver>
-- **Domain**: <area, e.g., "docs", "release", "telemetry">
-- **Description**: <one-line purpose, ≤120 chars>
-- **When to use**: <comma-separated task phrases, ≥30 chars>
-- **Steps**: <numbered procedure>
-- **Constraints**: <edge cases, gotchas>
-- **Evidence**: <memory/lesson/reference ids that informed the proposal>
-```
-
-**The 3 outcomes and what to do with each:**
-
-- `published`: skill is live and surfaced in `<available_skills>`. Read it via `mpm_skills read` and add to your procedural memory.
-- `candidate`: workshop generated a proposal but did not publish. Inspect `decision_model`, `duplicate_check`, `validation`, and `proposal`. If acceptable, call `mpm_skills save` with the `save_payload`. If not, discard and optionally save a memory or lesson.
-- `rejected`: not skill-worthy. Optionally save a memory or lesson capturing the insight.
-
-**The `save_payload` hand-off pattern** — when you accept a candidate, dispatch:
-
-```
-mpm_skills(action="save", params=<save_payload>)
-```
-
-The `save_payload` is the exact `params` dict the workshop returned under `validation.status == "passed_with_warnings"` or `"failed"`. No transformation needed.
-
-**Prefer refinement over creation** — when `duplicate_check.close_matches` is non-empty (combined score > 0.6), prefer `mode: "refine"` with the matching skill name. The workshop's change_type → version bump mapping makes refinement deterministic:
-
-- `correction` → patch (`1.0.0` → `1.0.1`)
-- `extension` → minor (`1.0.0` → `1.1.0`)
-- `restructuring` → minor (`1.0.0` → `1.1.0`)
-- `purpose_change` → major (`1.0.0` → `2.0.0`)
-
-Do not choose the version directly — supply `change_type` and let the workshop derive the bump.
+**Prefer refinement over creation.** When `duplicate_check.close_matches`
+is non-empty (combined score > 0.6), dispatch `mode: "refine"` with the
+matching skill name and supply `change_type` (`correction`/`extension`/
+`restructuring`/`purpose_change`) so the workshop derives the version
+bump. Do not choose the version directly.
 
 ---
 
@@ -481,36 +445,16 @@ new mistake.
 
 ### 8.2 How freshness is derived (no schema changes)
 
-The freshness signal is **computed at read time** from existing fields.
-There is no new table, no new column, no migration.
-
-Inputs (already in `reference_docs`):
-
-- `last_indexed` — Unix epoch seconds of most recent ingest (auto-bumped).
-- `tags` — JSON-encoded `[]string`. Operator-supplied via `--tag` at `add`.
-- `import_reason` — operator-supplied at `add` via `--reason`.
-
-Signal precedence (first match wins):
-
-1. **Explicit tags** (case-insensitive, scanned in slice order):
-   - `stale` → `stale`
-   - `current`, `verified`, `freshness:current` → `current`
-   - `historical`, `freshness:historical` → `historical`
-   - `version-bound:<X>`, `version:<X>` → `version-bound`
-2. **import_reason patterns:**
-   - `version:`, `for <thing>`, contains ` v` → `version-bound`
-   - `historical`, contains `as-of ` → `historical`
-3. **Age fallback on `last_indexed`:**
-   - older than 90 days → `stale`
-   - within 90 days → `current`
-   - future (clock skew) or unparseable → `unknown`
-
-The classifier is the single source of truth:
-
-- `internal/core/reference_freshness.go` — `Freshness` enum and
-  `ClassifyReferenceFreshness(doc, now)` / `ClassifyReferenceFreshnessFromFields(tagsJSON, importReason, lastIndexed, now)`.
-- Surfaced in `mpm_references list`, `mpm_references read`,
-  `mpm_references search` as the `freshness` field on each row.
+The freshness signal is **computed at read time** from existing
+`reference_docs` fields (`last_indexed`, `tags`, `import_reason`) —
+no new table, no new column, no migration. The classifier in
+`internal/core/reference_freshness.go`
+(`ClassifyReferenceFreshnessFromFields`) is the single source of
+truth: explicit tags win first, `import_reason` patterns next, age
+on `last_indexed` (default 90 days) last. The five states in §8.1
+are the contract; the exact precedence and pattern matching live in
+the classifier code. Freshness is surfaced in `mpm_references
+list` / `read` / `search` as the `freshness` field on each row.
 
 ### 8.3 How agents must apply this contract
 
@@ -541,18 +485,16 @@ consult-and-verify.
 
 - It does **not** claim MPM wakes the agent by itself. The host
   runtime owns wake-context delivery — each adapter ships its own
-  host-specific lifecycle integration (ClaudeCode `SessionStart`
-  hook, OpenClaw typed `session_start` → `agent_turn_prepare` chain,
-  OpenCode chat-hook, Pi extension hook pair). **Hermes has no
-  session-start wake hook** — on Hermes the agent must call
-  `mcp__mpm__mpm_context` action `read_wake_context` itself at
-  the start of its first turn.
+  lifecycle integration (ClaudeCode `SessionStart` hook, OpenClaw
+  `session_start` → `agent_turn_prepare` chain, OpenCode chat-hook,
+  Pi extension hook pair). **Hermes has no session-start wake hook**
+  — the agent must call `mcp__mpm__mpm_context` action
+  `read_wake_context` itself at the start of its first turn.
 - It does **not** claim MPM provides any specific behavior beyond
   durability, retrieval, and write-shape contracts. Capabilities outside
   this list are host- or tool-specific.
-- It does **not** require any particular host. OpenClaw, Claude Code,
-  OpenCode, Pi, Hermes, and any host that can call `mpm` (MCP, CLI,
-  plugin) can satisfy this protocol.
+- It does **not** require any particular host. Any host that can call
+  `mpm` (MCP, CLI, plugin) can satisfy this protocol.
 
 ---
 
