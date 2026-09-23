@@ -16,8 +16,20 @@
 // New state machine:
 //
 //	fired=0  dispatched_at=NULL        scheduled, target_time not yet reached
-//	fired=0  dispatched_at=<epoch>     scheduler-dispatched; awaiting user/agent acknowledgement
-//	fired=1                             user/agent acknowledged (via CheckPendingWakes fold or explicit ResolveWake)
+//	fired=0  dispatched_at=<epoch>     scheduler has dispatched the wake (NOT terminal;
+//	                                 dispatched_at is the audit trail; the wake is still
+//	                                 pending for normal delivery until fired=1)
+//	fired=1                             terminal: no longer pending for normal delivery.
+//	                                 Notification-kind wakes reach this state via the
+//	                                 CheckPendingWakes fold, explicit ResolveWake, or the
+//	                                 bounded-retirement sweep in wake_expiration.go.
+//	                                 System-kind wakes reach this state via MarkFired after
+//	                                 the scheduler-owned handler completes.
+//
+// Invariant: dispatched_at != NULL records that the scheduler has
+// processed the wake at its target_time. It does NOT imply fired=1,
+// acknowledgement, or terminal state — those are independent columns
+// and transitions.
 //
 // Idempotent via the scheduled_wakes_dispatched_at_v1 sentinel pattern
 // (matching migration_wake_resolver_fired_by.go).
@@ -49,11 +61,14 @@ func MigrateScheduledWakesDispatchedAt(tx *sql.Tx) error {
 		return fmt.Errorf("probe dispatched_at column: %w", err)
 	}
 	if !exists {
-		// dispatched_at is nullable. NULL = scheduler has not yet
-		// attempted dispatch (the wake is still waiting for
-		// target_time, or target_time has elapsed but the scheduler
-		// hasn't ticked since). Matches the wake lifecycle
-		// semantics: an unfired wake has no dispatched_at.
+		// dispatched_at is nullable. NULL = the scheduler has not
+		// yet recorded a dispatch attempt (target_time has not
+		// elapsed, or the scheduler has not ticked since). It is
+		// independent of fired: a wake may be dispatched_at IS NOT
+		// NULL while still fired=0 (still pending for normal
+		// delivery), or fired=1 with dispatched_at NULL (terminal
+		// without ever being scheduler-dispatched — e.g. retired by
+		// the bounded-retirement sweep before any MPM call arrived).
 		if _, err := tx.Exec(
 			`ALTER TABLE scheduled_wakes ADD COLUMN dispatched_at INTEGER`,
 		); err != nil {

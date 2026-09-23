@@ -5835,11 +5835,15 @@ func handleMpmWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload
 // resolution). Lifecycle contract:
 //
 //   - Marks fired=1 with fired_at=now and fired_by="wake-resolver".
-//     fired=1 here means user/agent acknowledgement — the canonical
-//     state for "wake no longer pending for delivery".
-//   - Idempotent: re-running on an already-acknowledged wake returns
+//     For notification-kind wakes, this is the explicit terminal
+//     transition (the wake was pending and the operator resolved it).
+//     fired=1 here means the wake is no longer pending for normal
+//     delivery — it does NOT mean "scheduler dispatched" (scheduler
+//     dispatch only stamps dispatched_at). See wake_tools.go and
+//     scheduler.go for the canonical fired / dispatched_at invariant.
+//   - Idempotent: re-running on an already-terminal wake returns
 //     success with status="already_resolved" and no new audit row.
-//     No double-fire noise from retries or double-clicks.
+//     No double-noise from retries or double-clicks.
 //   - Refuses scheduled_tasks-owned rows (no metadata.kind →
 //     "not_a_wake"). Scheduled tasks have their own lifecycle
 //     (`delete_task`); mixing the surfaces would let an agent

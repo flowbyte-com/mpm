@@ -308,7 +308,7 @@ func TestDispatchDrainAdHocWakes_DrainsAllDue(t *testing.T) {
 		t.Fatal(err)
 	}
 	if fired != 0 {
-		t.Errorf("fired count = %d, want 0 (wakes must remain pending until acknowledged)", fired)
+		t.Errorf("fired count = %d, want 0 (wakes must remain pending until terminal (acknowledged via fold, ResolveWake, or bounded retire))", fired)
 	}
 }
 
@@ -343,7 +343,7 @@ func TestDispatchDrainAdHocWakes_LeavesFutureAlone(t *testing.T) {
 		t.Errorf("past dispatched_at not set, want set (claim should stamp dispatched_at)")
 	}
 	if pastFired != 0 {
-		t.Errorf("past fired=%d, want 0 (wake must remain pending until acknowledged)", pastFired)
+		t.Errorf("past fired=%d, want 0 (wake must remain pending until terminal (acknowledged via fold, ResolveWake, or bounded retire))", pastFired)
 	}
 
 	var futureDispatchedAt sql.NullInt64
@@ -401,7 +401,7 @@ func TestDispatchDrainAdHocWakes_RespectsCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	if fired != 0 {
-		t.Errorf("fired count = %d, want 0 (wake must remain pending until acknowledged)", fired)
+		t.Errorf("fired count = %d, want 0 (wake must remain pending until terminal (acknowledged via fold, ResolveWake, or bounded retire))", fired)
 	}
 }
 
@@ -466,7 +466,7 @@ func TestDispatchDrain_ConcurrentNoDoubleFire(t *testing.T) {
 		t.Fatal(err)
 	}
 	if firedCount != 0 {
-		t.Errorf("fired count = %d, want 0 (wakes must remain pending until acknowledged)", firedCount)
+		t.Errorf("fired count = %d, want 0 (wakes must remain pending until terminal (acknowledged via fold, ResolveWake, or bounded retire))", firedCount)
 	}
 }
 
@@ -611,10 +611,10 @@ func TestDispatchClaim_RespectsBusyTimeout_Regression(t *testing.T) {
 //
 //   - Scheduler claim (this file): record an audit trail that the
 //     scheduler saw the wake due. Done via dispatched_at + dispatched_by.
-//   - Normal delivery (internal/core/wake_context.go gatherOverdueWakes,
-//     internal/core/wake_tools.go CheckPendingWakes): the wake row stays
-//     in fired=0 until the user/agent acknowledges it via ResolveWake,
-//     so the fold and the read_wake_context query both surface it.
+//     The wake row stays fired=0 — NOT terminal — so the normal delivery
+//     path (`gatherOverdueWakes`, `CheckPendingWakes`) keeps surfacing it
+//     until the notification-kind terminal transition fires (fold,
+//     explicit ResolveWake, or bounded retirement via wake_expiration.go).
 //
 // Pre-fix the scheduler claim flipped fired=1, removing the wake from
 // every normal delivery surface (`mpm continue`, `mpm wake`,

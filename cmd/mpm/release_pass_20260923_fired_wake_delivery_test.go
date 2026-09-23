@@ -5,8 +5,9 @@
 // tracking and audit traceability (this test is the executable-level
 // proof that the 2026-09-23 release-blocker repair closes the defect).
 // It does NOT describe the current persisted state machine —
-// `fired=1` post-fix is acknowledgement, never scheduler dispatch.
-// See the state machine below.
+// `fired=1` post-fix is terminal (no longer pending for normal
+// delivery) for notification-kind wakes via the fold, explicit
+// ResolveWake, or bounded retirement. See the state machine below.
 //
 // The defect (caught by the FINAL REAL-CLI ACCEPTANCE PASS):
 //   A scheduler-dispatched one-shot notification wake scheduled via
@@ -17,7 +18,9 @@
 //   though the scheduler had provably claimed the wake (pre-fix:
 //   `fired=true, fired_at=target_time, dispatched_by=mpm-scheduler`;
 //   the pre-fix code path used `fired=1` to mean "scheduler
-//   dispatched" — this is what the repair split into two states).
+//   dispatched" — this is what the repair split into two states:
+//   `dispatched_at` records the scheduler's claim, `fired` records
+//   the terminal transition).
 //   The wake's actual reason/marker was reachable only via
 //   `mpm_wakes list include_fired=true` and the activity-feed audit
 //   row for `mpm_wakes.schedule`.
@@ -26,25 +29,33 @@
 // flipped `fired=1` on dispatch, which removed the wake from every
 // surface that requires `fired=0` (gatherOverdueWakes, CheckPendingWakes,
 // the default mpm_wakes list). There was no separate "delivered but not
-// yet acknowledged" state.
+// yet terminal" state.
 //
 // Fix (release-blocker): dispatch now stamps `dispatched_at` and
-// `metadata.dispatched_by` only; `fired` stays 0 until the user/agent
-// acknowledges the wake via the fold (`CheckPendingWakes`) or explicit
-// `ResolveWake`. The wake remains visible to every normal delivery
-// surface between scheduler dispatch and acknowledgement. See
+// `metadata.dispatched_by` only; `fired` stays 0 until the notification-
+// kind terminal transition fires (fold `CheckPendingWakes`, explicit
+// `ResolveWake`, or bounded retirement via `wake_expiration.go`).
+// The wake remains visible to every normal delivery surface between
+// scheduler dispatch and terminal. See
 // `internal/scheduler/dispatch.go` doc comment and
 // `internal/core/migration_scheduled_wakes_dispatched_at.go` for the
 // full state-machine contract.
 //
-// State machine (post-fix):
+// State machine (post-fix) — for notification-kind wakes:
 //
 //	fired=0  dispatched_at=NULL        scheduled; target_time not yet reached
-//	fired=0  dispatched_at=<epoch>     scheduler-dispatched; awaiting
-//	                                  user/agent acknowledgement (fold or
-//	                                  ResolveWake)
-//	fired=1                             acknowledged (fold-consumed or
-//	                                  ResolveWake)
+//	fired=0  dispatched_at=<epoch>     scheduler-dispatched (audit trail);
+//	                                  NOT terminal; still pending for normal
+//	                                  delivery via the fold
+//	fired=1                             terminal; no longer pending for
+//	                                  normal delivery (fold-consumed,
+//	                                  ResolveWake, or wake_expiration.go
+//	                                  bounded retirement)
+//
+// `dispatched_at != NULL` records that the scheduler has processed
+// the wake at its target_time. It does NOT imply fired=1,
+// acknowledgement, or terminal state — those are independent columns
+// and transitions.
 //
 // This test exercises the EXECUTABLE acceptance path — it spawns a
 // fresh `mpm` binary, schedules a wake, advances the scheduler, and
@@ -222,12 +233,14 @@ func wakeContextContainsMarker(ctx map[string]interface{}, marker string) bool {
 //
 //  1. A scheduler-dispatched notification-kind wake (fired=0,
 //     dispatched_at set, dispatched_by=mpm-scheduler) is delivered
-//     through `mpm call mpm_context read_wake_context`.
+//     through `mpm call mpm_context read_wake_context`. The wake
+//     is NOT terminal (fired=0); only the audit trail
+//     (dispatched_at) shows scheduler activity.
 //
 //  2. The wake's actual reason/marker is in the response — not just
 //     an activity-feed audit entry or a `mpm_wakes list` row.
 //
-//  3. After explicit acknowledgement (ResolveWake, fired=1), the
+//  3. After explicit ResolveWake (terminal transition fired=1), the
 //     wake is no longer in the normal delivery surface.
 //
 // Pre-fix this test FAILED with reason absent from overdue_wakes

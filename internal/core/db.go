@@ -2070,11 +2070,14 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// leaves an audit trail WITHOUT flipping fired=1 (which would
 	// remove the wake from every normal delivery surface — mpm
 	// continue, mpm wake, read_wake_context, the opportunistic
-	// <system_wake_notification> fold). Pre-fix the scheduler fired
-	// the wake and lost it; post-fix the scheduler records
+	// <system_wake_notification> fold). Pre-fix the scheduler's
+	// dispatch flipped fired=1 and the wake was lost from the
+	// delivery surfaces. Post-fix the scheduler records
 	// dispatched_at + metadata.dispatched_by, and the wake stays
-	// fired=0 until the user/agent acknowledges it via the fold or
-	// explicit ResolveWake. Idempotent via
+	// fired=0 (still pending for delivery) until the
+	// notification-kind terminal transition fires — fold
+	// (CheckPendingWakes), explicit ResolveWake, or bounded
+	// retirement via wake_expiration.go. Idempotent via
 	// scheduled_wakes_dispatched_at_v1 sentinel.
 	if err := MigrateScheduledWakesDispatchedAt(tx); err != nil {
 		_ = tx.Rollback()

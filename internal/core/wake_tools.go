@@ -17,11 +17,12 @@
 //	   where fired=0 AND target_time <= now are surfaced in a
 //	   WakesPending block (and rendered as a <system_wake_notification>
 //	   XML prefix on MCP responses), then flipped to fired=1 with
-//	   fired_at=now. This is the user/agent acknowledgement path.
+//	   fired_at=now. This is the user/agent acknowledgement path for
+//	   notification-kind wakes.
 //
 //	c. Explicit operator resolution (handleResolveWake / ResolveWake)
 //	   flips fired=1 with fired_at=now and writes an audit row tagged
-//	   fired_by='wake-resolver'. Same final state as the fold, with
+//	   fired_by='wake-resolver'. Same terminal state as the fold, with
 //	   an explicit audit trail.
 //
 // Lifecycle of a wake:
@@ -39,14 +40,30 @@
 //     resolves a theory, optionally schedules the next wake. Or the
 //     operator calls ResolveWake explicitly.
 //
+// Canonical invariant for scheduled_wakes.fired:
+//
+//	fired=1 means the wake is TERMINAL — no longer pending for
+//	normal delivery. The terminal transition depends on the wake's
+//	kind:
+//	  - notification-kind:  fold (CheckPendingWakes), explicit
+//	                        ResolveWake, OR bounded retirement via
+//	                        internal/scheduler/wake_expiration.go
+//	                        (the 7-day retention sweep)
+//	  - system-kind:        MarkFired after the scheduler-owned
+//	                        HandlerFunc completes (recorded in
+//	                        scheduler.go:tick dispatch)
+//	fired=0 means the wake is still pending for delivery (one of
+//	the above terminal transitions has not occurred).
+//
 // State machine:
 //
 //	fired=0  dispatched_at=NULL      scheduled; target_time not yet reached
-//	fired=0  dispatched_at=<epoch>   scheduler-dispatched; awaiting
-//	                                 user/agent acknowledgement (fold or
-//	                                 ResolveWake)
-//	fired=1                           acknowledged (fold-consumed or
-//	                                 ResolveWake)
+//	fired=0  dispatched_at=<epoch>   scheduler dispatched the wake;
+//	                                 still pending (the dispatched_at
+//	                                 audit stamp does NOT imply fired=1)
+//	fired=1                           terminal; not pending for normal
+//	                                 delivery (any of the transitions
+//	                                 above)
 //
 // The scheduler is the daemon (introduced post-Phase-5a as the
 // deadline-driven executor). The earlier "no daemon" rationale

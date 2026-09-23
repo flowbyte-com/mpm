@@ -26,9 +26,13 @@
 //     the row was swept, not lost.
 //
 // Retired rows are functionally equivalent to a fold or ResolveWake
-// acknowledgement: fired=1 means the wake is no longer pending for
-// delivery. The sweep is the bounded-retirement fallback for wakes
-// that never reach the fold because no MPM call arrived in time.
+// terminal transition for notification-kind wakes: fired=1 means the
+// wake is no longer pending for normal delivery. The sweep is the
+// bounded-retirement fallback for notification wakes that never reach
+// the fold because no MPM call arrived in time. It is the third
+// legitimate notification-kind terminal path (alongside the fold
+// and explicit ResolveWake). See scheduler.go and wake_tools.go for
+// the canonical fired=1 / terminal invariant.
 //
 // What this sweep does NOT do.
 //   - It does not touch wakes with a system kind (snapshot,

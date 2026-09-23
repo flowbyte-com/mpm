@@ -12,11 +12,29 @@
 // stamps dispatched_at and metadata.dispatched_by='mpm-scheduler' on
 // each notification-kind wake at target_time, but it does NOT flip
 // fired=1. The wake stays in fired=0 (visible to the fold) until the
-// user/agent acknowledges it via CheckPendingWakes (opportunistic
-// fold) or explicit ResolveWake. fired=1 means acknowledgement only —
-// never scheduler dispatch. See dispatch.go for the canonical state
-// machine and the 2026-09-23 release-blocker repair that established
-// the split.
+// notification-kind terminal transition fires — CheckPendingWakes
+// (opportunistic fold), explicit ResolveWake, or bounded retirement
+// via wake_expiration.go. For system kinds, the terminal transition is
+// MarkFired (fired=1) after the registered HandlerFunc completes.
+//
+// Canonical invariant for scheduled_wakes.fired:
+//
+//	fired=1 means the wake is TERMINAL — no longer pending for normal
+//	delivery. The exact terminal path depends on the wake's kind:
+//	  - notification-kind:  fold (CheckPendingWakes), explicit
+//	                        ResolveWake, OR bounded retirement via
+//	                        wake_expiration.go (7-day retention sweep)
+//	  - system-kind:        MarkFired after the scheduler-owned
+//	                        HandlerFunc completes
+//	fired=0 means the wake is still pending; none of the above
+//	terminal transitions have occurred.
+//
+// dispatched_at != NULL means the scheduler has processed the wake
+// (notification-kind only, via the deadline-driven drain). It is the
+// AUDIT TRAIL of scheduler activity — it does NOT imply fired=1,
+// acknowledgement, or terminal state. See dispatch.go for the
+// canonical state machine and the 2026-09-23 release-blocker repair
+// that established the split.
 //
 // Two kinds of latency:
 //
@@ -35,10 +53,10 @@
 //     cascade_summary, cascade, cron) are owned by Tick() and run on
 //     the maintenance ticker (interval — default 60s). Tick() invokes
 //     the registered HandlerFunc for each, then calls MarkFired
-//     (fired=1) once the handler returns. fired=1 here means "the
-//     handler ran" — same column, same semantics, but for system
-//     kinds the acknowledgement transition is internal to the
-//     scheduler (the handler completes the lifecycle).
+//     (fired=1) once the handler returns. For system kinds,
+//     fired=1 records "the handler ran" — the terminal transition is
+//     internal to the scheduler (the handler completing the lifecycle
+//     is itself the terminal event).
 //
 //   - Notification-kind and untagged wakes are owned by the deadline-
 //     driven dispatch path (internal/scheduler/dispatch.go). The
