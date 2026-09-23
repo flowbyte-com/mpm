@@ -26,22 +26,12 @@ import (
 // must both log the "no pidfile singleton" line within the timeout,
 // proving the singleton check no longer rejects the second process.
 func TestConcurrentMcpInstances(t *testing.T) {
-	// Pre-fix this hardcoded
-	// /home/v/.openclaw/workspace/projects/mpm/bin/mpm-mcp —
-	// the original author's checkout — which broke the test under
-	// any other user. Hermetic repair: build the source tree's
-	// mpm-mcp into t.TempDir() via the shared mcpCmd helper. The
-	// fall-back to a pre-built absolute binary is preserved so a
-	// developer with a freshly-built bin/ can run the test without
-	// waiting for the go build to complete.
+	// Source-tree executable: build cmd/mpm-mcp into t.TempDir() and
+	// invoke that exact binary. If the build fails, mcpCmd calls
+	// t.Fatalf — the test must fail with the build error, not skip
+	// or fall back to an installed binary. A stale install must
+	// never make a broken source checkout pass.
 	bin := mcpCmd(t)
-	if _, err := exec.LookPath(bin); err != nil {
-		prebuilt := "/home/v/.openclaw/workspace/projects/mpm/bin/mpm-mcp"
-		if _, err := exec.LookPath(prebuilt); err != nil {
-			t.Skipf("mpm-mcp binary not built yet; run `make build` first")
-		}
-		bin = prebuilt
-	}
 
 	const N = 3
 	outputs := make([]string, N)
@@ -114,14 +104,12 @@ func TestConcurrentMcpInstances(t *testing.T) {
 // after startup, no pidfile should exist at the canonical path. The new
 // "no pidfile singleton" log line replaces the old "pidfile=..." line.
 func TestNoPidfileWrittenAfterStartup(t *testing.T) {
+	// Source-tree executable: build cmd/mpm-mcp into t.TempDir() and
+	// invoke that exact binary. If the build fails, mcpCmd calls
+	// t.Fatalf — the test must fail with the build error, not skip
+	// or fall back to an installed binary. A stale install must
+	// never make a broken source checkout pass.
 	bin := mcpCmd(t)
-	if _, err := exec.LookPath(bin); err != nil {
-		prebuilt := "/home/v/.openclaw/workspace/projects/mpm/bin/mpm-mcp"
-		if _, err := exec.LookPath(prebuilt); err != nil {
-			t.Skipf("mpm-mcp binary not built yet; run `make build` first")
-		}
-		bin = prebuilt
-	}
 
 	cmd := exec.Command(bin)
 	cmd.Stdin = strings.NewReader("")

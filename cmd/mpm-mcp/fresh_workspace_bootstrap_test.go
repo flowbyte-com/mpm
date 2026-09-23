@@ -44,28 +44,12 @@ import (
 // returns ENOENT for a missing dir. Post-fix: mpm-mcp creates the
 // dirs at boot and serves any tool request against the empty set.
 func TestMcpBootstrapsModeAndPersonaDirsOnFreshWorkspace(t *testing.T) {
-	// Resolve the binary the same way the concurrent-instances
-	// regression does. Skip the test if the user hasn't built yet.
-	//
-	// Pre-fix this hardcoded /home/v/workspace/projects/mpm/bin/mpm-mcp
-	// — the original author's checkout — which broke the test under
-	// any other user. Hermetic repair: build the source tree's
-	// mpm-mcp into t.TempDir() via `go build` and use that. The
-	// fall-back path to the pre-existing absolute binary is
-	// preserved (so a developer running this against their own
-	// pre-installed build still gets a fast no-build test), but
-	// the test no longer requires the exact absolute path.
+	// Source-tree executable: build cmd/mpm-mcp into t.TempDir() and
+	// invoke that exact binary. If the build fails, mcpCmd calls
+	// t.Fatalf — the test must fail with the build error, not skip
+	// or fall back to an installed binary. A stale install must
+	// never make a broken source checkout pass.
 	bin := mcpCmd(t)
-	if _, err := exec.LookPath(bin); err != nil {
-		// Build path failed; fall back to absolute pre-built
-		// binary if present. This keeps the test useful on
-		// developer machines with a freshly-built bin/.
-		prebuilt := "/home/v/workspace/projects/mpm/bin/mpm-mcp"
-		if _, err := exec.LookPath(prebuilt); err != nil {
-			t.Skipf("mpm-mcp binary not built yet; run `make build` first")
-		}
-		bin = prebuilt
-	}
 
 	// Temp workspace — empty, no mode/, no persona/, no mpm.db.
 	ws := t.TempDir()
