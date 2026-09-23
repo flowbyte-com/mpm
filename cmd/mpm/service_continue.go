@@ -135,13 +135,50 @@ func (s *ContinueService) composeWakeContext(now time.Time) DashboardSection {
 	if err != nil {
 		return errorSection("Wake Context", err)
 	}
+	return DashboardSection{
+		Name: "Wake Context",
+		Kind: "wake_context",
+		Body: buildWakeContextBody(wake),
+	}
+}
+
+// buildWakeContextBody renders the human-readable body of the Wake
+// Context section. Pure projection — no DB access, no side effects.
+// The single source of truth for the wake-section rendering; both
+// composeWakeContext (production) and the renderer regression tests
+// route through here.
+//
+// 2026-09-23 release-pass fix adds overdue-wakes rendering. The
+// underlying gatherOverdueWakes path was already populated by the
+// release-blocker repair (commit 59fafc4) but composeWakeContext
+// silently dropped the field. This helper makes the data visible at
+// the human-output surface; wake.OverdueWakes stays fired=0 until
+// the canonical notification-kind terminal transition fires (fold,
+// ResolveWake, or bounded retirement via wake_expiration.go) — see
+// internal/core/wake_tools.go for the canonical fired / dispatched_at
+// invariant.
+//
+// Stable output:
+//
+//	session           : <id>            (if SessionID != "")
+//	last handoff      : <summary>       (if LastHandoff != nil)
+//	raw / lesson      : <raw>/<lesson>  (always)
+//	pressure          : exceeded=<b> threshold=<n>  (always)
+//	overdue wakes     : <n> pending     (only when len > 0)
+//	  • <id> overdue <secs>s — <reason>     (per overdue wake, exact reason text)
+//	available skills  : <n>            (if > 0)
+//	scratchpad        : orphaned scratchpads present   (if ScratchpadOrphans != "")
+//
+// Empty-overdue-wakes case: no "overdue wakes" line. Keeps the
+// section quiet when nothing is pending for delivery.
+//
+// Empty-everything case: returns "  (no wake context loaded)" —
+// matches the legacy "no wake context" sentinel.
+func buildWakeContextBody(wake mpminternal.WakeContextData) string {
 	if wake.SessionID == "" && wake.LastHandoff == nil && len(wake.GlobalRules) == 0 &&
-		wake.ScratchpadOrphans == "" && len(wake.AvailableSkills) == 0 {
-		return DashboardSection{
-			Name: "Wake Context",
-			Kind: "wake_context",
-			Body: "  (no wake context loaded)",
-		}
+		wake.ScratchpadOrphans == "" && len(wake.AvailableSkills) == 0 &&
+		len(wake.OverdueWakes) == 0 {
+		return "  (no wake context loaded)"
 	}
 
 	var b strings.Builder
@@ -155,17 +192,20 @@ func (s *ContinueService) composeWakeContext(now time.Time) DashboardSection {
 		wake.EpistemicPressure.RawCount, wake.EpistemicPressure.LessonCount, wake.EpistemicPressure.Ratio)
 	fmt.Fprintf(&b, "  pressure          : exceeded=%v threshold=%d\n",
 		wake.EpistemicPressure.Exceeded, wake.EpistemicPressure.Threshold)
+	if len(wake.OverdueWakes) > 0 {
+		fmt.Fprintf(&b, "  overdue wakes     : %d pending\n", len(wake.OverdueWakes))
+		for _, ow := range wake.OverdueWakes {
+			fmt.Fprintf(&b, "    • %s overdue %ds — %s\n",
+				ow.ID, ow.OverdueSecs, ow.Reason)
+		}
+	}
 	if len(wake.AvailableSkills) > 0 {
 		fmt.Fprintf(&b, "  available skills  : %d\n", len(wake.AvailableSkills))
 	}
 	if wake.ScratchpadOrphans != "" {
 		fmt.Fprintf(&b, "  scratchpad        : orphaned scratchpads present\n")
 	}
-	return DashboardSection{
-		Name: "Wake Context",
-		Kind: "wake_context",
-		Body: strings.TrimRight(b.String(), "\n"),
-	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // composeMemoryStats builds a tiny memory-store snapshot section.
@@ -275,4 +315,3 @@ func formatStatIntRaw(dm *mpminternal.DatabaseManager, collection, where string)
 	}
 	return fmt.Sprintf("%d", n)
 }
-
