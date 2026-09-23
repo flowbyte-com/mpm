@@ -6,8 +6,8 @@ behavioral protocol, idempotently.
 Usage (called by install.sh):
     python3 install_claude_instructions.py \
         --scope user \                        # or 'project'
-        --home /home/v \
-        --target /home/v/.claude/CLAUDE.md \    # resolved by install.sh
+        --home "$HOME" \
+        --target "$HOME/.claude/CLAUDE.md" \  # resolved by install.sh
         --snippet /path/to/CLAUDE.md.snippet
 
 Behavior:

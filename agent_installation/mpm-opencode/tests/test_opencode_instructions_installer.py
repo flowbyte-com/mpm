@@ -39,11 +39,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT_DIR = Path("/home/v/.mpm/agent_installation/mpm-opencode")
+# Derive the source-tree adapter directory from this test file's
+# location rather than a hardcoded author-machine absolute path. The
+# test lives at
+#   agent_installation/mpm-opencode/tests/<file>.py
+# so SCRIPT_DIR = parent.parent (= agent_installation/mpm-opencode/).
+# CANONICAL_PROTOCOL is one level up at the agent_installation root.
+# The previous literal "/home/v/.mpm/agent_installation/..." pointed
+# only at the original author's installed location; tests should resolve
+# from the repository so they work without an installed MPM.
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 INSTALLER = SCRIPT_DIR / "scripts" / "install_agents_instructions.py"
 SNIPPET = SCRIPT_DIR / "templates" / "AGENTS.md.snippet"
 README = SCRIPT_DIR / "README.md"
-CANONICAL_PROTOCOL = Path("/home/v/.mpm/agent_installation/mpm-agent-protocol.md")
+CANONICAL_PROTOCOL = Path(__file__).resolve().parent.parent.parent / "mpm-agent-protocol.md"
 MANAGED_BEGIN = "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->"
 MANAGED_END = "<!-- END MPM-MANAGED SECTION:opencode-instructions -->"
 

@@ -30,7 +30,22 @@ import {
 } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-const ADAPTER_DIR = "/home/v/workspace/projects/mpm/agent_installation/mpm-opencode";
+import { fileURLToPath } from "node:url";
+
+// package.json declares `"type": "module"`, so this file is ES-module
+// scope where __dirname is not defined. Derive the test file's
+// directory from import.meta.url (the canonical ES-module equivalent).
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+// ADAPTER_DIR — derive the source-tree adapter directory from this
+// test file's location rather than a hardcoded author-machine absolute
+// path. The test lives at
+//   agent_installation/mpm-opencode/tests/<file>.ts
+// so ADAPTER_DIR = parent.parent (= agent_installation/mpm-opencode/).
+// The previous literal "/home/v/workspace/projects/mpm/agent_installation/..."
+// pointed only at the original author's checkout; tests should resolve
+// from the repository so they work without an installed MPM.
+const ADAPTER_DIR = path.resolve(__dirname, "..");
 const RESOLVER_TS = path.join(ADAPTER_DIR, "src", "resolve-mpm-binary.ts");
 // ---- Sandbox helpers -----------------------------------------------------
 const SANDBOX_ROOT = path.join(

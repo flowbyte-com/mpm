@@ -22,10 +22,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT_DIR = Path("/home/v/.mpm/agent_installation/mpm-claude-code")
+# Derive the source-tree adapter directory from this test file's
+# location rather than a hardcoded author-machine absolute path. The
+# test lives at
+#   agent_installation/mpm-claude-code/tests/<file>.py
+# so SCRIPT_DIR = parent.parent (= agent_installation/mpm-claude-code/).
+# CANONICAL_PROTOCOL is one level up at the agent_installation root.
+# The previous literal "/home/v/.mpm/agent_installation/..." pointed
+# only at the original author's installed location; tests should resolve
+# from the repository so they work without an installed MPM.
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 INSTALLER = SCRIPT_DIR / "scripts" / "install_claude_instructions.py"
 SNIPPET = SCRIPT_DIR / "templates" / "CLAUDE.md.snippet"
-CANONICAL_PROTOCOL = Path("/home/v/.mpm/agent_installation/mpm-agent-protocol.md")
+CANONICAL_PROTOCOL = Path(__file__).resolve().parent.parent.parent / "mpm-agent-protocol.md"
 
 
 class CanonicalProtocol(unittest.TestCase):
@@ -126,12 +135,19 @@ class InstallerRoundTrip(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def run_installer(self, *args):
+        # --home is documented as the user's HOME; the installer uses
+        # it only when --scope=user to derive a default --target if
+        # --target is omitted. Since this test passes --target explicitly
+        # (self.target is a t.TempDir() path), --home is irrelevant to
+        # the installer's behaviour here. Pass the tempdir so the test
+        # never references a specific user's home — the previous
+        # "/home/v" hardcoded the original author's checkout.
         return subprocess.run(
             [
                 sys.executable,
                 str(INSTALLER),
                 "--scope", "user",
-                "--home", "/home/v",
+                "--home", str(self.tmpdir),
                 "--target", str(self.target),
                 "--snippet", str(SNIPPET),
                 *args,
@@ -223,12 +239,15 @@ class InstallerScopeSafety(unittest.TestCase):
     """The installer must not write outside the target CLAUDE.md path."""
 
     def test_argparse_rejects_unknown_scope(self):
+        # --home is irrelevant to argparse; pass a tempdir so the test
+        # is fully hermetic and never references a specific user's home
+        # (the previous "/home/v" hardcoded the original author).
         r = subprocess.run(
             [
                 sys.executable,
                 str(INSTALLER),
                 "--scope", "site",  # invalid
-                "--home", "/home/v",
+                "--home", tempfile.mkdtemp(prefix="claude-md-argparse-"),
                 "--target", "/tmp/x",
                 "--snippet", str(SNIPPET),
             ],

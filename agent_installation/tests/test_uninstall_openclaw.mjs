@@ -886,9 +886,9 @@ test("LEG-6. legacy id with no source verdict AND entries have non-empty value â
       // config.mpmBin (or enabled) value â†’ owned via
       // entry_key_present.
       FAKE_OPENCLAW_LEGACY_MEMORY_STATE: "entries_only",
-      FAKE_OPENCLAW_LEGACY_MEMORY_ENTRY_VALUE: "/home/v/.local/bin/mpm",
+      FAKE_OPENCLAW_LEGACY_MEMORY_ENTRY_VALUE: path.join(os.homedir(), ".local", "bin", "mpm"),
       FAKE_OPENCLAW_LEGACY_AUTO_STATE: "entries_only",
-      FAKE_OPENCLAW_LEGACY_AUTO_ENTRY_VALUE: "/home/v/.local/bin/mpm",
+      FAKE_OPENCLAW_LEGACY_AUTO_ENTRY_VALUE: path.join(os.homedir(), ".local", "bin", "mpm"),
     },
   });
   assert.strictEqual(r.code, 0, `uninstaller exited non-zero: ${r.stderr}`);
@@ -962,7 +962,7 @@ test("LEG-9. conflicting registry sourcePath overrides entries fallback (D wins 
       // non-empty value (F). Per precedence, D wins; refuse.
       FAKE_OPENCLAW_LEGACY_MEMORY_STATE: "vanished",
       FAKE_OPENCLAW_LEGACY_MEMORY_REGISTRY_PATH: unrelMemory,
-      FAKE_OPENCLAW_LEGACY_MEMORY_ENTRY_VALUE: "/home/v/.local/bin/mpm",
+      FAKE_OPENCLAW_LEGACY_MEMORY_ENTRY_VALUE: path.join(os.homedir(), ".local", "bin", "mpm"),
     },
   });
   assert.strictEqual(r.code, 0);

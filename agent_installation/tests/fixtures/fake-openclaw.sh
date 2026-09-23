@@ -137,12 +137,15 @@ JSON
             state="${FAKE_OPENCLAW_LEGACY_MEMORY_STATE}"
             # Path used by inspect for the legacy plugin id. The
             # uninstaller matches this against the historical
-            # legacy adapter source path.
-            path_value="${FAKE_OPENCLAW_LEGACY_MEMORY_PATH:-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-memory}"
+            # legacy adapter source path. The default below is
+            # $HOME-derived so the fake is host-agnostic — the
+            # previous literal "/home/v/workspace/projects/mpm/..."
+            # assumed the original author's checkout.
+            path_value="${FAKE_OPENCLAW_LEGACY_MEMORY_PATH:-${HOME}/legacy-adapter/openclaw-mpm-memory}"
             ;;
           openclaw-mpm-auto-mode-persona)
             state="${FAKE_OPENCLAW_LEGACY_AUTO_STATE}"
-            path_value="${FAKE_OPENCLAW_LEGACY_AUTO_PATH:-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-auto-mode-persona}"
+            path_value="${FAKE_OPENCLAW_LEGACY_AUTO_PATH:-${HOME}/legacy-adapter/openclaw-mpm-auto-mode-persona}"
             ;;
           *)
             cat <<JSON

@@ -86,6 +86,14 @@ class TestPiSettingsInstaller(unittest.TestCase):
         # Seed a pre-migration settings.json that preserves the user's
         # unrelated keys — exactly the state the live system was in
         # before this fix.
+        #
+        # The legacy extension path is built from the hermetic temp
+        # MPM root (self.paths["mpm"]) rather than the original
+        # author's checkout path "/home/v/.mpm/agent_plugins/pi-mpm".
+        # The migration logic only needs ANY non-canonical extension
+        # path to exercise the legacy -> canonical rewrite; using a
+        # hermetic path keeps the test independent of the host.
+        legacy_path = str(self.paths["mpm"] / "agent_plugins" / "pi-mpm")
         self.paths["pi_settings"].write_text(json.dumps({
             "lastChangelogVersion": "0.85.1",
             "defaultThinkingLevel": "high",
@@ -93,7 +101,7 @@ class TestPiSettingsInstaller(unittest.TestCase):
             "defaultModel": "MiniMax-M3",
             "theme": "dark",
             "extensions": [
-                "/home/v/.mpm/agent_plugins/pi-mpm",
+                legacy_path,
             ],
             "packages": ["npm:pi-mcp-adapter"],
         }, indent=2) + "\n", encoding="utf-8")
@@ -106,7 +114,7 @@ class TestPiSettingsInstaller(unittest.TestCase):
         canonical = str(self.paths["adapter_dir"])
 
         # Legacy entry gone, canonical entry present, exactly once.
-        self.assertNotIn("/home/v/.mpm/agent_plugins/pi-mpm",
+        self.assertNotIn(legacy_path,
                          str(data["extensions"]))
         self.assertIn(canonical, data["extensions"])
         self.assertEqual(data["extensions"].count(canonical), 1,
@@ -129,9 +137,14 @@ class TestPiSettingsInstaller(unittest.TestCase):
         """The other historical legacy form: ~/.mpm/agent_installation/pi-mpm
         (pre-2026-09-17 directory name, post-rename-of-agent_plugins/).
         Also migrates to the canonical mpm-pi path."""
+        # Legacy path under the hermetic temp MPM root, not the original
+        # author's checkout. The migration logic only needs ANY non-
+        # canonical path under agent_installation/ to exercise the
+        # rewrite; using a hermetic path keeps the test host-independent.
+        legacy_path = str(self.paths["mpm"] / "agent_installation" / "pi-mpm")
         self.paths["pi_settings"].write_text(json.dumps({
             "extensions": [
-                "/home/v/.mpm/agent_installation/pi-mpm",
+                legacy_path,
             ],
         }, indent=2) + "\n", encoding="utf-8")
 
@@ -239,8 +252,11 @@ class TestPiSettingsInstaller(unittest.TestCase):
         """`install.sh --verify` exits non-zero when the settings file
         has a legacy entry or lacks the canonical entry. Exit-zero
         indicates the live config matches the contract."""
+        # Legacy path under the hermetic temp MPM root — see
+        # test_migrates_legacy_agent_plugins_pi_mpm_entry for rationale.
+        legacy_path = str(self.paths["mpm"] / "agent_plugins" / "pi-mpm")
         self.paths["pi_settings"].write_text(json.dumps({
-            "extensions": ["/home/v/.mpm/agent_plugins/pi-mpm"],
+            "extensions": [legacy_path],
         }) + "\n", encoding="utf-8")
 
         proc = _run_installer(self.env, "--verify")
@@ -249,7 +265,7 @@ class TestPiSettingsInstaller(unittest.TestCase):
         # After verification fails, no mutation should have occurred.
         data = json.loads(self.paths["pi_settings"].read_text())
         self.assertEqual(data["extensions"],
-                         ["/home/v/.mpm/agent_plugins/pi-mpm"])
+                         [legacy_path])
 
     def test_verify_mode_passes_clean_state(self):
         """`install.sh --verify` exits zero when the canonical entry is

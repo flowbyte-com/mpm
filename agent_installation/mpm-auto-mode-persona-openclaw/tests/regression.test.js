@@ -15,6 +15,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import { resolveWorkspace, withWorkspace } from "../lib/workspace.js";
 
@@ -40,6 +41,12 @@ function readPluginConfig(api, pluginId) {
 }
 
 test("(A) config nesting: entries[id].config.mpmBin is read", () => {
+  // The mpmBin value here is any absolute path; the test asserts
+  // that the config-reading logic returns whatever string was put
+  // under entries[id].config.mpmBin. Use os.homedir() so the value
+  // is portable across hosts (the previous "/home/alice/.local/bin/
+  // mpm" hardcoded a specific user's home as test data).
+  const fakeMpmBin = `${os.homedir()}/.local/bin/mpm`;
   const api = {
     config: {
       plugins: {
@@ -47,7 +54,7 @@ test("(A) config nesting: entries[id].config.mpmBin is read", () => {
           "mpm-auto-mode-persona-openclaw": {
             enabled: true,
             config: {
-              mpmBin: "/home/alice/.local/bin/mpm",
+              mpmBin: fakeMpmBin,
               timeoutMs: 7777,
             },
           },
@@ -56,7 +63,7 @@ test("(A) config nesting: entries[id].config.mpmBin is read", () => {
     },
   };
   const cfg = readPluginConfig(api, "mpm-auto-mode-persona-openclaw");
-  assert.strictEqual(cfg.mpmBin, "/home/alice/.local/bin/mpm");
+  assert.strictEqual(cfg.mpmBin, fakeMpmBin);
   assert.strictEqual(cfg.timeoutMs, 7777);
   assert.strictEqual(cfg.enabled, true);
 });

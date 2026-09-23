@@ -31,7 +31,14 @@ from typing import Optional, Tuple
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-HOME_DIR = Path(os.environ.get("HOME", "/home/v"))
+# HOME_DIR — resolve the operator's home directory via the standard
+# Python helper. Falls back to Path.home() if HOME is unset (which is
+# virtually always set on Unix, but Path.home() itself resolves via
+# the pwd database and is the canonical portable fallback). The
+# previous os.environ.get("HOME", "/home/v") silently defaulted to the
+# original author's home when HOME was unset — under any other user
+# the probes would target a non-existent install root.
+HOME_DIR = Path(os.environ.get("HOME") or Path.home())
 MPM_BIN = HOME_DIR / ".mpm" / "bin" / "mpm-mcp"
 MPM_WORKSPACE = HOME_DIR / ".mpm"  # canonical MPM install; same DB via hardlink
 DEFAULT_TIMEOUT_S = 8

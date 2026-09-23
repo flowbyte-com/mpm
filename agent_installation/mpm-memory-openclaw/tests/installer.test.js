@@ -106,7 +106,7 @@ exit 0
 // for any bash script that needs literal ${} syntax.
 function raw(strings, ...values) { return strings.raw.join(''); }
 
-const _BPE_SENTINELS = ["${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_CONFIG_PRESENT-0}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_PLUGIN_STATE:-absent}", "${FAKE_OPENCLAW_LINK_PATH-/tmp/mpm-memory-openclaw-install-fake}", "${FAKE_OPENCLAW_CONFLICT_PATH-/opt/unrelated/mpm-memory-openclaw}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_CONFLICT_PATH-/opt/unrelated/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_REGISTRY_PRESENT-0}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-/home/v/workspace/projects/mpm/agent_installation/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_CONFLICT_PATH-/opt/unrelated/openclaw-mpm-memory}", "${FAKE_OPENCLAW_HANG_STATUS-0}", "${FAKE_OPENCLAW_FAIL_STATUS-0}", "${FAKE_OPENCLAW_HANG-0}", "${FAKE_OPENCLAW_FAIL_RESTART-0}", "${FAKE_OPENCLAW_REJECT_BOOTSTRAP-0}", "${OPENCLAW_INVOCATIONS:-/tmp/mpm-memory-openclaw-fake-invocations.jsonl}", "${FAKE_OPENCLAW_UPDATE_REPAIR_FAIL-0}", "${FAKE_OPENCLAW_UPDATE_REPAIR_HANG-0}", "${FAKE_OPENCLAW_UPDATE_REPAIR_WARN-0}", "${FAKE_OPENCLAW_PRETEND_DIRTY-0}", "${FAKE_OPENCLAW_GATEWAY_DOWN_ON_RESTART_FAIL-0}"];
+const _BPE_SENTINELS = ["${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_CONFIG_PRESENT-0}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_PLUGIN_STATE:-absent}", "${FAKE_OPENCLAW_LINK_PATH-/tmp/mpm-memory-openclaw-install-fake}", "${FAKE_OPENCLAW_CONFLICT_PATH-/opt/unrelated/mpm-memory-openclaw}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-" + path.join(os.homedir(), "legacy-adapter", "openclaw-mpm-memory") + "}", "${FAKE_OPENCLAW_LEGACY_CONFLICT_PATH-/opt/unrelated/openclaw-mpm-memory}", "${FAKE_OPENCLAW_LEGACY_STATE-absent}", "${FAKE_OPENCLAW_LEGACY_REGISTRY_PRESENT-0}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-" + path.join(os.homedir(), "legacy-adapter", "openclaw-mpm-memory") + "}", "${FAKE_OPENCLAW_LEGACY_LINK_PATH-" + path.join(os.homedir(), "legacy-adapter", "openclaw-mpm-memory") + "}", "${FAKE_OPENCLAW_LEGACY_CONFLICT_PATH-/opt/unrelated/openclaw-mpm-memory}", "${FAKE_OPENCLAW_HANG_STATUS-0}", "${FAKE_OPENCLAW_FAIL_STATUS-0}", "${FAKE_OPENCLAW_HANG-0}", "${FAKE_OPENCLAW_FAIL_RESTART-0}", "${FAKE_OPENCLAW_REJECT_BOOTSTRAP-0}", "${OPENCLAW_INVOCATIONS:-/tmp/mpm-memory-openclaw-fake-invocations.jsonl}", "${FAKE_OPENCLAW_UPDATE_REPAIR_FAIL-0}", "${FAKE_OPENCLAW_UPDATE_REPAIR_HANG-0}", "${FAKE_OPENCLAW_UPDATE_REPAIR_WARN-0}", "${FAKE_OPENCLAW_PRETEND_DIRTY-0}", "${FAKE_OPENCLAW_GATEWAY_DOWN_ON_RESTART_FAIL-0}"];
 const FAKE_OPENCLAW_SCRIPT = `#!/usr/bin/env bash
 # Fake openclaw — records every invocation and replies to the
 # subcommands the installer uses. Behaviour is parameterised by env:
@@ -232,7 +232,16 @@ case "$cmd" in
             esac
             ;;
           plugins.entries.openclaw-mpm-memory.config.mpmBin)
-            printf '/home/v/.local/bin/mpm\\n'
+            # Simulate an existing mpmBin entry from a previous install.
+            # The installer must overwrite this with the canonical
+            # absolute path; the literal value here only needs to be
+            # any absolute path — we use HOME-derived so the fake is
+            # host-agnostic. The printf literal below passes "$HOME/
+            # .local/bin/mpm" to the fake bash; bash parameter expansion
+            # resolves HOME at run time. The dollar-brace is escaped
+            # because this template literal is a regular backtick (not
+            # raw backtick) and would otherwise perform JS interpolation.
+            printf '\${HOME}/.local/bin/mpm\\n'
             ;;
           plugins.entries.openclaw-mpm-memory.enabled)
             printf 'true\\n'

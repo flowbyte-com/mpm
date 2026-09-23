@@ -67,7 +67,7 @@ adapter installer performs is:
 
 ```bash
 openclaw plugins install . --link --force --accept-capabilities
-openclaw config set plugins.entries.mpm-auto-mode-persona-openclaw.config.mpmBin /home/v/.mpm/bin/mpm
+openclaw config set plugins.entries.mpm-auto-mode-persona-openclaw.config.mpmBin "$HOME/.mpm/bin/mpm"
 openclaw update repair    # converge pending state migration
 ```
 

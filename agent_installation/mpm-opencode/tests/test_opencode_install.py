@@ -34,7 +34,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ADAPTER_DIR = Path("/home/v/workspace/projects/mpm/agent_installation/mpm-opencode")
+# Derive the source-tree adapter directory from this test file's
+# location rather than a hardcoded author-machine absolute path. The
+# test lives at
+#   agent_installation/mpm-opencode/tests/<file>.py
+# so ADAPTER_DIR = parent.parent (= agent_installation/mpm-opencode/).
+# The previous literal "/home/v/workspace/projects/mpm/agent_installation/..."
+# pointed only at the original author's checkout; tests should resolve
+# from the repository so they work without an installed MPM.
+ADAPTER_DIR = Path(__file__).resolve().parent.parent
 INSTALL_SH = ADAPTER_DIR / "install.sh"
 
 

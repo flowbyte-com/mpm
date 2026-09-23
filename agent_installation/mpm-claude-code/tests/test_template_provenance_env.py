@@ -38,10 +38,23 @@ import tempfile
 import unittest
 from pathlib import Path
 
-PLUGIN_DIR = Path("/home/v/.mpm/agent_installation/mpm-claude-code")
+# Derive the source-tree adapter directory from this test file's
+# location. The test lives at
+#   agent_installation/mpm-claude-code/tests/<file>.py
+# so PLUGIN_DIR = parent.parent (= agent_installation/mpm-claude-code/).
+# The previous hardcoded "/home/v/.mpm/agent_installation/..." pointed
+# only at the original author's installed location; tests should
+# resolve from the repository so they work without an installed MPM.
+PLUGIN_DIR = Path(__file__).resolve().parent.parent
 TEMPLATE = PLUGIN_DIR / ".mcp.json.template"
 MATERIALIZED = Path.home() / ".claude" / ".mcp.json"
-HOME_RESOLVED = "/home/v"
+# HOME_RESOLVED — the resolved ${HOME} that install.sh substitutes when
+# it materialises the template. The test asserts template variables
+# expand to a path that exists on the current host, so we use the
+# current process's resolved home directory. The previous literal
+# "/home/v" hardcoded the author's checkout and produced a
+# host-dependent assertion that failed under any other user.
+HOME_RESOLVED = str(Path.home())
 
 
 def _resolved_template():
@@ -82,9 +95,15 @@ class TemplateFrameworkEnvContract(unittest.TestCase):
         )
 
     def test_workspace_env_var_preserved(self):
+        # The template sets MPM_WORKSPACE=${HOME}/.mpm; after install.sh
+        # substitutes ${HOME} with the current user's resolved home, the
+        # materialized env block must read "<home>/.mpm". Previously
+        # hardcoded to "/home/v/.mpm" which asserted the original
+        # author's specific install rather than the portable layout.
+        expected_workspace = str(Path.home() / ".mpm")
         self.assertEqual(
             self.env.get("MPM_WORKSPACE"),
-            "/home/v/.mpm",
+            expected_workspace,
             "MPM_WORKSPACE must remain set; rewriting the workspace handle "
             "would break the canonical install path.",
         )
