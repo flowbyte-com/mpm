@@ -2065,6 +2065,21 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("wake resolver fired_by migration failed: %w", err)
 	}
+	// 2026-09-23 release-blocker repair: dispatched_at column on
+	// scheduled_wakes so the scheduler's deadline-driven dispatch
+	// leaves an audit trail WITHOUT flipping fired=1 (which would
+	// remove the wake from every normal delivery surface — mpm
+	// continue, mpm wake, read_wake_context, the opportunistic
+	// <system_wake_notification> fold). Pre-fix the scheduler fired
+	// the wake and lost it; post-fix the scheduler records
+	// dispatched_at + metadata.dispatched_by, and the wake stays
+	// fired=0 until the user/agent acknowledges it via the fold or
+	// explicit ResolveWake. Idempotent via
+	// scheduled_wakes_dispatched_at_v1 sentinel.
+	if err := MigrateScheduledWakesDispatchedAt(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("scheduled_wakes dispatched_at migration failed: %w", err)
+	}
 	// Positive-direction (constructive) cascade: polarity column on
 	// epistemic_provenance. Idempotent via the schema_migrations sentinel
 	// pattern. See migration_epistemic_provenance_polarity.go for the

@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS scheduled_wakes (
     recurring_rule  TEXT,
     fired           INTEGER NOT NULL DEFAULT 0,
     fired_at        INTEGER,
+    fired_by        TEXT,
+    dispatched_at   INTEGER,
     created_by      TEXT NOT NULL,
     created_at      INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
     metadata        JSON
@@ -214,10 +216,11 @@ func TestDispatchClaimNextAdHocWake_HandlesNullableStrings(t *testing.T) {
 		t.Errorf("RecurringRule = %q, want empty (NULL scans to empty)", w.RecurringRule)
 	}
 }
+
 // for the production-shape metadata column. ScheduleWake stores
-// metadata='' (not '{}') for the default no-kind case. Earlier the
+// metadata=” (not '{}') for the default no-kind case. Earlier the
 // claim UPDATE used COALESCE(metadata,'{}'), which on empty string
-// returned '' because '' is non-NULL in SQLite — then json_set('')
+// returned ” because ” is non-NULL in SQLite — then json_set(”)
 // raised "malformed JSON" and the entire drain failed.
 //
 // Live-acceptance caught this: the first wake that fired was
@@ -228,7 +231,7 @@ func TestDispatchClaimNextAdHocWake_HandlesNullableStrings(t *testing.T) {
 // metadata column decode on the Go side. The subsequent claims errored
 // out the same way until ctx-cancel.
 //
-// This test inserts a row with metadata='' directly and asserts the
+// This test inserts a row with metadata=” directly and asserts the
 // claim succeeds, returns the row, and stamps dispatched_by.
 func TestDispatchClaimNextAdHocWake_HandlesEmptyMetadata(t *testing.T) {
 	s := newDispatchTestScheduler(t)
@@ -268,6 +271,10 @@ func TestDispatchClaimNextAdHocWake_HandlesEmptyMetadata(t *testing.T) {
 
 // TestDispatchDrainAdHocWakes_DrainsAllDue verifies the drain loop
 // claims every due row in a single call up to the cap.
+//
+// 2026-09-23 release-blocker repair: the drain records dispatched_at
+// instead of firing. Every claimed row must remain fired=0 (so the
+// normal wake/context delivery path can surface it to the user/agent).
 func TestDispatchDrainAdHocWakes_DrainsAllDue(t *testing.T) {
 	s := newDispatchTestScheduler(t)
 	now := time.Now()
@@ -284,17 +291,33 @@ func TestDispatchDrainAdHocWakes_DrainsAllDue(t *testing.T) {
 		t.Errorf("claimed %d, want %d", n, N)
 	}
 
-	var fired int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM scheduled_wakes WHERE fired=1`).Scan(&fired); err != nil {
+	var dispatched int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM scheduled_wakes WHERE dispatched_at IS NOT NULL`,
+	).Scan(&dispatched); err != nil {
 		t.Fatal(err)
 	}
-	if fired != N {
-		t.Errorf("fired count = %d, want %d", fired, N)
+	if dispatched != N {
+		t.Errorf("dispatched_at count = %d, want %d", dispatched, N)
+	}
+
+	var fired int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 1`,
+	).Scan(&fired); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 0 {
+		t.Errorf("fired count = %d, want 0 (wakes must remain pending until acknowledged)", fired)
 	}
 }
 
 // TestDispatchDrainAdHocWakes_LeavesFutureAlone verifies that a drain
 // with mixed past/future wakes claims only the past ones.
+//
+// 2026-09-23 release-blocker repair: "claim" now means stamping
+// dispatched_at, not flipping fired=1. The future wake must remain
+// fully untouched (no dispatched_at, fired=0).
 func TestDispatchDrainAdHocWakes_LeavesFutureAlone(t *testing.T) {
 	s := newDispatchTestScheduler(t)
 	now := time.Now()
@@ -309,15 +332,29 @@ func TestDispatchDrainAdHocWakes_LeavesFutureAlone(t *testing.T) {
 		t.Errorf("claimed %d, want 1 (only past)", n)
 	}
 
-	var pastFired, futureFired int
-	if err := s.db.QueryRow(`SELECT fired FROM scheduled_wakes WHERE id='past'`).Scan(&pastFired); err != nil {
+	var pastDispatchedAt sql.NullInt64
+	var pastFired int
+	if err := s.db.QueryRow(
+		`SELECT dispatched_at, fired FROM scheduled_wakes WHERE id='past'`,
+	).Scan(&pastDispatchedAt, &pastFired); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.db.QueryRow(`SELECT fired FROM scheduled_wakes WHERE id='future'`).Scan(&futureFired); err != nil {
+	if !pastDispatchedAt.Valid {
+		t.Errorf("past dispatched_at not set, want set (claim should stamp dispatched_at)")
+	}
+	if pastFired != 0 {
+		t.Errorf("past fired=%d, want 0 (wake must remain pending until acknowledged)", pastFired)
+	}
+
+	var futureDispatchedAt sql.NullInt64
+	var futureFired int
+	if err := s.db.QueryRow(
+		`SELECT dispatched_at, fired FROM scheduled_wakes WHERE id='future'`,
+	).Scan(&futureDispatchedAt, &futureFired); err != nil {
 		t.Fatal(err)
 	}
-	if pastFired != 1 {
-		t.Errorf("past fired=%d, want 1", pastFired)
+	if futureDispatchedAt.Valid {
+		t.Errorf("future dispatched_at set (%v), want NULL", futureDispatchedAt)
 	}
 	if futureFired != 0 {
 		t.Errorf("future fired=%d, want 0", futureFired)
@@ -327,6 +364,10 @@ func TestDispatchDrainAdHocWakes_LeavesFutureAlone(t *testing.T) {
 // TestDispatchDrainAdHocWakes_RespectsCap verifies capN bounds a
 // single drain pass. A cap of 1 against 5 due rows yields 1 claim and
 // 4 still-pending rows.
+//
+// 2026-09-23 release-blocker repair: post-drain the 1 claimed row has
+// dispatched_at set and fired=0; the 4 unclaimed rows have dispatched_at
+// NULL and fired=0.
 func TestDispatchDrainAdHocWakes_RespectsCap(t *testing.T) {
 	s := newDispatchTestScheduler(t)
 	now := time.Now()
@@ -343,19 +384,36 @@ func TestDispatchDrainAdHocWakes_RespectsCap(t *testing.T) {
 		t.Errorf("claimed %d, want 1 (cap=1)", n)
 	}
 
-	var fired int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM scheduled_wakes WHERE fired=1`).Scan(&fired); err != nil {
+	var dispatched int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM scheduled_wakes WHERE dispatched_at IS NOT NULL`,
+	).Scan(&dispatched); err != nil {
 		t.Fatal(err)
 	}
-	if fired != 1 {
-		t.Errorf("fired count = %d, want 1", fired)
+	if dispatched != 1 {
+		t.Errorf("dispatched_at count = %d, want 1", dispatched)
+	}
+
+	var fired int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 1`,
+	).Scan(&fired); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 0 {
+		t.Errorf("fired count = %d, want 0 (wake must remain pending until acknowledged)", fired)
 	}
 }
 
 // TestDispatchDrain_ConcurrentNoDoubleFire is the concurrency
 // regression test for the keystone invariant. Two goroutines race to
 // drain the same SQLite file; the atomic claim ensures each wake is
-// fired exactly once across both goroutines.
+// claimed (dispatched_at stamped) exactly once across both goroutines.
+//
+// 2026-09-23 release-blocker repair: the dedup invariant is now on
+// dispatched_at (the audit trail), not on fired=1. The two goroutines
+// must still split the work exactly N times, with no row receiving two
+// stamps.
 func TestDispatchDrain_ConcurrentNoDoubleFire(t *testing.T) {
 	s := newDispatchTestScheduler(t)
 	now := time.Now()
@@ -389,12 +447,26 @@ func TestDispatchDrain_ConcurrentNoDoubleFire(t *testing.T) {
 		t.Errorf("total claimed = %d, want %d (atomic claim invariant violated)", got, N)
 	}
 
-	var firedCount int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM scheduled_wakes WHERE fired=1`).Scan(&firedCount); err != nil {
+	// Every row must have dispatched_at set exactly once.
+	var dispatchedCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM scheduled_wakes WHERE dispatched_at IS NOT NULL`,
+	).Scan(&dispatchedCount); err != nil {
 		t.Fatal(err)
 	}
-	if firedCount != N {
-		t.Errorf("fired count = %d, want %d (no double-fire)", firedCount, N)
+	if dispatchedCount != N {
+		t.Errorf("dispatched_at count = %d, want %d (no double-dispatch)", dispatchedCount, N)
+	}
+
+	// All N rows must remain fired=0 (still pending for delivery).
+	var firedCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 1`,
+	).Scan(&firedCount); err != nil {
+		t.Fatal(err)
+	}
+	if firedCount != 0 {
+		t.Errorf("fired count = %d, want 0 (wakes must remain pending until acknowledged)", firedCount)
 	}
 }
 
@@ -527,4 +599,235 @@ func TestDispatchClaim_RespectsBusyTimeout_Regression(t *testing.T) {
 
 	// Drain any holder rollback if it's still pending. Idempotent.
 	_ = tx.Rollback()
+}
+
+// ── Fired-wake delivery regression (release-blocker) ──────────────────
+//
+// The original release-pass test (TestDispatchClaimNextAdHocWake_ClaimsNotificationKind)
+// verifies the keystone invariant that the claim SQL succeeds and stamps
+// metadata.dispatched_by. It does NOT verify that a claimed wake is still
+// delivered through the normal wake/context path — and the production
+// design separates those concerns:
+//
+//   - Scheduler claim (this file): record an audit trail that the
+//     scheduler saw the wake fire. Done via dispatched_at + dispatched_by.
+//   - Normal delivery (internal/core/wake_context.go gatherOverdueWakes,
+//     internal/core/wake_tools.go CheckPendingWakes): the wake row stays
+//     in fired=0 until the user/agent acknowledges it via ResolveWake,
+//     so the fold and the read_wake_context query both surface it.
+//
+// Pre-fix the scheduler claim flipped fired=1, removing the wake from
+// every normal delivery surface (`mpm continue`, `mpm wake`,
+// `read_wake_context`, the `<system_wake_notification>` fold on every
+// MPM call). Final installed real-CLI acceptance caught the regression:
+// the wake's actual reason/marker was absent from ALL normal delivery
+// paths, reachable only via `mpm_wakes list include_fired=true` and the
+// activity-feed `mpm_wakes.schedule` audit row. The seeded directive
+// `mpm-seed-wake-triage-policy` describes the canonical contract that
+// the opportunistic fold must satisfy; the failing implementation did
+// not meet it for one-shot notification wakes scheduled through
+// `mpm_wakes schedule`.
+
+// TestDispatchClaim_NotificationWakeStillPendingForNormalDelivery
+// verifies the keystone delivery invariant: after the scheduler claims
+// a notification-kind wake, the wake row remains fired=0 so the normal
+// wake/context delivery path (`gatherOverdueWakes`,
+// `CheckPendingWakes`) can still surface it to the agent on the next
+// MPM call. The scheduler records its dispatch via dispatched_at +
+// metadata.dispatched_by, NOT via fired=1.
+func TestDispatchClaim_NotificationWakeStillPendingForNormalDelivery(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	const marker = "ACCEPT-CLOSURE-WAKE marker=MPM-WAKE-CONTEXT-CLOSURE-regression-test"
+	seedWake(t, s, "n1", now.Add(-1*time.Minute), "notification")
+	// Replace reason with the marker so we can grep for it later.
+	if _, err := s.db.Exec(`UPDATE scheduled_wakes SET reason = ? WHERE id = 'n1'`, marker); err != nil {
+		t.Fatalf("update reason: %v", err)
+	}
+
+	// Scheduler claims.
+	w, ok, err := dispatchClaimNextAdHocWake(context.Background(), s.db, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if !ok || w.ID != "n1" {
+		t.Fatalf("expected claim of n1, got ok=%v id=%q", ok, w.ID)
+	}
+
+	// Invariant 1: fired=0 (the wake must remain pending for the fold).
+	var fired int
+	if err := s.db.QueryRow(`SELECT fired FROM scheduled_wakes WHERE id='n1'`).Scan(&fired); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 0 {
+		t.Errorf("after scheduler claim, fired=%d, want 0 (wake must remain pending for normal delivery)", fired)
+	}
+
+	// Invariant 2: dispatched_at is set to current epoch.
+	var dispatchedAt sql.NullInt64
+	if err := s.db.QueryRow(`SELECT dispatched_at FROM scheduled_wakes WHERE id='n1'`).Scan(&dispatchedAt); err != nil {
+		t.Fatalf("read dispatched_at: %v", err)
+	}
+	if !dispatchedAt.Valid {
+		t.Error("dispatched_at must be set after scheduler claim (audit trail)")
+	} else if dispatchedAt.Int64 <= 0 {
+		t.Errorf("dispatched_at = %d, want positive epoch", dispatchedAt.Int64)
+	}
+
+	// Invariant 3: metadata.dispatched_by = mpm-scheduler.
+	var dispatchedBy sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT json_extract(metadata, '$.dispatched_by') FROM scheduled_wakes WHERE id='n1'`,
+	).Scan(&dispatchedBy); err != nil {
+		t.Fatal(err)
+	}
+	if !dispatchedBy.Valid || dispatchedBy.String != "mpm-scheduler" {
+		t.Errorf("dispatched_by = %v, want mpm-scheduler", dispatchedBy)
+	}
+
+	// Invariant 4: gatherOverdueWakes-equivalent query finds the wake
+	// (the same WHERE clause that wake_context.go uses on every
+	// `mpm continue` and `read_wake_context` call). If the wake
+	// had been marked fired=1 by the claim, this query would return
+	// zero rows and the wake would never reach the user/agent.
+	var rows int
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM scheduled_wakes
+		WHERE fired = 0
+		  AND target_time <= CAST(strftime('%s','now') AS INTEGER)
+		  AND reason != ''
+		  AND id = 'n1'
+	`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Errorf("overdue query rows = %d, want 1 (normal wake/context delivery broken)", rows)
+	}
+
+	// Invariant 5: CheckPendingWakes-equivalent query also finds the
+	// wake (the same predicate the opportunistic fold in
+	// cmd/mpm/call.go and cmd/mpm-mcp/tools.go uses on every MPM
+	// call). The fold returns wakes_pending + (system_wake_notification)
+	// blocks to the agent based on this predicate.
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM scheduled_wakes
+		WHERE fired = 0
+		  AND target_time <= ?
+		  AND (
+		    metadata IS NULL OR metadata = ''
+		    OR json_extract(metadata, '$.kind') IS NULL
+		    OR json_extract(metadata, '$.kind') = 'notification'
+		  )
+		  AND id = 'n1'
+	`, now.Unix()).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Errorf("CheckPendingWakes-equivalent rows = %d, want 1 (fold delivery broken)", rows)
+	}
+
+	// Invariant 6: the wake's actual reason/marker survives in the
+	// table — proving that what the fold would surface to the agent
+	// IS the actual content, not just an audit breadcrumb.
+	var reasonText string
+	if err := s.db.QueryRow(`SELECT reason FROM scheduled_wakes WHERE id='n1'`).Scan(&reasonText); err != nil {
+		t.Fatal(err)
+	}
+	if reasonText != marker {
+		t.Errorf("reason mismatch: got %q, want marker %q", reasonText, marker)
+	}
+}
+
+// TestDispatchClaim_IdempotentNoDoubleClaim verifies the second-claim
+// has no effect once the wake has been dispatched by the scheduler.
+// Without the dispatched_at IS NULL guard, every scheduler tick would
+// re-claim (and re-stamp metadata) the same wake — wasteful and noisy
+// in the audit trail.
+func TestDispatchClaim_IdempotentNoDoubleClaim(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	seedWake(t, s, "n1", now.Add(-1*time.Minute), "notification")
+
+	// First claim.
+	_, ok, err := dispatchClaimNextAdHocWake(context.Background(), s.db, now)
+	if err != nil || !ok {
+		t.Fatalf("first claim: ok=%v err=%v", ok, err)
+	}
+
+	// Second claim must return false (no eligible rows) — the wake
+	// is already dispatched, so it should not be re-claimed.
+	_, ok, err = dispatchClaimNextAdHocWake(context.Background(), s.db, now)
+	if err != nil {
+		t.Fatalf("second claim err: %v", err)
+	}
+	if ok {
+		t.Error("second claim returned ok=true; expected false (dispatched wake must not be re-claimed)")
+	}
+}
+
+// TestDispatchClaim_SystemKindsUntouched verifies the claim does not
+// touch system-kind wakes (snapshot, gc, etc.). The deadline-driven
+// drain is exclusively for notification-kind — system kinds are owned
+// by Tick(). Pre-fix this was implicit in the WHERE clause's kind
+// filter; the regression confirms it after the fired-flip is replaced
+// by dispatched_at.
+func TestDispatchClaim_SystemKindsUntouched(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	seedWake(t, s, "sys", now.Add(-1*time.Minute), "snapshot")
+	seedWake(t, s, "notif", now.Add(-2*time.Minute), "notification")
+
+	// Claim the notification wake.
+	w, ok, err := dispatchClaimNextAdHocWake(context.Background(), s.db, now)
+	if err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if w.ID != "notif" {
+		t.Errorf("claimed %q, want notif (FIFO)", w.ID)
+	}
+
+	// System kind wake must remain fully untouched (fired=0, dispatched_at=NULL).
+	var fired int
+	var dispatchedAt sql.NullInt64
+	if err := s.db.QueryRow(
+		`SELECT fired, dispatched_at FROM scheduled_wakes WHERE id='sys'`,
+	).Scan(&fired, &dispatchedAt); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 0 {
+		t.Errorf("system-kind wake fired=%d, want 0", fired)
+	}
+	if dispatchedAt.Valid {
+		t.Errorf("system-kind wake dispatched_at=%v, want NULL (deadline drain must skip system kinds)", dispatchedAt)
+	}
+}
+
+// TestDispatchClaim_FutureNotClaimedAfterFix preserves the deadline
+// guard invariant after the fired-flip → dispatched_at change: a wake
+// scheduled for the future must NOT be claimed until target_time
+// passes.
+func TestDispatchClaim_FutureNotClaimedAfterFix(t *testing.T) {
+	s := newDispatchTestScheduler(t)
+	now := time.Now()
+	seedWake(t, s, "future", now.Add(1*time.Hour), "notification")
+
+	_, ok, err := dispatchClaimNextAdHocWake(context.Background(), s.db, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if ok {
+		t.Error("future wake was claimed; the deadline-driven drain must respect target_time")
+	}
+
+	// Future wake must be untouched.
+	var fired int
+	var dispatchedAt sql.NullInt64
+	if err := s.db.QueryRow(
+		`SELECT fired, dispatched_at FROM scheduled_wakes WHERE id='future'`,
+	).Scan(&fired, &dispatchedAt); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 0 || dispatchedAt.Valid {
+		t.Errorf("future wake touched: fired=%d dispatched_at=%v, want fired=0 dispatched_at=NULL", fired, dispatchedAt)
+	}
 }

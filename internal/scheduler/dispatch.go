@@ -39,20 +39,39 @@ import (
 // when no eligible row exists.
 //
 // Concurrency: this is the canonical cross-process dedup primitive.
-// SQLite's UPDATE ... WHERE id = (SELECT ...) WHERE fired = 0 is atomic
-// — when two dispatchers race on the same table, exactly one wins; the
-// loser sees ErrNoRows because the inner SELECT's WHERE fired = 0
-// filters out the row the winner just claimed.
+// SQLite's UPDATE ... WHERE id = (SELECT ...) WHERE fired = 0 AND
+// dispatched_at IS NULL is atomic — when two dispatchers race on the
+// same table, exactly one wins; the loser sees ErrNoRows because the
+// inner SELECT's filter excludes the row the winner just claimed.
 //
-// Eligible = WHERE fired = 0 AND target_time <= now AND kind IN
-// ('notification', NULL='', MISSING). This matches the existing
-// Kind() default (untagged wakes report kind = "notification") so the
-// claim partition is precisely the complement of the system-kind set.
+// Eligible = WHERE fired = 0 AND dispatched_at IS NULL AND
+// target_time <= now AND kind IN ('notification', NULL=”, MISSING).
+// This matches the existing Kind() default (untagged wakes report
+// kind = "notification") so the claim partition is precisely the
+// complement of the system-kind set.
 //
-// The fired timestamp and a "dispatched_by = mpm-scheduler" metadata
-// tag are stamped on success; the latter is the forensic trail for
-// distinguishing scheduler-claimed rows from rows claimed by the
-// opportunistic fold in mpm call / mpm-mcp.
+// CRITICAL: this function does NOT flip fired=1. The 2026-09-23
+// release-blocker repair splits the scheduler-dispatch audit trail
+// from the wake's "pending user delivery" state. Pre-fix the
+// scheduler flipped fired=1 on dispatch, which removed the wake
+// from every normal delivery surface (mpm continue, mpm wake,
+// mpm_context read_wake_context, the opportunistic
+// <system_wake_notification> fold on every MPM call). The seeded
+// directive `mpm-seed-wake-triage-policy` describes the canonical
+// contract that these surfaces must satisfy; the failing
+// implementation did not meet it for one-shot notification wakes
+// scheduled through `mpm_wakes schedule`. Post-fix the scheduler
+// records dispatched_at + metadata.dispatched_by only, leaving the
+// wake in fired=0 so the normal delivery path can surface it. The
+// user/agent acknowledges via the fold (CheckPendingWakes) or
+// explicit ResolveWake — both of which DO flip fired=1.
+//
+// dispatched_at IS NULL is the second eligibility guard: it prevents
+// the scheduler from re-claiming a wake it already dispatched on a
+// previous tick. Without this guard, every 60s tick would re-stamp
+// dispatched_at on the same wake — wasteful and noisy in the audit
+// trail. With the guard, each wake has exactly one scheduler claim
+// per lifetime.
 //
 // The single-row claim shape lets dispatchDrainAdHocWakes loop
 // indefinitely (bounded only by capN) without holding any transaction.
@@ -65,8 +84,7 @@ func dispatchClaimNextAdHocWake(ctx context.Context, db *sql.DB, now time.Time) 
 	var recurringRule sql.NullString
 	err := db.QueryRowContext(ctx, `
 		UPDATE scheduled_wakes
-		SET fired = 1,
-		    fired_at = ?,
+		SET dispatched_at = ?,
 		    metadata = json_set(
 		        CASE WHEN metadata IS NULL OR metadata = '' THEN '{}' ELSE metadata END,
 		        '$.dispatched_by', 'mpm-scheduler'
@@ -74,6 +92,7 @@ func dispatchClaimNextAdHocWake(ctx context.Context, db *sql.DB, now time.Time) 
 		WHERE id = (
 			SELECT id FROM scheduled_wakes
 			WHERE fired = 0
+			  AND dispatched_at IS NULL
 			  AND target_time <= ?
 			  AND (
 			    metadata IS NULL
@@ -86,10 +105,10 @@ func dispatchClaimNextAdHocWake(ctx context.Context, db *sql.DB, now time.Time) 
 			LIMIT 1
 		)
 		RETURNING id, target_time, reason, theory_id, recurring_rule,
-		          created_by, created_at, metadata
+		          created_by, created_at, dispatched_at, metadata
 	`, nowUnix, nowUnix).Scan(
 		&w.ID, &w.TargetTime, &w.Reason, &theoryID, &recurringRule,
-		&w.CreatedBy, &w.CreatedAt, &metaJSON,
+		&w.CreatedBy, &w.CreatedAt, &w.DispatchedAt, &metaJSON,
 	)
 	if err == sql.ErrNoRows {
 		return Wake{}, false, nil

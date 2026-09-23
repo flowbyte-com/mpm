@@ -31,13 +31,13 @@
 //
 // Three guarantees from the locked architecture (decision 27d7b3c18199e098):
 //
-//   1. Default kind = notification (backward compat). Existing wakes with
-//      no kind tag pass through to the notification dispatch path.
-//   2. Concurrent execution. Independent system wakes fire in parallel
-//      goroutines. Serial would re-introduce the SF2 race failure mode.
-//   3. Failure isolation. Non-zero handler exit still marks the wake
-//      fired=1 with metadata.last_error. One wake's failure cannot block
-//      subsequent wakes.
+//  1. Default kind = notification (backward compat). Existing wakes with
+//     no kind tag pass through to the notification dispatch path.
+//  2. Concurrent execution. Independent system wakes fire in parallel
+//     goroutines. Serial would re-introduce the SF2 race failure mode.
+//  3. Failure isolation. Non-zero handler exit still marks the wake
+//     fired=1 with metadata.last_error. One wake's failure cannot block
+//     subsequent wakes.
 //
 // Singleton enforcement is via flock on a PID file so two scheduler
 // instances cannot race on the same wake batch. The atomic UPDATE...
@@ -72,6 +72,16 @@ import (
 //
 // CreatedAt is stored as INTEGER Unix-epoch seconds (see migration
 // timestamps_unified_v1).
+//
+// DispatchedAt records the last time the scheduler's deadline-driven
+// dispatch claimed this wake. Zero means the scheduler has not
+// attempted delivery yet. Note: DispatchedAt is independent of the wake's
+// fired state — the scheduler records its dispatch attempt without
+// flipping fired=1, so the normal delivery path
+// (mpm continue / mpm wake / read_wake_context / the opportunistic
+// <system_wake_notification> fold) can still surface the wake to the
+// user/agent. See dispatch.go dispatchClaimNextAdHocWake doc for the
+// 2026-09-23 release-blocker repair that established this invariant.
 type Wake struct {
 	ID            string                 `json:"id"`
 	TargetTime    int64                  `json:"target_time"`
@@ -80,6 +90,7 @@ type Wake struct {
 	RecurringRule string                 `json:"recurring_rule,omitempty"`
 	CreatedBy     string                 `json:"created_by"`
 	CreatedAt     int64                  `json:"created_at"`
+	DispatchedAt  int64                  `json:"dispatched_at,omitempty"`
 	Metadata      map[string]interface{} `json:"metadata,omitempty"`
 }
 
@@ -506,7 +517,7 @@ func (s *Scheduler) hasHandler(kind string) bool {
 // repeats at zero delay. Result: 100% CPU wedge with no work
 // happening.
 //
-// The filter (`kind IS NULL OR kind='' OR kind='notification'`)
+// The filter (`kind IS NULL OR kind=” OR kind='notification'`)
 // matches dispatchClaimNextAdHocWake's WHERE clause exactly, so the
 // deadline is the soonest moment the dispatcher could possibly
 // claim. Returns time.Time{} (zero) when nothing is pending.

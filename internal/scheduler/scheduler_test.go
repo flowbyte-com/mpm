@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS scheduled_wakes (
     recurring_rule  TEXT,
     fired           INTEGER NOT NULL DEFAULT 0,
     fired_at        INTEGER,
+    fired_by        TEXT,
+    dispatched_at   INTEGER,
     created_by      TEXT NOT NULL,
     created_at      INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
     metadata        JSON
@@ -779,6 +781,10 @@ func mustExec(t *testing.T, db *sql.DB, q string, args ...any) {
 // This is the regression that motivated the change: previously, a
 // wake scheduled for +500ms would sit unfired for up to 60s because
 // nothing else ever asked the mpm call chokepoint to look at it.
+//
+// 2026-09-23 release-blocker repair: "dispatched" means
+// dispatched_at is set; fired stays 0 so the wake remains pending for
+// normal delivery.
 func TestScheduler_FiresAtTargetTime(t *testing.T) {
 	s := newTestScheduler(t)
 	now := time.Now()
@@ -789,23 +795,26 @@ func TestScheduler_FiresAtTargetTime(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.Run(ctx, 1*time.Second) }()
 
-	// Wait up to 2s for the wake to be fired. The bounded deadline
-	// timer should fire it within ~500ms + Jitter + drain overhead.
+	// Wait up to 2s for the wake to be dispatched. The bounded
+	// deadline timer should fire it within ~500ms + Jitter + drain
+	// overhead.
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
 		case <-deadline:
 			cancel()
 			<-done
-			t.Fatal("wake not fired within 2s (deadline-driven dispatch did not pick it up)")
+			t.Fatal("wake not dispatched within 2s (deadline-driven dispatch did not pick it up)")
 		case <-time.After(50 * time.Millisecond):
-			var fired int
-			if err := s.db.QueryRow(`SELECT fired FROM scheduled_wakes WHERE id='soon'`).Scan(&fired); err != nil {
+			var dispatchedAt sql.NullInt64
+			if err := s.db.QueryRow(
+				`SELECT dispatched_at FROM scheduled_wakes WHERE id='soon'`,
+			).Scan(&dispatchedAt); err != nil {
 				cancel()
 				<-done
 				t.Fatal(err)
 			}
-			if fired == 1 {
+			if dispatchedAt.Valid {
 				cancel()
 				return // PASS
 			}
@@ -833,6 +842,8 @@ func TestScheduler_FiresMultipleDueWakesInOrder(t *testing.T) {
 	go func() { done <- s.Run(ctx, 1*time.Second) }()
 
 	// Wait up to 3s for ALL 5 to be claimed.
+	// 2026-09-23 release-blocker repair: "claimed" means dispatched_at
+	// is set; fired remains 0 until acknowledged by the user/agent.
 	deadline := time.After(3 * time.Second)
 	for {
 		select {
@@ -840,11 +851,15 @@ func TestScheduler_FiresMultipleDueWakesInOrder(t *testing.T) {
 			cancel()
 			<-done
 			var count int
-			_ = s.db.QueryRow(`SELECT COUNT(*) FROM scheduled_wakes WHERE fired=1`).Scan(&count)
-			t.Fatalf("only %d/%d fired", count, N)
+			_ = s.db.QueryRow(
+				`SELECT COUNT(*) FROM scheduled_wakes WHERE dispatched_at IS NOT NULL`,
+			).Scan(&count)
+			t.Fatalf("only %d/%d dispatched", count, N)
 		case <-time.After(50 * time.Millisecond):
 			var count int
-			if err := s.db.QueryRow(`SELECT COUNT(*) FROM scheduled_wakes WHERE fired=1`).Scan(&count); err != nil {
+			if err := s.db.QueryRow(
+				`SELECT COUNT(*) FROM scheduled_wakes WHERE dispatched_at IS NOT NULL`,
+			).Scan(&count); err != nil {
 				cancel()
 				<-done
 				t.Fatal(err)
@@ -1003,6 +1018,10 @@ func TestScheduler_DoesNotWedgeOnPastCronKindWake(t *testing.T) {
 // deadline-driven loop arms the timer with d=0 when earliest is in
 // the past, so the very first iteration of the select processes
 // the overdue wake.
+//
+// 2026-09-23 release-blocker repair: "dispatched" now means
+// dispatched_at is set; fired remains 0 so the wake is still pending
+// for normal delivery via the fold / wake-context.
 func TestScheduler_RestartRecoversPending(t *testing.T) {
 	s := newTestScheduler(t)
 	s.SetHeartbeat(0)
@@ -1014,24 +1033,26 @@ func TestScheduler_RestartRecoversPending(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.Run(ctx, 60*time.Second) }()
 
-	// Wait up to 2s for it to fire (the deadline timer should fire on
-	// the very first iteration, since the only pending deadline is in
-	// the past).
+	// Wait up to 2s for the scheduler to dispatch (the deadline
+	// timer should fire on the very first iteration, since the only
+	// pending deadline is in the past).
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
 		case <-deadline:
 			cancel()
 			<-done
-			t.Fatal("overdue wake did not fire within 2s of scheduler start")
+			t.Fatal("overdue wake did not get dispatched within 2s of scheduler start")
 		case <-time.After(50 * time.Millisecond):
-			var fired int
-			if err := s.db.QueryRow(`SELECT fired FROM scheduled_wakes WHERE id='overdue'`).Scan(&fired); err != nil {
+			var dispatchedAt sql.NullInt64
+			if err := s.db.QueryRow(
+				`SELECT dispatched_at FROM scheduled_wakes WHERE id='overdue'`,
+			).Scan(&dispatchedAt); err != nil {
 				cancel()
 				<-done
 				t.Fatal(err)
 			}
-			if fired == 1 {
+			if dispatchedAt.Valid {
 				cancel()
 				return // PASS
 			}
@@ -1045,6 +1066,10 @@ func TestScheduler_RestartRecoversPending(t *testing.T) {
 // deadline timer parks for an hour; inject a now-due wake and
 // NotifyScheduleChanged; the new earliest-deadline is "now" so the
 // select hits the deadlineTimer.C branch on the next iteration.
+//
+// 2026-09-23 release-blocker repair: dispatch stamps dispatched_at,
+// not fired=1. The test asserts the wake got dispatched (audit
+// trail) within the deadline window.
 func TestScheduler_NotifyScheduleChanged_InterruptsWait(t *testing.T) {
 	s := newTestScheduler(t)
 	s.SetHeartbeat(0)
@@ -1069,15 +1094,17 @@ func TestScheduler_NotifyScheduleChanged_InterruptsWait(t *testing.T) {
 		case <-deadline:
 			cancel()
 			<-done
-			t.Fatal("now-wake did not fire within 2s of NotifyScheduleChanged")
+			t.Fatal("now-wake did not get dispatched within 2s of NotifyScheduleChanged")
 		case <-time.After(50 * time.Millisecond):
-			var fired int
-			if err := s.db.QueryRow(`SELECT fired FROM scheduled_wakes WHERE id='now-wake'`).Scan(&fired); err != nil {
+			var dispatchedAt sql.NullInt64
+			if err := s.db.QueryRow(
+				`SELECT dispatched_at FROM scheduled_wakes WHERE id='now-wake'`,
+			).Scan(&dispatchedAt); err != nil {
 				cancel()
 				<-done
 				t.Fatal(err)
 			}
-			if fired == 1 {
+			if dispatchedAt.Valid {
 				cancel()
 				return // PASS
 			}
