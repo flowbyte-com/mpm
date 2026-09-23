@@ -223,18 +223,31 @@ underlying persistence and validation architecture is unchanged.
 - Procedures already covered by an existing skill (use proactive discovery first)
 - Facts or preferences (use `mpm memory save` instead)
 
-**Decision model.** The workshop scores the candidate on four axes
-(reusability, non-obviousness, stability, leverage; each 0–5, total 0–20)
-plus a `boundary` (procedure | judgment | knowledge). The publication
-gate is **total ≥ 6 AND boundary = `procedure`**; anything else
-returns as `candidate` or `rejected`. The full proposal payload
-(name, version, domain, description, `when_to_use`, steps,
-constraints, evidence) is the workshop's response under
-`validation.status == "passed_with_warnings"` or `"failed"` — pass it
-back verbatim to `mpm_skills(action="save", params=<save_payload>)`
+**Decision model.** The workshop scores the candidate on four
+0–5 axes plus a `boundary` (procedure | judgment | knowledge); the
+total is 0–20. The validator in `internal/core/skill_workshop.go`
+enforces the same shape, so what the protocol states here must
+match what the code accepts:
+
+- **Reusability 0–5** — how broadly the procedure applies across
+  future sessions
+- **Non-obviousness 0–5** — how non-obvious the steps are (a
+  documented procedure scores low; an undocumented debugging
+  sequence scores high)
+- **Stability 0–5** — how stable the procedure is over time
+- **Leverage 0–5** — how much it accelerates future work
+- **Boundary** — `procedure` | `judgment` | `knowledge`
+
+The publication gate is **total ≥ 6 AND boundary = `procedure`**;
+anything else returns as `candidate` or `rejected`. The full
+proposal payload (name, version, domain, description, `when_to_use`,
+steps, constraints, evidence) is the workshop's response under
+`validation.status == "passed_with_warnings"` or `"failed"` — pass
+it back verbatim to `mpm_skills(action="save", params=<save_payload>)`
 to publish a candidate. The exact field-by-field template lives in
 the workshop's runtime contract (`mpm__mpm_skills` action `workshop`
-description); this protocol only fixes the gating rule.
+description); this protocol only fixes the gating rule and the axis
+shape the validator enforces.
 
 **The 3 outcomes:**
 
