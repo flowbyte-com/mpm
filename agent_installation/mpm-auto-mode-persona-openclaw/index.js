@@ -31,12 +31,41 @@ const DEFAULT_SOUL_FILENAME = "SOUL.md";
 // sessionKey → most recent `mpm route --apply` stdout
 const sessionReminders = new Map();
 
+// sessionKey → Set<reminderHash> of reminders that have already been
+// appended to SOUL.md via agent:bootstrap. Used to make the bootstrap
+// injection idempotent: if OpenClaw fires agent:bootstrap more than
+// once per turn (which can happen for retry / queue / assembly paths),
+// we must NOT append the same reminder again — otherwise the persona
+// block appears N times in the assembled SOUL.md.
+const injectedReminders = new Map();
+
+function getInjectedSet(sessionKey) {
+  let set = injectedReminders.get(sessionKey);
+  if (!set) {
+    set = new Set();
+    injectedReminders.set(sessionKey, set);
+  }
+  return set;
+}
+
 function getCurrentReminder(sessionKey) {
   return sessionReminders.get(sessionKey) ?? null;
 }
 
 function clearReminder(sessionKey) {
   sessionReminders.delete(sessionKey);
+}
+
+// djb2 string hash — sufficient for content fingerprinting within a session.
+// We only need to distinguish "this exact reminder has been injected for this
+// session" from "this is a new reminder we should inject". Cryptographic
+// strength is unnecessary.
+function reminderHash(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return String(h);
 }
 
 function runMpmRoute(prompt, mpmBin, timeoutMs) {
@@ -124,6 +153,14 @@ export default definePluginEntry({
     // agent:bootstrap — fires during prompt assembly.
     // Reads the cached reminder and appends it to the SOUL.md bootstrap
     // file content. No reminder → no mutation.
+    //
+    // Idempotency: OpenClaw may fire agent:bootstrap more than once per
+    // turn (retry / queue / partial-assembly paths). Without a guard,
+    // each fire appends the reminder, producing duplicate persona blocks
+    // (3x in practice). We track a per-session fingerprint of reminders
+    // already appended and skip duplicates. The fingerprint is a
+    // session-scoped Set of djb2 hashes; it does not need to survive
+    // across sessions (a fresh session gets a fresh fingerprint set).
     registerInternalHook("agent:bootstrap", async (event) => {
       const sessionKey = event?.sessionKey;
       if (!sessionKey) return;
@@ -134,6 +171,16 @@ export default definePluginEntry({
       // (typically ≤1 per session) and prevents stale reminders from a prior
       // turn being injected when the current turn's `mpm route` returned empty.
       sessionReminders.delete(sessionKey);
+
+      // Idempotency guard: skip if this exact reminder has already been
+      // injected for this session. Without this, multiple bootstrap
+      // firings per turn produce multiple persona blocks.
+      const fp = reminderHash(reminder);
+      const alreadyInjected = getInjectedSet(sessionKey);
+      if (alreadyInjected.has(fp)) {
+        return;
+      }
+      alreadyInjected.add(fp);
 
       const ctx = event.context;
       const files = ctx?.bootstrapFiles;
@@ -157,6 +204,17 @@ export default definePluginEntry({
         ...files[soulIdx],
         content: existing ? `${existing}\n\n---\n\n${reminder}` : reminder,
       };
+    });
+
+    // session_end — clears the session-scoped injection fingerprint so the
+    // next session starts without stale "already injected" markers. Also
+    // drops any pending reminder that the bootstrap hook never consumed
+    // (e.g. session terminated before the next agent turn assembled).
+    registerInternalHook("session_end", (event) => {
+      const sessionKey = event?.sessionKey;
+      if (!sessionKey) return;
+      sessionReminders.delete(sessionKey);
+      injectedReminders.delete(sessionKey);
     });
 
     api?.log?.info?.(
