@@ -33,6 +33,34 @@
 #     - rewrite unrelated plugin entries
 #     - delete files outside the legacy MPM-owned dist/
 #
+# External filesystem references — ownership invariant
+# ----------------------------------------------------
+#
+# This installer writes state ONLY under:
+#   - $HOME/.mpm/agent_installation/mpm-opencode/  (the integration itself)
+#   - $HOME/.config/opencode/                       (host config managed blocks)
+#
+# It does NOT create entries inside npm's global tree, /usr/local,
+# or any other package-manager-owned directory. If a future installer
+# must create an external reference (for example, to expose a plugin
+# dependency to a host that requires it on a global path), that
+# reference is MPM-owned by construction and MUST ship with:
+#   - explicit ownership/provenance so a future namespace rename
+#     can locate it
+#   - migration logic in the namespace-refresh path (Part 3 above)
+#   - uninstall handling that removes it
+#   - verification (--verify) that surfaces it as a failure when
+#     dangling
+#
+# Rationale: a dangling symlink inside an unrelated package manager's
+# state (e.g. npm's global node_modules) can corrupt that package
+# manager's view of its own tree. The 2026-09-25 OpenCode incident
+# showed that npm 12 + @npmcli/arborist silently swallow ENOENT when
+# readdirScoped hits a dangling @-scoped entry, making the entire
+# global tree invisible to `npm ls -g` and `npm rm -g`. MPM must not
+# create that class of latent external-state unless it owns the
+# cleanup. It does not own cleanup of references it did not create.
+#
 # Usage:
 #   ./install.sh             # install / refresh
 #   ./install.sh --uninstall # remove plugin entry + AGENTS.md block
