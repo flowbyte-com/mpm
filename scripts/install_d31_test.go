@@ -77,19 +77,51 @@ func TestInstallSh_HealthCheckValidationForm(t *testing.T) {
 // unset. Pre-fix the wrapper hardcoded the install path with no
 // override, so any test/dev environment with a different workspace
 // crashed.
+// TestInstallSh_AcceptsMPMWorkspaceOverride pins the post-fix MPM_WORKSPACE
+// override contract.
+//
+// Pre-fix the installer wrote a shell wrapper at $PREFIX/bin/mpm whose
+// sole purpose was `exec env MPM_WORKSPACE=${MPM_WORKSPACE:-...} mpm.real`.
+// Removing the wrapper changes which file owns the env-override logic:
+// it now lives in the Go binary itself (see
+// internal/core/config.GetMPMDir at internal/core/config/config.go:614,
+// which returns $MPM_WORKSPACE if set and falls back to $HOME/.mpm).
+//
+// The installer must NOT re-introduce a wrapper that handles the env
+// override, because the binary already does and reintroducing the wrapper
+// would re-create the bin/mpm contamination that broke `make build`.
+//
+// This test pins:
+//  1. install.sh does NOT contain a shell wrapper rewrite at $PREFIX/bin/mpm
+//  2. The override contract is still documented in install.sh (the binary
+//     honours the env var; the user can set it at invocation)
 func TestInstallSh_AcceptsMPMWorkspaceOverride(t *testing.T) {
 	data, err := os.ReadFile("../install.sh")
 	if err != nil {
-		t.Fatalf("read install.sh: %v", err)
+		if data, err = os.ReadFile("../install.sh"); err != nil {
+			t.Fatalf("read install.sh: %v", err)
+		}
 	}
 	body := string(data)
 
-	// Required: at least one wrapper-style `${MPM_WORKSPACE:-...}`
-	// default-fallback expression. The exact wrapper location is
-	// allowed to vary — we just require the env-override form is
-	// present somewhere in the script.
-	if !strings.Contains(body, "${MPM_WORKSPACE:-") {
-		t.Errorf("install.sh must honour MPM_WORKSPACE env override via ${MPM_WORKSPACE:-<default>}; not found")
+	// (1) No shell-wrapper heredoc / `cat > $PREFIX/bin/mpm` write.
+	if strings.Contains(body, "<<WRAPPER") {
+		t.Errorf("install.sh must not contain a wrapper heredoc; the env-override contract is owned by the Go binary (GetMPMDir), not the installer")
+	}
+	if strings.Contains(body, `cat > "$PREFIX/bin/mpm"`) {
+		t.Errorf("install.sh must not write a shell wrapper to $PREFIX/bin/mpm; the override contract lives in the binary")
+	}
+
+	// (2) The override must still be documented somewhere — either in
+	//     install.sh's own text (for operator-facing docs) or in a code
+	//     comment explaining where the override is honoured.
+	overrideMarkers := []string{
+		"MPM_WORKSPACE",
+	}
+	for _, marker := range overrideMarkers {
+		if !strings.Contains(body, marker) {
+			t.Errorf("install.sh must reference %q so operators can find the override contract", marker)
+		}
 	}
 }
 
@@ -474,41 +506,35 @@ func TestInstallSh_NextStepsUseCanonicalPath(t *testing.T) {
 	}
 }
 
-// TestInstallSh_WrapperHeredocHasNoCommandSubstitution pins the
-// wrapper heredoc in install.sh against accidental command-
-// substitution constructs.
+// TestInstallSh_NoWrapperAndNoMpmReal pins the post-fix ownership
+// invariant: the installer must NOT write a shell wrapper to a
+// Makefile-owned build path, and must NOT maintain a separate
+// mpm.real binary alongside mpm.
 //
-// The wrapper heredoc uses an UNQUOTED delimiter (`<<WRAPPER`)
-// so that ${DATA_ROOT} and ${PREFIX} expand at install time and
-// the installed wrapper can route to the install-time binary
-// path. The unquoted delimiter, however, also means Bash performs
-// $(...) and `...` substitution inside the heredoc — a stray
-// backtick (or $() ) in what looks like a comment will try to
-// execute the contents during install.
+// The pre-fix layout wrote a 261-byte POSIX shell wrapper to
+// $PREFIX/bin/mpm (which is bin/mpm when source == install prefix
+// via the canonical ~/.mpm symlink) and the compiled binary to
+// $PREFIX/bin/mpm.real. This caused `make build` to fail on
+// already-installed repos with:
 //
-// INSTALL-003: the wrapper comment used Markdown-style backticks
-// around an example invocation:
+//	build output "bin/mpm" already exists and is not an object file
 //
-//	# Override at invocation: `MPM_WORKSPACE=/tmp/foo mpm call …`
+// because `go build -o bin/mpm` refused to overwrite a non-object
+// file at that path.
 //
-// Bash tried to execute `MPM_WORKSPACE=/tmp/foo mpm call …` during
-// install, failing with "line N: mpm: command not found" on hosts
-// where `mpm` was not yet on PATH (i.e. the entire target user
-// base — fresh Linux Mint / Ubuntu hosts running the installer for
-// the first time).
+// The fix removes the wrapper entirely. The compiled binary at
+// bin/mpm IS the runtime entry point; MPM_WORKSPACE defaulting to
+// $HOME/.mpm is handled internally by GetMPMDir() in
+// internal/core/config/config.go. No wrapper is needed.
 //
 // This test pins:
-//  1. No backticks inside the wrapper heredoc (would be command
-//     substitution; the wrapper file is not the only casualty —
-//     the install aborts).
-//  2. No $(...) patterns inside the wrapper heredoc (same hazard
-//     class).
-//  3. The override example remains as inert comment text (without
-//     the backticks that previously broke install).
-//  4. The intended install-time and runtime variable expansions
-//     (${DATA_ROOT}, ${PREFIX}, \${MPM_WORKSPACE:-...}, "\$@")
-//     remain in the heredoc.
-func TestInstallSh_WrapperHeredocHasNoCommandSubstitution(t *testing.T) {
+//  1. install.sh does not contain the wrapper heredoc (`<<WRAPPER`)
+//  2. install.sh does not write mpm.real
+//  3. install.sh does clean up legacy wrapper artefacts from older
+//     installs (mpm.real, mpm.pre-wrapper.*)
+//  4. install.sh handles the source == install prefix edge case
+//     via the same-inode skip in the binary install loop
+func TestInstallSh_NoWrapperAndNoMpmReal(t *testing.T) {
 	data, err := os.ReadFile("../install.sh")
 	if err != nil {
 		if data, err = os.ReadFile("../install.sh"); err != nil {
@@ -517,84 +543,50 @@ func TestInstallSh_WrapperHeredocHasNoCommandSubstitution(t *testing.T) {
 	}
 	body := string(data)
 
-	// Extract the wrapper heredoc content. The heredoc is the only
-	// `<<WRAPPER ... WRAPPER` block in install.sh. The start
-	// marker is `<<WRAPPER`; the end marker is a line whose first
-	// non-whitespace token is `WRAPPER` (no leading whitespace per
-	// shell heredoc semantics).
-	const startMarker = "<<WRAPPER"
-	const endMarker = "WRAPPER"
-
-	startIdx := strings.Index(body, startMarker)
-	if startIdx == -1 {
-		t.Fatalf("install.sh must contain the wrapper heredoc start marker %q", startMarker)
+	// (1) No wrapper heredoc must exist.
+	if strings.Contains(body, "<<WRAPPER") {
+		t.Errorf("install.sh must not contain the wrapper heredoc (`<<WRAPPER`); the wrapper was the source of the bin/mpm contamination that broke `make build` after install")
 	}
-	afterStart := startIdx + len(startMarker)
-
-	var heredoc strings.Builder
-	foundEnd := false
-	for _, line := range strings.Split(body[afterStart:], "\n") {
-		if strings.TrimSpace(line) == endMarker {
-			foundEnd = true
-			break
-		}
-		heredoc.WriteString(line)
-		heredoc.WriteString("\n")
-	}
-	if !foundEnd {
-		t.Fatalf("install.sh must contain the wrapper heredoc end marker line %q", endMarker)
-	}
-	heredocContent := heredoc.String()
-
-	// (1) No backticks inside the heredoc.
-	if strings.Contains(heredocContent, "`") {
-		t.Errorf("wrapper heredoc must not contain backticks (would be interpreted as command substitution since the heredoc delimiter is unquoted); offending heredoc:\n%s", heredocContent)
+	if strings.Contains(body, `cat > "$PREFIX/bin/mpm"`) {
+		t.Errorf("install.sh must not `cat > $PREFIX/bin/mpm` — overwriting the Makefile-owned build artifact with wrapper content is the bug being fixed")
 	}
 
-	// (2) No $(...) patterns inside the heredoc.
-	if strings.Contains(heredocContent, "$(") {
-		t.Errorf("wrapper heredoc must not contain $(...) patterns (would be interpreted as command substitution since the heredoc delimiter is unquoted); offending heredoc:\n%s", heredocContent)
-	}
-
-	// (3) The override example is preserved as inert comment text.
-	//    We assert the line is still a comment and still contains
-	//    the example invocation, without the substituted-backtick
-	//    variant that triggered INSTALL-003.
-	requiredComment := []string{
-		"# Override at invocation:",
-		"MPM_WORKSPACE=/tmp/foo mpm call",
-	}
-	for _, want := range requiredComment {
-		if !strings.Contains(heredocContent, want) {
-			t.Errorf("wrapper heredoc must preserve the override example as inert comment text; missing %q in:\n%s", want, heredocContent)
-		}
-	}
-	// Negative: the pre-fix Markdown backtick form must NOT appear.
-	const preFixBackticks = "`MPM_WORKSPACE=/tmp/foo mpm call"
-	if strings.Contains(heredocContent, preFixBackticks) {
-		t.Errorf("wrapper heredoc contains the pre-fix INSTALL-003 form %q (backticks trigger command substitution); offending heredoc:\n%s", preFixBackticks, heredocContent)
-	}
-
-	// (4) Install-time expansions must be preserved.
-	installTimeExpansions := []string{
-		"${DATA_ROOT}",
-		"${PREFIX}/bin/mpm.real",
-	}
-	for _, want := range installTimeExpansions {
-		if !strings.Contains(heredocContent, want) {
-			t.Errorf("wrapper heredoc must preserve install-time expansion %q (do not quote the heredoc delimiter or disturb the intentional expansions); missing in:\n%s", want, heredocContent)
+	// (2) install.sh must not install a separate mpm.real binary.
+	if strings.Contains(body, `install -m 0755 "$src" "$dst"`) &&
+		strings.Contains(body, "mpm.real") {
+		// Specifically: the line that copies mpm to mpm.real must
+		// be gone. We accept a mention of mpm.real in comments
+		// (e.g. the legacy cleanup block) but not in an active copy.
+		if strings.Contains(body, `install -m 0755 "$PROJECT_ROOT/bin/mpm" "$PREFIX/bin/mpm.real"`) {
+			t.Errorf("install.sh must not install a separate mpm.real binary; mpm.real is dead weight (the Go binary defaults MPM_WORKSPACE internally)")
 		}
 	}
 
-	// (5) Runtime escaped expansions must be preserved.
-	runtimeExpansions := []string{
-		`\$@`,
-		`\${MPM_WORKSPACE:-${DATA_ROOT}}`,
+	// (3) Legacy cleanup block must exist and target the right
+	// artefacts.
+	legacyTargets := []string{
+		"$PREFIX/bin/mpm.real",
+		"$PREFIX/bin/mpm.pre-wrapper.",
 	}
-	for _, want := range runtimeExpansions {
-		if !strings.Contains(heredocContent, want) {
-			t.Errorf("wrapper heredoc must preserve runtime-escaped expansion %q; missing in:\n%s", want, heredocContent)
+	for _, want := range legacyTargets {
+		if !strings.Contains(body, want) {
+			t.Errorf("install.sh must clean up the legacy artefact %q from older wrapper-based installs", want)
 		}
+	}
+
+	// (4) Same-inode skip for the install loop.
+	//     phase_binaries must guard `install -m 0755` with `-ef`
+	//     so the same-prefix case (PROJECT_ROOT/bin/mpm -ef PREFIX/bin/mpm)
+	//     does not attempt to copy a file onto itself.
+	if !strings.Contains(body, `[ "$src" -ef "$dst" ]`) {
+		t.Errorf("install.sh phase_binaries must guard the install with `[ $src -ef $dst ]` to handle the source == install prefix case")
+	}
+
+	// (5) The mpm binary must be in the install loop (no longer
+	//     handled by a separate wrapper-writing block).
+	installLoopFragment := `for bin in mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry`
+	if !strings.Contains(body, installLoopFragment) {
+		t.Errorf("install.sh phase_binaries install loop must include `mpm` (the CLI binary is now installed as a normal binary, not a wrapper): missing fragment %q", installLoopFragment)
 	}
 }
 

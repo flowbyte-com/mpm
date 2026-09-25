@@ -68,8 +68,21 @@ all: build
 # mpm-critic is invoked by mpm-scheduler as a payload handler
 # (kind=critic_audit) — built alongside the other daemons so a
 # single `make build` produces a complete installable set.
+#
+# Pre-build cleanup: if $(BUILD_DIR)/mpm exists but is NOT a compiled
+# ELF (e.g. a legacy wrapper script left by an older install.sh that
+# separated mpm into wrapper + mpm.real), Go will refuse to overwrite
+# a non-object file at the same path. Detect and remove the stale
+# wrapper so `make build` works standalone on already-installed repos.
+# The corresponding cleanup in install.sh also removes any leftover
+# mpm.real and mpm.pre-wrapper.* sidecars from older installs.
 build:
 	@mkdir -p $(BUILD_DIR)
+	@if [ -f "$(BUILD_DIR)/$(BINARY_NAME)" ] \
+	   && head -c 2 "$(BUILD_DIR)/$(BINARY_NAME)" 2>/dev/null | grep -q '^#!'; then \
+	    echo "  removing stale wrapper at $(BUILD_DIR)/$(BINARY_NAME)"; \
+	    rm -f "$(BUILD_DIR)/$(BINARY_NAME)"; \
+	fi
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)    ./cmd/mpm
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(MCP_BINARY)   ./cmd/mpm-mcp
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(SCHED_BINARY) ./cmd/mpm-scheduler

@@ -307,23 +307,12 @@ phase_build() {
     note "BUILD"
     cd "$PROJECT_ROOT"
 
-    # Idempotency fix for the canonical install layout where the repo lives
-    # at $HOME/.mpm (i.e. $PREFIX). In that case $PROJECT_ROOT/bin/mpm and
-    # $PREFIX/bin/mpm are the same file, and the wrapper written by a
-    # previous install is now sitting at bin/mpm. `go build -o bin/mpm`
-    # refuses to overwrite a non-object file with that name, which would
-    # abort the installer at the build step on re-run. The actual binary
-    # content is preserved at bin/mpm.real (the same-prefix idempotency
-    # note in phase_binaries documents why); remove the stale wrapper so
-    # `make build` can write a fresh ELF. Other binaries (mpm-mcp,
-    # mpm-scheduler, mpm-critic, mpm-telemetry) have no wrapper and
-    # re-build cleanly.
-    if [ "$PROJECT_ROOT/bin/mpm" -ef "$PREFIX/bin/mpm" ] \
-       && [ -f "$PROJECT_ROOT/bin/mpm" ] \
-       && [ "$(head -c 2 "$PROJECT_ROOT/bin/mpm" 2>/dev/null || true)" = "#!" ]; then
-        log "  removing stale wrapper at $PROJECT_ROOT/bin/mpm (real binary preserved at mpm.real)"
-        rm -f "$PROJECT_ROOT/bin/mpm"
-    fi
+    # The Makefile's `build` target itself detects and removes a stale
+    # wrapper at bin/mpm before invoking `go build`, so this phase does
+    # not need to duplicate that cleanup. Running `make build` here also
+    # handles the legacy wrapper case for users who invoke install.sh
+    # against a checkout that was previously installed with the older
+    # wrapper+real layout.
 
     if ! make build; then
         die "make build failed" 2
@@ -358,21 +347,45 @@ phase_binaries() {
     note "BINARIES"
     install -d -m 0755 "$PREFIX/bin"
 
+    # Migrate any pre-existing wrapper+real layout from older installs.
+    #
+    # Historical installs wrote a shell wrapper to $PREFIX/bin/mpm and the
+    # compiled binary to $PREFIX/bin/mpm.real. The wrapper is no longer
+    # needed — the Go binary itself defaults MPM_WORKSPACE to $HOME/.mpm
+    # via internal/core/config.GetMPMDir() when the env var is unset, so
+    # wrapping the binary in a shell shim is redundant. Removing the
+    # wrapper also restores a clean separation between the Makefile-owned
+    # build artifact at $PREFIX/bin/mpm (which must remain an ELF) and
+    # any installation-only files. After this migration block, the layout
+    # is: $PREFIX/bin/<bin> = compiled Go binary, nothing else.
+    if [ -f "$PREFIX/bin/mpm.real" ] || [ -f "$PREFIX/bin/mpm.pre-wrapper."* ] 2>/dev/null; then
+        log "  removing legacy wrapper artifacts from prior install"
+        rm -f "$PREFIX/bin/mpm.real"
+        rm -f "$PREFIX/bin/mpm.pre-wrapper."*
+    fi
+
     # Daemon binaries (raw ELF, owned by current user in user mode).
     #
     # When the user cloned the repository directly to $HOME/.mpm — the
     # canonical install prefix — PROJECT_ROOT/bin/$bin and PREFIX/bin/$bin
     # resolve to the SAME file. Coreutils' install(1) refuses to copy a
     # file onto itself and ``set -e`` would abort the installer before
-    # the wrapper is written or any later phase runs. ``[ -ef ]`` is a
-    # POSIX test that returns true when both paths refer to the same
-    # inode (handles direct equality AND symlink resolution), which is
-    # the right notion of "same file" for this case. If source and dest
-    # are the same file, the binary is already at the install target —
-    # nothing to do.
-    for bin in mpm-scheduler mpm-critic mpm-mcp mpm-telemetry; do
+    # later phases run. ``[ -ef ]`` is a POSIX test that returns true
+    # when both paths refer to the same inode (handles direct equality
+    # AND symlink resolution), which is the right notion of "same file"
+    # for this case. If source and dest are the same file, the binary is
+    # already at the install target — nothing to do.
+    #
+    # ``mpm`` itself is now installed here too (no separate .real or
+    # wrapper). The Go binary handles MPM_WORKSPACE defaulting internally,
+    # so there is no longer any reason for the installer to write a
+    # non-ELF into a Makefile-owned path.
+    for bin in mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry; do
         local src="$PROJECT_ROOT/bin/$bin"
         local dst="$PREFIX/bin/$bin"
+        if [ ! -f "$src" ]; then
+            die "build did not produce $src (run make build first)" 2
+        fi
         if [ "$src" -ef "$dst" ]; then
             log "  $dst is build output (same file as $src) — skipping copy"
         else
@@ -380,56 +393,6 @@ phase_binaries() {
             log "  installed $dst"
         fi
     done
-
-    # Real mpm binary (renamed to .real so the wrapper can claim the
-    # canonical name). ``mpm`` and ``mpm.real`` are different filenames
-    # so install(1) is happy even when PROJECT_ROOT == PREFIX — but we
-    # still guard with ``-ef`` to be safe against the (unlikely) case
-    # of an existing ``mpm.real`` symlink resolving to the source.
-    #
-    # Idempotency note: in the same-prefix case the wrapper written by
-    # a previous install overwrites ``$PROJECT_ROOT/bin/mpm``. Re-running
-    # the installer would then copy the WRAPPER (not the real binary)
-    # to ``.real``. Detect a wrapper at the source and skip — the
-    # existing ``.real`` from the prior install is still correct.
-    local real_src="$PROJECT_ROOT/bin/mpm"
-    local real_dst="$PREFIX/bin/mpm.real"
-    if [ "$real_src" -ef "$real_dst" ]; then
-        log "  $real_dst is build output (same file as $real_src) — skipping copy"
-    elif [ -f "$real_dst" ] && [ "$(head -c 2 "$real_src" 2>/dev/null || true)" = "#!" ]; then
-        log "  $real_src is already a wrapper — preserving existing $real_dst"
-    else
-        install -m 0755 "$real_src" "$real_dst"
-        log "  installed $real_dst"
-    fi
-
-    # Wrapper: sets MPM_WORKSPACE then exec's the real binary.
-    #
-    # Wrapper ordering invariant: ``mpm.real`` MUST exist at this path
-    # before we overwrite ``mpm`` with the wrapper, otherwise the wrapper
-    # would exec a non-existent binary. The install above already
-    # created ``mpm.real``; do not move the wrapper write before it.
-    #
-    # In the same-prefix case, backing up the existing ``mpm`` (which is
-    # the build's real binary) before overwriting it would just create
-    # a useless ``mpm.pre-wrapper.*`` sidecar — the binary's content is
-    # already preserved as ``mpm.real``. Skip the backup to keep the
-    # install layout tidy.
-    if [ ! "$PROJECT_ROOT/bin/mpm" -ef "$PREFIX/bin/mpm" ]; then
-        backup_raw_binary_if_present "$PREFIX/bin/mpm" >/dev/null
-    else
-        log "  source tree at $PREFIX/bin/mpm is the build output — wrapper will replace it directly"
-    fi
-
-    cat > "$PREFIX/bin/mpm" <<WRAPPER
-#!/bin/sh
-# mpm CLI wrapper — installed by install.sh
-# Routes CLI to the per-user workspace regardless of CWD.
-# Override at invocation: MPM_WORKSPACE=/tmp/foo mpm call …
-exec env MPM_WORKSPACE=\${MPM_WORKSPACE:-${DATA_ROOT}} ${PREFIX}/bin/mpm.real "\$@"
-WRAPPER
-    chmod 0755 "$PREFIX/bin/mpm"
-    log "  installed wrapper $PREFIX/bin/mpm -> $PREFIX/bin/mpm.real"
 }
 
 # Symlink mpm + mpm-mcp into ~/.local/bin so subprocesses that inherit
@@ -781,7 +744,7 @@ mode_install() {
     # double-quoted strings below.
     local cli="$PREFIX/bin/mpm"
     log "  Mode:       USER-SPACE (no sudo, no /var/lib/mpm)"
-    log "  CLI:        $cli (wrapper) -> $PREFIX/bin/mpm.real"
+    log "  CLI:        $cli (compiled binary; MPM_WORKSPACE defaults to $DATA_ROOT internally)"
     log "  PATH:       $LOCAL_BIN/mpm + $LOCAL_BIN/mpm-mcp  (via symlinks)"
     log "  Daemon:     $(systemctl --user is-active $SERVICE_NAME) ($SERVICE_DST)"
     log "  Logs:       journalctl --user -u $SERVICE_NAME -f"
@@ -815,12 +778,12 @@ mode_dry_run() {
     log ""
     log "would execute:"
     log "  cd $PROJECT_ROOT && make build"
-    log "  install -m 0755 .../bin/mpm-scheduler -> $PREFIX/bin/mpm-scheduler"
-    log "  install -m 0755 .../bin/mpm-critic    -> $PREFIX/bin/mpm-critic"
-    log "  install -m 0755 .../bin/mpm-mcp       -> $PREFIX/bin/mpm-mcp"
-    log "  install -m 0755 .../bin/mpm-telemetry -> $PREFIX/bin/mpm-telemetry"
-    log "  install -m 0755 .../bin/mpm           -> $PREFIX/bin/mpm.real"
-    log "  write wrapper $PREFIX/bin/mpm"
+    log "  install -m 0755 .../bin/mpm           -> $PREFIX/bin/mpm            (skipped when same inode)"
+    log "  install -m 0755 .../bin/mpm-scheduler -> $PREFIX/bin/mpm-scheduler  (skipped when same inode)"
+    log "  install -m 0755 .../bin/mpm-critic    -> $PREFIX/bin/mpm-critic     (skipped when same inode)"
+    log "  install -m 0755 .../bin/mpm-mcp       -> $PREFIX/bin/mpm-mcp        (skipped when same inode)"
+    log "  install -m 0755 .../bin/mpm-telemetry -> $PREFIX/bin/mpm-telemetry  (skipped when same inode)"
+    log "  (legacy cleanup: rm -f $PREFIX/bin/mpm.real $PREFIX/bin/mpm.pre-wrapper.* from older installs)"
     log "  symlink $PREFIX/bin/mpm     -> $LOCAL_BIN/mpm"
     log "  symlink $PREFIX/bin/mpm-mcp -> $LOCAL_BIN/mpm-mcp"
     log "  install -d -m 0700 $DATA_ROOT/src/db $DATA_ROOT/backups/critic-pre  (and chmod 0700 to harden pre-existing dirs)"
@@ -883,12 +846,23 @@ mode_uninstall() {
         fi
     done
 
-    # All five binaries under $PREFIX/bin/. Wrapper + real + daemons.
-    for bin in mpm mpm.real mpm-scheduler mpm-critic mpm-mcp mpm-telemetry; do
+    # All five current-layout binaries under $PREFIX/bin/.
+    for bin in mpm mpm-mcp mpm-scheduler mpm-critic mpm-telemetry; do
         if [ -f "$PREFIX/bin/$bin" ]; then
             rm -f "$PREFIX/bin/$bin"
             log "  removed $PREFIX/bin/$bin"
         fi
+    done
+
+    # Legacy wrapper + mpm.real artefacts from older installs.
+    for pat in "$PREFIX/bin/mpm.real" "$PREFIX/bin/mpm.pre-wrapper."*; do
+        # shellcheck disable=SC2086
+        for f in $pat; do
+            if [ -f "$f" ]; then
+                rm -f "$f"
+                log "  removed legacy $f"
+            fi
+        done
     done
 
     log "uninstall complete"

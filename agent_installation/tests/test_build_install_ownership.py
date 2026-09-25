@@ -1,0 +1,357 @@
+"""
+Build / install ownership regression tests.
+
+The pre-fix install.sh wrote a 261-byte POSIX shell wrapper to
+$PREFIX/bin/mpm (which is the same inode as the repository's bin/mpm
+when the source tree is the canonical install prefix via ~/.mpm).
+That contamination broke the next `make build` with:
+
+    build output "bin/mpm" already exists and is not an object file
+
+The fix:
+  1. install.sh no longer writes a wrapper; bin/mpm IS the compiled binary
+  2. Makefile's `build` target detects and removes a stale wrapper at
+     bin/mpm before invoking `go build`, so `make build` standalone works
+     on already-installed repos
+  3. install.sh and uninstall.sh clean up legacy wrapper artefacts
+     (mpm.real, mpm.pre-wrapper.*) from older installs
+
+These tests verify the post-fix ownership contract from the source-tree
+side. They are read-only inspections of the repository's build/install
+artifacts; they do not invoke the build or installer (those are covered
+by go tests in scripts/install_d31_test.go).
+
+Test mapping (per the user task spec):
+  Test A — build output ownership             -> test_bin_mpm_is_compiled_artifact
+  Test B — install then rebuild                -> test_makefile_build_self_heals_from_stale_wrapper
+  Test C — source == install-prefix edge case  -> test_makefile_handles_same_prefix_layout
+  Test D — wrapper location                    -> test_no_wrapper_at_makefile_owned_paths
+  Test E — mpm.real lifecycle                  -> test_no_mpm_real_in_installer_artifacts
+  Test F — normal out-of-tree installation     -> test_install_dryrun_advertises_correct_binary_topology
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _read(path: str) -> str:
+    p = REPO_ROOT / path
+    if not p.is_file():
+        return ""
+    return p.read_text(encoding="utf-8")
+
+
+def _is_executable_file(path: Path) -> bool:
+    """Return True if path is a regular file with at least one execute bit set."""
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def _has_shebang(path: Path) -> bool:
+    """Return True if path's first two bytes are '#!'."""
+    try:
+        with path.open("rb") as f:
+            return f.read(2) == b"#!"
+    except OSError:
+        return False
+
+
+# --------------------------------------------------------------------------
+# Test A — build output ownership
+# --------------------------------------------------------------------------
+
+
+class BuildOutputOwnership(unittest.TestCase):
+    """After make build, bin/mpm must be a compiled executable, not a script."""
+
+    BIN = REPO_ROOT / "bin"
+
+    def test_bin_directory_exists(self):
+        """make build has been run at least once, so bin/ must exist."""
+        self.assertTrue(
+            self.BIN.is_dir(),
+            f"{self.BIN} must exist (make build must have been run)",
+        )
+
+    def test_bin_mpm_is_executable(self):
+        """bin/mpm must have at least one execute bit set."""
+        mpm = self.BIN / "mpm"
+        if not mpm.exists():
+            self.skipTest("bin/mpm not present; rebuild required before this test")
+        self.assertTrue(
+            _is_executable_file(mpm),
+            f"bin/mpm must be executable (got {oct(mpm.stat().st_mode)})",
+        )
+
+    def test_bin_mpm_is_not_a_shell_script(self):
+        """bin/mpm must NOT start with the '#!' shebang (that would mark it as a wrapper)."""
+        mpm = self.BIN / "mpm"
+        if not mpm.exists():
+            self.skipTest("bin/mpm not present; rebuild required before this test")
+        self.assertFalse(
+            _has_shebang(mpm),
+            "bin/mpm must NOT be a shell wrapper; it must be the compiled Go binary. "
+            "If this fires, the wrapper-removal fix has regressed.",
+        )
+
+
+# --------------------------------------------------------------------------
+# Test B — install then rebuild (Makefile self-heals from stale wrapper)
+# --------------------------------------------------------------------------
+
+
+class MakefileSelfHealsFromStaleWrapper(unittest.TestCase):
+    """The Makefile build target must detect and remove a stale wrapper at bin/mpm."""
+
+    MAKEFILE = REPO_ROOT / "Makefile"
+
+    def test_makefile_has_prebuild_cleanup(self):
+        """Makefile build target must contain the wrapper-removal pre-step."""
+        if not self.MAKEFILE.is_file():
+            self.skipTest("Makefile missing")
+        text = self.MAKEFILE.read_text(encoding="utf-8")
+        # The pre-build step checks for shebang and removes the wrapper.
+        self.assertRegex(
+            text,
+            r"head -c 2.*grep.*\^#!",
+            "Makefile build target must detect a wrapper at bin/mpm via shebang check",
+        )
+        self.assertRegex(
+            text,
+            r"rm -f.*\$\(BUILD_DIR\)/\$\(BINARY_NAME\)",
+            "Makefile build target must remove the stale wrapper before invoking go build",
+        )
+
+    def test_makefile_build_target_is_idempotent(self):
+        """Running `make build` twice in succession must succeed without producing
+        the 'build output already exists and is not an object file' error.
+
+        This is verified by inspecting the Makefile: the pre-build cleanup runs
+        BEFORE the go build invocation, so the second run finds a fresh ELF
+        (which the shebang check correctly identifies as 'not a wrapper') and
+        leaves it alone.
+        """
+        if not self.MAKEFILE.is_file():
+            self.skipTest("Makefile missing")
+        text = self.MAKEFILE.read_text(encoding="utf-8")
+        # Pre-build step must precede the first `go build`.
+        pre_step_idx = text.find('rm -f "$(BUILD_DIR)/$(BINARY_NAME)"')
+        first_go_build_idx = text.find("$(GO) build -tags fts5")
+        self.assertGreaterEqual(
+            pre_step_idx,
+            0,
+            "Makefile must have a wrapper-removal pre-build step",
+        )
+        self.assertGreater(
+            first_go_build_idx,
+            pre_step_idx,
+            "Wrapper-removal pre-build step must come BEFORE the `go build` invocation",
+        )
+
+
+# --------------------------------------------------------------------------
+# Test C — source == install-prefix edge case
+# --------------------------------------------------------------------------
+
+
+class MakefileHandlesSamePrefixLayout(unittest.TestCase):
+    """When $PROJECT_ROOT/bin/$bin and $PREFIX/bin/$bin resolve to the same inode,
+    the installer's same-inode guard must skip the copy."""
+
+    INSTALL = REPO_ROOT / "install.sh"
+
+    def test_install_uses_same_inode_guard(self):
+        """phase_binaries must guard install with `[ $src -ef $dst ]`."""
+        if not self.INSTALL.is_file():
+            self.skipTest("install.sh missing")
+        text = self.INSTALL.read_text(encoding="utf-8")
+        self.assertRegex(
+            text,
+            r"\[\s*\"\$src\"\s*-ef\s*\"\$dst\"\s*\]",
+            "install.sh phase_binaries must use the POSIX [-ef] same-inode guard "
+            "to handle the source == install prefix case",
+        )
+
+    def test_install_loop_includes_mpm(self):
+        """phase_binaries install loop must include `mpm` (the CLI binary)."""
+        if not self.INSTALL.is_file():
+            self.skipTest("install.sh missing")
+        text = self.INSTALL.read_text(encoding="utf-8")
+        self.assertRegex(
+            text,
+            r"for\s+bin\s+in\s+mpm\s+mpm-scheduler\s+mpm-critic\s+mpm-mcp\s+mpm-telemetry",
+            "install.sh install loop must include `mpm` alongside the daemons; "
+            "the CLI binary is now installed as a normal binary",
+        )
+
+
+# --------------------------------------------------------------------------
+# Test D — wrapper location (post-fix invariant: no wrapper)
+# --------------------------------------------------------------------------
+
+
+class NoWrapperAtMakefileOwnedPaths(unittest.TestCase):
+    """After install, no wrapper should appear at any Makefile-owned path."""
+
+    INSTALL = REPO_ROOT / "install.sh"
+
+    def test_install_does_not_write_wrapper_to_bin_mpm(self):
+        """install.sh must not `cat > $PREFIX/bin/mpm` (overwriting the build artifact)."""
+        text = _read("install.sh")
+        self.assertNotRegex(
+            text,
+            r"cat\s+>\s+\"?\$PREFIX/bin/mpm\"?",
+            "install.sh must not write a shell wrapper to $PREFIX/bin/mpm; "
+            "this overwrites the Makefile-owned build artifact and breaks "
+            "the next `make build`",
+        )
+
+    def test_install_does_not_contain_wrapper_heredoc(self):
+        """install.sh must not contain a `<<WRAPPER ... WRAPPER` heredoc."""
+        text = _read("install.sh")
+        self.assertNotRegex(
+            text,
+            r"<<WRAPPER",
+            "install.sh must not contain a wrapper heredoc; the wrapper has been "
+            "removed because MPM_WORKSPACE defaulting is handled by the binary",
+        )
+
+
+# --------------------------------------------------------------------------
+# Test E — mpm.real lifecycle
+# --------------------------------------------------------------------------
+
+
+class NoMpmRealInInstallerArtifacts(unittest.TestCase):
+    """The mpm.real artefact must not be installed or maintained by the post-fix installer."""
+
+    INSTALL = REPO_ROOT / "install.sh"
+    UNINSTALL = REPO_ROOT / "uninstall.sh"
+
+    def test_install_does_not_install_mpm_real(self):
+        """install.sh must not have an active `install -m 0755 ... mpm.real` copy."""
+        text = _read("install.sh")
+        # Specifically: the line that copies mpm to mpm.real must be gone.
+        self.assertNotRegex(
+            text,
+            r'install\s+-m\s+0755\s+"?\$PROJECT_ROOT/bin/mpm"?\s+"?\$PREFIX/bin/mpm\.real"?',
+            "install.sh must not install a separate mpm.real binary",
+        )
+
+    def test_install_cleans_up_legacy_mpm_real(self):
+        """install.sh must clean up legacy mpm.real from older wrapper-based installs."""
+        text = _read("install.sh")
+        self.assertIn(
+            "$PREFIX/bin/mpm.real",
+            text,
+            "install.sh must reference $PREFIX/bin/mpm.real to clean up legacy artefacts",
+        )
+
+    def test_uninstall_removes_legacy_mpm_real(self):
+        """uninstall.sh must include mpm.real in legacy cleanup."""
+        text = _read("uninstall.sh")
+        self.assertIn(
+            "mpm.real",
+            text,
+            "uninstall.sh must reference mpm.real (legacy artefact removal)",
+        )
+        # The current-layout ALL_BINARIES must NOT include mpm.real.
+        all_binaries_match = re.search(
+            r"ALL_BINARIES=\(([^)]*)\)", text
+        )
+        self.assertIsNotNone(
+            all_binaries_match,
+            "uninstall.sh must define ALL_BINARIES",
+        )
+        all_binaries = all_binaries_match.group(1)
+        self.assertNotIn(
+            "mpm.real",
+            all_binaries,
+            "uninstall.sh ALL_BINARIES must NOT include mpm.real (current layout has none)",
+        )
+
+
+# --------------------------------------------------------------------------
+# Test F — normal out-of-tree installation
+# --------------------------------------------------------------------------
+
+
+class InstallDryrunAdvertisesCorrectTopology(unittest.TestCase):
+    """The install.sh dry-run intent must reflect the post-fix layout."""
+
+    def test_dryrun_no_longer_advertises_mpm_real_copy(self):
+        """install.sh dry-run intent must not show `bin/mpm -> mpm.real` copy."""
+        text = _read("install.sh")
+        self.assertNotRegex(
+            text,
+            r"\.\.\./bin/mpm\s+->\s+\$PREFIX/bin/mpm\.real",
+            "install.sh dry-run intent must not advertise a copy of bin/mpm to mpm.real",
+        )
+
+    def test_dryrun_no_longer_advertises_wrapper_write(self):
+        """install.sh dry-run intent must not show a `write wrapper` line."""
+        text = _read("install.sh")
+        self.assertNotRegex(
+            text,
+            r"write wrapper",
+            "install.sh dry-run intent must not advertise a wrapper write",
+        )
+
+
+# --------------------------------------------------------------------------
+# Diagnostic / docs updates
+# --------------------------------------------------------------------------
+
+
+class DocumentationDistinguishesBinaryRoles(unittest.TestCase):
+    """Docs and the diagnostic must distinguish source artifact vs installed runtime."""
+
+    def test_integration_check_no_longer_references_mpm_real(self):
+        """mpm_integration_check.md must not reference mpm.real as a current artefact."""
+        text = _read("mpm_integration_check.md")
+        # The diagnostic may mention mpm.real only in historical/migration
+        # context, not as a current binary to verify freshness against.
+        # Check the freshness report template does not list "mpm.real freshness".
+        self.assertNotRegex(
+            text,
+            r"mpm\.real\s+freshness",
+            "mpm_integration_check.md must not require an `mpm.real freshness` check "
+            "(mpm.real is not part of the current layout)",
+        )
+
+    def test_install_md_documents_no_wrapper(self):
+        """docs/INSTALL.md must describe the no-wrapper layout."""
+        text = _read("docs/INSTALL.md")
+        # The PATH table must describe ~/.mpm/bin/mpm as the compiled binary.
+        # Markdown tables allow the row to span lines; use a permissive match.
+        self.assertRegex(
+            text,
+            r"`~/.mpm/bin/mpm`.*?Compiled Go CLI binary",
+            "docs/INSTALL.md PATH table must describe ~/.mpm/bin/mpm as the compiled binary",
+        )
+
+    def test_integration_check_binary_resolution_block(self):
+        """mpm_integration_check.md §3 must not promise that ~/.mpm/bin/mpm is a wrapper."""
+        text = _read("mpm_integration_check.md")
+        # The freshness section should run --version on ~/.mpm/bin/mpm
+        # directly (no separate .real).
+        self.assertRegex(
+            text,
+            r"~/.mpm/bin/mpm\s+--version",
+            "mpm_integration_check.md must run --version on ~/.mpm/bin/mpm directly",
+        )
+        self.assertNotRegex(
+            text,
+            r"~/.mpm/bin/mpm\.real\s+--version",
+            "mpm_integration_check.md must not probe ~/.mpm/bin/mpm.real --version "
+            "(no such file in the current layout)",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

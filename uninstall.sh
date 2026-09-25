@@ -181,7 +181,17 @@ AUTOSTART_FILE="$AUTOSTART_DIR/mpm-post-decrypt.desktop"
 # MPM-owned bin names. The first two are the only ones exposed on the
 # user PATH (symlinks in ~/.local/bin). The rest are internal daemons.
 PATH_BINARIES=(mpm mpm-mcp)
-ALL_BINARIES=(mpm mpm.real mpm-mcp mpm-scheduler mpm-critic mpm-telemetry)
+ALL_BINARIES=(mpm mpm-mcp mpm-scheduler mpm-critic mpm-telemetry)
+
+# Legacy files from older installs that split mpm into wrapper + mpm.real.
+# These are NOT part of the current layout; uninstall removes them so
+# re-running install.sh against the same prefix produces a clean tree.
+LEGACY_BINARIES=(
+    "$PREFIX/bin/mpm.real"
+)
+LEGACY_GLOBS=(
+    "$PREFIX/bin/mpm.pre-wrapper.*"
+)
 
 # Runtime-only artefacts (removed by default uninstall). These are
 # sockets, lock files, and pid files — NOT persistent data.
@@ -343,6 +353,23 @@ build_plan() {
         if [ -f "$p" ] || [ -L "$p" ]; then
             PLAN_RUNTIME_BINARIES+=("$p")
         fi
+    done
+
+    # 4b. Legacy artefacts from the old wrapper + mpm.real layout.
+    # Removed unconditionally on uninstall so a subsequent ./install.sh
+    # against the same prefix produces a clean current-layout tree.
+    for p in "${LEGACY_BINARIES[@]}"; do
+        if [ -f "$p" ] || [ -L "$p" ]; then
+            PLAN_RUNTIME_BINARIES+=("$p")
+        fi
+    done
+    for pat in "${LEGACY_GLOBS[@]}"; do
+        # shellcheck disable=SC2086
+        for p in $pat; do
+            if [ -f "$p" ] || [ -L "$p" ]; then
+                PLAN_RUNTIME_BINARIES+=("$p")
+            fi
+        done
     done
 
     # 5. Graphical-session wants (ecryptfs secondary).
