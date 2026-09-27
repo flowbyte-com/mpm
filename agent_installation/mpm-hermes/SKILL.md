@@ -7,7 +7,7 @@
 | Agent / framework | Hermes (minimax-oauth provider, hermes-agent CLI) |
 | Integration path | `~/.mpm/agent_installation/mpm-hermes/` |
 | Native mechanism | Hermes MCP client (`mcp_servers` in `~/.hermes/config.yaml`) + `.hermes.md` behavioural instruction file (walked up from cwd to git root) |
-| MPM interface used | `mpm-mcp` stdio server (compact 3-tool MCP surface via JSON-RPC over stdio; full 22-tool surface = 21 substrate Registry entries + `mpm_help` discovery closure, reachable via `mpm call <tool> --payload '{...}'` or via `MPM_EXPOSE_ALL_TOOLS=1`) |
+| MPM interface used | `mpm-mcp` stdio server (compact 3-tool MCP surface via JSON-RPC over stdio — intentionally fixed at `mpm_memory` / `mpm_context` / `mpm_help`; full registered MCP surface = every Registry entry plus the `mpm_help` discovery closure, reachable via `mpm call <tool> --payload '{...}'` or via `MPM_EXPOSE_ALL_TOOLS=1`) |
 | Auto-load mechanism | MCP server auto-spawned from `mcp_servers` config; `.hermes.md` walked up from cwd at session start |
 | MPM binary actually resolved | `$HOME/.mpm/bin/mpm-mcp` (canonical, absolute path) |
 | Database actually used | `$HOME/.mpm/src/db/mpm.db` (the canonical install root; the symlink tree also exposes the same inode via `$HOME/projects/mpm/src/db/mpm.db` and `$HOME/.openclaw/workspace/projects/mpm/src/db/mpm.db`) |

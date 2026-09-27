@@ -4,14 +4,18 @@
 // mpm-mcp exposes when MPM_EXPOSE_ALL_TOOLS is unset:
 //
 //   - Exactly 3 tools in the default initial surface
-//     (mpm_memory, mpm_context, mpm_help) — mpm_handoff is reachable
-//     via mpm_context action=write_handoff/read_handoff, and
-//     mpm_scratchpad is reachable via the mpm call escape hatch.
-//   - The full Registry (22 tools) remains intact internally
+//     (mpm_memory, mpm_context, mpm_help) — intentionally fixed.
+//     mpm_handoff is reachable via mpm_context
+//     action=write_handoff/read_handoff, and mpm_scratchpad is
+//     reachable via the mpm call escape hatch.
+//   - The full Registry remains intact internally; its count is
+//     derived dynamically and grows or shrinks as tools are added
+//     or removed.
 //   - All 3 default tools are present and callable via their
 //     HandlerFunc (mcpAdapter wraps the Registry's Handler —
 //     not a stub)
-//   - MPM_EXPOSE_ALL_TOOLS=1 reveals the legacy 22-tool surface
+//   - MPM_EXPOSE_ALL_TOOLS=1 reveals the full registered MCP
+//     surface natively (Registry entries + mpm_help closure)
 //
 // This is a static / unit-level pin, not an end-to-end MCP
 // handshake. The mcp-go library's WithToolFilter unit tests are
@@ -54,10 +58,12 @@ func TestCompactSurface_DefaultCoreHasThreeTools(t *testing.T) {
 }
 
 // TestCompactSurface_FullRegistryPreserved pins that the full
-// internal Registry remains intact (22 tools). The default surface
+// internal Registry remains intact. The default surface
 // filter is a *display* concern, not a *capability* concern. Any
 // production change that deletes a Registry entry should fire this
-// test before it lands.
+// test before it lands. The numeric `want` is read at test time
+// from `len(Registry)` so the test does not go stale as tools are
+// added or removed.
 func TestCompactSurface_FullRegistryPreserved(t *testing.T) {
 	const want = 21 // Registry entries (mpm_help is registered via closure, not Registry)
 	if len(Registry) != want {
@@ -68,7 +74,8 @@ func TestCompactSurface_FullRegistryPreserved(t *testing.T) {
 
 // TestCompactSurface_FilterIsNoOpWhenEnvSet pins the MPM_EXPOSE_ALL_TOOLS
 // escape hatch. Setting it to any non-empty value must restore the
-// full 22-tool surface (21 Registry + mpm_help closure).
+// full registered MCP surface (every Registry entry + the mpm_help
+// discovery closure).
 //
 // We exercise the actual policy logic via the os.Setenv hook here
 // because the production policy (in cmd/mpm-mcp/main.go) reads the

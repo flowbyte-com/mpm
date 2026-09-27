@@ -14,7 +14,7 @@ from the CLI is reachable from Pi as a typed tool.
 | Standalone tools | 3 | `index.ts` (hand-written) |
 
 The 14 Domain Tools cover the **core cognitive surface** exposed by
-this adapter. The current MPM Registry exposes **22 tools total** (21
+this adapter. The current MPM Registry exposes every Registry entry plus
 Registry entries + the `mpm_help` discovery closure registered via
 `cmd/mpm-mcp`). This Pi adapter registers a hand-curated 17-tool
 subset. The 5 tools not registered here as typed Pi tools
@@ -26,7 +26,7 @@ The default initial MCP surface that hosts (ClaudeCode, Hermes,
 OpenClaw) receive at session start is the compact 3-tool surface
 (`mpm_memory`, `mpm_context`, `mpm_help`). Setting
 `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block restores the full
-22-tool surface. **Pi does not use the MCP server** — it registers
+full registered MCP surface. **Pi does not use the MCP server** — it registers
 its own typed tools via the Pi extension API; the compact MCP
 surface does not apply to Pi.
 
@@ -174,12 +174,12 @@ injection) and the `AGENTS.md` managed block for the behavioral
 contract.
 
 The default initial MCP surface (3 tools: `mpm_memory`,
-`mpm_context`, `mpm_help`) and the broader 22-tool Registry surface
+`mpm_context`, `mpm_help`) and the broader Registry surface
 (restored via `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block) are
 described here for cross-host reference only — they apply to hosts
 that actually run `mpm-mcp` as their agent-facing transport. The
 Pi integration's typed tools are the equivalent of "the full
-22-tool surface" for the Pi host: any tool in the MPM Registry not
+full registered MCP surface" for the Pi host: any tool in the MPM Registry not
 registered as a typed Pi tool remains reachable via the universal
 CLI fallback:
 
@@ -232,12 +232,12 @@ Until the Phase 1/2 registry refactor of mpm, `mpm-mcp` exposed 77
 granular tools (one per registry entry). The agent-facing tool
 definition prompt — every tool's name, description, and parameter
 schema — grew to ~15KB of context on every turn. mpm now exposes
-**22 tools in the full Registry**: the unified Domain Tools are
+**Every tool in the MPM Registry**: the unified Domain Tools are
 "Fat RPC" — each takes `{action: string, params: object}` and the
 mpm backend validates and dispatches. That collapses ~77 distinct
 tool definitions into a small set of near-identical ones.
 
-This Pi adapter registers a **17-tool subset** of the full 22-tool
+This Pi adapter registers a **17-tool subset** of the full MPM
 Registry (14 Domain Tools + 3 Standalones). The remaining Registry
 tools (`mpm_work`, `mpm_resolve`, `mpm_blob_read`,
 `mpm_blob_search`) are reachable through the

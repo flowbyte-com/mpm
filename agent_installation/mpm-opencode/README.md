@@ -1,7 +1,7 @@
 # mpm-opencode
 
 OpenCode plugin that wires MPM's cognitive substrate in as **17 typed
-tools** (a curated subset of the full 22-tool MPM registry).
+tools** (a curated subset of the full MPM Registry).
 
 ## Parity with Claude Code Integration
 
@@ -27,7 +27,7 @@ The OpenCode plugin provides **automatic wake context injection** at session sta
 ### 14 Domain Tools
 
 The 14 Domain Tools cover the **core cognitive surface** exposed by this
-adapter. The current MPM registry exposes **22 tools total** (21
+adapter. The current MPM Registry exposes every tool plus the
 Registry entries + the `mpm_help` discovery closure registered via
 `cmd/mpm-mcp`), so this adapter is a hand-curated 17-tool subset.
 Tools in the full registry not registered here (`mpm_work`,
@@ -39,7 +39,7 @@ free-form `params`:
 > The default initial MCP surface that hosts receive at session start
 > is the compact 3-tool surface (`mpm_memory`, `mpm_context`,
 > `mpm_help`); `MPM_EXPOSE_ALL_TOOLS=1` in the MCP env block restores
-> the full 22-tool surface. The OpenCode plugin's typed tools
+> the full registered MCP surface. The OpenCode plugin's typed tools
 > (`mpm__mpm_handoff`, `mpm__mpm_scratchpad`, etc.) are exposed
 > directly regardless of the MCP filter because the OpenCode plugin
 > registers its own typed tools via Pi's extension API, not via
@@ -189,7 +189,7 @@ MPM DeriveWorkVerification derives verification status
 The legacy plugin (`agent-plugins/mpm-opencode-plugin` in pCloud) generated one tool per (action, artifact-type) pair — 18 tool definitions spanning memory / lessons / topics / references / wake / decisions / etc. It was bound to the **old 77-tool schema** that pre-dated the 13-aggregator collapse (2026-08-11). It is **dead code** and should be removed.
 
 The lightweight adapter:
-- 17 typed tools exposed by this plugin (a curated subset of the full 22-tool MPM registry; the legacy plugin named 18 individually: `query_long_term_memory`, `save_to_memory`, `challenge_memory`, etc. — note: `challenge_memory` is gone from the registry, use `mpm_memory` action=`challenge` instead)
+- 17 typed tools exposed by this plugin (a curated subset of the full MPM Registry; the legacy plugin named 18 individually: `query_long_term_memory`, `save_to_memory`, `challenge_memory`, etc. — note: `challenge_memory` is gone from the registry, use `mpm_memory` action=`challenge` instead)
 - One Zod schema shape for the 14 Domain Tools (free-form `params` validated by mpm backend)
 - No prompt bloat — the description strings are short, and the heavy `params` documentation lives in the mpm backend where it can be evolved without disrupting the plugin
 - No domain logic — no LLM calls, no caching, no local state

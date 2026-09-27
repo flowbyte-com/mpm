@@ -570,3 +570,79 @@ class DiagnosticDocumentHygiene(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpenClawPersistentBlockContract(unittest.TestCase):
+    """OpenClaw follows the same persistent-block model as the other
+    four hosts. The diagnostic must explicitly distinguish the
+    persistent behavioural contract (SOUL.md) from runtime wake /
+    persona injection, and must classify each layer separately."""
+
+    def test_openclaw_section_documents_three_layer_model(self):
+        text = _read_diagnostic()
+        # §17.3 must mention SOUL.md as the persistent surface.
+        self.assertRegex(
+            text, r"17\.3[^\n]*\n[\s\S]{0,400}SOUL\.md",
+            "OpenClaw section must mention SOUL.md as the persistent surface",
+        )
+
+    def test_openclaw_section_documents_managed_section_markers(self):
+        text = _read_diagnostic()
+        # The diagnostic must name the OpenClaw managed-section markers
+        # so the regression that the persistent block is present can
+        # actually be verified by name.
+        self.assertIn(
+            "BEGIN MPM-MANAGED SECTION:openclaw-instructions",
+            text,
+            "OpenClaw section must name the managed-section markers",
+        )
+
+    def test_openclaw_section_distinguishes_runtime_from_persistent(self):
+        text = _read_diagnostic()
+        # The diagnostic must explicitly say runtime injection is NOT
+        # a substitute for the persistent block. Without this, a host
+        # with only wake injection could falsely report behavioural
+        # adoption = PASS. Look anywhere in the OpenClaw section, not
+        # at a fixed offset — the explicit not-equivalent statement is
+        # placed after the per-host check list.
+        idx = text.find("## 17.3 OpenClaw")
+        self.assertGreater(idx, 0, "OpenClaw section must exist")
+        # Section ends at the next "## " heading.
+        next_idx = text.find("\n## ", idx + 1)
+        if next_idx < 0:
+            next_idx = len(text)
+        snippet = text[idx:next_idx]
+        self.assertIn(
+            "runtime", snippet.lower(),
+            "OpenClaw section must reference runtime injection",
+        )
+        self.assertIn(
+            "persistent", snippet.lower(),
+            "OpenClaw section must reference persistent contract",
+        )
+        # Must explicitly say runtime is not equivalent / not a substitute.
+        # Allow markdown emphasis between the words (e.g., "**not**
+        # equivalent").
+        self.assertRegex(
+            snippet, r"not\b\*?\*?\s+equivalent|not\s+a\s+substitute",
+            "OpenClaw section must state runtime wake ≠ persistent contract",
+        )
+
+    def test_openclaw_managed_block_check_command_present(self):
+        text = _read_diagnostic()
+        self.assertIn(
+            "BEGIN MPM-MANAGED SECTION:openclaw-instructions",
+            text,
+            "Diagnostic must include the OpenClaw managed-block check command",
+        )
+
+    def test_openclaw_runtime_managed_split_verdicts(self):
+        # The diagnostic must surface BOTH "Wake runtime injection" and
+        # "MPM managed block in SOUL.md" as separate verdict rows for
+        # OpenClaw. A single combined verdict is the false-PASS mode.
+        text = _read_diagnostic()
+        idx = text.find("## 17.3 OpenClaw")
+        self.assertGreater(idx, 0)
+        snippet = text[idx:idx + 2000]
+        self.assertIn("Wake runtime injection", snippet)
+        self.assertIn("MPM managed block in SOUL.md", snippet)

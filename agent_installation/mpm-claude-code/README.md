@@ -9,7 +9,7 @@ start with `MPM_EXPOSE_ALL_TOOLS` unset): **3 tools** — `mpm__mpm_memory`,
 through `mpm__mpm_context` action `write_handoff` / `read_handoff`; the
 substrate `mpm__mpm_handoff` and `mpm__mpm_scratchpad` tools remain in
 the registry and are reachable via `mpm call` / `mpm_help list` +
-subsequent `mpm call`. **Full surface** (legacy, 22 tools): set
+subsequent `mpm call`. **Full registered MCP surface**: set
 `MPM_EXPOSE_ALL_TOOLS=1` in the MCP env block of `~/.claude/.mcp.json`.
 See `~/.mpm/docs/CONTEXT_EXPOSURE.md` for the architecture.
 
@@ -28,15 +28,15 @@ serena, firebase — each declares an `.mcp.json` with a `mcpServers` block).
 
 ## Coverage
 
-**Full internal substrate surface**: 22 tools (21 Registry entries + the
-`mpm_help` discovery closure registered via `cmd/mpm-mcp`). The
+**Full internal substrate surface**: every tool in the MPM Registry
+plus the `mpm_help` discovery closure registered via `cmd/mpm-mcp`. The
 canonical Registry is the single source of truth for every tool the
 substrate implements; it is shared verbatim with `mpm call` and the
 MCP server.
 
 **Default initial MCP surface** (what Claude Code sees at session
 start with `MPM_EXPOSE_ALL_TOOLS` unset): 3 tools — `mpm__mpm_memory`,
-`mpm__mpm_context`, `mpm__mpm_help`. The full 22-tool surface is
+`mpm__mpm_context`, `mpm__mpm_help`. The full registered MCP surface is
 restored when the MCP env block sets `MPM_EXPOSE_ALL_TOOLS=1`. The
 adapters below describe the **full** substrate surface for operators;
 Claude Code's per-turn MCP tool list is determined by the
@@ -45,14 +45,14 @@ Claude Code's per-turn MCP tool list is determined by the
 | Layer | Count | Tool names |
 |---|---|---|
 | Default initial MCP surface | 3 | `mpm__mpm_memory`, `mpm__mpm_context`, `mpm__mpm_help` |
-| Full internal substrate surface (Registry) | 21 | `mpm__mpm_memory` (action: save/query/show/shred/reinforce/weaken/snooze/set_weight/patch/promote/review/synthesize/challenge/restore_challenge/commit_milestone), `mpm__mpm_wakes`, `mpm__mpm_theories`, `mpm__mpm_lessons`, `mpm__mpm_decisions`, `mpm__mpm_topics`, `mpm__mpm_references`, `mpm__mpm_evidence`, `mpm__mpm_confidence`, `mpm__mpm_context`, `mpm__mpm_skills`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`, `mpm__mpm_system`, `mpm__mpm_work`, `mpm__mpm_resolve`, `mpm__mpm_blob_read`, `mpm__mpm_blob_search`, `mpm__mpm_retrieval_diagnose` |
+| Full internal substrate surface (Registry) | (dynamic) | `mpm__mpm_memory` (action: save/query/show/shred/reinforce/weaken/snooze/set_weight/patch/promote/review/synthesize/challenge/restore_challenge/commit_milestone), `mpm__mpm_wakes`, `mpm__mpm_theories`, `mpm__mpm_lessons`, `mpm__mpm_decisions`, `mpm__mpm_topics`, `mpm__mpm_references`, `mpm__mpm_evidence`, `mpm__mpm_confidence`, `mpm__mpm_context`, `mpm__mpm_skills`, `mpm__mpm_handoff`, `mpm__mpm_scratchpad`, `mpm__mpm_system`, `mpm__mpm_work`, `mpm__mpm_resolve`, `mpm__mpm_blob_read`, `mpm__mpm_blob_search`, `mpm__mpm_retrieval_diagnose` |
 | Standalone tools | 2 | `mpm__log_to_changelog`, `mpm__request_review` |
 
 The 19 Domain Tools share the same `(action, params)` shape. The 2
 Standalones have their own narrower schemas. See `~/.mpm/bin/mpm-mcp`'s
 `tools/list` JSON-RPC method for the canonical schemas (the filtered
 default surface — 3 tools — is what Claude Code actually receives;
-set `MPM_EXPOSE_ALL_TOOLS=1` to see the full 22-tool surface).
+set `MPM_EXPOSE_ALL_TOOLS=1` to see the full registered MCP surface).
 
 ## Install
 

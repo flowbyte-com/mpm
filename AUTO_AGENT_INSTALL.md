@@ -755,13 +755,14 @@ retired tool names are absent from current instructions
 
 For MCP integrations, inspect the actual current tool registry where practical.
 
-The current default initial MCP surface (the model-facing one at session start, with `MPM_EXPOSE_ALL_TOOLS` unset) exposes **3 tools**: `mpm_memory`, `mpm_context`, `mpm_help`. The full internal substrate surface is **22 tools** (21 Registry entries + the `mpm_help` discovery closure registered via cmd/mpm-mcp); reachable on hosts that set `MPM_EXPOSE_ALL_TOOLS=1` in their MCP env block, or via the universal `mpm call <tool> --payload '…'` CLI fallback.
+The current default initial MCP surface (the model-facing one at session start, with `MPM_EXPOSE_ALL_TOOLS` unset) exposes **3 tools** — intentionally fixed: `mpm_memory`, `mpm_context`, `mpm_help`. The full registered MCP surface consists of every tool in the MPM Registry plus the `mpm_help` discovery closure registered via `cmd/mpm-mcp`; reachable on hosts that set `MPM_EXPOSE_ALL_TOOLS=1` in their MCP env block, or via the universal `mpm call <tool> --payload '…'` CLI fallback.
 
 Implementation sources (authoritative; re-derive the numbers from
 these rather than trusting this paragraph): the 3-tool default is
 `defaultCoreTools` filtered by `coreToolFilter` in `cmd/mpm-mcp/main.go`;
-the 21 Registry entries live in `internal/core/tools/registry_list.go`
-(pinned by `TestCompactSurface_FullRegistryPreserved` with `want = 21`);
+the Registry entries live in `internal/core/tools/registry_list.go`
+(pinned by `TestCompactSurface_FullRegistryPreserved` with the count
+derived from `len(Registry)` at runtime);
 `mpm_help` is registered as a closure in `cmd/mpm-mcp/tools.go`
 (`makeHelpHandler` iterates the live Registry, so its `list` output
 derives the count at runtime instead of hard-coding it).

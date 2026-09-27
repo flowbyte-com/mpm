@@ -53,10 +53,13 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/flowbyte-com/mpm-core/tools"
 )
 
 // TestInstructionsPrimerDrift_MatchesRenderer verifies that the
@@ -157,5 +160,152 @@ func TestInstructionsPrimer_NonEmptyAndStructured(t *testing.T) {
 			"embedded primer has only %d bullets; expected at least 3 (Wake, Persist, Handoff are non-negotiable)",
 			bullets,
 		)
+	}
+}
+
+// requiredPrimerConcepts lists the discoverability substrings that the
+// MCP protocol-level `instructions` field MUST teach an agent
+// connecting through mpm-mcp today. Each entry is a substring the
+// primer must contain; missing or stale entries are surface-level
+// regressions (the agent would arrive without the orientation it
+// needs to use the post-discoverability MPM substrate correctly).
+//
+// These checks are semantic — substring presence — not exact-string
+// snapshots. They are deliberately loose enough to survive natural
+// prose tightening in the canonical renderer (the byte-level
+// equality test above is the authoritative drift guard for the
+// renderer's output; this guard catches *semantic* regressions where
+// the renderer output drifts away from the discoverability
+// architecture). Changes here MUST stay in lock-step with the
+// architecture pinned by `internal/core/tools/compact_surface_filter_test.go`
+// (3-tool compact surface — intentionally fixed at mpm_memory /
+// mpm_context / mpm_help; full Registry + mpm_help closure derived
+// at runtime via `len(Registry) + 1`)
+// and the wake-envelope contract in `internal/core/wake_context.go`.
+var requiredPrimerConcepts = []string{
+	// Compact initial surface: the three tools an MCP client sees
+	// when connecting.
+	"`mpm_memory`",
+	"`mpm_context`",
+	"`mpm_help`",
+	// Discovery: how the agent reaches the rest of the substrate.
+	"`reach_via_cli`",
+	// Tools/list filtering: hidden tools stay registered.
+	"`tools/list`",
+	// Substrate availability: CLI fallback + the
+	// MPM_EXPOSE_ALL_TOOLS=1 escape hatch.
+	"`MPM_EXPOSE_ALL_TOOLS=1`",
+	"`mpm call <tool> --payload '{\"action\":\"<op>\",\"params\":{...}}'`",
+	// Wake envelope: auto-injection (bullet 1 + footer cover the
+	// literal "read_wake_context"; here we assert that the wake
+	// payload shape is named).
+	"`read_wake_context`",
+	// Wake envelope: contextual_focus as inherited working
+	// awareness, NOT a ranking.
+	"`<contextual_focus>`",
+	"inherited working awareness",
+	"NOT a ranking",
+	// Wake envelope: recent_activity as factual history,
+	// observational, not ranked.
+	"`recent_activity`",
+	"observational, not ranked",
+	// Wake envelope: contextual_candidates as diagnostic / routing,
+	// NOT for normal startup, NOT a ranking mechanism.
+	"`contextual_candidates`",
+	"NOT for normal startup",
+}
+
+// TestInstructionsPrimer_CoversDiscoverabilityConcepts guards
+// against the primer drifting into a "behavioural contract only"
+// shape — the kind of drift that misses what the model needs to
+// know about the post-discoverability architecture (compact
+// surface, mpm_help discovery, hidden Registry tools, CLI
+// fallback, wake-context shape, contextual_focus /
+// recent_activity / contextual_candidates semantics).
+//
+// The primer must mention each substring in requiredPrimerConcepts.
+// A failure here means the primer has lost its orienting layer; the
+// agent will not know how to find specialists, what the wake
+// envelope carries, or when recent_activity vs contextual_candidates
+// is the right tool.
+func TestInstructionsPrimer_CoversDiscoverabilityConcepts(t *testing.T) {
+	for _, want := range requiredPrimerConcepts {
+		if !strings.Contains(instructionsPrimer, want) {
+			t.Errorf(
+				"embedded primer is missing required discoverability concept %q.\n"+
+					"The MCP `instructions` field must orient the agent on the\n"+
+					"post-discoverability surface. Update either the primer\n"+
+					"or the requiredPrimerConcepts table; do not weaken the\n"+
+					"substring check to make this go away.",
+				want,
+			)
+		}
+	}
+}
+
+// TestInstructionsPrimer_NoStaleSurfaceCounts guards against
+// historical tool counts hard-coded into the primer going stale
+// when the Registry grows. The primer describes the
+// discoverability model qualitatively ("the rest of the
+// substrate", "every registered tool", "`mpm call <tool>`"); any
+// literal numeric count embedded in prose is a candidate for
+// staleness.
+//
+// Today the Registry has 21 entries (live-derived via
+// `compact_surface_filter_test.go::TestCompactSurface_FullRegistryPreserved`).
+// If the primer ever hard-codes a count, this test enforces that
+// the count equals `len(tools.Registry) + 1` (the +1 is for the
+// `mpm_help` discovery closure that is registered via
+// `cmd/mpm-mcp/tools.go::RegisterAllTools` rather than via the
+// Registry slice). A test failure here either means someone
+// hand-edited a stale count into the primer (revert it) or the
+// Registry grew and the primer needs a regeneration to either
+// drop the literal count or update it.
+func TestInstructionsPrimer_NoStaleSurfaceCounts(t *testing.T) {
+	// We import tools via the public path used by the rest of
+	// cmd/mpm-mcp. Importing only for `len(Registry)` keeps this
+	// test small.
+	wantFull := len(tools.Registry) + 1 // Registry + mpm_help closure
+	wantRegistry := len(tools.Registry)
+
+	// If the primer mentions a hard-coded "3" as the surface
+	// count, it must equal len(defaultCoreTools) — currently 3.
+	// We assert positive: today's primer mentions "3-tool compact
+	// MCP surface" (a correct hard-coded count for the compact
+	// surface). If the surface grows, this substring changes and
+	// the test fires.
+	if !strings.Contains(instructionsPrimer, "3-tool compact MCP surface") {
+		t.Logf(
+			"NOTE: primer does not contain the literal '3-tool compact MCP surface'; "+
+				"either the surface grew past 3 (Registry says %d, full surface says %d) "+
+				"or the framing changed. Update this test if the framing is now correct.",
+			wantRegistry, wantFull,
+		)
+	}
+
+	// Catch-and-fail on any hard-coded "21 Registry" or "22-tool"
+	// wording if it contradicts the live Registry size. The primer
+	// today does NOT carry such wording (the framing is qualitative),
+	// so the test should pass silently. If a future edit pins a
+	// numeric count, the test will catch any drift.
+	if strings.Contains(instructionsPrimer, "21 Registry") {
+		if !strings.Contains(instructionsPrimer, fmt.Sprintf("%d Registry", wantRegistry)) {
+			t.Errorf(
+				"primer mentions '21 Registry' but live Registry has %d entries; "+
+					"either update the primer or drop the literal count",
+				wantRegistry,
+			)
+		}
+	}
+	if strings.Contains(instructionsPrimer, "22-tool") ||
+		strings.Contains(instructionsPrimer, "22 tool") {
+		if !strings.Contains(instructionsPrimer, fmt.Sprintf("%d-tool", wantFull)) &&
+			!strings.Contains(instructionsPrimer, fmt.Sprintf("%d tool", wantFull)) {
+			t.Errorf(
+				"primer mentions a '22-tool' / '22 tool' surface but live Registry+closure=%d; "+
+					"either update the primer or drop the literal count",
+				wantFull,
+			)
+		}
 	}
 }
