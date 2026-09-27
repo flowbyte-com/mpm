@@ -66,14 +66,24 @@ def _load_render_module():
 _render = _load_render_module()
 
 
-# The seven behavioural-invariant label strings the canonical block must
-# teach. Order is the order they appear in the canonical block.
+# The behavioural-invariant label strings the canonical block must
+# teach. Substring match — the bold header text after the numbered
+# item marker is enough. Order is the order they appear in the canonical
+# block. The list grew from 7 to 10 invariants in the 2026-09-27
+# managed-instruction contract bump (1.1.0 -> 1.2.0): substrate
+# discoverability (#3), skill lifecycle expansion (#4), work
+# lifecycle separation (#6 from old #5), reference acquisition
+# (#8), and the explicit session-closure-is-not-work-completion
+# principle (#7).
 INVARIANT_LABELS = (
     "Wake is auto-injected on session start",
     "Persist during work",
-    "Skill discovery before reinventing",
+    "Look beyond the compact tool surface",
+    "Discover, create, and refine MPM skills",
     "Handoff before genuine session closure",
+    "Track durable objectives as work items",
     "Session closure is not work completion",
+    "Acquire and retain authoritative references",
     "MPM is the source of truth",
     "Recovery / fallback",
 )
@@ -144,9 +154,13 @@ class CanonicalBlockExtraction(unittest.TestCase):
                 f"host-specific prefix {prefix!r} leaked into canonical source",
             )
 
-    def test_block_teaches_all_seven_invariants(self):
-        """The canonical block must enumerate the seven behavioural
-        invariants by their stable label strings."""
+    def test_block_teaches_all_behavioural_invariants(self):
+        """The canonical block must enumerate every behavioural invariant
+        by its stable label string. The contract version 1.2.0 (Sept 2026
+        expansion) lifted the count from 7 to 10: substrate
+        discoverability, skill creation lifecycle, durable work
+        tracking, and reference acquisition each became an explicit
+        numbered invariant."""
         for label in INVARIANT_LABELS:
             self.assertIn(label, self.block, f"canonical block missing invariant: {label!r}")
 
@@ -343,20 +357,25 @@ class ByteForByteParity(unittest.TestCase):
 
 
 class AdapterExclusion(unittest.TestCase):
-    """OpenClaw uses runtime injection — it must NOT be in the adapter
-    list (no persistent managed file). The runtime binding is verified
-    through the OpenClaw adapter's own test surface, not through
-    managed-block parity."""
+    """mpm-auto-mode-persona-openclaw uses runtime persona injection
+    and must NOT be in the adapter list — it has no persistent managed
+    file. mpm-memory-openclaw IS in the adapter list (per the 2026-09
+    persistent-block architecture) and writes SOUL.md as the persistent
+    behavioural contract on top of the runtime wake injection layer."""
 
-    def test_openclaw_not_in_adapter_list(self):
+    def test_persona_plugin_not_in_adapter_list(self):
         names = {a["name"] for a in _render.ADAPTERS}
-        self.assertNotIn(
-            "mpm-memory-openclaw", names,
-            "mpm-memory-openclaw uses runtime injection — must not be in ADAPTERS",
-        )
         self.assertNotIn(
             "mpm-auto-mode-persona-openclaw", names,
             "mpm-auto-mode-persona-openclaw uses runtime injection — must not be in ADAPTERS",
+        )
+
+    def test_memory_openclaw_in_adapter_list(self):
+        # mpm-memory-openclaw is now a persistent-block host.
+        names = {a["name"] for a in _render.ADAPTERS}
+        self.assertIn(
+            "mpm-memory-openclaw", names,
+            "mpm-memory-openclaw is a persistent-block host; must be in ADAPTERS",
         )
 
 
@@ -624,7 +643,14 @@ class RendererSemanticGuard(unittest.TestCase):
         snippets with bare `mpm_work` — a real doc-quality gap. The
         2026-09-06 fix moved the prose to parens form; this test
         asserts the rewritten form is what shows up under prefixed
-        adapters."""
+        adapters.
+
+        Sept 2026 expansion: the work-lifecycle rule moved from §5 to
+        §6 (track durable objectives as work items) and now uses the
+        action-form prose "Use `mpm_work` action `create` to open"
+        instead of the legacy parens form. The semantic guard still
+        holds: `action` in the same sentence keeps `mpm_work` a
+        per-host actionable reference, so the host prefix must apply."""
         text = CANONICAL_SOURCE.read_text(encoding="utf-8")
         block = _render.extract_canonical_block(text)
 
@@ -644,20 +670,21 @@ class RendererSemanticGuard(unittest.TestCase):
                 f"description got rewritten (D-R1 regression)",
             )
 
-        # §5: the parens form puts `action` in the same sentence as
-        # `mpm_work`, so the renderer must apply the prefix. Assert
-        # the PREFIXED form (not the bare form) for prefixed hosts,
-        # and the bare form for OpenCode/Pi (no prefix).
+        # §6 (Sept 2026 contract): action-form prose `mpm_work action
+        # create` lives in the new work-lifecycle rule. The renderer
+        # must still apply the prefix because `action` is in the same
+        # sentence as `mpm_work` — same semantic guard as the legacy
+        # parens form, just new wording.
         prefix_to_expected = {
-            "mpm__":      "track it separately via\n   `mpm__mpm_work` (Lifecycle:",
-            "mcp__mpm__": "track it separately via\n   `mcp__mpm__mpm_work` (Lifecycle:",
-            "":            "track it separately via\n   `mpm_work` (Lifecycle:",
+            "mpm__":      "Use `mpm__mpm_work` action `create` to open",
+            "mcp__mpm__": "Use `mcp__mpm__mpm_work` action `create` to open",
+            "":            "Use `mpm_work` action `create` to open",
         }
         for prefix, expected_prefix_phrase in prefix_to_expected.items():
             rendered = _render.render_for_host(block, prefix)
             self.assertIn(
                 expected_prefix_phrase, rendered,
-                f"§5 prose `mpm_work` did not get the expected prefix "
+                f"§6 prose `mpm_work` did not get the expected prefix "
                 f"under prefix {prefix!r}. Expected substring "
                 f"{expected_prefix_phrase!r} in rendered output.",
             )
