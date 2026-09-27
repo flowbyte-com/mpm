@@ -124,10 +124,10 @@ canonical source.
 | Host | Adapter directory | Mechanism | Persistent-instruction surface |
 |---|---|---|---|
 | **OpenClaw** | [`mpm-memory-openclaw/`](./mpm-memory-openclaw/) + [`mpm-auto-mode-persona-openclaw/`](./mpm-auto-mode-persona-openclaw/) | OpenClaw plugin (`mpm_memory_search`/`mpm_memory_get` slot, kind:memory) + auto-mode/persona plugin (turn-key mode/persona injection) | `~/.openclaw/workspace/SOUL.md` + `AGENTS.md` (loaded by OpenClaw runtime) |
-| **Claude Code** | [`mpm-claude-code/`](./mpm-claude-code/) | MCP server (`~/.claude/.mcp.json`, default 3-tool initial surface via `mpm-mcp` — `MPM_EXPOSE_ALL_TOOLS=1` restores the full 22-tool registry) + CLAUDE.md managed block | `~/.claude/CLAUDE.md` (managed-block convention) |
-| **OpenCode** | [`mpm-opencode/`](./mpm-opencode/) | OpenCode plugin (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full 22-tool substrate registry) + AGENTS.md managed block | `<project>/AGENTS.md` or `~/.config/opencode/AGENTS.md` (managed-block convention) |
-| **Hermes** | [`mpm-hermes/`](./mpm-hermes/) | Hermes MCP client (`~/.hermes/config.yaml`, default 3-tool initial surface via `mpm-mcp` — `MPM_EXPOSE_ALL_TOOLS=1` restores the full 22-tool registry) + .hermes.md behavioral section | `<project>/.hermes.md` (or `HERMES.md`, walked from cwd to git root) — persona stays in `~/.hermes/SOUL.md` |
-| **Pi** | [`mpm-pi/`](./mpm-pi/) | Pi extension (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full 22-tool substrate registry) + AGENTS.md managed block | `~/.pi/agent/AGENTS.md` (global) or `<project>/AGENTS.md` (per-pi-docs search order) |
+| **Claude Code** | [`mpm-claude-code/`](./mpm-claude-code/) | MCP server (`~/.claude/.mcp.json`, default 3-tool initial surface via `mpm-mcp` — `MPM_EXPOSE_ALL_TOOLS=1` restores the full registered MCP surface) + CLAUDE.md managed block | `~/.claude/CLAUDE.md` (managed-block convention) |
+| **OpenCode** | [`mpm-opencode/`](./mpm-opencode/) | OpenCode plugin (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full MPM Registry) + AGENTS.md managed block | `<project>/AGENTS.md` or `~/.config/opencode/AGENTS.md` (managed-block convention) |
+| **Hermes** | [`mpm-hermes/`](./mpm-hermes/) | Hermes MCP client (`~/.hermes/config.yaml`, default 3-tool initial surface via `mpm-mcp` — `MPM_EXPOSE_ALL_TOOLS=1` restores the full registered MCP surface) + .hermes.md behavioral section | `<project>/.hermes.md` (or `HERMES.md`, walked from cwd to git root) — persona stays in `~/.hermes/SOUL.md` |
+| **Pi** | [`mpm-pi/`](./mpm-pi/) | Pi extension (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full MPM Registry) + AGENTS.md managed block | `~/.pi/agent/AGENTS.md` (global) or `<project>/AGENTS.md` (per-pi-docs search order) |
 
 ## Directory map
 

@@ -445,7 +445,7 @@ What `verify.py` checks:
 - `mpm-mcp` boots and responds to `tools/list` (default initial
   surface expects 3 tools: `mpm_memory`, `mpm_context`, `mpm_help`;
   set `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block to restore the
-  legacy 22-tool surface).
+  full registered MCP surface).
 - `mpm_context` action `read_wake_context` returns `success:true`
   with a populated wake payload (this is the always-on 3-tool probe —
   `mpm_system.health_check` is not in the default surface and requires
@@ -520,7 +520,7 @@ regenerate.
 
 | File / dir | Managed by | Purpose |
 |---|---|---|
-| `~/.config/opencode/plugin/mpm-opencode` | Symlink (manual or installer) | OpenCode plugin entry (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full 22-tool substrate registry) |
+| `~/.config/opencode/plugin/mpm-opencode` | Symlink (manual or installer) | OpenCode plugin entry (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full MPM Registry) |
 | `<project>/AGENTS.md` (or `~/.config/opencode/AGENTS.md`) | `install_agents_instructions.py` | Persistent instructions: MPM behavioral protocol in a managed block |
 | `~/.mpm/bin/mpm` | External (Makefile + install.sh) | `mpm` binary on `$PATH` |
 
@@ -745,7 +745,7 @@ would be empty, and writes a backup before mutation.
 Pi participates in the MPM substrate via:
 
 1. **Pi extension.** `mpm-pi/index.ts` registers a **17-tool subset**
-   of the full 22-tool MPM registry (14 Domain Tools via Fat RPC + 3
+   of the full MPM Registry (14 Domain Tools via Fat RPC + 3
    Standalones: `mpm_retrieval_diagnose`, `mpm_log_to_changelog`,
    `mpm_request_review`). Tools in the full registry not exposed here
    (`mpm_work`, `mpm_resolve`, `mpm_blob_read`,

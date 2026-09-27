@@ -221,6 +221,65 @@ ADAPTERS: list[dict] = [
             "directly underneath.\n"
         ),
     },
+    {
+        "name": "mpm-memory-openclaw",
+        "tool_prefix": "mcp__mpm__",
+        "snippet_path": "templates/SOUL.md.snippet",
+        "copy_paste_outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->",
+        "copy_paste_outer_end": "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->",
+        "header": (
+            "> OpenClaw loads this section from `SOUL.md` at agent\n"
+            "> bootstrap (per-agent workspace resolved from\n"
+            "> `openclaw.json` → `agents.entries.<id>.workspace`). The\n"
+            "> managed block is written by `mpm-memory-openclaw/install.sh`\n"
+            "> on install and refreshed on reinstall. Persona and user\n"
+            "> content outside the managed markers is preserved.\n"
+            ">\n"
+            "> Edit the canonical managed block in\n"
+            "> `~/.mpm/agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md`,\n"
+            "> not this file, for behavioural changes.\n"
+        ),
+        "footer": (
+            "\n"
+            "## OpenClaw-specific notes\n"
+            "\n"
+            "### Three-layer integration\n"
+            "\n"
+            "OpenClaw MPM integration is three layered components, not\n"
+            "substitutes:\n"
+            "\n"
+            "  - **persistent behavioural contract** — this SOUL.md\n"
+            "    managed block. Tells the agent *how* MPM must be used\n"
+            "    across the session.\n"
+            "  - **dynamic session wake/context** — the\n"
+            "    `mpm-memory-openclaw` plugin's\n"
+            "    `session_start` → `agent_turn_prepare` hook chain\n"
+            "    (returning `prependContext`). Tells the agent *what\n"
+            "    context exists now*.\n"
+            "  - **dynamic mode/persona routing** — the\n"
+            "    `mpm-auto-mode-persona-openclaw` plugin's\n"
+            "    `message:received` + `agent:bootstrap` hook chain.\n"
+            "    Tells the agent the active mode/persona for this turn.\n"
+            "\n"
+            "Runtime wake injection is **not** a substitute for the\n"
+            "persistent block. The two layers carry different content\n"
+            "and answer different questions.\n"
+            "\n"
+            "### SOUL.md resolution\n"
+            "\n"
+            "The installer resolves the active agent's SOUL.md from\n"
+            "`openclaw.json` → `agents.entries.<id>.workspace`. The\n"
+            "default agent id is `main`; multi-agent installations\n"
+            "resolve each entry's `workspace` independently. The\n"
+            "managed block is written into `SOUL.md` at that path.\n"
+            "\n"
+            "Persona (808) and any other user content above or below\n"
+            "the managed markers is preserved verbatim. The installer\n"
+            "is idempotent: a second run leaves the file byte-stable\n"
+            "outside the managed section, and refreshes only the\n"
+            "managed section if the canonical block has changed.\n"
+        ),
+    },
 ]
 
 
@@ -316,11 +375,57 @@ INSTRUCTIONS_PRIMER_PATH = Path("cmd/mpm-mcp/instructions_primer.txt")
 # fallback-aware pointer; the footer is the substrate-fallback contract.
 # These are intentionally NOT derived from the canonical block because
 # they are call-site semantics (where the managed block lives, what the
-# CLI fallback looks like) rather than behavioural principles.
+# compact surface is, what wake/context means, where factual recent
+# history lives, when the diagnostic contextual_* actions apply, and
+# what the CLI fallback looks like) rather than behavioural principles.
+#
+# The header is split into three segments:
+#
+#   1. The historical "behavioural contract loaded" pointer (kept
+#      verbatim so the existing structural sanity test in
+#      `cmd/mpm-mcp/instructions_primer_drift_test.go` remains green
+#      and so long-running hosts continue to see a stable opening
+#      sentence).
+#
+#   2. Compact-surface / discovery pointer — what the model sees
+#      initially (3-tool compact MCP surface), how to discover the
+#      rest (`mpm_help`), how to reach tools filtered out of
+#      `tools/list` (`mpm call` and the `MPM_EXPOSE_ALL_TOOLS=1`
+#      escape hatch). These are call-site semantics and do NOT belong
+#      in the canonical managed block (they would couple every host's
+#      persistent file to MCP transport mechanics).
+#
+#   3. Wake / context envelope pointer — auto-injection semantics,
+#      the bounded `<contextual_focus>` projection as inherited
+#      working awareness (NOT a ranking, NOT a startup tool),
+#      `recent_activity` for explicit factual-history lookup (NOT
+#      relevance-ranked), and `contextual_candidates` /
+#      `_selection` / `_materialization` as diagnostic surfaces
+#      (NOT for normal startup, NOT a ranking mechanism). These are
+#      call-site semantics for how the wake envelope is shaped;
+#      they do NOT belong in the canonical managed block either.
 _INSTRUCTIONS_HEADER = (
     "MPM behavioral contract loaded. If your host maintains a managed "
     "instruction file (CLAUDE.md / AGENTS.md / .hermes.md), read it for "
-    "the full contract. Otherwise, minimally:"
+    "the full contract. Otherwise, minimally:\n"
+    "\n"
+    "You initially see a 3-tool compact MCP surface: `mpm_memory`, "
+    "`mpm_context`, `mpm_help`. `mpm_help` discovers every registered "
+    "tool (each entry carries `reach_via_cli`). Tools filtered out of "
+    "the default `tools/list` are NOT directly callable over the "
+    "compact MCP transport; reach them through "
+    "`mpm call <tool> --payload '{\"action\":\"<op>\",\"params\":{...}}'` "
+    "(CLI fallback, works on every host) or by setting "
+    "`MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block to restore the full "
+    "registered MCP surface natively.\n"
+    "\n"
+    "The wake envelope (see bullet 1 for delivery) carries the bounded "
+    "`<contextual_focus>` projection -- inherited working awareness, "
+    "NOT a ranking. Factual recent history: `mpm_context` action "
+    "`recent_activity` (observational, not ranked). "
+    "`contextual_candidates` (and `contextual_selection` / "
+    "`contextual_materialization`) is a routing / diagnostic surface "
+    "-- NOT for normal startup, NOT a ranking mechanism."
 )
 _INSTRUCTIONS_FOOTER = (
     "If MCP transport fails, fall back to "

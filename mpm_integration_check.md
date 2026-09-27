@@ -365,10 +365,19 @@ For MCP integrations, distinguish between:
 
 ```text
 default model-facing MCP surface
+  intentionally fixed contract
+  mpm_memory, mpm_context, mpm_help
+  (do not describe this number as dynamic)
+
 full substrate surface
+  derived dynamically from the live Registry
+  reachable via mpm_help list discovery + the
+  mpm call <tool> CLI fallback
+  AND/OR by setting MPM_EXPOSE_ALL_TOOLS=1 on the
+  MCP env block to restore the full surface natively
 ```
 
-A compact default MCP exposure is not a defect if discovery/fallback provides the remaining supported operations by design.
+A compact default MCP exposure is not a defect if discovery/fallback provides the remaining supported operations by design. Tools filtered out of the default `tools/list` are NOT directly callable over the compact MCP transport; report `NATIVE` only for capabilities that flow through the host's MCP/typed-tool integration, and `FALLBACK` for capabilities reachable only via `mpm call <tool>`.
 
 ## 7.1 Tool-count reconciliation
 
@@ -973,6 +982,14 @@ runtime model metadata is not statically fabricated
 
 ## 17.3 OpenClaw
 
+OpenClaw follows the same **persistent managed instruction** model as
+the other four hosts. The agent's `SOUL.md` (resolved per-agent from
+`openclaw.json` → `agents.entries.<id>.workspace`) is the persistent
+behavioural-contract surface. `mpm-memory-openclaw/install.sh` writes
+the MPM managed block to that path on install and refreshes it on
+reinstall. Persona (808) and any user content outside the managed
+markers is preserved verbatim.
+
 Inspect current OpenClaw plugin identities from their manifests/configuration.
 
 For OpenClaw explicitly distinguish:
@@ -983,6 +1000,8 @@ package.json name            (e.g. "openclaw-mpm-memory")
 openclaw.plugin.json id      (e.g. "openclaw-mpm-memory")
 plugins.entries key          (in host config)
 plugins.slots.memory value   (in host config)
+agent SOUL.md path           (per-agent workspace / SOUL.md)
+managed-block markers       (BEGIN/END MPM-MANAGED SECTION:openclaw-instructions)
 historical names in memories/docs
 ```
 
@@ -999,7 +1018,34 @@ gateway health
 runtime hook wiring
 wake/context delivery
 mode/persona plugin behaviour where installed
+persistent behavioural contract present in SOUL.md
+persona / user content above managed markers preserved
 ```
+
+The persistent behavioural contract in `SOUL.md` is **not** equivalent
+to runtime wake injection. Both layers must pass for the agent to be
+fully MPM-capable:
+
+```text
+Wake gatherer (substrate side):                   PASS / FAIL
+Wake runtime injection (auto session_start → agent_turn_prepare):  PASS / FAIL / UNKNOWN
+MPM managed block in SOUL.md:                    PASS / FAIL
+Persona injection (auto message:received + agent:bootstrap):   PASS / FAIL / UNKNOWN
+```
+
+A host that reports `Wake runtime injection: PASS` MUST also pass
+`MPM managed block in SOUL.md`; otherwise the operator has been told
+a partial truth — runtime wake delivery without the persistent
+behavioural contract produces agents that receive current context but
+do not know how to use MPM across the session. Run:
+
+```bash
+test -f "$HOME/.openclaw/workspace/SOUL.md" \
+  && grep -q 'BEGIN MPM-MANAGED SECTION:openclaw-instructions' \
+       "$HOME/.openclaw/workspace/SOUL.md"
+```
+
+to confirm the managed section is present in the agent's SOUL.md.
 
 ## 17.4 Claude Code
 

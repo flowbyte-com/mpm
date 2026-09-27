@@ -1,9 +1,13 @@
-> Pi loads AGENTS.md (or CLAUDE.md) at session start and
-> concatenates them into the system prompt (per pi docs:
-> "What the model is told → AGENTS.md / CLAUDE.md / SYSTEM.md").
+> OpenClaw loads this section from `SOUL.md` at agent
+> bootstrap (per-agent workspace resolved from
+> `openclaw.json` → `agents.entries.<id>.workspace`). The
+> managed block is written by `mpm-memory-openclaw/install.sh`
+> on install and refreshed on reinstall. Persona and user
+> content outside the managed markers is preserved.
+>
 > Edit the canonical managed block in
 > `~/.mpm/agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md`,
-> not this file, for behavioral changes.
+> not this file, for behavioural changes.
 <!-- BEGIN MPM MANAGED BLOCK -->
 <!-- source: agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md -->
 <!-- The full behavioural protocol is canonical at ~/.mpm/agent_installation/mpm-agent-protocol.md -->
@@ -19,13 +23,13 @@ canonical protocol, not this block, for behavioural changes.
    OpenCode, and Pi. Each of these hosts installs a session-start
    hook that fetches MPM wake context and injects it into the
    system prompt before the first model turn. Hermes has no such
-   hook — on Hermes, the agent must call `mpm_context` action
+   hook — on Hermes, the agent must call `mcp__mpm__mpm_context` action
    `read_wake_context` once at the start of its first turn to
    obtain the wake payload. Arriving amnesic on a host that should
    be auto-injecting wake means the host integration is broken —
    diagnose the host adapter, not call `read_wake_context`. As a
    manual refresh path (mid-session, explicit refresh, or when the
-   host integration is unavailable), `mpm_context` action
+   host integration is unavailable), `mcp__mpm__mpm_context` action
    `read_wake_context` is available. The wake payload carries
    orientation signals (mode, persona, recent topics, recent
    memories, recent milestones, last handoff, open work, overdue
@@ -61,13 +65,13 @@ canonical protocol, not this block, for behavioural changes.
 1.2. **Recent history vs. contextual focus vs. diagnostic surfaces.**
    The wake payload's `<contextual_focus>` is the normal inherited
    working awareness to act on; it is a bounded pointer summary, NOT
-   a ranking. Two adjacent `mpm_context` actions serve different
+   a ranking. Two adjacent `mcp__mpm__mpm_context` actions serve different
    questions:
-   - `mpm_context` action `recent_activity` is the canonical way to
+   - `mcp__mpm__mpm_context` action `recent_activity` is the canonical way to
      ask "what recently happened?". It returns a chronological,
      observational feed of recent mutating actions across the substrate
      — newest-first, bounded by `limit`. The result is NOT relevance-ranked.
-   - `mpm_context` actions `contextual_candidates`,
+   - `mcp__mpm__mpm_context` actions `contextual_candidates`,
      `contextual_selection`, and `contextual_materialization` are
      routing / diagnostic surfaces for inspecting or debugging the
      contextual pipeline. They are NOT part of the normal session-start
@@ -75,10 +79,10 @@ canonical protocol, not this block, for behavioural changes.
      reconstruct the integrated result — the wake payload's
      `<contextual_focus>` already contains it.
 
-2. **Persist during work, not only at the end.** Use `mpm_memory`
-   action `save`, `mpm_decisions` action `record`,
-   `mpm_lessons` action `save`, `mpm_topics`
-   action `create`, and `mpm_references` action `add`
+2. **Persist during work, not only at the end.** Use `mcp__mpm__mpm_memory`
+   action `save`, `mcp__mpm__mpm_decisions` action `record`,
+   `mcp__mpm__mpm_lessons` action `save`, `mcp__mpm__mpm_topics`
+   action `create`, and `mcp__mpm__mpm_references` action `add`
    for any durable knowledge a future session would otherwise have
    to rediscover. Heuristic: if losing this on session-end would
    force you to rediscover it next time, persist now.
@@ -89,7 +93,7 @@ canonical protocol, not this block, for behavioural changes.
    `mpm_memory`, and `mpm_context`; the full registered substrate
    is broader (its count is dynamic — do not pin it). Do not assume
    a capability is missing merely because it does not appear in the
-   initial `tools/list`. Use `mpm_help` action `list` to discover
+   initial `tools/list`. Use `mcp__mpm__mpm_help` action `list` to discover
    every registered tool (each entry carries `reach_via_cli`).
    Tools hidden from the default surface are reachable via the CLI
    escape hatch `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
@@ -101,10 +105,10 @@ canonical protocol, not this block, for behavioural changes.
 4. **Discover, create, and refine MPM skills.** Skills are reusable
    procedures; treat them as a discover-then-creation lifecycle.
    Before doing repeatable or non-trivial work, look for an
-   applicable existing skill via `mpm_context` action
+   applicable existing skill via `mcp__mpm__mpm_context` action
    `proactive_recall_hint` (with `params: {conversation_text:
    "<recent task summary>"}`), read any surfaced skill via
-   `mpm_skills` action `read`, and fall back to `mpm_skills`
+   `mcp__mpm__mpm_skills` action `read`, and fall back to `mcp__mpm__mpm_skills`
    action `list` with `params: {scope: "all"}` (the bounded
    `<available_skills>` catalogue in the wake envelope is the
    lightweight first step — discovery adds a context-driven filter,
@@ -113,7 +117,7 @@ canonical protocol, not this block, for behavioural changes.
    performed successfully, likely to recur, useful to preserve
    procedurally, or improved by retaining its ordering / checks /
    constraints / failure recovery, capture it as a reusable
-   procedure via `mpm_skills` action `save`, or `mpm_skills`
+   procedure via `mcp__mpm__mpm_skills` action `save`, or `mcp__mpm__mpm_skills`
    action `workshop` if the workflow warrants the workshop path
    (`workshop` requires `intent`, `mode`, `task_context`,
    `workflow_description`, `failure_recovery`, `recent_actions`,
@@ -126,11 +130,11 @@ canonical protocol, not this block, for behavioural changes.
 5. **Handoff before genuine session closure.** Before any turn that
    closes the session, write a handoff. On hosts using the default
    compact MCP surface (Claude Code, Hermes, OpenClaw), the MCP path
-   is `mpm_context` action `write_handoff` with
+   is `mcp__mpm__mpm_context` action `write_handoff` with
    `params: {summary: "<required>", session_id: "<optional>",
    state: "clean"|"crashed"|"interrupted"|"force_end",
    commitments: ["<optional>"], open_questions: ["<optional>"]}`.
-   The substrate path `mpm_handoff` action `write` with the same
+   The substrate path `mcp__mpm__mpm_handoff` action `write` with the same
    `params` shape remains valid via `mpm call mpm_handoff --payload
    '{"action":"write","params":{...}}'` and on hosts running with
    `MPM_EXPOSE_ALL_TOOLS=1` on their MCP env block (which restores
@@ -139,7 +143,7 @@ canonical protocol, not this block, for behavioural changes.
    session-closing; don't write a handoff on every chat ack.
 
    For intra-session volatile working state, the substrate tool is
-   `mpm_scratchpad` actions `flush`, `read`,
+   `mcp__mpm__mpm_scratchpad` actions `flush`, `read`,
    `discard`, or `promote` (params: `{session_id, thesis,
    supporting}`); reachable via `mpm call mpm_scratchpad` on hosts
    using the compact MCP surface. Wake is how future-me starts;
@@ -150,13 +154,13 @@ canonical protocol, not this block, for behavioural changes.
    dependent on later information, waiting on follow-up, requiring
    verification, containing important intermediate progress, or
    costly to reconstruct after interruption, open a `mpm_work`
-   item reasonably early. Use `mpm_work` action `create` to open,
-   `mpm_work` action `update` for material state / plan / status
-   changes, `mpm_work` action `note` to retain meaningful progress
-   / evidence / context, and `mpm_work` action `complete` with
-   `params: {work_id}` to finish. Use `mpm_work` action `reopen`
+   item reasonably early. Use `mcp__mpm__mpm_work` action `create` to open,
+   `mcp__mpm__mpm_work` action `update` for material state / plan / status
+   changes, `mcp__mpm__mpm_work` action `note` to retain meaningful progress
+   / evidence / context, and `mcp__mpm__mpm_work` action `complete` with
+   `params: {work_id}` to finish. Use `mcp__mpm__mpm_work` action `reopen`
    when completion is invalidated or new evidence demands more
-   work, and `mpm_work` action `cancel` when an objective is
+   work, and `mcp__mpm__mpm_work` action `cancel` when an objective is
    intentionally abandoned. Do not create a work item for every
    small user request. Conceptual distinction: scratchpad is
    volatile intra-session working state (substrate tool
@@ -167,9 +171,9 @@ canonical protocol, not this block, for behavioural changes.
 
 7. **Session closure is not work completion.** Three events are
    distinct: `session ended` (the host process exits), `work completed`
-   (`mpm_work` action `complete` invoked), and `work verified`
+   (`mcp__mpm__mpm_work` action `complete` invoked), and `work verified`
    (objective actually achieved, including any evidence accumulation
-   via `mpm_work` action `resolve_contradiction`). Host session
+   via `mcp__mpm__mpm_work` action `resolve_contradiction`). Host session
    termination does NOT auto-complete a work item. The agent decides
    when work is done.
 
@@ -181,10 +185,10 @@ canonical protocol, not this block, for behavioural changes.
    where practical. Use whichever web / file / download capability
    the host already exposes (web search, browser, shell, curl,
    file tools — whatever is available and permitted) to obtain the
-   source material, then register it via `mpm_references` action
+   source material, then register it via `mcp__mpm__mpm_references` action
    `add` (params carry the source material and its provenance).
    Preserve enough provenance / version / freshness information to
-   judge later suitability — `mpm_references` action `read`
+   judge later suitability — `mcp__mpm__mpm_references` action `read`
    surfaces freshness states (`current`, `stale`, `version-bound`,
    `historical`, `unknown`). Reuse an appropriate current reference
    rather than repeatedly rediscovering the same documentation.
@@ -208,18 +212,40 @@ canonical protocol, not this block, for behavioural changes.
     provenance attribution as the native transport.
 <!-- END MPM MANAGED BLOCK -->
 
-## Pi-specific notes
+## OpenClaw-specific notes
 
-Pi searches for AGENTS.md in this order at session start:
+### Three-layer integration
 
-  1. `~/.pi/agent/AGENTS.md` (global, all projects)
-  2. AGENTS.md in any parent directory of cwd (walking up)
-  3. AGENTS.md in cwd (current project)
+OpenClaw MPM integration is three layered components, not
+substitutes:
 
-The mpm-pi extension at
-`~/.mpm/agent_installation/mpm-pi/` registers the typed
-transport for MPM tools; this AGENTS.md adds the behavioral
-layer (wake, persist, handoff, recovery).
+  - **persistent behavioural contract** — this SOUL.md
+    managed block. Tells the agent *how* MPM must be used
+    across the session.
+  - **dynamic session wake/context** — the
+    `mpm-memory-openclaw` plugin's
+    `session_start` → `agent_turn_prepare` hook chain
+    (returning `prependContext`). Tells the agent *what
+    context exists now*.
+  - **dynamic mode/persona routing** — the
+    `mpm-auto-mode-persona-openclaw` plugin's
+    `message:received` + `agent:bootstrap` hook chain.
+    Tells the agent the active mode/persona for this turn.
 
-Disable AGENTS.md loading with `--no-context-files` / `-nc`
-to bypass the MPM behavioral contract for a specific session.
+Runtime wake injection is **not** a substitute for the
+persistent block. The two layers carry different content
+and answer different questions.
+
+### SOUL.md resolution
+
+The installer resolves the active agent's SOUL.md from
+`openclaw.json` → `agents.entries.<id>.workspace`. The
+default agent id is `main`; multi-agent installations
+resolve each entry's `workspace` independently. The
+managed block is written into `SOUL.md` at that path.
+
+Persona (808) and any other user content above or below
+the managed markers is preserved verbatim. The installer
+is idempotent: a second run leaves the file byte-stable
+outside the managed section, and refreshes only the
+managed section if the canonical block has changed.
