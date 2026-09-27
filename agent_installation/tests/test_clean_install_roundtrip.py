@@ -83,6 +83,13 @@ INSTALLERS = {
         "managed_end": "<!-- END MPM-MANAGED BLOCK:mpm-hermes -->",
         "extra_args": [],  # --target-dir provided per-call
     },
+    "mpm-memory-openclaw": {
+        "installer": AGENT_INSTALLATION / "mpm-memory-openclaw/scripts/install_openclaw_instructions.py",
+        "snippet": AGENT_INSTALLATION / "mpm-memory-openclaw/templates/SOUL.md.snippet",
+        "managed_begin": "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->",
+        "managed_end": "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->",
+        "extra_args": ["--home", str(Path.home())],
+    },
 }
 
 

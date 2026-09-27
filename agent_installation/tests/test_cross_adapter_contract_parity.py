@@ -136,20 +136,22 @@ _PERSIST_FAMILIES = ("memory", "decisions", "lessons", "topics", "references")
 # the adapter name alone because the conventions differ (e.g.,
 # `install_claude_instructions.py` vs `install_agents_instructions.py`).
 _INSTALLERS = {
-    "mpm-claude-code": AGENT_INSTALLATION / "mpm-claude-code/scripts/install_claude_instructions.py",
-    "mpm-opencode":    AGENT_INSTALLATION / "mpm-opencode/scripts/install_agents_instructions.py",
-    "mpm-pi":          AGENT_INSTALLATION / "mpm-pi/scripts/install_agents_instructions.py",
-    "mpm-hermes":      AGENT_INSTALLATION / "mpm-hermes/scripts/install_hermes_instructions.py",
+    "mpm-claude-code":      AGENT_INSTALLATION / "mpm-claude-code/scripts/install_claude_instructions.py",
+    "mpm-opencode":         AGENT_INSTALLATION / "mpm-opencode/scripts/install_agents_instructions.py",
+    "mpm-pi":               AGENT_INSTALLATION / "mpm-pi/scripts/install_agents_instructions.py",
+    "mpm-hermes":           AGENT_INSTALLATION / "mpm-hermes/scripts/install_hermes_instructions.py",
+    "mpm-memory-openclaw":  AGENT_INSTALLATION / "mpm-memory-openclaw/scripts/install_openclaw_instructions.py",
 }
 
 # Per-host extra CLI args for the installer. Each adapter's installer
 # takes different scope flags and home-dir overrides; this is a
 # test-only concern (the render script does not invoke installers).
 _EXTRA_INSTALL_ARGS = {
-    "mpm-claude-code": ["--scope", "user", "--home", str(Path.home())],
-    "mpm-opencode":    ["--scope", "user"],
-    "mpm-pi":          [],
-    "mpm-hermes":      [],
+    "mpm-claude-code":     ["--scope", "user", "--home", str(Path.home())],
+    "mpm-opencode":        ["--scope", "user"],
+    "mpm-pi":              [],
+    "mpm-hermes":          [],
+    "mpm-memory-openclaw": ["--home", str(Path.home())],
 }
 
 # Outer markers the installer actually emits in the target file. These
@@ -175,6 +177,10 @@ _INSTALL_OUTER_MARKERS = {
     "mpm-hermes": (
         "<!-- BEGIN MPM-MANAGED BLOCK:mpm-hermes -->",
         "<!-- END MPM-MANAGED BLOCK:mpm-hermes -->",
+    ),
+    "mpm-memory-openclaw": (
+        "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->",
+        "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->",
     ),
 }
 
