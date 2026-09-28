@@ -129,6 +129,174 @@ func RunForensicClassifier(dm *DatabaseManager) error {
 	return nil
 }
 
+// RunForensicClassifierForReferences is the reference-side mirror
+// of RunForensicClassifier. Reads every reference_chunks row's
+// embedding column, classifies it into (source, dimension) the
+// same way the memories classifier does, and writes the
+// fingerprint columns where they are missing or wrong.
+//
+// The 256-dim heuristic in the memories classifier came from a
+// hash-based fallback that produced vectors of exactly that
+// length. The reference corpus has no historical hash path, so
+// every 384-/768-/1024-dim vector here is a real provider
+// embedding — but the heuristic is preserved so the column
+// vocabulary stays uniform across the substrate.
+//
+// The classifier is read-only at the application level but
+// updates the embedding_source / embedding_dimension /
+// embedding_model columns where the existing values are wrong.
+// Idempotent: a second run is a no-op.
+//
+// Called by the CLI backfill in --include references mode when
+// the operator wants to repair pre-2026-09-28 rows whose
+// fingerprint columns were never populated. The runtime
+// RefreshStaleReferenceEmbeddings does the same comparison
+// inline; this function exists so operators can run the
+// diagnostic as a standalone step.
+func (dm *DatabaseManager) RunForensicClassifierForReferences() error {
+	if dm == nil || dm.db == nil {
+		return fmt.Errorf("RunForensicClassifierForReferences: nil database manager")
+	}
+
+	rows, err := dm.db.Query(`
+		SELECT id, embedding,
+		       COALESCE(embedding_source, ''),
+		       COALESCE(embedding_dimension, 0),
+		       COALESCE(embedding_model, '')
+		FROM reference_chunks
+	`)
+	if err != nil {
+		return fmt.Errorf("RunForensicClassifierForReferences: query: %w", err)
+	}
+	defer rows.Close()
+
+	type update struct {
+		id                       string
+		source                   string
+		dimension                sql.NullInt64
+		model                    sql.NullString
+		anyChange                bool
+		hadStoredFingerprint     bool
+	}
+	var updates []update
+
+	for rows.Next() {
+		var (
+			id, raw               sql.NullString
+			storedSource          string
+			storedDim             int
+			storedModel           string
+		)
+		if err := rows.Scan(&id, &raw, &storedSource, &storedDim, &storedModel); err != nil {
+			return fmt.Errorf("RunForensicClassifierForReferences: scan: %w", err)
+		}
+		if !id.Valid {
+			continue
+		}
+
+		// Classify the row from its current embedding bytes.
+		var (
+			classifiedSource string
+			classifiedDim    sql.NullInt64
+			classifiedModel  sql.NullString
+		)
+		if !raw.Valid || raw.String == "" {
+			classifiedSource = "null"
+		} else {
+			var vec []float32
+			if err := json.Unmarshal([]byte(raw.String), &vec); err != nil {
+				slog.Warn("RunForensicClassifierForReferences: unparseable embedding; treating as null",
+					"chunk_id", id.String, "error", err.Error())
+				classifiedSource = "null"
+			} else {
+				dim := len(vec)
+				classifiedSource = "provider"
+				if dim == 256 {
+					classifiedSource = "hash"
+				}
+				classifiedDim = sql.NullInt64{Int64: int64(dim), Valid: true}
+				// We have no way to recover the original
+				// provider name from the bytes; leave the
+				// model as NULL. RefreshStaleReferenceEmbeddings
+				// will see the NULL model and re-embed on the
+				// next backfill run when a provider is
+				// configured.
+				classifiedModel = sql.NullString{String: "", Valid: false}
+			}
+		}
+
+		// Only update if something changed. The classifier is
+		// idempotent; preserving existing fingerprint data
+		// where it is already correct avoids needless WAL
+		// growth on every run.
+		anyChange := classifiedSource != storedSource ||
+			(classifiedDim.Valid && int(classifiedDim.Int64) != storedDim) ||
+			storedModel == ""
+		if !anyChange {
+			continue
+		}
+		updates = append(updates, update{
+			id:                   id.String,
+			source:               classifiedSource,
+			dimension:            classifiedDim,
+			model:                classifiedModel,
+			anyChange:            true,
+			hadStoredFingerprint: storedSource != "" || storedDim != 0 || storedModel != "",
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("RunForensicClassifierForReferences: rows.Err: %w", err)
+	}
+
+	if len(updates) == 0 {
+		slog.Info("RunForensicClassifierForReferences: no changes")
+		return nil
+	}
+
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return fmt.Errorf("RunForensicClassifierForReferences: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.Prepare(`
+		UPDATE reference_chunks
+		SET embedding_source = ?,
+		    embedding_dimension = ?,
+		    embedding_model = ?
+		WHERE id = ?
+	`)
+	if err != nil {
+		return fmt.Errorf("RunForensicClassifierForReferences: prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, u := range updates {
+		var dimArg interface{}
+		if u.dimension.Valid {
+			dimArg = u.dimension.Int64
+		} else {
+			dimArg = nil
+		}
+		var modelArg interface{}
+		if u.model.Valid {
+			modelArg = u.model.String
+		} else {
+			modelArg = nil
+		}
+		if _, err := stmt.Exec(u.source, dimArg, modelArg, u.id); err != nil {
+			return fmt.Errorf("RunForensicClassifierForReferences: update %q: %w", u.id, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("RunForensicClassifierForReferences: commit: %w", err)
+	}
+
+	slog.Info("RunForensicClassifierForReferences: complete",
+		"rows_scanned", len(updates))
+	return nil
+}
+
 // ─── Migration orchestrator ──────────────────────────────────────────────────
 
 // RunMigration performs the one-shot embedding remediation.

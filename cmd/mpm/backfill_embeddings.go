@@ -18,32 +18,43 @@ import (
 
 // handleBackfillEmbeddings runs the embedding backfill pipeline.
 //
-// 2026-09-28 extension: --include flag selects which surfaces to
-// backfill. The default remains "memories" for backward
-// compatibility — operators with scripts that depend on the
-// previous behavior see no change. "references" extends the
-// backfill to reference_chunks; "all" runs both passes in
-// sequence.
+// 2026-09-28 extensions:
 //
-// The two passes share the same embedding provider (the active
-// one at the time of the call) and the same dry-run / refusal
-// semantics. Per-chunk embedding failures are logged to
-// mirror.jsonl via logEmbeddingFailure; the per-doc reference
-// pass uses EmbedReferenceChunks which counts failed chunks
-// internally.
+//   - --include flag selects which surfaces to backfill. The
+//     default remains "memories" for backward compatibility —
+//     operators with scripts that depend on the previous
+//     behavior see no change. "references" extends the backfill
+//     to reference_chunks; "all" runs both passes in sequence.
+//
+//   - The reference pass is model-aware. It uses
+//     RefreshStaleReferenceEmbeddings (canonical) rather than
+//     the previous "fill NULL only" logic. Refreshed rows include
+//     any with a NULL embedding, any with a "null" or "hash"
+//     source, and any whose stored (model, dimension) fingerprint
+//     does not match the active provider. The previous CLI
+//     command would leave stale rows on disk when the operator
+//     switched embedding models; the new command repairs them
+//     automatically.
+//
+//   - --force-reembed re-embeds every reference chunk regardless
+//     of fingerprint. Useful for benchmarking model quality
+//     changes against the entire corpus. Not required for
+//     normal model-mismatch recovery — that is automatic.
 func handleBackfillEmbeddings(args []string) int {
 	fs := flag.NewFlagSet("backfill-embeddings", flag.ContinueOnError)
 	batchSize := fs.Int("batch-size", 50, "Memories per batch")
 	dryRun := fs.Bool("dry-run", false, "Count only, don't write embeddings")
 	collection := fs.String("collection", "", "Filter by memory collection (empty = all)")
 	include := fs.String("include", "memories", "Surfaces to backfill: memories, references, all")
+	forceReembed := fs.Bool("force-reembed", false, "Re-embed every reference chunk regardless of stored fingerprint (references pass only)")
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm ops backfill-embeddings [flags]")
 		fmt.Println("\nFlags:")
-		fmt.Println("  --batch-size <n>    Memories per batch (default 50)")
-		fmt.Println("  --collection <c>    Filter by memory collection (default: all)")
-		fmt.Println("  --include <scope>   memories | references | all (default memories)")
-		fmt.Println("  --dry-run           Count only, don't write embeddings")
+		fmt.Println("  --batch-size <n>      Memories per batch (default 50)")
+		fmt.Println("  --collection <c>      Filter by memory collection (default: all)")
+		fmt.Println("  --include <scope>     memories | references | all (default memories)")
+		fmt.Println("  --dry-run             Count only, don't write embeddings")
+		fmt.Println("  --force-reembed       Force every reference chunk to re-embed (references pass only)")
 	}
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -114,6 +125,8 @@ func handleBackfillEmbeddings(args []string) int {
 			// excluded (--include=references).
 			refCount, _ := countReferencesWithUnembeddedChunks(dm.SQLDB())
 			fmt.Printf("   Total references with unembedded chunks: %d\n", refCount)
+			staleCount, _ := countReferencesWithStaleEmbeddings(dm.SQLDB())
+			fmt.Printf("   Total references with stale (model-mismatched) embeddings: %d\n", staleCount)
 			return 0
 		}
 		cfg := mpminternal.DefaultEmbeddingConfig()
@@ -121,7 +134,7 @@ func handleBackfillEmbeddings(args []string) int {
 		// function returns a refusal message rather than an
 		// error code so partial successes in earlier passes
 		// are still reported.
-		runReferenceBackfill(dm, cfg)
+		runReferenceBackfill(dm, cfg, *forceReembed)
 	}
 
 	return 0
@@ -188,54 +201,76 @@ func runMemoryBackfill(dm mpminternal.CoreDB, cfg *mpminternal.EmbeddingConfig, 
 	return nil
 }
 
-// runReferenceBackfill is the reference-chunks pass. Iterates
-// every reference doc that has at least one unembedded chunk and
-// calls EmbedReferenceChunks, which fills NULL rows in place.
-// Per-chunk failures inside EmbedReferenceChunks are counted but
-// do not abort the doc — same semantics as the memory pass.
+// runReferenceBackfill is the reference-chunks pass.
 //
-// The doc-level iteration is intentionally simple (no batching
-// across docs) because the typical corpus is small (tens to
-// hundreds of docs) and per-doc embedding already runs in
-// sequence. A future enhancement could parallelize across
-// docs with a worker pool, but the current shape mirrors the
-// chunk-by-chunk loop inside EmbedReferenceChunks and keeps the
-// code path easy to reason about.
-func runReferenceBackfill(dm mpminternal.CoreDB, cfg *mpminternal.EmbeddingConfig) {
+// 2026-09-28 update: model-aware. The previous implementation
+// filled only NULL rows; the new one refreshes any row whose
+// stored (source, model, dimension) fingerprint does not match
+// the active embedding provider. The two implementation paths
+// are:
+//
+//   - refresh-only-stale (default): calls
+//     RefreshStaleReferenceEmbeddings, which scans every row
+//     and re-embeds only the ones that
+//     referenceEmbeddingNeedsRefresh flags. The fingerprint
+//     columns are written on every successful re-embed so
+//     the next pass with the same provider is a no-op.
+//
+//   - force-reembed (--force-reembed): sets every chunk's
+//     embedding to NULL and then re-runs the per-doc embed
+//     pass. This is the explicit operator override — useful
+//     when the operator wants to compare two model variants
+//     against the same corpus, or when a silent embedding
+//     bug is suspected.
+//
+// The dry-run branch above reports the count of stale rows so
+// the operator can see the model mismatch before triggering a
+// write.
+func runReferenceBackfill(dm mpminternal.CoreDB, cfg *mpminternal.EmbeddingConfig, forceReembed bool) {
 	if cfg.Source == mpminternal.EmbeddingSourceAbsent ||
 		cfg.Source == mpminternal.EmbeddingSourceDisabled ||
 		cfg.IntentionallyDisabled {
 		fmt.Printf("   Refusing reference backfill: embedding provider is %s.\n", providerStateLabel(cfg))
 		return
 	}
-	docIDs, err := listReferencesWithUnembeddedChunks(dm.SQLDB())
+	concrete, ok := dm.(*mpminternal.DatabaseManager)
+	if !ok {
+		fmt.Printf("   Reference backfill needs *DatabaseManager; this CoreDB is a different type. Skipping.\n")
+		return
+	}
+	ctx := context.Background()
+
+	if forceReembed {
+		// Clear every embedding column so EmbedReferenceChunks
+		// (NULL-only path) re-embeds the full corpus. The
+		// fingerprint columns are reset to defaults so the
+		// needs-refresh logic also fires for any stragglers
+		// the clear+re-embed pipeline might miss.
+		fmt.Println("   --force-reembed set: clearing all reference embeddings...")
+		if _, err := concrete.SQLDB().ExecContext(ctx, `
+			UPDATE reference_chunks
+			   SET embedding = NULL,
+			       embedding_source = 'null',
+			       embedding_dimension = NULL,
+			       embedding_model = NULL
+		`); err != nil {
+			fmt.Printf("   Failed to clear embeddings: %v\n", err)
+			return
+		}
+	}
+
+	// Model-aware refresh. RefreshStaleReferenceEmbeddings
+	// re-embeds any row whose fingerprint does not match the
+	// active provider — that includes NULL embeddings (since
+	// the clear in the force branch left them NULL), and any
+	// row from a previous model version.
+	refreshed, failed, err := concrete.RefreshStaleReferenceEmbeddings(ctx)
 	if err != nil {
-		fmt.Printf("   Error listing reference docs: %v\n", err)
+		fmt.Printf("   Refresh failed: %v\n", err)
 		return
 	}
-	fmt.Printf("   Total reference docs with unembedded chunks: %d\n", len(docIDs))
-	if len(docIDs) == 0 {
-		return
-	}
-	processed, totalEmbedded, totalFailed := 0, 0, 0
-	for _, docID := range docIDs {
-		concrete, ok := dm.(*mpminternal.DatabaseManager)
-		if !ok {
-			fmt.Printf("   Skipping %s: CoreDB is not a *DatabaseManager (reference backfill needs concrete access)\n", docID)
-			continue
-		}
-		embedded, failed, err := concrete.EmbedReferenceChunks(context.Background(), docID)
-		if err != nil {
-			fmt.Printf("   %s: error %v\n", docID, err)
-			continue
-		}
-		totalEmbedded += embedded
-		totalFailed += failed
-		processed++
-		fmt.Printf("   %s: %d embedded, %d failed\n", docID, embedded, failed)
-	}
-	fmt.Printf("\n⚡ Reference backfill complete: %d docs, %d chunks embedded, %d failed\n",
-		processed, totalEmbedded, totalFailed)
+	fmt.Printf("\n⚡ Reference backfill complete: %d chunks refreshed, %d failed\n",
+		refreshed, failed)
 }
 
 // countReferencesWithUnembeddedChunks returns the number of
@@ -250,6 +285,42 @@ func countReferencesWithUnembeddedChunks(db *sql.DB) (int, error) {
 	row := db.QueryRow(`
 		SELECT COUNT(DISTINCT doc_id) FROM reference_chunks WHERE embedding IS NULL
 	`)
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// countReferencesWithStaleEmbeddings returns the number of
+// reference chunks whose (source, model, dimension) fingerprint
+// does not match the active embedding provider. Used by
+// --dry-run so the operator can see how many rows would be
+// refreshed in a real pass.
+func countReferencesWithStaleEmbeddings(db *sql.DB) (int, error) {
+	// Without an active provider, no row is "stale" by
+	// fingerprint comparison — every row matches the
+	// zero-valued fingerprint trivially. The dry-run
+	// report is meaningful only when a provider is
+	// configured; if not, the count is zero and the
+	// operator sees "0 stale" alongside the refusal
+	// message elsewhere in the dry-run output.
+	active := mpminternal.CurrentEmbeddingFingerprint()
+	if active.Model == "" {
+		return 0, nil
+	}
+	// Count rows whose stored fingerprint is missing the
+	// active model's name. This is a deliberately loose
+	// check — it covers "model was never recorded" and
+	// "model is different from active". A tighter check
+	// would also verify dimension, but dimension is not
+	// recoverable from the active provider without a
+	// sample embed.
+	var count int
+	row := db.QueryRow(`
+		SELECT COUNT(*) FROM reference_chunks
+		 WHERE embedding IS NOT NULL
+		   AND (embedding_model IS NULL OR embedding_model != ?)
+	`, active.Model)
 	if err := row.Scan(&count); err != nil {
 		return 0, err
 	}

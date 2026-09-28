@@ -674,10 +674,24 @@ var ReferenceTables = []string{
 	// separate phase after AddReference. The embedding column is cleared
 	// by AddReference's ON CONFLICT(id) DO UPDATE branch whenever a
 	// chunk's content changes, so re-embedding is forced.
+	//
+	// embedding_source / embedding_dimension / embedding_model are the
+	// model-identity fingerprint written by EmbedReferenceChunks. They
+	// mirror the memories.* columns and let the backfill detect when a
+	// stored embedding came from a different model than the one currently
+	// configured (operator changed providers, swapped models, etc.).
+	// See internal/core/reference_db.go and the forensic classifier in
+	// RunForensicClassifierForReferences. The defaults are:
+	//   source     'provider' (real embedding, not a hash)
+	//   dimension  NULL (set on first successful embed)
+	//   model      NULL (set on first successful embed; provider.Name())
 	`CREATE TABLE IF NOT EXISTS reference_chunks (
 		id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, chunk_index INTEGER NOT NULL,
 		section TEXT, content TEXT NOT NULL, source_path TEXT,
 		content_hash TEXT, embedding BLOB,
+		embedding_source TEXT NOT NULL DEFAULT 'provider',
+		embedding_dimension INTEGER,
+		embedding_model TEXT,
 		FOREIGN KEY (doc_id) REFERENCES reference_docs(id) ON DELETE CASCADE
 	);`,
 
@@ -1311,6 +1325,16 @@ var SafeMigrations = [][3]string{
 	{"reference_docs", "import_reason", "TEXT"},
 	{"reference_chunks", "content_hash", "TEXT"},
 	{"reference_chunks", "embedding", "BLOB"},
+	// 2026-09-28: model-identity fingerprint for reference embeddings.
+	// Mirrors the memories.embedding_source / embedding_dimension
+	// columns and enables the reference backfill to detect when a
+	// stored embedding came from a different model than the one
+	// currently configured. embedding_source uses the same
+	// 'provider' / 'hash' vocabulary as memories; embedding_model
+	// records provider.Name() at write time (e.g. "ollama:all-minilm").
+	{"reference_chunks", "embedding_source", "TEXT NOT NULL DEFAULT 'provider'"},
+	{"reference_chunks", "embedding_dimension", "INTEGER"},
+	{"reference_chunks", "embedding_model", "TEXT"},
 	// dependencies: JSON array of artifact IDs that this theory depends on
 	// (forward edges: theory -> memory/lesson/theory). Populated only on
 	// collection='theories' rows. FireStaleFoundationWakes scans this column

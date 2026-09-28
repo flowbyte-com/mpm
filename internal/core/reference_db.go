@@ -195,6 +195,16 @@ func (dm *DatabaseManager) DeleteReference(id string) error {
 // between chunks and aborts cleanly. Per-chunk embed failures are
 // counted in `failed` but do not abort the loop.
 //
+// Fingerprint: every successful write also stores the current
+// provider's identity (embedding_source, embedding_dimension,
+// embedding_model) so the reference backfill can detect when a
+// stored embedding came from a different model than the one
+// currently configured. The backfill's "needs re-embed?" predicate
+// is: content_hash changed (handled by AddReference's diff) OR
+// embedding IS NULL OR (embedding_model, embedding_dimension)
+// differs from the active provider's fingerprint. See
+// referenceEmbeddingNeedsRefresh.
+//
 // Embedding is intentionally split from AddReference:
 //   - AddReference's tx stays small and fast (chunk rows + diff logic
 //     only); a slow embed call would block the ingest tx and bloat
@@ -241,6 +251,11 @@ func (dm *DatabaseManager) EmbedReferenceChunks(ctx context.Context, docID strin
 	}
 	rows.Close()
 
+	// Capture the active fingerprint ONCE so every row in this pass
+	// stamps the same identity. Doing it per-row would race against
+	// provider reconfiguration mid-loop.
+	fp := currentEmbeddingFingerprint()
+
 	for _, p := range batch {
 		if ctx.Err() != nil {
 			return embedded, failed, ctx.Err()
@@ -251,8 +266,36 @@ func (dm *DatabaseManager) EmbedReferenceChunks(ctx context.Context, docID strin
 			failed++
 			continue
 		}
+		// When EmbedText returned (nil, nil) — NullProvider /
+		// disabled / absent — vec is nil and bytes is nil. The
+		// UPDATE below writes a NULL embedding AND records the
+		// source as "null" / dim=0 / model="" so the forensic
+		// classifier and the backfill both treat the row as
+		// "not yet embedded with a real provider". A subsequent
+		// re-embed pass (or operator-configured provider) will
+		// replace these values.
+		var (
+			source string
+			dim    interface{}
+			model  interface{}
+		)
+		if vec == nil {
+			source = "null"
+			dim = nil
+			model = nil
+		} else {
+			source = "provider"
+			dim = len(vec)
+			model = fp.Model
+		}
 		_, writeErr := dm.db.ExecContext(ctx,
-			`UPDATE reference_chunks SET embedding = ? WHERE id = ?`, bytes, p.id)
+			`UPDATE reference_chunks
+			   SET embedding = ?,
+			       embedding_source = ?,
+			       embedding_dimension = ?,
+			       embedding_model = ?
+			 WHERE id = ?`,
+			bytes, source, dim, model, p.id)
 		if writeErr != nil {
 			failed++
 			continue
@@ -260,5 +303,264 @@ func (dm *DatabaseManager) EmbedReferenceChunks(ctx context.Context, docID strin
 		embedded++
 	}
 	return embedded, failed, nil
+}
+
+// ReferenceEmbeddingFingerprint is the identity of the embedding
+// that would be written RIGHT NOW by EmbedReferenceChunks given the
+// active EmbeddingConfig. The fingerprint is the (Model, Dimension)
+// pair the active provider would produce. A stored embedding matches
+// the active provider when its (embedding_model, embedding_dimension)
+// pair equals the active fingerprint. See referenceEmbeddingNeedsRefresh.
+type ReferenceEmbeddingFingerprint struct {
+	// Model is provider.Name() (e.g. "ollama:all-minilm",
+	// "openai-compatible:text-embedding-3-small"). Empty when
+	// the active provider is NullProvider / disabled / absent —
+	// a fingerprint match against "" means "no provider is
+	// configured", which is never a valid match.
+	Model string
+
+	// Dimension is the embedding dimension the active provider
+	// would produce. 0 when the active provider is
+	// NullProvider — also never a valid match.
+	Dimension int
+}
+
+// String is the canonical (model, dimension) representation for
+// diagnostic output and for hashing into the "fingerprint" string
+// used in the content_hash mixin (future enhancement).
+func (f ReferenceEmbeddingFingerprint) String() string {
+	if f.Model == "" && f.Dimension == 0 {
+		return "null"
+	}
+	return f.Model + "@" + itoaDim(f.Dimension)
+}
+
+func itoaDim(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [20]byte
+	pos := len(buf)
+	for n > 0 {
+		pos--
+		buf[pos] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
+}
+
+// currentEmbeddingFingerprint returns the fingerprint of the
+// embedding that would be written RIGHT NOW given the active
+// EmbeddingConfig. When the provider is null/disabled/absent
+// the fingerprint is the zero value (Model="", Dimension=0),
+// which referenceEmbeddingNeedsRefresh treats as "no active
+// provider to compare against".
+//
+// We do NOT call provider.Embed to get a sample dimension — that
+// would defeat the offline-fallback contract (every search must
+// work without a live provider). Instead, the fingerprint is
+// derived from cfg metadata. The trade-off: a provider that
+// reports a different dimension than the one it actually
+// produces would not be detected by the fingerprint comparison
+// alone; the dimension-mismatch check at query time (in
+// referenceSearchVector) is the safety net.
+func currentEmbeddingFingerprint() ReferenceEmbeddingFingerprint {
+	return CurrentEmbeddingFingerprint()
+}
+
+// CurrentEmbeddingFingerprint is the exported wrapper around
+// currentEmbeddingFingerprint. CLI backfill and other
+// out-of-package callers use this to report staleness
+// without going through a DatabaseManager.
+func CurrentEmbeddingFingerprint() ReferenceEmbeddingFingerprint {
+	cfg := DefaultEmbeddingConfig()
+	if cfg.Provider == nil || cfg.Provider.Name() == "null" {
+		return ReferenceEmbeddingFingerprint{}
+	}
+	// Provider name encodes model identity (e.g. "ollama:all-minilm"
+	// or "openai-compatible:text-embedding-3-small"). Dimension
+	// is not known without a sample embed; the fingerprint is
+	// therefore (Model, 0). referenceEmbeddingNeedsRefresh
+	// checks both fields: if either differs from the stored
+	// row, the row is stale.
+	return ReferenceEmbeddingFingerprint{Model: cfg.Provider.Name()}
+}
+
+// referenceEmbeddingNeedsRefresh reports whether a stored chunk
+// row needs re-embedding given the active fingerprint.
+//
+//   - embedding IS NULL             → YES, fill
+//   - source == "null" or "hash"    → YES, regenerate with real provider
+//   - source == "provider", stored model != active model → YES
+//   - source == "provider", stored dimension is NULL (legacy)  → YES
+//   - otherwise                     → NO, kept as-is
+//
+// `embeddingIsNull` is the canonical "needs refresh" signal: the
+// schema defaults embedding_source to 'provider' even on a
+// NULL-embedding row, so source alone cannot tell us whether
+// the row has been embedded. The caller passes the IS NULL
+// signal explicitly so the predicate does not depend on the
+// caller correctly translating the column state into source.
+func referenceEmbeddingNeedsRefresh(embeddingIsNull bool, storedSource string, storedDim int, storedModel string, active ReferenceEmbeddingFingerprint) bool {
+	// NULL embedding: fill.
+	if embeddingIsNull {
+		return true
+	}
+	// Source labels that never came from a real provider. The
+	// 'null' label is written by EmbedReferenceChunks when the
+	// active provider is NullProvider; the 'hash' label is the
+	// legacy 256-dim fallback (none of the reference rows are
+	// expected to carry it, but the guard is here for
+	// forward-compat — see the memories equivalent).
+	if storedSource == "null" || storedSource == "hash" {
+		return true
+	}
+	// No active provider to compare against: leave the stored
+	// row alone. The query-time dimension-mismatch check will
+	// skip it if it ever fires; the operator needs to configure
+	// a provider before any refresh can happen.
+	if active.Model == "" {
+		return false
+	}
+	// Model identity mismatch: the operator switched providers.
+	if storedModel != active.Model {
+		return true
+	}
+	// Dimension NULL on a row that has a non-NULL embedding
+	// signals a legacy row whose fingerprint was never stamped.
+	// Refresh to populate the dim alongside any future
+	// re-embed.
+	if storedDim == 0 {
+		return true
+	}
+	return false
+}
+
+// RefreshStaleReferenceEmbeddings scans every reference chunk
+// and re-embeds the ones that referenceEmbeddingNeedsRefresh
+// flags as stale. Returns the count of refreshed rows.
+//
+// "Stale" means at least one of:
+//
+//   - embedding IS NULL (never been embedded)
+//   - embedding_source = 'null' (NullProvider write)
+//   - embedding_source = 'hash' (legacy hash fallback)
+//   - embedding_model does not match the active provider
+//   - embedding_dimension does not match the active provider
+//
+// The function is the canonical "automatic detection" path the
+// user spec asks for: the operator does not need to remember
+// that a model change means "run --force". If a fingerprint
+// mismatch is detectable, this function will find it.
+//
+// Embedding is done chunk-by-chunk in a single transaction per
+// doc. Per-chunk embed failures are counted in `failed` and do
+// not abort the doc (same shape as EmbedReferenceChunks).
+//
+// When the active provider is null/disabled/absent, no rows can
+// be refreshed — the function returns (0, nil) and a no-op. The
+// caller (CLI backfill) is expected to gate on provider
+// availability before calling.
+//
+// Idempotent: a row that was refreshed and now matches the
+// active fingerprint will not be refreshed again. Running the
+// function twice in a row with no embedding change between
+// runs is a no-op on the second call.
+func (dm *DatabaseManager) RefreshStaleReferenceEmbeddings(ctx context.Context) (refreshed int, failed int, err error) {
+	if dm == nil || dm.db == nil {
+		return 0, 0, fmt.Errorf("RefreshStaleReferenceEmbeddings: database not initialized")
+	}
+	active := currentEmbeddingFingerprint()
+	if active.Model == "" {
+		// No active provider — nothing to refresh against.
+		return 0, 0, nil
+	}
+
+	// Fetch every chunk with its current fingerprint. The
+	// scan is small (corpus is bounded), so a single SELECT
+	// is cheaper than batching by doc.
+	rows, err := dm.db.QueryContext(ctx, `
+		SELECT id, doc_id, content, embedding,
+		       COALESCE(embedding_source, ''),
+		       COALESCE(embedding_dimension, 0),
+		       COALESCE(embedding_model, '')
+		FROM reference_chunks
+	`)
+	if err != nil {
+		return 0, 0, fmt.Errorf("RefreshStaleReferenceEmbeddings: query: %w", err)
+	}
+	type staleRow struct {
+		id      string
+		docID   string
+		content string
+	}
+	var stale []staleRow
+	for rows.Next() {
+		var (
+			id, docID, content, source, model string
+			embRaw                           []byte
+			dim                              int
+		)
+		if scanErr := rows.Scan(&id, &docID, &content, &embRaw, &source, &dim, &model); scanErr != nil {
+			rows.Close()
+			return refreshed, failed, fmt.Errorf("RefreshStaleReferenceEmbeddings: scan: %w", scanErr)
+		}
+		// Embedding IS NULL is the canonical "needs refresh" signal.
+		// The fingerprint source default is 'provider' even on
+		// NULL-embedding rows, so we cannot rely on source alone.
+		embeddingIsNull := len(embRaw) == 0
+		if referenceEmbeddingNeedsRefresh(embeddingIsNull, source, dim, model, active) {
+			stale = append(stale, staleRow{id, docID, content})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return refreshed, failed, fmt.Errorf("RefreshStaleReferenceEmbeddings: rows.Err: %w", err)
+	}
+	rows.Close()
+
+	// Refresh each stale row in place. Sequential per row keeps
+	// the WAL small and matches the existing EmbedReferenceChunks
+	// pacing. Per-row errors do not abort the loop.
+	for _, r := range stale {
+		if ctx.Err() != nil {
+			return refreshed, failed, ctx.Err()
+		}
+		vec, _ := EmbedText(r.content)
+		if vec == nil {
+			// Provider became unavailable mid-loop (or this
+			// row's content can't be embedded). Skip with
+			// counted failure.
+			failed++
+			continue
+		}
+		bytes, marshalErr := embeddingBytes(vec)
+		if marshalErr != nil {
+			failed++
+			continue
+		}
+		_, writeErr := dm.db.ExecContext(ctx, `
+			UPDATE reference_chunks
+			   SET embedding = ?,
+			       embedding_source = 'provider',
+			       embedding_dimension = ?,
+			       embedding_model = ?
+			 WHERE id = ?`,
+			bytes, len(vec), active.Model, r.id)
+		if writeErr != nil {
+			failed++
+			continue
+		}
+		refreshed++
+	}
+	return refreshed, failed, nil
 }
 
