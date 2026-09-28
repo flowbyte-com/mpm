@@ -1377,3 +1377,180 @@ func TestReferenceHybridSearch_EmbeddingFormatMatchesMemories(t *testing.T) {
 	assert.Equal(t, raw, memEmb,
 		"reference_chunks.embedding and memories.embedding must store identical bytes for the same vector")
 }
+
+// ── Reference metadata ingestion contract ────────────────────────────────────
+//
+// These tests pin the contract for how reference metadata reaches
+// the searchable index. The contract is:
+//
+//   - The CLI / MCP layer passes tags explicitly via the
+//     AddReference(...) Tags field (no implicit frontmatter
+//     parsing — frontmatter is opaque reference content).
+//   - The AddReference path persists the tags to reference_docs.
+//     tags and the references_au trigger re-populates
+//     references_fts.tags so the doc-level FTS5 index reflects
+//     the metadata.
+//   - The doc-level FTS5 MATCH against the tags column
+//     ("tags:edit*") surfaces the doc as a candidate, even
+//     when the chunk content has no exact-token overlap with
+//     the query.
+//
+// This is the contract the WordPress reference corpus depends
+// on. Any silent change to it (e.g. a refactor that drops the
+// tags persistence path) would surface here before the live
+// corpus breaks.
+
+// TestReferenceMetadata_TagsPersistAndIndex exercises the
+// end-to-end path:
+//   AddReference(doc{tags=[...]}, chunks)
+//       → reference_docs.tags populated
+//       → references_fts.tags populated (via trigger)
+//       → referenceSearchFTS5 surfaces the doc on tag-only MATCH
+func TestReferenceMetadata_TagsPersistAndIndex(t *testing.T) {
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	docTags := []string{"wp", "roles-capabilities", "edit_theme_options"}
+	doc := &ReferenceDoc{
+		ID:        "ref-meta-cap",
+		Title:     "wp-roles-capabilities",
+		SourcePath: "/tmp/wp-roles-capabilities.md",
+		SourceType: "markdown",
+		Tags:      docTags,
+		// Body has NO literal occurrence of "edit_theme_options".
+		// The tag is the only path that can surface this doc for
+		// an exact-symbol query — the test asserts that path works.
+		Content:     "Roles and capabilities govern what a user can do.",
+		LastIndexed: "1790000000",
+	}
+	chunks := []ReferenceChunk{{
+		ID:         "chunk-meta-cap",
+		DocID:      "ref-meta-cap",
+		ChunkIndex: 0,
+		Section:    "intro",
+		Content:    "Roles and capabilities govern what a user can do.",
+		SourcePath: "/tmp/wp-roles-capabilities.md",
+	}}
+	require.NoError(t, dm.AddReference(doc, chunks))
+
+	// 1. reference_docs.tags must be populated exactly as the
+	//    caller supplied it. The AddReference path persists via
+	//    MarshalJSON(doc.Tags) into the TEXT column; the test
+	//    reads the column back and confirms the round-trip.
+	var storedTags string
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT tags FROM reference_docs WHERE id = ?`, "ref-meta-cap",
+	).Scan(&storedTags))
+	require.NotEmpty(t, storedTags, "AddReference must persist tags to reference_docs.tags")
+	for _, want := range docTags {
+		assert.Contains(t, storedTags, want,
+			"tag %q missing from stored tags %q", want, storedTags)
+	}
+
+	// 2. references_fts.tags must be populated. The references_ai
+	//    trigger (db.go:2932) fires on insert and the references_au
+	//    trigger (db.go:2934) fires on update. Both copy the doc
+	//    tags into the references_fts.tags column.
+	var ftsTags string
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT tags FROM references_fts WHERE rowid = (SELECT rowid FROM reference_docs WHERE id = ?)`,
+		"ref-meta-cap",
+	).Scan(&ftsTags))
+	require.NotEmpty(t, ftsTags, "references_fts trigger must populate the tags column")
+	for _, want := range docTags {
+		assert.Contains(t, ftsTags, want,
+			"tag %q missing from references_fts.tags %q", want, ftsTags)
+	}
+
+	// 3. ReferenceHybridSearch on the canonical symbol — the
+	//    body has no literal overlap — must surface the doc as
+	//    top-1 because the doc-level tag MATCH fires with the
+	//    -8.0 boost.
+	results, err := ReferenceHybridSearch(dm, "edit_theme_options", DefaultReferenceHybridConfig())
+	require.NoError(t, err)
+	require.NotEmpty(t, results, "tag-only query must surface the doc")
+	assert.Equal(t, "ref-meta-cap", results[0].DocID,
+		"exact tag match must win; got doc %s, results: %v",
+		results[0].DocID, docSummary(results))
+}
+
+// TestReferenceMetadata_NoTagsNoBoost confirms the negative case:
+// a doc with empty tags (the pre-fix state) is NOT preferentially
+// ranked on tag-only queries. The body content's BM25 is the only
+// signal.
+func TestReferenceMetadata_NoTagsNoBoost(t *testing.T) {
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	// Doc with no tags (the pre-fix state). The body has
+	// "theme options" but not the literal symbol "edit_theme_options".
+	doc := &ReferenceDoc{
+		ID:        "ref-no-tags",
+		Title:     "doc-no-tags",
+		SourcePath: "/tmp/no-tags.md",
+		SourceType: "markdown",
+		Tags:      nil,
+		Content:     "Discussion of various theme options follows.",
+		LastIndexed: "1790000000",
+	}
+	chunks := []ReferenceChunk{{
+		ID:         "chunk-no-tags",
+		DocID:      "ref-no-tags",
+		ChunkIndex: 0,
+		Section:    "intro",
+		Content:    "Discussion of various theme options follows.",
+		SourcePath: "/tmp/no-tags.md",
+	}}
+	require.NoError(t, dm.AddReference(doc, chunks))
+
+	// A query for "edit_theme_options" must NOT surface this doc:
+	// the body has no exact-token overlap (porter-unicode61 splits
+	// "theme" / "options" as separate tokens, neither of which
+	// appear in the body) and the tags column is empty.
+	results, err := ReferenceHybridSearch(dm, "edit_theme_options", DefaultReferenceHybridConfig())
+	require.NoError(t, err)
+	for _, r := range results {
+		assert.NotEqual(t, "ref-no-tags", r.DocID,
+			"empty-tags doc must not surface on a tag-only query; got %s", r.DocID)
+	}
+}
+
+// TestReferenceMetadata_TagsRoundTripOnReingest confirms that
+// re-ingesting the same source bytes (with the same tags) is
+// idempotent. AddReference's chunk_hash diff path preserves the
+// doc id and the tags across re-ingests.
+func TestReferenceMetadata_TagsRoundTripOnReingest(t *testing.T) {
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	doc := &ReferenceDoc{
+		ID:        "ref-roundtrip",
+		Title:     "roundtrip-doc",
+		SourcePath: "/tmp/roundtrip.md",
+		SourceType: "markdown",
+		Tags:      []string{"foo", "bar"},
+		Content:     "roundtrip content with foo and bar tokens",
+		LastIndexed: "1790000000",
+	}
+	chunks := []ReferenceChunk{{
+		ID:         "chunk-roundtrip",
+		DocID:      "ref-roundtrip",
+		ChunkIndex: 0,
+		Content:    "roundtrip content with foo and bar tokens",
+		SourcePath: "/tmp/roundtrip.md",
+	}}
+	require.NoError(t, dm.AddReference(doc, chunks))
+
+	// Re-ingest with the same content + same tags. The chunk
+	// hash diff path should short-circuit and preserve the row.
+	require.NoError(t, dm.AddReference(doc, chunks))
+
+	var storedTags string
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT tags FROM reference_docs WHERE id = ?`, "ref-roundtrip",
+	).Scan(&storedTags))
+	for _, want := range []string{"foo", "bar"} {
+		assert.Contains(t, storedTags, want,
+			"tag %q missing after re-ingest; got %q", want, storedTags)
+	}
+}
