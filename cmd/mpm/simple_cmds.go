@@ -1876,6 +1876,7 @@ func handleRefSearch(args []string) int {
 			FTS5Score        float64 `json:"fts5_score"`
 			VectorSimilarity float64 `json:"vector_similarity"`
 			CombinedScore    float64 `json:"combined_score"`
+			RelevanceScore   float64 `json:"relevance_score"`
 		}
 		out := make([]chunkResult, 0, len(results))
 		for _, r := range results {
@@ -1889,6 +1890,7 @@ func handleRefSearch(args []string) int {
 				FTS5Score:        r.FTS5Score,
 				VectorSimilarity: r.VectorSimilarity,
 				CombinedScore:    r.CombinedScore,
+				RelevanceScore:   r.RelevanceScore,
 			})
 		}
 		data, _ := json.Marshal(map[string]interface{}{
@@ -1911,7 +1913,8 @@ func handleRefSearch(args []string) int {
 		fmt.Printf("[%s chunk %d] source=%s chunk %s (ref %s)\n",
 			r.DocTitle, r.ChunkIndex, r.Source,
 			idStr[:min(len(idStr), 8)], docIDStr[:min(len(docIDStr), 16)])
-		fmt.Printf("    fts5=%.3f vector=%.3f combined=%.3f\n", r.FTS5Score, r.VectorSimilarity, r.CombinedScore)
+		fmt.Printf("    fts5=%.3f vector=%.3f combined=%.3f relevance=%.3f\n",
+			r.FTS5Score, r.VectorSimilarity, r.CombinedScore, r.RelevanceScore)
 		fmt.Printf("    %s\n\n       → mpm reference show %s\n\n", content, docIDStr)
 	}
 	return 0

@@ -97,6 +97,19 @@ func DefaultReferenceHybridConfig() ReferenceHybridConfig {
 // ReferenceHybridResult is one chunk hit with combined lexical and
 // semantic scores. Field semantics match memory HybridResult so
 // consumers can use the same rendering code.
+//
+// CombinedScore and RelevanceScore are intentionally distinct:
+//
+//   - CombinedScore is the legacy weighted blend
+//     (sigmoid(BM25) * (1 - VectorWeight) + cosine * VectorWeight).
+//     It is a diagnostic — useful for showing "what would a
+//     weighted blend look like?" — but it is NOT used for the
+//     final sort.
+//
+//   - RelevanceScore is the comparable relevance in [0, 1] that
+//     the final sort actually uses. See relevanceScore() for the
+//     exact formula. Splitting the two makes the ranking intent
+//     explicit and lets the JSON renderer expose both.
 type ReferenceHybridResult struct {
 	ID               string  // chunk id
 	DocID            string  // parent doc id
@@ -106,7 +119,8 @@ type ReferenceHybridResult struct {
 	DocTitle         string  // parent doc title (joined for display)
 	FTS5Score        float64 // raw BM25 (more negative = better), 0 if no FTS5 hit
 	VectorSimilarity float64 // cosine in [0, 1], 0 if no vector hit
-	CombinedScore    float64 // weighted blend
+	CombinedScore    float64 // diagnostic: weighted blend, NOT used for sort
+	RelevanceScore   float64 // the comparable relevance used for the final sort
 	Source           string  // "fts5" | "vector" | "hybrid"
 }
 
@@ -178,26 +192,46 @@ func ReferenceHybridSearch(dm *DatabaseManager, query string, cfg ReferenceHybri
 	// Step 3: merge.
 	results := mergeReferenceResults(dm.SQLDB(), ftsResults, vecResults, cfg.VectorWeight)
 
-	// Step 4: natural sort. Source-priority first (hybrid > fts5
-	// > vector), then the within-source signal (FTS5 BM25
-	// ascending = better; vector similarity descending = better;
-	// combined descending = better). Stable so equal-score
-	// chunks preserve their merge-time order, which is
-	// deterministic (sorted chunk IDs) per the Determinism
-	// contract.
+	// Step 4: relevance-based sort. The previous implementation
+	// used a source-priority bucket (hybrid > fts5 > vector)
+	// before comparing within-source scores. That created a real
+	// defect: a weak-hybrid row (low FTS5 + low vector) would
+	// outrank a strong-vector row (zero FTS5, high cosine) purely
+	// because the source label said "hybrid". The user's stated
+	// principle is "actual relevance should dominate source
+	// label", so the sort key is now a comparable RelevanceScore
+	// in [0, 1].
+	//
+	// Tiebreakers, in order:
+	//   1. Stronger FTS5 leg (|sigmoid(BM25)|). This preserves
+	//      exact-symbol dominance: a chunk that has the literal
+	//      query token outranks a chunk that is merely a close
+	//      semantic neighbor, even when both end up with similar
+	//      RelevanceScore. Pinned by
+	//      Ranking_StrongLexicalBeatsGoodSemantic.
+	//   2. Stronger vector leg. When FTS5 strengths tie too, the
+	//      chunk that is semantically closer wins.
+	//   3. Chunk ID ascending. Deterministic absolute tiebreak;
+	//      no map-iteration-order leakage. Pinned by the
+	//      Determinism test.
 	sort.SliceStable(results, func(i, j int) bool {
-		if results[i].Source != results[j].Source {
-			return sourceRank(results[i].Source) > sourceRank(results[j].Source)
+		ri, rj := results[i].RelevanceScore, results[j].RelevanceScore
+		if ri != rj {
+			return ri > rj
 		}
-		switch results[i].Source {
-		case "fts5":
-			return results[i].FTS5Score < results[j].FTS5Score
-		case "vector":
+		// Tiebreaker 1: stronger FTS5 leg wins (preserves
+		// exact-symbol dominance on relevance ties).
+		fi := ftsStrength(results[i].FTS5Score)
+		fj := ftsStrength(results[j].FTS5Score)
+		if fi != fj {
+			return fi > fj
+		}
+		// Tiebreaker 2: stronger vector leg wins.
+		if results[i].VectorSimilarity != results[j].VectorSimilarity {
 			return results[i].VectorSimilarity > results[j].VectorSimilarity
-		case "hybrid":
-			return results[i].CombinedScore > results[j].CombinedScore
 		}
-		return false
+		// Tiebreaker 3: chunk ID for absolute determinism.
+		return results[i].ID < results[j].ID
 	})
 
 	// Step 5: source-diversity cap. Runs AFTER the natural sort
@@ -310,10 +344,18 @@ func referenceSearchLike(db *sql.DB, query string, limit int) ([]referenceFTSToM
 // memories.embedding — so the unmarshal step is byte-compatible
 // with the memory vector search.
 func referenceSearchVector(db *sql.DB, queryVec []float32, limit int) ([]referenceVecHit, error) {
+	// Skip hash-source rows: those are legacy 256-dim placeholder
+	// embeddings from a fallback path that was never used for
+	// references (the references corpus is too new to have any),
+	// but the filter mirrors memories' safety net so a future
+	// fallback that writes hash embeddings cannot corrupt the
+	// semantic ranking. See memories.embedding_source = 'hash' in
+	// internal/core/hybrid_search.go:390 for the same convention.
 	rows, err := db.Query(`
 		SELECT id, doc_id, chunk_index, section, content, embedding
 		FROM reference_chunks
 		WHERE embedding IS NOT NULL
+		  AND (embedding_source IS NULL OR embedding_source != 'hash')
 	`)
 	if err != nil {
 		return nil, err
@@ -496,6 +538,7 @@ func mergeReferenceResults(db *sql.DB, fts []referenceFTSToMerge, vec []referenc
 			FTS5Score:        ftsScore,
 			VectorSimilarity: vecSim,
 			CombinedScore:    combined,
+			RelevanceScore:   relevanceScore(ftsScore, vecSim),
 			Source:           source,
 		})
 	}
@@ -573,9 +616,82 @@ func batchFetchReferenceDocTitles(db *sql.DB, ftsByID map[string]referenceFTSToM
 // Re-exported as a package-level function so a future caller (e.g.
 // a CLI flag controlling blend weight) can recompute the score
 // without re-running the search.
+//
+// This score is the diagnostic CombinedScore on ReferenceHybridResult
+// — useful for "what would a weighted blend look like?" reporting.
+// It is NOT the final sort key. The sort uses RelevanceScore
+// (see relevanceScore) so a high-vector row is not buried by the
+// source-label bucket the legacy implementation used.
 func referenceHybridScore(ftsScore float64, vecSim float64, vecWeight float64) float64 {
 	normFTS := ftsScore / (1 + math.Abs(ftsScore))
 	return (1-vecWeight)*normFTS + vecWeight*vecSim
+}
+
+// ftsStrength returns |sigmoid(BM25)| in [0, 1]. Used as the
+// RelevanceScore tiebreaker so a row with strong lexical evidence
+// outranks a row with comparable but purely-semantic evidence. The
+// absolute value matters (not the signed sigmoid) because the
+// sort compares strengths, not signed scores.
+//
+// Always returns 0 when ftsScore is 0 (no FTS5 hit at all).
+func ftsStrength(ftsScore float64) float64 {
+	if ftsScore == 0 {
+		return 0
+	}
+	s := ftsScore / (1 + math.Abs(ftsScore))
+	if s < 0 {
+		return -s
+	}
+	return s
+}
+
+// strongLexicalThreshold is the BM25 below which a row counts as
+// having a "strong lexical match". Used by relevanceScore to give
+// exact-symbol queries a small advantage on relevance ties. The
+// threshold is deliberately conservative: -5 corresponds to "two
+// or more tokens matched well", which is what most technical-
+// symbol queries reach when the chunk is the right answer.
+const strongLexicalThreshold = -5.0
+
+// relevanceScore is the final sort key. Range is roughly [0, 1].
+//
+// Formula:
+//
+//	fts = |sigmoid(ftsScore)|     // 0..1
+//	vec = cosine                  // 0..1
+//	score = max(fts, vec) + 0.05 * (fts <= strongLexicalThreshold)
+//
+// Why max-of-legs, not weighted-blend: a weighted blend buries a
+// chunk that has only one strong leg. For example, an FTS5-only
+// chunk with BM25=-15 has CombinedScore = -0.47, but a vector-only
+// chunk with cosine=0.7 has CombinedScore = 0.35. The vector-only
+// chunk would outrank the exact-symbol hit despite the exact-symbol
+// hit being the more specific match. The max formulation fixes
+// this without a source-priority bucket: a strong-FTS5 row has
+// RelevanceScore near 0.94; a strong-vector row has RelevanceScore
+// near 0.7. The exact-symbol row wins.
+//
+// The 0.05 lexical boost is a tiebreaker nudge, not a primary
+// signal. On relevance ties (two rows with the same max-of-legs
+// score), a row with strong lexical evidence gets a small
+// preference — matching the user's principle that "exact
+// technical-symbol matches must still retain a strong advantage
+// where justified".
+func relevanceScore(ftsScore, vecSim float64) float64 {
+	fts := ftsStrength(ftsScore)
+	score := math.Max(fts, vecSim)
+	if ftsScore <= strongLexicalThreshold {
+		score += 0.05
+	}
+	// Clamp to [0, 1] so the score is comparable across rows.
+	// The boost can push score slightly above 1 in degenerate
+	// cases (vec=1.0 AND strong FTS5); clamping keeps the
+	// diagnostic field bounded and avoids surprising consumers
+	// that read it as a probability.
+	if score > 1.0 {
+		score = 1.0
+	}
+	return score
 }
 
 // applyPerDocCap partitions the result list so the first `cap`

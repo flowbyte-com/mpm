@@ -2157,6 +2157,7 @@ func handleSearchReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 			"fts5_score":        r.FTS5Score,
 			"vector_similarity": r.VectorSimilarity,
 			"combined_score":    r.CombinedScore,
+			"relevance_score":   r.RelevanceScore,
 		})
 	}
 	return map[string]interface{}{
