@@ -54,6 +54,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -240,6 +241,96 @@ func TestInstructionsPrimer_CoversDiscoverabilityConcepts(t *testing.T) {
 				want,
 			)
 		}
+	}
+}
+
+// TestInstructionsPrimer_ReferenceRetrievalContract pins the
+// reference-retrieval contract that the previous experiment found
+// was missing from the agent contract: the canonical managed block
+// and the MCP instructions primer must BOTH direct the agent to
+// query the existing MPM reference corpus (via `mpm_references`
+// action `search`) before reacquiring the same source. The fix
+// added item 9 ("Search the reference corpus before reacquiring")
+// to the managed block AND the corresponding primer bullet.
+//
+// A failure here means one of the two artefacts has lost the
+// directive: the agent would fall back to acquiring the same
+// reference instead of checking what MPM already knows.
+//
+// The substring is the tool invocation as it appears in both
+// documents: the canonical block uses the host-neutral form
+// `` `mpm_references` action `search` ``; the primer is rendered
+// from the same source so the substring matches verbatim. We check
+// the embedded primer AND the canonical managed block read fresh
+// from disk so a regression on either side is caught.
+func TestInstructionsPrimer_ReferenceRetrievalContract(t *testing.T) {
+	// Embedded primer must mention the new directive.
+	primerSubstr := "`mpm_references` action `search`"
+	if !strings.Contains(instructionsPrimer, primerSubstr) {
+		t.Errorf(
+			"embedded instructions primer is missing the reference-retrieval contract substring %q.\n"+
+				"The primer must tell the agent to query the existing reference corpus via "+
+				"`mpm_references` action `search` before reacquiring the same source.\n"+
+				"Regenerate via `python3 agent_installation/scripts/render_managed_blocks.py` "+
+				"after editing the canonical managed block in "+
+				"agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md.",
+			primerSubstr,
+		)
+	}
+
+	// Canonical managed block (read fresh from disk, so a future
+	// edit that drops the directive from the canonical source
+	// without regenerating the primer is caught here even if the
+	// primer still embeds the old text).
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("repo root abs: %v", err)
+	}
+	canonicalPath := filepath.Join(
+		repoRoot, "agent_installation", "MPM_AGENT_INTEGRATION_SNIPPETS.md",
+	)
+	canonicalBytes, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatalf("read canonical snippets: %v", err)
+	}
+	canonical := string(canonicalBytes)
+	if !strings.Contains(canonical, "Search the reference corpus before reacquiring") {
+		t.Errorf(
+			"canonical managed block (%s) is missing the "+
+				"'Search the reference corpus before reacquiring' item.\n"+
+				"The managed block is the source of truth for the contract; "+
+				"the primer is derived from it. Restore the item in the canonical "+
+				"source and re-run the renderer.",
+			canonicalPath,
+		)
+	}
+	// The canonical block must wire both the tool name and the
+	// action — independently, since the canonical source wraps
+	// them across a line break — so the per-adapter renderer's
+	// host-prefix substitution has something concrete to operate
+	// on.
+	if !strings.Contains(canonical, "`mpm_references`") {
+		t.Errorf(
+			"canonical managed block is missing the host-neutral "+
+				"tool reference `mpm_references` that the per-adapter "+
+				"renderer prefixes to produce the host-specific form.",
+		)
+	}
+	if !strings.Contains(canonical, "action `search`") {
+		t.Errorf(
+			"canonical managed block is missing the `action \\`search\\`` "+
+				"invocation keyword that pairs the tool with the action.",
+		)
+	}
+	// And it must include the CLI-fallback example the contract
+	// promises, so the recovery path is consistent with the rest of
+	// the contract.
+	if !strings.Contains(canonical, "mpm call mpm_references --payload") {
+		t.Errorf(
+			"canonical managed block is missing the CLI-fallback example for "+
+				"`mpm_references` action `search`. Add the mpm call invocation "+
+				"so the recovery path matches the rest of the contract.",
+		)
 	}
 }
 

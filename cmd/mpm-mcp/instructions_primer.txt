@@ -12,5 +12,6 @@ The wake envelope (see bullet 1 for delivery) carries the bounded `<contextual_f
 - Track durable objectives as work items (via `mpm_work` action `create`).
 - Session closure is not work completion (via `mpm_work` action `complete`).
 - Acquire and retain authoritative references (via `mpm_references` action `add`).
+- Search the reference corpus before reacquiring (via `mpm_references` action `search`).
 
 If MCP transport fails, fall back to `mpm call <tool> --payload '{"action":"<op>","params":{...}}'` -- same substrate, same provenance.

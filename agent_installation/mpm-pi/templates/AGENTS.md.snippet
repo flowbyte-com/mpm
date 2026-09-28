@@ -194,11 +194,24 @@ canonical protocol, not this block, for behavioural changes.
    configuration. The rule is general; apply it whenever
    primary-source accuracy and reusability matter.
 
-9. **MPM is the source of truth for cross-session continuity.**
-   Anything that should survive across sessions goes to MPM, not
-   just transient conversation context.
+9. **Search the reference corpus before reacquiring.** Before
+   pulling new source material for a fact that may already live
+   in MPM, query the reference corpus via `mpm_references`
+   action `search` (params: `query` and `limit`). The workflow is
+   search existing reference knowledge, then use or read it if
+   suitable, then acquire or add authoritative material only when
+   the existing corpus is stale, absent, inadequate, or
+   explicitly known to be out of date for the question at hand.
+   Stale, absent, or inadequate references may still need fresh
+   reacquisition; the rule is "check first", not "never re-fetch".
+   CLI fallback: `mpm call mpm_references --payload
+   '{"action":"search","params":{"query":"<query>","limit":5}}'`.
 
-10. **Recovery / fallback.** If the host's native MPM transport
+10. **MPM is the source of truth for cross-session continuity.**
+    Anything that should survive across sessions goes to MPM, not
+    just transient conversation context.
+
+11. **Recovery / fallback.** If the host's native MPM transport
     becomes unavailable mid-session (MCP server down, plugin crashed,
     `mpm__*` tools returning connection errors, etc.), fall back to
     the documented CLI path:
