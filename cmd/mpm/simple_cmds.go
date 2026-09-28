@@ -1777,27 +1777,85 @@ func handleRefShow(args []string) int {
 	return 0
 }
 
-// handleRefSearch searches reference chunks
+// handleRefSearch searches reference chunks using the hybrid
+// lexical + semantic retrieval path. Falls back gracefully to
+// FTS5-only when no embedding provider is configured; the user
+// contract is that reference lookup must never be dependent on
+// an external embedding service being healthy.
+//
+// Flags:
+//
+//	--limit N         Max results to return (default 20)
+//	--vector-weight W Blend weight in [0.0, 1.0] (default 0.5).
+//	                  0.0 = pure lexical, 1.0 = pure semantic.
+//	--json / -j       Emit machine-readable JSON.
 func handleRefSearch(args []string) int {
 	if len(args) < 2 {
-		usererror.Usage("mpm reference search <query> [--json]")
+		usererror.Usage("mpm reference search <query> [--limit N] [--vector-weight W] [--json]")
 		return 1
 	}
 
+	// Parse flags out of the arg list. Pre-2026-09-28, --limit
+	// tokens were silently appended to the query string, which
+	// meant every numeric query was poisoned by stray flag values.
 	jsonOutput, cleanArgs := ExtractJSONFlag(args[1:])
-	query := strings.Join(cleanArgs, " ")
-	dm := getDB()
+	limit := 20
+	vectorWeight := 0.5
+	queryTokens := make([]string, 0, len(cleanArgs))
+	for i := 0; i < len(cleanArgs); i++ {
+		switch cleanArgs[i] {
+		case "--limit":
+			if i+1 >= len(cleanArgs) {
+				usererror.Error("--limit requires a value")
+				return 1
+			}
+			n, err := strconv.Atoi(cleanArgs[i+1])
+			if err != nil || n <= 0 {
+				usererror.Error("--limit must be a positive integer")
+				return 1
+			}
+			limit = n
+			i++
+		case "--vector-weight":
+			if i+1 >= len(cleanArgs) {
+				usererror.Error("--vector-weight requires a value")
+				return 1
+			}
+			w, err := strconv.ParseFloat(cleanArgs[i+1], 64)
+			if err != nil || w < 0 || w > 1 {
+				usererror.Error("--vector-weight must be in [0.0, 1.0]")
+				return 1
+			}
+			vectorWeight = w
+			i++
+		default:
+			queryTokens = append(queryTokens, cleanArgs[i])
+		}
+	}
+	if len(queryTokens) == 0 {
+		usererror.Usage("mpm reference search <query> [--limit N] [--vector-weight W] [--json]")
+		return 1
+	}
+	query := strings.Join(queryTokens, " ")
+
+	dm := getDBConcrete()
 	if dm == nil {
 		return 1
 	}
 
-	chunks, err := dm.SearchReferenceChunks(query, 20)
+	// Build the hybrid config inline so the CLI can override the
+	// defaults. The limit/weight fields route to the underlying
+	// ReferenceHybridSearch function.
+	cfg := mpminternal.DefaultReferenceHybridConfig()
+	cfg.Limit = limit
+	cfg.VectorWeight = vectorWeight
+	results, err := mpminternal.ReferenceHybridSearch(dm, query, cfg)
 	if err != nil {
 		usererror.Error("%v", err)
 		return 1
 	}
 
-	if len(chunks) == 0 {
+	if len(results) == 0 {
 		if jsonOutput {
 			data, _ := json.Marshal(map[string]interface{}{"query": query, "results": []interface{}{}, "message": "No results found"})
 			fmt.Println(string(data))
@@ -1809,84 +1867,52 @@ func handleRefSearch(args []string) int {
 
 	if jsonOutput {
 		type chunkResult struct {
-			DocID      string  `json:"doc_id"`
-			DocTitle   string  `json:"doc_title"`
-			ChunkID    string  `json:"chunk_id"`
-			ChunkIndex int     `json:"chunk_index"`
-			Content    string  `json:"content"`
-			Score      float64 `json:"score"`
+			DocID            string  `json:"doc_id"`
+			DocTitle         string  `json:"doc_title"`
+			ChunkID          string  `json:"chunk_id"`
+			ChunkIndex       int     `json:"chunk_index"`
+			Content          string  `json:"content"`
+			Source           string  `json:"source"`
+			FTS5Score        float64 `json:"fts5_score"`
+			VectorSimilarity float64 `json:"vector_similarity"`
+			CombinedScore    float64 `json:"combined_score"`
 		}
-		results := make([]chunkResult, 0, len(chunks))
-		for _, c := range chunks {
-			docTitle := ""
-			if dt, ok := c["doc_title"].(string); ok {
-				docTitle = dt
-			}
-			// Rough-edge closure 2026-09-12 (item 7): `id` is the
-			// CHUNK id; the document id is `doc_id`. Pre-fix DocID
-			// was filled from `id`, sending consumers to `reference
-			// show <chunk-id>` which failed. Both are now explicit.
-			docID, _ := c["doc_id"].(string)
-			chunkID, _ := c["id"].(string)
-			idxVal := c["chunk_index"]
-			idx := 0
-			switch v := idxVal.(type) {
-			case int64:
-				idx = int(v)
-			case int:
-				idx = v
-			case int32:
-				idx = int(v)
-			case float64:
-				idx = int(v)
-			}
-			content, _ := c["content"].(string)
-			score := 0.0
-			if s, ok := c["score"].(float64); ok {
-				score = s
-			}
-			results = append(results, chunkResult{
-				DocID:      docID,
-				DocTitle:   docTitle,
-				ChunkID:    chunkID,
-				ChunkIndex: idx,
-				Content:    content,
-				Score:      score,
+		out := make([]chunkResult, 0, len(results))
+		for _, r := range results {
+			out = append(out, chunkResult{
+				DocID:            r.DocID,
+				DocTitle:         r.DocTitle,
+				ChunkID:          r.ID,
+				ChunkIndex:       r.ChunkIndex,
+				Content:          r.Content,
+				Source:           r.Source,
+				FTS5Score:        r.FTS5Score,
+				VectorSimilarity: r.VectorSimilarity,
+				CombinedScore:    r.CombinedScore,
 			})
 		}
-		data, _ := json.Marshal(map[string]interface{}{"query": query, "results": results})
+		data, _ := json.Marshal(map[string]interface{}{
+			"query":   query,
+			"results": out,
+			"count":   len(out),
+		})
 		fmt.Println(string(data))
 		return 0
 	}
 
-	fmt.Printf("\nFound %d matching chunks:\n\n", len(chunks))
-	for _, c := range chunks {
-		docTitle := ""
-		if dt, ok := c["doc_title"].(string); ok {
-			docTitle = dt
-		}
-		content, _ := c["content"].(string)
+	fmt.Printf("\nFound %d matching chunks:\n\n", len(results))
+	for _, r := range results {
+		content := r.Content
 		if len(content) > 200 {
 			content = content[:200] + "..."
 		}
-		idxVal := c["chunk_index"]
-		idx := 0
-		switch v := idxVal.(type) {
-		case int64:
-			idx = int(v)
-		case int:
-			idx = v
-		case int32:
-			idx = int(v)
-		case float64:
-			idx = int(v)
-		}
-		idStr, _ := c["id"].(string)
-		docIDStr, _ := c["doc_id"].(string)
-		// Item 7: print both identities so the next operation is
-		// obvious — `reference show` accepts either (chunk IDs
-		// resolve to their parent document).
-		fmt.Printf("[%s chunk %d] chunk %s (ref %s)\n%s\n\n       → mpm reference show %s\n\n", docTitle, idx, idStr[:min(len(idStr), 8)], docIDStr[:min(len(docIDStr), 16)], content, docIDStr)
+		idStr := r.ID
+		docIDStr := r.DocID
+		fmt.Printf("[%s chunk %d] source=%s chunk %s (ref %s)\n",
+			r.DocTitle, r.ChunkIndex, r.Source,
+			idStr[:min(len(idStr), 8)], docIDStr[:min(len(docIDStr), 16)])
+		fmt.Printf("    fts5=%.3f vector=%.3f combined=%.3f\n", r.FTS5Score, r.VectorSimilarity, r.CombinedScore)
+		fmt.Printf("    %s\n\n       → mpm reference show %s\n\n", content, docIDStr)
 	}
 	return 0
 }

@@ -2084,34 +2084,86 @@ func handleAddReference(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	return dm.AddReferenceFromFile(filepath, title)
 }
 
-// callSearchReferences searches reference content.
+// callSearchReferences searches reference content using the hybrid
+// lexical + semantic path. Falls back to FTS5-only when no embedding
+// provider is configured — the user contract is that reference
+// lookup must never depend on an external embedding service being
+// healthy. New hybrid-aware fields (source, fts5_score,
+// vector_similarity, combined_score) are additive; consumers that
+// don't read them are unaffected.
 func handleSearchReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	query, _ := p["query"].(string)
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
 	}
-	limit := int(internal.ParseFloatOr(p["limit"], 5))
+	limit := int(internal.ParseFloatOr(p["limit"], 20))
 	if limit <= 0 {
-		limit = 5
+		limit = 20
+	}
+	vectorWeight := internal.ParseFloatOr(p["vector_weight"], 0.5)
+	if vectorWeight < 0 || vectorWeight > 1 {
+		vectorWeight = 0.5
 	}
 
-	results, err := dm.SearchReferenceChunks(query, limit)
+	// The hybrid function needs a concrete *DatabaseManager so it
+	// can read reference_chunks.embedding and join against
+	// reference_docs. The MCP handler accepts a CoreDB interface
+	// for portability; assert here. The getDB() singleton is
+	// always a *DatabaseManager (see cmd/mpm/handlers.go:285
+	// getDBConcrete), so the assertion is safe.
+	concrete, ok := dm.(*mpminternal.DatabaseManager)
+	if !ok {
+		// Fall back to the legacy FTS-only path for any non-DM
+		// CoreDB implementation. The legacy path is correct
+		// (just less featureful) so the search still works.
+		results, err := dm.SearchReferenceChunks(query, limit)
+		if err != nil {
+			return nil, fmt.Errorf("search references: %w", err)
+		}
+		items := make([]map[string]interface{}, 0, len(results))
+		for _, r := range results {
+			items = append(items, map[string]interface{}{
+				"id":          r["id"],
+				"doc_title":   r["doc_title"],
+				"chunk_index": r["chunk_index"],
+				"content":     r["content"],
+			})
+		}
+		return map[string]interface{}{
+			"success": true,
+			"results": items,
+			"count":   len(items),
+			"mode":    "fts-only",
+		}, nil
+	}
+
+	cfg := mpminternal.DefaultReferenceHybridConfig()
+	cfg.Limit = limit
+	cfg.VectorWeight = vectorWeight
+	results, err := mpminternal.ReferenceHybridSearch(concrete, query, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("search references: %w", err)
 	}
 	items := make([]map[string]interface{}, 0, len(results))
 	for _, r := range results {
 		items = append(items, map[string]interface{}{
-			"id":          r["id"],
-			"doc_title":   r["doc_title"],
-			"chunk_index": r["chunk_index"],
-			"content":     r["content"],
+			"id":                r.ID,
+			"doc_id":            r.DocID,
+			"doc_title":         r.DocTitle,
+			"chunk_index":       r.ChunkIndex,
+			"section":           r.Section,
+			"content":           r.Content,
+			"source":            r.Source,
+			"fts5_score":        r.FTS5Score,
+			"vector_similarity": r.VectorSimilarity,
+			"combined_score":    r.CombinedScore,
 		})
 	}
 	return map[string]interface{}{
 		"success": true,
 		"results": items,
 		"count":   len(items),
+		"mode":    "hybrid",
 	}, nil
 }
 
