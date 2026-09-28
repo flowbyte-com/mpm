@@ -59,7 +59,7 @@ CGO_LDFLAGS := -lm
 # Run filter for make test-release; override with `make test-release RUN='-run TestFoo'`.
 RELEASE_RUN ?=
 
-.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit lint help refresh-installed
+.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit lint help refresh-installed check-installed-drift
 
 all: build
 
@@ -309,6 +309,22 @@ refresh-installed:
 	@cd $(AGENT_INSTALL_DIR) && python3 scripts/render_managed_blocks.py --check \
 	    && echo "==> refresh complete; render check PASS." \
 	    || { echo "    FAIL: post-refresh render --check failed (drift between canonical source and installed artifacts)" >&2; exit 6; }
+
+# Verify that every persistent-file host's installed managed block
+# byte-matches the canonical render. Closes the gap exposed on
+# 2026-09-28 when the Pi, Claude, and OpenCode managed blocks
+# remained on the 2026-09-04 7-section contract three weeks after
+# the 2026-09-27 1.0.0 -> 1.2.0 expansion: the render script's
+# `--check` mode validated the snippet, but no check validated the
+# next hop in the chain (snippet -> installed persistent file).
+#
+# `make refresh-installed` is the canonical repair path. This
+# target is read-only (does not modify the install targets); on
+# failure it prints the per-host drift, first divergent line, and
+# the repair command.
+check-installed-drift:
+	@cd $(AGENT_INSTALL_DIR) && python3 -m unittest tests.test_installed_block_drift -v \
+	    || { echo "    FAIL: installed managed blocks drifted from canonical render; run \`make refresh-installed\` to repair" >&2; exit 1; }
 
 # Show help
 help:
