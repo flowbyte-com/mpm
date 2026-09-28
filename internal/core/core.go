@@ -188,6 +188,7 @@ type CoreDB interface {
 	ListReferences(limit, offset int) ([]map[string]interface{}, error)
 	SearchReferences(q string, limit int) ([]map[string]interface{}, error)
 	SearchReferenceChunks(q string, limit int) ([]map[string]interface{}, error)
+	SearchReferenceChunksHybrid(query string, limit int) ([]map[string]interface{}, error)
 	AddReferenceFromFile(filepath, title string) (map[string]interface{}, error)
 	AddReferenceFromFileWith(filepath, title string, tags []string, reason string, chunkSize int) (map[string]interface{}, error)
 	EmbedReferenceChunks(ctx context.Context, docID string) (embedded int, failed int, err error)
