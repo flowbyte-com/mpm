@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 )
 
 // embeddingBytes marshals a []float32 to JSON bytes for storage in the
@@ -320,8 +321,9 @@ type ReferenceEmbeddingFingerprint struct {
 	Model string
 
 	// Dimension is the embedding dimension the active provider
-	// would produce. 0 when the active provider is
-	// NullProvider — also never a valid match.
+	// would produce. 0 means the dimension has not been
+	// determined yet (see ActiveEmbeddingDimension) OR the
+	// active provider is NullProvider.
 	Dimension int
 }
 
@@ -380,28 +382,99 @@ func currentEmbeddingFingerprint() ReferenceEmbeddingFingerprint {
 // currentEmbeddingFingerprint. CLI backfill and other
 // out-of-package callers use this to report staleness
 // without going through a DatabaseManager.
+//
+// Model is taken from provider.Name() (e.g. "ollama:all-minilm").
+// Dimension is taken from the cached ActiveEmbeddingDimension
+// if known; otherwise it is left at 0 and the dimension
+// comparison degenerates to "stored dim is 0 OR matches active".
+// The first call from RefreshStaleReferenceEmbeddings runs a
+// one-time sample embed to populate the cache; subsequent calls
+// are O(1) lookups.
 func CurrentEmbeddingFingerprint() ReferenceEmbeddingFingerprint {
 	cfg := DefaultEmbeddingConfig()
 	if cfg.Provider == nil || cfg.Provider.Name() == "null" {
 		return ReferenceEmbeddingFingerprint{}
 	}
-	// Provider name encodes model identity (e.g. "ollama:all-minilm"
-	// or "openai-compatible:text-embedding-3-small"). Dimension
-	// is not known without a sample embed; the fingerprint is
-	// therefore (Model, 0). referenceEmbeddingNeedsRefresh
-	// checks both fields: if either differs from the stored
-	// row, the row is stale.
-	return ReferenceEmbeddingFingerprint{Model: cfg.Provider.Name()}
+	return ReferenceEmbeddingFingerprint{
+		Model:     cfg.Provider.Name(),
+		Dimension: ActiveEmbeddingDimension(),
+	}
+}
+
+// activeEmbeddingDimCache caches the most recent observed
+// embedding dimension for the active provider. Populated by
+// ActiveEmbeddingDimension (lazy sample embed on first miss).
+// Cleared by ResetActiveEmbeddingDimensionForTest.
+var (
+	activeEmbeddingDimMu   sync.Mutex
+	activeEmbeddingDim      int
+	activeEmbeddingDimSet   bool
+	activeEmbeddingDimModel string // model name when the dim was set
+)
+
+// ActiveEmbeddingDimension returns the dimension the active
+// provider produces, discovered by a one-time sample embed.
+// On the first call (or when the active model has changed since
+// the last call), it issues a single EmbedText against a
+// short probe string; subsequent calls return the cached value
+// without an additional provider round-trip.
+//
+// The probe is "x" — the shortest non-empty string accepted
+// by every embedding provider (empty strings are rejected by
+// most APIs). The probe is the only runtime cost of dimension
+// discovery; everything else in the backfill is metadata
+// comparison.
+//
+// When the active provider is NullProvider / disabled /
+// absent, the function returns 0 and leaves the cache
+// unchanged.
+func ActiveEmbeddingDimension() int {
+	activeEmbeddingDimMu.Lock()
+	defer activeEmbeddingDimMu.Unlock()
+
+	cfg := DefaultEmbeddingConfig()
+	if cfg.Provider == nil || cfg.Provider.Name() == "null" {
+		return 0
+	}
+	if activeEmbeddingDimSet && activeEmbeddingDimModel == cfg.Provider.Name() {
+		return activeEmbeddingDim
+	}
+	// First call OR model changed since last call: sample the
+	// active provider once. If the embed fails, leave the
+	// cache unchanged — the dimension is unknown for this
+	// run and the predicate will not trigger a refresh on
+	// dimension mismatch alone.
+	vec, err := cfg.Provider.Embed("x")
+	if err != nil || len(vec) == 0 {
+		return 0
+	}
+	activeEmbeddingDim = len(vec)
+	activeEmbeddingDimSet = true
+	activeEmbeddingDimModel = cfg.Provider.Name()
+	return activeEmbeddingDim
+}
+
+// ResetActiveEmbeddingDimensionForTest clears the cached
+// dimension so the next ActiveEmbeddingDimension call runs a
+// fresh sample embed. Test-only; production code never needs
+// to call this.
+func ResetActiveEmbeddingDimensionForTest() {
+	activeEmbeddingDimMu.Lock()
+	activeEmbeddingDim = 0
+	activeEmbeddingDimSet = false
+	activeEmbeddingDimModel = ""
+	activeEmbeddingDimMu.Unlock()
 }
 
 // referenceEmbeddingNeedsRefresh reports whether a stored chunk
 // row needs re-embedding given the active fingerprint.
 //
-//   - embedding IS NULL             → YES, fill
-//   - source == "null" or "hash"    → YES, regenerate with real provider
-//   - source == "provider", stored model != active model → YES
-//   - source == "provider", stored dimension is NULL (legacy)  → YES
-//   - otherwise                     → NO, kept as-is
+//   - embedding IS NULL                              → YES, fill
+//   - source == "null" or "hash"                     → YES, regenerate
+//   - source == "provider", stored model != active   → YES
+//   - source == "provider", stored dim != active dim → YES
+//   - source == "provider", stored dim is 0 (legacy) → YES
+//   - otherwise                                      → NO, kept as-is
 //
 // `embeddingIsNull` is the canonical "needs refresh" signal: the
 // schema defaults embedding_source to 'provider' even on a
@@ -409,6 +482,16 @@ func CurrentEmbeddingFingerprint() ReferenceEmbeddingFingerprint {
 // the row has been embedded. The caller passes the IS NULL
 // signal explicitly so the predicate does not depend on the
 // caller correctly translating the column state into source.
+//
+// The active.Dimension is set by ActiveEmbeddingDimension
+// (one sample embed at the start of a refresh pass). When the
+// active dimension is unknown (provider absent, embed failed,
+// or first-call race), the dimension comparison degenerates to
+// "stored dim is 0 OR matches active" — a stored-dim of 0
+// still triggers a refresh (legacy fingerprint stamping), and
+// a non-zero stored dim is treated as a match (we cannot know
+// better without a successful sample). The model-name
+// comparison still fires regardless of dimension state.
 func referenceEmbeddingNeedsRefresh(embeddingIsNull bool, storedSource string, storedDim int, storedModel string, active ReferenceEmbeddingFingerprint) bool {
 	// NULL embedding: fill.
 	if embeddingIsNull {
@@ -431,15 +514,27 @@ func referenceEmbeddingNeedsRefresh(embeddingIsNull bool, storedSource string, s
 		return false
 	}
 	// Model identity mismatch: the operator switched providers.
+	// This is the primary refresh trigger; the dimension check
+	// below is a secondary refinement.
 	if storedModel != active.Model {
 		return true
 	}
-	// Dimension NULL on a row that has a non-NULL embedding
-	// signals a legacy row whose fingerprint was never stamped.
-	// Refresh to populate the dim alongside any future
-	// re-embed.
-	if storedDim == 0 {
-		return true
+	// Dimension mismatch. When active.Dimension is known and
+	// non-zero, a stored dim that differs triggers a refresh.
+	// When active.Dimension is unknown (0), a stored dim of 0
+	// still triggers a refresh to stamp the fingerprint; a
+	// non-zero stored dim is treated as a match because we
+	// cannot prove otherwise without a sample embed.
+	if active.Dimension != 0 {
+		if storedDim != active.Dimension {
+			return true
+		}
+	} else {
+		// Active dim unknown: refresh legacy rows whose dim
+		// was never stamped.
+		if storedDim == 0 {
+			return true
+		}
 	}
 	return false
 }

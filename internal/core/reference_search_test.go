@@ -825,6 +825,60 @@ func indexOfDoc(results []ReferenceHybridResult, docID string) int {
 	return -1
 }
 
+// TestRelevanceScore_LexicalBonusThresholdBoundary pins the
+// strongLexicalThreshold contract. The 0.05 lexical bonus is
+// applied to a strong lexical match, NOT to a weak one. The
+// threshold is BM25 ≤ -5.0 (BM25 is negative, more negative is
+// better). The boost must fire at the boundary (-5.0) and on
+// stronger matches, and must NOT fire on weaker matches.
+//
+// This is a direct unit test of relevanceScore (not a search-
+// level test) so the boundary contract is pinned independently
+// of the corpus.
+func TestRelevanceScore_LexicalBonusThresholdBoundary(t *testing.T) {
+	// Below the threshold: boost applies.
+	// (-10) is well below -5.0 → strong match → boost.
+	scoreBelow := relevanceScore(-10.0, 0.0)
+	scoreBelowNoBoost := math.Max(ftsStrength(-10.0), 0.0)
+	assert.InDelta(t, 0.05, scoreBelow-scoreBelowNoBoost, 1e-9,
+		"BM25=-10 must trigger the 0.05 lexical boost; got score=%.4f no-boost=%.4f",
+		scoreBelow, scoreBelowNoBoost)
+
+	// At the threshold (-5.0 exactly): boost applies.
+	scoreBoundary := relevanceScore(strongLexicalThreshold, 0.0)
+	scoreBoundaryNoBoost := math.Max(ftsStrength(strongLexicalThreshold), 0.0)
+	assert.InDelta(t, 0.05, scoreBoundary-scoreBoundaryNoBoost, 1e-9,
+		"BM25=-5.0 (threshold) must trigger the 0.05 lexical boost; got score=%.4f no-boost=%.4f",
+		scoreBoundary, scoreBoundaryNoBoost)
+
+	// Just above the threshold (-4.99): boost does NOT apply.
+	scoreAbove := relevanceScore(strongLexicalThreshold+0.01, 0.0)
+	scoreAboveNoBoost := math.Max(ftsStrength(strongLexicalThreshold+0.01), 0.0)
+	assert.InDelta(t, 0.0, scoreAbove-scoreAboveNoBoost, 1e-9,
+		"BM25=-4.99 (above threshold) must NOT trigger the boost; got score=%.4f no-boost=%.4f",
+		scoreAbove, scoreAboveNoBoost)
+
+	// Weak FTS5 (e.g. -1.0): boost does NOT apply.
+	scoreWeak := relevanceScore(-1.0, 0.0)
+	scoreWeakNoBoost := math.Max(ftsStrength(-1.0), 0.0)
+	assert.InDelta(t, 0.0, scoreWeak-scoreWeakNoBoost, 1e-9,
+		"BM25=-1.0 (weak) must NOT trigger the boost; got score=%.4f no-boost=%.4f",
+		scoreWeak, scoreWeakNoBoost)
+
+	// No FTS5 hit (BM25=0): boost does NOT apply.
+	scoreNone := relevanceScore(0.0, 0.0)
+	scoreNoneNoBoost := math.Max(ftsStrength(0.0), 0.0)
+	assert.InDelta(t, 0.0, scoreNone-scoreNoneNoBoost, 1e-9,
+		"BM25=0 (no hit) must NOT trigger the boost; got score=%.4f no-boost=%.4f",
+		scoreNone, scoreNoneNoBoost)
+
+	// Sanity: the boost is bounded. A row at fts=-100, vec=1.0
+	// has ftsStrength near 1.0; the boost adds 0.05; the result
+	// is clamped to 1.0.
+	scoreClamp := relevanceScore(-100.0, 1.0)
+	assert.LessOrEqual(t, scoreClamp, 1.0, "score must be clamped to [0, 1]")
+}
+
 // ── Story 2: model-aware embedding lifecycle tests ─────────────────────────
 //
 // These tests pin the fingerprint comparison logic that lets the
@@ -975,12 +1029,31 @@ func TestReferenceEmbedding_ChangedModelGetsRegenerated(t *testing.T) {
 //      row and the new fingerprint carries the new dim. The
 //      previous dim is overwritten — the row's stored vector
 //      is now produced by the new model at the new dim.
+// TestReferenceEmbedding_WrongDimensionGetsRefreshed confirms
+// the dimension-mismatch case: when the active provider
+// produces a different dim than the stored fingerprint, the row
+// is refreshed. Pinned by the spec's "wrong-dimension embedding
+// gets regenerated" requirement.
+//
+// The desired invariant (from the spec):
+//
+//   stored model != active model        → refresh
+//   stored dim   != active dim          → refresh
+//   missing embedding                   → refresh
+//   changed content                     → refresh
+//   matching content/model/dimension    → reuse
+//
+// The ActiveEmbeddingDimension cache is populated by a one-time
+// sample embed at the start of a refresh pass, so the test
+// uses the canonical stub provider to drive the dimension
+// discovery. The stub is named "stub-4" in both cases so the
+// model identity matches; only the dim differs.
 func TestReferenceEmbedding_WrongDimensionGetsRefreshed(t *testing.T) {
 	dm := NewTestDM(t)
 	defer dm.Close()
 
-	// Provider A: 4-dim, name "stub-a".
-	withNamedStubProvider(t, "stub-a", 4)
+	// Provider: 4-dim, name "stub-4".
+	withNamedStubProvider(t, "stub-4", 4)
 	seedReference(t, dm, "ref-dim-a", "dim-a-doc", "content for dim A.")
 	_, _, err := dm.RefreshStaleReferenceEmbeddings(context.Background())
 	require.NoError(t, err)
@@ -994,47 +1067,38 @@ func TestReferenceEmbedding_WrongDimensionGetsRefreshed(t *testing.T) {
 		"ref-dim-a",
 	).Scan(&dimA, &modelA))
 	assert.Equal(t, 4, dimA)
-	assert.Equal(t, "stub-a", modelA)
+	assert.Equal(t, "stub-4", modelA)
 
-	// Switch to provider with the SAME model name but
-	// different dim. The fingerprint is by (Model, Dim) but
-	// the comparator checks Model first; if Model matches it
-	// is treated as "current". The dim-only mismatch is
-	// handled at query time, not by refresh.
-	withNamedStubProvider(t, "stub-a", 8)
+	// Switch to provider with the SAME model name but a
+	// different dim. The dimension-mismatch path must fire
+	// because active.Dimension is now 8 and the stored dim
+	// is 4. Reset the cached dim so ActiveEmbeddingDimension
+	// re-samples the new provider.
+	withNamedStubProvider(t, "stub-4", 8)
+	ResetActiveEmbeddingDimensionForTest()
 	embedded, _, err := dm.RefreshStaleReferenceEmbeddings(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 0, embedded,
-		"same-model-different-dim is not a refresh trigger (model fingerprint matches); runtime dim-mismatch is the safety net")
+	assert.GreaterOrEqual(t, embedded, 1,
+		"same-model-different-dim must now trigger a refresh (active dim is known to differ from stored); got %d",
+		embedded)
 
-	// Stored dim must still be 4 (untouched).
-	var dimAfter int
+	// Stored dim is now 8 (the active provider's dim).
+	var dimB int
 	require.NoError(t, dm.SQLDB().QueryRow(
 		`SELECT embedding_dimension FROM reference_chunks WHERE doc_id = ?`,
 		"ref-dim-a",
-	).Scan(&dimAfter))
-	assert.Equal(t, 4, dimAfter, "stored dim must remain 4 after a no-op refresh")
+	).Scan(&dimB))
+	assert.Equal(t, 8, dimB, "fingerprint dim must reflect the new active dim")
 
-	// Now switch to a different model. Refresh fires; the
-	// stored dim is overwritten with the new model's dim.
-	withNamedStubProvider(t, "stub-b", 8)
+	// A second refresh with the same (model, dim) is idempotent.
+	ResetActiveEmbeddingDimensionForTest()
 	embedded, _, err = dm.RefreshStaleReferenceEmbeddings(context.Background())
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, embedded, 1, "model change must trigger refresh")
-
-	var (
-		dimB   int
-		modelB string
-	)
-	require.NoError(t, dm.SQLDB().QueryRow(
-		`SELECT embedding_dimension, embedding_model FROM reference_chunks WHERE doc_id = ?`,
-		"ref-dim-a",
-	).Scan(&dimB, &modelB))
-	assert.Equal(t, 8, dimB, "fingerprint dim must reflect the active provider")
-	assert.Equal(t, "stub-b", modelB, "fingerprint model must reflect the active provider")
+	assert.Equal(t, 0, embedded, "matching model+dim must be a no-op on the second pass")
 
 	ResetEmbedConfigForTest()
 }
+
 
 // TestReferenceEmbedding_QueryTimeDimensionMismatchStillSkips is
 // the safety net for the case Refresh does NOT touch (same model

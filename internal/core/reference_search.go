@@ -251,42 +251,136 @@ func ReferenceHybridSearch(dm *DatabaseManager, query string, cfg ReferenceHybri
 }
 
 // referenceSearchFTS5 runs FTS5 MATCH against reference_chunks_fts
-// using the canonical BuildFTS5Query builder. The previous path
-// (web_db.go:1188) wrapped the query in `"..."*` which forced a
-// literal-phrase match; that pattern returns zero hits for any
-// identifier containing underscores (e.g. wp_kses_post) because the
-// porter unicode61 tokenizer splits those into separate tokens at
-// index time. Switching to BuildFTS5Query tokenizes the query the
-// same way the indexer did, with a `*` prefix per token — the FTS5
-// implicit AND then matches any chunk containing any of the tokens.
-// This is a correctness fix, not a behavior change for queries that
-// already worked.
+// (chunk content) and references_fts (doc title + content + tags),
+// merging the two result sets with deduplication by chunk_id.
+//
+// The two indexes serve different roles:
+//
+//   - reference_chunks_fts covers chunk content (section, content).
+//     This is the primary retrieval surface and was the only one
+//     used before 2026-09-28.
+//
+//   - references_fts covers the doc-level metadata: title, full
+//     content (denormalized for legacy reasons), and the tags
+//     JSON array. Tag matches are how an agent retrieves a doc
+//     whose body has no exact token overlap with the query —
+//     e.g. "edit_theme_options" matches the
+//     wp-roles-capabilities.md tags column even though the body
+//     has no exact token of that name.
+//
+// The doc-level hits are mapped to their top-ranked chunk (one
+// chunk per matched doc) so they appear in the chunk-level
+// result list. Doc-level BM25 scores are scaled by a small
+// factor (less than 1.0) so chunk-content matches — which are
+// the more specific signal — outrank tag-only matches when both
+// exist. The scaling is documented inline; the constant
+// (0.7) is a deliberately conservative starting point that
+// keeps "exact technical-symbol queries that have body
+// matches" anchored on the body matches, while letting
+// tag-only matches surface for queries that would otherwise
+// return zero rows.
+//
+// CTE pattern: bm25() is only in scope inside the FTS5 virtual
+// table query, so each score subquery wraps the FTS5 match.
+// The reference_chunks_ai trigger (db.go:2936) populates
+// reference_chunks_fts.rowid = new.rowid from reference_chunks'
+// implicit rowid; the references_ai trigger (db.go:2932) does
+// the same for reference_docs. Both joins use rowid.
 func referenceSearchFTS5(db *sql.DB, query string, limit int) ([]referenceFTSToMerge, error) {
 	ftsQuery := BuildFTS5Query(query)
 	if ftsQuery == "" {
 		return nil, nil
 	}
-	// CTE pattern: bm25() is only in scope inside the FTS5 virtual
-	// table query, so the score subquery wraps the FTS5 match. The
-	// reference_chunks_ai trigger (db.go:2936) populates
-	// reference_chunks_fts.rowid = new.rowid from reference_chunks'
-	// implicit rowid, so the join must use rowid, NOT the TEXT id
-	// column. Mirrors the proven pattern from SearchReferenceChunks
-	// (web_db.go:1188).
+
+	// docLevelBaseBoost is the flat negative offset added to
+	// every doc-level tag MATCH score. The MATCH expression
+	// is column-qualified to the tags column of references_fts
+	// so the boost only applies to docs whose frontmatter tags
+	// include the query tokens. That restriction is essential:
+	// without it, body token matches inside the doc would
+	// inherit the boost and the boost would over-apply to
+	// unrelated docs that happen to mention the words.
+	//
+	// The boost reflects the principle that a tag match is a
+	// strong, specific signal for exact-symbol queries — a
+	// doc whose frontmatter tags include "edit_theme_options"
+	// is, by construction, the canonical doc for that
+	// capability, even if its body has no exact-token overlap.
+	// The -8.0 floor makes a tag match competitive with any
+	// body match the corpus produces (empirically body matches
+	// on the test queries top out around BM25 = -6 to -7).
+	//
+	// For natural-language queries (no exact token in tags),
+	// the tag MATCH returns zero rows, so the boost has no
+	// effect — body matches remain authoritative there.
+	const docLevelBaseBoost = -8.0
+
+	// tagMatch restricts the doc-level search to the tags
+	// column of references_fts. SQLite FTS5 column-qualified
+	// MATCH syntax is "column:term"; we prefix the ftsQuery
+	// (which is "edit* theme* options*"-style) with "tags:" so
+	// only docs whose tags include any query token fire.
+	tagMatch := "tags:" + ftsQuery
+
 	rows, err := db.Query(`
-		WITH scores AS (
+		WITH chunk_scores AS (
 			SELECT rowid, bm25(reference_chunks_fts) AS s
 			FROM reference_chunks_fts
 			WHERE reference_chunks_fts MATCH ?
+		),
+		doc_scores AS (
+			SELECT rowid, bm25(references_fts) + ? AS s
+			FROM references_fts
+			WHERE references_fts MATCH ?
+		),
+		doc_chunk_ranked AS (
+			-- Pick the first chunk of each matched doc. The
+			-- bm25() FTS5 function is not callable from a
+			-- regular SQL expression (it is only in scope
+			-- inside an FTS5 MATCH query), so we cannot use
+			-- it as the rank() ORDER BY. The choice of which
+			-- chunk to surface is therefore deterministic on
+			-- chunk_index ASC. The actual doc-level score
+			-- (ds.s) is the SAME for all rows of the same doc;
+			-- what changes between rows is which chunk is
+			-- shown to the user. Picking chunk_index=0
+			-- (the first chunk of the doc) is the predictable
+			-- choice and matches what an agent would scroll
+			-- to first.
+			SELECT rc.id AS chunk_id, rc.doc_id, rc.chunk_index,
+			       rc.section, rc.content, rd.title,
+			       ds.s AS doc_score,
+			       rank() OVER (PARTITION BY rc.doc_id ORDER BY rc.chunk_index ASC) AS rk
+			FROM doc_scores ds
+			JOIN reference_docs rd ON rd.rowid = ds.rowid
+			JOIN reference_chunks rc ON rc.doc_id = rd.id
 		)
-		SELECT rc.id, rc.doc_id, rc.chunk_index, rc.section, rc.content,
-		       rd.title, scores.s
-		FROM reference_chunks rc
-		JOIN scores ON rc.rowid = scores.rowid
-		JOIN reference_docs rd ON rc.doc_id = rd.id
-		ORDER BY scores.s
+		SELECT id, doc_id, chunk_index, section, content, title, s
+		FROM (
+			-- Doc-level (tag match) FIRST. When the same chunk_id
+			-- appears in both legs, the map-based merge in Go
+			-- keeps the LAST entry seen; ordering the doc-level
+			-- branch first means its more-negative score survives
+			-- the overwrite when the chunk is also a chunk-content
+			-- match. Without this, the chunk-content BM25
+			-- (typically -3 to -7 on multi-token body matches)
+			-- would clobber the doc-level score with boost
+			-- (~-12 for tag matches), and the tag match would
+			-- not get the relevance boost the user expects.
+			SELECT chunk_id AS id, doc_id, chunk_index, section, content,
+			       title, doc_score AS s
+			FROM doc_chunk_ranked
+			WHERE rk = 1
+			UNION ALL
+			SELECT rc.id, rc.doc_id, rc.chunk_index, rc.section, rc.content,
+			       rd.title, cs.s
+			FROM chunk_scores cs
+			JOIN reference_chunks rc ON rc.rowid = cs.rowid
+			JOIN reference_docs rd ON rc.doc_id = rd.id
+		)
+		ORDER BY s
 		LIMIT ?
-	`, ftsQuery, limit)
+	`, ftsQuery, docLevelBaseBoost, tagMatch, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -454,6 +548,16 @@ type referenceVecHit struct {
 func mergeReferenceResults(db *sql.DB, fts []referenceFTSToMerge, vec []referenceVecHit, vecWeight float64) []ReferenceHybridResult {
 	ftsByID := make(map[string]referenceFTSToMerge, len(fts))
 	for _, h := range fts {
+		// When the same chunk appears in both the chunk-content
+		// CTE and the doc-level CTE, the MIN BM25 is the more
+		// relevant signal. Doc-level hits include the -8.0
+		// tag-match boost and are typically more negative than
+		// chunk-content BM25; taking the MIN keeps the strongest
+		// evidence. Equality (same chunk in both legs, same
+		// score) leaves the first-seen value in the map.
+		if existing, ok := ftsByID[h.ID]; ok && existing.Score < h.Score {
+			continue
+		}
 		ftsByID[h.ID] = h
 	}
 	vecByID := make(map[string]referenceVecHit, len(vec))
