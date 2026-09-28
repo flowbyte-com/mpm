@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -272,6 +273,103 @@ class InstallerRoundTrip(unittest.TestCase):
         self.assertIn("refusing", r.stderr.lower())
         # Original file unchanged
         self.assertIn("no end", self.target.read_text())
+
+    def test_stale_body_with_correct_markers_is_replaced(self):
+        """Regression for the 2026-09-28 content-blinder investigation.
+
+        A target with the correct managed-section markers but a stale body
+        must be detected as stale and replaced. Earlier revisions of the
+        installer had a no-op branch that compared markers only (not the
+        body) and let stale content survive. The current body-comparison
+        guard must catch this and refresh the file in place, with a backup
+        preserved.
+        """
+        # Seed the file with user content above a correct managed-section
+        # block whose body is intentionally stale (3 items when the canonical
+        # contract has 11).
+        user_head = "# v's personal notes\nthese are mine, leave them alone\n"
+        stale_body = (
+            "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->\n"
+            "## STALE managed block (3 items only)\n\n"
+            "1. stale-wake\n"
+            "2. stale-persist\n"
+            "3. stale-handoff\n"
+            "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->\n"
+        )
+        user_tail = "\n# v's trailing notes\n"
+        self.target.write_text(user_head + stale_body + user_tail)
+
+        r = self.run_installer()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # Backup preserved
+        self.assertTrue((self.target.parent / (self.target.name + ".bak")).exists(),
+                        "stale-replace should have left a backup")
+
+        result = self.target.read_text()
+        # User content above and below survives
+        self.assertIn("v's personal notes", result)
+        self.assertIn("v's trailing notes", result)
+        # Stale body is gone
+        self.assertNotIn("stale-wake", result)
+        self.assertNotIn("stale-persist", result)
+        self.assertNotIn("stale-handoff", result)
+        # Current contract is in
+        self.assertIn("Wake is auto-injected", result)
+        self.assertIn("Recovery / fallback", result)
+        # Exactly one managed section
+        self.assertEqual(result.count("BEGIN MPM-MANAGED SECTION"), 1)
+
+    def test_current_body_is_noop_no_backup(self):
+        """The no-op branch is byte-equality of the full managed block
+        against the canonical render. A current block must be detected as
+        current, with no backup created (idempotence) and no replacement
+        text written (the file's mtime must not change).
+        """
+        # First install.
+        r = self.run_installer()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        first_bytes = self.target.read_bytes()
+        first_mtime = self.target.stat().st_mtime
+        # No backup should exist after a clean install.
+        self.assertFalse((self.target.parent / (self.target.name + ".bak")).exists(),
+                         "fresh install should not create a backup")
+
+        # Wait a tick so mtime would change if the file were rewritten.
+        time.sleep(0.05)
+
+        # Second install: body is current, must no-op.
+        r = self.run_installer()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no-op", r.stdout)
+        # File untouched: bytes and mtime unchanged.
+        self.assertEqual(self.target.read_bytes(), first_bytes)
+        self.assertEqual(self.target.stat().st_mtime, first_mtime)
+        # Still no backup created on the no-op path.
+        self.assertFalse((self.target.parent / (self.target.name + ".bak")).exists(),
+                         "no-op install should not create a backup")
+
+    def test_duplicate_end_marker_in_user_content_handled_conservatively(self):
+        """If the user has a stray `<!-- END MPM-MANAGED SECTION -->` marker
+        in their content outside the managed block, the installer must
+        still succeed without corrupting the user's marker. The non-greedy
+        managed-block extraction uses the first END after BEGIN, so the
+        user's orphan END remains untouched.
+        """
+        user_content = (
+            "# user notes\n"
+            "<!-- a comment about <!-- END MPM-MANAGED SECTION --> markers -->\n"
+        )
+        self.target.write_text(user_content)
+        r = self.run_installer()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        result = self.target.read_text()
+        # User content preserved
+        self.assertIn("user notes", result)
+        # The user's stray marker comment is preserved
+        self.assertIn("<!-- END MPM-MANAGED SECTION --> markers", result)
+        # The new managed section is present
+        self.assertEqual(result.count("BEGIN MPM-MANAGED SECTION:claude-code-instructions"), 1)
+        self.assertEqual(result.count("END MPM-MANAGED SECTION:claude-code-instructions"), 1)
 
 
 class InstallerScopeSafety(unittest.TestCase):

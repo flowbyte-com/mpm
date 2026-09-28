@@ -35,7 +35,6 @@ import argparse
 import re
 import shutil
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -52,6 +51,10 @@ MANAGED_END_RE   = re.compile(r"<!-- END MPM-MANAGED SECTION(?:[: ][^\n]*| [^\n]
 LEGACY_BEGIN_RE  = re.compile(r"<!-- BEGIN MPM-MANAGED SECTION(?:[: ][^\n]*| [^\n]*)?-->")
 LEGACY_END_RE    = re.compile(r"<!-- END MPM-MANAGED SECTION(?:[: ][^\n]*| [^\n]*)?-->")
 
+# Outer managed-section markers (must match renderer's copy_paste_outer_*).
+OUTER_BEGIN = "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->"
+OUTER_END   = "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->"
+
 HEAD_COMMENT = """\
 <!--
 This file's CLAUDE.md content is managed by the mpm-claude-code plugin's
@@ -62,57 +65,39 @@ To uninstall: re-run install.sh with --remove-managed-section.
 -->"""
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-# Match the existing `<!-- generated: ... -->` comment so re-installs can
-# preserve the original timestamp instead of bumping it every run. Without
-# this, two consecutive installs (e.g. CI smoke + manual re-run) produce
-# different bytes and trip the idempotency test.
-_GENERATED_RE = re.compile(r"<!-- generated: (\d{8}T\d{6}Z) -->")
-
-
-def _existing_generated(content: str) -> str | None:
-    """Return the `<!-- generated: ... -->` timestamp from content's first
-    managed block, or None if no managed block is present."""
-    m = _GENERATED_RE.search(content)
-    return m.group(1) if m else None
-
-
-def banner(existing_ts: str | None = None) -> str:
-    ts = existing_ts or now_iso()
-    return f"""<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->
-<!-- generated: {ts} -->
-<!-- source: ~/.mpm/agent_installation/mpm-claude-code/templates/CLAUDE.md.snippet -->
-<!-- do not edit between the BEGIN/END markers; edit the snippet or the -->
-<!-- canonical protocol at ~/.mpm/agent_installation/mpm-agent-protocol.md. -->"""
-
-
 def footer() -> str:
-    return "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->"
+    return OUTER_END
 
 
-def build_managed_block(snippet_body: str, existing_ts: str | None = None) -> str:
-    banner_text = banner(existing_ts=existing_ts)
-    return f"{banner_text}\n{snippet_body.rstrip()}\n{footer()}\n"
+def build_managed_block(snippet_body: str) -> str:
+    """Build the managed block to match the renderer's compose_snippet output
+    exactly. The outer managed-section markers wrap the snippet body
+    verbatim; the snippet itself already includes the inner
+    <!-- BEGIN MPM MANAGED BLOCK --> / <!-- END MPM MANAGED BLOCK -->
+    markers from the renderer's render_for_host.
+
+    Earlier revisions of this function prepended a `<!-- generated: ... -->`
+    timestamp and a `<!-- source: ... -->` line. Those were removed:
+    they created a content-blinder where the installer's output never
+    byte-matched the renderer's canonical output, so the
+    check-installed-drift guard (3760e0e6) reported false-positive
+    drift after every successful refresh. The body comparison below is
+    the authoritative currency check: byte-equality between the
+    extracted managed block and the rendered canonical block.
+    """
+    return f"{OUTER_BEGIN}\n{snippet_body.rstrip()}\n{OUTER_END}\n"
 
 
 def install(scope: str, home: str, target: str, snippet_path: str) -> int:
     target_path = Path(target)
     snippet = Path(snippet_path).read_text()
 
-    # Preserve the existing `<!-- generated: ... -->` timestamp on
-    # refresh so re-runs don't bump the timestamp every second (closes
-    # the idempotency-flake where two runs in different seconds produce
-    # different bytes). On a fresh install no existing block exists, so
-    # existing_ts is None and build_managed_block uses now_iso().
-    existing_ts = (
-        _existing_generated(target_path.read_text())
-        if target_path.exists()
-        else None
-    )
-    managed_block = build_managed_block(snippet, existing_ts=existing_ts)
+    # Build the managed block from the canonical snippet. The result
+    # is the same bytes the renderer (render_managed_blocks.py
+    # compose_snippet) would produce today; the body comparison below
+    # is therefore a byte-equality test against the canonical render
+    # at the time of install.
+    managed_block = build_managed_block(snippet)
 
     if not target_path.exists():
         # Fresh install: write header + managed block.
@@ -125,21 +110,26 @@ def install(scope: str, home: str, target: str, snippet_path: str) -> int:
     existing = target_path.read_text()
 
     if MANAGED_BEGIN_RE.search(existing) and MANAGED_END_RE.search(existing):
-        # Already managed — refresh the block content with the latest snippet
-        # so re-runs converge on the canonical template. User content outside
-        # the markers is preserved. This closes the drift class where the
-        # managed block became out-of-date with the snippet but the markers
-        # matched (the previous "no-op" branch let stale content survive
-        # forever — see MPM cross-adapter integrity audit, 2026-09-04).
-        new_managed = managed_block.rstrip() + "\n"
-        if _extract_managed_block(existing) == new_managed:
+        # Already managed — compare the extracted block against the
+        # canonical render. If they match byte-for-byte, no-op. If they
+        # differ, replace. The body is the entire managed block
+        # (BEGIN+body+END), so the comparison catches both content
+        # drift and any structural divergence from the renderer.
+        #
+        # Normalize both sides to rstrip() before comparing: the regex
+        # extraction does not include any trailing newline after the
+        # END marker, and the canonical block has a trailing \n.
+        # Without normalization, an otherwise-current file would
+        # appear stale on every run (false-positive drift).
+        new_managed = managed_block.rstrip()
+        if (_extract_managed_block(existing) or "").rstrip() == new_managed:
             print(f"[install_claude_instructions] {target_path} already has current managed section; no-op")
             return 0
         backup = backup_path(target_path)
         shutil.copy2(target_path, backup)
         replaced = re.sub(
             MANAGED_BEGIN_RE.pattern + r".*?"+MANAGED_END_RE.pattern,
-            new_managed.rstrip(),
+            new_managed,
             existing,
             flags=re.DOTALL,
         )
@@ -172,30 +162,29 @@ def install(scope: str, home: str, target: str, snippet_path: str) -> int:
         )
         return 0
 
-    # Single marker without its pair — corrupted file. Abort safely.
-    if re.search(r"<!-- (BEGIN|END) MPM-MANAGED SECTION", existing):
-        # One marker present but not the matching pair.
-        begins = re.findall(r"<!-- BEGIN MPM-MANAGED SECTION", existing)
-        ends = re.findall(r"<!-- END MPM-MANAGED SECTION", existing)
-        if len(begins) != len(ends) or len(begins) > 1:
-            backup = backup_path(target_path)
-            shutil.copy2(target_path, backup)
-            print(
-                f"[install_claude_instructions] ERROR: {target_path} has "
-                f"unmatched or multiple MPM-MANAGED markers; refusing to modify. "
-                f"backup at {backup}.",
-                file=sys.stderr,
-            )
-            return 2
-
-    if MANAGED_BEGIN_RE.search(existing) or MANAGED_END_RE.search(existing):
-        # One marker without the other — file is corrupted; abort.
+    # BEGIN without a matching END — corrupted file. Abort safely.
+    #
+    # Conservative handling: an orphan END (no BEGIN) in user content
+    # is unusual but not catastrophic. The append path below will add
+    # the managed block at the end of the file, leaving the orphan in
+    # place. A BEGIN-without-END is the structurally dangerous case:
+    # the regex below would walk past the missing END and consume
+    # arbitrary file content as if it were inside the managed block.
+    if MANAGED_BEGIN_RE.search(existing) and not MANAGED_END_RE.search(existing):
+        backup = backup_path(target_path)
+        shutil.copy2(target_path, backup)
         print(
-            f"[install_claude_instructions] ERROR: {target_path} has a partial "
-            f"MPM managed marker — refusing to modify. Inspect manually.",
+            f"[install_claude_instructions] ERROR: {target_path} has "
+            f"a BEGIN marker without a matching END; refusing to modify. "
+            f"backup at {backup}.",
             file=sys.stderr,
         )
         return 2
+
+    # (Orphan END in user content is handled by the append path below
+    # — the END stays in place and the new managed block is added at
+    # the end. The structurally dangerous case, BEGIN-without-END, was
+    # already caught above.)
 
     # No managed block present: back up and append.
     backup = backup_path(target_path)

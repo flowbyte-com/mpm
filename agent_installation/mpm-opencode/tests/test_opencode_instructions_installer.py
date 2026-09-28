@@ -246,6 +246,94 @@ class InstallerScopeSafety(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
 
+class StaleVsCurrentBody(unittest.TestCase):
+    """Regression coverage for the 2026-09-28 content-blinder investigation.
+
+    A target with the correct managed-section markers but a stale body
+    must be detected as stale and replaced. A current body must be
+    detected as a no-op, with no backup created.
+    """
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="mpm-opencode-stale-"))
+        self.target = self.tmpdir / "AGENTS.md"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _install(self) -> subprocess.CompletedProcess:
+        return _run([
+            "--scope", "user",
+            "--target", str(self.target),
+            "--snippet", str(SNIPPET),
+        ])
+
+    def test_stale_body_with_correct_markers_is_replaced(self):
+        # Seed with a correct managed-section block whose body is
+        # intentionally stale.
+        user_head = "# user notes\nthese are mine, leave them alone\n"
+        stale_body = (
+            "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->\n"
+            "## STALE managed block (3 items only)\n\n"
+            "1. stale-wake\n"
+            "2. stale-persist\n"
+            "3. stale-handoff\n"
+            "<!-- END MPM-MANAGED SECTION:opencode-instructions -->\n"
+        )
+        user_tail = "\n# trailing notes\n"
+        self.target.write_text(user_head + stale_body + user_tail)
+        r = self._install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.target.parent / (self.target.name + ".bak")).exists(),
+                        "stale-replace should have left a backup")
+        result = self.target.read_text()
+        self.assertIn("user notes", result)
+        self.assertIn("trailing notes", result)
+        self.assertNotIn("stale-wake", result)
+        self.assertNotIn("stale-persist", result)
+        self.assertNotIn("stale-handoff", result)
+        self.assertIn("Wake is auto-injected", result)
+        self.assertIn("Recovery / fallback", result)
+        self.assertEqual(result.count(MANAGED_BEGIN), 1)
+
+    def test_current_body_is_noop_no_backup(self):
+        # First install.
+        r = self._install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        first_bytes = self.target.read_bytes()
+        first_mtime = self.target.stat().st_mtime
+        self.assertFalse((self.target.parent / (self.target.name + ".bak")).exists(),
+                         "fresh install should not create a backup")
+        import time
+        time.sleep(0.05)
+        # Second install: body is current, must no-op.
+        r = self._install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no-op", r.stdout)
+        self.assertEqual(self.target.read_bytes(), first_bytes)
+        self.assertEqual(self.target.stat().st_mtime, first_mtime)
+        self.assertFalse((self.target.parent / (self.target.name + ".bak")).exists(),
+                         "no-op install should not create a backup")
+
+    def test_duplicate_end_marker_in_user_content_handled_conservatively(self):
+        # User content with a stray `<!-- END MPM-MANAGED SECTION -->` in
+        # a comment. The installer should still succeed (no managed
+        # block exists), append the new managed block, and leave the
+        # orphan marker untouched in user content.
+        user_content = (
+            "# user notes\n"
+            "<!-- a comment about <!-- END MPM-MANAGED SECTION --> markers -->\n"
+        )
+        self.target.write_text(user_content)
+        r = self._install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        result = self.target.read_text()
+        self.assertIn("user notes", result)
+        self.assertIn("<!-- END MPM-MANAGED SECTION --> markers", result)
+        self.assertEqual(result.count(MANAGED_BEGIN), 1)
+        self.assertEqual(result.count(MANAGED_END), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 

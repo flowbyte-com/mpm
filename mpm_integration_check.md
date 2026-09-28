@@ -1058,6 +1058,23 @@ managed MPM behavioural instructions
 live MCP call
 ```
 
+For the managed MPM behavioural instructions: the install target is `~/.claude/CLAUDE.md`. Use the canonical diagnostic:
+
+```bash
+make check-installed
+```
+
+The diagnostic distinguishes four states:
+
+```text
+PASS    installed block byte-matches the current canonical render
+WARN    installed block drifted from the current canonical render
+ABSENT  install target absent or managed-section markers absent
+ERROR   install target present, markers present, but file malformed
+```
+
+PASS and WARN are currency concerns; ABSENT is a presence concern. The `make check-installed` diagnostic reports presence and currency separately, so an operator can tell the two apart at a glance. WARN's repair path is `make refresh-installed`. ABSENT's repair path is the per-host `install.sh` (not `refresh-installed` — there is no managed block to refresh).
+
 ## 17.5 OpenCode
 
 Check:
@@ -1069,6 +1086,8 @@ CLI fallback
 workspace resolution
 managed behavioural instructions
 ```
+
+For the managed behavioural instructions: the install target is `~/.config/opencode/AGENTS.md`. Use the same `make check-installed` diagnostic. Repair paths match those listed in §17.4.
 
 ## 17.6 Hermes
 
