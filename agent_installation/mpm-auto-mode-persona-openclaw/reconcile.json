@@ -1,0 +1,9 @@
+{
+  "host_label": "openclaw_auto_mode_persona",
+  "description": "OpenClaw auto-mode-persona adapter (opt-in only)",
+  "installer": "",
+  "installer_type": "python",
+  "args": [],
+  "opt_in": true,
+  "skip_reason": "OpenClaw auto-mode-persona is installed only as part of mpm-memory-openclaw."
+}

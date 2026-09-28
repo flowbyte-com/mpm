@@ -59,7 +59,7 @@ CGO_LDFLAGS := -lm
 # Run filter for make test-release; override with `make test-release RUN='-run TestFoo'`.
 RELEASE_RUN ?=
 
-.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit lint help refresh-installed check-installed-drift
+.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit lint help refresh-installed check-installed-drift check-installed
 
 all: build
 
@@ -104,7 +104,7 @@ build:
 # the same canonical layout ($PREFIX/bin/) for the binaries
 # themselves; install.sh adds the PATH surface that
 # `make install` does not.
-install: build
+install: build refresh-installed
 	@echo "🚀 Verifying canonical install at $(PREFIX)/bin/..."
 	@mkdir -p $(PREFIX)/bin
 	@if [ "$(BUILD_DIR)" != "$(PREFIX)/bin" ] && [ ! -L "$(BUILD_DIR)" ] && [ ! -L "$(PREFIX)" ]; then \
@@ -263,19 +263,17 @@ clean:
 # adapter's installer preserves user-authored content outside the managed
 # block). Fails clearly if an adapter cannot be refreshed.
 #
-# Per-host behavior:
-#   Claude Code, OpenCode, Pi — refresh the persistent managed block in the
-#     user-scope instruction file (CLAUDE.md / AGENTS.md). Installers are
-#     idempotent; on a no-op they print a confirmation and exit 0.
-#   Hermes — skipped here (no installed managed block exists in this
-#     environment; the mpm-hermes SKILL.md documents the manual flow).
-#   OpenClaw — uses runtime injection (no persistent managed block); refresh
-#     via its own install.sh which is a separate concern (plugin wiring, not
-#     instruction-file refresh).
+# This target is host-agnostic: it does not name any specific adapter.
+# The reconciliation entry point discovers every adapter under
+# agent_installation/mpm-* that contributes a `reconcile.json` manifest
+# and invokes its installer. Opt-in adapters (those whose managed block
+# is intentionally absent on this machine) ship with `opt_in: true` so
+# the generic pass leaves them alone.
 #
-# After refresh, run `agent_installation/scripts/render_managed_blocks.py
-# --check` to verify no drift between canonical source and installed
-# artifacts.
+# Per-adapter behavior is declared in each adapter's `reconcile.json`.
+# Installers are idempotent; on a no-op they print a confirmation and
+# exit 0. After refresh, `make check-installed` and `make
+# check-installed-drift` verify byte-parity.
 AGENT_INSTALL_DIR := agent_installation
 refresh-installed:
 	@echo "==> refreshing host installed artifacts from canonical source..."
@@ -283,32 +281,12 @@ refresh-installed:
 	@echo "    [1/N] regenerating host template snippets from canonical source"
 	@cd $(AGENT_INSTALL_DIR) && python3 scripts/render_managed_blocks.py || { echo "    FAIL: render_managed_blocks.py failed" >&2; exit 2; }
 	@echo ""
-	@echo "    [2/N] Claude Code: refreshing $(HOME)/.claude/CLAUDE.md"
-	@python3 $(AGENT_INSTALL_DIR)/mpm-claude-code/scripts/install_claude_instructions.py \
-	    --scope user --home $(HOME) \
-	    --target $(HOME)/.claude/CLAUDE.md \
-	    --snippet $(AGENT_INSTALL_DIR)/mpm-claude-code/templates/CLAUDE.md.snippet \
-	    || { echo "    FAIL: Claude Code refresh failed" >&2; exit 3; }
-	@echo ""
-	@echo "    [3/N] OpenCode: refreshing install + AGENTS.md"
-	@bash $(AGENT_INSTALL_DIR)/mpm-opencode/install.sh || { echo "    FAIL: OpenCode install failed" >&2; exit 4; }
-	@python3 $(AGENT_INSTALL_DIR)/mpm-opencode/scripts/install_agents_instructions.py \
-	    --scope user \
-	    --target $(HOME)/.config/opencode/AGENTS.md \
-	    --snippet $(AGENT_INSTALL_DIR)/mpm-opencode/templates/AGENTS.md.snippet \
-	    || { echo "    FAIL: OpenCode refresh failed" >&2; exit 4; }
-	@echo ""
-	@echo "    [4/N] Pi: refreshing $(HOME)/.pi/agent/AGENTS.md"
-	@python3 $(AGENT_INSTALL_DIR)/mpm-pi/scripts/install_agents_instructions.py \
-	    --scope user \
-	    --snippet $(AGENT_INSTALL_DIR)/mpm-pi/templates/AGENTS.md.snippet \
-	    || { echo "    FAIL: Pi refresh failed" >&2; exit 5; }
-	@echo ""
-	@echo "    [5/N] Hermes: no persistent managed block to refresh (skipping)"
+	@echo "    [2/N] reconciling installed managed blocks via the host-agnostic entry point"
+	@python3 $(AGENT_INSTALL_DIR)/scripts/reconcile_managed_blocks.py --home $(HOME) || { echo "    FAIL: reconcile_managed_blocks.py failed" >&2; exit 3; }
 	@echo ""
 	@cd $(AGENT_INSTALL_DIR) && python3 scripts/render_managed_blocks.py --check \
 	    && echo "==> refresh complete; render check PASS." \
-	    || { echo "    FAIL: post-refresh render --check failed (drift between canonical source and installed artifacts)" >&2; exit 6; }
+	    || { echo "    FAIL: post-refresh render --check failed (drift between canonical source and installed artifacts)" >&2; exit 4; }
 
 # Verify that every persistent-file host's installed managed block
 # byte-matches the canonical render. Closes the gap exposed on
@@ -325,6 +303,16 @@ refresh-installed:
 check-installed-drift:
 	@cd $(AGENT_INSTALL_DIR) && python3 -m unittest tests.test_installed_block_drift -v \
 	    || { echo "    FAIL: installed managed blocks drifted from canonical render; run \`make refresh-installed\` to repair" >&2; exit 1; }
+
+# Read-only diagnostic for installed managed blocks. Distinguishes
+# PASS / WARN / ABSENT / ERROR per host, with the canonical repair
+# path printed for each non-PASS verdict. Exit code is 0 when all
+# installed hosts are PASS, 1 when any WARN or ERROR is observed.
+# This is the operational diagnostic complement to
+# check-installed-drift (which only fails on drift and does not
+# report presence separately).
+check-installed:
+	@python3 $(AGENT_INSTALL_DIR)/scripts/check_installed_managed_blocks.py
 
 # Show help
 help:

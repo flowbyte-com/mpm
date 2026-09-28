@@ -99,6 +99,23 @@ MIGRATION_AWARE_FILES = {
     # absent from active surfaces (manifest, index.js) and that the
     # migration step is silent when the legacy id is not present.
     "agent_installation/mpm-memory-openclaw/tests/installer.test.js",
+    # The OpenClaw uninstall-flow tests — exercise the migration from
+    # the legacy `openclaw-mpm-memory` / `openclaw-mpm-auto-mode-persona`
+    # plugin ids to the canonical `mpm-*` ones, so the legacy ids
+    # appear in test assertions and in the fake-binary fixture.
+    "agent_installation/tests/test_uninstall_openclaw.mjs",
+    "agent_installation/tests/fixtures/fake-openclaw.sh",
+    # The OpenClaw uninstaller — performs the legacy-id migration when
+    # removing an OpenClaw install (config unset, plugin entry removal).
+    # Same migration pattern as the installer; same allowlist.
+    "agent_installation/uninstall-openclaw.sh",
+    # INSTALL.md OpenClaw section — documents the legacy plugin ids so
+    # operators with pre-2026-09-17 installs know what to remove.
+    "agent_installation/INSTALL.md",
+    # mpm_integration_check.md — the §17.6 OpenClaw diagnostic surfaces
+    # the legacy plugin ids as examples that should NOT appear in active
+    # artefacts. The legacy names are the test inputs.
+    "mpm_integration_check.md",
     # The OpenCode adapter installer — uses 'opencode-mpm' in comments
     # and migration-detection logic to recognise and migrate the legacy
     # namespace from `opencode-mpm` to `mpm-opencode`.
@@ -112,6 +129,13 @@ MIGRATION_AWARE_FILES = {
     # references it (B9 invariant). Removing the references would
     # remove the test of the invariant.
     "agent_installation/mpm-opencode/tests/test_resolve_mpm_binary.test.ts",
+    # The Pi adapter installer — uses 'pi-mpm' in comments and
+    # migration-detection logic to recognise and migrate the legacy
+    # namespace from `pi-mpm` to `mpm-pi`.
+    "agent_installation/mpm-pi/install.sh",
+    # The Pi adapter installer tests — assert the migration behavior
+    # on the legacy path.
+    "agent_installation/mpm-pi/tests/test_pi_settings_installer.py",
     # This very test file — the forbidden-name lists and the legacy
     # documentation must enumerate the old names. Excluding it would
     # be self-defeating (the test would ban itself).
@@ -263,8 +287,17 @@ class TestNamingInvariants(unittest.TestCase):
     # ---- Boundary invariants -----------------------------------------
 
     def test_root_install_sh_remains_host_agnostic(self) -> None:
-        """The root install.sh does not reference adapter paths or names."""
-        src = (REPO_ROOT / "mpm" / "install.sh").read_text()
+        """The root install.sh does not reference adapter paths or names.
+
+        2026-09-17 commit 7682fa21 moved install.sh into mpm/ for one
+        release; that move was reverted in ab628144 (canonical layout
+        puts install.sh at the repo root). The test path was updated
+        to mpm/install.sh in 7682fa21 but the matching revert was
+        missed — the test has been silently erroring with
+        FileNotFoundError ever since. Fix the path to the actual
+        location of the canonical installer.
+        """
+        src = (REPO_ROOT / "install.sh").read_text()
         for name in FORBIDDEN_NAMES + sorted(CANONICAL_ADAPTERS):
             self.assertNotIn(
                 name,

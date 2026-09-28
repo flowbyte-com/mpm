@@ -74,32 +74,33 @@ class RefreshInstalledTargetRegistered(unittest.TestCase):
             "refresh-installed recipe must invoke render_managed_blocks.py",
         )
 
-    def test_recipe_invokes_claude_installer(self):
+    def test_recipe_invokes_host_agnostic_entry_point(self):
+        # refresh-installed must delegate to the host-agnostic generic
+        # entry point, NOT name any specific adapter's installer. The
+        # generic entry point (reconcile_managed_blocks.py) discovers
+        # every adapter with a reconcile.json manifest and dispatches
+        # accordingly. This is what keeps the Makefile host-agnostic.
         self.assertIn(
-            "install_claude_instructions.py", self.recipe_body,
-            "refresh-installed recipe must invoke install_claude_instructions.py",
+            "reconcile_managed_blocks.py", self.recipe_body,
+            "refresh-installed must invoke reconcile_managed_blocks.py "
+            "(the host-agnostic generic entry point), not name any "
+            "specific adapter's installer directly.",
         )
-
-    def test_recipe_invokes_opencode_install_sh(self):
-        # mpm-opencode's install.sh performs the namespace-refresh
-        # migration (opencode.jsonc stale entry → canonical path) plus
-        # the dist/ rebuild. refresh-installed must invoke it.
-        self.assertIn(
-            "mpm-opencode/install.sh", self.recipe_body,
-            "refresh-installed recipe must invoke mpm-opencode/install.sh for namespace refresh",
-        )
-
-    def test_recipe_invokes_opencode_and_pi_installer(self):
-        # OpenCode and Pi share the same installer filename but live in
-        # different adapter directories — both invocations should appear.
-        self.assertIn(
-            "mpm-opencode/scripts/install_agents_instructions.py", self.recipe_body,
-            "refresh-installed recipe must invoke mpm-opencode's installer",
-        )
-        self.assertIn(
-            "mpm-pi/scripts/install_agents_instructions.py", self.recipe_body,
-            "refresh-installed recipe must invoke mpm-pi's installer",
-        )
+        # Negative: the recipe must NOT hardcode adapter-specific
+        # installer names. This pins the host-agnostic invariant from
+        # the install target's perspective.
+        for forbidden in [
+            "mpm-claude-code/scripts/install_claude_instructions.py",
+            "mpm-opencode/install.sh",
+            "mpm-opencode/scripts/install_agents_instructions.py",
+            "mpm-pi/scripts/install_agents_instructions.py",
+            "mpm-memory-openclaw/install.sh",
+        ]:
+            self.assertNotIn(
+                forbidden, self.recipe_body,
+                f"refresh-installed must not hardcode adapter-specific "
+                f"path {forbidden!r}; delegate to reconcile_managed_blocks.py",
+            )
 
     def test_post_refresh_render_check_is_invoked(self):
         # The recipe must end with `render_managed_blocks.py --check` to
@@ -125,6 +126,15 @@ class RefreshInstalledPathsResolve(unittest.TestCase):
         self.assertTrue(
             (AGENT_INSTALL_DIR / "scripts" / "render_managed_blocks.py").is_file(),
             "render_managed_blocks.py missing",
+        )
+
+    def test_reconcile_script_exists(self):
+        # The host-agnostic generic entry point that the
+        # refresh-installed target now delegates to.
+        self.assertTrue(
+            (AGENT_INSTALL_DIR / "scripts" / "reconcile_managed_blocks.py").is_file(),
+            "reconcile_managed_blocks.py missing — refresh-installed "
+            "delegates to this entry point.",
         )
 
     def test_claude_code_installer_exists(self):

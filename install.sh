@@ -677,6 +677,48 @@ EOF
 }
 
 
+# ---------------------------------------------------------------------------
+# phase_agent_reconcile
+# ---------------------------------------------------------------------------
+#
+# Reconcile installed host managed blocks to the current canonical render.
+#
+# Why: this installer (the documented "git pull && ./install.sh" update path)
+# rebuilds the binary but does NOT otherwise touch host state. Without this
+# phase, an installed ~/.claude/CLAUDE.md, ~/.config/opencode/AGENTS.md, or
+# ~/.pi/agent/AGENTS.md whose managed section was written from an older
+# canonical contract would silently drift further on every update.
+#
+# This phase delegates to the host-agnostic generic entry point at
+# agent_installation/scripts/reconcile_managed_blocks.py. That script
+# discovers every adapter with a `reconcile.json` manifest, invokes
+# each adapter's installer, and skips opt-in adapters (e.g. OpenClaw
+# on this machine, which is intentionally absent). The root installer
+# stays host-agnostic: it never names a specific adapter or host.
+#
+# Failure mode: each adapter is invoked independently. A failure in one
+# adapter is logged as WARN; the install continues for the remaining
+# adapters. Operators can re-run the failed adapter's installer or
+# `make refresh-installed` to retry.
+# hosts. Operators can re-run the failed host's installer or
+# `make refresh-installed` to retry.
+phase_agent_reconcile() {
+    note "AGENT INSTALL RECONCILE"
+    local reconcile_script="$PROJECT_ROOT/agent_installation/scripts/reconcile_managed_blocks.py"
+    if [ ! -f "$reconcile_script" ]; then
+        warn "  reconcile_managed_blocks.py missing at $reconcile_script"
+        warn "  (this is unexpected on a stock MPM checkout)"
+        return 0
+    fi
+    if python3 "$reconcile_script" --home "$HOME"; then
+        log "  reconciliation ok"
+    else
+        warn "  one or more adapters reported non-zero exit (continuing)"
+        return 1
+    fi
+}
+
+
 phase_validate() {
     note "VALIDATION"
     local errors=0
@@ -735,6 +777,7 @@ mode_install() {
     phase_symlinks
     phase_data_dir
     phase_service
+    phase_agent_reconcile
     phase_validate
     note "INSTALL COMPLETE"
     # Use the canonical path so the next-steps commands are runnable
@@ -795,6 +838,10 @@ mode_dry_run() {
         log "  and: systemctl --user add-wants graphical-session.target mpm-scheduler.service (secondary)"
     fi
     log "  validate via systemctl status + mpm health_check"
+    log "  reconcile installed host managed blocks via the host-agnostic"
+    log "    agent_installation/scripts/reconcile_managed_blocks.py entry"
+    log "    point (idempotent; preserves user content outside managed block;"
+    log "    skips opt-in adapters such as OpenClaw)"
     log ""
     log "dry run complete (no changes made)"
 }
@@ -878,10 +925,14 @@ $SCRIPT_NAME — MPM install (user-space only)
 Usage: $SCRIPT_NAME [mode] [options]
 
 Modes (default: install):
-  (default)       Full install: preflight, build, install binaries + service
+  (default)       Full install: preflight, build, install binaries + service,
+                  reconcile host managed blocks, validate
   --check         Preflight only — verify environment, no changes
   --dry-run       Print intended actions, no changes
   --validate      Post-install validation (read-only)
+  --reconcile     Reconcile host managed blocks to canonical render only
+                  (the documented "git pull && ./install.sh --reconcile"
+                  path after a content-only MPM update)
   --uninstall     Remove installed artifacts (data preserved)
 
 Options:
@@ -896,6 +947,7 @@ Examples:
   $SCRIPT_NAME --check          # environment check (no changes)
   $SCRIPT_NAME --dry-run        # show intended actions
   $SCRIPT_NAME --validate       # verify install
+  $SCRIPT_NAME --reconcile      # reconcile host managed blocks only
   $SCRIPT_NAME --uninstall      # remove install (data preserved)
 
 Exit codes:
@@ -922,6 +974,7 @@ parse_args() {
             --check)        MODE="check"; shift ;;
             --dry-run)      MODE="dry_run"; shift ;;
             --validate)     MODE="validate"; shift ;;
+            --reconcile)    MODE="reconcile"; shift ;;
             --uninstall)    MODE="uninstall"; shift ;;
             --prefix)       PREFIX="$2"; shift 2 ;;
             --data-root)    DATA_ROOT="$2"; shift 2 ;;
@@ -933,6 +986,13 @@ parse_args() {
     done
 }
 
+mode_reconcile() {
+    note "RECONCILE (managed-block reconciliation only)"
+    preflight
+    phase_agent_reconcile
+    note "RECONCILE COMPLETE"
+}
+
 main() {
     parse_args "$@"
     resolve_paths
@@ -942,6 +1002,7 @@ main() {
         check)     mode_check ;;
         dry_run)   mode_dry_run ;;
         validate)  mode_validate ;;
+        reconcile) mode_reconcile ;;
         uninstall) mode_uninstall ;;
         *)         err "unknown mode: $MODE"; usage; exit 1 ;;
     esac

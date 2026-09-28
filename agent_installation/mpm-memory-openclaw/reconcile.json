@@ -1,0 +1,9 @@
+{
+  "host_label": "openclaw",
+  "description": "OpenClaw SOUL.md managed-block installer (opt-in only)",
+  "installer": "",
+  "installer_type": "python",
+  "args": [],
+  "opt_in": true,
+  "skip_reason": "OpenClaw uses runtime injection; the managed block is intentionally absent on this machine. Run mpm-memory-openclaw/install.sh explicitly to install."
+}

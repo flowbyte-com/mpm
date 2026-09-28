@@ -1,0 +1,12 @@
+{
+  "host_label": "opencode",
+  "description": "OpenCode AGENTS.md managed-block installer",
+  "installer": "scripts/install_agents_instructions.py",
+  "installer_type": "python",
+  "args": [
+    "--scope", "user",
+    "--target", "~/.config/opencode/AGENTS.md",
+    "--snippet", "@/templates/AGENTS.md.snippet"
+  ],
+  "opt_in": false
+}

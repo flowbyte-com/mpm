@@ -1,0 +1,13 @@
+{
+  "host_label": "pi",
+  "description": "Pi AGENTS.md managed-block installer",
+  "installer": "scripts/install_agents_instructions.py",
+  "installer_type": "python",
+  "args": [
+    "--scope", "user",
+    "--target-dir", "~/.pi/agent/",
+    "--filename", "AGENTS.md",
+    "--snippet", "@/templates/AGENTS.md.snippet"
+  ],
+  "opt_in": false
+}
