@@ -166,6 +166,14 @@ echo "[pre-commit] running synthesis / reliability / lifecycle / wake context te
 # Earlier version (kept here for the historical record — DO NOT USE):
 #   if ! (cd internal/core && "$GO" test -short -count=1 -tags fts5 ./... \
 #        -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"); then
+#
+# The live regex lives in the Makefile's `test-core-precommit` target and
+# was extended with `|TestDBSafety` on 2026-09-29. The repo-wide
+# production-DB guard used to skip under -short, so it never executed in
+# this gate or in CI — the two places it exists to protect. It resolves
+# the repo root and walks all five Go modules from wherever it is
+# invoked, so running it from internal/core still covers cmd/mpm,
+# internal/scheduler, internal/core/tools, and release_acceptance.
 if ! make test-core-precommit > /tmp/pre-commit-test.log 2>&1; then
   echo "[pre-commit] ABORTING commit: migration-relevant tests failed." >&2
   echo "[pre-commit] See log:" >&2

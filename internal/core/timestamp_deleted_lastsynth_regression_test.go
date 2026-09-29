@@ -78,10 +78,7 @@ func TestDeletedAt_MemoryStoreDeleteProducesInteger(t *testing.T) {
 	}
 	defer dm.Close()
 
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = dm.DBPath()
-	store.DB = &SQLiteConnection{DB: dm.SQLDB()}
-	store.DM = dm
+	store := NewTestStoreOnDM(t, dm)
 
 	id, err := dm.SaveMemory("memories", "store delete probe", "", nil, nil, nil, false, 1)
 	if err != nil {

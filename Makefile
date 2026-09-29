@@ -200,7 +200,7 @@ test:
 # previously invoking directly.
 test-core-precommit:
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -short -count=1 -tags fts5 ./... \
-		-run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"
+		-run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics|TestDBSafety"
 
 # Release acceptance suite — cross-agent continuity, public-CLI parity,
 # supersession trace, scale/e2e boundary tests. Spins up real subprocess

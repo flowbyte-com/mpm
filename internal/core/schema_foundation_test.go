@@ -86,11 +86,27 @@ func TestSchema_LegacyWeightView(t *testing.T) {
 
 // newTestStore creates a fresh store on a temp DB. Centralized so schema
 // tests don't all reinvent the same boilerplate.
+//
+// The store is built as a struct literal rather than via
+// NewTestStoreOnDM because these tests are specifically about
+// MemoryStore.InitSQLite creating the schema from BaseTables /
+// ReferenceTables / the FTS5 virtual tables. A DatabaseManager-backed
+// store already has its schema (NewTestDM runs InitSchema), so binding
+// one would skip the very code path under test.
+//
+// The literal replaces `NewMemoryStore("")`, which pointed SQLiteDBPath
+// at the live database before it was immediately overwritten — see the
+// history note in TestGetByIDNilDB. MPM_WORKSPACE is redirected as well
+// so that any config-driven fallback in InitSQLite also lands in the
+// temp dir rather than in the operator's workspace.
 func newTestStore(t *testing.T) *MemoryStore {
 	t.Helper()
 	tmpDir := t.TempDir()
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = filepath.Join(tmpDir, "test.db")
+	t.Setenv("MPM_WORKSPACE", tmpDir)
+	store := &MemoryStore{
+		SQLiteDBPath: filepath.Join(tmpDir, "test.db"),
+		Collections:  []string{},
+	}
 	require.NoError(t, store.InitSQLite())
 	return store
 }

@@ -15,10 +15,7 @@ func TestChallengeTimestamp_Regression(t *testing.T) {
 	}
 	defer dm.Close()
 
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = dm.DBPath()
-	store.DB = &SQLiteConnection{DB: dm.SQLDB()}
-	store.DM = dm
+	store := NewTestStoreOnDM(t, dm)
 
 	baseID, err := dm.SaveMemory("memories", "base fact", "", nil, nil, nil, false, 1)
 	if err != nil {
@@ -70,10 +67,7 @@ func TestSelfHealTimestamp_Regression(t *testing.T) {
 		t.Fatalf("NewDatabaseManager: %v", err)
 	}
 	defer dm.Close()
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = dm.DBPath()
-	store.DB = &SQLiteConnection{DB: dm.SQLDB()}
-	store.DM = dm
+	store := NewTestStoreOnDM(t, dm)
 
 	// Simulate fixed self_heal insert with CAST(... INTEGER)
 	_, err = dm.SQLDB().Exec(`INSERT INTO memories (id, collection, content, metadata, created_at, updated_at) VALUES (?, 'projects', ?, ?, CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER)) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata, updated_at=CAST(strftime('%s','now') AS INTEGER)`, "test-selfheal-reg", "marker", `{}`)
@@ -98,10 +92,7 @@ func TestSynthesisCreatedAtPreservation_Integer(t *testing.T) {
 		t.Fatalf("NewDatabaseManager: %v", err)
 	}
 	defer dm.Close()
-	store := NewMemoryStore("")
-	store.SQLiteDBPath = dm.DBPath()
-	store.DB = &SQLiteConnection{DB: dm.SQLDB()}
-	store.DM = dm
+	store := NewTestStoreOnDM(t, dm)
 
 	id1, _ := dm.SaveMemory("memories", "first", "", nil, nil, nil, false, 1)
 	time.Sleep(1100 * time.Millisecond)

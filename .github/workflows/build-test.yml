@@ -92,8 +92,17 @@ jobs:
 
       # Same regex as .git/hooks/pre-commit. Keep them in sync: if the pre-commit
       # gate gets tighter locally, it gets tighter in CI too.
-      - name: Core tests (synthesis, reliability, lifecycle, hybrid, wake context)
-        run: cd internal/core && go test -short -count=1 ./... -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics"
+      #
+      # TestDBSafety is the repo-wide production-DB guard. It must stay in
+      # this list: it previously skipped under -short, and both this step
+      # and `make test-core-precommit` pass -short, so a skip here meant the
+      # guard never ran in either real gate. It is also not -run-scoped in
+      # a way that matters — the guard resolves the repo root and walks all
+      # five Go modules, so running it from internal/core still covers
+      # cmd/mpm, internal/scheduler, internal/core/tools, and
+      # release_acceptance.
+      - name: Core tests (synthesis, reliability, lifecycle, hybrid, wake context, DB safety)
+        run: cd internal/core && go test -short -count=1 ./... -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics|TestDBSafety"
 
       # Managed-block parity gate (Python; closes a pre-existing CI gap).
       #

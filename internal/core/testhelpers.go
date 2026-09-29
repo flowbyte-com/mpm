@@ -82,6 +82,37 @@ func NewTestDM(t *testing.T) *DatabaseManager {
 	return dm
 }
 
+// NewTestStoreOnDM returns a MemoryStore bound to an existing hermetic
+// DatabaseManager — the sanctioned way for a test to build a
+// MemoryStore.
+//
+// It exists because the obvious alternative, `NewMemoryStore("")`, is
+// not a test constructor at all. `NewMemoryStore(_ string)` discards
+// its path argument and always resolves `config.GetMPMDir()`, so every
+// call points the store at the operator's real database. A store built
+// that way is inert only until something calls InitSQLite(), which
+// GetByID does automatically when s.DB == nil (memory.go:1185) — at
+// which point the full DDL, including four FTS5 virtual tables, is
+// written to ~/.mpm/src/db/mpm.db. The repo-wide AST guard in
+// test_db_safety_test.go fails any test file that calls it.
+//
+// Callers that need a MemoryStore with no DatabaseManager behind it
+// (to exercise InitSQLite's own DDL) should build the struct literal
+// with an explicit SQLiteDBPath under t.TempDir() instead — see
+// newTestStore in schema_foundation_test.go.
+func NewTestStoreOnDM(t *testing.T, dm *DatabaseManager) *MemoryStore {
+	t.Helper()
+	if dm == nil {
+		t.Fatal("NewTestStoreOnDM: nil DatabaseManager")
+	}
+	return &MemoryStore{
+		DM:           dm,
+		DB:           &SQLiteConnection{DB: dm.SQLDB()},
+		SQLiteDBPath: dm.DBPath(),
+		Collections:  []string{},
+	}
+}
+
 // NewTestSharedDM opens a hermetic DatabaseManager with a local tmpfile
 // DB and an ATTACHed shared tmpfile DB — both rooted at t.TempDir().
 //

@@ -3,6 +3,9 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -97,17 +100,56 @@ func TestGetByID(t *testing.T) {
 	}
 }
 
-// TestGetByIDNilDB tests that GetByID handles nil DB gracefully.
+// TestGetByIDNilDB pins the lazy-initialisation contract: GetByID
+// tolerates a store whose DB is not yet open, initialises it on
+// demand, and reports a missing row as (nil, nil) rather than an error.
+//
+// History (2026-09-29): this test previously called
+// `NewMemoryStore("")` and then GetByID(). NewMemoryStore discards its
+// path argument and always resolves config.GetMPMDir(), so the store
+// carried the live path ~/.mpm/src/db/mpm.db; GetByID saw s.DB == nil,
+// called InitSQLite(), and wrote the full schema — tables plus four
+// FTS5 virtual tables — into the operator's real database. The test
+// asserted nothing at all (both results were assigned to _), so the
+// write was invisible while happening on every run.
+//
+// The nil-DB branch is real production behaviour, so the branch is
+// still tested — against a temp path it owns. Isolation is
+// double-belted: MPM_WORKSPACE is redirected into the temp dir so that
+// even a config fallback lands there, and the resolved path is asserted
+// to be inside t.TempDir() before the store is used.
 func TestGetByIDNilDB(t *testing.T) {
-	// Create store without initializing DB
-	store := NewMemoryStore("")
-	// DB is nil, SQLiteDBPath is the default (real path) — calling GetByID
-	// will try to init. We just verify it doesn't panic and returns something.
-	mem, err := store.GetByID("anyid", "memories")
-	// It will either init and return nil (no row), or error on the real path
-	// Just ensure no panic
-	_ = mem
-	_ = err
+	tmpDir := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", tmpDir)
+
+	store := &MemoryStore{
+		SQLiteDBPath: filepath.Join(tmpDir, "lazy-init.db"),
+		Collections:  []string{},
+	}
+	// Precondition: the store really does start closed, otherwise this
+	// test would silently stop covering the branch it exists for.
+	if store.DB != nil {
+		t.Fatal("store.DB is non-nil before GetByID; the nil-DB branch is not under test")
+	}
+	// Precondition: the path cannot be the production database.
+	if !strings.HasPrefix(store.SQLiteDBPath, tmpDir+string(os.PathSeparator)) {
+		t.Fatalf("store path %q escapes the test temp dir %q", store.SQLiteDBPath, tmpDir)
+	}
+
+	mem, err := store.GetByID("nonexistent-id", "memories")
+	if err != nil {
+		t.Fatalf("GetByID on a lazily-initialised store returned error: %v", err)
+	}
+	if mem != nil {
+		t.Fatalf("GetByID on a lazily-initialised store returned %+v, want nil for a missing row", mem)
+	}
+	// The store must now be open — that IS the lazy-init contract.
+	if store.DB == nil {
+		t.Fatal("GetByID returned without error but left store.DB nil; lazy init did not happen")
+	}
+	if _, err := os.Stat(store.SQLiteDBPath); err != nil {
+		t.Fatalf("lazy init did not create the database at %s: %v", store.SQLiteDBPath, err)
+	}
 }
 
 // TestSearchSessions tests SearchSessions with the correct collection name.
