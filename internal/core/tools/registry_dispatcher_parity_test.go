@@ -27,7 +27,6 @@
 package tools
 
 import (
-	"encoding/json"
 	"sort"
 	"strings"
 	"testing"
@@ -39,26 +38,18 @@ import (
 // tool's JSON-Schema, in declaration order. This is what the
 // registry advertises to consumers (MCP server, future --help, etc).
 //
-// Tools with no action enum (e.g. mpm_resolve, mpm_retrieval_diagnose)
-// return an empty slice; assertParityForTool skips them.
+// A tool with no action enum returns an empty slice. That is a
+// legitimate registry state, not an error — the caller decides whether
+// an empty enum makes the tool in scope for parity. The pre-2026-09-29
+// version answered that question with t.Skipf inside the caller's loop,
+// which aborted the entire sweep; see assertParityForTool.
 func extractSchemaActionEnum(t *testing.T, toolName string) []string {
 	t.Helper()
-	tool, ok := ByName(toolName)
-	if !ok {
-		t.Fatalf("registry must contain %q", toolName)
+	enum, _, err := actionEnumOf(toolName)
+	if err != nil {
+		t.Fatalf("%v", err)
 	}
-
-	var schema struct {
-		Properties struct {
-			Action struct {
-				Enum []string `json:"enum"`
-			} `json:"action"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal(tool.Schema, &schema); err != nil {
-		t.Fatalf("%s schema must unmarshal as JSON: %v", toolName, err)
-	}
-	return schema.Properties.Action.Enum
+	return enum
 }
 
 // extractDispatcherActionList returns the dispatcher's public action
@@ -118,21 +109,33 @@ func extractDispatcherActionList(t *testing.T, toolName string, dm mpminternal.C
 //     every public action is advertised (this is what the drift
 //     class missed — schema enum shorter than dispatcher case list).
 //
-// Tools whose action contract is NOT represented by an enum (e.g.
-// mpm_resolve takes pointer URIs, not action verbs) have an empty
-// schema enum and are skipped: an empty enum means "no advertised
-// action surface", which the dispatcher honours by not enumerating
-// cases either.
+// Scope: this function is STRICT. It is called for a specific named
+// tool, so a missing action enum is drift in that tool's contract, not
+// an inapplicable test, and is reported as a failure.
+//
+// The pre-2026-09-29 version called t.Skipf here, and its only caller
+// other than the two per-tool tests was a LOOP. A t.Skipf inside a loop
+// aborts the whole test function on the first enum-less tool, so the
+// entire sweep reported as skipped and checked nothing past that
+// point — while still reading as a passing test. In-scope filtering
+// now happens in the sweep, before this function is called, so it can
+// never abort a sweep.
 func assertParityForTool(t *testing.T, toolName string, dm mpminternal.CoreDB, ac mpminternal.ActiveContext) {
 	t.Helper()
-	schema := extractSchemaActionEnum(t, toolName)
-	dispatcher := extractDispatcherActionList(t, toolName, dm, ac)
 
-	if len(schema) == 0 {
-		// Tool without an enum contract — skip; the test framework
-		// catches tools that DO have an enum but don't honour it.
-		t.Skipf("%s has no action enum (design choice — parity not applicable)", toolName)
+	schema, declaresEnum, err := actionEnumOf(toolName)
+	if err != nil {
+		t.Fatalf("%v", err)
 	}
+	if !declaresEnum {
+		t.Errorf("%s declares no action enum, so this parity assertion is being asked to lock a "+
+			"contract the tool does not have. Either the tool's action surface is encoded some other "+
+			"way (in which case extend assertParityForTool to read it), or the enum was lost and "+
+			"the registry now under-advertises what the dispatcher routes", toolName)
+		return
+	}
+
+	dispatcher := extractDispatcherActionList(t, toolName, dm, ac)
 
 	schemaSorted := append([]string(nil), schema...)
 	dispatcherSorted := append([]string(nil), dispatcher...)
@@ -222,32 +225,62 @@ func TestParity_MpmTopics_RegistryMatchesDispatcher(t *testing.T) {
 // (mpm_theories missing show/list/query) and alpha-5 D-4.1
 // (mpm_topics missing list/show).
 //
-// assertParityForTool skips tools without an enum (e.g. mpm_resolve,
-// mpm_retrieval_diagnose, mpm_blob_read, mpm_blob_search,
-// mpm_log_to_changelog, mpm_request_review) so the iteration is safe for
-// the mixed enum/non-enum registry.
+// Population: every registered tool whose schema declares an action
+// enum, discovered from the registry itself (toolsDeclaringActionEnum).
+//
+// The pre-2026-09-29 version iterated a hand-written list of 15 names
+// and called assertParityForTool, which called t.Skipf for any tool
+// without an enum. That combination is a guard that cannot report
+// anything: t.Skipf inside a loop aborts the entire test function, so
+// one enum-less tool in the middle of the list would have silenced
+// every tool after it while the suite stayed green. Two changes close
+// that:
+//
+//   1. The population is derived from the registry, not restated in
+//      this file. The hardcoded list happened to match the registry
+//      exactly on the day it was written, but a tool added later with
+//      an action enum was never added to the list and so was never
+//      checked — the guard silently fell behind the thing it guards.
+//   2. Out-of-scope tools are filtered BEFORE the loop body runs, so
+//      no per-tool call can skip the sweep. checkParityPopulation
+//      then requires a non-zero population, so a discovery failure
+//      fails the test rather than yielding a vacuous pass.
 func TestParity_AllActionTools_LockEverySurface(t *testing.T) {
 	dm := newTestDMForTools(t)
 	ac := mpminternal.ActiveContext{}
 
-	toolsWithActionEnums := []string{
-		"mpm_memory",
-		"mpm_lessons",
-		"mpm_decisions",
-		"mpm_theories",  // already locked above; iterated for completeness
-		"mpm_skills",
-		"mpm_topics",    // already locked above; iterated for completeness
-		"mpm_references",
-		"mpm_evidence",
-		"mpm_confidence",
-		"mpm_context",
-		"mpm_wakes",
-		"mpm_handoff",
-		"mpm_scratchpad",
-		"mpm_system",
-		"mpm_work",
+	inScope, allTools, err := toolsDeclaringActionEnum()
+	if err != nil {
+		t.Fatalf("cannot establish the parity sweep population: %v", err)
 	}
-	for _, name := range toolsWithActionEnums {
+	if err := checkParityPopulation("registry/dispatcher parity sweep", len(inScope), allTools); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	for _, name := range inScope {
+		// NOTE: deliberately no t.Skip in this loop. Out-of-scope tools
+		// were removed by the filter above; a t.Skip here would abort
+		// the sweep for every remaining tool.
 		assertParityForTool(t, name, dm, ac)
 	}
+
+	t.Logf("parity locked on %d of %d registered tools (%d advertise no action enum and are out of scope: %v)",
+		len(inScope), len(allTools), len(allTools)-len(inScope), outOfScopeTools(allTools, inScope))
+}
+
+// outOfScopeTools reports which registered tools the parity sweep did
+// not check, so the log line above names them rather than leaving the
+// coverage gap implicit.
+func outOfScopeTools(all, inScope []string) []string {
+	in := make(map[string]bool, len(inScope))
+	for _, n := range inScope {
+		in[n] = true
+	}
+	var out []string
+	for _, n := range all {
+		if !in[n] {
+			out = append(out, n)
+		}
+	}
+	return out
 }

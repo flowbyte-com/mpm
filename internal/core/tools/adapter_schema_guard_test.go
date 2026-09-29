@@ -107,11 +107,17 @@ func TestAdapterCallsites_MatchGoSchema(t *testing.T) {
 		}{actions, requiredAction, props}
 	}
 
-	// Find the agent_installation directory. Tests run from the core
-	// package directory, so the workspace root is ../../
-	root, err := findAgentPluginsRoot()
+	// Resolve the adapter tree. Both the root and the population within
+	// it are contractual: a missing tree or a tree with no callMpm(...)
+	// sites means this guard checked nothing, which it must report as a
+	// failure rather than a skip. See guard_scopes_test.go.
+	root, err := adapterRoot(guardRepoRoot(t))
 	if err != nil {
-		t.Skipf("agent_installation not found at expected location: %v", err)
+		t.Fatalf("%v\n"+
+			"This guard is the structural enforcement of lesson 6df12582cbdb9c0c: when the Go "+
+			"registry renames a tool, the JavaScript/TypeScript adapters must be updated in the same "+
+			"commit. If agent_installation/ moved, update adapterRoot rather than skipping the guard.",
+			err)
 	}
 
 	// Walk every adapter file and extract callMpm(...) callSites.
@@ -142,7 +148,12 @@ func TestAdapterCallsites_MatchGoSchema(t *testing.T) {
 		t.Fatalf("walk agent_installation: %v", err)
 	}
 	if len(sites) == 0 {
-		t.Skipf("no callMpm(...) callSites found under %s — no adapters to guard", root)
+		t.Fatalf("no callMpm(...) or callMpmTool(...) call sites found under %s.\n"+
+			"The registry contains %d tools and this guard exists to catch adapters that call a tool "+
+			"the registry no longer has. Zero discovered call sites means the guard is inspecting "+
+			"nothing while reporting success — either every adapter was rewritten to call some other "+
+			"helper, or the walk pattern (index.js / index.ts) no longer matches the adapter layout.",
+			root, len(Registry))
 	}
 
 	// Validate every callSite.
@@ -212,32 +223,24 @@ func TestAdapterCallsites_MatchGoSchema(t *testing.T) {
 		t.Fatalf("adapter-schema drift (%d issue(s)):\n  - %s",
 			len(failures), strings.Join(failures, "\n  - "))
 	}
+
+	// Report the population actually checked, so a future run against a
+	// shrunken adapter tree is visible in the log rather than inferred.
+	distinctTools := map[string]bool{}
+	for _, s := range sites {
+		distinctTools[s.tool] = true
+	}
+	t.Logf("adapter schema drift guard: %d call sites across %d distinct tools, %d registry tools",
+		len(sites), len(distinctTools), len(Registry))
 }
 
-// findAgentPluginsRoot returns the absolute path to the agent_installation
-// directory adjacent to the workspace containing the tools package.
-// The package is at internal/core/tools, so the workspace root is ../../.
-func findAgentPluginsRoot() (string, error) {
-	// cwd is the directory `go test` was invoked from (the tools package).
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	// Walk upward looking for a directory containing `agent_installation/`.
-	dir := cwd
-	for i := 0; i < 6; i++ {
-		candidate := filepath.Join(dir, "agent_installation")
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			return candidate, nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return "", fmt.Errorf("agent_installation/ not found within %d levels of %s", 6, cwd)
-}
+// findAgentPluginsRoot was the original, working-directory-based
+// resolver for this guard. It was removed on 2026-09-29 and replaced by
+// guardRepoRoot + adapterRoot (guard_scopes_test.go), because it walked
+// up from os.Getwd() — which under `go test` is the package directory,
+// not wherever the command was invoked from — and its failure was
+// answered with t.Skipf, silently disarming the guard. Kept as a note so
+// the resolution model is not re-invented.
 
 // callSitePattern recognises `callMpm("X", <arg>)` and
 // `callMpmTool("X", <arg>, ...)`. Captures: (1) full literal payload

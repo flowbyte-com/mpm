@@ -236,36 +236,79 @@ func TestOutputPolicy_DecisionDeterminism(t *testing.T) {
 // OutputPolicy.Apply is called only within cmd/mpm-mcp (the MCP server),
 // never in the CLI binary (cmd/mpm). This enforces the Phase 1 architecture:
 // the CLI never spills; only the MCP server applies the output policy.
+//
+// Population this guard inspects
+//
+//   - cmd/mpm-mcp/tools.go — exactly one file; the MCP server must
+//     reference outputPolicy_.Apply.
+//   - every NON-TEST .go file directly in cmd/mpm — none may reference
+//     OutputPolicy (unless the file carries an explicit `// OutputPolicy`
+//     acknowledgement comment, which is the documented opt-out).
+//
+// # Why the population is resolved, not guessed
+//
+// The pre-2026-09-29 version of this guard could inspect nothing and
+// still report success, in two independent ways:
+//
+//  1. It read `filepath.Join(os.Getenv("MPM_WORKSPACE"), "cmd/mpm-mcp/tools.go")`.
+//     With MPM_WORKSPACE unset that is a RELATIVE path, and the guard's
+//     only fallback tested `mcpToolsFile == "/" || mcpToolsFile == ""` —
+//     which is never true for a relative path. The read therefore failed,
+//     and the failure was answered with t.Skipf. On an ordinary `go test`
+//     run the guard reported SKIP: it had never once checked anything.
+//     A branch that performs no check and reports success is worse than
+//     an absent guard, because the absent guard is visible in review
+//     and the skip is not.
+//
+//  2. It globbed `filepath.Join(os.Getenv("MPM_WORKSPACE"), "cmd/mpm/*.go")`
+//     and wrapped the whole loop in `if err == nil && len(cliFiles) > 0`.
+//     With MPM_WORKSPACE unset the glob returns zero matches, so the
+//     entire CLI half of the guard never executed — with no message at
+//     all, not even a skip.
+//
+// Both halves now resolve through guardRepoRoot (compiled-in source
+// location, independent of the process working directory) and
+// nonTestGoFilesIn, which returns an error for a missing or empty
+// population instead of an empty success. An unreadable scope is a test
+// FAILURE. See guard_scopes_test.go for the scope contract and its
+// regression tests.
 func TestOutputPolicy_OnlyMCPEnforces(t *testing.T) {
-	// Phase 1 architecture: OutputPolicy.Apply may only be called in cmd/mpm-mcp.
-	// Verify the source files directly rather than relying on package listing.
-	mcpToolsFile := filepath.Join(os.Getenv("MPM_WORKSPACE"), "cmd/mpm-mcp/tools.go")
-	if mcpToolsFile == "/" || mcpToolsFile == "" {
-		cwd, _ := os.Getwd()
-		mcpToolsFile = filepath.Join(cwd, "..", "..", "cmd", "mpm-mcp", "tools.go")
-	}
-	mcpContent, mcpErr := os.ReadFile(mcpToolsFile)
-	if mcpErr != nil {
-		t.Skipf("cannot read mpm-mcp tools.go: %v", mcpErr)
-	}
+	root := guardRepoRoot(t)
 
 	// The MCP server MUST call outputPolicy_.Apply.
+	mcpToolsFile := filepath.Join(root, "cmd", "mpm-mcp", "tools.go")
+	mcpContent, err := os.ReadFile(mcpToolsFile)
+	if err != nil {
+		t.Fatalf("cannot read the MCP server's policy enforcement point %s: %v\n"+
+			"This guard exists to prove the MCP server applies the output policy. If that file "+
+			"moved or was renamed, update this guard to its new location — do not delete or skip it.",
+			mcpToolsFile, err)
+	}
 	if !strings.Contains(string(mcpContent), "outputPolicy_.Apply") {
-		t.Error("mpm-mcp tools.go must call outputPolicy_.Apply")
+		t.Errorf("%s must call outputPolicy_.Apply; without it the MCP server does not enforce the "+
+			"output policy and oversized tool results are returned unsized", mcpToolsFile)
 	}
 
 	// The CLI (cmd/mpm) must NOT call OutputPolicy.Apply.
-	// Check all non-test Go files in cmd/mpm.
-	cliFiles, err := filepath.Glob(filepath.Join(os.Getenv("MPM_WORKSPACE"), "cmd/mpm/*.go"))
-	if err == nil && len(cliFiles) > 0 {
-		for _, f := range cliFiles {
-			content, err := os.ReadFile(f)
-			if err != nil {
-				continue
-			}
-			if strings.Contains(string(content), "OutputPolicy") && !strings.Contains(string(content), "// OutputPolicy") {
-				t.Errorf("cmd/mpm file %q must not reference OutputPolicy", filepath.Base(f))
-			}
+	cliFiles, err := nonTestGoFilesIn(filepath.Join(root, "cmd", "mpm"))
+	if err != nil {
+		t.Fatalf("cannot establish the CLI scan population: %v\n"+
+			"The CLI half of this guard is now a hard failure rather than a silently skipped loop, "+
+			"because a zero-file glob is indistinguishable from a passing guard.", err)
+	}
+
+	for _, f := range cliFiles {
+		content, err := os.ReadFile(f)
+		if err != nil {
+			// A file we just listed but cannot read is a broken checkout,
+			// not a reason to silently reduce the population.
+			t.Errorf("cannot read %s, which is inside the CLI scan population: %v", f, err)
+			continue
+		}
+		if strings.Contains(string(content), "OutputPolicy") && !strings.Contains(string(content), "// OutputPolicy") {
+			t.Errorf("cmd/mpm file %q must not reference OutputPolicy; only the MCP server applies the "+
+				"output policy (a deliberate reference needs an explicit `// OutputPolicy` comment "+
+				"acknowledging it)", filepath.Base(f))
 		}
 	}
 }
