@@ -21,12 +21,19 @@
 //                                         CREATE TABLE statements.
 //                  RuntimeCanonicalSchema — tables created by runtime
 //                                         migrations (lessons_base,
-//                                         synthesis_dlq, etc.).
-//                Static guard TestCanonicalSchemaSync verifies
-//                CanonicalMPMSchema stays in sync with source. The
-//                guard catches ~95% of drift; the remaining 5% requires
-//                manual review at schema-change time (an intentional
-//                trade-off — see Architectural Decisions below).
+//                                         artifacts, etc.) plus the
+//                                         FTS5 virtual tables, which
+//                                         are CREATE VIRTUAL TABLE and
+//                                         so are invisible to a
+//                                         CREATE TABLE scan.
+//                Both lists are checked against source:
+//                TestCanonicalSchemaSync verifies CanonicalMPMSchema,
+//                and TestRuntimeCanonicalSchemaHasNoPhantomEntries
+//                verifies every RuntimeCanonicalSchema entry has a
+//                real table behind it. An earlier version checked only
+//                the first list, which left the second unguarded — and
+//                two entries (synthesis_dlq, reference_docs_fts) with
+//                no table behind them accumulated there unnoticed.
 //
 // Posture:       FAIL-CLOSED. The validator explicitly rejects malformed
 //                or unknown SQL rather than attempting to sanitize. Most
@@ -160,25 +167,45 @@ var CanonicalMPMSchema = []string{
 
 // RuntimeCanonicalSchema holds tables created by runtime migrations or
 // extension code (not declared in internal/core/db.go's CREATE TABLE
-// statements). The static guard does NOT check this list against source
-// — it's a hand-maintained extension to CanonicalMPMSchema. Add a table
-// here when a migration creates it and you want restore-db to accept
-// dumps that reference it.
+// statements). It is a hand-maintained extension to CanonicalMPMSchema.
+//
+// Unlike CanonicalMPMSchema, this list IS checked against source — by
+// TestRuntimeCanonicalSchemaHasNoPhantomEntries, which requires every
+// entry to correspond to a real CREATE VIRTUAL TABLE (for the *_fts
+// bases) or to appear in a non-test source file. Keep it that way: an
+// entry with no table behind it is a hole in the `mpm restore-db`
+// security allow-list, because a dump declaring a table MPM cannot
+// create would be accepted.
+//
+// Two entries were removed on 2026-09-29 for failing that guard:
+//
+//   - synthesis_dlq — the residue of the removed synthesis-DLQ feature.
+//     No CREATE TABLE for it exists in the tree, the `mpm dlq` command
+//     that read it is gone, and no current database contains it. Its
+//     only mention in this package was the comment beside the entry
+//     itself, which is how it survived so long.
+//   - reference_docs_fts — the FTS virtual table indexing the
+//     reference_docs base table is named references_fts (triggers
+//     references_ai/ad/au). reference_docs_fts is the pre-rename name
+//     and was left behind in this list.
+//
+// Add a table here when a migration creates it and you want restore-db
+// to accept dumps that reference it.
 var RuntimeCanonicalSchema = []string{
-	"artifacts",                    // created by extension migration
-	"confidence_history__new",      // created transiently by migration_confidence_history_check_widening's table-recreate dance; dropped + renamed before commit
-	"legacy_weight",                // created by extension migration
-	"lessons_base",                 // created by migrateLessonsToView
-	"synthesis_dlq",                // created by synthesis isolation runtime
+	"artifacts",               // created by extension migration
+	"confidence_history__new", // created transiently by migration_confidence_history_check_widening's table-recreate dance; dropped + renamed before commit
+	"legacy_weight",           // created by extension migration
+	"lessons_base",            // created by migrateLessonsToView
 	// FTS5 virtual tables — declared via CREATE VIRTUAL TABLE in db.go,
 	// not CREATE TABLE, so the static guard (TestCanonicalSchemaSync) does
 	// not pick them up. Their shadow tables (`<base>_fts_data`, `_fts_idx`,
 	// etc.) are accepted via isAllowedTable's suffix match — these base
 	// names just need to be on the allow-list for that match to fire.
+	// Exactly seven, matching the seven fts_recovery domains and the set
+	// of FTS virtual tables in a live MPM database.
 	"lessons_fts",
 	"memories_fts",
 	"reference_chunks_fts",
-	"reference_docs_fts",
 	"references_fts",
 	"scheduled_wakes_fts",
 	"sessions_fts",

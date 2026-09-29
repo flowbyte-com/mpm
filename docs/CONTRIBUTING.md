@@ -143,7 +143,9 @@ registry/dispatcher drift is caught.
   existing state and verify query plans and migration/startup
   behaviour — SQLite/FTS5 indexes in particular can be operationally
   significant and may require rebuild logic (see the
-  `references_fts` / `reference_docs_fts` triggers for the pattern).
+  `references_ai` / `references_ad` / `references_au` triggers, which
+  keep the `references_fts` index in step with the `reference_docs`
+  base table, for the pattern).
 - FTS5 virtual tables are created in `db.go` (not `schema.go`); that
   separation is intentional and is how tests get a minimal in-memory
   DB without the FTS surface.
