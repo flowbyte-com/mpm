@@ -212,19 +212,22 @@ native extension API (`index.ts` registered tools +
 `before_agent_start` hook for wake-context injection) and the
 `AGENTS.md` managed block for the behavioral contract, not through
 MCP. A Pi user who prefers the MCP route can install
-`pi-mcp-adapter` and register `mpm-mcp` as a configured server,
-but the adapter surfaces `initialize.instructions` only on
-explicit proxy call — verified by interactive probe 2026-09-05
-(`docs/onboarding-mcp-native-audit-2026-09-05.md` Part A): the
-model has to actively invoke `mcp({connect:"name"})` before
-`mcp({instructions:"name"})` returns the field, and there is a
-same-turn state-isolation quirk where the `instructions` shortcut
-reports "no instructions cached" even after a successful `connect`
-in the same turn. The `AGENTS.md` managed block installed by this
-extension remains the reliable onboarding path for Pi users, since
-auto-injection of MCP `instructions` into Pi's system prompt is
-not how the adapter is designed to work — and was not observed in
-probing.
+`pi-mcp-adapter` and register `mpm-mcp` as a configured server.
+
+Note: as of 2026-09-29, mpm-mcp no longer populates the MCP
+`initialize.instructions` field. The behavioural contract lives
+entirely in the per-host managed instruction file (`AGENTS.md` for
+Pi). Pi agents never see an MCP `instructions` payload; they receive
+the contract via `AGENTS.md` plus, on hosts where the wake-injection
+hook is working, the system-prompt banner this extension produces on
+`before_agent_start`. When that hook fails (extension loaded but
+`callMpm("mpm_context", read_wake_context)` returns no payload — the
+silent-fail path this block's rule 1 explicitly recovers from), the
+agent should call `mpm_context` action `read_wake_context` directly
+to recover.
+
+The `AGENTS.md` managed block installed by this extension remains
+the reliable onboarding path for Pi users.
 
 ## Why 17 (and not 77)
 

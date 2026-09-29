@@ -112,35 +112,80 @@ class ContinuityContract(unittest.TestCase):
             )
 
     def test_read_wake_context_described_as_continuity_entry_point(self):
-        """Every block must explicitly call read_wake_context the
-        normal continuity entry point (not a debugging surface)."""
-        required_phrases = (
-            "Wake is auto-injected on session start",
-            "read_wake_context",
-        )
-        # Both must be present in each block.
+        """Every block must teach wake orientation AND the
+        read_wake_context recovery path.
+
+        2026-09-29: the required phrase was the exact string
+        "Wake is auto-injected on session start". The approved compact
+        block states the same behavioural fact in rule 1 ("MPM wake
+        context normally arrives at session start ... If you do not have
+        it, fetch it through `mpm_context` action `read_wake_context` as
+        a recovery path"), and adds the integration-failure signal that
+        repeated absence is a host bug rather than normal operation.
+        This asserts the behaviour, not one wording of it.
+        """
         for host, block in self.blocks:
             with self.subTest(host=host):
+                # The action name must still be present and reachable.
+                self.assertIn(
+                    "read_wake_context", block,
+                    f"{host}: managed block must name the "
+                    f"read_wake_context recovery path",
+                )
+                # Wake normally arrives at session start (orientation).
+                normalized = re.sub(r"\s+", " ", block)
                 self.assertTrue(
-                    all(p in block for p in required_phrases),
-                    f"{host}: managed block does not describe "
-                    "read_wake_context as the canonical continuity entry point",
+                    any(p in normalized for p in (
+                        "Wake is auto-injected on session start",
+                        "wake context normally arrives at session start",
+                    )),
+                    f"{host}: managed block must teach that wake context "
+                    f"arrives at session start",
+                )
+                # Absent wake on an auto-injecting host is a defect, not
+                # normal operation — the recovery path is for that case.
+                self.assertTrue(
+                    "recovery path" in normalized or "integration problem" in normalized,
+                    f"{host}: managed block must frame read_wake_context as "
+                    f"the recovery path and repeated absence as an "
+                    f"integration problem",
                 )
 
-    def test_contextual_focus_described_in_every_block(self):
-        """Every block must mention <contextual_focus> as bounded
-        inherited working awareness (not as a debug surface)."""
+    def test_pointer_semantics_survive_as_rule_two(self):
+        """2026-09-29 replacement for
+        test_contextual_focus_described_in_every_block.
+
+        The compact managed block no longer names `contextual_focus` —
+        that term is wake-payload internals, not a behavioural decision
+        the agent makes before tool selection. The BEHAVIOUR it taught
+        is preserved verbatim as rule 2: wake context is bounded
+        inherited awareness, not a ranking or a verdict, and pointers
+        are followed when the summary is insufficient. This asserts that
+        behaviour survives rendering into every host.
+        """
         for host, block in self.blocks:
             with self.subTest(host=host):
-                self.assertIn(
-                    "contextual_focus", block,
-                    f"{host}: managed block missing contextual_focus mention",
+                normalized = re.sub(r"\s+", " ", block)
+                self.assertTrue(
+                    "inherited awareness" in normalized
+                    or "inherited working awareness" in normalized,
+                    f"{host}: managed block must teach that wake context is "
+                    f"bounded inherited awareness",
                 )
-                self.assertIn(
-                    "inherited working", block,
-                    f"{host}: managed block does not describe "
-                    "contextual_focus as inherited working context",
+                self.assertTrue(
+                    "not a ranking or a verdict" in normalized
+                    or "not a ranking" in normalized,
+                    f"{host}: managed block must teach that wake context is "
+                    f"not a ranking or a verdict",
                 )
+                # The staleness/supersession caveat that the old
+                # contextual_focus wording carried.
+                for concept in ("superseded", "hypothesis", "stale"):
+                    self.assertIn(
+                        concept, block,
+                        f"{host}: managed block must teach that stored "
+                        f"state may be outdated ({concept})",
+                    )
 
     def test_pointer_following_taught_in_every_block(self):
         """Every block must tell the agent to follow pointers when
@@ -157,18 +202,38 @@ class ContinuityContract(unittest.TestCase):
                     "instruction",
                 )
 
-    def test_diagnostic_actions_marked_as_diagnostic(self):
-        """Every block must explicitly mark the contextual_* actions
-        as diagnostic — NOT routine startup actions."""
+    def test_diagnostic_surface_distinction_not_in_permanent_prose(self):
+        """2026-09-29 replacement for
+        test_diagnostic_actions_marked_as_diagnostic.
+
+        The distinction between the canonical `recent_activity` feed and
+        the routing/diagnostic `contextual_*` actions has moved OUT of
+        permanent managed prose and INTO the compact `mpm_context` tool
+        description, which every host sees at tools/list time. That is
+        the canonical, production-facing coverage:
+        cmd/mpm-mcp/mpm_context_compact_distinction_test.go asserts the
+        registered tool description names recent_activity as
+        chronological/observational and the three contextual_* actions
+        as diagnostic surfaces outside the normal session-start
+        workflow.
+
+        Requiring the term in every managed block would duplicate that
+        coverage in five places and re-inflate the block with wake-
+        pipeline internals the agent does not act on. This asserts the
+        architectural boundary instead: permanent managed prose must
+        not reintroduce the diagnostic-surface vocabulary.
+        """
         for host, block in self.blocks:
             with self.subTest(host=host):
-                # Inner block uses lowercase 'diagnostic' in the §1.1
-                # instruction about not chaining them.
-                self.assertIn(
-                    "diagnostic", block.lower(),
-                    f"{host}: managed block does not mark "
-                    "contextual_* actions as diagnostic",
-                )
+                for term in ("contextual_candidates",
+                             "contextual_selection",
+                             "contextual_materialization"):
+                    self.assertNotIn(
+                        term, block,
+                        f"{host}: managed block must not carry "
+                        f"{term} (owned by the mpm_context tool "
+                        f"description, not permanent managed prose)",
+                    )
 
     def test_no_legacy_pre_2e4_wake_instructions(self):
         """Every block must NOT include the stale pre-Stage-2E.4

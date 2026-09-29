@@ -310,6 +310,32 @@ var (
 // This replaces the previous 35-line s.AddTool(...) block plus 30
 // handle*() adapter functions — both have been moved to the registry
 // or the single mcpAdapter closure below.
+// CompactMpmContextDescription is the description registered for the
+// mpm_context tool on the compact 3-tool MCP surface. The post-2026-
+// 09-29 simplification needs this surface to teach the
+// recent_activity / contextual_* distinction (the old managed-block
+// §1.2 no longer carries it). Exposed as a package-level constant so
+// the regression test in mpm_context_compact_distinction_test.go can
+// register the same tool against a fresh server and assert that what
+// clients receive contains the required semantics.
+//
+// Test the production-registered description, not the source string:
+// the source may be reorganised in any way that preserves semantics
+// (concatenation order, whitespace, surrounding prose); what matters
+// is the string clients actually receive.
+var CompactMpmContextDescription = "Session context. read_wake_context (browses recent " +
+	"memories, overdue wakes); write_handoff / " +
+	"read_handoff (session continuity); read_directives; " +
+	"route (auto-selects mode/persona); query_global_rules. " +
+	"For read_wake_context use projection=compact for " +
+	"~130 token bounded output. recent_activity is the " +
+	"chronological / observational activity feed (not " +
+	"relevance-ranked); contextual_candidates, " +
+	"contextual_selection, and contextual_materialization " +
+	"are diagnostic surfaces for inspecting the contextual " +
+	"routing pipeline (not part of normal session-start " +
+	"workflow)."
+
 func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.ActiveContext, router *core.Router, bs *blobstore.FilesystemBackend, op tools.OutputPolicy) {
 	blobStore = bs
 	blobAdapter := &blobStoreAdapter{bs: bs}
@@ -409,20 +435,24 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 		),
 		mcpAdapter(dm, ac, tools.MustByName("mpm_memory").Handler),
 	)
+
 	// mpm_context: compact surface. The wake-context action
 	// (read_wake_context) is the most common; the other actions
 	// (read_directives, proactive_recall_hint, query_global_rules,
 	// record_global_rule, promote_to_global, route) remain
 	// reachable via the full schema in tools.Registry.
+	//
+	// 2026-09-29 simplification: `recent_activity` and the three
+	// `contextual_*` actions are diagnostic and observational surfaces
+	// that the compact description used to omit. After dropping old
+	// managed-block §1.2, agents connected through this compact
+	// surface have no other source for the distinction. Added one
+	// sentence below; full semantic coverage remains in
+	// `internal/core/tools/registry_list.go::mpm_context` and
+	// `mpm-agent-protocol.md §1.2`.
 	s.AddTool(
 		mcp.NewTool("mpm_context",
-			mcp.WithDescription(
-				"Session context. read_wake_context (browses recent "+
-					"memories, overdue wakes); write_handoff / "+
-					"read_handoff (session continuity); read_directives; "+
-					"route (auto-selects mode/persona); query_global_rules. "+
-					"For read_wake_context use projection=compact for "+
-					"~130 token bounded output."),
+			mcp.WithDescription(CompactMpmContextDescription),
 			mcp.WithString("action",
 				mcp.Required(),
 				mcp.Description(

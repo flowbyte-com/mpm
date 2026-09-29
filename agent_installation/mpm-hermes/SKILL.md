@@ -60,10 +60,10 @@ machine interface
 `mpm call <tool> --payload '{"action":"<op>","params":{...}}'` from any
 subprocess. Setting `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block
 restores the legacy full-surface exposure to the MCP server's
-`tools/list`. See `cmd/mpm-mcp/instructions_primer.txt` for the canonical
-Registry. The Registry itself holds exactly 21 entries; `mpm_help` is
-the discovery closure registered at server init by `cmd/mpm-mcp` (not
-part of the Registry slice).
+`tools/list`. Use `mcp__mpm__mpm_help` action `list` to enumerate the
+Registry at runtime; the registry slice is the canonical surface and
+`mpm_help` is the discovery closure registered at server init by
+`cmd/mpm-mcp` (not part of the Registry slice).
 
 **DB path invariance:** All three paths resolve to the same inode:
 

@@ -69,23 +69,25 @@ _render = _load_render_module()
 # The behavioural-invariant label strings the canonical block must
 # teach. Substring match — the bold header text after the numbered
 # item marker is enough. Order is the order they appear in the canonical
-# block. The list grew from 7 to 10 invariants in the 2026-09-27
-# managed-instruction contract bump (1.1.0 -> 1.2.0): substrate
-# discoverability (#3), skill lifecycle expansion (#4), work
-# lifecycle separation (#6 from old #5), reference acquisition
-# (#8), and the explicit session-closure-is-not-work-completion
-# principle (#7).
+# block. The list reflects the 2026-09-29 instruction-architecture
+# simplification (contract version 1.3.0): the canonical block now
+# carries seven compact rules instead of the prior ten invariants.
+# Substantively the rules are:
+#   1. orientation / wake recovery ("Orient before you work")
+#   2. inherited context is pointers, not truth ("Treat wake context as pointers, not truth")
+#   3. persist durable state but not trivia ("Persist during work - and not trivia")
+#   4. reuse before reacquisition ("Reuse before reacquiring")
+#   5. substantial continuing work lifecycle ("Track substantial continuing work")
+#   6. meaningful handoff ("Leave useful continuation state")
+#   7. capability discovery / CLI recovery ("Do not assume an MPM capability is unavailable")
 INVARIANT_LABELS = (
-    "Wake is auto-injected on session start",
+    "Orient before you work",
+    "Treat wake context as pointers, not truth",
     "Persist during work",
-    "Look beyond the compact tool surface",
-    "Discover, create, and refine MPM skills",
-    "Handoff before genuine session closure",
-    "Track durable objectives as work items",
-    "Session closure is not work completion",
-    "Acquire and retain authoritative references",
-    "MPM is the source of truth",
-    "Recovery / fallback",
+    "Reuse before reacquiring",
+    "Track substantial continuing work",
+    "Leave useful continuation state",
+    "Do not assume an MPM capability is unavailable",
 )
 
 
@@ -132,15 +134,18 @@ class CanonicalBlockExtraction(unittest.TestCase):
         )
 
     def test_block_uses_bare_canonical_names(self):
-        """The canonical block must use bare canonical tool names
-        (`mpm_handoff`, `mpm_memory`) — no `{TOOL_PREFIX}` placeholder,
-        no host-specific prefix text. (References to tools outside the
-        universal seven live in the tool-reference table and the
-        protocol preamble, not in the agent-facing block itself —
-        brief §13: avoid protocol duplication.)"""
-        for name in ("mpm_context", "mpm_memory", "mpm_decisions", "mpm_lessons",
-                     "mpm_topics", "mpm_references", "mpm_skills", "mpm_handoff",
-                     "mpm_scratchpad", "mpm_work"):
+        """The canonical block must use bare canonical tool names for any
+        tool it names directly — no `{TOOL_PREFIX}` placeholder, no
+        host-specific prefix text.
+
+        Post-2026-09-29 simplification: the canonical block now names
+        only `mpm_context` (for the wake-context recovery call) and
+        `mpm_call` (for the CLI fallback). Other tool names are
+        captured in `mpm_help` discovery, the protocol preamble, and
+        per-tool descriptions — none of which the canonical block
+        needs to repeat. The list below is therefore tight: just the
+        tools the block actually invokes."""
+        for name in ("mpm_context",):
             self.assertIn(name, self.block, f"canonical block missing {name!r}")
         # No placeholder text.
         self.assertNotIn(
@@ -165,15 +170,11 @@ class CanonicalBlockExtraction(unittest.TestCase):
             self.assertIn(label, self.block, f"canonical block missing invariant: {label!r}")
 
     def test_block_uses_stable_non_negotiable_wording(self):
-        """The block must use the stable wording for the invariants
-        section header — not brittle numbered phrasings like
+        """The block must NOT use brittle numbered phrasings like
         'The seven non-negotiable invariants below...' which break
-        when the count changes."""
-        self.assertIn(
-            "The following are the non-negotiable MPM behavioural",
-            self.block,
-            "canonical block missing stable invariant-header wording",
-        )
+        when the count changes. Post-2026-09-29 the canonical block
+        no longer uses a numbered 'invariants' framing — it uses the
+        stable prose 'behavioural contract' header instead."""
         self.assertNotIn(
             "The seven non-negotiable invariants below",
             self.block,
@@ -185,32 +186,25 @@ class CanonicalBlockExtraction(unittest.TestCase):
         block must NOT teach agents to pass `note` to `mpm_handoff
         write` — the schema removed `note`, the snippet must agree.
 
-        Sept 2026 update: the canonical block now teaches the compact
-        MCP path (`mpm_context action=write_handoff`) as the primary
-        reference and the substrate path (`mpm_handoff action=write`)
-        only via the `mpm call` CLI escape hatch. The handoff params
-        block is now written under the compact path; the test accepts
-        either form and asserts neither teaches the stale `note` field.
-        """
-        # The handoff write/read section lists its params without `note`.
-        # Accept either the compact-surface MCP form (`write_handoff` /
-        # `read_handoff`) or the substrate `mpm_handoff` form.
-        m = re.search(
-            r"action `(?:write_handoff|write)` with\s+`params:\s*\{([^}]+)\}",
-            self.block,
+        Post-2026-09-29: the canonical block dropped handoff-param
+        syntax entirely. `mpm_handoff`'s parameter shape lives in
+        `internal/core/tools/registry_list.go::mpm_handoff` schema
+        (the `required: ["summary"]` line) and in the
+        `onboarding_drift_test.go::TestOnboardingDrift_mpm_handoff`
+        contract test. If the canonical block ever re-introduces
+        handoff-param prose, this test catches the regression."""
+        # The canonical block must not teach the stale `note` field.
+        self.assertNotIn(
+            "note", self.block,
+            "canonical block must not teach handoff write's stale 'note' field",
         )
-        self.assertIsNotNone(m, "handoff write params block not found")
-        params = m.group(1)
-        for token in (t.strip() for t in params.split(",")):
-            self.assertFalse(
-                token.startswith("note"),
-                f"handoff write params still teach stale 'note' field: {params!r}",
-            )
 
     def test_block_describes_compact_projection_semantically(self):
         """The wake-projection description must NOT pin a specific
-        field count (the count varies with session state: 8 always-on
-        plus 0/2 conditional when `LastHandoff` is set)."""
+        field count. Post-2026-09-29 the canonical block dropped
+        payload field enumeration entirely — the wake envelope
+        documents its fields, the block orients the user on what to
+        do with the bounded result."""
         # No `9-field`, `10-field`, `N-field` wording.
         for bad in ("9-field", "10-field", "11-field", "8-field"):
             self.assertNotIn(
@@ -219,8 +213,8 @@ class CanonicalBlockExtraction(unittest.TestCase):
             )
         # The semantic description IS present.
         self.assertIn(
-            "id+summary envelope", self.block,
-            "wake projection semantic description missing",
+            "bounded", self.block,
+            "wake boundedness semantic description missing",
         )
 
 
@@ -237,30 +231,35 @@ class PerHostRendering(unittest.TestCase):
         return _render.render_for_host(self.block, prefix)
 
     def test_claude_code_uses_mpm_double_namespace(self):
+        """Claude renders `mpm_context` as `mpm__mpm_context` when it
+        appears in an invocation context (rule 1 of the canonical
+        block: `mpm_context` action `read_wake_context`). The block
+        names only `mpm_context` and `mpm_call` directly; other tools
+        live in mpm_help / tool descriptions, so the assertion below
+        checks the one tool the canonical block actually invokes."""
         out = self._render_host("mpm__")
-        self.assertIn("mpm__mpm_handoff", out)
-        self.assertIn("mpm__mpm_memory", out)
         self.assertIn("mpm__mpm_context", out)
         # No triple-prefix regression.
         self.assertNotIn("mpm__mpm_mpm_handoff", out)
 
     def test_opencode_uses_bare_names(self):
+        """OpenCode has an empty prefix; rendered output preserves
+        bare canonical names."""
         out = self._render_host("")
-        # Bare `mpm_handoff` is still present; no transport wrapper.
-        self.assertIn("`mpm_handoff`", out)
         self.assertNotIn("mpm__mpm_", out)
         self.assertNotIn("mcp__mpm__mpm_", out)
 
     def test_pi_uses_bare_names(self):
+        """Pi has an empty prefix; rendered output preserves bare
+        canonical names."""
         out = self._render_host("")
-        self.assertIn("`mpm_handoff`", out)
         self.assertNotIn("mpm__mpm_", out)
         self.assertNotIn("mcp__mpm__mpm_", out)
 
     def test_hermes_uses_mcp_namespace(self):
+        """Hermes renders `mpm_context` as `mcp__mpm__mpm_context`."""
         out = self._render_host("mcp__mpm__")
-        self.assertIn("mcp__mpm__mpm_handoff", out)
-        self.assertIn("mcp__mpm__mpm_memory", out)
+        self.assertIn("mcp__mpm__mpm_context", out)
         # No double-prefix on the transport.
         self.assertNotIn("mcp__mpm__mpm_mpm_handoff", out)
 
@@ -617,186 +616,61 @@ class RendererSemanticGuard(unittest.TestCase):
         )
 
     def test_rendered_canonical_preserves_prose_in_wake_payload(self):
-        """End-to-end lock on the actual canonical source: rendered
-        canonical must preserve the bare prose mentions of
-        `mpm_decisions` / `mpm_lessons` in the §1 wake-payload
-        description (proving the renderer reads the actual file, not
-        just synthetic inputs). This is the regression test that
-        closes D-R1.
+        """End-to-end lock on the actual canonical source: the renderer
+        must transform the invocation reference to `mpm_context` in
+        rule 1 of the canonical block, while leaving prose-only
+        mentions of MPM (no backtick tokens in an action context)
+        alone.
 
-        Locks on the specific §1 prose context — the wake-payload
-        description line that says "Decisions live in `mpm_decisions`;
-        lessons in `mpm_lessons`." That line contains no `action`
-        keyword, so both tokens must remain bare under every host
-        prefix. (The §2 invocation reference to `mpm_decisions action
-        record` DOES still transform — that's an invocation, not a
-        prose mention, and must not regress.)
-
-        The §5 prose mention of `mpm_work` is INTENTIONALLY rewritten
-        by the host prefix — the canonical source uses parens form
-        (`mpm_work` (Lifecycle: action `create` to open, ...)) so the
-        `action` keyword lives in the same sentence as `mpm_work`,
-        making it a per-host actionable mention. The previous prose
-        form (`mpm_work`. Lifecycle: action `create` ...) had a
-        period immediately after the backtick that broke the
-        renderer's per-sentence heuristic, leaving Claude/Hermes
-        snippets with bare `mpm_work` — a real doc-quality gap. The
-        2026-09-06 fix moved the prose to parens form; this test
-        asserts the rewritten form is what shows up under prefixed
-        adapters.
-
-        Sept 2026 expansion: the work-lifecycle rule moved from §5 to
-        §6 (track durable objectives as work items) and now uses the
-        action-form prose "Use `mpm_work` action `create` to open"
-        instead of the legacy parens form. The semantic guard still
-        holds: `action` in the same sentence keeps `mpm_work` a
-        per-host actionable reference, so the host prefix must apply."""
+        Post-2026-09-29 the canonical block names exactly one tool
+        in an invocation context: `mpm_context` in rule 1
+        (`fetch it through `mpm_context` action `read_wake_context`).
+        Every other "mpm_*" or "MPM" mention is prose. The renderer's
+        prose/invocation distinction must still work end-to-end on
+        the live source — this test exercises the actual file, not
+        a synthetic input."""
         text = CANONICAL_SOURCE.read_text(encoding="utf-8")
         block = _render.extract_canonical_block(text)
 
-        # The §1 prose line is what D-R1 is about: prose mentions of
-        # `mpm_decisions` / `mpm_lessons` in the wake-payload
-        # description. It must remain bare under every host prefix.
-        prose_phrase = (
-            "Decisions live in `mpm_decisions`; lessons in "
-            "`mpm_lessons`."
-        )
-        for prefix in ("mpm__", "mcp__mpm__"):
-            rendered = _render.render_for_host(block, prefix)
-            self.assertIn(
-                prose_phrase, rendered,
-                f"§1 prose phrase drifted under prefix {prefix!r} — "
-                f"`mpm_decisions` / `mpm_lessons` in the wake-payload "
-                f"description got rewritten (D-R1 regression)",
-            )
-
-        # §6 (Sept 2026 contract): action-form prose `mpm_work action
-        # create` lives in the new work-lifecycle rule. The renderer
-        # must still apply the prefix because `action` is in the same
-        # sentence as `mpm_work` — same semantic guard as the legacy
-        # parens form, just new wording.
+        # Rule 1's invocation reference must receive each host's
+        # transport prefix. (The anchor is short to survive the
+        # canonical source's column wrap, which inserts a newline
+        # between `mpm_context` and `action`.)
         prefix_to_expected = {
-            "mpm__":      "Use `mpm__mpm_work` action `create` to open",
-            "mcp__mpm__": "Use `mcp__mpm__mpm_work` action `create` to open",
-            "":            "Use `mpm_work` action `create` to open",
+            "mpm__":      "fetch it through `mpm__mpm_context`",
+            "mcp__mpm__": "fetch it through `mcp__mpm__mpm_context`",
+            "":            "fetch it through `mpm_context`",
         }
         for prefix, expected_prefix_phrase in prefix_to_expected.items():
             rendered = _render.render_for_host(block, prefix)
             self.assertIn(
                 expected_prefix_phrase, rendered,
-                f"§6 prose `mpm_work` did not get the expected prefix "
-                f"under prefix {prefix!r}. Expected substring "
+                f"rule 1 invocation `mpm_context` did not get the "
+                f"expected prefix under {prefix!r}. Expected substring "
                 f"{expected_prefix_phrase!r} in rendered output.",
             )
 
-        # Sanity: §2 invocations in the same block DO still transform.
-        # This guards against the renderer regressing to "never
-        # transform" instead of "transform only invocations".
-        rendered_claude = _render.render_for_host(block, "mpm__")
-        self.assertIn(
-            "`mpm__mpm_memory`", rendered_claude,
-            "§2 invocation `mpm_memory` did NOT transform — "
-            "renderer heuristic is too conservative (regressed away "
-            "from invocation handling)",
-        )
-        self.assertIn(
-            "`mpm__mpm_decisions` action `record`", rendered_claude,
-            "§2 invocation `mpm_decisions action record` did NOT "
-            "transform — renderer regressed to no-op",
-        )
+        # Sanity: rule 1's read_wake_context action must survive the
+        # prefix substitution (the action name is host-neutral).
+        for prefix in ("mpm__", "mcp__mpm__", ""):
+            rendered = _render.render_for_host(block, prefix)
+            self.assertIn(
+                "read_wake_context", rendered,
+                f"action name `read_wake_context` lost under prefix "
+                f"{prefix!r}",
+            )
 
-
-class InstructionsPrimerContract(unittest.TestCase):
-    """Pin the `instructions_primer` output that mpm-mcp embeds via
-    //go:embed and ships in the MCP `initialize.instructions` field.
-    Pinned 2026-09-08 after the OpenClaw integration observed the
-    agent attempt `mcp__mpm__mpm_handoff` (a non-existent tool on the
-    default 3-tool surface). The pre-fix primer said only "via
-    `mpm_context` action"; an agent that saw `mpm_handoff` in
-    `mpm_help list` output could not connect the two. The fix is to
-    pin the exact action name in the primer so the contract is
-    unambiguous.
-
-    These tests assert the rendered primer's behavioral contract.
-    Drift against the embedded `cmd/mpm-mcp/instructions_primer.txt`
-    is caught separately by the Go drift test (`TestInstructionsPrimerDrift`)
-    and by `python3 scripts/render_managed_blocks.py --check`.
-    """
-
-    _PRIMER_PATH = AGENT_INSTALLATION.parent / "cmd" / "mpm-mcp" / "instructions_primer.txt"
-
-    def _primer_text(self) -> str:
-        return _render.render_instructions_primer(CANONICAL_SOURCE)
-
-    def test_primer_is_text(self):
-        primer = self._primer_text()
-        self.assertIsInstance(primer, str)
-        self.assertGreater(len(primer), 0)
-
-    def test_primer_names_handoff_action_explicitly(self):
-        """The OpenClaw 2026-09-08 regression. The primer must name
-        the exact action (`write_handoff`) so an agent that reads it
-        does not attempt the substrate tool name
-        (`mcp__mpm__mpm_handoff`) instead."""
-        primer = self._primer_text()
-        self.assertIn(
-            "Handoff before genuine session closure",
-            primer,
-            "primer must carry the Handoff bullet",
-        )
-        # The bullet MUST name the action explicitly:
-        #   "(via `mpm_context` action `write_handoff`)."
-        self.assertRegex(
-            primer,
-            r"Handoff before genuine session closure \(via `mpm_context` action `write_handoff`\)\.",
-            "primer's handoff bullet must explicitly name the "
-            "write_handoff action — the pre-fix primer said only "
-            "'via `mpm_context` action' which let agents confuse it "
-            "with the substrate mpm_handoff tool. See OpenClaw "
-            "2026-09-08 final-session regression.",
-        )
-
-    def test_primer_omits_substrate_handoff_tool_name(self):
-        """The primer's MCP `instructions` field must not advertise
-        the substrate `mpm_handoff` tool — it is not in the default
-        3-tool surface. If this fails, a future contributor has
-        reintroduced the substrate path as an MCP option, which would
-        silently allow agents to call a tool the OpenClaw runtime
-        filters out."""
-        primer = self._primer_text()
-        # The primer may mention `mpm_handoff` only in the CLI fallback
-        # footer context. We assert the bullet lines themselves do not
-        # name the tool as an MCP option.
-        for line in primer.splitlines():
-            if line.startswith("- "):
-                self.assertNotIn(
-                    "`mpm_handoff`",
-                    line,
-                    f"primer bullet must not advertise substrate "
-                    f"`mpm_handoff` as an MCP option: {line!r}",
-                )
-
-    def test_primer_embedded_file_byte_matches_renderer(self):
-        """The file mpm-mcp embeds via //go:embed must byte-match
-        the renderer's output. Drift between the two is also caught
-        by the Go-side drift test, but pinning it from Python too
-        catches renderer-side regressions that the Go test cannot
-        (e.g. the renderer being invoked with a stale canonical
-        source)."""
-        self.assertTrue(
-            self._PRIMER_PATH.exists(),
-            f"embedded primer missing at {self._PRIMER_PATH}",
-        )
-        rendered = self._primer_text()
-        embedded = self._PRIMER_PATH.read_text(encoding="utf-8")
-        self.assertEqual(
-            rendered,
-            embedded,
-            "rendered primer does not match embedded "
-            "cmd/mpm-mcp/instructions_primer.txt; re-run "
-            "`python3 scripts/render_managed_blocks.py --dump "
-            "instructions > cmd/mpm-mcp/instructions_primer.txt`",
-        )
+        # The block also contains a "mpm call <tool>" mention in
+        # rule 7. This is a prose mention (not a backtick-bounded
+        # `mpm_<X>` token the renderer's regex matches), so it must
+        # NOT receive the host prefix — and the substring "mpm call"
+        # must survive under every prefix.
+        for prefix in ("mpm__", "mcp__mpm__", ""):
+            rendered = _render.render_for_host(block, prefix)
+            self.assertIn(
+                "mpm call", rendered,
+                f"`mpm call` (prose) lost under prefix {prefix!r}",
+            )
 
 
 class CanonicalVersionMarker(unittest.TestCase):
@@ -852,6 +726,358 @@ class CanonicalVersionMarker(unittest.TestCase):
             count, 1,
             f"exactly one version marker expected at the top of the "
             f"file (before the H1), found {count}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-29 instruction-architecture simplification tests.
+# ---------------------------------------------------------------------------
+#
+# These tests pin behavioural concepts in the slim canonical block,
+# not the old verbose wording. They replace the prior
+# INVARIANT_LABELS substring set with seven concept-presence tests,
+# one per rule, and add a generous size ceiling to stop future
+# verbose regression. The ceiling is chosen from the actual accepted
+# block size with headroom, not from an arbitrary token target.
+
+# Concept-presence anchors: stable phrases each of the seven rules
+# must carry. The substring set was assembled from the approved
+# 2026-09-29 compact block; each anchor is unique to its rule.
+#
+# Anchors are intentionally short so the soft-wrap behaviour of
+# the canonical source doesn't break matching. (The block wraps at
+# 70-ish columns; longer anchors that span a wrap point would
+# need line-aware matching.)
+COMPACT_RULE_ANCHORS = {
+    "orientation": (
+        "Orient before you work",
+        "wake context normally arrives",
+        "fetch it through `mpm_context`",
+    ),
+    "wake_is_pointers": (
+        "Treat wake context as pointers",
+        "not a ranking or a verdict",
+    ),
+    "persistence_with_restraint": (
+        "Persist during work",
+        "not trivia",
+    ),
+    "reuse_before_reacquire": (
+        "Reuse before reacquiring",
+        "absent, stale, or inadequate",
+    ),
+    "work_lifecycle": (
+        "Track substantial continuing work",
+        "verification are separate events",
+    ),
+    "handoff_conditional": (
+        "Leave useful continuation state",
+        "Routine",
+    ),
+    "discovery_cli_recovery": (
+        "Do not assume an MPM capability is unavailable",
+        "affordance",  # short anchor survives the wrap
+        "`mpm call <tool>` fallback",
+    ),
+}
+
+# Size ceiling. The approved compact block is 2951 bytes / 422 words
+# (host-neutral canonical). Tightened ceiling for the 2026-09-29
+# follow-up pass: 3500 bytes / 500 words. This leaves roughly 18-19%
+# wording headroom for harmless updates (a single rule reword or a
+# brief clarifier) while making the gate meaningfully resist renewed
+# instruction creep. The ceilings are well below the old block's
+# 12492 bytes / 1612 words — verbose regression would have to add
+# ~500 bytes / ~80 words to fail the gate.
+COMPACT_BLOCK_BYTE_CEILING = 3500
+COMPACT_BLOCK_WORD_CEILING = 500
+
+
+class CompactBlockSizeCeiling(unittest.TestCase):
+    """Generous instruction-size regression guard for the slim canonical
+    managed block. Stops future prose creep.
+
+    The ceiling is set generously above the accepted block to permit
+    harmless wording refinement. The anchor (size that fails the gate)
+    is ~1000 bytes / 200 words above the actual block — meaningful
+    creep, not single-paragraph tweaks.
+    """
+
+    def setUp(self):
+        self.text = CANONICAL_SOURCE.read_text(encoding="utf-8")
+        # The canonical (host-neutral) block is the LAST managed block
+        # in the source. Extract it for the size check.
+        self.block = _render.extract_canonical_block(self.text)
+
+    def test_canonical_block_under_byte_ceiling(self):
+        """The canonical (host-neutral) block must stay under 3500 bytes.
+        3500 is ~550 bytes above the 2951-byte approved block (18-19%
+        headroom), enough for a single rule reword or a brief
+        clarifier while failing the gate on meaningful verbose creep."""
+        size = len(self.block.encode("utf-8"))
+        self.assertLessEqual(
+            size, COMPACT_BLOCK_BYTE_CEILING,
+            f"canonical managed block is {size} bytes; ceiling is "
+            f"{COMPACT_BLOCK_BYTE_CEILING}. The 2026-09-29 approved "
+            f"block is 2951 bytes; verbose regression would push the "
+            f"block back toward the old 12492-byte shape and reintroduce "
+            f"operational detail that belongs in tool descriptions, not "
+            f"the agent-facing behavioural contract.",
+        )
+
+    def test_canonical_block_under_word_ceiling(self):
+        """The canonical (host-neutral) block must stay under 500 words.
+        A byte ceiling alone is brittle across line-ending differences;
+        the word ceiling catches the prose-token gap regardless of
+        how the bytes are organised."""
+        size = len(self.block.split())
+        self.assertLessEqual(
+            size, COMPACT_BLOCK_WORD_CEILING,
+            f"canonical managed block is {size} words; ceiling is "
+            f"{COMPACT_BLOCK_WORD_CEILING}. The 2026-09-29 approved "
+            f"block is 422 words; the ceiling leaves ~18% headroom.",
+        )
+
+
+class CompactBlockConceptPresence(unittest.TestCase):
+    """Pin behavioural concepts in the slim canonical block.
+
+    Each rule has one or two anchoring phrases that capture its
+    behavioural load. The test fails if any rule's anchor is missing,
+    regardless of how the rest of the prose is worded. This replaces
+    the prior INVARIANT_LABELS substring set, which was anchored to
+    verbose wording that no longer survives in the slim block.
+    """
+
+    def setUp(self):
+        self.block = _render.extract_canonical_block(
+            CANONICAL_SOURCE.read_text(encoding="utf-8"),
+        )
+
+    def test_orientation_wake_recovery(self):
+        for anchor in COMPACT_RULE_ANCHORS["orientation"]:
+            self.assertIn(anchor, self.block,
+                f"orientation rule missing anchor {anchor!r}")
+
+    def test_wake_is_pointers_not_truth(self):
+        for anchor in COMPACT_RULE_ANCHORS["wake_is_pointers"]:
+            self.assertIn(anchor, self.block,
+                f"wake-as-pointers rule missing anchor {anchor!r}")
+
+    def test_persistence_with_restraint(self):
+        for anchor in COMPACT_RULE_ANCHORS["persistence_with_restraint"]:
+            self.assertIn(anchor, self.block,
+                f"persistence-restraint rule missing anchor {anchor!r}")
+
+    def test_reuse_before_reacquire(self):
+        for anchor in COMPACT_RULE_ANCHORS["reuse_before_reacquire"]:
+            self.assertIn(anchor, self.block,
+                f"reuse rule missing anchor {anchor!r}")
+
+    def test_work_lifecycle(self):
+        for anchor in COMPACT_RULE_ANCHORS["work_lifecycle"]:
+            self.assertIn(anchor, self.block,
+                f"work-lifecycle rule missing anchor {anchor!r}")
+
+    def test_handoff_conditional(self):
+        for anchor in COMPACT_RULE_ANCHORS["handoff_conditional"]:
+            self.assertIn(anchor, self.block,
+                f"handoff rule missing anchor {anchor!r}")
+
+    def test_discovery_cli_recovery(self):
+        for anchor in COMPACT_RULE_ANCHORS["discovery_cli_recovery"]:
+            self.assertIn(anchor, self.block,
+                f"discovery rule missing anchor {anchor!r}")
+
+
+class CompactBlockForbiddenSubstrings(unittest.TestCase):
+    """Pin the slim canonical block's anti-pattern set: enumerations
+    and host-specific detail that belong elsewhere.
+
+    These are the categories the 2026-09-29 simplification specifically
+    removed. The test fails if any reappears, because re-introduction
+    would mean the simplification was undone in the wording rather
+    than the structure.
+    """
+
+    def setUp(self):
+        self.block = _render.extract_canonical_block(
+            CANONICAL_SOURCE.read_text(encoding="utf-8"),
+        )
+
+    def test_no_hardcoded_tool_count(self):
+        """The canonical block must NOT carry a hard-coded tool count.
+        Counts in permanent instructions were the failure class
+        commit ee382813 was written to close. Today the compact
+        surface is 3 tools; tomorrow it could be 5. The block must
+        describe behaviour, not surface shape."""
+        for bad in (
+            "21 Registry", "22-tool", "22 tool", "3-tool compact",
+            "3 tool compact", "compact MCP surface is exactly",
+            "compact native MCP surface intentionally exposes only",
+        ):
+            self.assertNotIn(
+                bad, self.block,
+                f"canonical block carries hard-coded tool count: {bad!r}",
+            )
+
+    def test_no_host_namespace_prefix(self):
+        """The canonical block is host-neutral. Host-specific
+        prefixes (`mpm__mpm_`, `mcp__mpm__mpm_`) belong in the
+        per-adapter copy/paste examples and the per-host template
+        snippets, never in the canonical source."""
+        for prefix in ("mpm__mpm_", "mcp__mpm__mpm_"):
+            self.assertNotIn(
+                prefix, self.block,
+                f"canonical block leaks host-specific prefix {prefix!r}",
+            )
+
+    def test_no_placeholder_text(self):
+        self.assertNotIn(
+            "{TOOL_PREFIX}", self.block,
+            "canonical block contains placeholder text",
+        )
+
+
+# Note: an earlier revision of this file carried a
+# `CompactBlockDeletedConcepts` test class that forbade substrings
+# like "mpm_lessons", "write_handoff", "version-bound" — terms that
+# happened to disappear with the verbose block but are not
+# architecturally forbidden. The class was removed because negative
+# assertions should protect architecture and behaviour, not fossilise
+# today's exact prose. A future refactor that re-introduces one of
+# those substrings in service of a different rule should not have to
+# fight a brittle substring gate; the architecture-level
+# `CompactBlockForbiddenSubstrings` (hardcoded counts, host
+# prefixes, placeholder text) is the right place for negative
+# assertions.
+
+
+class CopyPasteExampleStructure(unittest.TestCase):
+    """Every copy/paste example in the canonical source must be a
+    well-formed, parseable fenced markdown block.
+
+    Added 2026-09-29 after the instruction-architecture rewrite silently
+    dropped the ```markdown fence and the
+    `<!-- BEGIN MPM MANAGED BLOCK:mpm-hermes -->` opener from the Hermes
+    example. The renderer still produced byte-correct adapter snippets
+    (the copy/paste examples are hand-maintained prose, not renderer
+    output), so every render-parity gate stayed green — but the Hermes
+    example stopped parsing as a managed block, and
+    test_stage2e4_behavioral_contract.ContinuityContract dropped to 3
+    host blocks instead of 4.
+
+    This is the structural class of defect those gates could not see:
+    renderer parity proves the renderer is consistent, not that the
+    hand-maintained examples around it are well-formed.
+    """
+
+    def test_each_copy_paste_example_is_fenced_and_parseable(self):
+        """Each copy/paste example must sit inside a ```markdown fence
+        and yield exactly one parseable managed block bounded by its
+        adapter's outer markers.
+
+        extract_copy_paste_block is the same parser the renderer uses, so
+        this asserts the example is well-formed for a human pasting it
+        into a host file — not merely equal to the rendered output.
+        """
+        text = CANONICAL_SOURCE.read_text(encoding="utf-8")
+        for adapter in _render.ADAPTERS:
+            with self.subTest(adapter=adapter["name"]):
+                outer_begin = adapter["copy_paste_outer_begin"]
+                outer_end = adapter["copy_paste_outer_end"]
+
+                # Locate the real example span. The canonical source
+                # documents each marker convention inline, backtick-wrapped,
+                # so a naive search hits the prose mention first — and a
+                # non-greedy regex from prose would swallow the real example
+                # as its own match. Scan opener positions directly: the real
+                # example's opener starts a line (prose mentions are
+                # mid-sentence, inside backticks) and is followed by a closer
+                # with an inner managed block between them.
+                example_span = None
+                idx = 0
+                while True:
+                    start = text.find(outer_begin, idx)
+                    if start == -1:
+                        break
+                    idx = start + 1
+                    at_line_start = start == 0 or text[start - 1] == "\n"
+                    if not at_line_start:
+                        continue
+                    close = text.find(outer_end, start + len(outer_begin))
+                    if close == -1:
+                        continue
+                    if "<!-- BEGIN MPM MANAGED BLOCK -->" in text[start:close]:
+                        example_span = (start, close)
+                        break
+                self.assertIsNotNone(
+                    example_span,
+                    f"{adapter['name']}: no copy/paste example containing an "
+                    f"inner managed block was found between the outer markers",
+                )
+
+                # 1. The example must live inside a ```markdown fence, so
+                #    the marker comments are presented as pasteable
+                #    content rather than as live document prose.
+                preceding = text[:example_span[0]]
+                last_open = preceding.rfind("```markdown")
+                last_close = preceding.rfind("```\n")
+                self.assertGreater(
+                    last_open, last_close,
+                    f"{adapter['name']}: copy/paste example must open with "
+                    f"a ```markdown fence before the outer marker",
+                )
+
+                # 2. The parser must recover a non-empty block, which
+                #    requires both outer markers and one inner universal
+                #    managed block nested between them.
+                block = _render.extract_copy_paste_block(
+                    text, outer_begin, outer_end, adapter["name"],
+                )
+                self.assertTrue(
+                    block.strip(),
+                    f"{adapter['name']}: extracted managed block is empty",
+                )
+
+                # 3. Exactly one universal managed block, and the outer
+                #    closer must follow the inner closer.
+                self.assertEqual(
+                    block.count("<!-- BEGIN MPM MANAGED BLOCK -->"), 1,
+                    f"{adapter['name']}: copy/paste example must contain "
+                    f"exactly one universal managed block opener",
+                )
+                inner_end = text.index(
+                    "<!-- END MPM MANAGED BLOCK -->", example_span[0])
+                self.assertLess(
+                    inner_end, example_span[1],
+                    f"{adapter['name']}: managed block must close before "
+                    f"the outer copy/paste closer",
+                )
+
+    def test_four_file_backed_hosts_have_extractable_blocks(self):
+        """The four persistent-file hosts must each yield a parseable
+        managed block. This is the invariant whose breakage made the
+        Hermes defect visible downstream as a host-count failure
+        (ContinuityContract extracts 3 of 4 when the Hermes outer
+        markers are lost)."""
+        text = CANONICAL_SOURCE.read_text(encoding="utf-8")
+        found = set()
+        for adapter in _render.ADAPTERS:
+            if adapter["name"] == "mpm-memory-openclaw":
+                continue  # OpenClaw inherits the universal block
+            block = _render.extract_copy_paste_block(
+                text,
+                adapter["copy_paste_outer_begin"],
+                adapter["copy_paste_outer_end"],
+                adapter["name"],
+            )
+            if block:
+                found.add(adapter["name"])
+        self.assertEqual(
+            len(found), 4,
+            f"expected 4 file-backed hosts with extractable managed "
+            f"blocks, got {sorted(found)}",
         )
 
 

@@ -1,4 +1,4 @@
-<!-- mpm_agent_integration_version: 1.2.0 -->
+<!-- mpm_agent_integration_version: 2.0.0 -->
 
 # MPM Agent Integration — Canonical Managed Instruction Snippets
 
@@ -63,220 +63,61 @@ MCP surface is exactly `mpm__mpm_memory`, `mpm__mpm_context`,
 <!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->
 <!-- BEGIN MPM MANAGED BLOCK -->
 <!-- source: agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md -->
-<!-- The full behavioural protocol is canonical at ~/.mpm/agent_installation/mpm-agent-protocol.md -->
+<!-- Full behavioural protocol: ~/.mpm/agent_installation/mpm-agent-protocol.md -->
 
 ## MPM behavioural contract
 
-You are operating with the MPM (Memory Persistence Module) substrate
-on this machine. The following are the non-negotiable MPM behavioural
-invariants that turn that capability into reliable behaviour. Edit the
-canonical protocol, not this block, for behavioural changes.
+MPM carries durable project state across sessions so future work can
+continue instead of rediscovering. This block is behavioural policy,
+not an API reference; tool descriptions, host discovery surfaces, and
+the full protocol carry operational detail.
 
-1. **Wake is auto-injected on session start** for ClaudeCode, OpenClaw,
-   OpenCode, and Pi. Each of these hosts installs a session-start
-   hook that fetches MPM wake context and injects it into the
-   system prompt before the first model turn. Hermes has no such
-   hook — on Hermes, the agent must call `mpm__mpm_context` action
-   `read_wake_context` once at the start of its first turn to
-   obtain the wake payload. Arriving amnesic on a host that should
-   be auto-injecting wake means the host integration is broken —
-   diagnose the host adapter, not call `read_wake_context`. As a
-   manual refresh path (mid-session, explicit refresh, or when the
-   host integration is unavailable), `mpm__mpm_context` action
-   `read_wake_context` is available. The wake payload carries
-   orientation signals (mode, persona, recent topics, recent
-   memories, recent milestones, last handoff, open work, overdue
-   scheduled wakes, a bounded `<available_skills>` catalogue) AND
-   the additive `<contextual_focus>` projection — bounded inherited
-   working awareness from the routing pipeline (see §1.1).
-   Decisions live in `mpm_decisions`; lessons in `mpm_lessons`. Use `params.projection:
-   "compact"` for a small id+summary envelope — the full payload
-   is the default.
+1. **Orient before you work.** MPM wake context normally arrives at
+   session start and carries relevant prior state such as handoff and
+   open work. If you do not have it, fetch it through `mpm__mpm_context`
+   action `read_wake_context` as a recovery path. Repeated absence on
+   a host that normally injects wake indicates an integration problem.
 
-1.1. **Interpret `<contextual_focus>` as inherited working
-   awareness**, not as unquestionable truth. Each item carries
-   `id / kind / artifact_id / pointer` (identity), `band / rationale /
-   why_now` (why it surfaced), `status / detail / truncated` (bounded
-   what-to-know), and supplementary `lifecycle_state` /
-   `selection_triggers` / `compressed_related_ids` where useful. Treat
-   it as bounded inherited context: use it as a durable pointer to
-   investigate, follow `pointer` / `artifact_id` with the appropriate
-   domain tool (`mpm_decisions show`, `mpm_lessons read`,
-   `mpm_memory show`, `mpm_work show`, `mpm_resolve`, etc.) when
-   detail is insufficient. Per-item status (`materialized` /
-   `pointer_only` / `missing` / `unsupported` / `error`) describes
-   whether bounded authoritative detail was available — never whether
-   the item mattered; a `missing` item still carries the pointer and
-   `why_now`. Selection order is preserved exactly; do not re-rank or
-   re-order. If `<contextual_focus>.status == "degraded"` (the
-   projection pipeline itself failed), continue using the legacy wake
-   context and investigate MPM health only if the missing focus
-   materially blocks work — do not chain the diagnostic
-   `contextual_*` actions to compensate. An empty items array is not
-   an error; continue from legacy wake context and current task.
+2. **Treat wake context as pointers, not truth.** It is bounded
+   inherited awareness, not a ranking or a verdict. Follow a pointer
+   with the relevant MPM tool when the summary is insufficient, and
+   check whether stored state is still applicable before relying on it:
+   a decision may be superseded, a theory is a hypothesis, and a
+   reference may be stale.
 
-1.2. **Recent history vs. contextual focus vs. diagnostic surfaces.**
-   The wake payload's `<contextual_focus>` is the normal inherited
-   working awareness to act on; it is a bounded pointer summary, NOT
-   a ranking. Two adjacent `mpm__mpm_context` actions serve different
-   questions:
-   - `mpm__mpm_context` action `recent_activity` is the canonical way to
-     ask "what recently happened?". It returns a chronological,
-     observational feed of recent mutating actions across the substrate
-     — newest-first, bounded by `limit`. The result is NOT relevance-ranked.
-   - `mpm__mpm_context` actions `contextual_candidates`,
-     `contextual_selection`, and `contextual_materialization` are
-     routing / diagnostic surfaces for inspecting or debugging the
-     contextual pipeline. They are NOT part of the normal session-start
-     workflow and NOT a ranking mechanism. Do not chain the three to
-     reconstruct the integrated result — the wake payload's
-     `<contextual_focus>` already contains it.
+3. **Persist during work, not only at the end - and not trivia.**
+   If losing something at session end would force meaningful
+   rediscovery later, preserve it in the appropriate MPM domain.
+   Do not store transient details, duplicates, or one-off noise.
 
-2. **Persist during work, not only at the end.** Use `mpm__mpm_memory`
-   action `save`, `mpm__mpm_decisions` action `record`,
-   `mpm__mpm_lessons` action `save`, `mpm__mpm_topics`
-   action `create`, and `mpm__mpm_references` action `add`
-   for any durable knowledge a future session would otherwise have
-   to rediscover. Heuristic: if losing this on session-end would
-   force you to rediscover it next time, persist now.
+4. **Reuse before reacquiring.** When prior project state may be
+   relevant, prefer existing MPM knowledge, decisions, references,
+   skills, or work over recreating or reacquiring them. Reacquire when
+   existing material is absent, stale, or inadequate. Probe for an
+   existing skill when a task looks familiar; capture a procedure only
+   when it has proved useful, is non-obvious, and is likely to recur.
 
-3. **Look beyond the compact tool surface.** When you need a
-   capability, discover it before assuming it is unavailable. The
-   compact native MCP surface intentionally exposes only `mpm_help`,
-   `mpm_memory`, and `mpm_context`; the full registered substrate
-   is broader (its count is dynamic — do not pin it). Do not assume
-   a capability is missing merely because it does not appear in the
-   initial `tools/list`. Use `mpm__mpm_help` action `list` to discover
-   every registered tool (each entry carries `reach_via_cli`).
-   Tools hidden from the default surface are reachable via the CLI
-   escape hatch `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
-   (works on every host). Hosts running with `MPM_EXPOSE_ALL_TOOLS=1`
-   on their MCP env block restore the full registered surface
-   natively. Do NOT hardcode a tool count in behaviour, tests, or
-   prose.
+5. **Track substantial continuing work.** Use durable work state when
+   an objective spans meaningful steps or sessions, waits on follow-up,
+   or requires later verification. Session closure, work completion,
+   and verification are separate events; the agent decides when work
+   is actually done.
 
-4. **Discover, create, and refine MPM skills.** Skills are reusable
-   procedures; treat them as a discover-then-creation lifecycle.
-   Before doing repeatable or non-trivial work, look for an
-   applicable existing skill via `mpm__mpm_context` action
-   `proactive_recall_hint` (with `params: {conversation_text:
-   "<recent task summary>"}`), read any surfaced skill via
-   `mpm__mpm_skills` action `read`, and fall back to `mpm__mpm_skills`
-   action `list` with `params: {scope: "all"}` (the bounded
-   `<available_skills>` catalogue in the wake envelope is the
-   lightweight first step — discovery adds a context-driven filter,
-   it does not replace it). Don't auto-scan the entire skill store
-   every turn. After a successful workflow that is non-trivial,
-   performed successfully, likely to recur, useful to preserve
-   procedurally, or improved by retaining its ordering / checks /
-   constraints / failure recovery, capture it as a reusable
-   procedure via `mpm__mpm_skills` action `save`, or `mpm__mpm_skills`
-   action `workshop` if the workflow warrants the workshop path
-   (`workshop` requires `intent`, `mode`, `task_context`,
-   `workflow_description`, `failure_recovery`, `recent_actions`,
-   `evidence` per the tool-reference stability contract). Avoid
-   skill spam. Do NOT create a skill for trivial one-off actions,
-   generic common knowledge, unproven procedures, or workflows not
-   likely to recur. Intended lifecycle: discover → execute → learn
-   → capture → reuse.
+6. **Leave useful continuation state.** At genuine session closure,
+   write a handoff when meaningful state remains for another session:
+   what happened, what is open, and what to do next. Routine
+   acknowledgements (`ok`, `thanks`, `ty`, `ack`) and trivial completed
+   interactions do not require one.
 
-5. **Handoff before genuine session closure.** Before any turn that
-   closes the session, write a handoff. On hosts using the default
-   compact MCP surface (Claude Code, Hermes, OpenClaw), the MCP path
-   is `mpm__mpm_context` action `write_handoff` with
-   `params: {summary: "<required>", session_id: "<optional>",
-   state: "clean"|"crashed"|"interrupted"|"force_end",
-   commitments: ["<optional>"], open_questions: ["<optional>"]}`.
-   The substrate path `mpm__mpm_handoff` action `write` with the same
-   `params` shape remains valid via `mpm call mpm_handoff --payload
-   '{"action":"write","params":{...}}'` and on hosts running with
-   `MPM_EXPOSE_ALL_TOOLS=1` on their MCP env block (which restores
-   the full registered MCP surface). `summary` is the only required field.
-   Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
-   session-closing; don't write a handoff on every chat ack.
-
-   For intra-session volatile working state, the substrate tool is
-   `mpm__mpm_scratchpad` actions `flush`, `read`,
-   `discard`, or `promote` (params: `{session_id, thesis,
-   supporting}`); reachable via `mpm call mpm_scratchpad` on hosts
-   using the compact MCP surface. Wake is how future-me starts;
-   handoff is how future-me receives the previous session.
-
-6. **Track durable objectives as work items.** When a task is
-   meaningfully multi-step, likely to span turns or sessions,
-   dependent on later information, waiting on follow-up, requiring
-   verification, containing important intermediate progress, or
-   costly to reconstruct after interruption, open a `mpm_work`
-   item reasonably early. Use `mpm__mpm_work` action `create` to open,
-   `mpm__mpm_work` action `update` for material state / plan / status
-   changes, `mpm__mpm_work` action `note` to retain meaningful progress
-   / evidence / context, and `mpm__mpm_work` action `complete` with
-   `params: {work_id}` to finish. Use `mpm__mpm_work` action `reopen`
-   when completion is invalidated or new evidence demands more
-   work, and `mpm__mpm_work` action `cancel` when an objective is
-   intentionally abandoned. Do not create a work item for every
-   small user request. Conceptual distinction: scratchpad is
-   volatile intra-session working state (substrate tool
-   `mpm_scratchpad`); work is a durable objective + progress
-   lifecycle; handoff is session transition (see #5). Tools not
-   exposed by your host's transport remain reachable via the CLI
-   fallback (see #10).
-
-7. **Session closure is not work completion.** Three events are
-   distinct: `session ended` (the host process exits), `work completed`
-   (`mpm__mpm_work` action `complete` invoked), and `work verified`
-   (objective actually achieved, including any evidence accumulation
-   via `mpm__mpm_work` action `resolve_contradiction`). Host session
-   termination does NOT auto-complete a work item. The agent decides
-   when work is done.
-
-8. **Acquire and retain authoritative references.** When work
-   depends on external facts or APIs that are version-sensitive,
-   implementation-sensitive, likely to be reused, expensive to
-   repeatedly rediscover, or important enough that primary-source
-   accuracy matters, prefer authoritative / primary documentation
-   where practical. Use whichever web / file / download capability
-   the host already exposes (web search, browser, shell, curl,
-   file tools — whatever is available and permitted) to obtain the
-   source material, then register it via `mpm__mpm_references` action
-   `add` (params carry the source material and its provenance).
-   Preserve enough provenance / version / freshness information to
-   judge later suitability — `mpm__mpm_references` action `read`
-   surfaces freshness states (`current`, `stale`, `version-bound`,
-   `historical`, `unknown`). Reuse an appropriate current reference
-   rather than repeatedly rediscovering the same documentation.
-   Common workflow classes that benefit: framework / library
-   development, API integration, vendor SDK work, standards /
-   specification work, version-sensitive infrastructure /
-   configuration. The rule is general; apply it whenever
-   primary-source accuracy and reusability matter.
-
-9. **Search the reference corpus before reacquiring.** Before
-   pulling new source material for a fact that may already live
-   in MPM, query the reference corpus via `mpm__mpm_references`
-   action `search` (params: `query` and `limit`). The workflow is
-   search existing reference knowledge, then use or read it if
-   suitable, then acquire or add authoritative material only when
-   the existing corpus is stale, absent, inadequate, or
-   explicitly known to be out of date for the question at hand.
-   Stale, absent, or inadequate references may still need fresh
-   reacquisition; the rule is "check first", not "never re-fetch".
-   CLI fallback: `mpm call mpm_references --payload
-   '{"action":"search","params":{"query":"<query>","limit":5}}'`.
-
-10. **MPM is the source of truth for cross-session continuity.**
-    Anything that should survive across sessions goes to MPM, not
-    just transient conversation context.
-
-11. **Recovery / fallback.** If the host's native MPM transport
-    becomes unavailable mid-session (MCP server down, plugin crashed,
-    `mpm__*` tools returning connection errors, etc.), fall back to
-    the documented CLI path:
-    `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
-    Do not abandon persistence when the preferred integration breaks.
-    `mpm call` writes to the same substrate with the same
-    provenance attribution as the native transport.
+7. **Do not assume an MPM capability is unavailable merely because it
+   is not initially visible.** Use the host's available discovery
+   affordance to inspect the substrate. Registry-backed tools not
+   exposed natively remain reachable through the documented
+   `mpm call <tool>` fallback. If the native transport fails
+   mid-session, use that fallback rather than abandoning persistence;
+   it operates on the same substrate with the same provenance.
 <!-- END MPM MANAGED BLOCK -->
+
 <!-- END MPM-MANAGED SECTION:claude-code-instructions -->
 ```
 
@@ -299,220 +140,61 @@ wake should appear in the system prompt before the first turn.
 <!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->
 <!-- BEGIN MPM MANAGED BLOCK -->
 <!-- source: agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md -->
-<!-- The full behavioural protocol is canonical at ~/.mpm/agent_installation/mpm-agent-protocol.md -->
+<!-- Full behavioural protocol: ~/.mpm/agent_installation/mpm-agent-protocol.md -->
 
 ## MPM behavioural contract
 
-You are operating with the MPM (Memory Persistence Module) substrate
-on this machine. The following are the non-negotiable MPM behavioural
-invariants that turn that capability into reliable behaviour. Edit the
-canonical protocol, not this block, for behavioural changes.
+MPM carries durable project state across sessions so future work can
+continue instead of rediscovering. This block is behavioural policy,
+not an API reference; tool descriptions, host discovery surfaces, and
+the full protocol carry operational detail.
 
-1. **Wake is auto-injected on session start** for ClaudeCode, OpenClaw,
-   OpenCode, and Pi. Each of these hosts installs a session-start
-   hook that fetches MPM wake context and injects it into the
-   system prompt before the first model turn. Hermes has no such
-   hook — on Hermes, the agent must call `mpm_context` action
-   `read_wake_context` once at the start of its first turn to
-   obtain the wake payload. Arriving amnesic on a host that should
-   be auto-injecting wake means the host integration is broken —
-   diagnose the host adapter, not call `read_wake_context`. As a
-   manual refresh path (mid-session, explicit refresh, or when the
-   host integration is unavailable), `mpm_context` action
-   `read_wake_context` is available. The wake payload carries
-   orientation signals (mode, persona, recent topics, recent
-   memories, recent milestones, last handoff, open work, overdue
-   scheduled wakes, a bounded `<available_skills>` catalogue) AND
-   the additive `<contextual_focus>` projection — bounded inherited
-   working awareness from the routing pipeline (see §1.1).
-   Decisions live in `mpm_decisions`; lessons in `mpm_lessons`. Use `params.projection:
-   "compact"` for a small id+summary envelope — the full payload
-   is the default.
+1. **Orient before you work.** MPM wake context normally arrives at
+   session start and carries relevant prior state such as handoff and
+   open work. If you do not have it, fetch it through `mpm_context`
+   action `read_wake_context` as a recovery path. Repeated absence on
+   a host that normally injects wake indicates an integration problem.
 
-1.1. **Interpret `<contextual_focus>` as inherited working
-   awareness**, not as unquestionable truth. Each item carries
-   `id / kind / artifact_id / pointer` (identity), `band / rationale /
-   why_now` (why it surfaced), `status / detail / truncated` (bounded
-   what-to-know), and supplementary `lifecycle_state` /
-   `selection_triggers` / `compressed_related_ids` where useful. Treat
-   it as bounded inherited context: use it as a durable pointer to
-   investigate, follow `pointer` / `artifact_id` with the appropriate
-   domain tool (`mpm_decisions show`, `mpm_lessons read`,
-   `mpm_memory show`, `mpm_work show`, `mpm_resolve`, etc.) when
-   detail is insufficient. Per-item status (`materialized` /
-   `pointer_only` / `missing` / `unsupported` / `error`) describes
-   whether bounded authoritative detail was available — never whether
-   the item mattered; a `missing` item still carries the pointer and
-   `why_now`. Selection order is preserved exactly; do not re-rank or
-   re-order. If `<contextual_focus>.status == "degraded"` (the
-   projection pipeline itself failed), continue using the legacy wake
-   context and investigate MPM health only if the missing focus
-   materially blocks work — do not chain the diagnostic
-   `contextual_*` actions to compensate. An empty items array is not
-   an error; continue from legacy wake context and current task.
+2. **Treat wake context as pointers, not truth.** It is bounded
+   inherited awareness, not a ranking or a verdict. Follow a pointer
+   with the relevant MPM tool when the summary is insufficient, and
+   check whether stored state is still applicable before relying on it:
+   a decision may be superseded, a theory is a hypothesis, and a
+   reference may be stale.
 
-1.2. **Recent history vs. contextual focus vs. diagnostic surfaces.**
-   The wake payload's `<contextual_focus>` is the normal inherited
-   working awareness to act on; it is a bounded pointer summary, NOT
-   a ranking. Two adjacent `mpm_context` actions serve different
-   questions:
-   - `mpm_context` action `recent_activity` is the canonical way to
-     ask "what recently happened?". It returns a chronological,
-     observational feed of recent mutating actions across the substrate
-     — newest-first, bounded by `limit`. The result is NOT relevance-ranked.
-   - `mpm_context` actions `contextual_candidates`,
-     `contextual_selection`, and `contextual_materialization` are
-     routing / diagnostic surfaces for inspecting or debugging the
-     contextual pipeline. They are NOT part of the normal session-start
-     workflow and NOT a ranking mechanism. Do not chain the three to
-     reconstruct the integrated result — the wake payload's
-     `<contextual_focus>` already contains it.
+3. **Persist during work, not only at the end - and not trivia.**
+   If losing something at session end would force meaningful
+   rediscovery later, preserve it in the appropriate MPM domain.
+   Do not store transient details, duplicates, or one-off noise.
 
-2. **Persist during work, not only at the end.** Use `mpm_memory`
-   action `save`, `mpm_decisions` action `record`,
-   `mpm_lessons` action `save`, `mpm_topics`
-   action `create`, and `mpm_references` action `add`
-   for any durable knowledge a future session would otherwise have
-   to rediscover. Heuristic: if losing this on session-end would
-   force you to rediscover it next time, persist now.
+4. **Reuse before reacquiring.** When prior project state may be
+   relevant, prefer existing MPM knowledge, decisions, references,
+   skills, or work over recreating or reacquiring them. Reacquire when
+   existing material is absent, stale, or inadequate. Probe for an
+   existing skill when a task looks familiar; capture a procedure only
+   when it has proved useful, is non-obvious, and is likely to recur.
 
-3. **Look beyond the compact tool surface.** When you need a
-   capability, discover it before assuming it is unavailable. The
-   compact native MCP surface intentionally exposes only `mpm_help`,
-   `mpm_memory`, and `mpm_context`; the full registered substrate
-   is broader (its count is dynamic — do not pin it). Do not assume
-   a capability is missing merely because it does not appear in the
-   initial `tools/list`. Use `mpm_help` action `list` to discover
-   every registered tool (each entry carries `reach_via_cli`).
-   Tools hidden from the default surface are reachable via the CLI
-   escape hatch `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
-   (works on every host). Hosts running with `MPM_EXPOSE_ALL_TOOLS=1`
-   on their MCP env block restore the full registered surface
-   natively. Do NOT hardcode a tool count in behaviour, tests, or
-   prose.
+5. **Track substantial continuing work.** Use durable work state when
+   an objective spans meaningful steps or sessions, waits on follow-up,
+   or requires later verification. Session closure, work completion,
+   and verification are separate events; the agent decides when work
+   is actually done.
 
-4. **Discover, create, and refine MPM skills.** Skills are reusable
-   procedures; treat them as a discover-then-creation lifecycle.
-   Before doing repeatable or non-trivial work, look for an
-   applicable existing skill via `mpm_context` action
-   `proactive_recall_hint` (with `params: {conversation_text:
-   "<recent task summary>"}`), read any surfaced skill via
-   `mpm_skills` action `read`, and fall back to `mpm_skills`
-   action `list` with `params: {scope: "all"}` (the bounded
-   `<available_skills>` catalogue in the wake envelope is the
-   lightweight first step — discovery adds a context-driven filter,
-   it does not replace it). Don't auto-scan the entire skill store
-   every turn. After a successful workflow that is non-trivial,
-   performed successfully, likely to recur, useful to preserve
-   procedurally, or improved by retaining its ordering / checks /
-   constraints / failure recovery, capture it as a reusable
-   procedure via `mpm_skills` action `save`, or `mpm_skills`
-   action `workshop` if the workflow warrants the workshop path
-   (`workshop` requires `intent`, `mode`, `task_context`,
-   `workflow_description`, `failure_recovery`, `recent_actions`,
-   `evidence` per the tool-reference stability contract). Avoid
-   skill spam. Do NOT create a skill for trivial one-off actions,
-   generic common knowledge, unproven procedures, or workflows not
-   likely to recur. Intended lifecycle: discover → execute → learn
-   → capture → reuse.
+6. **Leave useful continuation state.** At genuine session closure,
+   write a handoff when meaningful state remains for another session:
+   what happened, what is open, and what to do next. Routine
+   acknowledgements (`ok`, `thanks`, `ty`, `ack`) and trivial completed
+   interactions do not require one.
 
-5. **Handoff before genuine session closure.** Before any turn that
-   closes the session, write a handoff. On hosts using the default
-   compact MCP surface (Claude Code, Hermes, OpenClaw), the MCP path
-   is `mpm_context` action `write_handoff` with
-   `params: {summary: "<required>", session_id: "<optional>",
-   state: "clean"|"crashed"|"interrupted"|"force_end",
-   commitments: ["<optional>"], open_questions: ["<optional>"]}`.
-   The substrate path `mpm_handoff` action `write` with the same
-   `params` shape remains valid via `mpm call mpm_handoff --payload
-   '{"action":"write","params":{...}}'` and on hosts running with
-   `MPM_EXPOSE_ALL_TOOLS=1` on their MCP env block (which restores
-   the full registered MCP surface). `summary` is the only required field.
-   Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
-   session-closing; don't write a handoff on every chat ack.
-
-   For intra-session volatile working state, the substrate tool is
-   `mpm_scratchpad` actions `flush`, `read`,
-   `discard`, or `promote` (params: `{session_id, thesis,
-   supporting}`); reachable via `mpm call mpm_scratchpad` on hosts
-   using the compact MCP surface. Wake is how future-me starts;
-   handoff is how future-me receives the previous session.
-
-6. **Track durable objectives as work items.** When a task is
-   meaningfully multi-step, likely to span turns or sessions,
-   dependent on later information, waiting on follow-up, requiring
-   verification, containing important intermediate progress, or
-   costly to reconstruct after interruption, open a `mpm_work`
-   item reasonably early. Use `mpm_work` action `create` to open,
-   `mpm_work` action `update` for material state / plan / status
-   changes, `mpm_work` action `note` to retain meaningful progress
-   / evidence / context, and `mpm_work` action `complete` with
-   `params: {work_id}` to finish. Use `mpm_work` action `reopen`
-   when completion is invalidated or new evidence demands more
-   work, and `mpm_work` action `cancel` when an objective is
-   intentionally abandoned. Do not create a work item for every
-   small user request. Conceptual distinction: scratchpad is
-   volatile intra-session working state (substrate tool
-   `mpm_scratchpad`); work is a durable objective + progress
-   lifecycle; handoff is session transition (see #5). Tools not
-   exposed by your host's transport remain reachable via the CLI
-   fallback (see #10).
-
-7. **Session closure is not work completion.** Three events are
-   distinct: `session ended` (the host process exits), `work completed`
-   (`mpm_work` action `complete` invoked), and `work verified`
-   (objective actually achieved, including any evidence accumulation
-   via `mpm_work` action `resolve_contradiction`). Host session
-   termination does NOT auto-complete a work item. The agent decides
-   when work is done.
-
-8. **Acquire and retain authoritative references.** When work
-   depends on external facts or APIs that are version-sensitive,
-   implementation-sensitive, likely to be reused, expensive to
-   repeatedly rediscover, or important enough that primary-source
-   accuracy matters, prefer authoritative / primary documentation
-   where practical. Use whichever web / file / download capability
-   the host already exposes (web search, browser, shell, curl,
-   file tools — whatever is available and permitted) to obtain the
-   source material, then register it via `mpm_references` action
-   `add` (params carry the source material and its provenance).
-   Preserve enough provenance / version / freshness information to
-   judge later suitability — `mpm_references` action `read`
-   surfaces freshness states (`current`, `stale`, `version-bound`,
-   `historical`, `unknown`). Reuse an appropriate current reference
-   rather than repeatedly rediscovering the same documentation.
-   Common workflow classes that benefit: framework / library
-   development, API integration, vendor SDK work, standards /
-   specification work, version-sensitive infrastructure /
-   configuration. The rule is general; apply it whenever
-   primary-source accuracy and reusability matter.
-
-9. **Search the reference corpus before reacquiring.** Before
-   pulling new source material for a fact that may already live
-   in MPM, query the reference corpus via `mpm_references`
-   action `search` (params: `query` and `limit`). The workflow is
-   search existing reference knowledge, then use or read it if
-   suitable, then acquire or add authoritative material only when
-   the existing corpus is stale, absent, inadequate, or
-   explicitly known to be out of date for the question at hand.
-   Stale, absent, or inadequate references may still need fresh
-   reacquisition; the rule is "check first", not "never re-fetch".
-   CLI fallback: `mpm call mpm_references --payload
-   '{"action":"search","params":{"query":"<query>","limit":5}}'`.
-
-10. **MPM is the source of truth for cross-session continuity.**
-    Anything that should survive across sessions goes to MPM, not
-    just transient conversation context.
-
-11. **Recovery / fallback.** If the host's native MPM transport
-    becomes unavailable mid-session (MCP server down, plugin crashed,
-    `mpm__*` tools returning connection errors, etc.), fall back to
-    the documented CLI path:
-    `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
-    Do not abandon persistence when the preferred integration breaks.
-    `mpm call` writes to the same substrate with the same
-    provenance attribution as the native transport.
+7. **Do not assume an MPM capability is unavailable merely because it
+   is not initially visible.** Use the host's available discovery
+   affordance to inspect the substrate. Registry-backed tools not
+   exposed natively remain reachable through the documented
+   `mpm call <tool>` fallback. If the native transport fails
+   mid-session, use that fallback rather than abandoning persistence;
+   it operates on the same substrate with the same provenance.
 <!-- END MPM MANAGED BLOCK -->
+
 <!-- END MPM-MANAGED SECTION:opencode-instructions -->
 ```
 
@@ -537,220 +219,61 @@ on hosts without the full surface).
 <!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->
 <!-- BEGIN MPM MANAGED BLOCK -->
 <!-- source: agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md -->
-<!-- The full behavioural protocol is canonical at ~/.mpm/agent_installation/mpm-agent-protocol.md -->
+<!-- Full behavioural protocol: ~/.mpm/agent_installation/mpm-agent-protocol.md -->
 
 ## MPM behavioural contract
 
-You are operating with the MPM (Memory Persistence Module) substrate
-on this machine. The following are the non-negotiable MPM behavioural
-invariants that turn that capability into reliable behaviour. Edit the
-canonical protocol, not this block, for behavioural changes.
+MPM carries durable project state across sessions so future work can
+continue instead of rediscovering. This block is behavioural policy,
+not an API reference; tool descriptions, host discovery surfaces, and
+the full protocol carry operational detail.
 
-1. **Wake is auto-injected on session start** for ClaudeCode, OpenClaw,
-   OpenCode, and Pi. Each of these hosts installs a session-start
-   hook that fetches MPM wake context and injects it into the
-   system prompt before the first model turn. Hermes has no such
-   hook — on Hermes, the agent must call `mpm_context` action
-   `read_wake_context` once at the start of its first turn to
-   obtain the wake payload. Arriving amnesic on a host that should
-   be auto-injecting wake means the host integration is broken —
-   diagnose the host adapter, not call `read_wake_context`. As a
-   manual refresh path (mid-session, explicit refresh, or when the
-   host integration is unavailable), `mpm_context` action
-   `read_wake_context` is available. The wake payload carries
-   orientation signals (mode, persona, recent topics, recent
-   memories, recent milestones, last handoff, open work, overdue
-   scheduled wakes, a bounded `<available_skills>` catalogue) AND
-   the additive `<contextual_focus>` projection — bounded inherited
-   working awareness from the routing pipeline (see §1.1).
-   Decisions live in `mpm_decisions`; lessons in `mpm_lessons`. Use `params.projection:
-   "compact"` for a small id+summary envelope — the full payload
-   is the default.
+1. **Orient before you work.** MPM wake context normally arrives at
+   session start and carries relevant prior state such as handoff and
+   open work. If you do not have it, fetch it through `mpm_context`
+   action `read_wake_context` as a recovery path. Repeated absence on
+   a host that normally injects wake indicates an integration problem.
 
-1.1. **Interpret `<contextual_focus>` as inherited working
-   awareness**, not as unquestionable truth. Each item carries
-   `id / kind / artifact_id / pointer` (identity), `band / rationale /
-   why_now` (why it surfaced), `status / detail / truncated` (bounded
-   what-to-know), and supplementary `lifecycle_state` /
-   `selection_triggers` / `compressed_related_ids` where useful. Treat
-   it as bounded inherited context: use it as a durable pointer to
-   investigate, follow `pointer` / `artifact_id` with the appropriate
-   domain tool (`mpm_decisions show`, `mpm_lessons read`,
-   `mpm_memory show`, `mpm_work show`, `mpm_resolve`, etc.) when
-   detail is insufficient. Per-item status (`materialized` /
-   `pointer_only` / `missing` / `unsupported` / `error`) describes
-   whether bounded authoritative detail was available — never whether
-   the item mattered; a `missing` item still carries the pointer and
-   `why_now`. Selection order is preserved exactly; do not re-rank or
-   re-order. If `<contextual_focus>.status == "degraded"` (the
-   projection pipeline itself failed), continue using the legacy wake
-   context and investigate MPM health only if the missing focus
-   materially blocks work — do not chain the diagnostic
-   `contextual_*` actions to compensate. An empty items array is not
-   an error; continue from legacy wake context and current task.
+2. **Treat wake context as pointers, not truth.** It is bounded
+   inherited awareness, not a ranking or a verdict. Follow a pointer
+   with the relevant MPM tool when the summary is insufficient, and
+   check whether stored state is still applicable before relying on it:
+   a decision may be superseded, a theory is a hypothesis, and a
+   reference may be stale.
 
-1.2. **Recent history vs. contextual focus vs. diagnostic surfaces.**
-   The wake payload's `<contextual_focus>` is the normal inherited
-   working awareness to act on; it is a bounded pointer summary, NOT
-   a ranking. Two adjacent `mpm_context` actions serve different
-   questions:
-   - `mpm_context` action `recent_activity` is the canonical way to
-     ask "what recently happened?". It returns a chronological,
-     observational feed of recent mutating actions across the substrate
-     — newest-first, bounded by `limit`. The result is NOT relevance-ranked.
-   - `mpm_context` actions `contextual_candidates`,
-     `contextual_selection`, and `contextual_materialization` are
-     routing / diagnostic surfaces for inspecting or debugging the
-     contextual pipeline. They are NOT part of the normal session-start
-     workflow and NOT a ranking mechanism. Do not chain the three to
-     reconstruct the integrated result — the wake payload's
-     `<contextual_focus>` already contains it.
+3. **Persist during work, not only at the end - and not trivia.**
+   If losing something at session end would force meaningful
+   rediscovery later, preserve it in the appropriate MPM domain.
+   Do not store transient details, duplicates, or one-off noise.
 
-2. **Persist during work, not only at the end.** Use `mpm_memory`
-   action `save`, `mpm_decisions` action `record`,
-   `mpm_lessons` action `save`, `mpm_topics`
-   action `create`, and `mpm_references` action `add`
-   for any durable knowledge a future session would otherwise have
-   to rediscover. Heuristic: if losing this on session-end would
-   force you to rediscover it next time, persist now.
+4. **Reuse before reacquiring.** When prior project state may be
+   relevant, prefer existing MPM knowledge, decisions, references,
+   skills, or work over recreating or reacquiring them. Reacquire when
+   existing material is absent, stale, or inadequate. Probe for an
+   existing skill when a task looks familiar; capture a procedure only
+   when it has proved useful, is non-obvious, and is likely to recur.
 
-3. **Look beyond the compact tool surface.** When you need a
-   capability, discover it before assuming it is unavailable. The
-   compact native MCP surface intentionally exposes only `mpm_help`,
-   `mpm_memory`, and `mpm_context`; the full registered substrate
-   is broader (its count is dynamic — do not pin it). Do not assume
-   a capability is missing merely because it does not appear in the
-   initial `tools/list`. Use `mpm_help` action `list` to discover
-   every registered tool (each entry carries `reach_via_cli`).
-   Tools hidden from the default surface are reachable via the CLI
-   escape hatch `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
-   (works on every host). Hosts running with `MPM_EXPOSE_ALL_TOOLS=1`
-   on their MCP env block restore the full registered surface
-   natively. Do NOT hardcode a tool count in behaviour, tests, or
-   prose.
+5. **Track substantial continuing work.** Use durable work state when
+   an objective spans meaningful steps or sessions, waits on follow-up,
+   or requires later verification. Session closure, work completion,
+   and verification are separate events; the agent decides when work
+   is actually done.
 
-4. **Discover, create, and refine MPM skills.** Skills are reusable
-   procedures; treat them as a discover-then-creation lifecycle.
-   Before doing repeatable or non-trivial work, look for an
-   applicable existing skill via `mpm_context` action
-   `proactive_recall_hint` (with `params: {conversation_text:
-   "<recent task summary>"}`), read any surfaced skill via
-   `mpm_skills` action `read`, and fall back to `mpm_skills`
-   action `list` with `params: {scope: "all"}` (the bounded
-   `<available_skills>` catalogue in the wake envelope is the
-   lightweight first step — discovery adds a context-driven filter,
-   it does not replace it). Don't auto-scan the entire skill store
-   every turn. After a successful workflow that is non-trivial,
-   performed successfully, likely to recur, useful to preserve
-   procedurally, or improved by retaining its ordering / checks /
-   constraints / failure recovery, capture it as a reusable
-   procedure via `mpm_skills` action `save`, or `mpm_skills`
-   action `workshop` if the workflow warrants the workshop path
-   (`workshop` requires `intent`, `mode`, `task_context`,
-   `workflow_description`, `failure_recovery`, `recent_actions`,
-   `evidence` per the tool-reference stability contract). Avoid
-   skill spam. Do NOT create a skill for trivial one-off actions,
-   generic common knowledge, unproven procedures, or workflows not
-   likely to recur. Intended lifecycle: discover → execute → learn
-   → capture → reuse.
+6. **Leave useful continuation state.** At genuine session closure,
+   write a handoff when meaningful state remains for another session:
+   what happened, what is open, and what to do next. Routine
+   acknowledgements (`ok`, `thanks`, `ty`, `ack`) and trivial completed
+   interactions do not require one.
 
-5. **Handoff before genuine session closure.** Before any turn that
-   closes the session, write a handoff. On hosts using the default
-   compact MCP surface (Claude Code, Hermes, OpenClaw), the MCP path
-   is `mpm_context` action `write_handoff` with
-   `params: {summary: "<required>", session_id: "<optional>",
-   state: "clean"|"crashed"|"interrupted"|"force_end",
-   commitments: ["<optional>"], open_questions: ["<optional>"]}`.
-   The substrate path `mpm_handoff` action `write` with the same
-   `params` shape remains valid via `mpm call mpm_handoff --payload
-   '{"action":"write","params":{...}}'` and on hosts running with
-   `MPM_EXPOSE_ALL_TOOLS=1` on their MCP env block (which restores
-   the full registered MCP surface). `summary` is the only required field.
-   Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
-   session-closing; don't write a handoff on every chat ack.
-
-   For intra-session volatile working state, the substrate tool is
-   `mpm_scratchpad` actions `flush`, `read`,
-   `discard`, or `promote` (params: `{session_id, thesis,
-   supporting}`); reachable via `mpm call mpm_scratchpad` on hosts
-   using the compact MCP surface. Wake is how future-me starts;
-   handoff is how future-me receives the previous session.
-
-6. **Track durable objectives as work items.** When a task is
-   meaningfully multi-step, likely to span turns or sessions,
-   dependent on later information, waiting on follow-up, requiring
-   verification, containing important intermediate progress, or
-   costly to reconstruct after interruption, open a `mpm_work`
-   item reasonably early. Use `mpm_work` action `create` to open,
-   `mpm_work` action `update` for material state / plan / status
-   changes, `mpm_work` action `note` to retain meaningful progress
-   / evidence / context, and `mpm_work` action `complete` with
-   `params: {work_id}` to finish. Use `mpm_work` action `reopen`
-   when completion is invalidated or new evidence demands more
-   work, and `mpm_work` action `cancel` when an objective is
-   intentionally abandoned. Do not create a work item for every
-   small user request. Conceptual distinction: scratchpad is
-   volatile intra-session working state (substrate tool
-   `mpm_scratchpad`); work is a durable objective + progress
-   lifecycle; handoff is session transition (see #5). Tools not
-   exposed by your host's transport remain reachable via the CLI
-   fallback (see #10).
-
-7. **Session closure is not work completion.** Three events are
-   distinct: `session ended` (the host process exits), `work completed`
-   (`mpm_work` action `complete` invoked), and `work verified`
-   (objective actually achieved, including any evidence accumulation
-   via `mpm_work` action `resolve_contradiction`). Host session
-   termination does NOT auto-complete a work item. The agent decides
-   when work is done.
-
-8. **Acquire and retain authoritative references.** When work
-   depends on external facts or APIs that are version-sensitive,
-   implementation-sensitive, likely to be reused, expensive to
-   repeatedly rediscover, or important enough that primary-source
-   accuracy matters, prefer authoritative / primary documentation
-   where practical. Use whichever web / file / download capability
-   the host already exposes (web search, browser, shell, curl,
-   file tools — whatever is available and permitted) to obtain the
-   source material, then register it via `mpm_references` action
-   `add` (params carry the source material and its provenance).
-   Preserve enough provenance / version / freshness information to
-   judge later suitability — `mpm_references` action `read`
-   surfaces freshness states (`current`, `stale`, `version-bound`,
-   `historical`, `unknown`). Reuse an appropriate current reference
-   rather than repeatedly rediscovering the same documentation.
-   Common workflow classes that benefit: framework / library
-   development, API integration, vendor SDK work, standards /
-   specification work, version-sensitive infrastructure /
-   configuration. The rule is general; apply it whenever
-   primary-source accuracy and reusability matter.
-
-9. **Search the reference corpus before reacquiring.** Before
-   pulling new source material for a fact that may already live
-   in MPM, query the reference corpus via `mpm_references`
-   action `search` (params: `query` and `limit`). The workflow is
-   search existing reference knowledge, then use or read it if
-   suitable, then acquire or add authoritative material only when
-   the existing corpus is stale, absent, inadequate, or
-   explicitly known to be out of date for the question at hand.
-   Stale, absent, or inadequate references may still need fresh
-   reacquisition; the rule is "check first", not "never re-fetch".
-   CLI fallback: `mpm call mpm_references --payload
-   '{"action":"search","params":{"query":"<query>","limit":5}}'`.
-
-10. **MPM is the source of truth for cross-session continuity.**
-    Anything that should survive across sessions goes to MPM, not
-    just transient conversation context.
-
-11. **Recovery / fallback.** If the host's native MPM transport
-    becomes unavailable mid-session (MCP server down, plugin crashed,
-    `mpm__*` tools returning connection errors, etc.), fall back to
-    the documented CLI path:
-    `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
-    Do not abandon persistence when the preferred integration breaks.
-    `mpm call` writes to the same substrate with the same
-    provenance attribution as the native transport.
+7. **Do not assume an MPM capability is unavailable merely because it
+   is not initially visible.** Use the host's available discovery
+   affordance to inspect the substrate. Registry-backed tools not
+   exposed natively remain reachable through the documented
+   `mpm call <tool>` fallback. If the native transport fails
+   mid-session, use that fallback rather than abandoning persistence;
+   it operates on the same substrate with the same provenance.
 <!-- END MPM MANAGED BLOCK -->
+
 <!-- END MPM-MANAGED SECTION:pi-instructions -->
 ```
 
@@ -767,7 +290,7 @@ The persona stays in `~/.hermes/SOUL.md`; the MPM behavioural
 contract lands via `.hermes.md`. The compact MCP surface is
 `mcp__mpm__mpm_memory`, `mcp__mpm__mpm_context`,
 `mcp__mpm__mpm_help`; handoff goes through `mcp__mpm__mpm_context`
-action `write_handoff` / `read_handoff`. The full 22-tool
+action `write_handoff` / `read_handoff`. The full registered
 surface is restored by setting `MPM_EXPOSE_ALL_TOOLS=1` on the
 MCP env block (which exposes `mcp__mpm__mpm_handoff` directly).
 
@@ -775,220 +298,61 @@ MCP env block (which exposes `mcp__mpm__mpm_handoff` directly).
 <!-- BEGIN MPM MANAGED BLOCK:mpm-hermes -->
 <!-- BEGIN MPM MANAGED BLOCK -->
 <!-- source: agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md -->
-<!-- The full behavioural protocol is canonical at ~/.mpm/agent_installation/mpm-agent-protocol.md -->
+<!-- Full behavioural protocol: ~/.mpm/agent_installation/mpm-agent-protocol.md -->
 
 ## MPM behavioural contract
 
-You are operating with the MPM (Memory Persistence Module) substrate
-on this machine. The following are the non-negotiable MPM behavioural
-invariants that turn that capability into reliable behaviour. Edit the
-canonical protocol, not this block, for behavioural changes.
+MPM carries durable project state across sessions so future work can
+continue instead of rediscovering. This block is behavioural policy,
+not an API reference; tool descriptions, host discovery surfaces, and
+the full protocol carry operational detail.
 
-1. **Wake is auto-injected on session start** for ClaudeCode, OpenClaw,
-   OpenCode, and Pi. Each of these hosts installs a session-start
-   hook that fetches MPM wake context and injects it into the
-   system prompt before the first model turn. Hermes has no such
-   hook — on Hermes, the agent must call `mcp__mpm__mpm_context` action
-   `read_wake_context` once at the start of its first turn to
-   obtain the wake payload. Arriving amnesic on a host that should
-   be auto-injecting wake means the host integration is broken —
-   diagnose the host adapter, not call `read_wake_context`. As a
-   manual refresh path (mid-session, explicit refresh, or when the
-   host integration is unavailable), `mcp__mpm__mpm_context` action
-   `read_wake_context` is available. The wake payload carries
-   orientation signals (mode, persona, recent topics, recent
-   memories, recent milestones, last handoff, open work, overdue
-   scheduled wakes, a bounded `<available_skills>` catalogue) AND
-   the additive `<contextual_focus>` projection — bounded inherited
-   working awareness from the routing pipeline (see §1.1).
-   Decisions live in `mpm_decisions`; lessons in `mpm_lessons`. Use `params.projection:
-   "compact"` for a small id+summary envelope — the full payload
-   is the default.
+1. **Orient before you work.** MPM wake context normally arrives at
+   session start and carries relevant prior state such as handoff and
+   open work. If you do not have it, fetch it through `mcp__mpm__mpm_context`
+   action `read_wake_context` as a recovery path. Repeated absence on
+   a host that normally injects wake indicates an integration problem.
 
-1.1. **Interpret `<contextual_focus>` as inherited working
-   awareness**, not as unquestionable truth. Each item carries
-   `id / kind / artifact_id / pointer` (identity), `band / rationale /
-   why_now` (why it surfaced), `status / detail / truncated` (bounded
-   what-to-know), and supplementary `lifecycle_state` /
-   `selection_triggers` / `compressed_related_ids` where useful. Treat
-   it as bounded inherited context: use it as a durable pointer to
-   investigate, follow `pointer` / `artifact_id` with the appropriate
-   domain tool (`mpm_decisions show`, `mpm_lessons read`,
-   `mpm_memory show`, `mpm_work show`, `mpm_resolve`, etc.) when
-   detail is insufficient. Per-item status (`materialized` /
-   `pointer_only` / `missing` / `unsupported` / `error`) describes
-   whether bounded authoritative detail was available — never whether
-   the item mattered; a `missing` item still carries the pointer and
-   `why_now`. Selection order is preserved exactly; do not re-rank or
-   re-order. If `<contextual_focus>.status == "degraded"` (the
-   projection pipeline itself failed), continue using the legacy wake
-   context and investigate MPM health only if the missing focus
-   materially blocks work — do not chain the diagnostic
-   `contextual_*` actions to compensate. An empty items array is not
-   an error; continue from legacy wake context and current task.
+2. **Treat wake context as pointers, not truth.** It is bounded
+   inherited awareness, not a ranking or a verdict. Follow a pointer
+   with the relevant MPM tool when the summary is insufficient, and
+   check whether stored state is still applicable before relying on it:
+   a decision may be superseded, a theory is a hypothesis, and a
+   reference may be stale.
 
-1.2. **Recent history vs. contextual focus vs. diagnostic surfaces.**
-   The wake payload's `<contextual_focus>` is the normal inherited
-   working awareness to act on; it is a bounded pointer summary, NOT
-   a ranking. Two adjacent `mcp__mpm__mpm_context` actions serve different
-   questions:
-   - `mcp__mpm__mpm_context` action `recent_activity` is the canonical way to
-     ask "what recently happened?". It returns a chronological,
-     observational feed of recent mutating actions across the substrate
-     — newest-first, bounded by `limit`. The result is NOT relevance-ranked.
-   - `mcp__mpm__mpm_context` actions `contextual_candidates`,
-     `contextual_selection`, and `contextual_materialization` are
-     routing / diagnostic surfaces for inspecting or debugging the
-     contextual pipeline. They are NOT part of the normal session-start
-     workflow and NOT a ranking mechanism. Do not chain the three to
-     reconstruct the integrated result — the wake payload's
-     `<contextual_focus>` already contains it.
+3. **Persist during work, not only at the end - and not trivia.**
+   If losing something at session end would force meaningful
+   rediscovery later, preserve it in the appropriate MPM domain.
+   Do not store transient details, duplicates, or one-off noise.
 
-2. **Persist during work, not only at the end.** Use `mcp__mpm__mpm_memory`
-   action `save`, `mcp__mpm__mpm_decisions` action `record`,
-   `mcp__mpm__mpm_lessons` action `save`, `mcp__mpm__mpm_topics`
-   action `create`, and `mcp__mpm__mpm_references` action `add`
-   for any durable knowledge a future session would otherwise have
-   to rediscover. Heuristic: if losing this on session-end would
-   force you to rediscover it next time, persist now.
+4. **Reuse before reacquiring.** When prior project state may be
+   relevant, prefer existing MPM knowledge, decisions, references,
+   skills, or work over recreating or reacquiring them. Reacquire when
+   existing material is absent, stale, or inadequate. Probe for an
+   existing skill when a task looks familiar; capture a procedure only
+   when it has proved useful, is non-obvious, and is likely to recur.
 
-3. **Look beyond the compact tool surface.** When you need a
-   capability, discover it before assuming it is unavailable. The
-   compact native MCP surface intentionally exposes only `mpm_help`,
-   `mpm_memory`, and `mpm_context`; the full registered substrate
-   is broader (its count is dynamic — do not pin it). Do not assume
-   a capability is missing merely because it does not appear in the
-   initial `tools/list`. Use `mcp__mpm__mpm_help` action `list` to discover
-   every registered tool (each entry carries `reach_via_cli`).
-   Tools hidden from the default surface are reachable via the CLI
-   escape hatch `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
-   (works on every host). Hosts running with `MPM_EXPOSE_ALL_TOOLS=1`
-   on their MCP env block restore the full registered surface
-   natively. Do NOT hardcode a tool count in behaviour, tests, or
-   prose.
+5. **Track substantial continuing work.** Use durable work state when
+   an objective spans meaningful steps or sessions, waits on follow-up,
+   or requires later verification. Session closure, work completion,
+   and verification are separate events; the agent decides when work
+   is actually done.
 
-4. **Discover, create, and refine MPM skills.** Skills are reusable
-   procedures; treat them as a discover-then-creation lifecycle.
-   Before doing repeatable or non-trivial work, look for an
-   applicable existing skill via `mcp__mpm__mpm_context` action
-   `proactive_recall_hint` (with `params: {conversation_text:
-   "<recent task summary>"}`), read any surfaced skill via
-   `mcp__mpm__mpm_skills` action `read`, and fall back to `mcp__mpm__mpm_skills`
-   action `list` with `params: {scope: "all"}` (the bounded
-   `<available_skills>` catalogue in the wake envelope is the
-   lightweight first step — discovery adds a context-driven filter,
-   it does not replace it). Don't auto-scan the entire skill store
-   every turn. After a successful workflow that is non-trivial,
-   performed successfully, likely to recur, useful to preserve
-   procedurally, or improved by retaining its ordering / checks /
-   constraints / failure recovery, capture it as a reusable
-   procedure via `mcp__mpm__mpm_skills` action `save`, or `mcp__mpm__mpm_skills`
-   action `workshop` if the workflow warrants the workshop path
-   (`workshop` requires `intent`, `mode`, `task_context`,
-   `workflow_description`, `failure_recovery`, `recent_actions`,
-   `evidence` per the tool-reference stability contract). Avoid
-   skill spam. Do NOT create a skill for trivial one-off actions,
-   generic common knowledge, unproven procedures, or workflows not
-   likely to recur. Intended lifecycle: discover → execute → learn
-   → capture → reuse.
+6. **Leave useful continuation state.** At genuine session closure,
+   write a handoff when meaningful state remains for another session:
+   what happened, what is open, and what to do next. Routine
+   acknowledgements (`ok`, `thanks`, `ty`, `ack`) and trivial completed
+   interactions do not require one.
 
-5. **Handoff before genuine session closure.** Before any turn that
-   closes the session, write a handoff. On hosts using the default
-   compact MCP surface (Claude Code, Hermes, OpenClaw), the MCP path
-   is `mcp__mpm__mpm_context` action `write_handoff` with
-   `params: {summary: "<required>", session_id: "<optional>",
-   state: "clean"|"crashed"|"interrupted"|"force_end",
-   commitments: ["<optional>"], open_questions: ["<optional>"]}`.
-   The substrate path `mcp__mpm__mpm_handoff` action `write` with the same
-   `params` shape remains valid via `mpm call mpm_handoff --payload
-   '{"action":"write","params":{...}}'` and on hosts running with
-   `MPM_EXPOSE_ALL_TOOLS=1` on their MCP env block (which restores
-   the full registered MCP surface). `summary` is the only required field.
-   Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
-   session-closing; don't write a handoff on every chat ack.
-
-   For intra-session volatile working state, the substrate tool is
-   `mcp__mpm__mpm_scratchpad` actions `flush`, `read`,
-   `discard`, or `promote` (params: `{session_id, thesis,
-   supporting}`); reachable via `mpm call mpm_scratchpad` on hosts
-   using the compact MCP surface. Wake is how future-me starts;
-   handoff is how future-me receives the previous session.
-
-6. **Track durable objectives as work items.** When a task is
-   meaningfully multi-step, likely to span turns or sessions,
-   dependent on later information, waiting on follow-up, requiring
-   verification, containing important intermediate progress, or
-   costly to reconstruct after interruption, open a `mpm_work`
-   item reasonably early. Use `mcp__mpm__mpm_work` action `create` to open,
-   `mcp__mpm__mpm_work` action `update` for material state / plan / status
-   changes, `mcp__mpm__mpm_work` action `note` to retain meaningful progress
-   / evidence / context, and `mcp__mpm__mpm_work` action `complete` with
-   `params: {work_id}` to finish. Use `mcp__mpm__mpm_work` action `reopen`
-   when completion is invalidated or new evidence demands more
-   work, and `mcp__mpm__mpm_work` action `cancel` when an objective is
-   intentionally abandoned. Do not create a work item for every
-   small user request. Conceptual distinction: scratchpad is
-   volatile intra-session working state (substrate tool
-   `mpm_scratchpad`); work is a durable objective + progress
-   lifecycle; handoff is session transition (see #5). Tools not
-   exposed by your host's transport remain reachable via the CLI
-   fallback (see #10).
-
-7. **Session closure is not work completion.** Three events are
-   distinct: `session ended` (the host process exits), `work completed`
-   (`mcp__mpm__mpm_work` action `complete` invoked), and `work verified`
-   (objective actually achieved, including any evidence accumulation
-   via `mcp__mpm__mpm_work` action `resolve_contradiction`). Host session
-   termination does NOT auto-complete a work item. The agent decides
-   when work is done.
-
-8. **Acquire and retain authoritative references.** When work
-   depends on external facts or APIs that are version-sensitive,
-   implementation-sensitive, likely to be reused, expensive to
-   repeatedly rediscover, or important enough that primary-source
-   accuracy matters, prefer authoritative / primary documentation
-   where practical. Use whichever web / file / download capability
-   the host already exposes (web search, browser, shell, curl,
-   file tools — whatever is available and permitted) to obtain the
-   source material, then register it via `mcp__mpm__mpm_references` action
-   `add` (params carry the source material and its provenance).
-   Preserve enough provenance / version / freshness information to
-   judge later suitability — `mcp__mpm__mpm_references` action `read`
-   surfaces freshness states (`current`, `stale`, `version-bound`,
-   `historical`, `unknown`). Reuse an appropriate current reference
-   rather than repeatedly rediscovering the same documentation.
-   Common workflow classes that benefit: framework / library
-   development, API integration, vendor SDK work, standards /
-   specification work, version-sensitive infrastructure /
-   configuration. The rule is general; apply it whenever
-   primary-source accuracy and reusability matter.
-
-9. **Search the reference corpus before reacquiring.** Before
-   pulling new source material for a fact that may already live
-   in MPM, query the reference corpus via `mcp__mpm__mpm_references`
-   action `search` (params: `query` and `limit`). The workflow is
-   search existing reference knowledge, then use or read it if
-   suitable, then acquire or add authoritative material only when
-   the existing corpus is stale, absent, inadequate, or
-   explicitly known to be out of date for the question at hand.
-   Stale, absent, or inadequate references may still need fresh
-   reacquisition; the rule is "check first", not "never re-fetch".
-   CLI fallback: `mpm call mpm_references --payload
-   '{"action":"search","params":{"query":"<query>","limit":5}}'`.
-
-10. **MPM is the source of truth for cross-session continuity.**
-    Anything that should survive across sessions goes to MPM, not
-    just transient conversation context.
-
-11. **Recovery / fallback.** If the host's native MPM transport
-    becomes unavailable mid-session (MCP server down, plugin crashed,
-    `mpm__*` tools returning connection errors, etc.), fall back to
-    the documented CLI path:
-    `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
-    Do not abandon persistence when the preferred integration breaks.
-    `mpm call` writes to the same substrate with the same
-    provenance attribution as the native transport.
+7. **Do not assume an MPM capability is unavailable merely because it
+   is not initially visible.** Use the host's available discovery
+   affordance to inspect the substrate. Registry-backed tools not
+   exposed natively remain reachable through the documented
+   `mpm call <tool>` fallback. If the native transport fails
+   mid-session, use that fallback rather than abandoning persistence;
+   it operates on the same substrate with the same provenance.
 <!-- END MPM MANAGED BLOCK -->
+
 <!-- END MPM MANAGED BLOCK:mpm-hermes -->
 ```
 
@@ -1053,220 +417,63 @@ and the OpenClaw row in `INSTALL.md`.
 <!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->
 <!-- BEGIN MPM MANAGED BLOCK -->
 <!-- source: agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md -->
-<!-- The full behavioural protocol is canonical at ~/.mpm/agent_installation/mpm-agent-protocol.md -->
+<!-- Full behavioural protocol: ~/.mpm/agent_installation/mpm-agent-protocol.md -->
 
 ## MPM behavioural contract
 
-You are operating with the MPM (Memory Persistence Module) substrate
-on this machine. The following are the non-negotiable MPM behavioural
-invariants that turn that capability into reliable behaviour. Edit the
-canonical protocol, not this block, for behavioural changes.
+MPM carries durable project state across sessions so future work can
+continue instead of rediscovering. This block is behavioural policy,
+not an API reference; tool descriptions, host discovery surfaces, and
+the full protocol carry operational detail.
 
-1. **Wake is auto-injected on session start** for ClaudeCode, OpenClaw,
-   OpenCode, and Pi. Each of these hosts installs a session-start
-   hook that fetches MPM wake context and injects it into the
-   system prompt before the first model turn. Hermes has no such
-   hook — on Hermes, the agent must call `mcp__mpm__mpm_context` action
-   `read_wake_context` once at the start of its first turn to
-   obtain the wake payload. Arriving amnesic on a host that should
-   be auto-injecting wake means the host integration is broken —
-   diagnose the host adapter, not call `read_wake_context`. As a
-   manual refresh path (mid-session, explicit refresh, or when the
-   host integration is unavailable), `mcp__mpm__mpm_context` action
-   `read_wake_context` is available. The wake payload carries
-   orientation signals (mode, persona, recent topics, recent
-   memories, recent milestones, last handoff, open work, overdue
-   scheduled wakes, a bounded `<available_skills>` catalogue) AND
-   the additive `<contextual_focus>` projection — bounded inherited
-   working awareness from the routing pipeline (see §1.1).
-   Decisions live in `mpm_decisions`; lessons in `mpm_lessons`. Use `params.projection:
-   "compact"` for a small id+summary envelope — the full payload
-   is the default.
+1. **Orient before you work.** MPM wake context normally arrives at
+   session start and carries relevant prior state such as handoff and
+   open work. If you do not have it, fetch it through `mcp__mpm__mpm_context`
+   action `read_wake_context` as a recovery path. Repeated absence on
+   a host that normally injects wake indicates an integration problem.
 
-1.1. **Interpret `<contextual_focus>` as inherited working
-   awareness**, not as unquestionable truth. Each item carries
-   `id / kind / artifact_id / pointer` (identity), `band / rationale /
-   why_now` (why it surfaced), `status / detail / truncated` (bounded
-   what-to-know), and supplementary `lifecycle_state` /
-   `selection_triggers` / `compressed_related_ids` where useful. Treat
-   it as bounded inherited context: use it as a durable pointer to
-   investigate, follow `pointer` / `artifact_id` with the appropriate
-   domain tool (`mpm_decisions show`, `mpm_lessons read`,
-   `mpm_memory show`, `mpm_work show`, `mpm_resolve`, etc.) when
-   detail is insufficient. Per-item status (`materialized` /
-   `pointer_only` / `missing` / `unsupported` / `error`) describes
-   whether bounded authoritative detail was available — never whether
-   the item mattered; a `missing` item still carries the pointer and
-   `why_now`. Selection order is preserved exactly; do not re-rank or
-   re-order. If `<contextual_focus>.status == "degraded"` (the
-   projection pipeline itself failed), continue using the legacy wake
-   context and investigate MPM health only if the missing focus
-   materially blocks work — do not chain the diagnostic
-   `contextual_*` actions to compensate. An empty items array is not
-   an error; continue from legacy wake context and current task.
+2. **Treat wake context as pointers, not truth.** It is bounded
+   inherited awareness, not a ranking or a verdict. Follow a pointer
+   with the relevant MPM tool when the summary is insufficient, and
+   check whether stored state is still applicable before relying on it:
+   a decision may be superseded, a theory is a hypothesis, and a
+   reference may be stale.
 
-1.2. **Recent history vs. contextual focus vs. diagnostic surfaces.**
-   The wake payload's `<contextual_focus>` is the normal inherited
-   working awareness to act on; it is a bounded pointer summary, NOT
-   a ranking. Two adjacent `mcp__mpm__mpm_context` actions serve different
-   questions:
-   - `mcp__mpm__mpm_context` action `recent_activity` is the canonical way to
-     ask "what recently happened?". It returns a chronological,
-     observational feed of recent mutating actions across the substrate
-     — newest-first, bounded by `limit`. The result is NOT relevance-ranked.
-   - `mcp__mpm__mpm_context` actions `contextual_candidates`,
-     `contextual_selection`, and `contextual_materialization` are
-     routing / diagnostic surfaces for inspecting or debugging the
-     contextual pipeline. They are NOT part of the normal session-start
-     workflow and NOT a ranking mechanism. Do not chain the three to
-     reconstruct the integrated result — the wake payload's
-     `<contextual_focus>` already contains it.
+3. **Persist during work, not only at the end - and not trivia.**
+   If losing something at session end would force meaningful
+   rediscovery later, preserve it in the appropriate MPM domain.
+   Do not store transient details, duplicates, or one-off noise.
 
-2. **Persist during work, not only at the end.** Use `mcp__mpm__mpm_memory`
-   action `save`, `mcp__mpm__mpm_decisions` action `record`,
-   `mcp__mpm__mpm_lessons` action `save`, `mcp__mpm__mpm_topics`
-   action `create`, and `mcp__mpm__mpm_references` action `add`
-   for any durable knowledge a future session would otherwise have
-   to rediscover. Heuristic: if losing this on session-end would
-   force you to rediscover it next time, persist now.
+4. **Reuse before reacquiring.** When prior project state may be
+   relevant, prefer existing MPM knowledge, decisions, references,
+   skills, or work over recreating or reacquiring them. Reacquire when
+   existing material is absent, stale, or inadequate. Probe for an
+   existing skill when a task looks familiar; capture a procedure only
+   when it has proved useful, is non-obvious, and is likely to recur.
 
-3. **Look beyond the compact tool surface.** When you need a
-   capability, discover it before assuming it is unavailable. The
-   compact native MCP surface intentionally exposes only `mpm_help`,
-   `mpm_memory`, and `mpm_context`; the full registered substrate
-   is broader (its count is dynamic — do not pin it). Do not assume
-   a capability is missing merely because it does not appear in the
-   initial `tools/list`. Use `mcp__mpm__mpm_help` action `list` to discover
-   every registered tool (each entry carries `reach_via_cli`).
-   Tools hidden from the default surface are reachable via the CLI
-   escape hatch `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
-   (works on every host). Hosts running with `MPM_EXPOSE_ALL_TOOLS=1`
-   on their MCP env block restore the full registered surface
-   natively. Do NOT hardcode a tool count in behaviour, tests, or
-   prose.
+5. **Track substantial continuing work.** Use durable work state when
+   an objective spans meaningful steps or sessions, waits on follow-up,
+   or requires later verification. Session closure, work completion,
+   and verification are separate events; the agent decides when work
+   is actually done.
 
-4. **Discover, create, and refine MPM skills.** Skills are reusable
-   procedures; treat them as a discover-then-creation lifecycle.
-   Before doing repeatable or non-trivial work, look for an
-   applicable existing skill via `mcp__mpm__mpm_context` action
-   `proactive_recall_hint` (with `params: {conversation_text:
-   "<recent task summary>"}`), read any surfaced skill via
-   `mcp__mpm__mpm_skills` action `read`, and fall back to `mcp__mpm__mpm_skills`
-   action `list` with `params: {scope: "all"}` (the bounded
-   `<available_skills>` catalogue in the wake envelope is the
-   lightweight first step — discovery adds a context-driven filter,
-   it does not replace it). Don't auto-scan the entire skill store
-   every turn. After a successful workflow that is non-trivial,
-   performed successfully, likely to recur, useful to preserve
-   procedurally, or improved by retaining its ordering / checks /
-   constraints / failure recovery, capture it as a reusable
-   procedure via `mcp__mpm__mpm_skills` action `save`, or `mcp__mpm__mpm_skills`
-   action `workshop` if the workflow warrants the workshop path
-   (`workshop` requires `intent`, `mode`, `task_context`,
-   `workflow_description`, `failure_recovery`, `recent_actions`,
-   `evidence` per the tool-reference stability contract). Avoid
-   skill spam. Do NOT create a skill for trivial one-off actions,
-   generic common knowledge, unproven procedures, or workflows not
-   likely to recur. Intended lifecycle: discover → execute → learn
-   → capture → reuse.
+6. **Leave useful continuation state.** At genuine session closure,
+   write a handoff when meaningful state remains for another session:
+   what happened, what is open, and what to do next. Routine
+   acknowledgements (`ok`, `thanks`, `ty`, `ack`) and trivial completed
+   interactions do not require one.
 
-5. **Handoff before genuine session closure.** Before any turn that
-   closes the session, write a handoff. On hosts using the default
-   compact MCP surface (Claude Code, Hermes, OpenClaw), the MCP path
-   is `mcp__mpm__mpm_context` action `write_handoff` with
-   `params: {summary: "<required>", session_id: "<optional>",
-   state: "clean"|"crashed"|"interrupted"|"force_end",
-   commitments: ["<optional>"], open_questions: ["<optional>"]}`.
-   The substrate path `mcp__mpm__mpm_handoff` action `write` with the same
-   `params` shape remains valid via `mpm call mpm_handoff --payload
-   '{"action":"write","params":{...}}'` and on hosts running with
-   `MPM_EXPOSE_ALL_TOOLS=1` on their MCP env block (which restores
-   the full registered MCP surface). `summary` is the only required field.
-   Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
-   session-closing; don't write a handoff on every chat ack.
-
-   For intra-session volatile working state, the substrate tool is
-   `mcp__mpm__mpm_scratchpad` actions `flush`, `read`,
-   `discard`, or `promote` (params: `{session_id, thesis,
-   supporting}`); reachable via `mpm call mpm_scratchpad` on hosts
-   using the compact MCP surface. Wake is how future-me starts;
-   handoff is how future-me receives the previous session.
-
-6. **Track durable objectives as work items.** When a task is
-   meaningfully multi-step, likely to span turns or sessions,
-   dependent on later information, waiting on follow-up, requiring
-   verification, containing important intermediate progress, or
-   costly to reconstruct after interruption, open a `mpm_work`
-   item reasonably early. Use `mcp__mpm__mpm_work` action `create` to open,
-   `mcp__mpm__mpm_work` action `update` for material state / plan / status
-   changes, `mcp__mpm__mpm_work` action `note` to retain meaningful progress
-   / evidence / context, and `mcp__mpm__mpm_work` action `complete` with
-   `params: {work_id}` to finish. Use `mcp__mpm__mpm_work` action `reopen`
-   when completion is invalidated or new evidence demands more
-   work, and `mcp__mpm__mpm_work` action `cancel` when an objective is
-   intentionally abandoned. Do not create a work item for every
-   small user request. Conceptual distinction: scratchpad is
-   volatile intra-session working state (substrate tool
-   `mpm_scratchpad`); work is a durable objective + progress
-   lifecycle; handoff is session transition (see #5). Tools not
-   exposed by your host's transport remain reachable via the CLI
-   fallback (see #10).
-
-7. **Session closure is not work completion.** Three events are
-   distinct: `session ended` (the host process exits), `work completed`
-   (`mcp__mpm__mpm_work` action `complete` invoked), and `work verified`
-   (objective actually achieved, including any evidence accumulation
-   via `mcp__mpm__mpm_work` action `resolve_contradiction`). Host session
-   termination does NOT auto-complete a work item. The agent decides
-   when work is done.
-
-8. **Acquire and retain authoritative references.** When work
-   depends on external facts or APIs that are version-sensitive,
-   implementation-sensitive, likely to be reused, expensive to
-   repeatedly rediscover, or important enough that primary-source
-   accuracy matters, prefer authoritative / primary documentation
-   where practical. Use whichever web / file / download capability
-   the host already exposes (web search, browser, shell, curl,
-   file tools — whatever is available and permitted) to obtain the
-   source material, then register it via `mcp__mpm__mpm_references` action
-   `add` (params carry the source material and its provenance).
-   Preserve enough provenance / version / freshness information to
-   judge later suitability — `mcp__mpm__mpm_references` action `read`
-   surfaces freshness states (`current`, `stale`, `version-bound`,
-   `historical`, `unknown`). Reuse an appropriate current reference
-   rather than repeatedly rediscovering the same documentation.
-   Common workflow classes that benefit: framework / library
-   development, API integration, vendor SDK work, standards /
-   specification work, version-sensitive infrastructure /
-   configuration. The rule is general; apply it whenever
-   primary-source accuracy and reusability matter.
-
-9. **Search the reference corpus before reacquiring.** Before
-   pulling new source material for a fact that may already live
-   in MPM, query the reference corpus via `mcp__mpm__mpm_references`
-   action `search` (params: `query` and `limit`). The workflow is
-   search existing reference knowledge, then use or read it if
-   suitable, then acquire or add authoritative material only when
-   the existing corpus is stale, absent, inadequate, or
-   explicitly known to be out of date for the question at hand.
-   Stale, absent, or inadequate references may still need fresh
-   reacquisition; the rule is "check first", not "never re-fetch".
-   CLI fallback: `mpm call mpm_references --payload
-   '{"action":"search","params":{"query":"<query>","limit":5}}'`.
-
-10. **MPM is the source of truth for cross-session continuity.**
-    Anything that should survive across sessions goes to MPM, not
-    just transient conversation context.
-
-11. **Recovery / fallback.** If the host's native MPM transport
-    becomes unavailable mid-session (MCP server down, plugin crashed,
-    `mpm__*` tools returning connection errors, etc.), fall back to
-    the documented CLI path:
-    `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
-    Do not abandon persistence when the preferred integration breaks.
-    `mpm call` writes to the same substrate with the same
-    provenance attribution as the native transport.
+7. **Do not assume an MPM capability is unavailable merely because it
+   is not initially visible.** Use the host's available discovery
+   affordance to inspect the substrate. Registry-backed tools not
+   exposed natively remain reachable through the documented
+   `mpm call <tool>` fallback. If the native transport fails
+   mid-session, use that fallback rather than abandoning persistence;
+   it operates on the same substrate with the same provenance.
 <!-- END MPM MANAGED BLOCK -->
+
+
+
 <!-- END MPM-MANAGED SECTION:openclaw-instructions -->
 ```
 ---
@@ -1303,220 +510,61 @@ into the target persistent file.
 ```text
 <!-- BEGIN MPM MANAGED BLOCK -->
 <!-- source: agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md -->
-<!-- The full behavioural protocol is canonical at ~/.mpm/agent_installation/mpm-agent-protocol.md -->
+<!-- Full behavioural protocol: ~/.mpm/agent_installation/mpm-agent-protocol.md -->
 
 ## MPM behavioural contract
 
-You are operating with the MPM (Memory Persistence Module) substrate
-on this machine. The following are the non-negotiable MPM behavioural
-invariants that turn that capability into reliable behaviour. Edit the
-canonical protocol, not this block, for behavioural changes.
+MPM carries durable project state across sessions so future work can
+continue instead of rediscovering. This block is behavioural policy,
+not an API reference; tool descriptions, host discovery surfaces, and
+the full protocol carry operational detail.
 
-1. **Wake is auto-injected on session start** for ClaudeCode, OpenClaw,
-   OpenCode, and Pi. Each of these hosts installs a session-start
-   hook that fetches MPM wake context and injects it into the
-   system prompt before the first model turn. Hermes has no such
-   hook — on Hermes, the agent must call `mpm_context` action
-   `read_wake_context` once at the start of its first turn to
-   obtain the wake payload. Arriving amnesic on a host that should
-   be auto-injecting wake means the host integration is broken —
-   diagnose the host adapter, not call `read_wake_context`. As a
-   manual refresh path (mid-session, explicit refresh, or when the
-   host integration is unavailable), `mpm_context` action
-   `read_wake_context` is available. The wake payload carries
-   orientation signals (mode, persona, recent topics, recent
-   memories, recent milestones, last handoff, open work, overdue
-   scheduled wakes, a bounded `<available_skills>` catalogue) AND
-   the additive `<contextual_focus>` projection — bounded inherited
-   working awareness from the routing pipeline (see §1.1).
-   Decisions live in `mpm_decisions`; lessons in `mpm_lessons`. Use `params.projection:
-   "compact"` for a small id+summary envelope — the full payload
-   is the default.
+1. **Orient before you work.** MPM wake context normally arrives at
+   session start and carries relevant prior state such as handoff and
+   open work. If you do not have it, fetch it through `mpm_context`
+   action `read_wake_context` as a recovery path. Repeated absence on
+   a host that normally injects wake indicates an integration problem.
 
-1.1. **Interpret `<contextual_focus>` as inherited working
-   awareness**, not as unquestionable truth. Each item carries
-   `id / kind / artifact_id / pointer` (identity), `band / rationale /
-   why_now` (why it surfaced), `status / detail / truncated` (bounded
-   what-to-know), and supplementary `lifecycle_state` /
-   `selection_triggers` / `compressed_related_ids` where useful. Treat
-   it as bounded inherited context: use it as a durable pointer to
-   investigate, follow `pointer` / `artifact_id` with the appropriate
-   domain tool (`mpm_decisions show`, `mpm_lessons read`,
-   `mpm_memory show`, `mpm_work show`, `mpm_resolve`, etc.) when
-   detail is insufficient. Per-item status (`materialized` /
-   `pointer_only` / `missing` / `unsupported` / `error`) describes
-   whether bounded authoritative detail was available — never whether
-   the item mattered; a `missing` item still carries the pointer and
-   `why_now`. Selection order is preserved exactly; do not re-rank or
-   re-order. If `<contextual_focus>.status == "degraded"` (the
-   projection pipeline itself failed), continue using the legacy wake
-   context and investigate MPM health only if the missing focus
-   materially blocks work — do not chain the diagnostic
-   `contextual_*` actions to compensate. An empty items array is not
-   an error; continue from legacy wake context and current task.
+2. **Treat wake context as pointers, not truth.** It is bounded
+   inherited awareness, not a ranking or a verdict. Follow a pointer
+   with the relevant MPM tool when the summary is insufficient, and
+   check whether stored state is still applicable before relying on it:
+   a decision may be superseded, a theory is a hypothesis, and a
+   reference may be stale.
 
-1.2. **Recent history vs. contextual focus vs. diagnostic surfaces.**
-   The wake payload's `<contextual_focus>` is the normal inherited
-   working awareness to act on; it is a bounded pointer summary, NOT
-   a ranking. Two adjacent `mpm_context` actions serve different
-   questions:
-   - `mpm_context` action `recent_activity` is the canonical way to
-     ask "what recently happened?". It returns a chronological,
-     observational feed of recent mutating actions across the substrate
-     — newest-first, bounded by `limit`. The result is NOT relevance-ranked.
-   - `mpm_context` actions `contextual_candidates`,
-     `contextual_selection`, and `contextual_materialization` are
-     routing / diagnostic surfaces for inspecting or debugging the
-     contextual pipeline. They are NOT part of the normal session-start
-     workflow and NOT a ranking mechanism. Do not chain the three to
-     reconstruct the integrated result — the wake payload's
-     `<contextual_focus>` already contains it.
+3. **Persist during work, not only at the end - and not trivia.**
+   If losing something at session end would force meaningful
+   rediscovery later, preserve it in the appropriate MPM domain.
+   Do not store transient details, duplicates, or one-off noise.
 
-2. **Persist during work, not only at the end.** Use `mpm_memory`
-   action `save`, `mpm_decisions` action `record`,
-   `mpm_lessons` action `save`, `mpm_topics`
-   action `create`, and `mpm_references` action `add`
-   for any durable knowledge a future session would otherwise have
-   to rediscover. Heuristic: if losing this on session-end would
-   force you to rediscover it next time, persist now.
+4. **Reuse before reacquiring.** When prior project state may be
+   relevant, prefer existing MPM knowledge, decisions, references,
+   skills, or work over recreating or reacquiring them. Reacquire when
+   existing material is absent, stale, or inadequate. Probe for an
+   existing skill when a task looks familiar; capture a procedure only
+   when it has proved useful, is non-obvious, and is likely to recur.
 
-3. **Look beyond the compact tool surface.** When you need a
-   capability, discover it before assuming it is unavailable. The
-   compact native MCP surface intentionally exposes only `mpm_help`,
-   `mpm_memory`, and `mpm_context`; the full registered substrate
-   is broader (its count is dynamic — do not pin it). Do not assume
-   a capability is missing merely because it does not appear in the
-   initial `tools/list`. Use `mpm_help` action `list` to discover
-   every registered tool (each entry carries `reach_via_cli`).
-   Tools hidden from the default surface are reachable via the CLI
-   escape hatch `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
-   (works on every host). Hosts running with `MPM_EXPOSE_ALL_TOOLS=1`
-   on their MCP env block restore the full registered surface
-   natively. Do NOT hardcode a tool count in behaviour, tests, or
-   prose.
+5. **Track substantial continuing work.** Use durable work state when
+   an objective spans meaningful steps or sessions, waits on follow-up,
+   or requires later verification. Session closure, work completion,
+   and verification are separate events; the agent decides when work
+   is actually done.
 
-4. **Discover, create, and refine MPM skills.** Skills are reusable
-   procedures; treat them as a discover-then-creation lifecycle.
-   Before doing repeatable or non-trivial work, look for an
-   applicable existing skill via `mpm_context` action
-   `proactive_recall_hint` (with `params: {conversation_text:
-   "<recent task summary>"}`), read any surfaced skill via
-   `mpm_skills` action `read`, and fall back to `mpm_skills`
-   action `list` with `params: {scope: "all"}` (the bounded
-   `<available_skills>` catalogue in the wake envelope is the
-   lightweight first step — discovery adds a context-driven filter,
-   it does not replace it). Don't auto-scan the entire skill store
-   every turn. After a successful workflow that is non-trivial,
-   performed successfully, likely to recur, useful to preserve
-   procedurally, or improved by retaining its ordering / checks /
-   constraints / failure recovery, capture it as a reusable
-   procedure via `mpm_skills` action `save`, or `mpm_skills`
-   action `workshop` if the workflow warrants the workshop path
-   (`workshop` requires `intent`, `mode`, `task_context`,
-   `workflow_description`, `failure_recovery`, `recent_actions`,
-   `evidence` per the tool-reference stability contract). Avoid
-   skill spam. Do NOT create a skill for trivial one-off actions,
-   generic common knowledge, unproven procedures, or workflows not
-   likely to recur. Intended lifecycle: discover → execute → learn
-   → capture → reuse.
+6. **Leave useful continuation state.** At genuine session closure,
+   write a handoff when meaningful state remains for another session:
+   what happened, what is open, and what to do next. Routine
+   acknowledgements (`ok`, `thanks`, `ty`, `ack`) and trivial completed
+   interactions do not require one.
 
-5. **Handoff before genuine session closure.** Before any turn that
-   closes the session, write a handoff. On hosts using the default
-   compact MCP surface (Claude Code, Hermes, OpenClaw), the MCP path
-   is `mpm_context` action `write_handoff` with
-   `params: {summary: "<required>", session_id: "<optional>",
-   state: "clean"|"crashed"|"interrupted"|"force_end",
-   commitments: ["<optional>"], open_questions: ["<optional>"]}`.
-   The substrate path `mpm_handoff` action `write` with the same
-   `params` shape remains valid via `mpm call mpm_handoff --payload
-   '{"action":"write","params":{...}}'` and on hosts running with
-   `MPM_EXPOSE_ALL_TOOLS=1` on their MCP env block (which restores
-   the full registered MCP surface). `summary` is the only required field.
-   Mid-session acknowledgements (`ok`, `thanks`, `ty`, `ack`) are NOT
-   session-closing; don't write a handoff on every chat ack.
-
-   For intra-session volatile working state, the substrate tool is
-   `mpm_scratchpad` actions `flush`, `read`,
-   `discard`, or `promote` (params: `{session_id, thesis,
-   supporting}`); reachable via `mpm call mpm_scratchpad` on hosts
-   using the compact MCP surface. Wake is how future-me starts;
-   handoff is how future-me receives the previous session.
-
-6. **Track durable objectives as work items.** When a task is
-   meaningfully multi-step, likely to span turns or sessions,
-   dependent on later information, waiting on follow-up, requiring
-   verification, containing important intermediate progress, or
-   costly to reconstruct after interruption, open a `mpm_work`
-   item reasonably early. Use `mpm_work` action `create` to open,
-   `mpm_work` action `update` for material state / plan / status
-   changes, `mpm_work` action `note` to retain meaningful progress
-   / evidence / context, and `mpm_work` action `complete` with
-   `params: {work_id}` to finish. Use `mpm_work` action `reopen`
-   when completion is invalidated or new evidence demands more
-   work, and `mpm_work` action `cancel` when an objective is
-   intentionally abandoned. Do not create a work item for every
-   small user request. Conceptual distinction: scratchpad is
-   volatile intra-session working state (substrate tool
-   `mpm_scratchpad`); work is a durable objective + progress
-   lifecycle; handoff is session transition (see #5). Tools not
-   exposed by your host's transport remain reachable via the CLI
-   fallback (see #10).
-
-7. **Session closure is not work completion.** Three events are
-   distinct: `session ended` (the host process exits), `work completed`
-   (`mpm_work` action `complete` invoked), and `work verified`
-   (objective actually achieved, including any evidence accumulation
-   via `mpm_work` action `resolve_contradiction`). Host session
-   termination does NOT auto-complete a work item. The agent decides
-   when work is done.
-
-8. **Acquire and retain authoritative references.** When work
-   depends on external facts or APIs that are version-sensitive,
-   implementation-sensitive, likely to be reused, expensive to
-   repeatedly rediscover, or important enough that primary-source
-   accuracy matters, prefer authoritative / primary documentation
-   where practical. Use whichever web / file / download capability
-   the host already exposes (web search, browser, shell, curl,
-   file tools — whatever is available and permitted) to obtain the
-   source material, then register it via `mpm_references` action
-   `add` (params carry the source material and its provenance).
-   Preserve enough provenance / version / freshness information to
-   judge later suitability — `mpm_references` action `read`
-   surfaces freshness states (`current`, `stale`, `version-bound`,
-   `historical`, `unknown`). Reuse an appropriate current reference
-   rather than repeatedly rediscovering the same documentation.
-   Common workflow classes that benefit: framework / library
-   development, API integration, vendor SDK work, standards /
-   specification work, version-sensitive infrastructure /
-   configuration. The rule is general; apply it whenever
-   primary-source accuracy and reusability matter.
-
-9. **Search the reference corpus before reacquiring.** Before
-   pulling new source material for a fact that may already live
-   in MPM, query the reference corpus via `mpm_references`
-   action `search` (params: `query` and `limit`). The workflow is
-   search existing reference knowledge, then use or read it if
-   suitable, then acquire or add authoritative material only when
-   the existing corpus is stale, absent, inadequate, or
-   explicitly known to be out of date for the question at hand.
-   Stale, absent, or inadequate references may still need fresh
-   reacquisition; the rule is "check first", not "never re-fetch".
-   CLI fallback: `mpm call mpm_references --payload
-   '{"action":"search","params":{"query":"<query>","limit":5}}'`.
-
-10. **MPM is the source of truth for cross-session continuity.**
-    Anything that should survive across sessions goes to MPM, not
-    just transient conversation context.
-
-11. **Recovery / fallback.** If the host's native MPM transport
-    becomes unavailable mid-session (MCP server down, plugin crashed,
-    `mpm__*` tools returning connection errors, etc.), fall back to
-    the documented CLI path:
-    `mpm call <tool> --payload '{"action":"<op>","params":{...}}'`
-    Do not abandon persistence when the preferred integration breaks.
-    `mpm call` writes to the same substrate with the same
-    provenance attribution as the native transport.
+7. **Do not assume an MPM capability is unavailable merely because it
+   is not initially visible.** Use the host's available discovery
+   affordance to inspect the substrate. Registry-backed tools not
+   exposed natively remain reachable through the documented
+   `mpm call <tool>` fallback. If the native transport fails
+   mid-session, use that fallback rather than abandoning persistence;
+   it operates on the same substrate with the same provenance.
 <!-- END MPM MANAGED BLOCK -->
+
 ```
 
 # Manual installation per host

@@ -35,6 +35,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/flowbyte-com/mpm-core"
+	core "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/logging"
 	"github.com/flowbyte-com/mpm-core/mpmcli"
@@ -101,33 +102,6 @@ func coreToolFilter(_ context.Context, registered []mcp.Tool) []mcp.Tool {
 	}
 	return out
 }
-
-// instructionsPrimer is the value mpm-mcp returns in the
-// `initialize.instructions` field. The file is generated from the
-// canonical managed block by
-// `agent_installation/scripts/render_managed_blocks.py --dump
-// instructions` and committed alongside this source so the embedding
-// is deterministic across builds (no path resolution at runtime).
-//
-// Drift detection is two-sided:
-//
-//   - `render_managed_blocks.py --check` byte-compares this file
-//     against the renderer's output and fails if the canonical block
-//     has drifted away from the embedded primer.
-//   - `instructions_primer_drift_test.go` invokes the renderer at Go
-//     test time and asserts the rendered string equals this constant;
-//     that catches the inverse drift (someone hand-edits this file
-//     and forgets to re-run the renderer).
-//
-// The primer is a fallback-aware pointer, not a restatement of the
-// managed block's contract: on hosts that auto-inject the field AND
-// also maintain a managed instruction file (Claude Code, OpenCode) it
-// is one short paragraph; on hosts that surface it via an explicit
-// call (Pi via pi-mcp-adapter) it is a minimal behavioural skeleton;
-// on hosts that ignore the field (Hermes) it is inert.
-//
-//go:embed instructions_primer.txt
-var instructionsPrimer string
 
 // router is initialised once at server boot — patterns and anti-patterns
 // from all mode/*.md and persona/*.md files are compiled to regex at that
@@ -251,24 +225,7 @@ func main() {
 	// Output policy for MCP result bounding.
 	outputPolicy := tools.DefaultOutputPolicy()
 
-	s := server.NewMCPServer("mpm-mcp", "0.1.0",
-		// Defense-in-depth: ship a short behavioural primer in the
-		// initialize response. Hosts that read .instructions will
-		// surface it to the model; hosts that don't (Hermes,
-		// confirmed by source inspection) treat it as inert. The
-		// primer text is embedded from instructions_primer.txt
-		// (see the top of this file for the drift-detection
-		// contract and the audit citation
-		// docs/onboarding-mcp-native-audit-2026-09-05.md Part A).
-		server.WithInstructions(instructionsPrimer),
-		// Initial-surface filter: expose only the default core set at
-		// tools/list time. Specialists are reachable via the
-		// mpm_help discovery tool + `mpm call <tool>` escape hatch.
-		// MPM_EXPOSE_ALL_TOOLS=1 reverts to the legacy full surface.
-		// See docs/CONTEXT_EXPOSURE.md for the architecture.
-		server.WithToolFilter(coreToolFilter),
-	)
-	RegisterAllTools(s, dm, ac, router, blobStore, outputPolicy)
+	s := buildMCPServer(dm, ac, router, blobStore, outputPolicy)
 
 	// Translate SIGTERM/SIGINT into a context cancellation so the
 	// stdio server can shut down cleanly. The defer above releases
@@ -281,4 +238,57 @@ func main() {
 		log.Fatalf("mpm-mcp: serve stdio: %v", err)
 	}
 	_ = ctx
+}
+
+// buildMCPServer constructs the production MCP server with every
+// dependency the runtime needs. It is the single point of truth for
+// what mpm-mcp exposes to MCP clients — no `server.WithInstructions`,
+// no other options that would inject text into the initialize
+// response. Tests call buildMCPServerCore() (the option-set
+// construction underneath) to exercise the production initialize
+// path without paying the cost of full RegisterAllTools wiring.
+//
+// Extraction of this constructor (rather than leaving the build
+// inline in main()) was driven by the 2026-09-29 instruction-
+// architecture simplification: the regression guard for the
+// absence of `initialize.instructions` must observe the actual
+// production server, not a parallel one-off server with a different
+// option set. See cmd/mpm-mcp/no_primed_instructions_test.go.
+func buildMCPServer(
+	dm *core.DatabaseManager,
+	ac core.ActiveContext,
+	router *core.Router,
+	blobStore *blobstore.FilesystemBackend,
+	outputPolicy tools.OutputPolicy,
+) *server.MCPServer {
+	s := buildMCPServerCore()
+	RegisterAllTools(s, dm, ac, router, blobStore, outputPolicy)
+	return s
+}
+
+// buildMCPServerCore constructs the production MCP server with the
+// same option set used by main() — minus the tool registration,
+// which is what the regression guard for the absent
+// `initialize.instructions` is exercising. If a future contributor
+// adds any option here that injects text into the initialize
+// response (notably `server.WithInstructions(...)`), the no-primed-
+// instructions test will fail because it goes through this
+// function. Adding a new option in main() that bypasses this
+// helper would re-introduce drift; keep new option wiring here.
+func buildMCPServerCore() *server.MCPServer {
+	return server.NewMCPServer("mpm-mcp", "0.1.0",
+		// Initial-surface filter: expose only the default core set at
+		// tools/list time. Specialists are reachable via the
+		// mpm_help discovery tool + `mpm call <tool>` escape hatch.
+		// MPM_EXPOSE_ALL_TOOLS=1 reverts to the legacy full surface.
+		// See docs/CONTEXT_EXPOSURE.md for the architecture.
+		//
+		// MCP initialize.instructions: deliberately NOT set. The
+		// behavioural contract lives in the per-host managed
+		// instruction file (CLAUDE.md / AGENTS.md / SOUL.md /
+		// .hermes.md); initialize.instructions is non-universal and
+		// only some hosts surface it, so it cannot carry required
+		// policy. See agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md.
+		server.WithToolFilter(coreToolFilter),
+	)
 }

@@ -254,81 +254,6 @@ def _mentions_tool_family(text: str, prefix: str, family: str) -> bool:
     return bool(re.search(bare, text))
 
 
-def _mentions_action(text: str, prefix: str, family: str, action: str) -> bool:
-    """True if `text` mentions `<family>` ... `<action>` together.
-
-    Adapters document mpm_work / mpm_handoff / mpm_scratchpad in two
-    different surface forms:
-
-      A) `mpm_work` actions `create`/`update`/`note`/`complete`
-         (Pi, Hermes — backticks, slash-separated action list, where
-         the outer backticks wrap the entire list and inner backticks
-         delimit each action)
-      B) `mpm_<family>(action: "flush"|"read"|..., params: { ... })`
-         (Claude Code, OpenCode — paren-style call signature with a
-         pipe-separated, single-quoted action list after one `action:`
-         keyword)
-
-    We accept both. The `prefix` is the host-specific tool namespace
-    (mcp__mpm__ / mpm__mpm_ / mpm_); the bare family name (e.g.
-    `mpm_work`) is always acceptable in prose.
-    """
-    # Paren form (B): find `<family>(...)` and check whether `action`
-    # appears as a token (quoted or unquoted) in the captured body. This
-    # handles the pipe-separated form where `action:` appears only once
-    # but the body lists multiple actions.
-    pat_parens_body = re.compile(
-        rf"(?:{re.escape(prefix)})?{re.escape(family)}\s*\(([^)]*?)\)",
-        re.DOTALL,
-    )
-    for m in pat_parens_body.finditer(text):
-        body = m.group(1)
-        # The body looks like `action: "a1"|"a2"|... , params: {...}`.
-        # Match the action as a token, optionally quoted, in the pipe list.
-        if re.search(
-            rf'[\"\']?\b{re.escape(action)}\b[\"\']?',
-            body,
-        ):
-            return True
-
-    # Backtick form (A): outer backticks wrap the whole action list, inner
-    # backticks delimit each action (so the inside of the outer pair
-    # contains backticks — must use `.*?` with re.DOTALL, not `[^`]*`).
-    pat_backtick = re.compile(
-        rf"`(?:{re.escape(prefix)})?{re.escape(family)}`\s+actions?\s+`"
-        rf".*?\b{re.escape(action)}\b.*?`",
-        re.DOTALL,
-    )
-    if pat_backtick.search(text):
-        return True
-
-    # Lifecycle form (C): used by the canonical source post-2026-09-04.
-    # Sentence pattern: `mpm_<family>`. ... Lifecycle: action `<a1>`,
-    # `<a2>`/`<a3>` during, `<a4>` to finish. The family name is in
-    # backticks (possibly host-prefixed); the action verb appears in
-    # backticks anywhere within ~600 chars of the family name.
-    family_full = re.escape(prefix + family) if prefix else re.escape(family)
-    pat_lifecycle = re.compile(
-        rf"`{family_full}`\.{{0,40}}Lifecycle:\s+action\s+`{re.escape(action)}`",
-        re.DOTALL,
-    )
-    if pat_lifecycle.search(text):
-        return True
-
-    # Bare-named Lifecycle form: same as above but the family mention is
-    # unprefixed (e.g., when reading the canonical source directly).
-    if prefix:
-        bare_family = re.escape(family)
-        pat_lifecycle_bare = re.compile(
-            rf"`{bare_family}`\.{{0,40}}Lifecycle:\s+action\s+`{re.escape(action)}`",
-            re.DOTALL,
-        )
-        if pat_lifecycle_bare.search(text):
-            return True
-
-    return False
-
-
 # Outer marker for "this is the historical archive; not operational". The
 # audit only cares about drift in current operational material. VALIDATION-*
 # files are explicitly archival and are out of scope.
@@ -392,61 +317,104 @@ class AdapterContractMixin:
         cls.text = _read(cls.snippet_path)
 
     def test_work_lifecycle_distinct_from_session(self):
-        # Every adapter must teach the agent that session closure does not
-        # auto-complete work — the OpenCode drift came partly from this
-        # paragraph being missing in older templates.
-        self.assertIn("Session closure is not work completion", self.text)
-
-    def test_mentions_mpm_work_with_real_actions(self):
-        # `mpm_work` appears with at least one of its real action verbs.
-        # We accept three documentation styles:
-        #   A) `mpm_work` actions `create`/`update`/`note`/`complete` (backtick)
-        #   B) `mpm_work(action: "create"|"update"|..., params: {...})` (paren)
-        #   C) `mpm_work`. Lifecycle: action `create` to open, `update`/`note`
-        #      during, `complete` to finish. (sentence form used by the
-        #      canonical source post-2026-09-04)
-        for action in ("create", "complete"):
-            prefix_pat = re.escape(self.tool_prefix) if self.tool_prefix else ""
-            pat = re.compile(
-                rf"`?{prefix_pat}mpm_work`?\s*(?:"
-                rf"\([^)]*?\b{action}\b[^)]*?\)"
-                rf"|actions?\s+`.*?\b{action}\b.*?`"
-                rf"|.{{0,500}}Lifecycle:.{{0,200}}`{action}`"
-                rf")",
-                re.DOTALL,
-            )
-            self.assertRegex(
-                self.text, pat,
-                f"{self.snippet_path.name}: must mention mpm_work action '{action}'",
-            )
-
-    def test_mentions_mpm_handoff_write(self):
+        # Every adapter must teach that session closure, work completion,
+        # and verification are three separate events. The OpenCode drift
+        # came partly from this paragraph being missing in older templates.
+        #
+        # 2026-09-29: this asserted the exact phrase "Session closure is
+        # not work completion". The approved compact block states the
+        # stronger three-way distinction instead, so this asserts the
+        # concept rather than one wording of it.
+        normalized = re.sub(r"\s+", " ", self.text)
         self.assertTrue(
-            _mentions_action(self.text, self.tool_prefix, "mpm_handoff", "write"),
-            f"{self.snippet_path.name}: must show mpm_handoff with action 'write'",
+            any(p in normalized for p in (
+                "Session closure, work completion, and verification "
+                "are separate events",
+                "Session closure is not work completion",
+            )),
+            f"{self.snippet_path.name}: must teach that session closure, "
+            f"work completion, and verification are separate events; "
+            f"found neither the approved three-way phrasing nor the "
+            f"legacy two-way phrasing",
         )
 
-    def test_mentions_mpm_scratchpad_actions(self):
-        for action in ("flush", "read"):
-            self.assertTrue(
-                _mentions_action(self.text, self.tool_prefix, "mpm_scratchpad", action),
-                f"{self.snippet_path.name}: must show mpm_scratchpad action '{action}'",
-            )
-
-    def test_mentions_persist_during_work(self):
-        # The persist-during-work principle names the memory tool set.
-        # Each adapter's snippet must mention at least 3 of its 5 families.
-        # We check the prose family names directly (per-adapter, since the
-        # prefix convention varies: Claude uses `mpm__mpm_memory` while Pi /
-        # OpenCode / Hermes use `mpm_memory`).
-        pat = re.compile(
-            r"\b(?:" + "|".join(re.escape(f) for f in self.persist_families) + r")\b"
+    def test_teaches_durable_work_tracking(self):
+        # 2026-09-29: this replaces test_mentions_mpm_work_with_real_actions,
+        # which asserted the literal `mpm_work` action verbs create/complete
+        # inside every managed host block. Action enums are operational
+        # detail: the approved architecture assigns them to the tool-
+        # reference stability table (pinned by
+        # ToolReferenceStabilityContract::test_mpm_work_actions_documented)
+        # and to the live registry schema. The managed block carries the
+        # BEHAVIOURAL decision — use durable work state for substantial
+        # continuing work, and do not let session end stand in for
+        # completion — which is what this now asserts.
+        normalized = re.sub(r"\s+", " ", self.text)
+        self.assertTrue(
+            any(p in normalized for p in (
+                "Track substantial continuing work",
+                "durable work state",
+            )),
+            f"{self.snippet_path.name}: must teach durable work tracking "
+            f"for substantial continuing work",
         )
-        distinct = {m.group(0) for m in pat.finditer(self.text)}
-        self.assertGreaterEqual(
-            len(distinct), 3,
-            f"{self.snippet_path.name}: persist-during-work principle must "
-            f"name >=3 of {self.persist_families}; got {sorted(distinct)}",
+
+    def test_teaches_handoff_as_continuation_state(self):
+        # 2026-09-29: this replaces test_mentions_mpm_handoff_write, which
+        # asserted the literal `mpm_handoff` action `write` in every host
+        # block. The action enum lives in the tool-reference table (pinned
+        # by ToolReferenceStabilityContract::test_mpm_handoff_no_note_param,
+        # which asserts the `write` row and the absence of the stale `note`
+        # param). The managed block carries the behavioural decision —
+        # leave useful continuation state at genuine session closure — which
+        # is what this now asserts.
+        normalized = re.sub(r"\s+", " ", self.text)
+        self.assertTrue(
+            any(p in normalized for p in (
+                "Leave useful continuation state",
+                "write a handoff",
+            )),
+            f"{self.snippet_path.name}: must teach leaving continuation "
+            f"state at session closure",
+        )
+
+    def test_does_not_pin_scratchpad_action_enums(self):
+        # 2026-09-29: this replaces test_mentions_mpm_scratchpad_actions,
+        # which asserted `mpm_scratchpad` flush/read in every host block.
+        # Scratchpad action enums are operational detail owned by the
+        # tool-reference table
+        # (ToolReferenceStabilityContract::test_mpm_scratchpad_actions_documented).
+        # The managed block has no scratchpad rule at all, so asserting the
+        # enum here would re-teach an API surface the compact block
+        # deliberately does not carry. This asserts the architectural
+        # boundary instead: the host snippet must not reintroduce the enum.
+        self.assertNotIn(
+            "mpm_scratchpad", self.text,
+            f"{self.snippet_path.name}: managed block must not carry "
+            f"scratchpad action detail (owned by the tool-reference table)",
+        )
+
+    def test_teaches_persist_during_work_not_just_at_end(self):
+        # 2026-09-29: this replaces test_mentions_persist_during_work, which
+        # required >=3 of the 5 named persistence tool families
+        # (memory/decisions/lessons/topics/references) to appear in every
+        # host block. Enumerating the tool set is operational detail; the
+        # families are all listed in the tool-reference table. What must
+        # survive in the managed block is the BEHAVIOURAL rule: persist
+        # during the session, and persist durable state rather than trivia.
+        normalized = re.sub(r"\s+", " ", self.text)
+        self.assertTrue(
+            any(p in normalized for p in (
+                "Persist during work, not only at the end",
+                "persist during work",
+            )),
+            f"{self.snippet_path.name}: must teach persisting during work, "
+            f"not only at the end",
+        )
+        self.assertTrue(
+            "not trivia" in normalized or "one-off noise" in normalized,
+            f"{self.snippet_path.name}: persist-during-work rule must "
+            f"carry the restraint clause (do not store trivia/one-off noise)",
         )
 
     def test_mentions_skill_discovery(self):
@@ -684,6 +652,65 @@ class ToolReferenceStabilityContract(unittest.TestCase):
         self.assertIn("mpm_references", self.table)
         self.assertIn("freshness", self.table.lower(),
                       "tool-reference table must document reference freshness states")
+
+    def test_mpm_work_actions_documented(self):
+        # 2026-09-29: this is the new home for the guarantee that
+        # AdapterContractMixin::test_mentions_mpm_work_with_real_actions
+        # used to assert in every managed host block. The compact managed
+        # block teaches "track substantial continuing work" as a
+        # behavioural decision; the concrete `mpm_work` action enum is
+        # operational detail and belongs here, in the single
+        # host-independent table. The key actions an agent needs are
+        # create (open), note/update (progress), and complete (finish).
+        m = re.search(r"\|\s*`?mpm_work`?\s*\|([^\n]*)\|", self.table)
+        self.assertIsNotNone(m, "mpm_work row not found in tool-reference table")
+        # Capture the whole row (all three columns) so the required-params
+        # column is available for the lifecycle guarantee below.
+        row = m.group(1)
+        actions = row.split("|")[0]
+        for action in ("create", "note", "update", "complete"):
+            self.assertIn(
+                f"`{action}`", actions,
+                f"mpm_work row must document the `{action}` action; row: {row!r}",
+            )
+        # The lifecycle guarantee the managed block teaches in prose:
+        # host session termination does NOT auto-complete work.
+        self.assertIn(
+            "does NOT auto-trigger", row,
+            f"mpm_work row must pin that session termination does not "
+            f"auto-complete work; row: {row!r}",
+        )
+
+    def test_mpm_scratchpad_actions_documented(self):
+        # 2026-09-29: new home for the guarantee that
+        # AdapterContractMixin::test_mentions_mpm_scratchpad_actions used
+        # to assert in every managed host block. The compact managed block
+        # has no scratchpad rule, so the action enum is documented here
+        # only.
+        m = re.search(r"\|\s*`?mpm_scratchpad`?\s*\|([^|\n]*)\|", self.table)
+        self.assertIsNotNone(
+            m, "mpm_scratchpad row not found in tool-reference table")
+        row = m.group(1)
+        for action in ("flush", "read", "discard", "promote"):
+            self.assertIn(
+                f"`{action}`", row,
+                f"mpm_scratchpad row must document the `{action}` action; "
+                f"row: {row!r}",
+            )
+
+    def test_persistence_families_documented(self):
+        # 2026-09-29: new home for the guarantee that
+        # AdapterContractMixin::test_mentions_persist_during_work used to
+        # assert as ">=3 named families in every host block". The managed
+        # block now teaches the behavioural rule; the five persistence
+        # families are enumerated here so agents can still discover them.
+        for family in ("mpm_memory", "mpm_decisions", "mpm_lessons",
+                       "mpm_topics", "mpm_references"):
+            self.assertIn(
+                family, self.table,
+                f"tool-reference table must document the persistence "
+                f"family {family}",
+            )
 
     def test_mpm_handoff_no_note_param(self):
         # Regression for the 2026-09-04 audit finding: the canonical
