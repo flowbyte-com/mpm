@@ -9,7 +9,8 @@ import (
 
 // TestSharedFTS_TriggersKeepIndexSynced proves the structural invariant
 // promised by the shared_memories_ai/_ad/_au trigger set:
-//   "If a row is in shared.memories, it is searchable in shared.memories_fts."
+//
+//	"If a row is in shared.memories, it is searchable in shared.memories_fts."
 //
 // This is the regression net for the operator-workflow gap exposed by
 // the 2026-07-07 smoke test (hybrid_search_federated_test.go's
@@ -20,9 +21,13 @@ import (
 // We deliberately DO NOT manually backfill the FTS table. If the
 // triggers work, the index is updated by the time INSERT returns.
 //
-// Requires the build tag `sqlite_fts5` to enable FTS5 in the
-// production driver. The smoke script (scripts/smoke_shared.sh) is
-// the integration counterpart for this test.
+// Requires an FTS5-enabled build. The build tag is `fts5`, and it is
+// only meaningful alongside the C-level flag — a bare `-tags fts5`
+// compiles the module list without compiling FTS5 itself. Use the
+// Makefile targets (`make test`), which set the full set:
+// CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 CGO_LDFLAGS=-lm -tags fts5. The
+// smoke script (scripts/smoke_shared.sh) is the integration
+// counterpart for this test.
 func TestSharedFTS_TriggersKeepIndexSynced(t *testing.T) {
 	dm := NewTestSharedDM(t)
 
@@ -36,7 +41,8 @@ func TestSharedFTS_TriggersKeepIndexSynced(t *testing.T) {
 		t.Skipf("pragma_module_list unavailable: %v (likely an FTS5-disabled build)", err)
 	}
 	if hasFTS5 == 0 {
-		t.Skip("FTS5 module not enabled in this build (need -tags sqlite_fts5)")
+		t.Skip("FTS5 module not enabled in this build; use the Makefile targets " +
+			"(`make test`), which build with CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 CGO_LDFLAGS=-lm -tags fts5")
 	}
 
 	// Confirm triggers installed.
@@ -129,7 +135,8 @@ func TestSharedFTS_FederatedScopeAll_TriggersOnly(t *testing.T) {
 	var hasFTS5 int
 	_ = dm.db.QueryRow(`SELECT COUNT(*) FROM pragma_module_list WHERE name = 'fts5'`).Scan(&hasFTS5)
 	if hasFTS5 == 0 {
-		t.Skip("FTS5 module not enabled in this build (need -tags sqlite_fts5)")
+		t.Skip("FTS5 module not enabled in this build; use the Makefile targets " +
+			"(`make test`), which build with CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 CGO_LDFLAGS=-lm -tags fts5")
 	}
 
 	// Seed local + shared rows through mpm's own connection.

@@ -153,7 +153,8 @@ echo "[pre-commit] running synthesis / reliability / lifecycle / wake context te
 # gives the FTS5 flag set a single source of truth: the Makefile's
 # CGO_CFLAGS / CGO_LDFLAGS / -tags fts5 line. Running `go test` from the
 # hook bypasses that and silently breaks on a fresh checkout (no build
-# cache) because the C-level sqlite_fts5 module never gets compiled in.
+# cache) because the C-level FTS5 module (SQLITE_ENABLE_FTS5) never
+# gets compiled in.
 #
 # The previous direct-`go test` line is preserved as a comment for
 # archaeology; do not resurrect it.
