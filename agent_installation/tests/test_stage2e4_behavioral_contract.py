@@ -14,6 +14,23 @@ block teaches the canonical continuity contract:
 import re
 import unittest
 
+# Markdown emphasis and code spans are presentation, not meaning. The
+# protocol is wrapped prose, so an assertion about the contract it
+# teaches should not depend on where a line wrapped or whether a word
+# is bolded/backticked. `_prose` normalises both away.
+_EMPHASIS_RE = re.compile(r"\*\*|\*|`")
+
+
+def _prose(text: str) -> str:
+    """Return `text` as lowercase-normalised prose: line wraps
+    collapsed, markdown emphasis and code-span markers removed.
+
+    Used to assert the SEMANTICS the protocol teaches rather than one
+    particular rendering of the words that teach it.
+    """
+    return re.sub(r"\s+", " ", _EMPHASIS_RE.sub("", text))
+
+
 CANONICAL_SNIPPETS = (
     __import__("pathlib")
     .Path(__file__)
@@ -273,6 +290,14 @@ class SharedProtocolContract(unittest.TestCase):
 
     def setUp(self):
         self.text = CANONICAL_PROTOCOL.read_text(encoding="utf-8")
+        # Prose form: collapse line wraps and markdown emphasis so an
+        # assertion about meaning is not broken by where the editor
+        # wrapped a line or where an author placed a `**bold**` span.
+        # The protocol is wrapped prose, so any assertion against raw
+        # text is coupled to the current wrapping — which is why the
+        # 2026-09-29 pass replaced the literal "diagnostic surface" and
+        # "follow the pointer" checks with these semantic forms.
+        self.prose = _prose(self.text)
 
     def test_protocol_teaches_continuity_contract(self):
         self.assertIn(
@@ -280,32 +305,84 @@ class SharedProtocolContract(unittest.TestCase):
             "shared protocol missing contextual_focus section",
         )
         self.assertIn(
-            "inherited working awareness", self.text,
+            "inherited working awareness", self.prose,
             "shared protocol missing 'inherited working awareness' phrasing",
         )
 
     def test_protocol_diagnostic_action_role(self):
-        # Lowercase for case-insensitive check on diagnostic wording.
+        """The `contextual_*` actions must be taught as diagnostic
+        inspection surfaces, explicitly not part of normal
+        session-start routing.
+
+        2026-09-29: this previously asserted the literal
+        "diagnostic surface" against the raw file. The protocol says
+        "**diagnostic** surfaces" (§1) and "The three `contextual_*`
+        actions are diagnostic" (§1.2) — the markdown bold span breaks
+        the literal, so the test failed against wording that teaches
+        the contract correctly. Asserting the meaning rather than one
+        rendering of it.
+        """
         self.assertIn(
-            "diagnostic surface", self.text.lower(),
-            "shared protocol must mark contextual_* actions as diagnostic",
+            "diagnostic surfaces for inspecting the routing pipeline",
+            self.prose,
+            "shared protocol must mark the contextual_* actions as "
+            "diagnostic surfaces for inspecting the routing pipeline",
         )
-        # The protocol §1.2 says "They are NOT part of the normal
-        # session-start workflow" — possibly split across lines.
-        import re
-        normalized = re.sub(r"\s+", " ", self.text)
+        # All three diagnostic actions must be named, so the contract
+        # cannot silently drop one of them.
+        for action in ("contextual_candidates", "contextual_selection",
+                       "contextual_materialization"):
+            self.assertIn(
+                action, self.prose,
+                f"shared protocol must name {action} as a diagnostic action",
+            )
+        # §1.2: they are NOT part of the normal session-start workflow.
         self.assertIn(
-            "They are NOT part of the normal session-start workflow",
-            normalized,
-            "shared protocol must say contextual_* actions are not "
-            "session-start workflow",
+            "they are not part of the normal session-start workflow",
+            self.prose.lower(),
+            "shared protocol must say the contextual_* actions are not "
+            "part of the normal session-start workflow",
         )
 
     def test_protocol_pointer_following(self):
-        # Pointer-following guidance.
+        """The protocol must teach following a pointer with the
+        appropriate domain tool when a summary is insufficient.
+
+        2026-09-29: this previously asserted the literal
+        "follow the pointer" against the raw file. The protocol wraps
+        that instruction across lines 46-47 ("...follow\\n  the
+        pointer with the appropriate domain tool") and again at 75-76
+        ("follow the\\n  `pointer` / `artifact_id`"), so the literal
+        never appeared in the raw text even though both statements
+        were present and correct. Assert the instruction's substance.
+        """
         self.assertIn(
-            "follow the pointer", self.text,
-            "shared protocol missing pointer-following guidance",
+            "follow the pointer with the appropriate domain tool",
+            self.prose,
+            "shared protocol must teach following the pointer with the "
+            "appropriate domain tool",
+        )
+        # The instruction is conditional on the summary being
+        # insufficient, and names the pointer fields to act on.
+        self.assertIn(
+            "when detail is sufficient, proceed. when it is not, follow",
+            self.prose.lower(),
+            "shared protocol must teach that pointer-following is "
+            "conditional on the bounded detail being insufficient",
+        )
+        for field in ("pointer", "artifact_id"):
+            self.assertIn(
+                field, self.prose,
+                f"shared protocol pointer-following must name {field}",
+            )
+        # Guard against the opposite error: bulk-listing every
+        # substrate category is explicitly not the contract.
+        self.assertIn(
+            "bulk listing every substrate category at session start is "
+            "not the contract",
+            self.prose.lower(),
+            "shared protocol must rule out bulk-listing substrate "
+            "categories as the alternative to pointer-following",
         )
 
     def test_protocol_degraded_focus_guidance(self):
