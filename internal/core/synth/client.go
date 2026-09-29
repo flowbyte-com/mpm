@@ -290,6 +290,26 @@ Output: {"content": "The source statement is mathematically undefined; no reliab
 // tokens + ~4k output tokens is comfortably under the cap).
 const synthInternalMaxTokens = 16384
 
+// InternalMaxTokens returns the substrate-supplied output-token
+// ceiling.
+//
+// It exists so that every construction path for a SynthClient sources
+// the limit from this one constant instead of re-deriving it. A caller
+// that builds a SynthClient as a struct literal — rather than through
+// NewSynthClient — has no way to reach the unexported constant, and
+// the natural thing to reach for instead is the operator's
+// Profiles[...].MaxTokens. That silently hands the budget to user
+// configuration, which is exactly what synthInternalMaxTokens exists
+// to prevent.
+//
+// Callers that need profile-driven connection fields (model, api key,
+// base URL, timeout) should build the client with NewSynthClient and
+// override those, or use this accessor for the token ceiling. Note that
+// NewSynthClient also performs provider-specific env-var credential
+// resolution, so a caller that must use the profile's api_key verbatim
+// should prefer this accessor.
+func InternalMaxTokens() int { return synthInternalMaxTokens }
+
 // SynthResult is the LLM output structure for synthesis calls.
 // Exported because SynthClientInterface returns it.
 type SynthResult struct {
