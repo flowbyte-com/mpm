@@ -12,10 +12,22 @@
 //   - Idempotent: re-running on an already-fired wake      → already_resolved (no new audit row)
 //   - Wake not found                                       → wake_not_found
 //   - Invalid reason enum                                  → invalid_reason
-//   - Row has no metadata.kind                              → not_a_wake
+//   - Row whose metadata.kind is a non-wake kind
+//     (e.g. "cron")                                        → not_a_wake
 //     (the row is a scheduled_tasks-owned row; the surface
 //   refuses to retire it because scheduled tasks have their
 //   own lifecycle (`delete_task` / `upsert_task`).)
+//
+// 2026-09-29: the non-wake discriminator is metadata.kind, NOT the
+// absence of it. Rows with `kind` absent (NULL, empty, or `{}`)
+// are legitimate legacy wakes and MUST stay resolvable — see the D-1
+// fix in internal/core/wake_tools.go (ScheduleWake defaults a missing
+// kind to "notification", and ResolveWake accepts absent kind for
+// rows authored before that default existed) and the canonical pins
+// in internal/core/wake_lifecycle_d1_test.go. The fixture below
+// previously inserted a kind-less row and expected a refusal, which
+// contradicted that contract since D-1 landed; it now inserts the
+// real scheduled-task shape (an explicit non-wake kind).
 //
 // The reason taxonomy is canonical:
 //
@@ -67,9 +79,22 @@ func seedCascadeWake(t *testing.T, dm *internal.DatabaseManager, reason string) 
 	return id
 }
 
-// seedScheduleTaskOwnedRow inserts a row whose metadata lacks the
-// `kind` discriminator — the shape of a row owned by
+// seedScheduleTaskOwnedRow inserts a row carrying an explicit
+// non-wake `metadata.kind` — the shape of a row owned by
 // scheduled_tasks rather than the wakes lifecycle.
+//
+// 2026-09-29: this fixture previously inserted metadata with no
+// `kind` at all and asserted that such a row is refused as
+// not_a_wake. That contradicted the D-1 contract, which deliberately
+// treats a kind-less row (NULL / empty / `{}`) as a legacy WAKE so
+// rows authored before ScheduleWake defaulted kind=notification stay
+// resolvable. The kind-less row resolved successfully as a wake, the
+// test's success=false assertion failed, and the following
+// `m["error"].(string)` type assertion then panicked on the absent
+// error field. The fixture now writes the real discriminator the
+// resolver keys on: an explicit non-wake kind ("cron"), matching
+// TestD1_ResolveWake_RejectsScheduledTaskKind in
+// internal/core/wake_lifecycle_d1_test.go.
 func seedScheduleTaskOwnedRow(t *testing.T, dm *internal.DatabaseManager) string {
 	t.Helper()
 	now := timeNowUnixForResolve()
@@ -78,7 +103,7 @@ func seedScheduleTaskOwnedRow(t *testing.T, dm *internal.DatabaseManager) string
 		INSERT INTO scheduled_wakes
 			(id, target_time, reason, theory_id, recurring_rule, fired, fired_at, created_by, metadata)
 		VALUES (?, ?, 'cron:epistemic-compaction', NULL, NULL, 0, NULL, 'mpm-scheduler',
-		        '{"directive_id":"mpm-seed-epistemic-compaction-policy","expired":{}}')
+		        '{"kind":"cron","directive_id":"mpm-seed-epistemic-compaction-policy","expired":{}}')
 	`, id, now)
 	require.NoError(t, err)
 	return id
@@ -93,8 +118,8 @@ func TestWakesResolve_HappyPath_ResolvesAndAudits(t *testing.T) {
 	wakeID := seedCascadeWake(t, dm, "cascade: legacy ghost")
 
 	res, err := handleResolveWake(dm, defaultACForPatch(), map[string]interface{}{
-		"wake_id": wakeID,
-		"reason":  "superseded",
+		"wake_id":          wakeID,
+		"reason":           "superseded",
 		"result_reference": "downstream was superseded before materialization",
 	})
 	require.NoError(t, err)
@@ -222,10 +247,11 @@ func TestWakesResolve_RequiresReason(t *testing.T) {
 }
 
 // TestWakesResolve_RejectsScheduleTaskRows pins the safety
-// boundary: a row with no metadata.kind is owned by the
-// scheduled_tasks surface, NOT the wakes surface, and must NOT be
-// retire-able from mpm_wakes resolve. Mixing the two surfaces
-// would let an agent accidentally retire a recurring schedule.
+// boundary: a row whose metadata.kind is a non-wake kind (here
+// "cron") is owned by the scheduled_tasks surface, NOT the wakes
+// surface, and must NOT be retire-able from mpm_wakes resolve.
+// Mixing the two surfaces would let an agent accidentally retire a
+// recurring schedule.
 func TestWakesResolve_RejectsScheduleTaskRows(t *testing.T) {
 	dm := newTestSharedDM(t)
 	taskID := seedScheduleTaskOwnedRow(t, dm)
@@ -238,7 +264,19 @@ func TestWakesResolve_RejectsScheduleTaskRows(t *testing.T) {
 	m := res.(map[string]interface{})
 	assert.Equal(t, false, m["success"])
 	assert.Equal(t, "not_a_wake", m["status"])
-	assert.Contains(t, strings.ToLower(m["error"].(string)),
+	// 2026-09-29: this was `strings.ToLower(m["error"].(string))`,
+	// an unchecked type assertion. When the row was misclassified as
+	// a wake the envelope carried no "error" key at all, so the
+	// assertion panicked and destroyed the real diagnostic — the
+	// earlier assert.Equal failures above were the useful signal.
+	// Assert the key's presence and type first so a malformed
+	// envelope reports a readable failure instead of a nil-interface
+	// panic, and so a refusal can never be silently missing its
+	// machine-readable cause.
+	errMsg, ok := m["error"].(string)
+	require.True(t, ok,
+		"refusal envelope must carry a string \"error\" field; got %#v", m["error"])
+	assert.Contains(t, strings.ToLower(errMsg),
 		"scheduled task",
 		"refusal message must redirect operators to the scheduled-task surface")
 
@@ -249,6 +287,132 @@ func TestWakesResolve_RejectsScheduleTaskRows(t *testing.T) {
 	).Scan(&fired))
 	assert.Equal(t, 0, fired,
 		"schedule-task row must remain unfired after a refused resolve")
+}
+
+// seedKindlessWake inserts a legacy wake row whose metadata carries no
+// `kind` discriminator. This is the shape of rows authored before
+// ScheduleWake began defaulting kind=notification (2026-09-22 D-1), and
+// of any row written directly by an operator or another tool.
+//
+// 2026-09-29: added alongside the fixture repair in
+// seedScheduleTaskOwnedRow. The two fixtures are deliberately
+// distinguished ONLY by the presence of `kind`, so a regression that
+// collapsed the discriminator back to "absent means schedule task"
+// would be caught from both sides.
+func seedKindlessWake(t *testing.T, dm *internal.DatabaseManager, label, metadata string) string {
+	t.Helper()
+	now := timeNowUnixForResolve()
+	id := "kindless-" + internal.GenerateID()
+	var metaVal interface{}
+	if metadata == "<NULL>" {
+		metaVal = nil
+	} else {
+		metaVal = metadata
+	}
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO scheduled_wakes
+			(id, target_time, reason, theory_id, recurring_rule, fired, fired_at, created_by, metadata)
+		VALUES (?, ?, ?, NULL, NULL, 0, NULL, 'legacy-test', ?)
+	`, id, now, label, metaVal)
+	require.NoError(t, err)
+	return id
+}
+
+// TestWakesResolve_KindlessRowsRemainResolvable pins the OTHER side of
+// the discriminator boundary: a row with no metadata.kind is a legacy
+// WAKE, not a scheduled task, and must resolve successfully.
+//
+// 2026-09-29: this is the invariant the stale fixture violated. Per the
+// D-1 fix, ScheduleWake defaults a missing kind to "notification" and
+// ResolveWake accepts an absent kind so rows predating that default do
+// not become unresolvable (and unretirable) forever. The canonical
+// pins for this live in internal/core/wake_lifecycle_d1_test.go at the
+// DatabaseManager layer; this test pins the same invariant at the MCP
+// tool-handler layer, which is where the misclassification actually
+// surfaced. All three legacy encodings are covered: SQL NULL, empty
+// string, and empty JSON object.
+func TestWakesResolve_KindlessRowsRemainResolvable(t *testing.T) {
+	cases := []struct {
+		name     string
+		metadata string
+	}{
+		{"sql_null", "<NULL>"},
+		{"empty_string", ""},
+		{"empty_json_object", "{}"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dm := newTestSharedDM(t)
+			wakeID := seedKindlessWake(
+				t, dm, "legacy kindless wake: "+tc.name, tc.metadata)
+
+			res, err := handleResolveWake(dm, defaultACForPatch(), map[string]interface{}{
+				"wake_id": wakeID,
+				"reason":  "reconciled",
+			})
+			require.NoError(t, err)
+			m, ok := res.(map[string]interface{})
+			require.True(t, ok, "handler must return a result map; got %T", res)
+
+			assert.Equal(t, true, m["success"],
+				"a row with no metadata.kind is a legacy wake and must resolve")
+			assert.Equal(t, "resolved", m["status"],
+				"legacy kind-less row must reach the resolved status, not not_a_wake")
+			_, hasErr := m["error"]
+			assert.False(t, hasErr,
+				"a successful resolve envelope must not carry an error field")
+
+			var fired int
+			require.NoError(t, dm.SQLDB().QueryRow(
+				`SELECT fired FROM scheduled_wakes WHERE id = ?`, wakeID,
+			).Scan(&fired))
+			assert.Equal(t, 1, fired,
+				"legacy wake must be retired exactly as any other wake")
+		})
+	}
+}
+
+// TestWakesResolve_RejectionEnvelopeAlwaysCarriesError pins that every
+// refusal envelope is well-formed: a string "error" field naming the
+// cause. A refusal that omits its cause is a malformed result that
+// reads as success to any caller that only branches on "error".
+//
+// 2026-09-29: the panic this test's shape prevents came from an
+// unchecked `m["error"].(string)` in TestWakesResolve_RejectsScheduleTaskRows.
+func TestWakesResolve_RejectionEnvelopeAlwaysCarriesError(t *testing.T) {
+	dm := newTestSharedDM(t)
+
+	// wake_not_found — unknown id.
+	res, err := handleResolveWake(dm, defaultACForPatch(), map[string]interface{}{
+		"wake_id": "wk-does-not-exist-2026-09-29",
+		"reason":  "reconciled",
+	})
+	require.NoError(t, err, "a machine-readable refusal is not a Go error")
+	m, ok := res.(map[string]interface{})
+	require.True(t, ok, "refusal must be a result map; got %T", res)
+	assert.Equal(t, false, m["success"], "unknown wake must not report success")
+	assert.Equal(t, "wake_not_found", m["status"])
+	errMsg, ok := m["error"].(string)
+	require.True(t, ok, "refusal envelope must carry a string error field; got %#v", m["error"])
+	assert.NotEmpty(t, errMsg, "refusal error must not be empty")
+
+	// not_a_wake — schedule-owned row.
+	taskID := seedScheduleTaskOwnedRow(t, dm)
+	res, err = handleResolveWake(dm, defaultACForPatch(), map[string]interface{}{
+		"wake_id": taskID,
+		"reason":  "superseded",
+	})
+	require.NoError(t, err)
+	m, ok = res.(map[string]interface{})
+	require.True(t, ok, "refusal must be a result map; got %T", res)
+	assert.Equal(t, false, m["success"], "schedule row must not report success")
+	assert.Equal(t, "not_a_wake", m["status"])
+	errMsg, ok = m["error"].(string)
+	require.True(t, ok, "refusal envelope must carry a string error field; got %#v", m["error"])
+	assert.NotEmpty(t, errMsg, "refusal error must not be empty")
+	// The refusal must point at the surface that actually owns the row.
+	assert.Contains(t, strings.ToLower(errMsg), "delete_task",
+		"refusal must redirect the operator to the scheduled-task surface")
 }
 
 // TestWakesResolve_AllCanonicalReasonsAccepted pins the full reason
