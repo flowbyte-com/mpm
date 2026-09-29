@@ -59,7 +59,31 @@ CGO_LDFLAGS := -lm
 # Run filter for make test-release; override with `make test-release RUN='-run TestFoo'`.
 RELEASE_RUN ?=
 
-.PHONY: all build install service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit lint help refresh-installed check-installed-drift check-installed
+# Where `make install-hooks` writes the git hook. Uses git's own answer so
+# a repository that has relocated its hooks (core.hooksPath) is honoured
+# rather than silently written to the wrong place. Overridable so tests can
+# redirect it into a sandbox.
+GIT_HOOKS_DIR ?= $(shell git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)
+
+# The pre-commit guard subset for the nested tools module, and the guards
+# that must never drop out of it. Both are Make variables rather than
+# inline recipe text so TestBuildConfig_ToolsGuardSubsetIsNonVacuous can
+# read the exact regex the gate runs and prove it is not empty.
+#
+# Why a subset rather than the whole module: the full module is ~50s, and
+# no single test dominates it (the cost is spread across hundreds of
+# DB-backed tests, each 0.1-0.9s). A subset can therefore not be
+# meaningfully sped up by excluding "slow" tests, and the guards
+# themselves are the part that must never be allowed to rot. Measured:
+# this subset is 0.25s of test time, ~2.6s wall including compilation.
+TOOLS_GUARD_RUN := TestOutputPolicy_OnlyMCPEnforces|TestParity_AllActionTools_LockEverySurface|TestAdapterCallsites_MatchGoSchema|TestGuardScopes_
+# The three cross-surface guards. TestParity_ prefix and TestGuardScopes_
+# are intentionally absent here: the first is covered by the
+# AllActionTools sweep, the second tests the scope resolution the other
+# three depend on. Both are in TOOLS_GUARD_RUN above.
+TOOLS_REQUIRED_GUARDS := TestOutputPolicy_OnlyMCPEnforces TestParity_AllActionTools_LockEverySurface TestAdapterCallsites_MatchGoSchema
+
+.PHONY: all build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit lint help refresh-installed check-installed-drift check-installed
 
 all: build
 
@@ -175,6 +199,22 @@ uninstall-service:
 	-@systemctl --user daemon-reload
 	@echo "✓ Removed $(SERVICE_DST) (if it existed)"
 
+# Install the tracked pre-commit hook into this repository's git hooks
+# directory. This is what scripts/pre-commit's own header tells users to
+# run; the instruction existed for a long time with no corresponding
+# Makefile target, so following the hook's own instructions produced
+# "No rule to make target 'install-hooks'".
+#
+# Deliberately local and offline: it copies one tracked file and sets the
+# executable bit. It performs no network action and no push. Idempotent —
+# re-running overwrites the hook with the current tracked source, which is
+# the point: a hook left over from an older revision gates on stale rules.
+install-hooks:
+	@mkdir -p "$(GIT_HOOKS_DIR)"
+	@cp scripts/pre-commit "$(GIT_HOOKS_DIR)/pre-commit"
+	@chmod +x "$(GIT_HOOKS_DIR)/pre-commit"
+	@echo "✓ installed scripts/pre-commit -> $(GIT_HOOKS_DIR)/pre-commit"
+
 # Regenerate the CLI command catalogue in docs/SPEC.md (sent-injected
 # auto-generated block in §8). Walks r.Commands via go/ast — no
 # reflection, no runtime import, source-level extraction. Idempotent.
@@ -187,6 +227,7 @@ test:
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/telemetry/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/scheduler/...
+	$(MAKE) test-tools
 
 # Run the pre-commit subset of internal/core tests with the same FTS5 flag
 # discipline as `make test`. The pre-commit hook invokes this target rather
@@ -201,6 +242,56 @@ test:
 test-core-precommit:
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -short -count=1 -tags fts5 ./... \
 		-run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics|TestDBSafety"
+
+# Pre-commit gate for the nested tools module (internal/core/tools).
+#
+# This module is a separate Go module, so `./...` from the root does not
+# reach it. It holds three cross-surface guards — MCP output-policy
+# enforcement, registry/dispatcher parity, and cross-language adapter
+# schema drift — all of which inspect source OUTSIDE the Go package they
+# live in. Before this target existed they were named only in comments in
+# scripts/pre-commit and .github/workflows/build-test.yml, and nothing
+# executed them.
+#
+# The gate refuses to run on an empty population. `go test -run <regex>`
+# exits 0 when the regex matches nothing, so a renamed test or a typo
+# would silently disable the gate — the same failure shape as the guards
+# themselves had. The recipe therefore expands the regex with
+# `go test -list` first and fails if it resolves to zero tests, or if any
+# of TOOLS_REQUIRED_GUARDS is missing from it.
+test-tools-precommit:
+	@cd internal/core/tools && \
+	 matched=$$(CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -list "$(TOOLS_GUARD_RUN)" ./ | grep -E '^Test' || true); \
+	 if [ -z "$$matched" ]; then \
+	   echo "[test-tools-precommit] FATAL: TOOLS_GUARD_RUN matched ZERO tests." >&2; \
+	   echo "  \`go test -run\` exits 0 on an empty match, so the gate would pass" >&2; \
+	   echo "  without running anything. Check for a renamed or deleted test." >&2; \
+	   exit 1; \
+	 fi; \
+	 for guard in $(TOOLS_REQUIRED_GUARDS); do \
+	   echo "$$matched" | grep -qx "$$guard" || { \
+	     echo "[test-tools-precommit] FATAL: required guard $$guard is not in TOOLS_GUARD_RUN." >&2; \
+	     echo "  matched instead: $$matched" >&2; \
+	     exit 1; }; \
+	 done; \
+	 echo "[test-tools-precommit] guard population ($$(echo "$$matched" | wc -l | tr -d ' ') tests):"; \
+	 echo "$$matched" | sed 's/^/    - /'; \
+	 CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -short -count=1 -tags fts5 -v ./ \
+		-run "$(TOOLS_GUARD_RUN)"
+
+# Full test sweep of the nested tools module. Wired into `make test` and
+# `make test-race` so a green repository-wide result can no longer be
+# achieved while this module is red or untested.
+test-tools:
+	cd internal/core/tools && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -count=1 -tags fts5 -v ./...
+
+# Race-enabled sweep of the nested tools module. Included because it is
+# practical and matches the policy applied to every other module: the
+# tools module dispatches registry handlers against a shared DatabaseManager
+# and is exactly where a concurrency defect in the tool layer would live.
+# Measured cost: ~57s.
+test-tools-race:
+	cd internal/core/tools && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -count=1 -tags fts5 -v ./...
 
 # Release acceptance suite — cross-agent continuity, public-CLI parity,
 # supersession trace, scale/e2e boundary tests. Spins up real subprocess
@@ -242,6 +333,7 @@ test-race:
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/telemetry/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/scheduler/...
+	$(MAKE) test-tools-race
 
 # Run golangci-lint (advisory only — does not gate CI).
 # Install: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
@@ -328,7 +420,11 @@ help:
 	@echo "    make service             - Alias for service-scheduler"
 	@echo "    make uninstall-service   - Remove the installed systemd user unit"
 	@echo "    make gen-cli             - Regenerate the CLI catalogue in docs/SPEC.md §8"
-	@echo "    make test                - Run go tests"
+	@echo "    make test                - Run go tests (root + internal/core + scheduler + tools)"
+	@echo "    make test-race           - Same, under -race (the pre-merge gate)"
+	@echo "    make test-tools          - Run the full internal/core/tools module"
+	@echo "    make test-tools-precommit- Run the tools guard subset the pre-commit hook uses"
+	@echo "    make install-hooks       - Install scripts/pre-commit into .git/hooks (no network)"
 	@echo "    make lint                - Run golangci-lint (advisory; not CI-gated)"
 	@echo "    make clean               - Remove bin/"
 	@echo "    make help                - Show this help"

@@ -15,6 +15,7 @@
 #   - synthesis/reliability/lifecycle tests  (these are deterministic; some
 #     other test suites have pre-existing data-pollution failures we are not
 #     fixing in this arc — those belong in a CI matrix, not a local gate)
+#   - internal/core/tools guard subset     (`make test-tools-precommit`)
 #
 # Install: copy this file to .git/hooks/pre-commit (or run `make install-hooks`).
 # Future: when the test suite stabilises, add `go test ./...` (full sweep) and
@@ -183,6 +184,33 @@ if ! make test-core-precommit > /tmp/pre-commit-test.log 2>&1; then
   exit 1
 fi
 rm -f /tmp/pre-commit-test.log
+
+# internal/core/tools is a SEPARATE Go module. `go test ./...` from the repo
+# root never descends into it, so the guards below had never run in this hook
+# or anywhere else — TestOutputPolicy_OnlyMCPEnforces was a live t.Skip, and the
+# registry/dispatcher parity sweep called t.Skipf inside a loop, which aborts
+# the entire test function on the first miss. The guards themselves are now
+# repaired; this step is what makes them load-bearing.
+#
+# Only the guard subset runs here, not the whole ~50s module suite: these are
+# static/registry guards with no DB fixtures, and measuring the subset gave
+# 0.25s of test time (2.6s wall, cold-ish). The complete module runs in
+# `make test` / `make test-race` and in CI.
+#
+# `make test-tools-precommit` resolves the guard population with `go test -list`
+# first and fails when the regex matches nothing or a required guard is missing,
+# so a renamed or deleted guard cannot quietly turn this step into a no-op.
+if ! make test-tools-precommit > /tmp/pre-commit-tools.log 2>&1; then
+  echo "[pre-commit] ABORTING commit: internal/core/tools guard subset failed." >&2
+  echo "[pre-commit] See log:" >&2
+  cat /tmp/pre-commit-tools.log >&2
+  rm -f /tmp/pre-commit-tools.log
+  exit 1
+fi
+# Surface which guards actually executed — a silent green here is exactly the
+# failure mode this step exists to prevent.
+sed 's/^/[pre-commit] /' /tmp/pre-commit-tools.log
+rm -f /tmp/pre-commit-tools.log
 
 echo "[pre-commit] running router linter (persona/mode frontmatter)..."
 # The linter catches YAML escape footguns and broken regex compilation

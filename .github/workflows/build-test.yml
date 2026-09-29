@@ -134,6 +134,15 @@ jobs:
           # Print per-function and total coverage percentage to workflow logs
           go tool cover -func=coverage.out
 
+      # internal/core/tools is a separate Go module, so `./...` from the repo
+      # root never descends into it. Until this step the whole MCP tool layer —
+      # ~50s of tests including the output-policy, registry/dispatcher parity,
+      # and adapter schema guards — was invisible to a green CI result. Race
+      # coverage matches the step above; the module builds and passes clean
+      # under -race locally.
+      - name: Nested tools module (internal/core/tools)
+        run: make test-tools-race
+
       - name: Generate Workflow Step Summary
         run: |
           echo "### 🧪 Go Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
@@ -161,5 +170,9 @@ jobs:
           go-version: '1.26.6'
           cache: true
 
+      # `./...` excludes internal/core/tools (separate go.mod). Sweep it
+      # separately so this job's log covers the whole tree, not the root module.
       - name: Full test sweep
-        run: go test -tags fts5 -count=1 ./... 2>&1 | tee test-output.log
+        run: |
+          go test -tags fts5 -count=1 ./... 2>&1 | tee test-output.log
+          make test-tools 2>&1 | tee tools-output.log
