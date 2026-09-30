@@ -803,6 +803,40 @@ var WorkTables = []string{
 	  migrated_at  INTEGER NOT NULL,
 	  operator     TEXT NOT NULL DEFAULT 'mpm-migration'
 	);`,
+
+	// Purge audit trail (2026-09-30). Records that a work item was
+	// removed from the substrate and why. It is the ONLY record that
+	// survives a purge, and it deliberately holds no artifact text:
+	//
+	//   - no title column, no content column, no work-note column
+	//   - `note` is OPERATOR-AUTHORED independent input, supplied at
+	//     purge time. It is never derived from the work item, and it
+	//     permanently survives the purge.
+	//   - `counts` is a JSON object of deleted row counts per table.
+	//
+	// The absence of artifact-text columns is the property that makes
+	// this table a purge record rather than a second copy of the
+	// thing being purged. The purge write path never reads the work
+	// row or its events into any column here, so the property holds
+	// structurally and not merely by convention.
+	//
+	// `reason_code` has no 'privacy' member: v1 purge is logical
+	// removal, not forensic or privacy-grade erasure (see
+	// docs/designs/2026-09-30-work-archive-and-purge.md §5.2, §5.6).
+	`CREATE TABLE IF NOT EXISTS work_purge_audit (
+	  id          TEXT PRIMARY KEY,
+	  work_id     TEXT NOT NULL,
+	  purged_at   INTEGER NOT NULL,
+	  reason_code TEXT NOT NULL
+	                CHECK (reason_code IN (
+	                  'test_debris','accidental','corrupted',
+	                  'migration_cleanup','administrative','other')),
+	  note        TEXT,
+	  operator    TEXT,
+	  counts      TEXT NOT NULL
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_work_purge_audit_work ON work_purge_audit(work_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_work_purge_audit_time ON work_purge_audit(purged_at DESC);`,
 }
 
 // ReferenceIndexes contains the indexes that support the reference tables.

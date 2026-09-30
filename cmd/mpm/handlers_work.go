@@ -25,9 +25,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -330,11 +333,13 @@ func handleWorkItem(args []string) int {
 	// starts with `--` is a flag — the next token is its value unless
 	// it was supplied as `--key=value`.
 	valueTakingFlags := map[string]bool{
-		"--status":  true,
-		"--limit":   true,
-		"--note":    true,
-		"--content": true,
-		"--title":   true,
+		"--status":      true,
+		"--limit":       true,
+		"--note":        true,
+		"--content":     true,
+		"--title":       true,
+		"--reason-code": true,
+		"--backup":      true,
 	}
 	var subIdx int = -1
 	for i := 0; i < len(args); i++ {
@@ -514,6 +519,17 @@ func handleWorkItem(args []string) int {
 		}
 		action = sub
 		params["work_id"] = positional[0]
+	case "purge":
+		// Logical purge (2026-09-30). CLI-only by design: no `purge`
+		// action exists on mpm_work or mpm_system, because both are
+		// agent-reachable and an agent-reachable irreversible delete is
+		// a different tool with a different risk profile.
+		if len(positional) < 1 {
+			usererror.Error("mpm work item purge requires a work_id positional arg")
+			return 1
+		}
+		action = sub
+		params["work_id"] = positional[0]
 	case "resolve-contradiction":
 		// F6-1 / T20-1: agent-facing first-class contradiction resolution.
 		// The recovery path for unsubstantiated disputes against work
@@ -537,7 +553,7 @@ func handleWorkItem(args []string) int {
 		printWorkItemHelp()
 		return 0
 	default:
-		usererror.Error("mpm work item: unknown subcommand %q\navailable subcommands: create, list, show, complete, cancel, history, note, reopen, archive, unarchive, resolve-contradiction, update", sub)
+		usererror.Error("mpm work item: unknown subcommand %q\navailable subcommands: create, list, show, complete, cancel, history, note, reopen, archive, unarchive, purge, resolve-contradiction, update", sub)
 		return 1
 	}
 
@@ -551,6 +567,14 @@ func handleWorkItem(args []string) int {
 	// parse its JSON output.
 	if action == "list" {
 		return handleWorkItemList(params)
+	}
+
+	// Purge bypasses the mpm_work RPC path entirely. It has no MCP
+	// action and must never acquire one by accident, so it is
+	// dispatched here, before the payload is built and before
+	// handleCall — the substrate method is reached directly.
+	if action == "purge" {
+		return handleWorkItemPurge(params)
 	}
 
 	// 2026-09-14 release-pass: normalise work-id inputs through
@@ -567,6 +591,196 @@ func handleWorkItem(args []string) int {
 	payload := map[string]interface{}{"action": action, "params": params}
 	enc, _ := json.Marshal(payload)
 	return handleCall([]string{"mpm_work", "--payload", string(enc)})
+}
+
+// handleWorkItemPurge implements `mpm work item purge <work_id>
+// --reason-code <enum> [--note <text>] [--backup <path>] [--force]`.
+//
+// Dry run is the default. Without --force nothing is written, and the
+// output reports exactly what a forced run would remove, every inbound
+// structural reference that would block it, and the locations where the
+// content can still survive even after a successful purge.
+//
+// A --note is operator-authored independent input. It is copied into a
+// permanent audit record and survives the purge — purge does not remove
+// information you manually place in it.
+func handleWorkItemPurge(params map[string]interface{}) int {
+	dm := getDBConcrete()
+	if dm == nil {
+		return 1
+	}
+	workID, _ := params["work_id"].(string)
+	if workID == "" {
+		usererror.Error("mpm work item purge requires a work_id positional arg")
+		return 1
+	}
+	reasonCode, _ := params["reason_code"].(string)
+	if reasonCode == "" {
+		usererror.Error("mpm work item purge requires --reason-code (%s)",
+			strings.Join(mpminternal.ValidWorkPurgeReasonCodes, " | "))
+		return 1
+	}
+	if !mpminternal.WorkPurgeReasonCodeIsValid(reasonCode) {
+		usererror.Error("mpm work item purge: --reason-code %q is not valid (use %s)",
+			reasonCode, strings.Join(mpminternal.ValidWorkPurgeReasonCodes, " | "))
+		return 1
+	}
+	note, _ := params["note"].(string)
+	backupPath, _ := params["backup"].(string)
+	force, _ := params["force"].(bool)
+
+	// --backup is taken BEFORE the delete, and only when the operator
+	// asked for it. Purge creates no backup on its own — an implicit
+	// copy of a purge target would be a copy of the material the
+	// operator is trying to remove.
+	//
+	// The dump is a full copy of that same material, so it is written
+	// only for a purge that will actually run. Taking it and then
+	// refusing would leave a copy of the content on disk as a side
+	// effect of a command that changed nothing. The core re-checks
+	// referrers inside the transaction; this preflight only fixes the
+	// ORDER of the two side effects, and a lost race is caught there.
+	backupTaken := false
+	if force && backupPath != "" {
+		pre, err := dm.PreflightWorkPurge(dm, workID)
+		if err != nil {
+			return respond("", fmt.Sprintf("mpm work item purge: %v", err), 1)
+		}
+		if len(pre.Referrers) == 0 {
+			if err := writePurgeBackup(dm.DBPath(), backupPath); err != nil {
+				return respond("", fmt.Sprintf("mpm work item purge: backup failed, nothing was removed: %v", err), 1)
+			}
+			backupTaken = true
+		}
+	}
+
+	report, err := dm.PurgeWork(mpminternal.WorkPurgeRequest{
+		WorkID:     workID,
+		ReasonCode: reasonCode,
+		Note:       note,
+		Operator:   getOrMakeSessionID(),
+		Force:      force,
+	})
+	if err != nil {
+		// A refusal enumerates its referrers. The operator has to be
+		// able to see WHICH records block the purge without turning
+		// to the database, because resolving them is the next thing
+		// they will do.
+		if errors.Is(err, mpminternal.ErrWorkPurgeReferenced) && report != nil {
+			return respond("", renderWorkPurgeRefusal(workID, report, backupPath, backupTaken), 1)
+		}
+		return respond("", fmt.Sprintf("mpm work item purge: %v", err), 1)
+	}
+
+	return renderWorkPurgeReport(report, backupPath)
+}
+
+// renderWorkPurgeRefusal renders §6.2: the referring records, the fact
+// that nothing changed, and the absence of a cascade path.
+//
+// A requested --backup that was not taken is stated rather than left
+// silent. The operator asked for a copy of material they believe they
+// are removing; where that copy is (or is not) is the whole subject of
+// §5.7, and a refusal that quietly produced one would undercut it.
+func renderWorkPurgeRefusal(workID string, report *mpminternal.WorkPurgeReport, backupPath string, backupTaken bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "mpm work item purge: %s is referenced by %d record(s):\n",
+		workID, len(report.Referrers))
+	for _, r := range report.Referrers {
+		id := r.ID
+		if id == "" {
+			id = "-"
+		}
+		fmt.Fprintf(&b, "  %s: %s", r.Kind, id)
+		if r.Detail != "" {
+			fmt.Fprintf(&b, "  (%s)", r.Detail)
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("No changes were made. Resolve the references above and retry.\n")
+	b.WriteString("MPM has no --cascade; purge never rewrites a referring record.\n")
+	if backupPath != "" {
+		if backupTaken {
+			b.WriteString(fmt.Sprintf("NOTE: %s was written before the refusal and CONTAINS this work item. Purge does not delete backups.\n", backupPath))
+		} else {
+			b.WriteString("No backup was written: the purge was refused before any change.\n")
+		}
+	}
+	return b.String()
+}
+
+// renderWorkPurgeReport renders the dry-run and forced-purge output
+// through one path, so the two can never drift in what they disclose.
+func renderWorkPurgeReport(report *mpminternal.WorkPurgeReport, backupPath string) int {
+	var b strings.Builder
+	if report.DryRun {
+		render.Heading(&b, "Work item purge (dry run — nothing was written)")
+	} else {
+		render.Heading(&b, "Work item purged")
+	}
+	render.BlankLine(&b)
+	render.Label(&b, "  "+report.WorkID, report.Title)
+	render.Hint(&b, fmt.Sprintf("status: %s · reason: %s", report.Status, report.ReasonCode))
+	render.BlankLine(&b)
+
+	if report.DryRun {
+		render.Section(&b, "Would remove")
+	} else {
+		render.Section(&b, "Removed")
+	}
+	render.Label(&b, "  work_events", fmt.Sprintf("%d", report.Counts.WorkEvents))
+	render.Label(&b, "  evidence", fmt.Sprintf("%d", report.Counts.Evidence))
+	render.Label(&b, "  artifact_provenance", fmt.Sprintf("%d", report.Counts.ArtifactProvenance))
+	render.Label(&b, "  epistemic_provenance", fmt.Sprintf("%d", report.Counts.EpistemicProvenance))
+	render.BlankLine(&b)
+
+	if report.DryRun {
+		render.Section(&b, "To actually purge, re-run with --force")
+		render.BlankLine(&b)
+	} else {
+		render.Section(&b, "Audit")
+		render.Label(&b, "  work_purge_audit", report.AuditID)
+		render.BlankLine(&b)
+	}
+
+	// Mandatory disclosure on both paths. Purge's guarantee stops at
+	// the SQLite logical layer, and an operator who believes otherwise
+	// is worse off than one who was never offered the command.
+	render.Section(&b, "Residual exposure — purge is NOT erasure")
+	render.Plain(&b, "  MPM has no secure-erasure capability in v1. After this purge the content may still exist in:")
+	for _, exposure := range report.ResidualExposure {
+		render.Plain(&b, "    - "+exposure)
+	}
+	if backupPath != "" {
+		render.BlankLine(&b)
+		render.Section(&b, "Backup")
+		render.Plain(&b, "  Wrote "+backupPath)
+		render.Plain(&b, "  NOTE: that dump contains the purged material. Purge does not delete backups.")
+	}
+	return respond(b.String(), "", 0)
+}
+
+// writePurgeBackup dumps the database to path, before any delete.
+//
+// Refuses rather than silently skipping when the sqlite3 CLI is absent:
+// a requested backup that quietly did not happen would leave the
+// operator believing they have a copy they do not have.
+func writePurgeBackup(dbPath, outPath string) error {
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o700); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+	if err := flushWal(dbPath); err != nil {
+		return fmt.Errorf("wal flush: %w", err)
+	}
+	sqlitePath, err := exec.LookPath("sqlite3")
+	if err != nil {
+		return fmt.Errorf("`sqlite3` CLI not found on PATH (see `mpm doctor`)")
+	}
+	dump, err := exec.Command(sqlitePath, dbPath, ".dump").Output()
+	if err != nil {
+		return fmt.Errorf("sqlite3 .dump: %w", err)
+	}
+	return os.WriteFile(outPath, dump, 0o600)
 }
 
 // handleWorkItemList renders the `mpm work item list` surface.
@@ -742,6 +956,28 @@ func parseWorkItemArgs(rest []string) (map[string]interface{}, []string, error) 
 		case strings.HasPrefix(a, "--visibility="):
 			params["visibility"] = strings.TrimPrefix(a, "--visibility=")
 			i++
+		case a == "--reason-code" && i+1 < len(rest):
+			// Purge justification. An enum, never free text — there is
+			// deliberately no `--reason` on this path, because
+			// resolve_contradiction already owns that name for a
+			// different, non-destructive meaning.
+			params["reason_code"] = rest[i+1]
+			i += 2
+		case strings.HasPrefix(a, "--reason-code="):
+			params["reason_code"] = strings.TrimPrefix(a, "--reason-code=")
+			i++
+		case a == "--backup" && i+1 < len(rest):
+			params["backup"] = rest[i+1]
+			i += 2
+		case strings.HasPrefix(a, "--backup="):
+			params["backup"] = strings.TrimPrefix(a, "--backup=")
+			i++
+		case a == "--force":
+			// Boolean. No value, so it is NOT in valueTakingFlags —
+			// a `--force` at the end of the line has no argument to
+			// swallow, and `--force=false` is not offered.
+			params["force"] = true
+			i++
 		case a == "--json" || a == "-j":
 			// 2026-09-14 release-pass: --json flag is honoured by
 			// handleWorkItemList (list subcommand) for machine-readable
@@ -783,6 +1019,24 @@ func printWorkItemHelp() {
 	render.Label(os.Stdout, "unarchive <work_id> [--note <text>]", "return an archived item to the default views. Never reopens it.")
 	render.Label(os.Stdout, "resolve-contradiction <work_id> --reason <text>", "withdraw unsubstantiated dispute evidence and re-derive verification. Audit-trail reason required.")
 	render.Label(os.Stdout, "update <work_id> [--title <t>] [--content <c>] [--status <s>]", "update a work item's title/content/status")
+	render.Label(os.Stdout, "purge <work_id> --reason-code <enum> [--note <text>] [--backup <path>] [--force]", "LOGICALLY DELETE a work item and its event ledger (dry run without --force). Not erasure — see below.")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "purge is logical deletion, NOT erasure")
+	render.Plain(os.Stdout, "  --reason-code is required and must be one of:")
+	render.Plain(os.Stdout, "    "+strings.Join(mpminternal.ValidWorkPurgeReasonCodes, " | "))
+	render.Plain(os.Stdout, "  There is no 'privacy' code, because v1 purge provides no privacy-grade or")
+	render.Plain(os.Stdout, "  forensic erasure. MPM has NO secure-erasure capability: after a purge the content")
+	render.Plain(os.Stdout, "  can still exist in the WAL and rollback journal, in backups/critic-pre/")
+	render.Plain(os.Stdout, "  (automatic scheduler snapshots, rotating at 7 — any snapshot taken before the")
+	render.Plain(os.Stdout, "  purge keeps the content until it rotates out), in `mpm backup` dumps, and in")
+	render.Plain(os.Stdout, "  filesystem snapshots outside MPM's reach.")
+	render.Plain(os.Stdout, "  A purge refuses if another record structurally references the work item, and it")
+	render.Plain(os.Stdout, "  enumerates the referrers. There is no --cascade: purge never rewrites a")
+	render.Plain(os.Stdout, "  referring record. A prose mention of the id is NOT a reference.")
+	render.Plain(os.Stdout, "  --note is YOUR OWN text, copied into a permanent audit record. It is not")
+	render.Plain(os.Stdout, "  derived from the work item and survives the purge: purge does not remove")
+	render.Plain(os.Stdout, "  information you manually place in it.")
+	render.Plain(os.Stdout, "  --backup <path> writes a dump that CONTAINS the material being purged.")
 	render.BlankLine(os.Stdout)
 	render.Section(os.Stdout, "Status and visibility are separate filters")
 	render.Plain(os.Stdout, "  --status is the lifecycle (open|done|cancelled|all); --visibility is the operational view")
@@ -796,6 +1050,7 @@ func printWorkItemHelp() {
 	render.Plain(os.Stdout, "  mpm work item history work-abc123")
 	render.Plain(os.Stdout, "  mpm work item archive work-abc123 --note \"shipped in alpha-final\"")
 	render.Plain(os.Stdout, "  mpm work item list --status all --visibility archived")
+	render.Plain(os.Stdout, "  mpm work item purge work-abc123 --reason-code test_debris")
 	render.BlankLine(os.Stdout)
 }
 
@@ -818,7 +1073,7 @@ func printWorkHelp() {
 	render.Label(os.Stdout, "show", "show the raw working context, exactly as stored")
 	render.Label(os.Stdout, "clear", "discard the current working context")
 	render.Label(os.Stdout, "promote", "promote the working context to a permanent memory")
-	render.Label(os.Stdout, "item", "durable work-item CRUD (create/list/show/complete/cancel/history/note/reopen/update)")
+	render.Label(os.Stdout, "item", "durable work-item CRUD (create/list/show/complete/cancel/history/note/reopen/archive/unarchive/purge/update)")
 	render.BlankLine(os.Stdout)
 	render.Section(os.Stdout, "Flags")
 	render.Label(os.Stdout, "--session-id <id>", "override the per-process session id (default: a fresh random id per invocation)")

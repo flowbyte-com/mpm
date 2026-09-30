@@ -218,7 +218,10 @@ The same surface over the CLI:
 mpm work item archive   <work_id> [--note <text>]
 mpm work item unarchive <work_id> [--note <text>]
 mpm work item list [--status <s>] [--visibility <v>] [--limit <n>]
+mpm work item purge <work_id> --reason-code <enum> [--note <text>] [--backup <path>] [--force]
 ```
+
+`purge` is **CLI-only**. It is deliberately absent from the `mpm_work` and `mpm_system` MCP surfaces, because both are agent-reachable and an agent-reachable irreversible delete is a different tool with a different risk profile — the same reasoning that keeps destructive modes on `mpm gc` rather than in an MCP handler.
 
 New agents should use `complete`, `cancel`, and `reopen` directly. The v1 `update` action with `status` param is preserved for backward compatibility but maps to the appropriate event type internally.
 
@@ -238,6 +241,20 @@ New agents should use `complete`, `cancel`, and `reopen` directly. The v1 `updat
 **Status and visibility are separate filters.** `status` is the lifecycle axis (`open` / `done` / `cancelled` / `all`); `visibility` is the operational axis (`active` / `archived` / `all`, default `active`). Neither is derived from the other: an archived item still has whatever `status` it had, and a `done` item can be active or archived. Both compose on every listing, so the four meaningful combinations are all reachable — `status=done, visibility=archived` is "finished and filed away", and `--status all --visibility all` is the complete set.
 
 All seven default operational surfaces exclude archived work: `mpm wake` open works, `mpm wake` completed refs, `mpm work` list, `mpm context` focus, contextual candidates, session work references, and the `ListWorks` / `ListAllWorks` core queries. Explicit by-id access is unchanged and deliberately *not* visibility-filtered — `show`, `history`, and `get` still resolve an archived item, because archive hides an item from the operational view, it does not make it unretrievable. The `mpm_work` list envelope echoes both filters it applied, so an empty result is distinguishable from a filtered one.
+
+**Purge is logical deletion, not erasure.** `mpm work item purge` removes a work item from the active substrate. It is the administrative counterpart to `archive`: archive hides a live record, purge removes the record and its ledger. It is *not* a secure-deletion facility, and **MPM has no secure-erasure capability in v1.** Purge is logical removal at the SQLite layer, and it makes no guarantee about the bytes that may remain in `mpm.db` pages, the WAL, a rollback journal, pre-existing backups (`backups/critic-pre/` rotates at 7, so a snapshot taken before the purge retains the content until it rotates out), `mpm backup` dumps, filesystem snapshots, or content already transcribed into a handoff summary, a memory body, or the operator's own note. Every purge report — dry run and forced alike — prints that residual-exposure list rather than leaving it to the help text. There is deliberately no `privacy` reason code: v1 has no privacy-grade or forensic use case, and advertising one would promise a guarantee MPM cannot keep.
+
+| Aspect | Behaviour |
+|--------|-----------|
+| Default | Dry run. Without `--force` nothing is written; the report states what a forced run would remove. |
+| `--reason-code` | Required, on dry runs and forced runs alike, and constrained by a CHECK to `test_debris` \| `accidental` \| `corrupted` \| `migration_cleanup` \| `administrative` \| `other`. There is no free-text `--reason` — that name belongs to `resolve-contradiction` and carries a different meaning. |
+| Preflight | Structural references only: a memory's `dependencies` array, `epistemic_provenance` rows citing the item, foreign `evidence` rows, and pending `epistemic_cascade_outbox` entries. Prose mentions of the id are not references. Any referrer refuses the purge and is enumerated by kind and id. |
+| Cascade | None. There is no `--cascade` flag and no code path rewrites a referring record. A refused purge changes nothing. |
+| Transaction | One. Referrers are re-checked inside the transaction, `works` deletion is asserted to affect exactly one row, and success is confirmed by post-write read-back. |
+| Audit | `work_purge_audit` records the work id, timestamp, reason code, operator, delete counts, and the operator's `--note`. No field is populated from the work artifact; the note is independent input and survives the purge. |
+| `--backup <path>` | Explicit and opt-in; purge creates no backup of its own. The dump is written *before* the delete and only for a purge that will actually run, so a refused purge does not leave a copy of the content behind. It contains the material being purged, and the output says so. |
+
+`tool_invocations` and the system audit history are left intact: the record of the purge is not part of what the purge removes.
 
 #### Reference
 

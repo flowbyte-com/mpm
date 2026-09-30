@@ -162,6 +162,7 @@ var CanonicalMPMSchema = []string{
 	"vector_assignments",
 	"vector_clusters",
 	"work_events",
+	"work_purge_audit",
 	"works",
 }
 
