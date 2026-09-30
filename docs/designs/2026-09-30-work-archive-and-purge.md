@@ -363,13 +363,54 @@ found, and the residual-exposure locations named in §5.7.
 | `works WHERE id = ?` | DELETE | holds `title`/`content` |
 | `evidence WHERE artifact_id = ? AND artifact_type='work'` | DELETE | work-owned |
 | `artifact_provenance WHERE artifact_id = ? AND artifact_type='work'` | DELETE | work-owned |
-| `epistemic_provenance WHERE source_id = ?` | DELETE | work-owned citation edges |
+| `epistemic_provenance WHERE downstream_id = ?` | DELETE | work-owned citation edges — see §5.5.1 |
 | `tool_invocations` | KEEP | substrate execution ledger, not work-owned; stores `payload_hash`, not payload |
 | `system_audit_log` | KEEP | operator justification |
 
 Deleting `work_events` is **mandatory, not optional**: the event rows
 carry the same free text as the `works` row, so a purge that left them
 would defeat its own purpose.
+
+#### 5.5.1 `epistemic_provenance` direction — corrected
+
+An earlier draft of this design specified
+`DELETE FROM epistemic_provenance WHERE source_id = ?` and a preflight
+that matched `source_id = ? OR downstream_id = ?`. **Both were wrong**,
+and in a way that would have left the delete unreachable. The column
+names are the opposite of what they look like.
+
+Verified from the repository, not inferred:
+
+- **Writer** — `recordSourceCitationsNode`
+  (`epistemology_tools.go:677`) takes the ids a caller is *citing* as
+  `sourceIDs` and the id it just *minted* as `downstreamID`, then
+  writes the former into `source_id` and the latter into `downstream_id`
+  via `recordProvenanceNode`. The comment at
+  `cascade_provenance.go:159` corroborates it: *"The downstream side is
+  NOT resolved because callers know what they just minted."*
+- **Consumer** — `discoverPositiveCascadeTargets`
+  (`cascade_outbox.go:857`) resolves a foundation event with
+  `WHERE ep.source_id = ?` and reads back `ep.downstream_id`, i.e. the
+  artifacts affected when a foundation changes are the **downstream**
+  ones. `ListDownstreamCitations` (`cascade_provenance.go:286`) filters
+  on `source_id` for the same reason.
+
+So: **`source_id` is the artifact being relied upon;
+`downstream_id` is the artifact doing the relying.**
+
+| Edge | Meaning | Purge behaviour |
+|---|---|---|
+| `downstream_id = work` | the work *cites* something — a citation the work made, owned by the work | **DELETE** with the work |
+| `source_id = work` | another artifact *cites* the work — an inbound reference the operator must resolve | **REFUSE**, enumerate, mutate nothing |
+
+The symmetric preflight was the worse of the two errors: because it
+matched both columns, a work item's *own* outbound citation tripped the
+referrer check, so every work that had ever cited anything became
+un-purgeable and the `downstream_id` delete could never execute. Each
+single-direction test still passed, which is why the mistake survived
+review; only a fixture holding **both** edges on one work item at once
+distinguishes them. `TestPurge_ProvenanceDirectionsAreAsymmetric` is
+that fixture.
 
 **No tombstone row.** A scrubbed `works` row would be the only row in
 the table that `RecomputeWorkProjection` actively corrupts — a
@@ -489,7 +530,7 @@ references independently and retries.
 | Source | Detection |
 |---|---|
 | `memories.dependencies` | `EXISTS (SELECT 1 FROM json_each(dependencies) WHERE value = ?)` — JSON membership |
-| `epistemic_provenance` | `source_id = ?` OR `downstream_id = ?` — exact column match |
+| `epistemic_provenance` | `source_id = ?` **only** — an exact column match on the *cited* side, i.e. another artifact citing this work. See §5.5.1; matching `downstream_id` too would make a work item's own citation veto its own deletion |
 | `evidence` citing this work from another artifact | `artifact_id = ? AND artifact_type != 'work'` |
 | `cascade_outbox` already enqueued for this id | exact column match |
 
@@ -664,7 +705,12 @@ purge provides erasure. See §8.7.
 - a memory whose `dependencies` JSON contains the id (via `json_each`)
   → refuse, name the memory, and assert the memory's `dependencies` is
   **byte-identical** afterward
-- an `epistemic_provenance` citation → refuse
+- an `epistemic_provenance` citation **into** the work
+  (`source_id = work`) → refuse
+- a citation the work made itself (`downstream_id = work`) →
+  **must not** refuse; it is work-owned and is deleted with the work
+- both edges present on one work item simultaneously → refuse on the
+  inbound edge alone, and leave the outbound edge untouched
 - a foreign `evidence` row citing the work → refuse
 - **a prose mention in a handoff summary must NOT refuse**
 - refusal writes nothing and leaves every referrer unchanged

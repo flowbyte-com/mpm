@@ -171,11 +171,17 @@ func TestPurge_ForcedDeletesTheFullSet(t *testing.T) {
 		GenerateID(), id, GenerateID()); err != nil {
 		t.Fatalf("insert epistemic_provenance: %v", err)
 	}
-	// A tool_invocation and an audit-log row that MUST survive.
+	// A tool_invocation that MUST survive. Every NOT NULL column is
+	// supplied deliberately: this insert used to Skipf on any error,
+	// which silently retired every assertion below it in builds whose
+	// tool_invocations shape had drifted.
 	if _, err := dm.SQLDB().Exec(`
-		INSERT INTO tool_invocations (id, tool_name, created_at) VALUES (?, 'mpm_work', 0)`,
-		GenerateID()); err != nil {
-		t.Skipf("tool_invocations shape differs in this build: %v", err)
+		INSERT INTO tool_invocations
+			(id, session_id, tool_name, action, invocation_id, actor_kind,
+			 payload_hash, result_status, started_at)
+		VALUES (?, 's1', 'mpm_work', 'list', ?, 'agent', 'h', 'success', 0)`,
+		GenerateID(), GenerateID()); err != nil {
+		t.Fatalf("insert tool_invocations: %v", err)
 	}
 
 	report, err := dm.PurgeWork(WorkPurgeRequest{
@@ -547,31 +553,165 @@ func TestPurge_ProseMentionWithSubstringID(t *testing.T) {
 	}
 }
 
-// TestPurge_RefusesOnProvenanceCitation pins path 2.
+// TestPurge_RefusesOnProvenanceCitation pins path 2 in the inbound
+// direction only: a row where another artifact CITES this work
+// (source_id = work) is a structural reference and refuses.
+//
+// The two subtests used to be indistinguishable — both built the same
+// args, so "cited as downstream" and "citing as source" inserted the
+// same row. The naming was the only difference, and it was the
+// difference that decides whether purge refuses.
 func TestPurge_RefusesOnProvenanceCitation(t *testing.T) {
-	for _, tc := range []struct{ name, sourceSQL string }{
-		{"cited_as_downstream", `VALUES (?, 'other-thing', 'memory', ?, 'work', ?, 0)`},
-		{"citing_as_source", `VALUES (?, ?, 'work', 'other-thing', 'memory', ?, 0)`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dm := NewTestDM(t)
-			w := purgeFixture(t, dm, "citation target")
-			id := w.ID
-			args := []interface{}{GenerateID(), GenerateID()}
-			if tc.name == "cited_as_downstream" {
-				args = []interface{}{GenerateID(), id, GenerateID()}
-			} else {
-				args = []interface{}{GenerateID(), id, GenerateID()}
-			}
-			if _, err := dm.SQLDB().Exec(`
-				INSERT INTO epistemic_provenance (id, source_id, source_type, downstream_id, downstream_type, event_id, created_at)
-				`+tc.sourceSQL, args...); err != nil {
-				t.Fatalf("insert provenance: %v", err)
-			}
-			if _, err := dm.PurgeWork(WorkPurgeRequest{WorkID: id, ReasonCode: "other", Force: true}); !errors.Is(err, ErrWorkPurgeReferenced) {
-				t.Errorf("err = %v, want ErrWorkPurgeReferenced", err)
-			}
-		})
+	dm := NewTestDM(t)
+	w := purgeFixture(t, dm, "citation target")
+	id := w.ID
+
+	// source_id = this work, downstream_id = another artifact. The
+	// decision cites the work as a foundation.
+	if _, err := dm.SQLDB().Exec(`
+		INSERT INTO epistemic_provenance
+			(id, source_id, source_type, downstream_id, downstream_type, event_id, created_at)
+		VALUES (?, ?, 'work', ?, 'decision', ?, 0)`,
+		GenerateID(), id, GenerateID(), GenerateID()); err != nil {
+		t.Fatalf("insert inbound provenance: %v", err)
+	}
+
+	report, err := dm.PurgeWork(WorkPurgeRequest{WorkID: id, ReasonCode: "other", Force: true})
+	if !errors.Is(err, ErrWorkPurgeReferenced) {
+		t.Fatalf("err = %v, want ErrWorkPurgeReferenced", err)
+	}
+	if len(report.Referrers) != 1 {
+		t.Fatalf("refusal named %d referrers, want 1: %+v", len(report.Referrers), report.Referrers)
+	}
+	if report.Referrers[0].Kind != "epistemic_provenance" {
+		t.Errorf("Kind = %q, want epistemic_provenance", report.Referrers[0].Kind)
+	}
+	if report.Referrers[0].Detail == "" {
+		t.Error("refusal does not explain that the referrer cites the work")
+	}
+}
+
+// TestPurge_OwnCitationIsNotAReferrer pins the other half of the same
+// rule: a citation the work made ITSELF (downstream_id = work,
+// source_id = something else) is work-owned, belongs in the delete
+// set, and must not veto the work's own deletion.
+func TestPurge_OwnCitationIsNotAReferrer(t *testing.T) {
+	dm := NewTestDM(t)
+	w := purgeFixture(t, dm, "citing work")
+	id := w.ID
+
+	// The work cites a memory as a foundation.
+	cited := GenerateID()
+	if _, err := dm.SQLDB().Exec(`
+		INSERT INTO epistemic_provenance
+			(id, source_id, source_type, downstream_id, downstream_type, event_id, created_at)
+		VALUES (?, ?, 'memory', ?, 'work', ?, 0)`,
+		GenerateID(), cited, id, GenerateID()); err != nil {
+		t.Fatalf("insert outbound provenance: %v", err)
+	}
+
+	report, err := dm.PurgeWork(WorkPurgeRequest{WorkID: id, ReasonCode: "other", Force: true})
+	if err != nil {
+		t.Fatalf("the work's own outbound citation blocked its own purge: %v", err)
+	}
+	if report.Counts.EpistemicProvenance != 1 {
+		t.Errorf("counted %d work-owned citations, want 1", report.Counts.EpistemicProvenance)
+	}
+	// The edge is gone with the work; the cited memory is untouched.
+	if n := purgeCount(t, dm, `SELECT COUNT(*) FROM epistemic_provenance WHERE downstream_id = ?`, id); n != 0 {
+		t.Errorf("the work's own citation survived the purge: %d rows", n)
+	}
+	// The cited memory is not this work's to delete, and no dangling
+	// edge is left pointing at the purged id from either column.
+	if n := purgeCount(t, dm, `SELECT COUNT(*) FROM memories WHERE id = ?`, cited); n != 0 {
+		t.Errorf("the purge created a memory row it should not have: %d", n)
+	}
+	if n := purgeCount(t, dm,
+		`SELECT COUNT(*) FROM epistemic_provenance WHERE source_id = ? OR downstream_id = ?`,
+		id, id); n != 0 {
+		t.Errorf("a dangling provenance edge still mentions the purged work: %d rows", n)
+	}
+}
+
+// TestPurge_ProvenanceDirectionsAreAsymmetric is the regression that
+// the two directions are genuinely independent, with BOTH edges present
+// on ONE work item at the same time.
+//
+// It exists because a symmetric preflight (source_id = ? OR
+// downstream_id = ?) passes every single-direction test while making
+// the work-owned delete unreachable: the work's own citation trips the
+// referrer check, so the DELETE never runs. Only a fixture holding
+// both edges at once can tell the two apart.
+func TestPurge_ProvenanceDirectionsAreAsymmetric(t *testing.T) {
+	dm := NewTestDM(t)
+	w := purgeFixture(t, dm, "asymmetric")
+	id := w.ID
+
+	citedMemory := GenerateID()
+	citingDecision := GenerateID()
+	insertCitation := func(sourceID, sourceType, downstreamID, downstreamType string) {
+		t.Helper()
+		if _, err := dm.SQLDB().Exec(`
+			INSERT INTO epistemic_provenance
+				(id, source_id, source_type, downstream_id, downstream_type, event_id, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, 0)`,
+			GenerateID(), sourceID, sourceType, downstreamID, downstreamType, GenerateID()); err != nil {
+			t.Fatalf("insert citation %s->%s: %v", sourceID, downstreamID, err)
+		}
+	}
+	// Edge A — the work CITES a memory. Work-owned; must disappear.
+	insertCitation(citedMemory, "memory", id, "work")
+	// Edge B — a decision CITES the work. Inbound; must block the purge.
+	insertCitation(id, "work", citingDecision, "decision")
+
+	// ── Both edges present: the purge must refuse on B alone ──────
+	report, err := dm.PurgeWork(WorkPurgeRequest{WorkID: id, ReasonCode: "other", Force: true})
+	if !errors.Is(err, ErrWorkPurgeReferenced) {
+		t.Fatalf("err = %v, want ErrWorkPurgeReferenced", err)
+	}
+	if len(report.Referrers) != 1 {
+		t.Fatalf("refusal named %d referrers, want exactly 1 (edge B only): %+v",
+			len(report.Referrers), report.Referrers)
+	}
+	if report.Referrers[0].ID != citingDecision {
+		t.Errorf("refusal named %q, want the citing decision %q",
+			report.Referrers[0].ID, citingDecision)
+	}
+
+	// The refusal changed nothing: BOTH edges and the work survive. A
+	// refusal that silently dropped edge A would be worse than one
+	// that refused.
+	if n := purgeCount(t, dm, `SELECT COUNT(*) FROM epistemic_provenance WHERE source_id = ?`, id); n != 1 {
+		t.Errorf("edge B has %d rows after a refusal, want 1", n)
+	}
+	if n := purgeCount(t, dm, `SELECT COUNT(*) FROM epistemic_provenance WHERE downstream_id = ?`, id); n != 1 {
+		t.Errorf("edge A has %d rows after a refusal, want 1 — the refusal mutated it", n)
+	}
+	if n := purgeCount(t, dm, `SELECT COUNT(*) FROM works WHERE id = ?`, id); n != 1 {
+		t.Errorf("the work has %d rows after a refusal, want 1", n)
+	}
+	if _, err := dm.GetWork(id); err != nil {
+		t.Errorf("the work is no longer retrievable after a refusal: %v", err)
+	}
+
+	// ── Remove B: A must now be deleted with the work ─────────────
+	if _, err := dm.SQLDB().Exec(
+		`DELETE FROM epistemic_provenance WHERE source_id = ?`, id); err != nil {
+		t.Fatalf("resolve edge B: %v", err)
+	}
+	report, err = dm.PurgeWork(WorkPurgeRequest{WorkID: id, ReasonCode: "other", Force: true})
+	if err != nil {
+		t.Fatalf("purge refused after edge B was resolved: %v", err)
+	}
+	if report.Counts.EpistemicProvenance != 1 {
+		t.Errorf("counted %d work-owned citations to delete, want 1", report.Counts.EpistemicProvenance)
+	}
+	if n := purgeCount(t, dm, `SELECT COUNT(*) FROM epistemic_provenance WHERE downstream_id = ?`, id); n != 0 {
+		t.Errorf("edge A survived the purge: %d rows remain", n)
+	}
+	// Edge A's counterparty was never this work's to delete.
+	if n := purgeCount(t, dm, `SELECT COUNT(*) FROM epistemic_provenance WHERE source_id = ?`, citedMemory); n != 0 {
+		t.Errorf("the purge deleted a citation belonging to another artifact: %d rows", n)
 	}
 }
 

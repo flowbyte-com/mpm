@@ -288,28 +288,46 @@ func (dm *DatabaseManager) discoverWorkPurgeReferrers(node DBNode, workID string
 		return nil, fmt.Errorf("purge: discover memory dependencies rows: %w", err)
 	}
 
-	// Path 2: epistemic_provenance citation edges. Either side counts:
-	// the work being cited (downstream_id) is an inbound reference, and
-	// the work citing something (source_id) is an outbound edge the
-	// operator must also resolve before the citation can be removed
-	// honestly. Both are exact column matches.
+	// Path 2: epistemic_provenance INBOUND citations only — rows where
+	// this work is the cited foundation (source_id) and some other
+	// artifact is the citer (downstream_id).
+	//
+	// Direction matters, and the column names are the opposite of what
+	// they look like. Verified against the only production writer,
+	// recordSourceCitationsNode (epistemology_tools.go:677): it takes
+	// the ids a caller is CITING as `sourceIDs` and the id it just
+	// minted as `downstreamID`, writing the former into source_id and
+	// the latter into downstream_id. The consumer agrees —
+	// discoverPositiveCascadeTargets (cascade_outbox.go:857) resolves a
+	// foundation by `WHERE ep.source_id = ?` and reads back
+	// ep.downstream_id, so the affected artifacts are the downstream
+	// ones. source_id is the thing being relied upon; downstream_id is
+	// the thing doing the relying.
+	//
+	// Therefore: a row with source_id = this work is another artifact
+	// relying on the work, and is an inbound referrer. A row with
+	// downstream_id = this work is a citation the work itself made, and
+	// belongs in the delete set — treating it as a referrer would let a
+	// work item's own outbound citation veto its own deletion, leaving
+	// the delete in PurgeWork unreachable in practice.
 	rows, err = node.QueryTracked(`
-		SELECT source_id, downstream_id
+		SELECT downstream_id, source_type
 		FROM epistemic_provenance
-		WHERE source_id = ? OR downstream_id = ?
-	`, workID, workID)
+		WHERE source_id = ?
+	`, workID)
 	if err != nil {
 		return nil, fmt.Errorf("purge: discover epistemic provenance: %w", err)
 	}
 	for rows.Next() {
-		var sourceID, downstreamID string
-		if err := rows.Scan(&sourceID, &downstreamID); err != nil {
+		var downstreamID, sourceType string
+		if err := rows.Scan(&downstreamID, &sourceType); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("purge: discover epistemic provenance scan: %w", err)
 		}
 		out = append(out, WorkPurgeReferrer{
-			Kind: "epistemic_provenance",
-			ID:   sourceID + "->" + downstreamID,
+			Kind:   "epistemic_provenance",
+			ID:     downstreamID,
+			Detail: "cites this work (source_type=" + sourceType + ")",
 		})
 	}
 	rows.Close()
@@ -387,10 +405,11 @@ func (dm *DatabaseManager) countWorkPurgeDeleteSet(node DBNode, workID string) (
 		{&c.WorkEvents, `SELECT COUNT(*) FROM work_events WHERE work_id = ?`},
 		{&c.Evidence, `SELECT COUNT(*) FROM evidence WHERE artifact_id = ? AND artifact_type = 'work'`},
 		{&c.ArtifactProvenance, `SELECT COUNT(*) FROM artifact_provenance WHERE artifact_id = ? AND artifact_type = 'work'`},
-		// Downstream_id is deleted, not source_id: a row where this
-		// work is the source is an inbound reference and preflight has
-		// already refused. By the time a delete runs, every remaining
-		// edge has this work as the cited artifact.
+		// downstream_id is deleted, not source_id. downstream_id is the
+		// CITING artifact, so these are the citations this work made
+		// itself and they belong to it. A row with source_id = this work
+		// is an inbound citation another artifact made, and preflight
+		// has already refused on it, so none can exist here.
 		{&c.EpistemicProvenance, `SELECT COUNT(*) FROM epistemic_provenance WHERE downstream_id = ?`},
 	}
 	for _, cc := range counts {
