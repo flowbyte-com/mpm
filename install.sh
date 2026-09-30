@@ -691,10 +691,12 @@ EOF
 #
 # This phase delegates to the host-agnostic generic entry point at
 # agent_installation/scripts/reconcile_managed_blocks.py. That script
-# discovers every adapter with a `reconcile.json` manifest, invokes
-# each adapter's installer, and skips opt-in adapters (e.g. OpenClaw
-# on this machine, which is intentionally absent). The root installer
-# stays host-agnostic: it never names a specific adapter or host.
+# discovers every adapter with a `reconcile.json` manifest and invokes
+# each adapter's installer. Adapters that declare a `reconcile_if` gate
+# are reconciled only when that host's integration is already installed
+# on this machine, so MPM never opts a machine into a host it does not
+# use. The root installer stays host-agnostic: it never names a
+# specific adapter or host.
 #
 # Failure mode: each adapter is invoked independently. A failure in one
 # adapter is logged as WARN; the install continues for the remaining
@@ -841,7 +843,7 @@ mode_dry_run() {
     log "  reconcile installed host managed blocks via the host-agnostic"
     log "    agent_installation/scripts/reconcile_managed_blocks.py entry"
     log "    point (idempotent; preserves user content outside managed block;"
-    log "    skips opt-in adapters such as OpenClaw)"
+    log "    reconciles a host only when its integration is already installed)"
     log ""
     log "dry run complete (no changes made)"
 }

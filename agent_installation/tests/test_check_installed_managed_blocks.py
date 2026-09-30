@@ -7,11 +7,17 @@ ABSENT / ERROR per host:
 
   PASS    installed file present; managed-section block present; block
           byte-matches the current canonical render.
-  WARN    installed file present; managed-section block present; block
+  WARN    installed and the managed block is missing, OR the block
           does NOT byte-match the canonical render.
-  ABSENT  installed file absent OR managed-section markers absent.
+  ABSENT  the host's integration is not installed on this machine.
   ERROR   install target present, markers present, but file
           structurally malformed (BEGIN without END or vice versa).
+
+ABSENT is reserved for "this host is not part of this machine's MPM
+setup". It is deliberately NOT reachable by having the install target
+file present without a managed block: the managed behavioural block is
+a required part of a functional host integration, so a host that
+exposes MPM tools without the block is drifting, not healthy.
 """
 
 from __future__ import annotations
@@ -200,30 +206,46 @@ class Verdicts(unittest.TestCase):
         # Re-run with only some hosts present to confirm exit code.
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
-    # ---- ABSENT (markers missing in an existing file) ---------------
+    # ---- WARN (markers missing in an existing install target) -------
 
-    def test_absent_when_markers_missing_in_existing_file(self):
-        # File exists but contains no managed-section markers.
+    def test_warn_when_markers_missing_in_existing_file(self):
+        # The install target exists but contains no managed-section
+        # markers. For the always-on persistent-instruction hosts
+        # (claude_code, opencode, pi) this file IS MPM's managed
+        # instruction surface, so a missing block is drift to repair,
+        # not an informational absence. This was previously ABSENT,
+        # which let a host expose MPM tools with no behavioural
+        # contract and no operator signal.
         results = self._run_and_get({
             "claude_code": "# user content, no MPM block here\n",
         })
-        self.assertEqual(results["claude_code"]["verdict"], "ABSENT")
-        self.assertEqual(results["claude_code"]["presence"], "present")
-        self.assertIn("markers absent", results["claude_code"]["detail"])
+        row = results["claude_code"]
+        self.assertEqual(row["verdict"], "WARN", row["detail"])
+        self.assertEqual(row["file"], "present")
+        self.assertEqual(row["block"], "absent")
+        self.assertIn("markers absent", row["detail"])
+        self.assertTrue(row["repair"], "WARN must carry a repair path")
 
-    def test_absent_when_only_end_marker_in_user_content(self):
-        # User content has a stray END comment, no BEGIN. Installer
-        # would treat this as "no managed block present, append
-        # later" — for the diagnostic, the verdict is ABSENT (no
-        # well-formed pair).
+    def test_warn_when_only_end_marker_in_user_content(self):
+        # User content has a stray END comment, no BEGIN. There is no
+        # well-formed pair, so the block is absent — which for an
+        # existing install target is repairable drift.
         results = self._run_and_get({
             "opencode": (
                 "# user notes\n"
                 "<!-- a comment about <!-- END MPM-MANAGED SECTION:opencode-instructions --> markers -->\n"
             ),
         })
-        self.assertEqual(results["opencode"]["verdict"], "ABSENT")
-        self.assertEqual(results["opencode"]["presence"], "present")
+        self.assertEqual(results["opencode"]["verdict"], "WARN")
+        self.assertEqual(results["opencode"]["file"], "present")
+        self.assertEqual(results["opencode"]["block"], "absent")
+
+    def test_absent_when_install_target_does_not_exist(self):
+        # The genuinely absent case: the host's install target is not
+        # on disk at all, so there is nothing to be current or stale.
+        results = self._run_and_get({"claude_code": None})
+        self.assertEqual(results["claude_code"]["verdict"], "ABSENT")
+        self.assertEqual(results["claude_code"]["repair"], "")
 
     # ---- ERROR -------------------------------------------------------
 

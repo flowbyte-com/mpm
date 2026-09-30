@@ -15,19 +15,18 @@ Behaviour:
     content). This is the documented fresh-install behaviour for
     SOUL.md — the user/persona file is created only when no persona
     material exists yet (a fresh OpenClaw install).
-  * If target exists WITHOUT the managed section: insert the managed
-    section at the end (preserves all existing user/persona content
-    above).
-  * If target exists WITH the managed section already: refresh only
-    the managed section (between the BEGIN and END markers). All
-    other content (persona, user notes, etc.) is preserved verbatim.
-  * If target has only LEGACY markers from a prior version: replace
-    the legacy block with the current managed block. Persona/user
-    content outside the markers is preserved.
+  * Otherwise the file is CONVERGED to exactly one effective MPM
+    behavioural contract by the shared engine in
+    scripts/managed_block_convergence.py, which recognizes every MPM
+    marker form MPM has ever written (this host's section, another
+    host's section, legacy unsuffixed and Hermes-spaced anchors, and a
+    deterministically repairable unterminated section). After
+    convergence the file contains exactly ONE behavioural contract.
+  * All user/persona content outside MPM-owned regions is preserved
+    byte-for-byte.
   * Always backs up the existing target before any modification.
-
-The script fails closed if anything unexpected is in the target —
-partial markers, mismatched BEGIN/END counts, etc.
+  * Refuses (exit 3, no write) when the file's markers are genuinely
+    ambiguous, rather than risk deleting user content.
 
 Discovery:
   When --target is not provided, the script resolves the active
@@ -51,6 +50,16 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# The shared convergence engine. It lives in agent_installation/scripts/
+# alongside the reconciler and the renderer, and is imported by path
+# rather than by package name because every adapter's installer is
+# executed as a standalone script with no package context.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+import managed_block_convergence as convergence  # noqa: E402
+
 
 # Marker conventions follow the per-host pattern used by the other
 # persistent-file installers (claude-code, opencode, pi, hermes).
@@ -59,18 +68,25 @@ from pathlib import Path
 # canonical managed block. We do NOT match random `<!-- BEGIN mpm-* -->`
 # markers from unrelated plugins because that would conflate their
 # blocks with ours in a shared file.
+#
+# The outer/inner SPLIT and the recognition of every historical MPM
+# marker form are owned by the shared convergence engine, not by this
+# installer. This installer used to match only its own marker pair,
+# which meant a file carrying another host's MPM section matched
+# nothing and fell through to the append path — leaving two behavioural
+# contracts in one SOUL.md. Delegating the whole decision keeps the
+# "at most one effective MPM behavioural contract per file" invariant
+# in exactly one place.
 MANAGED_BEGIN_RE = re.compile(
     r"<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions(?: [^\n]*)?-->"
 )
 MANAGED_END_RE = re.compile(
     r"<!-- END MPM-MANAGED SECTION:openclaw-instructions(?: [^\n]*)?-->"
 )
-LEGACY_BEGIN_RE = re.compile(
-    r"<!-- BEGIN MPM-MANAGED BLOCK(?::[^\n]*| [^\n]*)?-->"
-)
-LEGACY_END_RE = re.compile(
-    r"<!-- END MPM-MANAGED BLOCK(?::[^\n]*| [^\n]*)?-->"
-)
+# The marker id this host owns. The engine compares a found region's
+# id against this set to tell "my own block" from "a foreign host's
+# block that must be migrated", not refreshed in place.
+OWN_HOST_IDS = frozenset({"openclaw-instructions"})
 
 # Default OpenClaw config location. Overridden by resolve_openclaw_target
 # using the --home argument; Path.home() is only used as the absolute
@@ -186,8 +202,32 @@ def extract_generated_ts(managed_section_text: str) -> str | None:
     return m.group(1) if m else None
 
 
+def extract_generated_ts_from_managed_region(text: str) -> str | None:
+    """Recover the install timestamp from whichever MPM-managed region
+    the file already carries.
+
+    Reads this host's section first, then falls back to any other MPM
+    region. The fallback matters when converging a file that currently
+    holds a foreign-host or legacy section: those carry a timestamp
+    too, and dropping it would make the first convergent write
+    indistinguishable from a real content change on the next run.
+    """
+    own = read_managed_section(text)
+    if own:
+        ts = extract_generated_ts(own)
+        if ts:
+            return ts
+    m = re.search(r"<!-- generated: ([^\n]+) -->\n", text)
+    return m.group(1) if m else None
+
+
 def read_managed_section(text: str) -> str | None:
-    """Return the bytes of the currently-managed section, or None."""
+    """Return the bytes of this host's currently-managed section.
+
+    Only recognizes THIS host's markers. Use of the engine's
+    `analyze` is what generalizes; this helper exists for callers that
+    specifically mean "my own section" (notably timestamp recovery).
+    """
     begin = MANAGED_BEGIN_RE.search(text)
     end = MANAGED_END_RE.search(text)
     if begin and end and end.start() > begin.end():
@@ -195,34 +235,10 @@ def read_managed_section(text: str) -> str | None:
     return None
 
 
-def replace_managed_section(text: str, new_section: str) -> str:
-    """Replace the managed section in text with new_section.
-
-    Fails closed if the BEGIN/END markers are missing or mismatched.
-    """
-    begin = MANAGED_BEGIN_RE.search(text)
-    end = MANAGED_END_RE.search(text)
-    if not begin or not end:
-        # Try legacy markers.
-        legacy_begin = LEGACY_BEGIN_RE.search(text)
-        legacy_end = LEGACY_END_RE.search(text)
-        if legacy_begin and legacy_end and legacy_end.start() > legacy_begin.end():
-            return text[:legacy_begin.start()] + new_section + text[legacy_end.end():]
-        # No markers present — append at end.
-        sep = "" if text.endswith("\n") else "\n"
-        return text + sep + "\n" + new_section + "\n"
-    if end.start() <= begin.end():
-        raise ValueError(
-            f"managed section markers are mismatched (BEGIN at {begin.start()}, "
-            f"END at {end.start()})"
-        )
-    return text[:begin.start()] + new_section + text[end.end():]
-
-
 def do_install(target: Path, snippet: Path) -> int:
-    """Install/refresh the managed section in target from snippet.
+    """Converge target onto exactly one MPM behavioural contract.
 
-    Returns 0 on success. Fails closed on any unexpected state.
+    Returns 0 on success or no-op, 3 on an ambiguous refusal.
     """
     snippet_text = snippet.read_text(encoding="utf-8")
 
@@ -243,88 +259,74 @@ def do_install(target: Path, snippet: Path) -> int:
 
     text = target.read_text(encoding="utf-8")
 
-    # Refuse partial state.
-    begin_count = len(MANAGED_BEGIN_RE.findall(text))
-    end_count = len(MANAGED_END_RE.findall(text))
-    if begin_count != end_count:
+    # Preserve the existing `<!-- generated: ... -->` timestamp on
+    # refresh so re-runs in different seconds do not produce different
+    # bytes outside the managed section (idempotency). The timestamp is
+    # read from whichever MPM-managed region is already present — a
+    # foreign-host or repaired section carries one too, and dropping it
+    # would make an otherwise-unchanged file look rewritten.
+    existing_ts = extract_generated_ts_from_managed_region(text)
+
+    new_section = build_managed_section(snippet_text, existing_ts=existing_ts)
+    plan = convergence.plan_convergence(text, new_section, OWN_HOST_IDS)
+
+    if plan.action == convergence.PLAN_REFUSE:
         sys.stderr.write(
-            f"[openclaw install] ERROR: mismatched markers in {target} "
-            f"(begin={begin_count}, end={end_count}); refusing to touch\n"
+            f"[openclaw install] REFUSING to modify {target}: {plan.reason}\n"
+            f"[openclaw install] no backup taken and no bytes written; inspect "
+            f"the file manually and re-run once the markers are resolved.\n"
         )
-        return 2
+        return 3
+
+    if plan.action == convergence.PLAN_NOOP:
+        sys.stderr.write(
+            f"[openclaw install] {target} already has the current managed "
+            f"section; no-op\n"
+        )
+        return 0
 
     backup = backup_target(target)
     if backup is not None:
         sys.stderr.write(
             f"[openclaw install] backed up {target} -> {backup}\n"
         )
-
-    # Identify the snippet's managed section so we can swap it in
-    # without disturbing header/footer positioning relative to user
-    # content. The snippet is the entire target content (header +
-    # managed block + footer); we replace only the bracketed managed
-    # section to preserve surrounding structure.
-    # Preserve the existing `<!-- generated: ... -->` timestamp on
-    # refresh so re-runs in different seconds do not produce different
-    # bytes outside the managed section (idempotency).
-    existing_section = read_managed_section(text)
-    existing_ts = extract_generated_ts(existing_section) if existing_section else None
-
-    new_section = build_managed_section(snippet_text, existing_ts=existing_ts)
-
-    # The new section must replace the existing one with surrounding
-    # whitespace preserved byte-for-byte. We strip all leading
-    # newlines from `after` (the END marker's own terminator plus any
-    # blank-line gap that may have accumulated on a prior install) and
-    # strip the section's own trailing newlines; we then re-add
-    # exactly one `\n` to keep a single boundary newline.
-    begin_m = MANAGED_BEGIN_RE.search(text)
-    end_m = MANAGED_END_RE.search(text)
-    if begin_m and end_m:
-        before = text[:begin_m.start()]
-        after = text[end_m.end():]
-        # Strip ALL leading newlines from `after` so any accumulated
-        # blank-line gap from a previous install does not re-appear.
-        after = after.lstrip("\n")
-        ns = new_section.rstrip("\n")
-        # Re-add exactly one boundary newline.
-        new_text = before + ns + "\n" + after
-    else:
-        new_text = replace_managed_section(text, new_section)
-    target.write_text(new_text, encoding="utf-8")
+    target.write_text(plan.text, encoding="utf-8")
     sys.stderr.write(
-        f"[openclaw install] refreshed managed section in {target} "
+        f"[openclaw install] {plan.action}: {plan.reason} "
         f"({len(new_section)} bytes)\n"
     )
     return 0
 
 
 def do_uninstall(target: Path) -> int:
-    """Remove only the MPM managed section from target."""
+    """Remove the MPM managed section from target.
+
+    Removes every MPM-owned region — this host's, another host's, or a
+    legacy one — because leaving a foreign or legacy contract behind
+    would defeat the point of uninstalling. Refuses on ambiguity.
+    """
     if not target.exists():
         return 0
     text = target.read_text(encoding="utf-8")
-    begin_count = len(MANAGED_BEGIN_RE.findall(text))
-    end_count = len(MANAGED_END_RE.findall(text))
-    if begin_count != end_count:
-        sys.stderr.write(
-            f"[openclaw install] ERROR: mismatched markers in {target}\n"
-        )
-        return 2
-    if begin_count == 0:
+    analysis = convergence.analyze(text)
+    if analysis.problems or not analysis.regions:
+        if analysis.problems:
+            sys.stderr.write(
+                f"[openclaw install] REFUSING to uninstall from {target}: "
+                f"{'; '.join(analysis.problems)}\n"
+            )
+            return 3
         return 0
     backup = backup_target(target)
     if backup is not None:
         sys.stderr.write(
             f"[openclaw install] backed up {target} -> {backup}\n"
         )
-    new_text = replace_managed_section(text, "")
-    # Strip a leading newline we may have left when removing the
-    # section so we don't double-blank the file.
-    new_text = re.sub(r"\n{3,}", "\n\n", new_text)
+    new_text = convergence.remove_regions(text, analysis.regions)
     target.write_text(new_text, encoding="utf-8")
     sys.stderr.write(
-        f"[openclaw install] removed managed section from {target}\n"
+        f"[openclaw install] removed {len(analysis.regions)} managed "
+        f"section(s) from {target}\n"
     )
     return 0
 

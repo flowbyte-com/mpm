@@ -50,6 +50,27 @@ managed section between `<!-- BEGIN MPM-MANAGED SECTION:* -->` and
 `<!-- END MPM-MANAGED SECTION:* -->` must byte-match what the
 canonical render would produce today.
 
+OpenClaw scope
+--------------
+
+OpenClaw's persistent managed block is a REQUIRED part of a functional
+OpenClaw MPM integration, exactly as it is for the other hosts. This
+test therefore includes OpenClaw whenever its integration is installed
+on the machine. A machine with no OpenClaw MPM integration is still
+skipped: presence of a host is a separate concern from currency of the
+block, and MPM never opts a machine into a host it does not use.
+
+Expected-block construction
+---------------------------
+
+Hosts whose installer writes bare outer markers are compared against
+`outer markers + rendered snippet + outer markers`. OpenClaw's
+installer instead wraps the snippet in a section banner carrying a
+`<!-- generated: TS -->` line, so its expected bytes are produced by
+asking that installer to build the section. The preserved timestamp is
+normalized away on both sides before comparison — it is a per-install
+fact, not part of the canonical contract.
+
 Hosts whose install target is absent are *skipped* — this test
 intentionally does not assert presence. The question of whether a
 host is installed at all is a separate concern from the question of
@@ -81,6 +102,7 @@ the managed-section markers.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import sys
@@ -93,7 +115,57 @@ from pathlib import Path
 # alternate mounts without hardcoded paths.
 AGENT_INSTALLATION = Path(__file__).resolve().parent.parent
 RENDER_SCRIPT = AGENT_INSTALLATION / "scripts" / "render_managed_blocks.py"
+RECONCILE_SCRIPT = AGENT_INSTALLATION / "scripts" / "reconcile_managed_blocks.py"
 CANONICAL_SOURCE = AGENT_INSTALLATION / "MPM_AGENT_INTEGRATION_SNIPPETS.md"
+
+if str(AGENT_INSTALLATION / "scripts") not in sys.path:
+    sys.path.insert(0, str(AGENT_INSTALLATION / "scripts"))
+
+import managed_block_convergence as convergence  # noqa: E402
+
+_convergence = convergence
+
+
+# Adapters whose installer wraps the snippet in a section banner
+# rather than emitting bare outer markers. Kept in sync with
+# check_installed_managed_blocks.SECTION_BUILDERS.
+SECTION_BUILDERS: dict[str, str] = {
+    "mpm-memory-openclaw": "install_openclaw_instructions",
+}
+
+TS_SENTINEL = "__MPM_TS__"
+_GENERATED_TS_RE = re.compile(r"<!-- generated: [^\n]* -->")
+
+
+def _normalize_generated_ts(text: str) -> str:
+    return _GENERATED_TS_RE.sub("<!-- generated: <TS> -->", text)
+
+
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader, f"{name} must be importable from {path}"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _integration_installed(adapter_name: str) -> bool:
+    """Ask the reconciler whether this adapter's integration is
+    already installed on the current HOME.
+
+    Delegating to the same gate the reconciler uses keeps the drift
+    detector and the reconciliation pass from disagreeing about
+    whether a host is in scope.
+    """
+    reconcile = _load_module("reconcile_managed_blocks", RECONCILE_SCRIPT)
+    manifest_path = AGENT_INSTALLATION / adapter_name / "reconcile.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    installed, _why = reconcile.integration_installed(manifest, str(Path.home()))
+    return installed
 
 
 # Host-by-host install target map. Each entry pairs the adapter name
@@ -150,32 +222,29 @@ HOST_INSTALL_TARGETS: list[dict] = [
         "relative_to_home": ".openclaw/workspace/SOUL.md",
         "outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->",
         "outer_end": "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->",
+        # OpenClaw's managed block is required once the integration is
+        # installed, so it is in scope exactly when the reconciler
+        # would reconcile it.
+        "integration_probe": "mpm-memory-openclaw",
     },
 ]
 
 
 def _load_render_module():
-    spec = importlib.util.spec_from_file_location(
-        "render_managed_blocks", RENDER_SCRIPT,
-    )
-    assert spec and spec.loader, "render script must be importable"
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_module("render_managed_blocks", RENDER_SCRIPT)
 
 
 _render = _load_render_module()
 
 
 def _canonical_block_for_host(adapter_name: str) -> str:
-    """Render the full per-host snippet using the render script's
-    `compose_snippet` (canonical block + adapter tool-prefix + host
-    header + host footer) and prepend/append the host's outer
-    managed-section markers. This is exactly what the per-host
-    installer would write into the install target today (modulo any
-    user content outside the markers, which the installer
-    preserves).
+    """Return the exact bytes this host's installer writes today.
+
+    Most hosts write bare outer markers around the rendered snippet.
+    OpenClaw's installer wraps the snippet in a section banner
+    carrying a `<!-- generated: TS -->` line, so its expected bytes
+    come from that installer itself; otherwise the comparison would
+    test bytes the installer never produces.
 
     Note: the snippet is the FULL host-specific composition
     (header + rendered block + footer), not just the bare
@@ -191,7 +260,16 @@ def _canonical_block_for_host(adapter_name: str) -> str:
     snippet = _render.compose_snippet(
         rendered, adapter["header"], adapter["footer"],
     )
-    return f'{adapter["copy_paste_outer_begin"]}\n{snippet}{adapter["copy_paste_outer_end"]}\n'
+
+    module_name = SECTION_BUILDERS.get(adapter_name)
+    if module_name is None:
+        return f'{adapter["copy_paste_outer_begin"]}\n{snippet}{adapter["copy_paste_outer_end"]}\n'
+
+    installer = _load_module(
+        module_name,
+        AGENT_INSTALLATION / adapter_name / "scripts" / f"{module_name}.py",
+    )
+    return installer.build_managed_section(snippet, existing_ts=TS_SENTINEL)
 
 
 def _extract_installed_block(text: str, outer_begin: str, outer_end: str) -> str | None:
@@ -230,10 +308,25 @@ class InstalledBlockDrift(unittest.TestCase):
 
         for entry in HOST_INSTALL_TARGETS:
             install_path = Path.home() / entry["relative_to_home"]
+
+            # A host with a declared integration gate is in scope only
+            # when that integration is actually installed here. This
+            # mirrors the reconciler exactly, so the drift detector
+            # never flags a host this machine does not use -- and
+            # never skips one it does.
+            probe = entry.get("integration_probe")
+            if probe and not _integration_installed(probe):
+                skips.append(
+                    f"{entry['host']}: integration not installed on this "
+                    f"machine -- skipping (MPM does not opt a machine into "
+                    f"a host it does not use)"
+                )
+                continue
+
             if not install_path.is_file():
                 skips.append(
-                    f"{entry['host']}: install target absent ({install_path}) — "
-                    "skipping (presence is a separate concern)"
+                    f"{entry['host']}: install target absent ({install_path}) "
+                    f"-- skipping (presence is a separate concern)"
                 )
                 continue
 
@@ -242,8 +335,8 @@ class InstalledBlockDrift(unittest.TestCase):
             except StopIteration:
                 failures.append(
                     f"{entry['host']}: adapter '{entry['adapter']}' not "
-                    "registered in render_managed_blocks.ADAPTERS — "
-                    "HOST_INSTALL_TARGETS is out of sync"
+                    f"registered in render_managed_blocks.ADAPTERS -- "
+                    f"HOST_INSTALL_TARGETS is out of sync"
                 )
                 continue
 
@@ -253,26 +346,54 @@ class InstalledBlockDrift(unittest.TestCase):
             )
             if installed is None:
                 # Block absent (or one-sided) at an existing install
-                # target. This is a *presence* concern, not a
-                # *currency* concern: the operator has not yet
-                # installed the persistent managed block on this
-                # host, or has uninstalled it. `make
-                # refresh-installed` does NOT fix this; the
-                # per-host install.sh does. Skip with a clear note
-                # so the drift detector stays scoped to its named
-                # invariant (byte-parity, when present).
-                skips.append(
-                    f"{entry['host']}: install target exists at "
-                    f"{install_path} but managed-section markers are "
-                    f"absent (BEGIN={entry['outer_begin'] in text}, "
-                    f"END={entry['outer_end'] in text}) — "
-                    "skipping drift check (run per-host install.sh to "
-                    "add the managed block; this test asserts only "
-                    "byte-parity when the block is present)"
+                # target. For a host whose integration is installed,
+                # the missing persistent managed block IS drift: the
+                # per-host installer repairs it, and `make
+                # refresh-installed` now reconciles it too. Fail
+                # rather than skip, because silently skipping is
+                # exactly what let an installed OpenClaw run without
+                # its block.
+                #
+                # Report the file's ACTUAL marker state rather than only
+                # whether THIS host's markers matched. A file carrying
+                # another host's section, two sections, or a truncated
+                # one is a materially different repair from a file with
+                # no MPM content at all, and "markers are absent"
+                # misdescribes all of them.
+                analysis = _convergence.analyze(text)
+                found = (
+                    ", ".join(convergence.describe_markers(text)) or "none"
                 )
+                state = (
+                    f"file carries MPM markers [{found}]"
+                    if found != "none" else
+                    f"no MPM marker of any kind is present"
+                )
+                detail = (
+                    f"{entry['host']}: install target exists at "
+                    f"{install_path} but this host's managed section is "
+                    f"not present (BEGIN={entry['outer_begin'] in text}, "
+                    f"END={entry['outer_end'] in text}); {state} -- the "
+                    f"persistent managed block is required for reliable "
+                    f"MPM use, and the file must end up with exactly one"
+                )
+                if analysis.problems:
+                    detail += (
+                        f"\n  structural problems: "
+                        + "; ".join(analysis.problems)
+                    )
+                if probe:
+                    failures.append(detail + "\n  repair: make refresh-installed")
+                else:
+                    skips.append(
+                        detail
+                        + " -- skipping drift check (run per-host install.sh "
+                          "to add the managed block; this test asserts only "
+                          "byte-parity when the block is present)"
+                    )
                 continue
 
-            if installed != expected:
+            if _normalize_generated_ts(installed) != _normalize_generated_ts(expected):
                 # Show the *first* divergent line plus a byte offset to
                 # help the operator locate the drift. A full unified
                 # diff would be too noisy for a test failure summary.

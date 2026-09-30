@@ -4,14 +4,26 @@ check_installed_managed_blocks.py.
 
 Pins the contract documented in mpm_integration_check.md §24:
 
-  PASS + ABSENT (intentional absence)  -> exit 0
-  PASS only                              -> exit 0
-  any WARN                               -> exit 1
-  any ERROR                              -> exit 1
+  PASS only                                -> exit 0
+  PASS + ABSENT (host not installed)       -> exit 0
+  any WARN                                 -> exit 1
+  any ERROR                                -> exit 1
 
-ABSENT is informational (the operator has not installed a managed
-block on this host); it is NOT a failure of the diagnostic. This
-matches the user's acceptance requirement.
+ABSENT is informational: the host's integration is not installed on
+this machine, so there is no managed block that could be current or
+stale. It is NOT a failure of the diagnostic.
+
+ABSENT is NOT reachable merely by having the install target file
+present without a managed block. The managed behavioural block is a
+required part of a functional host integration, so "integration
+installed + block missing" is WARN (drift to repair), not ABSENT.
+
+Every test runs against a sandboxed HOME. The previous version of
+this file asserted against the real machine's home and pinned
+"openclaw: file=present block=absent verdict=ABSENT" as the
+acceptance state; that encoded the superseded assumption that an
+installed OpenClaw with no managed block was healthy, and it made
+the suite fail on any machine whose real state legitimately changed.
 """
 
 from __future__ import annotations
@@ -53,81 +65,55 @@ class ExitCodeContract(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    # ---------- PASS-only ----------
+    # ---------- ABSENT ----------
 
-    def test_pass_only_returns_zero(self):
-        # Build a fake HOME where all three persistent hosts have a
-        # canonical block. Easiest: build the canonical block in a
-        # scratch path and symlink each host's target at it.
-        spec = importlib.util.spec_from_file_location(
-            "_render", EXPERIMENT_ROOT / "scripts" / "render_managed_blocks.py",
-        )
-        render = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(render)
-
-        # Set up three hosts with the canonical block. We use a
-        # render-only path: write a fake file per host that contains
-        # exactly the canonical block. To produce it, we'd need the
-        # render module's full machinery — instead, write minimal stubs
-        # for each host's outer markers and a body the renderer
-        # accepts as canonical.
-        # Simpler: just create empty targets. The diagnostic will
-        # report ABSENT (no managed block). To get PASS, we need to
-        # actually generate the canonical block. Skip the heavy path
-        # here — covered by other tests. Instead, run the diagnostic
-        # and assert that PASS-class hosts (if any) produce exit 0.
-        # For this assertion we just check the empty-state behavior:
-        # all-ABSENT is also exit 0 per the contract.
+    def test_all_absent_returns_zero(self):
+        """An empty HOME has no installed hosts: every host is ABSENT
+        and the diagnostic is informational (exit 0)."""
         proc = _run_script(self.tmpdir / "home_empty")
-        # Empty home: every host is ABSENT. Exit code should be 0.
         self.assertEqual(
             proc.returncode, 0,
             f"all-ABSENT should be exit 0, got {proc.returncode}; stderr={proc.stderr}",
         )
+        payload = json.loads(proc.stdout)
+        for row in payload:
+            self.assertEqual(row["verdict"], "ABSENT", row)
 
-    # ---------- PASS + ABSENT (intentional absence) ----------
+    def test_absent_when_openclaw_integration_not_installed(self):
+        """OpenClaw present as a host but its MPM integration absent
+        is ABSENT, and remains informational.
 
-    def test_pass_plus_absent_intentional_returns_zero(self):
-        """PASS for the installed hosts + ABSENT for openclaw is the
-        intended acceptance state on this machine. It MUST return
-        exit 0 (informational, not a failure).
+        This is the machine state in which MPM must not opt the
+        machine into OpenClaw.
         """
-        # Real home is /home/v; the diagnostic against the real home
-        # has 3 PASS + 1 ABSENT (openclaw), per the operator's prior
-        # configuration. We can't easily fake the real-home state
-        # without three canonical blocks; instead, assert the contract
-        # on the diagnostic's own verdict-evaluation logic directly.
-        # The diagnostic script's verdict vocabulary guarantees that
-        # PASS + ABSENT is the intended acceptance shape. Run against
-        # the real home to confirm the exit code is 0 in that shape.
-        proc = subprocess.run(
-            [sys.executable, str(SCRIPT)],
-            capture_output=True, text=True, timeout=30,
+        home = self.tmpdir / "home_openclaw_no_integration"
+        # A bare OpenClaw install: host config + SOUL.md, but no MPM
+        # plugin entry and no extensions dir.
+        (home / ".openclaw").mkdir(parents=True, exist_ok=True)
+        (home / ".openclaw" / "openclaw.json").write_text(
+            json.dumps({"plugins": {"entries": {"anthropic": {}}}}),
+            encoding="utf-8",
         )
-        # Real home today: 3 PASS + 1 ABSENT (openclaw).
-        # If that state changes this assertion becomes wrong; the
-        # test is intentionally written against the real environment
-        # because faking three PASSes requires running the renderer
-        # three times.
-        if "PASS=3" not in proc.stdout and "PASS=4" not in proc.stdout:
-            self.skipTest(
-                f"real-home host state is not the documented 3-PASS shape; "
-                f"got: {proc.stdout[-300:]!r}"
-            )
+        workspace = home / ".openclaw" / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "SOUL.md").write_text("# SOUL.md\npersona\n", encoding="utf-8")
+
+        proc = _run_script(home)
         self.assertEqual(
             proc.returncode, 0,
-            f"PASS+ABSENT (informational) should be exit 0, got {proc.returncode}; "
-            f"stdout={proc.stdout}; stderr={proc.stderr}",
+            f"ABSENT must stay informational (exit 0); stdout={proc.stdout}; "
+            f"stderr={proc.stderr}",
         )
+        row = {r["host"]: r for r in json.loads(proc.stdout)}["openclaw"]
+        self.assertEqual(row["verdict"], "ABSENT", row)
+        # Presence and currency are still reported unambiguously.
+        self.assertEqual(row["file"], "present")
+        self.assertEqual(row["block"], "absent")
 
     # ---------- WARN ----------
 
     def test_warn_returns_one(self):
-        """A host with a present-but-stale managed block must exit 1.
-
-        Build a fake HOME with one host's target containing the wrong
-        managed block.
-        """
+        """A host with a present-but-stale managed block must exit 1."""
         home = self.tmpdir / "home_warn"
         target = home / ".claude" / "CLAUDE.md"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -136,7 +122,6 @@ class ExitCodeContract(unittest.TestCase):
             "## stale body\n"
             "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->\n"
         )
-        # Other hosts have no install target — ABSENT.
         proc = _run_script(home)
         self.assertEqual(
             proc.returncode, 1,
@@ -146,6 +131,37 @@ class ExitCodeContract(unittest.TestCase):
         payload = json.loads(proc.stdout)
         verdict_by_host = {row["host"]: row["verdict"] for row in payload}
         self.assertEqual(verdict_by_host["claude_code"], "WARN")
+
+    def test_warn_not_absent_when_openclaw_integration_installed(self):
+        """The contract change: an installed OpenClaw MPM integration
+        with a missing managed block is WARN drift, not ABSENT.
+
+        Previously this combination reported ABSENT and exit 0, which
+        is what let a host expose MPM tools while the agent failed to
+        use them, with no signal to the operator.
+        """
+        home = self.tmpdir / "home_openclaw_integration"
+        # MPM OpenClaw integration IS installed.
+        (home / ".openclaw" / "extensions" / "mpm-memory-openclaw").mkdir(
+            parents=True, exist_ok=True,
+        )
+        # ... but the persistent managed block is missing.
+        workspace = home / ".openclaw" / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "SOUL.md").write_text("# SOUL.md\npersona\n", encoding="utf-8")
+
+        proc = _run_script(home)
+        self.assertEqual(
+            proc.returncode, 1,
+            f"installed integration + missing block must exit 1; "
+            f"stdout={proc.stdout}; stderr={proc.stderr}",
+        )
+        row = {r["host"]: r for r in json.loads(proc.stdout)}["openclaw"]
+        self.assertEqual(
+            row["verdict"], "WARN",
+            "an installed OpenClaw without its managed block is drift, "
+            "not a healthy intentional state",
+        )
 
 
 class DiagnosticFields(unittest.TestCase):
@@ -161,24 +177,24 @@ class DiagnosticFields(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_openclaw_reports_file_present_block_absent(self):
-        """OpenClaw on the real machine has the file (SOUL.md) but no
-        managed section. The diagnostic must report file=present and
-        block=absent unambiguously.
-        """
-        proc = subprocess.run(
-            [sys.executable, str(SCRIPT), "--json"],
-            capture_output=True, text=True, timeout=30,
+    def test_fields_are_unambiguous_regardless_of_verdict(self):
+        """file/block are reported independently of the verdict, so a
+        WARN caused by a missing block still shows file=present."""
+        home = self.tmpdir / "home_fields"
+        (home / ".openclaw" / "extensions" / "mpm-memory-openclaw").mkdir(
+            parents=True, exist_ok=True,
         )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        payload = json.loads(proc.stdout)
-        by_host = {row["host"]: row for row in payload}
-        oc = by_host.get("openclaw")
-        if not oc:
-            self.skipTest("openclaw host not present in this environment")
-        self.assertEqual(oc["file"], "present")
-        self.assertEqual(oc["block"], "absent")
-        self.assertEqual(oc["verdict"], "ABSENT")
+        workspace = home / ".openclaw" / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "SOUL.md").write_text("persona\n", encoding="utf-8")
+
+        proc = _run_script(home)
+        self.assertIn(proc.returncode, (0, 1), proc.stderr)
+        row = {r["host"]: r for r in json.loads(proc.stdout)}["openclaw"]
+        self.assertEqual(row["file"], "present")
+        self.assertEqual(row["block"], "absent")
+        # A repair path is offered whenever the block needs work.
+        self.assertTrue(row["repair"], "WARN must carry a repair path")
 
 
 if __name__ == "__main__":

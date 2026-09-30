@@ -95,6 +95,11 @@ MIGRATION_AWARE_FILES = {
     # The OpenClaw memory adapter installer — declares LEGACY_PLUGIN_ID
     # and uses it to probe for legacy config to migrate.
     "agent_installation/mpm-memory-openclaw/install.sh",
+    # The OpenClaw memory adapter reconcile.json — the `reconcile_if`
+    # probes recognize a machine that still carries the pre-2026-09-17
+    # legacy plugin id, so those installs get their managed block
+    # reconciled alongside canonical-id installs.
+    "agent_installation/mpm-memory-openclaw/reconcile.json",
     # The OpenClaw memory installer tests — assert the legacy id is
     # absent from active surfaces (manifest, index.js) and that the
     # migration step is silent when the legacy id is not present.

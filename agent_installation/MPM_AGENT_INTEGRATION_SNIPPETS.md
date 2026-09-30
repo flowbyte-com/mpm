@@ -428,7 +428,7 @@ the full protocol carry operational detail.
 
 1. **Orient before you work.** MPM wake context normally arrives at
    session start and carries relevant prior state such as handoff and
-   open work. If you do not have it, fetch it through `mcp__mpm__mpm_context`
+   open work. If you do not have it, fetch it through `mpm_context`
    action `read_wake_context` as a recovery path. Repeated absence on
    a host that normally injects wake indicates an integration problem.
 
@@ -472,7 +472,13 @@ the full protocol carry operational detail.
    it operates on the same substrate with the same provenance.
 <!-- END MPM MANAGED BLOCK -->
 
-
+> **OpenClaw has no MPM MCP server in either integration mode.** The
+> bare `mpm_context` above is a capability name, not a callable tool
+> identifier. Reach it with
+> `mpm call mpm_context --payload '{"action":"read_wake_context"}'`.
+> With the `mpm-memory-openclaw` plugin installed, the only tools on the
+> model are `mpm_memory_search` and `mpm_memory_get`. A name carrying an
+> MCP-client transport prefix does not exist on this host.
 
 <!-- END MPM-MANAGED SECTION:openclaw-instructions -->
 ```

@@ -198,13 +198,20 @@ hit the cache.
 For heartbeat turns, `heartbeat_prompt_contribution` injects a brief MPM status
 note (first 300 chars of wake context) without duplicating the full context.
 
-**This is the only delivery path for wake context.** OpenClaw does not
-require any persistent MPM instruction block in `SOUL.md`, `AGENTS.md`,
-or any other markdown file. The runtime hook chain — `session_start`
-(starting the fetch) followed by `agent_turn_prepare` (awaiting and
-returning the result as `prependContext`) — is what surfaces the wake
-payload to the model. A regression guard in
-`tests/runtime_injection.test.js` pins this contract.
+**This is the only delivery path for wake context.** The runtime hook
+chain — `session_start` (starting the fetch) followed by
+`agent_turn_prepare` (awaiting and returning the result as
+`prependContext`) — is what surfaces the wake payload to the model. A
+regression guard in `tests/runtime_injection.test.js` pins this
+contract.
+
+**This does not make the persistent managed block optional.** The hook
+chain supplies *what context exists now*; the `SOUL.md` managed block
+supplies *when and why to use MPM*. A host can expose the MPM tools and
+still fail to use them reliably when only the dynamic layer is present,
+so `install.sh` writes the managed block into the agent's `SOUL.md` and
+`make refresh-installed` keeps it current on any machine where this
+integration is installed.
 
 ### Per-session cache key
 

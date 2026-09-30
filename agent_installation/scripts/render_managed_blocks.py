@@ -20,8 +20,12 @@ block. This script:
   4. Composes each adapter's full template snippet (host header +
      rendered managed block + host footer) and writes it to
      `<adapter>/templates/<file>.snippet`.
-  5. Verifies byte-for-byte parity between each host's copy/paste
-     example in the canonical source and the rendered output.
+  5. Renders the host-neutral canonical block into the root
+     `README.md`'s managed example, so the README never carries a
+     hand-maintained second copy of the block.
+  6. Verifies byte-for-byte parity between each host's copy/paste
+     example in the canonical source, the README managed example,
+     and the rendered output.
 
 Usage (developer workflow):
 
@@ -29,7 +33,7 @@ Usage (developer workflow):
     python3 render_managed_blocks.py
 
     # Verify drift (no writes; render in memory and diff each adapter
-    # template snippet + each copy/paste example):
+    # template snippet + each copy/paste example + the README example):
     python3 render_managed_blocks.py --check
 
     # Render one adapter only (debugging):
@@ -223,7 +227,36 @@ ADAPTERS: list[dict] = [
     },
     {
         "name": "mpm-memory-openclaw",
-        "tool_prefix": "mcp__mpm__",
+        # OpenClaw renders with BARE canonical tool names, deliberately.
+        #
+        # `mcp__mpm__` is the prefix an MCP *client* transport puts on a
+        # server's tools. OpenClaw has no MPM MCP server in either of its
+        # supported integration modes, so that prefix names a tool that
+        # cannot exist:
+        #
+        #   native plugin mode  the mpm-memory-openclaw plugin calls
+        #                        registerTool() exactly twice, for
+        #                        `mpm_memory_search` and `mpm_memory_get`.
+        #                        It reaches `mpm_context` internally by
+        #                        shelling out to `mpm call mpm_context`
+        #                        (see callMpmTool in index.js). No
+        #                        `mcp__mpm__` namespace is ever created.
+        #   CLI fallback mode   no plugin at all; the agent reaches MPM
+        #                        through its own shell tool, again via
+        #                        `mpm call`.
+        #
+        # The adapter's own README states the consequence directly:
+        # "Do NOT call `mcp__mpm__mpm_handoff` — that tool is not on the
+        # default compact surface and the call will be rejected."
+        #
+        # The bare canonical name is correct in BOTH modes because the
+        # universal block's rule 7 already documents `mpm call <tool>` as
+        # the way to reach any capability the host does not expose
+        # natively, and rule 1's wake fetch is exactly such a capability.
+        # One canonical wording therefore serves both OpenClaw modes
+        # without a host-specific prefix and without a second OpenClaw
+        # behavioural contract to keep in sync.
+        "tool_prefix": "",
         "snippet_path": "templates/SOUL.md.snippet",
         "copy_paste_outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->",
         "copy_paste_outer_end": "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->",
@@ -242,6 +275,25 @@ ADAPTERS: list[dict] = [
         "footer": (
             "\n"
             "## OpenClaw-specific notes\n"
+            "\n"
+            "### How to actually reach MPM here\n"
+            "\n"
+            "OpenClaw does not expose MPM through an MCP server in\n"
+            "either supported integration mode, so the bare canonical\n"
+            "tool names in the block above are capability names, not\n"
+            "callable tool identifiers. Reach them like this:\n"
+            "\n"
+            "```\n"
+            "mpm call mpm_context --payload '{\"action\":\"read_wake_context\"}'\n"
+            "mpm call mpm_memory   --payload '{\"action\":\"query\",\"params\":{...}}'\n"
+            "```\n"
+            "\n"
+            "With the `mpm-memory-openclaw` plugin installed, the only\n"
+            "tools registered on the model are `mpm_memory_search` and\n"
+            "`mpm_memory_get`; everything else, including `mpm_context`,\n"
+            "is reached through the `mpm call` CLI. A name carrying an\n"
+            "MCP-client transport prefix does not exist on this host and\n"
+            "the call will be rejected.\n"
             "\n"
             "### Three-layer integration\n"
             "\n"
@@ -469,6 +521,135 @@ def copy_paste_example_path(canonical_path: Path, adapter: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# README managed-block example.
+# ---------------------------------------------------------------------------
+#
+# The root README documents the managed block so humans and agents
+# onboarding to MPM can see it without reading the installer tree. That
+# copy must never be hand-maintained: a second manual copy is exactly
+# the drift the renderer exists to prevent.
+#
+# The README example is HOST-NEUTRAL: it renders the bare canonical
+# block (no transport prefix, no host header/footer), because the
+# README is not host documentation. A host-specific prefix here would
+# teach readers to copy a block that does not match their own host.
+#
+# The renderer owns exactly the span between the two markers below.
+# Everything outside them in README.md is human-authored and is never
+# read or rewritten by this script.
+
+README_BEGIN_MARKER = "<!-- BEGIN MPM-MANAGED README:managed-block -->"
+README_END_MARKER = "<!-- END MPM-MANAGED README:managed-block -->"
+
+README_RELATIVE_PATH = "README.md"
+
+
+def readme_path(repo_root: Path) -> Path:
+    """Locate the root README.md from the agent_installation dir."""
+    return repo_root / README_RELATIVE_PATH
+
+
+def render_readme_block(canonical_path: Path) -> str:
+    """Return the full text the renderer owns inside README.md —
+    markers included — for the host-neutral canonical managed block.
+
+    The block is wrapped in a fenced ```markdown code block so the
+    example renders as a copyable literal in the README rather than
+    being interpreted as README formatting. The canonical block
+    contains no triple-backtick fence of its own (asserted by the
+    parity tests), so the fence is unambiguous.
+    """
+    block = extract_canonical_block(canonical_path.read_text(encoding="utf-8"))
+    # `render_for_host(block, "")` is the identity transform by
+    # contract. Calling it keeps the README copy on the same rendering
+    # path as every adapter snippet rather than special-casing it.
+    block = render_for_host(block, "")
+    body = block.rstrip("\n")
+    return (
+        f"{README_BEGIN_MARKER}\n"
+        f"<!-- Generated by agent_installation/scripts/"
+        f"render_managed_blocks.py from\n"
+        f"     agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md.\n"
+        f"     Do not edit between these markers. -->\n"
+        f"```markdown\n"
+        f"{body}\n"
+        f"```\n"
+        f"{README_END_MARKER}\n"
+    )
+
+
+def _split_readme(text: str) -> tuple[str, str, str] | None:
+    """Return (before, owned, after) for the README's managed span.
+
+    Returns None when the markers are missing or unbalanced — the
+    caller treats that as drift and the write path re-creates the span.
+    """
+    begin = text.find(README_BEGIN_MARKER)
+    if begin == -1:
+        return None
+    end = text.find(README_END_MARKER, begin + len(README_BEGIN_MARKER))
+    if end == -1:
+        return None
+    end += len(README_END_MARKER)
+    if text[end:end + 1] == "\n":
+        end += 1
+    return text[:begin], text[begin:end], text[end:]
+
+
+def readme_drift(repo_root: Path, expected: str) -> str | None:
+    """Return a human-readable drift report, or None when in parity."""
+    path = readme_path(repo_root)
+    if not path.is_file():
+        return f"{path} does not exist"
+    split = _split_readme(path.read_text(encoding="utf-8"))
+    if split is None:
+        return (
+            f"{path} is missing the managed-block markers "
+            f"({README_BEGIN_MARKER} ... {README_END_MARKER})"
+        )
+    _, actual, _ = split
+    if actual == expected:
+        return None
+    diff = "".join(
+        difflib.unified_diff(
+            actual.splitlines(keepends=True),
+            expected.splitlines(keepends=True),
+            fromfile=f"checked-in:{path}",
+            tofile="rendered:README managed-block example",
+            n=3,
+        )
+    )
+    return f"--- README DRIFT: {path} ---\n{diff}"
+
+
+def write_readme_block(repo_root: Path, expected: str) -> bool:
+    """Replace only the renderer's owned span in README.md.
+
+    Returns True if the file was written, False if it was already in
+    parity. Human-authored content outside the markers is preserved
+    byte-for-byte: we never rewrite the `before`/`after` spans.
+    """
+    path = readme_path(repo_root)
+    if not path.is_file():
+        raise SystemExit(
+            f"cannot render README managed block: {path} does not exist",
+        )
+    text = path.read_text(encoding="utf-8")
+    split = _split_readme(text)
+    if split is None:
+        raise SystemExit(
+            f"cannot render README managed block: {path} is missing or has "
+            f"unbalanced markers ({README_BEGIN_MARKER} ... "
+            f"{README_END_MARKER}). Add the markers, then re-run.",
+        )
+    before, actual, after = split
+    if actual == expected:
+        return False
+    path.write_text(before + expected + after, encoding="utf-8")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -569,6 +750,13 @@ def main(argv: Iterable[str] | None = None) -> int:
                     default=agent_installation_root,
                     help="Path to agent_installation/ (default: alongside "
                          "this script).")
+    ap.add_argument("--repo-root", type=Path,
+                    default=agent_installation_root.parent,
+                    help="Repository root containing README.md (default: "
+                         "the parent of agent_installation/).")
+    ap.add_argument("--skip-readme", action="store_true",
+                    help="Do not render or check the README managed-block "
+                         "example (for adapter-only debugging).")
     args = ap.parse_args(list(argv) if argv is not None else None)
 
     if args.dump == "canonical":
@@ -581,11 +769,21 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     try:
         rendered = render_all(canonical_path, args.adapter_root)
+        readme_rendered = (
+            None if args.skip_readme
+            else render_readme_block(canonical_path)
+        )
 
         if args.check:
             diffs = _diff_snippets(rendered, args.adapter_root)
             cpdiffs = _diff_copy_paste(canonical_path)
             all_diffs = diffs + cpdiffs
+            readme_ok = True
+            if readme_rendered is not None:
+                drift = readme_drift(args.repo_root, readme_rendered)
+                if drift is not None:
+                    all_diffs.append(drift)
+                    readme_ok = False
             if all_diffs:
                 sys.stderr.write("\n\n".join(all_diffs))
                 sys.stderr.write(
@@ -593,16 +791,27 @@ def main(argv: Iterable[str] | None = None) -> int:
                     f"detected. Re-run without --check to regenerate.\n",
                 )
                 return 1
+            readme_note = (
+                "; README managed-block example in parity"
+                if readme_ok else ""
+            )
             print(
                 f"[render_managed_blocks] {len(selected)} adapter(s) "
                 f"in byte-for-byte parity with canonical source; "
-                f"{len(ADAPTERS)} copy/paste example(s) in parity.",
+                f"{len(ADAPTERS)} copy/paste example(s) in parity"
+                f"{readme_note}.",
             )
             return 0
 
         written = _write_all(rendered, args.adapter_root)
         for p in written:
             print(f"[render_managed_blocks] wrote {p}")
+        if readme_rendered is not None:
+            if write_readme_block(args.repo_root, readme_rendered):
+                print(
+                    f"[render_managed_blocks] wrote managed-block example "
+                    f"in {readme_path(args.repo_root)}",
+                )
         # Also report copy/paste parity (informational only during write).
         cpdiffs = _diff_copy_paste(canonical_path)
         if cpdiffs:

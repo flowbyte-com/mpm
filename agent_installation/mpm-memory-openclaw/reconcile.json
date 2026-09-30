@@ -1,9 +1,91 @@
 {
   "host_label": "openclaw",
-  "description": "OpenClaw SOUL.md managed-block installer (opt-in only)",
-  "installer": "",
+  "description": "OpenClaw SOUL.md managed-block installer",
+  "installer": "scripts/install_openclaw_instructions.py",
   "installer_type": "python",
-  "args": [],
-  "opt_in": true,
-  "skip_reason": "OpenClaw uses runtime injection; the managed block is intentionally absent on this machine. Run mpm-memory-openclaw/install.sh explicitly to install."
+  "args": [
+    "--home", "~/",
+    "--snippet", "@/templates/SOUL.md.snippet"
+  ],
+  "opt_in": false,
+  "reconcile_if": {
+    "any_of": [
+      {
+        "comment": "MODE 1 — native plugin integration. The mpm-memory-openclaw plugin is installed, so the agent has typed mpm_memory_* tools and runtime wake injection. Presence of the plugin directory or a plugin config entry is sufficient: installing the plugin is itself the operator's explicit MPM opt-in, so this mode needs no additional intent probe.",
+        "any_of": [
+          {"path": "~/.openclaw/extensions/mpm-memory-openclaw", "kind": "dir"},
+          {"path": "~/.openclaw/extensions/openclaw-mpm-memory", "kind": "dir"},
+          {
+            "path": "~/.openclaw/openclaw.json",
+            "kind": "file",
+            "json_key": "plugins.entries.mpm-memory-openclaw"
+          },
+          {
+            "path": "~/.openclaw/openclaw.json",
+            "kind": "file",
+            "json_key": "plugins.entries.openclaw-mpm-memory"
+          },
+          {
+            "path": "~/.openclaw/openclaw.json",
+            "kind": "file",
+            "json_key": "plugins.slots.memory",
+            "json_value": "mpm-memory-openclaw"
+          },
+          {
+            "path": "~/.openclaw/openclaw.json",
+            "kind": "file",
+            "json_key": "plugins.slots.memory",
+            "json_value": "openclaw-mpm-memory"
+          }
+        ]
+      },
+      {
+        "comment": "MODE 2 — CLI-fallback integration. No MPM plugin, but the agent reaches MPM through `mpm call <tool>` over its shell tool. This is a supported mode, not a degraded one: the managed block is what tells the agent the fallback exists, so on a CLI-fallback host a missing block means the agent never learns MPM is reachable at all.",
+        "all_of": [
+          {
+            "comment": "Reachability — the mpm binary is installed where an OpenClaw agent's shell tool can find it. Checked at the canonical install locations rather than by resolving PATH, because the gateway runs under systemd with a deliberately minimal PATH that differs from the operator's login shell.",
+            "any_of": [
+              {"path": "~/.mpm/bin/mpm", "kind": "file"},
+              {"path": "~/.local/bin/mpm", "kind": "file"}
+            ]
+          },
+          {
+            "comment": "Intent — the operator already wired MPM into THIS OpenClaw workspace's persistent instruction surface. The workspace location is read from openclaw.json so a relocated workspace is detected correctly; the manifest falls back to the documented default when the key is absent.",
+            "any_of": [
+              {
+                "path_from": {
+                  "config": "~/.openclaw/openclaw.json",
+                  "json_key": "agents.defaults.workspace",
+                  "fallback": "~/.openclaw/workspace"
+                },
+                "kind": "file",
+                "suffix": "/AGENTS.md",
+                "contains": ["MPM", "mpm call", "read_wake_context"]
+              },
+              {
+                "path_from": {
+                  "config": "~/.openclaw/openclaw.json",
+                  "json_key": "agents.defaults.workspace",
+                  "fallback": "~/.openclaw/workspace"
+                },
+                "kind": "file",
+                "suffix": "/MEMORY.md",
+                "contains": ["MPM", "mpm call", "read_wake_context"]
+              },
+              {
+                "path_from": {
+                  "config": "~/.openclaw/openclaw.json",
+                  "json_key": "agents.defaults.workspace",
+                  "fallback": "~/.openclaw/workspace"
+                },
+                "kind": "file",
+                "suffix": "/CLAUDE.md",
+                "contains": ["MPM", "mpm call", "read_wake_context"]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
 }
