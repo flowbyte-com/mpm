@@ -107,7 +107,8 @@ hand-edited. The render script
 1. Reads the canonical source.
 2. Extracts the canonical managed block.
 3. Substitutes each adapter's `{TOOL_PREFIX}` (e.g., `mpm__` for
-   Claude Code, `mcp__mpm__` for Hermes, empty for OpenCode and Pi).
+   Claude Code, `mcp__mpm__` for Hermes, empty for OpenCode, Pi, and
+   OpenClaw — see the capability-name note below).
 4. Composes each adapter's full snippet (header + rendered block +
    host-specific notes).
 5. Writes the snippet to the adapter's `templates/` directory.
@@ -234,9 +235,117 @@ post-edit verification step for any change to
 
 Hermes is skipped here (no installed managed block in this
 environment; the `mpm-hermes/SKILL.md` documents the manual flow).
-OpenClaw uses runtime injection rather than a persistent managed file,
-so its install path is via `mpm-memory-openclaw/install.sh` — a
-separate concern (plugin wiring, not instruction-file refresh).
+
+OpenClaw's `SOUL.md` managed block is refreshed by this same pass —
+but only on a machine where the MPM OpenClaw integration is already
+installed. The reconciler checks the integration first and skips the
+adapter entirely when it is absent, so `make refresh-installed` never
+opts a machine into a host it does not use.
+
+OpenClaw has **two** supported integration modes, and the reconciler
+gates on both, because a machine legitimately running either one must
+have its block repaired:
+
+| Mode | How the agent reaches MPM | How it is detected |
+|---|---|---|
+| **Native plugin** | `mpm-memory-openclaw` installed; typed `mpm_memory_*` tools + runtime wake injection | plugin directory, `plugins.entries.*`, or `plugins.slots.memory` |
+| **CLI fallback** | no plugin; `mpm call <tool>` over the agent's shell tool | the `mpm` binary is installed **and** the OpenClaw workspace's persistent instruction surface (`AGENTS.md` / `MEMORY.md` / `CLAUDE.md`, resolved from `openclaw.json`) already names MPM |
+
+CLI-fallback mode is a supported mode, not a degraded one. The managed
+block is what tells the agent the `mpm call` fallback exists, so on a
+CLI-fallback host a missing block means the agent never learns MPM is
+reachable at all. That is why the gate requires **both** halves:
+reachability alone would be satisfied on any machine that has any MPM
+integration and would wrongly opt an unrelated OpenClaw in, so the
+host's own instruction surface must already name MPM too.
+
+Once the integration is present, a missing or stale `SOUL.md` block is
+drift and gets repaired here; `mpm-memory-openclaw/install.sh` remains
+the full installer, including the plugin wiring.
+
+### One behavioural contract per file
+
+`scripts/managed_block_convergence.py` is the single place that decides
+what counts as an MPM-owned region in a host instruction file. Every
+persistent-file installer delegates to it, which enforces one
+invariant:
+
+> A host instruction file may contain at most one effective MPM
+> behavioural contract after reconciliation.
+
+Installers previously recognized only their own marker pair, so a file
+holding another host's MPM section — or one whose outer END marker was
+never written — matched nothing and fell through to the append path,
+leaving two contradictory contracts side by side. The engine
+recognizes every MPM marker form that has shipped (all four
+`MPM-MANAGED SECTION:<host-id>` forms, the legacy unsuffixed
+`MPM-MANAGED SECTION`, both Hermes anchors, and a bare contract with no
+wrapper) and converges rather than appends:
+
+| Found in the target file | Outcome |
+|---|---|
+| no MPM region | insert one |
+| this host's section, current | no-op |
+| this host's section, stale | replace |
+| another host's or a legacy section | migrate to this host's rendering |
+| a bare contract with no wrapper | migrate |
+| several MPM sections | collapse to one |
+| unterminated but deterministically bounded | repair |
+| genuinely ambiguous | **refuse**, write nothing, name the reason |
+
+"Deterministically bounded" means exactly one outer BEGIN, no matching
+END, and exactly one balanced inner `MPM MANAGED BLOCK` pair after it —
+which proves where MPM's territory ends, so no user content is at risk.
+Anything else is refused. A refusal is always better than a second
+contract. Bytes outside MPM-owned regions are copied through
+byte-for-byte, and a backup is written before any change.
+
+### Tool names in the OpenClaw block are capability names
+
+OpenClaw renders with **bare canonical** tool names, not
+`mcp__mpm__`-prefixed ones, in both integration modes:
+
+- **native plugin mode** — the plugin calls `registerTool()` exactly
+  twice, for `mpm_memory_search` and `mpm_memory_get`. It reaches
+  `mpm_context` internally by shelling out to `mpm call mpm_context`.
+  No `mcp__mpm__` namespace is ever created.
+- **CLI-fallback mode** — no plugin at all; the agent reaches MPM
+  through its own shell tool, again via `mpm call`.
+
+`mcp__mpm__` is the prefix an MCP *client* puts on a server's tools.
+OpenClaw has no MPM MCP server, so that prefix names a tool that cannot
+exist. The adapter's own README already warned about this for a
+neighbouring tool: "Do NOT call `mcp__mpm__mpm_handoff` — that tool is
+not on the default compact surface and the call will be rejected."
+
+One canonical wording therefore serves both modes, with no
+host-specific prefix and no second OpenClaw contract to keep in sync.
+The universal managed-block wording is unchanged; only the renderer's
+per-adapter prefix table and the OpenClaw-specific prose outside the
+block differ.
+
+### Diagnostics
+
+`python3 scripts/check_installed_managed_blocks.py` reports marker
+shape separately from block currency, so "some MPM text exists
+somewhere in the file" is never mistaken for a pass:
+
+| Field | Meaning |
+|---|---|
+| `marker_state` | `own`, `foreign`, `duplicate`, `bare`, `malformed`, `none` |
+| `markers` | every MPM marker present, with the id each one carries |
+
+- `duplicate` — more than one MPM section in one file → **ERROR**
+- `foreign` — another host's section, or a bare contract → **WARN**, migrate
+- `malformed` — unresolvable markers → **ERROR**; deterministically
+  repairable ones are **WARN** with the repair command named, because
+  the installer will fix them
+- unreachable MCP-transport tool names on a host with no MPM MCP server
+  → **ERROR**, since the block would send the agent to a call that
+  cannot succeed
+
+`ABSENT` still means only "this host is not part of this machine's MPM
+setup".
 
 The structural smoke test
 [`tests/test_refresh_installed.py`](./tests/test_refresh_installed.py)

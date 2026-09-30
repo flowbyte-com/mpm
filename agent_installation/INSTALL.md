@@ -126,8 +126,10 @@ in `tests/test_render_managed_blocks.py` pin byte-for-byte parity
 between the copy/paste examples, the rendered adapter snippets, and
 the output of `python3 scripts/render_managed_blocks.py`.
 
-OpenClaw does not use a persistent managed file — runtime injection
-injects the same seven invariants automatically.
+OpenClaw is a persistent managed-file host like the others. Its
+`SOUL.md` managed block is written by
+`mpm-memory-openclaw/install.sh` on install and refreshed on reinstall.
+Runtime wake injection supplements that block; it does not replace it.
 
 ### Workshop invocation per host
 
@@ -155,24 +157,37 @@ OpenClaw participates in the MPM cognitive substrate via **two
 complementary surfaces**, plus an optional third. All three converge on
 the same MPM install and database.
 
-> **Adoption note (OpenClaw is the exception).** Most hosts require
-> editing a persistent-instruction file (CLAUDE.md / AGENTS.md /
-> .hermes.md) to teach the agent the MPM behavioral contract.
-> **OpenClaw does not.** The `mpm-memory-openclaw` plugin adopts the
-> wake invariant through the OpenClaw typed-hook chain
-> (`session_start` → `agent_turn_prepare` returning `prependContext`).
-> The plugin fetches the wake context, caches it per session, and
-> injects it into the agent prompt — the agent therefore wakes from MPM
-> without any SOUL.md / AGENTS.md / CLAUDE.md edit. The same hook chain
-> is documented in [`mpm-memory-openclaw/index.js`](./mpm-memory-openclaw/index.js)
+> **The managed block is required, not optional.** A host can
+> technically expose the MPM tools while still failing to use MPM
+> reliably, purely because the persistent managed block is absent.
+> OpenClaw needs both layers:
+>
+> - **persistent behavioural contract** — the managed block in
+>   `SOUL.md`. Tells the agent *when and why* to use MPM across the
+>   session.
+> - **dynamic wake/context** — the `mpm-memory-openclaw` plugin's
+>   typed-hook chain (`session_start` → `agent_turn_prepare` returning
+>   `prependContext`). Tells the agent *what context exists now*.
+>
+> The two carry different content and answer different questions, so
+> the hook chain does not make the `SOUL.md` block redundant. The same
+> hook chain is documented in
+> [`mpm-memory-openclaw/index.js`](./mpm-memory-openclaw/index.js)
 > (`api.on("session_start", ...)` + `api.on("agent_turn_prepare", ...)`).
+
+> **Reconciliation scope.** Once the MPM OpenClaw integration is
+> installed on a machine, `make refresh-installed` and `./install.sh`
+> converge the `SOUL.md` block to the current canonical render, exactly
+> as they do for the other hosts. MPM never installs OpenClaw itself:
+> on a machine with no OpenClaw MPM integration, the adapter is
+> skipped and nothing is touched.
 
 ### What gets installed
 
 | Surface | Where | Mechanism |
 |---|---|---|
 | **MCP stdio bundle** | OpenClaw runtime config (not in this repo) | `mcp.servers.mpm.command`, `mcp.servers.mpm.env.MPM_WORKSPACE` |
-| **Memory slot plugin** | `~/.openclaw/extensions/mpm-memory-openclaw/` | OpenClaw plugin (`kind:"memory"`); routes `mpm_memory_search`/`mpm_memory_get` to MPM. **Also wires the wake-context adoption hooks (`session_start` + `agent_turn_prepare` returning `prependContext`) and implements OpenClaw's memory-runtime classification contract — this is how OpenClaw adopts the wake invariant without a persistent-instruction file edit.** |
+| **Memory slot plugin** | `~/.openclaw/extensions/mpm-memory-openclaw/` | OpenClaw plugin (`kind:"memory"`); routes `mpm_memory_search`/`mpm_memory_get` to MPM. **Also wires the wake-context hooks (`session_start` + `agent_turn_prepare` returning `prependContext`) and implements OpenClaw's memory-runtime classification contract. These supply the dynamic wake layer; the persistent behavioural contract lives in the `SOUL.md` managed block installed below.** |
 | **Auto-mode/persona plugin** *(optional)* | `~/.openclaw/extensions/mpm-auto-mode-persona-openclaw/` | OpenClaw plugin; per-turn mode/persona injection via `mpm route --apply` |
 
 ### Installation

@@ -1037,7 +1037,36 @@ A host that reports `Wake runtime injection: PASS` MUST also pass
 `MPM managed block in SOUL.md`; otherwise the operator has been told
 a partial truth — runtime wake delivery without the persistent
 behavioural contract produces agents that receive current context but
-do not know how to use MPM across the session. Run:
+do not know how to use MPM across the session.
+
+The same holds when wake injection reports `FAIL` or `UNKNOWN` for a
+host that has no MPM plugin at all. OpenClaw supports a **CLI-fallback
+mode** in which the agent reaches MPM through `mpm call <tool>` over
+its shell tool instead of through a plugin. That mode delivers no wake
+injection, so the managed block is not merely supplementing a
+dynamic layer there — it is the *only* thing that tells the agent the
+fallback exists. Classify such a host as MPM-enabled on the strength of
+reachability plus intent, not on plugin presence:
+
+```text
+native plugin mode  mpm-memory-openclaw installed
+                    (plugin dir / plugins.entries.* / plugins.slots.memory)
+CLI fallback mode   mpm binary installed at ~/.mpm/bin/mpm or ~/.local/bin/mpm
+                    AND the OpenClaw workspace instruction surface
+                    (AGENTS.md / MEMORY.md / CLAUDE.md, workspace resolved from
+                    openclaw.json) already names MPM
+```
+
+Both halves are required. MPM is installed on any machine that has any
+MPM integration, so reachability alone is far too permissive; and a
+workspace that mentions MPM in passing has not been integrated. A
+machine satisfying neither is an OpenClaw that has never been
+integrated with MPM and must not be opted in.
+
+`make check-installed` applies exactly this rule, and
+`make refresh-installed` uses the same one, so the two can never
+disagree about whether a host is in scope. To confirm the managed
+section directly:
 
 ```bash
 test -f "$HOME/.openclaw/workspace/SOUL.md" \

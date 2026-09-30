@@ -499,13 +499,14 @@ Inspect both README files and manifests before installing.
 (plugin ID — adapter directory
 `agent_installation/mpm-memory-openclaw/`) via the
 `session_start` → `agent_turn_prepare` typed-hook chain (returning
-`prependContext`). This is automatic and **does not** require any
-persistent MPM instruction block in `SOUL.md` or `AGENTS.md`. The
-sessionKey used to correlate the cache write (in `session_start`) with
-the cache read (in `agent_turn_prepare`) comes from the hook context
-(`ctx.sessionKey`), not from the event payload. The
-`mpm-memory-openclaw/tests/runtime_injection.test.js` regression guard
-pins this contract.
+`prependContext`). The sessionKey used to correlate the cache write (in
+`session_start`) with the cache read (in `agent_turn_prepare`) comes
+from the hook context (`ctx.sessionKey`), not from the event payload.
+The `mpm-memory-openclaw/tests/runtime_injection.test.js` regression
+guard pins this contract.
+
+The persistent managed block in `SOUL.md` is required alongside this
+dynamic layer — see "behavioral adoption" below.
 
 Automatic wake delivery does not remove the behavioral contract.
 Distinguish the two layers defined in Section 2:
