@@ -141,6 +141,57 @@ func handleSessionAdd(args []string) int {
 	return respond(fmt.Sprintf("Session added with ID: %s\n", mem.ID), "", 0)
 }
 
+// workRef is the compact work projection rendered by `mpm wake`.
+//
+// Hoisted to package scope (2026-09-30) so queryCompletedWorkRefs can
+// return it and the archive-visibility contract is directly testable.
+type workRef struct {
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	Status       string `json:"status"`
+	Verification string `json:"verification,omitempty"`
+	Pointer      string `json:"pointer"`
+}
+
+// queryCompletedWorkRefs returns the bounded completed-work references
+// rendered by `mpm wake`. It mirrors gatherCompletedWorks in
+// internal/core/wake_context.go so the CLI projection is consistent with
+// `mpm call mpm_context read_wake_context`.
+//
+// Extracted from handleWake (2026-09-30) so the archive-visibility
+// contract is directly testable: an inlined query literal cannot be
+// asserted on without duplicating it, and a duplicated copy is exactly
+// how a partial visibility filter goes unnoticed. Archived work is
+// excluded here exactly as it is in the MCP path.
+//
+// Always returns a non-nil slice so the JSON shape is predictable.
+func queryCompletedWorkRefs(dm mpminternal.CoreDB) []workRef {
+	refs := []workRef{}
+	rows, err := dm.SQLDB().Query(`
+		SELECT id, title, status, COALESCE(verification, '')
+		FROM works
+		WHERE status = 'done' AND archived_at IS NULL
+		ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC
+		LIMIT 5
+	`)
+	if err != nil {
+		usererror.Warn("handleWake: completed works query: %v", err)
+		return refs
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var w workRef
+		if scanErr := rows.Scan(&w.ID, &w.Title, &w.Status, &w.Verification); scanErr == nil {
+			if len(w.Title) > 120 {
+				w.Title = w.Title[:120]
+			}
+			w.Pointer = "mpm://work/" + w.ID
+			refs = append(refs, w)
+		}
+	}
+	return refs
+}
+
 // handleWake returns context from the last active session.
 // Displays mode, persona, recent topics, and recent memories.
 func handleWake(args []string) int {
@@ -220,23 +271,23 @@ func handleWake(args []string) int {
 				if err := rows.Scan(&memID, &collection, &content, &tagsJSON, &metadataJSON, &createdAt); err != nil {
 					return fmt.Errorf("scanning wake context memory row: %w", err)
 				}
-			var tags []string
-			var memMeta map[string]interface{}
-			if tagsJSON.Valid {
-				json.Unmarshal([]byte(tagsJSON.String), &tags)
+				var tags []string
+				var memMeta map[string]interface{}
+				if tagsJSON.Valid {
+					json.Unmarshal([]byte(tagsJSON.String), &tags)
+				}
+				if metadataJSON.Valid {
+					json.Unmarshal([]byte(metadataJSON.String), &memMeta)
+				}
+				memories = append(memories, map[string]interface{}{
+					"id":         memID,
+					"collection": collection,
+					"content":    content,
+					"tags":       tags,
+					"metadata":   memMeta,
+					"created_at": createdAt,
+				})
 			}
-			if metadataJSON.Valid {
-				json.Unmarshal([]byte(metadataJSON.String), &memMeta)
-			}
-			memories = append(memories, map[string]interface{}{
-				"id":         memID,
-				"collection": collection,
-				"content":    content,
-				"tags":       tags,
-				"metadata":   memMeta,
-				"created_at": createdAt,
-			})
-		}
 			return nil
 		}()
 		if scanErr != nil {
@@ -261,18 +312,18 @@ func handleWake(args []string) int {
 				if err := lrows.Scan(&lessonID, &lessonType, &content, &tagsJSON, &created); err != nil {
 					return fmt.Errorf("scanning wake context lesson row: %w", err)
 				}
-			var tagList []string
-			if tagsJSON != "" {
-				json.Unmarshal([]byte(tagsJSON), &tagList)
+				var tagList []string
+				if tagsJSON != "" {
+					json.Unmarshal([]byte(tagsJSON), &tagList)
+				}
+				lessons = append(lessons, map[string]interface{}{
+					"id":      lessonID,
+					"type":    lessonType,
+					"content": "[Lesson] " + content,
+					"tags":    tagList,
+					"created": created,
+				})
 			}
-			lessons = append(lessons, map[string]interface{}{
-				"id":      lessonID,
-				"type":    lessonType,
-				"content": "[Lesson] " + content,
-				"tags":    tagList,
-				"created": created,
-			})
-		}
 			return nil
 		}()
 		if scanErrL != nil {
@@ -282,9 +333,9 @@ func handleWake(args []string) int {
 	}
 
 	// Identity fallback: read active.json for persona and modes via the
-// canonical pointer-aware loader (no local duplicate struct — the
-// drift between local activeState and the canonical ActiveState was a
-// pre-2026-09-11 source of bugs).
+	// canonical pointer-aware loader (no local duplicate struct — the
+	// drift between local activeState and the canonical ActiveState was a
+	// pre-2026-09-11 source of bugs).
 	var activeMode, activePersona string
 	if active, err := mpminternal.LoadActiveJSON(); err == nil {
 		activePersona = active.PersonaString()
@@ -301,13 +352,6 @@ func handleWake(args []string) int {
 		ID        string `json:"id"`
 		Content   string `json:"content"`
 		CreatedAt string `json:"created_at"`
-	}
-	type workRef struct {
-		ID           string `json:"id"`
-		Title        string `json:"title"`
-		Status       string `json:"status"`
-		Verification string `json:"verification,omitempty"`
-		Pointer      string `json:"pointer"`
 	}
 	type wakeResult struct {
 		SessionID      string               `json:"session_id"`
@@ -355,45 +399,16 @@ func handleWake(args []string) int {
 	// with `mpm call mpm_context read_wake_context`. RECOMMENDED 10 fix:
 	// the field had been populated on WakeContextData but no public
 	// surface actually rendered it, leaving it as dead projection data.
-	// The query is bounded to 5 and ordered completed_at DESC for
-	// deterministic, stable output. Title truncated to 120 chars to match
-	// the MCP path.
-	var completedRefs []workRef
-	crows, cErr := dm.SQLDB().Query(`
-		SELECT id, title, status, COALESCE(verification, '')
-		FROM works
-		WHERE status = 'done'
-		ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC
-		LIMIT 5
-	`)
-	if cErr == nil {
-		for crows.Next() {
-			var w workRef
-			if scanErr := crows.Scan(&w.ID, &w.Title, &w.Status, &w.Verification); scanErr == nil {
-				if len(w.Title) > 120 {
-					w.Title = w.Title[:120]
-				}
-				w.Pointer = "mpm://work/" + w.ID
-				completedRefs = append(completedRefs, w)
-			}
-		}
-		crows.Close()
-	} else {
-		usererror.Warn("handleWake: completed works query: %v", cErr)
-	}
-	// Always emit non-nil slice for predictable JSON shape.
-	if completedRefs == nil {
-		completedRefs = []workRef{}
-	}
+	completedRefs := queryCompletedWorkRefs(dm)
 
 	result := wakeResult{
-		SessionID:       sessionID,
-		ActiveMode:      activeMode,
-		ActivePersona:   activePersona,
-		RecentTopics:    topics,
-		RecentMemories:  memRefs,
-		LastHandoff:     handoff,
-		CompletedWorks:  completedRefs,
+		SessionID:      sessionID,
+		ActiveMode:     activeMode,
+		ActivePersona:  activePersona,
+		RecentTopics:   topics,
+		RecentMemories: memRefs,
+		LastHandoff:    handoff,
+		CompletedWorks: completedRefs,
 	}
 
 	if jsonOutput {
@@ -403,8 +418,8 @@ func handleWake(args []string) int {
 	}
 
 	// No context at all — human-readable empty state. Completed works
-// counts toward context so a fresh session that has just shipped
-// something does not see "No previous session found".
+	// counts toward context so a fresh session that has just shipped
+	// something does not see "No previous session found".
 	if len(memRefs) == 0 && len(completedRefs) == 0 && activeMode == "" && activePersona == "" {
 		fmt.Println("No previous session found.")
 		return 0
@@ -503,14 +518,14 @@ func handleWakeCompact(dm mpminternal.CoreDB) int {
 		}
 	}
 	compact := map[string]interface{}{
-		"session_id":         data.SessionID,
-		"session_current_id": data.SessionCurrentID,
-		"session_started_at": data.SessionStartedAt,
-		"active_mode":        data.ActiveMode,
-		"active_persona":     data.ActivePersona,
-		"open_work_ids":      []string{},
+		"session_id":          data.SessionID,
+		"session_current_id":  data.SessionCurrentID,
+		"session_started_at":  data.SessionStartedAt,
+		"active_mode":         data.ActiveMode,
+		"active_persona":      data.ActivePersona,
+		"open_work_ids":       []string{},
 		"recent_artifact_ids": []string{},
-		"audit_summary":      data.AuditSummary,
+		"audit_summary":       data.AuditSummary,
 	}
 	if data.LastHandoff != nil {
 		compact["last_handoff_summary"] = data.LastHandoff.Summary

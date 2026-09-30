@@ -39,7 +39,7 @@ func addWorkCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc map[s
 	rows, err := dm.db.Query(`
 		SELECT id, title, status, verification, updated_at, session_id
 		FROM works
-		WHERE status = 'open'
+		WHERE status = 'open' AND archived_at IS NULL
 		ORDER BY updated_at DESC, id ASC
 		LIMIT ?
 	`, limit)

@@ -57,6 +57,10 @@ func handleMpmWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload 
 		return handleNoteWork(dm, ac, params)
 	case "reopen":
 		return handleReopenWork(dm, ac, params)
+	case "archive":
+		return handleArchiveWork(dm, ac, params)
+	case "unarchive":
+		return handleUnarchiveWork(dm, ac, params)
 	case "resolve_contradiction":
 		// F6-1 (alpha-final): agent-facing first-class contradiction
 		// resolution. The recovery path for T20-1's invariant — a
@@ -65,7 +69,7 @@ func handleMpmWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload 
 		// the dispute rows (audit trail preserved).
 		return handleResolveContradictionWork(dm, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_work. Valid actions include create, list, show, update, complete, cancel, history, note, reopen, resolve_contradiction", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_work. Valid actions include create, list, show, update, complete, cancel, history, note, reopen, archive, unarchive, resolve_contradiction", action)
 	}
 }
 
@@ -89,6 +93,11 @@ func handleCreateWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 // exist". The enum is the single source of truth — keep it sorted.
 var validWorkStatuses = []string{"all", "cancelled", "done", "open"}
 
+// validWorkVisibilities mirrors mpminternal.ValidWorkVisibilities on
+// the wire. Same W-010 rationale: a typo in `visibility` must produce a
+// clear error, never a zero-row result that reads as "no work exists".
+var validWorkVisibilities = mpminternal.ValidWorkVisibilities
+
 func handleListWorks(dm mpminternal.CoreDB, p map[string]interface{}) (interface{}, error) {
 	// Support status filtering: "open" (default), "done", "cancelled", "all".
 	// The legacy ListWorks only returned open, which prevented reliable
@@ -108,6 +117,19 @@ func handleListWorks(dm mpminternal.CoreDB, p map[string]interface{}) (interface
 			strings.Join(validWorkStatuses, ", "), status,
 		)
 	}
+	// visibility is the SECOND, independent axis (2026-09-30). It is not
+	// derived from status: `done` + `archived` is a coherent query, and
+	// `all` + `all` is the complete inventory.
+	visibility, _ := p["visibility"].(string)
+	if visibility == "" {
+		visibility = string(mpminternal.WorkVisibilityActive)
+	}
+	if !isValidWorkVisibility(visibility) {
+		return nil, fmt.Errorf(
+			"field `visibility` must be one of [%s], got %q",
+			strings.Join(validWorkVisibilities, ", "), visibility,
+		)
+	}
 	// Optional limit param.
 	limit := 0
 	if limVal, ok := p["limit"]; ok {
@@ -124,7 +146,7 @@ func handleListWorks(dm mpminternal.CoreDB, p map[string]interface{}) (interface
 	// mpminternal.ListWorkRows helper (in internal/core/work_rows.go).
 	// The same helper is called by the human-mode CLI handler in
 	// cmd/mpm/handlers_work.go — both paths consume identical data.
-	rows, err := mpminternal.ListWorkRows(dm, status, limit)
+	rows, err := mpminternal.ListWorkRows(dm, status, visibility, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -132,9 +154,11 @@ func handleListWorks(dm mpminternal.CoreDB, p map[string]interface{}) (interface
 	// indistinguishable at the wire and diverged from every sibling list
 	// (mpm_handoff list, lessons search, memory query — all envelopes).
 	return map[string]interface{}{
-		"success": true,
-		"works":   rows,
-		"count":   len(rows),
+		"success":    true,
+		"works":      rows,
+		"count":      len(rows),
+		"status":     status,
+		"visibility": visibility,
 	}, nil
 }
 
@@ -391,4 +415,68 @@ func isValidWorkStatus(s string) bool {
 		}
 	}
 	return false
+}
+
+// isValidWorkVisibility is the visibility-axis twin of
+// isValidWorkStatus. Same W-010 rationale — an unknown visibility is a
+// caller error, never an empty result set.
+func isValidWorkVisibility(s string) bool {
+	for _, v := range validWorkVisibilities {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// workIDFromParams resolves the canonical `work_id` plus the `id` alias
+// used by the lifecycle commands.
+func workIDFromParams(p map[string]interface{}) string {
+	workID, _ := p["work_id"].(string)
+	if workID == "" {
+		if v, ok := p["id"].(string); ok {
+			workID = v
+		}
+	}
+	return workID
+}
+
+// handleArchiveWork takes a terminal work item out of the operational
+// view. Refuses an `open` item with no writes, and is idempotent: an
+// already-archived item reports already_archived=true and appends no
+// second ledger event.
+func handleArchiveWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	workID := workIDFromParams(p)
+	if workID == "" {
+		return nil, fmt.Errorf("work_id is required for archive")
+	}
+	note, _ := p["note"].(string)
+	w, already, err := dm.ArchiveWorkWithContext(workID, note, ac)
+	if err != nil {
+		return nil, workNotFoundHint(err, workID)
+	}
+	out := mpminternal.WorkRowToMap(w)
+	out["success"] = true
+	if already {
+		out["already_archived"] = true
+	}
+	return out, nil
+}
+
+// handleUnarchiveWork restores an archived item to the operational
+// view. It never reopens: an item archived while cancelled returns as
+// cancelled. Unarchiving a non-archived item is an error, not a no-op.
+func handleUnarchiveWork(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	workID := workIDFromParams(p)
+	if workID == "" {
+		return nil, fmt.Errorf("work_id is required for unarchive")
+	}
+	note, _ := p["note"].(string)
+	w, err := dm.UnarchiveWorkWithContext(workID, note, ac)
+	if err != nil {
+		return nil, workNotFoundHint(err, workID)
+	}
+	out := mpminternal.WorkRowToMap(w)
+	out["success"] = true
+	return out, nil
 }

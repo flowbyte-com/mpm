@@ -203,6 +203,15 @@ func ClassifyError(err error) (ToolOutcomeClass, string) {
 	if errors.Is(err, ErrInvalidWorkTransition) {
 		return OutcomeClassConflict, "state_transition_invalid"
 	}
+	// Archive lifecycle rejections (2026-09-30). Both are state
+	// conflicts, not substrate faults: the call is well-formed and the
+	// item's current state is what forbids it.
+	if errors.Is(err, ErrWorkNotTerminal) {
+		return OutcomeClassConflict, "work_not_terminal"
+	}
+	if errors.Is(err, ErrWorkNotArchived) {
+		return OutcomeClassConflict, "work_not_archived"
+	}
 	// Memory save scanner rejections (sensitive / poison content).
 	// These are deliberate policy enforcement, not MPM substrate
 	// failures. Classify as validation with a bounded code so Doctor

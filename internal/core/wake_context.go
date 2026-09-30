@@ -1537,11 +1537,14 @@ func (dm *DatabaseManager) clusterKeyKnownByEpistemology(clusterKey string) (boo
 // top: a newly created work and an old-but-just-updated work both surface,
 // while genuinely untouched old work sinks below the bound instead of
 // permanently occupying it. Closed/cancelled work is excluded by the
-// status='open' filter. Titles are truncated to 120 chars.
+// status='open' filter, and archived work is excluded by
+// archived_at IS NULL — an open item can never be archived (archive is
+// terminal-only), so the two predicates do not overlap in practice.
+// Titles are truncated to 120 chars.
 func (dm *DatabaseManager) gatherOpenWorks() []WakeContextWork {
 	rows, err := dm.db.Query(`
 		SELECT id, title, status, verification, created_at
-		FROM works WHERE status = 'open'
+		FROM works WHERE status = 'open' AND archived_at IS NULL
 		ORDER BY updated_at DESC, created_at DESC
 		LIMIT 5
 	`)
@@ -1605,7 +1608,7 @@ func (dm *DatabaseManager) gatherCompletedWorks() []WakeContextWork {
 	out := make([]WakeContextWork, 0, 5)
 	rows, err := dm.db.Query(`
 		SELECT id, title, status, verification, created_at
-		FROM works WHERE status = 'done'
+		FROM works WHERE status = 'done' AND archived_at IS NULL
 		ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC
 		LIMIT 5
 	`)

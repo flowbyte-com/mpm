@@ -427,6 +427,11 @@ type CoreDB interface {
 	ListWorks() ([]*Work, error)
 	ListAllWorks() ([]*Work, error)
 	ListWorksByStatus(status string) ([]*Work, error)
+	// ListWorksByStatusAndVisibility applies both query axes
+	// independently: status (lifecycle) and visibility (operational
+	// view). Neither is derived from the other.
+	// Design: docs/designs/2026-09-30-work-archive-and-purge.md §2
+	ListWorksByStatusAndVisibility(status, visibility string) ([]*Work, error)
 	// ResolveFrameworkModelForInvocations batch-loads framework/model
 	// provenance for work history display (F16).
 	ResolveFrameworkModelForInvocations(workID string, invocationIDs []string) map[string]WorkFrameworkModel
@@ -439,6 +444,12 @@ type CoreDB interface {
 	CancelWorkWithContext(workID, note string, ac ActiveContext) (*Work, error)
 	AddWorkNoteWithContext(workID, note string, ac ActiveContext) (*WorkEvent, error)
 	ReopenWorkWithContext(workID string, ac ActiveContext) (*Work, error)
+	// Archive lifecycle. ArchiveWorkWithContext is idempotent and
+	// terminal-only (alreadyArchived=true, no event, when the item is
+	// already archived); UnarchiveWorkWithContext is not idempotent and
+	// never changes status.
+	ArchiveWorkWithContext(workID, note string, ac ActiveContext) (*Work, bool, error)
+	UnarchiveWorkWithContext(workID, note string, ac ActiveContext) (*Work, error)
 	UpdateWorkWithContext(workID, title, content, statusStr string, ac ActiveContext) (*Work, error)
 	GetActiveDirectiveIDs(framework string) []string
 	RecordGitEvidenceForWork(workID string)

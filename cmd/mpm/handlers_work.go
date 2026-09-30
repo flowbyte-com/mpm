@@ -401,6 +401,21 @@ func handleWorkItem(args []string) int {
 			return 1
 		}
 	}
+	// --visibility is the second, independent axis (2026-09-30). It is
+	// valid only for `list` — there is no "visibility of a single
+	// work item" operation. Rejecting it elsewhere keeps a typo from
+	// being silently ignored on archive/unarchive.
+	if v, ok := params["visibility"].(string); ok && v != "" {
+		valid := v == "active" || v == "archived" || v == "all"
+		if !valid {
+			usererror.Error("mpm work item: --visibility %q is not a valid list filter (use active|archived|all)", v)
+			return 1
+		}
+		if sub != "list" {
+			usererror.Error("mpm work item: --visibility applies only to `list`")
+			return 1
+		}
+	}
 
 	var action string
 	switch sub {
@@ -489,6 +504,16 @@ func handleWorkItem(args []string) int {
 		}
 		action = "reopen"
 		params["work_id"] = positional[0]
+	case "archive", "unarchive":
+		// Archive lifecycle (2026-09-30). Archive is TERMINAL-ONLY:
+		// an open item is refused with no writes. Unarchive restores
+		// visibility only and never reopens work.
+		if len(positional) < 1 {
+			usererror.Error("mpm work item %s requires a work_id positional arg", sub)
+			return 1
+		}
+		action = sub
+		params["work_id"] = positional[0]
 	case "resolve-contradiction":
 		// F6-1 / T20-1: agent-facing first-class contradiction resolution.
 		// The recovery path for unsubstantiated disputes against work
@@ -512,7 +537,7 @@ func handleWorkItem(args []string) int {
 		printWorkItemHelp()
 		return 0
 	default:
-		usererror.Error("mpm work item: unknown subcommand %q\navailable subcommands: create, list, show, complete, cancel, history, note, reopen, resolve-contradiction, update", sub)
+		usererror.Error("mpm work item: unknown subcommand %q\navailable subcommands: create, list, show, complete, cancel, history, note, reopen, archive, unarchive, resolve-contradiction, update", sub)
 		return 1
 	}
 
@@ -558,6 +583,10 @@ func handleWorkItemList(params map[string]interface{}) int {
 	if status == "" {
 		status = "open"
 	}
+	visibility, _ := params["visibility"].(string)
+	if visibility == "" {
+		visibility = string(mpminternal.WorkVisibilityActive)
+	}
 	limit := 0
 	if v, ok := params["limit"]; ok {
 		switch x := v.(type) {
@@ -569,27 +598,40 @@ func handleWorkItemList(params map[string]interface{}) int {
 			limit = int(x)
 		}
 	}
-	rows, err := mpminternal.ListWorkRows(dm, status, limit)
+	rows, err := mpminternal.ListWorkRows(dm, status, visibility, limit)
 	if err != nil {
 		return respond("", fmt.Sprintf("work item list: %v", err), 1)
 	}
 	if jsonOutput {
 		// JSON mode: preserve the canonical envelope shape
-		// (success/works/count).
+		// (success/works/count) and echo both axes so a scripted
+		// caller can tell an empty result from a filtered one.
 		out := map[string]interface{}{
-			"success": true,
-			"works":   rows,
-			"count":   len(rows),
+			"success":    true,
+			"works":      rows,
+			"count":      len(rows),
+			"status":     status,
+			"visibility": visibility,
 		}
 		enc, _ := json.Marshal(out)
 		fmt.Println(string(enc))
 		return 0
 	}
 	// Human mode: canonical visual grammar.
-	render.Heading(os.Stdout, "Work item list")
+	heading := "Work item list"
+	if visibility == string(mpminternal.WorkVisibilityArchived) {
+		heading = "Work item list (archived)"
+	} else if visibility == string(mpminternal.WorkVisibilityAll) {
+		heading = "Work item list (active + archived)"
+	}
+	render.Heading(os.Stdout, heading)
 	render.BlankLine(os.Stdout)
 	if len(rows) == 0 {
-		render.Plain(os.Stdout, fmt.Sprintf("No %s work items.", status))
+		scope := status
+		if visibility != string(mpminternal.WorkVisibilityActive) {
+			scope = fmt.Sprintf("%s, %s", status, visibility)
+		}
+		render.Plain(os.Stdout, fmt.Sprintf("No %s work items.", scope))
 		return 0
 	}
 	for _, row := range rows {
@@ -692,6 +734,14 @@ func parseWorkItemArgs(rest []string) (map[string]interface{}, []string, error) 
 		case strings.HasPrefix(a, "--reason="):
 			params["reason"] = strings.TrimPrefix(a, "--reason=")
 			i++
+		case a == "--visibility" && i+1 < len(rest):
+			// Second, independent query axis (2026-09-30). Not derived
+			// from --status: `done` + `archived` is a coherent query.
+			params["visibility"] = rest[i+1]
+			i += 2
+		case strings.HasPrefix(a, "--visibility="):
+			params["visibility"] = strings.TrimPrefix(a, "--visibility=")
+			i++
 		case a == "--json" || a == "-j":
 			// 2026-09-14 release-pass: --json flag is honoured by
 			// handleWorkItemList (list subcommand) for machine-readable
@@ -700,7 +750,7 @@ func parseWorkItemArgs(rest []string) (map[string]interface{}, []string, error) 
 			params["json"] = true
 			i++
 		case strings.HasPrefix(a, "--"):
-			return nil, nil, fmt.Errorf("unknown flag %q (supported: --status, --limit, --note, --content, --title, --reason, --json)", a)
+			return nil, nil, fmt.Errorf("unknown flag %q (supported: --status, --visibility, --limit, --note, --content, --title, --reason, --json)", a)
 		default:
 			positional = append(positional, a)
 			i++
@@ -722,21 +772,30 @@ func printWorkItemHelp() {
 	render.BlankLine(os.Stdout)
 	render.Section(os.Stdout, "Subcommands")
 	render.Label(os.Stdout, "create <title> [content]", "create a new work item (--title and positional are both supported; positional wins on conflict)")
-	render.Label(os.Stdout, "list [--status <s>] [--limit <n>]", "list work items (status: open|done|cancelled|all; default open)")
+	render.Label(os.Stdout, "list [--status <s>] [--visibility <v>] [--limit <n>]", "list work items (status: open|done|cancelled|all, default open; visibility: active|archived|all, default active)")
 	render.Label(os.Stdout, "show <work_id>", "show a single work item by id")
 	render.Label(os.Stdout, "complete <work_id> [--note <text>]", "mark a work item complete (records a completion event)")
 	render.Label(os.Stdout, "cancel <work_id> [--note <text>]", "cancel a work item (locks verification below verified)")
 	render.Label(os.Stdout, "history <work_id>", "show the full event ledger for a work item")
 	render.Label(os.Stdout, "note <work_id> --note <text>", "append a free-form note to a work item's event ledger")
 	render.Label(os.Stdout, "reopen <work_id>", "reopen a cancelled work item")
+	render.Label(os.Stdout, "archive <work_id> [--note <text>]", "take a FINISHED (done or cancelled) item out of every default view. Open items are refused.")
+	render.Label(os.Stdout, "unarchive <work_id> [--note <text>]", "return an archived item to the default views. Never reopens it.")
 	render.Label(os.Stdout, "resolve-contradiction <work_id> --reason <text>", "withdraw unsubstantiated dispute evidence and re-derive verification. Audit-trail reason required.")
 	render.Label(os.Stdout, "update <work_id> [--title <t>] [--content <c>] [--status <s>]", "update a work item's title/content/status")
+	render.BlankLine(os.Stdout)
+	render.Section(os.Stdout, "Status and visibility are separate filters")
+	render.Plain(os.Stdout, "  --status is the lifecycle (open|done|cancelled|all); --visibility is the operational view")
+	render.Plain(os.Stdout, "  (active|archived|all). Neither is derived from the other: --status done --visibility archived")
+	render.Plain(os.Stdout, "  asks a question the old single-filter form could not express.")
 	render.BlankLine(os.Stdout)
 	render.Section(os.Stdout, "Examples")
 	render.Plain(os.Stdout, "  mpm work item create \"ship parser fix\" \"introduce new lexer\"")
 	render.Plain(os.Stdout, "  mpm work item list --status open --limit 10")
 	render.Plain(os.Stdout, "  mpm work item complete work-abc123 --note \"shipped in commit def456\"")
 	render.Plain(os.Stdout, "  mpm work item history work-abc123")
+	render.Plain(os.Stdout, "  mpm work item archive work-abc123 --note \"shipped in alpha-final\"")
+	render.Plain(os.Stdout, "  mpm work item list --status all --visibility archived")
 	render.BlankLine(os.Stdout)
 }
 

@@ -208,9 +208,21 @@ mpm call mpm_work --payload '{"action":"complete","params":{"work_id":"<id>"}}'
 mpm call mpm_work --payload '{"action":"history","params":{"work_id":"<id>"}}'
 mpm call mpm_work --payload '{"action":"note","params":{"work_id":"<id>","note":"Confirmed: --json before positional causes parse failure"}}'
 mpm call mpm_work --payload '{"action":"reopen","params":{"work_id":"<id>"}}'
+mpm call mpm_work --payload '{"action":"archive","params":{"work_id":"<id>"}}'
+mpm call mpm_work --payload '{"action":"unarchive","params":{"work_id":"<id>"}}'
+```
+
+The same surface over the CLI:
+
+```
+mpm work item archive   <work_id> [--note <text>]
+mpm work item unarchive <work_id> [--note <text>]
+mpm work item list [--status <s>] [--visibility <v>] [--limit <n>]
 ```
 
 New agents should use `complete`, `cancel`, and `reopen` directly. The v1 `update` action with `status` param is preserved for backward compatibility but maps to the appropriate event type internally.
+
+**Archive lifecycle.** Archiving removes a finished item from the operational surfaces without deleting anything. It is a visibility operation, expressed as a projection of two new ledger events (`archived`, `unarchived`) into `works.archived_at`; `NULL` means active. Archiving is **terminal-only** — `archive` refuses work whose `status` is still `open`, because an open commitment is a live obligation an agent is still acting on. A second `archive` is a no-op success that reports `already_archived` rather than an error or a duplicate event. `unarchive` restores visibility and nothing else: it never reopens work, so a `cancelled` item unarchived stays `cancelled` and never becomes `open`. Unarchiving a non-archived item is an error. Neither operation touches `verification`.
 
 **Phase 2 verification model.** The `complete` action emits `WorkEventTypeClaimedComplete` — an event recording that an agent *claimed* completion, not that the work is verified. Verification is derived separately via `DeriveWorkVerification`, which aggregates evidence rows (git observations, test results, file artifacts, manual review) into one of four epistemic states:
 
@@ -222,6 +234,10 @@ New agents should use `complete`, `cancel`, and `reopen` directly. The v1 `updat
 | `contradicted` | Evidence contradicts the claim |
 
 `claimed_complete` changes the work's `status` to `done`; it does not change `verification`. The `evidence_observed` event type records that evidence was attached. The `status` column and the `verification` column are orthogonal — `status=done, verification=unverified` is a valid, expected state immediately after `complete` is called with no evidence yet attached.
+
+**Status and visibility are separate filters.** `status` is the lifecycle axis (`open` / `done` / `cancelled` / `all`); `visibility` is the operational axis (`active` / `archived` / `all`, default `active`). Neither is derived from the other: an archived item still has whatever `status` it had, and a `done` item can be active or archived. Both compose on every listing, so the four meaningful combinations are all reachable — `status=done, visibility=archived` is "finished and filed away", and `--status all --visibility all` is the complete set.
+
+All seven default operational surfaces exclude archived work: `mpm wake` open works, `mpm wake` completed refs, `mpm work` list, `mpm context` focus, contextual candidates, session work references, and the `ListWorks` / `ListAllWorks` core queries. Explicit by-id access is unchanged and deliberately *not* visibility-filtered — `show`, `history`, and `get` still resolve an archived item, because archive hides an item from the operational view, it does not make it unretrievable. The `mpm_work` list envelope echoes both filters it applied, so an empty result is distinguishable from a filtered one.
 
 #### Reference
 
@@ -2952,11 +2968,11 @@ The CTE-updating-read pattern is atomic — concurrent callers see disjoint wake
 
 ### Wake open_works ordering
 
-`read_wake_context` surfaces at most five open work items ordered by `updated_at DESC` (created_at DESC as tiebreak): freshly created work and old-but-recently-touched work rank ahead of stale history, so a fresh agent sees current work instead of the five oldest items. Closed and cancelled work never appears. Both JSON and system-prompt projections consume identical underlying data; the handoff block renders once (consuming read) unless you gather read-only.
+`read_wake_context` surfaces at most five open work items ordered by `updated_at DESC` (created_at DESC as tiebreak): freshly created work and old-but-recently-touched work rank ahead of stale history, so a fresh agent sees current work instead of the five oldest items. Closed and cancelled work never appears, and neither does archived work (see §Work, "Status and visibility are separate filters"). Both JSON and system-prompt projections consume identical underlying data; the handoff block renders once (consuming read) unless you gather read-only.
 
 ### mpm_work response envelopes
 
-`mpm_work action=list` returns `{"success":true,"works":[...],"count":N}` and `action=history` returns `{"success":true,"work_id":"...","events":[...],"count":N}`. History events are enriched with `framework_name`/`model` resolved from authoritative provenance (`tool_invocations`, falling back to `artifact_provenance`) — absent optional metadata is omitted rather than fabricated. `works.session_id` is populated from the ActiveContext session when the caller omits it.
+`mpm_work action=list` returns `{"success":true,"works":[...],"count":N,"status":"<applied>","visibility":"<applied>"}` and `action=history` returns `{"success":true,"work_id":"...","events":[...],"count":N}`. The list envelope echoes both filter axes it applied, because `count:0` with an unstated filter is indistinguishable from "no work exists". History events are enriched with `framework_name`/`model` resolved from authoritative provenance (`tool_invocations`, falling back to `artifact_provenance`) — absent optional metadata is omitted rather than fabricated. `works.session_id` is populated from the ActiveContext session when the caller omits it. `action=archive` returns the updated work; the idempotent case adds `already_archived:true`. `action=unarchive` returns the updated work with no `archived_at` key.
 
 ## B.6 Wake payload shape
 

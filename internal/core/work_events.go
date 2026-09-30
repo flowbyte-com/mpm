@@ -14,6 +14,14 @@ const (
 	// Phase 2: provenance/verification events
 	WorkEventTypeClaimedComplete    WorkEventType = "claimed_complete"
 	WorkEventTypeEvidenceObserved   WorkEventType = "evidence_observed"
+	// Archive lifecycle (2026-09-30). Visibility events, NOT status
+	// transitions: they leave works.status untouched, so archiving a
+	// cancelled item and later unarchiving returns it to `cancelled`,
+	// never to `open`.
+	//
+	// Design: docs/designs/2026-09-30-work-archive-and-purge.md §1.2
+	WorkEventTypeArchived   WorkEventType = "archived"
+	WorkEventTypeUnarchived WorkEventType = "unarchived"
 )
 
 // WorkEvent is an immutable record of one state transition in a Work item's lifetime.

@@ -735,13 +735,14 @@ For indexed search across all memories, use mpm_memory query.`,
 		Name: "mpm_work",
 		Description: `Named work items with an immutable event ledger: create, complete, cancel, or track history.
 Use when: you have made a commitment to do something that will span multiple sessions; you need to track a task's progress over time; you want to record a note or completion evidence against a specific piece of work.
-The event ledger (history) provides full provenance: who created it, when it was completed, what evidence was attached. A work item is never truly "done" until Git evidence is attached via the complete action.
+The event ledger (history) provides full provenance: who created it, when it was completed, what evidence was attached.
 CRITICAL: the complete action requires work_id. Host session termination does NOT auto-complete a work item — the agent decides when work is done and calls action=complete explicitly.
+ARCHIVE: action=archive removes a FINISHED (done or cancelled) item from wake context and every default listing, without deleting anything; action=unarchive puts it back. Archiving never reopens work. Listing accepts an independent visibility filter: active (default) | archived | all.
 Do not use when: you just want to store a fact or insight (mpm_memory save).`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["create","list","show","update","complete","cancel","history","note","reopen","resolve_contradiction"]}
+				"action": {"type": "string", "enum": ["create","list","show","update","complete","cancel","history","note","reopen","archive","unarchive","resolve_contradiction"]}
 			},
 			"required": ["action"],
 			"oneOf": [
@@ -763,7 +764,16 @@ Do not use when: you just want to store a fact or insight (mpm_memory save).`,
 				},
 				{
 					"properties": {
-						"action": {"const": "list"}
+						"action": {"const": "list"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"status":     {"type": "string", "enum": ["open","done","cancelled","all"], "default": "open", "description": "Lifecycle axis. Independent of visibility."},
+								"visibility": {"type": "string", "enum": ["active","archived","all"], "default": "active", "description": "Operational-view axis. active excludes archived work; archived returns only archived work; all is the active+archived union. Independent of status."},
+								"limit":      {"type": "integer"}
+							},
+							"additionalProperties": true
+						}
 					}
 				},
 				{
@@ -855,6 +865,38 @@ Do not use when: you just want to store a fact or insight (mpm_memory save).`,
 						"params": {
 							"type": "object",
 							"properties": {"work_id": {"type": "string"}, "note": {"type": "string"}},
+							"required": ["work_id"],
+							"additionalProperties": true
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "archive"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"work_id": {"type": "string", "description": "Canonical id. The 'id' key is accepted as an alias."},
+								"id":      {"type": "string", "description": "Alias for work_id."},
+								"note":    {"type": "string"}
+							},
+							"required": ["work_id"],
+							"additionalProperties": true
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "unarchive"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"work_id": {"type": "string", "description": "Canonical id. The 'id' key is accepted as an alias."},
+								"id":      {"type": "string", "description": "Alias for work_id."},
+								"note":    {"type": "string"}
+							},
 							"required": ["work_id"],
 							"additionalProperties": true
 						}

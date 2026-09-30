@@ -745,7 +745,12 @@ var WorkTables = []string{
 		created_at   INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		updated_at   INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 		completed_at INTEGER,
-		session_id   TEXT
+		session_id   TEXT,
+		-- Archive projection. NULL = not archived. Derived from the
+		-- archived/unarchived event pair; written only by
+		-- AppendWorkEvent, never by an ad-hoc UPDATE. Independent of
+		-- status: archiving never implies completion or cancellation.
+		archived_at  INTEGER
 	);`,
 	`CREATE INDEX IF NOT EXISTS idx_works_status ON works(status);`,
 	`CREATE INDEX IF NOT EXISTS idx_works_session ON works(session_id);`,
@@ -767,7 +772,8 @@ var WorkTables = []string{
 		                        'created','note_appended','completed',
 		                        'cancelled','reopened',
 		                        'title_updated','content_updated',
-		                        'claimed_complete','evidence_observed'
+		                        'claimed_complete','evidence_observed',
+		                        'archived','unarchived'
 		                      )),
 		created_at            INTEGER NOT NULL
 		                      DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
@@ -1354,6 +1360,12 @@ var SafeMigrations = [][3]string{
 	// artifact_provenance instead.
 	{"works", "verification", "TEXT"},
 	{"work_events", "directive_ids", "TEXT DEFAULT '[]'"},
+
+	// Archive lifecycle (2026-09-30): works.archived_at is the derived
+	// projection of the archived/unarchived event pair. NULL = active.
+	// Independent of status — archiving never implies completion.
+	// Design: docs/designs/2026-09-30-work-archive-and-purge.md §1
+	{"works", "archived_at", "INTEGER"},
 
 	// F-D1: runtime-clock decay contract. Decay must advance according to
 	// accumulated scheduler/CLI runtime, not wall-clock downtime. A 14-day

@@ -340,7 +340,7 @@ func (dm *DatabaseManager) gatherActiveWorkIDs() []string {
 	}
 	rows, err := dm.db.Query(`
 		SELECT id FROM works
-		WHERE status = 'open'
+		WHERE status = 'open' AND archived_at IS NULL
 		ORDER BY updated_at DESC, created_at DESC
 		LIMIT 5
 	`)

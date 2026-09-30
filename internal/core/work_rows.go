@@ -10,10 +10,10 @@
 package internal
 
 // ListWorkRows returns the structured work-list rows for the given
-// status filter and limit. The rows are a []map[string]interface{}
-// with the canonical work-row shape (id / title / content /
-// status / verification / created_at / updated_at / completed_at /
-// session_id).
+// status filter, visibility filter, and limit. The rows are a
+// []map[string]interface{} with the canonical work-row shape (id /
+// title / content / status / verification / created_at / updated_at /
+// completed_at / archived_at / session_id).
 //
 // The same helper is called from:
 //   - handleListWorks in internal/core/tools/work_handlers.go (the
@@ -29,18 +29,16 @@ package internal
 // singular "ListWorks" call (status default open) is preserved by
 // mapping an empty status to "open".
 //
+// visibility is the independent second axis, "active" / "archived" /
+// "all", defaulting to "active". Both are validated at this boundary so
+// a typo on either never becomes an indistinguishable zero-row result.
+//
 // Limit values <= 0 mean "no cap".
-func ListWorkRows(dm CoreDB, status string, limit int) ([]map[string]interface{}, error) {
+func ListWorkRows(dm CoreDB, status, visibility string, limit int) ([]map[string]interface{}, error) {
 	if status == "" {
 		status = "open"
 	}
-	var works []*Work
-	var err error
-	if status == "all" {
-		works, err = dm.ListAllWorks()
-	} else {
-		works, err = dm.ListWorksByStatus(status)
-	}
+	works, err := dm.ListWorksByStatusAndVisibility(status, visibility)
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +70,11 @@ func WorkRowToMap(w *Work) map[string]interface{} {
 	}
 	if w.CompletedAt != nil {
 		m["completed_at"] = *w.CompletedAt
+	}
+	// Mirrors completed_at exactly: absent on the wire means "not
+	// archived". There is deliberately no separate boolean.
+	if w.ArchivedAt != nil {
+		m["archived_at"] = *w.ArchivedAt
 	}
 	if w.SessionID != "" {
 		m["session_id"] = w.SessionID

@@ -5509,14 +5509,17 @@ func (dm *DatabaseManager) addWorkTx(node DBNode, title, content, sessionID stri
 	return id, nil
 }
 
+// GetWork fetches a single work item by id. This is an explicit
+// by-id surface and is deliberately NOT visibility-filtered: archived
+// work stays fully reachable once its id is known (§3.2 of the design).
 func (dm *DatabaseManager) GetWork(id string) (*Work, error) {
 	var w Work
 	var content, sessionID, verification sql.NullString
-	var completedAt sql.NullInt64
+	var completedAt, archivedAt sql.NullInt64
 	err := dm.db.QueryRow(`
-		SELECT id, title, content, status, verification, created_at, updated_at, completed_at, session_id
+		SELECT id, title, content, status, verification, created_at, updated_at, completed_at, session_id, archived_at
 		FROM works WHERE id = ?
-	`, id).Scan(&w.ID, &w.Title, &content, &w.Status, &verification, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID)
+	`, id).Scan(&w.ID, &w.Title, &content, &w.Status, &verification, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID, &archivedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("work not found: %s", id)
 	}
@@ -5536,6 +5539,9 @@ func (dm *DatabaseManager) GetWork(id string) (*Work, error) {
 	}
 	if sessionID.Valid {
 		w.SessionID = sessionID.String
+	}
+	if archivedAt.Valid {
+		w.ArchivedAt = &archivedAt.Int64
 	}
 	return &w, nil
 }
@@ -5729,79 +5735,20 @@ func (dm *DatabaseManager) ResolveFrameworkModelForInvocations(workID string, in
 }
 
 func (dm *DatabaseManager) ListWorks() ([]*Work, error) {
-	rows, err := dm.db.Query(`
-		SELECT id, title, content, status, verification, created_at, updated_at, completed_at, session_id
-		FROM works WHERE status = 'open'
-		ORDER BY updated_at DESC, created_at DESC
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("list works: %w", err)
-	}
-	defer rows.Close()
-
-	var works []*Work
-	for rows.Next() {
-		var w Work
-		var content, sessionID, verification sql.NullString
-		var completedAt sql.NullInt64
-		if err := rows.Scan(&w.ID, &w.Title, &content, &w.Status, &verification, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID); err != nil {
-			return nil, fmt.Errorf("scan work row: %w", err)
-		}
-		if content.Valid {
-			w.Content = content.String
-		}
-		if verification.Valid && verification.String != "" {
-			w.Verification = WorkVerification(verification.String)
-		} else {
-			w.Verification = WorkVerificationUnverified
-		}
-		if completedAt.Valid {
-			w.CompletedAt = &completedAt.Int64
-		}
-		if sessionID.Valid {
-			w.SessionID = sessionID.String
-		}
-		works = append(works, &w)
-	}
-	return works, nil
+	// Default operational view: open + not archived. This is the legacy
+	// default-open path; archived items are excluded so a completed
+	// work item that was later archived does not linger in wake or
+	// listing surfaces.
+	return dm.listWorksByFilter("open", WorkVisibilityActive)
 }
 
 func (dm *DatabaseManager) ListAllWorks() ([]*Work, error) {
-	rows, err := dm.db.Query(`
-		SELECT id, title, content, status, verification, created_at, updated_at, completed_at, session_id
-		FROM works
-		ORDER BY updated_at DESC, created_at DESC
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("list all works: %w", err)
-	}
-	defer rows.Close()
-
-	var works []*Work
-	for rows.Next() {
-		var w Work
-		var content, sessionID, verification sql.NullString
-		var completedAt sql.NullInt64
-		if err := rows.Scan(&w.ID, &w.Title, &content, &w.Status, &verification, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID); err != nil {
-			return nil, fmt.Errorf("scan work row: %w", err)
-		}
-		if content.Valid {
-			w.Content = content.String
-		}
-		if verification.Valid && verification.String != "" {
-			w.Verification = WorkVerification(verification.String)
-		} else {
-			w.Verification = WorkVerificationUnverified
-		}
-		if completedAt.Valid {
-			w.CompletedAt = &completedAt.Int64
-		}
-		if sessionID.Valid {
-			w.SessionID = sessionID.String
-		}
-		works = append(works, &w)
-	}
-	return works, nil
+	// Backs `status=all`. "All statuses" was never an archive-inclusive
+	// contract — nothing could archive when that contract was written —
+	// so `all` here means all *operational* work. Use
+	// ListWorksByStatusAndVisibility("all", "all") for the true
+	// complete inventory.
+	return dm.listWorksByFilter("all", WorkVisibilityActive)
 }
 
 func (dm *DatabaseManager) ListWorksByStatus(status string) ([]*Work, error) {
@@ -5818,13 +5765,75 @@ func (dm *DatabaseManager) ListWorksByStatus(status string) ([]*Work, error) {
 	default:
 		return nil, fmt.Errorf("list works by status: unknown status %q (use open|done|cancelled)", status)
 	}
-	rows, err := dm.db.Query(`
-		SELECT id, title, content, status, verification, created_at, updated_at, completed_at, session_id
-		FROM works WHERE status = ?
-		ORDER BY updated_at DESC, created_at DESC
-	`, status)
+	return dm.listWorksByFilter(status, WorkVisibilityActive)
+}
+
+// ListWorksByStatusAndVisibility is the full two-axis work listing.
+// `status` and `visibility` are validated independently and neither is
+// derived from the other (see WorkVisibility).
+//
+// Design: docs/designs/2026-09-30-work-archive-and-purge.md §2
+func (dm *DatabaseManager) ListWorksByStatusAndVisibility(status string, visibility string) ([]*Work, error) {
+	switch WorkStatus(status) {
+	case WorkStatusOpen, WorkStatusDone, WorkStatusCancelled:
+		// valid
+	case "all":
+		// valid — the "every status" selector
+	default:
+		return nil, fmt.Errorf("list works by status: unknown status %q (use open|done|cancelled|all)", status)
+	}
+	vis, err := NormalizeWorkVisibility(visibility)
 	if err != nil {
-		return nil, fmt.Errorf("list works by status: %w", err)
+		return nil, err
+	}
+	return dm.listWorksByFilter(status, vis)
+}
+
+// listWorksByFilter is the single SQL site for the two-axis work
+// listing. status and visibility are rendered as literal predicates
+// (never user string interpolation — both are already validated
+// against closed enums above), so no parameter binding is possible and
+// no injection surface is introduced.
+func (dm *DatabaseManager) listWorksByFilter(status string, visibility WorkVisibility) ([]*Work, error) {
+	var where []string
+	switch WorkStatus(status) {
+	case WorkStatusOpen, WorkStatusDone, WorkStatusCancelled:
+		where = append(where, "status = ?")
+	case "all":
+		// no status predicate
+	default:
+		return nil, fmt.Errorf("list works: unknown status %q (use open|done|cancelled|all)", status)
+	}
+
+	switch visibility {
+	case WorkVisibilityActive:
+		where = append(where, "archived_at IS NULL")
+	case WorkVisibilityArchived:
+		where = append(where, "archived_at IS NOT NULL")
+	case WorkVisibilityAll:
+		// no visibility predicate — deliberate active+archived union
+	default:
+		return nil, fmt.Errorf("list works: unknown visibility %q (use active|archived|all)", visibility)
+	}
+
+	query := `
+		SELECT id, title, content, status, verification, created_at, updated_at, completed_at, session_id, archived_at
+		FROM works`
+	var args []interface{}
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	query += " ORDER BY updated_at DESC, created_at DESC"
+
+	// The status predicate is the only one that needs a bound value, and
+	// it is always the first element when present.
+	if len(where) > 0 && where[0] == "status = ?" {
+		args = append(args, status)
+	}
+
+	rows, err := dm.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list works: %w", err)
 	}
 	defer rows.Close()
 
@@ -5832,8 +5841,8 @@ func (dm *DatabaseManager) ListWorksByStatus(status string) ([]*Work, error) {
 	for rows.Next() {
 		var w Work
 		var content, sessionID, verification sql.NullString
-		var completedAt sql.NullInt64
-		if err := rows.Scan(&w.ID, &w.Title, &content, &w.Status, &verification, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID); err != nil {
+		var completedAt, archivedAt sql.NullInt64
+		if err := rows.Scan(&w.ID, &w.Title, &content, &w.Status, &verification, &w.CreatedAt, &w.UpdatedAt, &completedAt, &sessionID, &archivedAt); err != nil {
 			return nil, fmt.Errorf("scan work row: %w", err)
 		}
 		if content.Valid {
@@ -5850,7 +5859,13 @@ func (dm *DatabaseManager) ListWorksByStatus(status string) ([]*Work, error) {
 		if sessionID.Valid {
 			w.SessionID = sessionID.String
 		}
+		if archivedAt.Valid {
+			w.ArchivedAt = &archivedAt.Int64
+		}
 		works = append(works, &w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list works: %w", err)
 	}
 	return works, nil
 }
@@ -6122,6 +6137,99 @@ func (dm *DatabaseManager) CancelWorkWithContext(workID, note string, ac ActiveC
 	// committed 'cancelled' status and locks verification below verified.
 	if _, err := dm.DeriveWorkVerification(workID); err != nil {
 		return nil, fmt.Errorf("cancel: derive verification: %w", err)
+	}
+	return dm.GetWork(workID)
+}
+
+// ArchiveWorkWithContext takes a terminal work item out of the
+// operational view by appending an `archived` event. The works row is
+// the derived projection and is updated inside the same transaction as
+// the event INSERT (CLAUDE.md §4: no ad-hoc UPDATE works).
+//
+// Two guards, both design-mandated:
+//   - terminal-only: an `open` item is refused with ErrWorkNotTerminal
+//     and nothing is written. Archiving live work would hide an
+//     unfinished commitment from wake context with no signal.
+//   - idempotent: an already-archived item succeeds with
+//     alreadyArchived=true and appends NO event, so a retried archive
+//     does not add a duplicate ledger row.
+//
+// Archive is orthogonal to status: works.status is never written here.
+// Unarchiving a `cancelled` item restores it to `cancelled`, not open.
+//
+// Design: docs/designs/2026-09-30-work-archive-and-purge.md §1
+func (dm *DatabaseManager) ArchiveWorkWithContext(workID, note string, ac ActiveContext) (work *Work, alreadyArchived bool, err error) {
+	if workID == "" {
+		return nil, false, fmt.Errorf("work_id is required for archive")
+	}
+	// Read current state first so both guards decide before any write.
+	current, err := dm.GetWork(workID)
+	if err != nil {
+		return nil, false, err
+	}
+	if current.IsArchived() {
+		return current, true, nil
+	}
+	if current.Status == WorkStatusOpen {
+		return nil, false, fmt.Errorf("%w: work %s is open; complete or cancel it before archiving",
+			ErrWorkNotTerminal, workID)
+	}
+	prov := dm.provenanceFromContext(ac)
+	directiveIDs := dm.GetActiveDirectiveIDs(ac.FrameworkName)
+	err = dm.WithTx(func(node DBNode) error {
+		_, err := dm.AppendWorkEvent(workID, WorkEvent{
+			EventType:    WorkEventTypeArchived,
+			Note:         note,
+			InvocationID: prov.InvocationID,
+			DirectiveIDs: directiveIDs,
+		}, prov, node)
+		return err
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	// Verification is deliberately NOT re-derived: archive touches no
+	// status, and DeriveWorkVerification reads status, not archived_at.
+	work, err = dm.GetWork(workID)
+	if err != nil {
+		return nil, false, err
+	}
+	return work, false, nil
+}
+
+// UnarchiveWorkWithContext restores a work item to the operational
+// view. It clears archived_at and NEVER touches status — an item
+// archived while cancelled returns as cancelled, and re-entering
+// `open_works` requires an explicit `reopen`.
+//
+// Unarchiving a non-archived item is an error (ErrWorkNotArchived) with
+// no writes, not a silent success.
+//
+// Design: docs/designs/2026-09-30-work-archive-and-purge.md §1.4
+func (dm *DatabaseManager) UnarchiveWorkWithContext(workID, note string, ac ActiveContext) (*Work, error) {
+	if workID == "" {
+		return nil, fmt.Errorf("work_id is required for unarchive")
+	}
+	current, err := dm.GetWork(workID)
+	if err != nil {
+		return nil, err
+	}
+	if !current.IsArchived() {
+		return nil, fmt.Errorf("%w: work %s", ErrWorkNotArchived, workID)
+	}
+	prov := dm.provenanceFromContext(ac)
+	directiveIDs := dm.GetActiveDirectiveIDs(ac.FrameworkName)
+	err = dm.WithTx(func(node DBNode) error {
+		_, err := dm.AppendWorkEvent(workID, WorkEvent{
+			EventType:    WorkEventTypeUnarchived,
+			Note:         note,
+			InvocationID: prov.InvocationID,
+			DirectiveIDs: directiveIDs,
+		}, prov, node)
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
 	return dm.GetWork(workID)
 }
@@ -6952,7 +7060,8 @@ func (dm *DatabaseManager) migrateWorkEvents() error {
 		                        'created','note_appended','completed',
 		                        'cancelled','reopened',
 		                        'title_updated','content_updated',
-		                        'claimed_complete','evidence_observed'
+		                        'claimed_complete','evidence_observed',
+		                        'archived','unarchived'
 		                      )),
 		created_at            INTEGER NOT NULL
 		                      DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
@@ -7040,8 +7149,14 @@ func (dm *DatabaseManager) migrateWorkEventsCheck() error {
 	hasDirective := strings.Contains(sqlDef, "directive_ids")
 	hasActor := strings.Contains(sqlDef, "actor_kind")
 	hasGit := strings.Contains(sqlDef, "git_head_before")
-	// New shape: has claimed, has directive, no actor/git
-	if hasClaimed && hasDirective && !hasActor && !hasGit {
+	// hasArchived is the archive-lifecycle term (2026-09-30). Without it in
+	// the early-return condition, a database created before the archive
+	// feature would satisfy every other term and be left with the old CHECK —
+	// so the first `archive` call on an existing install would fail its
+	// constraint. This probe is the only thing that upgrades existing DBs.
+	hasArchived := strings.Contains(sqlDef, "'archived'")
+	// New shape: has claimed, has directive, has archived, no actor/git
+	if hasClaimed && hasDirective && hasArchived && !hasActor && !hasGit {
 		return nil
 	}
 	// Need to recreate table with domain-neutral schema.
@@ -7060,7 +7175,8 @@ func (dm *DatabaseManager) migrateWorkEventsCheck() error {
 		                        'created','note_appended','completed',
 		                        'cancelled','reopened',
 		                        'title_updated','content_updated',
-		                        'claimed_complete','evidence_observed'
+		                        'claimed_complete','evidence_observed',
+		                        'archived','unarchived'
 		                      )),
 		created_at            INTEGER NOT NULL
 		                      DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
@@ -7240,6 +7356,11 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 	var newCompletedAt *int64
 	var newTitle *string
 	var newContent *string
+	// newArchivedAt is a three-state projection input: nil pointer means
+	// "do not touch archived_at", and the explicit clearArchived flag is
+	// needed to distinguish "leave it alone" from "set it back to NULL".
+	var newArchivedAt *int64
+	clearArchived := false
 	switch event.EventType {
 	case WorkEventTypeCreated:
 		// The works row was just INSERTed with status='open' by AddWork.
@@ -7288,6 +7409,17 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 		// content; only title/content updates are routed to the
 		// works-row projection at the bottom of this function.
 		newStatus = ""
+	case WorkEventTypeArchived:
+		// Visibility event, not a status transition. newStatus stays empty
+		// so the F-B1 matrix below is bypassed entirely: archiving a
+		// `cancelled` item must not attempt cancelled → anything.
+		newStatus = ""
+		newArchivedAt = &now
+	case WorkEventTypeUnarchived:
+		// Unarchiving NEVER reopens work. Status is untouched, so a
+		// `cancelled` item returns to the operational view as `cancelled`.
+		newStatus = ""
+		clearArchived = true
 	default:
 		newStatus = "open"
 	}
@@ -7384,37 +7516,20 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 				_, err = dm.db.Exec(`UPDATE works SET content = ?, updated_at = ? WHERE id = ?`, *newContent, now, workID)
 			}
 		}
-	} else if newStatus != "" {
-		if newCompletedAt != nil {
-			if node != nil {
-				_, err = node.ExecTracked(`
-					UPDATE works SET status = ?, updated_at = ?, completed_at = ?
-					WHERE id = ?`, 0, newStatus, now, *newCompletedAt, workID)
-			} else {
-				_, err = dm.db.Exec(`
-					UPDATE works SET status = ?, updated_at = ?, completed_at = ?
-					WHERE id = ?`, newStatus, now, *newCompletedAt, workID)
-			}
-		} else if event.EventType == WorkEventTypeReopened {
-			if node != nil {
-				_, err = node.ExecTracked(`
-					UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
-					WHERE id = ?`, 0, newStatus, now, workID)
-			} else {
-				_, err = dm.db.Exec(`
-					UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
-					WHERE id = ?`, newStatus, now, workID)
-			}
+	} else if newArchivedAt != nil {
+		// Archive: visibility projection only. status/completed_at are
+		// deliberately not in the SET list, so terminal state is preserved
+		// exactly and unarchive can restore it unchanged.
+		if node != nil {
+			_, err = node.ExecTracked(`UPDATE works SET archived_at = ?, updated_at = ? WHERE id = ?`, 0, *newArchivedAt, now, workID)
 		} else {
-			if node != nil {
-				_, err = node.ExecTracked(`
-					UPDATE works SET status = ?, updated_at = ?
-					WHERE id = ?`, 0, newStatus, now, workID)
-			} else {
-				_, err = dm.db.Exec(`
-					UPDATE works SET status = ?, updated_at = ?
-					WHERE id = ?`, newStatus, now, workID)
-			}
+			_, err = dm.db.Exec(`UPDATE works SET archived_at = ?, updated_at = ? WHERE id = ?`, *newArchivedAt, now, workID)
+		}
+	} else if clearArchived {
+		if node != nil {
+			_, err = node.ExecTracked(`UPDATE works SET archived_at = NULL, updated_at = ? WHERE id = ?`, 0, now, workID)
+		} else {
+			_, err = dm.db.Exec(`UPDATE works SET archived_at = NULL, updated_at = ? WHERE id = ?`, now, workID)
 		}
 	} else if newStatus != "" {
 		if newCompletedAt != nil {
@@ -7602,10 +7717,16 @@ func (dm *DatabaseManager) GetLatestWorkEvent(workID string) (*WorkEvent, error)
 }
 
 // RecomputeWorkProjection recomputes the works row from the event ledger.
-// It derives status, title, content, updated_at and completed_at by replaying
-// events in order. Verification is NOT derived from events — it is derived
-// from evidence rows by DeriveWorkVerification. Used when the works row may
-// have drifted from its event source.
+// It derives status, title, content, updated_at, completed_at and
+// archived_at by replaying events in order. Verification is NOT derived
+// from events — it is derived from evidence rows by
+// DeriveWorkVerification. Used when the works row may have drifted from its
+// event source.
+//
+// A work item with no events is left untouched (the hasEvents guard below).
+// That guard is also what makes Phase-B logical purge safe: once the ledger
+// rows are deleted, a later recompute is a no-op and cannot resurrect the
+// works row from a stale projection.
 func (dm *DatabaseManager) RecomputeWorkProjection(workID string) error {
 	rows, err := dm.db.Query(`
 		SELECT event_type, created_at, title, content
@@ -7623,6 +7744,7 @@ func (dm *DatabaseManager) RecomputeWorkProjection(workID string) error {
 		status         = "open"
 		maxCreatedAt   int64
 		completedAt    *int64
+		archivedAt     *int64
 		hasEvents      bool
 	)
 	for rows.Next() {
@@ -7665,6 +7787,10 @@ func (dm *DatabaseManager) RecomputeWorkProjection(workID string) error {
 		case "evidence_observed":
 			// Evidence observed does not change status or verification.
 			// Verification is derived from evidence rows by DeriveWorkVerification.
+		case "archived":
+			archivedAt = &createdAt
+		case "unarchived":
+			archivedAt = nil
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -7677,9 +7803,10 @@ func (dm *DatabaseManager) RecomputeWorkProjection(workID string) error {
 		maxCreatedAt = time.Now().Unix()
 	}
 	_, err = dm.db.Exec(`
-		UPDATE works SET status = ?, title = ?, content = ?, updated_at = ?, completed_at = ?
+		UPDATE works SET status = ?, title = ?, content = ?, updated_at = ?, completed_at = ?,
+		                 archived_at = ?
 		WHERE id = ?
-	`, status, title, content, maxCreatedAt, completedAt, workID)
+	`, status, title, content, maxCreatedAt, completedAt, archivedAt, workID)
 	if err != nil {
 		return fmt.Errorf("update works projection: %w", err)
 	}
