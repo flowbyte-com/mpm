@@ -402,13 +402,22 @@ func (s *DoctorService) checkWorkingContextOrphans() DoctorCheck {
 // the daemon-health verdict with the actionable-overdue verdict, so a
 // healthy scheduler with a domain-work backlog was reported as a
 // scheduler daemon failure. The two are now separate DoctorCheck rows.
+//
+// This is the production entry point and always reads the real clock.
 func (s *DoctorService) checkScheduler() DoctorCheck {
+	return s.checkSchedulerAt(time.Now().Unix())
+}
+
+// checkSchedulerAt is checkScheduler with the evaluation second
+// supplied by the caller. The seam exists for tests only; see
+// cronRetentionStatusAt for why a second-order result needs pinning.
+func (s *DoctorService) checkSchedulerAt(now int64) DoctorCheck {
 	check := DoctorCheck{Name: "Scheduler"}
 
 	// Cron-retention interpretation. Always computed (best-effort) so
 	// the diagnostic surface is informative even when state-file or
 	// HealthCheck are unavailable.
-	check.CronRetention = s.cronRetentionStatus()
+	check.CronRetention = s.cronRetentionStatusAt(now)
 
 	// Daemon-only verdict. HealthCheck is used purely for the cron
 	// retention surface here; actionable-overdue is reported by
@@ -461,8 +470,24 @@ func statusSeverityForOverdue(overdue int64) int {
 // scheduler.state.json heartbeat plus a single bounded DB scan over
 // scheduled_wakes. Constants come from internal/scheduler — never
 // duplicated here.
+//
+// This is the production entry point and always reads the real clock.
+// The seam exists so tests can evaluate the same logic against a fixed
+// second; see cronRetentionStatusAt for why that matters.
 func (s *DoctorService) cronRetentionStatus() *CronRetentionStatus {
-	now := time.Now().Unix()
+	return s.cronRetentionStatusAt(time.Now().Unix())
+}
+
+// cronRetentionStatusAt is cronRetentionStatus with the evaluation
+// second supplied by the caller.
+//
+// The cutoff comparison is strict-< against a whole Unix second, so any
+// test that seeds a row relative to one time.Now() reading and then
+// evaluates against a later one can cross a second boundary mid-run and
+// observe a +1 backlog. Injecting the second makes "a row exactly at
+// the cutoff is excluded" an exact assertion instead of a coin flip on
+// how long the test took.
+func (s *DoctorService) cronRetentionStatusAt(now int64) *CronRetentionStatus {
 	out := &CronRetentionStatus{
 		RetentionWindowSec: int64(scheduler.CronRetentionWindow.Seconds()),
 		SweepCadenceSec:    int64(scheduler.CronRetentionCadence.Seconds()),

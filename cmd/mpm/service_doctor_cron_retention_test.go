@@ -146,6 +146,44 @@ func TestDoctorService_checkScheduler_FreshStartup_AllRowsYoung(t *testing.T) {
 	}
 }
 
+// retentionTestNowUnix is the fixed evaluation second shared by the
+// cron-retention tests. It is a constant, not a reading of the clock:
+// the strict-< cutoff comparison is against a whole Unix second, so a
+// test that seeds from time.Now() and lets the code read the clock
+// again can cross a boundary mid-run and see a +1 backlog.
+const retentionTestNowUnix int64 = 1_700_000_000
+
+// TestDoctorCronRetention_CutoffIsStrictlyLessThan pins the boundary
+// itself, isolated from every other quantity these tests assert.
+//
+// The production sweep and the diagnostic both use strict-<, so a row
+// whose target_time equals the cutoff exactly is NOT eligible, while
+// one second older is. Asserting the pair together is what makes the
+// operator-visible claim ("a row is retained for a full hour, not one
+// second less") true rather than approximately true.
+func TestDoctorCronRetention_CutoffIsStrictlyLessThan(t *testing.T) {
+	dm := newTestDMForCmd(t)
+	svc := NewDoctorService(dm)
+
+	cutoff := retentionTestNowUnix - int64(scheduler.CronRetentionWindow.Seconds())
+	seedCronRows(t, dm, []testCronRow{
+		{insertedAt: time.Unix(cutoff, 0)},               // exactly at cutoff — excluded
+		{insertedAt: time.Unix(cutoff-1, 0)},             // one second older — included
+		{insertedAt: time.Unix(retentionTestNowUnix, 0)}, // far newer — excluded
+	})
+
+	got := svc.cronRetentionStatusAt(retentionTestNowUnix)
+	if got.EligibleBacklog != 1 {
+		t.Errorf("eligible_backlog = %d, want 1: a row at exactly the cutoff must be "+
+			"excluded by strict-<' and one at cutoff-1 included", got.EligibleBacklog)
+	}
+	// Pending counts all three: exclusion is a cutoff decision, not a
+	// deletion, and the diagnostic must not conflate the two.
+	if got.Pending != 3 {
+		t.Errorf("pending = %d, want 3 (the cutoff excludes from the backlog, not from the table)", got.Pending)
+	}
+}
+
 // TestDoctorService_checkScheduler_StartupStabilization_EligibleBacklogOK
 // pins: at uptime ~1h25m with eligible backlog nonzero, status is still
 // PASS because the next expected sweep is at +2h and we haven't missed
@@ -154,23 +192,29 @@ func TestDoctorService_checkScheduler_StartupStabilization_EligibleBacklogOK(t *
 	dm := newTestDMForCmd(t)
 	svc := NewDoctorService(dm)
 
-	realNow := time.Now()
-	startedAt := realNow.Add(-85 * time.Minute) // uptime 1h25m
+	// A fixed evaluation second, used to seed every timestamp AND to
+	// evaluate the retention calculation. This test asserts an exact
+	// backlog count that depends on a strict-< comparison against a
+	// whole Unix second, so seeding from time.Now() and letting the
+	// code read the clock again would make the expected value depend on
+	// how long the test took — it crossed a second boundary roughly
+	// once in a hundred runs under load and reported a phantom +1.
+	nowTime := time.Unix(retentionTestNowUnix, 0)
+	startedAt := nowTime.Add(-85 * time.Minute) // uptime 1h25m
 
 	statePath, restoreSchedulerPath := withFakeSchedulerState(t)
 	defer restoreSchedulerPath()
-	writeFakeSchedulerState(t, statePath, startedAt, realNow.Add(-30*time.Second))
+	writeFakeSchedulerState(t, statePath, startedAt, nowTime.Add(-30*time.Second))
 
 	// 25 cron rows inserted 60-84m ago. Strict-< cutoff excludes the
 	// row at exactly -60m (the boundary), so 24 are eligible.
-	// Real-now based so they're correctly aged at test execution.
 	var rows []testCronRow
 	for i := 0; i < 25; i++ {
-		rows = append(rows, testCronRow{insertedAt: realNow.Add(-time.Duration(60+i) * time.Minute)})
+		rows = append(rows, testCronRow{insertedAt: nowTime.Add(-time.Duration(60+i) * time.Minute)})
 	}
 	seedCronRows(t, dm, rows)
 
-	check := svc.checkScheduler()
+	check := svc.checkSchedulerAt(retentionTestNowUnix)
 	if check.Status != "PASS" {
 		t.Errorf("status = %q, want PASS (eligible backlog is normal during startup stabilization; msg: %q)",
 			check.Status, check.Message)
@@ -200,24 +244,28 @@ func TestDoctorService_checkScheduler_SteadyState_Healthy(t *testing.T) {
 	dm := newTestDMForCmd(t)
 	svc := NewDoctorService(dm)
 
-	realNow := time.Now()
-	startedAt := realNow.Add(-4*time.Hour - 19*time.Minute) // uptime > 2h
+	// Fixed evaluation second, shared by every timestamp and by the
+	// retention calculation. The 60th "recent" row lands exactly on
+	// the cutoff, so the exact expected count of 50 is only stable if
+	// both sides read the same second.
+	nowTime := time.Unix(retentionTestNowUnix, 0)
+	startedAt := nowTime.Add(-4*time.Hour - 19*time.Minute) // uptime > 2h
 
 	statePath, restoreSchedulerPath := withFakeSchedulerState(t)
 	defer restoreSchedulerPath()
-	writeFakeSchedulerState(t, statePath, startedAt, realNow.Add(-30*time.Second))
+	writeFakeSchedulerState(t, statePath, startedAt, nowTime.Add(-30*time.Second))
 
 	// 50 eligible rows (older than 1h) + 60 recent rows (within window).
 	var rows []testCronRow
 	for i := 0; i < 50; i++ {
-		rows = append(rows, testCronRow{insertedAt: realNow.Add(-time.Duration(65+i) * time.Minute)})
+		rows = append(rows, testCronRow{insertedAt: nowTime.Add(-time.Duration(65+i) * time.Minute)})
 	}
 	for i := 0; i < 60; i++ {
-		rows = append(rows, testCronRow{insertedAt: realNow.Add(-time.Duration(1+i) * time.Minute)})
+		rows = append(rows, testCronRow{insertedAt: nowTime.Add(-time.Duration(1+i) * time.Minute)})
 	}
 	seedCronRows(t, dm, rows)
 
-	check := svc.checkScheduler()
+	check := svc.checkSchedulerAt(retentionTestNowUnix)
 	if check.Status != "PASS" {
 		t.Errorf("status = %q, want PASS in steady state with backlog within capacity (msg: %q)",
 			check.Status, check.Message)
@@ -264,7 +312,7 @@ func TestDoctorService_checkScheduler_SteadyState_BacklogBeyondCapacity(t *testi
 			VALUES (?, ?, ?, 0, NULL, 'test', ?)
 		`, fmt.Sprintf("test-cron-cap-%d", i),
 			"test cron row",
-			realNow.Add(-time.Duration(70+i) * time.Minute).Unix(), // > 1h old
+			realNow.Add(-time.Duration(70+i)*time.Minute).Unix(), // > 1h old
 			`{"kind":"cron","source":"cron","task_id":"epistemic-compaction","directive_id":"mpm-seed-epistemic-compaction-policy"}`,
 		)
 		if err != nil {
@@ -368,9 +416,9 @@ func TestDoctorService_cronRetentionToStatus_Boundaries(t *testing.T) {
 	writeFakeSchedulerState(t, statePath, startedAt, realNow.Add(-30*time.Second))
 
 	type tc struct {
-		eligible      int    // rows seeded, all > 1h old
-		wantStatus    string // expected diagnostic verdict
-		desc          string
+		eligible   int    // rows seeded, all > 1h old
+		wantStatus string // expected diagnostic verdict
+		desc       string
 	}
 	cases := []tc{
 		{0, "PASS", "no eligible backlog (steady, post-sweep)"},
@@ -397,7 +445,7 @@ func TestDoctorService_cronRetentionToStatus_Boundaries(t *testing.T) {
 					VALUES (?, ?, ?, 0, NULL, 'test', ?)
 				`, fmt.Sprintf("test-boundary-%s-%d", c.desc, i),
 					"test cron row",
-					realNow.Add(-time.Duration(70+i) * time.Minute).Unix(), // > 1h old
+					realNow.Add(-time.Duration(70+i)*time.Minute).Unix(), // > 1h old
 					`{"kind":"cron","source":"cron","task_id":"epistemic-compaction","directive_id":"mpm-seed-epistemic-compaction-policy"}`,
 				)
 				if err != nil {
