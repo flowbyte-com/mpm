@@ -2093,6 +2093,20 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("epistemic_provenance polarity migration failed: %w", err)
 	}
+	// Compact-refusal lifecycle: epistemic_pressure_v gains
+	// deferred_count and actionable_pending. raw_count is NOT redefined
+	// — same name, same predicate, same meaning — because existing
+	// readers select it and narrowing it would be a silent contract
+	// break. The wake TRIGGER moves to actionable_pending instead.
+	// Requires DROP+CREATE rather than CREATE IF NOT EXISTS, which
+	// silently no-ops against an existing definition. Idempotent via
+	// the epistemic_pressure_deferral_v1 sentinel plus a column probe.
+	// See migration_epistemic_pressure_deferral.go and
+	// docs/designs/2026-09-30-compact-refusal-lifecycle.md §4.
+	if err := MigrateEpistemicPressureDeferral(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("epistemic_pressure deferral migration failed: %w", err)
+	}
 	// session_handoffs.session_id → nullable. See
 	// migration_session_handoffs_optional_session_id.go for the
 	// rationale (external session identifiers are correlation metadata,

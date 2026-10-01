@@ -112,6 +112,15 @@ type CompactEpistemologyResult struct {
 	RawMarked      int    `json:"raw_marked"`
 	LessonID       string `json:"lesson_id,omitempty"`
 	SkippedReason  string `json:"skipped_reason,omitempty"`
+	// Deferred is set when the model returned the sanctioned refusal.
+	// The batch was annotated, not compacted: Deferred rows are out of
+	// the selection pool and remain fully retrievable, but they are no
+	// longer offered to the model. DeferralBatch groups every row of
+	// this one refusal so an operator can inspect the group, and
+	// DeferralReason is the reason stored on the row.
+	Deferred       int    `json:"deferred,omitempty"`
+	DeferralBatch  string `json:"deferral_batch,omitempty"`
+	DeferralReason string `json:"deferral_reason,omitempty"`
 }
 
 // compactBatchSize is the hard ceiling on raw memories per call.
@@ -141,20 +150,20 @@ const compactDrainMaxBatchesHardCap = 8
 //
 // StopReason vocabulary (always set on return):
 //   - "no_work"             — substrate was empty from the start;
-//                              0 batches ran. SkippedReason="no_raw_memories".
+//     0 batches ran. SkippedReason="no_raw_memories".
 //   - "completed"           — at least one batch ran and every eligible
-//                              row has been consumed. raw_remaining=0.
+//     row has been consumed. raw_remaining=0.
 //   - "threshold_reached"   — force=false and raw_count fell to/at the
-//                              configured threshold during the drain.
-//                              The remaining raw memories are eligible
-//                              but the threshold gate stopped further
-//                              compaction. SkippedReason="below_threshold".
+//     configured threshold during the drain.
+//     The remaining raw memories are eligible
+//     but the threshold gate stopped further
+//     compaction. SkippedReason="below_threshold".
 //   - "max_batches_reached" — caller-requested or default safety cap
-//                              (default 20 batches, hard cap 100) was
-//                              hit. Work may remain; check raw_remaining.
+//     (default 20 batches, hard cap 100) was
+//     hit. Work may remain; check raw_remaining.
 //   - "failure"             — a mid-drain batch failed. Earlier batches
-//                              remain committed; FailedBatch and
-//                              FailureReason identify the failed batch.
+//     remain committed; FailedBatch and
+//     FailureReason identify the failed batch.
 //
 // Field semantics:
 //   - Success: false ONLY on "failure". Always true for every other
@@ -173,14 +182,14 @@ const compactDrainMaxBatchesHardCap = 8
 //   - SkippedReason: set only on "no_work" (no_raw_memories) or
 //     "threshold_reached" (below_threshold).
 type CompactEpistemologyDrainResult struct {
-	Success         bool     `json:"success"`
-	BatchesProcessed int     `json:"batches_processed"`
-	RawProcessed    int      `json:"raw_processed"`
-	LessonsCreated  int      `json:"lessons_created"`
-	RawRemaining    int      `json:"raw_remaining"`
-	LessonIDs       []string `json:"lesson_ids,omitempty"`
-	SkippedReason   string   `json:"skipped_reason,omitempty"`
-	StopReason      string   `json:"stop_reason"`
+	Success          bool     `json:"success"`
+	BatchesProcessed int      `json:"batches_processed"`
+	RawProcessed     int      `json:"raw_processed"`
+	LessonsCreated   int      `json:"lessons_created"`
+	RawRemaining     int      `json:"raw_remaining"`
+	LessonIDs        []string `json:"lesson_ids,omitempty"`
+	SkippedReason    string   `json:"skipped_reason,omitempty"`
+	StopReason       string   `json:"stop_reason"`
 	// Partial-failure visibility. FailedBatch is 1-indexed.
 	FailedBatch   int    `json:"failed_batch,omitempty"`
 	FailureReason string `json:"failure_reason,omitempty"`
@@ -249,13 +258,22 @@ func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool) 
 		// The model declined, correctly, per the prompt's contract.
 		// This is NOT a failure and must not be reported as one.
 		//
-		// Deferral — marking these rows so the next drain does not
-		// reselect them and repeat this exact call forever — lands in
-		// a later phase of this change. Until then the batch is left
-		// untouched, which is the same as the pre-change behaviour;
-		// what changes here is only that the refusal stops masquerad-
-		// ing as a lesson_validation_failed error.
-		return &CompactEpistemologyResult{SkippedReason: "synthesis_refused"}, nil
+		// Defer the batch: annotate the rows so the next drain
+		// reselects the *next* un-attempted rows instead of repeating
+		// this identical call forever. No lesson is written and no
+		// compacted_into is set — a refusal folds nothing into
+		// durable knowledge, and claiming otherwise would be a lie the
+		// pressure gauge would then believe.
+		ann, err := dm.deferRawBatch(ctx, rawIDs, DeferralReasonRefusal, text)
+		if err != nil {
+			return nil, fmt.Errorf("defer: %w", err)
+		}
+		return &CompactEpistemologyResult{
+			SkippedReason:  "synthesis_refused",
+			Deferred:       len(rawIDs),
+			DeferralBatch:  ann.Batch,
+			DeferralReason: ann.Reason,
+		}, nil
 	}
 
 	// 5. Transaction — INSERT lesson + UPDATE raw memories, atomically.
@@ -284,7 +302,7 @@ func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool) 
 //   - "no_work"             substrate was empty from the start.
 //   - "completed"           every eligible row was consumed.
 //   - "threshold_reached"   force=false and the raw count fell to/at
-//                           the threshold; eligible rows remain.
+//     the threshold; eligible rows remain.
 //   - "max_batches_reached" safety cap hit; eligible rows remain.
 //   - "failure"             mid-drain batch failure (success=false).
 //
@@ -320,7 +338,7 @@ func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool) 
 //   - "no_work"             substrate was empty from the start.
 //   - "completed"           every eligible row was consumed.
 //   - "threshold_reached"   force=false and the raw count fell to/at
-//                           the threshold; eligible rows remain.
+//     the threshold; eligible rows remain.
 //   - "max_batches_reached" safety cap hit; eligible rows remain.
 //   - "failure"             mid-drain batch failure (success=false).
 //
@@ -476,16 +494,24 @@ func (dm *DatabaseManager) compactPreCheck(ctx context.Context) (rawCount, thres
 	return rawCount, threshold, nil
 }
 
-// extractRawBatch selects the oldest `limit` non-compacted memories.
-// Returns parallel slices of IDs and contents — the orchestrator uses
-// the IDs for the transaction UPDATE and the contents for the LLM prompt.
+// extractRawBatch selects the oldest `limit` non-compacted, non-deferred
+// memories. Returns parallel slices of IDs and contents — the
+// orchestrator uses the IDs for the transaction UPDATE and the contents
+// for the LLM prompt.
+//
+// The predicate below is memoryIsActionable, the same constant the
+// pressure view's actionable_pending subquery uses. That identity is
+// load-bearing: the drain and the pressure gauge must describe the same
+// population, or the pressure signal will describe rows the drain will
+// never offer. Editing one without the other is what
+// TestPressureAndExtractionAgreeOnPopulation exists to catch.
+//
+// A deferred row leaves this pool but nothing else. It stays
+// retrievable, is not deleted, and still counts in raw_count.
 func (dm *DatabaseManager) extractRawBatch(ctx context.Context, limit int) (ids, contents []string, err error) {
 	rows, err := dm.db.QueryContext(ctx, `
 		SELECT id, content FROM memories
-		WHERE collection = 'memories'
-		  AND deleted_at IS NULL
-		  AND (metadata IS NULL OR metadata = ''
-		       OR json_extract(metadata, '$.compacted_into') IS NULL)
+		WHERE `+memoryIsActionable+`
 		ORDER BY created_at ASC
 		LIMIT ?
 	`, limit)

@@ -128,16 +128,28 @@ var BaseTables = []string{
 		updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 	);`,
 
-	// Epistemic pressure view — powers the wake_context surface. Two
-	// scalar counts: raw_count (memories in the 'memories' collection
-	// not yet marked as rolled-up into a lesson) and lesson_count
-	// (durable lessons currently in the substrate).
+	// Epistemic pressure view — powers the wake_context surface. Four
+	// scalar counts over the same set of memories:
+	//
+	//	raw_count          every un-compacted memory, deferred included
+	//	deferred_count     un-compacted AND deferred (offered, refused)
+	//	actionable_pending un-compacted AND not deferred (actable now)
+	//	lesson_count       durable lessons currently in the substrate
 	//
 	// Convention: a raw memory is "compacted" once it has
 	//   metadata.compacted_into = <lesson_id>
 	// set on its row. Missing/null/empty metadata AND metadata without
 	// that key both count as raw (the conservative default — better to
 	// over-count than to assume compaction that never happened).
+	//
+	// raw_count keeps its ORIGINAL meaning exactly. It is a measure of
+	// backlog size, and deferring does not shrink the backlog — it
+	// changes what the backlog consists of. Because
+	// raw_count = actionable_pending + deferred_count, shrinking
+	// raw_count would make a refused backlog look solved. What moved is
+	// the WAKE TRIGGER, not the field: the wake now fires on
+	// actionable_pending so a deferred-only substrate cannot hold a
+	// wake open demanding work the agent is not permitted to do.
 	//
 	// Lessons are soft-deletable since the 2026-09-10 lifecycle fix;
 	// the count here intentionally includes soft-deleted rows (they
@@ -148,18 +160,16 @@ var BaseTables = []string{
 	// the `lessons` view.
 	//
 	// Used by internal.GatherWakeContext to surface the
-	// epistemic_pressure block on every wake. Cheap: two indexed
+	// epistemic_pressure block on every wake. Cheap: indexed
 	// COUNT(*) queries against the (collection, deleted_at, ...) and
 	// lessons views. Sub-millisecond at realistic substrate sizes.
-	`CREATE VIEW IF NOT EXISTS epistemic_pressure_v AS
-	SELECT
-	  (SELECT COUNT(*) FROM memories
-	   WHERE collection = 'memories'
-	     AND deleted_at IS NULL
-	     AND (metadata IS NULL OR metadata = ''
-	          OR json_extract(metadata, '$.compacted_into') IS NULL)
-	  ) AS raw_count,
-	  (SELECT COUNT(*) FROM lessons) AS lesson_count`,
+	//
+	// The definition lives in epistemicPressureViewSQL
+	// (migration_epistemic_pressure_deferral.go) and is referenced here
+	// rather than restated, because CREATE VIEW IF NOT EXISTS will not
+	// update an existing definition — a copy in this slice would give
+	// new and old databases different shapes.
+	epistemicPressureViewSQL,
 
 	// Memory revisions table - historical ledger for point-in-time reconstruction
 	`CREATE TABLE IF NOT EXISTS memory_revisions (

@@ -420,14 +420,23 @@ func TestDrain_ValidationFailureMidDrain_PartialCommit(t *testing.T) {
 	seedRaw(t, dm, 80)
 
 	// 80 rows: iter 0 → 50, iter 1 → 30 (the partial batch). Force
-	// the second batch to fail validation by returning the refusal
-	// sentinel.
+	// the second batch to fail validation.
+	//
+	// This test previously drove the failure with the refusal
+	// sentinel. That no longer produces an error — a refusal is a
+	// successful terminal outcome that defers the batch, and a drain
+	// that hits one keeps going. The property this test exists to pin
+	// is partial-commit-on-failure (earlier batches stay durable, the
+	// failed batch stays untouched), so the vehicle is now a genuine
+	// validation failure. Refusal-mid-drain is covered separately by
+	// TestDrain_RefusalMidDrain_DefersAndContinues.
 	callCount := 0
 	withMockSynth(t, func(ctx context.Context, raw []string) (string, error) {
 		callCount++
 		if callCount == 2 {
-			// Refusal sentinel — valid JSON, empty fields.
-			return `{"title":"","body":"","tags":[]}`, nil
+			// Well-formed JSON, unusable lesson: title present,
+			// body empty → lesson_validation_failed.
+			return `{"title":"T","body":"","tags":["x"]}`, nil
 		}
 		return drainSynthOK()(ctx, raw)
 	})
