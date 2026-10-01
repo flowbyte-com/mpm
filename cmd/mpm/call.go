@@ -224,10 +224,16 @@ smart-recall search (exit 0 on empty results) by design.
 		// implementation wrote the error envelope to stderr, which broke
 		// every agent adapter that follows the documented contract by
 		// reading only stdout (see lesson 2b22765cd1b13a81).
-		writeEnvelope(os.Stdout, map[string]interface{}{
-			"success": false,
-			"error":   err.Error(),
-		})
+		//
+		// A handler may return a meaningful partial result ALONGSIDE the
+		// error — compact does exactly this on a mid-drain batch failure,
+		// reporting batches_processed / raw_remaining / failed_batch /
+		// failure_reason so the operator can see which batch failed and how
+		// much work already committed. Collapsing that to a bare error
+		// string discarded the entire diagnostic. The helper degrades to
+		// the previous {"success":false,"error":...} envelope when the
+		// handler returned no result, so (nil, err) callers are unchanged.
+		writeEnvelope(os.Stdout, tools.ErrorEnvelopeWithResult(result, err))
 		return 1
 	}
 

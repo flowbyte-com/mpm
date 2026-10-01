@@ -1059,6 +1059,22 @@ Both the CLI (`mpm call <tool>`) and the MCP server iterate the same registry �
 
 Adding a new tool: write `handleFoo` in `internal/core/tools/handlers.go` (one function), append a `Tool{...}` entry in `internal/core/tools/registry_list.go`. Both the CLI dispatcher and the MCP server pick it up automatically.
 
+#### Partial results on the error path
+
+A handler may return **both** a structured result and a non-nil error. `mpm_system action=compact` does this on a mid-drain batch failure, returning the full drain result — `batches_processed`, `raw_processed`, `lessons_created`, `raw_remaining`, `stop_reason`, `failed_batch`, `failure_reason` — alongside the error. That result is the only way a caller learns *which* batch failed and *how much* work already committed; earlier batches are durable and must not be re-attempted.
+
+Both transports preserve it:
+
+- **CLI** (`mpm call`): the stdout envelope merges the diagnostic fields alongside `{"success":false,"error":…}`. The envelope stays a single line of parseable JSON, and the exit code stays `1`.
+- **MCP**: the tool result stays `IsError: true` and its first content block remains the `"<tool> failed: <err>"` text. The structured diagnostic is **appended as an additional content block** under a `partial_result` key.
+
+Two invariants hold on both surfaces:
+
+1. **A failure is never reported as a success.** `success` is forced to `false` and `error` to the Go error text *after* the partial result is merged, so a handler cannot launder a failure into a success by setting those fields in its own payload. MCP likewise never returns a successful result merely to carry metadata.
+2. **No result means no change.** A handler returning `(nil, err)` — the common case — produces exactly the pre-existing envelope. Nothing is added to the response.
+
+Because the rule lives in the transport rather than in any one handler, it applies to every action that returns a partial result, not only `compact`.
+
 #### MCP/CLI parity: what is exposed via both surfaces
 
 Every `mpm call <tool>` entry has a matching MCP tool spec; both call the same `CoreDB` methods. The full Registry has **21 entries** (the MCP surface is 22 — those 21 plus the `mpm_help` discovery closure registered at server init by `cmd/mpm-mcp`). Of those 21:

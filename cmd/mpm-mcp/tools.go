@@ -560,7 +560,28 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 		recordToolInvocation(dm, auditAC, req.Params.Name, payload,
 			startedAt, completedAt, extractAction(payload), auditStatus, err)
 		if err != nil {
-			return mcp.NewToolResultErrorFromErr(req.Params.Name+" failed", err), nil
+			// Partial-diagnostic preservation. A handler may return a
+			// structured result together with the error (compact does on a
+			// mid-drain failure, reporting failed_batch / failure_reason /
+			// raw_remaining). NewToolResultErrorFromErr carried only the
+			// error string, so the diagnostic was lost at the transport.
+			//
+			// The MCP tool-error semantics are deliberately UNCHANGED:
+			// IsError stays true, and the first content block is still the
+			// "<tool> failed: <err>" text, so any client that reads only
+			// that sees exactly what it saw before. The structured payload
+			// is appended as an ADDITIONAL block rather than replacing or
+			// reshaping the error text.
+			//
+			// Appending — rather than returning a successful result carrying
+			// the metadata — is the point: an actual operational failure
+			// must never be laundered into a success to carry diagnostics.
+			errResult := mcp.NewToolResultErrorFromErr(
+				tools.ErrorTextForResult(req.Params.Name, err), err)
+			if payload := partialResultPayload(result, err); payload != nil {
+				errResult.Content = append(errResult.Content, payload)
+			}
+			return errResult, nil
 		}
 
 		// Marshal once — used for both output policy decision and response.
@@ -840,6 +861,39 @@ func parseStringSliceArg(v interface{}) []string {
 		return t
 	}
 	return nil
+}
+
+// partialResultPayload renders the structured partial diagnostic that a
+// handler returned alongside an error, as a second MCP content block.
+//
+// Returns nil when the handler produced no diagnostic field, which keeps
+// the common (nil, err) response byte-identical to what it was before
+// partial-result preservation existed.
+//
+// The block is marked with a "partial_result" key so a client can tell
+// it apart from the primary payload: this text is diagnostic detail
+// accompanying a FAILURE, not a successful result. `success` is false
+// inside it, matching the tool result's IsError=true.
+func partialResultPayload(result interface{}, err error) mcp.Content {
+	envelope := tools.ErrorEnvelopeWithResult(result, err)
+	// Suppress the block when it would carry nothing the error text does
+	// not already say.
+	//
+	// The test is "does the envelope contain a field beyond success and
+	// error?", NOT "does it have more than two keys?". Those differ for a
+	// result made up entirely of reserved keys — a handler returning
+	// {"success":true,"error":"..."} produces a two-key envelope whose
+	// values were OVERWRITTEN by the transport, so counting keys would
+	// suppress a block that does carry the corrected verdict.
+	if !tools.HasDiagnosticFields(envelope) {
+		return nil
+	}
+	payload := map[string]interface{}{"partial_result": envelope}
+	data, mErr := json.Marshal(payload)
+	if mErr != nil {
+		return nil
+	}
+	return mcp.TextContent{Type: mcp.ContentTypeText, Text: string(data)}
 }
 
 // buildSpillPreview extracts a preview from a spilled JSON result.
