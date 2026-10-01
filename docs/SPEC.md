@@ -64,6 +64,7 @@ Every section is self-contained enough to read in isolation. This document is th
    - 6.4 [MCP Integration](#64-mcp-integration)
    - 6.5 [Multi-Agent Shared Epistemology (Layers 0–4)](#65-multi-agent-shared-epistemology-layers-04)
    - 6.6 [Telemetry Sidecar (mpm-telemetry)](#66-telemetry-sidecar-mpm-telemetry)
+   - 6.7 [Epistemic Compaction](#67-epistemic-compaction)
 7. [Core Stability](#7-core-stability)
 8. [CLI Reference](#8-cli-reference)
 9. [Runtime Services](#9-runtime-services)
@@ -1061,7 +1062,7 @@ Adding a new tool: write `handleFoo` in `internal/core/tools/handlers.go` (one f
 
 #### Partial results on the error path
 
-A handler may return **both** a structured result and a non-nil error. `mpm_system action=compact` does this on a mid-drain batch failure, returning the full drain result — `batches_processed`, `raw_processed`, `lessons_created`, `raw_remaining`, `stop_reason`, `failed_batch`, `failure_reason` — alongside the error. That result is the only way a caller learns *which* batch failed and *how much* work already committed; earlier batches are durable and must not be re-attempted.
+A handler may return **both** a structured result and a non-nil error. `mpm_system action=compact` does this on a mid-drain batch failure, returning the full drain result — `batches_processed`, `raw_processed`, `lessons_created`, `raw_remaining`, `actionable_pending`, `semantic_stages_spent`, `rows_deferred`, `stop_reason`, `failed_batch`, `failure_reason` — alongside the error. That result is the only way a caller learns *which* batch failed and *how much* work already committed; earlier batches are durable and must not be re-attempted. The same projection is used on the success path and the failure path, so a field is never missing precisely when a caller most needs it.
 
 Both transports preserve it:
 
@@ -1329,6 +1330,55 @@ mpm-telemetry observe [--since] [--threshold] [--min-invocations]
 **Verification.** `scripts/smoke_telemetry.sh` is a hermetic end-to-end test: boots the collector in a temp dir, sends 3 synthetic frames + an idempotent retry + a conflicting duplicate + a bad-schema frame, runs `query` / `cost` / `observe --dry-run`, asserts the row count via sqlite. Exits 0 on success.
 
 **Why a separate binary.** Billing data has different retention, export, and access-control semantics than cognitive data. Mixing them would force operators to ship a single retention policy, single access control, single export pipeline. Keeping `telemetry.db` separate means finance/ops teams can ship their own retention without negotiating with cognitive-data stakeholders.
+
+---
+
+### 6.7 Epistemic Compaction
+
+*Raw memories accumulate faster than any agent reads them; compaction drains the backlog into lessons — and a refusal from the model is a valid answer, not a failure to be retried forever.*
+
+`mpm_system action=compact` drains eligible raw memories into lessons in sequential batches of at most **50** (the LLM context safeguard). Each batch is independently synthesized, validated, and committed. `force=false` (the default) **relieves** pressure — the drain stops as soon as `raw_count <= threshold` and may leave eligible rows remaining. `force=true` **drains everything** — the threshold gate is bypassed and the drain continues until the substrate is empty or the per-invocation cap is hit. `force` does **not** widen the 50-item per-batch limit.
+
+#### A refusal is a valid terminal outcome
+
+The synthesis prompt explicitly sanctions declining a batch. When the model does, it returns the sentinel `{"title":"", "body":"", "tags":[]}`. That is a **considered judgement** — "these rows do not constitute a lesson" — and MPM treats it as a successful outcome with a distinct type, not as a malformed response.
+
+The distinction is load-bearing in both directions. A *near-miss* — a populated object whose title is empty, or one with a field the schema does not declare — is an **error**, because the model tried to answer and produced something unusable. Turning those into refusals would silently defer a broken response stream instead of surfacing it. Validation is unchanged for populated lessons: title, body, and tags are all still required.
+
+#### Deferred rows
+
+A refused batch is **deferred**, not retried. Each row in the group gets four `compaction_deferred_*` metadata keys — `at`, `reason`, `batch`, and a truncated `sample` — and a shared `compaction_deferred_batch` id, so an operator can see which rows were offered together and why they were declined. The whole group is written in one transaction: a fault midway leaves **zero** rows annotated, never a partial group.
+
+Deferral is compaction-scoped and nothing more:
+
+- The rows stay fully searchable and remain in the export population. A deferral records that the model declined, not that the memories are invalid.
+- Deferral state is visible to an agent at two different granularities, and the distinction is a property of the surfaces rather than a policy. Looking a row up **by id** (`mpm_memory show`, `mpm_resolve mpm://memory/<id>`) returns the full metadata document, so all four `compaction_deferred_*` keys are inspectable. **Search** results (`mpm_memory query`) project a fixed field set that does not include `metadata`, so a search row shows that a memory matched but not that it is deferred — the only signal there is the aggregate `epistemic_pressure.deferred_count` / `actionable_pending`. An agent can therefore always see *how much* is deferred, and *which rows* are deferred when it already has the id.
+- `compacted_into` is **never** written for a refused batch. That field is written only inside the same transaction that inserts the lesson it points at, and a refusal produces no lesson — so the row stays eligible to be re-offered once an operator requeues it.
+- Errors are never recorded as refusals. A provider failure stops the drain and reports `failed_batch` / `failure_reason`; it does not annotate anything.
+
+#### The pressure signal counts what is still offerable
+
+`epistemic_pressure_v` exposes two counts over the same population:
+
+```
+raw_count        = actionable_pending + deferred_count
+```
+
+`raw_count` is unchanged in name and meaning — it still counts every un-compacted memory, including deferred ones. What is new is that the *trigger* no longer reads it. The wake/context compaction demand is computed from `actionable_pending`: rows the model has already declined cannot produce a lesson no matter how many times the drain runs, so a fully-deferred substrate reports pressure but does **not** demand compaction. Without this, the scheduled reflex fires forever against a substrate where compaction cannot succeed, and the loop the deferral design removes comes back one layer up.
+
+`raw_remaining` in the result envelope includes deferred rows, so it is not a measure of remaining *work*. Read `actionable_pending` to know whether anything is still offerable.
+
+#### Stage budget, not batch budget
+
+`max_batches` bounds **semantic stages** — model synthesis attempts — not batches. A successful batch costs 1 stage; a refused batch costs 3, because MPM first attempts the whole batch and then, if refused, tries each half once more before deferring the group. The ceiling is **8 stages** (default 8, hard cap 8, silently clamped). The public parameter keeps its original name because renaming it would be a breaking wire change; the *unit* is documented rather than renamed, since "batch" and "stage" are different things and conflating them is what produced the old 20/100 documentation drift.
+
+`semantic_stages_spent` in the result reports what the budget actually bought, which is not the same number as `batches_processed` on a refusing substrate.
+
+#### Requeue is an operator action
+
+Returning a deferred row to the pool is `mpm compact requeue-deferred` — **CLI only, and deliberately not exposed on the MCP surface**. A deferral is a machine decision; a requeue is a *human overriding a machine decision*, and an agent able to requeue could undo a refusal on its own judgement, putting the loop back just more slowly. The `compact` action's params schema is `additionalProperties: false`, so requeue is not merely undocumented there — it is unreachable.
+
+The operator can always see what they are overriding: `mpm compact deferred` lists the deferred rows with their reason, batch, and a content sample. See [`mpm compact`](#compact--compaction-operator-surface) for the command surface.
 
 ---
 
@@ -1614,6 +1664,32 @@ mpm cascade list-dead-letters
 
 The `--max-iterations` bound is a safety valve — the operator's job is to keep the outbox at zero (or near it), not to let a single invocation spend unbounded time churning through a blast-radius cascade.
 
+### `compact` — Compaction operator surface
+
+Operator surface for the deferral lifecycle (§6.7). The compaction drain itself is agent-reachable through `mpm_system action=compact`; these two subcommands are the parts that are deliberately *not* — requeue in particular, because returning a declined row to the pool is a human overriding a model decision.
+
+```bash
+mpm compact                                              # Show help
+mpm compact deferred [--json]                            # List deferred rows + reasons (read-only)
+mpm compact requeue-deferred [limit] [--limit N] [--json]
+        # Return up to <limit> deferred rows to the compaction pool.
+        # Default limit 50; oldest-first; capped at 1000. No unbounded mode.
+```
+
+**Exit codes**
+
+| Code | Meaning |
+|---|---|
+| 0 | Command completed (including a requeue that found nothing to do) |
+| 1 | Unknown subcommand, unknown flag, or a non-numeric limit — nothing is written |
+| 2 | Runtime error (DB unavailable, scanner rejection, etc.) |
+
+`requeue-deferred` clears exactly the four `compaction_deferred_*` keys and writes nothing else: content, weight, collection, `created_at`, and every other substantive column are untouched, so a requeued row is byte-identical to one that was never deferred. The exception is `updated_at`, which the requeue stamps — the row was modified, and a stale timestamp would make a requeued row look untouched to anything reading recency. It does **not** clear `compacted_into` — a row that carries both keys was compacted at some earlier point, and re-synthesising it would duplicate a lesson. Each call writes a `system_audit_log` row naming the row ids it cleared, so repeated requeues are reconstructible. That audit row is written **in the same transaction as the requeue**: if it cannot be written, the requeue is rolled back and the command reports failure. A requeue therefore never commits without leaving a record — the same guarantee purge holds.
+
+Requeue returns the row to the pool; it does not schedule a synthesis. A requeued row is offered again on the next drain, spending stage budget like any other row.
+
+**Not exposed over MCP.** `requeue-deferred` has no `mpm_system` counterpart and no `mpm call` equivalent — reach the drain itself through `mpm call mpm_system --payload '{"action":"compact",...}'` if you need the agent path. The `compact` action's params schema is `additionalProperties: false`, so a requeue parameter cannot be passed even by an agent that guesses the name.
+
 ### CLI-side input/output limits
 
 CLI commands enforce byte and char caps on input payloads and rendered output, plus row-count defaults for `--limit` flags. These are distinct from the §6.4 MCP-output caps: this table is the user-facing CLI surface, where the operator (not the agent) sees the value. Inline per-command `fs.Int("limit", N, ...)` defaults are not listed here — they're already represented in the auto-generated Command Catalogue block below and the per-subcommand description prose.
@@ -1641,6 +1717,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`capability`** — Manage capabilities (seed, lifecycle, governance)
 - **`cascade`** — Materialize cascade intents
 - **`challenge`** — Flag memory as obsolete (atomic theory + patch; use 'restore' subcommand to undo)
+- **`compact`** — Operator commands for the compaction deferral lifecycle (deferred|requeue-deferred)
 - **`config`** — Configure LLM and embedding profiles manually (wizard | show | get | set | profile | component | capability)
 - **`continue`** — Resume previous session — composes working context, wake context, decisions, skills, theories
 - **`debug`** — Low-level debugging tools

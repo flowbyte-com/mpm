@@ -1,8 +1,9 @@
 # Compact Refusal Lifecycle — Design Specification
 
-> **Status:** Design only. **Not implemented.** No code in this document
-> exists; nothing in the repository has been changed to match it.
-> **Date:** 2026-09-30
+> **Status:** **Implemented** (2026-10-01). All 16 claims in §10 are
+> pinned by `internal/core/compact_design_matrix_test.go`. Two
+> deliberate deviations from the text below are recorded in §11.
+> **Date:** 2026-09-30 (design), 2026-10-01 (implemented)
 > **Scope:** the epistemic-compaction refusal path — what a sanctioned
 > refusal from the model *means*, how a refused batch stops blocking the
 > queue, and what the pressure signal is allowed to demand.
@@ -11,6 +12,11 @@
 > normative decisions. Every claim about current behaviour is cited to
 > the line that establishes it, so a later reader can check rather than
 > re-derive.
+>
+> **Where the implementation and this text disagree, this text is the
+> bug** — with the two exceptions named in §11, which were
+> implementation-time decisions taken under the design's own
+> operator-only intent and are now the contract.
 
 **Repository:** `/home/v/workspace/projects/mpm`
 **Authoritative product document:** `docs/SPEC.md` (must be updated
@@ -224,10 +230,11 @@ not be a loop of independent bare-`db` writes.
 
 ### 3.3 Requeue
 
-Requeue returns a deferred row to the selectable pool. It is proposed as
-`compact_epistemology` gaining a `requeue_deferred` parameter, and its
-semantics are fully specified here because a partially-specified requeue
-is the most likely way this design does real damage.
+Requeue returns a deferred row to the selectable pool. It is specified
+here as `mpm compact requeue-deferred` — an **operator CLI** command with
+no MCP counterpart (§11.1 records that decision and why). Its semantics
+are fully specified here because a partially-specified requeue is the
+most likely way this design does real damage.
 
 **R1 — explicit operator action only.** `requeue_deferred` is never
 implied, defaulted, or triggered. No scheduler tick sets it, no wake
@@ -257,11 +264,21 @@ four `compaction_deferred_*` keys:
 - `compaction_deferred_sample`
 
 and writes nothing else. Content, weight, collection, `created_at`, and
-every other column are untouched. This is the same all-but-the-metadata
-claim §3.2 property 1 makes for deferral, read in reverse: the two
-operations are exact inverses with respect to the row's identity and its
-retrieval behaviour, which is what makes requeue auditable — a
-requeued row is byte-identical to a row that had never been deferred.
+every other substantive column are untouched. This is the same
+all-but-the-metadata claim §3.2 property 1 makes for deferral, read in
+reverse: the two operations are exact inverses with respect to the row's
+identity and its retrieval behaviour, which is what makes requeue
+auditable — a requeued row is byte-identical to a row that had never
+been deferred.
+
+The one exception is `updated_at`, which both operations stamp, and the
+exception is deliberate: the row *was* modified, and leaving the
+timestamp at the deferral time would make a requeued row look untouched
+to anything that reads recency. `updated_at` is a bookkeeping column,
+not part of the row's identity or its retrievability, which is why §3.2
+property 1 says "substantive column" rather than "column". Every
+substantive column — including `created_at` — survives requeue
+byte-identical, which is the property the audit trail depends on.
 
 **R4 — never clears `compacted_into`.** Requeue deletes no key it did
 not create, and specifically does not touch `compacted_into`. This is
@@ -275,11 +292,12 @@ and silently un-doing real work. Requeue is a deferral-lifecycle
 operation; it is not, and must never become, a compaction-lifecycle
 operation.
 
-**R5 — auditable.** Every requeue writes an audit row through the
-existing `tool_invocations` hook (`cmd/mpm/audit_hook.go:130`) with
-`result_status = 'success'` and an `outcome_class` /
-`outcome_code` identifying requeue, plus the bounded target actually
-cleared (row ids, or a stable batch id and a count). The rationale is
+**R5 — auditable.** Every requeue writes an audit row recording that it
+happened and naming the bounded target actually cleared (row ids, or a
+stable batch id and a count). The row is written **in the same
+transaction as the mutation**, so the guarantee cannot be broken by a
+failed insert: an audit failure rolls the requeue back rather than
+leaving an override with no record of it. The rationale is
 asymmetric: a deferral is machine-initiated and needs no per-row
 attribution because `compaction_deferred_reason` is already stored on the
 row; a requeue is a *human overriding a machine decision*, and the
@@ -789,8 +807,8 @@ that would otherwise look like a regression on first run.
 | wake / `epistemic_pressure` block | new fields added; trigger switches to `actionable_pending` |
 | `CompactLesson.Validate()` | body unchanged; no longer consulted for the sentinel |
 | `compact_epistemology` result envelope | `stop_reason` gains a refusal-derived value; existing values unchanged |
-| `compact_epistemology` parameters | gains `requeue_deferred`; existing parameters unchanged |
-| `max_batches` advertised default/cap | **corrected** 20/100 → 8/8 at all five sites (§5.3); the parameter *name* is unchanged, only the advertised value |
+| `compact_epistemology` parameters | unchanged — requeue is **CLI-only**, not a parameter (§11.1) |
+| `max_batches` advertised default/cap | **corrected** 20/100 → 8/8 at all sites (§5.5 enumerated five; implementation found seven — §11.2); the parameter *name* is unchanged, only the advertised value |
 | drain loop accounting | counts stages instead of batches; ceiling stays 8 |
 | `compacted_into` semantics | unchanged (F7) |
 | `docs/SPEC.md` | must be updated alongside implementation |
@@ -835,8 +853,8 @@ pinned by a test or the design is wrong.
     `compaction_deferred_at` and `compaction_deferred_batch`.
 11. Requeue returns a deferred row to the pool at its original
     `created_at` position, clears exactly the four
-    `compaction_deferred_*` keys, and leaves every other column
-    byte-identical.
+    `compaction_deferred_*` keys, and leaves every other substantive
+    column byte-identical (`updated_at` is stamped by design — R3).
 12. Requeue does **not** clear `compacted_into` on a row that carries
     both. (Directly falsifies the R4 hazard.)
 13. Requeue is bounded: a call requeues at most `limit` rows and
@@ -852,3 +870,94 @@ pinned by a test or the design is wrong.
 
 All implementation tests use temporary state only. The live substrate's
 existing rows are fixtures for nothing and are not written to.
+
+All 16 claims are discharged by `internal/core/compact_design_matrix_test.go`
+(24 cases; §11.4). Claim 16's "five sites" is corrected to seven in
+§11.2 — the matrix asserts the value at every site rather than counting
+them, so it is insensitive to that correction.
+
+---
+
+## 11. Implementation record
+
+Implemented across five commits (`7a5f5a52`, `5e596526`, `1b1c8849`,
+`915993fc`, `4aaf01f8`) plus the Phase 10 matrix. Two decisions below
+depart from the text above. Both were taken at implementation time under
+the design's own stated intent, and both are now the contract rather than
+a divergence from it.
+
+### 11.1 Requeue is CLI-only, not a `compact_epistemology` parameter
+
+§3.3 opens with "It is proposed as `compact_epistemology` gaining a
+`requeue_deferred` parameter." **Not implemented as specified.** R1 says
+"explicit operator action only" and R5 gives the reason: a requeue is a
+*human overriding a machine decision*. An agent that could requeue could
+undo a refusal on its own judgement — and a refusal is a considered
+judgement, made because the model looked at the rows and declined.
+Undoing it automatically puts the loop back, just slower and harder to
+notice.
+
+So requeue is `mpm compact requeue-deferred`, following the existing
+`mpm capability grant-operator` precedent for an operator-only mutation.
+The compact action's params schema is `additionalProperties: false`, so
+the refusal is structural rather than a check somebody can forget to
+write. `cmd/mpm/compact_cmds_test.go::TestRequeue_IsNotReachableFromTheMCPAction`
+reads the **live** registry and fails if any alias of the parameter
+appears in the compact branch's schema.
+
+R2, R3, R4, and R5 are implemented as written on this surface.
+
+**R5's audit row is not a supplement to the dispatch hook — it is the
+only record.** This section originally claimed the `tool_invocations`
+row "comes free from the existing dispatch hook." That was wrong, and
+the CLI-only decision in §11.1 is what made it wrong. The dispatch hook
+(`cmd/mpm/audit_hook.go`) fires only for calls arriving via `mpm call` or
+the MCP server. Requeue is deliberately reachable from neither: the CLI
+router (`cmd/mpm/router.go` → `handleCompact`) invokes it directly,
+never passing through `recordToolInvocation`. On the one path requeue
+actually takes, no `tool_invocations` row exists at all.
+
+So `RequeueDeferred` writes the `system_audit_log` row itself, naming the
+row ids and the count requeued — which is the part R5's rationale is
+actually about. (It does not record `remaining_deferred`: that figure is
+read after the commit, so including it would put a value in the trail
+that no one could verify at the moment it was written.) An earlier
+implementation wrote the row *after* the commit and treated a failure as
+non-fatal. That is a best-effort trail, and it is not what R5 promises:
+under an injected audit failure it reported success for a mutation whose
+only forensic evidence was missing. The row now moves inside the
+transaction, matching `PurgeWork` (`internal/core/work_purge.go`), which
+already holds MPM to the same guarantee for the more destructive
+administrative mutation. Pinned by
+`TestRequeue_AuditFailureRollsBackTheMutation`.
+
+### 11.2 Seven stale `max_batches` sites, not five
+
+§5.5 enumerates five. Implementing the correction found **seven**. The
+two extra are doc comments in `compact.go` that describe the drain's
+capacity without naming `max_batches` on the same line, so the original
+line-referenced table missed them. Both are corrected; no limit was
+raised, per the design's own instruction.
+
+### 11.3 What Phase 5 required
+
+§6's progress invariant needed no new code — it is structural, once a
+refused group is deferred and the selection predicate excludes deferred
+rows. It is pinned by the matrix rather than implemented by a mechanism,
+which is the outcome the design asked for.
+
+### 11.4 The 24-case matrix
+
+§10's 16 claims are discharged by `internal/core/compact_design_matrix_test.go`,
+which asserts each claim directly rather than delegating to the
+per-phase tests written alongside the code. That duplication is
+intentional: the phase tests are where a regression will be debugged;
+the matrix is where a reader can walk the design's claims top to bottom
+and see each one discharged, and it would prove nothing on its own if it
+only pointed at other test names.
+
+Claim 16 is a source-text check by necessity — a test cannot observe a
+doc comment. It is scoped to the `max_batches` neighbourhoods rather than
+whole files, because `registry_list.go` and `handlers.go` legitimately
+document other parameters that default to 20, and a file-wide grep would
+report those as failures and teach a later reader to ignore the check.
