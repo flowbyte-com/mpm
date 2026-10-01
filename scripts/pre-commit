@@ -16,6 +16,7 @@
 #     other test suites have pre-existing data-pollution failures we are not
 #     fixing in this arc — those belong in a CI matrix, not a local gate)
 #   - internal/core/tools guard subset     (`make test-tools-precommit`)
+#   - subprocess-isolation guard           (`make test-testenv-precommit`)
 #
 # Install: copy this file to .git/hooks/pre-commit (or run `make install-hooks`).
 # Future: when the test suite stabilises, add `go test ./...` (full sweep) and
@@ -211,6 +212,36 @@ fi
 # failure mode this step exists to prevent.
 sed 's/^/[pre-commit] /' /tmp/pre-commit-tools.log
 rm -f /tmp/pre-commit-tools.log
+
+# Subprocess-isolation guard. This is the step that keeps a test from
+# writing to the live MPM database: `mpm` resolves its workspace through
+# MPM_WORKSPACE, else $HOME/.mpm, else the CWD, and on a developer
+# machine $HOME/.mpm is frequently a symlink to the checkout — so an
+# unguarded `exec.Command("mpm", ...)` in a test resolves to the very
+# production database the test was written to avoid.
+#
+# The scanner (TestScannerDetectsKnownBadForm) parses every .go file in
+# the repository, so it fails this commit regardless of which package the
+# violation came from. It is cheap — a parse pass, no subprocess, no DB.
+#
+# This step is NOT gated on staged file types. Conditioning on what
+# `git add` picked up would tie the gate's coverage to staging discipline,
+# which is how a safety guard becomes decorative.
+#
+# Unlike the CI full sweep, which reaches this package via `go test ./...`
+# from the repo root, the pre-commit gate invokes Makefile targets
+# individually, so it needs this explicit invocation.
+if ! make test-testenv-precommit > /tmp/pre-commit-testenv.log 2>&1; then
+  echo "[pre-commit] ABORTING commit: subprocess-isolation guard failed." >&2
+  echo "[pre-commit] This usually means a test spawns a DB-capable MPM binary" >&2
+  echo "[pre-commit] without routing it through internal/testenv (Env /" >&2
+  echo "[pre-commit] WithExtra / NoWorkspace). See log:" >&2
+  cat /tmp/pre-commit-testenv.log >&2
+  rm -f /tmp/pre-commit-testenv.log
+  exit 1
+fi
+sed 's/^/[pre-commit] /' /tmp/pre-commit-testenv.log
+rm -f /tmp/pre-commit-testenv.log
 
 echo "[pre-commit] running router linter (persona/mode frontmatter)..."
 # The linter catches YAML escape footguns and broken regex compilation

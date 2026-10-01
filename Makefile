@@ -83,7 +83,33 @@ TOOLS_GUARD_RUN := TestOutputPolicy_OnlyMCPEnforces|TestParity_AllActionTools_Lo
 # three depend on. Both are in TOOLS_GUARD_RUN above.
 TOOLS_REQUIRED_GUARDS := TestOutputPolicy_OnlyMCPEnforces TestParity_AllActionTools_LockEverySurface TestAdapterCallsites_MatchGoSchema
 
-.PHONY: all build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit lint help refresh-installed check-installed-drift check-installed
+# The subprocess-isolation guards. Note which test is which — this is the
+# single most important detail in this block, and getting it wrong produces
+# a gate that is green and useless:
+#
+#   TestNoUnisolatedMPMSubprocess
+#       THE scanner. It walks the repository and parses every _test.go
+#       file, so a violation FAILS the commit regardless of which package
+#       introduced it. This is the only test that can catch a bad
+#       subprocess in code it has never seen.
+#   TestScannerDetectsKnownBadForm
+#       does NOT scan the repository. It runs the scanner's classification
+#       logic against in-memory fixtures only — it proves the scanner
+#       CATCHES known-bad shapes, not that it CATCHES YOUR shape. A gate
+#       that runs only this test passes on a repository containing an
+#       arbitrary unisolated subprocess.
+#   TestEnv* / TestWithExtraOverridesBlank
+#       assert the sanctioned helper is actually safe. Cheap (env-map and
+#       path-string assertions, no subprocess, no DB).
+TESTENV_GUARD_RUN := TestNoUnisolatedMPMSubprocess|TestScannerDetectsKnownBadForm|TestEnvSurvivesHostileParent|TestEnvIsolatesUnderRepoCwd|TestEnvHasNoDuplicateKeys|TestWithExtraOverridesBlank
+# Both must be present. Without the scanner the gate catches nothing; with
+# only the scanner a regression in the helper goes unnoticed, because the
+# scanner's fixtures only assert that bad forms are REJECTED, never that
+# the sanctioned escape hatch is SAFE. The two failures are independent
+# and each is silent on its own.
+TESTENV_REQUIRED_GUARDS := TestNoUnisolatedMPMSubprocess TestScannerDetectsKnownBadForm
+
+.PHONY: all build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit lint help refresh-installed check-installed-drift check-installed
 
 all: build
 
@@ -227,6 +253,7 @@ test:
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/telemetry/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/scheduler/...
+	$(MAKE) test-testenv
 	$(MAKE) test-tools
 
 # Run the pre-commit subset of internal/core tests with the same FTS5 flag
@@ -293,6 +320,65 @@ test-tools:
 test-tools-race:
 	cd internal/core/tools && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -count=1 -tags fts5 -v ./...
 
+# The subprocess-isolation guard. This package is a repository SAFETY
+# mechanism, not a feature, which makes its inclusion in the gate a
+# correctness question rather than a coverage one: a guard that no
+# target runs is not a guard, it is a file. `./...` from the root does
+# not reach internal/testenv (the Makefile enumerates package roots
+# explicitly, as it does for internal/telemetry and internal/scheduler),
+# so these targets exist to keep the scanner and the hostile-parent
+# proofs inside `make test` / `make test-race`.
+#
+# The scanner parses every .go file in the repository, so a violation in
+# any package fails the gate even though the package containing it may
+# not itself be listed here.
+test-testenv:
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -count=1 -tags fts5 -v ./internal/testenv/...
+
+test-testenv-race:
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -count=1 -tags fts5 -v ./internal/testenv/...
+
+# Pre-commit subset of the subprocess-isolation guard, mirroring the
+# zero-match protection `test-tools-precommit` uses.
+#
+# Why this target exists at all, when `go test ./...` from the repo root
+# already reaches internal/testenv (it is part of the main module — only
+# internal/core and internal/core/tools are nested modules): the root
+# traversal runs in the CI full-sweep jobs, but NOT in this repository's
+# own pre-commit hook, which calls make targets one at a time. A guard
+# that only runs in CI fails a developer's commit at push time instead of
+# at commit time, which is the whole point of a pre-commit gate.
+#
+# The scanner is fast (parses the tree once, no subprocess, no DB), so
+# the cost of running it on every commit is a file walk. It is not gated
+# on staged-file types on purpose: a violation can be introduced by a
+# hand-edited file, and conditioning on what `git add` happened to pick up
+# would make the gate's coverage depend on staging discipline.
+#
+# `go test -run <regex>` exits 0 when the regex matches nothing, so a
+# renamed test would silently disable this gate — the same failure shape
+# as the guard having never been wired at all. The recipe therefore
+# resolves the population with `go test -list` and fails on an empty or
+# incomplete match.
+test-testenv-precommit:
+	@matched=$$(CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -list "$(TESTENV_GUARD_RUN)" ./internal/testenv/ | grep -E '^Test' || true); \
+	 if [ -z "$$matched" ]; then \
+	   echo "[test-testenv-precommit] FATAL: TESTENV_GUARD_RUN matched ZERO tests." >&2; \
+	   echo "  \`go test -run\` exits 0 on an empty match, so the gate would pass" >&2; \
+	   echo "  without running anything. Check for a renamed or deleted test." >&2; \
+	   exit 1; \
+	 fi; \
+	 for guard in $(TESTENV_REQUIRED_GUARDS); do \
+	   echo "$$matched" | grep -qx "$$guard" || { \
+	     echo "[test-testenv-precommit] FATAL: required guard $$guard is not in TESTENV_GUARD_RUN." >&2; \
+	     echo "  matched instead: $$matched" >&2; \
+	     exit 1; }; \
+	 done; \
+	 echo "[test-testenv-precommit] guard population ($$(echo "$$matched" | wc -l | tr -d ' ') tests):"; \
+	 echo "$$matched" | sed 's/^/    - /'; \
+	 CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -short -count=1 -tags fts5 -v ./internal/testenv/ \
+		-run "$(TESTENV_GUARD_RUN)"
+
 # Release acceptance suite — cross-agent continuity, public-CLI parity,
 # supersession trace, scale/e2e boundary tests. Spins up real subprocess
 # invocations of `bin/mpm` so it requires `make build` first; the FTS5
@@ -333,6 +419,7 @@ test-race:
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/telemetry/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/scheduler/...
+	$(MAKE) test-testenv-race
 	$(MAKE) test-tools-race
 
 # Run golangci-lint (advisory only — does not gate CI).

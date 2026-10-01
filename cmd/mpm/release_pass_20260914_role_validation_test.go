@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/flowbyte-com/mpm/internal/testenv"
 )
 
 // TestRoleValidation_RejectsEmbeddingOnlyOllamaLLM is the
@@ -293,8 +295,13 @@ func TestRoleValidation_EmbeddingConfigPathUnchanged(t *testing.T) {
 	// `mpm config --help` must surface both LLM and embedding
 	// manual-only sections; neither must reference the retired
 	// detect-embedding command.
+	// Isolation (2026-09-30): this was `[]string{"PATH=" + …}`, which
+	// pinned no workspace, so the child could resolve $HOME/.mpm (a
+	// symlink to this repository on a developer machine) or its own CWD.
+	// The help text under assertion is static, so pinning the workspace
+	// does not change what this test observes.
 	cmd := stdlibexec.Command(bin, "config", "--help")
-	cmd.Env = []string{"PATH=" + lookupTestPath()}
+	cmd.Env, cmd.Dir = testenv.Env(t), testenv.Workspace(t)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("config --help: %v\n%s", err, out)

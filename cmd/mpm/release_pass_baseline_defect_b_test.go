@@ -120,8 +120,16 @@ func runMpmWithDeadline(t *testing.T, bin, ws string, defaultTimeout time.Durati
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancel()
 	cmd := stdlibexec.CommandContext(ctx, bin, args...)
+	// HOME is pinned alongside MPM_WORKSPACE. MPM resolves its workspace
+	// through two independent paths — MPM_WORKSPACE, else $HOME/.mpm —
+	// and on a developer machine $HOME/.mpm is often a symlink to this
+	// repository, making the fallback the very database the test is
+	// trying to isolate from. MPM_WORKSPACE already wins today, so this
+	// is defence in depth: it keeps the child safe if a future refactor
+	// drops the workspace pin.
 	cmd.Env = []string{
 		"MPM_WORKSPACE=" + ws,
+		"HOME=" + t.TempDir(),
 		"PATH=" + safeTestPath(),
 	}
 	out, err := cmd.CombinedOutput()

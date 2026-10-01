@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/flowbyte-com/mpm/internal/testenv"
 )
 
 // runTelemetryHelpInProcess invokes the help dispatch in-process
@@ -43,24 +45,22 @@ func runTelemetryHelpInProcess(t *testing.T, args ...string) string {
 	// Run with MPM_WORKSPACE explicitly unset. pre-fix the help
 	// surface raised `MPM_WORKSPACE is required` because the
 	// workspace check ran before the help short-circuit.
+	//
+	// Isolation (2026-09-30): this was `[]string{"PATH=" + …}`, which
+	// pinned nothing. MPM resolves a workspace through TWO independent
+	// paths, and unsetting MPM_WORKSPACE exercises the one that falls
+	// back to $HOME/.mpm — a symlink to the repository on a developer
+	// machine, so the "inert" help binary was one refactor away from
+	// touching the live database. testenv.NoWorkspace keeps
+	// MPM_WORKSPACE unset (the point of the test) while pinning HOME
+	// and the working directory, closing both fallbacks.
 	cmd := exec.Command(binPath, args...)
-	cmd.Env = []string{"PATH=" + lookupPath()}
+	cmd.Env, cmd.Dir = testenv.NoWorkspace(t)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("mpm-telemetry %s: %v\noutput:\n%s", strings.Join(args, " "), err, out)
 	}
 	return string(out)
-}
-
-// lookupPath returns a minimal env PATH so exec.Command can find
-// the binary when invoked. Empty PATH breaks some go runtimes.
-func lookupPath() string {
-	if p, err := exec.LookPath("go"); err == nil {
-		// Best-effort: PATH-with-only-go is enough for our
-		// binary which doesn't need any external tools.
-		_ = p
-	}
-	return "/usr/bin:/bin:/usr/local/go/bin"
 }
 
 // newDiscard was previously used to swallow stderr from child
@@ -212,11 +212,13 @@ func TestTelemetry_Help_NoSideEffect(t *testing.T) {
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			// Use a temp dir as cwd so any accidental file
-			// creation surfaces in the listing.
-			wd := t.TempDir()
+			// creation surfaces in the listing. MPM_WORKSPACE stays
+			// unset on purpose (see runTelemetryHelpInProcess);
+			// testenv.NoWorkspace pins HOME so the $HOME/.mpm
+			// fallback cannot reach the operator's real state.
 			cmd := exec.Command(binPath, args...)
-			cmd.Dir = wd
-			cmd.Env = []string{"PATH=" + lookupPath()}
+			cmd.Env, cmd.Dir = testenv.NoWorkspace(t)
+			wd := cmd.Dir
 			if err := cmd.Run(); err != nil {
 				t.Fatalf("mpm-telemetry %s: %v", strings.Join(args, " "), err)
 			}
@@ -331,7 +333,7 @@ func TestTelemetry_NoFalseDefault(t *testing.T) {
 		t.Fatalf("go build: %v\n%s", err, b)
 	}
 	cmd := exec.Command(binPath)
-	cmd.Env = []string{"PATH=" + lookupPath()}
+	cmd.Env, cmd.Dir = testenv.NoWorkspace(t)
 	outBytes, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("bare `mpm-telemetry` must exit 0; got %v", err)

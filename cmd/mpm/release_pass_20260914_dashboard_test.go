@@ -32,6 +32,8 @@ import (
 	"testing"
 
 	stdlibexec "os/exec"
+
+	"github.com/flowbyte-com/mpm/internal/testenv"
 )
 
 // dashboardMemoryLessonBin builds a fresh mpm binary in a temp
@@ -49,8 +51,16 @@ func dashboardMemoryLessonBin(t *testing.T) string {
 
 // mkCmd is a tiny wrapper that returns an *execCmd with PATH
 // set, so the helpers stay terse.
-func mkCmd(name string, args ...string) *execCmd {
-	return &execCmd{path: name, args: args}
+//
+// Isolation (2026-09-30): the env defaults to testenv.Env(t) rather than
+// being left nil. A nil env meant execCmd.CombinedOutput/Output skipped
+// cmd.Env entirely, so the child silently inherited the operator's
+// ambient environment — and three of the four call sites override it
+// with WithEnv anyway, so the default costs nothing and removes the
+// trap. WithEnv still wins where a test needs a specific workspace.
+func mkCmd(t *testing.T, name string, args ...string) *execCmd {
+	t.Helper()
+	return &execCmd{path: name, args: args, env: testenv.Env(t)}
 }
 
 // execCmd is a minimal abstraction over *exec.Cmd that defers
@@ -109,7 +119,7 @@ func TestDashboard_MemoryCountMatchesCanonical(t *testing.T) {
 	// carries. The test asserts dashboard ≡ info's active count
 	// dynamically — we don't pin a literal number.
 	for _, content := range []string{"alpha", "beta", "gamma"} {
-		cmd := mkCmd(bin, "add", content).
+		cmd := mkCmd(t, bin, "add", content).
 			WithEnv([]string{"MPM_WORKSPACE=" + ws, "PATH=" + lookupTestPath()})
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("seed memory: %v\n%s", err, out)
@@ -192,7 +202,7 @@ func TestDashboard_LessonCountMatchesCanonical(t *testing.T) {
 
 	// Seed 2 lessons via the canonical lesson add surface.
 	for _, content := range []string{"first lesson body", "second lesson body"} {
-		cmd := mkCmd(bin, "lesson", "add", content).
+		cmd := mkCmd(t, bin, "lesson", "add", content).
 			WithEnv([]string{"MPM_WORKSPACE=" + ws, "PATH=" + lookupTestPath()})
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("seed lesson: %v\n%s", err, out)
@@ -314,7 +324,7 @@ func TestDashboard_AbsentLLMUsesNeutralMarker(t *testing.T) {
 func mustRunMpm(t *testing.T, bin, ws string, args ...string) string {
 	t.Helper()
 	allArgs := append([]string{}, args...)
-	cmd := mkCmd(bin, allArgs...).
+	cmd := mkCmd(t, bin, allArgs...).
 		WithEnv([]string{"MPM_WORKSPACE=" + ws, "PATH=" + lookupTestPath(), "QUIET=1"})
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -2,12 +2,13 @@ package main
 
 import (
 	"bytes"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/flowbyte-com/mpm/internal/testenv"
 )
 
 // TestConcurrentMcpInstances verifies the architectural invariant that
@@ -52,7 +53,13 @@ func TestConcurrentMcpInstances(t *testing.T) {
 			// machine interface stays clean. The startup log lines
 			// ("no pidfile singleton") that this regression asserts
 			// are diagnostic output — set MPM_VERBOSE to recover them.
-			cmd.Env = append(os.Environ(), "MPM_VERBOSE=1")
+			//
+			// Isolation (2026-09-30): this was append(os.Environ(),
+			// …), which let each child resolve the operator's real
+			// MPM state — mpm-mcp opens a database at startup.
+			// testenv.WithExtra pins MPM_WORKSPACE and HOME to temp
+			// state while still supplying MPM_VERBOSE.
+			cmd.Env = testenv.WithExtra(t, "MPM_VERBOSE=1")
 			var out, errOut bytes.Buffer
 			cmd.Stdout = &out
 			cmd.Stderr = &errOut
@@ -117,7 +124,11 @@ func TestNoPidfileWrittenAfterStartup(t *testing.T) {
 	// to io.Discard unless MPM_VERBOSE=1. The startup log line this
 	// regression asserts is diagnostic output — set MPM_VERBOSE to
 	// recover it.
-	cmd.Env = append(os.Environ(), "MPM_VERBOSE=1")
+	//
+	// Isolation (2026-09-30): this was append(os.Environ(), …), which
+	// let the child resolve the operator's real MPM state. See
+	// TestConcurrentMcpInstances for the full rationale.
+	cmd.Env = testenv.WithExtra(t, "MPM_VERBOSE=1")
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
