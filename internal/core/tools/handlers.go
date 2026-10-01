@@ -6518,6 +6518,37 @@ func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 	sessionID, _ := p["session_id"].(string)
 	artifactType, _ := p["artifact_type"].(string)
 
+	// result_status selects which persisted outcomes are visible.
+	//
+	// Unset means the historical default (successful activity only), so
+	// every existing agent, script, and prompt that calls recent_activity
+	// keeps seeing exactly what it saw before this parameter existed.
+	// Failures were always WRITTEN to tool_invocations; they were simply
+	// unreachable through this surface, so an operator debugging a failed
+	// call had nothing to read. Opting in here is how they become
+	// visible.
+	//
+	// The value itself is validated by the core layer, which owns the
+	// closed vocabulary; this handler only enforces the Go type so that
+	// a non-string is rejected as a type error rather than silently
+	// treated as unset.
+	resultStatus := ""
+	if v, present := p["result_status"]; present && v != nil {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("recent_activity: result_status must be string, got %T", v)
+		}
+		resultStatus = s
+	}
+	// The response echoes the selector that was actually applied, not the
+	// one that was sent, so a caller that omitted the parameter can see
+	// that it was defaulted rather than silently widened. The vocabulary
+	// comes from the core constants to keep one source of truth.
+	effectiveResultStatus := resultStatus
+	if effectiveResultStatus == "" {
+		effectiveResultStatus = mpminternal.RecentActivityStatusSuccess
+	}
+
 	// include_system is a strict no-op kept for legacy callers. The
 	// substrate cannot truthfully provide comprehensive system audit
 	// coverage from tool_invocations (cascade-materializer,
@@ -6548,6 +6579,7 @@ func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		SessionID:     sessionID,
 		ArtifactType:  artifactType,
 		IncludeSystem: includeSystem,
+		ResultStatus:  resultStatus,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("recent_activity: %w", err)
@@ -6564,10 +6596,11 @@ func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		"scanned_rows":      res.ScannedRows,
 		"scan_limit":        res.ScanLimit,
 		"defaults": map[string]interface{}{
-			"actor_scope":  "agent+human+unknown",
-			"class_filter": "mutating",
-			"ordering":     "newest-first",
-			"note":         "system activity (drill/system/maintenance) is intentionally excluded — use mpm_system query_audit_log for audit surface",
+			"actor_scope":   "agent+human+unknown",
+			"class_filter":  "mutating",
+			"ordering":      "newest-first",
+			"result_status": effectiveResultStatus,
+			"note":          "system activity (drill/system/maintenance) is intentionally excluded — use mpm_system query_audit_log for audit surface",
 		},
 	}, nil
 }

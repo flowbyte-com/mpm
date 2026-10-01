@@ -279,9 +279,13 @@ func TestRecentActivity_SecretRedaction(t *testing.T) {
 }
 
 // TestRecentActivity_FailedInvocationExcluded (#31): failed
-// (result_status=error) invocations are excluded by default;
-// they require include_system=true to surface (and even then,
-// mutating-only filter keeps read_only failures out).
+// (result_status=error) invocations are excluded by default.
+//
+// include_system is NOT the opt-in — it has been a strict no-op for
+// several arcs and does not affect this filter. The actual opt-in is
+// RecentActivityQueryParams.ResultStatus; see
+// recent_activity_result_status_test.go. This test pins the default
+// half of that contract.
 func TestRecentActivity_FailedInvocationExcluded(t *testing.T) {
 	dm := NewTestSharedDM(t)
 	now := time.Now().Unix()

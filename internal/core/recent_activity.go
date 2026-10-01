@@ -97,6 +97,62 @@ type RecentActivityQueryParams struct {
 	// The field is kept as a struct member so callers that pass it
 	// silently compile and run; the handler logs a deprecation note.
 	IncludeSystem bool
+	// ResultStatus selects which persisted tool outcomes are visible.
+	// One of RecentActivityStatusSuccess (the default), ...Error, or
+	// ...All; the empty string means Success. See the constants below.
+	//
+	// The default is Success, and it is the default rather than a choice
+	// because this field did not exist until failures were persisted but
+	// unreadable: every caller written before it leaves the field at its
+	// zero value, and each of them means "recent activity" as "what
+	// succeeded". Returning failures to a caller that never asked would
+	// change the meaning of the surface for all of them at once.
+	ResultStatus string
+}
+
+// RecentActivityResultStatus is the closed vocabulary for
+// RecentActivityQueryParams.ResultStatus.
+//
+// The two persisted values are not invented here: tool_invocations
+// declares CHECK (result_status IN ('success','error')) and both
+// writers derive the value from `err != nil`. "all" is the query-side
+// wildcard that suppresses the predicate, matching the "all" spelling
+// already used by the ActorKind filter in this same struct.
+const (
+	// RecentActivityStatusSuccess shows successful invocations only.
+	// This is what an unset ResultStatus means.
+	RecentActivityStatusSuccess = "success"
+	// RecentActivityStatusError shows failed invocations only.
+	RecentActivityStatusError = "error"
+	// RecentActivityStatusAll shows both, suppressing the predicate.
+	RecentActivityStatusAll = "all"
+)
+
+// appendResultStatusFilter adds the result_status predicate for the
+// requested selector, or suppresses it entirely for StatusAll.
+//
+// An unrecognised value is an error rather than a fallback. Silently
+// treating a typo as "all" would return failures to a caller that asked
+// for something narrower, which is the very failure mode this parameter
+// exists to let callers opt out of — and it would do so invisibly.
+//
+// The empty string resolves to Success rather than to All: it is the
+// zero value every pre-existing caller carries, and the historical
+// behaviour of this surface is the successful view. Empty is therefore a
+// documented default, not a fourth spelling of All.
+func appendResultStatusFilter(where []string, args []interface{}, status string) ([]string, []interface{}, error) {
+	switch status {
+	case "", RecentActivityStatusSuccess:
+		return append(where, "result_status = ?"), append(args, RecentActivityStatusSuccess), nil
+	case RecentActivityStatusError:
+		return append(where, "result_status = ?"), append(args, RecentActivityStatusError), nil
+	case RecentActivityStatusAll:
+		return where, args, nil
+	default:
+		return nil, nil, fmt.Errorf(
+			"recent_activity: result_status must be %q, %q, or %q; got %q",
+			RecentActivityStatusSuccess, RecentActivityStatusError, RecentActivityStatusAll, status)
+	}
 }
 
 // RecentActivityDefaults holds the canonical default/hard limits.
@@ -203,12 +259,14 @@ func (dm *DatabaseManager) RecentActivityWithMeta(p RecentActivityQueryParams) (
 	}
 
 	// Build the SQL WHERE clause from push-down-safe filters only.
-	// result_status='success' is pushed so the scan does not waste
-	// time on failed invocations; classification/actor filters are
-	// computed post-row since they depend on map lookups, not raw
-	// column equality.
-	where := []string{"result_status = 'success'"}
-	args := []interface{}{}
+	// result_status is pushed so the scan does not waste time on
+	// invocations the caller did not ask for; classification/actor
+	// filters are computed post-row since they depend on map lookups,
+	// not raw column equality.
+	where, args, err := appendResultStatusFilter(nil, nil, p.ResultStatus)
+	if err != nil {
+		return RecentActivityResult{}, err
+	}
 	if p.Since > 0 {
 		where = append(where, "started_at >= ?")
 		args = append(args, p.Since)
@@ -234,13 +292,23 @@ func (dm *DatabaseManager) RecentActivityWithMeta(p RecentActivityQueryParams) (
 		args = append(args, p.ArtifactType)
 	}
 
+	// The WHERE keyword is emitted only when there is at least one
+	// predicate. This is not defensive tidiness: ResultStatus=All with
+	// no other filters legitimately yields an empty predicate list, and
+	// splicing an unconditional `WHERE ` in front of `ORDER BY` is a
+	// syntax error — the caller would see a broken query rather than
+	// the unfiltered stream they asked for.
+	fromClause := `FROM tool_invocations`
+	if len(where) > 0 {
+		fromClause += ` WHERE ` + joinWhere(where)
+	}
+
 	baseQuery := `
 		SELECT id, session_id, tool_name, action, invocation_id,
 		       actor_kind, framework_name, payload_hash, result_status,
 		       started_at, completed_at, duration_ms, error_message,
 		       mpm_session_id, framework_session_id
-		FROM tool_invocations
-		WHERE ` + joinWhere(where) + `
+		` + fromClause + `
 		ORDER BY completed_at DESC, id DESC`
 
 	out := make([]RecentActivityEvent, 0, limit)
@@ -333,10 +401,24 @@ func (dm *DatabaseManager) filterActivityPage(rows *sql.Rows, p RecentActivityQu
 			return nil, read, fmt.Errorf("RecentActivity scan: %w", err)
 		}
 
-		// filterActivityPage relies on the SQL push-down of
-		// result_status='success', but defensive-check anyway in case
-		// a future caller reuses this helper without that filter.
-		if status == "error" {
+		// The SQL already pushed result_status down, so in the
+		// success/all-default path this branch is unreachable. It exists
+		// because a future caller could reuse this helper without that
+		// filter.
+		//
+		// It is conditioned on the selector rather than applied
+		// unconditionally: an unconditional `status == "error"`
+		// continue would silently discard exactly the rows a caller
+		// asked for by passing ResultStatus=error or =all, making the
+		// new parameter look accepted but do nothing. That is the same
+		// invisible-widening failure the parameter is meant to end.
+		//
+		// Unsupported selectors never reach here: RecentActivityWithMeta
+		// validates before the first query and returns the error, so the
+		// default arm below is only reachable for "" and "success".
+		wantsErrors := p.ResultStatus == RecentActivityStatusError ||
+			p.ResultStatus == RecentActivityStatusAll
+		if !wantsErrors && status == "error" {
 			continue
 		}
 
