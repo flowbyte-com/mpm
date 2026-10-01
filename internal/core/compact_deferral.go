@@ -202,6 +202,21 @@ func (dm *DatabaseManager) deferRawBatch(ctx context.Context, ids []string, reas
 	return ann, nil
 }
 
+// memoryHasDeferral is the annotation test on its own, with no
+// dependence on U. Both the operator's inspection read and the requeue
+// target selection use it.
+//
+// The null/empty guard is load-bearing, not defensive decoration.
+// json_extract(”) raises "malformed JSON" rather than returning NULL
+// (see migration_epistemic_pressure_deferral.go for the full note and
+// the verification), so an unguarded conjunct turns every
+// empty-metadata row in the table into a query error. The existing
+// memoryIsUncompacted predicate escapes this only because its json_extract
+// sits behind an OR arm that short-circuits; a standalone conjunct has
+// no such luck.
+const memoryHasDeferral = `(metadata IS NOT NULL AND metadata != ''
+     AND json_extract(metadata, '$.` + metaDeferralAt + `') IS NOT NULL)`
+
 // DeferralCounts reads how many rows are deferred and how many are
 // actionable, without the other two view columns.
 func (dm *DatabaseManager) DeferralCounts(ctx context.Context) (deferred, actionable int, err error) {
@@ -228,7 +243,7 @@ func (dm *DatabaseManager) ListDeferred(ctx context.Context, limit int) ([]Defer
 		FROM memories
 		WHERE collection = 'memories'
 		  AND deleted_at IS NULL
-		  AND json_extract(metadata, '$.`+metaDeferralAt+`') IS NOT NULL
+		  AND `+memoryHasDeferral+`
 		ORDER BY created_at ASC
 		LIMIT ?`, limit)
 	if err != nil {

@@ -126,6 +126,16 @@ type CoreDB interface {
 	SynthesizeMemoryFor(ctx context.Context, memoryID string) (map[string]interface{}, error)
 	CompactEpistemology(ctx context.Context, force bool) (*CompactEpistemologyResult, error)
 	CompactEpistemologyDrain(ctx context.Context, force bool, maxBatches int) (*CompactEpistemologyDrainResult, error)
+
+	// RequeueDeferred and ListDeferred are the operator half of the
+	// deferral lifecycle (compact-refusal design §3.3 R1–R5). They
+	// are on the interface but deliberately NOT reachable from the
+	// mpm_system compact MCP action: R1 requires an operator action,
+	// and an agent able to requeue could undo a refusal on its own
+	// judgement, which is the loop the design exists to close. The
+	// only production caller is the operator CLI command.
+	RequeueDeferred(ctx context.Context, limit int) (*RequeueResult, error)
+	ListDeferred(ctx context.Context, limit int) ([]DeferredRow, error)
 	PruneExpired() (int, error)
 	PruneOlderThan(beforeUnixSec int64) (int, error)
 	PruneNeverAccessed() (int, error)

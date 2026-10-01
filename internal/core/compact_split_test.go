@@ -426,3 +426,128 @@ func countCompacted(t *testing.T, dm *DatabaseManager) int {
 	}
 	return n
 }
+
+// ── the progress invariant (Phase 5) ─────────────────────────────────
+
+// C5: one sanctioned refusal can never prevent later pending memories
+// from being considered forever.
+//
+// The claim is structural rather than empirical — every terminal state
+// writes to the extraction predicate — so this test walks the three
+// states and asserts that each one shrinks the actionable pool.
+func TestProgressInvariant_EveryTerminalStateShrinksThePool(t *testing.T) {
+	cases := []struct {
+		name         string
+		respond      func(ctx context.Context, raw []string) (string, error)
+		wantPool     int
+		wantDeferred int
+	}{
+		{
+			name: "lesson committed leaves the pool",
+			respond: func(ctx context.Context, raw []string) (string, error) {
+				return `{"title":"T","body":"B","tags":["x"]}`, nil
+			},
+			wantPool: 0, wantDeferred: 0,
+		},
+		{
+			name: "refusal deferred leaves the pool",
+			respond: func(ctx context.Context, raw []string) (string, error) {
+				return testRefusalSentinel, nil
+			},
+			wantPool: 0, wantDeferred: 50,
+		},
+		{
+			name: "error stops the drain loudly and does NOT shrink the pool",
+			respond: func(ctx context.Context, raw []string) (string, error) {
+				return "", errors.New("upstream 503")
+			},
+			wantPool: 50, wantDeferred: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dm := NewTestDM(t)
+			seedRaw(t, dm, 50)
+			withMockSynth(t, tc.respond)
+
+			_, _ = dm.CompactEpistemologyDrain(context.Background(), true, 0)
+
+			pressure := readPressure(t, dm)
+			if pressure.ActionablePending != tc.wantPool {
+				t.Errorf("actionable_pending = %d, want %d", pressure.ActionablePending, tc.wantPool)
+			}
+			if pressure.DeferredCount != tc.wantDeferred {
+				t.Errorf("deferred_count = %d, want %d", pressure.DeferredCount, tc.wantDeferred)
+			}
+		})
+	}
+}
+
+// The end-to-end F6 scenario: a fully-refusing backlog drains to
+// actionable_pending == 0. Before this lifecycle it never converged —
+// each drain reselected the same rows and got the same refusal.
+func TestProgressInvariant_FullyRefusingBacklogConverges(t *testing.T) {
+	dm := NewTestDM(t)
+	// 110 rows: batches of 50, 50, and 10 — the F6 shape.
+	seedRaw(t, dm, 110)
+
+	withMockSynth(t, func(ctx context.Context, raw []string) (string, error) {
+		return testRefusalSentinel, nil
+	})
+
+	// More than one invocation, to prove it is not a one-invocation
+	// coincidence but an actual fixed point.
+	for i := 0; i < 3; i++ {
+		if _, err := dm.CompactEpistemologyDrain(context.Background(), true, 0); err != nil {
+			t.Fatalf("invocation %d: %v", i, err)
+		}
+		if got := readPressure(t, dm).ActionablePending; got != 0 {
+			t.Fatalf("invocation %d: actionable_pending = %d, want 0 — the backlog must converge", i, got)
+		}
+	}
+
+	pressure := readPressure(t, dm)
+	if pressure.DeferredCount != 110 {
+		t.Errorf("deferred_count = %d, want 110", pressure.DeferredCount)
+	}
+	// raw_count is unchanged: deferring shrinks what is actionable,
+	// not what is outstanding.
+	if pressure.RawCount != 110 {
+		t.Errorf("raw_count = %d, want 110 — raw_count measures backlog, not actionability", pressure.RawCount)
+	}
+	if pressure.ActionablePending != 0 {
+		t.Errorf("actionable_pending = %d, want 0", pressure.ActionablePending)
+	}
+}
+
+// A later batch is still reached after an earlier one refuses. Without
+// this, a refusal could block later rows across invocations — the
+// invariant is about a single refusal not being able to hold the pool.
+func TestProgressInvariant_RefusalDoesNotBlockLaterRows(t *testing.T) {
+	dm := NewTestDM(t)
+	seedRaw(t, dm, 150) // 3 full batches
+
+	// Batch 1 refuses and subdivides; batches 2 and 3 succeed.
+	call := 0
+	withMockSynth(t, func(ctx context.Context, raw []string) (string, error) {
+		call++
+		if len(raw) == 50 && call == 1 {
+			return testRefusalSentinel, nil
+		}
+		return `{"title":"T","body":"B","tags":["x"]}`, nil
+	})
+
+	res, err := dm.CompactEpistemologyDrain(context.Background(), true, 0)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	// The refused batch cost 3 stages; the two after it cost 1 each.
+	// 5 stages total, well inside the budget, so both later batches ran.
+	if res.LessonsCreated < 2 {
+		t.Errorf("LessonsCreated = %d, want >= 2 — later batches must still be reached", res.LessonsCreated)
+	}
+	pressure := readPressure(t, dm)
+	if pressure.ActionablePending != 0 {
+		t.Errorf("actionable_pending = %d, want 0", pressure.ActionablePending)
+	}
+}
