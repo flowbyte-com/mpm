@@ -193,6 +193,52 @@ type CompactEpistemologyDrainResult struct {
 	// Partial-failure visibility. FailedBatch is 1-indexed.
 	FailedBatch   int    `json:"failed_batch,omitempty"`
 	FailureReason string `json:"failure_reason,omitempty"`
+	// StagesSpent is the number of model synthesis attempts this
+	// invocation made, which is what the safety budget actually bounds.
+	// It is NOT the number of batches: a batch costs 1 stage when it
+	// succeeds and 3 when it refuses (parent plus two children), so
+	// BatchesProcessed undercounts the work done on a refusing
+	// substrate. StagesSpent is the number to read when asking what an
+	// invocation cost.
+	StagesSpent int `json:"semantic_stages_spent"`
+	// RowsDeferred counts rows removed from the actionable pool by a
+	// sanctioned refusal. They remain fully retrievable and are still
+	// counted in RawRemaining; they are simply no longer offered to the
+	// model.
+	RowsDeferred int `json:"rows_deferred"`
+	// DeferralBatchIDs groups every deferral this invocation performed,
+	// one entry per refused group, so an operator can inspect exactly
+	// which batches were offered and declined.
+	DeferralBatchIDs []string `json:"deferral_batch_ids,omitempty"`
+	// RawDeferred and ActionablePending are the pressure view's two
+	// split counts, read live after the loop. RawRemaining alone cannot
+	// distinguish a backlog the model has declined from one it has not
+	// yet seen.
+	RawDeferred       int `json:"raw_deferred"`
+	ActionablePending int `json:"actionable_pending"`
+}
+
+// splitRowSet splits a batch positionally into two halves, floor on the
+// left. It is deterministic, model-free, and total: no row is lost or
+// duplicated, which is what makes "both children refused → all N
+// deferred" actually mean all N.
+//
+// The larger child is always on the right. That is a tie-break, not a
+// requirement — both conventions are deterministic — but it matches
+// Go's slice idiom (rows[:n/2], rows[n/2:]), so the code reads the way
+// an implementer would write it without an adjustment and a comment
+// explaining why.
+//
+// ok is false when the batch is too small to split. A single row has no
+// sibling to synthesise with, and the model has already said it cannot
+// produce a lesson from it; splitting would produce two empty halves
+// and a second pointless call to learn nothing.
+func splitRowSet(ids, contents []string) (leftIDs, rightIDs, leftContents, rightContents []string, ok bool) {
+	if len(ids) < 2 {
+		return nil, nil, nil, nil, false
+	}
+	half := len(ids) / 2
+	return ids[:half], ids[half:], contents[:half], contents[half:], true
 }
 
 // compactSynthesizeFunc is the LLM injection seam. Production wires
@@ -238,15 +284,31 @@ func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool) 
 		return &CompactEpistemologyResult{SkippedReason: "no_raw_memories"}, nil
 	}
 
-	// 3. Synthesize — call the LLM with strict JSON contract. NO DB
+	// 3. Run one synthesis stage over this row set. There is no
+	// subdivision at this level: CompactEpistemology is the
+	// exactly-one-batch primitive, and the drain is what subdivides.
+	return dm.compactRowSet(ctx, rawIDs, rawContents, true)
+}
+
+// compactRowSet is one semantic stage: synthesize over a specific set
+// of rows, classify, and reach a terminal state — lesson committed,
+// refusal deferred, or error returned.
+//
+// It takes the rows explicitly rather than selecting them, because the
+// drain needs to re-run a stage over a SUBSET of a batch it has
+// already selected (the refusal split). Selection and execution are
+// therefore separate concerns, which is what makes subdivision
+// possible without re-querying and hoping the same rows come back.
+func (dm *DatabaseManager) compactRowSet(ctx context.Context, ids, contents []string, deferOnRefusal bool) (*CompactEpistemologyResult, error) {
+	// Synthesize — call the LLM with strict JSON contract. NO DB
 	// writes have happened yet; any failure here leaves the substrate
 	// untouched.
-	text, err := compactSynthesizeFunc(ctx, rawContents)
+	text, err := compactSynthesizeFunc(ctx, contents)
 	if err != nil {
 		return nil, fmt.Errorf("synthesize: %w", err)
 	}
 
-	// 4. Classify the response. Three outcomes, and only one of them
+	// Classify the response. Three outcomes, and only one of them
 	// is a lesson: a malformed response, the model's considered
 	// refusal, or a usable lesson. Validation happens inside the
 	// classifier and is asked only about real lessons.
@@ -258,34 +320,47 @@ func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool) 
 		// The model declined, correctly, per the prompt's contract.
 		// This is NOT a failure and must not be reported as one.
 		//
-		// Defer the batch: annotate the rows so the next drain
-		// reselects the *next* un-attempted rows instead of repeating
-		// this identical call forever. No lesson is written and no
+		// deferOnRefusal is false only for a parent batch the drain
+		// intends to subdivide. Deferring there and then re-attempting
+		// the same rows as children would annotate every row twice,
+		// overwrite the group id, and double-count the deferral — all
+		// to spend the same stages anyway. The parent therefore
+		// reports the refusal and leaves the decision to its caller.
+		if !deferOnRefusal {
+			return &CompactEpistemologyResult{SkippedReason: "synthesis_refused"}, nil
+		}
+		//
+		// Defer the rows: annotate them so the next drain reselects
+		// the *next* un-attempted rows instead of repeating this
+		// identical call forever. No lesson is written and no
 		// compacted_into is set — a refusal folds nothing into
 		// durable knowledge, and claiming otherwise would be a lie the
 		// pressure gauge would then believe.
-		ann, err := dm.deferRawBatch(ctx, rawIDs, DeferralReasonRefusal, text)
+		ann, err := dm.deferRawBatch(ctx, ids, DeferralReasonRefusal, text)
 		if err != nil {
 			return nil, fmt.Errorf("defer: %w", err)
 		}
 		return &CompactEpistemologyResult{
 			SkippedReason:  "synthesis_refused",
-			Deferred:       len(rawIDs),
+			Deferred:       len(ids),
 			DeferralBatch:  ann.Batch,
 			DeferralReason: ann.Reason,
 		}, nil
 	}
 
-	// 5. Transaction — INSERT lesson + UPDATE raw memories, atomically.
-	lessonID, err := dm.commitLessonAndMark(ctx, lesson, rawIDs)
+	// 4. Transaction — INSERT lesson + UPDATE raw memories, atomically.
+	// compacted_into is written in the SAME transaction as the lesson
+	// INSERT, so a row can never claim to be folded into a lesson that
+	// does not exist.
+	lessonID, err := dm.commitLessonAndMark(ctx, lesson, ids)
 	if err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 
 	return &CompactEpistemologyResult{
-		Compacted:      len(rawIDs),
+		Compacted:      len(ids),
 		LessonsCreated: 1,
-		RawMarked:      len(rawIDs),
+		RawMarked:      len(ids),
 		LessonID:       lessonID,
 	}, nil
 }
@@ -378,13 +453,18 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 	if maxBatches > compactDrainMaxBatchesHardCap {
 		maxBatches = compactDrainMaxBatchesHardCap
 	}
-	// 2026-09-14 tightening pass: enforce the safeguard's
-	// per-invocation stage ceiling. Even if a caller passes a
-	// smaller hard-cap later, this clamp is the operative
-	// truth: 8 stages per invocation.
+	// The budget is measured in SEMANTIC STAGES, not batches. A batch
+	// costs 1 stage when it succeeds and 3 when it refuses (parent plus
+	// two children), so counting batches would let one invocation spend
+	// 3× the safeguard's ceiling. The clamp is against the safeguard's
+	// constant directly; maxBatches is retained as the public
+	// parameter name because renaming it would be a breaking wire
+	// change for a defect fix. See
+	// docs/designs/2026-09-30-compact-refusal-lifecycle.md §5.5.
 	if maxBatches > MaxSemanticStagesPerInvocation {
 		maxBatches = MaxSemanticStagesPerInvocation
 	}
+	stageBudget := maxBatches
 
 	result := &CompactEpistemologyDrainResult{
 		Success:    true,
@@ -392,40 +472,136 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 		LessonIDs:  []string{},
 	}
 
-	for i := 0; i < maxBatches; i++ {
-		batch, err := dm.CompactEpistemology(ctx, force)
-		if err != nil {
-			// Mid-drain failure: earlier successful batches are already
-			// committed (each batch is atomic). The failed batch and
-			// all subsequent eligible rows are untouched. Report
-			// success=false with the partial aggregate and the error.
-			result.Success = false
-			result.StopReason = "failure"
-			result.FailedBatch = i + 1
-			result.FailureReason = err.Error()
-			result.RawRemaining = dm.liveRawCount(ctx)
-			return result, err
+	stagesUsed := 0
+	// The pre-check result, read once and reused. The original loop
+	// re-ran CompactEpistemology per iteration, which re-read the
+	// pressure gauge each time; the threshold behaviour is preserved
+	// below by re-reading whenever a batch is committed.
+	rawCount, threshold, err := dm.compactPreCheck(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("pre_check: %w", err)
+	}
+
+	for {
+		// Admission check, BEFORE any spend. Every batch costs at least
+		// one stage, so this is the only check needed to keep the
+		// counter from ever exceeding the budget on the success path.
+		if stagesUsed+1 > stageBudget {
+			if result.StopReason == "" {
+				result.StopReason = "max_batches_reached"
+			}
+			break
 		}
 
-		// Skip path — pre-check said no work to do.
-		if batch.SkippedReason != "" {
-			result.SkippedReason = batch.SkippedReason
-			switch batch.SkippedReason {
-			case "no_raw_memories":
-				if result.BatchesProcessed == 0 {
-					result.StopReason = "no_work"
-				} else {
-					// Hit the empty-substrate path after doing some
-					// work (theoretical — concurrent drain would have
-					// to leave raw at 0, but stays consistent).
-					result.StopReason = "completed"
-				}
-			case "below_threshold":
-				result.StopReason = "threshold_reached"
-			default:
+		// Skip paths — no work available, or below threshold.
+		if rawCount == 0 {
+			result.SkippedReason = "no_raw_memories"
+			if result.BatchesProcessed == 0 && result.RowsDeferred == 0 {
+				result.StopReason = "no_work"
+			} else {
 				result.StopReason = "completed"
 			}
 			break
+		}
+		if !force && rawCount <= threshold {
+			result.SkippedReason = "below_threshold"
+			result.StopReason = "threshold_reached"
+			break
+		}
+
+		ids, contents, err := dm.extractRawBatch(ctx, compactBatchSize)
+		if err != nil {
+			return dm.drainFail(result, 0, fmt.Errorf("extract: %w", err), ctx)
+		}
+		if len(ids) == 0 {
+			result.SkippedReason = "no_raw_memories"
+			if result.BatchesProcessed == 0 && result.RowsDeferred == 0 {
+				result.StopReason = "no_work"
+			} else {
+				result.StopReason = "completed"
+			}
+			break
+		}
+
+		// Spend one stage on the whole batch.
+		// deferOnRefusal=false: a refusal here may still be split.
+		batch, err := dm.compactRowSet(ctx, ids, contents, false)
+		stagesUsed++
+		result.StagesSpent = stagesUsed
+		if err != nil {
+			return dm.drainFail(result, result.BatchesProcessed+1, err, ctx)
+		}
+
+		if batch.SkippedReason == "synthesis_refused" {
+			// The model declined the whole batch. Everything below is
+			// the bounded recovery path, and nothing has been persisted
+			// yet — the parent deliberately did not defer, because
+			// these rows may yet be salvaged by a split.
+			//
+			// A single row has no sibling to synthesise with, and the
+			// model has already said it cannot produce a lesson from
+			// it. Splitting would produce two empty halves and a
+			// second pointless call to learn nothing.
+			if len(ids) < 2 {
+				if err := dm.deferAndRecord(ctx, result, ids, batch.DeferralReason); err != nil {
+					return dm.drainFail(result, 0, err, ctx)
+				}
+				rawCount = dm.liveRawCount(ctx)
+				continue
+			}
+			// Second budget check, BEFORE the spend. If the budget
+			// cannot afford BOTH children, the whole batch is already
+			// deferred and stays that way. Attempting the first child
+			// and abandoning the second would be the F6 failure in
+			// miniature: the abandoned rows stay pending, get
+			// reselected, and produce the same refusal having already
+			// been billed an attempt.
+			if stagesUsed+2 > stageBudget {
+				// The whole batch defers as-is. Attempting the first
+				// child and abandoning the second would be F6 in
+				// miniature.
+				if err := dm.deferAndRecord(ctx, result, ids, batch.DeferralReason); err != nil {
+					return dm.drainFail(result, 0, err, ctx)
+				}
+				rawCount = dm.liveRawCount(ctx)
+				continue
+			}
+
+			leftIDs, rightIDs, leftContents, rightContents, _ := splitRowSet(ids, contents)
+			// Both children run regardless of the first child's
+			// outcome, so the total cost is known in advance: exactly
+			// 2 further stages. A child that errors fails the drain
+			// loudly; a child that refuses defers itself.
+			for _, child := range []struct {
+				ids, contents []string
+			}{
+				{leftIDs, leftContents},
+				{rightIDs, rightContents},
+			} {
+				cres, cerr := dm.compactRowSet(ctx, child.ids, child.contents, true)
+				stagesUsed++
+				result.StagesSpent = stagesUsed
+				if cerr != nil {
+					return dm.drainFail(result, result.BatchesProcessed+1, cerr, ctx)
+				}
+				if cres.SkippedReason == "synthesis_refused" {
+					// The child deferred itself (deferOnRefusal=true),
+					// so just account for it.
+					result.RowsDeferred += cres.Deferred
+					if cres.DeferralBatch != "" {
+						result.DeferralBatchIDs = append(result.DeferralBatchIDs, cres.DeferralBatch)
+					}
+					continue
+				}
+				result.BatchesProcessed++
+				result.RawProcessed += cres.Compacted
+				result.LessonsCreated += cres.LessonsCreated
+				if cres.LessonID != "" {
+					result.LessonIDs = append(result.LessonIDs, cres.LessonID)
+				}
+			}
+			rawCount = dm.liveRawCount(ctx)
+			continue
 		}
 
 		// Commit path.
@@ -436,28 +612,61 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 			result.LessonIDs = append(result.LessonIDs, batch.LessonID)
 		}
 
-		// Last partial batch: this batch returned fewer than
-		// compactBatchSize rows, so the next iteration will skip with
-		// "no_raw_memories". Exit early without paying for the
-		// redundant pre-check on the next iteration.
+		// Last partial batch: fewer than compactBatchSize rows, so the
+		// next iteration would find nothing. Exit without paying for a
+		// redundant pre-check.
 		if batch.Compacted < compactBatchSize {
 			result.StopReason = "completed"
 			break
 		}
+		rawCount, threshold, err = dm.compactPreCheck(ctx)
+		if err != nil {
+			return dm.drainFail(result, 0, fmt.Errorf("pre_check: %w", err), ctx)
+		}
 	}
 
 	if result.StopReason == "" {
-		// Loop ran to maxBatches without a partial-batch or skip
-		// signal — the safety cap was reached. Work may remain.
 		result.StopReason = "max_batches_reached"
 	}
 
-	// Final raw_remaining from the canonical live view. Reflects
-	// concurrent writes during the drain — this is the source of
-	// truth, not a sum or estimate from the loop.
 	result.RawRemaining = dm.liveRawCount(ctx)
+	deferred, actionable, err := dm.DeferralCounts(ctx)
+	if err != nil {
+		return result, err
+	}
+	result.RawDeferred = deferred
+	result.ActionablePending = actionable
 
 	return result, nil
+}
+
+// deferAndRecord defers rows the drain has decided not to subdivide,
+// and folds the outcome into the drain's aggregate.
+func (dm *DatabaseManager) deferAndRecord(ctx context.Context, result *CompactEpistemologyDrainResult, ids []string, reason string) error {
+	if reason == "" {
+		reason = DeferralReasonRefusal
+	}
+	ann, err := dm.deferRawBatch(ctx, ids, reason, "")
+	if err != nil {
+		return fmt.Errorf("defer: %w", err)
+	}
+	result.RowsDeferred += len(ids)
+	result.DeferralBatchIDs = append(result.DeferralBatchIDs, ann.Batch)
+	return nil
+}
+
+// drainFail records a mid-drain failure and returns it. Earlier
+// successful batches are already committed (each is atomic); the failed
+// batch and everything after it are untouched.
+func (dm *DatabaseManager) drainFail(result *CompactEpistemologyDrainResult, failedBatch int, cause error, ctx context.Context) (*CompactEpistemologyDrainResult, error) {
+	result.Success = false
+	result.StopReason = "failure"
+	if failedBatch > 0 {
+		result.FailedBatch = failedBatch
+	}
+	result.FailureReason = cause.Error()
+	result.RawRemaining = dm.liveRawCount(ctx)
+	return result, cause
 }
 
 // liveRawCount reads the canonical raw_count from the
