@@ -2483,13 +2483,20 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	// Numeric fields are emitted as float64 (JSON's number type) rather
 	// than int — this matches what json.Marshal would produce on the
 	// wire and avoids type-coercion surprises for downstream parsers.
+	// deferred_count and actionable_pending split raw_count. Both are
+	// projected because exceeded is computed from actionable_pending:
+	// an agent seeing exceeded=false with a large raw_count would
+	// otherwise have no way to tell "nothing to do" from "the model
+	// declined everything and a human must decide".
 	result["epistemic_pressure"] = map[string]interface{}{
-		"raw_count":         float64(data.EpistemicPressure.RawCount),
-		"lesson_count":      float64(data.EpistemicPressure.LessonCount),
-		"ratio":             data.EpistemicPressure.Ratio,
-		"threshold":         float64(data.EpistemicPressure.Threshold),
-		"exceeded":          data.EpistemicPressure.Exceeded,
-		"last_compacted_at": data.EpistemicPressure.LastCompactedAt,
+		"raw_count":          float64(data.EpistemicPressure.RawCount),
+		"lesson_count":       float64(data.EpistemicPressure.LessonCount),
+		"deferred_count":     float64(data.EpistemicPressure.DeferredCount),
+		"actionable_pending": float64(data.EpistemicPressure.ActionablePending),
+		"ratio":              data.EpistemicPressure.Ratio,
+		"threshold":          float64(data.EpistemicPressure.Threshold),
+		"exceeded":           data.EpistemicPressure.Exceeded,
+		"last_compacted_at":  data.EpistemicPressure.LastCompactedAt,
 	}
 
 	return result, nil
@@ -4847,10 +4854,11 @@ func handleHealthCheck(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 // Parameters:
 //   - force (bool, default false): bypass the pressure threshold gate
 //     (does NOT bypass the 50-item per-batch limit).
-//   - max_batches (int, default 20, hard cap 100): per-invocation
-//     safety cap on LLM calls. 20 batches × 50 raw = 1000 raw memories
-//     per invocation. Caller-supplied values above the hard cap are
-//     silently clamped, not rejected.
+//   - max_batches (int, default 8, hard cap 8): per-invocation safety
+//     budget, counted in SEMANTIC STAGES rather than batches. A
+//     successful batch costs 1 stage; a refused batch costs 3 (the
+//     attempt plus up to two split children). Caller-supplied values
+//     above the hard cap are silently clamped, not rejected.
 //
 // Result envelope (always set):
 //   - success: false ONLY on a mid-drain batch failure. true for
@@ -4859,16 +4867,34 @@ func handleHealthCheck(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 //   - batches_processed: count of batches that committed a lesson.
 //   - raw_processed: sum of compacted raw memories across all batches.
 //   - lessons_created: equal to batches_processed on success.
-//   - raw_remaining: live read of the pressure view after the loop —
-//     the canonical post-drain count. Inspect this to determine
-//     whether more work remains.
+//   - raw_remaining: live read of the pressure view after the loop.
+//     Counts every un-compacted memory, INCLUDING rows a refusal has
+//     deferred. It is the right number for "how much is in the pool"
+//     and the wrong one for "is there work I can still do".
+//   - actionable_pending: live read of the un-compacted rows that are
+//     NOT deferred. This is the number to read when deciding whether
+//     to invoke again: a substrate with raw_remaining=400 and
+//     actionable_pending=0 will not yield a single lesson no matter
+//     how many times this tool is called.
+//   - semantic_stages_spent: model synthesis attempts actually made.
+//     Greater than batches_processed whenever any batch refused.
+//   - rows_deferred / raw_deferred: rows this invocation deferred, and
+//     the substrate-wide deferred total, respectively.
+//   - deferral_batch_ids: one id per refused group, so the declined
+//     batches can be inspected.
 //   - lesson_ids: lesson IDs created in batch order.
 //   - stop_reason: one of "no_work" | "completed" | "threshold_reached"
 //     | "max_batches_reached" | "failure". See the result struct doc
 //     for the full taxonomy.
-//   - skipped_reason: set only on "no_work" (no_raw_memories) and
-//     "threshold_reached" (below_threshold).
+//   - skipped_reason: set on "no_work" (no_raw_memories),
+//     "threshold_reached" (below_threshold), and single-batch refusal
+//     (synthesis_refused).
 //   - failed_batch + failure_reason: present only on "failure".
+//
+// Requeueing deferred rows is deliberately absent from this surface.
+// It is an operator action (a human overriding a model's judgement),
+// and exposing it here would let an agent undo a refusal on its own
+// judgement. See compact_requeue.go and the CLI command that owns it.
 //
 // Failure semantics: when a batch fails mid-drain, earlier successful
 // batches remain committed (each batch is atomic). The failed batch
@@ -4884,32 +4910,34 @@ func handleCompactEpistemology(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 		// error. Earlier successful batches are durable; the agent
 		// can decide whether to retry.
 		if result != nil {
-			out := map[string]interface{}{
-				"success":           result.Success,
-				"batches_processed": result.BatchesProcessed,
-				"raw_processed":     result.RawProcessed,
-				"lessons_created":   result.LessonsCreated,
-				"raw_remaining":     result.RawRemaining,
-				"stop_reason":       result.StopReason,
-				"failed_batch":      result.FailedBatch,
-				"failure_reason":    result.FailureReason,
-			}
-			if len(result.LessonIDs) > 0 {
-				out["lesson_ids"] = result.LessonIDs
-			}
-			return out, err
+			return compactDrainEnvelope(result), err
 		}
 		return nil, err
 	}
+	return compactDrainEnvelope(result), nil
+}
 
-	// Success or skip path.
+// compactDrainEnvelope projects the drain result onto the wire shape.
+//
+// One projection for both the success and the partial-failure path,
+// deliberately. The partial-failure envelope is the one an agent reads
+// when something went wrong, which is exactly when it is most likely to
+// need actionable_pending to tell "the drain stopped early, call me
+// again" apart from "the drain stopped because the model declined
+// everything, calling me again will not help". Splitting the two shapes
+// is how that field would have gone missing from the one that mattered.
+func compactDrainEnvelope(result *mpminternal.CompactEpistemologyDrainResult) map[string]interface{} {
 	out := map[string]interface{}{
-		"success":           result.Success,
-		"batches_processed": result.BatchesProcessed,
-		"raw_processed":     result.RawProcessed,
-		"lessons_created":   result.LessonsCreated,
-		"raw_remaining":     result.RawRemaining,
-		"stop_reason":       result.StopReason,
+		"success":               result.Success,
+		"batches_processed":     result.BatchesProcessed,
+		"raw_processed":         result.RawProcessed,
+		"lessons_created":       result.LessonsCreated,
+		"raw_remaining":         result.RawRemaining,
+		"actionable_pending":    result.ActionablePending,
+		"semantic_stages_spent": result.StagesSpent,
+		"rows_deferred":         result.RowsDeferred,
+		"raw_deferred":          result.RawDeferred,
+		"stop_reason":           result.StopReason,
 	}
 	if result.SkippedReason != "" {
 		out["skipped_reason"] = result.SkippedReason
@@ -4917,7 +4945,19 @@ func handleCompactEpistemology(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 	if len(result.LessonIDs) > 0 {
 		out["lesson_ids"] = result.LessonIDs
 	}
-	return out, nil
+	if len(result.DeferralBatchIDs) > 0 {
+		out["deferral_batch_ids"] = result.DeferralBatchIDs
+	}
+	// failed_batch and failure_reason are omitted rather than sent as
+	// zero/empty, so their presence is a reliable "this drain failed"
+	// signal for a client that checks keys rather than parsing values.
+	if result.FailedBatch > 0 {
+		out["failed_batch"] = result.FailedBatch
+	}
+	if result.FailureReason != "" {
+		out["failure_reason"] = result.FailureReason
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

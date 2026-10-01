@@ -87,8 +87,8 @@ func NewRouter() *CommandRouter {
 		"migrate": {Name: "migrate", Description: "Import from markdown/JSON (alias to ingest for non-SQLite sources)"},
 
 		// Working Context (cognitive-interface RFC Wave 1)
-		"work":      {Name: "work", Description: "Working context scratchpad — status|show|clear|promote"},
-		"continue":  {Name: "continue", Description: "Resume previous session — composes working context, wake context, decisions, skills, theories"},
+		"work":     {Name: "work", Description: "Working context scratchpad — status|show|clear|promote"},
+		"continue": {Name: "continue", Description: "Resume previous session — composes working context, wake context, decisions, skills, theories"},
 
 		// Cognitive-verb aliases (Wave 3). Humans express cognition;
 		// the substrate contracts (add, record_decision, propose_theory,
@@ -156,6 +156,12 @@ func NewRouter() *CommandRouter {
 
 		// Capability namespace — executable primitives (seed, lifecycle)
 		"capability": {Name: "capability", Description: "Manage capabilities (seed, lifecycle, governance)", MinArgs: 0},
+
+		// Compaction — operator surface of the deferral lifecycle.
+		// Requeue lives here rather than on the mpm_system compact
+		// action because it is a human overriding a model refusal;
+		// see compact_cmds.go.
+		"compact": {Name: "compact", Description: "Operator commands for the compaction deferral lifecycle (deferred|requeue-deferred)", MinArgs: 0},
 
 		// Provenance — artifact creation metadata
 		"provenance": {Name: "provenance", Description: "Show artifact provenance (mpm provenance help for subcommands)", MinArgs: 0},
@@ -426,6 +432,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleDebug(args)
 	case "capability":
 		return handleCapability(args)
+	case "compact":
+		return handleCompact(args)
 	case "provenance":
 		if len(args) < 2 {
 			// No subcommand — show brief usage.
@@ -529,12 +537,12 @@ func (r *CommandRouter) handleVersion() int {
 // handleHelp routes help requests per the cognitive-interface RFC §4
 // progressive-disclosure principle. Order:
 //
-//   1. No args → cognitive default (~22 commands across 5 sections).
-//   2. --all → full operator-interface catalogue (all 56+ commands).
-//   3. <known-section> → expanded section help (knowledge, runtime,
-//                         maintenance, reflection, work, explain).
-//   4. <known-command> → existing per-command help (mode, persona, etc.).
-//   5. Anything else → "no help available" + cognitive default.
+//  1. No args → cognitive default (~22 commands across 5 sections).
+//  2. --all → full operator-interface catalogue (all 56+ commands).
+//  3. <known-section> → expanded section help (knowledge, runtime,
+//     maintenance, reflection, work, explain).
+//  4. <known-command> → existing per-command help (mode, persona, etc.).
+//  5. Anything else → "no help available" + cognitive default.
 //
 // Stage 3 keeps existing per-command help reachable so scripts that
 // depended on `mpm help mode` etc. continue to work.
@@ -821,6 +829,7 @@ var commandsWithSubcommandDispatch = map[string]bool{
 	"self-heal":   true, // (ops subcommand pattern)
 	"why":         true, // (uses subcommand-style args)
 	"config":      true, // show|get|set|edit|validate|profile|component|capability
+	"compact":     true, // deferred|requeue-deferred|help
 }
 
 // isSubcommandHelp reports whether the given args (post-parseFlags, with

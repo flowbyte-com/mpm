@@ -17,10 +17,17 @@
 //   - force=true            — compact DRAINS everything. The threshold
 //     gate is bypassed; the drain continues until the substrate is
 //     empty or the safety cap is hit.
-//   - max_batches           — per-invocation cap on LLM calls (default
-//     20, hard cap 100). 20 batches × 50 raw = 1000 raw memories per
-//     call. Protects against runaway LLM cost when new eligible raw
-//     memories arrive faster than the drain can consume them.
+//   - max_batches           — per-invocation cap on SEMANTIC STAGES
+//     (default 8, hard cap 8). A stage is one model synthesis
+//     attempt, not one batch: a batch that succeeds costs 1, a batch
+//     that refuses costs 3 (parent plus two split children). 8 stages
+//     × 50 raw is at most 400 raw memories per call. Protects against
+//     runaway LLM cost when new eligible raw memories arrive faster
+//     than the drain can consume them.
+//
+//     The parameter is still named max_batches because it is part of
+//     the published wire contract. Read it as a stage budget; the
+//     drain enforces it as one, and StagesSpent reports what it spent.
 //
 // StopReason taxonomy (always set on return):
 //
@@ -125,8 +132,10 @@ type CompactEpistemologyResult struct {
 
 // compactBatchSize is the hard ceiling on raw memories per call.
 // Tuned to fit comfortably in MiniMax-M2.7's context window even
-// for verbose memory entries, while still draining a backlog of
-// 1000+ raw in ~20 calls.
+// for verbose memory entries. It is a per-request context limit and
+// is independent of the per-invocation stage budget below, which is
+// the smaller of the two in practice: at 8 stages an invocation
+// commits at most 8 × 50 = 400 raw memories.
 const compactBatchSize = 50
 
 // compactDrainMaxBatchesDefault is the per-invocation safety cap
@@ -158,9 +167,9 @@ const compactDrainMaxBatchesHardCap = 8
 //     The remaining raw memories are eligible
 //     but the threshold gate stopped further
 //     compaction. SkippedReason="below_threshold".
-//   - "max_batches_reached" — caller-requested or default safety cap
-//     (default 20 batches, hard cap 100) was
-//     hit. Work may remain; check raw_remaining.
+//   - "max_batches_reached" — the stage budget (8) was exhausted.
+//     Work may remain; check actionable_pending, not raw_remaining,
+//     to know whether any of it is still offerable.
 //   - "failure"             — a mid-drain batch failed. Earlier batches
 //     remain committed; FailedBatch and
 //     FailureReason identify the failed batch.
@@ -394,9 +403,15 @@ func (dm *DatabaseManager) compactRowSet(ctx context.Context, ids, contents []st
 // The 50-item batch safety is unrelated to force — every batch is
 // capped at compactBatchSize regardless of force or threshold.
 //
-// maxBatches semantics:
-//   - 0 or negative: use compactDrainMaxBatchesDefault (20).
-//   - positive: use as-is, capped at compactDrainMaxBatchesHardCap (100).
+// maxBatches semantics. Despite the name, this is a budget of SEMANTIC
+// STAGES (model synthesis attempts), not of batches: a successful
+// batch costs one stage, a refused batch costs three (the parent
+// attempt plus up to two split children). Read StagesSpent on the
+// result to see what the budget actually bought.
+//
+//   - 0 or negative: use compactDrainMaxBatchesDefault (8).
+//   - positive: use as-is, capped at compactDrainMaxBatchesHardCap (8)
+//     and then at MaxSemanticStagesPerInvocation (8).
 //
 // Each batch stays independently atomic — the per-batch transaction
 // boundary is inside CompactEpistemology. The drain loop holds NO
@@ -418,7 +433,7 @@ func (dm *DatabaseManager) compactRowSet(ctx context.Context, ids, contents []st
 //   - "failure"             mid-drain batch failure (success=false).
 //
 // 2026-09-14 release-pass: the existing compactDrainMaxBatchesHardCap
-// (100) IS the bounded-execution safeguard for this orchestrator.
+// IS the bounded-execution safeguard for this orchestrator.
 // The per-batch SynthesizeCompactLesson call now routes through
 // the Plan-aware DoLLMRequestWithPlan helper, which classifies
 // failures (transient=1 retry, auth=0, rate=conditional, malformed=1
@@ -439,9 +454,15 @@ func (dm *DatabaseManager) compactRowSet(ctx context.Context, ids, contents []st
 // The 50-item batch safety is unrelated to force — every batch is
 // capped at compactBatchSize regardless of force or threshold.
 //
-// maxBatches semantics:
-//   - 0 or negative: use compactDrainMaxBatchesDefault (20).
-//   - positive: use as-is, capped at compactDrainMaxBatchesHardCap (100).
+// maxBatches semantics. Despite the name, this is a budget of SEMANTIC
+// STAGES (model synthesis attempts), not of batches: a successful
+// batch costs one stage, a refused batch costs three (the parent
+// attempt plus up to two split children). Read StagesSpent on the
+// result to see what the budget actually bought.
+//
+//   - 0 or negative: use compactDrainMaxBatchesDefault (8).
+//   - positive: use as-is, capped at compactDrainMaxBatchesHardCap (8)
+//     and then at MaxSemanticStagesPerInvocation (8).
 //
 // Each batch stays independently atomic — the per-batch transaction
 // boundary is inside CompactEpistemology. The drain loop holds NO

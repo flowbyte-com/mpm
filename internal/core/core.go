@@ -31,6 +31,17 @@ import (
 // invariant and rationale.
 const MaxSemanticStagesPerInvocation = synth.MaxSemanticStagesPerInvocation
 
+// CompactBatchSize is the per-request ceiling on raw memories offered
+// to the model in one synthesis call, re-exported from the compact
+// package for the same reason as MaxSemanticStagesPerInvocation.
+//
+// The operator-facing `mpm compact` commands use it as the default
+// bound for both listing and requeueing deferred rows, so the help
+// text cannot drift from the behaviour the core actually applies. A
+// second hard-coded 50 in the CLI would be a second thing to update
+// when the context limit changes.
+const CompactBatchSize = compactBatchSize
+
 // DecisionFilter narrows the result set for ListDecisions. The zero value
 // returns all active (non-superseded, non-invalidated) decisions up to the
 // default page size. alpha-4 D-005.

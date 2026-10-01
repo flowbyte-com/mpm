@@ -195,6 +195,15 @@ type EpistemicPressureData struct {
 	Ratio       float64 `json:"ratio"`
 	Threshold   int     `json:"threshold"`
 	Exceeded    bool    `json:"exceeded"`
+	// DeferredCount and ActionablePending split RawCount. A substrate
+	// with raw_count=400, deferred_count=400, actionable_pending=0 is
+	// FULL of work the model has already declined; one with
+	// actionable_pending=400 is untouched. Both are the same
+	// raw_count, and an agent that reads only raw_count cannot tell
+	// them apart — so both are reported, and Exceeded is computed
+	// from ActionablePending.
+	DeferredCount     int `json:"deferred_count"`
+	ActionablePending int `json:"actionable_pending"`
 	// LastCompactedAt is the RFC3339 timestamp of the most recent
 	// compact_epistemology commit. Empty string when no compaction
 	// has happened yet — agent can branch on that without a separate
@@ -701,21 +710,25 @@ func (dm *DatabaseManager) gatherRecentActivity(limit int) []WakeContextActivity
 // still meaningful via RawCount alone.
 func (dm *DatabaseManager) gatherEpistemicPressure() EpistemicPressureData {
 	var (
-		rawCount    int
-		lessonCount int
-		threshold   int
+		rawCount          int
+		lessonCount       int
+		deferredCount     int
+		actionablePending int
+		threshold         int
 	)
 	err := dm.SQLDB().QueryRow(`
 		SELECT
 		  raw_count,
 		  lesson_count,
+		  deferred_count,
+		  actionable_pending,
 		  COALESCE(
 		    (SELECT CAST(json_extract(raw_json, '$.raw_threshold') AS INTEGER)
 		     FROM system_config WHERE key = 'compaction'),
 		    100
 		  ) AS threshold
 		FROM epistemic_pressure_v
-	`).Scan(&rawCount, &lessonCount, &threshold)
+	`).Scan(&rawCount, &lessonCount, &deferredCount, &actionablePending, &threshold)
 	if err != nil {
 		// Non-fatal: log to audit and return zero value. The agent sees
 		// absent pressure (raw_count=0, exceeded=false) which is the
@@ -746,13 +759,29 @@ func (dm *DatabaseManager) gatherEpistemicPressure() EpistemicPressureData {
 		ratio = float64(rawCount) / float64(lessonCount)
 	}
 
+	// Exceeded is computed from ACTIONABLE_PENDING, not raw_count.
+	//
+	// This is the whole point of the deferral lifecycle. A row the
+	// model declined is not work the agent can do by compacting
+	// harder — it is work the agent already tried and the model
+	// considered and refused. Triggering on raw_count would make a
+	// fully-deferred substrate (raw 400, deferred 400, actionable 0)
+	// report exceeded=true forever, and the scheduled compaction
+	// reflex would fire on every cycle, do nothing, and produce no
+	// lesson. That is the loop the design removes, reintroduced one
+	// layer up in the trigger rather than in the drain.
+	//
+	// raw_count keeps its own meaning and stays on the payload, so an
+	// operator inspecting the substrate still sees the full backlog.
 	return EpistemicPressureData{
-		RawCount:        rawCount,
-		LessonCount:     lessonCount,
-		Ratio:           ratio,
-		Threshold:       threshold,
-		Exceeded:        rawCount > threshold,
-		LastCompactedAt: lastCompacted,
+		RawCount:          rawCount,
+		LessonCount:       lessonCount,
+		Ratio:             ratio,
+		Threshold:         threshold,
+		DeferredCount:     deferredCount,
+		ActionablePending: actionablePending,
+		Exceeded:          actionablePending > threshold,
+		LastCompactedAt:   lastCompacted,
 	}
 }
 

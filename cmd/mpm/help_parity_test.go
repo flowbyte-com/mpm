@@ -46,6 +46,7 @@ func enumeratePublicCommands() []string {
 		"why", "theory", "skill", "tour", "info", "config", "save-skill",
 		"list-skills", "read-skill", "mode", "wake", "gc", "blob", "tasks",
 		"lint", "backup", "restore", "directives", "lifecycle", "status",
+		"compact",
 	}
 }
 

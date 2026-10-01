@@ -190,8 +190,16 @@ func buildWakeContextBody(wake mpminternal.WakeContextData) string {
 	}
 	fmt.Fprintf(&b, "  raw / lesson      : %d / %d (ratio %.2f)\n",
 		wake.EpistemicPressure.RawCount, wake.EpistemicPressure.LessonCount, wake.EpistemicPressure.Ratio)
-	fmt.Fprintf(&b, "  pressure          : exceeded=%v threshold=%d\n",
-		wake.EpistemicPressure.Exceeded, wake.EpistemicPressure.Threshold)
+	// The split matters more than the total: raw includes rows a
+	// synthesis refusal deferred, and those cannot be compacted by
+	// retrying. Printing only the total would show a large backlog and
+	// imply there is something to do.
+	if wake.EpistemicPressure.DeferredCount > 0 {
+		fmt.Fprintf(&b, "  deferred          : %d held back by refusal (%d actionable)\n",
+			wake.EpistemicPressure.DeferredCount, wake.EpistemicPressure.ActionablePending)
+	}
+	fmt.Fprintf(&b, "  pressure          : exceeded=%v threshold=%d (vs actionable %d)\n",
+		wake.EpistemicPressure.Exceeded, wake.EpistemicPressure.Threshold, wake.EpistemicPressure.ActionablePending)
 	if len(wake.OverdueWakes) > 0 {
 		fmt.Fprintf(&b, "  overdue wakes     : %d pending\n", len(wake.OverdueWakes))
 		for _, ow := range wake.OverdueWakes {
