@@ -260,37 +260,17 @@ func TestCompactEpistemology_SchemaViolation(t *testing.T) {
 	}
 }
 
-// ── 6b. Validation failure: empty fields ──────────────────────────────
-
-func TestCompactEpistemology_ValidationFailure(t *testing.T) {
+// A lesson that is well-formed JSON but not a usable lesson is still a
+// validation failure. The refusal path must not have absorbed it.
+func TestCompactEpistemology_ValidationFailureStillErrors(t *testing.T) {
 	dm := NewTestDM(t)
-	_, _ = dm.SQLDB().Exec(`DELETE FROM memories`)
-	if _, err := dm.SQLDB().Exec(`DELETE FROM lessons_base`); err != nil {
-		t.Fatalf("clear lessons: %v", err)
-	}
-	if _, err := dm.SQLDB().Exec(`
-		INSERT INTO system_config (key, raw_json, content_hash)
-		VALUES ('compaction', '{"raw_threshold":1}', '')
-	`); err != nil {
-		t.Fatalf("set threshold: %v", err)
-	}
+	seedRaw(t, dm, 3)
 
-	now := time.Now().UTC().Format(time.RFC3339)
-	for i := 0; i < 5; i++ {
-		if _, err := dm.SQLDB().Exec(`
-			INSERT INTO memories (id, collection, content, created_at, updated_at)
-			VALUES (?, 'memories', 'seed', ?, ?)
-		`, "raw-"+time.Now().Format("150405.000000")+"-"+string(rune('a'+i%26)), now, now); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
-	}
-
-	// Model returns the refusal sentinel — valid JSON, empty fields.
 	withMockSynth(t, func(ctx context.Context, raw []string) (string, error) {
-		return `{"title":"","body":"","tags":[]}`, nil
+		return `{"title":"Has a title","body":"","tags":["x"]}`, nil
 	})
 
-	_, err := dm.CompactEpistemology(context.Background(), false)
+	_, err := dm.CompactEpistemology(context.Background(), true)
 	if err == nil {
 		t.Fatal("expected validation error; got nil")
 	}
@@ -298,11 +278,12 @@ func TestCompactEpistemology_ValidationFailure(t *testing.T) {
 		t.Errorf("error: got %v, want contains 'lesson_validation_failed'", err)
 	}
 
-	// Zero DB writes.
 	var lessonCount int
-	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM lessons`).Scan(&lessonCount)
+	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM lessons`).Scan(&lessonCount); err != nil {
+		t.Fatalf("count lessons: %v", err)
+	}
 	if lessonCount != 0 {
-		t.Errorf("lessons table should be empty after validation failure: got %d, want 0", lessonCount)
+		t.Errorf("lessons = %d, want 0", lessonCount)
 	}
 }
 

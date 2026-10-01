@@ -237,19 +237,29 @@ func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool) 
 		return nil, fmt.Errorf("synthesize: %w", err)
 	}
 
-	// 4. Unmarshal into the domain struct. Bad JSON = model_schema_violation.
-	var lesson CompactLesson
-	if err := json.Unmarshal([]byte(text), &lesson); err != nil {
-		return nil, fmt.Errorf("model_schema_violation: %w", err)
+	// 4. Classify the response. Three outcomes, and only one of them
+	// is a lesson: a malformed response, the model's considered
+	// refusal, or a usable lesson. Validation happens inside the
+	// classifier and is asked only about real lessons.
+	outcome, lesson, err := ClassifyCompactSynthesis(text)
+	if err != nil {
+		return nil, err
+	}
+	if outcome == OutcomeRefused {
+		// The model declined, correctly, per the prompt's contract.
+		// This is NOT a failure and must not be reported as one.
+		//
+		// Deferral — marking these rows so the next drain does not
+		// reselect them and repeat this exact call forever — lands in
+		// a later phase of this change. Until then the batch is left
+		// untouched, which is the same as the pre-change behaviour;
+		// what changes here is only that the refusal stops masquerad-
+		// ing as a lesson_validation_failed error.
+		return &CompactEpistemologyResult{SkippedReason: "synthesis_refused"}, nil
 	}
 
-	// 5. Validate — semantic check (empty fields, missing tags).
-	if err := lesson.Validate(); err != nil {
-		return nil, fmt.Errorf("lesson_validation_failed: %w", err)
-	}
-
-	// 6. Transaction — INSERT lesson + UPDATE raw memories, atomically.
-	lessonID, err := dm.commitLessonAndMark(ctx, &lesson, rawIDs)
+	// 5. Transaction — INSERT lesson + UPDATE raw memories, atomically.
+	lessonID, err := dm.commitLessonAndMark(ctx, lesson, rawIDs)
 	if err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
