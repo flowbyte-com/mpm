@@ -158,12 +158,18 @@ install: build refresh-installed
 	@echo "🚀 Verifying canonical install at $(PREFIX)/bin/..."
 	@mkdir -p $(PREFIX)/bin
 	@if [ "$(BUILD_DIR)" != "$(PREFIX)/bin" ] && [ ! -L "$(BUILD_DIR)" ] && [ ! -L "$(PREFIX)" ]; then \
-	    install -m755 $(BUILD_DIR)/$(BINARY_NAME)    $(PREFIX)/bin/$(BINARY_NAME) || true; \
-	    install -m755 $(BUILD_DIR)/$(MCP_BINARY)    $(PREFIX)/bin/$(MCP_BINARY) || true; \
-	    install -m755 $(BUILD_DIR)/$(SCHED_BINARY)  $(PREFIX)/bin/$(SCHED_BINARY) || true; \
-	    install -m755 $(BUILD_DIR)/$(CRITIC_BINARY) $(PREFIX)/bin/$(CRITIC_BINARY) || true; \
-	    install -m755 $(BUILD_DIR)/$(TELEMETRY_BINARY) $(PREFIX)/bin/$(TELEMETRY_BINARY) || true; \
-	    echo "    (synced bin/ to $(PREFIX)/bin/)"; \
+	    echo "==> syncing bin/ -> $(PREFIX)/bin/ (all five must land; a partial sync is a failure)"; \
+	    install -m755 $(BUILD_DIR)/$(BINARY_NAME)    $(PREFIX)/bin/$(BINARY_NAME) && \
+	    install -m755 $(BUILD_DIR)/$(MCP_BINARY)    $(PREFIX)/bin/$(MCP_BINARY) && \
+	    install -m755 $(BUILD_DIR)/$(SCHED_BINARY)  $(PREFIX)/bin/$(SCHED_BINARY) && \
+	    install -m755 $(BUILD_DIR)/$(CRITIC_BINARY) $(PREFIX)/bin/$(CRITIC_BINARY) && \
+	    install -m755 $(BUILD_DIR)/$(TELEMETRY_BINARY) $(PREFIX)/bin/$(TELEMETRY_BINARY) && \
+	    echo "    (synced bin/ to $(PREFIX)/bin/)" || \
+	    { echo "    FAIL: could not sync all five binaries into $(PREFIX)/bin/." >&2; \
+	      echo "    The success line that follows asserts all five are present there; it" >&2; \
+	      echo "    must not be printed over a partial install. Inspect $(PREFIX)/bin/ to" >&2; \
+	      echo "    see which binaries landed, then re-run make install." >&2; \
+	      exit 1; }; \
 	else \
 	    echo "    (bin/ is the canonical location; no copy needed)"; \
 	fi

@@ -606,3 +606,214 @@ func listMatchingTests(t *testing.T, repoRoot, regex string) []string {
 	sort.Strings(names)
 	return names
 }
+
+// ---------------------------------------------------------------------------
+// Gate failure propagation
+// ---------------------------------------------------------------------------
+
+// makeInstallRecipe returns the recipe body of the Makefile's `install`
+// target, with the recipe prefix (@, -) and line continuations preserved
+// exactly as make would hand them to the shell.
+//
+// Extracting the REAL recipe (rather than restating its shape in the test)
+// is the point: the defect this guards against is a property of those exact
+// bytes. A paraphrase in the test could keep passing while the Makefile
+// regressed, or vice versa.
+func makeInstallRecipe(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(findRepoRoot(t), "Makefile")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	lines := strings.Split(string(data), "\n")
+
+	start := -1
+	for i, l := range lines {
+		if l == "install: build refresh-installed" {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("Makefile no longer has the expected `install: build refresh-installed` target; " +
+			"update makeInstallRecipe to match the current shape.")
+	}
+
+	var body []string
+	for i := start; i < len(lines); i++ {
+		l := lines[i]
+		// A non-indented, non-empty line ends the recipe.
+		if l != "" && !strings.HasPrefix(l, "\t") && !strings.HasPrefix(l, " ") {
+			break
+		}
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		body = append(body, strings.TrimPrefix(l, "\t"))
+	}
+	if len(body) == 0 {
+		t.Fatalf("`install` target has an empty recipe")
+	}
+	return strings.Join(body, "\n")
+}
+
+// TestBuildConfig_InstallSyncHasNoMaskedFailure pins the invariant that
+// `make install` cannot report success when a mandatory step failed.
+//
+// The defect: the five `install -m755` calls were each suffixed `|| true`
+// AND joined with `;` inside a single `if ... fi` shell invocation. A recipe
+// line's exit status is the status of the LAST command in it, so after every
+// copy failed the trailing `echo` still exited 0, the following recipe line
+// printed "✓ Canonical binaries at ...", and `make install` returned 0.
+//
+// Note that removing `|| true` ALONE would not have fixed it: the `;` chain
+// would still swallow the failure the same way. Both properties are asserted
+// below — the absence of the error-swallowing suffix, and the presence of
+// `&&` sequencing — because either one alone is insufficient.
+//
+// Why `make install` specifically: it is a validation target. Its closing
+// line makes a factual claim about five binaries being present in
+// $(PREFIX)/bin. That claim must not be printed over a partial install.
+//
+// Regression target: this test fails if the `install` recipe regains
+// `|| true` on a mandatory step, or returns to `;`-joining the copies.
+func TestBuildConfig_InstallSyncHasNoMaskedFailure(t *testing.T) {
+	recipe := makeInstallRecipe(t)
+
+	// Locate just the branch that performs the copy, so the assertions do
+	// not accidentally match unrelated `||` uses in the target.
+	copyBranch := ""
+	inCopy := false
+	for _, line := range strings.Split(recipe, "\n") {
+		if strings.Contains(line, "install -m755") {
+			inCopy = true
+		}
+		if inCopy {
+			copyBranch += line + "\n"
+		}
+	}
+	if strings.TrimSpace(copyBranch) == "" {
+		t.Fatalf("`install` recipe no longer contains any `install -m755` copy step; " +
+			"update this test to match the current shape.")
+	}
+
+	if strings.Contains(copyBranch, "|| true") {
+		t.Errorf("`make install` re-introduced `|| true` on a mandatory copy step.\n"+
+			"  A recipe line exits with the status of its LAST command, so swallowing\n"+
+			"  the copy failure lets the trailing echo report success over a partial\n"+
+			"  install. Chain the copies with `&&` and let the branch fail loudly.\n"+
+			"  offending branch:\n%s", indentForMessage(copyBranch))
+	}
+
+	// Every copy except the last must be followed by `&&` (or the branch
+	// must exit on failure some other way). A bare `;` between copies is
+	// the exact shape that lets a mid-chain failure vanish.
+	for i, line := range strings.Split(copyBranch, "\n") {
+		if !strings.Contains(line, "install -m755") {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		trimmed = strings.TrimSuffix(trimmed, "\\")
+		trimmed = strings.TrimSpace(trimmed)
+		if strings.HasSuffix(trimmed, ";") {
+			t.Errorf("`make install` joins copy steps with `;` at:\n  %s\n"+
+				"  A `;` chain in ONE shell invocation reports only the LAST command's\n"+
+				"  status, so an earlier failed copy is masked. Use `&&` so a failed\n"+
+				"  copy aborts the branch (or split the copies into separate recipe\n"+
+				"  lines, which make checks individually).", trimmed)
+		}
+		_ = i
+	}
+}
+
+// TestBuildConfig_InstallSyncFailsWhenCopyFails is the empirical half of the
+// guard: it executes the REAL `install` recipe with a stubbed `install`
+// command that always fails, and asserts the enclosing target exits non-zero
+// and never prints its success claim.
+//
+// This is what makes the invariant checkable rather than merely asserted. A
+// static scan can only confirm the Makefile does not contain a known-bad
+// token; it cannot confirm the shell actually propagates. This test runs the
+// shell.
+//
+// Isolation: the recipe body is written to a temp Makefile under t.TempDir()
+// with PREFIX redirected there, and a stub `install` earlier on PATH always
+// exits 1. No real $(PREFIX), no real $HOME, no live database, and neither
+// `build` nor `refresh-installed` is invoked.
+func TestBuildConfig_InstallSyncFailsWhenCopyFails(t *testing.T) {
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skipf("make not available: %v", err)
+	}
+
+	tmp := t.TempDir()
+	stubDir := filepath.Join(tmp, "stubbin")
+	if err := os.MkdirAll(stubDir, 0o755); err != nil {
+		t.Fatalf("mkdir stubbin: %v", err)
+	}
+	stub := filepath.Join(stubDir, "install")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho '[stub] refusing to install' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	// A non-symlinked build dir and a non-symlinked PREFIX, both inside the
+	// temp sandbox, so the copy branch is the one that executes.
+	buildDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(buildDir, 0o755); err != nil {
+		t.Fatalf("mkdir buildDir: %v", err)
+	}
+	prefix := filepath.Join(tmp, "prefix")
+	if err := os.MkdirAll(prefix, 0o755); err != nil {
+		t.Fatalf("mkdir prefix: %v", err)
+	}
+
+	recipe := makeInstallRecipe(t)
+
+	// The real recipe, verbatim, under a probe target. Only the variable
+	// definitions and the target name are ours; the shell text is the
+	// Makefile's own.
+	var b strings.Builder
+	b.WriteString("BINARY_NAME := mpm\n")
+	b.WriteString("MCP_BINARY  := mpm-mcp\n")
+	b.WriteString("SCHED_BINARY := mpm-scheduler\n")
+	b.WriteString("CRITIC_BINARY := mpm-critic\n")
+	b.WriteString("TELEMETRY_BINARY := mpm-telemetry\n")
+	b.WriteString("BUILD_DIR   := " + buildDir + "\n")
+	b.WriteString("PREFIX      := " + prefix + "\n")
+	b.WriteString("\n.PHONY: probe\nprobe:\n")
+	for _, line := range strings.Split(recipe, "\n") {
+		b.WriteString("\t" + line + "\n")
+	}
+
+	probeMakefile := filepath.Join(tmp, "Makefile.probe")
+	if err := os.WriteFile(probeMakefile, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write probe makefile: %v", err)
+	}
+
+	cmd := exec.Command("make", "-f", probeMakefile, "probe")
+	cmd.Dir = tmp
+	cmd.Env = append(os.Environ(), "PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+
+	if err == nil {
+		t.Errorf("`make install` reported SUCCESS while every binary copy failed.\n"+
+			"  This is the masked-failure defect: a mandatory step failed but the\n"+
+			"  enclosing target exited 0. Chain the copy steps with `&&`.\n"+
+			"  output:\n%s", indentForMessage(string(out)))
+	}
+
+	if strings.Contains(string(out), "✓ Canonical binaries at") {
+		t.Errorf("`make install` printed its success claim despite a failed copy.\n"+
+			"  The claim asserts all five binaries are present in PREFIX/bin, so it\n"+
+			"  must not be printed when the sync failed.\n"+
+			"  output:\n%s", indentForMessage(string(out)))
+	}
+}
+
+func indentForMessage(s string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
+		b.WriteString("    " + line + "\n")
+	}
+	return b.String()
+}
