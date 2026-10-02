@@ -109,7 +109,18 @@ TESTENV_GUARD_RUN := TestNoUnisolatedMPMSubprocess|TestScannerDetectsKnownBadFor
 # and each is silent on its own.
 TESTENV_REQUIRED_GUARDS := TestNoUnisolatedMPMSubprocess TestScannerDetectsKnownBadForm
 
-.PHONY: all build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit lint help refresh-installed check-installed-drift check-installed
+# Floor on the number of tests `test-scripts` must collect. `unittest`
+# exits 0 when it discovers nothing, so a directory rename, a broken
+# importable-path, or a pattern typo would turn the gate into a silent
+# pass — the same failure shape as the gate having never been wired at
+# all. This is the Python analogue of the TOOLS_REQUIRED_GUARDS /
+# TESTENV_REQUIRED_GUARDS checks above. Measured population: 139 tests.
+# The floor is deliberately well below that so ordinary test removal
+# does not trip it; it exists to catch a gate that has stopped seeing
+# anything.
+SCRIPTS_TEST_MIN_TESTS := 50
+
+.PHONY: all build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit test-scripts lint help refresh-installed check-installed-drift check-installed
 
 all: build
 
@@ -261,6 +272,7 @@ test:
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/scheduler/...
 	$(MAKE) test-testenv
 	$(MAKE) test-tools
+	$(MAKE) test-scripts
 
 # Run the pre-commit subset of internal/core tests with the same FTS5 flag
 # discipline as `make test`. The pre-commit hook invokes this target rather
@@ -385,6 +397,76 @@ test-testenv-precommit:
 	 CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -short -count=1 -tags fts5 -v ./internal/testenv/ \
 		-run "$(TESTENV_GUARD_RUN)"
 
+# Validation gate for the Python test suites under scripts/tests/.
+#
+# WHY THIS TARGET EXISTS
+#
+# Nothing in this repository's validation path could see a Python test
+# under scripts/tests/. Three separate boundaries conspired:
+#
+#   1. `scripts/` is its own Go module, so `go test ./...` from the repo
+#      root cannot descend into it. This is the same nested-module shape
+#      that already forced test-tools / test-tools-race and
+#      test-testenv / test-testenv-race into `make test` / `make test-race`.
+#   2. The Makefile's only Python invocation in its entire history was
+#      `check-installed-drift` -> agent_installation's
+#      tests.test_installed_block_drift. No target enumerated
+#      scripts/tests/ at all.
+#   3. scripts/pre-commit runs no Python whatsoever; it invokes
+#      make test-core-precommit, test-tools-precommit, and
+#      test-testenv-precommit, all Go.
+#
+# The consequence was measured, not assumed: with a deliberately failing
+# test in scripts/tests/test_install_phase_binaries.py, `make test`
+# exited 0, `make test-race` exited 0, `make release-gate` exited 0, and
+# scripts/pre-commit exited 0 — and the sabotaged test's name appeared
+# zero times in any of their logs, because none of them executed the
+# file. Meanwhile that file had been reporting 2 failures and 3 errors
+# since dd91fbf8 (2026-09-25) removed the shell wrapper the tests
+# asserted. A green gate was reporting on a suite it never ran.
+#
+# SCOPE
+#
+# scripts/tests/ only. agent_installation/tests/ is NOT duplicated here:
+# it is already owned by CI (`cd agent_installation && python3 -m unittest
+# discover tests` in .github/workflows/build-test.yml), and running its
+# ~36s locally as well would double the gate's cost for no additional
+# signal. If that ownership ever changes, move it here rather than
+# adding a third runner.
+#
+# Deliberately NOT wired into scripts/pre-commit: that suite costs ~16s
+# against a pre-commit budget the Go subsets keep at seconds, and it is
+# not a staged-file-type-guarded fast subset the way test-testenv-
+# precommit is. `make test` / `make test-race` / `make release-gate` are
+# the supported validation gates, and they now run it.
+#
+# `discover` is the same invocation CI already uses for
+# agent_installation; `scripts/tests/` is a namespace package with no
+# __init__.py, so `discover` only works with `tests` as a relative start
+# directory from `scripts/`, not with an absolute `-s` path.
+#
+# NON-VACUITY GUARD
+#
+# See SCRIPTS_TEST_MIN_TESTS above. The recipe parses the reported test
+# count and fails on an unparseable count, a zero count, or a count
+# below the floor, before propagating the suite's real exit status.
+test-scripts:
+	@cd scripts && out=$$(python3 -m unittest discover tests 2>&1); status=$$?; \
+	  printf '%s\n' "$$out"; \
+	  n=$$(printf '%s\n' "$$out" | sed -n 's/^Ran \([0-9][0-9]*\) tests\?.*/\1/p' | tail -1); \
+	  if [ -z "$$n" ]; then \
+	    echo "[test-scripts] FATAL: could not parse a test count from the run." >&2; \
+	    echo "  A silent pass here is indistinguishable from a green suite." >&2; \
+	    exit 1; \
+	  fi; \
+	  if [ "$$n" -lt $(SCRIPTS_TEST_MIN_TESTS) ]; then \
+	    echo "[test-scripts] FATAL: collected $$n tests, floor is $(SCRIPTS_TEST_MIN_TESTS)." >&2; \
+	    echo "  A rename or deletion has probably silently reduced this gate." >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "[test-scripts] collected $$n tests (floor $(SCRIPTS_TEST_MIN_TESTS))"; \
+	  exit $$status
+
 # Release acceptance suite — cross-agent continuity, public-CLI parity,
 # supersession trace, scale/e2e boundary tests. Spins up real subprocess
 # invocations of `bin/mpm` so it requires `make build` first; the FTS5
@@ -427,6 +509,7 @@ test-race:
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/scheduler/...
 	$(MAKE) test-testenv-race
 	$(MAKE) test-tools-race
+	$(MAKE) test-scripts
 
 # Run golangci-lint (advisory only — does not gate CI).
 # Install: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
