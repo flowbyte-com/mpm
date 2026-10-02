@@ -25,7 +25,12 @@ echo "==> smoke_telemetry: workspace=$TMP"
 # Start the collector in the background.
 "$BIN" serve --quiet &
 SERVE_PID=$!
-trap 'kill $SERVE_PID 2>/dev/null; rm -rf "$TMP"' EXIT
+# `|| true` is load-bearing: by the time this trap runs at the end of the
+# script, the `wait` below has already reaped SERVE_PID, so `kill` returns 1.
+# Under `set -e` a failing command inside an EXIT trap aborts the rest of the
+# trap body, which skipped `rm -rf "$TMP"` AND replaced the script's intended
+# exit 0 with kill's status 1 — the script printed "PASS" and exited non-zero.
+trap 'kill $SERVE_PID 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
 # Wait for socket.
 for _ in $(seq 1 50); do
