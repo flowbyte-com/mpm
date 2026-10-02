@@ -166,7 +166,13 @@ ALIAS_OK=$?
 section "D-006: machine-mode stderr silence"
 
 TMP_ERR=$(mktemp)
-call_only mpm_memory --payload '{"action":"query","params":{"query":"hello","limit":1}}' 2>"$TMP_ERR" >/dev/null
+# Invoke "$MPM" directly, not through call_only. call_only's body ends in
+# `2>/dev/null`, and a redirection inside a function body supersedes the
+# inherited one — so the caller's 2>"$TMP_ERR" never received anything and
+# STDERR_BYTES was structurally 0, making this assertion unable to fail.
+# Verified with a stub binary that writes 79 bytes to stderr: it still
+# reported "stderr is 0 bytes".
+"$MPM" call mpm_memory --payload '{"action":"query","params":{"query":"hello","limit":1}}' 2>"$TMP_ERR" >/dev/null
 STDERR_BYTES=$(wc -c <"$TMP_ERR")
 rm -f "$TMP_ERR"
 if [[ "$STDERR_BYTES" -eq 0 ]]; then
