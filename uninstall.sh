@@ -549,6 +549,29 @@ require_shred() {
     fi
 }
 
+# Remove a planned path and report only what actually happened.
+#
+# `rm -rf` fails on paths it cannot unlink (read-only parent, sticky-bit
+# directory, an immutable file, a mounted subvolume). Logging "removed:"
+# unconditionally after a `|| warn` therefore asserts a destruction that
+# did not happen — which for --purge/--shred is a false assurance about
+# the operator's own explicitly-confirmed data destruction. Re-check the
+# path afterwards and record the failure so main() can exit 7.
+#
+# This mirrors the verified install-prefix removal at step 10, which
+# already re-checked `[ ! -e … ]` before claiming success.
+REMOVAL_FAILURES=0
+remove_path() {
+    local target="$1"
+    rm -rf -- "$target" 2>/dev/null || warn "could not fully remove $target"
+    if [ ! -e "$target" ]; then
+        log "removed: $target"
+    else
+        warn "still present after rm -rf: $target"
+        REMOVAL_FAILURES=$((REMOVAL_FAILURES + 1))
+    fi
+}
+
 # Apply the destruction plan. For destructive modes, perform all
 # mutations; for dry-run, do nothing.
 apply_plan() {
@@ -648,8 +671,7 @@ apply_plan() {
     # 8. Runtime locks / sockets / logs.
     for f in "${PLAN_RUNTIME_LOCKS[@]}"; do
         if [ "$do_it" = "1" ]; then
-            rm -rf -- "$f" 2>/dev/null || warn "could not fully remove $f"
-            log "removed: $f"
+            remove_path "$f"
         else
             log "[dry-run] would remove: $f"
         fi
@@ -659,8 +681,7 @@ apply_plan() {
     if [ "$MODE" != "default" ]; then
         for f in "${PLAN_PURGE_DIRS[@]}"; do
             if [ "$do_it" = "1" ]; then
-                rm -rf -- "$f" 2>/dev/null || warn "could not fully remove $f"
-                log "removed: $f"
+                remove_path "$f"
             else
                 log "[dry-run] would remove: $f"
             fi
@@ -695,6 +716,7 @@ apply_plan() {
                 log "install prefix gone: $validated_prefix"
             else
                 warn "install prefix still present after rm -rf: $validated_prefix"
+                REMOVAL_FAILURES=$((REMOVAL_FAILURES + 1))
             fi
         fi
     fi
@@ -838,6 +860,13 @@ EOF
 
     apply_plan
 
+    # A removal step that did not remove its target is a failed removal
+    # step (exit 7), not a successful uninstall. Report it before the
+    # success banner so the banner is never printed over a live failure.
+    if [ "$REMOVAL_FAILURES" -gt 0 ]; then
+        warn "$REMOVAL_FAILURES removal step(s) did not complete; the listed path(s) are still present"
+    fi
+
     log "uninstall complete"
     log "host integrations are not modified by the substrate uninstaller."
     log "Remove or refresh them using the corresponding agent_installation adapter."
@@ -851,6 +880,11 @@ EOF
         rm -rf -- "${MPM_UNINSTALL_STAGED_AT}" 2>/dev/null || true
         rm -rf -- "$staged_dir" 2>/dev/null || true
         log "removed staged copy at ${MPM_UNINSTALL_STAGED_AT}"
+    fi
+
+    # Exit 7 last, so every removal warning above is printed first.
+    if [ "$REMOVAL_FAILURES" -gt 0 ]; then
+        exit 7
     fi
 }
 
