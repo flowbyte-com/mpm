@@ -120,7 +120,23 @@ TESTENV_REQUIRED_GUARDS := TestNoUnisolatedMPMSubprocess TestScannerDetectsKnown
 # anything.
 SCRIPTS_TEST_MIN_TESTS := 50
 
-.PHONY: all build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit test-scripts lint help refresh-installed check-installed-drift check-installed
+# Floors for the two agent_installation gates. Same reasoning as
+# SCRIPTS_TEST_MIN_TESTS: `python3 -m unittest discover` and
+# `node --test` both exit 0 when they collect nothing, so a directory
+# rename or a pattern change would turn either gate into a silent pass.
+# Measured populations: 318 (agent_installation/tests/), 178 Python +
+# 137 passing JS (the per-adapter suites).
+AGENT_INSTALL_TEST_MIN_TESTS := 300
+AGENT_ADAPTER_TEST_MIN_PY_TESTS := 150
+AGENT_ADAPTER_TEST_MIN_JS_TESTS := 100
+# Adapters whose Python suites are reachable via `unittest discover`.
+# Every directory with a tests/ package is listed explicitly; a new
+# adapter must be added here or it is silently skipped.
+AGENT_ADAPTERS := mpm-claude-code mpm-hermes mpm-memory-openclaw mpm-opencode mpm-pi
+# Adapters that additionally ship a `node --test` suite.
+AGENT_ADAPTERS_JS := mpm-memory-openclaw mpm-auto-mode-persona-openclaw
+
+.PHONY: all build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit test-scripts test-agent-installation test-agent-adapters lint help refresh-installed check-installed-drift check-installed
 
 all: build
 
@@ -273,6 +289,7 @@ test:
 	$(MAKE) test-testenv
 	$(MAKE) test-tools
 	$(MAKE) test-scripts
+	$(MAKE) test-agent-installation
 
 # Run the pre-commit subset of internal/core tests with the same FTS5 flag
 # discipline as `make test`. The pre-commit hook invokes this target rather
@@ -467,6 +484,163 @@ test-scripts:
 	  echo "[test-scripts] collected $$n tests (floor $(SCRIPTS_TEST_MIN_TESTS))"; \
 	  exit $$status
 
+# Local mirror of the `agent_installation/tests/` suite that CI already
+# runs (.github/workflows/build-test.yml, "Renderer parity
+# (managed-block byte-for-byte)": `cd agent_installation && python3 -m
+# unittest discover tests`).
+#
+# WHY THIS TARGET EXISTS
+#
+# That 318-case suite was reachable from CI and from nowhere else. No
+# make target and no pre-commit step ran it, so the one Python suite
+# the project actually treats as a merge gate could not be reproduced
+# or triaged locally — and when it went red, the first person to notice
+# was CI.
+#
+# Measured with a deliberately failing test added to a per-adapter
+# suite (a file this command does not even reach): `make test` exited 0,
+# `scripts/pre-commit` exited 0, and neither mentioned the sabotaged
+# test. Same class of gap as the scripts/tests/ one closed by
+# test-scripts: a suite with no runner is not a gate, it is a file.
+#
+# SAFETY
+#
+# The suite is read-only with respect to live state. It reads the
+# operator's installed host files (`~/.claude/CLAUDE.md`,
+# `~/.pi/agent/AGENTS.md`, per-host install targets) and the repository
+# working tree, and degrades explicitly: snippet fallbacks for hosts
+# with no globally installed file, and a per-host skip driven by an
+# integration-installed probe, so a machine without a given host
+# installed does not produce spurious failures. It writes nothing
+# outside temp dirs. Measured cost: ~33s.
+#
+# SCOPE
+#
+# This is the CI-owned suite only. The per-adapter suites under
+# mpm-*/tests/ are a different, larger problem — see
+# test-agent-adapters below. They are deliberately NOT folded in here.
+test-agent-installation:
+	@cd agent_installation && out=$$(python3 -m unittest discover tests 2>&1); status=$$?; \
+	  printf '%s\n' "$$out"; \
+	  n=$$(printf '%s\n' "$$out" | sed -n 's/^Ran \([0-9][0-9]*\) tests\?.*/\1/p' | tail -1); \
+	  if [ -z "$$n" ]; then \
+	    echo "[test-agent-installation] FATAL: could not parse a test count." >&2; \
+	    echo "  A silent pass here is indistinguishable from a green suite." >&2; \
+	    exit 1; \
+	  fi; \
+	  if [ "$$n" -lt $(AGENT_INSTALL_TEST_MIN_TESTS) ]; then \
+	    echo "[test-agent-installation] FATAL: collected $$n tests, floor is $(AGENT_INSTALL_TEST_MIN_TESTS)." >&2; \
+	    echo "  A rename or deletion has probably silently reduced this gate." >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "[test-agent-installation] collected $$n tests (floor $(AGENT_INSTALL_TEST_MIN_TESTS))"; \
+	  exit $$status
+
+# Diagnostic runner for the per-adapter suites under mpm-*/tests/.
+#
+# *** THIS TARGET IS CURRENTLY RED AND IS DELIBERATELY NOT GATED. ***
+#
+# It exists because those 20 files (10 .py, 9 .test.js, 1 .sh) were
+# reachable from NO runner at all — not from make test / make test-race
+# / make release-gate, not from scripts/pre-commit, and not from the
+# CI job either, whose only Python step is `unittest discover tests`
+# from inside agent_installation/. `unittest discover` does not descend
+# into a subdirectory, and the CI workflow has no Node step at all, so
+# `node --test` was never run by anything. 19 of the 20 run here; the
+# 20th is the live host check documented at the bottom of this block.
+#
+# The JS families are invoked as `node --test 'tests/*.test.js'`, not
+# `node --test tests/`. On Node 24.20 the directory form resolves
+# `tests` as a MODULE and dies with MODULE_NOT_FOUND, exiting 1 with a
+# plausible-looking summary and zero passes. The pass-count floor below
+# is what turns that into an explicit refusal instead of a number.
+#
+# Measured current state (2026-10-02, at 1e410f45):
+#
+#   mpm-claude-code            34 tests   2 failures
+#   mpm-hermes                 38 tests   4 failures
+#   mpm-memory-openclaw        13 tests   OK
+#   mpm-opencode               31 tests   1 failure
+#   mpm-pi                     62 tests   3 failures
+#   mpm-memory-openclaw/*.js  117 tests   1 failure  (installer.test.js)
+#   mpm-auto-mode-*/*.js       21 tests   OK
+#
+# 10 Python failures and 1 JS failure. Wiring that into `make test`
+# would turn a green gate red without fixing anything, which is a
+# regression dressed as coverage. So this target is runnable and
+# honest, but not a gate, until those failures have individual
+# root-cause work.
+#
+# Each family's tests are counted and checked against a floor before
+# the real exit status is propagated, so a suite that stops being
+# discovered cannot hide behind the other suite's result. A missing
+# `node` is a hard error rather than a skip: silently skipping the JS
+# suites on a host that cannot run them is how they went unnoticed.
+#
+# NOT INCLUDED: mpm-claude-code/tests/session_start_hook.test.sh. It is
+# a host-specific live check — it exports MPM_WORKSPACE="$HOME/.mpm" and
+# invokes "$HOME/.local/bin/mpm" — so it depends on this machine's
+# actual install and must not join a hermetic gate. Run it by hand.
+test-agent-adapters:
+	@command -v node >/dev/null 2>&1 || { \
+	   echo "[test-agent-adapters] FATAL: node not found on PATH." >&2; \
+	   echo "  The .test.js suites would be silently skipped, which is how" >&2; \
+	   echo "  they became unreachable in the first place." >&2; \
+	   exit 1; }; \
+	 command -v python3 >/dev/null 2>&1 || { \
+	   echo "[test-agent-adapters] FATAL: python3 not found on PATH." >&2; \
+	   exit 1; }; \
+	 py_total=0; js_total=0; failed=0; \
+	 for d in $(AGENT_ADAPTERS); do \
+	   if [ ! -d "agent_installation/$$d/tests" ]; then \
+	     echo "[test-agent-adapters] FATAL: agent_installation/$$d/tests is missing." >&2; \
+	     echo "  AGENT_ADAPTERS lists it, so its absence is a packaging error." >&2; \
+	     exit 1; \
+	   fi; \
+	   out=$$(cd "agent_installation/$$d" && python3 -m unittest discover tests 2>&1); status=$$?; \
+	   printf '%s\n' "$$out"; \
+	   n=$$(printf '%s\n' "$$out" | sed -n 's/^Ran \([0-9][0-9]*\) tests\?.*/\1/p' | tail -1); \
+	   if [ -z "$$n" ]; then \
+	     echo "[test-agent-adapters] FATAL: $$d reported no test count." >&2; \
+	     exit 1; \
+	   fi; \
+	   py_total=$$((py_total + n)); \
+	   if [ $$status -ne 0 ]; then failed=1; fi; \
+	 done; \
+	 if [ $$py_total -lt $(AGENT_ADAPTER_TEST_MIN_PY_TESTS) ]; then \
+	   echo "[test-agent-adapters] FATAL: collected $$py_total Python tests, floor is $(AGENT_ADAPTER_TEST_MIN_PY_TESTS)." >&2; \
+	   exit 1; \
+	 fi; \
+	 echo "[test-agent-adapters] Python: $$py_total tests (floor $(AGENT_ADAPTER_TEST_MIN_PY_TESTS))"; \
+	 for d in $(AGENT_ADAPTERS_JS); do \
+	   if [ ! -d "agent_installation/$$d/tests" ]; then \
+	     echo "[test-agent-adapters] FATAL: agent_installation/$$d/tests is missing." >&2; \
+	     exit 1; \
+	   fi; \
+	   out=$$(cd "agent_installation/$$d" && node --test 'tests/*.test.js' 2>&1); status=$$?; \
+	   printf '%s\n' "$$out"; \
+	   n=$$(printf '%s\n' "$$out" | sed -n 's/^ℹ pass \([0-9][0-9]*\).*/\1/p' | tail -1); \
+	   if [ -z "$$n" ]; then \
+	     echo "[test-agent-adapters] FATAL: $$d reported no passing-test count." >&2; \
+	     echo "  node --test exited 0 without a pass line — refusing to count it." >&2; \
+	     exit 1; \
+	   fi; \
+	   js_total=$$((js_total + n)); \
+	   if [ $$status -ne 0 ]; then failed=1; fi; \
+	 done; \
+	 if [ $$js_total -lt $(AGENT_ADAPTER_TEST_MIN_JS_TESTS) ]; then \
+	   echo "[test-agent-adapters] FATAL: collected $$js_total JS passing tests, floor is $(AGENT_ADAPTER_TEST_MIN_JS_TESTS)." >&2; \
+	   exit 1; \
+	   fi; \
+	 echo "[test-agent-adapters] JS: $$js_total passing tests (floor $(AGENT_ADAPTER_TEST_MIN_JS_TESTS))"; \
+	 if [ $$failed -ne 0 ]; then \
+	   echo "[test-agent-adapters] KNOWN FAILURES PRESENT — this target is not a gate." >&2; \
+	   echo "  See the counts in this target's Makefile comment. Fix them" >&2; \
+	   echo "  individually before considering gating it." >&2; \
+	   exit 1; \
+	 fi; \
+	 echo "[test-agent-adapters] all adapter suites green"
+
 # Release acceptance suite — cross-agent continuity, public-CLI parity,
 # supersession trace, scale/e2e boundary tests. Spins up real subprocess
 # invocations of `bin/mpm` so it requires `make build` first; the FTS5
@@ -510,6 +684,7 @@ test-race:
 	$(MAKE) test-testenv-race
 	$(MAKE) test-tools-race
 	$(MAKE) test-scripts
+	$(MAKE) test-agent-installation
 
 # Run golangci-lint (advisory only — does not gate CI).
 # Install: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
