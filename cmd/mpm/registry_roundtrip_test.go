@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -315,6 +316,7 @@ func (e *mcpTestError) Error() string { return e.msg }
 // Today the known volatile fields are:
 //   - last_gc_ran (gc_run writes it on each call)
 //   - ran / cooldown_skip (gc_run returns these based on cooldown state)
+//   - as_of / generated_at (wall-clock read per call, see below)
 //
 // We parse to interface{}, delete the volatile keys, and re-marshal
 // so both sides have the same canonical form.
@@ -330,6 +332,21 @@ func stripVolatile(jsonBytes []byte) []byte {
 	// system_audit_log, so successive calls in the same test see a
 	// higher count). Strip it so CLI/MCP comparisons are deterministic.
 	delete(obj, "audit_summary")
+	// as_of and generated_at are wall-clock unix seconds read at
+	// assemble time (internal/core/wake_context.go, gatherWakeContext).
+	// The CLI and MCP paths are invoked back-to-back, so the two
+	// payloads agree EXCEPT when the pair straddles a whole-second
+	// boundary — a genuine ~0.1% flake that made
+	// TestRegistry_AllToolsExecuteWithoutPanic/mpm_context fail
+	// intermittently with these two fields as the only difference.
+	//
+	// They belong in this function by its own stated contract ("anything
+	// that writes a last_ran timestamp"); they were simply never added.
+	// A CLI/MCP drift in how a wall-clock instant is read is not surface
+	// drift, and stripping them does not weaken the parity claim: every
+	// other field, nested structures included, is still compared.
+	delete(obj, "as_of")
+	delete(obj, "generated_at")
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return jsonBytes
@@ -347,4 +364,151 @@ func stripErrorPrefix(msg string) string {
 		return msg
 	}
 	return msg[idx+2:]
+}
+
+// TestRegistry_StripVolatileRemovesWallClockFields pins the volatile-field
+// contract that the CLI/MCP parity comparison depends on.
+//
+// A payload field that is re-read from the wall clock on every call cannot
+// be equal across two invocations that straddle a whole second. as_of and
+// generated_at are exactly that (internal/core/wake_context.go,
+// gatherWakeContext: `nowUnix := time.Now().Unix()`). Leaving them in the
+// comparison made TestRegistry_AllToolsExecuteWithoutPanic/mpm_context fail
+// intermittently on a ~0.1% boundary alignment, with those two fields as the
+// ONLY difference between an otherwise-identical pair of payloads.
+//
+// This asserts the strip set directly, so the regression does not depend on
+// winning a race to observe.
+func TestRegistry_StripVolatileRemovesWallClockFields(t *testing.T) {
+	payload := []byte(`{
+		"as_of": 1790933126,
+		"generated_at": 1790933126,
+		"last_gc_ran": 1790933120,
+		"ran": true,
+		"cooldown_skip": true,
+		"audit_summary": "12",
+		"context_version": "wake-context-v5",
+		"epistemic_pressure": {"ratio": 0, "threshold": 100}
+	}`)
+
+	got := string(stripVolatile(payload))
+
+	for _, gone := range []string{"as_of", "generated_at", "last_gc_ran", "ran", "cooldown_skip", "audit_summary"} {
+		if strings.Contains(got, `"`+gone+`"`) {
+			t.Errorf("stripVolatile left volatile key %q in output: %s", gone, got)
+		}
+	}
+
+	// Everything that is NOT volatile must survive, including nested
+	// structure — stripping must not hollow out the comparison.
+	for _, kept := range []string{"context_version", "wake-context-v5", "epistemic_pressure", "threshold"} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("stripVolatile removed non-volatile content %q: %s", kept, got)
+		}
+	}
+}
+
+// TestRegistry_MCPParityHoldsAcrossSecondBoundary drives the real
+// CLI/MCP comparison used by TestRegistry_AllToolsExecuteWithoutPanic across
+// a forced whole-second boundary.
+//
+// The sleep is semantically required, not a timing crutch: the defect under
+// test IS a wall-clock boundary, so a test that never crosses a boundary
+// cannot observe it. The wait is to the next wall-clock second plus 20ms, so
+// it costs at most ~1s and deterministically puts the two invocations in
+// different seconds. Under the old stripVolatile this test failed every time;
+// it now passes because the wall-clock fields are excluded from the
+// comparison, which is the invariant the parity claim actually rests on.
+func TestRegistry_MCPParityHoldsAcrossSecondBoundary(t *testing.T) {
+	tool, ok := tools.ByName("mpm_context")
+	if !ok {
+		t.Fatalf("mpm_context not in registry")
+	}
+	dm := newTestDMForCmd(t)
+	payload := minimalPayload(tool.Schema)
+
+	adapter := mcpAdapterForTest(dm, tool.Handler)
+	req := mcp.CallToolRequest{}
+	req.Params.Name = tool.Name
+	req.Params.Arguments = payload
+
+	// CLI path.
+	cliResult, cliErr := tool.Handler(dm, internal.ActiveContext{}, payload)
+	if cliErr != nil {
+		t.Fatalf("CLI path failed: %v", cliErr)
+	}
+
+	// Force the two invocations into different wall-clock seconds.
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second + 20*time.Millisecond)))
+
+	// MCP path.
+	mcpResult, err := adapter(context.Background(), req)
+	if err != nil {
+		t.Fatalf("MCP path failed: %v", err)
+	}
+
+	cliJSON := string(stripVolatile(mustMarshal(cliResult)))
+	mcpJSON := string(stripVolatile(extractMCPTextPayload(t, mcpResult)))
+	if cliJSON != mcpJSON {
+		t.Errorf("CLI/MCP drift across a second boundary:\n  CLI: %s\n  MCP: %s", cliJSON, mcpJSON)
+	}
+}
+
+// TestRegistry_ParityComparisonCatchesSemanticDrift is the negative control
+// for the wall-clock strip.
+//
+// TestRegistry_StripVolatileRemovesWallClockFields proves the helper does not
+// delete the semantic keys. This proves the STRONGER property: the comparison
+// the two parity tests actually perform still rejects a payload pair that
+// differs in any of them. Without this, an over-broad strip — one that hollowed
+// the payload out — would leave both existing tests green while the parity
+// claim they exist to protect silently evaporated.
+//
+// The two subtests are deliberate opposites: drift confined to the wall-clock
+// fields is ignored (that is the fix), drift in any ordinary semantic field is
+// still caught (that is the guarantee).
+func TestRegistry_ParityComparisonCatchesSemanticDrift(t *testing.T) {
+	const base = `{
+		"as_of": 1790933126,
+		"generated_at": 1790933126,
+		"context_version": "wake-context-v5",
+		"epistemic_pressure": {"ratio": 0.62, "threshold": 100},
+		"recent_activity": [{"kind": "session", "id": "s-1"}],
+		"handoff": {"summary": "prior state", "session_id": "s-0"},
+		"open_work": [{"id": "w-1", "state": "open"}],
+		"directives": []
+	}`
+
+	// Control case: differing ONLY in the wall-clock fields must compare
+	// equal after the strip. This is the behaviour the fix introduces.
+	t.Run("wall_clock_only_drift_is_ignored", func(t *testing.T) {
+		mutated := strings.Replace(base, "1790933126", "1790933127", 2)
+		if mutated == base {
+			t.Fatal("mutation did not apply — test is vacuous")
+		}
+		if got, want := string(stripVolatile([]byte(mutated))), string(stripVolatile([]byte(base))); got != want {
+			t.Errorf("wall-clock-only drift was not ignored:\n got: %s\nwant: %s", got, want)
+		}
+	})
+
+	// Each of these is an ordinary semantic field. The strip must leave
+	// every one of them compared, so the parity check must still fail.
+	for _, tc := range []struct{ name, from, to string }{
+		{"context_version", `"wake-context-v5"`, `"wake-context-v6"`},
+		{"epistemic_pressure.ratio", `"ratio": 0.62`, `"ratio": 0.63`},
+		{"recent_activity[0].id", `"id": "s-1"`, `"id": "s-2"`},
+		{"handoff.summary", `"prior state"`, `"different state"`},
+		{"open_work[0].state", `"state": "open"`, `"state": "blocked"`},
+		{"directives", `"directives": []`, `"directives": ["d-1"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mutated := strings.Replace(base, tc.from, tc.to, 1)
+			if mutated == base {
+				t.Fatalf("mutation %q did not apply — test is vacuous", tc.name)
+			}
+			if string(stripVolatile([]byte(mutated))) == string(stripVolatile([]byte(base))) {
+				t.Errorf("semantic drift in %s survived the parity comparison — stripVolatile is too broad", tc.name)
+			}
+		})
+	}
 }
