@@ -87,9 +87,18 @@ else
     # Path-only scan: walk each ref's reachable objects and check if the
     # path appears in any tree. `git rev-list --all --objects` does the
     # full traversal once; per-ref is more precise but slower.
+    #
+    # -F (fixed-string) is required, not a style choice. PATH_ARG is a
+    # filesystem path spliced into what was `grep -E`, so every regex
+    # metacharacter in it was live: `a(b)/c.txt` made the pattern invalid,
+    # grep exited non-zero, the `if` took the false branch, and a file
+    # genuinely present in history was reported NOT REACHABLE — this tool
+    # certifying a scrubbed path is still there. `.` also matched any
+    # character, so searching for `secret.key` matched `secretXkey`.
+    # The content branch above already used `grep -qF --` correctly.
     for ref in "${REFS[@]}"; do
         if git rev-list --objects "$ref" 2>/dev/null \
-            | grep -E "\b${PATH_ARG}\$" >/dev/null; then
+            | grep -qF -- "$PATH_ARG"; then
             found_refs+=("$ref")
         fi
     done
