@@ -141,6 +141,21 @@ MIGRATION_AWARE_FILES = {
     # The Pi adapter installer tests — assert the migration behavior
     # on the legacy path.
     "agent_installation/mpm-pi/tests/test_pi_settings_installer.py",
+    # The managed-block convergence tests — managed_block_convergence
+    # is the single owner of "what is an MPM-owned region", and it must
+    # recognize every marker form MPM has ever written, including
+    # pre-2026-09-17 host ids. The legacy names are the parser's test
+    # INPUTS:
+    #   test_recognizes_hermes_legacy_spaced_anchor feeds the legacy
+    #     spaced anchor `MPM MANAGED BLOCK:hermes-mpm` and asserts the
+    #     analyzer reports host_id "hermes-mpm".
+    #   test_recognizes_hermes_hyphenated_block_anchor is its direct
+    #     pair and already covers the canonical `mpm-hermes` form.
+    # Changing the legacy input to the canonical id would collapse the
+    # pair into a duplicate and delete the migration-path coverage
+    # 19770265 added. Same category as test_pi_settings_installer.py
+    # and test_opencode_install.py above.
+    "agent_installation/tests/test_managed_block_convergence.py",
     # This very test file — the forbidden-name lists and the legacy
     # documentation must enumerate the old names. Excluding it would
     # be self-defeating (the test would ban itself).
