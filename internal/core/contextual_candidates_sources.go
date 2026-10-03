@@ -379,7 +379,28 @@ func addEpistemicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc 
 		defer provRows.Close()
 		for provRows.Next() {
 			considered++
-			var sourceID, sourceType, downstreamID, downstreamType, polarity string
+			// polarity is scanned as a nullable value, deliberately.
+			// NULL is a first-class state meaning "polarity
+			// unspecified / not opted in": RecordProvenance
+			// normalises an empty polarity to NULL (the load-bearing
+			// invariant that a NULL-polarity citation can never fire
+			// the positive cascade), and the migration that added the
+			// column leaves every pre-existing row NULL by design with
+			// no backfill. Scanning it into a plain string made NULL a
+			// scan error, which hit the `continue` below and silently
+			// dropped the whole provenance row — so a legitimate
+			// downstream artifact vanished from candidate generation
+			// and an audit warning was logged on every scan.
+			//
+			// Do not "fix" this by mapping NULL onto assumes_true,
+			// assumes_false, or the empty string: NULL means the
+			// artifact did not opt in to a polarity claim, and
+			// inventing one would let an unclaimed citation behave
+			// like an asserted one. Leaving relationshipPolarity
+			// unset is the faithful representation, and it is what the
+			// explicit check below already did for every other value.
+			var sourceID, sourceType, downstreamID, downstreamType string
+			var polarity sql.NullString
 			if err := provRows.Scan(&sourceID, &sourceType, &downstreamID, &downstreamType, &polarity); err != nil {
 				dm.LogAudit(AuditWarn, "contextual_candidates", "epistemic_provenance scan: "+err.Error(), "", AuditContext{"source": "epistemic"})
 				continue
@@ -393,8 +414,10 @@ func addEpistemicCandidates(dm *DatabaseManager, q ContextQuery, limit int, acc 
 			// provenance row. If multiple provenance rows target
 			// the same downstream_id, last-write wins (stable
 			// because the scan is ORDER BY created_at DESC).
-			if polarity == "assumes_true" || polarity == "assumes_false" {
-				a.relationshipPolarity = polarity
+			// NULL (or any value outside the two opt-ins) leaves the
+			// field unset rather than asserting a direction.
+			if polarity.Valid && (polarity.String == PolarityAssumesTrue || polarity.String == PolarityAssumesFalse) {
+				a.relationshipPolarity = polarity.String
 			}
 			addReason(a, ReasonConfidenceChanged)
 			markSource(a, "epistemic")
