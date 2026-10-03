@@ -67,27 +67,42 @@ func handleShred(args []string) int {
 }
 
 func handleShredHelp() int {
-	output := `mpm shred - Secure delete operations
+	output := `mpm shred - Remove objects from active MPM state
+
+Scope of "shred":
+  shred removes records from ACTIVE MPM state and runs the cascades
+  defined for that object type. It does not erase bytes. The following
+  are outside its guarantee and may still contain the content:
+    - system_audit_log rows
+    - mirror.jsonl / watchdog.jsonl, including rotated (.gz) copies
+    - database backups and "mpm backup" dumps
+    - SQLite WAL, free pages, and filesystem snapshots
+  MPM has no secure-erasure capability. Only "uninstall.sh --shred"
+  attempts a (still best-effort) overwrite of files on disk.
 
 Usage:
-  mpm shred sessions         Delete all sessions (requires -f to confirm)
-  mpm shred memories         Delete all memories (requires -f to confirm)
-  mpm shred topics           Delete all topics (requires -f to confirm)
-  mpm shred database         Delete entire database (requires -f to confirm)
-  mpm shred modes            Delete all modes (requires -f to confirm)
-  mpm shred personas         Delete all personas (requires -f to confirm)
-  mpm shred topic <id>       Delete a topic by ID (requires -f to confirm)
-  mpm shred session <id>     Delete a session by ID (requires -f to confirm)
+  mpm shred <id>             Shred one memory by ID (permanent from active state)
+  mpm shred topic <id>       Delete a topic and its memberships (no confirmation prompt)
+  mpm shred session <id>     Soft-delete a session by ID (recoverable; no confirmation prompt)
+
+Bulk targets (all sessions, all memories, all topics, the whole
+database, all modes, all personas) require -f/--force to confirm.
+That confirmation is currently unreachable: the router's global flag
+parser consumes -f/--force before these handlers see it, so they
+always abort with the warning below. Pre-existing defect; tracked
+separately. Nothing is deleted in that state.
+
+  mpm shred sessions         Delete all sessions (bulk)
+  mpm shred memories         Delete all memories (bulk)
+  mpm shred topics           Delete all topics (bulk)
+  mpm shred database         Delete entire database file and recreate (bulk)
+  mpm shred modes            Delete all modes (bulk)
+  mpm shred personas         Delete all personas (bulk)
 
 Examples:
-  mpm shred sessions -f
-  mpm shred memories -f
-  mpm shred topics -f
-  mpm shred database -f
-  mpm shred modes -f
-  mpm shred personas -f
-  mpm shred topic abc123 -f
-  mpm shred session xyz789 -f
+  mpm shred abc123
+  mpm shred topic t-abc123
+  mpm shred session xyz789
 `
 	return respond(output, "", 0)
 }
@@ -102,7 +117,7 @@ func handleShredSessions(args []string) int {
 	}
 
 	if !force {
-		return respond("", "Warning: This will delete ALL sessions. Use 'mpm shred sessions -f' to confirm.\n", 1)
+		return respond("", "Refusing: 'mpm shred sessions' would delete ALL sessions.\nConfirmation is currently unavailable: the router's global flag parser consumes\n-f/--force before this handler sees it, so no invocation can confirm. Pre-existing\ndefect; tracked separately. Nothing was deleted.\n", 1)
 	}
 
 	store := getMemoryStore()
@@ -125,7 +140,7 @@ func handleShredMemories(args []string) int {
 	}
 
 	if !force {
-		return respond("", "Warning: This will delete ALL memories. Use 'mpm shred memories -f' to confirm.\n", 1)
+		return respond("", "Refusing: 'mpm shred memories' would delete ALL memories.\nConfirmation is currently unavailable: the router's global flag parser consumes\n-f/--force before this handler sees it, so no invocation can confirm. Pre-existing\ndefect; tracked separately. Nothing was deleted.\n", 1)
 	}
 
 	store := getMemoryStore()
@@ -148,7 +163,7 @@ func handleShredTopics(args []string) int {
 	}
 
 	if !force {
-		return respond("", "Warning: This will delete ALL topics. Use 'mpm shred topics -f' to confirm.\n", 1)
+		return respond("", "Refusing: 'mpm shred topics' would delete ALL topics.\nConfirmation is currently unavailable: the router's global flag parser consumes\n-f/--force before this handler sees it, so no invocation can confirm. Pre-existing\ndefect; tracked separately. Nothing was deleted.\n", 1)
 	}
 
 	store := getMemoryStore()
@@ -181,7 +196,7 @@ func handleShredDatabase(args []string) int {
 	}
 
 	if !force {
-		return respond("", "Warning: This will delete the entire database and create a new one. Use 'mpm shred database -f' to confirm.\n", 1)
+		return respond("", "Refusing: 'mpm shred database' would delete the entire database file and recreate it.\nConfirmation is currently unavailable: the router's global flag parser consumes\n-f/--force before this handler sees it, so no invocation can confirm. Pre-existing\ndefect; tracked separately. Nothing was deleted.\n", 1)
 	}
 
 	paths := internal.DefaultMemoryPaths()
@@ -225,7 +240,7 @@ func handleShredModes(args []string) int {
 	}
 
 	if !force {
-		return respond("", "Warning: This will delete ALL modes. Use 'mpm shred modes -f' to confirm.\n", 1)
+		return respond("", "Refusing: 'mpm shred modes' would delete ALL modes.\nConfirmation is currently unavailable: the router's global flag parser consumes\n-f/--force before this handler sees it, so no invocation can confirm. Pre-existing\ndefect; tracked separately. Nothing was deleted.\n", 1)
 	}
 
 	mm := internal.NewModeManager("")
@@ -247,7 +262,7 @@ func handleShredPersonas(args []string) int {
 	}
 
 	if !force {
-		return respond("", "Warning: This will delete ALL personas. Use 'mpm shred personas -f' to confirm.\n", 1)
+		return respond("", "Refusing: 'mpm shred personas' would delete ALL personas.\nConfirmation is currently unavailable: the router's global flag parser consumes\n-f/--force before this handler sees it, so no invocation can confirm. Pre-existing\ndefect; tracked separately. Nothing was deleted.\n", 1)
 	}
 
 	pm := internal.NewPersonaManager("")

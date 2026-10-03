@@ -576,8 +576,30 @@ The memory surface exposes four lifecycle verbs whose names and effects must sta
 |---|---|---|---|
 | `mpm memory delete <id>` (CLI) / `mpm_memory action=delete` (tool) | Soft-delete: sets `deleted_at`. Row stays in substrate with full content + history preserved. | **Yes** — `mpm memory restore <id>` / `mpm_memory action=restore` clears the tombstone and re-adds the FTS5 entry. | `shred` (permanent) |
 | `mpm memory restore <id>` (CLI) / `mpm_memory action=restore` (tool) | Reverse a soft-delete. Idempotent on live rows (errors with "not soft-deleted"). | n/a | `mpm challenge restore` (only clears the `challenged` status flag, not the `deleted_at` tombstone) |
-| `mpm memory shred <id>` (CLI) / `mpm_memory action=shred` (tool) | Permanent destruction. Broad sweep across topic_memberships, memory_revisions, evidence, confidence_history, artifact_provenance, synth_runs. | **No.** | `delete` (soft, reversible) |
+| `mpm memory shred <id>` (CLI) / `mpm_memory action=shred` (tool) | Permanent removal from active state. Broad sweep across topic_memberships, memory_revisions, evidence, confidence_history, artifact_provenance, synth_runs. | **No.** | `delete` (soft, reversible) |
 | `mpm shred <id>` (CLI, no `memory` subcommand) | Same as `mpm memory shred` — hard delete with cascade. | **No.** | `delete` (soft, reversible) |
+
+#### What "shred" guarantees — and what it does not
+
+**`shred` means: remove the object from active MPM state and run the cascades defined for its type. It is not secure erasure, and MPM has no secure-erasure capability.**
+
+The word "secure delete" is therefore not used for any `shred` surface. Two different operations in the repo carry the erasure-flavoured vocabulary, and they must not be conflated:
+
+| Operation | Guarantee | Attempts byte overwrite? |
+|---|---|---|
+| `mpm … shred <id>` (per object, all types) | Hard DELETE from the active substrate + defined cascades, in one transaction. Not reachable again through MPM; not restorable. | **No.** |
+| `mpm work item purge <id>` (CLI-only) | Logical purge from the active substrate. Explicitly *not* erasure (see "Purge is logical deletion, not erasure" under **Work**). | **No.** |
+| `uninstall.sh --shred` | Best-effort secure overwrite of every regular file under the data roots, then removal. Self-disclosed as best-effort: SSD, CoW, snapshot, journaled and virtualised storage are not guaranteed to be physically erased. | **Yes, best-effort.** |
+
+**Residual copies outside every `shred` guarantee.** After a per-object shred, the following may still contain the content and are deliberately *not* rewritten:
+
+- `system_audit_log` rows (and the `epistemic_provenance` edges citing the dead id — pruned later by a periodic `gc` sweep).
+- `mirror.jsonl` / `watchdog.jsonl`, including rotated `.gz` copies. A per-ID shred appends a content-free `memory_shredded` event; it does not rewrite history.
+- Database backups and `mpm backup` dumps, which are separate files shred never opens.
+- The SQLite WAL, and free pages in the main DB file. A deleted row's bytes remain until SQLite reuses the page. MPM issues no `PRAGMA secure_delete`, no `VACUUM`, and no `wal_checkpoint` on any shred path, so removal of the bytes is incidental to later page reuse and maintenance, never a shred guarantee.
+- Filesystem snapshots, and any copy already transcribed into a handoff summary, another memory body, or an operator's own notes.
+
+The distinction that matters operationally: **a shredded object is no longer reachable through MPM and is not restorable — it is not gone from the storage medium.**
 
 **Weaken floor.** `mpm memory weaken <id>` / `mpm_memory action=weaken` uses the symmetric formula `weight_loss = (delta+1)/2`, decrements `reinforcement_count` by `delta`, and floors weight at **1** — repeated weaken calls can never drive weight negative or below 1. The response payload includes `weight_loss`, `reinforcement_delta`, `weight`, `reinforcement_count`, and `floor_hit: true` when the call landed at the floor.
 

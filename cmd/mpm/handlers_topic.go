@@ -59,7 +59,7 @@ func handleTopicHelp() int {
 	render.Label(&b, "search <query>", "search topics")
 	render.Label(&b, "show <id>", "show topic by id")
 	render.Label(&b, "promote <id>", "promote topic to memory")
-	render.Label(&b, "shred <id>", "secure delete topic")
+	render.Label(&b, "shred <id>", "delete topic and its memberships (not byte erasure)")
 	render.Label(&b, "list", "list topics")
 	render.BlankLine(&b)
 	render.Section(&b, "Examples")

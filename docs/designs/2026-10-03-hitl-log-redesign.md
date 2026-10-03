@@ -674,22 +674,91 @@ Audited current behavior (must change where noted):
   `shred -f -n1 -z -u` over every regular file under `src/db`,
   `backups`, `logs` first (`uninstall.sh:399-435,597-613`) — complete.
 
+### 11A. Verified shred scope (empirical, 2026-10-03 contract audit)
+
+The behavior above was re-derived empirically in a hermetic temp
+workspace (seeded a memory with a unique canary plus dependent rows,
+called `ShredMemoryWithCascade`, then counted survivors per table and
+searched the raw DB/WAL bytes). Recorded here so the v2 matrix below
+rests on measurement, not on reading the sweep list.
+
+Row-level, after `ShredMemoryWithCascade(id)` — all reach **0**:
+
+| cleared | not cleared (by design or by omission) |
+|---|---|
+| `memories`, `memories_fts` (via the `memories_ad` AFTER DELETE trigger), `topic_memberships`, `memory_revisions`, `evidence`, `retrieval_metadata`, `confidence_history`, `artifact_provenance`, `synth_runs` | `topics` (the topic row itself is a separate object; only the membership is swept), `epistemic_provenance` (edges citing the dead id — pruned by a later `gc` sweep, documented in `shredBroadSweep`), `epistemic_cascade_outbox` (gains the `memory_shredded` intent; it is the cascade destination, not a victim), `system_audit_log` (never read by any shred path) |
+
+Byte-level, the same run — the content **remains in the storage
+medium**:
+
+- `mpm.db` still contains the shredded content after the command exits
+  (a clean close folds the WAL into the main file; the freed pages keep
+  the bytes).
+- `mpm.db-wal` contains it for as long as the WAL is not checkpointed
+  away and the pages are not reused.
+- A backup taken **before** the shred retains the content permanently;
+  shred never opens backup files.
+- MPM issues no `PRAGMA secure_delete`, no `VACUUM`, and no
+  `wal_checkpoint` on any shred path. Incidental clearing was observed
+  only when an explicit `VACUUM` plus a clean close happened to rewrite
+  the freed pages — never as a shred guarantee.
+
+Two further findings that bear directly on HITL messaging:
+
+- `mpm session shred <id>` and `mpm reference shred <id>` are **soft**
+  deletes (`deleted_at`) despite the verb, while their help said
+  "secure delete". `dm.ShredSkill` is likewise a soft delete; only
+  `PermanentlyShredSkill` is hard.
+- The bulk `shred` targets (`sessions`/`memories`/`topics`/`database`/
+  `modes`/`personas`) are currently **unreachable from the shipped CLI**:
+  `router.parseFlags` consumes `-f`/`--force` into `MPM_FORCE=1` before
+  the shred handlers see argv, so every bulk form aborts at its
+  confirmation prompt. Conversely `mpm shred topic <id>` and
+  `mpm shred session <id>` were documented as requiring `-f` but never
+  checked it. Pre-existing, tracked separately; corrected wording
+  shipped in `docs(shred): clarify hard-delete and erasure semantics`.
+
+The settled contract these findings support — and which the v2 messaging
+must not contradict — is the one now in `docs/SPEC.md` §4.5.2:
+**`shred` removes an object from active MPM state and runs its defined
+cascades; it does not erase bytes.** The word "secure delete" is
+retired from every `shred` surface. Only `uninstall.sh --shred` retains
+overwrite vocabulary, and it already self-discloses as best-effort.
+
 v2 specified behavior:
 
-| operation | active mirror | mirror rotations | active watchdog | watchdog rotations | note |
-|---|---|---|---|---|---|
-| `memory wipe --force` (corrected scope) | cleared | cleared (deleted) | appended `destructive_operation` line (scope+count, no content) | retained | fixes the false "All memories wiped" — wipe covers DB scope + mirror history; watchdog keeps the tombstone for forensics |
-| `memory shred <id>` (per-id) | append `memory_shredded` event (`id`, collection, no excerpt) | NOT rewritten (immutable) | append `memory_shredded` line | NOT rewritten | document explicitly: rotations keep history until expiry/purge; operator uses `ops logs purge` for early removal |
-| `ops logs purge --scope mirror\|watchdog` (new, phase E) | truncate | delete per scope | truncate | delete per scope | explicit rotation removal; no DB touch |
-| `uninstall --purge` | removed with `src/db` | removed | removed | removed | unchanged, complete |
-| `uninstall --shred` | shredded then removed | shredded then removed | shredded then removed | shredded then removed | unchanged, complete |
+| operation | active mirror | mirror rotations | active watchdog | watchdog rotations | audit DB (`system_audit_log`) | backups (`backups/`, `mpm backup`) | note |
+|---|---|---|---|---|---|---|---|
+| `memory wipe --force` (corrected scope) | cleared | cleared (deleted) | appended `destructive_operation` line (scope+count, no content) | retained | retained — never touched | **retained** | fixes the false "All memories wiped" — wipe covers DB scope + mirror history; watchdog keeps the tombstone for forensics |
+| `memory shred <id>` (per-id) | append `memory_shredded` event (`id`, collection, no excerpt) | NOT rewritten (immutable) | append `memory_shredded` line | NOT rewritten | **retained** — no shred path reads it | **retained** | document explicitly: rotations, audit rows and backups keep history until expiry/purge; operator uses `ops logs purge` for early removal of the *log* copies only |
+| `ops logs purge --scope mirror\|watchdog` (new, phase E) | truncate | delete per scope | truncate | delete per scope | **retained** — out of scope by construction | **retained** | explicit rotation removal; no DB touch, no backup touch |
+| `uninstall --purge` | removed with `src/db` | removed | removed | removed | removed with `mpm.db` | removed | unchanged, complete |
+| `uninstall --shred` | shredded then removed | shredded then removed | shredded then removed | shredded then removed | shredded then removed | shredded then removed | unchanged, complete; still best-effort (SSD/CoW/snapshot not guaranteed) |
+
+Reading the two columns this audit added:
+
+- **Audit DB and backups are never touched by any per-object
+  operation.** Only `uninstall --purge`/`--shred` remove them, because
+  they remove the whole workspace. An operator who shreds a memory
+  expecting the content to be unrecoverable must know the audit log and
+  any pre-existing backup still hold it. This is stated in
+  `docs/SPEC.md` §4.5.2 and echoed in the `mpm shred <id>` success
+  message.
+- **`ops logs purge` is a log-scope operation, not a content-scope
+  one.** It exists so an operator can remove HITL *history* early. It
+  must never be described as, or grow into, a memory-erasure path —
+  that is what `mpm work item purge` and `uninstall --shred` are for,
+  and the former is explicitly logical-only.
 
 Rules: tombstone/marker lines carry scope + counts + ids only, never
 excerpts or content. Per-id shred never rewrites compressed rotations
 (immutability + cost); this limitation is user-visible in `--help` and
 in the shred success message. `memory wipe`'s success message is
 corrected to state the actual scope (DB + mirror history cleared,
-watchdog tombstone written).
+watchdog tombstone written). Both messages must also disclose that the
+audit log and any pre-existing backup are outside their scope, and must
+not use the words "secure", "erase" or "unrecoverable" — see the
+contract in `docs/SPEC.md` §4.5.2.
 
 ## 12B. Shared rotation/append path (centralized)
 

@@ -49,7 +49,7 @@ Usage:
   mpm session add <content>      Add a new session entry (returns ID)
   mpm session search <query>     Search sessions
   mpm session show <id>          Show session by ID
-  mpm session shred <id>         Secure delete session
+  mpm session shred <id>         Soft-delete session (recoverable, NOT a shred)
   mpm session list               List recent sessions
   mpm session rotate             Allocate a fresh mpm_session_id (explicit)
   mpm session allocate           Allocate mpm_session_id if absent, else reuse

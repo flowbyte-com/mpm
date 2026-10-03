@@ -1188,7 +1188,13 @@ func handleSnooze(args []string) int {
 	return 0
 }
 
-// mpm shred <id> — Secure delete memory
+// mpm shred <id> — remove one memory from active MPM state.
+//
+// This is a hard delete from the active substrate plus the defined
+// cascades, NOT secure erasure. See the contract in
+// docs/SPEC.md §4.5.2: the audit log, mirror history and rotations,
+// database backups, the WAL and free pages, and filesystem snapshots
+// are all outside this guarantee and may still hold the content.
 func handleShredMem(args []string) int {
 	if len(args) < 2 {
 		usererror.Usage("mpm shred <id>")
@@ -1234,6 +1240,11 @@ func handleShredMem(args []string) int {
 			fmt.Printf("    - %s: %v rows\n", t, n)
 		}
 	}
+	// Say plainly what shred did NOT do. Silence here reads as "gone
+	// forever", and the content demonstrably survives in the audit log,
+	// mirror history and rotations, backups, the WAL and free pages.
+	fmt.Printf("  removed from active state. NOT erased: audit log, mirror history\n"+
+		"  and rotations, database backups, WAL/free pages, filesystem snapshots.\n")
 	return 0
 }
 
