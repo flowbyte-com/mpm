@@ -1330,6 +1330,14 @@ func (s *MemoryStore) GetRecent(n int) ([]*Memory, error) {
 // cycles diagnosing a non-bug. If you add a collection here, also add
 // it to handleSaveToMemory's mirror contract block.
 func (s *MemoryStore) appendToMirror(mem *Memory) error {
+	// An empty MirrorFile means this store has no mirror directory to own
+	// — the case for a manager wrapping an in-memory database. It is a
+	// silent no-op, not a failure: returning the OpenFile error here would
+	// turn "this database has no audit directory" into a per-save warning
+	// at every call site.
+	if s.MirrorFile == "" {
+		return nil
+	}
 	if !isMirroredCollection(mem.Collection) {
 		slog.Debug("mirror skip",
 			"collection", mem.Collection,
@@ -1390,6 +1398,10 @@ func isMirroredCollection(collection string) bool {
 // The full blocked content, its prefix, suffix, or any recoverable byte
 // sequence is NOT stored anywhere on disk.
 func (s *MemoryStore) appendBlockedAttempt(content, reason, attemptType string) error {
+	// See appendToMirror: an empty MirrorFile is a silent no-op, not an error.
+	if s.MirrorFile == "" {
+		return nil
+	}
 	f, err := os.OpenFile(s.MirrorFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return err

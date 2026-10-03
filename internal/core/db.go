@@ -329,6 +329,17 @@ type DatabaseManager struct {
 	watchdogPath string     // path to watchdog.jsonl for query observability
 	watchdogMu   sync.Mutex // serializes watchdog log writes
 
+	// mirrorPath is the path to mirror.jsonl, the audit trail for
+	// sync/sharing decisions. Like watchdogPath it is derived from the
+	// directory holding THIS manager's database, never from the ambient
+	// workspace, so a manager wrapping an explicitly isolated database
+	// cannot write audit lines outside that database's own tree.
+	//
+	// Empty means "no filesystem mirror for this manager": an in-memory
+	// database has no directory to own an auxiliary log. Callers must
+	// treat empty as a silent no-op, not an error.
+	mirrorPath string
+
 	// busyRetries counts lifetime SQLITE_BUSY retry attempts via ExecTracked.
 	// Use BusyRetryCount() to inspect. Zero is healthy; non-zero means
 	// contention is occurring somewhere in the call stack. The counter is
@@ -1089,6 +1100,15 @@ func (dm *DatabaseManager) getSharedStore() (*MemoryStore, error) {
 	}
 	store := NewMemoryStore("")
 	store.SQLiteDBPath = dm.dbPath
+	// NewMemoryStore discards its argument and derives MirrorFile from the
+	// AMBIENT workspace (config.GetMPMDir()). That is the production path,
+	// so it must be overridden for any manager that is not a production
+	// one — otherwise an in-memory test manager's Save/Update/Delete writes
+	// audit rows into the operator's real ~/.mpm/src/db/mirror.jsonl. The
+	// manager owns both auxiliary logs, so the store inherits the manager's
+	// own mirrorPath. Empty means "this manager has no mirror directory",
+	// which appendToMirror/appendBlockedAttempt treat as a silent no-op.
+	store.MirrorFile = dm.mirrorPath
 	store.DB = &SQLiteConnection{DB: dm.db}
 	store.DM = dm // wire DM so MemoryStore can audit-log via the same connection
 	dm.sharedStore = store
@@ -1180,6 +1200,11 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 		db:           db,
 		dbPath:       dbPath,
 		watchdogPath: filepath.Join(filepath.Dir(dbPath), "watchdog.jsonl"),
+		// Both auxiliary logs live beside the database they describe.
+		// ChallengeMemoryAsync writes mirror.jsonl, so the manager must
+		// own the path rather than letting that call re-derive it from
+		// global config.
+		mirrorPath: filepath.Join(filepath.Dir(dbPath), "mirror.jsonl"),
 	}
 
 	// Resolve symlinks for health_check / integration gating. The raw
@@ -1271,6 +1296,13 @@ func (dm *DatabaseManager) NewSession() (CoreDB, error) {
 		dbPath:       dm.dbPath,
 		dbPathRaw:    dm.dbPathRaw,
 		watchdogPath: filepath.Join(filepath.Dir(dm.dbPath), "watchdog.jsonl"),
+		// A session is the same database in a second connection, so it
+		// shares the parent's auxiliary logs verbatim. Re-deriving from
+		// dm.dbPath would be wrong for an in-memory parent (filepath.Dir("")
+		// is ".", which would put the log in the process working
+		// directory), and inheriting is exactly equivalent in production
+		// because the parent derived both from the same workspace.
+		mirrorPath: dm.mirrorPath,
 	}
 
 	// Initialize schema (idempotent — CREATE IF NOT EXISTS).
@@ -1874,14 +1906,76 @@ func (dm *DatabaseManager) backfillSharedFTSIfEmpty() error {
 	return nil
 }
 
-// NewDatabaseManagerForDB creates a DatabaseManager wrapping an existing *sql.DB.
-// Use this for one-off CLI commands that don't need managed persistence.
-func NewDatabaseManagerForDB(db *sql.DB) *DatabaseManager {
-	wdPath := ""
-	if mpmDir := config.GetMPMDir(); mpmDir != "" {
-		wdPath = filepath.Join(mpmDir, "src", "db", "watchdog.jsonl")
+// auxLogDir returns the directory that should own this database's
+// auxiliary logs (watchdog.jsonl, mirror.jsonl), or "" when the database
+// has no filesystem location of its own.
+//
+// The lookup is instance-local by construction: it asks SQLite what file
+// the `main` database actually has open, rather than consulting the
+// ambient MPM workspace. That distinction is the whole point — a manager
+// wrapping an explicitly isolated database must derive its writable
+// auxiliary paths from THAT database, never from unrelated global state.
+//
+// For an in-memory database SQLite reports an empty filename, so the
+// result is "" and the caller writes no auxiliary log at all. That is the
+// correct behaviour, not a degradation: there is no durable operation to
+// observe and no directory to own a file next to.
+func auxLogDir(db *sql.DB) string {
+	if db == nil {
+		return ""
 	}
-	return &DatabaseManager{db: db, watchdogPath: wdPath}
+	// PRAGMA database_list yields (seq, name, file) for every attached
+	// database. We want `main` specifically: an ATTACHed secondary has its
+	// own file and its own lifecycle.
+	rows, err := db.Query("PRAGMA database_list")
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var seq int
+		var name, file string
+		if err := rows.Scan(&seq, &name, &file); err != nil {
+			return ""
+		}
+		if name != "main" {
+			continue
+		}
+		// file is "" for in-memory databases and ":memory:"-style DSNs.
+		if file == "" || IsInMemoryDSN(file) {
+			return ""
+		}
+		dir := filepath.Dir(file)
+		if dir == "" || dir == "." {
+			return ""
+		}
+		return dir
+	}
+	return ""
+}
+
+// NewDatabaseManagerForDB creates a DatabaseManager wrapping an existing
+// *sql.DB. Use this for one-off CLI commands and for tests that supply
+// their own database.
+//
+// Auxiliary log paths are derived from the wrapped database's own
+// location (see auxLogDir), NOT from config.GetMPMDir(). The previous
+// global lookup was a hermeticity defect rather than a cosmetic one:
+// NewTestDM routes through this constructor for every in-memory test
+// database, so every ExecTracked/QueryTracked in ~121 test files
+// appended a watchdog line to the operator's real
+// ~/.mpm/src/db/watchdog.jsonl — contradicting NewTestDM's documented
+// "no prod-DB pollution" contract. The bug was latent on a machine with
+// no ~/.mpm/src/db, because logWatchdog opens the log without creating
+// parent directories; it fires on any real install.
+func NewDatabaseManagerForDB(db *sql.DB) *DatabaseManager {
+	dm := &DatabaseManager{db: db}
+	if dir := auxLogDir(db); dir != "" {
+		dm.watchdogPath = filepath.Join(dir, "watchdog.jsonl")
+		dm.mirrorPath = filepath.Join(dir, "mirror.jsonl")
+	}
+	return dm
 }
 
 // evalSymlinksOnDB resolves the symlink chain of a database file path.
@@ -5272,19 +5366,43 @@ func (dm *DatabaseManager) GetMemoryRevisionAtTime(memoryID string, asOf time.Ti
 // independent, detached goroutine. Does NOT block the search query or write to
 // the database — only appends to the audit mirror. The evidence parameter
 // describes which memories collided and why.
+//
+// The mirror path is this manager's own (see DatabaseManager.mirrorPath),
+// captured on the CALLING goroutine before the write is scheduled. It used
+// to be re-derived from config.GetMPMDir() INSIDE the goroutine, which had
+// two consequences:
+//
+//  1. The write escaped the manager's database tree. Any manager wrapping
+//     an isolated database still appended to the ambient
+//     ~/.mpm/src/db/mirror.jsonl.
+//  2. It read global state at EXECUTION time, so the destination depended
+//     on when the goroutine happened to be scheduled — after a test's
+//     t.Setenv cleanup had already restored the environment, the write
+//     could land in a directory the caller had stopped pointing at.
+//
+// Capturing before `go` makes the destination a property of the call, not
+// of the scheduler. A manager with no mirrorPath (an in-memory database)
+// writes nothing; that is a silent no-op, matching the existing contract
+// for logWatchdog.
 func (dm *DatabaseManager) ChallengeMemoryAsync(memoryID string, evidence string) {
+	// Resolve on the calling goroutine: after this line the destination is
+	// fixed, and no amount of concurrent env mutation can redirect it.
+	mirrorPath := dm.mirrorPath
+	if mirrorPath == "" {
+		return
+	}
+
+	entry := map[string]interface{}{
+		"event":     "contradiction_detected",
+		"memory_id": memoryID,
+		"evidence":  evidence,
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	}
+	line, _ := json.Marshal(entry)
+
 	dm.mirrorWG.Add(1)
 	go func() {
 		defer dm.mirrorWG.Done()
-		mirrorPath := filepath.Join(config.GetMPMDir(), "src", "db", "mirror.jsonl")
-
-		entry := map[string]interface{}{
-			"event":     "contradiction_detected",
-			"memory_id": memoryID,
-			"evidence":  evidence,
-			"timestamp": time.Now().UTC().Format(time.RFC3339),
-		}
-		line, _ := json.Marshal(entry)
 
 		// Hold watchdogMu across rotation + write so concurrent mirror
 		// writers (and concurrent watchdog writers — they share the

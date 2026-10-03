@@ -2653,6 +2653,14 @@ mpm call mpm_system --payload '{"action":"query_audit_log","params":{"component"
 
 The wake context surfaces a single-line summary when errors or fatals were logged in the last 24h.
 
+#### Auxiliary log ownership
+
+`watchdog.jsonl` and `mirror.jsonl` are properties of a **database**, not of the workspace. Every `DatabaseManager` derives both paths from the directory holding its own database file, so a manager opened on `<root>/src/db/mpm.db` writes `<root>/src/db/{watchdog,mirror}.jsonl` and nothing else. A manager wrapping an in-memory database has no directory to own, so it writes no auxiliary log anywhere — there is no ambient fallback to the operator's real workspace.
+
+This matters for isolation rather than for the production layout, where the two agree. Test databases (`NewTestDM` and friends) are in-memory or live under a temp directory, and a workspace-derived path would have sent every tracked query and every saved memory — content, metadata and all — into the operator's live audit trail. A `MemoryStore` obtained from a manager (`getSharedStore`) inherits the manager's mirror path rather than re-deriving it from global config, and a `NewSession` manager inherits its parent's.
+
+Rotation, `0600` permissions, and the "a log failure never fails the write that produced it" contract are unchanged: an empty mirror path is a silent no-op, and an unwritable one is reported and swallowed.
+
 #### Storage
 
 | Column | Type | Purpose |
