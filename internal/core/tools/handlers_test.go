@@ -737,6 +737,10 @@ func TestHandleCommitMilestone_PersistsWithCanonicalTag(t *testing.T) {
 // surfaces had drifted on every other field addition prior to this
 // fix; this test pins the contract going forward.
 func TestHandleReadWakeContext_IncludesRecentMilestones(t *testing.T) {
+	// An in-memory manager owns no workspace, so its scanner falls back to the
+	// ambient phrase file and GENERATES it on first use. Pin a workspace so this
+	// test writes nothing outside its own tree.
+	internal.PinIsolatedWorkspace(t)
 	// Use a hermetic in-memory DB instead of newTestSharedDM so the test
 	// is independent of prod-DB state and independent of test-ordering
 	// races with sibling commit_milestone tests. The newTestSharedDM
@@ -823,6 +827,10 @@ func TestHandleReadWakeContext_IncludesRecentMilestones(t *testing.T) {
 // map by hand — any new WakeContextData field has to be explicitly
 // projected, otherwise the wire contract drifts silently.
 func TestHandleReadWakeContext_IncludesOverdueWakes(t *testing.T) {
+	// An in-memory manager owns no workspace, so its scanner falls back to the
+	// ambient phrase file and GENERATES it on first use. Pin a workspace so this
+	// test writes nothing outside its own tree.
+	internal.PinIsolatedWorkspace(t)
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
@@ -928,6 +936,10 @@ func TestHandleReadWakeContext_IncludesOverdueWakes(t *testing.T) {
 // the handler copy. Pattern matches the recent_milestones regression
 // test above: same hermetic in-memory DB, same field-presence check.
 func TestHandleReadWakeContext_IncludesEpistemicPressure(t *testing.T) {
+	// An in-memory manager owns no workspace, so its scanner falls back to the
+	// ambient phrase file and GENERATES it on first use. Pin a workspace so this
+	// test writes nothing outside its own tree.
+	internal.PinIsolatedWorkspace(t)
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
@@ -978,6 +990,10 @@ func TestHandleReadWakeContext_IncludesEpistemicPressure(t *testing.T) {
 // system-prompt format (which calls ReadWakeContext directly) rendered
 // them correctly.
 func TestHandleReadWakeContext_IncludesOpenWorks(t *testing.T) {
+	// An in-memory manager owns no workspace, so its scanner falls back to the
+	// ambient phrase file and GENERATES it on first use. Pin a workspace so this
+	// test writes nothing outside its own tree.
+	internal.PinIsolatedWorkspace(t)
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
@@ -1069,6 +1085,10 @@ func TestHandleReadWakeContext_IncludesOpenWorks(t *testing.T) {
 // presence, not absence) and prove the populated case emits each item
 // with the right id and pointer.
 func TestHandleReadWakeContext_IncludesCompletedWorks(t *testing.T) {
+	// An in-memory manager owns no workspace, so its scanner falls back to the
+	// ambient phrase file and GENERATES it on first use. Pin a workspace so this
+	// test writes nothing outside its own tree.
+	internal.PinIsolatedWorkspace(t)
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
@@ -1889,6 +1909,10 @@ func TestScrubChallengeIdentifier_PublicSurfaces(t *testing.T) {
 // is the contract the agent sees — the helper-level test above proves
 // the algorithm; this one proves the wire.
 func TestHandleReadWakeContext_NoChallengeMetadataLeak(t *testing.T) {
+	// An in-memory manager owns no workspace, so its scanner falls back to the
+	// ambient phrase file and GENERATES it on first use. Pin a workspace so this
+	// test writes nothing outside its own tree.
+	internal.PinIsolatedWorkspace(t)
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)

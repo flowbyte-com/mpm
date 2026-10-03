@@ -6,8 +6,14 @@ import (
 	"time"
 )
 
+// These tests are not parallel. Each one builds a hermetic manager via
+// newTestDM, which pins MPM_WORKSPACE via t.Setenv; t.Setenv panics
+// under t.Parallel. A hermetic manager is a process-global environment
+// change, and a test that changes the environment cannot run
+// concurrently with others doing the same. The tests are microseconds
+// each, so nothing is lost by serialising them.
+
 func TestSetMemoryTTL_ExpiresAtColumn(t *testing.T) {
-	t.Parallel()
 	dm := newTestDM(t)
 	id, err := dm.SaveMemory("default", "ttl-test-content", "", nil, nil, nil, false, 1)
 	if err != nil {
@@ -42,7 +48,6 @@ func TestSetMemoryTTL_ExpiresAtColumn(t *testing.T) {
 }
 
 func TestSetMemoryTTL_FutureExpiryStillVisible(t *testing.T) {
-	t.Parallel()
 	dm := newTestDM(t)
 	id, err := dm.SaveMemory("default", "future-ttl-content", "", nil, nil, nil, false, 1)
 	if err != nil {
@@ -68,7 +73,6 @@ func TestSetMemoryTTL_FutureExpiryStillVisible(t *testing.T) {
 }
 
 func TestSetMemoryTTL_ClearWithZeroTime(t *testing.T) {
-	t.Parallel()
 	dm := newTestDM(t)
 	id, err := dm.SaveMemory("default", "clear-ttl-content", "", nil, nil, nil, false, 1)
 	if err != nil {
@@ -93,7 +97,6 @@ func TestSetMemoryTTL_ClearWithZeroTime(t *testing.T) {
 }
 
 func TestPruneExpired_RemovesExpiredRows(t *testing.T) {
-	t.Parallel()
 	dm := newTestDM(t)
 
 	liveID, err := dm.SaveMemory("default", "live", "", nil, nil, nil, false, 1)

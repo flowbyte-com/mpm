@@ -15,6 +15,7 @@ package main
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -26,9 +27,20 @@ import (
 // so tests don't bleed into the user's real ~/.mpm. We can't import
 // internal/testutil from a separate module — cmd/mpm's tests run inside
 // the main module and inherit it; cmd/mpm-mcp runs as its own binary.
+//
+// Two different roots have to be pinned, and isolating only the first is
+// a silent leak. `workspace` above roots the DATABASE — and with it
+// active.json, since a DatabaseManager resolves its own lifecycle
+// identity beside its own database. MPM_WORKSPACE roots everything that
+// still resolves through config.GetMPMDir(), most visibly
+// toxicphrases.txt, which any memory save's poison scanner will
+// generate. An already-set MPM_WORKSPACE is left alone.
 func newIsolatedTestDM(t *testing.T) *core.DatabaseManager {
 	t.Helper()
 	workspace := t.TempDir()
+	if os.Getenv("MPM_WORKSPACE") == "" {
+		t.Setenv("MPM_WORKSPACE", workspace)
+	}
 	dm, err := core.NewDatabaseManager(workspace)
 	if err != nil {
 		t.Fatalf("NewDatabaseManager(%q): %v", workspace, err)

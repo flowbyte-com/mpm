@@ -37,6 +37,9 @@ import (
 // path: a properly-shaped step with both Call and ArgsFrom survives
 // validation with zero errors.
 func TestSkillStep_ValidObject_PassesValidation(t *testing.T) {
+	// The scanner generates its phrase file on first use; pin a
+	// workspace so a pure-parser test writes nothing ambient.
+	PinIsolatedWorkspace(t)
 	content := `---
 name: agentshell
 version: 1.0.0
@@ -67,6 +70,9 @@ body
 // a step with `- call: ""` must be rejected with a useful error
 // identifying the offending row index.
 func TestSkillStep_EmptyCall_Rejected(t *testing.T) {
+	// The scanner generates its phrase file on first use; pin a
+	// workspace so a pure-parser test writes nothing ambient.
+	PinIsolatedWorkspace(t)
 	content := `---
 name: agentshell
 version: 1.0.0
@@ -100,6 +106,9 @@ body
 // Call is whitespace-only is also unusable — the runtime would try to
 // invoke "  " as a tool name and fail confusingly downstream.
 func TestSkillStep_WhitespaceOnlyCall_Rejected(t *testing.T) {
+	// The scanner generates its phrase file on first use; pin a
+	// workspace so a pure-parser test writes nothing ambient.
+	PinIsolatedWorkspace(t)
 	content := `---
 name: agentshell
 version: 1.0.0
@@ -122,6 +131,9 @@ body
 // SkillStep{Call:"", ArgsFrom:""} — the exact corruption the auditor
 // reported.
 func TestSkillStep_EmptyMap_Rejected(t *testing.T) {
+	// The scanner generates its phrase file on first use; pin a
+	// workspace so a pure-parser test writes nothing ambient.
+	PinIsolatedWorkspace(t)
 	content := `---
 name: agentshell
 version: 1.0.0
@@ -156,6 +168,9 @@ body
 // the boundary explicit and produces a useful message rather than the
 // raw yaml.v3 unmarshal error).
 func TestSkillStep_StringEntry_Rejected(t *testing.T) {
+	// The scanner generates its phrase file on first use; pin a
+	// workspace so a pure-parser test writes nothing ambient.
+	PinIsolatedWorkspace(t)
 	content := `---
 name: agentshell
 version: 1.0.0
@@ -184,6 +199,9 @@ body
 // SkillStep{Call:"", ArgsFrom:"x"} — a step that looks like it has
 // a binding but no target.
 func TestSkillStep_MissingCall_Rejected(t *testing.T) {
+	// The scanner generates its phrase file on first use; pin a
+	// workspace so a pure-parser test writes nothing ambient.
+	PinIsolatedWorkspace(t)
 	content := `---
 name: agentshell
 version: 1.0.0
@@ -215,6 +233,9 @@ body
 // TestSkillStep_NoSteps_PassesValidation pins that a skill with zero
 // steps is allowed — some skills are pure guidance, no procedure.
 func TestSkillStep_NoSteps_PassesValidation(t *testing.T) {
+	// The scanner generates its phrase file on first use; pin a
+	// workspace so a pure-parser test writes nothing ambient.
+	PinIsolatedWorkspace(t)
 	content := `---
 name: agentshell
 version: 1.0.0
@@ -242,6 +263,9 @@ body
 // reads back identically. This pins that validation didn't introduce
 // a regression on the happy path.
 func TestSkillStep_ValidSkillSave_RoundTrips(t *testing.T) {
+	// The scanner generates its phrase file on first use; pin a
+	// workspace so a pure-parser test writes nothing ambient.
+	PinIsolatedWorkspace(t)
 	dm := newTestDM(t)
 	content := `---
 name: agentshell

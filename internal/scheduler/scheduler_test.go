@@ -65,6 +65,14 @@ CREATE INDEX idx_scheduled_tasks_poll ON scheduled_tasks(status, next_run_at);
 // (not :memory:) because WAL mode + :memory: gives each connection its
 // own database, which breaks tests that share a *sql.DB across goroutines
 // via concurrent MarkFired calls.
+//
+// The heartbeat path is pinned into the same temp dir. Without it,
+// persistState resolves StateFilePath() from the ambient environment and
+// every test that ran the tick loop overwrote the operator's live
+// run/scheduler.state — the file cmd/mpm's emitSchedulerHealthWarning
+// reads to decide whether the real daemon is stalled. A test scheduler
+// publishing a heartbeat makes a healthy daemon look like it was
+// replaced seconds ago.
 func newTestScheduler(t *testing.T) *Scheduler {
 	t.Helper()
 	dir := t.TempDir()
@@ -88,6 +96,7 @@ func newTestScheduler(t *testing.T) *Scheduler {
 		handlers:     make(map[string]HandlerFunc),
 		tickHandlers: make(map[string]func(ctx context.Context) error),
 		wakeCh:       make(chan struct{}, 1),
+		statePath:    filepath.Join(dir, "run", "scheduler.state"),
 	}
 }
 

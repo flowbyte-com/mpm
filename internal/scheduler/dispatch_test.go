@@ -69,6 +69,9 @@ func newDispatchTestScheduler(t *testing.T) *Scheduler {
 		dbPath:   path,
 		log:      log,
 		handlers: make(map[string]HandlerFunc),
+		// Pinned beside the test DB — see newTestScheduler for why a
+		// test scheduler must never resolve the live heartbeat path.
+		statePath: filepath.Join(dir, "run", "scheduler.state"),
 	}
 }
 

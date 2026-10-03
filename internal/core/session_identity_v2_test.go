@@ -24,6 +24,7 @@ package internal
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -346,9 +347,20 @@ func TestSessionIdentity_S8_WakeContextSessionFieldsAreReadOnly(t *testing.T) {
 // EndSessionV2 writes the canonical three-ID surface. Going forward,
 // mpm_session_id is allocated at the interaction boundary (handoff
 // write), and framework_session_id is the caller-supplied host id.
+//
+// The manager here is FILE-BACKED and rooted at the fixture workspace,
+// which is what production looks like: a DatabaseManager resolves its
+// lifecycle identity against the active.json belonging to its own
+// database's workspace. An in-memory manager has no workspace of its own
+// and deliberately mints a process-scoped id instead of reaching into
+// whatever MPM_WORKSPACE happens to point at — that decoupling is what
+// makes a hermetic test manager safe to construct, and S9's final
+// assertion only holds for the file-backed shape.
 func TestSessionIdentity_S9_HandoffWriteReceivesSessionIdentity(t *testing.T) {
-	withSessionIdentityFixture(t)
-	dm := NewTestDM(t)
+	root := withSessionIdentityFixture(t)
+	dm, err := NewDatabaseManager(root)
+	require.NoError(t, err, "NewDatabaseManager(%q)", root)
+	t.Cleanup(func() { _ = dm.Close() })
 
 	h, err := dm.EndSessionV2(
 		"",                                  // legacy session_id (empty)
@@ -369,6 +381,8 @@ func TestSessionIdentity_S9_HandoffWriteReceivesSessionIdentity(t *testing.T) {
 	// is the same file the next acquire would read.
 	require.True(t, strings.HasPrefix(h.MPMSessionID, "mpm-"),
 		"S9: mpm_session_id carries the mpm- prefix")
+	require.FileExists(t, filepath.Join(root, "active.json"),
+		"S9: the manager persisted its identity beside its own database, not elsewhere")
 	require.Equal(t, h.MPMSessionID, CurrentMPMSessionID(),
 		"S9: post-write, the new session id is the current session id")
 }

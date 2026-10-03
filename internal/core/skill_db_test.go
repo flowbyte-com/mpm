@@ -557,6 +557,10 @@ func TestSaveSkill_ForceOverwriteHighestKeepsIsLatestTrue(t *testing.T) {
 // TestValidateSkillFrontmatterAndScan_CleanInput verifies the helper parses
 // valid frontmatter and returns no errors for clean content.
 func TestValidateSkillFrontmatterAndScan_CleanInput(t *testing.T) {
+	// The helper scans, and scanning GENERATES the phrase file on first
+	// use. Without a pinned workspace that write lands in the operator's
+	// real ~/.mpm — a test of a pure parser should leave no trace.
+	PinIsolatedWorkspace(t)
 	content := "---\nname: foo\nversion: 1.0.0\nwhen_to_use: doing, bar\n---\nbody"
 	skill, warnings, errors, err := validateSkillFrontmatterAndScan(content)
 	if err != nil {
@@ -575,6 +579,7 @@ func TestValidateSkillFrontmatterAndScan_CleanInput(t *testing.T) {
 // TestValidateSkillFrontmatterAndScan_ScannerBlocks verifies the helper
 // returns a scanner error when content contains a secret pattern.
 func TestValidateSkillFrontmatterAndScan_ScannerBlocks(t *testing.T) {
+	PinIsolatedWorkspace(t)
 	// OpenAI-style key triggers the secret scanner.
 	content := "---\nname: foo\nversion: 1.0.0\n---\nbody with sk-abc123def456ghi789jkl012mno345pqr here"
 	_, _, errs, err := validateSkillFrontmatterAndScan(content)
@@ -589,6 +594,7 @@ func TestValidateSkillFrontmatterAndScan_ScannerBlocks(t *testing.T) {
 // TestValidateSkillFrontmatterAndScan_BadFrontmatter verifies the helper
 // returns an error when frontmatter is missing.
 func TestValidateSkillFrontmatterAndScan_BadFrontmatter(t *testing.T) {
+	PinIsolatedWorkspace(t)
 	content := "no frontmatter here"
 	_, _, _, err := validateSkillFrontmatterAndScan(content)
 	if err == nil {

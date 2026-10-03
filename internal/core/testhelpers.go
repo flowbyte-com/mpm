@@ -10,6 +10,7 @@ package internal
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -30,11 +31,47 @@ import (
 // every connection to the same `file:NAME` see the same in-memory store.
 var testDBCounter int64
 
+// PinIsolatedWorkspace points MPM_WORKSPACE at a throwaway directory for
+// the duration of the test, so ambient runtime state follows the test
+// instead of the operator's real installation.
+//
+// This is the second half of NewTestDM's hermeticity. Isolating the
+// DATABASE is not enough: a surprising number of MPM operations resolve
+// workspace-scoped state through config.GetMPMDir() rather than through
+// the database they are operating on. active.json (and its cross-process
+// lock) hold the workspace's lifecycle identity; toxicphrases.txt holds
+// the workspace's phrase list. Both are reachable from ordinary memory
+// and handoff writes, so a hermetic test manager that left MPM_WORKSPACE
+// pointing at $HOME/.mpm would mint a session identity inside — and take
+// an exclusive flock on — the operator's real files.
+//
+// An already-set MPM_WORKSPACE is respected and left alone: callers that
+// deliberately pinned a workspace (NewTestSharedDM and friends) keep
+// their choice, and this helper never clobbers intent.
+//
+// Note: t.Setenv is incompatible with t.Parallel. A test that wants
+// parallel execution cannot use a hermetic manager, because a hermetic
+// manager is by definition a process-global environment change.
+func PinIsolatedWorkspace(t *testing.T) {
+	t.Helper()
+	if ws := os.Getenv("MPM_WORKSPACE"); ws != "" {
+		return
+	}
+	t.Setenv("MPM_WORKSPACE", t.TempDir())
+}
+
 // NewTestDM returns a hermetic DatabaseManager backed by an in-memory SQLite
 // database. The DB lives only for the duration of the test (registered with
 // t.Cleanup) and is isolated from every other test that runs in the same
 // `go test` invocation — no cross-test interference, no prod-DB pollution,
 // no leftover rows in ~/.mpm/src/db/mpm.db from a test run.
+//
+// "Hermetic" covers the whole workspace, not just the database. The helper
+// pins an isolated MPM_WORKSPACE (see PinIsolatedWorkspace) so that
+// workspace-scoped state — active.json and its lock, toxicphrases.txt —
+// is created inside the test's own tree. Isolating the database alone
+// left those files being created in the operator's real ~/.mpm by every
+// handoff write and every memory save.
 //
 // Use this everywhere tests previously constructed a tempfile via
 // `t.TempDir() + sql.Open("sqlite3", filepath.Join(tmp, "X.db"))`. The
@@ -51,6 +88,8 @@ var testDBCounter int64
 // (matching the pattern in cmd/mpm/call_evidence_test.go).
 func NewTestDM(t *testing.T) *DatabaseManager {
 	t.Helper()
+
+	PinIsolatedWorkspace(t)
 
 	// Unique name per test prevents the shared cache from being shared
 	// across tests in the same process — each test gets its own in-memory

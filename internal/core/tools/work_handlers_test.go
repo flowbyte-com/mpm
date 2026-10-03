@@ -495,6 +495,10 @@ func TestHandleMpmWork_ProvenanceOnCreate(t *testing.T) {
 // busy_timeout=5000, where retries serialise through and at least one path
 // always commits.
 func TestHandleMpmWork_ConcurrentAppends_OneWinsConstraintError(t *testing.T) {
+	// An in-memory manager owns no workspace, so its scanner falls back to the
+	// ambient phrase file and GENERATES it on first use. Pin a workspace so this
+	// test writes nothing outside its own tree.
+	internal.PinIsolatedWorkspace(t)
 	// Shared-cache in-memory DB so both connections see the same database.
 	// The file: prefix with mode=memory&cache=shared creates a shared
 	// in-memory database accessible by multiple connections. busy_timeout
