@@ -229,4 +229,10 @@ src/db/watchdog.jsonl.pre-*
 
 # Migration backup artifacts (runtime-generated undo snapshots from
 # `mpm ops migrate-embeddings --undo`). Not source.
+#
+# The whole directory is ignored, not just today's filename pattern: the
+# checkout is the runtime root, so a differently-named artifact landing
+# here would otherwise show up as untracked and could be committed by a
+# `git add -A`. The pattern is retained for clarity about what lives here.
+/migrations/
 embeddings-*.db.bak

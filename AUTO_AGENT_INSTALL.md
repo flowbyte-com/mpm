@@ -164,6 +164,42 @@ If the target has a malformed/partial managed section, follow the adapter's fail
 
 # 5. Install MPM itself
 
+MPM's canonical root is `~/.mpm`, which is simultaneously the Git checkout
+and the runtime root. Because one directory holds both source and live data,
+decide carefully before writing anything to it.
+
+## Deciding what to do with `~/.mpm`
+
+Inspect first:
+
+```bash
+ls -la ~/.mpm 2>/dev/null || echo "~/.mpm does not exist"
+git -C ~/.mpm rev-parse --is-inside-work-tree 2>/dev/null && echo "valid MPM checkout"
+ls -la ~/.mpm/src/db 2>/dev/null || echo "no database at the canonical path"
+```
+
+Then follow the first matching case:
+
+| State | Action |
+|---|---|
+| `~/.mpm` does not exist | `git clone https://github.com/flowbyte-com/mpm ~/.mpm`, then install. |
+| `~/.mpm/.git` is a valid MPM checkout | **Reuse it — do not re-clone.** `git -C ~/.mpm pull`, then re-run the installer. |
+| `~/.mpm` exists but is not a recognizable MPM checkout | **Stop. Do not delete, overwrite, or clone over it.** Report what you found and ask the user. |
+| `~/.mpm` exists, contents unknown | **Stop and report.** Treat as the ambiguous case. |
+| The user supplied an explicit alternate checkout | Honour it. Runtime state and binaries still install under `~/.mpm` unless `MPM_WORKSPACE` says otherwise. |
+
+**Never delete, overwrite, or force a clone onto `~/.mpm` to satisfy an
+install path.** A `git clone` into a non-empty directory fails rather than
+merging; forcing it, or clearing the directory first, can destroy a database
+that cannot be recreated. On a recovery machine the user may already have a
+database backup staged there. If `~/.mpm/src/db/` contains a database, that is
+evidence of live data, not evidence that the directory is disposable.
+
+An alternate checkout such as `~/projects/mpm` remains supported for running
+the source from elsewhere, but `~/.mpm` is the primary layout.
+
+## Running the installer
+
 Use the repository's canonical MPM installer/build procedure.
 
 Where available, prefer:
@@ -184,6 +220,11 @@ mpm-critic
 mpm-telemetry
 ```
 
+All five are compiled binaries installed under `~/.mpm/bin/`. There is no
+shell wrapper and no `mpm.real`; only `mpm` and `mpm-mcp` are additionally
+symlinked into `~/.local/bin` for the user's PATH. The three daemon binaries
+are invoked from `~/.mpm/bin/` by systemd and are not on the PATH.
+
 The exact installation location is determined by the current installer/configuration.
 
 Do not assume a hard-coded user path.
@@ -195,7 +236,7 @@ command -v mpm || true
 ```
 
 If bare `mpm` resolves in the current shell, use it. If not, locate
-the canonical installed binary or wrapper produced by the installer —
+the canonical compiled binary produced by the installer —
 typically:
 
 ```text
@@ -234,7 +275,7 @@ The canonical `install.sh` (the **only** install path; the legacy
 `~/.local/bin`:
 
 ```text
-~/.local/bin/mpm      ->  ~/.mpm/bin/mpm        (CLI wrapper)
+~/.local/bin/mpm      ->  ~/.mpm/bin/mpm        (CLI binary)
 ~/.local/bin/mpm-mcp  ->  ~/.mpm/bin/mpm-mcp    (MCP stdio server)
 ```
 
@@ -268,7 +309,7 @@ ls -l "$HOME/.local/bin/mpm" "$HOME/.local/bin/mpm-mcp"
 # expect each line to point at $HOME/.mpm/bin/...
 ```
 
-Then confirm the canonical wrapper works regardless of current-session
+Then confirm the canonical binary works regardless of current-session
 `PATH` resolution:
 
 ```bash

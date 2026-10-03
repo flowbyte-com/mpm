@@ -692,10 +692,12 @@ Five minutes from zero to first decision. Choose your depth:
 ### 5.1 Try it (CLI only — no daemons)
 
 ```bash
-git clone https://github.com/flowbyte-com/mpm ~/projects/mpm
-cd ~/projects/mpm
+git clone https://github.com/flowbyte-com/mpm ~/.mpm
+cd ~/.mpm
 make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic, bin/mpm-telemetry
 ```
+
+`~/.mpm` is the canonical root: the same directory is the Git checkout and the runtime root, and everything MPM writes there at runtime is gitignored, so a normal `git pull` updates code without touching your data.
 
 The single binary lives at `bin/mpm`. Try it without installing anything — no daemon setup, no service registration, no config files. (`make install` is optional; it verifies/syncs all five binaries to `$HOME/.mpm/bin` — the canonical install prefix. For a full systemd + OpenClaw install, run `./install.sh` — the canonical path. The companion daemons `mpm-mcp` and `mpm-scheduler` install together when you want autonomous operation — see §5.2.)
 
@@ -706,8 +708,8 @@ This section shows the daemon + systemd setup manually, for transparency and for
 For autonomous operation — the scheduler dispatches system-kind wakes (critic audits, snapshots, GC, broadcasts) on a 60s ticker, and `mpm-mcp` exposes MPM to MCP hosts (Claude Code, OpenClaw) over stdio:
 
 ```bash
-git clone https://github.com/flowbyte-com/mpm ~/projects/mpm
-cd ~/projects/mpm
+git clone https://github.com/flowbyte-com/mpm ~/.mpm
+cd ~/.mpm
 make build           # produces bin/mpm, bin/mpm-mcp, bin/mpm-scheduler, bin/mpm-critic, bin/mpm-telemetry
 make install         # optional — verifies/syncs all five to $HOME/.mpm/bin (no sudo)
 ```
@@ -744,7 +746,10 @@ journalctl --user -u mpm-telemetry -f              # follow logs
 > adding `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'`
 > to `mpm-scheduler.service` via `systemctl --user edit`.
 
-The default unit assumes `~/projects/mpm` layout. Override via either:
+The default unit targets the canonical layout — `WorkingDirectory=%h/.mpm`,
+`ExecStart=%h/.mpm/bin/mpm-scheduler`, and `MPM_WORKSPACE=%h/.mpm`, with
+`%h/.mpm` as the only writable path. To point a unit somewhere else, override
+via either:
 
 - **Drop-in** (preferred for path changes): `systemctl --user edit mpm-scheduler`
 - **Env file** (preferred for DB / backup paths): write `~/.config/mpm/mpm.env` with `MPM_DB_PATH=...`, `MPM_BACKUP_DIR=...`, `MPM_CRITIC_BIN=...` — it's sourced as `EnvironmentFile=-` in the unit.

@@ -37,7 +37,11 @@ The Makefile sets both. `make install` validates `$HOME/.mpm/bin/` is canonical 
 
 **No HTTP in `mpm`.** The binary is CLI-only; HTTP/MCP surfaces belong to consumer binaries (`mpm-agent`, `mpm-mcp`) which implement their own auth at the protocol boundary.
 
-**Path resolution:** `MPM_WORKSPACE` env → compile-time default (`$HOME/.openclaw/workspace/projects/mpm`) → CWD fallback.
+**Path resolution:** `MPM_WORKSPACE` env → `$HOME/.mpm` → CWD fallback. The
+canonical root `~/.mpm` is both the Git checkout and the runtime root
+(`git clone https://github.com/flowbyte-com/mpm ~/.mpm`). See
+`config.GetMPMDir()` / `config.GetWorkspace()` in
+`internal/core/config/config.go`.
 
 **GOMAXPROCS cap:** `main.go` caps at 32. Don't raise — default-unlimited can OOM the host.
 

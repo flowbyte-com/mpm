@@ -154,6 +154,105 @@ class TestNoObsoleteInstallPaths(unittest.TestCase):
             )
 
 
+class TestCanonicalRepositoryRoot(unittest.TestCase):
+    """The canonical repository root is ~/.mpm.
+
+    MPM installs via `git clone … ~/.mpm`, so that directory is BOTH the
+    Git checkout and the runtime root. A doc that tells a user to clone to
+    somewhere else as the PRIMARY instruction reintroduces the ambiguity
+    this layout exists to remove.
+
+    Deliberately narrow. It does NOT ban:
+      * mentions of an alternate checkout where it is framed as the
+        supported advanced/alternate layout;
+      * migration guidance naming older paths;
+      * anything under docs/archive/ (historical record);
+      * host-specific paths in validation snapshots and test fixtures.
+
+    What it forbids is a *clone instruction* aimed at a non-canonical
+    destination, in a current doc, outside a migration context.
+    """
+
+    # Only these are checked: current, user-facing install documentation.
+    GUARDED_DOCS = (
+        "README.md",
+        "AUTO_AGENT_INSTALL.md",
+        "docs/INSTALL.md",
+        "docs/SPEC.md",
+        "agent_installation/INSTALL.md",
+    )
+
+    # `git clone <url> <dest>` where dest is not ~/.mpm. A clone with no
+    # explicit destination (bare `git clone <url>`) is not a violation.
+    # The URL is matched as a unit so that a repo path containing '/' is
+    # not mistaken for the destination argument.
+    _CLONE = re.compile(
+        r"git\s+clone\s+(?P<url>(?:https?://|git@)\S+|[\w./-]+)"
+        r"(?:\s+(?P<dest>~/\S+|[./~$][\w./~-]*))?"
+    )
+
+    # Lines that legitimately name a non-canonical path.
+    ALLOWED_CONTEXT = (
+        "advanced",          # "Advanced: install.sh also supports …"
+        "alternate",         # the documented alternate checkout
+        "migrat",            # migration / recovery guidance
+        "histor",            # historical layouts
+        "formerly",
+        "previously",
+        "older layout",
+        "not the primary",
+        "supported as",
+    )
+
+    def test_primary_clone_target_is_canonical_mpm(self):
+        offenders: list[str] = []
+        for rel in self.GUARDED_DOCS:
+            path = REPO_ROOT / rel
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for n, line in enumerate(text.splitlines(), 1):
+                low = line.lower()
+                if any(ctx in low for ctx in self.ALLOWED_CONTEXT):
+                    continue
+                m = self._CLONE.search(line)
+                if not m:
+                    continue
+                dest = m.group("dest")
+                if dest is None:
+                    continue  # bare `git clone <url>` — no destination given
+                # Markdown prose trails punctuation and backticks off the
+                # path ("`git clone … ~/.mpm`, then install."). Strip them
+                # before comparing, or a correct instruction reads as a
+                # different destination.
+                dest = dest.rstrip("/").strip("`\"',;()[]*")
+                if dest == "~/.mpm":
+                    continue
+                offenders.append(f"  {rel}:{n}: {line.strip()}")
+        if offenders:
+            self.fail(
+                "a primary 'git clone' instruction targets a non-canonical "
+                "destination; ~/.mpm is the canonical repository root:\n"
+                + "\n".join(offenders)
+                + "\nUpdate it to `git clone https://github.com/flowbyte-com/mpm ~/.mpm`, "
+                "or frame the alternate layout explicitly as advanced/alternate."
+            )
+
+    def test_canonical_install_sequence_documented(self):
+        """The canonical sequence must be stated somewhere a user will find it."""
+        needle = "git clone https://github.com/flowbyte-com/mpm ~/.mpm"
+        found = any(
+            needle in (REPO_ROOT / rel).read_text(encoding="utf-8", errors="ignore")
+            for rel in self.GUARDED_DOCS
+            if (REPO_ROOT / rel).is_file()
+        )
+        self.assertTrue(
+            found,
+            "the canonical install sequence "
+            f"({needle!r}) is not documented in any current install doc",
+        )
+
+
 class TestCanonicalLifecycleFiles(unittest.TestCase):
     """Spec §1: the canonical lifecycle files exist where expected, are
     executable, and legacy locations are gone."""

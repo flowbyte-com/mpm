@@ -398,10 +398,20 @@ unavailable).
 
 **To install OpenClaw MPM integration:**
 
+The MPM source lives at the canonical root `~/.mpm` — not inside the OpenClaw
+agent workspace, which is runtime data owned by the agent. Install the
+adapter from the checkout:
+
 ```
-git clone <repo> ~/.openclaw/workspace/projects/mpm  # or symlink
-cd ~/.openclaw/workspace/projects/mpm/mpm-memory-openclaw
+cd ~/.mpm/agent_installation/mpm-memory-openclaw
 ./install.sh
+```
+
+If MPM is not installed yet, clone it first:
+
+```
+git clone https://github.com/flowbyte-com/mpm ~/.mpm
+cd ~/.mpm && ./install.sh
 ```
 
 The install writes the MPM managed block into the active agent's

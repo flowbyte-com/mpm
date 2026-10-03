@@ -206,8 +206,8 @@ install: build refresh-installed
 	@echo "    run: ./install.sh"
 
 # Install the mpm-scheduler systemd user service.
-# The unit is templated for the standard ~/projects/mpm layout; override
-# paths via:
+# The unit targets the canonical ~/.mpm layout (%h/.mpm for the working
+# directory, binary, workspace, DB, backups). Override paths via:
 #   1. Drop-in:  systemctl --user edit mpm-scheduler
 #   2. Env file: ~/.config/mpm/mpm.env  (sourced as EnvironmentFile=-)
 # mpm-mcp is intentionally NOT shipped as a systemd unit — it's spawned

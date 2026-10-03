@@ -532,21 +532,36 @@ const MPMDataDir = "mpm"
 // 3. Current Working Directory (os.Getwd) — absolute last resort; the prototype DB
 //    is created in cwd if missing, which is the ghost-DB shape; surface loudly.
 //
-// This enables portable installations - the same binary can work from any directory.
-// All MPM runtime data resides within workspace/flowbyte/mpm/ (src/, mode/, persona/)
-// Recommended structure:
+// This enables portable installations - the same binary can work from any
+// directory.
 //
-//	/workspace/         ← User-configurable (workspace root)
-//	└── symai/          ← Project folder
-//	    └── projects/   ← MPM Go binary
-//	        ├── src/db/         ← SQLite databases (mpm.db - consolidated)
-//	        │   ├── mpm.db ← Main database
-//	        │   ├── init.sql     ← Initialization script
-//	        │   └── schema.sql   ← Database schema
-//	        ├── mode/           ← Mode configurations (JSON files)
-//	        ├── persona/        ← Persona configurations (JSON files)
-//	        ├── toxicphrases.txt ← Cognitive firewall file
-//	        └── src/            ← Source code (hidden from end users)
+// Canonical layout: the MPM Git checkout IS the workspace root. The
+// documented install is
+//
+//	git clone https://github.com/flowbyte-com/mpm ~/.mpm
+//	cd ~/.mpm && ./install.sh
+//
+// so `~/.mpm` holds both tracked source and runtime state. That co-location
+// is deliberate and safe: every runtime path below is gitignored, and the
+// source directories that also live here (mode/, persona/) are treated as
+// source-owned — AddMode refuses to create them, and RemoveAll refuses to
+// bulk-delete them when the directory is inside a Git worktree.
+//
+//	~/.mpm/                   ← canonical repository + workspace root
+//	├── .git/                 ← source of truth
+//	├── bin/                  ← compiled binaries (generated, gitignored)
+//	├── src/db/               ← SQLite databases + mirror/watchdog JSONL (runtime)
+//	├── backups/              ← pre-migration snapshots (runtime)
+//	├── blobs/                ← content-addressed blob store (runtime)
+//	├── run/                  ← scheduler state, pid/lock files (runtime)
+//	├── active.json           ← active mode selection (runtime)
+//	├── mode/                 ← mode .md files (TRACKED SOURCE)
+//	├── persona/              ← persona .md files (TRACKED SOURCE)
+//	└── toxicphrases.txt      ← cognitive firewall (runtime)
+//
+// An alternate checkout (e.g. ~/projects/mpm) is supported for running the
+// source from elsewhere; install/runtime state still resolves to ~/.mpm
+// unless MPM_WORKSPACE says otherwise.
 func GetWorkspace() string {
 	// 1. Check environment variable (CLI flag or env var)
 	if workspace := os.Getenv("MPM_WORKSPACE"); workspace != "" {

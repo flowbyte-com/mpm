@@ -18,11 +18,9 @@ that "work" locally and corrupt invariants globally.
    repository-specific rules the lead developer relies on day-to-day
    (projection test, scanner coverage, threading caps, single-connection
    invariant, foreign-key posture, the stranger test as a release gate).
-3. Read [`docs/archive/architecture.md`](archive/architecture.md) for the
-   Projection Principle and the Projection Test. Both are short.
-4. Read [`docs/archive/RELEASE-NOTES-mpm-alpha.md`](archive/RELEASE-NOTES-mpm-alpha.md)
-   for what is and is not part of the current alpha.
-5. Read the code you are about to change. The substrate has structural
+3. Read [`docs/SPEC.md`](SPEC.md) for the Projection Principle and the
+   Projection Test, and for what is and is not part of the current alpha.
+4. Read the code you are about to change. The substrate has structural
    tests that enforce invariants — if your change breaks one, it is
    almost certainly breaking something the tests are designed to catch.
 
@@ -35,7 +33,7 @@ is built on. Violations will be rejected in review even when the code
 - **Source of truth vs. projections.** If a value can be computed from
   authoritative state at read time, do not persist it. Indexes are not
   persistence; caches that can drift are. The Projection Test in
-  `docs/archive/architecture.md` is the operational form of this rule.
+  [`docs/SPEC.md`](SPEC.md) is the operational form of this rule.
 - **One persistence for one concern.** Do not write the same fact to two
   tables. Do not write the same value to `metadata.X` *and* a dedicated
   column.
@@ -186,8 +184,8 @@ PRs that change behaviour should explain:
    behaviour change without a corresponding specification change is a
    documentation bug.
 5. **Whether anything in `docs/` needs updating.** Architecture
-   and behaviour shifts go in `docs/SPEC.md`. Cross-cutting shifts go in
-   `docs/archive/RELEASE-NOTES-*.md`.
+   and behaviour shifts go in `docs/SPEC.md`. Design records for work
+   that has already landed are preserved under `docs/archive/`.
 
 PRs that claim to add functionality should demonstrate the
 functionality working. "I added this and the tests pass" is not

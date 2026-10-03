@@ -41,11 +41,28 @@ has been removed.
 
 ### 1a. Clone and install
 
+`~/.mpm` is the canonical install location. It is simultaneously the Git
+checkout and the runtime root, so the source you just cloned is the same
+tree that will hold your database, binaries, and backups.
+
 ```bash
-git clone https://github.com/flowbyte-com/mpm ~/projects/mpm
-cd ~/projects/mpm
+git clone https://github.com/flowbyte-com/mpm ~/.mpm
+cd ~/.mpm
 ./install.sh
 ```
+
+The co-location is intentional and git-safe. Everything MPM writes at runtime
+— `src/db/`, `backups/`, `blobs/`, `run/`, `bin/`, `active.json`,
+`toxicphrases.txt`, `config/` — is gitignored, so normal operation never
+dirties your checkout or exposes your database to Git. The source directories
+that also live at that root (`mode/`, `persona/`) are treated as
+source-owned: MPM will not bulk-delete them from a checkout.
+
+**Advanced — alternate checkout.** `install.sh` also supports running from a
+checkout somewhere else (for example `~/projects/mpm`) while still installing
+the binaries and runtime state under `~/.mpm`. Use this when you want the
+source kept out of the runtime root. It is fully supported, but `~/.mpm` is
+the primary layout and the one the rest of this document describes.
 
 What the script does, in order:
 1. **Preflight** — checks Go, systemd, project layout. Detects legacy
@@ -401,16 +418,27 @@ hermes mcp list | grep mpm             # expect: mpm ... ✓ enabled
 ./install.sh --uninstall
 ```
 
-Removes: `~/.mpm/bin/` (all five binaries + wrapper), `~/.local/bin/mpm`,
-`~/.local/bin/mpm-mcp` symlinks, and `~/.config/systemd/user/mpm-scheduler.service`.
-**Preserves:** data directory (`$HOME/.mpm/`) and source code at
-`~/projects/mpm`.
+Removes: `~/.mpm/bin/` (all five compiled binaries), the `~/.local/bin/mpm`
+and `~/.local/bin/mpm-mcp` symlinks, and
+`~/.config/systemd/user/mpm-scheduler.service`.
+**Preserves:** your data (`~/.mpm/src/db/`, `~/.mpm/backups/`,
+`~/.mpm/blobs/`, `~/.mpm/active.json`) and your Git checkout.
 
-To remove data too:
+> **The checkout lives at `~/.mpm`.** `--uninstall` removes binaries and
+> services, not your source. Do **not** run `rm -rf ~/.mpm` to clear data —
+> that deletes the repository along with the database.
+
+To remove data too, keep the source and delete only the runtime state:
 
 ```bash
-rm -rf ~/.mpm
+rm -rf ~/.mpm/src/db ~/.mpm/backups ~/.mpm/blobs ~/.mpm/run ~/.mpm/active.json
 ```
+
+`./uninstall.sh` is the supported way to remove the runtime. It stages itself
+to a temporary directory when the checkout is inside the path being deleted, so
+it completes safely even when invoked from `~/.mpm`. If you choose to remove
+`~/.mpm` itself, do so only after you no longer need the source — and keep a
+backup of `src/db/` first.
 
 If a stale legacy unit remains at `/etc/systemd/system/mpm-scheduler.service`
 from a previous `--system` install, disable it manually:
@@ -438,11 +466,52 @@ user-owned; no `/usr/local` or `/var/lib/mpm` exists.
 | `~/.mpm/bin/mpm-telemetry` | $USER | Telemetry sidecar (invoked by systemd --user only — not on PATH) |
 | `~/.config/systemd/user/mpm-scheduler.service` | $USER | User service unit |
 | `~/.mpm/src/db/mpm.db` | $USER | SQLite database |
+| `~/.mpm/src/db/telemetry.db` | $USER | Telemetry sidecar database (separate from the substrate) |
 | `~/.mpm/backups/critic-pre/` | $USER | Pre-critic DB snapshots |
+| `~/.mpm/blobs/` | $USER | Content-addressed blob store |
+| `~/.mpm/run/` | $USER | Scheduler state, pid/lock files |
+| `~/.mpm/active.json` | $USER | Active mode selection |
 | `~/.mpm/scheduler.lock` | $USER | flock singleton lock |
 
-Source code (e.g. `~/projects/mpm/`) is NOT runtime data. It can be wiped
-without losing agent state; runtime data persists across `git pull`.
+### The canonical layout
+
+`~/.mpm` is the canonical repository root *and* the canonical runtime root.
+One directory holds both, and the split is by Git tracking, not by directory:
+
+```text
+~/.mpm/
+├── .git/                       ← the checkout
+├── README.md, docs/, agent_installation/, internal/, cmd/
+├── bin/                        ← compiled binaries        (gitignored)
+├── src/db/                     ← mpm.db, telemetry.db, sidecars, JSONL (gitignored)
+├── backups/                    ← pre-migration snapshots   (gitignored)
+├── blobs/                      ← blob store                (gitignored)
+├── run/                        ← scheduler state, locks    (gitignored)
+├── active.json, toxicphrases.txt, config/                  (gitignored)
+├── mode/, persona/             ← mode + persona .md        (TRACKED source)
+└── ...
+
+~/.local/bin/mpm      -> ~/.mpm/bin/mpm
+~/.local/bin/mpm-mcp  -> ~/.mpm/bin/mpm-mcp
+```
+
+Two consequences follow from this, and both matter:
+
+- **Normal operation never dirties the checkout.** Every runtime path above is
+  gitignored, so `git status` stays clean across builds, drains, backups, and
+  scheduler ticks, and your database is never exposed to Git.
+- **Source directories at this root are source-owned.** `mode/` and `persona/`
+  are tracked files that happen to sit at the runtime root. MPM will not
+  bulk-delete them from a checkout: `mpm shred modes -f` and
+  `mpm shred personas -f` refuse, because in a Git worktree those are
+  repository files, not runtime state. `AddMode` likewise declines to create
+  them. Outside a checkout — an install prefix holding only runtime state —
+  the bulk-delete still works as before.
+
+Source code is NOT runtime data, but under the canonical layout the source
+tree **is** `~/.mpm` — the same directory as the data above. Deleting the
+checkout deletes the database with it. Runtime data survives `git pull`,
+because `git pull` updates tracked files and leaves gitignored state alone.
 
 ---
 
@@ -458,7 +527,7 @@ without losing agent state; runtime data persists across `git pull`.
 | `mpm-scheduler`: DB not found in logs | `systemctl --user show mpm-scheduler -p Environment` | Set `MPM_DB_PATH` in `~/.config/mpm/mpm.env`, or `systemctl --user edit mpm-scheduler` |
 | `mpm-scheduler` stays `inactive` after reboot on encrypted `/home` | `systemctl --user is-active mpm-scheduler` returns `inactive`; `journalctl --user -u mpm-scheduler` shows no entries since boot | The autostart fix should have handled this — `~/.config/autostart/mpm-post-decrypt.desktop` runs `daemon-reload && start mpm-scheduler.service` on every graphical login. Verify the file exists; if missing, re-run `./install.sh` (it re-detects via `mount` + `findmnt` + `/home/.ecryptfs/$USER` and reinstalls the `.desktop`). If your workload runs unattended with no graphical login (cron / system timers only), opt out by removing the `.desktop` and adding a drop-in: `systemctl --user edit mpm-scheduler` → under `[Service]` add `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'` to delay-start until the mount is up. Commit `14ac32b` introduced the detection/wiring. |
 | CLI fails: "no such file or directory" for mpm | `ls -la ~/.mpm/bin/mpm*` | Re-run `./install.sh` to (re)install the binary. |
-| CLI reads from wrong DB (e.g. `~/projects/mpm/src/db/mpm.db`) | `which mpm`; `file $(which mpm)` | The `mpm` binary must be an ELF executable, not a shell script. Re-run install; if `~/.mpm/bin/mpm` is a script, the install predates the wrapper-removal fix. |
+| CLI reads from a different DB than the daemon | `mpm ops health_check`; `echo $MPM_WORKSPACE` | Both sides must resolve `MPM_WORKSPACE` the same way. The canonical DB is `~/.mpm/src/db/mpm.db`; a DB under some other checkout means `MPM_WORKSPACE` is set to a non-default value. Unset it, or point it at `~/.mpm` consistently in `~/.config/mpm/mpm.env` and the unit. |
 | Spawn ENOENT when host tries to launch mpm-mcp | `ls -l ~/.mpm/bin/mpm-mcp` (or `bin/mpm-mcp` in source tree) | If missing: `make build`. If not executable: `chmod +x`. Then re-register with correct path. |
 | `mpm` not found on PATH after install | `command -v mpm`; `echo $PATH` | Verify `~/.local/bin` is on PATH: most shells pick it up via `/etc/profile.d/` defaults. If not: `export PATH="$HOME/.local/bin:$PATH"`. Internal daemons (mpm-scheduler, mpm-critic, mpm-telemetry) are NOT on PATH by design — they are invoked by systemd, never directly. |
 | MCP tools return data, but writes don't persist | `openclaw mcp show mpm` | Check `MPM_WORKSPACE` matches the canonical path (`$HOME/.mpm`); restart gateway |
@@ -498,6 +567,80 @@ Derives `creator` (from existing `created_by` field) and `validation`
 (from the evidence table) for every existing memory. Other sub-blocks
 (`execution`, `provenance`, `context`) are unrecoverable for memories
 saved before the resolver existed — those rows carry partial snapshots.
+
+---
+
+## 7. Migrating from an older layout
+
+Older installs kept the MPM checkout somewhere other than `~/.mpm`, most
+commonly `~/.openclaw/workspace/projects/mpm` (inside the OpenClaw agent
+workspace) or `~/projects/mpm`. The canonical root is now `~/.mpm`.
+
+Nothing here needs to be done by the installer. The checkout and the data are
+separate concerns, and they must be moved separately.
+
+### What is what
+
+| Concern | Where it lives | Migrate how |
+|---|---|---|
+| Source / Git history | the checkout directory | Fresh `git clone` to `~/.mpm` |
+| Durable DB + state | `<old>/src/db/`, plus `active.json`, `backups/`, `blobs/`, `run/` | Copy deliberately, after installing |
+| Binaries / generated | `bin/` | Rebuilt by `install.sh` — never copy |
+| Host integrations | host config (`CLAUDE.md`, `AGENTS.md`, MCP registration) | Re-run each adapter installer |
+
+### Steps
+
+1. **Preserve the old data.** Copy the old database and state somewhere safe
+   *before* touching anything:
+
+   ```bash
+   cp -a ~/projects/mpm/src/db ~/mpm-db-backup
+   ```
+
+2. **Get current source at the canonical root.** If `~/.mpm` does not exist:
+
+   ```bash
+   git clone https://github.com/flowbyte-com/mpm ~/.mpm
+   ```
+
+   If `~/.mpm` already holds something, use the decision table in
+   [agent_installation/INSTALL.md](../agent_installation/INSTALL.md#deciding-where-the-source-goes)
+   — do not clone over it.
+
+3. **Build and install the current code:**
+
+   ```bash
+   cd ~/.mpm && ./install.sh
+   ```
+
+4. **Restore the durable DB and state deliberately.** Stop any MPM service
+   first, then copy the database — not the whole old directory — into place:
+
+   ```bash
+   systemctl --user stop mpm-scheduler 2>/dev/null || true
+   cp ~/mpm-db-backup/mpm.db ~/.mpm/src/db/mpm.db
+   # optionally: active.json, backups/, blobs/
+   ```
+
+5. **Validate before trusting it:**
+
+   ```bash
+   mpm ops health_check
+   mpm doctor
+   ```
+
+   Schema migrations run on open; confirm the health check passes before
+   re-enabling the scheduler.
+
+6. **Reconcile the host integrations.** Re-run each host adapter's installer
+   from `~/.mpm/agent_installation/` so the managed blocks and MCP
+   registration point at the canonical paths. The old checkout can then be
+   removed once you are satisfied.
+
+> **Do not copy an old MPM directory wholesale over a fresh clone.** It
+> overwrites the checkout with stale source and imports an old database
+> without migrating it. Move source and data as two separate, deliberate
+> steps.
 
 ---
 

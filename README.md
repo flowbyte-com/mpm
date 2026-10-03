@@ -158,12 +158,15 @@ its own `telemetry.db`, separate from the cognitive substrate.
 
 ## Try it
 
+MPM installs to `~/.mpm`, which is both the Git checkout and the runtime
+root — one directory holds the source, the compiled binaries, and your data.
+
 Building requires Go 1.26.6 or newer, Make, and a C toolchain for SQLite/CGO.
 The Makefile supplies the required FTS5 build flags.
 
 ```bash
-git clone https://github.com/flowbyte-com/mpm ~/projects/mpm
-cd ~/projects/mpm
+git clone https://github.com/flowbyte-com/mpm ~/.mpm
+cd ~/.mpm
 make build
 ./bin/mpm --help
 ```
@@ -175,6 +178,16 @@ For the full user-space install on Linux with systemd:
 mpm ops init directives
 mpm doctor
 ```
+
+That is the whole install. `install.sh` builds the five binaries into
+`~/.mpm/bin/` and links only `mpm` and `mpm-mcp` into `~/.local/bin` for your
+PATH; there is no wrapper and no `mpm.real`. The three daemon binaries
+(`mpm-scheduler`, `mpm-critic`, `mpm-telemetry`) are invoked from
+`~/.mpm/bin/` by systemd and are not on your PATH.
+
+**Advanced:** `install.sh` also supports running from an alternate checkout
+(e.g. `~/projects/mpm`) while still installing binaries and runtime state
+under `~/.mpm`. That is supported but not the primary layout.
 
 Follow [Agent Integration Installation](agent_installation/INSTALL.md) for
 prerequisites, host setup, verification, updates, and recovery. It is the

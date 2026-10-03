@@ -49,19 +49,58 @@ mpm-mcp < /dev/null                 # MCP server speaks JSON-RPC
 If any of these fail, install MPM first:
 
 ```bash
-git clone https://github.com/flowbyte-com/mpm ~/projects/mpm
-cd ~/projects/mpm
+git clone https://github.com/flowbyte-com/mpm ~/.mpm
+cd ~/.mpm
 ./install.sh                # full install: build + binaries + systemd user unit + lingering
 mpm ops init directives             # baseline cognitive bootstrap (idempotent)
 ```
 
+`~/.mpm` is the canonical root: the Git checkout and the runtime root are the
+same directory, and everything MPM writes there at runtime is gitignored.
+
+**If `~/.mpm` already exists, do not clone over it.** See
+[Deciding where the source goes](#deciding-where-the-source-goes) below — it
+may already be a checkout, or it may contain a database you cannot recreate.
+
 See [Technical specification §5 (Quick Start)](../docs/SPEC.md#5-quick-start) for the full MPM-side
 install procedure.
+
+### Deciding where the source goes
+
+`~/.mpm` is both the source tree and the runtime root, so anything that
+manages the checkout is touching live data. Work through these cases in order
+and stop at the first match:
+
+| State of `~/.mpm` | What to do |
+|---|---|
+| **Does not exist** | `git clone https://github.com/flowbyte-com/mpm ~/.mpm`, then install. |
+| **Exists, and `~/.mpm/.git` is a valid MPM checkout** | **Reuse it.** Run `git -C ~/.mpm pull` and re-run `./install.sh`. Never clone again. |
+| **Exists, but is not a recognizable MPM checkout** | **Stop and report.** Do not delete, overwrite, or clone over it. Show the user what is there and ask. |
+| **Exists and is not empty, contents unknown** | **Stop and report.** Treat as the ambiguous case above. |
+| **An explicit alternate checkout was supplied** | Honour it. Source may live elsewhere; runtime state and binaries still install under `~/.mpm` unless `MPM_WORKSPACE` says otherwise. |
+
+Rules that matter most on a recovery or migration machine:
+
+- **Never delete or overwrite `~/.mpm` to satisfy clone logic.** A `git clone`
+  into a non-empty directory fails rather than merging, and forcing it (or
+  `rm -rf` first) can destroy a database that cannot be recreated.
+- **Never destroy a database because an install path expected an empty
+  directory.** A user may already have a `mpm.db` backup staged at `~/.mpm`.
+- `~/.mpm/src/db/` holding a database is evidence this is a live MPM
+  workspace, not evidence that it is safe to overwrite.
+
+To inspect before deciding:
+
+```bash
+ls -la ~/.mpm 2>/dev/null
+git -C ~/.mpm rev-parse --is-inside-work-tree 2>/dev/null && echo "valid checkout"
+ls -la ~/.mpm/src/db 2>/dev/null        # a database here means live data
+```
 
 ### Verify FTS5 build flag
 
 The `mpm-mcp` binary must be built with the FTS5 SQLite extension. The
-Makefile in `~/projects/mpm` does this by default; if you build
+Makefile in `~/.mpm` does this by default; if you build
 manually, pass `-tags fts5 -DSQLITE_ENABLE_FTS5=1`. A binary built
 without this flag will silently produce an FTS5-disabled `mpm.db` and
 queries will degrade. Diagnose with:
@@ -904,7 +943,7 @@ managed block in place (with backup).
 ```bash
 # Standard update flow (any host):
 # 1. pull the latest from the MPM repo
-cd ~/projects/mpm && git pull
+cd ~/.mpm && git pull
 make build && make install
 
 # 2. re-run the host's install command — the installer detects
