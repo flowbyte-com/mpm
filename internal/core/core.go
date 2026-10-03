@@ -76,6 +76,7 @@ type CoreDB interface {
 	QueryRowTracked(query string, args ...interface{}) *sql.Row
 	WithTx(fn func(DBNode) error) error
 	WatchdogPath() string
+	PoisonPhrasesPath() string
 	SharedAttached() string
 	RecentWatchdogOps(n int, opPrefix string) ([]WatchdogOp, error)
 	NewSession() (CoreDB, error)

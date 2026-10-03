@@ -14,17 +14,26 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/flowbyte-com/mpm-core/config"
 	"golang.org/x/mod/semver"
 	"gopkg.in/yaml.v3"
 )
 
 // validateSkillFrontmatterAndScan parses frontmatter and runs the
-// secret/poison scanner against the Skill content. NO DB writes.
-// This helper is shared by SaveSkill (after validation succeeds, the
-// caller persists) and ValidateSkill (the workshop's non-mutating
-// stage). Splitting it out is the structural fix for the workshop
-// safety seam: the validation stage must never call the write API.
+// secret/poison scanner against the Skill content, resolving the phrase
+// list from the AMBIENT workspace. NO DB writes.
+//
+// Manager-scoped callers must use validateSkillFrontmatterAndScanAt
+// with dm.poisonPhrasesPath(): the scanner generates the phrase file on
+// first use, so an ambient resolution writes into a workspace the caller
+// never asked about.
 func validateSkillFrontmatterAndScan(content string) (*Skill, []string, []string, error) {
+	return validateSkillFrontmatterAndScanAt(content, config.GetToxicPhrasesPath())
+}
+
+// validateSkillFrontmatterAndScanAt is validateSkillFrontmatterAndScan
+// against an explicit phrase list.
+func validateSkillFrontmatterAndScanAt(content, poisonPhrasesPath string) (*Skill, []string, []string, error) {
 	fm, body, err := ParseSkillFrontmatter(content)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("parse frontmatter: %w", err)
@@ -49,7 +58,7 @@ func validateSkillFrontmatterAndScan(content string) (*Skill, []string, []string
 	if sensitive, reason := isSensitiveContent(content); sensitive {
 		errors = append(errors, "scanner_secret:sensitive content blocked - "+reason)
 	}
-	if poisoned, reason := isPoisoned(content); poisoned {
+	if poisoned, reason := isPoisonedAt(content, poisonPhrasesPath); poisoned {
 		errors = append(errors, "scanner_poison:"+reason)
 	}
 
@@ -468,7 +477,7 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 	// Parse frontmatter first so a malformed content string never reaches
 	// the DB layer. The contract here is that any rejected frontmatter
 	// is a 400, not a write-conflict.
-	skill, _, scanErrs, err := validateSkillFrontmatterAndScan(content)
+	skill, _, scanErrs, err := validateSkillFrontmatterAndScanAt(content, dm.poisonPhrasesPath())
 	if err != nil {
 		return "", fmt.Errorf("save skill: %w", err)
 	}
@@ -927,7 +936,7 @@ func (dm *DatabaseManager) ValidateSkill(skill *Skill) (warnings []string, error
 	// struct fields, then the body is appended. This matches what
 	// SaveSkill would persist.
 	content := buildSkillContent(skill)
-	_, warnings, errors, err = validateSkillFrontmatterAndScan(content)
+	_, warnings, errors, err = validateSkillFrontmatterAndScanAt(content, dm.poisonPhrasesPath())
 	if err != nil {
 		return nil, nil, err
 	}

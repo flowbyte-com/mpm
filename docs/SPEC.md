@@ -2653,13 +2653,68 @@ mpm call mpm_system --payload '{"action":"query_audit_log","params":{"component"
 
 The wake context surfaces a single-line summary when errors or fatals were logged in the last 24h.
 
-#### Auxiliary log ownership
+#### Runtime state ownership
 
-`watchdog.jsonl` and `mirror.jsonl` are properties of a **database**, not of the workspace. Every `DatabaseManager` derives both paths from the directory holding its own database file, so a manager opened on `<root>/src/db/mpm.db` writes `<root>/src/db/{watchdog,mirror}.jsonl` and nothing else. A manager wrapping an in-memory database has no directory to own, so it writes no auxiliary log anywhere — there is no ambient fallback to the operator's real workspace.
+MPM's runtime root holds a small number of files that are not rows in
+the database and are not logs. Each has a distinct owner, and the
+production layout is unaffected by that distinction — it is stated here
+because the rule is what keeps an isolated database isolated.
 
-This matters for isolation rather than for the production layout, where the two agree. Test databases (`NewTestDM` and friends) are in-memory or live under a temp directory, and a workspace-derived path would have sent every tracked query and every saved memory — content, metadata and all — into the operator's live audit trail. A `MemoryStore` obtained from a manager (`getSharedStore`) inherits the manager's mirror path rather than re-deriving it from global config, and a `NewSession` manager inherits its parent's.
+**Auxiliary logs.** `watchdog.jsonl` and `mirror.jsonl` are properties of
+a **database**, not of the workspace. Every `DatabaseManager` derives
+both paths from the directory holding its own database file, so a manager
+opened on `<root>/src/db/mpm.db` writes `<root>/src/db/{watchdog,mirror}.jsonl`
+and nothing else. A manager wrapping an in-memory database has no
+directory to own, so it writes no auxiliary log anywhere — there is no
+ambient fallback to the operator's real workspace.
 
-Rotation, `0600` permissions, and the "a log failure never fails the write that produced it" contract are unchanged: an empty mirror path is a silent no-op, and an unwritable one is reported and swallowed.
+This matters for isolation rather than for the production layout, where
+the two agree. Test databases (`NewTestDM` and friends) are in-memory or
+live under a temp directory, and a workspace-derived path would have sent
+every tracked query and every saved memory — content, metadata and all —
+into the operator's live audit trail. A `MemoryStore` obtained from a
+manager (`getSharedStore`) inherits the manager's mirror path rather than
+re-deriving it from global config, and a `NewSession` manager inherits its
+parent's.
+
+Rotation, `0600` permissions, and the "a log failure never fails the
+write that produced it" contract are unchanged: an empty mirror path is
+a silent no-op, and an unwritable one is reported and swallowed.
+
+**Workspace state.** `active.json` and its cross-process lock
+`active.json.lock` are properties of the **workspace that owns the
+writing manager's database**. A handoff write allocates
+`mpm_session_id` against its own database's `active.json` — never
+against whatever the ambient environment currently resolves to. A manager
+with no file-backed database owns no workspace and therefore no
+`active.json`; it gets a process-local ID cached on the manager, which
+preserves the "one lifecycle per session" contract for the lifetime of
+the object.
+
+`toxicphrases.txt` follows the same rule. It is workspace state that is
+**generated** on first use from a built-in list of 20 phrases, and every
+manager-scoped write — a memory save, a lesson, a work item or note, a
+skill, an evidence record — is scanned against the phrase list belonging
+to its own workspace. The scanner's phrase list is cached in memory
+keyed by path, so a process serving two workspaces reads each file once
+rather than letting whichever workspace asked first decide for both.
+
+Package-level entry points with no manager behind them — the CLI's
+pre-insert scan, skill frontmatter validation called directly — resolve
+the ambient workspace's list, which is correct for a single-workspace
+process.
+
+**Scheduler-instance state.** `run/scheduler.state` is the heartbeat
+bridge between one daemon and the CLI's `emitSchedulerHealthWarning`. A
+`Scheduler` captures its heartbeat path at construction and writes
+there for its lifetime, rather than re-resolving per tick; a scheduler
+in a test process therefore cannot overwrite the live daemon's
+liveness signal. The `<path>.tmp` sibling is part of the same artifact —
+written and renamed away on every successful tick.
+
+File formats, locking semantics, the scheduler protocol, active-context
+semantics, and toxic-phrase behaviour are unchanged by any of this.
+
 
 #### Storage
 

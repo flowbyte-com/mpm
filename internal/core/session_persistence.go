@@ -43,7 +43,16 @@ import (
 // handle. Lives next to active.json; deleting it is unnecessary
 // (flock is per-FD, not per-file).
 func flockLockPath() string {
-	return filepath.Join(config.GetMPMDir(), "active.json.lock")
+	return flockLockPathIn(config.GetMPMDir())
+}
+
+// flockLockPathIn is flockLockPath for an explicit workspace root. The
+// root-parameterised form is what a DatabaseManager uses: a manager that
+// wraps a specific database must lock the active.json belonging to THAT
+// database's workspace, not whatever the ambient environment currently
+// resolves to.
+func flockLockPathIn(root string) string {
+	return filepath.Join(root, "active.json.lock")
 }
 
 // flockUnlock is the function returned by acquireFlock that releases
@@ -95,7 +104,15 @@ func acquireFlock(lockPath string) (flockUnlock, error) {
 // through this helper to prevent split-brain between concurrent
 // processes. The lock is released even if fn panics.
 func withActiveJSONFlock(fn func() error) error {
-	unlock, err := acquireFlock(flockLockPath())
+	return withActiveJSONFlockAt(config.GetMPMDir(), fn)
+}
+
+// withActiveJSONFlockAt is withActiveJSONFlock against an explicit
+// workspace root. The caller MUST have created root if it wants the
+// lock file to be creatable; a root that does not exist surfaces as the
+// acquireFlock open error rather than a silent success.
+func withActiveJSONFlockAt(root string, fn func() error) error {
+	unlock, err := acquireFlock(flockLockPathIn(root))
 	if err != nil {
 		return err
 	}
@@ -113,7 +130,14 @@ func withActiveJSONFlock(fn func() error) error {
 // crypto/rand). The "mpm-" prefix lets operators distinguish MPM-
 // owned IDs from framework-supplied IDs at a glance.
 func loadOrAllocateMPMSessionIDLocked() (string, error) {
-	state, err := LoadActiveJSON()
+	return loadOrAllocateMPMSessionIDAt(config.GetMPMDir())
+}
+
+// loadOrAllocateMPMSessionIDAt is loadOrAllocateMPMSessionIDLocked
+// against an explicit workspace root.
+func loadOrAllocateMPMSessionIDAt(root string) (string, error) {
+	path := activeJSONPathIn(root)
+	state, err := loadActiveJSONAt(path)
 	if err != nil {
 		return "", fmt.Errorf("loadOrAllocateMPMSessionID: load: %w", err)
 	}
@@ -126,7 +150,7 @@ func loadOrAllocateMPMSessionIDLocked() (string, error) {
 	}
 	state.MPMSessionID = newID
 	state.MPMSessionIDCreatedAt = time.Now().Unix()
-	if err := SaveActiveJSON(state); err != nil {
+	if err := saveActiveJSONAt(path, state); err != nil {
 		return "", fmt.Errorf("loadOrAllocateMPMSessionID: save: %w", err)
 	}
 	return newID, nil
@@ -138,7 +162,14 @@ func loadOrAllocateMPMSessionIDLocked() (string, error) {
 // "keep old + start new" semantic. Explicit rotation is a fresh
 // lifecycle boundary.
 func rotateMPMSessionIDLocked() (string, error) {
-	state, err := LoadActiveJSON()
+	return rotateMPMSessionIDAt(config.GetMPMDir())
+}
+
+// rotateMPMSessionIDAt is rotateMPMSessionIDLocked against an explicit
+// workspace root.
+func rotateMPMSessionIDAt(root string) (string, error) {
+	path := activeJSONPathIn(root)
+	state, err := loadActiveJSONAt(path)
 	if err != nil {
 		return "", fmt.Errorf("rotateMPMSessionID: load: %w", err)
 	}
@@ -148,7 +179,7 @@ func rotateMPMSessionIDLocked() (string, error) {
 	}
 	state.MPMSessionID = newID
 	state.MPMSessionIDCreatedAt = time.Now().Unix()
-	if err := SaveActiveJSON(state); err != nil {
+	if err := saveActiveJSONAt(path, state); err != nil {
 		return "", fmt.Errorf("rotateMPMSessionID: save: %w", err)
 	}
 	return newID, nil

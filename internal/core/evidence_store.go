@@ -176,13 +176,13 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	if isSensitive, reason := isSensitiveContent(in.CreatedBy); isSensitive {
 		return fmt.Errorf("sensitive content in evidence created_by: %s", reason)
 	}
-	if isPoisoned, reason := isPoisoned(in.Notes); isPoisoned {
+	if isPoisoned, reason := dm.scanPoisoned(in.Notes); isPoisoned {
 		return fmt.Errorf("poison content in evidence notes: %s", reason)
 	}
-	if isPoisoned, reason := isPoisoned(in.SourceGroup); isPoisoned {
+	if isPoisoned, reason := dm.scanPoisoned(in.SourceGroup); isPoisoned {
 		return fmt.Errorf("poison content in evidence source_group: %s", reason)
 	}
-	if isPoisoned, reason := isPoisoned(in.CreatedBy); isPoisoned {
+	if isPoisoned, reason := dm.scanPoisoned(in.CreatedBy); isPoisoned {
 		return fmt.Errorf("poison content in evidence created_by: %s", reason)
 	}
 	if !ValidEvidenceSourceGroup(in.SourceGroup) {

@@ -228,7 +228,19 @@ func (s *ActiveState) IsModesAbsent() bool {
 // Always rooted at config.GetMPMDir() — the same directory the rest of
 // MPM uses for runtime state.
 func ActiveJSONPath() string {
-	return filepath.Join(config.GetMPMDir(), "active.json")
+	return activeJSONPathIn(config.GetMPMDir())
+}
+
+// activeJSONPathIn is ActiveJSONPath for an explicit workspace root.
+//
+// active.json is WORKSPACE state, not process-global state: two MPM
+// workspaces on one host have two independent active contexts, and each
+// one's lifecycle identity belongs beside its own database. The
+// root-parameterised form is how an object that already knows its
+// workspace (a DatabaseManager) reaches the right file, instead of
+// re-deriving an ambient one that may have nothing to do with it.
+func activeJSONPathIn(root string) string {
+	return filepath.Join(root, "active.json")
 }
 
 // LoadActiveJSON reads the active.json file and returns the parsed state.
@@ -237,7 +249,12 @@ func ActiveJSONPath() string {
 // Other read errors (corrupt JSON, permission denied) propagate so the
 // operator can fix.
 func LoadActiveJSON() (*ActiveState, error) {
-	data, err := os.ReadFile(ActiveJSONPath())
+	return loadActiveJSONAt(ActiveJSONPath())
+}
+
+// loadActiveJSONAt is LoadActiveJSON against an explicit path.
+func loadActiveJSONAt(path string) (*ActiveState, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &ActiveState{}, nil
@@ -260,6 +277,11 @@ func LoadActiveJSON() (*ActiveState, error) {
 // omits the key (absent state), &"" writes "" (explicit clear),
 // &"x" writes "x" (explicit selection).
 func SaveActiveJSON(s *ActiveState) error {
+	return saveActiveJSONAt(ActiveJSONPath(), s)
+}
+
+// saveActiveJSONAt is SaveActiveJSON against an explicit path.
+func saveActiveJSONAt(path string, s *ActiveState) error {
 	if s == nil {
 		return fmt.Errorf("save active.json: nil state")
 	}
@@ -267,7 +289,7 @@ func SaveActiveJSON(s *ActiveState) error {
 	if err != nil {
 		return fmt.Errorf("marshal active.json: %w", err)
 	}
-	return os.WriteFile(ActiveJSONPath(), data, 0600)
+	return os.WriteFile(path, data, 0600)
 }
 
 // ── Auto-mode detection (the "is the agent in auto-mode?" gate) ──────────────

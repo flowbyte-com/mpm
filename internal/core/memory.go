@@ -658,7 +658,7 @@ func (s *MemoryStore) addMemoryDirect(collection, content, sessionID string, tag
 	if isSensitive, reason := isSensitiveContent(content); isSensitive {
 		return "", fmt.Errorf("sensitive content detected and blocked: %s", reason)
 	}
-	if isPoisoned, reason := isPoisoned(content); isPoisoned {
+	if isPoisoned, reason := s.scanPoisoned(content); isPoisoned {
 		return "", fmt.Errorf("poison content detected and blocked: %s", reason)
 	}
 
@@ -715,23 +715,50 @@ func (s *MemoryStore) findLiveDuplicateByIDHash(collection, identityHash string)
 	return dupID
 }
 
-// poisonPhraseCache holds loaded poison phrases in memory
-var poisonPhraseCache []string
-var poisonPhraseOnce sync.Once
-var poisonPhraseErr error
+// poisonPhraseCache holds loaded poison phrases in memory, keyed by the
+// file they were read from.
+//
+// The key is load-bearing, not an optimisation detail. Poison phrases
+// are WORKSPACE state: the path comes from config.GetToxicPhrasesPath(),
+// which honours MPM_WORKSPACE, and each workspace owns its own list. A
+// single unkeyed sync.Once made the FIRST workspace to touch the scanner
+// decide the phrases for the whole process, so a second workspace — and
+// a second test — silently inherited the first one's file. Keying by
+// path makes the cache follow the same ownership rule as everything
+// else, while still reading each file only once.
+var (
+	poisonPhraseMu    sync.Mutex
+	poisonPhraseCache = map[string][]string{}
+	poisonPhraseErr   = map[string]error{}
+)
 
-// loadPoisonPhrases loads poison phrases from the phrases file using sync.Once
-// for thread-safe one-time initialization. Returns cached result on all calls.
+// loadPoisonPhrases loads poison phrases from the phrases file for the
+// current workspace, caching per path. Returns the cached result on
+// subsequent calls for the same path.
 func loadPoisonPhrases() ([]string, error) {
-	poisonPhraseOnce.Do(func() {
-		poisonPhraseCache, poisonPhraseErr = loadPoisonPhrasesFromFile()
-	})
-	return poisonPhraseCache, poisonPhraseErr
+	return loadPoisonPhrasesAt(config.GetToxicPhrasesPath())
 }
 
-func loadPoisonPhrasesFromFile() ([]string, error) {
-	poisonFilePath := config.GetToxicPhrasesPath()
+// loadPoisonPhrasesAt is loadPoisonPhrases against an explicit phrase
+// file. The manager-scoped callers pass their OWN workspace's file; the
+// package-level wrapper above passes the ambient one.
+func loadPoisonPhrasesAt(path string) ([]string, error) {
+	poisonPhraseMu.Lock()
+	defer poisonPhraseMu.Unlock()
+	if cached, ok := poisonPhraseCache[path]; ok {
+		return cached, poisonPhraseErr[path]
+	}
+	phrases, err := loadPoisonPhrasesFromFile(path)
+	poisonPhraseCache[path] = phrases
+	poisonPhraseErr[path] = err
+	return phrases, err
+}
 
+// loadPoisonPhrasesFromFile reads the poison phrase list for an explicit
+// workspace, seeding the file with built-in defaults when it is absent
+// or empty. The caller supplies the path so the cache key and the file
+// written are guaranteed to be the same one.
+func loadPoisonPhrasesFromFile(poisonFilePath string) ([]string, error) {
 	phrases := []string{}
 	if data, err := os.ReadFile(poisonFilePath); err == nil && len(data) > 0 {
 		scanner := bufio.NewScanner(strings.NewReader(string(data)))
@@ -778,11 +805,21 @@ func loadPoisonPhrasesFromFile() ([]string, error) {
 	return phrases, nil
 }
 
-// isPoisoned checks if content contains any poison phrase (prompt injection attempts)
+// isPoisoned checks if content contains any poison phrase (prompt
+// injection attempts), using the AMBIENT workspace's phrase list.
+//
+// Manager-scoped writes must not use this — see scanPoisonedFor, which
+// resolves the list against the writing manager's own workspace.
 func isPoisoned(content string) (bool, string) {
-	phrases, err := loadPoisonPhrases()
+	return isPoisonedAt(content, config.GetToxicPhrasesPath())
+}
+
+// isPoisonedAt is isPoisoned against an explicit phrase file.
+func isPoisonedAt(content, path string) (bool, string) {
+	phrases, err := loadPoisonPhrasesAt(path)
 	if err != nil {
-		// Defensive fallback — should never hit since sync.Once seeds defaults on first failure
+		// Defensive fallback — should never hit, since a missing file is
+		// seeded with built-in defaults rather than reported as an error.
 		return false, ""
 	}
 
@@ -797,6 +834,18 @@ func isPoisoned(content string) (bool, string) {
 
 // IsPoisonedForTest is a public wrapper for testing poison phrase detection
 func (s *MemoryStore) IsPoisonedForTest(content string) (bool, string) {
+	return s.scanPoisoned(content)
+}
+
+// scanPoisoned is dm.scanPoisoned for a store: the phrase list follows
+// the workspace that owns the store's database, and falls back to the
+// ambient one for a store with no manager behind it (which is why
+// NewMemoryStore("") is not a test constructor — see
+// NewTestStoreOnDM).
+func (s *MemoryStore) scanPoisoned(content string) (bool, string) {
+	if s != nil && s.DM != nil {
+		return isPoisonedAt(content, s.DM.PoisonPhrasesPath())
+	}
 	return isPoisoned(content)
 }
 

@@ -340,6 +340,14 @@ type DatabaseManager struct {
 	// treat empty as a silent no-op, not an error.
 	mirrorPath string
 
+	// processSessionID is the mpm_session_id this manager hands out when
+	// it owns no workspace to persist one in (an in-memory database, or a
+	// workspace root that could not be created). Cached per manager so
+	// repeated allocations stay idempotent for the object's lifetime.
+	// Guarded by sessionMu; never persisted.
+	processSessionID string
+	sessionMu        sync.Mutex
+
 	// busyRetries counts lifetime SQLITE_BUSY retry attempts via ExecTracked.
 	// Use BusyRetryCount() to inspect. Zero is healthy; non-zero means
 	// contention is occurring somewhere in the call stack. The counter is
@@ -1088,6 +1096,17 @@ func truncateQuery(q string) string {
 // WatchdogPath returns the path to the watchdog log file this manager writes to.
 func (dm *DatabaseManager) WatchdogPath() string {
 	return dm.watchdogPath
+}
+
+// PoisonPhrasesPath returns the path to the poison phrase list this
+// manager's writes are scanned against, and — on first use — generates.
+//
+// Exported for the same reason WatchdogPath is: a MemoryStore holds its
+// manager as the CoreDB interface, and the memory security scanner has
+// to resolve the list against the workspace that owns the store's
+// database. See poisonPhrasesPath for the ownership rule.
+func (dm *DatabaseManager) PoisonPhrasesPath() string {
+	return dm.poisonPhrasesPath()
 }
 
 // ==================== Shared Store ====================
@@ -1976,6 +1995,135 @@ func NewDatabaseManagerForDB(db *sql.DB) *DatabaseManager {
 		dm.mirrorPath = filepath.Join(dir, "mirror.jsonl")
 	}
 	return dm
+}
+
+// workspaceRoot returns the MPM workspace root that owns THIS
+// manager's database, or "" when the manager has no file-backed
+// database to own a workspace with.
+//
+// The database always lives at <workspace>/src/db/mpm.db, so the
+// workspace is three directories up. An in-memory database (dbPath is
+// empty or a :memory:-style DSN) has no such location, and an empty
+// result means "this manager owns no workspace-scoped state" — it must
+// not fall back to the ambient workspace, which is a different thing
+// entirely and may belong to a real installation.
+//
+// This is the same ownership rule the auxiliary logs follow (see
+// auxLogDir): a manager's writable state follows the manager's
+// database, never global configuration.
+func (dm *DatabaseManager) workspaceRoot() string {
+	if dm == nil {
+		return ""
+	}
+	p := dm.dbPath
+	if p == "" || IsInMemoryDSN(p) {
+		return ""
+	}
+	if !filepath.IsAbs(p) {
+		// A relative dbPath was resolved against some process working
+		// directory we cannot attribute to a workspace.
+		return ""
+	}
+	root := filepath.Dir(filepath.Dir(filepath.Dir(p))) // <ws>/src/db/mpm.db -> <ws>
+	if root == "" || root == "." || root == string(filepath.Separator) {
+		return ""
+	}
+	return root
+}
+
+// poisonPhrasesPath returns the phrase list this manager's writes are
+// scanned against.
+//
+// toxicphrases.txt is WORKSPACE state on the same terms as active.json:
+// each workspace owns its own list, and the list is GENERATED on first
+// use (built-in defaults) rather than shipped. Resolving it from the
+// ambient environment meant a manager bound to one workspace would
+// generate the file inside another one — a real, unrequested write to
+// someone's installation, triggered by nothing more than a memory save.
+//
+// A manager with no workspace falls back to the ambient path, which is
+// the pre-existing behaviour and is correct for the package-level
+// scanner entry points (ScanContentForWrite, which has no manager).
+func (dm *DatabaseManager) poisonPhrasesPath() string {
+	if root := dm.workspaceRoot(); root != "" {
+		return filepath.Join(root, "toxicphrases.txt")
+	}
+	return config.GetToxicPhrasesPath()
+}
+
+// scanPoisoned is isPoisoned scoped to this manager's workspace. Every
+// DatabaseManager write path that scans user content must use this
+// rather than the package-level isPoisoned, for the ownership reason
+// given on poisonPhrasesPath.
+func (dm *DatabaseManager) scanPoisoned(content string) (bool, string) {
+	return isPoisonedAt(content, dm.poisonPhrasesPath())
+}
+
+// acquireMPMSessionID allocates this manager's mpm_session_id
+// against the workspace that owns its database, and returns it.
+//
+// Why this is a method and not a call to the package-level
+// AcquireMPMSessionID: active.json is WORKSPACE state, and the
+// package-level allocator resolves the workspace from the ambient
+// environment. A manager wrapping an explicitly isolated database
+// (a temp workspace, a test) would therefore mint its lifecycle
+// identity inside an unrelated workspace — and take that workspace's
+// cross-process flock to do it, which is a real production file. The
+// session identity of a handoff written to database D must belong to
+// D's workspace.
+//
+// A manager with no workspace (an in-memory database) has no
+// active.json to own. It gets a process-local ID, cached on the
+// manager so repeated allocations from the same manager stay
+// idempotent, which preserves the "one lifecycle per session" contract
+// for the lifetime of the object. This mirrors the existing fallback
+// AcquireMPMSessionID already takes when persistence fails, and the
+// empty-auxiliary-log rule from auxLogDir: no directory, no
+// filesystem state.
+func (dm *DatabaseManager) acquireMPMSessionID() string {
+	root := dm.workspaceRoot()
+	if root == "" {
+		return dm.acquireProcessSessionID()
+	}
+
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		// Cannot guarantee the workspace exists to lock and write
+		// into; fall back to the process-local identity rather than
+		// touching an ambient one.
+		return dm.acquireProcessSessionID()
+	}
+	var id string
+	err := withActiveJSONFlockAt(root, func() error {
+		got, err := loadOrAllocateMPMSessionIDAt(root)
+		if err != nil {
+			return err
+		}
+		id = got
+		return nil
+	})
+	if err != nil {
+		return dm.acquireProcessSessionID()
+	}
+	return id
+}
+
+// acquireProcessSessionID is the workspace-less branch of
+// acquireMPMSessionID, factored so the failure paths share it: a
+// manager that cannot create its workspace, and a manager that never
+// had one, must not both be reaching for an ambient active.json.
+func (dm *DatabaseManager) acquireProcessSessionID() string {
+	dm.sessionMu.Lock()
+	defer dm.sessionMu.Unlock()
+	if dm.processSessionID == "" {
+		id, err := generateNewMPMSessionID()
+		if err != nil {
+			// Best-effort: hand back an empty ID rather than failing
+			// a handoff write over a lifecycle label.
+			return ""
+		}
+		dm.processSessionID = id
+	}
+	return dm.processSessionID
 }
 
 // evalSymlinksOnDB resolves the symlink chain of a database file path.
@@ -3537,7 +3685,7 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 		// incorrectly signalling an MPM substrate failure.
 		return "", fmt.Errorf("sensitive content detected and blocked: %s: %w", reason, ErrSensitiveContentBlocked)
 	}
-	if isPoisoned, reason := isPoisoned(content); isPoisoned {
+	if isPoisoned, reason := dm.scanPoisoned(content); isPoisoned {
 		emitMemorySaveAudit(dm, ac, AuditError, "security", "poison content blocked", "memory_save_poison_content_blocked", AuditContext{
 			"reason":    reason,
 			"len_chars": len(content),
@@ -4837,7 +4985,7 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 	if isSensitive, name := isSensitiveContent(content); isSensitive {
 		return nil, fmt.Errorf("lesson content blocked: %s detected", name)
 	}
-	if poisoned, reason := isPoisoned(content); poisoned {
+	if poisoned, reason := dm.scanPoisoned(content); poisoned {
 		return nil, fmt.Errorf("lesson content blocked: poison phrase detected: %s", reason)
 	}
 
@@ -5621,7 +5769,7 @@ func (dm *DatabaseManager) AddWork(title, content, sessionID string) (*Work, err
 	if isSensitive, reason := isSensitiveContent(title + " " + content); isSensitive {
 		return nil, fmt.Errorf("sensitive content detected and blocked: %s", reason)
 	}
-	if isPoisoned, reason := isPoisoned(title + " " + content); isPoisoned {
+	if isPoisoned, reason := dm.scanPoisoned(title + " " + content); isPoisoned {
 		return nil, fmt.Errorf("poison content detected and blocked: %s", reason)
 	}
 	id := GenerateID()
@@ -5667,7 +5815,7 @@ func (dm *DatabaseManager) addWorkTx(node DBNode, title, content, sessionID stri
 	if isSensitive, reason := isSensitiveContent(title + " " + content); isSensitive {
 		return "", fmt.Errorf("sensitive content detected and blocked: %s", reason)
 	}
-	if isPoisoned, reason := isPoisoned(title + " " + content); isPoisoned {
+	if isPoisoned, reason := dm.scanPoisoned(title + " " + content); isPoisoned {
 		return "", fmt.Errorf("poison content detected and blocked: %s", reason)
 	}
 	id := GenerateID()
@@ -6730,7 +6878,7 @@ func (dm *DatabaseManager) AddWorkNoteWithContext(workID, note string, ac Active
 	if isSensitive, reason := isSensitiveContent(note); isSensitive {
 		return nil, fmt.Errorf("sensitive content detected and blocked: %s", reason)
 	}
-	if isPoisoned, reason := isPoisoned(note); isPoisoned {
+	if isPoisoned, reason := dm.scanPoisoned(note); isPoisoned {
 		return nil, fmt.Errorf("poison content detected and blocked: %s", reason)
 	}
 	prov := dm.provenanceFromContext(ac)
@@ -7453,7 +7601,7 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 		if isSensitive, reason := isSensitiveContent(scanned); isSensitive {
 			return nil, fmt.Errorf("sensitive content detected and blocked: %s", reason)
 		}
-		if isPoisoned, reason := isPoisoned(scanned); isPoisoned {
+		if isPoisoned, reason := dm.scanPoisoned(scanned); isPoisoned {
 			return nil, fmt.Errorf("poison content detected and blocked: %s", reason)
 		}
 	}

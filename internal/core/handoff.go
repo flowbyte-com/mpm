@@ -136,9 +136,14 @@ func (dm *DatabaseManager) EndSessionV2(sessionID, frameworkSessionID, explicitM
 	// is an INTERACTION BOUNDARY (stage 2C invariant #4) — first-use
 	// allocation happens here, not on read paths. The explicit override
 	// is reserved for tests that need to pin a specific value.
+	//
+	// The allocation is scoped to THIS manager's workspace, not to the
+	// ambient one: a handoff row written to database D must carry the
+	// session identity of D's workspace, and must take D's workspace
+	// lock rather than an unrelated installation's.
 	mpmSessionID := explicitMPMSessionID
 	if mpmSessionID == "" {
-		mpmSessionID = AcquireMPMSessionID()
+		mpmSessionID = dm.acquireMPMSessionID()
 	}
 
 	now := time.Now().UTC().Unix()
