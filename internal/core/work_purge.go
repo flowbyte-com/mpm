@@ -1,6 +1,6 @@
 // work_purge.go — CLI-only logical purge of a work item.
 //
-// Design: docs/designs/2026-09-30-work-archive-and-purge.md §5, §6.
+// Design: docs/archive/2026-09-30-work-archive-and-purge.md §5, §6.
 //
 // WHAT PURGE IS: logical removal from the active substrate. After a
 // successful forced purge there is no `works` row, no `work_events`

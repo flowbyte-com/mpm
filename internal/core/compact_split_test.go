@@ -1,6 +1,6 @@
 // compact_split_test.go — Phase 4 of the compact-refusal lifecycle.
 //
-// Bounded refusal recovery (docs/designs/2026-09-30-compact-refusal-lifecycle.md
+// Bounded refusal recovery (docs/archive/2026-09-30-compact-refusal-lifecycle.md
 // §5): one deterministic positional split, at most two child attempts,
 // then deferral. No recursion, no clustering, no embeddings.
 //

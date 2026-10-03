@@ -3,7 +3,7 @@ package tools
 // work_archive_handlers_test.go — MCP-path coverage for the work
 // archive lifecycle and the visibility filter.
 //
-// Design: docs/designs/2026-09-30-work-archive-and-purge.md §4.1, §9.
+// Design: docs/archive/2026-09-30-work-archive-and-purge.md §4.1, §9.
 //
 // The MCP path and the CLI path share ListWorkRows and the CoreDB
 // methods, so these tests focus on the wire-level contract the handler

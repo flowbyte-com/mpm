@@ -481,7 +481,7 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 	// constant directly; maxBatches is retained as the public
 	// parameter name because renaming it would be a breaking wire
 	// change for a defect fix. See
-	// docs/designs/2026-09-30-compact-refusal-lifecycle.md §5.5.
+	// docs/archive/2026-09-30-compact-refusal-lifecycle.md §5.5.
 	if maxBatches > MaxSemanticStagesPerInvocation {
 		maxBatches = MaxSemanticStagesPerInvocation
 	}

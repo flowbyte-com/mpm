@@ -1,7 +1,11 @@
 # Work Archive and Logical Purge — Design Specification
 
-> **Status:** Approved for implementation. Not yet implemented.
-> **Date:** 2026-09-30
+> **Status:** **Implemented**. Landed across `aaca517` (archive and
+> visibility lifecycle), `968f3d5` (CLI logical purge), and `3d9a866`
+> (corrected `epistemic_provenance` direction — §5.5.1). The normative
+> product contract is now `docs/SPEC.md`; this document is retained as
+> the record of the decisions behind it.
+> **Date:** 2026-09-30 (design), 2026-09-30 (implemented)
 > **Scope:** two independent capabilities for the `mpm_work` primitive —
 > (1) non-destructive lifecycle archival, (2) administrative logical
 > purge. Both are additive; neither changes existing `mpm_work`

@@ -3,7 +3,7 @@ package main
 // work_purge_cli_test.go — CLI-surface coverage for `mpm work item
 // purge`.
 //
-// Design: docs/designs/2026-09-30-work-archive-and-purge.md §5.3, §5.7,
+// Design: docs/archive/2026-09-30-work-archive-and-purge.md §5.3, §5.7,
 // §8.3, §8.4.
 //
 // Isolation: every test pins MPM_WORKSPACE to t.TempDir() and re-arms

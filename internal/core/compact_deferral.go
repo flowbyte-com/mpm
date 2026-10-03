@@ -5,7 +5,7 @@
 // rows it was offered must stop being offered — otherwise the next
 // drain reselects the identical rows, makes the identical call, gets
 // the identical refusal, and loops. See
-// docs/designs/2026-09-30-compact-refusal-lifecycle.md §3.
+// docs/archive/2026-09-30-compact-refusal-lifecycle.md §3.
 //
 // The state lives in the existing `metadata` JSON column, alongside
 // `compacted_into`, for the reason F7 gives: compacted_into may only

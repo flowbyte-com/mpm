@@ -3,7 +3,7 @@ package tools
 // work_purge_registry_test.go — registry-level coverage that purge is
 // NOT an agent-reachable surface.
 //
-// Design: docs/designs/2026-09-30-work-archive-and-purge.md §5.3.
+// Design: docs/archive/2026-09-30-work-archive-and-purge.md §5.3.
 //
 // Purge is deliberately CLI-only. The schema is the whole safety
 // argument: an agent that reads an enum advertising `purge` would call

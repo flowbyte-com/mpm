@@ -880,8 +880,8 @@ them, so it is insensitive to that correction.
 
 ## 11. Implementation record
 
-Implemented across five commits (`7a5f5a52`, `5e596526`, `1b1c8849`,
-`915993fc`, `4aaf01f8`) plus the Phase 10 matrix. Two decisions below
+Implemented across five commits (`7a5f5a5`, `5e59652`, `1b1c884`,
+`bab0705`, `9864eae`) plus the Phase 10 matrix. Two decisions below
 depart from the text above. Both were taken at implementation time under
 the design's own stated intent, and both are now the contract rather than
 a divergence from it.

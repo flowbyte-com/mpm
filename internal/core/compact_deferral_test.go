@@ -1,7 +1,7 @@
 // compact_deferral_test.go — Phase 3 of the compact-refusal lifecycle.
 //
 // The deferred state and its pressure accounting. Per
-// docs/designs/2026-09-30-compact-refusal-lifecycle.md §3–§4:
+// docs/archive/2026-09-30-compact-refusal-lifecycle.md §3–§4:
 //
 //   D = { m ∈ U : json_extract(metadata,'$.compaction_deferred_at') IS NOT NULL }
 //   A = { m ∈ U : json_extract(metadata,'$.compaction_deferred_at') IS NULL }

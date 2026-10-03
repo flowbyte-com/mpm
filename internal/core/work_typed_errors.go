@@ -26,7 +26,7 @@ var ErrInvalidWorkTransition = errors.New("work state machine: invalid transitio
 // item is still `open`. Archive is a visibility operation on finished
 // work; letting an open item leave the operational view would hide an
 // unfinished commitment with no signal (§1.3 of
-// docs/designs/2026-09-30-work-archive-and-purge.md).
+// docs/archive/2026-09-30-work-archive-and-purge.md).
 //
 // Classified as a conflict by internal.ClassifyError, same as
 // ErrInvalidWorkTransition: the caller's request is well-formed, the

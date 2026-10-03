@@ -19,7 +19,7 @@ const (
 	// cancelled item and later unarchiving returns it to `cancelled`,
 	// never to `open`.
 	//
-	// Design: docs/designs/2026-09-30-work-archive-and-purge.md §1.2
+	// Design: docs/archive/2026-09-30-work-archive-and-purge.md §1.2
 	WorkEventTypeArchived   WorkEventType = "archived"
 	WorkEventTypeUnarchived WorkEventType = "unarchived"
 )

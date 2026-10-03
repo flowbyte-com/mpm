@@ -1,6 +1,6 @@
 // compact_design_matrix_test.go — Phase 10: the 24-case matrix.
 //
-// docs/designs/2026-09-30-compact-refusal-lifecycle.md §10 lists 16
+// docs/archive/2026-09-30-compact-refusal-lifecycle.md §10 lists 16
 // claims the implementation must prove. This file is the single
 // traceability artifact: every claim, and every branch of a claim that
 // has more than one, appears here as a numbered case.

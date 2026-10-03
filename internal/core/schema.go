@@ -832,7 +832,7 @@ var WorkTables = []string{
 	//
 	// `reason_code` has no 'privacy' member: v1 purge is logical
 	// removal, not forensic or privacy-grade erasure (see
-	// docs/designs/2026-09-30-work-archive-and-purge.md §5.2, §5.6).
+	// docs/archive/2026-09-30-work-archive-and-purge.md §5.2, §5.6).
 	`CREATE TABLE IF NOT EXISTS work_purge_audit (
 	  id          TEXT PRIMARY KEY,
 	  work_id     TEXT NOT NULL,
@@ -1408,7 +1408,7 @@ var SafeMigrations = [][3]string{
 	// Archive lifecycle (2026-09-30): works.archived_at is the derived
 	// projection of the archived/unarchived event pair. NULL = active.
 	// Independent of status — archiving never implies completion.
-	// Design: docs/designs/2026-09-30-work-archive-and-purge.md §1
+	// Design: docs/archive/2026-09-30-work-archive-and-purge.md §1
 	{"works", "archived_at", "INTEGER"},
 
 	// F-D1: runtime-clock decay contract. Decay must advance according to

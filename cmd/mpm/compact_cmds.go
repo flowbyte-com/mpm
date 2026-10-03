@@ -1,7 +1,7 @@
 // compact_cmds.go — `mpm compact` : the operator surface of the
 // deferral lifecycle.
 //
-//	docs/designs/2026-09-30-compact-refusal-lifecycle.md §3.3 R1
+//	docs/archive/2026-09-30-compact-refusal-lifecycle.md §3.3 R1
 //
 // Why this is a CLI command and not an mpm_system action. R1 requires
 // that requeue be "an explicit operator action", and R5 gives the

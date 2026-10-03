@@ -27,7 +27,7 @@
 // The identity raw_count = actionable_pending + deferred_count holds by
 // construction: all three count over the same set U, partitioned by
 // whether compaction_deferred_at is NULL. See
-// docs/designs/2026-09-30-compact-refusal-lifecycle.md §4.3.
+// docs/archive/2026-09-30-compact-refusal-lifecycle.md §4.3.
 //
 // One deliberate deviation from §4.3, in mechanism only. The design
 // states that json_extract "returns NULL for both" NULL and empty

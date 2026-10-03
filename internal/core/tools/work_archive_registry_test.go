@@ -3,7 +3,7 @@ package tools
 // work_archive_registry_test.go — registry-level coverage for the
 // work archive lifecycle actions.
 //
-// Design: docs/designs/2026-09-30-work-archive-and-purge.md §4.4.
+// Design: docs/archive/2026-09-30-work-archive-and-purge.md §4.4.
 //
 // The design's stated risk is an action enum that drifts from the
 // dispatcher: an agent reads a schema advertising `archive`, gets a

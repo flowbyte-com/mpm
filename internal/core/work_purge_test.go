@@ -2,7 +2,7 @@ package internal
 
 // work_purge_test.go — the logical-purge contract.
 //
-// Design: docs/designs/2026-09-30-work-archive-and-purge.md §5, §6, §8.3–§8.6.
+// Design: docs/archive/2026-09-30-work-archive-and-purge.md §5, §6, §8.3–§8.6.
 //
 // Isolation: every test uses NewTestDM, an in-memory SQLite store. The
 // production MPM database is never opened (CLAUDE.md §3, "Test

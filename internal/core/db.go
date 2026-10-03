@@ -2102,7 +2102,7 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// silently no-ops against an existing definition. Idempotent via
 	// the epistemic_pressure_deferral_v1 sentinel plus a column probe.
 	// See migration_epistemic_pressure_deferral.go and
-	// docs/designs/2026-09-30-compact-refusal-lifecycle.md §4.
+	// docs/archive/2026-09-30-compact-refusal-lifecycle.md §4.
 	if err := MigrateEpistemicPressureDeferral(tx); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("epistemic_pressure deferral migration failed: %w", err)
@@ -5786,7 +5786,7 @@ func (dm *DatabaseManager) ListWorksByStatus(status string) ([]*Work, error) {
 // `status` and `visibility` are validated independently and neither is
 // derived from the other (see WorkVisibility).
 //
-// Design: docs/designs/2026-09-30-work-archive-and-purge.md §2
+// Design: docs/archive/2026-09-30-work-archive-and-purge.md §2
 func (dm *DatabaseManager) ListWorksByStatusAndVisibility(status string, visibility string) ([]*Work, error) {
 	switch WorkStatus(status) {
 	case WorkStatusOpen, WorkStatusDone, WorkStatusCancelled:
@@ -6171,7 +6171,7 @@ func (dm *DatabaseManager) CancelWorkWithContext(workID, note string, ac ActiveC
 // Archive is orthogonal to status: works.status is never written here.
 // Unarchiving a `cancelled` item restores it to `cancelled`, not open.
 //
-// Design: docs/designs/2026-09-30-work-archive-and-purge.md §1
+// Design: docs/archive/2026-09-30-work-archive-and-purge.md §1
 func (dm *DatabaseManager) ArchiveWorkWithContext(workID, note string, ac ActiveContext) (work *Work, alreadyArchived bool, err error) {
 	if workID == "" {
 		return nil, false, fmt.Errorf("work_id is required for archive")
@@ -6219,7 +6219,7 @@ func (dm *DatabaseManager) ArchiveWorkWithContext(workID, note string, ac Active
 // Unarchiving a non-archived item is an error (ErrWorkNotArchived) with
 // no writes, not a silent success.
 //
-// Design: docs/designs/2026-09-30-work-archive-and-purge.md §1.4
+// Design: docs/archive/2026-09-30-work-archive-and-purge.md §1.4
 func (dm *DatabaseManager) UnarchiveWorkWithContext(workID, note string, ac ActiveContext) (*Work, error) {
 	if workID == "" {
 		return nil, fmt.Errorf("work_id is required for unarchive")

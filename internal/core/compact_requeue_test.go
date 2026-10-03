@@ -2,7 +2,7 @@
 //
 // Requeue returns a deferred row to the selectable pool. Its semantics
 // are specified as R1–R5 in
-// docs/designs/2026-09-30-compact-refusal-lifecycle.md §3.3, and each
+// docs/archive/2026-09-30-compact-refusal-lifecycle.md §3.3, and each
 // rule below maps to one of them.
 //
 // Requeue is the one operation here that a human performs to override a

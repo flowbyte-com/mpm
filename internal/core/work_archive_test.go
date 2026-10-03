@@ -3,7 +3,7 @@ package internal
 // work_archive_test.go — Phase A test matrix for the work archive
 // lifecycle and the independent status/visibility axes.
 //
-// Design: docs/designs/2026-09-30-work-archive-and-purge.md §8, §9.
+// Design: docs/archive/2026-09-30-work-archive-and-purge.md §8, §9.
 //
 // Every test here uses NewTestDM (in-memory, per-test shared-cache
 // namespace) so the production MPM database is never touched

@@ -4,7 +4,7 @@
 // drain runs unattended on a schedule; if the operator commands on this
 // surface can be reached by anything else, or can run more broadly
 // than they say they will, the safety argument in
-// docs/designs/2026-09-30-compact-refusal-lifecycle.md §3.3 R1/R2 is
+// docs/archive/2026-09-30-compact-refusal-lifecycle.md §3.3 R1/R2 is
 // void.
 //
 // Every test uses an in-memory DM installed over the package

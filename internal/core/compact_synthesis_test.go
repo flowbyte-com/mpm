@@ -1,7 +1,7 @@
 // compact_synthesis_test.go — Phase 1 of the compact-refusal lifecycle.
 //
 // Tests for the three-way semantic classification. These pin the
-// boundary the design fixes (docs/designs/2026-09-30-compact-refusal-lifecycle.md
+// boundary the design fixes (docs/archive/2026-09-30-compact-refusal-lifecycle.md
 // §2.2):
 //
 //	Lesson   valid lesson JSON

@@ -17,7 +17,7 @@
 // arrived at persistence as an error, and — because the rows were never
 // marked — the next drain invocation reselected the identical rows and
 // made the identical call. That is the infinite loop this design
-// removes. See docs/designs/2026-09-30-compact-refusal-lifecycle.md
+// removes. See docs/archive/2026-09-30-compact-refusal-lifecycle.md
 // F1–F6.
 //
 // # The boundary

@@ -451,7 +451,7 @@ type CoreDB interface {
 	// ListWorksByStatusAndVisibility applies both query axes
 	// independently: status (lifecycle) and visibility (operational
 	// view). Neither is derived from the other.
-	// Design: docs/designs/2026-09-30-work-archive-and-purge.md §2
+	// Design: docs/archive/2026-09-30-work-archive-and-purge.md §2
 	ListWorksByStatusAndVisibility(status, visibility string) ([]*Work, error)
 	// ResolveFrameworkModelForInvocations batch-loads framework/model
 	// provenance for work history display (F16).
