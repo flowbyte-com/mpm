@@ -214,6 +214,38 @@ func SqliteWriteDSN(path string) string {
 // "one helper, one DSN strategy" invariant.
 func sqliteWriteDSN(path string) string { return SqliteWriteDSN(path) }
 
+// IsInMemoryDSN reports whether s is a SQLite in-memory DSN rather than a
+// filesystem path.
+//
+// This exists because NewDatabaseManager takes a *workspace root* and is
+// filesystem-only: it derives `<root>/src/db/mpm.db` and MkdirAll's it.
+// Handing it a DSN such as ":memory:" therefore did not open an in-memory
+// database — it created a real directory literally named ":memory:",
+// holding a real file at ":memory:/src/db/mpm.db", relative to the
+// process working directory. Tests that did this littered the package
+// directory of whatever module they ran in, and were not hermetic at all:
+// they silently depended on (and shared) a file on disk while appearing to
+// use an ephemeral database.
+//
+// The recognised forms are the ones mattn/go-sqlite3 actually honours:
+//   - ":memory:"
+//   - "file::memory:" (optionally with query parameters)
+//   - any DSN carrying "mode=memory" in its query string
+//
+// Detecting these is not a convenience: the DSN-shaped branch of
+// SqliteWriteDSN already treats a '?' in the argument as "this is a DSN",
+// so the codebase acknowledges DSNs reach this layer. A DSN arriving at
+// NewDatabaseManager is a caller error and is now reported as one.
+func IsInMemoryDSN(s string) bool {
+	if s == ":memory:" {
+		return true
+	}
+	if strings.HasPrefix(s, "file:") && strings.Contains(s, ":memory:") {
+		return true
+	}
+	return strings.Contains(s, "mode=memory")
+}
+
 // dbFileName is the canonical filename for the MPM database.
 // Previously mpm_memory.db - renamed 2026-04-01 to reflect its unified nature.
 const dbFileName = "mpm.db"
@@ -1066,7 +1098,23 @@ func (dm *DatabaseManager) getSharedStore() (*MemoryStore, error) {
 // NewDatabaseManager creates a new database manager with single unified database.
 // The database is ALWAYS at mpm/src/db/mpm.db regardless of projectRoot.
 // projectRoot is kept for API compatibility but is ignored for path resolution.
+//
+// projectRoot is a workspace root on the filesystem — NOT a database file
+// path and NOT a SQLite DSN. The manager derives `<root>/src/db/mpm.db`,
+// creates that directory, and hangs its watchdog and mirror streams off
+// the same root, so it has no representation for a database that has no
+// file. An in-memory DSN passed here is a caller error and is rejected
+// rather than silently turned into a directory tree named after the DSN
+// (see IsInMemoryDSN). Use NewTestDM for a hermetic in-memory manager.
 func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
+	if IsInMemoryDSN(projectRoot) {
+		return nil, fmt.Errorf(
+			"NewDatabaseManager: %q is a SQLite in-memory DSN, not a workspace root; "+
+				"this constructor is filesystem-only because it derives and creates "+
+				"<root>/src/db/mpm.db. For an in-memory database use NewTestDM "+
+				"(tests) or NewDatabaseManagerForDB with your own *sql.DB",
+			projectRoot)
+	}
 	// Honour the caller's projectRoot argument when supplied. The legacy
 	// implementation ignored it and fell back to config.GetMPMDir() — which
 	// silently dropped system-level service paths into ~/.mpm on hosts where

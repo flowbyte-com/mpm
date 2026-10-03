@@ -211,11 +211,12 @@ func TestGetRecentUserTopics_OrderedNewestFirst(t *testing.T) {
 }
 
 func TestWakeContext_OpenWorks(t *testing.T) {
-	dm, err := NewDatabaseManager(":memory:")
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
+	// NewTestDM, not NewDatabaseManager(":memory:"): the latter takes a
+	// workspace root, so it created a real ":memory:/src/db/mpm.db" tree
+	// in the package directory — littering the repo and, worse, not being
+	// hermetic, since the "in-memory" database was in fact a shared file
+	// on disk. NewTestDM is the sanctioned hermetic in-memory manager.
+	dm := NewTestDM(t)
 
 	dm.AddWork("First work item", "", "")
 	dm.AddWork("Second work item", "", "")
