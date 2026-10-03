@@ -54,8 +54,24 @@ type schedulerState struct {
 	LastError          string `json:"last_error"`
 }
 
+// stateTarget resolves the heartbeat file for this Scheduler. New()
+// captures StateFilePath() into s.statePath; the empty-string fallback
+// covers a Scheduler built as a struct literal (tests only) and keeps
+// the pre-field resolution behaviour intact for that shape.
+func (s *Scheduler) stateTarget() string {
+	if s.statePath != "" {
+		return s.statePath
+	}
+	return StateFilePath()
+}
+
 // persistState atomically writes the scheduler heartbeat to disk so the
 // CLI's emitSchedulerHealthWarning can observe liveness across processes.
+//
+// The target is s.stateTarget() — the daemon's own path, captured at
+// construction — rather than a fresh StateFilePath() call per tick, so
+// a second Scheduler in the same process cannot overwrite the live
+// daemon's heartbeat.
 //
 // Atomic write pattern: write to <target>.tmp, then os.Rename to
 // <target>. Because both paths share the same filesystem (per POSIX
@@ -64,6 +80,10 @@ type schedulerState struct {
 // never a half-written buffer. Direct os.WriteFile / os.OpenFile +
 // O_TRUNC would race the reader's os.ReadFile and could surface a
 // truncated or empty file mid-write. This pattern closes that race.
+//
+// The <target>.tmp sibling is part of the same artifact: it is created
+// and renamed away on every successful tick. Any test that pins a
+// scheduler's state path must pin the directory, not just the file.
 //
 // Write amp: ~130 bytes per tick. At default 60s interval that's
 // negligible (well under 1 KB/min) — no throttling needed.
@@ -88,7 +108,7 @@ func (s *Scheduler) persistState() {
 		return
 	}
 
-	target := StateFilePath()
+	target := s.stateTarget()
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		s.log.Warn("state dir create failed", "dir", dir, "err", err)

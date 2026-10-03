@@ -198,6 +198,27 @@ type Scheduler struct {
 	// makes safe).
 	processStartedUnix int64
 
+	// statePath is the scheduler's heartbeat file, captured at New()
+	// from StateFilePath(). Empty means "resolve at write time" — the
+	// behaviour of a Scheduler built as a struct literal, which only
+	// tests do.
+	//
+	// Why the field exists rather than calling StateFilePath() inside
+	// persistState: the heartbeat file is the *daemon instance's* state,
+	// the same class of thing as processStartedUnix and tickCount. A
+	// Scheduler bound to a given database should write its heartbeat
+	// next to that database, not at whatever the ambient environment
+	// happens to resolve to at the moment of the write. Resolving lazily
+	// meant a test scheduler — or any second scheduler in the same
+	// process — overwrote the live daemon's heartbeat, which the CLI
+	// reads to decide whether the real scheduler is stalled.
+	//
+	// Production parity: New() captures StateFilePath() once, so a
+	// daemon run under the systemd unit (MPM_WORKSPACE set) writes
+	// exactly the path it always did. The lazy fallback preserves the
+	// old resolution for any literal-constructed Scheduler.
+	statePath string
+
 	// captureBuf/captureMu are test-only fields for capturing slog output.
 	// Production code never reads them; tests set them via
 	// newTestSchedulerWithCaptureLogger and retrieve via s.captureLogs().
@@ -234,6 +255,7 @@ func New(db *sql.DB, log *slog.Logger) (*Scheduler, error) {
 		wakeCh:             make(chan struct{}, 1),
 		heartbeatEvery:     100, // ~100 min at 60s interval; override with SetHeartbeat
 		processStartedUnix: time.Now().Unix(),
+		statePath:          StateFilePath(),
 	}
 	// Register the notification-expiration sweep as a tick handler so
 	// every scheduler tick retires notification-kind wakes whose
