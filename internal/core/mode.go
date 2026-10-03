@@ -267,7 +267,22 @@ func (mm *ModeManager) ClearModes() error {
 }
 
 // RemoveAll removes all mode files (use with caution)
+//
+// Under the canonical layout the MPM checkout IS the workspace root
+// (`~/.mpm`), so `mode/` is git-tracked source sitting at the runtime
+// root. Bulk-deleting it would destroy tracked files and dirty the
+// worktree, so the operation is refused there. A workspace that is not
+// a Git checkout (an install prefix holding only runtime state) keeps
+// the original behaviour.
+//
+// This matches AddMode, which already refuses to create mode files
+// because they are managed directly in the directory.
 func (mm *ModeManager) RemoveAll() (int, error) {
+	if isInsideGitWorktree(mm.Dir) {
+		return 0, fmt.Errorf(
+			"refusing to shred modes from a Git worktree (%s): these files are repository-owned source, not runtime state; remove them with `git rm` if that is really intended",
+			mm.Dir)
+	}
 	entries, err := os.ReadDir(mm.Dir)
 	if err != nil {
 		return 0, err

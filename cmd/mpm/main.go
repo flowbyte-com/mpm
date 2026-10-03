@@ -71,8 +71,13 @@ func init() {
 
 	// Initialize global mode manager
 	// Will be used to set default 808 mode on daemon startup
-	configPath := os.ExpandEnv("$HOME/.openclaw/workspace/projects/mpm")
-	modeManager = mpminternal.NewModeManager(configPath)
+	//
+	// Resolve the base through config.GetMPMDir() rather than a hard-coded
+	// path. NewModeManager only falls back to GetMPMDir() when handed an
+	// empty string, so any non-empty literal here silently overrides the
+	// canonical ~/.mpm workspace — that is how this ended up pointing at
+	// $HOME/.openclaw/workspace/projects/mpm, which does not exist.
+	modeManager = mpminternal.NewModeManager(config.GetMPMDir())
 }
 
 // isMachineMode reports whether the current invocation is a machine-facing

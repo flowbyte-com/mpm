@@ -212,7 +212,17 @@ func (pm *PersonaManager) SetActive(personaName string) error {
 }
 
 // RemoveAll removes all persona .md files (use with caution)
+//
+// Mirrors ModeManager.RemoveAll: under the canonical layout the MPM
+// checkout is the workspace root, so `persona/` is git-tracked source
+// at the runtime root and must not be bulk-deleted. A non-Git
+// workspace keeps the original behaviour.
 func (pm *PersonaManager) RemoveAll() (int, error) {
+	if isInsideGitWorktree(pm.Dir) {
+		return 0, fmt.Errorf(
+			"refusing to shred personas from a Git worktree (%s): these files are repository-owned source, not runtime state; remove them with `git rm` if that is really intended",
+			pm.Dir)
+	}
 	entries, err := os.ReadDir(pm.Dir)
 	if err != nil {
 		return 0, err

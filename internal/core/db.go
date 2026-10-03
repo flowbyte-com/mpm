@@ -4573,10 +4573,9 @@ func CaptureGitSnapshot(dir string) GitSnapshot {
 }
 
 func captureGitSnapshotAt(dir string) (GitSnapshot, bool) {
-	// Check if dir is inside a git work tree
-	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-	cmd.Dir = dir
-	if out, err := cmd.Output(); err != nil || strings.TrimSpace(string(out)) != "true" {
+	// Check if dir is inside a git work tree. Shared with the shred
+	// guards so Git-detection semantics have exactly one definition.
+	if !isInsideGitWorktree(dir) {
 		return GitSnapshot{}, false
 	}
 	var snap GitSnapshot
