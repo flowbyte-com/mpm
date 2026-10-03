@@ -12,6 +12,32 @@ import (
 	"github.com/flowbyte-com/mpm-core/config"
 )
 
+// isolateMigrationWorkspace pins MPM_WORKSPACE to a per-test temp dir for
+// any test that reaches RunMigration or UndoMigration.
+//
+// Both entry points resolve their backup destination through
+// config.GetWorkspace() — NOT through the DatabaseManager they are given —
+// and GetWorkspace falls back to $HOME/.mpm when MPM_WORKSPACE is unset.
+// NewTestDM's database is in-memory, so the manager offers no protection
+// whatsoever: without this, takeBackup's `VACUUM INTO` writes a real file
+// into the operator's live ~/.mpm/migrations/, once per run, under a fresh
+// timestamped name. The destination is gitignored, so `git status` stays
+// clean and the pollution is invisible to the usual gates.
+//
+// This is deliberately a test-side fix. The production fallback is correct
+// — a real `mpm migrate-embeddings` run with no MPM_WORKSPACE set should
+// back up into ~/.mpm. Only the test's failure to pin the workspace is a
+// defect, so only the test changes.
+//
+// Returns the isolated workspace so a caller can assert the backup landed
+// there rather than anywhere else.
+func isolateMigrationWorkspace(t *testing.T) string {
+	t.Helper()
+	ws := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", ws)
+	return ws
+}
+
 func TestForensicClassifier(t *testing.T) {
 	dm := NewTestDM(t)
 	defer dm.Close()
@@ -164,6 +190,11 @@ func TestForensicClassifier(t *testing.T) {
 // The provenance-gated gate uses weight<1.0 as the action-precondition
 // heuristic (origin_weight column does not exist).
 func TestRunMigration_IdempotentAndProvenanceGated(t *testing.T) {
+	// RunMigration calls takeBackup, which resolves its destination via
+	// config.GetWorkspace() rather than through dm. Without this the
+	// backup lands in the live ~/.mpm/migrations/ on every run.
+	isolateMigrationWorkspace(t)
+
 	dm := NewTestDM(t)
 	defer dm.Close()
 
@@ -414,10 +445,9 @@ func TestRunMigration_IdempotentAndProvenanceGated(t *testing.T) {
 // to old_weight, synthetic markers are cleared, and the audit log is purged.
 // The test uses a temp workspace so the backup file is created and found.
 func TestUndoMigration(t *testing.T) {
-	// Isolate to a temp workspace to avoid backup file collisions with
-	// other tests that call RunMigration in the full suite.
-	tmpDir := t.TempDir()
-	t.Setenv("MPM_WORKSPACE", tmpDir)
+	// UndoMigration reads its backup through the same unisolated
+	// config.GetWorkspace() path.
+	isolateMigrationWorkspace(t)
 
 	dm := NewTestDM(t)
 	defer dm.Close()
