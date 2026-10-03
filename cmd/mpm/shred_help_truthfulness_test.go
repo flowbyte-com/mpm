@@ -102,21 +102,23 @@ func TestShredHelpPage_PrimaryPathIsDocumented(t *testing.T) {
 	}
 }
 
-// TestBulkShredConfirmation_IsHonest pins the force-flag finding.
+// TestBulkShredConfirmation_IsHonest pins the disclosure rules for the
+// bulk forms.
 //
-// router.parseFlags consumes -f/--force from argv and republishes it as
-// MPM_FORCE=1 (router.go:508). The bulk shred handlers each scan their own
-// args for the literal token, so they never see it: every bulk form aborts
-// at its confirmation prompt regardless of what the operator types.
+// History, because the current state is not self-evident: these handlers
+// each used to scan their own args for the literal "-f" token, but
+// router.parseFlags consumes the flag and republishes it as MPM_FORCE=1,
+// so no bulk form could ever see it. Every one aborted at its
+// confirmation prompt, and told the operator to re-run the exact command
+// that had just failed — the worst possible failure mode for a
+// destructive command.
 //
-// The handlers previously told the operator to re-run the exact command
-// that had just failed. That is the worst possible failure mode for a
-// destructive command — it sends someone looking for a "real" invocation
-// that does not exist. The fix here is the message, not the flag plumbing:
-// rewiring it would activate six currently-unreachable bulk deletes
-// (including `shred database`, which os.Remove()s the DB file and recreates
-// it with no cascade and no backup handling), which is a behavior change
-// belonging in its own change with its own gates.
+// The flag is now wired through forceRequested(), but only to the three
+// forms that were audited and found safe (topics, modes, personas). The
+// other three refuse unconditionally, so the help must keep them
+// categorically separate from the confirmable ones: an operator who sees
+// "-f" next to a form has no way to know that some forms honour it and
+// some are unavailable.
 func TestBulkShredConfirmation_IsHonest(t *testing.T) {
 	data, err := os.ReadFile("handlers_shred.go")
 	if err != nil {
@@ -132,11 +134,53 @@ func TestBulkShredConfirmation_IsHonest(t *testing.T) {
 		t.Errorf("bulk shred warnings do not disclose that nothing was deleted; " +
 			"a destructive command must say so when it refuses")
 	}
-	// The help page must not advertise the bulk forms as confirmable.
+
 	out := captureShredHelp(t)
-	if strings.Contains(out, "requires -f to confirm") {
-		t.Errorf("shred help still advertises `-f` confirmation for the bulk forms, "+
-			"which the router consumes before the handlers see it:\n%s", out)
+
+	// The three forms the flag actually enables must be listed as
+	// confirmable. If a future change blocks one of them, the help must
+	// move it rather than keep advertising a form that refuses.
+	for _, form := range []string{
+		"mpm shred topics -f",
+		"mpm shred modes -f",
+		"mpm shred personas -f",
+	} {
+		if !strings.Contains(out, form) {
+			t.Errorf("shred help does not list the confirmable form %q.\nGot:\n%s", form, out)
+		}
+	}
+
+	// The three blocked forms must be listed separately, and within that
+	// section none of them may be shown with a confirmation flag — that
+	// would invite the operator to try a form that refuses regardless.
+	// The section runs from its header to the next flush-left line, so
+	// the "Examples" block that follows is deliberately out of scope.
+	notAvailable := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "Not available") {
+			notAvailable = true
+			continue
+		}
+		if notAvailable && !strings.HasPrefix(line, " ") && strings.TrimSpace(line) != "" {
+			break // next section
+		}
+		if notAvailable && strings.Contains(line, "mpm shred ") &&
+			(strings.Contains(line, "-f") || strings.Contains(line, "--force")) {
+			t.Errorf("a blocked form is advertised as confirmable: %q", line)
+		}
+	}
+	if !notAvailable {
+		t.Errorf("shred help no longer has a 'Not available' section; the blocked "+
+			"forms must stay visibly distinct from the confirmable ones.\nGot:\n%s", out)
+	}
+	for _, blocked := range []string{
+		"mpm shred sessions",
+		"mpm shred memories",
+		"mpm shred database",
+	} {
+		if !strings.Contains(out, blocked) {
+			t.Errorf("shred help does not mention the blocked form %q.\nGot:\n%s", blocked, out)
+		}
 	}
 }
 

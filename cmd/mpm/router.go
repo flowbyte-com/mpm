@@ -497,6 +497,12 @@ func (r *CommandRouter) resolveCommand(name string) *Command {
 }
 
 // parseFlags parses global flags, returns remaining args
+//
+// Note on -f/--force: the token is CONSUMED here and is never re-emitted
+// into the returned args. Handlers therefore cannot see it by scanning
+// argv — it is republished as MPM_FORCE=1 and read back through
+// forceRequested(). Anything that scans argv for a literal "-f" is
+// looking for a token that by construction never arrives.
 func (r *CommandRouter) parseFlags(args []string) []string {
 	result := make([]string, 0, len(args))
 	for _, arg := range args {
@@ -514,6 +520,20 @@ func (r *CommandRouter) parseFlags(args []string) []string {
 		}
 	}
 	return result
+}
+
+// forceRequested reports whether the operator supplied -f/--force.
+//
+// This is the single accessor for the router's force state. parseFlags
+// consumes the flag token from argv and republishes it as MPM_FORCE=1;
+// there is no other post-parser representation, so every handler that
+// needs force reads it here rather than re-implementing env parsing.
+//
+// Only the exact value "1" counts. Unset, empty, "0", "true" and any
+// other value are all false: a confirmation flag must never be
+// satisfied by a malformed or ambient value.
+func forceRequested() bool {
+	return os.Getenv("MPM_FORCE") == "1"
 }
 
 // ============================================================================

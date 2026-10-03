@@ -601,6 +601,24 @@ The word "secure delete" is therefore not used for any `shred` surface. Two diff
 
 The distinction that matters operationally: **a shredded object is no longer reachable through MPM and is not restorable — it is not gone from the storage medium.**
 
+**Bulk shred forms.** `mpm shred` also accepts a target word instead of an object id. These operate on *every* object of a type, so each one is gated on an explicit `-f`/`--force` confirmation and refuses without it, saying so and deleting nothing. The flag is consumed by the router before the handler runs and republished as `MPM_FORCE=1`; handlers read it through the single `forceRequested()` accessor, which accepts only the exact value `1`. Handlers must not scan `argv` for the token — it is guaranteed never to arrive.
+
+| Form | Status | Effect |
+|---|---|---|
+| `mpm shred topics -f` | Available | Deletes every topic and every topic membership, in one transaction. Content of the underlying memories is untouched; only the grouping is lost. Structural anchors (decisions/theories) are recreated by the next backfill. |
+| `mpm shred modes -f` | Available, **refuses inside a Git worktree** | Deletes all mode files. |
+| `mpm shred personas -f` | Available, **refuses inside a Git worktree** | Deletes all persona files. |
+| `mpm shred sessions` | **Not available** | — |
+| `mpm shred memories` | **Not available** | — |
+| `mpm shred database` | **Not available** | — |
+
+The Git-worktree refusal is not a force check and force cannot reach it: the guard lives inside `ModeManager.RemoveAll` / `PersonaManager.RemoveAll`, downstream of the confirmation. Under the canonical layout the checkout *is* the runtime root, so `mode/` and `persona/` are repository-owned source rather than runtime state; the guard is what stands between a working flag handler and silent deletion of tracked files. Remove them with `git rm`. Non-Git workspaces keep the bulk delete.
+
+The three unavailable forms are **disabled, not awaiting a flag**, and no value of `-f`/`--force` enables them. Each prints what it would actually have done and what to use instead:
+
+- `shred sessions` / `shred memories` — the underlying `DeleteAllByCollection` / `DeleteAllMemories` are `UPDATE`s that rename the collection to `<name>_inactive` and set a metadata flag. No row, FTS entry or topic membership is removed and the content stays searchable, so reporting the result as a deletion would be false. Use `mpm memory shred <id>` / `mpm shred <id>`.
+- `shred database` — deletes `mpm.db` and then fails to rebuild it. The recreation step calls `internal.NewMemoryStore`, which discards its path argument and never opens a database, so the workspace would be left holding no database at all; it would also have ignored the `-wal`/`-shm` sidecars, `telemetry.db`, the mirror and watchdog logs, and every backup. Use `uninstall.sh --purge` or `uninstall.sh --shred`, which are complete at that scope and are the only paths that also cover backups and logs.
+
 **Weaken floor.** `mpm memory weaken <id>` / `mpm_memory action=weaken` uses the symmetric formula `weight_loss = (delta+1)/2`, decrements `reinforcement_count` by `delta`, and floors weight at **1** — repeated weaken calls can never drive weight negative or below 1. The response payload includes `weight_loss`, `reinforcement_delta`, `weight`, `reinforcement_count`, and `floor_hit: true` when the call landed at the floor.
 
 **Projection semantics.** `projection: "summary"` (default on save/show / query) bounds the inline content echo and flags `content_truncated: true` for the larger-than-bound case. `projection: "full"` returns the complete stored body and clears the truncation markers. Projection is a wire-format choice — the stored content is **never** mutated by projection. Unknown projection values are rejected at the handler boundary with the canonical-list error `[summary, full]`.

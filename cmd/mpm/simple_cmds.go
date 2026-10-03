@@ -512,12 +512,12 @@ func runShow(dm mpminternal.CoreDB, id string, jsonOutput bool) int {
 // unless `--force` is supplied.
 //
 // The `--force` token is consumed by router.parseFlags BEFORE we see
-// the args: it sets `MPM_FORCE=1` and strips the token from argv
-// (router.go:467). So the rm handler reads the env var rather than
-// scanning for the literal token — otherwise the flag would be eaten
-// upstream and we'd silently ignore it.
+// the args: it sets `MPM_FORCE=1` and strips the token from argv. So the
+// rm handler reads it through forceRequested() rather than scanning for
+// the literal token — otherwise the flag would be eaten upstream and
+// we'd silently ignore it.
 func handleRm(args []string) int {
-	force := os.Getenv("MPM_FORCE") == "1"
+	force := forceRequested()
 	if len(args) < 2 {
 		usererror.Usage("mpm rm <id> [--force]")
 		return 1

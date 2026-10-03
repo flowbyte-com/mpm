@@ -13,17 +13,15 @@ import (
 // (`git clone … ~/.mpm`), so mode/ and persona/ are tracked directories that
 // happen to sit at the runtime root.
 //
-// These tests call the handlers directly, which is the boundary the guard
-// lives on. Note that the CLI confirmation flag does not currently reach
-// them: router.parseFlags (router.go:500) consumes `-f`/`--force` from argv
-// and re-publishes it as `MPM_FORCE=1`, which handleRm reads but the shred
-// handlers do not — so `mpm shred modes -f` prints its "use -f to confirm"
-// warning and exits 1. That flag bug is pre-existing and tracked separately;
-// it is why the bulk-delete path is currently unreachable from the shipped
-// CLI, and therefore why the underlying RemoveAll() guard is latent rather
-// than actively exploited. The guard still has to be here: it is the only
-// thing standing between a fixed flag handler and silent deletion of
-// repository source.
+// These tests drive the real router with the confirmation flag genuinely
+// set, because that is the condition under which the bulk path is now
+// reachable. router.parseFlags consumes `-f`/`--force` from argv and
+// republishes it as `MPM_FORCE=1` for forceRequested() to read; the token
+// never reaches the handler, so a test that passes "--force" straight to
+// handleShredModes would be testing nothing. Worse, it would pass
+// vacuously: the handler would refuse at the force check and never reach
+// the Git guard it exists to exercise. Each refusal test therefore also
+// asserts that the refusal came from the worktree guard specifically.
 //
 // Isolation: MPM_WORKSPACE is pinned to t.TempDir() and a real throwaway Git
 // repository is created inside it. Nothing here touches the live checkout or
@@ -39,6 +37,8 @@ func newShredWorkspace(t *testing.T) string {
 		t.Fatalf("mkdir workspace: %v", err)
 	}
 	t.Setenv("MPM_WORKSPACE", ws)
+	clearForce(t)
+	resetDBSingleton(t)
 
 	for _, args := range [][]string{
 		{"init", "-q", "."},
@@ -81,13 +81,32 @@ func assertFileSurvives(t *testing.T, path string) {
 	}
 }
 
+// assertGitGuardRefused proves the refusal came from the worktree guard in
+// RemoveAll, not from the confirmation check. Without this the test would
+// keep passing even if the guard were deleted outright, because the handler
+// would still refuse — just for a different reason.
+func assertGitGuardRefused(t *testing.T, out string) {
+	t.Helper()
+	if !strings.Contains(out, "Git worktree") {
+		t.Fatalf("expected the Git-worktree guard to refuse, got:\n%s", out)
+	}
+	if strings.Contains(out, "Re-run with -f") {
+		t.Fatalf("refusal came from the confirmation check, not the Git guard — "+
+			"the test is not exercising what it claims:\n%s", out)
+	}
+}
+
 func TestShredModesRefusesToDeleteTrackedSource(t *testing.T) {
 	ws := newShredWorkspace(t)
 	seedTrackedMarkdown(t, ws, "mode", "default.md", "architect.md", "README.md")
 
 	// The handler is destructive and returns a non-zero exit code on failure;
 	// what matters here is that the files survive.
-	_ = handleShredModes([]string{"--force"})
+	code, out := runCLI(t, "shred", "modes", "-f")
+	if code == 0 {
+		t.Fatalf("shred modes -f succeeded inside a Git checkout:\n%s", out)
+	}
+	assertGitGuardRefused(t, out)
 
 	assertFileSurvives(t, filepath.Join(ws, "mode", "default.md"))
 	assertFileSurvives(t, filepath.Join(ws, "mode", "architect.md"))
@@ -104,7 +123,11 @@ func TestShredPersonasRefusesToDeleteTrackedSource(t *testing.T) {
 	ws := newShredWorkspace(t)
 	seedTrackedMarkdown(t, ws, "persona", "default.md", "critic.md")
 
-	_ = handleShredPersonas([]string{"--force"})
+	code, out := runCLI(t, "shred", "personas", "--force")
+	if code == 0 {
+		t.Fatalf("shred personas --force succeeded inside a Git checkout:\n%s", out)
+	}
+	assertGitGuardRefused(t, out)
 
 	assertFileSurvives(t, filepath.Join(ws, "persona", "default.md"))
 	assertFileSurvives(t, filepath.Join(ws, "persona", "critic.md"))
@@ -121,6 +144,8 @@ func TestShredModesStillWorksInNonGitWorkspace(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	t.Setenv("MPM_WORKSPACE", ws)
+	clearForce(t)
+	resetDBSingleton(t)
 	modeDir := filepath.Join(ws, "mode")
 	if err := os.MkdirAll(modeDir, 0o755); err != nil {
 		t.Fatalf("mkdir mode: %v", err)
@@ -131,7 +156,10 @@ func TestShredModesStillWorksInNonGitWorkspace(t *testing.T) {
 		}
 	}
 
-	_ = handleShredModes([]string{"--force"})
+	code, out := runCLI(t, "shred", "modes", "-f")
+	if code != 0 {
+		t.Fatalf("non-Git bulk delete failed: exit %d\n%s", code, out)
+	}
 
 	for _, n := range []string{"a.md", "b.md"} {
 		if _, err := os.Stat(filepath.Join(modeDir, n)); !os.IsNotExist(err) {

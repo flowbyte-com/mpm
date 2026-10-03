@@ -224,6 +224,12 @@ func (pm *PersonaManager) RemoveAll() (int, error) {
 			pm.Dir)
 	}
 	entries, err := os.ReadDir(pm.Dir)
+	if os.IsNotExist(err) {
+		// See ModeManager.RemoveAll: an absent directory is a valid
+		// workspace state, not a failure, so a repeated bulk shred is a
+		// clean no-op rather than a raw errno.
+		return 0, nil
+	}
 	if err != nil {
 		return 0, err
 	}

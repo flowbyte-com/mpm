@@ -284,6 +284,16 @@ func (mm *ModeManager) RemoveAll() (int, error) {
 			mm.Dir)
 	}
 	entries, err := os.ReadDir(mm.Dir)
+	if os.IsNotExist(err) {
+		// No mode directory is a valid workspace state, not a failure.
+		// Returning the raw errno here made the CLI print a bare
+		// "open …/mode: no such file or directory" under a "Refusing:"
+		// prefix, which reads as a safety refusal when the real answer
+		// is "there was nothing to delete". A repeated bulk shred is
+		// therefore a clean no-op, matching `shred topics` on an empty
+		// database.
+		return 0, nil
+	}
 	if err != nil {
 		return 0, err
 	}
