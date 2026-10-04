@@ -6,11 +6,44 @@
 # Run from repo root after `make build`.
 #
 # Exit code: 0 if all assertions pass, 1 if any fail.
+#
+# MPM and DB resolution (see #T-2026-10-04 verify-DB-targeting audit):
+#   The script previously defaulted both MPM and DB to CWD-relative
+#   paths (./bin/mpm, ./src/db/mpm.db). When the script is run from
+#   anywhere other than the repo root, those paths silently resolve to
+#   non-existent files: sqlite3 returns empty strings, the assertions
+#   degenerate to PASS-or-FAIL based on whether the helper succeeded,
+#   and the smoke test produces a meaningless "all green" run. We
+#   resolve both paths from BASH_SOURCE[0] (this script's own
+#   location) so the suite is CWD-independent. The override knobs
+#   MPM= and DB= are preserved for operators who explicitly want to
+#   test a non-default build.
 
 set -uo pipefail
 
-MPM="${MPM:-./bin/mpm}"
-DB="${DB:-./src/db/mpm.db}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+MPM="${MPM:-${REPO_ROOT}/bin/mpm}"
+DB="${DB:-${REPO_ROOT}/src/db/mpm.db}"
+
+# Pre-flight: refuse to run if MPM or DB cannot be located. Without
+# this, sqlite3 silently returns empty for every query and the suite
+# can produce a vacuous green run on the wrong database.
+if [ ! -x "${MPM}" ]; then
+  echo "ERR: MPM binary not found or not executable at ${MPM}" >&2
+  echo "  hint: run \`make build\` first, or set MPM=/absolute/path/to/mpm" >&2
+  exit 2
+fi
+if [ ! -f "${DB}" ]; then
+  echo "ERR: MPM database not found at ${DB}" >&2
+  echo "  hint: run \`make build\` first, or set DB=/absolute/path/to/mpm.db" >&2
+  exit 2
+fi
+if ! command -v sqlite3 >/dev/null 2>&1; then
+  echo "ERR: sqlite3 not on PATH; required for direct DB assertions" >&2
+  exit 2
+fi
 
 PASS=0
 FAIL=0

@@ -5,11 +5,41 @@
 # Run from repo root after `make build`.
 #
 # Exit code: 0 if all assertions pass, 1 if any fail.
+#
+# MPM and DB resolution (see #T-2026-10-04 verify-DB-targeting audit):
+#   The W-011 test path performs a write (rm --force + UPDATE memories
+#   SET deleted_at = NULL) against the production database. Running
+#   this script from the wrong directory previously let it silently
+#   target a non-default path; sqlite3's empty-on-missing-file made
+#   that look like a green run. We now resolve both paths from
+#   BASH_SOURCE[0] and refuse to run if either is missing.
 
 set -uo pipefail
 
-MPM="${MPM:-./bin/mpm}"
-DB="${DB:-./src/db/mpm.db}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+MPM="${MPM:-${REPO_ROOT}/bin/mpm}"
+DB="${DB:-${REPO_ROOT}/src/db/mpm.db}"
+
+# Pre-flight: refuse to run if MPM or DB cannot be located. The W-011
+# path mutates the database (rm --force on a prime-directive memory,
+# then UPDATE to restore), so a wrong-target DB means a wrong-target
+# write. Bail out cleanly instead.
+if [ ! -x "${MPM}" ]; then
+  echo "ERR: MPM binary not found or not executable at ${MPM}" >&2
+  echo "  hint: run \`make build\` first, or set MPM=/absolute/path/to/mpm" >&2
+  exit 2
+fi
+if [ ! -f "${DB}" ]; then
+  echo "ERR: MPM database not found at ${DB}" >&2
+  echo "  hint: run \`make build\` first, or set DB=/absolute/path/to/mpm.db" >&2
+  exit 2
+fi
+if ! command -v sqlite3 >/dev/null 2>&1; then
+  echo "ERR: sqlite3 not on PATH; required for direct DB assertions" >&2
+  exit 2
+fi
 
 PASS=0
 FAIL=0
