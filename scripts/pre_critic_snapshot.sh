@@ -43,9 +43,28 @@ SIZE=$(stat -c%s "${SNAPSHOT}")
 echo "OK: ${SNAPSHOT} (${SIZE} bytes, integrity=ok)"
 
 # Rotation: keep only the most recent N snapshots. Sort by mtime, drop the rest.
-SNAPSHOTS=($(ls -1t "${BACKUP_DIR}"/mpm_pre_critic_*.db 2>/dev/null || true))
-if (( ${#SNAPSHOTS[@]} > ROTATION_KEEP )); then
-    for OLD in "${SNAPSHOTS[@]:${ROTATION_KEEP}}"; do
+#
+# Pre-fix this used `SNAPSHOTS=($(ls -1t ...))`, which is two-fold
+# broken: (a) the unquoted command substitution into an array performs
+# word-splitting, mangling any snapshot filename that contains a
+# space or glob metacharacter; (b) `2>/dev/null || true` swallows the
+# error from a no-match glob, masking the "no snapshots" case from
+# callers who want to know whether a rotation actually happened.
+#
+# `mapfile -t` reads lines into the array verbatim, preserving
+# filenames exactly as `ls` reports them. We use `--` on `ls` to
+# guard against snapshot names that begin with a dash. The
+# no-match case becomes a single-element array containing the empty
+# string, which we explicitly filter out below.
+mapfile -t SNAPSHOTS < <(ls -1t -- "${BACKUP_DIR}"/mpm_pre_critic_*.db 2>/dev/null)
+# Filter out empty entries (can happen when the glob has no matches
+# and the process substitution emits an empty line).
+FILTERED=()
+for s in "${SNAPSHOTS[@]}"; do
+    [[ -n "$s" ]] && FILTERED+=("$s")
+done
+if (( ${#FILTERED[@]} > ROTATION_KEEP )); then
+    for OLD in "${FILTERED[@]:${ROTATION_KEEP}}"; do
         rm -f -- "${OLD}"
         echo "ROTATED: ${OLD}"
     done

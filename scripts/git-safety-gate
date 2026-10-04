@@ -34,6 +34,67 @@ readonly SCRIPT_NAME=$(basename "$0")
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 readonly PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
+# Primary branch resolution. Pre-fix this script hardcoded `main`
+# three times (in the merge-base check, the unique-commit count, and
+# the per-row label), which made it silently produce a green
+# "no alternate history" exit on repos whose primary branch is
+# named `master`, `trunk`, `develop`, or anything else: the
+# `main..$ref` rev-list resolved to "$ref..$ref" (empty), the
+# merge-base check returned 1 (false — never branch proven), but the
+# script logged "(none — no alternate history exists)" and exited
+# 0. That is the worst possible outcome for a safety gate.
+#
+# Resolution order (first hit wins):
+#   1. `origin/HEAD` symbolic ref (the canonical primary-branch
+#   signal written by `git clone` and updated by `git remote set-head`).
+#   This is what `git symbolic-ref refs/remotes/origin/HEAD` returns
+#   on any clone from a server that advertises a default branch.
+#   2. `refs/remotes/origin/<default-branch>` candidates in the
+#   conventional-name list (main, master, trunk, develop). This
+#   covers bare local repos and freshly-initialized clones whose
+#   `origin/HEAD` has not been resolved yet.
+#   3. `--main=<ref>` override for callers who need to target a
+#   specific ref explicitly.
+#   4. If none of the above resolves, exit 3 with a clear error
+#   rather than falling through to a wrong-name rev-list.
+detect_primary_branch() {
+    local resolved=""
+    if resolved="$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null)"; then
+        # symbolic-ref returns e.g. "refs/remotes/origin/main"
+        echo "${resolved#refs/remotes/origin/}"
+        return 0
+    fi
+    # origin/HEAD may be stored as a packed-ref rather than a
+    # symbolic-ref; resolve via for-each-ref in that case.
+    resolved="$(git for-each-ref --format='%(refname:short)' refs/remotes/origin/HEAD 2>/dev/null | head -1)"
+    if [ -n "${resolved}" ] && [ "${resolved}" != "origin/HEAD" ]; then
+        echo "${resolved#origin/}"
+        return 0
+    fi
+    for candidate in main master trunk develop; do
+        if git show-ref --verify --quiet "refs/remotes/origin/${candidate}" 2>/dev/null \
+           || git show-ref --verify --quiet "refs/heads/${candidate}" 2>/dev/null; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [ -n "${MAIN_BRANCH_OVERRIDE:-}" ]; then
+    PRIMARY_BRANCH="${MAIN_BRANCH_OVERRIDE}"
+elif PRIMARY_BRANCH="$(detect_primary_branch)"; then
+    :
+else
+    echo "error: cannot determine the repository's primary branch." >&2
+    echo "  Tried: origin/HEAD, origin/main, origin/master, origin/trunk," >&2
+    echo "         origin/develop, local main, local master." >&2
+    echo "  Set MAIN_BRANCH_OVERRIDE=<name> or pass --main=<name> to this" >&2
+    echo "  script before any destructive operation." >&2
+    exit 3
+fi
+echo "  Primary branch: ${PRIMARY_BRANCH} (override: MAIN_BRANCH_OVERRIDE)"
+
 PATH_ARG=""
 OP_DESC=""
 ASSUME_YES=0
@@ -89,11 +150,16 @@ mapfile -t UNMERGED < <(git for-each-ref --format='%(refname)' \
     refs/heads refs/remotes \
     | while read -r ref; do
         if [ "$ref" = "refs/remotes/origin/HEAD" ]; then continue; fi
+        # Skip the primary branch on both sides (local + remote-tracking).
+        short="${ref#refs/heads/}"; short="${short#refs/remotes/}"
+        if [ "$short" = "${PRIMARY_BRANCH}" ] || [ "$short" = "origin/${PRIMARY_BRANCH}" ]; then
+            continue
+        fi
         merged="no"
-        if git merge-base --is-ancestor "$ref" "$(git rev-parse main^{commit})" 2>/dev/null; then
+        if git merge-base --is-ancestor "$ref" "$(git rev-parse "${PRIMARY_BRANCH}^{commit}")" 2>/dev/null; then
             merged="yes"
         fi
-        unique=$(git rev-list --count "main..$ref" 2>/dev/null || echo 0)
+        unique=$(git rev-list --count "${PRIMARY_BRANCH}..$ref" 2>/dev/null || echo 0)
         if [ "$merged" = "no" ] && [ "$unique" -gt 0 ]; then
             printf '%s|%d\n' "$ref" "$unique"
         fi
@@ -107,7 +173,7 @@ else
     for row in "${UNMERGED[@]}"; do
         IFS='|' read -r ref unique <<< "$row"
         short="${ref#refs/heads/}"; short="${short#refs/remotes/}"
-        printf '  %-44s %6d unique commits not on main\n' "$short" "$unique"
+        printf '  %-44s %6d unique commits not on %s\n' "$short" "$unique" "${PRIMARY_BRANCH}"
         substantive_branches=$(( substantive_branches + 1 ))
     done
 fi
