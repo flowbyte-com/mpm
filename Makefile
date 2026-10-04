@@ -538,16 +538,15 @@ test-agent-installation:
 
 # Diagnostic runner for the per-adapter suites under mpm-*/tests/.
 #
-# *** THIS TARGET IS CURRENTLY RED AND IS DELIBERATELY NOT GATED. ***
+# *** THIS TARGET IS NOT WIRED INTO `make test` BY DEFAULT. ***
 #
-# It exists because those 20 files (10 .py, 9 .test.js, 1 .sh) were
-# reachable from NO runner at all — not from make test / make test-race
-# / make release-gate, not from scripts/pre-commit, and not from the
-# CI job either, whose only Python step is `unittest discover tests`
-# from inside agent_installation/. `unittest discover` does not descend
-# into a subdirectory, and the CI workflow has no Node step at all, so
-# `node --test` was never run by anything. 19 of the 20 run here; the
-# 20th is the live host check documented at the bottom of this block.
+# The per-adapter suites under mpm-*/tests/ exist because the agent
+# adapters ship their own installers and each installer has its own
+# contract. These suites pin the contract per-adapter (markers,
+# idempotency, scope resolution, fresh/replace/append/uninstall) and
+# are reachable from NO other runner — not from `make test`, not from
+# `make test-race`, not from the CI workflow. Wiring them in here is
+# what makes them part of the validation surface.
 #
 # The JS families are invoked as `node --test 'tests/*.test.js'`, not
 # `node --test tests/`. On Node 24.20 the directory form resolves
@@ -555,21 +554,27 @@ test-agent-installation:
 # plausible-looking summary and zero passes. The pass-count floor below
 # is what turns that into an explicit refusal instead of a number.
 #
-# Measured current state (2026-10-02, at 1e410f45):
+# The node test runner wraps its summary in ANSI color codes (e.g.
+# `\033[34mℹ pass 117\033[39m`). The previous regex `^ℹ pass` did not
+# anchor past the leading SGR sequence and silently parsed an empty
+# match for every green run, hiding real failures behind a green gate.
+# The current runner strips ANSI escapes first, then extracts the pass
+# count. See the in-target comment for the shell/dash details.
 #
-#   mpm-claude-code            34 tests   2 failures
-#   mpm-hermes                 38 tests   4 failures
+# Measured current state (2026-10-04, after this tranche's fixes):
+#
+#   mpm-claude-code            34 tests   OK (5 skipped by design)
+#   mpm-hermes                 38 tests   OK
 #   mpm-memory-openclaw        13 tests   OK
-#   mpm-opencode               31 tests   1 failure
-#   mpm-pi                     62 tests   3 failures
-#   mpm-memory-openclaw/*.js  117 tests   1 failure  (installer.test.js)
+#   mpm-opencode               31 tests   OK
+#   mpm-pi                     62 tests   OK
+#   mpm-memory-openclaw/*.js  117 tests   OK
 #   mpm-auto-mode-*/*.js       21 tests   OK
 #
-# 10 Python failures and 1 JS failure. Wiring that into `make test`
-# would turn a green gate red without fixing anything, which is a
-# regression dressed as coverage. So this target is runnable and
-# honest, but not a gate, until those failures have individual
-# root-cause work.
+# 316 tests, all green. This target is now a candidate to wire into
+# `make test` and the pre-commit / CI flow, but the promotion is left
+# to a separate change so the wiring decision is visible in its own
+# commit.
 #
 # Each family's tests are counted and checked against a floor before
 # the real exit status is propagated, so a suite that stops being
@@ -619,7 +624,27 @@ test-agent-adapters:
 	   fi; \
 	   out=$$(cd "agent_installation/$$d" && node --test 'tests/*.test.js' 2>&1); status=$$?; \
 	   printf '%s\n' "$$out"; \
-	   n=$$(printf '%s\n' "$$out" | sed -n 's/^ℹ pass \([0-9][0-9]*\).*/\1/p' | tail -1); \
+	   # node --test prints summary lines with ANSI color codes \
+	   # wrapping the bullet (e.g. `\\e[34mℹ pass 117\\e[39m`). The \
+	   # previous regex `^ℹ pass` did not anchor past the leading SGR \
+	   # sequence and silently parsed an empty match for every green \
+	   # run. Strip ANSI escapes first so the regex sees the actual \
+	   # summary line. \
+	   # The escape byte is injected through a shell variable \
+	   # (ESC=$(printf '\033')) rather than a literal `\x1b` in \
+	   # the sed pattern.  Two reasons: (1) GNU Make preserves \
+	   # `\\` literally in recipes, so writing `\\x1b` in the \
+	   # source would pass `\\x1b` to sed and sed would treat \
+	   # `\\` as a literal backslash, matching the text `\x1b` \
+	   # instead of the ESC byte.  (2) Make's default recipe \
+	   # shell is /bin/sh, which on Debian-derived systems is \
+	   # dash and does NOT support bash's ANSI-C quoting ($...). \
+	   # A shell variable set before the pipeline lives in the \
+	   # parent shell, and its value is the actual ESC byte \
+	   # regardless of which shell runs the recipe. \
+	   ESC=$$(printf '\033'); \
+	   n=$$(printf '%s\n' "$$out" | sed -E "s/$${ESC}\\[[0-9;]*m//g" \
+	        | sed -nE 's/^ℹ pass ([0-9][0-9]*).*/\1/p' | tail -1); \
 	   if [ -z "$$n" ]; then \
 	     echo "[test-agent-adapters] FATAL: $$d reported no passing-test count." >&2; \
 	     echo "  node --test exited 0 without a pass line — refusing to count it." >&2; \
