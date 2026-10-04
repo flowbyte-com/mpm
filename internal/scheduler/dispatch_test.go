@@ -215,9 +215,10 @@ func TestDispatchClaimNextAdHocWake_HandlesNullableStrings(t *testing.T) {
 	if w.TheoryID != "" {
 		t.Errorf("TheoryID = %q, want empty (NULL scans to empty)", w.TheoryID)
 	}
-	if w.RecurringRule != "" {
-		t.Errorf("RecurringRule = %q, want empty (NULL scans to empty)", w.RecurringRule)
-	}
+	// RecurringRule field was retired 2026-10-04 (Tranche B §10).
+	// The column still exists on disk for legacy compat but is not
+	// read by dispatch — see wake_recurring_rule_semantics_test.go
+	// §3 / §11.
 }
 
 // for the production-shape metadata column. ScheduleWake stores

@@ -43,7 +43,7 @@ func TestD1_ScheduleResolve_RoundTrip_ScheduleDefaultsKind(t *testing.T) {
 	require.NoError(t, err)
 	defer dm.Close()
 
-	out, err := dm.ScheduleWake("D-1 regression probe", "1h", "", "", "test-agent", nil)
+	out, err := dm.ScheduleWake("D-1 regression probe", "1h", "", "test-agent", nil)
 	require.NoError(t, err)
 	id, ok := out["id"].(string)
 	require.True(t, ok, "ScheduleWake must return a string id; got %#v", out["id"])
@@ -82,7 +82,7 @@ func TestD1_ScheduleResolve_CallerKindPreserved(t *testing.T) {
 		"kind":   "cascade",
 		"source": "caller-test",
 	}
-	out, err := dm.ScheduleWake("D-1 cascade kind preservation", "1h", "th-1", "", "test-agent", callerMeta)
+	out, err := dm.ScheduleWake("D-1 cascade kind preservation", "1h", "th-1", "test-agent", callerMeta)
 	require.NoError(t, err)
 	id := out["id"].(string)
 
@@ -186,7 +186,7 @@ func TestD1_PersistenceAcrossReopen(t *testing.T) {
 	dm, err := NewDatabaseManager(root)
 	require.NoError(t, err)
 
-	out, err := dm.ScheduleWake("D-1 reopen probe", "1h", "", "", "test-agent", nil)
+	out, err := dm.ScheduleWake("D-1 reopen probe", "1h", "", "test-agent", nil)
 	require.NoError(t, err)
 	id := out["id"].(string)
 
@@ -213,7 +213,7 @@ func TestD1_OverdueRemainsResolvable(t *testing.T) {
 	require.NoError(t, err)
 	defer dm.Close()
 
-	out, err := dm.ScheduleWake("D-1 overdue probe", "1h", "", "", "test-agent", nil)
+	out, err := dm.ScheduleWake("D-1 overdue probe", "1h", "", "test-agent", nil)
 	require.NoError(t, err)
 	id := out["id"].(string)
 
@@ -244,7 +244,7 @@ func TestD1_OrdinaryScheduledTaskSemanticsUnchanged(t *testing.T) {
 		"kind":         "cron",
 		"directive_id": "mpm-seed-test-directive",
 	}
-	out, err := dm.ScheduleWake("D-1 cron owner probe", "1h", "0 */6 * * *", "", "test-agent", cronMeta)
+	out, err := dm.ScheduleWake("D-1 cron owner probe", "1h", "0 */6 * * *", "test-agent", cronMeta)
 	require.NoError(t, err)
 	id := out["id"].(string)
 
@@ -264,7 +264,7 @@ func TestD1_ResolveWake_ReasonEnumUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	defer dm.Close()
 
-	out, err := dm.ScheduleWake("D-1 reason enum unchanged", "1h", "", "", "test-agent", nil)
+	out, err := dm.ScheduleWake("D-1 reason enum unchanged", "1h", "", "test-agent", nil)
 	require.NoError(t, err)
 	id := out["id"].(string)
 

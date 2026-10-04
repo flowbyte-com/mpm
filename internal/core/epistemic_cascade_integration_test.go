@@ -194,7 +194,6 @@ func TestIntegration_E2E_FoundationToWakeDelivery(t *testing.T) {
 			"cascade wake for theory "+tid,
 			past.Format("2006-01-02T15:04:05Z"),
 			tid,
-			"",
 			"e2e-test",
 			meta,
 		)
@@ -220,7 +219,6 @@ func TestIntegration_E2E_FoundationToWakeDelivery(t *testing.T) {
 		_, err := dm.ScheduleWake(
 			"pagination test wake",
 			past.Format("2006-01-02T15:04:05Z"),
-			"",
 			"",
 			"e2e-test",
 			meta,
