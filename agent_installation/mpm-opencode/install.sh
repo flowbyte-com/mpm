@@ -319,10 +319,13 @@ do_uninstall() {
     local installer="$SCRIPT_DIR/scripts/install_agents_instructions.py"
     if [ -f "$installer" ]; then
         local target="$OPENCODE_CONFIG_DIR/AGENTS.md"
-        python3 "$installer" --scope user --target "$target" \
-            --uninstall >>"$INSTALL_LOG" 2>&1 \
-            && log "removed managed block from $target" \
-            || warn "AGENTS.md uninstall failed (see $INSTALL_LOG)"
+        if python3 "$installer" --scope user --target "$target" \
+            --uninstall >>"$INSTALL_LOG" 2>&1; then
+            log "removed managed block from $target"
+        else
+            err "AGENTS.md uninstall failed (see $INSTALL_LOG); leaving managed block in place"
+            exit 1
+        fi
     fi
     # Remove the plugin entry from opencode.jsonc (only our canonical one).
     if [ -f "$OPENCODE_CONFIG" ] && command -v python3 >/dev/null 2>&1; then

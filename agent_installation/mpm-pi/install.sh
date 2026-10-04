@@ -297,8 +297,12 @@ PYEOF
             log "removed canonical MPM-Pi entry from settings.json"
         fi
         if [ -f "$INSTRUCTIONS_INSTALLER" ] && command -v python3 >/dev/null 2>&1; then
-            python3 "$INSTRUCTIONS_INSTALLER" --uninstall \
-                || warn "AGENTS.md uninstall returned non-zero"
+            if python3 "$INSTRUCTIONS_INSTALLER" --uninstall; then
+                log "removed AGENTS.md managed block"
+            else
+                err "AGENTS.md uninstall failed; leaving managed block in place"
+                exit 1
+            fi
         fi
         exit 0
         ;;

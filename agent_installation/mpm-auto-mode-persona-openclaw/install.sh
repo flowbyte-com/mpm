@@ -288,11 +288,15 @@ esac
 # as mpm-memory-openclaw (see its README for the longer writeup).
 
 log "persisting plugins.entries.$PLUGIN_ID.config.mpmBin=$MPM_BIN"
+MPM_BIN_CONFIGURED=0
 if ! timeout "${OPENCLAW_CONFIG_TIMEOUT}s" \
     openclaw config set "plugins.entries.$PLUGIN_ID.config.mpmBin" "$MPM_BIN" \
       >>"$INSTALL_LOG" 2>&1; then
   warn "failed to persist mpmBin automatically. Operator run manually:"
   warn "  openclaw config set plugins.entries.$PLUGIN_ID.config.mpmBin $MPM_BIN"
+  MPM_BIN_CONFIGURED=1
+else
+  MPM_BIN_CONFIGURED=0
 fi
 
 # --------------------------------------------------------------------------
@@ -308,14 +312,17 @@ fi
 # `doctor --lint` after install does not re-surface the warning.
 
 log "converging pending state migration (openclaw update repair)"
+UPDATE_REPAIR_OK=0
 if timeout "${OPENCLAW_UPDATE_REPAIR_TIMEOUT}s" \
     openclaw update repair \
       >>"$INSTALL_LOG" 2>&1; then
   log "  update repair ok"
+  UPDATE_REPAIR_OK=1
 else
   warn "update repair returned non-zero (operator can run:"
   warn "  openclaw update repair && openclaw doctor --fix"
   warn "see $INSTALL_LOG)"
+  UPDATE_REPAIR_OK=0
 fi
 
 # --------------------------------------------------------------------------
@@ -367,8 +374,57 @@ fi
 if timeout "${OPENCLAW_PLUGIN_INSPECT_TIMEOUT}s" \
    openclaw plugins inspect "$PLUGIN_ID" --json >/dev/null 2>&1; then
   log "plugin visible to openclaw: $PLUGIN_ID"
+  PLUGIN_INSPECT_OK=1
 else
   warn "openclaw plugins inspect $PLUGIN_ID did not return cleanly; inspect $INSTALL_LOG"
+  PLUGIN_INSPECT_OK=0
+fi
+
+# --------------------------------------------------------------------------
+# Required-classification
+#
+# Required steps:
+#     - mpmBin config persistence (Step 5). Without it the gateway
+#       cannot spawn mpm at runtime under its stripped PATH. Step 5
+#       comment: "this is the PATH-gotcha mitigation."
+#     - update repair convergence (Step 6). Header says "without
+#       convergence, doctor warns and the install is not fully visible
+#       to the gateway." `openclaw doctor --lint` will re-surface the
+#       migration warning on the next start until this converges.
+#     - plugins inspect verification (Step 8). The installer promises
+#       the plugin is visible to openclaw; an inspect failure means
+#       that promise is false.
+#
+# Best-effort (documented):
+#     - gateway restart (Step 7). The systemd --user unit is
+#       configured to auto-restart on failure, so a bounded restart
+#       failure is not itself an installer failure. The classification
+#       intentionally does NOT depend on RESTART_RC.
+
+INSTALL_FAILED=0
+if [ "$MPM_BIN_CONFIGURED" -ne 0 ]; then
+  INSTALL_FAILED=1
+elif [ "$UPDATE_REPAIR_OK" -ne 1 ]; then
+  INSTALL_FAILED=1
+elif [ "$PLUGIN_INSPECT_OK" -ne 1 ]; then
+  INSTALL_FAILED=1
+fi
+
+if [ "$INSTALL_FAILED" -ne 0 ]; then
+  cat >&2 <<NEXT
+[mpm-auto-mode-persona-openclaw install] FAILED.
+
+The plugin link is in place; OpenClaw did not settle into a healthy
+state. Do NOT treat this install as successful.
+
+Operator recovery:
+  openclaw config set plugins.entries.$PLUGIN_ID.config.mpmBin $MPM_BIN
+  openclaw update repair
+  openclaw plugins inspect $PLUGIN_ID
+
+Inspect $INSTALL_LOG for captured openclaw CLI output.
+NEXT
+  exit 1
 fi
 
 cat >&2 <<NEXT

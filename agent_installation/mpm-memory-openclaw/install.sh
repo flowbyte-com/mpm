@@ -1008,8 +1008,10 @@ fi
 if [ ! -f "$SCRIPT_DIR/templates/SOUL.md.snippet" ]; then
   warn "templates/SOUL.md.snippet missing at $SCRIPT_DIR; skipping SOUL.md managed-block install"
   warn "  regenerate via: python3 scripts/render_managed_blocks.py"
+  SOUL_MD_OK=0
 elif ! command -v python3 >/dev/null 2>&1; then
   warn "python3 not available — SOUL.md managed-block install skipped"
+  SOUL_MD_OK=0
 else
   if python3 "$SCRIPT_DIR/scripts/install_openclaw_instructions.py" \
         --home "$HOME_DIR" \
@@ -1017,8 +1019,10 @@ else
         --snippet "$SCRIPT_DIR/templates/SOUL.md.snippet" \
         >>"$INSTALL_LOG" 2>&1; then
     log "SOUL.md managed block installed/refreshed"
+    SOUL_MD_OK=1
   else
     warn "SOUL.md managed block install failed (rc=$?); inspect $INSTALL_LOG"
+    SOUL_MD_OK=0
   fi
 fi
 
@@ -1030,6 +1034,10 @@ fi
 #       where the restart --safe command returned but the new gateway
 #       process exited 78 during startup, AND the case where the
 #       restart command itself failed and the gateway stayed down.
+#   (C) SOUL.md managed-block install failed. The installer promises
+#       the agent's SOUL.md carries the canonical MPM behavioural
+#       block; an install failure means that promise is unmet, even
+#       if the gateway itself is reachable.
 # Anything else (gateway unreachable from the start, OR restart
 # succeeded but gateway remained reachable, OR gateway stayed up
 # despite a restart failure) is installer success.
@@ -1037,6 +1045,8 @@ INSTALL_FAILED=0
 if [ "$REPAIR_OK" -ne 1 ]; then
   INSTALL_FAILED=1
 elif [ "$RESTART_ATTEMPTED" -eq 1 ] && [ "$GATEWAY_REACHABLE_AFTER_RESTART" -ne 1 ]; then
+  INSTALL_FAILED=1
+elif [ "$SOUL_MD_OK" -ne 1 ]; then
   INSTALL_FAILED=1
 fi
 
