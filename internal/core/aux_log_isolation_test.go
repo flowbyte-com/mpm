@@ -124,6 +124,12 @@ func TestAuxLogs_InMemoryManagerWritesNothing(t *testing.T) {
 // TestAuxLogs_FileBackedDBStaysBesideItsOwnDatabase pins the positive
 // direction: an explicitly isolated file-backed database keeps its logs
 // in its own tree and nowhere else.
+//
+// A fast successful SQL statement does not produce a watchdog line under
+// the v2 redesign (design §5.4 — fast success is not news), so the test
+// drives one statement that does: a query against a table that does not
+// exist. The SQLite error is what the watchdog records; the path the
+// record lands on is what the test pins.
 func TestAuxLogs_FileBackedDBStaysBesideItsOwnDatabase(t *testing.T) {
 	_, ambientWD, ambientMirror := sentinelInstallHome(t)
 	root := t.TempDir()
@@ -131,11 +137,14 @@ func TestAuxLogs_FileBackedDBStaysBesideItsOwnDatabase(t *testing.T) {
 	dm := NewDatabaseManagerForDB(db)
 	defer dm.Close()
 
-	if _, err := dm.ExecTracked("CREATE TABLE IF NOT EXISTS aux_probe(x INTEGER)", 3); err != nil {
-		t.Fatalf("ExecTracked: %v", err)
-	}
 	dm.ChallengeMemoryAsync("mem-2", "evidence-2")
 	dm.mirrorWG.Wait()
+
+	// Drive a SQL error so the watchdog is forced to write a line —
+	// successful statements produce no line under v2.
+	if _, err := dm.ExecTracked("SELECT * FROM no_such_table_xyz", 0); err == nil {
+		t.Fatalf("expected error from no_such_table_xyz")
+	}
 
 	wantWD := filepath.Join(root, "watchdog.jsonl")
 	wantMirror := filepath.Join(root, "mirror.jsonl")
@@ -265,9 +274,12 @@ func TestAuxLogs_ProductionConstructionUnchanged(t *testing.T) {
 		t.Errorf("production mirrorPath = %q, want %q", dm.mirrorPath, wantMirror)
 	}
 
-	// And the logs must actually be written there, with 0600.
-	if _, err := dm.ExecTracked("CREATE TABLE IF NOT EXISTS aux_probe(x INTEGER)", 3); err != nil {
-		t.Fatalf("ExecTracked: %v", err)
+	// And the logs must actually be written there, with 0600. A
+	// fast successful statement produces no watchdog line under v2, so
+	// the test drives a statement that does: a query against a table
+	// that does not exist.
+	if _, err := dm.ExecTracked("SELECT * FROM no_such_table_xyz", 0); err == nil {
+		t.Fatalf("expected error from no_such_table_xyz")
 	}
 	dm.ChallengeMemoryAsync("mem-prod", "evidence-prod")
 	dm.mirrorWG.Wait()

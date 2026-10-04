@@ -2404,9 +2404,44 @@ func (s *MemoryStore) HybridSearch(query string, collection string, n int) ([]*M
 	return results, nil
 }
 
-// ClearMirror clears all memories (use with caution!)
-func (s *MemoryStore) ClearMirror() error {
-	return os.Remove(s.MirrorFile)
+// ClearMirror removes the ACTIVE mirror file and every gzip rotation
+// belonging to it.
+//
+// The pre-v2 version was a single os.Remove of the active file, which left
+// every rotation in place — so the journal an operator was told had been
+// wiped was in fact still on disk in compressed form, and the command that
+// printed "All memories wiped." had wiped neither the database nor the
+// history. Both halves of that are wrong, and the fix is to be explicit
+// about what this does and does not touch:
+//
+//   - IN SCOPE: the active mirror file, and its rotations.
+//   - OUT OF SCOPE: mpm.db, the audit table, backups, and the watchdog log.
+//     The watchdog keeps a `destructive_operation` tombstone precisely
+//     because an operator investigating what happened next should not find
+//     the log has been silently truncated too.
+//
+// The caller (handleMemoryWipe) owns the user-facing wording, and that
+// wording has to state this scope rather than imply more. See SPEC §4.5.2
+// for why "secure" and "erase" are not available words for any of this.
+func (s *MemoryStore) ClearMirror() (int, error) {
+	if s.MirrorFile == "" {
+		return 0, nil
+	}
+	if err := os.Remove(s.MirrorFile); err != nil && !os.IsNotExist(err) {
+		return 0, err
+	}
+	rots, err := listRotations(s.MirrorFile)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, r := range rots {
+		if rmErr := os.Remove(r.path); rmErr != nil {
+			return removed, rmErr
+		}
+		removed++
+	}
+	return removed, nil
 }
 
 // PromoteTopicToMemory converts a topic to a permanent memory

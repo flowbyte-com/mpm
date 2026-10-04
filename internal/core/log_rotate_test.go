@@ -2,6 +2,7 @@ package internal
 
 import (
 	"compress/gzip"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -144,10 +145,14 @@ func TestLogRotateThresholdBytes_InvalidFallback(t *testing.T) {
 }
 
 // TestLogWatchdog_TriggersRotationAtThreshold pins the end-to-end
-// integration: writing through logWatchdog at a threshold below the
-// file's size produces a gzipped rotated file. Uses a private
-// DatabaseManager with a tmpdir watchdog path so production logs
-// are untouched.
+// integration: writing through the v2 watchdog path at a threshold
+// below the file's size produces a gzipped rotated file. Uses a
+// private DatabaseManager with a tmpdir watchdog path so production
+// logs are untouched.
+//
+// The records come from logSQLOutcome with an error, because a fast
+// successful statement is deliberately not recorded at all (v2) — the
+// test would otherwise be asserting against an empty file.
 func TestLogWatchdog_TriggersRotationAtThreshold(t *testing.T) {
 	dm := newTestDM(t)
 
@@ -160,7 +165,7 @@ func TestLogWatchdog_TriggersRotationAtThreshold(t *testing.T) {
 	// Write enough content to exceed a small threshold.
 	bigLine := strings.Repeat("x", 200)
 	for i := 0; i < 5; i++ {
-		dm.logWatchdog(watchdogOp{Operation: "exec", Query: bigLine})
+		dm.logSQLOutcome(watchdogOpExec, bigLine, 0, errors.New("boom"), 0)
 	}
 
 	// First check: file exists.

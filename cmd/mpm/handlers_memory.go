@@ -776,6 +776,17 @@ func handleMemoryShred(args []string) int {
 			output += fmt.Sprintf("    - %s: %d rows\n", t, sweep[t])
 		}
 	}
+	// The residual-copies disclosure. A shred removes an object from the
+	// active substrate; it does not reach into the audit table, the backups,
+	// or the compressed journal history, and it does not overwrite bytes on
+	// the storage medium. An operator who needs those copies gone has to
+	// act on them separately, and they can only do that if told they exist.
+	output += "  removed from the active substrate and its defined cascades\n"
+	output += "  still present by design:\n"
+	output += "    - audit-log rows and any database backup taken before now\n"
+	output += "    - compressed mirror.jsonl / watchdog.jsonl history\n"
+	output += "      (remove those log copies with: mpm ops logs purge --scope mirror --force)\n"
+	output += "    - the bytes themselves, until SQLite reuses the freed pages\n"
 	return respond(output, "", 0)
 }
 
@@ -985,11 +996,30 @@ func handleMemoryWipe(args []string) int {
 
 	store := getMemoryStore()
 
-	// Clear the mirror file
-	err := store.ClearMirror()
+	// Clear the mirror: the active file AND its rotations. Before the v2
+	// retention work this removed only the active file, so the compressed
+	// history the operator was told had gone was still on disk.
+	rotations, err := store.ClearMirror()
 	if err != nil {
-		return respond("", fmt.Sprintf("Failed to wipe memories: %v", err), 1)
+		return respond("", fmt.Sprintf("Failed to clear the mirror journal: %v\n", err), 1)
 	}
 
-	return respond("All memories wiped.\n", "", 0)
+	// Tombstone the watchdog. The log is NOT cleared — an operator who
+	// wipes the cognitive journal and then finds no record that they did is
+	// worse off than one who finds the record.
+	if dm := getDBConcrete(); dm != nil {
+		dm.LogDestructiveOperation("memory wipe", 1+rotations)
+	}
+	// The message states the actual scope. "All memories wiped." was false
+	// in both directions: the database was untouched, and the rotations
+	// survived. Saying what happened, and what deliberately did not, is the
+	// only version of this line that is safe to print.
+	return respond(fmt.Sprintf(
+		"Mirror journal cleared: 1 active file + %d rotation(s) removed.\n\n"+
+			"Still present, and unaffected by this command:\n"+
+			"  - every memory in mpm.db (use `mpm memory shred <id>` per object)\n"+
+			"  - the audit log (system_audit_log) and any database backup\n"+
+			"  - watchdog.jsonl, which now carries a destructive_operation record\n\n"+
+			"To remove the log copies themselves: mpm ops logs purge --scope mirror --force\n",
+		rotations), "", 0)
 }
