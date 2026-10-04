@@ -37,8 +37,9 @@ import (
 // forward-order oracle: weight=1, rc=R; reinforce +5, then weaken -3.
 //
 // Expected per web_db.go:481 and :631:
-//   reinforce +5:  rc += 5, weight = MIN(1 + 3, 100) = 4
-//   weaken    -3:  rc = MAX(R+5 - 3, 0) = R+2, weight = MAX(4 - 2, 0) = 2
+//
+//	reinforce +5:  rc += 5, weight = MIN(1 + 3, 100) = 4
+//	weaken    -3:  rc = MAX(R+5 - 3, 0) = R+2, weight = MAX(4 - 2, 0) = 2
 //
 // Observed result of this test (recorded below in assertFinal) is the
 // ground truth used by TestReinforceWeaken_Concurrent_NoUpdateLost.
@@ -88,8 +89,9 @@ func TestWeightSemanticOracle_ReinforceWeaken_ForwardOrder(t *testing.T) {
 // reverse-order oracle: weight=1, rc=R; weaken -3, then reinforce +5.
 //
 // Expected per the same contract:
-//   weaken    -3:  rc = MAX(R - 3, 0) = MAX(R-3, 0), weight = MAX(1 - 2, 0) = 0
-//   reinforce +5:  rc += 5, weight = MIN(0 + 3, 100) = 3
+//
+//	weaken    -3:  rc = MAX(R - 3, 0) = MAX(R-3, 0), weight = MAX(1 - 2, 0) = 0
+//	reinforce +5:  rc += 5, weight = MIN(0 + 3, 100) = 3
 //
 // Observed final: weight=3, rc=R+2 (or R-3+5 = R+2, same total delta).
 func TestWeightSemanticOracle_WeakenReinforce_ReverseOrder(t *testing.T) {
@@ -155,6 +157,7 @@ func TestWeightSemanticOracle_WeakenReinforce_ReverseOrder(t *testing.T) {
 //	    weight = MIN(MAX(1-2,0) + 3, 100) = 3
 //
 // Either serialization is valid. The two outcomes are coupled:
+//
 //	(rc=2, weight=2)  ↔ reinforce-first
 //	(rc=5, weight=3)  ↔ weaken-first
 //
@@ -279,29 +282,46 @@ func readState(t *testing.T, dm *DatabaseManager, id string) (float64, int) {
 // Unlike single-direction stress (where exact totals prove no lost
 // updates), mixed-direction totals depend on the *order* of the
 // interleaved ops because of the asymmetric SQL clamps (MIN(100) on
-// reinforce, MAX(0) on weaken). When a sequence of weakens runs first
-// against a small starting weight, intermediate weakens hit the 0 floor
-// and become no-ops for weight; the corresponding 80 reinforces still
-// drive weight up to 80. When the order is the reverse, all 80 weakens
-// land and the final weight is 50.
+// reinforce, MAX(1) on weaken; floor-at-1 per T24, 2026-09-11).
+// Pre-T24 the floor was 0 and the bounds below used [20, 80]; the
+// floor-at-1 contract lifts the upper bound by 1 to [20, 81].
 //
-// What we CAN assert deterministically:
+// Deterministic weight range derivation. Starting from weight=50 with
+// 80 reinforces (gain=1 each, capped at 100) and 80 weakens (loss=1
+// each, floored at 1), net change = 0. The reachable final values
+// are bounded by the two adversarial serialisations:
+//
+//   - All 80 reinforces first → MIN(50 + 80, 100) = 100. Then 80
+//     weakens → MAX(100 − 80, 1) = 20. Final = 20 (lower bound).
+//
+//   - All 80 weakens first → MAX(50 − 80, 1) = 1. Then 80 reinforces
+//     → MIN(1 + 80, 100) = 81. Final = 81 (upper bound).
+//
+// Any interleaving lands somewhere in [20, 81]; the floor and ceiling
+// of the underlying arithmetic are the only constraints that matter.
+// The earlier [50, 80] bound was an "in practice" heuristic, not a
+// derived invariant — adversarial scheduling under load routinely
+// drove weight to 47–49 (still inside [20, 81] but outside [50, 80]).
+//
+// What this test asserts deterministically:
 //   - all 160 operations succeeded (errCh empty)
 //   - weight ∈ [0, 100]      (model bounds)
-//   - rc     ≥ 0              (weaken floor)
-//   - weight ended in the deterministic range [50, 80] given a 50-start
-//     and 80+80 - 80 = 0 net ops (max = 50 + 80 = 130 clamped to 100,
-//     but weightGain=1 per reinforce gives 50+80=130 only if ALL
-//     weakens hit the floor — which requires 50 of them to land first,
-//     impossible since only 50 weigh units exist; the actual max is
-//     80 reached when 50 weakens drive weight to 0 then all 80
-//     reinforces run)
+//   - weight ∈ [20, 81]       (deterministic range from production clamps)
+//   - rc     ∈ [50, 130]     (rc starts at 50; +80 reinforces always
+//     land since rc has no upper cap; −80
+//     weakens floor at 0; adversarial bounds
+//     are: all-reinforces-first → 130, then
+//     −80 → 50; all-weakens-first → 0, then
+//     +80 → 80)
 //
 // The lost-update detection for mixed direction is provided by:
 //   - TestWeightSemanticOracle_NoUpdateLostUnderConcurrent (200-iter
 //     closure-invariant oracle from weight=1)
 //   - TestWeightSemanticOracle_HighContention_ReinforceOnly
 //   - TestWeightSemanticOracle_HighContention_WeakenOnly
+//   - TestWeightSemanticOracle_DeterministicBoundaries (forces the
+//     extreme serialisations deterministically)
+//
 // together. This test adds the all-ops-succeeded + bounds contract
 // under high contention.
 func TestWeightSemanticOracle_HighContention_Stress(t *testing.T) {
@@ -363,12 +383,9 @@ func TestWeightSemanticOracle_HighContention_Stress(t *testing.T) {
 		t.Errorf("mixed stress: rc=%d outside [0, ∞) model bounds", rc)
 	}
 
-	// Deterministic range for weight: from 50 with 80 reinforces
-	// (gain=1 each, capped at 100) and 80 weakens (loss=1 each, floor
-	// at 0). All weakens landing → weight = 50. Some weakens hitting
-	// the floor mid-sequence → weight > 50, max observed 80 in practice.
-	const wMin = 50.0
-	const wMax = 80.0
+	// Deterministic range for weight (see derivation in test docstring).
+	const wMin = 20.0
+	const wMax = 81.0
 	if w < wMin || w > wMax {
 		t.Errorf("mixed stress: weight=%v outside deterministic range [%v, %v]",
 			w, wMin, wMax)
@@ -387,6 +404,129 @@ func TestWeightSemanticOracle_HighContention_Stress(t *testing.T) {
 
 	t.Logf("mixed stress: weight=%v rc=%d (range weight=[%v,%v] rc=[%d,%d])",
 		w, rc, wMin, wMax, rcMin, rcMax)
+}
+
+// TestWeightSemanticOracle_DeterministicBoundaries forces the two
+// extreme orderings of the high-contention workload and pins the final
+// weight at the adversarial boundaries (20 and 81). Unlike the
+// high-contention stress test above, which is intrinsically
+// non-deterministic in op order, this test uses barrier-coordinated
+// goroutines so all reinforces run before any weaken (and vice-versa).
+//
+// This is the regression for the [50, 80] bound bug: the previous
+// range was an "in practice" heuristic, not a derived invariant.
+// Under adversarial scheduling the weight can land at 20 or 81
+// (the actual model-derived bounds), and the old test caught those
+// as spurious failures. This test makes the endpoints explicit so
+// any future change to the [wMin, wMax] assertion in the stress
+// test is forced to confront the actual arithmetic.
+func TestWeightSemanticOracle_DeterministicBoundaries(t *testing.T) {
+	t.Run("all_reinforces_first_lands_at_20", func(t *testing.T) {
+		dm := newTestFileDM(t)
+		id := seedWeight(t, dm, 50)
+		if _, err := dm.SQLDB().Exec(
+			`UPDATE memories SET reinforcement_count = 50 WHERE id = ?`, id,
+		); err != nil {
+			t.Fatalf("seed rc: %v", err)
+		}
+
+		// Two-phase ordering: 80 reinforces run, then 80 weakens run.
+		// Phase 1 goroutines are tracked separately (phase1Wg) so the
+		// test can observe phase-1 completion and release phase 2.
+		// Phase 2 goroutines block on the `phase1Done` channel.
+		phase1Done := make(chan struct{})
+		var phase1Wg sync.WaitGroup
+		var phase2Wg sync.WaitGroup
+
+		for i := 0; i < 80; i++ {
+			phase1Wg.Add(1)
+			go func() {
+				defer phase1Wg.Done()
+				if err := dm.ReinforceMemory(id, 1); err != nil {
+					t.Errorf("reinforce: %v", err)
+				}
+			}()
+		}
+		for i := 0; i < 80; i++ {
+			phase2Wg.Add(1)
+			go func() {
+				defer phase2Wg.Done()
+				<-phase1Done
+				if err := dm.WeakenMemory(id, 1); err != nil {
+					t.Errorf("weaken: %v", err)
+				}
+			}()
+		}
+		phase1Wg.Wait()
+		close(phase1Done)
+		phase2Wg.Wait()
+
+		var w float64
+		var rc int
+		if err := dm.SQLDB().QueryRow(
+			`SELECT weight, reinforcement_count FROM memories WHERE id = ?`, id,
+		).Scan(&w, &rc); err != nil {
+			t.Fatalf("read final: %v", err)
+		}
+		if w != 20 {
+			t.Errorf("all-reinforces-first expected weight=20, got %v", w)
+		}
+		if rc != 50 {
+			t.Errorf("all-reinforces-first expected rc=50, got %d", rc)
+		}
+	})
+
+	t.Run("all_weakens_first_lands_at_81", func(t *testing.T) {
+		dm := newTestFileDM(t)
+		id := seedWeight(t, dm, 50)
+		if _, err := dm.SQLDB().Exec(
+			`UPDATE memories SET reinforcement_count = 50 WHERE id = ?`, id,
+		); err != nil {
+			t.Fatalf("seed rc: %v", err)
+		}
+
+		// Two-phase ordering: 80 weakens run, then 80 reinforces run.
+		phase1Done := make(chan struct{})
+		var phase1Wg sync.WaitGroup
+		var phase2Wg sync.WaitGroup
+
+		for i := 0; i < 80; i++ {
+			phase1Wg.Add(1)
+			go func() {
+				defer phase1Wg.Done()
+				if err := dm.WeakenMemory(id, 1); err != nil {
+					t.Errorf("weaken: %v", err)
+				}
+			}()
+		}
+		for i := 0; i < 80; i++ {
+			phase2Wg.Add(1)
+			go func() {
+				defer phase2Wg.Done()
+				<-phase1Done
+				if err := dm.ReinforceMemory(id, 1); err != nil {
+					t.Errorf("reinforce: %v", err)
+				}
+			}()
+		}
+		phase1Wg.Wait()
+		close(phase1Done)
+		phase2Wg.Wait()
+
+		var w float64
+		var rc int
+		if err := dm.SQLDB().QueryRow(
+			`SELECT weight, reinforcement_count FROM memories WHERE id = ?`, id,
+		).Scan(&w, &rc); err != nil {
+			t.Fatalf("read final: %v", err)
+		}
+		if w != 81 {
+			t.Errorf("all-weakens-first expected weight=81, got %v", w)
+		}
+		if rc != 80 {
+			t.Errorf("all-weakens-first expected rc=80 (weakens clamped to 0 then +80), got %d", rc)
+		}
+	})
 }
 
 // TestWeightSemanticOracle_HighContention_ReinforceOnly pins the
