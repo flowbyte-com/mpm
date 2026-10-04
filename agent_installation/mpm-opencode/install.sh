@@ -145,16 +145,29 @@ done
 # Step 1: compile dist/ if missing or stale
 # --------------------------------------------------------------------------
 #
-# `npx tsc` is the canonical build. We rebuild only when the existing
-# dist/index.js is older than src/index.ts — incremental build keeps
-# this fast on repeat invocations.
+# The local TypeScript compiler (./node_modules/.bin/tsc) is the
+# canonical build. We rebuild only when the existing dist/index.js is
+# older than src/index.ts — incremental build keeps this fast on
+# repeat invocations. See build_dist() for why we don't use
+# `npx tsc` (the deprecated npm package lookup).
 
 build_dist() {
     if [ ! -f "$SCRIPT_DIR/dist/index.js" ] \
         || [ -f "$SCRIPT_DIR/src/index.ts" -a "$SCRIPT_DIR/src/index.ts" -nt "$SCRIPT_DIR/dist/index.js" ]; then
         log "rebuilding dist/ from source..."
-        if ! (cd "$SCRIPT_DIR" && npx tsc 2>>"$INSTALL_LOG") >>"$INSTALL_LOG" 2>&1; then
-            die "npx tsc failed; see $INSTALL_LOG" 2
+        # Use the local TypeScript binary from node_modules/.bin/. We
+        # intentionally do NOT use `npx tsc` here: `npx tsc` resolves
+        # the npm package name `tsc` (the deprecated 2.0.4 stub that
+        # prints "This is not the tsc command you are looking for")
+        # rather than the local TypeScript compiler. The
+        # node_modules/.bin/tsc path is hermetic and only depends on a
+        # real `npm install` having populated the devDependencies.
+        local tsc_bin="$SCRIPT_DIR/node_modules/.bin/tsc"
+        if [ ! -x "$tsc_bin" ]; then
+            die "TypeScript compiler not found at $tsc_bin; run 'npm install' in the mpm-opencode adapter directory to populate devDependencies" 3
+        fi
+        if ! (cd "$SCRIPT_DIR" && "$tsc_bin" 2>>"$INSTALL_LOG") >>"$INSTALL_LOG" 2>&1; then
+            die "tsc build failed; see $INSTALL_LOG" 2
         fi
         log "dist/index.js rebuilt"
     else
@@ -381,6 +394,9 @@ case "$MODE" in
         if [ ! -f "$SCRIPT_DIR/dist/index.js" ]; then
             err "verify: dist/index.js missing"
             ok=0
+        fi
+        if [ ! -x "$SCRIPT_DIR/node_modules/.bin/tsc" ]; then
+            warn "verify: local TypeScript compiler missing at $SCRIPT_DIR/node_modules/.bin/tsc; 'npm install' needed for fresh builds"
         fi
         if [ ! -f "$OPENCODE_CONFIG" ]; then
             err "verify: $OPENCODE_CONFIG missing"

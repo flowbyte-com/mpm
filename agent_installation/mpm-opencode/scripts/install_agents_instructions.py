@@ -208,7 +208,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Install OpenCode AGENTS.md with MPM behavioral section, idempotently.")
     ap.add_argument("--scope", choices=("user", "project"), required=True)
     ap.add_argument("--target", required=True, help="Absolute path to AGENTS.md")
-    ap.add_argument("--snippet", required=True, help="Path to the AGENTS.md.snippet")
+    # Snippet is required only for the install path; --uninstall does
+    # not need it (the uninstall only manipulates marker-delimited
+    # content in the existing target). Required=True would block the
+    # install.sh --uninstall flow that passes --target + --uninstall
+    # without --snippet.
+    ap.add_argument("--snippet", required=False, help="Path to the AGENTS.md.snippet")
     ap.add_argument("--uninstall", action="store_true")
     args = ap.parse_args()
     if args.uninstall:
