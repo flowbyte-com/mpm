@@ -5,7 +5,6 @@
 package internal
 
 import (
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -90,72 +89,10 @@ func logRotateThresholdBytes() int64 {
 	return n
 }
 
-// rotateLogIfNeeded checks the size of path; if it exceeds thresholdBytes,
-// reads the current contents, gzips them to path.YYYYMMDD-HHMMSS.gz, and
-// truncates the original to zero bytes. The next O_APPEND write creates
-// fresh content. Returns nil on no-op (file missing or below threshold) or
-// on success; errors are non-fatal — the caller logs and continues with
-// the append.
-//
-// Called from inside the watchdogMu critical section so rotation does not
-// race with concurrent writers.
-//
-// Atomicity: the read-then-truncate is not atomic across processes. Two
-// MPM instances writing to the same log (production has only one — the
-// workspace DB is per-process) would race. We accept this; the design
-// contract is "one process owns one workspace DB and its logs." A
-// separate `mpm ops logs rotate` command can be added later if manual
-// rotation is needed.
-func rotateLogIfNeeded(path string, thresholdBytes int64) error {
-	if path == "" {
-		return nil
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("stat log for rotation: %w", err)
-	}
-	if info.Size() < thresholdBytes {
-		return nil
-	}
-
-	timestamp := time.Now().UTC().Format("20060102-150405")
-	rotated := path + "." + timestamp + ".gz"
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read log for rotation: %w", err)
-	}
-	gz, err := os.Create(rotated)
-	if err != nil {
-		return fmt.Errorf("create rotated log: %w", err)
-	}
-	gzWriter := gzip.NewWriter(gz)
-	if _, err := gzWriter.Write(data); err != nil {
-		_ = gzWriter.Close()
-		_ = gz.Close()
-		_ = os.Remove(rotated)
-		return fmt.Errorf("gzip write: %w", err)
-	}
-	if err := gzWriter.Close(); err != nil {
-		_ = gz.Close()
-		_ = os.Remove(rotated)
-		return fmt.Errorf("gzip close: %w", err)
-	}
-	if err := gz.Close(); err != nil {
-		return fmt.Errorf("close rotated log: %w", err)
-	}
-	// Truncate in place so the existing O_APPEND handle (if any) keeps
-	// appending at offset 0. If a different process raced us here, the
-	// log content between the gzip snapshot and now would be lost —
-	// accepted risk per the atomicity note above.
-	if err := os.Truncate(path, 0); err != nil {
-		return fmt.Errorf("truncate after rotation: %w", err)
-	}
-	return nil
-}
+// rotateLogIfNeeded and the rest of the rotation/retention machinery live
+// in hitl_log.go, which owns the single shared append path for both HITL
+// streams. See that file for the size-OR-age policy, the expiry and count
+// caps, and the 0600 rotation contract.
 
 // sqliteWriteDSN appends the foreign-key pragma to a SQLite DSN so that
 // EVERY pooled connection opens with `PRAGMA foreign_keys = ON`.
@@ -1265,14 +1202,26 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 
 	// Check and rotate watchdog/mirror logs at startup so operators don't
 	// need to rely solely on manual `mpm ops logs rotate`. Auto-rotation
-	// also happens on each tracked Exec/Query; the startup check catches
-	// the case where the process idles with no DB activity.
-	threshold := logRotateThresholdBytes()
-	if err := rotateLogIfNeeded(filepath.Join(filepath.Dir(dbPath), "watchdog.jsonl"), threshold); err != nil {
-		slog.Warn("watchdog log rotation at startup", "error", err.Error())
-	}
-	if err := rotateLogIfNeeded(filepath.Join(filepath.Dir(dbPath), "mirror.jsonl"), threshold); err != nil {
-		slog.Warn("mirror log rotation at startup", "error", err.Error())
+	// also happens on each append; the startup check catches the case
+	// where the process idles with no writes at all — which is the normal
+	// state of a scheduler between ticks, and exactly when an age-due
+	// rotation would otherwise never fire.
+	now := time.Now()
+	for _, s := range []struct {
+		name string
+		pol  streamPolicy
+	}{
+		{"watchdog", watchdogPolicy},
+		{"mirror", mirrorPolicy},
+	} {
+		p := filepath.Join(filepath.Dir(dbPath), s.name+".jsonl")
+		pol := resolvedPolicy(s.pol)
+		if _, err := rotateHITLIfNeeded(p, pol, now); err != nil {
+			slog.Warn("hitl log rotation at startup", "stream", s.name, "error", err.Error())
+		}
+		if err := enforceHITLRetention(p, pol, now); err != nil {
+			slog.Warn("hitl log retention at startup", "stream", s.name, "error", err.Error())
+		}
 	}
 
 	// Phase 1 of the multi-agent shared-epistemology arc (docs/archive/shared-epistemology.md):
