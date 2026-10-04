@@ -29,10 +29,11 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"runtime"
-	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -167,55 +168,133 @@ func TestF3_HandlerReceivesCtx(t *testing.T) {
 // that outlives ctx cancellation. Post-fix: handlers that take ctx
 // use exec.CommandContext(ctx, ...), and the child dies when ctx is
 // cancelled.
+//
+// Ownership contract: this test asserts on the EXACT subprocess it
+// created, not on the system-wide population of `sleep 60` processes.
+// A global pgrep / proc scan is wrong: a developer's other tooling,
+// editor, or sibling CI step can legitimately spawn a process named
+// "sleep 60" and create a false-positive leak. The right signal is
+// the captured child PID + the handler-completed signal from
+// cmd.Wait().
 func TestF3_HandlerSubprocessKilledOnCancel(t *testing.T) {
 	s := newTestScheduler(t)
 
-	// Register a handler that spawns a long-lived subprocess via
-	// exec.CommandContext(ctx, ...). When ctx is cancelled, the
-	// subprocess receives SIGKILL and exits.
+	// Channels for deterministic synchronization (NO wall-clock
+	// coordination beyond the cancel path):
+	//   - handlerEntered: closes when the handler goroutine starts;
+	//     proves production reached h(ctx, w).
+	//   - handlerReturned: receives the handler's exit error; closing
+	//     proves cmd.Wait() returned, which guarantees the child has
+	//     been reaped by the OS (Go's os/exec contract).
+	//   - childPID:        receives the spawned child PID as the
+	//     first thing the handler does after Start().
+	var (
+		handlerEntered  = make(chan struct{})
+		childPID        = make(chan int, 1)
+		handlerReturned = make(chan error, 1)
+		enteredOnce     sync.Once
+	)
+
 	s.Register("spawn_sleeper", func(ctx context.Context, w Wake) error {
+		enteredOnce.Do(func() { close(handlerEntered) })
 		cmd := exec.CommandContext(ctx, "sleep", "60")
-		// Pin the test subprocess to the test process group so SIGKILL
-		// from ctx cancellation actually terminates it (rather than
-		// relying on the test process's lifetime).
-		_ = cmd.Start()
-		return cmd.Wait()
+		if err := cmd.Start(); err != nil {
+			handlerReturned <- err
+			return err
+		}
+		// Publish the PID for the test to assert on. Buffer-1 send
+		// so we never block even if the test has already moved on.
+		childPID <- cmd.Process.Pid
+		waitErr := cmd.Wait()
+		handlerReturned <- waitErr
+		return waitErr
 	})
 
 	w := Wake{ID: "wk-subproc-001", Metadata: map[string]interface{}{"kind": "spawn_sleeper"}}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	done := make(chan error, 1)
-	go func() { done <- s.executeOne(ctx, w) }()
+	execDone := make(chan error, 1)
+	go func() { execDone <- s.executeOne(ctx, w) }()
 
-	// Cancel after the handler has spawned its subprocess.
-	time.Sleep(50 * time.Millisecond)
+	// 1. Wait for the handler to start AND publish the child PID.
+	//    Both are required before we cancel — we want to assert on
+	//    the exact child that this invocation of the test created.
+	var pid int
+	select {
+	case <-handlerEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never started; production must invoke h(ctx, w)")
+	}
+	select {
+	case pid = <-childPID:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler started but did not publish child PID")
+	}
+
+	// 2. Cancel. The handler's exec.CommandContext will SIGKILL the
+	//    child, and cmd.Wait() will return with a signal-killed error.
 	cancelStart := time.Now()
 	cancel()
 
+	// 3. executeOne must return promptly on the cancel path
+	//    (it selects on ctx.Done() and does NOT wait for the handler
+	//    goroutine — by design, so a hung handler cannot pin a tick).
 	select {
-	case err := <-done:
-		// The handler should return promptly with a cancellation error.
+	case err := <-execDone:
 		require.Error(t, err, "executeOne must return an error on cancel")
 		require.Less(t, time.Since(cancelStart), 2*time.Second,
-			"executeOne took too long to return after cancel; subprocess leak likely")
+			"executeOne took too long to return after cancel; ctx propagation likely broken")
 		t.Logf("executeOne returned in %v after cancel: %v", time.Since(cancelStart), err)
 	case <-time.After(3 * time.Second):
 		t.Fatal("executeOne did not return within 3s of cancel; goroutine likely leaked")
 	}
 
-	// Give the OS a moment to reap the subprocess, then verify no
-	// `sleep 60` lingers. We check /proc on Linux (the only supported
-	// platform for this test) for any process whose command line
-	// starts with "sleep 60".
+	// 4. Wait for the handler goroutine itself to return. This is the
+	//    KEY synchronization: cmd.Wait() returning is Go's os/exec
+	//    guarantee that the child has been reaped. We must not assert
+	//    on PID liveness before this fires, or we race against the
+	//    OS's process-reaper. The 5s ceiling is a deadlock guard, not
+	//    a synchronization primitive — the real synchronization is
+	//    handlerReturned closing.
+	select {
+	case handlerErr := <-handlerReturned:
+		// We expect a non-nil error ("signal: killed" or
+		// "context canceled" depending on Go version). We do not
+		// require.ErrorIs here because the exact wording of the
+		// Wait() error is platform/version-specific; the only
+		// contract we pin is that Wait() returned (which proves
+		// the child is reaped).
+		_ = handlerErr
+	case <-time.After(5 * time.Second):
+		t.Fatalf("handler did not return within 5s of cancel; "+
+			"cmd.Wait() blocked — the spawned child (pid=%d) was not "+
+			"reaped, indicating a real production regression (NOT a "+
+			"test-only flake). Inspect the child with: ps -p %d",
+			pid, pid)
+	}
+
+	// 5. Defense-in-depth: even though cmd.Wait() has reaped the
+	//    child, double-check the exact PID is gone. We use
+	//    syscall.Kill(pid, 0) which returns ESRCH if the process
+	//    does not exist, and 0 if it does (it does NOT send a
+	//    signal). This is scoped to OUR pid, never a global scan.
+	//
+	//    Skip on non-linux: Windows process liveness via signal 0
+	//    is unreliable and this scheduler is linux-only.
 	if runtime.GOOS == "linux" {
-		time.Sleep(100 * time.Millisecond) // reap window
-		if out, err := exec.Command("pgrep", "-af", "^sleep 60$").CombinedOutput(); err == nil {
-			pgrepOut := strings.TrimSpace(string(out))
-			if pgrepOut != "" {
-				t.Fatalf("subprocess leaked after cancel: %s", pgrepOut)
-			}
+		if err := syscall.Kill(pid, 0); err == nil {
+			t.Fatalf("child pid=%d is still alive after handler returned "+
+				"from cmd.Wait(); exec.CommandContext did not actually "+
+				"terminate the child on ctx cancel", pid)
+		} else if !errors.Is(err, syscall.ESRCH) {
+			// EPERM is "process exists, you can't signal it" —
+			// that still proves the process is alive, which is a
+			// leak. Anything other than ESRCH is a failure.
+			t.Fatalf("unexpected error from kill(%d, 0): %v "+
+				"(want ESRCH; EPERM would also indicate the process is alive)",
+				pid, err)
 		}
 	}
 }
