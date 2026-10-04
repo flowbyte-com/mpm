@@ -586,7 +586,7 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 	registerDomainTool(bin, tools, {
 		name: "mpm_wakes",
 		description: `Wake scheduling and inspection. Literal actions:
-  schedule — Required params.reason, params.target_time (epoch/duration/ISO-8601). Optional: params.theory_id, params.recurring_rule, params.metadata.
+  schedule — Required params.reason, params.target_time (epoch/duration/ISO-8601). Optional: params.theory_id, params.metadata. For recurring workflows use upsert_task (cron).
   check — Pull due wakes. Optional: params.kinds (array; default notification-only; ["*"] for all).
   check_pending_event — Pull event wakes for this session. Optional: params.session_id.
   list — List scheduled wakes. Optional: params.include_fired, params.overdue_only, params.limit.
