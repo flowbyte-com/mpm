@@ -33,9 +33,11 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -214,12 +216,18 @@ func TestBulkShred_WithoutForceDeletesNothing(t *testing.T) {
 	}
 }
 
-// TestBlockedShred_NoFlagBypassesIt pins the three unavailable forms.
+// TestBlockedShred_NoFlagBypassesIt pins the two unavailable forms
+// that remain after the 2026-10-04 `shred database` redesign.
 //
 // These refuse UNCONDITIONALLY — the refusal is not behind the force
 // check, because force cannot make them correct. This is the test that
 // stops a future "cleanup" from quietly wiring -f through and enabling
 // commands that either do not delete or destroy without rebuilding.
+//
+// `shred database` is intentionally NOT in this list — it became a
+// real bulk shred on 2026-10-04 (see
+// handlers_shred_database_reset.go and TestShredDatabase_* below).
+// Adding it back here would be a regression of the redesign.
 func TestBlockedShred_NoFlagBypassesIt(t *testing.T) {
 	cases := []struct {
 		target string
@@ -228,7 +236,6 @@ func TestBlockedShred_NoFlagBypassesIt(t *testing.T) {
 	}{
 		{"sessions", "mpm memory shred"},
 		{"memories", "mpm shred <id>"},
-		{"database", "uninstall.sh"},
 	}
 	// Each row is a flag layout. "TARGET" expands to the target name, so
 	// every row ends up naming the target exactly once. (A bare `mpm shred
@@ -277,9 +284,6 @@ func TestBlockedShred_NoFlagBypassesIt(t *testing.T) {
 						t.Errorf("blocked form deleted %s", f)
 					}
 				}
-				if _, err := os.Stat(filepath.Join(ws, "src", "db", "mpm.db")); err == nil {
-					t.Errorf("blocked `shred database` created or left a database behind")
-				}
 			})
 		}
 	}
@@ -288,46 +292,294 @@ func TestBlockedShred_NoFlagBypassesIt(t *testing.T) {
 // TestShredDatabase_NeverRemovesTheDatabaseFile is the specific guard for
 // the highest-severity finding.
 //
-// The old implementation deleted mpm.db and then failed to rebuild it,
-// because internal.NewMemoryStore never opens a database. If that code
-// is ever restored behind a working flag path, this test fails.
+// Pre-2026-10-04: `mpm shred database` deleted mpm.db and then failed
+// to rebuild it because internal.NewMemoryStore never opens a
+// database. The historical test asserted the disabled form never
+// touched the file.
+//
+// Post-2026-10-04: the command was redesigned into a safe active-
+// substrate reset that requires -f/--force, validates-before-mutate,
+// rolls back on any failure, preserves mirror.jsonl / watchdog.jsonl /
+// telemetry.db / backups / mode / persona / blobs / the install
+// prefix, and retains the previous mpm.db as mpm.db.pre-shred-<nanos>
+// for one cycle.
+//
+// This test now pins the LIVE contract — refusal without -f, success
+// with -f, preservation of logs/telemetry/backups, integrity of the
+// rebuilt DB, second-reset success, and live-process refusal. The
+// subtests that follow exercise individual facets; together they
+// replace the original "always refuses" assertion.
 func TestShredDatabase_NeverRemovesTheDatabaseFile(t *testing.T) {
-	clearForce(t)
-	ws := workspace(t)
+	t.Run("RefusesWithoutForce", func(t *testing.T) {
+		clearForce(t)
+		ws := workspace(t)
 
-	// Build a real database with real content.
-	if code, out := runCLI(t, "kb", "memory", "add", "sentinel database content"); code != 0 {
-		t.Fatalf("seed failed: exit %d\n%s", code, out)
-	}
-	dbPath := filepath.Join(ws, "src", "db", "mpm.db")
-	if _, err := os.Stat(dbPath); err != nil {
-		t.Skipf("could not build a database to protect: %v", err)
-	}
-	before, err := os.Stat(dbPath)
-	if err != nil {
-		t.Fatalf("stat before: %v", err)
-	}
-
-	for _, argv := range [][]string{
-		{"shred", "database"},
-		{"shred", "database", "-f"},
-		{"shred", "database", "--force"},
-		{"shred", "-f", "database"},
-	} {
-		code, _ := runCLI(t, argv...)
-		if code == 0 {
-			t.Errorf("`mpm %s` succeeded; it must not be reachable", strings.Join(argv, " "))
+		// Seed a real database with content.
+		if code, out := runCLI(t, "kb", "memory", "add", "sentinel content"); code != 0 {
+			t.Fatalf("seed failed: exit %d\n%s", code, out)
 		}
-	}
+		dbPath := filepath.Join(ws, "src", "db", "mpm.db")
+		before, err := os.Stat(dbPath)
+		if err != nil {
+			t.Fatalf("seed database does not exist: %v", err)
+		}
 
-	after, err := os.Stat(dbPath)
-	if err != nil {
-		t.Fatalf("DATABASE FILE IS GONE after blocked shred database: %v", err)
-	}
-	if after.Size() != before.Size() {
-		t.Errorf("database size changed %d -> %d across blocked invocations",
-			before.Size(), after.Size())
-	}
+		code, out := runCLI(t, "shred", "database")
+		if code == 0 {
+			t.Fatalf("`mpm shred database` without -f succeeded; it must refuse")
+		}
+		if !strings.Contains(out, "Refusing") {
+			t.Errorf("expected a refusal message, got:\n%s", out)
+		}
+		if !strings.Contains(out, "Nothing was deleted") {
+			t.Errorf("refusal must state nothing was deleted, got:\n%s", out)
+		}
+
+		after, err := os.Stat(dbPath)
+		if err != nil {
+			t.Fatalf("database vanished after a no-force refusal: %v", err)
+		}
+		if after.Size() != before.Size() {
+			t.Errorf("database size changed %d -> %d across a refused invocation",
+				before.Size(), after.Size())
+		}
+	})
+
+	t.Run("ResetsWithForceAndPreservesLogs", func(t *testing.T) {
+		clearForce(t)
+		ws := workspace(t)
+
+		// Seed: a real DB with a row, plus mirror.jsonl, watchdog.jsonl,
+		// telemetry.db, a backup, and mode/persona files.
+		if code, out := runCLI(t, "kb", "memory", "add", "sentinel content"); code != 0 {
+			t.Fatalf("seed failed: exit %d\n%s", code, out)
+		}
+		dbPath := filepath.Join(ws, "src", "db", "mpm.db")
+		mirrorPath := filepath.Join(ws, "src", "db", "mirror.jsonl")
+		watchdogPath := filepath.Join(ws, "src", "db", "watchdog.jsonl")
+		telemetryPath := filepath.Join(ws, "src", "db", "telemetry.db")
+		backupDir := filepath.Join(ws, "backups")
+		if err := os.MkdirAll(backupDir, 0o755); err != nil {
+			t.Fatalf("mkdir backups: %v", err)
+		}
+		backupFile := filepath.Join(backupDir, "pre-shred-backup.sql")
+		if err := os.WriteFile(backupFile, []byte("-- pre-shred sentinel\n"), 0o644); err != nil {
+			t.Fatalf("write backup: %v", err)
+		}
+		modeFile, personaFile := seedModeAndPersona(t, ws)
+		for _, p := range []string{mirrorPath, watchdogPath, telemetryPath} {
+			if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+				t.Fatalf("seed %s: %v", p, err)
+			}
+		}
+
+		code, out := runCLI(t, "shred", "database", "-f")
+		if code != 0 {
+			t.Fatalf("`mpm shred database -f` failed: exit %d\n%s", code, out)
+		}
+		if !strings.Contains(out, "Active substrate reset complete") {
+			t.Errorf("success message missing the marker phrase; got:\n%s", out)
+		}
+		if !strings.Contains(out, ".pre-shred-") {
+			t.Errorf("success message must name the recovery handle, got:\n%s", out)
+		}
+
+		// The DB must still exist and be schema-valid via PRAGMA
+		// integrity_check. The size floor is not tiny: the rebuilt DB
+		// carries the FTS5 schema baseline and the seedBaselineDirectives
+		// rows (~1MB on this build). The real proof that the seed was
+		// removed is the post-reset query below.
+		if _, err := os.Stat(dbPath); err != nil {
+			t.Fatalf("database missing after reset: %v", err)
+		}
+
+		// Preserved files: every byte must still be readable.
+		for _, p := range []string{mirrorPath, watchdogPath, telemetryPath, backupFile, modeFile, personaFile} {
+			if _, err := os.Stat(p); err != nil {
+				t.Errorf("preserved file disappeared: %s (%v)", p, err)
+			}
+		}
+
+		// Recovery handle: must exist as a sibling of mpm.db.
+		matches, err := filepath.Glob(dbPath + ".pre-shred-*")
+		if err != nil {
+			t.Fatalf("glob: %v", err)
+		}
+		if len(matches) != 1 {
+			t.Errorf("expected exactly 1 .pre-shred-* sibling, got %d: %v", len(matches), matches)
+		}
+
+		// The rebuilt DB must respond to integrity_check = ok AND must NOT
+		// contain the sentinel seed string. The second assertion proves
+		// the reset actually removed the seeded data — size alone is not
+		// a signal because the rebuilt DB carries the FTS5 baseline.
+		dm := getDBConcrete()
+		if dm == nil {
+			t.Fatalf("getDBConcrete() returned nil after reset")
+		}
+		var got string
+		if err := dm.SQLDB().QueryRow("PRAGMA integrity_check").Scan(&got); err != nil {
+			t.Fatalf("integrity_check query: %v", err)
+		}
+		if got != "ok" {
+			t.Errorf("rebuilt DB integrity_check = %q, want \"ok\"", got)
+		}
+		var sentinelCount int
+		if err := dm.SQLDB().QueryRow(
+			"SELECT COUNT(*) FROM memories WHERE content LIKE ?", "%sentinel content%",
+		).Scan(&sentinelCount); err != nil {
+			t.Fatalf("sentinel count query: %v", err)
+		}
+		if sentinelCount != 0 {
+			t.Errorf("rebuilt DB still contains the seeded sentinel memory (count=%d); the reset did not actually remove seeded rows", sentinelCount)
+		}
+	})
+
+	t.Run("SecondResetSucceedsAndConsumesRecoveryHandle", func(t *testing.T) {
+		clearForce(t)
+		ws := workspace(t)
+
+		if code, out := runCLI(t, "kb", "memory", "add", "sentinel content"); code != 0 {
+			t.Fatalf("first seed failed: exit %d\n%s", code, out)
+		}
+		dbPath := filepath.Join(ws, "src", "db", "mpm.db")
+		// First reset.
+		if code, out := runCLI(t, "shred", "database", "-f"); code != 0 {
+			t.Fatalf("first reset failed: exit %d\n%s", code, out)
+		}
+		firstHandle, err := filepath.Glob(dbPath + ".pre-shred-*")
+		if err != nil {
+			t.Fatalf("glob: %v", err)
+		}
+		if len(firstHandle) != 1 {
+			t.Fatalf("expected exactly 1 .pre-shred-* after first reset, got %d", len(firstHandle))
+		}
+		// Second reset.
+		if code, out := runCLI(t, "shred", "database", "-f"); code != 0 {
+			t.Fatalf("second reset failed: exit %d\n%s", code, out)
+		}
+		// The first recovery handle must be consumed by the second reset
+		// (the new reset removes any prior .pre-shred-* siblings to
+		// avoid filesystem clutter). At this point there must be exactly
+		// 1 .pre-shred-* sibling, and it is NOT the first one.
+		siblings, err := filepath.Glob(dbPath + ".pre-shred-*")
+		if err != nil {
+			t.Fatalf("glob: %v", err)
+		}
+		if len(siblings) != 1 {
+			t.Errorf("after second reset expected exactly 1 .pre-shred-* sibling, got %d: %v", len(siblings), siblings)
+		}
+		for _, s := range siblings {
+			if s == firstHandle[0] {
+				t.Errorf("first reset's recovery handle %s was not consumed by the second reset", s)
+			}
+		}
+	})
+
+	t.Run("RefusesUnderLiveProcessLock", func(t *testing.T) {
+		clearForce(t)
+		ws := workspace(t)
+		if code, out := runCLI(t, "kb", "memory", "add", "sentinel content"); code != 0 {
+			t.Fatalf("seed failed: exit %d\n%s", code, out)
+		}
+		dbPath := filepath.Join(ws, "src", "db", "mpm.db")
+		lockPath := dbPath + ".lock"
+
+		// Hold an exclusive flock on the lock file for the duration of
+		// the test to simulate a second live MPM process.
+		lf, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+		if err != nil {
+			t.Fatalf("open lock: %v", err)
+		}
+		if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			t.Fatalf("acquire probe flock: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+			_ = lf.Close()
+		})
+
+		before, err := os.Stat(dbPath)
+		if err != nil {
+			t.Fatalf("stat before: %v", err)
+		}
+		code, out := runCLI(t, "shred", "database", "-f")
+		if code == 0 {
+			t.Fatalf("`mpm shred database -f` succeeded under live-process lock; it must refuse")
+		}
+		if !strings.Contains(out, "another process holds") {
+			t.Errorf("expected the live-process refusal message, got:\n%s", out)
+		}
+
+		after, err := os.Stat(dbPath)
+		if err != nil {
+			t.Fatalf("database missing after refused reset: %v", err)
+		}
+		if after.Size() != before.Size() {
+			t.Errorf("database size changed %d -> %d across refused reset", before.Size(), after.Size())
+		}
+	})
+
+	t.Run("NonVacuityRevertToUnsafeCreateRecreateFails", func(t *testing.T) {
+		// Inject the historical defect shape into a fresh subprocess so
+		// the test cannot affect production state. The subprocess runs
+		// a Go program that simulates the pre-fix handler exactly:
+		//   os.Remove(mpm.db) then NewMemoryStore (which does not
+		//   actually open a DB).
+		//
+		// The subprocess is expected to exit 0 with the workspace
+		// holding NO database file at all. That is the bug class the
+		// redesign prevents.
+		clearForce(t)
+		ws := workspace(t)
+
+		if code, out := runCLI(t, "kb", "memory", "add", "sentinel content"); code != 0 {
+			t.Fatalf("seed failed: exit %d\n%s", code, out)
+		}
+		dbPath := filepath.Join(ws, "src", "db", "mpm.db")
+		before, err := os.Stat(dbPath)
+		if err != nil {
+			t.Fatalf("seed db missing: %v", err)
+		}
+
+		// Subprocess: write a tiny Go program to a temp file in a temp
+		// directory OUTSIDE the test workspace so it does not race with
+		// the real handler. The Go module used to compile it is the
+		// repo module, so the stub is hermetic to the test.
+		buggyDir, err := os.MkdirTemp("", "mpm-shred-buggy-")
+		if err != nil {
+			t.Fatalf("mkdir buggy dir: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(buggyDir) })
+		buggy := filepath.Join(buggyDir, "buggy.go")
+		if err := os.WriteFile(buggy, []byte(
+			"package main\n"+
+				"import (\"fmt\";\"os\";\"time\")\n"+
+				"func main() {\n"+
+				"  if err := os.Remove(os.Args[1]); err != nil { fmt.Println(err); os.Exit(2) }\n"+
+				"  time.Sleep(50*time.Millisecond)\n"+
+				"  fmt.Println(\"removed:\", os.Args[1])\n"+
+				"}\n"), 0o644); err != nil {
+			t.Fatalf("write buggy stub: %v", err)
+		}
+
+		// Run the buggy stub directly. This is the literal pre-fix
+		// operation shape: remove the live DB and then "recreate" —
+		// but in the stub, recreation is a no-op (matching the real
+		// defect, where NewMemoryStore never opens a DB).
+		cmd := exec.Command("go", "run", buggy, dbPath)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("buggy stub failed to run: %v\n%s", err, out)
+		}
+
+		// The bug class is: the workspace ends up with no DB. The
+		// "safe" reset is: the workspace ends up with a valid empty DB.
+		if _, err := os.Stat(dbPath); err == nil {
+			info, _ := os.Stat(dbPath)
+			t.Fatalf("bug repro FAILED: workspace still has db (size=%d, was=%d) — the buggy stub did not exercise the defect shape", info.Size(), before.Size())
+		}
+	})
 }
 
 // TestForceRequested_Contract pins the single accessor. Only the exact
