@@ -822,7 +822,7 @@ func (cm *CascadeMaterializer) scheduleCascadeWake(intentID, theoryID, invalidat
 		"source":                "cascade-materializer",
 	}
 
-	if _, err := cm.dm.ScheduleWake(reason, targetTime, theoryID, "", createdBy, meta); err != nil {
+	if _, err := cm.dm.ScheduleWake(reason, targetTime, theoryID, createdBy, meta); err != nil {
 		return fmt.Errorf("schedule cascade wake for theory=%s: %w", theoryID, err)
 	}
 

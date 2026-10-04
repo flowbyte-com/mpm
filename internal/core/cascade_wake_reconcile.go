@@ -93,7 +93,7 @@ func ReconcileUnscheduledCascadeWakes(ctx context.Context, dm *DatabaseManager) 
 		}
 
 		wakeResult, schedErr := dm.ScheduleWake(reason, time.Now().Format(time.RFC3339),
-			p.theoryID, "", "cascade-reconciler", meta)
+			p.theoryID, "cascade-reconciler", meta)
 		if schedErr != nil {
 			dm.LogAudit(AuditWarn, "cascade-reconciler",
 				fmt.Sprintf("failed to reschedule wake for theory=%s intent=%s: %v",

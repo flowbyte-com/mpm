@@ -27,7 +27,7 @@
 //
 // Lifecycle of a wake:
 //
-//  1. Agent calls ScheduleWake(reason, target_time, theory_id?, recurring_rule?).
+//  1. Agent calls ScheduleWake(reason, target_time, theory_id?).
 //     Row written with fired=0, dispatched_at=NULL.
 //  2. Time passes. The scheduler's deadline-driven drain stamps
 //     dispatched_at when target_time is reached. fired stays 0.
@@ -115,8 +115,8 @@ func (dm *DatabaseManager) ScheduleCascadeSummaryWake(ctx context.Context, mater
 		return fmt.Errorf("marshal cascade summary metadata: %w", err)
 	}
 	_, err = dm.db.ExecContext(ctx,
-		`INSERT INTO scheduled_wakes (id, target_time, reason, theory_id, recurring_rule, fired, created_by, metadata)
-		 VALUES (?, ?, ?, NULL, NULL, 0, ?, ?)`,
+		`INSERT INTO scheduled_wakes (id, target_time, reason, theory_id, fired, created_by, metadata)
+		 VALUES (?, ?, ?, NULL, 0, ?, ?)`,
 		id, time.Now().Unix(), "cascade tick summary", "cascade_drain", metaJSON,
 	)
 	if err != nil {
@@ -175,9 +175,14 @@ func (dm *DatabaseManager) LastCascadeSummaryMetrics(ctx context.Context) (mater
 //
 // theory_id is optional; when set, the wake is intended to evaluate
 // that theory (e.g. "check WC2026 R32 result for theory 7383f157...").
-// recurring_rule is a hint for the agent's own next-schedule logic
-// (the daemon does NOT parse it).
-func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, recurringRule, createdBy string, metadata map[string]interface{}) (map[string]interface{}, error) {
+//
+// recurring workflows are NOT scheduled through ScheduleWake. The
+// field that historically carried a cron expression was DEPRECATED
+// 2026-07-23 and retired 2026-10-04. Use UpsertScheduledTask (or
+// `mpm tasks upsert`) for recurring workflows; the daemon's 60s
+// tick polls scheduled_tasks and injects a standard scheduled_wakes
+// row for each due task.
+func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, createdBy string, metadata map[string]interface{}) (map[string]interface{}, error) {
 	if reason == "" {
 		return nil, fmt.Errorf("reason is required")
 	}
@@ -221,26 +226,21 @@ func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, recurringR
 	if theoryID != "" {
 		theoryPtr = theoryID
 	}
-	var recurPtr interface{}
-	if recurringRule != "" {
-		recurPtr = recurringRule
-	}
 	_, err = dm.db.Exec(
-		`INSERT INTO scheduled_wakes (id, target_time, reason, theory_id, recurring_rule, fired, created_by, metadata)
-		 VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
-		id, absolute, reason, theoryPtr, recurPtr, createdBy, metaJSON,
+		`INSERT INTO scheduled_wakes (id, target_time, reason, theory_id, fired, created_by, metadata)
+		 VALUES (?, ?, ?, ?, 0, ?, ?)`,
+		id, absolute, reason, theoryPtr, createdBy, metaJSON,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert scheduled_wakes: %w", err)
 	}
 	return map[string]interface{}{
-		"success":        true,
-		"id":             id,
-		"target_time":    absolute,
-		"target_iso":     time.Unix(absolute, 0).UTC().Format(time.RFC3339),
-		"reason":         reason,
-		"theory_id":      theoryID,
-		"recurring_rule": recurringRule,
+		"success":     true,
+		"id":          id,
+		"target_time": absolute,
+		"target_iso":  time.Unix(absolute, 0).UTC().Format(time.RFC3339),
+		"reason":      reason,
+		"theory_id":   theoryID,
 	}, nil
 }
 
@@ -517,7 +517,7 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 	}
 
 	rows, err := tx.Query(
-		`SELECT id, target_time, reason, theory_id, recurring_rule, created_by, metadata, created_at
+		`SELECT id, target_time, reason, theory_id, created_by, metadata, created_at
 		 FROM scheduled_wakes
 		 WHERE fired = 0 AND target_time <= ?`+whereExtra+`
 		 ORDER BY target_time ASC`,
@@ -528,19 +528,18 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 	}
 	defer rows.Close()
 	type pending struct {
-		id            string
-		targetTime    int64
-		reason        string
-		theoryID      *string
-		recurringRule *string
-		createdBy     string
-		metadata      *string
-		createdAt     string
+		id         string
+		targetTime int64
+		reason     string
+		theoryID   *string
+		createdBy  string
+		metadata   *string
+		createdAt  string
 	}
 	var batch []pending
 	for rows.Next() {
 		var p pending
-		if err := rows.Scan(&p.id, &p.targetTime, &p.reason, &p.theoryID, &p.recurringRule, &p.createdBy, &p.metadata, &p.createdAt); err != nil {
+		if err := rows.Scan(&p.id, &p.targetTime, &p.reason, &p.theoryID, &p.createdBy, &p.metadata, &p.createdAt); err != nil {
 			return nil, fmt.Errorf("scan wake row: %w", err)
 		}
 		batch = append(batch, p)
@@ -599,25 +598,23 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 // wakeRowToMap converts a pending wake row to the map format returned by
 // CheckPendingWakes, without any database side effects.
 func (dm *DatabaseManager) wakeRowToMap(p struct {
-	id            string
-	targetTime    int64
-	reason        string
-	theoryID      *string
-	recurringRule *string
-	createdBy     string
-	metadata      *string
-	createdAt     string
+	id         string
+	targetTime int64
+	reason     string
+	theoryID   *string
+	createdBy  string
+	metadata   *string
+	createdAt  string
 }, nowUnix int64) map[string]interface{} {
 	row := map[string]interface{}{
-		"id":             p.id,
-		"target_time":    p.targetTime,
-		"reason":         p.reason,
-		"theory_id":      nullableString(p.theoryID),
-		"recurring_rule": nullableString(p.recurringRule),
-		"created_by":     p.createdBy,
-		"created_at":     p.createdAt,
-		"fired_at":       nowUnix,
-		"overdue_secs":   nowUnix - p.targetTime,
+		"id":           p.id,
+		"target_time":  p.targetTime,
+		"reason":       p.reason,
+		"theory_id":    nullableString(p.theoryID),
+		"created_by":   p.createdBy,
+		"created_at":   p.createdAt,
+		"fired_at":     nowUnix,
+		"overdue_secs": nowUnix - p.targetTime,
 	}
 	if p.metadata != nil && *p.metadata != "" {
 		var meta map[string]interface{}
@@ -647,7 +644,7 @@ func (dm *DatabaseManager) ListScheduledWakes(includeFired, overdueOnly bool, li
 		where = append(where, "target_time < ?")
 		args = append(args, nowUnix)
 	}
-	q := `SELECT id, target_time, reason, theory_id, recurring_rule, fired, fired_at, created_by, metadata, created_at
+	q := `SELECT id, target_time, reason, theory_id, fired, fired_at, created_by, metadata, created_at
 	      FROM scheduled_wakes`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
@@ -664,25 +661,24 @@ func (dm *DatabaseManager) ListScheduledWakes(includeFired, overdueOnly bool, li
 		var (
 			id, reason, createdBy, createdAt string
 			targetTime                       int64
-			theoryID, recurringRule          *string
+			theoryID                         *string
 			fired                            int
 			firedAt                          *int64
 			metadata                         *string
 		)
-		if err := rows.Scan(&id, &targetTime, &reason, &theoryID, &recurringRule, &fired, &firedAt, &createdBy, &metadata, &createdAt); err != nil {
+		if err := rows.Scan(&id, &targetTime, &reason, &theoryID, &fired, &firedAt, &createdBy, &metadata, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan wake list row: %w", err)
 		}
 		row := map[string]interface{}{
-			"id":             id,
-			"target_time":    targetTime,
-			"target_iso":     time.Unix(targetTime, 0).UTC().Format(time.RFC3339),
-			"reason":         reason,
-			"theory_id":      nullableString(theoryID),
-			"recurring_rule": nullableString(recurringRule),
-			"fired":          fired == 1,
-			"fired_at":       nullableInt64(firedAt),
-			"created_by":     createdBy,
-			"created_at":     createdAt,
+			"id":          id,
+			"target_time": targetTime,
+			"target_iso":  time.Unix(targetTime, 0).UTC().Format(time.RFC3339),
+			"reason":      reason,
+			"theory_id":   nullableString(theoryID),
+			"fired":       fired == 1,
+			"fired_at":    nullableInt64(firedAt),
+			"created_by":  createdBy,
+			"created_at":  createdAt,
 		}
 		if metadata != nil && *metadata != "" {
 			var meta map[string]interface{}
@@ -884,7 +880,7 @@ func (dm *DatabaseManager) FireStaleFoundationWakes(deletedArtifactID string) (i
 		}
 		reason := fmt.Sprintf("Stale foundation: theory %s depends on missing artifact %s",
 			theoryID, deletedArtifactID)
-		if _, err := dm.ScheduleWake(reason, targetTime, theoryID, "", "mpm-reconcile", meta); err != nil {
+		if _, err := dm.ScheduleWake(reason, targetTime, theoryID, "mpm-reconcile", meta); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", theoryID, err))
 			continue
 		}

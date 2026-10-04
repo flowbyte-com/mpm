@@ -118,15 +118,14 @@ import (
 // user/agent. See dispatch.go dispatchClaimNextAdHocWake doc for the
 // 2026-09-23 release-blocker repair that established this invariant.
 type Wake struct {
-	ID            string                 `json:"id"`
-	TargetTime    int64                  `json:"target_time"`
-	Reason        string                 `json:"reason"`
-	TheoryID      string                 `json:"theory_id,omitempty"`
-	RecurringRule string                 `json:"recurring_rule,omitempty"`
-	CreatedBy     string                 `json:"created_by"`
-	CreatedAt     int64                  `json:"created_at"`
-	DispatchedAt  int64                  `json:"dispatched_at,omitempty"`
-	Metadata      map[string]interface{} `json:"metadata,omitempty"`
+	ID           string                 `json:"id"`
+	TargetTime   int64                  `json:"target_time"`
+	Reason       string                 `json:"reason"`
+	TheoryID     string                 `json:"theory_id,omitempty"`
+	CreatedBy    string                 `json:"created_by"`
+	CreatedAt    int64                  `json:"created_at"`
+	DispatchedAt int64                  `json:"dispatched_at,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // Kind returns the dispatch key for a wake. Reads metadata.kind first;
@@ -347,7 +346,7 @@ func (s *Scheduler) RegisterTickHandler(name string, fn func(ctx context.Context
 // acknowledges them.
 func (s *Scheduler) QueryDueWakes(now time.Time) ([]Wake, error) {
 	rows, err := s.db.Query(
-		`SELECT id, target_time, reason, COALESCE(theory_id,''), COALESCE(recurring_rule,''),
+		`SELECT id, target_time, reason, COALESCE(theory_id,''),
 		        created_by, created_at, COALESCE(metadata,'')
 		 FROM scheduled_wakes
 		 WHERE fired = 0 AND target_time <= ?
@@ -363,7 +362,7 @@ func (s *Scheduler) QueryDueWakes(now time.Time) ([]Wake, error) {
 	for rows.Next() {
 		var w Wake
 		var metaJSON string
-		if err := rows.Scan(&w.ID, &w.TargetTime, &w.Reason, &w.TheoryID, &w.RecurringRule,
+		if err := rows.Scan(&w.ID, &w.TargetTime, &w.Reason, &w.TheoryID,
 			&w.CreatedBy, &w.CreatedAt, &metaJSON); err != nil {
 			return nil, fmt.Errorf("scan wake: %w", err)
 		}

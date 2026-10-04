@@ -238,7 +238,6 @@ func (h *IngestHandler) tickHandler(ctx context.Context) error {
 		"ephemeral_compaction_ready",
 		fmt.Sprintf("%d", nowUnix), // absolute epoch
 		"",                         // theory_id
-		"",                         // recurring_rule
 		"mpm-memory-openclaw-ingest",
 		metadata,
 	); serr != nil {
