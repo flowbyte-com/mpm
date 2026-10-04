@@ -1394,15 +1394,7 @@ func (s *MemoryStore) appendToMirror(mem *Memory) error {
 			"reason", "collection not in mirror allow-list")
 		return nil
 	}
-	f, err := os.OpenFile(s.MirrorFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	data, _ := json.Marshal(mem)
-	_, err = f.WriteString(string(data) + "\n")
-	return err
+	return appendMirrorLine(s.MirrorFile, newMemoryEvent(mem))
 }
 
 // mirroredCollections is the allow-list for src/db/mirror.jsonl writes.
@@ -1451,11 +1443,6 @@ func (s *MemoryStore) appendBlockedAttempt(content, reason, attemptType string) 
 	if s.MirrorFile == "" {
 		return nil
 	}
-	f, err := os.OpenFile(s.MirrorFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
 
 	// Pattern-family extraction: the reason string passed by callers is
 	// of the form "blocked: <family>" (see logSensitiveAttempt) or just
@@ -1467,19 +1454,16 @@ func (s *MemoryStore) appendBlockedAttempt(content, reason, attemptType string) 
 	}
 
 	digest := sha256.Sum256([]byte(content))
-	logEntry := map[string]interface{}{
-		"timestamp":      time.Now().UTC().Format(time.RFC3339),
-		"reason":         reason,
-		"pattern_family": family,
-		"content_sha256": hex.EncodeToString(digest[:]),
-		"content_length": len(content),
-		"action":         "blocked",
-		"type":           attemptType,
+	ev := mirrorEvent{
+		Op:               mirrorOpBlockedAttempt,
+		Reason:           reason,
+		PatternFamily:    family,
+		ContentSHA256:    hex.EncodeToString(digest[:]),
+		ContentLength:    len(content),
+		Action:           "blocked",
+		AttemptType:      attemptType,
 	}
-
-	data, _ := json.Marshal(logEntry)
-	_, err = f.WriteString(string(data) + "\n")
-	return err
+	return appendMirrorLine(s.MirrorFile, ev)
 }
 
 // Stats returns store statistics

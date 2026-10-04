@@ -5032,6 +5032,17 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 		}
 	}
 
+	// A lesson_created event line, and nothing more. Lessons were excluded
+	// from the mirror entirely, which meant a lesson — a durable,
+	// cross-session lesson about how to work — left no trace in the human
+	// journal at all. The event restores that visibility at the cost of one
+	// bounded preview rather than a full lesson body, which is the whole
+	// trade the v2 format exists to make.
+	//
+	// There is no lesson TITLE column; the content's first sentence is the
+	// label the caller would have used, so that is what the preview holds.
+	_ = appendMirrorLine(dm.mirrorPath, NewMirrorLessonEvent(id, lessonTitleLabel(content), sourceSessionID))
+
 	return &Lesson{
 		ID:                 id,
 		Type:               lessonType,
@@ -5489,32 +5500,18 @@ func (dm *DatabaseManager) ChallengeMemoryAsync(memoryID string, evidence string
 		return
 	}
 
-	entry := map[string]interface{}{
-		"event":     "contradiction_detected",
-		"memory_id": memoryID,
-		"evidence":  evidence,
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
-	}
-	line, _ := json.Marshal(entry)
+	ev := newContradictionEvent(memoryID, evidence)
 
 	dm.mirrorWG.Add(1)
 	go func() {
 		defer dm.mirrorWG.Done()
-
-		// Hold watchdogMu across rotation + write so concurrent mirror
-		// writers (and concurrent watchdog writers — they share the
-		// mutex) don't race on the truncate step.
-		dm.watchdogMu.Lock()
-		defer dm.watchdogMu.Unlock()
-		if err := rotateLogIfNeeded(mirrorPath, logRotateThresholdBytes()); err != nil {
-			slog.Warn("mirror log rotation failed", "err", err)
+		// The shared path owns the mutex, the rotation check and the
+		// append. This used to hold watchdogMu inline and rotate the
+		// mirror itself, which meant a third set of file-handling rules
+		// for the same filename pair (design §12B).
+		if err := appendMirrorLine(mirrorPath, ev); err != nil {
+			slog.Debug("mirror append skipped", "err", err)
 		}
-		f, err := os.OpenFile(mirrorPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-		if err != nil {
-			return
-		}
-		defer f.Close()
-		f.WriteString(string(line) + "\n")
 	}()
 }
 
