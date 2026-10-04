@@ -185,73 +185,53 @@ func TestWakesSchedule_InvalidTargetTimeDoesNotPersist(t *testing.T) {
 	}
 }
 
-// TestWakesSchedule_ValidRecurringRuleCron pins: a canonical
-// 5-field cron expression is accepted for recurring_rule.
-func TestWakesSchedule_ValidRecurringRuleCron(t *testing.T) {
+// TestWakesSchedule_RecurringRuleFieldRetired pins: as of the
+// 2026-10-04 retirement (Tranche B §10), recurring_rule is no
+// longer accepted on the mpm_wakes schedule action. Any caller
+// still sending the field — whether the value is a valid cron
+// expression or a malformed string — must receive a clear
+// migration error pointing them at the scheduled_tasks surface.
+//
+// This is the post-retirement contract. The pre-retirement
+// contract (validation + persistence verbatim) is documented in
+// the C.18 audit remediation and is exercised by the git history
+// at commit 2219a08 and earlier.
+func TestWakesSchedule_RecurringRuleFieldRetired(t *testing.T) {
 	dm := newTestSharedDM(t)
 
-	_, err := handleMpmWakes(dm, defaultACForPatch(), map[string]interface{}{
-		"action": "schedule",
-		"params": map[string]interface{}{
-			"reason":         "test-recurring",
-			"target_time":    "24h",
-			"recurring_rule": "0 * * * *",
-		},
-	})
-	if err != nil {
-		t.Errorf("canonical cron recurring_rule must be accepted: %v", err)
-	}
-}
-
-// TestWakesSchedule_InvalidRecurringRuleRejected pins: a malformed
-// cron expression is rejected at the boundary. Previously these
-// were persisted verbatim and surfaced as failures at next-schedule
-// time.
-func TestWakesSchedule_InvalidRecurringRuleRejected(t *testing.T) {
-	dm := newTestSharedDM(t)
-
-	for _, bad := range []string{"* * *", "sometimes", "0 25 * * *", "not a cron"} {
+	for _, bad := range []string{"* * *", "sometimes", "0 25 * * *", "not a cron", "0 * * * *"} {
 		t.Run("recurring_rule="+bad, func(t *testing.T) {
 			_, err := handleMpmWakes(dm, defaultACForPatch(), map[string]interface{}{
 				"action": "schedule",
 				"params": map[string]interface{}{
-					"reason":         "test-bad-cron",
+					"reason":         "test-retired-rr",
 					"target_time":    "24h",
 					"recurring_rule": bad,
 				},
 			})
 			if err == nil {
-				t.Errorf("malformed recurring_rule %q must error", bad)
+				t.Errorf("recurring_rule is retired; %q must error", bad)
 			}
-			if !strings.Contains(err.Error(), "recurring_rule") &&
-				!strings.Contains(err.Error(), "cron") {
-				t.Errorf("error must mention 'recurring_rule' or 'cron', got: %v", err)
+			// The error must name the field AND must name the
+			// replacement surface, so the agent can self-correct
+			// without reading the changelog.
+			msg := err.Error()
+			if !strings.Contains(msg, "recurring_rule") {
+				t.Errorf("error must mention 'recurring_rule' so the caller can identify the rejected field, got: %v", err)
+			}
+			if !strings.Contains(msg, "scheduled_tasks") && !strings.Contains(msg, "upsert_task") {
+				t.Errorf("error must point at the replacement surface (scheduled_tasks / upsert_task), got: %v", err)
 			}
 		})
 	}
 }
 
-// TestWakesSchedule_OmittedRecurringRuleValid pins: omitting
-// recurring_rule is the legitimate one-shot-wake path.
-func TestWakesSchedule_OmittedRecurringRuleValid(t *testing.T) {
-	dm := newTestSharedDM(t)
-
-	_, err := handleMpmWakes(dm, defaultACForPatch(), map[string]interface{}{
-		"action": "schedule",
-		"params": map[string]interface{}{
-			"reason":      "test-no-recurring",
-			"target_time": "24h",
-		},
-	})
-	if err != nil {
-		t.Errorf("omitted recurring_rule must not error: %v", err)
-	}
-}
-
-// TestWakesSchedule_InvalidRecurringRuleDoesNotPersist pins the
-// write-path guarantee for the recurring_rule field: a malformed
-// cron expression does not create a scheduled wake row.
-func TestWakesSchedule_InvalidRecurringRuleDoesNotPersist(t *testing.T) {
+// TestWakesSchedule_RecurringRuleRetiredDoesNotPersist pins the
+// write-path guarantee for the retired field: a rejected
+// recurring_rule does not create a scheduled wake row. Pre-fix
+// the value was persisted verbatim; post-retirement the field is
+// rejected at the boundary, so no row is created.
+func TestWakesSchedule_RecurringRuleRetiredDoesNotPersist(t *testing.T) {
 	dm := newTestSharedDM(t)
 
 	beforeRow := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM scheduled_wakes`)
@@ -263,13 +243,13 @@ func TestWakesSchedule_InvalidRecurringRuleDoesNotPersist(t *testing.T) {
 	_, err := handleMpmWakes(dm, defaultACForPatch(), map[string]interface{}{
 		"action": "schedule",
 		"params": map[string]interface{}{
-			"reason":         "no-persist-cron",
+			"reason":         "no-persist-retired",
 			"target_time":    "24h",
 			"recurring_rule": "* * *",
 		},
 	})
 	if err == nil {
-		t.Fatalf("malformed recurring_rule must error")
+		t.Fatalf("retired recurring_rule must error")
 	}
 
 	afterRow := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM scheduled_wakes`)
