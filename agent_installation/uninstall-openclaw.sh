@@ -606,6 +606,17 @@ fi
 # --------------------------------------------------------------------------
 
 CHANGED=0
+# FAIL counts steps the uninstaller was supposed to perform but could
+# not. The script exits non-zero iff at least one required step failed,
+# so callers (CI, automation, `set -e` chains) can detect partial state
+# rather than learning about it from a later `openclaw plugins list`.
+FAIL=0
+# mark_fail bumps FAIL and emits a one-line summary so the operator
+# sees which step failed without having to grep the verbose log.
+mark_fail() {
+  FAIL=$(( FAIL + 1 ))
+  warn "  FAILED STEP: ${1}"
+}
 
 uninstall_one() {
   local row="$1"
@@ -626,18 +637,23 @@ EOF
         CHANGED=1
         log "  $row_id uninstalled"
       else
-        warn "  failed to uninstall $row_id (operator can re-run; see $LOG_FILE)"
+        mark_fail "openclaw plugins uninstall --force $row_id"
       fi
       # `plugins uninstall` removes the install record and load
       # path but, in 2026.9.5, leaves the user's
       # `plugins.entries.<id>` subtree (with `enabled:false`) in
       # openclaw.json. The CLI also reports a config warning
       # ("plugin disabled ... but config is present") until we
-      # clear those subtrees. We do that explicitly.
+      # clear those subtrees. We do that explicitly. A residue
+      # cleanup failure does NOT mark the uninstall itself failed
+      # (the record is gone) but DOES count toward FAIL so the
+      # operator is told the post-state is dirty.
       if timeout "${CONFIG_TIMEOUT}s" \
           openclaw config unset "plugins.entries.$row_id" \
             >>"$LOG_FILE" 2>&1; then
         log "  cleared plugins.entries.$row_id residue"
+      else
+        mark_fail "openclaw config unset plugins.entries.$row_id (residue cleanup)"
       fi
       # Legacy id also has config residue under the legacy key.
       case "$row_id" in
@@ -712,6 +728,7 @@ case "$SLOT_NOW" in
     else
       warn "  failed to reset plugins.slots.memory (operator can run:"
       warn "    openclaw config set plugins.slots.memory memory-core)"
+      mark_fail "openclaw config set plugins.slots.memory memory-core"
     fi
     ;;
   "")
@@ -744,6 +761,11 @@ for ROW in $(printf '%s\n' "$PLAN_ROWS"); do
       warn "  $ROW_ID still registered as ours (uninstall reported success but the record survived)"
       warn "  operator can re-run or run:"
       warn "    openclaw plugins uninstall $ROW_ID"
+      # Post-state still shows our record after a "successful" uninstall.
+      # The uninstall call claimed success but left the install record
+      # behind — the operator's plugin registry is dirty. Mark FAIL so
+      # the exit code reflects the partial state.
+      mark_fail "$ROW_ID still registered after uninstall (record survived)"
       ;;
     unresolvable)
       warn "  $ROW_ID registered but rootDir unresolvable (cannot verify)"
@@ -769,6 +791,7 @@ if [ "$CHANGED" = "1" ]; then
       warn "  gateway restart hit the bounded timeout or returned non-zero."
       warn "  config is already persisted; operator can run:"
       warn "    openclaw gateway restart --safe"
+      mark_fail "openclaw gateway restart --safe (post-uninstall refresh)"
     fi
   else
     log "no gateway service detected; config will apply on next gateway start"
@@ -817,3 +840,18 @@ Verification:
   openclaw plugins registry --json     # neither MPM install record should appear
   mpm --version                        # substrate is untouched
 NEXT
+
+# Final exit code: 1 if any required step failed, 0 otherwise.
+#
+# Rationale: the heredoc above intentionally prints the same "Done."
+# banner whether everything worked or some steps failed, because the
+# uninstaller always preserves the MPM substrate (its non-negotiable
+# invariant). But the operator/CI who ran this needs to know the
+# difference. We propagate it through the exit code so callers
+# running `set -e` and `make` targets can detect partial state
+# without grepping the verbose log.
+if [ "$FAIL" -gt 0 ]; then
+  err "uninstall completed with $FAIL failed step(s); see $LOG_FILE"
+  exit 1
+fi
+exit 0
