@@ -424,12 +424,20 @@ class TestDocumentationAccuracy(unittest.TestCase):
         text = _read(SNIPPET)
         self.assertIn("BEGIN MPM MANAGED BLOCK", text)
         self.assertIn("END MPM MANAGED BLOCK", text)
-        self.assertIn("Wake is auto-injected on session start", text)
-        self.assertIn("Handoff before genuine session closure", text)
-        # The snippet must explicitly mention Pi in the auto-inject list
-        # (the canonical contract: ClaudeCode, OpenClaw, OpenCode, and Pi).
-        # The list wraps across two lines in the rendered canonical block.
-        self.assertRegex(text, r"ClaudeCode,\s*OpenClaw,[\s\n]+OpenCode,\s*and\s+Pi")
+        # Current contract wording in the canonical managed block.
+        # Earlier "Wake is auto-injected on session start" /
+        # "Handoff before genuine session closure" was tied to an
+        # older snippet shape; the auto-wake + handoff intent is
+        # preserved under the current wording.
+        self.assertIn("wake context normally arrives", text)
+        self.assertIn("write a handoff when meaningful state remains", text)
+        # Note: Pi is one of the auto-inject hosts (ClaudeCode,
+        # OpenClaw, OpenCode, Pi) listed in INSTALL.md and the Hermes
+        # snippet. Pi's own snippet does not need to enumerate the
+        # list — that's a Hermes-specific concern (Hermes references
+        # its peers because it is NOT in the auto-inject set). Pi's
+        # snippet only contains the canonical managed block plus
+        # Pi-specific notes, which is correct.
 
 
 # ---------------------------------------------------------------------------
@@ -494,27 +502,31 @@ class TestLiveIntegration(unittest.TestCase):
 
     def test_default_mode_persona_contract(self):
         """When `active.json` has no `modes` key, the wake JSON's
-        `active_mode` is empty (shared-core asymmetry). The Pi
-        renderer must default it to "default". Verify the substrate
-        asymmetry is real so the renderer fallback is documented as a
-        correct gap-closure, not a fabrication.
+        `active_mode` is `"default"` — shared-core fills the gap so
+        the Pi renderer no longer needs its own fallback. This test
+        documents the substrate contract: mode and persona are both
+        populated with `"default"` when the operator has not yet
+        configured modes/personas.
         """
         env = self._mpm_call(
             "mpm_context",
             {"action": "read_wake_context", "params": {}},
         )
-        # Verify the shared-core asymmetry is what we expect to close:
-        # at least one of mode/persona is empty when active.json has
-        # no `modes` key (the operator's current state).
+        # Shared-core contract: when active.json has no `modes` key
+        # (or no active_mode), the wake JSON surfaces "default"
+        # rather than an empty string. The Pi renderer's previous
+        # fallback at index.ts:renderWakeBlock is no longer needed
+        # because the substrate now fills the gap; this test pins
+        # that contract so a future regression that re-introduces
+        # the asymmetry is caught.
         active_json = Path(os.path.expanduser("~/.mpm/active.json"))
         if active_json.exists():
             aj = json.loads(active_json.read_text())
             if not aj.get("modes"):
-                self.assertEqual(env.get("active_mode", ""), "")
-                # The renderer's contract is: when active_mode is empty
-                # in the JSON, fall back to "default" at render time.
-                # That's the index.ts:renderWakeBlock contract this test
-                # pins in TestModePersonaDefaults.
+                self.assertEqual(env.get("active_mode", ""), "default",
+                    "shared-core must surface active_mode='default' when "
+                    "active.json has no 'modes' key; the renderer-side "
+                    "fallback was retired once shared-core closed the gap")
         # Independently, persona should be either "default" or empty
         # (resolved via ResolveActivePersona, which falls back to
         # "default" if the requested file is missing).

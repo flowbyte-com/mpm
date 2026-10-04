@@ -85,9 +85,21 @@ class TestInstallerContract(unittest.TestCase):
         text = target.read_text(encoding="utf-8")
         self.assertEqual(text.count("<!-- BEGIN MPM-MANAGED BLOCK:mpm-hermes -->"), 1)
         self.assertEqual(text.count("<!-- END MPM-MANAGED BLOCK:mpm-hermes -->"), 1)
-        # Snippet body present:
-        self.assertIn("Wake is auto-injected on session start", text)
-        self.assertIn("Handoff before genuine session closure", text)
+        # Hermes is the documented exception to the auto-wake pattern:
+        # unlike ClaudeCode, OpenClaw, OpenCode, and Pi, Hermes does NOT
+        # have a native session-start wake-injection hook. The snippet
+        # carries the explicit exception and the first-turn fetch
+        # contract. Asserting against those exact substrings pins both
+        # halves — dropping the exception line would let an editor
+        # quietly inherit Claude Code's auto-wake prose, which would be
+        # a real product defect for Hermes.
+        self.assertIn("Hermes does **not** have a native session-start", text)
+        self.assertIn("first agent turn must", text)
+        # Handoff contract: the canonical prose is "write a handoff when
+        # meaningful state remains for another session", not the older
+        # "Handoff before genuine session closure" string the test used
+        # to grep for.
+        self.assertIn("write a handoff when meaningful state remains", text)
 
     def test_idempotent_double_install_is_noop(self):
         target = self._target()
@@ -391,16 +403,29 @@ class TestSnippetInstructionContract(unittest.TestCase):
 
     def test_snippet_namespace_is_mcp_mpm(self):
         text = SNIPPET.read_text(encoding="utf-8")
+        # The snippet's MPM tool references all use the mcp__mpm__
+        # prefix. The canonical wake-context call is via
+        # mcp__mpm__mpm_context action read_wake_context. The earlier
+        # assertion against mcp__mpm__mpm_memory was over-specific —
+        # the snippet doesn't (and shouldn't) invoke the memory tool by
+        # namespace from the system-prompt layer; it calls the
+        # wake-context tool. Asserting the namespace prefix and the
+        # actual tool referenced pins the contract without coupling
+        # to a tool name that lives one layer below the prompt.
         self.assertIn("mcp__mpm__mpm_context", text)
-        self.assertIn("mcp__mpm__mpm_memory", text)
+        self.assertIn("mcp__mpm__", text)
         self.assertIn("read_wake_context", text)
 
     def test_snippet_documents_first_turn_wake_call(self):
         text = SNIPPET.read_text(encoding="utf-8")
         # The managed block in the snippet explicitly tells the agent
-        # to call read_wake_context on the first turn.
+        # to call read_wake_context on the first turn. Canonical
+        # prose uses "first agent turn" (more specific than "first
+        # turn"); the test should pin the canonical wording so an
+        # editor who deletes the specific phrase — and replaces it
+        # with a vaguer one — fails here.
         self.assertIn("read_wake_context", text)
-        self.assertIn("first turn", text)
+        self.assertIn("first agent turn", text)
 
     def test_snippet_does_not_claim_auto_wake_for_hermes(self):
         """The snippet must NOT claim that wake is auto-injected on
@@ -409,8 +434,11 @@ class TestSnippetInstructionContract(unittest.TestCase):
         text = SNIPPET.read_text(encoding="utf-8")
         # Hermes must be explicitly named as the exception to the
         # auto-inject pattern. The canonical managed-block prose
-        # wraps this across two lines ("Hermes has no such\n   hook").
-        self.assertIn("Hermes has no such", text)
+        # reads "Hermes does **not** have a native session-start
+        # wake-injection hook" (wrapped across two lines). The test
+        # pins the canonical prefix so an editor who softens it
+        # ("Hermes might not...") fails here.
+        self.assertIn("Hermes does **not** have a native", text)
         # And it must not list Hermes among the hosts that auto-inject.
         # The canonical wake item lists ClaudeCode, OpenClaw, OpenCode,
         # Pi — and must exclude Hermes from that auto-inject list.

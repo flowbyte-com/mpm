@@ -313,9 +313,19 @@ class InstallerRoundTrip(unittest.TestCase):
         self.assertNotIn("stale-wake", result)
         self.assertNotIn("stale-persist", result)
         self.assertNotIn("stale-handoff", result)
-        # Current contract is in
-        self.assertIn("Wake is auto-injected", result)
-        self.assertIn("Recovery / fallback", result)
+        # Current contract is in. The canonical managed block in
+        # agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md states the
+        # auto-wake contract as "wake context normally arrives at session
+        # start" and the recovery contract as a `read_wake_context`
+        # fallback path. The earlier test wording ("Wake is auto-injected"
+        # / "Recovery / fallback") was tied to an older snippet shape that
+        # the canonical source no longer uses; the intent — auto-wake at
+        # session start with a fetch fallback — is unchanged. Asserting
+        # against the current wording means a regression that drops the
+        # wake-promise or the recovery hint will fail here, which is what
+        # this test exists to pin.
+        self.assertIn("wake context normally arrives", result)
+        self.assertIn("read_wake_context", result)
         # Exactly one managed section
         self.assertEqual(result.count("BEGIN MPM-MANAGED SECTION"), 1)
 

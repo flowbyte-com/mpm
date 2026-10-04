@@ -92,8 +92,18 @@ class TestInstallerContract(unittest.TestCase):
         text = target.read_text(encoding="utf-8")
         self.assertEqual(text.count("<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->"), 1)
         self.assertEqual(text.count("<!-- END MPM-MANAGED SECTION:pi-instructions -->"), 1)
-        self.assertIn("Wake is auto-injected on session start", text)
-        self.assertIn("Handoff before genuine session closure", text)
+        # Current contract is in. The canonical managed block in
+        # agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md (the
+        # pi-instructions block) states the auto-wake contract as
+        # "wake context normally arrives at session start" and the
+        # handoff contract as "write a handoff when meaningful state
+        # remains". The earlier assertion wording
+        # ("Wake is auto-injected on session start" / "Handoff
+        # before genuine session closure") was tied to an older
+        # snippet shape; the intent — auto-wake + handoff discipline
+        # — is unchanged.
+        self.assertIn("wake context normally arrives", text)
+        self.assertIn("write a handoff when meaningful state remains", text)
 
     def test_fresh_install_project_scope(self):
         cp = _run(["--scope", "project", "--target-dir", str(self.tmp), "--snippet", str(SNIPPET)])
