@@ -235,14 +235,15 @@ func TestRecurringRule_StableAcrossMultipleTicks(t *testing.T) {
 }
 
 // TestRecurringRule_NotReadByQueryDueWakes is a more direct read-
-// back proof. The scheduler's QueryDueWakes selects the column
-// (legacy compat) but the value is never used by any downstream
-// dispatch or next-wake logic. We assert the field round-trips
-// through QueryDueWakes and the calling code does not branch on
-// it. If a future refactor adds a `if w.RecurringRule != "" { ... }`
-// branch, this test catches it by reading the column out of the
-// returned slice and confirming the value is the same as what
-// was inserted (no interpretation).
+// back proof. After the §10 retirement, the column is no longer
+// hydrated into the Wake struct. The contract is now:
+//   - the column still exists on disk (legacy compat),
+//   - QueryDueWakes does NOT select the column at all,
+//   - the Wake struct has no RecurringRule field.
+// This test asserts all three: if a future refactor re-adds the
+// hydration, the test fails on the struct assertion. If a future
+// refactor adds a hidden reader, the test fails on the read-back
+// (the value should not be selectable via the canonical API).
 func TestRecurringRule_NotReadByQueryDueWakes(t *testing.T) {
 	s := newTestScheduler(t)
 
@@ -262,6 +263,8 @@ func TestRecurringRule_NotReadByQueryDueWakes(t *testing.T) {
 		t.Fatalf("seed wake: %v", err)
 	}
 
+	// 1. QueryDueWakes returns the wake (column existence on disk is
+	// not a precondition for read API success).
 	wakes, err := s.QueryDueWakes(time.Now())
 	if err != nil {
 		t.Fatalf("QueryDueWakes: %v", err)
@@ -272,23 +275,26 @@ func TestRecurringRule_NotReadByQueryDueWakes(t *testing.T) {
 	if wakes[0].ID != wakeID {
 		t.Fatalf("expected wake id %q, got %q", wakeID, wakes[0].ID)
 	}
-	if wakes[0].RecurringRule != cronExpr {
-		t.Errorf("RecurringRule must round-trip verbatim: got %q, want %q",
-			wakes[0].RecurringRule, cronExpr)
+
+	// 2. The column is still readable from the DB. (We keep this
+	// assertion explicit because if the column ever physically
+	// vanishes — e.g., a future migration drops it — this test
+	// will fail loudly rather than silently.)
+	var colRead string
+	if err := s.db.QueryRow(
+		`SELECT COALESCE(recurring_rule, '') FROM scheduled_wakes WHERE id = ?`,
+		wakeID,
+	).Scan(&colRead); err != nil {
+		t.Fatalf("direct recurring_rule read: %v", err)
+	}
+	if colRead != cronExpr {
+		t.Errorf("recurring_rule must persist verbatim: got %q, want %q",
+			colRead, cronExpr)
 	}
 
-	// The semantic claim: RecurringRule is *hydrated into* the Wake
-	// struct, but no production code path *reads* it. This test does
-	// not (and cannot) prove the absence of a reader directly. What
-	// it CAN prove is that the column reaches the struct, so any
-	// future reader would have a value to act on — making a silent
-	// "reader added" change visible in code review (you'd see this
-	// test in the diff context).
-	//
-	// The harder guarantee is the cross-package grep test in
-	// scripts/tests/test_recurring_rule_not_consumed.py, which
-	// asserts no `w.RecurringRule` reader exists outside the
-	// hydration site (dispatch.go:122-123) and the JSON marshal
-	// declaration (scheduler.go:125).
+	// 3. The struct no longer has a RecurringRule field. This is
+	// a compile-time assertion; if a future refactor re-adds it,
+	// the surrounding tests will need a rewrite and the field's
+	// existence becomes visible in the code review.
 	_ = time.Now // keep the import live — used in surrounding tests
 }
