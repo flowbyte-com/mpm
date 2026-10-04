@@ -549,67 +549,10 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 
 // ==================== Watchdog / Query Observability ====================
 
-// watchdogOp represents a single operation entry written to watchdog.jsonl.
-type watchdogOp struct {
-	Timestamp  string `json:"timestamp"`
-	Operation  string `json:"operation"`
-	DurationMs int64  `json:"duration_ms"`
-	Query      string `json:"query,omitempty"`
-	Retries    int    `json:"retries,omitempty"`
-	Error      string `json:"error,omitempty"`
-	Slow       bool   `json:"slow"`
-}
-
-// logWatchdog appends a watchdog entry to watchdog.jsonl.
-// File-write contention is serialised by watchdogMu so that concurrent
-// DatabaseManager users do not corrupt the log. Log rotation (gzip +
-// truncate) runs inside the same critical section so concurrent writers
-// don't race on the truncation step.
-func (dm *DatabaseManager) logWatchdog(entry watchdogOp) {
-	if dm.watchdogPath == "" {
-		return
-	}
-	dm.watchdogMu.Lock()
-	defer dm.watchdogMu.Unlock()
-
-	if err := rotateLogIfNeeded(dm.watchdogPath, logRotateThresholdBytes()); err != nil {
-		slog.Warn("watchdog log rotation failed", "err", err)
-	}
-
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
-	f, err := os.OpenFile(dm.watchdogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	f.Write(data)
-	f.Write([]byte("\n"))
-}
-
-// logWatchdogRaw appends raw JSON bytes to watchdog.jsonl under the dm mutex.
-// Used by synthesis and other subsystems that want structured events with
-// custom schemas rather than the watchdogOp query-timing format. Log
-// rotation runs inside the same critical section.
-func (dm *DatabaseManager) logWatchdogRaw(line []byte) {
-	if dm == nil || dm.watchdogPath == "" {
-		return
-	}
-	dm.watchdogMu.Lock()
-	defer dm.watchdogMu.Unlock()
-	if err := rotateLogIfNeeded(dm.watchdogPath, logRotateThresholdBytes()); err != nil {
-		slog.Warn("watchdog log rotation failed", "err", err)
-	}
-	f, err := os.OpenFile(dm.watchdogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	f.Write(line)
-	f.Write([]byte("\n"))
-}
+// The v1 watchdogOp record and its logWatchdog/logWatchdogRaw writers are
+// gone: v2 records are built in watchdog_v2.go and written through the
+// shared append path. V1 LINES on disk are untouched and are read back by
+// normalizeWatchdogOp — see RecentWatchdogOps.
 
 // WatchdogOp is one parsed entry from watchdog.jsonl. Both the legacy
 // watchdogOp schema and the newer raw schema (op / timestamp / error / reason)
@@ -625,13 +568,21 @@ type WatchdogOp map[string]interface{}
 // This is the read path for `mpm synthesize status|errors` — the watchdog
 // log is the de-facto synthesis telemetry store since there is no in-memory
 // queue or DLQ for synthesis attempts.
+//
+// Mixed generations are the normal case, not an edge case: v1 lines carry
+// `operation`/`query`, v2 lines carry `op`/`sql_shape`, and both spellings
+// of two operation names exist in the wild. normalizeWatchdogOp projects all
+// of them onto `op` so every reader below this function has one key to look
+// at. Nothing is rewritten on disk — old history stays inspectable exactly
+// as written.
 func (dm *DatabaseManager) RecentWatchdogOps(n int, opPrefix string) ([]WatchdogOp, error) {
 	if dm.watchdogPath == "" {
 		return nil, fmt.Errorf("watchdog log path not configured")
 	}
-	dm.watchdogMu.Lock()
+	stream := hitlStreamFor(dm.watchdogPath, watchdogPolicy)
+	stream.mu.Lock()
 	data, err := os.ReadFile(dm.watchdogPath)
-	dm.watchdogMu.Unlock()
+	stream.mu.Unlock()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -651,8 +602,12 @@ func (dm *DatabaseManager) RecentWatchdogOps(n int, opPrefix string) ([]Watchdog
 		}
 		var op WatchdogOp
 		if err := json.Unmarshal([]byte(line), &op); err != nil {
+			// Corrupt line: skip it. A truncated tail from a hard kill is
+			// the common case, and one bad line must not make the whole
+			// log unreadable.
 			continue
 		}
+		normalizeWatchdogOp(op)
 		if opPrefix != "" {
 			name, _ := op["op"].(string)
 			if !strings.HasPrefix(name, opPrefix) {
@@ -665,6 +620,55 @@ func (dm *DatabaseManager) RecentWatchdogOps(n int, opPrefix string) ([]Watchdog
 		out = out[len(out)-n:]
 	}
 	return out, nil
+}
+
+// watchdogOpAliases maps the operation names that historical writers
+// spelled differently onto the canonical v2 spelling. The key is what
+// readers accept; the value is what they see.
+//
+// These are read aliases only. No writer emits the old spellings — that is
+// the point of having them — and nothing rewrites history to conform.
+var watchdogOpAliases = map[string]string{
+	"queryrow":         "query_row",
+	"synthesize_error": "synthesize_failed",
+}
+
+// normalizeWatchdogOp projects one parsed record onto the reader-facing
+// shape: `op` always present (falling back to v1's `operation`), aliased
+// operation names resolved to their canonical spelling, and `ts` and
+// `timestamp` reconciled.
+//
+// The timestamp reconciliation is what keeps every existing reader working
+// across the cutover without each one learning the version rule. v1 wrote
+// `timestamp`; v2 writes `ts`. Setting both from whichever is present means
+// `mpm synthesize status`, `mpm doctor` and `mpm status` read either
+// generation, today and after the last v1 line has aged out.
+func normalizeWatchdogOp(op WatchdogOp) {
+	name, _ := op["op"].(string)
+	if name == "" {
+		if legacy, ok := op["operation"].(string); ok {
+			name = legacy
+		}
+	}
+	if canonical, ok := watchdogOpAliases[name]; ok {
+		name = canonical
+	}
+	if name != "" {
+		op["op"] = name
+		// Drop the legacy key so a caller that iterates values is not
+		// handed the same name twice under two spellings.
+		delete(op, "operation")
+	}
+
+	ts, _ := op["ts"].(string)
+	stamp, _ := op["timestamp"].(string)
+	if ts == "" {
+		ts = stamp
+	}
+	if ts != "" {
+		op["ts"] = ts
+		op["timestamp"] = ts
+	}
 }
 
 // DBNode abstracts the query execution environment so functions can run
@@ -723,18 +727,7 @@ func (t *txNode) ExecTracked(query string, retries int, args ...interface{}) (sq
 			}
 			continue
 		}
-		entry := watchdogOp{
-			Timestamp:  start.UTC().Format(time.RFC3339Nano),
-			Operation:  "exec",
-			DurationMs: elapsed.Milliseconds(),
-			Query:      truncateQuery(query),
-			Retries:    attempts - 1,
-			Slow:       elapsed > slowQueryThreshold,
-		}
-		if err != nil {
-			entry.Error = err.Error()
-		}
-		t.dm.logWatchdog(entry)
+		t.dm.logSQLOutcome(watchdogOpExec, query, elapsed, err, attempts-1)
 		return result, err
 	}
 }
@@ -743,17 +736,7 @@ func (t *txNode) QueryTracked(query string, args ...interface{}) (*sql.Rows, err
 	start := time.Now()
 	rows, err := t.tx.Query(query, args...)
 	elapsed := time.Since(start)
-	entry := watchdogOp{
-		Timestamp:  start.UTC().Format(time.RFC3339Nano),
-		Operation:  "query",
-		DurationMs: elapsed.Milliseconds(),
-		Query:      truncateQuery(query),
-		Slow:       elapsed > slowQueryThreshold,
-	}
-	if err != nil {
-		entry.Error = err.Error()
-	}
-	t.dm.logWatchdog(entry)
+	t.dm.logSQLOutcome(watchdogOpQuery, query, elapsed, err, 0)
 	return rows, err
 }
 
@@ -761,14 +744,10 @@ func (t *txNode) QueryRowTracked(query string, args ...interface{}) *sql.Row {
 	start := time.Now()
 	row := t.tx.QueryRow(query, args...)
 	elapsed := time.Since(start)
-	entry := watchdogOp{
-		Timestamp:  start.UTC().Format(time.RFC3339Nano),
-		Operation:  "query_row",
-		DurationMs: elapsed.Milliseconds(),
-		Query:      truncateQuery(query),
-		Slow:       elapsed > slowQueryThreshold,
-	}
-	t.dm.logWatchdog(entry)
+	// The row has not been scanned yet, so the error is not knowable here.
+	// A failure surfaces at the caller's Scan; what this path can retain is
+	// a slow statement, which is the part an operator reads a tail for.
+	t.dm.logSQLOutcome(watchdogOpQueryRow, query, elapsed, nil, 0)
 	return row
 }
 
@@ -900,18 +879,7 @@ func (dm *DatabaseManager) ExecTracked(query string, retries int, args ...interf
 			continue
 		}
 
-		entry := watchdogOp{
-			Timestamp:  start.UTC().Format(time.RFC3339Nano),
-			Operation:  "exec",
-			DurationMs: elapsed.Milliseconds(),
-			Query:      truncateQuery(query),
-			Retries:    attempts - 1,
-			Slow:       elapsed > slowQueryThreshold,
-		}
-		if err != nil {
-			entry.Error = err.Error()
-		}
-		dm.logWatchdog(entry)
+		dm.logSQLOutcome(watchdogOpExec, query, elapsed, err, attempts-1)
 
 		return result, err
 	}
@@ -950,18 +918,7 @@ func (dm *DatabaseManager) QueryTracked(query string, args ...interface{}) (*sql
 			continue
 		}
 
-		entry := watchdogOp{
-			Timestamp:  start.UTC().Format(time.RFC3339Nano),
-			Operation:  "query",
-			DurationMs: elapsed.Milliseconds(),
-			Query:      truncateQuery(query),
-			Retries:    attempts - 1,
-			Slow:       elapsed > slowQueryThreshold,
-		}
-		if err != nil {
-			entry.Error = err.Error()
-		}
-		dm.logWatchdog(entry)
+		dm.logSQLOutcome(watchdogOpQuery, query, elapsed, err, attempts-1)
 
 		return rows, err
 	}
@@ -973,16 +930,12 @@ func (dm *DatabaseManager) QueryRowTracked(query string, args ...interface{}) *s
 	row := dm.db.QueryRow(query, args...)
 	elapsed := time.Since(start)
 
-	entry := watchdogOp{
-		Timestamp:  start.UTC().Format(time.RFC3339Nano),
-		Operation:  "queryrow",
-		DurationMs: elapsed.Milliseconds(),
-		Query:      truncateQuery(query),
-		Slow:       elapsed > slowQueryThreshold,
-	}
-	// We cannot inspect the error without scanning the row, so we log
-	// duration-only here. Callers that scan will see any sql.ErrNoRows etc.
-	dm.logWatchdog(entry)
+	// We cannot inspect the error without scanning the row, so a failure
+	// is not recordable here — callers that scan will see any
+	// sql.ErrNoRows etc. The pre-v1 spelling of this operation was
+	// `queryrow`; readers still accept it (see watchdogOpAliases) but no
+	// writer emits it.
+	dm.logSQLOutcome(watchdogOpQueryRow, query, elapsed, nil, 0)
 
 	return row
 }

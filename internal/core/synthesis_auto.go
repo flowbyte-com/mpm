@@ -14,7 +14,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -406,7 +405,7 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 	contentHash := synthHashContent(content)
 	if hit, runCount := synthHasContentHash(dm, contentHash); hit {
 		bumpSynthDedupCounter(dm, contentHash)
-		logWatchdogOp(dm, "synthesize_skip", map[string]interface{}{
+		logSynthesizeEvent(dm, "synthesize_skip", map[string]interface{}{
 			"reason":       "content_hash already synthesized",
 			"content_hash": contentHash,
 			"prior_runs":   runCount,
@@ -420,7 +419,7 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 	cooldown := synthCooldownSeconds()
 	candidates, err := DetectNearMiss(dm, content, newID, threshold, cooldown)
 	if err != nil {
-		logWatchdogOp(dm, "synthesize_skip", map[string]interface{}{
+		logSynthesizeEvent(dm, "synthesize_skip", map[string]interface{}{
 			"reason": "near-miss detection failed",
 			"error":  err.Error(),
 		})
@@ -444,7 +443,7 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 		}
 	}
 	if len(toMerge) == 0 {
-		logWatchdogOp(dm, "synthesize_skip", map[string]interface{}{
+		logSynthesizeEvent(dm, "synthesize_skip", map[string]interface{}{
 			"reason": "all candidates already seen this session",
 		})
 		return
@@ -480,20 +479,18 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 		// operator diagnosis (without leaking secrets — the
 		// watchdog stores machine-stable fields, not the
 		// raw prompt body).
-		truncated := content
-		if len(truncated) > 120 {
-			truncated = truncated[:120] + "..."
-		}
+		// No content excerpt: the pre-v1 record carried 120 bytes of the
+		// body being synthesized, which is row content in an operational
+		// log. The error and the safeguard's reason are what an operator
+		// diagnoses from, and the body is retrievable from mpm.db.
 		fields := map[string]interface{}{
-			"content":   truncated,
-			"error":     err.Error(),
-			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"error": err.Error(),
 		}
 		if errors.Is(err, synth.ErrBoundedPlanExceeded) {
 			fields["bounded_safeguard"] = "stopped"
 			fields["safeguard_reason"] = err.Error()
 		}
-		logWatchdogOp(dm, "synthesize_failed", fields)
+		logSynthesizeEvent(dm, "synthesize_failed", fields)
 		return
 	}
 
@@ -553,9 +550,9 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 	// 8. Save the synthesized LTM
 	newSynthID, err := dm.SaveMemory("memories", result.Content, "", allTags, metadata, embedding, true, 10)
 	if err != nil {
-		logWatchdogOp(dm, "synthesize_failed", map[string]interface{}{
-			"content": truncatedContent(content),
-			"error":   fmt.Sprintf("save failed: %v", err),
+		// No content excerpt here either — see the LLM-failure path above.
+		logSynthesizeEvent(dm, "synthesize_failed", map[string]interface{}{
+			"error": fmt.Sprintf("save failed: %v", err),
 		})
 		return
 	}
@@ -608,45 +605,13 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 	markMemorySynthCooldown(dm, newSynthID)
 
 	// 13. Log success to watchdog
-	logWatchdogOp(dm, "synthesize", map[string]interface{}{
+	logSynthesizeEvent(dm, "synthesize", map[string]interface{}{
 		"new_id":       newSynthID,
 		"old_ids":      sourceIDs,
 		"content_hash": contentHash,
 		"cooldown_s":   cooldown,
 		"timestamp":    time.Now().UTC().Format(time.RFC3339),
 	})
-}
-
-// logWatchdogOp writes a structured synthesis event to watchdog.jsonl.
-// Uses logWatchdogRaw to write a single entry with synthesis-specific fields
-// (op, content, error, new_id, old_ids, timestamp). Does NOT use the
-// watchdogOp format (which is for query timing) to avoid schema fragmentation.
-func logWatchdogOp(dm CoreDB, op string, data map[string]interface{}) {
-	if dm == nil {
-		return
-	}
-	entry := map[string]interface{}{
-		"op":        op,
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
-	}
-	for k, v := range data {
-		entry[k] = v
-	}
-	line, _ := json.Marshal(entry)
-	// Type-assert to access unexported logWatchdogRaw. If the
-	// CoreDB wasn't created by NewDatabaseManager/NewSession,
-	// the watchdog entry is silently dropped — acceptable for
-	// best-effort observability.
-	if dm, ok := dm.(*DatabaseManager); ok {
-		dm.logWatchdogRaw(line)
-	}
-}
-
-func truncatedContent(s string) string {
-	if len(s) > 120 {
-		return s[:120] + "..."
-	}
-	return s
 }
 
 // applyEmbeddingFailureToMetadata records a synthesis-time embedding
