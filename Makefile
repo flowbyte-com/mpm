@@ -516,11 +516,32 @@ test-scripts:
 #
 # SCOPE
 #
-# This is the CI-owned suite only. The per-adapter suites under
-# mpm-*/tests/ are a different, larger problem — see
-# test-agent-adapters below. They are deliberately NOT folded in here.
+# This is the umbrella for everything in agent_installation/tests/. It
+# has two parts:
+#
+#   1. `cd agent_installation && python3 -m unittest discover tests` —
+#      the CI-owned renderer-parity / managed-block byte-for-byte suite
+#      that the workflow already runs on its own line for ordering.
+#      That same line is the local mirror; running it here too gives a
+#      single command that exercises the whole agent_installation tree.
+#
+#   2. The per-adapter suites under agent_installation/mpm-*/tests/
+#      (executed by `make test-agent-adapters` below). These pin each
+#      adapter's installer contract (markers, idempotency, scope
+#      resolution, fresh/replace/append/uninstall, JS lifecycle/run-
+#      time guarantees) and were previously reachable from NO other
+#      runner — not from `make test`, not from `make test-race`, not
+#      from CI. Folding them in here is what makes them part of the
+#      validation surface: `make test`, `make test-race`, and
+#      `make release-gate` all reach this target, and through it the
+#      per-adapter suites. CI's separate `cd agent_installation && ...
+#      discover tests` line is preserved (it tests managed-block
+#      byte-for-byte parity in a controlled order and is not on this
+#      umbrella's path).
 test-agent-installation:
-	@cd agent_installation && out=$$(python3 -m unittest discover tests 2>&1); status=$$?; \
+	@$(MAKE) test-agent-adapters; \
+	  ad_status=$$?; \
+	  cd agent_installation && out=$$(python3 -m unittest discover tests 2>&1); status=$$?; \
 	  printf '%s\n' "$$out"; \
 	  n=$$(printf '%s\n' "$$out" | sed -n 's/^Ran \([0-9][0-9]*\) tests\?.*/\1/p' | tail -1); \
 	  if [ -z "$$n" ]; then \
@@ -534,25 +555,27 @@ test-agent-installation:
 	    exit 1; \
 	  fi; \
 	  echo "[test-agent-installation] collected $$n tests (floor $(AGENT_INSTALL_TEST_MIN_TESTS))"; \
-	  exit $$status
+	  if [ $$status -ne 0 ]; then exit $$status; fi; \
+	  exit $$ad_status
 
-# Diagnostic runner for the per-adapter suites under mpm-*/tests/.
+# Runner for the per-adapter suites under agent_installation/mpm-*/tests/.
 #
-# *** THIS TARGET IS NOT WIRED INTO `make test` BY DEFAULT. ***
-#
-# The per-adapter suites under mpm-*/tests/ exist because the agent
-# adapters ship their own installers and each installer has its own
-# contract. These suites pin the contract per-adapter (markers,
-# idempotency, scope resolution, fresh/replace/append/uninstall) and
-# are reachable from NO other runner — not from `make test`, not from
-# `make test-race`, not from the CI workflow. Wiring them in here is
-# what makes them part of the validation surface.
+# Each agent adapter ships its own installer with its own contract. The
+# per-adapter suites pin that contract (markers, idempotency, scope
+# resolution, fresh/replace/append/uninstall, JS lifecycle/runtime
+# guarantees). This target walks every adapter listed in AGENT_ADAPTERS
+# and AGENT_ADAPTERS_JS, runs its suite in isolation, counts the result,
+# and propagates a non-zero exit if any suite failed or any count fell
+# below the per-language floor. A missing `node` or `python3` on PATH
+# is a hard error rather than a silent skip: silently skipping the JS
+# or Python families on a host that cannot run them is how these suites
+# became invisible to the gate stack in the first place.
 #
 # The JS families are invoked as `node --test 'tests/*.test.js'`, not
 # `node --test tests/`. On Node 24.20 the directory form resolves
 # `tests` as a MODULE and dies with MODULE_NOT_FOUND, exiting 1 with a
-# plausible-looking summary and zero passes. The pass-count floor below
-# is what turns that into an explicit refusal instead of a number.
+# plausible-looking summary and zero passes. The pass-count floor is
+# what turns that into an explicit refusal instead of a number.
 #
 # The node test runner wraps its summary in ANSI color codes (e.g.
 # `\033[34mℹ pass 117\033[39m`). The previous regex `^ℹ pass` did not
@@ -561,31 +584,14 @@ test-agent-installation:
 # The current runner strips ANSI escapes first, then extracts the pass
 # count. See the in-target comment for the shell/dash details.
 #
-# Measured current state (2026-10-04, after this tranche's fixes):
-#
-#   mpm-claude-code            34 tests   OK (5 skipped by design)
-#   mpm-hermes                 38 tests   OK
-#   mpm-memory-openclaw        13 tests   OK
-#   mpm-opencode               31 tests   OK
-#   mpm-pi                     62 tests   OK
-#   mpm-memory-openclaw/*.js  117 tests   OK
-#   mpm-auto-mode-*/*.js       21 tests   OK
-#
-# 316 tests, all green. This target is now a candidate to wire into
-# `make test` and the pre-commit / CI flow, but the promotion is left
-# to a separate change so the wiring decision is visible in its own
-# commit.
-#
-# Each family's tests are counted and checked against a floor before
-# the real exit status is propagated, so a suite that stops being
-# discovered cannot hide behind the other suite's result. A missing
-# `node` is a hard error rather than a skip: silently skipping the JS
-# suites on a host that cannot run them is how they went unnoticed.
-#
 # NOT INCLUDED: mpm-claude-code/tests/session_start_hook.test.sh. It is
 # a host-specific live check — it exports MPM_WORKSPACE="$HOME/.mpm" and
 # invokes "$HOME/.local/bin/mpm" — so it depends on this machine's
 # actual install and must not join a hermetic gate. Run it by hand.
+#
+# Currently invoked by test-agent-installation (which `make test`,
+# `make test-race`, and `make release-gate` already depend on). Direct
+# invocation remains useful as a fast ~50s local debug surface.
 test-agent-adapters:
 	@command -v node >/dev/null 2>&1 || { \
 	   echo "[test-agent-adapters] FATAL: node not found on PATH." >&2; \
