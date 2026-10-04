@@ -1,6 +1,12 @@
 # HITL Log Redesign: mirror.jsonl and watchdog.jsonl
 
-Status: **PROPOSED — NOT IMPLEMENTED**
+Status: **IMPLEMENTED (2026-10-04).** Phases A–E landed in commit
+sequence (see *Implementation phases* below). This document is the
+normative contract; the canonical current behavior lives in
+`docs/SPEC.md` ("Auxiliary logs" under Runtime state ownership) and in
+`internal/core/hitl_log.go`, `internal/core/mirror_v2.go`,
+`internal/core/watchdog_v2.go`. Phase F (docs + archival) is this
+move.
 
 Date: 2026-10-03
 

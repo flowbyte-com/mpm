@@ -594,7 +594,7 @@ The word "secure delete" is therefore not used for any `shred` surface. Two diff
 **Residual copies outside every `shred` guarantee.** After a per-object shred, the following may still contain the content and are deliberately *not* rewritten:
 
 - `system_audit_log` rows (and the `epistemic_provenance` edges citing the dead id — pruned later by a periodic `gc` sweep).
-- `mirror.jsonl` / `watchdog.jsonl`, including rotated `.gz` copies. A per-ID shred appends a content-free `memory_shredded` event; it does not rewrite history.
+- `mirror.jsonl` / `watchdog.jsonl`, including rotated `.gz` copies. A per-ID shred appends a content-free v2 `memory_shredded` envelope (`preview: ""`, no `digest`, no `content_sha256`); rotations are not rewritten. The two streams have distinct roles — mirror is the cognitive journal (what was learned), watchdog is the operational black box (what went wrong) — and they are governed by separate retention policies; see *Auxiliary logs* below.
 - Database backups and `mpm backup` dumps, which are separate files shred never opens.
 - The SQLite WAL, and free pages in the main DB file. A deleted row's bytes remain until SQLite reuses the page. MPM issues no `PRAGMA secure_delete`, no `VACUUM`, and no `wal_checkpoint` on any shred path, so removal of the bytes is incidental to later page reuse and maintenance, never a shred guarantee.
 - Filesystem snapshots, and any copy already transcribed into a handoff summary, another memory body, or an operator's own notes.
@@ -2680,6 +2680,93 @@ parent's.
 Rotation, `0600` permissions, and the "a log failure never fails the
 write that produced it" contract are unchanged: an empty mirror path is
 a silent no-op, and an unwritable one is reported and swallowed.
+
+The two files have distinct roles and distinct schemas, and the
+distinction is the rule that keeps an operator reading them useful:
+
+| File | Role | Audience | What earns a record |
+|---|---|---|---|
+| `mirror.jsonl` | Cognitive journal — what was learned, decided, contradicted, blocked, shredded | Human reading from a terminal | v2 envelope events with a bounded `preview` and short digest; tombstones for shreds; structural record for blocked attempts (no content) |
+| `watchdog.jsonl` | Operational black box — what went wrong, what was slow, what the database was fighting | Human reading from a terminal AND the operator's `mpm ops logs` surface | A SQL statement that errored, retried, or exceeded the slow threshold; destructive actions; synthesis failures |
+
+A line in either file answers one question in seconds: *what was
+learned* (mirror) or *what went wrong* (watchdog). v1 mirror lines
+embedded full content and 300-float embeddings; v1 watchdog lines
+recorded every fast successful statement. Both behaviours are gone:
+the shared append path (`internal/core/hitl_log.go`) is the only
+writer, and the structural and content tests
+(`internal/core/hitl_*_test.go`) enforce it.
+
+**v2 envelope (mirror).** Every record carries `v:2`, an RFC3339 `ts`,
+an `op` from a closed vocabulary (`memory_created`, `memory_revised`,
+`memory_superseded`, `memory_reinforced`, `memory_weakened`,
+`decision_created`, `decision_changed`, `theory_created`,
+`theory_changed`, `lesson_created`, `contradiction_found`,
+`contradiction_resolved`, `work_lifecycle`, `destructive_operation`,
+`blocked_attempt`, `embedding_failure`, `memory_shredded`), the object
+`id` and `collection` where they apply, a bounded `preview` (cap
+240, hard max 280), and a short `sha256:` digest prefix. A `reason`
+field carries the human explanation for blocked, contradiction,
+resolved, embedding-failure, and destructive events. No embedding, no
+full content, no metadata dump. A blocked attempt (F-4) carries the
+sha256 of the rejected bytes, the pattern family label, and the
+length — never a byte of the rejected content.
+
+**v2 envelope (watchdog).** Every record carries `v:2`, an RFC3339
+`ts`, a `level` (`warn` / `error`), an `op` (`exec`, `query`,
+`query_row`, `synthesize_failed`, `destructive_operation`,
+…; legacy `synthesize_error` / `queryrow` are read aliases), a
+normalized `sql_shape` (SQL statements collapse parameter values to
+`?`, quoted identifiers preserved, ≤ 120 chars, marked with `…` on
+truncation), and an `error` (driver text, redacted at the writer).
+Fast successful statements produce **no** record. The classifier's
+precedence is `error` > `busy_retry` > `slow`; a statement that
+qualifies on multiple axes produces one line at the highest level,
+not several at lower ones.
+
+**Retention (shared, enforced).** Rotation is `size ≥ SIZE_THRESHOLD`
+OR `active age ≥ MAX_ACTIVE_AGE`, checked on every append and at
+startup; rotated files are gzipped (`0600`) and the active file is
+truncated. Expiry is age-based with a count cap as a safety bound
+for burst weeks:
+
+| Stream | SIZE_THRESHOLD | MAX_ACTIVE_AGE (rotate) | MAX_AGE (expire) | COUNT cap |
+|---|---|---|---|---|
+| `mirror.jsonl` | 5 MiB | 30 days | 365 days (enforced delete) | 12 newest |
+| `watchdog.jsonl` | 2 MiB | 30 days | 90 days (enforced delete) | 5 newest |
+
+A retention cap is not a rewrite — it deletes files older than
+MAX_AGE and trims beyond COUNT, leaving each surviving file's bytes
+untouched. On the first post-install write after this version,
+historical rotations beyond the cap are trimmed; from then on,
+steady state keeps the bounds.
+
+**Destructive scope.**
+
+- `mpm memory wipe` removes the active `mirror.jsonl` AND every
+  rotation. It does **not** touch the database. The audit table and
+  backups keep their own copies — that is a journal wipe, not a
+  memory wipe pretending to be one. The wipe is documented in the
+  user-facing message, not implied.
+- `mpm ops logs purge --scope {mirror|watchdog}` empties the named
+  log and removes its rotations. The other stream and the database
+  are untouched. Path-literal scopes (`mpm.db`, an arbitrary path)
+  are rejected by the CLI projection.
+- A successful wipe or purge appends a `destructive_operation` line
+  to `watchdog.jsonl` so the action is recorded in the surviving
+  stream.
+
+**Terminal usage.**
+
+```bash
+tail -F ~/.mpm/src/db/mirror.jsonl
+jq 'select(.op == "blocked_attempt")' ~/.mpm/src/db/mirror.jsonl
+jq 'select(.op == "contradiction_found")' ~/.mpm/src/db/mirror.jsonl
+tail -F ~/.mpm/src/db/watchdog.jsonl
+jq 'select(.level == "error" or (.duration_ms // 0) > 100)' ~/.mpm/src/db/watchdog.jsonl
+mpm ops logs status           # sizes, oldest rotation age, current policy
+mpm ops logs purge --scope mirror -f   # mirror only; refuses without -f
+```
 
 **Workspace state.** `active.json` and its cross-process lock
 `active.json.lock` are properties of the **workspace that owns the
