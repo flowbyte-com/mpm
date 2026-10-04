@@ -1,18 +1,13 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log/slog"
-	"os"
-	"time"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
-	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
@@ -157,7 +152,6 @@ func gateProvider(cfg *mpminternal.EmbeddingConfig, what string) int {
 	fmt.Printf("⚡ Embedding backfill using %s\n", cfg.Provider.Name())
 	return 0
 }
-
 
 // runMemoryBackfill is the in-memory-pass loop extracted from
 // handleBackfillEmbeddings. Split out so the reference pass can
@@ -426,23 +420,13 @@ func providerStateLabel(cfg *mpminternal.EmbeddingConfig) string {
 	}
 }
 
+// logEmbeddingFailure records a backfill failure in the mirror journal.
+//
+// The record is built and written by the core package rather than here, so
+// that this file is not a second place that knows how to open mirror.jsonl.
+// The design's grep-gate (no writer outside the shared append path) exists
+// precisely to stop a command-local OpenFile from becoming a copy of the
+// mirror contract that drifts from it.
 func logEmbeddingFailure(id, content string, err error) {
-	entry := map[string]interface{}{
-		"ts":        time.Now().UTC().Format(time.RFC3339),
-		"type":      "embedding_failure",
-		"memory_id": id,
-		"error":     err.Error(),
-	}
-	data, _ := json.Marshal(entry)
-	var buf bytes.Buffer
-	buf.Write(data)
-	buf.WriteByte('\n')
-
-	f, openErr := os.OpenFile(config.GetMirrorPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if openErr != nil {
-		slog.Warn("embedding-backfill: failed to open mirror log", "error", openErr)
-		return
-	}
-	defer f.Close()
-	f.Write(buf.Bytes())
+	mpminternal.LogEmbeddingFailureToMirror(id, err)
 }

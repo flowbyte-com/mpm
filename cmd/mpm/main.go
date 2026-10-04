@@ -1457,16 +1457,19 @@ func runDoctorSecurityChecks(report *DoctorReport) {
 			})
 			report.Warnings++
 		} else {
+			// RecentWatchdogOps resolves the historical v1 spelling
+			// (`synthesize_error`) onto the canonical one, so this counts
+			// failures across both generations of the log.
 			failures := 0
 			for _, op := range ops {
-				if name, _ := op["op"].(string); name == "synthesize_error" {
+				if name, _ := op["op"].(string); name == "synthesize_failed" {
 					failures++
 				}
 			}
 			status, msg := "PASS", fmt.Sprintf("%d synthesis events, 0 errors", len(ops))
 			if failures > 0 {
 				status = "WARN"
-				msg = fmt.Sprintf("%d synthesize_error events in last %d entries (run `mpm synthesize failures`)", failures, len(ops))
+				msg = fmt.Sprintf("%d synthesize_failed events in last %d entries (run `mpm synthesize failures`)", failures, len(ops))
 				report.Warnings++
 			}
 			report.Checks = append(report.Checks, DoctorCheck{

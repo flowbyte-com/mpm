@@ -644,6 +644,7 @@ func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]i
 		if _, err := dm.db.Exec(`DELETE FROM lessons WHERE id = ?`, memoryID); err != nil {
 			return nil, fmt.Errorf("shred: delete from lessons: %w", err)
 		}
+		dm.logShredTombstone(memoryID, "lessons")
 		return map[string]interface{}{
 			"success":   true,
 			"lesson_id": memoryID,
@@ -654,7 +655,13 @@ func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]i
 	// Pull the challenged_theory_id out of metadata BEFORE deleting the
 	// row, so we know which theory (if any) to cascade-purge.
 	var theoryID string
+	// Collection is read here, before the row is deleted, purely so the
+	// mirror tombstone can name what was removed. The id alone would do
+	// for a reader who knew the workspace; the collection is what lets
+	// them tell a shredded decision from a shredded memory in a tail.
+	var collection string
 	if mem, err := dm.GetMemory(memoryID); err == nil && mem != nil {
+		collection, _ = mem["collection"].(string)
 		if metaStr, ok := mem["metadata"].(string); ok && metaStr != "" {
 			var meta map[string]interface{}
 			if json.Unmarshal([]byte(metaStr), &meta) == nil {
@@ -745,6 +752,16 @@ func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]i
 	}
 	committed = true
 
+	// The HITL tombstone. Emitted AFTER commit so the journal never
+	// records a shred that did not happen.
+	//
+	// What it deliberately does not do is rewrite anything. Rotations keep
+	// whatever the mirror said while the memory existed, and the audit table
+	// and backups keep their own copies — see SPEC §4.5.2. The tombstone's
+	// job is to make that legible from a tail: the object is gone, here is
+	// when, and the historical copies are still there by design.
+	dm.logShredTombstone(memoryID, collection)
+
 	result := map[string]interface{}{
 		"success":         true,
 		"memory_id":       memoryID,
@@ -756,6 +773,22 @@ func (dm *DatabaseManager) ShredMemoryWithCascade(memoryID string) (map[string]i
 		result["theory_purged"] = theoryID
 	}
 	return result, nil
+}
+
+// logShredTombstone appends the memory_shredded record to both HITL
+// streams: the mirror (this is a cognitive-surface change) and the watchdog
+// (this is an operational event an operator may need to account for).
+//
+// Both records carry the id and collection and nothing else. A tombstone is
+// not a second index of what the memory said.
+func (dm *DatabaseManager) logShredTombstone(memoryID, collection string) {
+	ev := NewMirrorShredEvent(memoryID, collection)
+	_ = appendMirrorLine(dm.mirrorPath, ev)
+
+	w := newWatchdogEvent(watchdogLevelWarn, watchdogOpMemoryShredded,
+		"memory "+memoryID+" removed from the active substrate")
+	w.Fields = map[string]interface{}{"id": memoryID, "collection": collection}
+	dm.logWatchdogEvent(w)
 }
 
 // SoftDeleteMemory is the reversible "delete" verb — sets deleted_at on

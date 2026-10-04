@@ -181,9 +181,14 @@ func handleSynthesizeStatus(limit int) int {
 	return 0
 }
 
-// handleSynthesizeFailures prints watchdog entries with op="synthesize_error"
-// or a non-empty error field. Useful for "why are my merges not happening?"
+// handleSynthesizeFailures prints watchdog entries with a failure op or a
+// non-empty error field. Useful for "why are my merges not happening?"
 // investigations.
+//
+// RecentWatchdogOps has already resolved the v1 `synthesize_error` spelling
+// onto the canonical `synthesize_failed`, so this matches one name rather
+// than two — but the error-field check stays, because a v1 line whose op
+// did not survive a partial write still has to be findable.
 func handleSynthesizeFailures(limit int) int {
 	dm := getDB()
 	if dm == nil {
@@ -199,7 +204,7 @@ func handleSynthesizeFailures(limit int) int {
 	for _, op := range ops {
 		name, _ := op["op"].(string)
 		errStr, _ := op["error"].(string)
-		if name != "synthesize_error" && errStr == "" {
+		if name != "synthesize_failed" && errStr == "" {
 			continue
 		}
 		ts, _ := op["timestamp"].(string)

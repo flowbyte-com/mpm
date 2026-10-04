@@ -84,7 +84,7 @@ func TestHandleOpsLogs_Help(t *testing.T) {
 // return non-zero (not silent failure).
 func TestHandleOpsLogs_UnknownSubcommand(t *testing.T) {
 	// unknown subcommand exits 1.
-	assert.Equal(t, 1, handleOpsLogs([]string{"purge"}))
+	assert.Equal(t, 1, handleOpsLogs([]string{"no-such-subcommand"}))
 }
 
 // TestHandleOpsLogs_RotateWithUnknownLogName pins that an invalid

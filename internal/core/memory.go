@@ -1517,7 +1517,21 @@ func (s *MemoryStore) Stats() map[string]interface{} {
 		"healthy":     healthy,
 	}
 
-	// Count mirror entries
+	// Count mirror events.
+	//
+	// The key is `mirror_events`, not `mirror_entries`, and the distinction
+	// is load-bearing rather than cosmetic. Under v1 the file held one
+	// snapshot per saved memory, so a count read as "N memories are
+	// mirrored". Under v2 it holds one line per journal event —
+	// contradictions, blocked attempts, tombstones and previews of
+	// revisions that never created a new memory all appear here — so the
+	// same number means something different. A dashboard that keeps
+	// labelling it as mirrored memories would be reporting a category
+	// error with a confident-looking number.
+	//
+	// `mirror_entries` is retained as a one-release compatibility alias for
+	// any external consumer of this map. It is deprecated and will be
+	// removed; new code must read `mirror_events`.
 	if data, err := os.ReadFile(s.MirrorFile); err == nil {
 		lines := splitLines(string(data))
 		count := 0
@@ -1526,7 +1540,8 @@ func (s *MemoryStore) Stats() map[string]interface{} {
 				count++
 			}
 		}
-		stats["mirror_entries"] = count
+		stats["mirror_events"] = count
+		stats["mirror_entries"] = count // deprecated alias; see above
 	}
 
 	return stats

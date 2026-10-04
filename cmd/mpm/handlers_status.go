@@ -547,15 +547,20 @@ func getRecentWatchdogEvents(dm *mpminternal.DatabaseManager, limit int) []watch
 		if json.Unmarshal([]byte(line), &m) != nil {
 			continue
 		}
-		op := ""
-		if v, ok := m["op"].(string); ok {
-			op = v
+		// `op` and `detail` are the v2 keys; `operation`/`query` and
+		// `reason` are the v1 ones. This tail reads the live file rather
+		// than going through RecentWatchdogOps, so it applies the same
+		// tolerance locally. Old lines keep rendering after the cutover.
+		op, _ := m["op"].(string)
+		if op == "" {
+			op, _ = m["operation"].(string)
 		}
-		detail := ""
-		if v, ok := m["reason"].(string); ok {
-			detail = v
-		} else if v, ok := m["error"].(string); ok {
-			detail = v
+		detail, _ := m["detail"].(string)
+		if detail == "" {
+			detail, _ = m["reason"].(string)
+		}
+		if detail == "" {
+			detail, _ = m["error"].(string)
 		}
 		if op != "" {
 			events = append(events, watchdogEvent{op: op, detail: detail})
