@@ -4514,22 +4514,17 @@ func handleScheduleWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		return nil, fmt.Errorf("target_time is required (absolute unix epoch or relative like '24h', '2h', '30m')")
 	}
 	theoryID, _ := p["theory_id"].(string)
-	recurringRule, _ := p["recurring_rule"].(string)
 
-	// 2026-09-05 audit remediation pass 4 defect C.18 (P1): the audit
-	// framed target_time and recurring_rule as a single scheduling-
-	// form contract, but they are distinct fields in the codebase.
-	// target_time is already validated by resolveTargetTime (epoch,
-	// relative duration, ISO-8601) — arbitrary strings are rejected.
-	// recurring_rule is the structured cron expression field and was
-	// previously persisted verbatim, so caller typos ("* * *", "0 25
-	// * * *") surfaced only at next-schedule time. Validate at the
-	// boundary using the existing robfig/cron parser (same parser as
-	// the scheduled_tasks path).
-	if recurringRule != "" {
-		if _, err := internal.CalculateNextRun(recurringRule, time.Now()); err != nil {
-			return nil, fmt.Errorf("recurring_rule: %w", err)
-		}
+	// recurring_rule was DEPRECATED 2026-07-23 and retired in
+	// 2026-10-04 (Tranche B §10). The daemon's 60s tick polls
+	// scheduled_tasks (the Agentic Cron surface) for recurring
+	// workflows; wakes are one-shot notification rows. The field
+	// is preserved in the physical schema for legacy DB
+	// compatibility but the public API no longer accepts it. Use
+	// mpm_wakes.{upsert_task,list_tasks,delete_task} (or
+	// `mpm tasks ...` CLI) for recurring workflows.
+	if _, present := p["recurring_rule"]; present {
+		return nil, fmt.Errorf("recurring_rule is no longer supported on wakes; use the scheduled_tasks surface (mpm_wakes action=upsert_task, or `mpm tasks upsert`) for recurring workflows")
 	}
 
 	createdBy := ac.Agent
@@ -4556,7 +4551,7 @@ func handleScheduleWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	// wake_tools.go ScheduleWake for the producer-side fix; see
 	// wake_tools.go ResolveWake for the consumer-side matcher.
 
-	out, err := dm.ScheduleWake(reason, targetTime, theoryID, recurringRule, createdBy, metadata)
+	out, err := dm.ScheduleWake(reason, targetTime, theoryID, createdBy, metadata)
 	if err != nil {
 		return nil, err
 	}

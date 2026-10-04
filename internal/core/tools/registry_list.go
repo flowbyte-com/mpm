@@ -375,7 +375,6 @@ Cron-wake retention model (the bookkeeping rows emitted by recurring cron tasks)
 						"reason":         {"type": "string"},
 						"target_time":   {"type": "string"},
 						"theory_id":     {"type": "string"},
-						"recurring_rule": {"type": "string"},
 						"metadata":      {"type": "object"},
 						"kinds":        {"type": "array", "items": {"type": "string"}},
 						"session_id":    {"type": "string"},
