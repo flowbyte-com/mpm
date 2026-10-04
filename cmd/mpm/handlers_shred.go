@@ -327,12 +327,23 @@ func handleShredTopic(id string) int {
 }
 
 func handleShredSession(id string) int {
+	// `mpm shred session <id>` and the alias `mpm session shred <id>` are
+	// SOFT deletes (store.DeleteMemory sets `deleted_at`; the row stays in
+	// the substrate with full content + history preserved, and is
+	// recoverable via `mpm memory restore <id>`). The help text and the
+	// SPEC lifecycle table both say so; this success message is the only
+	// place that called it a "shred" and the truthfulness test pins
+	// against that wording. Keep the verb "soft-deleted" in the response
+	// so an operator who runs it sees the same word the help promised.
 	store := getMemoryStore()
 
 	err := store.DeleteMemory(id, "session")
 	if err != nil {
-		return respond("", fmt.Sprintf("Failed to shred session: %v", err), 1)
+		return respond("", fmt.Sprintf("Failed to soft-delete session: %v", err), 1)
 	}
 
-	return respond(fmt.Sprintf("Session shredded: %s\n", id), "", 0)
+	return respond(fmt.Sprintf(
+		"Session soft-deleted: %s (recoverable via 'mpm memory restore %s')\n",
+		id, id,
+	), "", 0)
 }
