@@ -190,11 +190,21 @@ func (h *CascadeDrainHandler) tickHandler(ctx context.Context) (err error) {
 // State-transition policy (issue #5): insert a wake row whenever the
 // tick produced non-zero materializations or failures — those are
 // always worth surfacing. Steady-state zero ticks (queue_empty with no
-// failures, etc.) are deduped by exact metric match against the prior
+// failures, etc.) are deduped by exact semantic match against the prior
 // cascade_summary wake row: only insert if materialized/failed/
-// pending_after/elapsed_ms differ from the most recent. This keeps
+// pending_after differ from the most recent. This keeps
 // scheduled_wakes from filling with identical zero-rows on every idle
 // tick while preserving the forensic trail when something changes.
+//
+// elapsed_ms is stored on each row for forensic value (an operator
+// tail-grepping the wake table wants to see "this drain took 4 ms,
+// that one took 30 ms") but it is deliberately NOT part of the dedupe
+// key. Two consecutive idle ticks can have elapsed_ms values that
+// differ by a millisecond or more purely because of OS scheduler
+// jitter and the cost of the dedupe lookup itself; comparing wall-clock
+// durations to decide semantic equivalence is what made this test flaky
+// under load. The semantic identity of "idle" is zero work + zero
+// pending + zero failures; the dedupe key is that, not the timer.
 func (h *CascadeDrainHandler) logYield(ctx context.Context, processed, failed int, reason string, elapsed time.Duration) {
 	h.logger.Info("cascade drain yielded",
 		"yield_reason", reason,
@@ -225,17 +235,18 @@ func (h *CascadeDrainHandler) logYield(ctx context.Context, processed, failed in
 		// branch for the dedupe.
 		insert = true
 	} else {
-		// Steady-state zero tick — dedupe by comparing the four metrics
-		// to the most recent cascade_summary wake. If they're identical,
-		// there's nothing new for an operator to look at; skip the row.
-		prevM, prevF, prevPa, prevMs, ok, err := h.dm.LastCascadeSummaryMetrics(ctx)
+		// Steady-state zero tick — dedupe by comparing the three semantic
+		// metrics (materialized, failed, pending_after) to the most recent
+		// cascade_summary wake. elapsed_ms is intentionally excluded; see
+		// the function-level comment for why.
+		prevM, prevF, prevPa, _, ok, err := h.dm.LastCascadeSummaryMetrics(ctx)
 		if err != nil {
 			h.logger.Warn("cascade drain: dedupe lookup failed; inserting wake anyway", "err", err)
 			insert = true
 		} else if !ok {
 			// No prior wake exists; first tick of a fresh scheduler run.
 			insert = true
-		} else if prevM != processed || prevF != failed || prevPa != pendingAfter || prevMs != elapsed.Milliseconds() {
+		} else if prevM != processed || prevF != failed || prevPa != pendingAfter {
 			insert = true
 		}
 	}
