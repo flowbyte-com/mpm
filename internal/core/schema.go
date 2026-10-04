@@ -1028,17 +1028,14 @@ var CommonIndexes = []string{
 	//
 	//   - target_time:  unix epoch seconds; wake is due when <= now().
 	//   - fired:        0 = not yet surfaced; 1 = surfaced at fired_at.
-	//   - recurring_rule: agent's own cron-like spec (e.g. "+24h", "next monday").
-	//                    DEPRECATED 2026-07-23 — the column remains in the
-	//                    schema for backward compatibility with existing
-	//                    code paths (Wake.RecurringRule field, schedule_wake
-	//                    tool payload), but is NEVER honored by the daemon.
-	//                    Recurring workflows now live in the dedicated
-	//                    `scheduled_tasks` table (CRUD via the upcoming
-	//                    `manage_scheduled_task` MCP tool) — the daemon's
-	//                    60s tick loop polls that table and injects a
-	//                    standard `scheduled_wakes` row at each fire.
-	//                    A future schema-version bump can drop this column.
+	//   - recurring_rule: DEPRECATED 2026-07-23; RETIRED 2026-10-04
+	//                    (Tranche B §10). The column is RETAINED INERT
+	//                    for legacy DB compatibility — no production
+	//                    code path reads, writes, or returns it. New
+	//                    recurring workflows use `scheduled_tasks`
+	//                    (mpm_wakes action=upsert_task, or
+	//                    `mpm tasks upsert`). A future schema-version
+	//                    bump can drop this column cleanly.
 	//   - theory_id:    optional pointer to a pending theory to evaluate.
 	//
 	// The composite index idx_scheduled_wakes_due supports the hot path:

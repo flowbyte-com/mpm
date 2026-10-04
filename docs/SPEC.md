@@ -1871,6 +1871,8 @@ The "agent has initiative" effect: any subsequent `mpm call` (CLI or MCP) that l
 
 Companion tools: `check_wakes`, `list_wakes`. Architecture: `scheduled_wakes` table + composite index `scheduled_wakes_due(fired, target_time)` + FTS5 virtual table for content search. `CheckPendingWakes` runs in a single transaction (idempotent across concurrent callers).
 
+**Wakes are one-shot.** A wake fires once, gets marked `fired=1`, and is retired by GC. For *recurring* workflows, use `scheduled_tasks` (the Agentic Cron surface — see below). The `recurring_rule` field that historically lived on `schedule_wake` is retired as of 2026-10-04; see the migration note further down.
+
 **Trade-off vs. a real-time push daemon:** MCP has no server-initiated messages over stdio, so `mpm-mcp` cannot fire a wake back to a sleeping agent. The opportunistic fold is the next-best mechanism — at-most-once-on-next-contact, not real-time. For Wimbledon R1, WC2026 group stage, and monthly Meshal reminder use cases this is sufficient. Real-time push would require an SSE transport change and is deferred.
 #### Autonomous wake execution (mpm-scheduler + mpm-critic)
 
@@ -1953,7 +1955,7 @@ The composite index on `(status, next_run_at)` is the daemon's hot path: a singl
 
 Option 1 wins because the hot path is a single indexed lookup; option 2 wastes CPU on every tick; option 3 introduces cache invalidation correctness concerns. The cost is that re-upserting a task recomputes the schedule from now (documented behavior, not a bug).
 
-**Migration note.** The existing `scheduled_wakes` table has a dormant `recurring_rule TEXT` column that was accepted by `schedule_wake` but never honored by any daemon code path. Recurring workflows now live in `scheduled_tasks`; `recurring_rule` is preserved for backward compatibility with the `Wake.RecurringRule` struct field but documented as superseded. A future schema-version bump can drop it cleanly when no callers remain.
+**Migration note (2026-10-04, Tranche B §10).** The `recurring_rule` field on `schedule_wake` was retired from the public API. Sending `recurring_rule` now produces the error: `recurring_rule is no longer supported on wakes; use the scheduled_tasks surface (mpm_wakes action=upsert_task, or \`mpm tasks upsert\`) for recurring workflows`. The `scheduled_wakes.recurring_rule TEXT` physical column is **retained as inert legacy storage compatibility only** — it is no longer read, written, or returned by any code path. A future schema-version bump can drop the column. See `internal/scheduler/wake_recurring_rule_*_test.go` for the regression coverage that pins the inertness contract.
 #### Event Wakes — Active Dissemination (Arc 2)
 
 *Other-directed pushes (rule bodies, resolutions, arbitration verdicts) propagate via the shared DB — pull becomes push for known events.*
