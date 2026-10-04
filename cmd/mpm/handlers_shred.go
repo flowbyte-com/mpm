@@ -148,6 +148,9 @@ Available (bulk; -f required, otherwise nothing is deleted):
   mpm shred topics -f        Delete all topics and all topic memberships
   mpm shred modes -f         Delete all mode files
   mpm shred personas -f      Delete all persona files
+  mpm shred database -f      Reset the active substrate; retain previous
+                              as mpm.db.pre-shred-<nanos>; preserve logs,
+                              backups, telemetry, mode/, persona/
 
   Note: mode/ and persona/ are git-tracked source in the canonical
   ~/.mpm checkout, so the last two refuse there. Use ` + "`git rm`" + ` for tracked files.
@@ -155,7 +158,6 @@ Available (bulk; -f required, otherwise nothing is deleted):
 Not available (-f does not enable them):
   mpm shred sessions         Would only rename the collection, not delete it
   mpm shred memories         Would only rename the collection, not delete it
-  mpm shred database         Would delete the DB and fail to rebuild it
 
   Each prints why when invoked. To remove MPM state entirely use:
     ./uninstall.sh --purge    (remove all persistent state)
@@ -193,25 +195,15 @@ func handleShredMemories(args []string) int {
 	return respond("", shredMemoriesDisabledMsg, 1)
 }
 
-// handleShredDatabase is DISABLED and refuses unconditionally.
+// handleShredDatabase is the CLI entry point for the active-substrate
+// reset. The real implementation lives in handlers_shred_database_reset.go.
+// This file owns the disabled-form message constant only — the
+// historical refusal stub was replaced by the safe reset on 2026-10-04.
 //
-// The recreate half of the original implementation could never have
-// worked: internal.NewMemoryStore discards its path argument and never
-// opens a database (it returns a store with a nil DB — the open
-// happens in getMemoryStore, not in the constructor). So the handler
-// deleted mpm.db, observed newStore.DB == nil, and returned
-// "Failed to recreate database" — leaving the workspace with no
-// database at all. Verified against a seeded temp workspace.
-//
-// It also ignored the -wal/-shm sidecars, telemetry.db, the mirror and
-// watchdog logs, and every backup, so even a working version would have
-// deleted the database while leaving the content in all of those.
-//
-// Removals that are actually complete are one level up:
-// uninstall.sh --purge (state) and --shred (overwrite, then state).
-func handleShredDatabase(args []string) int {
-	return respond("", shredDatabaseDisabledMsg, 1)
-}
+// The disabled-form message constant `shredDatabaseDisabledMsg` is
+// kept verbatim for any reader that still links to it from
+// documentation or older tests. New tests assert the live contract
+// defined in handlers_shred_database_reset.go.
 
 func handleShredTopics(args []string) int {
 	if !forceRequested() {
