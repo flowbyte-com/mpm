@@ -1012,6 +1012,18 @@ if [ ! -f "$SCRIPT_DIR/templates/SOUL.md.snippet" ]; then
 elif ! command -v python3 >/dev/null 2>&1; then
   warn "python3 not available — SOUL.md managed-block install skipped"
   SOUL_MD_OK=0
+elif [ ! -f "$HOME_DIR/.openclaw/openclaw.json" ]; then
+  # The OpenClaw CLI is the writer of $HOME/.openclaw/ — including the
+  # workspace directory the SOUL.md managed block is anchored to. If
+  # the host hasn't been initialised yet (no ~/.openclaw/openclaw.json
+  # from `openclaw init` or equivalent), we must NOT create the
+  # workspace ourselves: doing so would materialise host state the
+  # installer does not own and cannot safely retract on uninstall.
+  # Skip the SOUL.md step; the operator can rerun the installer after
+  # the host CLI has created the workspace.
+  log "no ~/.openclaw/openclaw.json yet - skipping SOUL.md managed-block install"
+  log "  (the OpenClaw CLI is the writer of ~/.openclaw; rerun after openclaw init)"
+  SOUL_MD_OK=0
 else
   if python3 "$SCRIPT_DIR/scripts/install_openclaw_instructions.py" \
         --home "$HOME_DIR" \
@@ -1034,10 +1046,13 @@ fi
 #       where the restart --safe command returned but the new gateway
 #       process exited 78 during startup, AND the case where the
 #       restart command itself failed and the gateway stayed down.
-#   (C) SOUL.md managed-block install failed. The installer promises
-#       the agent's SOUL.md carries the canonical MPM behavioural
-#       block; an install failure means that promise is unmet, even
-#       if the gateway itself is reachable.
+#   (C) SOUL.md managed-block install attempted (the host was
+#       initialised, i.e. ~/.openclaw/openclaw.json exists) AND it
+#       failed. If the host hasn't been initialised yet, the SOUL.md
+#       step is skipped — the CLI is the writer of ~/.openclaw and
+#       we don't materialise that state ourselves — and the install
+#       still succeeds; the operator can rerun the installer after
+#       `openclaw init`.
 # Anything else (gateway unreachable from the start, OR restart
 # succeeded but gateway remained reachable, OR gateway stayed up
 # despite a restart failure) is installer success.
@@ -1046,7 +1061,11 @@ if [ "$REPAIR_OK" -ne 1 ]; then
   INSTALL_FAILED=1
 elif [ "$RESTART_ATTEMPTED" -eq 1 ] && [ "$GATEWAY_REACHABLE_AFTER_RESTART" -ne 1 ]; then
   INSTALL_FAILED=1
-elif [ "$SOUL_MD_OK" -ne 1 ]; then
+elif [ "$SOUL_MD_OK" -ne 1 ] && [ -f "$HOME_DIR/.openclaw/openclaw.json" ]; then
+  # Only treat SOUL.md failure as a hard install failure when the
+  # host WAS initialised — i.e. the installer attempted the SOUL.md
+  # step. When the host isn't initialised yet, SOUL_MD_OK is 0 by
+  # design (skip) and the install is still successful.
   INSTALL_FAILED=1
 fi
 
