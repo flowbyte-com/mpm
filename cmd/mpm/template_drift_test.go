@@ -151,8 +151,12 @@ func TestNoRetiredMpmSessionReferences(t *testing.T) {
 		if isWhitelisted(rel) {
 			continue
 		}
-		// Match whole-word occurrences only — `mpm_session_id` (a
-		// hypothetical env-var-derived field name) must not fail.
+		// Boundary-aware match: a retired name flagged only when it
+		// appears as a complete identifier (see isStandaloneIdentified
+		// for the rule and the test cases below for the contract).
+		// Substrings of longer names — mpm_session_id,
+		// mpm_session_ids, some_mpm_session_helper — are not retired
+		// tool references, they are valid current symbols.
 		if lineNo, snippet, hit := findOccurrence(string(data), retdName); hit {
 			offenders = append(offenders,
 				rel+":"+lineNoString(lineNo)+": "+snippet)
@@ -167,10 +171,19 @@ func TestNoRetiredMpmSessionReferences(t *testing.T) {
 }
 
 // findOccurrence reports the first 1-based line number containing
-// needle and a trimmed snippet. Returns hit=false if not found.
+// needle as a complete identifier (per the lexical rule used by
+// isStandaloneIdentified), along with a trimmed snippet. Returns
+// hit=false if not found.
+//
+// The lexical rule is the contract: mpm_session_id, mpm_session_ids,
+// some_mpm_session_helper, and mpm_session2 are NOT standalone
+// references to the retired tool name — they are longer identifiers
+// that share a prefix with it. A drift guard that flags them would
+// block legitimate current code, which is the defect this function
+// fixes.
 func findOccurrence(haystack, needle string) (int, string, bool) {
 	for i, line := range strings.Split(haystack, "\n") {
-		if strings.Contains(line, needle) {
+		if isStandaloneIdentified(line, needle) {
 			snippet := strings.TrimSpace(line)
 			if len(snippet) > 160 {
 				snippet = snippet[:160] + "…"
@@ -179,6 +192,48 @@ func findOccurrence(haystack, needle string) (int, string, bool) {
 		}
 	}
 	return 0, "", false
+}
+
+// isStandaloneIdentified reports whether needle appears in line as a
+// complete identifier — bounded on both sides by a non-identifier
+// character (or by the line edge).
+//
+// Identifier characters are ASCII letters, digits, and underscore. The
+// set is the one Go uses for identifiers, which matches the
+// snake_case/camelCase the rest of this repo names its symbols with.
+// Prose like `mpm_session`, "mpm_session", mpm_session(…) matches
+// because backtick, quote, and open-paren are not identifier chars;
+// longer names like mpm_session_id do not, because the character
+// following `_` is itself an identifier character.
+func isStandaloneIdentified(line, needle string) bool {
+	if needle == "" {
+		return false
+	}
+	for i := 0; i+len(needle) <= len(line); {
+		j := strings.Index(line[i:], needle)
+		if j < 0 {
+			return false
+		}
+		j += i
+		end := j + len(needle)
+		leftOK := j == 0 || !isIdentByte(line[j-1])
+		rightOK := end == len(line) || !isIdentByte(line[end])
+		if leftOK && rightOK {
+			return true
+		}
+		i = end
+	}
+	return false
+}
+
+// isIdentByte reports whether b is a Go identifier character. Pulled
+// into a helper so the boundary rule has one definition that both the
+// matcher and the regression tests reference.
+func isIdentByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9') ||
+		b == '_'
 }
 
 // lineNoString is a tiny local helper to keep this file stdlib-only without
@@ -203,4 +258,93 @@ func lineNoString(n int) string {
 		b[pos] = '-'
 	}
 	return string(b[pos:])
+}
+
+// ==================== isStandaloneIdentified contract ====================
+//
+// Pin the boundary rule as a contract test. The main drift guard
+// depends on this matcher behaving the same way across the whole
+// repo, so the test cases here are the operational definition of
+// "what counts as a retired tool reference".
+//
+// MUST match (drift guard must flag):
+//   - the bare retired name in prose,
+//   - backticked / quoted forms, because that is how documentation
+//     and chat-style callouts reference a tool name,
+//   - call-style references (mpm_session(…)) and tool-list references
+//     (tool: mpm_session).
+//
+// MUST NOT match (legitimate current code):
+//   - longer names that share a prefix: mpm_session_id,
+//     mpm_session_ids, mpm_session2, some_mpm_session_helper. These
+//     are real identifiers that contain the retired name as a prefix
+//     or substring; flagging them is the defect the new matcher fixes.
+func TestIsStandaloneIdentified_BoundaryContract(t *testing.T) {
+	cases := []struct {
+		name  string
+		line  string
+		want  bool
+	}{
+		// MUST match — bare retired name in prose.
+		{"bare-name", "the retired mpm_session tool must not appear", true},
+		{"bare-name-edge", "mpm_session", true},
+		{"bare-name-leading-space", " (mpm_session)", true},
+		{"bare-name-trailing-punct", "see mpm_session.", true},
+		{"bare-name-trailing-comma", "see mpm_session, mpm_wakes", true},
+
+		// MUST match — quoted / backticked forms in docs and chat.
+		{"backticked", "retired `mpm_session` interface must not be wired", true},
+		{"double-quoted", `migrate "mpm_session" to mpm_handoff`, true},
+		{"single-quoted", "the 'mpm_session' surface", true},
+		{"call-style", "resolveLegacySessionAlias(\"mpm_session\", …)", true},
+		{"tool-prefix", "tool: mpm_session", true},
+		{"heading", "## mpm_session status", true},
+
+		// MUST NOT match — longer identifiers that contain the
+		// retired name as a prefix or substring.
+		{"mpm_session_id", "store carries mpm_session_id against active.json", false},
+		{"mpm_session_ids", "multiple mpm_session_ids in one batch", false},
+		{"some_mpm_session_helper", "calls into some_mpm_session_helper with the handoff", false},
+		{"mpm_session2", "the mpm_session2 migration rolled out", false},
+		{"mpm_sessionx", "no mpm_sessionx identifier exists; this is a fixture", false},
+
+		// MUST NOT match — short identifiers, exactly the failure
+		// mode the live SPEC.md and README.md used to trip the guard
+		// with.
+		{"spec-id-only", "`mpm_session_id` against its own database's active.json — never", false},
+		{"readme-id-only", "`mpm_session_id` against its own database's active.json — never", false},
+
+		// MUST NOT match — empty / pathological inputs.
+		{"empty-needle-called", "", false}, // never true regardless of line
+		{"needle-not-in-line", "no relevant reference here", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isStandaloneIdentified(tc.line, retdName); got != tc.want {
+				t.Errorf("isStandaloneIdentified(%q, %q) = %v, want %v", tc.line, retdName, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsStandaloneIdentified_RealSourceFixture pins the contract
+// against an actual source-line fixture so a future change to the
+// matcher cannot quietly regress the SPEC.md / README.md case that
+// motivated this work.
+func TestIsStandaloneIdentified_RealSourceFixture(t *testing.T) {
+	// Taken verbatim from docs/SPEC.md:2774 (pre-edit) and the same
+	// reference after the HITL documentation work moved the line
+	// range. The boundary matcher must let this line pass.
+	const specLine = "`mpm_session_id` against its own database's `active.json` — never"
+	if isStandaloneIdentified(specLine, retdName) {
+		t.Errorf("SPEC.md fixture wrongly flagged; matcher regressed to substring semantics")
+	}
+
+	// The same line with the legitimate field replaced by the actual
+	// retired name must NOT pass — that is the boundary the guard
+	// exists to enforce.
+	const badLine = "`mpm_session` against its own database's `active.json` — never"
+	if !isStandaloneIdentified(badLine, retdName) {
+		t.Errorf("Synthetic retrospective test still catches the retired name; matcher regressed")
+	}
 }
