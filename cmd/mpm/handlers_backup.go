@@ -7,11 +7,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm/internal/scheduler"
 )
 
 // ============================================================================
@@ -217,6 +219,45 @@ func handleRestoreDB(args []string) int {
 		return respond("", fmt.Sprintf("Restore rejected (unsafe dump): %v\n", err), 1)
 	}
 
+	// STEP 2.5 (H-4 concurrency guard): acquire an exclusive flock on
+	// `<dbPath>.lock` for the duration of the destructive window. The
+	// empirical §4 reproducer (internal/core/restore_db_concurrency_repro_test.go)
+	// proved that a concurrent writer with an open FD can either
+	// silently lose data (scenarios A/B/E) or contaminate the new DB
+	// (scenario C) if the rename proceeds while the writer is active.
+	// This lock serialises restore-db invocations against each other
+	// and against the shred-database preflight probe (which uses the
+	// same lock file). The lock is acquired AFTER validation succeeds
+	// (validate-before-mutate) and AFTER the user-confirmation prompt,
+	// so the lock-hold time is bounded to the destructive window only.
+	//
+	// Crash safety: syscall.Flock is kernel-cleared on FD close / process
+	// death, so a kill -9 in the middle of the restore releases the
+	// lock immediately. The `.pre-restore` recovery file is left on
+	// disk for the operator to recover from.
+	//
+	// Known limitation: this lock is NOT acquired by other DatabaseManager
+	// users (CLI handlers, scheduler, MCP). A concurrent `mpm capture`
+	// running while `mpm restore-db` runs is still racy. The error
+	// message and the help text both tell the operator to stop the
+	// live MPM daemon before running restore-db. A future tranche
+	// could extend the lock protocol to all DatabaseManager users; that
+	// is a broader change and is out of scope for H-4.
+	//
+	// The lock path is overridable via MPM_DB_LOCK for hermetic tests
+	// (mirrors the MPM_CASCADE_LOCK pattern in handlers_cascade.go).
+	// Production callers leave it unset; the lock file is sibling to
+	// the DB.
+	lockPath := dbPath + ".lock"
+	if override := os.Getenv("MPM_DB_LOCK"); override != "" {
+		lockPath = override
+	}
+	lockFile, err := scheduler.AcquireLock(lockPath)
+	if err != nil {
+		return respond("", fmt.Sprintf("Restore refused: cannot acquire %s: %v\n  (stop the live MPM daemon and any concurrent `mpm` invocations, then retry)\n", lockPath, err), 1)
+	}
+	defer func() { _ = lockFile.Close() }() // kernel releases flock on FD close
+
 	// STEP 3 (T78 contract): only NOW do we touch the live DB.
 	// Clear WAL/SHM siblings — they may contain writes newer than the
 	// dump. Best-effort: a sibling absence is not an error (the live DB
@@ -344,8 +385,35 @@ func handleRestoreDB(args []string) int {
 	// Restore succeeded — discard the pre-delete backup.
 	_ = os.Remove(preDeleteCopy)
 
+	// Reset the process-wide DatabaseManager singleton. After a
+	// successful restore, the singleton's *sql.DB still points to the
+	// OLD inode (now unlinked); subsequent CLI invocations in this
+	// process would either read from the dead inode or fail at the
+	// SQLite layer. Mirrors resetShredDatabaseSingleton in
+	// handlers_shred_database_reset.go, which solves the same problem
+	// for the shred-database path. The next getDB() will lazily
+	// re-initialize a fresh DatabaseManager against the new file.
+	resetRestoreDBDatabaseSingleton()
+
 	fmt.Printf("Restored from: %s\n", sqlPath)
 	return 0
+}
+
+// resetRestoreDBDatabaseSingleton re-arms the process-wide DatabaseManager
+// singleton so the next getDB() initializes a fresh one against the
+// post-restore DB. Mirrors resetShredDatabaseSingleton in
+// handlers_shred_database_reset.go. Kept as a private helper so a
+// future reader cannot wire a reset behind a different command name.
+func resetRestoreDBDatabaseSingleton() {
+	if dbManager != nil {
+		// Best-effort close. Close errors on the dead singleton are
+		// not surfaced; the new constructor overwrites the field
+		// before the next caller can observe the old one.
+		_ = dbManager.Close()
+	}
+	dbManager = nil
+	dbManagerInitErr = nil
+	dbManagerOnce = sync.Once{}
 }
 
 // ============================================================================
