@@ -13,6 +13,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm/internal/scheduler"
 )
 
@@ -47,7 +48,10 @@ func handleBackup(args []string) int {
 	}
 
 	// Flush any pending WAL writes so the dump captures a consistent snapshot.
-	if err := flushWal(dbPath); err != nil {
+	// H-4: routed through the DatabaseManager singleton so the shared
+	// maintenance lease (LOCK_SH) covers the checkpoint — a concurrent
+	// restore-db / shred-database refuses while a backup is in flight.
+	if err := flushWal(dm); err != nil {
 		return respond("", fmt.Sprintf("Backup failed (wal flush): %v\n", err), 1)
 	}
 
@@ -90,37 +94,61 @@ func handleBackup(args []string) int {
 // path was empty, leaving the system degraded until manual recovery.
 //
 // Post-fix, the handler follows a strict "validate-before-mutate" contract:
-//   1. Confirm with the user.
-//   2. Read the entire dump into memory.
-//   3. Run the canonical validator against the dump (returns parsed
-//      statements or rejects). The live DB is UNTOUCHED at this point —
-//      any rejection here returns non-zero with the original DB intact.
-//   4. Only after a fully valid dump is in hand, clear WAL/SHM siblings,
-//      rename the live DB aside as `.pre-restore`, and write the new DB.
-//   5. If anything fails after the rename, restore the original from
-//      `.pre-restore` and report the error.
-//   6. On success, remove `.pre-restore`.
+//  1. Confirm with the user.
+//  2. Read the entire dump into memory.
+//  3. Run the canonical validator against the dump (returns parsed
+//     statements or rejects). The live DB is UNTOUCHED at this point —
+//     any rejection here returns non-zero with the original DB intact.
+//  4. Only after a fully valid dump is in hand, clear WAL/SHM siblings,
+//     rename the live DB aside as `.pre-restore`, and write the new DB.
+//  5. If anything fails after the rename, restore the original from
+//     `.pre-restore` and report the error.
+//  6. On success, remove `.pre-restore`.
 //
 // This way the live database is only ever mutated once a complete,
 // validated restore is guaranteed to proceed.
 func handleRestoreDB(args []string) int {
 	if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
-		return respond("", "Usage: mpm restore-db <path-to-sql-dump>\n", 1)
+		return respond("", restoreDBUsage(), 1)
 	}
 	sqlPath := args[1]
 
-	dm := getDB()
-	if dm == nil {
-		return 1
+	// H-4 (corrective): resolve the canonical DB and lock paths WITHOUT
+	// opening a DatabaseManager. Restoring the database is a destructive
+	// window — every active writer (CLI handlers, scheduler, MCP, critic)
+	// holds LOCK_SH on `<dbPath>.lock` for the lifetime of its
+	// DatabaseManager. The previous (S-1) implementation constructed the
+	// process-wide DatabaseManager singleton here solely to extract the
+	// path string, which acquired LOCK_SH on this very process. The
+	// subsequent AcquireLock(LOCK_EX) at the destructive window then
+	// raced against the singleton's LOCK_SH. On Linux flock(2) "merges"
+	// same-process FDs (LOCK_SH + LOCK_EX on two FDs owned by one
+	// process upgrades to LOCK_EX without EWOULDBLOCK), so the race was
+	// invisible on Linux; on macOS/BSD flock is per-FD and the LOCK_EX
+	// acquisition would EWOULDBLOCK against the same process's LOCK_SH
+	// — restoring a single-source-of-deadlock bug for restore-db to
+	// deadlock against itself.
+	//
+	// The clean cross-platform design is: restore-db does NOT
+	// participate in the shared lease at all. The canonical DB path and
+	// lock path are derived from the active workspace directly via the
+	// single source of truth in internal/core (ActiveDBPath /
+	// MaintenanceLockPath), which both resolve symlinks so two processes
+	// pointing at the same physical workspace via different path
+	// spellings converge on the same lock identity. No DatabaseManager
+	// is constructed in this command, so this process never holds
+	// LOCK_SH — the LOCK_EX acquisition below succeeds iff no OTHER
+	// process holds LOCK_SH (i.e. no live writer is racing the
+	// destructive window).
+	//
+	// See internal/core/maintenance_lock.go for the full protocol and
+	// internal/core/db.go for the DatabaseManager side of the lease.
+	workspace := config.GetMPMDir()
+	dbPath := mpminternal.ActiveDBPath(workspace)
+	lockPath := mpminternal.MaintenanceLockPath(workspace)
+	if override := os.Getenv("MPM_DB_LOCK"); override != "" {
+		lockPath = override
 	}
-	// Extract the path strings only. Do NOT call dm.Close() — dbManager is
-	// a process-wide singleton reused by every CLI invocation in this
-	// process. The actual restore writes through a fresh sql.Open below,
-	// not through the singleton, so closing the singleton here serves no
-	// purpose and breaks every subsequent command. The 2026-08-13 audit
-	// flagged this; regression locked in by
-	// cmd/mpm/handlers_backup_singleton_test.go::TestHandleRestoreDB_LeavesSingletonAlive.
-	dbPath := dm.DBPath()
 
 	// 2026-09-10 regression repair (T78): allow legitimate
 	// operator-supplied backups from outside the database
@@ -225,36 +253,34 @@ func handleRestoreDB(args []string) int {
 	// proved that a concurrent writer with an open FD can either
 	// silently lose data (scenarios A/B/E) or contaminate the new DB
 	// (scenario C) if the rename proceeds while the writer is active.
-	// This lock serialises restore-db invocations against each other
-	// and against the shred-database preflight probe (which uses the
-	// same lock file). The lock is acquired AFTER validation succeeds
-	// (validate-before-mutate) and AFTER the user-confirmation prompt,
-	// so the lock-hold time is bounded to the destructive window only.
 	//
-	// Crash safety: syscall.Flock is kernel-cleared on FD close / process
-	// death, so a kill -9 in the middle of the restore releases the
-	// lock immediately. The `.pre-restore` recovery file is left on
-	// disk for the operator to recover from.
+	// Coordination: every ordinary DatabaseManager user (CLI handlers,
+	// scheduler, MCP, critic) acquires LOCK_SH on `<dbPath>.lock` for
+	// the lifetime of its *sql.DB (internal/core/db.go:NewDatabaseManager).
+	// The lock acquired below is LOCK_EX|LOCK_NB; it fails with
+	// EWOULDBLOCK iff ANY DatabaseManager (in any process) holds
+	// LOCK_SH on the same inode, so a concurrent `mpm capture`, the
+	// live MPM daemon, or any other active writer will block this
+	// restore. restore-db itself does NOT open a DatabaseManager
+	// (see the workspace-resolution block at the top of this function),
+	// so the LOCK_EX acquisition is uncontested within this process
+	// across Linux and macOS/BSD — no same-process re-entrancy hazard.
 	//
-	// Known limitation: this lock is NOT acquired by other DatabaseManager
-	// users (CLI handlers, scheduler, MCP). A concurrent `mpm capture`
-	// running while `mpm restore-db` runs is still racy. The error
-	// message and the help text both tell the operator to stop the
-	// live MPM daemon before running restore-db. A future tranche
-	// could extend the lock protocol to all DatabaseManager users; that
-	// is a broader change and is out of scope for H-4.
+	// The lock is acquired AFTER validation succeeds (validate-before-
+	// mutate) and AFTER the user-confirmation prompt, so the lock-hold
+	// time is bounded to the destructive window only. Crash safety:
+	// syscall.Flock is kernel-cleared on FD close / process death, so a
+	// kill -9 in the middle of the restore releases the lock
+	// immediately. The `.pre-restore` recovery file is left on disk
+	// for the operator to recover from.
 	//
 	// The lock path is overridable via MPM_DB_LOCK for hermetic tests
 	// (mirrors the MPM_CASCADE_LOCK pattern in handlers_cascade.go).
 	// Production callers leave it unset; the lock file is sibling to
 	// the DB.
-	lockPath := dbPath + ".lock"
-	if override := os.Getenv("MPM_DB_LOCK"); override != "" {
-		lockPath = override
-	}
 	lockFile, err := scheduler.AcquireLock(lockPath)
 	if err != nil {
-		return respond("", fmt.Sprintf("Restore refused: cannot acquire %s: %v\n  (stop the live MPM daemon and any concurrent `mpm` invocations, then retry)\n", lockPath, err), 1)
+		return respond("", fmt.Sprintf("Restore refused: cannot acquire %s: %v\n  (another writer — live MPM daemon, `mpm capture`, or any active DatabaseManager holder — has the maintenance lease on this database.\n  Stop the live MPM daemon (`mpm stop` or `systemctl --user stop mpm-scheduler`) and any concurrent `mpm` invocation, then retry.)\n", lockPath, err), 1)
 	}
 	defer func() { _ = lockFile.Close() }() // kernel releases flock on FD close
 
@@ -414,6 +440,43 @@ func resetRestoreDBDatabaseSingleton() {
 	dbManager = nil
 	dbManagerInitErr = nil
 	dbManagerOnce = sync.Once{}
+}
+
+// restoreDBUsage is the operator-facing help for `mpm restore-db`.
+// Returned by handleRestoreDB when called with no path argument, and
+// also exposed via `mpm restore-db --help` through the standard
+// flag-driven help short-circuit (the existing pattern is
+// requireHelpShortCircuit). The safety section mirrors the actual
+// protection surface (H-4 shared/exclusive lease) — see
+// internal/core/maintenance_lock.go for the protocol definition.
+func restoreDBUsage() string {
+	return `mpm restore-db — restore the active MPM database from a SQL dump
+
+Usage:
+  mpm restore-db <path-to-sql-dump>
+
+Scope:
+  Reads an .sql dump (the format produced by 'mpm backup' or 'sqlite3 .dump'),
+  validates every line against the canonical MPM allow-list (C-2), and
+  atomically replaces the live database. The previous database is
+  retained on disk as src/db/mpm.db.pre-restore until the next successful
+  restore (or until removed by hand).
+
+Concurrency (H-4 maintenance lease):
+  Restore-db acquires LOCK_EX|LOCK_NB on <dbPath>.lock and holds it
+  through the entire destructive window. Every active DatabaseManager
+  (CLI handlers, scheduler, MCP, critic) holds LOCK_SH on the same
+  lock file for the lifetime of its *sql.DB. The acquire fails with
+  EWOULDBLOCK iff any other process holds the maintenance lease.
+  Before retrying, stop the live MPM daemon (mpm stop or
+  'systemctl --user stop mpm-scheduler') and any concurrent 'mpm'
+  invocation that uses this database.
+
+Crash safety:
+  syscall.Flock is kernel-cleared on FD close / process death. A kill -9
+  during the destructive window releases the lock immediately; the
+  .pre-restore file remains on disk for recovery.
+`
 }
 
 // ============================================================================
@@ -594,21 +657,23 @@ func defaultBackupPath(dbPath string) string {
 	return filepath.Join(filepath.Dir(dbPath), fmt.Sprintf("mpm-backup-%s.sql", ts))
 }
 
-// flushWal runs `PRAGMA wal_checkpoint(TRUNCATE)` against dbPath so the dump
-// captures all writes, not just what's in the main file. Uses a transient
-// sql.DB connection (caller's connection is presumed closed or about to be).
+// flushWal runs `PRAGMA wal_checkpoint(TRUNCATE)` against the active MPM
+// database so the dump captures all writes, not just what's in the main
+// file. Runs against the canonical DatabaseManager's *sql.DB so the
+// H-4 shared maintenance lease (LOCK_SH held by the DM) covers the
+// checkpoint; restore-db / shred-database will refuse (EWOULDBLOCK) on
+// the same lock inode while a backup is in flight, which is the correct
+// observable behaviour for "destructive operation cannot race a writer".
 //
-// DSN: must use mpminternal.SqliteWriteDSN so the transient connection
-// opens with foreign_keys=ON. A bare path would leave FK enforcement at
-// the SQLite default (off), which lets the checkpoint silently drop rows
-// that violate foreign-key constraints. The 2026-08-13 audit flagged
-// this; locked in by handlers_backup_singleton_test.go::TestFlushWal_PassesForeignKeysPragma.
-func flushWal(dbPath string) error {
-	db, err := sql.Open("sqlite3", mpminternal.SqliteWriteDSN(dbPath))
-	if err != nil {
-		return err
+// Pre-H-4 this opened a transient sql.Open. That violates the single-connection
+// discipline in TestDatabaseManagerIsOnlyOwnerOfSqlOpen and, more critically,
+// bypasses the maintenance lease: a concurrent restore-db would race a
+// backup-held checkpoint because the bypass writer did not hold LOCK_SH.
+// Routing through the singleton closes both holes structurally.
+func flushWal(dm mpminternal.CoreDB) error {
+	if dm == nil {
+		return fmt.Errorf("flushWal: nil CoreDB")
 	}
-	defer closeSQLDB(db)
-	_, err = db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	_, err := dm.SQLDB().Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	return err
 }

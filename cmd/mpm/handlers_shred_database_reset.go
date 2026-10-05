@@ -44,8 +44,13 @@ package main
 //  2. Preflight refuses if the resolved database path is not safe:
 //     empty, "/", $HOME, the repo parent, an in-memory DSN, or a path
 //     that fails stat-based real-path resolution.
-//  3. Preflight refuses if a second live process holds the database —
-//     best-effort probe via non-blocking flock on `<dbPath>.lock`.
+//  3. Preflight acquires an exclusive flock on `<dbPath>.lock` and
+//     HOLDS it through the entire destructive window. The acquire
+//     fails (EWOULDBLOCK) iff any active DatabaseManager (CLI
+//     handlers, scheduler, MCP, critic, mpm capture) holds LOCK_SH
+//     on the same inode — see internal/core/maintenance_lock.go for
+//     the shared/exclusive lease protocol. Kernel releases the lock
+//     on FD close / process death.
 //  4. Validate-before-mutate: a fresh DatabaseManager is fully built
 //     and integrity-checked against a side-file BEFORE the live DB is
 //     renamed aside. If the side-file build fails, the live DB is
@@ -78,7 +83,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/flowbyte-com/mpm-core"
@@ -178,9 +182,28 @@ func executeShredDatabaseReset() int {
 	walPath := dbPath + "-wal"
 	shmPath := dbPath + "-shm"
 
-	if err := preflightShredDatabase(dbPath); err != nil {
+	// H-4: preflight acquires LOCK_EX|LOCK_NB on `<dbPath>.lock` and
+	// HOLDS it for the entire destructive window. The deferred close
+	// releases the lock on every exit path (success, refusal, panic).
+	// Holding through the window means a concurrent `mpm capture` (or
+	// any other DatabaseManager user) that started its LOCK_SH before
+	// our LOCK_EX acquisition is blocked at its own constructor (the
+	// constructor waits on the LOCK_SH acquire), and any concurrent
+	// DatabaseManager that started AFTER our LOCK_EX will EWOULDBLOCK
+	// at the LOCK_SH acquire and refuse. Either way, no other process
+	// can hold a writable *sql.DB on the live DB during the rename.
+	lockFile, err := preflightShredDatabase(dbPath)
+	if err != nil {
 		return respond("", fmt.Sprintf("Refusing 'mpm shred database': %v\n", err), 1)
 	}
+	defer func() {
+		if lerr := internal.ReleaseExclusiveMaintenanceLock(lockFile); lerr != nil {
+			// Best-effort. The kernel releases on FD close / process
+			// death regardless; we log via respond so the failure is
+			// observable but the destructive outcome still stands.
+			respond("", fmt.Sprintf("Warning: shred database exclusive-lock release error: %v\n", lerr), 0)
+		}
+	}()
 
 	// Validate-before-mutate: build a fresh DatabaseManager against a
 	// side-directory (not the live path) and integrity-check it. Only
@@ -323,33 +346,62 @@ func detectRepoParent() (string, error) {
 	return "", nil
 }
 
-// preflightShredDatabase refuses if a second live process appears to
-// hold the database. The probe is a non-blocking exclusive flock on
-// `<dbPath>.lock`: if the lock is already held, we refuse with a
-// precise message rather than try to delete files from underneath
-// the holder.
+// preflightShredDatabase acquires LOCK_EX|LOCK_NB on `<dbPath>.lock`
+// and HOLDS it for the duration of the destructive window. Returns
+// the open *os.File whose FD carries the exclusive flock; the caller
+// MUST defer ReleaseExclusiveMaintenanceLock (or close the file) so
+// the kernel releases the lock at the end of the destructive window.
 //
-// Returns nil if the DB does not yet exist (fresh install path) — the
-// caller treats that as "no live process to refuse".
-func preflightShredDatabase(dbPath string) error {
+// H-4 (corrective): the previous implementation acquired the exclusive
+// flock, immediately released it, and proceeded with the destructive
+// steps unprotected. That left a window between the probe-release
+// and the rename-aside during which a concurrent DatabaseManager
+// (mpm capture, the live MPM daemon, any other active writer) could
+// acquire LOCK_SH and start writing to the DB we were about to
+// rename. The acquire-and-hold form closes that window: from the
+// moment preflight returns success until the caller closes the file,
+// every other process is refused at LOCK_EX acquisition time
+// (EWOULDBLOCK), and any LOCK_SH holder already in place blocks the
+// LOCK_EX acquisition right here.
+//
+// The exclusive acquisition fails (EWOULDBLOCK) iff a DatabaseManager
+// in any process holds LOCK_SH on the same inode. That includes
+// every active writer described in internal/core/db.go's H-4 lease
+// protocol (CLI handlers, scheduler, MCP, critic). The caller treats
+// the failure as a refusal: "another writer holds the maintenance
+// lease; stop the live MPM daemon and any concurrent `mpm`
+// invocation, then retry".
+//
+// Returns (nil, nil) if the DB does not yet exist (fresh install
+// path) — there is no live writer to serialise against, and no
+// exclusive lock is needed for a non-existent file. The caller must
+// tolerate a nil lock file in that case.
+//
+// The lock identity is derived from the DB path via
+// internal.AcquireExclusiveMaintenanceLockAt so the canonical symlink
+// resolution and MPM_DB_LOCK test backstop both apply.
+func preflightShredDatabase(dbPath string) (*os.File, error) {
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return nil
+		return nil, nil
 	} else if err != nil {
-		return fmt.Errorf("cannot stat database: %w", err)
+		return nil, fmt.Errorf("cannot stat database: %w", err)
 	}
-	lockPath := dbPath + ".lock"
-	lockFile, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	// Derive the lock identity from the workspace root via the SINGLE
+	// source of truth in internal/core (MaintenanceLockPath). Hand-
+	// constructing "<dbPath>.lock" here would diverge from the canonical
+	// identity if MaintenanceLockPath ever changes its scheme, and would
+	// silently break cross-symlink aliasing. The static guard
+	// internal/core/maintenance_lock_static_test.go enforces this.
+	mpmDir := config.GetMPMDir()
+	lockPath := internal.MaintenanceLockPath(mpmDir)
+	if override := os.Getenv("MPM_DB_LOCK"); override != "" {
+		lockPath = override
+	}
+	lockFile, err := internal.AcquireExclusiveMaintenanceLockAt(lockPath)
 	if err != nil {
-		return fmt.Errorf("cannot probe %s: %w", lockPath, err)
+		return nil, fmt.Errorf("cannot acquire %s: %w\n  (another writer — live MPM daemon, `mpm capture`, or any active DatabaseManager holder — has the maintenance lease on this database.\n  Stop the live MPM daemon (`mpm stop` or `systemctl --user stop mpm-scheduler`) and any concurrent `mpm` invocation, then retry.)", lockPath, err)
 	}
-	defer lockFile.Close()
-	// Non-blocking exclusive flock. EWOULDBLOCK means another FD in
-	// this process or another process holds the lock.
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return fmt.Errorf("another process holds %s; stop the live MPM daemon and retry", lockPath)
-	}
-	_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-	return nil
+	return lockFile, nil
 }
 
 // sideIntegrityCheck runs PRAGMA integrity_check against the
@@ -416,6 +468,17 @@ Scope:
   path. Retains the previous database as
     src/db/mpm.db.pre-shred-<nanos>
   for one cycle so the operator can recover if needed.
+
+Concurrency (H-4 maintenance lease):
+  Preflight acquires LOCK_EX|LOCK_NB on <dbPath>.lock and HOLDS it
+  through the entire destructive window. Every active DatabaseManager
+  (CLI handlers, scheduler, MCP, critic) holds LOCK_SH on the same
+  lock file for the lifetime of its *sql.DB. The acquire fails with
+  EWOULDBLOCK iff any other process holds the maintenance lease.
+  Before retrying, stop the live MPM daemon (mpm stop or
+  'systemctl --user stop mpm-scheduler') and any concurrent 'mpm'
+  invocation that uses this database. The lock release on FD close /
+  process death is kernel-cleared.
 
 Preserved on purpose (still on disk, may contain the old content):
   backups/, migrations/, mirror.jsonl (+ rotated .gz),
