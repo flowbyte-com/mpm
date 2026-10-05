@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
@@ -114,17 +115,19 @@ func setupRestoreSafetyTest(t *testing.T) *mpminternal.DatabaseManager {
 			"(workspace=%q). Without this, the handler's os.Rename would "+
 			"silently fail.", tmpDir)
 
-	// Consume sync.Once then swap in our test DM. Same pattern as
-	// setupBackupSingletonTest.
-	_ = getDB()
-	prev := dbManager
-	prevErr := dbManagerInitErr
-	dbManager = dm
-	dbManagerInitErr = nil
-	t.Cleanup(func() {
-		dbManager = prev
-		dbManagerInitErr = prevErr
-	})
+	// H-4: do NOT seed the process-wide DatabaseManager singleton
+	// here. The previous pattern called getDB() to consume sync.Once
+	// and then swapped dbManager to our test dm. That left a second
+	// dm (the singleton's first lazy-init dm) holding LOCK_SH on
+	// `<dbPath>.lock` for the test's lifetime — harmless pre-H-4
+	// because handleRestoreDB ignored the lock entirely. Post-H-4 the
+	// extra LOCK_SH holder makes handleRestoreDB correctly refuse with
+	// EWOULDBLOCK against the test process's own writers. handleRestoreDB
+	// no longer reads from getDB() (it derives dbPath / lockPath from
+	// MPM_WORKSPACE directly), so this setup no longer needs to touch
+	// the singleton at all. Tests that need the test dm released before
+	// invoking handleRestoreDB do so explicitly via a closeDBSingleton
+	// equivalent.
 	return dm
 }
 
@@ -272,6 +275,20 @@ func TestHandleRestoreDB_SuccessOverwritesOriginal(t *testing.T) {
 	require.NotEmpty(t, dbPath)
 
 	populateTestDB(t, dm)
+
+	// H-4 contract: the test-process DM opened by setupRestoreSafetyTest
+	// holds LOCK_SH on `<dbPath>.lock` for its lifetime. Pre-H-4 the
+	// destructive command would have ignored the lock entirely; post-H-4
+	// handleRestoreDB correctly refuses with EWOULDBLOCK against its
+	// own process's LOCK_SH. Release the in-process LOCK_SH before
+	// invoking the handler so the LOCK_EX acquisition can succeed.
+	// setupRestoreSafetyTest's cleanup re-closes dm, so the double-
+	// close is harmless.
+	_ = dm.Close()
+	dbManager = nil
+	dbManagerInitErr = nil
+	dbManagerOnce = sync.Once{}
+
 	// After a successful restore, the dm's pre-populated rows live in
 	// the OLD inode (now removed). The NEW file at dbPath starts empty
 	// and gains exactly 1 row from the dump's INSERT. So
@@ -311,7 +328,7 @@ COMMIT;
 	// The pre-restore copy must NOT exist after a successful restore
 	// (the cleanup path removes it).
 	if _, err := os.Stat(dbPath + ".pre-restore"); err == nil {
-		t.Fatalf(".pre-restore still exists after successful restore — "+
+		t.Fatalf(".pre-restore still exists after successful restore — " +
 			"cleanup path failed to remove it")
 	}
 }

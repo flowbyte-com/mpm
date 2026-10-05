@@ -103,13 +103,16 @@ func TestHandleRestoreDB_LeavesSingletonAlive(t *testing.T) {
 }
 
 // TestFlushWal_PassesForeignKeysPragma verifies the second audit finding:
-// flushWal used to open the DB with bare `dbPath` (no DSN query params),
-// leaving foreign_keys=OFF. With FK enforcement off, a WAL checkpoint
-// could silently drop rows that violate FK constraints.
+// the pre-H-4 flushWal opened its own transient connection with bare
+// `dbPath` (no DSN query params), leaving foreign_keys=OFF. With FK
+// enforcement off, a WAL checkpoint could silently drop rows that
+// violate FK constraints.
 //
-// Post-fix: flushWal uses mpminternal.SqliteWriteDSN, which appends
-// `?_foreign_keys=1` to the DSN. We verify that on a fresh connection
-// opened the same way, foreign_keys is ON.
+// Post-H-4 flushWal does not open its own connection: it routes through
+// the singleton DatabaseManager (which holds LOCK_SH as part of the
+// maintenance lease). The DSN-side FK guard is therefore exercised
+// separately against SqliteWriteDSN below — the helper used by every
+// non-DM write path that still opens its own connection.
 func TestFlushWal_PassesForeignKeysPragma(t *testing.T) {
 	// Use a file-based DM (not NewTestDM which is in-memory) so DBPath()
 	// returns a real path — the empty-path guard returns ":memory:",
@@ -121,15 +124,20 @@ func TestFlushWal_PassesForeignKeysPragma(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dm.Close() })
 	require.NotEmpty(t, dm.DBPath(),
-		"file-based DM must produce a non-empty DBPath — got %q "+
+		"file-based DM must produce a non-empty DMPath — got %q "+
 			"(workspace=%q)", dm.DBPath(), config.GetMPMDir())
 
-	// flushWal opens its own transient connection — exercise it on the
-	// real DB path and confirm it doesn't error.
-	require.NoError(t, flushWal(dm.DBPath()))
+	// Post-H-4 flushWal takes the DM (CoreDB interface) and runs the
+	// checkpoint on the singleton's *sql.DB. The LOCK_SH held by the
+	// DM is what blocks a concurrent restore-db / shred-database from
+	// racing the dump. The transient sql.Open path that previously
+	// bypassed the lease has been removed.
+	require.NoError(t, flushWal(dm))
 
 	// Open a fresh connection using the same exported helper flushWal
-	// uses internally and read the pragma to confirm.
+	// USED TO use internally, and read the pragma to confirm the DSN
+	// still enables FK. SqliteWriteDSN remains the single source of
+	// truth for FK=ON for any write path that opens its own connection.
 	db, err := sql.Open("sqlite3", mpminternal.SqliteWriteDSN(dm.DBPath()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -137,9 +145,10 @@ func TestFlushWal_PassesForeignKeysPragma(t *testing.T) {
 	var fk int
 	require.NoError(t, db.QueryRow(`PRAGMA foreign_keys`).Scan(&fk))
 	assert.Equal(t, 1, fk,
-		"flushWal DSN must enable foreign_keys=ON — "+
-			"pre-fix, FK enforcement was off and the checkpoint "+
-			"could silently drop FK-violating rows")
+		"SqliteWriteDSN must enable foreign_keys=ON — "+
+			"pre-fix, FK enforcement was off and any write path "+
+			"that opens its own connection could silently drop "+
+			"FK-violating rows")
 }
 
 // TestSqliteWriteDSN_EmptyPathReturnsMemory exercises the defensive guard

@@ -119,6 +119,33 @@ func resetDBSingleton(t *testing.T) {
 	})
 }
 
+// closeDBSingleton closes the process-wide DatabaseManager singleton
+// (releasing LOCK_SH on `<dbPath>.lock`) and resets the sync.Once so
+// the next getDB() lazily re-initialises against the current
+// MPM_WORKSPACE.
+//
+// H-4 contract: any DatabaseManager holder in this process holds
+// LOCK_SH for its lifetime. Tests that invoke `mpm shred database -f`
+// (or any other destructive command that takes LOCK_EX|LOCK_NB) must
+// therefore release the in-process LOCK_SH before invoking the
+// command, otherwise the command correctly refuses with EWOULDBLOCK
+// — same-process, same-inode lock contention, not a bug. After the
+// destructive command completes, getDB() re-acquires LOCK_SH on the
+// (possibly-renamed) file for verification reads.
+//
+// Note: this only closes the in-process singleton. It does NOT touch
+// subprocess state; runCLI shells out via NewRouter().Execute which
+// shares this process.
+func closeDBSingleton(t *testing.T) {
+	t.Helper()
+	if dbManager != nil {
+		_ = dbManager.Close()
+	}
+	dbManager = nil
+	dbManagerInitErr = nil
+	dbManagerOnce = sync.Once{}
+}
+
 // workspace pins MPM_WORKSPACE to a fresh temp dir and returns it.
 func workspace(t *testing.T) string {
 	t.Helper()
@@ -373,6 +400,17 @@ func TestShredDatabase_NeverRemovesTheDatabaseFile(t *testing.T) {
 			}
 		}
 
+		// H-4 contract: release the in-process LOCK_SH before invoking
+		// `shred database -f`. The seed step above opened a DatabaseManager
+		// that holds LOCK_SH for the test's lifetime; pre-H-4 the
+		// destructive command would have ignored the lock entirely. Post-
+		// H-4 the lock is honoured and the destructive window correctly
+		// refuses to start while a writer (even this process's own
+		// singleton) holds the lease. Closing the singleton releases
+		// LOCK_SH; getDB() will lazily re-acquire it against the rebuilt
+		// file for the post-reset integrity / sentinel query below.
+		closeDBSingleton(t)
+
 		code, out := runCLI(t, "shred", "database", "-f")
 		if code != 0 {
 			t.Fatalf("`mpm shred database -f` failed: exit %d\n%s", code, out)
@@ -443,6 +481,13 @@ func TestShredDatabase_NeverRemovesTheDatabaseFile(t *testing.T) {
 			t.Fatalf("first seed failed: exit %d\n%s", code, out)
 		}
 		dbPath := filepath.Join(ws, "src", "db", "mpm.db")
+
+		// H-4: release the in-process LOCK_SH held by the seed
+		// DatabaseManager before the first `shred database -f`. The lock
+		// has to be released before each reset invocation in this
+		// subtest; the seed (and only the seed) re-opens a DM.
+		closeDBSingleton(t)
+
 		// First reset.
 		if code, out := runCLI(t, "shred", "database", "-f"); code != 0 {
 			t.Fatalf("first reset failed: exit %d\n%s", code, out)
@@ -454,6 +499,15 @@ func TestShredDatabase_NeverRemovesTheDatabaseFile(t *testing.T) {
 		if len(firstHandle) != 1 {
 			t.Fatalf("expected exactly 1 .pre-shred-* after first reset, got %d", len(firstHandle))
 		}
+		// H-4: the first reset does not touch the in-process
+		// singleton (the destructive window holds its own
+		// exclusive-lock FD and releases on exit), so by the time
+		// we reach the second reset no in-process LOCK_SH is held
+		// — but we call closeDBSingleton unconditionally to keep
+		// the pattern explicit and resilient to future refactors
+		// that might lazily cache a DM.
+		closeDBSingleton(t)
+
 		// Second reset.
 		if code, out := runCLI(t, "shred", "database", "-f"); code != 0 {
 			t.Fatalf("second reset failed: exit %d\n%s", code, out)
@@ -485,6 +539,14 @@ func TestShredDatabase_NeverRemovesTheDatabaseFile(t *testing.T) {
 		dbPath := filepath.Join(ws, "src", "db", "mpm.db")
 		lockPath := dbPath + ".lock"
 
+		// H-4 contract: release the in-process LOCK_SH before
+		// acquiring the probe LOCK_EX. Otherwise the test process
+		// itself is the "writer holding the lease", and the probe
+		// flock attempt below would EWOULDBLOCK against its own
+		// LOCK_SH — same as the production scenario this test
+		// simulates, but indistinguishable from a probe failure.
+		closeDBSingleton(t)
+
 		// Hold an exclusive flock on the lock file for the duration of
 		// the test to simulate a second live MPM process.
 		lf, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
@@ -507,8 +569,8 @@ func TestShredDatabase_NeverRemovesTheDatabaseFile(t *testing.T) {
 		if code == 0 {
 			t.Fatalf("`mpm shred database -f` succeeded under live-process lock; it must refuse")
 		}
-		if !strings.Contains(out, "another process holds") {
-			t.Errorf("expected the live-process refusal message, got:\n%s", out)
+		if !strings.Contains(out, "maintenance lease") {
+			t.Errorf("expected the H-4 maintenance-lease refusal message, got:\n%s", out)
 		}
 
 		after, err := os.Stat(dbPath)
