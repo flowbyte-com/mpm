@@ -1,16 +1,36 @@
 // drill_handler_test.go — pin the scheduler-side drill executor.
 //
-// Two tests: the synthetic path (deterministic, no real agent) and a
-// framework-routing rejection test for unsupported frameworks. The
-// claude_code real-framework path is exercised end-to-end by
-// TestDrillE2E_ClaudeCode (gated on claude + mpm-mcp binaries).
+// Six tests covering the drill-run session identity invariant (§4)
+// and the framework-dispatch contract:
+//
+//   - TestDrillHandler_SyntheticPath_RecordsVerdict
+//       framework-dispatch decision for the synthetic path; the
+//       score pipeline records the row even when `mpm call` cannot
+//       resolve on PATH.
+//   - TestDrillHandler_UnsupportedFrameworkRejected
+//       unsupported framework → status='error' with diagnostic
+//       message; the row persists so the failure is recoverable.
+//   - TestDrillHandler_ClaudeCodePath_SessionIdentityEndToEnd (§9)
+//       orchestrator S == drill_runs.session_id ==
+//       tool_invocations.session_id end-to-end through
+//       DrillHandler.Launch.Finish on the claude_code path.
+//   - TestDrillHandler_ClaudeCodePath_NoCrossRunBleed (§10)
+//       two consecutive runs must own distinct session_ids and
+//       exactly one audit row each, with no orphans.
+//   - TestDrillHandler_ClaudeCodePath_ErrorPreservesSessionID (§11)
+//       launch failure (claude absent from PATH) must surface as
+//       status='error' WITHOUT erasing the orchestrator's
+//       sessionID from drill_runs.
+//   - TestDrillHandler_SyntheticPath_SessionIdentityEndToEnd
+//       same §4 chain on the synthetic path: orchestrator S →
+//       drill_runs.session_id → MPM_SESSION_ID env on `mpm call`
+//       → tool_invocations.session_id.
 
 package scheduler
 
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -19,21 +39,135 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDrillHandler_SyntheticPath_RecordsVerdict(t *testing.T) {
+// setupDrillDM returns a file-backed DatabaseManager with the schema
+// initialised and MPM_WORKSPACE pinned to its directory. The caller
+// must not call dm.Close — t.Cleanup handles it. Reused by every
+// drill-handler test below; collapsing the inline boilerplate here
+// keeps each test focused on its own assertion surface.
+func setupDrillDM(t *testing.T) (*core.DatabaseManager, string) {
+	t.Helper()
 	workspace := t.TempDir()
 	t.Setenv("MPM_WORKSPACE", workspace)
 	dm, err := core.NewDatabaseManager(workspace)
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
-	if err := dm.InitSchema(); err != nil {
-		t.Fatalf("InitSchema: %v", err)
-	}
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dm.Close() })
+	require.NoError(t, dm.InitSchema())
+	return dm, workspace
+}
 
-	// Seed a drill fixture (the handler expects the file on disk).
-	drillPath := filepath.Join(workspace, "test-drill.yaml")
-	if err := writeFile(drillPath, []byte(`
+// installFakeBin drops an executable shell script at <tmpdir>/<name>
+// and prepends that directory to PATH so the harness's exec.LookPath
+// resolves our shim before any system binary. Reused by the
+// claude_code + synthetic path tests.
+func installFakeBin(t *testing.T, name, body string) string {
+	t.Helper()
+	binDir := t.TempDir()
+	path := filepath.Join(binDir, name)
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o755))
+	// Prepend so the harness resolves our shim before any real binary
+	// that may be on PATH.
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return binDir
+}
+
+// installFakeClaudeAndMcp installs both the fake claude (the
+// production-equivalent shim that stamps tool_invocations rows with
+// MPM_SESSION_ID) and the fake mpm-mcp (harness.isAvailable only
+// stats — a no-op script is enough). Used by every claude_code path
+// test that needs both binaries present.
+func installFakeClaudeAndMcp(t *testing.T) {
+	t.Helper()
+	dir := installFakeBin(t, "claude", fakeClaudeShimScript)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "mpm-mcp"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+}
+
+// writeDrillYAML serialises a minimal drill fixture to disk so the
+// handler can resolve path metadata. Lives next to the helpers to
+// keep the test bodies free of YAML noise.
+func writeDrillYAML(t *testing.T, path, body string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+}
+
+// fakeClaudeShimScript is the body of the fake `claude` binary. It
+// honours MPM_SESSION_ID by writing exactly one tool_invocations row
+// tagged with the env-passed session_id, then exits 0. Mirrors what
+// mpm-mcp's audit hook does in production. Used by the claude_code
+// path tests AND by the synthetic-path session-identity test (as a
+// reference shape; the synthetic path uses a separate fake `mpm`
+// shim).
+//
+// Embed MPM_SESSION_ID in the row id so multiple DrillHandler calls
+// in one test (each with a different session) produce distinct row
+// ids. Without this, the second run's INSERT collides on the PRIMARY
+// KEY and the row never lands — masking the very correlation the
+// test wants to assert.
+const fakeClaudeShimScript = `#!/bin/sh
+# Fake claude — stands in for the real Claude Code CLI in tests.
+# Mirrors what mpm-mcp's audit hook does in production: stamps every
+# tool_invocation row with the env-passed MPM_SESSION_ID.
+set -e
+
+if [ -z "$MPM_SESSION_ID" ]; then
+  echo "fake claude: MPM_SESSION_ID is empty" >&2
+  exit 1
+fi
+if [ -z "$MPM_WORKSPACE" ]; then
+  echo "fake claude: MPM_WORKSPACE is empty" >&2
+  exit 1
+fi
+
+DB="$MPM_WORKSPACE/src/db/mpm.db"
+NOW=$(date +%s)
+
+sqlite3 "$DB" <<EOF
+INSERT INTO tool_invocations
+  (id, session_id, tool_name, action, invocation_id,
+   actor_kind, payload_hash, result_status,
+   started_at)
+VALUES
+  ('inv-fake-claude-$MPM_SESSION_ID', '$MPM_SESSION_ID', 'mpm_lessons', 'save',
+   'uuid-fake-$MPM_SESSION_ID', 'agent', 'sha256:fake', 'success', $NOW);
+EOF
+
+exit 0
+`
+
+// fakeMpmShimScript is the body of the fake `mpm` binary used by
+// TestDrillHandler_SyntheticPath_SessionIdentityEndToEnd. It honours
+// MPM_SESSION_ID by writing exactly one tool_invocations row tagged
+// with the env-passed session_id, then exits 0. Mirrors what the
+// production mpm-call audit hook does.
+const fakeMpmShimScript = `#!/bin/sh
+# Fake mpm — stands in for the real mpm-call binary in tests.
+# Mirrors what the audit hook does in production: stamps every
+# tool_invocation row with the env-passed MPM_SESSION_ID.
+set -e
+
+if [ -z "$MPM_SESSION_ID" ]; then
+  echo "fake mpm: MPM_SESSION_ID is empty" >&2
+  exit 1
+fi
+if [ -z "$MPM_WORKSPACE" ]; then
+  echo "fake mpm: MPM_WORKSPACE is empty" >&2
+  exit 1
+fi
+
+DB="$MPM_WORKSPACE/src/db/mpm.db"
+NOW=$(date +%s)
+
+sqlite3 "$DB" "INSERT INTO tool_invocations (id, session_id, tool_name, action, invocation_id, actor_kind, payload_hash, result_status, started_at) VALUES ('inv-fake-mpm-$MPM_SESSION_ID', '$MPM_SESSION_ID', 'mpm_lessons', 'save', 'uuid-fake-mpm-$MPM_SESSION_ID', 'agent', 'sha256:fake-mpm', 'success', $NOW)"
+
+exit 0
+`
+
+// ─── existing dispatch tests (unchanged semantics, helpers below) ───
+
+func TestDrillHandler_SyntheticPath_RecordsVerdict(t *testing.T) {
+	dm, _ := setupDrillDM(t)
+
+	drillPath := filepath.Join(t.TempDir(), "test-drill.yaml")
+	writeDrillYAML(t, drillPath, `
 id: test-drill
 description: synthetic self-test
 framework: synthetic
@@ -44,9 +178,7 @@ expect:
     - tool: mpm_lessons
       action: save
 timeout_secs: 5
-`), 0644); err != nil {
-		t.Fatalf("write drill: %v", err)
-	}
+`)
 
 	w := Wake{
 		ID: "test-wake-1",
@@ -64,28 +196,25 @@ timeout_secs: 5
 	// side; the audit-row assertion is gated below.
 	t.Setenv("PATH", "")
 	if err := DrillHandler(context.Background(), w); err != nil {
-		// Even with empty PATH the dispatch should record the run
-		// (the failing `mpm call` invocations are audited as errors
-		// when mpm is missing — but mpm is not invoked in test
-		// environment since we redirect PATH away from it).
 		t.Logf("DrillHandler returned (acceptable for this synthetic path test): %v", err)
 	}
+
+	// Sanity: the row persists even when `mpm call` cannot resolve —
+	// status='running' is the recorded state when dispatch returns an
+	// error before updateDrillRunError fires. We just want the row to
+	// be present so the report can see the run happened.
+	var seen int
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM drill_runs WHERE drill_id = ?`, "test-drill",
+	).Scan(&seen))
+	require.Equal(t, 1, seen, "drill_runs ledger must record the synthetic run")
 }
 
 func TestDrillHandler_UnsupportedFrameworkRejected(t *testing.T) {
-	workspace := t.TempDir()
-	t.Setenv("MPM_WORKSPACE", workspace)
-	dm, err := core.NewDatabaseManager(workspace)
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
-	if err := dm.InitSchema(); err != nil {
-		t.Fatalf("InitSchema: %v", err)
-	}
+	dm, _ := setupDrillDM(t)
 
-	drillPath := filepath.Join(workspace, "drill.yaml")
-	if err := writeFile(drillPath, []byte(`
+	drillPath := filepath.Join(t.TempDir(), "drill.yaml")
+	writeDrillYAML(t, drillPath, `
 id: bad-framework
 description: framework that has no harness
 framework: futura-framework
@@ -95,9 +224,7 @@ expect:
   sequence:
     - tool: a
       action: x
-`), 0644); err != nil {
-		t.Fatalf("write drill: %v", err)
-	}
+`)
 
 	w := Wake{
 		ID: "wake-bad",
@@ -108,31 +235,21 @@ expect:
 		},
 	}
 
-	err = DrillHandler(context.Background(), w)
-	if err == nil {
-		t.Fatal("DrillHandler should reject unknown framework")
-	}
+	err := DrillHandler(context.Background(), w)
+	require.Error(t, err, "DrillHandler should reject unknown framework")
+
 	// The row should still exist with status='error'.
 	var status, errMsg string
-	if e := dm.SQLDB().QueryRow(
+	require.NoError(t, dm.SQLDB().QueryRow(
 		`SELECT status, error_message FROM drill_runs WHERE drill_id = ?`, "bad-framework",
-	).Scan(&status, &errMsg); e != nil {
-		t.Fatalf("scan: %v", e)
-	}
-	if status != "error" {
-		t.Errorf("status = %q, want error (drill_runs ledger is the recovery channel)", status)
-	}
-	if errMsg == "" {
-		t.Error("error_message must be populated for diagnostic visibility")
-	}
+	).Scan(&status, &errMsg))
+	require.Equal(t, "error", status,
+		"drill_runs ledger is the recovery channel: status='error' "+
+			"so the report can show WHY the run failed")
+	require.NotEmpty(t, errMsg, "error_message must be populated for diagnostic visibility")
 }
 
-// writeFile is a one-line helper so tests don't pull in os just for
-// one write call. Lives here so it doesn't drift into a shared test
-// util that later gets imported incorrectly.
-func writeFile(path string, data []byte, perm uint32) error {
-	return os.WriteFile(path, data, os.FileMode(perm))
-}
+// ─── claude_code path session identity tests ────────────────────────
 
 // TestDrillHandler_ClaudeCodePath_SessionIdentityEndToEnd is the §9
 // scheduler-level correlation test for the drill-run session identity
@@ -155,26 +272,14 @@ func writeFile(path string, data []byte, perm uint32) error {
 // actually being invoked. sqlite3 CLI must be on PATH for the fake
 // claude to write its row.
 func TestDrillHandler_ClaudeCodePath_SessionIdentityEndToEnd(t *testing.T) {
-	if _, err := exec.LookPath("sqlite3"); err != nil {
+	if _, err := os.Stat("/usr/bin/sqlite3"); err != nil {
 		t.Skipf("sqlite3 CLI required for fake claude shim: %v", err)
 	}
 
-	workspace := t.TempDir()
-	t.Setenv("MPM_WORKSPACE", workspace)
+	dm, workspace := setupDrillDM(t)
 
-	dm, err := core.NewDatabaseManager(workspace)
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
-	if err := dm.InitSchema(); err != nil {
-		t.Fatalf("InitSchema: %v", err)
-	}
-
-	// Drill YAML pinned to claude_code so dispatchDrill routes through
-	// the harness under test.
 	drillPath := filepath.Join(workspace, "drill.yaml")
-	if err := writeFile(drillPath, []byte(`
+	writeDrillYAML(t, drillPath, `
 id: session-identity-e2e
 description: end-to-end correlation across drill_runs and tool_invocations
 framework: claude_code
@@ -185,28 +290,9 @@ expect:
     - tool: mpm_lessons
       action: save
 timeout_secs: 30
-`), 0644); err != nil {
-		t.Fatalf("write drill: %v", err)
-	}
+`)
+	installFakeClaudeAndMcp(t)
 
-	// Fake claude + mpm-mcp on a PATH-only directory so the harness's
-	// exec.LookPath finds them. The fake claude writes a tool_invocations
-	// row tagged with MPM_SESSION_ID (mirrors what mpm-mcp does in
-	// production); the fake mpm-mcp just exists (isAvailable only stats).
-	fakeBinDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(fakeBinDir, "claude"), []byte(fakeClaudeShimScript), 0o755); err != nil {
-		t.Fatalf("write fake claude: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(fakeBinDir, "mpm-mcp"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write fake mpm-mcp: %v", err)
-	}
-	// PATH must come BEFORE the system PATH so the harness resolves
-	// our shims, not any real claude / mpm-mcp that may be on PATH.
-	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	// Capture the run id so the assertion can locate the row (the
-	// orchestrator mints it; the test can't predict it without
-	// intercepting DrillHandler).
 	w := Wake{
 		ID: "wake-session-identity-e2e",
 		Metadata: map[string]interface{}{
@@ -217,9 +303,8 @@ timeout_secs: 30
 		},
 	}
 
-	if err := DrillHandler(context.Background(), w); err != nil {
-		t.Fatalf("DrillHandler returned: %v", err)
-	}
+	require.NoError(t, DrillHandler(context.Background(), w),
+		"DrillHandler must succeed when fake claude + mpm-mcp are on PATH")
 
 	// §9 correlation: drill_runs.session_id == tool_invocations.session_id
 	// for the run we just drove. Both rows must exist; both session
@@ -229,26 +314,20 @@ timeout_secs: 30
 		drillSession string
 		drillStatus  string
 	)
-	if err := dm.SQLDB().QueryRow(
+	require.NoError(t, dm.SQLDB().QueryRow(
 		`SELECT id, session_id, status FROM drill_runs WHERE drill_id = ? ORDER BY started_at DESC LIMIT 1`,
 		"session-identity-e2e",
-	).Scan(&drillRunID, &drillSession, &drillStatus); err != nil {
-		t.Fatalf("read drill_runs: %v", err)
-	}
-	if drillStatus != "passed" {
-		t.Errorf("drill_runs.status = %q, want passed (drill should have scored the fake claude's row)", drillStatus)
-	}
+	).Scan(&drillRunID, &drillSession, &drillStatus))
+	require.Equal(t, "passed", drillStatus,
+		"drill should have scored the fake claude's audit row as passed")
 
 	var auditSession string
 	var auditCount int
-	if err := dm.SQLDB().QueryRow(
+	require.NoError(t, dm.SQLDB().QueryRow(
 		`SELECT session_id, COUNT(*) FROM tool_invocations GROUP BY session_id ORDER BY COUNT(*) DESC LIMIT 1`,
-	).Scan(&auditSession, &auditCount); err != nil {
-		t.Fatalf("read tool_invocations: %v", err)
-	}
-	if auditCount != 1 {
-		t.Fatalf("audit row count = %d, want 1 (one audit row per DrillHandler call)", auditCount)
-	}
+	).Scan(&auditSession, &auditCount))
+	require.Equal(t, 1, auditCount,
+		"one audit row per DrillHandler call")
 
 	require.Equal(t, drillSession, auditSession,
 		"§9 invariant: drill_runs.session_id (%q) must equal "+
@@ -263,18 +342,136 @@ timeout_secs: 30
 	// Structural proof: the join used by an operator to trace
 	// evidence back to a drill_run returns exactly 1 row.
 	var traceable int
-	if err := dm.SQLDB().QueryRow(`
+	require.NoError(t, dm.SQLDB().QueryRow(`
 		SELECT COUNT(*) FROM drill_runs dr
 		JOIN tool_invocations ti ON ti.session_id = dr.session_id
 		WHERE dr.id = ?`,
 		drillRunID,
-	).Scan(&traceable); err != nil {
-		t.Fatalf("join: %v", err)
-	}
+	).Scan(&traceable))
 	require.Equal(t, 1, traceable,
 		"drill_runs ↔ tool_invocations join on session_id must return "+
 			"the run's evidence. Pre-§6 this was 0 — the orchestrator's "+
 			"id and the harness's id were different rows.")
+}
+
+// TestDrillHandler_ClaudeCodePath_NoCrossRunBleed is the §10
+// regression: two consecutive drill runs must not share session_ids,
+// and each run's audit row must belong ONLY to that run's session.
+//
+// Pre-§6, the harness minted a fresh UUID per Launch. The two runs
+// were naturally isolated because the UUIDs didn't share a namespace
+// — but each run was ALSO internally split (drill_runs vs evidence,
+// see §3). Post-§6, the orchestrator mints the sessionID. The risk
+// shifts from "no split" to "no accidental reuse" — if the
+// orchestrator ever stopped minting (or the harness's sessionID was
+// reused by mistake), runs would bleed. This test ensures that
+// didn't happen: run A's sessionID ≠ run B's sessionID, and each
+// run's evidence lives exclusively under its own sessionID.
+func TestDrillHandler_ClaudeCodePath_NoCrossRunBleed(t *testing.T) {
+	if _, err := os.Stat("/usr/bin/sqlite3"); err != nil {
+		t.Skipf("sqlite3 CLI required for fake claude shim: %v", err)
+	}
+
+	dm, workspace := setupDrillDM(t)
+
+	drillPath := filepath.Join(workspace, "drill.yaml")
+	writeDrillYAML(t, drillPath, `
+id: cross-run-bleed
+description: two consecutive runs must not share session_ids
+framework: claude_code
+prompt: "(fake prompt)"
+expect:
+  tools_required: [mpm_lessons]
+  sequence:
+    - tool: mpm_lessons
+      action: save
+timeout_secs: 30
+`)
+	installFakeClaudeAndMcp(t)
+
+	// Run the drill twice. Each DrillHandler call mints a fresh
+	// sessionID.
+	for i, label := range []string{"run-A", "run-B"} {
+		w := Wake{
+			ID: "wake-" + label,
+			Metadata: map[string]interface{}{
+				"kind":      "drill",
+				"drill_id":  "cross-run-bleed",
+				"path":      drillPath,
+				"compliant": true,
+			},
+		}
+		require.NoError(t, DrillHandler(context.Background(), w),
+			"DrillHandler %s failed", label)
+		// Brief pause so the two started_at values are distinct; the
+		// assertion below sorts by started_at and the test would be
+		// fragile if both landed in the same Unix second.
+		if i == 0 {
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	// Read both runs' session_ids.
+	rows, err := dm.SQLDB().Query(`
+		SELECT id, session_id FROM drill_runs
+		WHERE drill_id = ? ORDER BY started_at ASC`,
+		"cross-run-bleed",
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	type run struct {
+		id        string
+		sessionID string
+	}
+	var runs []run
+	for rows.Next() {
+		var r run
+		require.NoError(t, rows.Scan(&r.id, &r.sessionID))
+		runs = append(runs, r)
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, runs, 2, "two DrillHandler invocations must produce two drill_runs rows")
+	require.NotEqual(t, runs[0].sessionID, runs[1].sessionID,
+		"consecutive runs must have distinct session_ids — "+
+			"if they match, the orchestrator stopped minting (or "+
+			"something is stashing the id between calls). "+
+			"Either way, cross-run bleed has appeared.")
+
+	// Each run's audit row must belong ONLY to that run's session.
+	var auditByRun int
+	for _, r := range runs {
+		var n int
+		require.NoError(t, dm.SQLDB().QueryRow(
+			`SELECT COUNT(*) FROM tool_invocations WHERE session_id = ?`,
+			r.sessionID,
+		).Scan(&n))
+		require.Equal(t, 1, n,
+			"run %s (session %q) should own exactly 1 audit row; "+
+				"got %d. Anything else means rows are being attributed "+
+				"to the wrong session, or the harness is dropping them.",
+			r.id, r.sessionID, n)
+		auditByRun += n
+	}
+
+	// No orphan audit rows: every row's session_id matches SOME
+	// run's session_id.
+	var totalAudit, orphanAudit int
+	require.NoError(t, dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM tool_invocations`).Scan(&totalAudit))
+	require.NoError(t, dm.SQLDB().QueryRow(`
+		SELECT COUNT(*) FROM tool_invocations
+		WHERE session_id NOT IN (?, ?)`,
+		runs[0].sessionID, runs[1].sessionID,
+	).Scan(&orphanAudit))
+	require.Equal(t, totalAudit, auditByRun,
+		"total audit rows (%d) should equal the sum owned by runs (%d) "+
+			"— orphans indicate a session_id leak",
+		totalAudit, auditByRun)
+	require.Equal(t, 0, orphanAudit,
+		"no tool_invocations row should exist outside the runs' "+
+			"session_ids — orphans here mean a third session_id "+
+			"appeared (the harness minting its own id post-§6 "+
+			"would surface here)")
 }
 
 // TestDrillHandler_ClaudeCodePath_ErrorPreservesSessionID is the §11
@@ -292,21 +489,11 @@ timeout_secs: 30
 // since DrillHandler calls uuid.NewString() but the value must
 // survive the UPDATE in updateDrillRunError).
 func TestDrillHandler_ClaudeCodePath_ErrorPreservesSessionID(t *testing.T) {
-	workspace := t.TempDir()
-	t.Setenv("MPM_WORKSPACE", workspace)
-
-	dm, err := core.NewDatabaseManager(workspace)
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
-	if err := dm.InitSchema(); err != nil {
-		t.Fatalf("InitSchema: %v", err)
-	}
+	dm, workspace := setupDrillDM(t)
 
 	drillPath := filepath.Join(workspace, "drill.yaml")
-	if err := writeFile(drillPath, []byte(`
-id: error-session-preserved
+	writeDrillYAML(t, drillPath, `
+id: error-session-preserves
 description: claude_code path that fails at Launch must still record the orchestrator's sessionID
 framework: claude_code
 prompt: "(anything — claude is unavailable)"
@@ -316,47 +503,40 @@ expect:
     - tool: mpm_lessons
       action: save
 timeout_secs: 5
-`), 0644); err != nil {
-		t.Fatalf("write drill: %v", err)
-	}
+`)
 
 	// PATH points only at a directory with NO claude / mpm-mcp so
 	// exec.LookPath returns empty. NewClaudeCodeHarness(_, "", "")
 	// then fails isAvailable at Launch.
-	emptyBin := t.TempDir()
-	t.Setenv("PATH", emptyBin)
+	t.Setenv("PATH", t.TempDir())
 
 	w := Wake{
 		ID: "wake-error-preserves-session",
 		Metadata: map[string]interface{}{
 			"kind":     "drill",
-			"drill_id": "error-session-preserved",
+			"drill_id": "error-session-preserves",
 			"path":     drillPath,
 		},
 	}
 
 	// DrillHandler must still complete cleanly (errors are surfaced
 	// via drill_runs.status='error' + error_message, not via panic).
-	err = DrillHandler(context.Background(), w)
-	if err == nil {
-		t.Fatal("DrillHandler should return an error when claude is unavailable")
-	}
+	err := DrillHandler(context.Background(), w)
+	require.Error(t, err, "DrillHandler should return an error when claude is unavailable")
 
 	// drill_runs row must exist with status='error' and the
 	// orchestrator's sessionID still set to a non-empty value. The
-	// sessionID was minted at DrillHandler:74-91 BEFORE the
-	// dispatch attempt — updateDrillRunError must not have reset it.
+	// sessionID was minted at DrillHandler BEFORE the dispatch
+	// attempt — updateDrillRunError must not have reset it.
 	var (
 		gotStatus  string
 		gotSession string
 		errMessage string
 	)
-	if err := dm.SQLDB().QueryRow(
+	require.NoError(t, dm.SQLDB().QueryRow(
 		`SELECT status, session_id, error_message FROM drill_runs WHERE drill_id = ? ORDER BY started_at DESC LIMIT 1`,
-		"error-session-preserved",
-	).Scan(&gotStatus, &gotSession, &errMessage); err != nil {
-		t.Fatalf("read drill_runs: %v", err)
-	}
+		"error-session-preserves",
+	).Scan(&gotStatus, &gotSession, &errMessage))
 	require.Equal(t, "error", gotStatus,
 		"claude-unavailable failure must surface as status='error', "+
 			"not 'running' or 'failed' (status='error' is the contract "+
@@ -368,206 +548,88 @@ timeout_secs: 5
 			"reset session_id (regression of the §6 invariant: "+
 			"drill_runs.session_id is the canonical run identifier)")
 	require.NotEmpty(t, errMessage,
-		"error_message must be populated for diagnostic visibility — "+
-			"the operator should be able to read WHY the run failed "+
-			"from drill_runs alone, without re-running")
+		"error_message must be populated for diagnostic visibility")
 }
 
-// TestDrillHandler_ClaudeCodePath_SessionIdentityEndToEnd. It honours
-// MPM_SESSION_ID by writing exactly one tool_invocations row tagged
-// with the env-passed session_id, then exits 0 — the minimum a
-// reproducer needs to demonstrate audit-row scope.
-const fakeClaudeShimScript = `#!/bin/sh
-# Fake claude — stands in for the real Claude Code CLI in tests.
-# Mirrors what mpm-mcp's audit hook does in production: stamps every
-# tool_invocation row with the env-passed MPM_SESSION_ID.
-set -e
-
-if [ -z "$MPM_SESSION_ID" ]; then
-  echo "fake claude: MPM_SESSION_ID is empty" >&2
-  exit 1
-fi
-if [ -z "$MPM_WORKSPACE" ]; then
-  echo "fake claude: MPM_WORKSPACE is empty" >&2
-  exit 1
-fi
-
-DB="$MPM_WORKSPACE/src/db/mpm.db"
-NOW=$(date +%s)
-
-# Embed MPM_SESSION_ID in the row id so multiple DrillHandler calls in
-# one test (each with a different session) produce distinct row ids.
-# Without this, the second run's INSERT collides on the PRIMARY KEY
-# and the row never lands — masking the very correlation the test
-# wants to assert.
-sqlite3 "$DB" <<EOF
-INSERT INTO tool_invocations
-  (id, session_id, tool_name, action, invocation_id,
-   actor_kind, payload_hash, result_status,
-   started_at)
-VALUES
-  ('inv-fake-claude-$MPM_SESSION_ID', '$MPM_SESSION_ID', 'mpm_lessons', 'save',
-   'uuid-fake-$MPM_SESSION_ID', 'agent', 'sha256:fake', 'success', $NOW);
-EOF
-
-exit 0
-`
-
-// fakeClaudeShimScript is the body of the fake `claude` binary used by
-// TestDrillHandler_ClaudeCodePath_NoCrossRunBleed is the §10
-// regression: two consecutive drill runs must not share session_ids,
-// and each run's audit row must belong ONLY to that run's session.
+// TestDrillHandler_SyntheticPath_SessionIdentityEndToEnd is the
+// synthetic-path counterpart to
+// TestDrillHandler_ClaudeCodePath_SessionIdentityEndToEnd. The §4
+// chain on the synthetic path is:
 //
-// Pre-§6, the harness minted a fresh UUID per Launch. The two runs
-// were naturally isolated because the UUIDs didn't share a namespace
-// — but each run was ALSO internally split (drill_runs vs evidence,
-// see §3). Post-§6, the orchestrator mints the sessionID. The risk
-// shifts from "no split" to "no accidental reuse" — if the
-// orchestrator ever stopped minting (or the harness's sessionID was
-// reused by mistake), runs would bleed. This test ensures that
-// didn't happen: run A's sessionID ≠ run B's sessionID, and each
-// run's evidence lives exclusively under its own sessionID.
-func TestDrillHandler_ClaudeCodePath_NoCrossRunBleed(t *testing.T) {
-	if _, err := exec.LookPath("sqlite3"); err != nil {
-		t.Skipf("sqlite3 CLI required for fake claude shim: %v", err)
+//	orchestrator S (DrillHandler mints)
+//	  == drill_runs.session_id (drill_runs INSERT in DrillHandler)
+//	  == MPM_SESSION_ID env (runSyntheticDrill appends it to `mpm call`)
+//	  == tool_invocations.session_id (audit hook stamps it)
+//
+// The fake mpm-cli's shim honours MPM_SESSION_ID by writing a
+// tool_invocations row tagged with the env-passed id, mirroring what
+// the production `mpm call` audit hook does. If runSyntheticDrill
+// ever dropped the MPM_SESSION_ID env (or the synthetic harness
+// minted its own id), the audit row's session_id would not match
+// drill_runs.session_id — this test catches that.
+func TestDrillHandler_SyntheticPath_SessionIdentityEndToEnd(t *testing.T) {
+	if _, err := os.Stat("/usr/bin/sqlite3"); err != nil {
+		t.Skipf("sqlite3 CLI required for fake mpm shim: %v", err)
 	}
 
-	workspace := t.TempDir()
-	t.Setenv("MPM_WORKSPACE", workspace)
-
-	dm, err := core.NewDatabaseManager(workspace)
-	if err != nil {
-		t.Fatalf("NewDatabaseManager: %v", err)
-	}
-	defer dm.Close()
-	if err := dm.InitSchema(); err != nil {
-		t.Fatalf("InitSchema: %v", err)
-	}
+	dm, workspace := setupDrillDM(t)
 
 	drillPath := filepath.Join(workspace, "drill.yaml")
-	if err := writeFile(drillPath, []byte(`
-id: cross-run-bleed
-description: two consecutive runs must not share session_ids
-framework: claude_code
-prompt: "(fake prompt)"
+	writeDrillYAML(t, drillPath, `
+id: synthetic-session-identity
+description: synthetic path must propagate sessionID through MPM_SESSION_ID env to tool_invocations
+framework: synthetic
+prompt: "(unused — synthetic harness generates sequence)"
 expect:
   tools_required: [mpm_lessons]
   sequence:
     - tool: mpm_lessons
       action: save
-timeout_secs: 30
-`), 0644); err != nil {
-		t.Fatalf("write drill: %v", err)
+timeout_secs: 5
+`)
+	installFakeBin(t, "mpm", fakeMpmShimScript)
+
+	w := Wake{
+		ID: "wake-synthetic-session-identity",
+		Metadata: map[string]interface{}{
+			"kind":      "drill",
+			"drill_id":  "synthetic-session-identity",
+			"path":      drillPath,
+			"compliant": true,
+		},
 	}
 
-	fakeBinDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(fakeBinDir, "claude"), []byte(fakeClaudeShimScript), 0o755); err != nil {
-		t.Fatalf("write fake claude: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(fakeBinDir, "mpm-mcp"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write fake mpm-mcp: %v", err)
-	}
-	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, DrillHandler(context.Background(), w),
+		"DrillHandler must succeed when fake mpm is on PATH")
 
-	// Run the drill twice. Each DrillHandler call mints a fresh
-	// sessionID (runID/sessionID := uuid.NewString() twice).
-	for i, label := range []string{"run-A", "run-B"} {
-		w := Wake{
-			ID: "wake-" + label,
-			Metadata: map[string]interface{}{
-				"kind":      "drill",
-				"drill_id":  "cross-run-bleed",
-				"path":      drillPath,
-				"compliant": true,
-			},
-		}
-		if err := DrillHandler(context.Background(), w); err != nil {
-			t.Fatalf("DrillHandler %s returned: %v", label, err)
-		}
-		// Brief pause so the two started_at values are distinct; the
-		// assertion below sorts by started_at and the test would be
-		// fragile if both landed in the same Unix second.
-		if i == 0 {
-			time.Sleep(2 * time.Second)
-		}
-	}
+	// §4 chain end-to-end on the synthetic path:
+	//   drill_runs.session_id == tool_invocations.session_id.
+	var drillSession string
+	var drillStatus string
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT session_id, status FROM drill_runs WHERE drill_id = ? ORDER BY started_at DESC LIMIT 1`,
+		"synthetic-session-identity",
+	).Scan(&drillSession, &drillStatus))
+	require.NotEmpty(t, drillSession,
+		"drill_runs.session_id must be set for synthetic runs (§4 "+
+			"invariant — drill_runs.session_id is the canonical "+
+			"run identifier even on the synthetic path)")
+	require.Equal(t, "passed", drillStatus,
+		"the fake mpm wrote a tool_invocations row matching the spec")
 
-	// Read both runs' session_ids.
-	rows, err := dm.SQLDB().Query(`
-		SELECT id, session_id FROM drill_runs
-		WHERE drill_id = ? ORDER BY started_at ASC`,
-		"cross-run-bleed",
-	)
-	if err != nil {
-		t.Fatalf("query drill_runs: %v", err)
-	}
-	defer rows.Close()
+	var auditSession string
+	var auditCount int
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT session_id, COUNT(*) FROM tool_invocations GROUP BY session_id ORDER BY COUNT(*) DESC LIMIT 1`,
+	).Scan(&auditSession, &auditCount))
+	require.Equal(t, 1, auditCount,
+		"one audit row per DrillHandler call on the synthetic path")
 
-	type run struct {
-		id        string
-		sessionID string
-	}
-	var runs []run
-	for rows.Next() {
-		var r run
-		if err := rows.Scan(&r.id, &r.sessionID); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		runs = append(runs, r)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("rows: %v", err)
-	}
-	require.Len(t, runs, 2, "two DrillHandler invocations must produce two drill_runs rows")
-	require.NotEqual(t, runs[0].sessionID, runs[1].sessionID,
-		"consecutive runs must have distinct session_ids — "+
-			"if they match, the orchestrator stopped minting (or "+
-			"something is stashing the id between calls). "+
-			"Either way, cross-run bleed has appeared.")
-
-	// Each run's audit row must belong ONLY to that run's session.
-	// The fake claude writes one row per invocation, tagged with the
-	// harness's MPM_SESSION_ID (= the orchestrator's id post-§6).
-	// After two runs there should be exactly two audit rows, one per
-	// session_id, with no orphans.
-	var auditByRun int
-	for _, r := range runs {
-		var n int
-		if err := dm.SQLDB().QueryRow(
-			`SELECT COUNT(*) FROM tool_invocations WHERE session_id = ?`,
-			r.sessionID,
-		).Scan(&n); err != nil {
-			t.Fatalf("audit count for %s: %v", r.id, err)
-		}
-		require.Equal(t, 1, n,
-			"run %s (session %q) should own exactly 1 audit row; "+
-				"got %d. Anything else means rows are being attributed "+
-				"to the wrong session, or the harness is dropping them.",
-			r.id, r.sessionID, n)
-		auditByRun += n
-	}
-
-	// No orphan audit rows: every row's session_id matches SOME
-	// run's session_id. If a row leaked (e.g. a third id appeared),
-	// the sum below would exceed the row count owned by runs.
-	var totalAudit, orphanAudit int
-	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM tool_invocations`).Scan(&totalAudit); err != nil {
-		t.Fatalf("total audit count: %v", err)
-	}
-	if err := dm.SQLDB().QueryRow(`
-		SELECT COUNT(*) FROM tool_invocations
-		WHERE session_id NOT IN (?, ?)`,
-		runs[0].sessionID, runs[1].sessionID,
-	).Scan(&orphanAudit); err != nil {
-		t.Fatalf("orphan count: %v", err)
-	}
-	require.Equal(t, totalAudit, auditByRun,
-		"total audit rows (%d) should equal the sum owned by runs (%d) "+
-			"— orphans indicate a session_id leak",
-		totalAudit, auditByRun)
-	require.Equal(t, 0, orphanAudit,
-		"no tool_invocations row should exist outside the runs' "+
-			"session_ids — orphans here mean a third session_id "+
-			"appeared (the harness minting its own id post-§6 "+
-			"would surface here)")
+	require.Equal(t, drillSession, auditSession,
+		"synthetic path §4 invariant: drill_runs.session_id (%q) must "+
+			"equal tool_invocations.session_id (%q). Mismatch means "+
+			"runSyntheticDrill dropped MPM_SESSION_ID env or the "+
+			"synthetic harness minted its own id (regression of the "+
+			"§6 contract — orchestrator owns the mint).",
+		drillSession, auditSession)
 }
