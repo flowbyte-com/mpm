@@ -187,6 +187,48 @@ var BaseTables = []string{
 		UNIQUE(memory_id, version)
 	);`,
 
+	// Memory settling baselines — the per-memory anchor that lets the
+	// Critic measure CUMULATIVE SCHEDULER-ACTIVE RESIDENCY rather than
+	// wall-clock age.
+	//
+	// Why a relation and not a column on memories: settling must not
+	// widen the 19-site memory INSERT fan-out (memory.go, db.go,
+	// watchdog_v2.go, hitl_log.go, fts_recovery.go,
+	// handlers_challenge.go, self_heal.go). A baseline is written by the
+	// SCHEDULER on observation, never by the memory creation path and
+	// never by the Critic.
+	//
+	// baseline_active_seconds is the value of the global
+	// scheduler_active_uptime counter at the moment the scheduler FIRST
+	// observed this memory. Settling age for a memory is therefore
+	// `current_active_seconds - baseline_active_seconds`, which is
+	// immune to wall-clock gaps: a 20h scheduler outage advances neither
+	// side of the subtraction.
+	//
+	// The row is IMMUTABLE once written. It records admission residency,
+	// not a cooldown after epistemic reinforcement — reinforcement must
+	// not restart SettlingPeriod, so no UPDATE path exists here and
+	// population is INSERT ... ON CONFLICT DO NOTHING.
+	//
+	// A memory with NO row is NOT settled. That is the correct and
+	// conservative default for both pre-rollout memories and any
+	// memory inserted since the last scheduler tick.
+	//
+	// ON DELETE CASCADE mirrors memory_revisions: a hard-deleted memory
+	// takes its baseline with it. Soft delete / restore (deleted_at)
+	// does NOT fire the cascade, so an admission baseline SURVIVES a
+	// soft-delete round trip — a restored memory is not re-admitted.
+	//
+	// captured_at is wall-clock and is DIAGNOSTIC ONLY. It must never
+	// participate in settling arithmetic; the monotonic accounting in
+	// scheduler active uptime is the sole clock.
+	`CREATE TABLE IF NOT EXISTS memory_settling_baselines (
+		memory_id TEXT PRIMARY KEY,
+		baseline_active_seconds INTEGER NOT NULL,
+		captured_at INTEGER NOT NULL,
+		FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
+	);`,
+
 	// Evidence table — typed, source-grouped evidence for confidence calculation.
 	`CREATE TABLE IF NOT EXISTS evidence (
 		id                  TEXT PRIMARY KEY,

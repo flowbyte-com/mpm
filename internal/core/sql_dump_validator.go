@@ -157,6 +157,7 @@ var CanonicalMPMSchema = []string{
 	"lessons",
 	"memories",
 	"memory_revisions",
+	"memory_settling_baselines",
 	"raw_memories",
 	"reference_chunks",
 	"reference_docs",
