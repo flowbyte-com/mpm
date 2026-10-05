@@ -30,6 +30,7 @@ type MigrateStats struct {
 	RowsRejected int
 	Format       string // "markdown" or "json"
 	ImportBatch  string
+	Errors       []string // optional per-entry messages (json migrator)
 }
 
 // ParseMarkdownFacts splits a markdown document into atomic facts.
@@ -125,7 +126,7 @@ func ParseMarkdownFacts(content, sourcePath string) []MigratedFact {
 			fact := MigratedFact{
 				Content: part,
 				Tags:    []string{},
-				Weight:  5, // default
+				Weight:  5,  // default
 				TTL:     "", // default
 				Heading: heading,
 			}
@@ -266,14 +267,14 @@ func (dm *DatabaseManager) IngestFromMarkdownFile(sourcePath, importBatch string
 		// Build metadata JSON for the raw_memories row (carried over to the
 		// memory when promoted via --commit).
 		meta := map[string]interface{}{
-			"weight":     f.Weight,
-			"ttl":        f.TTL,
-			"tags":       f.Tags,
-			"source":     "migrate",
-			"source_db":  "markdown",
-			"source_id":  f.SourceID,
+			"weight":      f.Weight,
+			"ttl":         f.TTL,
+			"tags":        f.Tags,
+			"source":      "migrate",
+			"source_db":   "markdown",
+			"source_id":   f.SourceID,
 			"source_path": sourcePath,
-			"heading":    f.Heading,
+			"heading":     f.Heading,
 			"imported_at": time.Now().UTC().Format(time.RFC3339),
 		}
 		metaJSON, err := json.Marshal(meta)
@@ -329,13 +330,14 @@ func readFileCapped(path string, maxBytes int64) (string, error) {
 	}
 	return string(buf[:n]), nil
 }
+
 // PromoteRawMemoryBatch promotes pending raw_memories rows to memories,
 // optionally filtered by import_batch. Returns the count promoted.
 //
 // For each pending row:
-//   1. Parse metadata to recover tags, weight, TTL, heading
-//   2. Call SaveMemoryWithContext (which now auto-detects the weight scale)
-//   3. Mark the raw_memories row as 'approved' and stamp updated_at
+//  1. Parse metadata to recover tags, weight, TTL, heading
+//  2. Call SaveMemoryWithContext (which now auto-detects the weight scale)
+//  3. Mark the raw_memories row as 'approved' and stamp updated_at
 //
 // If save fails (e.g. toxicity, schema violation), the row stays 'pending'
 // with a notes field explaining the rejection.

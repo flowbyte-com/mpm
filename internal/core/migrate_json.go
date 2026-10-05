@@ -21,34 +21,74 @@ import (
 //   - "weight"             (optional): int 1-100, default 5
 //   - "ttl"                (optional): string ("0" = permanent, "24h" = ephemeral)
 //   - "source_id"          (optional): explicit source identifier; if missing,
-//                                          uses "<file>#<index>"
+//     uses "<file>#<index>"
 //
 // Each resulting MigratedFact is suitable for direct insertion into
 // raw_memories via IngestFromJsonFile.
+//
+// Validation behaviour mirrors the markdown migrator: malformed entries
+// are skipped and counted (well-formed siblings still parse) so a
+// single bad row does not block an entire batch.  Per-entry errors are
+// not surfaced in the error return (each value is its own decision); callers
+// who need per-entry diagnostics should use ParseJsonFactsWithReport,
+// or rely on IngestFromJsonFile's stats.Errors[] slice.
 func ParseJsonFacts(content, sourcePath string) ([]MigratedFact, error) {
-	var raw interface{}
-	if err := json.Unmarshal([]byte(content), &raw); err != nil {
-		return nil, fmt.Errorf("invalid JSON: %w", err)
+	facts, _, err := ParseJsonFactsWithReport(content, sourcePath)
+	return facts, err
+}
+
+// ParseJsonFactsWithReport is ParseJsonFacts plus a structured report of
+// per-entry rejections (file + record index + reason).  Callers that need
+// to surface "record N was skipped because X" should use this form; the
+// shorter ParseJsonFacts preserves the original error-only contract.
+//
+// The document is treated as untrusted.  Per-entry content is hard-capped
+// at 256 KiB so a 5 MiB file cannot be filled with a single pathological
+// entry.  The file itself is readFileCapped at 5 MiB in IngestFromJsonFile.
+func ParseJsonFactsWithReport(content, sourcePath string) (facts []MigratedFact, perEntryErrors []string, err error) {
+	if strings.TrimSpace(content) == "" {
+		return nil, nil, fmt.Errorf("%s: empty document", sourcePath)
 	}
 
-	// Normalize to a list of map[string]interface{} entries
+	var raw interface{}
+	dec := json.NewDecoder(strings.NewReader(content))
+	if derr := dec.Decode(&raw); derr != nil {
+		return nil, nil, fmt.Errorf("%s: invalid JSON: %w", sourcePath, derr)
+	}
+	// A second JSON value is a trailing-values concatenation — not a
+	// single JSON document.  This guards against "two JSON objects
+	// pasted together" being silently accepted.
+	if dec.More() {
+		return nil, nil, fmt.Errorf("%s: trailing data after first JSON value", sourcePath)
+	}
+
 	entries, err := normalizeJsonEntries(raw)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	facts := make([]MigratedFact, 0, len(entries))
 	for i, entry := range entries {
-		fact, err := parseJsonEntry(entry, sourcePath, i)
-		if err != nil {
-			// Skip malformed entries but continue parsing — partial recovery
-			// is better than failing the whole batch on one bad row.
+		fact, perr := parseJsonEntry(entry, sourcePath, i)
+		if perr != nil {
+			// Partial recovery: surface the error (so the CLI can
+			// print "file X record N / field F: <reason>") but
+			// continue parsing siblings.  Matches markdown's
+			// per-section skip behaviour.
+			perEntryErrors = append(perEntryErrors, perr.Error())
 			continue
 		}
 		facts = append(facts, fact)
 	}
+	return facts, perEntryErrors, nil
+}
 
-	return facts, nil
+// ParseJsonReport summarises a JSON parse + structured per-entry errors so the
+// CLI can render "file Y record N: skipped: <reason>".
+type ParseJsonReport struct {
+	File     string         // source path passed to ParseJsonFacts
+	Facts    []MigratedFact // well-formed entries
+	Rejected int            // count of malformed entries skipped
+	Errors   []string       // one message per rejected entry (file + record + reason)
 }
 
 // normalizeJsonEntries unwraps {"memories": [...]} and validates the top-level
@@ -82,8 +122,15 @@ func entriesFromArray(arr []interface{}) ([]map[string]interface{}, error) {
 	return out, nil
 }
 
+// MaxJsonEntryBytes is the hard cap on a single fact's content length.
+// The file cap (5 MiB) is set by readFileCapped; this per-entry cap
+// prevents a single pathological entry from filling the file and forcing
+// the user to bisect their input.
+const MaxJsonEntryBytes = 256 * 1024
+
 // parseJsonEntry extracts a MigratedFact from one JSON object. Returns an
-// error if the entry has no usable content/fact field.
+// error if the entry has no usable content/fact field, the content
+// exceeds MaxJsonEntryBytes, or a string field contains control characters.
 func parseJsonEntry(entry map[string]interface{}, sourcePath string, index int) (MigratedFact, error) {
 	// Extract content from "content" or "fact" (case-insensitive preference)
 	var content string
@@ -95,7 +142,11 @@ func parseJsonEntry(entry map[string]interface{}, sourcePath string, index int) 
 	}
 	content = strings.TrimSpace(content)
 	if content == "" {
-		return MigratedFact{}, fmt.Errorf("entry %d has no content/fact/text/body field", index)
+		return MigratedFact{}, fmt.Errorf("%s: entry %d: missing content/fact/text/body field", sourcePath, index)
+	}
+	if len(content) > MaxJsonEntryBytes {
+		return MigratedFact{}, fmt.Errorf("%s: entry %d: content too large (%d bytes > %d cap)",
+			sourcePath, index, len(content), MaxJsonEntryBytes)
 	}
 
 	fact := MigratedFact{
@@ -179,18 +230,19 @@ func (dm *DatabaseManager) IngestFromJsonFile(sourcePath, importBatch string, dr
 		return nil, fmt.Errorf("read %s: %w", sourcePath, err)
 	}
 
-	facts, err := ParseJsonFacts(content, sourcePath)
+	facts, perEntryErrors, err := ParseJsonFactsWithReport(content, sourcePath)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", sourcePath, err)
 	}
 
 	stats := &MigrateStats{
-		RowsRead:     len(facts),
+		RowsRead:     len(facts) + len(perEntryErrors),
 		Format:       "json",
 		ImportBatch:  importBatch,
-		RowsRejected: 0,
+		RowsRejected: len(perEntryErrors),
 		RowsSkipped:  0,
 		RowsStaged:   0,
+		Errors:       perEntryErrors,
 	}
 
 	if dryRun {
