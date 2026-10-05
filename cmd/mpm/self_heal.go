@@ -196,7 +196,10 @@ func handleSelfHeal(args []string) int {
 			exitCode = 1
 			usererror.Warn("self-heal: %d ghosts exceeds SelfHealMaxFix=%d — escalating without fix", scan.SoftDeleteGhosts, SelfHealMaxFix)
 		} else if !*dryRun {
-			n, ferr := runDeepScanFixSoftDeleteGhosts(dbPath)
+			// H-4: routed through the singleton's *sql.DB so the shared
+			// maintenance lease (LOCK_SH) covers the auto-fix; concurrent
+			// restore-db / shred-database refuses (EWOULDBLOCK).
+			n, ferr := runDeepScanFixSoftDeleteGhosts(dm)
 			if ferr != nil {
 				usererror.Warn("self-heal: ghost fix failed: %v", ferr)
 				action = "fix-failed"

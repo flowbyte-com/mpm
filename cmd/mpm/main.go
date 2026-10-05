@@ -674,7 +674,12 @@ func runDoctorCommand(args []string) {
 	// on-demand integrity checks (FTS sync, soft-delete ghosts, dangling
 	// memberships). Useful when investigating search-index drift.
 	if deepScan {
-		runDoctorDeepScan(fix)
+		dm := getDBConcrete()
+		if dm == nil {
+			usererror.Error("doctor deep-scan: cannot open database")
+			return
+		}
+		runDoctorDeepScan(dm, fix)
 		return
 	}
 
@@ -852,16 +857,21 @@ func runDeepScanCheck(dbPath string) (*DeepScanResult, error) {
 	return res, nil
 }
 
-// runDeepScanFixSoftDeleteGhosts opens the DB writable and removes every
-// memories_fts row whose joined memory has deleted_at IS NOT NULL. Returns
-// the number of rows deleted. Safe to call when there are no ghosts (no-op).
-func runDeepScanFixSoftDeleteGhosts(dbPath string) (int64, error) {
-	wDB, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		return 0, fmt.Errorf("open writable: %w", err)
+// runDeepScanFixSoftDeleteGhosts removes every memories_fts row whose
+// joined memory has deleted_at IS NOT NULL. Returns the number of rows
+// deleted. Safe to call when there are no ghosts (no-op).
+//
+// H-4: routed through the DatabaseManager singleton so the shared
+// maintenance lease (LOCK_SH held by the DM) covers the DELETE.
+// Pre-H-4 this opened a separate writable *sql.DB; concurrent
+// restore-db / shred-database would race the DELETE because the
+// bypass writer did not hold LOCK_SH. Routing through the singleton
+// closes that hole structurally.
+func runDeepScanFixSoftDeleteGhosts(dm *mpminternal.DatabaseManager) (int64, error) {
+	if dm == nil {
+		return 0, fmt.Errorf("runDeepScanFixSoftDeleteGhosts: nil DatabaseManager")
 	}
-	defer wDB.Close()
-	res, err := wDB.Exec(
+	res, err := dm.SQLDB().Exec(
 		"DELETE FROM memories_fts WHERE rowid IN (SELECT rowid FROM memories WHERE deleted_at IS NOT NULL)",
 	)
 	if err != nil {
@@ -877,7 +887,11 @@ func runDeepScanFixSoftDeleteGhosts(dbPath string) (int64, error) {
 // Pass --fix to clean soft-delete ghosts in place. FTS orphan and dangling
 // membership fixes are left to manual intervention (they indicate schema
 // drift, not just trigger lag).
-func runDoctorDeepScan(fix bool) {
+//
+// H-4: takes the canonical DatabaseManager singleton so the --fix path
+// routes writes through the shared maintenance lease instead of a
+// bypass *sql.DB connection (see runDeepScanFixSoftDeleteGhosts).
+func runDoctorDeepScan(dm *mpminternal.DatabaseManager, fix bool) {
 	fmt.Printf("\n%s[%s]%s %sDeep-Scan Integrity Audit%s\n\n", ansiBold, colorCyan("●"), ansiReset, ansiBold, ansiReset)
 	if fix {
 		fmt.Printf("  %s--fix enabled: soft-delete ghosts will be removed in place%s\n\n", ansiYellow, ansiReset)
@@ -929,7 +943,7 @@ func runDoctorDeepScan(fix bool) {
 	} else if scan.SoftDeleteGhosts > 0 {
 		fmt.Printf("    [%s] %d ghost(s) found: %s\n", colorYellow("WARN"), scan.SoftDeleteGhosts, strings.Join(scan.SoftDeleteGhostSamples, ", "))
 		if fix {
-			n, ferr := runDeepScanFixSoftDeleteGhosts(dbPath)
+			n, ferr := runDeepScanFixSoftDeleteGhosts(dm)
 			if ferr != nil {
 				fmt.Printf("    [%s] --fix failed: %v\n", colorRed("FAIL"), ferr)
 				failed++

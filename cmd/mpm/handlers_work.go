@@ -285,8 +285,6 @@ func buildWorkingContextService(dm *mpminternal.DatabaseManager) *WorkingContext
 	)
 }
 
-
-
 // handleWorkItem dispatches the durable work-item sub-namespace under
 // `mpm work item <sub>`. Each subcommand is a thin facade that builds
 // the canonical mpm_work payload and delegates to handleCall so audit
@@ -647,7 +645,7 @@ func handleWorkItemPurge(params map[string]interface{}) int {
 			return respond("", fmt.Sprintf("mpm work item purge: %v", err), 1)
 		}
 		if len(pre.Referrers) == 0 {
-			if err := writePurgeBackup(dm.DBPath(), backupPath); err != nil {
+			if err := writePurgeBackup(dm, backupPath); err != nil {
 				return respond("", fmt.Sprintf("mpm work item purge: backup failed, nothing was removed: %v", err), 1)
 			}
 			backupTaken = true
@@ -760,16 +758,27 @@ func renderWorkPurgeReport(report *mpminternal.WorkPurgeReport, backupPath strin
 	return respond(b.String(), "", 0)
 }
 
-// writePurgeBackup dumps the database to path, before any delete.
+// writePurgeBackup dumps the database to outPath, before any delete.
+// H-4: routed through the DatabaseManager singleton so the shared
+// maintenance lease (LOCK_SH) covers the pre-delete flushWal +
+// sqlite3 .dump.
 //
 // Refuses rather than silently skipping when the sqlite3 CLI is absent:
 // a requested backup that quietly did not happen would leave the
 // operator believing they have a copy they do not have.
-func writePurgeBackup(dbPath, outPath string) error {
+func writePurgeBackup(dm *mpminternal.DatabaseManager, outPath string) error {
+	if dm == nil {
+		return fmt.Errorf("writePurgeBackup: nil DatabaseManager")
+	}
+	dbPath := dm.DBPath()
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o700); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
-	if err := flushWal(dbPath); err != nil {
+	// H-4: flushWal runs against the singleton's *sql.DB so the
+	// maintenance lease covers the checkpoint; a restore-db /
+	// shred-database racing this flushWal will refuse (EWOULDBLOCK)
+	// on the same lock inode.
+	if err := flushWal(dm); err != nil {
 		return fmt.Errorf("wal flush: %w", err)
 	}
 	sqlitePath, err := exec.LookPath("sqlite3")
@@ -1053,7 +1062,6 @@ func printWorkItemHelp() {
 	render.Plain(os.Stdout, "  mpm work item purge work-abc123 --reason-code test_debris")
 	render.BlankLine(os.Stdout)
 }
-
 
 // printWorkHelp prints the `mpm work` subcommand help via the
 // canonical visual grammar. 2026-09-14 release-pass: removes the
