@@ -123,22 +123,23 @@ type Audit struct {
 // already exists as MPM's canonical bounded key/value state surface.
 const criticCycleKey = "critic_cycle"
 
-// ensureCycleStateTable creates the system_config table if absent.
+// SCHEMA OWNERSHIP: the system_config TABLE is owned by mpm-core.
 //
-// Production always initializes this through DatabaseManager, so this
-// is normally a no-op. It exists so the Critic's durable state does
-// not depend on which migration path opened the database, and so a
-// critic pointed at a bare SQLite file behaves identically. The DDL is
-// byte-identical to the canonical definition in internal/core/schema.go
-// so the two cannot drift in shape.
-const ensureCycleStateTable = `
-CREATE TABLE IF NOT EXISTS system_config (
-	key TEXT PRIMARY KEY,
-	raw_json TEXT NOT NULL,
-	content_hash TEXT NOT NULL,
-	updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-	config_snapshot JSON
-)`
+// New receives a *sql.DB that the caller constructed through
+// DatabaseManager (see cmd/mpm-critic/main.go), and that constructor
+// runs initUnifiedSchema over schema.BaseTables, which declares
+// system_config. The Critic therefore owns exactly one bounded ROW
+// within that table and never its DDL.
+//
+// This code previously carried a duplicate CREATE TABLE claiming to be
+// byte-identical to core's definition. That was not a valid invariant:
+// two copies of schema text drift independently, and the copy would
+// have silently masked a real schema change. It existed only because
+// the hermetic test fixture did not install system_config itself.
+//
+// A bare, uninitialized *sql.DB passed directly to New is outside the
+// documented production contract, and no fallback DDL is provided for
+// it. Critic tests construct the minimum schema they require.
 
 // claimDurableCycle atomically advances the Critic cycle and returns the
 // value this caller owns.
@@ -202,11 +203,10 @@ WHERE json_type(system_config.raw_json, '$.cycle') = 'integer'
 RETURNING json_extract(raw_json, '$.cycle')`
 
 // claimDurableCycle advances and returns the durable cycle.
+//
+// It performs ONLY the atomic claim against the canonical system_config
+// table that the caller already initialized. It creates no schema.
 func (a *Audit) claimDurableCycle(ctx context.Context) (int, error) {
-	if _, err := a.db.ExecContext(ctx, ensureCycleStateTable); err != nil {
-		return 0, fmt.Errorf("critic: ensure state table: %w", err)
-	}
-
 	var cycle int
 	err := a.db.QueryRowContext(ctx, claimDurableCycleStmt).Scan(&cycle)
 	if errors.Is(err, sql.ErrNoRows) {

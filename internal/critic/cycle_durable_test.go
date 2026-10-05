@@ -30,9 +30,11 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// newSharedCriticDB creates ONE temp database carrying both the critic
-// test schema and system_config, to be shared by successive simulated
-// process invocations.
+// newSharedCriticDB creates ONE temp database carrying the hermetic
+// test schema (including system_config), to be shared by successive
+// simulated process invocations. Nothing here creates schema outside
+// the fixture: production code claims rows, it does not define the
+// table they live in.
 func newSharedCriticDB(t *testing.T) *sql.DB {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "critic.db")
@@ -278,9 +280,6 @@ func TestCriticCycle_MalformedStateFailsClosed(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := newSharedCriticDB(t)
-			if _, err := db.Exec(ensureCycleStateTable); err != nil {
-				t.Fatalf("ensure table: %v", err)
-			}
 			if _, err := db.Exec(
 				`INSERT INTO system_config (key, raw_json, content_hash) VALUES (?, ?, '')`,
 				criticCycleKey, tc.raw); err != nil {
@@ -318,9 +317,6 @@ func TestCriticCycle_MalformedStateFailsClosed(t *testing.T) {
 // initialized row.
 func TestCriticCycle_ZeroBootstrap(t *testing.T) {
 	db := newSharedCriticDB(t)
-	if _, err := db.Exec(ensureCycleStateTable); err != nil {
-		t.Fatalf("ensure table: %v", err)
-	}
 	if _, err := db.Exec(
 		`INSERT INTO system_config (key, raw_json, content_hash) VALUES (?, ?, '')`,
 		criticCycleKey, `{"cycle":0}`); err != nil {
@@ -345,9 +341,6 @@ func TestCriticCycle_RejectedClaimLeavesStateUntouched(t *testing.T) {
 	for _, raw := range []string{`{"cycle":-1}`, `{"cycle":5.5}`, `{"cycle":"5"}`} {
 		t.Run(raw, func(t *testing.T) {
 			db := newSharedCriticDB(t)
-			if _, err := db.Exec(ensureCycleStateTable); err != nil {
-				t.Fatalf("ensure table: %v", err)
-			}
 			if _, err := db.Exec(
 				`INSERT INTO system_config (key, raw_json, content_hash) VALUES (?, ?, '')`,
 				criticCycleKey, raw); err != nil {
@@ -375,9 +368,6 @@ func TestCriticCycle_RejectedClaimLeavesStateUntouched(t *testing.T) {
 // key does not disturb any other configuration row.
 func TestCriticCycle_UnrelatedSystemConfigUntouched(t *testing.T) {
 	db := newSharedCriticDB(t)
-	if _, err := db.Exec(ensureCycleStateTable); err != nil {
-		t.Fatalf("ensure table: %v", err)
-	}
 	if _, err := db.Exec(
 		`INSERT INTO system_config (key, raw_json, content_hash) VALUES ('last_gc_at', '{"updated_at":"x"}', '')`); err != nil {
 		t.Fatalf("seed unrelated: %v", err)

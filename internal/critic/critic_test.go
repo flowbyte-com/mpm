@@ -22,6 +22,20 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// criticTestSchema is the minimum hermetic schema these tests need.
+//
+// system_config appears here because PRODUCTION obtains it from
+// mpm-core's DatabaseManager (which execs schema.BaseTables), not
+// because the Critic owns it. The Critic owns exactly one bounded ROW
+// inside that table and never its DDL. See the SCHEMA OWNERSHIP note
+// in audit.go.
+//
+// This is a test fixture, not a second schema authority: it is
+// deliberately NOT a byte copy of core's definition and is not
+// imported from mpm-core, because duplicating the text is precisely
+// the drift hazard this change removes. It carries the columns the
+// claim statement actually names — key, raw_json, content_hash,
+// updated_at — so the production SQL runs unmodified against it.
 const criticTestSchema = `
 CREATE TABLE memories (
     id TEXT PRIMARY KEY,
@@ -34,6 +48,12 @@ CREATE TABLE memories (
     deleted_at INTEGER,
     updated_at INTEGER,
     created_at INTEGER
+);
+CREATE TABLE system_config (
+    key TEXT PRIMARY KEY,
+    raw_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 );
 `
 
