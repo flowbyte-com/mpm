@@ -218,6 +218,15 @@ type Scheduler struct {
 	// old resolution for any literal-constructed Scheduler.
 	statePath string
 
+	// activeUptime accrues cumulative scheduler-active uptime and
+	// populates missing memory settling baselines. It is the scheduler's
+	// side of the settling clock: this process is the only MPM process
+	// whose lifetime is meaningful, so it is the only thing that can
+	// define "active". Its monotonic per-process elapsed time means a
+	// restart contributes no credit for the wall-clock gap that preceded
+	// it. See active_uptime.go.
+	activeUptime *activeUptimeAccruer
+
 	// captureBuf/captureMu are test-only fields for capturing slog output.
 	// Production code never reads them; tests set them via
 	// newTestSchedulerWithCaptureLogger and retrieve via s.captureLogs().
@@ -255,6 +264,7 @@ func New(db *sql.DB, log *slog.Logger) (*Scheduler, error) {
 		heartbeatEvery:     100, // ~100 min at 60s interval; override with SetHeartbeat
 		processStartedUnix: time.Now().Unix(),
 		statePath:          StateFilePath(),
+		activeUptime:       newActiveUptimeAccruer(nil),
 	}
 	// Register the notification-expiration sweep as a tick handler so
 	// every scheduler tick retires notification-kind wakes whose
@@ -395,6 +405,22 @@ func (s *Scheduler) MarkFired(id string, lastError string) error {
 // Tick runs one scheduler iteration. Pulls due wakes, dispatches each
 // according to its kind. Returns the number of system wakes executed.
 func (s *Scheduler) Tick(ctx context.Context) (int, error) {
+	// PHASE 0 — active-uptime accrual, before ANY wake is queried or
+	// dispatched. Ordering is load-bearing: a critic_audit wake fired by
+	// this very tick must observe (a) the current global active seconds
+	// and (b) a fully populated set of per-memory settling baselines.
+	// Accruing afterwards would let an audit read a stale total or find
+	// baselines missing, and would award a just-admitted memory credit
+	// for time before the scheduler first observed it.
+	//
+	// Failure is logged, never fatal: a tick that cannot account for
+	// uptime must not fabricate it, and must not block wake delivery.
+	if s.activeUptime != nil {
+		if _, err := s.activeUptime.Accrue(ctx, s.db); err != nil {
+			s.log.Error("active uptime accrual failed", "err", err)
+		}
+	}
+
 	// Tick handlers fire unconditionally on every tick, regardless of
 	// wake state. Dispatch happens after wake processing completes.
 	defer s.dispatchTickHandlers(ctx)
