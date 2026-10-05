@@ -60,10 +60,23 @@
 //                per-statement errors and gives a clear failure point.
 //
 // Architectural Decisions (intentional trade-offs, not gaps):
-//   * H-4 concurrent-write `flock` guard deferred. Documented as
-//     'next milestone' in the audit. C-2 is the parser milestone;
-//     H-4 is the concurrency milestone. Mixing them would compound
-//     two classes of bugs in one change.
+//   * H-4 concurrent-write `flock` guard implemented (2026-10-05).
+//     handleRestoreDB (cmd/mpm/handlers_backup.go) acquires an
+//     exclusive flock on `<dbPath>.lock` AFTER validation succeeds
+//     and BEFORE the destructive window, and holds it until
+//     `.pre-restore` is removed. The empirical reproducer
+//     (internal/core/restore_db_concurrency_repro_test.go, §4)
+//     pinned the pre-fix race in five scenarios (silent loss in A/B/E,
+//     data contamination in C, benign post-rename open in D). The
+//     same lock file is also probed by the shred-database preflight,
+//     so a shred-database and a restore-db can never run
+//     concurrently. Crash safety is kernel-cleared via syscall.Flock.
+//     The known limitation: the lock is NOT acquired by other
+//     DatabaseManager users (CLI handlers, scheduler, MCP), so a
+//     concurrent `mpm capture` is still racy. The restore-db error
+//     message and the help text both tell the operator to stop the
+//     live MPM daemon before running restore-db. Extending the lock
+//     protocol to all DatabaseManager users is a future tranche.
 //   * Reject-not-sanitize chosen for fail-closed posture. Sanitization
 //     is where most SQLi bypasses live; deterministic rejection is safer.
 //   * Canonical schema (not live schema) as allow-list. Live schema
