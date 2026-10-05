@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -55,10 +56,14 @@ func ParseJsonFactsWithReport(content, sourcePath string) (facts []MigratedFact,
 	if derr := dec.Decode(&raw); derr != nil {
 		return nil, nil, fmt.Errorf("%s: invalid JSON: %w", sourcePath, derr)
 	}
-	// A second JSON value is a trailing-values concatenation — not a
-	// single JSON document.  This guards against "two JSON objects
-	// pasted together" being silently accepted.
-	if dec.More() {
+	// Trailing-data check: a single valid JSON document is followed
+	// only by EOF (with optional whitespace).  Any non-EOF result from a
+	// second Decode means the operator concatenated documents.  (dec.More()
+	// was unreliable: it does not skip leading whitespace at EOF, falsely
+	// flagging "\n"/"/"/"* etc. as trailing JSON.  The canonical
+	// second-Decode pattern handles whitespace correctly.)
+	var dummy interface{}
+	if derr := dec.Decode(&dummy); derr != io.EOF {
 		return nil, nil, fmt.Errorf("%s: trailing data after first JSON value", sourcePath)
 	}
 
