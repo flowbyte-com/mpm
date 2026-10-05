@@ -31,10 +31,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	core "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/mpmcli"
 	"github.com/flowbyte-com/mpm-core/usererror"
+	"github.com/google/uuid"
 )
 
 // DrillsDir is the canonical location for drill YAML specs. Relative
@@ -349,20 +349,22 @@ func runSyntheticDrillCLI(
 // MPM_SESSION_ID, so every audit row written during this run tags
 // itself with the session_id we just minted.
 //
-// The CLI's sessionID is logged for traceability but the harness
-// mints its own at Launch — the scoring pipeline reads the harness's
-// session via tool_invocations, which the MCP server tags with
-// MPM_SESSION_ID env. Keeping the row's session_id aligned with the
-// produced score is a TODO that the report command will surface.
+// sessionID is the orchestrator-owned canonical session_id (drill-
+// run session identity invariant, §4): the harness MUST receive the
+// same id we stored in drill_runs.session_id so every audit row
+// joins back to its drill_run via session_id. The harness no longer
+// mints its own (drill_claude_code_harness.go §6) — passing the
+// caller's id here is the only way the contract is closed. The
+// CLI's drill_runs row is written at handleDrillsRun's INSERT above
+// with this same sessionID, so the two stay aligned.
 func runClaudeCodeDrillCLI(
 	ctx context.Context,
 	drill core.DrillSpec,
 	sessionID string,
 ) ([]core.ToolCall, error) {
 	workspace := mpmcli.ResolveWorkspace()
-	_ = sessionID // harness owns its session; score reads by harness.sessionID
 	h := core.NewClaudeCodeHarness(workspace, "", "")
-	if _, err := h.Launch(ctx, drill); err != nil {
+	if _, err := h.Launch(ctx, drill, sessionID); err != nil {
 		return nil, fmt.Errorf("claude launch: %w", err)
 	}
 	dm, err := core.NewDatabaseManager(workspace)

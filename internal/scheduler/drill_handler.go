@@ -42,8 +42,8 @@ import (
 //   - drill_id    : string, identifier matching the YAML's id field
 //   - path        : string, absolute path to the drill YAML on disk
 //   - compliant   : bool,   true=compliant harness run, false=non-compliant
-//                    (only meaningful for synthetic harness; claude_code
-//                    always runs the agent against the prompt normally)
+//     (only meaningful for synthetic harness; claude_code
+//     always runs the agent against the prompt normally)
 //
 // Errors return non-nil but the wake is still marked fired=1 — the
 // scheduler's contract is "failures surface but do not block other
@@ -138,7 +138,6 @@ func DrillHandler(ctx context.Context, w Wake) error {
 	}); err != nil {
 		return err
 	}
-	_ = sessionID // reserved for future telemetry cross-references
 	return nil
 }
 
@@ -205,6 +204,13 @@ func runSyntheticDrill(
 // so every audit row written during this run tags itself with the
 // session_id we just minted. After Claude Code exits, we read the
 // audit rows by session_id and return them as ToolCalls.
+//
+// sessionID is the orchestrator-owned canonical session_id (drill-
+// run session identity invariant, §4): the harness MUST receive the
+// same id we stored in drill_runs.session_id so every audit row
+// joins back to its drill_run via session_id. The harness no longer
+// mints its own (drill_claude_code_harness.go §6) — passing the
+// caller's id here is the only way the contract is closed.
 func runClaudeCodeDrill(
 	ctx context.Context,
 	dm *core.DatabaseManager,
@@ -213,14 +219,13 @@ func runClaudeCodeDrill(
 ) ([]core.ToolCall, error) {
 	workspace := mpmcli.ResolveWorkspace()
 	h := core.NewClaudeCodeHarness(workspace, "", "")
-	if _, err := h.Launch(ctx, drill); err != nil {
+	if _, err := h.Launch(ctx, drill, sessionID); err != nil {
 		return nil, fmt.Errorf("claude launch: %w", err)
 	}
 	calls, err := h.Finish(ctx, dm.SQLDB())
 	if err != nil {
 		return nil, fmt.Errorf("claude finish: %w", err)
 	}
-	_ = sessionID // harness mints its own; left for traceability in drill_runs
 	return calls, nil
 }
 

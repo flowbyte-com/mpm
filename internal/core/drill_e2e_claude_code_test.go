@@ -132,14 +132,33 @@ func TestDrillE2E_ClaudeCode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(drill.TimeoutSecs)*time.Second)
 	defer cancel()
 
-	if _, err := h.Launch(ctx, drill); err != nil {
+	// The orchestrator (scheduler.DrillHandler / cmd/mpm/drill_cmds.go)
+	// owns the canonical session_id. The E2E test bypasses both and
+	// stands in as the orchestrator — mint a UUID here so the harness
+	// receives the same id we use everywhere else on this run. The
+	// harness no longer mints its own (drill_claude_code_harness.go §6).
+	orchestratorSessionID := "e2e-claude-code-" + t.Name()
+
+	if _, err := h.Launch(ctx, drill, orchestratorSessionID); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 
 	// Read the harness's session_id BEFORE Finish waits — we need
 	// it to assert the audit rows landed under the right session.
+	// Post-§6 the harness returns the orchestrator-supplied id
+	// unchanged; pre-§6 it returned a freshly minted UUID that
+	// never matched anything in drill_runs.session_id.
 	harnessSessionID := h.SessionID()
-	t.Logf("harness session_id: %s", harnessSessionID)
+	t.Logf("harness session_id: %s (orchestrator: %s, match: %t)",
+		harnessSessionID, orchestratorSessionID,
+		harnessSessionID == orchestratorSessionID)
+
+	if harnessSessionID != orchestratorSessionID {
+		t.Fatalf("drill-run session identity §4 broken: harness "+
+			"returned %q but orchestrator supplied %q. The audit "+
+			"rows will land under the harness's id and cannot be "+
+			"joined back to any drill_runs row.", harnessSessionID, orchestratorSessionID)
+	}
 
 	calls, err := h.Finish(ctx, dm.SQLDB())
 	if err != nil {

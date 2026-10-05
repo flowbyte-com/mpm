@@ -10,11 +10,12 @@
 //	drill prompt
 //	    │
 //	    ▼
-//	ClaudeCodeHarness.Begin
+//	ClaudeCodeHarness.Launch(ctx, drill, sessionID)
 //	    │   spawns `claude -p <prompt>` with --mcp-config pointing at
 //	    │   the local mpm-mcp stdio server. The harness sets
-//	    │   MPM_SESSION_ID=<uuid> so every audit row written by mpm-mcp
-//	    │   across this drill carries the same session_id.
+//	    │   MPM_SESSION_ID=<sessionID> so every audit row written by
+//	    │   mpm-mcp across this drill carries the same session_id
+//	    │   the caller (orchestrator) already minted for drill_runs.
 //	    ▼
 //	Claude Code (real agent)
 //	    │   discovers mpm-mcp via MCP, calls mpm_* tools over stdio.
@@ -27,9 +28,23 @@
 //	    ▼
 //	scheduler scores; verdict persists in drill_runs.
 //
-// Critical invariant: the verdict comes from the audit table, not
-// from anything Claude Code said. If the agent claims "I saved a
-// lesson" but mpm has no tool_invocations row, the drill FAILS.
+// Critical invariant (drill-run session identity, §4):
+//
+//	drill_runs.session_id == tool_invocations.session_id
+//
+// The orchestrator (scheduler or CLI dispatcher) is the canonical
+// minter of the run's session_id S. The harness consumes S via the
+// Launch parameter and threads it through every audit-row producer:
+// MPM_SESSION_ID env, writeMcpConfig, and Finish's
+// readInvocationsForSession scope. The harness MUST NOT mint its own
+// session_id — that breaks the invariant (see
+// drill_session_identity_reproducer_test.go §3 for the historical
+// bug shape).
+//
+// Critical invariant (drill-run audit):
+// The verdict comes from the audit table, not from anything Claude
+// Code said. If the agent claims "I saved a lesson" but mpm has no
+// tool_invocations row, the drill FAILS.
 
 package internal
 
@@ -38,6 +53,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -45,8 +61,6 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // ClaudeCodeHarness drives one drill run via the `claude` CLI. It
@@ -58,11 +72,11 @@ import (
 // doesn't have to fit inside one method call. Callers MUST call Finish
 // even on error or after a timeout to release child state cleanly.
 type ClaudeCodeHarness struct {
-	claudePath  string
-	mpmMcpPath  string
-	workspace   string
-	debugLog    io.Writer   // tee target for human-visible diagnostics (typically os.Stderr)
-	debugBuf    *syncBuf    // captured child output for programmatic inspection (DebugOutput)
+	claudePath string
+	mpmMcpPath string
+	workspace  string
+	debugLog   io.Writer // tee target for human-visible diagnostics (typically os.Stderr)
+	debugBuf   *syncBuf  // captured child output for programmatic inspection (DebugOutput)
 
 	// session_id is generated at Begin; every tool_invocations row the
 	// agent emits carries this. Set as MPM_SESSION_ID env so mpm-mcp
@@ -135,9 +149,11 @@ func (s *syncBuf) String() string {
 	return s.buf.String()
 }
 
-// SessionID returns the session_id minted at Launch. Callers use this
-// to associate the audit rows the harness will write with the
-// drill_runs row that initiated the run. Returns "" before Launch.
+// SessionID returns the session_id supplied to Launch — the same id
+// stored in drill_runs.session_id. Returns "" before Launch. The
+// harness no longer mints a UUID here (§6 — see
+// drill_session_identity_reproducer_test.go for the historical bug
+// shape); the orchestrator owns the mint.
 func (h *ClaudeCodeHarness) SessionID() string { return h.sessionID }
 
 // isAvailable reports whether the harness can run in the current
@@ -165,25 +181,33 @@ func (h *ClaudeCodeHarness) isAvailable() error {
 }
 
 // Launch spawns Claude Code with the drill prompt and MCP config pointing
-// at our local mpm-mcp. Returns the session_id used to scope audit
-// queries. The caller MUST call Finish (even on error) to reap the
-// subprocess and surface telemetry.
+// at our local mpm-mcp. sessionID is the orchestrator-owned canonical
+// session_id for this run — the same one stored in drill_runs.session_id.
+// The harness threads it through every audit-row producer: the
+// MPM_SESSION_ID env, the MCP config the child server inherits, and
+// the Finish read scope. The caller MUST call Finish (even on error)
+// to reap the subprocess and surface telemetry.
 //
 // Named Launch (not Begin) because the mpm-lint tx-rollback rule has
 // an over-eager pattern matching any `.Begin(` call against a
 // database/sql-shaped type. The harness does nothing transactional.
 //
-// The harness relies on the mpm-mcp dispatcher honouring the
-// MPM_SESSION_ID environment variable to scope every audit row it
-// writes. If that plumbing is missing the harness still works, but
-// evidence correlation with the per-session drill_run row breaks
-// (rows land but are unattributable).
-func (h *ClaudeCodeHarness) Launch(ctx context.Context, drill DrillSpec) (string, error) {
+// sessionID must be non-empty. The harness historically minted its
+// own UUID here, which silently broke the drill-run session identity
+// invariant (drill_runs.session_id != tool_invocations.session_id — see
+// drill_session_identity_reproducer_test.go §3). The minting was
+// removed in §6: the orchestrator (scheduler or CLI dispatcher) is the
+// single source of session_ids for a drill run, and the harness
+// refuses to Launch without it.
+func (h *ClaudeCodeHarness) Launch(ctx context.Context, drill DrillSpec, sessionID string) (string, error) {
+	if sessionID == "" {
+		return "", errors.New("ClaudeCodeHarness.Launch requires a caller-owned sessionID (orchestrator owns the mint; see §4 session-identity invariant)")
+	}
 	if err := h.isAvailable(); err != nil {
 		return "", err
 	}
 
-	h.sessionID = uuid.NewString()
+	h.sessionID = sessionID
 
 	// Materialise an MCP config file in the workspace so each drill
 	// gets a clean server process (no shared-state bleed across
