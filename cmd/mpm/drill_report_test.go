@@ -17,7 +17,6 @@ import (
 	"testing"
 
 	core "github.com/flowbyte-com/mpm-core"
-	"github.com/stretchr/testify/require"
 )
 
 func TestHarnessCapability(t *testing.T) {
@@ -246,88 +245,4 @@ func TestParseDrillReportFlags(t *testing.T) {
 	if !pf || json || pd {
 		t.Errorf("json=%v pd=%v pf=%v, want false false true", json, pd, pf)
 	}
-}
-
-// TestBuildDrillRows_PropagatesSessionID is the §12 unit guard: when
-// buildDrillRows merges a latestRun with a non-empty sessionID, the
-// resulting drillRow must carry that sessionID verbatim — that's the
-// drill-run session identity invariant surfaced into the report
-// (operator can drill from "latest run for drill X" to "evidence
-// under session Y" purely on session_id, no extra query needed).
-func TestBuildDrillRows_PropagatesSessionID(t *testing.T) {
-	drills := []core.DrillSpec{
-		{ID: "a", Framework: "claude_code"},
-	}
-	const want = "drill-session-canonical-abc123"
-	latest := []latestRun{
-		{DrillID: "a", Framework: "claude_code", Status: "passed", Passed: true,
-			StartedAt: 100, SessionID: want, RunCount: 1},
-	}
-	rows := buildDrillRows(drills, latest)
-	require.Len(t, rows, 1)
-	require.Equal(t, want, rows[0].SessionID,
-		"drill_row.session_id must equal latestRun.session_id — the "+
-			"operator-visible join key for tool_invocations (§4). "+
-			"A nil propagation breaks `mpm drills report --json`'s "+
-			"downstream tooling (the web UI's evidence drill-in).")
-}
-
-// TestQueryLatestDrillRuns_SessionIDReachesRow is the §12 integration
-// guard: queryLatestDrillRuns against a real DM reads session_id
-// alongside status/verdict/started_at. The per-drill row that the
-// report emits is the only place an operator finds the run's
-// canonical session_id without querying drill_runs directly; missing
-// it here is a silent regression of the drill-run session identity
-// invariant.
-func TestQueryLatestDrillRuns_SessionIDReachesRow(t *testing.T) {
-	workspace := t.TempDir()
-	t.Setenv("MPM_WORKSPACE", workspace)
-
-	dm, err := core.NewDatabaseManager(workspace)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = dm.Close() })
-	require.NoError(t, dm.InitSchema())
-
-	// Seed two runs for the same (drill, framework) pair, so the
-	// query's MAX(started_at) logic must pick the newer one AND its
-	// session_id. Different session_ids catch a regression that
-	// returned the older row's id.
-	const (
-		drillID   = "session-id-surfacing"
-		framework = "claude_code"
-	)
-	olderSession := "older-session-canonical"
-	newerSession := "newer-session-canonical"
-
-	_, err = dm.SQLDB().Exec(`
-		INSERT INTO drill_runs
-		    (id, drill_id, framework, session_id, status, verdict, started_at)
-		VALUES
-		    ('run-older', ?, ?, ?, 'passed',
-		     '{"passed":true,"reasons":[]}', 100),
-		    ('run-newer', ?, ?, ?, 'passed',
-		     '{"passed":true,"reasons":[]}', 200)`,
-		drillID, framework, olderSession,
-		drillID, framework, newerSession,
-	)
-	require.NoError(t, err)
-
-	latest, err := queryLatestDrillRuns(dm.SQLDB())
-	require.NoError(t, err)
-	require.Len(t, latest, 1, "two runs collapse to one latest-row per (drill_id, framework)")
-	require.Equal(t, newerSession, latest[0].SessionID,
-		"latest run's session_id must be the newest run's session_id, "+
-			"not the older one's — the report must point at the "+
-			"verdict the operator is reading.")
-	require.Equal(t, int64(200), latest[0].StartedAt)
-
-	// Round-trip through buildDrillRows to prove the session_id
-	// reaches the JSON surface, not just the intermediate struct.
-	drills := []core.DrillSpec{{ID: drillID, Framework: framework}}
-	rows := buildDrillRows(drills, latest)
-	require.Len(t, rows, 1)
-	require.Equal(t, newerSession, rows[0].SessionID,
-		"session_id must survive the buildDrillRows merge — "+
-			"this is what `mpm drills report --json` emits and "+
-			"what downstream tools consume.")
 }

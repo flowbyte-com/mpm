@@ -70,14 +70,7 @@ type drillRow struct {
 	Capability string `json:"capability"` // WIRED | NOT_WIRED
 	Behavior   string `json:"behavior"`   // PASS | FAIL | NOT_TESTED
 	LastRunAt  int64  `json:"last_run_at,omitempty"`
-	// SessionID is the orchestrator-owned canonical session_id of
-	// the most recent run. The drill-run session identity invariant
-	// (§4) makes this the join key for tool_invocations: a UI can
-	// drill from "what was the latest run for drill X?" to
-	// "what evidence backed it?" purely on session_id. Empty when
-	// no run has been recorded.
-	SessionID string `json:"session_id,omitempty"`
-	RunCount  int    `json:"run_count"`
+	RunCount   int    `json:"run_count"`
 }
 
 type frameworkRow struct {
@@ -160,26 +153,29 @@ func parseDrillReportFlags(args []string) (jsonOutput, perDrillOnly, perFramewor
 }
 
 // queryLatestDrillRuns returns one row per (drill_id, framework): the
-// most recent row's status + verdict + started_at + session_id.
-// NOT_TESTED comes from the absence of a row, which the caller
-// derives by comparing against the installed-drills list. The
-// session_id field is the orchestrator-owned canonical id (§4) —
-// it's surfaced in the per-drill row so an operator can drill from
-// "what was the latest run?" to "what evidence backed it?" without
-// re-querying drill_runs.
+// most recent row's status + verdict + started_at. NOT_TESTED comes
+// from the absence of a row, which the caller derives by comparing
+// against the installed-drills list.
+//
+// drill_runs.session_id is the orchestrator-owned canonical session
+// id (§4 — drill-run session identity invariant). It stays in the
+// schema and remains queryable for debugging/provenance joins
+// (drill_runs ↔ tool_invocations), but it is intentionally not
+// surfaced through this report query — surfacing it would require a
+// product requirement to display session_ids in the matrix that does
+// not exist today.
 type latestRun struct {
 	DrillID   string
 	Framework string
 	Status    string // passed | failed | error | running
 	Passed    bool   // derived from verdict
 	StartedAt int64
-	SessionID string // orchestrator-owned canonical session_id (§4)
 	RunCount  int
 }
 
 func queryLatestDrillRuns(db *sql.DB) ([]latestRun, error) {
 	rows, err := db.Query(`
-		SELECT drill_id, framework, status, verdict, started_at, session_id
+		SELECT drill_id, framework, status, verdict, started_at
 		FROM drill_runs dr
 		WHERE dr.started_at = (
 			SELECT MAX(dr2.started_at) FROM drill_runs dr2
@@ -196,7 +192,7 @@ func queryLatestDrillRuns(db *sql.DB) ([]latestRun, error) {
 		var lr latestRun
 		var verdictStr sql.NullString
 		var status string
-		if err := rows.Scan(&lr.DrillID, &lr.Framework, &status, &verdictStr, &lr.StartedAt, &lr.SessionID); err != nil {
+		if err := rows.Scan(&lr.DrillID, &lr.Framework, &status, &verdictStr, &lr.StartedAt); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
 		lr.Status = status
@@ -268,7 +264,6 @@ func buildDrillRows(drills []core.DrillSpec, latest []latestRun) []drillRow {
 				row.Behavior = "FAIL"
 			}
 			row.LastRunAt = lr.StartedAt
-			row.SessionID = lr.SessionID
 			row.RunCount = lr.RunCount
 		}
 		out = append(out, row)
@@ -386,26 +381,16 @@ func emitDrillReportPerDrill(rows []drillRow) error {
 	}
 	fmt.Println("Per-drill matrix:")
 	fmt.Println()
-	fmt.Printf("%-32s %-14s %-12s %-12s %-8s %-20s %s\n",
-		"DRILL_ID", "FRAMEWORK", "CAPABILITY", "BEHAVIOR", "RUNS", "LAST_RUN", "SESSION_ID")
-	fmt.Println(strings.Repeat("-", 124))
+	fmt.Printf("%-32s %-14s %-12s %-12s %-8s %s\n",
+		"DRILL_ID", "FRAMEWORK", "CAPABILITY", "BEHAVIOR", "RUNS", "LAST_RUN")
+	fmt.Println(strings.Repeat("-", 100))
 	for _, r := range rows {
 		lastRun := "—"
 		if r.LastRunAt > 0 {
 			lastRun = time.Unix(r.LastRunAt, 0).UTC().Format("2006-01-02T15:04:05Z")
 		}
-		// session_id is a UUID; the full string fits inside 36 chars.
-		// Show a short prefix + "…" only if longer (defensive against
-		// future expansion of the id scheme).
-		sid := r.SessionID
-		if len(sid) > 36 {
-			sid = sid[:35] + "…"
-		}
-		if sid == "" {
-			sid = "—"
-		}
-		fmt.Printf("%-32s %-14s %-12s %-12s %-8d %-20s %s\n",
-			r.DrillID, r.Framework, r.Capability, r.Behavior, r.RunCount, lastRun, sid)
+		fmt.Printf("%-32s %-14s %-12s %-12s %-8d %s\n",
+			r.DrillID, r.Framework, r.Capability, r.Behavior, r.RunCount, lastRun)
 	}
 	fmt.Println()
 	return nil
