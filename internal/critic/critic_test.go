@@ -11,6 +11,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -18,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	mpmcore "github.com/flowbyte-com/mpm-core"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -36,6 +39,11 @@ import (
 // the drift hazard this change removes. It carries the columns the
 // claim statement actually names — key, raw_json, content_hash,
 // updated_at — so the production SQL runs unmodified against it.
+//
+// memory_settling_baselines is core-owned too: the scheduler writes it,
+// the Critic only reads it. Tests that expect a memory to be challengeable
+// must therefore grant residency via settleMemories (or run the accrual
+// path), because a memory with no baseline is never settled.
 const criticTestSchema = `
 CREATE TABLE memories (
     id TEXT PRIMARY KEY,
@@ -54,6 +62,11 @@ CREATE TABLE system_config (
     raw_json TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+);
+CREATE TABLE memory_settling_baselines (
+    memory_id TEXT PRIMARY KEY,
+    baseline_active_seconds INTEGER NOT NULL,
+    captured_at INTEGER NOT NULL
 );
 `
 
@@ -146,6 +159,35 @@ func seedMemory(t *testing.T, a *Audit, id, collection, content, source string, 
 	)
 	if err != nil {
 		t.Fatalf("seed memory: %v", err)
+	}
+}
+
+// settleMemories grants cumulative-scheduler-active residency to the
+// named memories so a MaxAge-focused test can reach the challenge path.
+//
+// StaleMemoryHunt requires BOTH a wall-clock-stale memory AND
+// SettlingPeriod of ACTIVE uptime. Tests written before settling existed
+// only satisfied the first gate, so they must opt in explicitly here.
+//
+// activeSeconds becomes the durable global counter, and each named
+// memory is anchored at zero — giving it the full activeSeconds of
+// residency. Naming no memories leaves the baseline table empty, which
+// is the "never observed" state and correctly yields no findings.
+func settleMemories(t *testing.T, a *Audit, activeSeconds int64, memoryIDs ...string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := a.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO system_config (key, raw_json, content_hash) VALUES (?, ?, '')`,
+		mpmcore.ActiveUptimeKey,
+		fmt.Sprintf(`{"active_seconds":%d,"last_elapsed_ms":0,"updated_at":0}`, activeSeconds)); err != nil {
+		t.Fatalf("seed active uptime: %v", err)
+	}
+	for _, id := range memoryIDs {
+		if _, err := a.db.ExecContext(ctx,
+			`INSERT OR REPLACE INTO memory_settling_baselines (memory_id, baseline_active_seconds, captured_at)
+			 VALUES (?, 0, 0)`, id); err != nil {
+			t.Fatalf("seed baseline for %s: %v", id, err)
+		}
 	}
 }
 
@@ -256,7 +298,7 @@ func TestStaleMemoryHunt_FlagsOldMemory(t *testing.T) {
 	ctx := context.Background()
 
 	oldDate := time.Now().Add(-90 * 24 * time.Hour) // 90 days ago, > 30d default
-	recent := time.Now().Add(-1 * 24 * time.Hour)  // 1 day ago
+	recent := time.Now().Add(-1 * 24 * time.Hour)   // 1 day ago
 
 	seedMemory(t, a, "old-1", "memories", "outdated info", "", 0.8, "", oldDate)
 	seedMemory(t, a, "old-2", "memories", "another outdated", "", 0.7, "", oldDate)
@@ -265,6 +307,11 @@ func TestStaleMemoryHunt_FlagsOldMemory(t *testing.T) {
 	seedMemory(t, a, "old-deleted", "memories", "old gone", "", 0.8, "2026-07-01 00:00:00", oldDate)
 	// No updated_at: should not be flagged (NULL).
 	seedMemory(t, a, "no-updated", "memories", "no timestamp", "", 0.8, "", time.Time{})
+
+	// Grant active residency so the MaxAge gate is what decides, not the
+	// settling gate. Only the two wall-stale memories are settled; a
+	// settled-but-fresh memory must still be excluded by MaxAge.
+	settleMemories(t, a, 24*3600, "old-1", "old-2", "recent-1", "old-deleted", "no-updated")
 
 	findings, err := (&StaleMemoryHunt{MaxAge: 30 * 24 * time.Hour}).Run(ctx, a)
 	if err != nil {
@@ -293,6 +340,7 @@ func TestStaleMemoryHunt_DefaultMaxAge(t *testing.T) {
 	// 31 days old: just past the default 30-day threshold. Should fire.
 	stale := time.Now().Add(-31 * 24 * time.Hour)
 	seedMemory(t, a, "stale", "memories", "old memory", "", 0.8, "", stale)
+	settleMemories(t, a, 24*3600, "stale")
 
 	// Hunt with default MaxAge=0 → code uses 30 days.
 	findings, err := (&StaleMemoryHunt{}).Run(ctx, a)
@@ -543,6 +591,9 @@ func TestCriticCanPublishFinding(t *testing.T) {
 	// challenge envelope.
 	old := time.Now().Add(-60 * 24 * time.Hour)
 	seedMemory(t, a, "stale-1", "memories", "ancient content", "", 0.8, "", old)
+	// Grant active residency so the memory clears the settling gate and
+	// reaches the challenge emit this test is about.
+	settleMemories(t, a, 24*3600, "stale-1")
 
 	if err := a.Run(ctx); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -584,9 +635,9 @@ func TestCriticCanPublishFinding(t *testing.T) {
 // the live envelope rejected with "unknown tool").
 func TestCriticEnvelopesAreCurrent(t *testing.T) {
 	forbidden := map[string]string{
-		"challenge_memory":  "legacy — use mpm_memory + challenge",
-		"save_lesson":       "legacy — use mpm_lessons + save",
-		"propose_theory":    "legacy — use mpm_theories + propose",
+		"challenge_memory": "legacy — use mpm_memory + challenge",
+		"save_lesson":      "legacy — use mpm_lessons + save",
+		"propose_theory":   "legacy — use mpm_theories + propose",
 	}
 
 	// Drain every published Finding across all hunts by running each

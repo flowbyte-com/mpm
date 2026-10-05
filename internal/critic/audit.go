@@ -110,7 +110,7 @@ type Audit struct {
 	db         *sql.DB
 	log        *slog.Logger
 	cycle      int
-	cycleStart time.Time // captured at the start of each Run(); hunts read this for settling-period comparisons
+	cycleStart time.Time // captured at the start of each Run(); a per-cycle duration reference, NOT the settling clock
 	hunts      []Hunt
 	cli        CLIRunner
 }
@@ -366,7 +366,12 @@ func (a *Audit) DB() *sql.DB { return a.db }
 func (a *Audit) Cycle() int { return a.cycle }
 
 // CycleStart returns the wall-clock at which the current (or most recent)
-// audit cycle began. Hunts use this as the reference for settling-period
-// calculations so the period doesn't tick against absolute time during a
-// daemon outage — it ticks only when a cycle is actively running.
+// audit cycle began.
+//
+// It is a per-cycle duration reference (how long THIS audit is running),
+// NOT a system-lifetime clock. It is deliberately NOT used for settling
+// arithmetic: mpm-critic is a one-shot process, so this value is always
+// near zero at hunt time and carries no residency information. Settling
+// is measured in cumulative SCHEDULER-active uptime instead — see
+// StaleMemoryHunt.
 func (a *Audit) CycleStart() time.Time { return a.cycleStart }

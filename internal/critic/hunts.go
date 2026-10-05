@@ -13,6 +13,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	mpmcore "github.com/flowbyte-com/mpm-core"
 )
 
 // SurvivalAsymmetryHunt detects the call-vs-direct source survival gap.
@@ -117,14 +119,47 @@ func (h *SurvivalAsymmetryHunt) Run(ctx context.Context, a *Audit) ([]Finding, e
 	return []Finding{finding}, nil
 }
 
-// StaleMemoryHunt flags memories with no reinforcement in MaxAge.
+// StaleMemoryHunt flags memories that are BOTH wall-clock stale AND
+// sufficiently settled in cumulative scheduler-active uptime.
 //
 // A memory's confidence degrades without periodic reinforcement. If a
 // memory has been silent for longer than MaxAge, the Critic emits a
 // challenge_memory finding. The user (808) arbitrates.
+//
+// TWO INDEPENDENT CLOCKS, BOTH REQUIRED:
+//
+//	MaxAge         WALL CLOCK. "Is this stale?" — a recency judgement
+//	               about the memory's content age.
+//	SettlingPeriod CUMULATIVE SCHEDULER-ACTIVE UPTIME. "Has the system
+//	               actually been up long enough to judge it fairly?"
+//	               Measured as the global active-uptime counter minus the
+//	               memory's own admission baseline.
+//
+// A memory is challengeable only when BOTH gates pass. The second gate
+// exists so the Critic never judges a memory the system has barely had
+// the opportunity to observe.
+//
+// WHY SETTLING IS NOT WALL CLOCK. The previous implementation computed
+// `cycleStart.Add(-settling)` where cycleStart is time.Now() captured
+// inside the one-shot mpm-critic process. That is identically
+// `now - settling`, so the predicate carried no information beyond
+// MaxAge: a scheduler outage of ANY length accrued settling credit. The
+// in-code comment at the time claimed "a 13h daemon outage does NOT
+// accumulate against the settling period" — that was false, and a
+// memory with 6h of true active residency could be challenged after a
+// 20h outage.
+//
+// Settling now reads durable active uptime that the PERSISTENT
+// scheduler accrues from its own monotonic process elapsed time. A
+// restart contributes no credit for the wall-clock gap preceding it.
+//
+// REINFORCEMENT DOES NOT RESET SETTLING. The baseline is immutable
+// once written; it records admission residency, not a cooldown after
+// epistemic reinforcement. The audit below reads updated_at ONLY for
+// the MaxAge recency judgement — never for settling.
 type StaleMemoryHunt struct {
-	MaxAge         time.Duration // default: 30 days
-	SettlingPeriod time.Duration // default: 12h; refuse to challenge memories fresher than this when measured from the current audit cycle start
+	MaxAge         time.Duration // default: 30 days — WALL CLOCK
+	SettlingPeriod time.Duration // default: 12h — CUMULATIVE SCHEDULER-ACTIVE UPTIME
 }
 
 func (h *StaleMemoryHunt) Name() string { return "stale_memory" }
@@ -138,44 +173,53 @@ func (h *StaleMemoryHunt) Run(ctx context.Context, a *Audit) ([]Finding, error) 
 	if settling == 0 {
 		settling = 12 * time.Hour
 	}
-	cutoff := time.Now().Add(-maxAge).Unix()
-	// Settling cutoff is anchored to the cycle start, not absolute time.
-	// This way a 13h daemon outage does NOT accumulate against the settling
-	// period — when the daemon wakes, only time elapsed within active cycles
-	// counts. (Strict cumulative-uptime-per-memory is a follow-up; see TODO.)
-	// Fallback to time.Now() if the cycle start has not been initialized
-	// (e.g., when a hunt is invoked directly outside of Audit.Run()).
-	cycleStart := a.CycleStart()
-	if cycleStart.IsZero() {
-		cycleStart = time.Now()
-	}
-	settleCutoff := cycleStart.Add(-settling).Unix()
+	settleSeconds := int64(settling / time.Second)
 
-	// Pull memories that have no reinforcement row newer than cutoff.
-	// Heuristic: rely on updated_at; if a memory hasn't been updated in
-	// MaxAge, it's stale. This is approximate — a more rigorous check
-	// would join against evidence rows, but updated_at is the closest
-	// signal in the schema.
+	// Read the durable active-uptime total. An absent row reads as 0
+	// (nothing has ever been accrued); a MALFORMED row is an explicit
+	// error. Either way we fail closed below — we never guess.
+	currentActive, err := mpmcore.ReadActiveUptime(ctx, a.DB())
+	if err != nil {
+		return nil, fmt.Errorf("stale_memory: read active uptime: %w", err)
+	}
+
+	maxAgeCutoff := time.Now().Add(-maxAge).Unix()
+
+	// Select memories that pass BOTH gates.
+	//
+	// The settling predicate lives in SQL so the LIMIT selects genuinely
+	// eligible rows rather than paging over ineligible ones.
+	//
+	// The LEFT JOIN + IS NOT NULL check is the "no baseline" rule: a
+	// memory the scheduler has never observed has UNKNOWN residency, and
+	// unknown must not read as settled. This also covers memories created
+	// since the last scheduler tick and every pre-rollout memory.
+	//
+	// A negative difference (baseline ahead of the counter, which the
+	// accrual guard prevents) simply fails `>= settleSeconds`, so it can
+	// never manufacture eligibility.
 	rows, err := a.DB().QueryContext(ctx, `
-		SELECT id, content
-		FROM memories
-		WHERE deleted_at IS NULL
-		  AND updated_at IS NOT NULL
-		  AND updated_at < ?
+		SELECT m.id, m.content
+		FROM memories m
+		LEFT JOIN memory_settling_baselines b ON b.memory_id = m.id
+		WHERE m.deleted_at IS NULL
+		  AND m.updated_at IS NOT NULL
+		  AND m.updated_at < ?
 		  -- symmetry with MemoryStore.AutoPrunePolicy (memory.go:1400)
-		  AND is_long_term = 0
+		  AND m.is_long_term = 0
 		  -- shield persistent fixtures by tag. Use instr() (substring search) instead of
 		  -- LIKE '%"seed"%' — double-quoted seed markers in a LIKE pattern collide with
 		  -- SQLite's identifier-quoting rules and break the parser.
 		  -- COALESCE because instr(NULL, ...) returns NULL, and NULL = 0 is FALSE.
-		  AND COALESCE(instr(tags, '"seed"'), 0) = 0
-		  AND COALESCE(instr(tags, '"alpha-fixture"'), 0) = 0
-		  -- settling period anchored to current cycle start (see StaleMemoryHunt docstring).
-		  -- COALESCE handles memories that pre-date the created_at column or have NULL set.
-		  AND COALESCE(created_at, updated_at) < ?
-		ORDER BY updated_at ASC
+		  AND COALESCE(instr(m.tags, '"seed"'), 0) = 0
+		  AND COALESCE(instr(m.tags, '"alpha-fixture"'), 0) = 0
+		  -- GATE 2: cumulative ACTIVE residency since admission.
+		  -- Boundary is INCLUSIVE: exactly SettlingPeriod is eligible.
+		  AND b.memory_id IS NOT NULL
+		  AND (? - b.baseline_active_seconds) >= ?
+		ORDER BY m.updated_at ASC
 		LIMIT 20
-	`, cutoff, settleCutoff)
+	`, maxAgeCutoff, currentActive, settleSeconds)
 	if err != nil {
 		return nil, fmt.Errorf("query stale: %w", err)
 	}
