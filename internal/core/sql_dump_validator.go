@@ -60,23 +60,29 @@
 //                per-statement errors and gives a clear failure point.
 //
 // Architectural Decisions (intentional trade-offs, not gaps):
-//   * H-4 concurrent-write `flock` guard implemented (2026-10-05).
+//   * H-4 concurrent-write `flock` guard implemented (2026-10-05;
+//     corrective revision 2026-10-05 against the §1 contract gap).
 //     handleRestoreDB (cmd/mpm/handlers_backup.go) acquires an
 //     exclusive flock on `<dbPath>.lock` AFTER validation succeeds
-//     and BEFORE the destructive window, and holds it until
-//     `.pre-restore` is removed. The empirical reproducer
-//     (internal/core/restore_db_concurrency_repro_test.go, §4)
-//     pinned the pre-fix race in five scenarios (silent loss in A/B/E,
-//     data contamination in C, benign post-rename open in D). The
-//     same lock file is also probed by the shred-database preflight,
-//     so a shred-database and a restore-db can never run
-//     concurrently. Crash safety is kernel-cleared via syscall.Flock.
-//     The known limitation: the lock is NOT acquired by other
-//     DatabaseManager users (CLI handlers, scheduler, MCP), so a
-//     concurrent `mpm capture` is still racy. The restore-db error
-//     message and the help text both tell the operator to stop the
-//     live MPM daemon before running restore-db. Extending the lock
-//     protocol to all DatabaseManager users is a future tranche.
+//     and BEFORE the destructive window, and HOLDS it through the
+//     entire destructive window (the kernel releases on FD close /
+//     process death). The empirical reproducer
+//     (internal/core/restore_db_concurrency_repro_test.go, §4) pinned
+//     the pre-fix race in five scenarios (silent loss in A/B/E, data
+//     contamination in C, benign post-rename open in D). The same
+//     lock file is also held by shred-database's preflight
+//     (acquire-and-hold, not probe-and-release) and by every
+//     DatabaseManager lifetime via LOCK_SH
+//     (internal/core/db.go:NewDatabaseManager +
+//     internal/core/maintenance_lock.go). The protocol is therefore
+//     a shared/exclusive lease: a destructive warning blocks iff any
+//     active DatabaseManager holds LOCK_SH, and every active
+//     DatabaseManager constructor refuses if a destructive warning
+//     holds LOCK_EX. The restore-db error message and the help text
+//     tell the operator to stop the live MPM daemon and any
+//     concurrent `mpm` invocation before retrying — this matches the
+//     actual protection surface, not a residual footgun. See
+//     internal/core/maintenance_lock.go for the full protocol.
 //   * Reject-not-sanitize chosen for fail-closed posture. Sanitization
 //     is where most SQLi bypasses live; deterministic rejection is safer.
 //   * Canonical schema (not live schema) as allow-list. Live schema
@@ -109,7 +115,7 @@ import (
 // comment-based bypasses (`-- ATTACH` inside a comment should not
 // trigger rejection of a valid INSERT that follows) and respects
 // string-literal boundaries to avoid false positives on semicolons
-// inside string values. It also handles the SQL-standard `''`
+// inside string values. It also handles the SQL-standard `”`
 // escape for embedded single quotes.
 //
 // On any failure, the validator fails CLOSED: it returns an error
@@ -128,10 +134,10 @@ type DumpValidator struct {
 // dump must reference a table in this list OR RuntimeCanonicalSchema.
 //
 // To regenerate after a schema change:
-//   1. Add the new table to internal/core/db.go (CREATE TABLE IF NOT EXISTS ...)
-//   2. Add it to CanonicalMPMSchema below
-//   3. Run `go test -run TestCanonicalSchemaSync ./internal/core/`
-//      to verify the static guard passes
+//  1. Add the new table to internal/core/db.go (CREATE TABLE IF NOT EXISTS ...)
+//  2. Add it to CanonicalMPMSchema below
+//  3. Run `go test -run TestCanonicalSchemaSync ./internal/core/`
+//     to verify the static guard passes
 var CanonicalMPMSchema = []string{
 	"admission_log",
 	"artifact_provenance",
@@ -448,7 +454,7 @@ func (v *DumpValidator) validateInsert(fields []string) error {
 // extractTableName extracts the bare table name from a token that may
 // include a column list (e.g. `memories(weight)`) and/or be wrapped in
 // any of SQLite's accepted quoting styles: double quotes `"name"`, single
-// quotes `'name'`, square brackets `[name]`, or backticks `` `name` ``
+// quotes `'name'`, square brackets `[name]`, or backticks “ `name` “
 // (the last is non-standard but tolerated by `sqlite3 .dump` for some
 // shadow-table outputs). The token may also be glued to a column list
 // without whitespace (e.g. `'name'(col)`) since `strings.Fields` does
@@ -563,7 +569,7 @@ func (v *DumpValidator) validatePragma(fields []string) error {
 // The pre-fix version was string-literal blind: it treated `--` anywhere as
 // comment-start. That broke any SQL string containing a `--` (e.g. a lesson
 // prose value like `'use cmd --flag'`) because the stripper would consume
-// the rest of the line — including any `''` escape sequences and quote
+// the rest of the line — including any `”` escape sequences and quote
 // toggles that splitSQLStatements relies on to keep string-literal state
 // in sync. The downstream parser would then misclassify later `;` as a
 // statement boundary and trip on the orphan fragment (e.g. `do PATH ...`).
@@ -633,7 +639,7 @@ func stripSQLComments(s string) string {
 
 // splitSQLStatements splits SQL content into statements by semicolons,
 // respecting single-quoted and double-quoted string literal boundaries.
-// Handles the SQL-standard `''` escape for embedded single quotes.
+// Handles the SQL-standard `”` escape for embedded single quotes.
 //
 // Statement awareness for CREATE TRIGGER: the splitter walks the
 // content linearly. When it sees `CREATE TRIGGER` at the start of a
@@ -823,4 +829,3 @@ func findTriggerBodyEnd(content string, start int) int {
 	}
 	return -1
 }
-

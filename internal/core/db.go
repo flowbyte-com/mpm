@@ -263,6 +263,17 @@ type DatabaseManager struct {
 	dbPathRaw   string       // raw path passed to NewDatabaseManager (symlinks un-resolved)
 	sharedStore *MemoryStore // reused for self-maintenance; nil until first access
 
+	// H-4 shared maintenance lease. lockFD holds LOCK_SH on lockPath
+	// for the lifetime of this DatabaseManager; Close() releases it.
+	// Nil for in-memory / non-workspace DMs (NewDatabaseManagerForDB
+	// test fixtures, attached shared DBs that don't own a workspace).
+	// Destructive operations (restore-db, shred database) acquire
+	// LOCK_EX|LOCK_NB on the same inode and refuse (EWOULDBLOCK)
+	// while this lease is held by ANY process. See
+	// maintenance_lock.go for the protocol contract.
+	lockPath string
+	lockFD   *os.File
+
 	watchdogPath string     // path to watchdog.jsonl for query observability
 	watchdogMu   sync.Mutex // serializes watchdog log writes
 
@@ -1063,8 +1074,35 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	}
 
 	dbPath := filepath.Join(dbDir, dbFileName)
+
+	// H-4 §6: acquire LOCK_SH on the maintenance lock BEFORE opening
+	// the SQLite handle. While held, no destructive operation in any
+	// process (restore-db, shred database) can acquire LOCK_EX|LOCK_NB
+	// on the same inode — they refuse before any filesystem
+	// mutation. In-memory / non-workspace DSNs (which the constructor
+	// explicitly rejects at the top of this function) skip lease
+	// acquisition.
+	//
+	// The lock identity is derived from mpmDir via MaintenanceLockPath
+	// — the SINGLE source of truth for the canonical lock file path
+	// (EvalSymlinks resolution + MPM_DB_LOCK test backstop). Hand-
+	// constructing "<dbPath>.lock" here would diverge from the canonical
+	// identity if MaintenanceLockPath ever changes its scheme.
+	lockPath := MaintenanceLockPath(mpmDir)
+	if override := os.Getenv("MPM_DB_LOCK"); override != "" {
+		// MPM_DB_LOCK is a hermetic-test override (mirrors
+		// MPM_CASCADE_LOCK). Production identity always comes from
+		// the resolved workspace root.
+		lockPath = override
+	}
+	lockFD, lerr := AcquireSharedMaintenanceLockAt(lockPath)
+	if lerr != nil {
+		return nil, fmt.Errorf("acquire maintenance lease on %s: %w", lockPath, lerr)
+	}
+
 	db, err := sql.Open("sqlite3", sqliteWriteDSN(dbPath))
 	if err != nil {
+		_ = lockFD.Close()
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 	// NOTE: SetMaxOpenConns(1) is INTENTIONALLY NOT called here.
@@ -1108,6 +1146,8 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	manager := &DatabaseManager{
 		db:           db,
 		dbPath:       dbPath,
+		lockPath:     lockPath,
+		lockFD:       lockFD,
 		watchdogPath: filepath.Join(filepath.Dir(dbPath), "watchdog.jsonl"),
 		// Both auxiliary logs live beside the database they describe.
 		// ChallengeMemoryAsync writes mirror.jsonl, so the manager must
@@ -1130,6 +1170,7 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 
 	if err := manager.initUnifiedSchema(); err != nil {
 		db.Close()
+		_ = lockFD.Close()
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
@@ -1137,6 +1178,7 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	// with the constitutional directives present (see the helper doc).
 	if err := manager.seedBaselineDirectives(); err != nil {
 		db.Close()
+		_ = lockFD.Close()
 		return nil, fmt.Errorf("seed baseline directives: %w", err)
 	}
 
@@ -1150,6 +1192,7 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	// overwritten.
 	if _, err := manager.seedBaselineScheduledTasks(); err != nil {
 		db.Close()
+		_ = lockFD.Close()
 		return nil, fmt.Errorf("seed baseline scheduled tasks: %w", err)
 	}
 
@@ -3345,10 +3388,28 @@ func (dm *DatabaseManager) Close() error {
 		slog.Warn("DatabaseManager.Close: mirror writers did not drain within 2s; proceeding")
 	}
 
+	// Close order matters: the *sql.DB connection first (no new
+	// operations can be started against a closed handle), then the
+	// maintenance lease FD. Releasing the lease BEFORE the *sql.DB
+	// would expose a window where another process could acquire
+	// LOCK_EX and rename the underlying file out from under a still-
+	// open connection. Releasing the *sql.DB first means we still
+	// hold LOCK_SH while the *sql.DB is being torn down; a concurrent
+	// LOCK_EX attempt fails (EWOULDBLOCK), which is the correct
+	// observable behaviour for an in-flight shutdown.
+	var dbErr error
 	if dm.db != nil {
-		return dm.db.Close()
+		dbErr = dm.db.Close()
 	}
-	return nil
+	if dm.lockFD != nil {
+		// Best-effort: the kernel auto-releases on FD close / process
+		// death, so a Close error here cannot actually leak the lock.
+		// Surface it for parity with the *sql.DB error path.
+		if lerr := dm.lockFD.Close(); lerr != nil && dbErr == nil {
+			dbErr = lerr
+		}
+	}
+	return dbErr
 }
 
 // NewCascadeMaterializer constructs a CascadeMaterializer bound to this
