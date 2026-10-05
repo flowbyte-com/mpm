@@ -33,8 +33,8 @@ import (
 
 	"github.com/flowbyte-com/mpm-core/config"
 
-	"github.com/flowbyte-com/mpm/internal/critic"
 	"github.com/flowbyte-com/mpm-core/mpmcli"
+	"github.com/flowbyte-com/mpm/internal/critic"
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
 
@@ -103,7 +103,7 @@ func main() {
 
 	// Optionally run the telemetry HighTokenNoArtifactHunt in the same cycle.
 	if *telemetryHunt {
-		if err := runTelemetryHunt(ctx, logger, projectRoot); err != nil {
+		if err := runTelemetryHunt(ctx, logger, projectRoot, a.Cycle()); err != nil {
 			logger.Error("telemetry hunt failed", "err", err)
 			os.Exit(1)
 		}
@@ -117,7 +117,7 @@ func main() {
 // within the same audit cycle as the critic hunts. Findings are emitted as
 // mpm_lessons (type=observation) via mpm call, consistent with how the
 // critic emits its own findings.
-func runTelemetryHunt(ctx context.Context, log *slog.Logger, projectRoot string) error {
+func runTelemetryHunt(ctx context.Context, log *slog.Logger, projectRoot string, cycle int) error {
 	telemetryDB := filepath.Join(projectRoot, "telemetry.db")
 	store, err := telemetry.Open(telemetryDB)
 	if err != nil {
@@ -166,8 +166,8 @@ func runTelemetryHunt(ctx context.Context, log *slog.Logger, projectRoot string)
 
 	sevenDaysAgo := telemetry.HuntConfig{
 		HighTokenThreshold: 100000,
-		MinInvocations:    1,
-		Since:             time.Now().Add(-7 * 24 * time.Hour).Unix(), // 7-day lookback
+		MinInvocations:     1,
+		Since:              time.Now().Add(-7 * 24 * time.Hour).Unix(), // 7-day lookback
 	}
 
 	findings, err := telemetry.Hunt(ctx, store, sevenDaysAgo, countFn)
@@ -175,7 +175,13 @@ func runTelemetryHunt(ctx context.Context, log *slog.Logger, projectRoot string)
 		return fmt.Errorf("telemetry Hunt: %w", err)
 	}
 
-	cycleTag := fmt.Sprintf("critic_cycle_%d", 0) // cycle not tracked here; use wall-clock tag
+	// The telemetry hunt runs in the same process immediately after the
+	// critic hunts, so it genuinely belongs to the cycle that was just
+	// claimed from durable state. Tagging it with that cycle makes the
+	// telemetry findings correlatable with the critic's own cycle_N
+	// tags. It is NOT wall-clock derived and never was - the previous
+	// hardcoded 0 made every telemetry lesson share one bogus tag.
+	cycleTag := fmt.Sprintf("critic_cycle_%d", cycle)
 	for _, f := range findings {
 		payload := telemetry.FindingLessonPayload(f, cycleTag)
 		if err := lessonFn(ctx, payload); err != nil {

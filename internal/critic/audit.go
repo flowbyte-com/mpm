@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -114,6 +115,116 @@ type Audit struct {
 	cli        CLIRunner
 }
 
+// criticCycleKey is the system_config key owning the durable Critic
+// cycle. mpm-critic runs as a one-shot process per scheduled audit
+// (see CriticAuditHandler), so an in-memory counter on Audit restarts
+// at zero on every invocation and the every-fifth-cycle Poison Pill
+// can never fire. The counter therefore lives in system_config, which
+// already exists as MPM's canonical bounded key/value state surface.
+const criticCycleKey = "critic_cycle"
+
+// ensureCycleStateTable creates the system_config table if absent.
+//
+// Production always initializes this through DatabaseManager, so this
+// is normally a no-op. It exists so the Critic's durable state does
+// not depend on which migration path opened the database, and so a
+// critic pointed at a bare SQLite file behaves identically. The DDL is
+// byte-identical to the canonical definition in internal/core/schema.go
+// so the two cannot drift in shape.
+const ensureCycleStateTable = `
+CREATE TABLE IF NOT EXISTS system_config (
+	key TEXT PRIMARY KEY,
+	raw_json TEXT NOT NULL,
+	content_hash TEXT NOT NULL,
+	updated_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+	config_snapshot JSON
+)`
+
+// claimDurableCycle atomically advances the Critic cycle and returns the
+// value this caller owns.
+//
+// CRASH SEMANTICS: a cycle counts a CLAIMED AUDIT ATTEMPT, not a
+// successfully completed audit. The claim happens at the top of Run,
+// before any hunt executes, so a process that crashes mid-audit has
+// still consumed its cycle number. This is deliberate:
+//
+//   - uniqueness stays trivially atomic — one claim, one owner;
+//   - a crash cannot replay the every-fifth-cycle Poison Pill on
+//     retry, which would double-inject a manufactured counter-theory.
+//
+// The cost is that a crash burns a cycle, so a persistently crashing
+// critic can skip a Poison Pill boundary. That is the safer failure:
+// a skipped cycle is a missed injection, whereas a replayed one
+// re-injects a counter-theory that must then be arbitrated.
+//
+// ATOMICITY: a single INSERT ... ON CONFLICT DO UPDATE ... RETURNING
+// statement. SQLite executes one statement as one implicit transaction,
+// so two concurrent callers serialize on the write lock and observe
+// each other's committed value. They claim N and N+1, never N and N.
+// This does not rely on the scheduler's singleton enforcement, which
+// does not apply because mpm-critic is also a standalone binary that an
+// operator can launch by hand.
+//
+// MALFORMED STATE: the DO UPDATE carries a WHERE guard requiring
+// $.cycle to be a JSON integer that is non-negative. If the stored
+// state is corrupt or missing that field, the guard is false, no row
+// is written, and RETURNING yields no row — the claim fails closed
+// rather than silently resetting the counter and re-issuing cycle
+// numbers that may already have driven a Poison Pill.
+//
+// Fail-closed matrix for the stored $.cycle value:
+//
+//	missing / JSON null   -> no claim, run errors   (json_type NULL)
+//	string ("5")          -> no claim, run errors   (json_type 'text')
+//	real (5.5)            -> no claim, run errors   (json_type 'real')
+//	negative (-1)         -> no claim, run errors   (guard rejects < 0)
+//
+// The guard is part of the statement rather than a post-read check so
+// a rejected claim LEAVES THE ROW UNTOUCHED. A post-hoc check would
+// still have let a negative value increment (-1 -> 0) before being
+// rejected, silently repairing corrupt state as a side effect of
+// trying to detect it.
+//
+// Stored cycle 0 IS valid and is treated as bootstrap: the first claim
+// over it yields 1. That is the natural pre-first-cycle value and has
+// no legacy producer — pre-tranche the counter was in-memory only, so
+// no database ever persisted a 0 — but accepting it keeps a
+// hand-seeded or partially-initialized row from wedging the Critic.
+const claimDurableCycleStmt = `
+INSERT INTO system_config (key, raw_json, content_hash)
+VALUES ('` + criticCycleKey + `', '{"cycle":1}', '')
+ON CONFLICT(key) DO UPDATE SET
+	raw_json = json_set(system_config.raw_json, '$.cycle',
+	                    json_extract(system_config.raw_json, '$.cycle') + 1),
+	updated_at = CAST(strftime('%s','now') AS INTEGER)
+WHERE json_type(system_config.raw_json, '$.cycle') = 'integer'
+  AND json_extract(system_config.raw_json, '$.cycle') >= 0
+RETURNING json_extract(raw_json, '$.cycle')`
+
+// claimDurableCycle advances and returns the durable cycle.
+func (a *Audit) claimDurableCycle(ctx context.Context) (int, error) {
+	if _, err := a.db.ExecContext(ctx, ensureCycleStateTable); err != nil {
+		return 0, fmt.Errorf("critic: ensure state table: %w", err)
+	}
+
+	var cycle int
+	err := a.db.QueryRowContext(ctx, claimDurableCycleStmt).Scan(&cycle)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf(
+			"critic: durable cycle state under key %q is malformed (expected {\"cycle\":<integer>}); "+
+				"refusing to reset the counter because that could silently resurrect cycle numbers "+
+				"that already drove a poison pill. Inspect or repair the row manually",
+			criticCycleKey)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("critic: claim durable cycle: %w", err)
+	}
+	if cycle <= 0 {
+		return 0, fmt.Errorf("critic: durable cycle claim returned non-positive cycle %d", cycle)
+	}
+	return cycle, nil
+}
+
 // New returns an Audit bound to the given *sql.DB. The caller owns the
 // database lifecycle (typically a *DatabaseManager from mpm-core) and
 // is responsible for closing it.
@@ -123,6 +234,11 @@ type Audit struct {
 // DatabaseManager remains the singleton owner of *sql.DB. This is the
 // F-007 fix — critic participates in DatabaseManager's connection
 // management rather than bypassing it.
+//
+// cycle is intentionally left at zero here. The real cycle number is
+// claimed from durable database state at the start of each Run(), so
+// constructing an Audit does not consume a cycle and a process that
+// starts but never runs one does not skip a Poison Pill boundary.
 func New(db *sql.DB, log *slog.Logger) (*Audit, error) {
 	if db == nil {
 		return nil, fmt.Errorf("db is required (caller must construct via DatabaseManager)")
@@ -152,9 +268,22 @@ func (a *Audit) Close() error {
 
 // Run executes one full audit cycle. Each hunt runs sequentially;
 // findings are batched and emitted via the CLI in priority order.
-// The cycle counter is incremented at the end.
+//
+// The cycle number is CLAIMED from durable state at the start of the
+// run, not incremented in memory. mpm-critic is a one-shot process per
+// scheduled audit, so an in-memory counter would restart at 1 on every
+// invocation and the every-fifth-cycle Poison Pill could never fire in
+// production. See claimDurableCycle for the atomicity and crash
+// semantics.
+//
+// Every hunt in a given run observes the same claimed value via
+// Cycle(); hunts never re-read or advance durable state themselves.
 func (a *Audit) Run(ctx context.Context) error {
-	a.cycle++
+	cycle, err := a.claimDurableCycle(ctx)
+	if err != nil {
+		return err
+	}
+	a.cycle = cycle
 	a.cycleStart = time.Now()
 	a.log.Info("critic audit cycle starting", "cycle", a.cycle, "cycle_start", a.cycleStart)
 
@@ -204,12 +333,36 @@ func (a *Audit) Run(ctx context.Context) error {
 }
 
 // DB returns the audit's database handle. Hunts use this for direct
-// queries against MPM tables. The handle should not be used to write —
-// all writes go through cli.Call.
+// reads against MPM tables.
+//
+// WRITE POLICY — two distinct classes, deliberately not conflated:
+//
+//  1. Findings / epistemic content (memories, theories, lessons) go
+//     through cli.Call. The Critic is decoupled from mpm-core's
+//     internal API surface, and `mpm call` is the supported write
+//     path for domain content.
+//
+//  2. Bounded internal Critic CONTROL STATE — currently only the
+//     `critic_cycle` record claimed by claimDurableCycle — is written
+//     directly with transactional SQL on this handle.
+//
+// Class 2 is narrow and intentional. The cycle counter must be
+// readable and advanceable by the one-shot mpm-critic process itself,
+// before and independently of any finding emission; routing it through
+// the CLI would make cycle identity depend on the CLI being installed,
+// on PATH, and on a live daemon, which is exactly the coupling the
+// counter exists to escape. It is a single bounded row owned solely by
+// the Critic, not domain content, and it is claimed atomically so
+// concurrent processes cannot duplicate a cycle.
+//
+// Any NEW write to this handle must justify itself against this split:
+// domain content does not belong here.
 func (a *Audit) DB() *sql.DB { return a.db }
 
-// Cycle returns the current cycle number. Useful in test assertions and
-// for hunts that need to be cycle-aware.
+// Cycle returns the durable cycle number claimed by the current run,
+// or 0 before the first Run(). It is stable for the whole run: every
+// hunt observes the same value, and no hunt advances it. Useful in
+// test assertions and for hunts that need to be cycle-aware.
 func (a *Audit) Cycle() int { return a.cycle }
 
 // CycleStart returns the wall-clock at which the current (or most recent)
