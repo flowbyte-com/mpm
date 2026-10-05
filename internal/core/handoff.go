@@ -331,6 +331,92 @@ func (dm *DatabaseManager) GetLatestHandoff() (*Handoff, error) {
 	return scanHandoff(row)
 }
 
+// Identity namespaces on session_handoffs. The three columns are
+// separate domains and are never interchangeable: mpm_session_id is
+// MPM-owned, framework_session_id is host-owned, and session_id is the
+// legacy caller-supplied correlation value (nullable, UNIQUE, and
+// possibly absent on rows written by hosts that boot without a native
+// session id).
+const (
+	handoffColumnMPMSession    = "mpm_session_id"
+	handoffColumnLegacySession = "session_id"
+)
+
+// getPreviousHandoffForIdentity returns the most recent ENDED handoff
+// whose `column` holds a non-empty identity DISTINCT from
+// currentIdentity. Returns sql.ErrNoRows when no such row exists.
+//
+// Semantics this encodes:
+//
+//   - "previous" means the most recent ended lifecycle in this identity
+//     namespace that is not the current one — not merely the newest
+//     row. A workspace that has not yet rotated past the newest
+//     handoff's lifecycle has no previous session, and saying so is
+//     more useful than pointing the agent at its own closeout.
+//   - The caller supplies the column explicitly so a lookup can never
+//     cross namespaces by accident. The MPM-owned and legacy lookups
+//     are separate exported functions for the same reason.
+//   - ended_at DESC, rowid DESC — the same deterministic pair as every
+//     other handoff query. Several closeouts may share one
+//     mpm_session_id (the column is not unique); ordering by ended_at
+//     first makes the returned row the LATEST closeout within the
+//     prior lifecycle, so the id and the ended_at always describe the
+//     same session rather than two.
+//   - No read_at predicate. Whether a handoff was already delivered is
+//     delivery state, not identity state; depending on it here would
+//     erase the previous session's identity on the very wake that
+//     consumes its handoff.
+//   - Pure projection. No writes, no identity allocation, no rotation.
+//
+// An empty currentIdentity returns sql.ErrNoRows: with nothing to be
+// distinct from, there is no previous session to claim, and inventing
+// continuity from an unrelated row is worse than an honest empty.
+func (dm *DatabaseManager) getPreviousHandoffForIdentity(column, currentIdentity string) (*Handoff, error) {
+	if dm == nil || dm.db == nil {
+		return nil, fmt.Errorf("getPreviousHandoffForIdentity: db not initialized")
+	}
+	if currentIdentity == "" {
+		return nil, sql.ErrNoRows
+	}
+	// column is never caller-supplied — it comes from the two
+	// package-level constants above, so this interpolation cannot carry
+	// caller data into the SQL text.
+	row := dm.db.QueryRow(`
+		SELECT id, session_id, mpm_session_id, framework_session_id, ended_at, ended_state, summary, commitments, open_questions, read_at, read_by, created_at
+		FROM session_handoffs
+		WHERE `+column+` IS NOT NULL AND `+column+` != ''
+		  AND `+column+` != ?
+		ORDER BY ended_at DESC, rowid DESC
+		LIMIT 1`, currentIdentity)
+	return scanHandoff(row)
+}
+
+// GetPreviousMPMSessionHandoff returns the most recent ended handoff
+// belonging to an MPM-owned session identity other than
+// currentMPMSessionID. This is the authoritative source for wake
+// context's SessionPreviousID / SessionPreviousEndedAt pair.
+//
+// The two returned values must be read from this single row: taking an
+// id from one handoff and a timestamp from another would describe a
+// session that never existed.
+//
+// See getPreviousHandoffForIdentity for the full selection contract.
+func (dm *DatabaseManager) GetPreviousMPMSessionHandoff(currentMPMSessionID string) (*Handoff, error) {
+	return dm.getPreviousHandoffForIdentity(handoffColumnMPMSession, currentMPMSessionID)
+}
+
+// GetPreviousLegacySessionHandoff returns the most recent ended handoff
+// belonging to a legacy session_id other than currentSessionID. Used
+// only in legacy mode, where the current session identity itself came
+// from the dormant sessions table rather than from active.json — the
+// namespaces must match, so an MPM-owned current identity is never
+// resolved through this path.
+//
+// See getPreviousHandoffForIdentity for the full selection contract.
+func (dm *DatabaseManager) GetPreviousLegacySessionHandoff(currentSessionID string) (*Handoff, error) {
+	return dm.getPreviousHandoffForIdentity(handoffColumnLegacySession, currentSessionID)
+}
+
 // GetHandoffByID returns a specific handoff. Useful for re-reading or
 // historical context.
 func (dm *DatabaseManager) GetHandoffByID(id string) (*Handoff, error) {

@@ -58,13 +58,20 @@ type WakeContextData struct {
 	// the split fields.
 	//
 	// SessionCurrentID — the session that is currently waking.
-	// SessionPreviousID — the session that last wrote state (often the
-	//   one whose handoff we just marked read). Empty when no prior
-	//   session exists or when GetPreviousSession hasn't been wired yet
-	//   (filled in by a follow-up; today the field stays "").
+	// SessionPreviousID — the most recent ENDED session, expressed in
+	//   the SAME identity namespace as SessionCurrentID and distinct
+	//   from it. When SessionCurrentID is an MPM-owned id, this is an
+	//   MPM-owned id drawn from session_handoffs.mpm_session_id; when
+	//   the current identity is legacy (resolved from the dormant
+	//   sessions table, with no active MPM identity), this is a legacy
+	//   session_id. The two are never mixed. Empty when no trustworthy
+	//   prior session exists.
 	// SessionStartedAt — when SessionCurrentID began (unix epoch).
-	// SessionPreviousEndedAt — when SessionPreviousID ended (unix epoch,
-	//   0 when no previous).
+	// SessionPreviousEndedAt — when SessionPreviousID ended (unix
+	//   epoch, 0 when no previous). Always the ended_at of the SAME
+	//   handoff row that supplied SessionPreviousID; it is never
+	//   inferred from another session's start or from the sessions
+	//   table's created_at, which is a start timestamp.
 	SessionID         string `json:"session_id"`
 	SessionCurrentID  string `json:"session_current_id"`
 	SessionPreviousID string `json:"session_previous_id"`
@@ -458,6 +465,75 @@ func (dm *DatabaseManager) GatherWakeContextReadOnly() (WakeContextData, error) 
 	return dm.gatherWakeContext(false)
 }
 
+// applyPreviousSessionIdentity projects the previous-session pair onto
+// the gathered wake context.
+//
+// NAMESPACE RULE: SessionPreviousID always lives in the same identity
+// namespace as SessionCurrentID, because "the session before me" is
+// only meaningful relative to an identity scheme.
+//
+//	MPM-owned current id  → previous comes from handoff.mpm_session_id
+//	legacy current id     → previous comes from handoff.session_id
+//
+// The rule is chosen by which column the CURRENT identity came from,
+// not by whichever handoff column happens to be populated: a legacy
+// row that also carries an mpm_session_id cannot supply the previous
+// identity for an MPM-owned current session, and vice versa. A
+// framework-owned id is never a candidate — FrameworkSessionID is
+// host-owned, spans one host process, and has no continuity story
+// against an MPM lifecycle.
+//
+// "Previous" is the most recent ENDED session in that namespace which
+// is DISTINCT from the current one. The newest handoff is frequently
+// the current lifecycle's own closeout (an operator can close out
+// without rotating), and naming that "previous" would tell an agent it
+// is its own ancestor. When several closeouts belong to one prior
+// lifecycle — the mpm_session_id column is not unique — they are one
+// previous session, and the reported ended_at is that lifecycle's
+// latest closeout.
+//
+// Failure is quiet and leaves both fields at their zero values. An
+// unreadable substrate, an absent handoff table, or simply no prior
+// session all produce SessionPreviousID = "" and
+// SessionPreviousEndedAt = 0, which is the documented "no previous"
+// state. Inventing a timestamp from the next session's start or from
+// sessions.created_at would be worse than admitting we do not know:
+// both are start timestamps, and an agent that reads one as an end
+// timestamp computes a session duration that never existed.
+func applyPreviousSessionIdentity(data *WakeContextData, dm *DatabaseManager) {
+	if data == nil || data.SessionCurrentID == "" {
+		return
+	}
+
+	var prev *Handoff
+	var err error
+	if data.MPMSessionID != "" {
+		prev, err = dm.GetPreviousMPMSessionHandoff(data.SessionCurrentID)
+	} else {
+		prev, err = dm.GetPreviousLegacySessionHandoff(data.SessionCurrentID)
+	}
+	if err != nil {
+		// sql.ErrNoRows is the ordinary "no previous session" answer.
+		// Anything else is a substrate problem worth surfacing, but
+		// not worth failing a wake over: orientation is bootstrap data
+		// and the rest of the context is still useful without it.
+		if !errors.Is(err, sql.ErrNoRows) {
+			dm.LogAudit(AuditWarn, "wake_context", "previous session lookup failed: "+err.Error(), "", AuditContext{})
+		}
+		return
+	}
+
+	switch {
+	case data.MPMSessionID != "":
+		data.SessionPreviousID = prev.MPMSessionID
+	default:
+		data.SessionPreviousID = prev.SessionID
+	}
+	// Both values come from prev — the one row — so the id and the
+	// timestamp can never describe different sessions.
+	data.SessionPreviousEndedAt = prev.EndedAt
+}
+
 func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextData, error) {
 	var data WakeContextData
 
@@ -481,10 +557,6 @@ func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextD
 		if startedAt, ok := session["started_at"].(int64); ok {
 			data.SessionStartedAt = startedAt
 		}
-		// SessionPreviousID + SessionPreviousEndedAt remain zero values
-		// until a future iteration wires GetPreviousSession(); until
-		// then the agent sees "" / 0 and the absence is captured in
-		// the v4 wire format. Future work, not future regression.
 	}
 
 	// Session identity (stage 2C): the canonical MPM-owned session ID
@@ -504,6 +576,17 @@ func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextD
 		data.SessionCurrentID = data.MPMSessionID
 		data.SessionStartedAt = CurrentMPMSessionIDCreatedAt()
 	}
+
+	// Previous-session identity. The lookup is a pure projection over
+	// session_handoffs and is independent of the handoff read marker
+	// below — deriving it from the unread handoff would make the
+	// answer change the moment this same gather consumes that handoff.
+	//
+	// The namespace follows the CURRENT identity (see
+	// applyPreviousSessionIdentity): an MPM-owned current id resolves a
+	// previous MPM-owned id, and a legacy current id resolves a legacy
+	// one. FrameworkSessionID is never a candidate.
+	applyPreviousSessionIdentity(&data, dm)
 
 	// Ensures every list field on data is a non-nil empty slice —
 	// see invariant 3 on WakeContextData. Variables like
