@@ -3,9 +3,20 @@
 // Empirical reproducer for the H-4 concurrency hazard described in
 // internal/core/sql_dump_validator.go:
 //
-//     H-4 concurrent-write `flock` guard deferred
+//	H-4 concurrent-write `flock` guard deferred
 //
-// The current restore-db handler (cmd/mpm/handlers_backup.go) renames
+// NOTE ON CURRENT PRODUCTION STATE. The original commit message above
+// records the hazard as unmitigated ("guard deferred"). That is no
+// longer accurate: cmd/mpm/handlers_backup.go now calls
+// scheduler.AcquireLock before the destructive window, so cooperating
+// MPM writers are excluded by a maintenance lease. This file remains
+// the empirical record of the underlying hazard and of the FD/inode
+// semantics the guard relies on; it is not a claim that the guard is
+// missing. Scenarios A/B/C/E still describe destructive sequences that
+// a writer not holding the lease could reach, and Scenario D documents
+// the post-rename open path.
+//
+// The restore-db handler (cmd/mpm/handlers_backup.go) renames
 // `<workspace>/src/db/mpm` to `<workspace>/src/db/mpm.pre-restore`
 // while another MPM writer may still hold an open FD on the same inode.
 // Linux rename(2) does NOT invalidate open FDs to the old inode, so a
@@ -21,6 +32,14 @@
 // (channels only — NO arbitrary sleeps). All tests use t.TempDir() and
 // file-backed SQLite so FD/inode semantics match production.
 //
+// Connection identity: any scenario that requires several statements to
+// execute on ONE SQLite connection across an intervening rename must pin
+// a *sql.Conn and open it before the rename. *sql.DB.Exec does not
+// guarantee the same underlying connection, and sql.Open is lazy, so an
+// unpinned writer acquires its connection at its first Exec — after the
+// rename, on the NEW inode, which silently converts the scenario into a
+// different one. See ScenarioC.
+//
 // Each sub-test reports the actual outcome. The pre-fix failure mode
 // the chosen guard must prevent is the deterministically-reproducible
 // case below.
@@ -31,6 +50,7 @@
 package internal
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -92,17 +112,25 @@ func writerFD(t *testing.T, dbPath string) *sql.DB {
 
 // doRestoreRenameAndReplay performs the exact destructive sequence
 // handleRestoreDB executes after validation completes:
-//   1. Remove <dbPath>-wal, <dbPath>-shm.
-//   2. Rename <dbPath> -> <dbPath>.pre-restore.
-//   3. Open a fresh sql.DB on <dbPath> (creates a new inode).
-//   4. Replay CREATE TABLE + a single INSERT (simulating a restore).
-//   5. (Caller decides when to remove .pre-restore; see
-//      removePreRestore helper for the canonical teardown.)
+//  1. Remove <dbPath>-wal, <dbPath>-shm.
+//  2. Rename <dbPath> -> <dbPath>.pre-restore.
+//  3. Open a fresh sql.DB on <dbPath> (creates a new inode).
+//  4. Replay CREATE TABLE + a single INSERT (simulating a restore).
+//  5. (Caller decides when to remove .pre-restore; see
+//     removePreRestore helper for the canonical teardown.)
+//
+// Step 1 is intentional production behavior, not test corruption:
+// handlers_backup.go removes the WAL/SHM siblings under the T78
+// contract because they may hold writes newer than the dump. Removing
+// them while a writer still has them open is part of the hazard being
+// reproduced, so this helper must keep doing it.
 //
 // preRenameHook is invoked AFTER the rename (step 2) but BEFORE the
 // fresh DB is opened (step 3). This is the deterministic window in
 // which concurrent writer FDs still point to the OLD inode, now
-// named .pre-restore.
+// named .pre-restore. The name is historical and slightly misleading:
+// the hook fires after the rename, not before it. Scenario C uses it
+// to release the writer's COMMIT at exactly that point.
 //
 // preRemoveHook is invoked AFTER the fresh DB has replayed content
 // (step 4) but BEFORE .pre-restore is removed (step 5). This is the
@@ -325,42 +353,133 @@ func TestH4Race_ScenarioB_FDAcrossRename(t *testing.T) {
 }
 
 // ScenarioC: writer BEGINs a transaction, holds it across the rename,
-// and COMMITs AFTER the rename. SQLite honors the FD-inode model:
-// the COMMIT writes to the OLD inode (now named .pre-restore).
-// Restore's later Remove(.pre-restore) silently destroys the COMMIT's
-// effect.
+// and COMMITs AFTER the rename.
 //
-// Deterministic synchronization: same as ScenarioB but with BEGIN
-// IMMEDIATE / INSERT / wait / COMMIT.
+// BARRIER PROTOCOL. The happens-before chain is explicit and enforced
+// by channels, not by timing:
+//
+//	writer                          test
+//	------                          ----
+//	conn pinned + opened (OLD inode)
+//	BEGIN IMMEDIATE
+//	INSERT n=42
+//	txReady <- nil      ------->    <-txReady; fail if err
+//	                                 remove WAL/SHM
+//	                                 rename db -> .pre-restore
+//	                                 preRenameHook: close(renameDone)
+//	<-renameDone       <------
+//	COMMIT
+//	commitResult <- err ------->    <-commitResult
+//	                                 remove .pre-restore
+//	                                 assert canonical state
+//
+// txReady carries the error rather than being a bare close, so a
+// writer that fails to establish its transaction fails the test
+// instead of deadlocking it.
+//
+// WHY THE WRITER CONNECTION IS PINNED AND OPENED FIRST.
+//
+// sql.Open is LAZY - it opens no connection at all (verified:
+// DBStats.OpenConnections == 0 immediately after sql.Open). So a
+// writer built the old way acquires its connection at its first Exec.
+// In the previous version of this test that first Exec happened after
+// the rename, which meant the writer opened the NEW inode at the
+// canonical path instead of holding the OLD inode across the rename.
+// Writer and restore then contended for the SAME file, and the
+// restore's CREATE TABLE lost the lock race and blocked until
+// _busy_timeout expired at ~5.0s. That was the flake.
+//
+// Pinning a *sql.Conn and touching it before the rename makes both
+// properties explicit rather than pool-dependent:
+//   - connection identity: BEGIN / INSERT / COMMIT provably execute on
+//     ONE underlying SQLite connection, instead of three separate
+//     *sql.DB.Exec calls that database/sql is free to satisfy from
+//     three different pooled connections.
+//   - inode identity: the connection is already open on the OLD inode
+//     when the rename occurs, which is the condition this scenario
+//     exists to demonstrate. Note this is the opposite of Scenario D,
+//     where the writer opens AFTER the rename and receives the new
+//     inode.
+//
+// Because the writer holds the old inode and the restore creates a new
+// one, the two never contend for SQLite locks, so no timeout governs
+// this test. The result is deterministic rather than probabilistic.
+//
+// This scenario specifically demonstrates a transaction ALREADY ACTIVE
+// when the rename occurs. It must not be collapsed into "writer starts
+// after rename"; Scenario D covers that case.
 func TestH4Race_ScenarioC_TxAcrossRename(t *testing.T) {
 	workspace, dbPath, _ := freshRaceDB(t)
 	_ = workspace
 
 	writerDB := writerFD(t, dbPath)
 
-	preRenameReady := make(chan struct{})
+	// Pin one *sql.Conn for the whole BEGIN/INSERT/COMMIT sequence.
+	ctx := context.Background()
+	conn, err := writerDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("scenario C: pin writer conn: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// Force the connection open NOW, before the rename, so it holds
+	// the old inode. Without this the open is deferred to the first
+	// Exec and lands on the new inode instead.
+	var one int
+	if err := conn.QueryRowContext(ctx, `SELECT 1`).Scan(&one); err != nil {
+		t.Fatalf("scenario C: pre-open writer conn: %v", err)
+	}
+
+	// txReady carries the writer's establishment error so a failure
+	// fails this test rather than hanging it.
+	txReady := make(chan error, 1)
 	renameDone := make(chan struct{})
 	commitResult := make(chan error, 1)
 
+	// Observed ordering state, asserted below. The final canonical
+	// state alone does NOT distinguish a correctly ordered scenario
+	// from a broken one, because a writer pinned to the old inode
+	// yields the same -999 result whether or not the rename was
+	// properly gated. Without these assertions the test is vacuous:
+	// a mutation that removes the barrier still passes. These flags
+	// make the happens-before relation itself the assertion.
+	var (
+		establishedBeforeRename bool
+		committedAfterRename    bool
+	)
+
 	go func() {
-		<-preRenameReady
-		if _, err := writerDB.Exec(`BEGIN IMMEDIATE`); err != nil {
-			commitResult <- err
+		if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+			txReady <- err
 			return
 		}
-		if _, err := writerDB.Exec(`INSERT INTO race_log VALUES (?, ?)`, 42, time.Now().UnixNano()); err != nil {
-			commitResult <- err
+		if _, err := conn.ExecContext(ctx, `INSERT INTO race_log VALUES (?, ?)`, 42, time.Now().UnixNano()); err != nil {
+			txReady <- err
 			return
 		}
-		// Wait for the rename to complete, then commit.
+		// Only now is the transaction genuinely established.
+		txReady <- nil
 		<-renameDone
-		_, err := writerDB.Exec(`COMMIT`)
-		commitResult <- err
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			commitResult <- err
+			return
+		}
+		committedAfterRename = true
+		commitResult <- nil
 	}()
 
+	// The rename cannot happen until the writer's transaction is
+	// established and its INSERT has succeeded.
+	if err := <-txReady; err != nil {
+		t.Fatalf("scenario C: writer failed to establish transaction before rename: %v", err)
+	}
+	establishedBeforeRename = true
+
 	doRestoreRenameAndReplay(t, dbPath,
+		// preRenameHook runs AFTER os.Rename, so closing renameDone
+		// here guarantees the writer's COMMIT strictly follows the
+		// rename and precedes the fresh open / CREATE TABLE.
 		func() {
-			close(preRenameReady)
 			close(renameDone)
 		},
 		nil,
@@ -374,29 +493,36 @@ func TestH4Race_ScenarioC_TxAcrossRename(t *testing.T) {
 
 	t.Logf("scenario C: writer's COMMIT result=%v; canonical DB has %d rows, sum(n)=%d", commitErr, count, sumN)
 
-	// The COMMIT "succeeded" from SQLite's perspective (no error).
-	// The actual outcome observed empirically is data CONTAMINATION
-	// rather than silent loss: the writer's n=42 row lands in the
-	// canonical DB alongside the restore's -999 row.  Either outcome
-	// is a contract violation.  Pin both shapes (sum == -999 for
-	// silent loss, sum == -957 for contamination) as race evidence.
-	//
-	// Mechanism (best current hypothesis): SQLite's COMMIT path
-	// reopens the file by canonical path; after the rename, the
-	// canonical path points to the restore's NEW inode, so the
-	// COMMIT's WAL flush lands in the new file.  Even if the writer's
-	// user-space FD still points to the old inode, the driver
-	// surfaces the COMMITTED row at the canonical path.
-	if commitErr != nil {
-		t.Logf("scenario C: writer's COMMIT returned %v (writer saw the rename)", commitErr)
+	// ORDERING ASSERTIONS. These are the real subject of this test.
+	if !establishedBeforeRename {
+		t.Errorf("scenario C: writer's transaction was not established before the rename")
 	}
-	switch sumN {
-	case -999:
-		t.Logf("scenario C: race outcome = silent data loss; canonical DB has only the restore's row")
-	case 42 + (-999):
-		t.Logf("scenario C: race outcome = data contamination; canonical DB has restore's row + writer's row")
-	default:
-		t.Errorf("scenario C: race produced unexpected canonical DB state: count=%d sum(n)=%d", count, sumN)
+	if !committedAfterRename {
+		t.Errorf("scenario C: writer's COMMIT did not complete after the rename")
+	}
+
+	// EXPECTED OUTCOME, established empirically from this corrected
+	// ordering rather than assumed.
+	//
+	// The writer committed to the OLD inode, which is now
+	// .pre-restore and has just been unlinked. The canonical path
+	// holds a different inode containing only the restore's -999 row.
+	// So the writer's n=42 is silently destroyed by
+	// Remove(.pre-restore) even though SQLite reported the COMMIT as
+	// successful.
+	//
+	// The previous version of this test also accepted sum == -957
+	// (restore row + writer row, i.e. contamination). That outcome
+	// required the writer's connection to land on the NEW inode,
+	// which is exactly the bug this ordering removes. With the
+	// happens-before relation established above, -957 is no longer
+	// reachable, so it is no longer accepted: an unexpected state
+	// must fail loudly rather than be tolerated.
+	if commitErr != nil {
+		t.Errorf("scenario C: writer's COMMIT returned %v; with the transaction established before the rename it should succeed against the old inode", commitErr)
+	}
+	if sumN != -999 {
+		t.Errorf("scenario C: expected silent writer loss (sum(n)==-999, canonical inode holds only the restore row); got count=%d sum(n)=%d", count, sumN)
 	}
 }
 
