@@ -27,8 +27,9 @@ import (
 // For SQLite sources (OpenClaw DBs, etc.) keep using `mpm ingest --source`.
 // The ingest pipeline remains the engine; migrate is the alias.
 //
-// Underlying implementation lives in internal/core/migrate_md.go. JSON
-// support is queued (TODO: parse_json.go) but the CLI shape is stable.
+// Underlying implementation lives in internal/core/migrate_md.go and
+// internal/core/migrate_json.go.  Both ship ready: --from <file.json> parses
+// JSON, --from <file.md> parses markdown.  The CLI shape is stable.
 
 func handleMigrate(args []string) int {
 	if len(args) < 2 {
@@ -162,6 +163,15 @@ func handleMigrate(args []string) int {
 	fmt.Printf("  Skipped:   %d (already in memories)\n", stats.RowsSkipped)
 	fmt.Printf("  Rejected:  %d\n", stats.RowsRejected)
 
+	// Per-entry rejections: surface the file/record/reason so the operator
+	// can fix the offending rows.  Only printed when there are any.
+	if len(stats.Errors) > 0 {
+		fmt.Println("  Per-entry:")
+		for _, e := range stats.Errors {
+			fmt.Printf("    - %s\n", e)
+		}
+	}
+
 	if dryRun {
 		fmt.Println("\n  Next step: re-run without --dry-run to stage, then use --commit to promote.")
 		return 0
@@ -224,7 +234,12 @@ Usage:
 Flags:
     --from <path>        Source file (markdown or json). Format auto-detected
                          from extension. .md/.markdown → markdown parser.
-                         .json → JSON parser (not yet implemented).
+                         .json → JSON parser (array of objects, or wrapped
+                         {"memories"|"facts"|"items"|"entries":[...]}).
+                         Per-entry content/fact/text/body required;
+                         optional tags (array or comma-string), weight (1-100),
+                         ttl, source_id. Per-entry content capped at 256 KiB;
+                         file capped at 5 MiB.
     --dry-run            Parse + stage but write nothing. Shows counts.
     --commit             Stage then immediately promote pending rows to memories.
                          Skips the review step.
@@ -250,6 +265,15 @@ Examples:
     mpm migrate --from docs/notes.md
     mpm ingest --status
     mpm migrate --commit-batch migrate_notes_md_1773907957
+
+    # JSON: array-of-objects
+    mpm migrate --from lessons.json --commit
+
+    # JSON: wrapped object
+    mpm migrate --from export.json --commit    # accepts {"memories": [...]},
+                                               # {"facts": [...]},
+                                               # {"items": [...]},
+                                               # {"entries": [...]}
 
 Notes:
     - Dedup is via content_hash; facts already in memories are skipped.
