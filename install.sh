@@ -680,8 +680,29 @@ phase_service() {
     # removed from contrib/systemd/ — only one install path exists.
     local service_src="${PROJECT_ROOT}/contrib/systemd/${SERVICE_NAME}.service.user"
 
-    install -m 0644 "$service_src" "$SERVICE_DST"
+    # Rewrite the template's canonical `%h/.mpm` placeholder to the prefix
+    # actually being installed.
+    #
+    # The unit used to be copied verbatim, so a PREFIX override installed a
+    # unit that still pointed at %h/.mpm — binaries at the default location,
+    # data at the overridden one, and two install roots in one service. The
+    # failure is quiet: systemd starts the scheduler happily from the old
+    # prefix while the operator believes the new one is live.
+    #
+    # DATA_ROOT, not PREFIX, is what gets substituted: every %h/.mpm path in
+    # the template is a RUNTIME path (workspace, DB, backups, and the two
+    # subprocess binaries), and DATA_ROOT is the runtime root. With the
+    # defaults they are the same directory, so this is a no-op for the
+    # canonical install.
+    local service_tmp
+    service_tmp="$(mktemp)"
+    sed "s|%h/\.mpm|${DATA_ROOT}|g" "$service_src" > "$service_tmp"
+    install -m 0644 "$service_tmp" "$SERVICE_DST"
+    rm -f "$service_tmp"
     log "  installed $SERVICE_DST"
+    if [ "$DATA_ROOT" != "$HOME/.mpm" ]; then
+        log "  unit paths rewritten for DATA_ROOT=$DATA_ROOT"
+    fi
 
     # User-space service. Two extra concerns vs the legacy system mode:
     #   1. Need loginctl enable-linger so the user service survives

@@ -184,7 +184,11 @@ func runSyntheticDrill(
 			return nil, err
 		}
 		payload, _ := json.Marshal(c.Payload)
-		cmd := exec.CommandContext(ctx, "mpm", "call", c.ToolName,
+		bin, err := resolveMPMBin()
+		if err != nil {
+			return calls, err
+		}
+		cmd := exec.CommandContext(ctx, bin, "call", c.ToolName,
 			"--payload", string(payload),
 		)
 		cmd.Env = append(os.Environ(), "MPM_SESSION_ID="+sessionID)

@@ -101,6 +101,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	core "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/mpmcli"
 )
 
 // Wake is the projected view of a scheduled_wakes row.
@@ -944,7 +945,11 @@ func GCHandler(ctx context.Context, w Wake) error {
 	if a, ok := w.Metadata["aggressive"].(bool); ok && a {
 		args[2] = `{"dry_run":false,"aggressive":true}`
 	}
-	cmd := exec.CommandContext(ctx, "mpm", args...)
+	bin, err := resolveMPMBin()
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mpm call gc_run: %s: %w", strings.TrimSpace(string(out)), err)
@@ -965,7 +970,11 @@ func BroadcastHandler(ctx context.Context, w Wake) error {
 	if target != "" {
 		args = append(args, "--target", target)
 	}
-	cmd := exec.CommandContext(ctx, "mpm", args...)
+	bin, err := resolveMPMBin()
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mpm ops broadcast: %s: %w", strings.TrimSpace(string(out)), err)
@@ -979,16 +988,17 @@ func defaultDBPath() string {
 	if env := os.Getenv("MPM_DB_PATH"); env != "" {
 		return env
 	}
-	// Default to the workspace-relative path mpm-mcp uses.
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "src/db/mpm.db"
-	}
-	candidate := filepath.Join(cwd, "src", "db", "mpm.db")
-	if _, err := os.Stat(candidate); err == nil {
-		return candidate
-	}
-	return "src/db/mpm.db"
+	// Workspace-relative, never cwd-relative.
+	//
+	// This used to probe the current directory for src/db/mpm.db and use it
+	// if it happened to exist — the same ghost-DB shape config.GetWorkspace()
+	// removed after the 2026-07-21 incident (lesson 59fe3f8ff3e1549e). Under
+	// a systemd user unit the working directory is the runtime root, so the
+	// probe usually returned the right answer by luck; run the scheduler by
+	// hand from a source checkout and it resolved to the checkout's DB
+	// instead, so the critic audited a different substrate than the one the
+	// scheduler was running against.
+	return filepath.Join(mpmcli.ResolveWorkspace(), "src", "db", "mpm.db")
 }
 
 // rotateSnapshots keeps the most recent N snapshots in dir and deletes

@@ -43,6 +43,12 @@ Environment=MPM_WORKSPACE=%h/.mpm
 Environment=MPM_DB_PATH=%h/.mpm/src/db/mpm.db
 Environment=MPM_BACKUP_DIR=%h/.mpm/backups/critic-pre
 Environment=MPM_CRITIC_BIN=%h/.mpm/bin/mpm-critic
+# The `mpm` binary this scheduler shells out to for gc_run and broadcast
+# wakes. Pinned to the installed binary rather than left to PATH: a user
+# unit's PATH is the manager's, not the operator's shell, so a bare "mpm"
+# would resolve to whatever came first there — or to nothing. Mirrors
+# MPM_CRITIC_BIN above.
+Environment=MPM_BIN=%h/.mpm/bin/mpm
 
 EnvironmentFile=-%h/.config/mpm/mpm.env
 

@@ -725,6 +725,100 @@ class TestRuntimeTemplates(unittest.TestCase):
                     f"binary under {RUNTIME_ROOT}/bin/",
                 )
 
+    # ── Subprocess binary pinning (scheduler PATH ambiguity) ──────────────
+    #
+    # The scheduler execs `mpm` for gc_run and broadcast wakes. Left as a
+    # bare name, exec resolves it through PATH — and a systemd user unit's
+    # PATH is the manager's, not the operator's shell's. The unit therefore
+    # has to say which binary to run, the same way it already says which
+    # workspace and which critic binary to use.
+    #
+    # These assert on the unit as a unit, so a value dropped from the
+    # template fails here rather than at the first wake on a live host.
+
+    SUBPROCESS_BIN_ENV = ("MPM_BIN", "MPM_CRITIC_BIN")
+
+    def unit_env(self, unit):
+        """Every Environment assignment in the unit, split into key/value."""
+        env = {}
+        for value in unit_directive_values(unit, "Environment"):
+            for assignment in value.split():
+                key, _, val = assignment.partition("=")
+                if key:
+                    env[key] = val
+        return env
+
+    def scheduler_units(self):
+        """Units whose ExecStart runs the scheduler.
+
+        Subprocess binary pinning only applies here. mpm-telemetry
+        execs nothing, so demanding MPM_BIN of it would be asserting a
+        property it has no reason to have.
+        """
+        return [
+            u
+            for u in self.units()
+            if any(
+                "mpm-scheduler" in line
+                for line in unit_directive_values(u, "ExecStart")
+            )
+        ]
+
+    def test_scheduler_units_exist(self):
+        self.assertTrue(
+            self.scheduler_units(),
+            "no unit runs mpm-scheduler; the subprocess-pinning guards below "
+            "would pass vacuously",
+        )
+
+    def test_scheduler_binary_env_vars_are_pinned_to_installed_binaries(self):
+        for unit in self.scheduler_units():
+            env = self.unit_env(unit)
+            for key in self.SUBPROCESS_BIN_ENV:
+                self.assertIn(
+                    key,
+                    env,
+                    f"{unit.name}: {key} is not set. The scheduler would exec a "
+                    "bare name and let the unit's PATH choose the binary, so a "
+                    "stale or hostile earlier entry silently serves the wakes.",
+                )
+                self.assertEqual(
+                    env[key],
+                    f"{RUNTIME_ROOT}/bin/{'mpm' if key == 'MPM_BIN' else 'mpm-critic'}",
+                    f"{unit.name}: {key}={env[key]} is not the installed binary",
+                )
+
+    def test_no_subprocess_binary_env_var_is_a_bare_name(self):
+        # A bare name is the defect itself: PATH gets the vote.
+        for unit in self.units():
+            env = self.unit_env(unit)
+            for key in self.SUBPROCESS_BIN_ENV:
+                if key not in env:
+                    continue
+                self.assertIn(
+                    "/",
+                    env[key],
+                    f"{unit.name}: {key}={env[key]} is a bare name; PATH would "
+                    "decide which binary runs",
+                )
+
+    def test_no_directive_reaches_into_a_source_checkout(self):
+        # §13 prerequisite: after the checkout moves to ~/src/mpm, nothing
+        # in a unit may still resolve into wherever the source used to be.
+        for unit in self.units():
+            for directive in PATH_DIRECTIVES + ("Environment",):
+                for value in unit_directive_values(unit, directive):
+                    for raw in value.split():
+                        if "=" in raw:
+                            raw = raw.split("=", 1)[1]
+                        for marker in (".build", "/src/mpm", "~/src"):
+                            self.assertNotIn(
+                                marker,
+                                raw,
+                                f"{unit.name}: {directive}={value} references {marker}; "
+                                "a source checkout must not be a runtime dependency",
+                            )
+
 
 if __name__ == "__main__":
     unittest.main()
