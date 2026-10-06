@@ -281,7 +281,7 @@ print-build-dir:
 # systemd unit — run ./install.sh. Both routes produce the same canonical
 # layout ($(PREFIX)/bin/) for the binaries themselves; install.sh adds the
 # PATH surface that `make install` does not.
-install: build refresh-installed
+install: build refresh-installed install-runtime-assets
 	@echo "🚀 Deploying $(BUILD_DIR)/* -> $(PREFIX)/bin/"
 	@echo "   (this REPLACES the live install binaries — it is not a build)"
 	@mkdir -p $(PREFIX)/bin
@@ -311,6 +311,39 @@ install: build refresh-installed
 	@echo ""
 	@echo "ℹ  For the full user install (PATH symlinks + systemd unit),"
 	@echo "    run: ./install.sh"
+
+# Provision the runtime DEFINITION assets — mode/, persona/, drills/ — into
+# the runtime root, as installable copies rather than as tracked source that
+# happens to sit at the runtime root.
+#
+# WHY THIS EXISTS SEPARATELY FROM `install`. The binaries load mode/persona/
+# drills from $MPM_WORKSPACE at runtime (internal/core/router.go:97-98,
+# internal/core/mode.go:44, cmd/mpm/drill_cmds.go:96). They worked when the
+# canonical checkout WAS ~/.mpm and those directories were git-tracked source
+# read in place. Nothing ever copied them. This target supplies that copy so a
+# pure runtime root needs no repository tree.
+#
+# Ownership is reconciled, not overwritten: locally modified definitions are
+# preserved, untouched ones refresh from upstream, custom files are never
+# touched. See scripts/install_runtime_assets.py for the case table.
+#
+# This is a DEPLOYMENT action, so it is wired into `install` and nowhere
+# else. `make build` must never run it, and neither `make test` nor
+# `make release-gate` may: those gates are required to leave every real
+# runtime asset byte-identical.
+RUNTIME_ASSETS_SCRIPT := scripts/install_runtime_assets.py
+
+.PHONY: install-runtime-assets
+install-runtime-assets:
+	@echo "==> reconciling runtime definitions (mode/ persona/ drills/) into $(PREFIX)"
+	@python3 $(RUNTIME_ASSETS_SCRIPT) \
+	    --source-root "$(CURDIR)" \
+	    --runtime-root "$(PREFIX)" \
+	    || { echo "    FAIL: runtime-asset reconciliation failed." >&2; \
+	         echo "    Binaries are installed, but mode/persona/drills definitions may" >&2; \
+	         echo "    be unprovisioned or in a conflicted state. Resolve the reported" >&2; \
+	         echo "    problem before relying on routing or drills." >&2; \
+	         exit 1; }
 
 # Install the mpm-scheduler systemd user service.
 # The unit targets the canonical ~/.mpm layout (%h/.mpm for the working

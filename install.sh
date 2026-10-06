@@ -814,6 +814,34 @@ phase_agent_reconcile() {
 }
 
 
+phase_runtime_assets() {
+    note "RUNTIME DEFINITION ASSETS"
+    local assets_script="$PROJECT_ROOT/scripts/install_runtime_assets.py"
+    if [ ! -f "$assets_script" ]; then
+        warn "  install_runtime_assets.py missing at $assets_script"
+        warn "  (this is unexpected on a stock MPM checkout)"
+        return 0
+    fi
+    # Reconciles mode/ persona/ drills/ into $DATA_ROOT. Same script
+    # `make install` calls, so the two install surfaces cannot drift
+    # into different ownership semantics.
+    #
+    # Non-zero is FATAL here, unlike phase_agent_reconcile. A host whose
+    # runtime root has no mode/persona definitions routes nothing and
+    # injects no persona, which looks like a working install that is
+    # silently inert. Failing loudly is the correct outcome; the
+    # reconciler's own output names the specific conflicting files.
+    if python3 "$assets_script" \
+            --source-root "$PROJECT_ROOT" \
+            --runtime-root "$DATA_ROOT"; then
+        log "  runtime definitions reconciled"
+    else
+        err "  runtime-asset reconciliation failed (see above)"
+        return 1
+    fi
+}
+
+
 phase_validate() {
     note "VALIDATION"
     local errors=0
@@ -871,6 +899,7 @@ mode_install() {
     phase_binaries
     phase_symlinks
     phase_data_dir
+    phase_runtime_assets
     phase_service
     phase_agent_reconcile
     phase_validate
@@ -928,6 +957,11 @@ mode_dry_run() {
     log "  symlink $PREFIX/bin/mpm     -> $LOCAL_BIN/mpm"
     log "  symlink $PREFIX/bin/mpm-mcp -> $LOCAL_BIN/mpm-mcp"
     log "  install -d -m 0700 $DATA_ROOT/src/db $DATA_ROOT/backups/critic-pre  (and chmod 0700 to harden pre-existing dirs)"
+    log "  reconcile runtime definitions (mode/ persona/ drills/) into $DATA_ROOT via"
+    log "    scripts/install_runtime_assets.py --source-root $PROJECT_ROOT --runtime-root $DATA_ROOT"
+    log "    (provisioned as owned copies, so the runtime root needs no repository"
+    log "     tree; locally modified definitions are preserved, untouched ones"
+    log "     refresh from source, custom files are never touched)"
     log "  loginctl enable-linger $USER_NAME"
     log "  install -m 0644 .../contrib/systemd/${SERVICE_NAME}.service.user -> $SERVICE_DST"
     log "  systemctl --user daemon-reload && enable --now $SERVICE_NAME"
