@@ -67,6 +67,17 @@ func TestWork_ForensicIncident_ClaimWithoutAction(t *testing.T) {
 // TestWork_ExternalGitCommit_WithoutMPMAction simulates an external process
 // committing to git without any MPM action. MPM observes but did not act.
 // Expected: external evidence recorded, verification=partial (audit evidence only).
+//
+// The evidence is recorded through the EXPLICIT observation route. This test
+// previously called dm.recordGitEvidenceForWork(w.ID), which reached
+// CaptureGitSnapshot("") and relied on the ambient cwd/workspace probe chain
+// to find a repository. It passed only because `go test` happened to run with
+// cwd inside the MPM git worktree — an environment-dependent test asserting
+// the very false attribution that has since been removed. What this test is
+// actually about is the verification rule "audit-only evidence derives
+// partial", and that rule needs an evidence row from a real source.
+//
+// See git_provenance_test.go for the fail-closed provenance invariant.
 func TestWork_ExternalGitCommit_WithoutMPMAction(t *testing.T) {
 	dm := NewTestDM(t)
 	defer dm.Close()
@@ -76,8 +87,19 @@ func TestWork_ExternalGitCommit_WithoutMPMAction(t *testing.T) {
 		t.Fatalf("AddWork: %v", err)
 	}
 
-	// External process committed; MPM records git audit evidence directly.
-	dm.recordGitEvidenceForWork(w.ID)
+	// External process committed; the observer records git audit evidence
+	// explicitly, stating the observation as its own knowledge.
+	if _, err := dm.AddEvidence(EvidenceInput{
+		ArtifactID:   w.ID,
+		ArtifactType: "work",
+		Type:         "observation",
+		SourceGroup:  "git",
+		CreatedBy:    "work_evidence",
+		Notes:        "git changed_files: README.md head_before=abc1234",
+		Strength:     0.6,
+	}); err != nil {
+		t.Fatalf("AddEvidence: %v", err)
+	}
 
 	// Derive verification — should be partial (audit evidence only, no outcome).
 	derived, err := dm.DeriveWorkVerification(w.ID)
