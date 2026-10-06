@@ -193,14 +193,16 @@ git -C "$MPM_WORKSPACE" rev-parse '@{upstream}' 2>/dev/null || true
 git -C "$MPM_WORKSPACE" status --porcelain 2>/dev/null || true
 ```
 
-The CLI binary at `~/.mpm/bin/mpm` is the compiled Go binary itself, not a wrapper. The runtime defaults `MPM_WORKSPACE` to `$HOME/.mpm` internally via `internal/core/config.GetMPMDir()` when the environment variable is unset, so no shell shim is required. If you observe a non-ELF file at any of the canonical binary paths (`bin/mpm`, `~/.mpm/bin/mpm`, or any `~/.mpm/bin/*`), treat it as a stale install artefact and recommend `./install.sh` to restore the canonical layout.
+The CLI binary at `~/.mpm/bin/mpm` is the compiled Go binary itself, not a wrapper. The runtime defaults `MPM_WORKSPACE` to `$HOME/.mpm` internally via `internal/core/config.GetMPMDir()` when the environment variable is unset, so no shell shim is required. If you observe a non-ELF file at any of the canonical binary paths (`.build/bin/mpm`, `~/.mpm/bin/mpm`, or any `~/.mpm/bin/*`), treat it as a stale install artefact and recommend `./install.sh` to restore the canonical layout.
 
 Where source binaries and installed binaries can be compared safely, use hashes or byte comparison:
 
 ```bash
-sha256sum bin/mpm bin/mpm-mcp bin/mpm-scheduler bin/mpm-critic bin/mpm-telemetry
+sha256sum .build/bin/mpm .build/bin/mpm-mcp .build/bin/mpm-scheduler .build/bin/mpm-critic .build/bin/mpm-telemetry
 sha256sum "$HOME/.mpm/bin/mpm" "$HOME/.mpm/bin/mpm-mcp" "$HOME/.mpm/bin/mpm-scheduler" "$HOME/.mpm/bin/mpm-critic" "$HOME/.mpm/bin/mpm-telemetry"
 ```
+
+`make build` populates only `.build/bin/`; it never writes the install prefix. The two are expected to differ until `make install` (or `./install.sh`) explicitly promotes the developer artifacts.
 
 Relevant binaries include:
 
@@ -219,7 +221,7 @@ Record freshness separately:
 ```text
 Source HEAD:
 Installed build identity (mpm --version):
-mpm freshness (hash vs source bin/mpm): PASS/FAIL/UNKNOWN
+mpm freshness (hash vs source .build/bin/mpm): PASS/FAIL/UNKNOWN
 mpm-mcp freshness: PASS/FAIL/UNKNOWN
 mpm-scheduler freshness: PASS/FAIL/UNKNOWN
 mpm-critic freshness: PASS/FAIL/UNKNOWN

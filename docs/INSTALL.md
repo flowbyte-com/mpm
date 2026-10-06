@@ -69,7 +69,9 @@ What the script does, in order:
    `/etc/systemd/system/mpm-scheduler.service` and offers to disable it
    (avoids split-brain dual-scheduler scenario for upgrading testers).
    Detects legacy data at `/var/lib/mpm/mpm.db` and warns about migration.
-2. **Build** — `make build` produces all five binaries
+2. **Build** — `make build` produces all five binaries in `.build/bin/`
+   (a checkout-local scratch directory; `make build` never writes the
+   install prefix)
 3. **Binaries** — installs `mpm`, `mpm-scheduler`, `mpm-critic`, `mpm-mcp`, and
    `mpm-telemetry` to `$HOME/.mpm/bin/`. The CLI binary at
    `$HOME/.mpm/bin/mpm` is the compiled Go binary itself; it defaults
@@ -528,7 +530,7 @@ because `git pull` updates tracked files and leaves gitignored state alone.
 | `mpm-scheduler` stays `inactive` after reboot on encrypted `/home` | `systemctl --user is-active mpm-scheduler` returns `inactive`; `journalctl --user -u mpm-scheduler` shows no entries since boot | The autostart fix should have handled this — `~/.config/autostart/mpm-post-decrypt.desktop` runs `daemon-reload && start mpm-scheduler.service` on every graphical login. Verify the file exists; if missing, re-run `./install.sh` (it re-detects via `mount` + `findmnt` + `/home/.ecryptfs/$USER` and reinstalls the `.desktop`). If your workload runs unattended with no graphical login (cron / system timers only), opt out by removing the `.desktop` and adding a drop-in: `systemctl --user edit mpm-scheduler` → under `[Service]` add `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'` to delay-start until the mount is up. Commit `14ac32b` introduced the detection/wiring. |
 | CLI fails: "no such file or directory" for mpm | `ls -la ~/.mpm/bin/mpm*` | Re-run `./install.sh` to (re)install the binary. |
 | CLI reads from a different DB than the daemon | `mpm ops health_check`; `echo $MPM_WORKSPACE` | Both sides must resolve `MPM_WORKSPACE` the same way. The canonical DB is `~/.mpm/src/db/mpm.db`; a DB under some other checkout means `MPM_WORKSPACE` is set to a non-default value. Unset it, or point it at `~/.mpm` consistently in `~/.config/mpm/mpm.env` and the unit. |
-| Spawn ENOENT when host tries to launch mpm-mcp | `ls -l ~/.mpm/bin/mpm-mcp` (or `bin/mpm-mcp` in source tree) | If missing: `make build`. If not executable: `chmod +x`. Then re-register with correct path. |
+| Spawn ENOENT when host tries to launch mpm-mcp | `ls -l ~/.mpm/bin/mpm-mcp` (or `.build/bin/mpm-mcp` for a local build) | If missing: run `./install.sh` (or `make install`) to place the binary in `~/.mpm/bin/`. `make build` alone only fills `.build/bin/`. If not executable: `chmod +x`. Then re-register with correct path. |
 | `mpm` not found on PATH after install | `command -v mpm`; `echo $PATH` | Verify `~/.local/bin` is on PATH: most shells pick it up via `/etc/profile.d/` defaults. If not: `export PATH="$HOME/.local/bin:$PATH"`. Internal daemons (mpm-scheduler, mpm-critic, mpm-telemetry) are NOT on PATH by design — they are invoked by systemd, never directly. |
 | MCP tools return data, but writes don't persist | `openclaw mcp show mpm` | Check `MPM_WORKSPACE` matches the canonical path (`$HOME/.mpm`); restart gateway |
 | `openclaw mcp add mpm` is a silent no-op | `openclaw mcp list` | Server already exists — use `openclaw mcp set mpm '<json>'` instead |
@@ -585,7 +587,7 @@ separate concerns, and they must be moved separately.
 |---|---|---|
 | Source / Git history | the checkout directory | Fresh `git clone` to `~/.mpm` |
 | Durable DB + state | `<old>/src/db/`, plus `active.json`, `backups/`, `blobs/`, `run/` | Copy deliberately, after installing |
-| Binaries / generated | `bin/` | Rebuilt by `install.sh` — never copy |
+| Binaries / generated | `bin/` (the install; `make build` writes `.build/bin/` instead) | Rebuilt by `install.sh` — never copy |
 | Host integrations | host config (`CLAUDE.md`, `AGENTS.md`, MCP registration) | Re-run each adapter installer |
 
 ### Steps

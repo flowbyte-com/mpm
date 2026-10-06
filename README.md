@@ -167,9 +167,14 @@ The Makefile supplies the required FTS5 build flags.
 ```bash
 git clone https://github.com/flowbyte-com/mpm ~/.mpm
 cd ~/.mpm
-make build
-./bin/mpm --help
+make build          # developer artifacts -> ./.build/bin/ (disposable)
+./.build/bin/mpm --help
 ```
+
+`make build` writes `.build/bin/` and nothing else. The binaries the
+services actually execute live in `~/.mpm/bin/`; only `make install`
+(or `./install.sh`) puts them there. Building can no longer overwrite a
+running installation.
 
 For the full user-space install on Linux with systemd:
 
