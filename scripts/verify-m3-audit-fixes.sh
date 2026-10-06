@@ -9,7 +9,7 @@
 #
 # MPM and DB resolution (see #T-2026-10-04 verify-DB-targeting audit):
 #   The script previously defaulted both MPM and DB to CWD-relative
-#   paths (./bin/mpm, ./src/db/mpm.db). When the script is run from
+#   paths (.build/bin/mpm, ./src/db/mpm.db). When the script is run from
 #   anywhere other than the repo root, those paths silently resolve to
 #   non-existent files: sqlite3 returns empty strings, the assertions
 #   degenerate to PASS-or-FAIL based on whether the helper succeeded,
@@ -24,7 +24,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-MPM="${MPM:-${REPO_ROOT}/bin/mpm}"
+MPM="${MPM:-${REPO_ROOT}/.build/bin/mpm}"
 DB="${DB:-${REPO_ROOT}/src/db/mpm.db}"
 
 # Pre-flight: refuse to run if MPM or DB cannot be located. Without

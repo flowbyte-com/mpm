@@ -1,31 +1,41 @@
 # mpm Master Makefile
 # Usage: make <target>
 #
-# Canonical binary location: $HOME/.mpm/bin/ (the same root as data, config,
-# logs, and the runtime database). This is the install target for both the
-# `make build` and `make install` paths — no sudo, no /usr/local copy, no
-# XDG split. Agent integrations invoke $HOME/.mpm/bin/mpm directly; PATH
-# is convenience, not contract.
+# TWO DISTINCT LOCATIONS. Keeping them distinct is a safety property, not a
+# layout preference — see BUILD_DIR below.
 #
-# If you cloned to a different location, PREFIX defaults to whatever
-# $(HOME)/.mpm resolves to via the standard mpm data-root convention.
-# Override with `make install PREFIX=/somewhere` for non-standard layouts.
+#   $(BUILD_DIR)   = .build/bin/   DEVELOPER BUILD ARTIFACTS. Relative to the
+#                                    checkout, so every worktree gets its own.
+#                                    Never installed, never executed by a service.
+#
+#   $(PREFIX)/bin/ = $HOME/.mpm/bin/  RUNTIME INSTALL. What systemd ExecStart,
+#                                    ~/.local/bin symlinks, and agent
+#                                    integrations execute. PREFIX defaults to
+#                                    the mpm data-root convention; override with
+#                                    `make install PREFIX=/somewhere`.
+#
+# THE REASON THEY ARE SEPARATE. The canonical install IS a git checkout at
+# $HOME/.mpm. While BUILD_DIR was the relative path `bin`, that made
+# `$(BUILD_DIR)` and `$(PREFIX)/bin` the same directory whenever the checkout
+# was the prefix — so `make build` overwrote the running scheduler's binary
+# and `make clean` deleted it outright. `make build` is now incapable of
+# touching the install.
 #
 # Targets:
-#   make build               - Build all five binaries to bin/
+#   make build               - Build all five binaries to .build/bin/
 #                              (mpm, mpm-mcp, mpm-scheduler, mpm-critic, mpm-telemetry)
-#   make install             - Verify binaries are at $(PREFIX)/bin/ (canonical). No copy step.
+#   make install             - PROMOTE .build/bin/* to $(PREFIX)/bin/ (deployment)
 #   make service-scheduler   - Install mpm-scheduler systemd USER unit
 #                              (fails on encrypted home dirs — use install.sh instead)
 #   make service             - Alias for service-scheduler
-#   make clean               - Remove bin/
+#   make clean               - Remove .build/ (never touches $(PREFIX))
 #   make test                - Run tests
 #   make lint                - Run golangci-lint (advisory; not CI-gated)
 #   make help                - Show this help
 #
 # RECOMMENDED INSTALL PATH:
 #   ./install.sh
-# This single command builds, installs binaries + wrapper at $HOME/.mpm/bin/,
+# This single command builds, installs binaries at $HOME/.mpm/bin/,
 # creates ~/.local/bin symlinks for `mpm` and `mpm-mcp`, installs the
 # USER-level systemd unit, registers with OpenClaw if present, and
 # validates end-to-end. No sudo required. See INSTALL.md for full details.
@@ -35,7 +45,15 @@ MCP_BINARY  := mpm-mcp
 SCHED_BINARY := mpm-scheduler
 CRITIC_BINARY := mpm-critic
 TELEMETRY_BINARY := mpm-telemetry
-BUILD_DIR   := bin
+# Developer build output. RELATIVE on purpose: it must follow the checkout
+# into whatever worktree or scratch clone is being built, so two checkouts
+# never share artifacts and a build here can never land in someone else's
+# install.
+#
+# The leading dot is load-bearing as documentation: `.build/bin` reads as
+# scratch even when the checkout IS $HOME/.mpm, which is precisely the case
+# where the old value (`bin`) silently aliased the live install directory.
+BUILD_DIR   := .build/bin
 # Canonical install prefix: $HOME/.mpm (matches DATA_ROOT in install.sh).
 # Override with `make install PREFIX=/somewhere` for non-standard layouts.
 PREFIX      ?= $(HOME)/.mpm
@@ -136,11 +154,51 @@ AGENT_ADAPTERS := mpm-claude-code mpm-hermes mpm-memory-openclaw mpm-opencode mp
 # Adapters that additionally ship a `node --test` suite.
 AGENT_ADAPTERS_JS := mpm-memory-openclaw mpm-auto-mode-persona-openclaw
 
-.PHONY: all build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit test-scripts test-agent-installation test-agent-adapters lint help refresh-installed check-installed-drift check-installed
+.PHONY: all assert-build-dir-safe print-build-dir build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit test-scripts test-agent-installation test-agent-adapters lint help clean refresh-installed check-installed-drift check-installed
 
 all: build
 
-# Build canonical binaries to bin/.
+# Refuse to run any target that writes to $(BUILD_DIR) unless the resolved
+# build output is a scratch subdirectory of THIS checkout.
+#
+# This is defence in depth. The current value is already safe, but a future
+# edit that reintroduced `BUILD_DIR := bin` would re-merge the checkout and
+# the install — and only in the one layout that matters (checkout == PREFIX,
+# i.e. the canonical $HOME/.mpm). This turns that into a loud failure.
+#
+# Checked on RESOLVED paths (realpath -m), never on the literal strings. The
+# old guard compared `"$(BUILD_DIR)" != "$(PREFIX)/bin"` — "bin" and
+# "/home/v/.mpm/bin" are never string-equal, so that comparison passed while
+# the two names denoted the same directory.
+#
+# `realpath -m "$(BUILD_DIR)"` resolves a relative BUILD_DIR against the
+# recipe's cwd, which make guarantees is $(CURDIR). It deliberately does NOT
+# prepend $(CURDIR) by string concatenation: that mangles an already-absolute
+# BUILD_DIR into "$(CURDIR)//some/abs/path".
+.PHONY: assert-build-dir-safe
+assert-build-dir-safe:
+	@_abs_build=`realpath -m "$(BUILD_DIR)"`; \
+	 _abs_prefix=`realpath -m "$(PREFIX)"`; \
+	 case "$$_abs_build" in \
+	    /|"$(CURDIR)"|"$$_abs_prefix"|"$$_abs_prefix/bin") _why="it IS the checkout root or the live install directory" ;; \
+	    "$(CURDIR)"/*) ;; \
+	    *) _why="it is not a subdirectory of this checkout" ;; \
+	 esac; \
+	 if [ -n "$$_why" ]; then \
+	    echo "REFUSING to build: BUILD_DIR resolves to '$$_abs_build' because $$_why." >&2; \
+	    echo "  Build output must be a scratch subdirectory of this checkout ($(CURDIR))." >&2; \
+	    echo "  It must not be the checkout root, nor \$$(PREFIX) = $$_abs_prefix," >&2; \
+	    echo "  nor \$$(PREFIX)/bin — writing there would make an ordinary" >&2; \
+	    echo "  build mutate the install that the running services execute." >&2; \
+	    exit 1; \
+	 fi
+
+# Build developer artifacts to $(BUILD_DIR) (= .build/bin/).
+#
+# THIS TARGET CANNOT DEPLOY. Its only output is $(BUILD_DIR), which is not
+# $(PREFIX)/bin even when the checkout IS $(PREFIX). Publishing to the runtime
+# install is exclusively `make install`'s job.
+#
 # Requires CGO for mattn/go-sqlite3 with FTS5 support.
 # mpm-critic is invoked by mpm-scheduler as a payload handler
 # (kind=critic_audit) — built alongside the other daemons so a
@@ -153,7 +211,7 @@ all: build
 # wrapper so `make build` works standalone on already-installed repos.
 # The corresponding cleanup in install.sh also removes any leftover
 # mpm.real and mpm.pre-wrapper.* sidecars from older installs.
-build:
+build: assert-build-dir-safe
 	@mkdir -p $(BUILD_DIR)
 	@if [ -f "$(BUILD_DIR)/$(BINARY_NAME)" ] \
 	   && head -c 2 "$(BUILD_DIR)/$(BINARY_NAME)" 2>/dev/null | grep -q '^#!'; then \
@@ -167,40 +225,89 @@ build:
 	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(TELEMETRY_BINARY) ./cmd/mpm-telemetry
 	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), $(BUILD_DIR)/$(CRITIC_BINARY), and $(BUILD_DIR)/$(TELEMETRY_BINARY) (mpm-alpha)"
 
-# Verify the canonical install location contains all five binaries.
-# `make build` already writes to bin/, which IS $(PREFIX)/bin/ when the repo
-# is cloned at $HOME/.mpm (the standard layout). On a non-standard layout
-# (repo cloned somewhere other than $HOME/.mpm), this target copies the
-# build output into the canonical location. No sudo — the canonical
-# location is always user-writable.
+# Print the ABSOLUTE resolved build output directory, one line, nothing else.
+#
+# install.sh consumes this so the installer can never drift from the
+# Makefile's idea of where `make build` puts its output — the two used to
+# hardcode `bin/` in parallel, and a one-sided edit silently pointed the
+# installer at a directory that no longer existed.
+.PHONY: print-build-dir
+# Machine-readable query: callers (install.sh) capture stdout in a
+# variable and require it to be a single absolute path.
+#
+# Use $(info ...) rather than a recipe line. A recipe is SUPPRESSED
+# under `make -n` — it prints the command text instead of running it —
+# and GNU make propagates MAKEFLAGS to sub-makes, so install.sh's nested
+# `make print-build-dir` inherits `-n` when the installer runs from
+# inside a recipe (e.g. `make -n test` -> test-agent-installation ->
+# install.sh, which is exactly what the build-config guard test does).
+# With a recipe, that produced `realpath -m "..."` instead of the path,
+# and the install aborted with "could not determine build output
+# directory".
+#
+# $(info ...) at top level would fire on EVERY make invocation, which is
+# unacceptable. Instead use a variable-expansion recipe: make prints the
+# EXPANDED text even under -n, so we expand `realpath` via $(shell) at
+# parse time and the recipe just echoes an already-resolved literal.
+BUILD_DIR_ABS := $(shell realpath -m "$(CURDIR)/$(BUILD_DIR)")
+
+print-build-dir:
+	@echo '$(BUILD_DIR_ABS)'
+
+# DEPLOY: promote the developer artifacts in $(BUILD_DIR) to the runtime
+# install at $(PREFIX)/bin/. This is the ONLY target that writes there.
+#
+# Promotion is unconditional. The previous version guarded the copy with
+# `[ "$(BUILD_DIR)" != "$(PREFIX)/bin" ]` and, when the strings differed,
+# printed "(bin/ is the canonical location; no copy needed)". That branch was
+# unreachable as written: "bin" and "/home/v/.mpm/bin" are never string-equal,
+# so from the canonical checkout (which IS $(PREFIX)) the copy branch ran
+# unconditionally — and copied each file onto itself. A no-op that only
+# appears to no-op is worse than no guard, because it reads as a proof of
+# "nothing to do" while the live install is being rewritten by `make build`
+# two targets earlier.
+#
+# Same-directory is now a HARD ERROR rather than a skip. If build output and
+# install target ever resolve to one directory again, promotion must stop and
+# say so; silently succeeding would report a deployment that did not happen.
+# The comparison is on `realpath -m` RESOLVED paths, so it also catches the
+# symlinked-BUILD_DIR variants the old string test missed.
+#
+# No sudo — $(PREFIX) is always user-writable.
 #
 # 2026-09-14 release-pass: this target is intended for development
 # workflows. For the canonical user-facing install — including
 # ~/.local/bin/mpm symlinks, PATH integration, and the user-level
-# systemd unit — run ./install.sh. The two routes produce
-# the same canonical layout ($PREFIX/bin/) for the binaries
-# themselves; install.sh adds the PATH surface that
-# `make install` does not.
+# systemd unit — run ./install.sh. Both routes produce the same canonical
+# layout ($(PREFIX)/bin/) for the binaries themselves; install.sh adds the
+# PATH surface that `make install` does not.
 install: build refresh-installed
-	@echo "🚀 Verifying canonical install at $(PREFIX)/bin/..."
+	@echo "🚀 Deploying $(BUILD_DIR)/* -> $(PREFIX)/bin/"
+	@echo "   (this REPLACES the live install binaries — it is not a build)"
 	@mkdir -p $(PREFIX)/bin
-	@if [ "$(BUILD_DIR)" != "$(PREFIX)/bin" ] && [ ! -L "$(BUILD_DIR)" ] && [ ! -L "$(PREFIX)" ]; then \
-	    echo "==> syncing bin/ -> $(PREFIX)/bin/ (all five must land; a partial sync is a failure)"; \
+	@_src_dir=`realpath -m "$(BUILD_DIR)"`; \
+	 _dst_dir=`realpath -m "$(PREFIX)/bin"`; \
+	 if [ "$$_src_dir" = "$$_dst_dir" ]; then \
+	    echo "    FAIL: build output ($$_src_dir) and install target ($$_dst_dir)" >&2; \
+	    echo "    are the same directory, so there is nothing to promote. Refusing" >&2; \
+	    echo "    rather than reporting a deployment that did not happen. Fix" >&2; \
+	    echo "    BUILD_DIR ($(BUILD_DIR)) or PREFIX ($(PREFIX)) and re-run." >&2; \
+	    exit 1; \
+	 else \
+	    echo "==> deploying (all five must land; a partial deploy is a failure)"; \
 	    install -m755 $(BUILD_DIR)/$(BINARY_NAME)    $(PREFIX)/bin/$(BINARY_NAME) && \
 	    install -m755 $(BUILD_DIR)/$(MCP_BINARY)    $(PREFIX)/bin/$(MCP_BINARY) && \
 	    install -m755 $(BUILD_DIR)/$(SCHED_BINARY)  $(PREFIX)/bin/$(SCHED_BINARY) && \
 	    install -m755 $(BUILD_DIR)/$(CRITIC_BINARY) $(PREFIX)/bin/$(CRITIC_BINARY) && \
 	    install -m755 $(BUILD_DIR)/$(TELEMETRY_BINARY) $(PREFIX)/bin/$(TELEMETRY_BINARY) && \
-	    echo "    (synced bin/ to $(PREFIX)/bin/)" || \
-	    { echo "    FAIL: could not sync all five binaries into $(PREFIX)/bin/." >&2; \
+	    echo "    (deployed $(BUILD_DIR)/ to $(PREFIX)/bin/)" || \
+	    { echo "    FAIL: could not deploy all five binaries to $(PREFIX)/bin/." >&2; \
 	      echo "    The success line that follows asserts all five are present there; it" >&2; \
 	      echo "    must not be printed over a partial install. Inspect $(PREFIX)/bin/ to" >&2; \
 	      echo "    see which binaries landed, then re-run make install." >&2; \
 	      exit 1; }; \
-	else \
-	    echo "    (bin/ is the canonical location; no copy needed)"; \
-	fi
-	@echo "✓ Canonical binaries at $(PREFIX)/bin/: $(BINARY_NAME) $(MCP_BINARY) $(SCHED_BINARY) $(CRITIC_BINARY) $(TELEMETRY_BINARY)"
+	 fi
+	@echo "✓ Installed binaries at $(PREFIX)/bin/: $(BINARY_NAME) $(MCP_BINARY) $(SCHED_BINARY) $(CRITIC_BINARY) $(TELEMETRY_BINARY)"
 	@echo ""
 	@echo "ℹ  For the full user install (PATH symlinks + systemd unit),"
 	@echo "    run: ./install.sh"
@@ -675,7 +782,8 @@ test-agent-adapters:
 
 # Release acceptance suite — cross-agent continuity, public-CLI parity,
 # supersession trace, scale/e2e boundary tests. Spins up real subprocess
-# invocations of `bin/mpm` so it requires `make build` first; the FTS5
+# invocations of the `$(BUILD_DIR)/mpm` artifact so it requires
+# `make build` first; the FTS5
 # build flags must match the production binary or the schema-migration
 # path leaves lessons_fts (and other FTS5 modules) unbuilt, surfacing
 # as "no such table: main.<base>_fts" at INSERT time on the lessons
@@ -690,8 +798,8 @@ test-release: build
 
 # Aggregate release gate. Composes the broad race-detector suite with
 # the cross-agent continuity / public-CLI subprocess suite. The
-# subprocess suite requires `make build` so bin/mpm is available to
-# the public-CLI test cases; `make test-race` does NOT depend on
+# subprocess suite requires `make build` so $(BUILD_DIR)/mpm is available
+# to the public-CLI test cases; `make test-race` does NOT depend on
 # build (it's the inner dev-loop race gate), so we keep test-race and
 # test-release as separate leaf targets and compose them at the
 # release-gate level rather than threading build into every test-race
@@ -725,14 +833,25 @@ lint:
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint not installed. Run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"; exit 1; }
 	golangci-lint run ./...
 
-# Clean build artifacts. Also removes stray root-level binaries: a bare
-# `go build ./cmd/mpm` (without -o bin/ and without the FTS5 flags)
-# drops a non-canonical, non-FTS5 `mpm` at the repo root that shadows
-# nothing but confuses everything. Canonical output is bin/ only.
-clean:
+# Clean DEVELOPER build artifacts. Also removes stray root-level binaries: a
+# bare `go build ./cmd/mpm` (without -o $(BUILD_DIR)/ and without the FTS5
+# flags) drops a non-canonical, non-FTS5 `mpm` at the repo root that shadows
+# nothing but confuses everything.
+#
+# THIS TARGET MUST NEVER TOUCH $(PREFIX). While BUILD_DIR was the relative
+# path `bin`, `clean` run from the canonical checkout executed
+# `rm -rf ~/.mpm/bin` — deleting all five live binaries, including the one
+# systemd was executing. `clean` now removes only $(BUILD_DIR), and
+# `assert-build-dir-safe` re-checks the resolved path first so a future edit
+# cannot silently widen its blast radius.
+#
+# It also does NOT remove the checkout's own `bin/` directory if one exists
+# from before this separation; that directory is no longer owned by any
+# target. Delete it by hand if you have one.
+clean: assert-build-dir-safe
 	rm -rf $(BUILD_DIR)
 	rm -f ./mpm ./mpm-critic ./mpm-scheduler ./mpm-mcp ./mpm-telemetry
-	@echo "🧹 Cleaned $(BUILD_DIR)/ (plus stray root binaries)"
+	@echo "🧹 Cleaned $(BUILD_DIR)/ (plus stray root binaries). \$$(PREFIX)/bin/ untouched."
 
 # Refresh all currently supported locally-installed MPM agent-integration
 # artifacts from the canonical repository sources. Safe to re-run (each
@@ -794,12 +913,14 @@ check-installed:
 help:
 	@echo "mpm Makefile"
 	@echo ""
-	@echo "  Canonical location: \$$HOME/.mpm/bin/ (no sudo, no /usr/local copy)"
+	@echo "  Build output: \$(BUILD_DIR) relative to this checkout (scratch; never installed)"
+	@echo "  Install root: \$$(PREFIX)/bin/ = \$$HOME/.mpm/bin/ (no sudo, no /usr/local copy)"
+	@echo "               THIS IS WHAT THE RUNNING SERVICES EXECUTE."
 	@echo ""
 	@echo "  Targets:"
-	@echo "    make build               - Build all five binaries to bin/ (mpm, mpm-mcp,"
+	@echo "    make build               - Build all five binaries to \$(BUILD_DIR)/ (mpm, mpm-mcp,"
 	@echo "                              mpm-scheduler, mpm-critic, mpm-telemetry)"
-	@echo "    make install             - Verify/sync bin/ to \$$(PREFIX)/bin/ (default \$$HOME/.mpm)"
+	@echo "    make install             - DEPLOY \$(BUILD_DIR)/ to \$$(PREFIX)/bin/ (default \$$HOME/.mpm)"
 	@echo "    make service-scheduler   - Install mpm-scheduler systemd user unit"
 	@echo "    make service             - Alias for service-scheduler"
 	@echo "    make uninstall-service   - Remove the installed systemd user unit"
@@ -810,7 +931,7 @@ help:
 	@echo "    make test-tools-precommit- Run the tools guard subset the pre-commit hook uses"
 	@echo "    make install-hooks       - Install scripts/pre-commit into .git/hooks (no network)"
 	@echo "    make lint                - Run golangci-lint (advisory; not CI-gated)"
-	@echo "    make clean               - Remove bin/"
+	@echo "    make clean               - Remove \$(BUILD_DIR)/ (never touches \$$(PREFIX)/bin/)"
 	@echo "    make help                - Show this help"
 	@echo ""
 	@echo "  Version: $(VERSION)"

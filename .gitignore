@@ -3,7 +3,13 @@ __pycache__/
 .vscode/
 *.log
 
-# Compiled binaries (mpm itself)
+# Developer build artifacts (`make build` -> BUILD_DIR = .build/bin).
+# Deliberately NOT the install prefix's bin/: keeping the two distinct is
+# what stops an ordinary build from overwriting the running services.
+.build/
+
+# A checkout from before the build/install split may still carry a
+# bin/ with old artifacts. No target writes there any more.
 bin/
 
 # Top-level `mpm` symlinks (used for go tooling that expects ./mpm
@@ -129,7 +135,7 @@ sys_prompts/
 # Nested Go build outputs (when building inside cmd/ subdirs via
 # `go build ./cmd/mpm` rather than the root-level `make build`).
 # Prevents accidental commits of stale local builds that shadow
-# the canonical `bin/` output.
+# the canonical `.build/bin/` output.
 cmd/mpm/mpm
 cmd/mpm-mcp/mpm-mcp
 cmd/mpm-scheduler/mpm-scheduler

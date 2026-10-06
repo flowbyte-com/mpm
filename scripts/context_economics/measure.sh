@@ -5,7 +5,7 @@
 #
 # What this script does:
 #   1. Creates a disposable workspace under a temp directory.
-#   2. Builds the mpm binary in ./bin/mpm (or uses a pre-built one).
+#   2. Builds the mpm binary in ./.build/bin/mpm (or uses a pre-built one).
 #   3. Captures model-facing surfaces for each scenario in the brief:
 #        A. Minimal context (no useful recall content)
 #        B. Simple useful recall
@@ -28,7 +28,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-BIN="${PROJECT_ROOT}/bin/mpm"
+BIN="${PROJECT_ROOT}/.build/bin/mpm"
 TMPDIR_OUT="${TMPDIR:-/tmp}/mpm-econ-$$"
 WORKSPACE="${TMPDIR_OUT}/workspace"
 RAW_DIR="${TMPDIR_OUT}/raw"

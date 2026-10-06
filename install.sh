@@ -17,27 +17,30 @@
 #
 # What this script does:
 #   1. Builds binaries (mpm, mpm-mcp, mpm-scheduler, mpm-critic, mpm-telemetry)
-#   2. Installs binaries to $HOME/.mpm/bin/ (canonical — same root as data)
-#   3. Writes a workspace-setting wrapper at $HOME/.mpm/bin/mpm
-#   4. Creates $HOME/.mpm/ as the runtime data root (0700/0600 enforced
+#      into the checkout's .build/bin/ — disposable developer artifacts
+#   2. Promotes them to $HOME/.mpm/bin/ (canonical install — same root as
+#      data). Promotion is explicit and unconditional; the installed
+#      `mpm` IS the compiled binary (no shell wrapper — MPM_WORKSPACE
+#      defaulting is handled inside the binary)
+#   3. Creates $HOME/.mpm/ as the runtime data root (0700/0600 enforced
 #      by the binary's startup gate)
-#   5. Installs and enables the USER-level systemd service at
+#   4. Installs and enables the USER-level systemd service at
 #      $HOME/.config/systemd/user/mpm-scheduler.service
-#   6. Enables systemd user lingering (loginctl enable-linger) so the
+#   5. Enables systemd user lingering (loginctl enable-linger) so the
 #      scheduler survives logout
-#   7. Creates ~/.local/bin and symlinks `mpm` and `mpm-mcp` into it
+#   6. Creates ~/.local/bin and symlinks `mpm` and `mpm-mcp` into it
 #      (so subprocesses that inherit the user PATH can resolve them).
 #      Internal daemons (mpm-scheduler, mpm-critic, mpm-telemetry) are
 #      NOT exposed on PATH — they live only at $PREFIX/bin/ and are
 #      invoked by the scheduler / systemd, never directly by the user.
-#   8. Warns (read-only) if legacy data exists at /var/lib/mpm/mpm.db —
+#   7. Warns (read-only) if legacy data exists at /var/lib/mpm/mpm.db —
 #      operator must migrate manually if they want to keep it. The
 #      script NEVER touches /var/lib/mpm, NEVER invokes sudo, and NEVER
 #      tears down a legacy system unit. The legacy `--system` install
 #      path has been removed.
-#   9. Validates the substrate end-to-end (mpm health_check, scheduler
+#   8. Validates the substrate end-to-end (mpm health_check, scheduler
 #      service, lock file, directives count).
-#  10. On ecryptfs encrypted homes (linger + default.target invisibility),
+#   9. On ecryptfs encrypted homes (linger + default.target invisibility),
 #      installs an XDG autostart entry ~/.config/autostart/mpm-post-decrypt.desktop
 #      that runs after login/decrypt: daemon-reload + start scheduler (and
 #      telemetry if present), plus graphical-session.target Wants as secondary.
@@ -122,6 +125,14 @@ USER_NAME="${SUDO_USER:-${USER:-$(id -un)}}"
 PREFIX=""
 DATA_ROOT=""
 SERVICE_DST=""
+# Absolute path to the Makefile's build output directory, discovered from
+# `make print-build-dir` during phase_build. It is deliberately NOT
+# hardcoded here: the installer and the Makefile previously each carried
+# their own copy of the "bin" literal, and a one-sided edit would point the
+# installer at a directory `make build` no longer writes to. Empty until
+# phase_build runs, and never defaulted to a guessed path — an unresolved
+# value is a hard error (see build_dir).
+BUILD_DIR=""
 
 # ---------- logging ----------
 log()  { printf '%s %s\n' "$LOG_PREFIX" "$*" >&2; }
@@ -303,23 +314,95 @@ preflight() {
 }
 
 # ---------- phases ----------
+#
+# build_dir echoes the Makefile's build output directory. It is a function
+# rather than a bare "$BUILD_DIR" read so that an unresolved value fails at
+# the point of use instead of silently expanding to "/" or "" — the latter
+# would turn every subsequent path into "$PROJECT_ROOT//mpm".
+build_dir() {
+    if [ -z "$BUILD_DIR" ]; then
+        die "internal error: build output directory unknown (phase_build did not run?)" 2
+    fi
+    printf '%s\n' "$BUILD_DIR"
+}
+
 phase_build() {
     note "BUILD"
     cd "$PROJECT_ROOT"
 
     # The Makefile's `build` target itself detects and removes a stale
-    # wrapper at bin/mpm before invoking `go build`, so this phase does
-    # not need to duplicate that cleanup. Running `make build` here also
-    # handles the legacy wrapper case for users who invoke install.sh
+    # wrapper at the build path before invoking `go build`, so this phase
+    # does not need to duplicate that cleanup. Running `make build` here
+    # also handles the legacy wrapper case for users who invoke install.sh
     # against a checkout that was previously installed with the older
     # wrapper+real layout.
+    #
+    # Ask make where it writes BEFORE building, so a missing `print-build-dir`
+    # target is reported as a missing target rather than as five confusing
+    # "build did not produce X" errors against a path we guessed wrong.
+    #
+    # Two defences, because this value gates the whole install:
+    #
+    #   1. `-s --no-print-directory` suppress the noise make emits to
+    #      STDOUT when invoked as a recursive sub-make from inside another
+    #      recipe ("make[1]: Entering directory '...'") or when not
+    #      silent. Those go to stdout, so `2>/dev/null` alone does not
+    #      catch them.
+    #   2. The sed extracts the first absolute path from anywhere in the
+    #      output. This is what makes the install survive GNU make's
+    #      dry-run mode: make propagates MAKEFLAGS to sub-makes, so when
+    #      the installer runs from inside a recipe under `make -n` (the
+    #      build-config guard test does exactly this:
+    #      `make -n test` -> test-agent-installation -> install.sh), the
+    #      nested `make print-build-dir` does not RUN its recipe and
+    #      instead prints the recipe text, e.g.
+    #
+    #          echo '/tmp/.../.build/bin'
+    #
+    #      Requiring the output to be exactly one bare path made that
+    #      abort with "could not determine build output directory".
+    #      Pulling the path out of the echoed form keeps a legitimate
+    #      install working while still refusing anything that does not
+    #      resolve to an absolute path.
+    if ! BUILD_DIR="$(
+            _pbd="$(make -s --no-print-directory print-build-dir 2>/dev/null)"
+            # Prefer a bare absolute path (the normal case)...
+            printf '%s\n' "$_pbd" | sed -n 's/^\(\/[^ '\''"]*\)$/\1/p' | head -1
+            # ...else the path quoted inside an echoed recipe.
+            if [ "$_pbd" != "$(printf '%s\n' "$_pbd" | sed -n 's/^\(\/[^ '\''"]*\)$/\1/p' | head -1)" ]; then
+                printf '%s\n' "$_pbd" | sed -n "s/^echo '\(\/[^']*\)'\$/\\1/p" | head -1
+            fi
+        )" || [ -z "$BUILD_DIR" ]; then
+        die "could not determine build output directory from the Makefile (\`make print-build-dir\`);
+this installer deliberately does not guess the path — fix the Makefile or use an
+older checkout of install.sh with a matching Makefile." 2
+    fi
+    case "$BUILD_DIR" in
+        /*) ;;
+        *) die "make print-build-dir returned a non-absolute path '$BUILD_DIR'" 2 ;;
+    esac
+    log "build output: $BUILD_DIR"
 
     if ! make build; then
         die "make build failed" 2
     fi
     for bin in mpm mpm-mcp mpm-scheduler mpm-critic mpm-telemetry; do
-        [ -x "$PROJECT_ROOT/bin/$bin" ] || die "build did not produce bin/$bin" 2
+        [ -x "$(build_dir)/$bin" ] || die "build did not produce $(build_dir)/$bin" 2
     done
+
+    # The whole point of the build/install split. These are two different
+    # directories and must stay that way: writing build output into $PREFIX/bin
+    # is what previously let a plain build overwrite the running services.
+    # Checked after the build rather than only before, because a symlinked
+    # or overridden BUILD_DIR could resolve differently by this point.
+    _install_bin="$(cd "$PREFIX" 2>/dev/null && realpath -m "$PREFIX/bin" || printf '%s' "$PREFIX/bin")"
+    if [ "$(realpath -m "$BUILD_DIR")" = "$_install_bin" ]; then
+        die "build output ($BUILD_DIR) and install target ($_install_bin) are the same
+directory. Refusing to continue: promotion must copy distinct files, and an
+ordinary build must never write into the directory the running services execute
+from. Set BUILD_DIR to a scratch subdirectory of the checkout." 2
+    fi
+
     log "build complete"
 }
 
@@ -366,32 +449,42 @@ phase_binaries() {
 
     # Daemon binaries (raw ELF, owned by current user in user mode).
     #
-    # When the user cloned the repository directly to $HOME/.mpm — the
-    # canonical install prefix — PROJECT_ROOT/bin/$bin and PREFIX/bin/$bin
-    # resolve to the SAME file. Coreutils' install(1) refuses to copy a
-    # file onto itself and ``set -e`` would abort the installer before
-    # later phases run. ``[ -ef ]`` is a POSIX test that returns true
-    # when both paths refer to the same inode (handles direct equality
-    # AND symlink resolution), which is the right notion of "same file"
-    # for this case. If source and dest are the same file, the binary is
-    # already at the install target — nothing to do.
+    # The source is the Makefile's build output directory, discovered in
+    # phase_build via `make print-build-dir`. It is a scratch subdirectory
+    # of the checkout and is DISTINCT from $PREFIX/bin even when the
+    # checkout is $PREFIX itself — the canonical install.
     #
-    # ``mpm`` itself is now installed here too (no separate .real or
-    # wrapper). The Go binary handles MPM_WORKSPACE defaulting internally,
-    # so there is no longer any reason for the installer to write a
-    # non-ELF into a Makefile-owned path.
+    # ``mpm`` itself is installed here too (no separate .real or wrapper).
+    # The Go binary handles MPM_WORKSPACE defaulting internally, so there
+    # is no reason for the installer to write a non-ELF anywhere.
+    #
+    # SAME-FILE IS AN ERROR, NOT A SKIP. This loop used to treat
+    # ``[ "$src" -ef "$dst" ]`` as "already installed, skip" — a guard
+    # that existed only because source and destination used to be the same
+    # inode whenever the checkout WAS the prefix. Now that they are two
+    # distinct paths, reaching that state means the build/install split has
+    # been violated by something (a symlinked BUILD_DIR, a stale
+    # configuration), and the correct response is to stop. Skipping would
+    # report a successful install of a binary that was never copied, which
+    # is precisely the "success printed over a partial install" failure
+    # mode this installer already guards against elsewhere.
     for bin in mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry; do
-        local src="$PROJECT_ROOT/bin/$bin"
+        local src="$(build_dir)/$bin"
         local dst="$PREFIX/bin/$bin"
         if [ ! -f "$src" ]; then
             die "build did not produce $src (run make build first)" 2
         fi
         if [ "$src" -ef "$dst" ]; then
-            log "  $dst is build output (same file as $src) — skipping copy"
-        else
-            install -m 0755 "$src" "$dst"
-            log "  installed $dst"
+            die "refusing to install $bin: build output and install target are the same file
+  src: $src
+  dst: $dst
+Build output must be a scratch subdirectory of the checkout, separate from the
+install prefix. Something has aliased them (symlinked BUILD_DIR, or a checkout
+whose .build/ points at the install) — fix that rather than letting the
+installer report a deployment that did not happen." 2
         fi
+        install -m 0755 "$src" "$dst"
+        log "  installed $dst"
     done
 }
 
@@ -823,11 +916,14 @@ mode_dry_run() {
     log ""
     log "would execute:"
     log "  cd $PROJECT_ROOT && make build"
-    log "  install -m 0755 .../bin/mpm           -> $PREFIX/bin/mpm            (skipped when same inode)"
-    log "  install -m 0755 .../bin/mpm-scheduler -> $PREFIX/bin/mpm-scheduler  (skipped when same inode)"
-    log "  install -m 0755 .../bin/mpm-critic    -> $PREFIX/bin/mpm-critic     (skipped when same inode)"
-    log "  install -m 0755 .../bin/mpm-mcp       -> $PREFIX/bin/mpm-mcp        (skipped when same inode)"
-    log "  install -m 0755 .../bin/mpm-telemetry -> $PREFIX/bin/mpm-telemetry  (skipped when same inode)"
+    log "  # build output is $(make -C "$PROJECT_ROOT" -s --no-print-directory print-build-dir 2>/dev/null || echo '<BUILD_DIR>')"
+    log "  #   (scratch, inside the checkout; distinct from \$PREFIX/bin even when"
+    log "  #    the checkout IS \$PREFIX, as in the canonical \$HOME/.mpm install)"
+    log "  install -m 0755 <BUILD_DIR>/mpm           -> $PREFIX/bin/mpm"
+    log "  install -m 0755 <BUILD_DIR>/mpm-scheduler -> $PREFIX/bin/mpm-scheduler"
+    log "  install -m 0755 <BUILD_DIR>/mpm-critic    -> $PREFIX/bin/mpm-critic"
+    log "  install -m 0755 <BUILD_DIR>/mpm-mcp       -> $PREFIX/bin/mpm-mcp"
+    log "  install -m 0755 <BUILD_DIR>/mpm-telemetry -> $PREFIX/bin/mpm-telemetry"
     log "  (legacy cleanup: rm -f $PREFIX/bin/mpm.real $PREFIX/bin/mpm.pre-wrapper.* from older installs)"
     log "  symlink $PREFIX/bin/mpm     -> $LOCAL_BIN/mpm"
     log "  symlink $PREFIX/bin/mpm-mcp -> $LOCAL_BIN/mpm-mcp"

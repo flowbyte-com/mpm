@@ -11,13 +11,13 @@
 # and exits non-zero on any failure.
 #
 # Usage:  ./scripts/verify-alpha-blocker-fixes.sh
-# Assumes: ./bin/mpm and ./bin/mpm-mcp already built (`make build`).
+# Assumes: .build/bin/mpm and .build/bin/mpm-mcp already built (`make build`).
 
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MPM_BIN="${ROOT}/bin/mpm"
-MCP_BIN="${ROOT}/bin/mpm-mcp"
+MPM_BIN="${ROOT}/.build/bin/mpm"
+MCP_BIN="${ROOT}/.build/bin/mpm-mcp"
 TMP="$(mktemp -d -t mpm-alpha-verify.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 

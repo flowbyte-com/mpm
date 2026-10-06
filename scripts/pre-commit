@@ -250,14 +250,14 @@ echo "[pre-commit] running router linter (persona/mode frontmatter)..."
 # Only run if persona/ or mode/ files are staged for this commit —
 # avoids slowing down unrelated commits.
 if git diff --cached --name-only | grep -qE "^(persona|mode)/.*\.md$"; then
-  if [ ! -x "./bin/mpm" ]; then
-    echo "[pre-commit] WARN: bin/mpm not found, building..."
-    if ! "$GO" build -o bin/mpm ./cmd/mpm; then
-      echo "[pre-commit] ABORTING commit: could not build bin/mpm for linter." >&2
+  if [ ! -x "./.build/bin/mpm" ]; then
+    echo "[pre-commit] building .build/bin/mpm for the linter..."
+    if ! mkdir -p ./.build/bin || ! "$GO" build -o .build/bin/mpm ./cmd/mpm; then
+      echo "[pre-commit] ABORTING commit: could not build .build/bin/mpm for linter." >&2
       exit 1
     fi
   fi
-  if ! ./bin/mpm ops lint > /tmp/pre-commit-lint.log 2>&1; then
+  if ! ./.build/bin/mpm ops lint > /tmp/pre-commit-lint.log 2>&1; then
     echo "[pre-commit] ABORTING commit: router frontmatter lint failed." >&2
     echo "[pre-commit] Run \`mpm ops lint\` to see issues:" >&2
     cat /tmp/pre-commit-lint.log >&2

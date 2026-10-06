@@ -30,7 +30,7 @@
 # internal/core/shared_fts_triggers_test.go.
 #
 # Usage: bash scripts/smoke_shared.sh
-# Requires: bin/mpm built with CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 (or
+# Requires: .build/bin/mpm built with CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 (or
 # -tags fts5). Run `make build` first.
 
 set -euo pipefail
@@ -38,7 +38,7 @@ set -euo pipefail
 # Resolve script-relative paths so the script is callable from any cwd.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
-MPM_BIN="${MPM_BIN:-$REPO_ROOT/bin/mpm}"
+MPM_BIN="${MPM_BIN:-$REPO_ROOT/.build/bin/mpm}"
 
 if [ ! -x "$MPM_BIN" ]; then
     echo "FATAL: mpm binary not found at $MPM_BIN"

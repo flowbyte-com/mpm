@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "mpm": {
-      "command": "./bin/mpm-mcp",
+      "command": "./.build/bin/mpm-mcp",
       "args": [],
       "env": {
         "MPM_WORKSPACE": "."

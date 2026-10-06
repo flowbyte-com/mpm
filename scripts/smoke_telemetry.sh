@@ -7,10 +7,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="${REPO_ROOT}/bin/mpm-telemetry"
+BIN="${REPO_ROOT}/.build/bin/mpm-telemetry"
 
 if [[ ! -x "$BIN" ]]; then
-  echo "bin/mpm-telemetry missing; run 'make build' first" >&2
+  echo ".build/bin/mpm-telemetry missing; run 'make build' first" >&2
   exit 1
 fi
 

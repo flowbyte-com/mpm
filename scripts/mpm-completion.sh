@@ -21,7 +21,7 @@
 # Resolution order:
 #   1. MPM_WORKSPACE — explicit project directory (set by operators
 #      who cloned mpm to a non-default location). The completion runs
-#      the in-source `bin/mpm` binary which understands the
+#      the in-source `.build/bin/mpm` binary which understands the
 #      _suggest_tags command and works against the project's
 #      workspace DB.
 #

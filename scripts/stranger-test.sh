@@ -8,7 +8,7 @@
 # command that fails to produce the documented behavior.
 #
 # Usage:
-#   ./scripts/stranger-test.sh                    # default: uses ./bin/mpm
+#   ./scripts/stranger-test.sh                    # default: uses .build/bin/mpm
 #   MPM_BIN=/abs/path/to/mpm ./scripts/stranger-test.sh
 #   STRANGER_VERBOSE=1 ./scripts/stranger-test.sh # print every command
 #   STRANGER_KEEP=1 ./scripts/stranger-test.sh    # keep scratch dir for forensics
@@ -32,12 +32,12 @@ set -u
 # --- locate binary ------------------------------------------------------------
 
 if [[ -z "${MPM_BIN:-}" ]]; then
-    if [[ -x "./bin/mpm" ]]; then
-        MPM_BIN="$(pwd)/bin/mpm"
-    elif [[ -x "$(dirname "$0")/../bin/mpm" ]]; then
-        MPM_BIN="$(cd "$(dirname "$0")/.." && pwd)/bin/mpm"
+    if [[ -x "./.build/bin/mpm" ]]; then
+        MPM_BIN="$(pwd)/.build/bin/mpm"
+    elif [[ -x "$(dirname "$0")/../.build/bin/mpm" ]]; then
+        MPM_BIN="$(cd "$(dirname "$0")/.." && pwd)/.build/bin/mpm"
     else
-        echo "❌ MPM_BIN not set and ./bin/mpm not found. Build with 'make build' first." >&2
+        echo "❌ MPM_BIN not set and ./.build/bin/mpm not found. Build with 'make build' first." >&2
         exit 2
     fi
 fi

@@ -19,7 +19,11 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-MPM="${MPM:-${REPO_ROOT}/bin/mpm}"
+# Developer build artifact. The checkout's bin/ is the INSTALL prefix
+# when the source tree is ~/.mpm, so resolving the binary there would
+# smoke-test whatever production has deployed rather than the tree under
+# review. Matches the other verify-* scripts.
+MPM="${MPM:-${REPO_ROOT}/.build/bin/mpm}"
 DB="${DB:-${REPO_ROOT}/src/db/mpm.db}"
 
 # Pre-flight: refuse to run if MPM or DB cannot be located. The W-011

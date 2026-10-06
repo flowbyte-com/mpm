@@ -4,7 +4,11 @@
 # Must be run from repo root: bash scripts/work_acceptance.sh
 set -uo pipefail
 
-MPM_BIN="${MPM_BIN:-./bin/mpm}"
+# Developer build artifact, NOT the installed binary. `make build` writes
+# .build/bin/; the installed binaries live at $PREFIX/bin. Pointing this at
+# ./bin/mpm would test whatever production happens to have deployed, which is
+# both wrong (it is not the tree under test) and a live-system read.
+MPM_BIN="${MPM_BIN:-./.build/bin/mpm}"
 TMPDIR=$(mktemp -d)
 echo "TMPDIR: $TMPDIR"
 export MPM_WORKSPACE="$TMPDIR/.mpm"
