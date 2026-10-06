@@ -811,6 +811,50 @@ papered over by an unrelated one. `MPM_BIN` unset is the ad-hoc case
 (`mpm-scheduler` run by hand) and resolves to a bare `mpm`; the installed
 unit always sets it.
 
+**Helper binaries resolve the same way, and never through `PATH`.**
+`mpm-critic` (both the `ExecCLI` finding writer and the telemetry hunt's
+`mpm_provenance` / `mpm_lessons` calls) and `mpm-telemetry observe` shell out
+to `mpm call ...`. They resolve that binary in one order:
+
+1. an explicitly configured path — `ExecCLI.MPMPath`, or
+   `mpm-telemetry observe --mpm`;
+2. `MPM_BIN`, the same variable the scheduler unit sets;
+3. the sibling named `mpm` beside the running `mpm-critic` / `mpm-telemetry`
+   executable;
+4. otherwise fail, naming what was tried.
+
+There is deliberately no final bare-`"mpm"` fallback. Every candidate must be
+an explicit path that exists, is a regular file, and carries an execute bit; a
+*configured* candidate that fails any of those is an error rather than a
+reason to fall through, so an operator who named a binary and got it wrong
+finds out. Sibling resolution is what makes a non-standard `PREFIX` install
+work — `make install PREFIX=/opt/mpm` keeps all five binaries together — and
+nothing here assumes `~/.mpm`. The scheduler-launched critic inherits the
+scheduler's `MPM_BIN`, so step 2 is what normally serves it; an operator
+running `mpm-telemetry observe` by hand from an installed prefix gets step 3.
+
+`mpm-telemetry observe` resolves *lazily*: `--dry-run`, and any run whose
+hunt finds nothing to report, never shells out and therefore never requires a
+resolvable binary. The error surfaces the moment a call is actually needed.
+
+**Git evidence requires an explicitly named repository.** MPM records a work
+item's Git state as audit evidence, and it will only do so for a repository
+the caller named. It does not discover one: not from the process working
+directory, not from the workspace, not by walking parents, and never on the
+assumption that the `MPM` source checkout is the repository a piece of work
+belongs to. Given no repository, no Git evidence is recorded.
+
+The reason is that a `git` evidence row classifies as *audit* evidence, so
+one row is enough to move a work item to `partial` verification. Inferring the
+repository from ambient process state therefore let an unrelated checkout
+assert, on its own behalf, that an arbitrary work item had been observed — and
+that assertion is indistinguishable downstream from a real one. Missing
+evidence is strictly better: absence is visible and can be supplied later by a
+caller that actually knows the repository, whereas a fabricated observation is
+trusted. Nothing in the work model carries a repository identity today, so the
+automatic path is a no-op by design; to record real Git evidence, use the
+explicit observation route (`mpm_evidence action=add source_group=git`).
+
 **The working directory is not a workspace.** No `MPM` process resolves
 runtime state from the current directory. The workspace is
 `$MPM_WORKSPACE`, else `$HOME/.mpm`; the database is

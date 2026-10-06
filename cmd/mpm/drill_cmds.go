@@ -308,9 +308,15 @@ func dispatchDrillCLI(
 
 // runSyntheticDrillCLI emits the harness's sequence and shells
 // `mpm call` per call so the audit hook populates tool_invocations
-// with the same session_id. The CLI uses the local resolved binary
-// (`os.Executable`) if available, falling back to whatever `mpm`
-// resolves on PATH.
+// with the same session_id. The CLI re-invokes its OWN executable
+// (`os.Executable`), so the binary that runs the drill and the binary the
+// drill shells out to are necessarily the same build.
+//
+// It used to fall back to a bare "mpm" when that re-invocation failed, which
+// silently substituted whatever PATH offered — potentially a different MPM
+// than the one running the drill, writing the drill's evidence into another
+// substrate. A failure to re-execute ourselves is now reported instead: it
+// is a real problem with this invocation, not a reason to guess.
 func runSyntheticDrillCLI(
 	ctx context.Context,
 	drill core.DrillSpec,
@@ -322,9 +328,12 @@ func runSyntheticDrillCLI(
 	if err != nil {
 		return nil, err
 	}
-	mpmBin, _ := os.Executable()
-	if resolveErr := exec.Command(mpmBin, "version").Run(); resolveErr != nil {
-		mpmBin = "mpm" // fall back to PATH
+	mpmBin, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve own executable for drill replay: %w", err)
+	}
+	if err := exec.Command(mpmBin, "version").Run(); err != nil {
+		return nil, fmt.Errorf("drill replay requires a re-executable mpm binary (%s): %w", mpmBin, err)
 	}
 	for _, c := range calls {
 		if err := ctx.Err(); err != nil {

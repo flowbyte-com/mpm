@@ -751,9 +751,23 @@ class TestRuntimeTemplates(unittest.TestCase):
     def scheduler_units(self):
         """Units whose ExecStart runs the scheduler.
 
-        Subprocess binary pinning only applies here. mpm-telemetry
-        execs nothing, so demanding MPM_BIN of it would be asserting a
+        Subprocess binary pinning only applies here, because the scheduler
+        is the process that spawns other MPM binaries: it execs `mpm` for
+        gc_run/broadcast and `mpm-critic` for the audit, and it hands both
+        its own environment down, so the unit's MPM_BIN reaches the critic.
+
+        mpm-telemetry is deliberately NOT in this set. It is a different
+        case, and the difference matters: `mpm-telemetry observe` DOES exec
+        `mpm` (for the mpm_provenance cross-DB join and the mpm_lessons
+        save), but the telemetry unit runs `mpm-telemetry serve`, which
+        execs nothing at all. Demanding MPM_BIN of that unit would assert a
         property it has no reason to have.
+
+        When an operator runs `observe` by hand from the installed prefix,
+        the binary resolves as the sibling `mpm` beside mpm-telemetry —
+        which is what a PREFIX install actually guarantees. See
+        test_telemetry_unit_runs_serve_not_observe for the guard that keeps
+        those two facts in agreement.
         """
         return [
             u
@@ -801,6 +815,69 @@ class TestRuntimeTemplates(unittest.TestCase):
                     f"{unit.name}: {key}={env[key]} is a bare name; PATH would "
                     "decide which binary runs",
                 )
+
+    def test_telemetry_unit_runs_serve_not_observe(self):
+        # The reason mpm-telemetry's unit carries no MPM_BIN is that the
+        # unit runs `serve`, which execs nothing. `observe` is the only
+        # subcommand that shells out to `mpm` (mpm_provenance cross-DB
+        # join, mpm_lessons save), and nothing in this repo — no scheduler
+        # handler, no unit, no timer, no script — launches it under a unit.
+        #
+        # So the unit's PATH-safety rests on that fact. If someone changes
+        # ExecStart to `observe`, this test fails and the missing MPM_BIN
+        # becomes a deliberate decision to make rather than an accident.
+        telemetry_units = [
+            u
+            for u in self.units()
+            if any(
+                "mpm-telemetry" in line
+                for line in unit_directive_values(u, "ExecStart")
+            )
+        ]
+        self.assertTrue(
+            telemetry_units,
+            "no unit runs mpm-telemetry; the guard below would pass vacuously",
+        )
+        for unit in telemetry_units:
+            for exec_line in unit_directive_values(unit, "ExecStart"):
+                self.assertNotIn(
+                    " observe",
+                    exec_line,
+                    f"{unit.name}: ExecStart={exec_line!r} runs `observe`, which "
+                    "shells out to `mpm`. The unit must then declare MPM_BIN, "
+                    "because a user unit's PATH is the systemd manager's.",
+                )
+
+    def test_telemetry_observe_has_no_automatic_launcher(self):
+        # The complement of the guard above: confirm the claim that nothing
+        # launches `observe` under a unit. If a future cron/timer/handler
+        # starts doing so, this fails and the two tests together point at
+        # the missing Environment=MPM_BIN.
+        repo_root = Path(__file__).resolve().parents[2]
+        offenders = []
+        for unit in self.units():
+            for directive in ("ExecStart", "ExecStartPre", "ExecStop", "ExecStopPost"):
+                for value in unit_directive_values(unit, directive):
+                    if "observe" in value:
+                        offenders.append(f"{unit.name}:{directive}={value}")
+        self.assertEqual(
+            offenders,
+            [],
+            "a unit now launches `mpm-telemetry observe`; it must declare "
+            f"MPM_BIN: {offenders}",
+        )
+        # No scheduler handler shells out to `mpm-telemetry observe`.
+        scheduler_go = repo_root / "internal" / "scheduler"
+        for go_file in scheduler_go.rglob("*.go"):
+            if go_file.name.endswith("_test.go"):
+                continue
+            text = go_file.read_text(encoding="utf-8")
+            self.assertNotIn(
+                '"observe"',
+                text,
+                f"{go_file}: a scheduler handler references the observe "
+                "subcommand; if it can launch it, MPM_BIN must reach that path",
+            )
 
     def test_no_directive_reaches_into_a_source_checkout(self):
         # §13 prerequisite: after the checkout moves to ~/src/mpm, nothing
