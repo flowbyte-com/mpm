@@ -35,6 +35,7 @@ import (
 
 	"github.com/flowbyte-com/mpm-core/mpmcli"
 	"github.com/flowbyte-com/mpm/internal/critic"
+	"github.com/flowbyte-com/mpm/internal/runtimebin"
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
 
@@ -125,9 +126,21 @@ func runTelemetryHunt(ctx context.Context, log *slog.Logger, projectRoot string,
 	}
 	defer store.Close()
 
+	// Both hunt subprocesses must run the SAME binary identity. Resolve
+	// once here rather than per call: two calls in one cycle that
+	// resolved differently would mean an artifact count taken from one
+	// substrate and a lesson written to another.
+	//
+	// This used to pass a bare "mpm" and let PATH decide, which under
+	// the scheduler's unit PATH meant whichever mpm came first there.
+	mpmBin, err := runtimebin.Resolve()
+	if err != nil {
+		return fmt.Errorf("resolve mpm binary for telemetry hunt: %w", err)
+	}
+
 	// Artifact count: shell out to mpm call mpm_provenance (cross-DB join).
 	countFn := func(ctx context.Context, sessionID string) (int, error) {
-		cmd := exec.CommandContext(ctx, "mpm", "call", "mpm_provenance",
+		cmd := exec.CommandContext(ctx, mpmBin, "call", "mpm_provenance",
 			"--payload", fmt.Sprintf(`{"action":"count_by_session","params":{"session_id":"%s"}}`, sessionID))
 		cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+projectRoot)
 		out, err := cmd.Output()
@@ -155,7 +168,7 @@ func runTelemetryHunt(ctx context.Context, log *slog.Logger, projectRoot string,
 		if err != nil {
 			return err
 		}
-		cmd := exec.CommandContext(ctx, "mpm", "call", "mpm_lessons", "--payload", string(b))
+		cmd := exec.CommandContext(ctx, mpmBin, "call", "mpm_lessons", "--payload", string(b))
 		cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+projectRoot)
 		out, err := cmd.Output()
 		if err != nil {

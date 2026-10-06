@@ -27,6 +27,8 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"github.com/flowbyte-com/mpm/internal/runtimebin"
 )
 
 // Hunt is the unit of work in an audit cycle. Each hunt reads the
@@ -64,8 +66,42 @@ type CLIRunner interface {
 // ExecCLI invokes `mpm call <tool> --payload <json>` as a subprocess.
 // Errors include the tool name and any stderr output for diagnostics.
 type ExecCLI struct {
-	MPMPath string        // path to the mpm binary (default: "mpm")
+	// MPMPath pins the mpm binary. Empty means "resolve it" — via
+	// MPM_BIN, then the sibling beside the running executable — not
+	// "use whatever PATH offers".
+	//
+	// It used to default to the bare name "mpm", which meant the critic
+	// audited against whichever mpm came first on the unit's PATH: a
+	// stale build or an unrelated project, silently, while the installed
+	// binary sat unused.
+	MPMPath string
 	Timeout time.Duration // per-call timeout (default: 30s)
+
+	// selfPath overrides the running-executable location used for
+	// sibling resolution. Test-only; production leaves it empty.
+	selfPath string
+
+	// env overrides the environment MPM_BIN is read from. Test-only.
+	env []string
+
+	// resolved caches the binary identity across calls within a
+	// process, so one audit cycle cannot resolve two different binaries.
+	resolved   string
+	resolveErr error
+}
+
+// resolveBin returns the mpm binary to execute, resolving at most once
+// per ExecCLI.
+func (c *ExecCLI) resolveBin() (string, error) {
+	if c.resolved != "" || c.resolveErr != nil {
+		return c.resolved, c.resolveErr
+	}
+	c.resolved, c.resolveErr = (&runtimebin.Resolver{
+		Explicit: c.MPMPath,
+		SelfPath: c.selfPath,
+		Env:      c.env,
+	}).Resolve()
+	return c.resolved, c.resolveErr
 }
 
 // Call runs the mpm call synchronously and returns an error on non-zero
@@ -79,9 +115,9 @@ type ExecCLI struct {
 // Callers (hunts) populate Tool + Action on the Finding; this wrapper
 // ensures the published payload matches what the live tool expects.
 func (c *ExecCLI) Call(ctx context.Context, tool, action string, payload map[string]interface{}) error {
-	mpm := c.MPMPath
-	if mpm == "" {
-		mpm = "mpm"
+	mpm, err := c.resolveBin()
+	if err != nil {
+		return fmt.Errorf("critic: resolve mpm binary: %w", err)
 	}
 	envelope := map[string]interface{}{
 		"action": action,
