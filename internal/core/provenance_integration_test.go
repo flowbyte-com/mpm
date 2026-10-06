@@ -637,16 +637,37 @@ func TestArtifactProvenance_MigrationIsIdempotent(t *testing.T) {
 		t.Errorf("parent_invocation_id column count = %d, want 1", columnCount)
 	}
 
+	// Assert the CHECK semantically against the canonical vocabulary rather
+	// than by substring. The previous form checked for "'handoff'" and
+	// "'directive'" anywhere in the DDL and never mentioned 'work', so a
+	// table that merely NAMED those values in a comment would have passed —
+	// and a table that rejected them outright would too. Comparing the
+	// parsed CHECK against ProvenanceArtifactTypes asks the actual question.
 	var checkSQL string
 	if err := dm.db.QueryRow(
 		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'artifact_provenance'`,
 	).Scan(&checkSQL); err != nil {
 		t.Fatalf("read schema: %v", err)
 	}
-	for _, must := range []string{"'handoff'", "'directive'"} {
-		if !contains(checkSQL, must) {
-			t.Errorf("artifact_type CHECK missing %q\nGot: %s", must, checkSQL)
+	vocab := artifactTypeVocabulary(checkSQL)
+	if !vocabularyMatchesCanonical(vocab) {
+		t.Errorf("artifact_type CHECK vocabulary = %v, want %v\nGot: %s",
+			vocab, ProvenanceArtifactTypes, checkSQL)
+	}
+
+	// And prove the constraint by using it: every canonical type must be
+	// accepted, a non-canonical one rejected.
+	for _, atype := range ProvenanceArtifactTypes {
+		if _, err := dm.db.Exec(`INSERT INTO artifact_provenance
+			(id, artifact_id, artifact_type, created_at, actor_kind)
+			VALUES (?,?,?,?,?)`,
+			"fresh-"+atype, "fresh-artifact-"+atype, atype, 1, "agent"); err != nil {
+			t.Errorf("canonical artifact_type %q rejected on a fresh database: %v", atype, err)
 		}
 	}
+	if _, err := dm.db.Exec(`INSERT INTO artifact_provenance
+		(id, artifact_id, artifact_type, created_at, actor_kind)
+		VALUES ('fresh-bad','fresh-artifact-bad','spaceship',1,'agent')`); err == nil {
+		t.Error("non-canonical artifact_type 'spaceship' accepted on a fresh database")
+	}
 }
-

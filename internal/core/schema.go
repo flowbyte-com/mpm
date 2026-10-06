@@ -4,8 +4,37 @@
 
 package internal
 
+import "strings"
+
 // BaseTables contains the core table creation statements.
 // These are always created on database initialization.
+// ProvenanceArtifactTypes is the canonical artifact_provenance.artifact_type
+// vocabulary. It is the single source of truth for:
+//
+//   - the CREATE TABLE CHECK in BaseTables (see ProvenanceArtifactTypeSQL);
+//   - the replacement DDL built by migrateArtifactProvenanceWorkType;
+//   - the skip predicate that decides whether a legacy table needs rebuilding;
+//   - the migration tests, which assert against this list rather than a
+//     hand-copied one.
+//
+// Everything downstream of this slice must agree with it. A migration that
+// silently skips a partially widened table, or that widens the CHECK past the
+// canonical set, is exactly the class of defect a single source prevents.
+var ProvenanceArtifactTypes = []string{
+	"memory", "theory", "lesson", "decision", "handoff", "directive", "work",
+}
+
+// ProvenanceArtifactTypeSQL renders the canonical vocabulary as a SQL value
+// list, e.g. ('memory','theory',...). Used to build CHECK constraints so the
+// DDL is generated from ProvenanceArtifactTypes rather than retyped.
+func ProvenanceArtifactTypeSQL() string {
+	quoted := make([]string, len(ProvenanceArtifactTypes))
+	for i, t := range ProvenanceArtifactTypes {
+		quoted[i] = "'" + t + "'"
+	}
+	return strings.Join(quoted, ",")
+}
+
 var BaseTables = []string{
 	// Sessions table - stores session metadata and transcripts
 	`CREATE TABLE IF NOT EXISTS sessions (
@@ -438,6 +467,12 @@ var BaseTables = []string{
 	// The two CHECK constraints enforce the artifact_type and
 	// actor_kind vocabularies at the storage boundary; a typo in a
 	// caller is rejected by the database, not silently propagated.
+	//
+	// The artifact_type CHECK is built from ProvenanceArtifactTypes via
+	// string concatenation rather than written out literally, so the
+	// canonical vocabulary has exactly one definition. The migration
+	// (migrateArtifactProvenanceWorkType) reads the same slice: the
+	// replacement DDL cannot drift from this one.
 	`CREATE TABLE IF NOT EXISTS artifact_provenance (
 		id                   TEXT PRIMARY KEY,
 		artifact_id          TEXT NOT NULL,
@@ -473,8 +508,11 @@ var BaseTables = []string{
 		-- SQL comment inside the DDL: artifact_type covers the full
 		-- substrate surface for telemetry. The widening from the
 		-- original ('memory','theory','lesson','decision') is enforced
-		-- for existing alpha DBs by migrateArtifactProvenanceSchema.
-		CHECK (artifact_type IN ('memory','theory','lesson','decision','handoff','directive','work')),
+		-- for existing databases by
+		-- migrateArtifactProvenanceWorkType, which rebuilds the table
+		-- when — and only when — the live CHECK vocabulary does not
+		-- already equal the canonical set below.
+		CHECK (artifact_type IN (` + ProvenanceArtifactTypeSQL() + `)),
 		CHECK (actor_kind IN ('agent','human','import','system','unknown'))
 	);`,
 	// Go comment block: Reserved for the artifact_relations table.
