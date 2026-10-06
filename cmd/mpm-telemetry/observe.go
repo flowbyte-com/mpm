@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/flowbyte-com/mpm/internal/runtimebin"
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
 
@@ -24,7 +25,18 @@ func runObserve(args []string) error {
 	since := fs.Int64("since", 0, "Unix epoch seconds; default = now-7d")
 	threshold := fs.Int64("threshold", 100000, "high-token threshold (input + output)")
 	minInv := fs.Int("min-invocations", 1, "minimum invocations per session")
-	mpmPath := fs.String("mpm", "mpm", "path to mpm binary for cross-DB lookups")
+	// --mpm is an operator override for the binary used for cross-DB
+	// lookups. It defaults to EMPTY, not to "mpm": resolution happens
+	// through runtimebin (MPM_BIN, then the sibling of this executable)
+	// and only when a subprocess is actually required.
+	//
+	// It used to default to the bare name "mpm", so an unattended observe
+	// run cross-joined whichever mpm PATH offered. Under a unit's PATH
+	// that is not necessarily the installed one, and the resulting counts
+	// look plausible either way — which is exactly why it needs to be
+	// pinned rather than inherited.
+	mpmPath := fs.String("mpm", "", "absolute path to mpm binary for cross-DB lookups; "+
+		"default resolves MPM_BIN then the sibling of this executable")
 	dryRun := fs.Bool("dry-run", false, "print findings instead of calling mpm call")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -39,8 +51,9 @@ func runObserve(args []string) error {
 	}
 	defer store.Close()
 
-	countFn := defaultArtifactCountFn(*mpmPath)
-	lessonFn := defaultLessonSaveFn(*mpmPath)
+	lazyBin := &lazyMPMBin{explicit: *mpmPath}
+	countFn := defaultArtifactCountFn(lazyBin)
+	lessonFn := defaultLessonSaveFn(lazyBin)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -66,13 +79,13 @@ func runObserve(args []string) error {
 	return nil
 }
 
-func defaultArtifactCountFn(mpmPath string) telemetry.ArtifactCountFn {
+func defaultArtifactCountFn(l *lazyMPMBin) telemetry.ArtifactCountFn {
 	return func(ctx context.Context, sessionID string) (int, error) {
 		payload, _ := json.Marshal(map[string]any{
 			"action":     "count_by_session",
 			"session_id": sessionID,
 		})
-		out, err := runMpmCall(ctx, mpmPath, "mpm_provenance", payload)
+		out, err := runMpmCall(ctx, l, "mpm_provenance", payload)
 		if err != nil {
 			return 0, err
 		}
@@ -86,18 +99,44 @@ func defaultArtifactCountFn(mpmPath string) telemetry.ArtifactCountFn {
 	}
 }
 
-func defaultLessonSaveFn(mpmPath string) func(context.Context, map[string]any) error {
+func defaultLessonSaveFn(l *lazyMPMBin) func(context.Context, map[string]any) error {
 	return func(ctx context.Context, payload map[string]any) error {
 		b, err := json.Marshal(payload)
 		if err != nil {
 			return err
 		}
-		_, err = runMpmCall(ctx, mpmPath, "mpm_lessons", b)
+		_, err = runMpmCall(ctx, l, "mpm_lessons", b)
 		return err
 	}
 }
 
-func runMpmCall(ctx context.Context, mpmPath, tool string, payload []byte) ([]byte, error) {
+// lazyMPMBin resolves the mpm binary on first use and caches it.
+//
+// Resolution is deliberately deferred rather than performed at startup.
+// `observe --dry-run` prints findings without saving a lesson, and on a
+// quiet telemetry store the hunt may never call mpm at all — neither
+// should fail because a binary could not be resolved for a subprocess
+// that was never going to run. The error still surfaces the moment a
+// call is genuinely required.
+type lazyMPMBin struct {
+	explicit string
+	resolved string
+	err      error
+}
+
+func (l *lazyMPMBin) path() (string, error) {
+	if l.resolved != "" || l.err != nil {
+		return l.resolved, l.err
+	}
+	l.resolved, l.err = (&runtimebin.Resolver{Explicit: l.explicit}).Resolve()
+	return l.resolved, l.err
+}
+
+func runMpmCall(ctx context.Context, l *lazyMPMBin, tool string, payload []byte) ([]byte, error) {
+	mpmPath, err := l.path()
+	if err != nil {
+		return nil, fmt.Errorf("resolve mpm binary for %s: %w", tool, err)
+	}
 	cmd := exec.CommandContext(ctx, mpmPath, "call", tool, "--payload", string(payload))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
