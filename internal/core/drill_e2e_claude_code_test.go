@@ -66,11 +66,11 @@ func TestDrillE2E_ClaudeCode(t *testing.T) {
 		t.Skipf("claude CLI not on PATH: %v", err)
 	}
 	mpmMcpPath, err := exec.LookPath("mpm-mcp")
-	// Fallback to workspace bin/mpm-mcp if not on PATH
+	// Fallback to the developer build artifact if not on PATH.
 	if err != nil {
 		mpmMcpPath = findWorkspaceBin(t, "mpm-mcp")
 		if mpmMcpPath == "" {
-			t.Skipf("mpm-mcp not on PATH and not in ./bin: %v", err)
+			t.Skipf("mpm-mcp not on PATH and not in ./.build/bin: %v", err)
 		}
 	}
 
@@ -265,8 +265,13 @@ func TestDrillE2E_ClaudeCode(t *testing.T) {
 }
 
 // findWorkspaceBin walks up from the test working directory to find
-// a bin/<binary> relative to the project root. Used when the binary
-// isn't on PATH but exists in the local build.
+// a .build/bin/<binary> relative to the project root. Used when the
+// binary isn't on PATH but exists in the local developer build.
+//
+// Note the directory: the Makefile's BUILD_DIR is `.build/bin`, a scratch
+// output distinct from the install prefix's `bin/`. Looking under `bin/`
+// here would make this test reach for the LIVE install binaries whenever
+// the checkout happens to be the prefix.
 func findWorkspaceBin(t *testing.T, name string) string {
 	t.Helper()
 	// tests run with cwd = the package dir; project root is up one.
@@ -276,7 +281,7 @@ func findWorkspaceBin(t *testing.T, name string) string {
 	}
 	root := filepath.Dir(cwd)
 	for i := 0; i < 5; i++ {
-		cand := filepath.Join(root, "bin", name)
+		cand := filepath.Join(root, ".build", "bin", name)
 		if _, err := os.Stat(cand); err == nil {
 			return cand
 		}
@@ -285,7 +290,7 @@ func findWorkspaceBin(t *testing.T, name string) string {
 	// Pre-fix this also tried /home/v/workspace/projects/mpm/bin
 	// — the original author's checkout — which broke the test
 	// under any other user. The walk-up loop above is the
-	// canonical path: it finds <repo>/bin/<name> regardless of
+	// canonical path: it finds <repo>/.build/bin/<name> regardless of
 	// cwd, so long as the test runs from inside the repo tree.
 	return ""
 }

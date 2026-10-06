@@ -245,16 +245,16 @@ func assertJSONContract(t *testing.T, c jsonContractCase, stdout, stderr []byte,
 // mpmBinForTest resolves the production binary for the matrix tests.
 //
 // Pre-fix this had a hardcoded /home/v/.mpm/bin/mpm as the third
-// candidate — the original author's install location. Removed: the
-// walk-up-the-tree candidates cover both `make build`-in-tree and
-// in-place binaries; an absolute install path leaks the test into a
-// specific user's host environment. If neither walk-up candidate
-// hits, the test falls back to a per-test built binary via the
-// shared mpmCmd helper (see exec_helpers_test.go).
+// candidate — the original author's install location. Removed: an
+// absolute install path leaks the test into a specific user's host
+// environment, and silently exercising the INSTALLED binary in place
+// of the code under test is worse than failing. The single candidate
+// is the Makefile's BUILD_DIR. If it misses, the test falls back to a
+// per-test built binary via the shared mpmCmd helper (see
+// exec_helpers_test.go).
 func mpmBinForTest() string {
 	candidates := []string{
-		filepath.Join("..", "..", "bin", "mpm"),
-		"bin/mpm",
+		filepath.Join(builtCLIRelPath, "mpm"),
 	}
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {

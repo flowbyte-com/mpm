@@ -27,10 +27,7 @@ import (
 // workspace lives under t.TempDir() and is cleaned up automatically.
 func runMpmSkillWorkspace(t *testing.T, args ...string) (string, int) {
 	t.Helper()
-	binPath := filepath.Join("..", "..", "bin", "mpm")
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		t.Skip("bin/mpm not built; run `make build` first")
-	}
+	binPath := requireBuiltCLI(t)
 	tmpDir := t.TempDir()
 	workspace := filepath.Join(tmpDir, "workspace")
 	cmd := exec.Command(binPath, args...)
@@ -163,7 +160,7 @@ func TestSkillWorkshop_Form_PublishesSkill(t *testing.T) {
 				{"call": "do the thing", "args_from": ""},
 			},
 		},
-		"task_context":       "TDD regression for mpm skill workshop --mode form",
+		"task_context":         "TDD regression for mpm skill workshop --mode form",
 		"workflow_description": "fill decision model, validate, publish",
 	}
 	payloadBytes, err := json.Marshal(payload)
@@ -176,7 +173,7 @@ func TestSkillWorkshop_Form_PublishesSkill(t *testing.T) {
 	if err := os.WriteFile(payloadPath, payloadBytes, 0644); err != nil {
 		t.Fatalf("write payload: %v", err)
 	}
-	cmd := exec.Command(filepath.Join("..", "..", "bin", "mpm"),
+	cmd := exec.Command(filepath.Join(builtCLIRelPath, "mpm"),
 		"skill", "workshop", "--file", payloadPath)
 	cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
 	out, err := cmd.CombinedOutput()
@@ -209,8 +206,8 @@ func TestSkillWorkshop_Refine_MissingChangeType_Rejected(t *testing.T) {
 			"boundary": "procedure",
 		},
 		"proposal": map[string]interface{}{
-			"name": "refine-no-change-type",
-			"version": "1.0.0",
+			"name":        "refine-no-change-type",
+			"version":     "1.0.0",
 			"description": "should be rejected",
 			"when_to_use": "trying to refine without change_type is not allowed",
 		},
@@ -246,8 +243,8 @@ func TestSkillWorkshop_InvalidBoundary_Rejected(t *testing.T) {
 			"boundary": "fact", // not in {procedure, judgment, knowledge}
 		},
 		"proposal": map[string]interface{}{
-			"name": "bad-boundary",
-			"version": "1.0.0",
+			"name":        "bad-boundary",
+			"version":     "1.0.0",
 			"when_to_use": "trying a non-canonical boundary value should be rejected",
 		},
 	}
@@ -297,7 +294,7 @@ func TestSkillWorkshop_CLIEqualsMCPRoute(t *testing.T) {
 	payloadPath := filepath.Join(tmpDir, "parity.json")
 	os.WriteFile(payloadPath, payloadBytes, 0644)
 
-	binPath := filepath.Join("..", "..", "bin", "mpm")
+	binPath := requireBuiltCLI(t)
 	runInWorkspace := func(args ...string) (map[string]interface{}, int) {
 		cmd := exec.Command(binPath, args...)
 		cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)

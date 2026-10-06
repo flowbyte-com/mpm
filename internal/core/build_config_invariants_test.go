@@ -562,15 +562,18 @@ func makeRecipe(t *testing.T, makefilePath, target string) string {
 	return strings.Join(body, "\n")
 }
 
-// makeVariable returns the value of a `NAME := value` / `NAME = value`
-// Makefile assignment, with surrounding quotes and spaces trimmed.
+// makeVariable returns the value of a `NAME := value` / `NAME = value` /
+// `NAME ?= value` Makefile assignment, with surrounding quotes and spaces
+// trimmed. The conditional `?=` form matters here: PREFIX is declared
+// with it, so a reader that only understood `:=` reports PREFIX as
+// undefined rather than reading its real value.
 func makeVariable(t *testing.T, makefilePath, name string) (string, bool) {
 	t.Helper()
 	data, err := os.ReadFile(makefilePath)
 	if err != nil {
 		t.Fatalf("read %s: %v", makefilePath, err)
 	}
-	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + `\s*:?=\s*(.+)$`)
+	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + `\s*(?:\?|:)?=\s*(.+)$`)
 	m := re.FindStringSubmatch(string(data))
 	if len(m) < 2 {
 		return "", false
@@ -912,5 +915,361 @@ func TestBuildConfig_CriticInCanonicalGates(t *testing.T) {
 				t.Errorf("critic line in `%s` must pass -race (got: %q)", target.name, criticLine)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Build artifact vs installed binary — regression guards A–F
+//
+// THE DEFECT THESE GUARD. Before the build/install split, BUILD_DIR was
+// `bin`, which IS $(PREFIX)/bin whenever the checkout is the install
+// prefix — the canonical layout, `~/.mpm`. So:
+//
+//     make build == overwrite the binaries the running services execute
+//
+// The split moves developer artifacts to `.build/bin` and makes `make
+// install` the only thing that writes $(PREFIX)/bin.
+//
+// Each guard below pins ONE property of that split, and each is written
+// so that reverting the corresponding half of the fix turns it red. A
+// guard that cannot fail is worse than no guard, because it reads as
+// coverage.
+//
+// Region-scoped, not whole-file: makeRecipe/makeVariable extract the
+// exact target region, so a comment elsewhere in the Makefile cannot
+// satisfy (or break) a guard. That distinction is the whole reason the
+// existing helpers in this file exist.
+// ---------------------------------------------------------------------------
+
+// makeFilePath returns the path to the repository Makefile.
+func makeFilePath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(findRepoRoot(t), "Makefile")
+}
+
+// TestBuildConfig_BuildDirIsAScratchSubdirectoryNotTheInstall — GUARD A
+//
+// BUILD_DIR must not be `bin`, must not be `$(PREFIX)/bin`, and must not
+// be any path that is the live install. Checked on RESOLVED absolute
+// paths, because the pre-fix guard compared literal strings ("bin" vs
+// "/home/v/.mpm/bin") which are never equal even when they name the
+// same directory — that comparison passed while the two were one dir.
+func TestBuildConfig_BuildDirIsAScratchSubdirectoryNotTheInstall(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	makefile := makeFilePath(t)
+
+	buildDir, ok := makeVariable(t, makefile, "BUILD_DIR")
+	if !ok {
+		t.Fatalf("Makefile must define BUILD_DIR")
+	}
+	prefix, ok := makeVariable(t, makefile, "PREFIX")
+	if !ok {
+		t.Fatalf("Makefile must define PREFIX")
+	}
+
+	absBuild := resolveMakePath(t, repoRoot, buildDir)
+	absPrefixBin := resolveMakePath(t, repoRoot, prefix+"/bin")
+
+	if absBuild == absPrefixBin {
+		t.Fatalf("BUILD_DIR resolves to %s, which IS $(PREFIX)/bin.\n"+
+			"  This re-merges the checkout and the live install: `make build` would\n"+
+			"  overwrite the binaries systemd ExecStart runs, so an ordinary build\n"+
+			"  IS a deployment.\n"+
+			"  BUILD_DIR must be a disposable scratch directory inside the checkout.",
+			absBuild)
+	}
+	if filepath.Base(absBuild) == "bin" && filepath.Dir(absBuild) == repoRoot {
+		t.Fatalf("BUILD_DIR resolves to the checkout's own bin/ (%s).\n"+
+			"  When the checkout is the install prefix (~/.mpm) that directory IS\n"+
+			"  the live install. Use a dot-prefixed scratch dir such as `.build/bin`.",
+			absBuild)
+	}
+	// Build output must be local to THIS checkout (brief §4: no /tmp, no
+	// symlink into the install), so it must live under the checkout root.
+	rel, err := filepath.Rel(repoRoot, absBuild)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		t.Fatalf("BUILD_DIR resolves to %s, which is OUTSIDE the checkout (%s).\n"+
+			"  Build output must stay local to each checkout/worktree so parallel\n"+
+			"  worktrees do not clobber each other's artifacts, and so it can never\n"+
+			"  be the install root.", absBuild, repoRoot)
+	}
+	if rel == "." {
+		t.Fatalf("BUILD_DIR resolves to the checkout root itself (%s)", absBuild)
+	}
+}
+
+// resolveMakePath turns a Makefile path value into an absolute path,
+// expanding the `$(HOME)` reference PREFIX carries. Only `$(VAR)` forms
+// that appear in the Makefile's own path variables are expanded; anything
+// else is left literal rather than guessed at.
+func resolveMakePath(t *testing.T, repoRoot, value string) string {
+	t.Helper()
+	v := strings.TrimSpace(value)
+	if v == "" {
+		t.Fatalf("empty Makefile path value")
+	}
+	// Expand the environment references the Makefile's own path variables
+	// use. Anything still unresolved afterwards is a reference this helper
+	// cannot evaluate faithfully; failing loudly beats resolving half of it.
+	v = strings.ReplaceAll(v, "$(HOME)", os.Getenv("HOME"))
+	v = strings.ReplaceAll(v, "${HOME}", os.Getenv("HOME"))
+	if strings.Contains(v, "$(") {
+		t.Fatalf("Makefile path value %q still contains an unexpanded reference after "+
+			"HOME substitution; this helper only expands $(HOME)", value)
+	}
+	if !filepath.IsAbs(v) {
+		v = filepath.Join(repoRoot, v)
+	}
+	// EvalSymlinks on a not-yet-existing path fails, so resolve the parent
+	// when needed and re-append the leaf.
+	abs, err := filepath.Abs(v)
+	if err != nil {
+		t.Fatalf("resolve %q: %v", v, err)
+	}
+	if _, err := os.Lstat(abs); err == nil {
+		if resolved, rErr := filepath.EvalSymlinks(abs); rErr == nil {
+			return resolved
+		}
+		return abs
+	}
+	parent := filepath.Dir(abs)
+	if resolved, rErr := filepath.EvalSymlinks(parent); rErr == nil {
+		return filepath.Join(resolved, filepath.Base(abs))
+	}
+	return abs
+}
+
+// TestBuildConfig_BuildRecipeWritesAllFiveToBuildDir — GUARD B
+//
+// Every `go build -o` in the build target must target $(BUILD_DIR).
+// The defect shape is a single stray `-o bin/mpm-scheduler` in a recipe
+// that is otherwise correct — invisible to any check that only looks at
+// BUILD_DIR's value.
+func TestBuildConfig_BuildRecipeWritesAllFiveToBuildDir(t *testing.T) {
+	makefile := makeFilePath(t)
+	recipe := makeRecipe(t, makefile, "build")
+
+	outRE := regexp.MustCompile(`-o\s+(\S+)\s+\./cmd/(\S+)`)
+	matches := outRE.FindAllStringSubmatch(recipe, -1)
+	if len(matches) == 0 {
+		t.Fatalf("no `go build ... -o <path> ./cmd/...` lines found in the build recipe:\n%s",
+			indentForMessage(recipe))
+	}
+
+	for _, m := range matches {
+		outPath, cmd := m[1], m[2]
+		if !strings.HasPrefix(outPath, "$(BUILD_DIR)/") {
+			t.Errorf("build target writes %s ./cmd/%s outside $(BUILD_DIR).\n"+
+				"  Every developer artifact must land under BUILD_DIR; a path that\n"+
+				"  escapes it can land on the live install.", outPath, cmd)
+		}
+		if !strings.HasPrefix(outPath, "$(BUILD_DIR)/$(") {
+			t.Errorf("build output %s is not expressed via a $(BINARY) variable.\n"+
+				"  Hardcoding the filename lets the artifact and BUILD_DIR drift apart.", outPath)
+		}
+	}
+
+	// All five daemons/CLI must be built, not just whichever were added
+	// last. A guard on "some -o lines are under BUILD_DIR" would pass on a
+	// recipe that dropped mpm-telemetry.
+	for _, v := range []string{
+		"$(BINARY_NAME)", "$(MCP_BINARY)", "$(SCHED_BINARY)",
+		"$(CRITIC_BINARY)", "$(TELEMETRY_BINARY)",
+	} {
+		if !strings.Contains(recipe, "-o $(BUILD_DIR)/"+v) {
+			t.Errorf("build recipe does not produce $(BUILD_DIR)/%s.\n"+
+				"  All five binaries must be built to BUILD_DIR; the install step\n"+
+				"  promotes all five or fails.\n  recipe:\n%s",
+				v, indentForMessage(recipe))
+		}
+	}
+}
+
+// TestBuildConfig_InstallPromotesAllFiveFromBuildDir — GUARD C
+//
+// `make install` must explicitly copy each of the five from BUILD_DIR to
+// $(PREFIX)/bin, and must be all-or-fail. The pre-fix recipe had a
+// coincidence branch that printed "bin/ is the canonical location; no
+// copy needed" and skipped the copy — which was unreachable in the
+// canonical layout, so the copy ran unconditionally, copying files onto
+// themselves. The comment read as a proof that nothing needed doing
+// while the install was being rewritten.
+func TestBuildConfig_InstallPromotesAllFiveFromBuildDir(t *testing.T) {
+	makefile := makeFilePath(t)
+	recipe := makeRecipe(t, makefile, "install")
+
+	for _, v := range []string{
+		"$(BINARY_NAME)", "$(MCP_BINARY)", "$(SCHED_BINARY)",
+		"$(CRITIC_BINARY)", "$(TELEMETRY_BINARY)",
+	} {
+		want := "install -m755 $(BUILD_DIR)/" + v
+		if !strings.Contains(recipe, want) {
+			t.Errorf("install recipe does not promote $(BUILD_DIR)/%s.\n"+
+				"  `make install` is the ONLY thing allowed to write $(PREFIX)/bin;\n"+
+				"  each binary must be copied explicitly from the build output.\n  recipe:\n%s",
+				v, indentForMessage(recipe))
+		}
+		if !strings.Contains(recipe, "$(PREFIX)/bin/"+v) {
+			t.Errorf("install recipe does not write $(PREFIX)/bin/%s", v)
+		}
+	}
+
+	// The promotion must be a hard error, never a silent skip, when the
+	// two directories collide.
+	if !strings.Contains(recipe, "exit 1") {
+		t.Errorf("install recipe has no hard failure for the same-directory case.\n"+
+			"  If BUILD_DIR and $(PREFIX)/bin ever resolve to one directory there\n"+
+			"  is nothing to promote; reporting success would be a lie.\n  recipe:\n%s",
+			indentForMessage(recipe))
+	}
+
+	// All five, or none: the copies are chained with && so a partial
+	// deploy cannot print the success line.
+	installRE := regexp.MustCompile(`install -m755 \$\(BUILD_DIR\)/\$\([A-Z_]+\)`)
+	if n := len(installRE.FindAllString(recipe, -1)); n != 5 {
+		t.Errorf("install recipe contains %d `install -m755 $(BUILD_DIR)/...` copies, want 5.\n"+
+			"  A missing copy means that binary silently keeps whatever version the\n"+
+			"  install already had, while the target still reports success.\n  recipe:\n%s",
+			n, indentForMessage(recipe))
+	}
+}
+
+// TestBuildConfig_CleanCannotRemoveTheInstall — GUARD D
+//
+// `make clean` removes BUILD_DIR only. The pre-fix clean did
+// `rm -rf bin`, which in the canonical layout deleted the live install
+// outright — the running scheduler's binary gone.
+func TestBuildConfig_CleanCannotRemoveTheInstall(t *testing.T) {
+	recipe := makeRecipe(t, makeFilePath(t), "clean")
+
+	rmRE := regexp.MustCompile(`(?m)^[^\n]*\brm\b[^\n]*$`)
+	for _, line := range rmRE.FindAllString(recipe, -1) {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(line, "$(PREFIX)") {
+			t.Errorf("`make clean` runs a command that references $(PREFIX):\n    %s\n"+
+				"  clean must never touch the install prefix; it removes developer\n"+
+				"  artifacts ($(BUILD_DIR)) only.", trimmed)
+		}
+		// A bare `rm -rf bin` is the exact pre-fix shape. Allow `rm -f ./mpm`
+		// style stray-root cleanup only if it names the binary, not a dir.
+		if regexp.MustCompile(`\brm\b[^|;]*\bbin\b`).MatchString(line) &&
+			!strings.Contains(line, "$(BUILD_DIR)") {
+			t.Errorf("`make clean` removes a path containing `bin` that is not $(BUILD_DIR):\n    %s\n"+
+				"  In the canonical layout the checkout's bin/ IS $(PREFIX)/bin.", trimmed)
+		}
+	}
+}
+
+// TestBuildConfig_ReleaseAndTestSubprocessesUseDeveloperArtifacts — GUARD E
+//
+// Every test/release harness that execs a built binary must resolve the
+// DEVELOPER artifact. The pre-fix failure was silent: a harness that
+// fell back to ~/.mpm/bin/mpm kept passing while exercising whatever was
+// installed, so a broken build looked green.
+func TestBuildConfig_ReleaseAndTestSubprocessesUseDeveloperArtifacts(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+
+	// (relative path, required substring identifying the developer artifact)
+	harnesses := []struct {
+		path string
+		want string
+	}{
+		{"scripts/work_acceptance.sh", ".build/bin/mpm"},
+		{"release_acceptance/public_cli_helpers_test.go", `"..", ".build", "bin", "mpm"`},
+		{"cmd/mpm/exec_helpers_test.go", `builtCLIRelPath = "../../.build/bin"`},
+		{"scripts/smoke_shared.sh", ".build/bin/mpm"},
+		{"scripts/smoke_telemetry.sh", ".build/bin/mpm-telemetry"},
+		{"scripts/verify-alpha-blocker-fixes.sh", ".build/bin/mpm"},
+	}
+
+	for _, h := range harnesses {
+		t.Run(h.path, func(t *testing.T) {
+			full := filepath.Join(repoRoot, h.path)
+			data, err := os.ReadFile(full)
+			if err != nil {
+				t.Fatalf("read %s: %v", full, err)
+			}
+			if !strings.Contains(string(data), h.want) {
+				t.Errorf("%s does not resolve the developer build artifact (want %q).\n"+
+					"  It must exec $(BUILD_DIR)/mpm, not the installed binary.\n"+
+					"  A harness pointed at ~/.mpm/bin/mpm tests the INSTALLED code, so a\n"+
+					"  broken working tree still reports green.", h.path, h.want)
+			}
+			// The failure mode this guards is a FALLBACK, so the absence
+			// of a silent installed-binary fallback matters as much as the
+			// presence of the artifact path.
+			for _, forbidden := range []string{
+				".mpm/bin/mpm\"}", "$HOME/.mpm/bin/mpm\"",
+				"|| $HOME/.mpm/bin/mpm", ":-~/.mpm/bin/mpm",
+			} {
+				if strings.Contains(string(data), forbidden) {
+					t.Errorf("%s contains an installed-binary fallback %q.\n"+
+						"  A missing developer artifact must FAIL the test, not silently\n"+
+						"  substitute the installed production binary.", h.path, forbidden)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildConfig_SystemdStillPointsAtTheInstalledBinaries — GUARD F
+//
+// The systemd unit is the runtime ABI and must keep pointing at
+// $(PREFIX)/bin — the separation must not be "fixed" by pointing the
+// service at a build directory, which would make the unit depend on a
+// disposable checkout artifact.
+func TestBuildConfig_SystemdStillPointsAtTheInstalledBinaries(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	// The CANONICAL unit template that install.sh copies verbatim
+	// (Makefile SERVICE_SRC). Not ~/.config/systemd/user/... : that path
+	// holds the INSTALLED copy on a live host and does not exist in a
+	// fresh checkout, so reading it here would either fail on every clone
+	// or — worse — silently match a stray file some earlier test left in
+	// the tree and pass without ever reading the tracked source.
+	unitPath := filepath.Join(repoRoot, "contrib", "systemd", "mpm-scheduler.service.user")
+	data, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", unitPath, err)
+	}
+	text := string(data)
+
+	// The guard is only meaningful if install.sh actually installs THIS
+	// file, so pin the wiring too: a unit that is correct but no longer
+	// the one that gets installed is not the deployed unit.
+	mk, mkErr := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
+	if mkErr != nil {
+		t.Fatalf("read Makefile: %v", mkErr)
+	}
+	src, ok := makeVariable(t, filepath.Join(repoRoot, "Makefile"), "SERVICE_SRC")
+	if !ok {
+		t.Fatalf("Makefile must define SERVICE_SRC")
+	}
+	if !strings.Contains(string(mk), src) {
+		t.Errorf("Makefile does not reference SERVICE_SRC=%s", src)
+	}
+
+	execStart := ""
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "ExecStart=") {
+			execStart = strings.TrimSpace(line)
+			break
+		}
+	}
+	if execStart == "" {
+		t.Fatalf("mpm-scheduler.service has no ExecStart= line")
+	}
+
+	if !strings.Contains(execStart, "%h/.mpm/bin/mpm-scheduler") {
+		t.Errorf("systemd ExecStart does not point at the installed binary:\n    %s\n"+
+			"  The runtime ABI is ~/.mpm/bin/. It must not be repointed at the\n"+
+			"  developer build directory.", execStart)
+	}
+	if strings.Contains(execStart, ".build") || strings.Contains(text, ".build/bin") {
+		t.Errorf("mpm-scheduler.service references the developer build directory:\n%s\n"+
+			"  $(BUILD_DIR) is a disposable checkout artifact that `make clean`\n"+
+			"  removes. The service must execute the installed binary.", execStart)
 	}
 }

@@ -21,10 +21,7 @@ import (
 // Invariant: `mpm <command> --help` (and -h) must print help, exit 0, and
 // perform NO mutation.
 func TestHelpFlag_NeverMutates(t *testing.T) {
-	binPath := filepath.Join("..", "..", "bin", "mpm")
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		t.Skip("bin/mpm not built; run make build first")
-	}
+	binPath := requireBuiltCLI(t)
 
 	tmpDir := t.TempDir()
 	workspace := filepath.Join(tmpDir, "workspace")

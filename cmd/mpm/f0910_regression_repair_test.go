@@ -1,20 +1,20 @@
 // f0910_regression_repair_test.go — 2026-09-10 regression repair tests
 // for T45, T56, T78.
 //
-//   T45: `mpm evidence list` (bare form) must list evidence
-//        without requiring --artifact. The filtered form
-//        `--artifact <id>` continues to work.
+//	T45: `mpm evidence list` (bare form) must list evidence
+//	     without requiring --artifact. The filtered form
+//	     `--artifact <id>` continues to work.
 //
-//   T56: `mpm work item note <id> "text"` (positional) must work.
-//        The flag form `--note "text"` continues to work. Missing
-//        note fails cleanly.
+//	T56: `mpm work item note <id> "text"` (positional) must work.
+//	     The flag form `--note "text"` continues to work. Missing
+//	     note fails cleanly.
 //
-//   T78: `mpm restore-db <external-path>` must accept a path
-//        outside the database directory. The pre-fix behavior
-//        rejected any external path. Safety checks still apply
-//        (file existence, regular-file mode). The actual SQL
-//        execution path depends on the canonical dump validator,
-//        which is exercised separately.
+//	T78: `mpm restore-db <external-path>` must accept a path
+//	     outside the database directory. The pre-fix behavior
+//	     rejected any external path. Safety checks still apply
+//	     (file existence, regular-file mode). The actual SQL
+//	     execution path depends on the canonical dump validator,
+//	     which is exercised separately.
 //
 // These tests run against a real binary built from the working tree
 // via `make build`. They use a fresh tempdir workspace per case so
@@ -34,10 +34,7 @@ import (
 // pattern in cmd/mpm/help_regression_test.go is the precedent.
 func findBin(t *testing.T) string {
 	t.Helper()
-	binPath := filepath.Join("..", "..", "bin", "mpm")
-	if _, err := os.Stat(binPath); err != nil {
-		t.Skipf("bin/mpm not built (%v); run `make build` first", err)
-	}
+	binPath := requireBuiltCLI(t)
 	return binPath
 }
 

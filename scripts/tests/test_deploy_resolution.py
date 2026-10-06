@@ -33,10 +33,42 @@ class TestDeployRepoRootResolution(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="mpm-deploy-test-"))
         self.fakebin = self.tmp / "fakebin"
         self.fakebin.mkdir(parents=True, exist_ok=True)
-        # All binaries deploy.sh invokes (make, openclaw, systemctl, sha256sum)
-        # need to be on PATH. Build a minimal PATH.
-        for util in ("make", "openclaw", "systemctl", "sha256sum", "pgrep",
-                     "mkdir", "true", "echo", "cat", "awk"):
+        # sandbox HOME --------------------------------------------------
+        #
+        # deploy.sh runs `make install` UNCONDITIONALLY; `--no-install`
+        # only skips the *service restart* half. Two facts make an
+        # un-sandboxed run write to the real installation:
+        #
+        #   1. deploy.sh:32 prepends "$HOME/.mpm/bin:$HOME/.local/bin:
+        #      /usr/local/bin:/usr/bin:/bin" to PATH. That places the
+        #      real /usr/bin/make AHEAD of any make the caller put
+        #      earlier in PATH, so a caller-supplied fake is bypassed.
+        #   2. make's PREFIX defaults to $(HOME)/.mpm, so the promotion
+        #      target follows HOME.
+        #
+        # Pointing HOME at a sandbox neutralises BOTH: CANONICAL_BIN
+        # ($HOME/.mpm/bin) and make's PREFIX resolve inside the sandbox,
+        # and the fake `make` goes in $HOME/.mpm/bin — the exact slot
+        # deploy.sh prepends first, so the stub wins the lookup.
+        #
+        # Even if the stub were bypassed, the real `make install` would
+        # promote into the sandbox, not the operator's live install.
+        self.home = self.tmp / "home"
+        self.sandbox_bin = self.home / ".mpm" / "bin"
+        self.sandbox_bin.mkdir(parents=True, exist_ok=True)
+        self.make_stub = self.sandbox_bin / "make"
+        self.make_stub.write_text(
+            "#!/bin/sh\n"
+            "# Test stub: record that we were invoked, then succeed\n"
+            "# without building or installing anything.\n"
+            f"printf 'invoked cwd=%s\\n' \"$(pwd)\" >> '{self.tmp}/make-invocations'\n"
+            "exit 0\n"
+        )
+        self.make_stub.chmod(0o755)
+
+        # Utilities deploy.sh invokes (sha256sum, pgrep, awk, ...) still
+        # need to resolve; symlink the real ones.
+        for util in ("sha256sum", "pgrep", "mkdir", "true", "echo", "cat", "awk"):
             src = Path("/usr/bin") / util
             if src.exists():
                 link = self.fakebin / util
@@ -45,10 +77,21 @@ class TestDeployRepoRootResolution(unittest.TestCase):
                         link.symlink_to(src)
                     except OSError:
                         pass
-        # Override `make` to be a no-op (we don't actually want to build).
-        # We can't override with a real symlink; instead, use a wrapper.
-        # Simpler: just don't actually invoke deploy.sh's make — use --no-install
-        # flag and inspect the early output (project_root message).
+
+        # Hard-fail stubs for the two utilities that reach outside the
+        # process. deploy.sh should never call them under --no-install;
+        # if that ever regresses we want a loud test failure, not a real
+        # `systemctl --user restart` or gateway restart on this machine.
+        for guard in ("systemctl", "openclaw"):
+            stub = self.fakebin / guard
+            stub.write_text(
+                "#!/bin/sh\n"
+                f"echo 'GUARD: deploy.sh invoked {guard}; this test must never "
+                "reach service control' >&2\n"
+                "exit 97\n"
+            )
+            stub.chmod(0o755)
+
         self.addCleanup(self._cleanup)
 
     def _cleanup(self):
@@ -58,19 +101,13 @@ class TestDeployRepoRootResolution(unittest.TestCase):
         """Run deploy.sh --no-install from /tmp and verify it can locate
         install.sh via its REPO_ROOT resolution. The simplest proof:
         deploy.sh should NOT fail with "cannot find Makefile" or
-        similar — it must `cd` to the correct REPO_ROOT."""
-        # We use --no-install to skip actual builds; deploy.sh still does
-        # `make install` UNLESS --no-install is given. We need to fake `make`
-        # so it succeeds even from /tmp.
-        fake_make = self.fakebin / "make"
-        fake_make.unlink() if fake_make.exists() or fake_make.is_symlink() else None
-        fake_make.write_text("#!/bin/sh\nexit 0\n")
-        fake_make.chmod(0o755)
+        similar — it must `cd` to the correct REPO_ROOT.
 
-        # Use --no-install to skip the install + service restart phase;
-        # we only care about REPO_ROOT resolution in the early `make install`
-        # call.
+        The run is sandboxed (see setUp): deploy.sh's `make install` is
+        unconditional and targets $(HOME)/.mpm, so HOME is pinned to a
+        temp dir for the duration of this test."""
         env = os.environ.copy()
+        env["HOME"] = str(self.home)
         env["PATH"] = f"{self.fakebin}:{env.get('PATH', '')}"
         result = subprocess.run(
             ["bash", "--noprofile", "--norc", str(DEPLOY_SH), "--no-install"],
@@ -82,13 +119,42 @@ class TestDeployRepoRootResolution(unittest.TestCase):
         # fail or the script would emit a "no Makefile" message. With a
         # fake make that exits 0, the script should complete the build phase
         # and exit 0 after --no-install.
-        # We tolerate failure from later phases (e.g. systemctl) but the
-        # first build line should report success.
         combined = result.stdout + result.stderr
         self.assertIn("==> Building mpm binaries", combined,
                       f"deploy.sh did not reach the build phase; cwd=/tmp\n"
                       f"stdout: {result.stdout[:500]}\n"
                       f"stderr: {result.stderr[:500]}")
+
+        # --- Hermeticity guards -------------------------------------
+        #
+        # These are not incidental. The pre-fix version of this test put
+        # its fake `make` in a fakebin that deploy.sh's own PATH prepend
+        # shadowed, so the REAL /usr/bin/make ran `make install` with
+        # PREFIX defaulting to the operator's $HOME/.mpm — a test in the
+        # canonical gate was replacing the live installation binaries.
+        # `--no-install` did not prevent this; it only skips the restart.
+
+        # 1. The stub must actually have been the make that ran.
+        invocations = self.tmp / "make-invocations"
+        self.assertTrue(
+            invocations.exists(),
+            "the sandboxed `make` stub was never invoked, so deploy.sh "
+            "reached a different make than the one this test controls — "
+            "its PATH prepend may once again be shadowing the sandbox.\n"
+            f"combined output:\n{combined}",
+        )
+        # 2. deploy.sh must have cd'd to REPO_ROOT before invoking make.
+        self.assertIn(f"invoked cwd={REPO_ROOT}", invocations.read_text(),
+                      "deploy.sh did not run `make` from REPO_ROOT; "
+                      "repository-root resolution is broken.")
+        # 3. Nothing may have been promoted into the live install root.
+        live_prefix = Path(os.path.expanduser("~")) / ".mpm" / "bin"
+        sandbox_is_not_live = self.sandbox_bin.resolve() != live_prefix.resolve()
+        self.assertTrue(
+            sandbox_is_not_live,
+            "sandbox $HOME/.mpm/bin resolves onto the live install "
+            f"({live_prefix}); this test would write production binaries",
+        )
 
     def test_deploy_sh_script_dir_resolution(self):
         """A direct inspection: confirm deploy.sh's SCRIPT_DIR resolves

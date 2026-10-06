@@ -35,10 +35,7 @@ import (
 // test-local directory so persistence is hermetic.
 func r9T34RunMpm(t *testing.T, workspace string, args ...string) (string, int) {
 	t.Helper()
-	binPath := filepath.Join("..", "..", "bin", "mpm")
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		t.Skip("bin/mpm not built; run make build first")
-	}
+	binPath := requireBuiltCLI(t)
 	cmd := exec.Command(binPath, args...)
 	cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
 	out, err := cmd.CombinedOutput()
@@ -80,7 +77,7 @@ func TestR9T34_WeightEcho_MatchesStored(t *testing.T) {
 		// through, 0.0-1.0 floats are ×10.
 		expectedStored int64
 	}{
-		{name: "int_zero", cliWeight: "0", expectedStored: 5},  // 0→ default
+		{name: "int_zero", cliWeight: "0", expectedStored: 5}, // 0→ default
 		{name: "int_default", cliWeight: "5", expectedStored: 5},
 		{name: "int_50", cliWeight: "50", expectedStored: 50},
 		{name: "int_100", cliWeight: "100", expectedStored: 100},

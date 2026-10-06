@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -25,10 +24,7 @@ import (
 // Invariant: a help request must NEVER execute the handler. The command
 // must print help/usage and exit 0 with no state change.
 func TestHelp_NeverExecutesHandlers(t *testing.T) {
-	binPath := filepath.Join("..", "..", "bin", "mpm")
-	if _, err := os.Stat(binPath); err != nil {
-		t.Skip("bin/mpm not built; run make build first")
-	}
+	binPath := requireBuiltCLI(t)
 
 	ws := t.TempDir()
 	t.Setenv("MPM_WORKSPACE", ws)
@@ -93,10 +89,7 @@ func TestHelp_NeverExecutesHandlers(t *testing.T) {
 // TestHelp_LiteralWordRemainsData guards against over-blocking: a literal
 // "help" argument that did NOT come from a help flag stays handler data.
 func TestHelp_LiteralWordRemainsData(t *testing.T) {
-	binPath := filepath.Join("..", "..", "bin", "mpm")
-	if _, err := os.Stat(binPath); err != nil {
-		t.Skip("bin/mpm not built; run make build first")
-	}
+	binPath := requireBuiltCLI(t)
 	ws := t.TempDir()
 	t.Setenv("MPM_WORKSPACE", ws)
 

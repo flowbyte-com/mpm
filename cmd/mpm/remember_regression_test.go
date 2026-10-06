@@ -19,10 +19,7 @@ import (
 // content, verified against PERSISTED STATE (via mpm_memory query), not
 // merely command success.
 func TestRemember_StoresExactContent(t *testing.T) {
-	binPath := filepath.Join("..", "..", "bin", "mpm")
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		t.Skip("bin/mpm not built; run make build first")
-	}
+	binPath := requireBuiltCLI(t)
 
 	cases := []struct {
 		name string
@@ -109,10 +106,7 @@ func TestRemember_StoresExactContent(t *testing.T) {
 // TestAdd_StoresExactContent guards the sibling command: the D1 fix must not
 // change `mpm add` semantics (add takes full args including the verb).
 func TestAdd_StoresExactContent(t *testing.T) {
-	binPath := filepath.Join("..", "..", "bin", "mpm")
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		t.Skip("bin/mpm not built; run make build first")
-	}
+	binPath := requireBuiltCLI(t)
 
 	tmpDir := t.TempDir()
 	workspace := filepath.Join(tmpDir, "workspace")

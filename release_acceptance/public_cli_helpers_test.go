@@ -65,12 +65,31 @@ func getItems(focus map[string]interface{}) []map[string]interface{} {
 	return out
 }
 
-// findProjectBinary locates the bin/mpm binary produced by `make build`.
+// findProjectBinary locates the developer build artifact produced by
+// `make build`, and FAILS the test when it is absent.
+//
+// It deliberately does not fall back to $HOME/.mpm/bin/mpm, and it
+// deliberately does not t.Skip. This suite drives the real shipped CLI
+// through subprocesses; substituting the installed production binary
+// would let the whole suite pass while exercising a different build, and
+// reporting "skipped" for a missing artifact is a false pass rather than
+// a signal. `make test-release` already declares `build` as a
+// prerequisite, so the artifact is guaranteed present on the gate that
+// runs this suite.
 func findProjectBinary(t *testing.T) string {
 	t.Helper()
-	candidate := filepath.Join("..", "bin", "mpm")
+	candidate := filepath.Join("..", ".build", "bin", "mpm")
 	if _, err := os.Stat(candidate); err != nil {
-		t.Skipf("bin/mpm not built (run `make build` first): %v", err)
+		abs, absErr := filepath.Abs(candidate)
+		if absErr != nil {
+			abs = candidate
+		}
+		t.Fatalf("developer build artifact missing: %s (%v)\n"+
+			"  Run `make build` from the repository root first (`make test-release` "+
+			"does this for you).\n"+
+			"  This suite will not fall back to $HOME/.mpm/bin/mpm: doing so would "+
+			"exercise the installed production binary instead of the code under test.",
+			abs, err)
 	}
 	abs, err := filepath.Abs(candidate)
 	if err != nil {

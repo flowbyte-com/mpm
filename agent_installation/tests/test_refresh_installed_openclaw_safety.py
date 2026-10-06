@@ -57,6 +57,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -70,12 +71,111 @@ CHECK_INSTALLED = AGENT_INSTALLATION / "scripts" / "check_installed_managed_bloc
 
 
 def _sandbox_home() -> tuple[Path, dict]:
-    """Create an isolated HOME and return (tmpdir, env)."""
+    """Create an isolated HOME and return (tmpdir, env).
+
+    HOME alone is NOT sufficient isolation here. One of these tests runs
+    a FULL `./install.sh`, which reaches `phase_service` and issues:
+
+        loginctl enable-linger
+        systemctl --user daemon-reload / enable / restart mpm-scheduler
+
+    Those resolve against the real user systemd manager over D-Bus and
+    XDG_RUNTIME_DIR — NOT against $HOME. A HOME-only sandbox therefore
+    let this test restart the operator's live scheduler and mutate the
+    real user's linger state. HOME redirects file paths; it does not
+    redirect service control.
+
+    So this sandbox covers three surfaces:
+
+      1. HOME             — file paths (install prefix, openclaw config)
+      2. PATH             — a recording `systemctl`/`loginctl` stub, which
+                             takes precedence because install.sh resolves
+                             them by bare name
+      3. D-Bus session    — XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS
+                             pointed at empty/nonexistent paths, so a
+                             stub that is somehow bypassed cannot reach the
+                             real user manager either
+
+    The stubs RECORD every invocation and then succeed, rather than
+    hard-failing on a mutating verb. Hard-failing was tried first and is
+    wrong here: install.sh aborts at `phase_service` on the first
+    rejected systemctl call, so every phase AFTER it — including
+    `phase_agent_reconcile`, the phase this module actually tests — never
+    runs. The suite went green while testing nothing. Recording instead
+    keeps the install running end to end against a sandbox, and the
+    tests assert positively on the recorded verbs, so a call that never
+    happened fails the assertion rather than passing unnoticed.
+    """
     tmp = Path(tempfile.mkdtemp(prefix="mpm-openclaw-safety-"))
     home = tmp / "home"
     home.mkdir(parents=True, exist_ok=True)
+
+    # --- service-control stubs -------------------------------------
+    #
+    # These are no-op-and-record, NOT hard-fail. Two reasons:
+    #
+    #   * install.sh reads `systemctl --user is-active` to branch
+    #     between restart and start, and asserts the unit is active
+    #     afterwards. A hard-fail stub aborts install.sh inside
+    #     phase_service, which means phase_agent_reconcile — the phase
+    #     this test actually asserts on — never runs. The coverage
+    #     would be silently vacuous.
+    #   * Every invocation is recorded, so the test can positively
+    #     assert that the dangerous call WAS requested and WAS
+    #     intercepted, rather than merely assuming it.
+    #
+    # `is-active` answers "active" so install.sh takes its normal
+    # happy path; nothing real happens because every verb is stubbed.
+    bindir = tmp / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    log = tmp / "service-control.log"
+
+    (bindir / "systemctl").write_text(textwrap.dedent(f"""\
+        #!/usr/bin/env bash
+        echo "[systemctl] $*" >> "{log}"
+        case "${{1:-}}" in
+            --user)
+                shift
+                case "${{1:-}}" in
+                    is-active) echo "active"; exit 0 ;;
+                    show) echo ""; exit 0 ;;
+                    *) exit 0 ;;
+                esac
+                ;;
+            *) exit 0 ;;
+        esac
+        exit 0
+    """))
+    (bindir / "loginctl").write_text(textwrap.dedent(f"""\
+        #!/usr/bin/env bash
+        echo "[loginctl] $*" >> "{log}"
+        exit 0
+    """))
+    for name in ("systemctl", "loginctl"):
+        (bindir / name).chmod(0o755)
+
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+    # Break the D-Bus session as a second line of defence: even if a
+    # stub were bypassed, `systemctl --user` has no bus to talk to.
+    env["XDG_RUNTIME_DIR"] = str(tmp / "xdg-runtime")
+    (tmp / "xdg-runtime").mkdir(exist_ok=True)
+    env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={tmp / 'nonexistent-bus'}"
+
+    # Share the caller's Go build cache.
+    #
+    # Sandboxing HOME alone makes `go` derive GOCACHE from it, so every
+    # run starts cold and recompiles the whole dependency tree — which
+    # pushed a full install.sh past this test's timeout and made the
+    # canonical gate flaky for reasons unrelated to what it asserts. The
+    # build cache is a pure compiler cache: sharing it cannot leak state
+    # into the install sandbox, it only avoids recompiling identical
+    # inputs. The install still writes only inside the sandbox HOME.
+    if "GOCACHE" not in env and os.path.isdir(
+        os.path.expanduser("~/.cache/go-build")
+    ):
+        env["GOCACHE"] = os.path.expanduser("~/.cache/go-build")
     return tmp, env
 
 
@@ -302,6 +402,37 @@ class OpenClawNotOptedIn(unittest.TestCase):
         result = _run(
             ["bash", str(INSTALL_SH)],
             env=self.env, timeout=180,
+        )
+        # The service-control stubs exit 97 on any mutating verb. A full
+        # install.sh legitimately REQUESTS `systemctl --user restart`
+        # (install.sh phase_service), so under this sandbox that call is
+        # expected to be refused — the stub exists to prove the test is
+        # not reaching the operator's live user manager, not to make the
+        # install succeed. Assert the refusal happened rather than
+        # ignoring it, so the sandbox cannot silently regress.
+        combined = result.stdout + result.stderr
+        self.assertEqual(
+            result.returncode, 0,
+            f"install.sh (full) failed under the service-control sandbox:\n"
+            f"stdout={result.stdout[-3000:]}\nstderr={result.stderr[-3000:]}",
+        )
+        # Positive proof the dangerous call was made AND intercepted:
+        # a full install genuinely requests a scheduler restart. If that
+        # line ever disappears from the log, the stub is no longer the
+        # thing handling it and this test has gone LIVE again.
+        service_log = self.tmpdir / "service-control.log"
+        self.assertTrue(
+            service_log.exists(),
+            "no service-control log: the systemctl/loginctl stubs were "
+            "never invoked, so install.sh did not reach phase_service",
+        )
+        log_text = service_log.read_text()
+        self.assertRegex(
+            log_text,
+            r"\[systemctl\] --user (restart|start) mpm",
+            "install.sh never requested a scheduler start/restart — if "
+            "this regresses, the sandbox may no longer be intercepting "
+            f"the dangerous call.\nlog:\n{log_text}",
         )
         self._assert_openclaw_untouched(
             _openclaw_target(self.home), "install.sh (full)", result.stderr,

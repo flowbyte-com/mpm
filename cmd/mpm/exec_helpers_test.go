@@ -27,10 +27,50 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 )
+
+// builtCLIRelPath is the Makefile's BUILD_DIR, relative to this package
+// directory. Must track `BUILD_DIR := .build/bin` in the Makefile — the
+// guard TestBuildConfig_BuildDirIsAScratchSubdirectoryNotTheInstall pins
+// that pairing from the other side.
+const builtCLIRelPath = "../../.build/bin"
+
+// requireBuiltCLI returns the path to the developer build artifact
+// produced by `make build`, and FAILS the test when it is absent.
+//
+// It deliberately does NOT fall back to $HOME/.mpm/bin/mpm (or to
+// whatever `mpm` resolves to on PATH). A fallback here would silently
+// substitute the installed production binary for the code under test —
+// the test would keep passing while exercising a different build, and
+// would start failing for reasons that have nothing to do with the
+// change under review.
+//
+// It deliberately does NOT t.Skip either. These tests are the ones that
+// prove the shipped CLI behaves correctly; a missing build artifact
+// means they proved nothing, and reporting "skipped" for that is a false
+// pass. `make build` is cheap and is already a prerequisite of
+// `make release-gate`.
+func requireBuiltCLI(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(builtCLIRelPath, "mpm")
+	if _, err := os.Stat(p); err != nil {
+		abs, absErr := filepath.Abs(p)
+		if absErr != nil {
+			abs = p
+		}
+		t.Fatalf("developer build artifact missing: %s (%v)\n"+
+			"  Run `make build` from the repository root first.\n"+
+			"  This test will not fall back to $HOME/.mpm/bin/mpm: doing so "+
+			"would exercise the installed production binary instead of the "+
+			"code under test, turning a build-ordering mistake into a silent "+
+			"false pass.", abs, err)
+	}
+	return p
+}
 
 // mpmCmd builds a fresh `mpm` binary from the current source tree
 // (./cmd/mpm) into a per-test temp directory and returns its

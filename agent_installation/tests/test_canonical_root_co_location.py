@@ -26,7 +26,26 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Runtime artifacts MPM creates beneath its workspace root. Each entry is
 # (relative path, content). Directory entries are created as needed.
 RUNTIME_ARTIFACTS: list[tuple[str, bytes]] = [
-    # Compiled binaries (make build / install.sh)
+    # Compiled binaries.
+    #
+    # These are BUILD/INSTALL artifacts, not runtime state — nothing MPM
+    # writes while running produces them. They live in two places now:
+    #
+    #   .build/bin/*  — `make build` output, a scratch subdirectory of the
+    #                   checkout. This is where an ordinary build lands.
+    #   bin/*         — the install target ($PREFIX/bin). Populated only by
+    #                   `make install` / install.sh / deploy.sh, never by
+    #                   `make build`.
+    #
+    # Both must stay gitignored. The co-location guard is about the
+    # invariant that `~/.mpm` is simultaneously checkout and runtime root,
+    # so a build or install artifact landing in the tracked tree must never
+    # show up as an untracked change.
+    (".build/bin/mpm", b"\x7fELF"),
+    (".build/bin/mpm-mcp", b"\x7fELF"),
+    (".build/bin/mpm-scheduler", b"\x7fELF"),
+    (".build/bin/mpm-critic", b"\x7fELF"),
+    (".build/bin/mpm-telemetry", b"\x7fELF"),
     ("bin/mpm", b"\x7fELF"),
     ("bin/mpm-mcp", b"\x7fELF"),
     ("bin/mpm-scheduler", b"\x7fELF"),

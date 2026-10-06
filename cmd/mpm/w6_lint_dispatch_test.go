@@ -18,9 +18,7 @@
 package main
 
 import (
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -99,10 +97,7 @@ func TestW6_LintDispatch_UnrelatedCommandUnchanged(t *testing.T) {
 // Skipped if bin/mpm is not built (mirrors the convention in
 // help_regression_test.go).
 func TestW6_LintDispatch_SubprocessEndToEnd(t *testing.T) {
-	binPath := filepath.Join("..", "..", "bin", "mpm")
-	if _, err := os.Stat(binPath); err != nil {
-		t.Skip("bin/mpm not built; run make build first")
-	}
+	binPath := requireBuiltCLI(t)
 
 	ws := t.TempDir()
 	t.Setenv("MPM_WORKSPACE", ws)

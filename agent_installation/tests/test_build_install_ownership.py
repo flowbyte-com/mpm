@@ -9,11 +9,17 @@ That contamination broke the next `make build` with:
     build output "bin/mpm" already exists and is not an object file
 
 The fix:
-  1. install.sh no longer writes a wrapper; bin/mpm IS the compiled binary
-  2. Makefile's `build` target detects and removes a stale wrapper at
-     bin/mpm before invoking `go build`, so `make build` standalone works
-     on already-installed repos
-  3. install.sh and uninstall.sh clean up legacy wrapper artefacts
+  1. install.sh no longer writes a wrapper; the installed `mpm` IS the
+     compiled binary
+  2. The Makefile's build output is `.build/bin`, a scratch subdirectory of
+     the checkout — NOT `bin/`. Previously BUILD_DIR was `bin/`, which is
+     also `$PREFIX/bin` when the checkout is the install prefix (`~/.mpm`),
+     so an ordinary `make build` overwrote the binaries the running
+     services execute. Building is now incapable of live deployment.
+  3. `make build` detects and removes a stale wrapper at
+     $(BUILD_DIR)/mpm before invoking `go build`, so `make build`
+     standalone works on already-installed repos
+  4. install.sh and uninstall.sh clean up legacy wrapper artefacts
      (mpm.real, mpm.pre-wrapper.*) from older installs
 
 These tests verify the post-fix ownership contract from the source-tree
@@ -67,36 +73,66 @@ def _has_shebang(path: Path) -> bool:
 
 
 class BuildOutputOwnership(unittest.TestCase):
-    """After make build, bin/mpm must be a compiled executable, not a script."""
+    """After make build, .build/bin/mpm must be a compiled executable, not a script.
 
-    BIN = REPO_ROOT / "bin"
+    The build output directory is `.build/bin` — a scratch subdirectory of
+    the checkout, deliberately NOT `bin/`. The old layout used `bin/`,
+    which is also `$PREFIX/bin` when the checkout is the install prefix
+    (the `~/.mpm` co-location), so `make build` overwrote the binaries the
+    running services execute. These tests track the new location.
+    """
 
-    def test_bin_directory_exists(self):
-        """make build has been run at least once, so bin/ must exist."""
+    BIN = REPO_ROOT / ".build" / "bin"
+
+    def test_build_output_directory_exists(self):
+        """make build has been run at least once, so .build/bin/ must exist."""
         self.assertTrue(
             self.BIN.is_dir(),
-            f"{self.BIN} must exist (make build must have been run)",
+            f"{self.BIN} must exist (run `make build` first)",
         )
 
     def test_bin_mpm_is_executable(self):
-        """bin/mpm must have at least one execute bit set."""
+        """.build/bin/mpm must have at least one execute bit set."""
         mpm = self.BIN / "mpm"
         if not mpm.exists():
-            self.skipTest("bin/mpm not present; rebuild required before this test")
+            self.skipTest(".build/bin/mpm not present; rebuild required before this test")
         self.assertTrue(
             _is_executable_file(mpm),
-            f"bin/mpm must be executable (got {oct(mpm.stat().st_mode)})",
+            f"{mpm} must be executable (got {oct(mpm.stat().st_mode)})",
         )
 
     def test_bin_mpm_is_not_a_shell_script(self):
-        """bin/mpm must NOT start with the '#!' shebang (that would mark it as a wrapper)."""
+        """.build/bin/mpm must NOT start with the '#!' shebang (that would mark it as a wrapper)."""
         mpm = self.BIN / "mpm"
         if not mpm.exists():
-            self.skipTest("bin/mpm not present; rebuild required before this test")
+            self.skipTest(".build/bin/mpm not present; rebuild required before this test")
         self.assertFalse(
             _has_shebang(mpm),
-            "bin/mpm must NOT be a shell wrapper; it must be the compiled Go binary. "
-            "If this fires, the wrapper-removal fix has regressed.",
+            ".build/bin/mpm must NOT be a shell wrapper; it must be the "
+            "compiled Go binary. If this fires, the wrapper-removal fix "
+            "has regressed.",
+        )
+
+    def test_build_output_is_not_the_install_prefix_bin(self):
+        """The build output must never BE the install prefix's bin/.
+
+        This is the load-bearing invariant of the build/install split. When
+        the checkout is the install prefix (`~/.mpm`), `bin/` is
+        `$PREFIX/bin` — the live install the scheduler executes. Building
+        there is deployment by side effect, so BUILD_DIR must be a
+        distinct, dot-prefixed scratch directory.
+        """
+        live_bin = REPO_ROOT / "bin"
+        self.assertNotEqual(
+            self.BIN.resolve(),
+            live_bin.resolve(),
+            f"build output ({self.BIN}) must not be the install prefix "
+            f"bin/ ({live_bin}); `make build` would overwrite the live "
+            "installation",
+        )
+        self.assertTrue(
+            self.BIN.name == "bin" and self.BIN.parent.name == ".build",
+            f"BUILD_DIR must be `.build/bin`, got {self.BIN}",
         )
 
 
@@ -160,21 +196,74 @@ class MakefileSelfHealsFromStaleWrapper(unittest.TestCase):
 
 
 class MakefileHandlesSamePrefixLayout(unittest.TestCase):
-    """When $PROJECT_ROOT/bin/$bin and $PREFIX/bin/$bin resolve to the same inode,
-    the installer's same-inode guard must skip the copy."""
+    """Build output and install target are always distinct paths.
+
+    This class used to assert that phase_binaries SKIPPED the copy when
+    source and destination were the same inode — a guard that existed
+    only because the checkout and the install prefix were the same
+    directory, so `$PROJECT_ROOT/bin/$bin` and `$PREFIX/bin/$bin` were
+    one file.
+
+    With the build/install split that state is impossible by design: the
+    build output is `.build/bin`, the install target is `$PREFIX/bin`,
+    and they can never collide. Per the "simplify rather than preserve
+    dead complexity" principle, the guard's polarity is inverted — same
+    file is now a hard error, because reaching it means something has
+    aliased the two paths and any "successful" install would be a lie.
+    """
 
     INSTALL = REPO_ROOT / "install.sh"
 
     def test_install_uses_same_inode_guard(self):
-        """phase_binaries must guard install with `[ $src -ef $dst ]`."""
+        """phase_binaries must test `[ "$src" -ef "$dst" ]`."""
         if not self.INSTALL.is_file():
             self.skipTest("install.sh missing")
         text = self.INSTALL.read_text(encoding="utf-8")
         self.assertRegex(
             text,
             r"\[\s*\"\$src\"\s*-ef\s*\"\$dst\"\s*\]",
-            "install.sh phase_binaries must use the POSIX [-ef] same-inode guard "
-            "to handle the source == install prefix case",
+            "install.sh phase_binaries must use the POSIX [-ef] same-inode "
+            "guard",
+        )
+
+    def test_same_inode_is_fatal_not_a_skip(self):
+        """The same-inode branch must die, not silently skip.
+
+        A skip here would print a successful install for a binary that was
+        never copied — the "success printed over a partial install" failure
+        mode. Since build output and install target are distinct paths by
+        construction, reaching this branch means the split was violated.
+        """
+        if not self.INSTALL.is_file():
+            self.skipTest("install.sh missing")
+        text = self.INSTALL.read_text(encoding="utf-8")
+        m = re.search(
+            r'\[\s*"\$src"\s*-ef\s*"\$dst"\s*\]\s*;?\s*then\s+(die|continue|return)',
+            text,
+        )
+        self.assertIsNotNone(
+            m,
+            "could not find the `-ef` branch in phase_binaries",
+        )
+        self.assertEqual(
+            m.group(1),
+            "die",
+            "the same-inode branch must be `die` (a hard failure), not "
+            "`continue`/`return` (a silent skip that reports a deployment "
+            "which never happened)",
+        )
+
+    def test_install_sourcing_uses_build_dir_not_repo_bin(self):
+        """phase_binaries must source from build_dir(), not $PROJECT_ROOT/bin."""
+        if not self.INSTALL.is_file():
+            self.skipTest("install.sh missing")
+        text = self.INSTALL.read_text(encoding="utf-8")
+        self.assertRegex(
+            text,
+            r'local\s+src="\$\(build_dir\)/\$bin"',
+            "phase_binaries must read each binary from $(build_dir)/$bin — "
+            "the resolved build output — not from a hardcoded repo-relative "
+            "bin/ path",
         )
 
     def test_install_loop_includes_mpm(self):

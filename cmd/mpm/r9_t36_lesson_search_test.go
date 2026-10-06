@@ -47,10 +47,7 @@ func TestR9T36_LessonAddThenSearch_FindsSaved(t *testing.T) {
 	const sentinel = "r9t36sentinelzyxw"
 	const content = "R9 T36 round-trip test — searching for sentinel " + sentinel
 
-	binPath := filepath.Join("..", "..", "bin", "mpm")
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		t.Skip("bin/mpm not built; run make build first")
-	}
+	binPath := requireBuiltCLI(t)
 
 	run := func(args ...string) (string, int) {
 		cmd := exec.Command(binPath, args...)
@@ -107,10 +104,7 @@ func TestR9T36_LessonShredRemovesFromSearch(t *testing.T) {
 	const sentinel = "r9t36shredmarkervqr"
 	const content = "R9 T36 shred-test content with sentinel " + sentinel
 
-	binPath := filepath.Join("..", "..", "bin", "mpm")
-	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		t.Skip("bin/mpm not built; run make build first")
-	}
+	binPath := requireBuiltCLI(t)
 
 	run := func(args ...string) (string, int) {
 		cmd := exec.Command(binPath, args...)

@@ -14,18 +14,28 @@ The contract these tests pin
     via ``install -m 0755``. ``mpm`` is installed *directly*; the
     installer authors no file of its own into ``$PREFIX/bin/``.
 
-  Case B (same layout) — ``PROJECT_ROOT == PREFIX`` (user cloned the
-    repo directly to ``$HOME/.mpm``, the canonical install prefix)
-    The build output already lives at the install target. ``install -m
-    0755 src dst`` refuses to copy a file onto itself, so the phase
-    must detect it with the ``-ef`` same-inode test and skip the copy.
+  Case B (colocated checkout) — ``PROJECT_ROOT == PREFIX`` (the repo is
+    cloned directly to ``$HOME/.mpm``, the canonical install prefix)
+    This used to be the dangerous layout: build output lived at
+    ``$PROJECT_ROOT/bin``, which here IS the directory the running
+    services execute from, so an ordinary ``make build`` overwrote the
+    live binaries and the installer then had to skip a
+    ``install(1) ... are the same file`` copy. Build output now lives at
+    ``$PROJECT_ROOT/.build/bin``, so the two are distinct directories and
+    promotion is a plain copy. This layout is now ordinary.
 
-  After the phase, in BOTH cases:
+  Case C (build output aliased onto the install)
+    Forces the old broken state back — ``BUILD_DIR`` pointed at
+    ``$PREFIX/bin`` — and asserts the phase REFUSES. It previously
+    skipped the copy and reported success, which is a deployment that
+    never happened.
+
+  After the phase, in cases A and B:
     * ``$PREFIX/bin/<bin>`` is byte-identical to the build output
     * ``$PREFIX/bin/mpm.real`` does NOT exist
     * no file in ``$PREFIX/bin`` is a shell wrapper (none starts with
       ``#!``)
-    * source binaries in ``$PROJECT_ROOT/bin/`` are copied, not moved
+    * build output in ``$BUILD_DIR`` is copied, not moved
 
   Legacy cleanup — an install that finds ``$PREFIX/bin/mpm.real`` or
     ``$PREFIX/bin/mpm.pre-wrapper.*`` from an older install removes
@@ -64,8 +74,11 @@ Per-test disposition of the old revision:
                                        and ``test_produces_no_wrapper_artifacts``
   test_preserves_source_binaries       STILL VALID, kept as-is
   test_does_not_fail_with_same_file_error
-                                       STILL VALID — the ``-ef`` guard is
-                                       still the mechanism
+                                       STILL VALID — but the mechanism it
+                                       guards against is now impossible
+                                       to reach accidentally (Case C
+                                       proves the installer refuses when
+                                       forced into it)
   test_daemon_binaries_exist_at_prefix STILL VALID, widened like the first
   test_mpm_real_preserved_as_real_binary
                                        OBSOLETE — folded into the
@@ -188,12 +201,16 @@ class _InstallDriver(unittest.TestCase):
         installer authored. Daemon fakes get real ELF magic; the ``mpm``
         fake is a runnable script so the functional test can execute it.
         """
-        (root / "bin").mkdir(parents=True, exist_ok=True)
+        # Build output lives in .build/bin — a scratch subdirectory of the
+        # checkout, and deliberately NOT the install prefix's bin/. The
+        # fixture stages them as separate directories so the tests would
+        # still pass if the installer copied onto itself.
+        (root / ".build" / "bin").mkdir(parents=True, exist_ok=True)
         sentinel = f"fake-binary-{root.name}-{os.getpid()}\n"
         self._sentinel = sentinel
 
         for name in self.BINARIES:
-            p = root / "bin" / name
+            p = root / ".build" / "bin" / name
             if name == "mpm":
                 # Runnable: echoes its sentinel and MPM_WORKSPACE so the
                 # functional test can observe the environment the
@@ -224,11 +241,11 @@ class _InstallDriver(unittest.TestCase):
         """Non-vacuity guard. If the fixture is wrong, every assertion
         built on it passes for the wrong reason."""
         for name in self.BINARIES:
-            p = self._project / "bin" / name
+            p = self._project / ".build" / "bin" / name
             self.assertTrue(p.is_file(), f"fixture missing binary {name}")
             self.assertIn(self._sentinel, p.read_bytes().decode(errors="replace"))
         for name in self.DAEMONS:
-            head = (self._project / "bin" / name).read_bytes()[:2]
+            head = (self._project / ".build" / "bin" / name).read_bytes()[:2]
             self.assertEqual(
                 head, ELF_MAGIC,
                 f"daemon fixture {name} must carry ELF magic so the "
@@ -240,26 +257,35 @@ class _InstallDriver(unittest.TestCase):
     # driver
     # ------------------------------------------------------------------
     def _drive(self, project_root: Path, prefix: Path, data_root: Path,
-               phases: str = "phase_binaries") -> dict:
+               phases: str = "phase_binaries",
+               build_dir: Path | None = None) -> dict:
         """Run the named install.sh phases in a subprocess with
         controlled env, and return stdout/stderr/returncode.
 
-        ``PROJECT_ROOT``/``PREFIX``/``DATA_ROOT`` are assigned AFTER the
-        sourced lib is read, because install.sh declares PREFIX/DATA_ROOT
-        as bare (non-readonly) assignments at the top that would wipe any
-        pre-source export. ``LOCAL_BIN`` is ``readonly`` and derived from
-        ``HOME``, which the caller controls via the child env.
+        ``PROJECT_ROOT``/``BUILD_DIR``/``PREFIX``/``DATA_ROOT`` are assigned
+        AFTER the sourced lib is read, because install.sh declares
+        PREFIX/DATA_ROOT as bare (non-readonly) assignments at the top that
+        would wipe any pre-source export. ``LOCAL_BIN`` is ``readonly`` and
+        derived from ``HOME``, which the caller controls via the child env.
+
+        ``build_dir`` defaults to the fixture's ``<project>/.build/bin``,
+        i.e. what ``make print-build-dir`` reports. Pass it explicitly to
+        force an aliased/misconfigured build output and prove the phase
+        refuses it.
         """
+        if build_dir is None:
+            build_dir = project_root / ".build" / "bin"
         driver = project_root / "_drive.sh"
         driver.write_text(textwrap.dedent(f"""\
             #!/usr/bin/env bash
             set -uo pipefail
             export PROJECT_ROOT={project_root}
             source {project_root}/install.sh.lib
+            BUILD_DIR={build_dir}
             PREFIX={prefix}
             DATA_ROOT={data_root}
             SERVICE_DST=/dev/null
-            export PREFIX DATA_ROOT SERVICE_DST
+            export BUILD_DIR PREFIX DATA_ROOT SERVICE_DST
             {phases}
         """))
         driver.chmod(0o755)
@@ -301,12 +327,12 @@ class _InstallDriver(unittest.TestCase):
     def _assert_is_build_output(self, path: Path, msg: str):
         """Assert ``path`` is a verbatim copy of the corresponding
         build artifact — the strongest form of "installed directly"."""
-        src = self._project / "bin" / path.name
+        src = self._project / ".build" / "bin" / path.name
         self.assertTrue(src.is_file(), f"no build output for {path.name}")
         self.assertEqual(
             path.read_bytes(), src.read_bytes(),
             f"{path} is not the build output ({msg}); the installer must "
-            f"copy $PROJECT_ROOT/bin/{path.name} verbatim",
+            f"copy $BUILD_DIR/{path.name} verbatim",
         )
 
     def _assert_not_a_wrapper(self, path: Path, msg: str):
@@ -393,7 +419,7 @@ class PhaseBinariesSeparateLayout(_InstallDriver):
         self._assert_ok(result, "phase_binaries (separate layout)")
 
         for name in self.BINARIES:
-            src = self._project / "bin" / name
+            src = self._project / ".build" / "bin" / name
             self._assert_executable(src, "source binary")
             self.assertIn(
                 self._sentinel, src.read_bytes().decode(errors="replace"),
@@ -402,15 +428,20 @@ class PhaseBinariesSeparateLayout(_InstallDriver):
 
 
 # ======================================================================
-# Case B — same layout
+# Case B — checkout IS the install prefix (the canonical $HOME/.mpm layout)
 # ======================================================================
-class PhaseBinariesSameLayout(_InstallDriver):
-    """PROJECT_ROOT == PREFIX (repo cloned to the canonical prefix).
+class PhaseBinariesColocatedCheckout(_InstallDriver):
+    """PROJECT_ROOT == PREFIX: the repo IS cloned to the canonical prefix.
 
-    This is the regression case the installer originally broke on.
-    Without the ``-ef`` guard, ``install -m 0755 $PROJECT_ROOT/bin/… $PREFIX/bin/…``
-    fails with "are the same file" and ``set -e`` aborts the installer
-    before the remaining install phases run.
+    Historically this was the dangerous layout. `make build` wrote to
+    `bin/`, which here IS the install directory systemd executes from, so
+    an ordinary build overwrote the live binaries; the installer then hit
+    `install(1): 'X' and 'X' are the same file` and needed an `-ef` skip to
+    survive. Both halves of that are gone.
+
+    It is now an ordinary working layout: build output is
+    `$PROJECT_ROOT/.build/bin`, the install target is `$PROJECT_ROOT/bin`,
+    and they are two different directories. Promotion is a plain copy.
     """
 
     def setUp(self):
@@ -420,6 +451,17 @@ class PhaseBinariesSameLayout(_InstallDriver):
         self._build_fake_project(self._project)
         self._assert_fixture_is_real()
         self._prefix = self._project
+
+    def test_build_output_and_install_target_are_distinct(self):
+        """The precondition the rest of this class relies on. If these
+        ever collide, every other test here is asserting the wrong thing."""
+        build_dir = self._project / ".build" / "bin"
+        install_dir = self._prefix / "bin"
+        self.assertNotEqual(
+            build_dir.resolve(), install_dir.resolve(),
+            "fixture is degenerate: build output and install target must "
+            "be distinct directories",
+        )
 
     def test_does_not_fail_with_same_file_error(self):
         result = self._drive(self._project, self._prefix, self._prefix)
@@ -431,22 +473,37 @@ class PhaseBinariesSameLayout(_InstallDriver):
             f"install(1) refused to copy a file onto itself — this is the bug:\n"
             f"  stderr: {result['stderr']}\n  stdout: {result['stdout']}",
         )
-        self._assert_ok(result, "phase_binaries (same layout)")
+        self._assert_ok(result, "phase_binaries (colocated checkout)")
 
     def test_binaries_exist_at_prefix(self):
         result = self._drive(self._project, self._prefix, self._prefix)
-        self._assert_ok(result, "phase_binaries (same layout)")
+        self._assert_ok(result, "phase_binaries (colocated checkout)")
 
         for name in self.BINARIES:
             path = self._prefix / "bin" / name
-            self._assert_executable(path, "binary (same layout)")
-            self._assert_is_build_output(path, "same layout")
+            self._assert_executable(path, "binary (colocated checkout)")
+            self._assert_is_build_output(path, "colocated checkout")
 
     def test_produces_no_wrapper_artifacts(self):
         result = self._drive(self._project, self._prefix, self._prefix)
-        self._assert_ok(result, "phase_binaries (same layout)")
+        self._assert_ok(result, "phase_binaries (colocated checkout)")
 
-        self._assert_no_wrapper_artifacts(self._prefix, "same layout")
+        self._assert_no_wrapper_artifacts(self._prefix, "colocated checkout")
+
+    def test_build_output_survives_promotion(self):
+        """The split's whole purpose: promoting to the install must leave
+        the build artifacts in place, because they are now somewhere
+        else rather than the same files."""
+        result = self._drive(self._project, self._prefix, self._prefix)
+        self._assert_ok(result, "phase_binaries (colocated checkout)")
+
+        for name in self.BINARIES:
+            src = self._project / ".build" / "bin" / name
+            self._assert_executable(src, "build output after promotion")
+            self.assertIn(
+                self._sentinel, src.read_bytes().decode(errors="replace"),
+                f"build output {name} was modified or consumed by install",
+            )
 
     def test_installed_mpm_is_directly_runnable(self):
         """Functional check: the installed $PREFIX/bin/mpm runs, and
@@ -456,7 +513,7 @@ class PhaseBinariesSameLayout(_InstallDriver):
         the caller did not set, which is the whole reason the wrapper
         was dropped (internal/core/config defaults it to $HOME/.mpm)."""
         result = self._drive(self._project, self._prefix, self._prefix)
-        self._assert_ok(result, "phase_binaries (same layout)")
+        self._assert_ok(result, "phase_binaries (colocated checkout)")
 
         proc = subprocess.run(
             [str(self._prefix / "bin" / "mpm")],
@@ -473,6 +530,87 @@ class PhaseBinariesSameLayout(_InstallDriver):
             f"the installed mpm must not have a wrapper injecting "
             f"MPM_WORKSPACE; got stdout={proc.stdout!r}",
         )
+
+
+# ======================================================================
+# Case C — build output ALIASED onto the install target (must refuse)
+# ======================================================================
+class BuildOutputAliasedOntoInstall(_InstallDriver):
+    """The defect this whole split exists to make impossible, forced
+    back into existence to prove the installer rejects it.
+
+    Reached when `.build/bin` is symlinked at the install's `bin/`, or
+    BUILD_DIR is overridden to the install path. Previously the `-ef`
+    branch SKIPPED the copy and reported success — a deployment that never
+    happened. It is now a hard error.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._project = self._tmp / "src" / "mpm"
+        self._build_fake_project(self._project)
+        self._prefix = self.home / ".mpm"
+        # Model the alias faithfully: the build artifacts ARE the install
+        # files, so src and dst are the same inodes. Staging empty files
+        # would trip the existence check first and never reach the
+        # collision handling this class is about.
+        (self._prefix / "bin").mkdir(parents=True)
+        for name in self.BINARIES:
+            shutil.copy(
+                self._project / ".build" / "bin" / name,
+                self._prefix / "bin" / name,
+            )
+        self._aliased_build_dir = self._prefix / "bin"
+
+    def _drive_aliased(self) -> dict:
+        return self._drive(
+            self._project, self._prefix, self._prefix,
+            build_dir=self._aliased_build_dir,
+        )
+
+    def test_refuses_instead_of_skipping(self):
+        result = self._drive_aliased()
+        combined = result["stderr"] + result["stdout"]
+        self.assertNotEqual(
+            result["returncode"], 0,
+            "installer reported success while refusing to copy anything — "
+            "that is the 'success over a partial install' failure mode:\n"
+            f"  stderr: {result['stderr']}",
+        )
+        self.assertIn(
+            "same file", combined,
+            f"expected the installer to name the same-file collision:\n"
+            f"  stderr: {result['stderr']}\n  stdout: {result['stdout']}",
+        )
+
+    def test_does_not_report_a_skip(self):
+        """The old wording. Its absence is the behavioural change."""
+        result = self._drive_aliased()
+        self.assertNotIn(
+            "skipping copy", result["stderr"] + result["stdout"],
+            "installer still SKIPS the copy when src and dst are the same "
+            f"file; it must refuse. stderr={result['stderr']!r}",
+        )
+
+    def test_leaves_install_target_untouched(self):
+        """A refusal must not have half-modified anything.
+
+        The files are already present (that is the premise), so the
+        invariant is that they are byte-identical afterwards — the phase
+        died before copying, rather than truncating and rewriting them.
+        """
+        before = {
+            name: (self._prefix / "bin" / name).read_bytes()
+            for name in self.BINARIES
+        }
+        result = self._drive_aliased()
+        self.assertNotEqual(result["returncode"], 0)
+        for name in self.BINARIES:
+            path = self._prefix / "bin" / name
+            self.assertEqual(
+                path.read_bytes(), before[name],
+                f"{path} was modified by a phase that refused to install",
+            )
 
 
 # ======================================================================
@@ -605,7 +743,11 @@ class PhaseBinariesIdempotency(_InstallDriver):
             self._assert_is_build_output(path, msg)
         self._assert_no_wrapper_artifacts(prefix, msg)
 
-    def test_same_layout_repeat_safe(self):
+    def test_colocated_checkout_repeat_safe(self):
+        """Re-running against a checkout that IS the prefix must be a
+        plain, repeatable copy. There is no `-ef` skip to take any more:
+        the second run copies the same distinct files the first one did.
+        """
         self._project = self.home / ".mpm"
         self._build_fake_project(self._project)
         self._assert_fixture_is_real()
@@ -615,13 +757,12 @@ class PhaseBinariesIdempotency(_InstallDriver):
             self._drive(self._project, self._prefix, self._prefix), "first run")
         self._assert_stable(self._prefix, "after first run")
 
-        # The second run hits the -ef guard for every binary.
         r2 = self._drive(self._project, self._prefix, self._prefix)
         self._assert_ok(r2, "second run")
-        self.assertIn(
-            "is build output (same file as", r2["stderr"],
-            "second same-layout run should skip every copy via the -ef guard; "
-            f"stderr={r2['stderr']!r}",
+        self.assertNotIn(
+            "skipping copy", r2["stderr"],
+            "the -ef skip is gone; a second colocated run is an ordinary "
+            f"copy. stderr={r2['stderr']!r}",
         )
         self._assert_stable(self._prefix, "after second run")
 
@@ -659,7 +800,7 @@ class NegativeControls(_InstallDriver):
         moved aside to mpm.real, a generated wrapper at mpm."""
         mpm = self._bindir / "mpm"
         (self._bindir / "mpm.real").write_bytes(
-            (self._project / "bin" / "mpm").read_bytes())
+            (self._project / ".build" / "bin" / "mpm").read_bytes())
         mpm.write_text(
             "#!/usr/bin/env bash\n"
             'export MPM_WORKSPACE=/somewhere\n'
@@ -702,7 +843,22 @@ class ContractStillDeclaredInInstallScript(unittest.TestCase):
         self.assertEqual(sorted(declared), sorted(_InstallDriver.BINARIES))
 
     def test_same_inode_guard_is_present(self):
+        """The same-inode test is retained, but its consequence INVERTED.
+
+        It used to select a "skip the copy" branch. That branch was
+        reachable only when the build output and the install target were
+        the same file — the very condition the build/install split now
+        prevents. It now selects a refusal (``die``), because reaching it
+        means something aliased the two directories, and reporting a
+        successful install of a binary that was never copied is the exact
+        failure this guard exists to prevent.
+        """
         self.assertRegex(self.src, r'if \[ "\$src" -ef "\$dst" \]; then')
+        self.assertNotIn(
+            "skipping copy", self.src,
+            "the -ef branch must refuse, not skip; a skip would report a "
+            "deployment that did not happen",
+        )
 
     def test_legacy_cleanup_block_is_present(self):
         self.assertIn('rm -f "$PREFIX/bin/mpm.real"', self.src)
