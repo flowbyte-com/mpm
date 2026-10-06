@@ -152,8 +152,9 @@ Available (bulk; -f required, otherwise nothing is deleted):
                               as mpm.db.pre-shred-<nanos>; preserve logs,
                               backups, telemetry, mode/, persona/
 
-  Note: mode/ and persona/ are git-tracked source in the canonical
-  ~/.mpm checkout, so the last two refuse there. Use ` + "`git rm`" + ` for tracked files.
+  Note: mode/ and persona/ are runtime definitions in the runtime root,
+  owned by you. The last two delete them there. If the workspace happens to
+  be a Git checkout, they refuse and you should use ` + "`git rm`" + ` instead.
 
 Not available (-f does not enable them):
   mpm shred sessions         Would only rename the collection, not delete it
@@ -255,11 +256,11 @@ func handleShredModes(args []string) int {
 			"Nothing was deleted. Re-run with -f to confirm.\n", 1)
 	}
 
-	// RemoveAll refuses inside a Git worktree. Under the canonical
-	// ~/.mpm layout, mode/ is git-tracked source at the runtime root, so
-	// this is the guard that stands between a working flag handler and
-	// deleting repository source. It lives in RemoveAll, downstream of
-	// this force check, so propagating force cannot bypass it.
+	// RemoveAll refuses inside a Git worktree, where mode/ is tracked
+	// source rather than runtime state. In a pure runtime root it
+	// proceeds, and it touches only that root — a checkout elsewhere is
+	// unaffected. The guard lives in RemoveAll, downstream of this force
+	// check, so propagating force cannot bypass it.
 	mm := internal.NewModeManager("")
 	count, err := mm.RemoveAll()
 	if err != nil {

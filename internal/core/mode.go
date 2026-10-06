@@ -268,12 +268,15 @@ func (mm *ModeManager) ClearModes() error {
 
 // RemoveAll removes all mode files (use with caution)
 //
-// Under the canonical layout the MPM checkout IS the workspace root
-// (`~/.mpm`), so `mode/` is git-tracked source sitting at the runtime
-// root. Bulk-deleting it would destroy tracked files and dirty the
-// worktree, so the operation is refused there. A workspace that is not
-// a Git checkout (an install prefix holding only runtime state) keeps
-// the original behaviour.
+// `mode/` is runtime state in the runtime root: provisioned from the
+// source checkout by scripts/install_runtime_assets.py, then owned by
+// the operator. Bulk-deleting it is the intended effect of this command.
+//
+// The Git-worktree guard remains for the co-located case, where the
+// runtime root is still a checkout and `mode/` is tracked source —
+// bulk-deleting it there would destroy repository files and dirty the
+// worktree. A pure runtime root (no `.git` above it) is not refused,
+// and this never reaches outside the workspace it was given.
 //
 // This matches AddMode, which already refuses to create mode files
 // because they are managed directly in the directory.
