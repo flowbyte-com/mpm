@@ -817,3 +817,100 @@ func indentForMessage(s string) string {
 	}
 	return b.String()
 }
+
+// ---------------------------------------------------------------------------
+// Root-module package coverage in the canonical gates
+// ---------------------------------------------------------------------------
+
+// TestBuildConfig_CriticInCanonicalGates pins that internal/critic is
+// executed by BOTH canonical Go gates.
+//
+// WHY THIS NEEDS PINNING. The gates enumerate root-module packages
+// individually (./cmd/..., ./internal/telemetry/..., internal/core,
+// ./internal/scheduler/...) rather than a single ./... , because
+// internal/core is a separate nested module. Any package added under
+// internal/ is therefore INVISIBLE to both gates until someone edits
+// this Makefile by hand.
+//
+// That is not hypothetical. internal/critic was omitted for its entire
+// life: every Tranche-5 fix to StaleMemoryHunt — including the
+// cumulative-active-uptime settling rewrite and its 15 regression
+// tests — passed `make test` and `make release-gate` without a single
+// critic test executing. The gates were green while the code they were
+// supposed to cover never ran.
+//
+// Both gates are checked, not just `test`, because `release-gate` is
+// defined as `test-race test-release`, so a package absent from
+// test-race is absent from release-gate too (test-release only runs
+// the separate release_acceptance module).
+//
+// The match is scoped to each target's OWN recipe region, extracted
+// the same way TestBuildConfig_MakefileHasRaceDetectorTarget does it.
+// A whole-file substring search would be satisfied by a comment
+// mentioning the package, which is precisely the vacuous pass this
+// guard exists to prevent.
+func TestBuildConfig_CriticInCanonicalGates(t *testing.T) {
+	makefilePath := filepath.Join(findRepoRoot(t), "Makefile")
+	data, err := os.ReadFile(makefilePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", makefilePath, err)
+	}
+	text := string(data)
+
+	for _, target := range []struct {
+		name    string
+		flag    string
+		example string
+	}{
+		{"test", "-tags fts5", "make test"},
+		{"test-race", "-race -tags fts5", "make test-race"},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			recipeRE := regexp.MustCompile(
+				`(?m)^` + regexp.QuoteMeta(target.name) + `:[^\n]*\n((?:^[ \t].*\n?)+)`,
+			)
+			match := recipeRE.FindStringSubmatch(text)
+			if len(match) < 2 {
+				t.Fatalf("Makefile must define a `%s:` target recipe (got empty body)", target.name)
+			}
+			recipe := match[1]
+
+			if !strings.Contains(recipe, "./internal/critic/...") {
+				t.Errorf("`%s` recipe does not execute ./internal/critic/...\n"+
+					"  The Critic's tests are silently skipped, so a green %s can\n"+
+					"  mean the critic package never ran. Add:\n"+
+					"    CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test %s -v ./internal/critic/...\n"+
+					"  recipe:\n%s", target.name, target.example, target.flag, indentForMessage(recipe))
+			}
+
+			// The critic line must carry the same build configuration as its
+			// neighbours. A critic run compiled without FTS5 would fail
+			// differently from the rest of the root module and could be
+			// "fixed" by dropping the flags, reintroducing exactly the drift
+			// TestBuildConfig_MakefileHasRaceDetectorTarget guards against.
+			criticLine := ""
+			for _, line := range strings.Split(recipe, "\n") {
+				if strings.Contains(line, "./internal/critic/...") {
+					criticLine = line
+					break
+				}
+			}
+			if criticLine == "" {
+				return // already reported above
+			}
+			for _, required := range []string{
+				"$(CGO_CFLAGS)", "$(CGO_LDFLAGS)", "$(GO) test",
+				"-tags fts5", "-v",
+			} {
+				if !strings.Contains(criticLine, required) {
+					t.Errorf("critic line in `%s` is missing %q; it must use the same\n"+
+						"  build configuration as every other root-module package (got: %q)",
+						target.name, required, criticLine)
+				}
+			}
+			if strings.Contains(target.name, "race") && !strings.Contains(criticLine, "-race") {
+				t.Errorf("critic line in `%s` must pass -race (got: %q)", target.name, criticLine)
+			}
+		})
+	}
+}
