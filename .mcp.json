@@ -1,10 +1,35 @@
 {
+  "_comment": [
+    "Project-scoped MCP wiring for developing MPM itself.",
+    "",
+    "`command` intentionally points at the DEVELOPER artifact .build/bin/mpm-mcp,",
+    "never at $(PREFIX)/bin. A build must not be able to launch as the live server,",
+    "and a deploy must not be shadowed by a stale checkout artifact.",
+    "",
+    "`MPM_WORKSPACE` points at the CANONICAL RUNTIME ROOT (${HOME}/.mpm), not at",
+    "`.`. The source checkout is not a workspace. Setting it to `.` made the",
+    "mpm-mcp server treat the checkout as a runtime workspace, and because",
+    "mpmcli.ResolveWorkspace() falls back to the literal `.` (internal/core/mpmcli/",
+    "mpmcli.go:18-23) the MCP server then bootstrap-created mode/ and persona/",
+    "inside the source tree and resolved its DB there — source pollution, and a",
+    "ghost database distinct from the canonical one.",
+    "",
+    "`${HOME}` is used rather than `~` because MCP hosts expand `${VAR}` in the env",
+    "block but pass a literal tilde through unexpanded; a literal `~/.mpm` is a",
+    "relative path and would recreate the very bug this replaces. This was",
+    "verified empirically against the host, not assumed.",
+    "",
+    "Pinned by scripts/tests/test_runtime_asset_provisioning.py.",
+    "",
+    "Operator-facing runtime wiring is a separate concern and lives in",
+    "agent_installation/mpm-memory-openclaw/.mcp.json."
+  ],
   "mcpServers": {
     "mpm": {
       "command": "./.build/bin/mpm-mcp",
       "args": [],
       "env": {
-        "MPM_WORKSPACE": "."
+        "MPM_WORKSPACE": "${HOME}/.mpm"
       }
     }
   }

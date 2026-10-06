@@ -2398,6 +2398,22 @@ func printRefHelp() int {
 // loadActiveJSON/saveActiveJSON/activeJSONPath were deleted; callers
 // below now use mpminternal.LoadActiveJSON / mpminternal.SaveActiveJSON.
 
+// getModeFiles and getPersonaFiles enumerate the selectable definitions
+// for the interactive `mpm switch` picker.
+//
+// Both gate on internal.IsDefinitionFile, matching ModeManager.List
+// (internal/core/mode.go:140), PersonaManager.List
+// (internal/core/persona.go:126), and the router's own loader
+// (internal/core/router_loader.go:85). The bare `.md`-suffix test these
+// functions used to perform let mode/README.md and persona/README.md
+// appear as selectable entries named "README", and the picker's
+// selection is written straight into active.json.
+//
+// The definitions now ship as provisioned runtime copies rather than
+// tracked source, so the README is a documentation file the operator
+// reads in a directory they own — which makes this gap more reachable,
+// not less. Consistency with the loaders is the contract: if it is not
+// selectable anywhere else, it must not be selectable here either.
 func getModeFiles() []string {
 	dir := filepath.Join(config.GetMPMDir(), "mode")
 	entries, err := os.ReadDir(dir)
@@ -2406,13 +2422,10 @@ func getModeFiles() []string {
 	}
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || !mpminternal.IsDefinitionFile(e.Name()) {
 			continue
 		}
-		name := e.Name()
-		if strings.HasSuffix(name, ".md") {
-			names = append(names, strings.TrimSuffix(name, ".md"))
-		}
+		names = append(names, strings.TrimSuffix(e.Name(), ".md"))
 	}
 	return names
 }
@@ -2425,13 +2438,10 @@ func getPersonaFiles() []string {
 	}
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || !mpminternal.IsDefinitionFile(e.Name()) {
 			continue
 		}
-		name := e.Name()
-		if strings.HasSuffix(name, ".md") {
-			names = append(names, strings.TrimSuffix(name, ".md"))
-		}
+		names = append(names, strings.TrimSuffix(e.Name(), ".md"))
 	}
 	return names
 }
