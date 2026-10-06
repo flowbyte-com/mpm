@@ -633,14 +633,33 @@ func makeInstallRecipe(t *testing.T) string {
 
 	start := -1
 	for i, l := range lines {
-		if l == "install: build refresh-installed" {
+		// Match the `install` target by its load-bearing prerequisites rather
+		// than by exact text. Pinning the whole line would fail every time a
+		// legitimate prerequisite is added — and `install-runtime-assets` is
+		// exactly such an addition. What must never change is that install
+		// still builds first and still promotes binaries; both are asserted
+		// below, and separately by the install-sync tests.
+		if !strings.HasPrefix(l, "install:") {
+			continue
+		}
+		prereqs := strings.Fields(strings.TrimPrefix(l, "install:"))
+		hasBuild, hasPromote := false, false
+		for _, p := range prereqs {
+			switch p {
+			case "build":
+				hasBuild = true
+			case "refresh-installed":
+				hasPromote = true
+			}
+		}
+		if hasBuild && hasPromote {
 			start = i + 1
 			break
 		}
 	}
 	if start < 0 {
-		t.Fatalf("Makefile no longer has the expected `install: build refresh-installed` target; " +
-			"update makeInstallRecipe to match the current shape.")
+		t.Fatalf("Makefile no longer has an `install` target depending on both " +
+			"`build` and `refresh-installed`; update makeInstallRecipe to match the current shape.")
 	}
 
 	var body []string

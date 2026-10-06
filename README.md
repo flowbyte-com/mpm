@@ -165,8 +165,8 @@ Building requires Go 1.26.6 or newer, Make, and a C toolchain for SQLite/CGO.
 The Makefile supplies the required FTS5 build flags.
 
 ```bash
-git clone https://github.com/flowbyte-com/mpm ~/.mpm
-cd ~/.mpm
+git clone https://github.com/flowbyte-com/mpm ~/src/mpm
+cd ~/src/mpm
 make build          # developer artifacts -> ./.build/bin/ (disposable)
 ./.build/bin/mpm --help
 ```

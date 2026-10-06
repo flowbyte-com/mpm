@@ -180,13 +180,16 @@ ls -la ~/.mpm/src/db 2>/dev/null || echo "no database at the canonical path"
 
 Then follow the first matching case:
 
-| State | Action |
+| State of the checkout (`~/src/mpm` by convention) | Action |
 |---|---|
-| `~/.mpm` does not exist | `git clone https://github.com/flowbyte-com/mpm ~/.mpm`, then install. |
-| `~/.mpm/.git` is a valid MPM checkout | **Reuse it — do not re-clone.** `git -C ~/.mpm pull`, then re-run the installer. |
-| `~/.mpm` exists but is not a recognizable MPM checkout | **Stop. Do not delete, overwrite, or clone over it.** Report what you found and ask the user. |
-| `~/.mpm` exists, contents unknown | **Stop and report.** Treat as the ambiguous case. |
+| No checkout exists | `git clone https://github.com/flowbyte-com/mpm ~/src/mpm`, then install from there. |
+| Its `.git` is a valid MPM checkout | **Reuse it — do not re-clone.** `git -C ~/src/mpm pull`, then re-run the installer. |
+| It exists but is not a recognizable MPM checkout | **Stop. Do not delete, overwrite, or clone over it.** Report what you found and ask the user. |
+| It exists, contents unknown | **Stop and report.** Treat as the ambiguous case. |
 | The user supplied an explicit alternate checkout | Honour it. Runtime state and binaries still install under `~/.mpm` unless `MPM_WORKSPACE` says otherwise. |
+
+`~/.mpm` itself is the runtime root and normally already exists on any machine
+that has run MPM. Its presence is not evidence of a checkout.
 
 **Never delete, overwrite, or force a clone onto `~/.mpm` to satisfy an
 install path.** A `git clone` into a non-empty directory fails rather than

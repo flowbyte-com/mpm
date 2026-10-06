@@ -613,7 +613,7 @@ The distinction that matters operationally: **a shredded object is no longer rea
 | `mpm shred memories` | **Not available** | — |
 | `mpm shred database -f` | **Available, refuses without `-f`** | Active-substrate reset: validates-before-mutate, retains the previous `mpm.db` as `mpm.db.pre-shred-<nanos>` for one cycle, rolls back on any failure, preserves `mirror.jsonl` / `watchdog.jsonl` / `telemetry.db` / backups / `mode/` / `persona/` / blobs / the install prefix. Refuses while another live MPM process holds the substrate lock. The second reset consumes the first recovery handle. |
 
-The Git-worktree refusal is not a force check and force cannot reach it: the guard lives inside `ModeManager.RemoveAll` / `PersonaManager.RemoveAll`, downstream of the confirmation. Under the canonical layout the checkout *is* the runtime root, so `mode/` and `persona/` are repository-owned source rather than runtime state; the guard is what stands between a working flag handler and silent deletion of tracked files. Remove them with `git rm`. Non-Git workspaces keep the bulk delete.
+The Git-worktree refusal is not a force check and force cannot reach it: the guard lives inside `ModeManager.RemoveAll` / `PersonaManager.RemoveAll`, downstream of the confirmation. `mode/` and `persona/` are runtime state in the runtime root — provisioned from the source checkout at install time and then operator-owned — so a pure runtime root keeps the bulk delete. The guard still applies in the co-located case where the runtime root is still a checkout and those files are tracked source; there, remove them with `git rm`. The shred reaches only the workspace it was given, so a source checkout elsewhere is never touched.
 
 The two unavailable forms are **disabled, not awaiting a flag**, and no value of `-f`/`--force` enables them. Each prints what it would actually have done and what to use instead:
 
@@ -734,12 +734,12 @@ Five minutes from zero to first decision. Choose your depth:
 ### 5.1 Try it (CLI only — no daemons)
 
 ```bash
-git clone https://github.com/flowbyte-com/mpm ~/.mpm
-cd ~/.mpm
+git clone https://github.com/flowbyte-com/mpm ~/src/mpm
+cd ~/src/mpm
 make build           # produces .build/bin/{mpm,mpm-mcp,mpm-scheduler,mpm-critic,mpm-telemetry}
 ```
 
-`~/.mpm` is the canonical root: the same directory is the Git checkout and the runtime root, and everything MPM writes there at runtime is gitignored, so a normal `git pull` updates code without touching your data.
+`~/.mpm` is the canonical **runtime** root. The checkout is a separate directory that may live anywhere outside it (`~/src/mpm` is the suggested convention); a checkout colocated at `~/.mpm` still works. The runtime root requires no repository content — no `.git/`, no Go source, no Makefile — and everything MPM writes there at runtime is runtime state, so updating code with a `git pull` in the checkout cannot touch your data.
 
 The single binary lives at `.build/bin/mpm` after `make build`. Build output is
 checkout-local and disposable; it is never installed and never executed by a
@@ -752,8 +752,8 @@ This section shows the daemon + systemd setup manually, for transparency and for
 For autonomous operation — the scheduler dispatches system-kind wakes (critic audits, snapshots, GC, broadcasts) on a 60s ticker, and `mpm-mcp` exposes MPM to MCP hosts (Claude Code, OpenClaw) over stdio:
 
 ```bash
-git clone https://github.com/flowbyte-com/mpm ~/.mpm
-cd ~/.mpm
+git clone https://github.com/flowbyte-com/mpm ~/src/mpm
+cd ~/src/mpm
 make build           # produces .build/bin/{mpm,mpm-mcp,mpm-scheduler,mpm-critic,mpm-telemetry}
 make install         # optional — verifies/syncs all five to $HOME/.mpm/bin (no sudo)
 ```

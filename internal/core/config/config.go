@@ -535,33 +535,42 @@ const MPMDataDir = "mpm"
 // This enables portable installations - the same binary can work from any
 // directory.
 //
-// Canonical layout: the MPM Git checkout IS the workspace root. The
-// documented install is
+// Canonical layout: the runtime root and the source checkout are SEPARATE
+// concerns with separate owners.
 //
-//	git clone https://github.com/flowbyte-com/mpm ~/.mpm
-//	cd ~/.mpm && ./install.sh
+//	SOURCE CHECKOUT  ~/src/mpm      .git/, Go source, Makefile, scripts/, docs/,
+//	                                mode/, persona/, drills/, .build/
+//	RUNTIME ROOT     ~/.mpm         bin/, src/db/, config/, mode/, persona/,
+//	                                drills/, backups/, blobs/, run/, active.json
 //
-// so `~/.mpm` holds both tracked source and runtime state. That co-location
-// is deliberate and safe: every runtime path below is gitignored, and the
-// source directories that also live here (mode/, persona/) are treated as
-// source-owned — AddMode refuses to create them, and RemoveAll refuses to
-// bulk-delete them when the directory is inside a Git worktree.
+// `~/.mpm` is the runtime root. It does not require — and must not be
+// assumed to have — any repository content: no `.git/`, no Go source, no
+// Makefile, no scripts/. A runtime root on its own is sufficient to resolve
+// definitions, open the database, and run.
 //
-//	~/.mpm/                   ← canonical repository + workspace root
-//	├── .git/                 ← source of truth
-//	├── bin/                  ← compiled binaries (generated, gitignored)
+//	~/.mpm/                   ← canonical runtime root (workspace)
+//	├── bin/                  ← installed binaries
 //	├── src/db/               ← SQLite databases + mirror/watchdog JSONL (runtime)
+//	├── config/               ← runtime config + runtime-assets.json manifest
 //	├── backups/              ← pre-migration snapshots (runtime)
 //	├── blobs/                ← content-addressed blob store (runtime)
 //	├── run/                  ← scheduler state, pid/lock files (runtime)
 //	├── active.json           ← active mode selection (runtime)
-//	├── mode/                 ← mode .md files (TRACKED SOURCE)
-//	├── persona/              ← persona .md files (TRACKED SOURCE)
+//	├── mode/                 ← provisioned mode .md files (runtime, operator-owned)
+//	├── persona/              ← provisioned persona .md files (runtime, operator-owned)
+//	├── drills/               ← provisioned drill .yaml files (runtime, operator-owned)
 //	└── toxicphrases.txt      ← cognitive firewall (runtime)
 //
-// An alternate checkout (e.g. ~/projects/mpm) is supported for running the
-// source from elsewhere; install/runtime state still resolves to ~/.mpm
-// unless MPM_WORKSPACE says otherwise.
+// The mode/, persona/, and drills/ directories are provisioned from the source
+// checkout by scripts/install_runtime_assets.py and are then runtime state:
+// the operator may edit them, and ownership is tracked by content hash in
+// config/runtime-assets.json so upstream changes can still reach untouched
+// files. They are NOT tracked source.
+//
+// A host whose checkout is still colocated at ~/.mpm continues to work
+// unchanged — the separation changes ownership, not lookup paths. Wherever the
+// checkout lives (~/src/mpm, ~/projects/mpm, ~/.mpm), runtime state resolves
+// to ~/.mpm unless MPM_WORKSPACE says otherwise.
 func GetWorkspace() string {
 	// 1. Check environment variable (CLI flag or env var)
 	if workspace := os.Getenv("MPM_WORKSPACE"); workspace != "" {

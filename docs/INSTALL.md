@@ -46,8 +46,8 @@ checkout and the runtime root, so the source you just cloned is the same
 tree that will hold your database, binaries, and backups.
 
 ```bash
-git clone https://github.com/flowbyte-com/mpm ~/.mpm
-cd ~/.mpm
+git clone https://github.com/flowbyte-com/mpm ~/src/mpm
+cd ~/src/mpm
 ./install.sh
 ```
 
@@ -426,9 +426,11 @@ and `~/.local/bin/mpm-mcp` symlinks, and
 **Preserves:** your data (`~/.mpm/src/db/`, `~/.mpm/backups/`,
 `~/.mpm/blobs/`, `~/.mpm/active.json`) and your Git checkout.
 
-> **The checkout lives at `~/.mpm`.** `--uninstall` removes binaries and
-> services, not your source. Do **not** run `rm -rf ~/.mpm` to clear data —
-> that deletes the repository along with the database.
+> **Your source checkout is not the runtime root.** `--uninstall` removes
+> binaries and services, not your source. Do **not** run `rm -rf ~/.mpm` to
+> clear data unless your checkout is colocated there — on a host that has
+> already moved its checkout to e.g. `~/src/mpm`, that would delete the
+> database along with your repository.
 
 To remove data too, keep the source and delete only the runtime state:
 
@@ -477,43 +479,78 @@ user-owned; no `/usr/local` or `/var/lib/mpm` exists.
 
 ### The canonical layout
 
-`~/.mpm` is the canonical repository root *and* the canonical runtime root.
-One directory holds both, and the split is by Git tracking, not by directory:
+MPM has two distinct roots with two distinct owners. Keeping them straight is
+the single most useful thing to know about an installation.
 
 ```text
-~/.mpm/
-├── .git/                       ← the checkout
-├── README.md, docs/, agent_installation/, internal/, cmd/
-├── bin/                        ← compiled binaries        (gitignored)
-├── src/db/                     ← mpm.db, telemetry.db, sidecars, JSONL (gitignored)
-├── backups/                    ← pre-migration snapshots   (gitignored)
-├── blobs/                      ← blob store                (gitignored)
-├── run/                        ← scheduler state, locks    (gitignored)
-├── active.json, toxicphrases.txt, config/                  (gitignored)
-├── mode/, persona/             ← mode + persona .md        (TRACKED source)
-└── ...
+SOURCE CHECKOUT (yours, disposable, rebuilt from upstream)
+    ~/src/mpm/            or wherever you cloned
+    ├── .git/
+    ├── internal/ cmd/ scripts/ docs/ agent_installation/
+    ├── Makefile install.sh
+    ├── mode/ persona/ drills/      ← the CANONICAL definitions
+    └── .build/bin/                ← developer artifacts (never installed)
+
+RUNTIME ROOT (MPM's, installed, operator-owned)
+    ~/.mpm/
+    ├── bin/                        ← the five installed binaries
+    ├── mode/ persona/ drills/      ← PROVISIONED runtime definitions
+    ├── src/db/                     ← mpm.db, telemetry.db, sidecars
+    ├── config/                     ← incl. runtime-assets.json (ownership manifest)
+    ├── backups/ blobs/ run/
+    ├── active.json toxicphrases.txt
+    └── logs/
 
 ~/.local/bin/mpm      -> ~/.mpm/bin/mpm
-~/.local/bin/mpm-mcp  -> ~/.mpm/bin/mpm-mcp
+~/.local/bin/mcp-mcp  -> ~/.mpm/bin/mpm-mcp
 ```
 
-Two consequences follow from this, and both matter:
+The runtime root needs **no** repository content. No `.git/`, no Go source, no
+`Makefile`, no `scripts/`, no `docs/`. Given only the runtime root and the
+installed binaries, MPM resolves modes, personas, and drills, opens its
+database, and runs.
 
-- **Normal operation never dirties the checkout.** Every runtime path above is
-  gitignored, so `git status` stays clean across builds, drains, backups, and
-  scheduler ticks, and your database is never exposed to Git.
-- **Source directories at this root are source-owned.** `mode/` and `persona/`
-  are tracked files that happen to sit at the runtime root. MPM will not
-  bulk-delete them from a checkout: `mpm shred modes -f` and
-  `mpm shred personas -f` refuse, because in a Git worktree those are
-  repository files, not runtime state. `AddMode` likewise declines to create
-  them. Outside a checkout — an install prefix holding only runtime state —
-  the bulk-delete still works as before.
+> **Existing hosts are not required to have moved yet.** The layout above is
+> the target the installer now targets, and `install.sh` / `make install`
+> provision the runtime definitions wherever the source checkout happens to
+> live. A host whose checkout is still colocated at `~/.mpm` continues to work
+> unchanged. No physical migration has been performed as part of this change.
 
-Source code is NOT runtime data, but under the canonical layout the source
-tree **is** `~/.mpm` — the same directory as the data above. Deleting the
-checkout deletes the database with it. Runtime data survives `git pull`,
-because `git pull` updates tracked files and leaves gitignored state alone.
+#### Who owns `~/.mpm/mode`, `~/.mpm/persona`, `~/.mpm/drills`
+
+These are **runtime state that happens to have an upstream origin**. They are
+provisioned by the installer and then owned by you. They are not tracked
+source, and editing them is expected.
+
+`install` reconciles them against the source checkout under a recorded
+ownership manifest at `~/.mpm/config/runtime-assets.json`:
+
+| You did | Result |
+|---|---|
+| Nothing (stock file) | Upstream changes flow through on the next install |
+| Nothing (file absent) | Provisioned and recorded as managed |
+| Edited a managed file | **Preserved.** Upstream changes are not applied; the conflict is reported |
+| Added your own file | **Untouched.** Never claimed, never overwritten |
+| Deleted a managed file | **Not resurrected.** The deletion is treated as intentional |
+
+Ownership is decided by content hash, not by path, so a file you edited is
+never mistaken for stock. There is deliberately no `--force` flag: overwriting
+an operator edit is not a decision an installer should make on your behalf.
+
+#### Shredding
+
+`mpm shred modes -f` and `mpm shred personas -f` bulk-delete definitions. They
+refuse to run when the target directory is inside a Git worktree, because
+there the definitions are repository files rather than runtime state. In a
+pure runtime root — no `.git` anywhere above it — the shred proceeds, and it
+touches only the runtime root; a source checkout elsewhere is unaffected.
+
+#### Upgrades
+
+`make install` (or `./install.sh`) is the upgrade path. It rebuilds, promotes
+binaries to `~/.mpm/bin/`, and reconciles runtime definitions. Runtime data
+survives: `src/db/`, `blobs/`, `backups/`, and `config/` are runtime state and
+are never touched by an upgrade.
 
 ---
 
@@ -576,7 +613,9 @@ saved before the resolver existed — those rows carry partial snapshots.
 
 Older installs kept the MPM checkout somewhere other than `~/.mpm`, most
 commonly `~/.openclaw/workspace/projects/mpm` (inside the OpenClaw agent
-workspace) or `~/projects/mpm`. The canonical root is now `~/.mpm`.
+workspace) or `~/projects/mpm`. The canonical *runtime* root is `~/.mpm`; the
+checkout may live anywhere outside it, and `~/src/mpm` is the suggested
+convention.
 
 Nothing here needs to be done by the installer. The checkout and the data are
 separate concerns, and they must be moved separately.
@@ -585,9 +624,10 @@ separate concerns, and they must be moved separately.
 
 | Concern | Where it lives | Migrate how |
 |---|---|---|
-| Source / Git history | the checkout directory | Fresh `git clone` to `~/.mpm` |
-| Durable DB + state | `<old>/src/db/`, plus `active.json`, `backups/`, `blobs/`, `run/` | Copy deliberately, after installing |
-| Binaries / generated | `bin/` (the install; `make build` writes `.build/bin/` instead) | Rebuilt by `install.sh` — never copy |
+| Source / Git history | the checkout directory | Fresh `git clone` to `~/src/mpm` (any path outside `~/.mpm` works) |
+| Runtime definitions | `~/.mpm/mode/`, `~/.mpm/persona/`, `~/.mpm/drills/` | Not copied — re-provisioned by `install`, reconciled against the manifest |
+| Durable DB + state | `~/.mpm/src/db/`, plus `active.json`, `backups/`, `blobs/`, `run/` | Stays at `~/.mpm`; nothing to move |
+| Binaries / generated | `~/.mpm/bin/` (the install; `make build` writes `.build/bin/` instead) | Rebuilt by `install.sh` — never copy |
 | Host integrations | host config (`CLAUDE.md`, `AGENTS.md`, MCP registration) | Re-run each adapter installer |
 
 ### Steps
@@ -599,13 +639,13 @@ separate concerns, and they must be moved separately.
    cp -a ~/projects/mpm/src/db ~/mpm-db-backup
    ```
 
-2. **Get current source at the canonical root.** If `~/.mpm` does not exist:
+2. **Get current source in a checkout of its own.** If you have no checkout yet:
 
    ```bash
-   git clone https://github.com/flowbyte-com/mpm ~/.mpm
+   git clone https://github.com/flowbyte-com/mpm ~/src/mpm
    ```
 
-   If `~/.mpm` already holds something, use the decision table in
+   If `~/src/mpm` already holds something, use the decision table in
    [agent_installation/INSTALL.md](../agent_installation/INSTALL.md#deciding-where-the-source-goes)
    — do not clone over it.
 

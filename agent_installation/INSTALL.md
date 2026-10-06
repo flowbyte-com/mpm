@@ -49,8 +49,8 @@ mpm-mcp < /dev/null                 # MCP server speaks JSON-RPC
 If any of these fail, install MPM first:
 
 ```bash
-git clone https://github.com/flowbyte-com/mpm ~/.mpm
-cd ~/.mpm
+git clone https://github.com/flowbyte-com/mpm ~/src/mpm
+cd ~/src/mpm
 ./install.sh                # full install: build + binaries + systemd user unit + lingering
 mpm ops init directives             # baseline cognitive bootstrap (idempotent)
 ```
@@ -67,17 +67,21 @@ install procedure.
 
 ### Deciding where the source goes
 
-`~/.mpm` is both the source tree and the runtime root, so anything that
-manages the checkout is touching live data. Work through these cases in order
-and stop at the first match:
+`~/.mpm` is the **runtime root** — database, blobs, backups, and the
+provisioned `mode/`, `persona/`, `drills/` definitions. It is not a place a
+checkout lives, and it will normally already exist on any machine that has run
+MPM before. The question to ask is therefore about the *checkout*, not about
+`~/.mpm`.
 
-| State of `~/.mpm` | What to do |
+Work through these cases in order and stop at the first match:
+
+| State of the checkout (`~/src/mpm` by convention) | What to do |
 |---|---|
-| **Does not exist** | `git clone https://github.com/flowbyte-com/mpm ~/.mpm`, then install. |
-| **Exists, and `~/.mpm/.git` is a valid MPM checkout** | **Reuse it.** Run `git -C ~/.mpm pull` and re-run `./install.sh`. Never clone again. |
+| **Does not exist** | `git clone https://github.com/flowbyte-com/mpm ~/src/mpm`, then install from there. |
+| **Exists, and its `.git` is a valid MPM checkout** | **Reuse it.** Run `git -C ~/src/mpm pull` and re-run `./install.sh`. Never clone again. |
 | **Exists, but is not a recognizable MPM checkout** | **Stop and report.** Do not delete, overwrite, or clone over it. Show the user what is there and ask. |
 | **Exists and is not empty, contents unknown** | **Stop and report.** Treat as the ambiguous case above. |
-| **An explicit alternate checkout was supplied** | Honour it. Source may live elsewhere; runtime state and binaries still install under `~/.mpm` unless `MPM_WORKSPACE` says otherwise. |
+| **An explicit alternate checkout was supplied** | Honour it. Source may live anywhere outside `~/.mpm`; runtime state and binaries still install under `~/.mpm` unless `MPM_WORKSPACE` says otherwise. |
 
 Rules that matter most on a recovery or migration machine:
 
