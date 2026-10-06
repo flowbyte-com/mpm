@@ -41,6 +41,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Where a user's checkout belongs: outside the runtime root. The runtime
+# root is ~/.mpm and must never receive a repository.
+RUNTIME_ROOT = "~/.mpm"
+CANONICAL_CHECKOUT = "~/src/mpm"
+
 
 # Files that legitimately mention the historical path for narrative
 # reasons (release notes, changelog entries, history commits).
@@ -155,12 +160,18 @@ class TestNoObsoleteInstallPaths(unittest.TestCase):
 
 
 class TestCanonicalRepositoryRoot(unittest.TestCase):
-    """The canonical repository root is ~/.mpm.
+    """The checkout must be cloned OUTSIDE the runtime root.
 
-    MPM installs via `git clone … ~/.mpm`, so that directory is BOTH the
-    Git checkout and the runtime root. A doc that tells a user to clone to
-    somewhere else as the PRIMARY instruction reintroduces the ambiguity
-    this layout exists to remove.
+    `~/.mpm` is the RUNTIME root: it holds the database, blobs, backups, and
+    the provisioned mode/persona/drills definitions. It is not a place a
+    repository belongs. MPM installs from a checkout elsewhere — `~/src/mpm`
+    is the documented convention — and `install.sh` reconciles runtime
+    definitions out of it.
+
+    Cloning into `~/.mpm` is therefore actively wrong, not merely inelegant:
+    it drops `.git/`, Go source, Makefile, and `scripts/` into the directory
+    installed MPM treats as its own, and it puts the checkout's `mode/` and
+    `persona/` on top of the provisioned runtime ones.
 
     Deliberately narrow. It does NOT ban:
       * mentions of an alternate checkout where it is framed as the
@@ -169,8 +180,8 @@ class TestCanonicalRepositoryRoot(unittest.TestCase):
       * anything under docs/archive/ (historical record);
       * host-specific paths in validation snapshots and test fixtures.
 
-    What it forbids is a *clone instruction* aimed at a non-canonical
-    destination, in a current doc, outside a migration context.
+    What it forbids is a *clone instruction* aimed at the runtime root, in a
+    current doc, outside a migration context.
     """
 
     # Only these are checked: current, user-facing install documentation.
@@ -182,8 +193,8 @@ class TestCanonicalRepositoryRoot(unittest.TestCase):
         "agent_installation/INSTALL.md",
     )
 
-    # `git clone <url> <dest>` where dest is not ~/.mpm. A clone with no
-    # explicit destination (bare `git clone <url>`) is not a violation.
+    # `git clone <url> <dest>` where dest IS the runtime root. A clone with
+    # no explicit destination (bare `git clone <url>`) is not a violation.
     # The URL is matched as a unit so that a repo path containing '/' is
     # not mistaken for the destination argument.
     _CLONE = re.compile(
@@ -204,7 +215,7 @@ class TestCanonicalRepositoryRoot(unittest.TestCase):
         "supported as",
     )
 
-    def test_primary_clone_target_is_canonical_mpm(self):
+    def test_primary_clone_target_is_outside_the_runtime_root(self):
         offenders: list[str] = []
         for rel in self.GUARDED_DOCS:
             path = REPO_ROOT / rel
@@ -222,25 +233,28 @@ class TestCanonicalRepositoryRoot(unittest.TestCase):
                 if dest is None:
                     continue  # bare `git clone <url>` — no destination given
                 # Markdown prose trails punctuation and backticks off the
-                # path ("`git clone … ~/.mpm`, then install."). Strip them
+                # path ("`git clone … ~/src/mpm`, then install."). Strip them
                 # before comparing, or a correct instruction reads as a
                 # different destination.
                 dest = dest.rstrip("/").strip("`\"',;()[]*")
-                if dest == "~/.mpm":
+                if dest != RUNTIME_ROOT:
                     continue
                 offenders.append(f"  {rel}:{n}: {line.strip()}")
         if offenders:
             self.fail(
-                "a primary 'git clone' instruction targets a non-canonical "
-                "destination; ~/.mpm is the canonical repository root:\n"
+                "a primary 'git clone' instruction targets the RUNTIME ROOT "
+                f"({RUNTIME_ROOT}); {CANONICAL_CHECKOUT} is where the checkout belongs:\n"
                 + "\n".join(offenders)
-                + "\nUpdate it to `git clone https://github.com/flowbyte-com/mpm ~/.mpm`, "
-                "or frame the alternate layout explicitly as advanced/alternate."
+                + f"\nUpdate it to `git clone https://github.com/flowbyte-com/mpm {CANONICAL_CHECKOUT}`, "
+                "or frame an alternate checkout explicitly as advanced/alternate. "
+                "Cloning into the runtime root mixes a repository into the "
+                "directory installed MPM treats as its own, which the "
+                "source/runtime separation exists to prevent."
             )
 
     def test_canonical_install_sequence_documented(self):
         """The canonical sequence must be stated somewhere a user will find it."""
-        needle = "git clone https://github.com/flowbyte-com/mpm ~/.mpm"
+        needle = f"git clone https://github.com/flowbyte-com/mpm {CANONICAL_CHECKOUT}"
         found = any(
             needle in (REPO_ROOT / rel).read_text(encoding="utf-8", errors="ignore")
             for rel in self.GUARDED_DOCS
