@@ -798,6 +798,27 @@ via either:
 - **Drop-in** (preferred for path changes): `systemctl --user edit mpm-scheduler`
 - **Env file** (preferred for DB / backup paths): write `~/.config/mpm/mpm.env` with `MPM_DB_PATH=...`, `MPM_BACKUP_DIR=...`, `MPM_CRITIC_BIN=...` — it's sourced as `EnvironmentFile=-` in the unit.
 
+**Subprocess binaries are named, not looked up.** For `gc_run` and
+broadcast wakes the scheduler execs `MPM_BIN`, defaulting to
+`%h/.mpm/bin/mpm`; the critic binary is `MPM_CRITIC_BIN`. Neither is
+resolved through `PATH`. A user unit's `PATH` is the systemd manager's,
+not the operator's shell's, so a bare `mpm` would resolve to whatever came
+first there — a stale build, a developer's artifact, or nothing. If
+`MPM_BIN` is set to a path that cannot be executed, the scheduler fails
+the wake with an error naming the variable rather than falling back to a
+`PATH` lookup: a missing installed binary must be visible, not silently
+papered over by an unrelated one. `MPM_BIN` unset is the ad-hoc case
+(`mpm-scheduler` run by hand) and resolves to a bare `mpm`; the installed
+unit always sets it.
+
+**The working directory is not a workspace.** No `MPM` process resolves
+runtime state from the current directory. The workspace is
+`$MPM_WORKSPACE`, else `$HOME/.mpm`; the database is
+`$MPM_WORKSPACE/src/db/mpm.db`. Running any `MPM` command from inside a
+source checkout therefore reads and writes the canonical runtime, never
+the checkout — which is what makes it safe for the checkout to live
+somewhere else entirely.
+
 **Seed the baseline cognitive directives** (recommended once after install):
 
 ```bash
@@ -2942,7 +2963,7 @@ This appendix is the deep dive behind §6.5. The narrative above says *what*; th
 
 ### The two databases
 
-- **Local DB** — `~/.mpm/src/db/mpm.db`. Single canonical tactical-memory DB. Override the workspace root via `MPM_WORKSPACE` (the DB lives at `$MPM_WORKSPACE/src/db/mpm.db`). There is no `<workspace>` subdirectory tier — each MPM process opens one DB per workspace.
+- **Local DB** — `~/.mpm/src/db/mpm.db`. Single canonical tactical-memory DB. Override the workspace root via `MPM_WORKSPACE` (the DB lives at `$MPM_WORKSPACE/src/db/mpm.db`). There is no `<workspace>` subdirectory tier — each MPM process opens one DB per workspace. The DB path is never derived from the current working directory, so running `mpm` from a source checkout cannot create or adopt a second database there.
 - **Shared DB** — `$MPM_SHARED_DB` if set; no default path. Cross-project house rules, operator-gated. If the env var is unset (or the file at that path is missing), mpm runs in local-only mode. The convention `~/.mpm/shared/shared.db` is suggested but not enforced.
 
 Each MPM process attaches both via `ATTACH DATABASE '<shared_path>' AS shared`. Cross-DB queries become plain SQL: `SELECT … FROM shared.memories WHERE …`. There is no separate service, no IPC, no serialization layer.

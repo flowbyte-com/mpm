@@ -33,14 +33,19 @@ if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
   export MPM_PROVENANCE_FRAMEWORK_SESSION_ID="$CLAUDE_SESSION_ID"
 fi
 
-# Workspace: prefer MPM_WORKSPACE (canonical install root), fall back to
-# ~/.mpm (the canonical user-scope install layout), then to "." (last resort).
+# Workspace: prefer MPM_WORKSPACE (the host's own wiring), else the
+# canonical user runtime at $HOME/.mpm.
+#
+# There is deliberately no "." last resort here. A previous version fell
+# back to the current directory when $HOME/.mpm/src/db was absent, which
+# made the hook point the whole session at whatever directory the user
+# happened to launch from — the same ghost-workspace shape the Go
+# resolvers carried. If the runtime root is genuinely missing, naming it
+# anyway is correct: `mpm` will report what is absent, which is a
+# diagnosable failure, rather than silently operating on a directory that
+# was never a workspace.
 if [ -z "${MPM_WORKSPACE:-}" ]; then
-  if [ -d "${HOME}/.mpm/src/db" ]; then
-    export MPM_WORKSPACE="${HOME}/.mpm"
-  else
-    export MPM_WORKSPACE="."
-  fi
+  export MPM_WORKSPACE="${HOME}/.mpm"
 fi
 
 # Locate the mpm binary. The hook MUST not block on a missing binary.

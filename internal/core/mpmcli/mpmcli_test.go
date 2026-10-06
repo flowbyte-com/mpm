@@ -1,13 +1,47 @@
 package mpmcli
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/flowbyte-com/mpm-core/config"
 )
 
-func TestResolveWorkspace_DefaultIsCwd(t *testing.T) {
+// TestResolveWorkspace_DefaultsToCanonicalRuntime pins the default to the
+// canonical user runtime. It used to assert "." (the cwd), which only ever
+// made sense while the checkout and the runtime root were one directory.
+func TestResolveWorkspace_DefaultsToCanonicalRuntime(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv("MPM_WORKSPACE", "")
-	if got := ResolveWorkspace(); got != "." {
-		t.Fatalf("expected default \".\", got %q", got)
+	want := filepath.Join(home, ".mpm")
+	if got := ResolveWorkspace(); got != want {
+		t.Fatalf("ResolveWorkspace() = %q, want %q", got, want)
+	}
+}
+
+// TestResolveWorkspace_IsIndependentOfCwd is the property the old default
+// violated: where the process is launched from must not decide where runtime
+// state lives.
+func TestResolveWorkspace_IsIndependentOfCwd(t *testing.T) {
+	home := t.TempDir()
+	elsewhere := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("MPM_WORKSPACE", "")
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(elsewhere); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(wd) }()
+
+	want := filepath.Join(home, ".mpm")
+	if got := ResolveWorkspace(); got != want {
+		t.Fatalf("ResolveWorkspace() = %q from cwd %q, want %q", got, elsewhere, want)
 	}
 }
 
@@ -105,41 +139,48 @@ func TestActiveContextFromEnv_FrameworkPrecedence(t *testing.T) {
 	}
 }
 
-// TestResolveWorkspace_DefaultsDivergence documents the deliberate
-// divergence between two workspace resolvers:
+// TestResolveWorkspace_DefaultsDivergence pins that the two workspace
+// resolvers now AGREE.
 //
-//   - mpmcli.ResolveWorkspace(): defaults to "." (cwd)
-//   - config.GetWorkspace():    defaults to $HOME/.mpm
+// They used to diverge deliberately:
 //
-// Both honor MPM_WORKSPACE first when set; the divergence only affects
-// the unset case. The cmd/mpm doctor command uses config.GetWorkspace()
-// because it reports on the config subsystem's view of the canonical
-// workspace ($HOME/.mpm), which is the substrate's home-rooted design
-// intent. The CLI itself routes through mpmcli.ResolveWorkspace().
+//   - mpmcli.ResolveWorkspace(): defaulted to "." (cwd)
+//   - config.GetWorkspace():    defaulted to $HOME/.mpm
 //
-// Audit M-1 (post-M3, 2026-08-31) flagged this as a latent "mpm status
-// reports wrong workspace" bug, but inspection showed both resolvers
-// honor MPM_WORKSPACE first — the divergence only matters when the
-// env is unset, and the doctor using config.GetWorkspace() is
-// semantically correct (it reports on the config subsystem). The
-// verdict is RECLASSIFIED: the doctor command's behavior is correct,
-// and no fix is needed at cmd/mpm/main.go:934,989.
+// That divergence was not load-bearing. It meant the ghost-DB defect fixed
+// in config.GetWorkspace() after the 2026-07-21 incident (lesson
+// 59fe3f8ff3e1549e) was still live in mpmcli, and audit M-1 (2026-08-31)
+// reclassified the mismatch as harmless only because it had not yet traced
+// what the CLI and MCP server actually did with a "." workspace.
+//
+// mpmcli.ResolveWorkspace() now delegates to config.GetWorkspace(), so this
+// holds by construction rather than by two implementations agreeing.
 func TestResolveWorkspace_DefaultsDivergence(t *testing.T) {
-	t.Run("mpmcli defaults to cwd", func(t *testing.T) {
+	t.Run("both default to the canonical runtime root", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
 		t.Setenv("MPM_WORKSPACE", "")
-		if got := ResolveWorkspace(); got != "." {
-			t.Errorf("mpmcli.ResolveWorkspace() default = %q, want \".\"", got)
+
+		want := filepath.Join(home, ".mpm")
+		if got := ResolveWorkspace(); got != want {
+			t.Errorf("mpmcli.ResolveWorkspace() default = %q, want %q", got, want)
+		}
+		if got := config.GetWorkspace(); got != want {
+			t.Errorf("config.GetWorkspace() default = %q, want %q", got, want)
+		}
+		if ResolveWorkspace() != config.GetWorkspace() {
+			t.Errorf("resolvers disagree: mpmcli=%q config=%q",
+				ResolveWorkspace(), config.GetWorkspace())
 		}
 	})
 
 	t.Run("both honor MPM_WORKSPACE when set", func(t *testing.T) {
-		// The two resolvers diverge only in their unset-default; when
-		// MPM_WORKSPACE is set, both return the same value (verifying
-		// the audit's claim that doctor reports wrong workspace is
-		// incorrect).
 		t.Setenv("MPM_WORKSPACE", "/tmp/postm3-ws")
 		if got := ResolveWorkspace(); got != "/tmp/postm3-ws" {
 			t.Errorf("mpmcli.ResolveWorkspace() = %q, want /tmp/postm3-ws", got)
+		}
+		if got := config.GetWorkspace(); got != "/tmp/postm3-ws" {
+			t.Errorf("config.GetWorkspace() = %q, want /tmp/postm3-ws", got)
 		}
 	})
 }

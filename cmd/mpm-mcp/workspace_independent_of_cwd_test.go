@@ -85,15 +85,23 @@ func TestResolveWorkspaceHonoursEnvVar(t *testing.T) {
 	}
 }
 
-// TestResolveWorkspaceDefaultsToDotWhenUnset pins the fallback: with
-// MPM_WORKSPACE unset, ResolveWorkspace returns ".". This is the
-// original behaviour — the env-var path is additive, not breaking.
-func TestResolveWorkspaceDefaultsToDotWhenUnset(t *testing.T) {
-	// Ensure MPM_WORKSPACE is unset.
+// TestResolveWorkspaceDefaultsToCanonicalRuntimeWhenUnset pins the fallback:
+// with MPM_WORKSPACE unset, the workspace is the canonical user runtime, not
+// the current directory.
+//
+// This test is named for the failure it guards. The MCP server resolving its
+// workspace to "." when the variable is unset is what made it bootstrap-create
+// mode/ and persona/ inside whatever directory it was launched from and open a
+// database there — a ghost substrate distinct from the canonical one. The
+// installed unit sets MPM_WORKSPACE explicitly, but an explicit launch by
+// hand must not be able to reproduce that.
+func TestResolveWorkspaceDefaultsToCanonicalRuntimeWhenUnset(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv("MPM_WORKSPACE", "")
 
-	got := mpmcli.ResolveWorkspace()
-	if got != "." {
-		t.Errorf("ResolveWorkspace()=%q, want %q (MPM_WORKSPACE unset)", got, ".")
+	want := filepath.Join(home, ".mpm")
+	if got := mpmcli.ResolveWorkspace(); got != want {
+		t.Errorf("ResolveWorkspace()=%q, want %q (MPM_WORKSPACE unset)", got, want)
 	}
 }

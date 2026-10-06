@@ -10,16 +10,31 @@ package mpmcli
 
 import (
 	"github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
 	"os"
 )
 
-// ResolveWorkspace reads MPM_WORKSPACE and falls back to "." if unset.
-// Used by both the CLI and MCP server to find the workspace root.
+// ResolveWorkspace returns the runtime workspace root: MPM_WORKSPACE when
+// set, otherwise the canonical user runtime at $HOME/.mpm.
+//
+// It previously fell back to "." (the current directory). That default was
+// never a product feature — it was the prototype's assumption that MPM would
+// always be run from its own checkout, which is only true while the checkout
+// and the runtime root are the same directory. Once they are separated, "."
+// silently points the runtime at wherever the user happened to `cd`, which
+// produces a second, ghost copy of every piece of runtime state: a DB under
+// ./src/db, active.json in the current directory, blobs and run/ beside
+// them.
+//
+// config.GetWorkspace() had the same fallback and had already removed it
+// after the ghost-DB incident of 2026-07-21 (lesson 59fe3f8ff3e1549e),
+// where CWD probing created bogus databases in unrelated directories.
+// Leaving two resolvers disagreeing meant the defect was fixed in one and
+// still live in the other, so this delegates to config rather than
+// reimplementing the same three-tier resolution. Delegating also means the
+// two cannot drift apart again.
 func ResolveWorkspace() string {
-	if w := os.Getenv("MPM_WORKSPACE"); w != "" {
-		return w
-	}
-	return "."
+	return config.GetWorkspace()
 }
 
 // ActiveContextFromEnv reads MPM_ACTIVE_MODE / MPM_ACTIVE_PERSONA and
