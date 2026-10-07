@@ -1839,7 +1839,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`decision`** — Decision CRUD
 - **`decisions`** — List decisions
 - **`directives`** — Show behavioral directives
-- **`doctor`** — Run substrate diagnostics (--deep-scan for FTS/integrity audit, --explain for FTS5 query plan)
+- **`doctor`** — Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)
 - **`drills`** — Behavioural drill execution + compatibility matrix (list|show|run|report)
 - **`evidence`** — Manage evidence (add|list) — confidence foundation
 - **`export`** — Export memories to JSON
@@ -2656,6 +2656,12 @@ The companion on-demand audit:
 mpm doctor --deep-scan         # human-readable integrity report
 mpm doctor --deep-scan --fix   # clean soft-delete ghosts in place
 ```
+
+`--fix` is only valid alongside `--deep-scan`; on its own it is rejected,
+because the standard report has no remediation path. `--all` is not
+supported: `mpm doctor` already runs every available check. `--explain`
+is a separate mode that prints the FTS5 query plan, and cannot be
+combined with `--deep-scan`.
 
 #### How it works
 

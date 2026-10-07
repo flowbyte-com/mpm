@@ -47,7 +47,7 @@ func NewRouter() *CommandRouter {
 		// Info / diagnostics
 		"version": {Name: "version", Description: "Show version + build identity", MinArgs: 0, MaxArgs: 0},
 		"help":    {Name: "help", Description: "Show CLI catalogue", MinArgs: 0, MaxArgs: 0},
-		"doctor":  {Name: "doctor", Description: "Run substrate diagnostics (--deep-scan for FTS/integrity audit, --explain for FTS5 query plan)", MinArgs: 0},
+		"doctor":  {Name: "doctor", Description: "Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)", MinArgs: 0},
 
 		// Memory verbs — capability-named
 		"recall":       {Name: "recall", Description: "Recall relevant context", MinArgs: 1, Aliases: []string{"s"}},

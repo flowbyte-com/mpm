@@ -1551,7 +1551,11 @@ func printDoctorSummary(report *DoctorReport) {
 	fmt.Printf("\n")
 
 	if report.Failed > 0 {
-		fmt.Printf("  %s  Some checks failed. Run 'mpm doctor --fix' to attempt repairs.%s\n\n", colorRed("!"), ansiReset)
+		// Point at the flag pair that actually exists. A bare
+		// `mpm doctor --fix` is rejected: the standard report has no
+		// remediation path, only the deep-scan audit does.
+		fmt.Printf("  %s  Some checks failed. Run 'mpm doctor --deep-scan' for the integrity audit, "+
+			"adding --fix to clean soft-delete ghosts.%s\n\n", colorRed("!"), ansiReset)
 	} else if report.Warnings > 0 {
 		fmt.Printf("  %s  All critical checks passed. Review warnings above.%s\n\n", colorYellow("!"), ansiReset)
 	} else {
