@@ -294,18 +294,18 @@ install: build refresh-installed install-runtime-assets
 	    echo "    BUILD_DIR ($(BUILD_DIR)) or PREFIX ($(PREFIX)) and re-run." >&2; \
 	    exit 1; \
 	 else \
-	    echo "==> deploying (all five must land; a partial deploy is a failure)"; \
-	    install -m755 $(BUILD_DIR)/$(BINARY_NAME)    $(PREFIX)/bin/$(BINARY_NAME) && \
-	    install -m755 $(BUILD_DIR)/$(MCP_BINARY)    $(PREFIX)/bin/$(MCP_BINARY) && \
-	    install -m755 $(BUILD_DIR)/$(SCHED_BINARY)  $(PREFIX)/bin/$(SCHED_BINARY) && \
-	    install -m755 $(BUILD_DIR)/$(CRITIC_BINARY) $(PREFIX)/bin/$(CRITIC_BINARY) && \
-	    install -m755 $(BUILD_DIR)/$(TELEMETRY_BINARY) $(PREFIX)/bin/$(TELEMETRY_BINARY) && \
-	    echo "    (deployed $(BUILD_DIR)/ to $(PREFIX)/bin/)" || \
-	    { echo "    FAIL: could not deploy all five binaries to $(PREFIX)/bin/." >&2; \
-	      echo "    The success line that follows asserts all five are present there; it" >&2; \
-	      echo "    must not be printed over a partial install. Inspect $(PREFIX)/bin/ to" >&2; \
-	      echo "    see which binaries landed, then re-run make install." >&2; \
-	      exit 1; }; \
+	    echo "==> deploying (all five land as one transaction; a failure restores the previous set)"; \
+	    . scripts/lib/binary_transaction.sh; \
+	    mpm_promote_binaries "$(BUILD_DIR)" "$(PREFIX)/bin"; \
+	    _rc=$$?; \
+	    if [ $$_rc -ne 0 ]; then \
+	        echo "    FAIL: transactional binary promotion did not complete (rc=$$_rc)." >&2; \
+	        echo "    See the error above: on a promotion failure the previous binary" >&2; \
+	        echo "    set has been restored and $(PREFIX)/bin/ matches its pre-install" >&2; \
+	        echo "    state exactly. Nothing is deployed; re-run make install." >&2; \
+	        exit 1; \
+	    fi; \
+	    echo "    (deployed $(BUILD_DIR)/ to $(PREFIX)/bin/)"; \
 	 fi
 	@echo "✓ Installed binaries at $(PREFIX)/bin/: $(BINARY_NAME) $(MCP_BINARY) $(SCHED_BINARY) $(CRITIC_BINARY) $(TELEMETRY_BINARY)"
 	@echo ""

@@ -116,6 +116,33 @@ readonly LOG_PREFIX="[mpm-install]"
 # against PATH corruption: a minimal, predictable surface.
 readonly LOCAL_BIN="${HOME}/.local/bin"
 
+# Transactional binary promotion (2026-10-07).
+#
+# phase_binaries used to copy the five binaries with five independent
+# `install -m 0755 src dst` calls. `install` writes each destination in
+# place, so any failure partway through the loop left a MIXED release on disk
+# — and because GNU `install` unlinks the destination before reading the
+# source, an unreadable candidate destroyed the old binary outright. Both were
+# reproduced before the fix; see scripts/lib/binary_transaction.sh for the
+# transaction, its commit point, and its rollback contract.
+#
+# The library is shared with the Makefile's `install:` target so the two
+# promotion surfaces implement exactly one transaction, in one order.
+readonly BT_LIB="$PROJECT_ROOT/scripts/lib/binary_transaction.sh"
+if [ ! -r "$BT_LIB" ]; then
+    printf '[mpm-install] ERROR: missing %s\n' "$BT_LIB" >&2
+    printf '[mpm-install] The installer requires the transactional promotion library.\n' >&2
+    exit 2
+fi
+# shellcheck source=scripts/lib/binary_transaction.sh
+. "$BT_LIB"
+
+# The single canonical promotion order. This used to differ between
+# install.sh (mpm, mpm-scheduler, mpm-critic, mpm-mcp, mpm-telemetry) and the
+# Makefile (mpm, mpm-mcp, mpm-scheduler, ...), which meant a partial promotion
+# left a different mixture depending on which surface ran. Now there is one.
+BT_BINARIES="$BT_DEFAULT_BINARIES"
+
 # ---------- mutable state (set by parse_args / preflight) ----------
 MODE="install"
 ASSUME_YES=0
@@ -428,7 +455,6 @@ backup_raw_binary_if_present() {
 
 phase_binaries() {
     note "BINARIES"
-    install -d -m 0755 "$PREFIX/bin"
 
     # Migrate any pre-existing wrapper+real layout from older installs.
     #
@@ -458,19 +484,24 @@ phase_binaries() {
     # The Go binary handles MPM_WORKSPACE defaulting internally, so there
     # is no reason for the installer to write a non-ELF anywhere.
     #
-    # SAME-FILE IS AN ERROR, NOT A SKIP. This loop used to treat
-    # ``[ "$src" -ef "$dst" ]`` as "already installed, skip" — a guard
-    # that existed only because source and destination used to be the same
-    # inode whenever the checkout WAS the prefix. Now that they are two
-    # distinct paths, reaching that state means the build/install split has
-    # been violated by something (a symlinked BUILD_DIR, a stale
-    # configuration), and the correct response is to stop. Skipping would
-    # report a successful install of a binary that was never copied, which
-    # is precisely the "success printed over a partial install" failure
-    # mode this installer already guards against elsewhere.
-    for bin in mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry; do
-        local src="$(build_dir)/$bin"
-        local dst="$PREFIX/bin/$bin"
+    # SAME-FILE IS AN ERROR, NOT A SKIP. This check used to guard an
+    # ``install -m 0755 "$src" "$dst"`` loop that treated
+    # ``[ "$src" -ef "$dst" ]`` as "already installed, skip" — a guard that
+    # existed only because source and destination used to be the same inode
+    # whenever the checkout WAS the prefix. Now that they are two distinct
+    # paths, reaching that state means the build/install split has been
+    # violated by something (a symlinked BUILD_DIR, a stale configuration),
+    # and the correct response is to stop. Skipping would report a successful
+    # install of a binary that was never copied, which is precisely the
+    # "success printed over a partial install" failure mode this installer
+    # already guards against elsewhere.
+    #
+    # Checked for all five before promotion begins, not inside the loop, so a
+    # misconfigured BUILD_DIR cannot leave a partial promotion behind.
+    local bin src dst
+    for bin in $BT_BINARIES; do
+        src="$(build_dir)/$bin"
+        dst="$PREFIX/bin/$bin"
         if [ ! -f "$src" ]; then
             die "build did not produce $src (run make build first)" 2
         fi
@@ -483,9 +514,47 @@ install prefix. Something has aliased them (symlinked BUILD_DIR, or a checkout
 whose .build/ points at the install) — fix that rather than letting the
 installer report a deployment that did not happen." 2
         fi
-        install -m 0755 "$src" "$dst"
-        log "  installed $dst"
     done
+
+    install -d -m 0755 "$PREFIX/bin"
+
+    # TRANSACTIONAL PROMOTION (2026-10-07).
+    #
+    # This phase used to copy the five binaries with five independent
+    # `install -m 0755 src dst` calls in a loop. That was not atomic in the
+    # sense that mattered: `install` writes each destination in place, so a
+    # failure at binary 3 left a MIXED release on disk (binaries 1-2 new,
+    # 3-5 old) with no way back. Worse, GNU `install` unlinks the destination
+    # before reading the source, so an unreadable candidate destroyed the old
+    # binary outright rather than leaving it stale.
+    #
+    # Promotion is now a transaction: stage every candidate, validate all
+    # five, back up the old set by rename, promote by rename(2), and roll
+    # back to the exact prior state on any failure. The transaction lives in
+    # scripts/lib/binary_transaction.sh so that `make install` and this
+    # installer cannot drift apart again.
+    #
+    # Exit codes: 0 committed, 10 rolled back cleanly, 11 rollback
+    # incomplete (operator must intervene), 12 refused before promotion.
+    local trc=0
+    mpm_promote_binaries "$(build_dir)" "$PREFIX/bin" $BT_BINARIES || trc=$?
+    case "$trc" in
+        0)
+            log "  installed all five binaries transactionally"
+            ;;
+        10|11)
+            # The transaction already reported the outcome, including which
+            # binaries could not be restored. Re-announcing here would be
+            # noise; just exit with the install-failed code.
+            die "binary promotion failed; the previous binary set has been returned to its pre-install state" 3
+            ;;
+        12)
+            die "binary promotion refused before modifying anything (see the error above)" 3
+            ;;
+        *)
+            die "binary promotion failed unexpectedly (exit $trc)" 3
+            ;;
+    esac
 }
 
 # Symlink mpm + mpm-mcp into ~/.local/bin so subprocesses that inherit
@@ -969,11 +1038,19 @@ mode_dry_run() {
     log "  # build output is $(make -C "$PROJECT_ROOT" -s --no-print-directory print-build-dir 2>/dev/null || echo '<BUILD_DIR>')"
     log "  #   (scratch, inside the checkout; distinct from \$PREFIX/bin even when"
     log "  #    the checkout IS \$PREFIX, as in the canonical \$HOME/.mpm install)"
-    log "  install -m 0755 <BUILD_DIR>/mpm           -> $PREFIX/bin/mpm"
-    log "  install -m 0755 <BUILD_DIR>/mpm-scheduler -> $PREFIX/bin/mpm-scheduler"
-    log "  install -m 0755 <BUILD_DIR>/mpm-critic    -> $PREFIX/bin/mpm-critic"
-    log "  install -m 0755 <BUILD_DIR>/mpm-mcp       -> $PREFIX/bin/mpm-mcp"
-    log "  install -m 0755 <BUILD_DIR>/mpm-telemetry -> $PREFIX/bin/mpm-telemetry"
+    log "  # promote all five binaries as ONE TRANSACTION:"
+    log "  #   1. validate every candidate (regular file, executable, readable)"
+    log "  #      — all five, before any installed binary is touched"
+    log "  #   2. stage all five into a private dir under $PREFIX/bin"
+    log "  #      (same filesystem, so promotion is rename(2), never a copy)"
+    log "  #   3. back up the currently installed five by rename(2)"
+    log "  #   4. promote each staged binary by rename(2)"
+    log "  #   5. COMMIT (the fifth rename) — then delete rollback material"
+    log "  #   on any failure before step 5: roll every promoted binary back to"
+    log "  #   its exact prior bytes, mode and ownership; remove any promoted"
+    log "  #   binary that had no previous counterpart (first install)"
+    log "  #   promoted, in order: $BT_BINARIES"
+    log "  #   a failed promotion leaves $PREFIX/bin/ exactly as it was"
     log "  (legacy cleanup: rm -f $PREFIX/bin/mpm.real $PREFIX/bin/mpm.pre-wrapper.* from older installs)"
     log "  symlink $PREFIX/bin/mpm     -> $LOCAL_BIN/mpm"
     log "  symlink $PREFIX/bin/mpm-mcp -> $LOCAL_BIN/mpm-mcp"
