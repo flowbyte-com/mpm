@@ -38,26 +38,52 @@ import (
 // Final release-pass: --json is now honoured. The canonical envelope is
 // {timestamp, summary, checks} — checks is a JSON-serialisable slice
 // of DoctorCheck. JSON output NEVER routes through the human renderer.
+//
+// Flag truthfulness (2026-10-07). This handler previously accepted
+// --all/--deep-scan/--explain/--fix in an empty switch arm and discarded
+// them, so every one of those flags produced output byte-identical to
+// plain `mpm doctor` while the CLI advertised their behaviour. The
+// contract is now explicit:
+//
+//	doctor                    the standard report
+//	doctor --json             the same report as a JSON envelope
+//	doctor --explain          FTS5 query plan (EXPLAIN QUERY PLAN)
+//	doctor --deep-scan        on-demand FTS/integrity audit
+//	doctor --deep-scan --fix  the audit plus its bounded remediation
+//
+// --all and a bare --fix are REJECTED rather than silently accepted.
+// Neither has an implementation to delegate to: there is no "extended"
+// check set distinct from the standard report, and the standard report
+// has no remediation path. See doctorFlagContract for the full rules.
 func handleDoctor(args []string) int {
-	wantJSON := false
-	for _, a := range args {
-		switch a {
-		case "--json", "-j":
-			wantJSON = true
-		case "--all", "--deep-scan", "--explain", "--fix":
-			// Accepted for forward-compat. Not yet implemented at
-			// the top-level; the engine-room `mpm ops doctor` keeps
-			// those flags for its --deep-scan/--explain modes.
-		default:
-			usererror.Error("doctor: unknown flag %q", a)
-			return 1
-		}
+	opts, err := parseDoctorFlags(args)
+	if err != nil {
+		usererror.Error("%v", err)
+		return 1
 	}
 
 	dm := getDBConcrete()
 	if dm == nil {
 		usererror.Error("database unavailable")
 		return 1
+	}
+
+	// --explain is its own audit mode: it prints an EXPLAIN QUERY PLAN
+	// tree and returns. It precedes --deep-scan exactly as it does in
+	// `mpm ops doctor`, so the two entry points cannot disagree.
+	if opts.explain {
+		runDoctorExplain()
+		return 0
+	}
+
+	// --deep-scan skips the standard suite and runs the on-demand
+	// integrity checks. With --fix it additionally applies the single
+	// bounded remediation this codebase implements (soft-delete ghost
+	// cleanup); that mutation is scoped to memories_fts and is the only
+	// write path doctor has.
+	if opts.deepScan {
+		runDoctorDeepScan(dm, opts.fix)
+		return 0
 	}
 
 	svc := NewDoctorService(dm)
@@ -87,7 +113,7 @@ func handleDoctor(args []string) int {
 	// counting rules.
 	report.Tally()
 
-	if wantJSON {
+	if opts.json {
 		// JSON output — never routes through the human renderer.
 		// Use os.Stdout directly so the contract holds even when
 		// isatty returns true.
