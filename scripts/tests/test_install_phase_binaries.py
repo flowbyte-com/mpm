@@ -236,6 +236,13 @@ class _InstallDriver(unittest.TestCase):
         (root / "install.sh.lib").write_text(
             build_sourced_lib(INSTALL_SH.read_text())
         )
+        # install.sh now sources the transactional promotion library at
+        # source time and hard-fails if it is missing, so the fixture must
+        # stage it at the same relative path the real checkout uses.
+        lib_src = REPO_ROOT / "scripts" / "lib" / "binary_transaction.sh"
+        lib_dst = root / "scripts" / "lib" / "binary_transaction.sh"
+        lib_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(lib_src, lib_dst)
 
     def _assert_fixture_is_real(self) -> None:
         """Non-vacuity guard. If the fixture is wrong, every assertion

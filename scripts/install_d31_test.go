@@ -582,11 +582,49 @@ func TestInstallSh_NoWrapperAndNoMpmReal(t *testing.T) {
 		t.Errorf("install.sh phase_binaries must guard the install with `[ $src -ef $dst ]` to handle the source == install prefix case")
 	}
 
-	// (5) The mpm binary must be in the install loop (no longer
-	//     handled by a separate wrapper-writing block).
-	installLoopFragment := `for bin in mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry`
-	if !strings.Contains(body, installLoopFragment) {
-		t.Errorf("install.sh phase_binaries install loop must include `mpm` (the CLI binary is now installed as a normal binary, not a wrapper): missing fragment %q", installLoopFragment)
+	// (5) The mpm binary must be in the promoted set (no longer handled by
+	//     a separate wrapper-writing block).
+	//
+	//     2026-10-07: the promotion order moved out of install.sh into
+	//     scripts/lib/binary_transaction.sh, shared with `make install`.
+	//     The old pin asserted a literal `for bin in mpm mpm-scheduler ...`
+	//     loop in install.sh; that loop no longer exists because promotion
+	//     is now a stage/backup/rename/rollback transaction rather than
+	//     five independent `install -m` calls.
+	//
+	//     The requirement is unchanged and now pins the canonical order in
+	//     the one place that defines it. Both promotion surfaces must use
+	//     it — if either reorders independently, a partial promotion would
+	//     leave a different mixture depending on which surface ran.
+	libBody, err := os.ReadFile("../scripts/lib/binary_transaction.sh")
+	if err != nil {
+		t.Fatalf("cannot read the transactional promotion library: %v", err)
+	}
+	if !strings.Contains(string(libBody), `BT_DEFAULT_BINARIES="mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry"`) {
+		t.Errorf("the promotion library must define the canonical five-binary order " +
+			"as `BT_DEFAULT_BINARIES=\"mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry\"` " +
+			"(this is what replaced install.sh's inline promotion loop)")
+	}
+
+	// (6) Both promotion surfaces must delegate to the shared transaction
+	//     rather than copying binaries independently. Two independent
+	//     implementations is exactly how the order drifted apart before.
+	if !strings.Contains(body, `mpm_promote_binaries`) {
+		t.Errorf("install.sh phase_binaries must delegate to mpm_promote_binaries " +
+			"(scripts/lib/binary_transaction.sh); five independent `install -m` calls " +
+			"leave a mixed release behind when one of them fails")
+	}
+	if !strings.Contains(body, `. "$BT_LIB"`) {
+		t.Errorf("install.sh must source the shared promotion library ($BT_LIB) so " +
+			"install.sh and `make install` cannot implement divergent transactions")
+	}
+	makeBody, err := os.ReadFile("../Makefile")
+	if err != nil {
+		t.Fatalf("cannot read the Makefile: %v", err)
+	}
+	if !strings.Contains(string(makeBody), `mpm_promote_binaries`) {
+		t.Errorf("the Makefile `install:` target must delegate to mpm_promote_binaries; " +
+			"it is a second promotion surface and must share one transaction")
 	}
 }
 
