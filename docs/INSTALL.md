@@ -552,6 +552,53 @@ binaries to `~/.mpm/bin/`, and reconciles runtime definitions. Runtime data
 survives: `src/db/`, `blobs/`, `backups/`, and `config/` are runtime state and
 are never touched by an upgrade.
 
+#### Binary promotion is transactional
+
+The five installed binaries — `mpm`, `mpm-mcp`, `mpm-scheduler`,
+`mpm-critic`, `mpm-telemetry` — are promoted as **one transaction**. Both
+`./install.sh` and `make install` use the same implementation
+(`scripts/lib/binary_transaction.sh`):
+
+1. Every candidate is validated (regular file, readable, executable) **before**
+   any installed binary is touched.
+2. All five are staged into a private directory under `~/.mpm/bin/`, so
+   promotion is a same-filesystem `rename(2)` rather than a copy.
+3. The currently installed five are backed up by `rename(2)`.
+4. Each staged binary is promoted by `rename(2)`.
+5. The **fifth rename is the commit point.** Rollback material is deleted only
+   after it.
+
+If any step fails before the commit, the installer returns non-zero and
+`~/.mpm/bin/` is returned to **exactly** the state it had before the install —
+same bytes, same mode, same ownership for every binary. On a first install,
+where no previous binary exists, any newly created binary is removed instead,
+so a failed first install does not leave a false complete installation.
+
+Two consequences worth knowing:
+
+- A missing, unreadable, or non-executable candidate aborts the whole
+  promotion before binary 1 is replaced. Previously a mid-loop failure left a
+  mixture of old and new binaries — and because `install(1)` unlinks the
+  destination before reading the source, an unreadable candidate *deleted* the
+  installed binary outright.
+- No service restart happens until the transaction has committed.
+
+Promotion is serialised per install prefix with `flock` on
+`~/.mpm/.mpm-install.lock`, so two concurrent installers cannot interleave. The
+lock is released by the kernel when the process exits, including on a crash.
+
+**Scope — what this does and does not promise.** Only the five-binary promotion
+is transactional. The installer performs other work after the commit point
+(PATH symlinks, runtime-asset reconciliation, the systemd unit,
+`daemon-reload`, service start). If one of *those* fails, the binaries are
+already committed and are **not** rolled back; the installer reports the later
+step's failure. The installation as a whole is not atomic.
+
+If rollback itself fails, the installer exits non-zero, names the binaries it
+could not restore, and **preserves** the rollback directory rather than
+deleting the only remaining copy of your previous binaries. It prints the
+command to recover by hand.
+
 ---
 
 ## 6. Troubleshooting
