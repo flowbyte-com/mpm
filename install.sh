@@ -128,20 +128,34 @@ readonly LOCAL_BIN="${HOME}/.local/bin"
 #
 # The library is shared with the Makefile's `install:` target so the two
 # promotion surfaces implement exactly one transaction, in one order.
-readonly BT_LIB="$PROJECT_ROOT/scripts/lib/binary_transaction.sh"
-if [ ! -r "$BT_LIB" ]; then
-    printf '[mpm-install] ERROR: missing %s\n' "$BT_LIB" >&2
-    printf '[mpm-install] The installer requires the transactional promotion library.\n' >&2
-    exit 2
-fi
-# shellcheck source=scripts/lib/binary_transaction.sh
-. "$BT_LIB"
+#
+# Loaded LAZILY, on first use, rather than at source time. Several installer
+# test harnesses source a stripped copy of this script with the `readonly
+# PROJECT_ROOT=` assignment removed and then supply PROJECT_ROOT themselves;
+# under `set -u` a top-level expansion of an unset PROJECT_ROOT aborts before
+# any phase can run. Nothing here needs the promotion library until
+# phase_binaries executes, so that is where it is loaded.
+BT_LIB=""
+BT_BINARIES=""
 
-# The single canonical promotion order. This used to differ between
-# install.sh (mpm, mpm-scheduler, mpm-critic, mpm-mcp, mpm-telemetry) and the
-# Makefile (mpm, mpm-mcp, mpm-scheduler, ...), which meant a partial promotion
-# left a different mixture depending on which surface ran. Now there is one.
-BT_BINARIES="$BT_DEFAULT_BINARIES"
+load_promotion_lib() {
+    [ -n "$BT_BINARIES" ] && return 0
+    local lib="${PROJECT_ROOT:-$SCRIPT_DIR}/scripts/lib/binary_transaction.sh"
+    if [ ! -r "$lib" ]; then
+        printf '[mpm-install] ERROR: missing %s\n' "$lib" >&2
+        printf '[mpm-install] The installer requires the transactional promotion library.\n' >&2
+        return 1
+    fi
+    # shellcheck source=scripts/lib/binary_transaction.sh
+    . "$lib"
+    BT_LIB="$lib"
+    # The single canonical promotion order. This used to differ between
+    # install.sh (mpm, mpm-scheduler, mpm-critic, mpm-mcp, mpm-telemetry) and
+    # the Makefile (mpm, mpm-mcp, mpm-scheduler, ...), which meant a partial
+    # promotion left a different mixture depending on which surface ran.
+    BT_BINARIES="$BT_DEFAULT_BINARIES"
+    return 0
+}
 
 # ---------- mutable state (set by parse_args / preflight) ----------
 MODE="install"
@@ -455,6 +469,8 @@ backup_raw_binary_if_present() {
 
 phase_binaries() {
     note "BINARIES"
+
+    load_promotion_lib || exit 2
 
     # Migrate any pre-existing wrapper+real layout from older installs.
     #
@@ -1049,7 +1065,7 @@ mode_dry_run() {
     log "  #   on any failure before step 5: roll every promoted binary back to"
     log "  #   its exact prior bytes, mode and ownership; remove any promoted"
     log "  #   binary that had no previous counterpart (first install)"
-    log "  #   promoted, in order: $BT_BINARIES"
+    log "  #   promoted, in order: $(load_promotion_lib >/dev/null 2>&1 && printf '%s' "$BT_BINARIES" || printf 'mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry')"
     log "  #   a failed promotion leaves $PREFIX/bin/ exactly as it was"
     log "  (legacy cleanup: rm -f $PREFIX/bin/mpm.real $PREFIX/bin/mpm.pre-wrapper.* from older installs)"
     log "  symlink $PREFIX/bin/mpm     -> $LOCAL_BIN/mpm"

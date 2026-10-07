@@ -285,28 +285,33 @@ install: build refresh-installed install-runtime-assets
 	@echo "🚀 Deploying $(BUILD_DIR)/* -> $(PREFIX)/bin/"
 	@echo "   (this REPLACES the live install binaries — it is not a build)"
 	@mkdir -p $(PREFIX)/bin
-	@_src_dir=`realpath -m "$(BUILD_DIR)"`; \
-	 _dst_dir=`realpath -m "$(PREFIX)/bin"`; \
-	 if [ "$$_src_dir" = "$$_dst_dir" ]; then \
+	@# The promotion library is bash (it uses arrays), while make recipes run
+	@# under /bin/sh — dash on Debian/Ubuntu, which cannot parse them. This
+	@# whole recipe body therefore executes under bash explicitly rather than
+	@# inheriting make's SHELL. Everything before the `if` was POSIX and is
+	@# unchanged; only the transaction needed bash.
+	@bash -e -c '\
+	  _src_dir=`realpath -m "$(BUILD_DIR)"`; \
+	  _dst_dir=`realpath -m "$(PREFIX)/bin"`; \
+	  if [ "$$_src_dir" = "$$_dst_dir" ]; then \
 	    echo "    FAIL: build output ($$_src_dir) and install target ($$_dst_dir)" >&2; \
 	    echo "    are the same directory, so there is nothing to promote. Refusing" >&2; \
 	    echo "    rather than reporting a deployment that did not happen. Fix" >&2; \
 	    echo "    BUILD_DIR ($(BUILD_DIR)) or PREFIX ($(PREFIX)) and re-run." >&2; \
 	    exit 1; \
-	 else \
-	    echo "==> deploying (all five land as one transaction; a failure restores the previous set)"; \
-	    . scripts/lib/binary_transaction.sh; \
-	    mpm_promote_binaries "$(BUILD_DIR)" "$(PREFIX)/bin"; \
-	    _rc=$$?; \
-	    if [ $$_rc -ne 0 ]; then \
-	        echo "    FAIL: transactional binary promotion did not complete (rc=$$_rc)." >&2; \
-	        echo "    See the error above: on a promotion failure the previous binary" >&2; \
-	        echo "    set has been restored and $(PREFIX)/bin/ matches its pre-install" >&2; \
-	        echo "    state exactly. Nothing is deployed; re-run make install." >&2; \
-	        exit 1; \
-	    fi; \
-	    echo "    (deployed $(BUILD_DIR)/ to $(PREFIX)/bin/)"; \
-	 fi
+	  fi; \
+	  echo "==> deploying (all five land as one transaction; a failure restores the previous set)"; \
+	  . scripts/lib/binary_transaction.sh; \
+	  mpm_promote_binaries "$(BUILD_DIR)" "$(PREFIX)/bin"; \
+	  _rc=$$?; \
+	  if [ $$_rc -ne 0 ]; then \
+	    echo "    FAIL: transactional binary promotion did not complete (rc=$$_rc)." >&2; \
+	    echo "    See the error above: on a promotion failure the previous binary set" >&2; \
+	    echo "    has been restored and $(PREFIX)/bin/ matches its pre-install state" >&2; \
+	    echo "    exactly. Nothing is deployed; re-run make install." >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "    (deployed $(BUILD_DIR)/ to $(PREFIX)/bin/)"'
 	@echo "✓ Installed binaries at $(PREFIX)/bin/: $(BINARY_NAME) $(MCP_BINARY) $(SCHED_BINARY) $(CRITIC_BINARY) $(TELEMETRY_BINARY)"
 	@echo ""
 	@echo "ℹ  For the full user install (PATH symlinks + systemd unit),"
