@@ -1336,9 +1336,9 @@ var CommonIndexes = []string{
 	// Lives in CommonIndexes (not BaseTables) because the column was
 	// added in alpha-3 telemetry hardening — SafeMigrations adds it
 	// first, then this CREATE INDEX runs against the live column.
-	// migrateArtifactProvenanceSchema also rebuilds it inside its
-	// table-recreate transaction; CREATE INDEX IF NOT EXISTS makes
-	// both paths idempotent.
+	// migrateArtifactProvenanceWorkType's table rebuild intentionally does
+	// NOT recreate it (it runs before this column is guaranteed present);
+	// CREATE INDEX IF NOT EXISTS keeps this path idempotent across boots.
 	`CREATE INDEX IF NOT EXISTS idx_provenance_parent_invocation
 		ON artifact_provenance(parent_invocation_id);`,
 

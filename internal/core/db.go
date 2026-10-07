@@ -2180,12 +2180,13 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	}
 
 	// Constraint migration: widen artifact_provenance for alpha-3
-	// telemetry. Adds parent_invocation_id column (traces agent-of-agent
-	// invocation trees) and extends artifact_type CHECK to include
-	// 'handoff' and 'directive'. Idempotent — same read-sqlite_master /
-	// skip-if-current pattern as migrateAuditLevelConstraint. Rebuilds
-	// the six indexes inline so the migration is atomic with the
-	// table recreate.
+	// telemetry so every canonical artifact_type is accepted, and repair
+	// the two analytics views. Idempotent — reads sqlite_master and skips
+	// only when the live CHECK vocabulary is already exactly canonical AND
+	// both views are already canonical. Runs inside one transaction
+	// (table rebuild + view restore), so a failure rolls back whole.
+	// See provenance_migration.go for the ownership split: SafeMigrations
+	// adds parent_invocation_id, CommonIndexes adds its index.
 	if err := dm.migrateArtifactProvenanceWorkType(); err != nil {
 		return fmt.Errorf("migrateArtifactProvenanceWorkType: %w", err)
 	}
