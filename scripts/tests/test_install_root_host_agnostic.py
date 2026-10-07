@@ -129,6 +129,13 @@ class _RootInstallDriver(unittest.TestCase):
         shutil.copy(INSTALL_SH, root / "install.sh")
         lib = root / "install.sh.lib"
         lib.write_text(build_sourced_lib(INSTALL_SH.read_text()))
+        # install.sh sources the transactional promotion library at source
+        # time and hard-fails when it is absent, so the fixture must stage it
+        # at the relative path the real checkout uses.
+        lib_src = REPO_ROOT / "scripts" / "lib" / "binary_transaction.sh"
+        lib_dst = root / "scripts" / "lib" / "binary_transaction.sh"
+        lib_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(lib_src, lib_dst)
 
     def _drive_phases(
         self,
