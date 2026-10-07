@@ -258,24 +258,52 @@ class MakefileHandlesSamePrefixLayout(unittest.TestCase):
         if not self.INSTALL.is_file():
             self.skipTest("install.sh missing")
         text = self.INSTALL.read_text(encoding="utf-8")
+        # `local` is declared once for the whole guard loop (`local bin src
+        # dst`), so this pins where the value is ASSIGNED, not how it is
+        # declared.
         self.assertRegex(
             text,
-            r'local\s+src="\$\(build_dir\)/\$bin"',
+            r'src="\$\(build_dir\)/\$bin"',
             "phase_binaries must read each binary from $(build_dir)/$bin — "
             "the resolved build output — not from a hardcoded repo-relative "
             "bin/ path",
         )
 
     def test_install_loop_includes_mpm(self):
-        """phase_binaries install loop must include `mpm` (the CLI binary)."""
+        """The promoted binary set must include `mpm` (the CLI binary).
+
+        The set lives in scripts/lib/binary_transaction.sh as
+        BT_DEFAULT_BINARIES and is shared with `make install`, so that the
+        two promotion surfaces cannot drift apart. This test therefore pins
+        the canonical list in the library, and pins that install.sh
+        actually iterates that list rather than a private copy of it.
+        """
         if not self.INSTALL.is_file():
             self.skipTest("install.sh missing")
+        lib = REPO_ROOT / "scripts" / "lib" / "binary_transaction.sh"
+        if not lib.is_file():
+            self.skipTest("binary_transaction.sh missing")
+        lib_text = lib.read_text(encoding="utf-8")
+        self.assertRegex(
+            lib_text,
+            r'BT_DEFAULT_BINARIES="mpm\s+mpm-scheduler',
+            "the canonical promoted set must begin with `mpm`, the CLI binary, "
+            "followed by the daemons",
+        )
+        for binary in (
+            "mpm", "mpm-scheduler", "mpm-critic", "mpm-mcp", "mpm-telemetry",
+        ):
+            self.assertIn(
+                binary, lib_text.split("BT_DEFAULT_BINARIES=", 1)[1].split("\n", 1)[0],
+                f"the promoted binary set must include `{binary}`",
+            )
         text = self.INSTALL.read_text(encoding="utf-8")
         self.assertRegex(
             text,
-            r"for\s+bin\s+in\s+mpm\s+mpm-scheduler\s+mpm-critic\s+mpm-mcp\s+mpm-telemetry",
-            "install.sh install loop must include `mpm` alongside the daemons; "
-            "the CLI binary is now installed as a normal binary",
+            r"for\s+bin\s+in\s+\$BT_BINARIES",
+            "install.sh must iterate the canonical promoted set, not a private "
+            "copy of it — one list keeps `make install` and `install.sh` from "
+            "promoting different orders",
         )
 
 

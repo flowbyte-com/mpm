@@ -699,53 +699,60 @@ func makeInstallRecipe(t *testing.T) string {
 // $(PREFIX)/bin. That claim must not be printed over a partial install.
 //
 // Regression target: this test fails if the `install` recipe regains
-// `|| true` on a mandatory step, or returns to `;`-joining the copies.
+// `|| true` on a mandatory step, or stops checking the transaction's
+// result.
 func TestBuildConfig_InstallSyncHasNoMaskedFailure(t *testing.T) {
 	recipe := makeInstallRecipe(t)
 
-	// Locate just the branch that performs the copy, so the assertions do
-	// not accidentally match unrelated `||` uses in the target.
-	copyBranch := ""
-	inCopy := false
+	// Promotion is one transaction call now, not a chain of copies. Locate
+	// the promotion invocation and everything after it, so the assertions
+	// do not accidentally match unrelated `||` uses in the target.
+	promoBranch := ""
+	inPromo := false
 	for _, line := range strings.Split(recipe, "\n") {
-		if strings.Contains(line, "install -m755") {
-			inCopy = true
+		if strings.Contains(line, "mpm_promote_binaries") {
+			inPromo = true
 		}
-		if inCopy {
-			copyBranch += line + "\n"
+		if inPromo {
+			promoBranch += line + "\n"
 		}
 	}
-	if strings.TrimSpace(copyBranch) == "" {
-		t.Fatalf("`install` recipe no longer contains any `install -m755` copy step; " +
+	if strings.TrimSpace(promoBranch) == "" {
+		t.Fatalf("`install` recipe no longer calls mpm_promote_binaries; " +
 			"update this test to match the current shape.")
 	}
 
-	if strings.Contains(copyBranch, "|| true") {
-		t.Errorf("`make install` re-introduced `|| true` on a mandatory copy step.\n"+
+	if strings.Contains(promoBranch, "|| true") {
+		t.Errorf("`make install` re-introduced `|| true` around the promotion.\n"+
 			"  A recipe line exits with the status of its LAST command, so swallowing\n"+
-			"  the copy failure lets the trailing echo report success over a partial\n"+
-			"  install. Chain the copies with `&&` and let the branch fail loudly.\n"+
-			"  offending branch:\n%s", indentForMessage(copyBranch))
+			"  the failure lets the trailing echo report success over a rolled-back\n"+
+			"  deploy.  offending branch:\n%s", indentForMessage(promoBranch))
 	}
 
-	// Every copy except the last must be followed by `&&` (or the branch
-	// must exit on failure some other way). A bare `;` between copies is
-	// the exact shape that lets a mid-chain failure vanish.
-	for i, line := range strings.Split(copyBranch, "\n") {
-		if !strings.Contains(line, "install -m755") {
-			continue
-		}
-		trimmed := strings.TrimSpace(line)
-		trimmed = strings.TrimSuffix(trimmed, "\\")
-		trimmed = strings.TrimSpace(trimmed)
-		if strings.HasSuffix(trimmed, ";") {
-			t.Errorf("`make install` joins copy steps with `;` at:\n  %s\n"+
-				"  A `;` chain in ONE shell invocation reports only the LAST command's\n"+
-				"  status, so an earlier failed copy is masked. Use `&&` so a failed\n"+
-				"  copy aborts the branch (or split the copies into separate recipe\n"+
-				"  lines, which make checks individually).", trimmed)
-		}
-		_ = i
+	// The result must be captured and checked. Capturing `$?` and never
+	// testing it is the `;`-chain bug wearing a different hat. Inside a
+	// `bash -c '...'` recipe body make escapes `$` as `$$`, so both spellings
+	// are legitimate here.
+	if !strings.Contains(promoBranch, "_rc=") {
+		t.Errorf("`make install` does not capture the promotion's exit status.\n"+
+			"  Without it a failed transaction would be reported as a successful\n"+
+			"  install over a rolled-back binary set.  offending branch:\n%s",
+			indentForMessage(promoBranch))
+	}
+	if !strings.Contains(promoBranch, "_rc -ne 0") {
+		t.Errorf("`make install` does not test the promotion's exit status.\n"+
+			"  A non-zero transaction must abort before the success line.\n"+
+			"  offending branch:\n%s", indentForMessage(promoBranch))
+	}
+
+	// The whole body runs under `bash -e` so an unexpected non-zero between
+	// the start of the block and the explicit check aborts rather than
+	// sliding through.
+	if !strings.Contains(recipe, "bash -e -c") {
+		t.Errorf("`make install` no longer runs its body under `bash -e`.\n"+
+			"  The promotion library uses bash arrays, and `-e` keeps any\n"+
+			"  unexpected failure from being reported as a completed install.\n"+
+			"  recipe:\n%s", indentForMessage(recipe))
 	}
 }
 
@@ -1106,30 +1113,74 @@ func TestBuildConfig_BuildRecipeWritesAllFiveToBuildDir(t *testing.T) {
 
 // TestBuildConfig_InstallPromotesAllFiveFromBuildDir — GUARD C
 //
-// `make install` must explicitly copy each of the five from BUILD_DIR to
-// $(PREFIX)/bin, and must be all-or-fail. The pre-fix recipe had a
-// coincidence branch that printed "bin/ is the canonical location; no
-// copy needed" and skipped the copy — which was unreachable in the
-// canonical layout, so the copy ran unconditionally, copying files onto
-// themselves. The comment read as a proof that nothing needed doing
-// while the install was being rewritten.
+// `make install` must promote all five from BUILD_DIR to $(PREFIX)/bin, and
+// must be all-or-fail. The pre-fix recipe had a coincidence branch that
+// printed "bin/ is the canonical location; no copy needed" and skipped the
+// copy — which was unreachable in the canonical layout, so the copy ran
+// unconditionally, copying files onto themselves. The comment read as a
+// proof that nothing needed doing while the install was being rewritten.
+//
+// The five `install -m755` copies were themselves the original bug: five
+// independent in-place writes leave a MIXED release if one fails. Promotion
+// is now one transaction in scripts/lib/binary_transaction.sh, shared with
+// install.sh so the two surfaces cannot promote in different orders. This
+// test therefore pins that the recipe drives THAT transaction with
+// $(BUILD_DIR) and $(PREFIX)/bin, that the canonical set still contains all
+// five, and that a non-zero transaction result aborts the target.
 func TestBuildConfig_InstallPromotesAllFiveFromBuildDir(t *testing.T) {
 	makefile := makeFilePath(t)
 	recipe := makeRecipe(t, makefile, "install")
 
-	for _, v := range []string{
-		"$(BINARY_NAME)", "$(MCP_BINARY)", "$(SCHED_BINARY)",
-		"$(CRITIC_BINARY)", "$(TELEMETRY_BINARY)",
-	} {
-		want := "install -m755 $(BUILD_DIR)/" + v
-		if !strings.Contains(recipe, want) {
-			t.Errorf("install recipe does not promote $(BUILD_DIR)/%s.\n"+
-				"  `make install` is the ONLY thing allowed to write $(PREFIX)/bin;\n"+
-				"  each binary must be copied explicitly from the build output.\n  recipe:\n%s",
-				v, indentForMessage(recipe))
+	// `make install` is the ONLY thing allowed to write $(PREFIX)/bin, and
+	// it must do so through the shared transaction, taking both endpoints
+	// explicitly.
+	if !strings.Contains(recipe, "mpm_promote_binaries") {
+		t.Errorf("install recipe does not call mpm_promote_binaries.\n"+
+			"  `make install` is the ONLY thing allowed to write $(PREFIX)/bin, and\n"+
+			"  promotion must go through the one transaction that install.sh also\n"+
+			"  uses. Five independent copies would leave a mixed release on\n"+
+			"  failure.\n  recipe:\n%s", indentForMessage(recipe))
+	}
+	if !strings.Contains(recipe, `mpm_promote_binaries "$(BUILD_DIR)" "$(PREFIX)/bin"`) {
+		t.Errorf("install recipe does not promote $(BUILD_DIR) into $(PREFIX)/bin.\n"+
+			"  Both endpoints must be explicit; the build output and the install\n"+
+			"  target may not be conflated.  recipe:\n%s", indentForMessage(recipe))
+	}
+	if !strings.Contains(recipe, "binary_transaction.sh") {
+		t.Errorf("install recipe does not source scripts/lib/binary_transaction.sh.\n"+
+			"  The transaction must be shared with install.sh so the two promotion\n"+
+			"  surfaces cannot drift apart again.  recipe:\n%s",
+			indentForMessage(recipe))
+	}
+
+	// The canonical promoted set must still be all five. (That the build
+	// recipe still PRODUCES all five into $(BUILD_DIR) is pinned separately
+	// by TestBuildConfig_BuildRecipeWritesAllFiveToBuildDir; this test is
+	// about what the install recipe promotes.)
+	lib := filepath.Join(findRepoRoot(t), "scripts", "lib", "binary_transaction.sh")
+	libText, err := os.ReadFile(lib)
+	if err != nil {
+		t.Fatalf("read binary_transaction.sh: %v", err)
+	}
+	set := ""
+	for _, line := range strings.Split(string(libText), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "BT_DEFAULT_BINARIES=") {
+			set = strings.TrimSpace(strings.TrimPrefix(
+				strings.TrimSpace(line), "BT_DEFAULT_BINARIES="))
+			break
 		}
-		if !strings.Contains(recipe, "$(PREFIX)/bin/"+v) {
-			t.Errorf("install recipe does not write $(PREFIX)/bin/%s", v)
+	}
+	if set == "" {
+		t.Fatalf("BT_DEFAULT_BINARIES not found in binary_transaction.sh")
+	}
+	for _, name := range []string{
+		"mpm", "mpm-scheduler", "mpm-critic", "mpm-mcp", "mpm-telemetry",
+	} {
+		if !strings.Contains(set, name) {
+			t.Errorf("the promoted binary set no longer contains `%s`: %q\n"+
+				"  A missing binary means it silently keeps whatever version the\n"+
+				"  install already had, while the target still reports success.",
+				name, set)
 		}
 	}
 
@@ -1142,14 +1193,14 @@ func TestBuildConfig_InstallPromotesAllFiveFromBuildDir(t *testing.T) {
 			indentForMessage(recipe))
 	}
 
-	// All five, or none: the copies are chained with && so a partial
-	// deploy cannot print the success line.
-	installRE := regexp.MustCompile(`install -m755 \$\(BUILD_DIR\)/\$\([A-Z_]+\)`)
-	if n := len(installRE.FindAllString(recipe, -1)); n != 5 {
-		t.Errorf("install recipe contains %d `install -m755 $(BUILD_DIR)/...` copies, want 5.\n"+
-			"  A missing copy means that binary silently keeps whatever version the\n"+
-			"  install already had, while the target still reports success.\n  recipe:\n%s",
-			n, indentForMessage(recipe))
+	// All five, or none: a failed transaction must abort the target before
+	// the closing success claim is printed.
+	if !strings.Contains(recipe, "FAIL: transactional binary promotion did not complete") {
+		t.Errorf("install recipe does not check the transaction's result.\n"+
+			"  A non-zero transaction means the previous binary set was restored;\n"+
+			"  the target must say so and exit non-zero instead of printing its\n"+
+			"  success line over a rolled-back deploy.  recipe:\n%s",
+			indentForMessage(recipe))
 	}
 }
 
