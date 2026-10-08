@@ -84,6 +84,62 @@ if [ -z "$PLUGIN_ID" ]; then
   exit 2
 fi
 
+# --------------------------------------------------------------------------
+# Source tree vs runtime package
+# --------------------------------------------------------------------------
+#
+# SCRIPT_DIR is where this adapter lives in the *source checkout*. It is
+# not what OpenClaw ends up linked to. Under the source/runtime split the
+# runtime root is populated by explicit provisioning, so this installer
+# stages a minimal, validated package into
+#
+#     <runtime-root>/agent_installation/<plugin-id>
+#
+# and links THAT. Consequence: once installed, the live integration no
+# longer depends on this checkout existing — which is the entire point of
+# separating source from runtime. Linking $SCRIPT_DIR (the previous
+# behaviour) meant deleting or moving the checkout silently broke the
+# installed plugin, and on a host where the runtime root had never been
+# provisioned it meant there was nothing to link at all.
+#
+# The runtime root is derived from the mpm binary we resolve in step 1,
+# so a relocated or hermetic install provisions into its own tree.
+#
+# The manifest below is the allowlist for what ships. Tests, bytecode
+# caches and install-only assets are development residue and stay in
+# source; adding a file to the runtime package is a deliberate act.
+#
+# Stage: index.js + openclaw.plugin.json + package.json (the plugin and
+# its metadata), lib/ (the module index.js imports), and the two
+# published contract documents. templates/ and scripts/ are used by
+# reconcile_managed_blocks.py from SOURCE at install time and are not
+# needed to load the plugin.
+
+# `|| true` is load-bearing: under `set -e` a failing command substitution
+# in an assignment aborts the script *before* the guard below can report
+# what went wrong, so a missing sibling directory would exit silently.
+MPM_STAGE_PARENT="$(cd "$(dirname "$SCRIPT_DIR")/scripts" 2>/dev/null && pwd -P || true)"
+MPM_STAGE_LIB="${MPM_STAGE_PARENT:+$MPM_STAGE_PARENT/}stage_runtime_package.sh"
+if [ ! -f "$MPM_STAGE_LIB" ]; then
+  printf '[mpm-memory-openclaw install] ERROR: staging library not found: %s\n' "$MPM_STAGE_LIB" >&2
+  printf '[mpm-memory-openclaw install] the shared provisioning library lives at agent_installation/scripts/\n' >&2
+  printf '[mpm-memory-openclaw install] next to this adapter; run this installer from a complete checkout.\n' >&2
+  exit 2
+fi
+# shellcheck source=../scripts/stage_runtime_package.sh
+. "$MPM_STAGE_LIB"
+
+RUNTIME_PACKAGE_MANIFEST=(
+  index.js
+  openclaw.plugin.json
+  package.json
+  README.md
+  .mcp.json
+  lib/workspace.js
+)
+
+PLUGIN_PKG_DIR=""
+
 # MPM canonical locations. Order matters: the substrate install (root
 # install.sh) writes ~/.mpm/bin/mpm and symlinks it into
 # ~/.local/bin/mpm. We accept either. We never rely on PATH resolution
@@ -195,6 +251,34 @@ fi
 log "mpm version: $("$MPM_BIN" --version 2>&1 | head -n1)"
 
 # --------------------------------------------------------------------------
+# 1b. Provision the runtime package
+# --------------------------------------------------------------------------
+#
+# Must happen before any plugin-state inspection: the inspection compares
+# OpenClaw's recorded rootDir against the path we are about to link, and
+# the install step links the runtime package rather than this checkout.
+#
+# Staging is idempotent and validated before it is exposed — a package
+# that fails validation aborts here with the previous one left intact,
+# rather than reaching OpenClaw half-populated.
+
+MPM_RUNTIME_ROOT="$(mpm_runtime_root_from_bin "$MPM_BIN")"
+if [ -z "$MPM_RUNTIME_ROOT" ] || [ "$MPM_RUNTIME_ROOT" = "/" ] || [ "$MPM_RUNTIME_ROOT" = "." ]; then
+  err "could not derive a sane MPM runtime root from $MPM_BIN"
+  err "refusing to stage — set MPM_RUNTIME_ROOT explicitly if this install is relocated."
+  exit 2
+fi
+log "MPM runtime root: $MPM_RUNTIME_ROOT"
+
+if ! PLUGIN_PKG_DIR="$(stage_runtime_package "$SCRIPT_DIR" "$MPM_RUNTIME_ROOT" \
+        "$PLUGIN_ID" "${RUNTIME_PACKAGE_MANIFEST[@]}")"; then
+  err "runtime package provisioning failed for $PLUGIN_ID; refusing to link an unvalidated package"
+  exit 3
+fi
+PLUGIN_PKG_DIR="$(cd "$PLUGIN_PKG_DIR" && pwd -P)"
+log "runtime package staged and validated: $PLUGIN_PKG_DIR"
+
+# --------------------------------------------------------------------------
 # 2. OpenClaw CLI presence
 # --------------------------------------------------------------------------
 #
@@ -204,7 +288,7 @@ log "mpm version: $("$MPM_BIN" --version 2>&1 | head -n1)"
 
 if ! command -v openclaw >/dev/null 2>&1; then
   err "openclaw CLI not on PATH. Install OpenClaw first, then re-run this installer."
-  err "  Plugin dir (already prepared for linking): $SCRIPT_DIR"
+  err "  Runtime package (already prepared for linking): $PLUGIN_PKG_DIR"
   exit 1
 fi
 
@@ -234,7 +318,8 @@ fi
 #
 #   1. inspect_root_match      legacy rootDir from `plugins inspect`
 #                               resolves to the canonical former path
-#                               ($(dirname "$SCRIPT_DIR")/openclaw-mpm-memory)
+#                               ($MPM_RUNTIME_ROOT/agent_installation/
+#                                openclaw-mpm-memory)
 #   2. inspect_root_different  legacy rootDir resolves to some other
 #                               existing path → CONFLICT, refuse
 #   3. registry_path_match     install record under legacy id has
@@ -265,21 +350,30 @@ fi
 # key was missing.
 
 LEGACY_PLUGIN_ID="openclaw-mpm-memory"
-# Canonical former adapter directory: the pre-2026-09-17 sibling of
-# $SCRIPT_DIR. Used to recognize ownership when the legacy path no
-# longer exists on disk — the realpath comparison below tolerates
-# either form (path still present or already removed).
-LEGACY_ADAPTER_DIR_RAW="$(cd "$(dirname "$SCRIPT_DIR")" 2>/dev/null && printf '%s/openclaw-mpm-memory' "$(_q="${PWD:-}"; printf '%s' "$_q")")"
-# Resolve via readlink -f when the path exists; otherwise normalize
-# the literal we built above. readlink -f fails on missing paths, so
-# we try, then fall back to a manual resolution.
-if [ -d "$(dirname "$SCRIPT_DIR")/openclaw-mpm-memory" ]; then
-  LEGACY_ADAPTER_DIR="$(cd "$(dirname "$SCRIPT_DIR")/openclaw-mpm-memory" 2>/dev/null && pwd -P)" \
-    || LEGACY_ADAPTER_DIR="$(dirname "$SCRIPT_DIR")/openclaw-mpm-memory"
+# Canonical former adapter directory. The legacy id was linked from the
+# runtime tree (under the former co-location layout, the runtime root WAS
+# the checkout), so the runtime location is the form that matters for
+# recognizing ownership; the source-tree sibling is retained as a fallback
+# for hosts that still carry an older source-linked install.
+#
+# Used to recognize ownership when the legacy path no longer exists on
+# disk — the realpath comparison below tolerates either form (path still
+# present or already removed).
+LEGACY_ADAPTER_DIR_RAW="$MPM_RUNTIME_ROOT/agent_installation/$LEGACY_PLUGIN_ID"
+if [ -d "$LEGACY_ADAPTER_DIR_RAW" ]; then
+  LEGACY_ADAPTER_DIR="$(cd "$LEGACY_ADAPTER_DIR_RAW" 2>/dev/null && pwd -P)" \
+    || LEGACY_ADAPTER_DIR="$LEGACY_ADAPTER_DIR_RAW"
+elif [ -d "$(dirname "$SCRIPT_DIR")/$LEGACY_PLUGIN_ID" ]; then
+  LEGACY_ADAPTER_DIR="$(cd "$(dirname "$SCRIPT_DIR")/$LEGACY_PLUGIN_ID" 2>/dev/null && pwd -P)" \
+    || LEGACY_ADAPTER_DIR="$(dirname "$SCRIPT_DIR")/$LEGACY_PLUGIN_ID"
 else
-  LEGACY_ADAPTER_DIR="$(dirname "$SCRIPT_DIR")/openclaw-mpm-memory"
+  LEGACY_ADAPTER_DIR="$LEGACY_ADAPTER_DIR_RAW"
 fi
-OUR_REAL="$(cd "$SCRIPT_DIR" && pwd -P 2>/dev/null || printf '%s' "$SCRIPT_DIR")"
+# "Our" path is the runtime package we provision and link — never the
+# source checkout. An install recorded against the checkout is a
+# pre-split install and must be treated as foreign, so it is migrated
+# rather than silently accepted as already-correct.
+OUR_REAL="$(cd "$PLUGIN_PKG_DIR" && pwd -P 2>/dev/null || printf '%s' "$PLUGIN_PKG_DIR")"
 LEGACY_REAL="$LEGACY_ADAPTER_DIR"
 
 # Helper: try to read a JSON field out of an openclaw command. Returns
@@ -440,9 +534,19 @@ paths_match() {
 # produces capital-T — we accept it as a safety net).
 if [ "$legacy_inspect_ok" = "true" ] || [ "$legacy_inspect_ok" = "True" ] || [ "$legacy_inspect_ok" = "1" ]; then
   # inspect succeeded — strongest evidence (A or B).
+  #
+  # "Ours" has two accepted spellings: the legacy former location, and
+  # the runtime package we provision today. A record pointing at the
+  # runtime package is this adapter's own record from a prior run — it
+  # is ours to migrate, not an unrelated plugin to refuse. An actually
+  # foreign plugin is by definition recorded at neither path, so adding
+  # this arm does not weaken the conflict protection below.
   if [ -n "$legacy_inspect_root" ] && paths_match "$legacy_inspect_root" "$LEGACY_ADAPTER_DIR"; then
     legacy_ownership="owned"
     legacy_evidence="inspect_root_match:$legacy_inspect_root"
+  elif [ -n "$legacy_inspect_root" ] && paths_match "$legacy_inspect_root" "$OUR_REAL"; then
+    legacy_ownership="owned"
+    legacy_evidence="inspect_root_our_runtime_package:$legacy_inspect_root"
   elif [ -n "$legacy_inspect_root" ]; then
     # B: inspect_root_different — STOP HERE. Do NOT fall through to
     # registry/config fallback. An unrelated plugin owns the legacy id.
@@ -456,6 +560,10 @@ elif [ -n "$legacy_registry_source" ] || [ -n "$legacy_registry_install" ]; then
     if [ -n "$rp" ] && paths_match "$rp" "$LEGACY_ADAPTER_DIR"; then
       legacy_ownership="owned"
       legacy_evidence="registry_path_match:$rp"
+      break
+    elif [ -n "$rp" ] && paths_match "$rp" "$OUR_REAL"; then
+      legacy_ownership="owned"
+      legacy_evidence="registry_path_our_runtime_package:$rp"
       break
     elif [ -n "$rp" ] && [ -e "$rp" ]; then
       # D: registry_path_different — STOP HERE. Do NOT fall through to
@@ -496,7 +604,7 @@ case "$legacy_ownership" in
   conflict)
     err "legacy plugin id '$LEGACY_PLUGIN_ID' is already installed but points at a different source:"
     err "  recorded source: $legacy_conflict_path"
-    err "  this adapter:    $SCRIPT_DIR"
+    err "  this adapter:    $PLUGIN_PKG_DIR"
     err "  expected former canonical location of this adapter:"
     err "    $LEGACY_ADAPTER_DIR"
     err "this installer will not seize an unrelated plugin installation."
@@ -624,7 +732,7 @@ esac
 #
 #   absent              — plugin id is not in OpenClaw's registry.
 #   linked-from-here    — plugin id is registered AND its rootDir
-#                         equals our $SCRIPT_DIR. Re-running the
+#                         equals our $PLUGIN_PKG_DIR. Re-running the
 #                         installer is a true no-op for the install step.
 #   conflicting         — plugin id is registered AND its rootDir points
 #                         somewhere else. We must NOT silently overwrite
@@ -667,7 +775,7 @@ print(plugin.get("rootDir", ""))
   )"
   if [ -n "$parsed_root" ]; then
     # Compare absolute paths via realpath to handle symlinks in either side.
-    our_real="$(cd "$SCRIPT_DIR" && pwd -P 2>/dev/null || printf '%s' "$SCRIPT_DIR")"
+    our_real="$(cd "$PLUGIN_PKG_DIR" && pwd -P 2>/dev/null || printf '%s' "$PLUGIN_PKG_DIR")"
     their_real="$(cd "$parsed_root" 2>/dev/null && pwd -P 2>/dev/null || printf '%s' "$parsed_root")"
     if [ "$their_real" = "$our_real" ]; then
       PLUGIN_STATE="linked-from-here"
@@ -700,7 +808,7 @@ fi
 #                                    consent" and aborts.
 #   --link                           Symlink the local source instead of
 #                                    copying. Required so source edits in
-#                                    $SCRIPT_DIR take effect without a
+#                                    $PLUGIN_PKG_DIR take effect without a
 #                                    re-install.
 #
 # Failure modes we explicitly handle:
@@ -721,19 +829,19 @@ case "$PLUGIN_STATE" in
   conflicting)
     err "plugin '$PLUGIN_ID' is already installed but points at a different source."
     err "  registered rootDir: $PLUGIN_EXISTING_ROOT"
-    err "  this adapter path:  $SCRIPT_DIR"
+    err "  this adapter path:  $PLUGIN_PKG_DIR"
     err "this installer will not silently overwrite an unrelated plugin source."
     err "operator actions (pick exactly one):"
     err "  (a) the existing install is THIS adapter from another path — uninstall it first, then re-run this installer:"
     err "        openclaw plugins uninstall $PLUGIN_ID"
     err "        $0"
-    err "  (b) the existing install is unrelated — pick a different plugin id (rename $SCRIPT_DIR/openclaw.plugin.json and update PLUGIN_ID)."
+    err "  (b) the existing install is unrelated — pick a different plugin id (rename the adapter's openclaw.plugin.json and update PLUGIN_ID)."
     exit 1
     ;;
   absent|*)
-    log "installing plugin '$PLUGIN_ID' from $SCRIPT_DIR (--link --force --accept-capabilities)"
+    log "installing plugin '$PLUGIN_ID' from $PLUGIN_PKG_DIR (--link --force --accept-capabilities)"
     if ! timeout "${OPENCLAW_PLUGIN_INSTALL_TIMEOUT}s" \
-        openclaw plugins install "$SCRIPT_DIR" --link --force --accept-capabilities \
+        openclaw plugins install "$PLUGIN_PKG_DIR" --link --force --accept-capabilities \
           >>"$INSTALL_LOG" 2>&1; then
       # Inspect the captured log to give the operator an actionable error
       # rather than a bare "exit 1".

@@ -26,9 +26,10 @@
 # switch, and no capability schema beyond the standard `mpmBin`.
 #
 # Idempotency contract (OpenClaw 2026.9.5):
-#   * Plugin absent → run `openclaw plugins install . --link --force
+#   * Plugin absent → stage the runtime package, then run
+#     `openclaw plugins install <runtime-package> --link --force
 #     --accept-capabilities`.
-#   * Plugin already linked from THIS adapter's absolute path →
+#   * Plugin already linked from THIS adapter's runtime package →
 #     skip the install step entirely (no destructive re-install).
 #   * Plugin installed but pointing at a different source → fail
 #     closed; we do not seize an unrelated installation.
@@ -67,6 +68,54 @@ if [ -z "$PLUGIN_ID" ]; then
   printf '[mpm-auto-mode-persona-openclaw install] ERROR: could not parse plugin id from %s/openclaw.plugin.json\n' "$SCRIPT_DIR" >&2
   exit 2
 fi
+
+# --------------------------------------------------------------------------
+# Source tree vs runtime package
+# --------------------------------------------------------------------------
+#
+# SCRIPT_DIR is this adapter's location in the *source checkout*. It is not
+# what OpenClaw ends up linked to. Under the source/runtime split the
+# runtime root is populated by explicit provisioning, so this installer
+# stages a minimal, validated package into
+#
+#     <runtime-root>/agent_installation/<plugin-id>
+#
+# and links THAT. This also removes a latent CWD dependency: the previous
+# `openclaw plugins install . --link` linked whatever directory the
+# operator happened to be standing in, which is only the adapter by
+# coincidence. Linking the resolved runtime package makes the install
+# CWD-independent by construction.
+#
+# The runtime root is derived from the mpm binary resolved in step 1, so a
+# relocated or hermetic install provisions into its own tree.
+#
+# The manifest is the allowlist for what ships. This plugin contributes
+# no instruction-reconcile assets, so its runtime surface is just its
+# entrypoint, its metadata, and the one module that entrypoint imports.
+
+# `|| true` is load-bearing: under `set -e` a failing command substitution
+# in an assignment aborts the script *before* the guard below can report
+# what went wrong, so a missing sibling directory would exit silently.
+MPM_STAGE_PARENT="$(cd "$(dirname "$SCRIPT_DIR")/scripts" 2>/dev/null && pwd -P || true)"
+MPM_STAGE_LIB="${MPM_STAGE_PARENT:+$MPM_STAGE_PARENT/}stage_runtime_package.sh"
+if [ ! -f "$MPM_STAGE_LIB" ]; then
+  printf '[mpm-auto-mode-persona-openclaw install] ERROR: staging library not found: %s\n' "$MPM_STAGE_LIB" >&2
+  printf '[mpm-auto-mode-persona-openclaw install] the shared provisioning library lives at agent_installation/scripts/\n' >&2
+  printf '[mpm-auto-mode-persona-openclaw install] next to this adapter; run this installer from a complete checkout.\n' >&2
+  exit 2
+fi
+# shellcheck source=../scripts/stage_runtime_package.sh
+. "$MPM_STAGE_LIB"
+
+RUNTIME_PACKAGE_MANIFEST=(
+  index.js
+  openclaw.plugin.json
+  package.json
+  README.md
+  lib/workspace.js
+)
+
+PLUGIN_PKG_DIR=""
 
 # MPM canonical locations. Discovery order is deterministic and
 # never relies on a freshly-touched PATH entry. The OpenClaw gateway
@@ -133,12 +182,41 @@ fi
 log "mpm version: $("$MPM_BIN" --version 2>&1 | head -n1)"
 
 # --------------------------------------------------------------------------
+# 1b. Provision the runtime package
+# --------------------------------------------------------------------------
+#
+# Must happen before plugin-state inspection: the inspection compares
+# OpenClaw's recorded rootDir against the path we are about to link, and
+# the install step links the runtime package rather than this checkout or
+# the caller's CWD.
+#
+# Staging is idempotent and validated before exposure — a package that
+# fails validation aborts here with the previous one intact, rather than
+# reaching OpenClaw half-populated.
+
+MPM_RUNTIME_ROOT="$(mpm_runtime_root_from_bin "$MPM_BIN")"
+if [ -z "$MPM_RUNTIME_ROOT" ] || [ "$MPM_RUNTIME_ROOT" = "/" ] || [ "$MPM_RUNTIME_ROOT" = "." ]; then
+  err "could not derive a sane MPM runtime root from $MPM_BIN"
+  err "refusing to stage — set MPM_RUNTIME_ROOT explicitly if this install is relocated."
+  exit 2
+fi
+log "MPM runtime root: $MPM_RUNTIME_ROOT"
+
+if ! PLUGIN_PKG_DIR="$(stage_runtime_package "$SCRIPT_DIR" "$MPM_RUNTIME_ROOT" \
+        "$PLUGIN_ID" "${RUNTIME_PACKAGE_MANIFEST[@]}")"; then
+  err "runtime package provisioning failed for $PLUGIN_ID; refusing to link an unvalidated package"
+  exit 3
+fi
+PLUGIN_PKG_DIR="$(cd "$PLUGIN_PKG_DIR" && pwd -P)"
+log "runtime package staged and validated: $PLUGIN_PKG_DIR"
+
+# --------------------------------------------------------------------------
 # 2. OpenClaw CLI presence
 # --------------------------------------------------------------------------
 
 if ! command -v openclaw >/dev/null 2>&1; then
   err "openclaw CLI not on PATH. Install OpenClaw first, then re-run this installer."
-  err "  Plugin dir (already prepared for linking): $SCRIPT_DIR"
+  err "  Runtime package (already prepared for linking): $PLUGIN_PKG_DIR"
   exit 1
 fi
 
@@ -225,7 +303,7 @@ inspect_output="$(timeout "${OPENCLAW_PLUGIN_INSPECT_TIMEOUT}s" \
 ok="$(extract_json_field "ok" "$inspect_output")"
 parsed_root="$(extract_json_field "plugin.rootDir" "$inspect_output")"
 if [ -n "$parsed_root" ] && [ "$ok" != "false" ] && [ "$ok" != "False" ]; then
-  our_real="$(cd "$SCRIPT_DIR" && pwd -P 2>/dev/null || printf '%s' "$SCRIPT_DIR")"
+  our_real="$(cd "$PLUGIN_PKG_DIR" && pwd -P 2>/dev/null || printf '%s' "$PLUGIN_PKG_DIR")"
   their_real="$(cd "$parsed_root" 2>/dev/null && pwd -P 2>/dev/null || printf '%s' "$parsed_root")"
   if [ "$their_real" = "$our_real" ]; then
     PLUGIN_STATE="linked-from-here"
@@ -247,7 +325,7 @@ case "$PLUGIN_STATE" in
   conflicting)
     err "plugin '$PLUGIN_ID' is already installed but points at a different source."
     err "  registered rootDir: $PLUGIN_EXISTING_ROOT"
-    err "  this adapter path:  $SCRIPT_DIR"
+    err "  this adapter path:  $PLUGIN_PKG_DIR"
     err "this installer will not silently overwrite an unrelated plugin source."
     err "operator actions:"
     err "  (a) uninstall the conflicting install:"
@@ -257,15 +335,15 @@ case "$PLUGIN_STATE" in
     exit 1
     ;;
   absent|*)
-    log "installing plugin '$PLUGIN_ID' from $SCRIPT_DIR (--link --force --accept-capabilities)"
-    # The OpenClaw CLI parses the trailing path argument strictly:
-    # passing '.' here installs the plugin whose manifest lives in
-    # the current directory. Passing "./<plugin-dir>" was tried but
-    # 2026.9.5 concatenates that path onto $PWD and rejects the
-    # resulting non-existent path. Using '.' is the documented
-    # form that matches the auto-mode README.
+    log "installing plugin '$PLUGIN_ID' from $PLUGIN_PKG_DIR (--link --force --accept-capabilities)"
+    # The path argument is the resolved runtime package directory.
+    # It was previously '.' (the caller's working directory), which
+    # only happened to be the adapter when the operator ran the
+    # installer from inside it — and which, after the source/runtime
+    # split, would not have been the adapter at all. An absolute
+    # runtime path is CWD-independent by construction.
     if ! timeout "${OPENCLAW_PLUGIN_INSTALL_TIMEOUT}s" \
-        openclaw plugins install . --link --force --accept-capabilities \
+        openclaw plugins install "$PLUGIN_PKG_DIR" --link --force --accept-capabilities \
           >>"$INSTALL_LOG" 2>&1; then
       err "fresh plugin install failed. Tail of $INSTALL_LOG:"
       tail -n 20 "$INSTALL_LOG" >&2 || true

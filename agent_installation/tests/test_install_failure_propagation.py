@@ -218,6 +218,25 @@ def _stage_mpm_payload(home: Path) -> None:
     (home / ".mpm" / "bin" / "mpm").chmod(0o755)
 
 
+def _runtime_package_dir(install_script: Path, sandbox: _InstallerSandbox) -> Path:
+    """Where the adapter will provision its runtime package.
+
+    Mirrors the OpenClaw adapters' own derivation: the runtime root
+    comes from the mpm binary they resolve (here the sandbox's
+    synthetic one at <fake_home>/.mpm/bin/mpm), and the package is
+    <runtime-root>/agent_installation/<plugin-id>.
+
+    Only the two OpenClaw adapters provision a runtime package. The
+    mpm-opencode and mpm-pi adapters carry no openclaw.plugin.json and
+    are installed in place, so they keep the source-directory path.
+    """
+    manifest_path = install_script.parent / "openclaw.plugin.json"
+    if not manifest_path.is_file():
+        return install_script.parent
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return sandbox.fake_home / ".mpm" / "agent_installation" / manifest["id"]
+
+
 def _run_installer(
     install_script: Path,
     sandbox: _InstallerSandbox,
@@ -229,11 +248,19 @@ def _run_installer(
     install_log = sandbox.tmp / "install.log"
     env = sandbox.env(install_log=str(install_log))
     # The fake-openclaw's `plugins inspect` reports this path so the
-    # installer's preflight sees the plugin as already linked from
-    # this adapter's own source dir (the "linked-from-here" branch).
-    # That skips the destructive install step and lets us drive the
-    # post-install CLI calls under test.
-    env["ADAPTER_DIR"] = str(adapter_dir or install_script.parent)
+    # installer's preflight sees the plugin as already linked from its
+    # own runtime package (the "linked-from-here" branch). That skips
+    # the destructive install step and lets us drive the post-install
+    # CLI calls under test.
+    #
+    # This must be the RUNTIME PACKAGE, not the source dir. Under the
+    # source/runtime split the adapter provisions
+    # <runtime-root>/agent_installation/<plugin-id> and links that;
+    # pointing inspect at the checkout makes the preflight classify an
+    # already-correct install as a conflict and exit 1.
+    if adapter_dir is None:
+        adapter_dir = _runtime_package_dir(install_script, sandbox)
+    env["ADAPTER_DIR"] = str(adapter_dir)
     result = subprocess.run(
         ["bash", "--noprofile", "--norc", str(install_script), *args],
         capture_output=True,
@@ -535,6 +562,29 @@ class NegativeControlAutoMode(unittest.TestCase):
                 src_manifest.read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
+        # The adapter also sources the shared runtime-package provisioning
+        # library from its sibling scripts/ directory, and stages its
+        # declared manifest files. Both must exist alongside the stripped
+        # script or it aborts before reaching the behaviour under test.
+        (staged_dir / "lib").mkdir(exist_ok=True)
+        for rel in (
+            "openclaw.plugin.json",
+            "package.json",
+            "README.md",
+            "lib/workspace.js",
+            "index.js",
+        ):
+            origin = AUTO_MODE_INSTALL.parent / rel
+            if origin.exists():
+                dest = staged_dir / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(origin, dest)
+        staged_scripts = self.sb.tmp / "scripts"
+        staged_scripts.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(
+            AGENT_INSTALLATION / "scripts" / "stage_runtime_package.sh",
+            staged_scripts / "stage_runtime_package.sh",
+        )
         return staged
 
     def test_pre_fix_script_returns_zero_and_claims_done(self) -> None:

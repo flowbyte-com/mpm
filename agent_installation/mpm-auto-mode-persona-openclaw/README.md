@@ -35,11 +35,13 @@ OpenClaw-specific setup in the correct order:
    2026.9.5):
      absent              — plugin id not in the registry → fresh install.
      linked-from-here    — plugin id registered and rootDir equals
-                           this adapter's directory → skip install step.
+                           this adapter's runtime package → skip install step.
      conflicting         — plugin id registered but rootDir points
                            elsewhere → hard error, no overwrite.
+2b. Provision the runtime package (see "Runtime package" below).
 3. Install (only when state was "absent"):
-     openclaw plugins install . --link --force --accept-capabilities
+     openclaw plugins install <runtime-root>/agent_installation/<plugin-id> \
+       --link --force --accept-capabilities
    The three flags are the documented 2026.9.4 contract for installing
    a non-ClawHub local source that declares capabilities.
 4. Persist absolute mpmBin (PATH-gotcha mitigation).
@@ -53,7 +55,7 @@ OpenClaw-specific setup in the correct order:
 ### Re-running (idempotency)
 
 Re-running `./install.sh` on a host where the plugin is already
-correctly linked from THIS adapter's directory is genuinely idempotent
+correctly linked from this adapter's runtime package is genuinely idempotent
 for the install step: no `openclaw plugins install` is reissued, no
 trust warning is emitted, no `installedAt` timestamp is bumped.
 The `update repair` step IS reissued on every run, which is harmless
@@ -66,7 +68,8 @@ If you cannot run `install.sh`, the bare-minimum sequence the
 adapter installer performs is:
 
 ```bash
-openclaw plugins install . --link --force --accept-capabilities
+openclaw plugins install "$HOME/.mpm/agent_installation/mpm-auto-mode-persona-openclaw" \
+  --link --force --accept-capabilities
 openclaw config set plugins.entries.mpm-auto-mode-persona-openclaw.config.mpmBin "$HOME/.mpm/bin/mpm"
 openclaw update repair    # converge pending state migration
 ```
@@ -74,6 +77,42 @@ openclaw update repair    # converge pending state migration
 The bounded gateway restart is then left to systemd. `install.sh`
 is the supported path; the bare CLI sequence above is for
 diagnostics only.
+
+### Runtime package
+
+Source and runtime are separate trees: the checkout lives at
+`~/src/mpm`, runtime state at `~/.mpm`. Nothing in this repository
+populates `~/.mpm/agent_installation/` from Git, because Git no
+longer owns that path — it used to, back when `~/.mpm` *was* the
+checkout.
+
+So `install.sh` provisions the package itself before linking it. It
+stages a minimal, validated copy into
+
+```
+<runtime-root>/agent_installation/mpm-auto-mode-persona-openclaw/
+```
+
+containing only what OpenClaw loads and what the plugin imports:
+`index.js`, `openclaw.plugin.json`, `package.json`, `README.md`,
+and `lib/workspace.js`. Tests, bytecode caches, and install-only
+assets stay in source. The manifest is an allowlist, so adding a file
+to the shipped package is a deliberate act.
+
+The runtime root is derived from the resolved `mpm` binary (the
+parent of its `bin/`), not hardcoded to `~/.mpm` — a relocated or
+hermetic install provisions into its own tree and never touches the
+operator's real one.
+
+The staged package is validated *before* it is handed to OpenClaw:
+metadata parses, the plugin id matches, the `package.json` entrypoint
+exists, and every relative import resolves inside the package. A
+package that fails validation aborts the install with the previous
+package left intact, rather than reaching OpenClaw half-populated.
+
+The practical consequence: **once installed, the live integration no
+longer depends on the source checkout.** Deleting or moving
+`~/src/mpm` does not break the plugin.
 
 ### Verify after install
 
