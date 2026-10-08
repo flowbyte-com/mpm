@@ -522,5 +522,140 @@ class TestDryRun(TransactionBase):
         )
 
 
+class TestBackupPhaseFailure(TransactionBase):
+    """§22/§G — a failure during the BACKUP step must not delete anything.
+
+    The backup step moves the OLD binaries into the rollback directory one at
+    a time. If it fails partway, the binaries it never reached are still
+    sitting in the destination, untouched and still owned by the operator.
+    Rollback must leave them alone.
+
+    It used to destroy them. Rollback decided what to remove by asking
+    "is there no backup copy for this one?" — but "no backup copy" describes
+    two different situations that look identical on disk:
+
+      * a first install, where WE created the file and must remove it, and
+      * a partially-completed backup, where the file is the operator's
+        ORIGINAL and must be left exactly as it is.
+
+    Guessing wrong there deletes binaries that were never at risk.
+    """
+
+    def _stub_mv_failing_backup_of(self, binary):
+        """A `mv` that fails only when backing up `binary` into the rollback dir.
+
+        The backup direction is <bindir>/<binary> -> <bindir>/.mpm-rollback.*/
+        <binary>. Restoration moves the other way, out of the rollback
+        directory, so it still works and the transaction genuinely reaches the
+        point where it needs to undo its work.
+        """
+        stub = self._tmp / "stub-backup"
+        stub.mkdir(exist_ok=True)
+        (stub / "mv").write_text(
+            "#!/usr/bin/env bash\n"
+            'src=""; dst=""\n'
+            'for a in "$@"; do\n'
+            '  case "$a" in -*) continue;; esac\n'
+            '  if [ -z "$src" ]; then src="$a"; else dst="$a"; fi\n'
+            "done\n"
+            f'case "$dst" in\n'
+            f'  */.mpm-rollback.*/{binary}) exit 1;;\n'
+            "esac\n"
+            'exec /usr/bin/mv "$@"\n'
+        )
+        (stub / "mv").chmod(0o755)
+        return stub
+
+    def test_backup_failure_does_not_delete_never_backed_up_binaries(self):
+        stub = self._stub_mv_failing_backup_of("mpm-critic")
+        env = os.environ.copy()
+        env["HOME"] = str(self.home)
+        env["PATH"] = f"{stub}:/usr/bin:/bin"
+
+        driver = self._tmp / "drive-backup-fail.sh"
+        driver.write_text(
+            f'#!/usr/bin/env bash\nset -uo pipefail\n. {LIB}\n'
+            f'mpm_promote_binaries "{self.build}" "{self.bindir}"\n'
+            f"exit $?\n"
+        )
+        driver.chmod(0o755)
+        r = subprocess.run(
+            ["bash", "--noprofile", "--norc", str(driver)],
+            capture_output=True, text=True, env=env,
+        )
+
+        self.assertNotEqual(
+            r.returncode, 0,
+            f"a failed backup must not report success:\n{r.stderr}",
+        )
+        # The decisive assertion: every binary is byte-identical to PRE. The
+        # three binaries the backup never reached were never in danger, and
+        # must still be exactly as the operator left them.
+        self._assert_equals_pre_state("backup failed partway")
+        self._assert_no_transaction_leftovers("backup failed partway")
+
+
+class TestSignalCleanup(TransactionBase):
+    """§22 — a signal during promotion must not strand the prefix.
+
+    Mid-promotion the OLD binaries are already in the rollback directory and
+    only some NEW ones are in place, so simply dying leaves the prefix with
+    binaries MISSING from it. The transaction installs INT/TERM handlers to
+    restore the previous set before exiting.
+    """
+
+    def _drive_slowly(self, bindir, dest):
+        """A driver whose `mv` sleeps, so a signal reliably lands mid-promotion."""
+        d = self._tmp / "drive-slow.sh"
+        d.write_text(
+            f'#!/usr/bin/env bash\nset -uo pipefail\n. {LIB}\n'
+            'mv() { sleep 0.5; command mv "$@"; }\n'
+            f'mpm_promote_binaries "{bindir}" "{dest}"\n'
+            f"exit $?\n"
+        )
+        d.chmod(0o755)
+        return d
+
+    def _assert_restored_after_signal(self, signum):
+        import signal as _signal
+        driver = self._drive_slowly(self.build, self.bindir)
+        proc = subprocess.Popen(
+            ["bash", "--noprofile", "--norc", str(driver)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, env={**os.environ, "HOME": str(self.home)},
+        )
+        try:
+            # Let it get past staging and into the backup/promotion window.
+            _signal.pause  # no-op; keeps the import obviously used
+            import time
+            time.sleep(1.1)
+            proc.send_signal(signum)
+            out, err = proc.communicate(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+
+        self._assert_equals_pre_state(f"SIG{signum} mid-promotion")
+        self._assert_no_transaction_leftovers(f"SIG{signum} mid-promotion")
+
+    def test_sigterm_during_promotion_restores_previous_set(self):
+        import signal
+        self._assert_restored_after_signal(signal.SIGTERM)
+
+    def test_sigint_during_promotion_restores_previous_set(self):
+        import signal
+        self._assert_restored_after_signal(signal.SIGINT)
+
+    def test_library_installs_signal_handlers(self):
+        """The handlers must exist in the shipped source, not just in a test."""
+        src = LIB.read_text()
+        self.assertIn("trap ", src,
+                      "the transaction installs no signal handlers, so an "
+                      "interrupted promotion leaves binaries missing from "
+                      "the prefix")
+        self.assertIn("_bt_tx_signal", src)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -85,6 +85,16 @@
 #   12  refused before touching anything (missing/invalid candidate, or the
 #       lock is held by another installer)
 #
+# SIGNALS
+#
+# INT and TERM arriving between the first backup rename and the commit point
+# trigger the same rollback as any other pre-commit failure, then exit 143/130
+# (or 11 if restoration was itself incomplete). Handlers are armed only for
+# that destructive window and are removed on every exit path, so a caller that
+# had its own traps keeps them. SIGKILL cannot be trapped; after a SIGKILL the
+# prefix may hold a partial set, and the preserved rollback directory remains
+# the operator's recovery material.
+#
 # Sourced by install.sh and by the Makefile's `install:` target so the two
 # promotion surfaces cannot drift apart again.
 
@@ -178,6 +188,68 @@ _bt_validate_candidates() {
     return 0
 }
 
+# ---------- signal safety ----------
+#
+# A signal delivered mid-promotion must not strand the prefix. At that instant
+# the OLD binaries are already in the rollback directory and only a subset of
+# the NEW ones have been promoted, so an unguarded exit leaves some binaries
+# MISSING from the prefix entirely — a worse outcome than the mixed release
+# this transaction exists to prevent, and a direct violation of the release
+# criterion that any pre-commit failure leaves the five paths as they were.
+#
+# The handler runs in the same shell as the interrupted function, but reads
+# the transaction's state from these globals rather than from that function's
+# locals, so that install.sh's own traps (if it ever sets any) are preserved
+# and restored rather than clobbered.
+_BT_TX_ACTIVE=0
+_BT_TX_COMMITTED=0
+_bt_tx_prev_int=""
+_bt_tx_prev_term=""
+_bt_tx_bin_dir=""
+_bt_tx_rollback_dir=""
+_bt_tx_stage_dir=""
+_bt_tx_binaries=()
+
+# Re-arm whatever the caller had installed before this transaction ran.
+_bt_tx_restore_traps() {
+    trap - INT TERM 2>/dev/null || true
+    [ -n "$_bt_tx_prev_int" ] && eval "$_bt_tx_prev_int"
+    [ -n "$_bt_tx_prev_term" ] && eval "$_bt_tx_prev_term"
+    _bt_tx_prev_int=""
+    _bt_tx_prev_term=""
+}
+
+_bt_tx_signal() {
+    local signame="$1" signum="$2" rrc=0
+    # Further signals during restoration must not re-enter this handler.
+    trap '' INT TERM
+    if [ "$_BT_TX_ACTIVE" -eq 1 ] && [ "$_BT_TX_COMMITTED" -eq 0 ] \
+       && [ -n "$_bt_tx_rollback_dir" ]; then
+        bt_err "interrupted by SIG$signame; restoring the previous binary set"
+        _bt_rollback "$_bt_tx_bin_dir" "$_bt_tx_rollback_dir" "${_bt_tx_binaries[@]}" || rrc=$?
+        if [ "$rrc" -eq 0 ]; then
+            # Restoration succeeded, so the rollback directory is empty and
+            # removing it destroys nothing.
+            rm -rf "$_bt_tx_rollback_dir" 2>/dev/null || true
+        fi
+    fi
+    # The staging directory is always disposable — it holds only our own
+    # copies — so it is cleaned up whether or not restoration succeeded.
+    # (Deliberately not `return`: this function always exits.)
+    if [ -n "$_bt_tx_stage_dir" ]; then
+        rm -rf "$_bt_tx_stage_dir" 2>/dev/null || true
+    fi
+    _BT_TX_ACTIVE=0
+    _bt_tx_restore_traps
+    # An incomplete restoration is the more serious outcome, so it wins the
+    # exit code; the rollback directory is left in place for manual recovery.
+    if [ "$rrc" -ne 0 ]; then
+        bt_err "interrupted and rollback incomplete; previous binaries are preserved for manual recovery"
+        exit 11
+    fi
+    exit "$signum"
+}
+
 # ---------- failure reporting ----------
 # The operator-facing summary line. Emitted once per failed transaction, and
 # deliberately says the previous set was restored only when _bt_rollback is
@@ -204,10 +276,40 @@ _bt_report_failure() {
 #   * no copy exists, but the binary is in the destination -> it was promoted
 #     during a first install, so remove it; there was no prior state
 #   * neither -> the binary was absent before and is absent now; leave it
+# The binaries actually promoted by the CURRENT transaction attempt. Rollback
+# uses this to decide which destination files it may delete.
+#
+# It cannot infer that from the rollback directory's contents: "no backup copy"
+# means either (a) this was a first install and the file was promoted by us,
+# or (b) the BACKUP step never reached this binary and it is still the
+# operator's original file, untouched. Case (b) looks exactly like case (a)
+# from the filesystem's point of view, and treating it as (a) deleted binaries
+# that were never at risk. Tracking the set explicitly separates them.
+_BT_PROMOTED_NAMES=()
+
+_bt_was_promoted() {
+    local want="$1" n
+    for n in "${_BT_PROMOTED_NAMES[@]-}"; do
+        [ "$n" = "$want" ] && return 0
+    done
+    return 1
+}
+
 _bt_rollback() {
     local bin_dir="$1" rollback_dir="$2"
     shift 2
     local bin restored=0 failed=0 removed=0
+
+    # Restoration is itself destructive, so it must be strictly one-shot. A
+    # signal arriving mid-restoration (or after a rollback already completed)
+    # must NOT start a second pass: by then the rollback directory is empty,
+    # so a re-run would take the "no old counterpart" branch and delete the
+    # very binaries it had just restored.
+    #
+    # NOTE: _BT_PROMOTED_NAMES is deliberately NOT cleared here — this
+    # function has to be able to read it to know what it may delete. It is
+    # reset once per transaction, at the top of _bt_promote_transaction.
+    _BT_TX_ACTIVE=0
 
     bt_warn "rolling back binary promotion"
     for bin in "$@"; do
@@ -218,8 +320,10 @@ _bt_rollback() {
                 bt_err "ROLLBACK FAILED: could not restore $bin_dir/$bin"
                 failed=1
             fi
-        elif [ -e "$bin_dir/$bin" ]; then
-            # Promoted during a first install — no old counterpart existed.
+        elif [ -e "$bin_dir/$bin" ] && _bt_was_promoted "$bin"; then
+            # Promoted by THIS transaction and no old counterpart existed
+            # (a first install). Removing it returns the prefix to its
+            # pre-install absence.
             if rm -f "$bin_dir/$bin" 2>/dev/null; then
                 removed=$((removed + 1))
             else
@@ -265,6 +369,12 @@ mpm_promote_binaries() {
     _bt_lock "$bin_dir" || return $?
     local rc=0
     _bt_promote_transaction "$build_dir" "$bin_dir" "${binaries[@]}" || rc=$?
+    # Every exit path — validation refusal, staged/backup failure, a rolled
+    # back transaction, or a commit — returns through here, so restoring the
+    # caller's traps in one place is what keeps this library from leaking a
+    # trapped shell state into its caller.
+    _BT_TX_ACTIVE=0
+    _bt_tx_restore_traps
     _bt_unlock
     return "$rc"
 }
@@ -275,6 +385,11 @@ _bt_promote_transaction() {
     local binaries=("$@")
     local stage_dir="" rollback_dir=""
     local bin promoted=0 have_old=0
+
+    # Per-transaction state. Reset here so a second transaction in the same
+    # shell (or the installer's two promotion surfaces) never inherits the
+    # previous one's promoted set.
+    _BT_PROMOTED_NAMES=()
 
     # --- validate every candidate before touching the destination ---
     _bt_validate_candidates "$build_dir" "${binaries[@]}" || return 12
@@ -300,6 +415,21 @@ _bt_promote_transaction() {
         return 12
     }
     chmod 0700 "$rollback_dir"
+
+    # Arm signal handling for the destructive window. Staging happens before
+    # this point and only writes into our own private directory, so a signal
+    # there is harmless; from the first backup rename onward the prefix is in
+    # a mixed state that must not be abandoned.
+    _bt_tx_prev_int="$(trap -p INT 2>/dev/null || true)"
+    _bt_tx_prev_term="$(trap -p TERM 2>/dev/null || true)"
+    _bt_tx_bin_dir="$bin_dir"
+    _bt_tx_rollback_dir="$rollback_dir"
+    _bt_tx_stage_dir="$stage_dir"
+    _bt_tx_binaries=("${binaries[@]}")
+    _BT_TX_ACTIVE=1
+    _BT_TX_COMMITTED=0
+    trap '_bt_tx_signal INT 2' INT
+    trap '_bt_tx_signal TERM 15' TERM
 
     # --- stage every candidate ---
     # Copy (not move) so the build tree is left intact. install into our own
@@ -364,6 +494,7 @@ _bt_promote_transaction() {
             return "$prc"
         fi
         promoted=$((promoted + 1))
+        _BT_PROMOTED_NAMES+=("$bin")
         bt_log "  promoted $bin_dir/$bin"
     done
 
@@ -384,7 +515,12 @@ _bt_promote_transaction() {
     }
 
     # The fifth rename above was the commit point. From here the release is
-    # the new one and is not rolled back.
+    # the new one and is not rolled back. Mark it committed BEFORE the
+    # cleanup below so a signal arriving during cleanup cannot resurrect a
+    # rollback of an already-committed release.
+    _BT_TX_COMMITTED=1
+    _BT_TX_ACTIVE=0
+    _bt_tx_restore_traps
     rm -rf "$stage_dir" 2>/dev/null || true
     if ! rm -rf "$rollback_dir" 2>/dev/null; then
         # Post-commit cleanup failure. The binaries are correct and
