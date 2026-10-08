@@ -6293,57 +6293,39 @@ func (dm *DatabaseManager) provenanceFromContext(ac ActiveContext) *EffectivePro
 	return base
 }
 
-// recordGitEvidenceForWork records Git evidence for a work item when — and
-// only when — the work's repository is explicitly identified.
-//
-// It is currently a no-op, and that is the intended state, not a stub.
-//
-// This function used to call CaptureGitSnapshot("") and rely on the
-// ambient-probe chain to find a repository, which meant it recorded
-// whichever repository happened to contain the process: the MPM source
-// checkout, the workspace, or whatever the operator's shell was pointed at.
-// A `git` evidence row classifies as AUDIT, so that single fabricated row
-// promoted DeriveWorkVerification to `partial` — an assertion that the work
-// had been observed, made on the work's behalf by an unrelated repository.
-//
-// Nothing in the data model can supply the missing fact. Work carries no
-// project or repository field (see schema.go's `works` table), ActiveContext
-// and ActiveState carry session provenance only, and the evidence table has
-// no origin column. So the repository is genuinely unknowable here, and the
-// honest result is to record nothing.
-//
-// Deliberately NOT done, because each would reintroduce the false attribution
-// by another name:
+// The former recordGitEvidenceForWork lived here and has been removed. Its
+// rationale is preserved because it is the only record of which ambient
+// sources were considered and why each was rejected:
 //
 //   - os.Getwd()                  — the shell's directory, not the work's
 //   - config.GetMPMDir()          — the workspace, not a repository
 //   - os.Executable()             — the MPM checkout, which is a repository
 //     for MPM's own source and for nothing else
 //   - an MPM_SOURCE_ROOT env var  — inventing a configuration surface whose
-//     only purpose would be to keep the old
-//     automatic behaviour alive
+//     only purpose would be to keep the old automatic behaviour alive
+//
+// It used to call CaptureGitSnapshot("") and rely on the ambient-probe chain
+// to find a repository, which meant it recorded whichever repository happened
+// to contain the process. A `git` evidence row classifies as AUDIT, so that
+// single fabricated row promoted DeriveWorkVerification to `partial` — an
+// assertion that the work had been observed, made on the work's behalf by an
+// unrelated repository.
+//
+// Nothing in the data model could supply the missing fact. Work carries no
+// project or repository field (see schema.go's `works` table), ActiveContext
+// and ActiveState carry session provenance only, and the evidence table has
+// no origin column. Once the method became a guaranteed no-op it was pure
+// surface area: a public method promising Git evidence while doing nothing.
 //
 // The rule this encodes:
 //
 //	Git evidence without an explicitly identified repository is
 //	unavailable, not inferred.
 //
-// Work lifecycle is unaffected. Absence of Git evidence is not a failure
-// state: an item completes, derives `unverified`, and can be supplied later
-// by a caller that actually knows the repository. A caller that wants Git
-// evidence recorded should use the explicit observation route
-// (`mpm_evidence action=add source_group=git`), which states the
+// A caller that wants Git evidence recorded uses the explicit observation
+// route (`mpm_evidence action=add source_group=git`), which states the
 // observation as a fact of the caller's own knowledge rather than MPM
-// guessing at one.
-//
-// The snapshot-capture body was deleted rather than left behind a dead
-// branch: the note format it wrote is recoverable from history, and
-// unreachable production code is worse than no code.
-func (dm *DatabaseManager) recordGitEvidenceForWork(workID string) {
-	_ = workID
-	// No explicit repository root is available on the work model, so no
-	// Git evidence is admissible. See the doc comment above.
-}
+// guessing at one. See also CaptureGitSnapshot's doc comment.
 
 // CreateWorkWithContext creates a work and its initial event atomically.
 // Thin-handler target for mpm_work create.
@@ -6548,27 +6530,6 @@ func (dm *DatabaseManager) UnarchiveWorkWithContext(workID, note string, ac Acti
 		return nil, err
 	}
 	return dm.GetWork(workID)
-}
-
-// RecordGitEvidenceForWork is retained as a no-op for interface
-// compatibility. It no longer records a Git evidence row.
-//
-// The work model carries no repository identity, so this method cannot name
-// the repository whose state would be evidence, and it must not guess. It
-// previously did guess — via the ambient probe chain inside
-// CaptureGitSnapshot — and therefore attributed an unrelated repository's
-// HEAD and changed files to the work, promoting verification to `partial` on
-// the strength of a fabricated observation.
-//
-// It has no production callers; the `complete` and `cancel` paths
-// deliberately omit Git auto-inflation (see the Alpha-4.1 F-003 note on the
-// deprecated update surface).
-//
-// To record real Git evidence, use the explicit observation route:
-// `mpm_evidence action=add source_group=git`, which states the observation as
-// a fact of the caller's own knowledge.
-func (dm *DatabaseManager) RecordGitEvidenceForWork(workID string) {
-	dm.recordGitEvidenceForWork(workID)
 }
 
 // DeriveWorkVerification computes and persists works.verification from evidence rows

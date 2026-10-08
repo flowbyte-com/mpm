@@ -474,7 +474,16 @@ type CoreDB interface {
 	UnarchiveWorkWithContext(workID, note string, ac ActiveContext) (*Work, error)
 	UpdateWorkWithContext(workID, title, content, statusStr string, ac ActiveContext) (*Work, error)
 	GetActiveDirectiveIDs(framework string) []string
-	RecordGitEvidenceForWork(workID string)
+	// NOTE: there is deliberately no RecordGitEvidenceForWork here. It was an
+	// intentionally non-operative method retained for compatibility, and it
+	// has been removed: it could only ever record nothing, because the work
+	// model carries no repository identity for it to name. Keeping it on an
+	// agent-reachable interface advertised a capability MPM does not have.
+	// Git evidence reaches a work item through the explicit observation route
+	// (AddEvidence / `mpm_evidence action=add source_group=git`), which states
+	// the observation as the caller's own knowledge. See docs/SPEC.md,
+	// "Git evidence requires an explicitly named repository", and
+	// CaptureGitSnapshot's doc comment for the full rationale.
 	DeriveWorkVerification(workID string) (WorkVerification, error)
 	// ResolveWorkContradiction is the F6-1 / T20-1 agent-facing recovery
 	// path: withdraw unsubstantiated dispute evidence from a work item so
