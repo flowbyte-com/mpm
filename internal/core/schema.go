@@ -270,7 +270,15 @@ var BaseTables = []string{
 		created_by          TEXT NOT NULL,
 		created_at          INTEGER NOT NULL,
 		expires_at          INTEGER,
-		notes               TEXT
+		notes               TEXT,
+		-- Explicit, user-supplied external reference for this evidence:
+		-- "what external reference did this claim come from?" Nullable,
+		-- because a reference is optional. It is metadata that identifies a
+		-- source — NOT proof the source is correct or reachable. MPM never
+		-- fetches, resolves, or verifies it, and its presence does not
+		-- affect strength, confidence, or derived verification.
+		-- See evidence_reference_url.go for the full contract.
+		reference_url       TEXT
 	);`,
 
 	`CREATE INDEX IF NOT EXISTS idx_evidence_artifact ON evidence(artifact_id, artifact_type);`,
@@ -1450,6 +1458,11 @@ var SafeMigrations = [][3]string{
 	// migrateLessonsToView, when the table doesn't exist yet, so it's
 	// deliberately absent here.
 	{"reference_docs", "import_reason", "TEXT"},
+	// Explicit, user-supplied external reference URL on an evidence row.
+	// Nullable so every pre-existing row and every pre-existing caller —
+	// none of which supply the field — stays valid. `evidence` is also in the
+	// shared-table set (db.go), so this entry migrates the shared DB too.
+	{"evidence", "reference_url", "TEXT"},
 	{"reference_chunks", "content_hash", "TEXT"},
 	{"reference_chunks", "embedding", "BLOB"},
 	// 2026-09-28: model-identity fingerprint for reference embeddings.

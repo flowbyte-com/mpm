@@ -13,7 +13,8 @@
 // BEGIN
 //   1. Preserve any triggers on memories that reference the evidence table.
 //   2. CREATE TABLE evidence_new (... new CHECK with 'work' ...)
-//   3. INSERT INTO evidence_new SELECT * FROM evidence
+//   3. INSERT INTO evidence_new SELECT <explicit column list> FROM evidence
+//      (never SELECT * — see the note at the copy step)
 //   4. DROP TABLE evidence
 //   5. ALTER TABLE evidence_new RENAME TO evidence
 //   6. Recreate the preserved triggers (SQLite updates internal references).
@@ -75,6 +76,19 @@ func (dm *DatabaseManager) migrateEvidenceWorkType() error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Self-heal the column this migration's copy list depends on.
+	// SafeMigrations normally adds reference_url before we get here, but
+	// that loop only slog.Warn's on failure — it does not abort init — so
+	// a database whose ALTER failed is reachable. Without this, the copy
+	// below would fail with "no such column: reference_url". ADD COLUMN is
+	// idempotent here (duplicate-column error is swallowed), so running it
+	// unconditionally is safe on both a fresh and an already-migrated table.
+	if _, err := tx.Exec(`ALTER TABLE evidence ADD COLUMN reference_url TEXT`); err != nil {
+		if !isDuplicateColumnError(err) {
+			return fmt.Errorf("migrateEvidenceWorkType: ensure reference_url: %w", err)
+		}
+	}
+
 	const newDDL = `CREATE TABLE evidence_new (
 		id                  TEXT PRIMARY KEY,
 		artifact_id         TEXT NOT NULL,
@@ -86,7 +100,16 @@ func (dm *DatabaseManager) migrateEvidenceWorkType() error {
 		created_by          TEXT NOT NULL,
 		created_at          INTEGER NOT NULL,
 		expires_at          INTEGER,
-		notes               TEXT
+		notes               TEXT,
+		-- reference_url must be listed here. SafeMigrations runs BEFORE this
+		-- function (db.go: SafeMigrations loop, then migrateEvidenceWorkType),
+		-- so on a legacy database the column has ALREADY been added by the
+		-- time this recreate runs. Omitting it would drop every stored
+		-- reference URL on the way through.
+		-- NOTE: every line of a SQL comment must use the SQL dash-dash form.
+		-- A slash-slash line inside this string is not a comment to SQLite
+		-- and aborts the CREATE with a syntax error.
+		reference_url       TEXT
 	)`
 
 	if _, err := tx.Exec(newDDL); err != nil {
@@ -95,7 +118,26 @@ func (dm *DatabaseManager) migrateEvidenceWorkType() error {
 
 	// Copy all rows (evidence rows are artifact-type-restricted at insert time,
 	// so no existing row can violate the new CHECK).
-	if _, err := tx.Exec(`INSERT INTO evidence_new SELECT * FROM evidence`); err != nil {
+	//
+	// The column list is explicit, never `SELECT *`. This function hardcodes
+	// the destination table's shape in newDDL while the source table's shape
+	// is whatever the live database plus SafeMigrations have accumulated. A
+	// `SELECT *` here silently couples the two: any column added to `evidence`
+	// between BaseTables and this migration (reference_url, and every future
+	// addition) makes the copy supply more values than evidence_new declares,
+	// and the migration fails at boot with an arity error. Naming the columns
+	// makes that coupling impossible.
+	if _, err := tx.Exec(`
+		INSERT INTO evidence_new
+			(id, artifact_id, artifact_type, type, source_group, strength,
+			 independence_factor, created_by, created_at, expires_at,
+			 notes, reference_url)
+		SELECT
+			id, artifact_id, artifact_type, type, source_group, strength,
+			independence_factor, created_by, created_at, expires_at,
+			notes, reference_url
+		FROM evidence
+	`); err != nil {
 		return fmt.Errorf("migrateEvidenceWorkType: copy rows: %w", err)
 	}
 
