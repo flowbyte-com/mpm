@@ -851,9 +851,11 @@ assert, on its own behalf, that an arbitrary work item had been observed — and
 that assertion is indistinguishable downstream from a real one. Missing
 evidence is strictly better: absence is visible and can be supplied later by a
 caller that actually knows the repository, whereas a fabricated observation is
-trusted. Nothing in the work model carries a repository identity today, so the
-automatic path is a no-op by design; to record real Git evidence, use the
-explicit observation route (`mpm_evidence action=add source_group=git`).
+trusted. Nothing in the work model carries a repository identity today, so
+there is no automatic path to take: `MPM` does not expose an API that would
+associate Git evidence with a work item on its own initiative. To record real
+Git evidence, use the explicit observation route
+(`mpm_evidence action=add source_group=git`).
 
 **The working directory is not a workspace.** No `MPM` process resolves
 runtime state from the current directory. The workspace is

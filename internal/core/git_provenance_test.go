@@ -178,7 +178,15 @@ func TestCaptureGitSnapshot_NonRepoPathIsEmpty(t *testing.T) {
 }
 
 // E. Without an explicit repository, no Git evidence row is written.
-func TestRecordGitEvidenceForWork_NoExplicitRepoWritesNoGitEvidence(t *testing.T) {
+//
+// This test previously called dm.recordGitEvidenceForWork. That method is
+// gone: it was a guaranteed no-op, so calling it asserted only that the
+// no-op did nothing. What actually matters is the PRODUCT behaviour — that
+// MPM's work lifecycle writes no `git` evidence row when the work has no
+// repository identity — so this test now drives the real path (add +
+// complete) instead of the removed plumbing. The invariant, not the old
+// function name, is what is pinned here.
+func TestWorkLifecycle_NoExplicitRepoWritesNoGitEvidence(t *testing.T) {
 	// Run from a real repository so a cwd-based implementation would have
 	// something to wrongly attribute.
 	t.Chdir(newTestRepo(t, "e-marker.txt", "e commit"))
@@ -191,7 +199,12 @@ func TestRecordGitEvidenceForWork_NoExplicitRepoWritesNoGitEvidence(t *testing.T
 		t.Fatalf("AddWork: %v", err)
 	}
 
-	dm.recordGitEvidenceForWork(w.ID)
+	// Drive the production lifecycle path the removed method used to hang
+	// off. If any of these transitions ever re-admit ambient Git capture,
+	// this is where it shows.
+	if _, err := dm.CompleteWorkWithContext(w.ID, "Done", ActiveContext{}); err != nil {
+		t.Fatalf("CompleteWorkWithContext: %v", err)
+	}
 
 	evidence, err := ListEvidenceForArtifact(dm, w.ID, "work")
 	if err != nil {
@@ -235,6 +248,12 @@ func TestWork_CompletionSucceedsWithoutGitEvidence(t *testing.T) {
 //
 // This is the harm the old chain caused: a `git` row classifies as AUDIT,
 // and audit-without-outcome derives `partial`.
+//
+// The removed recordGitEvidenceForWork used to be the thing under test; the
+// assertion below is stronger without it. Instead of asking "does the no-op
+// avoid recording?", this asks "does the real lifecycle avoid the false
+// promotion?" — run the production path under an unrelated Git cwd and
+// require that verification stays unverified.
 func TestDeriveWorkVerification_NotPromotedByUnrelatedCwdGitState(t *testing.T) {
 	t.Chdir(newTestRepo(t, "g-marker.txt", "g commit"))
 
@@ -246,7 +265,12 @@ func TestDeriveWorkVerification_NotPromotedByUnrelatedCwdGitState(t *testing.T) 
 		t.Fatalf("AddWork: %v", err)
 	}
 
-	dm.recordGitEvidenceForWork(w.ID)
+	// Production path: complete the item, which internally re-derives
+	// verification. If ambient Git capture were ever reinstated, the
+	// fabricated `git` row would land here and flip the result to partial.
+	if _, err := dm.CompleteWorkWithContext(w.ID, "Done", ActiveContext{}); err != nil {
+		t.Fatalf("CompleteWorkWithContext: %v", err)
+	}
 
 	derived, err := dm.DeriveWorkVerification(w.ID)
 	if err != nil {
@@ -275,7 +299,6 @@ func TestWork_UnrelatedRepoStateNeverAppearsInEvidence(t *testing.T) {
 		t.Fatalf("AddWork: %v", err)
 	}
 
-	dm.recordGitEvidenceForWork(w.ID)
 	if _, err := dm.CompleteWorkWithContext(w.ID, "Done", ActiveContext{}); err != nil {
 		t.Fatalf("CompleteWorkWithContext: %v", err)
 	}

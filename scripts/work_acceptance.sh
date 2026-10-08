@@ -83,9 +83,11 @@ pass "Test 2 create work_id=$work_id_b"
 [ "$work_id_a" != "$work_id_b" ] || fail "Test 2 distinct" "same id"
 pass "Test 2 distinct frameworks"
 
-# Test 3: Complete + dirty (partial)
-echo "=== Test 3: Complete with dirty tree -> partial ==="
-# Create a temp git repo inside workspace to test git evidence
+# Test 3: Complete reaches a terminal status
+echo "=== Test 3: Complete -> done ==="
+# An unrelated repository exists at $GIT_TMP. It is deliberately NOT the
+# workspace and is never cd'd into: MPM must not derive a repository from
+# ambient state, so this repo must have no effect on the work item.
 GIT_TMP="$TMPDIR/gitrepo"
 mkdir -p "$GIT_TMP"
 (
@@ -98,9 +100,10 @@ mkdir -p "$GIT_TMP"
   git add README.md changelog.md
   git commit -qm "initial"
 )
-# Set MPM_WORKSPACE to still be $TMPDIR/.mpm, but git repo is $GIT_TMP
-# Our CaptureGitSnapshot tries MPM_WORKSPACE and cwd, so we need to test via direct DB
-# For now, test complete without git repo -> should be unverified or partial
+# MPM_WORKSPACE stays $TMPDIR/.mpm. No Git evidence is expected: nothing in
+# the work model names a repository, and an unrelated checkout must never be
+# attributed to it. See SPEC, "Git evidence requires an explicitly named
+# repository".
 export MPM_FRAMEWORK="claude-code"
 out=$(call_work "{\"action\":\"complete\",\"params\":{\"work_id\":\"$work_id_a\",\"note\":\"done\"}}")
 status=$(sqlite3 "$MPM_WORKSPACE/src/db/mpm.db" "SELECT status FROM works WHERE id='$work_id_a';")
