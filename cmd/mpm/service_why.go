@@ -95,6 +95,10 @@ type EvidenceRow struct {
 	CreatedAt  time.Time
 	Notes      string
 	SourceGroup string
+	// ReferenceURL is the explicit, user-supplied external reference for
+	// this evidence, or "" when none was supplied. Rendered verbatim and
+	// truncated; see renderer_why.go for why that is safe.
+	ReferenceURL string
 }
 
 // ConfidenceRow is one confidence-altering event. Output shape from
@@ -593,6 +597,7 @@ func (s *WhyService) loadEvidence(id, kind string) ([]EvidenceRow, int, error) {
 			CreatedBy:   stringOf(m["created_by"]),
 			SourceGroup: stringOf(m["source_group"]),
 			Notes:       stringOf(m["notes"]),
+			ReferenceURL: stringOf(m["reference_url"]),
 		}
 		if v, ok := m["created_at"].(int64); ok {
 			row.CreatedAt = time.Unix(v, 0).UTC()

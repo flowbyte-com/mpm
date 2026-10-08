@@ -2899,6 +2899,7 @@ func handleAddEvidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payl
 		CreatedBy:          getString(payload, "created_by"),
 		CreatedAt:          time.Now(),
 		Notes:              getString(payload, "notes"),
+		ReferenceURL:       getString(payload, "reference_url"),
 	})
 }
 

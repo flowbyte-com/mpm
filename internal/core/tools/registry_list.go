@@ -188,7 +188,7 @@ Do not use when: you just want to store a single fact (mpm_memory save); you nee
 		Name: "mpm_references",
 		Description: `Ingested external documents: PDFs, specs, whitepapers, books.
 Use when: you read an external document and want to make its contents searchable via the MPM query surface. References are indexed and queryable; use read to retrieve a single doc by id, search to query chunks, or list to enumerate.
-Do not use when: the document is ephemeral or you just want to save a URL to visit later (mpm_memory save).`,
+Do not use when: the document is ephemeral, or you only want to record a URL for later — use mpm_evidence action=add with reference_url, which stores the pointer durably on the evidence row (MPM never fetches it).`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -230,7 +230,8 @@ Do not use when: you are storing raw facts without evidentiary context (mpm_memo
 						"strength":           {"type": "number"},
 						"independence_factor": {"type": "number"},
 						"created_by":         {"type": "string"},
-						"notes":              {"type": "string"}
+						"notes":              {"type": "string"},
+						"reference_url": {"type": "string", "description": "Optional explicit external reference identifying where this evidence came from. User-supplied reference metadata: MPM stores and returns it verbatim and does NOT fetch, resolve, or verify it. Must be an absolute http/https URL. Omit when there is no external reference. A reference identifies a source; it is not evidence that the source is correct, and it does not affect strength, confidence, or verification."}
 					},
 					"additionalProperties": true
 				}

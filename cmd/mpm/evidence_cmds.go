@@ -36,14 +36,20 @@ func parseEvidenceAddArgs(args []string) (map[string]interface{}, error) {
 	createdBy := fs.String("by", "", "creator (required)")
 	notes := fs.String("note", "", "optional notes")
 	notesAlias := fs.String("notes", "", "deprecated alias for --note")
+	// reference_url is an OPTIONAL, explicitly user-supplied external
+	// reference for this evidence: where the claim came from. It is stored
+	// and returned verbatim; MPM never fetches, resolves, or verifies it,
+	// and it does not affect strength, confidence, or verification.
+	referenceURL := fs.String("reference-url", "", "optional explicit external reference URL (absolute http/https); stored as-is, never fetched or verified")
 	fs.Usage = func() {
-		fmt.Println("Usage: mpm evidence add --artifact <id> --type <t> --source <s> --by <c> [--artifact-type <kind>] [--note <text>]")
+		fmt.Println("Usage: mpm evidence add --artifact <id> --type <t> --source <s> --by <c> [--artifact-type <kind>] [--note <text>] [--reference-url <url>]")
 		fmt.Println()
 		fmt.Println("Flags:")
 		fs.PrintDefaults()
 		fmt.Println()
 		fmt.Println("Note: --notes (plural) is a deprecated alias for --note.")
 		fmt.Println("Note: --artifact-type defaults to auto-resolve from --artifact.")
+		fmt.Println("Note: --reference-url records an explicit external reference. It is never fetched or verified, and does not affect confidence.")
 	}
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -68,6 +74,14 @@ func parseEvidenceAddArgs(args []string) (map[string]interface{}, error) {
 	}
 	if *createdBy == "" {
 		return nil, fmt.Errorf("--by is required")
+	}
+	// Reject a malformed reference URL at the parser boundary, before any
+	// DB work, so the operator gets a flag-scoped message instead of a
+	// generic add-evidence failure. AddEvidence validates it again — this
+	// is the same belt-and-braces shape as the --type check above, not a
+	// second source of truth.
+	if _, err := mpminternal.ValidateReferenceURL(*referenceURL); err != nil {
+		return nil, fmt.Errorf("--reference-url: %w", err)
 	}
 	var s float64
 	if *strength == "" {
@@ -99,6 +113,10 @@ func parseEvidenceAddArgs(args []string) (map[string]interface{}, error) {
 		"independence_factor": ind,
 		"created_by":          *createdBy,
 		"notes":               *notes,
+		// Empty string means "no external reference supplied". AddEvidence
+		// validates it; a rejected URL fails the whole call, so no partial
+		// evidence row is left behind.
+		"reference_url": *referenceURL,
 	}, nil
 }
 
@@ -149,6 +167,7 @@ func handleEvidenceAdd(args []string) int {
 		IndependenceFactor: payload["independence_factor"].(float64),
 		CreatedBy:          payload["created_by"].(string),
 		Notes:              payload["notes"].(string),
+		ReferenceURL:       payload["reference_url"].(string),
 	}
 	if err := mpminternal.AddEvidence(dm, in); err != nil {
 		printError("add evidence: %v", err)

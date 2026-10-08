@@ -202,6 +202,13 @@ func (r *WhyRenderer) renderEvidence(rows []EvidenceRow) {
 		if row.Notes != "" {
 			fmt.Fprintf(r.out, "    notes:  %s\n", truncateForWhy(row.Notes, 80))
 		}
+		if row.ReferenceURL != "" {
+			// Safe to emit because url.Parse — which every stored
+			// reference passed through ValidateReferenceURL before the
+			// row could be written — rejects ASCII control characters.
+			// Truncated for the same reason notes are.
+			fmt.Fprintf(r.out, "    ref:    %s\n", truncateForWhy(row.ReferenceURL, 80))
+		}
 	}
 	if len(rows) > maxRows {
 		fmt.Fprintf(r.out, "  ... and %d more (use 'mpm call mpm_evidence --payload '{\"action\":\"list\",...}' for full list)\n",
