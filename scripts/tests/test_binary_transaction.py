@@ -656,6 +656,47 @@ class TestSignalCleanup(TransactionBase):
                       "the prefix")
         self.assertIn("_bt_tx_signal", src)
 
+    def test_caller_signal_handlers_are_restored(self):
+        """The library must not clobber the calling shell's own handlers.
+
+        A sourced library that installs traps has to put back whatever the
+        caller had, or sourcing it silently changes how the installer behaves
+        on Ctrl-C. Restoration is reached from more than one exit path, so it
+        has to be idempotent: a second pass would reset the already-restored
+        shell and drop the caller's handler entirely.
+        """
+        for label, fail_after in (("success", None), ("failure", "2")):
+            with self.subTest(path=label):
+                driver = self._tmp / f"drive-traps-{label}.sh"
+                env_line = (
+                    f'MPM_INSTALL_TEST_FAIL_AFTER={fail_after} '
+                    if fail_after else ""
+                )
+                driver.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "set -uo pipefail\n"
+                    "trap 'echo CALLER_HANDLER' INT\n"
+                    "trap 'echo CALLER_HANDLER' TERM\n"
+                    f". {LIB}\n"
+                    f"{env_line}mpm_promote_binaries \"{self.build}\" \"{self.bindir}\" >/dev/null 2>&1\n"
+                    "echo '---INT---'\n"
+                    "trap -p INT\n"
+                    "echo '---TERM---'\n"
+                    "trap -p TERM\n"
+                )
+                driver.chmod(0o755)
+                r = subprocess.run(
+                    ["bash", "--noprofile", "--norc", str(driver)],
+                    capture_output=True, text=True,
+                    env={**os.environ, "HOME": str(self.home)},
+                )
+                for sig in ("INT", "TERM"):
+                    self.assertIn(
+                        "CALLER_HANDLER", r.stdout.split(f"---{sig}---")[-1],
+                        f"{label} path: the caller's {sig} handler was not "
+                        f"restored after the transaction; stdout={r.stdout}",
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

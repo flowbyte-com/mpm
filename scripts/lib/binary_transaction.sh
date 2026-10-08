@@ -205,18 +205,29 @@ _BT_TX_ACTIVE=0
 _BT_TX_COMMITTED=0
 _bt_tx_prev_int=""
 _bt_tx_prev_term=""
+_bt_tx_traps_restored=1
 _bt_tx_bin_dir=""
 _bt_tx_rollback_dir=""
 _bt_tx_stage_dir=""
 _bt_tx_binaries=()
 
 # Re-arm whatever the caller had installed before this transaction ran.
+#
+# Called on more than one exit path (commit, and again from the wrapper for
+# every failure path), so it must be IDEMPOTENT: the first call performs the
+# restore and remembers that it did, and later calls are no-ops. Without that,
+# the second call would re-run `trap - INT TERM` against an already-restored
+# shell and silently discard the caller's own handlers.
 _bt_tx_restore_traps() {
+    if [ "${_bt_tx_traps_restored:-0}" -eq 1 ]; then
+        return 0
+    fi
     trap - INT TERM 2>/dev/null || true
-    [ -n "$_bt_tx_prev_int" ] && eval "$_bt_tx_prev_int"
-    [ -n "$_bt_tx_prev_term" ] && eval "$_bt_tx_prev_term"
+    if [ -n "$_bt_tx_prev_int" ]; then eval "$_bt_tx_prev_int"; fi
+    if [ -n "$_bt_tx_prev_term" ]; then eval "$_bt_tx_prev_term"; fi
     _bt_tx_prev_int=""
     _bt_tx_prev_term=""
+    _bt_tx_traps_restored=1
 }
 
 _bt_tx_signal() {
@@ -422,6 +433,7 @@ _bt_promote_transaction() {
     # a mixed state that must not be abandoned.
     _bt_tx_prev_int="$(trap -p INT 2>/dev/null || true)"
     _bt_tx_prev_term="$(trap -p TERM 2>/dev/null || true)"
+    _bt_tx_traps_restored=0
     _bt_tx_bin_dir="$bin_dir"
     _bt_tx_rollback_dir="$rollback_dir"
     _bt_tx_stage_dir="$stage_dir"
