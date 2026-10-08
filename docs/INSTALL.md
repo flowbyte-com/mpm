@@ -574,6 +574,14 @@ same bytes, same mode, same ownership for every binary. On a first install,
 where no previous binary exists, any newly created binary is removed instead,
 so a failed first install does not leave a false complete installation.
 
+An interrupted promotion counts as a pre-commit failure. `SIGINT` and
+`SIGTERM` arriving between the first backup rename and the commit point
+trigger the same rollback, so Ctrl-C mid-install does not leave a partial
+release; the installer then exits 130 or 143. `SIGKILL` cannot be trapped, so
+after one the prefix may hold a partial set — the preserved rollback directory
+remains the recovery material in that case. The installer restores any signal
+handlers it displaced, so this does not change how your own shell behaves.
+
 Two consequences worth knowing:
 
 - A missing, unreadable, or non-executable candidate aborts the whole
