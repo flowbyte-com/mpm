@@ -218,6 +218,16 @@ var validTableNames = map[string]bool{
 	// would otherwise reject the SafeMigrations list and break init.
 	"tool_invocations": true,
 	"system_audit_log": true,
+	// REFERENCE URL (2026-10-08): allowlisted for the SafeMigration
+	// entry that adds evidence.reference_url.
+	//
+	// The table-name check in addColumnIfNotExists runs BEFORE the
+	// PRAGMA that would discover the column already exists, so a
+	// SafeMigrations entry for an unlisted table hard-fails every
+	// standalone MemoryStore.InitSQLite caller — not just the
+	// case where the ALTER is actually needed. Same failure mode the
+	// observability entries above hit before.
+	"evidence": true,
 }
 
 // addColumnIfNotExists adds a column to a table if it doesn't already exist.
