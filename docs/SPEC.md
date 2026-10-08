@@ -260,7 +260,7 @@ All seven default operational surfaces exclude archived work: `mpm wake` open wo
 
 #### Reference
 
-External material ingested for the agent to consult — documentation, specs, articles, code. Reference artifacts are distinct from Memory: Memory is what the agent synthesises internally; Reference is what the agent can look up. References are stored with their source URL, section markers, and ingestion timestamp, and are searchable via the same FTS5 index as memories.
+External material ingested for the agent to consult — documentation, specs, articles, code. Reference artifacts are distinct from Memory: Memory is what the agent synthesises internally; Reference is what the agent can look up. References are ingested from a local file path and are stored with their section markers and ingestion timestamp, searchable via the same FTS5 index as memories. MPM does not fetch URLs: `mpm reference add --url` is a reserved, explicitly-rejected stub. When an ingested document needs a durable pointer back to where it came from, that pointer is an `evidence` row carrying a `reference_url` (§4.2).
 
 #### Lesson
 
@@ -458,6 +458,8 @@ Notice what never happens. The original memory is never edited. Only confidence 
 The cognitive sequence above shows how artifacts come into being. The relationship below shows how their truth gets refined over time. The two are different things; conflating them is what made the earlier single-diagram view misleading.
 
 **`source_group` vocabulary (validated at write time).** Every evidence write (`mpm_evidence action=add`, `mpm evidence add`) validates `source_group` against the same registry the work verifier classifies with. Accepted values: outcome sources `filesystem`, `test`, `api_response`, `manual_review`; audit sources `git`, `ci`, `external`; action sources `tool_invocation`, `api_call`, `process`. Unknown values are rejected with an error enumerating the accepted set (discoverable via `mpm_evidence action=source_groups`) and leave no partial state. This closes the failure mode where unrecognized source groups were stored, silently ignored by the verifier, and permanently capped verification.
+
+**`reference_url` (optional, evidence rows only).** Every evidence row may carry a `reference_url`: an absolute `http`/`https` URL of at most 2048 characters, supplied by hand, answering one question — *what external reference did this claim come from?* MPM stores and returns it **verbatim** — no normalization, no query or fragment stripping, no parameter reordering — and **never fetches, resolves, redirects, verifies, or endorses it**. A stored reference is a claim by the author that the document exists and is relevant; it is not evidence that MPM checked, and not an assertion that the document is correct. Accepted on `mpm_evidence action=add` and `mpm evidence add --reference-url`; omitting it is the common case and is always valid. A malformed or non-`http`/`https` value is rejected with an error naming the accepted set and leaves no partial state. **It carries no evidentiary weight:** it is not read by the confidence formula, does not affect a `source_group`'s outcome/audit/action class, and cannot move a work's derived verification. An evidence row with a URL and an otherwise identical row without one derive identical confidence. It is also scanned by the same secret/poison scanner as every other user-supplied evidence field, since a URL query string is a common place for a credential to leak.
 
 
 A piece of evidence can support or challenge **any** artifact — memory, decision, or theory — not just the most recently created one. The artifacts that have evidence attached accumulate that evidence over time. Decay reduces confidence over time. Retrieval surfaces artifacts; new observations restart the cycle.
@@ -1056,7 +1058,7 @@ The Confidence Engine computes and tracks the system's belief in each artifact. 
 | `reproduction` | 0.85 | Independently reproduced result |
 | `challenge` | −0.6 | Evidence against an artifact |
 | `decision_outcome` | 0.95 | Outcome of a recorded decision |
-| `external_reference` | 0.6 | Cited source from outside the agent |
+| `external_reference` | 0.6 | Cited source from outside the agent, named by the row's `reference_url` |
 
 Override the default with `--strength`. Artifact types are a strict enum — the LLM cannot invent categories.
 
@@ -1843,7 +1845,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`directives`** — Show behavioral directives
 - **`doctor`** — Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)
 - **`drills`** — Behavioural drill execution + compatibility matrix (list|show|run|report)
-- **`evidence`** — Manage evidence (add|list) — confidence foundation
+- **`evidence`** — Manage evidence (add|list) — confidence foundation; `add` accepts `--reference-url`
 - **`export`** — Export memories to JSON
 - **`gc`** — Run decay sweep (--dry-run, --review, --purge)
 - **`handoff`** — Manage handoffs (write|read|list|shred)
