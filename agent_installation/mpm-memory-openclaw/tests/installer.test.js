@@ -69,7 +69,21 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ADAPTER_DIR = path.join(__dirname, "..");
+
+// The legacy id's canonical former location under the source/runtime
+// split. It is the runtime tree, NOT a sibling of the checkout: under
+// the split the runtime root is no longer the checkout, so an install
+// record left by the legacy id lives under <runtime-root>/. Naming a
+// source sibling here would describe a pre-split install, which the
+// installer is right to treat as foreign.
+function legacyFormerPath(homeDir) {
+  return path.join(homeDir, ".mpm", "agent_installation", "openclaw-mpm-memory");
+}
 const INSTALL_SH = path.join(ADAPTER_DIR, "install.sh");
+// Runtime identity of the plugin. Matches index.js's PLUGIN_ID and the
+// id in openclaw.plugin.json; the directory name the installer stages
+// its runtime package under.
+const PLUGIN_ID = "mpm-memory-openclaw";
 
 // --------------------------------------------------------------------------
 // Hermetic scaffolding
@@ -756,7 +770,15 @@ function runInstaller({
   mpmBootstrapUrl = "",
   cwd = SANDBOX_ROOT,
   pluginState = "absent",
-  linkPath = ADAPTER_DIR,
+  // Default resolved inside the driver to the RUNTIME PACKAGE the
+  // installer provisions under the sandbox HOME, not ADAPTER_DIR.
+  //
+  // The adapter no longer links its source directory: it stages a
+  // validated package at <runtime-root>/agent_installation/<plugin-id>
+  // and links that. A fake `plugins inspect` that reports the checkout
+  // as rootDir therefore describes an install this adapter did not make,
+  // and the preflight correctly classifies it as a conflict.
+  linkPath = null,
   conflictPath = "/opt/unrelated/mpm-memory-openclaw",
   // Legacy plugin-id simulation (2026-09-17 namespace migration).
   // absent    — no legacy state at all.
@@ -774,7 +796,7 @@ function runInstaller({
   // registry_only — registry has the legacy install record;
   //                inspect unavailable; config keys may be sparse.
   legacyState = "absent",
-  legacyLinkPath = path.join(path.dirname(ADAPTER_DIR), "openclaw-mpm-memory"),
+  legacyLinkPath = legacyFormerPath(homeDir),
   legacyConflictPath = "/opt/unrelated/openclaw-mpm-memory",
   legacyConfigPresent = false,
   legacyRegistryPresent = false,
@@ -793,6 +815,9 @@ function runInstaller({
   // We point PATH at the fake bin dirs and HOME at the sandbox so the
   // canonical paths under $HOME resolve there. OPENCLAW_INVOCATIONS is
   // forwarded so the fake-openclaw records to the test's assertion file.
+  if (linkPath === null) {
+    linkPath = path.join(homeDir, ".mpm", "agent_installation", PLUGIN_ID);
+  }
   const env = {
     ...process.env,
     PATH: `${FAKE_OPENCLAW_BINDIR}:${FAKE_MPM_PRIMARY}:${FAKE_MPM_SYMLINK_DIR}:/usr/bin:/bin`,
@@ -1374,6 +1399,7 @@ test("idempotent rerun: a correctly-linked-from-here plugin is NOT re-installed"
   // already-correct state must be a true no-op for the install step
   // (no trust-warning noise, no installedAt timestamp bump).
   const home = freshHomeDir("idempotent-noinstall");
+  installCanonicalMpmAt(home);
   clearInvocations();
   clearFakeUninstalledFlag();
   const r1 = await runInstaller({ homeDir: home, pluginState: "absent" });
@@ -1385,7 +1411,9 @@ test("idempotent rerun: a correctly-linked-from-here plugin is NOT re-installed"
   const r2 = await runInstaller({
     homeDir: home,
     pluginState: "linked",
-    linkPath: ADAPTER_DIR,
+    // Runtime package under the sandbox HOME; the adapter links that,
+    // not its own source directory. See runInstaller's linkPath default.
+    linkPath: null,
   });
   assert.strictEqual(r2.code, 0, `second run non-zero: ${r2.stderr}`);
   const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
@@ -1497,12 +1525,15 @@ test("idempotent rerun still writes both hook flags and absolute mpmBin", async 
   // that a fresh OpenClaw config (no plugins.entries.<id>.config) is
   // re-seeded.
   const home = freshHomeDir("idempotent-config");
+  installCanonicalMpmAt(home);
   clearInvocations();
   clearFakeUninstalledFlag();
   const { code, stderr } = await runInstaller({
     homeDir: home,
     pluginState: "linked",
-    linkPath: ADAPTER_DIR,
+    // Runtime package under the sandbox HOME; the adapter links that,
+    // not its own source directory. See runInstaller's linkPath default.
+    linkPath: null,
   });
   assert.strictEqual(code, 0, `installer exited non-zero: ${stderr}`);
   const log = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
@@ -1693,9 +1724,10 @@ test("legacy id absent: no migration action (sanity for the new states)", async 
 
 test("legacy linked install from old canonical path, old path still present → migrate (linked)", async () => {
   const home = freshHomeDir("legacy-linked");
+  installCanonicalMpmAt(home);
   clearInvocations();
   clearFakeUninstalledFlag();
-  const canonicalFormer = path.join(path.dirname(ADAPTER_DIR), "openclaw-mpm-memory");
+  const canonicalFormer = legacyFormerPath(home);
   const { code, stderr } = await runInstaller({
     homeDir: home,
     pluginState: "absent",
@@ -1743,9 +1775,10 @@ test("legacy linked install from old canonical path, old path MISSING (the real 
   // behind. The new ownership algorithm recognises the legacy install
   // via registry + config evidence and migrates.
   const home = freshHomeDir("legacy-vanished");
+  installCanonicalMpmAt(home);
   clearInvocations();
   clearFakeUninstalledFlag();
-  const canonicalFormer = path.join(path.dirname(ADAPTER_DIR), "openclaw-mpm-memory");
+  const canonicalFormer = legacyFormerPath(home);
   const { code, stderr } = await runInstaller({
     homeDir: home,
     pluginState: "absent",
@@ -1921,9 +1954,10 @@ test("legacy registry-only state (registry has install record, no config) → mi
   // ownership via the registry record and proceed (no config keys to
   // migrate, but the legacy id must still be uninstalled).
   const home = freshHomeDir("legacy-registry-only");
+  installCanonicalMpmAt(home);
   clearInvocations();
   clearFakeUninstalledFlag();
-  const canonicalFormer = path.join(path.dirname(ADAPTER_DIR), "openclaw-mpm-memory");
+  const canonicalFormer = legacyFormerPath(home);
   const { code, stderr } = await runInstaller({
     homeDir: home,
     pluginState: "absent",
@@ -2240,6 +2274,7 @@ test("F) restart command non-zero AND gateway down; installer reports FAILED and
 // the convergence-before-restart ordering.
 test("G) idempotent rerun: no duplicate registrations; convergence-then-restart ordering preserved", async () => {
   const home = freshHomeDir("lifecycle-idempotent");
+  installCanonicalMpmAt(home);
   clearInvocations();
   clearFakeUninstalledFlag();
   const r1 = await runInstaller({ homeDir: home });
@@ -2256,7 +2291,9 @@ test("G) idempotent rerun: no duplicate registrations; convergence-then-restart 
   const r2 = await runInstaller({
     homeDir: home,
     pluginState: "linked",
-    linkPath: ADAPTER_DIR,
+    // Runtime package under the sandbox HOME; the adapter links that,
+    // not its own source directory. See runInstaller's linkPath default.
+    linkPath: null,
   });
   assert.strictEqual(r2.code, 0, `second run failed: ${r2.stderr}`);
   const secondLog = readFileSync(OPENCLAW_INVOCATIONS, "utf8");
