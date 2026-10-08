@@ -81,7 +81,7 @@ func EvidenceTypeHelp() string {
 		"reproduction":       "designated verifier — independent reproduction of the outcome",
 		"challenge":          "negative evidence — flags the artifact as contradicted; moves verified → contradicted",
 		"decision_outcome":   "designated verifier — observed downstream outcome of a decision",
-		"external_reference": "pointer to an external document / API response (moderate weight)",
+		"external_reference": "pointer to an external document / API response, named by the row's reference_url (moderate weight)",
 	}
 	out := "Evidence types:\n"
 	for _, e := range AllEvidenceTypes() {

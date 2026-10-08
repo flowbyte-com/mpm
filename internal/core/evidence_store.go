@@ -43,16 +43,34 @@ const (
 func addEvidenceInTx(node DBNode, id string, in EvidenceInput, expiresAt *int64) error {
 	if _, err := node.ExecTracked(`
 		INSERT INTO evidence (id, artifact_id, artifact_type, type, source_group,
-		                     strength, independence_factor, created_by, created_at, expires_at, notes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                     strength, independence_factor, created_by, created_at, expires_at, notes,
+		                     reference_url)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, 0, id, in.ArtifactID, in.ArtifactType, in.Type, in.SourceGroup,
-		in.Strength, in.IndependenceFactor, in.CreatedBy, in.CreatedAt.Unix(), expiresAt, in.Notes); err != nil {
+		in.Strength, in.IndependenceFactor, in.CreatedBy, in.CreatedAt.Unix(), expiresAt, in.Notes,
+		// Absent persists as SQL NULL rather than ''. ValidateReferenceURL
+		// guarantees a non-empty string always means "a reference was
+		// supplied", so NULL and '' are never ambiguous on the read side —
+		// and keeping the distinction in SQL lets a query ask
+		// "which evidence carries an external reference?" directly.
+		nullableReferenceURL(in.ReferenceURL)); err != nil {
 		return fmt.Errorf("insert evidence: %w", err)
 	}
 	if err := RecomputeConfidence(node, in.ArtifactID, in.ArtifactType, RecomputeReasonEvidenceAdded); err != nil {
 		return fmt.Errorf("recompute confidence: %w", err)
 	}
 	return nil
+}
+
+// nullableReferenceURL maps the absent (empty) reference URL to SQL NULL so
+// "no external reference was supplied" stays distinguishable in the database
+// from any stored value. Callers that build an EvidenceInput literal without
+// the field get NULL for free via the Go zero value.
+func nullableReferenceURL(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // EvidenceInput is the public shape for adding evidence. The DB wrapper
@@ -68,6 +86,15 @@ type EvidenceInput struct {
 	CreatedAt          time.Time
 	ExpiresAt          *time.Time
 	Notes              string
+	// ReferenceURL is an OPTIONAL, explicitly user-supplied external
+	// reference identifying where this evidence came from. Empty means no
+	// reference was supplied and stays valid — every pre-existing caller
+	// leaves it empty.
+	//
+	// It is metadata about a source, never proof about a claim: it does not
+	// affect strength, confidence, SourceGroupClass, or derived verification,
+	// and MPM never fetches or verifies it. See evidence_reference_url.go.
+	ReferenceURL string
 }
 
 // EvidenceSourceGroupClass is how DeriveWorkVerification classifies
@@ -160,6 +187,21 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	if in.CreatedBy == "" {
 		return fmt.Errorf("created_by required")
 	}
+	// Validate the explicit reference URL BEFORE any DB work, alongside the
+	// other acceptance checks, so a rejected value leaves zero partial state.
+	// ValidateReferenceURL returns the input verbatim (or "" when absent) —
+	// it never normalizes — so what was validated is exactly what is stored.
+	//
+	// reference_url participates in the scanner below for the same reason
+	// notes does: a URL query string (?api_key=…, #access_token=…, a signed
+	// S3 link) is a MORE common credential-smuggling vector than free text,
+	// so leaving it unscanned would be a net regression against the
+	// "every user field is scanned" invariant.
+	referenceURL, err := ValidateReferenceURL(in.ReferenceURL)
+	if err != nil {
+		return err
+	}
+	in.ReferenceURL = referenceURL
 	// Scan every user-supplied text field for secrets and poison phrases
 	// BEFORE any DB work. The `notes` field is the obvious target, but
 	// `SourceGroup` and `CreatedBy` can also smuggle content (the prior
@@ -176,6 +218,9 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	if isSensitive, reason := isSensitiveContent(in.CreatedBy); isSensitive {
 		return fmt.Errorf("sensitive content in evidence created_by: %s", reason)
 	}
+	if isSensitive, reason := isSensitiveContent(in.ReferenceURL); isSensitive {
+		return fmt.Errorf("sensitive content in evidence reference_url: %s", reason)
+	}
 	if isPoisoned, reason := dm.scanPoisoned(in.Notes); isPoisoned {
 		return fmt.Errorf("poison content in evidence notes: %s", reason)
 	}
@@ -184,6 +229,9 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	}
 	if isPoisoned, reason := dm.scanPoisoned(in.CreatedBy); isPoisoned {
 		return fmt.Errorf("poison content in evidence created_by: %s", reason)
+	}
+	if isPoisoned, reason := dm.scanPoisoned(in.ReferenceURL); isPoisoned {
+		return fmt.Errorf("poison content in evidence reference_url: %s", reason)
 	}
 	if !ValidEvidenceSourceGroup(in.SourceGroup) {
 		return fmt.Errorf(
@@ -779,6 +827,11 @@ type Evidence struct {
 	CreatedAt          time.Time
 	ExpiresAt          *time.Time
 	Notes              string
+	// ReferenceURL is the explicit, user-supplied external reference for
+	// this evidence, or "" when none was supplied. It is returned exactly as
+	// stored. The struct carries no JSON tags — fields serialize by Go name —
+	// so this field reaches MCP output, CLI JSON, and `mpm why` for free.
+	ReferenceURL string
 }
 
 // ListEvidenceForArtifact returns all non-expired evidence rows for an
@@ -786,7 +839,8 @@ type Evidence struct {
 func ListEvidenceForArtifact(dm *DatabaseManager, artifactID, artifactType string) ([]Evidence, error) {
 	rows, err := dm.QueryTracked(`
 		SELECT id, artifact_id, artifact_type, type, source_group,
-		       strength, independence_factor, created_by, created_at, expires_at, notes
+		       strength, independence_factor, created_by, created_at, expires_at, notes,
+		       reference_url
 		FROM evidence
 		WHERE artifact_id = ? AND artifact_type = ?
 		ORDER BY created_at ASC
@@ -808,9 +862,15 @@ func ListEvidenceForArtifact(dm *DatabaseManager, artifactID, artifactType strin
 		// substrate defense triad (rule #2), nullable scalar columns must
 		// bind to sql.NullString and be unwrapped at the Go boundary.
 		var notes sql.NullString
+		// reference_url is TEXT NULL for the same reason notes is.
+		var referenceURL sql.NullString
 		if err := rows.Scan(&e.ID, &e.ArtifactID, &e.ArtifactType, &e.Type, &e.SourceGroup,
-			&e.Strength, &e.IndependenceFactor, &e.CreatedBy, &createdAt, &expiresAt, &notes); err != nil {
+			&e.Strength, &e.IndependenceFactor, &e.CreatedBy, &createdAt, &expiresAt, &notes,
+			&referenceURL); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
+		}
+		if referenceURL.Valid {
+			e.ReferenceURL = referenceURL.String
 		}
 		if notes.Valid {
 			e.Notes = notes.String
@@ -846,7 +906,8 @@ func ListEvidenceForArtifact(dm *DatabaseManager, artifactID, artifactType strin
 func ListEvidence(dm *DatabaseManager) ([]Evidence, error) {
 	rows, err := dm.QueryTracked(`
 		SELECT id, artifact_id, artifact_type, type, source_group,
-		       strength, independence_factor, created_by, created_at, expires_at, notes
+		       strength, independence_factor, created_by, created_at, expires_at, notes,
+		       reference_url
 		FROM evidence
 		ORDER BY created_at DESC
 	`)
@@ -862,9 +923,14 @@ func ListEvidence(dm *DatabaseManager) ([]Evidence, error) {
 		var createdAt int64
 		var expiresAt sql.NullInt64
 		var notes sql.NullString
+		var referenceURL sql.NullString
 		if err := rows.Scan(&e.ID, &e.ArtifactID, &e.ArtifactType, &e.Type, &e.SourceGroup,
-			&e.Strength, &e.IndependenceFactor, &e.CreatedBy, &createdAt, &expiresAt, &notes); err != nil {
+			&e.Strength, &e.IndependenceFactor, &e.CreatedBy, &createdAt, &expiresAt, &notes,
+			&referenceURL); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
+		}
+		if referenceURL.Valid {
+			e.ReferenceURL = referenceURL.String
 		}
 		if notes.Valid {
 			e.Notes = notes.String

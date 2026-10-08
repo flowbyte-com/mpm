@@ -305,6 +305,15 @@ func TestAddEvidence_ScrubsAllUserFields(t *testing.T) {
 			},
 			errContains: "created_by",
 		},
+		{
+			// A URL query string is a more common credential-smuggling
+			// vector than free text, so reference_url is scanned too.
+			name: "reference_url",
+			mutate: func(in *EvidenceInput) {
+				in.ReferenceURL = "https://api.example.com/v1?api_key=sk-abcdefghijklmnopqrstuv"
+			},
+			errContains: "reference_url",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

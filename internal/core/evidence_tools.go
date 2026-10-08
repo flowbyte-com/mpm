@@ -134,7 +134,8 @@ func (dm *DatabaseManager) ListEvidence(artifactID, artifactType string) (map[st
 	// trail regardless of which wrote them.
 	rows, err := dm.QueryTracked(`
 		SELECT id, artifact_id, artifact_type, type, source_group, strength,
-		       independence_factor, created_by, created_at, expires_at, notes
+		       independence_factor, created_by, created_at, expires_at, notes,
+		       reference_url
 		FROM evidence
 		WHERE artifact_id = ?
 		  AND (artifact_type = ? OR artifact_type = 'memory')
@@ -149,10 +150,12 @@ func (dm *DatabaseManager) ListEvidence(artifactID, artifactType string) (map[st
 	for rows.Next() {
 		var id, aid, atype, t, src, by string
 		var notes sql.NullString
+		var referenceURL sql.NullString
 		var strength, ind float64
 		var createdAt int64
 		var expiresAt *int64
-		if err := rows.Scan(&id, &aid, &atype, &t, &src, &strength, &ind, &by, &createdAt, &expiresAt, &notes); err != nil {
+		if err := rows.Scan(&id, &aid, &atype, &t, &src, &strength, &ind, &by, &createdAt, &expiresAt, &notes,
+			&referenceURL); err != nil {
 			return nil, err
 		}
 		row := map[string]interface{}{
@@ -165,6 +168,14 @@ func (dm *DatabaseManager) ListEvidence(artifactID, artifactType string) (map[st
 			row["notes"] = notes.String
 		} else {
 			row["notes"] = ""
+		}
+		// Mirrors the `notes` shape: always present as a key, empty string
+		// when no reference was supplied. Present-but-empty keeps the MCP
+		// response shape stable for clients that branch on the key.
+		if referenceURL.Valid {
+			row["reference_url"] = referenceURL.String
+		} else {
+			row["reference_url"] = ""
 		}
 		if expiresAt != nil {
 			row["expires_at"] = *expiresAt
