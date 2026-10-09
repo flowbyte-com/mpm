@@ -8,7 +8,7 @@ into every OpenClaw session via OpenClaw's native hook API.
 
 | Surface | Mechanism | Status |
 |---------|-----------|--------|
-| `mpm_memory_search` / `mpm_memory_get` | Subprocess → `mpm call mpm_memory` | ✅ Works |
+| `mpm_memory_search` / `mpm_memory_get` | Persistent `mpm-mcp` child → MCP `tools/call`, falling back to `mpm call mpm_memory` | ✅ Works |
 | Wake context injection | `session_start` → `agent_turn_prepare` hooks | ✅ Implemented |
 | Provenance env vars | `resolve_exec_env` hook | ✅ Implemented |
 | `session_end` → work completion | Not implemented | ✅ Correct — intentional |
@@ -394,6 +394,10 @@ where the interactive shell PATH differed from the systemd unit's PATH.
 | MPM returns zero hits | `results: []`, `total: 0` — normal |
 | `mpm_memory_get` on non-virtual path | `{notFound:true, supportedPrefix:"mpm://memory/"}` |
 | `mpm_memory_get` for unknown id | `{notFound:true}` |
+| `mpm-mcp` missing / not executable | Falls back to `mpm call`; logs one warning naming the resolved path |
+| `mpm-mcp` crashes after healthy operation | Child reaped, one bounded lazy restart, then permanent fallback for the plugin lifecycle |
+| MCP request timeout | That call is retried over `mpm call`; the child stays up |
+| Malformed MCP response | Treated as a protocol error, in-flight requests fail, call falls back to `mpm call` |
 | Wake context fetch fails | Agent turn proceeds without wake context (graceful degradation) |
 
 No error throws into the agent turn — every surface has a fail-open path.
@@ -444,10 +448,65 @@ Agent-facing tool schemas accurately declare parameters already supported and va
 }
 ```
 
+> **On `activation.onStartup`.** The manifest sets
+> `activation.onStartup: false`. That field is **not** a tool-registration
+> gate — an A/B through OpenClaw's own `resolvePluginTools` yields the
+> same two tools with the flag both `false` and `true`. It only marks the
+> plugin as a startup sidecar in the manifest's startup-info view. Do not
+> "fix" it expecting tool availability to change.
+
+## Memory-read transport
+
+`mpm_memory_search` and `mpm_memory_get` reach MPM over one long-lived
+`mpm-mcp` child instead of launching an `mpm` process per call.
+
+    agent turn ──▶ mpm_memory_search ──▶ persistent mpm-mcp ──▶ mpm.db
+                                (started on the first read)
+
+**Why.** The per-call transport paid a full Go process launch on every
+memory read. Measured on a 60-call benchmark over a throwaway workspace:
+the subprocess path spent a 24.4 ms warm median, the persistent child
+1.5–2.0 ms. The structural result matters more than the milliseconds:
+60 reads now launch **0** `mpm` processes and exactly **1** `mpm-mcp`
+child, instead of 60 `mpm` processes.
+
+**When the child starts.** Lazily, on the first routed read — not at
+register time. The original roadmap said "spawn at plugin register time";
+that is not safe under current OpenClaw, and correctness outranks the
+old wording. `register()` also runs for `openclaw plugins list`,
+`inspect` and `doctor`, and in modes where the plugin runtime is
+deliberately unavailable, so a register-time spawn would leak one child
+per inspection command. The child is owned by the plugin instance and
+reaped through `api.registerRuntimeLifecycle`'s `cleanup`, which fires on
+gateway shutdown and on plugin reload.
+
+**Reads only.** `mpm-mcp` reads its provenance and active-context
+environment once, at startup. That is harmless for a query and wrong for
+a write, so only `mpm_memory`, `mpm_context` and `mpm_system` are routed
+(Memory read-routing, `lib/memory-transport.js`). Anything else stays on
+`mpm call`. The boot health check also stays on `mpm call`, because it
+runs inside `register()` and would defeat the lazy start.
+
+**Which binary.** `mpm-mcp` is derived as the sibling of the configured
+`mpmBin` — the installation contract places both in the same `bin/`
+directory. There is no PATH search for the sibling, and a path pointing
+into a source checkout's `.build/bin` is rejected. A custom runtime
+prefix (`/opt/mpm/bin/mpm`) resolves to `/opt/mpm/bin/mpm-mcp`.
+
+**Fallback.** Every memory read degrades to the canonical `mpm call`
+subprocess rather than erroring, so a missing or crashing `mpm-mcp`
+behaves like today's plugin:
+
+- a *request* timeout leaves the child alone and retries that one call
+- a *fatal* failure tears the child down and grants one restart; after
+  that the fast path stays off for the rest of the plugin lifecycle, so
+  a permanently broken `mpm-mcp` cannot become a spawn-per-call loop
+- the MCP surface spills results over 20 KB to a blob pointer; because
+  that would change the tool's visible output shape, such a call is
+  re-served by the subprocess, which has no such policy
+
 ## Roadmap
 
-- **mcp fast-path:** Spawn `mpm-mcp` once at plugin register time, route
-  calls over MCP `tools/call` instead of per-call `mpm call` subprocess.
 - **score fusion:** Combine MPM bm25 + reinforcement into a hybrid score.
 - **mpm_memory_get by content:** Allow `path: "?query=foo bar"` for ad-hoc reads.
 
