@@ -93,6 +93,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { withWorkspace } from "./lib/workspace.js";
+import { createMemoryTransport, resolveMcpBin } from "./lib/memory-transport.js";
 
 const MP_MEMORY_PATH_PREFIX = "mpm://memory/";
 const PLUGIN_ID = "mpm-memory-openclaw";
@@ -404,6 +405,55 @@ export default definePluginEntry({
       log.debug(
         `mpm-memory-openclaw: registered ` +
         `(mpmBin=${mpmBin}, scope=${scope}, timeout=${timeoutMs}ms, limit=${limitDefault})`
+      );
+    }
+
+    // ------------------------------------------------------------------
+    // Persistent mpm-mcp transport
+    // ------------------------------------------------------------------
+    // One long-lived `mpm-mcp` child replaces the per-call `mpm call`
+    // subprocess on the memory-read hot path. The child starts LAZILY on
+    // the first routed read, never here: register() also runs for
+    // `openclaw plugins list / inspect / doctor` and in modes where the
+    // runtime is deliberately unavailable, so spawning here would leak a
+    // child per inspection command.
+    //
+    // Only the memory reads route through it. The boot health check and
+    // the per-session wake-context fetch stay on the subprocess: the
+    // health check runs inside register(), and routing it would defeat
+    // the lazy start above.
+    const mcpBin = resolveMcpBin(mpmBin);
+    const transport = createMemoryTransport({
+      mpmBin,
+      mcpBin,
+      timeoutMs,
+      log,
+      callMpmTool,
+      env: withWorkspace({ ...process.env, MPM_LOG_FORMAT: "json" }),
+    });
+
+    try {
+      api.registerRuntimeLifecycle?.({
+        id: "mpm-mcp-transport",
+        // Reaps the child on gateway shutdown AND on plugin reload, so
+        // neither accumulates mpm-mcp processes.
+        cleanup: async () => {
+          await transport.close();
+        },
+      });
+    } catch (e) {
+      // Unavailable in registration modes that expose a stub api. The
+      // transport is still safe there — it simply never starts, and any
+      // leak is bounded by process exit closing the stdio pipes.
+      if (typeof log.debug === "function") {
+        log.debug(`mpm-memory-openclaw: runtime lifecycle registration failed — ${e.message}`);
+      }
+    }
+
+    if (typeof log.debug === "function") {
+      log.debug(
+        `mpm-memory-openclaw: memory transport ` +
+        `${mcpBin ? `persistent mpm-mcp (${mcpBin})` : "subprocess only (mpm-mcp not resolvable)"}`
       );
     }
 
@@ -872,7 +922,7 @@ export default definePluginEntry({
     // Tools: memory_search + memory_get
     // ------------------------------------------------------------------
 
-    const callMpm = (tool, payload) => callMpmTool(tool, payload, { mpmBin, timeoutMs });
+    const callMpm = (tool, payload) => transport.call(tool, payload);
 
     api.registerTool(
       () => ({

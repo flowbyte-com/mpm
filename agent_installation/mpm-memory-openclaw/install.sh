@@ -136,6 +136,8 @@ RUNTIME_PACKAGE_MANIFEST=(
   README.md
   .mcp.json
   lib/workspace.js
+  lib/mcp-client.js
+  lib/memory-transport.js
 )
 
 PLUGIN_PKG_DIR=""
