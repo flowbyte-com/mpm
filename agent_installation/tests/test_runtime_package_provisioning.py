@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -50,6 +51,8 @@ OPENCLAW_PLUGINS: dict[str, tuple[Path, list[str]]] = {
             "README.md",
             ".mcp.json",
             "lib/workspace.js",
+            "lib/mcp-client.js",
+            "lib/memory-transport.js",
         ],
     ),
     "mpm-auto-mode-persona-openclaw": (
@@ -96,6 +99,38 @@ class StagingHarness(unittest.TestCase):
     def stage(self, plugin_id: str) -> subprocess.CompletedProcess:
         src, manifest = OPENCLAW_PLUGINS[plugin_id]
         return run_stage(src, self.runtime, plugin_id, manifest)
+
+
+class TestManifestMatchesInstaller(unittest.TestCase):
+    """The fixture manifest must not drift from what the installer stages.
+
+    OPENCLAW_PLUGINS above is a hand-copied mirror of each plugin's
+    RUNTIME_PACKAGE_MANIFEST in its install.sh. Nothing enforced that,
+    so adding a runtime file to the installer alone left the real
+    installer correct and every staging test failing on an unresolved
+    import — the JS suite stayed green and only the Go gate caught it.
+    """
+
+    def test_fixture_manifest_matches_installer_manifest(self) -> None:
+        for plugin_id, (src, manifest) in OPENCLAW_PLUGINS.items():
+            with self.subTest(plugin=plugin_id):
+                install_sh = (src / "install.sh").read_text(encoding="utf-8")
+                block = re.search(
+                    r"RUNTIME_PACKAGE_MANIFEST=\(\s*(.*?)\n\)", install_sh, re.S
+                )
+                self.assertIsNotNone(
+                    block, f"{plugin_id}/install.sh has no RUNTIME_PACKAGE_MANIFEST"
+                )
+                declared = [
+                    line.strip()
+                    for line in block.group(1).splitlines()
+                    if line.strip()
+                ]
+                self.assertEqual(
+                    sorted(declared),
+                    sorted(manifest),
+                    f"{plugin_id}: test manifest is out of sync with install.sh",
+                )
 
 
 class TestRuntimeRootDerivation(StagingHarness):
