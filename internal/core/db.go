@@ -15,7 +15,6 @@ import (
 	"log/slog"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -4788,140 +4787,6 @@ func jsonMarshal(v interface{}) ([]byte, error) {
 	return json.Marshal(v)
 }
 
-// GitSnapshot captures the observable repository state at event creation.
-// Best-effort: if git is not available or not a repo, all fields are empty/false.
-type GitSnapshot struct {
-	HeadBefore   string
-	HeadAfter    string
-	DirtyBefore  bool
-	DirtyAfter   bool
-	ChangedFiles []string
-	Committed    bool
-}
-
-// CaptureGitSnapshot runs git commands to capture repository state.
-//
-// dir must name the repository whose state is evidence for the event. There
-// is NO discovery chain: no workspace fallback, no cwd fallback, no parent
-// walk, and no assumption that the MPM source checkout is the repository
-// the work belongs to. An empty dir yields an empty GitSnapshot.
-//
-// # Why the chain was removed
-//
-// This function used to try `dir`, then the MPM workspace, then the process
-// cwd, and return the first that happened to be inside a Git worktree. With
-// `dir == ""` — the only form the production caller used — every candidate
-// was ambient, so the function would happily attribute an unrelated
-// repository's HEAD, dirty flag and changed-file list to a work item. Because
-// a `git` evidence row classifies as AUDIT (SourceGroupClassAudit), that one
-// false row promoted DeriveWorkVerification to `partial`. A scheduler, an
-// unattended mpm, or an operator with the shell pointed at some other project
-// could therefore assert "this work has audit evidence" on its behalf. The
-// failure is silent and the assertion is false.
-//
-// This is the same class of defect as the ghost-DB incident of 2026-07-21
-// (see config.GetWorkspace): resolving durable state from ambient process
-// context manufactures evidence about the wrong subject. The documented rule
-// is the same one — "the working directory is not a workspace" (SPEC) — and
-// it is applied here to evidence rather than to the database.
-//
-// The epistemic rule is therefore:
-//
-//	Git evidence without an explicitly identified repository is
-//	unavailable, not inferred.
-//
-// A non-repository dir, an absent dir, or an empty dir is not an error for
-// work lifecycle. It simply means no Git evidence is recorded, and the work
-// continues through its normal completion path. Missing evidence is strictly
-// better than false evidence: an absent observation can be noticed and
-// supplied by a caller that knows the repository, whereas a fabricated one
-// is trusted downstream and cannot be distinguished from a real observation.
-func CaptureGitSnapshot(dir string) GitSnapshot {
-	if dir == "" {
-		return GitSnapshot{}
-	}
-	snap, ok := captureGitSnapshotAt(dir)
-	if !ok {
-		return GitSnapshot{}
-	}
-	return snap
-}
-
-func captureGitSnapshotAt(dir string) (GitSnapshot, bool) {
-	// Check if dir is inside a git work tree. Shared with the shred
-	// guards so Git-detection semantics have exactly one definition.
-	if !isInsideGitWorktree(dir) {
-		return GitSnapshot{}, false
-	}
-	var snap GitSnapshot
-	// HEAD. Every command below sets cmd.Dir to the explicit repository
-	// root. This used to run `git rev-parse HEAD` once WITHOUT cmd.Dir and
-	// discard the output, which probed the caller's cwd for no reason —
-	// the exact ambient read this function no longer performs.
-	cmd1 := exec.Command("git", "rev-parse", "HEAD")
-	cmd1.Dir = dir
-	if b, err := cmd1.Output(); err == nil {
-		snap.HeadBefore = strings.TrimSpace(string(b))
-		snap.HeadAfter = snap.HeadBefore
-	}
-	// dirty check
-	cmd3 := exec.Command("git", "status", "--porcelain")
-	cmd3.Dir = dir
-	if out, err := cmd3.Output(); err == nil {
-		trimmed := strings.TrimSpace(string(out))
-		snap.DirtyBefore = trimmed != ""
-		snap.DirtyAfter = snap.DirtyBefore
-		// changed files from status
-		if trimmed != "" {
-			lines := strings.Split(trimmed, "\n")
-			for _, line := range lines {
-				if len(line) < 3 {
-					continue
-				}
-				f := strings.TrimSpace(line[3:])
-				// Handle renames "R  old -> new"
-				if idx := strings.Index(f, " -> "); idx != -1 {
-					f = f[idx+4:]
-				}
-				if f != "" {
-					snap.ChangedFiles = append(snap.ChangedFiles, f)
-				}
-			}
-		}
-	}
-	// Also get changed files via diff --name-only if status missed
-	if len(snap.ChangedFiles) == 0 {
-		cmd4 := exec.Command("git", "diff", "--name-only", "HEAD")
-		cmd4.Dir = dir
-		if out, err := cmd4.Output(); err == nil {
-			s := strings.TrimSpace(string(out))
-			if s != "" {
-				for _, f := range strings.Split(s, "\n") {
-					f = strings.TrimSpace(f)
-					if f != "" {
-						snap.ChangedFiles = append(snap.ChangedFiles, f)
-					}
-				}
-			}
-		}
-	}
-	// untracked files
-	cmd5 := exec.Command("git", "ls-files", "--others", "--exclude-standard")
-	cmd5.Dir = dir
-	if out, err := cmd5.Output(); err == nil {
-		s := strings.TrimSpace(string(out))
-		if s != "" {
-			for _, f := range strings.Split(s, "\n") {
-				f = strings.TrimSpace(f)
-				if f != "" && !containsString(snap.ChangedFiles, f) {
-					snap.ChangedFiles = append(snap.ChangedFiles, f)
-				}
-			}
-		}
-	}
-	return snap, true
-}
-
 func containsString(arr []string, s string) bool {
 	for _, v := range arr {
 		if v == s {
@@ -6325,7 +6190,28 @@ func (dm *DatabaseManager) provenanceFromContext(ac ActiveContext) *EffectivePro
 // A caller that wants Git evidence recorded uses the explicit observation
 // route (`mpm_evidence action=add source_group=git`), which states the
 // observation as a fact of the caller's own knowledge rather than MPM
-// guessing at one. See also CaptureGitSnapshot's doc comment.
+// guessing at one.
+//
+// The same reasoning retired the snapshot helper this method used to call.
+// CaptureGitSnapshot and its private core existed only to answer that call:
+// they had no other production caller, and no surface of their own. Removing
+// them loses no capability, because nothing could reach them to use one — but
+// their doc comment carried the argument for the rule above, so that argument
+// is preserved here rather than deleted with the code.
+//
+// That argument, in full: there is no discovery chain for Git evidence. No
+// workspace fallback, no cwd fallback, no parent walk, and no assumption that
+// the MPM source checkout is the repository a given work item belongs to.
+// A non-repository path, an absent path, or an empty path is not an error for
+// the work lifecycle; it means no Git evidence is recorded and the work
+// continues through its normal completion path. Missing evidence is strictly
+// better than false evidence: an absent observation can be noticed and
+// supplied by a caller that knows the repository, whereas a fabricated one is
+// trusted downstream and cannot be distinguished from a real observation.
+//
+// The invariant is pinned by tests in git_provenance_test.go, which drive the
+// real work lifecycle under an unrelated Git cwd and assert that no `git`
+// evidence row appears. Those guards never called the removed helper.
 
 // CreateWorkWithContext creates a work and its initial event atomically.
 // Thin-handler target for mpm_work create.

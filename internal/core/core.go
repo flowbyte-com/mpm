@@ -482,8 +482,8 @@ type CoreDB interface {
 	// Git evidence reaches a work item through the explicit observation route
 	// (AddEvidence / `mpm_evidence action=add source_group=git`), which states
 	// the observation as the caller's own knowledge. See docs/SPEC.md,
-	// "Git evidence requires an explicitly named repository", and
-	// CaptureGitSnapshot's doc comment for the full rationale.
+	// "Git evidence requires an explicitly named repository", and the
+	// rationale preserved above recordGitEvidenceForWork in db.go.
 	DeriveWorkVerification(workID string) (WorkVerification, error)
 	// ResolveWorkContradiction is the F6-1 / T20-1 agent-facing recovery
 	// path: withdraw unsubstantiated dispute evidence from a work item so

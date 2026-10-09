@@ -10,7 +10,7 @@ import (
 
 // Git provenance must never be inferred from ambient process state.
 //
-// Before the fail-closed rule, CaptureGitSnapshot("") walked a chain of
+// Before the fail-closed rule, the snapshot helper walked a chain of
 // ambient candidates — the MPM workspace, then the process cwd — and returned
 // the first that happened to be inside a Git worktree. Because a `git`
 // evidence row classifies as AUDIT, recording one promoted
@@ -23,6 +23,10 @@ import (
 // recorded" would still pass while the wrong repository supplied it. Asserting
 // that repo A's marker is present and repo B's is absent makes false
 // attribution directly observable rather than inferred.
+//
+// These tests pin PRODUCT behaviour through the real work lifecycle. The
+// snapshot helper itself (CaptureGitSnapshot and its private core) had zero
+// production callers and has been removed; the guards below never called it.
 
 // newTestRepo creates a Git repository whose content is uniquely identifiable.
 //
@@ -85,96 +89,6 @@ func gitRun(t *testing.T, dir string, args ...string) string {
 func repoHead(t *testing.T, dir string) string {
 	t.Helper()
 	return gitRun(t, dir, "rev-parse", "HEAD")
-}
-
-// assertSnapshotEmpty fails with the snapshot rendered in full, so a failure
-// says which repository leaked in rather than just "not empty".
-func assertSnapshotEmpty(t *testing.T, label string, snap GitSnapshot) {
-	t.Helper()
-	if snap.HeadBefore != "" || snap.HeadAfter != "" ||
-		snap.DirtyBefore || snap.DirtyAfter || len(snap.ChangedFiles) > 0 {
-		t.Errorf("%s = %+v, want a fully empty GitSnapshot", label, snap)
-	}
-}
-
-// A. An explicit repository root is inspected, and only that one.
-func TestCaptureGitSnapshot_ExplicitRepoCapturesThatRepo(t *testing.T) {
-	repo := newDirtyTestRepo(t, "alpha-marker.txt", "alpha commit", "alpha-dirty.txt")
-
-	snap := CaptureGitSnapshot(repo)
-
-	if want := repoHead(t, repo); snap.HeadBefore != want {
-		t.Errorf("HeadBefore = %q, want %q (the explicit repo's HEAD)", snap.HeadBefore, want)
-	}
-	if snap.HeadAfter != snap.HeadBefore {
-		t.Errorf("HeadAfter = %q, want %q", snap.HeadAfter, snap.HeadBefore)
-	}
-	if !snap.DirtyBefore {
-		t.Error("DirtyBefore = false, want true (uncommitted alpha-dirty.txt)")
-	}
-	if !containsString(snap.ChangedFiles, "alpha-dirty.txt") {
-		t.Errorf("ChangedFiles = %v, want it to contain alpha-dirty.txt", snap.ChangedFiles)
-	}
-}
-
-// B. No explicit repo means no snapshot, even from a Git cwd.
-//
-// This is the exact regression: pre-fix, the cwd probe found the repo and
-// returned its HEAD, which the caller then recorded as evidence about a work
-// item.
-func TestCaptureGitSnapshot_EmptyDirIsEmptyDespiteGitCwd(t *testing.T) {
-	repo := newTestRepo(t, "cwd-marker.txt", "cwd commit")
-	t.Chdir(repo)
-
-	assertSnapshotEmpty(t, `CaptureGitSnapshot("")`, CaptureGitSnapshot(""))
-}
-
-// C. No explicit repo means no snapshot, even when MPM_WORKSPACE is a Git repo.
-func TestCaptureGitSnapshot_EmptyDirIsEmptyDespiteGitWorkspace(t *testing.T) {
-	repo := newTestRepo(t, "ws-marker.txt", "workspace commit")
-	t.Setenv("MPM_WORKSPACE", repo)
-
-	assertSnapshotEmpty(t, `CaptureGitSnapshot("")`, CaptureGitSnapshot(""))
-}
-
-// D. An explicit repo wins over an unrelated cwd — and the cwd's content
-// must not appear anywhere in the result.
-func TestCaptureGitSnapshot_ExplicitRepoWinsOverUnrelatedCwd(t *testing.T) {
-	alpha := newDirtyTestRepo(t, "alpha-marker.txt", "alpha commit", "alpha-dirty.txt")
-	beta := newDirtyTestRepo(t, "beta-marker.txt", "beta commit", "beta-dirty.txt")
-	t.Chdir(beta)
-
-	snap := CaptureGitSnapshot(alpha)
-
-	if want := repoHead(t, alpha); snap.HeadBefore != want {
-		t.Errorf("HeadBefore = %q, want alpha's HEAD %q", snap.HeadBefore, want)
-	}
-	if betaHead := repoHead(t, beta); snap.HeadBefore == betaHead {
-		t.Errorf("HeadBefore = beta's HEAD %q; the unrelated cwd was used", betaHead)
-	}
-	for _, f := range snap.ChangedFiles {
-		if strings.HasPrefix(f, "beta-") {
-			t.Errorf("ChangedFiles contains %q from the unrelated cwd; got %v", f, snap.ChangedFiles)
-		}
-	}
-	if !containsString(snap.ChangedFiles, "alpha-dirty.txt") {
-		t.Errorf("ChangedFiles = %v, want it to contain alpha-dirty.txt", snap.ChangedFiles)
-	}
-}
-
-// D2. A path that is not a repository yields an empty snapshot rather than
-// an error or a fallback to some other repository.
-func TestCaptureGitSnapshot_NonRepoPathIsEmpty(t *testing.T) {
-	alpha := newTestRepo(t, "alpha-marker.txt", "alpha commit")
-	// A plain directory that is NOT inside any Git worktree.
-	plain := t.TempDir()
-
-	snap := CaptureGitSnapshot(plain)
-
-	assertSnapshotEmpty(t, "CaptureGitSnapshot(non-repo)", snap)
-	if want := repoHead(t, alpha); snap.HeadBefore == want {
-		t.Errorf("HeadBefore = %q; fell back to an unrelated repository", want)
-	}
 }
 
 // E. Without an explicit repository, no Git evidence row is written.
