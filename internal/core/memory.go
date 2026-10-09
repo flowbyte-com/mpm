@@ -1006,7 +1006,7 @@ func init() {
 // policy block reported as a system fault.
 var (
 	ErrSensitiveContentBlocked = errors.New("memory security scanner: sensitive content blocked")
-	ErrPoisonContentBlocked   = errors.New("memory security scanner: poison content blocked")
+	ErrPoisonContentBlocked    = errors.New("memory security scanner: poison content blocked")
 )
 
 // isSensitiveContent checks if content contains sensitive data patterns
@@ -1465,13 +1465,13 @@ func (s *MemoryStore) appendBlockedAttempt(content, reason, attemptType string) 
 
 	digest := sha256.Sum256([]byte(content))
 	ev := mirrorEvent{
-		Op:               mirrorOpBlockedAttempt,
-		Reason:           reason,
-		PatternFamily:    family,
-		ContentSHA256:    hex.EncodeToString(digest[:]),
-		ContentLength:    len(content),
-		Action:           "blocked",
-		AttemptType:      attemptType,
+		Op:            mirrorOpBlockedAttempt,
+		Reason:        reason,
+		PatternFamily: family,
+		ContentSHA256: hex.EncodeToString(digest[:]),
+		ContentLength: len(content),
+		Action:        "blocked",
+		AttemptType:   attemptType,
 	}
 	return appendMirrorLine(s.MirrorFile, ev)
 }
