@@ -131,6 +131,47 @@ func TestWorkLifecycle_NoExplicitRepoWritesNoGitEvidence(t *testing.T) {
 	}
 }
 
+// G. No explicit repo means no evidence, even when MPM_WORKSPACE is a Git repo.
+//
+// The cwd is only one ambient source; the workspace is a separate one and
+// needs its own guard. It previously had coverage only as a unit test of the
+// snapshot helper, which no longer exists — so without this the "no ambient
+// Git attribution" guarantee would be half-covered: reintroducing a
+// workspace-derived capture would pass every remaining test. Probe B exists
+// to keep that honest.
+//
+// The DB stays hermetic (NewTestDM uses in-memory SQLite); only the workspace
+// env var is pointed at a repository, because the workspace is exactly the
+// ambient source under test.
+func TestWorkLifecycle_NoExplicitRepoWritesNoGitEvidenceDespiteGitWorkspace(t *testing.T) {
+	t.Setenv("MPM_WORKSPACE", newTestRepo(t, "ws-marker.txt", "workspace commit"))
+	// cwd deliberately NOT a repository, so a workspace-derived capture is
+	// the only thing that can leak in.
+	t.Chdir(t.TempDir())
+
+	dm := NewTestDM(t)
+	defer dm.Close()
+
+	w, err := dm.AddWork("Work whose workspace happens to be a repo", "Body", "session-ws")
+	if err != nil {
+		t.Fatalf("AddWork: %v", err)
+	}
+
+	if _, err := dm.CompleteWorkWithContext(w.ID, "Done", ActiveContext{}); err != nil {
+		t.Fatalf("CompleteWorkWithContext: %v", err)
+	}
+
+	evidence, err := ListEvidenceForArtifact(dm, w.ID, "work")
+	if err != nil {
+		t.Fatalf("ListEvidenceForArtifact: %v", err)
+	}
+	for _, e := range evidence {
+		if e.SourceGroup == "git" {
+			t.Errorf("recorded a git evidence row (%q) from the workspace, which is not a repository identity", e.Notes)
+		}
+	}
+}
+
 // F. Absence of Git evidence does not break work completion.
 //
 // The no-op must not become a functional regression: the item still reaches
