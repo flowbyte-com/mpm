@@ -5,8 +5,10 @@ verify.py — Live verification of the Claude Code ↔ MPM integration.
 Exercises the mpm-mcp server exactly as Claude Code would: JSON-RPC over
 stdio using the same payload shapes the MCP tool contracts specify. This
 is the strongest test we can run without an actual Claude Code session
-restart — modify the .mcp.json file, restart Claude Code, and the `mpm__*`
+restart — re-run `install.sh`, restart Claude Code, and the `mpm__*`
 tools appear in the tool list. The probes here prove the binding works.
+Registration itself (which scope, which env block) is covered by
+`tests/test_claude_mcp_registration.py`.
 
 Each test prints PASS/FAIL with a one-line evidence string. Exit code 0
 iff all tests pass.

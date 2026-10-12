@@ -364,7 +364,11 @@ def _host_has_mpm_mcp_server(entry: dict, home: Path) -> bool:
     """
     probes: dict[str, list[str]] = {
         # Claude Code / Hermes: MCP servers in a host JSON/YAML config.
-        "claude_code": [".claude/.mcp.json", ".hermes/config.yaml"],
+        # Claude Code's user scope is ~/.claude.json (mcpServers at top
+        # level). ~/.claude/.mcp.json is NOT a discovery path in any scope;
+        # probing it made this check report "no MPM server" on every host
+        # where the adapter had correctly registered MPM.
+        "claude_code": [".claude.json", ".hermes/config.yaml"],
         "hermes": [".hermes/config.yaml"],
         # OpenClaw: MCP servers under `mcp.servers` in openclaw.json.
         "openclaw": [".openclaw/openclaw.json"],

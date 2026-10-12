@@ -47,7 +47,12 @@ from pathlib import Path
 # resolve from the repository so they work without an installed MPM.
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 TEMPLATE = PLUGIN_DIR / ".mcp.json.template"
-MATERIALIZED = Path.home() / ".claude" / ".mcp.json"
+# Claude Code's user scope is ~/.claude.json (mcpServers at top level).
+# ~/.claude/.mcp.json is NOT a discovery path — install.sh used to write
+# there, so these assertions silently skipped forever on a host where the
+# adapter had never run. They now follow the registration the installer
+# actually performs.
+MATERIALIZED = Path.home() / ".claude.json"
 # HOME_RESOLVED — the resolved ${HOME} that install.sh substitutes when
 # it materialises the template. The test asserts template variables
 # expand to a path that exists on the current host, so we use the
@@ -85,7 +90,7 @@ class TemplateFrameworkEnvContract(unittest.TestCase):
     def test_legacy_framework_alias_preserved(self):
         # Older mpm-mcp binaries read MPM_FRAMEWORK instead of the canonical
         # var. Setting both lets installs migrate forward without re-render
-        # of the materialized ~/.claude/.mcp.json.
+        # of the registered user-scope entry.
         self.assertEqual(
             self.env.get("MPM_FRAMEWORK"),
             "claude-code",
@@ -148,7 +153,7 @@ class TemplateFrameworkEnvContract(unittest.TestCase):
 
 
 class MaterializedConfigInSync(unittest.TestCase):
-    """The installed ~/.claude/.mcp.json must mirror the template's env block."""
+    """The registered user-scope entry must mirror the template's env block."""
 
     def setUp(self):
         if not MATERIALIZED.exists():
@@ -157,7 +162,13 @@ class MaterializedConfigInSync(unittest.TestCase):
                 f"Run 'install.sh' first."
             )
         data = json.loads(MATERIALIZED.read_text())
-        self.env = data["mcpServers"]["mpm"]["env"]
+        entry = (data.get("mcpServers") or {}).get("mpm")
+        if not entry:
+            self.skipTest(
+                f"No user-scope mpm entry in {MATERIALIZED}. "
+                f"Run 'install.sh' first."
+            )
+        self.env = entry["env"]
 
     def test_installed_config_has_claude_code_framework(self):
         # Canonical wins; legacy alias is acceptable as fallback.
@@ -183,8 +194,13 @@ class MaterializedConfigInSync(unittest.TestCase):
 
     def test_installed_config_does_not_contain_redundant_provenance(self):
         # Belt-and-braces: ensure earlier wrong-var-name drafts never shipped
-        # into the materialized config.
-        self.assertNotIn("MPM_PROVENANCE_FRAMEWORK", self.env)
+        # into the materialized config. This previously asserted the OPPOSITE
+        # of the canonical contract — that MPM_PROVENANCE_FRAMEWORK is absent —
+        # while TemplateFrameworkEnvContract pins it as required. It only ever
+        # passed by skipping, because it pointed at a file the installer
+        # never wrote; repointed at the real registration it would have
+        # contradicted the very contract it was guarding.
+        self.assertEqual(self.env.get("MPM_PROVENANCE_FRAMEWORK"), "claude-code")
         self.assertNotIn("MPM_PROVENANCE_ACTOR_KIND", self.env)
 
 
@@ -202,12 +218,14 @@ class InstallMaterializationIsIdempotent(unittest.TestCase):
         self.assertEqual(first["env"], second["env"])
 
     def test_installed_matches_template_after_install(self):
-        # If install.sh has been run, ~/.claude/.mcp.json should reflect the
+        # If install.sh has been run, the user-scope entry should reflect the
         # template's canonical framework-id var.
-        if not MATERIALIZED.exists():
-            self.skipTest(f"Materialized config absent: {MATERIALIZED}")
+        live_entry = (json.loads(MATERIALIZED.read_text())
+                      .get("mcpServers") or {}).get("mpm")
+        if not live_entry:
+            self.skipTest(f"No user-scope mpm entry in {MATERIALIZED}")
         tpl_env = _resolved_template()["mcpServers"]["mpm"]["env"]
-        live_env = json.loads(MATERIALIZED.read_text())["mcpServers"]["mpm"]["env"]
+        live_env = live_entry["env"]
         for key in ("MPM_WORKSPACE", "MPM_FRAMEWORK"):
             self.assertEqual(live_env.get(key), tpl_env.get(key),
                              f"{key} drift between template and materialized config")
