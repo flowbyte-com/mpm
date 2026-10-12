@@ -10,7 +10,8 @@ through `mpm__mpm_context` action `write_handoff` / `read_handoff`; the
 substrate `mpm__mpm_handoff` and `mpm__mpm_scratchpad` tools remain in
 the registry and are reachable via `mpm call` / `mpm_help list` +
 subsequent `mpm call`. **Full registered MCP surface**: set
-`MPM_EXPOSE_ALL_TOOLS=1` in the MCP env block of `~/.claude/.mcp.json`.
+`MPM_EXPOSE_ALL_TOOLS=1` in the MCP env block of the `mpm` entry in
+`~/.claude.json`.
 See `~/.mpm/docs/CONTEXT_EXPOSURE.md` for the architecture.
 
 ## Why this exists
@@ -20,8 +21,9 @@ The canonical MPM machine-facing MCP server is `~/.mpm/bin/mpm-mcp` — the
 same binary OpenClaw uses. Rather than write a TypeScript plugin (the
 mpm-opencode pattern) or a shell wrapper (a fallback that breaks under
 non-interactive subprocess), we reuse the canonical MCP server and let
-Claude Code's runtime discover it via the standard `~/.claude/.mcp.json`
-side-channel.
+Claude Code's runtime discover it via its standard **user-scope** MCP
+registration: the `mpmServers.mpm` entry in `~/.claude.json`, which
+`install.sh` creates through `claude mcp add mpm --scope user`.
 
 This is the same wiring the Claude Code marketplace plugins use (telegram,
 serena, firebase — each declares an `.mcp.json` with a `mcpServers` block).
@@ -57,7 +59,7 @@ set `MPM_EXPOSE_ALL_TOOLS=1` to see the full registered MCP surface).
 ## Install
 
 ```bash
-# 1. Materialize the wiring into ~/.claude/.mcp.json + the SessionStart hook
+# 1. Register mpm at user scope + install the SessionStart hook
 ./install.sh
 
 # 2. Restart Claude Code (mcpServers AND the SessionStart hook are loaded at
@@ -69,9 +71,18 @@ set `MPM_EXPOSE_ALL_TOOLS=1` to see the full registered MCP surface).
 ```
 
 The install script:
-- Backs up any existing `~/.claude/.mcp.json` to `~/.claude/backups/mpm-claude-code-<TS>/`
-- Materializes `.mcp.json.template` into `~/.claude/.mcp.json` with `${HOME}` substituted
-- **Merges** with any existing `mcpServers` — never clobbers other servers
+- Registers `mpm` at **user scope** with `claude mcp add mpm --scope user`, so
+  the server is available in every project
+- Reads the server entry from `.mcp.json.template` (substituting `${HOME}`), so
+  the template stays the single source of truth for the env block
+- **Idempotent**: a matching registration is left untouched, a stale one is
+  replaced. `claude mcp add` refuses to overwrite an existing name and still
+  exits 0, so the installer compares first rather than trusting the call
+- **Preserves** every other MCP server in the config — the CLI owns the merge
+- Backs up `~/.claude.json` to `~/.claude/backups/mpm-claude-code-<TS>/`
+- **Detects shadowing** local- and project-scope `mpm` registrations and reports
+  them (local > project > user precedence, so they win). Nothing is removed
+  without an explicit `--migrate-shadow`
 - Sanity-probes the wiring by booting `mpm-mcp` and calling `mpm_context`
   action `read_wake_context` (always in the default 3-tool surface)
 - **Installs the SessionStart hook** at `~/.claude/hooks/mpm-session-start`
@@ -83,14 +94,72 @@ The install script:
   carries the persistent behavioural protocol only; it is not the dynamic
   wake delivery mechanism.
 
+## Scope, shadowing, and migrating older registrations
+
+Claude Code resolves MCP servers in three scopes, highest precedence first:
+
+| Scope | Stored in | Applies to |
+|---|---|---|
+| `local` | `~/.claude.json` → `projects.<abs path>.mcpServers` | one project, this machine only |
+| `project` | `<project>/.mcp.json` | everyone who checks out the repo |
+| `user` | `~/.claude.json` → `mcpServers` | every project, this machine |
+
+`~/.claude/.mcp.json` is **not** a discovery path in any scope. Earlier builds
+of this adapter wrote there; the file was created, `install.sh` reported
+success, and no MCP server ever started. If you have one, it is inert —
+`--uninstall` moves it into the backup directory rather than deleting it.
+
+### Shadowing
+
+Because `local` and `project` outrank `user`, an `mpm` entry left at either
+takes precedence over the user-scope registration, silently. `install.sh`
+detects and reports these; it never removes them, because a project
+`.mcp.json` is a file other developers read and a local entry may encode a
+deliberate choice.
+
+### Migration
+
+Retiring a shadowing entry is an explicit, separate step:
+
+```bash
+./install.sh --migrate-shadow
+```
+
+It scans every project in the config plus the current directory's `.mcp.json`,
+then for each `mpm` entry:
+
+- **backs up** the whole file first, to
+  `~/.claude/backups/mpm-claude-code-<TS>/`
+- removes it only if it is recognizably this adapter's own wiring —
+  classified `canonical` (identical to the template) or `legacy` (an MPM
+  binary with no env block, e.g. a hand-made `claude mcp add mpm -- …`)
+- **leaves `custom` and `foreign` entries alone** and says so. An entry whose
+  env carries keys the template never sets is the user's configuration, and
+  removing it is their decision.
+- removes only the `mpm` key — every other server in the file is untouched
+
+Recovery is a file copy from the backup directory, and the exact path is
+printed on completion:
+
+```bash
+cp -p ~/.claude/backups/mpm-claude-code-<TS>/.claude.json.before-migrate ~/.claude.json
+```
+
+**Restart Claude Code afterwards.** MCP servers are resolved at session start,
+so a registration change has no effect until the next session.
+
 ## Uninstall
 
 ```bash
 ./install.sh --uninstall
 ```
 
-Removes the `mpm` entry from `~/.claude/.mcp.json` (or removes the file if
-it was the only entry). The shell `--uninstall` mode does **not** strip
+Removes the user-scope `mpm` entry from `~/.claude.json` via
+`claude mcp remove mpm --scope user`, preserving every other server. It does
+not touch local- or project-scope entries, because this installer never
+created those; use `--migrate-shadow` for those. If an inert
+`~/.claude/.mcp.json` from an older build is present, it is moved into the
+backup directory rather than deleted. The shell `--uninstall` mode does **not** strip
 the managed CLAUDE.md section — to do that, run the Python uninstaller
 directly:
 
@@ -110,11 +179,12 @@ The install script hardcodes the canonical install path
 (`${HOME}/.mpm`). It does **not** read `MPM_BINARY` or `MPM_WORKSPACE`
 env vars for resolution — the same deterministic absolute path is what
 the mpm-opencode and openclaw-mpm integrations expect. To override,
-edit `~/.claude/.mcp.json` after install.
+edit the `mpm` entry in `~/.claude.json` after install — or re-run
+`./install.sh`, which reconciles a changed template.
 
-The `~/.mcp.json` template uses `${HOME}` substitution so the same template
+The `.mcp.json.template` uses `${HOME}` substitution so the same template
 works on any machine. The install script resolves `${HOME}` to an absolute
-path at install time.
+path and passes the result to `claude mcp add`.
 
 `MPM_WORKSPACE` is set to `${HOME}/.mpm` — the canonical install root. The
 canonical install's `src/db/mpm.db` is hardlinked to the actual workspace
@@ -233,7 +303,7 @@ validation run on 2026-08-19.
 
 The 2026-08-28 follow-up triage introduced `tests/test_template_provenance_env.py`
 which pins the framework-identification env contract against the template
-and the materialized `~/.claude/.mcp.json`. Run with:
+and the registered `mpm` entry in `~/.claude.json`. Run with:
 
 ```bash
 PYTHONPATH=. python3 -m unittest tests.test_template_provenance_env -v

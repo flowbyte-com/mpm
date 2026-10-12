@@ -440,15 +440,16 @@ Two artifacts land in `~/.claude/` after `install.sh`:
 
 | File | Managed by | Purpose |
 |---|---|---|
-| `~/.claude/.mcp.json` | `install.sh` (one-shot) | MCP server config — Claude Code launches `mpm-mcp` as a stdio child process |
+| `~/.claude.json` (`mcpServers.mpm`) | `install.sh` (one-shot, `claude mcp add --scope user`) | MCP server config — Claude Code launches `mpm-mcp` as a stdio child process |
 | `~/.claude/CLAUDE.md` | `install_claude_instructions.py` | Persistent instructions: MPM behavioral protocol in a managed block |
 
 The install script wires both in one invocation.
 
 ### User scope
 
-Default. Writes to `~/.claude/.mcp.json` (applies to all projects) and
-`~/.claude/CLAUDE.md` (global persistent instructions).
+Default. Registers the `mpm` server at user scope in `~/.claude.json`
+(applies to all projects) and writes `~/.claude/CLAUDE.md` (global persistent
+instructions).
 
 ### Project scope
 
@@ -470,12 +471,18 @@ cd ~/.mpm/agent_installation/mpm-claude-code
 ```
 
 The install script:
-1. Backs up any existing `~/.claude/.mcp.json` to
+1. Backs up any existing `~/.claude.json` to
    `~/.claude/backups/mpm-claude-code-<TS>/`.
-2. Materializes `.mcp.json.template` into `~/.claude/.mcp.json` with
-   `${HOME}` substituted.
-3. **Merges** with any existing `mcpServers` — never clobbers other
-   servers.
+2. Reads the server entry from `.mcp.json.template` with `${HOME}`
+   substituted — the template stays the source of truth.
+3. Registers it with `claude mcp add mpm --scope user`. The CLI owns the
+   file, so **merging is preserved** — other servers are never clobbered.
+   Re-running is idempotent: a matching registration is left alone, a
+   stale one is replaced.
+4. Reports any local- or project-scope `mpm` registration, which would
+   shadow the user-scope one. Nothing is removed without an explicit
+   `./install.sh --migrate-shadow`, which backs up first and skips any
+   entry it cannot prove is this adapter's own wiring.
 4. Sanity-probes the wiring by booting `mpm-mcp` and calling
    `mpm_context` action `read_wake_context` (always in the default
    3-tool surface).
@@ -498,8 +505,8 @@ The install script:
 
 What `verify.py` checks:
 
-- `~/.claude/.mcp.json` parses, contains the `mpm` entry, command is
-  absolute.
+- The user-scope `mpm` entry in `~/.claude.json` exists and its command
+  is absolute.
 - `mpm-mcp` boots and responds to `tools/list` (default initial
   surface expects 3 tools: `mpm_memory`, `mpm_context`, `mpm_help`;
   set `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block to restore the
@@ -534,15 +541,14 @@ the tool list).
 ./install.sh --uninstall
 ```
 
-Removes the `mpm` entry from `~/.claude/.mcp.json` (or removes the
-file if it was the only entry) and strips the managed section from
-`~/.claude/CLAUDE.md`. Original state is preserved in
+Removes the user-scope `mpm` entry from `~/.claude.json` and strips the
+managed section from `~/.claude/CLAUDE.md`. Original state is preserved in
 `~/.claude/backups/mpm-claude-code-<TS>/`.
 
 ### Provenance configuration
 
 `MPM_FRAMEWORK=claude-code` must be in the `env` block of the `mpm`
-entry in `~/.claude/.mcp.json`. The `install.sh` template sets this
+entry in `~/.claude.json`. The `install.sh` template sets this
 automatically. If the env var is missing, all `mpm__*` tool
 invocations record `framework_name="unknown"` in `artifact_provenance`,
 which makes cross-host attribution ambiguous.
@@ -550,7 +556,7 @@ which makes cross-host attribution ambiguous.
 Diagnose:
 
 ```bash
-jq '.mcpServers.mpm.env.MPM_FRAMEWORK' ~/.claude/.mcp.json
+jq '.mcpServers.mpm.env.MPM_FRAMEWORK' ~/.claude.json
 # expect: "claude-code"
 ```
 
