@@ -2,16 +2,19 @@
 #
 # install.sh — Materialize the OpenCode ↔ MPM integration.
 #
-# Idempotent. Performs three orthogonal responsibilities:
+# Idempotent. Performs four ordered responsibilities:
 #
 #   1. Compile dist/ from canonical source (if dist/index.js missing
 #      or older than src/index.ts).
-#   2. Refresh the OpenCode plugin config entry in
+#   2. Provision the compiled payload into the MPM runtime root via the
+#      shared stage_runtime_package.sh library, and validate it. The
+#      plugin[] entry is never written for a path that holds nothing.
+#   3. Refresh the OpenCode plugin config entry in
 #      ~/.config/opencode/opencode.jsonc. Detects and migrates
 #      STALE entries that reference the pre-2026-09-17 legacy
 #      'opencode-mpm' directory. New entries use the canonical
 #      'mpm-opencode' path.
-#   3. Refresh the AGENTS.md behavioral managed block (delegates to
+#   4. Refresh the AGENTS.md behavioral managed block (delegates to
 #      install_agents_instructions.py for the actual content work).
 #
 # Migration behavior (Part 3 — namespace refresh):
@@ -108,7 +111,18 @@ HOME_DIR="${HOME:?HOME must be set}"
 OPENCODE_CONFIG_DIR="${HOME_DIR}/.config/opencode"
 OPENCODE_CONFIG="${OPENCODE_CONFIG_DIR}/opencode.jsonc"
 OPENCODE_PLUGIN_DIR="${OPENCODE_CONFIG_DIR}/plugin"
-PLUGIN_INSTALL_DIR="${HOME_DIR}/.mpm/agent_installation"
+
+# Where MPM keeps installed adapter assets.
+#
+# MPM_WORKSPACE is the same override the mpm-pi installer honours, and the
+# same variable mpm itself reads to locate the workspace. Previously this
+# was hardcoded to $HOME/.mpm, so an operator running against a relocated
+# workspace got a plugin[] entry pointing at a directory that was never
+# populated — the registration looked correct and loaded nothing. The
+# default is unchanged, so an unset MPM_WORKSPACE behaves exactly as before.
+MPM_HOME_DIR="${MPM_WORKSPACE:-${HOME_DIR}/.mpm}"
+PLUGIN_INSTALL_DIR="${MPM_HOME_DIR}/agent_installation"
+
 # Canonical adapter install locations (new and legacy).
 CANONICAL_ADAPTER_DIR="${PLUGIN_INSTALL_DIR}/mpm-opencode"
 LEGACY_ADAPTER_DIR="${PLUGIN_INSTALL_DIR}/opencode-mpm"
@@ -133,7 +147,7 @@ for arg in "$@"; do
         --uninstall) MODE="uninstall" ;;
         --verify)    MODE="verify" ;;
         --help|-h)
-            sed -n '2,42p' "$0"
+            sed -n '2,74p' "$0"
             exit 0
             ;;
         *)  err "unknown option: $arg"; exit 1 ;;
@@ -175,7 +189,67 @@ build_dist() {
 }
 
 # --------------------------------------------------------------------------
-# Step 2: detect and migrate OpenCode plugin config
+# Step 2: provision the runtime package
+# --------------------------------------------------------------------------
+#
+# OpenCode loads the plugin at runtime from the file:// URL written below.
+# That URL names a path inside the runtime root, which Git populates only
+# when ~/.mpm *is* the source checkout — an invariant that no longer holds
+# now that checkouts and runtime roots are separate trees.
+#
+# build_dist() compiles into $SCRIPT_DIR, and the registration names
+# $CANONICAL_ADAPTER_DIR. When the installer runs from anywhere but the
+# installed workspace those are different directories, so the config got an
+# entry resolving to a path holding no dist/index.js. OpenCode reports no
+# error for an unresolvable plugin URL; it just loads nothing.
+#
+# Provisioning is therefore explicit here, using the shared library rather
+# than a copy loop: manifest allowlist, staged into a sibling and swapped
+# into place atomically, validated before OpenCode is told about it,
+# idempotent on re-run, and preserving any operator file already in the
+# package.
+
+STAGE_LIBRARY="${SCRIPT_DIR}/../scripts/stage_runtime_package.sh"
+
+# Explicit allowlist. tsc emits one .js per .ts under src/ with
+# rootDir=src and outDir=dist, so these three are the complete compiled
+# payload. package.json travels with it because OpenCode resolves the
+# plugin's module metadata through the package root. Development surface
+# (install.sh, tests/, src/, reconcile.json, node_modules) is excluded.
+#
+# If tsc ever emits a module this list omits, the unresolved-import check in
+# the validator fails the stage rather than publishing a package that would
+# throw on load. The list cannot silently drift out of date.
+OPENCODE_RUNTIME_MANIFEST=(
+    dist/index.js
+    dist/workspace.js
+    dist/resolve-mpm-binary.js
+    package.json
+)
+
+stage_opencode_runtime_package() {
+    if [ ! -f "$STAGE_LIBRARY" ]; then
+        err "runtime provisioning library not found at $STAGE_LIBRARY"
+        err "  this installer cannot safely provision its own payload"
+        exit 2
+    fi
+    # shellcheck source=../scripts/stage_runtime_package.sh
+    . "$STAGE_LIBRARY"
+
+    local staged
+    if ! staged="$(MPM_RUNTIME_PACKAGE_VALIDATOR=mpm_validate_runtime_package_opencode \
+                  stage_runtime_package "$SCRIPT_DIR" "$MPM_HOME_DIR" \
+                  "mpm-opencode" "${OPENCODE_RUNTIME_MANIFEST[@]}")"; then
+        err "runtime package provisioning failed for mpm-opencode; refusing to register an unvalidated payload"
+        exit 3
+    fi
+    CANONICAL_ADAPTER_DIR="$(cd "$staged" && pwd -P)"
+    CANONICAL_PLUGIN_ENTRY="file://${CANONICAL_ADAPTER_DIR}/dist/index.js"
+    log "runtime package staged and validated: $CANONICAL_ADAPTER_DIR"
+}
+
+# --------------------------------------------------------------------------
+# Step 3: detect and migrate OpenCode plugin config
 # --------------------------------------------------------------------------
 #
 # The namespace migration `git mv opencode-mpm → mpm-opencode` moved
@@ -242,7 +316,7 @@ EOF
 }
 
 # --------------------------------------------------------------------------
-# Step 3: refresh the AGENTS.md behavioral managed block
+# Step 4: refresh the AGENTS.md behavioral managed block
 # --------------------------------------------------------------------------
 #
 # Delegates to the existing Python installer. We pass the canonical
@@ -273,7 +347,7 @@ refresh_agents_md() {
 }
 
 # --------------------------------------------------------------------------
-# Step 4: clean up the legacy generated directory (when safe)
+# Step 5: clean up the legacy generated directory (when safe)
 # --------------------------------------------------------------------------
 #
 # After the namespace migration, the legacy directory
@@ -349,6 +423,9 @@ case "$MODE" in
     install)
         log "installing mpm-opencode plugin (id=$PLUGIN_ID) from $SCRIPT_DIR"
         build_dist
+        # Registration names a path. Provision and validate it before
+        # writing anything, so an entry never exists without a payload.
+        stage_opencode_runtime_package
         # A failed migration means MPM is NOT registered with OpenCode.
         # Continuing would print "done" and a verification summary that
         # claims the plugin entry points at the canonical path — the exact
@@ -367,6 +444,11 @@ case "$MODE" in
         # (every `opencode` subcommand requires a live authenticated
         # environment), and an unresolvable plugin URL is silent.
         log "verification (checked here):"
+        if [ -f "$CANONICAL_ADAPTER_DIR/dist/index.js" ]; then
+            log "  [ok]   payload exists at the registered path"
+        else
+            log "  [FAIL] payload missing at the registered path"
+        fi
         if python3 "${SCRIPT_DIR}/scripts/jsonc_config.py" \
                 --check-entry "$OPENCODE_CONFIG" "$CANONICAL_PLUGIN_ENTRY" >/dev/null 2>&1; then
             log "  [ok]   plugin[] in $OPENCODE_CONFIG names the registered path"
@@ -391,8 +473,13 @@ case "$MODE" in
     verify)
         # Verify the canonical install state.
         ok=1
-        if [ ! -f "$SCRIPT_DIR/dist/index.js" ]; then
-            err "verify: dist/index.js missing"
+        # Check the payload the *registration* names, not the one this
+        # script happens to be sitting next to. Verifying SCRIPT_DIR is
+        # what let a checkout pass --verify while the registered
+        # file:// URL pointed at nothing.
+        if [ ! -f "${CANONICAL_ADAPTER_DIR}/dist/index.js" ]; then
+            err "verify: registered payload missing"
+            err "  expected: ${CANONICAL_ADAPTER_DIR}/dist/index.js"
             ok=0
         fi
         if [ ! -x "$SCRIPT_DIR/node_modules/.bin/tsc" ]; then
