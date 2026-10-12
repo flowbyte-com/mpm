@@ -109,7 +109,6 @@ OPENCODE_CONFIG_DIR="${HOME_DIR}/.config/opencode"
 OPENCODE_CONFIG="${OPENCODE_CONFIG_DIR}/opencode.jsonc"
 OPENCODE_PLUGIN_DIR="${OPENCODE_CONFIG_DIR}/plugin"
 PLUGIN_INSTALL_DIR="${HOME_DIR}/.mpm/agent_installation"
-
 # Canonical adapter install locations (new and legacy).
 CANONICAL_ADAPTER_DIR="${PLUGIN_INSTALL_DIR}/mpm-opencode"
 LEGACY_ADAPTER_DIR="${PLUGIN_INSTALL_DIR}/opencode-mpm"
@@ -207,61 +206,39 @@ EOF
         return 0
     fi
 
-    # Detect legacy 'opencode-mpm' references and migrate them.
-    # We use Python for safe JSON editing — shell string replacement
-    # would risk corrupting other plugin entries.
-    if command -v python3 >/dev/null 2>&1; then
-        if python3 - "$OPENCODE_CONFIG" "$CANONICAL_PLUGIN_ENTRY" <<'PYEOF'
-import json, os, sys
-config_path = os.path.realpath(sys.argv[1])
-canonical = sys.argv[2]
-with open(config_path, 'r', encoding='utf-8') as f:
-    text = f.read()
-try:
-    data = json.loads(text)
-except Exception:
-    sys.exit(0)  # malformed config — leave it alone, OpenCode will error
-plugins = data.get('plugin', [])
-if not isinstance(plugins, list):
-    plugins = [plugins]
-migrated = False
-new_plugins = []
-for entry in plugins:
-    # Recognise the legacy path by directory component, not by raw
-    # substring (the sandbox test path /tmp/mpm-opencode-debug-XYZ/...
-    # happens to contain 'mpm-opencode' as a prefix and must NOT be
-    # misread as a stale entry).
-    if (
-        isinstance(entry, str)
-        and (
-            '/opencode-mpm/' in entry
-            or entry.endswith('/opencode-mpm')
-            or entry.endswith('opencode-mpm/dist/index.js')
-        )
-    ):
-        new_plugins.append(canonical)
-        migrated = True
-    else:
-        new_plugins.append(entry)
-# If the canonical entry is not already present, add it.
-if canonical not in new_plugins:
-    # Place canonical first; preserve any other entries.
-    new_plugins = [canonical] + [p for p in new_plugins if p != canonical]
-    migrated = True
-data['plugin'] = new_plugins
-with open(config_path, 'w', encoding='utf-8') as f:
-    json.dump(data, f, indent=2)
-    f.write('\n')
-if migrated:
-    print(f"migrated stale opencode-mpm entries to {canonical}", file=sys.stderr)
-PYEOF
-        then
-            log "opencode.jsonc updated (migrated stale entries)"
-        fi
-    else
-        warn "python3 not available — opencode.jsonc migration skipped"
-        warn "  manually replace 'opencode-mpm' with 'mpm-opencode' in ${OPENCODE_CONFIG}"
+    if ! command -v python3 >/dev/null 2>&1; then
+        err "python3 is required to migrate ${OPENCODE_CONFIG} safely."
+        err "  MPM will NOT edit the file by shell substitution — that corrupts"
+        err "  other plugin entries and any URL inside a string value."
+        err "  Install python3 and re-run, or replace 'opencode-mpm' with"
+        err "  'mpm-opencode' in ${OPENCODE_CONFIG} by hand."
+        return 1
     fi
+
+    # opencode.jsonc is JSONC: users put // comments and trailing commas in
+    # it. json.loads() rejects those, and the previous implementation
+    # treated that rejection as "nothing to do" and exited 0 — so the shell
+    # reported a successful migration while the stale opencode-mpm entry
+    # survived. jsonc_config.py strips comments and trailing commas with a
+    # string-aware scanner (a regex would eat the "https://" in a $schema
+    # URL), splices only the plugin array so unrelated keys and the
+    # operator's comments survive byte-for-byte, and exits non-zero when the
+    # config cannot be parsed or walked safely.
+    local migrator="${SCRIPT_DIR}/scripts/jsonc_config.py"
+    if [ ! -f "$migrator" ]; then
+        err "JSONC migration helper missing at ${migrator}"
+        err "  ${OPENCODE_CONFIG} was NOT modified."
+        return 1
+    fi
+
+    if ! python3 "$migrator" "$OPENCODE_CONFIG" "$CANONICAL_PLUGIN_ENTRY"; then
+        err "opencode.jsonc migration failed — file left untouched."
+        err "  MPM is NOT registered with OpenCode; its plugin will not load."
+        return 1
+    fi
+
+    log "opencode.jsonc migrated to canonical plugin entry"
+    return 0
 }
 
 # --------------------------------------------------------------------------
@@ -372,13 +349,36 @@ case "$MODE" in
     install)
         log "installing mpm-opencode plugin (id=$PLUGIN_ID) from $SCRIPT_DIR"
         build_dist
-        migrate_opencode_config
+        # A failed migration means MPM is NOT registered with OpenCode.
+        # Continuing would print "done" and a verification summary that
+        # claims the plugin entry points at the canonical path — the exact
+        # false-success this step previously produced on commented configs.
+        if ! migrate_opencode_config; then
+            err "install aborted: OpenCode plugin registration did not complete."
+            exit 1
+        fi
         refresh_agents_md
         cleanup_legacy_generated
         log "done"
-        log "verification:"
-        log "  opencode.jsonc plugin[] points at $CANONICAL_PLUGIN_ENTRY"
-        log "  AGENTS.md managed block is current"
+        # State what was actually checked, and what was not. An install
+        # log that lists only successes reads as "the plugin works", which
+        # this installer cannot establish: OpenCode exposes no
+        # non-interactive surface that reports which plugins it loaded
+        # (every `opencode` subcommand requires a live authenticated
+        # environment), and an unresolvable plugin URL is silent.
+        log "verification (checked here):"
+        if python3 "${SCRIPT_DIR}/scripts/jsonc_config.py" \
+                --check-entry "$OPENCODE_CONFIG" "$CANONICAL_PLUGIN_ENTRY" >/dev/null 2>&1; then
+            log "  [ok]   plugin[] in $OPENCODE_CONFIG names the registered path"
+        else
+            log "  [FAIL] plugin[] in $OPENCODE_CONFIG does not name the registered path"
+        fi
+        log "  [ok]   AGENTS.md managed block refreshed"
+        log "NOT verified:"
+        log "  whether OpenCode actually loads the plugin. OpenCode offers no"
+        log "  non-interactive way to ask, and a plugin URL that resolves to"
+        log "  nothing produces no error. Confirm by starting OpenCode and"
+        log "  invoking an mpm_* tool."
         if [ -d "$LEGACY_ADAPTER_DIR" ]; then
             log "  legacy directory remains at $LEGACY_ADAPTER_DIR"
             log "  operator can remove manually: rm -rf '$LEGACY_ADAPTER_DIR'"
@@ -405,6 +405,22 @@ case "$MODE" in
         if [ -f "$OPENCODE_CONFIG" ] && grep -q 'opencode-mpm' "$OPENCODE_CONFIG"; then
             err "verify: $OPENCODE_CONFIG still references legacy 'opencode-mpm'"
             ok=0
+        fi
+        # Presence of the canonical entry, not merely absence of the legacy
+        # one. A config holding only unrelated plugins passed the checks
+        # above with MPM entirely unregistered — the registration check has
+        # to be for the thing we claim to have installed.
+        #
+        # Parsed with the JSONC-aware reader, not grep, so a commented or
+        # comma-trailing config is understood and a URL in another field
+        # cannot masquerade as a match.
+        if [ -f "$OPENCODE_CONFIG" ]; then
+            if ! python3 "${SCRIPT_DIR}/scripts/jsonc_config.py" \
+                    --check-entry "$OPENCODE_CONFIG" "$CANONICAL_PLUGIN_ENTRY" 2>>"$INSTALL_LOG"; then
+                err "verify: $OPENCODE_CONFIG does not register the canonical plugin entry"
+                err "  expected: $CANONICAL_PLUGIN_ENTRY"
+                ok=0
+            fi
         fi
         [ "$ok" = "1" ] || exit 1
         log "verify: ok"

@@ -310,27 +310,40 @@ class OpenCodeInstallStaleConfigMigration(unittest.TestCase):
         self.assertTrue(user_file.exists(), "user content was removed")
         self.assertEqual(user_file.read_text(), "# My notes\n")
 
-    def test_verify_fails_when_stale_entry_remains(self):
-        # If the config has a stale entry that can't be migrated
-        # (e.g. points at an unrelated path), --verify must report it.
+    def test_verify_fails_when_canonical_entry_absent(self):
+        # A config holding only an unrelated plugin entry means MPM is
+        # NOT registered with OpenCode. --verify must report that.
+        #
+        # This used to assert the opposite (returncode 0), on the
+        # reasoning that the check only looks for 'opencode-mpm'
+        # references. That reasoning described the gap rather than the
+        # desired behaviour: verify passed with MPM entirely unregistered,
+        # which is the exact failure class this installer already had.
         canonical = _stage_adapter(self.home, ADAPTER_DIR)
         _write_opencode_config(self.home, [
             "file:///some/unrelated/path/dist/index.js",
         ])
-        # --verify must run against the staged adapter (which has the
-        # hermetic dist/ + node_modules pre-staged) so the verify
-        # checks for stale references see the canonical install
-        # state.
         staged_install_sh = canonical / "install.sh"
         result = _run(["--verify"], self.home, install_sh=staged_install_sh)
-        # Verify succeeds because the stale entry's path doesn't
-        # contain 'opencode-mpm' specifically — it just contains an
-        # unrelated path. The verify checks for 'opencode-mpm'
-        # references specifically, not for any stale path. This is
-        # the current behaviour.
+        self.assertEqual(result.returncode, 1,
+            f"verify must fail when the canonical entry is absent; "
+            f"stderr={result.stderr}")
+        self.assertIn("does not register the canonical plugin entry",
+                      result.stderr)
+
+    def test_verify_passes_when_canonical_entry_present(self):
+        canonical = _stage_adapter(self.home, ADAPTER_DIR)
+        cfg = _write_opencode_config(self.home, [
+            f"file://{canonical}/dist/index.js",
+            "someone-elses-plugin",
+        ])
+        staged_install_sh = canonical / "install.sh"
+        result = _run(["--verify"], self.home, install_sh=staged_install_sh)
         self.assertEqual(result.returncode, 0,
-            f"verify should pass when no opencode-mpm reference "
-            f"exists; stderr={result.stderr}")
+            f"verify should pass with the canonical entry registered; "
+            f"stderr={result.stderr}")
+        # Verification must not mutate the user's config.
+        self.assertIn("someone-elses-plugin", cfg.read_text())
 
     def test_legacy_dist_with_no_src_is_removed(self):
         # If the legacy directory has ONLY a generated dist/ (no src
@@ -430,5 +443,149 @@ class OpenCodeInstallUninstallContract(unittest.TestCase):
         self.assertIn("npm:keep-me", data["plugin"])
 
 
+
+class OpenCodeInstallJsonc(unittest.TestCase):
+    """JSONC handling at the installer level.
+
+    The defect: opencode.jsonc is JSONC, so it legitimately contains
+    comments and trailing commas. install.sh read it with json.loads,
+    caught the resulting exception, and exited 0 — so the shell reported a
+    successful migration while the stale entry survived and the plugin
+    loader broke. The user saw "done" and an unusable install.
+    """
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp(prefix="mpm-opencode-jsonc-"))
+        self.addCleanup(self._cleanup)
+        self.home = self._tmp / "home"
+        self.home.mkdir()
+
+    def _cleanup(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write_raw_config(self, body: str) -> Path:
+        cfg_dir = self.home / ".config" / "opencode"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        cfg = cfg_dir / "opencode.jsonc"
+        cfg.write_text(body)
+        return cfg
+
+    def _legacy_entry(self) -> str:
+        return f"file://{self.home}/.mpm/agent_installation/opencode-mpm/dist/index.js"
+
+    def test_commented_config_is_migrated_not_skipped(self):
+        """The core regression: a valid commented config must migrate."""
+        canonical = _stage_adapter(self.home, ADAPTER_DIR)
+        cfg = self._write_raw_config(
+            "{\n"
+            "  // plugins I actually use\n"
+            '  "$schema": "https://opencode.ai/config.json",\n'
+            '  "plugin": [\n'
+            f'    "{self._legacy_entry()}",\n'
+            "  ],\n"
+            "}\n"
+        )
+
+        result = _run([], self.home, install_sh=canonical / "install.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        text = cfg.read_text()
+        self.assertNotIn("opencode-mpm/dist", text,
+                         f"stale entry survived migration:\n{text}")
+        # The operator's comment and $schema URL both survive.
+        self.assertIn("// plugins I actually use", text)
+        self.assertIn("https://opencode.ai/config.json", text)
+
+    def test_trailing_commas_are_tolerated(self):
+        canonical = _stage_adapter(self.home, ADAPTER_DIR)
+        cfg = self._write_raw_config(
+            "{\n"
+            '  "plugin": [\n'
+            f'    "{self._legacy_entry()}",\n'
+            "  ],\n"
+            '  "theme": "dark",\n'
+            "}\n"
+        )
+        result = _run([], self.home, install_sh=canonical / "install.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("opencode-mpm/dist", cfg.read_text())
+
+    def test_malformed_config_fails_loudly_and_is_not_modified(self):
+        """A config we cannot parse must abort the install, not fake success."""
+        canonical = _stage_adapter(self.home, ADAPTER_DIR)
+        broken = "{\n  \"plugin\": [\n"
+        cfg = self._write_raw_config(broken)
+
+        result = _run([], self.home, install_sh=canonical / "install.sh")
+        self.assertNotEqual(
+            result.returncode, 0,
+            "install must NOT report success on an unparseable config",
+        )
+        self.assertIn("migration failed", result.stderr)
+        # The user's file is left exactly as they had it.
+        self.assertEqual(cfg.read_text(), broken)
+
+    def test_install_does_not_claim_done_when_migration_fails(self):
+        """The false-success message must not appear on a failed install."""
+        canonical = _stage_adapter(self.home, ADAPTER_DIR)
+        self._write_raw_config("{ this is not json at all\n")
+        result = _run([], self.home, install_sh=canonical / "install.sh")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("[mpm-opencode install] done", result.stderr)
+        self.assertIn("install aborted", result.stderr)
+
+    def test_repeated_install_is_byte_identical(self):
+        canonical = _stage_adapter(self.home, ADAPTER_DIR)
+        self._write_raw_config(
+            "{\n  // note\n"
+            '  "plugin": [\n'
+            f'    "{self._legacy_entry()}",\n'
+            '    "keep-me",  // unrelated\n'
+            "  ],\n}\n"
+        )
+        staged = canonical / "install.sh"
+        first = _run([], self.home, install_sh=staged)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        after_first = (self.home / ".config" / "opencode" / "opencode.jsonc").read_text()
+
+        second = _run([], self.home, install_sh=staged)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        after_second = (self.home / ".config" / "opencode" / "opencode.jsonc").read_text()
+
+        self.assertEqual(
+            after_first, after_second,
+            "a repeated install rewrote an already-correct config; "
+            "comments and formatting should be untouched",
+        )
+        self.assertIn("// note", after_second)
+        self.assertIn("// unrelated", after_second)
+        self.assertIn("keep-me", after_second)
+
+    def test_unrelated_config_preserved_through_migration(self):
+        canonical = _stage_adapter(self.home, ADAPTER_DIR)
+        cfg = self._write_raw_config(
+            "{\n"
+            '  "$schema": "https://opencode.ai/config.json",\n'
+            '  "theme": "dark",\n'
+            '  "model": "anthropic/claude",\n'
+            '  "mcp": {\n    "some-server": {\n      "command": "npx",\n'
+            '      "args": ["-y", "server"]\n    }\n  },\n'
+            '  "plugin": [\n'
+            f'    "{self._legacy_entry()}",\n'
+            '    "npm:another-plugin"\n'
+            "  ]\n}\n"
+        )
+        result = _run([], self.home, install_sh=canonical / "install.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        import jsonc_config as jc
+
+        data = jc.parse(cfg.read_text())
+        self.assertEqual(data["theme"], "dark")
+        self.assertEqual(data["model"], "anthropic/claude")
+        self.assertEqual(data["mcp"]["some-server"]["command"], "npx")
+        self.assertIn("npm:another-plugin", data["plugin"])
+        self.assertNotIn("opencode-mpm/dist", cfg.read_text())
 if __name__ == "__main__":
     unittest.main()
