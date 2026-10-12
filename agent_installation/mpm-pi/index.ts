@@ -40,6 +40,7 @@ import { spawn } from "node:child_process";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { withProvenance } from "./src/workspace.js";
+import { resolveMpmBinary, describeDiscovery } from "./src/resolve-mpm-binary.js";
 
 // --------------------------------------------------------------------------
 // Subprocess adapter — `mpm call <tool> --payload '<json>'`
@@ -56,6 +57,11 @@ interface MpmCallResult {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+// Resolved once per extension load, so every tool call, CLI helper, and
+// wake-context fetch targets the same binary. See
+// ./src/resolve-mpm-binary.ts for why PATH alone is not sufficient.
+const RESOLVED_MPM_BINARY = resolveMpmBinary();
+
 /**
  * Spawn `mpm call <tool> --payload <json>` and return the parsed envelope.
  * mpm emits one zap-style log line to stderr (e.g. "time=... level=INFO msg=...")
@@ -67,7 +73,7 @@ function callMpm(
 	payload: Record<string, unknown>,
 	opts: { mpmBin?: string; timeoutMs?: number } = {},
 ): Promise<MpmCallResult> {
-	const bin = opts.mpmBin ?? "mpm";
+	const bin = opts.mpmBin ?? RESOLVED_MPM_BINARY.binary;
 	const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	const json = JSON.stringify(payload);
 
@@ -159,7 +165,18 @@ function parseLastJsonLine(s: string): unknown {
 
 function formatFailure(tool: string, r: MpmCallResult): string {
 	if (r.spawnError) {
-		return `mpm not reachable: ${r.spawnError}. Is the mpm binary on PATH?`;
+		// Name every location checked rather than suggesting PATH. The
+		// historical message ("Is the mpm binary on PATH?") sent operators
+		// to inspect a PATH that was never the cause in the failure this
+		// adapter was written for: mpm installed correctly under
+		// ~/.mpm/bin but Pi launched without a login shell.
+		return [
+			`mpm not reachable: ${r.spawnError}`,
+			`Resolved binary: ${RESOLVED_MPM_BINARY.binary}`,
+			"Discovery order checked:",
+			describeDiscovery(RESOLVED_MPM_BINARY),
+			`Set MPM_BINARY to override, or MPM_WORKSPACE if MPM is installed in a relocated workspace.`,
+		].join("\n");
 	}
 	if (r.timedOut) {
 		return `mpm call ${tool} timed out after ${DEFAULT_TIMEOUT_MS}ms.`;
@@ -636,7 +653,7 @@ function callMpmCli(
 	args: string[],
 	opts: { mpmBin?: string; timeoutMs?: number } = {},
 ): Promise<{ success: boolean; raw: string; spawnError: string | null }> {
-	const bin = opts.mpmBin ?? "mpm";
+	const bin = opts.mpmBin ?? RESOLVED_MPM_BINARY.binary;
 	const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
 	return new Promise((resolve) => {
