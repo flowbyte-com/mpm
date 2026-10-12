@@ -25,7 +25,7 @@
  * compact 3-tool surface (mpm_memory, mpm_context, mpm_help);
  * `MPM_EXPOSE_ALL_TOOLS=1` restores the full 22-tool surface. The
  * OpenCode plugin does NOT use `mpm-mcp` — it registers its own typed
- * tools via Pi's extension API, so this filter does not apply.
+ * tools via OpenCode's plugin API, so this filter does not apply.
  *
  * Boot-time health check: on plugin initialization we ping
  * `mpm call mpm_system action:health_check` with a 2s timeout. If the

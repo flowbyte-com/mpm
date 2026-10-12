@@ -42,7 +42,7 @@ free-form `params`:
 > the full registered MCP surface. The OpenCode plugin's typed tools
 > (`mpm__mpm_handoff`, `mpm__mpm_scratchpad`, etc.) are exposed
 > directly regardless of the MCP filter because the OpenCode plugin
-> registers its own typed tools via Pi's extension API, not via
+> registers its own typed tools via OpenCode's plugin API, not via
 > `mpm-mcp`'s `tools/list`.
 
 | Domain | Actions |

@@ -377,6 +377,92 @@ class TestMcpSurfaceContract(unittest.TestCase):
         # Or a stronger statement.
         self.assertRegex(text, r"Pi does not use (the )?MCP server", text)
 
+    def test_readme_does_not_claim_pi_lacks_native_mcp(self):
+        """The stale claim that Pi ships no MCP client.
+
+        Pi added MCP as the `builtin:mcp` built-in extension in 0.99.0
+        (2026-09-29), and it is present in the 1.x line. A README still
+        telling operators Pi has no native MCP support sends them to
+        install a third-party bridge they do not need."""
+        text = _read(README)
+        forbidden = [
+            "does not ship a native MCP",
+            "no native MCP client",
+            "not addressable from a stock Pi",
+        ]
+        for phrase in forbidden:
+            self.assertNotIn(
+                phrase, text,
+                f"README still carries the stale native-MCP claim {phrase!r}",
+            )
+
+    def test_readme_documents_builtin_mcp(self):
+        """The corrected statement: Pi ships MCP as a built-in extension."""
+        text = _read(README)
+        self.assertIn("builtin:mcp", text)
+        self.assertIn("0.99.0", text)
+
+    def test_readme_says_mpm_adapter_needs_no_mcp(self):
+        """The load-bearing conclusion: no MCP bridge is required."""
+        import re
+
+        # Collapse whitespace so the assertion is not defeated by the
+        # sentence being wrapped across lines.
+        text = re.sub(r"\s+", " ", _read(README))
+        self.assertRegex(
+            text,
+            r"does not require MCP|You do not need to enable `builtin:mcp`",
+            "README must state that MPM's Pi adapter needs no MCP bridge",
+        )
+
+    def test_no_adapter_doc_still_misattributes_opencode_to_pi(self):
+        """OpenCode's own source must not describe its plugin as a Pi one.
+
+        This was a copy-paste from the Pi adapter living in the OpenCode
+        plugin's header comment. It matters because it tells a reader —
+        or a future maintainer looking for the OpenCode plugin contract —
+        that OpenCode uses an extension API it does not have. OpenCode
+        loads plugins via its `plugin[]` config array."""
+        offenders = []
+        for path in sorted(ADAPTER_DIR.parent.rglob("*")):
+            if not path.is_file() or path.suffix not in {".md", ".ts"}:
+                continue
+            # Skip generated output and vendored trees.
+            if any(p in {"node_modules", "dist", ".pytest_cache", "__pycache__"}
+                   for p in path.parts):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if "OpenCode" in text and "Pi's extension API" in text:
+                offenders.append(str(path.relative_to(ADAPTER_DIR.parent)))
+        self.assertEqual(
+            offenders, [],
+            "these files attribute OpenCode's plugin API to Pi: "
+            + ", ".join(offenders),
+        )
+
+    def test_no_adapter_doc_still_claims_pi_lacks_native_mcp(self):
+        """The stale native-MCP claim must be gone repo-wide, not just from
+        mpm-pi/README.md.
+
+        Other adapter READMEs cross-reference the Pi integration. A
+        corrected mpm-pi/README.md alongside an uncorrected cross-reference
+        elsewhere leaves the operator reading the same false claim."""
+        import re
+
+        offenders = []
+        for path in sorted(ADAPTER_DIR.parent.rglob("*.md")):
+            if any(p in {"node_modules", "dist", ".pytest_cache", "__pycache__"}
+                   for p in path.parts):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"(has no native MCP|no native MCP client)", text):
+                offenders.append(str(path.relative_to(ADAPTER_DIR.parent)))
+        self.assertEqual(
+            offenders, [],
+            "these adapter docs still claim Pi has no native MCP: "
+            + ", ".join(offenders),
+        )
+
 
 class TestBinaryDiscovery(unittest.TestCase):
     """index.ts must not fall back to the bare literal 'mpm'.

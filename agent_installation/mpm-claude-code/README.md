@@ -318,5 +318,5 @@ The suite covers:
 
 - `~/.mpm/agent_installation/mpm-opencode/` — same MCP server, TypeScript plugin mechanism
 - `~/.mpm/agent_installation/mpm-memory-openclaw/` — same MCP server, OpenClaw plugin mechanism
-- `~/.mpm/agent_installation/mpm-pi/` — same substrate, Pi extension bridge (Pi's upstream `badlogic/pi-mono` has no native MCP; MPM's bundled Pi integration uses Pi's extension API + `AGENTS.md` managed block, not the third-party `pi-mcp-adapter` bridge — see that README for the trade-off)
+- `~/.mpm/agent_installation/mpm-pi/` — same substrate, Pi extension bridge (Pi has shipped a native `builtin:mcp` since 0.99.0; MPM's bundled Pi integration does not use it — it uses Pi's native extension API + `AGENTS.md` managed block, not the third-party `pi-mcp-adapter` bridge — see that README for the trade-off)
 - `~/.mpm/agent_installation/README.md` — index of all integrations
