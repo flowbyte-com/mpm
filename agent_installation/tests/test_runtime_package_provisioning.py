@@ -504,5 +504,286 @@ class TestAdaptersLinkTheRuntimePackage(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Adapter-payload validation (added when staging generalised past OpenClaw)
+# ---------------------------------------------------------------------------
+
+def run_validator(dir_: Path, validator: str, *args: str) -> subprocess.CompletedProcess:
+    """Invoke one validator hook with a hermetic HOME."""
+    cmd = [
+        "bash", "-c",
+        # $1 is the library, $2 the validator, $3.. its arguments.
+        'set -euo pipefail; . "$1"; "$2" "${@:3}"',
+        "bash", str(STAGE_LIB), validator, str(dir_), *args,
+    ]
+    home = dir_.parent / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+
+def run_staged(dir_: Path, validator: str, plugin_id: str) -> subprocess.CompletedProcess:
+    """Invoke the dispatcher exactly as stage_runtime_package does."""
+    cmd = [
+        "bash", "-c",
+        'set -euo pipefail; . "$1"; MPM_RUNTIME_PACKAGE_VALIDATOR="$2" '
+        'mpm_validate_staged_package "$3" "$4"',
+        "bash", str(STAGE_LIB), validator, str(dir_), plugin_id,
+    ]
+    home = dir_.parent / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+
+class ValidatorFixture(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="mpm-validator-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+
+class TestCoreValidation(ValidatorFixture):
+    """The adapter-independent floor every runtime package must clear."""
+
+    def test_empty_directory_is_rejected(self) -> None:
+        d = self.tmp / "empty"
+        d.mkdir()
+        res = run_validator(d, "mpm_validate_runtime_package_core")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("is empty", res.stderr)
+
+    def test_missing_directory_is_rejected(self) -> None:
+        res = run_validator(self.tmp / "nope", "mpm_validate_runtime_package_core")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("does not exist", res.stderr)
+
+    def test_orphan_bytecode_only_directory_is_rejected(self) -> None:
+        """The exact live-host shape: a directory that looks installed."""
+        d = self.tmp / "orphan"
+        (d / "__pycache__").mkdir(parents=True)
+        (d / "__pycache__" / "stale.cpython-314.pyc").write_text("")
+        res = run_validator(d, "mpm_validate_runtime_package_core")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("residue", res.stderr)
+
+    def test_populated_directory_passes(self) -> None:
+        d = self.tmp / "ok"
+        d.mkdir()
+        (d / "index.ts").write_text("export default () => {}\n")
+        self.assertEqual(
+            run_validator(d, "mpm_validate_runtime_package_core").returncode, 0
+        )
+
+
+class TestOpenCodePayloadValidation(ValidatorFixture):
+    """OpenCode's registered payload is one compiled file. Checks that
+    'the build succeeded' and 'the registered path resolves' stay
+    separate facts."""
+
+    def _pkg(self, dist: dict[str, str], *, package_json: bool = True) -> Path:
+        d = self.tmp / "oc"
+        (d / "dist").mkdir(parents=True)
+        for name, body in dist.items():
+            (d / "dist" / name).write_text(body)
+        if package_json:
+            (d / "package.json").write_text('{"main": "./dist/index.js"}')
+        return d
+
+    def test_complete_bundle_passes(self) -> None:
+        d = self._pkg({
+            "index.js": 'import { w } from "./workspace.js";\nexport default w;\n',
+            "workspace.js": "export const w = () => {};\n",
+            "resolve-mpm-binary.js": "export const r = () => {};\n",
+        })
+        self.assertEqual(run_staged(d, "mpm_validate_runtime_package_opencode",
+                                    "mpm-opencode").returncode, 0)
+
+    def test_missing_bundle_is_rejected(self) -> None:
+        d = self._pkg({})
+        res = run_staged(d, "mpm_validate_runtime_package_opencode", "mpm-opencode")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("missing dist/index.js", res.stderr)
+
+    def test_empty_bundle_is_rejected(self) -> None:
+        """tsc can produce a zero-byte file on some failure paths; an empty
+        bundle registers and loads nothing."""
+        d = self._pkg({"index.js": ""})
+        res = run_staged(d, "mpm_validate_runtime_package_opencode", "mpm-opencode")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("is empty", res.stderr)
+
+    def test_unresolved_relative_import_is_rejected(self) -> None:
+        d = self._pkg({"index.js": 'import { w } from "./workspace.js";\n'})
+        res = run_staged(d, "mpm_validate_runtime_package_opencode", "mpm-opencode")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("unresolved internal imports", res.stderr)
+        self.assertIn("./workspace.js", res.stderr)
+
+    def test_bare_specifier_is_not_treated_as_unresolved(self) -> None:
+        """@opencode-ai/plugin is supplied by the host and is unresolvable
+        in the checkout too. Rejecting it would fail every correct run."""
+        d = self._pkg({
+            "index.js": 'import { tool } from "@opencode-ai/plugin";\n'
+                        "export default { tool };\n",
+        })
+        self.assertEqual(run_staged(d, "mpm_validate_runtime_package_opencode",
+                                    "mpm-opencode").returncode, 0)
+
+
+class TestPiPayloadValidation(ValidatorFixture):
+    """Pi's contract is narrow and silent when unmet, which is what makes
+    these checks worth having."""
+
+    def _pkg(self, index_ts: str | None, **modules: str) -> Path:
+        d = self.tmp / "pi"
+        (d / "src").mkdir(parents=True)
+        if index_ts is not None:
+            (d / "index.ts").write_text(index_ts)
+        for name, body in modules.items():
+            (d / "src" / name).write_text(body)
+        return d
+
+    def test_conforming_extension_passes(self) -> None:
+        d = self._pkg(
+            'import { w } from "./src/workspace.js";\n'
+            'import type { E } from "@earendil-works/pi-coding-agent";\n'
+            "export default function activate(api: E) { return w(); }\n",
+            **{"workspace.ts": "export const w = () => 1;\n"},
+        )
+        self.assertEqual(run_staged(d, "mpm_validate_runtime_package_pi",
+                                    "mpm-pi").returncode, 0)
+
+    def test_js_specifier_resolving_to_a_ts_file_is_accepted(self) -> None:
+        """TypeScript imports carry a .js specifier and load a .ts file.
+        Treating that as unresolved would reject every correct package."""
+        d = self._pkg(
+            'import { w } from "./src/workspace.js";\nexport default () => w;\n',
+            **{"workspace.ts": "export const w = () => 1;\n"},
+        )
+        self.assertEqual(run_staged(d, "mpm_validate_runtime_package_pi",
+                                    "mpm-pi").returncode, 0)
+
+    def test_missing_index_is_rejected(self) -> None:
+        """Pi silently ignores a registered directory with no index.ts."""
+        d = self._pkg(None, **{"workspace.ts": "export const w = 1;\n"})
+        res = run_staged(d, "mpm_validate_runtime_package_pi", "mpm-pi")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("missing index.ts", res.stderr)
+
+    def test_no_default_export_is_rejected(self) -> None:
+        d = self._pkg("export const activate = () => {};\n")
+        res = run_staged(d, "mpm_validate_runtime_package_pi", "mpm-pi")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("no default export", res.stderr)
+
+    def test_unresolved_relative_import_is_rejected(self) -> None:
+        d = self._pkg(
+            'import { w } from "./src/gone.js";\nexport default () => w;\n'
+        )
+        res = run_staged(d, "mpm_validate_runtime_package_pi", "mpm-pi")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("unresolved internal imports", res.stderr)
+
+    def test_bare_virtual_module_is_not_treated_as_unresolved(self) -> None:
+        """@earendil-works/* are bundled virtual modules from the host."""
+        d = self._pkg(
+            'import { Type } from "@earendil-works/pi-ai";\n'
+            "export default () => Type;\n"
+        )
+        self.assertEqual(run_staged(d, "mpm_validate_runtime_package_pi",
+                                    "mpm-pi").returncode, 0)
+
+
+class TestValidatorDispatch(ValidatorFixture):
+    def test_unknown_validator_name_fails_rather_than_passing(self) -> None:
+        """A typo in an installer must degrade to a failure, not to no
+        validation at all."""
+        d = self.tmp / "d"
+        d.mkdir()
+        (d / "index.ts").write_text("export default () => {}\n")
+        res = run_staged(d, "mpm_validate_does_not_exist", "mpm-pi")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("unknown runtime package validator", res.stderr)
+
+    def test_default_validator_is_still_openclaw(self) -> None:
+        """An installer that predates the hook mechanism must keep its
+        existing checks rather than silently losing them."""
+        d = self.tmp / "d"
+        d.mkdir()
+        (d / "index.ts").write_text("module.exports = {};\n")
+        (d / "package.json").write_text('{"main": "index.js"}\n')
+        (d / "index.js").write_text("module.exports = {};\n")
+        (d / "openclaw.plugin.json").write_text('{"id": "thing"}\n')
+        res = run_staged(d, "mpm_validate_runtime_package", "thing")
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+
+class TestAdaptersWithoutARuntimePackage(unittest.TestCase):
+    """Adding a provisioning step to an adapter that does not need one is
+    its own defect: it introduces a build or copy the adapter has no use
+    for, and a new way to fail an install that used to be trivial.
+
+    Claude Code registers the canonical mpm-mcp binary and materialises
+    its session-start hook at install time. Hermes is a managed-block
+    writer. Neither resolves anything out of its own directory after the
+    installer returns.
+    """
+
+    NO_RUNTIME_PACKAGE = ["mpm-claude-code", "mpm-hermes"]
+
+    def test_no_staging_library_is_sourced(self) -> None:
+        for adapter in self.NO_RUNTIME_PACKAGE:
+            with self.subTest(adapter=adapter):
+                for script in (AGENT_DIR / adapter).rglob("*.sh"):
+                    text = script.read_text(encoding="utf-8")
+                    self.assertNotIn(
+                        "stage_runtime_package", text,
+                        f"{script.relative_to(REPO_ROOT)} provisions a "
+                        f"runtime package but this adapter does not need one",
+                    )
+                for script in (AGENT_DIR / adapter).rglob("*.py"):
+                    text = script.read_text(encoding="utf-8")
+                    self.assertNotIn(
+                        "stage_runtime_package", text,
+                        f"{script.relative_to(REPO_ROOT)} provisions a "
+                        f"runtime package but this adapter does not need one",
+                    )
+
+    def test_claude_code_registers_the_canonical_binary(self) -> None:
+        """The reason Claude Code needs no package: its registration names
+        a binary in the runtime root, not a file in the adapter tree."""
+        text = (AGENT_DIR / "mpm-claude-code" / "install.sh").read_text(
+            encoding="utf-8")
+        self.assertIn(".mpm/bin/mpm-mcp", text)
+
+
+class TestOpenClawCompatibility(unittest.TestCase):
+    """The generalisation must not have changed the OpenClaw path. These
+    run the real shipped manifests through the library."""
+
+    def test_both_openclaw_plugins_stage_and_validate(self) -> None:
+        tmp = Path(tempfile.mkdtemp(prefix="mpm-ocl-compat-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        for plugin_id, (src, manifest) in OPENCLAW_PLUGINS.items():
+            with self.subTest(plugin=plugin_id):
+                res = run_stage(src, tmp, plugin_id, manifest)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertTrue(
+                    (tmp / "agent_installation" / plugin_id).is_dir())
+
+    def test_openclaw_validator_still_demands_plugin_metadata(self) -> None:
+        tmp = Path(tempfile.mkdtemp(prefix="mpm-ocl-meta-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        d = tmp / "d"
+        d.mkdir()
+        (d / "index.js").write_text("module.exports = {};\n")
+        (d / "package.json").write_text('{"main": "index.js"}\n')
+        res = run_staged(d, "mpm_validate_runtime_package", "thing")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("openclaw.plugin.json", res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
