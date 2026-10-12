@@ -720,6 +720,66 @@ class TestValidatorDispatch(ValidatorFixture):
         self.assertEqual(res.returncode, 0, res.stderr)
 
 
+class TestAdapterManifestsMatchInstallers(unittest.TestCase):
+    """Same drift guard the OpenClaw adapters already have: the fixture
+    manifest must mirror what the installer actually stages."""
+
+    CASES = [
+        ("mpm-opencode", "install.sh", "OPENCODE_RUNTIME_MANIFEST", [
+            "dist/index.js",
+            "dist/workspace.js",
+            "dist/resolve-mpm-binary.js",
+            "package.json",
+        ]),
+        ("mpm-pi", "install.sh", "PI_RUNTIME_MANIFEST", [
+            "index.ts",
+            "src/workspace.ts",
+            "src/resolve-mpm-binary.ts",
+        ]),
+    ]
+
+    def test_manifests_match(self) -> None:
+        for adapter, script, var, expected in self.CASES:
+            with self.subTest(adapter=adapter):
+                text = (AGENT_DIR / adapter / script).read_text(encoding="utf-8")
+                block = re.search(
+                    rf"{var}=\(\s*(.*?)\n\)", text, re.S
+                )
+                self.assertIsNotNone(block, f"{adapter} has no {var}")
+                declared = [
+                    line.strip() for line in block.group(1).splitlines()
+                    if line.strip()
+                ]
+                self.assertEqual(sorted(declared), sorted(expected))
+
+
+class TestManifestEntriesExistInSource(unittest.TestCase):
+    """A manifest naming a file tsc does not emit must fail loudly at
+    stage time, not publish a package that throws on load."""
+
+    def test_opencode_manifest_matches_tsc_output_shape(self) -> None:
+        """tsc emits one .js per .ts under src/ (rootDir=src, outDir=dist).
+        The manifest is therefore exactly the src/ file list plus
+        package.json — anything else would be a manifest drift bug."""
+        src = AGENT_DIR / "mpm-opencode" / "src"
+        emitted = sorted(
+            f"dist/{p.stem}.js" for p in src.glob("*.ts")
+        )
+        expected = sorted([
+            "dist/index.js",
+            "dist/workspace.js",
+            "dist/resolve-mpm-binary.js",
+        ])
+        self.assertEqual(emitted, expected,
+                         "opencode src/ changed; the runtime manifest and "
+                         "the fake-tsc test stub must both be updated")
+
+    def test_pi_manifest_matches_source_tree(self) -> None:
+        src = AGENT_DIR / "mpm-pi"
+        for rel in ("index.ts", "src/workspace.ts", "src/resolve-mpm-binary.ts"):
+            self.assertTrue((src / rel).exists(), f"missing source file: {rel}")
+
+
 class TestAdaptersWithoutARuntimePackage(unittest.TestCase):
     """Adding a provisioning step to an adapter that does not need one is
     its own defect: it introduces a build or copy the adapter has no use

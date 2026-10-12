@@ -210,20 +210,104 @@ class TestPiSettingsInstaller(unittest.TestCase):
         self.assertEqual(backups, [])
 
     # -- Adapter payload gate -------------------------------------------------
+    #
+    # The installer provisions its own payload rather than checking that
+    # someone else already did. Pi ignores a registered directory with no
+    # index.ts without saying so, so "is index.ts there?" was never a
+    # sufficient gate — the gate is "did a validated package get staged?".
 
-    def test_fails_clearly_when_canonical_adapter_missing(self):
-        """If the canonical adapter payload is not installed, the installer
-        must fail clearly rather than write a dead path into Pi settings."""
-        # Remove the canonical adapter index file.
-        (self.paths["adapter_dir"] / "index.ts").unlink()
+    def test_provisions_payload_when_runtime_package_is_absent(self):
+        """An empty runtime workspace is provisioned, not refused.
+
+        This is the state a checkout-based install leaves behind: the
+        directory the registration names exists and holds nothing.
+        """
+        adapter = self.paths["adapter_dir"]
+        shutil.rmtree(adapter)
 
         proc = _run_installer(self.env)
-        self.assertEqual(proc.returncode, 2)
-        self.assertIn("canonical Pi adapter index not found",
-                      proc.stderr + proc.stdout)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
-        # No mutation to settings.json.
+        self.assertTrue((adapter / "index.ts").exists(),
+                        "index.ts was not provisioned into the runtime root")
+        # The whole runtime manifest, not just the entrypoint.
+        self.assertTrue((adapter / "src" / "workspace.ts").exists())
+        self.assertTrue((adapter / "src" / "resolve-mpm-binary.ts").exists())
+
+        # And the registration names the directory that now has content.
+        data = json.loads(self.paths["pi_settings"].read_text())
+        self.assertEqual(data["extensions"], [str(adapter)])
+
+    def test_provisions_payload_when_runtime_dir_has_only_orphan_bytecode(self):
+        """Orphan .pyc residue is what a half-provisioned workspace
+        actually looks like; it must be swept, not mistaken for payload."""
+        adapter = self.paths["adapter_dir"]
+        cache = adapter / "__pycache__"
+        cache.mkdir(parents=True)
+        (cache / "install_agents_instructions.cpython-314.pyc").write_text("")
+        (adapter / "index.ts").unlink()
+
+        proc = _run_installer(self.env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        self.assertTrue((adapter / "index.ts").exists())
+        self.assertFalse((adapter / "__pycache__").exists(),
+                         "bytecode residue survived into the runtime package")
+
+    def test_refuses_when_source_cannot_supply_the_manifest(self):
+        """A payload that cannot be staged must never be registered."""
+        # Point the installer at a source tree that is missing a manifest
+        # entry. Copying install.sh alone is the honest simulation of a
+        # truncated source tree.
+        partial = Path(self.tmp) / "partial-src"
+        partial.mkdir()
+        (partial / "install.sh").write_text(
+            INSTALL_SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+        library = partial / ".." / "scripts" / "stage_runtime_package.sh"
+        library.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(
+            REPO / "agent_installation" / "scripts" / "stage_runtime_package.sh",
+            library,
+        )
+
+        env = {**self.env}
+        proc = subprocess.run(
+            ["bash", str(partial / "install.sh")],
+            env=env, capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("refusing to register an unvalidated payload",
+                      proc.stderr + proc.stdout)
         self.assertFalse(self.paths["pi_settings"].exists())
+
+    def test_refuses_when_staging_library_is_missing(self):
+        """Without the shared library the installer cannot provision
+        safely, so it must stop rather than half-configure Pi."""
+        partial = Path(self.tmp) / "no-library-src"
+        partial.mkdir()
+        (partial / "install.sh").write_text(
+            INSTALL_SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+
+        proc = subprocess.run(
+            ["bash", str(partial / "install.sh")],
+            env=self.env, capture_output=True, text=True, timeout=30,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("runtime provisioning library not found",
+                      proc.stderr + proc.stdout)
+        self.assertFalse(self.paths["pi_settings"].exists())
+
+    def test_verify_flags_a_registration_with_no_payload(self):
+        """--verify must not declare success on the entry alone."""
+        data = json.loads(json.dumps({"extensions": [
+            str(self.paths["adapter_dir"])]}))
+        self.paths["pi_settings"].write_text(json.dumps(data, indent=2) + "\n")
+        (self.paths["adapter_dir"] / "index.ts").unlink()
+
+        proc = _run_installer(self.env, "--verify")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("no payload", proc.stderr + proc.stdout)
 
     # -- Corruption safety ----------------------------------------------------
 

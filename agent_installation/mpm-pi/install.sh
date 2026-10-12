@@ -2,15 +2,19 @@
 #
 # install.sh — Materialize the Pi ↔ MPM integration.
 #
-# Idempotent. Performs two orthogonal responsibilities:
+# Idempotent. Performs three ordered responsibilities:
 #
-#   1. Refresh the Pi extension entry in ~/.pi/agent/settings.json.
+#   1. Provision the runtime package into the MPM runtime root, using the
+#      shared stage_runtime_package.sh library, and validate it against
+#      Pi's extension contract. A registration is never written for a
+#      payload that is absent or invalid.
+#   2. Refresh the Pi extension entry in ~/.pi/agent/settings.json.
 #      Detects and migrates STALE entries that reference the
 #      pre-2026-09-17 legacy 'agent_plugins/pi-mpm' path (or the
 #      pre-2026-09-17 'pi-mpm' directory name). New entries use the
 #      canonical '~/.mpm/agent_installation/mpm-pi' path.
 #
-#   2. Refresh the AGENTS.md behavioral managed block (delegates to
+#   3. Refresh the AGENTS.md behavioral managed block (delegates to
 #      install_agents_instructions.py for the actual content work).
 #
 # Migration behavior (Part 1 — namespace refresh):
@@ -85,20 +89,53 @@ warn() { printf '[mpm-pi install] WARN: %s\n' "$*" >&2; }
 err()  { printf '[mpm-pi install] ERROR: %s\n' "$*" >&2; }
 
 # --------------------------------------------------------------------------
-# 1. Verify the canonical adapter payload exists
+# 1. Provision the runtime package
 # --------------------------------------------------------------------------
 #
-# Fail clearly if the expected integration payload is unavailable rather
-# than writing a dead path into Pi settings.
+# Pi loads the extension at runtime from the directory this installer writes
+# into ~/.pi/agent/settings.json. That directory is populated by Git only
+# when ~/.mpm *is* the source checkout — an invariant that no longer holds
+# now that checkouts and runtime roots are separate trees. Running this
+# installer from a checkout therefore used to leave Pi pointed at a
+# directory holding nothing, and Pi ignores a registered directory with no
+# index.ts without saying so.
+#
+# So provisioning is explicit here, using the shared library rather than a
+# copy loop: manifest allowlist, staged into a sibling and swapped into
+# place atomically, validated before Pi is told about it, idempotent on
+# re-run, and preserving any operator file already in the package.
 
-if [ ! -f "$ADAPTER_INDEX" ]; then
-    err "canonical Pi adapter index not found at $ADAPTER_INDEX"
-    err "  MPM_WORKSPACE=${MPM_HOME_DIR} does not contain agent_installation/mpm-pi/"
-    err "  Run the canonical MPM substrate installer first:"
-    err "    cd ~/.mpm && ./install.sh"
-    err "  Or set MPM_WORKSPACE to the directory that holds the MPM checkout."
-    exit 2
-fi
+STAGE_LIBRARY="${SCRIPT_DIR}/../scripts/stage_runtime_package.sh"
+
+# Explicit allowlist. index.ts is Pi's entrypoint contract; the two files
+# under src/ are what it imports. Nothing else is runtime-relevant —
+# install.sh, tests/, and reconcile.json are development surface.
+PI_RUNTIME_MANIFEST=(
+    index.ts
+    src/workspace.ts
+    src/resolve-mpm-binary.ts
+)
+
+stage_pi_runtime_package() {
+    if [ ! -f "$STAGE_LIBRARY" ]; then
+        err "runtime provisioning library not found at $STAGE_LIBRARY"
+        err "  this installer cannot safely provision its own payload"
+        exit 2
+    fi
+    # shellcheck source=../scripts/stage_runtime_package.sh
+    . "$STAGE_LIBRARY"
+
+    local staged
+    if ! staged="$(MPM_RUNTIME_PACKAGE_VALIDATOR=mpm_validate_runtime_package_pi \
+                  stage_runtime_package "$SCRIPT_DIR" "$MPM_HOME_DIR" \
+                  "mpm-pi" "${PI_RUNTIME_MANIFEST[@]}")"; then
+        err "runtime package provisioning failed for mpm-pi; refusing to register an unvalidated payload"
+        exit 3
+    fi
+    ADAPTER_DIR="$(cd "$staged" && pwd -P)"
+    ADAPTER_INDEX="${ADAPTER_DIR}/index.ts"
+    log "runtime package staged and validated: $ADAPTER_DIR"
+}
 
 # --------------------------------------------------------------------------
 # 2. Refresh ~/.pi/agent/settings.json extension entry
@@ -312,6 +349,15 @@ PYEOF
             err "settings.json does not exist"
             exit 1
         fi
+        # Registration pointing at a directory with no payload is the exact
+        # state this installer now refuses to create. Report it rather
+        # than letting --verify declare success on the entry alone.
+        if [ ! -f "$ADAPTER_INDEX" ]; then
+            err "registered extension path has no payload: $ADAPTER_INDEX"
+            err "  Pi ignores a registered directory with no index.ts."
+            err "  Re-run $0 without --verify to provision it."
+            exit 1
+        fi
         python3 - "$PI_SETTINGS" "$ADAPTER_DIR" <<'PYEOF'
 import json, sys
 settings_path = sys.argv[1]
@@ -331,9 +377,28 @@ sys.exit(1 if legacy or canonical not in extensions else 0)
 PYEOF
         ;;
     "")
+        stage_pi_runtime_package
         refresh_pi_settings
         refresh_agents_md
         log "Pi integration installed. Restart Pi to load the extension."
+        # Say what was checked and what was not. A bare "installed" reads
+        # as "the extension loads". This installer cannot establish that:
+        # Pi has no introspection command, and `pi --offline --print`
+        # surfaces load errors but still exits 0, so its exit code is not
+        # evidence either way.
+        log "verification (checked here):"
+        if [ -f "$ADAPTER_INDEX" ]; then
+            log "  [ok]   extension entrypoint exists at $ADAPTER_INDEX"
+        else
+            log "  [FAIL] extension entrypoint missing"
+        fi
+        log "  [ok]   runtime package validated against Pi's extension contract"
+        log "  [ok]   extensions[] in $PI_SETTINGS names the provisioned directory"
+        log "NOT verified:"
+        log "  whether Pi actually loads the extension. Pi has no command that"
+        log "  reports loaded extensions, and it ignores a registered directory"
+        log "  with no index.ts without saying so. Confirm by restarting Pi and"
+        log "  invoking an mpm_* tool."
         ;;
     *)
         err "unknown argument: $1"
