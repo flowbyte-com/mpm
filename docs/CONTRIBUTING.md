@@ -107,9 +107,13 @@ registry/dispatcher drift is caught.
   ```bash
   make test
   ```
-  This runs both modules (the standalone `internal/core/` module and the
-  main module). It is slow enough that you should run it before
-  opening a PR, not on every save.
+  This runs every Go module the default gate covers: the main module
+  (`./cmd/...`, `./internal/telemetry`, `./internal/scheduler`,
+  `./internal/critic`), the standalone `internal/core` module, the nested
+  `internal/core/tools` module, and the Python suites under `scripts/`
+  and `agent_installation/`. `release_acceptance` and the Go tests in
+  `scripts/` are separate — see `make test-release`. It is slow enough
+  that you should run it before opening a PR, not on every save.
 - Stranger test (the hermetic specification quickstart gate):
   ```bash
   bash scripts/stranger-test.sh
@@ -119,15 +123,24 @@ registry/dispatcher drift is caught.
   if your change affects user-visible behaviour.
 - Add tests for behaviour you add or change. Tests are table-driven;
   match the patterns in the package you are touching.
-- A single test in isolation:
+- A single test in isolation — route through the Makefile so the build
+  flags stay in one place (`make test` runs every module):
   ```bash
-  cd internal/core && go test -tags fts5 -v ./... -run TestName
+  make test                      # canonical: all Go modules, FTS5 configured
+  make test-race                 # canonical pre-merge gate
   ```
-  or
+  To narrow to one package or one test, use `go test` with **all three**
+  required settings inline — omitting any one fails in a way that looks
+  like a code problem:
   ```bash
-  go test -tags fts5 -v ./cmd/mpm/... -run TestName
+  cd internal/core && \
+    CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 CGO_LDFLAGS=-lm \
+    go test -tags fts5 -v ./... -run TestName
   ```
-- CI must export `CGO_CFLAGS=-DSQLITE_ENABLE_FTS5` or tests will panic.
+- Tests require `CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1`, `-tags fts5`, **and**
+  `CGO_LDFLAGS=-lm`. The last one is easy to miss and fails only on hosts
+  that do not link libm implicitly (CI runners, fresh containers), as
+  ``undefined reference to `log` `` from `sqlite3-binding.c`.
   If you add a test that needs an environment variable, document it
   in the test and in the PR description.
 

@@ -28,8 +28,22 @@ Triad / FTS5 integrity). The `make test-race` recipe is pinned by
 
 - `CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1`
 - `go build -tags fts5` (for `mattn/go-sqlite3`)
+- `CGO_LDFLAGS=-lm`
 
-The Makefile sets both. `make install` validates `$HOME/.mpm/bin/` is canonical — no sudo, no `/usr/local` split.
+All three are required *together*, and the third is the one that gets
+missed. FTS5's `bm25()` calls `log()`, which lives in libm. Most dev hosts
+link libm implicitly so the omission is invisible locally; CI runners and
+fresh containers fail at link time with
+`undefined reference to \`log\``. If a test run produces a wall of
+unrelated failures, or a build fails to link from a `sqlite3-binding.c`
+error, suspect a missing flag here rather than the code under test.
+
+The Makefile sets all three, and `make test` / `make test-race` are the
+canonical commands — prefer them over hand-written `go test` lines, which
+is exactly how the `-lm` omission reached CI. The flag sets are pinned by
+`internal/core/test_environment_invariants_test.go`.
+
+`make install` validates `$HOME/.mpm/bin/` is canonical — no sudo, no `/usr/local` split.
 
 ## 2. Architecture & Projection Test
 

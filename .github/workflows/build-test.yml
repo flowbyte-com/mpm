@@ -102,7 +102,13 @@ jobs:
       # cmd/mpm, internal/scheduler, internal/core/tools, and
       # release_acceptance.
       - name: Core tests (synthesis, reliability, lifecycle, hybrid, wake context, DB safety)
-        run: cd internal/core && go test -short -count=1 ./... -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics|TestDBSafety"
+        # -tags fts5 is required on every invocation even though CGO_CFLAGS is
+        # pinned at workflow level: the C flag and the Go build tag are
+        # independent, and only the C flag can be inherited. Without the tag
+        # this step compiles the non-FTS5 driver path — which the -run filter
+        # below happens to tolerate today, so the omission was invisible until
+        # a selected test started asserting on FTS5 behaviour.
+        run: cd internal/core && go test -short -count=1 -tags fts5 ./... -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics|TestDBSafety"
 
       # Managed-block parity gate (Python; closes a pre-existing CI gap).
       #
