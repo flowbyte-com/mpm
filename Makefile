@@ -425,8 +425,39 @@ install-hooks:
 gen-cli:
 	$(GO) run ./cmd/gen-cli
 
-# Run tests
-test:
+# THE test entry point. One command, correct from a fresh clone.
+#
+# Depends on `build`, and must keep depending on it.
+#
+# The CLI subprocess tests shell out to $(BUILD_DIR)/mpm and
+# $(BUILD_DIR)/mpm-mcp and refuse to fall back to $(PREFIX)/bin/mpm —
+# correctly, because falling back would exercise the installed production
+# binary instead of the code under test and turn a build-ordering mistake
+# into a silent false pass. Those tests are not written to be skippable,
+# so without a prior `make build` a fresh checkout reported 26 failures,
+# every one of them this:
+#
+#     developer build artifact missing: <checkout>/.build/bin/mpm
+#     Run `make build` from the repository root first.
+#
+# A fresh clone now needs exactly one command: `make test`.
+#
+# Cost of the prerequisite: Go's build cache makes a no-op rebuild of all
+# five binaries 0.35s (measured), because nothing is recompiled and only
+# the link step is redone. That is not worth trading for a gate that
+# fails on a clean tree, so the dependency is unconditional rather than
+# conditional on $(BUILD_DIR) being populated.
+#
+# `test-race` carries the same prerequisite for the same reason — it runs
+# the same cmd/mpm tests, and leaving it out would mean the pre-merge
+# gate still fails on a fresh clone. `test-release` already had it.
+#
+# FTS5 discipline is unchanged and still comes from one place: `build`
+# carries `-tags fts5`, CGO_CFLAGS and CGO_LDFLAGS, and every recipe below
+# repeats them for its own `go test` invocation. Adding `build` as a
+# prerequisite does not add a second flag set; it delegates to the target
+# that already owns them.
+test: build
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./cmd/...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/telemetry/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./...
@@ -613,7 +644,13 @@ test-testenv-precommit:
 # See SCRIPTS_TEST_MIN_TESTS above. The recipe parses the reported test
 # count and fails on an unparseable count, a zero count, or a count
 # below the floor, before propagating the suite's real exit status.
-test-scripts:
+#
+# Depends on `build`: scripts/tests/test_build_install_separation.py,
+# test_runtime_asset_provisioning.py and test_install_phase_binaries.py
+# all assert against $(BUILD_DIR), so without the artifacts this target
+# fails on a fresh checkout for a reason that has nothing to do with the
+# scripts. Same reasoning as `test`.
+test-scripts: build
 	@cd scripts && out=$$(python3 -m unittest discover tests 2>&1); status=$$?; \
 	  printf '%s\n' "$$out"; \
 	  n=$$(printf '%s\n' "$$out" | sed -n 's/^Ran \([0-9][0-9]*\) tests\?.*/\1/p' | tail -1); \
@@ -684,7 +721,15 @@ test-scripts:
 #      discover tests` line is preserved (it tests managed-block
 #      byte-for-byte parity in a controlled order and is not on this
 #      umbrella's path).
-test-agent-installation:
+#
+# Depends on `build` for the same reason `test` does:
+# tests/test_build_install_ownership.py asserts that $(BUILD_DIR)/mpm
+# exists and is a compiled binary, so a fresh checkout fails this target
+# on the very first ownership assertion without the artifacts. CI runs
+# the same suite directly (`cd agent_installation && python3 -m unittest
+# discover tests`) and therefore needs `make build` in the job — a make
+# prerequisite cannot help a line that never invokes make.
+test-agent-installation: build
 	@$(MAKE) test-agent-adapters; \
 	  ad_status=$$?; \
 	  cd agent_installation && out=$$(python3 -m unittest discover tests 2>&1); status=$$?; \
@@ -835,18 +880,21 @@ test-release: build
 	cd release_acceptance && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -count=1 -tags fts5 $(RELEASE_RUN) ./...
 
 # Aggregate release gate. Composes the broad race-detector suite with
-# the cross-agent continuity / public-CLI subprocess suite. The
-# subprocess suite requires `make build` so $(BUILD_DIR)/mpm is available
-# to the public-CLI test cases; `make test-race` does NOT depend on
-# build (it's the inner dev-loop race gate), so we keep test-race and
-# test-release as separate leaf targets and compose them at the
-# release-gate level rather than threading build into every test-race
-# invocation. Release_acceptance cannot silently fall outside future
-# release validation while this aggregate exists.
+# the cross-agent continuity / public-CLI subprocess suite. Both leaves
+# depend on `build` so $(BUILD_DIR)/mpm is available to the subprocess
+# test cases that shell out to it; that dependency used to live only on
+# test-release, on the reasoning that test-race was the inner dev-loop
+# gate and should stay build-free. A no-op rebuild is 0.35s, so that
+# reasoning cost a broken fresh-clone pre-merge gate for nothing.
+# Release_acceptance cannot silently fall outside future release
+# validation while this aggregate exists.
 release-gate: test-race test-release
 
 # Run tests with the race detector enabled.
-# Mirrors `make test` but adds `-race`. Both flags are required:
+# Mirrors `make test` but adds `-race`. Depends on `build` for the same
+# reason `test` does — the cmd/mpm subprocess tests need $(BUILD_DIR)/mpm,
+# and the race gate is worthless if it cannot run on a fresh clone.
+# Both flags are required:
 #   * `-race`                   — race detector for goroutine/data races
 #   * `CGO_CFLAGS=...FTS5`      — C-level compile flag enabling FTS5 in SQLite
 #   * `-tags fts5`              — Go build tag selecting the FTS5 driver path
@@ -854,7 +902,7 @@ release-gate: test-race test-release
 # breaks the search, pointer-resolution, and scheduler-triggers code paths
 # that unconditionally assume FTS5 is compiled in. Both flags are part of
 # the substrate's mandatory FTS5 integrity guarantee — see CLAUDE.md §3.
-test-race:
+test-race: build
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./cmd/...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/telemetry/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./...
@@ -963,7 +1011,10 @@ help:
 	@echo "    make service             - Alias for service-scheduler"
 	@echo "    make uninstall-service   - Remove the installed systemd user unit"
 	@echo "    make gen-cli             - Regenerate the CLI catalogue in docs/SPEC.md §8"
-	@echo "    make test                - Run go tests (root + internal/core + scheduler + tools)"
+	@echo "    make test                - THE test entry point. Builds first, then runs the full"
+	@echo "                              suite (root + internal/core + scheduler + critic + tools +"
+	@echo "                              scripts + agent_installation). Correct on a fresh clone:"
+	@echo "                              clone, then 'make test'. No separate build step needed."
 	@echo "    make test-race           - Same, under -race (the pre-merge gate)"
 	@echo "    make test-tools          - Run the full internal/core/tools module"
 	@echo "    make test-tools-precommit- Run the tools guard subset the pre-commit hook uses"
