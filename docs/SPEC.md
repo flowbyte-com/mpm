@@ -1102,6 +1102,26 @@ with `vector_weight = 0.5` by default. Use `--semantic` to drop BM25 and search 
 
 > **Implementation note:** The hybrid scoring function lives in `internal/core/hybrid_search.go`. The default embedding model is `nomic-embed-text` (768-dim), served by a **locally running Ollama instance** as the supported embedding inference provider. Ollama performs inference and returns vectors to MPM — the vectors are then persisted in the same SQLite database (alongside the memories they describe), partitioned into Voronoi cells by the shared IVF index (§6.5 Layer 1). Ollama is an inference dependency, not a separate persistence substrate or vector database; the configured embedding component can also be set to `"disabled"` (NullProvider) when semantic recall is not required.
 
+#### Retrieval provenance in the query response
+
+*A result set that does not say how it was found cannot be weighed — because "five results" and "five relevant results" are different claims.*
+
+`mpm_memory action=query` returns a `retrieval` envelope alongside `memories`, and every row carries a `retrieval_source`:
+
+| Field | Meaning |
+|---|---|
+| `retrieval.mode` | `hybrid` when an embedding provider is configured and the semantic arm ran; `lexical_only` when it did not. A `lexical_only` mode means a zero-hit cannot be blamed on semantic retrieval — no semantic retrieval was attempted. |
+| `retrieval.sources` | Count of returned rows per channel (`hybrid`, `fts5`, `vector`, `lexical`). |
+| `retrieval.semantic_only` | `true` when **every** returned row came from the vector arm with no lexical match. `false` when there are no rows. |
+| `retrieval.vector_weight` / `retrieval.retrieval_threshold` | The scoring configuration in force, so an unexpected ordering can be attributed to a ranking choice rather than a data problem. |
+| `memories[].retrieval_source` | Per-row channel: `hybrid`, `fts5`, `vector`, or `lexical` (full-text fallback path). |
+
+`sources` and `mode` are deliberately not derivable from one another. "No embedding provider configured" and "provider configured, nothing matched" both yield a lexical-only result set, but they call for opposite responses from the caller — fix the configuration, versus rephrase the query.
+
+`semantic_only` is the field that carries the weight. A `vector` row is an embedding near-neighbour, not a match against the query's terms, and with a cosine-similarity arm such rows can be returned for queries with no meaningful relationship to their content. When `semantic_only` is true, the result count should be read as *"N nearest neighbours"*, not *"N answers"*.
+
+**Zero-hit diagnostic.** When a query returns zero rows and carries more than one FTS5 term, the response includes a `hint` naming the terms FTS5 ANDed together and stating that the failure is a match failure rather than a score filter. It is deliberately narrow: lexical-only rows are exempt from `retrieval_threshold` (BM25 is naturally negative, so a floor would delete nearly every useful lexical hit) and the default `-3.0` cannot fire against the vector arm at all (cosine similarity in `[0,1]` scaled by a `[0,1]` weight). A zero-hit is therefore a **match** failure with one unmatchable term, and the recovery is to reduce the query — not to adjust a threshold that was never applied.
+
 **Memory provenance (`mpm recall --why`):** every result can be annotated with the score breakdown that retrieved it. Pass `--why` to see per-result `[why]` lines showing the FTS5 terms that matched, the cosine similarity (when vector search contributed), and the stored weight / reinforcement_count metadata. The metadata fields are surfaced for **provenance / display only** — they are not part of the ranking score, so changes in `reinforcement_count` do not move a memory up or down the list. Useful for "why did the agent pick this memory?" introspection without re-running the search.
 
 > **Retrieval ranking determines what is surfaced. Confidence determines what is believed.** A frequently retrieved artifact is not necessarily a trusted artifact.

@@ -544,6 +544,18 @@ func hybridResultsToMaps(mems []HybridResult) []map[string]interface{} {
 		} else if m.IsChallenged {
 			banner = challengeWarning
 		}
+		// retrieval_source is the SEARCH METHOD that produced this row,
+		// which HybridSearch already tracks but this projection used to
+		// drop. A caller could not previously tell a row that matched
+		// the query's terms from one that is merely the nearest
+		// embedding — so a semantic-only hit was indistinguishable from
+		// a lexical match. See retrievalProvenance in internal/core/tools.
+		source := m.Source
+		if source == "" {
+			// fallbackLocal builds HybridResult without Source: those
+			// rows come from FullTextSearch, i.e. lexical by definition.
+			source = "lexical"
+		}
 		items = append(items, map[string]interface{}{
 			"id":                   m.ID,
 			"content":              m.Content,
@@ -553,6 +565,7 @@ func hybridResultsToMaps(mems []HybridResult) []map[string]interface{} {
 			"created_at":           m.CreatedAt,
 			"reinforcement_count":  m.ReinforcementCount,
 			"origin":               m.Origin,
+			"retrieval_source":     source,
 			"banner":               banner,
 			"is_concept_drift":     m.IsConceptDrift,
 			"is_challenged":        m.IsChallenged,
