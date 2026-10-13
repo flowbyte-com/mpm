@@ -22,7 +22,7 @@ revision.
 
 ## 1. Confirmed unresolved defects
 
-### 1.1 `mpm onboard` host inspection depends on the working directory — FIXED in this closeout
+### 1.1 `mpm onboard` host inspection depends on the working directory — FIXED (`e27d593`)
 
 **Severity:** medium. The headline onboarding command reports hosts as
 "inspection unavailable" unless it is run from inside a source checkout.
@@ -57,10 +57,28 @@ ABSENT** when the manifest or the reconciler module is missing. Staging
 "zero hosts installed" — a false negative on every host. Verified: no
 `reconcile.json` is currently present anywhere under `~/.mpm`.
 
-Regression coverage: `resolveRepoRelative` and `locateHostInspector` had
-no tests at all before this closeout.
+Regression coverage: `scripts/tests/test_onboard_runtime_assets.py` (8
+tests). Six of them fail against the pre-fix code; verified by stashing.
 
-### 1.2 Memory embeddings carry no model fingerprint — FIXED in this closeout
+**Fix shipped in `e27d593`.** `install_runtime_assets.py` now stages the
+whole transitive set. Per-adapter manifests, templates and installer modules
+are discovered by **scan** rather than enumerated, so adding an adapter
+needs no edit there — a static list is what made the gap invisible.
+
+Verified end-to-end: run from `/`, all four hosts report the managed block
+present and byte-matching canonical render, where all four previously
+reported unavailable:
+
+```
+✓ Claude Code    ✓ OpenClaw    ✓ OpenCode    ✓ Pi
+```
+
+That run also independently corroborates §3.1 — Pi's and OpenCode's managed
+blocks are byte-current on disk. It still says nothing about whether those
+hosts *load* the extension at runtime, which is the axis that remains
+unverified.
+
+### 1.2 Memory embeddings carry no model fingerprint — FIXED
 
 **Severity:** high for data integrity, latent until a model switch.
 
@@ -87,8 +105,199 @@ current path performs *no* check: mixing models silently corrupts every
 cosine similarity rather than failing loudly.
 
 Fixed by recording the generating model on every memory embedding and
-refusing to blend vectors from different models. See §5 for the
-deliberate limitation that remains.
+filtering retrieval on it. See §5 for the deliberate limitation that
+remains.
+
+**What changed:**
+
+- `memories.embedding_model` added by migration, mirroring
+  `reference_chunks.embedding_model`.
+- All three memory write paths now record the fingerprint:
+  `MemoryStore.UpdateMemory` (`internal/core/memory.go`), the backfill
+  (`cmd/mpm/backfill_embeddings.go` — this was the site that left all 149
+  rows NULL, since it wrote only the vector), and the insert path.
+- `VectorSearch` filters `memories` on the active model
+  (`internal/core/db.go`). `sessions` and `topics` have no such column and
+  are unfiltered, which is stated in the code rather than left implicit.
+- Doctor reports the **unlabelled-row count**, not just column presence
+  (`service_doctor_embedding_integrity.go`). Column-exists and rows-are-
+  labelled are different facts, and on the live database the column existed
+  while all 149 rows were still unlabelled.
+
+Regression coverage: `internal/core/embedding_model_compatibility_test.go`.
+Three of its tests fail against the pre-fix code — verified by stashing.
+The most important is `TestVectorSearchExcludesUnfingerprintedRows`, which
+demonstrates the defect behaviourally: pre-fix, an unfingerprinted vector
+**was** returned by `VectorSearch`.
+
+### 1.3 The operational consequence — READ THIS BEFORE DEPLOYING
+
+**After this change, semantic retrieval over `memories` returns nothing on
+the live store until a re-embed runs.**
+
+All existing memory rows predate the column and carry NULL
+`embedding_model`. The compatibility filter excludes them — correctly,
+since an unrecorded model cannot be proven comparable.
+
+Measured on a `sqlite3 .backup` snapshot of the live database with the
+migration applied:
+
+| | count |
+|---|---|
+| `memories` rows (total) | 149 |
+| soft-deleted (`deleted_at IS NOT NULL`) | 3 |
+| **live** | **146** |
+| live rows carrying a vector | 146 |
+| live rows labelled with the active model, post-migration | **0** |
+| rows the new pending predicate selects for backfill | 146 |
+
+(The 3 deleted rows are also the 3 holding a literal `'null'` vector, so
+they were already excluded before this change.)
+
+The filter therefore empties the candidate set completely, and the WARN's
+`labelled == 0` guard fires as designed:
+
+```
+$ mpm recall --semantic "how do I stop the attachments from breaking"
+WARN VectorMatch: every embedded memory is excluded by the embedding-model
+     compatibility filter  active_model=ollama:all-minilm unlabelled_rows=146
+     remedy="run `mpm ops backfill-embeddings` to re-embed them under the
+     active model and record the fingerprint"
+No memories found for: how do I stop the attachments from breaking
+```
+
+Lexical (`mpm recall` without `--semantic`) is unaffected and still works.
+
+This is surfaced as a **WARN with a remedy** rather than a silent empty
+result, because the silent version reads like an empty store and sends the
+operator looking in entirely the wrong place. The doctor reports the same
+count via `mpm doctor`.
+
+Two things make the transition safe:
+
+- The filter only applies when a provider is configured. With no active
+  provider (`activeModel == ""`) nothing is filtered, so a store is never
+  locked out of retrieval by a missing profile.
+- New writes are fingerprinted at INSERT (`saveMemoryRow`), so the
+  unlabelled population only shrinks from here.
+
+**Required follow-up:** run `mpm ops backfill-embeddings` against the live
+store. That has **not** been done — it is a full re-embed and was
+explicitly outside the authorisation for this work. Until it runs,
+semantic recall is degraded on the live store. **Lexical recall, MCP, and
+all other substrate functions are unaffected.**
+
+### 1.4 The backfill could not have fixed it — a gap the filter exposed
+
+**Severity:** high, and it would have shipped as a permanent silent outage.
+
+Adding the column and the filter is only half the change. The other half is
+making the existing rows *recoverable*, and they were not: no command could
+ever fingerprint them.
+
+`countMemoriesWithoutEmbedding` selected only
+`embedding IS NULL OR embedding = 'null'`. Every pre-existing row already
+has a vector, so on the live store that predicate matches **0 of 149** — the
+command prints `Total memories missing embeddings: 0` and `Nothing to do.`,
+forever. The rows the filter excludes are precisely the rows the only
+remedy skips. Semantic recall over memories would have been filtered down to
+nothing with no way back, and the WARN would have pointed at a command that
+reports nothing to do.
+
+There was a second defect in the same place: the documented remedy,
+`mpm ops backfill-embeddings --force`, names a flag that **has never
+existed**. The real flag is `--force-reembed`, and it was scoped
+"references pass only" — so neither spelling of the remedy would have
+worked. The same wrong flag was referenced from `onboard_cmds.go:801` and
+the doctor's no-column branch, meaning the mistake predates this change and
+had simply never been executed.
+
+Fixed by making the memories pass model-aware, symmetric with the references
+pass that was made model-aware on 2026-09-28:
+
+- `memoryNeedsEmbedding(force, hasModelCol)` is now the single definition of
+  "pending": a row needs embedding if its vector is null **or** it carries
+  no model fingerprint. A vector with no recorded model is not comparable,
+  and the only honest way to make it comparable is to re-embed it under a
+  known provider.
+- `--force-reembed` now applies to both passes.
+- `hasModelCol` falls back to the legacy null-only predicate on a schema
+  predating the migration, so an old fixture degrades instead of erroring.
+- The command converges: a fully fingerprinted store reports 0 pending, so
+  it does not re-embed on every run.
+
+### 1.5 The backfill loop skipped a third of every run
+
+**Severity:** high, and silently. Found only by reading the loop rather
+than the predicate.
+
+`runMemoryBackfill` paginated with `LIMIT ? OFFSET ?`. Every successful
+`UPDATE` makes the row **stop matching the pending predicate**, so the
+result set shrinks underneath the cursor while the offset keeps
+advancing — one batch's worth of rows is skipped per iteration, with no
+error raised.
+
+Replaying the exact old loop in a test over 12 rows at batch size 4:
+
+```
+OFFSET pagination visited 8 of 12 rows (skipped: of00004 of00005 of00006 of00007)
+```
+
+Scaled to the live store's 149 rows at the default batch size of 50:
+
+| Iteration | Fetched | Note |
+|---|---|---|
+| 1 | rows 1–50 | stamped; 99 remain |
+| 2 | rows 101–149 (49) | `OFFSET 50` over 99 remaining — rows 51–100 never fetched |
+| 3 | — | `OFFSET 100` over 50 remaining returns nothing; loop ends |
+
+**99 of 149 fingerprinted, 50 skipped, exit status 0.** The command would
+have reported success, written a correct-looking completion line, and left
+50 memories filtered out of semantic retrieval.
+
+This bug predates the fingerprint change — it is only reachable now because
+the predicate finally matches rows. That is worth stating plainly: the
+fingerprint work did not create it, but it converted a latent defect into
+a live one, and shipping the column without fixing the loop would have
+activated it.
+
+Fixed with keyset pagination on `(created_at, id)`, which is stable under
+mutation — already-processed rows fall out of the result set without moving
+the cursor. The loop also now reports a count mismatch if the pending set
+changed while it ran, so a future divergence surfaces instead of passing.
+
+Regression coverage: `TestBackfillPaginationVisitsEveryRowOnce` (every row
+visited exactly once, and the run converges), plus
+`TestBackfillOffsetPaginationWouldSkipRows`, which replays the old loop and
+**fails if OFFSET ever stops skipping** — so if a future change makes the
+keyset cursor unnecessary, the test says so rather than leaving a stale
+justification in place.
+
+Regression coverage for §1.4: `cmd/mpm/backfill_embeddings_selection_test.go`.
+It demonstrates the predicate regression rather than asserting it — it runs
+the *old* predicate against the same rows and fails if that old predicate
+already covered the case, because then the test would be pinning nothing.
+Measured: **the legacy predicate selects 1 of 3 pending rows in the fixture,
+and would select 0 of 149 on the live database.**
+
+> A third latent bug in the same area, also fixed: `saveMemoryRow` — the
+> dominant memory write path — recorded no fingerprint either, so every
+> *newly created* memory would have been invisible to semantic retrieval the
+> moment it was written. Caught by
+> `TestAgentShellQuery_SemanticOnlyRowsAreLabelled`, whose fixture seeds
+> vectors through a raw `UPDATE`.
+>
+> And a fourth, found by reviewing the filter's blast radius rather than
+> only its behaviour: it was initially applied to `VectorSearch`, which is
+> **not** the path `mpm recall --semantic` takes. `HybridSearch` calls
+> `VectorMatch`, which falls back to `IVFSearch`. Filtering only
+> `VectorSearch` left the real path unprotected while the unit test still
+> passed — the defect would have been reported as fixed and shipped live.
+
+One pre-existing test asserted the *absence* of `memories.embedding_model`
+— it had pinned the defect rather than the requirement. It now asserts the
+per-row fact, which holds on both old and new schemas, and a companion test
+guards the new count against over-reporting.
 
 ---
 
@@ -244,7 +453,9 @@ Not blockers for AgentShell work.
 
 | Item | Why deferred |
 |---|---|
-| **Legacy memories predate the fingerprint.** The 149 existing memory embeddings were written before §1.2 and carry no model identity; only `embedding_dimension` exists and it is NULL for all of them. They cannot be retroactively fingerprinted with confidence. New writes are fingerprinted; existing rows are backfilled on next re-embed. | Backfilling requires a full re-embed against a chosen model — which is a separate, explicitly-authorised operation, not a code fix. |
+| **Migrating to `qwen3-embedding:0.6b`** — measured, and **recommended against**. Full findings in [`EMBEDDING-MODEL-BENCHMARK.md`](./EMBEDDING-MODEL-BENCHMARK.md). qwen3 genuinely improves paraphrase MRR (0.260 → 0.517) and exact (0.900 → 1.000), but during a 22-query benchmark that should have been observational it caused **4 of 149 memories to have their weight decayed** with `auto_capture` evidence rows written; all-minilm caused zero. `ChallengeMemory` fires at cosine ≥ 0.85 with no opt-out, and qwen3 compresses the relevant/noise gap from 0.307 to 0.191, pushing unrelated pairs over that threshold. | The gain is real but is bought with silent side effects on correct memories. Switching models requires an explicit decision plus a separate, backed-up full re-embedding — neither has been authorised, and **the live store was not touched**. |
+| **Backfilling the 149 existing memory embeddings with a fingerprint.** The new column is NULL for all of them; retrieval excludes them until they are re-embedded. §1.4 made this *possible* — before that fix no command could do it. | A full re-embed is an explicitly-authorised operation on live data, not a code fix. The live store is currently in this state: semantic retrieval over `memories` returns nothing until `mpm ops backfill-embeddings` runs. |
+| **Legacy memories predate the fingerprint.** The 149 existing memory embeddings were written before §1.2 and carry no model identity; only `embedding_dimension` exists and it is NULL for all of them. They cannot be retroactively fingerprinted with confidence — the vector itself does not say what produced it. New writes are fingerprinted; existing rows are backfilled on next re-embed. | Backfilling requires a full re-embed against a chosen model — which is a separate, explicitly-authorised operation, not a code fix. |
 | **Reference-chunk embeddings are model-aware, memory embeddings were not.** `reference_db.go` filters by model; `db.go` did not. §1.2 closes the memory side. | Resolved by §1.2. |
 | **A load-receipt mechanism for Pi / OpenCode** (§3.1) — the adapter would need to emit a positive signal at session init. | Requires host-side cooperation in two external projects. |
 | **Lexical path still sorts by `created_at DESC` after ordering by BM25** (`recall.go`), discarding the lexical ranking. The preserved `lexicalRank` is surfaced by `--why` so the divergence is visible. | Primary-ordering change is a policy decision, not a correctness fix. |
