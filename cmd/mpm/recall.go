@@ -95,124 +95,57 @@ func handleRecall(args []string) int {
 	projected := fs.Bool("projected", false, "Pointer-native output: summary + pointer + retrieval_metadata instead of full content")
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm recall [options] <query>")
+		fmt.Println("Flags may appear before or after the query.")
 		fmt.Println("\nRecall options:")
 		fs.PrintDefaults()
 	}
 
-	// Go's flag.Parse stops at the first non-flag positional arg.
-	// Pre-scan for --json, --stale-days, and --token-budget since callers
-	// may place these flags after the query.
-	preprocessed := make([]string, 0, len(args))
-	jsonFlagSeen := false
-	projectedFlagSeen := false
-	tokenBudgetVal := 0
-	weightBelowVal := 0
-	beforeVal := ""
-
-	// Collect indices to remove
-	removeIdxs := make(map[int]bool)
-
-	for i, arg := range args[1:] {
-		realIdx := i + 1 // account for args[0] being the command name
-		if arg == "--json" || arg == "-j" {
-			jsonFlagSeen = true
-			removeIdxs[realIdx] = true
-			continue
+	// Flags are honoured wherever they appear, and an unrecognised one is an
+	// error rather than a no-op. This replaced a hand-rolled pre-scan that
+	// hoisted six specific flags ahead of the query and left every other
+	// flag on this FlagSet silently discarded when written after it.
+	if err := parseArgsInterleaved(fs, args[1:]); err != nil {
+		if err == flag.ErrHelp {
+			return 0
 		}
-		if arg == "--stale-days" {
-			removeIdxs[realIdx] = true
-			if realIdx+1 < len(args) {
-				removeIdxs[realIdx+1] = true // consume its value
-			}
-			continue
-		}
-		if strings.HasPrefix(arg, "--stale-days=") {
-			removeIdxs[realIdx] = true
-			continue
-		}
-		if arg == "--token-budget" {
-			removeIdxs[realIdx] = true
-			if realIdx+1 < len(args) {
-				removeIdxs[realIdx+1] = true
-				if v, err := strconv.Atoi(args[realIdx+1]); err == nil && v > 0 {
-					tokenBudgetVal = v
-				}
-			}
-			continue
-		}
-		if strings.HasPrefix(arg, "--token-budget=") {
-			removeIdxs[realIdx] = true
-			if v, err := strconv.Atoi(strings.TrimPrefix(arg, "--token-budget=")); err == nil && v > 0 {
-				tokenBudgetVal = v
-			}
-			continue
-		}
-		if arg == "--weight-below" {
-			removeIdxs[realIdx] = true
-			if realIdx+1 < len(args) {
-				removeIdxs[realIdx+1] = true
-				if v, err := strconv.Atoi(args[realIdx+1]); err == nil && v > 0 {
-					weightBelowVal = v
-				}
-			}
-			continue
-		}
-		if strings.HasPrefix(arg, "--weight-below=") {
-			removeIdxs[realIdx] = true
-			if v, err := strconv.Atoi(strings.TrimPrefix(arg, "--weight-below=")); err == nil && v > 0 {
-				weightBelowVal = v
-			}
-			continue
-		}
-		if arg == "--before" {
-			removeIdxs[realIdx] = true
-			if realIdx+1 < len(args) {
-				removeIdxs[realIdx+1] = true
-				beforeVal = args[realIdx+1]
-			}
-			continue
-		}
-		if strings.HasPrefix(arg, "--before=") {
-			removeIdxs[realIdx] = true
-			beforeVal = strings.TrimPrefix(arg, "--before=")
-			continue
-		}
-		if arg == "--projected" {
-			projectedFlagSeen = true
-			removeIdxs[realIdx] = true
-			continue
-		}
-	}
-
-	for i, arg := range args {
-		if !removeIdxs[i] {
-			preprocessed = append(preprocessed, arg)
-		}
-	}
-
-	if err := fs.Parse(preprocessed[1:]); err != nil {
+		usererror.Errorf(err.Error())
+		fs.Usage()
 		return 1
 	}
 
-	// Apply pre-scanned flags
-	if jsonFlagSeen {
-		*jsonOutput = true
+	hasFilter := *weightBelow > 0 || *before != "" || *since != "" || *until != "" || *collection != "memories"
+
+	// Conflicting and impossible flag combinations are rejected here rather
+	// than reaching SQL, where they produce a plausible-looking empty result:
+	//
+	//   --limit 0      → "LIMIT 0" returns nothing, reading as "no matches"
+	//   --limit -5     → a negative LIMIT means *no* limit, the opposite
+	//   --since > --until → an empty range, same false negative
+	//
+	// None of these are the user getting what they asked for, and none say so.
+	if *limit < 1 {
+		usererror.Error("--limit must be a positive integer; got %d", *limit)
+		fs.Usage()
+		return 1
 	}
-	if tokenBudgetVal > 0 {
-		*tokenBudget = tokenBudgetVal
-	}
-	if weightBelowVal > 0 {
-		*weightBelow = weightBelowVal
-	}
-	if beforeVal != "" {
-		*before = beforeVal
-	}
-	if projectedFlagSeen {
-		*projected = true
+	if *since != "" && *until != "" {
+		s, serr := time.Parse("2006-01-02", *since)
+		u, uerr := time.Parse("2006-01-02", *until)
+		if serr == nil && uerr == nil && s.After(u) {
+			usererror.Error("--since (%s) is after --until (%s): the range is empty",
+				*since, *until)
+			fs.Usage()
+			return 1
+		}
 	}
 
-	hasFilter := *weightBelow > 0 || *before != "" || *since != "" || *until != "" || *collection != "memories"
-	query := fs.Arg(0)
+	// Rejoin every positional into one query. Taking only Arg(0) silently
+	// dropped the rest: `mpm recall deploy pipeline` searched for "deploy"
+	// and discarded "pipeline", with no indication that half the question was
+	// missing. Quoted callers are unaffected — the shell hands us a single
+	// token — so this only changes the unquoted case, in the direction of
+	// searching for what the user actually typed.
+	query := strings.Join(fs.Args(), " ")
 	if query == "" && !hasFilter {
 		usererror.Usage("mpm recall [options] <query>")
 		return 1
