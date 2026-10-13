@@ -223,17 +223,21 @@ func TestParseArgsInterleaved_ShortDashFormStillWorks(t *testing.T) {
 // while breaking every caller that used the alias. It must work in both
 // positions, like every other flag.
 func TestParseArgsInterleaved_JSONAliasWorksInBothPositions(t *testing.T) {
-	for _, args := range [][]string{
-		{"-j", "query"},
-		{"query", "-j"},
-		{"-j", "some", "query", "-j"},
+	for _, tc := range []struct {
+		args      []string
+		wantQuery string
+	}{
+		{[]string{"-j", "query"}, "query"},
+		{[]string{"query", "-j"}, "query"},
+		// -j is not positional, so it never absorbs the word after it.
+		{[]string{"-j", "some", "query", "-j"}, "some query"},
 	} {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			r := newRecallTestFlagSet(t)
-			require.NoError(t, parseArgsInterleaved(r.fs, args),
+			require.NoError(t, parseArgsInterleaved(r.fs, tc.args),
 				"-j is a registered alias; it must not be rejected as unknown")
 			require.True(t, *r.jsonAlias, "-j must be honoured in any position")
-			require.Equal(t, "some query",
+			require.Equal(t, tc.wantQuery,
 				strings.TrimSpace(strings.Join(r.fs.Args(), " ")))
 		})
 	}
