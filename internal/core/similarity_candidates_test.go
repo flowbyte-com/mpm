@@ -102,9 +102,17 @@ func TestFindSimilarityCandidates_StructuralPrefixPairIsDiscounted(t *testing.T)
 
 // ── dimension and value guards ─────────────────────────────────────
 
-// Truncation defect: a 768-dim and a 384-dim vector compared over their
-// shared components can score exactly 1.0. Comparing only same-length pairs
-// makes that unreachable.
+// Mismatched dimensionality must never produce a candidate.
+//
+// This is a property test on FindSimilarityCandidates, and it is deliberately
+// NOT the only thing pinning the guard. Two independent checks reject a
+// length mismatch: validEmbeddingPair, and cosineSimilarity, which returns 0
+// when the lengths differ. Removing validEmbeddingPair therefore leaves this
+// test green — measured, not assumed.
+//
+// The guard is pinned directly by TestValidEmbeddingPair_RejectsMismatchedLength
+// below. This test stays because it states the contract the operator cares
+// about, at the level the operator experiences it.
 func TestFindSimilarityCandidates_MismatchedDimensionsAreSkipped(t *testing.T) {
 	entries := []ScanEntry{
 		{ID: "long", Content: "768-dimensional", Embedding: make([]float32, 768)},
@@ -118,6 +126,40 @@ func TestFindSimilarityCandidates_MismatchedDimensionsAreSkipped(t *testing.T) {
 	}
 	require.Empty(t, FindSimilarityCandidates(entries),
 		"vectors of different dimensionality must never be compared")
+}
+
+// The guard itself. Same-length is necessary but NOT sufficient — note what
+// this test deliberately does not assert: two equal-length vectors from
+// DIFFERENT models pass here, and FindSimilarityCandidates cannot tell them
+// apart. That is why LoadSimilarityScanEntries filters on embedding_model
+// before the vectors ever reach the scan.
+func TestValidEmbeddingPair_RejectsMismatchedLength(t *testing.T) {
+	long := make([]float32, 768)
+	short := make([]float32, 384)
+	for i := range long {
+		long[i] = 1
+	}
+	for i := range short {
+		short[i] = 1
+	}
+
+	require.False(t, validEmbeddingPair(long, short),
+		"a length mismatch must be rejected before any cosine is computed")
+	require.False(t, validEmbeddingPair(short, long), "order must not matter")
+
+	same := make([]float32, 384)
+	for i := range same {
+		same[i] = 1
+	}
+	require.True(t, validEmbeddingPair(same, short),
+		"equal length is the whole of this guard; it cannot detect model mismatch")
+
+	// Non-finite values are rejected too — a NaN makes every comparison false,
+	// so a threshold guard alone would let the pair through.
+	nan := make([]float32, 384)
+	nan[0] = float32(math.NaN())
+	require.False(t, validEmbeddingPair(nan, same),
+		"a NaN component must be rejected, not scored")
 }
 
 // A NaN makes every comparison false, so a `sim < threshold` guard alone

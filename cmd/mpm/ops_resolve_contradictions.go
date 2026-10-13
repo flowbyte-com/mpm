@@ -260,7 +260,7 @@ func printResolveDecisions(queue []map[string]interface{}, decisions []mpmintern
 // idempotent on the memory pair, so re-running over unchanged data enqueues
 // nothing new — that is what stops a repeated scan from growing the queue.
 func runProposeCandidates(dm *mpminternal.DatabaseManager, scanLimit int, jsonOutput bool) (int, error) {
-	entries, err := dm.LoadSimilarityScanEntries(scanLimit, "")
+	entries, err := dm.LoadSimilarityScanEntriesFederated(scanLimit)
 	if err != nil {
 		return 0, err
 	}
