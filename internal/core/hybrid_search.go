@@ -63,10 +63,45 @@ func ValidateSchemaPrefix(prefix string) error {
 }
 
 // DefaultHybridConfig returns sensible defaults.
+//
+// RetrievalThreshold stays at -3.0 despite that value being unreachable
+// for vector-only rows (see the threshold comment in HybridSearch). It was
+// measured rather than assumed — see the calibration below.
+//
+// CALIBRATION (22-query benchmark + 15 dedicated nonsense queries,
+// real all-minilm embeddings, 160 result rows):
+//
+//	relevant hits   n=20   vector similarity 0.159 .. 0.828
+//	noise hits      n=140  vector similarity 0.030 .. 0.307
+//
+// The distributions OVERLAP: the strongest noise row (0.307) is more
+// similar than the weakest legitimate row (0.159), so no similarity floor
+// separates them cleanly:
+//
+//	floor   relevant kept   noise kept   noise filtered
+//	 0.15      20/20           22/140         84%
+//	 0.20      19/20            5/140         96%
+//	 0.25      17/20            3/140         98%
+//
+// A floor of 0.20 would suppress real results. Worse, every legitimate
+// hit below 0.25 is a PARAPHRASE — semantic retrieval's whole purpose:
+//
+//	0.244  "how do I stop the attachments from breaking"  -> the actual answer
+//	0.212  "what model does the system use for writing"  -> the actual answer
+//	0.159  "why is my hard drive no longer protected"    -> the actual answer
+//
+// Raising the default would trade the confident-nonsense problem for a
+// paraphrase-recall problem, which is the worse failure. The default is
+// therefore left alone, and the real fix is orthogonal: a caller that
+// wants a floor should set RetrievalThreshold above 0 deliberately,
+// knowing the 0.159–0.244 band contains true positives.
 func DefaultHybridConfig() HybridConfig {
 	return HybridConfig{
-		VectorWeight:       0.5,
-		RetrievalThreshold: -3.0, // BM25 can be negative; threshold here is on combined score
+		VectorWeight: 0.5,
+		// Unreachable for vector-only rows (similarity is 0–1). Kept at
+		// the historical value rather than silently changing retrieval
+		// behaviour; see the calibration comment above.
+		RetrievalThreshold: -3.0,
 		Limit:              15,
 		SchemaPrefix:       "",
 		Origin:             "local",
@@ -186,9 +221,21 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			combinedScore = hybridScore(fts.Score, vecSim, cfg.VectorWeight)
 			source = "hybrid"
 		} else if ftsOK {
-			// FTS5 only
+			// FTS5 only. Normalise the lexical leg onto the same 0–1
+			// scale as the hybrid blend so CombinedScore means the same
+			// thing for every source. Previously this was
+			// `fts.Score * (1-vecWeight)` — raw unbounded BM25 on a
+			// negative-is-better scale, which made an FTS5 row's score
+			// incomparable to a hybrid row's and put it at a wildly
+			// different magnitude (e.g. -7.32 vs -0.16).
+			//
+			// There is no vector leg to blend in, so the normalised
+			// lexical signal is scaled by (1-vecWeight) and nothing
+			// else is added: an FTS5-only match is a partial match, and
+			// leaving the vector weight's share unfilled keeps it below
+			// a hybrid row that matched both signals.
 			ftsScore = fts.Score
-			combinedScore = fts.Score * (1 - cfg.VectorWeight)
+			combinedScore = normalizeBM25(fts.Score) * (1 - cfg.VectorWeight)
 			source = "fts5"
 		} else {
 			// Vector only (no FTS5 match) — preserve as a candidate.
@@ -204,20 +251,20 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			source = "vector"
 		}
 
-		// RetrievalThreshold is calibrated for hybrid (FTS5+vector) combined
-		// scores, which land in roughly 0–1 range. BM25 is naturally unbounded
-		// negative, so for FTS5-only matches the same threshold would filter
-		// out nearly everything useful. Trust the BM25 ordering for FTS5-only
-		// paths; only apply the threshold to true hybrid scores and to
-		// vector-only candidates whose similarity is in 0–1.
+		// RetrievalThreshold applies to hybrid and vector-only candidates.
+		// Both are now on a 0–1 "higher is better" scale (see
+		// normalizeBM25), so a single threshold is meaningful across them.
+		// FTS5-only rows are still exempt: their ordering comes from the
+		// BM25 rank itself, and a relevance floor on a lexical-only path
+		// discards legitimate exact-term matches.
 		switch {
 		case ftsOK && vecOK:
 			if combinedScore < cfg.RetrievalThreshold {
 				continue
 			}
 		case !ftsOK && vecOK:
-			// Vector similarity is 0–1; default threshold -3.0 would never
-			// fire. Use a non-negative floor so callers who raise the
+			// Vector similarity is 0–1, so the shipped default of -3.0
+			// could never fire here. Use a non-negative floor so callers who raise the
 			// threshold above 0 can still exclude low-similarity noise.
 			if combinedScore < cfg.RetrievalThreshold {
 				continue
@@ -576,16 +623,37 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 	return combined, nil
 }
 
-// hybridScore blends FTS5 BM25 and vector cosine similarity.
-// FTS5 scores are unbounded; normalize to 0–1 range using sigmoid.
-// Vector similarity is already 0–1 cosine.
-func hybridScore(ftsScore float64, vecSim float64, vecWeight float64) float64 {
-	// Sigmoid normalization for BM25: maps unbounded scores to ~0–1
-	// Using a simple tanh-based squash: score / (1 + |score|)
-	normFTS := ftsScore / (1 + math.Abs(ftsScore))
+// normalizeBM25 maps an FTS5 bm25() score onto a 0–1 scale where
+// HIGHER MEANS A BETTER MATCH.
+//
+// SQLite's bm25() is negative-is-better: the strongest match returns the
+// most negative number. The earlier `score / (1 + |score|)` squash was
+// sign-preserving, so it mapped the best lexical match (most negative)
+// to the worst normalised value (near -1) — inverting the lexical signal
+// inside the blend. A 22-query benchmark caught this: with bm25 -22.57
+// ranked above bm25 -24.36 for the same query.
+//
+// Dividing by -1 first flips the sign so better matches are positive,
+// then the squash compresses the unbounded magnitude into (0, 1):
+//
+//	bm25 -24.365 -> normFTS 0.961   (strongest match)
+//	bm25  -8.797 -> normFTS 0.898
+//	bm25  -0.300 -> normFTS 0.231   (weakest match)
+//
+// This is not a sigmoid — it is a monotone squash — so the comment
+// claiming sigmoid normalisation was wrong as well.
+func normalizeBM25(ftsScore float64) float64 {
+	return -ftsScore / (1 + math.Abs(ftsScore))
+}
 
-	// Blend: combined = (1-vecWeight)*normFTS + vecWeight*vecSim
-	return (1-vecWeight)*normFTS + vecWeight*vecSim
+// hybridScore blends FTS5 BM25 and vector cosine similarity.
+//
+// Both legs are on the same 0–1 "higher is better" scale, so the result
+// is directly comparable across sources and against RetrievalThreshold:
+//
+//	combined = (1-vecWeight)*normalizeBM25(bm25) + vecWeight*cosine
+func hybridScore(ftsScore float64, vecSim float64, vecWeight float64) float64 {
+	return (1-vecWeight)*normalizeBM25(ftsScore) + vecWeight*vecSim
 }
 
 // sourceRank gives the cross-source ordering priority: hybrid > fts5 > vector.
