@@ -7,6 +7,7 @@ import (
 	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 	"golang.org/x/sys/unix"
 	"os"
+	"strings"
 )
 
 // Command describes a single command
@@ -187,6 +188,21 @@ func (r *CommandRouter) Execute(args []string) int {
 	// payload or quoted content is never exactly "-h"/"--help".
 	helpRequested := r.helpRequested
 	args = r.parseFlags(args)
+
+	// A bare trailing "help" token is a help request for any command that
+	// dispatches subcommands, whether it was typed as `help` or produced
+	// by the parseFlags rewrite above. Without this, `mpm ops gc help`
+	// (no dash) ran garbage collection and `mpm handoff write help`
+	// wrote a handoff, because helpRequested only ever tracked an
+	// original -h/--help token.
+	//
+	// For commands that do NOT dispatch subcommands the bare token stays
+	// data, so the documented `mpm recall help` (search for the word
+	// "help") and `mpm rm help` behaviour are unchanged.
+	if len(args) > 1 && args[len(args)-1] == "help" &&
+		commandsWithSubcommandDispatch[args[0]] {
+		helpRequested = true
+	}
 
 	if len(args) < 1 {
 		PrintHelp()
@@ -852,13 +868,99 @@ var commandsWithSubcommandDispatch = map[string]bool{
 	"compact":     true, // deferred|requeue-deferred|help
 }
 
+// subcommandHelpOwners lists the "<family> <subcommand>" paths whose
+// handler genuinely renders its own help page when it receives the
+// trailing literal "help" token that parseFlags produces.
+//
+// WHY THIS EXISTS (2026-10-13). The help guard in Execute used to defer
+// to the handler for ANY command in commandsWithSubcommandDispatch, on
+// the assumption that the handler would recognise the trailing "help"
+// token. That assumption is opt-in per handler (requireHelpShortCircuit,
+// handlers_helpers.go), and almost no handler had adopted it: of ~200
+// handlers only 3 mutating ones call it. So the trailing "help" fell
+// through as DATA and the command ran for real.
+//
+// Measured against an isolated workspace before this change:
+//
+//	mpm ops backfill-embeddings --help   performed the embedding backfill
+//	mpm ops gc --help                     ran GC over live memories
+//	mpm ops init skills --help            seeded the skill library
+//	mpm handoff write --help              wrote a handoff
+//	mpm session shred <real-id> --help    SOFT-DELETED a live session
+//
+// The last one is the exact defect the D5 note at Execute claims was
+// fixed in 2026-08-25 for `mpm rm <id> --help`; the deferral path was
+// never closed, so the family-dispatch commands kept the bug.
+//
+// The fix inverts the default. A help request now reaches a handler
+// ONLY if its exact path appears below. Everything else is intercepted
+// by Execute and rendered via handleCommandHelp, which prints the
+// family's help page. A path missing from this map therefore costs
+// help specificity — it prints "MPM · Reference" instead of the
+// subcommand's own page — and can never cost a mutation.
+//
+// Entries are added only after TestHelpRequestsNeverMutate confirms the
+// path prints a real help page AND leaves the database and workspace
+// byte-identical.
+var subcommandHelpOwners = map[string]bool{
+	// work — these leaves print the "MPM · Work" / "MPM · Work item" pages.
+	// ("work show" is deliberately absent: it prints the live Working
+	// Context, so it runs rather than helping.)
+	"work status": true, "work clear": true, "work promote": true, "work item": true,
+
+	// topic — add/list print "MPM · Topic" / "MPM · Topic list".
+	// Deliberately absent: "topic show" (runs the lookup and reports
+	// "Topic not found: help") and "topic search" (runs the search).
+	"topic add": true, "topic list": true,
+
+	// reference — leaf handlers print "MPM · Reference".
+	"reference add": true, "reference list": true, "reference show": true,
+	"reference search": true,
+
+	// compact — both leaves print "MPM · compact …".
+	"compact deferred": true, "compact requeue-deferred": true,
+
+	// skill — add/save print the save-skill help page, which documents the
+	// required `version` frontmatter field. Deliberately absent: skill
+	// delete / skill shred, which shred whatever they are pointed at.
+	"skill add": true, "skill save": true,
+
+	// config — profile/component/capability print their own sub-pages;
+	// detect-embedding is the RETIRED probe, which must keep exiting
+	// non-zero even when asked for help (pinned by
+	// TestFinal_P_DetectEmbeddingHelpAlsoRetired). Deliberately absent:
+	// config show / set / validate (they run), and config edit (it opens
+	// an editor and blocks until stdin closes).
+	"config profile": true, "config component": true,
+	"config capability": true, "config detect-embedding": true,
+
+	// ops — only these leaves print a usage line instead of running.
+	// Deliberately absent, because each of these EXECUTES on --help:
+	//   ops synthesize / gc / backfill-embeddings / backfill-snapshots /
+	//   migrate-embeddings / self-heal / backup / restore-db / directives /
+	//   integrate / ingest / cascade / migrate / mode / persona / memory /
+	//   topic / lesson / session / reference / gateway / stance / init /
+	//   lint (lint reports "unknown flag \"help\"" and then lints anyway)
+	// and these MUTATE or run despite looking informational:
+	//   ops stats / ops status (accrue runtime state — verified MUTATED),
+	//   ops prune ("Pruned 0 expired memories"), ops export (dumped JSON),
+	//   ops resolve-contradictions.
+	"ops shared": true, "ops rebalance": true, "ops changelog": true,
+	"ops milestones": true, "ops broadcast": true,
+	"ops active-sessions": true, "ops confidence": true,
+}
+
 // isSubcommandHelp reports whether the given args (post-parseFlags, with
 // cmdName still at index 0) indicate that --help was meant for a
-// SUBCOMMAND rather than for the top-level command. The signal is:
-// parseFlags rewrites -h/--help to the literal token "help"; if that
-// rewrite appears at the LAST position AND the command dispatches
-// subcommands (so args[1] is a subcommand name rather than a data
-// positional), the help belongs to the subcommand.
+// SUBCOMMAND whose handler owns its own help page.
+//
+// The signal is: parseFlags rewrites -h/--help to the literal token
+// "help"; if that rewrite appears at the LAST position, the help
+// belongs to the subcommand rather than to the family.
+//
+// Membership in subcommandHelpOwners is REQUIRED, not merely the family
+// being a dispatch command. See the comment above that map for the
+// measured mutations this replaced.
 func isSubcommandHelp(args []string, cmdName string) bool {
 	if !commandsWithSubcommandDispatch[cmdName] {
 		return false
@@ -866,7 +968,19 @@ func isSubcommandHelp(args []string, cmdName string) bool {
 	if len(args) < 2 {
 		return false
 	}
-	return args[len(args)-1] == "help"
+	if args[len(args)-1] != "help" {
+		return false
+	}
+	// The path is the family name plus every token between it and the
+	// trailing "help": ["work", "item", "help"] -> "work item". args[0]
+	// IS cmdName, so it is included explicitly. Data positionals
+	// ("skill search foo --help") produce a longer path that simply is
+	// not in the map, so they fall through to interception — which is
+	// the safe direction.
+	path := make([]string, 0, len(args)-1)
+	path = append(path, cmdName)
+	path = append(path, args[1:len(args)-1]...)
+	return subcommandHelpOwners[strings.Join(path, " ")]
 }
 
 // ============================================================================
