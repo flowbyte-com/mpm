@@ -94,9 +94,13 @@ func memoryIsChallenged(metadataJSON string) bool {
 // This is the explicit opt-in write. It is not called by HybridSearch, by
 // recall, or by any diagnostic path.
 //
-// EnqueueContradiction is idempotent on the memory pair, so re-running a
-// scan over the same corpus adds nothing the second time. That is what
-// keeps a repeated operator scan from growing the queue without bound.
+// EnqueueContradictionReport is idempotent on the unresolved memory pair, so
+// re-running a scan over the same corpus adds nothing the second time. That
+// is what keeps a repeated operator scan from growing the queue without
+// bound. Idempotency was briefly a claim without a mechanism: the table's
+// uniqueness constraint includes a one-second-resolution `detected_at`, so
+// OR IGNORE alone suppressed a duplicate only within the same second. See
+// the pre-check in contradiction_log.go.
 //
 // Returns the number of rows ACTUALLY inserted. Candidates already queued
 // are not counted, so a repeat run over unchanged data returns 0 rather than

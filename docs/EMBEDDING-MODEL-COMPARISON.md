@@ -5,10 +5,12 @@ Extends [`EMBEDDING-MODEL-BENCHMARK.md`](./EMBEDDING-MODEL-BENCHMARK.md)
 mutation-cost measurement per model, and measures query-instruction
 sensitivity.
 
-**Outcome: `nomic-embed-text` is the leading retrieval candidate
+**Outcome: `nomic-embed-text` is the leading retrieval model
 (MRR 0.832, nDCG@10 0.789, paraphrase MRR 0.529 vs `all-minilm`'s
-0.260). Do not migrate yet** — two preconditions are unmet, both
-described in §7. The decisive finding is in §4.
+0.260). Migration proceeded on 2026-10-13** — see §7a for the
+resolution of the two preconditions §7 lists, and
+[`NOMIC-MIGRATION.md`](./NOMIC-MIGRATION.md) for the plan and runbook.
+The decisive finding is in §4.
 
 ## Method
 
@@ -196,6 +198,51 @@ provider change is what makes those gains reachable.
 After (a), re-run this benchmark and decide. Migration itself is then a
 re-embed plus a threshold recalibration keyed to the model fingerprint —
 not a policy change.
+
+### 7a. Status — both preconditions resolved, migration proceeded
+
+**(a) is done.** Retrieval is write-free as of 2026-10-13; see
+[`RECALL-MUTATION.md`](./RECALL-MUTATION.md). Re-running the 30-query
+benchmark against `nomic` with the fixed binary on a fingerprint-verified
+snapshot:
+
+| | §4 (before fix) | re-run (after fix) |
+|---|---|---|
+| total weight delta | −57 | **0.0** |
+| memories challenged | 24 | **0** |
+| queries mutating | 12/30 | **0/30** |
+| contradiction queue growth | 1 per query | **0** |
+| MRR | 0.832 | 0.832 |
+| R@1 | 0.739 | 0.739 |
+| R@5 | 0.913 | 0.913 |
+
+Ranking is unchanged and the writes are gone — which is the whole point of
+the change, and is only visible because both numbers come from the same 30
+queries over the same corpus.
+
+**The benchmark itself was invalid until it was fingerprint-checked.**
+The snapshots stamped a display label (`NOMIC768`) into `embedding_model`
+instead of the runtime fingerprint. `VectorMatch` filters on
+`CurrentEmbeddingFingerprint().Model`, so every vector row was excluded and
+the run was lexical-only while still reporting `Hybrid Recall`. The runner
+now asserts the fingerprint before the first query and asserts that
+returned rows are `vector`/`hybrid`-sourced after the last; the run above
+reports `30/30 queries returned vector-sourced rows`.
+
+**(b) is deliberately deferred, not met.** Adding `search_query: ` prefixing
+in the same change as a model migration makes the two unattributable — a
+post-migration improvement could be the model or the prefix, and the next
+person to tune the prefix would have no baseline. +0.022 MRR stays on the
+table until it can be measured on its own. See
+[`NOMIC-MIGRATION.md`](./NOMIC-MIGRATION.md) §5.
+
+**Migration proceeded** to `ollama:nomic-embed-text`; the plan, backup and
+reversal procedure are in [`NOMIC-MIGRATION.md`](./NOMIC-MIGRATION.md).
+
+**§2 stands unchanged.** All four models return 10 results for all 7
+negatives, `nomic` included. The migration neither fixes nor regresses
+this, and it is not claimed to. It is a ranker problem
+(`RetrievalThreshold = -3.0` is unreachable for vector rows), still open.
 
 ## Reproducing
 

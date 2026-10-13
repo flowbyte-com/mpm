@@ -147,9 +147,38 @@ func (dm *DatabaseManager) EnqueueContradiction(ev ContradictionEvidence) error 
 // of a scan over unchanged data learns nothing. With `inserted`, a repeat run
 // reports 0, which is the truth.
 //
-// Returns (false, nil) when the pair was already queued. Errors are returned
+// Returns (false, nil) when the pair is already queued. Errors are returned
 // exactly as EnqueueContradiction returns them, so existing fail-soft
 // behaviour is unchanged.
+//
+// # Why the explicit pre-check, when INSERT OR IGNORE already exists
+//
+// The table's uniqueness constraint is
+//
+//	UNIQUE(memory_id_a, memory_id_b, detected_at)
+//
+// and detected_at is CURRENT_TIMESTAMP, whose resolution is one second. So
+// OR IGNORE suppresses a write only when the repeat lands inside the same
+// second. An operator running a scan twice — two seconds apart, which is
+// faster than typing the command — gets a second row for the same pair, and
+// RowsAffected reports it as a write.
+//
+// Measured, before this check: two enqueues of an identical pair 1.1s apart
+// both returned wrote=true and left 2 rows. That made "N candidates
+// proposed" grow by N on every run of a scan over unchanged data, which is
+// the opposite of what the count is for.
+//
+// The check is on the unresolved pair, matching the queue's own semantics
+// (see the partial index on resolved_at IS NULL): a pair is either awaiting
+// review or it is not. Once resolved, the pair may legitimately be queued
+// again.
+//
+// This is a SELECT before an INSERT, so two concurrent enqueues of the same
+// fresh pair can both insert. That is accepted deliberately: the queue is a
+// review worklist, a duplicate there costs an operator one glance, and the
+// alternative — a new UNIQUE index on the live shared schema — is a larger
+// change than the defect warrants. The callers that matter are sequential
+// operator invocations.
 func (dm *DatabaseManager) EnqueueContradictionReport(ev ContradictionEvidence) (bool, error) {
 	if dm.db == nil {
 		return false, fmt.Errorf("EnqueueContradiction: dm.db is nil")
@@ -171,6 +200,17 @@ func (dm *DatabaseManager) EnqueueContradictionReport(ev ContradictionEvidence) 
 	// The shared.contradiction_log table is created in attachShared.
 	// If shared isn't attached, fail soft: the caller will log this
 	// to watchdog and the mirror.jsonl entry is the fallback.
+	var pending int
+	if err := dm.db.QueryRow(`
+		SELECT COUNT(*) FROM shared.contradiction_log
+		WHERE memory_id_a = ? AND memory_id_b = ? AND resolved_at IS NULL
+	`, ev.MemoryA, ev.MemoryB).Scan(&pending); err != nil {
+		return false, fmt.Errorf("EnqueueContradiction: %w", err)
+	}
+	if pending > 0 {
+		return false, nil
+	}
+
 	res, err := dm.db.Exec(`
 		INSERT OR IGNORE INTO shared.contradiction_log
 			(memory_id_a, memory_id_b, evidence, similarity, detected_by, detected_at)
@@ -180,8 +220,9 @@ func (dm *DatabaseManager) EnqueueContradictionReport(ev ContradictionEvidence) 
 		return false, fmt.Errorf("EnqueueContradiction: %w", err)
 	}
 	// INSERT OR IGNORE reports 0 affected rows when the uniqueness constraint
-	// suppressed the write. A RowsAffected error is not actionable here: we
-	// would be reporting the write as unconfirmed while having no way to
+	// suppressed the write. With the pre-check above this is a same-second
+	// race, not the normal path. A RowsAffected error is not actionable here:
+	// we would be reporting the write as unconfirmed while having no way to
 	// distinguish success, so treat it as "not inserted" and let the caller's
 	// own verification catch a real problem.
 	n, err := res.RowsAffected()
