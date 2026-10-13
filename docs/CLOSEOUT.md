@@ -299,6 +299,175 @@ One pre-existing test asserted the *absence* of `memories.embedding_model`
 per-row fact, which holds on both old and new schemas, and a companion test
 guards the new count against over-reporting.
 
+### 1.6 The suite could report green while these fixes were never tested
+
+**Severity:** medium, and it invalidates the Phase 4 evidence — which is
+precisely how it was caught.
+
+The first clean-worktree `make test` passed (exit 0, 23 packages). But
+reading the log rather than the exit code showed **five of the new tests
+had SKIPPED**:
+
+```
+--- SKIP: TestVectorMatchExcludesUnlabelledRows
+    embedding_model_compatibility_test.go:333: no embedding provider configured
+    in this test environment
+```
+
+Five skips — the entire behavioural core of the fingerprint fix — and the
+suite still reported success.
+
+Cause, in two layers:
+
+1. `DefaultEmbeddingConfig()` caches the resolved provider in a
+   process-wide `sync.Once` (`embeddings.go:562`) with **no reset hook** —
+   unlike `ResetActiveEmbeddingDimensionForTest` for the dimension cache.
+   Whichever test resolves config first decides the provider for the entire
+   process.
+2. Tests in this package run under a temporary `MPM_WORKSPACE` containing
+   no `mpm_config.json` (`active_state_test.go:38` sets one, and
+   `aux_log_isolation_test.go:65` unsets it outright with no restore). Under
+   such a workspace the config resolves to `NullProvider`, the fingerprint
+   comes back empty, and the tests skip. Reproduced directly:
+
+   ```
+   $ MPM_WORKSPACE=/tmp/emptyroot go test -run TestEmbeddingFingerprintNamesTheModel
+     active fingerprint: model="" dimension=0        ← provider gone
+   ```
+
+Fixed:
+
+- Added `ResetDefaultEmbeddingConfigForTest()`, mirroring the existing
+  `ResetEmbedConfigForTest`. Pair it with
+  `ResetActiveEmbeddingDimensionForTest`, since the dimension cache is
+  populated from the config being replaced.
+- `useActiveFingerprint` now pins `MPM_WORKSPACE` to default resolution
+  (unset, restored on exit) so ambient leakage cannot decide whether these
+  tests run.
+- `TestEmbeddingFingerprintNamesTheModel` no longer passes vacuously. It
+  previously asserted only that `model` and `dimension` were mutually
+  consistent, which an absent provider satisfied — so it passed with
+  `model="" dimension=0` while asserting nothing. It now requires a real
+  provider and fails loudly if the reset helper is not effective.
+
+**The general lesson, and the reason this is filed as a defect rather than
+an observation:** ordering-dependent coverage is the same defect as missing
+coverage. A green suite is not evidence that the fix is tested; only
+reading the test log for `SKIP` is. Every `SKIP` in the canonical run was
+inspected — the others (`TestCriticSubprocess_*`, `TestTelemetrySubprocess_*`,
+`TestDrillE2E_ClaudeCode`, `TestHelpTopics_*`) are pre-existing and
+unrelated to this work.
+
+The same blind spot has a second face: §1.8, where the filter itself broke
+six provider-gated tests that the canonical suite never ran.
+
+### 1.7 The embedding config is resolved once per process — known limitation
+
+`DefaultEmbeddingConfig()` is cached in a `sync.Once` for the lifetime of
+the process. For short-lived CLI invocations that is invisible. For the
+long-lived daemons (`mpm-scheduler`, `mpm-mcp`) a change to the embedding
+profile does not take effect until the process restarts.
+
+This is **documented intent**, not an accident — the resolution order is
+spelled out in the function's doc comment and cites a design spec. It is
+recorded here so it is not re-reported as a bug, and because it interacts
+with §1.6: the cache is why test ordering could silently disable the
+provider.
+
+### 1.8 Every test touching memory vectors skips without a provider — the filter's blast radius was invisible
+
+**Severity:** medium. Caught by running the affected tests, not by the suite.
+
+Enabling the compatibility filter (§1.2) broke **six tests** across
+`internal/core/hybrid_search_vector_only_test.go`:
+
+```
+--- FAIL: TestHybridSearch_VectorOnlyCandidatePreserved (0.07s)
+        vector-only candidate MUST be returned after the merge fix
+--- FAIL: TestHybridSearch_VectorOnlyAtVWOne (0.14s)
+--- FAIL: TestHybridSearch_BothChannelsMerge (0.14s)
+--- FAIL: TestHybridSearch_VectorOnlyThresholdFilter (0.13s)
+--- FAIL: TestHybridSearch_VectorOnlyFieldsPopulated (0.13s)
+--- FAIL: TestHybridSearch_VectorOnlyChallengeSignalPopulated (0.11s)
+```
+
+Confirmed caused by this change, not pre-existing: the same seven tests
+all PASS on `6737f2e` (the commit before `12ce499`) with the provider
+enabled.
+
+Each of those tests seeded its vector with a raw
+
+```sql
+UPDATE memories SET embedding = ? WHERE id = ?
+```
+
+which leaves `embedding_model` NULL — so the filter correctly excluded
+the corpus and the merge had nothing to merge. The failure message points
+at the merge, not at the filter, which is what makes this class expensive:
+it reads like a regression in the thing under test.
+
+The reason the canonical suite reported green throughout is the same one
+as §1.6: **every one of these tests skips when no embedding provider is
+configured** (`if provider.Name() == "null" { t.Skip(...) }`). `make test`
+runs without `OLLAMA_ENDPOINT`, so none of them ran. The canonical suite
+has never exercised them, and never will, unless the runner provides a
+provider.
+
+This is now the fourth file to need the same treatment. The pattern was:
+
+| File | Fixed |
+|---|---|
+| `hybrid_search_test.go` | `12ce499` |
+| `hybrid_search_federated_test.go` | `12ce499` |
+| `agentshell_query_fixture_test.go` | `12ce499` |
+| `hybrid_search_vector_only_test.go` | this commit |
+
+Each now carries an identical file-level contract note stating that rows
+expected to be **returned** must carry `embedding_model =
+CurrentEmbeddingFingerprint().Model`, that rows expected to be **excluded**
+must say which reason they exercise (`unlabelled` and `hash`-sourced are
+different exclusions), and that the seeding goes through a single
+`stampTestEmbedding` helper rather than a hand-written `UPDATE` per site —
+so the next person adding a fixture cannot silently re-introduce the gap.
+
+**Deliberately not changed:** the `t.Skip` guards themselves stay. Requiring
+a live provider for the canonical suite would make `make test` depend on a
+running Ollama, which is worse. The gap is recorded rather than papered
+over, and the affected tests are now verified in an explicit provider-backed
+run (`OLLAMA_ENDPOINT` + `OLLAMA_MODEL=all-minilm`) as part of closeout
+verification. Note the model name is `all-minilm`, not `ollama:all-minilm`;
+the qualified form 404s against the Ollama API.
+
+**The transferable lesson:** a filter added for correctness will silently
+invalidate every fixture that hand-writes rows around the schema, and those
+fixtures are usually the ones guarded by environment-dependent skips. The
+affected tests must be run *with the dependency present* before the change
+can be called verified — a passing suite that skipped them says nothing.
+
+#### Verification: both modes
+
+| Run | Provider | Result |
+|---|---|---|
+| `internal/core`, canonical | none | 1959 PASS / 9 SKIP / 0 FAIL |
+| `internal/core`, provider-backed | `OLLAMA_MODEL=all-minilm` | **1964 PASS / 4 SKIP / 0 FAIL**, 153.7s |
+| `internal/core`, `-run TestHybridSearch_` | provider | **7 PASS / 0 SKIP** |
+| `cmd/mpm`, provider-backed | `OLLAMA_MODEL=all-minilm` | **1053 PASS / 3 SKIP / 0 FAIL** |
+| `cmd/mpm`, canonical | none | ok, 332s (exit 0) |
+
+The two modes are complementary, and the delta is exactly accounted for:
+the six `TestHybridSearch_*` tests move from SKIP to PASS, and one test —
+`TestReferenceHybridSearch_NoEmbeddingsFallback` — moves the other way,
+because it asserts the *absence* of embeddings and therefore cannot run in
+a process where a provider has already been resolved (the `sync.Once`
+cache of §1.7 makes that unavoidable). It is covered by the canonical
+run. Neither mode is a superset of the other, which is why both are
+recorded rather than just the green one.
+
+The 4 remaining provider-mode skips are `TestDrillE2E_ClaudeCode`,
+`TestHITLStream_AppendNeverFailsTheCaller`,
+`TestAffinityRebuild_RunsAgainstRealOnDiskDB` and the reference-fallback
+test above — all pre-existing and unrelated to this work.
+
 ---
 
 ## 2. Previously reported defects already fixed
@@ -465,16 +634,54 @@ Not blockers for AgentShell work.
 
 ## 6. Onboarding / deployment state at closeout
 
+### 6.1 Source vs installed runtime — verified separately
+
+Source tests passing says nothing about what is installed under `~/.mpm`.
+Both were checked independently, because the fixes in §1.1 and §1.2 are
+only real once the installer has staged them.
+
+**Before deploy** (installed binary, sha256 `6e673287b489763d`, built
+14:17 from `6737f2e`), running `mpm onboard report` from `/`:
+
+```
+! Host inspection  unavailable: agent_installation/scripts/ not found near
+                     the binary or working directory
+· memories has no embedding_model column, so changing the model leaves
+  mixed-generation vectors undetectable. Re-embed with
+  `mpm ops backfill-embeddings --force` after a change.
+```
+
+All three defects are present and reproducible in the installed runtime —
+and the second line is the installed binary **naming the flag that does not
+exist** (§1.4). That message ships to users as onboarding advice.
+
+Staged-asset inventory, also absent pre-deploy:
+
+| Asset | Installed | Source |
+|---|---|---|
+| `agent_installation/scripts/*.py` | absent | present |
+| `agent_installation/*/reconcile.json` | absent (none anywhere) | present per adapter |
+| `agent_installation/*/templates/*.snippet` | absent | present |
+| `agent_installation/*/scripts/*.py` | absent | present |
+
+**After deploy**, the same command from `/` must report all four hosts
+present and byte-matching (§1.1 already verified this against the source
+tree), and must no longer print the "no embedding_model column" line.
+
+### 6.2 Baseline state to preserve across deploy
+
 | Item | Value |
 |---|---|
-| Source revision | `6737f2e` on `fix/retrieval-benchmark-findings` (pushed, not merged) |
-| Installed binary | `~/.mpm`, sha256 `6e673287b489763d` — matches source build |
-| Database | integrity `ok`; 149 memories, 149 embeddings, 692 scheduled wakes preserved |
-| Embedding model | `ollama:all-minilm`, 384-dim — **unchanged** |
+| Source revision at deploy | `eb6cf87` on `fix/retrieval-benchmark-findings` |
+| Database | integrity `ok`; 149 memories (146 live, 3 soft-deleted), 232 reference chunks, 692 scheduled wakes |
+| Embedding model | `ollama:all-minilm`, 384-dim — **unchanged** throughout |
 | MCP | `initialize` responds |
-| Scheduler | restarted 14:17:08 on the new binary |
-| Managed blocks | 4 hosts reconciled idempotently |
+| Scheduler | user unit `active` + `enabled` |
 | Pi `-builtin:mcp` | byte-identical, not touched |
 | Rollback | `~/.mpm/backups/pre-retrieval-fix-20261013-141648` |
 
-No embedding backfill or model migration occurred.
+No embedding backfill and no model migration occurred during the closeout.
+The live database was confirmed byte-unchanged against a snapshot
+(`sqlite3 .backup`) at every verification point: 149 memories, 232
+reference chunks, 0 rows with `embedding_dimension`, and **no
+`embedding_model` column at all** — the migration had not been applied.
