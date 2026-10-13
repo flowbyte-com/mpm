@@ -46,11 +46,23 @@ import (
 // lacks temperature wiring. This is a forward-compatibility hook.
 func DefaultModelFactory() ModelFactory {
 	return func(profile config.Profile) (ModelClient, error) {
+		// Credential resolution is the substrate's single rule: an
+		// explicit profile api_key wins, otherwise the provider's own
+		// environment variable is consulted (synth.ResolveAPIKey).
+		// Resolving here rather than reading profile.APIKey directly is
+		// what lets an environment-only credential drive review and
+		// critic requests, the same way it already drives synthesis.
+		apiKey := synth.ResolveAPIKey(profile.APIKey, profile.BaseURL)
+
 		// Provider-side validation. Ollama + other local servers run
-		// without auth; everything else needs an api_key.
-		if !profileLocallyHosted(profile) && profile.APIKey == "" {
-			return nil, fmt.Errorf("model factory: profile %q has no api_key and provider %q is not local",
-				profile.Name, profile.Provider)
+		// without auth; everything else needs a credential from one of
+		// the two sources above. The error names the variable to export
+		// so an environment-only operator is not sent to edit the config.
+		if !profileLocallyHosted(profile) && apiKey == "" {
+			return nil, fmt.Errorf(
+				"model factory: profile %q has no credential for provider %q (not locally hosted): "+
+					"set api_key on the profile or export %s",
+				profile.Name, profile.Provider, synth.PrimaryAPIKeyEnvVar(profile.BaseURL))
 		}
 		timeout := time.Duration(profile.TimeoutSecs) * time.Second
 		if timeout <= 0 {
@@ -58,7 +70,7 @@ func DefaultModelFactory() ModelFactory {
 		}
 		sc := &synth.SynthClient{
 			Model:  profile.Model,
-			APIKey: profile.APIKey,
+			APIKey: apiKey,
 			// Operator-configurable, and honoured. NOTE: this literal
 			// leaves SynthClient.Wire at its zero value, so the wire
 			// protocol is NOT inferred from BaseURL the way

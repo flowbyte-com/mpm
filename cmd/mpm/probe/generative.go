@@ -93,9 +93,15 @@ func probeGenerativeWithTimeout(ctx context.Context, p *config.Profile, kind Pro
 	}
 
 	// Build a probe-specific SynthClient with probeMaxTokens.
+	// The credential goes through synth.ResolveAPIKey so the probe
+	// resolves the same credential the runtime would: an explicit
+	// profile api_key first, the provider's own environment variable
+	// second. Reading p.APIKey directly here made every environment-only
+	// install report a false auth failure from the probe while real
+	// synthesis against the same profile succeeded.
 	sc := &synth.SynthClient{
 		Model:     p.Model,
-		APIKey:    p.APIKey,
+		APIKey:    synth.ResolveAPIKey(p.APIKey, p.BaseURL),
 		BaseURL:   p.BaseURL,
 		Timeout:   timeout,
 		MaxTokens: probeMaxTokens,
