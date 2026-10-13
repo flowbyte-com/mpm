@@ -174,7 +174,7 @@ adjustments follow from the real CLI.
 |---|---|---|
 | `mpm onboard` | adopt | Full guided run: models → hosts → report |
 | `mpm onboard --models` | adopt | Model step only. Skips hosts entirely — satisfies "rerun just model setup without repeating framework installation" |
-| `mpm onboard --hosts` | adopt, **with carve-out** | Host step only. See §6 |
+| `mpm onboard --hosts` | adopt, **with explicit-consent boundary** | Host step only. See §6. There is no `--hosts auto`. |
 | `mpm onboard --dry-run` | adopt | Established convention — `changelog.go:84`, `backfill_embeddings.go:41`, `install.sh --dry-run`. `install.sh` also has `--check`/`--validate`/`--yes`; onboard borrows the same vocabulary |
 
 Additional flags required by the architecture, not by the brief:
@@ -193,9 +193,14 @@ the step that was skipped.
 
 ---
 
-## 6. Host step and the safety carve-out
+## 6. Host step — installable, behind an explicit-consent boundary
 
-**The invariant that onboarding must not break** —
+**Approved: adopt-as-designed, with a strict explicit-consent boundary.**
+Onboarding *may* install new framework integrations. Framework **detection
+alone must never trigger installation.**
+
+### 6.1 The invariant that is preserved, not weakened
+
 `agent_installation/scripts/reconcile_managed_blocks.py:15-36`:
 
 > "MPM must never opt a machine into a host it does not already use… When
@@ -207,22 +212,67 @@ The rationale is that MPM is installed on any machine with any MPM
 integration, so a "does the `mpm` binary exist" probe would be satisfied on
 a host that has never heard of MPM. An auto-sweep would defeat the gate.
 
-Onboarding is, by definition, the act of opting in. So the design is:
+**This invariant stands unchanged.** The reconcile guard keeps its current
+behaviour. Onboarding does not add an automatic installation path through
+host discovery, and no probe is weakened or removed.
 
-- Onboard **lists** what it found, with the same PASS / ABSENT / WARN
-  vocabulary `check_installed_managed_blocks.py` already uses.
-- Adoption is **explicit and per-host**, never a sweep. No adapter is
-  installed because onboard noticed it.
-- A host already using MPM may be reconciled by the existing machinery
-  without further gates — that is what it is for.
-- Every adopted host writes the standard `<file>.bak.<TS>` backup that the
-  per-adapter installers already perform.
+### 6.2 The distinction, stated explicitly
 
-**This is a deliberate, documented carve-out to the invariant, and belongs
-in `reconcile_managed_blocks.py`'s header comment as such** — not as a
-silent bypass. It requires explicit approval.
+| Activity | Mutating? | Rule |
+|---|---|---|
+| Framework detection | **read-only** | Never installs. Discovers; proposes; stops. |
+| Existing-integration inspection | **read-only** | Never repairs, rewrites or replaces. |
+| Offering installation of a missing adapter | no | A proposal only. Recording a proposal is not consent. |
+| Installing a selected adapter | **yes** | Requires the operator to select **that host** and approve the mutation. |
+| Reconciling an existing integration | **yes** | Only under an approved host target. Preserves the guard above. |
 
-### Rollback gap that onboarding must not paper over
+Detection and consent are two separate steps with an operator decision
+between them. Nothing discovered by step one flows into step three without
+passing through step two.
+
+### 6.3 Unattended operation
+
+Unattended use (`--yes`, piped stdin, agent-invoked) requires **both**:
+
+1. **Explicit host targets** — named hosts, never a discovered set. There is
+   deliberately **no `--hosts auto`**, and no flag that expands a detected
+   set into install targets.
+2. **Explicit mutation approval** — a separate acknowledgement that
+   installation is authorised.
+
+A host present in the detected set but absent from the explicit target list
+is **skipped, not installed**. Absence of a target is never treated as
+consent.
+
+### 6.4 Preservation of existing adapters
+
+An adapter already integrated is **left as it is** unless the operator
+approves repair or replacement. Onboard does not:
+
+- overwrite a working managed section because a newer one is available
+  upstream,
+- replace an adapter to "standardise" the installation,
+- remove or reconfigure a host the operator did not name.
+
+Drift is *reported*; acting on it is a separate, named approval.
+
+### 6.5 Delegation
+
+Installation delegates to the **existing** adapter installers and the
+shared runtime staging mechanism. Onboard adds no second payload path, no
+bespoke copy step, and no new manifest format. The per-adapter installers
+already perform the `<file>.bak.<TS>` backup; onboard reports those paths
+and does not invent its own.
+
+### 6.6 Skipping is a supported outcome
+
+Declining an adapter, or having none applicable, is a **successful**
+onboarding outcome, reported under *deliberately skipped* — not a failure,
+and not something requiring remediation. `opt_in: true` adapters
+(`mpm-auto-mode-persona-openclaw`, `mpm-hermes`) are skipped by the existing
+gate and onboard honours that.
+
+### 6.7 Rollback gap that onboarding must not paper over
 
 `uninstall.sh` deliberately scopes to `~/.mpm`, `~/.local/bin`,
 `~/.config/systemd/user`, `~/.config/autostart`, `~/.config/mpm` and
@@ -238,6 +288,15 @@ Onboard must therefore:
 
 Closing this gap (an adapter-aware uninstall orchestrator plus a
 compensation pass) is separate work and is **not** part of this design.
+
+### 6.8 Required documentation change
+
+Because onboarding is now a deliberate, bounded exception rather than an
+accidental one, `reconcile_managed_blocks.py`'s header comment gains a
+carve-out paragraph stating that `mpm onboard` may install into
+operator-selected hosts, that detection is read-only, and that the
+reconciliation guard itself is unchanged. This is a **documentation change
+only** — no behavioural change to the reconcile path.
 
 ---
 
@@ -349,21 +408,28 @@ the verbs, `mpm onboard` configures and verifies the substrate.
 
 ---
 
-## 11. Open decision requiring approval
+## 11. Resolved decision
 
-The `--hosts` carve-out in §6 contradicts a standing safety invariant, and
-`uninstall.sh` cannot roll it back atomically. Two ways forward:
+**Approved 2026-10-13: option (A), adopt-as-designed, with a strict
+explicit-consent boundary.** See §6 for the full rules.
 
-- **(A) Adopt as designed** — onboard installs only into explicitly named
-  hosts, records per-adapter backups, and states that rollback is
-  per-adapter. The invariant's header comment gains a documented carve-out.
-- **(B) Reconcile-only** — `--hosts` detects and reports drift and offers
-  the existing `make refresh-installed`, but never installs. Onboarding
-  then never contradicts the invariant, at the cost of not covering a new
-  host in one flow.
+The binding constraints, restated so they survive refactoring:
 
-(B) is the conservative choice and is consistent with the guiding
-principle. (A) is what the brief's "framework integration" implies.
+- Detection is read-only. Detection never installs.
+- Existing-integration inspection is read-only. It never repairs or replaces.
+- Installing a missing adapter requires the operator to select **that host**.
+- Unattended operation requires explicit host targets **and** explicit
+  mutation approval. There is no `--hosts auto`.
+- Existing adapters are preserved unless repair or replacement is approved.
+- Reconciliation must never silently expand MPM into additional frameworks.
+- The `reconcile_managed_blocks.py` guard is **not** weakened; no automatic
+  installation path exists through host discovery.
+- Installation delegates to the existing adapter installers and shared
+  runtime staging.
+- Skipping an integration is a supported outcome, not a failure.
+
+The residual, accepted limitation is §6.7: adapter rollback is per-adapter
+with no orchestrator and no compensation pass. Closing it is separate work.
 
 ---
 
