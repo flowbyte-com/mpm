@@ -22,23 +22,60 @@ package internal
 import (
 	"encoding/json"
 	"math"
+	"os"
+	"strings"
 	"testing"
 )
 
-// activeFingerprintCache is process-global (see activeEmbeddingDimMu in
-// reference_db.go). Reading CurrentEmbeddingFingerprint() populates it via a
-// sample embed, which arms the embedding_model filter for EVERY later test in
-// this package. Tests that seed unfingerprinted rows — including several
-// pre-existing VectorMatch tests — then see an empty corpus and fail.
+// useActiveFingerprint returns the live provider fingerprint, arranging for
+// the process-wide caches to be restored on exit.
 //
-// So any test that reads the fingerprint must restore the cache on exit. It is
-// cleared rather than restored to a previous value because there is no getter
-// for the cached state, and the correct post-test state is "not yet sampled",
-// which is what a fresh process would have.
+// TWO process-global caches are involved, and both must be handled:
+//
+//  1. The embedding config itself (defaultEmbedConfigOnce in embeddings.go),
+//     resolved once per process. Whichever test happens to run first decides
+//     the provider for the entire run — and several tests run under a
+//     temporary MPM_WORKSPACE containing no mpm_config.json, which resolves
+//     to NullProvider. Without a reset here, these tests SKIP depending on
+//     ordering, and the canonical `make test` run reports green while the
+//     filter they pin is never exercised. That is the same defect as having
+//     no coverage at all.
+//
+//  2. The sampled dimension (activeEmbeddingDim* in reference_db.go).
+//     Reading the fingerprint populates it, which arms the embedding_model
+//     filter for every LATER test in the package; the pre-existing
+//     VectorMatch tests seed unfingerprinted rows and would then see an
+//     empty corpus and fail.
+//
+// Both are cleared rather than restored to a previous value: there is no
+// getter for either, and "not yet resolved" is the correct post-test state
+// because it is what a fresh process would have.
 func useActiveFingerprint(t *testing.T) ReferenceEmbeddingFingerprint {
 	t.Helper()
-	ResetActiveEmbeddingDimensionForTest()
-	t.Cleanup(ResetActiveEmbeddingDimensionForTest)
+
+	// Pin config resolution to the operator's real runtime root. Several
+	// tests in this package run under a temporary MPM_WORKSPACE that holds
+	// no mpm_config.json, and at least one unsets it outright without
+	// restoring. Whichever value is ambient when these tests run decides
+	// whether a provider resolves at all, so the suite's coverage of this
+	// fix depends on test ordering.
+	//
+	// Go's testing package has t.Setenv but no t.Unsetenv, so unset
+	// explicitly and restore the prior value on exit. Empty means "use the
+	// default resolution", which is what an ordinary `mpm` invocation does.
+	if prior, had := os.LookupEnv("MPM_WORKSPACE"); had {
+		os.Unsetenv("MPM_WORKSPACE")
+		t.Cleanup(func() { os.Setenv("MPM_WORKSPACE", prior) })
+	} else {
+		t.Cleanup(func() { os.Unsetenv("MPM_WORKSPACE") })
+	}
+
+	reset := func() {
+		ResetActiveEmbeddingDimensionForTest()
+		ResetDefaultEmbeddingConfigForTest()
+	}
+	reset()
+	t.Cleanup(reset)
 	fp := CurrentEmbeddingFingerprint()
 	if fp.Model == "" || fp.Dimension == 0 {
 		t.Skip("no embedding provider configured in this test environment")
@@ -149,19 +186,29 @@ func TestReferenceChunksHasEmbeddingModelParity(t *testing.T) {
 // TestEmbeddingFingerprintNamesTheModel — a dimension-only "fingerprint"
 // is not a fingerprint. CurrentEmbeddingFingerprint must carry the model
 // identity, not merely a length.
+//
+// This deliberately requires a real provider rather than skipping. An
+// earlier version of it passed vacuously with model="" and dimension=0 —
+// it only checked that the two fields were mutually consistent, so an
+// absent provider satisfied it and the assertion it was written to make
+// never ran. A test that passes when the thing it measures is missing is
+// worse than no test, because it reads as coverage.
 func TestEmbeddingFingerprintNamesTheModel(t *testing.T) {
-	ResetActiveEmbeddingDimensionForTest()
-	t.Cleanup(ResetActiveEmbeddingDimensionForTest)
-	fp := CurrentEmbeddingFingerprint()
+	fp := useActiveFingerprint(t)
 	t.Logf("active fingerprint: model=%q dimension=%d", fp.Model, fp.Dimension)
-	if fp.Model == "" && fp.Dimension != 0 {
+
+	if fp.Dimension != 0 && fp.Model == "" {
 		t.Errorf("dimension %d recorded with no model identity — that is the "+
 			"dimension-only check this column exists to replace", fp.Dimension)
 	}
-	// When no provider is configured the fingerprint must be empty, not a
-	// plausible-looking default that would match garbage.
-	if fp.Model == "" && fp.Dimension != 0 {
-		t.Error("empty model with non-zero dimension must not happen")
+	if fp.Model == "" {
+		t.Fatalf("fingerprint is empty despite useActiveFingerprint having " +
+			"resolved a provider; the reset helper is not effective")
+	}
+	if !strings.Contains(fp.Model, ":") {
+		t.Errorf("model identity %q is not provider-qualified — the fingerprint "+
+			"must name the provider too, or two providers offering the same "+
+			"model name would collide", fp.Model)
 	}
 }
 
