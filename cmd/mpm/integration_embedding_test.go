@@ -2,12 +2,15 @@ package main
 
 import (
 	"database/sql"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 )
@@ -226,9 +229,72 @@ func TestMpmAdd_ReachableWritesVector(t *testing.T) {
 	// Reachable (not tested in unit): HTTP succeeds, vector stored
 }
 
+// reserveRefusedEndpoint returns a loopback endpoint that is guaranteed to
+// refuse connections, for tests that need an unreachable provider.
+//
+// The obvious choice — localhost:11434 — is not one. Its precondition is
+// "port 11434 is unused", which is a property of the operator's machine, not
+// of the test. With Ollama running, `mpm add` connects successfully, exits 0,
+// and the test fails on a machine where nothing is wrong. That is precisely
+// what happened: this test was only green on developers who did not run
+// Ollama locally, so it was excluded from `make test` and left to rot.
+//
+// Instead: ask the kernel for a free port, then close the listener. The port
+// was demonstrably free microseconds ago, and it was freshly allocated rather
+// than a well-known one, so the window for something else to claim it is tiny.
+// The result is verified before use — if the port turns out to be reachable,
+// the helper retries rather than handing back a precondition it cannot honour.
+func reserveRefusedEndpoint(t *testing.T) string {
+	t.Helper()
+
+	const attempts = 5
+	for i := 0; i < attempts; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve a port on 127.0.0.1: %v", err)
+		}
+		addr := ln.Addr().String()
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close reserved listener: %v", err)
+		}
+
+		// Verify the precondition rather than assuming it. A refused
+		// connection is what makes this endpoint unusable as a provider;
+		// anything else would silently turn the test into a no-op.
+		conn, dialErr := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if dialErr != nil {
+			return "http://" + addr
+		}
+		_ = conn.Close()
+		t.Logf("port %s was claimed between release and dial; retrying", addr)
+	}
+
+	t.Fatalf("could not obtain a refused endpoint after %d attempts; "+
+		"the machine's loopback stack may be intercepting connections", attempts)
+	return ""
+}
+
+// hermeticEmbeddingEnv returns os.Environ() with every OLLAMA_* variable
+// stripped, so a developer's own provider settings cannot leak into a test
+// that sets its own.
+func hermeticEmbeddingEnv(overrides ...string) []string {
+	env := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "OLLAMA_") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, overrides...)
+}
+
 // TestMpmAdd_AbsentWithOllamaEnvVar covers the case where OLLAMA_ENDPOINT
 // is set (env-fallback) but the provider is absent (not running).
 // This exercises EmbeddingSourceEnvFallback with no actual server.
+//
+// The endpoint is a deliberately-refused one (see reserveRefusedEndpoint), so
+// the test passes whether or not the operator runs Ollama, and whether it
+// runs on the default port or not.
 func TestMpmAdd_AbsentWithOllamaEnvVar(t *testing.T) {
 	// Build the mpm binary for testing.
 	bin := filepath.Join(t.TempDir(), "mpm")
@@ -244,23 +310,28 @@ func TestMpmAdd_AbsentWithOllamaEnvVar(t *testing.T) {
 		t.Fatalf("creating workspace dir: %v", err)
 	}
 
-	// Run mpm add with OLLAMA_ENDPOINT set but server not running.
+	// Run mpm add pointed at an endpoint that refuses connections.
+	endpoint := reserveRefusedEndpoint(t)
 	addCmd := exec.Command(bin, "add", "env-fallback without server")
-	addCmd.Env = append(os.Environ(),
+	addCmd.Env = hermeticEmbeddingEnv(
 		"MPM_WORKSPACE="+workspaceDir,
 		"HOME="+tmp,
-		"OLLAMA_ENDPOINT=http://localhost:11434",
+		"OLLAMA_ENDPOINT="+endpoint,
 		"OLLAMA_MODEL=nomic-embed-text",
 	)
-	_, err := addCmd.CombinedOutput()
+	out, err := addCmd.CombinedOutput()
 
 	// Verify exit code is non-zero.
 	if err == nil {
-		t.Fatal("expected non-zero exit code for env-fallback with no server, got nil")
+		t.Fatalf("expected non-zero exit code for env-fallback with no server "+
+			"at %s, got 0. Command output:\n%s", endpoint, out)
 	}
-	if exitErr, ok := err.(*exec.ExitError); !ok {
-		t.Fatalf("expected *exec.ExitError, got %T", err)
-	} else if exitErr.ExitCode() == 0 {
-		t.Fatal("expected exit code != 0 for env-fallback with no server, got 0")
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected *exec.ExitError, got %T (%v)", err, err)
+	}
+	if exitErr.ExitCode() == 0 {
+		t.Fatalf("expected exit code != 0 for env-fallback with no server at %s, got 0.\nOutput:\n%s",
+			endpoint, out)
 	}
 }
