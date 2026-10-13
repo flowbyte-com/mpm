@@ -84,6 +84,13 @@ func handleRecall(args []string) int {
 	limit := fs.Int("limit", 15, "Maximum results to return")
 	staleDays := fs.Int("stale-days", 14, "Days threshold for stale flag (0=disabled)")
 	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	// `-j` is a long-standing alias for --json. It was handled by the pre-scan
+	// this file used to carry, and dropping it in the rewrite turned a working
+	// invocation into "unknown flag: --j". Registering it on the FlagSet is the
+	// fix: arity is read from the FlagSet, so the alias participates in
+	// position handling exactly like every other flag instead of needing its
+	// own special case.
+	jsonAlias := fs.Bool("j", false, "Alias for --json")
 	collection := fs.String("collection", "memories", "Collection to search")
 	tokenBudget := fs.Int("token-budget", 0, "Max cumulative tokens before truncation (0=unlimited)")
 	weightBelow := fs.Int("weight-below", 0, "Only results with weight below this value (0=no filter)")
@@ -112,6 +119,11 @@ func handleRecall(args []string) int {
 		fs.Usage()
 		return 1
 	}
+
+	// Fold the alias in after parsing: -j and --json are one flag, so either
+	// spelling enables JSON output. Neither one alone can be false while the
+	// other is true.
+	*jsonOutput = *jsonOutput || *jsonAlias
 
 	hasFilter := *weightBelow > 0 || *before != "" || *since != "" || *until != "" || *collection != "memories"
 

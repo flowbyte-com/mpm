@@ -29,7 +29,7 @@ import (
 // recallFlagNames lists every flag handleRecall declares. A new flag must be
 // added here to receive position coverage.
 var recallFlagNames = []string{
-	"since", "until", "limit", "stale-days", "json", "collection",
+	"since", "until", "limit", "stale-days", "json", "j", "collection",
 	"token-budget", "weight-below", "before", "semantic", "vector-weight",
 	"as-of", "why", "projected",
 }
@@ -51,6 +51,7 @@ type recallFlagset struct {
 	asOf        *string
 	vectorWt    *float64
 	json        *bool
+	jsonAlias   *bool
 	semantic    *bool
 	why         *bool
 	projected   *bool
@@ -70,6 +71,7 @@ func newRecallTestFlagSet(t *testing.T) *recallFlagset {
 	r.limit = fs.Int("limit", 15, "")
 	r.staleDays = fs.Int("stale-days", 14, "")
 	r.json = fs.Bool("json", false, "")
+	r.jsonAlias = fs.Bool("j", false, "")
 	r.collection = fs.String("collection", "memories", "")
 	r.tokenBudget = fs.Int("token-budget", 0, "")
 	r.weightBelow = fs.Int("weight-below", 0, "")
@@ -154,6 +156,7 @@ func TestParseArgsInterleaved_FlagOrderDoesNotMatter(t *testing.T) {
 			require.Equal(t, *before.asOf, *after.asOf, "--as-of differs by position")
 			require.Equal(t, *before.vectorWt, *after.vectorWt, "--vector-weight differs by position")
 			require.Equal(t, *before.json, *after.json, "--json differs by position")
+			require.Equal(t, *before.jsonAlias, *after.jsonAlias, "-j differs by position")
 			require.Equal(t, *before.semantic, *after.semantic,
 				"--semantic differs by position: this is the original defect")
 			require.Equal(t, *before.why, *after.why, "--why differs by position")
@@ -212,6 +215,28 @@ func TestParseArgsInterleaved_ShortDashFormStillWorks(t *testing.T) {
 	r := newRecallTestFlagSet(t).parse(t, "query", "-json")
 	require.True(t, *r.json,
 		"the single-dash form must keep working; some callers use it")
+}
+
+// `-j` predates the interleave rewrite: the pre-scan it replaced handled
+// `arg == "--json" || arg == "-j"` explicitly. Dropping it turned a working
+// invocation into "unknown flag: --j", which satisfies "rejected explicitly"
+// while breaking every caller that used the alias. It must work in both
+// positions, like every other flag.
+func TestParseArgsInterleaved_JSONAliasWorksInBothPositions(t *testing.T) {
+	for _, args := range [][]string{
+		{"-j", "query"},
+		{"query", "-j"},
+		{"-j", "some", "query", "-j"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			r := newRecallTestFlagSet(t)
+			require.NoError(t, parseArgsInterleaved(r.fs, args),
+				"-j is a registered alias; it must not be rejected as unknown")
+			require.True(t, *r.jsonAlias, "-j must be honoured in any position")
+			require.Equal(t, "some query",
+				strings.TrimSpace(strings.Join(r.fs.Args(), " ")))
+		})
+	}
 }
 
 func TestParseArgsInterleaved_ManyFlagsInterleaved(t *testing.T) {
