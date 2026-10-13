@@ -597,9 +597,17 @@ removed; see [`RECALL-MUTATION.md`](./RECALL-MUTATION.md) for the current
 contract and [`EMBEDDING-MODEL-COMPARISON.md`](./EMBEDDING-MODEL-COMPARISON.md)
 for the model-migration preconditions this unblocks.
 
-Recall is still not write-free — `EnqueueContradiction` and CLI access
-reinforcement both write — so the snapshot-copy discipline below still
-applies to any future agent benchmarking MPM.
+**Further resolved on 2026-10-13.** The three paired `EnqueueContradiction`
+calls went the same way, for the same underlying reason: cosine similarity
+cannot distinguish a contradiction from a near-duplicate, and filing one
+automatically on every read asserted a fact MPM does not have. Candidates
+are now added only by `mpm ops resolve-contradictions --propose`, and are
+labelled *unverified similarity candidates*. Semantic retrieval is
+write-free.
+
+The CLI still applies lexical-path access reinforcement (§4.4), so the
+snapshot-copy discipline below still applies to any future agent
+benchmarking MPM.
 
 ---
 

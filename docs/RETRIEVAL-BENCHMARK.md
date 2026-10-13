@@ -5,15 +5,14 @@ defects fixed in the `fix/retrieval-benchmark-findings` branch, and the
 calibration behind the changes that were *not* made.
 
 Reproducing: the benchmark runs against a **snapshot copy** of the live
-database, never `~/.mpm/src/db/mpm.db`. That is not caution for its own
-sake — `docs/RECALL-MUTATION.md` records that `mpm recall --semantic`
-still writes on two paths: `EnqueueContradiction` inserts a row into the
-shared contradiction queue for any pair above cosine 0.85, and the CLI
-applies access reinforcement. (Semantic retrieval no longer reduces
-memory weight — the automatic `ChallengeMemory` calls were removed on
-2026-10-13 — but a recall is still not write-free, so the snapshot
-discipline stands.) The harness digests the copy before and after
-and reports `READ-ONLY: confirmed`.
+database, never `~/.mpm/src/db/mpm.db`. As of 2026-10-13 semantic
+retrieval is **write-free** — both the automatic `ChallengeMemory` weight
+slashes and the `EnqueueContradiction` queue inserts were removed; see
+`docs/RECALL-MUTATION.md`. The CLI still applies lexical-path access
+reinforcement (`weight + 0.5`, rate-limited to hourly), and the harness
+still runs against a copy so that the live store is verifiable untouched
+regardless. The harness digests the copy before and after and reports
+`READ-ONLY: confirmed`.
 
 ## Defect 1 — BM25 sign inversion in the hybrid blend (fixed)
 

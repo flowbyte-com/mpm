@@ -651,7 +651,7 @@ Six canonical failure modes and the mechanism that handles each:
 
 **Premature theory confirmation.** A theory was marked confirmed with thin evidence, or new evidence has since emerged that contradicts it. *Recovery:* the challenge lifecycle is non-monotonic. A confirmed theory can be challenged again, re-entering the evidence-collection state with a fresh back-link. There is no "settled science" path — theories are revisable for the lifetime of the database.
 
-**Conflicting shared rules.** Agent A writes `Always use snake_case for DB columns`; Agent B writes `Always use camelCase for DB columns`. *Recovery:* every shared write produces a near-miss scan against existing rules via `shared.contradiction_log`. Detection runs opportunistically inside `mpm_memory action=query` — no separate ticker. Near-misses carry a protobuf-shape score combining confidence, freshness, and reinforcement. The operator is presented with both rules and chooses via `ResolveArbitrationTheory`; MPM does not silently overwrite either side.
+**Conflicting shared rules.** Agent A writes `Always use snake_case for DB columns`; Agent B writes `Always use camelCase for DB columns`. *Recovery:* an explicit `mpm ops resolve-contradictions --propose` scan produces near-miss candidates against existing rules via `shared.contradiction_log` — **not** automatically on every write or query, because cosine similarity cannot distinguish a contradiction from a near-duplicate. Candidates carry a protobuf-shape score combining confidence, freshness, and reinforcement. The operator is presented with both rules and chooses via `ResolveArbitrationTheory`; MPM does not silently overwrite either side.
 
 **Confidence decay drift.** A memory's weight decayed to a wrong value because the lifecycle sweep ran in an unexpected state, or because the underlying evidence ledger had a bug. *Recovery:* §10.1 Self-Healing Integrity Loop. Concept-drift detection quarantines affected memories (`concept_drift: true`), proposes pending theories, and survives restarts via SQLite-native dedup. The system errs on the side of *escalating to a theory* rather than silently fixing — wrong weight corrections are far more dangerous than visible ones.
 
@@ -1398,6 +1398,21 @@ Local FTS5 is a keyword index. For semantic recall over the shared DB, MPM runs 
 
 When two memories disagree, the system has to notice. `shared.contradiction_log` is the detection surface. Every shared write that produces a near-miss against an existing memory is logged with a protobuf-shape score (a weighted combination of confidence, freshness, and reinforcement). Detection runs **inside `mpm_memory action=query`'s result set** — opportunistic, not polled. There is no background ticker, no separate timer.
 
+> **Superseded 2026-10-13 — detection no longer runs inside query.** The
+> query-time detection described above was removed. Cosine similarity
+> establishes that two memories are *related*; it cannot establish that their
+> claims *conflict*. Running the scan inside every query meant a read
+> persisted unverified candidates on every invocation, from every client,
+> including diagnostics — measured at 78 proposals across 5 benchmark
+> queries, with a single unrelated query producing 35, all of them pairs
+> within one duplicate cluster and none resolved.
+>
+> Discovery is now an **explicit operator action**:
+> `mpm ops resolve-contradictions --propose`. Semantic retrieval writes
+> nothing to this queue. The scoring and arbitration described below are
+> unchanged; only the trigger moved. See
+> [`RECALL-MUTATION.md`](./RECALL-MUTATION.md).
+
 If the two candidates land within a small margin of each other, the system **does not** auto-resolve. It writes a pending theory and waits for an operator. A clean winner can be auto-resolved; a coin-flip always escalates.
 
 #### Layer 3 — Conflict Resolution + Arbitration Closure
@@ -1743,7 +1758,7 @@ mpm ops stance synthesize <name> [flags]
 
 # Multi-agent shared epistemology
 mpm ops shared [status]
-mpm ops resolve-contradictions [--apply] [--json]      # Arc 1: dry-run inspect or apply resolutions
+mpm ops resolve-contradictions [--propose] [--apply] [--json]  # Arc 1: dry-run inspect, explicit candidate scan, or apply resolutions
 mpm ops broadcast <memory_id>                          # Arc 2: fan-out an event wake
         [--kind=rule|resolution|arbitration|memory]    #    (auto-detected from collection if omitted)
         [--rationale="..."]                            #    (REQUIRED for kind=memory)
@@ -3165,6 +3180,13 @@ The `VectorMatch` circuit breaker refuses to start a vector scan that would touc
 - The resolution status (`pending` / `resolved` / `arbitration_needed`)
 
 The detection runs **inside `mpm_memory action=query`'s result set**, not as a background ticker. This is opportunistic: detection happens exactly when an agent is looking at the shared DB anyway, so there is no separate timer, no panic-recovery surface.
+
+> **Superseded 2026-10-13.** Query-time detection was removed. A queue row is
+> a *review item*, not a finding, and cosine similarity cannot tell a
+> contradiction from a duplicate. Rows are now added only by an explicit
+> `--propose` scan; the queue is otherwise written only by resolution.
+> Existing rows are preserved and read exactly as described here. See
+> [`RECALL-MUTATION.md`](./RECALL-MUTATION.md).
 
 ### Protobuf-shape scoring
 
