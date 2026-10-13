@@ -7,11 +7,25 @@ on:
     branches: [main]
 
 # Two-job split is intentional. The "gate" job must pass for merge; it covers
-# the build and the migration-relevant test subset. The "full-suite" job runs
-# the entire test tree but is allowed to fail — it exists to track the
-# pre-existing test-pollution failures (see TestLessonStoreListLessons,
-# TestRenderRoute) until the test suite cleanup arc lands. When the noise is
-# fixed, promote full-suite to a gating job by removing `continue-on-error`.
+# the build and the migration-relevant test subset. The "full-suite" job sweeps
+# the entire test tree without the race detector and is now gating too.
+#
+# It used to be `continue-on-error: true`, on the stated grounds that it was
+# tracking "pre-existing test-pollution failures (see TestLessonStoreListLessons,
+# TestRenderRoute)". That reasoning was stale on two counts, and the run history
+# shows it: in run 37958953946 every full-suite failure — 26 of them, the whole
+# set — was `developer build artifact missing: .../.build/bin/mpm`, the CLI
+# subprocess tests refusing to fall back to the installed binary. Neither named
+# test appears in any failure list. Worse, `continue-on-error` is invisible from
+# the job list: that job's conclusion reads `success` while its own log shows
+# `FAIL github.com/flowbyte-com/mpm/cmd/mpm 400.696s`. The gate job was red for
+# the same missing-build reason (`test_build_output_directory_exists`: ".build/bin
+# must exist (run `make build` first)").
+#
+# Both jobs now run `make build` first, which is the actual fix; verified
+# locally in a clean checkout that `go test -tags fts5 -count=1 ./...` exits 0
+# once the artifacts exist. Re-add `continue-on-error` only alongside a named
+# test in this comment, and only if that name appears in the job's own log.
 
 env:
   # FTS5 must be enabled for mattn/go-sqlite3 — see Makefile. Pin these at
@@ -55,7 +69,18 @@ jobs:
           git config --global init.defaultBranch main
 
       - name: Build
-        run: go build -tags fts5 ./...
+        run: |
+          go build -tags fts5 ./...
+          # `make build` is what puts artifacts where the CLI subprocess
+          # tests expect them: cmd/mpm and cmd/mpm-critic execute
+          # $(BUILD_DIR)/mpm and deliberately refuse to fall back to the
+          # installed production binary. `go build ./...` above cannot
+          # supply that — with several main packages it compiles all of
+          # them and discards every result, leaving no file on disk. The
+          # "Run `make build` first" failure those tests emit was
+          # therefore reachable from a clean runner, which is why this
+          # step exists separately from the compile check.
+          make build
 
       - name: go vet
         run: go vet -tags fts5 ./...
@@ -164,9 +189,8 @@ jobs:
           retention-days: 14
 
   full-suite:
-    name: Full test suite (tracking only)
+    name: Full test suite
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
 
@@ -178,6 +202,15 @@ jobs:
 
       # `./...` excludes internal/core/tools (separate go.mod). Sweep it
       # separately so this job's log covers the whole tree, not the root module.
+      #
+      # `make build` runs first for the same reason as in the gate job: the
+      # CLI subprocess tests under cmd/mpm execute $(BUILD_DIR)/mpm and
+      # refuse to fall back to the installed binary. Without it every clean
+      # runner reports the same "developer build artifact missing" failures,
+      # which drowns the real signal this job exists to surface.
+      - name: Build
+        run: make build
+
       - name: Full test sweep
         run: |
           go test -tags fts5 -count=1 ./... 2>&1 | tee test-output.log
