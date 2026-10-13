@@ -391,9 +391,37 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 		combined = combined[:cfg.Limit]
 	}
 
-	// ── Phase 4: Contradiction Detection (Cognitive Immune System) ─────
+	// ── Phase 4: Contradiction PROPOSALS (formerly Detection) ───────────
 	// Limit to top 15 candidates for O(1) pairwise evaluation (C(15,2) = 105)
-	// Uses provenance-based tiebreaker rules when a collision is detected.
+	//
+	// 2026-10-13 — this phase no longer mutates memory. Cosine similarity
+	// establishes that two memories are RELATED, which is not the same as
+	// establishing that they CONTRADICT each other. It previously called
+	// dm.ChallengeMemory on all three branches, so any semantic retrieval
+	// could reduce a memory's weight:
+	//
+	//   - the equal-tier branch fired on scanSet[i] by rank position alone;
+	//   - identical or near-identical statements tripped every branch,
+	//     because similarity is highest exactly where duplication is
+	//     highest;
+	//   - on the live store this had challenged 40 distinct members of one
+	//     75-row near-identical cluster asserting the SAME claim, 30 of
+	//     them pinned at the weight floor of 1.0.
+	//
+	// The invariant now enforced by this file is narrower and is tested in
+	// hybrid_search_nomutate_test.go:
+	//
+	//	Semantic similarity must never automatically cause
+	//	ChallengeMemory to reduce memory weight.
+	//
+	// Note this does NOT make semantic recall read-only: EnqueueContradiction
+	// below is still a database write into shared.contradiction_log, and CLI
+	// recall applies independent access reinforcement. What is guaranteed is
+	// that a read cannot reduce a memory's weight on its own.
+	//
+	// Proposals remain inspectable via `mpm ops resolve-contradictions`, and
+	// operators retain the explicit, audited challenge path
+	// (`mpm challenge-memory` / handleChallengeMemory), which is unchanged.
 	scanLimit := 15
 	if len(combined) < scanLimit {
 		scanLimit = len(combined)
@@ -512,9 +540,20 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			ciTier := provenanceTier(ciCompute)
 			cjTier := provenanceTier(cjCompute)
 
-			// State collision: one challenged, one not — challenge the unchallenged one.
-			// Previously used ChallengeMemoryAsync (fire-and-forget, no DB write). Fixed:
-			// uses synchronous ChallengeMemory so the DB is actually updated.
+			// State collision: one challenged, one not. PROPOSE only.
+			//
+			// 2026-10-13: this branch used to call
+			// dm.ChallengeMemory(unchallengedID, 1, evidence) here,
+			// reducing the memory's weight during a read. Cosine
+			// similarity measures relatedness, not logical
+			// contradiction, so a retrieval could penalise a memory
+			// for resembling another one. On the live store that had
+			// challenged 40 distinct members of a single
+			// near-identical cluster that all asserted the SAME
+			// claim. See docs/RECALL-MUTATION.md.
+			//
+			// The pair is still recorded for operator review via the
+			// contradiction queue; it is no longer enforced here.
 			if ci.isChallenged != cj.isChallenged {
 				var challengedID, unchallengedID string
 				if ci.isChallenged {
@@ -527,12 +566,12 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 				evidence := fmt.Sprintf(
 					"semantic collision (cosine=%.2f) between challenged memory %s and unchallenged memory %s",
 					sim, challengedID, unchallengedID)
-				dm.ChallengeMemory(unchallengedID, 1, evidence)
 				// Arc 1: enqueue in the shared contradiction queue
 				// so the operator can resolve via `mpm ops
-				// resolve-contradictions`. Best-effort: if the
-				// shared DB isn't attached, the slash still
-				// landed; the queue insert is a no-op.
+				// resolve-contradictions`. Best-effort: without an
+				// attached shared DB the proposal is dropped, which is
+				// the intended failure mode — losing a review item is
+				// strictly better than silently penalising a memory.
 				_ = dm.EnqueueContradiction(ContradictionEvidence{
 					MemoryA:    challengedID,
 					MemoryB:    unchallengedID,
@@ -542,31 +581,25 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 				continue
 			}
 
-			// Provenance-based tiebreaker: different tiers
+			// Provenance-based tiebreaker: different tiers. PROPOSE only.
+			//
+			// 2026-10-13: the slash that used to land here is gone.
+			// Provenance tier is a tiebreaker for which of two
+			// similarly-worded memories should win a dispute, but it
+			// is not evidence that a dispute exists. Proposing is
+			// retained; enforcing is not.
 			if ciTier != cjTier {
 				var winnerID, loserID string
-				var loserCompute string
-				var slashAmount int
 				if ciTier > cjTier {
 					winnerID = scanSet[i].ID
 					loserID = scanSet[j].ID
-					loserCompute = cjCompute
 				} else {
 					winnerID = scanSet[j].ID
 					loserID = scanSet[i].ID
-					loserCompute = ciCompute
-				}
-				// Human vs Model: slash -5
-				// High vs Ephemeral: slash -3
-				if loserCompute == "ephemeral" {
-					slashAmount = 3
-				} else {
-					slashAmount = 5
 				}
 				evidence := fmt.Sprintf(
-					"provenance collision (cosine=%.2f): %s (tier=%d) vs %s (tier=%d) — resolved in favor of %s",
+					"provenance collision (cosine=%.2f): %s (tier=%d) vs %s (tier=%d) — %s favored, pending manual review",
 					sim, scanSet[i].ID, ciTier, scanSet[j].ID, cjTier, winnerID)
-				dm.ChallengeMemory(loserID, slashAmount, evidence)
 				_ = dm.EnqueueContradiction(ContradictionEvidence{
 					MemoryA:    winnerID,
 					MemoryB:    loserID,
@@ -577,13 +610,22 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			}
 
 			// Equal tier — both memories have equal provenance weight and neither is
-			// challenged. Mark the first as challenged to signal unresolved dispute.
-			// (scanSet[i] is the earlier-in-list member of the unordered pair since j > i.)
+			// challenged. PROPOSE only.
+			//
+			// 2026-10-13: this branch is the worst of the three under
+			// the old behaviour. It challenged scanSet[i] purely
+			// because of that element's POSITION in the ranked list —
+			// j > i by loop construction — with no inspection of what
+			// either memory claimed. Two identical statements tripped
+			// it as readily as two incompatible ones.
+			//
+			// (scanSet[i] is still the earlier-in-list member of the
+			// unordered pair since j > i, so the queue record names the
+			// same two memories it always did.)
 			if !cj.isChallenged {
 				evidence := fmt.Sprintf(
 					"unresolved state collision (cosine=%.2f) between equal-tier memories %s and %s — pending manual review",
 					sim, scanSet[i].ID, scanSet[j].ID)
-				dm.ChallengeMemory(scanSet[i].ID, 1, evidence)
 				_ = dm.EnqueueContradiction(ContradictionEvidence{
 					MemoryA:    scanSet[i].ID,
 					MemoryB:    scanSet[j].ID,

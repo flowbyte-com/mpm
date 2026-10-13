@@ -219,8 +219,8 @@ func IVFSearch(db *sql.DB, queryEmbedding []float32, collection string, cfg IVFC
 	// models can share a dimension while producing incomparable spaces,
 	// and the `len(dbEmbedding) != len(queryEmbedding)` guard below
 	// passes in exactly that case, yielding a plausible cosine over
-	// unrelated vectors. Above 0.85 that cosine makes HybridSearch call
-	// ChallengeMemory() and mutate the memory.
+	// unrelated vectors. Such a cosine inflates retrieval scores and,
+	// above 0.85, produces a spurious contradiction proposal.
 	//
 	// Unlabelled rows (NULL embedding_model, i.e. written before the
 	// 2026-10-13 migration) are excluded: unproven is not compatible.
