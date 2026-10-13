@@ -1,12 +1,12 @@
 # `mpm onboard` — design
 
-**Status:** approved (2026-10-13, §11) and being implemented in stages.
+**Status:** approved (2026-10-13, §11); all three stages landed.
 
 | Stage | Scope | State |
 |---|---|---|
 | 1 | command structure, read-only environment/readiness reporting | **landed** |
 | 2 | guided model configuration | **landed** |
-| 3 | opt-in host installation behind explicit consent | not started |
+| 3 | opt-in host installation behind explicit consent | **landed** |
 
 Stage 1 ships `cmd/mpm/onboard_cmds.go` with the full mode surface
 (`report`, `models`, `hosts`, `--dry-run`, `--json`, `--yes`). The
@@ -16,8 +16,9 @@ runs.
 
 Stage 2 adds `cmd/mpm/onboard_models.go`. It opens **only** the model
 gate (`onboardOptions.mutateModelsAllowed()`); `mutateHostsAllowed()`
-stays false and is pinned by a test, so opening one gate cannot
-implicitly open the other. The step decides *whether* to run the
+stayed false at the time and was pinned by a test, so opening one gate
+could not implicitly open the other. Stage 3 then opened it deliberately
+and changed that test on purpose. The step decides *whether* to run the
 existing `mpm config` wizard, prints what it would change, obtains
 consent, and delegates — there is no second configuration system.
 
@@ -37,6 +38,25 @@ design is most concerned with.
 
 Supersedes the earlier `mpm bootstrap` proposal; the command is
 `mpm onboard`.
+
+Stage 3 adds `cmd/mpm/onboard_hosts.go`. It opens the host gate
+(`onboardOptions.mutateHostsAllowed()`), which means *capable*, not
+*permitted*: the only hosts it will touch are the ones the operator
+named on the command line, and `parseOnboardArgs` refuses the
+auto-sweep vocabulary (`auto`, `all`, `detected`, …) **by name**, so
+`mpm onboard --hosts install auto` is an error with a reason rather
+than a silent no-op. Detection feeds the report; installation consumes
+only the command line. `decideHostInstall` is the whole consent
+surface and is a pure function, so the rejected-approval and
+drifted-without-`--repair` branches are testable without a pty.
+
+Three preservation rules are enforced rather than merely intended:
+a `PASS` host is left byte-identical even when `--yes` is given; a
+`WARN` (drifted) host is reported and **not** rewritten unless
+`--repair` was also named; and after an install the inventory rows are
+re-inspected, so a run that exits 0 without producing a managed block
+is reported as unconfirmed rather than as installed. Rollback is
+per-adapter and the report says so every time — see §6.7.
 
 **Guiding principle:** *MPM explains its requirements; the operator chooses
 the models.* Onboard may say what an embedding model is for and what breaks

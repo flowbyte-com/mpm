@@ -69,14 +69,42 @@ func TestOnboardModelGateIsOpen(t *testing.T) {
 	}
 }
 
-// TestOnboardHostGateStaysClosed is the counterpart. Stage 2 must not be
-// able to install a host integration, and the stage that does so has to
-// change this test on purpose rather than by accident.
-func TestOnboardHostGateStaysClosed(t *testing.T) {
+// TestOnboardHostGateIsCapableNotPermitted is the counterpart to
+// TestOnboardModelGateIsOpen. Stage 3 opened the host gate, so this test
+// changed on purpose.
+//
+// What it now asserts is the thing that actually protects the machine: an
+// open gate means CAPABLE, and every path through it still demands a
+// target the operator typed plus an approval they gave. The gates are
+// permissive; the consent around them is not.
+func TestOnboardHostGateIsCapableNotPermitted(t *testing.T) {
 	var opts onboardOptions
-	if opts.mutateHostsAllowed() {
-		t.Error("mutateHostsAllowed() = true; host installation is stage 3 and " +
-			"requires an explicit target plus mutation approval (ONBOARD.md §6)")
+	if !opts.mutateHostsAllowed() {
+		t.Error("mutateHostsAllowed() = false; stage 3 implements the host step")
+	}
+
+	// No targets — which is what detection produces, always — means no
+	// installation is even schedulable.
+	if len(opts.hostTargets) != 0 {
+		t.Errorf("a default invocation carries %d host targets; a target must "+
+			"only ever come from the command line", len(opts.hostTargets))
+	}
+	for _, state := range hostStates() {
+		d := decisionFor(t, state.Host,
+			decideHostInstall([]hostTargetState{state}, opts, false, nil))
+		if d.Proceed {
+			t.Errorf("host %q is scheduled with no named target and no approval", state.Host)
+		}
+	}
+
+	// And the model gate opening must never have opened this one by
+	// implication — the two are separate methods for exactly that reason.
+	modelOnly := onboardOptions{scope: onboardScopeModels}
+	if !modelOnly.mutateModelsAllowed() {
+		t.Error("--models no longer opens the model gate")
+	}
+	if _, err := parseOnboardArgs([]string{"--models"}); err != nil {
+		t.Fatalf("parse --models: %v", err)
 	}
 }
 

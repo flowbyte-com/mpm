@@ -392,9 +392,11 @@ func TestOnboardGatesReflectImplementedSteps(t *testing.T) {
 		t.Fatal("mutateAllowed() is false, but stage 2 implements the guided " +
 			"model step. A false here would make the step unreachable.")
 	}
-	if opts.mutateHostsAllowed() {
-		t.Fatal("mutateHostsAllowed() is true, but host installation is stage 3 " +
-			"and requires an explicit target plus mutation approval.")
+	if !opts.mutateHostsAllowed() {
+		t.Fatal("mutateHostsAllowed() is false, but stage 3 implements opt-in host " +
+			"installation. A false here would make the host step unreachable. The " +
+			"gate being open does not make it PERMITTED — TestOnboardHostGateIsCapableNotPermitted " +
+			"in onboard_models_test.go is what guards that.")
 	}
 }
 

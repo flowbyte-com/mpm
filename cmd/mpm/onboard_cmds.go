@@ -137,6 +137,21 @@ type onboardOptions struct {
 	// what may be done: unattended operation still requires explicit
 	// host targets (docs/ONBOARD.md §6.3).
 	assumeYes bool
+
+	// hostInstall selects `mpm onboard hosts install <target>...`, and
+	// hostTargets are the hosts the operator NAMED. There is no "auto"
+	// form and no flag that expands a detected set into targets; the
+	// parser rejects the attempt by name rather than quietly treating it
+	// as a literal hostname that does not exist.
+	hostInstall bool
+	hostTargets []string
+
+	// hostRepair authorises rewriting a host whose managed section has
+	// DRIFTED. It is separate from install because repair replaces
+	// something that exists and works, which is a different decision
+	// from filling a gap (ONBOARD.md §6.4: drift is reported; acting on
+	// it is a separate, named approval).
+	hostRepair bool
 }
 
 // The per-step write gates (mutateModelsAllowed, mutateHostsAllowed and
@@ -201,6 +216,8 @@ func parseOnboardArgs(args []string) (onboardOptions, error) {
 			}
 		case "--yes", "-y":
 			opts.assumeYes = true
+		case "--repair":
+			opts.hostRepair = true
 		case "--json", "-j":
 			opts.json = true
 		case "--check":
@@ -208,11 +225,48 @@ func parseOnboardArgs(args []string) (onboardOptions, error) {
 			// vocabulary. An alias is honest; a flag that changes
 			// nothing is not.
 			opts.dryRun = true
+		case "install":
+			if opts.scope != onboardScopeHosts {
+				return opts, fmt.Errorf(
+					"`install` applies to the host step only; run `mpm onboard --hosts install <target>`")
+			}
+			opts.hostInstall = true
 		default:
+			if !strings.HasPrefix(a, "-") {
+				// Collected regardless of `install`, so that naming a
+				// host without it produces "that host was named but
+				// nothing will be installed" below, rather than a bare
+				// "unknown argument" that leaves the operator guessing
+				// whether the target was recognised.
+				target, err := normaliseHostTarget(a)
+				if err != nil {
+					return opts, err
+				}
+				opts.hostTargets = append(opts.hostTargets, target)
+				continue
+			}
 			return opts, fmt.Errorf(
 				"unknown argument %q\n"+
 					"  usage: mpm onboard [report|models|hosts] [--dry-run] [--json] [--yes]\n"+
 					"  run `mpm onboard help` for the full command table", a)
+		}
+	}
+
+	if opts.hostInstall && len(opts.hostTargets) == 0 {
+		return opts, fmt.Errorf(
+			"`install` needs at least one host named on the command line.\n"+
+				"  targets: %s\n"+
+				"  there is deliberately no `--hosts auto`: MPM is installed on machines that have\n"+
+				"  never used any MPM integration, so a detected set is not evidence of consent",
+			strings.Join(onboardHostLabels, ", "))
+	}
+	if opts.hostRepair && !opts.hostInstall {
+		return opts, fmt.Errorf(
+			"`--repair` only applies to `mpm onboard --hosts install`; nothing else rewrites a host")
+	}
+	if !opts.hostInstall {
+		for _, t := range opts.hostTargets {
+			return opts, fmt.Errorf("host %q was named without `install`; `mpm onboard --hosts` only inspects", t)
 		}
 	}
 
@@ -223,6 +277,45 @@ func parseOnboardArgs(args []string) (onboardOptions, error) {
 		opts.dryRun = true
 	}
 	return opts, nil
+}
+
+// autoInstallWords are the tokens an operator reaches for when they want
+// "just set up the ones I have". Each is rejected by name, with the
+// reason, rather than treated as an unknown host and reported as a typo.
+// The distinction matters: "you misspelled a host" and "MPM will not
+// sweep your machine" are different messages, and conflating them would
+// leave the operator to guess which rule they hit.
+//
+// The rule is ONBOARD.md §6.1/§6.3: MPM is installed on any machine that
+// has any MPM integration, so a "is the mpm binary present" probe is
+// satisfied on hosts that have never heard of MPM. An auto-sweep would
+// defeat the gate that keeps the reconcile path from expanding MPM into
+// frameworks the operator never chose.
+var autoInstallWords = map[string]bool{
+	"auto": true, "all": true, "any": true, "every": true,
+	"*": true, "detected": true, "found": true, "installed": true,
+}
+
+// normaliseHostTarget validates one host label, rejecting the
+// auto-sweep vocabulary explicitly and normalising case so `Pi` and `pi`
+// are the same target rather than two.
+func normaliseHostTarget(tok string) (string, error) {
+	lower := strings.ToLower(strings.TrimSpace(tok))
+	if autoInstallWords[lower] {
+		return "", fmt.Errorf(
+			"host target %q is refused: onboarding has no auto-sweep.\n"+
+				"  name the hosts you want, one at a time: %s\n"+
+				"  a host that is present but unnamed is skipped, not installed",
+			tok, strings.Join(onboardHostLabels, ", "))
+	}
+	for _, known := range onboardHostLabels {
+		if lower == known {
+			return known, nil
+		}
+	}
+	return "", fmt.Errorf(
+		"unknown host target %q\n  known targets: %s\n  run `mpm onboard --hosts` to see which are present",
+		tok, strings.Join(onboardHostLabels, ", "))
 }
 
 func scopeFlagName(s onboardScope) string {
@@ -280,6 +373,9 @@ func handleOnboard(args []string) int {
 	// and the exit code reflects the combination.
 	if opts.scope == onboardScopeModels || opts.scope == onboardScopeFull {
 		runModelStep(opts, &rep)
+	}
+	if opts.hostInstall {
+		runHostStep(opts, &rep)
 	}
 
 	if opts.json {
@@ -345,6 +441,12 @@ type onboardReport struct {
 	// consent decision, and what actually resolved afterwards. Populated
 	// for models and full scope.
 	ModelStep *modelStepOutcome `json:"model_step,omitempty"`
+
+	// HostStep records the host step's outcome: the hosts the operator
+	// NAMED, the decision taken for each, and what each installer
+	// actually did. Populated only when targets were named — a plain
+	// inspection has no step to record.
+	HostStep *hostStepOutcome `json:"host_step,omitempty"`
 
 	// NotVerified names things this command structurally cannot
 	// check. Always populated; an empty list here would be the bug.
@@ -415,17 +517,35 @@ func collectOnboardReport(opts onboardOptions) (onboardReport, error) {
 		collectHosts(&rep)
 	}
 
-	// The gates are per-step, not global: stage 2 can configure models
-	// and still cannot install a host integration. Reporting availability
-	// against the global predicate would have told the operator that
-	// guided configuration is unavailable when it is merely absent, and
-	// that host installation is available when it is not.
-	if !opts.mutateHostsAllowed() {
-		switch opts.scope {
-		case onboardScopeHosts, onboardScopeFull:
+	// The gates are per-step, not global: each step reports what IT
+	// cannot do, so "not available" always names the missing thing
+	// rather than a general capability.
+	//
+	// For the host step the interesting case is not the gate but the
+	// TARGETS. `mpm onboard --hosts` inspects and proposes; it installs
+	// nothing because the operator named no host. Saying "installation
+	// is unavailable" there would be false — it is available and simply
+	// was not asked for — and saying nothing would leave an inspect-only
+	// run looking like a silent no-op.
+	switch opts.scope {
+	case onboardScopeHosts, onboardScopeFull:
+		switch {
+		case !opts.mutateHostsAllowed():
 			rep.NotAvailable = append(rep.NotAvailable,
 				"host installation: this build inspects integrations but cannot install them. "+
 					"Run the per-host installer directly, one host at a time")
+		case !opts.hostInstall:
+			rep.NotAvailable = append(rep.NotAvailable,
+				"host installation: available, but no host was named. "+
+					"Run `mpm onboard --hosts install <target>` — targets are never inferred from what was detected")
+		}
+	}
+	if !opts.mutateModelsAllowed() {
+		switch opts.scope {
+		case onboardScopeModels, onboardScopeFull:
+			rep.NotAvailable = append(rep.NotAvailable,
+				"model configuration: this build reports model state but cannot change it. "+
+					"Configure with `mpm config` (no arguments runs the wizard)")
 		}
 	}
 	if !opts.mutateModelsAllowed() {
@@ -905,10 +1025,21 @@ func inspectInstalledHosts() ([]installedHostResult, error) {
 // "nothing is there" and "I could not look" must survive.
 func locateHostInspector() (string, error) {
 	rel := filepath.Join("agent_installation", "scripts", "check_installed_managed_blocks.py")
+	return resolveRepoRelative(rel)
+}
+
+// resolveRepoRelative finds a repo-relative path, honouring
+// MPM_REPO_ROOT first and otherwise walking up from the executable and
+// then the working directory.
+//
+// The inspector and the adapter installers must agree on where the
+// checkout is. Sharing the resolution is what keeps them from disagreeing
+// about which install.sh they are talking about.
+func resolveRepoRelative(rel string) (string, error) {
 
 	if root := os.Getenv("MPM_REPO_ROOT"); root != "" {
 		candidate := filepath.Join(root, rel)
-		if onboardFileExists(candidate) {
+		if onboardPathExists(candidate) {
 			return candidate, nil
 		}
 		return "", fmt.Errorf("MPM_REPO_ROOT=%s has no %s", root, rel)
@@ -930,7 +1061,7 @@ func locateHostInspector() (string, error) {
 		dir := start
 		for i := 0; i < 8; i++ {
 			candidate := filepath.Join(dir, rel)
-			if onboardFileExists(candidate) {
+			if onboardPathExists(candidate) {
 				return candidate, nil
 			}
 			parent := filepath.Dir(dir)
@@ -948,6 +1079,16 @@ func locateHostInspector() (string, error) {
 // onboardFileExists is a local helper because the package-level
 // fileExists lives in a _test.go file and is therefore not compiled
 // into the binary.
+// onboardPathExists reports whether anything exists at path, file or
+// directory. The resolver is shared by the inspector (which needs a
+// script) and the adapter root (which is a directory), so requiring a
+// regular file here would have made the adapter lookup fail against a
+// perfectly good checkout.
+func onboardPathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 func onboardFileExists(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && !st.IsDir()
@@ -1009,6 +1150,7 @@ func renderOnboardReport(rep onboardReport) {
 	}
 
 	renderModelStep(rep)
+	renderHostStep(rep)
 
 	// The scriptable equivalent is printed whenever onboarding could not
 	// prompt. Declining to be unattended is only useful if the operator
@@ -1086,6 +1228,47 @@ func renderModelStep(rep onboardReport) {
 	}
 	for _, r := range step.Remaining {
 		fmt.Printf("  %s %s is still outstanding — configure later with `mpm config`\n", marker, r)
+	}
+	fmt.Println()
+}
+
+// renderHostStep prints the host step's per-host outcome.
+//
+// Each host gets its own line with its own verdict, because the step is
+// per-adapter in every meaningful sense: one installer runs, backs up
+// its own file, and can be undone only by re-running that same
+// installer. Collapsing several hosts into one "done" would misdescribe
+// a partial run — the exact failure ONBOARD.md §6.7 warns about.
+func renderHostStep(rep onboardReport) {
+	step := rep.HostStep
+	if step == nil {
+		return
+	}
+	fmt.Println("Host step")
+	fmt.Printf("  · targets named by the operator: %s\n", strings.Join(step.Targets, ", "))
+	for _, r := range step.Results {
+		marker := "·"
+		switch r.Verdict {
+		case hostVerdictPass:
+			marker = "✓"
+		case "failed":
+			marker = "!"
+		}
+		fmt.Printf("  %s %-14s %s\n", marker, displayHostName(r.Host), r.Detail)
+		if r.ExitCode != 0 {
+			fmt.Printf("      installer exited %d\n", r.ExitCode)
+		}
+		for _, b := range r.Backups {
+			fmt.Printf("      backup: %s\n", b)
+		}
+		if r.Output != "" && r.Verdict == "failed" {
+			for _, line := range strings.Split(r.Output, "\n") {
+				fmt.Printf("      | %s\n", line)
+			}
+		}
+	}
+	if step.Rollback != "" {
+		fmt.Printf("  · %s\n", step.Rollback)
 	}
 	fmt.Println()
 }
@@ -1168,7 +1351,8 @@ func printOnboardHelp() {
 	fmt.Println("  (none)             full run: models, then hosts, then the report")
 	fmt.Println("  report             read-only inspection; never writes anything")
 	fmt.Println("  models             model-configuration step only")
-	fmt.Println("  hosts              host-integration step only")
+	fmt.Println("  hosts              host-integration step only (inspect and propose)")
+	fmt.Println("  hosts install      install into hosts you NAME — see below")
 	fmt.Println()
 	fmt.Println("Options")
 	fmt.Println("  --models           same as the `models` subcommand")
@@ -1177,15 +1361,31 @@ func printOnboardHelp() {
 	fmt.Println("  --check            alias for --dry-run")
 	fmt.Println("  --json, -j         machine-readable report; never routes through the human renderer")
 	fmt.Println("  --yes, -y          non-interactive confirmation")
+	fmt.Println("  --repair           authorise rewriting a host whose managed section has drifted")
 	fmt.Println()
 	fmt.Println("The three scopes are mutually exclusive: `--models` and --hosts select")
 	fmt.Println("different steps, and running one never implies running the other.")
+	fmt.Println()
+	fmt.Println("Host installation")
+	fmt.Println("  mpm onboard --hosts install <target>...")
+	fmt.Println()
+	fmt.Println("  Targets: " + strings.Join(onboardHostLabels, ", "))
+	fmt.Println()
+	fmt.Println("  There is deliberately no `--hosts auto`. A host that is present on the")
+	fmt.Println("  machine but absent from your target list is skipped, not installed.")
+	fmt.Println("  Detection is read-only and never installs: onboarding may write into a")
+	fmt.Println("  host only when you name that host and approve the mutation.")
+	fmt.Println()
+	fmt.Println("  Unattended use (--yes) needs both explicit targets and explicit approval.")
+	fmt.Println("  Rollback is per adapter, not atomic — re-run each adapter's")
+	fmt.Println("  install.sh --uninstall, one at a time. There is no single-command undo.")
 	fmt.Println()
 	fmt.Println("What this command will not do")
 	fmt.Println("  · contact a model endpoint, download a model, or call a paid API")
 	fmt.Println("  · recommend or auto-select a model, or name a preferred provider")
 	fmt.Println("  · install a framework integration merely because that framework is present")
 	fmt.Println("  · overwrite a working configuration")
+	fmt.Println("  · repair a drifted managed block unless you pass --repair")
 	fmt.Println()
 	fmt.Println("Related")
 	fmt.Println("  mpm config          interactive model configuration wizard")

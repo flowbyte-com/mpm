@@ -57,12 +57,12 @@ func (o onboardOptions) mutateModelsAllowed() bool { return true }
 
 // mutateHostsAllowed reports whether the host step may write.
 //
-// CLOSED, and it must stay closed until stage 3. `mpm onboard` inspects
-// integrations but never installs one: ONBOARD.md §6 makes detection
-// read-only, and installing into a host requires the operator to name
-// that host and approve the mutation separately. TestOnboardHostGateStaysClosed
-// pins this, so the stage that opens it has to change a test on purpose.
-func (o onboardOptions) mutateHostsAllowed() bool { return false }
+// Open as of stage 3, but "open" means CAPABLE, not PERMITTED: every
+// path that writes still requires targets the operator named on the
+// command line (parseOnboardArgs refuses the auto-sweep vocabulary) plus
+// an approval the operator gave (decideHostInstall). Detection never
+// writes, and a discovered host is skipped rather than installed.
+func (o onboardOptions) mutateHostsAllowed() bool { return true }
 
 // mutateAllowed reports whether this invocation may change anything.
 func (o onboardOptions) mutateAllowed() bool {
