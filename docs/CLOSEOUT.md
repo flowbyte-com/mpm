@@ -468,6 +468,69 @@ The 4 remaining provider-mode skips are `TestDrillE2E_ClaudeCode`,
 `TestAffinityRebuild_RunsAgainstRealOnDiskDB` and the reference-fallback
 test above — all pre-existing and unrelated to this work.
 
+### 1.9 Onboarding reported a schema fact that had become false — FIXED
+
+**Severity:** low functionally, high in trust. Found only by *running the
+deployed binary*, after both suites were green.
+
+The post-deploy `mpm onboard --check`, run from `/`, printed:
+
+```
+Not verified by onboarding
+  · embedding model identity of already-stored memory vectors: `memories`
+    has no embedding_model column, so changing the model leaves
+    mixed-generation vectors undetectable.
+```
+
+The column existed. The migration had been applied by that very deploy —
+`SELECT COUNT(*) FROM pragma_table_info('memories') WHERE
+name='embedding_model'` returned 1. The sentence was a **hardcoded
+constant** in `cmd/mpm/onboard_cmds.go`, true when written and false after
+`12ce499`, and nothing compared it against the store it described.
+
+Two things make this worth more than a cosmetic string fix:
+
+1. **It misdirects.** The remedy it names —
+   `backfill-embeddings --force-reembed` — is the wrong one for the state
+   the store is actually in. The live database has the column and 146 live
+   rows with no label, so the correct command is plain
+   `mpm ops backfill-embeddings`. An operator following the report would
+   have run the `--force-reembed` variant, which re-embeds every row
+   regardless of fingerprint — strictly more work, and it re-embeds the
+   3 already-correct rows too.
+
+2. **It hides the actual state.** The per-row situation — 146 of 146
+   unlabelled, meaning semantic recall over `memories` returns nothing
+   right now (§1.3) — was nowhere in the report. That is the single most
+   operationally important fact about the store post-deploy, and the one
+   line that should have carried it was asserting something else.
+
+A report that misstates the substrate is worse than one that stays silent,
+because the operator has no way to tell which lines to trust.
+
+**Fixed:** the text is now derived from the live store via
+`memoryVectorFingerprintState`, covering the three states that need
+different responses — no column (pre-migration), column present with
+unlabelled rows (migrated, backfill outstanding — names the count and the
+correct remedy), and fully labelled (nothing outstanding). An unavailable
+database reports "not checked" rather than reading as healthy.
+
+**Regression coverage:** `cmd/mpm/onboard_fingerprint_report_test.go`. The
+original was invisible to the suite precisely because it was a constant, so
+the tests assert against seeded stores in each state, and
+`TestOnboardFingerprintLineNeverClaimsAMissingColumnOnAMigratedStore`
+pins the exact regression. Verified by substituting the old constant text
+back into the function: **all three state subtests fail**, each naming the
+false claim. A test that cannot fail against the code it replaces is not
+covering anything.
+
+**The transferable lesson, and why this is filed as a defect rather than
+an observation:** user-facing text describing a *schema or data* fact is
+itself a correctness surface, and it needs the same discipline as code —
+derive it from the store, and assert on it. A comment in prose silently
+becomes a lie the moment a migration lands, and nothing in a green test
+suite will notice.
+
 ---
 
 ## 2. Previously reported defects already fixed
