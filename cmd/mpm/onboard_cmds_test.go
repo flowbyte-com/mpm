@@ -139,24 +139,6 @@ func (f onboardFixture) writeConfig(t *testing.T, body string) {
 	}
 }
 
-func (f onboardFixture) env(t *testing.T) []string {
-	t.Helper()
-	return append(os.Environ(),
-		"HOME="+f.home,
-		"MPM_WORKSPACE="+f.workspace,
-		"MPM_NO_AUTO_INIT=1",
-		"MPM_REPO_ROOT="+repoRoot(t),
-		// Closed ports: a provider call fails instead of succeeding,
-		// which is how these tests prove no provider call happens.
-		"OPENAI_API_BASE=http://127.0.0.1:1/v1",
-		"OPENAI_BASE_URL=http://127.0.0.1:1/v1",
-		"ANTHROPIC_BASE_URL=http://127.0.0.1:1",
-		"OLLAMA_HOST=http://127.0.0.1:1",
-		"OLLAMA_ENDPOINT=",
-		"OLLAMA_MODEL=",
-	)
-}
-
 // repoRoot locates the checkout so the host inspector is reachable
 // without the test depending on the working directory.
 func repoRoot(t *testing.T) string {
@@ -191,7 +173,20 @@ func (f onboardFixture) run(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command(f.bin, args...)
 	cmd.Dir = f.workspace
-	cmd.Env = f.env(t)
+	cmd.Env = append(os.Environ(),
+		"HOME="+f.home,
+		"MPM_WORKSPACE="+f.workspace,
+		"MPM_NO_AUTO_INIT=1",
+		"MPM_REPO_ROOT="+repoRoot(t),
+		// Closed ports: a provider call fails instead of succeeding,
+		// which is how these tests prove no provider call happens.
+		"OPENAI_API_BASE=http://127.0.0.1:1/v1",
+		"OPENAI_BASE_URL=http://127.0.0.1:1/v1",
+		"ANTHROPIC_BASE_URL=http://127.0.0.1:1",
+		"OLLAMA_HOST=http://127.0.0.1:1",
+		"OLLAMA_ENDPOINT=",
+		"OLLAMA_MODEL=",
+	)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
