@@ -511,7 +511,7 @@ func collectOnboardReport(opts onboardOptions) (onboardReport, error) {
 	collectInstallation(&rep, dm)
 	collectReadiness(&rep, dm)
 	if opts.scope != onboardScopeHosts {
-		collectModels(&rep)
+		collectModels(&rep, dm)
 	}
 	if opts.scope != onboardScopeModels {
 		collectHosts(&rep)
@@ -687,7 +687,7 @@ func readinessState(it ReadinessItem) string {
 // config: Config.ResolveProfile for generative components and
 // ResolveEmbeddingConfig for embedding — which is NOT routed through
 // ResolveProfile, and must not inherit profiles.default.
-func collectModels(rep *onboardReport) {
+func collectModels(rep *onboardReport, dm *mpminternal.DatabaseManager) {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		rep.Models = append(rep.Models, onboardRow{
@@ -789,20 +789,94 @@ func collectModels(rep *onboardReport) {
 
 	// -- the memory-store heterogeneity gap, stated before it bites.
 	//
-	// `memories` has embedding_dimension and embedding_source but no
-	// embedding_model column, so a changed embedding model leaves
-	// mixed-generation vectors that nothing can detect. This is a real
-	// substrate asymmetry; onboarding surfaces it rather than
-	// papering over it, and names the remedy.
+	// What is true here CHANGED when the embedding_model migration landed
+	// (2026-10-13), so this text is derived from the live store rather
+	// than asserted as a constant. An earlier version hardcoded "memories
+	// has no embedding_model column"; after the migration that sentence
+	// became false and onboarding kept printing it — a report that
+	// misstates the substrate is worse than one that is silent, because
+	// the operator has no way to tell which parts to trust.
+	//
+	// The state that matters is per-row, not per-schema: the compatibility
+	// filter compares embedding_model to the ACTIVE model and excludes
+	// what it cannot prove, so a store where the column exists but rows
+	// are unlabelled still returns nothing from semantic recall.
 	if emb.Status == mpminternal.EmbeddingStatusConfigured && emb.ProviderName != "" {
 		rep.NotVerified = append(rep.NotVerified,
-			"embedding model identity of already-stored memory vectors: `memories` has no "+
-				"embedding_model column, so changing the model leaves mixed-generation vectors "+
-				"undetectable. Re-embed with `mpm ops backfill-embeddings --force-reembed` after a change.")
+			"embedding model identity of already-stored memory vectors: "+
+				memoryVectorFingerprintState(dm, emb))
 	}
 
 	rep.NotVerified = append(rep.NotVerified,
 		"live reachability and authentication of the configured endpoints — `mpm doctor` probes those; onboard does not")
+}
+
+// memoryFingerprintCounts reports (column present, live vectors, labelled
+// vectors). `live` counts rows eligible for retrieval — soft-deleted rows
+// are excluded, since the backfill's pending predicate excludes them too
+// and counting them would overstate the work.
+func memoryFingerprintCounts(dm *mpminternal.DatabaseManager) (haveColumn bool, live, labelled int, err error) {
+	db := dm.SQLDB()
+	if !memoriesHaveModelColumn(db) {
+		return false, 0, 0, nil
+	}
+	err = db.QueryRow(`
+		SELECT COUNT(*),
+		       COALESCE(SUM(CASE WHEN embedding_model IS NOT NULL
+		                          AND TRIM(embedding_model) <> '' THEN 1 ELSE 0 END), 0)
+		  FROM memories
+		 WHERE deleted_at IS NULL AND embedding IS NOT NULL AND embedding != 'null'`,
+	).Scan(&live, &labelled)
+	return true, live, labelled, err
+}
+
+// memoryVectorFingerprintState describes, from the live store, how much of
+// `memories` can currently be proven comparable to the active embedding
+// model — and what to run when the answer is "not all of it".
+//
+// It reports a fact rather than a reassurance. Three distinct states, each
+// needing a different response:
+//
+//   - no column: pre-migration store. Nothing is provable and a model
+//     change leaves mixed-generation vectors undetectable.
+//   - column present, rows unlabelled: the migration applied but the
+//     backfill has not run. Semantic recall over `memories` returns
+//     nothing until it does — the compatibility filter excludes what it
+//     cannot prove. This is the state a freshly deployed binary finds.
+//   - fully labelled: nothing outstanding.
+//
+// A count is reported wherever one exists, because "some rows are
+// unlabelled" is not actionable in the way "146 rows are" is.
+func memoryVectorFingerprintState(dm *mpminternal.DatabaseManager, emb *mpminternal.EmbeddingConfig) string {
+	const remedy = "Run `mpm ops backfill-embeddings` to re-embed them under " +
+		"the active model; add --force-reembed to re-embed rows that already carry a fingerprint."
+
+	if dm == nil {
+		return "not checked — the database was unavailable to this report. " + remedy
+	}
+	haveColumn, live, labelled, err := memoryFingerprintCounts(dm)
+	if err != nil {
+		return "not checked (" + err.Error() + "). " + remedy
+	}
+	if !haveColumn {
+		return "`memories` has no embedding_model column, so changing the model " +
+			"leaves mixed-generation vectors undetectable. " + remedy
+	}
+	if live == 0 {
+		// Nothing stored yet — there is no heterogeneity to report, and
+		// saying "all 0 rows carry a fingerprint" would read as a finding
+		// rather than as the absence of one.
+		return "no stored memory vectors yet, so there is nothing to re-embed. " +
+			"Vectors written from now on record the active model's fingerprint."
+	}
+	if labelled == live {
+		return fmt.Sprintf("all %d live memory vectors carry the active model's fingerprint (%s)",
+			live, emb.ProviderName)
+	}
+	return fmt.Sprintf(
+		"%d of %d live memory vectors carry no embedding_model and are therefore "+
+			"excluded from semantic recall until re-embedded (active model %s). %s",
+		live-labelled, live, emb.ProviderName, remedy)
 }
 
 // generativeConsequences states what is lost without a generative
