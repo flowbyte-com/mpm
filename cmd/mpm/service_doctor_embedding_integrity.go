@@ -71,6 +71,11 @@ type embeddingIntegrityResult struct {
 	referenceDims      map[int]int
 	memoryHasModelCol  bool
 	referenceChunkRows int
+	// memoryUnlabelledRows counts live memory vectors that carry no
+	// embedding_model. Distinct from memoryHasModelCol: the column can
+	// exist while every row predates it, which is the state the live
+	// database was in when the column was added on 2026-10-13 (all 149).
+	memoryUnlabelledRows int
 }
 
 // distinctDimensions returns the observed dimensions in ascending order.
@@ -142,6 +147,24 @@ func collectEmbeddingIntegrity(s *DoctorService) (embeddingIntegrityResult, erro
 		referenceModels:    map[string]int{},
 		referenceDims:      map[int]int{},
 		memoryHasModelCol:  memoryEmbeddingModelColumnExists(s),
+	}
+
+	// Count unlabelled vectors separately from the column's existence.
+	// Only meaningful once the column is present; before the migration
+	// every row is unlabelled by construction and saying so would be noise.
+	if res.memoryHasModelCol {
+		if rows, err := s.dm.QueryTracked(
+			`SELECT COUNT(*) FROM memories
+			 WHERE deleted_at IS NULL AND embedding IS NOT NULL
+			   AND (embedding_model IS NULL OR TRIM(embedding_model) = '')`); err == nil {
+			if rows.Next() {
+				var n int
+				if err := rows.Scan(&n); err == nil {
+					res.memoryUnlabelledRows = n
+				}
+			}
+			rows.Close()
+		}
 	}
 
 	if s == nil || s.dm == nil {
@@ -310,16 +333,29 @@ func (s *DoctorService) checkEmbeddingIntegrity() DoctorCheck {
 	}
 
 	// -- model fingerprints ---------------------------------------------
+	//
+	// The column's presence and its population are different facts. As of
+	// the 2026-10-13 migration `memories` HAS the column, but every row
+	// written before it still carries NULL — on the live database that was
+	// all 149. Reporting only "the column exists" would read as "identity is
+	// available" when in practice no memory vector is yet attributable, so
+	// the unlabelled count is stated separately.
 	if res.memoryHasModelCol {
-		details = append(details,
-			"memories now carries a model-fingerprint column; per-row identity is available.")
+		msg := "memories carries a model-fingerprint column; per-row identity is recorded as of the 2026-10-13 migration."
+		if res.memoryUnlabelledRows > 0 {
+			msg += fmt.Sprintf(" %d memory rows predate it and still have no recorded model: "+
+				"their vectors cannot be attributed to the model that produced them, and "+
+				"retrieval excludes them until they are re-embedded. Re-embed with "+
+				"`mpm ops backfill-embeddings`.", res.memoryUnlabelledRows)
+		}
+		details = append(details, msg)
 	} else {
 		details = append(details,
 			"Model identity for memory vectors is NOT recoverable: `memories` has no "+
 				"embedding_model column, so a stored vector cannot be attributed to the "+
 				"model that produced it. If the embedding profile is changed, existing "+
 				"memory vectors are retained unlabelled and cannot be detected as "+
-				"stale. Re-embed with `mpm ops backfill-embeddings --force` (memories "+
+				"stale. Re-embed with `mpm ops backfill-embeddings --force-reembed` (memories "+
 				"backfill is otherwise NULL-only) and rebuild the vector index.")
 	}
 	switch len(res.referenceModels) {

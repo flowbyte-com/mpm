@@ -798,7 +798,7 @@ func collectModels(rep *onboardReport) {
 		rep.NotVerified = append(rep.NotVerified,
 			"embedding model identity of already-stored memory vectors: `memories` has no "+
 				"embedding_model column, so changing the model leaves mixed-generation vectors "+
-				"undetectable. Re-embed with `mpm ops backfill-embeddings --force` after a change.")
+				"undetectable. Re-embed with `mpm ops backfill-embeddings --force-reembed` after a change.")
 	}
 
 	rep.NotVerified = append(rep.NotVerified,

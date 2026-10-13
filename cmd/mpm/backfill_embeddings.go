@@ -41,7 +41,7 @@ func handleBackfillEmbeddings(args []string) int {
 	dryRun := fs.Bool("dry-run", false, "Count only, don't write embeddings")
 	collection := fs.String("collection", "", "Filter by memory collection (empty = all)")
 	include := fs.String("include", "memories", "Surfaces to backfill: memories, references, all")
-	forceReembed := fs.Bool("force-reembed", false, "Re-embed every reference chunk regardless of stored fingerprint (references pass only)")
+	forceReembed := fs.Bool("force-reembed", false, "Re-embed every row regardless of stored fingerprint (memories and references passes)")
 	fs.Usage = func() {
 		fmt.Println("Usage: mpm ops backfill-embeddings [flags]")
 		fmt.Println("\nFlags:")
@@ -49,7 +49,7 @@ func handleBackfillEmbeddings(args []string) int {
 		fmt.Println("  --collection <c>      Filter by memory collection (default: all)")
 		fmt.Println("  --include <scope>     memories | references | all (default memories)")
 		fmt.Println("  --dry-run             Count only, don't write embeddings")
-		fmt.Println("  --force-reembed       Force every reference chunk to re-embed (references pass only)")
+		fmt.Println("  --force-reembed       Force every row to re-embed regardless of stored fingerprint")
 	}
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -84,11 +84,15 @@ func handleBackfillEmbeddings(args []string) int {
 	// the memory count; the reference phase adds its own report
 	// below.
 	if *include != "references" {
-		total, err := countMemoriesWithoutEmbedding(dm.SQLDB(), *collection)
+		total, err := countMemoriesNeedingEmbedding(dm.SQLDB(), *collection, *forceReembed)
 		if err != nil {
 			return usererror.Error("Error counting memories: %v", err)
 		}
-		fmt.Printf("   Total memories missing embeddings: %d\n", total)
+		label := "missing embeddings or a model fingerprint"
+		if *forceReembed {
+			label = "selected for forced re-embed"
+		}
+		fmt.Printf("   Total memories %s: %d\n", label, total)
 
 		if *dryRun {
 			// Skip the provider gate; dry-run is a count-only probe.
@@ -104,7 +108,7 @@ func handleBackfillEmbeddings(args []string) int {
 			if code := gateProvider(cfg, "memory backfill"); code != 0 {
 				return code
 			}
-			if err := runMemoryBackfill(dm, cfg, *collection, *batchSize); err != nil {
+			if err := runMemoryBackfill(dm, cfg, *collection, *batchSize, *forceReembed); err != nil {
 				fmt.Printf("   Memory backfill failed: %v\n", err)
 			}
 		} else {
@@ -156,15 +160,41 @@ func gateProvider(cfg *mpminternal.EmbeddingConfig, what string) int {
 // runMemoryBackfill is the in-memory-pass loop extracted from
 // handleBackfillEmbeddings. Split out so the reference pass can
 // run after it without duplicating the batch scaffold.
-func runMemoryBackfill(dm mpminternal.CoreDB, cfg *mpminternal.EmbeddingConfig, collection string, batchSize int) error {
-	total, err := countMemoriesWithoutEmbedding(dm.SQLDB(), collection)
+func runMemoryBackfill(dm mpminternal.CoreDB, cfg *mpminternal.EmbeddingConfig, collection string, batchSize int, force bool) error {
+	total, err := countMemoriesNeedingEmbedding(dm.SQLDB(), collection, force)
 	if err != nil {
 		return err
 	}
 	processed, failed := 0, 0
-	offset := 0
+
+	// Keyset pagination, not OFFSET.
+	//
+	// Every successful update makes the row STOP matching the pending
+	// predicate, so the result set shrinks underneath the cursor while the
+	// offset keeps advancing — one batch's worth of rows is skipped per
+	// iteration, silently. Traced over the live store's 149 rows at the
+	// default batch size of 50:
+	//
+	//   iter 1: OFFSET 0  -> rows 1-50    stamped; 99 remain
+	//   iter 2: OFFSET 50 -> rows 101-149 (49 rows; 99 remain, so 50-100
+	//                          are never fetched)
+	//   iter 3: OFFSET 100 over 50 remaining -> nothing; loop ends
+	//
+	// 99 fingerprinted, 50 skipped, exit status 0. The count mismatch note
+	// below is what would have made that visible.
+	//
+	// (Latent before the fingerprint change only because the predicate was
+	// NULL-only and no live row matched it. The fingerprint work did not
+	// create this bug, but it made it reachable.)
+	//
+	// Keyset on (created_at, id) is stable under mutation: already-processed
+	// rows fall out of the result set without moving the cursor.
+	var cursorCreated string
+	var cursorID string
+	haveCursor := false
+
 	for {
-		memories, err := fetchMemoriesWithoutEmbedding(dm.SQLDB(), collection, batchSize, offset)
+		memories, err := fetchMemoriesNeedingEmbedding(dm.SQLDB(), collection, batchSize, haveCursor, cursorCreated, cursorID, force)
 		if err != nil {
 			return err
 		}
@@ -176,20 +206,24 @@ func runMemoryBackfill(dm mpminternal.CoreDB, cfg *mpminternal.EmbeddingConfig, 
 			if err != nil {
 				logEmbeddingFailure(mem.ID, mem.Content, err)
 				failed++
-				continue
-			}
-			if err := updateMemoryEmbedding(dm.SQLDB(), mem.ID, vec); err != nil {
+			} else if err := updateMemoryEmbedding(dm.SQLDB(), mem.ID, vec); err != nil {
 				logEmbeddingFailure(mem.ID, mem.Content, err)
 				failed++
-				continue
+			} else {
+				processed++
 			}
-			processed++
 		}
-		offset += batchSize
+		last := memories[len(memories)-1]
+		cursorCreated, cursorID, haveCursor = last.CreatedAt, last.ID, true
+
 		fmt.Printf("   Memory progress: %d/%d done, %d failed\n", processed, total, failed)
 		if len(memories) < batchSize {
 			break
 		}
+	}
+	if processed+failed != total {
+		fmt.Printf("   Note: %d rows were counted pending but %d were processed — "+
+			"the set changed while running; re-run to converge.\n", total, processed+failed)
 	}
 	fmt.Printf("\n⚡ Memory backfill complete: %d succeeded, %d failed (of %d total)\n", processed, failed, total)
 	return nil
@@ -354,9 +388,69 @@ type memRow struct {
 	CreatedAt string
 }
 
-func countMemoriesWithoutEmbedding(db *sql.DB, collection string) (int, error) {
+// memoryNeedsEmbedding reports whether a memory row should be re-embedded,
+// and is the single place the memories pass decides what "pending" means.
+//
+// Historically this selected only `embedding IS NULL OR embedding='null'`.
+// That made the fingerprint column unusable on any pre-existing store: all
+// 149 rows on the live database already have vectors, so the pass counted
+// zero, printed "Nothing to do", and no supported command could ever record
+// a model for them — leaving semantic recall over memories permanently
+// filtered out by the 2026-10-13 compatibility check.
+//
+// A vector with no recorded model is not comparable, and the only honest
+// way to make it comparable is to re-embed it under a known provider. So
+// unlabelled rows count as pending alongside null ones.
+//
+// force re-embeds every live row regardless of fingerprint — the explicit
+// operator override, mirroring --force-reembed on the references pass.
+//
+// When `hasModelCol` is false (a schema predating the migration, e.g. a
+// hand-built test fixture) the unlabelled clause is dropped and the legacy
+// null-only predicate applies, so an old schema degrades to the old
+// behaviour instead of erroring.
+func memoryNeedsEmbedding(force, hasModelCol bool) string {
+	if force {
+		return "deleted_at IS NULL"
+	}
+	if hasModelCol {
+		return `((embedding IS NULL OR embedding = 'null')
+		         OR (embedding_model IS NULL OR TRIM(embedding_model) = ''))
+		      AND deleted_at IS NULL`
+	}
+	return `(embedding IS NULL OR embedding = 'null') AND deleted_at IS NULL`
+}
+
+// memoriesHaveModelColumn reports whether memories carries
+// embedding_model. SafeMigrations adds it on open, so this is true on any
+// database the current binary has touched; it exists for fixtures and for
+// a database opened read-only against an older schema.
+func memoriesHaveModelColumn(db *sql.DB) bool {
+	rows, err := db.Query("PRAGMA table_info(memories)")
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dflt interface{}
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false
+		}
+		if name == "embedding_model" {
+			return true
+		}
+	}
+	return false
+}
+
+func countMemoriesNeedingEmbedding(db *sql.DB, collection string, force bool) (int, error) {
 	var count int
-	query := `SELECT COUNT(*) FROM memories WHERE (embedding IS NULL OR embedding = 'null') AND deleted_at IS NULL`
+	query := `SELECT COUNT(*) FROM memories WHERE ` +
+		memoryNeedsEmbedding(force, memoriesHaveModelColumn(db))
 	args := []interface{}{}
 	if collection != "" {
 		query += " AND collection = ?"
@@ -369,15 +463,28 @@ func countMemoriesWithoutEmbedding(db *sql.DB, collection string) (int, error) {
 	return count, nil
 }
 
-func fetchMemoriesWithoutEmbedding(db *sql.DB, collection string, limit, offset int) ([]memRow, error) {
-	query := `SELECT id, content, created_at FROM memories WHERE (embedding IS NULL OR embedding = 'null') AND deleted_at IS NULL`
+// fetchMemoriesNeedingEmbedding returns one batch of pending rows in
+// (created_at, id) order.
+//
+// Cursor-based rather than offset-based: each batch's successful UPDATE
+// removes those rows from the pending set, so an OFFSET cursor would skip
+// as many rows per batch as it had processed. `haveCursor` false fetches
+// from the start.
+func fetchMemoriesNeedingEmbedding(db *sql.DB, collection string, limit int,
+	haveCursor bool, cursorCreated, cursorID string, force bool) ([]memRow, error) {
+	query := `SELECT id, content, created_at FROM memories WHERE ` +
+		memoryNeedsEmbedding(force, memoriesHaveModelColumn(db))
 	args := []interface{}{}
 	if collection != "" {
 		query += " AND collection = ?"
 		args = append(args, collection)
 	}
-	query += " ORDER BY created_at ASC LIMIT ? OFFSET ?"
-	args = append(args, limit, offset)
+	if haveCursor {
+		query += " AND (created_at > ? OR (created_at = ? AND id > ?))"
+		args = append(args, cursorCreated, cursorCreated, cursorID)
+	}
+	query += " ORDER BY created_at ASC, id ASC LIMIT ?"
+	args = append(args, limit)
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -396,9 +503,22 @@ func fetchMemoriesWithoutEmbedding(db *sql.DB, collection string, limit, offset 
 	return results, rows.Err()
 }
 
+// updateMemoryEmbedding writes the vector AND its model fingerprint.
+//
+// The fingerprint is the point. This function previously wrote only the
+// embedding column, which is why memories.embedding_dimension was NULL for
+// all 149 rows on the live database while reference_chunks — whose writer
+// records the fingerprint — was fully populated. With no model recorded and
+// no filter at read time, model identity for a memory vector was
+// unrecoverable: a dimension match would be the only available check, and
+// dimension alone cannot establish compatibility, because two models can
+// share a dimension while producing incomparable vector spaces.
 func updateMemoryEmbedding(db *sql.DB, id string, vec []float32) error {
 	bytes, _ := json.Marshal(vec)
-	_, err := db.Exec(`UPDATE memories SET embedding = ? WHERE id = ?`, string(bytes), id)
+	_, err := db.Exec(`UPDATE memories
+		SET embedding = ?, embedding_source = ?, embedding_dimension = ?, embedding_model = ?
+		WHERE id = ?`,
+		string(bytes), "provider", len(vec), mpminternal.CurrentEmbeddingFingerprint().Model, id)
 	return err
 }
 

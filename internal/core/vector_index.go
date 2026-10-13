@@ -213,6 +213,23 @@ func IVFSearch(db *sql.DB, queryEmbedding []float32, collection string, cfg IVFC
 		args = append(args, collection)
 	}
 
+	// Model compatibility — mirrors the brute-force path in VectorMatch so
+	// the IVF fast path and its fallback cannot disagree about which rows
+	// are comparable. A dimension check cannot substitute for this: two
+	// models can share a dimension while producing incomparable spaces,
+	// and the `len(dbEmbedding) != len(queryEmbedding)` guard below
+	// passes in exactly that case, yielding a plausible cosine over
+	// unrelated vectors. Above 0.85 that cosine makes HybridSearch call
+	// ChallengeMemory() and mutate the memory.
+	//
+	// Unlabelled rows (NULL embedding_model, i.e. written before the
+	// 2026-10-13 migration) are excluded: unproven is not compatible.
+	// `mpm ops backfill-embeddings` restores them.
+	if activeModel := CurrentEmbeddingFingerprint().Model; activeModel != "" {
+		whereClauses = append(whereClauses, "m.embedding_model = ?")
+		args = append(args, activeModel)
+	}
+
 	// JOIN with vector_assignments to get cluster_id. (The memories table
 	// itself doesn't have cluster_id — that's the IVF design: cluster_id
 	// lives in the assignment table to keep the source-of-truth memories

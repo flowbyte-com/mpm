@@ -3304,11 +3304,18 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 	var execErr error
 	if embedding != nil {
 		embeddingJSON, _ := json.Marshal(embedding)
+		// Record the generating model alongside the vector. A dimension
+		// match alone cannot establish compatibility — two models can
+		// share a dimension while producing incomparable spaces — so the
+		// fingerprint must name the model, not just measure the vector.
+		fp := CurrentEmbeddingFingerprint()
 		_, execErr = s.DB.Exec(`UPDATE memories
 			SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
+			    embedding_source = ?, embedding_dimension = ?, embedding_model = ?,
 			    updated_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id = ?`,
-			content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
+			content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash,
+			"provider", len(embedding), fp.Model, id)
 	} else {
 		// Embedding not regenerated — preserve the existing column.
 		_, execErr = s.DB.Exec(`UPDATE memories

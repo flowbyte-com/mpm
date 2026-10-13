@@ -57,6 +57,15 @@ func TestValidateSchemaPrefix(t *testing.T) {
 // memories with embedding_source='hash'. Hash-sourced embeddings are
 // deterministic fingerprints with no semantic content; cosine comparison
 // against them is meaningless.
+// NOTE: rows seeded here carry no embedding_model unless stated otherwise.
+// Since the 2026-10-13 compatibility filter, VectorMatch excludes unlabelled
+// rows (see TestVectorMatchExcludesUnlabelledRows in
+// embedding_model_compatibility_test.go), so a test that expects a row to be
+// RETURNED must stamp embedding_model = CurrentEmbeddingFingerprint().Model.
+// A test that expects a row to be EXCLUDED may leave it unlabelled, but must
+// say which reason it is exercising — "unlabelled" and "hash" are different
+// exclusions and a test that conflates them stops covering either.
+
 func TestVectorMatch_SkipsHashRows(t *testing.T) {
 	dm := NewTestDM(t)
 	defer dm.Close()
@@ -81,10 +90,12 @@ func TestVectorMatch_SkipsHashRows(t *testing.T) {
 		t.Fatalf("insert hash memory: %v", err)
 	}
 
+	// This row is expected to be RETURNED, so it must carry the active
+	// model's fingerprint — see the file-level note above.
 	_, err = dm.SQLDB().Exec(`
-		INSERT INTO memories (id, collection, content, embedding, embedding_source, embedding_dimension, deleted_at)
-		VALUES (?, 'memories', 'provider memory content', ?, 'provider', ?, NULL)`,
-		providerID, string(embJSON), dim)
+		INSERT INTO memories (id, collection, content, embedding, embedding_source, embedding_dimension, embedding_model, deleted_at)
+		VALUES (?, 'memories', 'provider memory content', ?, 'provider', ?, ?, NULL)`,
+		providerID, string(embJSON), dim, CurrentEmbeddingFingerprint().Model)
 	if err != nil {
 		t.Fatalf("insert provider memory: %v", err)
 	}

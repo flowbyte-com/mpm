@@ -134,9 +134,15 @@ func pinFixtureEmbedder(t *testing.T, dm *DatabaseManager) {
 		// generates the real id, and reaching for the raw column is the
 		// only way to seed a vector for a row written through the
 		// production path.
+		// The fingerprint travels with the vector. VectorMatch has excluded
+		// unlabelled rows since the 2026-10-13 embedding-model compatibility
+		// filter, so seeding the vector alone would leave every fixture row
+		// invisible to the semantic arm this fixture exists to test.
 		res, err := dm.ExecTracked(
-			`UPDATE memories SET embedding = ? WHERE content = ?`,
-			0, string(embJSON), m.content)
+			`UPDATE memories SET embedding = ?, embedding_source = 'provider',
+			                  embedding_dimension = ?, embedding_model = ?
+			 WHERE content = ?`,
+			0, string(embJSON), fixtureEmbedDims, "fixture:hashing-v1", m.content)
 		require.NoError(t, err)
 		n, err := res.RowsAffected()
 		require.NoError(t, err)

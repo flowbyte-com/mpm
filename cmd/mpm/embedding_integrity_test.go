@@ -215,6 +215,17 @@ func TestEmbeddingIntegrity_ClassifyNullAndEmpty(t *testing.T) {
 
 // Legacy memory embeddings have no recoverable model identity. The check
 // must say so explicitly rather than implying the vectors are attributable.
+//
+// This test originally asserted the *absence* of the embedding_model column.
+// That was accurate when memories had no such column at all, but it pinned
+// the defect rather than the requirement: as of the 2026-10-13 migration the
+// column exists, and the state that actually matters is per-row. A memory
+// vector whose embedding_model is NULL is just as unattributable as one in a
+// schema without the column, and on the live database all 149 rows were in
+// exactly that state when the column was added.
+//
+// So the assertion is now on the per-row fact, which is the one that stays
+// true on both old and new schemas.
 func TestEmbeddingIntegrity_ReportsUnrecoverableMemoryFingerprint(t *testing.T) {
 	svc := newIntegrityFixture(t)
 	if _, err := svc.dm.ExecTracked(
@@ -227,13 +238,43 @@ func TestEmbeddingIntegrity_ReportsUnrecoverableMemoryFingerprint(t *testing.T) 
 
 	check := svc.checkEmbeddingIntegrity()
 	joined := strings.Join(check.Details, "\n")
-	if !strings.Contains(joined, "NOT recoverable") {
-		t.Errorf("expected an explicit statement that memory-vector model identity is "+
-			"unrecoverable, got:\n%s", joined)
+
+	// The row was seeded with no embedding_model, so it is unlabelled and
+	// its identity is not recoverable. The check must count it and say so.
+	if !strings.Contains(joined, "1 memory rows") {
+		t.Errorf("expected the unlabelled-vector count to be reported, got:\n%s", joined)
 	}
-	if !strings.Contains(joined, "no `embedding_model` column") &&
-		!strings.Contains(joined, "embedding_model column") {
-		t.Errorf("expected the reason (missing embedding_model column), got:\n%s", joined)
+	if !strings.Contains(joined, "no recorded model") &&
+		!strings.Contains(joined, "NOT recoverable") {
+		t.Errorf("expected an explicit statement that the memory vector's model "+
+			"identity is unrecoverable, got:\n%s", joined)
+	}
+	// And it must name the remedy rather than leaving the operator stuck.
+	if !strings.Contains(joined, "backfill-embeddings") {
+		t.Errorf("expected a remediation command, got:\n%s", joined)
+	}
+}
+
+// The converse: once a row DOES carry a fingerprint, the check must not
+// report it as unlabelled. This guards the new count against over-reporting
+// — a check that always says "N memory rows have no recorded model" is as
+// useless as one that never says it.
+func TestEmbeddingIntegrity_FingerprintedRowIsNotReportedUnlabelled(t *testing.T) {
+	svc := newIntegrityFixture(t)
+	if _, err := svc.dm.ExecTracked(
+		`INSERT INTO memories (id, collection, content, embedding, created_at,
+		                       embedding_source, embedding_dimension, embedding_model)
+		 VALUES (?, 'test', ?, ?, ?, 'provider', 384, 'some-provider:some-model')`,
+		0, idFor("labelled", 0), "content", `[0.1,0.2,0.3]`, int64(1700000000),
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	check := svc.checkEmbeddingIntegrity()
+	joined := strings.Join(check.Details, "\n")
+	if strings.Contains(joined, "1 memory rows") &&
+		strings.Contains(joined, "no recorded model") {
+		t.Errorf("a row WITH a recorded model was reported as unlabelled:\n%s", joined)
 	}
 }
 

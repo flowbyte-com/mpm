@@ -1017,6 +1017,26 @@ func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float
 	}
 	memTable := schemaPrefix + "memories"
 
+	// Model compatibility. This is the check that dimension equality
+	// cannot make: two models can share a dimension while producing
+	// incomparable vector spaces, and the `len(dbEmbedding) !=
+	// len(queryEmbedding)` guard below passes in exactly that case. The
+	// cosine is then computed over unrelated spaces and returns a
+	// plausible number in [-1,1] — which is worse than no score,
+	// because a score above 0.85 makes HybridSearch call
+	// ChallengeMemory() and MUTATE the memory.
+	//
+	// Rows with NULL embedding_model predate the 2026-10-13 migration
+	// and cannot be attributed to any model, so they are excluded too:
+	// unproven is not the same as compatible. `mpm ops
+	// backfill-embeddings` selects unlabelled rows as pending and restores
+	// them under the active model.
+	activeModel := CurrentEmbeddingFingerprint().Model
+	if activeModel != "" {
+		whereClauses = append(whereClauses, "embedding_model = ?")
+		args = append(args, activeModel)
+	}
+
 	maxScan := dm.GetConfigInt("vector.max_scan", 5000)
 	if maxScan > 0 {
 		countQuery := `SELECT COUNT(*) FROM ` + memTable + ` WHERE ` + strings.Join(whereClauses, " AND ")
@@ -1033,6 +1053,38 @@ func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float
 	}
 
 	whereSQL := strings.Join(whereClauses, " AND ")
+
+	// Fail loudly, not silently. After the 2026-10-13 embedding_model
+	// migration every pre-existing memory row is unlabelled, and the
+	// compatibility filter above therefore excludes all of them. That is
+	// the correct behaviour — unproven is not comparable — but the visible
+	// symptom is "no memories found", which reads like an empty store and
+	// sends the operator looking in entirely the wrong place.
+	//
+	// Guarded on `labelled == 0`, not merely `unlabelled > 0`: a partially
+	// backfilled store has unlabelled rows but still retrieves fine, and
+	// warning there would train the operator to ignore this message. It
+	// fires only when the filter has actually emptied the candidate set.
+	// The remedy is a re-embed, not a config change.
+	if activeModel != "" {
+		var labelled, unlabelled int
+		if err := dm.SQLDB().QueryRow(
+			`SELECT
+				COALESCE(SUM(CASE WHEN embedding_model IS NOT NULL
+				                   AND TRIM(embedding_model) <> '' THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN embedding_model IS NULL
+				                   OR TRIM(embedding_model) = '' THEN 1 ELSE 0 END), 0)
+			 FROM `+memTable+` WHERE embedding IS NOT NULL AND embedding != 'null'`,
+		).Scan(&labelled, &unlabelled); err == nil && unlabelled > 0 && labelled == 0 {
+			slog.Warn("VectorMatch: every embedded memory is excluded by the "+
+				"embedding-model compatibility filter",
+				"active_model", activeModel,
+				"unlabelled_rows", unlabelled,
+				"remedy", "run `mpm ops backfill-embeddings` to re-embed "+
+					"them under the active model and record the fingerprint")
+		}
+	}
+
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, content, created_at, embedding, embedding_source
 		FROM `+memTable+`

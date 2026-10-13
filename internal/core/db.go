@@ -3722,8 +3722,25 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 	// FTS5-triggered secondary inserts escalated to a hard failure that
 	// rolled back the enclosing transaction and silently dropped the
 	// theory row. See TestMaterializer_ConcurrentClaim for the regression.
-	res, err := node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance, content_hash, identity_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		5, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, createdSec, referenceID, retrievalPriority, importance, contentHash, wantIdentity)
+	// Fingerprint the vector at INSERT time. This is the dominant memory
+	// write path (SaveMemoryNode -> saveMemoryRow, reached from
+	// SaveMemoryWithContext -> AddMemoryWithWeight), so a fingerprint
+	// recorded only on the update and backfill paths would leave every
+	// newly created memory unlabelled — and since the 2026-10-13
+	// compatibility filter excludes unlabelled rows, invisible to
+	// semantic retrieval the moment it is written.
+	//
+	// recorded for a non-nil embedding only: a NULL embedding has no
+	// model to attribute, and stamping it would assert a provenance that
+	// does not exist.
+	embedDim, embedModel := interface{}(nil), interface{}(nil)
+	if embedding != nil {
+		embedDim = len(embedding)
+		embedModel = CurrentEmbeddingFingerprint().Model
+	}
+
+	res, err := node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance, content_hash, identity_hash, embedding_dimension, embedding_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		5, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, createdSec, referenceID, retrievalPriority, importance, contentHash, wantIdentity, embedDim, embedModel)
 	if err != nil {
 		if isIdentityConstraintViolation(err) {
 			// A concurrent writer inserted the same identity between our
@@ -4229,12 +4246,40 @@ func (dm *DatabaseManager) VectorSearch(tier string, queryEmbedding []float32, l
 	}
 
 	// Safe: whitelist enforced above; map lookup avoids fmt.Sprintf with user data
+	//
+	// The memories arm filters on the embedding model, the other two tiers
+	// do not: sessions and topics have no embedding_model column, so the
+	// fingerprint exists only for memories and reference_chunks.
+	//
+	// This is a compatibility filter, not a quality filter. Without it, a
+	// store holding vectors from two models compares them as if they shared
+	// a vector space, and every resulting similarity is meaningless —
+	// silently, because cosineSimilarity returns a plausible number in
+	// [-1,1]. The dimension check further down would NOT catch this: two
+	// models can share a dimension while producing incomparable spaces,
+	// which is exactly the case a dimension match is powerless to detect.
+	//
+	// Rows with NULL embedding_model (written before the column existed)
+	// are excluded by `embedding_model = ?` when a model is configured.
+	// That is deliberate: an unrecorded model cannot be proven comparable,
+	// so it is treated as incomparable until re-embedded. `mpm ops
+	// migrate-embeddings` backfills them.
+	activeModel := CurrentEmbeddingFingerprint().Model
+	memoriesQuery := "SELECT id, content, embedding, created_at FROM memories WHERE embedding IS NOT NULL"
+	if activeModel != "" {
+		memoriesQuery += " AND embedding_model = ?"
+	}
 	baseQuery := map[string]string{
 		"sessions": "SELECT id, content, embedding, created_at FROM sessions WHERE embedding IS NOT NULL",
-		"memories": "SELECT id, content, embedding, created_at FROM memories WHERE embedding IS NOT NULL",
+		"memories": memoriesQuery,
 		"topics":   "SELECT id, content, embedding, created_at FROM topics WHERE embedding IS NOT NULL",
 	}[tier]
-	rows, err := dm.db.Query(baseQuery)
+
+	var queryArgs []interface{}
+	if tier == "memories" && activeModel != "" {
+		queryArgs = append(queryArgs, activeModel)
+	}
+	rows, err := dm.db.Query(baseQuery, queryArgs...)
 	if err != nil {
 		return nil, err
 	}
