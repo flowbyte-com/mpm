@@ -115,8 +115,14 @@ describe("resolveMcpBin", () => {
   });
 
   test("rejects a source-checkout .build/bin path", () => {
-    // Probe G: the runtime package must never resolve into ~/src/mpm/.build/bin.
-    assert.strictEqual(resolveMcpBin("/home/v/src/mpm/.build/bin/mpm"), null);
+    // Probe G: the runtime package must never resolve into a source
+    // checkout's .build/bin. The rejection keys off the path SHAPE (the
+    // segment .build/bin), not off whether that path exists, so a
+    // generated temporary checkout exercises the identical branch
+    // without naming any machine's home directory.
+    const checkout = fs.mkdtempSync(path.join(tmpDir, "checkout-"));
+    assert.strictEqual(resolveMcpBin(path.join(checkout, ".build", "bin", "mpm")), null);
+    fs.rmSync(checkout, { recursive: true, force: true });
   });
 
   test("returns null when the sibling is not executable", () => {

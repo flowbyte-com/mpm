@@ -44,7 +44,15 @@ What the guard permits
   by the test author.
 
 Run with:
-    python3 agent_installation/tests/agent_installation_machine_specific_paths_test.py
+    python3 agent_installation/tests/test_agent_installation_machine_specific_paths.py
+
+The file name follows the `test_*.py` convention on purpose. It was
+originally `agent_installation_machine_specific_paths_test.py`, which
+matched no discovery pattern: `python3 -m unittest discover tests` uses
+`test*.py`, so this guard never ran. It failed on demand — five
+`/home/v/` literals it exists to forbid were sitting in the tree it
+scans — while `make test-agent-installation` reported a green suite.
+A guard that is not collected is not a guard.
 """
 
 from __future__ import annotations
@@ -82,7 +90,7 @@ WHITELIST: dict[str, str] = {
     # The guard itself references the patterns it forbids, in
     # docstrings, constant declarations, and error messages. The
     # pattern values are not used as runtime paths.
-    "agent_installation/tests/agent_installation_machine_specific_paths_test.py":
+    "agent_installation/tests/test_agent_installation_machine_specific_paths.py":
         "guard itself — references the bad pattern in constants/docstrings",
 }
 

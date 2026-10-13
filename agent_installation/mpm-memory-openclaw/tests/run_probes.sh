@@ -7,12 +7,27 @@
 # the tree is required to return to its original state.
 #
 # Usage: bash tests/run_probes.sh
+#
+# The mpm / mpm-mcp binaries under test default to the canonical install
+# prefix but can be pointed elsewhere — a build directory is usually what
+# you want while working in a checkout. The paths are used verbatim, so
+# give absolute ones:
+#     R="$(cd ../.. && pwd)"
+#     MPM_TEST_MPM_BIN="$R/.build/bin/mpm" \
+#     MPM_TEST_MCP_BIN="$R/.build/bin/mpm-mcp" bash tests/run_probes.sh
 set -uo pipefail
 
 PKG="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$PKG"
-MPM=/home/v/.mpm/bin/mpm
-MCP=/home/v/.mpm/bin/mpm-mcp
+MPM="${MPM_TEST_MPM_BIN:-${HOME}/.mpm/bin/mpm}"
+MCP="${MPM_TEST_MCP_BIN:-${HOME}/.mpm/bin/mpm-mcp}"
+if [ ! -x "$MPM" ] || [ ! -x "$MCP" ]; then
+  echo "run_probes: need an executable mpm and mpm-mcp; got:" >&2
+  echo "  MPM=$MPM" >&2
+  echo "  MCP=$MCP" >&2
+  echo "Set MPM_TEST_MPM_BIN / MPM_TEST_MCP_BIN, or install to ~/.mpm/bin." >&2
+  exit 1
+fi
 export MPM_TEST_MPM_BIN=$MPM MPM_TEST_MCP_BIN=$MCP
 
 CLIENT=lib/mcp-client.js
@@ -151,9 +166,15 @@ restore
 
 echo "Probe G — resolve mpm-mcp through PATH instead of the configured prefix"
 python3 - <<'PY'
+import os
 p="lib/mcp-client.js"; s=open(p).read()
+# The substituted path only has to be *some* other installation's binary
+# — the guard under test rejects a bare name regardless of where the
+# probe points it. Derive it from the running host's home so the probe
+# is not tied to one machine's directory layout.
+elsewhere = os.path.join(os.path.expanduser("~"), ".mpm", "bin", "mpm-mcp")
 s=s.replace('  const dir = path.dirname(bin);\n  if (dir === "" || dir === ".") {\n    // A bare name gives nothing to derive from, and searching PATH for a\n    // sibling would defeat the point of a deterministic mapping.\n    return null;\n  }',
-            '  const dir = path.dirname(bin);\n  if (dir === "" || dir === ".") {\n    return "/home/v/.mpm/bin/mpm-mcp"; // PROBE G: arbitrary PATH selection\n  }')
+            '  const dir = path.dirname(bin);\n  if (dir === "" || dir === ".") {\n    return "%s"; // PROBE G: arbitrary PATH selection\n  }' % elsewhere)
 open(p,"w").write(s)
 PY
 probe "G" "returns null for a bare binary name" tests/mcp_client.test.js "bare binary name"

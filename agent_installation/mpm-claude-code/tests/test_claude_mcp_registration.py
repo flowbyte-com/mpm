@@ -224,8 +224,19 @@ class Classification(unittest.TestCase):
         self.assertEqual(cfgmod.classify(entry, self.desired), "legacy")
 
     def test_symlinked_binary_with_no_env_is_legacy(self):
-        """The shape a hand-made `claude mcp add mpm -- /path/mpm-mcp` produces."""
-        entry = {"type": "stdio", "command": "/home/v/.local/bin/mpm-mcp", "args": [], "env": {}}
+        """The shape a hand-made `claude mcp add mpm -- /path/mpm-mcp` produces.
+
+        The path is derived from the running host's home rather than
+        hardcoded: ~/.local/bin is the conventional symlink farm for
+        user-managed binaries, and `classify` is pure string logic that
+        never touches the filesystem, so a derived path exercises
+        exactly the same code as the literal it replaces. A hardcoded
+        author's home directory here made the test unreadable off that
+        one machine and was forbidden by the machine-specific-path
+        guard.
+        """
+        command = str(Path.home() / ".local" / "bin" / "mpm-mcp")
+        entry = {"type": "stdio", "command": command, "args": [], "env": {}}
         self.assertEqual(cfgmod.classify(entry, self.desired), "legacy")
 
     def test_foreign_env_keys_make_it_custom(self):
