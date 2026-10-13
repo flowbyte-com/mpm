@@ -4154,16 +4154,62 @@ type searchResult struct {
 	similarity float32
 }
 
+// validEmbeddingPair reports whether a and b are two well-formed
+// embeddings that may be compared with each other.
+//
+// Dimension equality is the load-bearing check. cosineSimilarity
+// previously scored the shorter vector's length of components, so a
+// 768-dim vector and a 384-dim vector were compared over their first 384
+// components and returned a number in [-1,1] that looked like a
+// similarity but described nothing. That is worse than returning
+// nothing: callers act on the score, and the contradiction detector in
+// HybridSearch challenges — and therefore MUTATES — a memory when two
+// candidates score at or above 0.85.
+//
+// A mismatched pair is not comparable, so it is rejected rather than
+// scored. NaN and Inf are rejected for the same reason: a single
+// non-finite component poisons the whole vector, and float32
+// comparisons against NaN are always false, so a NaN-borne score would
+// slip past a threshold check that means "similar".
+//
+// Empty is rejected (nothing to compare). A pair of equal-length,
+// all-finite, non-empty vectors is valid; an all-zero vector is valid
+// but scores 0, which cosineSimilarity already handled and callers
+// already treat as "no similarity".
+func validEmbeddingPair(a, b []float32) bool {
+	if len(a) == 0 || len(a) != len(b) {
+		return false
+	}
+	for _, v := range a {
+		if f := float64(v); math.IsNaN(f) || math.IsInf(f, 0) {
+			return false
+		}
+	}
+	for _, v := range b {
+		if f := float64(v); math.IsNaN(f) || math.IsInf(f, 0) {
+			return false
+		}
+	}
+	return true
+}
+
+// cosineSimilarity returns the cosine of the angle between two
+// embeddings, or 0 when the pair is not comparable (see
+// validEmbeddingPair).
+//
+// 0 is the established "no information" answer here — it is what this
+// function already returned for empty and zero-norm vectors — and every
+// caller treats it as "not similar": the contradiction detector skips
+// below 0.85, and the vector arms skip below their own floors. Callers
+// that WRITE on a high score should check validEmbeddingPair
+// explicitly rather than relying on that, so the reason a pair was
+// skipped is visible at the write site.
 func cosineSimilarity(a, b []float32) float32 {
-	if len(a) == 0 || len(b) == 0 {
+	if !validEmbeddingPair(a, b) {
 		return 0
 	}
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
 	var dotProduct, normA, normB float32
-	for i := 0; i < n; i++ {
+	for i := range a {
 		dotProduct += a[i] * b[i]
 		normA += a[i] * a[i]
 		normB += b[i] * b[i]

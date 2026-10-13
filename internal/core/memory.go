@@ -1953,13 +1953,20 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 	return consolidated, nil
 }
 
-// cosineSimilarityFloat32 computes cosine similarity between two vectors
+// cosineSimilarityFloat32 computes cosine similarity between two
+// embeddings.
+//
+// Uses the same comparability rules as cosineSimilarity: mismatched
+// dimensions, empty vectors and non-finite components are rejected
+// rather than scored. This matters here because the clustering caller
+// merges memories above a similarity threshold, so a meaningless score
+// produced by truncation would drive a soft-delete.
 func cosineSimilarityFloat32(a, b []float32) float32 {
-	if len(a) == 0 || len(b) == 0 {
+	if !validEmbeddingPair(a, b) {
 		return 0
 	}
 	var dotProduct, normA, normB float32
-	for i := 0; i < len(a) && i < len(b); i++ {
+	for i := range a {
 		dotProduct += a[i] * b[i]
 		normA += a[i] * a[i]
 		normB += b[i] * b[i]

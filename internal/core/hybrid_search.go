@@ -439,6 +439,15 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			if !cjOK || len(cj.embedding) == 0 {
 				continue
 			}
+			// This scan MUTATES: a pair at or above the threshold calls
+			// ChallengeMemory below, which writes to the database. So the
+			// comparability check is explicit here rather than left to
+			// cosineSimilarity's 0 return, which a future refactor could
+			// change without anyone noticing that a write path now hangs
+			// off an unvalidated score.
+			if !validEmbeddingPair(ci.embedding, cj.embedding) {
+				continue
+			}
 			sim := cosineSimilarity(ci.embedding, cj.embedding)
 			// Structural-prefix discount: if both candidates start with the same
 			// template marker (e.g. "CHOICE: CHOICE:") the cosine score is
