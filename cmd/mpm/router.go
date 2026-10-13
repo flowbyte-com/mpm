@@ -136,6 +136,7 @@ func NewRouter() *CommandRouter {
 		"status":     {Name: "status", Description: "Show system status", MinArgs: 0},
 		"persona":    {Name: "persona", Description: "Manage personas"},
 		"ops":        {Name: "ops", Description: "Engine-room operations (maintenance, diagnostics)"},
+		"onboard":    {Name: "onboard", Description: "Guided setup and verification of an MPM installation", MinArgs: 0, MaxArgs: -1},
 
 		// Routing — context-aware helpers
 		"hint":  {Name: "hint", Description: "Surface context-relevant artifacts", MinArgs: 1},
@@ -442,6 +443,10 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleChallenge(args[1:])
 	case "ops":
 		return handleOps(args)
+	case "onboard":
+		// args[0] is "onboard"; the family handler owns its own
+		// subcommand table (report|models|hosts) — see onboard_cmds.go.
+		return handleOnboard(args[1:])
 	case "kb":
 		return handleKB(args)
 	case "debug":
@@ -656,6 +661,9 @@ func (r *CommandRouter) handleHelp(args []string) int {
 	case "ops":
 		printOpsHelp()
 		return 0
+	case "onboard":
+		printOnboardHelp()
+		return 0
 	case "work":
 		printWorkHelp()
 		return 0
@@ -775,6 +783,9 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 	case "ops":
 		printOpsHelp()
 		return 0
+	case "onboard":
+		printOnboardHelp()
+		return 0
 	case "work":
 		printWorkHelp()
 		return 0
@@ -865,6 +876,7 @@ var commandsWithSubcommandDispatch = map[string]bool{
 	"self-heal":   true, // (ops subcommand pattern)
 	"why":         true, // (uses subcommand-style args)
 	"config":      true, // show|get|set|edit|validate|profile|component|capability
+	"onboard":     true, // report|models|hosts
 	"compact":     true, // deferred|requeue-deferred|help
 }
 

@@ -1,7 +1,22 @@
 # `mpm onboard` — design
 
-**Status:** design proposal. Not implemented. Supersedes the earlier
-`mpm bootstrap` proposal; the command is `mpm onboard`.
+**Status:** approved (2026-10-13, §11) and being implemented in stages.
+
+| Stage | Scope | State |
+|---|---|---|
+| 1 | command structure, read-only environment/readiness reporting | **landed** |
+| 2 | guided model configuration | not started |
+| 3 | opt-in host installation behind explicit consent | not started |
+
+Stage 1 ships `cmd/mpm/onboard_cmds.go` with the full mode surface
+(`report`, `models`, `hosts`, `--dry-run`, `--json`, `--yes`) but with
+the write gate closed: `onboardOptions.mutateAllowed()` returns false
+and a test pins that, so no stage-1 path can write. The report
+renderer, the JSON contract and the honesty caveats are final in stage
+1 because later stages only add what happens *before* the report runs.
+
+Supersedes the earlier `mpm bootstrap` proposal; the command is
+`mpm onboard`.
 
 **Guiding principle:** *MPM explains its requirements; the operator chooses
 the models.* Onboard may say what an embedding model is for and what breaks

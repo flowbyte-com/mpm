@@ -1885,6 +1885,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`memory`** — Manage memories
 - **`migrate`** — Import from markdown/JSON (alias to ingest for non-SQLite sources)
 - **`mode`** — Manage modes
+- **`onboard`** — Guided setup and verification of an MPM installation
 - **`ops`** — Engine-room operations (maintenance, diagnostics)
 - **`patch-memory`** — Patch memory metadata
 - **`persona`** — Manage personas
