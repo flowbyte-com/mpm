@@ -48,6 +48,8 @@ func handleOpsResolveContradictions(args []string) int {
 	limit := defaultResolveLimit
 	loserFilter := ""
 	winnerFilter := ""
+	propose := false
+	proposeLimit := 0
 
 	for _, arg := range args {
 		switch {
@@ -59,6 +61,15 @@ func handleOpsResolveContradictions(args []string) int {
 			apply = false
 		case arg == "--json":
 			jsonOutput = true
+		case arg == "--propose":
+			propose = true
+		case strings.HasPrefix(arg, "--propose-limit="):
+			n, err := strconv.Atoi(strings.TrimPrefix(arg, "--propose-limit="))
+			if err != nil || n <= 0 {
+				usererror.Error("--propose-limit must be a positive integer")
+				return 1
+			}
+			proposeLimit = n
 		case arg == "--help" || arg == "help":
 			printResolveHelp()
 			return 0
@@ -92,6 +103,27 @@ func handleOpsResolveContradictions(args []string) int {
 		return 1
 	}
 
+	// --propose: the ONLY way candidates reach the queue.
+	//
+	// Retrieval used to do this implicitly on every query, which meant a
+	// read grew a persistent worklist. It now happens only because an
+	// operator asked for it by name.
+	//
+	// These rows are UNVERIFIED SIMILARITY CANDIDATES. The scan compares
+	// cosine similarity, which shows that two memories are related; it does
+	// not show that their claims conflict. Near-identical duplicates score
+	// at the very top of that range, so a candidate is a "look at this
+	// pair" item, not a finding.
+	var proposedCount int
+	if propose {
+		n, err := runProposeCandidates(dm, proposeLimit, jsonOutput)
+		if err != nil {
+			usererror.Error("propose candidates: %v", err)
+			return 1
+		}
+		proposedCount = n
+	}
+
 	// Load the unresolved queue. Filter to limit (defensive: if
 	// limit is huge, we still cap at defaultResolveLimit * 10 to
 	// prevent a runaway transaction).
@@ -105,7 +137,7 @@ func handleOpsResolveContradictions(args []string) int {
 	}
 	if len(queue) == 0 {
 		if jsonOutput {
-			fmt.Println(`{"queue_size":0,"decisions":[]}`)
+			fmt.Printf(`{"queue_size":0,"candidates_proposed":%d,"decisions":[]}`+"\n", proposedCount)
 		} else {
 			fmt.Println("✓ Contradiction queue is empty.")
 		}
@@ -158,11 +190,11 @@ func handleOpsResolveContradictions(args []string) int {
 	// Output.
 	if jsonOutput {
 		out := map[string]interface{}{
-			"queue_size":     len(queue),
-			"applied":        applied,
-			"close_calls":    closeCalls,
-			"dry_run":        !apply,
-			"decisions":      decisions,
+			"queue_size":  len(queue),
+			"applied":     applied,
+			"close_calls": closeCalls,
+			"dry_run":     !apply,
+			"decisions":   decisions,
 		}
 		b, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(b))
@@ -217,12 +249,58 @@ func printResolveDecisions(queue []map[string]interface{}, decisions []mpmintern
 	}
 }
 
+// runProposeCandidates scans live memories for above-threshold similarity
+// pairs and enqueues them. Reached only via --propose.
+//
+// scanLimit caps the working set of memories examined (0 = every live
+// memory). Pairs are evaluated only WITHIN that set, so a smaller limit is
+// a cheaper and shallower scan, not a sample of the whole store.
+//
+// Returns the number of candidates enqueued. EnqueueContradiction is
+// idempotent on the memory pair, so re-running over unchanged data enqueues
+// nothing new — that is what stops a repeated scan from growing the queue.
+func runProposeCandidates(dm *mpminternal.DatabaseManager, scanLimit int, jsonOutput bool) (int, error) {
+	entries, err := dm.LoadSimilarityScanEntries(scanLimit, "")
+	if err != nil {
+		return 0, err
+	}
+	candidates := mpminternal.FindSimilarityCandidates(entries)
+
+	inserted, err := dm.EnqueueSimilarityCandidates(candidates)
+	if err != nil {
+		return inserted, err
+	}
+
+	if jsonOutput {
+		fmt.Printf(`{"scanned_memories":%d,"candidates_found":%d,"candidates_proposed":%d}`+"\n",
+			len(entries), len(candidates), inserted)
+		return inserted, nil
+	}
+
+	fmt.Printf("Scanned %d memories: %d unverified similarity candidate(s), %d new queue row(s).\n",
+		len(entries), len(candidates), inserted)
+	if len(candidates) > 0 {
+		fmt.Println("These are RELATED pairs, not established contradictions —")
+		fmt.Println("similarity is highest where duplication is highest. Review, then resolve.")
+	}
+	return inserted, nil
+}
+
 // printResolveHelp is the --help text. Kept in lock-step with the
 // actual flag parsing above.
 func printResolveHelp() {
-	fmt.Println(`mpm ops resolve-contradictions [--dry-run] [--apply] [--json] [--limit=N] [--loser=ID] [--winner=ID]
+	fmt.Println(`mpm ops resolve-contradictions [--propose] [--dry-run] [--apply] [--json] [--limit=N] [--loser=ID] [--winner=ID]
 
-Resolve contradictions in the shared queue (shared.contradiction_log).
+Review and resolve rows in the shared queue (shared.contradiction_log).
+
+WHAT IS IN THE QUEUE
+  Two kinds of row, and the difference matters:
+    - Similarity candidates — UNVERIFIED. Two memories scored high on
+      cosine, which shows they are RELATED. It does not show their claims
+      conflict. Near-identical duplicates score at the TOP of that range,
+      so most candidates are duplicates, not contradictions.
+    - Operator-established conflicts — a human adjudicated these.
+  Candidates are added ONLY by --propose. Retrieval never adds them.
 
 Default mode is dry-run: prints proposed verdicts without mutating state.
 Use --apply to execute resolutions in transactions.
@@ -237,7 +315,12 @@ Each resolution is one transaction: slash + write resolution memory +
 mark queue row resolved. Crash safety: no half-state.
 
 Flags:
-  --dry-run            Print verdicts without mutating (default)
+  --propose            Scan live memories and enqueue unverified similarity
+                       candidates before reviewing. THIS WRITES TO THE
+                       QUEUE, independent of --apply. Omit it and nothing
+                       is ever added.
+  --propose-limit=N    Cap memories examined by --propose (default: all)
+  --dry-run            Print verdicts without mutating resolutions (default)
   --apply              Execute resolutions transactionally
   --json               Structured JSON output (for scripting)
   --limit=N            Max queue rows to process (default 100, cap 1000)
@@ -247,6 +330,7 @@ Flags:
 
 Examples:
   mpm ops resolve-contradictions                       # dry-run, 100 rows
+  mpm ops resolve-contradictions --propose              # scan + enqueue, then review
   mpm ops resolve-contradictions --apply --limit=50     # apply first 50
   mpm ops resolve-contradictions --loser=mem-abc-123    # narrow scope
   mpm ops resolve-contradictions --json --apply         # CI-friendly output`)

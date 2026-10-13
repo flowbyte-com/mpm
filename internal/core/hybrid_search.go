@@ -391,250 +391,40 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 		combined = combined[:cfg.Limit]
 	}
 
-	// ── Phase 4: Contradiction PROPOSALS (formerly Detection) ───────────
-	// Limit to top 15 candidates for O(1) pairwise evaluation (C(15,2) = 105)
+	// ── Phase 4: REMOVED — similarity candidates are no longer discovered here ──
 	//
-	// 2026-10-13 — this phase no longer mutates memory. Cosine similarity
-	// establishes that two memories are RELATED, which is not the same as
-	// establishing that they CONTRADICT each other. It previously called
-	// dm.ChallengeMemory on all three branches, so any semantic retrieval
-	// could reduce a memory's weight:
+	// This phase used to run three things over the top-15 results: a
+	// ChallengeMemory write on each of three branches, and an
+	// EnqueueContradiction insert on each of the same three branches.
 	//
-	//   - the equal-tier branch fired on scanSet[i] by rank position alone;
-	//   - identical or near-identical statements tripped every branch,
-	//     because similarity is highest exactly where duplication is
-	//     highest;
-	//   - on the live store this had challenged 40 distinct members of one
-	//     75-row near-identical cluster asserting the SAME claim, 30 of
-	//     them pinned at the weight floor of 1.0.
+	// Both are gone, for one shared reason. Cosine similarity establishes
+	// that two memories are RELATED. It does not establish that they
+	// CONTRADICT each other, and similarity is highest exactly where
+	// duplication is highest — so the scan fired hardest on near-identical
+	// statements asserting the same claim. On the live store that had
+	// challenged 40 distinct members of one 75-row cluster and pinned 30 of
+	// them at the weight floor of 1.0.
 	//
-	// The invariant now enforced by this file is narrower and is tested in
-	// hybrid_search_nomutate_test.go:
+	// Discovery did not die with the writes; it moved somewhere that cannot
+	// write. FindSimilarityCandidates (similarity_candidates.go) is a pure
+	// function over ScanEntry values, and EnqueueSimilarityCandidates
+	// (similarity_candidates_store.go) is the only persistence path, reached
+	// only when an operator explicitly asks for a review scan.
 	//
-	//	Semantic similarity must never automatically cause
-	//	ChallengeMemory to reduce memory weight.
+	// Consequences for this file, all intentional:
 	//
-	// Note this does NOT make semantic recall read-only: EnqueueContradiction
-	// below is still a database write into shared.contradiction_log, and CLI
-	// recall applies independent access reinforcement. What is guaranteed is
-	// that a read cannot reduce a memory's weight on its own.
+	//   - Retrieval no longer performs a pairwise scan at all. It was work
+	//     whose only output was a write, so removing the write removes the
+	//     work.
+	//   - Retrieval is now write-free on the semantic path. The narrowing
+	//     invariant is now the stronger one: semantic retrieval adds no
+	//     persistent record of any kind.
+	//   - Ranking and result contents are untouched. Phase 4 ran after
+	//     ranking was fixed and after IsChallenged was populated from
+	//     pre-existing database state, so it never fed back into either.
 	//
-	// Proposals remain inspectable via `mpm ops resolve-contradictions`, and
-	// operators retain the explicit, audited challenge path
-	// (`mpm challenge-memory` / handleChallengeMemory), which is unchanged.
-	scanLimit := 15
-	if len(combined) < scanLimit {
-		scanLimit = len(combined)
-	}
-	scanSet := combined[:scanLimit]
-
-	// Load embeddings + provenance for pairwise cosine similarity
-	type candidateInfo struct {
-		embedding       []float32
-		content         string
-		isChallenged    bool
-		metadataJSON    string
-	}
-
-	// isStructuralPrefix returns true when content starts with a template
-	// marker that dominates embedding similarity without carrying semantic
-	// signal. The CHOICE:/## /Fact:/Note:/Decision: family are how decision
-	// records, log entries, and section headings start — when two unrelated
-	// memories share the same prefix, the embedding model returns a high
-	// cosine score based on the template tokens, not the underlying claim.
-	// Halving the similarity score in this case prevents the contradiction
-	// detector from false-flagging unrelated decisions/logs/sections as
-	// semantic collisions. Added 2026-07-17 after the c0d7c5807 vs
-	// 077e9b207aa6be1e false positive (both started with "CHOICE: CHOICE:",
-	// cosine=0.88, unrelated content).
-
-	// Phase 2d: build the contradiction lookup once with the schema prefix.
-	// INSERT INTO shared.memories for shared DBs; bare `memories` for local.
-	contradictionTable := cfg.SchemaPrefix + "memories"
-	candMap := make(map[string]candidateInfo, scanLimit)
-
-	// Batch fetch embeddings + content + metadata in a single query
-	if scanLimit > 0 {
-		placeholders := make([]string, scanLimit)
-		args := make([]interface{}, scanLimit)
-		for i, c := range scanSet {
-			placeholders[i] = "?"
-			args[i] = c.ID
-		}
-		rows, err := dm.SQLDB().Query(
-			fmt.Sprintf(`SELECT id, embedding, content, COALESCE(metadata, '{}') FROM %s WHERE id IN (%s) AND embedding IS NOT NULL AND embedding != 'null' AND embedding_source != 'hash'`, contradictionTable, strings.Join(placeholders, ",")),
-			args...,
-		)
-		if err == nil {
-			for rows.Next() {
-				var id, embStr, contentStr, metaStr string
-				if err := rows.Scan(&id, &embStr, &contentStr, &metaStr); err == nil && embStr != "" {
-					var emb []float32
-					if json.Unmarshal([]byte(embStr), &emb) == nil && len(emb) > 0 {
-						candMap[id] = candidateInfo{embedding: emb, content: contentStr, isChallenged: false, metadataJSON: metaStr}
-					}
-				}
-			}
-			rows.Close()
-		}
-	}
-
-	// Backfill isChallenged from scanSet (since we didn't include it in the batch query)
-	for _, c := range scanSet {
-		if info, ok := candMap[c.ID]; ok {
-			info.isChallenged = c.IsChallenged
-			candMap[c.ID] = info
-		}
-	}
-
-	// Provenance tier priority for tiebreaker: absolute > high > standard > ephemeral
-	provenanceTier := func(compute string) int {
-		switch compute {
-		case "absolute":
-			return 4
-		case "high":
-			return 3
-		case "standard":
-			return 2
-		case "ephemeral":
-			return 1
-		default:
-			return 2 // default to standard
-		}
-	}
-
-	// Pairwise O(1) contradiction scan
-	for i := 0; i < scanLimit; i++ {
-		ci, ciOK := candMap[scanSet[i].ID]
-		if !ciOK || len(ci.embedding) == 0 {
-			continue
-		}
-		for j := i + 1; j < scanLimit; j++ {
-			cj, cjOK := candMap[scanSet[j].ID]
-			if !cjOK || len(cj.embedding) == 0 {
-				continue
-			}
-			// This scan MUTATES: a pair at or above the threshold calls
-			// ChallengeMemory below, which writes to the database. So the
-			// comparability check is explicit here rather than left to
-			// cosineSimilarity's 0 return, which a future refactor could
-			// change without anyone noticing that a write path now hangs
-			// off an unvalidated score.
-			if !validEmbeddingPair(ci.embedding, cj.embedding) {
-				continue
-			}
-			sim := cosineSimilarity(ci.embedding, cj.embedding)
-			// Structural-prefix discount: if both candidates start with the same
-			// template marker (e.g. "CHOICE: CHOICE:") the cosine score is
-			// inflated by shared tokens. Halve it before the threshold check.
-			if IsStructuralPrefix(ci.content) && IsStructuralPrefix(cj.content) {
-				sim = sim * 0.5
-			}
-			if sim < 0.85 {
-				continue
-			}
-
-			// Extract provenance compute for both memories
-			ciCompute := extractProvenanceCompute(ci.metadataJSON)
-			cjCompute := extractProvenanceCompute(cj.metadataJSON)
-			ciTier := provenanceTier(ciCompute)
-			cjTier := provenanceTier(cjCompute)
-
-			// State collision: one challenged, one not. PROPOSE only.
-			//
-			// 2026-10-13: this branch used to call
-			// dm.ChallengeMemory(unchallengedID, 1, evidence) here,
-			// reducing the memory's weight during a read. Cosine
-			// similarity measures relatedness, not logical
-			// contradiction, so a retrieval could penalise a memory
-			// for resembling another one. On the live store that had
-			// challenged 40 distinct members of a single
-			// near-identical cluster that all asserted the SAME
-			// claim. See docs/RECALL-MUTATION.md.
-			//
-			// The pair is still recorded for operator review via the
-			// contradiction queue; it is no longer enforced here.
-			if ci.isChallenged != cj.isChallenged {
-				var challengedID, unchallengedID string
-				if ci.isChallenged {
-					challengedID = scanSet[i].ID
-					unchallengedID = scanSet[j].ID
-				} else {
-					challengedID = scanSet[j].ID
-					unchallengedID = scanSet[i].ID
-				}
-				evidence := fmt.Sprintf(
-					"semantic collision (cosine=%.2f) between challenged memory %s and unchallenged memory %s",
-					sim, challengedID, unchallengedID)
-				// Arc 1: enqueue in the shared contradiction queue
-				// so the operator can resolve via `mpm ops
-				// resolve-contradictions`. Best-effort: without an
-				// attached shared DB the proposal is dropped, which is
-				// the intended failure mode — losing a review item is
-				// strictly better than silently penalising a memory.
-				_ = dm.EnqueueContradiction(ContradictionEvidence{
-					MemoryA:    challengedID,
-					MemoryB:    unchallengedID,
-					Evidence:   evidence,
-					Similarity: float64(sim),
-				})
-				continue
-			}
-
-			// Provenance-based tiebreaker: different tiers. PROPOSE only.
-			//
-			// 2026-10-13: the slash that used to land here is gone.
-			// Provenance tier is a tiebreaker for which of two
-			// similarly-worded memories should win a dispute, but it
-			// is not evidence that a dispute exists. Proposing is
-			// retained; enforcing is not.
-			if ciTier != cjTier {
-				var winnerID, loserID string
-				if ciTier > cjTier {
-					winnerID = scanSet[i].ID
-					loserID = scanSet[j].ID
-				} else {
-					winnerID = scanSet[j].ID
-					loserID = scanSet[i].ID
-				}
-				evidence := fmt.Sprintf(
-					"provenance collision (cosine=%.2f): %s (tier=%d) vs %s (tier=%d) — %s favored, pending manual review",
-					sim, scanSet[i].ID, ciTier, scanSet[j].ID, cjTier, winnerID)
-				_ = dm.EnqueueContradiction(ContradictionEvidence{
-					MemoryA:    winnerID,
-					MemoryB:    loserID,
-					Evidence:   evidence,
-					Similarity: float64(sim),
-				})
-				continue
-			}
-
-			// Equal tier — both memories have equal provenance weight and neither is
-			// challenged. PROPOSE only.
-			//
-			// 2026-10-13: this branch is the worst of the three under
-			// the old behaviour. It challenged scanSet[i] purely
-			// because of that element's POSITION in the ranked list —
-			// j > i by loop construction — with no inspection of what
-			// either memory claimed. Two identical statements tripped
-			// it as readily as two incompatible ones.
-			//
-			// (scanSet[i] is still the earlier-in-list member of the
-			// unordered pair since j > i, so the queue record names the
-			// same two memories it always did.)
-			if !cj.isChallenged {
-				evidence := fmt.Sprintf(
-					"unresolved state collision (cosine=%.2f) between equal-tier memories %s and %s — pending manual review",
-					sim, scanSet[i].ID, scanSet[j].ID)
-				_ = dm.EnqueueContradiction(ContradictionEvidence{
-					MemoryA:    scanSet[i].ID,
-					MemoryB:    scanSet[j].ID,
-					Evidence:   evidence,
-					Similarity: float64(sim),
-				})
-			}
-		}
-	}
+	// Tested in hybrid_search_nomutate_test.go and
+	// similarity_candidates_test.go.
 
 	// ── Phase 5: In-Memory Provenance Preamble + Warning Prepend ─────────
 	// ── Phase 5b: Correction-chain discount ──────────────────────────────

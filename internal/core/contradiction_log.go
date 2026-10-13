@@ -30,6 +30,15 @@
 //     resolution memory (a row in shared.memories), NOT in this
 //     table. The table only holds the pair and the queue state. The
 //     verdict is the audit trail; the queue is the worklist.
+//  4. (added 2026-10-13) A row is a REVIEW ITEM, not a finding. The
+//     rows this file receives from EnqueueSimilarityCandidates are
+//     UNVERIFIED similarity candidates: two memories that scored high
+//     on cosine, which shows they are related and not that their
+//     claims conflict. Near-identical duplicates score at the top of
+//     that range, so most candidates are duplicates. Only an operator
+//     upgrading a row into an adjudicated conflict — via --apply —
+//     makes it one, and the detected_by column records which rows
+//     arrived from an explicit scan.
 
 package internal
 
@@ -100,24 +109,56 @@ const SlashFraction = 0.5
 
 // EnqueueContradiction inserts a row into shared.contradiction_log.
 // Idempotent on (memory_a, memory_b, evidence_hash): a second call
-// with the same triple is a no-op. This protects against the
-// "detection fires twice" race (HybridSearch → ChallengeMemoryAsync
-// can fire from two different code paths in the same query).
+// with the same triple is a no-op.
 //
-// Called from ChallengeMemoryAsync in the same goroutine that
-// appends to mirror.jsonl. The shared DB write is best-effort: if it
-// fails (shared DB not attached, write error, etc.) the goroutine
-// logs to watchdog and returns. The mirror.jsonl entry is the
-// durable trail; the table is the operational cache.
+// WHO CALLS THIS, as of 2026-10-13: no production path. The one caller that
+// used to — HybridSearch's Phase 4 — was removed, because a retrieval must
+// not persist a contradiction claim it cannot substantiate. The only
+// production insert is EnqueueSimilarityCandidates (similarity_candidates_store.go),
+// reached solely from `mpm ops resolve-contradictions --propose`. This
+// wrapper is retained because it is part of the DatabaseManager surface and
+// is exercised by the queue's own tests.
+//
+// The doc comment here used to say this was called from ChallengeMemoryAsync.
+// That was wrong even when written: ChallengeMemoryAsync appends to
+// mirror.jsonl and never touched this table. Correcting it here rather than
+// leaving a caller that does not exist.
+//
+// The shared DB write is best-effort by contract: if it fails (shared DB not
+// attached, write error, etc.) the caller decides whether that is fatal.
+// EnqueueSimilarityCandidates treats an unattached shared DB as fatal,
+// because a caller that asked to persist and got silence would conclude the
+// queue was updated.
+//
+// Callers that need to know whether a row was actually added should use
+// EnqueueContradictionReport; this wrapper discards the answer because its
+// remaining callers have no use for it.
 func (dm *DatabaseManager) EnqueueContradiction(ev ContradictionEvidence) error {
+	_, err := dm.EnqueueContradictionReport(ev)
+	return err
+}
+
+// EnqueueContradictionReport is EnqueueContradiction plus the one fact it
+// cannot otherwise convey: whether the INSERT OR IGNORE actually inserted.
+//
+// The distinction is not cosmetic. A caller that reports "N candidates
+// proposed" while re-proposing rows it did not write is reporting work it
+// did not do, and an operator reading "78 candidates proposed" on every run
+// of a scan over unchanged data learns nothing. With `inserted`, a repeat run
+// reports 0, which is the truth.
+//
+// Returns (false, nil) when the pair was already queued. Errors are returned
+// exactly as EnqueueContradiction returns them, so existing fail-soft
+// behaviour is unchanged.
+func (dm *DatabaseManager) EnqueueContradictionReport(ev ContradictionEvidence) (bool, error) {
 	if dm.db == nil {
-		return fmt.Errorf("EnqueueContradiction: dm.db is nil")
+		return false, fmt.Errorf("EnqueueContradiction: dm.db is nil")
 	}
 	if ev.MemoryA == "" || ev.MemoryB == "" {
-		return fmt.Errorf("EnqueueContradiction: both memory IDs required")
+		return false, fmt.Errorf("EnqueueContradiction: both memory IDs required")
 	}
 	if ev.MemoryA == ev.MemoryB {
-		return fmt.Errorf("EnqueueContradiction: a memory cannot contradict itself")
+		return false, fmt.Errorf("EnqueueContradiction: a memory cannot contradict itself")
 	}
 	// Normalize the pair: sort lexicographically so (A,B) and (B,A)
 	// produce the same dedup key. This protects against the "order
@@ -130,15 +171,24 @@ func (dm *DatabaseManager) EnqueueContradiction(ev ContradictionEvidence) error 
 	// The shared.contradiction_log table is created in attachShared.
 	// If shared isn't attached, fail soft: the caller will log this
 	// to watchdog and the mirror.jsonl entry is the fallback.
-	_, err := dm.db.Exec(`
+	res, err := dm.db.Exec(`
 		INSERT OR IGNORE INTO shared.contradiction_log
 			(memory_id_a, memory_id_b, evidence, similarity, detected_by, detected_at)
 		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 	`, ev.MemoryA, ev.MemoryB, string(evJSON), ev.Similarity, ev.DetectedBy)
 	if err != nil {
-		return fmt.Errorf("EnqueueContradiction: %w", err)
+		return false, fmt.Errorf("EnqueueContradiction: %w", err)
 	}
-	return nil
+	// INSERT OR IGNORE reports 0 affected rows when the uniqueness constraint
+	// suppressed the write. A RowsAffected error is not actionable here: we
+	// would be reporting the write as unconfirmed while having no way to
+	// distinguish success, so treat it as "not inserted" and let the caller's
+	// own verification catch a real problem.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, nil
+	}
+	return n > 0, nil
 }
 
 // LoadContradictionQueue returns the unresolved rows ordered by
@@ -165,7 +215,7 @@ func (dm *DatabaseManager) LoadContradictionQueue(limit int) ([]map[string]inter
 	for rows.Next() {
 		var (
 			id, a, b, evidence, detectedAt, detectedBy sql.NullString
-			similarity                                  sql.NullFloat64
+			similarity                                 sql.NullFloat64
 		)
 		if err := rows.Scan(&id, &a, &b, &evidence, &similarity, &detectedAt, &detectedBy); err != nil {
 			return nil, fmt.Errorf("LoadContradictionQueue: scan: %w", err)
