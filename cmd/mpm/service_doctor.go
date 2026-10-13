@@ -85,6 +85,7 @@ func (s *DoctorService) Check() (*DoctorReport, error) {
 	// change Check() itself.
 	report.Checks = append(report.Checks, s.checkDatabase())
 	report.Checks = append(report.Checks, s.checkEmbeddings())
+	report.Checks = append(report.Checks, s.checkEmbeddingIntegrity())
 	report.Checks = append(report.Checks, s.checkEmbeddingProvider())
 	report.Checks = append(report.Checks, s.checkWorkingContextOrphans())
 	report.Checks = append(report.Checks, s.checkScheduler())
@@ -218,6 +219,22 @@ func (s *DoctorService) checkDatabase() DoctorCheck {
 //	hash>0               → WARN (legacy rows present)
 //	null/total > 10%     → WARN (backfill needed)
 //	all real provider    → PASS
+// checkEmbeddings measures embedding COVERAGE: the distribution of the
+// `embedding_source` label across live memories, against a statistical
+// tolerance (it warns only when nulls exceed 10% of rows).
+//
+// It deliberately does NOT validate payloads. Coverage is not validity —
+// "12% of memories lack a vector" is a different claim from "the vectors
+// we hold are decodable, finite and mutually comparable". As of
+// 2026-10-13 that second claim was unverified anywhere, so a database
+// holding empty, truncated, non-finite or mixed-dimension vectors
+// reported PASS here. checkEmbeddingIntegrity (service_doctor_embedding_integrity.go)
+// covers it.
+//
+// The two are deliberately separate rows: absence of an optional feature
+// must not make the substrate look unhealthy, so this check keeps its
+// forgiving tolerance, while integrity — which is about data that IS
+// present — has none.
 func (s *DoctorService) checkEmbeddings() DoctorCheck {
 	check := DoctorCheck{Name: "Embeddings"}
 	var total, hashCount, nullCount int
