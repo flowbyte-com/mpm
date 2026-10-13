@@ -590,11 +590,16 @@ before and was not touched.
 
 ### 3.2 Semantic recall is a mutation vector
 
-`HybridSearch` calls `ChallengeMemory()` at cosine ≥ 0.85
-(`docs/RECALL-MUTATION.md`) and **no env var disables it**. A "read-only"
-`--semantic` recall can durably write challenge state. All benchmarking
-therefore runs against a snapshot copy with a before/after digest. Any
-future agent benchmarking MPM must do the same.
+**Resolved on 2026-10-13.** `HybridSearch` used to call `ChallengeMemory()`
+at cosine ≥ 0.85, so a "read-only" `--semantic` recall could durably write
+challenge state with no opt-out. All three automatic calls have been
+removed; see [`RECALL-MUTATION.md`](./RECALL-MUTATION.md) for the current
+contract and [`EMBEDDING-MODEL-COMPARISON.md`](./EMBEDDING-MODEL-COMPARISON.md)
+for the model-migration preconditions this unblocks.
+
+Recall is still not write-free — `EnqueueContradiction` and CLI access
+reinforcement both write — so the snapshot-copy discipline below still
+applies to any future agent benchmarking MPM.
 
 ---
 
@@ -685,7 +690,7 @@ Not blockers for AgentShell work.
 
 | Item | Why deferred |
 |---|---|
-| **Migrating to `qwen3-embedding:0.6b`** — measured, and **recommended against**. Full findings in [`EMBEDDING-MODEL-BENCHMARK.md`](./EMBEDDING-MODEL-BENCHMARK.md). qwen3 genuinely improves paraphrase MRR (0.260 → 0.517) and exact (0.900 → 1.000), but during a 22-query benchmark that should have been observational it caused **4 of 149 memories to have their weight decayed** with `auto_capture` evidence rows written; all-minilm caused zero. `ChallengeMemory` fires at cosine ≥ 0.85 with no opt-out, and qwen3 compresses the relevant/noise gap from 0.307 to 0.191, pushing unrelated pairs over that threshold. | The gain is real but is bought with silent side effects on correct memories. Switching models requires an explicit decision plus a separate, backed-up full re-embedding — neither has been authorised, and **the live store was not touched**. |
+| **Migrating the embedding model** — measured across four models. `nomic-embed-text` is the leading candidate (MRR 0.832, nDCG@10 0.789, paraphrase MRR 0.529 vs all-minilm's 0.260); `qwen3-embedding:0.6b` is second at ~6× the embedding cost. Original two-model findings in [`EMBEDDING-MODEL-BENCHMARK.md`](./EMBEDDING-MODEL-BENCHMARK.md), four-model comparison in [`EMBEDDING-MODEL-COMPARISON.md`](./EMBEDDING-MODEL-COMPARISON.md). **Still recommended against, for now** — the original blocker was that `ChallengeMemory` fired at cosine ≥ 0.85 with no opt-out, so a stronger model's tighter relevant/noise distribution multiplied spurious challenges (qwen3: 27/30 queries mutating; gemma: −301 weight). That blocker is **removed** as of 2026-10-13. The remaining work is re-running the benchmark against the separated write path, then deciding. | The gain is real and the original objection is answered, but a model switch still requires an explicit decision plus a separate, backed-up full re-embedding. Neither has been authorised, and **the live store was not touched**. |
 | **Backfilling the 149 existing memory embeddings with a fingerprint.** The new column is NULL for all of them; retrieval excludes them until they are re-embedded. §1.4 made this *possible* — before that fix no command could do it. | A full re-embed is an explicitly-authorised operation on live data, not a code fix. The live store is currently in this state: semantic retrieval over `memories` returns nothing until `mpm ops backfill-embeddings` runs. |
 | **Legacy memories predate the fingerprint.** The 149 existing memory embeddings were written before §1.2 and carry no model identity; only `embedding_dimension` exists and it is NULL for all of them. They cannot be retroactively fingerprinted with confidence — the vector itself does not say what produced it. New writes are fingerprinted; existing rows are backfilled on next re-embed. | Backfilling requires a full re-embed against a chosen model — which is a separate, explicitly-authorised operation, not a code fix. |
 | **Reference-chunk embeddings are model-aware, memory embeddings were not.** `reference_db.go` filters by model; `db.go` did not. §1.2 closes the memory side. | Resolved by §1.2. |

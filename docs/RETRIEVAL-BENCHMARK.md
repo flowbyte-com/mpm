@@ -6,10 +6,13 @@ calibration behind the changes that were *not* made.
 
 Reproducing: the benchmark runs against a **snapshot copy** of the live
 database, never `~/.mpm/src/db/mpm.db`. That is not caution for its own
-sake — `docs/RECALL-MUTATION.md` documents that `mpm recall --semantic`
-calls `ChallengeMemory()` when two candidates exceed cosine 0.85, so a
-"read-only" recall can durably write challenge state. There is no env var
-that disables that path. The harness digests the copy before and after
+sake — `docs/RECALL-MUTATION.md` records that `mpm recall --semantic`
+still writes on two paths: `EnqueueContradiction` inserts a row into the
+shared contradiction queue for any pair above cosine 0.85, and the CLI
+applies access reinforcement. (Semantic retrieval no longer reduces
+memory weight — the automatic `ChallengeMemory` calls were removed on
+2026-10-13 — but a recall is still not write-free, so the snapshot
+discipline stands.) The harness digests the copy before and after
 and reports `READ-ONLY: confirmed`.
 
 ## Defect 1 — BM25 sign inversion in the hybrid blend (fixed)
