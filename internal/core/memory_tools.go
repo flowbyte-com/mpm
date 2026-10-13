@@ -502,20 +502,30 @@ func applySharedPremium(merged []HybridResult, targetCount int) []HybridResult {
 		out[i] = scored{r: r, final: final}
 	}
 	sort.Slice(out, func(i, j int) bool {
-		// For FTS5-only results (no vector), CombinedScore is negative
-		// (BM25 * (1-VectorWeight)) — more negative = better match.
-		// Sorting final DESC would put the WORST matches first. Use
-		// FTS5Score ASC for FTS5-only (most negative = best first).
-		// For hybrid (FTS5+vector) or vector-only, CombinedScore is
-		// positive (higher = better blend) — sort final DESC.
-		iIsFTS := out[i].r.Source == "fts5"
-		jIsFTS := out[j].r.Source == "fts5"
-		if iIsFTS && jIsFTS {
+		// Primary key: relevance.
+		//
+		// FTS5-only rows rank by raw BM25 ascending, because SQLite's
+		// bm25() is negative-is-better (most negative = strongest
+		// match). This was previously an unconditional early return,
+		// which made the weight and collection tie-breaks below
+		// UNREACHABLE whenever both rows were FTS5 — precisely the
+		// local-vs-shared comparison case they existed to serve, since
+		// the shared-scope premium lands on rows that share a BM25
+		// band. It now falls through to the tie-breaks when the BM25
+		// scores are actually equal, so relevance stays primary.
+		//
+		// Everything else (hybrid, vector-only, or mixed sources) sorts
+		// on `final`, which is the normalised 0–1 blend with the
+		// shared-scope premium applied — higher is better.
+		iIsFTS := out[i].r.Source == "fts5" && out[j].r.Source == "fts5"
+		if iIsFTS && out[i].r.FTS5Score != out[j].r.FTS5Score {
 			return out[i].r.FTS5Score < out[j].r.FTS5Score
 		}
 		if out[i].final != out[j].final {
 			return out[i].final > out[j].final
 		}
+		// Tie-breaks: weight, then collection. These only run when the
+		// relevance keys above are equal.
 		if out[i].r.Weight != out[j].r.Weight {
 			return out[i].r.Weight > out[j].r.Weight
 		}
