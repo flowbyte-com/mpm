@@ -23,6 +23,18 @@ query-instruction split, is **deliberately deferred**; see
 378 rows re-embedded in total. The statement is `UPDATE`-only, over three
 columns, keyed by `id`.
 
+### Tables deliberately not migrated
+
+`sessions`, `topics` and `capabilities` each declare an `embedding` column
+but have **no** `embedding_model` or `embedding_dimension` column, so they
+cannot be stamped and cannot be filtered by fingerprint. They are not
+migrated, and no retrieval path reads them as vectors: all three currently
+hold **zero** non-NULL embeddings, and `db.go` (the vector reindex query)
+notes their missing columns explicitly and skips them. If any of them ever
+starts holding vectors, that is a separate change — it needs a schema
+migration for the fingerprint columns first, otherwise a nomic query would
+silently compare against unlabelled vectors.
+
 ## 2. What must not change
 
 `content`, `weight`, `metadata`, `created_at`, `deleted_at`, `collection`,
