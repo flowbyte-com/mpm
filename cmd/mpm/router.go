@@ -935,7 +935,17 @@ var subcommandHelpOwners = map[string]bool{
 	// skill — add/save print the save-skill help page, which documents the
 	// required `version` frontmatter field. Deliberately absent: skill
 	// delete / skill shred, which shred whatever they are pointed at.
-	"skill add": true, "skill save": true,
+	//
+	// skill workshop added 2026-10-13. handleSkillWorkshop
+	// (handlers_skill.go:230) short-circuits on ANY help token and
+	// returns 0 before opening a database or reading stdin, and its
+	// page is the only place the WorkshopRequest schema is documented.
+	// Omitting it regressed TestSkillWorkshop_Help_PrintsWorkshopGuide:
+	// `mpm skill workshop --help` silently degraded to the family page.
+	// Found by running the canonical suite, not by reading this map —
+	// which is why TestSubcommandHelpOwnersCoverEveryShortCircuit now
+	// cross-checks the map against every handler that short-circuits.
+	"skill add": true, "skill save": true, "skill workshop": true,
 
 	// config — profile/component/capability print their own sub-pages;
 	// detect-embedding is the RETIRED probe, which must keep exiting
