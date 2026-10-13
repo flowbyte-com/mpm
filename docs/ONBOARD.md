@@ -5,15 +5,35 @@
 | Stage | Scope | State |
 |---|---|---|
 | 1 | command structure, read-only environment/readiness reporting | **landed** |
-| 2 | guided model configuration | not started |
+| 2 | guided model configuration | **landed** |
 | 3 | opt-in host installation behind explicit consent | not started |
 
 Stage 1 ships `cmd/mpm/onboard_cmds.go` with the full mode surface
-(`report`, `models`, `hosts`, `--dry-run`, `--json`, `--yes`) but with
-the write gate closed: `onboardOptions.mutateAllowed()` returns false
-and a test pins that, so no stage-1 path can write. The report
-renderer, the JSON contract and the honesty caveats are final in stage
-1 because later stages only add what happens *before* the report runs.
+(`report`, `models`, `hosts`, `--dry-run`, `--json`, `--yes`). The
+report renderer, the JSON contract and the honesty caveats are final in
+stage 1 because later stages only add what happens *before* the report
+runs.
+
+Stage 2 adds `cmd/mpm/onboard_models.go`. It opens **only** the model
+gate (`onboardOptions.mutateModelsAllowed()`); `mutateHostsAllowed()`
+stays false and is pinned by a test, so opening one gate cannot
+implicitly open the other. The step decides *whether* to run the
+existing `mpm config` wizard, prints what it would change, obtains
+consent, and delegates — there is no second configuration system.
+
+Four gates stand between the operator and a write, and all must open:
+there is work to do; the run is not `--dry-run`; there is a terminal to
+approve on; and the operator approved explicitly. A bare Enter is **not**
+approval — deliberately stricter than `confirmPrompt`, which defaults to
+yes. Without a terminal onboarding refuses rather than assuming consent,
+and prints the scriptable equivalent instead.
+
+A disabled embedding is a decision, not a gap, and is never
+re-offered. A run that saved a generative profile but left the optional
+embedding unconfigured is reported as **partial**: the wizard's
+embedding step defaults to "leave unchanged", so that outcome is the
+common one, and presenting it as total success would be the failure this
+design is most concerned with.
 
 Supersedes the earlier `mpm bootstrap` proposal; the command is
 `mpm onboard`.

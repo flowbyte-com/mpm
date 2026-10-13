@@ -139,14 +139,9 @@ type onboardOptions struct {
 	assumeYes bool
 }
 
-// mutateAllowed reports whether this invocation may change anything.
-//
-// Commit 1 is honest about its own scope: the guided configuration
-// and host installation land in later commits, and until they do,
-// nothing is allowed to write. Encoding that as a predicate rather
-// than scattering early-returns means the later commits relax exactly
-// one place, and a test can assert the current value.
-func (o onboardOptions) mutateAllowed() bool { return false }
+// The per-step write gates (mutateModelsAllowed, mutateHostsAllowed and
+// mutateAllowed) live in onboard_models.go, next to the step that obeys
+// them.
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -275,6 +270,18 @@ func handleOnboard(args []string) int {
 		return 1
 	}
 
+	// The guided steps run AFTER the read-only report is collected, so
+	// the report they render is the state as it was found — not the
+	// state onboarding made it look like. Re-collection after a mutation
+	// would be a nicer ending, but it would also mean the sections above
+	// were describing a machine state that no longer exists, and the
+	// delta would have to be reconstructed from the step outcome.
+	// Instead the step records what it did and what it did not finish,
+	// and the exit code reflects the combination.
+	if opts.scope == onboardScopeModels || opts.scope == onboardScopeFull {
+		runModelStep(opts, &rep)
+	}
+
 	if opts.json {
 		emitOnboardJSON(rep)
 	} else {
@@ -324,10 +331,20 @@ type onboardReport struct {
 	Skipped   []string `json:"skipped"`
 
 	// Plan names every mutation a run WOULD make. It is populated by
-	// --dry-run (and by any mutating scope once the write gate opens);
-	// in a pure inspection it is legitimately empty, because a pure
-	// inspection proposes nothing.
+	// --dry-run and by the guided steps; in a pure inspection it is
+	// legitimately empty, because a pure inspection proposes nothing.
 	Plan []string `json:"plan"`
+
+	// ModelPlan is what the guided model step would do, for models and
+	// full scope. Non-nil means onboarding has something to say about
+	// configuration — including when the answer is "nothing to do",
+	// which is itself worth saying out loud.
+	ModelPlan *modelStepPlan `json:"model_plan,omitempty"`
+
+	// ModelStep records the guided model step's outcome: the plan, the
+	// consent decision, and what actually resolved afterwards. Populated
+	// for models and full scope.
+	ModelStep *modelStepOutcome `json:"model_step,omitempty"`
 
 	// NotVerified names things this command structurally cannot
 	// check. Always populated; an empty list here would be the bug.
@@ -398,21 +415,25 @@ func collectOnboardReport(opts onboardOptions) (onboardReport, error) {
 		collectHosts(&rep)
 	}
 
-	if !opts.mutateAllowed() {
-		// The write gate is closed. Say which steps would run once it
-		// opens, so the report is never mistaken for a completed
-		// onboarding.
-		switch opts.scope {
-		case onboardScopeModels, onboardScopeFull:
-			rep.NotAvailable = append(rep.NotAvailable,
-				"model configuration: this build reports model state but cannot change it. "+
-					"Configure with `mpm config` (no arguments runs the wizard)")
-		}
+	// The gates are per-step, not global: stage 2 can configure models
+	// and still cannot install a host integration. Reporting availability
+	// against the global predicate would have told the operator that
+	// guided configuration is unavailable when it is merely absent, and
+	// that host installation is available when it is not.
+	if !opts.mutateHostsAllowed() {
 		switch opts.scope {
 		case onboardScopeHosts, onboardScopeFull:
 			rep.NotAvailable = append(rep.NotAvailable,
 				"host installation: this build inspects integrations but cannot install them. "+
 					"Run the per-host installer directly, one host at a time")
+		}
+	}
+	if !opts.mutateModelsAllowed() {
+		switch opts.scope {
+		case onboardScopeModels, onboardScopeFull:
+			rep.NotAvailable = append(rep.NotAvailable,
+				"model configuration: this build reports model state but cannot change it. "+
+					"Configure with `mpm config` (no arguments runs the wizard)")
 		}
 	}
 
@@ -974,9 +995,28 @@ func renderOnboardReport(rep onboardReport) {
 
 	if len(rep.Plan) > 0 {
 		fmt.Println("Plan")
-		fmt.Println("  (nothing above was written — this is a dry run)")
+		if rep.DryRun {
+			fmt.Println("  (nothing above was written — this is a dry run)")
+		} else if rep.ModelStep != nil && !rep.ModelStep.Applied {
+			fmt.Println("  (proposed — nothing was applied; see the step outcome below for why)")
+		} else {
+			fmt.Println("  (recorded before approval — see the step outcome below for what was actually applied)")
+		}
 		for _, step := range rep.Plan {
 			fmt.Printf("  → %s\n", step)
+		}
+		fmt.Println()
+	}
+
+	renderModelStep(rep)
+
+	// The scriptable equivalent is printed whenever onboarding could not
+	// prompt. Declining to be unattended is only useful if the operator
+	// is handed the other way to do it.
+	if rep.ModelStep != nil && !rep.ModelStep.Applied && strings.Contains(rep.ModelStep.Reason, "not a terminal") {
+		fmt.Println("Without a terminal")
+		for _, c := range nonInteractiveModelCommands() {
+			fmt.Printf("  %s\n", c)
 		}
 		fmt.Println()
 	}
@@ -1012,6 +1052,42 @@ func renderOnboardReport(rep onboardReport) {
 		}
 		fmt.Println()
 	}
+}
+
+// renderModelStep prints the guided step's outcome.
+//
+// Applied and completed are rendered separately on purpose. A run where
+// the wizard saved a generative profile and left the optional embedding
+// profile unconfigured is a real, useful outcome — but rendering it as
+// "✓ model configuration complete" would tell the operator something
+// untrue, and rendering it as a failure would train them to distrust a
+// run that did exactly what they approved.
+func renderModelStep(rep onboardReport) {
+	step := rep.ModelStep
+	if step == nil {
+		return
+	}
+	fmt.Println("Model step")
+	fmt.Printf("  · %s\n", step.Reason)
+	if step.Applied {
+		fmt.Printf("  · the existing `mpm config` wizard ran and exited %d\n", step.ExitCode)
+	}
+	for _, d := range step.Done {
+		fmt.Printf("  ✓ %s is settled\n", d)
+	}
+	// The marker depends on whether onboarding TRIED. Outstanding after a
+	// run is a partial completion and warrants "!"; outstanding because the
+	// step was declined is just the state the Models section already
+	// reports, and marking it "!" here would inflate an optional,
+	// deliberately-skipped capability into a defect.
+	marker := "·"
+	if step.Applied {
+		marker = "!"
+	}
+	for _, r := range step.Remaining {
+		fmt.Printf("  %s %s is still outstanding — configure later with `mpm config`\n", marker, r)
+	}
+	fmt.Println()
 }
 
 func renderSection(label string, rows []onboardRow) {

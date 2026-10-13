@@ -373,20 +373,28 @@ func TestParseOnboardArgs(t *testing.T) {
 	}
 }
 
-// TestOnboardMutateAllowedIsFalseInCommitOne pins the current scope of
-// the command. Guided configuration and host installation arrive in
-// later commits; until then nothing may write. When that changes this
-// test is the thing that must be updated deliberately — which is the
-// point: the write gate is a named predicate, not a scattering of
-// conditionals to be audited.
-func TestOnboardMutateAllowedIsFalseInCommitOne(t *testing.T) {
+// TestOnboardGatesReflectImplementedSteps pins the scope of the write
+// gates against what has actually been implemented.
+//
+// Stage 1 shipped both gates closed. Stage 2 opens the MODEL gate only;
+// host installation is stage 3 and its gate must stay closed until then.
+// This test is the thing that must be updated deliberately when a stage
+// lands — which is the point: the gates are named predicates, not a
+// scattering of conditionals to be audited. The per-gate assertions
+// live in onboard_models_test.go; this one pins the aggregate so that a
+// new gate cannot be opened without somebody reading why.
+func TestOnboardGatesReflectImplementedSteps(t *testing.T) {
 	opts, err := parseOnboardArgs(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.mutateAllowed() {
-		t.Fatal("mutateAllowed() is true, but no onboarding step has an implemented " +
-			"mutation yet. A true here would mean `mpm onboard` can write.")
+	if !opts.mutateAllowed() {
+		t.Fatal("mutateAllowed() is false, but stage 2 implements the guided " +
+			"model step. A false here would make the step unreachable.")
+	}
+	if opts.mutateHostsAllowed() {
+		t.Fatal("mutateHostsAllowed() is true, but host installation is stage 3 " +
+			"and requires an explicit target plus mutation approval.")
 	}
 }
 
