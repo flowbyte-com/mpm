@@ -45,7 +45,7 @@ func TestRough_Item4_RecallVerbatimFallback(t *testing.T) {
 			var sess, tags, meta, lastAcc, refID sql.NullString
 			var created any
 			var rc, w float64
-			if err := rows.Scan(&id, &content, &sess, &tags, &meta, &created, &rc, &w, &lastAcc, &refID); err != nil {
+			if err := rows.Scan(&id, &content, &sess, &tags, &meta, &created, &rc, &w, &lastAcc, &refID, new(sql.NullFloat64)); err != nil {
 				t.Fatalf("scan: %v", err)
 			}
 			ids = append(ids, id)

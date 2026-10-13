@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/flowbyte-com/mpm-core/usererror"
 	"io"
 	"log/slog"
-	"github.com/flowbyte-com/mpm-core/usererror"
+	"math"
 	"os"
 	"regexp"
 	"sort"
@@ -49,6 +50,24 @@ type recallEntry struct {
 	weight             int
 	lastAccessedAt     *int64
 	referenceID        string
+
+	// Ranking signals — the values that ACTUALLY determined this row's
+	// position. `mpm recall --why` reports these instead of the
+	// reinforcement/weight/recency arithmetic that used to be printed
+	// (computeScore), which no comparator in the recall path reads.
+	//
+	// lexicalRank is the 1-based position the SQL BM25 order gave this
+	// row before the post-scan recency re-sort.
+	lexicalRank int
+	// bm25 is the raw FTS5 score (negative-is-better) for lexical rows.
+	bm25      float64
+	hasBM25   bool
+	source    string  // "lexical", "fts5", "vector", "hybrid"
+	vecSim    float64 // cosine similarity, 0–1
+	hasVecSim bool    //
+	combined  float64 // blended score for semantic rows
+	hasComb   bool    //
+	hasState  bool    // reinforcement/weight were populated for this path
 }
 
 var _ = recallEntry{} // ensure the type is "used" even if --why is off
@@ -232,7 +251,7 @@ func handleRecall(args []string) int {
 			return 0
 		}
 		// Render hybrid results as recall entries and output
-		return renderHybridResults(hybridResults, query, *jsonOutput, *tokenBudget, *staleDays, dm)
+		return renderHybridResults(hybridResults, query, *jsonOutput, *tokenBudget, *staleDays, *why, dm)
 	}
 
 	// Keyword search using LIKE + FTS5 fallback with time and weight filters
@@ -250,8 +269,10 @@ func handleRecall(args []string) int {
 			var nullableSessionID, nullableTags sql.NullString
 			var reinforcementCount, weight float64
 			var nullableLastAccessed, nullableRefID, nullableMetadata sql.NullString
+			var nullableBM25 sql.NullFloat64
 			if err := rows.Scan(&id, &content, &nullableSessionID, &nullableTags, &nullableMetadata, &createdAt,
-				&reinforcementCount, &weight, &nullableLastAccessed, &nullableRefID); err != nil {
+				&reinforcementCount, &weight, &nullableLastAccessed, &nullableRefID,
+				&nullableBM25); err != nil {
 				return fmt.Errorf("scanning recall entry row: %w", err)
 			}
 			if content == "" {
@@ -265,27 +286,37 @@ func handleRecall(args []string) int {
 			if nullableRefID.Valid {
 				refID = nullableRefID.String
 			}
-		entry := recallEntry{
-			id:                 id,
-			content:            content,
-			metadata:           nullableMetadata.String,
-			sessionID:          sessionID,
-			tags:               nullableTags.String,
-			createdAt:          createdAt,
-			reinforcementCount: int(reinforcementCount),
-			weight:             int(weight + 0.5), // round to nearest int for display
-			referenceID:        refID,
-		}
-		if nullableLastAccessed.Valid && nullableLastAccessed.String != "" {
-			if v, err := strconv.ParseInt(nullableLastAccessed.String, 10, 64); err == nil {
-				entry.lastAccessedAt = &v
+			entry := recallEntry{
+				id:                 id,
+				content:            content,
+				metadata:           nullableMetadata.String,
+				sessionID:          sessionID,
+				tags:               nullableTags.String,
+				createdAt:          createdAt,
+				reinforcementCount: int(reinforcementCount),
+				weight:             int(weight + 0.5), // round to nearest int for display
+				referenceID:        refID,
+				source:             "lexical",
+				hasState:           true,
 			}
-		}
-		if strings.Contains(nullableTags.String, "synthesized") {
-			entry.synthesized = true
-		}
-		returnedIDs[id] = true
-		entries = append(entries, entry)
+			if nullableBM25.Valid {
+				entry.bm25 = nullableBM25.Float64
+				entry.hasBM25 = true
+			}
+			// Record the position BM25 gave this row. Rows arrive in
+			// `ORDER BY fts.rank` (best first); the recency re-sort below
+			// discards that order, so capture it here first.
+			entry.lexicalRank = len(entries) + 1
+			if nullableLastAccessed.Valid && nullableLastAccessed.String != "" {
+				if v, err := strconv.ParseInt(nullableLastAccessed.String, 10, 64); err == nil {
+					entry.lastAccessedAt = &v
+				}
+			}
+			if strings.Contains(nullableTags.String, "synthesized") {
+				entry.synthesized = true
+			}
+			returnedIDs[id] = true
+			entries = append(entries, entry)
 		}
 		return nil
 	}()
@@ -294,7 +325,15 @@ func handleRecall(args []string) int {
 		return 1
 	}
 
-	// Sort by recency — must happen before empty check for JSON mode
+	// Sort by recency — must happen before empty check for JSON mode.
+	//
+	// NOTE: this DISCARDS the BM25 order the SQL just produced. The
+	// benchmark (docs/RETRIEVAL-BENCHMARK.md) found that a query whose
+	// strongest lexical match is old can have it displaced by a newer,
+	// weaker match. Changing the primary ordering is a ranking-policy
+	// decision, not a correctness fix, so it is left as-is here; the
+	// BM25 rank is preserved on each entry (lexicalRank) and surfaced by
+	// --why so the divergence is visible rather than silent.
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].createdAt > entries[j].createdAt
 	})
@@ -442,19 +481,19 @@ func handleRecall(args []string) int {
 			LastRetrievedAt string `json:"last_retrieved_at,omitempty"`
 		}
 		type projectedEntry struct {
-			ID                 string           `json:"id"`
-			Summary            string           `json:"summary"`
-			Pointer            string           `json:"pointer"`
-			Type               string           `json:"type"`
-			Tags               string           `json:"tags,omitempty"`
-			Collection         string           `json:"collection"`
-			CreatedAt          string           `json:"created_at"`
-			ReinforcementCount int              `json:"reinforcement_count"`
-			Weight             int              `json:"weight"`
+			ID                 string             `json:"id"`
+			Summary            string             `json:"summary"`
+			Pointer            string             `json:"pointer"`
+			Type               string             `json:"type"`
+			Tags               string             `json:"tags,omitempty"`
+			Collection         string             `json:"collection"`
+			CreatedAt          string             `json:"created_at"`
+			ReinforcementCount int                `json:"reinforcement_count"`
+			Weight             int                `json:"weight"`
 			RetrievalMetadata  *retrievalMetadata `json:"retrieval_metadata"`
-			Score              float64          `json:"score"`
-			Rationale           string          `json:"rationale"`
-			IsStale            bool             `json:"is_stale"`
+			Score              float64            `json:"score"`
+			Rationale          string             `json:"rationale"`
+			IsStale            bool               `json:"is_stale"`
 		}
 		result := make([]projectedEntry, 0, len(entries))
 		for _, e := range entries {
@@ -485,11 +524,11 @@ func handleRecall(args []string) int {
 				Tags:               e.tags,
 				Collection:         *collection,
 				CreatedAt:          mpminternal.FormatUnixSeconds(e.createdAt),
-				ReinforcementCount:  e.reinforcementCount,
+				ReinforcementCount: e.reinforcementCount,
 				Weight:             e.weight,
-				RetrievalMetadata:   retMeta,
+				RetrievalMetadata:  retMeta,
 				Score:              score,
-				Rationale:           rationale,
+				Rationale:          rationale,
 				IsStale:            isStale,
 			})
 		}
@@ -695,7 +734,8 @@ func keywordSearchWithTime(db *sql.DB, query, collection, since, until string, w
 		       COALESCE(m.reinforcement_count, 0) as reinforcement_count,
 		       COALESCE(m.weight, 1) as weight,
 		       m.last_accessed_at,
-		       m.reference_id
+		       m.reference_id,
+		       bm25(memories_fts) as bm25
 		FROM memories m
 		JOIN memories_fts fts ON m.rowid = fts.rowid
 		WHERE m.deleted_at IS NULL` + mpminternal.MemoryExpireClauseM
@@ -782,17 +822,22 @@ func likeFallbackQuery(db *sql.DB, query, collection, since, until string, weigh
 // likeFallbackQueryWith is the shared LIKE implementation. Column order
 // MUST match the FTS5 query above (id, content, session_id,
 // tags, metadata, created_at, reinforcement_count, weight, last_accessed_at,
-// reference_id). The Scan destination in handleRecall has 10 args; if
+// reference_id, bm25). The Scan destination in handleRecall has 11 args; if
 // this drifts the count mismatch surfaces as a runtime crash on the
 // very first recall — which is what bit the stranger test when FTS5
 // init failed in the hermetic workspace.
+//
+// The bm25 column is a NULL placeholder: the LIKE path has no BM25 to
+// report, so --why shows the recency order alone rather than inventing a
+// lexical score.
 func likeFallbackQueryWith(db *sql.DB, likePattern, collection, since, until string, weightBelow int, before string, limit int) (*sql.Rows, error) {
 	likeQuery := `
 		SELECT id, content, session_id, tags, metadata, created_at,
 		       COALESCE(reinforcement_count, 0) as reinforcement_count,
 		       COALESCE(weight, 1) as weight,
 		       last_accessed_at,
-		       reference_id
+		       reference_id,
+		       NULL
 		FROM memories
 		WHERE deleted_at IS NULL AND collection = ?` + mpminternal.MemoryExpireClause + `
 		  AND (content LIKE ? OR tags LIKE ?)`
@@ -988,7 +1033,7 @@ func isMemoryStale(createdAt int64, lastAccessed *int64, staleDays int) bool {
 }
 
 // renderHybridResults outputs hybrid search results in the same format as keyword recall.
-func renderHybridResults(results []mpminternal.HybridResult, query string, jsonOutput bool, tokenBudget, staleDays int, dm *mpminternal.DatabaseManager) int {
+func renderHybridResults(results []mpminternal.HybridResult, query string, jsonOutput bool, tokenBudget, staleDays int, why bool, dm *mpminternal.DatabaseManager) int {
 	if jsonOutput {
 		type hybridEntry struct {
 			ID                 string  `json:"id"`
@@ -1040,6 +1085,28 @@ func renderHybridResults(results []mpminternal.HybridResult, query string, jsonO
 			content = content[:80] + "..."
 		}
 		fmt.Printf("%d. [%.2f] [%s] %s\n   %s\n\n", i+1, score, source, createdAt.Format("2006-01-02"), content)
+
+		// --why was previously a no-op on the semantic path: the flag
+		// parsed, but only the lexical renderer consulted it. Now both
+		// paths report the signals that actually ranked the row.
+		if why {
+			e := recallEntry{
+				content:   r.Content,
+				createdAt: r.CreatedAt,
+				source:    r.Source,
+				vecSim:    r.VectorSimilarity,
+				hasVecSim: r.VectorSimilarity != 0,
+				combined:  r.CombinedScore,
+				hasComb:   true,
+				// HybridResult.Weight is not populated by the semantic
+				// path, so leave hasState false rather than printing a
+				// meaningless weight=0.
+				hasState: false,
+				bm25:     r.FTS5Score,
+				hasBM25:  r.Source == "hybrid",
+			}
+			printProvenance(os.Stdout, e, r.Content)
+		}
 	}
 	return 0
 }
@@ -1060,11 +1127,28 @@ func rationaleForSource(source string, combinedScore, vectorSim float64) string 
 	}
 }
 
+// normalizeBM25ForDisplay mirrors internal/core.normalizeBM25 so `--why`
+// can show the lexical score on the same 0–1 scale the hybrid blend uses.
+// Duplicated rather than exported because the internal helper is package-
+// private and this is a one-line presentation concern; TestNormalizeBM25-
+// DisplayMatchesCore pins them together.
+func normalizeBM25ForDisplay(ftsScore float64) float64 {
+	return -ftsScore / (1 + math.Abs(ftsScore))
+}
+
 // printProvenance prints the "why was this retrieved?" breakdown for a
-// recall result. Shows the score components (reinforcement_count × 2 +
-// weight × 1.5 + recency bonus) and any matched FTS5 terms. Designed to
-// answer "why did the agent pick this memory?" without re-running the
-// query against a debugger.
+// recall result. It reports the signals that ACTUALLY determined the
+// row's position — the BM25 score and rank the SQL gave it, or the
+// per-channel scores of the hybrid blend.
+//
+// It previously printed "reinforcement=N (×2 = X)  weight=N (×1.5 = Y)
+// recency=Z", attributed to internal/hybrid_search.go. No comparator in
+// the recall path reads reinforcement_count or weight: the benchmark
+// neutralised both (weight=1, reinforcement_count=0) across all rows and
+// measured 0/8 orderings changed, byte-identical. That arithmetic lives
+// only in computeScore (a 0–1 display value for the JSON payload) and
+// described nothing the ranker did, so --why now reports the real
+// signals instead.
 //
 // The output is plain text with a dim prefix so it stays unobtrusive
 // when stacked between result cards.
@@ -1075,25 +1159,43 @@ func printProvenance(w io.Writer, e recallEntry, content string) {
 	const dim = "\033[2m"
 	const reset = "\033[0m"
 
-	// Score components per internal/hybrid_search.go.
-	// score = (reinforcement_count × 2) + (weight × 1.5) + recency_bonus
-	reinforcement := float64(e.reinforcementCount) * 2
-	weightContrib := float64(e.weight) * 1.5
-	// Recency bonus is harder to reverse-engineer; show the access age
-	// instead and let the operator intuit it.
-	recency := ""
-	if e.lastAccessedAt != nil {
-		recency = formatAgeUnix(*e.lastAccessedAt) + " ago"
-	} else {
-		recency = formatAgeUnix(e.createdAt) + " old"
+	switch {
+	case e.hasComb:
+		// Semantic path — same shape rationaleForSource uses.
+		fmt.Fprintf(w, "    %s[why]%s %s\n",
+			dim, reset, rationaleForSource(e.source, e.combined, e.vecSim))
+	case e.hasBM25:
+		// Lexical path. bm25 is negative-is-better, so report the
+		// normalised form too: that is the value the hybrid blend uses.
+		fmt.Fprintf(w, "    %s[why]%s lexical bm25=%.3f (normalized %.3f, more negative = better match)  bm25 rank %d\n",
+			dim, reset, e.bm25, normalizeBM25ForDisplay(e.bm25), e.lexicalRank)
+	default:
+		// LIKE fallback: there is no BM25 to report, so say which
+		// ordering actually applied instead of inventing a score.
+		fmt.Fprintf(w, "    %s[why]%s substring match (LIKE fallback, no bm25 available)  ordered by created_at DESC\n",
+			dim, reset)
 	}
 
-	fmt.Fprintf(w, "    %s[why]%s reinforcement=%d (×2 = %.1f)  weight=%d (×1.5 = %.1f)  recency=%s\n",
-		dim, reset,
-		e.reinforcementCount, reinforcement,
-		e.weight, weightContrib,
-		recency,
-	)
+	// Recency is a genuine sort key on the lexical path, so report it
+	// as such rather than as a score contribution.
+	recency := ""
+	if e.lastAccessedAt != nil {
+		recency = "last accessed " + formatAgeUnix(*e.lastAccessedAt)
+	} else {
+		recency = "created " + formatAgeUnix(e.createdAt)
+	}
+	fmt.Fprintf(w, "    %s[why]%s %s\n", dim, reset, recency)
+
+	// Reinforcement and weight are NOT ranking signals — no comparator
+	// reads them. They are still useful provenance, so report them as
+	// plain state with no arithmetic attached. `hasState` distinguishes
+	// "weight is genuinely 0" from "this path never populated it" —
+	// HybridResult.Weight is a float64 the semantic path leaves zero, so
+	// printing it there would invent a value that means nothing.
+	if e.hasState && (e.reinforcementCount > 0 || e.weight != 1) {
+		fmt.Fprintf(w, "    %s[why]%s state: reinforcement=%d  weight=%d (not used for ranking)\n",
+			dim, reset, e.reinforcementCount, e.weight)
+	}
 
 	// FTS5 hit terms: extract quoted query terms from the content. This
 	// is a heuristic — for proper FTS5 term highlighting we'd query
