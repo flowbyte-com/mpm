@@ -257,7 +257,7 @@ func TestVectorSearchExcludesForeignModelRows(t *testing.T) {
 		if id, _ := r["id"].(string); id == "bbb22222" {
 			t.Errorf("VectorSearch returned a memory embedded by a different model "+
 				"(%q vs active %q); its cosine describes nothing and a high score "+
-				"triggers ChallengeMemory", id, fp.Model)
+				"produces a spurious contradiction proposal", id, fp.Model)
 		}
 	}
 	var sawMine bool
@@ -350,7 +350,7 @@ func TestVectorMatchExcludesForeignModelRows(t *testing.T) {
 		if m.ID == "eee55555" {
 			t.Error("VectorMatch returned a memory embedded by a different model; " +
 				"its cosine is computed over an unrelated vector space and a score " +
-				">= 0.85 triggers ChallengeMemory")
+				">= 0.85 produces a spurious contradiction proposal")
 		}
 	}
 	var sawMine bool

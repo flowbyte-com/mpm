@@ -79,9 +79,10 @@ func TestCosineSimilarity_MatchingDimensionsPreservesResults(t *testing.T) {
 // A 768-dim and a 384-dim vector were previously compared over their
 // first 384 components and returned a number in [-1,1]. The value is
 // meaningless — it describes a partial dot product of two unrelated
-// embedding spaces — but callers act on it. The contradiction detector
-// in HybridSearch challenges (mutates) a memory when a pair scores at
-// or above 0.85.
+// embedding spaces — but callers act on it. HybridSearch's contradiction
+// scan proposes a pair for operator review when a candidate pair scores
+// at or above 0.85, so a meaningless maximum would put a fabricated
+// dispute in front of a human.
 //
 // The test uses two vectors that agree perfectly on their shared
 // prefix, which is the worst case: truncation returned 1.0, the
