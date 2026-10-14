@@ -184,6 +184,15 @@ Memories challenged before this change remain challenged, with their
 restorable. Retrieval does not re-slash them, and does not clear them.
 Restoring them is a separate, deliberate action via the restore path.
 
+"Restorable" here means the **memory half** — the pre-challenge weight goes
+back. It never meant belief was reinstated. A restore puts back ranking, not
+confidence: `confidence` stays at the challenged floor, the supporting
+`evidence` rows stay expired, and the runtime decay accumulators stay reset.
+Restoring a flagged memory therefore leaves it findable again but still
+distrusted, and fresh evidence is what re-earns confidence. This is F7.1,
+not a limitation of the recovery contract, and it is documented in
+`docs/SPEC.md` §4.5.
+
 The same holds for the adjudication paths. Memories the two Arc 1 writers
 slashed *before* the recovery contract existed (`applyResolution`,
 `applyArbitrationResolution`) had their `weight` and `retrieval_priority`

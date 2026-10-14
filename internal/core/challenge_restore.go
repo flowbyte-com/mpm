@@ -19,10 +19,19 @@
 //     rows are neutralized via expires_at by `mpm challenge` itself, but
 //     they are not deleted).
 //
-// History preservation: prior_confidence, challenged_at, and challenge
-// reason are KEPT in metadata after restore. Only the operational flags
-// (status, challenged_theory_id, challenged_prior_weight,
-// challenged_prior_retrieval_priority) are removed.
+// History preservation: the challenge's forensic trail — challenged_at,
+// the challenge reason, and updated_at — is KEPT in metadata after a
+// restore, along with the explicit restored_from_challenge / restored_at
+// stamps. Every restoration-state key is removed: status,
+// challenged_theory_id, and all four challenged_prior_* baselines.
+//
+// challenged_prior_confidence is a restoration-state key, not a forensic
+// one, and clearing it matters beyond tidiness. Its PRESENCE is what tells
+// a later restore to reset confidence to the floor, so a baseline stranded
+// on an unchallenged memory would make a subsequent restore act on a
+// challenge that is no longer in force — and the next challenge would
+// inherit a prior confidence belonging to some earlier moment instead of
+// recording the row's actual current value.
 //
 // Affected-row accounting (issue #11)
 // -----------------------------------
@@ -424,47 +433,38 @@ func (dm *DatabaseManager) RestoreMemoryFromChallenge(memoryID string) (map[stri
 	}
 	defer tx.Rollback()
 
-	// 1. Resolve theory: status → disproven, memory_id → null (RFC 7396
-	//    null removal). Zero affected rows is an observation, not an error:
-	//    see the partial-success semantics documented above.
+	// The two halves run in ONE transaction, so the order below cannot
+	// change the outcome. It is chosen so that the memory half — the
+	// operation the operator actually asked for, and the only half that is
+	// always recoverable — commits first, and the best-effort theory half
+	// is the thing a later failure has to roll back.
 	//
-	//    The theory usually lives in the same store as the memory, but
-	//    not always: a challenge theory is created through the local
-	//    MemoryStore while an arbitration theory lives in shared. Both
-	//    stores are tried with identical exact-match guards, so the second
-	//    attempt can only ever find a theory that back-links to THIS
-	//    memory — it is not a speculative search, and it stops at the
-	//    first store that matched nothing rather than accumulating
-	//    candidates.
-	var theoryRows int64
-	if theoryID != "" {
-		tried := map[ChallengeTable]bool{}
-		for _, table := range append([]ChallengeTable{loc.Table}, dm.challengeTables()...) {
-			if tried[table] {
-				continue
-			}
-			tried[table] = true
-			rows, rerr := resolveChallengedTheory(tx, table, theoryID, memoryID)
-			if rerr != nil {
-				return nil, rerr
-			}
-			if rows > 0 {
-				theoryRows = rows
-				break
-			}
-		}
-	}
+	// The order is also what makes the boundary observable from a test: a
+	// failure injected into the theory half now proves the memory half
+	// shared the transaction, which is the half a future regression is
+	// most likely to break. With the theory half first, that same injected
+	// failure aborts before the memory UPDATE is ever attempted, and a
+	// memory half moved outside the transaction would go unnoticed.
 
-	// 2. Clear challenged status from memory, put back every column this
+	// 1. Clear challenged status from memory, put back every column this
 	//    challenge recorded a prior for, leave confidence at the
 	//    challenged floor (do NOT silently re-promote to prior
 	//    confidence) when the challenge dropped it, and stamp audit
 	//    metadata so the cycle is reconstructable.
 	clearPatch := map[string]interface{}{
-		"status":                              nil,
+		"status": nil,
+		// Every challenged_prior_* key goes, including the confidence one
+		// that F7.1 keeps out of the restore targets. Leaving it behind
+		// would strand a baseline on a memory that is no longer challenged,
+		// and its presence is what drives confidence_reset on a later
+		// restore — so a stale key both misreports the memory's state and
+		// makes a subsequent challenge inherit a prior confidence that was
+		// true of some earlier moment rather than of the row it is
+		// challenging now.
 		"challenged_theory_id":                nil,
 		"challenged_prior_weight":             nil,
 		"challenged_prior_retrieval_priority": nil,
+		"challenged_prior_confidence":         nil,
 		"restored_from_challenge":             true,
 		"restored_at":                         nowSec,
 	}
@@ -506,6 +506,42 @@ func (dm *DatabaseManager) RestoreMemoryFromChallenge(memoryID string) (map[stri
 	}
 	if memRows == 0 {
 		return nil, fmt.Errorf("restore aborted: memory %s was not updated (no matching live row)", memoryID)
+	}
+
+	// 2. Resolve theory: status → disproven, memory_id → null (RFC 7396
+	//    null removal). Zero affected rows is an observation, not an error:
+	//    see the partial-success semantics documented above.
+	//
+	//    The theory usually lives in the same store as the memory, but
+	//    not always: a challenge theory is created through the local
+	//    MemoryStore while an arbitration theory lives in shared. Both
+	//    stores are tried with identical exact-match guards, so the second
+	//    attempt can only ever find a theory that back-links to THIS
+	//    memory — it is not a speculative search, and it stops at the
+	//    first store that matched nothing rather than accumulating
+	//    candidates.
+	//
+	//    A failure here aborts the whole restore, including the memory
+	//    half above: a memory cleared of its challenged flag while its
+	//    theory stayed pending would report a reversal that did not
+	//    happen.
+	var theoryRows int64
+	if theoryID != "" {
+		tried := map[ChallengeTable]bool{}
+		for _, table := range append([]ChallengeTable{loc.Table}, dm.challengeTables()...) {
+			if tried[table] {
+				continue
+			}
+			tried[table] = true
+			rows, rerr := resolveChallengedTheory(tx, table, theoryID, memoryID)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if rows > 0 {
+				theoryRows = rows
+				break
+			}
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

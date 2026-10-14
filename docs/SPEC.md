@@ -558,7 +558,7 @@ challenge ───────────────────────�
 ```
 
 - **`mpm challenge <id> "<evidence>"`** — atomic: apply the challenge state, create the theory with a back-link, neutralize the memory's existing evidence. The challenge state is written by the same shared primitive the other two challenge writers use (see the challenge recovery contract below), so it records the pre-challenge values a restore needs and records `challenged_via: challenge_theory`. The `mpm_memory action=challenge` tool additionally weakens the stored weight by 2 and records the pre-challenge value in metadata (`challenged_prior_weight`). A negative or inverted reduction is rejected outright — challenging knowledge can never increase its rank.
-- **`mpm challenge restore <id>`** — atomic: resolve the linked theory as disproven, clear memory flags, and restore the recorded pre-challenge weight so the memory returns to its exact prior epistemic standing. The memory half and the theory half report separately, because only one of them is always recoverable (see below).
+- **`mpm challenge restore <id>`** — atomic: the memory half clears the challenged flags and puts back every column the challenge recorded a prior for; the theory half resolves the linked theory as disproven. The memory half runs first inside the single transaction, so a theory-side failure rolls the memory half back rather than committing a half-reversal. Restoring the recorded pre-challenge weight returns the memory to its prior *ranking*; it does not re-promote *belief* — confidence stays at the challenged floor and fresh evidence must re-earn it (see the state ledger below). The two halves report separately, because only one of them is always recoverable (see below).
 
   **Partial-success semantics.** A restore needs a `challenged_theory_id` to resolve, and memories challenged by paths that predate that contract (notably the retired auto-challenge defect) store prose in that field instead of an id. There is no theory row to resolve in that case, and MPM does not go looking for a plausible substitute — guessing which theory an operator meant is how an unrelated theory gets marked disproven. The memory half still runs (the pre-challenge weight is genuinely recorded, so reinstating it is safe), and the result reports `complete: false` with `theory_resolution: "not_found"` and a `theory_warning` naming the offending reference. `theory_status` is `disproven` only when a theory row was actually updated. The CLI prints the partial outcome and exits 0; a machine caller should branch on `complete` / `theory_resolved` rather than on exit status. Refusing the restore outright would leave exactly those memories unrecoverable, which is the condition the operator is trying to repair.
 
@@ -566,13 +566,26 @@ challenge ───────────────────────�
 
 Three paths set `status=challenged` on a memory. All three share one primitive (`internal/core/challenge_state.go`) that applies the metadata and the reduction as a single statement inside the caller's transaction, so the record of what changed cannot drift from what changed.
 
-| Writer | Store | Reduces | `challenged_via` | Theory link |
+| Writer | Store | Changes | `challenged_via` | Theory link |
 |---|---|---|---|---|
-| `mpm challenge`, `mpm_memory action=challenge`, `ChallengeMemoryWithTheory` | `memories` | `weight` | `challenge_theory` | `challenged_theory_id` → a pending theory a restore marks disproven |
-| `--apply` on a decisive-margin row (`applyResolution`) | `shared.memories` | `weight`, `retrieval_priority` | `contradiction_resolution` | none — there is no theory to disprove, and none is fabricated |
-| `ResolveArbitrationTheory` (`applyArbitrationResolution`) | `shared.memories` | `weight`, `retrieval_priority` | `operator_arbitration` | none; the arbitrated theory is recorded under `arbitration_theory` and was already closed as `resolved` by the operator |
+| `mpm challenge`, `mpm_memory action=challenge`, `ChallengeMemoryWithTheory` | `memories` | reduces `weight`; overwrites `confidence` with the challenged floor; expires the memory's `evidence` rows; resets the `runtime_*` decay accumulators | `challenge_theory` | `challenged_theory_id` → a pending theory a restore marks disproven |
+| `--apply` on a decisive-margin row (`applyResolution`) | `shared.memories` | reduces `weight` and `retrieval_priority` | `contradiction_resolution` | none — there is no theory to disprove, and none is fabricated |
+| `ResolveArbitrationTheory` (`applyArbitrationResolution`) | `shared.memories` | reduces `weight` and `retrieval_priority` | `operator_arbitration` | none; the arbitrated theory is recorded under `arbitration_theory` and was already closed as `resolved` by the operator |
 
-A writer records a baseline (`challenged_prior_*`) for **every column it reduces and only those columns**. A restore reads what is present and puts back exactly that: an absent key is not a lost value, it is the claim that this challenge never moved the column. So the challenge surfaces — which reduce weight but not retrieval priority — do not record a retrieval-priority baseline, and a restore cannot clobber an unrelated later adjustment to it. `challenged_prior_confidence` is forensic only: restoration resets a dropped confidence to the challenged floor rather than re-promoting it (F7.1), so only that key's *presence* is load-bearing.
+A writer records a baseline (`challenged_prior_*`) for **every column it reduces and only those columns**. A restore reads what is present and puts back exactly that: an absent key is not a lost value, it is the claim that this challenge never moved the column. So the challenge surfaces — which reduce weight but not retrieval priority — do not record a retrieval-priority baseline, and a restore cannot clobber an unrelated later adjustment to it. A restore clears **every** `challenged_prior_*` key it finds, so a memory that is no longer challenged never carries a leftover baseline.
+
+**What a challenge changes, and what a restore puts back.** This is the complete ledger, because "restorable" is not the same as "restored":
+
+| State a challenge changes | After a restore | Why |
+|---|---|---|
+| `weight` | **restored** to the recorded prior | the slash is the thing being reversed |
+| `retrieval_priority` (Arc 2 writers) | **restored** to the recorded prior | ditto |
+| `confidence` | **reset to the challenged floor, not restored** | F7.1: a restoration re-establishes standing but refuses to re-promote belief |
+| `evidence.expires_at` on the memory's supporting rows | **not reversed** | the same F7.1 rule — the evidence that produced the prior confidence must not come back with it. The rows stay in place as the audit trail |
+| `last_accessed_at`, `runtime_seconds_since_access`, `runtime_last_accrued_at` | **not restored** | time-derived operational state. Rewinding the decay clock would grant decay credit the memory never earned, and a stale access stamp would misreport when the memory was last touched |
+| `updated_at`, `challenged_at` | **stamped, not restored** | ordinary operational timestamps |
+
+`challenged_prior_confidence` is therefore recorded but **forensic only**: only that key's *presence* is load-bearing, and it tells the restore to reset the column to the floor rather than reinstate the prior. Restoring that prior — or un-expiring the evidence behind it — would re-promote precisely the belief an operator flagged as doubtful, which is why the two behaviours are one policy and not two. Fresh evidence re-earns confidence.
 
 The recorded baseline is the **first** one. A repeated challenge on an already-challenged memory still restores to where the memory stood before the first one, because any later value already includes the earlier slash.
 
@@ -1463,7 +1476,7 @@ When two memories disagree, the system has to notice. `shared.contradiction_log`
 >
 > | Path | Recorded |
 > |---|---|
-> | `mpm challenge` / `mpm_memory action=challenge` / `ChallengeMemoryWithTheory` | `challenged_theory_id`, `challenged_prior_weight`, `challenged_prior_confidence` — **restorable** |
+> | `mpm challenge` / `mpm_memory action=challenge` / `ChallengeMemoryWithTheory` | `challenged_theory_id`, `challenged_prior_weight` — **restored**; `challenged_prior_confidence` — **forensic only**, the restore resets confidence to the challenged floor rather than re-promoting it (F7.1) |
 > | `--apply` on a decisive-margin row (`applyResolution`) | `challenged_by_resolution`, `challenged_prior_weight`, `challenged_prior_retrieval_priority` — **restorable** |
 > | `ResolveArbitrationTheory` (`applyArbitrationResolution`) | `challenged_by_resolution`, `arbitration_theory`, `challenged_prior_weight`, `challenged_prior_retrieval_priority` — **restorable** |
 >

@@ -31,9 +31,11 @@
 package internal
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -125,6 +127,8 @@ func TestIssue24_ChallengeMemory_RoundTrip(t *testing.T) {
 
 	mid := issue24Snapshot(t, dm, ChallengeTableLocal, memID)
 	require.Equal(t, float64(7), mid.weight)
+	require.Equal(t, ChallengedMemoryConfidenceFloor, mid.confidence,
+		"the challenge drops confidence to the floor — it OVERWRITES the column, it does not reduce it by an amount")
 	midMeta := issue24Meta(t, mid.metadata)
 	require.Equal(t, "challenged", midMeta["status"])
 	require.Equal(t, float64(9), midMeta["challenged_prior_weight"])
@@ -144,6 +148,8 @@ func TestIssue24_ChallengeMemory_RoundTrip(t *testing.T) {
 	assert.Equal(t, float64(9), after.weight)
 	assert.Equal(t, before.retrievalPriority, after.retrievalPriority,
 		"retrieval_priority must be exactly as it was — untouched by both the challenge and the restore")
+	assert.Equal(t, ChallengedMemoryConfidenceFloor, after.confidence,
+		"F7.1: a restore re-establishes standing but does NOT re-promote confidence; fresh evidence must re-earn it")
 	assert.NotContains(t, issue24Meta(t, after.metadata), "status")
 }
 
@@ -405,10 +411,137 @@ func TestIssue24_RepeatedRestore_IsSafeAndReported(t *testing.T) {
 
 // ── partial failure rolls back completely ────────────────────────────
 
-// TestIssue24_RestoreRollsBackOnTheoryHalf: the theory UPDATE runs first,
-// so an injected failure in the memory half must roll it back. Otherwise a
-// failed restore leaves a theory marked disproven — an adjudication that
-// never completed.
+// ── what a challenge changes, and what a restore reverses ──────────────
+
+// issue24FullSnapshot reads every column a challenge is allowed to move,
+// plus the operational decay accumulators, so a test can assert the whole
+// ledger rather than the two columns the headline contract talks about.
+type issue24FullState struct {
+	weight                    float64
+	retrievalPriority         float64
+	confidence                float64
+	lastAccessedAt            sql.NullInt64
+	runtimeSecondsSinceAccess sql.NullInt64
+	metadata                  string
+	liveEvidenceRows          int
+}
+
+func issue24FullSnapshot(t *testing.T, dm *DatabaseManager, id string) issue24FullState {
+	t.Helper()
+	var s issue24FullState
+	var meta *string
+	require.NoError(t, dm.db.QueryRow(`
+		SELECT COALESCE(weight,0), COALESCE(retrieval_priority,0), COALESCE(confidence,0),
+		       last_accessed_at, runtime_seconds_since_access, metadata
+		FROM memories WHERE id = ? AND deleted_at IS NULL`, id).Scan(
+		&s.weight, &s.retrievalPriority, &s.confidence,
+		&s.lastAccessedAt, &s.runtimeSecondsSinceAccess, &meta))
+	if meta != nil {
+		s.metadata = *meta
+	}
+	// The challenge expires a memory's evidence; a restore must not
+	// resurrect those rows.
+	require.NoError(t, dm.db.QueryRow(`
+		SELECT COUNT(*) FROM evidence
+		WHERE artifact_id = ? AND artifact_type = 'memory' AND expires_at IS NULL`, id).Scan(&s.liveEvidenceRows))
+	return s
+}
+
+// TestIssue24_ChallengeStateLedgerIsFullyAccountedFor is the audit test for
+// requirement 5: every piece of state a challenge actually changes is
+// either restored, or explicitly classified as deliberately not restored.
+//
+// The Arc 1 challenge surfaces (`mpm challenge`, `mpm_memory
+// action=challenge`) change MORE than weight. They also overwrite
+// confidence with the challenged floor, expire the memory's supporting
+// evidence, and reset the runtime decay accumulators. A reader of the
+// headline contract would reasonably assume a restore puts all of that
+// back, so each column is asserted here against the policy that actually
+// governs it:
+//
+//   - weight           restored to the recorded prior
+//   - confidence       left at the floor (F7.1 — see below)
+//   - evidence expiry  NOT reversed (F7.1 — the reason confidence is not
+//     restored in the first place)
+//   - decay clocks     NOT reversed (operational, time-derived)
+//
+// F7.1 is a single coherent policy, not two: a restoration re-establishes
+// a memory's *standing* while refusing to re-promote its *belief*. The
+// pre-challenge confidence is not reinstated, and the evidence that
+// produced it is not un-expired, because doing either would re-promote
+// exactly the belief an operator flagged as doubtful. Fresh evidence must
+// re-earn confidence; the expired rows remain in place as the audit trail.
+func TestIssue24_ChallengeStateLedgerIsFullyAccountedFor(t *testing.T) {
+	dm := newTestDM(t)
+	defer dm.Close()
+
+	// An explicit prior confidence well above the floor, so "confidence was
+	// not restored" is distinguishable from "confidence never moved".
+	memID := seedWeightedMemory(t, dm, "issue24 state ledger", 9)
+	_, err := dm.db.Exec(`UPDATE memories SET confidence = 0.92 WHERE id = ?`, memID)
+	require.NoError(t, err)
+	_, err = dm.db.Exec(`
+		INSERT INTO evidence (id, artifact_id, artifact_type, type, source_group, strength, created_by, created_at)
+		VALUES (?, ?, 'memory', 'reproduction', 'issue24', 0.9, 'issue24 test', ?)`,
+		"issue24-ev-"+memID, memID, time.Now().Unix())
+	require.NoError(t, err)
+	// Age the decay accumulators so a reset is observable.
+	_, err = dm.db.Exec(`
+		UPDATE memories
+		SET last_accessed_at = 1700000000, runtime_seconds_since_access = 4242, runtime_last_accrued_at = 1700000000
+		WHERE id = ?`, memID)
+	require.NoError(t, err)
+
+	before := issue24FullSnapshot(t, dm, memID)
+	require.Equal(t, 0.92, before.confidence, "setup: prior confidence must be above the floor")
+	require.Equal(t, int64(4242), before.runtimeSecondsSinceAccess.Int64, "setup: decay accumulator must be non-zero")
+	require.Equal(t, 1, before.liveEvidenceRows, "setup: the memory must start with one live evidence row")
+
+	_, err = dm.ChallengeMemoryWithTheory(memID, "contradicted by the ledger audit")
+	require.NoError(t, err)
+
+	mid := issue24FullSnapshot(t, dm, memID)
+	assert.Equal(t, 7.0, mid.weight, "the challenge must slash weight")
+	assert.Equal(t, ChallengedMemoryConfidenceFloor, mid.confidence,
+		"the challenge must overwrite confidence with the floor")
+	assert.Equal(t, 0, mid.liveEvidenceRows,
+		"the challenge must expire the memory's supporting evidence")
+	assert.Equal(t, int64(0), mid.runtimeSecondsSinceAccess.Int64,
+		"the challenge must reset the decay accumulator")
+	assert.False(t, mid.lastAccessedAt.Valid && mid.lastAccessedAt.Int64 == before.lastAccessedAt.Int64,
+		"the challenge must stamp last_accessed_at")
+
+	res, err := dm.RestoreMemoryFromChallenge(memID)
+	require.NoError(t, err)
+	require.Equal(t, true, res["weight_restored"], "weight is the one true restore target")
+	require.Equal(t, true, res["confidence_reset"],
+		"the restore must report that it reset the dropped confidence, since the reset is a write it performs")
+
+	after := issue24FullSnapshot(t, dm, memID)
+
+	// Restored: the only true restore target.
+	assert.Equal(t, before.weight, after.weight, "the recorded prior weight must be reinstated")
+
+	// Deliberately NOT restored, under F7.1. These three assertions are the
+	// point of the test: if one of them ever starts passing, the policy
+	// changed and docs/SPEC.md must change with it.
+	assert.Equal(t, ChallengedMemoryConfidenceFloor, after.confidence,
+		"F7.1: the pre-challenge confidence must NOT be reinstated — restoring it would re-promote flagged belief")
+	assert.Equal(t, 0, after.liveEvidenceRows,
+		"F7.1: the expired evidence must NOT be un-expired — the confidence it produced must not come back with it")
+	assert.Equal(t, int64(0), after.runtimeSecondsSinceAccess.Int64,
+		"the decay accumulator is time-derived operational state; rewinding it would grant decay credit never earned")
+
+	meta := issue24Meta(t, after.metadata)
+	assert.NotContains(t, meta, "status", "the challenged flag must be cleared")
+	assert.NotContains(t, meta, "challenged_prior_confidence",
+		"the forensic confidence baseline is cleared once its role is spent")
+}
+
+// TestIssue24_RestoreRollsBackOnTheoryHalf: an injected failure in the
+// memory half must roll back the theory resolution that already succeeded.
+// Otherwise a failed restore leaves a theory marked disproven — an
+// adjudication that never completed.
 func TestIssue24_RestoreRollsBackOnTheoryHalf(t *testing.T) {
 	dm := newTestDM(t)
 	defer dm.Close()
@@ -435,8 +568,71 @@ func TestIssue24_RestoreRollsBackOnTheoryHalf(t *testing.T) {
 	assert.Equal(t, float64(7), issue24Snapshot(t, dm, ChallengeTableLocal, memID).weight, "weight must be left slashed")
 }
 
-// TestIssue24_ChallengeRollsBackOnLaterFailure pins the other half of
-// atomicity: when a step AFTER the challenge statement fails inside
+// TestIssue24_RestoreRollsBackMemoryHalfOnTheoryFailure is the targeted
+// atomicity test for the transaction boundary ITSELF.
+//
+// The companion test above injects the failure into the memory half, which
+// proves the theory half rolls back — but it structurally cannot observe
+// whether the memory half shares the transaction, because that is the half
+// that is failing. Hoisting the memory UPDATE out of the transaction leaves
+// both of those tests green.
+//
+// Here the roles are reversed: the memory half SUCCEEDS, then the theory
+// half fails. Sharing one transaction means the memory is rolled back and
+// stays challenged with its slashed weight and its baseline. A memory half
+// moved outside the transaction would already have been committed on its
+// own, and the memory would come back un-challenged with its weight
+// reinstated — a restore that reported itself reversed while its theory
+// stayed pending.
+//
+// This is why the restore runs its memory half first. With the theory half
+// first, this same injected failure would abort before the memory UPDATE
+// was ever attempted, and the mutation would go undetected.
+func TestIssue24_RestoreRollsBackMemoryHalfOnTheoryFailure(t *testing.T) {
+	dm := newTestDM(t)
+	defer dm.Close()
+
+	memID, theoryID := challengeTarget(t, dm, "issue24 restore rollback on theory")
+
+	before := issue24Snapshot(t, dm, ChallengeTableLocal, memID)
+	beforeMeta := issue24Meta(t, before.metadata)
+	require.Equal(t, "challenged", beforeMeta["status"], "setup: the memory must start challenged")
+	require.Equal(t, float64(7), before.weight, "setup: the challenge must have slashed the weight")
+
+	require.Equal(t, TheoryReferenceIdentifier, classifyTheoryReference(theoryID),
+		"setup: the theory id must be a generated hex id for safe trigger interpolation")
+
+	// Fire on the THEORY row only. A theory is itself a row in `memories`
+	// (with collection='theories'), the same table the memory half updates,
+	// so the trigger is keyed on the theory's id rather than on the table.
+	_, err := dm.db.Exec(fmt.Sprintf(`
+		CREATE TRIGGER issue24_block_theory_resolve
+		BEFORE UPDATE ON memories
+		WHEN NEW.id = '%s'
+		BEGIN SELECT RAISE(ABORT, 'injected theory failure'); END`, theoryID))
+	require.NoError(t, err)
+
+	res, err := dm.RestoreMemoryFromChallenge(memID)
+	require.Error(t, err, "setup: the injected theory failure must surface")
+	assert.Nil(t, res)
+
+	after := issue24Snapshot(t, dm, ChallengeTableLocal, memID)
+	afterMeta := issue24Meta(t, after.metadata)
+	assert.Equal(t, "challenged", afterMeta["status"],
+		"ISSUE 24: a restore that aborted on its theory half must not leave the memory un-challenged")
+	assert.Equal(t, float64(7), after.weight,
+		"the reinstated weight must roll back together with the challenged flag")
+	assert.Equal(t, beforeMeta["challenged_prior_weight"], afterMeta["challenged_prior_weight"],
+		"the baseline must survive the rollback rather than being cleared")
+	assert.NotContains(t, afterMeta, "restored_from_challenge",
+		"no restore audit stamp may be committed when the restore as a whole failed")
+
+	assert.Equal(t, "pending", theoryMeta(t, dm, theoryID)["status"],
+		"the theory must remain pending, not disproven")
+}
+
+// TestIssue24_ChallengeRollsBackOnLaterFailure pins atomicity on the
+// challenge side: when a step AFTER the challenge statement fails inside
 // applyResolution's transaction, the challenge is rolled back too. The
 // metadata and the slash are one statement, but the whole resolution is one
 // transaction, and a partially-applied verdict is worse than none.
