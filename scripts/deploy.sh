@@ -10,7 +10,8 @@
 #   2. openclaw gateway restart           — gateway respawns mpm-mcp with new binary
 #   3. systemctl --user restart mpm-scheduler  — scheduler is independent of gateway
 #   4. systemctl --user restart mpm-telemetry  — telemetry collector is independent of gateway
-#   5. sha verification
+#   5. is-active check on every unit it restarted — a zero exit code is not liveness
+#   6. sha verification
 #
 # Why this script exists: the live MCP server is started once at gateway
 # boot and only picks up a new binary on gateway restart. mpm-scheduler
@@ -92,7 +93,32 @@ else
   echo "==> mpm-telemetry not active (state: $TELEM_ACTIVE_BEFORE) — no restart needed"
 fi
 
-# 5. Verify live mpm-mcp is the new binary ───────────────────────────
+# 5. Verify the restarted units are actually live ────────────────────
+# `systemctl restart` exiting 0 means systemd accepted the job, not that
+# the unit stayed up: a unit that crash-loops on the new binary reports
+# success from `restart` and then sits in `failed` a second later. The
+# sha check in step 6 covers mpm-mcp only — mpm-scheduler and
+# mpm-telemetry are separate units, so without this the script prints
+# "Deployment complete." with the scheduler down.
+sleep 1
+for pair in "mpm-scheduler:$SCHED_ACTIVE_BEFORE" "mpm-telemetry:$TELEM_ACTIVE_BEFORE"; do
+  unit="${pair%%:*}"
+  was_active="${pair#*:}"
+  # Only units this script actually restarted are ours to assert on. A
+  # unit that was already inactive before the deploy is the operator's
+  # business — steps 3 and 4 deliberately leave those alone.
+  [[ "$was_active" == "active" ]] || continue
+  if systemctl --user is-active --quiet "$unit"; then
+    echo "    ✓ $unit active after restart"
+  else
+    echo "!! $unit did not come back up after restart" >&2
+    echo "   check: systemctl --user status $unit" >&2
+    echo "   logs:  journalctl --user -u $unit -n 20 --no-pager" >&2
+    exit 1
+  fi
+done
+
+# 6. Verify live mpm-mcp is the new binary ───────────────────────────
 sleep 1
 LIVE_PID=$(pgrep -f "$CANONICAL_BIN/mpm-mcp" | head -1 || true)
 if [[ -n "$LIVE_PID" ]]; then
