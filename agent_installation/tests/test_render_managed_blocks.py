@@ -88,6 +88,7 @@ INVARIANT_LABELS = (
     "Track substantial continuing work",
     "Leave useful continuation state",
     "Do not assume an MPM capability is unavailable",
+    "Search references before concluding external material is",
 )
 
 
@@ -161,11 +162,17 @@ class CanonicalBlockExtraction(unittest.TestCase):
 
     def test_block_teaches_all_behavioural_invariants(self):
         """The canonical block must enumerate every behavioural invariant
-        by its stable label string. The contract version 1.2.0 (Sept 2026
-        expansion) lifted the count from 7 to 10: substrate
-        discoverability, skill creation lifecycle, durable work
-        tracking, and reference acquisition each became an explicit
-        numbered invariant."""
+        by its stable label string.
+
+        This docstring previously claimed a "version 1.2.0 expansion"
+        lifted the count from 7 to 10 and that "reference acquisition"
+        had become an explicit numbered invariant. No such expansion ever
+        landed: the block sat at 7 items with no reference-discovery
+        guidance, while this docstring described the intended state. An
+        agent reading only the managed block therefore had no instruction
+        to consult the reference corpus at all — the WordPress incident
+        in issue #25 is that gap made visible. The label is now genuinely
+        required, so the description matches what is enforced."""
         for label in INVARIANT_LABELS:
             self.assertIn(label, self.block, f"canonical block missing invariant: {label!r}")
 
@@ -781,26 +788,36 @@ COMPACT_RULE_ANCHORS = {
     ),
 }
 
-# Size ceiling. The approved compact block is 2951 bytes / 422 words
-# (host-neutral canonical). Tightened ceiling for the 2026-09-29
-# follow-up pass: 3500 bytes / 500 words. This leaves roughly 18-19%
-# wording headroom for harmless updates (a single rule reword or a
-# brief clarifier) while making the gate meaningfully resist renewed
-# instruction creep. The ceilings are well below the old block's
-# 12492 bytes / 1612 words — verbose regression would have to add
-# ~500 bytes / ~80 words to fail the gate.
-COMPACT_BLOCK_BYTE_CEILING = 3500
-COMPACT_BLOCK_WORD_CEILING = 500
+# Size ceiling — a safeguard against accidental bloat, NOT an
+# optimisation target.
+#
+# The 2026-09-29 approved compact block was 2951 bytes / 422 words
+# (host-neutral canonical). Ceilings were raised for issue #25 to 5000
+# bytes / 750 words.
+#
+# The earlier 3500/500 pair was tight enough that adding the
+# reference-discovery invariant (item 8) forced a choice between a
+# useful instruction and a compressed one. That is the wrong trade for
+# a block loaded into agent context: a few hundred extra bytes are
+# negligible next to an agent concluding that documentation it already
+# has access to does not exist. The objective is an effective agent,
+# not an impressively small instruction file.
+#
+# These numbers are a backstop against the old 12492-byte / 1612-word
+# verbose shape, which duplicated operational detail that belongs in
+# tool descriptions. If a future genuinely essential instruction would
+# exceed them, raise the ceiling rather than mutilating the
+# instruction.
+COMPACT_BLOCK_BYTE_CEILING = 5000
+COMPACT_BLOCK_WORD_CEILING = 750
 
 
 class CompactBlockSizeCeiling(unittest.TestCase):
-    """Generous instruction-size regression guard for the slim canonical
-    managed block. Stops future prose creep.
+    """Guard against accidental instruction bloat.
 
-    The ceiling is set generously above the accepted block to permit
-    harmless wording refinement. The anchor (size that fails the gate)
-    is ~1000 bytes / 200 words above the actual block — meaningful
-    creep, not single-paragraph tweaks.
+    Deliberately loose. The accepted block sits far below the ceiling,
+    so the gate only fires on runaway growth — not on an author writing
+    a necessary instruction at its natural length.
     """
 
     def setUp(self):
@@ -810,33 +827,136 @@ class CompactBlockSizeCeiling(unittest.TestCase):
         self.block = _render.extract_canonical_block(self.text)
 
     def test_canonical_block_under_byte_ceiling(self):
-        """The canonical (host-neutral) block must stay under 3500 bytes.
-        3500 is ~550 bytes above the 2951-byte approved block (18-19%
-        headroom), enough for a single rule reword or a brief
-        clarifier while failing the gate on meaningful verbose creep."""
+        """The canonical (host-neutral) block must stay under 5000 bytes.
+
+        A backstop against returning to the old 12492-byte verbose shape,
+        which reintroduced operational detail that belongs in tool
+        descriptions rather than the agent-facing behavioural contract.
+        It is not a budget to optimise against."""
         size = len(self.block.encode("utf-8"))
         self.assertLessEqual(
             size, COMPACT_BLOCK_BYTE_CEILING,
             f"canonical managed block is {size} bytes; ceiling is "
-            f"{COMPACT_BLOCK_BYTE_CEILING}. The 2026-09-29 approved "
-            f"block is 2951 bytes; verbose regression would push the "
-            f"block back toward the old 12492-byte shape and reintroduce "
-            f"operational detail that belongs in tool descriptions, not "
-            f"the agent-facing behavioural contract.",
+            f"{COMPACT_BLOCK_BYTE_CEILING}. If an essential instruction "
+            f"legitimately needs this much room, raise the ceiling — do "
+            f"not compress the instruction to fit it.",
         )
 
     def test_canonical_block_under_word_ceiling(self):
-        """The canonical (host-neutral) block must stay under 500 words.
-        A byte ceiling alone is brittle across line-ending differences;
-        the word ceiling catches the prose-token gap regardless of
-        how the bytes are organised."""
+        """The canonical (host-neutral) block must stay under 750 words.
+
+        The word count is what actually governs how much instruction an
+        agent must read, so it is the meaningful bloat guard; the byte
+        ceiling is a proxy for it that also catches formatting drift.
+        Same rule: raise this rather than mutilate the instruction."""
         size = len(self.block.split())
         self.assertLessEqual(
             size, COMPACT_BLOCK_WORD_CEILING,
             f"canonical managed block is {size} words; ceiling is "
-            f"{COMPACT_BLOCK_WORD_CEILING}. The 2026-09-29 approved "
-            f"block is 422 words; the ceiling leaves ~18% headroom.",
+            f"{COMPACT_BLOCK_WORD_CEILING}. Raise the ceiling if the "
+            f"instruction needs the room; do not trim it to fit.",
         )
+
+    def test_every_host_render_stays_within_the_ceilings(self):
+        """The budget policy applies uniformly to every supported host.
+
+        The ceiling tests above measure the host-neutral canonical block.
+        Each adapter re-renders it with its own tool prefix, and those
+        prefixes are longer (`mcp__mpm__mpm_references`), so the bytes an
+        agent actually loads can exceed the canonical measurement. Word
+        count is unaffected — a prefix rewrites a token, it does not add
+        one — so it is the byte ceiling that needs per-host coverage.
+        """
+        for adapter in _render.ADAPTERS:
+            rendered = _render.render_for_host(self.block, adapter["tool_prefix"])
+            size = len(rendered.encode("utf-8"))
+            self.assertLessEqual(
+                size, COMPACT_BLOCK_BYTE_CEILING,
+                f"{adapter['name']} renders {size} bytes for the host to "
+                f"load; ceiling is {COMPACT_BLOCK_BYTE_CEILING}. The "
+                f"instruction-budget policy applies to every host equally.")
+            words = len(rendered.split())
+            self.assertLessEqual(
+                words, COMPACT_BLOCK_WORD_CEILING,
+                f"{adapter['name']} renders {words} words; ceiling is "
+                f"{COMPACT_BLOCK_WORD_CEILING}")
+
+
+class ManagedBlockDuplicationGuard(unittest.TestCase):
+    """Catch ACCIDENTAL bloat, which is what the size ceilings exist to
+    catch.
+
+    The instruction-budget policy (see "Instruction budget policy" in
+    MPM_AGENT_INTEGRATION_SNIPPETS.md) is explicit that ceilings are
+    optimisation safeguards, not correctness constraints: essential
+    capability discovery must never be dropped to fit a budget. So
+    these tests must not measure "is the block too long" — they measure
+    "has the block started repeating itself", which is the growth mode
+    that is always a defect regardless of budget.
+    """
+
+    def setUp(self):
+        self.text = CANONICAL_SOURCE.read_text(encoding="utf-8")
+        self.block = _render.extract_canonical_block(self.text)
+
+    def _sentences(self) -> list[str]:
+        # Strip the HTML comment header, which legitimately repeats the
+        # same sentence shape across blocks, and unwrap hard wrapping
+        # so a sentence split across lines counts once.
+        body = re.sub(r"<!--.*?-->", " ", self.block, flags=re.DOTALL)
+        body = re.sub(r"[#*`]", " ", body)
+        body = re.sub(r"\s+", " ", body)
+        parts = re.split(r"(?<=[.!?])\s+", body)
+        return [p.strip() for p in parts if len(p.strip()) > 25]
+
+    def test_no_sentence_is_duplicated(self):
+        sentences = self._sentences()
+        counts: dict[str, int] = {}
+        for s in sentences:
+            counts[s] = counts.get(s, 0) + 1
+        dupes = {s: n for s, n in counts.items() if n > 1}
+        self.assertEqual(
+            {}, dupes,
+            "the managed block repeats identical sentences: "
+            f"{dupes}. Duplicated instruction is pure bloat — it costs "
+            f"agent context and signals an unfinished edit.")
+
+    def test_no_invariant_repeats_another_invariants_opening(self):
+        """Each numbered invariant should say something the others do
+        not. Catches a copy-paste edit that clones a rule body."""
+        # DOTALL because several bold labels are hard-wrapped and the
+        # closing `**` lands on the following line.
+        openings = re.findall(r"^\s*\d+\.\s+\*\*(.+?)\*\*", self.block,
+                              re.MULTILINE | re.DOTALL)
+        self.assertGreaterEqual(len(openings), 8,
+                                "expected at least 8 invariants in the block")
+        norm = [re.sub(r"\s+", " ", o).strip().lower() for o in openings]
+        self.assertEqual(len(norm), len(set(norm)),
+                         f"duplicate invariant labels: {norm}")
+
+    def test_instruction_budget_policy_is_stated_in_canonical_source(self):
+        """The budget policy must be documented where the block is
+        authored, so a future author meets it before writing rather than
+        after being told by a failing test."""
+        low = self.text.lower()
+        # The policy is prose in a hard-wrapped markdown file, so match
+        # against whitespace-collapsed text rather than raw lines.
+        flat = re.sub(r"\s+", " ", low)
+        for phrase in ("instruction budget policy",
+                       "not correctness constraints",
+                       "never be omitted merely to satisfy"):
+            self.assertIn(phrase, flat,
+                          f"the canonical source must state {phrase!r}; the "
+                          f"budget policy is what stops the ceilings being "
+                          f"read as a correctness constraint")
+
+    def test_budget_policy_does_not_grow_the_managed_block(self):
+        """The policy is documentation for maintainers. It must not leak
+        into the agent-facing block, which is loaded into every session."""
+        self.assertNotIn(
+            "Instruction budget policy", self.block,
+            "the budget policy is maintainer documentation and must not "
+            "appear in the agent-facing managed block")
 
 
 class CompactBlockConceptPresence(unittest.TestCase):

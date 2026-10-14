@@ -186,8 +186,9 @@ Do not use when: you just want to store a single fact (mpm_memory save); you nee
 	},
 	{
 		Name: "mpm_references",
-		Description: `Ingested external documents: PDFs, specs, whitepapers, books.
-Use when: you read an external document and want to make its contents searchable via the MPM query surface. References are indexed and queryable; use read to retrieve a single doc by id, search to query chunks, or list to enumerate.
+		Description: `Search and read previously ingested external documents: PDFs, specs, API and framework documentation, whitepapers, books.
+Use when: you need documentation you have already ingested — API references, framework manuals, specifications, or previously acquired external material. REFERENCES ARE A SEPARATE SUBSYSTEM FROM MEMORIES: a memory query or collection listing does not establish whether the reference corpus holds a document, so an empty memory search is NOT evidence of absence. Search first (action search with a query), then read the document itself with action read using the id — do not act on a search-result summary alone. Every result carries a freshness classification (current, stale, version-bound, historical, unknown); check it before relying on technical documentation, because a reference can be relevant and still be not current.
+Use action list to enumerate what is in the corpus when you do not know what to look for. Use action add when you have a new document to make searchable.
 Do not use when: the document is ephemeral, or you only want to record a URL for later — use mpm_evidence action=add with reference_url, which stores the pointer durably on the evidence row (MPM never fetches it).`,
 		Schema: json.RawMessage(`{
 			"type": "object",

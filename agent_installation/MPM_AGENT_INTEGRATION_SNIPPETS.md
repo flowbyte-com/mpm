@@ -1,4 +1,4 @@
-<!-- mpm_agent_integration_version: 2.0.0 -->
+<!-- mpm_agent_integration_version: 2.1.0 -->
 
 # MPM Agent Integration — Canonical Managed Instruction Snippets
 
@@ -116,6 +116,16 @@ the full protocol carry operational detail.
    `mpm call <tool>` fallback. If the native transport fails
    mid-session, use that fallback rather than abandoning persistence;
    it operates on the same substrate with the same provenance.
+
+8. **Search references before concluding external material is
+   absent.** Memories and references are separate subsystems:
+   an empty memory search is not evidence of absence. For
+   API or framework documentation, specifications, or prior
+   material, search — `mpm reference search "<query>"`, or
+   `mpm__mpm_references` action `search` — then read the document itself,
+   `mpm reference show <id>` or `mpm__mpm_references` action `read`, not a
+   search-result summary. Check version and freshness first: a
+   reference can still be stale.
 <!-- END MPM MANAGED BLOCK -->
 
 <!-- END MPM-MANAGED SECTION:claude-code-instructions -->
@@ -193,6 +203,16 @@ the full protocol carry operational detail.
    `mpm call <tool>` fallback. If the native transport fails
    mid-session, use that fallback rather than abandoning persistence;
    it operates on the same substrate with the same provenance.
+
+8. **Search references before concluding external material is
+   absent.** Memories and references are separate subsystems:
+   an empty memory search is not evidence of absence. For
+   API or framework documentation, specifications, or prior
+   material, search — `mpm reference search "<query>"`, or
+   `mpm_references` action `search` — then read the document itself,
+   `mpm reference show <id>` or `mpm_references` action `read`, not a
+   search-result summary. Check version and freshness first: a
+   reference can still be stale.
 <!-- END MPM MANAGED BLOCK -->
 
 <!-- END MPM-MANAGED SECTION:opencode-instructions -->
@@ -272,6 +292,16 @@ the full protocol carry operational detail.
    `mpm call <tool>` fallback. If the native transport fails
    mid-session, use that fallback rather than abandoning persistence;
    it operates on the same substrate with the same provenance.
+
+8. **Search references before concluding external material is
+   absent.** Memories and references are separate subsystems:
+   an empty memory search is not evidence of absence. For
+   API or framework documentation, specifications, or prior
+   material, search — `mpm reference search "<query>"`, or
+   `mpm_references` action `search` — then read the document itself,
+   `mpm reference show <id>` or `mpm_references` action `read`, not a
+   search-result summary. Check version and freshness first: a
+   reference can still be stale.
 <!-- END MPM MANAGED BLOCK -->
 
 <!-- END MPM-MANAGED SECTION:pi-instructions -->
@@ -351,6 +381,16 @@ the full protocol carry operational detail.
    `mpm call <tool>` fallback. If the native transport fails
    mid-session, use that fallback rather than abandoning persistence;
    it operates on the same substrate with the same provenance.
+
+8. **Search references before concluding external material is
+   absent.** Memories and references are separate subsystems:
+   an empty memory search is not evidence of absence. For
+   API or framework documentation, specifications, or prior
+   material, search — `mpm reference search "<query>"`, or
+   `mcp__mpm__mpm_references` action `search` — then read the document itself,
+   `mpm reference show <id>` or `mcp__mpm__mpm_references` action `read`, not a
+   search-result summary. Check version and freshness first: a
+   reference can still be stale.
 <!-- END MPM MANAGED BLOCK -->
 
 <!-- END MPM MANAGED BLOCK:mpm-hermes -->
@@ -480,6 +520,16 @@ the full protocol carry operational detail.
    `mpm call <tool>` fallback. If the native transport fails
    mid-session, use that fallback rather than abandoning persistence;
    it operates on the same substrate with the same provenance.
+
+8. **Search references before concluding external material is
+   absent.** Memories and references are separate subsystems:
+   an empty memory search is not evidence of absence. For
+   API or framework documentation, specifications, or prior
+   material, search — `mpm reference search "<query>"`, or
+   `mpm_references` action `search` — then read the document itself,
+   `mpm reference show <id>` or `mpm_references` action `read`, not a
+   search-result summary. Check version and freshness first: a
+   reference can still be stale.
 <!-- END MPM MANAGED BLOCK -->
 
 > **OpenClaw has no MPM MCP server in either integration mode.** The
@@ -579,6 +629,16 @@ the full protocol carry operational detail.
    `mpm call <tool>` fallback. If the native transport fails
    mid-session, use that fallback rather than abandoning persistence;
    it operates on the same substrate with the same provenance.
+
+8. **Search references before concluding external material is
+   absent.** Memories and references are separate subsystems:
+   an empty memory search is not evidence of absence. For
+   API or framework documentation, specifications, or prior
+   material, search — `mpm reference search "<query>"`, or
+   `mpm_references` action `search` — then read the document itself,
+   `mpm reference show <id>` or `mpm_references` action `read`, not a
+   search-result summary. Check version and freshness first: a
+   reference can still be stale.
 <!-- END MPM MANAGED BLOCK -->
 
 ```
@@ -643,6 +703,46 @@ Edit the canonical managed block above to change what every host
 learns. Then run the render script to propagate. Drift detection
 tests fail if the rendered output and the checked-in artifacts
 diverge.
+
+## Instruction budget policy
+
+**Instruction budgets are optimisation safeguards, not correctness
+constraints. Essential capability discovery and operational guidance
+must never be omitted merely to satisfy an arbitrary size ceiling.**
+
+The managed block exists to improve *total* agent efficiency, not to
+minimise its own token count. A slightly longer instruction that
+prevents repeated searches, unnecessary tool calls, incorrect
+conclusions, or rediscovery of information MPM already holds is
+strongly net-positive: each avoided misfire costs far more context
+than the instruction ever will. An agent that concludes "MPM does not
+have this documentation" because nothing told it references are a
+separate subsystem will spend a long time re-deriving what is already
+stored.
+
+The current limits are **5,000 bytes and 750 words** for the
+host-neutral canonical block. They are **maintainability warnings and
+review triggers**, not budgets to optimise against:
+
+* Do **not** remove useful guidance, compress an instruction until it
+  is ambiguous, or sacrifice discoverability to stay under a ceiling.
+* If an essential instruction genuinely needs the room, raise the
+  ceiling. Say so in review. Do not mutilate the instruction instead.
+* If the block is already correct and verbose, tighten the *wording* —
+  that is a legitimate improvement. What is not legitimate is
+  deleting a capability to buy headroom.
+
+What the ceilings do still guard is **accidental** growth: duplicated
+sentences, restated tool documentation, and mechanical reformatting
+that balloons a one-line change. Those are the regressions a size
+gate catches cheaply, and `test_render_managed_blocks.py` carries that
+coverage (byte ceiling, word ceiling, duplicate-sentence detection,
+and per-invariant concept anchors).
+
+This policy governs every supported host: all five adapters render
+from this one canonical block, so it applies uniformly to Claude
+Code, OpenCode, Pi, Hermes and OpenClaw, and to the copy/paste
+examples and README rendered from it.
 
 ## Updating the managed instructions
 

@@ -61,6 +61,16 @@ the full protocol carry operational detail.
    `mpm call <tool>` fallback. If the native transport fails
    mid-session, use that fallback rather than abandoning persistence;
    it operates on the same substrate with the same provenance.
+
+8. **Search references before concluding external material is
+   absent.** Memories and references are separate subsystems:
+   an empty memory search is not evidence of absence. For
+   API or framework documentation, specifications, or prior
+   material, search — `mpm reference search "<query>"`, or
+   `mcp__mpm__mpm_references` action `search` — then read the document itself,
+   `mpm reference show <id>` or `mcp__mpm__mpm_references` action `read`, not a
+   search-result summary. Check version and freshness first: a
+   reference can still be stale.
 <!-- END MPM MANAGED BLOCK -->
 
 ## Hermes-specific notes

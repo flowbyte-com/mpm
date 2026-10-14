@@ -979,12 +979,21 @@ refresh-installed:
 # `--check` mode validated the snippet, but no check validated the
 # next hop in the chain (snippet -> installed persistent file).
 #
+# This is an OPERATIONAL check against this machine's live install, and
+# is deliberately NOT part of `make test`. A source gate that fails
+# whenever the installed instructions predate the source cannot be
+# passed by a correct source change and cannot be trusted to mean "the
+# source is broken" when it does fail — so canonical `make test` and
+# `make test-race` validate the source tree only (including hermetic
+# coverage of this same detection logic against a synthetic install
+# tree). This target opts in to the machine-specific scope.
+#
 # `make refresh-installed` is the canonical repair path. This
 # target is read-only (does not modify the install targets); on
 # failure it prints the per-host drift, first divergent line, and
 # the repair command.
 check-installed-drift:
-	@cd $(AGENT_INSTALL_DIR) && python3 -m unittest tests.test_installed_block_drift -v \
+	@cd $(AGENT_INSTALL_DIR) && MPM_CHECK_INSTALLED_DRIFT=1 python3 -m unittest tests.test_installed_block_drift -v \
 	    || { echo "    FAIL: installed managed blocks drifted from canonical render; run \`make refresh-installed\` to repair" >&2; exit 1; }
 
 # Read-only diagnostic for installed managed blocks. Distinguishes

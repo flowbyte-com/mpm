@@ -136,6 +136,31 @@ ONBOARDING_SUPPORT = [
     "agent_installation/scripts/stage_runtime_package.sh",
 ]
 
+# The shared behavioural protocol, staged so the path the managed block
+# advertises actually resolves.
+#
+# Every installed managed block carries this header line:
+#
+#   <!-- Full behavioural protocol: ~/.mpm/agent_installation/mpm-agent-protocol.md -->
+#
+# It has advertised that runtime path since the block was introduced,
+# but nothing ever staged the file, so on every installed machine that
+# pointer resolved to a path that did not exist. An agent that followed
+# it — which is exactly what it is invited to do — found nothing.
+#
+# The protocol is the detailed semantics behind the managed block's
+# summary rules (AUTO_AGENT_INSTALL.md names it as source-of-truth tier
+# 3). The block is the always-loaded summary; this document is what an
+# agent reads when it needs the full contract. Without it installed,
+# that distinction is invisible.
+#
+# This stages the existing canonical file. It does not create a second
+# copy: the repo file remains the single source of truth, and the
+# runtime root holds a provisioned asset like every other entry above.
+AGENT_PROTOCOL_DOCS = [
+    "agent_installation/mpm-agent-protocol.md",
+]
+
 # Per-adapter templates/*.snippet files are discovered by scan (see
 # discover_source_assets), not listed here. They are NOT optional: each
 # reconcile.json names its snippet via "@/templates/<name>.snippet", and
@@ -362,11 +387,12 @@ def discover_source_assets(source_root: Path) -> list[str]:
             if entry.is_file() and entry.suffix == suffix:
                 found.append(f"{subdir}/{entry.name}")
 
-    # Onboarding support. The enumerated list is used verbatim; a missing
-    # entry is skipped rather than fatal, because a partial source tree
-    # (a per-adapter checkout, a vendored install) legitimately lacks some
-    # of them and should still provision what it does have.
-    for rel in ONBOARDING_SUPPORT:
+    # Onboarding support and the shared behavioural protocol. The
+    # enumerated lists are used verbatim; a missing entry is skipped
+    # rather than fatal, because a partial source tree (a per-adapter
+    # checkout, a vendored install) legitimately lacks some of them and
+    # should still provision what it does have.
+    for rel in ONBOARDING_SUPPORT + AGENT_PROTOCOL_DOCS:
         if (source_root / rel).is_file():
             found.append(rel)
 

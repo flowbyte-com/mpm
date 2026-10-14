@@ -182,5 +182,128 @@ class TestHalfProvisionedInstallIsWorseThanNone(unittest.TestCase):
                         "a managed block is present")
 
 
+class TestAgentProtocolIsReachable(unittest.TestCase):
+    """The managed block advertises a runtime path for the full
+    behavioural protocol. That path must resolve on an installed
+    machine, or the block is pointing at nothing.
+
+    This was a live defect: every rendered host block carried the header
+
+        <!-- Full behavioural protocol:
+             ~/.mpm/agent_installation/mpm-agent-protocol.md -->
+
+    but no staging manifest ever listed the file, so the advertised
+    path did not exist on any installed machine. An agent that followed
+    the pointer it was explicitly invited to follow found nothing.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls._tmp.name) / "rt"
+        cls.proc = provision(cls.root)
+        if cls.proc.returncode != 0:
+            raise AssertionError(
+                f"provisioning failed: {cls.proc.returncode}\n"
+                f"stdout={cls.proc.stdout[-2000:]}\nstderr={cls.proc.stderr[-2000:]}")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    PROTOCOL_REL = "agent_installation/mpm-agent-protocol.md"
+
+    def test_protocol_is_staged_at_the_advertised_path(self):
+        staged = self.root / self.PROTOCOL_REL
+        self.assertTrue(
+            staged.is_file(),
+            f"{self.PROTOCOL_REL} was not staged; every managed block "
+            f"advertises this path, so it must resolve after install")
+
+    def test_staged_protocol_is_the_repo_canonical_file(self):
+        """Not a second copy. The staged bytes must be the repo file's
+        bytes, so there is exactly one canonical protocol."""
+        staged = (self.root / self.PROTOCOL_REL).read_bytes()
+        source = (REPO / self.PROTOCOL_REL).read_bytes()
+        self.assertEqual(
+            source, staged,
+            "the staged protocol must be the canonical repo file, not a "
+            "divergent copy")
+
+    def test_every_rendered_host_block_advertises_a_path_that_is_staged(self):
+        """The header a host actually loads must name a file this
+        provisioning pass placed. Guards the pairing: staging the file
+        without the block pointing at it, or the reverse, both leave the
+        contract broken."""
+        rendered = []
+        for adapter in sorted(
+            d for d in (REPO / "agent_installation").iterdir()
+            if d.is_dir() and (d / "templates").is_dir()
+        ):
+            for snippet in sorted((adapter / "templates").glob("*.snippet")):
+                rendered.append((adapter.name, snippet.name,
+                                 snippet.read_text(encoding="utf-8")))
+
+        self.assertTrue(rendered, "no rendered host snippets found")
+        for adapter, name, text in rendered:
+            self.assertIn(
+                "mpm-agent-protocol.md", text,
+                f"{adapter}/{name} does not reference the protocol at all")
+            for line in text.splitlines():
+                if "Full behavioural protocol:" in line:
+                    path = line.split("protocol:", 1)[1].strip().rstrip("-->").strip()
+                    rel = path.replace("~/.mpm/", "").lstrip("/")
+                    self.assertTrue(
+                        (self.root / rel).is_file(),
+                        f"{adapter}/{name} advertises {path!r}, which this "
+                        f"provisioning pass did not create")
+
+    def test_repeated_provisioning_is_idempotent(self):
+        """Re-running the provisioner must not rewrite or duplicate the
+        staged protocol — a second pass over a settled runtime root is a
+        no-op."""
+        sys.path.insert(0, str(REPO / "scripts"))
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "install_runtime_assets_probe", SCRIPT)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            result = module.reconcile(REPO, self.root)
+            changed = result.changed()
+            self.assertEqual(
+                [], changed,
+                f"a second reconcile over a settled runtime root changed "
+                f"{changed}; provisioning must be idempotent")
+        finally:
+            sys.path.pop(0)
+
+    def test_provisioning_preserves_unrelated_operator_content(self):
+        """Staging is additive. An operator file the provisioner does
+        not own must survive a pass untouched."""
+        owned = self.root / self.PROTOCOL_REL
+        self.assertTrue(owned.is_file(), "precondition: provision ran")
+
+        unrelated = self.root / "mode" / "my-custom-mode.md"
+        unrelated.parent.mkdir(parents=True, exist_ok=True)
+        unrelated.write_text("# my own mode, not source-managed\n",
+                             encoding="utf-8")
+        marker = self.root / "agent_installation" / "my-notes.md"
+        marker.write_text("operator scratch\n", encoding="utf-8")
+
+        proc = provision(self.root)
+        self.assertEqual(0, proc.returncode, proc.stderr)
+
+        self.assertEqual(
+            "# my own mode, not source-managed\n",
+            unrelated.read_text(encoding="utf-8"),
+            "an operator-owned file under a source-managed directory must "
+            "not be clobbered by provisioning")
+        self.assertEqual(
+            "operator scratch\n", marker.read_text(encoding="utf-8"),
+            "provisioning must not remove files it does not manage")
+
+
 if __name__ == "__main__":
     unittest.main()
