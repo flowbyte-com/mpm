@@ -203,6 +203,19 @@ Stated plainly in the report rather than glossed:
 
 ### A known gap onboarding must warn about
 
+> **Superseded — kept for the design rationale, not as current state.**
+> The gap described here was closed on 2026-10-13: `memories` now carries
+> an `embedding_model` column (`internal/core/schema.go:1569`), every write
+> path records the fingerprint, and `VectorSearch` filters on it
+> (`internal/core/db.go:4270`). The memories backfill is model-aware, so a
+> row without a fingerprint is pending rather than skipped. `mpm onboard`
+> derives its claim from the live store rather than stating it as a
+> constant. See [`CLOSEOUT.md`](./CLOSEOUT.md) §1.2, §1.4 and §1.9, and
+> the live gap in [`NOMIC-MIGRATION.md`](./NOMIC-MIGRATION.md) §1
+> (`sessions`, `topics` and `capabilities` still carry no fingerprint
+> columns). Tracked as
+> [#17](https://github.com/flowbyte-com/mpm/issues/17).
+
 `memories` has `embedding_dimension` and `embedding_source` but **no
 `embedding_model` column** — only `reference_chunks` carries a full
 `(model, dimension)` fingerprint with a working detector

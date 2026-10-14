@@ -225,7 +225,7 @@ func TestDBSafety_NoLiveDBLeakInTests(t *testing.T) {
 // previous guard resolved the nearest go.mod — internal/core — and so
 // covered only internal/core while its own comment claimed repo-wide
 // coverage. This asserts the walk reaches every area the repo actually
-// has test files in, including the two nested modules that no `make
+// has test files in, including the nested module that no `make
 // test` target traverses.
 func TestDBSafety_ScanCoversEveryModuleArea(t *testing.T) {
 	root := findRepoRoot(t)

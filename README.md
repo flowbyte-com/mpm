@@ -219,6 +219,7 @@ CLI-only path, manual service setup, and first cognitive commands.
 | [Supported integrations](agent_installation/README.md) | Host overview and links to adapter-specific documentation |
 | [Agent protocol](agent_installation/mpm-agent-protocol.md) | Wake, persistence, skill discovery, handoff, and recovery contract |
 | [Contributing](docs/CONTRIBUTING.md) | Repository invariants, testing gates, and contribution expectations |
+| [Work tracking](docs/ISSUES.md) | Where work is tracked, how findings are classified, how to report an issue |
 | [Security policy](docs/SECURITY.md) | Private vulnerability reporting and credential-handling rules |
 
 ## Development

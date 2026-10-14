@@ -111,8 +111,8 @@ registry/dispatcher drift is caught.
   (`./cmd/...`, `./internal/telemetry`, `./internal/scheduler`,
   `./internal/critic`), the standalone `internal/core` module, the nested
   `internal/core/tools` module, and the Python suites under `scripts/`
-  and `agent_installation/`. `release_acceptance` and the Go tests in
-  `scripts/` are separate — see `make test-release`. It is slow enough
+  and `agent_installation/`. `release_acceptance` is a separate Go module
+  — see `make test-release`. It is slow enough
   that you should run it before opening a PR, not on every save.
 - Stranger test (the hermetic specification quickstart gate):
   ```bash

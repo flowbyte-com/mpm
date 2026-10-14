@@ -598,10 +598,12 @@ test-testenv-precommit:
 # Nothing in this repository's validation path could see a Python test
 # under scripts/tests/. Three separate boundaries conspired:
 #
-#   1. `scripts/` is its own Go module, so `go test ./...` from the repo
-#      root cannot descend into it. This is the same nested-module shape
-#      that already forced test-tools / test-tools-race and
-#      test-testenv / test-testenv-race into `make test` / `make test-race`.
+#   1. `scripts/` used to be its own Go module, so `go test ./...` from
+#      the repo root could not descend into it; e28eaa9 retired that
+#      module and ported its coverage to Python under scripts/tests/.
+#      The nested-module shape is the same one that already forced
+#      test-tools / test-tools-race and test-testenv / test-testenv-race
+#      into `make test` / `make test-race`.
 #   2. The Makefile's only Python invocation in its entire history was
 #      `check-installed-drift` -> agent_installation's
 #      tests.test_installed_block_drift. No target enumerated

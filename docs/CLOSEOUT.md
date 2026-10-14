@@ -5,6 +5,13 @@ Scope: every defect reported against MPM across the 2026-09-13 through
 This exists so the next agent does not have to re-derive any of it from
 conversation history.
 
+> **This document is a historical record, not a work queue.** It describes
+> the state as of the baseline revision below and is not updated as work
+> proceeds. Items left as DEFERRED, LIMITATION or a §3 verification gap
+> were carried into GitHub Issues, which are now the authoritative backlog —
+> see [§7 Open backlog](#7-open-backlog) and
+> [`ISSUES.md`](./ISSUES.md). Do not add new work here; open an issue.
+
 Baseline revision: `6737f2e` on `fix/retrieval-benchmark-findings`
 (pushed, not merged). Installed environment `~/.mpm` is on the same
 revision.
@@ -761,3 +768,86 @@ The live database was confirmed byte-unchanged against a snapshot
 (`sqlite3 .backup`) at every verification point: 149 memories, 232
 reference chunks, 0 rows with `embedding_dimension`, and **no
 `embedding_model` column at all** — the migration had not been applied.
+
+---
+
+## 7. Open backlog
+
+Added 2026-10-14, after the ledger above was complete. This section exists
+only to point at the issues; it is deliberately not a second copy of them.
+GitHub Issues is the authoritative work queue.
+
+The audit that produced these issues re-verified each ledger entry against
+the implementation at `e28eaa9` rather than taking the ledger's word for it.
+Most entries held up. Three did not, and are recorded below because they
+are the ones most likely to be re-reported against this document.
+
+### 7.1 Ledger entries that did not hold
+
+| Ledger entry | Verified state at `e28eaa9` | Tracked as |
+|---|---|---|
+| §3.2 "semantic retrieval is write-free" | True of `memories` and the contradiction queue. **Not true of `retrieval_metadata`**, which the MCP query and wake paths write on every retrieval. The regression test snapshots two stores. | [#18](https://github.com/flowbyte-com/mpm/issues/18) |
+| §5 "`norerelevant` queries still return 10 results" — LIMITATION | Confirmed open. | [#15](https://github.com/flowbyte-com/mpm/issues/15) |
+| §3.2 "candidates are now added only by `mpm ops resolve-contradictions --propose`" | Confirmed as to *insertion*. The subsequent **`--apply` path does not distinguish candidates from established contradictions** and can reach `ChallengeMemory`. | [#10](https://github.com/flowbyte-com/mpm/issues/10) |
+
+The third is the material one. The 2026-10-13 work removed automatic writes
+from the *retrieval* path and the ledger records that as resolved. It was
+resolved. The operator CLI reaches the same write one layer up, and the
+`detected_by` field that would distinguish the two kinds is selected by
+`LoadContradictionQueue` and then read by nobody.
+
+### 7.2 Not in the ledger at all
+
+Found by the same audit; none appear anywhere in §1–§6.
+
+- `mpm ops doctor` checks for `~/.mpm/sessions`, a directory no installer
+  ever creates, and exits 1 on a healthy host — [#12](https://github.com/flowbyte-com/mpm/issues/12)
+- `mpm challenge restore` silently fails its theory-resolution half for all
+  41 challenged rows while reporting success — [#11](https://github.com/flowbyte-com/mpm/issues/11)
+- No operator workflow exists to find or adjudicate those 41 rows —
+  [#20](https://github.com/flowbyte-com/mpm/issues/20)
+- `scripts/tests/` (24 files) and `release_acceptance/` (26 tests) never run
+  in CI — [#14](https://github.com/flowbyte-com/mpm/issues/14)
+- The benchmark harness lived in `/tmp/embench` and is gone, making every
+  recorded benchmark figure unreproducible — [#16](https://github.com/flowbyte-com/mpm/issues/16)
+
+### 7.3 Deliberately not converted into issues
+
+Recorded here so they are not re-reported as undocumented defects. Each is
+a documented decision with its reasoning intact:
+
+- **§4.1 — semantic false positives, `RetrievalThreshold: -3.0` stays.** Measured and rejected; the relevant/noise distributions overlap. Carried forward as [#15](https://github.com/flowbyte-com/mpm/issues/15) because the underlying question is still open, but the *decision* stands.
+- **§4.2 — lexical AND semantics.** A retrieval-policy redesign, not a correctness fix. No independent evidence supports changing it.
+- **§4.3 — source-bucket policy.** Reproduced the shipped ordering on 22/22 cases; the bucket was masking the inverted score in every measured query.
+- **§4.4 — recall mutates memory state.** Intentional access tracking, pinned by `internal/core/call_helpers_test.go:440`.
+- **§4.5 — FTS5 build discipline centralised.** A bare `go test ./...` without `-tags fts5` failing 11 tests is pre-existing and confirmed by stashing. `make test` is canonical.
+- **§4.6 — temporary-directory cleanup.** WORKING; all 15 `mktemp` sites audited, no leak.
+- **§1.7 — embedding config cached per process.** Documented intent, stated in the function's own doc comment. It interacts with §1.6 (test-order-dependent coverage), which is why it is recorded at all.
+- **The nomic `search_query:` prefix.** Deferred for a sound attribution reason. Tracked as [#23](https://github.com/flowbyte-com/mpm/issues/23) so the deferral has an owner, not because the reasoning was wrong.
+- **`sessions`, `topics` and `capabilities` are not migrated.** They hold zero vectors and cannot be fingerprinted. Stated in `docs/NOMIC-MIGRATION.md` §1; a schema migration is required before they could hold any.
+
+### 7.4 Full index
+
+Fourteen issues, grouped by what they are:
+
+**Retrieval correctness**
+- [#10](https://github.com/flowbyte-com/mpm/issues/10) `--apply` treats unverified similarity candidates as established contradictions — **high**
+- [#11](https://github.com/flowbyte-com/mpm/issues/11) `challenge restore` silently fails theory resolution for all 41 challenged rows — **high**
+- [#12](https://github.com/flowbyte-com/mpm/issues/12) `mpm ops doctor` FAILs permanently on `~/.mpm/sessions` — **medium**
+
+**Retrieval quality and scale**
+- [#15](https://github.com/flowbyte-com/mpm/issues/15) no vector similarity floor; 0/7 negatives rejected — **medium**
+- [#21](https://github.com/flowbyte-com/mpm/issues/21) `--propose` is uncapped O(n²); review reads only the oldest 100 — **medium**
+- [#23](https://github.com/flowbyte-com/mpm/issues/23) nomic query/document prefixes unmeasured — **low–medium**
+
+**Integrations and verification**
+- [#14](https://github.com/flowbyte-com/mpm/issues/14) `scripts/tests/` and `release_acceptance/` never run in CI — **medium**
+- [#20](https://github.com/flowbyte-com/mpm/issues/20) no workflow to find or adjudicate the 41 challenged memories — **medium**
+
+**Documentation accuracy**
+- [#13](https://github.com/flowbyte-com/mpm/issues/13) stale `scripts/` Go module references — **low**
+- [#16](https://github.com/flowbyte-com/mpm/issues/16) `/tmp/embench` harness gone; benchmark figures unreproducible — **medium**
+- [#17](https://github.com/flowbyte-com/mpm/issues/17) `ONBOARD.md` claims a column that exists and a flag that does not — **medium**
+- [#18](https://github.com/flowbyte-com/mpm/issues/18) "retrieval is write-free" is unqualified — **medium**
+- [#19](https://github.com/flowbyte-com/mpm/issues/19) OpenCode validation doc contradicts the current position — **medium**
+- [#22](https://github.com/flowbyte-com/mpm/issues/22) `RECALL-MUTATION.md` citation, command name and idempotency claim — **low**
