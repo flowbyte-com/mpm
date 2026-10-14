@@ -965,11 +965,26 @@ var subcommandHelpOwners = map[string]bool{
 	//   lint (lint reports "unknown flag \"help\"" and then lints anyway)
 	// and these MUTATE or run despite looking informational:
 	//   ops stats / ops status (accrue runtime state — verified MUTATED),
-	//   ops prune ("Pruned 0 expired memories"), ops export (dumped JSON),
-	//   ops resolve-contradictions.
+	//   ops prune ("Pruned 0 expired memories"), ops export (dumped JSON).
+	//
+	// ops resolve-contradictions was listed as absent until 2026-10-14,
+	// which was accurate about the code and wrong about the consequence.
+	// Its handler DOES recognise a help token (ops_resolve_contradictions.go
+	// returns 0 before touching the database), but Execute intercepts first,
+	// so that branch was unreachable and `mpm ops resolve-contradictions
+	// --help` printed the generic `mpm ops` page. That page never mentions
+	// --adjudicate=ID:REASON — the flag that decides whether a row may
+	// penalise a memory at all (issue #10). The one command whose workflow
+	// cannot be guessed from the family page was the one page that omitted it.
+	//
+	// Safe to own: the help branch returns before getDBConcrete(), so no
+	// database is opened and no queue row is read or written.
+	// TestSubcommandHelpOwnersAreInert proves the inertness of every entry
+	// here, this one included, against an isolated workspace.
 	"ops shared": true, "ops rebalance": true, "ops changelog": true,
 	"ops milestones": true, "ops broadcast": true,
 	"ops active-sessions": true, "ops confidence": true,
+	"ops resolve-contradictions": true,
 }
 
 // isSubcommandHelp reports whether the given args (post-parseFlags, with
@@ -1183,7 +1198,7 @@ var opsSubcommandDescs = []struct {
 	{"init skills", "Seed the Baseline Skill Library (idempotent)"},
 	{"init tasks", "Seed the Baseline Cognitive Bootstrap for scheduled tasks (idempotent)"},
 	{"self-heal [--dry-run/--force/--quiet]", "Autonomous integrity repair — auto-fix known drift, escalate unknown via theory"},
-	{"resolve-contradictions [--dry-run/--apply/--json/--limit=N]", "Resolve the shared contradiction queue by provenance scoring"},
+	{"resolve-contradictions [--dry-run/--apply/--json/--limit=N/--adjudicate=ID:REASON]", "Resolve the shared contradiction queue by provenance scoring (only adjudicated rows are applied)"},
 	{"broadcast <memory_id> [--kind/--rationale/--to/--dry-run/--json]", "Arc 2 fan-out: push an epistemic event to every active session"},
 	{"active-sessions [--json]", "List sessions active within the heartbeat window"},
 	{"help", "Show this help"},

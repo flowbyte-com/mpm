@@ -123,6 +123,48 @@ unchanged data inserts nothing. `EnqueueSimilarityCandidates` returns the
 number of rows **actually** inserted — a repeat run reports **0**, not last
 run's total re-announced as new work.
 
+## Applying a candidate requires adjudication
+
+`--apply` no longer treats a queue row as its own justification. A row may
+penalise a memory only when `detected_by` carries an explicit operator
+adjudication. Everything else is unverified and fails closed: a similarity
+candidate, a row routed to arbitration, a legacy row carrying a session id, a
+row with no `detected_by` at all, and any value written by something this
+codebase has never heard of.
+
+```bash
+mpm ops resolve-contradictions --json                      # find queue row ids
+mpm ops resolve-contradictions --adjudicate=42:"mem-a claims X, mem-b claims not-X"
+mpm ops resolve-contradictions --apply                     # now those rows may penalise
+```
+
+`--adjudicate` is per row and repeatable, and the reason is mandatory — it is
+the audit trail that distinguishes a considered decision from a reflex. It is
+deliberately **not** a force flag: a force flag answers "apply this anyway"
+and leaves the question of whether the pair is a real contradiction
+unanswered and unrecoverable. There is no batch form, because adjudicating
+without reading each pair is the mistake the gate exists to prevent.
+
+The segment is appended, never rewritten, so the detection provenance that
+brought a row to the queue stays legible next to the judgement made about it:
+
+```
+similarity-scan|adjudicated:read both, claims conflict
+```
+
+**No schema change.** This reuses the compound `detected_by` idiom already
+established for `theory:` (`applyArbitration`), so there is no migration, no
+new column and no backfill.
+
+Refused rows are **not discarded**. Each is reported as `NEEDS ADJUDICATION`
+with the `detected_by` that failed the check, why it was not applied, and the
+exact command that would change that; `--json` carries the same rows in
+`needs_adjudication_rows` alongside a `needs_adjudication` count. They stay in
+the queue, waiting. The gate applies to `--apply`, not to visibility — a
+dry-run still lists every row, because that is how an operator finds out what
+is in the queue in the first place.
+
+
 ## Explicit challenges still work
 
 The sanctioned path is unchanged and audited:
@@ -143,7 +185,10 @@ restorable. Retrieval does not re-slash them, and does not clear them.
 Restoring them is a separate, deliberate action via the restore path.
 
 Queue rows written before this change remain in place with their original
-`detected_by`. Nothing reinterprets them.
+`detected_by`. Nothing reinterprets them — and because historical rows carry no
+`adjudicated:` segment, they are read as *unverified*. Existing rows are
+therefore review items, not findings: an operator who wants one applied must
+adjudicate it explicitly first. That is the asymmetry made enforceable.
 
 ## Validation guards retained
 

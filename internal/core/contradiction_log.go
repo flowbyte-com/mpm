@@ -30,15 +30,21 @@
 //     resolution memory (a row in shared.memories), NOT in this
 //     table. The table only holds the pair and the queue state. The
 //     verdict is the audit trail; the queue is the worklist.
-//  4. (added 2026-10-13) A row is a REVIEW ITEM, not a finding. The
-//     rows this file receives from EnqueueSimilarityCandidates are
-//     UNVERIFIED similarity candidates: two memories that scored high
-//     on cosine, which shows they are related and not that their
-//     claims conflict. Near-identical duplicates score at the top of
-//     that range, so most candidates are duplicates. Only an operator
-//     upgrading a row into an adjudicated conflict — via --apply —
-//     makes it one, and the detected_by column records which rows
-//     arrived from an explicit scan.
+//  4. (added 2026-10-13, amended 2026-10-14) A row is a REVIEW ITEM, not
+//     a finding. The rows this file receives from EnqueueSimilarityCandidates
+//     are UNVERIFIED similarity candidates: two memories that scored high
+//     on cosine, which shows they are related and not that their claims
+//     conflict. Near-identical duplicates score at the top of that range, so
+//     most candidates are duplicates.
+//
+//     The amendment (issue #10): this comment used to say an operator
+//     upgrades a row "via --apply", which made the apply flag its own
+//     justification — a batch --apply over 100 candidates adjudicated all
+//     100 at once, which is the defect, not a remedy. Adjudication is now
+//     its own explicit, per-row act (AdjudicateContradiction, in
+//     contradiction_verification.go) that records the operator's reason on
+//     detected_by. ResolveOneContradiction refuses to penalise any row
+//     lacking that marker, whatever it was detected by.
 
 package internal
 
@@ -92,6 +98,17 @@ type ResolutionDecision struct {
 	// after the apply call returns. Used by Arc 2's auto-broadcast
 	// to fan out the resolution event.
 	ResolutionMemoryID string
+	// Adjudicated reports whether an operator explicitly judged this
+	// pair to be a genuine contradiction. Only an adjudicated row may
+	// penalise a memory; see contradiction_verification.go. False for
+	// unverified similarity candidates, for rows merely routed to
+	// arbitration, and for any detected_by value this codebase does not
+	// recognise — the check is affirmative, never inferred.
+	Adjudicated bool
+	// VerificationNote explains, for an unadjudicated row, why it is not
+	// eligible to apply and what an operator can do about it. Empty when
+	// Adjudicated is true.
+	VerificationNote string
 }
 
 // ProvenanceThreshold is the |winner_score - loser_score| margin
@@ -195,6 +212,20 @@ func (dm *DatabaseManager) EnqueueContradictionReport(ev ContradictionEvidence) 
 	if ev.MemoryA > ev.MemoryB {
 		ev.MemoryA, ev.MemoryB = ev.MemoryB, ev.MemoryA
 	}
+	// An `adjudicated:` segment is a record of an operator having read both
+	// memories. Creating a queue row is not that action, so an adjudication
+	// segment supplied by a producer is unauthorised no matter what the
+	// producer claims: verification is affirmative and never inferred from
+	// text supplied by the party asking for the benefit of the doubt.
+	// Strip it before it reaches either the column or the evidence JSON that
+	// mirrors this struct, so AdjudicateContradiction remains the only way a
+	// row becomes eligible to penalise a memory. See
+	// stripForgedAdjudication for why this is enforced here rather than
+	// trusted to the call graph.
+	if cleaned, forged := stripForgedAdjudication(ev.DetectedBy); forged {
+		ev.DetectedBy = cleaned
+	}
+
 	evJSON, _ := json.Marshal(ev)
 
 	// The shared.contradiction_log table is created in attachShared.
@@ -236,6 +267,14 @@ func (dm *DatabaseManager) EnqueueContradictionReport(ev ContradictionEvidence) 
 // detection time (oldest first — operators want to clear stale items
 // before fresh ones). Limit caps the batch size; 0 means "no cap"
 // but in practice the CLI default is 100.
+//
+// Every row carries a "detected_by" key. It is the only thing that
+// distinguishes an unverified similarity candidate from a row an operator
+// adjudicated, so a caller that is about to ACT on a row — rather than
+// merely list it — must pass it to ClassifyContradictionVerification
+// first. ResolveOneContradiction does exactly that and refuses to apply
+// an unadjudicated row; the check lives there so that every present and
+// future caller inherits it rather than having to remember it.
 func (dm *DatabaseManager) LoadContradictionQueue(limit int) ([]map[string]interface{}, error) {
 	q := `
 		SELECT id, memory_id_a, memory_id_b, evidence, similarity,

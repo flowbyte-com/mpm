@@ -69,27 +69,31 @@ var knownNonOwningSubcommandHelp = map[string]string{
 	// them into subcommandHelpOwners is a separate change that must first
 	// prove the handler is inert; TestHelpRequestsNeverMutate does exactly
 	// that for every owner key.
-	"blob gc":                    "intercepted; prints the `mpm blob` page, which lists `gc [--dry-run|-n]`",
-	"lesson add":                 "intercepted; prints the `mpm lesson` page, which lists `mpm lesson add <content>`",
-	"memory add":                 "intercepted; prints the `mpm memory` page, which documents `mpm memory add`",
-	"memory save":                "intercepted; alias of `memory add`, documented on the `mpm memory` page",
-	"memory delete":              "intercepted; prints the `mpm memory` page",
-	"memory list":                "intercepted; prints the `mpm memory` page",
-	"memory promote":             "intercepted; prints the `mpm memory` page",
-	"memory reinforce":           "intercepted; prints the `mpm memory` page",
-	"memory restore":             "intercepted; prints the `mpm memory` page",
-	"memory search":              "intercepted; prints the `mpm memory` page",
-	"memory set-weight":          "intercepted; prints the `mpm memory` page",
-	"memory show":                "intercepted; prints the `mpm memory` page",
-	"memory snooze":              "intercepted; prints the `mpm memory` page",
-	"memory weaken":              "intercepted; prints the `mpm memory` page",
-	"ops logs":                   "intercepted; prints the `mpm ops` page — cost: the handler's own logs page is not reached",
-	"ops reference":              "intercepted; prints the `mpm ops` page — cost: the handler's own reference page is not reached",
-	"ops resolve-contradictions": "intercepted; prints the `mpm ops` page — cost: the handler's own resolve page is not reached",
-	"session add":                "intercepted; prints the `mpm session` page, which lists `mpm session add <content>`",
-	"session allocate":           "intercepted; prints the `mpm session` page, which lists `mpm session allocate`",
-	"session rotate":             "intercepted; prints the `mpm session` page, which lists `mpm session rotate`",
-	"shred database":             "intercepted; prints the `mpm shred` page, which states the shred scope and its limits",
+	"blob gc":           "intercepted; prints the `mpm blob` page, which lists `gc [--dry-run|-n]`",
+	"lesson add":        "intercepted; prints the `mpm lesson` page, which lists `mpm lesson add <content>`",
+	"memory add":        "intercepted; prints the `mpm memory` page, which documents `mpm memory add`",
+	"memory save":       "intercepted; alias of `memory add`, documented on the `mpm memory` page",
+	"memory delete":     "intercepted; prints the `mpm memory` page",
+	"memory list":       "intercepted; prints the `mpm memory` page",
+	"memory promote":    "intercepted; prints the `mpm memory` page",
+	"memory reinforce":  "intercepted; prints the `mpm memory` page",
+	"memory restore":    "intercepted; prints the `mpm memory` page",
+	"memory search":     "intercepted; prints the `mpm memory` page",
+	"memory set-weight": "intercepted; prints the `mpm memory` page",
+	"memory show":       "intercepted; prints the `mpm memory` page",
+	"memory snooze":     "intercepted; prints the `mpm memory` page",
+	"memory weaken":     "intercepted; prints the `mpm memory` page",
+	"ops logs":          "intercepted; prints the `mpm ops` page — cost: the handler's own logs page is not reached",
+	"ops reference":     "intercepted; prints the `mpm ops` page — cost: the handler's own reference page is not reached",
+	// "ops resolve-contradictions" was here until 2026-10-14 and was
+	// PROMOTED to subcommandHelpOwners: its handler recognises a help token
+	// and returns before opening the database, so owning it is safe. The
+	// cost it recorded — the family page never documents
+	// --adjudicate=ID:REASON — was the whole problem (issue #10).
+	"session add":      "intercepted; prints the `mpm session` page, which lists `mpm session add <content>`",
+	"session allocate": "intercepted; prints the `mpm session` page, which lists `mpm session allocate`",
+	"session rotate":   "intercepted; prints the `mpm session` page, which lists `mpm session rotate`",
+	"shred database":   "intercepted; prints the `mpm shred` page, which states the shred scope and its limits",
 }
 
 // loadMPMAST parses every non-test Go source file in this package.

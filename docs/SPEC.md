@@ -1413,7 +1413,29 @@ When two memories disagree, the system has to notice. `shared.contradiction_log`
 > unchanged; only the trigger moved. See
 > [`RECALL-MUTATION.md`](./RECALL-MUTATION.md).
 
-If the two candidates land within a small margin of each other, the system **does not** auto-resolve. It writes a pending theory and waits for an operator. A clean winner can be auto-resolved; a coin-flip always escalates.
+> **Superseded 2026-10-14 — `--apply` no longer treats a queue row as its own
+> justification.** `--apply` may penalise a memory only for a row an operator
+> has explicitly **adjudicated**. Similarity is evidence of relatedness, not of
+> logical contradiction, and a batch `--apply` over a freshly-proposed candidate
+> queue cannot be the thing that decides 100 pairwise judgements at once.
+> Unadjudicated rows now fail closed: no weight moves, no status flips, no
+> resolution memory is written, and the row is reported as
+> `NEEDS ADJUDICATION` rather than discarded or dumped as an error per row.
+>
+> Adjudication is its own explicit, per-row act —
+> `mpm ops resolve-contradictions --adjudicate=ID:REASON`, with the reason
+> mandatory because it is the audit trail. There is deliberately no force flag
+> and no batch form. It is recorded as an additive `adjudicated:<reason>`
+> segment on the row's existing `detected_by`, so no schema change, migration
+> or backfill is involved and the detection provenance that brought the row to
+> the queue stays legible next to the judgement made about it.
+>
+> Rows predating this change keep their original `detected_by` and are read
+> exactly as written — which means they are *unverified*, and must be
+> adjudicated before they may be applied. See
+> [`RECALL-MUTATION.md`](./RECALL-MUTATION.md).
+
+If the two candidates land within a small margin of each other, the system **does not** auto-resolve. It writes a pending theory and waits for an operator. A clean winner can be auto-resolved — but only once an operator has adjudicated the pair; a coin-flip always escalates.
 
 #### Layer 3 — Conflict Resolution + Arbitration Closure
 
@@ -1759,6 +1781,7 @@ mpm ops stance synthesize <name> [flags]
 # Multi-agent shared epistemology
 mpm ops shared [status]
 mpm ops resolve-contradictions [--propose] [--apply] [--json]  # Arc 1: dry-run inspect, explicit candidate scan, or apply resolutions
+        [--adjudicate=ID:REASON]                             #    (per-row; only adjudicated rows may be applied)
 mpm ops broadcast <memory_id>                          # Arc 2: fan-out an event wake
         [--kind=rule|resolution|arbitration|memory]    #    (auto-detected from collection if omitted)
         [--rationale="..."]                            #    (REQUIRED for kind=memory)
@@ -3265,7 +3288,7 @@ End-to-end verification (8 steps, all green):
 
 1. Seed two contradictory rules into the shared DB.
 2. Run `mpm ops resolve-contradictions` (dry-run) — see the queue.
-3. Apply one with `--apply` — auto-resolves, writes resolution memory, asymmetric evidence row.
+3. Adjudicate it with `--adjudicate=<queue_id>:"<why the claims conflict>"`, then apply with `--apply` — resolves, writes resolution memory, asymmetric evidence row. (`--apply` alone is refused for an unadjudicated row.)
 4. Verify the winner has the `resolution_survived` evidence row.
 5. Verify the loser has `status='archived'` and `operator_arbitration=true` in its metadata.
 6. Create a close-call contradiction.

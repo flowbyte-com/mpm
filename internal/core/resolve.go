@@ -34,9 +34,9 @@ import (
 func (dm *DatabaseManager) LoadMemoryProvenance(memoryID string) (ProvenanceScore, error) {
 	ps := ProvenanceScore{MemoryID: memoryID}
 	var (
-		confidence     sql.NullFloat64
-		updatedAt      sql.NullString
-		retrievalPri   sql.NullFloat64
+		confidence   sql.NullFloat64
+		updatedAt    sql.NullString
+		retrievalPri sql.NullFloat64
 	)
 	err := dm.db.QueryRow(`
 		SELECT
@@ -91,13 +91,18 @@ func (dm *DatabaseManager) LoadMemoryProvenance(memoryID string) (ProvenanceScor
 // (--apply). The function itself NEVER mutates state in dry-run
 // mode — mutation is gated on the apply flag at the call site.
 //
-// Three terminal states:
+// Four terminal states:
 //   - "resolved": margin > threshold, slash applied, resolution
 //     memory written, queue row marked resolved.
 //   - "arbitration": margin < threshold, theory proposed, queue
 //     row NOT marked resolved (operator arbitrates manually).
 //   - "missing": one of the memories no longer exists. Default to
 //     the survivor; queue row marked resolved.
+//   - "unverified": the row has not been adjudicated by an operator.
+//     With apply set this returns *UnverifiedContradictionError and
+//     writes nothing at all; with apply clear the decision is returned
+//     with Adjudicated=false so the caller can present the row as a
+//     review item. See contradiction_verification.go.
 func (dm *DatabaseManager) ResolveOneContradiction(row map[string]interface{}, apply bool) (ResolutionDecision, error) {
 	dec := ResolutionDecision{}
 
@@ -108,6 +113,28 @@ func (dm *DatabaseManager) ResolveOneContradiction(row map[string]interface{}, a
 
 	if memoryA == "" || memoryB == "" {
 		return dec, fmt.Errorf("ResolveOneContradiction: missing memory IDs in row")
+	}
+
+	// Verification gate (issue #10). This runs BEFORE any state is read
+	// for scoring and before any branch that can write, so an
+	// unadjudicated row cannot reach applyResolution or applyArbitration
+	// by any route.
+	//
+	// It gates apply but not dry-run, deliberately. Dry-run mutates
+	// nothing, and suppressing the decision there would hide the row from
+	// an operator who is trying to find out what is in the queue. The
+	// decision is returned with Adjudicated=false so the caller can show
+	// it as a review item rather than a verdict.
+	detectedBy, _ := row["detected_by"].(string)
+	verification := ClassifyContradictionVerification(detectedBy)
+	dec.Adjudicated = verification.Adjudicated
+	dec.VerificationNote = verification.Reason
+	if apply && !verification.Adjudicated {
+		return dec, &UnverifiedContradictionError{
+			QueueRowID: idStr,
+			DetectedBy: detectedBy,
+			Reason:     verification.Reason,
+		}
 	}
 
 	scoreA, err := dm.LoadMemoryProvenance(memoryA)
@@ -189,8 +216,11 @@ func (dm *DatabaseManager) ResolveOneContradiction(row map[string]interface{}, a
 }
 
 // applyResolution executes the verdict in a single transaction:
-//  1. Slash the loser's weight (via ChallengeMemory, which sets
-//     status='challenged' and decrements weight).
+//  1. Slash the loser's weight with an INLINE UPDATE that mirrors
+//     ChallengeMemory's semantics (status='challenged' in the metadata
+//     JSON, weight and retrieval_priority decremented). ChallengeMemory
+//     itself is NOT called — it owns its own transaction, and calling it
+//     would break the all-or-nothing guarantee below.
 //  2. INSERT a resolution memory into shared.memories — the FTS5
 //     sync triggers from 61a8418 mirror it to shared.memories_fts.
 //  3. UPDATE the queue row: resolved_at + resolution_memory_id.
@@ -198,6 +228,12 @@ func (dm *DatabaseManager) ResolveOneContradiction(row map[string]interface{}, a
 // All three steps in one transaction. Crash safety: either all
 // three land or none do. The queue row stays "unresolved" if any
 // step fails; the next operator run picks it up.
+//
+// Note for anyone auditing the damage this can do (issue #10): the loser's
+// weight is reduced by an inline `UPDATE shared.memories`, not through
+// ChallengeMemory, so there is no ChallengeMemory call to trace and no
+// ChallengeMemory-owned state beyond the metadata fields this function
+// writes itself.
 func (dm *DatabaseManager) applyResolution(queueID int64, dec ResolutionDecision) error {
 	// Invariant: resolution memories live in shared.memories. Refuse
 	// early with a clear error rather than failing with a raw
@@ -269,9 +305,9 @@ func (dm *DatabaseManager) applyResolution(queueID int64, dec ResolutionDecision
 			return fmt.Errorf("applyResolution: read loser metadata: %w", err)
 		}
 		loserPatch := map[string]interface{}{
-			"status":                "challenged",
+			"status":                   "challenged",
 			"challenged_by_resolution": resolutionID,
-			"challenged_at":         time.Now().UTC().Format(time.RFC3339),
+			"challenged_at":            time.Now().UTC().Format(time.RFC3339),
 		}
 		merged := map[string]interface{}{}
 		if existingMetaRaw.Valid && existingMetaRaw.String != "" && existingMetaRaw.String != "{}" {
