@@ -24,8 +24,10 @@ The fix:
 
 These tests verify the post-fix ownership contract from the source-tree
 side. They are read-only inspections of the repository's build/install
-artifacts; they do not invoke the build or installer (those are covered
-by go tests in scripts/install_d31_test.go).
+artifacts; they do not invoke the build or installer (the installer's
+own source-text contracts are covered by
+scripts/tests/test_install_sh_contracts.py, which `make test-scripts`
+runs).
 
 Test mapping (per the user task spec):
   Test A — build output ownership             -> test_bin_mpm_is_compiled_artifact

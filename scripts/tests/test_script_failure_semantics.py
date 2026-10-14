@@ -110,6 +110,7 @@ SCRIPTS = REPO_ROOT / "scripts"
 SMOKE_TELEMETRY = SCRIPTS / "smoke_telemetry.sh"
 VERIFY_M3 = SCRIPTS / "verify-m3-audit-fixes.sh"
 VERIFY_WISHLIST = SCRIPTS / "verify-wishlist-fixes.sh"
+DEPLOY = SCRIPTS / "deploy.sh"
 
 SCHEDULER_UNIT = "mpm-scheduler"
 
@@ -407,6 +408,137 @@ class VerifyWishlistContrast(unittest.TestCase):
             src,
             r'"\$MPM" call mpm_memory[^\n]*\\\n\s*2>"\$TMP_ERR"',
         )
+
+
+class DeployLivenessRejectsFailedUnit(unittest.TestCase):
+    """Defect 3, executed: a restart that succeeds but a service that is down.
+
+    The static rule above proves deploy.sh contains an is-active check.
+    This proves the check does something — that with `systemctl restart`
+    returning 0 and `systemctl is-active` returning non-zero, the script
+    aborts instead of proceeding to "Deployment complete.".
+
+    HERMETIC BY CONSTRUCTION. Only the extracted step-5 block runs, and
+    `systemctl` is a stub on PATH in a temp dir. No real unit is
+    contacted, stopped, or restarted, and the block is the only thing in
+    the harness that can invoke systemctl at all.
+    """
+
+    def setUp(self) -> None:
+        self.src = DEPLOY.read_text()
+        self.start = self.src.index("# 5. Verify the restarted units are actually live")
+        self.end = self.src.index("# 6. Verify live mpm-mcp is the new binary")
+        self.block = self.src[self.start : self.end]
+
+    def _run(self, is_active_exit: int) -> tuple[subprocess.CompletedProcess, str]:
+        """Run the real block against a stub systemctl; return (result, calls)."""
+        with tempfile.TemporaryDirectory(prefix="mpm-deploy-liveness.") as td:
+            td_path = Path(td)
+            log = td_path / "calls.log"
+            stub = td_path / "systemctl"
+            # Restart succeeds; is-active's outcome is the variable under
+            # test. That split IS the defect: a zero exit from the former
+            # says nothing about the latter.
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "[systemctl] $*" >> "$STUB_CALLS"\n'
+                'case " $* " in\n'
+                f'  *" is-active "*) exit {is_active_exit} ;;\n'
+                '  *) exit 0 ;;\n'
+                "esac\n"
+            )
+            stub.chmod(0o755)
+            case = td_path / "case.sh"
+            case.write_text(
+                "set -uo pipefail\n"
+                # Fail loudly if systemctl would resolve to anything but the
+                # stub. Without this a missing or non-executable stub would
+                # silently fall through to /usr/bin/systemctl. The extracted
+                # block only ever calls `is-active`, which is read-only, so
+                # the worst case is not destructive — but "we reasoned it is
+                # harmless" is exactly how a hermetic test stops being
+                # hermetic two edits later.
+                'STUB_DIR="' + str(td_path) + '"\n'
+                'PATH="$STUB_DIR:$PATH"\n'
+                "export PATH\n"
+                # Resolved AFTER the stub is on PATH, or the check is
+                # measuring the real /usr/bin/systemctl.
+                'RESOLVED="$(command -v systemctl || true)"\n'
+                'if [[ "$RESOLVED" != "$STUB_DIR/systemctl" ]]; then\n'
+                '  echo "STUB_NOT_USED resolved=$RESOLVED" >&2\n'
+                "  exit 99\n"
+                "fi\n"
+                'STUB_CALLS="' + str(log) + '"\n'
+                "export STUB_CALLS\n"
+                "SCHED_ACTIVE_BEFORE=active\n"
+                "TELEM_ACTIVE_BEFORE=active\n"
+                + self.block
+                + '\necho REACHED_END_OF_BLOCK\n'
+            )
+            result = subprocess.run(
+                ["bash", str(case)], capture_output=True, text=True, timeout=60
+            )
+            calls = log.read_text() if log.exists() else ""
+            return result, calls
+
+    def test_a_failed_unit_after_a_successful_restart_aborts_the_deploy(self):
+        result, calls = self._run(is_active_exit=3)  # inactive / failed
+        self.assertNotEqual(
+            result.returncode,
+            0,
+            f"deploy must fail when a restarted unit is not active\n{result.stdout}",
+        )
+        self.assertNotIn(
+            "REACHED_END_OF_BLOCK",
+            result.stdout,
+            "the block ran to completion despite a failed unit — the is-active "
+            "assertion is not wired into the exit path",
+        )
+        self.assertIn("did not come back up", result.stderr)
+        self.assertIn("journalctl --user -u", result.stderr, "no diagnostic offered")
+
+    def test_a_healthy_unit_passes(self):
+        """Negative control: the above must not pass for the wrong reason."""
+        result, calls = self._run(is_active_exit=0)
+        self.assertEqual(
+            result.returncode, 0, f"healthy deploy wrongly failed\n{result.stderr}"
+        )
+        self.assertIn("REACHED_END_OF_BLOCK", result.stdout)
+
+    def test_the_stub_was_actually_used(self):
+        """The block must reach the stub, not a real systemctl.
+
+        Without this, a broken PATH could make the negative test pass by
+        never calling systemctl at all.
+        """
+        _, calls = self._run(is_active_exit=3)
+        self.assertIn(
+            "[systemctl] --user is-active --quiet mpm-scheduler",
+            calls,
+            "the stub never saw the scheduler check, so this test is not "
+            "exercising the real code path",
+        )
+
+    def test_a_healthy_run_checks_every_unit_it_restarted(self):
+        """Both units are asserted when both are up; fail-fast is for the bad path."""
+        _, calls = self._run(is_active_exit=0)
+        self.assertIn("[systemctl] --user is-active --quiet mpm-scheduler", calls)
+        self.assertIn(
+            "[systemctl] --user is-active --quiet mpm-telemetry",
+            calls,
+            "mpm-telemetry is restarted by this script and must be asserted too",
+        )
+
+    def test_it_fails_fast_on_the_first_bad_unit(self):
+        """The failing scheduler must abort before telemetry is checked."""
+        result, calls = self._run(is_active_exit=3)
+        self.assertNotIn("mpm-telemetry", calls, "expected fail-fast on the scheduler")
+
+    def test_the_extracted_block_is_the_real_one(self):
+        """Guard against the extraction silently finding an empty string."""
+        self.assertIn("systemctl --user is-active --quiet", self.block)
+        self.assertIn("exit 1", self.block)
+        self.assertLess(self.start, self.end)
 
 
 class SchedulerScopeAndLiveness(unittest.TestCase):
