@@ -305,6 +305,24 @@ type CoreDB interface {
 	// and `theory_status` is empty rather than asserting "disproven".
 	// Callers must branch on those fields, not on a nil error. See
 	// challenge_restore.go for the full contract.
+	//
+	// Issue #24 broadened the surface and the result map:
+	//   - `memory_store` ("local" | "shared") says which memories table the
+	//     challenge actually wrote, so the two Arc 1 writers (which slash
+	//     `shared.memories`) and the challenge surfaces (local) restore
+	//     through one entry point.
+	//   - `challenge_via` echoes the writer that produced the challenge.
+	//   - `weight_restored`, `retrieval_priority_restored` and
+	//     `confidence_reset` say which columns were put back. A restore
+	//     touches only what the challenge recorded, so these are false for
+	//     a column that challenge never moved.
+	//   - `theory_resolution` is one of "resolved", "not_found" or
+	//     "not_applicable". The last is a COMPLETE restore for a challenge
+	//     that carried no theory reference; it must not be rendered as a
+	//     partial success.
+	// A challenged row with no recorded baseline (the shape left by the two
+	// Arc 1 writers before #24) returns an error distinct from "is not
+	// challenged"; it is never reconstructed.
 	RestoreMemoryFromChallenge(memoryID string) (map[string]interface{}, error)
 	RecordDecision(contextText, choice, rationale, outcome string, tags []string, sourceIDs []string, ac ActiveContext) (map[string]interface{}, error)
 	// SupersedeDecision records a replacement decision and marks the

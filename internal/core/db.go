@@ -5548,39 +5548,38 @@ func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evi
 
 	nowSec := time.Now().Unix()
 
-	patch := map[string]interface{}{
-		"status":               "challenged",
-		"challenged_theory_id": evidence,
-		"challenged_at":        nowSec,
-	}
-	patchJSON, _ := json.Marshal(patch)
-	if err := updateMemoryMetadataTx(tx, memoryID, string(patchJSON)); err != nil {
+	// Issue #24: metadata, baseline capture and the weight reduction are
+	// one statement, so the record of what this challenge did cannot
+	// diverge from what it did. Previously the metadata patch and the
+	// weight UPDATE were separate statements and the two Arc 1 writers
+	// had no equivalent at all.
+	//
+	// W-004 (2026-08-31) is honoured inside the primitive: weight is REAL
+	// in the schema, so fractional prior weights (e.g. 7.5) survive the
+	// round-trip without truncation. The prior_confidence value is
+	// forensic only; restoration does NOT silently re-elevate it (F7.1)
+	// — it resets to the floor instead.
+	applied, err := applyChallengeStateInTx(tx, ChallengeTableLocal, ChallengeSpec{
+		MemoryID:              memoryID,
+		SlashAmount:           slashAmount,
+		DropConfidence:        true,
+		ResetAccessTimestamps: true,
+		ChallengedAt:          nowSec,
+		Fields: map[string]interface{}{
+			"status":               "challenged",
+			"challenged_theory_id": evidence,
+			"challenged_via":       ChallengeViaTheory,
+		},
+	})
+	if err != nil {
 		return err
 	}
-
-	// Record the pre-challenge weight AND confidence AFTER the status
-	// patch so restore sees both atomically. Read through the same tx
-	// for a consistent snapshot. The prior_confidence value is forensic
-	// only; restoration does NOT silently re-elevate it (F7.1).
-	// W-004 (2026-08-31): weight is REAL in the schema; Scan into float64
-	// so fractional prior weights (e.g. 7.5) survive the challenge
-	// round-trip without silent truncation in the metadata snapshot.
-	var priorWeight float64
-	var priorConfidence float64
-	if err := tx.QueryRow(`SELECT COALESCE(weight, 1), COALESCE(confidence, 0.5) FROM memories WHERE id = ? AND deleted_at IS NULL`, memoryID).Scan(&priorWeight, &priorConfidence); err != nil {
-		return fmt.Errorf("ChallengeMemory: read prior state: %w", err)
-	}
-	priorPatch := map[string]interface{}{
-		"challenged_prior_weight":     priorWeight,
-		"challenged_prior_confidence": priorConfidence,
-	}
-	priorJSON, _ := json.Marshal(priorPatch)
-	if err := updateMemoryMetadataTx(tx, memoryID, string(priorJSON)); err != nil {
-		return err
-	}
-
-	if _, err := tx.Exec(`UPDATE memories SET weight = MAX(1, weight - ?), updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL`, slashAmount, memoryID); err != nil {
-		return fmt.Errorf("ChallengeMemory: weight update: %w", err)
+	if applied.RowsAffected == 0 {
+		// The existence check above ran in this transaction, so zero rows
+		// means a trigger or a concurrent write removed the row between
+		// the two statements. Reporting success would leave the operator
+		// believing a challenge landed that did not.
+		return fmt.Errorf("ChallengeMemory: challenge aborted: memory %s was not updated (no matching live row)", memoryID)
 	}
 
 	// F7.1: neutralize existing evidence rows (set expires_at = now). The
@@ -5595,16 +5594,12 @@ func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evi
 		return fmt.Errorf("ChallengeMemory: neutralize evidence: %w", err)
 	}
 
-	// F7.1: drop confidence to the challenged floor. The challenged memory
-	// cannot retain its pre-challenge high confidence value; fresh evidence
-	// is required to re-elevate it after restoration. The confidence_history
-	// row that records this recompute is the auditable trail.
-	if _, err := tx.Exec(
-		`UPDATE memories SET confidence = ? WHERE id = ? AND deleted_at IS NULL`,
-		ChallengedMemoryConfidenceFloor, memoryID,
-	); err != nil {
-		return fmt.Errorf("ChallengeMemory: drop confidence: %w", err)
-	}
+	// F7.1 note: the drop to ChallengedMemoryConfidenceFloor now happens
+	// inside the challenge statement above (DropConfidence), which is why
+	// it cannot drift from the metadata that records the challenge. Fresh
+	// evidence is required to re-elevate it after restoration; the
+	// confidence_history row that records the recompute is the auditable
+	// trail.
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("ChallengeMemory: commit: %w", err)

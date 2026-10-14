@@ -557,10 +557,30 @@ challenge ───────────────────────�
     └── shred ─────────────────────────────────────▶ [theory: deleted]
 ```
 
-- **`mpm challenge <id> "<evidence>"`** — atomic: patch memory metadata, create theory with back-link. The `mpm_memory action=challenge` tool additionally weakens the stored weight by 2 and records the pre-challenge value in metadata (`challenged_prior_weight`). A negative or inverted reduction is rejected outright — challenging knowledge can never increase its rank.
+- **`mpm challenge <id> "<evidence>"`** — atomic: apply the challenge state, create the theory with a back-link, neutralize the memory's existing evidence. The challenge state is written by the same shared primitive the other two challenge writers use (see the challenge recovery contract below), so it records the pre-challenge values a restore needs and records `challenged_via: challenge_theory`. The `mpm_memory action=challenge` tool additionally weakens the stored weight by 2 and records the pre-challenge value in metadata (`challenged_prior_weight`). A negative or inverted reduction is rejected outright — challenging knowledge can never increase its rank.
 - **`mpm challenge restore <id>`** — atomic: resolve the linked theory as disproven, clear memory flags, and restore the recorded pre-challenge weight so the memory returns to its exact prior epistemic standing. The memory half and the theory half report separately, because only one of them is always recoverable (see below).
 
   **Partial-success semantics.** A restore needs a `challenged_theory_id` to resolve, and memories challenged by paths that predate that contract (notably the retired auto-challenge defect) store prose in that field instead of an id. There is no theory row to resolve in that case, and MPM does not go looking for a plausible substitute — guessing which theory an operator meant is how an unrelated theory gets marked disproven. The memory half still runs (the pre-challenge weight is genuinely recorded, so reinstating it is safe), and the result reports `complete: false` with `theory_resolution: "not_found"` and a `theory_warning` naming the offending reference. `theory_status` is `disproven` only when a theory row was actually updated. The CLI prints the partial outcome and exits 0; a machine caller should branch on `complete` / `theory_resolved` rather than on exit status. Refusing the restore outright would leave exactly those memories unrecoverable, which is the condition the operator is trying to repair.
+
+**Challenge recovery contract.**
+
+Three paths set `status=challenged` on a memory. All three share one primitive (`internal/core/challenge_state.go`) that applies the metadata and the reduction as a single statement inside the caller's transaction, so the record of what changed cannot drift from what changed.
+
+| Writer | Store | Reduces | `challenged_via` | Theory link |
+|---|---|---|---|---|
+| `mpm challenge`, `mpm_memory action=challenge`, `ChallengeMemoryWithTheory` | `memories` | `weight` | `challenge_theory` | `challenged_theory_id` → a pending theory a restore marks disproven |
+| `--apply` on a decisive-margin row (`applyResolution`) | `shared.memories` | `weight`, `retrieval_priority` | `contradiction_resolution` | none — there is no theory to disprove, and none is fabricated |
+| `ResolveArbitrationTheory` (`applyArbitrationResolution`) | `shared.memories` | `weight`, `retrieval_priority` | `operator_arbitration` | none; the arbitrated theory is recorded under `arbitration_theory` and was already closed as `resolved` by the operator |
+
+A writer records a baseline (`challenged_prior_*`) for **every column it reduces and only those columns**. A restore reads what is present and puts back exactly that: an absent key is not a lost value, it is the claim that this challenge never moved the column. So the challenge surfaces — which reduce weight but not retrieval priority — do not record a retrieval-priority baseline, and a restore cannot clobber an unrelated later adjustment to it. `challenged_prior_confidence` is forensic only: restoration resets a dropped confidence to the challenged floor rather than re-promoting it (F7.1), so only that key's *presence* is load-bearing.
+
+The recorded baseline is the **first** one. A repeated challenge on an already-challenged memory still restores to where the memory stood before the first one, because any later value already includes the earlier slash.
+
+`mpm challenge restore` reaches all three writers and both stores: it locates the memory in the local table first and then in `shared.memories` when the shared DB is attached, reports which one it acted on as `memory_store`, and echoes the writer as `challenge_via`. `weight_restored`, `retrieval_priority_restored` and `confidence_reset` say which columns were actually put back.
+
+**Theory-free challenges restore completely.** A challenge with no theory reference yields `theory_resolution: "not_applicable"` and `complete: true`. That is a distinct outcome from `not_found` — reporting it as a failure would send an operator looking for a theory that was never created.
+
+**Historical rows are not retroactively repaired.** Memories challenged before this contract existed carry `status=challenged` with no recorded baseline. A restore of such a row fails with an explicit "cannot be reversed through MPM" error naming the writer, rather than the misleading `is not challenged`, and MPM never reconstructs a prior value it never stored — the memory may have been reinforced since, and an invented value would be a number that never existed. Recovering those rows is an out-of-band decision, not something `mpm challenge restore` can do for you.
 - **`mpm shred <id>`** — atomic: cascade-delete memory + linked theory + topic memberships.
 - **`mpm ops gc --shred-negative`** — shreds only memories with weight<0 AND a proven theory exists. Negative weight alone is never sufficient — the theory provides the evidence chain.
 
@@ -1437,24 +1457,31 @@ When two memories disagree, the system has to notice. `shared.contradiction_log`
 > adjudicated before they may be applied. See
 > [`RECALL-MUTATION.md`](./RECALL-MUTATION.md).
 >
-> **Known limitation — the contradiction slash is currently irreversible.**
-> Three writers set `status=challenged`; only the challenge surfaces record
-> the metadata a restore needs.
+> **The contradiction slash is reversible from both adjudication paths.**
+> Three writers set `status=challenged`, and all three now record the
+> pre-challenge values a restore needs, through one shared primitive.
 >
 > | Path | Recorded |
 > |---|---|
 > | `mpm challenge` / `mpm_memory action=challenge` / `ChallengeMemoryWithTheory` | `challenged_theory_id`, `challenged_prior_weight`, `challenged_prior_confidence` — **restorable** |
-> | `--apply` on a decisive-margin row (`applyResolution`) | `challenged_by_resolution` only — **not restorable** |
-> | `ResolveArbitrationTheory` (`applyArbitrationResolution`) | `challenged_by_resolution`, `arbitration_theory` — **not restorable** |
+> | `--apply` on a decisive-margin row (`applyResolution`) | `challenged_by_resolution`, `challenged_prior_weight`, `challenged_prior_retrieval_priority` — **restorable** |
+> | `ResolveArbitrationTheory` (`applyArbitrationResolution`) | `challenged_by_resolution`, `arbitration_theory`, `challenged_prior_weight`, `challenged_prior_retrieval_priority` — **restorable** |
 >
-> The two irreversible writers reduce the loser's `weight` and
-> `retrieval_priority` by an inline `UPDATE shared.memories` that records no
-> prior values and no theory reference, so `mpm challenge restore` rejects
-> such a memory outright (`is not challenged`). `ResolveArbitrationTheory` is
-> the more misleading of the two: it is the documented close-the-loop
-> operator workflow and reads as a reversible decision. Adjudication gates
-> *who* may trigger the slash; it does not make the slash reversible.
-> Tracked in issue #24.
+> The two adjudication paths previously reduced the loser's `weight` and
+> `retrieval_priority` through an inline `UPDATE shared.memories` that
+> recorded no prior values and no theory reference, so `mpm challenge restore`
+> rejected such a memory outright (`is not challenged`) — the same message an
+> untouched memory got. `ResolveArbitrationTheory` was the more misleading of
+> the two: it is the documented close-the-loop operator workflow and reads as a
+> reversible decision. Adjudication gates *who* may trigger the slash; the
+> slash is now reversible on both paths. See
+> the challenge recovery contract in §4.5.
+>
+> Rows slashed before this contract existed are **not** retroactively
+> restorable: their columns were reduced and nothing records what they were.
+> `mpm challenge restore` refuses those with an explicit "cannot be reversed
+> through MPM" error rather than guessing, and no backfill or migration
+> rewrites them.
 
 If the two candidates land within a small margin of each other, the system **does not** auto-resolve. It writes a pending theory and waits for an operator. A clean winner can be auto-resolved — but only once an operator has adjudicated the pair; a coin-flip always escalates.
 

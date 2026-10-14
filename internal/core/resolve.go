@@ -284,51 +284,44 @@ func (dm *DatabaseManager) applyResolution(queueID int64, dec ResolutionDecision
 	// essential UPDATE here inside our transaction. We do this
 	// AFTER the resolution memory write so resolutionID is in
 	// scope for the loser's metadata patch.
+	//
+	// Issue #24: the duplicate is now a call to the SHARED challenge
+	// primitive rather than a third copy of the same SQL. The loser
+	// lands in `shared.memories`, which is where every challenge
+	// writer's counterpart restore also reads it, and the primitive
+	// records the pre-slash weight and retrieval_priority so
+	// `mpm challenge restore` can put both back. Before this, the two
+	// Arc 1 writers reduced those columns and recorded nothing, which
+	// made a legitimate operator verdict permanently irreversible.
+	//
+	// There is deliberately no `challenged_theory_id` here. The queue
+	// row's resolution_memory_id points at the RESOLUTION memory, not at
+	// a theory that contested the loser; stamping it into the theory
+	// field would send a restore looking for a theory that does not
+	// exist. A challenge with no linked theory says so, and restores
+	// completely rather than reporting a phantom resolution.
 	var exists bool
 	err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM shared.memories WHERE id = ? AND deleted_at IS NULL)`, dec.LoserID).Scan(&exists)
 	if err != nil {
 		return fmt.Errorf("applyResolution: loser check: %w", err)
 	}
 	if exists {
-		// Build a metadata patch that mirrors the existing
-		// ChallengeMemory semantics: status='challenged' stored in
-		// the JSON metadata column, plus weight/reinforcement
-		// updated via the standard columns. Note: there's no
-		// "status" column on the memories table; it's part of the
-		// metadata JSON (see updateMemoryMetadataTx).
-		//
-		// We do a proper JSON merge in Go (not string concat with
-		// `||`) so existing metadata fields are preserved. The
-		// patch's keys win on collision.
-		var existingMetaRaw sql.NullString
-		if err := tx.QueryRow(`SELECT metadata FROM shared.memories WHERE id = ?`, dec.LoserID).Scan(&existingMetaRaw); err != nil {
-			return fmt.Errorf("applyResolution: read loser metadata: %w", err)
-		}
-		loserPatch := map[string]interface{}{
-			"status":                   "challenged",
-			"challenged_by_resolution": resolutionID,
-			"challenged_at":            time.Now().UTC().Format(time.RFC3339),
-		}
-		merged := map[string]interface{}{}
-		if existingMetaRaw.Valid && existingMetaRaw.String != "" && existingMetaRaw.String != "{}" {
-			if err := json.Unmarshal([]byte(existingMetaRaw.String), &merged); err != nil {
-				return fmt.Errorf("applyResolution: parse existing loser metadata: %w", err)
-			}
-		}
-		for k, v := range loserPatch {
-			merged[k] = v
-		}
-		mergedJSON, _ := json.Marshal(merged)
-		_, err = tx.Exec(`
-			UPDATE shared.memories
-			SET metadata = ?,
-			    weight = MAX(1, weight - ?),
-			    retrieval_priority = MAX(0.01, retrieval_priority - ?),
-			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ? AND deleted_at IS NULL
-		`, string(mergedJSON), dec.SlashAmount, float64(dec.SlashAmount)/100.0, dec.LoserID)
+		applied, err := applyChallengeStateInTx(tx, ChallengeTableShared, ChallengeSpec{
+			MemoryID:               dec.LoserID,
+			SlashAmount:            dec.SlashAmount,
+			SlashRetrievalPriority: true,
+			ChallengedAt:           time.Now().Unix(),
+			Fields: map[string]interface{}{
+				"status":                   "challenged",
+				"challenged_by_resolution": resolutionID,
+				"challenged_via":           ChallengeViaResolution,
+			},
+		})
 		if err != nil {
 			return fmt.Errorf("applyResolution: slash loser: %w", err)
+		}
+		if applied.RowsAffected == 0 {
+			return fmt.Errorf("applyResolution: challenge aborted: loser %s was not updated (no matching live row)", dec.LoserID)
 		}
 	}
 

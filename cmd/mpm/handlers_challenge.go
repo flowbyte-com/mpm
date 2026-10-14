@@ -101,58 +101,40 @@ func runChallenge(dm internal.CoreDB, id, evidence string) int {
 	}
 	theoryMetaJSON, _ := json.Marshal(theoryMeta)
 
-	// Capture the pre-challenge confidence so the audit trail is
-	// reconstructable, but do NOT use it as a "restore to" target on
-	// subsequent restore — confidence must be re-established from new
-	// evidence after a challenge. The value lives in metadata for
-	// forensic review only (matches the projection-test principle:
-	// captured at write, not computed on read).
-	var priorConfidence float64
-	if c, ok := mem["confidence"].(float64); ok {
-		priorConfidence = c
-	}
-
-	// Memory metadata patch with forward link to theory. The pre-challenge
-	// weight is recorded so `mpm challenge restore` can put the memory back
-	// to its prior epistemic standing. The prior confidence is recorded
-	// for forensic/audit purposes ONLY — restoration does NOT re-elevate
-	// confidence to this value (F7.1: restoration must not silently
-	// promote verification).
-	patch := map[string]interface{}{
-		"status":                      "challenged",
-		"challenged_theory_id":        theoryID,
-		"challenged_prior_weight":     int(mem["weight"].(int)),
-		"challenged_prior_confidence": priorConfidence,
-		"challenged_at":               nowSec,
-	}
-	patchJSON, _ := json.Marshal(patch)
-
-	// Transaction: patch memory + neutralize evidence + save theory atomically
+	// Transaction: apply challenge + neutralize evidence + save theory
+	// atomically. Everything below shares this one transaction, so a
+	// failure anywhere leaves the memory exactly as it was.
 	tx, err := dm.SQLDB().Begin()
 	if err != nil {
 		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
 	}
 	defer tx.Rollback()
 
-	// 1. Patch memory metadata with forward link (guard on live row)
-	result, err := tx.Exec(
-		`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ? AND deleted_at IS NULL`,
-		string(patchJSON), id)
+	// 1. Apply the challenge state. This is the SAME primitive the other
+	//    three challenge writers use (issue #24), so `mpm challenge`
+	//    produces exactly the recovery metadata they do and
+	//    `mpm challenge restore` can undo any of them uniformly.
+	//
+	//    It records the pre-challenge weight and confidence, reduces the
+	//    weight by 2, drops confidence to the challenged floor, and links
+	//    the theory created below — in one statement, so the record of
+	//    what was changed cannot diverge from what was changed.
+	applied, err := internal.ApplyChallengeInTx(tx, internal.ChallengeTableLocal, internal.ChallengeSpec{
+		MemoryID:       id,
+		SlashAmount:    2,
+		DropConfidence: true,
+		ChallengedAt:   nowSec,
+		Fields: map[string]interface{}{
+			"status":               "challenged",
+			"challenged_theory_id": theoryID,
+			"challenged_via":       internal.ChallengeViaTheory,
+		},
+	})
 	if err != nil {
-		return respond("", fmt.Sprintf("Error patching memory: %v\n", err), 1)
+		return respond("", fmt.Sprintf("Error challenging memory: %v\n", err), 1)
 	}
-	rowsAff, _ := result.RowsAffected()
-	if rowsAff == 0 {
+	if applied.RowsAffected == 0 {
 		return respond("", fmt.Sprintf("Memory not found: %s\n", id), 1)
-	}
-
-	// 1b. Weaken the memory's weight by 2 (same as ChallengeMemory).
-	//     The prior weight is already captured in metadata at step 1.
-	if _, err := tx.Exec(
-		`UPDATE memories SET weight = MAX(1, weight - 2), updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL`,
-		id,
-	); err != nil {
-		return respond("", fmt.Sprintf("Error weakening memory: %v\n", err), 1)
 	}
 
 	// 2. F7.1: neutralize existing evidence rows for this memory by setting
@@ -172,19 +154,11 @@ func runChallenge(dm internal.CoreDB, id, evidence string) int {
 		return respond("", fmt.Sprintf("Error neutralizing evidence: %v\n", err), 1)
 	}
 
-	// 3. Recompute confidence inside the transaction so the memory's
-	//    confidence column reflects the neutralized evidence set. Without
-	//    evidence, confidence falls to the per-type initial value (memory=0.8
-	//    by the confidence formula, which still incorporates decay). This
-	//    is the F7.1 invariant: a challenged memory cannot retain its
-	//    pre-challenge high confidence. The confidence_history row that
-	//    records this recompute is the auditable trail.
-	if _, err := tx.Exec(
-		`UPDATE memories SET confidence = ? WHERE id = ? AND deleted_at IS NULL`,
-		ChallengedMemoryConfidenceFloor, id,
-	); err != nil {
-		return respond("", fmt.Sprintf("Error resetting confidence: %v\n", err), 1)
-	}
+	// 3. Confidence is already at the challenged floor: step 1 dropped it
+	//    inside the same statement that recorded the challenge, so the
+	//    F7.1 invariant ("a challenged memory cannot retain its
+	//    pre-challenge high confidence") cannot drift from the metadata
+	//    that describes the challenge.
 
 	// 4. Save theory with back-link — canonical INTEGER Unix epoch (matches BaseTables created_at INTEGER and saveMemoryRow)
 	_, err = tx.Exec(
@@ -258,15 +232,45 @@ func runChallengeRestore(dm internal.CoreDB, id string) int {
 		return respond("", fmt.Sprintf("%v\n", err), 1)
 	}
 	theoryID, _ := res["theory_id"].(string)
+	resolution, _ := res["theory_resolution"].(string)
 	resolved, _ := res["theory_resolved"].(bool)
+
+	// Which columns the restore actually put back. Reported because a
+	// memory slashed by `--apply` or by operator arbitration has a
+	// different recovery footprint from one challenged by a theory, and
+	// "cleared" alone does not say which.
+	var restored []string
+	if w, _ := res["weight_restored"].(bool); w {
+		restored = append(restored, "weight")
+	}
+	if rp, _ := res["retrieval_priority_restored"].(bool); rp {
+		restored = append(restored, "retrieval_priority")
+	}
 
 	if resolved {
 		fmt.Printf("✓ Theory %s resolved as disproven. Memory %s cleared.\n", theoryID, id)
+		if len(restored) > 0 {
+			fmt.Printf("  restored: %s\n", strings.Join(restored, ", "))
+		}
 		return 0
 	}
 
-	// Theory not located. Say exactly that, and name the reference kind so
-	// an operator can tell a stale id from legacy free text at a glance.
+	// A challenge that was never linked to a theory has no theory half to
+	// run. That is a COMPLETE restore, not a partial one, and saying
+	// "theory not resolved" here would send an operator looking for a
+	// theory that was never created.
+	if resolution == internal.TheoryResolutionNotApplicable {
+		fmt.Printf("✓ Memory %s cleared.\n", id)
+		fmt.Printf("  no linked theory (challenge carried no theory reference)\n")
+		if len(restored) > 0 {
+			fmt.Printf("  restored: %s\n", strings.Join(restored, ", "))
+		}
+		return 0
+	}
+
+	// Theory reference present but no row matched. Say exactly that, and
+	// name the reference kind so an operator can tell a stale id from
+	// legacy free text at a glance.
 	refKind, _ := res["theory_reference"].(string)
 	if refKind == "" {
 		refKind = "unknown"
@@ -274,6 +278,9 @@ func runChallengeRestore(dm internal.CoreDB, id string) int {
 	warning, _ := res["theory_warning"].(string)
 	fmt.Printf("⚠ Memory %s cleared. Theory NOT resolved.\n", id)
 	fmt.Printf("  no theory row matched reference %q (kind=%s)\n", theoryID, refKind)
+	if len(restored) > 0 {
+		fmt.Printf("  restored: %s\n", strings.Join(restored, ", "))
+	}
 	if warning != "" && !strings.Contains(warning, theoryID) {
 		// The core's warning restates the reference on its own line; skip
 		// it when it would only repeat the line above.

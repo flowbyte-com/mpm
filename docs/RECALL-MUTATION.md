@@ -184,6 +184,16 @@ Memories challenged before this change remain challenged, with their
 restorable. Retrieval does not re-slash them, and does not clear them.
 Restoring them is a separate, deliberate action via the restore path.
 
+The same holds for the adjudication paths. Memories the two Arc 1 writers
+slashed *before* the recovery contract existed (`applyResolution`,
+`applyArbitrationResolution`) had their `weight` and `retrieval_priority`
+reduced with no record of the prior values, so they are **not** restorable
+through MPM — `mpm challenge restore` refuses them with an explicit
+"cannot be reversed through MPM" error rather than the misleading
+`is not challenged`, and never reconstructs a value it never stored. Nothing
+migrates or backfills those rows; recovering them is an out-of-band decision.
+Challenges written by the current code are fully restorable on both paths.
+
 Queue rows written before this change remain in place with their original
 `detected_by`. Nothing reinterprets them — and because historical rows carry no
 `adjudicated:` segment, they are read as *unverified*. Existing rows are
