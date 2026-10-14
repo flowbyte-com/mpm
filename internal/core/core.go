@@ -297,6 +297,14 @@ type CoreDB interface {
 	// against memoryID and clears the memory's challenged status.
 	// F7-1 surface parity: previously CLI-only; now reachable through
 	// the canonical agent path (mpm_memory.challenge action).
+	//
+	// The returned map reports the two halves separately (issue #11): the
+	// memory half always succeeds, the theory half succeeds only if the
+	// recorded reference matches a live theory row that challenged THIS
+	// memory. `theory_resolved` / `complete` are false when it does not,
+	// and `theory_status` is empty rather than asserting "disproven".
+	// Callers must branch on those fields, not on a nil error. See
+	// challenge_restore.go for the full contract.
 	RestoreMemoryFromChallenge(memoryID string) (map[string]interface{}, error)
 	RecordDecision(contextText, choice, rationale, outcome string, tags []string, sourceIDs []string, ac ActiveContext) (map[string]interface{}, error)
 	// SupersedeDecision records a replacement decision and marks the

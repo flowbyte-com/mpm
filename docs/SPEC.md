@@ -552,13 +552,15 @@ When new evidence appears, a memory is challenged, a theory is created, evidence
 ```
 challenge ─────────────────────────────────────────────────▶ [pending theory]
     │
-    ├── challenge restore ──────────────────────────▶ [theory: disproven]
+    ├── challenge restore ──────────────────────────▶ [theory: disproven, if resolvable]
     │
     └── shred ─────────────────────────────────────▶ [theory: deleted]
 ```
 
 - **`mpm challenge <id> "<evidence>"`** — atomic: patch memory metadata, create theory with back-link. The `mpm_memory action=challenge` tool additionally weakens the stored weight by 2 and records the pre-challenge value in metadata (`challenged_prior_weight`). A negative or inverted reduction is rejected outright — challenging knowledge can never increase its rank.
-- **`mpm challenge restore <id>`** — atomic: resolve theory as disproven, clear memory flags, and restore the recorded pre-challenge weight so the memory returns to its exact prior epistemic standing.
+- **`mpm challenge restore <id>`** — atomic: resolve the linked theory as disproven, clear memory flags, and restore the recorded pre-challenge weight so the memory returns to its exact prior epistemic standing. The memory half and the theory half report separately, because only one of them is always recoverable (see below).
+
+  **Partial-success semantics.** A restore needs a `challenged_theory_id` to resolve, and memories challenged by paths that predate that contract (notably the retired auto-challenge defect) store prose in that field instead of an id. There is no theory row to resolve in that case, and MPM does not go looking for a plausible substitute — guessing which theory an operator meant is how an unrelated theory gets marked disproven. The memory half still runs (the pre-challenge weight is genuinely recorded, so reinstating it is safe), and the result reports `complete: false` with `theory_resolution: "not_found"` and a `theory_warning` naming the offending reference. `theory_status` is `disproven` only when a theory row was actually updated. The CLI prints the partial outcome and exits 0; a machine caller should branch on `complete` / `theory_resolved` rather than on exit status. Refusing the restore outright would leave exactly those memories unrecoverable, which is the condition the operator is trying to repair.
 - **`mpm shred <id>`** — atomic: cascade-delete memory + linked theory + topic memberships.
 - **`mpm ops gc --shred-negative`** — shreds only memories with weight<0 AND a proven theory exists. Negative weight alone is never sufficient — the theory provides the evidence chain.
 
@@ -1434,6 +1436,25 @@ When two memories disagree, the system has to notice. `shared.contradiction_log`
 > exactly as written — which means they are *unverified*, and must be
 > adjudicated before they may be applied. See
 > [`RECALL-MUTATION.md`](./RECALL-MUTATION.md).
+>
+> **Known limitation — the contradiction slash is currently irreversible.**
+> Three writers set `status=challenged`; only the challenge surfaces record
+> the metadata a restore needs.
+>
+> | Path | Recorded |
+> |---|---|
+> | `mpm challenge` / `mpm_memory action=challenge` / `ChallengeMemoryWithTheory` | `challenged_theory_id`, `challenged_prior_weight`, `challenged_prior_confidence` — **restorable** |
+> | `--apply` on a decisive-margin row (`applyResolution`) | `challenged_by_resolution` only — **not restorable** |
+> | `ResolveArbitrationTheory` (`applyArbitrationResolution`) | `challenged_by_resolution`, `arbitration_theory` — **not restorable** |
+>
+> The two irreversible writers reduce the loser's `weight` and
+> `retrieval_priority` by an inline `UPDATE shared.memories` that records no
+> prior values and no theory reference, so `mpm challenge restore` rejects
+> such a memory outright (`is not challenged`). `ResolveArbitrationTheory` is
+> the more misleading of the two: it is the documented close-the-loop
+> operator workflow and reads as a reversible decision. Adjudication gates
+> *who* may trigger the slash; it does not make the slash reversible.
+> Tracked in issue #24.
 
 If the two candidates land within a small margin of each other, the system **does not** auto-resolve. It writes a pending theory and waits for an operator. A clean winner can be auto-resolved — but only once an operator has adjudicated the pair; a coin-flip always escalates.
 

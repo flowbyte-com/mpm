@@ -28,22 +28,22 @@ func handleChallenge(args []string) int {
 //
 // F7.1 (challenge-restoration): A challenge must NOT silently destroy the
 // memory's history. It must:
-//   1. Stamp the current confidence and weight into metadata so restoration
-//      can return the memory to its prior epistemic standing WITHOUT
-//      automatically re-promoting it. Restoration removes the "challenged"
-//      status flag and reverts the weight — but does NOT silently restore
-//      confidence to its pre-challenge high value, because a challenged
-//      memory's evidence was neutralized during the challenge period.
-//   2. Stamp `challenged_at` so the audit trail shows when the challenge
-//      began (the F7.1 invariant: challenge must not silently destroy
-//      history).
-//   3. Neutralize existing evidence rows (set expires_at = now) so the
-//      confidence recompute treats them as expired during the challenge
-//      window. The evidence rows are NOT deleted — they remain in the
-//      audit trail (confidence_history still references them) but they
-//      cannot contribute to a "high confidence" recompute. On restore,
-//      we explicitly DO NOT re-open those evidence rows; fresh evidence
-//      is required to re-establish trust.
+//  1. Stamp the current confidence and weight into metadata so restoration
+//     can return the memory to its prior epistemic standing WITHOUT
+//     automatically re-promoting it. Restoration removes the "challenged"
+//     status flag and reverts the weight — but does NOT silently restore
+//     confidence to its pre-challenge high value, because a challenged
+//     memory's evidence was neutralized during the challenge period.
+//  2. Stamp `challenged_at` so the audit trail shows when the challenge
+//     began (the F7.1 invariant: challenge must not silently destroy
+//     history).
+//  3. Neutralize existing evidence rows (set expires_at = now) so the
+//     confidence recompute treats them as expired during the challenge
+//     window. The evidence rows are NOT deleted — they remain in the
+//     audit trail (confidence_history still references them) but they
+//     cannot contribute to a "high confidence" recompute. On restore,
+//     we explicitly DO NOT re-open those evidence rows; fresh evidence
+//     is required to re-establish trust.
 func runChallenge(dm internal.CoreDB, id, evidence string) int {
 
 	// F-C3: refuse empty evidence. The hostile test surfaced that
@@ -119,11 +119,11 @@ func runChallenge(dm internal.CoreDB, id, evidence string) int {
 	// confidence to this value (F7.1: restoration must not silently
 	// promote verification).
 	patch := map[string]interface{}{
-		"status":                    "challenged",
-		"challenged_theory_id":      theoryID,
-		"challenged_prior_weight":   int(mem["weight"].(int)),
+		"status":                      "challenged",
+		"challenged_theory_id":        theoryID,
+		"challenged_prior_weight":     int(mem["weight"].(int)),
 		"challenged_prior_confidence": priorConfidence,
-		"challenged_at":             nowSec,
+		"challenged_at":               nowSec,
 	}
 	patchJSON, _ := json.Marshal(patch)
 
@@ -237,12 +237,47 @@ func handleChallengeRestore(args []string) int {
 // DatabaseManager.RestoreMemoryFromChallenge method, so the CLI, mpm
 // call, and MCP surfaces all share one implementation. The detailed
 // invariant commentary lives in internal/core/challenge_restore.go.
+//
+// Reporting (issue #11)
+// ---------------------
+// The success line used to be a fixed string asserting the theory was
+// "resolved as disproven", printed regardless of what the database did.
+// It now reflects the result map's observed outcome.
+//
+// The exit code stays 0 when the memory half succeeded and only the
+// theory half had nothing to act on. A non-zero code would tell the
+// operator nothing was restored, when in fact the memory's weight and
+// status were restored — and the documented remedy for a stale theory
+// reference is not "retry the restore". The distinction is carried by the
+// output text and by the machine-readable `complete` / `theory_resolution`
+// fields, which is where a script should be reading it from. Full failure
+// (error from the core) still exits 1.
 func runChallengeRestore(dm internal.CoreDB, id string) int {
 	res, err := dm.RestoreMemoryFromChallenge(id)
 	if err != nil {
 		return respond("", fmt.Sprintf("%v\n", err), 1)
 	}
 	theoryID, _ := res["theory_id"].(string)
-	fmt.Printf("✓ Theory %s resolved as disproven. Memory %s cleared.\n", theoryID, id)
+	resolved, _ := res["theory_resolved"].(bool)
+
+	if resolved {
+		fmt.Printf("✓ Theory %s resolved as disproven. Memory %s cleared.\n", theoryID, id)
+		return 0
+	}
+
+	// Theory not located. Say exactly that, and name the reference kind so
+	// an operator can tell a stale id from legacy free text at a glance.
+	refKind, _ := res["theory_reference"].(string)
+	if refKind == "" {
+		refKind = "unknown"
+	}
+	warning, _ := res["theory_warning"].(string)
+	fmt.Printf("⚠ Memory %s cleared. Theory NOT resolved.\n", id)
+	fmt.Printf("  no theory row matched reference %q (kind=%s)\n", theoryID, refKind)
+	if warning != "" && !strings.Contains(warning, theoryID) {
+		// The core's warning restates the reference on its own line; skip
+		// it when it would only repeat the line above.
+		fmt.Printf("  %s\n", warning)
+	}
 	return 0
 }
