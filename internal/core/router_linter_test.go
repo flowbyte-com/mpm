@@ -11,17 +11,53 @@ import (
 )
 
 // TestLintRouterDirectories_CleanFiles verifies that the linter accepts
-// every real production persona/mode file with no issues. This is the
-// baseline — if real production files fail the linter, either the
-// linter is wrong or production has silently-broken routing rules.
+// well-formed persona/mode files with no issues. This is the baseline —
+// if real-shaped production files fail the linter, the linter is wrong.
+//
+// Earlier this test read ~/.mpm/persona and ~/.mpm/mode via os.UserHomeDir().
+// That coupled the test to a developer machine that has MPM installed.
+// On a clean CI runner those directories do not exist, the linter returns
+// a "cannot read directory" issue, and the test fails for environmental
+// rather than semantic reasons. See #32.
+//
+// The fix is to synthesise the fixtures in t.TempDir() with the same
+// frontmatter shape the linter inspects. The CLI path (cmd/mpm/lint_cmds.go)
+// pre-filters missing dirs before calling the linter, so the production
+// "mpm ops lint" command never reaches the missing-dir branch.
 func TestLintRouterDirectories_CleanFiles(t *testing.T) {
-	home, err := os.UserHomeDir()
-	require.NoError(t, err)
-	mpmDir := filepath.Join(home, ".mpm")
-	report := LintRouterDirectories(
-		filepath.Join(mpmDir, "persona"),
-		filepath.Join(mpmDir, "mode"),
-	)
+	root := t.TempDir()
+	personaDir := filepath.Join(root, "persona")
+	modeDir := filepath.Join(root, "mode")
+	require.NoError(t, os.MkdirAll(personaDir, 0o755))
+	require.NoError(t, os.MkdirAll(modeDir, 0o755))
+
+	// Minimal-but-realistic clean persona: matches the shape of a real
+	// ~/.mpm/persona/*.md file. The linter inspects patterns and
+	// domain_out; voice_guards is descriptive prose (not regex).
+	persona := `---
+name: default
+title: Core Substrate
+patterns: "status, report, standard, update, default, execute"
+domain_out: "brainstorm, creative, chat, explore"
+---
+
+# Default Persona
+`
+	require.NoError(t, os.WriteFile(filepath.Join(personaDir, "default.md"), []byte(persona), 0o644))
+
+	// Minimal-but-realistic clean mode: matches the shape of a real
+	// ~/.mpm/mode/*.md file.
+	mode := `---
+name: architect
+patterns: "design, architecture, structure, plan, system, refactor"
+domain_out: "typo, css, syntax, minor, quick fix"
+---
+
+# Architect Mode
+`
+	require.NoError(t, os.WriteFile(filepath.Join(modeDir, "architect.md"), []byte(mode), 0o644))
+
+	report := LintRouterDirectories(personaDir, modeDir)
 	if !report.OK() {
 		for _, issue := range report.Issues {
 			t.Errorf("clean file lint failure: %s field=%q pattern=%q msg=%q",
@@ -29,6 +65,74 @@ func TestLintRouterDirectories_CleanFiles(t *testing.T) {
 		}
 	}
 	require.Less(t, report.FilesScanned, 20, "expected to scan a focused number of persona/mode files (<20); a higher count would mean the linter is scanning too much")
+}
+
+// TestLintRouterDirectories_HandlesMissingOptionalDirs pins the current
+// linter contract for missing optional asset directories. The linter
+// surfaces a missing dir as a LintIssue with Field == "" and Message
+// containing "cannot read directory"; it does NOT silently pass.
+//
+// This is the right production contract for the linter itself: silently
+// passing a missing dir would hide real configuration breakage from
+// operators. The "optional vs required" distinction lives one layer up
+// — cmd/mpm/lint_cmds.go pre-filters missing dirs before calling the
+// linter, and cmd/mpm/main.go (doctor) classifies them as WARN for
+// optional assets (mode, persona) versus FAIL for required (src/db).
+// See cmd/mpm/doctor_workspace_optional_dirs_test.go.
+//
+// Without this test, a future change that silently swallows missing-dir
+// errors would pass every other LintRouterDirectories test and only
+// surface as a regression in production user reports. #32.
+func TestLintRouterDirectories_HandlesMissingOptionalDirs(t *testing.T) {
+	t.Run("one populated, one missing", func(t *testing.T) {
+		root := t.TempDir()
+		personaDir := filepath.Join(root, "persona")
+		require.NoError(t, os.MkdirAll(personaDir, 0o755))
+		// Write a clean file in the populated dir.
+		clean := `---
+name: ok
+patterns: "ok"
+---
+`
+		require.NoError(t, os.WriteFile(filepath.Join(personaDir, "ok.md"), []byte(clean), 0o644))
+
+		// Point at the populated dir plus a non-existent mode dir.
+		missingModeDir := filepath.Join(root, "mode-does-not-exist")
+		report := LintRouterDirectories(personaDir, missingModeDir)
+
+		// Contract: the missing dir is reported as an issue. Field is
+		// empty (whole-file/directory-level), Message names the cause.
+		require.False(t, report.OK(), "missing optional dir must be surfaced as a lint issue, not silently passed")
+		require.Len(t, report.Issues, 1, "expected exactly one issue for the one missing dir")
+		issue := report.Issues[0]
+		require.Equal(t, missingModeDir, issue.File, "issue must name the missing path")
+		require.Equal(t, "", issue.Field, "missing-dir issues are whole-file/directory-level (Field empty)")
+		require.Contains(t, issue.Message, "cannot read directory", "issue must explain the cause")
+
+		// The populated dir's files scanned and linted clean.
+		require.Equal(t, 1, report.FilesScanned, "populated dir's clean file was scanned exactly once")
+	})
+
+	t.Run("both missing", func(t *testing.T) {
+		root := t.TempDir()
+		missingA := filepath.Join(root, "missing-a")
+		missingB := filepath.Join(root, "missing-b")
+		report := LintRouterDirectories(missingA, missingB)
+
+		require.False(t, report.OK(), "two missing dirs must produce two issues, not silent pass")
+		require.Len(t, report.Issues, 2, "expected one issue per missing dir")
+		require.Equal(t, 0, report.FilesScanned, "no files were scanned because no dir was readable")
+
+		// Both missing paths must be named. Order follows the variadic
+		// args (matches the linter's for-loop order).
+		files := []string{report.Issues[0].File, report.Issues[1].File}
+		require.Contains(t, files, missingA)
+		require.Contains(t, files, missingB)
+		for _, issue := range report.Issues {
+			require.Equal(t, "", issue.Field)
+			require.Contains(t, issue.Message, "cannot read directory")
+		}
+	})
 }
 
 // TestLintRouterDirectories_BrokenFrontmatter verifies the linter
