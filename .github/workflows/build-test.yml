@@ -6,9 +6,15 @@ on:
   pull_request:
     branches: [main]
 
-# Two-job split is intentional. The "gate" job must pass for merge; it covers
-# the build and the migration-relevant test subset. The "full-suite" job sweeps
-# the entire test tree without the race detector and is now gating too.
+# Three-job split is intentional. The "gate" job must pass for merge; it
+# covers the build and the migration-relevant test subset. The "full-suite"
+# job sweeps the entire test tree without the race detector and is also
+# gating. The "release-gate" job runs the cross-agent continuity and
+# public-CLI subprocess suite (release_acceptance, a separate Go module
+# `go test ./...` from the root cannot reach) under -race. release_acceptance
+# is intentionally NOT folded into the gate job — its cases spawn real
+# subprocesses of $(BUILD_DIR)/mpm, so the cost is one full e2e sweep per
+# case, and pre-merge-in-every-save is the wrong place for it.
 #
 # It used to be `continue-on-error: true`, on the stated grounds that it was
 # tracking "pre-existing test-pollution failures (see TestLessonStoreListLessons,
@@ -157,6 +163,17 @@ jobs:
       - name: Renderer parity (managed-block byte-for-byte)
         run: cd agent_installation && python3 -m unittest discover tests
 
+      # scripts/tests/ (24 files, ~139 cases) pins the installer contract
+      # (binary transaction ordering, systemd umask, deploy path resolution,
+      # runtime asset provisioning). It used to be reachable only via
+      # `make test`/`make test-race` locally — `make test-scripts` is
+      # already wired into both — and was completely absent from CI, so
+      # an installer-contract regression could land via a green PR. This
+      # step closes that gap. Non-vacuity floor (SCRIPTS_TEST_MIN_TESTS)
+      # is enforced inside the Makefile target itself, not here.
+      - name: Installer contract (scripts/tests)
+        run: make test-scripts
+
       - name: Run full test suite with coverage
         run: |
           # Run tests and write atomic coverage profile
@@ -215,3 +232,33 @@ jobs:
         run: |
           go test -tags fts5 -count=1 ./... 2>&1 | tee test-output.log
           make test-tools 2>&1 | tee tools-output.log
+
+  release-gate:
+    name: Release gate (cross-agent continuity + public-CLI subprocess suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          # See the gate job above for the bump rationale (2026-08-17).
+          go-version: '1.26.6'
+          cache: true
+
+      # release_acceptance is a separate Go module (its own go.mod), so
+      # `go test ./...` from the repo root cannot descend into it.
+      # `make release-gate` composes the broad race-detector suite
+      # (`test-race`) with the cross-agent continuity / public-CLI
+      # subprocess suite (`test-release`); both leaves depend on `build`
+      # because the subprocess tests shell out to $(BUILD_DIR)/mpm.
+      #
+      # Both must run from one Makefile target so the FTS5 build flags
+      # (CGO_CFLAGS / -tags fts5) come from one place. The non-vacuity
+      # floor (RELEASE_TEST_MIN_TESTS) is enforced inside the
+      # `test-release` recipe itself, not here, so a sabotaged
+      # release_acceptance module cannot be reported as a green run.
+      - name: Build
+        run: make build
+
+      - name: Release gate
+        run: make release-gate

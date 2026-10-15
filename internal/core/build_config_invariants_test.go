@@ -945,6 +945,316 @@ func TestBuildConfig_CriticInCanonicalGates(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// release_acceptance ownership — gate wiring + non-vacuity floor
+//
+// THE DEFECT THESE GUARD. `release_acceptance` is a separate Go module
+// (release_acceptance/go.mod:1). `go test ./...` from the repo root
+// cannot descend into it; the only Makefile target that runs it is
+// `make test-release`, and the only aggregate that wires it is
+// `make release-gate: test-race test-release` (Makefile).
+//
+// Before this guard was added, three failure modes were possible:
+//
+//   1. Someone edits `test-release` to bypass the build, and the suite
+//      silently runs against the installed production binary. The
+//      subprocess tests in executable_d1_wake_cli_test.go and friends
+//      would still pass — but on a different mpm than the one the
+//      build under test just compiled.
+//
+//   2. Someone deletes the `release_acceptance` directory or moves its
+//      test files. `go test ./...` from the root still passes; the
+//      release-only gate, if it exists, runs an empty test list and
+//      reports a misleading `ok` line. `go test -list` exits 0 on an
+//      empty match, so this is silent without a count check.
+//
+//   3. Someone drops `test-release` from `release-gate`, e.g. to "fix"
+//      a flaky test locally. Cross-agent continuity regressions
+//      thereafter merge without CI objecting. The CI workflow no
+//      longer invokes the suite at all.
+//
+// Each guard below pins ONE property, and each is written so that
+// reverting the corresponding half of the fix turns it red. A guard
+// that cannot fail is worse than no guard, because it reads as
+// coverage.
+// ---------------------------------------------------------------------------
+
+// TestBuildConfig_ReleaseAcceptanceHasNonVacuityFloor — GUARD A
+//
+// `test-release` must include a non-vacuity check that fails when
+// `go test -list` matches zero tests or fewer than
+// `RELEASE_TEST_MIN_TESTS`. The recipe is the only line of defence
+// against a silently-empty release_acceptance module reaching
+// `make release-gate` and reporting a green run.
+//
+// The match is scoped to the test-release recipe, not the whole
+// file, so a comment elsewhere in the Makefile cannot satisfy the
+// guard. A whole-file substring search would be satisfied by the
+// explanatory text in the OWNERSHIP block above the recipe — which
+// is exactly the vacuous pass this guard exists to prevent.
+func TestBuildConfig_ReleaseAcceptanceHasNonVacuityFloor(t *testing.T) {
+	makefilePath := makeFilePath(t)
+	recipe := makeRecipe(t, makefilePath, "test-release")
+
+	// (1) The recipe must reference the floor variable. Without the
+	// variable, a future editor can lower the floor without anyone
+	// noticing, and the suite can shrink past the documented
+	// population silently.
+	if !strings.Contains(recipe, "RELEASE_TEST_MIN_TESTS") {
+		t.Errorf("`test-release` recipe does not reference RELEASE_TEST_MIN_TESTS; "+
+			"  the non-vacuity floor is enforced in Makefile, not the recipe.\n"+
+			"  Add a `go test -list` count check that fails below the floor.\n"+
+			"  recipe:\n%s", indentForMessage(recipe))
+	}
+
+	// (2) The recipe must run `go test -list` (or equivalent) to
+	// enumerate the test population BEFORE running. A floor check
+	// that runs against a different count source is not the floor
+	// the test_suite has.
+	if !strings.Contains(recipe, "go test") || !strings.Contains(recipe, "-list") {
+		t.Errorf("`test-release` recipe does not enumerate tests via `go test -list` "+
+			"  before running; a count-from-output approach is too easy to game "+
+			"  with a no-test pass.\n"+
+			"  recipe:\n%s", indentForMessage(recipe))
+	}
+
+	// (3) The recipe must run the suite with the FTS5 build flags.
+	// release_acceptance's subprocess tests shell out to
+	// $(BUILD_DIR)/mpm and assert on FTS5-backed schema objects
+	// (lessons_fts, etc.) at INSERT time. Without `-tags fts5` the
+	// schema migration leaves those tables unbuilt and the suite
+	// surfaces as "no such table" — a different failure than the
+	// substantive one. The flag discipline is the same as every
+	// other gate; the test fails if the recipe drifts.
+	for _, required := range []string{
+		"$(CGO_CFLAGS)", "$(CGO_LDFLAGS)", "$(GO) test",
+		"-tags fts5",
+	} {
+		if !strings.Contains(recipe, required) {
+			t.Errorf("`test-release` recipe is missing %q; it must use the same "+
+				"  build configuration as every other gate (got recipe:\n%s)",
+				required, indentForMessage(recipe))
+		}
+	}
+}
+
+// TestBuildConfig_ReleaseAcceptanceWiredIntoReleaseGate — GUARD B
+//
+// `release-gate` must depend on `test-release`. The aggregate
+// `release-gate: test-race test-release` is the only way
+// release_acceptance reaches any canonical validation surface; if a
+// future edit drops the dependency, the cross-agent continuity and
+// public-CLI subprocess suite silently falls out of every gate that
+// composes `release-gate`.
+//
+// The match is on the release-gate target header line itself, not
+// the whole file. A comment mentioning `test-release` elsewhere in
+// the Makefile cannot satisfy the guard.
+func TestBuildConfig_ReleaseAcceptanceWiredIntoReleaseGate(t *testing.T) {
+	makefilePath := makeFilePath(t)
+	data, err := os.ReadFile(makefilePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", makefilePath, err)
+	}
+	text := string(data)
+
+	// Find the `release-gate:` target header line and inspect its
+	// prerequisites (the part after `:` and before the line break).
+	headerRE := regexp.MustCompile(`(?m)^release-gate:([^\n]*)\n`)
+	match := headerRE.FindStringSubmatch(text)
+	if len(match) < 2 {
+		t.Fatalf("Makefile must define a `release-gate:` target header")
+	}
+	prereqs := match[1]
+	if !strings.Contains(prereqs, "test-release") {
+		t.Errorf("`release-gate:` prerequisites do not include `test-release`; "+
+			"  release_acceptance is now outside the canonical release validation gate.\n"+
+			"  Current prereqs: %q\n"+
+			"  Add `test-release` to the release-gate header so `make release-gate` "+
+			"  composes both leaves.", prereqs)
+	}
+}
+
+// TestBuildConfig_CIWiringForIssue14 — GUARD C
+//
+// The CI workflow (.github/workflows/build-test.yml) must run
+// `make test-scripts` in the gate job (so PRs catch installer-contract
+// regressions) and must contain a `release-gate` job that invokes
+// `make release-gate` (so cross-agent continuity / public-CLI
+// subprocess regressions cannot merge into main).
+//
+// Before this guard was added, neither was true: the scripts/tests
+// suite was reachable only from local `make test`/`make test-race`,
+// and release_acceptance had no CI entry point at all. A green PR
+// could ship a regression in either suite; only a developer who
+// remembered to type `make test` or `make test-release` locally
+// would catch it.
+//
+// Each subtest pins ONE job + step, scoped to the job's own step
+// region, so a comment elsewhere in the workflow cannot satisfy the
+// guard.
+func TestBuildConfig_CIWiringForIssue14(t *testing.T) {
+	workflowPath := filepath.Join(findRepoRoot(t), ".github", "workflows", "build-test.yml")
+	data, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", workflowPath, err)
+	}
+	text := string(data)
+
+	// YAML job names are not necessarily the `name:` field; the
+	// schema uses the top-level key under `jobs:`. Find the
+	// top-level `jobs:` key and split into per-job bodies. A
+	// minimal YAML parser is enough: jobs are top-level
+	// two-space-indented keys under `jobs:`.
+	jobs := parseYAMLJobs(t, text)
+
+	// (1) `gate` job must invoke `make test-scripts` (directly or
+	// transitively). The Makefile target is the canonical
+	// scripts/tests/ entry point; it carries the
+	// SCRIPTS_TEST_MIN_TESTS non-vacuity floor so a sabotaged
+	// scripts/tests cannot be reported as a green run.
+	gateBody, ok := jobs["gate"]
+	if !ok {
+		t.Errorf("CI workflow is missing a `gate` job; the merge-gate job " +
+			"must run the install-contract tests.")
+	} else {
+		if !strings.Contains(gateBody, "make test-scripts") {
+			t.Errorf("CI `gate` job does not invoke `make test-scripts`; "+
+				"  scripts/tests/ (24 files, ~139 cases, install-contract regression "+
+				"  coverage) is unreachable from CI.\n"+
+				"  Add a step:\n"+
+				"    - name: Installer contract (scripts/tests)\n"+
+				"      run: make test-scripts\n"+
+				"  to the `gate` job.\n\n"+
+				"  gate body:\n%s", indentForMessage(gateBody))
+		}
+	}
+
+	// (2) `release-gate` job must exist AND must invoke
+	// `make release-gate` (the aggregate that composes
+	// `test-race` + `test-release`). Without the job, cross-agent
+	// continuity regressions can merge without CI objecting.
+	rgBody, ok := jobs["release-gate"]
+	if !ok {
+		t.Errorf("CI workflow is missing a `release-gate` job; " +
+			"  release_acceptance (cross-agent continuity, public-CLI subprocess " +
+			"  suite, FTS5 invariant) is unreachable from CI.\n" +
+			"  Add a job:\n" +
+			"    release-gate:\n" +
+			"      name: Release gate (...)\n" +
+			"      runs-on: ubuntu-latest\n" +
+			"      steps:\n" +
+			"        - uses: actions/checkout@v7\n" +
+			"        - uses: actions/setup-go@v7\n" +
+			"          with: { go-version: '1.26.6', cache: true }\n" +
+			"        - name: Build\n" +
+			"          run: make build\n" +
+			"        - name: Release gate\n" +
+			"          run: make release-gate")
+	} else {
+		if !strings.Contains(rgBody, "make release-gate") {
+			t.Errorf("CI `release-gate` job exists but does not invoke "+
+				"  `make release-gate`; the job is a no-op wrapper.\n"+
+				"  Add a step:\n"+
+				"    - name: Release gate\n"+
+				"      run: make release-gate\n"+
+				"  to the `release-gate` job.\n\n"+
+				"  release-gate body:\n%s", indentForMessage(rgBody))
+		}
+		// The job must include `make build` (or equivalent) so
+		// the subprocess tests in release_acceptance have a fresh
+		// $(BUILD_DIR)/mpm to shell out to. Without the build
+		// step, the suite is run against whatever happens to be
+		// on the runner's PATH — almost certainly the wrong
+		// binary, and a known-bad failure mode for fresh
+		// runners.
+		if !strings.Contains(rgBody, "make build") {
+			t.Errorf("CI `release-gate` job does not run `make build`; "+
+				"  release_acceptance's subprocess tests shell out to "+
+				"  $(BUILD_DIR)/mpm and need the freshly-built artifact.\n"+
+				"  Add a `make build` step before `make release-gate`.\n\n"+
+				"  release-gate body:\n%s", indentForMessage(rgBody))
+		}
+	}
+}
+
+// parseYAMLJobs is a minimal YAML reader: it splits a workflow file
+// into per-job bodies keyed by the top-level `jobs:` key. We do not
+// pull in a YAML library because the only thing we need is the
+// top-level `jobs:` mapping, and a minimal parser that handles the
+// canonical shape of GitHub Actions workflow files is good enough
+// for the structural checks above. If a future edit uses an
+// unusual indentation or quoting style, the parser will report
+// that the job is missing — which is the right answer for a guard
+// that exists to fail loudly on schema drift.
+func parseYAMLJobs(t *testing.T, text string) map[string]string {
+	t.Helper()
+	lines := strings.Split(text, "\n")
+
+	// Locate the `jobs:` top-level key. In a GitHub Actions
+	// workflow it is column 0 (no leading whitespace) and
+	// followed by an indented two-space mapping of job names.
+	jobsLine := -1
+	for i, line := range lines {
+		if line == "jobs:" {
+			jobsLine = i
+			break
+		}
+	}
+	if jobsLine == -1 {
+		t.Fatalf("workflow has no `jobs:` top-level key")
+	}
+
+	// Each job is a two-space-indented key under `jobs:`. Its
+	// body is everything from the line after the key (more
+	// deeply indented) to the next same-or-shallower-indented
+	// line.
+	jobs := map[string]string{}
+	for i := jobsLine + 1; i < len(lines); i++ {
+		line := lines[i]
+		if line == "" {
+			continue
+		}
+		// Top-level key ends at any non-indented line that is
+		// not a continuation of the previous block. (Anchored
+		// at column 0.)
+		if line[0] != ' ' && line[0] != '\t' {
+			break
+		}
+		// A two-space-indented key starts a job. A more-deeply
+		// indented line is part of the previous job's body.
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") {
+			// `  jobname:` — extract the name.
+			rest := strings.TrimPrefix(line, "  ")
+			colon := strings.Index(rest, ":")
+			if colon < 0 {
+				continue
+			}
+			name := rest[:colon]
+			// Collect body lines until the next same-or-
+			// shallower indentation.
+			var body []string
+			for j := i + 1; j < len(lines); j++ {
+				bl := lines[j]
+				if bl == "" {
+					body = append(body, bl)
+					continue
+				}
+				// Body lines are deeper than two spaces.
+				// (The job key is two-space-indented; its
+				// body is anything more indented.)
+				if strings.HasPrefix(bl, "    ") {
+					body = append(body, bl)
+					continue
+				}
+				break
+			}
+			jobs[name] = strings.Join(body, "\n")
+		}
+	}
+	return jobs
+}
+
+// ---------------------------------------------------------------------------
 // Build artifact vs installed binary — regression guards A–F
 //
 // THE DEFECT THESE GUARD. Before the build/install split, BUILD_DIR was

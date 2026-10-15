@@ -138,6 +138,15 @@ TESTENV_REQUIRED_GUARDS := TestNoUnisolatedMPMSubprocess TestScannerDetectsKnown
 # anything.
 SCRIPTS_TEST_MIN_TESTS := 50
 
+# Floor on the number of tests `test-release` must collect. `go test
+# -list` exits 0 when the regex matches nothing, so a renamed test or
+# a moved package would turn `release-gate` into a silent pass — the
+# same failure shape `SCRIPTS_TEST_MIN_TESTS` guards against for
+# scripts/tests/. Measured population: 26 tests. The floor is well
+# below that so ordinary test removal does not trip it; it exists to
+# catch a release_acceptance that has been silently emptied.
+RELEASE_TEST_MIN_TESTS := 20
+
 # Floors for the two agent_installation gates. Same reasoning as
 # SCRIPTS_TEST_MIN_TESTS: `python3 -m unittest discover` and
 # `node --test` both exit 0 when they collect nothing, so a directory
@@ -877,9 +886,37 @@ test-agent-adapters:
 # dependency; promoted to a dedicated target so the regression class
 # above cannot recur silently. Run pre-release.
 #
+# OWNERSHIP. `release_acceptance` is a separate Go module (its own
+# go.mod), so `./...` from the root cannot descend into it. The
+# canonical "is this release shippable?" gate is `make release-gate`
+# below, which composes `test-race` and `test-release`. CI runs both
+# in its own job so a green PR cannot mask release-only regressions
+# — see .github/workflows/build-test.yml for the `release-gate` job.
+#
+# NON-VACUITY GUARD. Same failure shape as SCRIPTS_TEST_MIN_TESTS:
+# `go test -list <regex>` exits 0 when nothing matches, so a renamed
+# test or a moved package would turn `release-gate` into a silent
+# pass. The recipe counts via `go test -list` first and fails on an
+# unparseable, zero, or below-floor count BEFORE running the suite.
+# The list output is discarded so the test run itself stays silent.
+#
 # RUN forwards to the release_acceptance package; default is all tests.
 test-release: build
-	cd release_acceptance && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -count=1 -tags fts5 $(RELEASE_RUN) ./...
+	@mod=release_acceptance; \
+	  n=$$(cd $$mod && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -list '.*' ./... 2>/dev/null | grep -cE '^Test' || true); \
+	  if [ -z "$$n" ] || [ "$$n" -eq 0 ]; then \
+	    echo "[test-release] FATAL: collected 0 tests, floor is $(RELEASE_TEST_MIN_TESTS)." >&2; \
+	    echo "  \`go test -list\` matched nothing — the release_acceptance module is empty" >&2; \
+	    echo "  or the regex is wrong. A silent pass here is indistinguishable from a green suite." >&2; \
+	    exit 1; \
+	  fi; \
+	  if [ "$$n" -lt $(RELEASE_TEST_MIN_TESTS) ]; then \
+	    echo "[test-release] FATAL: collected $$n tests, floor is $(RELEASE_TEST_MIN_TESTS)." >&2; \
+	    echo "  A rename or deletion has probably silently reduced this gate." >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "[test-release] collected $$n tests (floor $(RELEASE_TEST_MIN_TESTS))"; \
+	  cd $$mod && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -count=1 -tags fts5 $(RELEASE_RUN) ./...
 
 # Aggregate release gate. Composes the broad race-detector suite with
 # the cross-agent continuity / public-CLI subprocess suite. Both leaves

@@ -114,6 +114,32 @@ registry/dispatcher drift is caught.
   and `agent_installation/`. `release_acceptance` is a separate Go module
   — see `make test-release`. It is slow enough
   that you should run it before opening a PR, not on every save.
+- CI coverage (the contract every PR is checked against). The
+  `.github/workflows/build-test.yml` workflow is the single source of
+  truth; this section describes it for reviewers, not for CI to read.
+  Three jobs, all gating:
+  - `gate` — `make build`, `mpm-lint --gate`, the
+    synthesis/reliability/lifecycle/hybrid/`TestGetRecentUserTopics`/
+    `TestDBSafety` core subset, the renderer-parity tests, the
+    `scripts/tests/` installer-contract suite (via `make test-scripts`),
+    the full root-module race-detector sweep with coverage, and the
+    nested `internal/core/tools` race-detector sweep. Required for merge.
+  - `full-suite` — `make build` then a non-race full sweep of the root
+    module plus `internal/core/tools`. Required for merge.
+  - `release-gate` — `make build` then `make release-gate`, which
+    composes `test-race` with `test-release` (cross-agent continuity,
+    public-CLI subprocess suite, FTS5 invariant). Required for merge.
+    Without this job, regressions in the release-only suite can land
+    via a green PR; the contract that pins it lives in
+    `TestBuildConfig_CIWiringForIssue14` in
+    `internal/core/build_config_invariants_test.go`, alongside the
+    Makefile wiring contract
+    (`TestBuildConfig_ReleaseAcceptanceHasNonVacuityFloor`,
+    `TestBuildConfig_ReleaseAcceptanceWiredIntoReleaseGate`).
+  The non-vacuity floors (`SCRIPTS_TEST_MIN_TESTS` in the `test-scripts`
+  recipe, `RELEASE_TEST_MIN_TESTS` in the `test-release` recipe) are
+  enforced inside the Makefile targets themselves, so a sabotaged
+  `scripts/tests/` or `release_acceptance/` cannot report a green run.
 - Stranger test (the hermetic specification quickstart gate):
   ```bash
   bash scripts/stranger-test.sh
