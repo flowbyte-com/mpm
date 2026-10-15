@@ -1233,19 +1233,32 @@ func runDoctorWorkspaceChecks(report *DoctorReport) {
 	for _, d := range dirs {
 		info, err := os.Stat(d.path)
 		if err != nil && !os.IsNotExist(err) {
-			// Unexpected error (perm denied, I/O fault, …) — WARN.
-			// A permission failure on a required dir is the
-			// operator's signal to fix perms, not doctor's to create
-			// workarounds. Doctor is observational.
+			// Unexpected error (perm denied, ENOTDIR, I/O fault, …).
+			// The policy is the same as the missing-dir and
+			// wrong-type branches: a stat error on a required dir is
+			// a genuine installation fault (FAIL); on an optional
+			// dir it is a configuration gap the runtime can still
+			// start past (WARN). Collapsing the two would let a
+			// permission failure on src/db/ produce a healthy exit
+			// status, which is the exact regression #12 was opened
+			// to prevent.
+			status := "WARN"
+			if d.required {
+				status = "FAIL"
+			}
 			report.Checks = append(report.Checks, DoctorCheck{
 				Name:     d.name + " Directory",
-				Status:   "WARN",
+				Status:   status,
 				Message:  "Stat error: " + err.Error(),
 				Duration: "0ms",
 			})
-			report.Warnings++
+			if status == "FAIL" {
+				report.Failed++
+			} else {
+				report.Warnings++
+			}
 			report.TotalChecks++
-			fmt.Printf("    [%s] %s\n", colorizeStatus("WARN"), d.name+" Directory")
+			fmt.Printf("    [%s] %s\n", colorizeStatus(status), d.name+" Directory")
 			fmt.Printf("          Stat error: %s\n\n", err.Error())
 			continue
 		}

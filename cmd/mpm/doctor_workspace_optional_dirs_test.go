@@ -458,63 +458,150 @@ func TestDoctorWorkspaceChecks_Mutation_GuardsAgainstReintroducingSessions(t *te
 	}
 }
 
-// TestDoctorWorkspaceChecks_StatErrorIsWarned_NotFailed pins the
-// non-ENOENT stat-error branch in runDoctorWorkspaceChecks. When
-// os.Stat returns an error other than ErrNotExist (perm denied,
-// ENOTDIR, I/O fault, …) the check must surface a WARN, not a
-// FAIL, and must include the underlying error text so the
-// operator can act.
+// TestDoctorWorkspaceChecks_StatErrorOnRequiredDir_Fails pins
+// the policy for the non-ENOENT stat-error branch on a
+// required workspace dir. When os.Stat returns an error other
+// than ErrNotExist (perm denied, ENOTDIR, I/O fault, …) on
+// the required src/db path, the check must surface as FAIL —
+// the same severity as missing-dir and wrong-type on a
+// required dir. Collapsing the three branches into one WARN
+// would let a permission failure on src/db/ produce a healthy
+// exit status, which is the exact regression #12 was opened
+// to prevent.
 //
-// Rationale: a permission failure on a workspace directory is an
-// operator signal to fix perms, not doctor's call to declare the
-// install broken. The runtime cannot start either way, but the
-// distinction between "missing" and "broken" is the operator's
-// to make; the doctor must not collapse the two.
+// The test forces ENOTDIR for src/db only: it points the src
+// parent at a regular file so that os.Stat on <ws>/src/db
+// returns ENOTDIR, while leaving <ws>/mode and <ws>/persona
+// statable. This is the canonical cross-platform way to
+// reach the non-ENOENT branch on a single path without
+// root-only fs tricks (mounts, loop devices, etc.).
+func TestDoctorWorkspaceChecks_StatErrorOnRequiredDir_Fails(t *testing.T) {
+	ws := withWorkspace(t)
+	// Make <ws>/src a regular file so that os.Stat(<ws>/src/db)
+	// returns ENOTDIR (not IsNotExist). mode/ and persona/ sit at
+	// <ws>/<name> and stat cleanly, so they are independent of
+	// this manipulation.
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "src"), []byte("not a dir"), 0o644))
+
+	report := &DoctorReport{Checks: []DoctorCheck{}}
+	runDoctorWorkspaceChecks(report)
+
+	srcDB := findCheck(report, "src/db Directory")
+	require.NotNil(t, srcDB, "src/db Directory check missing; got checks: %v", checkNames(report))
+	require.Equal(t, "FAIL", srcDB.Status,
+		"a non-ENOENT stat error on the required src/db must be FAIL, "+
+			"the same severity as missing-dir and wrong-type on a required dir; "+
+			"got %q with message %q", srcDB.Status, srcDB.Message)
+	require.Contains(t, srcDB.Message, "Stat error",
+		"FAIL message must explain the stat-error condition; "+
+			"got: %q", srcDB.Message)
+	// Stat error must contribute to the FAIL count, so the
+	// doctor's exit code is non-zero for a required-dir I/O
+	// failure. An operator gating automations on the exit code
+	// must see the broken src/db as a failure.
+	require.Equal(t, 1, report.Failed,
+		"a non-ENOENT stat error on src/db must contribute to "+
+			"report.Failed (so the doctor exits 1); got: %+v", report.Checks)
+
+	// mode/ and persona/ are optional. Even though this test
+	// only forces the stat-error condition on src/, we still
+	// want to confirm the optional dirs are reported
+	// independently — missing here is fine (WARN).
+	for _, name := range []string{"mode Directory", "persona Directory"} {
+		c := findCheck(report, name)
+		require.NotNil(t, c, "%s check missing; got checks: %v", name, checkNames(report))
+		require.Equal(t, "WARN", c.Status,
+			"%s on a fresh workspace is a missing optional dir, "+
+				"which must be WARN; got %q with message %q",
+			name, c.Status, c.Message)
+	}
+}
+
+// TestDoctorWorkspaceChecks_StatErrorOnOptionalDirs_Warns pins
+// the policy for the non-ENOENT stat-error branch on optional
+// workspace dirs. When os.Stat returns an error other than
+// ErrNotExist on mode/ or persona/, the check must surface as
+// WARN — the same severity as missing-dir and wrong-type on an
+// optional dir. The runtime can still start; the operator gets
+// an actionable signal that the asset is unreachable.
 //
-// The test forces ENOTDIR by pointing MPM_WORKSPACE at a path
-// whose parent is a regular file. os.Stat on a child of a
-// regular file returns "not a directory" — non-ENOENT, and so
-// it lands in the very branch this test pins. This is the
-// canonical cross-platform way to reach the non-ENOENT branch
-// without root-only fs tricks (mounts, loop devices, etc.).
-func TestDoctorWorkspaceChecks_StatErrorIsWarned_NotFailed(t *testing.T) {
-	// Create a holder directory, then a regular file inside it.
-	// Set MPM_WORKSPACE to "<holder>/<file>" so that any stat on
-	// <ws>/<sub> produces ENOTDIR.
+// Setup: ENOTDIR requires a non-directory parent. The cleanest
+// way to force this on mode/ and persona/ while keeping src/db
+// statable is to make <ws>/src a regular file. Then:
+//   - os.Stat(<ws>/src/db)  → ENOTDIR  (required → FAIL; pinned above)
+//   - os.Stat(<ws>/mode)    → IsNotExist (missing optional → WARN)
+//   - os.Stat(<ws>/persona) → IsNotExist (missing optional → WARN)
+//
+// That covers the missing-optional policy but not the
+// stat-error-on-optional policy. To force ENOTDIR on the
+// optional paths specifically, the test points MPM_WORKSPACE
+// inside a regular file, then creates src/db as a regular
+// directory the OS can still resolve. Because the OS treats
+// "<file>/src/db" as ENOTDIR regardless of intermediate
+// creation, this test instead pins the policy by assertion
+// shape: the stat-error branch on optional dirs must produce
+// WARN, never FAIL, regardless of which OS-level condition
+// triggered it. We exercise the branch by making mode/ and
+// persona/ each a regular file in front of a deeper stat
+// target — but since os.Stat of a regular file returns
+// success (and !info.IsDir() is the wrong-type branch, not
+// the stat-error branch), we use the holder trick: nest
+// mode/ and persona/ behind a regular file, so the OS rejects
+// the lookup with ENOTDIR.
+//
+// Concrete recipe: build a holder dir, then make the
+// workspace a path that has both a real dir for src/db
+// resolution and a regular file blocking the optional paths.
+// Cleanest implementation: split the workspace in two halves
+// using a symlink-free trick — make <ws>/<name> resolve to
+// ENOTDIR by inserting a regular file at every parent
+// component of <ws>/<name> that is not a directory. We
+// achieve this by setting MPM_WORKSPACE to a path inside a
+// regular file, then asserting that ALL three checks land in
+// the stat-error branch. The required src/db is FAIL
+// (already pinned above); the two optional dirs are WARN.
+// This is the canonical cross-platform way to exercise the
+// non-ENOENT branch without root-only fs tricks.
+func TestDoctorWorkspaceChecks_StatErrorOnOptionalDirs_Warns(t *testing.T) {
 	holder := t.TempDir()
 	holderFile := filepath.Join(holder, "regular-file")
 	require.NoError(t, os.WriteFile(holderFile, []byte("x"), 0o644))
-	// MPM_WORKSPACE points inside the regular file — every
-	// workspace-dir stat returns ENOTDIR.
+	// MPM_WORKSPACE points inside a regular file — every
+	// <ws>/<sub> stat returns ENOTDIR. The required src/db
+	// must classify as FAIL (covered above) and the optional
+	// mode/ and persona/ must classify as WARN.
 	t.Setenv("MPM_WORKSPACE", holderFile)
 
 	report := &DoctorReport{Checks: []DoctorCheck{}}
 	runDoctorWorkspaceChecks(report)
 
-	// Every workspace check (src/db, mode, persona) should fall
-	// into the stat-error branch and surface as WARN with the
-	// underlying error text.
-	for _, name := range []string{"src/db Directory", "mode Directory", "persona Directory"} {
+	// mode/ and persona/ are optional. Their stat error must
+	// be WARN, not FAIL — the runtime can still start, and
+	// the operator's signal is "asset is unreachable", not
+	// "install is broken".
+	for _, name := range []string{"mode Directory", "persona Directory"} {
 		c := findCheck(report, name)
 		require.NotNil(t, c, "%s check missing; got checks: %v", name, checkNames(report))
 		require.Equal(t, "WARN", c.Status,
-			"%s must be WARN when os.Stat returns non-ENOENT; "+
-				"got %q with message %q", name, c.Status, c.Message)
+			"%s stat-error must be WARN (optional dir, runtime "+
+				"can start); got %q with message %q",
+			name, c.Status, c.Message)
 		require.Contains(t, c.Message, "Stat error",
 			"%s WARN message must explain the stat-error condition; "+
 				"got: %q", name, c.Message)
 	}
 
-	// A stat error must not contribute to the FAIL count: the
-	// doctor must not exit 1 for what is essentially "I/O failed",
-	// because the operator's recovery path is different from a
-	// missing install.
-	require.Equal(t, 0, report.Failed,
-		"stat errors on workspace dirs must not contribute to report.Failed; "+
-			"got: %+v", report.Checks)
-	require.Greater(t, report.Warnings, 0,
-		"stat errors on workspace dirs must contribute to report.Warnings; "+
-			"got: %+v", report.Checks)
+	// Exactly one FAIL (src/db, required) and at least two
+	// WARN (the two optional-dir stat errors). The doctor must
+	// exit 1 because the required dir is broken, but the two
+	// optional-dir stat errors must NOT have contributed to
+	// that FAIL count.
+	require.Equal(t, 1, report.Failed,
+		"only the required src/db stat-error must contribute to "+
+			"report.Failed; got: %+v", report.Checks)
+	require.GreaterOrEqual(t, report.Warnings, 2,
+		"both optional-dir stat-errors must contribute to "+
+			"report.Warnings; got: %+v", report.Checks)
 }
 
 // TestDoctorOpsDoctor_CLIExitCode_FreshWorkspaceIsZero is the
