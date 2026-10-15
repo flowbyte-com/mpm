@@ -1190,56 +1190,126 @@ func runDoctorWorkspaceChecks(report *DoctorReport) {
 		return
 	}
 
-	// Check critical directories
-	dirs := map[string]string{
-		"mode":     filepath.Join(workspace, "mode"),
-		"persona":  filepath.Join(workspace, "persona"),
-		"src/db":   filepath.Join(workspace, "src", "db"),
-		"sessions": filepath.Join(workspace, "sessions"),
+	// Required vs. optional. Required dirs FAIL when absent because the
+	// runtime cannot function without them; optional dirs WARN because
+	// their absence is a provisioning gap, not an installation fault
+	// (a CLI-only or CI workspace may legitimately not have them).
+	//
+	// Note: `sessions/` is intentionally NOT checked. It has no
+	// producer or consumer in MPM (sessions live in the SQLite
+	// `sessions` table at src/db/mpm.db), no installer creates it,
+	// and including it produced a permanent false FAIL on every
+	// healthy host. Tracked at #12.
+	type workspaceDirCheck struct {
+		name     string
+		path     string
+		required bool
+		// provisionHint, when non-empty, is appended to the missing
+		// optional-dir message so the operator knows how to recover.
+		// Only used for optional dirs; required-dir recovery is
+		// installation-level.
+		provisionHint string
+	}
+	dirs := []workspaceDirCheck{
+		{
+			name:     "src/db",
+			path:     filepath.Join(workspace, "src", "db"),
+			required: true,
+		},
+		{
+			name:          "mode",
+			path:          filepath.Join(workspace, "mode"),
+			required:      false,
+			provisionHint: "Run scripts/install_runtime_assets.py --source-root <repo> --runtime-root " + workspace + " to provision",
+		},
+		{
+			name:          "persona",
+			path:          filepath.Join(workspace, "persona"),
+			required:      false,
+			provisionHint: "Run scripts/install_runtime_assets.py --source-root <repo> --runtime-root " + workspace + " to provision",
+		},
 	}
 
-	for name, path := range dirs {
-		info, err := os.Stat(path)
+	for _, d := range dirs {
+		info, err := os.Stat(d.path)
 		if err != nil && !os.IsNotExist(err) {
-			// Unexpected error — log it and skip
-			fmt.Printf("    [%s] %s\n", colorYellow("WARN"), name+" Directory")
-			fmt.Printf("          Stat error: %v\n\n", err)
+			// Unexpected error (perm denied, I/O fault, …) — WARN.
+			// A permission failure on a required dir is the
+			// operator's signal to fix perms, not doctor's to create
+			// workarounds. Doctor is observational.
+			report.Checks = append(report.Checks, DoctorCheck{
+				Name:     d.name + " Directory",
+				Status:   "WARN",
+				Message:  "Stat error: " + err.Error(),
+				Duration: "0ms",
+			})
+			report.Warnings++
+			report.TotalChecks++
+			fmt.Printf("    [%s] %s\n", colorizeStatus("WARN"), d.name+" Directory")
+			fmt.Printf("          Stat error: %s\n\n", err.Error())
 			continue
 		}
 		if os.IsNotExist(err) || info == nil {
+			status := "WARN"
+			message := "Missing: " + d.path
+			if d.required {
+				status = "FAIL"
+				message = "Missing: " + d.path + " (required) — run install or 'mpm init' to provision"
+			} else if d.provisionHint != "" {
+				message = "Missing: " + d.path + " — " + d.provisionHint
+			}
 			report.Checks = append(report.Checks, DoctorCheck{
-				Name:     name + " Directory",
-				Status:   "FAIL",
-				Message:  "Missing: " + path,
+				Name:     d.name + " Directory",
+				Status:   status,
+				Message:  message,
 				Duration: "0ms",
 			})
-			report.Failed++
+			if status == "FAIL" {
+				report.Failed++
+			} else {
+				report.Warnings++
+			}
 			report.TotalChecks++
-			fmt.Printf("    [%s] %s\n", colorRed("FAIL"), name+" Directory")
-			fmt.Printf("          Missing: %s\n\n", path)
-		} else if !info.IsDir() {
-			report.Checks = append(report.Checks, DoctorCheck{
-				Name:     name + " Directory",
-				Status:   "FAIL",
-				Message:  "Not a directory: " + path,
-				Duration: "0ms",
-			})
-			report.Failed++
-			report.TotalChecks++
-			fmt.Printf("    [%s] %s\n", colorRed("FAIL"), name+" Directory")
-			fmt.Printf("          Not a directory: %s\n\n", path)
-		} else {
-			report.Checks = append(report.Checks, DoctorCheck{
-				Name:     name + " Directory",
-				Status:   "PASS",
-				Message:  path,
-				Duration: "0ms",
-			})
-			report.Passed++
-			report.TotalChecks++
-			fmt.Printf("    [%s] %s\n", colorGreen("PASS"), name+" Directory")
-			fmt.Printf("          %s\n\n", path)
+			fmt.Printf("    [%s] %s\n", colorizeStatus(status), d.name+" Directory")
+			fmt.Printf("          %s\n\n", message)
+			continue
 		}
+		if !info.IsDir() {
+			// Path exists but is a regular file, symlink, etc. For a
+			// required dir this is a genuine installation fault
+			// (FAIL). For an optional dir the operator has
+			// misconfigured the workspace, but the runtime can still
+			// start — WARN.
+			status := "WARN"
+			if d.required {
+				status = "FAIL"
+			}
+			report.Checks = append(report.Checks, DoctorCheck{
+				Name:     d.name + " Directory",
+				Status:   status,
+				Message:  "Not a directory: " + d.path,
+				Duration: "0ms",
+			})
+			if status == "FAIL" {
+				report.Failed++
+			} else {
+				report.Warnings++
+			}
+			report.TotalChecks++
+			fmt.Printf("    [%s] %s\n", colorizeStatus(status), d.name+" Directory")
+			fmt.Printf("          %s\n\n", "Not a directory: "+d.path)
+			continue
+		}
+		report.Checks = append(report.Checks, DoctorCheck{
+			Name:     d.name + " Directory",
+			Status:   "PASS",
+			Message:  d.path,
+			Duration: "0ms",
+		})
+		report.Passed++
+		report.TotalChecks++
+		fmt.Printf("    [%s] %s\n", colorizeStatus("PASS"), d.name+" Directory")
+		fmt.Printf("          %s\n\n", d.path)
 	}
 }
 
