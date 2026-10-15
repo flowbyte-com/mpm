@@ -7,14 +7,20 @@ on:
     branches: [main]
 
 # Three-job split is intentional. The "gate" job must pass for merge; it
-# covers the build and the migration-relevant test subset. The "full-suite"
-# job sweeps the entire test tree without the race detector and is also
-# gating. The "release-gate" job runs the cross-agent continuity and
-# public-CLI subprocess suite (release_acceptance, a separate Go module
-# `go test ./...` from the root cannot reach) under -race. release_acceptance
-# is intentionally NOT folded into the gate job — its cases spawn real
-# subprocesses of $(BUILD_DIR)/mpm, so the cost is one full e2e sweep per
-# case, and pre-merge-in-every-save is the wrong place for it.
+# covers the build, the migration-relevant test subset, the renderer
+# parity tests, the scripts/tests/ installer-contract suite, the
+# root-module race-detector sweep with coverage, and the nested
+# `internal/core/tools` race-detector sweep. The "full-suite" job
+# sweeps the entire test tree without the race detector and is also
+# gating. The "release-gate" job runs ONLY the cross-agent
+# continuity / public-CLI subprocess suite (release_acceptance, a
+# separate Go module `go test ./...` from the root cannot reach).
+# release_acceptance is intentionally NOT folded into the gate job —
+# its cases spawn real subprocesses of $(BUILD_DIR)/mpm, so the cost
+# is one full e2e sweep per case, and pre-merge-in-every-save is the
+# wrong place for it. It is also NOT folded into full-suite, since
+# the test names there mean the same set under non-race conditions
+# and the subprocess cases already cover the runtime surfaces.
 #
 # It used to be `continue-on-error: true`, on the stated grounds that it was
 # tracking "pre-existing test-pollution failures (see TestLessonStoreListLessons,
@@ -247,18 +253,16 @@ jobs:
 
       # release_acceptance is a separate Go module (its own go.mod), so
       # `go test ./...` from the repo root cannot descend into it.
-      # `make release-gate` composes the broad race-detector suite
-      # (`test-race`) with the cross-agent continuity / public-CLI
-      # subprocess suite (`test-release`); both leaves depend on `build`
-      # because the subprocess tests shell out to $(BUILD_DIR)/mpm.
+      # `make release-gate` runs only `test-release` (the cross-agent
+      # continuity / public-CLI subprocess suite); the race-detector
+      # suite and `make test-scripts` are owned by the `gate` job, so
+      # this job does not re-invoke them.
       #
-      # Both must run from one Makefile target so the FTS5 build flags
-      # (CGO_CFLAGS / -tags fts5) come from one place. The non-vacuity
-      # floor (RELEASE_TEST_MIN_TESTS) is enforced inside the
-      # `test-release` recipe itself, not here, so a sabotaged
-      # release_acceptance module cannot be reported as a green run.
-      - name: Build
-        run: make build
-
+      # The non-vacuity floor (RELEASE_TEST_MIN_TESTS) is enforced
+      # inside the `test-release` recipe itself, not here, so a
+      # sabotaged release_acceptance module cannot be reported as a
+      # green run. `make release-gate` depends on `build`, so the
+      # subprocess tests get a fresh $(BUILD_DIR)/mpm without a
+      # separate `make build` step.
       - name: Release gate
         run: make release-gate

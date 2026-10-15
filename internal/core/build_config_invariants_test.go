@@ -951,7 +951,7 @@ func TestBuildConfig_CriticInCanonicalGates(t *testing.T) {
 // (release_acceptance/go.mod:1). `go test ./...` from the repo root
 // cannot descend into it; the only Makefile target that runs it is
 // `make test-release`, and the only aggregate that wires it is
-// `make release-gate: test-race test-release` (Makefile).
+// `make release-gate: build test-release` (Makefile).
 //
 // Before this guard was added, three failure modes were possible:
 //
@@ -1039,16 +1039,23 @@ func TestBuildConfig_ReleaseAcceptanceHasNonVacuityFloor(t *testing.T) {
 
 // TestBuildConfig_ReleaseAcceptanceWiredIntoReleaseGate — GUARD B
 //
-// `release-gate` must depend on `test-release`. The aggregate
-// `release-gate: test-race test-release` is the only way
-// release_acceptance reaches any canonical validation surface; if a
-// future edit drops the dependency, the cross-agent continuity and
-// public-CLI subprocess suite silently falls out of every gate that
-// composes `release-gate`.
+// `release-gate` must depend on `test-release`. `test-release` is
+// the only path from the Makefile surface to the `release_acceptance`
+// Go module (a separate go.mod that `./...` from the root cannot
+// reach), so dropping the prerequisite takes the cross-agent
+// continuity and public-CLI subprocess suite out of every gate that
+// composes `release-gate` — including the `release-gate` CI job.
 //
 // The match is on the release-gate target header line itself, not
 // the whole file. A comment mentioning `test-release` elsewhere in
 // the Makefile cannot satisfy the guard.
+//
+// (Earlier revisions of this target composed `test-race test-release`
+// so a single `make release-gate` covered both. That meant an extra
+// `make test-scripts` invocation per CI run, since `test-race`
+// pulls in `$(MAKE) test-scripts` as a leaf. The current
+// `release-gate: build test-release` is the smaller aggregate; the
+// race suite is owned by the `gate` job.)
 func TestBuildConfig_ReleaseAcceptanceWiredIntoReleaseGate(t *testing.T) {
 	makefilePath := makeFilePath(t)
 	data, err := os.ReadFile(makefilePath)
@@ -1160,20 +1167,16 @@ func TestBuildConfig_CIWiringForIssue14(t *testing.T) {
 				"  to the `release-gate` job.\n\n"+
 				"  release-gate body:\n%s", indentForMessage(rgBody))
 		}
-		// The job must include `make build` (or equivalent) so
-		// the subprocess tests in release_acceptance have a fresh
-		// $(BUILD_DIR)/mpm to shell out to. Without the build
-		// step, the suite is run against whatever happens to be
-		// on the runner's PATH — almost certainly the wrong
-		// binary, and a known-bad failure mode for fresh
-		// runners.
-		if !strings.Contains(rgBody, "make build") {
-			t.Errorf("CI `release-gate` job does not run `make build`; "+
-				"  release_acceptance's subprocess tests shell out to "+
-				"  $(BUILD_DIR)/mpm and need the freshly-built artifact.\n"+
-				"  Add a `make build` step before `make release-gate`.\n\n"+
-				"  release-gate body:\n%s", indentForMessage(rgBody))
-		}
+		// The build prerequisite lives in the Makefile (the
+		// `release-gate: build test-release` target), not as a
+		// separate CI step — `make release-gate` triggers it
+		// transitively. We do not assert `make build` shows up
+		// as a separate step here because the relevant contract
+		// is on the Makefile (and the
+		// `TestBuildConfig_*` family that pins it), not on the
+		// workflow shape. Asserting both would force a redundant
+		// `make build` invocation per CI run.
+		_ = rgBody
 	}
 }
 

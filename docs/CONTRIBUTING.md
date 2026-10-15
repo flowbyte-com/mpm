@@ -127,15 +127,30 @@ registry/dispatcher drift is caught.
   - `full-suite` — `make build` then a non-race full sweep of the root
     module plus `internal/core/tools`. Required for merge.
   - `release-gate` — `make build` then `make release-gate`, which
-    composes `test-race` with `test-release` (cross-agent continuity,
-    public-CLI subprocess suite, FTS5 invariant). Required for merge.
-    Without this job, regressions in the release-only suite can land
-    via a green PR; the contract that pins it lives in
+    runs only `test-release` (cross-agent continuity, public-CLI
+    subprocess suite, FTS5 invariant). Required for merge. Without
+    this job, regressions in the release-only suite can land via a
+    green PR; the contract that pins it lives in
     `TestBuildConfig_CIWiringForIssue14` in
     `internal/core/build_config_invariants_test.go`, alongside the
     Makefile wiring contract
     (`TestBuildConfig_ReleaseAcceptanceHasNonVacuityFloor`,
     `TestBuildConfig_ReleaseAcceptanceWiredIntoReleaseGate`).
+
+  Suite ownership — what each CI job runs and what it does NOT run,
+  so a reviewer can answer "is X exercised in CI?" by reading this
+  list:
+  - `gate` owns: root-module `-race` sweep, `internal/core/tools`
+    `-race` sweep, `scripts/tests/`, renderer-parity Python tests,
+    core precommit subset, `mpm-lint --gate`.
+  - `full-suite` owns: root-module non-race sweep,
+    `internal/core/tools` non-race sweep.
+  - `release-gate` owns: `release_acceptance` (cross-agent
+    continuity, public-CLI subprocess suite, FTS5 invariant).
+  - `make test` and `make test-race` are local-developer aggregates
+    that compose the above into a single command. CI does not invoke
+    either; the jobs above are split so that an expensive suite runs
+    in exactly one job, not in two.
   The non-vacuity floors (`SCRIPTS_TEST_MIN_TESTS` in the `test-scripts`
   recipe, `RELEASE_TEST_MIN_TESTS` in the `test-release` recipe) are
   enforced inside the Makefile targets themselves, so a sabotaged

@@ -918,16 +918,22 @@ test-release: build
 	  echo "[test-release] collected $$n tests (floor $(RELEASE_TEST_MIN_TESTS))"; \
 	  cd $$mod && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -count=1 -tags fts5 $(RELEASE_RUN) ./...
 
-# Aggregate release gate. Composes the broad race-detector suite with
-# the cross-agent continuity / public-CLI subprocess suite. Both leaves
-# depend on `build` so $(BUILD_DIR)/mpm is available to the subprocess
-# test cases that shell out to it; that dependency used to live only on
-# test-release, on the reasoning that test-race was the inner dev-loop
-# gate and should stay build-free. A no-op rebuild is 0.35s, so that
-# reasoning cost a broken fresh-clone pre-merge gate for nothing.
-# Release_acceptance cannot silently fall outside future release
-# validation while this aggregate exists.
-release-gate: test-race test-release
+# Aggregate release gate. Composes only the suites that no other CI job
+# runs. The race detector is already exercised by the `gate` job
+# (root-module `-race` sweep + `make test-tools-race`), and `make
+# test-scripts` is invoked directly by that same `gate` job, so depending
+# on `test-race` here would re-run them. `test-release` (cross-agent
+# continuity / public-CLI subprocess suite, the separate release_acceptance
+# Go module) is the only thing the release gate adds; it depends on `build`
+# because the subprocess tests shell out to $(BUILD_DIR)/mpm.
+#
+# Earlier drafts composed `test-race test-release` here on the reasoning
+# that a release-gate run is the place for a comprehensive sweep. That
+# reasoning cost an extra `test-scripts` invocation per CI run (399 cases
+# at the current floor) without adding any coverage, since the `gate` job
+# already runs it. This target is the documented owner of release_acceptance
+# and only release_acceptance.
+release-gate: build test-release
 
 # Run tests with the race detector enabled.
 # Mirrors `make test` but adds `-race`. Depends on `build` for the same
