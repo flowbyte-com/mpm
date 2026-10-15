@@ -918,22 +918,31 @@ test-release: build
 	  echo "[test-release] collected $$n tests (floor $(RELEASE_TEST_MIN_TESTS))"; \
 	  cd $$mod && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -count=1 -tags fts5 $(RELEASE_RUN) ./...
 
-# Aggregate release gate. Composes only the suites that no other CI job
-# runs. The race detector is already exercised by the `gate` job
-# (root-module `-race` sweep + `make test-tools-race`), and `make
-# test-scripts` is invoked directly by that same `gate` job, so depending
-# on `test-race` here would re-run them. `test-release` (cross-agent
-# continuity / public-CLI subprocess suite, the separate release_acceptance
-# Go module) is the only thing the release gate adds; it depends on `build`
-# because the subprocess tests shell out to $(BUILD_DIR)/mpm.
+# Aggregate release gate. Composes the broad race-detector suite with
+# the cross-agent continuity / public-CLI subprocess suite. Both leaves
+# depend on `build` so $(BUILD_DIR)/mpm is available to the subprocess
+# test cases that shell out to it; that dependency used to live only on
+# test-release, on the reasoning that test-race was the inner dev-loop
+# gate and should stay build-free. A no-op rebuild is 0.35s, so that
+# reasoning cost a broken fresh-clone pre-merge gate for nothing.
+# Release_acceptance cannot silently fall outside future release
+# validation while this aggregate exists.
 #
-# Earlier drafts composed `test-race test-release` here on the reasoning
-# that a release-gate run is the place for a comprehensive sweep. That
-# reasoning cost an extra `test-scripts` invocation per CI run (399 cases
-# at the current floor) without adding any coverage, since the `gate` job
-# already runs it. This target is the documented owner of release_acceptance
-# and only release_acceptance.
-release-gate: build test-release
+# Re-anchoring note (2026-10-15): an earlier cut of this comment
+# promoted the more conservative `release-gate: build test-release`
+# shape on the grounds that the `gate` job already covers the race
+# detector and `make test-scripts`, so depending on `test-race` here
+# would re-run them inside the release-gate job. That argument
+# overrides a deliberate contract: `scripts/tests/`
+# `test_makefile_agent_adapter_wiring.TestGateReachability` (added
+# in 467d520, alongside the rest of the #14 wiring) pins
+# `release-gate` as a comprehensive sweep that reaches
+# `test-agent-installation` and `test-agent-adapters`. Pinning a
+# contract is itself the proof that the work is intentional, not
+# accidental duplication, so the right correction is to keep the
+# reach the test demands and accept the extra `test-scripts`
+# invocation per CI run as the cost of the explicit design.
+release-gate: test-race test-release
 
 # Run tests with the race detector enabled.
 # Mirrors `make test` but adds `-race`. Depends on `build` for the same

@@ -1168,14 +1168,14 @@ func TestBuildConfig_CIWiringForIssue14(t *testing.T) {
 				"  release-gate body:\n%s", indentForMessage(rgBody))
 		}
 		// The build prerequisite lives in the Makefile (the
-		// `release-gate: build test-release` target), not as a
-		// separate CI step — `make release-gate` triggers it
-		// transitively. We do not assert `make build` shows up
-		// as a separate step here because the relevant contract
-		// is on the Makefile (and the
-		// `TestBuildConfig_*` family that pins it), not on the
-		// workflow shape. Asserting both would force a redundant
-		// `make build` invocation per CI run.
+		// `release-gate: test-race test-release` target, which
+		// transitively pulls in `test-race: build`).
+		// `make release-gate` triggers a build without a
+		// separate CI step, so we do not assert `make build`
+		// shows up as a step here: asserting both would force a
+		// redundant `make build` invocation per CI run. The
+		// `TestBuildConfig_*` family above pins the Makefile
+		// shape; this contract is on the workflow-side reach.
 		_ = rgBody
 	}
 }

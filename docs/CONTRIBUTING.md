@@ -126,12 +126,17 @@ registry/dispatcher drift is caught.
     nested `internal/core/tools` race-detector sweep. Required for merge.
   - `full-suite` — `make build` then a non-race full sweep of the root
     module plus `internal/core/tools`. Required for merge.
-  - `release-gate` — `make build` then `make release-gate`, which
-    runs only `test-release` (cross-agent continuity, public-CLI
-    subprocess suite, FTS5 invariant). Required for merge. Without
-    this job, regressions in the release-only suite can land via a
-    green PR; the contract that pins it lives in
-    `TestBuildConfig_CIWiringForIssue14` in
+  - `release-gate` — `make release-gate`, which composes
+    `test-race` (root-module + `internal/core/tools` race-detector
+    sweep, plus `scripts/tests/`) with `test-release`
+    (cross-agent continuity, public-CLI subprocess suite, FTS5
+    invariant, in the `release_acceptance` Go module).
+    `make release-gate` depends on `test-race` which depends on
+    `build`, so a fresh `$(BUILD_DIR)/mpm` is available without a
+    separate `make build` step in the workflow. Required for merge.
+    Without this job, regressions in the release-only suite can
+    land via a green PR; the contract that pins the wiring lives
+    in `TestBuildConfig_CIWiringForIssue14` in
     `internal/core/build_config_invariants_test.go`, alongside the
     Makefile wiring contract
     (`TestBuildConfig_ReleaseAcceptanceHasNonVacuityFloor`,
@@ -145,12 +150,22 @@ registry/dispatcher drift is caught.
     core precommit subset, `mpm-lint --gate`.
   - `full-suite` owns: root-module non-race sweep,
     `internal/core/tools` non-race sweep.
-  - `release-gate` owns: `release_acceptance` (cross-agent
-    continuity, public-CLI subprocess suite, FTS5 invariant).
+  - `release-gate` owns: the `release-gate` aggregate
+    (`test-race` + `test-release`). The race suite and
+    `scripts/tests/` therefore run in BOTH the `gate` and
+    `release-gate` jobs. That overlap is intentional, not
+    accidental duplication: it is the design pinned by
+    `scripts/tests/test_makefile_agent_adapter_wiring.py`
+    `TestGateReachability`, which asserts that
+    `make release-gate` reaches `test-agent-installation` and
+    `test-agent-adapters` (and therefore the per-adapter suites
+    are exercised from every gate).
   - `make test` and `make test-race` are local-developer aggregates
     that compose the above into a single command. CI does not invoke
-    either; the jobs above are split so that an expensive suite runs
-    in exactly one job, not in two.
+    either; the jobs above are split so that the non-trivial
+    release-only suite (`test-release`) runs in its own job, while
+    the developer-loop gate (`test-race` + `scripts/tests/`) is
+    covered in the `gate` job too.
   The non-vacuity floors (`SCRIPTS_TEST_MIN_TESTS` in the `test-scripts`
   recipe, `RELEASE_TEST_MIN_TESTS` in the `test-release` recipe) are
   enforced inside the Makefile targets themselves, so a sabotaged
