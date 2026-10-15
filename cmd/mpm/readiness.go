@@ -283,14 +283,23 @@ func checkSchedulerReadOnly() ReadinessItem {
 	// stopped" changes the remedy entirely, and collapsing the two
 	// would send operators to `make service-scheduler` on a machine
 	// that never wanted a scheduler.
+	//
+	// An absent unit is NOT a defect: it is the supported state on a
+	// fresh machine, a CI runner, or any host that does not need a
+	// long-running scheduler. The Level = readinessLevelINFO signal
+	// is what keeps `mpm onboard` from rendering the absent scheduler
+	// as "needs attention": see collectReadiness (cmd/mpm/
+	// onboard_cmds.go) for how the level is consumed.
 	detail := "not running (not started — inspection is read-only)"
 	hint := "start it with `make service-scheduler`, or run `mpm` to allow auto-start"
+	level := readinessLevelWarn
 	if out, err := exec.Command("systemctl", "--user", "show",
 		"mpm-scheduler", "--property=LoadState", "--value").Output(); err == nil {
 		switch strings.TrimSpace(string(out)) {
 		case "not-found":
 			detail = "unit not installed on this machine"
 			hint = "install it with `make service-scheduler`"
+			level = readinessLevelInfo
 		case "":
 			// systemctl returned nothing — treat as unknown rather
 			// than claiming the unit is missing.
@@ -299,6 +308,7 @@ func checkSchedulerReadOnly() ReadinessItem {
 	return ReadinessItem{
 		Name:   "Scheduler running",
 		OK:     false,
+		Level:  level,
 		Detail: detail,
 		Hint:   hint,
 	}
