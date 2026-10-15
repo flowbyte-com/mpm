@@ -175,6 +175,9 @@ func classifyTheoryReference(theoryID string) string {
 // is attempted, so a reference that does not match exactly leaves the
 // theory untouched rather than resolving a near-miss.
 func resolveChallengedTheory(tx *sql.Tx, table ChallengeTable, theoryID, memoryID string) (int64, error) {
+	if !validChallengeTables[table] {
+		return 0, fmt.Errorf("resolveChallengedTheory: refusing unknown memories table %q", string(table))
+	}
 	resolveJSON, _ := json.Marshal(map[string]interface{}{"status": "disproven", "memory_id": nil})
 	res, err := tx.Exec(fmt.Sprintf(`
 		UPDATE %s
@@ -185,7 +188,7 @@ func resolveChallengedTheory(tx *sql.Tx, table ChallengeTable, theoryID, memoryI
 		  AND COALESCE(
 		        json_extract(metadata, '$.challenged_memory_id'),
 		        json_extract(metadata, '$.memory_id')
-		      ) = ?`, string(table)),
+		      ) = ?`, table),
 		string(resolveJSON), theoryID, memoryID)
 	if err != nil {
 		return 0, fmt.Errorf("resolve theory %s: %w", theoryID, err)
@@ -211,10 +214,13 @@ type challengedRow struct {
 // readChallengedMetadata reads one table's metadata for a memory. found is
 // false when the row is absent or soft-deleted, which is not an error.
 func readChallengedMetadata(dm *DatabaseManager, table ChallengeTable, memoryID string) (meta map[string]interface{}, found bool, err error) {
+	if !validChallengeTables[table] {
+		return nil, false, fmt.Errorf("readChallengedMetadata: refusing unknown memories table %q", string(table))
+	}
 	meta = map[string]interface{}{}
 	var raw sql.NullString
 	err = dm.db.QueryRow(fmt.Sprintf(
-		`SELECT metadata FROM %s WHERE id = ? AND deleted_at IS NULL`, string(table)),
+		`SELECT metadata FROM %s WHERE id = ? AND deleted_at IS NULL`, table),
 		memoryID).Scan(&raw)
 	if err == sql.ErrNoRows {
 		return meta, false, nil
@@ -391,6 +397,9 @@ func (dm *DatabaseManager) RestoreMemoryFromChallenge(memoryID string) (map[stri
 	if err != nil {
 		return nil, err
 	}
+	if !validChallengeTables[loc.Table] {
+		return nil, fmt.Errorf("restore memory %s: refusing unknown memories table %q", memoryID, string(loc.Table))
+	}
 	meta := loc.Meta
 
 	if !isChallengedMeta(meta) {
@@ -492,7 +501,7 @@ func (dm *DatabaseManager) RestoreMemoryFromChallenge(memoryID string) (map[stri
 	memRes, err := tx.Exec(fmt.Sprintf(`
 		UPDATE %s
 		SET %s
-		WHERE id = ? AND deleted_at IS NULL`, string(loc.Table), strings.Join(setClauses, ", ")), args...)
+		WHERE id = ? AND deleted_at IS NULL`, loc.Table, joinPriorPairs(setClauses)), args...)
 	if err != nil {
 		return nil, fmt.Errorf("clear memory status: %w", err)
 	}

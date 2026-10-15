@@ -820,14 +820,16 @@ func memoryFingerprintCounts(dm *mpminternal.DatabaseManager) (haveColumn bool, 
 	if !memoriesHaveModelColumn(db) {
 		return false, 0, 0, nil
 	}
-	err = db.QueryRow(`
+	if err = db.QueryRow(`
 		SELECT COUNT(*),
 		       COALESCE(SUM(CASE WHEN embedding_model IS NOT NULL
 		                          AND TRIM(embedding_model) <> '' THEN 1 ELSE 0 END), 0)
 		  FROM memories
 		 WHERE deleted_at IS NULL AND embedding IS NOT NULL AND embedding != 'null'`,
-	).Scan(&live, &labelled)
-	return true, live, labelled, err
+	).Scan(&live, &labelled); err != nil {
+		return false, 0, 0, err
+	}
+	return true, live, labelled, nil
 }
 
 // memoryVectorFingerprintState describes, from the live store, how much of

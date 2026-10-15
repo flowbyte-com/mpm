@@ -76,6 +76,21 @@ const (
 	ChallengeTableShared ChallengeTable = "shared.memories"
 )
 
+// validChallengeTables is the allowlist mpm-lint's sql parameterization
+// rule recognizes. Every call site that interpolates a ChallengeTable into
+// SQL text must guard against an unknown value with:
+//
+//	if !validChallengeTables[table] { return err }
+//
+// The linter only looks for the IndexExpr pattern `validChallengeTables[table]`
+// (and named equivalents) inside the enclosing function body — a `switch
+// table { case ... }` is structurally equivalent but invisible to the
+// classifier, so the allowlist form is the only one the gate accepts.
+var validChallengeTables = map[ChallengeTable]bool{
+	ChallengeTableLocal:  true,
+	ChallengeTableShared: true,
+}
+
 // challengeTables returns the tables that exist for this manager, in the
 // order a restore should prefer them: the local store first, because a
 // memory id is authoritative there, and the shared store only when the
@@ -203,9 +218,7 @@ func applyChallengeStateInTx(tx *sql.Tx, table ChallengeTable, spec ChallengeSpe
 	if spec.SlashAmount < 0 {
 		return out, fmt.Errorf("applyChallengeStateInTx: slash amount must be >= 0 (got %d); a negative reduction would silently increase the challenged memory's weight", spec.SlashAmount)
 	}
-	switch table {
-	case ChallengeTableLocal, ChallengeTableShared:
-	default:
+	if !validChallengeTables[table] {
 		return out, fmt.Errorf("applyChallengeStateInTx: refusing unknown memories table %q", string(table))
 	}
 
@@ -222,7 +235,7 @@ func applyChallengeStateInTx(tx *sql.Tx, table ChallengeTable, spec ChallengeSpe
 		       COALESCE(confidence, 0.5),
 		       json_extract(metadata, '$.challenged_prior_weight')
 		FROM %s
-		WHERE id = ? AND deleted_at IS NULL`, string(table)), spec.MemoryID).
+		WHERE id = ? AND deleted_at IS NULL`, table), spec.MemoryID).
 		Scan(&weight, &retrievalPriority, &confidence, &existingPriorWeight)
 	if err == sql.ErrNoRows {
 		return out, nil
@@ -299,7 +312,7 @@ func applyChallengeStateInTx(tx *sql.Tx, table ChallengeTable, spec ChallengeSpe
 	res, err := tx.Exec(fmt.Sprintf(`
 		UPDATE %s
 		SET %s
-		WHERE id = ? AND deleted_at IS NULL`, string(table), joinPriorPairs(setClauses)), args...)
+		WHERE id = ? AND deleted_at IS NULL`, table, joinPriorPairs(setClauses)), args...)
 	if err != nil {
 		return out, fmt.Errorf("applyChallengeStateInTx: challenge %s: %w", spec.MemoryID, err)
 	}
