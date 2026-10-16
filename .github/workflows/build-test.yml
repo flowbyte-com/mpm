@@ -12,15 +12,21 @@ on:
 # root-module race-detector sweep with coverage, and the nested
 # `internal/core/tools` race-detector sweep. The "full-suite" job
 # sweeps the entire test tree without the race detector and is also
-# gating. The "release-gate" job runs ONLY the cross-agent
-# continuity / public-CLI subprocess suite (release_acceptance, a
-# separate Go module `go test ./...` from the root cannot reach).
-# release_acceptance is intentionally NOT folded into the gate job —
-# its cases spawn real subprocesses of $(BUILD_DIR)/mpm, so the cost
-# is one full e2e sweep per case, and pre-merge-in-every-save is the
-# wrong place for it. It is also NOT folded into full-suite, since
-# the test names there mean the same set under non-race conditions
-# and the subprocess cases already cover the runtime surfaces.
+# gating. The "release-gate" job runs `make release-gate`, which is
+# `test-release` (the cross-agent continuity / public-CLI subprocess
+# suite that `go test ./...` from the root cannot reach because
+# release_acceptance is a separate Go module) chained with `test-race`
+# (so it also exercises the race-detector sweep, the scripts/tests
+# suite, and the per-adapter test suites including the mpm-opencode
+# TypeScript gate). That intentional duplication is contractually
+# pinned by `scripts/tests/test_makefile_agent_adapter_wiring.py`
+# TestGateReachability; the job's npm-bootstrap step is therefore
+# scoped to release-gate alone, because the `gate` and `full-suite`
+# jobs do not reach `test-agent-installation`.
+# release_acceptance itself is intentionally NOT folded into the
+# gate job — its cases spawn real subprocesses of $(BUILD_DIR)/mpm,
+# so the cost is one full e2e sweep per case, and pre-merge-in-
+# every-save is the wrong place for it.
 #
 # It used to be `continue-on-error: true`, on the stated grounds that it was
 # tracking "pre-existing test-pollution failures (see TestLessonStoreListLessons,
@@ -251,18 +257,53 @@ jobs:
           go-version: '1.26.6'
           cache: true
 
+      # Node 20 LTS. The mpm-opencode TypeScript suite (17 .test.ts
+      # files compiled to .test.js via the adapter-local tsc, run by
+      # `make test-agent-adapters`) requires `engines.node: ">=20"`
+      # per agent_installation/mpm-opencode/package.json. Node 20 is
+      # the LTS that satisfies the package.json floor and matches the
+      # version the project has been validated against on the
+      # ubuntu-24.04 GitHub Actions runner. Caching is keyed to the
+      # lockfile path so a clean-checkout rebuild under `npm ci`
+      # reuses the warm cache.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'agent_installation/mpm-opencode/package-lock.json'
+
+      # `make release-gate` -> `test-race` -> `test-agent-installation`
+      # -> `test-agent-adapters` reaches the mpm-opencode TypeScript
+      # suite, which compiles its `.test.ts` via the adapter-local
+      # `node_modules/.bin/tsc`. The Makefile gate fails closed if
+      # that binary is missing (it deliberately does NOT fall back to
+      # a globally installed tsc). `npm ci` populates devDependencies
+      # from the tracked lockfile (added in commit 0ec2810 alongside
+      # the V2 integration) and is idempotent. This step is scoped to
+      # the release-gate job because the `gate` and `full-suite` jobs
+      # do not reach `test-agent-installation`; adding it there would
+      # be a redundant download.
+      - name: Bootstrap OpenCode TypeScript devDependencies
+        run: npm ci
+        working-directory: agent_installation/mpm-opencode
+
       # release_acceptance is a separate Go module (its own go.mod), so
       # `go test ./...` from the repo root cannot descend into it.
-      # `make release-gate` runs only `test-release` (the cross-agent
-      # continuity / public-CLI subprocess suite); the race-detector
-      # suite and `make test-scripts` are owned by the `gate` job, so
-      # this job does not re-invoke them.
-      #
-      # The non-vacuity floor (RELEASE_TEST_MIN_TESTS) is enforced
-      # inside the `test-release` recipe itself, not here, so a
-      # sabotaged release_acceptance module cannot be reported as a
-      # green run. `make release-gate` depends on `build`, so the
-      # subprocess tests get a fresh $(BUILD_DIR)/mpm without a
-      # separate `make build` step.
+      # `make release-gate` runs `test-release` (the cross-agent
+      # continuity / public-CLI subprocess suite) AND `test-race` (the
+      # race-detector suite with `test-scripts` and
+      # `test-agent-installation` chained in). The `gate` job already
+      # runs `test-scripts` and a race-detector sweep; the deliberate
+      # duplication here exists because the release-gate target was
+      # contractually pinned as a comprehensive sweep that reaches
+      # `test-agent-installation` and `test-agent-adapters` (see
+      # scripts/tests/test_makefile_agent_adapter_wiring.py
+      # TestGateReachability, added in 467d520). The non-vacuity
+      # floors (AGENT_INSTALL_TEST_MIN_TESTS, RELEASE_TEST_MIN_TESTS)
+      # are enforced inside the recipes themselves, not here, so a
+      # sabotaged module cannot be reported as a green run. `make
+      # release-gate` depends on `build`, so the subprocess tests get
+      # a fresh $(BUILD_DIR)/mpm without a separate `make build`
+      # step.
       - name: Release gate
         run: make release-gate
