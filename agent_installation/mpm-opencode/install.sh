@@ -210,11 +210,15 @@ build_dist() {
         # the npm package name `tsc` (the deprecated 2.0.4 stub that
         # prints "This is not the tsc command you are looking for")
         # rather than the local TypeScript compiler. The
-        # node_modules/.bin/tsc path is hermetic and only depends on a
-        # real `npm install` having populated the devDependencies.
+        # node_modules/.bin/tsc path is hermetic and only depends on
+        # the adapter's devDependencies having been populated. The
+        # committed package-lock.json (lockfileVersion 3) makes
+        # `npm ci` the canonical bootstrap on a fresh checkout; plain
+        # `npm install` still works but is NOT what gates like
+        # `make test-agent-adapters` exercise in CI.
         local tsc_bin="$SCRIPT_DIR/node_modules/.bin/tsc"
         if [ ! -x "$tsc_bin" ]; then
-            die "TypeScript compiler not found at $tsc_bin; run 'npm install' in the mpm-opencode adapter directory to populate devDependencies" 3
+            die "TypeScript compiler not found at $tsc_bin; run 'npm ci' (preferred, matches the committed package-lock.json) or 'npm install' in the mpm-opencode adapter directory to populate devDependencies" 3
         fi
         if ! (cd "$SCRIPT_DIR" && "$tsc_bin" 2>>"$INSTALL_LOG") >>"$INSTALL_LOG" 2>&1; then
             die "tsc build failed; see $INSTALL_LOG" 2
@@ -566,7 +570,7 @@ case "$MODE" in
             ok=0
         fi
         if [ ! -x "$SCRIPT_DIR/node_modules/.bin/tsc" ]; then
-            warn "verify: local TypeScript compiler missing at $SCRIPT_DIR/node_modules/.bin/tsc; 'npm install' needed for fresh builds"
+            warn "verify: local TypeScript compiler missing at $SCRIPT_DIR/node_modules/.bin/tsc; 'npm ci' (preferred) or 'npm install' is needed for fresh builds"
         fi
         if [ ! -f "$OPENCODE_CONFIG" ]; then
             err "verify: $OPENCODE_CONFIG missing"

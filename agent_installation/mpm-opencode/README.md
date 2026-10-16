@@ -283,7 +283,9 @@ it is emptied.
 ## Build
 
 ```bash
-npm install
+npm ci        # preferred on a fresh checkout — uses the committed package-lock.json
+# or:
+npm install   # acceptable fallback if the lockfile is missing or out of date
 npm run build
 ```
 

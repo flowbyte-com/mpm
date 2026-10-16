@@ -136,8 +136,10 @@ Remaining (cannot be removed via supported interface):
   correction above).
 
 No MPM core files modified (`git status --short`: only `src/index.ts` modified,
-`package-lock.json` untracked; `dist/` and `node_modules/` gitignored). No
-commits made. No credentials or config secrets touched.
+`dist/` and `node_modules/` gitignored; `package-lock.json` was
+untracked at original validation time but is committed today — see
+the 2026-10-16 B1-correction note at the bottom). No commits made at
+that 2026-08-19 point. No credentials or config secrets touched.
 ---
 
 # 2026-10-16 Runtime Validation (OpenCode 2)
