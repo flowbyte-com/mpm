@@ -28,6 +28,10 @@ test_opencode_install.py):
     4.  already-correct directory registration  -> byte-identical no-op
     5.  repeated migration                      -> byte-identical no-op
     6.  unrelated entries + comments + trailing commas -> preserved
+    6d. duplicate MPM entries (same canonical URL twice, or
+        identical canonical URLs under both `plugin` and
+        `plugins`) must collapse to ONE canonical registration
+        while unrelated entries survive exactly as written
     7.  CRLF line endings                       -> preserved
     8.  BOM-prefixed config                     -> preserved
     9.  both `plugin` and `plugins` keys        -> merged into `plugins`
@@ -47,7 +51,10 @@ test_opencode_install.py):
 Negative controls: tests 13/14 fail the OLD contract (the old installer
 accepted any entry matching the canonical prefix and only ever checked
 for `plugin`-key entries), which is exactly how the broken file-path
-registration survived a successful `--verify` on 2026-10-16.
+registration survived a successful `--verify` on 2026-10-16. Test 6d is
+the dedup guard: a duplicate MPM registration must not survive into the
+final config, and an unrelated entry interleaved with the duplicates
+must not be over-merged by the dedup logic.
 """
 
 import json
@@ -188,6 +195,59 @@ class MigrationTests(unittest.TestCase):
         updated, _, _ = migrate(text, CANONICAL)
         self.assertEqual(_parse_entries(updated), [CANONICAL])
         self.assertIn('"model": "x/1",', updated)
+
+    def test_6d_duplicate_mpm_entries_are_deduplicated(self):
+        """Duplicate MPM-owned plugin entries (the same entry
+        written twice in `plugins`, or the same entry under both
+        the legacy `plugin` and the canonical `plugins` keys)
+        must collapse to a single canonical registration while
+        unrelated entries survive exactly as written. This is the
+        regression that surfaced on operators who manually
+        edited opencode.jsonc, then re-ran the installer in a
+        loop, accumulating identical entries under both key
+        names — each duplicate was a duplicate server-load
+        attempt to OpenCode 2.
+        """
+        # Same canonical entry written twice under `plugins`.
+        dup_in_plugins = (
+            "{\n"
+            '  "plugins": [\n'
+            '    "%s",\n'
+            '    "%s"\n'
+            "  ]\n"
+            "}\n"
+        ) % (CANONICAL, CANONICAL)
+        updated, changed, _summary = migrate(dup_in_plugins, CANONICAL)
+        self.assertEqual(
+            _parse_entries(updated),
+            [CANONICAL],
+            "Duplicate canonical entries in `plugins` must "
+            "collapse to a single registration.",
+        )
+        # Same canonical entry written under both key names;
+        # an unrelated entry separates them so the dedup logic
+        # has to prove it doesn't over-merge distinct entries.
+        dup_across_keys = (
+            "{\n"
+            '  "plugin": ["%s"],\n'
+            '  "plugins": ["%s",\n    "%s"]\n'
+            "}\n"
+        ) % (CANONICAL, CANONICAL, UNRELATED)
+        updated, changed, _summary = migrate(dup_across_keys, CANONICAL)
+        entries = _parse_entries(updated)
+        self.assertEqual(
+            entries,
+            [CANONICAL, UNRELATED],
+            "Identical MPM-owned entries across `plugin` and "
+            "`plugins` must collapse to ONE canonical "
+            "registration, and unrelated entries (here, "
+            f"{UNRELATED!r}) must survive in their original "
+            f"order. Got: {entries!r}",
+        )
+        self.assertNotIn('"plugin"', updated,
+                         "Legacy `plugin` key must be removed "
+                         "entirely after dedup, not merely "
+                         "depopulated.")
 
     def test_7_crlf_endings_are_preserved(self):
         text = (

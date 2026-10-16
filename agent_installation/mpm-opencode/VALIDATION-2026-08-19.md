@@ -206,10 +206,63 @@ records from before 2026-10-16 are not evidence of plugin loading.)
 - `--uninstall` removes every MPM-owned shape (package dir, file URL,
   legacy `opencode-mpm` variants, legacy `plugin` key) and keeps
   unrelated plugins, comments, trailing commas, CRLF and BOM intact.
-- Regression coverage: `tests/test_jsonc_config.py` (31), installer
-  `tests/test_opencode_install.py` (35 incl. negative controls), staging
+- Regression coverage: `tests/test_jsonc_config.py` (32 incl. negative
+  controls — was 31; the new case `test_6d_duplicate_mpm_entries_are_
+  deduplicated` pins that duplicate MPM registrations collapse to one
+  canonical entry while unrelated registrations survive exactly as
+  written), installer `tests/test_opencode_install.py` (35 incl.
+  negative controls), AGENTS.md managed-block installer
+  `tests/test_opencode_instructions_installer.py` (21), staging
   validator tests in `agent_installation/tests/`
   `test_runtime_package_provisioning.py` (52).
+
+### Test ownership — what each gate actually collects (NOT file totals)
+
+File-level counts above (52, 32, 35, 21, 17-TS) are the populations
+inside each file; the gates own them differently. Pin this
+distinction so a caller cannot mistake "files contain N tests" for
+"the gate runs N tests":
+
+| Gate / target | Owned by this gate | NOT owned here |
+| --- | --- | --- |
+| `make test-agent-installation` (the umbrella; reached by `make test`, `make test-race`, `make release-gate`) | `agent_installation/tests/test_runtime_package_provisioning.py` (52 tests — staging validator that pins the contract referenced above as "staged package = exactly server.js, package.json, dist/{...}"); plus everything `make test-agent-adapters` walks (below) | The 32 + 35 + 21 Python tests in `agent_installation/mpm-opencode/tests/` are owned by `make test-agent-adapters`, not by `test-agent-installation`'s umbrella directly. |
+| `make test-agent-adapters` (the per-adapter runner) | The Python families in `AGENT_ADAPTERS` (mpm-claude-code + mpm-hermes + mpm-memory-openclaw + mpm-opencode + mpm-pi) — including 87 baseline OpenCode Python adapter tests (32 + 35 + 21); the JS families in `AGENT_ADAPTERS_JS` (mpm-memory-openclaw + mpm-auto-mode-persona-openclaw — 165 passing JS tests); **the TS family in `AGENT_ADAPTERS_TS` (mpm-opencode — 17 passing TS tests as of the 2026-10-16 B1 wiring fix)**. | The 52 staging validator tests in `agent_installation/tests/test_runtime_package_provisioning.py` are owned by `test-agent-installation`, NOT by `test-agent-adapters`. |
+| `make test-scripts` | `scripts/tests/*.py` (the Makefile-wiring pin tests and friends — currently 414 tests, all green). | The 32/35/21 file-level tests above for mpm-opencode are NOT owned here. |
+
+Concretely, as of 2026-10-16:
+
+* **87 → 88 OpenCode Python adapter tests** (the union of
+  test_jsonc_config.py, test_opencode_install.py, and
+  test_opencode_instructions_installer.py) run through
+  `make test-agent-adapters` because `mpm-opencode` is in
+  `AGENT_ADAPTERS` and `unittest discover tests` finds them.
+  The count was 87 before this commit's small correction
+  #2 (a +1 dedup regression test) and is **88** after it:
+  test_jsonc_config.py is 32 (was 31),
+  test_opencode_install.py is 35, test_opencode_instructions_
+  installer.py is 21. These are NOT counted by
+  `test-agent-installation`'s 52-test staging validator
+  umbrella.
+* **52 staging tests** (the `agent_installation/tests/` runtime
+  package provisioning suite) run through `make
+  test-agent-installation`, alongside `$(MAKE)
+  test-agent-adapters`. Staging-validator tests pin the manifest
+  shape and the V2 payload presence — they are NOT duplicated
+  inside `make test-agent-adapters`.
+* **17 TypeScript tests** (the `*.test.ts` files in
+  `agent_installation/mpm-opencode/tests/`) run through `make
+  test-agent-adapters` after the 2026-10-16 B1 fix. They are
+  compiled into `tests-build/*.test.js` by the local
+  `node_modules/.bin/tsc` (driven by `tsconfig.tests.json`)
+  immediately before the same `node --test --test-reporter=tap`
+  invocation that carries the JS branch — no parallel parser,
+  no global TypeScript dependency. The floor
+  `AGENT_ADAPTER_TEST_MIN_TS_TESTS := 15` refuses a silently-
+  zero suite.
+
+The reviewer of the previous VALIDATION entry conflated
+"file-level tests" with "gate-level tests" in the brief; that is
+the B2 review finding the present entry corrects.
 
 Known limitation (unchanged from V1): `fetchWakeContext` stamps no
 provenance env, so wake-context fetch rows record under the default

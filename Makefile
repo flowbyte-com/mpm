@@ -156,12 +156,22 @@ RELEASE_TEST_MIN_TESTS := 20
 AGENT_INSTALL_TEST_MIN_TESTS := 300
 AGENT_ADAPTER_TEST_MIN_PY_TESTS := 150
 AGENT_ADAPTER_TEST_MIN_JS_TESTS := 100
+AGENT_ADAPTER_TEST_MIN_TS_TESTS := 15
 # Adapters whose Python suites are reachable via `unittest discover`.
 # Every directory with a tests/ package is listed explicitly; a new
 # adapter must be added here or it is silently skipped.
 AGENT_ADAPTERS := mpm-claude-code mpm-hermes mpm-memory-openclaw mpm-opencode mpm-pi
 # Adapters that additionally ship a `node --test` suite.
 AGENT_ADAPTERS_JS := mpm-memory-openclaw mpm-auto-mode-persona-openclaw
+# Adapters whose suites are written in TypeScript and are compiled
+# to JavaScript by the local `node_modules/.bin/tsc` before the
+# standard `node --test` invocation runs. Every entry here MUST
+# ship a `tsconfig.tests.json` so the compile inputs are pinned;
+# AGENT_ADAPTER_TEST_MIN_TS_TESTS is the per-suite pass-count
+# floor and the B1 gate's trip wire (the suite cannot disappear
+# without tripping it). The Python families still run through
+# AGENT_ADAPTERS — the TS gate runs ONLY the TypeScript suite.
+AGENT_ADAPTERS_TS := mpm-opencode
 
 .PHONY: all assert-build-dir-safe print-build-dir build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit test-scripts test-agent-installation test-agent-adapters lint help clean refresh-installed check-installed-drift check-installed
 
@@ -806,7 +816,7 @@ test-agent-adapters:
 	 command -v python3 >/dev/null 2>&1 || { \
 	   echo "[test-agent-adapters] FATAL: python3 not found on PATH." >&2; \
 	   exit 1; }; \
-	 py_total=0; js_total=0; failed=0; \
+	 py_total=0; js_total=0; ts_total=0; failed=0; \
 	 for d in $(AGENT_ADAPTERS); do \
 	   if [ ! -d "agent_installation/$$d/tests" ]; then \
 	     echo "[test-agent-adapters] FATAL: agent_installation/$$d/tests is missing." >&2; \
@@ -873,6 +883,75 @@ test-agent-adapters:
 	   exit 1; \
 	   fi; \
 	 echo "[test-agent-adapters] JS: $$js_total passing tests (floor $(AGENT_ADAPTER_TEST_MIN_JS_TESTS))"; \
+	 # TypeScript-compiled JS suite gate. Every entry in \
+	 # AGENT_ADAPTERS_TS ships a `tsconfig.tests.json` and a `tests/` \
+	 # tree of `.test.ts` files. The local pin for the compiler is \
+	 # `node_modules/.bin/tsc` (the artifact of `npm ci` on the \
+	 # adapter's own devDependencies). We DO NOT depend on a globally \
+	 # installed TypeScript and DO NOT trigger an unpinned download \
+	 # at gate time — a missing local binary is a hard refusal below. \
+	 # The output of compilation is `--outDir`-controlled; we sort \
+	 # the resulting set deterministically and run `node --test \
+	 # --test-reporter=tap` against it the same way the JS branch \
+	 # above does. Each adapter's tsconfig is local, so a new entry \
+	 # added to AGENT_ADAPTERS_TS must ship a matching tsconfig. \
+	 # Bootstrap: on a fresh checkout `agent_installation/mpm-opencode/\
+	 # node_modules/` is absent; the FATAL below names the canonical \
+	 # `npm ci` step. The same step populates the dev-time payload the \
+	 # installer (`install.sh` Step 1) and the runtime (`install.sh` \
+	 # Steps 1-3) both rely on, so the gate's local-pin requirement \
+	 # matches the rest of the project's. \
+	 for d in $(AGENT_ADAPTERS_TS); do \
+	   if [ ! -d "agent_installation/$$d/tests" ]; then \
+	     echo "[test-agent-adapters] FATAL: agent_installation/$$d/tests is missing." >&2; \
+	     echo "  AGENT_ADAPTERS_TS lists it, so its absence is a packaging error." >&2; \
+	     exit 1; \
+	   fi; \
+	   if [ ! -f "agent_installation/$$d/tsconfig.tests.json" ]; then \
+	     echo "[test-agent-adapters] FATAL: agent_installation/$$d/tsconfig.tests.json is missing." >&2; \
+	     echo "  AGENT_ADAPTERS_TS lists $$d, but the per-adapter compile config is not provided." >&2; \
+	     exit 1; \
+	   fi; \
+	   tsc=$$(cd "agent_installation/$$d" && pwd -P)/node_modules/.bin/tsc; \
+	   if [ ! -x "$$tsc" ]; then \
+	     echo "[test-agent-adapters] FATAL: $$d has no local TypeScript compiler at node_modules/.bin/tsc." >&2; \
+	     echo "  Run 'npm ci' inside agent_installation/$$d to populate devDependencies." >&2; \
+	     echo "  The gate deliberately does not fall back to a global tsc: a globally" >&2; \
+	     echo "  installed compiler version is unpinned here and would couple the" >&2; \
+	     echo "  output to whatever the host happens to ship." >&2; \
+	     exit 1; \
+	   fi; \
+	   printf '[test-agent-adapters] %s: compiling TypeScript tests via local tsc...\n' "$$d" >&2; \
+	   if ! (cd "agent_installation/$$d" && "$$tsc" -p tsconfig.tests.json 2>&1); then \
+	     echo "[test-agent-adapters] FATAL: $$d TypeScript compile failed." >&2; \
+	     exit 1; \
+	   fi; \
+	   js_files=$$(cd "agent_installation/$$d" && ls tests-build/*.test.js 2>/dev/null | sort); \
+	   if [ -z "$$js_files" ]; then \
+	     echo "[test-agent-adapters] FATAL: $$d compiled no .test.js files under tests-build/." >&2; \
+	     echo "  The compile did not produce any runnable output (regression class: TS suite" >&2; \
+	     echo "  collects zero tests and is silently accepted as a green gate)." >&2; \
+	     exit 1; \
+	   fi; \
+	   js_glob=$$(printf '%s\n' "$$js_files" | tr '\n' ' '); \
+	   out=$$(cd "agent_installation/$$d" && node --test --test-reporter=tap $$js_glob 2>&1); status=$$?; \
+	   printf '%s\n' "$$out"; \
+	   ESC=$$(printf '\033'); \
+	   n=$$(printf '%s\n' "$$out" | sed -E "s/$${ESC}\\[[0-9;]*m//g" \
+	        | sed -nE 's/^# pass ([0-9][0-9]*).*/\1/p' | tail -1); \
+	   if [ -z "$$n" ]; then \
+	     echo "[test-agent-adapters] FATAL: $$d reported no passing-test count." >&2; \
+	     echo "  node --test exited 0 without a pass line — refusing to count it." >&2; \
+	     exit 1; \
+	   fi; \
+	   ts_total=$$((ts_total + n)); \
+	   if [ $$status -ne 0 ]; then failed=1; fi; \
+	 done; \
+	 if [ $$ts_total -lt $(AGENT_ADAPTER_TEST_MIN_TS_TESTS) ]; then \
+	   echo "[test-agent-adapters] FATAL: collected $$ts_total TS passing tests, floor is $(AGENT_ADAPTER_TEST_MIN_TS_TESTS)." >&2; \
+	   exit 1; \
+	 fi; \
+	 echo "[test-agent-adapters] TS: $$ts_total passing tests (floor $(AGENT_ADAPTER_TEST_MIN_TS_TESTS))"; \
 	 if [ $$failed -ne 0 ]; then \
 	   echo "[test-agent-adapters] KNOWN FAILURES PRESENT — this target is not a gate." >&2; \
 	   echo "  See the counts in this target's Makefile comment. Fix them" >&2; \

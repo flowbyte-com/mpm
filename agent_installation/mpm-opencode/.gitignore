@@ -2,6 +2,13 @@
 dist/
 node_modules/
 
+# Compiled test suite produced by `tsc -p tsconfig.tests.json`.
+# The Makefile's test-agent-adapters gate runs the canonical gate's
+# TS tests against `tests-build/`, which is generated on demand by
+# the local node_modules/.bin/tsc — committing it would couple the
+# source tree to a host-specific compile.
+tests-build/
+
 # TypeScript build info
 *.tsbuildinfo
 

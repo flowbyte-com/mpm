@@ -11,6 +11,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:tests": "tsc -p tsconfig.tests.json",
     "watch": "tsc --watch"
   },
   "devDependencies": {
