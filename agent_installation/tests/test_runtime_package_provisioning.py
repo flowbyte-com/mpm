@@ -578,55 +578,85 @@ class TestCoreValidation(ValidatorFixture):
 
 
 class TestOpenCodePayloadValidation(ValidatorFixture):
-    """OpenCode's registered payload is one compiled file. Checks that
-    'the build succeeded' and 'the registered path resolves' stay
-    separate facts."""
+    """The OpenCode registration is the staged PACKAGE DIRECTORY, resolved
+    by a root-level server/index module the OpenCode 2 loader looks for
+    (never package.json). 'the build succeeded', 'a root entry exists', and
+    'the registered path resolves' must stay separate facts: an entry-less
+    directory verifies as a valid package while the loader silently drops
+    it — that is exactly the 2026-10-16 load-nothing defect's shape."""
 
-    def _pkg(self, dist: dict[str, str], *, package_json: bool = True) -> Path:
+    def _pkg(self, dist: dict[str, str], *, server_js: str | None = "default_shim",
+             package_json: bool = True) -> Path:
         d = self.tmp / "oc"
         (d / "dist").mkdir(parents=True)
         for name, body in dist.items():
             (d / "dist" / name).write_text(body)
+        if server_js == "default_shim":
+            (d / "server.js").write_text('export { default } from "./dist/index.v2.js";\n')
+        elif server_js is not None:
+            (d / "server.js").write_text(server_js)
         if package_json:
-            (d / "package.json").write_text('{"main": "./dist/index.js"}')
+            (d / "package.json").write_text('{"main": "./dist/index.v2.js"}')
         return d
 
     def test_complete_bundle_passes(self) -> None:
         d = self._pkg({
-            "index.js": 'import { w } from "./workspace.js";\nexport default w;\n',
+            "index.v2.js": 'import { w } from "./workspace.js";\nexport default w;\n',
             "workspace.js": "export const w = () => {};\n",
             "resolve-mpm-binary.js": "export const r = () => {};\n",
         })
         self.assertEqual(run_staged(d, "mpm_validate_runtime_package_opencode",
                                     "mpm-opencode").returncode, 0)
 
-    def test_missing_bundle_is_rejected(self) -> None:
+    def test_root_entry_required(self) -> None:
+        """A staged package without the root server.js entry registers and
+        loads nothing, with no warning from OpenCode. This is the loader
+        contract the 2026-10-16 regression was built on."""
+        d = self._pkg({
+            "index.v2.js": "export default {};\n",
+            "workspace.js": "export const w = () => {};\n",
+        }, server_js=None)
+        res = run_staged(d, "mpm_validate_runtime_package_opencode", "mpm-opencode")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("missing the root entry server.js", res.stderr)
+
+    def test_empty_root_entry_is_rejected(self) -> None:
+        d = self._pkg({
+            "index.v2.js": "export default {};\n",
+            "workspace.js": "export const w = () => {};\n",
+        }, server_js="")
+        res = run_staged(d, "mpm_validate_runtime_package_opencode", "mpm-opencode")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("root entry server.js is empty", res.stderr)
+
+    def test_missing_v2_payload_is_rejected(self) -> None:
         d = self._pkg({})
         res = run_staged(d, "mpm_validate_runtime_package_opencode", "mpm-opencode")
         self.assertNotEqual(res.returncode, 0)
-        self.assertIn("missing dist/index.js", res.stderr)
+        self.assertIn("missing dist/index.v2.js", res.stderr)
 
-    def test_empty_bundle_is_rejected(self) -> None:
+    def test_empty_v2_payload_is_rejected(self) -> None:
         """tsc can produce a zero-byte file on some failure paths; an empty
-        bundle registers and loads nothing."""
-        d = self._pkg({"index.js": ""})
+        payload registers and loads nothing."""
+        d = self._pkg({"index.v2.js": ""})
         res = run_staged(d, "mpm_validate_runtime_package_opencode", "mpm-opencode")
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("is empty", res.stderr)
 
     def test_unresolved_relative_import_is_rejected(self) -> None:
-        d = self._pkg({"index.js": 'import { w } from "./workspace.js";\n'})
+        d = self._pkg({"index.v2.js": 'import { w } from "./workspace.js";\n'})
         res = run_staged(d, "mpm_validate_runtime_package_opencode", "mpm-opencode")
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("unresolved internal imports", res.stderr)
         self.assertIn("./workspace.js", res.stderr)
 
     def test_bare_specifier_is_not_treated_as_unresolved(self) -> None:
-        """@opencode-ai/plugin is supplied by the host and is unresolvable
-        in the checkout too. Rejecting it would fail every correct run."""
+        """@opencode/plugin is aliased by the OpenCode 2 loader for
+        directory plugins and is unresolvable in the checkout too.
+        Rejecting it would fail every correct run."""
         d = self._pkg({
-            "index.js": 'import { tool } from "@opencode-ai/plugin";\n'
-                        "export default { tool };\n",
+            "index.v2.js": 'import { Plugin } from "@opencode/plugin";\n'
+                           "export default Plugin.define({ id: 'x', setup() {} });\n",
         })
         self.assertEqual(run_staged(d, "mpm_validate_runtime_package_opencode",
                                     "mpm-opencode").returncode, 0)
@@ -726,7 +756,8 @@ class TestAdapterManifestsMatchInstallers(unittest.TestCase):
 
     CASES = [
         ("mpm-opencode", "install.sh", "OPENCODE_RUNTIME_MANIFEST", [
-            "dist/index.js",
+            "server.js",
+            "dist/index.v2.js",
             "dist/workspace.js",
             "dist/resolve-mpm-binary.js",
             "package.json",
@@ -758,21 +789,39 @@ class TestManifestEntriesExistInSource(unittest.TestCase):
     stage time, not publish a package that throws on load."""
 
     def test_opencode_manifest_matches_tsc_output_shape(self) -> None:
-        """tsc emits one .js per .ts under src/ (rootDir=src, outDir=dist).
-        The manifest is therefore exactly the src/ file list plus
+        """tsc emits one .js per .ts under src/ (rootDir=src, outDir=dist),
+        except for ambient declarations (.d.ts), which emit nothing. The
+        manifest is therefore the compilable src/ file list plus
         package.json — anything else would be a manifest drift bug."""
         src = AGENT_DIR / "mpm-opencode" / "src"
         emitted = sorted(
-            f"dist/{p.stem}.js" for p in src.glob("*.ts")
+            f"dist/{p.stem}.js"
+            for p in src.glob("*.ts")
+            if not p.name.endswith(".d.ts")
         )
         expected = sorted([
             "dist/index.js",
+            "dist/index.v2.js",
             "dist/workspace.js",
             "dist/resolve-mpm-binary.js",
         ])
         self.assertEqual(emitted, expected,
                          "opencode src/ changed; the runtime manifest and "
                          "the fake-tsc test stub must both be updated")
+
+    def test_opencode_staged_package_carries_root_entry(self) -> None:
+        """server.js is not a tsc output — it is a checked-in shim — but it
+        MUST be in the manifest: without it OpenCode drops the directory
+        registration silently (the 2026-10-16 defect)."""
+        self.assertTrue(
+            (AGENT_DIR / "mpm-opencode" / "server.js").exists(),
+            "server.js missing from the adapter source tree",
+        )
+        reexport = (AGENT_DIR / "mpm-opencode" / "server.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("./dist/index.v2.js", reexport,
+                      "server.js must re-export the compiled payload")
 
     def test_pi_manifest_matches_source_tree(self) -> None:
         src = AGENT_DIR / "mpm-pi"

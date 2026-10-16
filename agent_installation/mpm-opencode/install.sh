@@ -4,8 +4,8 @@
 #
 # Idempotent. Performs four ordered responsibilities:
 #
-#   1. Compile dist/ from canonical source (if dist/index.js missing
-#      or older than src/index.ts).
+#   1. Compile dist/ from canonical source (if dist/index.v2.js missing
+#      or older than any module under src/).
 #   2. Provision the compiled payload into the MPM runtime root via the
 #      shared stage_runtime_package.sh library, and validate it. The
 #      plugin[] entry is never written for a path that holds nothing.
@@ -17,12 +17,28 @@
 #   4. Refresh the AGENTS.md behavioral managed block (delegates to
 #      install_agents_instructions.py for the actual content work).
 #
-# Migration behavior (Part 3 — namespace refresh):
+# Migration behavior (Part 3 — registration refresh):
 #
 #   Before 2026-09-17: opencode.jsonc pointed at
 #       file:///.../.mpm/agent_installation/opencode-mpm/dist/index.js
-#   After this script: opencode.jsonc points at
+#   2026-09-17 .. 2026-10-16: opencode.jsonc pointed at
 #       file:///.../.mpm/agent_installation/mpm-opencode/dist/index.js
+#   After this script: opencode.jsonc points at the PACKAGE DIRECTORY
+#       file:///.../.mpm/agent_installation/mpm-opencode
+#
+#   The 2026-09-17 namespace refresh fixed `opencode-mpm` → `mpm-opencode`
+#   but kept registering a FILE url. OpenCode 2 (v2.0.30, verified live)
+#   refuses a file target ("configured plugin path must be a directory")
+#   and, once a directory is registered, resolves it by looking for a
+#   ROOT-LEVEL `server.*` / `index.*` module inside the directory — it
+#   never consults package.json, and it drops a directory without one
+#   SILENTLY (no warning; /api/plugin stays all-builtin). The
+#   dist/index.js registration therefore loaded nothing from 2026-09-17
+#   through 2026-10-16 while every install and --verify reported success.
+#
+#   The staged package now carries `server.js` at its root — a shim that
+#   re-exports the compiled payload in dist/index.v2.js — and the staged
+#   contract is validated for exactly that shape before registration.
 #
 #   The legacy directory at ~/.mpm/agent_installation/opencode-mpm/
 #   is REPO-OWNED state (left behind by the namespace migration
@@ -126,8 +142,11 @@ PLUGIN_INSTALL_DIR="${MPM_HOME_DIR}/agent_installation"
 # Canonical adapter install locations (new and legacy).
 CANONICAL_ADAPTER_DIR="${PLUGIN_INSTALL_DIR}/mpm-opencode"
 LEGACY_ADAPTER_DIR="${PLUGIN_INSTALL_DIR}/opencode-mpm"
-# Canonical dist path written to opencode.jsonc plugin[].
-CANONICAL_PLUGIN_ENTRY="file://${CANONICAL_ADAPTER_DIR}/dist/index.js"
+# The registration is the plugin PACKAGE DIRECTORY. OpenCode 2 resolves a
+# directory plugin by a root-level server/index module inside it (never
+# package.json); a file registration is refused outright, and a directory
+# without the root entry is dropped silently. See the header comments.
+CANONICAL_PLUGIN_ENTRY="file://${CANONICAL_ADAPTER_DIR}"
 
 INSTALL_LOG="/tmp/mpm-opencode-install.log"
 : > "$INSTALL_LOG" 2>/dev/null || true
@@ -159,15 +178,33 @@ done
 # --------------------------------------------------------------------------
 #
 # The local TypeScript compiler (./node_modules/.bin/tsc) is the
-# canonical build. We rebuild only when the existing dist/index.js is
-# older than src/index.ts — incremental build keeps this fast on
-# repeat invocations. See build_dist() for why we don't use
-# `npx tsc` (the deprecated npm package lookup).
+# canonical build. We rebuild only when the staged payload
+# (dist/index.v2.js) is missing or some module under src/ is newer than
+# it — incremental build keeps this fast on repeat invocations. See
+# build_dist() for why we don't use `npx tsc` (the deprecated npm
+# package lookup).
 
 build_dist() {
-    if [ ! -f "$SCRIPT_DIR/dist/index.js" ] \
-        || [ -f "$SCRIPT_DIR/src/index.ts" -a "$SCRIPT_DIR/src/index.ts" -nt "$SCRIPT_DIR/dist/index.js" ]; then
-        log "rebuilding dist/ from source..."
+    # The staged payload is dist/index.v2.js (the OpenCode-2 plugin
+    # implementation); dist/index.js remains the V1-era build and is not
+    # part of the staged package. Rebuild when the payload is missing or
+    # ANY source module under src/ is newer than it.
+    local payload="$SCRIPT_DIR/dist/index.v2.js"
+    local newer=""
+    if [ ! -f "$payload" ]; then
+        newer="missing"
+    else
+        local f
+        for f in "$SCRIPT_DIR"/src/*.ts; do
+            [ -e "$f" ] || continue
+            if [ "$f" -nt "$payload" ]; then
+                newer="$f"
+                break
+            fi
+        done
+    fi
+    if [ -n "$newer" ]; then
+        log "rebuilding dist/ from source ($newer)..."
         # Use the local TypeScript binary from node_modules/.bin/. We
         # intentionally do NOT use `npx tsc` here: `npx tsc` resolves
         # the npm package name `tsc` (the deprecated 2.0.4 stub that
@@ -182,9 +219,9 @@ build_dist() {
         if ! (cd "$SCRIPT_DIR" && "$tsc_bin" 2>>"$INSTALL_LOG") >>"$INSTALL_LOG" 2>&1; then
             die "tsc build failed; see $INSTALL_LOG" 2
         fi
-        log "dist/index.js rebuilt"
+        log "dist/ rebuilt"
     else
-        log "dist/index.js is up to date"
+        log "dist/ is up to date"
     fi
 }
 
@@ -211,17 +248,21 @@ build_dist() {
 
 STAGE_LIBRARY="${SCRIPT_DIR}/../scripts/stage_runtime_package.sh"
 
-# Explicit allowlist. tsc emits one .js per .ts under src/ with
-# rootDir=src and outDir=dist, so these three are the complete compiled
-# payload. package.json travels with it because OpenCode resolves the
-# plugin's module metadata through the package root. Development surface
-# (install.sh, tests/, src/, reconcile.json, node_modules) is excluded.
+# Explicit allowlist. server.js is the root-level ENTRY the OpenCode
+# loader resolves a directory plugin by (it never consults package.json).
+# tsc emits one .js per .ts under src/ with rootDir=src and outDir=dist, so
+# the dist/ entries are the complete compiled payload; index.v2.js is the
+# implementation the loader actually runs. package.json travels with it
+# because OpenCode resolves the plugin's module metadata through the
+# package root. Development surface (install.sh, tests/, src/,
+# reconcile.json, node_modules) is excluded.
 #
 # If tsc ever emits a module this list omits, the unresolved-import check in
 # the validator fails the stage rather than publishing a package that would
 # throw on load. The list cannot silently drift out of date.
 OPENCODE_RUNTIME_MANIFEST=(
-    dist/index.js
+    server.js
+    dist/index.v2.js
     dist/workspace.js
     dist/resolve-mpm-binary.js
     package.json
@@ -244,7 +285,7 @@ stage_opencode_runtime_package() {
         exit 3
     fi
     CANONICAL_ADAPTER_DIR="$(cd "$staged" && pwd -P)"
-    CANONICAL_PLUGIN_ENTRY="file://${CANONICAL_ADAPTER_DIR}/dist/index.js"
+    CANONICAL_PLUGIN_ENTRY="file://${CANONICAL_ADAPTER_DIR}"
     log "runtime package staged and validated: $CANONICAL_ADAPTER_DIR"
 }
 
@@ -267,11 +308,13 @@ migrate_opencode_config() {
     mkdir -p "$OPENCODE_CONFIG_DIR" 2>/dev/null || true
 
     if [ ! -f "$OPENCODE_CONFIG" ]; then
-        # No config yet — create one with just the plugin entry.
+        # No config yet — create one with just the plugin entry. The "plugins"
+        # key is the OpenCode 2 canonical name ("plugin" is the V1 key the
+        # v2 loader still tolerates for compatibility).
         cat > "$OPENCODE_CONFIG" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
-  "plugin": [
+  "plugins": [
     "${CANONICAL_PLUGIN_ENTRY}"
   ]
 }
@@ -391,27 +434,25 @@ do_uninstall() {
             exit 1
         fi
     fi
-    # Remove the plugin entry from opencode.jsonc (only our canonical one).
+    # Remove the plugin entry from opencode.jsonc. Delegated to
+    # jsonc_config.py in --remove-mpm mode: every MPM-owned registration
+    # shape (the canonical package directory, the 2026-09-17..10-16
+    # dist/index.js file registration, and every legacy opencode-mpm
+    # variant) is removed from both the V2 `plugins` key and the legacy
+    # `plugin` key, unrelated plugins and all comments survive, and a key
+    # whose array becomes empty is removed entirely. The previous inline
+    # implementation parsed with json.loads (which dies on commented
+    # configs — uninstall silently did nothing) and rewrote the whole file
+    # with json.dump, destroying every comment it succeeded on.
     if [ -f "$OPENCODE_CONFIG" ] && command -v python3 >/dev/null 2>&1; then
-        python3 - "$OPENCODE_CONFIG" "$CANONICAL_PLUGIN_ENTRY" <<'PYEOF'
-import json, os, sys
-config_path = os.path.realpath(sys.argv[1])
-canonical = sys.argv[2]
-with open(config_path, 'r', encoding='utf-8') as f:
-    text = f.read()
-try:
-    data = json.loads(text)
-except Exception:
-    sys.exit(0)
-plugins = data.get('plugin', [])
-if not isinstance(plugins, list):
-    plugins = [plugins]
-data['plugin'] = [p for p in plugins if p != canonical]
-with open(config_path, 'w', encoding='utf-8') as f:
-    json.dump(data, f, indent=2)
-    f.write('\n')
-PYEOF
-        log "removed canonical plugin entry from $OPENCODE_CONFIG"
+        if python3 "${SCRIPT_DIR}/scripts/jsonc_config.py" \
+                --remove-mpm "$OPENCODE_CONFIG" "$CANONICAL_PLUGIN_ENTRY" >>"$INSTALL_LOG" 2>&1; then
+            log "removed MPM registration entries from $OPENCODE_CONFIG"
+        else
+            err "opencode.jsonc uninstall failed — file left untouched (see $INSTALL_LOG)."
+            err "  MPM registrations may remain in $OPENCODE_CONFIG."
+            exit 1
+        fi
     fi
 }
 
@@ -444,23 +485,31 @@ case "$MODE" in
         # (every `opencode` subcommand requires a live authenticated
         # environment), and an unresolvable plugin URL is silent.
         log "verification (checked here):"
-        if [ -f "$CANONICAL_ADAPTER_DIR/dist/index.js" ]; then
-            log "  [ok]   payload exists at the registered path"
+        if [ -f "$CANONICAL_ADAPTER_DIR/server.js" ] && [ -s "$CANONICAL_ADAPTER_DIR/server.js" ]; then
+            log "  [ok]   root entry server.js exists at the registered package"
         else
-            log "  [FAIL] payload missing at the registered path"
+            log "  [FAIL] root entry server.js missing — OpenCode drops the registration silently"
+        fi
+        if [ -f "$CANONICAL_ADAPTER_DIR/dist/index.v2.js" ] && [ -s "$CANONICAL_ADAPTER_DIR/dist/index.v2.js" ]; then
+            log "  [ok]   compiled payload exists behind the registered path"
+        else
+            log "  [FAIL] compiled payload dist/index.v2.js missing at the registered path"
         fi
         if python3 "${SCRIPT_DIR}/scripts/jsonc_config.py" \
                 --check-entry "$OPENCODE_CONFIG" "$CANONICAL_PLUGIN_ENTRY" >/dev/null 2>&1; then
-            log "  [ok]   plugin[] in $OPENCODE_CONFIG names the registered path"
+            log "  [ok]   plugins[] in $OPENCODE_CONFIG registers the package directory"
         else
-            log "  [FAIL] plugin[] in $OPENCODE_CONFIG does not name the registered path"
+            log "  [FAIL] $OPENCODE_CONFIG does not register the package directory"
+            log "         (a historical file-path registration also fails this check)"
         fi
         log "  [ok]   AGENTS.md managed block refreshed"
         log "NOT verified:"
-        log "  whether OpenCode actually loads the plugin. OpenCode offers no"
-        log "  non-interactive way to ask, and a plugin URL that resolves to"
-        log "  nothing produces no error. Confirm by starting OpenCode and"
-        log "  invoking an mpm_* tool."
+        log "  whether OpenCode actually loads the plugin. Installer checks cannot"
+        log "  prove runtime loading. With a running OpenCode service, ask the"
+        log "  server itself and require a NON-builtin plugin entry:"
+        log "    opencode api GET /api/plugin"
+        log "  (an all-builtin result means the plugin did NOT load); or invoke an"
+        log "  mpm_* tool from an OpenCode session."
         if [ -d "$LEGACY_ADAPTER_DIR" ]; then
             log "  legacy directory remains at $LEGACY_ADAPTER_DIR"
             log "  operator can remove manually: rm -rf '$LEGACY_ADAPTER_DIR'"
@@ -477,9 +526,21 @@ case "$MODE" in
         # script happens to be sitting next to. Verifying SCRIPT_DIR is
         # what let a checkout pass --verify while the registered
         # file:// URL pointed at nothing.
-        if [ ! -f "${CANONICAL_ADAPTER_DIR}/dist/index.js" ]; then
-            err "verify: registered payload missing"
-            err "  expected: ${CANONICAL_ADAPTER_DIR}/dist/index.js"
+        #
+        # The registration is the PACKAGE DIRECTORY; the loader-resolvable
+        # root entry plus the compiled payload are both required — a
+        # directory without server.js "verifies" as an existing directory
+        # while the loader drops it silently.
+        if [ ! -f "${CANONICAL_ADAPTER_DIR}/server.js" ] || [ ! -s "${CANONICAL_ADAPTER_DIR}/server.js" ]; then
+            err "verify: registered package has no root entry server.js"
+            err "  expected: ${CANONICAL_ADAPTER_DIR}/server.js (re-run install)"
+            err "  a directory plugin without that root-level module is dropped"
+            err "  silently by the OpenCode loader (no warning is printed)"
+            ok=0
+        fi
+        if [ ! -f "${CANONICAL_ADAPTER_DIR}/dist/index.v2.js" ] || [ ! -s "${CANONICAL_ADAPTER_DIR}/dist/index.v2.js" ]; then
+            err "verify: compiled payload missing at the registered path"
+            err "  expected: ${CANONICAL_ADAPTER_DIR}/dist/index.v2.js"
             ok=0
         fi
         if [ ! -x "$SCRIPT_DIR/node_modules/.bin/tsc" ]; then
@@ -504,8 +565,11 @@ case "$MODE" in
         if [ -f "$OPENCODE_CONFIG" ]; then
             if ! python3 "${SCRIPT_DIR}/scripts/jsonc_config.py" \
                     --check-entry "$OPENCODE_CONFIG" "$CANONICAL_PLUGIN_ENTRY" 2>>"$INSTALL_LOG"; then
-                err "verify: $OPENCODE_CONFIG does not register the canonical plugin entry"
+                err "verify: $OPENCODE_CONFIG does not register the canonical package directory"
                 err "  expected: $CANONICAL_PLUGIN_ENTRY"
+                err "  a surviving historical file-path registration (…/dist/index.js)"
+                err "  is the load-nothing defect this check exists to catch; re-run install"
+                err "  or hand-edit the entry to the package directory."
                 ok=0
             fi
         fi

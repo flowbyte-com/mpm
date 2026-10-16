@@ -69,7 +69,8 @@
 #
 #     MPM_RUNTIME_PACKAGE_VALIDATOR=mpm_validate_runtime_package_opencode \
 #     stage_runtime_package "$SCRIPT_DIR" "$RUNTIME_ROOT" "mpm-opencode" \
-#         dist/index.js dist/workspace.js dist/resolve-mpm-binary.js package.json
+#         server.js dist/index.v2.js dist/workspace.js \
+#         dist/resolve-mpm-binary.js package.json
 #
 # Library contract: safe to source under `set -euo pipefail`. Defines
 # functions only; sourcing has no side effects.
@@ -456,25 +457,49 @@ PY
 # mpm_validate_runtime_package_opencode <dir> [plugin-id]
 # --------------------------------------------------------------------------
 #
-# OpenCode's payload is a single file:// URL into the staged tree, so there
-# is no package metadata to reconcile — the only thing that can be wrong is
-# that the compiled bundle is absent or empty.
+# The OpenCode registration is now the staged PACKAGE DIRECTORY (a file://
+# URL naming the directory, not a file inside it), and OpenCode 2 resolves
+# a directory plugin by looking for a root-level `server.*` / `index.*`
+# entry at the top of that directory — it never consults package.json and
+# it silently drops a directory registered without a resolvable entry.
+# (Silently: no warning, and `opencode plugin list` still reports success
+# with zero non-builtin plugins. See the 2026-10-16 registration defect.)
+#
+# So two things can be wrong:
+#   1. the loader-resolvable root entry is absent        -> registration
+#      succeeds and loads nothing (no warning is printed);
+#   2. the compiled payload behind that entry is absent  -> resolve errors
+#      at load time.
 #
 # The build runs in the *source* tree (build_dist compiles into SCRIPT_DIR),
-# so "the source built" and "the registered path resolves to a bundle" are
-# two separate facts. This check is what stops the second from being assumed.
+# so "the source built" and "the registered path resolves to a loadable
+# package" are two separate facts. This check is what stops the second from
+# being assumed, and — since 2026-10-16 — the first too.
 mpm_validate_runtime_package_opencode() {
   local dir="$1" fail=0
 
-  local entry="dist/index.js"
-  if [ ! -f "$dir/$entry" ]; then
-    echo "[stage] ERROR: staged OpenCode package is missing $entry" >&2
-    echo "[stage]        run 'npm install && npm run build' in the adapter" >&2
-    echo "[stage]        source directory first, or add $entry to the manifest" >&2
+  local root_entry="server.js"
+  if [ ! -f "$dir/$root_entry" ]; then
+    echo "[stage] ERROR: staged OpenCode package is missing the root entry $root_entry" >&2
+    echo "[stage]        OpenCode resolves a directory plugin by that root-level" >&2
+    echo "[stage]        module name; without it the registration is dropped" >&2
+    echo "[stage]        silently (no warning, plugin registry stays empty)." >&2
     fail=1
-  elif [ ! -s "$dir/$entry" ]; then
-    echo "[stage] ERROR: staged OpenCode payload $entry is empty" >&2
-    echo "[stage]        an empty bundle registers and loads nothing" >&2
+  elif [ ! -s "$dir/$root_entry" ]; then
+    echo "[stage] ERROR: staged OpenCode root entry $root_entry is empty" >&2
+    echo "[stage]        an empty entry resolves to an empty module" >&2
+    fail=1
+  fi
+
+  local payload="dist/index.v2.js"
+  if [ ! -f "$dir/$payload" ]; then
+    echo "[stage] ERROR: staged OpenCode package is missing $payload" >&2
+    echo "[stage]        run 'npm install && npm run build' in the adapter" >&2
+    echo "[stage]        source directory first, or add $payload to the manifest" >&2
+    fail=1
+  elif [ ! -s "$dir/$payload" ]; then
+    echo "[stage] ERROR: staged OpenCode payload $payload is empty" >&2
+    echo "[stage]        an empty payload registers and loads nothing" >&2
     fail=1
   fi
 
