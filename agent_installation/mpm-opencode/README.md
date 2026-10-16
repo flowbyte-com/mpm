@@ -310,8 +310,8 @@ Registration shape (`~/.config/opencode/opencode.jsonc`, written by
 }
 ```
 
-Before 2026-09-17 the namespace was `opencode-mpm`; from 2026-09-17
-through 2026-10-16 the installer registered
+Before 2026-09-17 the namespace was the legacy `opencode`-`mpm`
+hyphenated form; from 2026-09-17 through 2026-10-16 the installer registered
 `file:///.../mpm-opencode/dist/index.js` — a FILE url, which OpenCode 2
 refuses ("configured plugin path must be a directory") under an old
 config schema and elsewhere drops silently. Both shapes are migrated to
@@ -331,7 +331,8 @@ is why the historical source must not anchor the build.
 
 ```bash
 # 1. Remove MPM registrations from opencode.jsonc (all historical
-#    shapes: package dir, dist/index.js file url, opencode-mpm legacy):
+#    shapes: package dir, dist/index.js file url, the legacy
+#    hyphenated `opencode`-`mpm` form):
 ~/.mpm/agent_installation/mpm-opencode/install.sh --uninstall
 
 # 2. Strip the managed section from AGENTS.md (user scope):
