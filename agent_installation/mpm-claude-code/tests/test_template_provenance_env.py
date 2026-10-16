@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -47,11 +48,22 @@ from pathlib import Path
 # resolve from the repository so they work without an installed MPM.
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 TEMPLATE = PLUGIN_DIR / ".mcp.json.template"
+INSTALL_SH = PLUGIN_DIR / "install.sh"
+CONFIG_HELPER = PLUGIN_DIR / "scripts" / "claude_mcp_config.py"
 # Claude Code's user scope is ~/.claude.json (mcpServers at top level).
 # ~/.claude/.mcp.json is NOT a discovery path — install.sh used to write
 # there, so these assertions silently skipped forever on a host where the
 # adapter had never run. They now follow the registration the installer
 # actually performs.
+#
+# MATERIALIZED is the operator's live ~/.claude.json — the one install.sh
+# would read on a developer machine that has already run the installer.
+# Tests that touch the live install path (MaterializedConfigInSync below)
+# check for its presence and skip cleanly when absent, so a clean CI runner
+# with no prior install does not error out. Tests that need to *exercise*
+# the installer's first-install contract run against an isolated sandbox
+# (FreshInstallMatchesTemplateContract) so the developer's real config
+# is never read or written by these tests.
 MATERIALIZED = Path.home() / ".claude.json"
 # HOME_RESOLVED — the resolved ${HOME} that install.sh substitutes when
 # it materialises the template. The test asserts template variables
@@ -60,6 +72,18 @@ MATERIALIZED = Path.home() / ".claude.json"
 # "/home/v" hardcoded the author's checkout and produced a
 # host-dependent assertion that failed under any other user.
 HOME_RESOLVED = str(Path.home())
+
+
+def has_claude() -> bool:
+    """Whether the host has the `claude` CLI on PATH.
+
+    The first-install contract requires `claude mcp add` to run; on hosts
+    without Claude Code installed the installer itself refuses to proceed.
+    The sandbox-based tests below skip on those hosts rather than fabricating
+    a `~/.claude.json` — installing the CLI is a developer decision, not a
+    test convenience.
+    """
+    return shutil.which("claude") is not None
 
 
 def _resolved_template():
@@ -205,30 +229,26 @@ class MaterializedConfigInSync(unittest.TestCase):
 
 
 class InstallMaterializationIsIdempotent(unittest.TestCase):
-    """install.sh is idempotent: running the materialization produces identical env block content."""
+    """install.sh's in-process materialization is deterministic.
+
+    These tests do not run install.sh end-to-end; the installer's sanity
+    probe requires the canonical MPM binary at $HOME/.mpm/bin/mpm-mcp,
+    which is a developer-machine artefact, not a test fixture. Instead we
+    exercise the materialization logic in-process and verify the env
+    block is identical across runs and across a synthetic empty / pre-seeded
+    user config. That proves the template+materialize pipeline is
+    deterministic regardless of invocation count or starting state.
+
+    First-install behaviour against a real Claude Code CLI is verified
+    separately by FreshInstallMatchesTemplateContract, which runs the
+    installer against an isolated sandbox so the developer's real
+    ~/.claude.json is never read or written.
+    """
 
     def test_double_materialize_yields_stable_env(self):
-        # We don't run install.sh end-to-end (its sanity probe requires the
-        # canonical MPM binary at $HOME/.mpm/bin/mpm-mcp), but we exercise the
-        # materialization logic in-process twice and verify the env block is
-        # identical across runs. That proves the template+materialize pipeline
-        # is deterministic regardless of invocation count.
         first = self._materialize()
         second = self._materialize()
         self.assertEqual(first["env"], second["env"])
-
-    def test_installed_matches_template_after_install(self):
-        # If install.sh has been run, the user-scope entry should reflect the
-        # template's canonical framework-id var.
-        live_entry = (json.loads(MATERIALIZED.read_text())
-                      .get("mcpServers") or {}).get("mpm")
-        if not live_entry:
-            self.skipTest(f"No user-scope mpm entry in {MATERIALIZED}")
-        tpl_env = _resolved_template()["mcpServers"]["mpm"]["env"]
-        live_env = live_entry["env"]
-        for key in ("MPM_WORKSPACE", "MPM_FRAMEWORK"):
-            self.assertEqual(live_env.get(key), tpl_env.get(key),
-                             f"{key} drift between template and materialized config")
 
     def _materialize(self) -> dict:
         raw = TEMPLATE.read_text().replace("${HOME}", HOME_RESOLVED)
@@ -251,6 +271,175 @@ class InstallMaterializationIsIdempotent(unittest.TestCase):
         existing["mcpServers"]["mpm"] = data["mcpServers"]["mpm"]
         tf_path.unlink(missing_ok=True)
         return existing["mcpServers"]["mpm"]
+
+
+class FreshInstallSandbox:
+    """Isolated HOME + CLAUDE_CONFIG_DIR for first-install contract tests.
+
+    `CLAUDE_CONFIG_DIR` relocates BOTH `~/.claude.json` and `settings.json`
+    into a single directory, so a sandbox here is genuinely complete — the
+    real host config is never read or written by these tests.
+
+    install.sh's pre-flight requires an executable mpm-mcp under HOME; the
+    sandbox writes a no-op stub so the installer's materialization path can
+    run end-to-end without needing a real binary. The probe at the end of
+    install.sh is opted out via MPM_INSTALL_SKIP_PROBE=1 — the probe
+    requires a live mpm-mcp and a reachable workspace DB, which is not
+    what these tests are about. The contract under test is the
+    registration, not the binary.
+    """
+
+    def __init__(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="mpm-cc-tplprov-"))
+        self.home = self.root / "home"
+        self.cfg = self.root / "claude-cfg"
+        self.project = self.root / "project"
+        for d in (self.home, self.cfg, self.project):
+            d.mkdir(parents=True, exist_ok=True)
+        # install.sh pre-flight: must have an executable mpm-mcp under HOME.
+        bin_dir = self.home / ".mpm" / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / "mpm-mcp").write_text("#!/bin/sh\nexit 0\n")
+        (bin_dir / "mpm-mcp").chmod(0o755)
+
+    @property
+    def user_config(self) -> Path:
+        return self.cfg / ".claude.json"
+
+    def read_user_config(self) -> dict:
+        try:
+            return json.loads(self.user_config.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def seed_user_config(self, cfg: dict) -> None:
+        self.user_config.write_text(json.dumps(cfg, indent=2))
+
+    def env(self, **extra) -> dict:
+        e = dict(os.environ)
+        e.update({
+            "HOME": str(self.home),
+            "CLAUDE_CONFIG_DIR": str(self.cfg),
+            # The live mpm-mcp handshake has no meaning in a sandbox; the
+            # registration contract is what these tests are about.
+            "MPM_INSTALL_SKIP_PROBE": "1",
+        })
+        e.update(extra)
+        return e
+
+    def run(self, *args, expect_ok: bool = True) -> subprocess.CompletedProcess:
+        p = subprocess.run(
+            ["bash", str(INSTALL_SH), *args],
+            cwd=str(self.project), env=self.env(),
+            capture_output=True, text=True, timeout=180,
+        )
+        if expect_ok and p.returncode != 0:
+            raise AssertionError(
+                f"install.sh {args} failed ({p.returncode})\n"
+                f"--- stdout ---\n{p.stdout}\n--- stderr ---\n{p.stderr}"
+            )
+        return p
+
+    def cleanup(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+@unittest.skipUnless(has_claude(), "claude CLI not on PATH")
+class FreshInstallMatchesTemplateContract(unittest.TestCase):
+    """End-to-end: install.sh against an isolated sandbox writes a registration
+    whose env block matches the source-tree template.
+
+    These tests exercise the installer's *actual* first-install contract
+    (the same `claude mcp add --scope user` flow the developer runs), not
+    a re-implementation of the materialization. They skip when the `claude`
+    CLI is not on PATH — the installer's supported first-install contract
+    requires it, and a host without Claude Code installed cannot meaningfully
+    verify the registration path.
+
+    On a clean CI runner the installer's pre-flight fails before any config
+    is written, so these tests are skipped rather than fabricating a
+    ~/.claude.json. MaterializedConfigInSync covers the developer's
+    existing-install path; the suite is honest about which state it can
+    verify on which host.
+    """
+
+    def setUp(self) -> None:
+        self.sb = FreshInstallSandbox()
+        self.addCleanup(self.sb.cleanup)
+        # Import the helper so we can call desired_entry / user_entry against
+        # the sandbox config without duplicating their logic.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("claude_mcp_config", CONFIG_HELPER)
+        self.cfgmod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.cfgmod)
+
+    def test_fresh_install_against_empty_sandbox_matches_template(self) -> None:
+        """The cleanest first-install state: no ~/.claude.json exists.
+
+        `claude mcp add --scope user` creates the file when the user has
+        never registered an MCP server before. The resulting entry must
+        match the template's env block exactly.
+        """
+        self.assertFalse(
+            self.sb.user_config.exists(),
+            "sandbox precondition: user config must not exist before install",
+        )
+        self.sb.run()
+        entry = self.cfgmod.user_entry(self.sb.user_config)
+        self.assertIsNotNone(entry, "no user-scope mpm entry was written")
+        tpl_env = (
+            json.loads(TEMPLATE.read_text().replace("${HOME}", str(self.sb.home)))
+            ["mcpServers"]["mpm"]["env"]
+        )
+        # Pin every key the contract cares about. Drift here would break
+        # MPM's framework-identification wire contract.
+        for key in ("MPM_WORKSPACE", "MPM_FRAMEWORK", "MPM_PROVENANCE_FRAMEWORK"):
+            self.assertEqual(
+                entry["env"].get(key), tpl_env.get(key),
+                f"{key} drift between template and post-install entry",
+            )
+
+    def test_fresh_install_against_pre_existing_user_config_matches_template(self) -> None:
+        """Pre-existing ~/.claude.json with unrelated servers: the installer
+        must add mpm without touching the rest, and the mpm entry's env
+        block must still match the template.
+
+        This is the developer-machine case: a user already has other MCP
+        servers registered at user scope. Idempotency and preservation of
+        user-authored configuration are both pinned here.
+        """
+        self.sb.seed_user_config({
+            "mcpServers": {
+                "unrelated": {"command": "/bin/echo", "env": {}},
+            },
+        })
+        self.sb.run()
+        cfg = self.sb.read_user_config()
+        self.assertIn(
+            "unrelated", cfg["mcpServers"],
+            "installer must preserve unrelated user-scope servers",
+        )
+        entry = self.cfgmod.user_entry(self.sb.user_config)
+        self.assertIsNotNone(entry, "no user-scope mpm entry was written")
+        self.assertEqual(
+            entry["env"].get("MPM_PROVENANCE_FRAMEWORK"), "claude-code",
+            "post-install entry must carry the canonical framework id",
+        )
+
+    def test_no_install_run_means_no_mpm_entry(self) -> None:
+        """Negative control: a sandbox with no installer run must not contain
+        an mpm registration. This is the test that would fail loudly if the
+        suite ever started fabricating a ~/.claude.json to make a skip look
+        like a pass.
+        """
+        self.assertFalse(
+            self.sb.user_config.exists(),
+            "sandbox precondition: no user config without an install",
+        )
+        self.assertIsNone(
+            self.cfgmod.user_entry(self.sb.user_config),
+            "no mpm entry should exist before install.sh runs",
+        )
 
 
 if __name__ == "__main__":
