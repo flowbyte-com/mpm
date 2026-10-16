@@ -779,12 +779,15 @@ test-agent-installation: build
 # plausible-looking summary and zero passes. The pass-count floor is
 # what turns that into an explicit refusal instead of a number.
 #
-# The node test runner wraps its summary in ANSI color codes (e.g.
-# `\033[34mℹ pass 117\033[39m`). The previous regex `^ℹ pass` did not
-# anchor past the leading SGR sequence and silently parsed an empty
-# match for every green run, hiding real failures behind a green gate.
-# The current runner strips ANSI escapes first, then extracts the pass
-# count. See the in-target comment for the shell/dash details.
+# The node test runner's default reporter is version-dependent
+# (TAP on Node 18/20.x, the "spec" form on Node >= 22.6). Pin it
+# to TAP with `--test-reporter=tap` so the output is stable across
+# every Node minor the project supports, then strip ANSI escapes
+# and match the TAP `# pass N` summary line. The previous recipe
+# matched `^ℹ pass` (the spec form) and silently parsed an empty
+# match against the TAP form, which is what the GitHub Actions
+# ubuntu-24.04 runner emits by default — that is the failure
+# that this fix closes.
 #
 # NOT INCLUDED: mpm-claude-code/tests/session_start_hook.test.sh. It is
 # a host-specific live check — it exports MPM_WORKSPACE="$HOME/.mpm" and
@@ -830,14 +833,18 @@ test-agent-adapters:
 	     echo "[test-agent-adapters] FATAL: agent_installation/$$d/tests is missing." >&2; \
 	     exit 1; \
 	   fi; \
-	   out=$$(cd "agent_installation/$$d" && node --test 'tests/*.test.js' 2>&1); status=$$?; \
+	   out=$$(cd "agent_installation/$$d" && node --test --test-reporter=tap 'tests/*.test.js' 2>&1); status=$$?; \
 	   printf '%s\n' "$$out"; \
-	   # node --test prints summary lines with ANSI color codes \
-	   # wrapping the bullet (e.g. `\\e[34mℹ pass 117\\e[39m`). The \
-	   # previous regex `^ℹ pass` did not anchor past the leading SGR \
-	   # sequence and silently parsed an empty match for every green \
-	   # run. Strip ANSI escapes first so the regex sees the actual \
-	   # summary line. \
+	   # node --test prints the TAP summary line as `# pass N`, \
+	   # optionally wrapped in SGR color codes (e.g. \
+	   # `\\e[32m# pass 117\\e[39m`). The previous parser regex \
+	   # `^ℹ pass` matched only the "spec" form (Node >= 22.6) and \
+	   # silently parsed an empty match against the TAP form \
+	   # (Node 18/20.x and `--test-reporter=tap`), which is what \
+	   # the GitHub Actions ubuntu-24.04 runner emits. The current \
+	   # runner pins the reporter to TAP with `--test-reporter=tap` \
+	   # (so the output is stable across Node 18/20/22/24/26) AND \
+	   # strips ANSI escapes before extracting `# pass N`. \
 	   # The escape byte is injected through a shell variable \
 	   # (ESC=$(printf '\033')) rather than a literal `\x1b` in \
 	   # the sed pattern.  Two reasons: (1) GNU Make preserves \
@@ -852,7 +859,7 @@ test-agent-adapters:
 	   # regardless of which shell runs the recipe. \
 	   ESC=$$(printf '\033'); \
 	   n=$$(printf '%s\n' "$$out" | sed -E "s/$${ESC}\\[[0-9;]*m//g" \
-	        | sed -nE 's/^ℹ pass ([0-9][0-9]*).*/\1/p' | tail -1); \
+	        | sed -nE 's/^# pass ([0-9][0-9]*).*/\1/p' | tail -1); \
 	   if [ -z "$$n" ]; then \
 	     echo "[test-agent-adapters] FATAL: $$d reported no passing-test count." >&2; \
 	     echo "  node --test exited 0 without a pass line — refusing to count it." >&2; \
