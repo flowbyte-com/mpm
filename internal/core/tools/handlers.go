@@ -348,6 +348,48 @@ type ProjectedMemoryEntry struct {
 	Score             float64                 `json:"score"`
 	Rationale         string                  `json:"rationale"`
 	IsStale           bool                    `json:"is_stale"`
+	// RetrievalSource names the search channel that produced this row:
+	// "hybrid" (matched lexically AND scored semantically), "fts5"
+	// (matched lexically), "vector" (semantic near-neighbour with no
+	// lexical match) or "lexical" (full-text fallback path). A caller
+	// that cannot tell these apart cannot tell a real match from a
+	// nearest-neighbour that happens to be unrelated — see
+	// RetrievalProvenance for the aggregate view.
+	RetrievalSource string `json:"retrieval_source"`
+}
+
+// RetrievalProvenance is the additive envelope block that makes the
+// retrieval path observable to the caller.
+//
+// Why it exists: `mpm_memory query` returned rows without saying how
+// they were found. A caller could not tell whether the semantic arm was
+// even configured, whether the results came from term matches or from
+// embedding near-neighbours, or whether a zero-hit was a genuinely
+// absent memory or an arm that never ran. All three are the difference
+// between "rephrase the query" and "fix the configuration", and none
+// were answerable from the response.
+//
+// SemanticOnly is the field that matters most: when it is true, NOTHING
+// matched the query's terms lexically and every row is an embedding
+// near-neighbour. Rows like that are the ones to discount before acting
+// on them, and previously the response gave no way to tell them apart
+// from term matches.
+type RetrievalProvenance struct {
+	// Mode is "hybrid" when an embedding provider is configured and the
+	// semantic arm ran, or "lexical_only" when it did not. A
+	// lexical_only mode means a zero-hit cannot be blamed on semantic
+	// retrieval — no semantic retrieval was attempted.
+	Mode string `json:"mode"`
+	// Sources counts returned rows per retrieval channel.
+	Sources map[string]int `json:"sources"`
+	// SemanticOnly is true when every returned row came from the vector
+	// arm with no lexical match. False when there are no rows.
+	SemanticOnly bool `json:"semantic_only"`
+	// VectorWeight and RetrievalThreshold echo the scoring configuration
+	// in force, so a caller reading an unexpected ordering can tell a
+	// ranking choice from a data problem.
+	VectorWeight       float64 `json:"vector_weight"`
+	RetrievalThreshold float64 `json:"retrieval_threshold"`
 }
 
 // ProjectedLessonEntry is the Phase 2D pointer-native lesson output shape.
@@ -603,6 +645,7 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 
 			rationale := formatRationaleForMemory(mem)
 			isStale := isMemoryStaleForProjection(mem)
+			retrievalSource, _ := mem["retrieval_source"].(string)
 
 			projected = append(projected, ProjectedMemoryEntry{
 				ID:                 id,
@@ -619,6 +662,7 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 				Score:              computeScore(mem),
 				Rationale:          rationale,
 				IsStale:            isStale,
+				RetrievalSource:    retrievalSource,
 			})
 		}
 		summaryResp := map[string]interface{}{
@@ -629,6 +673,7 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 			"count":    len(projected),
 			"scope":    defaultScope(scope),
 		}
+		summaryResp["retrieval"] = retrievalProvenanceFor(items)
 		attachZeroHitHint(summaryResp, query, len(projected))
 		return summaryResp, nil
 	}
@@ -655,6 +700,7 @@ func handleQueryLongTermMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 		"count":    len(items),
 		"scope":    defaultScope(scope),
 	}
+	fullResp["retrieval"] = retrievalProvenanceFor(items)
 	attachZeroHitHint(fullResp, query, len(items))
 	return fullResp, nil
 }
@@ -799,26 +845,135 @@ func deriveChallengeFields(meta map[string]interface{}) (bool, string) {
 }
 
 // attachZeroHitHint adds a `hint` field to the response when the query
-// returned zero results and the query has multiple whitespace-separated
-// tokens. The hint nudges the agent toward single-token queries (where
-// per-token BM25 scores don't compete against each other for IDF).
+// returned zero results and the query carries more than one searchable
+// FTS5 term. The hint explains the actual reason and gives the agent a
+// recovery path.
 //
 // W-010: silent zero-hit results are a recurring agent failure mode.
 // Surfacing the hint at the protocol layer keeps the contract honest —
 // the agent learns from one read that multi-token queries may need
 // simplification, instead of guessing after the third retry.
+//
+// # What the previous explanation got wrong
+//
+// The original text blamed "BM25 IDF underflow" and said multi-token
+// queries can "underflow the threshold". Both claims were false, and
+// both pointed the agent at the wrong knob:
+//
+//   - BM25 has no IDF underflow. IDF is a per-term weight, not a
+//     quantity that runs low as a query grows.
+//   - RetrievalThreshold does not apply to lexical-only rows at all —
+//     HybridSearch deliberately exempts them, because BM25 scores are
+//     naturally negative and a -3.0 floor would delete nearly every
+//     useful lexical hit. The default -3.0 also cannot fire for the
+//     vector arm, whose combined score is cosine similarity in [0,1]
+//     scaled by a [0,1] weight.
+//
+// So a zero-hit is almost never a scoring artefact. It is a MATCH
+// failure, and the real mechanism is FTS5's implicit AND: BuildFTS5Query
+// joins every term with a space, so a row is returned only if it
+// contains ALL of them. Adding a term can therefore only remove
+// results — which is exactly the trap that makes an over-specific query
+// look like missing data.
 func attachZeroHitHint(resp map[string]interface{}, query string, count int) {
 	if count != 0 {
 		return
 	}
-	tokens := strings.Fields(query)
-	if len(tokens) <= 1 {
+	// Count the terms FTS5 will actually AND together, not whitespace
+	// tokens. They differ: "lazy-start" is one whitespace token but two
+	// AND terms, and "HTTP/1.1" is one token but three. Counting
+	// whitespace tokens both missed the hyphenated case (one term, no
+	// hint, when a hint was warranted) and mislabelled the count the
+	// agent is told to reduce from.
+	ftsQuery := internal.BuildFTS5Query(query)
+	terms := strings.Fields(ftsQuery)
+	if len(terms) <= 1 {
 		return
 	}
-	resp["hint"] = "0 hits for multi-token query; try each token individually " +
-		"or reduce the query to a single distinctive term (BM25 IDF is " +
-		"per-token — multi-token queries can underflow the threshold even " +
-		"when individual tokens would match)."
+	longest := terms[0]
+	for _, t := range terms {
+		if len(t) > len(longest) {
+			longest = t
+		}
+	}
+	resp["hint"] = fmt.Sprintf(
+		"0 hits. All %d FTS5 term(s) must match the SAME memory — %s is "+
+			"joined with an implicit AND, so adding a term can only remove "+
+			"results and no row may be missing one of them. Each term is a "+
+			"PREFIX match (%s), not a substring or phrase match, so quoting "+
+			"a phrase does not restrict it to that phrase and a hyphen or "+
+			"slash splits into separate terms. Retry with one term at a "+
+			"time, longest first (%s): short terms are usually the ones "+
+			"present in no indexed memory. This is a match failure, not a "+
+			"score filter — lexical hits are ranked with BM25 and are "+
+			"exempt from the retrieval threshold, so raising it will not help.",
+		len(terms), strings.Join(terms, ", "), longest, longest)
+}
+
+// retrievalProvenanceFor builds the aggregate retrieval description for a
+// memory-query response.
+//
+// It is a pure function of the returned rows plus the embedding
+// configuration, so it can be asserted in tests without a database. The
+// mode is read from the embedding config rather than inferred from the
+// rows: a lexical-only result set is ambiguous on its own (embeddings
+// may be off, or on and matching nothing), and those two situations call
+// for opposite responses from the caller.
+func retrievalProvenanceFor(items []map[string]interface{}) RetrievalProvenance {
+	sources := map[string]int{}
+	for _, mem := range items {
+		src, _ := mem["retrieval_source"].(string)
+		if src == "" {
+			src = "lexical"
+		}
+		sources[src]++
+	}
+
+	mode := "lexical_only"
+	if cfg := internal.DefaultEmbeddingConfig(); cfg != nil &&
+		cfg.Provider != nil && cfg.Provider.Name() != "null" {
+		mode = "hybrid"
+	}
+
+	// semantic_only means NO row was matched lexically. Counted rather
+	// than derived from the map's emptiness so an empty result set is
+	// false (nothing was returned to be semantic) instead of vacuously
+	// true.
+	semanticOnly := false
+	if len(items) > 0 {
+		semanticOnly = true
+		for src := range sources {
+			if sourceIsLexical(src) {
+				semanticOnly = false
+				break
+			}
+		}
+	}
+
+	hybridCfg := internal.DefaultHybridConfig()
+	return RetrievalProvenance{
+		Mode:               mode,
+		Sources:            sources,
+		SemanticOnly:       semanticOnly,
+		VectorWeight:       hybridCfg.VectorWeight,
+		RetrievalThreshold: hybridCfg.RetrievalThreshold,
+	}
+}
+
+// sourceIsLexical reports whether a retrieval_source value denotes a row
+// that matched the query's terms rather than an embedding near-neighbour.
+//
+// Kept as a switch on the known channel names rather than a substring
+// test so an unrecognised value defaults to the safe answer (treated as
+// non-lexical), which keeps semantic_only from being asserted on the
+// strength of a channel we do not understand.
+func sourceIsLexical(source string) bool {
+	switch source {
+	case "fts5", "lexical", "hybrid":
+		return true
+	default:
+		return false
+	}
 }
 
 // defaultScope normalises the user-supplied scope string to one of

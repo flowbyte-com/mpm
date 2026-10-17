@@ -7,6 +7,7 @@ import (
 	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 	"golang.org/x/sys/unix"
 	"os"
+	"strings"
 )
 
 // Command describes a single command
@@ -135,6 +136,7 @@ func NewRouter() *CommandRouter {
 		"status":     {Name: "status", Description: "Show system status", MinArgs: 0},
 		"persona":    {Name: "persona", Description: "Manage personas"},
 		"ops":        {Name: "ops", Description: "Engine-room operations (maintenance, diagnostics)"},
+		"onboard":    {Name: "onboard", Description: "Guided setup and verification of an MPM installation", MinArgs: 0, MaxArgs: -1},
 
 		// Routing — context-aware helpers
 		"hint":  {Name: "hint", Description: "Surface context-relevant artifacts", MinArgs: 1},
@@ -187,6 +189,21 @@ func (r *CommandRouter) Execute(args []string) int {
 	// payload or quoted content is never exactly "-h"/"--help".
 	helpRequested := r.helpRequested
 	args = r.parseFlags(args)
+
+	// A bare trailing "help" token is a help request for any command that
+	// dispatches subcommands, whether it was typed as `help` or produced
+	// by the parseFlags rewrite above. Without this, `mpm ops gc help`
+	// (no dash) ran garbage collection and `mpm handoff write help`
+	// wrote a handoff, because helpRequested only ever tracked an
+	// original -h/--help token.
+	//
+	// For commands that do NOT dispatch subcommands the bare token stays
+	// data, so the documented `mpm recall help` (search for the word
+	// "help") and `mpm rm help` behaviour are unchanged.
+	if len(args) > 1 && args[len(args)-1] == "help" &&
+		commandsWithSubcommandDispatch[args[0]] {
+		helpRequested = true
+	}
 
 	if len(args) < 1 {
 		PrintHelp()
@@ -426,6 +443,10 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleChallenge(args[1:])
 	case "ops":
 		return handleOps(args)
+	case "onboard":
+		// args[0] is "onboard"; the family handler owns its own
+		// subcommand table (report|models|hosts) — see onboard_cmds.go.
+		return handleOnboard(args[1:])
 	case "kb":
 		return handleKB(args)
 	case "debug":
@@ -640,6 +661,9 @@ func (r *CommandRouter) handleHelp(args []string) int {
 	case "ops":
 		printOpsHelp()
 		return 0
+	case "onboard":
+		printOnboardHelp()
+		return 0
 	case "work":
 		printWorkHelp()
 		return 0
@@ -759,6 +783,9 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 	case "ops":
 		printOpsHelp()
 		return 0
+	case "onboard":
+		printOnboardHelp()
+		return 0
 	case "work":
 		printWorkHelp()
 		return 0
@@ -849,16 +876,128 @@ var commandsWithSubcommandDispatch = map[string]bool{
 	"self-heal":   true, // (ops subcommand pattern)
 	"why":         true, // (uses subcommand-style args)
 	"config":      true, // show|get|set|edit|validate|profile|component|capability
+	"onboard":     true, // report|models|hosts
 	"compact":     true, // deferred|requeue-deferred|help
+}
+
+// subcommandHelpOwners lists the "<family> <subcommand>" paths whose
+// handler genuinely renders its own help page when it receives the
+// trailing literal "help" token that parseFlags produces.
+//
+// WHY THIS EXISTS (2026-10-13). The help guard in Execute used to defer
+// to the handler for ANY command in commandsWithSubcommandDispatch, on
+// the assumption that the handler would recognise the trailing "help"
+// token. That assumption is opt-in per handler (requireHelpShortCircuit,
+// handlers_helpers.go), and almost no handler had adopted it: of ~200
+// handlers only 3 mutating ones call it. So the trailing "help" fell
+// through as DATA and the command ran for real.
+//
+// Measured against an isolated workspace before this change:
+//
+//	mpm ops backfill-embeddings --help   performed the embedding backfill
+//	mpm ops gc --help                     ran GC over live memories
+//	mpm ops init skills --help            seeded the skill library
+//	mpm handoff write --help              wrote a handoff
+//	mpm session shred <real-id> --help    SOFT-DELETED a live session
+//
+// The last one is the exact defect the D5 note at Execute claims was
+// fixed in 2026-08-25 for `mpm rm <id> --help`; the deferral path was
+// never closed, so the family-dispatch commands kept the bug.
+//
+// The fix inverts the default. A help request now reaches a handler
+// ONLY if its exact path appears below. Everything else is intercepted
+// by Execute and rendered via handleCommandHelp, which prints the
+// family's help page. A path missing from this map therefore costs
+// help specificity — it prints "MPM · Reference" instead of the
+// subcommand's own page — and can never cost a mutation.
+//
+// Entries are added only after TestHelpRequestsNeverMutate confirms the
+// path prints a real help page AND leaves the database and workspace
+// byte-identical.
+var subcommandHelpOwners = map[string]bool{
+	// work — these leaves print the "MPM · Work" / "MPM · Work item" pages.
+	// ("work show" is deliberately absent: it prints the live Working
+	// Context, so it runs rather than helping.)
+	"work status": true, "work clear": true, "work promote": true, "work item": true,
+
+	// topic — add/list print "MPM · Topic" / "MPM · Topic list".
+	// Deliberately absent: "topic show" (runs the lookup and reports
+	// "Topic not found: help") and "topic search" (runs the search).
+	"topic add": true, "topic list": true,
+
+	// reference — leaf handlers print "MPM · Reference".
+	"reference add": true, "reference list": true, "reference show": true,
+	"reference search": true,
+
+	// compact — both leaves print "MPM · compact …".
+	"compact deferred": true, "compact requeue-deferred": true,
+
+	// skill — add/save print the save-skill help page, which documents the
+	// required `version` frontmatter field. Deliberately absent: skill
+	// delete / skill shred, which shred whatever they are pointed at.
+	//
+	// skill workshop added 2026-10-13. handleSkillWorkshop
+	// (handlers_skill.go:230) short-circuits on ANY help token and
+	// returns 0 before opening a database or reading stdin, and its
+	// page is the only place the WorkshopRequest schema is documented.
+	// Omitting it regressed TestSkillWorkshop_Help_PrintsWorkshopGuide:
+	// `mpm skill workshop --help` silently degraded to the family page.
+	// Found by running the canonical suite, not by reading this map —
+	// which is why TestSubcommandHelpOwnersCoverEveryShortCircuit now
+	// cross-checks the map against every handler that short-circuits.
+	"skill add": true, "skill save": true, "skill workshop": true,
+
+	// config — profile/component/capability print their own sub-pages;
+	// detect-embedding is the RETIRED probe, which must keep exiting
+	// non-zero even when asked for help (pinned by
+	// TestFinal_P_DetectEmbeddingHelpAlsoRetired). Deliberately absent:
+	// config show / set / validate (they run), and config edit (it opens
+	// an editor and blocks until stdin closes).
+	"config profile": true, "config component": true,
+	"config capability": true, "config detect-embedding": true,
+
+	// ops — only these leaves print a usage line instead of running.
+	// Deliberately absent, because each of these EXECUTES on --help:
+	//   ops synthesize / gc / backfill-embeddings / backfill-snapshots /
+	//   migrate-embeddings / self-heal / backup / restore-db / directives /
+	//   integrate / ingest / cascade / migrate / mode / persona / memory /
+	//   topic / lesson / session / reference / gateway / stance / init /
+	//   lint (lint reports "unknown flag \"help\"" and then lints anyway)
+	// and these MUTATE or run despite looking informational:
+	//   ops stats / ops status (accrue runtime state — verified MUTATED),
+	//   ops prune ("Pruned 0 expired memories"), ops export (dumped JSON).
+	//
+	// ops resolve-contradictions was listed as absent until 2026-10-14,
+	// which was accurate about the code and wrong about the consequence.
+	// Its handler DOES recognise a help token (ops_resolve_contradictions.go
+	// returns 0 before touching the database), but Execute intercepts first,
+	// so that branch was unreachable and `mpm ops resolve-contradictions
+	// --help` printed the generic `mpm ops` page. That page never mentions
+	// --adjudicate=ID:REASON — the flag that decides whether a row may
+	// penalise a memory at all (issue #10). The one command whose workflow
+	// cannot be guessed from the family page was the one page that omitted it.
+	//
+	// Safe to own: the help branch returns before getDBConcrete(), so no
+	// database is opened and no queue row is read or written.
+	// TestSubcommandHelpOwnersAreInert proves the inertness of every entry
+	// here, this one included, against an isolated workspace.
+	"ops shared": true, "ops rebalance": true, "ops changelog": true,
+	"ops milestones": true, "ops broadcast": true,
+	"ops active-sessions": true, "ops confidence": true,
+	"ops resolve-contradictions": true,
 }
 
 // isSubcommandHelp reports whether the given args (post-parseFlags, with
 // cmdName still at index 0) indicate that --help was meant for a
-// SUBCOMMAND rather than for the top-level command. The signal is:
-// parseFlags rewrites -h/--help to the literal token "help"; if that
-// rewrite appears at the LAST position AND the command dispatches
-// subcommands (so args[1] is a subcommand name rather than a data
-// positional), the help belongs to the subcommand.
+// SUBCOMMAND whose handler owns its own help page.
+//
+// The signal is: parseFlags rewrites -h/--help to the literal token
+// "help"; if that rewrite appears at the LAST position, the help
+// belongs to the subcommand rather than to the family.
+//
+// Membership in subcommandHelpOwners is REQUIRED, not merely the family
+// being a dispatch command. See the comment above that map for the
+// measured mutations this replaced.
 func isSubcommandHelp(args []string, cmdName string) bool {
 	if !commandsWithSubcommandDispatch[cmdName] {
 		return false
@@ -866,7 +1005,19 @@ func isSubcommandHelp(args []string, cmdName string) bool {
 	if len(args) < 2 {
 		return false
 	}
-	return args[len(args)-1] == "help"
+	if args[len(args)-1] != "help" {
+		return false
+	}
+	// The path is the family name plus every token between it and the
+	// trailing "help": ["work", "item", "help"] -> "work item". args[0]
+	// IS cmdName, so it is included explicitly. Data positionals
+	// ("skill search foo --help") produce a longer path that simply is
+	// not in the map, so they fall through to interception — which is
+	// the safe direction.
+	path := make([]string, 0, len(args)-1)
+	path = append(path, cmdName)
+	path = append(path, args[1:len(args)-1]...)
+	return subcommandHelpOwners[strings.Join(path, " ")]
 }
 
 // ============================================================================
@@ -1046,8 +1197,9 @@ var opsSubcommandDescs = []struct {
 	{"init directives", "Seed the Baseline Cognitive Bootstrap (idempotent)"},
 	{"init skills", "Seed the Baseline Skill Library (idempotent)"},
 	{"init tasks", "Seed the Baseline Cognitive Bootstrap for scheduled tasks (idempotent)"},
+	{"init topics", "Link theories/decisions memories to their topics (idempotent, replaces the doctor's implicit backfill)"},
 	{"self-heal [--dry-run/--force/--quiet]", "Autonomous integrity repair — auto-fix known drift, escalate unknown via theory"},
-	{"resolve-contradictions [--dry-run/--apply/--json/--limit=N]", "Resolve the shared contradiction queue by provenance scoring"},
+	{"resolve-contradictions [--dry-run/--apply/--json/--limit=N/--adjudicate=ID:REASON]", "Resolve the shared contradiction queue by provenance scoring (only adjudicated rows are applied)"},
 	{"broadcast <memory_id> [--kind/--rationale/--to/--dry-run/--json]", "Arc 2 fan-out: push an epistemic event to every active session"},
 	{"active-sessions [--json]", "List sessions active within the heartbeat window"},
 	{"help", "Show this help"},
@@ -1537,12 +1689,13 @@ func isatty(f *os.File) bool {
 
 // handleOpsInit dispatches `mpm ops init <subcommand>`. Currently
 // supports `init directives` (Baseline Cognitive Bootstrap),
-// `init skills` (Baseline Skill Library), and `init tasks` (Baseline
-// Cognitive Bootstrap for scheduled tasks). Other init subcommands
+// `init skills` (Baseline Skill Library), `init tasks` (Baseline
+// Cognitive Bootstrap for scheduled tasks), and `init topics`
+// (epistemology topic membership backfill). Other init subcommands
 // (e.g. `init config`) can be added here.
 func handleOpsInit(args []string) int {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "init requires a subcommand. Try: init directives, init skills, init tasks")
+		fmt.Fprintln(os.Stderr, "init requires a subcommand. Try: init directives, init skills, init tasks, init topics")
 		return 1
 	}
 	sub := args[0]
@@ -1553,7 +1706,9 @@ func handleOpsInit(args []string) int {
 		return handleOpsInitSkills(args[1:])
 	case "tasks":
 		return handleOpsInitTasks(args[1:])
+	case "topics":
+		return handleOpsInitTopics(args[1:])
 	default:
-		return usererror.Error("unknown init subcommand: %q (want: directives, skills, tasks)", sub)
+		return usererror.Error("unknown init subcommand: %q (want: directives, skills, tasks, topics)", sub)
 	}
 }

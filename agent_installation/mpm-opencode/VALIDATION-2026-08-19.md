@@ -2,6 +2,20 @@
 
 Verdict: **READY**
 
+> **Scope notice (2026-10-16).** This document validates the OpenCode
+> **V1** plugin (`@opencode-ai/plugin`) against OpenCode **1.18.18**. It
+> does NOT demonstrate plugin loading under OpenCode 2. OpenCode 2
+> changed both the plugin API (V2 `@opencode/plugin`) and the loader
+> (directory plugins resolve via a root-level `server.*`/`index.*`
+> module; a FILE registration is refused, and a directory without a
+> root entry is dropped silently). A config carrying the V1-era
+> `dist/index.js` file registration therefore passes every claim below's
+> *installer-level* checks while loading nothing at runtime. See
+> **"2026-10-16 Runtime Validation (OpenCode 2)"** at the bottom for the
+> evidenced OpenCode 2 facts; `docs/CLOSEOUT.md` §3.1 remains the
+> authoritative 2026-10-13-era position, which this addendum brings
+> current. See also issue #19 for the audit trail.
+
 Adversarial onboarding test run by an OpenCode agent against the local MPM
 installation (`~/.mpm` → `/home/v/workspace/projects/mpm`). Same prompt used for
 the OpenClaw canary earlier the same day (see
@@ -122,5 +136,144 @@ Remaining (cannot be removed via supported interface):
   correction above).
 
 No MPM core files modified (`git status --short`: only `src/index.ts` modified,
-`package-lock.json` untracked; `dist/` and `node_modules/` gitignored). No
-commits made. No credentials or config secrets touched.
+`dist/` and `node_modules/` gitignored; `package-lock.json` was
+untracked at original validation time but is committed today — see
+the 2026-10-16 B1-correction note at the bottom). No commits made at
+that 2026-08-19 point. No credentials or config secrets touched.
+---
+
+# 2026-10-16 Runtime Validation (OpenCode 2)
+
+Everything below is 2026-10-16 evidence against **OpenCode v2.0.30**
+(`/home/v/.opencode/bin/opencode` → v2.0.30) and the ported V2 plugin —
+it is deliberately separate from the 2026-08-19 V1-era validation above,
+because issue #19 mixes the two eras.
+
+## Facts established by direct loader inspection (decoded from the bun binary)
+
+- Directory plugins are resolved ONLY via root-level module names:
+  the loader's resolver tries `server` then `index` at the directory
+  ROOT (`resolve(dir, o || "index")`) and never consults package.json
+  `main`/`exports`.
+- A registered FILE target is refused: `configured plugin path must be
+  a directory` (WARN).
+- A registered directory WITHOUT a resolvable root entry is dropped at
+  scan time (`if (!w.server) return []`) with NO log output; the only
+  later symptom is `failed to load plugin` / `Plugin entrypoint not
+  found` for a resolved-but-broken entry, or — for a dropped entry —
+  nothing at all: `/api/plugin` reports only builtins and every
+  `opencode` subcommand still exits 0.
+- A loadable plugin must default-export a definition accepted by
+  `Plugin.define` (`{ id, setup|effect }`); the V1 payload fails with
+  `Plugin must export a default definition with an id and an effect or
+  setup function`.
+- The SDK specifier `@opencode/plugin` is aliased by the host loader
+  (docs examples load with zero node_modules).
+
+## The defect
+
+From 2026-09-17 to 2026-10-16, `install.sh` registered
+`file:///…/.mpm/agent_installation/mpm-opencode/dist/index.js` — a FILE
+URL. Under the July-2026 opencode config
+schema this was refused outright; on 2026-10-16 the runtime showed the
+entry silently dropped. Every install and every `--verify` reported
+success throughout, because verification compared the registered path
+against what the installer expected to write, not against what the
+loader resolves. The plugin therefore loaded nothing for ~4 weeks while
+the AGENTS.md managed block kept injecting protocol text and 228
+historical `framework_name='opencode'` tool rows (recorded via the
+`mpm` CLI on the same machine) made the integration LOOK live. (Verification
+records from before 2026-10-16 are not evidence of plugin loading.)
+
+## Exact 2026-10-16 runtime evidence (plugin loading WORKS after the fix)
+
+| Claim | Evidence |
+| --- | --- |
+| Fresh host loads the plugin | `cd /tmp/opencode && opencode run --standalone --auto '…'` — boot log clean (no `configured plugin path must be a directory`, no `failed to load plugin`); plugin module `dist/index.v2.js` executed (banner `mpm-opencode (V2 port) loading; mpm binary: /home/v/.mpm/bin/mpm`), 17 tools registered (14 domain + 3 standalone), id `mpm-opencode` |
+| Real agent turns invoke MPM tools | In the same isolated run: `mpm_memory` action `query` returned 2 live memories; `mpm_context` action `read_wake_context` returned live wake content (AgentShell Stage 1b item + consistency probe + Stage 2b handoff) |
+| Provenance proves OpenCode origin | MPM `tool_invocations` table (DB COPY `/tmp/opencode/mpm-copy3.db` — live DB never touched for diagnostics): row `tool_name=mpm_memory, action=query, framework_name='opencode', started_at=2026-10-16T12:05:12Z, status=success`. 228 pre-existing `opencode` rows are V1-era/CLI hybrids — the row above is the first proven plugin-invoked row |
+| User's persistent server loads it | opencode service restarted (PID 300990, 2026-10-16); post-restart log has zero new WARN/ERROR; the live session toolset contains all 18 `mpm_*` tools; a native `mpm_context read_wake_context` from that session returned live wake data |
+| Loader contract verified negative | Registered `dist/index.js` FILE (alone) → WARN `configured plugin path must be a directory`; registered directory without root entry (alone) → registry all-builtin, zero warnings — reproduced during root-cause isolation |
+
+## Post-fix installer verification (installer-level, 2026-10-16)
+
+- Real-tooling end-to-end in a sandbox HOME: real `tsc` build → staged
+  package = exactly `server.js`, `package.json`,
+  `dist/{index.v2.js,workspace.js,resolve-mpm-binary.js}`;
+  fresh config written with the package-directory registration under
+  the V2 `plugins` key; `install.sh --verify` → ok.
+- `--verify` REJECTS: a surviving `dist/index.js` file registration
+  (remediation hint names the defect); a registered package without
+  `server.js` ("no root entry server.js ... dropped silently").
+- `--uninstall` removes every MPM-owned shape (package dir, file URL,
+  legacy `opencode-mpm` variants, legacy `plugin` key) and keeps
+  unrelated plugins, comments, trailing commas, CRLF and BOM intact.
+- Regression coverage: `tests/test_jsonc_config.py` (32 incl. negative
+  controls — was 31; the new case `test_6d_duplicate_mpm_entries_are_
+  deduplicated` pins that duplicate MPM registrations collapse to one
+  canonical entry while unrelated registrations survive exactly as
+  written), installer `tests/test_opencode_install.py` (35 incl.
+  negative controls), AGENTS.md managed-block installer
+  `tests/test_opencode_instructions_installer.py` (21), staging
+  validator tests in `agent_installation/tests/`
+  `test_runtime_package_provisioning.py` (52).
+
+### Test ownership — what each gate actually collects (NOT file totals)
+
+File-level counts above (52, 32, 35, 21, 17-TS) are the populations
+inside each file; the gates own them differently. Pin this
+distinction so a caller cannot mistake "files contain N tests" for
+"the gate runs N tests":
+
+| Gate / target | Owned by this gate | NOT owned here |
+| --- | --- | --- |
+| `make test-agent-installation` (the umbrella; reached by `make test`, `make test-race`, `make release-gate`) | `agent_installation/tests/test_runtime_package_provisioning.py` (52 tests — staging validator that pins the contract referenced above as "staged package = exactly server.js, package.json, dist/{...}"); plus everything `make test-agent-adapters` walks (below) | The 32 + 35 + 21 Python tests in `agent_installation/mpm-opencode/tests/` are owned by `make test-agent-adapters`, not by `test-agent-installation`'s umbrella directly. |
+| `make test-agent-adapters` (the per-adapter runner) | The Python families in `AGENT_ADAPTERS` (mpm-claude-code + mpm-hermes + mpm-memory-openclaw + mpm-opencode + mpm-pi) — including 87 baseline OpenCode Python adapter tests (32 + 35 + 21); the JS families in `AGENT_ADAPTERS_JS` (mpm-memory-openclaw + mpm-auto-mode-persona-openclaw — 165 passing JS tests); **the TS family in `AGENT_ADAPTERS_TS` (mpm-opencode — 17 passing TS tests as of the 2026-10-16 B1 wiring fix)**. | The 52 staging validator tests in `agent_installation/tests/test_runtime_package_provisioning.py` are owned by `test-agent-installation`, NOT by `test-agent-adapters`. |
+| `make test-scripts` | `scripts/tests/*.py` (the Makefile-wiring pin tests and friends — currently 414 tests, all green). | The 32/35/21 file-level tests above for mpm-opencode are NOT owned here. |
+
+Concretely, as of 2026-10-16:
+
+* **87 → 88 OpenCode Python adapter tests** (the union of
+  test_jsonc_config.py, test_opencode_install.py, and
+  test_opencode_instructions_installer.py) run through
+  `make test-agent-adapters` because `mpm-opencode` is in
+  `AGENT_ADAPTERS` and `unittest discover tests` finds them.
+  The count was 87 before this commit's small correction
+  #2 (a +1 dedup regression test) and is **88** after it:
+  test_jsonc_config.py is 32 (was 31),
+  test_opencode_install.py is 35, test_opencode_instructions_
+  installer.py is 21. These are NOT counted by
+  `test-agent-installation`'s 52-test staging validator
+  umbrella.
+* **52 staging tests** (the `agent_installation/tests/` runtime
+  package provisioning suite) run through `make
+  test-agent-installation`, alongside `$(MAKE)
+  test-agent-adapters`. Staging-validator tests pin the manifest
+  shape and the V2 payload presence — they are NOT duplicated
+  inside `make test-agent-adapters`.
+* **17 TypeScript tests** (the `*.test.ts` files in
+  `agent_installation/mpm-opencode/tests/`) run through `make
+  test-agent-adapters` after the 2026-10-16 B1 fix. They are
+  compiled into `tests-build/*.test.js` by the local
+  `node_modules/.bin/tsc` (driven by `tsconfig.tests.json`)
+  immediately before the same `node --test --test-reporter=tap`
+  invocation that carries the JS branch — no parallel parser,
+  no global TypeScript dependency. The floor
+  `AGENT_ADAPTER_TEST_MIN_TS_TESTS := 15` refuses a silently-
+  zero suite.
+
+The reviewer of the previous VALIDATION entry conflated
+"file-level tests" with "gate-level tests" in the brief; that is
+the B2 review finding the present entry corrects.
+
+Known limitation (unchanged from V1): `fetchWakeContext` stamps no
+provenance env, so wake-context fetch rows record under the default
+`mpm-cli` actor; tool-invocation provenance is unaffected.
+
+## Cleanup (2026-10-16)
+
+The isolated `opencode run --standalone` harness used its own scratch
+MPM copy; live substrate test rows were queried only. Live
+`~/.mpm/agent_installation/mpm-opencode` was upgraded to the ported V2
+payload + root `server.js` shim (this machine's instance), registered as
+`file:///home/v/.mpm/agent_installation/mpm-opencode`.

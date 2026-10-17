@@ -63,10 +63,45 @@ func ValidateSchemaPrefix(prefix string) error {
 }
 
 // DefaultHybridConfig returns sensible defaults.
+//
+// RetrievalThreshold stays at -3.0 despite that value being unreachable
+// for vector-only rows (see the threshold comment in HybridSearch). It was
+// measured rather than assumed — see the calibration below.
+//
+// CALIBRATION (22-query benchmark + 15 dedicated nonsense queries,
+// real all-minilm embeddings, 160 result rows):
+//
+//	relevant hits   n=20   vector similarity 0.159 .. 0.828
+//	noise hits      n=140  vector similarity 0.030 .. 0.307
+//
+// The distributions OVERLAP: the strongest noise row (0.307) is more
+// similar than the weakest legitimate row (0.159), so no similarity floor
+// separates them cleanly:
+//
+//	floor   relevant kept   noise kept   noise filtered
+//	 0.15      20/20           22/140         84%
+//	 0.20      19/20            5/140         96%
+//	 0.25      17/20            3/140         98%
+//
+// A floor of 0.20 would suppress real results. Worse, every legitimate
+// hit below 0.25 is a PARAPHRASE — semantic retrieval's whole purpose:
+//
+//	0.244  "how do I stop the attachments from breaking"  -> the actual answer
+//	0.212  "what model does the system use for writing"  -> the actual answer
+//	0.159  "why is my hard drive no longer protected"    -> the actual answer
+//
+// Raising the default would trade the confident-nonsense problem for a
+// paraphrase-recall problem, which is the worse failure. The default is
+// therefore left alone, and the real fix is orthogonal: a caller that
+// wants a floor should set RetrievalThreshold above 0 deliberately,
+// knowing the 0.159–0.244 band contains true positives.
 func DefaultHybridConfig() HybridConfig {
 	return HybridConfig{
-		VectorWeight:       0.5,
-		RetrievalThreshold: -3.0, // BM25 can be negative; threshold here is on combined score
+		VectorWeight: 0.5,
+		// Unreachable for vector-only rows (similarity is 0–1). Kept at
+		// the historical value rather than silently changing retrieval
+		// behaviour; see the calibration comment above.
+		RetrievalThreshold: -3.0,
 		Limit:              15,
 		SchemaPrefix:       "",
 		Origin:             "local",
@@ -186,9 +221,21 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			combinedScore = hybridScore(fts.Score, vecSim, cfg.VectorWeight)
 			source = "hybrid"
 		} else if ftsOK {
-			// FTS5 only
+			// FTS5 only. Normalise the lexical leg onto the same 0–1
+			// scale as the hybrid blend so CombinedScore means the same
+			// thing for every source. Previously this was
+			// `fts.Score * (1-vecWeight)` — raw unbounded BM25 on a
+			// negative-is-better scale, which made an FTS5 row's score
+			// incomparable to a hybrid row's and put it at a wildly
+			// different magnitude (e.g. -7.32 vs -0.16).
+			//
+			// There is no vector leg to blend in, so the normalised
+			// lexical signal is scaled by (1-vecWeight) and nothing
+			// else is added: an FTS5-only match is a partial match, and
+			// leaving the vector weight's share unfilled keeps it below
+			// a hybrid row that matched both signals.
 			ftsScore = fts.Score
-			combinedScore = fts.Score * (1 - cfg.VectorWeight)
+			combinedScore = normalizeBM25(fts.Score) * (1 - cfg.VectorWeight)
 			source = "fts5"
 		} else {
 			// Vector only (no FTS5 match) — preserve as a candidate.
@@ -204,20 +251,20 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 			source = "vector"
 		}
 
-		// RetrievalThreshold is calibrated for hybrid (FTS5+vector) combined
-		// scores, which land in roughly 0–1 range. BM25 is naturally unbounded
-		// negative, so for FTS5-only matches the same threshold would filter
-		// out nearly everything useful. Trust the BM25 ordering for FTS5-only
-		// paths; only apply the threshold to true hybrid scores and to
-		// vector-only candidates whose similarity is in 0–1.
+		// RetrievalThreshold applies to hybrid and vector-only candidates.
+		// Both are now on a 0–1 "higher is better" scale (see
+		// normalizeBM25), so a single threshold is meaningful across them.
+		// FTS5-only rows are still exempt: their ordering comes from the
+		// BM25 rank itself, and a relevance floor on a lexical-only path
+		// discards legitimate exact-term matches.
 		switch {
 		case ftsOK && vecOK:
 			if combinedScore < cfg.RetrievalThreshold {
 				continue
 			}
 		case !ftsOK && vecOK:
-			// Vector similarity is 0–1; default threshold -3.0 would never
-			// fire. Use a non-negative floor so callers who raise the
+			// Vector similarity is 0–1, so the shipped default of -3.0
+			// could never fire here. Use a non-negative floor so callers who raise the
 			// threshold above 0 can still exclude low-similarity noise.
 			if combinedScore < cfg.RetrievalThreshold {
 				continue
@@ -344,199 +391,40 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 		combined = combined[:cfg.Limit]
 	}
 
-	// ── Phase 4: Contradiction Detection (Cognitive Immune System) ─────
-	// Limit to top 15 candidates for O(1) pairwise evaluation (C(15,2) = 105)
-	// Uses provenance-based tiebreaker rules when a collision is detected.
-	scanLimit := 15
-	if len(combined) < scanLimit {
-		scanLimit = len(combined)
-	}
-	scanSet := combined[:scanLimit]
-
-	// Load embeddings + provenance for pairwise cosine similarity
-	type candidateInfo struct {
-		embedding       []float32
-		content         string
-		isChallenged    bool
-		metadataJSON    string
-	}
-
-	// isStructuralPrefix returns true when content starts with a template
-	// marker that dominates embedding similarity without carrying semantic
-	// signal. The CHOICE:/## /Fact:/Note:/Decision: family are how decision
-	// records, log entries, and section headings start — when two unrelated
-	// memories share the same prefix, the embedding model returns a high
-	// cosine score based on the template tokens, not the underlying claim.
-	// Halving the similarity score in this case prevents the contradiction
-	// detector from false-flagging unrelated decisions/logs/sections as
-	// semantic collisions. Added 2026-07-17 after the c0d7c5807 vs
-	// 077e9b207aa6be1e false positive (both started with "CHOICE: CHOICE:",
-	// cosine=0.88, unrelated content).
-
-	// Phase 2d: build the contradiction lookup once with the schema prefix.
-	// INSERT INTO shared.memories for shared DBs; bare `memories` for local.
-	contradictionTable := cfg.SchemaPrefix + "memories"
-	candMap := make(map[string]candidateInfo, scanLimit)
-
-	// Batch fetch embeddings + content + metadata in a single query
-	if scanLimit > 0 {
-		placeholders := make([]string, scanLimit)
-		args := make([]interface{}, scanLimit)
-		for i, c := range scanSet {
-			placeholders[i] = "?"
-			args[i] = c.ID
-		}
-		rows, err := dm.SQLDB().Query(
-			fmt.Sprintf(`SELECT id, embedding, content, COALESCE(metadata, '{}') FROM %s WHERE id IN (%s) AND embedding IS NOT NULL AND embedding != 'null' AND embedding_source != 'hash'`, contradictionTable, strings.Join(placeholders, ",")),
-			args...,
-		)
-		if err == nil {
-			for rows.Next() {
-				var id, embStr, contentStr, metaStr string
-				if err := rows.Scan(&id, &embStr, &contentStr, &metaStr); err == nil && embStr != "" {
-					var emb []float32
-					if json.Unmarshal([]byte(embStr), &emb) == nil && len(emb) > 0 {
-						candMap[id] = candidateInfo{embedding: emb, content: contentStr, isChallenged: false, metadataJSON: metaStr}
-					}
-				}
-			}
-			rows.Close()
-		}
-	}
-
-	// Backfill isChallenged from scanSet (since we didn't include it in the batch query)
-	for _, c := range scanSet {
-		if info, ok := candMap[c.ID]; ok {
-			info.isChallenged = c.IsChallenged
-			candMap[c.ID] = info
-		}
-	}
-
-	// Provenance tier priority for tiebreaker: absolute > high > standard > ephemeral
-	provenanceTier := func(compute string) int {
-		switch compute {
-		case "absolute":
-			return 4
-		case "high":
-			return 3
-		case "standard":
-			return 2
-		case "ephemeral":
-			return 1
-		default:
-			return 2 // default to standard
-		}
-	}
-
-	// Pairwise O(1) contradiction scan
-	for i := 0; i < scanLimit; i++ {
-		ci, ciOK := candMap[scanSet[i].ID]
-		if !ciOK || len(ci.embedding) == 0 {
-			continue
-		}
-		for j := i + 1; j < scanLimit; j++ {
-			cj, cjOK := candMap[scanSet[j].ID]
-			if !cjOK || len(cj.embedding) == 0 {
-				continue
-			}
-			sim := cosineSimilarity(ci.embedding, cj.embedding)
-			// Structural-prefix discount: if both candidates start with the same
-			// template marker (e.g. "CHOICE: CHOICE:") the cosine score is
-			// inflated by shared tokens. Halve it before the threshold check.
-			if IsStructuralPrefix(ci.content) && IsStructuralPrefix(cj.content) {
-				sim = sim * 0.5
-			}
-			if sim < 0.85 {
-				continue
-			}
-
-			// Extract provenance compute for both memories
-			ciCompute := extractProvenanceCompute(ci.metadataJSON)
-			cjCompute := extractProvenanceCompute(cj.metadataJSON)
-			ciTier := provenanceTier(ciCompute)
-			cjTier := provenanceTier(cjCompute)
-
-			// State collision: one challenged, one not — challenge the unchallenged one.
-			// Previously used ChallengeMemoryAsync (fire-and-forget, no DB write). Fixed:
-			// uses synchronous ChallengeMemory so the DB is actually updated.
-			if ci.isChallenged != cj.isChallenged {
-				var challengedID, unchallengedID string
-				if ci.isChallenged {
-					challengedID = scanSet[i].ID
-					unchallengedID = scanSet[j].ID
-				} else {
-					challengedID = scanSet[j].ID
-					unchallengedID = scanSet[i].ID
-				}
-				evidence := fmt.Sprintf(
-					"semantic collision (cosine=%.2f) between challenged memory %s and unchallenged memory %s",
-					sim, challengedID, unchallengedID)
-				dm.ChallengeMemory(unchallengedID, 1, evidence)
-				// Arc 1: enqueue in the shared contradiction queue
-				// so the operator can resolve via `mpm ops
-				// resolve-contradictions`. Best-effort: if the
-				// shared DB isn't attached, the slash still
-				// landed; the queue insert is a no-op.
-				_ = dm.EnqueueContradiction(ContradictionEvidence{
-					MemoryA:    challengedID,
-					MemoryB:    unchallengedID,
-					Evidence:   evidence,
-					Similarity: float64(sim),
-				})
-				continue
-			}
-
-			// Provenance-based tiebreaker: different tiers
-			if ciTier != cjTier {
-				var winnerID, loserID string
-				var loserCompute string
-				var slashAmount int
-				if ciTier > cjTier {
-					winnerID = scanSet[i].ID
-					loserID = scanSet[j].ID
-					loserCompute = cjCompute
-				} else {
-					winnerID = scanSet[j].ID
-					loserID = scanSet[i].ID
-					loserCompute = ciCompute
-				}
-				// Human vs Model: slash -5
-				// High vs Ephemeral: slash -3
-				if loserCompute == "ephemeral" {
-					slashAmount = 3
-				} else {
-					slashAmount = 5
-				}
-				evidence := fmt.Sprintf(
-					"provenance collision (cosine=%.2f): %s (tier=%d) vs %s (tier=%d) — resolved in favor of %s",
-					sim, scanSet[i].ID, ciTier, scanSet[j].ID, cjTier, winnerID)
-				dm.ChallengeMemory(loserID, slashAmount, evidence)
-				_ = dm.EnqueueContradiction(ContradictionEvidence{
-					MemoryA:    winnerID,
-					MemoryB:    loserID,
-					Evidence:   evidence,
-					Similarity: float64(sim),
-				})
-				continue
-			}
-
-			// Equal tier — both memories have equal provenance weight and neither is
-			// challenged. Mark the first as challenged to signal unresolved dispute.
-			// (scanSet[i] is the earlier-in-list member of the unordered pair since j > i.)
-			if !cj.isChallenged {
-				evidence := fmt.Sprintf(
-					"unresolved state collision (cosine=%.2f) between equal-tier memories %s and %s — pending manual review",
-					sim, scanSet[i].ID, scanSet[j].ID)
-				dm.ChallengeMemory(scanSet[i].ID, 1, evidence)
-				_ = dm.EnqueueContradiction(ContradictionEvidence{
-					MemoryA:    scanSet[i].ID,
-					MemoryB:    scanSet[j].ID,
-					Evidence:   evidence,
-					Similarity: float64(sim),
-				})
-			}
-		}
-	}
+	// ── Phase 4: REMOVED — similarity candidates are no longer discovered here ──
+	//
+	// This phase used to run three things over the top-15 results: a
+	// ChallengeMemory write on each of three branches, and an
+	// EnqueueContradiction insert on each of the same three branches.
+	//
+	// Both are gone, for one shared reason. Cosine similarity establishes
+	// that two memories are RELATED. It does not establish that they
+	// CONTRADICT each other, and similarity is highest exactly where
+	// duplication is highest — so the scan fired hardest on near-identical
+	// statements asserting the same claim. On the live store that had
+	// challenged 40 distinct members of one 75-row cluster and pinned 30 of
+	// them at the weight floor of 1.0.
+	//
+	// Discovery did not die with the writes; it moved somewhere that cannot
+	// write. FindSimilarityCandidates (similarity_candidates.go) is a pure
+	// function over ScanEntry values, and EnqueueSimilarityCandidates
+	// (similarity_candidates_store.go) is the only persistence path, reached
+	// only when an operator explicitly asks for a review scan.
+	//
+	// Consequences for this file, all intentional:
+	//
+	//   - Retrieval no longer performs a pairwise scan at all. It was work
+	//     whose only output was a write, so removing the write removes the
+	//     work.
+	//   - Retrieval is now write-free on the semantic path. The narrowing
+	//     invariant is now the stronger one: semantic retrieval adds no
+	//     persistent record of any kind.
+	//   - Ranking and result contents are untouched. Phase 4 ran after
+	//     ranking was fixed and after IsChallenged was populated from
+	//     pre-existing database state, so it never fed back into either.
+	//
+	// Tested in hybrid_search_nomutate_test.go and
+	// similarity_candidates_test.go.
 
 	// ── Phase 5: In-Memory Provenance Preamble + Warning Prepend ─────────
 	// ── Phase 5b: Correction-chain discount ──────────────────────────────
@@ -567,16 +455,37 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 	return combined, nil
 }
 
-// hybridScore blends FTS5 BM25 and vector cosine similarity.
-// FTS5 scores are unbounded; normalize to 0–1 range using sigmoid.
-// Vector similarity is already 0–1 cosine.
-func hybridScore(ftsScore float64, vecSim float64, vecWeight float64) float64 {
-	// Sigmoid normalization for BM25: maps unbounded scores to ~0–1
-	// Using a simple tanh-based squash: score / (1 + |score|)
-	normFTS := ftsScore / (1 + math.Abs(ftsScore))
+// normalizeBM25 maps an FTS5 bm25() score onto a 0–1 scale where
+// HIGHER MEANS A BETTER MATCH.
+//
+// SQLite's bm25() is negative-is-better: the strongest match returns the
+// most negative number. The earlier `score / (1 + |score|)` squash was
+// sign-preserving, so it mapped the best lexical match (most negative)
+// to the worst normalised value (near -1) — inverting the lexical signal
+// inside the blend. A 22-query benchmark caught this: with bm25 -22.57
+// ranked above bm25 -24.36 for the same query.
+//
+// Dividing by -1 first flips the sign so better matches are positive,
+// then the squash compresses the unbounded magnitude into (0, 1):
+//
+//	bm25 -24.365 -> normFTS 0.961   (strongest match)
+//	bm25  -8.797 -> normFTS 0.898
+//	bm25  -0.300 -> normFTS 0.231   (weakest match)
+//
+// This is not a sigmoid — it is a monotone squash — so the comment
+// claiming sigmoid normalisation was wrong as well.
+func normalizeBM25(ftsScore float64) float64 {
+	return -ftsScore / (1 + math.Abs(ftsScore))
+}
 
-	// Blend: combined = (1-vecWeight)*normFTS + vecWeight*vecSim
-	return (1-vecWeight)*normFTS + vecWeight*vecSim
+// hybridScore blends FTS5 BM25 and vector cosine similarity.
+//
+// Both legs are on the same 0–1 "higher is better" scale, so the result
+// is directly comparable across sources and against RetrievalThreshold:
+//
+//	combined = (1-vecWeight)*normalizeBM25(bm25) + vecWeight*cosine
+func hybridScore(ftsScore float64, vecSim float64, vecWeight float64) float64 {
+	return (1-vecWeight)*normalizeBM25(ftsScore) + vecWeight*vecSim
 }
 
 // sourceRank gives the cross-source ordering priority: hybrid > fts5 > vector.
@@ -940,6 +849,26 @@ func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float
 	}
 	memTable := schemaPrefix + "memories"
 
+	// Model compatibility. This is the check that dimension equality
+	// cannot make: two models can share a dimension while producing
+	// incomparable vector spaces, and the `len(dbEmbedding) !=
+	// len(queryEmbedding)` guard below passes in exactly that case. The
+	// cosine is then computed over unrelated spaces and returns a
+	// plausible number in [-1,1] — which is worse than no score,
+	// because a score above 0.85 makes HybridSearch call
+	// ChallengeMemory() and MUTATE the memory.
+	//
+	// Rows with NULL embedding_model predate the 2026-10-13 migration
+	// and cannot be attributed to any model, so they are excluded too:
+	// unproven is not the same as compatible. `mpm ops
+	// backfill-embeddings` selects unlabelled rows as pending and restores
+	// them under the active model.
+	activeModel := CurrentEmbeddingFingerprint().Model
+	if activeModel != "" {
+		whereClauses = append(whereClauses, "embedding_model = ?")
+		args = append(args, activeModel)
+	}
+
 	maxScan := dm.GetConfigInt("vector.max_scan", 5000)
 	if maxScan > 0 {
 		countQuery := `SELECT COUNT(*) FROM ` + memTable + ` WHERE ` + strings.Join(whereClauses, " AND ")
@@ -956,6 +885,38 @@ func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float
 	}
 
 	whereSQL := strings.Join(whereClauses, " AND ")
+
+	// Fail loudly, not silently. After the 2026-10-13 embedding_model
+	// migration every pre-existing memory row is unlabelled, and the
+	// compatibility filter above therefore excludes all of them. That is
+	// the correct behaviour — unproven is not comparable — but the visible
+	// symptom is "no memories found", which reads like an empty store and
+	// sends the operator looking in entirely the wrong place.
+	//
+	// Guarded on `labelled == 0`, not merely `unlabelled > 0`: a partially
+	// backfilled store has unlabelled rows but still retrieves fine, and
+	// warning there would train the operator to ignore this message. It
+	// fires only when the filter has actually emptied the candidate set.
+	// The remedy is a re-embed, not a config change.
+	if activeModel != "" {
+		var labelled, unlabelled int
+		if err := dm.SQLDB().QueryRow(
+			`SELECT
+				COALESCE(SUM(CASE WHEN embedding_model IS NOT NULL
+				                   AND TRIM(embedding_model) <> '' THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN embedding_model IS NULL
+				                   OR TRIM(embedding_model) = '' THEN 1 ELSE 0 END), 0)
+			 FROM `+memTable+` WHERE embedding IS NOT NULL AND embedding != 'null'`,
+		).Scan(&labelled, &unlabelled); err == nil && unlabelled > 0 && labelled == 0 {
+			slog.Warn("VectorMatch: every embedded memory is excluded by the "+
+				"embedding-model compatibility filter",
+				"active_model", activeModel,
+				"unlabelled_rows", unlabelled,
+				"remedy", "run `mpm ops backfill-embeddings` to re-embed "+
+					"them under the active model and record the fingerprint")
+		}
+	}
+
 	rows, err := dm.SQLDB().Query(`
 		SELECT id, content, created_at, embedding, embedding_source
 		FROM `+memTable+`

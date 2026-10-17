@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 
@@ -123,78 +122,14 @@ func NewSynthClient() *SynthClient {
 			}
 		}
 	}
-	if sc.APIKey == "" {
-		// Env-var fallback. Each provider reads its OWN
-		// env var only — no cross-provider fallthrough.
-		//
-		// 2026-09-14 release-pass credential-isolation:
-		// OpenRouter must NOT consume OPENAI_API_KEY and
-		// vice versa. Generic OpenAI-compatible endpoints
-		// require the dedicated OAI_COMPAT_API_KEY env
-		// var (or an explicit profile api_key). The
-		// provider-specific lookup is keyed off the
-		// canonical base URL's domain substring.
-		//
-		// This is a strict lookup: no provider can
-		// accidentally inherit another provider's secret.
-		sc.Wire = inferWire(sc.BaseURL)
-		lu := strings.ToLower(sc.BaseURL)
-		switch sc.Wire {
-		case wireOpenAI:
-			switch {
-			case strings.Contains(lu, "openrouter"):
-				if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
-					sc.APIKey = key
-				}
-			case strings.Contains(lu, "googleapis"):
-				if key := os.Getenv("GEMINI_API_KEY"); key != "" {
-					sc.APIKey = key
-				} else if key := os.Getenv("GOOGLE_API_KEY"); key != "" {
-					sc.APIKey = key
-				}
-			case strings.Contains(lu, "x.ai"):
-				if key := os.Getenv("XAI_API_KEY"); key != "" {
-					sc.APIKey = key
-				}
-			case strings.Contains(lu, "mistral.ai"):
-				if key := os.Getenv("MISTRAL_API_KEY"); key != "" {
-					sc.APIKey = key
-				}
-			case strings.Contains(lu, "cohere.com"):
-				if key := os.Getenv("COHERE_API_KEY"); key != "" {
-					sc.APIKey = key
-				}
-			case strings.Contains(lu, "openai.com"),
-				strings.Contains(lu, "/openai/"),
-				strings.HasSuffix(lu, "/openai"):
-				if key := os.Getenv("OPENAI_API_KEY"); key != "" {
-					sc.APIKey = key
-				}
-			default:
-				// Generic OpenAI-compatible endpoints:
-				// require the dedicated OAI_COMPAT_API_KEY env
-				// var. OPENAI_API_KEY and OPENROUTER_API_KEY
-				// are NEVER read here — operators with a local
-				// LM Studio / LocalAI / vLLM endpoint MUST
-				// configure a separate key (or set the
-				// profile's api_key explicitly).
-				if key := os.Getenv("OAI_COMPAT_API_KEY"); key != "" {
-					sc.APIKey = key
-				}
-			}
-		default:
-			if key := os.Getenv("MINIMAX_API_KEY"); key != "" {
-				sc.APIKey = key
-			} else if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-				sc.APIKey = key
-			}
-		}
-	} else {
-		// API key was set on the explicit config path
-		// (synth block or profile); wire is still inferred
-		// from BaseURL the same way.
-		sc.Wire = inferWire(sc.BaseURL)
-	}
+	// Wire and credential are resolved independently: the wire comes
+	// from the URL alone, the credential from explicit config first and
+	// the provider's own environment variable second. Both go through
+	// the shared resolver so the synthesis client, the orchestration
+	// model factory and the generative probe can never disagree about
+	// which credential applies.
+	sc.Wire = inferWire(sc.BaseURL)
+	sc.APIKey = ResolveAPIKey(sc.APIKey, sc.BaseURL)
 	// 2026-09-10 cleanup: synthesis is OPTIONAL — a successful memory
 	// save must not be reported as ERROR-level failure just because the
 	// operator hasn't configured an LLM provider. Distinguish:

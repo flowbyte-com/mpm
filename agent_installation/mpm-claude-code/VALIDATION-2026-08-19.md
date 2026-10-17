@@ -1,5 +1,16 @@
 # Claude Code ↔ MPM Integration — Alpha Validation 2026-08-19
 
+> **Correction (2026-10-12).** The `READY` verdict below was reached against a
+> wiring path that Claude Code never read. This record claims the integration
+> lives in `~/.claude/.mcp.json`; that file is **not** a discovery path in any
+> scope. The user scope is the `mpmServers.mpm` entry in `~/.claude.json`, and
+> `install.sh` now registers there via `claude mcp add mpm --scope user`. The
+> body of this document is left as the historical record of the 2026-08-19 run,
+> including its incorrect path claims — see §"Scope and shadowing" in
+> `README.md` for the current contract and `tests/test_claude_mcp_registration.py`
+> for the regression coverage. Do not use this file as a description of where
+> the registration lives.
+
 Verdict: **READY**
 
 Adversarial onboarding test run by a Claude Code agent against the local MPM

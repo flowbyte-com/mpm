@@ -410,24 +410,71 @@ func handleConfigValidate(c *config.Config) int {
 	// flaky networks. Today's validator catches "this binding
 	// won't work because the profile is missing a model" without
 	// leaving the operator's machine.
+	//
+	// The check logic itself lives in validateConfigStructure so a
+	// second surface can consume the same verdict as data instead of
+	// parsing this handler's stdout (`mpm onboard` does; see
+	// onboard_cmds.go). The rendered lines below are byte-identical
+	// to what the handler printed before the extraction.
 	if c == nil {
 		fmt.Println("✗ no config loaded")
 		return 1
 	}
-	issues := 0
+	v := validateConfigStructure(c)
 
 	fmt.Println("Configuration validation")
 	fmt.Println(strings.Repeat("─", 60))
+	for _, line := range v.Lines {
+		fmt.Println(line)
+	}
+
+	fmt.Println()
+	if v.Issues == 0 {
+		fmt.Println("Validation: ✓ OK")
+		return 0
+	}
+	fmt.Printf("Validation: ✗ FAIL (%d issue%s)\n", v.Issues, pluralForN(v.Issues))
+	fmt.Println()
+	fmt.Println("Live provider checks (--live flag) are a future RFC.")
+	return 1
+}
+
+// configValidation is the data form of `mpm config validate`: the
+// ordered rendered lines plus the issue count that decides the exit
+// code. Extracted 2026-10-13 so `mpm onboard` can report structural
+// validity without capturing stdout — the checks must not exist twice
+// (priority: reuse the existing contract, do not add a second
+// configuration system).
+type configValidation struct {
+	// Lines are the exact strings the human renderer prints, in order.
+	Lines []string
+	// Issues counts only hard failures (✗). Warnings (⚠) are reported
+	// but do not make the configuration invalid.
+	Issues int
+}
+
+// Failed reports whether structural validation found a hard problem.
+func (v configValidation) Failed() bool { return v.Issues > 0 }
+
+// OK is the inverse of Failed, named for call sites that read better
+// as a positive assertion.
+func (v configValidation) OK() bool { return v.Issues == 0 }
+
+func validateConfigStructure(c *config.Config) configValidation {
+	v := configValidation{Lines: []string{}}
+	add := func(format string, args ...interface{}) {
+		v.Lines = append(v.Lines, fmt.Sprintf(format, args...))
+	}
 
 	// Check 1: at least one usable provider is configured.
 	hasProvider := (c.Synth != nil && (c.Synth.Model != "" || c.Synth.BaseURL != "")) ||
 		len(c.Profiles) > 0
 	if hasProvider {
-		fmt.Println("  ✓ provider configuration present")
+		add("  ✓ provider configuration present")
 	} else {
-		fmt.Println("  ✗ no provider configured")
-		fmt.Println("      → run `mpm config` to set one up")
-		issues++
+		add("  ✗ no provider configured")
+		add("      → run `mpm config` to set one up")
+		v.Issues++
 	}
 
 	// Check 2: every profile has provider + model set.
@@ -436,14 +483,14 @@ func handleConfigValidate(c *config.Config) int {
 		for _, name := range sortedKeysForConfig(c.Profiles) {
 			p := c.Profiles[name]
 			if p.Provider == "" || p.Model == "" {
-				fmt.Printf("  ✗ profile %q missing %s\n", name, missingField(p))
-				issues++
+				add("  ✗ profile %q missing %s", name, missingField(p))
+				v.Issues++
 			} else {
 				profileOK++
 			}
 		}
 		if profileOK > 0 && profileOK == len(c.Profiles) {
-			fmt.Printf("  ✓ profiles: %d / %d valid\n", profileOK, len(c.Profiles))
+			add("  ✓ profiles: %d / %d valid", profileOK, len(c.Profiles))
 		}
 	}
 
@@ -453,7 +500,7 @@ func handleConfigValidate(c *config.Config) int {
 		for _, comp := range sortedKeysForConfig(c.Components) {
 			bound := c.Components[comp]
 			if bound == "" {
-				fmt.Printf("  ⚠ component %q unbound (falls back to ProfileFor default chain)\n", comp)
+				add("  ⚠ component %q unbound (falls back to ProfileFor default chain)", comp)
 				continue
 			}
 			if _, ok := c.Profiles[bound]; !ok {
@@ -464,19 +511,19 @@ func handleConfigValidate(c *config.Config) int {
 				// a UX footgun. Surface the broken binding even when
 				// default exists so operators can fix it.
 				if _, hasDefault := c.Profiles["default"]; hasDefault {
-					fmt.Printf("  ⚠ component %q explicitly bound to missing profile %q (runtime would fall back to default)\n", comp, bound)
-					fmt.Printf("      → define the profile or unbind: `mpm config profile add %s` or `mpm config component unset %q`\n", bound, comp)
+					add("  ⚠ component %q explicitly bound to missing profile %q (runtime would fall back to default)", comp, bound)
+					add("      → define the profile or unbind: `mpm config profile add %s` or `mpm config component unset %q`", bound, comp)
 					continue
 				}
-				fmt.Printf("  ✗ component %q bound to missing profile %q\n", comp, bound)
-				fmt.Printf("      → define the profile or unbind: `mpm config profile add %s` or `mpm config component unset %q`\n", bound, comp)
-				issues++
+				add("  ✗ component %q bound to missing profile %q", comp, bound)
+				add("      → define the profile or unbind: `mpm config profile add %s` or `mpm config component unset %q`", bound, comp)
+				v.Issues++
 				continue
 			}
 			componentOK++
 		}
 		if componentOK == len(c.Components) && len(c.Components) > 0 {
-			fmt.Printf("  ✓ components: %d / %d bound\n", componentOK, len(c.Components))
+			add("  ✓ components: %d / %d bound", componentOK, len(c.Components))
 		}
 	}
 
@@ -497,21 +544,21 @@ func handleConfigValidate(c *config.Config) int {
 		for _, cap := range sortedKeysForConfig(c.Capabilities) {
 			bound := c.Capabilities[cap]
 			if bound == "" {
-				fmt.Printf("  ⚠ capability %q unbound (will use default if defined)\n", cap)
+				add("  ⚠ capability %q unbound (will use default if defined)", cap)
 				continue
 			}
 			if !knownSet[bound] {
 				if _, ok := c.Components[bound]; !ok {
-					fmt.Printf("  ✗ capability %q bound to missing component %q\n", cap, bound)
-					fmt.Printf("      → bind to a known component: `mpm config capability set %q <component>`\n", cap)
-					issues++
+					add("  ✗ capability %q bound to missing component %q", cap, bound)
+					add("      → bind to a known component: `mpm config capability set %q <component>`", cap)
+					v.Issues++
 					continue
 				}
 			}
 			capOK++
 		}
 		if capOK == len(c.Capabilities) && len(c.Capabilities) > 0 {
-			fmt.Printf("  ✓ capabilities: %d / %d resolve\n", capOK, len(c.Capabilities))
+			add("  ✓ capabilities: %d / %d resolve", capOK, len(c.Capabilities))
 		}
 	}
 
@@ -523,25 +570,17 @@ func handleConfigValidate(c *config.Config) int {
 		missingComponent := 0
 		for _, comp := range knownComponents {
 			if c.ProfileFor(comp) == nil {
-				fmt.Printf("  ✗ component %q cannot resolve to a profile\n", comp)
+				add("  ✗ component %q cannot resolve to a profile", comp)
 				missingComponent++
-				issues++
+				v.Issues++
 			}
 		}
 		if missingComponent == 0 && (c.Synth != nil || len(c.Profiles) > 0) {
-			fmt.Printf("  ✓ known components: %s resolve to profiles\n", strings.Join(knownComponents, ", "))
+			add("  ✓ known components: %s resolve to profiles", strings.Join(knownComponents, ", "))
 		}
 	}
 
-	fmt.Println()
-	if issues == 0 {
-		fmt.Println("Validation: ✓ OK")
-		return 0
-	}
-	fmt.Printf("Validation: ✗ FAIL (%d issue%s)\n", issues, pluralForN(issues))
-	fmt.Println()
-	fmt.Println("Live provider checks (--live flag) are a future RFC.")
-	return 1
+	return v
 }
 
 // missingField returns the first missing required field in p

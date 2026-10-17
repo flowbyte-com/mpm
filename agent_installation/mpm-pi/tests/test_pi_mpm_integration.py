@@ -37,6 +37,7 @@ from pathlib import Path
 
 # Path constants for the contract tests.
 ADAPTER_DIR = Path(__file__).resolve().parent.parent
+REPO = ADAPTER_DIR.parent.parent
 INDEX_TS = ADAPTER_DIR / "index.ts"
 WORKSPACE_TS = ADAPTER_DIR / "src" / "workspace.ts"
 README = ADAPTER_DIR / "README.md"
@@ -376,6 +377,136 @@ class TestMcpSurfaceContract(unittest.TestCase):
         # Or a stronger statement.
         self.assertRegex(text, r"Pi does not use (the )?MCP server", text)
 
+    def test_readme_does_not_claim_pi_lacks_native_mcp(self):
+        """The stale claim that Pi ships no MCP client.
+
+        Pi added MCP as the `builtin:mcp` built-in extension in 0.99.0
+        (2026-09-29), and it is present in the 1.x line. A README still
+        telling operators Pi has no native MCP support sends them to
+        install a third-party bridge they do not need."""
+        text = _read(README)
+        forbidden = [
+            "does not ship a native MCP",
+            "no native MCP client",
+            "not addressable from a stock Pi",
+        ]
+        for phrase in forbidden:
+            self.assertNotIn(
+                phrase, text,
+                f"README still carries the stale native-MCP claim {phrase!r}",
+            )
+
+    def test_readme_documents_builtin_mcp(self):
+        """The corrected statement: Pi ships MCP as a built-in extension."""
+        text = _read(README)
+        self.assertIn("builtin:mcp", text)
+        self.assertIn("0.99.0", text)
+
+    def test_readme_says_mpm_adapter_needs_no_mcp(self):
+        """The load-bearing conclusion: no MCP bridge is required."""
+        import re
+
+        # Collapse whitespace so the assertion is not defeated by the
+        # sentence being wrapped across lines.
+        text = re.sub(r"\s+", " ", _read(README))
+        self.assertRegex(
+            text,
+            r"does not require MCP|You do not need to enable `builtin:mcp`",
+            "README must state that MPM's Pi adapter needs no MCP bridge",
+        )
+
+    def test_no_adapter_doc_still_misattributes_opencode_to_pi(self):
+        """OpenCode's own source must not describe its plugin as a Pi one.
+
+        This was a copy-paste from the Pi adapter living in the OpenCode
+        plugin's header comment. It matters because it tells a reader —
+        or a future maintainer looking for the OpenCode plugin contract —
+        that OpenCode uses an extension API it does not have. OpenCode
+        loads plugins via its `plugin[]` config array."""
+        offenders = []
+        for path in sorted(ADAPTER_DIR.parent.rglob("*")):
+            if not path.is_file() or path.suffix not in {".md", ".ts"}:
+                continue
+            # Skip generated output and vendored trees.
+            if any(p in {"node_modules", "dist", ".pytest_cache", "__pycache__"}
+                   for p in path.parts):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if "OpenCode" in text and "Pi's extension API" in text:
+                offenders.append(str(path.relative_to(ADAPTER_DIR.parent)))
+        self.assertEqual(
+            offenders, [],
+            "these files attribute OpenCode's plugin API to Pi: "
+            + ", ".join(offenders),
+        )
+
+    def test_no_adapter_doc_still_claims_pi_lacks_native_mcp(self):
+        """The stale native-MCP claim must be gone repo-wide, not just from
+        mpm-pi/README.md.
+
+        Other adapter READMEs cross-reference the Pi integration. A
+        corrected mpm-pi/README.md alongside an uncorrected cross-reference
+        elsewhere leaves the operator reading the same false claim."""
+        import re
+
+        offenders = []
+        for path in sorted(ADAPTER_DIR.parent.rglob("*.md")):
+            if any(p in {"node_modules", "dist", ".pytest_cache", "__pycache__"}
+                   for p in path.parts):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"(has no native MCP|no native MCP client)", text):
+                offenders.append(str(path.relative_to(ADAPTER_DIR.parent)))
+        self.assertEqual(
+            offenders, [],
+            "these adapter docs still claim Pi has no native MCP: "
+            + ", ".join(offenders),
+        )
+
+
+class TestBinaryDiscovery(unittest.TestCase):
+    """index.ts must not fall back to the bare literal 'mpm'.
+
+    The bare-literal fallback is the defect this class documents: Pi is
+    frequently launched without a login shell, so `mpm` can be installed
+    correctly and still not be on PATH. The behavioural assertions live
+    in tests/test_resolve_mpm_binary.test.ts (which exercises the real
+    resolution); these pin the wiring in index.ts that the behavioural
+    tests cannot see."""
+
+    def test_index_uses_resolver(self):
+        text = _read(INDEX_TS)
+        self.assertIn("resolve-mpm-binary.js", text)
+        self.assertIn("RESOLVED_MPM_BINARY", text)
+
+    def test_no_literal_mpm_fallback_at_call_sites(self):
+        text = _read(INDEX_TS)
+        self.assertNotIn(
+            'opts.mpmBin ?? "mpm"',
+            text,
+            "call sites must fall back to the resolved binary path",
+        )
+
+    def test_failure_message_does_not_blame_path(self):
+        """The old message was 'Is the mpm binary on PATH?' — the wrong
+        diagnosis for the failure the resolver exists to fix.
+
+        Checked against code with comments stripped: the phrase survives
+        legitimately in a comment explaining why the message changed, and
+        asserting on the raw file would forbid documenting the fix."""
+        import re
+
+        raw = _read(INDEX_TS)
+        no_block = re.sub(r"/\*[\s\S]*?\*/", "", raw)
+        code = re.sub(r"//[^\n]*", "", no_block)
+        self.assertNotIn(
+            "Is the mpm binary on PATH?",
+            code,
+            "the spawn-failure message must name the discovery trail "
+            "instead of sending the operator to inspect PATH",
+        )
+        self.assertIn("describeDiscovery", code)
+
 
 # ---------------------------------------------------------------------------
 # Documentation accuracy
@@ -453,13 +584,40 @@ def _mpm_on_path() -> bool:
 class TestLiveIntegration(unittest.TestCase):
     """Real-substrate live tests. Each test runs `mpm call` with the
     Pi provenance env set and verifies the resulting attribution.
+
+    These tests exercise the REAL mpm binary, but never the operator's
+    real memory store. Every call runs against a throwaway MPM_WORKSPACE
+    created for the class, because these tests write memories and
+    handoffs: against the live store an ordinary `make test` mutates
+    production MPM state, and a test that fails between saving and
+    shredding leaves a row behind for good.
     """
+
+    _workspace: Path | None = None
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._workspace = Path(
+            tempfile.mkdtemp(prefix="mpm-pi-live-test-")
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if cls._workspace is not None:
+            shutil.rmtree(cls._workspace, ignore_errors=True)
+            cls._workspace = None
 
     @staticmethod
     def _mpm_call(tool: str, payload: dict, framework: str = "pi", timeout: int = 30) -> dict:
         """Run `mpm call <tool> --payload '<json>'` with a forced
-        framework env var and return the parsed JSON envelope."""
+        framework env var and return the parsed JSON envelope.
+
+        MPM_WORKSPACE is pinned to the class's throwaway directory so
+        the real binary runs against disposable data. (It is MPM's data
+        root, not a source path — the store self-initialises there on
+        first write, verified by probe.)"""
         env = os.environ.copy()
+        env["MPM_WORKSPACE"] = str(TestLiveIntegration._workspace)
         env["MPM_PROVENANCE_FRAMEWORK"] = framework
         proc = subprocess.run(
             ["mpm", "call", tool, "--payload", json.dumps(payload)],
@@ -501,36 +659,47 @@ class TestLiveIntegration(unittest.TestCase):
         self.assertTrue(env["success"])
 
     def test_default_mode_persona_contract(self):
-        """When `active.json` has no `modes` key, the wake JSON's
-        `active_mode` is `"default"` — shared-core fills the gap so
-        the Pi renderer no longer needs its own fallback. This test
-        documents the substrate contract: mode and persona are both
-        populated with `"default"` when the operator has not yet
-        configured modes/personas.
+        """A workspace with no mode or persona configured surfaces
+        `active_mode` and `active_persona` as `"default"` — shared-core
+        fills the gap so the Pi renderer no longer needs its own
+        fallback.
+
+        The precondition is established here rather than read from the
+        operator's machine. The previous version inspected the real
+        ~/.mpm/active.json while querying an isolated workspace. That
+        made the assertion depend on whatever the host happened to have
+        installed, and its stated cause was wrong: `active.json` having
+        no `modes` key is not what drives the value. Probing a throwaway
+        workspace showed the actual driver is the presence of the
+        shipped `mode/` and `persona/` directories — a workspace with
+        `persona/default.md` alone yields active_persona="default" but
+        active_mode="", and both only once `mode/` is present too.
         """
+        for kind in ("mode", "persona"):
+            src = REPO / kind / "default.md"
+            dest = self._workspace / kind
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest / "default.md")
+        self.addCleanup(shutil.rmtree, self._workspace / "mode", True)
+        self.addCleanup(shutil.rmtree, self._workspace / "persona", True)
+
         env = self._mpm_call(
             "mpm_context",
             {"action": "read_wake_context", "params": {}},
         )
-        # Shared-core contract: when active.json has no `modes` key
-        # (or no active_mode), the wake JSON surfaces "default"
-        # rather than an empty string. The Pi renderer's previous
-        # fallback at index.ts:renderWakeBlock is no longer needed
-        # because the substrate now fills the gap; this test pins
-        # that contract so a future regression that re-introduces
-        # the asymmetry is caught.
-        active_json = Path(os.path.expanduser("~/.mpm/active.json"))
-        if active_json.exists():
-            aj = json.loads(active_json.read_text())
-            if not aj.get("modes"):
-                self.assertEqual(env.get("active_mode", ""), "default",
-                    "shared-core must surface active_mode='default' when "
-                    "active.json has no 'modes' key; the renderer-side "
-                    "fallback was retired once shared-core closed the gap")
-        # Independently, persona should be either "default" or empty
-        # (resolved via ResolveActivePersona, which falls back to
-        # "default" if the requested file is missing).
-        self.assertIn(env.get("active_persona", ""), {"", "default"})
+        # Shared-core contract: with mode/ and persona/ present and no
+        # active.json override, the wake JSON surfaces "default" rather
+        # than an empty string. The Pi renderer's previous fallback at
+        # index.ts:renderWakeBlock is no longer needed because the
+        # substrate now fills the gap; this test pins that contract so a
+        # future regression that re-introduces the asymmetry is caught.
+        self.assertEqual(env.get("active_mode", ""), "default",
+            "shared-core must surface active_mode='default' when no mode "
+            "is configured; the renderer-side fallback was retired once "
+            "shared-core closed the gap")
+        self.assertEqual(env.get("active_persona", ""), "default",
+            "shared-core must surface active_persona='default' when no "
+            "persona is configured")
 
     def test_live_provenance_attribution(self):
         """When `MPM_PROVENANCE_FRAMEWORK=pi` is set on the mpm call,
@@ -547,22 +716,26 @@ class TestLiveIntegration(unittest.TestCase):
         self.assertTrue(result.get("success"), f"save failed: {result}")
         memory_id = result.get("memory_id") or result.get("id")
         self.assertTrue(memory_id, f"no memory_id in: {result}")
+        # Register cleanup BEFORE the first assertion that can fail. The
+        # earlier version shredded at the end of the happy path, so any
+        # failing assertion left the row behind.
+        self.addCleanup(
+            self._mpm_call,
+            "mpm_memory",
+            {"action": "shred", "params": {"memory_id": memory_id}},
+            "pi",
+        )
         # Inspect provenance via mpm provenance CLI.
         prov = subprocess.run(
             ["mpm", "provenance", memory_id],
             capture_output=True,
             text=True,
             timeout=30,
+            env={**os.environ, "MPM_WORKSPACE": str(self._workspace)},
         )
         self.assertEqual(prov.returncode, 0, prov.stderr)
         self.assertIn("framework: pi", prov.stdout,
                       f"provenance does not attribute framework=pi: {prov.stdout!r}")
-        # Cleanup: shred the test memory.
-        self._mpm_call(
-            "mpm_memory",
-            {"action": "shred", "params": {"memory_id": memory_id}},
-            framework="pi",
-        )
 
     def test_live_handoff_round_trip(self):
         """Write a handoff with provenance=pi, list it, verify it
@@ -582,6 +755,14 @@ class TestLiveIntegration(unittest.TestCase):
         self.assertTrue(result.get("success"), f"handoff write failed: {result}")
         handoff_id = result.get("handoff_id") or (result.get("handoff") or {}).get("id")
         self.assertTrue(handoff_id, f"no handoff_id in: {result}")
+        # Registered before the first assertion that can fail, for the
+        # same reason as the memory case above.
+        self.addCleanup(
+            self._mpm_call,
+            "mpm_handoff",
+            {"action": "shred", "params": {"handoff_id": handoff_id, "confirm": True}},
+            "pi",
+        )
         # List it back.
         listed = self._mpm_call(
             "mpm_handoff",
@@ -589,13 +770,6 @@ class TestLiveIntegration(unittest.TestCase):
             framework="pi",
         )
         self.assertTrue(listed.get("success"))
-        # Shred the handoff (mark confirm=true to be safe).
-        shred = self._mpm_call(
-            "mpm_handoff",
-            {"action": "shred", "params": {"handoff_id": handoff_id, "confirm": True}},
-            framework="pi",
-        )
-        self.assertTrue(shred.get("success"))
 
     def test_live_mcp_startup_not_applicable(self):
         """Pi does not use the mpm-mcp MCP server. Document the

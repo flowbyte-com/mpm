@@ -148,13 +148,13 @@ func (dm *DatabaseManager) ResolveArbitrationTheory(theoryID, winnerID, conclusi
 	// ResolveTheory's semantics, scoped to shared.memories.
 	now := time.Now().UTC().Format(time.RFC3339)
 	theoryPatch := map[string]interface{}{
-		"status":         "resolved",
-		"conclusion":     conclusion,
-		"resolved_at":    now,
-		"winner_id":      winnerID,
-		"loser_id":       loserID,
-		"queue_id":       queueIDV.Int64,
-		"resolution_id":  resolutionResult["resolution_id"],
+		"status":        "resolved",
+		"conclusion":    conclusion,
+		"resolved_at":   now,
+		"winner_id":     winnerID,
+		"loser_id":      loserID,
+		"queue_id":      queueIDV.Int64,
+		"resolution_id": resolutionResult["resolution_id"],
 	}
 	theoryPatchJSON, _ := json.Marshal(theoryPatch)
 	if err := dm.UpdateSharedMemoryMetadata(theoryID, string(theoryPatchJSON)); err != nil {
@@ -180,16 +180,16 @@ func (dm *DatabaseManager) ResolveArbitrationTheory(theoryID, winnerID, conclusi
 
 	// Merge the results.
 	out := map[string]interface{}{
-		"success":               true,
-		"id":                    theoryID,
-		"status":                "resolved",
-		"conclusion":            conclusion,
-		"queue_id":              queueIDV.Int64,
-		"winner_id":             winnerID,
-		"loser_id":              loserID,
-		"resolution_memory_id":  resolutionResult["resolution_id"],
-		"slash_amount":          resolutionResult["slash_amount"],
-		"evidence_id":           resolutionResult["evidence_id"],
+		"success":              true,
+		"id":                   theoryID,
+		"status":               "resolved",
+		"conclusion":           conclusion,
+		"queue_id":             queueIDV.Int64,
+		"winner_id":            winnerID,
+		"loser_id":             loserID,
+		"resolution_memory_id": resolutionResult["resolution_id"],
+		"slash_amount":         resolutionResult["slash_amount"],
+		"evidence_id":          resolutionResult["evidence_id"],
 	}
 	return out, nil
 }
@@ -257,48 +257,41 @@ func (dm *DatabaseManager) applyArbitrationResolution(theoryID string, queueID i
 		return nil, fmt.Errorf("applyArbitrationResolution: write resolution memory: %w", err)
 	}
 
-	// Slash the loser. Same UPDATE shape as applyResolution.
+	// Slash the loser. Same UPDATE shape as applyResolution — and, since
+	// issue #24, the same SHARED challenge primitive rather than a third
+	// copy of the SQL, so the pre-slash weight and retrieval_priority are
+	// recorded and `mpm challenge restore` can put both back.
+	//
+	// The theory that carried this verdict is recorded as
+	// `arbitration_theory`, NOT as `challenged_theory_id`. By the time a
+	// restore runs, ResolveArbitrationTheory has already resolved that
+	// theory to status='resolved' with the operator's conclusion; a
+	// restore asked to mark it 'disproven' would be reporting a
+	// contradiction the operator never made. A challenge with no theory
+	// to disprove restores completely and says so.
 	var exists bool
 	err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM shared.memories WHERE id = ? AND deleted_at IS NULL)`, loserID).Scan(&exists)
 	if err != nil {
 		return nil, fmt.Errorf("applyArbitrationResolution: loser check: %w", err)
 	}
 	if exists {
-		// Same JSON-merge approach as applyResolution: read the
-		// existing metadata, merge in the patch, write back as a
-		// single JSON object. String concat (`||`) would produce
-		// invalid JSON.
-		var existingMetaRaw sql.NullString
-		if err := tx.QueryRow(`SELECT metadata FROM shared.memories WHERE id = ?`, loserID).Scan(&existingMetaRaw); err != nil {
-			return nil, fmt.Errorf("applyArbitrationResolution: read loser metadata: %w", err)
-		}
-		loserPatch := map[string]interface{}{
-			"status":                  "challenged",
-			"challenged_by_resolution": resolutionID,
-			"challenged_at":           time.Now().UTC().Format(time.RFC3339),
-			"challenged_via":          "operator_arbitration",
-			"arbitration_theory":      theoryID,
-		}
-		merged := map[string]interface{}{}
-		if existingMetaRaw.Valid && existingMetaRaw.String != "" && existingMetaRaw.String != "{}" {
-			if err := json.Unmarshal([]byte(existingMetaRaw.String), &merged); err != nil {
-				return nil, fmt.Errorf("applyArbitrationResolution: parse existing loser metadata: %w", err)
-			}
-		}
-		for k, v := range loserPatch {
-			merged[k] = v
-		}
-		mergedJSON, _ := json.Marshal(merged)
-		_, err = tx.Exec(`
-			UPDATE shared.memories
-			SET metadata = ?,
-			    weight = MAX(1, weight - ?),
-			    retrieval_priority = MAX(0.01, retrieval_priority - ?),
-			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ? AND deleted_at IS NULL
-		`, string(mergedJSON), slashAmount, float64(slashAmount)/100.0, loserID)
+		applied, err := applyChallengeStateInTx(tx, ChallengeTableShared, ChallengeSpec{
+			MemoryID:               loserID,
+			SlashAmount:            slashAmount,
+			SlashRetrievalPriority: true,
+			ChallengedAt:           time.Now().Unix(),
+			Fields: map[string]interface{}{
+				"status":                   "challenged",
+				"challenged_by_resolution": resolutionID,
+				"challenged_via":           ChallengeViaArbitration,
+				"arbitration_theory":       theoryID,
+			},
+		})
 		if err != nil {
 			return nil, fmt.Errorf("applyArbitrationResolution: slash loser: %w", err)
+		}
+		if applied.RowsAffected == 0 {
+			return nil, fmt.Errorf("applyArbitrationResolution: challenge aborted: loser %s was not updated (no matching live row)", loserID)
 		}
 	}
 

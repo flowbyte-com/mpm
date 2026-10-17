@@ -19,8 +19,10 @@
 #   - subprocess-isolation guard           (`make test-testenv-precommit`)
 #
 # Install: copy this file to .git/hooks/pre-commit (or run `make install-hooks`).
-# Future: when the test suite stabilises, add `go test ./...` (full sweep) and
-# move the flaky tests into a separate CI job with -short + clean DB.
+# Future: when the test suite stabilises, add a full sweep (as a Makefile
+# target carrying CGO_CFLAGS/CGO_LDFLAGS/-tags fts5 — never a bare
+# `go test ./...`, which compiles go-sqlite3 without FTS5) and move the
+# flaky tests into a separate CI job with -short + clean DB.
 
 set -e
 

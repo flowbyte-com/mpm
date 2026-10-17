@@ -199,20 +199,47 @@ From mpm's README:
 > interface; `mpm call` and MCP are the agent-facing tool surfaces. All
 > map to the same `internal/core/tools` registry."
 
-Pi's upstream (`badlogic/pi-mono`) does not ship a native MCP
-client, so `mpm-mcp` is not directly addressable from a stock Pi
-install. There is a widely-used third-party bridge,
-**`pi-mcp-adapter`** (currently v2.32.1, published 2026-09-01,
-maintained by `nicobailon` outside the `badlogic` org, listed on
-`pi.dev` and seeing ~761K downloads/mo — install with
-`pi install npm:pi-mcp-adapter`), which exposes MCP servers to Pi
-through a single proxy tool. It is *not* what this extension uses:
-MPM's bundled Pi integration talks to the substrate through Pi's
-native extension API (`index.ts` registered tools +
-`before_agent_start` hook for wake-context injection) and the
-`AGENTS.md` managed block for the behavioral contract, not through
-MCP. A Pi user who prefers the MCP route can install
-`pi-mcp-adapter` and register `mpm-mcp` as a configured server.
+### MPM's Pi adapter does not use MCP
+
+**MPM's Pi integration uses Pi's native extension API. It does not
+require MCP, and installing no MCP bridge is the supported path.**
+
+The extension registers typed tools directly against Pi's
+`ExtensionAPI` (`pi.registerTool(...)`), injects wake context through
+the `before_agent_start` hook, and ships the behavioral contract as an
+`AGENTS.md` managed block. Nothing in that path touches an MCP server.
+
+### Pi and native MCP (current versions)
+
+Earlier Pi releases had no MCP client, so a third-party bridge was the
+only way to reach an MCP server. **That is no longer true.** Pi ships
+MCP as a **built-in extension** named `builtin:mcp`, alongside
+`builtin:llama.cpp`, `builtin:codemode`, and `builtin:tool-search`. It
+was added in Pi **0.99.0** (2026-09-29) and is present in the 1.x
+line. It is enabled by default and reads servers from
+`~/.pi/agent/mcp.json` (user-level) and `.pi/mcp.json` (project-level,
+after project trust is granted); `pi mcp add` manages entries.
+
+Consequences for this adapter:
+
+- **You do not need to enable `builtin:mcp` to use MPM with Pi.** MPM's
+  integration is independent of it. Some installs disable the builtin
+  via `-builtin:mcp` in `~/.pi/agent/settings.json`; MPM's adapter is
+  unaffected by that setting.
+- **MCP remains a supported alternative route** for operators who
+  prefer it. Register `mpm-mcp` as a server and its tools appear as
+  `mcp__<server>__<tool>`. Two routes can coexist — the extension's
+  typed tools and the MCP surface — though running both means two
+  ways to reach the same tools.
+- **The third-party `pi-mcp-adapter` is no longer required** for MCP
+  access on current Pi. It remains usable on older releases and adds
+  features (OAuth flows, a panel UI) beyond Pi's builtin, so it is not
+  wrong to install — but it is not the only route, and an operator on
+  a current Pi should not assume an MCP bridge is mandatory.
+
+The rest of this README describes MPM's native-extension route, which
+remains the recommended default: it registers the curated 17-tool
+subset as first-class typed tools and needs no additional packages.
 
 Note: as of 2026-09-29, mpm-mcp no longer populates the MCP
 `initialize.instructions` field. The behavioural contract lives

@@ -1,30 +1,32 @@
-// executable_d2_recovery_test.go — Item 1.
+// executable_d2_recovery_test.go — D-2 release-gate rehearsal.
 //
-// Real-executable regression for D-2. Mirrors the pristine rehearsal
-// exactly:
+// Real-executable regression for D-2. Rewritten to match the
+// post-#28 contract where `mpm doctor` is observational and does
+// not silently repair schema damage; explicit writable commands
+// (`mpm ops init topics`) are the recovery surface.
 //
-//	A. create a realistic workspace/DB,
+// Rehearsal:
+//
+//	A. create a realistic workspace/DB via the explicit writable
+//	   maintenance command (`bin/mpm ops init topics`),
 //	B. close MPM,
 //	C. externally DROP TABLE lessons_fts (no IF EXISTS), using the
 //	   same sqlite3 CLI invocation a shell operator would run,
-//	D. execute the built/public:
-//	       bin/mpm doctor
-//	   with:
-//	       MPM_WORKSPACE=<that workspace>,
-//	E. verify afterward, by reading the workspace's on-disk
-//	   sqlite_master directly:
-//	       lessons_fts virtual table exists,
-//	       lessons_instead_of_insert trigger exists,
-//	       lessons_instead_of_update trigger exists,
-//	       lessons_instead_of_delete trigger exists,
+//	D. execute the built/public observational inspection
+//	   (`bin/mpm doctor`) and verify it does NOT repair
+//	   lessons_fts — the new contract is observational only,
+//	E. execute the explicit writable recovery
+//	   (`bin/mpm ops init topics`) and verify lessons_fts and
+//	   the three lessons_instead_of_* triggers are recreated
+//	   on disk,
 //	F. verify a probe write through the lessons view succeeds by
 //	   running another fresh subprocess against the same workspace.
 //
-// Subprocess entry point matches the pristine rehearsal exactly:
-// the doctor command from `bin/mpm`, no test-internal database
-// manager reach-through. The init path that doctor triggers is
-// identical to what any other bin/mpm subcommand triggers, so this
-// covers every public invocation surface.
+// Subprocess entry point uses real `bin/mpm` invocations; no
+// test-internal database manager reach-through. This covers the
+// public executable surface (observational + writable init) and
+// pins both halves of the #28 contract: doctor does not repair
+// (observational), explicit init does repair (writable).
 package release_acceptance_test
 
 import (
@@ -41,57 +43,64 @@ import (
 
 const sqlite3Maybe = "sqlite3" // tolerate absent CLI; skip if not installed
 
-// TestExecutableD2_RecoveryViaBinMpmDoctor is the canonical D-2
-// executable-level regression. Requires both `bin/mpm` (built via
-// `make build`) and the `sqlite3` CLI tool.
-func TestExecutableD2_RecoveryViaBinMpmDoctor(t *testing.T) {
+// TestExecutableD2_ObservationalDoctorAndExplicitInit pins both
+// halves of the MPM #28 contract at the executable level:
+//
+//  1. `bin/mpm doctor` is observational and must NOT silently
+//     repair schema damage. The FTS state after a doctor run on a
+//     damaged database must reflect the same damage.
+//  2. The explicit writable maintenance command
+//     `bin/mpm ops init topics` is the recovery surface. After
+//     that command runs, the schema must be restored on disk.
+//
+// Requires both `bin/mpm` (built via `make build`) and the
+// `sqlite3` CLI tool.
+func TestExecutableD2_ObservationalDoctorAndExplicitInit(t *testing.T) {
 	if os.Getenv("CGO_CFLAGS") == "" {
 		t.Skip("FTS5 build flags absent; rerun via `make test-release`")
 	}
 
 	// (A) Build a realistic workspace via the producer-side API
-	// once so the workspace layout and DB schema are the canonical
-	// state a real installation would have immediately after a
-	// fresh `install.sh`. After this, MPM is "closed" in that
-	// every subprocess invocation sees a fresh boot path.
+	// once so the workspace layout is in place. Then prime the
+	// on-disk DB with the explicit writable maintenance command
+	// `bin/mpm ops init topics`, which invokes the writable
+	// singleton and runs schema init. Assert success — silent
+	// tolerance would mask a broken init path.
 	workspace, cleanup := makeAcceptanceWorkspace(t)
 	defer cleanup()
 	mpmBin := findProjectBinary(t)
 
-	// First invocation: prime the on-disk DB. The workspace
-	// helper only mkdirs the .mpm/src/db directory; the actual
-	// mpm.db is created on first NewDatabaseManager call. We run
-	// `mpm doctor` (which is the same path we will test in (D)
-	// below) once here so the directory and DB land in a known
-	// canonical state. The captured output for this prime-run is
-	// not asserted on; it's the schema on disk that matters.
-	primeCmd := exec.Command(mpmBin, "doctor")
-	primeCmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
-	if _, err := primeCmd.CombinedOutput(); err != nil {
-		// doctor may exit 1/2 on warnings; that is not what
-		// we are testing here. We only need the DB initialized.
-		t.Logf("prime-run bin/mpm doctor exited %v (continuing): we are asserting on disk state, not exit code", err)
+	initCmd := exec.Command(mpmBin, "ops", "init", "topics")
+	initCmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("init bin/mpm ops init topics failed: %v\n%s", err, string(out))
 	}
 
 	// makeAcceptanceWorkspace resolves MPM_WORKSPACE→$MPM_WORKSPACE
 	// and the canonical DB path is <MPM_WORKSPACE>/src/db/mpm.db.
 	dbPath := filepath.Join(workspace, "src", "db", "mpm.db")
 	if _, err := os.Stat(dbPath); err != nil {
-		t.Fatalf("workspace DB not at expected path: %v (looked for %s)", err, dbPath)
+		t.Fatalf("workspace DB not at expected path after init topics: %v (looked for %s)", err, dbPath)
 	}
 
 	// Probe the DB path we'll be dropping against — this proves
 	// the same DB is the one bin/mpm reads/writes.
 	preDrop := snapshotDB(t, dbPath)
-	if _, ok := preDrop.triggers["lessons_instead_of_insert"]; !ok {
-		t.Fatalf("precondition: lessons_instead_of_insert absent in fresh DB; triggers=%+v", preDrop.triggers)
-	}
 	if _, ok := preDrop.vtabs["lessons_fts"]; !ok {
 		t.Fatalf("precondition: lessons_fts absent in fresh DB; vtabs=%+v", preDrop.vtabs)
 	}
+	for _, want := range []string{
+		"lessons_instead_of_insert",
+		"lessons_instead_of_update",
+		"lessons_instead_of_delete",
+	} {
+		if _, ok := preDrop.triggers[want]; !ok {
+			t.Fatalf("precondition: trigger %s absent in fresh DB; triggers=%+v", want, preDrop.triggers)
+		}
+	}
 
 	// (B) "Close MPM" — implicitly done because no MPM process is
-	// holding the DB open after makeAcceptanceWorkspace returns.
+	// holding the DB open after `ops init topics` returned.
 
 	// (C) External strict DROP via the sqlite3 CLI — exactly the
 	// operation a shell operator runs. Use sqlite3 directly rather
@@ -117,33 +126,45 @@ func TestExecutableD2_RecoveryViaBinMpmDoctor(t *testing.T) {
 		t.Fatalf("precondition: strict DROP did not remove lessons_fts from disk; DB=%+v", postDrop)
 	}
 
-	// (D) Execute the real `bin/mpm doctor` subprocess. The
-	// workspace resolution used here is the SAME one the user
-	// runs in production. The doctor boot path will:
-	//   1. NewDatabaseManager(workspace) → initUnifiedSchema
-	//   2. migrateLessonsToView → finishOrRepairLessonsView
-	//      (sees baseExists==1, 3 triggers present → healthy)
-	//   3. initFTSTables → repairOrphanedFTS5 → ftsStateMissing
-	//      → dropStaleFTSyncTriggers (post-fix skips INSTEAD OF)
-	//      → ftsStatements loop recreates lessons_fts + INSTEAD OF
-	//      triggers via ce22fbf's DROP+CREATE pair.
-	cmd := exec.Command(mpmBin, "doctor")
-	cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
-	docOut, docErr := cmd.CombinedOutput()
+	// (D) Execute `bin/mpm doctor` (observational). The doctor
+	// boot path is read-only: a fresh handle is opened against
+	// the workspace DB and a health report is rendered. Doctor
+	// MUST NOT silently repair lessons_fts. A damaged database may
+	// legitimately produce a nonzero exit; we assert on the
+	// output banner and on the on-disk state after the run.
+	docCmd := exec.Command(mpmBin, "doctor")
+	docCmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
+	docOut, docErr := docCmd.CombinedOutput()
 	if docErr != nil {
-		// Doctor may exit 1/2 on warnings/failures; that's
-		// normal. We assert on the OUTPUT and on the recovered
-		// schema, not on the exit code itself.
-		t.Logf("bin/mpm doctor exit=%v (may be non-zero on warnings); output follows", docErr)
+		t.Logf("bin/mpm doctor exit=%v (may be non-zero on warnings or missing-DB); output follows", docErr)
 	}
 	if !strings.Contains(string(docOut), "MPM") {
 		t.Logf("doctor output (truncated): %.200s", string(docOut))
 	}
 
-	// (E) Read the DB on disk and confirm the recovery landed.
+	// Negative control: observational doctor must NOT have
+	// recreated lessons_fts. If it did, the post-#28 read-only
+	// contract is broken.
+	postDoctor := snapshotDB(t, dbPath)
+	if _, repaired := postDoctor.vtabs["lessons_fts"]; repaired {
+		t.Fatalf("bin/mpm doctor unexpectedly recreated lessons_fts; observational contract violated (vtabs=%+v)", postDoctor.vtabs)
+	}
+
+	// (E) Explicit writable recovery: `bin/mpm ops init topics`.
+	// The writable singleton opens the DM, runs schema init (which
+	// detects the missing lessons_fts and recreates the virtual
+	// table plus the three INSTEAD OF triggers), and finally runs
+	// the topic-membership backfill the command is named for.
+	// Assert success and verify the recovered schema.
+	recoverCmd := exec.Command(mpmBin, "ops", "init", "topics")
+	recoverCmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
+	if out, err := recoverCmd.CombinedOutput(); err != nil {
+		t.Fatalf("recovery bin/mpm ops init topics failed: %v\n%s", err, string(out))
+	}
+
 	finalState := snapshotDB(t, dbPath)
 	if _, ok := finalState.vtabs["lessons_fts"]; !ok {
-		t.Fatalf("lessons_fts NOT recreated by `bin/mpm doctor`; vtabs=%+v triggers=%+v",
+		t.Fatalf("lessons_fts NOT recreated by `bin/mpm ops init topics`; vtabs=%+v triggers=%+v",
 			finalState.vtabs, finalState.triggers)
 	}
 	for _, want := range []string{
@@ -152,16 +173,16 @@ func TestExecutableD2_RecoveryViaBinMpmDoctor(t *testing.T) {
 		"lessons_instead_of_delete",
 	} {
 		if _, ok := finalState.triggers[want]; !ok {
-			t.Errorf("trigger %s NOT recreated by `bin/mpm doctor`; present=%+v",
+			t.Errorf("trigger %s NOT recreated by `bin/mpm ops init topics`; present=%+v",
 				want, finalState.triggers)
 		}
 	}
 
 	// (F) Verify a write through the lessons view succeeds via a
 	// SECOND subprocess invocation. This exercises the recovery
-	// under load (writers come in after doctor already ran). The
-	// lessons save surface expects `fact` (the lesson body), with
-	// `type` and `tags` as optional fields.
+	// under load (writers come in after init topics already ran).
+	// The lessons save surface expects `fact` (the lesson body),
+	// with `type` and `tags` as optional fields.
 	insertCmd := exec.Command(mpmBin, "call", "mpm_lessons",
 		`--payload`, `{"action":"save","params":{"type":"insight","fact":"executable D-2 write probe","tags":"[]"}}`)
 	insertCmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)

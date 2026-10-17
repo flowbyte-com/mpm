@@ -1031,6 +1031,15 @@ func TestScheduler_DoesNotWedgeOnPastCronKindWake(t *testing.T) {
 // 2026-09-23 release-blocker repair: "dispatched" now means
 // dispatched_at is set; fired remains 0 so the wake is still pending
 // for normal delivery via the fold / wake-context.
+//
+// 2026-10-17 release-gate fix: wait for the Run goroutine to drain
+// before returning on success. Without `<-done` the test's
+// t.TempDir() cleanup can race with the still-running goroutine's
+// open SQLite file handles, producing the flaky
+// "TempDir RemoveAll cleanup: directory not empty" error. The
+// companion tests TestScheduler_DoesNotWedgeOnPastCronKindWake
+// and TestScheduler_ContextCancellation_CleanShutdown already use
+// the correct pattern.
 func TestScheduler_RestartRecoversPending(t *testing.T) {
 	s := newTestScheduler(t)
 	s.SetHeartbeat(0)
@@ -1063,6 +1072,10 @@ func TestScheduler_RestartRecoversPending(t *testing.T) {
 			}
 			if dispatchedAt.Valid {
 				cancel()
+				// Wait for the Run goroutine to drain before
+				// returning so t.TempDir() cleanup does not race
+				// with the goroutine's open SQLite file handles.
+				<-done
 				return // PASS
 			}
 		}
@@ -1079,6 +1092,11 @@ func TestScheduler_RestartRecoversPending(t *testing.T) {
 // 2026-09-23 release-blocker repair: dispatch stamps dispatched_at,
 // not fired=1. The test asserts the wake got dispatched (audit
 // trail) within the deadline window.
+//
+// 2026-10-17 release-gate fix: wait for the Run goroutine to drain
+// before returning on success. Same fix as
+// TestScheduler_RestartRecoversPending; the pattern is now
+// consistent across all four tests that start a Run goroutine.
 func TestScheduler_NotifyScheduleChanged_InterruptsWait(t *testing.T) {
 	s := newTestScheduler(t)
 	s.SetHeartbeat(0)
@@ -1115,6 +1133,10 @@ func TestScheduler_NotifyScheduleChanged_InterruptsWait(t *testing.T) {
 			}
 			if dispatchedAt.Valid {
 				cancel()
+				// Wait for the Run goroutine to drain before
+				// returning so t.TempDir() cleanup does not race
+				// with the goroutine's open SQLite file handles.
+				<-done
 				return // PASS
 			}
 		}

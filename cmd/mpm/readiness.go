@@ -125,11 +125,44 @@ func readinessOverall(items []ReadinessItem) bool {
 // if the database fails to open, we still want to try starting
 // the scheduler first because it's likely the right move).
 func ReadReadiness(dm *mpminternal.DatabaseManager) []ReadinessItem {
+	return readReadiness(dm, true)
+}
+
+// ReadReadinessReadOnly is ReadReadiness with the scheduler
+// auto-start suppressed.
+//
+// WHY (2026-10-13, `mpm onboard`). ReadReadiness's documented and
+// deliberate side effect is `systemctl --user start mpm-scheduler`
+// when the scheduler is not running. That is correct for `mpm` (no
+// args) — the operator asked for readiness and a dead scheduler
+// silently breaks every wake-scheduled task.
+//
+// It is NOT correct for `mpm onboard`, whose inspection and
+// --dry-run modes are contractually non-mutating ("Ensure help and
+// inspection modes never mutate anything"). Starting a systemd unit
+// is a mutation of machine state outside the workspace, so the
+// inspection path must not be able to do it even as a side effect.
+//
+// The two callers therefore differ in exactly one field: whether the
+// scheduler may be started. Everything else — the eight checks, their
+// order, their levels — is shared, so the inspection report and the
+// `mpm` dashboard can never disagree about what "ready" means.
+func ReadReadinessReadOnly(dm *mpminternal.DatabaseManager) []ReadinessItem {
+	return readReadiness(dm, false)
+}
+
+func readReadiness(dm *mpminternal.DatabaseManager, autoStartScheduler bool) []ReadinessItem {
 	var items []ReadinessItem
 
 	// 1. Scheduler — first because it's the only side-effect we
 	// take. Auto-start on failure is the explicit behaviour.
-	schedItem, schedAutoStarted := checkSchedulerWithAutoStart()
+	var schedItem ReadinessItem
+	var schedAutoStarted bool
+	if autoStartScheduler {
+		schedItem, schedAutoStarted = checkSchedulerWithAutoStart()
+	} else {
+		schedItem = checkSchedulerReadOnly()
+	}
 	items = append(items, schedItem)
 
 	// 2. Database ping.
@@ -227,6 +260,56 @@ func checkReviewBacklogReady(dm *mpminternal.DatabaseManager) ReadinessItem {
 		OK:     false,
 		Level:  readinessLevelWarn,
 		Detail: fmt.Sprintf("%d memories due for spaced review", n),
+		Hint:   hint,
+	}
+}
+
+// checkSchedulerReadOnly reports scheduler state WITHOUT attempting
+// to start it. Used by the onboarding inspection path; see
+// ReadReadinessReadOnly for why the difference is load-bearing.
+//
+// The hint names the same start command a mutating caller would run,
+// so the operator is never told a dead scheduler is fine.
+func checkSchedulerReadOnly() ReadinessItem {
+	if pid := readSchedulerPID(); pid > 0 {
+		return ReadinessItem{
+			Name:   "Scheduler running",
+			OK:     true,
+			Detail: fmt.Sprintf("uptime %s", schedulerUptime()),
+		}
+	}
+	// The unit's existence is read, never acted on. Distinguishing
+	// "you never installed it" from "you installed it and it is
+	// stopped" changes the remedy entirely, and collapsing the two
+	// would send operators to `make service-scheduler` on a machine
+	// that never wanted a scheduler.
+	//
+	// An absent unit is NOT a defect: it is the supported state on a
+	// fresh machine, a CI runner, or any host that does not need a
+	// long-running scheduler. The Level = readinessLevelINFO signal
+	// is what keeps `mpm onboard` from rendering the absent scheduler
+	// as "needs attention": see collectReadiness (cmd/mpm/
+	// onboard_cmds.go) for how the level is consumed.
+	detail := "not running (not started — inspection is read-only)"
+	hint := "start it with `make service-scheduler`, or run `mpm` to allow auto-start"
+	level := readinessLevelWarn
+	if out, err := exec.Command("systemctl", "--user", "show",
+		"mpm-scheduler", "--property=LoadState", "--value").Output(); err == nil {
+		switch strings.TrimSpace(string(out)) {
+		case "not-found":
+			detail = "unit not installed on this machine"
+			hint = "install it with `make service-scheduler`"
+			level = readinessLevelInfo
+		case "":
+			// systemctl returned nothing — treat as unknown rather
+			// than claiming the unit is missing.
+		}
+	}
+	return ReadinessItem{
+		Name:   "Scheduler running",
+		OK:     false,
+		Level:  level,
+		Detail: detail,
 		Hint:   hint,
 	}
 }

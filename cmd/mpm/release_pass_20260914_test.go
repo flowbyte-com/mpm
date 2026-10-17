@@ -23,6 +23,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -240,14 +242,46 @@ func TestRelease_20260914_NoArchaeology(t *testing.T) {
 
 // TestRelease_20260914_InstallPATHWarn is a smoke wrapper for
 // the install-script source-text pins in
-// scripts/install_d31_test.go.
+// scripts/tests/test_install_sh_contracts.py.
+//
+// HISTORY, because the previous version of this test is a warning
+// worth keeping. It read:
+//
+//	_ = "see TestInstallSh_PATHShadowDetection in scripts/install_d31_test.go"
+//
+// with a comment claiming the detailed pin "requires scripts/go.mod,
+// which is invoked by `go test ./scripts/...`". Nothing invoked it.
+// scripts/ was a nested Go module holding exactly one test file, no
+// Makefile target, CI job, or pre-commit hook traversed it, and one of
+// its twelve tests had been failing since commit 93b11cc with nothing
+// to report it. So the release pass pointed at a suite it never ran —
+// the same shape of failure this repository has already paid for once,
+// documented on `make test-scripts`.
+//
+// The pins moved into the gated Python suite, which `make test-scripts`
+// really does execute. This wrapper now checks that they are still
+// there, so deleting or renaming that file cannot quietly drop the
+// release-pass coverage this test stands for.
 func TestRelease_20260914_InstallPATHWarn(t *testing.T) {
-	// The detailed source-text pin is
-	// TestInstallSh_PATHShadowDetection in scripts/install_d31_test.go.
-	// Running it requires scripts/go.mod, which is invoked by
-	// `go test ./scripts/...`. This smoke test simply asserts the
-	// scripts directory contains the new test function.
-	_ = "see TestInstallSh_PATHShadowDetection in scripts/install_d31_test.go"
+	path := filepath.Join(repoRoot(t), "scripts", "tests",
+		"test_install_sh_contracts.py")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the gated install.sh contract suite: %v", err)
+	}
+	for _, want := range []string{
+		"class PathShadowDetection", // the shadowing binary is reported, never removed
+		"will NOT be removed automatically",
+		"readlink -f",
+		"class PathWarningWording", // the PATH warning promises only what happens
+		"new login session",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("scripts/tests/test_install_sh_contracts.py no longer pins %q;\n"+
+				"this release-pass wrapper points at that file, so a rename or a\n"+
+				"dropped assertion silently removes the coverage it stands for", want)
+		}
+	}
 }
 
 // TestRelease_20260914_ConfidenceIntentional is a smoke wrapper

@@ -580,6 +580,26 @@ func ResetEmbedConfigForTest() {
 	testEmbedConfig = nil
 }
 
+// ResetDefaultEmbeddingConfigForTest discards the process-wide cached
+// embedding config so the next DefaultEmbeddingConfig call re-resolves it.
+//
+// This hook exists because the cache is a sync.Once with no other way back.
+// Without it a test that ran first — possibly under a temporary
+// MPM_WORKSPACE with no mpm_config.json — decides the embedding provider
+// for every later test in the process. Anything reading
+// CurrentEmbeddingFingerprint (which returns empty for a null provider)
+// then sees no provider for the rest of the run, and tests that SKIP on
+// "no embedding provider configured" do so silently.
+//
+// Ordering-dependent coverage is the same defect as missing coverage: the
+// suite passes green while the behaviour it was written to pin is never
+// exercised. Callers should pair this with ResetActiveEmbeddingDimensionForTest,
+// since the dimension cache is populated from the config being replaced.
+func ResetDefaultEmbeddingConfigForTest() {
+	defaultEmbedConfigOnce = sync.Once{}
+	defaultEmbedConfig = nil
+}
+
 // DefaultEmbeddingConfig returns a cached embedding config using
 // mpm_config.json. The config is resolved once and then cached for
 // the lifetime of the process.

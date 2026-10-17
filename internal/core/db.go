@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -329,6 +330,45 @@ type DatabaseManager struct {
 	// before the function returns. Tests use t.Cleanup to ensure the
 	// override is cleared on test exit.
 	perCallProvenanceOverride *EffectiveProvenance
+
+	// readOnly is true when this DatabaseManager was opened by
+	// NewDatabaseManagerReadOnly. The flag is the structural
+	// enforcement of the "no writes" contract for the doctor's
+	// inspection path: HealthCheck refuses to run on a read-only
+	// handle (it would issue PRAGMA wal_checkpoint(TRUNCATE) and
+	// LogAudit on failure), and HealthCheckReadOnly refuses to run
+	// on a writable handle (it cannot guarantee the
+	// "this code path cannot write" property if the underlying
+	// connection is not ?mode=ro).
+	//
+	// The default false is correct for every existing call site;
+	// the flag is only set by the new read-only constructor.
+	readOnly bool
+
+	// journalMode is the value observed by a one-shot
+	// PRAGMA journal_mode read at constructor time. Empty when
+	// the read failed (or for handles opened by the writable
+	// constructor, which never observes the value). The doctor
+	// surfaces this in its report so operators can verify the
+	// database's mode without writing anything back. The field is
+	// informational only and does not affect any constructor's
+	// behaviour.
+	journalMode string
+}
+
+// IsReadOnly reports whether this DatabaseManager was opened by the
+// read-only constructor. Callers use this to decide which health-
+// check variant to invoke (HealthCheck vs HealthCheckReadOnly) and
+// to assert the safety property at API boundaries.
+//
+// The default (false) preserves the existing writable behaviour. The
+// flag is only set by NewDatabaseManagerReadOnly; no other code path
+// in this file mutates it.
+func (dm *DatabaseManager) IsReadOnly() bool {
+	if dm == nil {
+		return false
+	}
+	return dm.readOnly
 }
 
 // GetProvenanceResolver returns the resolver, lazily initializing
@@ -449,7 +489,17 @@ func (dm *DatabaseManager) BusyRetryCount() uint64 {
 // Not a tool today — DM-level method that future ops commands can wrap.
 // Failure modes: returns whatever it managed to read; the `ok` field
 // reflects only the integrity check result.
+//
+// Refuses (with ErrHealthCheckReadOnlyNotSupported) when invoked on a
+// read-only DatabaseManager. The structural enforcement is at the API
+// boundary: a read-only handle must use HealthCheckReadOnly, which
+// does not issue PRAGMA wal_checkpoint(TRUNCATE) or LogAudit. Cross-
+// mode calls are programmer errors and refuse loudly.
 func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
+	if dm != nil && dm.readOnly {
+		return nil, ErrHealthCheckReadOnlyNotSupported
+	}
+
 	out := map[string]interface{}{
 		"busy_retries": dm.BusyRetryCount(),
 		// db_path — the absolute, realpath-resolved SQLite file this
@@ -555,6 +605,148 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 	}
 
 	return out, nil
+}
+
+// ReadOnlyHealthCheck is the structured return type of
+// HealthCheckReadOnly. The shape mirrors HealthCheck's
+// map[string]interface{} with one addition: the in-band `warnings`
+// slice that replaces the writable variant's LogAudit calls.
+//
+// The map-shape is preserved for compatibility with the doctor
+// renderer, which reads fields by name (ok, page_count, freelist_count,
+// memories_active, theories_pending, wakes_overdue, evidence_total,
+// busy_retries, db_path, db_path_raw, shared_attached, shared_path).
+// New fields (`warnings`, `journal_mode`) are additive; existing
+// field semantics are unchanged.
+type ReadOnlyHealthCheck struct {
+	Stats    map[string]interface{}
+	Warnings []string
+}
+
+// HealthCheckReadOnly is the read-only counterpart of HealthCheck.
+// It runs the same integrity + page_count / freelist_count + domain
+// stats queries on the read-only handle, but:
+//
+//   - Does NOT issue PRAGMA wal_checkpoint(TRUNCATE). The check
+//     exists on the writable path to commit concurrent writer
+//     uncommitted frames so PRAGMA quick_check does not report a
+//     false FTS5 checksum mismatch (the "WAL frame race"). The
+//     race does not apply to a read-only handle: the doctor
+//     cannot affect the WAL, so a concurrent writer's uncommitted
+//     frames are simply unread by this handle.
+//   - Does NOT call LogAudit. Audit writes would violate the
+//     no-filesystem-mutation contract for the doctor. The method
+//     instead accumulates per-failure warnings in the returned
+//     slice, so the doctor can surface partial-success without
+//     persisting anything.
+//   - Reuses the integrity check, page-level stats, and domain
+//     stats queries verbatim. They are read-only operations that
+//     the read-only handle serves correctly.
+//
+// Refuses (with ErrHealthCheckNotReadOnly) when invoked on a
+// writable DatabaseManager. The contract is: the safety property
+// "this code path cannot write" depends on the underlying
+// connection being ?mode=ro. A writable handle cannot satisfy
+// that property because HealthCheckReadOnly has no way to prevent
+// the future caller from issuing writes through the same
+// connection.
+func (dm *DatabaseManager) HealthCheckReadOnly() (ReadOnlyHealthCheck, error) {
+	if dm == nil {
+		return ReadOnlyHealthCheck{}, fmt.Errorf("HealthCheckReadOnly: nil DatabaseManager")
+	}
+	if !dm.readOnly {
+		return ReadOnlyHealthCheck{}, ErrHealthCheckNotReadOnly
+	}
+	if dm.db == nil {
+		return ReadOnlyHealthCheck{}, fmt.Errorf("HealthCheckReadOnly: database handle is not open")
+	}
+
+	out := map[string]interface{}{
+		// db_path / db_path_raw / shared_attached / shared_path
+		// mirror HealthCheck's contract so the doctor renderer can
+		// treat the two variants interchangeably. busy_retries
+		// remains process-local and is meaningful for any handle
+		// the process has opened.
+		"db_path":         dm.dbPath,
+		"db_path_raw":     dm.dbPathRaw,
+		"shared_attached": dm.sharedAttached,
+		"shared_path":     dm.sharedPath,
+		"busy_retries":    dm.BusyRetryCount(),
+	}
+	// Surface the journal mode observed at constructor time. The
+	// value is "" if the constructor's PRAGMA journal_mode read
+	// failed; the doctor renders the empty case as "unknown".
+	if dm.journalMode != "" {
+		out["journal_mode"] = dm.journalMode
+	}
+
+	var warnings []string
+	addWarning := func(msg string) {
+		warnings = append(warnings, msg)
+	}
+
+	// Integrity check. No wal_checkpoint(TRUNCATE) — see method
+	// doc. The read-only connection cannot affect the WAL, so the
+	// race the writable variant guards against does not apply.
+	var integrity string
+	if err := dm.db.QueryRow(`PRAGMA quick_check`).Scan(&integrity); err != nil {
+		out["ok"] = false
+		out["integrity_error"] = err.Error()
+		addWarning(fmt.Sprintf("integrity check: %v", err))
+		// Return the partial result alongside the warnings so the
+		// doctor can render the integrity failure and the operator
+		// can see what other checks succeeded.
+		return ReadOnlyHealthCheck{Stats: out, Warnings: warnings},
+			fmt.Errorf("integrity check: %w", err)
+	}
+	out["ok"] = integrity == "ok"
+	if !out["ok"].(bool) {
+		out["integrity_status"] = integrity
+	}
+
+	// Page-level stats. Failures are recorded as warnings, not
+	// audit rows, so the doctor surface can carry the same
+	// partial-success semantics as the writable path without
+	// writing to the audit log.
+	var pageCount, freelistCount sql.NullInt64
+	if err := dm.db.QueryRow(`PRAGMA page_count`).Scan(&pageCount); err != nil {
+		addWarning(fmt.Sprintf("PRAGMA page_count scan failed, skipping: %v", err))
+	} else if pageCount.Valid {
+		out["page_count"] = pageCount.Int64
+	}
+	if err := dm.db.QueryRow(`PRAGMA freelist_count`).Scan(&freelistCount); err != nil {
+		addWarning(fmt.Sprintf("PRAGMA freelist_count scan failed, skipping: %v", err))
+	} else if freelistCount.Valid {
+		out["freelist_count"] = freelistCount.Int64
+	}
+
+	// Domain stats. Same shape as HealthCheck. Failures are
+	// recorded as warnings rather than audit rows.
+	queries := []struct {
+		key, sql string
+	}{
+		{"memories_active", `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND NOT (collection = 'directives' OR COALESCE(is_prime_directive, 0) = 1)`},
+		{"theories_pending", `SELECT COUNT(*) FROM memories WHERE collection = 'theories' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > strftime('%s','now')) AND json_extract(metadata, '$.status') = 'pending'`},
+		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND (metadata IS NULL OR metadata = '' OR json_extract(metadata, '$.kind') IS NULL OR json_extract(metadata, '$.kind') = '' OR json_extract(metadata, '$.kind') IN ('notification','cascade'))`},
+		{"evidence_total", `SELECT COUNT(*) FROM evidence`},
+	}
+	now := time.Now().Unix()
+	for _, q := range queries {
+		var n int64
+		var err error
+		if q.key == "wakes_overdue" {
+			err = dm.db.QueryRow(q.sql, now).Scan(&n)
+		} else {
+			err = dm.db.QueryRow(q.sql).Scan(&n)
+		}
+		if err == nil {
+			out[q.key] = n
+		} else {
+			addWarning(fmt.Sprintf("HealthCheckReadOnly stat %q scan failed, skipping: %v", q.key, err))
+		}
+	}
+
+	return ReadOnlyHealthCheck{Stats: out, Warnings: warnings}, nil
 }
 
 // ==================== Watchdog / Query Observability ====================
@@ -1230,6 +1422,232 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 				"path", sharedPath, "error", err.Error())
 		}
 	}
+
+	return manager, nil
+}
+
+// ErrHealthCheckReadOnlyNotSupported is returned by HealthCheck when
+// invoked on a read-only DatabaseManager, and by HealthCheckReadOnly
+// when invoked on a writable DatabaseManager. The sentinel enforces
+// the "this code path cannot write" property at the API boundary:
+// the writable HealthCheck issues PRAGMA wal_checkpoint(TRUNCATE) and
+// LogAudit, and the read-only HealthCheckReadOnly can only guarantee
+// observational behaviour if the underlying connection is genuinely
+// ?mode=ro.
+//
+// Callers that hold a read-only handle must invoke HealthCheckReadOnly.
+// Callers that hold a writable handle must invoke HealthCheck. Cross-
+// mode calls are programmer errors and refuse loudly.
+var ErrHealthCheckReadOnlyNotSupported = fmt.Errorf(
+	"HealthCheck cannot run on a read-only DatabaseManager; " +
+		"use HealthCheckReadOnly for observational inspection",
+)
+
+// ErrHealthCheckNotReadOnly is the symmetric sentinel for the
+// read-only HealthCheckReadOnly when invoked on a writable handle.
+// Kept distinct from ErrHealthCheckReadOnlyNotSupported so callers
+// can branch on the direction of the misuse.
+var ErrHealthCheckNotReadOnly = fmt.Errorf(
+	"HealthCheckReadOnly can only run on a read-only DatabaseManager; " +
+		"use HealthCheck for the writable path",
+)
+
+// ErrReadOnlyDatabaseNotFound is returned by NewDatabaseManagerReadOnly
+// when the active database file does not exist. Distinct from the
+// open failure modes so the doctor can render a precise message.
+//
+// A missing database on a fresh install is a normal condition (the
+// operator has not yet run any write command). The doctor surfaces
+// this as a top-level WARN with a remediation hint ("run a write
+// command such as `mpm remember` to create it"), preserving the
+// existing missing-database severity and exit-code contract.
+var ErrReadOnlyDatabaseNotFound = fmt.Errorf(
+	"read-only inspection: database file does not exist",
+)
+
+// NewDatabaseManagerReadOnly opens the active MPM database in
+// read-only mode for observational inspection by the doctor.
+//
+// The contract is "this code path cannot write". The constructor:
+//
+//   - Refuses to call os.MkdirAll. A non-existent parent directory
+//     is an immediate ErrReadOnlyDatabaseNotFound.
+//   - Opens the SQLite handle with the URI `?mode=ro` ONLY — no
+//     journal-mode parameter is passed. The driver opens the
+//     database in read-only mode without issuing any mode-change
+//     PRAGMA. This is the contract verified by the F8 WAL/
+//     concurrency gate.
+//   - Acquires the existing maintenance lock via
+//     AcquireSharedMaintenanceLockExistingOnly, NOT
+//     AcquireSharedMaintenanceLockAt. The doctor does not create
+//     the lock file; the lock file is the writable constructor's
+//     coordination primitive and must pre-exist for the doctor's
+//     read to be considered coordinated.
+//   - Does NOT run migrations, does NOT seed baseline directives
+//     or tasks, does NOT rotate logs, does NOT enable WAL mode,
+//     and does NOT issue any mode-change PRAGMA. The constructor
+//     is the single point of enforcement for the doctor's
+//     no-filesystem-mutation contract.
+//   - Inspects the current PRAGMA journal_mode with a one-shot
+//     read query and exposes the observed value on the returned
+//     handle. The doctor surfaces the value in its report so
+//     operators can verify the database's mode without writing
+//     anything back.
+//   - Tags the returned handle with readOnly=true. HealthCheck
+//     and HealthCheckReadOnly both refuse cross-mode calls; the
+//     structural enforcement is at the API boundary.
+//
+// Returns:
+//
+//   - ErrReadOnlyDatabaseNotFound if the database file does not
+//     exist (a fresh install that has never run a write command).
+//     The doctor surfaces this as a top-level WARN with the
+//     "run a write command to create it" hint.
+//   - ErrMaintenanceLockAbsent (wrapped) if the lock file does
+//     not exist. The doctor surfaces this as a top-level FAIL
+//     with the "run a write command to establish the lock file"
+//     hint, and exits with the existing missing-database exit
+//     code. The constructor does not create the lock file.
+//   - Other errors from the underlying sql.Open or flock are
+//     wrapped and surfaced verbatim.
+func NewDatabaseManagerReadOnly(projectRoot string) (*DatabaseManager, error) {
+	if IsInMemoryDSN(projectRoot) {
+		return nil, fmt.Errorf(
+			"NewDatabaseManagerReadOnly: %q is a SQLite in-memory DSN, not a workspace root; "+
+				"this constructor is filesystem-only because it derives the existing "+
+				"<root>/src/db/mpm.db. Use NewTestDM (tests) for in-memory databases",
+			projectRoot)
+	}
+
+	// Resolve the workspace root. Mirrors NewDatabaseManager's logic:
+	// a non-empty projectRoot is honoured; an empty projectRoot falls
+	// back to the env-driven GetMPMDir() so CLI handlers and ad-hoc
+	// test invocations work.
+	var mpmDir string
+	if projectRoot != "" {
+		mpmDir = projectRoot
+	} else {
+		mpmDir = config.GetMPMDir()
+	}
+
+	// Derive the canonical lock path. The doctor reads the existing
+	// lock file; it does not create one.
+	lockPath := MaintenanceLockPath(mpmDir)
+	if override := os.Getenv("MPM_DB_LOCK"); override != "" {
+		// MPM_DB_LOCK is the hermetic-test backstop. When the test
+		// sets it, the read-only constructor follows the same path
+		// resolution as the writable constructor: a pre-existing
+		// lock file at the override location is the coordination
+		// primitive. If the file does not exist, the constructor
+		// returns ErrMaintenanceLockAbsent.
+		lockPath = override
+	}
+
+	// Acquire the existing maintenance lock. This is the fail-closed
+	// primitive: it does NOT MkdirAll, does NOT create the lock
+	// file, and refuses with ErrMaintenanceLockAbsent if the file
+	// is missing. The doctor cannot claim coordination with
+	// destructive operations without the H-4 lock.
+	lockFD, lerr := AcquireSharedMaintenanceLockExistingOnly(lockPath)
+	if lerr != nil {
+		// Distinguish the absent-lock case so the doctor can render
+		// a precise remediation hint. The wrapped sentinel
+		// (ErrCoordinatedInspectionUnavailable) is the doctor-facing
+		// failure mode; the underlying ErrMaintenanceLockAbsent
+		// carries the file-state detail.
+		if errors.Is(lerr, ErrMaintenanceLockAbsent) {
+			return nil, fmt.Errorf(
+				"NewDatabaseManagerReadOnly: %w",
+				ErrCoordinatedInspectionUnavailable,
+			)
+		}
+		return nil, fmt.Errorf("NewDatabaseManagerReadOnly: acquire maintenance lease on %s: %w", lockPath, lerr)
+	}
+
+	// Derive the database path. The doctor opens the canonical
+	// active database at <mpmDir>/src/db/mpm.db. If the file does
+	// not exist, fail closed before sql.Open so the operator sees a
+	// precise "database does not exist" message rather than a
+	// SQLite-level "unable to open" error.
+	dbPath := ActiveDBPath(mpmDir)
+	if _, statErr := os.Stat(dbPath); statErr != nil {
+		_ = ReleaseSharedMaintenanceLock(lockFD)
+		if os.IsNotExist(statErr) {
+			return nil, fmt.Errorf("NewDatabaseManagerReadOnly: %w", ErrReadOnlyDatabaseNotFound)
+		}
+		return nil, fmt.Errorf("NewDatabaseManagerReadOnly: stat %s: %w", dbPath, statErr)
+	}
+
+	// Identity check: after acquiring the lock and confirming the
+	// database file exists, re-resolve EvalSymlinks(dbPath) and
+	// confirm the lock and the database agree on the same workspace
+	// root. The cross-process coordination guarantee depends on
+	// this invariant: a destructive operation's LOCK_EX must block
+	// against the same inode the doctor holds LOCK_SH on.
+	resolvedDB, rerr := evalSymlinksOnDB(dbPath)
+	if rerr == nil && resolvedDB != "" {
+		// Sanity: the resolved path must still point at a file. The
+		// file was stat-able above; if the resolution changed
+		// reality (e.g. a symlink swap), the destructive window has
+		// just opened. Refuse the read.
+		if rfi, rerr2 := os.Stat(resolvedDB); rerr2 != nil || !rfi.Mode().IsRegular() {
+			_ = ReleaseSharedMaintenanceLock(lockFD)
+			return nil, fmt.Errorf(
+				"NewDatabaseManagerReadOnly: database identity changed after lock acquisition "+
+					"(resolved=%q, stat err=%v); refusing to read",
+				resolvedDB, rerr2,
+			)
+		}
+	}
+
+	// Open the SQLite handle in read-only mode. The URI is
+	// `?mode=ro` only — no journal-mode parameter is passed. The
+	// driver opens the database in read-only mode without issuing
+	// any mode-change PRAGMA. This is the contract verified by the
+	// F8 WAL/concurrency gate.
+	dsn := dbPath + "?mode=ro"
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		_ = ReleaseSharedMaintenanceLock(lockFD)
+		return nil, fmt.Errorf("NewDatabaseManagerReadOnly: open %s: %w", dbPath, err)
+	}
+
+	manager := &DatabaseManager{
+		db:          db,
+		dbPath:      resolvedDB, // realpath-resolved, mirrors NewDatabaseManager
+		dbPathRaw:   dbPath,
+		lockPath:    lockPath,
+		lockFD:      lockFD,
+		readOnly:    true, // structural enforcement of the no-write contract
+		watchdogPath: filepath.Join(filepath.Dir(dbPath), "watchdog.jsonl"),
+		mirrorPath:   filepath.Join(filepath.Dir(dbPath), "mirror.jsonl"),
+	}
+	// Auxiliary log paths point at the canonical locations beside
+	// the database. The doctor does not write to them; the fields
+	// are populated so the existing log-rotation hooks (which are
+	// no-ops on a read-only handle) see consistent paths.
+
+	// Read-only connections do not need a busy_timeout or any of
+	// the WAL/busy/foreign-key/synchronous PRAGMAs that the writable
+	// constructor issues. mattn/go-sqlite3's ?mode=ro honours
+	// read transactions natively; the kernel-level mmap + WAL
+	// reader path does not require busy_timeout. We leave the
+	// connection at driver defaults.
+
+	// Observe the current journal mode with a one-shot read query.
+	// This is a read operation that does not change the mode; the
+	// doctor reports what it observes. If the query fails (e.g.
+	// the database has been moved between the Stat and the
+	// QueryRow), the doctor falls back to "unknown".
+	//
+	// A failure here is non-fatal: the doctor still has a valid
+	// read-only handle and can run the integrity check. The
+	// journal-mode observation is informational.
+	var journalMode string
+	if err := db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		journalMode = ""
+	}
+	manager.journalMode = journalMode
 
 	return manager, nil
 }
@@ -3722,8 +4140,25 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 	// FTS5-triggered secondary inserts escalated to a hard failure that
 	// rolled back the enclosing transaction and silently dropped the
 	// theory row. See TestMaterializer_ConcurrentClaim for the regression.
-	res, err := node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance, content_hash, identity_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		5, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, createdSec, referenceID, retrievalPriority, importance, contentHash, wantIdentity)
+	// Fingerprint the vector at INSERT time. This is the dominant memory
+	// write path (SaveMemoryNode -> saveMemoryRow, reached from
+	// SaveMemoryWithContext -> AddMemoryWithWeight), so a fingerprint
+	// recorded only on the update and backfill paths would leave every
+	// newly created memory unlabelled — and since the 2026-10-13
+	// compatibility filter excludes unlabelled rows, invisible to
+	// semantic retrieval the moment it is written.
+	//
+	// recorded for a non-nil embedding only: a NULL embedding has no
+	// model to attribute, and stamping it would assert a provenance that
+	// does not exist.
+	embedDim, embedModel := interface{}(nil), interface{}(nil)
+	if embedding != nil {
+		embedDim = len(embedding)
+		embedModel = CurrentEmbeddingFingerprint().Model
+	}
+
+	res, err := node.ExecTracked(`INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, is_long_term, weight, expires_at, confidence, created_at, reference_id, retrieval_priority, importance, content_hash, identity_hash, embedding_dimension, embedding_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		5, id, collection, content, sessionIDVal, string(tagsJSON), string(metadataJSON), embeddingJSON, isLTM, weight, expiresAtStr, initialConf, createdSec, referenceID, retrievalPriority, importance, contentHash, wantIdentity, embedDim, embedModel)
 	if err != nil {
 		if isIdentityConstraintViolation(err) {
 			// A concurrent writer inserted the same identity between our
@@ -4154,16 +4589,62 @@ type searchResult struct {
 	similarity float32
 }
 
+// validEmbeddingPair reports whether a and b are two well-formed
+// embeddings that may be compared with each other.
+//
+// Dimension equality is the load-bearing check. cosineSimilarity
+// previously scored the shorter vector's length of components, so a
+// 768-dim vector and a 384-dim vector were compared over their first 384
+// components and returned a number in [-1,1] that looked like a
+// similarity but described nothing. That is worse than returning
+// nothing: callers act on the score, and the contradiction detector in
+// HybridSearch challenges — and therefore MUTATES — a memory when two
+// candidates score at or above 0.85.
+//
+// A mismatched pair is not comparable, so it is rejected rather than
+// scored. NaN and Inf are rejected for the same reason: a single
+// non-finite component poisons the whole vector, and float32
+// comparisons against NaN are always false, so a NaN-borne score would
+// slip past a threshold check that means "similar".
+//
+// Empty is rejected (nothing to compare). A pair of equal-length,
+// all-finite, non-empty vectors is valid; an all-zero vector is valid
+// but scores 0, which cosineSimilarity already handled and callers
+// already treat as "no similarity".
+func validEmbeddingPair(a, b []float32) bool {
+	if len(a) == 0 || len(a) != len(b) {
+		return false
+	}
+	for _, v := range a {
+		if f := float64(v); math.IsNaN(f) || math.IsInf(f, 0) {
+			return false
+		}
+	}
+	for _, v := range b {
+		if f := float64(v); math.IsNaN(f) || math.IsInf(f, 0) {
+			return false
+		}
+	}
+	return true
+}
+
+// cosineSimilarity returns the cosine of the angle between two
+// embeddings, or 0 when the pair is not comparable (see
+// validEmbeddingPair).
+//
+// 0 is the established "no information" answer here — it is what this
+// function already returned for empty and zero-norm vectors — and every
+// caller treats it as "not similar": the contradiction detector skips
+// below 0.85, and the vector arms skip below their own floors. Callers
+// that WRITE on a high score should check validEmbeddingPair
+// explicitly rather than relying on that, so the reason a pair was
+// skipped is visible at the write site.
 func cosineSimilarity(a, b []float32) float32 {
-	if len(a) == 0 || len(b) == 0 {
+	if !validEmbeddingPair(a, b) {
 		return 0
 	}
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
 	var dotProduct, normA, normB float32
-	for i := 0; i < n; i++ {
+	for i := range a {
 		dotProduct += a[i] * b[i]
 		normA += a[i] * a[i]
 		normB += b[i] * b[i]
@@ -4183,12 +4664,40 @@ func (dm *DatabaseManager) VectorSearch(tier string, queryEmbedding []float32, l
 	}
 
 	// Safe: whitelist enforced above; map lookup avoids fmt.Sprintf with user data
+	//
+	// The memories arm filters on the embedding model, the other two tiers
+	// do not: sessions and topics have no embedding_model column, so the
+	// fingerprint exists only for memories and reference_chunks.
+	//
+	// This is a compatibility filter, not a quality filter. Without it, a
+	// store holding vectors from two models compares them as if they shared
+	// a vector space, and every resulting similarity is meaningless —
+	// silently, because cosineSimilarity returns a plausible number in
+	// [-1,1]. The dimension check further down would NOT catch this: two
+	// models can share a dimension while producing incomparable spaces,
+	// which is exactly the case a dimension match is powerless to detect.
+	//
+	// Rows with NULL embedding_model (written before the column existed)
+	// are excluded by `embedding_model = ?` when a model is configured.
+	// That is deliberate: an unrecorded model cannot be proven comparable,
+	// so it is treated as incomparable until re-embedded. `mpm ops
+	// migrate-embeddings` backfills them.
+	activeModel := CurrentEmbeddingFingerprint().Model
+	memoriesQuery := "SELECT id, content, embedding, created_at FROM memories WHERE embedding IS NOT NULL"
+	if activeModel != "" {
+		memoriesQuery += " AND embedding_model = ?"
+	}
 	baseQuery := map[string]string{
 		"sessions": "SELECT id, content, embedding, created_at FROM sessions WHERE embedding IS NOT NULL",
-		"memories": "SELECT id, content, embedding, created_at FROM memories WHERE embedding IS NOT NULL",
+		"memories": memoriesQuery,
 		"topics":   "SELECT id, content, embedding, created_at FROM topics WHERE embedding IS NOT NULL",
 	}[tier]
-	rows, err := dm.db.Query(baseQuery)
+
+	var queryArgs []interface{}
+	if tier == "memories" && activeModel != "" {
+		queryArgs = append(queryArgs, activeModel)
+	}
+	rows, err := dm.db.Query(baseQuery, queryArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -5457,39 +5966,38 @@ func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evi
 
 	nowSec := time.Now().Unix()
 
-	patch := map[string]interface{}{
-		"status":               "challenged",
-		"challenged_theory_id": evidence,
-		"challenged_at":        nowSec,
-	}
-	patchJSON, _ := json.Marshal(patch)
-	if err := updateMemoryMetadataTx(tx, memoryID, string(patchJSON)); err != nil {
+	// Issue #24: metadata, baseline capture and the weight reduction are
+	// one statement, so the record of what this challenge did cannot
+	// diverge from what it did. Previously the metadata patch and the
+	// weight UPDATE were separate statements and the two Arc 1 writers
+	// had no equivalent at all.
+	//
+	// W-004 (2026-08-31) is honoured inside the primitive: weight is REAL
+	// in the schema, so fractional prior weights (e.g. 7.5) survive the
+	// round-trip without truncation. The prior_confidence value is
+	// forensic only; restoration does NOT silently re-elevate it (F7.1)
+	// — it resets to the floor instead.
+	applied, err := applyChallengeStateInTx(tx, ChallengeTableLocal, ChallengeSpec{
+		MemoryID:              memoryID,
+		SlashAmount:           slashAmount,
+		DropConfidence:        true,
+		ResetAccessTimestamps: true,
+		ChallengedAt:          nowSec,
+		Fields: map[string]interface{}{
+			"status":               "challenged",
+			"challenged_theory_id": evidence,
+			"challenged_via":       ChallengeViaTheory,
+		},
+	})
+	if err != nil {
 		return err
 	}
-
-	// Record the pre-challenge weight AND confidence AFTER the status
-	// patch so restore sees both atomically. Read through the same tx
-	// for a consistent snapshot. The prior_confidence value is forensic
-	// only; restoration does NOT silently re-elevate it (F7.1).
-	// W-004 (2026-08-31): weight is REAL in the schema; Scan into float64
-	// so fractional prior weights (e.g. 7.5) survive the challenge
-	// round-trip without silent truncation in the metadata snapshot.
-	var priorWeight float64
-	var priorConfidence float64
-	if err := tx.QueryRow(`SELECT COALESCE(weight, 1), COALESCE(confidence, 0.5) FROM memories WHERE id = ? AND deleted_at IS NULL`, memoryID).Scan(&priorWeight, &priorConfidence); err != nil {
-		return fmt.Errorf("ChallengeMemory: read prior state: %w", err)
-	}
-	priorPatch := map[string]interface{}{
-		"challenged_prior_weight":     priorWeight,
-		"challenged_prior_confidence": priorConfidence,
-	}
-	priorJSON, _ := json.Marshal(priorPatch)
-	if err := updateMemoryMetadataTx(tx, memoryID, string(priorJSON)); err != nil {
-		return err
-	}
-
-	if _, err := tx.Exec(`UPDATE memories SET weight = MAX(1, weight - ?), updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL`, slashAmount, memoryID); err != nil {
-		return fmt.Errorf("ChallengeMemory: weight update: %w", err)
+	if applied.RowsAffected == 0 {
+		// The existence check above ran in this transaction, so zero rows
+		// means a trigger or a concurrent write removed the row between
+		// the two statements. Reporting success would leave the operator
+		// believing a challenge landed that did not.
+		return fmt.Errorf("ChallengeMemory: challenge aborted: memory %s was not updated (no matching live row)", memoryID)
 	}
 
 	// F7.1: neutralize existing evidence rows (set expires_at = now). The
@@ -5504,16 +6012,12 @@ func (dm *DatabaseManager) ChallengeMemory(memoryID string, slashAmount int, evi
 		return fmt.Errorf("ChallengeMemory: neutralize evidence: %w", err)
 	}
 
-	// F7.1: drop confidence to the challenged floor. The challenged memory
-	// cannot retain its pre-challenge high confidence value; fresh evidence
-	// is required to re-elevate it after restoration. The confidence_history
-	// row that records this recompute is the auditable trail.
-	if _, err := tx.Exec(
-		`UPDATE memories SET confidence = ? WHERE id = ? AND deleted_at IS NULL`,
-		ChallengedMemoryConfidenceFloor, memoryID,
-	); err != nil {
-		return fmt.Errorf("ChallengeMemory: drop confidence: %w", err)
-	}
+	// F7.1 note: the drop to ChallengedMemoryConfidenceFloor now happens
+	// inside the challenge statement above (DropConfidence), which is why
+	// it cannot drift from the metadata that records the challenge. Fresh
+	// evidence is required to re-elevate it after restoration; the
+	// confidence_history row that records the recompute is the auditable
+	// trail.
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("ChallengeMemory: commit: %w", err)

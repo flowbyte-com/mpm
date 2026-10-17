@@ -77,14 +77,24 @@ func runDoctorFixtureHome(t *testing.T, bin, ws, home string, args ...string) (s
 // Two runs, deliberately. The first creates the database; the second
 // absorbs the one-time lessons-view migration so later comparisons are
 // against a settled schema rather than mid-migration.
+//
+// MPM #28 (issue #28): `mpm doctor` became observational. It refuses
+// to create the workspace DB on a fresh install (the standard report
+// path uses a read-only handle that requires the maintenance lease
+// to exist). To bootstrap the fixture, the warmup uses a write
+// command (`mpm remember warmup`) instead. After the warmup
+// the database, maintenance lease, and migrated schema all exist;
+// subsequent `mpm doctor` invocations take the read-only path
+// successfully.
 func warmDoctorFixture(t *testing.T, bin, ws string) {
 	t.Helper()
+	home := t.TempDir()
 	for i := 0; i < 2; i++ {
-		cmd := exec.Command(bin, "doctor")
+		cmd := exec.Command(bin, "remember", "warmup")
 		cmd.Env = []string{
 			"MPM_WORKSPACE=" + ws,
 			"MPM_NO_AUTO_INIT=1",
-			"HOME=" + t.TempDir(),
+			"HOME=" + home,
 			"PATH=/usr/bin:/bin:/usr/local/go/bin",
 		}
 		_, _ = cmd.CombinedOutput()

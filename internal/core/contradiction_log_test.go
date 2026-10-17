@@ -250,8 +250,9 @@ func TestResolveOneContradiction_DecisiveSlash(t *testing.T) {
 	// Set up two memories with very different confidence.
 	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, confidence, retrieval_priority, importance, weight) VALUES ('strong','memories','x',0.95,0.9,0.9,5)`)
 	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, confidence, retrieval_priority, importance, weight) VALUES ('weak','memories','x',0.10,0.2,0.2,5)`)
-	// Queue a contradiction.
-	res, _ := dm.db.Exec(`INSERT INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity) VALUES ('strong','weak','test',0.9)`)
+	// Queue a contradiction and adjudicate it: since issue #10 only an
+	// operator-adjudicated row may be applied.
+	res, _ := dm.db.Exec(`INSERT INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity, detected_by) VALUES ('strong','weak','test',0.9,'adjudicated:fixture')`)
 	if res == nil {
 		t.Fatalf("insert queue: %v", res)
 	}
@@ -260,6 +261,7 @@ func TestResolveOneContradiction_DecisiveSlash(t *testing.T) {
 		"id":          queueIDToStr(int(id)),
 		"memory_id_a": "strong",
 		"memory_id_b": "weak",
+		"detected_by": "adjudicated:fixture",
 	}
 
 	// Dry-run: should print verdict, not mutate.
@@ -308,12 +310,13 @@ func TestResolveOneContradiction_CloseCallProposesTheory(t *testing.T) {
 	// Two memories with the SAME confidence (so margin = 0).
 	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, confidence, retrieval_priority, importance, weight) VALUES ('a','memories','x',0.5,0.5,0.5,5)`)
 	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, confidence, retrieval_priority, importance, weight) VALUES ('b','memories','x',0.5,0.5,0.5,5)`)
-	res, _ := dm.db.Exec(`INSERT INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity) VALUES ('a','b','test',0.9)`)
+	res, _ := dm.db.Exec(`INSERT INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity, detected_by) VALUES ('a','b','test',0.9,'adjudicated:fixture')`)
 	id, _ := res.LastInsertId()
 	row := map[string]interface{}{
 		"id":          queueIDToStr(int(id)),
 		"memory_id_a": "a",
 		"memory_id_b": "b",
+		"detected_by": "adjudicated:fixture",
 	}
 	dec, err := dm.ResolveOneContradiction(row, true)
 	if err != nil {
@@ -342,7 +345,7 @@ func TestResolveOneContradiction_Idempotent(t *testing.T) {
 	dm := newTestDMWithShared(t)
 	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, confidence, retrieval_priority, importance, weight) VALUES ('s','memories','x',0.95,0.9,0.9,5)`)
 	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, confidence, retrieval_priority, importance, weight) VALUES ('w','memories','x',0.10,0.2,0.2,5)`)
-	_, _ = dm.db.Exec(`INSERT INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity) VALUES ('s','w','t',0.9)`)
+	_, _ = dm.db.Exec(`INSERT INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity, detected_by) VALUES ('s','w','t',0.9,'adjudicated:fixture')`)
 	// First run: applies.
 	queue, _ := dm.LoadContradictionQueue(100)
 	for _, row := range queue {
@@ -427,12 +430,13 @@ func TestApplyResolution_WritesEvidenceForWinner(t *testing.T) {
 	dm := newTestDMWithShared(t)
 	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, confidence, retrieval_priority, importance, weight) VALUES ('strong','memories','x',0.95,0.9,0.9,5)`)
 	_, _ = dm.db.Exec(`INSERT INTO shared.memories (id, collection, content, confidence, retrieval_priority, importance, weight) VALUES ('weak','memories','x',0.10,0.2,0.2,5)`)
-	res, _ := dm.db.Exec(`INSERT INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity) VALUES ('strong','weak','t',0.9)`)
+	res, _ := dm.db.Exec(`INSERT INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity, detected_by) VALUES ('strong','weak','t',0.9,'adjudicated:fixture')`)
 	id, _ := res.LastInsertId()
 	row := map[string]interface{}{
 		"id":          queueIDToStr(int(id)),
 		"memory_id_a": "strong",
 		"memory_id_b": "weak",
+		"detected_by": "adjudicated:fixture",
 	}
 	if _, err := dm.ResolveOneContradiction(row, true); err != nil {
 		t.Fatalf("resolve: %v", err)
