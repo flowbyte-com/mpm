@@ -843,7 +843,21 @@ test-agent-adapters:
 	     echo "[test-agent-adapters] FATAL: agent_installation/$$d/tests is missing." >&2; \
 	     exit 1; \
 	   fi; \
-	   out=$$(cd "agent_installation/$$d" && node --test --test-reporter=tap 'tests/*.test.js' 2>&1); status=$$?; \
+	   # The `node --test` invocation MUST receive concrete file \
+	   # paths, not a literal glob. Node 20 (the GitHub Actions \
+	   # ubuntu-24.04 runner) treats a literal pattern that does \
+	   # not match as "Could not find '<pattern>'" and exits 0, \
+	   # which trips the empty-summary FATAL downstream. Node 26 \
+	   # silently falls back to "0 tests" -- same failure mode, \
+	   # different surface. The fix is to expand the glob with the \
+	   # shell (portable POSIX `set -- <pattern>`) and pass the \
+	   # resulting concrete filenames via "$$@". The `[ -e "$$1" ]` \
+	   # guard distinguishes "glob matched something" from "glob \
+	   # matched nothing" (in which case $$1 is the literal pattern \
+	   # and the file-existence check fails). This mirrors the TS \
+	   # branch's "build an explicit file list, fail closed on \
+	   # empty" pattern (Makefile:929-937). \
+	   out=$$(cd "agent_installation/$$d" && { set -- tests/*.test.js; if [ ! -e "$$1" ]; then echo "[test-agent-adapters] FATAL: $$d has no .test.js files under tests/." >&2; echo "  AGENT_ADAPTERS_JS lists $$d, so its absence is a packaging error." >&2; exit 1; fi; node --test --test-reporter=tap "$$@" 2>&1; }); status=$$?; \
 	   printf '%s\n' "$$out"; \
 	   # node --test prints the TAP summary line as `# pass N`, \
 	   # optionally wrapped in SGR color codes (e.g. \

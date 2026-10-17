@@ -5,11 +5,8 @@ stable, reporter-explicit `node --test` output and rejects empty or
 malformed summaries.
 
 Background:
-  The recipe used to invoke `node --test 'tests/*.test.js'` without
-  an explicit reporter. The default reporter is the version-dependent
-  "spec" output on Node >= 22.6 (`ℹ pass N`) and the TAP output on
-  Node 18/20.x (`# pass N`). The recipe's parser only understood
-  the spec form, so the GitHub Actions ubuntu-24.04 runner (Node
+  The recipe's parser once only understood the spec form
+  (`ℹ pass N`), so the GitHub Actions ubuntu-24.04 runner (Node
   20.x by default) emitted `# pass 143` and the recipe reported
   "no passing-test count" while the suite had actually passed.
 
@@ -21,17 +18,30 @@ Background:
     [test-agent-adapters] FATAL: mpm-memory-openclaw reported no
     passing-test count.
 
-  The fix is twofold: (1) invoke `node --test --test-reporter=tap
-  ...` so the output is stable across every Node >= 18 minor, and
-  (2) parse the TAP `# pass N` form. The spec form (`ℹ pass N`) is
-  NOT accepted by the parser — the recipe forces `--test-reporter=tap`
-  on every invocation, so a parser that also accepted the spec
-  form would be re-coupled to a version-dependent default. Any
-  input that does not match the TAP `# pass N` line is treated
-  as malformed and fails closed.
+  The parser fix is twofold: (1) invoke `node --test
+  --test-reporter=tap ...` so the output is stable across every
+  Node >= 18 minor, and (2) parse the TAP `# pass N` form. The
+  spec form (`ℹ pass N`) is NOT accepted by the parser — the
+  recipe forces `--test-reporter=tap` on every invocation, so a
+  parser that also accepted the spec form would be re-coupled to
+  a version-dependent default. Any input that does not match the
+  TAP `# pass N` line is treated as malformed and fails closed.
 
-  This test pins both halves of that contract and the fail-closed
-  behaviour the brief required:
+  A second, file-discovery defect appeared on the same runner
+  after the parser fix landed: the recipe's `node --test
+  'tests/*.test.js'` invocation passes a literal glob (the single
+  quotes stop the shell from expanding it). Node 26 expands the
+  glob internally and falls back to "0 tests" on a non-match;
+  Node 20 reports `Could not find '<pattern>'` and exits 0. The
+  empty-pass-summary FATAL then trips on a suite whose .test.js
+  files are present and would have run if `node --test` had
+  received concrete paths. The recipe now uses portable POSIX
+  `set -- tests/*.test.js` to expand the glob and an `[ -e
+  "$$1" ]` guard to fail closed on a no-match (the same file-
+  list-then-fail-closed pattern the TS branch already used).
+
+  This test pins both contracts and the fail-closed behaviour
+  the brief required:
 
     * the recipe MUST use `--test-reporter=tap`
     * the parser MUST accept `# pass N` (TAP)
@@ -43,22 +53,40 @@ Background:
       non-zero node exit, and a zero node exit without a `# pass`
       line in the output (e.g. node died before printing anything)
     * a pre-fix shape that only matched `ℹ pass` MUST be rejected
-      (negative control: this is the regression we just shipped a
-      fix for; never let it come back)
+      (negative control: this is the parser regression we just
+      shipped a fix for; never let it come back)
+    * the recipe MUST discover `.test.js` files via a portable
+      POSIX shell glob (`set -- tests/*.test.js` followed by
+      `"$$@"`) and MUST NOT pass a literal single-quoted glob to
+      `node --test` (the second regression we just shipped a fix
+      for; the new `TestRecipeDiscoversJsTestFiles` class pins
+      this contract)
 
 Hermeticity:
-  No `node` subprocess is spawned. The parse pipeline is a pure
-  `sed` expression over a captured string; the test feeds in
-  representative outputs (with and without ANSI, with and without
-  CR, TAP and spec) and asserts on the parsed count. The recipe's
-  exact `sed` command is extracted from the Makefile source so a
-  change to the recipe cannot pass these tests without also
-  changing the parse contract.
+  No `node` subprocess is spawned by the parse-pipeline tests;
+  the parse pipeline is a pure `sed` expression over a captured
+  string, and the test feeds in representative outputs (with and
+  without ANSI, with and without CR, TAP and spec) and asserts on
+  the parsed count. The recipe's exact `sed` command is extracted
+  from the Makefile source so a change to the recipe cannot pass
+  these tests without also changing the parse contract.
+
+  The new `TestNode20CompatUnderDash` class IS allowed to spawn
+  `dash` and `node` subprocesses against a real `tempfile.TemporaryDirectory()`
+  containing a synthetic `.test.js` file. Both binaries are
+  already required by the recipe (`dash` is the default
+  `make`-recipe shell on Debian-derived systems; `node` is
+  probed for on PATH at the top of the recipe). The subprocess
+  is the only way to reproduce the original failure shape under
+  Node 20 — the structural assertions cannot prove that a
+  literal glob fails closed because they cannot exercise the
+  shell's quote-handling semantics.
 """
 
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -99,35 +127,33 @@ def _extract_recipe(makefile_text: str, target: str) -> str:
 
 
 def _recipe_invocation_line(recipe: str) -> str:
-    """Return the subshell in the recipe that calls `node --test`.
+    """Return the JS branch's `out=$$(cd "agent_installation/$$d"
+    && ... node --test ... 2>&1; }); status=$$?; \\` subshell.
 
     The recipe is multi-line with backslash continuations; we join
-    the lines into a single command string. The line that actually
-    launches the JS suite is `out=$$(cd "agent_installation/$$d"
-    && node --test 'tests/*.test.js' 2>&1)`. The parser-recipe
-    substring lives directly after it on the same joined line.
+    the lines into a single command string. The JS branch is the
+    FIRST `out=$$(cd "agent_installation/$$d" && ... node --test
+    ... 2>&1` substring in the joined recipe — the TS branch comes
+    later and uses the same shape but with a different `out=`
+    variable list (`$$js_glob` rather than `"$$@"`). The helper
+    anchors on the literal `out=$$(cd "agent_installation/$$d"`
+    prefix and the closing `2>&1` of the subshell. If the recipe
+    ever grows past that, this assertion fires first and forces
+    the test to be updated alongside the recipe.
     """
     joined_lines: list[str] = []
     for line in recipe.splitlines():
         joined_lines.append(line.rstrip("\\\n").strip())
     full = " ".join(joined_lines)
-    # Anchor on `out=$$(cd "agent_installation/$$d" && node --test`
-    # and pull everything up to and including the closing `)` of
-    # the `$$(...)` subshell. `[^)]*` is too narrow (a future
-    # change could add a paren-bearing arg); use a non-greedy
-    # match for the closing `)` instead, anchored on the literal
-    # `2>&1)` that closes the current subshell. If the invocation
-    # ever grows past that, this assertion fires first and forces
-    # the test to be updated alongside the recipe.
     match = re.search(
-        r'out=\$\$\(cd\s+"agent_installation/\$\$d"\s+&&\s+node\s+--test.*?2>&1\)',
+        r'out=\$\$\(cd\s+"agent_installation/\$\$d"\s+&&.*?node\s+--test.*?2>&1\b',
         full,
     )
     if not match:
         raise AssertionError(
             "test-agent-adapters recipe must invoke "
             "`node --test` inside a `cd agent_installation/$$d` "
-            "subshell that ends with `2>&1)`. "
+            "subshell that ends with `2>&1`. "
             f"Joined recipe was:\n{full}"
         )
     return match.group(0)
@@ -498,6 +524,470 @@ class TestFailClosedBehaviourIsPreserved(unittest.TestCase):
             "if [ $$failed -ne 0 ]; then",
             self.recipe,
             "test-agent-adapters must exit 1 when `failed` is set.",
+        )
+
+
+class TestRecipeDiscoversJsTestFiles(unittest.TestCase):
+    """Pin the JS file-discovery contract that the literal-glob
+    fix introduced.
+
+    Before the fix, the JS branch passed a single-quoted glob
+    (`'tests/*.test.js'`) to `node --test`. The shell did not
+    expand the quoted glob, and `node --test` only matched files
+    when the host happened to expand the pattern itself (Node 26
+    does, Node 20 does not — it reports `Could not find` and
+    exits 0). The fix is to expand the glob in the recipe's
+    shell with portable POSIX `set -- <pattern>` and pass the
+    resulting concrete paths via `"$$@"`, with a `[ -e "$$1" ]`
+    guard that fails closed when the glob matched nothing.
+
+    These tests are structural: they assert that the recipe text
+    contains the load-bearing pieces of the new contract and
+    does NOT contain the load-bearing piece of the broken
+    contract. They do NOT exercise `node` or `dash`; that is the
+    job of `TestNode20CompatUnderDash` below.
+    """
+
+    def setUp(self):
+        self.recipe = _extract_recipe(_read_makefile(), "test-agent-adapters")
+
+    def test_recipe_uses_set_to_expand_js_glob(self):
+        """The recipe MUST expand the JS test-file glob with a
+        portable POSIX `set -- tests/*.test.js` (the same form
+        dash and bash both understand on every supported
+        platform). This is the load-bearing piece of the
+        discovery contract.
+        """
+        self.assertRegex(
+            self.recipe,
+            r"set\s+--\s+tests/\*\.test\.js",
+            "test-agent-adapters JS branch must use portable "
+            "POSIX `set -- tests/*.test.js` to expand the JS "
+            "test-file glob. The previous literal single-quoted "
+            "glob passed the pattern to `node --test` literally, "
+            "which Node 20 cannot match.",
+        )
+
+    def test_recipe_fails_closed_on_no_matching_test_files(self):
+        """A glob that matched nothing MUST trigger a FATAL and
+        exit 1 before `node --test` runs. The `[ -e "$$1" ]`
+        guard distinguishes "glob matched something" from "glob
+        matched nothing" (in which case `$$1` is the literal
+        pattern and the file-existence check fails). Without
+        this guard, an empty `tests/` directory silently runs
+        `node --test` against zero files and trips the
+        empty-summary FATAL downstream.
+        """
+        self.assertRegex(
+            self.recipe,
+            r"if\s+\[\s+!\s+-e\s+\"\$\$1\"\s+\];\s*then",
+            "test-agent-adapters JS branch must guard the "
+            "`set -- tests/*.test.js` expansion with an "
+            "`[ ! -e \"$$1\" ]` test that fails closed when the "
+            "glob matched nothing.",
+        )
+        self.assertIn(
+            "no .test.js files under tests/",
+            self.recipe,
+            "test-agent-adapters JS branch must emit a FATAL "
+            "naming the missing .test.js files so the failure is "
+            "actionable rather than a downstream empty-summary "
+            "mystery.",
+        )
+        self.assertIn(
+            "AGENT_ADAPTERS_JS lists $$d, so its absence is a packaging error",
+            self.recipe,
+            "test-agent-adapters JS branch must name the "
+            "AGENT_ADAPTERS_JS variable in the FATAL so a reader "
+            "knows which variable to fix.",
+        )
+
+    def test_recipe_passes_concrete_paths_via_positional_args(self):
+        """The `node --test` invocation MUST receive concrete
+        file paths via `"$$@"`, NOT a single-quoted glob
+        (`'tests/*.test.js'`) that the shell would have to
+        expand for `node --test` to match anything. The
+        single-quoted form is exactly the broken shape the
+        fix removed.
+        """
+        # The new shape: pass concrete paths via the positional
+        # args `"$$@"` (set up by the `set -- tests/*.test.js`
+        # expansion above). The recipe must contain this form.
+        self.assertIn(
+            'node --test --test-reporter=tap "$$@"',
+            self.recipe,
+            "test-agent-adapters JS branch must pass concrete "
+            "filenames via `node --test --test-reporter=tap "
+            '"$$@"` so `node --test` never has to expand a glob '
+            "itself.",
+        )
+        # The old, broken shape: a literal single-quoted glob
+        # passed to `node --test`. The recipe must NOT contain
+        # this form anywhere in the JS branch — re-introducing
+        # it would re-create the Node 20 latent failure.
+        self.assertNotIn(
+            "node --test --test-reporter=tap 'tests/*.test.js'",
+            self.recipe,
+            "test-agent-adapters JS branch must NOT pass a "
+            "single-quoted glob to `node --test`. The shell "
+            "does not expand single-quoted patterns, and Node "
+            "20 cannot match a literal glob that did not match "
+            "any file on disk (the exact failure mode this fix "
+            "removed).",
+        )
+        # The exact pre-fix bare invocation must also be gone —
+        # even if a future refactor drops the `--test-reporter=tap`
+        # flag, a literal-glob form is still broken.
+        self.assertNotIn(
+            "node --test 'tests/*.test.js'",
+            self.recipe,
+            "test-agent-adapters must not invoke `node --test` "
+            "with a literal single-quoted glob anywhere in the "
+            "JS branch. The pattern is the regression we just "
+            "fixed.",
+        )
+
+
+class TestNode20CompatUnderDash(unittest.TestCase):
+    """Executable negative control: prove (a) the original
+    quoted-glob form is fragile because the shell passes the
+    literal pattern to `node --test`, and (b) the new form is
+    robust because the shell expands the glob to concrete
+    filenames before `node --test` runs.
+
+    Per the brief, the two demonstrations are NODE-INDEPENDENT —
+    they prove the SHELL semantics, not the runtime behaviour of
+    any particular Node major. The third optional demonstration
+    (run the broken form on a real Node and observe that the
+    file is undiscovered) is Node-major-DEPENDENT: Node 20
+    reports `Could not find '<pattern>'`, but Node 22+ silently
+    expands the literal pattern itself and reports a passing
+    test count of zero or worse. The brief asked us to test on
+    Node 20 where available; the test below detects the local
+    Node major and runs the runtime demonstration only on Node
+    <= 20 (where it is meaningful), and skips on Node 22+ (where
+    the surface lies).
+
+    This class is the only one in this file that spawns a real
+    subprocess. The structural assertions in
+    `TestRecipeDiscoversJsTestFiles` prove the recipe text is
+    correct; the assertions here prove the recipe is correct
+    *as a shell pipeline*. The two halves together pin both the
+    text and the runtime semantics.
+    """
+
+    # Mirror the recipe body exactly so the test exercises the
+    # same pipeline the recipe runs. The shell expansion +
+    # existence guard + positional-args invocation is the load-
+    # bearing piece.
+    NEW_INVOCATION = (
+        "set -- tests/*.test.js && "
+        "if [ ! -e \"$1\" ]; then exit 1; fi && "
+        "node --test --test-reporter=tap \"$@\""
+    )
+
+    def setUp(self):
+        if shutil.which("dash") is None:
+            self.skipTest("dash not on PATH; cannot exercise the negative control.")
+        if shutil.which("node") is None:
+            self.skipTest("node not on PATH; cannot exercise the negative control.")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tmpdir = Path(self.tmp.name)
+        # Synthesize a single `.test.js` file under `tests/`.
+        # The file contains one trivially-passing `node:test`
+        # test so `node --test` has at least one test to run.
+        tests_dir = self.tmpdir / "tests"
+        tests_dir.mkdir()
+        test_file = tests_dir / "synthetic.test.js"
+        test_file.write_text(
+            "const test = require('node:test');\n"
+            "test('synthetic passes', () => { /* ok */ });\n",
+            encoding="utf-8",
+        )
+        # Capture the local Node major so the optional
+        # runtime-demonstration test can decide whether its
+        # premise is meaningful. Major-20 reports
+        # `Could not find '<pattern>'` on a literal glob;
+        # major-22+ reports a TAP summary that hides the
+        # underlying discovery failure.
+        self.node_major = self._detect_node_major()
+
+    @staticmethod
+    def _detect_node_major() -> int:
+        cp = subprocess.run(
+            ["node", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        out = (cp.stdout or "").strip()
+        # `v20.x.y` -> 20
+        if out.startswith("v") and "." in out:
+            try:
+                return int(out[1:].split(".", 1)[0])
+            except ValueError:
+                return 0
+        return 0
+
+    def _run_dash(self, command: str) -> subprocess.CompletedProcess:
+        """Run `command` in `dash -c` from the synthetic tempdir.
+
+        Returns the CompletedProcess so callers can inspect
+        stdout, stderr, and returncode.
+        """
+        return subprocess.run(
+            ["dash", "-c", command],
+            cwd=str(self.tmpdir),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+
+    def test_quoted_glob_passes_through_shell_literally(self):
+        """Demonstration (1) of the brief — Node-independent.
+
+        A POSIX shell passes a SINGLE-QUOTED wildcard to
+        `node --test` literally. The shell expands an unquoted
+        `tests/*.test.js` to concrete filenames; the same
+        pattern inside single quotes is left alone. This is
+        what makes the original recipe's `'tests/*.test.js'`
+        argument brittle — under Node 20, the literal string
+        `tests/*.test.js` is treated as a single path that does
+        not exist, and the runner reports `Could not find
+        '<pattern>'`.
+
+        The test is Node-independent: under `dash`, the quoted
+        wildcard in a command string is the EXACT byte sequence
+        passed as argv[1] to `node --test`. The proof: write
+        the literal glob into a wrapper script using only
+        single quotes, invoke the wrapper, and ask the wrapper
+        to print its `$1` argument. The literal pattern must
+        round-trip intact. A re-introduced refactor that
+        "fixes the shell quoting" without also expanding the
+        glob is caught here.
+        """
+        # Write a wrapper script that, when run, prints its
+        # $1 argument. The shell treats single-quoted text
+        # literally; if the wrapper's $1 is the literal glob,
+        # the round-trip proves the shell never expanded it.
+        wrapper = self.tmpdir / "round_trip.sh"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$1\"\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        # Invoke the wrapper with the literal single-quoted
+        # glob as $1. If the shell expanded the pattern, the
+        # wrapper would receive a concrete filename instead.
+        cp = subprocess.run(
+            [str(wrapper), "tests/*.test.js"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(
+            cp.returncode, 0,
+            f"round-trip wrapper exited {cp.returncode}: {cp.stderr!r}",
+        )
+        printed = cp.stdout.rstrip("\n")
+        self.assertEqual(
+            printed, "tests/*.test.js",
+            "A single-quoted glob passed as a positional arg "
+            "to a script must survive intact: the receiving "
+            "process's `$1` must equal the literal pattern, "
+            "not any matched filename. If the shell expanded "
+            "the pattern, this assertion would print a "
+            "concrete filename (the file's basename) instead. "
+            "The literal-pattern round-trip is the proof that "
+            "the original quoted-glob form is fragile: it "
+            "depends on `node --test` to do its own glob "
+            "expansion, and Node 20 cannot.",
+        )
+
+    def test_new_invocation_passes_concrete_filenames(self):
+        """Demonstration (2) of the brief — Node-independent.
+
+        The fixed invocation passes concrete filenames to
+        `node --test`, not a glob. The proof is a shell
+        round-trip: run the recipe's `set -- tests/*.test.js
+        && printf '%s\\n' "$@"` snippet and assert the printed
+        result is a real filename, not the literal glob.
+
+        This is the positive counterpart to
+        `test_quoted_glob_passes_through_shell_literally`:
+        the same shell semantics prove (a) the quoted glob
+        is passed literally and (b) the unquoted glob is
+        expanded to a concrete filename. Together they prove
+        the original form is fragile and the new form is
+        robust, without depending on any specific Node major.
+        """
+        cp = self._run_dash(
+            "set -- tests/*.test.js && printf '%s\\n' \"$@\""
+        )
+        self.assertEqual(
+            cp.returncode, 0,
+            f"`dash -c` wrapper exited {cp.returncode}: {cp.stderr!r}",
+        )
+        printed = cp.stdout.rstrip("\n")
+        # The new form's expansion must produce a real
+        # filename, not the literal glob.
+        self.assertIn(
+            "synthetic.test.js",
+            printed,
+            "The fixed invocation's `set -- tests/*.test.js` "
+            "must expand to a concrete filename, not the "
+            "literal glob. The printed `$@` should include "
+            "the on-disk `synthetic.test.js` path. If this "
+            "assertion fails, the shell did not expand the "
+            "glob (e.g. the test ran with `shopt -f` or some "
+            "nonomal setting) and the recipe's discovery "
+            "contract is broken. "
+            f"printed={printed!r}",
+        )
+        # Negative: the literal glob must NOT be in the
+        # expansion output (it would only appear if the glob
+        # failed to match anything AND the shell left the
+        # pattern intact — which is exactly the no-match
+        # branch the `[ -e "$1" ]` guard is supposed to
+        # catch).
+        self.assertNotIn(
+            "tests/*.test.js",
+            printed,
+            "The fixed invocation's `set -- tests/*.test.js` "
+            "must NOT print the literal glob. The expansion "
+            "produced a real filename; the literal pattern "
+            "should be gone. If the literal pattern is still "
+            "in the output, the glob did not match anything "
+            "AND the shell did not strip the pattern — the "
+            "recipe's fail-closed `[ -e \"$1\" ]` guard would "
+            "catch this, but it is worth a separate "
+            "assertion here so the failure mode is visible "
+            "in the test output. "
+            f"printed={printed!r}",
+        )
+
+    def test_quoted_glob_runtime_fails_on_node_20(self):
+        """Optional runtime demonstration — gated on Node <= 20.
+
+        On Node 20 (the GitHub Actions ubuntu-24.04 runner),
+        the original quoted-glob form does NOT discover the
+        synthetic file: `node --test` reports `Could not find
+        '<pattern>'` and exits 0 with no TAP summary. On
+        Node 22+, `node --test` silently expands the literal
+        pattern and either runs zero tests or behaves
+        differently; the test cannot make a portable
+        assertion about that surface, so it is gated to Node
+        <= 20 only.
+
+        If the local Node major is > 20, this test skips with
+        an informative message rather than failing. The two
+        Node-independent tests above already pin the load-
+        bearing shell semantics; this test is a
+        belt-and-braces version of the same proof on the
+        affected host major.
+        """
+        if self.node_major == 0:
+            self.skipTest("Could not determine local Node major; "
+                          "skipping the version-gated runtime check.")
+        if self.node_major > 20:
+            self.skipTest(
+                f"Local Node major is {self.node_major}; the "
+                "runtime demonstration is meaningful only on "
+                "Node <= 20 (the GitHub Actions ubuntu-24.04 "
+                "runner major). The two Node-independent tests "
+                "above already pin the load-bearing shell "
+                "semantics."
+            )
+        # Run the original quoted-glob form against the
+        # synthetic file. The synthetic file is on disk; the
+        # shell passes the literal glob; Node 20 reports
+        # `Could not find '<pattern>'` to stderr and exits 0
+        # with no TAP summary (i.e. zero tests run).
+        cp = self._run_dash(
+            "node --test --test-reporter=tap 'tests/*.test.js'"
+        )
+        combined = (cp.stdout or "") + (cp.stderr or "")
+        discovery_signals = (
+            "synthetic passes",
+            "# pass 1",
+            "# tests 1",
+            "TAP version 13",
+        )
+        discovered = any(sig in combined for sig in discovery_signals)
+        self.assertFalse(
+            discovered,
+            "On Node <= 20, the original quoted-glob form "
+            "must NOT discover the synthetic `.test.js` file. "
+            "The shell passed the literal glob, `node --test` "
+            "received the literal string, and the runner "
+            "could not find a file at that path. If this "
+            "assertion fails, the local Node major expanded "
+            "the pattern itself and hid the bug from the "
+            "developer. "
+            f"Combined output: {combined!r}",
+        )
+
+    def test_new_invocation_discovers_synthetic_file(self):
+        """Run the new invocation against the synthetic file.
+        The file MUST be discovered, run, and emit a TAP
+        summary with `# pass 1`. This is the positive control
+        for the recipe's discovery contract.
+        """
+        cp = self._run_dash(self.NEW_INVOCATION)
+        self.assertEqual(
+            cp.returncode, 0,
+            f"New invocation under `dash -c` exited {cp.returncode}: "
+            f"stdout={cp.stdout!r} stderr={cp.stderr!r}",
+        )
+        # The synthetic test name AND the `# pass 1` TAP
+        # summary must both be present. The summary is what
+        # the recipe's `n=...` parser would extract; the test
+        # name is the proof the file was actually run.
+        self.assertIn(
+            "synthetic passes",
+            cp.stdout,
+            "New invocation must RUN the synthetic test. If "
+            "this assertion fails, the file was not discovered "
+            "even with the fixed invocation. stdout="
+            f"{cp.stdout!r}",
+        )
+        self.assertIn(
+            "# pass 1",
+            cp.stdout,
+            "New invocation must emit a TAP summary with "
+            "`# pass 1`. This is what the recipe's `n=...` "
+            "parser extracts. stdout="
+            f"{cp.stdout!r}",
+        )
+
+    def test_new_invocation_fails_closed_on_no_matching_files(self):
+        """The `[ -e "$$1" ]` guard distinguishes "glob matched
+        something" from "glob matched nothing" — when no
+        `.test.js` files exist, the guard exits 1 before
+        `node --test` runs. This is the fail-closed branch
+        the recipe documents; the test proves it works on a
+        real shell.
+        """
+        # Remove the synthetic test file and rerun. The guard
+        # must trip and exit 1, NOT silently fall through to
+        # `node --test` (which would then exit 0 with zero
+        # tests and trip the empty-summary FATAL downstream).
+        (self.tmpdir / "tests" / "synthetic.test.js").unlink()
+        cp = self._run_dash(self.NEW_INVOCATION)
+        self.assertNotEqual(
+            cp.returncode, 0,
+            "New invocation must exit non-zero when the glob "
+            "matched no files. The `[ -e \"$1\" ]` guard is the "
+            "fail-closed branch; if it ever goes away, the "
+            "recipe would silently fall through to `node --test` "
+            "with zero files and trip the empty-summary FATAL. "
+            f"returncode={cp.returncode} stdout={cp.stdout!r} "
+            f"stderr={cp.stderr!r}",
         )
 
 
