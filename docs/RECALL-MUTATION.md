@@ -81,10 +81,14 @@ lexical-path reinforcement, which is a deliberate access-tracking mechanism
 rather than a consequence of anything the query matched.
 
 > **Operational note.** The `+0.5` reinforcement is applied only to
-> `returnedIDs`, which is populated on the **lexical SQL-scan path**. The
-> `--semantic` path returns at `recall.go:254` before reaching it, so a
-> semantic query reinforces nothing. This was verified with a SQLite trigger
-> that logs any weight change, across both paths and both output modes.
+> `returnedIDs`, which is populated on the **lexical SQL-scan path**.
+> The `--semantic` path returns at `recall.go:199` from `handleRecall`
+> (the early return inside the `if *semantic` block) into
+> `renderHybridResults` (`recall.go:981`), which never touches
+> `returnedIDs` (declared at `recall.go:174`) and has no `Exec` or
+> `UPDATE` call. A semantic query therefore reinforces nothing. This was
+> verified with a SQLite trigger that logs any weight change, across
+> both paths and both output modes.
 
 ## What the queue now contains
 
@@ -117,11 +121,46 @@ independently of `--apply`: `--apply` executes verdicts on rows already in
 the queue, `--propose` populates the queue. Omitting both, the command is a
 pure read.
 
-`EnqueueContradiction` is idempotent on the memory pair (`INSERT OR IGNORE`
-against a uniqueness index on the normalised pair), so re-running a scan over
-unchanged data inserts nothing. `EnqueueSimilarityCandidates` returns the
-number of rows **actually** inserted — a repeat run reports **0**, not last
-run's total re-announced as new work.
+Idempotency of `EnqueueContradiction` for the sequential case comes
+from a **Go-level pre-check** on the unresolved pair, not from a
+database-level guarantee. `EnqueueContradictionReport`
+(`internal/core/contradiction_log.go:199`, the live writer; see its
+`# Why the explicit pre-check` comment at `:171-181`) runs
+`SELECT COUNT(*) ... WHERE memory_id_a = ? AND memory_id_b = ?
+AND resolved_at IS NULL` (`:235-238`) before the `INSERT OR IGNORE`;
+a pending match returns `(false, nil)` and never reaches SQL.
+
+Three things the pre-check is **not**:
+
+- The `UNIQUE(memory_id_a, memory_id_b, detected_at)` index
+  (`internal/core/contradiction_schema_patch.go:69`) is not what
+  suppresses the repeat. `detected_at` defaults to
+  `CURRENT_TIMESTAMP` with one-second resolution, so `INSERT OR IGNORE`
+  alone only deduplicates a re-detection inside the same wall-clock
+  second — faster than an operator can type the command twice. The
+  pre-check was added in `9e75074` after this exact failure mode was
+  measured.
+- The check is `SELECT` then `INSERT`, not atomic. Two concurrent
+  enqueues of the same fresh pair can both insert. That race is
+  accepted in `contradiction_log.go:193-198`: the queue is a review
+  worklist, a duplicate costs an operator one glance, and the
+  alternative — a new `UNIQUE` index on the live shared schema — is
+  a larger change than the defect warrants. The callers that matter
+  are sequential operator invocations.
+- The pre-check is scoped to `resolved_at IS NULL` to match the
+  queue's worklist semantics (`contradiction_schema_patch.go:21-24`,
+  the partial index on `resolved_at IS NULL`). Once a pair is
+  resolved it is immediately eligible to be queued again,
+  deliberately.
+
+The sequential case is pinned by
+`TestEnqueueContradictionReport_RepeatAcrossSecondsIsNotANewWrite`
+(`internal/core/contradiction_queue_idempotency_test.go:45`).
+`EnqueueSimilarityCandidates` returns the number of rows **actually**
+inserted — a repeat run reports **0**, not last run's total
+re-announced as new work — and the end-to-end shape is pinned by
+`TestEnqueueSimilarityCandidates_SecondRunOverUnchangedDataInsertsNothing`
+(`internal/core/contradiction_queue_idempotency_test.go:156`).
 
 ## Applying a candidate requires adjudication
 
@@ -169,7 +208,10 @@ is in the queue in the first place.
 
 The sanctioned path is unchanged and audited:
 
-- `mpm challenge-memory` / `handleChallengeMemory`
+- `mpm challenge <id> "<evidence>"` / `mpm challenge restore <id>`
+  (`docs/SPEC.md:560`; the underlying handlers are `handleChallenge`
+  at `cmd/mpm/handlers_challenge.go:12` and `handleChallengeRestore`
+  at `:194`)
 - `epistemology_tools.go` (`dm.ChallengeMemory`, slash 2)
 
 `ChallengeMemory` (internal/core/db.go) opens a real transaction and writes
