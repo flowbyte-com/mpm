@@ -73,12 +73,20 @@ state, so it never fed back into either.
 | Path | Writes? | Notes |
 |---|---|---|
 | `EnqueueContradiction` (Phase 4) | **No — removed** | Was the only automatic insert. Gone from the retrieval path. |
-| CLI access reinforcement (`recall.go`) | **Yes** | `weight + 0.5`, capped, rate-limited to hourly. Independent of similarity. |
+| CLI access reinforcement (`recall.go`) | **Yes — lexical only** | `weight + 0.5`, capped, rate-limited to hourly. Independent of similarity. `--semantic` does not run this path. |
+| MCP `mpm_memory` query (`RecordRetrieval`) | **Yes — observability** | One `retrieval_metadata` row per returned id (handlers.go:585-592). Fire-and-forget; not a memory mutation. |
+| MCP `mpm_read_wake_context` (`RecordRetrieval`) | **Yes — observability** | One `retrieval_metadata` row per surfaced memory or milestone (handlers.go:2486, 2497). Same observability contract. |
 | Memory weight / status | **No** | Only via an explicit, operator-facing call. |
 
 So a retrieval can still write to the database, but only through the
-lexical-path reinforcement, which is a deliberate access-tracking mechanism
-rather than a consequence of anything the query matched.
+lexical-path reinforcement, which is a deliberate access-tracking
+mechanism rather than a consequence of anything the query matched —
+and only through the observability writes the MCP `mpm_memory` query
+and `mpm_read_wake_context` surfaces make via `RecordRetrieval`. The
+MCP-side writes are scoped to `retrieval_metadata`; they do not change
+the underlying memory row. The CLI's `--semantic` recall applies
+neither: it does not call `RecordRetrieval` and does not call the
+lexical reinforcement path.
 
 > **Operational note.** The `+0.5` reinforcement is applied only to
 > `returnedIDs`, which is populated on the **lexical SQL-scan path**.
@@ -293,7 +301,7 @@ thirteen cases:
 | 1 | Identical memories | maximal-similarity pair keeps weight |
 | 2 | Near-duplicates | single-token difference keeps weight |
 | 3 | Genuine contradiction | neither penalised **and not queued**, but still discoverable |
-| 4 | All three former branches | retrieval writes nothing; explicit scan still finds each |
+| 4 | All three former branches | direct retrieval writes nothing to memory or queue; explicit scan still finds each |
 | 5 | Repeated retrieval ×6 | queue stays at 0; explicit scan stays at 1 |
 | 6 | Diagnostic path | observational |
 | 7 | Explicit `ChallengeMemory` | still writes, still records restoration state |
@@ -302,11 +310,20 @@ thirteen cases:
 | 10 | `shared` unattached | retrieval succeeds; the explicit path **reports** failure |
 | 11 | 75-row duplicate cluster | 75 weights intact across 3 passes, 0 challenged, 0 queued, all 2775 pairs findable as candidates |
 | 12 | Explicit generation | writes only what discovery found; repeat run reports 0; `detected_by` attributable |
-| 13 | Zero unintended writes | **every column of every memory and every queue row** byte-identical before/after |
+| 13 | Zero unintended writes (direct path) | `TestDirectSearch_WritesNothingToMemoryQueueOrRetrievalMetadata` — every column of every memory, every queue row, and every `retrieval_metadata` row byte-identical before/after a direct `HybridSearch` / `HybridSearchMemories` call. |
 
-Case 13 is the strong form: it snapshots whole rows rather than checking
-columns we happen to know about, so a future regression adding a new column
-write fails there even if no assertion was written to catch it.
+Case 13 is the strong form on the direct path: it snapshots whole rows
+of three stores (memory, queue, retrieval_metadata) rather than
+checking columns we happen to know about, so a future regression
+adding a new column write to any of the three stores fails there even
+if no assertion was written to catch it. The contract is **scoped to
+the direct search path** — the MCP `mpm_memory` query and
+`mpm_read_wake_context` surfaces are pinned *separately* in
+`internal/core/tools/retrieval_metadata_writes_test.go`, where they
+*are* expected to write `retrieval_metadata` rows (observability) and
+must not mutate memory or the queue. The pair of tests is the
+complete contract: direct search writes nothing to any of the three
+stores; MCP surfaces write only `retrieval_metadata`.
 
 The net was verified against the old behaviour by temporarily reintroducing
 the Phase 4 write behind an environment guard: **five tests fail**

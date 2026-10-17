@@ -723,15 +723,27 @@ func TestEnqueueSimilarityCandidates_WritesOnlyWhatDiscoveryFound(t *testing.T) 
 	require.Empty(t, challengedIDs(t, dm))
 }
 
-// ── 13. retrieval writes NOTHING at all ─────────────────────────────
+// ── 13. direct search writes nothing to memory, queue, or retrieval_metadata ──
 
-// The strongest form of the guarantee: rather than checking the columns we
-// know about, this snapshots every row of the corpus and the whole shared
-// queue, runs retrieval, and requires the two snapshots to be byte-identical.
+// The strongest form of the direct-search guarantee: rather than checking
+// the columns we happen to know about, this snapshots every row of the
+// corpus, the whole shared queue, AND the whole retrieval_metadata table,
+// runs direct HybridSearch + HybridSearchMemories, and requires all three
+// snapshots to be byte-identical before/after.
 //
-// A future regression that adds a new column write will fail here even if no
-// existing assertion was written to catch it.
-func TestRetrieval_WritesNothingToAnyStore(t *testing.T) {
+// A future regression that adds a new column write (to any of those three
+// tables) will fail here even if no existing assertion was written to catch
+// it.
+//
+// Scope (issue #18, 2026-10-17): this test pins the *direct* HybridSearch
+// path. Retrieval_metadata writes DO happen on the MCP surfaces
+// (handleQueryLongTermMemory, handleReadWakeContext) — see
+// TestMCPQueryAndWake_RecordsRetrievalMetadata_LeavesMemoryAndQueueIntact
+// in internal/core/tools/retrieval_metadata_writes_test.go for the
+// observability side of the contract. The MCP writes are intentional and
+// scoped to a fire-and-forget upsert keyed on node_id; they do not modify
+// the memory row or the contradiction queue.
+func TestDirectSearch_WritesNothingToMemoryQueueOrRetrievalMetadata(t *testing.T) {
 	dm := newTestDMWithShared(t)
 	defer dm.Close()
 
@@ -747,6 +759,7 @@ func TestRetrieval_WritesNothingToAnyStore(t *testing.T) {
 
 	before := snapshotCorpus(t, dm)
 	queueBefore := snapshotQueue(t, dm)
+	retMetaBefore := snapshotRetrievalMetadata(t, dm)
 
 	cfg := DefaultHybridConfig()
 	cfg.Limit = 10
@@ -757,18 +770,22 @@ func TestRetrieval_WritesNothingToAnyStore(t *testing.T) {
 	}
 
 	require.Equal(t, before, snapshotCorpus(t, dm),
-		"retrieval must not alter a single field of any memory")
+		"direct HybridSearch must not alter a single field of any memory")
 	require.Equal(t, queueBefore, snapshotQueue(t, dm),
-		"retrieval must not touch the contradiction queue")
+		"direct HybridSearch must not touch the contradiction queue")
+	require.Equal(t, retMetaBefore, snapshotRetrievalMetadata(t, dm),
+		"direct HybridSearch must not record retrieval_metadata; that write is an MCP-handler responsibility (issue #18)")
 
 	// The same guarantee for the diagnostic entry point, which reaches the
 	// same code from a different caller.
 	_, err = dm.HybridSearchMemories("read-only", "memories", 10, "local")
 	require.NoError(t, err)
 	require.Equal(t, before, snapshotCorpus(t, dm),
-		"retrieval diagnostics must not alter any memory field")
+		"HybridSearchMemories must not alter any memory field")
 	require.Equal(t, queueBefore, snapshotQueue(t, dm),
-		"retrieval diagnostics must not touch the contradiction queue")
+		"HybridSearchMemories must not touch the contradiction queue")
+	require.Equal(t, retMetaBefore, snapshotRetrievalMetadata(t, dm),
+		"HybridSearchMemories must not record retrieval_metadata; that write is an MCP-handler responsibility (issue #18)")
 }
 
 // snapshotCorpus renders every memory row as a sorted slice of strings so
@@ -816,6 +833,38 @@ func snapshotQueue(t *testing.T, dm *DatabaseManager) []string {
 		require.NoError(t, rows.Scan(&id, &a, &b, &by, &resolved, &sim))
 		out = append(out, strings.Join([]string{
 			id, a, b, by, resolved, fmt.Sprintf("%g", sim),
+		}, "\x1f"))
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+// snapshotRetrievalMetadata renders every retrieval_metadata row as a
+// sorted slice of strings so two snapshots can be compared with
+// require.Equal without depending on column order or driver-specific
+// types. Coverage of this table is what makes case 13 a guarantee
+// against "a new write to a third store" regressions (issue #18).
+// Direct HybridSearch does not write to retrieval_metadata; the writes
+// happen on MCP surfaces (handleQueryLongTermMemory,
+// handleReadWakeContext) and are pinned by the
+// retrieval_metadata_writes_test.go in internal/core/tools/.
+func snapshotRetrievalMetadata(t *testing.T, dm *DatabaseManager) []string {
+	t.Helper()
+	rows, err := dm.SQLDB().Query(
+		`SELECT node_id, COALESCE(node_type,''), COALESCE(reuse_count,0),
+		        COALESCE(last_retrieved_at,0), COALESCE(success_count,0)
+		 FROM retrieval_metadata ORDER BY node_id`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var nodeID, nodeType string
+		var reuse, lastAt, success int64
+		require.NoError(t, rows.Scan(&nodeID, &nodeType, &reuse, &lastAt, &success))
+		out = append(out, strings.Join([]string{
+			nodeID, nodeType, fmt.Sprintf("%d", reuse),
+			fmt.Sprintf("%d", lastAt), fmt.Sprintf("%d", success),
 		}, "\x1f"))
 	}
 	require.NoError(t, rows.Err())

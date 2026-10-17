@@ -201,10 +201,13 @@ not a policy change.
 
 ### 7a. Status — both preconditions resolved, migration proceeded
 
-**(a) is done.** Retrieval is write-free as of 2026-10-13; see
-[`RECALL-MUTATION.md`](./RECALL-MUTATION.md). Re-running the 30-query
-benchmark against `nomic` with the fixed binary on a fingerprint-verified
-snapshot:
+**(a) is done.** Direct `HybridSearch` / `HybridSearchMemories` calls
+are write-free on the memory row and the contradiction queue as of
+2026-10-13; see [`RECALL-MUTATION.md`](./RECALL-MUTATION.md). The MCP
+`mpm_memory` query and `mpm_read_wake_context` surfaces additionally
+write a `retrieval_metadata` row per returned id via `RecordRetrieval`
+(observability only). Re-running the 30-query benchmark against `nomic`
+with the fixed binary on a fingerprint-verified snapshot:
 
 | | §4 (before fix) | re-run (after fix) |
 |---|---|---|

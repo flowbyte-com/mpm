@@ -638,12 +638,24 @@ calls went the same way, for the same underlying reason: cosine similarity
 cannot distinguish a contradiction from a near-duplicate, and filing one
 automatically on every read asserted a fact MPM does not have. Candidates
 are now added only by `mpm ops resolve-contradictions --propose`, and are
-labelled *unverified similarity candidates*. Semantic retrieval is
-write-free.
+labelled *unverified similarity candidates*. Direct semantic retrieval
+(`HybridSearch` / `HybridSearchMemories`) is write-free on the memory
+row and the contradiction queue as of 2026-10-13 — see
+[`RECALL-MUTATION.md`](./RECALL-MUTATION.md). That statement is **scoped
+to the direct search path**; the MCP `mpm_memory` query and
+`mpm_read_wake_context` surfaces each call `RecordRetrieval` and write
+a `retrieval_metadata` row (observability only) per returned id. The
+sweep pinned both halves of the contract in 2026-10-17: the direct path
+in `TestDirectSearch_WritesNothingToMemoryQueueOrRetrievalMetadata`
+(`internal/core/hybrid_search_nomutate_test.go`) and the MCP side in
+`TestHandleQueryLongTermMemory_RecordsRetrievalMetadataForEachResult`
++ `TestHandleReadWakeContext_RecordsRetrievalMetadataForSurfacedMemories`
++ `TestMCPQueryAndWake_DoNotMutateMemoryOrContradictionQueue`
+(`internal/core/tools/retrieval_metadata_writes_test.go`).
 
-The CLI still applies lexical-path access reinforcement (§4.4), so the
-snapshot-copy discipline below still applies to any future agent
-benchmarking MPM.
+The CLI still applies lexical-path access reinforcement (§4.4) on the
+`mpm recall --lexical` path, so the snapshot-copy discipline below
+still applies to any future agent benchmarking MPM.
 
 ---
 
@@ -693,14 +705,30 @@ Both mechanisms existed; only the broken one was load-bearing.
 
 ### 4.4 Recall mutates memory state — by design
 
-Plain `mpm recall` increments the recalled memory's weight by 0.5 and
-stamps `last_accessed_at`. This is intentional retrieval tracking, pinned
-by `internal/core/call_helpers_test.go:440`. It is distinct from the
-`ChallengeMemory` hazard in §3.2.
+Plain `mpm recall --lexical` increments the recalled memory's weight by
+0.5 and stamps `last_accessed_at`. This is intentional retrieval
+tracking, pinned by `internal/core/call_helpers_test.go:440`. It is
+distinct from the `ChallengeMemory` hazard in §3.2. `--semantic` does
+**not** apply lexical access reinforcement; the two paths differ on
+purpose (CLI lexical reinforcement is rate-limited and operator-driven,
+whereas the semantic path is meant to be read-only on the recall side).
+
+The MCP `mpm_memory` query and `mpm_read_wake_context` surfaces are
+*separately* allowed to call `RecordRetrieval`, which writes one
+`retrieval_metadata` row per returned id (observability only). That is
+an additional write the operator must accept when scoping a "verify the
+live database is unchanged" check, and it is the only place
+`retrieval_metadata` is allowed to grow from a read. The
+`TestMCPQueryAndWake_DoNotMutateMemoryOrContradictionQueue` regression
+(`internal/core/tools/retrieval_metadata_writes_test.go`) pins the
+scope: byte-identical memory rows and contradiction queue before and
+after a query + wake pair, with `retrieval_metadata` allowed to grow.
 
 **Operational consequence:** a "verify the live database is unchanged"
-check must scope itself to rows other than those deliberately recalled, or
-it will report expected tracking as drift.
+check must scope itself to rows other than those deliberately recalled
+(via `mpm recall --lexical`) and must separately account for
+`retrieval_metadata` row growth when the test path includes an MCP
+query or wake read, or it will report expected tracking as drift.
 
 ### 4.5 FTS5 build discipline is centralised — WORKING
 

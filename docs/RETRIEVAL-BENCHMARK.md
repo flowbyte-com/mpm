@@ -5,14 +5,21 @@ defects fixed in the `fix/retrieval-benchmark-findings` branch, and the
 calibration behind the changes that were *not* made.
 
 Reproducing: the benchmark runs against a **snapshot copy** of the live
-database, never `~/.mpm/src/db/mpm.db`. As of 2026-10-13 semantic
-retrieval is **write-free** — both the automatic `ChallengeMemory` weight
-slashes and the `EnqueueContradiction` queue inserts were removed; see
-`docs/RECALL-MUTATION.md`. The CLI still applies lexical-path access
-reinforcement (`weight + 0.5`, rate-limited to hourly), and the harness
-still runs against a copy so that the live store is verifiable untouched
-regardless. The harness digests the copy before and after and reports
-`READ-ONLY: confirmed`.
+database, never `~/.mpm/src/db/mpm.db`. As of 2026-10-13, direct
+`HybridSearch` / `HybridSearchMemories` calls do not mutate the memory
+row or the contradiction queue — the automatic `ChallengeMemory` weight
+slashes and the `EnqueueContradiction` queue inserts were both removed;
+see `docs/RECALL-MUTATION.md`. That statement is **scoped to the direct
+search path**: the MCP `mpm_memory` query and `mpm_read_wake_context`
+surfaces each call `RecordRetrieval` and so write a `retrieval_metadata`
+row (observability) per returned id. The CLI still applies lexical-path
+access reinforcement (`weight + 0.5`, rate-limited to hourly) on the
+`mpm recall --lexical` path, and the harness still runs against a copy
+so the live store is verifiable untouched regardless. The harness
+digests the copy before and after and reports `READ-ONLY: confirmed`.
+Pin coverage: `TestDirectSearch_WritesNothingToMemoryQueueOrRetrievalMetadata`
+(`internal/core/hybrid_search_nomutate_test.go`) plus the three MCP-side
+tests in `internal/core/tools/retrieval_metadata_writes_test.go`.
 
 ## Defect 1 — BM25 sign inversion in the hybrid blend (fixed)
 
