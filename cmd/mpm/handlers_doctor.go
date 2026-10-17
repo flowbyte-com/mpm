@@ -55,6 +55,15 @@ import (
 // Neither has an implementation to delegate to: there is no "extended"
 // check set distinct from the standard report, and the standard report
 // has no remediation path. See doctorFlagContract for the full rules.
+//
+// MPM #28 (issue #28): the standard report path uses a read-only
+// handle (getDBReadOnly) so the inspection is observational and the
+// writable singleton is not instantiated for an inspection-only
+// invocation. The probe.RunActiveProbes call passes nil for dm so
+// the probe cache is not written (the live probe results are still
+// rendered into the report). --explain and --deep-scan are handled
+// by the same dispatcher as `mpm ops doctor` so the two entry points
+// cannot diverge.
 func handleDoctor(args []string) int {
 	opts, err := parseDoctorFlags(args)
 	if err != nil {
@@ -62,31 +71,95 @@ func handleDoctor(args []string) int {
 		return 1
 	}
 
-	dm := getDBConcrete()
-	if dm == nil {
-		usererror.Error("database unavailable")
-		return 1
-	}
-
-	// --explain is its own audit mode: it prints an EXPLAIN QUERY PLAN
-	// tree and returns. It precedes --deep-scan exactly as it does in
-	// `mpm ops doctor`, so the two entry points cannot disagree.
+	// --explain and --deep-scan are handled by runDoctorCommand's
+	// dispatcher via the legacy `mpm ops doctor` route. But the
+	// top-level `mpm doctor` handler also accepts these flags and
+	// can short-circuit them here. Both paths use the same
+	// read-only handle so the contracts align.
 	if opts.explain {
 		runDoctorExplain()
 		return 0
 	}
 
-	// --deep-scan skips the standard suite and runs the on-demand
-	// integrity checks. With --fix it additionally applies the single
-	// bounded remediation this codebase implements (soft-delete ghost
-	// cleanup); that mutation is scoped to memories_fts and is the only
-	// write path doctor has.
 	if opts.deepScan {
-		runDoctorDeepScan(dm, opts.fix)
+		ro, dberr := getDBReadOnly()
+		if dberr != nil {
+			renderDoctorDatabaseUnavailable(os.Stderr, dberr)
+			return doctorMissingDBExitCode()
+		}
+		defer ro.Close()
+		if opts.fix {
+			rw := getDBConcrete()
+			if rw == nil {
+				usererror.Error("doctor deep-scan --fix: cannot open database")
+				return 1
+			}
+			runDoctorDeepScanFix(rw)
+			return 0
+		}
+		runDoctorDeepScanInspect(ro)
 		return 0
 	}
 
-	svc := NewDoctorService(dm)
+	ro, dberr := getDBReadOnly()
+	if dberr != nil {
+		// The standard report cannot run without a database.
+		// Render a top-level "Database" check with the precise
+		// remediation hint, then exit with the preserved
+		// missing-database exit code.
+		report := DoctorReport{Checks: []DoctorCheck{}}
+		renderDoctorDatabaseUnavailableToReport(&report, dberr)
+		report.Tally()
+		// Mirror the unavailable message to stderr so the operator
+		// sees it on the terminal (the report will only show on
+		// the json/--json path; the standard report prints via
+		// NewDoctorRenderer which expects rows in the report).
+		renderDoctorDatabaseUnavailable(os.Stderr, dberr)
+		// On --json, encode the report; otherwise render via the
+		// human renderer. Branching on opts.json here means the
+		// --json path is never contaminated by ANSI escapes from
+		// printDoctorSummary.
+		if opts.json {
+			out := struct {
+				Timestamp string                   `json:"timestamp"`
+				Summary   map[string]interface{}   `json:"summary"`
+				Checks    []map[string]interface{} `json:"checks"`
+				Usage     *DoctorUsage             `json:"usage,omitempty"`
+				Attention *DoctorAttention         `json:"attention,omitempty"`
+			}{
+				Timestamp: nowRFC3339(),
+				Summary: map[string]interface{}{
+					"passed":   report.Passed,
+					"warnings": report.Warnings,
+					"failed":   report.Failed,
+				},
+				Checks: doctorChecksToJSON(report.Checks),
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(&out); err != nil {
+				usererror.Error("doctor json: %v", err)
+				return 1
+			}
+			switch {
+			case report.Failed > 0:
+				return 2
+			case report.Warnings > 0:
+				return 1
+			default:
+				return 0
+			}
+		}
+		// Human path. Print the summary directly (the renderer
+		// is for multi-check reports; a single unavailable-DB
+		// row is rendered via the stderr message above and the
+		// summary footer here).
+		printDoctorSummary(&report)
+		return doctorMissingDBExitCode()
+	}
+	defer ro.Close()
+
+	svc := NewDoctorService(ro)
 	if svc == nil {
 		usererror.Error("doctor: failed to wire service")
 		return 1
@@ -98,11 +171,14 @@ func handleDoctor(args []string) int {
 		return 1
 	}
 
-	// Model connectivity probes — runs concurrently with bounded fan-out,
-	// persists results to system_config[model_probe_results]. Errors per
-	// profile become DoctorCheck rows alongside the structural report.
+	// Model connectivity probes — runs concurrently with bounded fan-out.
+	// The dm is passed as nil so the probe cache is NOT persisted; the
+	// live probe results are still rendered into the report (operator
+	// decision: "doctor remains allowed to perform live network probes
+	// without persisting their results"). See internal/core/probe/run.go
+	// for the dm=nil gate.
 	if cfg, lerr := config.LoadConfig(); lerr == nil && cfg != nil {
-		if pres, perr := probe.RunActiveProbes(context.Background(), cfg, dm); perr == nil && len(pres) > 0 {
+		if pres, perr := probe.RunActiveProbes(context.Background(), cfg, nil); perr == nil && len(pres) > 0 {
 			report.Checks = append(report.Checks, modelChecksFromProbes(pres)...)
 		}
 	}

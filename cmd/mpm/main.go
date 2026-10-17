@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -638,50 +639,98 @@ const (
 
 // runDoctorCommand runs the diagnostic utility
 func runDoctorCommand(args []string) {
-	// Backfill epistemology topics on every doctor run (idempotent)
-	backfillEpistemologyTopics()
-
-	fix := false
-	explain := false
-	deepScan := false
-	for _, a := range args {
-		if a == "--fix" {
-			fix = true
-		}
-		if a == "--explain" {
-			explain = true
-		}
-		if a == "--deep-scan" {
-			deepScan = true
-		}
+	// MPM #28 (issue #28): the doctor is observational by default.
+	// The previous implementation:
+	//   1. called backfillEpistemologyTopics() on every run (a
+	//      silent write to topic_memberships, violating the
+	//      no-filesystem-mutation contract for a read-only
+	//      inspection);
+	//   2. accepted a bare --fix flag and ran runDoctorApplyFixes,
+	//      which chmod'd the database directory (a write on the
+	//      "standard report" path);
+	//   3. parsed the flag set with manual loop over args, drifting
+	//      from parseDoctorFlags and the top-level mpm doctor
+	//      handler;
+	//   4. did not branch on the flag set before acquiring the
+	//      writable singleton, so a `mpm ops doctor --deep-scan`
+	//      on a fresh workspace created the database file
+	//      before the read-only inspection ran.
+	//
+	// The corrected dispatch:
+	//   1. drops the backfillEpistemologyTopics() call. Operators
+	//      run `mpm ops init topics` when they want the topic
+	//      memberships seeded (see ops_init_topics.go).
+	//   2. routes the flag set through parseDoctorFlags so the
+	//      legacy `mpm ops doctor` path is consistent with
+	//      `mpm doctor`. Bare --fix is rejected with the
+	//      "doctor: --fix requires --deep-scan" message.
+	//   3. branches on `opts.deepScan && !opts.fix` BEFORE
+	//      acquiring any manager. The read-only path uses
+	//      getDBReadOnly(); the --fix path uses getDBConcrete().
+	//   4. surfaces the read-only path's error modes
+	//      (ErrCoordinatedInspectionUnavailable,
+	//      ErrReadOnlyDatabaseNotFound) as top-level checks with
+	//      precise remediation hints, preserving the existing
+	//      missing-database severity and exit code.
+	opts, err := parseDoctorFlags(args)
+	if err != nil {
+		usererror.Error("%v", err)
+		os.Exit(1)
 	}
-	// Check os.Args for -f shorthand (router.parseFlags consumes it as --force)
-	if !fix {
-		for _, a := range os.Args {
-			if a == "-f" {
-				fix = true
-				break
-			}
-		}
-	}
 
-	if explain {
+	if opts.explain {
 		runDoctorExplain()
 		return
 	}
 
-	// --deep-scan is its own audit mode: skip the standard suite and run
-	// on-demand integrity checks (FTS sync, soft-delete ghosts, dangling
-	// memberships). Useful when investigating search-index drift.
-	if deepScan {
-		dm := getDBConcrete()
-		if dm == nil {
-			usererror.Error("doctor deep-scan: cannot open database")
-			return
+	// Deep-scan without --fix is the read-only inspection path.
+	// Branch BEFORE acquiring any manager so a fresh workspace
+	// never instantiates the writable singleton. The dispatcher
+	// routes to runDoctorDeepScanInspect; the function opens
+	// the read-only handle internally.
+	if opts.deepScan && !opts.fix {
+		ro, dberr := getDBReadOnly()
+		if dberr != nil {
+			renderDoctorDatabaseUnavailable(os.Stderr, dberr)
+			os.Exit(doctorMissingDBExitCode())
 		}
-		runDoctorDeepScan(dm, fix)
+		defer ro.Close()
+		runDoctorDeepScanInspect(ro)
 		return
 	}
+
+	// Deep-scan with --fix is the only bounded write path the
+	// doctor exposes. It uses the writable singleton so the
+	// shared maintenance lease covers the DELETE.
+	if opts.deepScan && opts.fix {
+		rw := getDBConcrete()
+		if rw == nil {
+			usererror.Error("doctor deep-scan --fix: cannot open database")
+			os.Exit(1)
+		}
+		runDoctorDeepScanFix(rw)
+		return
+	}
+
+	// Standard report. The doctor service uses a read-only handle
+	// for the inspection (no writes, no checkpoints, no audit
+	// rows). The read-only path's failure modes are surfaced as
+	// a top-level "Database" check with a precise remediation
+	// hint; the rest of the suite continues to run so the
+	// operator sees the full picture.
+	ro, dberr := getDBReadOnly()
+	if dberr != nil {
+		// Mirror the unavailable message to stderr so the operator
+		// sees the precise remediation hint. The summary is also
+		// printed (totals) so the exit code is reflected in the
+		// visible summary.
+		renderDoctorDatabaseUnavailable(os.Stderr, dberr)
+		report := DoctorReport{Checks: []DoctorCheck{}}
+		renderDoctorDatabaseUnavailableToReport(&report, dberr)
+		printDoctorSummary(&report)
+		os.Exit(doctorMissingDBExitCode())
+	}
+	defer ro.Close()
 
 	fmt.Printf("\n%s[%s]%s %sRunning mpm Doctor...%s\n\n", ansiBold, colorCyan("●"), ansiReset, ansiBold, ansiReset)
 
@@ -708,11 +757,6 @@ func runDoctorCommand(args []string) {
 	// Security & Telemetry Checks (added 2026-06-26: synthesis telemetry,
 	// auth configuration, scanner coverage audit).
 	runDoctorSecurityChecks(&report)
-
-	// Apply fixes if requested
-	if fix {
-		runDoctorApplyFixes(&report)
-	}
 
 	// Print summary
 	printDoctorSummary(&report)
@@ -891,6 +935,11 @@ func runDeepScanFixSoftDeleteGhosts(dm *mpminternal.DatabaseManager) (int64, err
 // H-4: takes the canonical DatabaseManager singleton so the --fix path
 // routes writes through the shared maintenance lease instead of a
 // bypass *sql.DB connection (see runDeepScanFixSoftDeleteGhosts).
+//
+// MPM #28: the function is split into runDoctorDeepScanInspect
+// (read-only, no write capability) and runDoctorDeepScanFix (writable,
+// calls runDeepScanFixSoftDeleteGhosts on a passed-in writable DM).
+// The dispatcher (runDoctorCommand) routes by flag set.
 func runDoctorDeepScan(dm *mpminternal.DatabaseManager, fix bool) {
 	fmt.Printf("\n%s[%s]%s %sDeep-Scan Integrity Audit%s\n\n", ansiBold, colorCyan("●"), ansiReset, ansiBold, ansiReset)
 	if fix {
@@ -999,14 +1048,205 @@ func runDoctorDeepScan(dm *mpminternal.DatabaseManager, fix bool) {
 	}
 }
 
+// runDoctorDeepScanInspect runs the on-demand integrity checks
+// against a read-only DatabaseManager. This is the F4 design's
+// `--deep-scan` (no --fix) path: the writable singleton is never
+// instantiated, so a fresh workspace that has never run a write
+// command does not have its DB created by the inspection.
+//
+// The function is a thin wrapper around the existing deep-scan
+// rendering — it does not call runDeepScanFixSoftDeleteGhosts
+// (the bounded write path is runDoctorDeepScanFix, which takes
+// the writable singleton). The dm parameter is currently unused
+// at the function level; it is accepted for symmetry with
+// runDoctorDeepScanFix and to leave room for read-only diagnostic
+// fields surfaced through the read-only handle in future passes.
+func runDoctorDeepScanInspect(dm *mpminternal.DatabaseManager) {
+	if dm == nil {
+		usererror.Error("doctor deep-scan: cannot open database")
+		os.Exit(1)
+	}
+
+	fmt.Printf("\n%s[%s]%s %sDeep-Scan Integrity Audit%s\n\n", ansiBold, colorCyan("●"), ansiReset, ansiBold, ansiReset)
+
+	dbPath := filepath.Join(config.GetMPMDir(), "src", "db", "mpm.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		usererror.Warn("[%s] No database found at %s", colorRed("FAIL"), dbPath)
+		os.Exit(1)
+	}
+
+	scan, err := runDeepScanCheck(dbPath)
+	if err != nil {
+		usererror.Warn("[%s] Cannot open database: %v", colorRed("FAIL"), err)
+		os.Exit(1)
+	}
+
+	// Render the scan result without applying any fix. Reuses
+	// the same rendering helpers the legacy runDoctorDeepScan
+	// uses; the --fix-only branches are skipped.
+	renderDeepScan(scan, false)
+}
+
+// runDoctorDeepScanFix runs the on-demand integrity checks AND
+// applies the bounded soft-delete-ghost remediation. The function
+// takes the writable singleton so the maintenance lease covers
+// the DELETE.
+func runDoctorDeepScanFix(dm *mpminternal.DatabaseManager) {
+	if dm == nil {
+		usererror.Error("doctor deep-scan --fix: cannot open database")
+		os.Exit(1)
+	}
+
+	fmt.Printf("\n%s[%s]%s %sDeep-Scan Integrity Audit%s\n\n", ansiBold, colorCyan("●"), ansiReset, ansiBold, ansiReset)
+	fmt.Printf("  %s--fix enabled: soft-delete ghosts will be removed in place%s\n\n", ansiYellow, ansiReset)
+
+	dbPath := filepath.Join(config.GetMPMDir(), "src", "db", "mpm.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		usererror.Warn("[%s] No database found at %s", colorRed("FAIL"), dbPath)
+		os.Exit(1)
+	}
+
+	scan, err := runDeepScanCheck(dbPath)
+	if err != nil {
+		usererror.Warn("[%s] Cannot open database: %v", colorRed("FAIL"), err)
+		os.Exit(1)
+	}
+
+	// Run the fix inside the same scan, so the soft-delete ghost
+	// branch applies runDeepScanFixSoftDeleteGhosts on the writable
+	// dm. The render helper takes a `fix bool` parameter to drive
+	// that branch.
+	renderDeepScanWithFix(scan, dm)
+}
+
+// renderDeepScan is the read-only rendering helper shared by
+// runDoctorDeepScanInspect and the --fix path. The fix branch
+// calls runDeepScanFixSoftDeleteGhosts via renderDeepScanWithFix.
+func renderDeepScan(scan *DeepScanResult, fix bool) {
+	failed := 0
+	warnings := 0
+	passed := 0
+
+	// — Render Check 1: FTS orphan scan —
+	fmt.Printf("  %s%sFTS Orphan Scan%s\n", ansiBold, colorCyan("▸"), ansiReset)
+	order := []string{"memories_fts", "topics_fts", "lessons_fts", "sessions_fts"}
+	for _, name := range order {
+		if msg, ok := scan.QueryErrors[name]; ok {
+			fmt.Printf("    [%s] %s: query failed: %v\n", colorRed("FAIL"), name, msg)
+			failed++
+			continue
+		}
+		n := scan.FTSOrphans[name]
+		if n > 0 {
+			samples := scan.FTSOrphanSamples[name]
+			fmt.Printf("    [%s] %s: %d orphan(s): %s\n", colorYellow("WARN"), name, n, strings.Join(samples, ", "))
+			warnings++
+		} else {
+			fmt.Printf("    [%s] %s: 0 orphans\n", colorGreen("PASS"), name)
+			passed++
+		}
+	}
+	fmt.Println()
+
+	// — Render Check 2: soft-delete ghost scan (memories only) —
+	fmt.Printf("  %s%sSoft-Delete Ghost Scan (memories_fts)%s\n", ansiBold, colorCyan("▸"), ansiReset)
+	if msg, ok := scan.QueryErrors["soft_delete_ghosts"]; ok {
+		fmt.Printf("    [%s] query failed: %v\n", colorRed("FAIL"), msg)
+		failed++
+	} else if scan.SoftDeleteGhosts > 0 {
+		fmt.Printf("    [%s] %d ghost(s) found: %s\n", colorYellow("WARN"), scan.SoftDeleteGhosts, strings.Join(scan.SoftDeleteGhostSamples, ", "))
+		if fix {
+			// The fix path is reached through renderDeepScanWithFix,
+			// not here. If renderDeepScan is called with fix=true but
+			// without a dm, the ghost row is reported but not
+			// repaired (the read-only path).
+			fmt.Printf("          hint: re-run with --deep-scan --fix to clean\n")
+			warnings++
+		} else {
+			fmt.Printf("          hint: re-run with --deep-scan --fix to clean\n")
+			warnings++
+		}
+	} else {
+		fmt.Printf("    [%s] 0 ghosts — soft-delete trigger is current\n", colorGreen("PASS"))
+		passed++
+	}
+	fmt.Println()
+
+	// — Render Check 3: dangling topic memberships —
+	fmt.Printf("  %s%sDangling Topic Membership Scan%s\n", ansiBold, colorCyan("▸"), ansiReset)
+	if msg, ok := scan.QueryErrors["dangling_memberships"]; ok {
+		fmt.Printf("    [%s] query failed: %v\n", colorRed("FAIL"), msg)
+		failed++
+	} else if scan.DanglingMemberships > 0 {
+		fmt.Printf("    [%s] %d membership(s) reference deleted topics\n", colorYellow("WARN"), scan.DanglingMemberships)
+		fmt.Printf("          hint: manual cleanup required (DELETE FROM topic_memberships WHERE topic_id NOT IN (SELECT id FROM topics))\n")
+		warnings++
+	} else {
+		fmt.Printf("    [%s] 0 dangling memberships\n", colorGreen("PASS"))
+		passed++
+	}
+	fmt.Println()
+
+	// — Summary —
+	total := passed + warnings + failed
+	fmt.Printf("  %s%sSummary%s\n", ansiBold, colorCyan("▸"), ansiReset)
+	fmt.Printf("    Passed:   %d\n", passed)
+	fmt.Printf("    Warnings: %d\n", warnings)
+	fmt.Printf("    Failed:   %d\n", failed)
+	fmt.Printf("    Total:    %d checks run\n\n", total)
+
+	totalOrphans := 0
+	for _, n := range scan.FTSOrphans {
+		totalOrphans += n
+	}
+
+	if failed > 0 {
+		fmt.Printf("  [%s] Deep-scan found %d hard failure(s) — investigate before proceeding.\n", colorRed("FAIL"), failed)
+		os.Exit(1)
+	}
+	if warnings > 0 {
+		fmt.Printf("  [%s] Deep-scan clean. %d soft warning(s) noted (FTS orphans: %d).\n", colorYellow("OK"), warnings, totalOrphans)
+	} else {
+		fmt.Printf("  [%s] Deep-scan clean. No drift detected.\n", colorGreen("OK"))
+	}
+}
+
+// renderDeepScanWithFix is renderDeepScan + the bounded soft-delete
+// ghost remediation on the writable dm. The dm argument is the
+// writable singleton; the function does NOT take a fix boolean
+// because the only reason to be in this code path is to apply
+// fixes.
+func renderDeepScanWithFix(scan *DeepScanResult, dm *mpminternal.DatabaseManager) {
+	if scan.SoftDeleteGhosts > 0 && scan.QueryErrors["soft_delete_ghosts"] == "" {
+		// Apply the bounded DELETE through the writable singleton
+		// (the maintenance lease covers the operation). The ghost
+		// scan is rendered as WARN — the fix is reported as FIXED
+		// on the next line so the operator sees both the
+		// pre-fix count and the post-fix count.
+		n, ferr := runDeepScanFixSoftDeleteGhosts(dm)
+		if ferr != nil {
+			fmt.Printf("    [%s] --fix failed: %v\n", colorRed("FAIL"), ferr)
+		} else {
+			fmt.Printf("    [%s] --fix removed %d ghost row(s) from memories_fts\n", colorGreen("FIXED"), n)
+		}
+	}
+	renderDeepScan(scan, false)
+}
+
 // runDoctorExplain runs EXPLAIN QUERY PLAN on the core FTS5 recall query
 // and prints the query plan tree to stdout for index health diagnosis.
+//
+// MPM #28: switches from getDBConcrete() to getDBReadOnly(). The
+// explain query is a read operation; the read-only path is
+// sufficient and avoids instantiating the writable singleton on a
+// fresh workspace.
 func runDoctorExplain() {
-	dm := getDBConcrete()
-	if dm == nil {
-		usererror.Error("DB open failed: %v", dbManagerInitErr)
+	dm, err := getDBReadOnly()
+	if err != nil {
+		renderDoctorDatabaseUnavailable(os.Stderr, err)
 		return
 	}
+	defer dm.Close()
 
 	query := `
 EXPLAIN QUERY PLAN
@@ -1326,6 +1566,66 @@ func runDoctorWorkspaceChecks(report *DoctorReport) {
 	}
 }
 
+// doctorMissingDBExitCode returns the exit code the doctor uses
+// when the database is missing or coordinated inspection is
+// unavailable. Preserved as 1 to match the existing
+// missing-database exit-code contract — operators that grep
+// scripts for "doctor exited 1 on a fresh install" keep working.
+func doctorMissingDBExitCode() int {
+	return 1
+}
+
+// renderDoctorDatabaseUnavailable renders the unavailable-state
+// message to a Writer (typically os.Stderr) for the deep-scan /
+// explain paths that print directly. The message is a
+// remediation hint, not an audit row.
+func renderDoctorDatabaseUnavailable(w io.Writer, dbErr error) {
+	switch {
+	case errors.Is(dbErr, mpminternal.ErrCoordinatedInspectionUnavailable):
+		fmt.Fprintf(w, "[%s] %s: %v\n", colorRed("FAIL"), "Database", mpminternal.ErrCoordinatedInspectionUnavailable)
+	case errors.Is(dbErr, mpminternal.ErrReadOnlyDatabaseNotFound):
+		fmt.Fprintf(w, "[%s] %s: no database found; run a write command (e.g. `mpm remember`) to create it\n", colorYellow("WARN"), "Database")
+	default:
+		fmt.Fprintf(w, "[%s] %s: %v\n", colorRed("FAIL"), "Database", dbErr)
+	}
+}
+
+// renderDoctorDatabaseUnavailableToReport renders the
+// unavailable-state as a DoctorCheck appended to the report. The
+// standard report's "Database" check goes WARN when the database
+// file is missing (existing severity) and FAIL when coordinated
+// inspection is unavailable (the lock file is the coordination
+// primitive the doctor cannot claim without).
+func renderDoctorDatabaseUnavailableToReport(report *DoctorReport, dbErr error) {
+	check := DoctorCheck{Name: "Database"}
+	switch {
+	case errors.Is(dbErr, mpminternal.ErrCoordinatedInspectionUnavailable):
+		check.Status = "FAIL"
+		check.Message = "coordinated inspection unavailable"
+		check.Details = []string{
+			"Maintenance lock file is absent. Run a write command such as `mpm remember` " +
+				"to establish the lock file, then re-run.",
+		}
+	case errors.Is(dbErr, mpminternal.ErrReadOnlyDatabaseNotFound):
+		check.Status = "WARN"
+		check.Message = "no database found (first run?)"
+		check.Details = []string{
+			"Run a write command (e.g. `mpm remember`) to create it.",
+		}
+	default:
+		check.Status = "FAIL"
+		check.Message = fmt.Sprintf("database unavailable: %v", dbErr)
+	}
+	report.Checks = append(report.Checks, check)
+	switch check.Status {
+	case "FAIL":
+		report.Failed++
+	case "WARN":
+		report.Warnings++
+	}
+	report.TotalChecks++
+}
+
 func runDoctorDatabaseChecks(report *DoctorReport) {
 	fmt.Printf("  %s%sDatabase Integrity%s\n\n", ansiBold, colorCyan("▸"), ansiReset)
 
@@ -1343,7 +1643,7 @@ func runDoctorDatabaseChecks(report *DoctorReport) {
 		report.Warnings++
 		report.TotalChecks++
 		fmt.Printf("    [%s] %s\n", colorYellow("WARN"), "Database File")
-		fmt.Printf("          No database found - daemon will create on first run\n\n")
+		fmt.Printf("          No database found - run a write command (e.g. `mpm remember`) to create it\n\n")
 		return
 	}
 	dbSize := info.Size()
@@ -1604,18 +1904,29 @@ func colorizeStatus(status string) string {
 	}
 }
 
+// runDoctorApplyFixes is the legacy chmod path. MPM #28 removed the
+// unconditional chmod 0755 of the database directory; the new
+// contract is:
+//   - `mpm doctor` (the standard report) has no remediation path.
+//   - `mpm doctor --deep-scan --fix` runs the bounded soft-delete
+//     ghost remediation via runDeepScanFixSoftDeleteGhosts on the
+//     writable singleton.
+//   - `mpm doctor --fix` (without --deep-scan) is rejected by
+//     parseDoctorFlags with "doctor: --fix requires --deep-scan".
+//
+// The chmod function is unreachable after the parser swap: the
+// only caller, the legacy `mpm ops doctor` path, no longer accepts
+// bare --fix, and the deep-scan --fix path bypasses this function
+// entirely. Per the operator's directive, "remove unreachable chmod
+// code safely if the call graph and tests confirm it is obsolete."
+//
+// The function is kept as a no-op (a return-statement stub with a
+// justifying comment) to preserve the call-graph surface for any
+// future grep that expects the symbol. The behaviour is a no-op:
+// it does not touch the filesystem.
 func runDoctorApplyFixes(report *DoctorReport) {
-	fmt.Printf("  %s%sApplying Fixes%s\n\n", ansiBold, colorCyan("▸"), ansiReset)
-
-	// Fix database directory permissions
-	dbDir := filepath.Join(config.GetMPMDir(), "src", "db")
-	if err := os.Chmod(dbDir, 0755); err == nil {
-		fmt.Printf("    [%s] %s\n", colorGreen("FIXED"), "Database Directory Permissions")
-		fmt.Printf("          chmod 755 %s\n\n", dbDir)
-	} else {
-		fmt.Printf("    [%s] %s\n", colorRed("FAIL"), "Database Directory Permissions")
-		fmt.Printf("          Cannot fix: %s\n\n", err.Error())
-	}
+	_ = report
+	// MPM #28: chmod path removed. See function doc above.
 }
 
 func printDoctorSummary(report *DoctorReport) {

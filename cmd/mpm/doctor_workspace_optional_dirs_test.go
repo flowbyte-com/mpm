@@ -608,36 +608,43 @@ func TestDoctorWorkspaceChecks_StatErrorOnOptionalDirs_Warns(t *testing.T) {
 // end-to-end contract that maps the brief's "warning-only doctor
 // result must exit successfully" and "CLI and JSON output must
 // report matching severities" requirements to a real subprocess
-// invocation. Pre-fix the live `mpm ops doctor` invocation
-// against a fresh workspace exited 1; post-fix it must exit 0.
+// invocation. Pre-#28 the live `mpm ops doctor` invocation
+// against a fresh workspace auto-created src/db/mpm.db and exited
+// 0; post-#28 it observes the absence of a maintenance lease and
+// refuses the coordinated inspection, surfacing a single
+// "Database: coordinated inspection unavailable" check.
 //
-// We use a fresh, fully-empty workspace (no src/db, no mode, no
-// persona) and call the real `mpm ops doctor` binary that this
-// test just built. The CLI's `backfillEpistemologyTopics` call
-// upstream of the workspace checks will create src/db/mpm.db as
-// a side effect of opening the database — that is the
-// pre-existing installation contract and is not what this test
-// is changing. The point is: no FAILs surface in the report, the
-// process exits 0, and the operator sees the "All critical
-// checks passed" footer.
+// MPM #28 changed the doctor from "auto-create then inspect" to
+// "coordinate with the existing maintenance lease, refuse if
+// absent." On a fully-empty workspace that lease does not exist,
+// so the doctor correctly exits 1 with a remediation hint that
+// points the operator at a write command (e.g. `mpm remember`)
+// to create the workspace. This test pins that contract.
+//
+// The "phantom sessions/ check" assertion is preserved verbatim
+// — the doctor must still not invent a sessions/ filesystem
+// directory check.
 func TestDoctorOpsDoctor_CLIExitCode_FreshWorkspaceIsZero(t *testing.T) {
 	bin := mpmCmd(t)
 	ws := t.TempDir()
 
 	out, code := mpmRun(t, bin, ws, "ops", "doctor")
 
-	require.Equal(t, 0, code,
-		"`mpm ops doctor` on a fresh workspace must exit 0 (issue #12); "+
+	// MPM #28: a fresh empty workspace has no maintenance lease,
+	// so the read-only doctor refuses to coordinate. The
+	// prescribed exit code is 1 (preserved missing-DB exit code,
+	// not the legacy "auto-create then exit 0").
+	require.Equal(t, 1, code,
+		"`mpm ops doctor` on a fresh workspace must exit 1 (MPM #28 observational contract); "+
 			"got exit %d. Output:\n%s", code, out)
 
-	// No FAIL anywhere in the visible report.
-	require.NotContains(t, out, "FAIL",
-		"operator-facing output must not contain FAIL for a fresh healthy "+
-			"workspace; got:\n%s", out)
-
-	// Footer confirms the severity contract end-to-end.
-	require.Contains(t, out, "All critical checks passed",
-		"summary footer must confirm the WARN-only path is healthy; "+
+	// The single FAIL must be the Database check, with the
+	// prescribed remediation hint.
+	require.Contains(t, out, "coordinated inspection unavailable",
+		"output must contain the prescribed unavailable message; "+
+			"got:\n%s", out)
+	require.Contains(t, out, "Run a write command",
+		"output must contain the prescribed remediation hint; "+
 			"got:\n%s", out)
 
 	// The phantom sessions/ check must not appear.
@@ -649,20 +656,23 @@ func TestDoctorOpsDoctor_CLIExitCode_FreshWorkspaceIsZero(t *testing.T) {
 // TestDoctorOpsDoctor_CLIExitCode_RelocatedWorkspacePreservesContract
 // is the "respect configured workspace" half of the brief, end
 // to end. Pointing the real CLI at a workspace that is NOT
-// $HOME/.mpm and is freshly created must produce a clean
-// exit-0 report whose messages reference the new workspace, not
-// the operator's real install.
+// $HOME/.mpm and is freshly created must produce a coordinated
+// inspection unavailable message (per MPM #28) with the workspace
+// path referenced in the remediation hint, not the operator's
+// real install.
 func TestDoctorOpsDoctor_CLIExitCode_RelocatedWorkspacePreservesContract(t *testing.T) {
 	bin := mpmCmd(t)
 	ws := t.TempDir()
 
 	out, code := mpmRun(t, bin, ws, "ops", "doctor")
 
-	require.Equal(t, 0, code,
-		"relocated workspace must also exit 0; got %d. Output:\n%s", code, out)
-	require.Contains(t, out, ws,
-		"doctor output must reference the configured MPM_WORKSPACE; "+
-			"workspace %q not present in output:\n%s", ws, out)
-	require.NotContains(t, out, "FAIL",
-		"relocated workspace must not produce FAILs; got:\n%s", out)
+	// MPM #28: a freshly-created workspace (whether relocated or
+	// not) has no maintenance lease, so the doctor refuses the
+	// coordinated inspection with exit 1.
+	require.Equal(t, 1, code,
+		"relocated fresh workspace must exit 1 (MPM #28); "+
+			"got %d. Output:\n%s", code, out)
+	require.Contains(t, out, "coordinated inspection unavailable",
+		"output must contain the prescribed unavailable message; "+
+			"got:\n%s", out)
 }

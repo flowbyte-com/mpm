@@ -58,6 +58,34 @@ func NewDoctorService(dm *mpminternal.DatabaseManager) *DoctorService {
 	return &DoctorService{dm: dm}
 }
 
+// healthCheck dispatches to HealthCheck (writable) or
+// HealthCheckReadOnly (read-only) based on the handle's readOnly
+// tag. The two methods are symmetric and refuse cross-mode calls;
+// the dispatch keeps the call sites readable.
+//
+// Returns a map[string]interface{} shape compatible with both
+// methods' return types (HealthCheck already returns the map;
+// HealthCheckReadOnly returns a struct whose .Stats field is the
+// same shape). The struct's .Warnings slice is appended to the
+// map under the "warnings" key when present, so the renderer can
+// surface partial-success messages without re-shaping the data.
+func (s *DoctorService) healthCheck() (map[string]interface{}, error) {
+	if s.dm == nil {
+		return nil, fmt.Errorf("doctor: nil database handle")
+	}
+	if s.dm.IsReadOnly() {
+		ro, err := s.dm.HealthCheckReadOnly()
+		if err != nil {
+			return ro.Stats, err
+		}
+		if len(ro.Warnings) > 0 {
+			ro.Stats["warnings"] = ro.Warnings
+		}
+		return ro.Stats, nil
+	}
+	return s.dm.HealthCheck()
+}
+
 // Check runs every per-subsystem check and assembles the base
 // DoctorReport. The base report is tallied before returning so
 // callers that only inspect the base checks (e.g. tests) see
@@ -173,10 +201,14 @@ func (r *DoctorReport) Tally() {
 	}
 }
 
-// checkDatabase inspects integrity + busy_retries via HealthCheck.
+// checkDatabase inspects integrity + busy_retries via HealthCheck
+// (writable path) or HealthCheckReadOnly (read-only path). The
+// dispatch is structural: the read-only path's "no writes" contract
+// is enforced by the constructor tagging the handle, and the two
+// methods refuse cross-mode calls.
 func (s *DoctorService) checkDatabase() DoctorCheck {
 	check := DoctorCheck{Name: "Database"}
-	hc, err := s.dm.HealthCheck()
+	hc, err := s.healthCheck()
 	if err != nil {
 		check.Status = "FAIL"
 		check.Message = fmt.Sprintf("health check failed: %v", err)
@@ -438,8 +470,10 @@ func (s *DoctorService) checkSchedulerAt(now int64) DoctorCheck {
 
 	// Daemon-only verdict. HealthCheck is used purely for the cron
 	// retention surface here; actionable-overdue is reported by
-	// checkWakeBacklog.
-	hc, err := s.dm.HealthCheck()
+	// checkWakeBacklog. s.healthCheck() dispatches to HealthCheck on
+	// a writable handle and HealthCheckReadOnly on a read-only
+	// handle, preserving the read-only contract for the doctor.
+	hc, err := s.healthCheck()
 	if err != nil {
 		check.Status = cronRetentionToStatus(check.CronRetention)
 		check.Message = cronRetentionToMessage(check.CronRetention)
@@ -459,7 +493,7 @@ func (s *DoctorService) checkSchedulerAt(now int64) DoctorCheck {
 // not a daemon failure. The verdict caps at WARN regardless of count.
 func (s *DoctorService) checkWakeBacklog() DoctorCheck {
 	check := DoctorCheck{Name: "Wake backlog"}
-	hc, err := s.dm.HealthCheck()
+	hc, err := s.healthCheck()
 	if err != nil {
 		check.Status = "WARN"
 		check.Message = "could not query wake backlog"

@@ -1825,6 +1825,7 @@ mpm ops ingest <path>
 # Init (one-time bootstrap — idempotent)
 mpm ops init directives       # Seed baseline cognitive directives
 mpm ops init skills           # Seed baseline skill library (status, health, etc.)
+mpm ops init topics           # Link existing theories/decisions memories to their topics
 
 # Context
 mpm ops switch
@@ -2754,7 +2755,7 @@ This section is the operator-facing view of the same model: what runs, when, and
 
 | Surface | Behaviour |
 | --- | --- |
-| `mpm doctor` | Performs an active real-network probe of every generative + embedding binding. Concurrent (4 fan-out), 12s per-probe timeout, persists bounded results to `system_config[model_probe_results]`. |
+| `mpm doctor` | Performs an active real-network probe of every generative + embedding binding. Concurrent (4 fan-out), 12s per-probe timeout. Live results are rendered into the report but **NOT persisted** to `system_config[model_probe_results]` (the doctor is observational; probe results are surfaced in the report and refreshed on each invocation). |
 | `mpm` / `mpm status` | Read-only on the probe cache. Renders `Models  ✓ N/N healthy · checked Ns ago`. Stale or missing cache surfaces `? not recently verified · run 'mpm doctor'`. **Never blocks on the network.** |
 | `mpm config profile set <name> <material-field>` | After each material-field save that produces a structurally complete profile, fires a single best-effort probe and prints `✓ Connection verified · …` or `✗ Verification failed · … / Configuration was saved.` |
 | Disabled (`Components["embedding"] == "disabled"`) | Reported as neutral — excluded from the health denominator. |
@@ -2786,6 +2787,37 @@ because the standard report has no remediation path. `--all` is not
 supported: `mpm doctor` already runs every available check. `--explain`
 is a separate mode that prints the FTS5 query plan, and cannot be
 combined with `--deep-scan`.
+
+#### Doctor is observational
+
+`mpm doctor` and `mpm ops doctor` are **observational by default**: the
+standard report path opens the database through a read-only handle
+(`?mode=ro` DSN) coordinated by a shared maintenance lease
+(`LOCK_SH` on `<root>/src/db/mpm.db.lock`). The standard report must not
+write to the database, the schema, the audit log, the probe cache, or
+the filesystem. Specifically:
+
+- no `WAL` checkpoint is issued;
+- no row is written to `system_audit_log`;
+- no probe result is written to `system_config[model_probe_results]`
+  (the live probe results are still rendered into the report);
+- no implicit backfill runs (topic memberships, etc.) — operators
+  run `mpm ops init topics` explicitly when they want the topic
+  memberships seeded;
+- no migrations run, no log rotation is triggered, no FTS5 rebuild is
+  initiated.
+
+The only write path the doctor exposes is `mpm doctor --deep-scan
+--fix`, which is the bounded soft-delete ghost cleanup. The fix path
+uses the writable singleton and the exclusive maintenance lease.
+
+On a fresh empty workspace the doctor refuses to coordinate the
+inspection (the maintenance lease does not exist), surfaces a single
+"Database: coordinated inspection unavailable" check, prints the
+prescribed remediation hint (`Run a write command such as
+\`mpm remember\` to establish the lock file, then re-run.`), and
+exits 1. The exit code is the preserved missing-database code; the
+JSON output mirrors the same shape with `failed: 1`.
 
 #### How it works
 
