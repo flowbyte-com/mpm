@@ -770,9 +770,27 @@ func assertUnchanged(t *testing.T, label string, before, after onboardDigest) {
 // explicitly: registration is not proof of loading.
 //
 // A host whose managed block is present and current still has UNKNOWN
-// runtime behaviour. The report must carry that caveat every time, and
-// must name OpenCode specifically, because that adapter's runtime load
-// has never been confirmed.
+// runtime behaviour for the current host. The 2026-10-16 OpenCode
+// 2.0.30 V2 addendum is a historical load receipt for that specific
+// tested build; the report's caveat must distinguish that from the
+// current-host probe this command does not perform.
+//
+// The contract the caveat must satisfy:
+//
+//  1. it exists in `NotVerified`;
+//  2. it names OpenCode specifically;
+//  3. it states that "registration is not proof of loading" (or
+//     equivalently "not proof of loading");
+//  4. it names the date and version of the demonstrated load — the
+//     evidence is "2026-10-16" against "2.0.30" — so a caveat
+//     that names OpenCode without dating the evidence is just as
+//     dishonest as the unconditional denial;
+//  5. it does not falsely claim that `mpm onboard` probes the
+//     current host (the command does not start or interrogate the
+//     host; a positive claim otherwise is the same kind of
+//     dishonesty the third assertion guards against);
+//  6. it does not contain the historically-false phrase
+//     "no confirmed runtime load" verbatim.
 func TestOnboardNeverClaimsUnverifiedRuntime(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the binary and runs a subprocess")
@@ -792,14 +810,122 @@ func TestOnboardNeverClaimsUnverifiedRuntime(t *testing.T) {
 		t.Fatal("report carries no runtime-loading caveat; a present managed block " +
 			"shows what the host is told, not that it loaded MPM")
 	}
-	if !strings.Contains(strings.ToLower(caveat), "opencode") {
-		t.Errorf("runtime caveat does not name OpenCode, whose runtime load is "+
-			"unconfirmed: %q", caveat)
+	assertRuntimeCaveatContract(t, caveat)
+}
+
+// TestOnboardNeverClaimsUnverifiedRuntime_NegativeControl pins the
+// test's own purpose: a synthetic caveat that contains the
+// historically-false phrase "no confirmed runtime load" must fail
+// the contract. The synthetic string mimics the pre-2026-10-16
+// wording so a future refactor that re-introduces it is caught by
+// the same assertions, not by a one-off check.
+func TestOnboardNeverClaimsUnverifiedRuntime_NegativeControl(t *testing.T) {
+	bogus := "host RUNTIME loading: registration is not proof of loading. " +
+		"A present, current managed block shows what the host is TOLD, " +
+		"not that it loaded MPM. OpenCode in particular has no confirmed " +
+		"runtime load; verify by observing a real `mpm_memory/*` tool " +
+		"invocation through that adapter."
+
+	// Drive the helper through t.Errorf so the negative control
+	// records the contract violation rather than failing the test
+	// suite. A negative control is most useful when its failures
+	// are visible in the run output, not when they abort CI.
+	rec := &recordingT{T: t}
+	assertRuntimeCaveatContract(rec, bogus)
+	if !rec.failed {
+		t.Fatal("synthetic pre-2026-10-16 caveat was accepted by the contract helper; " +
+			"assertRuntimeCaveatContract must reject the historically-false " +
+			"'no confirmed runtime load' wording — the negative control is the " +
+			"test's own purpose, not a side check")
 	}
-	if !strings.Contains(strings.ToLower(caveat), "registration is not proof") &&
-		!strings.Contains(strings.ToLower(caveat), "not proof of loading") {
+}
+
+// assertRuntimeCaveatContract encodes the six-point contract the
+// runtime-loading caveat must satisfy. It is the single source of
+// truth for both TestOnboardNeverClaimsUnverifiedRuntime (live
+// caveat) and the negative control (synthetic pre-fix caveat).
+// A test-driven refactor that drops any of the six checks here
+// surfaces immediately in both call sites.
+//
+// The contract:
+//
+//  1. the caveat exists;
+//  2. it names "opencode";
+//  3. it states "registration is not proof" / "not proof of loading";
+//  4. it dates the historical evidence (contains "2026-10-16" and "2.0.30");
+//  5. it disclaims that `mpm onboard` probes the current host
+//     (the phrase "mpm onboard does not" plus one of
+//     start/probe/interrogate must appear);
+//  6. it does NOT contain the historically-false substring
+//     "no confirmed runtime load".
+func assertRuntimeCaveatContract(t assertT, caveat string) {
+	t.Helper()
+	if caveat == "" {
+		t.Errorf("runtime caveat is empty; a present managed block shows what the " +
+			"host is told, not that it loaded MPM")
+		return
+	}
+	lower := strings.ToLower(caveat)
+	if !strings.Contains(lower, "opencode") {
+		t.Errorf("runtime caveat does not name OpenCode: %q", caveat)
+	}
+	if !strings.Contains(lower, "registration is not proof") &&
+		!strings.Contains(lower, "not proof of loading") {
 		t.Errorf("runtime caveat does not state that registration is not proof: %q", caveat)
 	}
+	if !strings.Contains(caveat, "2026-10-16") {
+		t.Errorf("runtime caveat does not date the historical evidence; a caveat that "+
+			"names OpenCode without the 2026-10-16 date is just as dishonest as the "+
+			"unconditional denial it replaces. caveat=%q", caveat)
+	}
+	if !strings.Contains(caveat, "2.0.30") {
+		t.Errorf("runtime caveat does not name the OpenCode 2.0.30 version of the "+
+			"demonstrated load; date without version is half a fact. caveat=%q", caveat)
+	}
+	if !strings.Contains(lower, "mpm onboard does not") &&
+		!strings.Contains(lower, "`mpm onboard` does not") {
+		t.Errorf("runtime caveat does not disclaim that `mpm onboard` probes the "+
+			"current host; the command does not start or interrogate the host, and "+
+			"silently omitting that is the same dishonesty the third assertion "+
+			"guards against. caveat=%q", caveat)
+	} else if !strings.Contains(lower, "start") &&
+		!strings.Contains(lower, "probe") &&
+		!strings.Contains(lower, "interrogate") {
+		t.Errorf("runtime caveat mentions `mpm onboard` but does not say the command "+
+			"does not start/probe/interrogate the current host. caveat=%q", caveat)
+	}
+	if strings.Contains(lower, "no confirmed runtime load") {
+		t.Errorf("runtime caveat contains the historically-false phrase "+
+			"'no confirmed runtime load'; the 2026-10-16 OpenCode 2.0.30 V2 addendum "+
+			"supersedes that wording. caveat=%q", caveat)
+	}
+}
+
+// assertT is the minimal interface assertRuntimeCaveatContract
+// needs. Both *testing.T and the recordingT used by the negative
+// control satisfy it, so the helper is testable without spinning
+// up a real fixture.
+type assertT interface {
+	Helper()
+	Errorf(format string, args ...interface{})
+}
+
+// recordingT is a *testing.T-shaped sink used by the negative
+// control. It records whether Errorf was ever called and otherwise
+// discards the message. It is the smallest harness that lets the
+// negative control assert "the helper would have failed this
+// input" without aborting the test run.
+type recordingT struct {
+	T      *testing.T
+	failed bool
+}
+
+func (r *recordingT) Helper() {}
+
+func (r *recordingT) Errorf(format string, args ...interface{}) {
+	r.failed = true
+	// Echo the message so a CI log makes the failure obvious.
+	r.T.Logf("[negative-control] contract helper rejected caveat: "+format, args...)
 }
 
 // TestOnboardDoesNotClaimProbeCapability pins the second honesty rule:

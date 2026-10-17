@@ -84,9 +84,15 @@
 // In particular, a host row reporting PASS means "the managed block
 // is present and byte-current". It does NOT mean the host loads MPM
 // at runtime. `RuntimeVerified` is carried on every row and is false
-// in this commit; OpenCode's runtime loading in particular remains
-// unverified and must stay that way until an actual tool invocation
-// through that adapter is observed.
+// in this commit. OpenCode's runtime loading was demonstrated on
+// 2026-10-16 against OpenCode 2.0.30 (17 tools registered, real
+// `mpm_memory` / `mpm_context` agent invocations recorded with
+// `framework_name='opencode'`); that is observed native runtime
+// invocation for that specific tested build, not a session-init
+// load-receipt facility, and does not generalise to every current
+// or future host session. See
+// `agent_installation/mpm-opencode/VALIDATION-2026-08-19.md` for the
+// full evidence record.
 
 package main
 
@@ -1028,10 +1034,16 @@ func collectHosts(rep *onboardReport) {
 	// loads MPM at runtime, and reporting it as though it did is the
 	// specific dishonesty this command must avoid.
 	rep.NotVerified = append(rep.NotVerified,
-		"host RUNTIME loading: registration is not proof of loading. A present, current "+
-			"managed block shows what the host is TOLD, not that it loaded MPM. OpenCode in "+
-			"particular has no confirmed runtime load; verify by observing a real "+
-			"`mpm_memory/*` tool invocation through that adapter")
+		"host RUNTIME loading: a present, current managed block shows what the host is "+
+			"TOLD, not that it loaded MPM — registration is not proof of loading, and the "+
+			"OpenCode plugin is not gated on the managed block either. `mpm onboard` does "+
+			"not start or interrogate the current host. The OpenCode 2.0.30 V2 plugin was "+
+			"demonstrated loading on 2026-10-16 (17 tools registered, real `mpm_memory` / "+
+			"`mpm_context` agent invocations recorded with `framework_name='opencode'`), "+
+			"but that is observed native runtime invocation for a specific tested build, "+
+			"not a load-receipt facility and not a guarantee for any current or future "+
+			"session. Verify a current session by observing a real `mpm_memory/*` tool "+
+			"invocation through that adapter")
 	rep.Skipped = append(rep.Skipped,
 		"host runtime verification: registration is not proof of loading (no adapter is started by onboard)")
 }

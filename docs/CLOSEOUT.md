@@ -595,6 +595,35 @@ Neither host's runtime loading should be reported as verified until a
 load receipt exists. Pi's `-builtin:mcp` setting is byte-identical to
 before and was not touched.
 
+#### 3.1.1 Dated follow-up (2026-10-16)
+
+The October 13 ABSENT verdicts above are the *historical* position.
+On 2026-10-16 the OpenCode V2 integration was demonstrated loading
+against OpenCode 2.0.30: a fresh `opencode run --standalone` boot
+registered the V2 plugin module, 17 typed tools became available,
+real `mpm_memory` and `mpm_context` agent invocations landed in
+`tool_invocations` with `framework_name='opencode'`, and the same
+attribution was confirmed against the user's persistent OpenCode
+service after restart. The reconciled current position for the
+**tested V2 build** is therefore:
+
+| Adapter | Status as of 2026-10-16 |
+|---|---|
+| OpenCode (V2 plugin, OpenCode 2.0.30, fresh host) | **VERIFIED** for that tested build |
+| OpenCode (any other host session or build) | not established by this evidence |
+| Pi | unchanged — ABSENT for direct host verification |
+
+The October 16 evidence is **observed native runtime invocation**
+for a specific tested build, not a session-init load-receipt
+facility. It does not generalise to every current or future host
+session, and `mpm onboard` does not perform a current-host probe —
+a green managed block is still necessary-but-not-sufficient for
+runtime loading. The §3.1 "Direct host verification" row above
+stays verbatim as the historical October 13 position; this
+follow-up is the only place where the *current* reconciled
+position is recorded. Full evidence record:
+[`agent_installation/mpm-opencode/VALIDATION-2026-08-19.md`](../agent_installation/mpm-opencode/VALIDATION-2026-08-19.md).
+
 ### 3.2 Semantic recall is a mutation vector
 
 **Resolved on 2026-10-13.** `HybridSearch` used to call `ChallengeMemory()`
