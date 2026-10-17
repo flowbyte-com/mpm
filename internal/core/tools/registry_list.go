@@ -197,12 +197,13 @@ Do not use when: the document is ephemeral, or you only want to record a URL for
 				"params": {
 					"type": "object",
 					"properties": {
-						"filepath": {"type": "string"},
-						"title":   {"type": "string"},
-						"query":   {"type": "string"},
-						"id":      {"type": "string", "description": "Reference doc id; required for the read action."},
-						"limit":   {"type": "number"},
-						"offset":  {"type": "number"}
+						"filepath":     {"type": "string"},
+						"title":        {"type": "string"},
+						"query":        {"type": "string"},
+						"id":           {"type": "string", "description": "Reference doc id; required for the read action."},
+						"limit":        {"type": "integer", "minimum": 1, "description": "Maximum number of results to return for the search action. Defaults to 20."},
+						"offset":       {"type": "integer", "minimum": 0, "description": "Number of results to skip before returning rows. Defaults to 0."},
+						"vector_weight": {"type": "number",  "minimum": 0, "maximum": 1, "description": "Weighting between lexical (FTS5) and vector similarity in the hybrid reference search. 0.0 = pure lexical, 1.0 = pure vector. Defaults to 0.5; values outside [0, 1] are clamped to 0.5 by the handler."}
 					},
 					"additionalProperties": true
 				}
