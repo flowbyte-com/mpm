@@ -201,35 +201,28 @@ Stated plainly in the report rather than glossed:
   contract does not encode a known dimension"). Onboard cannot verify it
   without restoring the removed probe, so it does not claim to.
 
-### A known gap onboarding must warn about
+### Embedding model fingerprint on `memories`
 
-> **Superseded — kept for the design rationale, not as current state.**
-> The gap described here was closed on 2026-10-13: `memories` now carries
-> an `embedding_model` column (`internal/core/schema.go:1569`), every write
-> path records the fingerprint, and `VectorSearch` filters on it
-> (`internal/core/db.go:4270`). The memories backfill is model-aware, so a
-> row without a fingerprint is pending rather than skipped. `mpm onboard`
-> derives its claim from the live store rather than stating it as a
-> constant. See [`CLOSEOUT.md`](./CLOSEOUT.md) §1.2, §1.4 and §1.9, and
-> the live gap in [`NOMIC-MIGRATION.md`](./NOMIC-MIGRATION.md) §1
-> (`sessions`, `topics` and `capabilities` still carry no fingerprint
-> columns). Tracked as
-> [#17](https://github.com/flowbyte-com/mpm/issues/17).
+`memories` now carries a full `(model, dimension)` fingerprint on every
+row (`internal/core/schema.go:1569`); the write path records it
+(`internal/core/db.go:3742`) and `VectorSearch` filters on it
+(`internal/core/db.go:4270`). The memories backfill is model-aware: a
+row without a fingerprint is pending rather than skipped
+(`cmd/mpm/backfill_embeddings.go:412-422`), and ordinary model-mismatch
+recovery is automatic — no `--force`-class flag is needed. The explicit
+operator override is `--force-reembed`
+(`cmd/mpm/backfill_embeddings.go:44`), used when the operator wants the
+full corpus re-embedded under a known provider, not when remediation
+fails closed on its own.
 
-`memories` has `embedding_dimension` and `embedding_source` but **no
-`embedding_model` column** — only `reference_chunks` carries a full
-`(model, dimension)` fingerprint with a working detector
-(`referenceEmbeddingNeedsRefresh`, `reference_db.go:495`). Consequences:
-
-- If the operator **changes** the embedding model, `memories` silently
-  retains mixed-model vectors with nothing able to detect it, and memories
-  backfill is NULL-only (`backfill_embeddings.go:87`).
-- Onboard's role is to **state this before the operator switches**, and name
-  the remedy: `mpm ops backfill-embeddings --force` plus a vector-index
-  rebuild.
-
-This is a real asymmetry in the substrate, surfaced by onboarding rather
-than papered over. It is not fixed by this design.
+The remaining fingerprint asymmetry is on `sessions`, `topics`, and
+`capabilities`: those three declare an `embedding` column but no
+`embedding_model`, and hold zero vectors. They are the live gap
+onboarding surfaces rather than `memories`. See
+[`NOMIC-MIGRATION.md`](./NOMIC-MIGRATION.md) §1 ("Tables deliberately
+not migrated") for the current state, and [`CLOSEOUT.md`](./CLOSEOUT.md)
+§1.2, §1.4 and §1.9 for the design rationale and the lessons that
+produced it.
 
 ---
 
