@@ -296,10 +296,11 @@ actually happens when an operator runs the recovery path:
    baseline is present. For 27 of the 41 live rows, the prior
    weight was 1.0, so this is a **no-op on weight** — only the
    flag clears, and the row continues to rank at the floor.
-   For 4 rows the prior weight was above the floor; restore
-   moves them back to that prior value. The `weight→prior`
-   column in `mpm challenge list` makes the no-op case visible
-   in advance.
+   For 14 rows the prior weight was above the floor; restore
+   moves them back to that prior value. 4 of those 14 were
+   specifically clamped from prior 2 to current 1, the remaining
+   10 from higher prior values. The `weight→prior` column in
+   `mpm challenge list` makes the no-op case visible in advance.
 3. `confidence` is reset to `ChallengedMemoryConfidenceFloor`
    (0.5) when the challenge dropped it. **The pre-challenge
    confidence is not re-promoted.** A restore is the memory

@@ -18,10 +18,12 @@
 // CommandRouter.Execute calls and pins the five invocations the
 // operator needs.
 //
-// Every test installs a disposable dm via installTestDM so the
-// global getDB() inside the handlers resolves to a test
-// database, not the production workspace. The override is
-// removed on test cleanup.
+// Every test installs a disposable, on-disk workspace via
+// installTestDMRouter so the production getDBReadOnly()
+// lifecycle opens a fresh read-only handle against the same
+// DB the test seeds. The lifecycle contract is pinned by the
+// separate challenge_list_lifecycle_test.go (existing DB not
+// modified, missing DB not created).
 package main
 
 import (
@@ -242,6 +244,28 @@ func TestIssue20_RouterChallengeList_StrictRejection(t *testing.T) {
 			args:        []string{"challenge", "list", "--limit=foo"},
 			mustContain: []string{"--limit value", "foo", "positive integer"},
 		},
+		{
+			// HAL defect (post #20): the previous
+			// parsePositiveInt used fmt.Sscanf("%d"), which
+			// does NOT require the entire string to be
+			// numeric. "2junk" would silently parse as 2
+			// and the limit would be applied with no
+			// warning. The strict-integer fix rejects it
+			// and surfaces the offending value to stderr.
+			name:        "trailing-garbage --limit= form",
+			args:        []string{"challenge", "list", "--limit=2junk"},
+			mustContain: []string{"--limit value", "2junk"},
+		},
+		{
+			// Same defect, space form. The space form
+			// consumed two arg slots (--limit then "2junk"),
+			// so the handler's strict-arg loop must catch
+			// "2junk" before the database is consulted and
+			// surface the offending value in the error.
+			name:        "trailing-garbage --limit space form",
+			args:        []string{"challenge", "list", "--limit", "2junk"},
+			mustContain: []string{"--limit value", "2junk"},
+		},
 	}
 
 	for _, tc := range cases {
@@ -282,14 +306,36 @@ func TestIssue20_RouterChallengeList_LimitMaxEnforced(t *testing.T) {
 		"the 1000-row safety maximum must be enforced; --limit 5000 must report limit=1000 in the envelope")
 }
 
-// installTestDMRouter installs a disposable dm as the
-// global dbManager for the duration of the test. The global
-// override is removed on test cleanup. Defined here (rather
-// than in capability_seed_test.go) to keep the issue #20
-// test plumbing in one place.
+// installTestDMRouter sets up a disposable, real on-disk MPM
+// workspace for the duration of the test, returning the
+// writable *DatabaseManager that the test can use to seed
+// data. The handle is closed automatically on test cleanup.
+//
+// HAL defect (post #20): the production handleChallengeList
+// resolves its database through getDBReadOnly(), NOT getDB().
+// The previous helper installed an in-memory test DM as the
+// package-level singleton so getDB() would return it; with
+// the read-only lifecycle, that override is a no-op — the
+// handler opens a fresh on-disk handle against the workspace.
+// To exercise the production lifecycle, the fixture must
+// therefore use a real on-disk DB at a temp workspace. The
+// writable constructor populates the schema and creates the
+// lock file, which is exactly the state a real operator's
+// workspace has after their first write command.
+//
+// The returned DM is the writable handle for the same DB the
+// handler will read. Tests that need to seed data can use it
+// directly; tests that only need an open workspace can ignore
+// the return value.
 func installTestDMRouter(t *testing.T) *internal.DatabaseManager {
 	t.Helper()
-	dm := internal.NewTestDM(t)
-	installTestDM(t, dm)
+	workspace := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", workspace)
+
+	dm, err := internal.NewDatabaseManager(workspace)
+	if err != nil {
+		t.Fatalf("installTestDMRouter: NewDatabaseManager(%q): %v", workspace, err)
+	}
+	t.Cleanup(func() { _ = dm.Close() })
 	return dm
 }

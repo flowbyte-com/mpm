@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -317,10 +319,17 @@ const challengeListLimitMax = 1000
 // running it), which writer produced the challenge, and whether
 // the row is restorable through MPM at all.
 //
-// Read-only by construction. The core primitive is a single
-// SELECT with no write path; the handler does no writing. A
-// regression test in challenge_list_test.go pins this contract
-// with a full-table SHA snapshot before/after the call.
+// Read-only by construction. The handler resolves its database
+// handle through getDBReadOnly() (NOT getDB()): the writable
+// NewDatabaseManager constructor performs schema initialization
+// and baseline seeding, both of which are writes the discovery
+// surface is meant to avoid. The read-only constructor is
+// fail-closed — it does not create the database, does not
+// create the lock file, and does not initialize the schema.
+// A regression test in challenge_list_lifecycle_test.go pins
+// this with a SHA snapshot of the DB file before/after the
+// handler runs, plus a separate "missing DB" test that asserts
+// the file is not created by the listing call.
 //
 // HAL defect 1 (post #20): the previous version of this handler
 // iterated `args` directly, but the router passes `args[1:]` to
@@ -406,29 +415,86 @@ func handleChallengeList(args []string) int {
 		return respond("", fmt.Sprintf("Error: unknown argument %q for 'mpm challenge list'\n%s", unknown[0], challengeListUsage()), 1)
 	}
 
-	dm := getDB()
-	if dm == nil {
-		return 1
+	// Resolve the database through the read-only lifecycle. The
+	// writable getDB() constructor would initialize the schema
+	// and run baseline seeding as a side effect — both are
+	// writes, and a read-only discovery surface must not perform
+	// them. The read-only constructor is fail-closed: it does
+	// not create the database, does not create the lock file,
+	// and does not initialize the schema. The fresh handle must
+	// be closed by the caller.
+	ro, err := getDBReadOnly()
+	if err != nil {
+		return respond("", renderChallengeListUnavailable(err), 1)
 	}
-	return runChallengeList(dm, wantJSON, limit)
+	defer ro.Close()
+	return runChallengeList(ro, wantJSON, limit)
 }
 
 // parsePositiveInt parses a non-empty numeric string as a positive
 // integer. Used by handleChallengeList to validate --limit values.
-// Returns an error for empty input, non-numeric input, zero, or
-// negative values.
+//
+// HAL defect (post #20): the previous implementation used
+// fmt.Sscanf(s, "%d", &n), which does NOT require the entire
+// string to be numeric — Sscanf returns the count of items
+// successfully scanned, and a partial match is treated as
+// success. A value like "2junk" would parse the leading "2",
+// drop the trailing garbage, and silently set n=2. The operator
+// would see the limit applied as 2 with no warning, even though
+// the original string was not an integer.
+//
+// The fix is strconv.Atoi, which requires the WHOLE string to
+// be a valid base-10 integer. "2junk" now fails with
+// "strconv.Atoi: parsing \"2junk\": invalid syntax", and the
+// handler renders it as a strict-rejection error before the
+// database is consulted. The regression test in
+// challenge_list_router_test.go exercises both the equals form
+// (--limit=2junk) and the space form (--limit 2junk) and pins
+// the error path.
+//
+// Returns an error for empty input, non-integer input, partial
+// integer input (e.g. "2junk"), zero, or negative values.
 func parsePositiveInt(s string) (int, error) {
 	if s == "" {
 		return 0, fmt.Errorf("empty value")
 	}
-	var n int
-	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
-		return 0, err
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("not a valid integer: %q", s)
 	}
 	if n <= 0 {
 		return 0, fmt.Errorf("non-positive value %d", n)
 	}
 	return n, nil
+}
+
+// renderChallengeListUnavailable renders an operator-friendly
+// error message when the read-only database handle cannot be
+// opened. The two sentinels get distinct remediation hints:
+//
+//   - ErrReadOnlyDatabaseNotFound: no DB file at all. The
+//     operator has never run a write command on this workspace,
+//     so there is nothing to list. Hint: run any write command
+//     to create the schema, then retry the list.
+//   - ErrCoordinatedInspectionUnavailable: the maintenance lock
+//     file is absent. The read-only handle requires the lock as
+//     its coordination primitive (it cannot claim to coordinate
+//     with destructive operations without the H-4 lock). Hint:
+//     run any write command to establish the lock, then retry.
+//
+// Other errors surface verbatim with no remediation hint — the
+// operator can debug the underlying cause.
+func renderChallengeListUnavailable(dbErr error) string {
+	switch {
+	case errors.Is(dbErr, internal.ErrCoordinatedInspectionUnavailable):
+		return "Error: maintenance lock is absent. Run a write command (e.g. `mpm remember`) " +
+			"to establish the lock file, then re-run `mpm challenge list`.\n"
+	case errors.Is(dbErr, internal.ErrReadOnlyDatabaseNotFound):
+		return "Error: no MPM database found. Run a write command (e.g. `mpm remember`) " +
+			"to create the database, then re-run `mpm challenge list`.\n"
+	default:
+		return fmt.Sprintf("Error: failed to open database read-only: %v\n", dbErr)
+	}
 }
 
 // challengeListUsage is the single source of truth for the
