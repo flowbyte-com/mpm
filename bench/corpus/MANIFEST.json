@@ -1,0 +1,21 @@
+{
+  "version": "v1",
+  "documents_sha256": "9dd4cbf52a7319e2ed18da84ebf63bd68da1b421f45d96442288ced93d74a0f9",
+  "queries_sha256": "80122d309ca959e507c2b1d0b6e6124883677e0ad6efab98c268068533ce836e",
+  "expectations_sha256": "838b5052c207725ebc49e0a2b342cd58c48960a1fd4b68760f66d362f9f01bb9",
+  "scoring_sha256": "dd13985c86d62c457f33da378a361b7fe13f286dcb590d734552345c9671f4bc",
+  "generator": "hand-authored-from-topics@2026-10-18",
+  "seed_topics": [
+    "MPM architecture",
+    "embedding storage",
+    "FTS5 hybrid search",
+    "ChallengeMemory subsystem",
+    "workspace resolution"
+  ],
+  "documents_count": 30,
+  "queries_count": 20,
+  "positive_queries_count": 10,
+  "negative_queries_count": 10,
+  "scoring_method": "mpm recall --semantic --json",
+  "note": "Synthetic self-contained set; documents, queries, expectations and scoring are bound together. NOT a recovery of the lost historical 30-query corpus. Labels are scored against this corpus own documents, never against live-memory content."
+}

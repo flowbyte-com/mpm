@@ -1,0 +1,12 @@
+{
+  "method": "mpm recall --semantic --json",
+  "top_k": 5,
+  "parameters": {
+    "collection": "memories",
+    "ranker": "hybrid",
+    "vector_source_required": true,
+    "score_field": "score",
+    "source_field": "source",
+    "vector_similarity_field": "vector_similarity"
+  }
+}

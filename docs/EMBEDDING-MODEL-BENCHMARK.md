@@ -165,11 +165,34 @@ switching trades a measurable relevance gain for an unmeasured integrity loss.
 
 ## Reproducing
 
+The historical 22-query benchmark scripts under `/tmp/embench/`
+are no longer present in the repository. The corpus and
+hand-labelled relevance judgments that drove the historical run
+were not preserved as artifacts; the reproduction recipe
+above is therefore **not** runnable against the current
+repository state. The four memories that lost weight during
+the qwen3 pass (noted in the §5 mutation check) cannot be
+re-identified from the lost corpus.
+
+The current harness (Issue #16) does not reproduce the historical
+22-query qwen3-vs-all-minilm comparison numbers. To reproduce
+them, the original 22-query corpus and its labels would have
+to be reconstructed; the new harness ships a small synthetic
+labelled set under `bench/corpus/v1/` instead. The manifest at
+`bench/corpus/MANIFEST.json` records this in its `note` field.
+
+What can be reproduced today, against the current repository:
+
 ```bash
-python3 /tmp/embench/reembed.py <snapshot.db> <model> <label>   # re-embed one workspace
-bash    /tmp/embench/run.sh   <minilm|qwen3>                    # run 22 queries
-python3 /tmp/embench/score_<minilm|qwen3>.py                    # score
+# Self-tests: no mpm binary, no live DB, no network.
+python -m bench selftest
+
+# Smoke test: fake embeddings server, disposable DB, FTS5 mpm build.
+CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 CGO_LDFLAGS=-lm \
+    go build -tags fts5 -o mpm ./cmd/mpm
+python -m bench smoke
 ```
 
-Both workspaces are under `/tmp/embench/`. The live database
-`~/.mpm/src/db/mpm.db` was read-only throughout.
+See [`EMBEDDING-BENCHMARK-HARNESS.md`](./EMBEDDING-BENCHMARK-HARNESS.md)
+and [`EMBEDDING-BENCHMARK-HARNESS-DESIGN.md`](./EMBEDDING-BENCHMARK-HARNESS-DESIGN.md)
+for the user-facing and design documentation.
