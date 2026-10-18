@@ -7,6 +7,13 @@
  * "mpm_".
  *
  * Run with: npx tsx tests/namespace_contract.test.ts
+ *
+ * @ts-nocheck — see the same directive on test_resolve_mpm_binary.test.ts
+ * for the rationale; the canonical Makefile gate compiles this file via
+ * `tsc -p tsconfig.tests.json` (strict:false) and would otherwise reject
+ * the intentionally-loose typing here. Production source under src/ is
+ * type-checked under the strict tsconfig.json that anchors `npm run
+ * build`.
  */
 
 import { test } from "node:test";

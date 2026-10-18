@@ -188,6 +188,100 @@ func AcquireSharedMaintenanceLockAt(lockPath string) (*os.File, error) {
 	return f, nil
 }
 
+// ErrMaintenanceLockAbsent is returned by the read-only maintenance lock
+// primitive when the lock file does not exist. The read-only doctor
+// cannot claim coordination with destructive operations without the
+// H-4 lock file, so this is a fail-closed signal: the caller reports
+// the absence to the operator and refuses the read.
+//
+// The error message names the exact remediation ("run a write command
+// to establish the lock file") so the operator's failure-mode is
+// self-documenting. The doctor does NOT silently bypass the lock or
+// open the database without flock.
+var ErrMaintenanceLockAbsent = fmt.Errorf(
+	"maintenance lock file is absent, refusing to coordinate with destructive operations " +
+		"because we cannot verify the absence of writers. Run a write command such as `mpm remember` " +
+		"to establish the lock file, then re-run.",
+)
+
+// ErrCoordinatedInspectionUnavailable is returned by the read-only
+// doctor's entry point when coordinated inspection is unavailable —
+// currently only when the maintenance lock file is missing. The
+// doctor surfaces this as a top-level "Database" check FAIL with a
+// remediation hint, and exits with the existing missing-database exit
+// code (preserved per the brief's "preserve existing exit-code
+// semantics where applicable" rule).
+var ErrCoordinatedInspectionUnavailable = fmt.Errorf(
+	"coordinated inspection unavailable: %w",
+	ErrMaintenanceLockAbsent,
+)
+
+// AcquireSharedMaintenanceLockExistingOnly opens the maintenance lock
+// file O_RDONLY (no O_CREATE) and acquires LOCK_SH on it. Unlike
+// AcquireSharedMaintenanceLock, this primitive:
+//
+//   - Does NOT call os.MkdirAll. The lock file is treated as
+//     pre-existing state managed by the writable constructor; the
+//     read-only doctor must not create new files in the database
+//     directory (the no-filesystem-mutation contract for non-fix
+//     doctor invocations).
+//   - Opens the file with O_RDONLY (no O_CREATE). If the file does
+//     not exist, the call returns ErrMaintenanceLockAbsent
+//     immediately. The doctor cannot fall back to a no-flock read;
+//     the design rejects that as a silent bypass of H-4.
+//   - Issues LOCK_SH on success. As with the writable variant, the
+//     kernel still provides cross-process coordination: a destructive
+//     LOCK_EX|LOCK_NB attempt on the same inode will see EWOULDBLOCK
+//     while the read-only doctor holds LOCK_SH.
+//
+// The returned *os.File's FD holds LOCK_SH until Close is called.
+// Callers should defer the release to bound the lease window to the
+// shortest useful inspection span.
+//
+// The lock file's inode identity is the coordination primitive; the
+// file's content is irrelevant (flock locks the open file description,
+// not the path or the data). Because the writable constructor creates
+// the lock file when it opens the database, the read-only doctor can
+// rely on the lock file's existence iff a writable DatabaseManager
+// has previously been opened against this workspace. A fresh install
+// that has never run a write command will see ErrMaintenanceLockAbsent
+// — that is the correct, fail-closed behaviour.
+func AcquireSharedMaintenanceLockExistingOnly(lockPath string) (*os.File, error) {
+	// Fail closed: absent lock file is not a recoverable condition
+	// for the doctor. The doctor cannot claim coordination with
+	// destructive operations without the H-4 lock; opening the
+	// database without flock would let a concurrent restore-db or
+	// shred-database race the read.
+	//
+	// os.Stat is cheaper than os.OpenFile+IsNotExist and the only
+	// thing the doctor needs to know up front is whether the
+	// coordination primitive is present.
+	if _, err := os.Stat(lockPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrMaintenanceLockAbsent
+		}
+		return nil, fmt.Errorf("acquire shared maintenance lock (read-only): stat %s: %w", lockPath, err)
+	}
+
+	f, err := os.OpenFile(lockPath, os.O_RDONLY, 0)
+	if err != nil {
+		// The file existed at Stat time but disappeared (or became
+		// unreadable) before we could open it. Treat that as the
+		// same fail-closed condition: the coordination primitive is
+		// not safely usable.
+		if os.IsNotExist(err) {
+			return nil, ErrMaintenanceLockAbsent
+		}
+		return nil, fmt.Errorf("acquire shared maintenance lock (read-only): open %s: %w", lockPath, err)
+	}
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("acquire shared maintenance lock (read-only): flock %s: %w", lockPath, err)
+	}
+	return f, nil
+}
+
 // ReleaseSharedMaintenanceLock closes the LOCK_SH FD. Safe to call
 // with a nil file (no-op). The kernel auto-releases on FD close /
 // process death, so callers may also rely on finalizers; the explicit

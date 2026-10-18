@@ -544,9 +544,21 @@ func TestMemoryProvenanceStorage(t *testing.T) {
 		"high-compute memory should decay slower than standard")
 }
 
-// TestImmuneProvenanceTieBreaker verifies provenance-based contradiction resolution.
-// Insert absolute (human) and ephemeral (model) memories with identical embeddings,
-// assert the ephemeral is challenged and its weight slashed.
+// TestImmuneProvenanceTieBreaker verifies provenance-based contradiction
+// PROPOSALS.
+//
+// 2026-10-13: this test previously asserted that a retrieval slashed the
+// ephemeral memory's weight via the provenance tiebreaker. That automatic
+// write is gone — Phase 4 no longer calls ChallengeMemory (see
+// hybrid_search.go and docs/RECALL-MUTATION.md). Cosine similarity ranks
+// the pair; it does not establish a dispute, so MPM must not decide one on
+// a read.
+//
+// The contract now pinned here is narrower and is the one that matters:
+// retrieval must not touch either memory's weight or status, and the pair
+// must still be recorded for operator review. See
+// hybrid_search_nomutate_test.go for the dedicated coverage of all three
+// former branches.
 func TestImmuneProvenanceTieBreaker(t *testing.T) {
 	db := newTestDM(t)
 	defer db.Close()
@@ -576,7 +588,7 @@ func TestImmuneProvenanceTieBreaker(t *testing.T) {
 	id2, err := db.SaveMemory("memories", content, "", []string{"preference"}, modelMeta, embedding, false, 8)
 	require.NoError(t, err)
 
-	// Run HybridSearch to trigger contradiction detection
+	// Run HybridSearch to trigger contradiction PROPOSAL detection.
 	cfg := DefaultHybridConfig()
 	cfg.Limit = 10
 	cfg.VectorWeight = 1.0 // pure vector search
@@ -584,7 +596,10 @@ func TestImmuneProvenanceTieBreaker(t *testing.T) {
 	_, err = HybridSearch(db, content, "memories", cfg)
 	require.NoError(t, err)
 
-	// The ephemeral memory should now have challenged status and reduced weight
+	// The ephemeral memory must be UNCHANGED by retrieval. Identical
+	// content plus a differing provenance tier is exactly the case the
+	// old code acted on, and it is the case similarity cannot resolve:
+	// nothing here shows which memory is wrong.
 	var w2 int
 	var metaJSON string
 	err = db.SQLDB().QueryRow(`SELECT weight, COALESCE(metadata, '{}') FROM memories WHERE id = ?`, id2).Scan(&w2, &metaJSON)
@@ -593,10 +608,12 @@ func TestImmuneProvenanceTieBreaker(t *testing.T) {
 	json.Unmarshal([]byte(metaJSON), &meta)
 	status, _ := meta["status"].(string)
 
-	assert.Equal(t, "challenged", status, "ephemeral memory should be challenged after tiebreaker")
-	assert.Less(t, w2, 8, "ephemeral memory weight should be slashed below initial value of 8")
+	assert.NotEqual(t, "challenged", status,
+		"retrieval must not challenge the ephemeral memory; proposals are for operator review")
+	assert.Equal(t, 8, w2,
+		"retrieval must not reduce the ephemeral memory's weight below its initial value of 8")
 
-	// Absolute memory should remain unchallenged with original weight
+	// Absolute memory likewise unchanged.
 	var w1 int
 	var metaJSON1 string
 	err = db.SQLDB().QueryRow(`SELECT weight, COALESCE(metadata, '{}') FROM memories WHERE id = ?`, id1).Scan(&w1, &metaJSON1)

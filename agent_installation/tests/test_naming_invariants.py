@@ -128,6 +128,15 @@ MIGRATION_AWARE_FILES = {
     # The OpenCode adapter install tests — assert the migration
     # behavior on the legacy path.
     "agent_installation/mpm-opencode/tests/test_opencode_install.py",
+    # The JSONC migration helper — carries the canonical
+    # "this is what we are migrating FROM" declarations for the legacy
+    # OpenCode plugin id (recognised by directory component, and written
+    # into fixtures). Same migration role as install.sh, which is the
+    # code that used to hold this logic inline.
+    "agent_installation/mpm-opencode/scripts/jsonc_config.py",
+    # The JSONC migration unit tests — pin detection and replacement of
+    # the legacy entry. The legacy id is the test input.
+    "agent_installation/mpm-opencode/tests/test_jsonc_config.py",
     # The OpenCode resolver tests — they enumerate the obsolete
     # 'opencode-mpm' name in test descriptions and assertions
     # specifically BECAUSE they pin that the active source no longer

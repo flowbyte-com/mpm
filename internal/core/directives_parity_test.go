@@ -16,8 +16,19 @@ import (
 //
 // Each read path used to query by exactly one identifier, so a directive
 // ingested via path A was invisible to readers on paths B and C. This
-// regression test asserts that all three paths return the same set when
+// regression test asserts that all three paths return the same SET when
 // given the same database state — split-brain would fail the assertion.
+//
+// Ordering is intentionally NOT part of the contract: ReadDirectives
+// uses `ORDER BY created_at ASC` and QueryMemories uses
+// `ORDER BY created_at DESC`. When the fixture rows are inserted in the
+// same second they share a `created_at` value, and SQLite's tiebreaker
+// for equal ORDER BY values is implementation-defined (it varies across
+// build / version / platform — see directives_parity_test.go commit
+// history for the CI flake this caused). The test compares populations
+// via ElementsMatch, not ordered slices. The count assertions below
+// give clearer per-path error messages for the genuine "row dropped"
+// failure mode.
 func TestDirectives_AllReadPathsAgree(t *testing.T) {
 	dm := newTestDM(t)
 
@@ -49,12 +60,12 @@ func TestDirectives_AllReadPathsAgree(t *testing.T) {
 	// Path 1: MCP read_directives (the agent-facing surface).
 	got, err := dm.ReadDirectives()
 	require.NoError(t, err)
-	assert.Equal(t, want, idsOf(got), "MCP ReadDirectives must include all three identifier paths")
+	assert.ElementsMatch(t, want, idsOf(got), "MCP ReadDirectives must include all three identifier paths (set, not order)")
 
 	// Path 2: web UI QueryMemories(primeOnly=true).
 	webRows, err := dm.QueryMemories("", true, 100, 0)
 	require.NoError(t, err)
-	assert.Equal(t, want, idsOf(webRows), "Web QueryMemories(primeOnly) must include all three identifier paths")
+	assert.ElementsMatch(t, want, idsOf(webRows), "Web QueryMemories(primeOnly) must include all three identifier paths (set, not order)")
 
 	// Path 3: the mpm-agent query shape — assert it agrees on count. (mpm-agent
 	// is a separate Go module so we cannot import its retrieveDirectives

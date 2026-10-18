@@ -64,9 +64,14 @@ func TestCLI_UnchangedAfterPhase1(t *testing.T) {
 				if len(out) == 0 {
 					t.Errorf("%s: expected non-empty output on exit 1, got empty", tc.name)
 				}
-				// For doctor, expect to see the Doctor report.
-				if tc.name == "doctor" && !strings.Contains(output, "MPM") {
-					t.Errorf("%s: expected 'MPM' in output, got: %s", tc.name, output)
+				// For doctor, expect the prescribed unavailable-DB
+				// message (MPM #28 observational contract on a fresh
+				// workspace). Pre-#28 the test looked for the
+				// banner "MPM" but the new contract explicitly
+				// surfaces the unavailability reason on the standard
+				// report path.
+				if tc.name == "doctor" && !strings.Contains(output, "coordinated inspection unavailable") {
+					t.Errorf("%s: expected unavailable-DB message in output, got: %s", tc.name, output)
 				}
 				return
 			}

@@ -67,8 +67,21 @@ func TestMcpBootstrapsModeAndPersonaDirsOnFreshWorkspace(t *testing.T) {
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
 
+	// Start() returns once the child process is spawned; cmd.Process is
+	// populated synchronously by Start, so the parent goroutine can read
+	// it without racing the spawn goroutine. Run() is Start+Wait and was
+	// called from a worker goroutine, which races with the timeout's
+	// cmd.Process.Kill() on the *os/exec.Cmd / *os.Process handle fields
+	// (the race detector flagged exactly this on the 2-vCPU CI runner:
+	// read in (*Process).pidfdSendSignal racing the write in
+	// os.newHandleProcess during Cmd.Start). The canonical fix is the
+	// start-then-wait split below: Start synchronously in the test
+	// goroutine, Wait in a worker that only signals completion.
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("mpm-mcp start: %v\nstderr: %s", err, errOut.String())
+	}
 	done := make(chan error, 1)
-	go func() { done <- cmd.Run() }()
+	go func() { done <- cmd.Wait() }()
 	select {
 	case <-done:
 		// Process exited on its own — fine, it would only do so on

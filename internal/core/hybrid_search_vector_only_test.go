@@ -7,6 +7,47 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// NOTE: every row seeded in this file is expected to be RETURNED by the
+// vector path, so every row must carry a verifiable embedding fingerprint —
+// which is why the seeding goes through stampTestEmbedding rather than a
+// hand-written UPDATE at each site.
+//
+// Since the 2026-10-13 compatibility filter, VectorMatch — the path
+// `mpm recall --semantic` actually uses — and VectorSearch both exclude
+// memory rows whose embedding_model does not match the active provider,
+// and exclude NULL ones outright: an unrecorded model cannot be proven
+// comparable to the active one. A raw `UPDATE memories SET embedding = ?`
+// with no accompanying embedding_model therefore produces a corpus the
+// filter silently discards, and the test fails with an empty result set
+// that reads like a merge regression rather than an unlabelled fixture.
+//
+// These tests skip unless a real provider is configured, so the canonical
+// suite reports green without ever running them — the blast radius of a
+// filter change here is invisible unless they are run with OLLAMA_ENDPOINT
+// set. See also the note in hybrid_search_test.go and the filter itself in
+// TestVectorMatchExcludesUnlabelledRows (embedding_model_compatibility_test.go).
+
+// stampTestEmbedding attaches a vector to an already-inserted memory row and
+// labels it with the active model, so the row is eligible for vector
+// retrieval. Fails the test if the row was not found — an unlabelled fixture
+// that silently retrieves nothing is the failure mode this prevents.
+func stampTestEmbedding(t *testing.T, dm *DatabaseManager, id, vecJSON string) {
+	t.Helper()
+	res, err := dm.ExecTracked(`
+		UPDATE memories
+		   SET embedding = ?, embedding_source = 'provider',
+		       embedding_dimension = json_array_length(?),
+		       embedding_model = ?
+		 WHERE id = ?`,
+		0, vecJSON, vecJSON, CurrentEmbeddingFingerprint().Model, id)
+	require.NoError(t, err, "stamp embedding for %s", id)
+	if n, err := res.RowsAffected(); err == nil {
+		require.Equal(t, int64(1), n,
+			"stamped embedding for %s but no such row exists — the fixture would "+
+				"have retrieved nothing and failed later as a merge regression", id)
+	}
+}
+
 // TestHybridSearch_VectorOnlyCandidatePreserved is the regression net for the
 // 2026-08-26 merge fix: when a real embedding provider is active and the
 // query has zero FTS5 token overlap with the corpus, the vector-only
@@ -40,9 +81,7 @@ func TestHybridSearch_VectorOnlyCandidatePreserved(t *testing.T) {
 	require.NoError(t, err)
 	embJSON, err := json.Marshal(vec)
 	require.NoError(t, err)
-	_, err = dm.ExecTracked(
-		`UPDATE memories SET embedding = ? WHERE id = ?`, 0, string(embJSON), target)
-	require.NoError(t, err)
+	stampTestEmbedding(t, dm, target, string(embJSON))
 
 	// Run HybridSearch. With any VectorWeight > 0 the target must appear.
 	cfg := DefaultHybridConfig()
@@ -78,9 +117,7 @@ func TestHybridSearch_VectorOnlyAtVWOne(t *testing.T) {
 	vec, err := provider.Embed(targetContent)
 	require.NoError(t, err)
 	embJSON, _ := json.Marshal(vec)
-	_, err = dm.ExecTracked(
-		`UPDATE memories SET embedding = ? WHERE id = ?`, 0, string(embJSON), target)
-	require.NoError(t, err)
+	stampTestEmbedding(t, dm, target, string(embJSON))
 
 	cfg := DefaultHybridConfig()
 	cfg.VectorWeight = 1.0
@@ -118,9 +155,7 @@ func TestHybridSearch_BM25OnlyStillWorks(t *testing.T) {
 		vec, err := provider.Embed("challenge challenge challenge restoration")
 		require.NoError(t, err)
 		embJSON, _ := json.Marshal(vec)
-		_, err = dm.ExecTracked(
-			`UPDATE memories SET embedding = ? WHERE id = ?`, 0, string(embJSON), ftsHit)
-		require.NoError(t, err)
+			stampTestEmbedding(t, dm, ftsHit, string(embJSON))
 	}
 
 	// FTS5-only candidate: no embedding, no vector signal — single token match.
@@ -171,9 +206,7 @@ func TestHybridSearch_BothChannelsMerge(t *testing.T) {
 	vec, err := provider.Embed(content)
 	require.NoError(t, err)
 	embJSON, _ := json.Marshal(vec)
-	_, err = dm.ExecTracked(
-		`UPDATE memories SET embedding = ? WHERE id = ?`, 0, string(embJSON), row)
-	require.NoError(t, err)
+	stampTestEmbedding(t, dm, row, string(embJSON))
 
 	cfg := DefaultHybridConfig()
 	cfg.VectorWeight = 0.5
@@ -212,9 +245,7 @@ func TestHybridSearch_VectorOnlyThresholdFilter(t *testing.T) {
 	vec, err := provider.Embed(content)
 	require.NoError(t, err)
 	embJSON, _ := json.Marshal(vec)
-	_, err = dm.ExecTracked(
-		`UPDATE memories SET embedding = ? WHERE id = ?`, 0, string(embJSON), target)
-	require.NoError(t, err)
+	stampTestEmbedding(t, dm, target, string(embJSON))
 
 	// Query with paraphrase (zero FTS5 overlap).
 	cfg := DefaultHybridConfig()
@@ -270,9 +301,7 @@ func TestHybridSearch_VectorOnlyFieldsPopulated(t *testing.T) {
 	vec, err := provider.Embed(targetContent)
 	require.NoError(t, err)
 	embJSON, _ := json.Marshal(vec)
-	_, err = dm.ExecTracked(
-		`UPDATE memories SET embedding = ? WHERE id = ?`, 0, string(embJSON), target)
-	require.NoError(t, err)
+	stampTestEmbedding(t, dm, target, string(embJSON))
 
 	// Paraphrased query — zero FTS5 overlap.
 	cfg := DefaultHybridConfig()
@@ -317,9 +346,7 @@ func TestHybridSearch_VectorOnlyChallengeSignalPopulated(t *testing.T) {
 	vec, err := provider.Embed(targetContent)
 	require.NoError(t, err)
 	embJSON, _ := json.Marshal(vec)
-	_, err = dm.ExecTracked(
-		`UPDATE memories SET embedding = ? WHERE id = ?`, 0, string(embJSON), target)
-	require.NoError(t, err)
+	stampTestEmbedding(t, dm, target, string(embJSON))
 
 	cfg := DefaultHybridConfig()
 	cfg.VectorWeight = 0.5

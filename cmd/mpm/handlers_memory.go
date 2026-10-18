@@ -519,6 +519,30 @@ func handleMemorySearch(args []string) int {
 	// literal flag string into the FTS5 query and returned zero hits
 	// because no document contained the token "--json".
 	cleaned, wantJSON := stripMemoryFlagToken(args, "--json", "-j")
+
+	// `--semantic` is NOT a memory-search flag — it belongs to
+	// `mpm recall`. This command is BM25/FTS5 only (recall.go:72 is the
+	// sole definition site).
+	//
+	// Pre-fix, `mpm kb memory search foo --semantic` fell through to
+	// `strings.Join(cleaned, " ")` and searched for the literal string
+	// "foo --semantic". That is the worst failure mode available: the
+	// command exits 0, prints a plausible result set, and silently
+	// drops the vector half of hybrid ranking — the operator has no
+	// signal that the flag was ignored. Silently changing the
+	// semantics of an existing command is forbidden
+	// (doctor_flag_contract.go:3-6), so this rejects clearly and names
+	// the command that does support it.
+	for _, a := range args {
+		if a == "--semantic" || a == "-semantic" {
+			return respond("",
+				"`--semantic` is not supported by memory search; it is a `mpm recall` flag.\n"+
+					"  memory search is BM25/FTS5 only.\n"+
+					"  for hybrid FTS5 + vector ranking, run:  mpm recall <query> --semantic",
+				1)
+		}
+	}
+
 	// D-4.2: also strip `--limit N` / `-l N` so the limit flag doesn't
 	// pollute the FTS5 query. Default to 20 (matches prior hardcoded
 	// behaviour); explicit --limit N caps the result set.

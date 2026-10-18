@@ -373,32 +373,72 @@ func TestAcceptance_CrossProcessSerialisation(t *testing.T) {
 	workspace, _ := acceptanceWorkspace(t)
 	lockPath := MaintenanceLockPath(workspace)
 
-	// Write the subprocess source.
+	// Pre-compile the subprocess binary OUTSIDE the timing-sensitive
+	// section. Earlier this test used `go run` which forces a fresh
+	// compile on every invocation; on a 2-vCPU shared CI runner where
+	// this release-gate job runs alongside the full-suite and gate
+	// jobs, that compile+link can exceed the 2s parent deadline
+	// before the subprocess has even started. The deadline is meant
+	// to detect failure to acquire the lock — not to race the
+	// toolchain. See #33.
+	//
+	// The build itself is NOT time-bounded: a `go build` failure is a
+	// real defect signal (e.g. the subprocess source is broken), not
+	// a deadline race, so we Fatalf on build error.
 	subDir := t.TempDir()
 	subSrc := filepath.Join(subDir, "subprocess.go")
 	if err := os.WriteFile(subSrc, []byte(acceptanceSubprocessProgram), 0o600); err != nil {
 		t.Fatalf("write subprocess source: %v", err)
 	}
+	subBin := filepath.Join(subDir, "subprocess_bin")
+	buildCmd := exec.Command("go", "build", "-o", subBin, subSrc)
+	// CGO flags: mpm-core's transitive sqlite3 binding links against
+	// libm; without these the build fails with "undefined reference
+	// to log". Same Makefile-level convention as before.
+	buildCmd.Env = append(os.Environ(), "CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1", "CGO_LDFLAGS=-lm")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("pre-compile subprocess binary: %v\n%s", err, out)
+	}
 
-	// Step 1: spawn a subprocess that acquires LOCK_EX, signals
-	// readiness, sleeps briefly, and releases. While it holds EX,
-	// the parent must fail to acquire EX.
+	// Step 1: spawn the pre-compiled subprocess that acquires
+	// LOCK_EX, signals readiness via sentinel, sleeps briefly, and
+	// releases. While it holds EX, the parent must fail to acquire
+	// EX. This is the cross-process §9 core check.
 	holdDuration := 200 * time.Millisecond
-	cmd := exec.Command("go", "run", subSrc, "hold-ex", lockPath, holdDuration.String())
+	cmd := exec.Command(subBin, "hold-ex", lockPath, holdDuration.String())
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	// Inherit CGO flags so mpm-core's transitive sqlite3 binding
-	// links correctly. The parent process has CGO_CFLAGS /
-	// CGO_LDFLAGS set (Makefile-level convention); without them,
-	// the subprocess fails to link (undefined reference to log).
+	// Inherit CGO flags so the subprocess's transitive sqlite3
+	// binding loads correctly at runtime (same convention as before).
 	cmd.Env = append(os.Environ(), "CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1", "CGO_LDFLAGS=-lm")
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("go run subprocess: %v", err)
+		t.Fatalf("start subprocess: %v", err)
 	}
+
+	// Reliable cleanup: if the test exits before cmd.Wait() returns
+	// (e.g. a Fatalf on the deadline check or the EWOULDBLOCK check),
+	// the subprocess would otherwise be orphaned. The kernel still
+	// releases the flock on process death, so the lease is safe — the
+	// kill is for cleanliness, not correctness. registered is set
+	// after Start() so a failed Start does not race with the cleanup.
+	registered := true
+	t.Cleanup(func() {
+		if !registered {
+			return
+		}
+		if p := cmd.Process; p != nil {
+			// Best-effort: Kill returns an error if the process
+			// already exited. Wait has not been called by this
+			// branch, so reap is the caller's job (cmd.Wait below).
+			_ = p.Kill()
+		}
+	})
 
 	// Wait for the subprocess to acquire the lock (signalled by
 	// creating a sentinel file). The subprocess writes the sentinel
-	// AFTER acquiring the lock.
+	// AFTER acquiring the lock. With a pre-compiled binary the
+	// 2s deadline now covers only the actual lock acquisition, not
+	// toolchain overhead.
 	sentinel := lockPath + ".held"
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -422,7 +462,9 @@ func TestAcceptance_CrossProcessSerialisation(t *testing.T) {
 		t.Fatalf("parent EX acquire error is not EWOULDBLOCK: %v", err)
 	}
 
-	// Wait for the subprocess to finish and release.
+	// Wait for the subprocess to finish and release. The cleanup
+	// guard no longer needs to fire on success, so deregister it.
+	registered = false
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("subprocess: %v", err)
 	}
@@ -515,6 +557,156 @@ func main() {
 `
 
 // Keep helper signatures available for future expansion.
+
+// acceptanceSubprocessProgramNoLock is a modified version of
+// acceptanceSubprocessProgram for the §9 non-vacuity regression
+// (TestAcceptance_CrossProcessSerialisation_DetectsMissingLockRelease).
+//
+// This variant writes the readiness sentinel and sleeps for the
+// requested duration but DOES NOT acquire the maintenance lease. The
+// parent test then verifies that the parent's AcquireExclusiveMaintenanceLock
+// succeeds (because no one holds the lock), proving the §9 test would
+// catch a regression where the subprocess forgot to hold the lock.
+//
+// Same shape as the canonical subprocess (same imports, same arg
+// parsing) so the parent can use the same command-construction logic.
+const acceptanceSubprocessProgramNoLock = `package main
+
+import (
+	"fmt"
+	"os"
+	"time"
+)
+
+func main() {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: subprocess <hold-ex|signal> <lockPath> [duration]")
+		os.Exit(2)
+	}
+	mode, lockPath := os.Args[1], os.Args[2]
+	sentinel := lockPath + ".held"
+	switch mode {
+	case "hold-ex":
+		if len(os.Args) < 4 {
+			fmt.Fprintln(os.Stderr, "hold-ex requires duration")
+			os.Exit(2)
+		}
+		d, err := time.ParseDuration(os.Args[3])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "duration parse:", err)
+			os.Exit(2)
+		}
+		// Write the sentinel — same as the canonical subprocess — but
+		// do NOT acquire the lock. This simulates a regression where
+		// the subprocess forgot to hold the lease.
+		if err := os.WriteFile(sentinel, []byte("held"), 0o600); err != nil {
+			fmt.Fprintln(os.Stderr, "sentinel:", err)
+			os.Exit(1)
+		}
+		time.Sleep(d)
+		_ = os.Remove(sentinel)
+	default:
+		fmt.Fprintln(os.Stderr, "unknown mode:", mode)
+		os.Exit(2)
+	}
+}
+`
+
+// TestAcceptance_CrossProcessSerialisation_DetectsMissingLockRelease is
+// the non-vacuity regression for §9. It proves the §9 test would catch
+// a regression where the subprocess no longer holds the maintenance
+// lock — by deliberately breaking the subprocess and verifying the
+// parent observes the difference.
+//
+// If the §9 test only checked "subprocess wrote a sentinel" (and not
+// "subprocess holds LOCK_EX"), this regression would still pass after
+// the subprocess stopped acquiring the lock. The test instead
+// challenges the parent's AcquireExclusiveMaintenanceLock to fail
+// with EWOULDBLOCK while the subprocess sleeps; if the subprocess
+// forgot to acquire the lock, the parent succeeds and the §9 test
+// (in the form of this regression) FAILS — pinning the real contract.
+func TestAcceptance_CrossProcessSerialisation_DetectsMissingLockRelease(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cross-process test in -short mode")
+	}
+
+	workspace, _ := acceptanceWorkspace(t)
+	lockPath := MaintenanceLockPath(workspace)
+
+	// Pre-compile the modified subprocess. Same pattern as
+	// TestAcceptance_CrossProcessSerialisation: build is outside the
+	// timing-sensitive section, build failure is a real defect signal.
+	subDir := t.TempDir()
+	subSrc := filepath.Join(subDir, "subprocess_nolock.go")
+	if err := os.WriteFile(subSrc, []byte(acceptanceSubprocessProgramNoLock), 0o600); err != nil {
+		t.Fatalf("write subprocess source: %v", err)
+	}
+	subBin := filepath.Join(subDir, "subprocess_nolock_bin")
+	buildCmd := exec.Command("go", "build", "-o", subBin, subSrc)
+	buildCmd.Env = append(os.Environ(), "CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1", "CGO_LDFLAGS=-lm")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("pre-compile subprocess binary: %v\n%s", err, out)
+	}
+
+	// Run the no-lock subprocess. It writes the sentinel then sleeps,
+	// but never acquires LOCK_EX. The parent must observe the
+	// absence of the lock and succeed in acquiring it.
+	holdDuration := 200 * time.Millisecond
+	cmd := exec.Command(subBin, "hold-ex", lockPath, holdDuration.String())
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), "CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1", "CGO_LDFLAGS=-lm")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start subprocess: %v", err)
+	}
+	registered := true
+	t.Cleanup(func() {
+		if !registered {
+			return
+		}
+		if p := cmd.Process; p != nil {
+			_ = p.Kill()
+		}
+	})
+
+	// Wait for the subprocess to write the sentinel (it does this
+	// immediately, before sleeping). The 2s budget is generous.
+	sentinel := lockPath + ".held"
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sentinel); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("subprocess did not write sentinel within deadline: %v", err)
+	}
+
+	// The §9 contract: the parent must FAIL to acquire LOCK_EX while
+	// the subprocess holds it. With the no-lock subprocess, no one
+	// holds it, so the parent MUST succeed. If the parent's
+	// AcquireExclusiveMaintenanceLock returns EWOULDBLOCK here, the
+	// §9 test would not be able to distinguish "subprocess holds
+	// the lock" from "subprocess forgot to hold the lock" — that
+	// would be a regression in the §9 test's discriminative power.
+	f, err := AcquireExclusiveMaintenanceLock(workspace)
+	if err != nil {
+		t.Fatalf("parent failed to acquire LOCK_EX even though no subprocess holds it — "+
+			"the §9 acceptance test would not be able to distinguish a holding subprocess "+
+			"from a no-op subprocess: %v", err)
+	}
+	defer ReleaseExclusiveMaintenanceLock(f)
+
+	// Release before the subprocess finishes so it can exit cleanly.
+	_ = ReleaseExclusiveMaintenanceLock(f)
+
+	registered = false
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("subprocess: %v", err)
+	}
+	_ = os.Remove(sentinel)
+}
 
 // TestAcceptance_NonVacuity is the §17 acceptance: temporarily bypass
 // the canonical helper, observe the race scenario, then restore the

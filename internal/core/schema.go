@@ -1551,6 +1551,22 @@ var SafeMigrations = [][3]string{
 	// `mpm ops migrate-embeddings`.
 	{"memories", "embedding_source", "TEXT NOT NULL DEFAULT 'provider'"},
 	{"memories", "embedding_dimension", "INTEGER"},
+	// 2026-10-13: model-identity fingerprint for memory embeddings.
+	//
+	// memories.embedding_dimension existed but was NULL for all 149 rows on
+	// the live database, and VectorSearch loaded every non-NULL embedding
+	// with no filter at all (db.go:4234) — so model identity for a memory
+	// vector was unrecoverable from stored data. A dimension match alone
+	// cannot establish compatibility: two models can share a dimension
+	// while producing incomparable vector spaces, and mixing them silently
+	// corrupts every cosine similarity rather than failing loudly.
+	//
+	// This mirrors reference_chunks.embedding_model, which has been
+	// populated since 2026-09-28 (all 232 embedded chunks carry e.g.
+	// "ollama:all-minilm"). NULL means "written before this column" and
+	// is NOT treated as a match: a vector with no recorded model cannot be
+	// proven comparable to one that has one.
+	{"memories", "embedding_model", "TEXT"},
 	// Theories (collection='theories' rows in the memories table) whose
 	// evidence was a HashEmbed cosine get marked so the provenance-gated
 	// un-challenge can identify them.

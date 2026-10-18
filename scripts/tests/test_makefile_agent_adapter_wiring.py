@@ -18,7 +18,15 @@ Contract pinned by this test:
   1. `test-agent-adapters` exists as a Makefile target in the root
      Makefile and runs both the AGENT_ADAPTERS Python families and
      AGENT_ADAPTERS_JS Node families, with non-empty lists and
-     non-zero floors.
+     non-zero floors. The TypeScript family (AGENT_ADAPTERS_TS) is
+     also pinned here: its members must ship a `tsconfig.tests.json`,
+     the gate must compile them via the local `node_modules/.bin/tsc`
+     (not a globally installed compiler), and a missing tsconfig,
+     missing tests directory, or empty pass summary is a hard refusal
+     rather than a silent green. The sibling file
+     `test_makefile_typescript_test_wiring.py` carries the executable
+     negative controls (omitting mpm-opencode from AGENT_ADAPTERS_TS,
+     `tsc --version` reading from the wrong path, etc.).
   2. `test-agent-installation`'s recipe in the root Makefile invokes
      `test-agent-adapters` via a `$(MAKE) test-agent-adapters` line
      (the standard Makefile recursive-make form). This is the
@@ -170,6 +178,32 @@ class TestAdapterLists(unittest.TestCase):
             f"AGENT_ADAPTERS_JS should list at least 1 JS suite; got {names!r}",
         )
 
+    def test_agent_adapters_ts_list_includes_mpm_opencode(self):
+        """The TypeScript family must list mpm-opencode (the only
+        adapter today whose test suite is written in TypeScript). A
+        recipe that compiles to disk but skips the gate because it
+        did not list mpm-opencode under AGENT_ADAPTERS_TS is a
+        silent green — the regression we are pinning.
+        """
+        text = _read_makefile()
+        match = re.search(
+            r"^AGENT_ADAPTERS_TS\s*:=\s*(?P<list>.+?)$",
+            text,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(
+            match,
+            "AGENT_ADAPTERS_TS must be defined as a Make variable.",
+        )
+        names = match.group("list").split()
+        self.assertIn(
+            "mpm-opencode",
+            names,
+            "AGENT_ADAPTERS_TS must list mpm-opencode so its "
+            "17-test TypeScript suite runs through the canonical "
+            f"test-agent-adapters gate. Got: {names!r}",
+        )
+
     def test_per_language_floors_present(self):
         text = _read_makefile()
         self.assertRegex(
@@ -179,6 +213,13 @@ class TestAdapterLists(unittest.TestCase):
         self.assertRegex(
             text,
             r"(?m)^AGENT_ADAPTER_TEST_MIN_JS_TESTS\s*:=\s*\d+$",
+        )
+        self.assertRegex(
+            text,
+            r"(?m)^AGENT_ADAPTER_TEST_MIN_TS_TESTS\s*:=\s*\d+$",
+            "AGENT_ADAPTER_TEST_MIN_TS_TESTS must be defined so "
+            "the TypeScript pass-count floor trips on a "
+            "silently-zero suite.",
         )
 
 
@@ -207,6 +248,33 @@ class TestAdapterTargetExists(unittest.TestCase):
         self.assertIn("$(AGENT_ADAPTERS_JS)", recipe,
                       "test-agent-adapters must iterate AGENT_ADAPTERS_JS (JS).")
 
+    def test_recipe_invokes_ts_family_with_local_tsc(self):
+        """The recipe must walk AGENT_ADAPTERS_TS and compile each
+        member via the LOCAL `node_modules/.bin/tsc`. Falling back
+        to a globally installed compiler would couple the test output
+        to whatever the host happens to ship and break the
+        reproducible-build contract the canonical gate is meant to
+        preserve.
+        """
+        recipe = _extract_recipe(_read_makefile(), "test-agent-adapters")
+        self.assertIn("$(AGENT_ADAPTERS_TS)", recipe,
+                      "test-agent-adapters must iterate AGENT_ADAPTERS_TS (TS).")
+        self.assertIn(
+            "tsconfig.tests.json",
+            recipe,
+            "test-agent-adapters must pin a per-adapter tsconfig.tests.json "
+            "as the compile input — that is the deterministic input that "
+            "every other adapter's compile paths already use.",
+        )
+        self.assertIn(
+            "node_modules/.bin/tsc",
+            recipe,
+            "test-agent-adapters must invoke the LOCAL tsc binary at "
+            "agent_installation/<d>/node_modules/.bin/tsc. The gate "
+            "deliberately does not fall back to a globally installed "
+            "tsc (which is unpinned here).",
+        )
+
     def test_recipe_fails_on_missing_node(self):
         """A host without `node` on PATH must be a hard refusal, not
         a silent skip. The script became unreachable in the first
@@ -226,6 +294,42 @@ class TestAdapterTargetExists(unittest.TestCase):
             recipe,
             r"command -v python3",
             "test-agent-adapters must probe for `python3` on PATH and fail closed.",
+        )
+
+    def test_recipe_fails_closed_on_ts_compile_problems(self):
+        """The TS branch must fail closed on the four realistic
+        failure shapes: missing tests directory, missing
+        `tsconfig.tests.json`, missing local tsc, and an empty
+        pass summary after a successful compile. None of them is a
+        silent zero — every one of them is an explicit FATAL.
+        """
+        recipe = _extract_recipe(_read_makefile(), "test-agent-adapters")
+        # Missing tsconfig.tests.json — listed, but the adapter forgot
+        # to ship the per-adapter input.
+        self.assertIn(
+            "tsconfig.tests.json is missing",
+            recipe,
+            "test-agent-adapters must FATAL on a missing "
+            "tsconfig.tests.json so an entry drift surfaces "
+            "as a green-gate regression rather than a silent skip.",
+        )
+        # Missing local tsc — refrained from falling back to a
+        # globally installed compiler.
+        self.assertIn(
+            "no local TypeScript compiler",
+            recipe,
+            "test-agent-adapters must FATAL on a missing local "
+            "tsc binary and refuse to fall back to a globally "
+            "installed (unpinned) tsc.",
+        )
+        # Empty pass summary — `node --test` exited 0 without a
+        # `# pass` line. The JS branch already pins this;
+        # the TS branch must too.
+        self.assertRegex(
+            recipe,
+            r"TS:.*passing tests",
+            "test-agent-adapters must print a TS: <count> "
+            "passing-tests line so the gate is auditable.",
         )
 
     def test_session_start_hook_excluded_from_comment(self):

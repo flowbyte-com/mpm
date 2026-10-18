@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "rootDir": "./tests",
+    "outDir": "./tests-build",
+    "strict": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "declaration": false,
+    "sourceMap": false,
+    "tsBuildInfoFile": "./tests-build/.tsbuildinfo"
+  },
+  "include": ["tests/**/*.ts"],
+  "exclude": ["node_modules", "dist", "tests-build", "src"]
+}

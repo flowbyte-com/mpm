@@ -107,9 +107,69 @@ registry/dispatcher drift is caught.
   ```bash
   make test
   ```
-  This runs both modules (the standalone `internal/core/` module and the
-  main module). It is slow enough that you should run it before
-  opening a PR, not on every save.
+  This runs every Go module the default gate covers: the main module
+  (`./cmd/...`, `./internal/telemetry`, `./internal/scheduler`,
+  `./internal/critic`), the standalone `internal/core` module, the nested
+  `internal/core/tools` module, and the Python suites under `scripts/`
+  and `agent_installation/`. `release_acceptance` is a separate Go module
+  — see `make test-release`. It is slow enough
+  that you should run it before opening a PR, not on every save.
+- CI coverage (the contract every PR is checked against). The
+  `.github/workflows/build-test.yml` workflow is the single source of
+  truth; this section describes it for reviewers, not for CI to read.
+  Three jobs, all gating:
+  - `gate` — `make build`, `mpm-lint --gate`, the
+    synthesis/reliability/lifecycle/hybrid/`TestGetRecentUserTopics`/
+    `TestDBSafety` core subset, the renderer-parity tests, the
+    `scripts/tests/` installer-contract suite (via `make test-scripts`),
+    the full root-module race-detector sweep with coverage, and the
+    nested `internal/core/tools` race-detector sweep. Required for merge.
+  - `full-suite` — `make build` then a non-race full sweep of the root
+    module plus `internal/core/tools`. Required for merge.
+  - `release-gate` — `make release-gate`, which composes
+    `test-race` (root-module + `internal/core/tools` race-detector
+    sweep, plus `scripts/tests/`) with `test-release`
+    (cross-agent continuity, public-CLI subprocess suite, FTS5
+    invariant, in the `release_acceptance` Go module).
+    `make release-gate` depends on `test-race` which depends on
+    `build`, so a fresh `$(BUILD_DIR)/mpm` is available without a
+    separate `make build` step in the workflow. Required for merge.
+    Without this job, regressions in the release-only suite can
+    land via a green PR; the contract that pins the wiring lives
+    in `TestBuildConfig_CIWiringForIssue14` in
+    `internal/core/build_config_invariants_test.go`, alongside the
+    Makefile wiring contract
+    (`TestBuildConfig_ReleaseAcceptanceHasNonVacuityFloor`,
+    `TestBuildConfig_ReleaseAcceptanceWiredIntoReleaseGate`).
+
+  Suite ownership — what each CI job runs and what it does NOT run,
+  so a reviewer can answer "is X exercised in CI?" by reading this
+  list:
+  - `gate` owns: root-module `-race` sweep, `internal/core/tools`
+    `-race` sweep, `scripts/tests/`, renderer-parity Python tests,
+    core precommit subset, `mpm-lint --gate`.
+  - `full-suite` owns: root-module non-race sweep,
+    `internal/core/tools` non-race sweep.
+  - `release-gate` owns: the `release-gate` aggregate
+    (`test-race` + `test-release`). The race suite and
+    `scripts/tests/` therefore run in BOTH the `gate` and
+    `release-gate` jobs. That overlap is intentional, not
+    accidental duplication: it is the design pinned by
+    `scripts/tests/test_makefile_agent_adapter_wiring.py`
+    `TestGateReachability`, which asserts that
+    `make release-gate` reaches `test-agent-installation` and
+    `test-agent-adapters` (and therefore the per-adapter suites
+    are exercised from every gate).
+  - `make test` and `make test-race` are local-developer aggregates
+    that compose the above into a single command. CI does not invoke
+    either; the jobs above are split so that the non-trivial
+    release-only suite (`test-release`) runs in its own job, while
+    the developer-loop gate (`test-race` + `scripts/tests/`) is
+    covered in the `gate` job too.
+  The non-vacuity floors (`SCRIPTS_TEST_MIN_TESTS` in the `test-scripts`
+  recipe, `RELEASE_TEST_MIN_TESTS` in the `test-release` recipe) are
+  enforced inside the Makefile targets themselves, so a sabotaged
+  `scripts/tests/` or `release_acceptance/` cannot report a green run.
 - Stranger test (the hermetic specification quickstart gate):
   ```bash
   bash scripts/stranger-test.sh
@@ -119,15 +179,24 @@ registry/dispatcher drift is caught.
   if your change affects user-visible behaviour.
 - Add tests for behaviour you add or change. Tests are table-driven;
   match the patterns in the package you are touching.
-- A single test in isolation:
+- A single test in isolation — route through the Makefile so the build
+  flags stay in one place (`make test` runs every module):
   ```bash
-  cd internal/core && go test -tags fts5 -v ./... -run TestName
+  make test                      # canonical: all Go modules, FTS5 configured
+  make test-race                 # canonical pre-merge gate
   ```
-  or
+  To narrow to one package or one test, use `go test` with **all three**
+  required settings inline — omitting any one fails in a way that looks
+  like a code problem:
   ```bash
-  go test -tags fts5 -v ./cmd/mpm/... -run TestName
+  cd internal/core && \
+    CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 CGO_LDFLAGS=-lm \
+    go test -tags fts5 -v ./... -run TestName
   ```
-- CI must export `CGO_CFLAGS=-DSQLITE_ENABLE_FTS5` or tests will panic.
+- Tests require `CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1`, `-tags fts5`, **and**
+  `CGO_LDFLAGS=-lm`. The last one is easy to miss and fails only on hosts
+  that do not link libm implicitly (CI runners, fresh containers), as
+  ``undefined reference to `log` `` from `sqlite3-binding.c`.
   If you add a test that needs an environment variable, document it
   in the test and in the PR description.
 

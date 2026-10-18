@@ -696,6 +696,62 @@ shipped with the repository. Auto-generating one of these from an
 installer is exactly the kind of side-effect that pollutes the source
 tree and is impossible to audit.
 
+## Two different "reserved" paths — read this before concluding anything
+
+`agent_installation/` holds two kinds of file, and the prohibition above
+covers only one of them. Conflating them is how a correct installer gets
+"fixed" into a broken one, or how an agent convinces itself a sanctioned
+step is forbidden.
+
+| Path | Owner | Who may write | Contents |
+|---|---|---|---|
+| `agent_installation/<adapter>/` (source) | the repository, version-controlled | human reviewers only, via normal code review | adapter source: `install.sh`, `index.ts` / `src/`, `scripts/`, `templates/`, `tests/` |
+| `<runtime-root>/agent_installation/<adapter>/` (runtime package) | the installer, at install time | the reviewed adapter's own `install.sh`, via `stage_runtime_package.sh` | the deployed payload: the compiled bundle or extension entrypoint and the modules it imports |
+
+"Runtime root" is `$MPM_WORKSPACE` or `~/.mpm`. These are the same
+*relative* path by design — that is what lets the substrate installer be
+run from `~/.mpm` unchanged — but on any host where the checkout and the
+runtime root are separate directories they are different absolute paths.
+
+**The prohibition is on modifying protected installation assets**:
+adapter source, the managed-block snippets, the substrate `install.sh`,
+the staging library itself, and anything else under version control.
+Runtime customisation — adapting a config file, setting a colour, adding
+a projection — MUST NOT touch any of them. That rule is unchanged.
+
+**Provisioning a managed runtime package is permitted, and required.**
+A source checkout and a runtime root are separate trees, so nothing
+carries adapter payload into the runtime root by being cloned. A reviewed
+adapter installer MUST provision its own payload before registering it,
+using `agent_installation/scripts/stage_runtime_package.sh`:
+
+- an explicit allowlist manifest of the files the payload needs
+- staged into a sibling and swapped into place atomically, so a partial
+  package is never visible
+- validated *before* the framework is told about the path
+- idempotent, and preserving operator-owned files already in the package
+
+Not every adapter needs a runtime package, and adding one where none is
+required is its own defect (an unnecessary build or copy step). As
+shipped:
+
+- **OpenClaw** — yes. `openclaw plugins install <dir> --link` links the
+  package, so it must be runtime-owned.
+- **OpenCode** — yes. The `plugin[]` entry is a `file://` URL into the
+  runtime root, and OpenCode reports no error for one that resolves to
+  nothing.
+- **Pi** — yes. The `extensions[]` entry names a directory Pi loads
+  `index.ts` from, and a directory without one is ignored silently.
+- **Claude Code** — no. It registers the canonical `~/.mpm/bin/mpm-mcp`
+  binary and materialises its one executable asset (the session-start
+  hook) at install time.
+- **Hermes** — no. Its installer is a managed-block writer; it registers
+  no runtime code.
+
+Manual copying from a source checkout is **not** an acceptable substitute
+for this. It is unmanifested, non-atomic, unvalidated, and it leaves the
+operator with a deployment step they must remember forever.
+
 ## Required fail-closed behavior
 
 1. Install/configure MPM core normally (Section 5) so the `mpm` and

@@ -428,10 +428,10 @@ func (r *SQLRule) isSafeInterpolation(e ast.Expr, parentMap map[ast.Node]ast.Nod
 				}
 			}
 		}
-		if id, ok := t.Fun.(*ast.Ident); ok && isTableNameResolver(id.Name) {
+		if id, ok := t.Fun.(*ast.Ident); ok && (isTableNameResolver(id.Name) || isLiteralClauseJoiner(id.Name)) {
 			return true
 		}
-		if sel, ok := t.Fun.(*ast.SelectorExpr); ok && isTableNameResolver(sel.Sel.Name) {
+		if sel, ok := t.Fun.(*ast.SelectorExpr); ok && (isTableNameResolver(sel.Sel.Name) || isLiteralClauseJoiner(sel.Sel.Name)) {
 			return true
 		}
 		return false
@@ -770,6 +770,20 @@ func (r *SQLRule) isPlaceholderBuilderCall(call *ast.CallExpr) bool {
 func isTableNameResolver(name string) bool {
 	switch name {
 	case "ArtifactTable", "artifactTable", "resolveTable", "tableNameFor", "tableForType":
+		return true
+	}
+	return false
+}
+
+// isLiteralClauseJoiner reports whether a function name is a known pure
+// joiner of literal SQL fragments. The result is safe for SET-clause
+// positions inside fmt.Sprintf because the function's output is a
+// concatenation of literals drawn from a closed set in the same file —
+// the same safety property isTableNameResolver provides for DDL
+// positions, applied to the runtime-composed UPDATE shape.
+func isLiteralClauseJoiner(name string) bool {
+	switch name {
+	case "joinPriorPairs":
 		return true
 	}
 	return false

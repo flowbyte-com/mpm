@@ -6,12 +6,44 @@ on:
   pull_request:
     branches: [main]
 
-# Two-job split is intentional. The "gate" job must pass for merge; it covers
-# the build and the migration-relevant test subset. The "full-suite" job runs
-# the entire test tree but is allowed to fail — it exists to track the
-# pre-existing test-pollution failures (see TestLessonStoreListLessons,
-# TestRenderRoute) until the test suite cleanup arc lands. When the noise is
-# fixed, promote full-suite to a gating job by removing `continue-on-error`.
+# Three-job split is intentional. The "gate" job must pass for merge; it
+# covers the build, the migration-relevant test subset, the renderer
+# parity tests, the scripts/tests/ installer-contract suite, the
+# root-module race-detector sweep with coverage, and the nested
+# `internal/core/tools` race-detector sweep. The "full-suite" job
+# sweeps the entire test tree without the race detector and is also
+# gating. The "release-gate" job runs `make release-gate`, which is
+# `test-release` (the cross-agent continuity / public-CLI subprocess
+# suite that `go test ./...` from the root cannot reach because
+# release_acceptance is a separate Go module) chained with `test-race`
+# (so it also exercises the race-detector sweep, the scripts/tests
+# suite, and the per-adapter test suites including the mpm-opencode
+# TypeScript gate). That intentional duplication is contractually
+# pinned by `scripts/tests/test_makefile_agent_adapter_wiring.py`
+# TestGateReachability; the job's npm-bootstrap step is therefore
+# scoped to release-gate alone, because the `gate` and `full-suite`
+# jobs do not reach `test-agent-installation`.
+# release_acceptance itself is intentionally NOT folded into the
+# gate job — its cases spawn real subprocesses of $(BUILD_DIR)/mpm,
+# so the cost is one full e2e sweep per case, and pre-merge-in-
+# every-save is the wrong place for it.
+#
+# It used to be `continue-on-error: true`, on the stated grounds that it was
+# tracking "pre-existing test-pollution failures (see TestLessonStoreListLessons,
+# TestRenderRoute)". That reasoning was stale on two counts, and the run history
+# shows it: in run 37958953946 every full-suite failure — 26 of them, the whole
+# set — was `developer build artifact missing: .../.build/bin/mpm`, the CLI
+# subprocess tests refusing to fall back to the installed binary. Neither named
+# test appears in any failure list. Worse, `continue-on-error` is invisible from
+# the job list: that job's conclusion reads `success` while its own log shows
+# `FAIL github.com/flowbyte-com/mpm/cmd/mpm 400.696s`. The gate job was red for
+# the same missing-build reason (`test_build_output_directory_exists`: ".build/bin
+# must exist (run `make build` first)").
+#
+# Both jobs now run `make build` first, which is the actual fix; verified
+# locally in a clean checkout that `go test -tags fts5 -count=1 ./...` exits 0
+# once the artifacts exist. Re-add `continue-on-error` only alongside a named
+# test in this comment, and only if that name appears in the job's own log.
 
 env:
   # FTS5 must be enabled for mattn/go-sqlite3 — see Makefile. Pin these at
@@ -55,7 +87,18 @@ jobs:
           git config --global init.defaultBranch main
 
       - name: Build
-        run: go build -tags fts5 ./...
+        run: |
+          go build -tags fts5 ./...
+          # `make build` is what puts artifacts where the CLI subprocess
+          # tests expect them: cmd/mpm and cmd/mpm-critic execute
+          # $(BUILD_DIR)/mpm and deliberately refuse to fall back to the
+          # installed production binary. `go build ./...` above cannot
+          # supply that — with several main packages it compiles all of
+          # them and discards every result, leaving no file on disk. The
+          # "Run `make build` first" failure those tests emit was
+          # therefore reachable from a clean runner, which is why this
+          # step exists separately from the compile check.
+          make build
 
       - name: go vet
         run: go vet -tags fts5 ./...
@@ -102,7 +145,13 @@ jobs:
       # cmd/mpm, internal/scheduler, internal/core/tools, and
       # release_acceptance.
       - name: Core tests (synthesis, reliability, lifecycle, hybrid, wake context, DB safety)
-        run: cd internal/core && go test -short -count=1 ./... -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics|TestDBSafety"
+        # -tags fts5 is required on every invocation even though CGO_CFLAGS is
+        # pinned at workflow level: the C flag and the Go build tag are
+        # independent, and only the C flag can be inherited. Without the tag
+        # this step compiles the non-FTS5 driver path — which the -run filter
+        # below happens to tolerate today, so the omission was invisible until
+        # a selected test started asserting on FTS5 behaviour.
+        run: cd internal/core && go test -short -count=1 -tags fts5 ./... -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics|TestDBSafety"
 
       # Managed-block parity gate (Python; closes a pre-existing CI gap).
       #
@@ -125,6 +174,17 @@ jobs:
       # simulated one-character drift; restored on revert.
       - name: Renderer parity (managed-block byte-for-byte)
         run: cd agent_installation && python3 -m unittest discover tests
+
+      # scripts/tests/ (24 files, ~139 cases) pins the installer contract
+      # (binary transaction ordering, systemd umask, deploy path resolution,
+      # runtime asset provisioning). It used to be reachable only via
+      # `make test`/`make test-race` locally — `make test-scripts` is
+      # already wired into both — and was completely absent from CI, so
+      # an installer-contract regression could land via a green PR. This
+      # step closes that gap. Non-vacuity floor (SCRIPTS_TEST_MIN_TESTS)
+      # is enforced inside the Makefile target itself, not here.
+      - name: Installer contract (scripts/tests)
+        run: make test-scripts
 
       - name: Run full test suite with coverage
         run: |
@@ -158,9 +218,8 @@ jobs:
           retention-days: 14
 
   full-suite:
-    name: Full test suite (tracking only)
+    name: Full test suite
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
 
@@ -172,7 +231,79 @@ jobs:
 
       # `./...` excludes internal/core/tools (separate go.mod). Sweep it
       # separately so this job's log covers the whole tree, not the root module.
+      #
+      # `make build` runs first for the same reason as in the gate job: the
+      # CLI subprocess tests under cmd/mpm execute $(BUILD_DIR)/mpm and
+      # refuse to fall back to the installed binary. Without it every clean
+      # runner reports the same "developer build artifact missing" failures,
+      # which drowns the real signal this job exists to surface.
+      - name: Build
+        run: make build
+
       - name: Full test sweep
         run: |
           go test -tags fts5 -count=1 ./... 2>&1 | tee test-output.log
           make test-tools 2>&1 | tee tools-output.log
+
+  release-gate:
+    name: Release gate (cross-agent continuity + public-CLI subprocess suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          # See the gate job above for the bump rationale (2026-08-17).
+          go-version: '1.26.6'
+          cache: true
+
+      # Node 20 LTS. The mpm-opencode TypeScript suite (17 .test.ts
+      # files compiled to .test.js via the adapter-local tsc, run by
+      # `make test-agent-adapters`) requires `engines.node: ">=20"`
+      # per agent_installation/mpm-opencode/package.json. Node 20 is
+      # the LTS that satisfies the package.json floor and matches the
+      # version the project has been validated against on the
+      # ubuntu-24.04 GitHub Actions runner. Caching is keyed to the
+      # lockfile path so a clean-checkout rebuild under `npm ci`
+      # reuses the warm cache.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'agent_installation/mpm-opencode/package-lock.json'
+
+      # `make release-gate` -> `test-race` -> `test-agent-installation`
+      # -> `test-agent-adapters` reaches the mpm-opencode TypeScript
+      # suite, which compiles its `.test.ts` via the adapter-local
+      # `node_modules/.bin/tsc`. The Makefile gate fails closed if
+      # that binary is missing (it deliberately does NOT fall back to
+      # a globally installed tsc). `npm ci` populates devDependencies
+      # from the tracked lockfile (added in commit 0ec2810 alongside
+      # the V2 integration) and is idempotent. This step is scoped to
+      # the release-gate job because the `gate` and `full-suite` jobs
+      # do not reach `test-agent-installation`; adding it there would
+      # be a redundant download.
+      - name: Bootstrap OpenCode TypeScript devDependencies
+        run: npm ci
+        working-directory: agent_installation/mpm-opencode
+
+      # release_acceptance is a separate Go module (its own go.mod), so
+      # `go test ./...` from the repo root cannot descend into it.
+      # `make release-gate` runs `test-release` (the cross-agent
+      # continuity / public-CLI subprocess suite) AND `test-race` (the
+      # race-detector suite with `test-scripts` and
+      # `test-agent-installation` chained in). The `gate` job already
+      # runs `test-scripts` and a race-detector sweep; the deliberate
+      # duplication here exists because the release-gate target was
+      # contractually pinned as a comprehensive sweep that reaches
+      # `test-agent-installation` and `test-agent-adapters` (see
+      # scripts/tests/test_makefile_agent_adapter_wiring.py
+      # TestGateReachability, added in 467d520). The non-vacuity
+      # floors (AGENT_INSTALL_TEST_MIN_TESTS, RELEASE_TEST_MIN_TESTS)
+      # are enforced inside the recipes themselves, not here, so a
+      # sabotaged module cannot be reported as a green run. `make
+      # release-gate` depends on `build`, so the subprocess tests get
+      # a fresh $(BUILD_DIR)/mpm without a separate `make build`
+      # step.
+      - name: Release gate
+        run: make release-gate

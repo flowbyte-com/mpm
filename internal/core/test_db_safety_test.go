@@ -39,17 +39,25 @@ package internal
 //	github.com/flowbyte-com/mpm-core         (internal/core)
 //	github.com/flowbyte-com/mpm-core/tools   (internal/core/tools)
 //	github.com/flowbyte-com/mpm/release_acceptance
-//	github.com/flowbyte-com/mpm/scripts
 //
 // A guard that resolved the *nearest* go.mod would stop at
 // internal/core/go.mod and never see cmd/mpm, internal/scheduler,
-// internal/core/tools, or release_acceptance — 265+ test files, two of
-// which live in modules no `make test` target traverses at all. That
-// is precisely how the previous version of this guard became
-// decorative. The shared findRepoRoot helper therefore walks to the
-// directory holding BOTH go.mod and Makefile — only the repository
-// root has both — and the walk covers the whole tree from there.
+// internal/core/tools, or release_acceptance — 265+ test files, one of
+// which lives in a module `make test` does not traverse (release_acceptance
+// is reached by `make test-release`, via release-gate). That is precisely
+// how the previous version of this guard became decorative. The shared
+// findRepoRoot helper therefore walks to the directory holding BOTH
+// go.mod and Makefile — only the repository root has both — and the walk
+// covers the whole tree from there.
 // Pinned by TestDBSafety_ScanCoversEveryModuleArea.
+//
+// scripts/ was listed here until 2026-10-14. It was a nested Go module
+// holding exactly one file, install_d31_test.go, and no Makefile target,
+// CI job, or pre-commit hook ran it — so listing it made this guard
+// assert coverage of a suite nothing executed. The module and its file
+// were removed; its assertions moved to scripts/tests/, which
+// test-scripts really does run. Do not re-add a directory here unless
+// something actually executes tests in it.
 //
 // # Why it runs in -short
 //
@@ -162,7 +170,6 @@ var expectedScanAreas = []string{
 	"internal/core/tools",
 	"internal/scheduler",
 	"release_acceptance",
-	"scripts",
 }
 
 // TestDBSafety_NoLiveDBLeakInTests walks every _test.go file in the
@@ -218,7 +225,7 @@ func TestDBSafety_NoLiveDBLeakInTests(t *testing.T) {
 // previous guard resolved the nearest go.mod — internal/core — and so
 // covered only internal/core while its own comment claimed repo-wide
 // coverage. This asserts the walk reaches every area the repo actually
-// has test files in, including the two nested modules that no `make
+// has test files in, including the nested module that no `make
 // test` target traverses.
 func TestDBSafety_ScanCoversEveryModuleArea(t *testing.T) {
 	root := findRepoRoot(t)

@@ -3,14 +3,14 @@
 //
 // Pins the contracts:
 //
-//   1. SchemaPrefix stamps Origin on HybridResult.
-//   2. applySharedPremium: local untouched, shared *1.20, rules *1.35,
-//      capped at 1.0.
-//   3. Sort order respects final-score > weight > collection.
-//   4. HybridSearchMemories scope=local returns only local rows.
-//   5. HybridSearchMemories scope=shared returns only shared rows.
-//   6. HybridSearchMemories scope=all merges + applies multiplier + slices to limit.
-//   7. handleQueryLongTermMemory forwards the `scope` param.
+//  1. SchemaPrefix stamps Origin on HybridResult.
+//  2. applySharedPremium: local untouched, shared *1.20, rules *1.35,
+//     capped at 1.0.
+//  3. Sort order respects final-score > weight > collection.
+//  4. HybridSearchMemories scope=local returns only local rows.
+//  5. HybridSearchMemories scope=shared returns only shared rows.
+//  6. HybridSearchMemories scope=all merges + applies multiplier + slices to limit.
+//  7. handleQueryLongTermMemory forwards the `scope` param.
 //
 // Uses NewTestSharedDM (tmpfile-backed shared DB) since the in-memory
 // NewTestDM has no shared DB attached — the federated paths need it.
@@ -94,12 +94,12 @@ func TestFederated_OriginStampedFromSchemaPrefix(t *testing.T) {
 
 func TestApplySharedPremium_MultiplierMatrix(t *testing.T) {
 	type tc struct {
-		name           string
-		in             []HybridResult
-		limit          int
-		wantFinals     []float64 // expected final score per row in returned order
-		wantOrigins    []string  // expected origin per row in returned order
-		wantColl       []string  // expected collection per row in returned order
+		name        string
+		in          []HybridResult
+		limit       int
+		wantFinals  []float64 // expected final score per row in returned order
+		wantOrigins []string  // expected origin per row in returned order
+		wantColl    []string  // expected collection per row in returned order
 	}
 
 	cases := []tc{
@@ -370,6 +370,15 @@ func TestVectorMatch_MaxScanCap_DisabledByZero(t *testing.T) {
 	require.NoError(t, err, "MPM_MAX_VECTOR_SCAN=0 must disable the cap (full scan, your funeral)")
 }
 
+// NOTE: rows seeded here carry no embedding_model unless stated otherwise.
+// Since the 2026-10-13 compatibility filter, VectorMatch excludes unlabelled
+// rows (see TestVectorMatchExcludesUnlabelledRows in
+// embedding_model_compatibility_test.go), so a test that expects a row to be
+// RETURNED must stamp embedding_model = CurrentEmbeddingFingerprint().Model.
+// A test that expects a row to be EXCLUDED may leave it unlabelled, but must
+// say which reason it is exercising — "unlabelled" and "hash" are different
+// exclusions and a test that conflates them stops covering either.
+
 func TestVectorMatch_MaxScanCap_TripsAboveThreshold(t *testing.T) {
 	dm := NewTestDM(t)
 	// Set the cap to 0. With 0 we expect... actually the test was
@@ -377,12 +386,15 @@ func TestVectorMatch_MaxScanCap_TripsAboveThreshold(t *testing.T) {
 	// require the corpus to be empty. A more honest test: insert
 	// a few rows, then set cap=1, expect error.
 	t.Setenv("MPM_MAX_VECTOR_SCAN", "1")
-	_, _ = dm.db.Exec(`INSERT INTO memories (id, collection, content, embedding, weight, deleted_at)
-		VALUES ('cap-1', 'memories', 'first', '[0.1, 0.2, 0.3, 0.4]', 1, NULL)`)
-	_, _ = dm.db.Exec(`INSERT INTO memories (id, collection, content, embedding, weight, deleted_at)
-		VALUES ('cap-2', 'memories', 'second', '[0.2, 0.3, 0.4, 0.5]', 1, NULL)`)
-	_, _ = dm.db.Exec(`INSERT INTO memories (id, collection, content, embedding, weight, deleted_at)
-		VALUES ('cap-3', 'memories', 'third', '[0.3, 0.4, 0.5, 0.6]', 1, NULL)`)
+	// Stamped with the active model fingerprint: these rows must be COUNTED
+	// by the scan preflight, and VectorMatch excludes unlabelled rows since
+	// the 2026-10-13 compatibility filter. See the file-level note above.
+	fpModel := CurrentEmbeddingFingerprint().Model
+	for i, v := range []string{"[0.1, 0.2, 0.3, 0.4]", "[0.2, 0.3, 0.4, 0.5]", "[0.3, 0.4, 0.5, 0.6]"} {
+		_, _ = dm.db.Exec(`INSERT INTO memories (id, collection, content, embedding, embedding_model, weight, deleted_at)
+			VALUES (?, 'memories', ?, ?, ?, 1, NULL)`,
+			fmt.Sprintf("cap-%d", i+1), []string{"first", "second", "third"}[i], v, fpModel)
+	}
 	vec := []float32{0.1, 0.2, 0.3, 0.4}
 	_, err := dm.VectorMatch("", vec, 10, "")
 	require.Error(t, err, "cap=1 with 3 rows in scope MUST trip the circuit breaker")
@@ -394,10 +406,11 @@ func TestVectorMatch_MaxScanCap_AllowsAtThreshold(t *testing.T) {
 	dm := NewTestDM(t)
 	t.Setenv("MPM_MAX_VECTOR_SCAN", "5")
 	// Insert exactly 5 rows; cap is inclusive at the threshold.
+	fpModel := CurrentEmbeddingFingerprint().Model
 	for i := 0; i < 5; i++ {
-		_, _ = dm.db.Exec(`INSERT INTO memories (id, collection, content, embedding, weight, deleted_at)
-			VALUES (?, 'memories', ?, ?, 1, NULL)`,
-			fmt.Sprintf("at-cap-%d", i), fmt.Sprintf("content %d", i), "[0.1, 0.2, 0.3, 0.4]")
+		_, _ = dm.db.Exec(`INSERT INTO memories (id, collection, content, embedding, embedding_model, weight, deleted_at)
+			VALUES (?, 'memories', ?, ?, ?, 1, NULL)`,
+			fmt.Sprintf("at-cap-%d", i), fmt.Sprintf("content %d", i), "[0.1, 0.2, 0.3, 0.4]", fpModel)
 	}
 	vec := []float32{0.1, 0.2, 0.3, 0.4}
 	_, err := dm.VectorMatch("", vec, 10, "")

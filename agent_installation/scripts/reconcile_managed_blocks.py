@@ -35,6 +35,25 @@ this, and they are mutually exclusive:
                        literal substring read, or a conjunction of
                        those.
 
+`mpm onboard --hosts install <target>` may install an integration into
+an operator-selected host. That path is outside this script and does
+not weaken anything here:
+
+  - it never discovers its targets. The operator names each host on the
+    command line; the sweep vocabulary (`auto`, `all`, `detected`, ...)
+    is rejected by name, because a detected set is not evidence of
+    consent;
+  - detection stays read-only here. This script's inspection is
+    unchanged, and it still refuses to create the integration it would
+    then have to reconcile;
+  - installation delegates to each adapter's own `install.sh`, the same
+    installer this script invokes to reconcile an already-installed host;
+  - an existing, current integration is left untouched, and a drifted
+    one is only rewritten when `--repair` is also named.
+
+Rollback remains per adapter (`install.sh --uninstall`, one at a time);
+see docs/ONBOARD.md §6.7.
+
 Why a conjunction is needed
 ---------------------------
 

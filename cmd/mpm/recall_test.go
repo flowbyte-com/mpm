@@ -118,16 +118,16 @@ func TestRecallDeduplicatesReinforcement(t *testing.T) {
 	var uniqueIDs []string
 	for rows.Next() {
 		var id string
-		// Scan all 10 columns (must match keywordSearchWithTime's SELECT):
+		// Scan all 11 columns (must match keywordSearchWithTime's SELECT):
 		// id, content, session_id, tags, metadata, created_at, reinforcement_count,
-		// weight, last_accessed_at, reference_id. The Scan destination in
-		// handleRecall has the same 10 args; if either drifts the count
+		// weight, last_accessed_at, reference_id, bm25. The Scan destination in
+		// handleRecall has the same 11 args; if either drifts the count
 		// mismatch surfaces as a runtime crash on the very first recall.
 		// metadata + created_at + last_accessed_at + reference_id are all
 		// nullable or time-typed in the test schema (insertMemory doesn't
 		// set them) so we use sql.NullString / sql.NullTime — matching
 		// production handleRecall's nullable destinations.
-		if err := rows.Scan(&id, new(string), new(string), new(string), new(sql.NullString), new(sql.NullTime), new(int64), new(int64), new(sql.NullTime), new(sql.NullString)); err != nil {
+		if err := rows.Scan(&id, new(string), new(string), new(string), new(sql.NullString), new(sql.NullTime), new(int64), new(int64), new(sql.NullTime), new(sql.NullString), new(sql.NullFloat64)); err != nil {
 			t.Logf("scan err: %v", err)
 			continue
 		}
@@ -198,14 +198,14 @@ func TestRecallDeduplicatesAccessAcrossMultipleRows(t *testing.T) {
 	var uniqueIDs []string
 	for rows.Next() {
 		var id string
-		// Scan all 10 columns — must match keywordSearchWithTime's SELECT
+		// Scan all 11 columns — must match keywordSearchWithTime's SELECT
 		// (id, content, session_id, tags, metadata, created_at, reinforcement_count,
-		// weight, last_accessed_at, reference_id). See the same comment in
+		// weight, last_accessed_at, reference_id, bm25). See the same comment in
 		// TestRecallDeduplicatesReinforcement for the column-count contract.
 		// metadata + created_at + last_accessed_at + reference_id use
 		// sql.NullString / sql.NullTime to match the test schema and
 		// production handleRecall's nullable destinations.
-		if err := rows.Scan(&id, new(string), new(string), new(string), new(sql.NullString), new(sql.NullTime), new(int64), new(int64), new(sql.NullTime), new(sql.NullString)); err != nil {
+		if err := rows.Scan(&id, new(string), new(string), new(string), new(sql.NullString), new(sql.NullTime), new(int64), new(int64), new(sql.NullTime), new(sql.NullString), new(sql.NullFloat64)); err != nil {
 			continue
 		}
 		if sessionAccessCounts[id] == 0 {
@@ -444,7 +444,7 @@ func TestKeywordSearchWithTime_ExcludesExpiredRows(t *testing.T) {
 		var reinforcementCount, weight sql.NullInt64
 		var lastAccessed sql.NullString
 		var referenceID sql.NullString
-		if err := rows.Scan(&id, &content, &sessionID, &tags, &metadata, &createdAt, &reinforcementCount, &weight, &lastAccessed, &referenceID); err != nil {
+		if err := rows.Scan(&id, &content, &sessionID, &tags, &metadata, &createdAt, &reinforcementCount, &weight, &lastAccessed, &referenceID, new(sql.NullFloat64)); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
 		ids = append(ids, id)

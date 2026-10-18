@@ -1953,13 +1953,20 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 	return consolidated, nil
 }
 
-// cosineSimilarityFloat32 computes cosine similarity between two vectors
+// cosineSimilarityFloat32 computes cosine similarity between two
+// embeddings.
+//
+// Uses the same comparability rules as cosineSimilarity: mismatched
+// dimensions, empty vectors and non-finite components are rejected
+// rather than scored. This matters here because the clustering caller
+// merges memories above a similarity threshold, so a meaningless score
+// produced by truncation would drive a soft-delete.
 func cosineSimilarityFloat32(a, b []float32) float32 {
-	if len(a) == 0 || len(b) == 0 {
+	if !validEmbeddingPair(a, b) {
 		return 0
 	}
 	var dotProduct, normA, normB float32
-	for i := 0; i < len(a) && i < len(b); i++ {
+	for i := range a {
 		dotProduct += a[i] * b[i]
 		normA += a[i] * a[i]
 		normB += b[i] * b[i]
@@ -3297,11 +3304,18 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 	var execErr error
 	if embedding != nil {
 		embeddingJSON, _ := json.Marshal(embedding)
+		// Record the generating model alongside the vector. A dimension
+		// match alone cannot establish compatibility — two models can
+		// share a dimension while producing incomparable spaces — so the
+		// fingerprint must name the model, not just measure the vector.
+		fp := CurrentEmbeddingFingerprint()
 		_, execErr = s.DB.Exec(`UPDATE memories
 			SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
+			    embedding_source = ?, embedding_dimension = ?, embedding_model = ?,
 			    updated_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id = ?`,
-			content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
+			content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash,
+			"provider", len(embedding), fp.Model, id)
 	} else {
 		// Embedding not regenerated — preserve the existing column.
 		_, execErr = s.DB.Exec(`UPDATE memories

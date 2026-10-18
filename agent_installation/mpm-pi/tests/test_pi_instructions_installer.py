@@ -196,13 +196,21 @@ class TestInstallerContract(unittest.TestCase):
         self.assertTrue(target.exists())
 
     def test_scope_user_default_path(self):
-        # No --target: should resolve to ~/.pi/agent/AGENTS.md.
-        # Run with HOME=tmp so the resolved path stays inside the test sandbox.
-        cp = _run(
-            ["--scope", "user", "--filename", "AGENTS.md", "--snippet", str(SNIPPET)],
-            cwd=str(self.tmp),
-        )
-        # Override HOME via env for the subprocess:
+        # No --target: the installer must resolve to
+        # <HOME>/.pi/agent/AGENTS.md. HOME is redirected into the
+        # sandbox for the subprocess so the resolved path cannot be
+        # the operator's real file.
+        #
+        # The FIRST call in this test previously passed only `cwd=`,
+        # with no `env=`, so it installed into the real
+        # ~/.pi/agent/AGENTS.md on every run of `make test-agent-
+        # installation`. The assertion below then passed against the
+        # sandbox copy written by a second call that WAS sandboxed,
+        # which is why the live write went unnoticed: the test proved
+        # what it claimed while having already mutated the machine.
+        # A test that resolves a $HOME-anchored default path must
+        # redirect HOME in the environment, not merely change
+        # directory.
         cp2 = subprocess.run(
             [sys.executable, str(INSTALLER), "--scope", "user", "--snippet", str(SNIPPET)],
             capture_output=True,

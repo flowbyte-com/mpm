@@ -54,12 +54,24 @@ go test -race ./...
 
 is not an equivalent validation command because this repository requires the FTS5 build flags used by the Makefile.
 
-Required build configuration includes:
+Required build configuration — all three, together:
 
 ```bash
 CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1
 go build -tags fts5
+CGO_LDFLAGS=-lm
 ```
+
+`CGO_LDFLAGS=-lm` is the one that gets missed. FTS5's `bm25()` calls
+`log()` from libm; dev hosts usually link libm implicitly so its absence
+is invisible locally, while CI runners and fresh containers fail at link
+time with ``undefined reference to `log` ``. A run that fails to link from
+`sqlite3-binding.c`, or that produces a large wall of unrelated assertion
+failures, is a missing-flag symptom — check here before suspecting the
+code under test.
+
+These flag sets are pinned by
+`internal/core/test_environment_invariants_test.go`.
 
 Prefer repository Makefile targets over reconstructing build flags manually.
 

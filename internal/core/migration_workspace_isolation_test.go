@@ -99,6 +99,12 @@ func TestMigrationBackup_StaysInsideIsolatedWorkspace(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
 		"CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1",
+		// The child is a real `go test` subprocess, so it needs the same
+		// three build settings this package runs under — not just the
+		// two. CGO_LDFLAGS=-lm is the third: FTS5's bm25() calls log(),
+		// so without it the child fails to link on any host that does not
+		// link libm implicitly. See internal/core/test_environment_invariants_test.go.
+		"CGO_LDFLAGS=-lm",
 		// Point the child's module and build caches at the REAL ones,
 		// outside the sentinel. Overriding HOME otherwise makes `go
 		// test` populate $HOME/.cache/go-build, $HOME/go/pkg/mod and

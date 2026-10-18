@@ -835,10 +835,11 @@ make test
 make test-race
 ```
 
-Also run:
+The nested `internal/core/tools` module is a separate Go module that
+`./...` from the repo root cannot reach, so it needs its own target:
 
 ```bash
-cd internal/core/tools && go test -tags fts5 -count=1 .
+make test-tools
 ```
 
 Run `golangci-lint` if it is installed.

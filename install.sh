@@ -1083,7 +1083,7 @@ mode_dry_run() {
         log "  ecryptfs detected → install ~/.config/autostart/mpm-post-decrypt.desktop (daemon-reload + start after decrypt)"
         log "  and: systemctl --user add-wants graphical-session.target mpm-scheduler.service (secondary)"
     fi
-    log "  validate via systemctl status + mpm health_check"
+    log "  validate via systemctl --user status + mpm health_check"
     log "  reconcile installed host managed blocks via the host-agnostic"
     log "    agent_installation/scripts/reconcile_managed_blocks.py entry"
     log "    point (idempotent; preserves user content outside managed block;"

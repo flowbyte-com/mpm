@@ -138,6 +138,15 @@ TESTENV_REQUIRED_GUARDS := TestNoUnisolatedMPMSubprocess TestScannerDetectsKnown
 # anything.
 SCRIPTS_TEST_MIN_TESTS := 50
 
+# Floor on the number of tests `test-release` must collect. `go test
+# -list` exits 0 when the regex matches nothing, so a renamed test or
+# a moved package would turn `release-gate` into a silent pass — the
+# same failure shape `SCRIPTS_TEST_MIN_TESTS` guards against for
+# scripts/tests/. Measured population: 26 tests. The floor is well
+# below that so ordinary test removal does not trip it; it exists to
+# catch a release_acceptance that has been silently emptied.
+RELEASE_TEST_MIN_TESTS := 20
+
 # Floors for the two agent_installation gates. Same reasoning as
 # SCRIPTS_TEST_MIN_TESTS: `python3 -m unittest discover` and
 # `node --test` both exit 0 when they collect nothing, so a directory
@@ -147,12 +156,22 @@ SCRIPTS_TEST_MIN_TESTS := 50
 AGENT_INSTALL_TEST_MIN_TESTS := 300
 AGENT_ADAPTER_TEST_MIN_PY_TESTS := 150
 AGENT_ADAPTER_TEST_MIN_JS_TESTS := 100
+AGENT_ADAPTER_TEST_MIN_TS_TESTS := 15
 # Adapters whose Python suites are reachable via `unittest discover`.
 # Every directory with a tests/ package is listed explicitly; a new
 # adapter must be added here or it is silently skipped.
 AGENT_ADAPTERS := mpm-claude-code mpm-hermes mpm-memory-openclaw mpm-opencode mpm-pi
 # Adapters that additionally ship a `node --test` suite.
 AGENT_ADAPTERS_JS := mpm-memory-openclaw mpm-auto-mode-persona-openclaw
+# Adapters whose suites are written in TypeScript and are compiled
+# to JavaScript by the local `node_modules/.bin/tsc` before the
+# standard `node --test` invocation runs. Every entry here MUST
+# ship a `tsconfig.tests.json` so the compile inputs are pinned;
+# AGENT_ADAPTER_TEST_MIN_TS_TESTS is the per-suite pass-count
+# floor and the B1 gate's trip wire (the suite cannot disappear
+# without tripping it). The Python families still run through
+# AGENT_ADAPTERS — the TS gate runs ONLY the TypeScript suite.
+AGENT_ADAPTERS_TS := mpm-opencode
 
 .PHONY: all assert-build-dir-safe print-build-dir build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit test-scripts test-agent-installation test-agent-adapters lint help clean refresh-installed check-installed-drift check-installed
 
@@ -218,11 +237,11 @@ build: assert-build-dir-safe
 	    echo "  removing stale wrapper at $(BUILD_DIR)/$(BINARY_NAME)"; \
 	    rm -f "$(BUILD_DIR)/$(BINARY_NAME)"; \
 	fi
-	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)    ./cmd/mpm
-	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(MCP_BINARY)   ./cmd/mpm-mcp
-	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(SCHED_BINARY) ./cmd/mpm-scheduler
-	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(CRITIC_BINARY) ./cmd/mpm-critic
-	CGO_CFLAGS=$(CGO_CFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(TELEMETRY_BINARY) ./cmd/mpm-telemetry
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)    ./cmd/mpm
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(MCP_BINARY)   ./cmd/mpm-mcp
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(SCHED_BINARY) ./cmd/mpm-scheduler
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(CRITIC_BINARY) ./cmd/mpm-critic
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(TELEMETRY_BINARY) ./cmd/mpm-telemetry
 	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), $(BUILD_DIR)/$(CRITIC_BINARY), and $(BUILD_DIR)/$(TELEMETRY_BINARY) (mpm-alpha)"
 
 # Print the ABSOLUTE resolved build output directory, one line, nothing else.
@@ -425,8 +444,39 @@ install-hooks:
 gen-cli:
 	$(GO) run ./cmd/gen-cli
 
-# Run tests
-test:
+# THE test entry point. One command, correct from a fresh clone.
+#
+# Depends on `build`, and must keep depending on it.
+#
+# The CLI subprocess tests shell out to $(BUILD_DIR)/mpm and
+# $(BUILD_DIR)/mpm-mcp and refuse to fall back to $(PREFIX)/bin/mpm —
+# correctly, because falling back would exercise the installed production
+# binary instead of the code under test and turn a build-ordering mistake
+# into a silent false pass. Those tests are not written to be skippable,
+# so without a prior `make build` a fresh checkout reported 26 failures,
+# every one of them this:
+#
+#     developer build artifact missing: <checkout>/.build/bin/mpm
+#     Run `make build` from the repository root first.
+#
+# A fresh clone now needs exactly one command: `make test`.
+#
+# Cost of the prerequisite: Go's build cache makes a no-op rebuild of all
+# five binaries 0.35s (measured), because nothing is recompiled and only
+# the link step is redone. That is not worth trading for a gate that
+# fails on a clean tree, so the dependency is unconditional rather than
+# conditional on $(BUILD_DIR) being populated.
+#
+# `test-race` carries the same prerequisite for the same reason — it runs
+# the same cmd/mpm tests, and leaving it out would mean the pre-merge
+# gate still fails on a fresh clone. `test-release` already had it.
+#
+# FTS5 discipline is unchanged and still comes from one place: `build`
+# carries `-tags fts5`, CGO_CFLAGS and CGO_LDFLAGS, and every recipe below
+# repeats them for its own `go test` invocation. Adding `build` as a
+# prerequisite does not add a second flag set; it delegates to the target
+# that already owns them.
+test: build
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./cmd/...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/telemetry/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./...
@@ -567,10 +617,12 @@ test-testenv-precommit:
 # Nothing in this repository's validation path could see a Python test
 # under scripts/tests/. Three separate boundaries conspired:
 #
-#   1. `scripts/` is its own Go module, so `go test ./...` from the repo
-#      root cannot descend into it. This is the same nested-module shape
-#      that already forced test-tools / test-tools-race and
-#      test-testenv / test-testenv-race into `make test` / `make test-race`.
+#   1. `scripts/` used to be its own Go module, so `go test ./...` from
+#      the repo root could not descend into it; e28eaa9 retired that
+#      module and ported its coverage to Python under scripts/tests/.
+#      The nested-module shape is the same one that already forced
+#      test-tools / test-tools-race and test-testenv / test-testenv-race
+#      into `make test` / `make test-race`.
 #   2. The Makefile's only Python invocation in its entire history was
 #      `check-installed-drift` -> agent_installation's
 #      tests.test_installed_block_drift. No target enumerated
@@ -613,7 +665,13 @@ test-testenv-precommit:
 # See SCRIPTS_TEST_MIN_TESTS above. The recipe parses the reported test
 # count and fails on an unparseable count, a zero count, or a count
 # below the floor, before propagating the suite's real exit status.
-test-scripts:
+#
+# Depends on `build`: scripts/tests/test_build_install_separation.py,
+# test_runtime_asset_provisioning.py and test_install_phase_binaries.py
+# all assert against $(BUILD_DIR), so without the artifacts this target
+# fails on a fresh checkout for a reason that has nothing to do with the
+# scripts. Same reasoning as `test`.
+test-scripts: build
 	@cd scripts && out=$$(python3 -m unittest discover tests 2>&1); status=$$?; \
 	  printf '%s\n' "$$out"; \
 	  n=$$(printf '%s\n' "$$out" | sed -n 's/^Ran \([0-9][0-9]*\) tests\?.*/\1/p' | tail -1); \
@@ -684,7 +742,15 @@ test-scripts:
 #      discover tests` line is preserved (it tests managed-block
 #      byte-for-byte parity in a controlled order and is not on this
 #      umbrella's path).
-test-agent-installation:
+#
+# Depends on `build` for the same reason `test` does:
+# tests/test_build_install_ownership.py asserts that $(BUILD_DIR)/mpm
+# exists and is a compiled binary, so a fresh checkout fails this target
+# on the very first ownership assertion without the artifacts. CI runs
+# the same suite directly (`cd agent_installation && python3 -m unittest
+# discover tests`) and therefore needs `make build` in the job — a make
+# prerequisite cannot help a line that never invokes make.
+test-agent-installation: build
 	@$(MAKE) test-agent-adapters; \
 	  ad_status=$$?; \
 	  cd agent_installation && out=$$(python3 -m unittest discover tests 2>&1); status=$$?; \
@@ -723,12 +789,15 @@ test-agent-installation:
 # plausible-looking summary and zero passes. The pass-count floor is
 # what turns that into an explicit refusal instead of a number.
 #
-# The node test runner wraps its summary in ANSI color codes (e.g.
-# `\033[34mℹ pass 117\033[39m`). The previous regex `^ℹ pass` did not
-# anchor past the leading SGR sequence and silently parsed an empty
-# match for every green run, hiding real failures behind a green gate.
-# The current runner strips ANSI escapes first, then extracts the pass
-# count. See the in-target comment for the shell/dash details.
+# The node test runner's default reporter is version-dependent
+# (TAP on Node 18/20.x, the "spec" form on Node >= 22.6). Pin it
+# to TAP with `--test-reporter=tap` so the output is stable across
+# every Node minor the project supports, then strip ANSI escapes
+# and match the TAP `# pass N` summary line. The previous recipe
+# matched `^ℹ pass` (the spec form) and silently parsed an empty
+# match against the TAP form, which is what the GitHub Actions
+# ubuntu-24.04 runner emits by default — that is the failure
+# that this fix closes.
 #
 # NOT INCLUDED: mpm-claude-code/tests/session_start_hook.test.sh. It is
 # a host-specific live check — it exports MPM_WORKSPACE="$HOME/.mpm" and
@@ -747,7 +816,7 @@ test-agent-adapters:
 	 command -v python3 >/dev/null 2>&1 || { \
 	   echo "[test-agent-adapters] FATAL: python3 not found on PATH." >&2; \
 	   exit 1; }; \
-	 py_total=0; js_total=0; failed=0; \
+	 py_total=0; js_total=0; ts_total=0; failed=0; \
 	 for d in $(AGENT_ADAPTERS); do \
 	   if [ ! -d "agent_installation/$$d/tests" ]; then \
 	     echo "[test-agent-adapters] FATAL: agent_installation/$$d/tests is missing." >&2; \
@@ -774,14 +843,32 @@ test-agent-adapters:
 	     echo "[test-agent-adapters] FATAL: agent_installation/$$d/tests is missing." >&2; \
 	     exit 1; \
 	   fi; \
-	   out=$$(cd "agent_installation/$$d" && node --test 'tests/*.test.js' 2>&1); status=$$?; \
+	   # The `node --test` invocation MUST receive concrete file \
+	   # paths, not a literal glob. Node 20 (the GitHub Actions \
+	   # ubuntu-24.04 runner) treats a literal pattern that does \
+	   # not match as "Could not find '<pattern>'" and exits 0, \
+	   # which trips the empty-summary FATAL downstream. Node 26 \
+	   # silently falls back to "0 tests" -- same failure mode, \
+	   # different surface. The fix is to expand the glob with the \
+	   # shell (portable POSIX `set -- <pattern>`) and pass the \
+	   # resulting concrete filenames via "$$@". The `[ -e "$$1" ]` \
+	   # guard distinguishes "glob matched something" from "glob \
+	   # matched nothing" (in which case $$1 is the literal pattern \
+	   # and the file-existence check fails). This mirrors the TS \
+	   # branch's "build an explicit file list, fail closed on \
+	   # empty" pattern (Makefile:929-937). \
+	   out=$$(cd "agent_installation/$$d" && { set -- tests/*.test.js; if [ ! -e "$$1" ]; then echo "[test-agent-adapters] FATAL: $$d has no .test.js files under tests/." >&2; echo "  AGENT_ADAPTERS_JS lists $$d, so its absence is a packaging error." >&2; exit 1; fi; node --test --test-reporter=tap "$$@" 2>&1; }); status=$$?; \
 	   printf '%s\n' "$$out"; \
-	   # node --test prints summary lines with ANSI color codes \
-	   # wrapping the bullet (e.g. `\\e[34mℹ pass 117\\e[39m`). The \
-	   # previous regex `^ℹ pass` did not anchor past the leading SGR \
-	   # sequence and silently parsed an empty match for every green \
-	   # run. Strip ANSI escapes first so the regex sees the actual \
-	   # summary line. \
+	   # node --test prints the TAP summary line as `# pass N`, \
+	   # optionally wrapped in SGR color codes (e.g. \
+	   # `\\e[32m# pass 117\\e[39m`). The previous parser regex \
+	   # `^ℹ pass` matched only the "spec" form (Node >= 22.6) and \
+	   # silently parsed an empty match against the TAP form \
+	   # (Node 18/20.x and `--test-reporter=tap`), which is what \
+	   # the GitHub Actions ubuntu-24.04 runner emits. The current \
+	   # runner pins the reporter to TAP with `--test-reporter=tap` \
+	   # (so the output is stable across Node 18/20/22/24/26) AND \
+	   # strips ANSI escapes before extracting `# pass N`. \
 	   # The escape byte is injected through a shell variable \
 	   # (ESC=$(printf '\033')) rather than a literal `\x1b` in \
 	   # the sed pattern.  Two reasons: (1) GNU Make preserves \
@@ -796,7 +883,7 @@ test-agent-adapters:
 	   # regardless of which shell runs the recipe. \
 	   ESC=$$(printf '\033'); \
 	   n=$$(printf '%s\n' "$$out" | sed -E "s/$${ESC}\\[[0-9;]*m//g" \
-	        | sed -nE 's/^ℹ pass ([0-9][0-9]*).*/\1/p' | tail -1); \
+	        | sed -nE 's/^# pass ([0-9][0-9]*).*/\1/p' | tail -1); \
 	   if [ -z "$$n" ]; then \
 	     echo "[test-agent-adapters] FATAL: $$d reported no passing-test count." >&2; \
 	     echo "  node --test exited 0 without a pass line — refusing to count it." >&2; \
@@ -810,6 +897,75 @@ test-agent-adapters:
 	   exit 1; \
 	   fi; \
 	 echo "[test-agent-adapters] JS: $$js_total passing tests (floor $(AGENT_ADAPTER_TEST_MIN_JS_TESTS))"; \
+	 # TypeScript-compiled JS suite gate. Every entry in \
+	 # AGENT_ADAPTERS_TS ships a `tsconfig.tests.json` and a `tests/` \
+	 # tree of `.test.ts` files. The local pin for the compiler is \
+	 # `node_modules/.bin/tsc` (the artifact of `npm ci` on the \
+	 # adapter's own devDependencies). We DO NOT depend on a globally \
+	 # installed TypeScript and DO NOT trigger an unpinned download \
+	 # at gate time — a missing local binary is a hard refusal below. \
+	 # The output of compilation is `--outDir`-controlled; we sort \
+	 # the resulting set deterministically and run `node --test \
+	 # --test-reporter=tap` against it the same way the JS branch \
+	 # above does. Each adapter's tsconfig is local, so a new entry \
+	 # added to AGENT_ADAPTERS_TS must ship a matching tsconfig. \
+	 # Bootstrap: on a fresh checkout `agent_installation/mpm-opencode/\
+	 # node_modules/` is absent; the FATAL below names the canonical \
+	 # `npm ci` step. The same step populates the dev-time payload the \
+	 # installer (`install.sh` Step 1) and the runtime (`install.sh` \
+	 # Steps 1-3) both rely on, so the gate's local-pin requirement \
+	 # matches the rest of the project's. \
+	 for d in $(AGENT_ADAPTERS_TS); do \
+	   if [ ! -d "agent_installation/$$d/tests" ]; then \
+	     echo "[test-agent-adapters] FATAL: agent_installation/$$d/tests is missing." >&2; \
+	     echo "  AGENT_ADAPTERS_TS lists it, so its absence is a packaging error." >&2; \
+	     exit 1; \
+	   fi; \
+	   if [ ! -f "agent_installation/$$d/tsconfig.tests.json" ]; then \
+	     echo "[test-agent-adapters] FATAL: agent_installation/$$d/tsconfig.tests.json is missing." >&2; \
+	     echo "  AGENT_ADAPTERS_TS lists $$d, but the per-adapter compile config is not provided." >&2; \
+	     exit 1; \
+	   fi; \
+	   tsc=$$(cd "agent_installation/$$d" && pwd -P)/node_modules/.bin/tsc; \
+	   if [ ! -x "$$tsc" ]; then \
+	     echo "[test-agent-adapters] FATAL: $$d has no local TypeScript compiler at node_modules/.bin/tsc." >&2; \
+	     echo "  Run 'npm ci' inside agent_installation/$$d to populate devDependencies." >&2; \
+	     echo "  The gate deliberately does not fall back to a global tsc: a globally" >&2; \
+	     echo "  installed compiler version is unpinned here and would couple the" >&2; \
+	     echo "  output to whatever the host happens to ship." >&2; \
+	     exit 1; \
+	   fi; \
+	   printf '[test-agent-adapters] %s: compiling TypeScript tests via local tsc...\n' "$$d" >&2; \
+	   if ! (cd "agent_installation/$$d" && "$$tsc" -p tsconfig.tests.json 2>&1); then \
+	     echo "[test-agent-adapters] FATAL: $$d TypeScript compile failed." >&2; \
+	     exit 1; \
+	   fi; \
+	   js_files=$$(cd "agent_installation/$$d" && ls tests-build/*.test.js 2>/dev/null | sort); \
+	   if [ -z "$$js_files" ]; then \
+	     echo "[test-agent-adapters] FATAL: $$d compiled no .test.js files under tests-build/." >&2; \
+	     echo "  The compile did not produce any runnable output (regression class: TS suite" >&2; \
+	     echo "  collects zero tests and is silently accepted as a green gate)." >&2; \
+	     exit 1; \
+	   fi; \
+	   js_glob=$$(printf '%s\n' "$$js_files" | tr '\n' ' '); \
+	   out=$$(cd "agent_installation/$$d" && node --test --test-reporter=tap $$js_glob 2>&1); status=$$?; \
+	   printf '%s\n' "$$out"; \
+	   ESC=$$(printf '\033'); \
+	   n=$$(printf '%s\n' "$$out" | sed -E "s/$${ESC}\\[[0-9;]*m//g" \
+	        | sed -nE 's/^# pass ([0-9][0-9]*).*/\1/p' | tail -1); \
+	   if [ -z "$$n" ]; then \
+	     echo "[test-agent-adapters] FATAL: $$d reported no passing-test count." >&2; \
+	     echo "  node --test exited 0 without a pass line — refusing to count it." >&2; \
+	     exit 1; \
+	   fi; \
+	   ts_total=$$((ts_total + n)); \
+	   if [ $$status -ne 0 ]; then failed=1; fi; \
+	 done; \
+	 if [ $$ts_total -lt $(AGENT_ADAPTER_TEST_MIN_TS_TESTS) ]; then \
+	   echo "[test-agent-adapters] FATAL: collected $$ts_total TS passing tests, floor is $(AGENT_ADAPTER_TEST_MIN_TS_TESTS)." >&2; \
+	   exit 1; \
+	 fi; \
+	 echo "[test-agent-adapters] TS: $$ts_total passing tests (floor $(AGENT_ADAPTER_TEST_MIN_TS_TESTS))"; \
 	 if [ $$failed -ne 0 ]; then \
 	   echo "[test-agent-adapters] KNOWN FAILURES PRESENT — this target is not a gate." >&2; \
 	   echo "  See the counts in this target's Makefile comment. Fix them" >&2; \
@@ -830,23 +986,69 @@ test-agent-adapters:
 # dependency; promoted to a dedicated target so the regression class
 # above cannot recur silently. Run pre-release.
 #
+# OWNERSHIP. `release_acceptance` is a separate Go module (its own
+# go.mod), so `./...` from the root cannot descend into it. The
+# canonical "is this release shippable?" gate is `make release-gate`
+# below, which composes `test-race` and `test-release`. CI runs both
+# in its own job so a green PR cannot mask release-only regressions
+# — see .github/workflows/build-test.yml for the `release-gate` job.
+#
+# NON-VACUITY GUARD. Same failure shape as SCRIPTS_TEST_MIN_TESTS:
+# `go test -list <regex>` exits 0 when nothing matches, so a renamed
+# test or a moved package would turn `release-gate` into a silent
+# pass. The recipe counts via `go test -list` first and fails on an
+# unparseable, zero, or below-floor count BEFORE running the suite.
+# The list output is discarded so the test run itself stays silent.
+#
 # RUN forwards to the release_acceptance package; default is all tests.
 test-release: build
-	cd release_acceptance && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -count=1 -tags fts5 $(RELEASE_RUN) ./...
+	@mod=release_acceptance; \
+	  n=$$(cd $$mod && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -list '.*' ./... 2>/dev/null | grep -cE '^Test' || true); \
+	  if [ -z "$$n" ] || [ "$$n" -eq 0 ]; then \
+	    echo "[test-release] FATAL: collected 0 tests, floor is $(RELEASE_TEST_MIN_TESTS)." >&2; \
+	    echo "  \`go test -list\` matched nothing — the release_acceptance module is empty" >&2; \
+	    echo "  or the regex is wrong. A silent pass here is indistinguishable from a green suite." >&2; \
+	    exit 1; \
+	  fi; \
+	  if [ "$$n" -lt $(RELEASE_TEST_MIN_TESTS) ]; then \
+	    echo "[test-release] FATAL: collected $$n tests, floor is $(RELEASE_TEST_MIN_TESTS)." >&2; \
+	    echo "  A rename or deletion has probably silently reduced this gate." >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "[test-release] collected $$n tests (floor $(RELEASE_TEST_MIN_TESTS))"; \
+	  cd $$mod && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -count=1 -tags fts5 $(RELEASE_RUN) ./...
 
 # Aggregate release gate. Composes the broad race-detector suite with
-# the cross-agent continuity / public-CLI subprocess suite. The
-# subprocess suite requires `make build` so $(BUILD_DIR)/mpm is available
-# to the public-CLI test cases; `make test-race` does NOT depend on
-# build (it's the inner dev-loop race gate), so we keep test-race and
-# test-release as separate leaf targets and compose them at the
-# release-gate level rather than threading build into every test-race
-# invocation. Release_acceptance cannot silently fall outside future
-# release validation while this aggregate exists.
+# the cross-agent continuity / public-CLI subprocess suite. Both leaves
+# depend on `build` so $(BUILD_DIR)/mpm is available to the subprocess
+# test cases that shell out to it; that dependency used to live only on
+# test-release, on the reasoning that test-race was the inner dev-loop
+# gate and should stay build-free. A no-op rebuild is 0.35s, so that
+# reasoning cost a broken fresh-clone pre-merge gate for nothing.
+# Release_acceptance cannot silently fall outside future release
+# validation while this aggregate exists.
+#
+# Re-anchoring note (2026-10-15): an earlier cut of this comment
+# promoted the more conservative `release-gate: build test-release`
+# shape on the grounds that the `gate` job already covers the race
+# detector and `make test-scripts`, so depending on `test-race` here
+# would re-run them inside the release-gate job. That argument
+# overrides a deliberate contract: `scripts/tests/`
+# `test_makefile_agent_adapter_wiring.TestGateReachability` (added
+# in 467d520, alongside the rest of the #14 wiring) pins
+# `release-gate` as a comprehensive sweep that reaches
+# `test-agent-installation` and `test-agent-adapters`. Pinning a
+# contract is itself the proof that the work is intentional, not
+# accidental duplication, so the right correction is to keep the
+# reach the test demands and accept the extra `test-scripts`
+# invocation per CI run as the cost of the explicit design.
 release-gate: test-race test-release
 
 # Run tests with the race detector enabled.
-# Mirrors `make test` but adds `-race`. Both flags are required:
+# Mirrors `make test` but adds `-race`. Depends on `build` for the same
+# reason `test` does — the cmd/mpm subprocess tests need $(BUILD_DIR)/mpm,
+# and the race gate is worthless if it cannot run on a fresh clone.
+# Both flags are required:
 #   * `-race`                   — race detector for goroutine/data races
 #   * `CGO_CFLAGS=...FTS5`      — C-level compile flag enabling FTS5 in SQLite
 #   * `-tags fts5`              — Go build tag selecting the FTS5 driver path
@@ -854,7 +1056,7 @@ release-gate: test-race test-release
 # breaks the search, pointer-resolution, and scheduler-triggers code paths
 # that unconditionally assume FTS5 is compiled in. Both flags are part of
 # the substrate's mandatory FTS5 integrity guarantee — see CLAUDE.md §3.
-test-race:
+test-race: build
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./cmd/...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/telemetry/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./...
@@ -929,12 +1131,21 @@ refresh-installed:
 # `--check` mode validated the snippet, but no check validated the
 # next hop in the chain (snippet -> installed persistent file).
 #
+# This is an OPERATIONAL check against this machine's live install, and
+# is deliberately NOT part of `make test`. A source gate that fails
+# whenever the installed instructions predate the source cannot be
+# passed by a correct source change and cannot be trusted to mean "the
+# source is broken" when it does fail — so canonical `make test` and
+# `make test-race` validate the source tree only (including hermetic
+# coverage of this same detection logic against a synthetic install
+# tree). This target opts in to the machine-specific scope.
+#
 # `make refresh-installed` is the canonical repair path. This
 # target is read-only (does not modify the install targets); on
 # failure it prints the per-host drift, first divergent line, and
 # the repair command.
 check-installed-drift:
-	@cd $(AGENT_INSTALL_DIR) && python3 -m unittest tests.test_installed_block_drift -v \
+	@cd $(AGENT_INSTALL_DIR) && MPM_CHECK_INSTALLED_DRIFT=1 python3 -m unittest tests.test_installed_block_drift -v \
 	    || { echo "    FAIL: installed managed blocks drifted from canonical render; run \`make refresh-installed\` to repair" >&2; exit 1; }
 
 # Read-only diagnostic for installed managed blocks. Distinguishes
@@ -963,7 +1174,10 @@ help:
 	@echo "    make service             - Alias for service-scheduler"
 	@echo "    make uninstall-service   - Remove the installed systemd user unit"
 	@echo "    make gen-cli             - Regenerate the CLI catalogue in docs/SPEC.md §8"
-	@echo "    make test                - Run go tests (root + internal/core + scheduler + tools)"
+	@echo "    make test                - THE test entry point. Builds first, then runs the full"
+	@echo "                              suite (root + internal/core + scheduler + critic + tools +"
+	@echo "                              scripts + agent_installation). Correct on a fresh clone:"
+	@echo "                              clone, then 'make test'. No separate build step needed."
 	@echo "    make test-race           - Same, under -race (the pre-merge gate)"
 	@echo "    make test-tools          - Run the full internal/core/tools module"
 	@echo "    make test-tools-precommit- Run the tools guard subset the pre-commit hook uses"

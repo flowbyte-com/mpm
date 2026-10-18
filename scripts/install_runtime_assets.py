@@ -109,6 +109,67 @@ ASSET_DIRS = {
     "drills": ".yaml",
 }
 
+# Explicit, enumerated assets. ASSET_DIRS cannot express these because it is
+# a (directory, suffix) pair and onboarding needs files that share a
+# directory with different suffixes plus per-adapter manifests.
+#
+# `mpm onboard` inspects installed hosts by running
+# agent_installation/scripts/check_installed_managed_blocks.py, which
+# locateHostInspector() (cmd/mpm/onboard_cmds.go:1026) resolves
+# repo-relative: MPM_REPO_ROOT, then up from the executable, then up from
+# the CWD. An installed binary at ~/.mpm/bin/mpm satisfies none of those
+# unless invoked from a source checkout, so onboard reports "inspection
+# unavailable" from anywhere else. Staging these files into the runtime
+# root is what makes the executable's own upward walk succeed.
+#
+# Both halves are required. Staging the .py files alone is WORSE than
+# staging neither: check_installed_managed_blocks.py:238-249 reads
+# AGENT_INSTALLATION/<adapter>/reconcile.json and fails closed to ABSENT
+# when the manifest or the reconciler module is missing, so a half-staged
+# install converts "I could not look" into a false "no hosts installed".
+ONBOARDING_SUPPORT = [
+    "agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md",
+    "agent_installation/scripts/check_installed_managed_blocks.py",
+    "agent_installation/scripts/managed_block_convergence.py",
+    "agent_installation/scripts/reconcile_managed_blocks.py",
+    "agent_installation/scripts/render_managed_blocks.py",
+    "agent_installation/scripts/stage_runtime_package.sh",
+]
+
+# The shared behavioural protocol, staged so the path the managed block
+# advertises actually resolves.
+#
+# Every installed managed block carries this header line:
+#
+#   <!-- Full behavioural protocol: ~/.mpm/agent_installation/mpm-agent-protocol.md -->
+#
+# It has advertised that runtime path since the block was introduced,
+# but nothing ever staged the file, so on every installed machine that
+# pointer resolved to a path that did not exist. An agent that followed
+# it — which is exactly what it is invited to do — found nothing.
+#
+# The protocol is the detailed semantics behind the managed block's
+# summary rules (AUTO_AGENT_INSTALL.md names it as source-of-truth tier
+# 3). The block is the always-loaded summary; this document is what an
+# agent reads when it needs the full contract. Without it installed,
+# that distinction is invisible.
+#
+# This stages the existing canonical file. It does not create a second
+# copy: the repo file remains the single source of truth, and the
+# runtime root holds a provisioned asset like every other entry above.
+AGENT_PROTOCOL_DOCS = [
+    "agent_installation/mpm-agent-protocol.md",
+]
+
+# Per-adapter templates/*.snippet files are discovered by scan (see
+# discover_source_assets), not listed here. They are NOT optional: each
+# reconcile.json names its snippet via "@/templates/<name>.snippet", and
+# render_managed_blocks.py resolves that against the staged adapter
+# directory. Without them the inspector reaches main(), passes the
+# existence checks, and then fails while rendering — reported as
+# "inspector failed: exit status 2" rather than as a missing asset, which
+# is a materially worse diagnostic than a clean absence.
+
 # Runtime directories are created 0755 and definition files 0644: owned
 # by the installing user and freely editable, because the operator is
 # expected to customize them. This deliberately matches what a
@@ -325,6 +386,44 @@ def discover_source_assets(source_root: Path) -> list[str]:
         for entry in sorted(d.iterdir()):
             if entry.is_file() and entry.suffix == suffix:
                 found.append(f"{subdir}/{entry.name}")
+
+    # Onboarding support and the shared behavioural protocol. The
+    # enumerated lists are used verbatim; a missing entry is skipped
+    # rather than fatal, because a partial source tree (a per-adapter
+    # checkout, a vendored install) legitimately lacks some of them and
+    # should still provision what it does have.
+    for rel in ONBOARDING_SUPPORT + AGENT_PROTOCOL_DOCS:
+        if (source_root / rel).is_file():
+            found.append(rel)
+
+    # Per-adapter reconcile.json and templates. Enumerated by scan rather
+    # than hardcoded, so adding an adapter needs no change here — the
+    # omission that made this whole gap invisible is exactly the kind a
+    # static list invites.
+    ai = source_root / "agent_installation"
+    if ai.is_dir():
+        for entry in sorted(ai.iterdir()):
+            if not entry.is_dir():
+                continue
+            manifest = entry / "reconcile.json"
+            if manifest.is_file():
+                found.append(f"agent_installation/{entry.name}/reconcile.json")
+            for tmpl in sorted(entry.glob("templates/*.snippet")):
+                if tmpl.is_file():
+                    # `entry` is absolute, so glob returns absolute paths;
+                    # every other entry here is source-root relative.
+                    found.append(tmpl.relative_to(source_root).as_posix())
+            # Per-adapter installer modules. SECTION_BUILDERS
+            # (check_installed_managed_blocks.py:149) maps an adapter to a
+            # module it imports by file path to build the expected block,
+            # and those modules import their own siblings (jsonc_config,
+            # claude_mcp_config). Staging the whole scripts/ directory per
+            # adapter rather than the one mapped module avoids a partial
+            # import graph that fails only for some adapters.
+            for mod in sorted(entry.glob("scripts/*.py")):
+                if mod.is_file():
+                    found.append(mod.relative_to(source_root).as_posix())
+
     return sorted(found)
 
 

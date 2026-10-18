@@ -289,6 +289,29 @@ func getDBConcrete() *internal.DatabaseManager {
 	return nil
 }
 
+// getDBReadOnly opens a fresh read-only DatabaseManager for
+// observational inspection. Mirrors getDB's shape (resolves the
+// ambient workspace via config.GetMPMDir) but:
+//
+//   - Does NOT populate the dbManager singleton. The read-only
+//     handle is not the process-wide writer; the writable
+//     singleton and the read-only handle are distinct lifecycles.
+//   - Returns a fresh handle per call. The caller owns the
+//     returned *DatabaseManager and must Close it when done.
+//   - Returns ErrCoordinatedInspectionUnavailable (wrapped) when
+//     the maintenance lock is absent. The caller renders this as
+//     a top-level "Database" check FAIL with a remediation hint.
+//   - Returns ErrReadOnlyDatabaseNotFound (wrapped) when the
+//     database file is missing. The caller renders this as a
+//     top-level WARN with a "run a write command to create it"
+//     hint, preserving the existing missing-database severity.
+//
+// Each call opens a fresh *sql.DB; the cost is one open per doctor
+// invocation, which is negligible.
+func getDBReadOnly() (*internal.DatabaseManager, error) {
+	return internal.NewDatabaseManagerReadOnly("")
+}
+
 // getMemoryStore returns a MemoryStore backed by the shared database manager.
 // Lazily initializes dbManager if nil.
 func getMemoryStore() *internal.MemoryStore {

@@ -552,13 +552,48 @@ When new evidence appears, a memory is challenged, a theory is created, evidence
 ```
 challenge ─────────────────────────────────────────────────▶ [pending theory]
     │
-    ├── challenge restore ──────────────────────────▶ [theory: disproven]
+    ├── challenge restore ──────────────────────────▶ [theory: disproven, if resolvable]
     │
     └── shred ─────────────────────────────────────▶ [theory: deleted]
 ```
 
-- **`mpm challenge <id> "<evidence>"`** — atomic: patch memory metadata, create theory with back-link. The `mpm_memory action=challenge` tool additionally weakens the stored weight by 2 and records the pre-challenge value in metadata (`challenged_prior_weight`). A negative or inverted reduction is rejected outright — challenging knowledge can never increase its rank.
-- **`mpm challenge restore <id>`** — atomic: resolve theory as disproven, clear memory flags, and restore the recorded pre-challenge weight so the memory returns to its exact prior epistemic standing.
+- **`mpm challenge <id> "<evidence>"`** — atomic: apply the challenge state, create the theory with a back-link, neutralize the memory's existing evidence. The challenge state is written by the same shared primitive the other two challenge writers use (see the challenge recovery contract below), so it records the pre-challenge values a restore needs and records `challenged_via: challenge_theory`. The `mpm_memory action=challenge` tool additionally weakens the stored weight by 2 and records the pre-challenge value in metadata (`challenged_prior_weight`). A negative or inverted reduction is rejected outright — challenging knowledge can never increase its rank.
+- **`mpm challenge restore <id>`** — atomic: the memory half clears the challenged flags and puts back every column the challenge recorded a prior for; the theory half resolves the linked theory as disproven. The memory half runs first inside the single transaction, so a theory-side failure rolls the memory half back rather than committing a half-reversal. Restoring the recorded pre-challenge weight returns the memory to its prior *ranking*; it does not re-promote *belief* — confidence stays at the challenged floor and fresh evidence must re-earn it (see the state ledger below). The two halves report separately, because only one of them is always recoverable (see below).
+
+  **Partial-success semantics.** A restore needs a `challenged_theory_id` to resolve, and memories challenged by paths that predate that contract (notably the retired auto-challenge defect) store prose in that field instead of an id. There is no theory row to resolve in that case, and MPM does not go looking for a plausible substitute — guessing which theory an operator meant is how an unrelated theory gets marked disproven. The memory half still runs (the pre-challenge weight is genuinely recorded, so reinstating it is safe), and the result reports `complete: false` with `theory_resolution: "not_found"` and a `theory_warning` naming the offending reference. `theory_status` is `disproven` only when a theory row was actually updated. The CLI prints the partial outcome and exits 0; a machine caller should branch on `complete` / `theory_resolved` rather than on exit status. Refusing the restore outright would leave exactly those memories unrecoverable, which is the condition the operator is trying to repair.
+
+**Challenge recovery contract.**
+
+Three paths set `status=challenged` on a memory. All three share one primitive (`internal/core/challenge_state.go`) that applies the metadata and the reduction as a single statement inside the caller's transaction, so the record of what changed cannot drift from what changed.
+
+| Writer | Store | Changes | `challenged_via` | Theory link |
+|---|---|---|---|---|
+| `mpm challenge`, `mpm_memory action=challenge`, `ChallengeMemoryWithTheory` | `memories` | reduces `weight`; overwrites `confidence` with the challenged floor; expires the memory's `evidence` rows; resets the `runtime_*` decay accumulators | `challenge_theory` | `challenged_theory_id` → a pending theory a restore marks disproven |
+| `--apply` on a decisive-margin row (`applyResolution`) | `shared.memories` | reduces `weight` and `retrieval_priority` | `contradiction_resolution` | none — there is no theory to disprove, and none is fabricated |
+| `ResolveArbitrationTheory` (`applyArbitrationResolution`) | `shared.memories` | reduces `weight` and `retrieval_priority` | `operator_arbitration` | none; the arbitrated theory is recorded under `arbitration_theory` and was already closed as `resolved` by the operator |
+
+A writer records a baseline (`challenged_prior_*`) for **every column it reduces and only those columns**. A restore reads what is present and puts back exactly that: an absent key is not a lost value, it is the claim that this challenge never moved the column. So the challenge surfaces — which reduce weight but not retrieval priority — do not record a retrieval-priority baseline, and a restore cannot clobber an unrelated later adjustment to it. A restore clears **every** `challenged_prior_*` key it finds, so a memory that is no longer challenged never carries a leftover baseline.
+
+**What a challenge changes, and what a restore puts back.** This is the complete ledger, because "restorable" is not the same as "restored":
+
+| State a challenge changes | After a restore | Why |
+|---|---|---|
+| `weight` | **restored** to the recorded prior | the slash is the thing being reversed |
+| `retrieval_priority` (Arc 2 writers) | **restored** to the recorded prior | ditto |
+| `confidence` | **reset to the challenged floor, not restored** | F7.1: a restoration re-establishes standing but refuses to re-promote belief |
+| `evidence.expires_at` on the memory's supporting rows | **not reversed** | the same F7.1 rule — the evidence that produced the prior confidence must not come back with it. The rows stay in place as the audit trail |
+| `last_accessed_at`, `runtime_seconds_since_access`, `runtime_last_accrued_at` | **not restored** | time-derived operational state. Rewinding the decay clock would grant decay credit the memory never earned, and a stale access stamp would misreport when the memory was last touched |
+| `updated_at`, `challenged_at` | **stamped, not restored** | ordinary operational timestamps |
+
+`challenged_prior_confidence` is therefore recorded but **forensic only**: only that key's *presence* is load-bearing, and it tells the restore to reset the column to the floor rather than reinstate the prior. Restoring that prior — or un-expiring the evidence behind it — would re-promote precisely the belief an operator flagged as doubtful, which is why the two behaviours are one policy and not two. Fresh evidence re-earns confidence.
+
+The recorded baseline is the **first** one. A repeated challenge on an already-challenged memory still restores to where the memory stood before the first one, because any later value already includes the earlier slash.
+
+`mpm challenge restore` reaches all three writers and both stores: it locates the memory in the local table first and then in `shared.memories` when the shared DB is attached, reports which one it acted on as `memory_store`, and echoes the writer as `challenge_via`. `weight_restored`, `retrieval_priority_restored` and `confidence_reset` say which columns were actually put back.
+
+**Theory-free challenges restore completely.** A challenge with no theory reference yields `theory_resolution: "not_applicable"` and `complete: true`. That is a distinct outcome from `not_found` — reporting it as a failure would send an operator looking for a theory that was never created.
+
+**Historical rows are not retroactively repaired.** Memories challenged before this contract existed carry `status=challenged` with no recorded baseline. A restore of such a row fails with an explicit "cannot be reversed through MPM" error naming the writer, rather than the misleading `is not challenged`, and MPM never reconstructs a prior value it never stored — the memory may have been reinforced since, and an invented value would be a number that never existed. Recovering those rows is an out-of-band decision, not something `mpm challenge restore` can do for you.
 - **`mpm shred <id>`** — atomic: cascade-delete memory + linked theory + topic memberships.
 - **`mpm ops gc --shred-negative`** — shreds only memories with weight<0 AND a proven theory exists. Negative weight alone is never sufficient — the theory provides the evidence chain.
 
@@ -651,7 +686,7 @@ Six canonical failure modes and the mechanism that handles each:
 
 **Premature theory confirmation.** A theory was marked confirmed with thin evidence, or new evidence has since emerged that contradicts it. *Recovery:* the challenge lifecycle is non-monotonic. A confirmed theory can be challenged again, re-entering the evidence-collection state with a fresh back-link. There is no "settled science" path — theories are revisable for the lifetime of the database.
 
-**Conflicting shared rules.** Agent A writes `Always use snake_case for DB columns`; Agent B writes `Always use camelCase for DB columns`. *Recovery:* every shared write produces a near-miss scan against existing rules via `shared.contradiction_log`. Detection runs opportunistically inside `mpm_memory action=query` — no separate ticker. Near-misses carry a protobuf-shape score combining confidence, freshness, and reinforcement. The operator is presented with both rules and chooses via `ResolveArbitrationTheory`; MPM does not silently overwrite either side.
+**Conflicting shared rules.** Agent A writes `Always use snake_case for DB columns`; Agent B writes `Always use camelCase for DB columns`. *Recovery:* an explicit `mpm ops resolve-contradictions --propose` scan produces near-miss candidates against existing rules via `shared.contradiction_log` — **not** automatically on every write or query, because cosine similarity cannot distinguish a contradiction from a near-duplicate. Candidates carry a protobuf-shape score combining confidence, freshness, and reinforcement. The operator is presented with both rules and chooses via `ResolveArbitrationTheory`; MPM does not silently overwrite either side.
 
 **Confidence decay drift.** A memory's weight decayed to a wrong value because the lifecycle sweep ran in an unexpected state, or because the underlying evidence ledger had a bug. *Recovery:* §10.1 Self-Healing Integrity Loop. Concept-drift detection quarantines affected memories (`concept_drift: true`), proposes pending theories, and survives restarts via SQLite-native dedup. The system errs on the side of *escalating to a theory* rather than silently fixing — wrong weight corrections are far more dangerous than visible ones.
 
@@ -1102,6 +1137,26 @@ with `vector_weight = 0.5` by default. Use `--semantic` to drop BM25 and search 
 
 > **Implementation note:** The hybrid scoring function lives in `internal/core/hybrid_search.go`. The default embedding model is `nomic-embed-text` (768-dim), served by a **locally running Ollama instance** as the supported embedding inference provider. Ollama performs inference and returns vectors to MPM — the vectors are then persisted in the same SQLite database (alongside the memories they describe), partitioned into Voronoi cells by the shared IVF index (§6.5 Layer 1). Ollama is an inference dependency, not a separate persistence substrate or vector database; the configured embedding component can also be set to `"disabled"` (NullProvider) when semantic recall is not required.
 
+#### Retrieval provenance in the query response
+
+*A result set that does not say how it was found cannot be weighed — because "five results" and "five relevant results" are different claims.*
+
+`mpm_memory action=query` returns a `retrieval` envelope alongside `memories`, and every row carries a `retrieval_source`:
+
+| Field | Meaning |
+|---|---|
+| `retrieval.mode` | `hybrid` when an embedding provider is configured and the semantic arm ran; `lexical_only` when it did not. A `lexical_only` mode means a zero-hit cannot be blamed on semantic retrieval — no semantic retrieval was attempted. |
+| `retrieval.sources` | Count of returned rows per channel (`hybrid`, `fts5`, `vector`, `lexical`). |
+| `retrieval.semantic_only` | `true` when **every** returned row came from the vector arm with no lexical match. `false` when there are no rows. |
+| `retrieval.vector_weight` / `retrieval.retrieval_threshold` | The scoring configuration in force, so an unexpected ordering can be attributed to a ranking choice rather than a data problem. |
+| `memories[].retrieval_source` | Per-row channel: `hybrid`, `fts5`, `vector`, or `lexical` (full-text fallback path). |
+
+`sources` and `mode` are deliberately not derivable from one another. "No embedding provider configured" and "provider configured, nothing matched" both yield a lexical-only result set, but they call for opposite responses from the caller — fix the configuration, versus rephrase the query.
+
+`semantic_only` is the field that carries the weight. A `vector` row is an embedding near-neighbour, not a match against the query's terms, and with a cosine-similarity arm such rows can be returned for queries with no meaningful relationship to their content. When `semantic_only` is true, the result count should be read as *"N nearest neighbours"*, not *"N answers"*.
+
+**Zero-hit diagnostic.** When a query returns zero rows and carries more than one FTS5 term, the response includes a `hint` naming the terms FTS5 ANDed together and stating that the failure is a match failure rather than a score filter. It is deliberately narrow: lexical-only rows are exempt from `retrieval_threshold` (BM25 is naturally negative, so a floor would delete nearly every useful lexical hit) and the default `-3.0` cannot fire against the vector arm at all (cosine similarity in `[0,1]` scaled by a `[0,1]` weight). A zero-hit is therefore a **match** failure with one unmatchable term, and the recovery is to reduce the query — not to adjust a threshold that was never applied.
+
 **Memory provenance (`mpm recall --why`):** every result can be annotated with the score breakdown that retrieved it. Pass `--why` to see per-result `[why]` lines showing the FTS5 terms that matched, the cosine similarity (when vector search contributed), and the stored weight / reinforcement_count metadata. The metadata fields are surfaced for **provenance / display only** — they are not part of the ranking score, so changes in `reinforcement_count` do not move a memory up or down the list. Useful for "why did the agent pick this memory?" introspection without re-running the search.
 
 > **Retrieval ranking determines what is surfaced. Confidence determines what is believed.** A frequently retrieved artifact is not necessarily a trusted artifact.
@@ -1378,7 +1433,70 @@ Local FTS5 is a keyword index. For semantic recall over the shared DB, MPM runs 
 
 When two memories disagree, the system has to notice. `shared.contradiction_log` is the detection surface. Every shared write that produces a near-miss against an existing memory is logged with a protobuf-shape score (a weighted combination of confidence, freshness, and reinforcement). Detection runs **inside `mpm_memory action=query`'s result set** — opportunistic, not polled. There is no background ticker, no separate timer.
 
-If the two candidates land within a small margin of each other, the system **does not** auto-resolve. It writes a pending theory and waits for an operator. A clean winner can be auto-resolved; a coin-flip always escalates.
+> **Superseded 2026-10-13 — detection no longer runs inside query.** The
+> query-time detection described above was removed. Cosine similarity
+> establishes that two memories are *related*; it cannot establish that their
+> claims *conflict*. Running the scan inside every query meant a read
+> persisted unverified candidates on every invocation, from every client,
+> including diagnostics — measured at 78 proposals across 5 benchmark
+> queries, with a single unrelated query producing 35, all of them pairs
+> within one duplicate cluster and none resolved.
+>
+> Discovery is now an **explicit operator action**:
+> `mpm ops resolve-contradictions --propose`. Semantic retrieval writes
+> nothing to this queue. The scoring and arbitration described below are
+> unchanged; only the trigger moved. See
+> [`RECALL-MUTATION.md`](./RECALL-MUTATION.md).
+
+> **Superseded 2026-10-14 — `--apply` no longer treats a queue row as its own
+> justification.** `--apply` may penalise a memory only for a row an operator
+> has explicitly **adjudicated**. Similarity is evidence of relatedness, not of
+> logical contradiction, and a batch `--apply` over a freshly-proposed candidate
+> queue cannot be the thing that decides 100 pairwise judgements at once.
+> Unadjudicated rows now fail closed: no weight moves, no status flips, no
+> resolution memory is written, and the row is reported as
+> `NEEDS ADJUDICATION` rather than discarded or dumped as an error per row.
+>
+> Adjudication is its own explicit, per-row act —
+> `mpm ops resolve-contradictions --adjudicate=ID:REASON`, with the reason
+> mandatory because it is the audit trail. There is deliberately no force flag
+> and no batch form. It is recorded as an additive `adjudicated:<reason>`
+> segment on the row's existing `detected_by`, so no schema change, migration
+> or backfill is involved and the detection provenance that brought the row to
+> the queue stays legible next to the judgement made about it.
+>
+> Rows predating this change keep their original `detected_by` and are read
+> exactly as written — which means they are *unverified*, and must be
+> adjudicated before they may be applied. See
+> [`RECALL-MUTATION.md`](./RECALL-MUTATION.md).
+>
+> **The contradiction slash is reversible from both adjudication paths.**
+> Three writers set `status=challenged`, and all three now record the
+> pre-challenge values a restore needs, through one shared primitive.
+>
+> | Path | Recorded |
+> |---|---|
+> | `mpm challenge` / `mpm_memory action=challenge` / `ChallengeMemoryWithTheory` | `challenged_theory_id`, `challenged_prior_weight` — **restored**; `challenged_prior_confidence` — **forensic only**, the restore resets confidence to the challenged floor rather than re-promoting it (F7.1) |
+> | `--apply` on a decisive-margin row (`applyResolution`) | `challenged_by_resolution`, `challenged_prior_weight`, `challenged_prior_retrieval_priority` — **restorable** |
+> | `ResolveArbitrationTheory` (`applyArbitrationResolution`) | `challenged_by_resolution`, `arbitration_theory`, `challenged_prior_weight`, `challenged_prior_retrieval_priority` — **restorable** |
+>
+> The two adjudication paths previously reduced the loser's `weight` and
+> `retrieval_priority` through an inline `UPDATE shared.memories` that
+> recorded no prior values and no theory reference, so `mpm challenge restore`
+> rejected such a memory outright (`is not challenged`) — the same message an
+> untouched memory got. `ResolveArbitrationTheory` was the more misleading of
+> the two: it is the documented close-the-loop operator workflow and reads as a
+> reversible decision. Adjudication gates *who* may trigger the slash; the
+> slash is now reversible on both paths. See
+> the challenge recovery contract in §4.5.
+>
+> Rows slashed before this contract existed are **not** retroactively
+> restorable: their columns were reduced and nothing records what they were.
+> `mpm challenge restore` refuses those with an explicit "cannot be reversed
+> through MPM" error rather than guessing, and no backfill or migration
+> rewrites them.
+
+If the two candidates land within a small margin of each other, the system **does not** auto-resolve. It writes a pending theory and waits for an operator. A clean winner can be auto-resolved — but only once an operator has adjudicated the pair; a coin-flip always escalates.
 
 #### Layer 3 — Conflict Resolution + Arbitration Closure
 
@@ -1707,6 +1825,7 @@ mpm ops ingest <path>
 # Init (one-time bootstrap — idempotent)
 mpm ops init directives       # Seed baseline cognitive directives
 mpm ops init skills           # Seed baseline skill library (status, health, etc.)
+mpm ops init topics           # Link existing theories/decisions memories to their topics
 
 # Context
 mpm ops switch
@@ -1723,7 +1842,8 @@ mpm ops stance synthesize <name> [flags]
 
 # Multi-agent shared epistemology
 mpm ops shared [status]
-mpm ops resolve-contradictions [--apply] [--json]      # Arc 1: dry-run inspect or apply resolutions
+mpm ops resolve-contradictions [--propose] [--apply] [--json]  # Arc 1: dry-run inspect, explicit candidate scan, or apply resolutions
+        [--adjudicate=ID:REASON]                             #    (per-row; only adjudicated rows may be applied)
 mpm ops broadcast <memory_id>                          # Arc 2: fan-out an event wake
         [--kind=rule|resolution|arbitration|memory]    #    (auto-detected from collection if omitted)
         [--rationale="..."]                            #    (REQUIRED for kind=memory)
@@ -1865,6 +1985,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`memory`** — Manage memories
 - **`migrate`** — Import from markdown/JSON (alias to ingest for non-SQLite sources)
 - **`mode`** — Manage modes
+- **`onboard`** — Guided setup and verification of an MPM installation
 - **`ops`** — Engine-room operations (maintenance, diagnostics)
 - **`patch-memory`** — Patch memory metadata
 - **`persona`** — Manage personas
@@ -2634,7 +2755,7 @@ This section is the operator-facing view of the same model: what runs, when, and
 
 | Surface | Behaviour |
 | --- | --- |
-| `mpm doctor` | Performs an active real-network probe of every generative + embedding binding. Concurrent (4 fan-out), 12s per-probe timeout, persists bounded results to `system_config[model_probe_results]`. |
+| `mpm doctor` | Performs an active real-network probe of every generative + embedding binding. Concurrent (4 fan-out), 12s per-probe timeout. Live results are rendered into the report but **NOT persisted** to `system_config[model_probe_results]` (the doctor is observational; probe results are surfaced in the report and refreshed on each invocation). |
 | `mpm` / `mpm status` | Read-only on the probe cache. Renders `Models  ✓ N/N healthy · checked Ns ago`. Stale or missing cache surfaces `? not recently verified · run 'mpm doctor'`. **Never blocks on the network.** |
 | `mpm config profile set <name> <material-field>` | After each material-field save that produces a structurally complete profile, fires a single best-effort probe and prints `✓ Connection verified · …` or `✗ Verification failed · … / Configuration was saved.` |
 | Disabled (`Components["embedding"] == "disabled"`) | Reported as neutral — excluded from the health denominator. |
@@ -2666,6 +2787,37 @@ because the standard report has no remediation path. `--all` is not
 supported: `mpm doctor` already runs every available check. `--explain`
 is a separate mode that prints the FTS5 query plan, and cannot be
 combined with `--deep-scan`.
+
+#### Doctor is observational
+
+`mpm doctor` and `mpm ops doctor` are **observational by default**: the
+standard report path opens the database through a read-only handle
+(`?mode=ro` DSN) coordinated by a shared maintenance lease
+(`LOCK_SH` on `<root>/src/db/mpm.db.lock`). The standard report must not
+write to the database, the schema, the audit log, the probe cache, or
+the filesystem. Specifically:
+
+- no `WAL` checkpoint is issued;
+- no row is written to `system_audit_log`;
+- no probe result is written to `system_config[model_probe_results]`
+  (the live probe results are still rendered into the report);
+- no implicit backfill runs (topic memberships, etc.) — operators
+  run `mpm ops init topics` explicitly when they want the topic
+  memberships seeded;
+- no migrations run, no log rotation is triggered, no FTS5 rebuild is
+  initiated.
+
+The only write path the doctor exposes is `mpm doctor --deep-scan
+--fix`, which is the bounded soft-delete ghost cleanup. The fix path
+uses the writable singleton and the exclusive maintenance lease.
+
+On a fresh empty workspace the doctor refuses to coordinate the
+inspection (the maintenance lease does not exist), surfaces a single
+"Database: coordinated inspection unavailable" check, prints the
+prescribed remediation hint (`Run a write command such as
+\`mpm remember\` to establish the lock file, then re-run.`), and
+exits 1. The exit code is the preserved missing-database code; the
+JSON output mirrors the same shape with `failed: 1`.
 
 #### How it works
 
@@ -3145,6 +3297,13 @@ The `VectorMatch` circuit breaker refuses to start a vector scan that would touc
 
 The detection runs **inside `mpm_memory action=query`'s result set**, not as a background ticker. This is opportunistic: detection happens exactly when an agent is looking at the shared DB anyway, so there is no separate timer, no panic-recovery surface.
 
+> **Superseded 2026-10-13.** Query-time detection was removed. A queue row is
+> a *review item*, not a finding, and cosine similarity cannot tell a
+> contradiction from a duplicate. Rows are now added only by an explicit
+> `--propose` scan; the queue is otherwise written only by resolution.
+> Existing rows are preserved and read exactly as described here. See
+> [`RECALL-MUTATION.md`](./RECALL-MUTATION.md).
+
 ### Protobuf-shape scoring
 
 ```
@@ -3222,7 +3381,7 @@ End-to-end verification (8 steps, all green):
 
 1. Seed two contradictory rules into the shared DB.
 2. Run `mpm ops resolve-contradictions` (dry-run) — see the queue.
-3. Apply one with `--apply` — auto-resolves, writes resolution memory, asymmetric evidence row.
+3. Adjudicate it with `--adjudicate=<queue_id>:"<why the claims conflict>"`, then apply with `--apply` — resolves, writes resolution memory, asymmetric evidence row. (`--apply` alone is refused for an unadjudicated row.)
 4. Verify the winner has the `resolution_survived` evidence row.
 5. Verify the loser has `status='archived'` and `operator_arbitration=true` in its metadata.
 6. Create a close-call contradiction.

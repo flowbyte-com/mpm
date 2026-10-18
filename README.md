@@ -126,6 +126,16 @@ the full protocol carry operational detail.
    `mpm call <tool>` fallback. If the native transport fails
    mid-session, use that fallback rather than abandoning persistence;
    it operates on the same substrate with the same provenance.
+
+8. **Search references before concluding external material is
+   absent.** Memories and references are separate subsystems:
+   an empty memory search is not evidence of absence. For
+   API or framework documentation, specifications, or prior
+   material, search — `mpm reference search "<query>"`, or
+   `mpm_references` action `search` — then read the document itself,
+   `mpm reference show <id>` or `mpm_references` action `read`, not a
+   search-result summary. Check version and freshness first: a
+   reference can still be stale.
 <!-- END MPM MANAGED BLOCK -->
 ```
 <!-- END MPM-MANAGED README:managed-block -->
@@ -219,6 +229,7 @@ CLI-only path, manual service setup, and first cognitive commands.
 | [Supported integrations](agent_installation/README.md) | Host overview and links to adapter-specific documentation |
 | [Agent protocol](agent_installation/mpm-agent-protocol.md) | Wake, persistence, skill discovery, handoff, and recovery contract |
 | [Contributing](docs/CONTRIBUTING.md) | Repository invariants, testing gates, and contribution expectations |
+| [Work tracking](docs/ISSUES.md) | Where work is tracked, how findings are classified, how to report an issue |
 | [Security policy](docs/SECURITY.md) | Private vulnerability reporting and credential-handling rules |
 
 ## Development
