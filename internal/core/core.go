@@ -111,6 +111,13 @@ type CoreDB interface {
 	GetMemoryStats() (map[string]interface{}, error)
 	GetMemoriesForExport(collection, since, until string) ([]map[string]interface{}, error)
 	GetNegativeWeightMemories() ([]map[string]interface{}, error)
+	// ListChallengedMemories returns the read-only projection used
+	// by `mpm challenge list` and the observational doctor check
+	// (issue #20). Ordered by challenged_at ASC, id ASC. Reads
+	// both local and shared tables when the shared DB is
+	// attached. No write path; safe to call with a read-only
+	// database handle.
+	ListChallengedMemories() ([]ChallengedMemory, error)
 	GetProvenTheoryForMemory(memoryID string) (map[string]interface{}, error)
 	GetMemoryRevisions(memoryID string) ([]MemoryRevision, error)
 	GetMemoryRevisionAtTime(memoryID string, asOf time.Time) (*MemoryRevision, error)

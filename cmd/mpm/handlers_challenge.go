@@ -7,6 +7,7 @@ import (
 	"time"
 
 	internal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
 func handleChallenge(args []string) int {
@@ -287,4 +288,362 @@ func runChallengeRestore(dm internal.CoreDB, id string) int {
 		fmt.Printf("  %s\n", warning)
 	}
 	return 0
+}
+
+// challengeListLimitDefault is the row cap when --limit is not
+// passed. Large enough to absorb the audit-time 41 from issue #20
+// in a single call; small enough to keep the human-readable
+// output scannable. The cap is also a load-bearing safety bound
+// on the core read.
+const challengeListLimitDefault = 50
+
+// challengeListLimitMax is the upper bound enforced regardless of
+// what the operator passes. The query is a single SELECT against
+// indexed JSON; even at 10,000 rows the cost is bounded, but the
+// intent here is "discovery surface", not "bulk export" — past
+// that, the operator should use --json and a script.
+const challengeListLimitMax = 1000
+
+// handleChallengeList — `mpm challenge list [--json] [--limit N]`.
+//
+// Issue #20: the 41 memories left in `status='challenged'` by the
+// retired auto-challenge defect had no operator-facing discovery
+// surface. `mpm challenge restore <id>` was the sanctioned per-row
+// recovery path, but it required the operator to already know
+// which id to restore. This handler enumerates every challenged
+// row with the columns an operator needs to make a per-row
+// judgement: identity, current standing, the baselines the
+// challenge recorded (so a no-op restore is visible before
+// running it), which writer produced the challenge, and whether
+// the row is restorable through MPM at all.
+//
+// Read-only by construction. The core primitive is a single
+// SELECT with no write path; the handler does no writing. A
+// regression test in challenge_list_test.go pins this contract
+// with a full-table SHA snapshot before/after the call.
+//
+// HAL defect 1 (post #20): the previous version of this handler
+// iterated `args` directly, but the router passes `args[1:]` to
+// subcommand handlers — so the FIRST element the handler sees
+// is the literal subcommand token "list", not the operator's
+// first real argument. Without skipping it, every invocation
+// would trip the strict-rejection check on the "list" token.
+// The fix matches the existing handleChallengeRestore
+// convention: treat args[0] as the subcommand token and parse
+// from args[1:] onward.
+func handleChallengeList(args []string) int {
+	// Subcommand convention. The router passes the full
+	// ["challenge", "list", ...] slice; this handler owns
+	// the "list" half, so args[0] is the literal "list"
+	// subcommand. The actual flags start at args[1].
+	// `mpm challenge list` with no flags is a valid bare
+	// invocation: skip the help check if args[0] is
+	// exactly "list".
+	if len(args) >= 1 && args[0] != "list" {
+		return respond("", fmt.Sprintf("Error: unexpected subcommand %q for 'mpm challenge list'\n%s", args[0], challengeListUsage()), 1)
+	}
+	flagArgs := args[1:]
+
+	// --help / -h / "help" short-circuit. Same defect, same fix
+	// as handleMemoryList.
+	for _, a := range flagArgs {
+		if a == "-h" || a == "--help" || a == "help" {
+			return respond("", challengeListUsage(), 0)
+		}
+	}
+
+	// Single-pass argument parsing. The previous implementation
+	// called stripMemoryFlagToken twice — once for --json, then
+	// once for --limit on the ORIGINAL args — and discarded the
+	// cleaned slice from the first call, so a command like
+	// `mpm challenge list --json` would hit the "unknown
+	// argument" check on `--json`. This pass walks the args once,
+	// recognising --json/-j, --limit N, and --limit=N, and
+	// accumulating anything else as an unknown.
+	wantJSON := false
+	limit := challengeListLimitDefault
+	var unknown []string
+	for i := 0; i < len(flagArgs); i++ {
+		a := flagArgs[i]
+		switch {
+		case a == "--json" || a == "-j":
+			wantJSON = true
+		case a == "--limit":
+			if i+1 >= len(flagArgs) {
+				return respond("", fmt.Sprintf("Error: --limit requires a value\n%s", challengeListUsage()), 1)
+			}
+			val := flagArgs[i+1]
+			n, err := parsePositiveInt(val)
+			if err != nil {
+				return respond("", fmt.Sprintf("Error: --limit value %q is not a positive integer\n%s", val, challengeListUsage()), 1)
+			}
+			limit = n
+			i++ // skip the value
+		case strings.HasPrefix(a, "--limit="):
+			val := strings.TrimPrefix(a, "--limit=")
+			n, err := parsePositiveInt(val)
+			if err != nil {
+				return respond("", fmt.Sprintf("Error: --limit value %q is not a positive integer\n%s", val, challengeListUsage()), 1)
+			}
+			limit = n
+		case strings.HasPrefix(a, "-"):
+			unknown = append(unknown, a)
+		default:
+			unknown = append(unknown, a)
+		}
+	}
+
+	// Safety cap. Discovery surface, not bulk export — past 1000
+	// the operator should use --json and a script.
+	if limit > challengeListLimitMax {
+		limit = challengeListLimitMax
+	}
+
+	// Strict rejection of unknown / malformed arguments. Mirrors
+	// the handleDoctor strict-flag contract: refuse rather than
+	// silently ignore, so a typo in the flag name is loud.
+	if len(unknown) > 0 {
+		return respond("", fmt.Sprintf("Error: unknown argument %q for 'mpm challenge list'\n%s", unknown[0], challengeListUsage()), 1)
+	}
+
+	dm := getDB()
+	if dm == nil {
+		return 1
+	}
+	return runChallengeList(dm, wantJSON, limit)
+}
+
+// parsePositiveInt parses a non-empty numeric string as a positive
+// integer. Used by handleChallengeList to validate --limit values.
+// Returns an error for empty input, non-numeric input, zero, or
+// negative values.
+func parsePositiveInt(s string) (int, error) {
+	if s == "" {
+		return 0, fmt.Errorf("empty value")
+	}
+	var n int
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+		return 0, err
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("non-positive value %d", n)
+	}
+	return n, nil
+}
+
+// challengeListUsage is the single source of truth for the
+// `mpm challenge list` help text. Kept short so the operator can
+// read it on one screen; the per-row semantics are documented in
+// docs/RECALL-MUTATION.md (issue #20).
+func challengeListUsage() string {
+	return "Usage: mpm challenge list [--json] [--limit N]\n" +
+		"\n" +
+		"Enumerate memories currently in status='challenged'.\n" +
+		"Read-only. Show the columns needed to decide whether to\n" +
+		"restore a row via 'mpm challenge restore <id>'.\n" +
+		"\n" +
+		"Flags:\n" +
+		"  --json, -j    Emit the canonical JSON envelope (success, count, challenged).\n" +
+		"  --limit N     Cap the row count (default 50, max 1000).\n" +
+		"  -h, --help    Show this help.\n" +
+		"\n" +
+		"See docs/RECALL-MUTATION.md for the per-row restore semantics\n" +
+		"and the policy on the residue from the retired auto-challenge defect.\n"
+}
+
+// runChallengeList is the injectable core of `mpm challenge list` so
+// tests can drive it against a hermetic database.
+//
+// wantJSON selects the canonical JSON envelope; the human-readable
+// path is the default. limit caps the row count returned (and
+// rendered); the underlying SELECT is read-only.
+//
+// Truncation reporting: the JSON envelope carries BOTH `count`
+// (rows in the returned slice) and `total_count` (rows the
+// database had). When `truncated=true`, a script knows to
+// re-query with a higher `--limit`. Without `total_count`, a
+// script cannot distinguish "the limit was high enough" from
+// "the limit capped the result" — a load-bearing distinction
+// for the audit-time 41, where an operator who runs the
+// command with the default `--limit=50` and gets `count=50`
+// cannot tell whether the population is 50 or 4,100.
+func runChallengeList(dm internal.CoreDB, wantJSON bool, limit int) int {
+	rows, err := dm.ListChallengedMemories()
+	if err != nil {
+		if wantJSON {
+			out, _ := json.Marshal(map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Failed to list challenged memories: %v", err),
+			})
+			return respond(string(out)+"\n", "", 1)
+		}
+		return respond("", fmt.Sprintf("Failed to list challenged memories: %v\n", err), 1)
+	}
+
+	totalCount := len(rows)
+	truncated := false
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+		truncated = true
+	}
+
+	if wantJSON {
+		envelope := map[string]interface{}{
+			"success":     true,
+			"count":       len(rows),
+			"total_count": totalCount,
+			"limit":       limit,
+			"truncated":   truncated,
+			"challenged":  challengedMemoriesToJSON(rows),
+		}
+		out, _ := json.MarshalIndent(envelope, "", "  ")
+		return respond(string(out)+"\n", "", 0)
+	}
+
+	return renderChallengeListHuman(rows, totalCount, limit, truncated)
+}
+
+// challengedMemoriesToJSON converts a slice of core projections
+// into the JSON-friendly shape the envelope carries. The shape is
+// deliberately flat (no nested objects) so a script can read it
+// without reaching for a JSONPath. Numeric values use Go's default
+// JSON rendering for float64; absent baselines are surfaced as
+// explicit nulls rather than omitted, so a script can distinguish
+// "not recorded" from "0.0".
+func challengedMemoriesToJSON(rows []internal.ChallengedMemory) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(rows))
+	for _, r := range rows {
+		entry := map[string]interface{}{
+			"id":                       r.ID,
+			"store":                    r.Store,
+			"collection":               r.Collection,
+			"current_weight":           r.CurrentWeight,
+			"current_confidence":       r.CurrentConfidence,
+			"prior_weight":             optionalFloat(r.PriorWeightPresent, r.PriorWeight),
+			"prior_confidence":         optionalFloat(r.PriorConfidencePresent, r.PriorConfidence),
+			"prior_retrieval_priority": optionalFloat(r.PriorRetrievalPriorityPresent, r.PriorRetrievalPriority),
+			"challenged_via":           r.ChallengedVia,
+			"challenged_at":            r.ChallengedAt,
+			"challenged_at_iso":        internal.FormatUnixSeconds(r.ChallengedAt),
+			"theory_id":                r.TheoryID,
+			"theory_reference_shape":   r.TheoryReferenceShape,
+			"restoreable":              r.Restoreable,
+			"restore_weight_change":    optionalFloat(r.RestoreWeightChangePresent, r.RestoreWeightChange),
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// optionalFloat renders a (present, value) pair as either the
+// float or JSON null. The nil-vs-zero distinction is load-bearing:
+// the operator needs to see "no prior weight recorded" as null
+// rather than 0.0, because 0.0 would falsely report a row that
+// was slashed to zero (which the schema does not allow — the
+// weight floor is 1.0, so 0.0 means "absent").
+func optionalFloat(present bool, value float64) interface{} {
+	if !present {
+		return nil
+	}
+	return value
+}
+
+// renderChallengeListHuman prints the canonical human-readable
+// table for `mpm challenge list`.
+//
+// Columns: ID, store.collection, weight→prior (with restoreable
+// marker), via, theory_ref, challenged_at.
+//
+// The weight column is the most important one: a "1.0←1.0" entry
+// is a no-op-on-weight restore, a "1.0←2.0" entry is a clamped
+// row that would actually move on restore. The marker after the
+// weight column also makes Restoreable explicit: rows with no
+// prior weight show "[!]" instead of a number.
+//
+// Truncation reporting: when the run sliced the result down to
+// `limit`, the heading reports the total count plus the slice
+// size ("showing N of M; rerun with a higher --limit..."). The
+// JSON envelope carries the same information as `truncated` and
+// `total_count` fields; the human and machine surfaces agree
+// on what the operator needs to know.
+func renderChallengeListHuman(rows []internal.ChallengedMemory, totalCount int, limit int, truncated bool) int {
+	var out strings.Builder
+	render.Heading(&out, "Challenge list")
+	out.WriteString(fmt.Sprintf("%d memories in status='challenged'", totalCount))
+	if truncated {
+		out.WriteString(fmt.Sprintf(" (showing %d of %d; rerun with a higher --limit for the full list)", len(rows), totalCount))
+	}
+	out.WriteString("\n\n")
+
+	if len(rows) == 0 {
+		out.WriteString("No challenged memories.\n")
+		return respond(out.String(), "", 0)
+	}
+
+	// Header line. Fixed-width columns keep the table readable
+	// across rows; the content columns (id, theory_ref,
+	// challenged_at) are variable-width and the operator can
+	// pipe through `column -t -s $'\t'` if they want.
+	out.WriteString("ID                                store.collection     weight→prior         via                theory_ref        challenged_at\n")
+	out.WriteString("--------------------------------  -------------------  -------------------  -----------------  ----------------  ----------------------------\n")
+
+	for _, r := range rows {
+		// "1.0←1.0" for the common case where the clamp hit
+		// the floor; "1.0←2.0" for clamped rows that would
+		// actually move; "[!] no prior" for rows that carry
+		// no baseline (unrestorable through MPM).
+		weight := weightArrow(r)
+		via := r.ChallengedVia
+		if via == "" {
+			via = "-"
+		}
+		theory := r.TheoryReferenceShape
+		if theory == "" {
+			theory = "-"
+		}
+		when := internal.FormatUnixSeconds(r.ChallengedAt)
+		if when == "" {
+			when = "-"
+		}
+		out.WriteString(fmt.Sprintf("%-32s  %-19s  %-19s  %-17s  %-16s  %s\n",
+			truncate(r.ID, 32),
+			truncate(r.Store+"."+r.Collection, 19),
+			truncate(weight, 19),
+			truncate(via, 17),
+			truncate(theory, 16),
+			when,
+		))
+	}
+
+	return respond(out.String(), "", 0)
+}
+
+// weightArrow renders the weight column in a form that surfaces
+// the no-op-on-weight case at a glance AND makes the absent-prior
+// case impossible to misread as a genuine recorded prior of 1.0.
+//
+// The four cases:
+//
+//	PriorWeightPresent, current == prior  →  "1.0←1.0"  (no-op on weight; the prior was honestly 1.0)
+//	PriorWeightPresent, current != prior  →  "1.0←2.0"  (restore would move it)
+//	!PriorWeightPresent, !Restoreable     →  "[!] no prior"  (unrestorable through MPM)
+//	!PriorWeightPresent, Restoreable (RP) →  "1.0←[absent]"  (restorable via retrieval_priority only; weight-delta is undefined)
+//
+// The third and fourth cases are the ones HAL flagged: when no
+// prior weight was recorded, the human column must NOT show
+// "1.0←1.0" — that would invent a historical weight value the
+// system never recorded. The JSON envelope encodes the same
+// distinction as 0.0 (number) vs null.
+func weightArrow(r internal.ChallengedMemory) string {
+	if !r.Restoreable {
+		return "[!] no prior"
+	}
+	if !r.PriorWeightPresent {
+		// Restoreable via retrieval_priority only. The
+		// "[absent]" marker is the human analogue of
+		// the JSON null in restore_weight_change: the
+		// system has no prior weight value to show.
+		return fmt.Sprintf("%.1f←[absent]", r.CurrentWeight)
+	}
+	return fmt.Sprintf("%.1f←%.1f", r.CurrentWeight, r.PriorWeight)
 }

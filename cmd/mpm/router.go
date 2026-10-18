@@ -146,7 +146,7 @@ func NewRouter() *CommandRouter {
 		"propose_theory":  {Name: "propose_theory", Description: "Propose hypothesis", MinArgs: 1},
 		"resolve_theory":  {Name: "resolve_theory", Description: "Resolve theory", MinArgs: 2},
 		"record_decision": {Name: "record_decision", Description: "Record decision (full substrate form: context, choice, rationale)", MinArgs: 1},
-		"challenge":       {Name: "challenge", Description: "Flag memory as obsolete (atomic theory + patch; use 'restore' subcommand to undo)", MinArgs: 1, MaxArgs: 2},
+		"challenge":       {Name: "challenge", Description: "Flag memory as obsolete; 'list' enumerates challenged rows, 'restore <id>' undoes one (issue #20)", MinArgs: 1},
 		"theories":        {Name: "theories", Description: "List theories [pending|resolved|all]", MinArgs: 0},
 		"decisions":       {Name: "decisions", Description: "List decisions", MinArgs: 0},
 		"call":            {Name: "call", Description: "Universal tool boundary (JSON): mpm call <tool> [--payload <json>] [--payload-file <path>] | (stdin)", MinArgs: 0},
@@ -437,7 +437,10 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleAudit(args[1:])
 	case "challenge":
 		sub := args[1]
-		if sub == "restore" && len(args) >= 3 {
+		switch sub {
+		case "list":
+			return handleChallengeList(args[1:])
+		case "restore":
 			return handleChallengeRestore(args[1:])
 		}
 		return handleChallenge(args[1:])
@@ -641,8 +644,10 @@ func (r *CommandRouter) handleHelp(args []string) int {
 		helpFunc = printGatewayHelp
 	case "challenge":
 		fmt.Println("Usage: mpm challenge <id> <evidence>")
+		fmt.Println("       mpm challenge list [--json] [--limit N]")
 		fmt.Println("       mpm challenge restore <id>")
 		fmt.Println("Challenges a memory as obsolete by proposing an atomic theory and patch.")
+		fmt.Println("'list' enumerates every challenged row (issue #20 discovery surface).")
 		return 0
 	case "evidence":
 		// RECOMMENDED 7: surface the canonical evidence-type
@@ -763,8 +768,10 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 		helpFunc = printGatewayHelp
 	case "challenge":
 		fmt.Println("Usage: mpm challenge <id> <evidence>")
+		fmt.Println("       mpm challenge list [--json] [--limit N]")
 		fmt.Println("       mpm challenge restore <id>")
 		fmt.Println("Challenges a memory as obsolete by proposing an atomic theory and patch.")
+		fmt.Println("'list' enumerates every challenged row (issue #20 discovery surface).")
 		return 0
 	case "evidence":
 		// RECOMMENDED 7: surface the canonical evidence-type

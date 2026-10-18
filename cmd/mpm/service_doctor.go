@@ -118,6 +118,7 @@ func (s *DoctorService) Check() (*DoctorReport, error) {
 	report.Checks = append(report.Checks, s.checkWorkingContextOrphans())
 	report.Checks = append(report.Checks, s.checkScheduler())
 	report.Checks = append(report.Checks, s.checkWakeBacklog())
+	report.Checks = append(report.Checks, s.checkChallengedMemories())
 	report.Checks = append(report.Checks, s.checkReviewBacklog())
 	report.Checks = append(report.Checks, s.checkMemoryLLM())
 
@@ -251,6 +252,7 @@ func (s *DoctorService) checkDatabase() DoctorCheck {
 //	hash>0               → WARN (legacy rows present)
 //	null/total > 10%     → WARN (backfill needed)
 //	all real provider    → PASS
+//
 // checkEmbeddings measures embedding COVERAGE: the distribution of the
 // `embedding_source` label across live memories, against a statistical
 // tolerance (it warns only when nulls exceed 10% of rows).
