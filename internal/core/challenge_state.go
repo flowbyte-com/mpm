@@ -57,6 +57,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 // ChallengeTable names the memories table a challenge reads or writes.
@@ -348,4 +349,341 @@ func joinPriorPairs(parts []string) string {
 // the caller rolls this back with it.
 func ApplyChallengeInTx(tx *sql.Tx, table ChallengeTable, spec ChallengeSpec) (ChallengeApplied, error) {
 	return applyChallengeStateInTx(tx, table, spec)
+}
+
+// ChallengedMemory is the read-only projection used by the
+// `mpm challenge list` CLI surface and the observational doctor check.
+//
+// What is in this struct is exactly what an operator needs to make a
+// per-row adjudication: the identity, the current standing (weight,
+// confidence), the baselines the prior challenge recorded (so a
+// restore caller can see whether a restore would be a no-op on
+// weight), which writer produced the challenge (so the operator
+// knows the contract that the restore will follow), and whether
+// the row is restorable through MPM (a value, not a derived
+// computation, so a script can drive restoration directly).
+//
+// Nothing here is intended to be written. The struct is
+// observational by design: a doctor report or CLI list that built
+// a write path off it would be a layering violation.
+//
+// `PriorWeight` etc. are (value, present) pairs because the Arc 1
+// writers do not record these columns — `mpm challenge restore`
+// refuses such rows, and the listing must surface the same
+// distinction so an operator does not waste time restoring a row
+// that cannot be restored.
+type ChallengedMemory struct {
+	// Table names the memories table the row came from, in the
+	// canonical ChallengeTable form. UI surfaces should display
+	// Store (the human label) rather than Table.
+	Table ChallengeTable
+
+	// Store is the operator-facing label for Table: "local" or
+	// "shared". Matches storeLabel in challenge_restore.go so
+	// scripts that read both surfaces see consistent values.
+	Store string
+
+	// ID is the memory's primary key. The operator pipes this to
+	// `mpm challenge restore <id>`.
+	ID string
+
+	// Collection is the memories row's `collection` column.
+	// The audit-time observation in issue #20 records 40 rows in
+	// `memories` and 1 in `decisions`; surfacing it lets an
+	// operator see at a glance whether a row is a normal memory
+	// or a higher-stakes artifact.
+	Collection string
+
+	// CurrentWeight is the row's current `weight` after the
+	// challenge was applied. For 27 of the 41 live rows this is
+	// exactly 1.0 because the `MAX(1, weight - slash)` clamp
+	// hit the floor.
+	CurrentWeight float64
+
+	// CurrentConfidence is the row's current `confidence` after
+	// the challenge. For all 41 live rows this is
+	// ChallengedMemoryConfidenceFloor (0.5) because
+	// `mpm challenge` (and every other challenge writer in the
+	// current code) drops confidence to the floor.
+	CurrentConfidence float64
+
+	// PriorWeight is the value the restore path will reinstate
+	// to the row's `weight` column, when present. Absent on
+	// rows written by the Arc 1 writers — those rows are
+	// unrestorable through MPM.
+	PriorWeight        float64
+	PriorWeightPresent bool
+
+	// PriorConfidence is the value the challenge captured into
+	// the audit trail. The restore path does NOT re-promote to
+	// this value (F7.1: a restore is the memory half, not the
+	// belief half), so this is forensic only. Surfaced for
+	// operators who want to see what was lost.
+	PriorConfidence        float64
+	PriorConfidencePresent bool
+
+	// PriorRetrievalPriority mirrors PriorWeight for the
+	// retrieval_priority column. Recorded only by the Arc 1
+	// writers (the local challenge paths do not touch
+	// retrieval_priority), so the live 41 have it absent.
+	PriorRetrievalPriority        float64
+	PriorRetrievalPriorityPresent bool
+
+	// ChallengedVia identifies which writer produced this
+	// challenge: one of the ChallengeVia* constants
+	// ("challenge_theory", "contradiction_resolution",
+	// "operator_arbitration"). Empty when the metadata key
+	// is absent (legacy rows written before the field existed).
+	ChallengedVia string
+
+	// ChallengedAt is the challenge timestamp as Unix epoch
+	// SECONDS — the same representation every challenge writer
+	// uses after the 2026-10-13 unification. The CLI surface
+	// converts this to ISO8601; the core reports the raw value
+	// so a script can sort or range-filter.
+	ChallengedAt int64
+
+	// TheoryID is the value of the metadata key
+	// `challenged_theory_id`. Empty for challenges that were
+	// never linked to a theory. The audit-time 41 carry
+	// free-text values here (the retired auto-challenge
+	// defect wrote human-readable reasons into this field
+	// rather than a theory id).
+	TheoryID string
+
+	// TheoryReferenceShape classifies TheoryID by shape:
+	// "identifier" (16 hex chars), "free_text" (anything
+	// else), or "" (absent). The same classification
+	// `classifyTheoryReference` (challenge_restore.go) uses
+	// to label the theory half of a restore — a free_text
+	// reference is the operator's signal that the theory
+	// half will report not_found even on a successful
+	// memory half.
+	TheoryReferenceShape string
+
+	// Restoreable reports whether `mpm challenge restore` can
+	// reverse this challenge through MPM. Mirrors the
+	// "refuse to write a half-restore" test in
+	// RestoreMemoryFromChallenge: a row with no
+	// challenged_prior_weight AND no
+	// challenged_prior_retrieval_priority is unrestorable
+	// (the pre-slash values were never recorded). Every
+	// row in the audit-time 41 carries
+	// challenged_prior_weight, so all 41 are restorable.
+	Restoreable bool
+
+	// RestoreWeightChange is `PriorWeight - CurrentWeight`
+	// when PriorWeight is present. For 27 of the 41 audit-time
+	// rows, PriorWeight is 1.0 and CurrentWeight is 1.0, so
+	// restore is a no-op on weight (only the status flag
+	// clears). For 4 rows it is 1.0, meaning restore would
+	// return the row to weight 2.0. The operator needs this
+	// number to know whether a restore is actually worth
+	// running on a given row.
+	//
+	// RestoreWeightChangePresent distinguishes "the delta is
+	// zero because both sides are 1.0" (a real fact about
+	// the row) from "no prior weight was recorded, so the
+	// delta is undefined" (an unrestorable row). Without
+	// this flag, a row whose prior weight was never recorded
+	// and a row clamped at 1.0 from prior 1.0 would both
+	// report 0.0 — a misleadingly identical state for two
+	// different rows. The CLI surface renders absent as
+	// "[!] no prior" and the JSON envelope renders it as
+	// null. The two states are operationally distinct and
+	// must not collapse.
+	RestoreWeightChange        float64
+	RestoreWeightChangePresent bool
+}
+
+// ListChallengedMemories returns every row currently in
+// `status='challenged'`, across both the local and shared memories
+// tables (when the shared DB is attached). Ordered by challenged_at
+// ascending, then id, so the audit-time residue reads top-down by
+// chronology.
+//
+// The query is a plain SELECT, never a write. It uses the database
+// handle the caller passes in, so callers that hold the read-only
+// handle (the doctor service after MPM #28) get the observational
+// contract for free: this function does not perform any mutations
+// of its own, and the query plan is a single read against indexed
+// columns.
+//
+// The function reads from BOTH tables so an operator that runs
+// `mpm challenge list` against a manager with the shared DB
+// attached sees the full population, not just the local slice. The
+// audit-time 41 are all in the local table (the shared table is
+// where the Arc 1 writers slashed, and those writers recorded no
+// prior weight — so a future shared-table row would surface as
+// `Restoreable == false` and `RestoreWeightChange == 0`).
+func (dm *DatabaseManager) ListChallengedMemories() ([]ChallengedMemory, error) {
+	if dm == nil {
+		return nil, fmt.Errorf("ListChallengedMemories: nil database manager")
+	}
+
+	var out []ChallengedMemory
+	for _, table := range dm.challengeTables() {
+		rows, err := dm.queryChallengedRows(table)
+		if err != nil {
+			return nil, fmt.Errorf("ListChallengedMemories: read %s: %w", string(table), err)
+		}
+		out = append(out, rows...)
+	}
+
+	// Global chronological order across both tables. Each
+	// queryChallengedRows call returns its own table sorted by
+	// (challenged_at ASC, id ASC), but the two slices are
+	// appended local-first, shared-second. Without a merge
+	// step, a shared row at challenged_at=10 followed by a
+	// local row at challenged_at=20 would land in that order
+	// regardless of the actual chronology. The shared DB may
+	// carry a small number of legacy Arc 1 rows interleaved
+	// with the local residue, so the global sort is the only
+	// way to make "oldest first" honest.
+	//
+	// Tie-breaker: local before shared on identical
+	// (challenged_at, id). Local rows are the canonical
+	// substrate; shared is the secondary attachment. The
+	// id-already-breaks-ties rule means the tie-breaker only
+	// matters across tables, and the local-first rule
+	// matches the iteration order the rows came out of
+	// `challengeTables()`.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].ChallengedAt != out[j].ChallengedAt {
+			return out[i].ChallengedAt < out[j].ChallengedAt
+		}
+		if out[i].ID != out[j].ID {
+			return out[i].ID < out[j].ID
+		}
+		// Identical (challenged_at, id) across tables is
+		// not possible in practice (memory ids are unique
+		// across the local and shared substrates), but the
+		// rule is documented for completeness: local wins.
+		return out[i].Store == "local"
+	})
+	return out, nil
+}
+
+// queryChallengedRows runs the actual SELECT for one table. Pulled
+// out so the table-name interpolation is in one place and the
+// table-allowlist check is unambiguous (the linter expects
+// `validChallengeTables[table]` next to the format string, and
+// inline that becomes hard to follow inside a loop).
+func (dm *DatabaseManager) queryChallengedRows(table ChallengeTable) ([]ChallengedMemory, error) {
+	if !validChallengeTables[table] {
+		return nil, fmt.Errorf("queryChallengedRows: refusing unknown memories table %q", string(table))
+	}
+
+	// One SELECT per table, reading every column the projection
+	// needs. The values that are stored as JSON metadata keys
+	// (challenged_at, challenged_via, challenged_theory_id,
+	// the three challenged_prior_* baselines) are pulled out
+	// with json_extract so the caller's struct fields are
+	// concrete Go values rather than raw JSON to re-parse.
+	rows, err := dm.db.Query(fmt.Sprintf(`
+		SELECT id,
+		       collection,
+		       COALESCE(weight, 1),
+		       COALESCE(confidence, 0.5),
+		       json_extract(metadata, '$.challenged_at'),
+		       json_extract(metadata, '$.challenged_via'),
+		       json_extract(metadata, '$.challenged_theory_id'),
+		       json_extract(metadata, '$.challenged_prior_weight'),
+		       json_extract(metadata, '$.challenged_prior_confidence'),
+		       json_extract(metadata, '$.challenged_prior_retrieval_priority')
+		FROM %s
+		WHERE deleted_at IS NULL
+		  AND json_extract(metadata, '$.status') = 'challenged'
+		ORDER BY json_extract(metadata, '$.challenged_at') ASC, id ASC`, table))
+	if err != nil {
+		return nil, fmt.Errorf("queryChallengedRows: select from %s: %w", string(table), err)
+	}
+	defer rows.Close()
+
+	var out []ChallengedMemory
+	for rows.Next() {
+		var (
+			row          ChallengedMemory
+			challengedAt sql.NullFloat64
+			via          sql.NullString
+			theoryID     sql.NullString
+			priorWeight  sql.NullFloat64
+			priorConf    sql.NullFloat64
+			priorRP      sql.NullFloat64
+		)
+		if err := rows.Scan(
+			&row.ID,
+			&row.Collection,
+			&row.CurrentWeight,
+			&row.CurrentConfidence,
+			&challengedAt,
+			&via,
+			&theoryID,
+			&priorWeight,
+			&priorConf,
+			&priorRP,
+		); err != nil {
+			return nil, fmt.Errorf("queryChallengedRows: scan: %w", err)
+		}
+
+		row.Table = table
+		row.Store = storeLabel(table)
+
+		if challengedAt.Valid {
+			row.ChallengedAt = int64(challengedAt.Float64)
+		}
+		if via.Valid {
+			row.ChallengedVia = via.String
+		}
+		if theoryID.Valid {
+			row.TheoryID = theoryID.String
+			row.TheoryReferenceShape = classifyTheoryReference(theoryID.String)
+		}
+
+		// The three baselines are present-or-absent: any
+		// NULL in json_extract means the challenge writer
+		// did not record a value for that column. The
+		// restore path keys off presence, and the listing
+		// must surface the same distinction.
+		if priorWeight.Valid {
+			row.PriorWeight = priorWeight.Float64
+			row.PriorWeightPresent = true
+		}
+		if priorConf.Valid {
+			row.PriorConfidence = priorConf.Float64
+			row.PriorConfidencePresent = true
+		}
+		if priorRP.Valid {
+			row.PriorRetrievalPriority = priorRP.Float64
+			row.PriorRetrievalPriorityPresent = true
+		}
+
+		// Restoreable mirrors the test in
+		// RestoreMemoryFromChallenge: a row is restorable
+		// if at least one of the two columns the restore
+		// would actually move is recorded. The audit-time
+		// 41 all carry challenged_prior_weight, so all
+		// 41 are restorable.
+		row.Restoreable = row.PriorWeightPresent || row.PriorRetrievalPriorityPresent
+
+		// RestoreWeightChange is meaningful only when a
+		// prior weight was actually recorded. When
+		// PriorWeight is absent, the delta is undefined
+		// — the row is unrestorable through MPM (the
+		// restore path's "refuse to write a half-restore"
+		// test fires), and reporting 0.0 would collapse
+		// this row with a floor no-op row in the operator
+		// display. RestoreWeightChangePresent is the
+		// honest marker.
+		if row.PriorWeightPresent {
+			row.RestoreWeightChange = row.PriorWeight - row.CurrentWeight
+			row.RestoreWeightChangePresent = true
+		}
+
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queryChallengedRows: iterate: %w", err)
+	}
+	return out, nil
 }

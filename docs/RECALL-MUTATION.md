@@ -259,6 +259,100 @@ Queue rows written before this change remain in place with their original
 therefore review items, not findings: an operator who wants one applied must
 adjudicate it explicitly first. That is the asymmetry made enforceable.
 
+## Operator workflow for the residue (issue #20)
+
+The 41 memories left in `status='challenged'` by the retired
+auto-challenge defect (writes removed 2026-10-13) are **preserved
+until individually adjudicated**. No blanket restore; no
+backfill; no migration. The count is an observation, not an
+invariant — it grows if a future operator-initiated
+`resolve-contradictions --apply` on an adjudicated row produces a
+new challenge via the live `ChallengeMemory` path. Operators are
+expected to enumerate and decide per row.
+
+**Discovery surfaces** (read-only, both surfaces cover the same
+population — local `memories` plus shared `memories` when attached):
+
+- `mpm challenge list [--json] [--limit N]` — per-row enumeration
+  with the columns an operator needs to make a per-row judgement:
+  id, store, collection, current weight, the prior weight the
+  restore would reinstate, which writer produced the challenge,
+  whether the row is restorable through MPM at all, and the
+  `challenged_at` timestamp. `--json` is the canonical envelope
+  (success / count / limit / challenged[]) for scripts; the
+  default is a human-readable table.
+- `mpm doctor` — a single-row entry under "Challenged memories"
+  reports the population count. Status `PASS` when the count is
+  zero, `WARN` when non-zero. The message includes the
+  floor/at-floor split so the operator can see at a glance how
+  much of the population is a flag-only restore.
+
+**Per-row semantics of `mpm challenge restore <id>`** — what
+actually happens when an operator runs the recovery path:
+
+1. The `status` flag is cleared. The row becomes retrievable
+   again.
+2. `weight` is restored to `challenged_prior_weight` when that
+   baseline is present. For 27 of the 41 live rows, the prior
+   weight was 1.0, so this is a **no-op on weight** — only the
+   flag clears, and the row continues to rank at the floor.
+   For 14 rows the prior weight was above the floor; restore
+   moves them back to that prior value. 4 of those 14 were
+   specifically clamped from prior 2 to current 1, the remaining
+   10 from higher prior values. The `weight→prior` column in
+   `mpm challenge list` makes the no-op case visible in advance.
+3. `confidence` is reset to `ChallengedMemoryConfidenceFloor`
+   (0.5) when the challenge dropped it. **The pre-challenge
+   confidence is not re-promoted.** A restore is the memory
+   half (ranking, status flag), not the belief half (confidence,
+   evidence, decay accumulators). Fresh evidence is what
+   re-earns confidence, the same as for any other memory. This
+   is the F7.1 contract from `docs/SPEC.md` §4.5; this section
+   restates it because the operator running the workflow is the
+   one who needs to know what they are not getting back.
+4. The linked theory, when present and matchable, is marked
+   disproven. The 41 live rows carry free-text values in
+   `challenged_theory_id` (the retired defect wrote
+   human-readable reasons into that field rather than a theory
+   id), so the theory half reports `not_found` for them — the
+   memory half still lands. The `theory_reference_shape`
+   column in `mpm challenge list` output is the operator's
+   signal that the theory half will be a no-op for that row.
+
+**Arc 1 writer records (separate population).** The Arc 1
+challenge writers, predating the recovery contract, recorded
+no reversible baselines: a row in that population has no
+`challenged_prior_weight` (and typically no
+`challenged_prior_retrieval_priority` either). For such rows,
+`mpm challenge restore` refuses the operation with the
+existing "cannot be reversed through MPM" error, and they
+surface in `mpm challenge list` with `Restoreable=false` and
+a `[!] no prior` weight marker. The audit-time 41 rows are
+NOT Arc 1 writer rows — the existing 41-row audit reports
+prior weights recorded for all 41. Arc 1 records are a
+separate, smaller population that grows only if a future
+operator-initiated action writes through the legacy path.
+The exact count of Arc 1 records is not asserted here; check
+`mpm doctor` and `mpm challenge list` for the live state.
+
+**Contradiction-apply interaction.** The auto-challenge gate is
+gone, but `mpm ops resolve-contradictions --apply` can still
+reach `ChallengeMemory` from an unverified similarity candidate.
+Any new challenge from that path adds to this population. The
+discovery surfaces above make that growth visible — the
+`mpm doctor` count tracks it; `mpm challenge list` enumerates
+it; the per-row `challenged_via` column tells the operator which
+writer produced each new entry.
+
+**Out of scope.** No DB-level backfill or mass update; no
+re-derivation of pre-challenge values for Arc 1 writer
+records; no changes to retrieval, embedding, or
+contradiction-apply algorithms. The `mpm challenge restore`
+calls on the 41 live rows are a separate operator action and
+a separate decision; this section provides the discovery
+surface and the policy, not
+the restore itself.
+
 ## Validation guards retained
 
 The `validEmbeddingPair` guard still rejects incomparable vectors — mismatched
