@@ -34,8 +34,10 @@ from pathlib import Path
 from bench.corpus import Corpus, load_corpus
 from bench.fake_server import make_server
 from bench.fts5_control import (
+    CONTROL_SET_SHA256,
     CONTROL_SET_VERSION,
     FTS5_CONTROL_QUERIES,
+    control_set_canonical_sha256,
     fts5_control_corpus_manifest,
 )
 from bench.harness import (
@@ -199,29 +201,40 @@ class TestFTS5ControlSet(unittest.TestCase):
     def test_control_manifest_sha256_stable(self) -> None:
         """The control set's content-hash is stable. If the
         control set is accidentally modified, this test fails
-        (forcing an explicit update of CONTROL_SET_SHA256)."""
+        (forcing an explicit update of CONTROL_SET_SHA256).
+
+        B3 review (HAL 2026-10-19): the assertion is now
+        against a FIXED expected digest (CONTROL_SET_SHA256)
+        and the canonical re-derivation
+        (`control_set_canonical_sha256()`). The pre-fix code
+        computed the hash from the same in-memory list it was
+        checking, so edits would have compared equal to
+        themselves and the test would have passed silently.
+        """
         manifest = fts5_control_corpus_manifest()
-        # Re-compute the hash from the in-memory list and
-        # confirm it matches the manifest's reported hash.
-        from bench.fts5_control import FTS5_CONTROL_QUERIES
-        payload = json.dumps(
-            [
-                {
-                    "query_id": q.query_id,
-                    "query": q.query,
-                    "target_doc_ids": list(q.target_doc_ids),
-                }
-                for q in FTS5_CONTROL_QUERIES
-            ],
-            sort_keys=True,
-        ).encode("utf-8")
-        import hashlib
-        actual = hashlib.sha256(payload).hexdigest()
+        # 1. The fixed constant in fts5_control.py must match
+        #    the canonical re-derivation. A divergence here is
+        #    a defect: either the constant is stale (the
+        #    queries changed but the constant was not
+        #    updated) or the canonical function is wrong.
+        actual = control_set_canonical_sha256()
         self.assertEqual(
-            manifest["expected_sha256"], actual,
-            "control set manifest sha256 mismatch; the test "
-            "would have caught a silent edit"
+            actual, CONTROL_SET_SHA256,
+            f"FTS5 control contract SHA mismatch: "
+            f"constant={CONTROL_SET_SHA256!r} actual={actual!r}. "
+            f"If the queries changed legitimately, update "
+            f"CONTROL_SET_SHA256 and the canonical function in "
+            f"tandem."
         )
+        # 2. The manifest's reported expected_sha256 must
+        #    agree with the constant.
+        self.assertEqual(
+            manifest["expected_sha256"], CONTROL_SET_SHA256,
+            "manifest expected_sha256 disagrees with the fixed "
+            "CONTROL_SET_SHA256 constant"
+        )
+        # 3. Sanity: the version and probe count are
+        #    consistent.
         self.assertEqual(
             manifest["version"], CONTROL_SET_VERSION,
             "control set version string mismatch"
@@ -229,6 +242,70 @@ class TestFTS5ControlSet(unittest.TestCase):
         self.assertEqual(
             manifest["n_queries"], len(FTS5_CONTROL_QUERIES)
         )
+
+    def test_control_manifest_sha256_rejects_query_mutation(self) -> None:
+        """Mutation test: an unintended edit to a probe's
+        `query` text MUST change the canonical SHA. This
+        proves the fixed digest covers the actual control-
+        query contract and is not a tautology.
+        """
+        import importlib
+        from bench import fts5_control as fc
+
+        original_queries = list(fc.FTS5_CONTROL_QUERIES)
+        # Pick the first probe and mutate ONLY its query text.
+        first = original_queries[0]
+        mutated_probe = fc.FTS5ControlQuery(
+            query_id=first.query_id,
+            query=first.query + " EXTRA-TOKEN",  # the mutation
+            target_doc_ids=first.target_doc_ids,
+            rationale=first.rationale,
+        )
+        mutated_tuple = (mutated_probe,) + tuple(original_queries[1:])
+        try:
+            fc.FTS5_CONTROL_QUERIES = mutated_tuple
+            mutated = control_set_canonical_sha256()
+            self.assertNotEqual(
+                mutated, CONTROL_SET_SHA256,
+                "mutating a probe's query text did NOT change the "
+                "SHA; the digest is not actually content-addressed"
+            )
+        finally:
+            fc.FTS5_CONTROL_QUERIES = original_queries
+            # Re-importing is not needed because the module-level
+            # tuple was reassigned; restore the original.
+            importlib.reload  # noqa: B018  (kept for symmetry;
+            # the assignment already restored the list)
+
+    def test_control_manifest_sha256_rejects_target_doc_mutation(self) -> None:
+        """Mutation test: an unintended edit to a probe's
+        `target_doc_ids` MUST change the canonical SHA. The
+        B3 review requires the digest to cover the target-
+        document identities, not just the query text.
+        """
+        from bench import fts5_control as fc
+
+        original_queries = list(fc.FTS5_CONTROL_QUERIES)
+        first = original_queries[0]
+        mutated_probe = fc.FTS5ControlQuery(
+            query_id=first.query_id,
+            query=first.query,
+            target_doc_ids=tuple(
+                list(first.target_doc_ids) + ["d99999-fake-id"]
+            ),
+            rationale=first.rationale,
+        )
+        mutated_tuple = (mutated_probe,) + tuple(original_queries[1:])
+        try:
+            fc.FTS5_CONTROL_QUERIES = mutated_tuple
+            mutated = control_set_canonical_sha256()
+            self.assertNotEqual(
+                mutated, CONTROL_SET_SHA256,
+                "mutating target_doc_ids did NOT change the SHA; "
+                "the digest does not cover target identities"
+            )
+        finally:
+            fc.FTS5_CONTROL_QUERIES = original_queries
 
     def test_exact_token_probes_surface_fts5_or_hybrid_source(self) -> None:
         """For each exact-token probe, the production `mpm recall`

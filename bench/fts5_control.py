@@ -52,9 +52,48 @@ from typing import Any
 
 
 CONTROL_SET_VERSION = "fts5-control-v1"
+# Fixed expected SHA-256 of the canonical FTS5 control contract
+# (CONTROL_SET_VERSION + FTS5_CONTROL_QUERIES, sorted by query_id).
+# This digest is computed by `control_set_canonical_sha256()`; any
+# change to a probe's query text or target_doc_ids list will
+# produce a different SHA and the regression test will fail. The
+# pre-fix version of this constant was a placeholder that was
+# never checked against the actual data, so accidental edits to
+# FTS5_CONTROL_QUERIES passed silently. The B3 review requires
+# the digest to be genuinely fixed (not derived in the same test
+# that asserts it) and to cover the actual control-query
+# contract including target-document identities.
 CONTROL_SET_SHA256 = (
-    "1f5c8b2a3c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f"
+    "0e213f6fe9fa52e9c0e31a760a8ade9eff19aacf209f95d6ff28979d21c8c6be"
 )
+
+
+def control_set_canonical_sha256() -> str:
+    """Compute the canonical SHA-256 of the FTS5 control contract.
+
+    The contract covers CONTROL_SET_VERSION and the (query_id,
+    query, target_doc_ids) tuple for every probe in
+    FTS5_CONTROL_QUERIES. The probes are sorted by query_id
+    before hashing so the digest is stable across dict
+    insertion order. This function is the canonical source of
+    truth for the expected CONTROL_SET_SHA256; if
+    FTS5_CONTROL_QUERIES changes legitimately, both this
+    function's output and the constant CONTROL_SET_SHA256 must
+    be updated together.
+    """
+    payload = {
+        "version": CONTROL_SET_VERSION,
+        "queries": [
+            {
+                "query_id": q.query_id,
+                "query": q.query,
+                "target_doc_ids": list(q.target_doc_ids),
+            }
+            for q in sorted(FTS5_CONTROL_QUERIES, key=lambda x: x.query_id)
+        ],
+    }
+    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -140,21 +179,20 @@ def fts5_control_corpus_manifest() -> dict[str, Any]:
     The manifest is content-addressed: any change to
     FTS5_CONTROL_QUERIES produces a different SHA-256, so the
     regression test catches accidental edits.
+
+    B3 review (HAL 2026-10-19): the expected_sha256 here is
+    the same fixed digest as CONTROL_SET_SHA256, derived from
+    `control_set_canonical_sha256()`. The manifest's
+    `expected_sha256` field and the module-level
+    `CONTROL_SET_SHA256` constant must agree, AND both must
+    agree with the actual content. The pre-fix code derived
+    the manifest's hash from the same in-memory list it was
+    testing, so accidental edits would have compared equal to
+    themselves and passed silently.
     """
-    payload = json.dumps(
-        [
-            {
-                "query_id": q.query_id,
-                "query": q.query,
-                "target_doc_ids": list(q.target_doc_ids),
-            }
-            for q in FTS5_CONTROL_QUERIES
-        ],
-        sort_keys=True,
-    ).encode("utf-8")
     return {
         "version": CONTROL_SET_VERSION,
-        "expected_sha256": hashlib.sha256(payload).hexdigest(),
+        "expected_sha256": CONTROL_SET_SHA256,
         "n_queries": len(FTS5_CONTROL_QUERIES),
         "queries": [
             {
