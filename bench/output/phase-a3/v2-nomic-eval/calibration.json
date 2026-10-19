@@ -4,6 +4,7 @@
     {
       "abstain_breakdown": {},
       "abstain_rate": 0.0,
+      "answerability_precision": 0.6341463414634146,
       "description": "Current production: ranker returns 0 -> empty path; otherwise answer.",
       "false_abstention": 0,
       "false_abstention_rate": 0.0,
@@ -11,14 +12,17 @@
       "false_confidence_rate": 1.0,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 0,
+      "n_accepted": 41,
+      "n_accepted_positives": 26,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P0_empty_ranker",
-      "precision_on_answered": 0.6341463414634146,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 1.0
     },
     {
       "abstain_breakdown": {},
       "abstain_rate": 0.0,
+      "answerability_precision": 0.6341463414634146,
       "description": "Abstain when top-1 cosine similarity < 0.50.",
       "false_abstention": 0,
       "false_abstention_rate": 0.0,
@@ -26,16 +30,19 @@
       "false_confidence_rate": 1.0,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 0,
+      "n_accepted": 41,
+      "n_accepted_positives": 26,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P1_cosine_0.50",
-      "precision_on_answered": 0.6341463414634146,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 1.0
     },
     {
       "abstain_breakdown": {
         "top1_cosine<0.60": 1
       },
       "abstain_rate": 0.024390243902439025,
+      "answerability_precision": 0.65,
       "description": "Abstain when top-1 cosine similarity < 0.60.",
       "false_abstention": 0,
       "false_abstention_rate": 0.0,
@@ -43,16 +50,19 @@
       "false_confidence_rate": 0.9333333333333333,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 1,
+      "n_accepted": 40,
+      "n_accepted_positives": 26,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P1_cosine_0.60",
-      "precision_on_answered": 0.65,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 1.0
     },
     {
       "abstain_breakdown": {
         "top1_cosine<0.70": 17
       },
       "abstain_rate": 0.4146341463414634,
+      "answerability_precision": 0.9166666666666666,
       "description": "Abstain when top-1 cosine similarity < 0.70.",
       "false_abstention": 4,
       "false_abstention_rate": 0.15384615384615385,
@@ -60,16 +70,19 @@
       "false_confidence_rate": 0.13333333333333333,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 17,
+      "n_accepted": 24,
+      "n_accepted_positives": 22,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P1_cosine_0.70",
-      "precision_on_answered": 0.9166666666666666,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 0.8461538461538461
     },
     {
       "abstain_breakdown": {
         "top1_cosine<0.80": 32
       },
       "abstain_rate": 0.7804878048780488,
+      "answerability_precision": 1.0,
       "description": "Abstain when top-1 cosine similarity < 0.80.",
       "false_abstention": 17,
       "false_abstention_rate": 0.6538461538461539,
@@ -77,14 +90,17 @@
       "false_confidence_rate": 0.0,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 32,
+      "n_accepted": 9,
+      "n_accepted_positives": 9,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P1_cosine_0.80",
-      "precision_on_answered": 1.0,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 0.34615384615384615
     },
     {
       "abstain_breakdown": {},
       "abstain_rate": 0.0,
+      "answerability_precision": 0.6341463414634146,
       "description": "Abstain when top-1 CombinedScore < -1.00. LEGACY: with VectorWeight=0.5, vector-only CombinedScore is in [0, 0.5]; this threshold is unreachable for vector-only rows.",
       "false_abstention": 0,
       "false_abstention_rate": 0.0,
@@ -92,14 +108,17 @@
       "false_confidence_rate": 1.0,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 0,
+      "n_accepted": 41,
+      "n_accepted_positives": 26,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P2_combined_-1.00",
-      "precision_on_answered": 0.6341463414634146,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 1.0
     },
     {
       "abstain_breakdown": {},
       "abstain_rate": 0.0,
+      "answerability_precision": 0.6341463414634146,
       "description": "Abstain when top-1 CombinedScore < -0.50. LEGACY: with VectorWeight=0.5, vector-only CombinedScore is in [0, 0.5]; this threshold is unreachable for vector-only rows.",
       "false_abstention": 0,
       "false_abstention_rate": 0.0,
@@ -107,14 +126,17 @@
       "false_confidence_rate": 1.0,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 0,
+      "n_accepted": 41,
+      "n_accepted_positives": 26,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P2_combined_-0.50",
-      "precision_on_answered": 0.6341463414634146,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 1.0
     },
     {
       "abstain_breakdown": {},
       "abstain_rate": 0.0,
+      "answerability_precision": 0.6341463414634146,
       "description": "Abstain when top-1 CombinedScore < +0.00. LEGACY: with VectorWeight=0.5, vector-only CombinedScore is in [0, 0.5]; this threshold is unreachable for vector-only rows.",
       "false_abstention": 0,
       "false_abstention_rate": 0.0,
@@ -122,16 +144,19 @@
       "false_confidence_rate": 1.0,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 0,
+      "n_accepted": 41,
+      "n_accepted_positives": 26,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P2_combined_+0.00",
-      "precision_on_answered": 0.6341463414634146,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 1.0
     },
     {
       "abstain_breakdown": {
         "top1_combined<0.30": 1
       },
       "abstain_rate": 0.024390243902439025,
+      "answerability_precision": 0.65,
       "description": "Abstain when top-1 CombinedScore < +0.30. Equivalent to raw cosine < 0.60 for vector-only candidates (VectorWeight=0.5).",
       "false_abstention": 0,
       "false_abstention_rate": 0.0,
@@ -139,16 +164,19 @@
       "false_confidence_rate": 0.9333333333333333,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 1,
+      "n_accepted": 40,
+      "n_accepted_positives": 26,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P2_combined_+0.30",
-      "precision_on_answered": 0.65,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 1.0
     },
     {
       "abstain_breakdown": {
         "top1_combined<0.35": 17
       },
       "abstain_rate": 0.4146341463414634,
+      "answerability_precision": 0.9166666666666666,
       "description": "Abstain when top-1 CombinedScore < +0.35. Equivalent to raw cosine < 0.70 for vector-only candidates (VectorWeight=0.5).",
       "false_abstention": 4,
       "false_abstention_rate": 0.15384615384615385,
@@ -156,16 +184,19 @@
       "false_confidence_rate": 0.13333333333333333,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 17,
+      "n_accepted": 24,
+      "n_accepted_positives": 22,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P2_combined_+0.35",
-      "precision_on_answered": 0.9166666666666666,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 0.8461538461538461
     },
     {
       "abstain_breakdown": {
         "top1_combined<0.40": 32
       },
       "abstain_rate": 0.7804878048780488,
+      "answerability_precision": 1.0,
       "description": "Abstain when top-1 CombinedScore < +0.40. Equivalent to raw cosine < 0.80 for vector-only candidates (VectorWeight=0.5).",
       "false_abstention": 17,
       "false_abstention_rate": 0.6538461538461539,
@@ -173,10 +204,12 @@
       "false_confidence_rate": 0.0,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 32,
+      "n_accepted": 9,
+      "n_accepted_positives": 9,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P2_combined_+0.40",
-      "precision_on_answered": 1.0,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 0.34615384615384615
     },
     {
       "abstain_breakdown": {
@@ -184,6 +217,7 @@
         "top1_top2_gap<0.05": 22
       },
       "abstain_rate": 0.5609756097560976,
+      "answerability_precision": 0.9444444444444444,
       "description": "Abstain when top1-top2 cosine gap < 0.05 OR top1 cosine < 0.60.",
       "false_abstention": 9,
       "false_abstention_rate": 0.34615384615384615,
@@ -191,10 +225,12 @@
       "false_confidence_rate": 0.06666666666666667,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 23,
+      "n_accepted": 18,
+      "n_accepted_positives": 17,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P3_gap_0.05_min_0.60",
-      "precision_on_answered": 0.9444444444444444,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 0.6538461538461539
     },
     {
       "abstain_breakdown": {
@@ -202,6 +238,7 @@
         "top1_top2_gap<0.10": 30
       },
       "abstain_rate": 0.7560975609756098,
+      "answerability_precision": 0.9,
       "description": "Abstain when top1-top2 cosine gap < 0.10 OR top1 cosine < 0.60.",
       "false_abstention": 17,
       "false_abstention_rate": 0.6538461538461539,
@@ -209,10 +246,12 @@
       "false_confidence_rate": 0.06666666666666667,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 31,
+      "n_accepted": 10,
+      "n_accepted_positives": 9,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P3_gap_0.10_min_0.60",
-      "precision_on_answered": 0.9,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 0.34615384615384615
     },
     {
       "abstain_breakdown": {
@@ -220,6 +259,7 @@
         "top1_top2_gap<0.15": 18
       },
       "abstain_rate": 0.8536585365853658,
+      "answerability_precision": 1.0,
       "description": "Abstain when top1-top2 cosine gap < 0.15 OR top1 cosine < 0.70.",
       "false_abstention": 20,
       "false_abstention_rate": 0.7692307692307693,
@@ -227,14 +267,17 @@
       "false_confidence_rate": 0.0,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 35,
+      "n_accepted": 6,
+      "n_accepted_positives": 6,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P3_gap_0.15_min_0.70",
-      "precision_on_answered": 1.0,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 0.23076923076923078
     },
     {
       "abstain_breakdown": {},
       "abstain_rate": 0.0,
+      "answerability_precision": 0.6341463414634146,
       "description": "Abstain when no row came from vector or hybrid source.",
       "false_abstention": 0,
       "false_abstention_rate": 0.0,
@@ -242,10 +285,12 @@
       "false_confidence_rate": 1.0,
       "metric_kind": "query_level_answerability_classification",
       "n_abstain": 0,
+      "n_accepted": 41,
+      "n_accepted_positives": 26,
       "n_total": 41,
+      "n_total_positives": 26,
       "name": "P4_no_vector_source",
-      "precision_on_answered": 0.6341463414634146,
-      "recall_on_answered": 1.0
+      "positive_query_coverage": 1.0
     }
   ],
   "report_path": "/home/v/src/mpm/.claude/worktrees/issue-15-calibration/bench/output/phase-a3/v2-nomic/report.json",

@@ -1861,7 +1861,7 @@ pair d02017/d02018; one of the two is retrieved,
 yielding Recall@10 = 0.5).
 
 The Option D policy sweep's
-`precision_on_answered` values (correctly partitioned
+`answerability_precision` values (correctly partitioned
 by scope in
 `bench/output/phase-a3/v2-nomic-eval/*.json`):
 - calibration: 26/41 ≈ 0.6341 (P0_empty_ranker)
@@ -1870,6 +1870,74 @@ by scope in
 
 These match the schema above and are the values the
 `P0` baseline answers are scored against.
+
+### B6 review (HAL 2026-10-19) — corrected
+answerability metrics
+
+The previous Option D JSON schema exposed two fields —
+`precision_on_answered` and `recall_on_answered` —
+that HAL's review identified as mathematically
+misleading. Specifically, `recall_on_answered` was
+computed as `answered_positives_with_hit / answered_positives`,
+so a policy that abstained on most positives still
+reported `recall_on_answered = 1.0` on its small
+answered subset. HAL verified:
+
+- `P1_cosine_0.70`, all scope: 10 false abstentions
+  among 40 positives. Actual positive-query coverage
+  is 30/40 = 0.75; published recall was 1.0.
+- `P1_cosine_0.80`, all scope: 28 false abstentions
+  among 40 positives. Actual coverage is 12/40 = 0.30;
+  published recall was 1.0.
+
+The B6 fix replaces these two fields with explicit,
+non-misleading names:
+
+- `answerability_precision` = accepted positive queries /
+  all accepted queries (HAL-aligned name).
+- `positive_query_coverage` = accepted positive queries /
+  all positive queries in the scope (HAL-aligned name).
+
+Both fields are `None` (JSON `null`) when their
+denominator is zero — respectively when no queries
+are accepted at all, or when the scope has no positive
+queries. The pre-fix fields silently returned 0 or 1
+in those cases; `None` makes the absent-meaning explicit.
+The misleading `precision_on_answered` /
+`recall_on_answered` fields have been removed from the
+JSON output. They are NOT silently retained as aliases.
+
+The pre-fix and post-fix numbers for the two HAL
+examples, across all three scopes:
+
+**`P1_cosine_0.70`** (abstain when top-1 cosine < 0.70):
+
+| Scope       | n_pos | false_abstention | n_accepted_positives | n_accepted | pre-fix `recall_on_answered` | post-fix `positive_query_coverage` | post-fix `answerability_precision` |
+|---|---|---|---|---|---|---|---|
+| All         | 40 | 10 | 30 | 32 | **1.0000** | **0.7500** | 0.9375 |
+| Calibration | 26 | 4  | 22 | 24 | **1.0000** | **0.8462** | 0.9167 |
+| Held-out    | 14 | 6  | 8  | 8  | **1.0000** | **0.5714** | 1.0000 |
+
+**`P1_cosine_0.80`** (abstain when top-1 cosine < 0.80):
+
+| Scope       | n_pos | false_abstention | n_accepted_positives | n_accepted | pre-fix `recall_on_answered` | post-fix `positive_query_coverage` | post-fix `answerability_precision` |
+|---|---|---|---|---|---|---|---|
+| All         | 40 | 28 | 12 | 12 | **1.0000** | **0.3000** | 1.0000 |
+| Calibration | 26 | 17 | 9  | 9  | **1.0000** | **0.3462** | 1.0000 |
+| Held-out    | 14 | 11 | 3  | 3  | **1.0000** | **0.2143** | 1.0000 |
+
+The post-fix table values are the values now present in
+`bench/output/phase-a3/v2-nomic-eval/{all, calibration, held-out}.json`
+(recomputed in the B6 commit, SHA256SUMS updated). The
+`pre-fix recall_on_answered` column shows the misleading
+values from the B1–B5 commit `8df87bf` that HAL's review
+flagged.
+
+The Phase A.3 addendum's underlying real-model
+measurements (per-query top-k from `mpm recall --collection
+bench_v2_corpus`) are unchanged; the B6 fix is a
+metric-semantics correction plus an in-place Option D
+recomputation from the unchanged per-query records.
 
 ### A3.10.2 — Mutation-gate scope (HAL C2)
 
@@ -2132,6 +2200,9 @@ The eval JSONs at
 | `make test-bench` result | (not run in A.3) | Re-run, exit 0, 148 tests collected (floor 50); see A3.10.3. |
 | Bench invocation | (not fully pinned) | Pinned: `python3 -m bench run --output-dir ... --corpus-version v2 --raw-cosine-prefix` with `MPM_BENCH_COLLECTION=bench_v2_corpus`; binary `.build/bin/mpm` (SHA-256 130cb1...); see A3.10.4. |
 | A.3 vs A.2 comparability | within 0.5% on aggregates | Unchanged: comparability conclusion still holds (the corrected mutation scope is a reporting correction, not a measurement change). |
+| `make test-bench` after B6 (HAL 2026-10-19) | (not yet run) | 167 tests collected (floor 50); exit 0. The previous 160 grew by 7 new B6 regression tests. |
+| Option D JSON schema after B6 | (pre-B6) `precision_on_answered` / `recall_on_answered` (misleading) | Replaced by `answerability_precision` / `positive_query_coverage` plus raw counts (`n_accepted`, `n_total_positives`, `n_accepted_positives`); old names removed. |
+| Forensic explanation after B7 | claimed seeds had no embedding | Corrected: stated only what is provable — seeds appeared in raw-cosine output, SQL required non-NULL embedding, collection filter was absent, corrected run excludes them. The exact sequence of operations on the live database between seed insertion and bench measurement is not independently reconstructible; no specific backfill timing is asserted. |
 
 **No underlying bench evidence is changed by these
 corrections; the per-query table in
@@ -2143,3 +2214,49 @@ is required.**
 production threshold, no production code change, no
 production-state modification. Phase B remains
 UNAUTHORISED.**
+
+### B7 review (HAL 2026-10-19) — corrected forensic
+embedding explanation
+
+The forensic README at
+`bench/output/phase-a3/v2-nomic-CONTAMINATED-FORENSIC/README.md`
+previously claimed the seed rows "had no `embedding`
+column set, so they had not been embedded". HAL's
+review (B7) noted that the pre-fix raw-cosine SQL
+read `WHERE embedding IS NOT NULL AND deleted_at IS
+NULL`, so the rows could not have been returned
+without an embedding.
+
+The forensic README now states only the four
+provable facts:
+
+1. The seed rows appeared in the raw-cosine output
+   (7 in unprefixed, 5 in prefixed; 0 in hybrid).
+2. The pre-fix SQL required `embedding IS NOT NULL`.
+3. The collection filter was absent in pre-fix code.
+4. The corrected run excludes those rows.
+
+Code evidence for the inferred constraint that the
+seeds must have had non-NULL embeddings at query
+time:
+
+- `insertSeedRow` at `internal/core/seed/engine.go:147`
+  inserts without an `embedding` column (initial state
+  is `NULL`).
+- `mpm ops backfill-embeddings` at
+  `cmd/mpm/backfill_embeddings.go:421` selects rows
+  by `(embedding IS NULL OR embedding = 'null') AND
+  deleted_at IS NULL` with no exclusion on
+  `collection` — so it WOULD backfill directive rows
+  if it was run.
+
+Therefore the seeds must have been embedded before
+the bench measurement, but the exact timing / writer
+is not reconstructible from the bench-run artifacts.
+The contaminated report files are preserved unchanged
+in `bench/output/phase-a3/v2-nomic-CONTAMINATED-FORENSIC/`
+with their original SHAs (`1ab727f2aa38471c...` for
+`report.json`, `0f04f2ddacae809f...` for `report.md`).
+The forensic README's SHA (`3b55cc166a94d48f...`) was
+preserved by the B1–B5 commit and is updated by the
+B7 commit to `e1474596b3b2aa08...`.

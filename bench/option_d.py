@@ -117,38 +117,60 @@ class PerQueryFeatures:
 
 @dataclass
 class PolicyResult:
-    """Result of evaluating one abstention policy on a set of queries."""
+    """Result of evaluating one abstention policy on a set of queries.
+
+    B6 review (HAL 2026-10-19): the previous fields
+    `precision_on_answered` and `recall_on_answered` were
+    mathematically misleading — `recall_on_answered` was
+    `answered_positives_with_hit / answered_positives`, so a
+    policy that abstained on most positives still reported
+    recall=1.0 on its small answered set. The B6 fix replaces
+    them with explicit, non-misleading names:
+
+      - `answerability_precision` = accepted positive queries /
+        all accepted queries (i.e. how clean the answered set
+        is). HAL-aligned name.
+      - `positive_query_coverage` = accepted positive queries /
+        all positive queries in the scope (i.e. how many of the
+        scope's positives were answered at all). HAL-aligned name.
+      - `n_accepted`, `n_total_positives`, `n_accepted_positives`
+        are the explicit denominators / numerators that
+        `answerability_precision` and `positive_query_coverage`
+        are computed from. Downstream readers that want the raw
+        counts can use these.
+
+    The fields are QUERY-LEVEL ANSWERABILITY CLASSIFICATION
+    metrics for the ANSWERED subset, NOT retrieval-ranking
+    Precision@k / Recall@k. A retrieval Precision@k / Recall@k
+    report keys on `top_k` row IDs against `relevant_doc_ids`,
+    which is what `bench/labelled_scoring` already does and is
+    reported separately in `bench/output/.../report.json` as
+    `labelled_scoring`. The `render_policy_result` JSON output
+    exposes the `metric_kind` field so downstream readers can
+    disambiguate.
+
+    Zero-denominator handling: both
+    `answerability_precision` and `positive_query_coverage` are
+    `None` (JSON `null`) when their denominator is zero —
+    respectively when no queries are accepted at all, or when
+    the scope has no positive queries. The pre-B6 fields
+    silently returned `0` or `1` in those cases; `None` makes
+    the absent-meaning explicit.
+    """
 
     name: str
     description: str
     n_total: int
     n_abstain: int
+    n_accepted: int
+    n_total_positives: int
+    n_accepted_positives: int
     false_abstention: int
     false_abstention_rate: float
     false_confidence: int
-    false_confidence_rate: float    # Aliases with explicit semantics (B5 review, HAL
-    # 2026-10-19): these fields are QUERY-LEVEL ANSWERABILITY
-    # CLASSIFICATION measures for the ANSWERED subset, NOT
-    # retrieval-ranking Precision@k / Recall@k. Specifically:
-    #   precision_on_answered = (# answered positives with at
-    #     least one vector/hybrid row) / (total answered)
-    #     = how clean the answered set is.
-    #   recall_on_answered = (# answered positives with at
-    #     least one vector/hybrid row) / (# positives in the
-    #     scope) = how many of the scope's positives were
-    #     answered at all.
-    # These are NOT retrieval metrics; they describe the
-    # abstention policy's effect on the answered set's
-    # composition, not on per-document relevance ranking.
-    # A retrieval Precision@k / Recall@k report would key on
-    # `top_k` row IDs against `relevant_doc_ids`, not on
-    # policy decisions. The names are kept short for backward
-    # compatibility with the existing JSON consumers, but the
-    # `render_policy_result` JSON output exposes the
-    # `metric_kind` field so downstream readers can
-    # disambiguate.
-    precision_on_answered: float | None
-    recall_on_answered: float | None
+    false_confidence_rate: float
+    answerability_precision: float | None
+    positive_query_coverage: float | None
     abstain_breakdown: dict[str, int] = field(default_factory=dict)
 
 
@@ -226,13 +248,13 @@ def evaluate_policy(
     the breakdown.
     """
     n_total = len(features)
+    n_total_positives = sum(1 for f in features if f.is_positive)
+    n_total_negatives = sum(1 for f in features if not f.is_positive)
     n_abstain = 0
+    n_accepted = 0
+    n_accepted_positives = 0
     false_abstention = 0
     false_confidence = 0
-    answered_positives = 0
-    answered_positives_with_hit = 0
-    answered_total = 0
-    answered_relevant_total = 0
     breakdown: dict[str, int] = {}
     for f in features:
         should_abstain, reason = abstain_fn(f)
@@ -242,44 +264,43 @@ def evaluate_policy(
             if f.is_positive:
                 false_abstention += 1
             continue
-        # We "answer". The policy is the unit of analysis here, not
-        # the underlying retrieval quality; for answered queries
-        # the precision/recall on the underlying retrieval is the
-        # ranker's contribution, not the policy's. We report
-        # precision/recall on the answerer's mean across the
-        # answered set so the policy can be compared against the
-        # ranker's pre-policy numbers.
-        answered_total += 1
+        # We "answer".
+        n_accepted += 1
         if f.is_positive:
-            answered_positives += 1
-            if f.top1_cosine > 0.0:
-                answered_positives_with_hit += 1
-            answered_relevant_total += 1
+            n_accepted_positives += 1
         else:
             false_confidence += 1
-    precision = (
-        answered_positives_with_hit / answered_total
-        if answered_total else None
+    # B6 (HAL 2026-10-19): explicit, non-misleading names.
+    # `answerability_precision` is `n_accepted_positives / n_accepted`
+    # — how clean the answered set is. `positive_query_coverage` is
+    # `n_accepted_positives / n_total_positives` — how many of the
+    # scope's positives were answered at all. Both are `None` when
+    # their denominator is zero so the absent-meaning is explicit.
+    answerability_precision = (
+        n_accepted_positives / n_accepted if n_accepted else None
     )
-    recall = (
-        answered_positives_with_hit / answered_relevant_total
-        if answered_relevant_total else None
+    positive_query_coverage = (
+        n_accepted_positives / n_total_positives
+        if n_total_positives else None
     )
     return PolicyResult(
         name=name,
         description=description,
         n_total=n_total,
         n_abstain=n_abstain,
+        n_accepted=n_accepted,
+        n_total_positives=n_total_positives,
+        n_accepted_positives=n_accepted_positives,
         false_abstention=false_abstention,
         false_abstention_rate=(
-            false_abstention / max(1, sum(1 for f in features if f.is_positive))
+            false_abstention / max(1, n_total_positives)
         ),
         false_confidence=false_confidence,
         false_confidence_rate=(
-            false_confidence / max(1, sum(1 for f in features if not f.is_positive))
+            false_confidence / max(1, n_total_negatives)
         ),
-        precision_on_answered=precision,
-        recall_on_answered=recall,
+        answerability_precision=answerability_precision,
+        positive_query_coverage=positive_query_coverage,
         abstain_breakdown=breakdown,
     )
 
@@ -430,18 +451,25 @@ def evaluate_all_policies(features: list[PerQueryFeatures]) -> list[PolicyResult
 def render_policy_result(r: PolicyResult) -> dict[str, Any]:
     """Render a PolicyResult to a JSON-safe dict.
 
-    B5 review (HAL 2026-10-19): the JSON output now carries
-    a `metric_kind` field that explicitly classifies
-    `precision_on_answered` and `recall_on_answered` as
+    B6 review (HAL 2026-10-19): the previous JSON fields
+    `precision_on_answered` / `recall_on_answered` were
+    mathematically misleading (recall was `answered_positives_with_hit
+    / answered_positives`, so a policy that abstained on most
+    positives still reported recall=1.0 on its small answered set).
+    They are replaced with explicit, non-misleading names
+    (`answerability_precision`, `positive_query_coverage`) plus the
+    raw counts (`n_accepted`, `n_total_positives`,
+    `n_accepted_positives`) that those metrics are computed from.
+
+    B5 review (HAL 2026-10-19): the JSON output also carries a
+    `metric_kind` field that explicitly classifies these fields as
     QUERY-LEVEL ANSWERABILITY CLASSIFICATION metrics for the
-    ANSWERED subset, not as retrieval Precision@k /
-    Recall@k. Downstream readers that need retrieval
-    Precision@k should compute it directly from
-    `per_query_table[*].top_k[*]` against `relevant_doc_ids`,
-    which is what `bench/labelled_scoring` already does and is
-    reported separately in `bench/output/.../report.json` as
-    `labelled_scoring`. The names are preserved for backward
-    compatibility.
+    ANSWERED subset, not as retrieval Precision@k / Recall@k.
+    Downstream readers that need retrieval Precision@k should
+    compute it directly from `per_query_table[*].top_k[*]` against
+    `relevant_doc_ids`, which is what `bench/labelled_scoring`
+    already does and is reported separately in
+    `bench/output/.../report.json` as `labelled_scoring`.
     """
     return {
         "name": r.name,
@@ -449,15 +477,17 @@ def render_policy_result(r: PolicyResult) -> dict[str, Any]:
         "n_total": r.n_total,
         "n_abstain": r.n_abstain,
         "abstain_rate": r.n_abstain / max(1, r.n_total),
+        "n_accepted": r.n_accepted,
+        "n_total_positives": r.n_total_positives,
+        "n_accepted_positives": r.n_accepted_positives,
         "false_abstention": r.false_abstention,
         "false_abstention_rate": r.false_abstention_rate,
         "false_confidence": r.false_confidence,
         "false_confidence_rate": r.false_confidence_rate,
-        # B5: classify explicitly so consumers do not confuse
-        # these with retrieval ranking metrics.
+        # B6: explicit, non-misleading names (HAL-aligned).
         "metric_kind": "query_level_answerability_classification",
-        "precision_on_answered": r.precision_on_answered,
-        "recall_on_answered": r.recall_on_answered,
+        "answerability_precision": r.answerability_precision,
+        "positive_query_coverage": r.positive_query_coverage,
         "abstain_breakdown": r.abstain_breakdown,
     }
 
