@@ -32,12 +32,12 @@ queries.v1 is a small synthetic labelled set, not a recovery of the historical 3
 - Mean nDCG@k:      `0.9269`
 
 ## Isolation (C4 / gate 7)
-- **snapshot_workspace**: `/tmp/mpm-bench/mpm-bench-run-bxlzo6vi`
-- **output_dir**: `/tmp/mpm-bench-v2-nomic-a3`
+- **snapshot_workspace**: `/tmp/mpm-bench/mpm-bench-run-c4pn386c`
+- **output_dir**: `/tmp/mpm-bench-output-b1`
 - **snapshot_symlink_rejection**: `passed`
 - **output_symlink_rejection**: `passed`
 - **env_scrubbing**: `passed (see test_env_scrubbing.py)`
-- **binary_provenance**: `{'path': '/home/v/src/mpm/.claude/worktrees/issue-15-calibration/.build/bin/mpm', 'resolved_path': '/home/v/src/mpm/.claude/worktrees/issue-15-calibration/.build/bin/mpm', 'size_bytes': 22601728, 'mtime_iso': '2026-10-19T13:34:57.340063+00:00', 'sha256': '130cb1293d27850d2f30aa8e4fd53cdd4f2f9df74d6d9614c6abeb90c0af4304', 'mpm_version': 'MPM mpm archive/pr29head-17-g90ef900', 'git_head': '90ef90088f154086881d05338a22e2487ad17d5a', 'build_config': 'CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)    ./cmd/mpm', 'canonical': True}`
+- **binary_provenance**: `{'path': '/home/v/src/mpm/.claude/worktrees/issue-15-calibration/.build/bin/mpm', 'resolved_path': '/home/v/src/mpm/.claude/worktrees/issue-15-calibration/.build/bin/mpm', 'size_bytes': 22601728, 'mtime_iso': '2026-10-19T13:34:57.340063+00:00', 'sha256': '130cb1293d27850d2f30aa8e4fd53cdd4f2f9df74d6d9614c6abeb90c0af4304', 'mpm_version': 'MPM mpm archive/pr29head-17-g90ef900', 'git_head': '687eb4fea50040fb7eacf4ba9ccddee76775fdf0', 'build_config': 'CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)    ./cmd/mpm', 'canonical': True}`
 - **bench_collection**: `bench_v2_corpus`
 - **expected_collection_verification**: `bench_v2_corpus`
 

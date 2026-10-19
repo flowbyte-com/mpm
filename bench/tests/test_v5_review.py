@@ -368,7 +368,7 @@ class TestRecallSubprocessReceivesTopK(unittest.TestCase):
         captured: list[int] = []
         orig_raw = r._raw_cosine_ranking
 
-        def fake_raw(query, snap, top_k, embedding_profile=None, prefix=""):
+        def fake_raw(query, snap, top_k, embedding_profile=None, prefix="", collection=None):
             captured.append(top_k)
             return []
 

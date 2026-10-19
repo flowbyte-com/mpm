@@ -16,7 +16,7 @@
       "dimension": 768,
       "source": "provider"
     },
-    "snapshot_path": "/tmp/mpm-bench/mpm-bench-run-bxlzo6vi/src/db/mpm.db"
+    "snapshot_path": "/tmp/mpm-bench/mpm-bench-run-c4pn386c/src/db/mpm.db"
   },
   "participation": {
     "positive_total": 40,
@@ -423,10 +423,10 @@
           "d02014",
           "d02048",
           "d02001",
-          "mpm-seed-session-end-cluster-triage",
           "d02020",
           "d02022",
-          "d02003"
+          "d02003",
+          "d02009"
         ],
         "relevant_ids": [
           "d02027"
@@ -702,8 +702,8 @@
           "d02030",
           "d02048",
           "d02009",
-          "mpm-seed-session-end-cluster-triage",
-          "d02020"
+          "d02020",
+          "d02025"
         ],
         "relevant_ids": [
           "d02043"
@@ -771,8 +771,8 @@
           "d02034",
           "d02017",
           "d02009",
-          "mpm-seed-wake-triage-policy",
-          "d02020"
+          "d02020",
+          "d02044"
         ],
         "relevant_ids": [
           "d02045"
@@ -930,10 +930,10 @@
           "d02024",
           "d02008",
           "d02045",
-          "mpm-seed-session-end-cluster-triage",
           "d02020",
           "d02047",
-          "d02030"
+          "d02030",
+          "d02034"
         ],
         "relevant_ids": [
           "d02046"
@@ -949,14 +949,14 @@
         "top_ids": [
           "d02045",
           "d02046",
-          "mpm-seed-session-end-cluster-triage",
           "d02020",
           "d02030",
           "d02047",
           "d02018",
           "d02008",
           "d02043",
-          "mpm-seed-read-wake-context"
+          "d02048",
+          "d02033"
         ],
         "relevant_ids": [
           "d02045"
@@ -1254,10 +1254,10 @@
           "d02049",
           "d02050",
           "d02013",
-          "mpm-seed-epistemic-compaction-policy",
           "d02042",
           "d02036",
-          "d02043"
+          "d02043",
+          "d02026"
         ],
         "relevant_ids": [],
         "precision_at_k": 0.0,
@@ -2128,8 +2128,8 @@
           "d02034",
           "d02009",
           "d02043",
-          "mpm-seed-wake-triage-policy",
-          "d02048"
+          "d02048",
+          "d02020"
         ],
         "relevant_ids": [
           "d02045"
@@ -2286,11 +2286,11 @@
           "d02017",
           "d02008",
           "d02045",
-          "mpm-seed-session-end-cluster-triage",
           "d02024",
           "d02034",
           "d02020",
-          "d02030"
+          "d02030",
+          "d02047"
         ],
         "relevant_ids": [
           "d02046"
@@ -2306,14 +2306,14 @@
         "top_ids": [
           "d02045",
           "d02046",
-          "mpm-seed-session-end-cluster-triage",
           "d02020",
           "d02030",
           "d02047",
           "d02008",
           "d02018",
           "d02048",
-          "mpm-seed-read-wake-context"
+          "d02043",
+          "d02017"
         ],
         "relevant_ids": [
           "d02045"
@@ -2611,10 +2611,10 @@
           "d02031",
           "d02049",
           "d02013",
-          "mpm-seed-epistemic-compaction-policy",
           "d02042",
           "d02036",
-          "d02043"
+          "d02043",
+          "d02026"
         ],
         "relevant_ids": [],
         "precision_at_k": 0.0,
@@ -4165,8 +4165,8 @@
     }
   },
   "isolation": {
-    "snapshot_workspace": "/tmp/mpm-bench/mpm-bench-run-bxlzo6vi",
-    "output_dir": "/tmp/mpm-bench-v2-nomic-a3",
+    "snapshot_workspace": "/tmp/mpm-bench/mpm-bench-run-c4pn386c",
+    "output_dir": "/tmp/mpm-bench-output-b1",
     "snapshot_symlink_rejection": "passed",
     "output_symlink_rejection": "passed",
     "env_scrubbing": "passed (see test_env_scrubbing.py)",
@@ -4177,7 +4177,7 @@
       "mtime_iso": "2026-10-19T13:34:57.340063+00:00",
       "sha256": "130cb1293d27850d2f30aa8e4fd53cdd4f2f9df74d6d9614c6abeb90c0af4304",
       "mpm_version": "MPM mpm archive/pr29head-17-g90ef900",
-      "git_head": "90ef90088f154086881d05338a22e2487ad17d5a",
+      "git_head": "687eb4fea50040fb7eacf4ba9ccddee76775fdf0",
       "build_config": "CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)    ./cmd/mpm",
       "canonical": true
     },
@@ -9401,12 +9401,6 @@
           "source": "vector"
         },
         {
-          "id": "mpm-seed-session-end-cluster-triage",
-          "score": 0.4672625260553848,
-          "vector_similarity": 0.4672625260553848,
-          "source": "vector"
-        },
-        {
           "id": "d02020",
           "score": 0.4668997352760685,
           "vector_similarity": 0.4668997352760685,
@@ -9422,6 +9416,12 @@
           "id": "d02003",
           "score": 0.457616152258925,
           "vector_similarity": 0.457616152258925,
+          "source": "vector"
+        },
+        {
+          "id": "d02009",
+          "score": 0.4566159762449574,
+          "vector_similarity": 0.4566159762449574,
           "source": "vector"
         }
       ]
@@ -10241,15 +10241,15 @@
           "source": "vector"
         },
         {
-          "id": "mpm-seed-session-end-cluster-triage",
-          "score": 0.4888454473769153,
-          "vector_similarity": 0.4888454473769153,
-          "source": "vector"
-        },
-        {
           "id": "d02020",
           "score": 0.4837328745318011,
           "vector_similarity": 0.4837328745318011,
+          "source": "vector"
+        },
+        {
+          "id": "d02025",
+          "score": 0.4833620505065437,
+          "vector_similarity": 0.4833620505065437,
           "source": "vector"
         }
       ]
@@ -10448,15 +10448,15 @@
           "source": "vector"
         },
         {
-          "id": "mpm-seed-wake-triage-policy",
-          "score": 0.4911286914471669,
-          "vector_similarity": 0.4911286914471669,
-          "source": "vector"
-        },
-        {
           "id": "d02020",
           "score": 0.48156794762156946,
           "vector_similarity": 0.48156794762156946,
+          "source": "vector"
+        },
+        {
+          "id": "d02044",
+          "score": 0.4708303179655027,
+          "vector_similarity": 0.4708303179655027,
           "source": "vector"
         }
       ]
@@ -10919,12 +10919,6 @@
           "source": "vector"
         },
         {
-          "id": "mpm-seed-session-end-cluster-triage",
-          "score": 0.5600810651063118,
-          "vector_similarity": 0.5600810651063118,
-          "source": "vector"
-        },
-        {
           "id": "d02020",
           "score": 0.5594531312064497,
           "vector_similarity": 0.5594531312064497,
@@ -10940,6 +10934,12 @@
           "id": "d02030",
           "score": 0.5365860024485238,
           "vector_similarity": 0.5365860024485238,
+          "source": "vector"
+        },
+        {
+          "id": "d02034",
+          "score": 0.5343916445127234,
+          "vector_similarity": 0.5343916445127234,
           "source": "vector"
         }
       ]
@@ -10961,12 +10961,6 @@
           "id": "d02046",
           "score": 0.5879469451551764,
           "vector_similarity": 0.5879469451551764,
-          "source": "vector"
-        },
-        {
-          "id": "mpm-seed-session-end-cluster-triage",
-          "score": 0.5837902404006886,
-          "vector_similarity": 0.5837902404006886,
           "source": "vector"
         },
         {
@@ -11006,9 +11000,15 @@
           "source": "vector"
         },
         {
-          "id": "mpm-seed-read-wake-context",
-          "score": 0.5284986435457831,
-          "vector_similarity": 0.5284986435457831,
+          "id": "d02048",
+          "score": 0.5271778276483767,
+          "vector_similarity": 0.5271778276483767,
+          "source": "vector"
+        },
+        {
+          "id": "d02033",
+          "score": 0.5173045421766741,
+          "vector_similarity": 0.5173045421766741,
           "source": "vector"
         }
       ]
@@ -11954,12 +11954,6 @@
           "source": "vector"
         },
         {
-          "id": "mpm-seed-epistemic-compaction-policy",
-          "score": 0.6082297560275786,
-          "vector_similarity": 0.6082297560275786,
-          "source": "vector"
-        },
-        {
           "id": "d02042",
           "score": 0.5995531761127777,
           "vector_similarity": 0.5995531761127777,
@@ -11975,6 +11969,12 @@
           "id": "d02043",
           "score": 0.592024844535958,
           "vector_similarity": 0.592024844535958,
+          "source": "vector"
+        },
+        {
+          "id": "d02026",
+          "score": 0.5917373007072725,
+          "vector_similarity": 0.5917373007072725,
           "source": "vector"
         }
       ]
@@ -14590,15 +14590,15 @@
           "source": "vector"
         },
         {
-          "id": "mpm-seed-wake-triage-policy",
-          "score": 0.5300526464120758,
-          "vector_similarity": 0.5300526464120758,
-          "source": "vector"
-        },
-        {
           "id": "d02048",
           "score": 0.5153053229135622,
           "vector_similarity": 0.5153053229135622,
+          "source": "vector"
+        },
+        {
+          "id": "d02020",
+          "score": 0.5130812716100667,
+          "vector_similarity": 0.5130812716100667,
           "source": "vector"
         }
       ]
@@ -15055,12 +15055,6 @@
           "source": "vector"
         },
         {
-          "id": "mpm-seed-session-end-cluster-triage",
-          "score": 0.5482728305685797,
-          "vector_similarity": 0.5482728305685797,
-          "source": "vector"
-        },
-        {
           "id": "d02024",
           "score": 0.5358307762706647,
           "vector_similarity": 0.5358307762706647,
@@ -15083,6 +15077,12 @@
           "score": 0.5289716075996931,
           "vector_similarity": 0.5289716075996931,
           "source": "vector"
+        },
+        {
+          "id": "d02047",
+          "score": 0.520657843934865,
+          "vector_similarity": 0.520657843934865,
+          "source": "vector"
         }
       ]
     },
@@ -15103,12 +15103,6 @@
           "id": "d02046",
           "score": 0.5856205052152791,
           "vector_similarity": 0.5856205052152791,
-          "source": "vector"
-        },
-        {
-          "id": "mpm-seed-session-end-cluster-triage",
-          "score": 0.581203461939351,
-          "vector_similarity": 0.581203461939351,
           "source": "vector"
         },
         {
@@ -15148,9 +15142,15 @@
           "source": "vector"
         },
         {
-          "id": "mpm-seed-read-wake-context",
-          "score": 0.5285608453756825,
-          "vector_similarity": 0.5285608453756825,
+          "id": "d02043",
+          "score": 0.527007269282894,
+          "vector_similarity": 0.527007269282894,
+          "source": "vector"
+        },
+        {
+          "id": "d02017",
+          "score": 0.5210785634824114,
+          "vector_similarity": 0.5210785634824114,
           "source": "vector"
         }
       ]
@@ -16096,12 +16096,6 @@
           "source": "vector"
         },
         {
-          "id": "mpm-seed-epistemic-compaction-policy",
-          "score": 0.6199091514648207,
-          "vector_similarity": 0.6199091514648207,
-          "source": "vector"
-        },
-        {
           "id": "d02042",
           "score": 0.6122764905876432,
           "vector_similarity": 0.6122764905876432,
@@ -16117,6 +16111,12 @@
           "id": "d02043",
           "score": 0.6047691288384893,
           "vector_similarity": 0.6047691288384893,
+          "source": "vector"
+        },
+        {
+          "id": "d02026",
+          "score": 0.5996182700339437,
+          "vector_similarity": 0.5996182700339437,
           "source": "vector"
         }
       ]
@@ -16675,5 +16675,5 @@
     }
   ],
   "historical_note": "queries.v1 is a small synthetic labelled set, not a recovery of the historical 30-query benchmark. The historical +0.022 MRR figure attributed to raw-cosine prefixing is NOT reproduced by this harness. The raw-cosine delta in the report is the metric DIFFERENCE between the unprefixed and `search_query:`-prefixed query embeddings on this corpus; a near-zero delta on a synthetic set is expected and does not contradict the historical finding on the lost corpus.",
-  "output_dir": "/tmp/mpm-bench-v2-nomic-a3"
+  "output_dir": "/tmp/mpm-bench-output-b1"
 }

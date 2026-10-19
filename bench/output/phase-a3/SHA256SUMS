@@ -1,5 +1,8 @@
-0f04f2ddacae809f4717fd7edb391b17307ad048274e2dd6e04ab840215412ae  bench/output/phase-a3/v2-nomic/report.md
-1ab727f2aa38471c3d531d05549f24e026129d18e738314c3e6e3220cffb2784  bench/output/phase-a3/v2-nomic/report.json
-ea61b822cd14b51a4a826fd958d7e60dc928a74c35594479230674a54d88e537  bench/output/phase-a3/v2-nomic-eval/calibration.json
-01914608517cafb13e705630c1aa8469dd30a7644f3abd38a2b91dd93ec86c72  bench/output/phase-a3/v2-nomic-eval/all.json
-4e13251a79561cecdfb628d719e330f92d63d49bbe5ded16de86c400cfb42ab5  bench/output/phase-a3/v2-nomic-eval/held-out.json
+3b55cc166a94d48ff2716f9432ab0d30353ef3141b31b26f07ba15e2d073cd42  ./v2-nomic-CONTAMINATED-FORENSIC/README.md
+1ab727f2aa38471c3d531d05549f24e026129d18e738314c3e6e3220cffb2784  ./v2-nomic-CONTAMINATED-FORENSIC/report.json
+0f04f2ddacae809f4717fd7edb391b17307ad048274e2dd6e04ab840215412ae  ./v2-nomic-CONTAMINATED-FORENSIC/report.md
+d6820b1c91b1f490fd41733b9e641156937468da452c157fbb21af380f8c692c  ./v2-nomic-eval/all.json
+94e016c2ef00b06813baf68437ee22217d41a5e04da148d7b427aeeaa354efff  ./v2-nomic-eval/calibration.json
+c37e70b123a4739011e26a55eb5c886ec1605dcaecaa1ccde80ef874db6ec06c  ./v2-nomic-eval/held-out.json
+20ec21b772dce2b313907cd0035a1e0e8e8a10df1211984ca1e69a40091c0225  ./v2-nomic/report.json
+65c038652f1a9628c0d7ad24a758e8c7293d6fa5a5dae6b9fccce57ff185066f  ./v2-nomic/report.md
