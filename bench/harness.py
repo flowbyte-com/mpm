@@ -60,6 +60,15 @@ v5 review (HAL 2026-10-19):
     corpus contract, not from the operator's config. The
     operator's config is honoured only for the embedding
     profile and model identity.
+
+v6 review (HAL 2026-10-19):
+  - The resolved binary must be a regular file (B4). An
+    executable directory or other non-file path is rejected
+    explicitly with `IsADirectoryError`. Both the canonical
+    artifact and the `MPM_BENCH_BINARY` override path are
+    checked. The pre-v6 existence + executable-bit checks
+    were insufficient on Unix because `/tmp` (an executable
+    directory) would have passed them.
 """
 
 from __future__ import annotations
@@ -446,18 +455,47 @@ def _resolve_mpm_binary() -> Path:
     is production state and must NOT be used as an implicit
     fallback — it would route the harness against the live DB).
 
+    v6 review (HAL 2026-10-19): the resolved binary must be a
+    regular file. On Unix, an executable directory (e.g. `/tmp`)
+    passes the existence and executable-bit checks but cannot
+    be exec'd as a binary. The harness now fails closed on
+    directories, symlinks-to-directories, sockets, and other
+    non-regular-file paths.
+
     Resolution order:
-      1. `MPM_BENCH_BINARY` (absolute path, validated to exist
-         and be executable). Used by tests and CI to point at a
-         specific build.
+      1. `MPM_BENCH_BINARY` (absolute path, validated to exist,
+         be a regular file, and be executable). Used by tests
+         and CI to point at a specific build.
       2. The canonical `.build/bin/mpm` (the make build artifact).
-         Validated to exist and be executable.
+         Validated to exist, be a regular file, and be executable.
       3. Hard error. The harness does NOT silently fall back to
          a root-level or installed binary.
 
     The returned path is absolute and the file is verified to
-    exist and be marked executable before subprocess execution.
+    exist, be a regular file, and be marked executable before
+    subprocess execution.
     """
+    def _validate(p: Path, *, source: str) -> Path:
+        if not p.exists():
+            raise FileNotFoundError(
+                f"{source}={p} does not exist"
+            )
+        if not p.is_file():
+            # v6 B4: an executable directory (e.g. /tmp) or any
+            # other non-regular file passes the existence and
+            # executable-bit checks on Unix. Reject it explicitly
+            # so the harness cannot be tricked into exec'ing a
+            # directory or following a non-file path.
+            raise IsADirectoryError(
+                f"{source}={p} is not a regular file; "
+                f"refusing to use {p} as the mpm binary"
+            )
+        if not os.access(p, os.X_OK):
+            raise PermissionError(
+                f"{source}={p} is not executable"
+            )
+        return p
+
     override = os.environ.get("MPM_BENCH_BINARY")
     if override:
         # v5 review: check absolute on the raw string BEFORE
@@ -470,16 +508,7 @@ def _resolve_mpm_binary() -> Path:
             raise ValueError(
                 f"MPM_BENCH_BINARY must be an absolute path; got {override!r}"
             )
-        p = Path(override)
-        if not p.exists():
-            raise FileNotFoundError(
-                f"MPM_BENCH_BINARY={p} does not exist"
-            )
-        if not os.access(p, os.X_OK):
-            raise PermissionError(
-                f"MPM_BENCH_BINARY={p} is not executable"
-            )
-        return p
+        return _validate(Path(override), source="MPM_BENCH_BINARY")
     if not CANONICAL_MPM_BINARY.exists():
         raise FileNotFoundError(
             f"canonical mpm binary not found at {CANONICAL_MPM_BINARY}; "
@@ -490,6 +519,17 @@ def _resolve_mpm_binary() -> Path:
             f"operator's installed binary at $HOME/.mpm/bin/mpm "
             f"(that is production state and would route this run "
             f"against the live DB)."
+        )
+    if not CANONICAL_MPM_BINARY.is_file():
+        # v6 B4: same fail-closed check for the canonical
+        # artifact. If `.build/bin/mpm` is a directory or has
+        # been replaced with a non-file, surface that here
+        # rather than letting subprocess.run fail later with a
+        # less informative error.
+        raise IsADirectoryError(
+            f"canonical mpm binary at {CANONICAL_MPM_BINARY} is "
+            f"not a regular file; re-run `make build` or check "
+            f"the file mode"
         )
     if not os.access(CANONICAL_MPM_BINARY, os.X_OK):
         raise PermissionError(
