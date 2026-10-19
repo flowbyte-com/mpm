@@ -20,6 +20,8 @@ class RunReport:
     regeneration: dict[str, Any]
     participation: dict[str, Any]
     raw_cosine_participation: dict[str, Any] | None
+    labelled_scoring: dict[str, Any] | None
+    raw_cosine_scoring: dict[str, Any] | None
     isolation: dict[str, Any]
     snapshot_logical_mutation: dict[str, Any]
     live_store: dict[str, Any]
@@ -35,6 +37,8 @@ class RunReport:
                 "regeneration": self.regeneration,
                 "participation": self.participation,
                 "raw_cosine_participation": self.raw_cosine_participation,
+                "labelled_scoring": self.labelled_scoring,
+                "raw_cosine_scoring": self.raw_cosine_scoring,
                 "isolation": self.isolation,
                 "snapshot_logical_mutation": self.snapshot_logical_mutation,
                 "live_store": self.live_store,
@@ -99,6 +103,30 @@ class RunReport:
         )
         lines.append("")
 
+        # Real labelled relevance scoring (priority 3 of HAL's review).
+        if self.labelled_scoring is not None:
+            lines.append("## Labelled relevance scoring (priority 3)")
+            s = self.labelled_scoring
+            agg = s.get("aggregates", {})
+            lines.append(f"- top-k: `{s.get('k')}`")
+            lines.append(
+                f"- Positive queries scored: `{s.get('positive_total')}` "
+                f"(negative: `{s.get('negative_total')}`)"
+            )
+            lines.append(
+                f"- Mean Precision@k: `{agg.get('mean_precision_at_k'):.4f}`"
+            )
+            lines.append(
+                f"- Mean Recall@k:    `{agg.get('mean_recall_at_k'):.4f}`"
+            )
+            lines.append(
+                f"- Mean MRR:         `{agg.get('mean_mrr'):.4f}`"
+            )
+            lines.append(
+                f"- Mean nDCG@k:      `{agg.get('mean_ndcg_at_k'):.4f}`"
+            )
+            lines.append("")
+
         lines.append("## Isolation (C4 / gate 7)")
         for k, v in self.isolation.items():
             lines.append(f"- **{k}**: `{v}`")
@@ -113,6 +141,24 @@ class RunReport:
             lines.append(
                 f"- Positive queries: {rp.get('positive_vector_participated')}/{rp.get('positive_total')} participated"
             )
+            # Real labelled relevance for the raw-cosine experiment
+            # (priority 3 + 4 of HAL's review).
+            if self.raw_cosine_scoring is not None:
+                rs = self.raw_cosine_scoring
+                rag = rs.get("aggregates", {})
+                lines.append(
+                    f"- Mean Precision@k: `{rag.get('mean_precision_at_k'):.4f}` "
+                    f"(raw-cosine, query embedded via configured provider)"
+                )
+                lines.append(
+                    f"- Mean Recall@k:    `{rag.get('mean_recall_at_k'):.4f}`"
+                )
+                lines.append(
+                    f"- Mean MRR:         `{rag.get('mean_mrr'):.4f}`"
+                )
+                lines.append(
+                    f"- Mean nDCG@k:      `{rag.get('mean_ndcg_at_k'):.4f}`"
+                )
             lines.append("")
 
         lines.append("## Per-query table (hybrid ranker)")

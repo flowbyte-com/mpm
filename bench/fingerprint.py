@@ -127,7 +127,9 @@ def verify_regeneration_complete(
     both `memories` and `reference_chunks` has the exact intended
     (model, dimension, source) AND the BLOB decodes to a vector whose
     length matches `expected_dimension` AND (if `expected_doc_ids` is
-    provided) every expected doc_id has an embedded row.
+    provided) every expected doc_id has an embedded row AND (priority
+    2 of HAL's review) the decoded vector is not all-zero and has a
+    non-NaN, non-Inf, finite L2 norm in a sane range.
 
     Subprocess exit 0 is irrelevant; this function is the source of
     truth for "did regeneration complete?".
@@ -136,6 +138,20 @@ def verify_regeneration_complete(
     NULL embeddings, not just incorrect fingerprints on populated
     rows. The expected_doc_ids check is how missing rows are caught:
     if a row is missing entirely, the doc_ids set will not be covered.
+
+    Hardening (priority 2 of HAL's review):
+      - L2-norm check: reject zero vectors (a `provider` row whose
+        decoded BLOB is all zeros is a silent failure; the JSON
+        round-trip will accept it but the ranker will see a
+        directionless vector).
+      - NaN/Inf check: a NaN in a stored vector would corrupt
+        cosine computations; the JSON decode accepts the
+        string `"NaN"` on some Python versions but Go's strict
+        JSON decoder refuses it. We surface the corruption
+        rather than letting it pass.
+      - L2-norm range check: a unit-L2 vector's norm is 1.0; a
+        stored vector whose L2 norm is far from `expected_dimension`
+        in magnitude (e.g. `1e6`) is a real model failure.
 
     Args:
         snapshot_path: path to the disposable DB file
@@ -147,6 +163,8 @@ def verify_regeneration_complete(
             have a non-NULL embedded row. If provided, missing IDs
             are listed in failures.
     """
+    import math
+
     failures: list[str] = []
     con = sqlite3.connect(f"file:{snapshot_path}?mode=ro", uri=True)
     try:
@@ -173,11 +191,13 @@ def verify_regeneration_complete(
             """
         ).fetchone()[0]
         # Memories: check that the BLOB decodes to a vector of the
-        # declared length. This is the gate-1 "actual decoded vector
-        # length" check.
+        # declared length AND is a sane real-valued vector.
         mem_bad_len = 0
         mem_decoded_total = 0
         mem_undecodable = 0
+        mem_zero_norm = 0
+        mem_nonfinite = 0
+        mem_huge_norm = 0
         for blob, dim in con.execute(
             """
             SELECT embedding, embedding_dimension FROM memories
@@ -191,6 +211,21 @@ def verify_regeneration_complete(
             mem_decoded_total += 1
             if dim is None or len(vec) != dim:
                 mem_bad_len += 1
+                continue
+            # Sanity: all values finite, not all zero, norm bounded.
+            if any(
+                (not isinstance(x, (int, float))) or x != x or x in (float("inf"), float("-inf"))
+                for x in vec
+            ):
+                mem_nonfinite += 1
+                continue
+            norm_sq = sum(float(x) * float(x) for x in vec)
+            if norm_sq == 0.0:
+                mem_zero_norm += 1
+                continue
+            if math.sqrt(norm_sq) > 1e6 * expected_dimension:
+                mem_huge_norm += 1
+                continue
 
         # Reference chunks: same shape.
         ref_mismatch = con.execute(
@@ -215,6 +250,9 @@ def verify_regeneration_complete(
         ref_bad_len = 0
         ref_decoded_total = 0
         ref_undecodable = 0
+        ref_zero_norm = 0
+        ref_nonfinite = 0
+        ref_huge_norm = 0
         for blob, dim in con.execute(
             """
             SELECT embedding, embedding_dimension FROM reference_chunks
@@ -228,6 +266,20 @@ def verify_regeneration_complete(
             ref_decoded_total += 1
             if dim is None or len(vec) != dim:
                 ref_bad_len += 1
+                continue
+            if any(
+                (not isinstance(x, (int, float))) or x != x or x in (float("inf"), float("-inf"))
+                for x in vec
+            ):
+                ref_nonfinite += 1
+                continue
+            norm_sq = sum(float(x) * float(x) for x in vec)
+            if norm_sq == 0.0:
+                ref_zero_norm += 1
+                continue
+            if math.sqrt(norm_sq) > 1e6 * expected_dimension:
+                ref_huge_norm += 1
+                continue
 
         # Expected doc_ids coverage. If the caller passed the corpus
         # IDs, every one must have an embedded row.
@@ -270,6 +322,18 @@ def verify_regeneration_complete(
         failures.append(
             f"memories: {mem_undecodable} rows with undecodable embedding BLOB"
         )
+    if mem_zero_norm:
+        failures.append(
+            f"memories: {mem_zero_norm} rows with all-zero vector (silent provider failure)"
+        )
+    if mem_nonfinite:
+        failures.append(
+            f"memories: {mem_nonfinite} rows with NaN/Inf in vector (priority 2)"
+        )
+    if mem_huge_norm:
+        failures.append(
+            f"memories: {mem_huge_norm} rows with L2 norm > 1e6 * dim (priority 2)"
+        )
     if ref_mismatch:
         failures.append(
             f"reference_chunks: {ref_mismatch} rows with non-matching fingerprint"
@@ -285,6 +349,18 @@ def verify_regeneration_complete(
     if ref_undecodable:
         failures.append(
             f"reference_chunks: {ref_undecodable} rows with undecodable embedding BLOB"
+        )
+    if ref_zero_norm:
+        failures.append(
+            f"reference_chunks: {ref_zero_norm} rows with all-zero vector (silent provider failure)"
+        )
+    if ref_nonfinite:
+        failures.append(
+            f"reference_chunks: {ref_nonfinite} rows with NaN/Inf in vector (priority 2)"
+        )
+    if ref_huge_norm:
+        failures.append(
+            f"reference_chunks: {ref_huge_norm} rows with L2 norm > 1e6 * dim (priority 2)"
         )
     if missing_doc_ids:
         failures.append(

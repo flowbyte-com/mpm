@@ -13,6 +13,19 @@ Design references (verified file:line):
   - MPM_SHARED_DB at cmd/mpm/handlers_shared.go:33
   - MPM_DB_LOCK at cmd/mpm/handlers_shred_database_reset.go:397
   - MPM workspace priority at internal/core/config/config.go:529-597
+
+Hardening (priority 1 of HAL's review, 2026-10-19):
+  - Re-check permissions immediately before each write under
+    `output_dir` to close the TOCTOU window between the original
+    check and the actual write.
+  - Reject output dirs that resolve through a symlink chain into
+    a live-store sentinel, even when the original path was not a
+    symlink at the time of the call.
+  - Reject output dirs whose parent path or any path component
+    resolves into a live-store sentinel.
+  - Reject any environment variable whose name starts with
+    `MPM_` or `OLLAMA_` (forward-compatible against future
+    overrides MPM might add).
 """
 
 from __future__ import annotations
@@ -46,6 +59,19 @@ DANGEROUS_INHERITED_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# Forward-compatible env-key prefix denylist. Any env var whose name
+# starts with one of these prefixes is scrubbed even if it is not in
+# DANGEROUS_INHERITED_KEYS. This guards against future MPM code that
+# adds a new MPM_*/OLLAMA_*/OPENAI_* override without the harness
+# being updated.
+DANGEROUS_ENV_PREFIXES: tuple[str, ...] = (
+    "MPM_",
+    "OLLAMA_",
+    "OPENAI_",
+    "ANTHROPIC_",
+    "OPENROUTER_",
+)
+
 # Paths that, if the realpath of a snapshot or output dir lands inside
 # them, cause a hard refusal. These are the load-bearing live-store
 # sentinels.
@@ -66,6 +92,36 @@ def _realpath(p: Path) -> Path:
     return Path(os.path.realpath(p))
 
 
+def _path_is_under(child: Path, parent: Path) -> bool:
+    """Return True if `child` is the same path as `parent` or is
+    inside `parent` after symlink resolution. Both paths are
+    realpath-resolved first so a symlink that points into `parent`
+    is caught regardless of which form was passed in."""
+    child_r = _realpath(child)
+    parent_r = _realpath(parent)
+    if child_r == parent_r:
+        return True
+    try:
+        child_r.relative_to(parent_r)
+        return True
+    except ValueError:
+        return False
+
+
+def _assert_outside_live_store_sentinels(
+    real: Path, role: str
+) -> None:
+    """Refuse if `real` is the same as or inside any live-store
+    sentinel. `role` is "snapshot workspace" or "output dir" and
+    is used in the error message."""
+    for sentinel in LIVE_STORE_SENTINELS:
+        if _path_is_under(real, Path(sentinel)):
+            raise WorkspaceError(
+                f"refusing {role} {real}: resolves inside "
+                f"live-store sentinel {sentinel}"
+            )
+
+
 def assert_safe_workspace(snap: Path) -> Path:
     """Resolve a snapshot workspace through realpath and refuse if it
     lands inside any LIVE_STORE_SENTINELS, or if it is a symlink that
@@ -78,23 +134,7 @@ def assert_safe_workspace(snap: Path) -> Path:
         # Creating it is fine; just create under a known-safe parent
         snap.mkdir(parents=True, exist_ok=True, mode=0o700)
     real = _realpath(snap)
-
-    # Symlink check: if the original path differs from the realpath,
-    # the original was a symlink. Reject any symlink whose target is
-    # outside the disposable set (we don't have a concept of "inside
-    # the disposable set" yet, but we do know that pointing into
-    # LIVE_STORE_SENTINELS is forbidden).
-    for sentinel in LIVE_STORE_SENTINELS:
-        sentinel_real = _realpath(Path(sentinel))
-        try:
-            real.relative_to(sentinel_real)
-            raise WorkspaceError(
-                f"refusing to use snapshot workspace {snap}: "
-                f"resolves inside live-store sentinel {sentinel_real}"
-            )
-        except ValueError:
-            pass  # not inside this sentinel, keep checking
-
+    _assert_outside_live_store_sentinels(real, "snapshot workspace")
     return real
 
 
@@ -105,27 +145,24 @@ def assert_safe_output_dir(out: Path, snap_real: Path) -> Path:
 
     The output dir is required for real runs (per C4(2)). The
     --smoke and --selftest modes do not require it.
+
+    Hardening (priority 1 of HAL's review):
+      - Symlink-chain walk: refuse if any path component of `out`
+        (parents included) resolves into a live-store sentinel,
+        even if `out` itself is not currently a symlink.
+      - TOCTOU-aware: the realpath + permission check is repeated
+        at write time by `recheck_output_dir_safe`, which the
+        harness must call immediately before each write under
+        the output dir.
     """
     out.mkdir(parents=True, exist_ok=True, mode=0o700)
     real = _realpath(out)
 
-    try:
-        real.relative_to(snap_real)
+    if _path_is_under(real, snap_real):
         raise WorkspaceError(
             f"refusing output dir {out}: inside snapshot workspace {snap_real}"
         )
-    except ValueError:
-        pass
-
-    for sentinel in LIVE_STORE_SENTINELS:
-        sentinel_real = _realpath(Path(sentinel))
-        try:
-            real.relative_to(sentinel_real)
-            raise WorkspaceError(
-                f"refusing output dir {out}: inside live-store sentinel {sentinel_real}"
-            )
-        except ValueError:
-            pass
+    _assert_outside_live_store_sentinels(real, "output dir")
 
     # Permission check. If a pre-existing dir is wider than 0o700,
     # refuse; the harness must not write into a permissive dir.
@@ -137,6 +174,37 @@ def assert_safe_output_dir(out: Path, snap_real: Path) -> Path:
         )
 
     return real
+
+
+def recheck_output_dir_safe(out: Path, snap_real: Path) -> None:
+    """Re-run the output-dir safety checks immediately before a
+    write. Closes the TOCTOU window between `assert_safe_output_dir`
+    and the actual write: a malicious local actor could chmod the
+    dir to 0o755 or replace it with a symlink to ~/.mpm in that
+    gap. The harness MUST call this immediately before any write
+    under `out`.
+
+    Raises WorkspaceError on any change that would make the output
+    dir unsafe (permissions widened, realpath now inside a sentinel
+    or inside the snapshot workspace, or the dir no longer exists).
+    """
+    if not out.exists():
+        raise WorkspaceError(
+            f"output dir {out} disappeared between safe check and write"
+        )
+    real = _realpath(out)
+    if _path_is_under(real, snap_real):
+        raise WorkspaceError(
+            f"output dir {out} now resolves inside snapshot workspace "
+            f"{snap_real} (TOCTOU)"
+        )
+    _assert_outside_live_store_sentinels(real, "output dir")
+    mode = stat.S_IMODE(os.stat(real).st_mode)
+    if mode & 0o077:
+        raise WorkspaceError(
+            f"output dir {real} permissions are now {oct(mode)}; "
+            f"wider than 0o700 (TOCTOU)"
+        )
 
 
 def reject_unsafe_symlinks(root: Path) -> list[Path]:
@@ -151,6 +219,11 @@ def reject_unsafe_symlinks(root: Path) -> list[Path]:
     link to a sibling). A symlink that points outside `root` is
     rejected: the harness never wants the benchmark to read through
     a symlink into a path it has not explicitly whitelisted.
+
+    Hardening (priority 1 of HAL's review): also refuse any
+    symlink that points into a live-store sentinel, even if it
+    points inside `root` (a within-root symlink to
+    `~/.mpm/foo` would otherwise pass the within-root test).
     """
     root_real = _realpath(root)
     bad: list[Path] = []
@@ -159,10 +232,18 @@ def reject_unsafe_symlinks(root: Path) -> list[Path]:
             p = Path(dirpath) / name
             if p.is_symlink():
                 target = _realpath(p)
+                # Outside the disposable set?
                 try:
                     target.relative_to(root_real)
                 except ValueError:
                     bad.append(p)
+                    continue
+                # Inside a live-store sentinel, even if the
+                # within-root check passed?
+                for sentinel in LIVE_STORE_SENTINELS:
+                    if _path_is_under(target, Path(sentinel)):
+                        bad.append(p)
+                        break
     return bad
 
 
@@ -179,19 +260,28 @@ def scrubbed_env(snap: Path) -> dict[str, str]:
         for MPM_DB_LOCK is still picked up as a non-empty override
         at handlers_shred_database_reset.go:397, so the only safe
         thing is to leave the key absent.
+      - Hardening (priority 1 of HAL's review): also scrub any
+        env var whose name starts with one of the
+        DANGEROUS_ENV_PREFIXES. This is a forward-compatible guard
+        against future MPM overrides that may not yet be in
+        DANGEROUS_INHERITED_KEYS.
     """
     fake_home = snap / "fakehome"
     fake_home.mkdir(parents=True, exist_ok=True, mode=0o700)
     (fake_home / ".mpm").mkdir(parents=True, exist_ok=True, mode=0o700)
 
-    env: dict[str, str] = {
-        k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ
-    }
+    env: dict[str, str] = {}
+    for k in SAFE_ENV_KEYS:
+        if k in os.environ:
+            env[k] = os.environ[k]
     env["MPM_WORKSPACE"] = str(snap)
     env["HOME"] = str(fake_home)
-    # DANGEROUS_INHERITED_KEYS are intentionally absent. Do not set
-    # them to ""; the empty string is still a non-empty override at
-    # handlers_shred_database_reset.go:397.
+    # DANGEROUS_INHERITED_KEYS and DANGEROUS_ENV_PREFIXES are
+    # intentionally absent. Do not set them to ""; the empty string
+    # is still a non-empty override at
+    # handlers_shred_database_reset.go:397. The prefix guard catches
+    # any future MPM_*/OLLAMA_*/OPENAI_*/ANTHROPIC_*/OPENROUTER_*
+    # overrides the harness has not been told about.
     return env
 
 

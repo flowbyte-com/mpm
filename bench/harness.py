@@ -44,6 +44,7 @@ from bench.runner import (
     per_query_participation,
     run_query,
 )
+from bench.scoring import score_queries
 from bench.workspace import (
     WorkspaceError,
     assert_safe_output_dir,
@@ -452,15 +453,64 @@ def cmd_run(args: argparse.Namespace) -> int:
     positive_ids = {q.query_id for q in corpus.positive_queries}
     participation = per_query_participation(results, positive_ids)
 
+    # Labelled relevance scoring (priority 3 of HAL's review): the
+    # corpus binds queries to `relevant_doc_ids`; the harness now
+    # reports Precision@k, Recall@k, MRR, and nDCG@k against those
+    # labels. Top-k is read from the scoring config so it matches
+    # the participation check's top-k.
+    top_k_for_scoring = int(
+        config.get("expected", {}).get("top_k", 5)
+    ) if isinstance(config, dict) else 5
+    labelled_scoring = score_queries(
+        [
+            (
+                q.query_id,
+                q.is_positive,
+                tuple(r["id"] for r in res.rows),
+                q.relevant_doc_ids,
+            )
+            for q, res in zip(corpus.queries, results)
+        ],
+        k=top_k_for_scoring,
+    )
+
     # Raw-cosine experiment (gate 4 of impl gates): independent of hybrid ranker.
+    # The query embedding is obtained from the same provider the
+    # documents were embedded with (priority 4 of HAL's review).
     raw_cosine_results: list[QueryResult] | None = None
     if args.raw_cosine_prefix:
+        # Read the embedding profile for the raw-cosine experiment.
+        # `config["profiles"]` is a dict of named profiles keyed by
+        # the "default" / "embedding" / etc. name; the harness
+        # uses the same name the components config picks, or
+        # "default" if absent.
+        profiles = config.get("profiles", {}) if isinstance(config, dict) else {}
+        components = (
+            config.get("components", {}) if isinstance(config, dict) else {}
+        )
+        emb_component = (
+            components.get("embedding", "default")
+            if isinstance(components, dict)
+            else "default"
+        )
+        if emb_component in profiles:
+            raw_cosine_profile = dict(profiles[emb_component])
+        elif "default" in profiles:
+            raw_cosine_profile = dict(profiles["default"])
+        else:
+            # No profile to embed with; fall back to the hash
+            # function (matches the hermetic test path).
+            raw_cosine_profile = None
         raw_cosine_results = [
-            run_query(q, snap, _resolve_mpm_binary(), raw_cosine=True)
+            run_query(
+                q, snap, _resolve_mpm_binary(),
+                raw_cosine=True, embedding_profile=raw_cosine_profile,
+            )
             for q in corpus.queries
         ]
     raw_cosine_participation: dict[str, Any] | None = None
     raw_cosine_table: list[dict[str, Any]] | None = None
+    raw_cosine_scoring: dict[str, Any] | None = None
     if raw_cosine_results is not None:
         raw_cosine_participation = per_query_participation(
             raw_cosine_results, positive_ids
@@ -475,6 +525,20 @@ def cmd_run(args: argparse.Namespace) -> int:
             }
             for r in raw_cosine_results
         ]
+        # Labelled relevance scoring for the raw-cosine experiment,
+        # against the same `relevant_doc_ids` as the hybrid ranker.
+        raw_cosine_scoring = score_queries(
+            [
+                (
+                    q.query_id,
+                    q.is_positive,
+                    tuple(r["id"] for r in res.rows),
+                    q.relevant_doc_ids,
+                )
+                for q, res in zip(corpus.queries, raw_cosine_results)
+            ],
+            k=top_k_for_scoring,
+        )
 
     per_query_table = [
         {
@@ -492,6 +556,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         regeneration=verification.to_dict(),
         participation=participation,
         raw_cosine_participation=raw_cosine_participation,
+        labelled_scoring=labelled_scoring,
+        raw_cosine_scoring=raw_cosine_scoring,
         isolation={
             "snapshot_workspace": str(snap),
             "output_dir": str(out_real),

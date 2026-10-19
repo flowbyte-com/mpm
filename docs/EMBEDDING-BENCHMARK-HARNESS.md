@@ -160,3 +160,83 @@ HAL's 2026-10-18 authorization:
    do not inspect or copy the live DB:
    `bench/workspace.py`, `bench/tests/test_workspace_isolation.py`,
    `bench/tests/test_env_scrubbing.py`.
+
+## v2 review (HAL 2026-10-19) — eight priority fixes
+
+After the v1 implementation landed, HAL's review surfaced eight
+follow-up items. Five were addressed in code; three are reported
+without code changes per the scope-discipline rule (no changes
+unrelated to PR #40 without approval).
+
+### Addressed in code
+
+1. **Filesystem isolation hardening (priority 1)**: TOCTOU recheck
+   immediately before each write under the output dir
+   (`bench/workspace.py:recheck_output_dir_safe`); rejection of
+   within-root symlinks whose target resolves into a live-store
+   sentinel (`bench/workspace.py:reject_unsafe_symlinks`); a
+   forward-compatible `DANGEROUS_ENV_PREFIXES` denylist
+   (`MPM_/OLLAMA_/OPENAI_/ANTHROPIC_/OPENROUTER_`) that scrubs
+   any prefix match even if it is not in the explicit
+   `DANGEROUS_INHERITED_KEYS` set. Covered by
+   `bench/tests/test_adversarial.py::TestSymlinkChainIntoLiveStore`,
+   `TestRecheckOutputDirTOCTOU`, `TestEnvPrefixDenyList`.
+
+2. **Complete regeneration verification (priority 2)**: in addition
+   to the (model, dimension, source) fingerprint and BLOB length
+   check, the regeneration verifier now rejects all-zero vectors
+   (silent provider failure), NaN/Inf entries, and L2 norms above
+   `1e6 * expected_dimension` (a real model failure or a unit
+   mismatch). Covered by
+   `bench/tests/test_adversarial.py::TestVerifyRegenerationAdversarial`.
+
+3. **Real labelled relevance scoring (priority 3)**: Precision@k,
+   Recall@k, MRR, and nDCG@k are now computed against the corpus's
+   `relevant_doc_ids` for both the hybrid ranker and the raw-cosine
+   experiment. Aggregates are reported over positive queries only;
+   negative queries are tracked separately per C5. Implemented in
+   `bench/scoring.py` and wired through `bench/harness.py:cmd_run`
+   and `bench/reporter.py`. Covered by
+   `bench/tests/test_scoring.py` (12 cases including a hand-computed
+   nDCG reference for the one-relevant-at-rank-2 case).
+
+4. **Provider-aware raw-cosine query embedding (priority 4)**: the
+   raw-cosine experiment now embeds the query with the same
+   provider the documents were embedded with, via HTTP to
+   `{base_url}/api/embed` (Ollama) or `{base_url}/embeddings`
+   (OpenAI-compatible / OpenAI / OpenRouter). The pre-fix path used
+   a SHA-256 hash that was only meaningful for the fake server.
+   Implemented in `bench/embed_query.py` and wired through
+   `bench/runner.py:_raw_cosine_ranking`. Backward-compat fallback
+   to the hash function is preserved for hermetic tests. Covered by
+   `bench/tests/test_embed_query.py` (13 cases — in-process HTTP
+   server per provider) and
+   `bench/tests/test_adversarial.py::TestRawCosineQueryEmbeddingAdversarial`.
+
+5. **Adversarial regression tests (priority 5)**: 11 cases in
+   `bench/tests/test_adversarial.py` covering the four priorities
+   above plus the TOCTOU and prefix-denylist guards.
+
+### CI integration
+
+`make test-bench` is wired into both `make test` and `make test-race`
+with a non-vacuity floor of 50 tests (current population 75). The
+`Embedding benchmark harness (bench/tests)` step in
+`.github/workflows/build-test.yml` runs the same target in the
+`gate` job, so the suite is reachable from CI.
+
+### Reported without code change (scope discipline)
+
+- **TestHITLRotation_AgeTrigger** (release-gate order-dependent
+  failure observed in earlier CI history): re-ran in isolation
+  under three independent selectors (`-run TestHITLRotation_AgeTrigger`,
+  `-run TestHITL*`, `-count=3`) and the test passes every time on
+  the worktree's current HEAD. The test uses `t.TempDir()` for
+  isolation and an injected clock; no shared state is reachable
+  across the suite. A future reproduction of the failure should
+  capture the seed/race output rather than retry the same flag set.
+- **Historical reproducibility**: still unverifiable from the lost
+  30-query corpus. The harness ships its own synthetic corpus
+  under `bench/corpus/v1/`. The 22-query qwen3 vs all-minilm
+  comparison in `docs/EMBEDDING-MODEL-COMPARISON.md` remains
+  unreproducible from inside this repository.

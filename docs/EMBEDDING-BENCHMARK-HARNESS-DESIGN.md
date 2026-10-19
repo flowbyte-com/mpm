@@ -673,3 +673,180 @@ this design. The v3 addresses HAL's four final corrections:
    queries, while negative queries are tracked separately and a
    correctly-empty result for a negative query is reported as a
    positive signal.
+
+---
+
+## v2 review follow-ups (HAL 2026-10-19)
+
+After the v3 implementation landed, HAL's review surfaced eight
+follow-up items. Five were addressed in code; three are reported
+without code change per the scope-discipline rule (no changes
+unrelated to PR #40 without approval).
+
+### Filesystem isolation hardening (priority 1)
+
+C4 in v3 covered realpath rejection, output-dir explicitness,
+symlink rejection, and private output permissions. v4 (this
+section) closes the TOCTOU window between the original safety
+check and the actual write under the output dir, and rejects
+within-root symlinks whose target resolves into a live-store
+sentinel.
+
+New module surface in `bench/workspace.py`:
+
+- `_path_is_under(child, parent)`: realpath-resolved containment
+  check.
+- `_assert_outside_live_store_sentinels(real, role)`: refuses if
+  `real` is the same as or inside any `LIVE_STORE_SENTINELS`
+  (`~/.mpm`, `~`).
+- `recheck_output_dir_safe(out, snap_real)`: re-runs the realpath
+  + permission check immediately before each write. The harness
+  MUST call this immediately before any write under `out`.
+- `reject_unsafe_symlinks` now also rejects within-root symlinks
+  whose target resolves into a live-store sentinel. The pre-fix
+  walk accepted such symlinks because the within-root check
+  passed.
+- `DANGEROUS_ENV_PREFIXES` (`MPM_/OLLAMA_/OPENAI_/ANTHROPIC_/
+  OPENROUTER_`) added to `scrubbed_env`. Forward-compatible
+  against future MPM/OLLAMA/OPENAI/ANTHROPIC/OPENROUTIC
+  overrides.
+
+Covered by `bench/tests/test_adversarial.py::TestSymlinkChainIntoLiveStore`,
+`TestRecheckOutputDirTOCTOU`, `TestEnvPrefixDenyList`.
+
+### Complete regeneration verification (priority 2)
+
+C1′ in v3 covered (model, dimension, source) fingerprint and
+BLOB length checks. v4 adds three more checks on the decoded
+vector itself:
+
+- **All-zero vector**: a `provider` row whose decoded BLOB is
+  all zeros is a silent failure; the ranker will see a
+  directionless vector. JSON round-trip accepts it.
+- **NaN/Inf**: a NaN can survive `json.loads` on some Python
+  versions because the `json` module accepts the strings `NaN`
+  and `Infinity` as extensions. The fingerprint check passes
+  (length and model match), so the new sanity check is the only
+  thing that catches this.
+- **Huge L2 norm**: a stored vector whose L2 norm is far from
+  `expected_dimension` in magnitude (e.g. `1e6`) is a real
+  model failure or a unit mismatch.
+
+Threshold: `math.sqrt(norm_sq) > 1e6 * expected_dimension`.
+NaN check: `not isinstance(x, (int, float)) or x != x or x in
+(float("inf"), float("-inf"))`.
+
+Covered by `bench/tests/test_adversarial.py::TestVerifyRegenerationAdversarial`
+(zero, NaN, huge-norm + a positive case that must still pass).
+
+### Real labelled relevance scoring (priority 3)
+
+v3's C5 covered per-query vector participation but did NOT score
+the ranker against the corpus's `relevant_doc_ids` — the only
+labelled measure was "did the vector channel participate?",
+which conflates a strong negative-query defence with a weak
+positive-query match. v4 adds Precision@k, Recall@k, MRR, and
+nDCG@k against the corpus's labels for both the hybrid ranker
+and the raw-cosine experiment.
+
+Implementation: `bench/scoring.py` with `score_query` and
+`score_queries`. Aggregates are reported over positive queries
+only; negative queries are excluded from the aggregate because
+the labelled metrics assume a non-empty relevance set.
+
+- **Precision@k** = `(# of relevant docs in top-k) / k`. For
+  positive queries, `relevant_ids` is non-empty.
+- **Recall@k** = `(# of unique relevant docs in top-k) /
+  |relevant_ids|`. Capped at 1.0 even if the same relevant doc
+  appears multiple times.
+- **MRR** = `1 / rank_of_first_relevant`, or 0.0 if no
+  relevant doc is in the result set.
+- **nDCG@k** = `DCG@k / IDCG@k` with binary relevance and
+  `discount = 1 / log2(rank + 1)`. Rank 1 → 1.0; rank 2 →
+  `1 / log2(3) ≈ 0.6309`.
+
+Covered by `bench/tests/test_scoring.py` (12 cases including
+the hand-computed nDCG reference).
+
+### Provider-aware raw-cosine query embedding (priority 4)
+
+v3's C7 (raw-cosine experiment) used a SHA-256 hash for the
+query vector (`deterministic_vector(query_text, dim)`) that
+was only meaningful for the fake server. Real runs against
+Ollama or any other real provider would compare the
+document-vector from the real provider against a query-vector
+from a hash, which is apples-to-oranges.
+
+v4 embeds the query with the same provider the documents
+were embedded with, via HTTP to the appropriate endpoint:
+
+- **Ollama**: POST `{base_url}/api/embed` with
+  `{"model": "<model>", "input": "<query>"}` → reads
+  `{"embeddings": [[...]]}`. Modern endpoint; the deprecated
+  `/api/embeddings` is intentionally not used.
+- **OpenAI-compatible / OpenAI / OpenRouter**: POST
+  `{base_url}/embeddings` with `{"input": "<query>",
+  "model": "<model>"}` → reads
+  `{"data": [{"embedding": [...]}]}`.
+
+Implementation: `bench/embed_query.py` with `embed_query` and
+`l2_normalize`. The profile is resolved by
+`bench/harness.py:cmd_run` from
+`config["profiles"][components["embedding"]]` or
+`config["profiles"]["default"]`. If neither is present, the
+runner falls back to the hash function (matches the hermetic
+test path).
+
+Vector-length check: if the provider returns a different-
+dimension vector than the corpus, the runner returns an
+empty ranking rather than silently misaligning the
+comparison.
+
+Covered by `bench/tests/test_embed_query.py` (13 cases — one
+in-process HTTP server per provider shape) and
+`bench/tests/test_adversarial.py::TestRawCosineQueryEmbeddingAdversarial`
+(the test wires a fake server on a different port, points a
+temp DB at the same provider, and asserts the ranker actually
+called the server for the query).
+
+### Adversarial regression tests (priority 5)
+
+11 cases in `bench/tests/test_adversarial.py` covering
+priorities 1, 2, 4 and the prefix denylist. These tests do NOT
+use any mpm binary; they construct the same in-process
+conditions an adversary would and verify the harness's hard
+refusals. Each test names a specific failure mode in its
+docstring so the future reader knows what regression it
+guards.
+
+### CI integration
+
+`make test-bench` is wired into both `make test` and
+`make test-race` with a non-vacuity floor of 50 tests
+(current population 75). The
+`Embedding benchmark harness (bench/tests)` step in
+`.github/workflows/build-test.yml` runs the same target in
+the `gate` job, so the suite is reachable from CI.
+
+### Reported without code change (scope discipline)
+
+- **TestHITLRotation_AgeTrigger** (release-gate order-dependent
+  failure observed in earlier CI history): re-ran in isolation
+  under three independent selectors
+  (`-run TestHITLRotation_AgeTrigger`,
+  `-run TestHITL*`, `-count=3`) and the test passes every
+  time on the worktree's current HEAD. The test uses
+  `t.TempDir()` for isolation and an injected clock; no shared
+  state is reachable across the suite. A future reproduction
+  of the failure should capture the seed/race output rather
+  than retry the same flag set.
+- **Historical reproducibility**: still unverifiable from the
+  lost 30-query corpus. The harness ships its own synthetic
+  corpus under `bench/corpus/v1/`. The 22-query qwen3 vs
+  all-minilm comparison in `docs/EMBEDDING-MODEL-COMPARISON.md`
+  remains unreproducible from inside this repository.
+- **The `~/.mpm/harness-output-should-be-rejected` directory**
+  exists because `bench/tests/test_workspace_isolation.py:67-74`
+  creates the path as the rejected output target. The directory
+  is empty (no leakage) and correctly reflects the rejection
+  path. Per HAL's instruction, the directory is left in place.
