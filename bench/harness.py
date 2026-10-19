@@ -69,8 +69,10 @@ from bench.scoring import score_queries
 from bench.workspace import (
     WorkspaceError,
     assert_safe_output_dir,
+    assert_safe_temp_parent,
     assert_safe_workspace,
     reject_unsafe_symlinks,
+    recheck_output_dir_safe,
     scrubbed_env,
     write_mpm_config,
 )
@@ -90,20 +92,39 @@ RAW_COSINE_PREFIX = "search_query: "
 
 
 def _default_snap_parent() -> Path:
-    """The parent dir for snapshot workspaces. Always under /tmp
-    so it cannot be inside a live-store sentinel."""
+    """The parent dir for snapshot workspaces. Always under the
+    system temp dir so it cannot be inside a live-store sentinel
+    by default. v4 review: callers MUST pass this through
+    `assert_safe_temp_parent` before any mkdir — TMPDIR may be set
+    to a path inside the operator's home or MPM workspace, and
+    `Path(tempfile.gettempdir())` would then resolve inside a
+    protected root.
+    """
     return Path(tempfile.gettempdir()) / "mpm-bench"
 
 
-def _make_snap_workspace(prefix: str = "mpm-bench-") -> Path:
-    """Create a private per-run snapshot workspace under
-    /tmp/mpm-bench/ via `tempfile.mkdtemp`.
+def _make_snap_workspace(
+    prefix: str = "mpm-bench-",
+    protected_root: Path | None = None,
+) -> Path:
+    """Create a private per-run snapshot workspace via
+    `tempfile.mkdtemp`.
 
     v3 review: this replaces the previous per-PID name. The
     tempdir is private to one run; we resolve it to a realpath
     before doing any further work.
+
+    v4 review: the canonical temp parent is validated against the
+    live-store sentinels BEFORE any mkdir. The pre-v4 code did
+    `parent.mkdir(parents=True, exist_ok=True, mode=0o700)` first,
+    which would create a directory inside a protected root if
+    TMPDIR pointed at the operator's home or MPM workspace.
     """
     parent = _default_snap_parent()
+    # v4: validate the canonical temp parent AND its ancestors
+    # before any creation. assert_safe_temp_parent never creates;
+    # it only validates.
+    assert_safe_temp_parent(parent, protected_root=protected_root)
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     snap = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent)))
     os.chmod(snap, 0o700)
@@ -118,13 +139,83 @@ def _make_snap_workspace(prefix: str = "mpm-bench-") -> Path:
 # to detect recall-time mutation, including the
 # contradiction queue and the retrieval metadata table
 # (both of which `mpm recall` may touch on a hit).
+#
+# v4 review: the table/column list is now derived from the
+# real MPM schema (see MPM_DISPOSABLE_SCHEMA below). The
+# pre-v4 `_snapshot_full` queried columns that DO NOT EXIST on
+# the real `memories` table (e.g. `last_retrieved_at`,
+# `challenged_at`) and swallowed the resulting
+# `OperationalError` as a placeholder, which then compared
+# equal to itself and produced a false "clean" status. The
+# fix is to require the schema to MATCH the real MPM schema
+# and to fail closed when a required table or column is
+# missing.
 TRACKED_TABLES: tuple[str, ...] = (
     "memories",
     "reference_chunks",
     "retrieval_metadata",
-    "contradiction_queue",
-    "challenges",
 )
+
+
+# v4 review: the snapshot is a per-table column-list and a
+# query that uses that column list. The pre-v4 code used a
+# single SELECT * and a hard-coded column list. The new
+# format lets us detect schema mismatches (a missing column
+# becomes a SQL error, not a silent comparison-equal) and
+# keeps the column list in one place. The shape of each
+# TRACKED_QUERY's result is a tuple of (column values) in
+# the order of the column list; the diff is multiset
+# comparison on those tuples.
+#
+# Tracked fields per table (real MPM schema, verified at
+# internal/core/schema.go:78-85, 125-133, 789-792, 1408-1600):
+#   memories:
+#     id, collection, content, session_id, tags, metadata,
+#     embedding (presence only), embedding_source,
+#     embedding_dimension, embedding_model, weight, deleted_at,
+#     identity_hash, is_long_term, is_prime_directive,
+#     toxicity_score, confidence, importance, retrieval_priority,
+#     reinforcement_count, last_accessed_at, last_synthesized_at,
+#     runtime_seconds_since_access, runtime_last_accrued_at,
+#     created_at, updated_at, expires_at, source_db, source_id,
+#     promoted_at, is_global, reference_id, content_hash,
+#     dependencies, synthetic
+#     (NOTE: last_retrieved_at is on retrieval_metadata, NOT
+#     memories; challenged status is in metadata JSON, NOT a
+#     column. Both are tracked via retrieval_metadata or
+#     metadata.)
+#   reference_chunks:
+#     id, doc_id, chunk_index, section, content,
+#     embedding_source, embedding_dimension, embedding_model,
+#     content_hash, embedding (presence only)
+#   retrieval_metadata:
+#     node_id, node_type, reuse_count, last_retrieved_at,
+#     success_count, created_at, updated_at
+TRACKED_QUERIES: dict[str, tuple[str, ...]] = {
+    "memories": (
+        "id", "collection", "content", "session_id", "tags", "metadata",
+        "(CASE WHEN embedding IS NULL THEN 0 ELSE 1 END)",
+        "embedding_source", "embedding_dimension", "embedding_model",
+        "weight", "deleted_at", "identity_hash", "is_long_term",
+        "is_prime_directive", "toxicity_score", "confidence",
+        "importance", "retrieval_priority", "reinforcement_count",
+        "last_accessed_at", "last_synthesized_at",
+        "runtime_seconds_since_access", "runtime_last_accrued_at",
+        "created_at", "updated_at", "expires_at", "source_db",
+        "source_id", "promoted_at", "is_global", "reference_id",
+        "content_hash", "dependencies", "synthetic",
+    ),
+    "reference_chunks": (
+        "id", "doc_id", "chunk_index", "section", "content",
+        "embedding_source", "embedding_dimension", "embedding_model",
+        "content_hash",
+        "(CASE WHEN embedding IS NULL THEN 0 ELSE 1 END)",
+    ),
+    "retrieval_metadata": (
+        "node_id", "node_type", "reuse_count", "last_retrieved_at",
+        "success_count", "created_at", "updated_at",
+    ),
+}
 
 
 def _snapshot_full(snap_db: Path) -> dict[str, list[tuple]]:
@@ -132,73 +223,54 @@ def _snapshot_full(snap_db: Path) -> dict[str, list[tuple]]:
     list of tuples per table. The shape is ordered so the diff
     is deterministic.
 
-    The read is done at READ UNCOMMITTED to avoid being blocked
-    by MPM's WAL writes; we want a consistent point-in-time
-    view of the DB state. (WAL mode means readers never block
-    writers and the snapshot is committed-state as of the
-    read-time snapshot.)
+    v4 review: this function FAILS CLOSED on any tracked table
+    or column that is missing. The pre-v3 / pre-v4 code caught
+    `sqlite3.OperationalError` and inserted a placeholder; that
+    meant identical errors before/after recall compared equal
+    and produced a false "clean" status. The new contract is
+    that the schema MUST match the real MPM schema (see
+    TRACKED_QUERIES), and any missing table or column is a hard
+    error that the harness surfaces.
 
-    v3 review fields:
-      - `memories`: id, content, tags, metadata, weight, deleted_at,
-        embedding_model, embedding_dimension, embedding_source,
-        embedding IS NULL check, last_retrieved_at if present.
-      - `reference_chunks`: id, doc_id, chunk_index, section, content,
-        embedding_model, embedding_dimension, embedding_source,
-        embedding IS NULL check.
-      - `retrieval_metadata`: every column, the table is
-        observability for hits.
-      - `contradiction_queue`: every column, the table is
-        written by MPM on a fresh contradiction-apply.
-      - `challenges`: every column, the table is the
-        challenge-state trail.
+    The read is done at READ UNCOMMITTED to avoid being blocked
+    by MPM's WAL writes; we want a consistent point-in-time view
+    of the DB state. (WAL mode means readers never block writers
+    and the snapshot is committed-state as of the read-time
+    snapshot.)
     """
     con = sqlite3.connect(f"file:{snap_db}?mode=ro", uri=True)
     out: dict[str, list[tuple]] = {}
+    failures: list[str] = []
     try:
-        # Memories: capture every column that recall could plausibly
-        # write to, plus the embedding NULL/present bit and the
-        # fingerprint columns.
-        out["memories"] = list(
-            con.execute(
-                """
-                SELECT id, collection, content, tags, metadata, weight,
-                       deleted_at, embedding_model, embedding_dimension,
-                       embedding_source,
-                       (CASE WHEN embedding IS NULL THEN 0 ELSE 1 END) AS has_embedding,
-                       (CASE WHEN challenged_at IS NULL THEN 0 ELSE 1 END) AS has_challenge,
-                       last_retrieved_at
-                FROM memories
-                """
-            ).fetchall()
-        )
-        out["reference_chunks"] = list(
-            con.execute(
-                """
-                SELECT id, doc_id, chunk_index, section, content,
-                       embedding_model, embedding_dimension, embedding_source,
-                       (CASE WHEN embedding IS NULL THEN 0 ELSE 1 END) AS has_embedding
-                FROM reference_chunks
-                """
-            ).fetchall()
-        )
-        out["retrieval_metadata"] = list(
-            con.execute("SELECT * FROM retrieval_metadata").fetchall()
-        )
-        out["contradiction_queue"] = list(
-            con.execute("SELECT * FROM contradiction_queue").fetchall()
-        )
-        out["challenges"] = list(
-            con.execute("SELECT * FROM challenges").fetchall()
-        )
-    except sqlite3.OperationalError as e:
-        # A tracked table might be missing in a fixture or a
-        # pre-embed DB. Treat that as an empty snapshot for the
-        # missing table; the post-run check will report a schema
-        # mismatch in the diff.
-        out.setdefault("missing_table", []).append(("missing_table", str(e)))
+        for table, cols in TRACKED_QUERIES.items():
+            col_list = ", ".join(cols)
+            try:
+                rows = con.execute(
+                    f"SELECT {col_list} FROM {table}"
+                ).fetchall()
+                out[table] = [tuple(r) for r in rows]
+            except sqlite3.OperationalError as e:
+                # v4: hard failure. We do NOT insert a placeholder.
+                # The caller must check the returned `failures` list
+                # and fail the run if any required table is missing.
+                failures.append(f"{table}: {e}")
     finally:
         con.close()
+    if failures:
+        raise SnapshotSchemaError(
+            f"disposable DB {snap_db} is missing required tracked "
+            f"tables/columns: {'; '.join(failures)}"
+        )
     return out
+
+
+class SnapshotSchemaError(RuntimeError):
+    """Raised when the disposable DB schema does not match the
+    tracked-table contract. v4: this is a hard failure; the run
+    must NOT proceed if the snapshot cannot be taken. The
+    pre-v4 code silently swallowed missing-table errors and
+    compared the resulting placeholders as equal, producing a
+    false-clean mutation status."""
 
 
 def _mutation_diff(
@@ -595,10 +667,33 @@ def cmd_run(args: argparse.Namespace) -> int:
     # v3 review: take the "before" snapshot IMMEDIATELY before
     # the first recall. The "after" snapshot is taken after
     # every query; any tracked-field change fails the run.
+    #
+    # v4 review: results are accumulated INSIDE the monitored
+    # loop. The pre-v4 code re-ran the entire query corpus
+    # outside the loop ("rebuild the per-query list from the
+    # actual run"), which meant every query ran twice under
+    # mpm: once under mutation checking, then again without.
+    # The new contract is one run per query; on the first
+    # detected mutation the loop breaks and no further queries
+    # are issued. The pre-v4 contract was a duplicate-recall
+    # defect that would have doubled the recall-time mutation
+    # surface and made the mutation check unreliable.
+    #
+    # v4 review (priority 6): the hybrid runner is invoked
+    # with `top_k=corpus.scoring.top_k` so the retrieval depth
+    # matches the labelled-scoring depth. The pre-v4 code
+    # relied on the runner's default top_k=5 and only the
+    # scoring step saw corpus.scoring.top_k, which meant
+    # scoring on top-5 of top-5 was a no-op for any corpus
+    # with top_k > 5.
     before = _snapshot_full(db_path)
     cumulative_diff: dict[str, Any] = {"status": "clean", "diffs": []}
+    results: list[QueryResult] = []
     for q in corpus.queries:
-        r = run_query(q, snap, _resolve_mpm_binary())
+        r = run_query(
+            q, snap, _resolve_mpm_binary(),
+            top_k=corpus.scoring.top_k,
+        )
         after = _snapshot_full(db_path)
         d = _mutation_diff(before, after)
         if d["status"] != "clean":
@@ -609,20 +704,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             break
-        # Re-run result rows into the per-query list.
-        results_so_far = list(corpus.queries[: corpus.queries.index(q) + 1])
-        # (the per-query participation uses `results` collected
-        # below; we only need the per-row QueryResult objects.)
-        _ = results_so_far
+        results.append(r)
 
-    # Rebuild the per-query list from the actual run, so we can
-    # report it. The pre-fix `results = [run_query(...)]` did
-    # the same; here we re-run to keep the per-query report
-    # consistent with the post-mutation-check loop's outcome.
-    results = [
-        run_query(q, snap, _resolve_mpm_binary())
-        for q in corpus.queries
-    ]
     positive_ids = {q.query_id for q in corpus.positive_queries}
     participation = per_query_participation(results, positive_ids)
 
@@ -653,7 +736,27 @@ def cmd_run(args: argparse.Namespace) -> int:
     raw_cosine_prefixed_scoring: dict[str, Any] | None = None
     raw_cosine_delta: dict[str, Any] | None = None
     if args.raw_cosine_prefix:
+        # v4 review (priority 5): if --raw-cosine-prefix was
+        # requested but no configured embedding profile resolves,
+        # fail clearly. The pre-v4 code returned a hash-only
+        # unprefixed result with `prefixed=None` and reported it
+        # as a "completed experiment" — that is a real-model
+        # anti-pattern (the comparison would be hash-vs-hash, not
+        # a model measurement). The new contract is all-or-nothing:
+        # either we ran the two-provider-query comparison or the
+        # run fails with an explicit error.
         profile = _build_raw_cosine_profile(config)
+        if profile is None:
+            print(
+                "REFUSING: --raw-cosine-prefix was requested but no "
+                "configured embedding profile resolved from config. "
+                "Set components.embedding or profiles.default in the "
+                "config so the harness can compare two provider-query "
+                "embeddings. A hash-only fallback would not be a real-"
+                "model experiment.",
+                file=sys.stderr,
+            )
+            return 1
         unprefixed, prefixed = _run_raw_cosine_both(
             corpus.queries, snap, profile
         )
@@ -788,7 +891,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         ),
         output_dir=out_real,
     )
-    json_path, md_path = write_report(report)
+    json_path, md_path = write_report(report, snap_real=snap)
     print(f"REPORT: {md_path}")
     print(f"REPORT: {json_path}")
     return 0 if (

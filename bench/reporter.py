@@ -216,12 +216,57 @@ class RunReport:
         return "\n".join(lines) + "\n"
 
 
-def write_report(report: RunReport) -> tuple[Path, Path]:
-    """Write the JSON and Markdown reports to the output dir. Returns
-    (json_path, md_path)."""
+def write_report(
+    report: RunReport,
+    snap_real: Path | None = None,
+    protected_root: Path | None = None,
+) -> tuple[Path, Path]:
+    """Write the JSON and Markdown reports to the output dir.
+    Returns (json_path, md_path).
+
+    v4 review: re-validate the output dir immediately before
+    each write. The pre-v4 code only called `mkdir`; a malicious
+    local actor could chmod the dir to 0o755 or replace it with
+    a symlink to a protected workspace in the gap between the
+    initial check and the actual write. The new contract is
+    `recheck_output_dir_safe(...)` immediately before every write
+    (mkdir, json write, md write).
+
+    Args:
+        report: the structured report.
+        snap_real: the resolved realpath of the snapshot
+            workspace; the output dir may not be inside it.
+            Required for the safety recheck; pass None to skip
+            the recheck (only acceptable for tests that
+            explicitly opt out).
+        protected_root: optional override for the live-store
+            sentinel set.
+    """
+    from bench.workspace import recheck_output_dir_safe
+
+    if snap_real is not None:
+        recheck_output_dir_safe(
+            report.output_dir, snap_real, protected_root=protected_root
+        )
     report.output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if snap_real is not None:
+        recheck_output_dir_safe(
+            report.output_dir, snap_real, protected_root=protected_root
+        )
     json_path = report.output_dir / "report.json"
     md_path = report.output_dir / "report.md"
+    if snap_real is not None:
+        recheck_output_dir_safe(
+            report.output_dir, snap_real, protected_root=protected_root
+        )
     json_path.write_text(report.to_json())
+    if snap_real is not None:
+        recheck_output_dir_safe(
+            report.output_dir, snap_real, protected_root=protected_root
+        )
     md_path.write_text(report.to_markdown())
+    if snap_real is not None:
+        recheck_output_dir_safe(
+            report.output_dir, snap_real, protected_root=protected_root
+        )
     return json_path, md_path

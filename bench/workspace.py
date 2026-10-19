@@ -165,6 +165,13 @@ def assert_safe_workspace(
     nothing is created. If the path is safe, the dir is created
     (when `create=True`) and the resolved realpath is returned.
 
+    v4 review: also refuse if the parent path of `snap` resolves
+    inside a protected root. A non-existent child of a protected
+    root would otherwise pass the child's realpath check (the
+    child has no realpath yet, so realpath returns its absolute
+    form, which is still under the protected root after
+    resolution). The parent check catches that case.
+
     Args:
         snap: candidate snapshot workspace path.
         protected_root: optional override for the live-store
@@ -176,19 +183,55 @@ def assert_safe_workspace(
             after the safety check passes.
     """
     sentinels = _sentinels_for(protected_root)
-    # Resolve as if the path existed. If it does not yet, realpath
-    # returns the parent-anchored absolute form. If it does, we
-    # get the resolved realpath including any symlinks. Either way
-    # the safety check uses the canonicalised form so a symlink
-    # pointing at ~/.mpm is caught.
     real = _realpath(snap)
     _assert_outside_live_store_sentinels(real, "snapshot workspace", sentinels)
+    # v4 review: refuse if any ancestor of `snap` resolves inside
+    # a protected root. The pre-v4 code only checked the candidate
+    # itself; a non-existent child of a protected root would pass
+    # the child realpath check.
+    if snap.parent != snap:
+        parent_real = _realpath(snap.parent)
+        _assert_outside_live_store_sentinels(
+            parent_real, "snapshot workspace parent", sentinels
+        )
     if create:
-        # Re-resolve to handle the case where `snap` is a new
-        # path whose parent might have changed (rare; cheap).
         snap.mkdir(parents=True, exist_ok=True, mode=0o700)
         real = _realpath(snap)
         _assert_outside_live_store_sentinels(real, "snapshot workspace", sentinels)
+    return real
+
+
+def assert_safe_temp_parent(
+    parent: Path,
+    protected_root: Path | None = None,
+) -> Path:
+    """Refuse if `parent` (the proposed root of an mkdtemp / mktree)
+    resolves inside a protected root. v4 review: this is the gate
+    that must run BEFORE any mkdir/mkdtemp that uses `parent` as
+    the canonical temp root. The pre-v4 `_make_snap_workspace`
+    called `parent.mkdir(parents=True, ...)` before any safety
+    check, which would create a directory inside a protected root
+    when TMPDIR pointed at the operator's home or workspace.
+
+    The function never creates anything; it only validates. The
+    caller is responsible for the actual `mkdir` / `mkdtemp` once
+    this returns.
+    """
+    sentinels = _sentinels_for(protected_root)
+    real = _realpath(parent)
+    _assert_outside_live_store_sentinels(real, "temp parent", sentinels)
+    # Also refuse if the realpath of `parent` does not exist yet
+    # AND the parent-of-parent is protected. The mkdir-create
+    # path goes through `parents=True`, so an intermediate
+    # protected-root segment would be silently created.
+    if not real.exists():
+        cur = parent
+        while cur != cur.parent:
+            cur = cur.parent
+            cur_real = _realpath(cur)
+            _assert_outside_live_store_sentinels(
+                cur_real, "temp parent ancestor", sentinels
+            )
     return real
 
 

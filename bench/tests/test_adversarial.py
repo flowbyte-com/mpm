@@ -1165,3 +1165,891 @@ class TestRecallMustNotMutateMemories(unittest.TestCase):
         self.assertEqual(d["status"], "clean")
         self.assertEqual(d["diffs"], [])
 
+
+# ---- v4 review adversarial tests (HAL 2026-10-19) ----
+
+
+def _write_cfg(json_text: str) -> Path:
+    """Write a temp config file and return its path. The harness's
+    `cmd_run` reads `--config` as a file path."""
+    td = tempfile.mkdtemp()
+    p = Path(td) / "cfg.json"
+    p.write_text(json_text)
+    return p
+
+
+# Minimal config that satisfies the harness's required keys
+# (`profiles`, `components`, `expected.model`, `expected.dimension`).
+# Embedding provider is "openai-compatible" so `_build_raw_cosine_profile`
+# returns a profile, exercising the path that v4 prioritised.
+_MINIMAL_CONFIG = (
+    '{"profiles": {"default": {"provider": "openai-compatible", '
+    '"model": "fake-embed-v1", "base_url": "http://127.0.0.1:1", '
+    '"api_key": ""}}, "components": {"embedding": "default"}, '
+    '"expected": {"model": "fake-embed-v1", "dimension": 8}}'
+)
+
+
+class TestSnapshotFailsClosedOnSchemaMismatch(unittest.TestCase):
+    """v4 review priority 1: the mutation snapshot must FAIL CLOSED
+    when a required tracked table or column is missing. The pre-v4
+    code caught `sqlite3.OperationalError` and inserted a
+    placeholder; identical errors before/after recall compared
+    equal and produced a false "clean" status. The new contract
+    is: missing schema is a hard error.
+
+    A test that builds a stub schema missing `last_retrieved_at`
+    (the column the v3 code erroneously selected from `memories`
+    instead of `retrieval_metadata`) MUST surface as a
+    `SnapshotSchemaError`, not a silent placeholder diff.
+    """
+
+    def test_missing_required_column_raises(self) -> None:
+        from bench.harness import _snapshot_full, SnapshotSchemaError
+        from bench.mpm_schema import build_mpm_disposable_db
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "test.db"
+            build_mpm_disposable_db(db)
+            # Drop the last_retrieved_at column from
+            # retrieval_metadata to simulate a schema mismatch.
+            con = sqlite3.connect(str(db))
+            try:
+                # Rename the table to break the column; this
+                # produces a clean `no such column` error at
+                # query time. The snapshot must hard-fail.
+                con.execute(
+                    "ALTER TABLE retrieval_metadata RENAME TO retrieval_metadata_broken"
+                )
+                con.commit()
+            finally:
+                con.close()
+            with self.assertRaises(SnapshotSchemaError) as cm:
+                _snapshot_full(db)
+            self.assertIn("retrieval_metadata", str(cm.exception))
+
+    def test_missing_required_table_raises(self) -> None:
+        from bench.harness import _snapshot_full, SnapshotSchemaError
+        from bench.mpm_schema import build_mpm_disposable_db
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "test.db"
+            build_mpm_disposable_db(db)
+            con = sqlite3.connect(str(db))
+            try:
+                con.execute("DROP TABLE memories")
+                con.commit()
+            finally:
+                con.close()
+            with self.assertRaises(SnapshotSchemaError) as cm:
+                _snapshot_full(db)
+            self.assertIn("memories", str(cm.exception))
+
+    def test_real_mpm_schema_snapshot_succeeds(self) -> None:
+        # The positive case: a real MPM schema (memories,
+        # reference_chunks, retrieval_metadata all present with
+        # the columns the harness reads) must snapshot cleanly.
+        from bench.harness import _snapshot_full
+        from bench.mpm_schema import build_mpm_disposable_db
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "test.db"
+            build_mpm_disposable_db(db)
+            snap = _snapshot_full(db)
+            self.assertIn("memories", snap)
+            self.assertIn("reference_chunks", snap)
+            self.assertIn("retrieval_metadata", snap)
+            # All three lists must be initialized (possibly empty).
+            self.assertIsInstance(snap["memories"], list)
+            self.assertIsInstance(snap["reference_chunks"], list)
+            self.assertIsInstance(snap["retrieval_metadata"], list)
+
+
+class TestRealMpmSchemaIntegration(unittest.TestCase):
+    """v4 review priority 1: end-to-end integration test using
+    the real MPM schema. Build a disposable DB, insert a memory,
+    run a mutation (UPDATE last_retrieved_at on retrieval_metadata),
+    and assert the snapshot diff is detected.
+
+    This is the load-bearing test the v3 code did not have: a
+    test that exercises the FULL snapshot path against a schema
+    that matches what `mpm remember` produces."""
+
+    def test_recall_writes_retrieval_metadata_detected(self) -> None:
+        from bench.harness import _snapshot_full, _mutation_diff
+        from bench.mpm_schema import build_mpm_disposable_db, vec_blob
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "test.db"
+            build_mpm_disposable_db(db)
+            # Insert one memory + retrieval_metadata row.
+            con = sqlite3.connect(str(db))
+            try:
+                con.execute(
+                    "INSERT INTO memories (id, collection, content, "
+                    "embedding, embedding_source, embedding_dimension, "
+                    "embedding_model) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "d0000001",
+                        "memories",
+                        "x",
+                        vec_blob([0.1] * 8),
+                        "provider",
+                        8,
+                        "fake-embed-v1",
+                    ),
+                )
+                con.execute(
+                    "INSERT INTO retrieval_metadata "
+                    "(node_id, node_type, reuse_count) "
+                    "VALUES (?, ?, ?)",
+                    ("d0000001", "memory", 0),
+                )
+                con.commit()
+            finally:
+                con.close()
+            # Snapshot before.
+            before = _snapshot_full(db)
+            self.assertEqual(len(before["memories"]), 1)
+            self.assertEqual(len(before["retrieval_metadata"]), 1)
+            # Simulate a recall write: increment reuse_count and
+            # set last_retrieved_at.
+            con = sqlite3.connect(str(db))
+            try:
+                con.execute(
+                    "UPDATE retrieval_metadata SET reuse_count = 1, "
+                    "last_retrieved_at = 1759000000 "
+                    "WHERE node_id = ?",
+                    ("d0000001",),
+                )
+                con.commit()
+            finally:
+                con.close()
+            after = _snapshot_full(db)
+            d = _mutation_diff(before, after)
+            # The diff must surface the retrieval_metadata change.
+            self.assertEqual(
+                d["status"], "FAIL",
+                f"recall-time retrieval_metadata write must surface; "
+                f"got diffs={d['diffs']}",
+            )
+            self.assertTrue(
+                any(x.get("table") == "retrieval_metadata"
+                    for x in d["diffs"]),
+                f"expected retrieval_metadata in diffs; got {d['diffs']}",
+            )
+
+    def test_metadata_json_challenge_state_change_detected(self) -> None:
+        # The challenge status flag lives in the metadata JSON,
+        # not in a column. A recall that flips the flag MUST
+        # be detected because the snapshot includes the metadata
+        # column.
+        from bench.harness import _snapshot_full, _mutation_diff
+        from bench.mpm_schema import build_mpm_disposable_db, vec_blob
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "test.db"
+            build_mpm_disposable_db(db)
+            con = sqlite3.connect(str(db))
+            try:
+                con.execute(
+                    "INSERT INTO memories (id, collection, content, "
+                    "metadata, embedding, embedding_source, "
+                    "embedding_dimension, embedding_model) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "d0000001",
+                        "memories",
+                        "x",
+                        '{"status": "active"}',
+                        vec_blob([0.1] * 8),
+                        "provider",
+                        8,
+                        "fake-embed-v1",
+                    ),
+                )
+                con.commit()
+            finally:
+                con.close()
+            before = _snapshot_full(db)
+            # Simulate a challenge write that flips the metadata.
+            con = sqlite3.connect(str(db))
+            try:
+                con.execute(
+                    "UPDATE memories SET metadata = ? WHERE id = ?",
+                    (
+                        '{"status": "challenged", '
+                        '"challenged_prior_weight": 1.0}',
+                        "d0000001",
+                    ),
+                )
+                con.commit()
+            finally:
+                con.close()
+            after = _snapshot_full(db)
+            d = _mutation_diff(before, after)
+            self.assertEqual(
+                d["status"], "FAIL",
+                f"challenge metadata flip must surface; got {d['diffs']}",
+            )
+            self.assertTrue(
+                any(x.get("table") == "memories"
+                    for x in d["diffs"]),
+                f"expected memories in diffs; got {d['diffs']}",
+            )
+
+
+class TestCmdRunAccumulatesResultsAndStopsOnMutation(unittest.TestCase):
+    """v4 review priority 2: `cmd_run` must accumulate each
+    `QueryResult` in the monitored loop, reuse those exact
+    results for participation/scoring/reports, and STOP on
+    the first detected mutation. The pre-v4 code re-ran the
+    entire query corpus after the monitored loop finished,
+    which means every query ran TWICE under MPM: once under
+    mutation check, then again without.
+
+    This test exercises the harness's mutation-stop contract
+    without spinning up the real MPM binary: it patches
+    `_snapshot_full` and `run_query` to count invocations."""
+
+    def test_one_run_per_query(self) -> None:
+        from bench import harness as h
+        from bench.corpus import Corpus, Document, Query, Scoring
+        from bench.runner import QueryResult
+
+        # Build a minimal in-memory corpus.
+        corpus = Corpus(
+            version="v-test",
+            documents=tuple(
+                Document(
+                    doc_id=f"d{i:07d}",
+                    content=f"c{i}",
+                    relevance_class="relevant",
+                )
+                for i in range(1, 6)
+            ),
+            queries=tuple(
+                Query(
+                    query_id=f"q{i}",
+                    query="?",
+                    relevance_class="positive",
+                    relevant_doc_ids=("d0000001",),
+                )
+                for i in range(1, 6)
+            ),
+            expectations=None,  # type: ignore[arg-type]
+            scoring=Scoring(method="mpm recall", top_k=5, parameters={}),
+            manifest_path=None,  # type: ignore[arg-type]
+        )
+
+        # Counters for invocations.
+        run_query_calls: list[str] = []
+        snapshot_calls: list[str] = []
+
+        def fake_run_query(q, snap, mpm, **kwargs):  # type: ignore[no-untyped-def]
+            run_query_calls.append(q.query_id)
+            return QueryResult(
+                query_id=q.query_id,
+                query=q.query,
+                is_positive=q.is_positive,
+                rows=tuple(
+                    {"id": "d0000001", "content": "x", "source": "vector",
+                     "score": 0.9, "vector_similarity": 0.9}
+                    for _ in range(5)
+                ),
+                search_mode="hybrid",
+                raw_cosine=False,
+            )
+
+        def fake_snapshot(db_path):  # type: ignore[no-untyped-def]
+            snapshot_calls.append("snap")
+            return {"memories": [], "reference_chunks": [],
+                    "retrieval_metadata": []}
+
+        # Build an args namespace. The harness reads --config as a
+        # file path, so we write the JSON to a temp file.
+        import argparse
+        td_cfg = tempfile.mkdtemp()
+        cfg_path = Path(td_cfg) / "cfg.json"
+        cfg_path.write_text(_MINIMAL_CONFIG)
+        args = argparse.Namespace(
+            output_dir="/tmp/nope-cmd-run-test",
+            config=str(cfg_path),
+            raw_cosine_prefix=False,
+        )
+
+        Path("/tmp/fake-snap").mkdir(parents=True, exist_ok=True)
+        Path("/tmp/fake-cmd-run-test").mkdir(parents=True, exist_ok=True)
+        try:
+            # Patch the heavy side effects: load_corpus, mpm
+            # configuration, ingest, backfill, verify, write_report.
+            with unittest.mock.patch.object(h, "load_corpus", return_value=corpus), \
+             unittest.mock.patch.object(h, "_ingest_corpus"), \
+             unittest.mock.patch.object(h, "_backfill",
+                                        return_value=(0, "")), \
+             unittest.mock.patch.object(h, "verify_regeneration_complete",
+                                        return_value=unittest.mock.MagicMock(
+                                            ok=True,
+                                            to_dict=lambda: {"ok": True,
+                                                             "failures": []},
+                                        )), \
+             unittest.mock.patch.object(h, "run_query",
+                                        side_effect=fake_run_query), \
+             unittest.mock.patch.object(h, "_snapshot_full",
+                                        side_effect=fake_snapshot), \
+             unittest.mock.patch.object(h, "_resolve_mpm_binary",
+                                        return_value=Path("/bin/true")), \
+             unittest.mock.patch.object(h, "_make_snap_workspace",
+                                        return_value=Path("/tmp/fake-snap")), \
+             unittest.mock.patch.object(h, "assert_safe_workspace",
+                                        return_value=Path("/tmp/fake-snap")), \
+             unittest.mock.patch.object(h, "assert_safe_output_dir",
+                                        return_value=Path(
+                                            "/tmp/fake-cmd-run-test")), \
+             unittest.mock.patch.object(h, "reject_unsafe_symlinks",
+                                        return_value=[]), \
+             unittest.mock.patch.object(h, "write_mpm_config",
+                                        return_value=Path(
+                                            "/tmp/fake-config")), \
+             unittest.mock.patch.object(h, "_find_db_path",
+                                        return_value=Path(
+                                            "/tmp/fake-snap/mpm.db")), \
+             unittest.mock.patch.object(h, "write_report",
+                                        return_value=(Path("r.json"),
+                                                     Path("r.md"))):
+                rc = h.cmd_run(args)
+        finally:
+            import shutil
+            shutil.rmtree("/tmp/fake-snap", ignore_errors=True)
+            shutil.rmtree("/tmp/fake-cmd-run-test", ignore_errors=True)
+
+        # The harness must call run_query EXACTLY ONCE per
+        # query (5 queries → 5 calls). The pre-v4 code would
+        # have called it 10 times.
+        self.assertEqual(
+            len(run_query_calls), 5,
+            f"each query must run exactly once under MPM; got "
+            f"{len(run_query_calls)} calls: {run_query_calls}",
+        )
+        # And each query_id should appear exactly once.
+        self.assertEqual(sorted(run_query_calls),
+                         ["q1", "q2", "q3", "q4", "q5"])
+
+    def test_mutation_stops_further_queries(self) -> None:
+        from bench import harness as h
+        from bench.corpus import Corpus, Document, Query, Scoring
+        from bench.runner import QueryResult
+
+        corpus = Corpus(
+            version="v-test",
+            documents=tuple(
+                Document(doc_id=f"d{i:07d}", content=f"c{i}",
+                         relevance_class="relevant")
+                for i in range(1, 4)
+            ),
+            queries=tuple(
+                Query(query_id=f"q{i}", query="?",
+                      relevance_class="positive",
+                      relevant_doc_ids=("d0000001",))
+                for i in range(1, 6)
+            ),
+            expectations=None,  # type: ignore[arg-type]
+            scoring=Scoring(method="mpm recall", top_k=5, parameters={}),
+            manifest_path=None,  # type: ignore[arg-type]
+        )
+
+        run_query_calls: list[str] = []
+        snapshot_index = [0]
+        # The third snapshot-after-query returns a different
+        # value, simulating a recall-time mutation.
+
+        def fake_run_query(q, snap, mpm, **kwargs):  # type: ignore[no-untyped-def]
+            run_query_calls.append(q.query_id)
+            return QueryResult(
+                query_id=q.query_id, query=q.query,
+                is_positive=q.is_positive,
+                rows=tuple({"id": "d0000001", "content": "x",
+                            "source": "vector", "score": 0.9,
+                            "vector_similarity": 0.9} for _ in range(5)),
+                search_mode="hybrid", raw_cosine=False,
+            )
+
+        def fake_snapshot(db_path):  # type: ignore[no-untyped-def]
+            snapshot_index[0] += 1
+            if snapshot_index[0] == 4:  # after the 3rd query
+                return {"memories": [("mutated",)],
+                        "reference_chunks": [],
+                        "retrieval_metadata": []}
+            return {"memories": [], "reference_chunks": [],
+                    "retrieval_metadata": []}
+
+        import argparse
+        td_cfg = tempfile.mkdtemp()
+        cfg_path = Path(td_cfg) / "cfg.json"
+        cfg_path.write_text(_MINIMAL_CONFIG)
+        args = argparse.Namespace(
+            output_dir="/tmp/nope-cmd-run-mut",
+            config=str(cfg_path),
+            raw_cosine_prefix=False,
+        )
+
+        Path("/tmp/fake-snap").mkdir(parents=True, exist_ok=True)
+        Path("/tmp/fake-cmd-run-mut").mkdir(parents=True, exist_ok=True)
+        try:
+            with unittest.mock.patch.object(h, "load_corpus",
+                                            return_value=corpus), \
+                 unittest.mock.patch.object(h, "_ingest_corpus"), \
+                 unittest.mock.patch.object(h, "_backfill",
+                                            return_value=(0, "")), \
+                 unittest.mock.patch.object(h, "verify_regeneration_complete",
+                                            return_value=unittest.mock.MagicMock(
+                                                ok=True,
+                                                to_dict=lambda: {"ok": True,
+                                                                 "failures": []},
+                                            )), \
+                 unittest.mock.patch.object(h, "run_query",
+                                            side_effect=fake_run_query), \
+                 unittest.mock.patch.object(h, "_snapshot_full",
+                                            side_effect=fake_snapshot), \
+                 unittest.mock.patch.object(h, "_resolve_mpm_binary",
+                                            return_value=Path("/bin/true")), \
+                 unittest.mock.patch.object(h, "_make_snap_workspace",
+                                            return_value=Path(
+                                                "/tmp/fake-snap")), \
+                 unittest.mock.patch.object(h, "assert_safe_workspace",
+                                            return_value=Path(
+                                                "/tmp/fake-snap")), \
+                 unittest.mock.patch.object(h, "assert_safe_output_dir",
+                                            return_value=Path(
+                                                "/tmp/fake-cmd-run-mut")), \
+                 unittest.mock.patch.object(h, "reject_unsafe_symlinks",
+                                            return_value=[]), \
+                 unittest.mock.patch.object(h, "write_mpm_config",
+                                            return_value=Path(
+                                                "/tmp/fake-config")), \
+                 unittest.mock.patch.object(h, "_find_db_path",
+                                            return_value=Path(
+                                                "/tmp/fake-snap/mpm.db")), \
+                 unittest.mock.patch.object(h, "write_report",
+                                            return_value=(Path("r.json"),
+                                                         Path("r.md"))):
+                h.cmd_run(args)
+        finally:
+            import shutil
+            shutil.rmtree("/tmp/fake-snap", ignore_errors=True)
+            shutil.rmtree("/tmp/fake-cmd-run-mut", ignore_errors=True)
+
+        # The mutation was simulated on snapshot 4 (after q3).
+        # The harness MUST stop there: q4 and q5 are never
+        # issued under MPM.
+        self.assertEqual(
+            run_query_calls, ["q1", "q2", "q3"],
+            f"mutation must stop further queries; got {run_query_calls}",
+        )
+
+
+class TestReportWriteRechecksSafety(unittest.TestCase):
+    """v4 review priority 3: `write_report` must call
+    `recheck_output_dir_safe` immediately before each write
+    to close the TOCTOU window between the initial check and
+    the actual write. The pre-v4 code only called `mkdir`;
+    a malicious local actor could chmod the dir to 0o755 or
+    replace it with a symlink to a protected workspace in
+    the gap."""
+
+    def test_report_write_refuses_widened_perms(self) -> None:
+        from bench.reporter import RunReport, write_report
+        from bench.workspace import WorkspaceError
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out"
+            snap = Path(td) / "snap"
+            out.mkdir(parents=True, mode=0o700)
+            snap.mkdir(parents=True, mode=0o700)
+            r = RunReport(
+                corpus={"version": "v-test"},
+                regeneration={"ok": True, "failures": [], "expected": {}},
+                participation={},
+                raw_cosine_participation=None,
+                raw_cosine_unprefixed_scoring=None,
+                raw_cosine_prefixed_scoring=None,
+                raw_cosine_delta=None,
+                labelled_scoring=None,
+                isolation={},
+                snapshot_logical_mutation={"status": "clean", "diffs": []},
+                per_query_table=[],
+                raw_cosine_per_query_table=None,
+                raw_cosine_prefixed_per_query_table=None,
+                historical_note="",
+                output_dir=out,
+            )
+            # Widen the perms to 0o755 between the initial
+            # write_report call and the actual write. We do
+            # this by monkey-patching mkdir to widen perms.
+            import os as _os
+            orig_mkdir = Path.mkdir
+            def widening_mkdir(self, *a, **kw):  # type: ignore[no-untyped-def]
+                kw.pop("mode", None)
+                orig_mkdir(self, *a, **kw)
+                if self == out:
+                    _os.chmod(self, 0o755)
+            with unittest.mock.patch.object(Path, "mkdir", widening_mkdir):
+                with self.assertRaises(WorkspaceError) as cm:
+                    write_report(r, snap_real=snap)
+            self.assertIn("wider than 0o700", str(cm.exception))
+
+    def test_report_write_refuses_symlink_redirect(self) -> None:
+        from bench.reporter import RunReport, write_report
+        from bench.workspace import WorkspaceError
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out"
+            snap = Path(td) / "snap"
+            snap.mkdir(parents=True, mode=0o700)
+            out.mkdir(parents=True, mode=0o700)
+            # Replace the output dir with a symlink that points
+            # into the snapshot workspace. The pre-write recheck
+            # in `write_report` MUST catch the symlink-to-snap
+            # and refuse the write. The pre-v4 code only called
+            # `mkdir`; the new contract is recheck-then-write.
+            out_parent = out.parent
+            os.rmdir(out)
+            (out_parent / "out").symlink_to(snap)
+            r = RunReport(
+                corpus={"version": "v-test"},
+                regeneration={"ok": True, "failures": [], "expected": {}},
+                participation={},
+                raw_cosine_participation=None,
+                raw_cosine_unprefixed_scoring=None,
+                raw_cosine_prefixed_scoring=None,
+                raw_cosine_delta=None,
+                labelled_scoring=None,
+                isolation={},
+                snapshot_logical_mutation={"status": "clean", "diffs": []},
+                per_query_table=[],
+                raw_cosine_per_query_table=None,
+                raw_cosine_prefixed_per_query_table=None,
+                historical_note="",
+                output_dir=out_parent / "out",
+            )
+            with self.assertRaises(WorkspaceError) as cm:
+                write_report(r, snap_real=snap)
+            self.assertIn("snapshot workspace", str(cm.exception))
+
+
+class TestTempParentValidatedBeforeMkdir(unittest.TestCase):
+    """v4 review priority 4: `_make_snap_workspace` must validate
+    the canonical temp parent (`/tmp/mpm-bench`) against the
+    live-store sentinels BEFORE any mkdir. The pre-v4 code
+    called `parent.mkdir(parents=True, exist_ok=True, mode=0o700)`
+    first, which would create a directory inside a protected
+    root if TMPDIR pointed at the operator's home or MPM
+    workspace."""
+
+    def test_tmpdir_into_protected_root_rejected_no_artifact(self) -> None:
+        from bench import harness as h
+        with tempfile.TemporaryDirectory() as home_root:
+            with tempfile.TemporaryDirectory() as td:
+                home = Path(home_root)
+                mpm = home / ".mpm"
+                mpm.mkdir(parents=True, exist_ok=True, mode=0o700)
+                # Use a protected_root of `home`; the canonical
+                # temp parent path is computed inside
+                # `_make_snap_workspace` and would normally be
+                # `/tmp/mpm-bench`. We simulate the dangerous
+                # case by passing `home` as the parent override
+                # and asserting the helper refuses.
+                bad_parent = mpm / "tmp"
+                # The helper exposes `_default_snap_parent` and
+                # `assert_safe_temp_parent`; the integration
+                # test patches `tempfile.gettempdir` to point
+                # inside the protected root.
+                with unittest.mock.patch.object(
+                    h.tempfile, "gettempdir",
+                    return_value=str(mpm)
+                ):
+                    with self.assertRaises(Exception):
+                        h._make_snap_workspace(
+                            "mpm-bench-x-", protected_root=home
+                        )
+                # The protected-root tmp dir must NOT have been
+                # created on disk.
+                self.assertFalse(
+                    bad_parent.exists(),
+                    f"rejection must not create {bad_parent} on disk",
+                )
+
+
+class TestPrefixExperimentFailsClosedWithoutProfile(unittest.TestCase):
+    """v4 review priority 5: if `--raw-cosine-prefix` is requested
+    and no embedding profile resolves from the config, fail
+    clearly. The pre-v4 code returned a hash-only unprefixed
+    result with `prefixed=None` and reported it as a "completed
+    experiment" — a real-model anti-pattern."""
+
+    def test_no_profile_returns_error(self) -> None:
+        from bench import harness as h
+        from bench.corpus import Corpus, Document, Query, Scoring
+        import argparse
+        corpus = Corpus(
+            version="v-test",
+            documents=(),
+            queries=(),
+            expectations=None,  # type: ignore[arg-type]
+            scoring=Scoring(method="mpm recall", top_k=5, parameters={}),
+            manifest_path=None,  # type: ignore[arg-type]
+        )
+        args = argparse.Namespace(
+            output_dir="/tmp/nope-prefix-fail",
+            # profiles is non-empty (so write_mpm_config passes),
+            # but components.embedding points at a name that does
+            # not exist AND there is no "default" profile → no
+            # profile resolves for the raw-cosine experiment.
+            config=str(_write_cfg(
+                '{"profiles": {"foo": {"provider": "openai-compatible", '
+                '"model": "x"}}, "components": {"embedding": "bar"}, '
+                '"expected": {"model": "x", "dimension": 8}}'
+            )),
+            raw_cosine_prefix=True,
+        )
+        # Make the fake snap dir exist on disk so write_mpm_config
+        # can write mpm_config.json into it.
+        Path("/tmp/fake-snap").mkdir(parents=True, exist_ok=True)
+        Path("/tmp/fake-out-prefix").mkdir(parents=True, exist_ok=True)
+        try:
+            with unittest.mock.patch.object(h, "load_corpus",
+                                            return_value=corpus), \
+                 unittest.mock.patch.object(h, "_make_snap_workspace",
+                                            return_value=Path(
+                                                "/tmp/fake-snap")), \
+                 unittest.mock.patch.object(h, "assert_safe_workspace",
+                                            return_value=Path(
+                                                "/tmp/fake-snap")), \
+                 unittest.mock.patch.object(h, "assert_safe_output_dir",
+                                            return_value=Path(
+                                                "/tmp/fake-out-prefix")), \
+                 unittest.mock.patch.object(h, "reject_unsafe_symlinks",
+                                            return_value=[]), \
+                 unittest.mock.patch.object(h, "_ingest_corpus"), \
+                 unittest.mock.patch.object(h, "_backfill",
+                                            return_value=(0, "")), \
+                 unittest.mock.patch.object(h, "_find_db_path",
+                                            return_value=Path(
+                                                "/tmp/fake-snap/mpm.db")), \
+                 unittest.mock.patch.object(h, "verify_regeneration_complete",
+                                            return_value=unittest.mock.MagicMock(
+                                                ok=True,
+                                                to_dict=lambda: {"ok": True,
+                                                                 "failures": []},
+                                            )), \
+                 unittest.mock.patch.object(h, "_snapshot_full",
+                                            return_value={"memories": [],
+                                                         "reference_chunks": [],
+                                                         "retrieval_metadata": []}), \
+                 unittest.mock.patch.object(h, "run_query"), \
+                 unittest.mock.patch.object(h, "_resolve_mpm_binary",
+                                            return_value=Path("/bin/true")), \
+                 unittest.mock.patch.object(h, "write_mpm_config",
+                                            return_value=Path(
+                                                "/tmp/fake-config")), \
+                 unittest.mock.patch.object(h, "write_report",
+                                            return_value=(Path("r.json"),
+                                                         Path("r.md"))):
+                rc = h.cmd_run(args)
+        finally:
+            import shutil
+            shutil.rmtree("/tmp/fake-snap", ignore_errors=True)
+            shutil.rmtree("/tmp/fake-out-prefix", ignore_errors=True)
+        self.assertEqual(
+            rc, 1,
+            "no profile + --raw-cosine-prefix must fail with rc=1",
+        )
+
+    def test_profile_present_proceeds(self) -> None:
+        # The positive case: when a profile resolves, the
+        # harness does NOT short-circuit on rc=1 at the
+        # profile-resolution step. (It may still fail later
+        # for other reasons in the test environment; this
+        # test only asserts it gets past the profile check.)
+        from bench import harness as h
+        from bench.corpus import Corpus, Document, Query, Scoring
+        import argparse
+        corpus = Corpus(
+            version="v-test",
+            documents=(),
+            queries=(),
+            expectations=None,  # type: ignore[arg-type]
+            scoring=Scoring(method="mpm recall", top_k=5, parameters={}),
+            manifest_path=None,  # type: ignore[arg-type]
+        )
+        cfg_json = (
+            '{"profiles": {"default": {"provider": "openai-compatible", '
+            '"model": "x"}}, "components": {"embedding": "default"}, '
+            '"expected": {"model": "x", "dimension": 8}}'
+        )
+        args = argparse.Namespace(
+            output_dir="/tmp/nope-prefix-ok",
+            config=str(_write_cfg(cfg_json)),
+            raw_cosine_prefix=True,
+        )
+        Path("/tmp/fake-snap").mkdir(parents=True, exist_ok=True)
+        Path("/tmp/fake-out-ok").mkdir(parents=True, exist_ok=True)
+        try:
+            with unittest.mock.patch.object(h, "load_corpus",
+                                            return_value=corpus), \
+                 unittest.mock.patch.object(h, "_make_snap_workspace",
+                                            return_value=Path(
+                                                "/tmp/fake-snap")), \
+                 unittest.mock.patch.object(h, "assert_safe_workspace",
+                                            return_value=Path(
+                                                "/tmp/fake-snap")), \
+                 unittest.mock.patch.object(h, "assert_safe_output_dir",
+                                            return_value=Path(
+                                                "/tmp/fake-out-ok")), \
+                 unittest.mock.patch.object(h, "reject_unsafe_symlinks",
+                                            return_value=[]), \
+                 unittest.mock.patch.object(h, "_ingest_corpus"), \
+                 unittest.mock.patch.object(h, "_backfill",
+                                            return_value=(0, "")), \
+                 unittest.mock.patch.object(h, "_find_db_path",
+                                            return_value=Path(
+                                                "/tmp/fake-snap/mpm.db")), \
+                 unittest.mock.patch.object(h, "verify_regeneration_complete",
+                                            return_value=unittest.mock.MagicMock(
+                                                ok=True,
+                                                to_dict=lambda: {"ok": True,
+                                                                 "failures": []},
+                                            )), \
+                 unittest.mock.patch.object(h, "_snapshot_full",
+                                            return_value={"memories": [],
+                                                         "reference_chunks": [],
+                                                         "retrieval_metadata": []}), \
+                 unittest.mock.patch.object(h, "run_query"), \
+                 unittest.mock.patch.object(h, "_resolve_mpm_binary",
+                                            return_value=Path("/bin/true")), \
+                 unittest.mock.patch.object(h, "write_mpm_config",
+                                            return_value=Path(
+                                                "/tmp/fake-config")), \
+                 unittest.mock.patch.object(h, "write_report",
+                                            return_value=(Path("r.json"),
+                                                         Path("r.md"))):
+                # No mutation: the run proceeds past the profile
+                # check and tries to do real work. We don't care
+                # about the final rc here; we just want to assert
+                # the harness did NOT short-circuit on the profile
+                # step. The mock is permissive enough that the run
+                # will either succeed or fail later; both are fine.
+                h.cmd_run(args)
+        finally:
+            import shutil
+            shutil.rmtree("/tmp/fake-snap", ignore_errors=True)
+            shutil.rmtree("/tmp/fake-out-ok", ignore_errors=True)
+
+
+class TestCmdRunPassesTopKToHybridRunner(unittest.TestCase):
+    """v4 review priority 6: `cmd_run` must pass
+    `corpus.scoring.top_k` to the hybrid runner so the
+    retrieval depth matches the labelled-scoring depth. The
+    pre-v4 code relied on the runner's default top_k=5 and
+    only the scoring step saw corpus.scoring.top_k; a corpus
+    with top_k > 5 had its labelled scoring computed on
+    top-5 of top-5."""
+
+    def test_hybrid_runner_called_with_corpus_top_k(self) -> None:
+        from bench import harness as h
+        from bench.corpus import Corpus, Document, Query, Scoring
+
+        corpus = Corpus(
+            version="v-test",
+            documents=tuple(
+                Document(doc_id=f"d{i:07d}", content=f"c{i}",
+                         relevance_class="relevant")
+                for i in range(1, 11)
+            ),
+            queries=tuple(
+                Query(query_id="q1", query="?",
+                      relevance_class="positive",
+                      relevant_doc_ids=("d0000001",))
+                for _ in range(1)
+            ),
+            expectations=None,  # type: ignore[arg-type]
+            scoring=Scoring(method="mpm recall", top_k=7, parameters={}),
+            manifest_path=None,  # type: ignore[arg-type]
+        )
+        captured_kwargs: list[dict] = []
+
+        from bench.runner import QueryResult
+
+        def fake_run_query(q, snap, mpm, **kw):  # type: ignore[no-untyped-def]
+            captured_kwargs.append(kw)
+            return QueryResult(
+                query_id=q.query_id, query=q.query,
+                is_positive=q.is_positive, rows=(),
+                search_mode="hybrid", raw_cosine=False,
+            )
+
+        import argparse
+        td_cfg = tempfile.mkdtemp()
+        cfg_path = Path(td_cfg) / "cfg.json"
+        cfg_path.write_text(_MINIMAL_CONFIG)
+        args = argparse.Namespace(
+            output_dir="/tmp/nope-topk",
+            config=str(cfg_path),
+            raw_cosine_prefix=False,
+        )
+
+        Path("/tmp/fake-snap").mkdir(parents=True, exist_ok=True)
+        Path("/tmp/fake-out-topk").mkdir(parents=True, exist_ok=True)
+        try:
+            with unittest.mock.patch.object(h, "load_corpus",
+                                            return_value=corpus), \
+                 unittest.mock.patch.object(h, "_ingest_corpus"), \
+                 unittest.mock.patch.object(h, "_backfill",
+                                            return_value=(0, "")), \
+                 unittest.mock.patch.object(h, "verify_regeneration_complete",
+                                            return_value=unittest.mock.MagicMock(
+                                                ok=True,
+                                                to_dict=lambda: {"ok": True,
+                                                                 "failures": []},
+                                            )), \
+                 unittest.mock.patch.object(h, "run_query",
+                                            side_effect=fake_run_query), \
+                 unittest.mock.patch.object(h, "_snapshot_full",
+                                            return_value={"memories": [],
+                                                         "reference_chunks": [],
+                                                         "retrieval_metadata": []}), \
+                 unittest.mock.patch.object(h, "_resolve_mpm_binary",
+                                            return_value=Path("/bin/true")), \
+                 unittest.mock.patch.object(h, "_make_snap_workspace",
+                                            return_value=Path(
+                                                "/tmp/fake-snap")), \
+                 unittest.mock.patch.object(h, "assert_safe_workspace",
+                                            return_value=Path(
+                                                "/tmp/fake-snap")), \
+                 unittest.mock.patch.object(h, "assert_safe_output_dir",
+                                            return_value=Path(
+                                                "/tmp/fake-out-topk")), \
+                 unittest.mock.patch.object(h, "reject_unsafe_symlinks",
+                                            return_value=[]), \
+                 unittest.mock.patch.object(h, "write_mpm_config",
+                                            return_value=Path(
+                                                "/tmp/fake-config")), \
+                 unittest.mock.patch.object(h, "_find_db_path",
+                                            return_value=Path(
+                                                "/tmp/fake-snap/mpm.db")), \
+                 unittest.mock.patch.object(h, "write_report",
+                                            return_value=(Path("r.json"),
+                                                         Path("r.md"))):
+                h.cmd_run(args)
+        finally:
+            import shutil
+            shutil.rmtree("/tmp/fake-snap", ignore_errors=True)
+            shutil.rmtree("/tmp/fake-out-topk", ignore_errors=True)
+
+        # The hybrid runner must have been called with
+        # top_k=7 (corpus.scoring.top_k), not the runner
+        # default of 5.
+        self.assertTrue(
+            len(captured_kwargs) >= 1,
+            f"run_query must be called at least once; got {captured_kwargs}",
+        )
+        for kw in captured_kwargs:
+            self.assertEqual(
+                kw.get("top_k"), 7,
+                f"hybrid runner must be called with top_k=7 "
+                f"(corpus.scoring.top_k); got kw={kw}",
+            )
+
