@@ -1503,10 +1503,20 @@ dimension 768, source `provider`, 50 rows in
 `bench_v2_corpus`. Actual: 50 rows in `bench_v2_corpus`;
 0 extra rows in the collection; 0 missing doc_ids.
 
-**Mutation verification (gate 7):** **clean**. No
-mutation detected in `memories`, `reference_chunks`,
-`retrieval_metadata`, `contradiction_queue`, or
-`challenges` after 60 queries.
+**Mutation verification (gate 7):** **clean on
+the 3 tracked tables**. No mutation detected in
+`memories`, `reference_chunks`, or `retrieval_metadata`
+after 60 queries. The harness's `TRACKED_TABLES` tuple
+at `bench/harness.py:237` defines exactly these 3
+tables; neither `contradiction_queue` nor `challenges`
+is tracked (and neither exists as a separate table in
+MPM's real schema — `internal/core/schema.go` defines
+43 `CREATE TABLE` statements, none for those names;
+their state lives in JSON columns on `memories`,
+`evidence`, and `epistemic_provenance`). The "clean"
+verdict cannot be extended to those surfaces without
+expanding the harness to read those JSON columns; see
+A3.10.2 for the HAL C2 reconciliation.
 
 **Per-class participation:**
 
@@ -1789,3 +1799,347 @@ proposed for implementation in Phase A.3.
 **No deployment, installation, binary replacement,
 service restart, or production-state modification
 occurred during Phase A.3.**
+
+## A3.10 — Evidence reconciliation (HAL closeout, 2026-10-19)
+
+The HAL review of the A.3 addendum identified four
+reporting issues (C1–C4). This section corrects each
+from the retained artefacts; no bench re-run is
+required. The per-query evidence in
+`bench/output/phase-a3/v2-nomic/report.json` is the
+authoritative source for all numerical claims.
+
+### A3.10.1 — Sample counts and aggregates (HAL C1)
+
+The A3.4 labelled-scoring table (`mean_precision_at_k
+= 0.1075`, `mean_recall_at_k = 0.9875`,
+`mean_mrr = 0.9182`, `mean_ndcg_at_k = 0.9269`) is
+correct AS STORED: the harness's aggregate at
+`bench/scoring.py:217` is
+`sum(s.precision_at_k for s in positive) / n_pos`,
+i.e. computed over positive queries only. With
+`positive_total = 40` and `negative_total = 20`, the
+metric is over the 40 positives of the all-scope run.
+
+The per-scope breakdown is computed directly from
+`bench/output/phase-a3/v2-nomic/report.json::labelled_scoring.per_query`
+using `bench/corpus/v2/queries.json::split` to
+partition. The corpus manifest records
+`calibration_queries_count: 41` and
+`held_out_queries_count: 19`.
+
+**All queries in scope (positives contribute their
+IR scores; negatives contribute 0 because their
+`relevant_doc_ids` arrays are empty by hand-authored
+ground truth):**
+
+| Scope   | n_total | n_positive | n_negative | Mean Precision@10 | Mean Recall@10 | Mean MRR | Mean nDCG@10 |
+|---|---|---|---|---|---|---|---|
+| Calibration | 41 | 26 | 15 | 0.0683 | 0.6220 | 0.5706 | 0.5770 |
+| Held-out    | 19 | 14 |  5 | 0.0789 | 0.7368 | 0.7018 | 0.7063 |
+| All         | 60 | 40 | 20 | 0.0717 | 0.6583 | 0.6121 | 0.6179 |
+
+**Positives only in scope** (matches the v1 baseline
+convention so v2 is directly comparable to v1):
+
+| Scope   | n_positive | Mean Precision@10 | Mean Recall@10 | Mean MRR | Mean nDCG@10 |
+|---|---|---|---|---|---|
+| Calibration | 26 | 0.1077 | 0.9808 | 0.8997 | 0.9099 |
+| Held-out    | 14 | 0.1071 | 1.0000 | 0.9524 | 0.9586 |
+| All         | 40 | 0.1075 | 0.9875 | 0.9182 | 0.9269 |
+
+**Interpretation:** held-out positives achieve higher
+mean Recall@10 (1.000 vs 0.9808) because held-out
+queries target documents in `search_operators`
+(d02041–d02050), each with a single relevant
+`doc_id` — so every positive query retrieves its
+single relevant doc. Calibration positives target
+multi-doc corpora (d02003 is the relevant doc in 2
+queries, d02006 in 2, d02019 in 2); the calibration
+set's single weak Recall result is q02040 (relevant
+pair d02017/d02018; one of the two is retrieved,
+yielding Recall@10 = 0.5).
+
+The Option D policy sweep's
+`precision_on_answered` values (correctly partitioned
+by scope in
+`bench/output/phase-a3/v2-nomic-eval/*.json`):
+- calibration: 26/41 ≈ 0.6341 (P0_empty_ranker)
+- held-out:    14/19 ≈ 0.7368 (P0_empty_ranker)
+- all:         40/60 ≈ 0.6667 (P0_empty_ranker)
+
+These match the schema above and are the values the
+`P0` baseline answers are scored against.
+
+### A3.10.2 — Mutation-gate scope (HAL C2)
+
+The A3.4 mutation-coverage claim — "clean on
+memories, reference_chunks, retrieval_metadata,
+contradiction_queue, challenges" — was incorrect
+in two distinct senses.
+
+**(a) Tracked tables.** The merged harness's
+`TRACKED_TABLES` tuple at `bench/harness.py:237`:
+
+```python
+TRACKED_TABLES: tuple[str, ...] = (
+    "memories",
+    "reference_chunks",
+    "retrieval_metadata",
+)
+```
+
+`contradiction_queue` and `challenges` are not in
+`TRACKED_TABLES`. The snapshot function
+`_snapshot_full` at `bench/harness.py:305` queries
+only those three tables.
+
+**(b) Schema existence.** Neither `contradiction_queue`
+nor `challenges` is defined as a separate table in
+MPM's schema. `internal/core/schema.go` defines 43
+`CREATE TABLE` statements; the full table list
+includes `memories`, `sessions`, `topics`,
+`topic_memberships`, `system_config`,
+`schema_migrations`, `lessons`,
+`retrieval_metadata`, `raw_memories`,
+`external_db_cursors`, `memory_revisions`,
+`memory_settling_baselines`, `evidence`,
+`confidence_history`, `synth_runs`,
+`epistemic_cascade_outbox`, `epistemic_provenance`,
+`artifact_provenance`, `capabilities`,
+`capability_invocations`, `capability_dependencies`,
+`capability_events`, `reference_docs`,
+`reference_chunks`, `reference_interactions`,
+`admission_log`, `works`, `work_events`,
+`embedding_migration_log`, etc. — but no
+`contradiction_queue` and no `challenges` table.
+Conflict- and challenge-related state lives in JSON
+columns on `memories` (the `metadata` column), in
+`evidence`, and in `epistemic_provenance`.
+
+**Corrected mutation-coverage statement:**
+
+> **Mutation verification (gate 7):** **clean on
+> the 3 tables actually tracked by the harness.**
+> No mutation detected in `memories`,
+> `reference_chunks`, or `retrieval_metadata` after
+> 60 queries (status=`clean`, diffs=`[]`).
+>
+> The harness does **not** track `contradiction_queue`
+> or `challenges`: neither exists as a separate
+> table in MPM's schema, and the corresponding
+> mutation-tracking machinery (which compares
+> per-table row snapshots before and after recall)
+> does not read JSON columns. The "clean" verdict
+> is therefore scoped to the 3 tables above and
+> cannot be extended to the JSON-encoded
+> contradiction/challenge state without expanding
+> the harness. This expansion is **out of scope
+> for Phase A.3** (HAL's instruction: "Do not
+> expand production code or mutation machinery
+> merely to resolve a reporting discrepancy"). It
+> is recommended as a Phase B candidate if
+> contradiction-apply behaviour ever needs to be
+> verified by the mutation gate.
+
+### A3.10.3 — Official benchmark test runner (HAL C3)
+
+`make test-bench` was re-run on the worktree HEAD
+before this reconciliation was committed. Output:
+
+```
+Ran 148 tests in 5.052s
+
+OK
+[test-bench] collected 148 tests (floor 50)
+```
+
+- Exit code: 0.
+- `python3 -m unittest discover -s bench/tests -t .`
+  collected **148 tests**, all passed in 5.052s.
+- The 13 new Phase A.3 regression tests are
+  discoverable by the official runner:
+  - `test_phase_a3_isolation.py` — 3 tests
+    (`test_fresh_workspace_seeds_5_directives`,
+    `test_collection_scoped_verification_passes`,
+    `test_unscoped_verification_flags_seed_rows_as_extra`).
+  - `test_fts5_control.py` — 4 tests
+    (`test_fts5_shadow_table_present`,
+    `test_disposable_corpus_in_fts5_index`,
+    `test_control_manifest_sha256_stable`,
+    `test_exact_token_probes_surface_fts5_or_hybrid_source`).
+  - `test_binary_provenance.py` — 6 tests
+    (`test_canonical_binary_path`,
+    `test_provenance_block_has_all_required_fields`,
+    `test_provenance_is_stable`,
+    `test_provenance_sha_matches_independent_hash`,
+    `test_build_config_pins_fts5_tag`,
+    `test_canonical_flag_true`).
+- The official floor is 50 (`Makefile:157`); the
+  actual count is 148, well above the floor.
+- A pre-existing `unittest.SkipTest` (called when
+  the canonical mpm binary is not built) and one
+  `REFUSING` line from the raw-cosine prefix config
+  check are expected console output, not failures.
+
+Pytest (`pytest -q bench/tests/`) discovers the
+same suite and also reports 148 passed. The
+unittest runner — invoked by `make test-bench` — is
+the discovery surface HAL requires.
+
+No new test files were needed: every new test file
+is a `unittest.TestCase` subclass that
+`unittest discover` finds automatically. No
+`test_bench` magic was required.
+
+### A3.10.4 — Exact experiment invocation (HAL C4)
+
+The A.3 v2+nomic measurements were produced by
+these two step-types, executed on the worktree
+itself (`pwd` =
+`/home/v/src/mpm/.claude/worktrees/issue-15-calibration`):
+
+**(1) Real benchmark run** — writes
+`/tmp/mpm-bench-v2-nomic-a3/report.json` and the
+matching `.md`, plus the disposable snapshot
+workspace at `/tmp/mpm-bench/mpm-bench-run-bxlzo6vi/`:
+
+```bash
+MPM_BENCH_COLLECTION=bench_v2_corpus \
+  python3 -m bench run \
+    --output-dir /tmp/mpm-bench-v2-nomic-a3 \
+    --config /path/to/nomic-config.json \
+    --corpus-version v2 \
+    --raw-cosine-prefix
+```
+
+The `--config` JSON contained:
+
+```json
+{
+  "profiles": {
+    "default": {
+      "provider": "openai-compatible",
+      "model": "nomic-embed-text",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key": ""
+    }
+  },
+  "components": {
+    "embedding": "default"
+  }
+}
+```
+
+That config is verified by reading the harness's
+rendered config at
+`/tmp/mpm-bench/mpm-bench-run-bxlzo6vi/mpm_config.json`
+(matching the JSON above byte-for-byte). Embedding
+model: `openai-compatible:nomic-embed-text`,
+dimension 768, served by Ollama at
+127.0.0.1:11434 (local; no remote endpoint).
+
+**Effective corpus and configuration:**
+
+- corpus manifest: `bench/corpus/v2/MANIFEST.json`
+  (sha256:
+  `753dbb458c237ec101cf3f1d4763b31ae7e140fd00c26c80e6d93a1f99d32a95`)
+- corpus documents: `bench/corpus/v2/documents.json`
+  (50 docs)
+- corpus queries: `bench/corpus/v2/queries.json` (60
+  queries: 40 positive, 20 negative, split
+  `calibration` (41) / `held-out` (19))
+- corpus expectations: `bench/corpus/v2/expectations.json`
+- corpus scoring: `bench/corpus/v2/scoring.json`
+  (top_k = 10, vector_weight = 0.5,
+  retrieval_threshold = -3.0, the production
+  `DefaultHybridConfig` unchanged)
+- benchmark collection: `bench_v2_corpus` (via
+  `MPM_BENCH_COLLECTION`)
+- snapshot workspace:
+  `/tmp/mpm-bench/mpm-bench-run-bxlzo6vi`
+- output dir: `/tmp/mpm-bench-v2-nomic-a3`
+- gate 1 (regeneration verification): ok
+- gate 7 (mutation verification, 3-table scope): clean
+- raw_cosine_run: true (both prefixed and unprefixed)
+
+**Why v2 corpus was selected (not the harness's
+default v1):** the `load_corpus(DEFAULT_CORPUS_DIR,
+version="v2")` call at `bench/harness.py:911` reads
+`bench/corpus/v2/MANIFEST.json` only when
+`--corpus-version v2` is passed; without that flag
+the harness defaults to v1 (the v1 corpus path is
+`bench/corpus/v1/`, the v2 corpus path is
+`bench/corpus/v2/`). The A.3 command passed
+`--corpus-version v2` explicitly, and the manifest's
+`version: "v2"` matches that flag.
+
+**Why the subprocess queried `bench_v2_corpus` (and
+not the operator's installed binary or the
+operator's live DB):**
+- `bench/runner.py:run_query` invokes
+  `mpm recall --json --collection <name>`, where
+  `<name>` is `corpus_collection()` at
+  `bench/harness.py:158` — which reads
+  `MPM_BENCH_COLLECTION` from the env. With the
+  override `MPM_BENCH_COLLECTION=bench_v2_corpus`,
+  every recall subprocess passed
+  `--collection bench_v2_corpus`.
+- The mpm binary itself is the harness's
+  `_resolve_mpm_binary()` resolution at
+  `bench/harness.py:548-578`: it returns the
+  canonical `.build/bin/mpm` (overridable only via
+  the explicit `MPM_BENCH_BINARY` env var). The A.3
+  command did not set `MPM_BENCH_BINARY`; the
+  binary is `.build/bin/mpm`, recorded in the
+  isolation block with `canonical: True`.
+- The disposable workspace's data directory was
+  created under `/tmp/mpm-bench/mpm-bench-run-bxlzo6vi`
+  (per `_make_snap_workspace("mpm-bench-run-")`),
+  so the mpm process used the disposable DB, not
+  the operator's installed DB at `~/.mpm/`.
+
+**(2) Three policy-evaluation runs** — write
+`calibration.json`, `held-out.json`, `all.json`
+under `/tmp/mpm-bench-v2-nomic-a3-eval/` (which are
+copied verbatim to
+`bench/output/phase-a3/v2-nomic-eval/`):
+
+```bash
+python3 -m bench.option_d \
+  --report /tmp/mpm-bench-v2-nomic-a3/report.json \
+  --queries bench/corpus/v2/queries.json \
+  --scope calibration \
+  --output /tmp/mpm-bench-v2-nomic-a3-eval/calibration.json
+# (and likewise with --scope held-out, --scope all)
+```
+
+The eval JSONs at
+`bench/output/phase-a3/v2-nomic-eval/` carry
+`report_path: /tmp/mpm-bench-v2-nomic-a3/report.json`
+(verified against all three files).
+
+### A3.10.5 — Verdict summary
+
+| Item | A.3 claim (before) | A.3.10 reconciliation |
+|---|---|---|
+| Labelled metrics (A3.4) | mean P@10 0.1075, R@10 0.9875, MRR 0.9182, nDCG 0.9269 | Verified correct AS STORED (positives-only, all scope). Per-scope breakdown added in A3.10.1. |
+| `n_positive` by scope | (implicit) | Calibration 26, Held-out 14, All 40. |
+| `n_negative` by scope | (implicit) | Calibration 15, Held-out 5, All 20. |
+| Total queries by scope | (implicit) | Calibration 41, Held-out 19, All 60. |
+| Mutation coverage | 5 tables incl. `contradiction_queue` and `challenges` | Corrected to **3 tables**: `memories`, `reference_chunks`, `retrieval_metadata`. The other two do not exist; see A3.10.2. |
+| Mutation verdict "clean" | clean on 5-table scope | clean on 3-table scope; verdict cannot be extended without expanding the harness. |
+| `make test-bench` result | (not run in A.3) | Re-run, exit 0, 148 tests collected (floor 50); see A3.10.3. |
+| Bench invocation | (not fully pinned) | Pinned: `python3 -m bench run --output-dir ... --corpus-version v2 --raw-cosine-prefix` with `MPM_BENCH_COLLECTION=bench_v2_corpus`; binary `.build/bin/mpm` (SHA-256 130cb1...); see A3.10.4. |
+| A.3 vs A.2 comparability | within 0.5% on aggregates | Unchanged: comparability conclusion still holds (the corrected mutation scope is a reporting correction, not a measurement change). |
+
+**No underlying bench evidence is changed by these
+corrections; the per-query table in
+`bench/output/phase-a3/v2-nomic/report.json` is the
+authoritative source and remains unchanged. No re-run
+is required.**
+
+**Phase A.3 closeout disposition remains: no
+production threshold, no production code change, no
+production-state modification. Phase B remains
+UNAUTHORISED.**
