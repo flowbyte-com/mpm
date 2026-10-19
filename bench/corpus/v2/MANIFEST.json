@@ -1,0 +1,27 @@
+{
+  "version": "v2",
+  "documents_sha256": "753dbb458c237ec101cf3f1d4763b31ae7e140fd00c26c80e6d93a1f99d32a95",
+  "queries_sha256": "01c3444794d69c079a9a6c896cc149fb5b647a1e31b982360051d7f48da8cfa1",
+  "expectations_sha256": "05a45f528348cb779c8792d0f0a3655e3030d0ccaacf7a2182b3972a3e774425",
+  "scoring_sha256": "e532ad942241fbebcb08c420ce145d4eb3878787b684728b6ab093f605ecef8b",
+  "generator": "hand-authored-from-topics@2026-10-19",
+  "seed_topics": [
+    "retrieval_core",
+    "memory_lifecycle",
+    "challenge",
+    "schema_persistence",
+    "search_operators"
+  ],
+  "documents_count": 50,
+  "queries_count": 60,
+  "positive_queries_count": 40,
+  "negative_queries_count": 20,
+  "calibration_queries_count": 41,
+  "held_out_queries_count": 19,
+  "calibration_documents_count": 40,
+  "held_out_documents_count": 10,
+  "paraphrase_pairs": 9,
+  "hard_negatives": 4,
+  "scoring_method": "mpm recall --semantic --json",
+  "note": "v2 calibration corpus. Independent from v1: documents, queries, expectations and scoring are bound together. 5 topic families; calibration scope is 4 families (retrieval_core, memory_lifecycle, challenge, schema_persistence); held-out scope is 1 family (search_operators). v1 is preserved unchanged at bench/corpus/v1/ with its original MANIFEST.json hashes. Both MANIFESTs are content-hashed; any change to a corpus file is detected at load time. Labels are scored against the v2 corpus's own documents, never against live-memory content."
+}

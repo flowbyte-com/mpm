@@ -1,0 +1,611 @@
+[
+  {
+    "query_id": "q02001",
+    "query": "How does MPM combine FTS5 and vector search?",
+    "relevance_class": "positive",
+    "topic_family": "retrieval_core",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02003", "d02006"],
+    "label_rationale": "Direct match: d02003 documents the hybrid blending formula and d02006 documents the combined score formula. Both are topically central to the question.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02002",
+    "query": "What algorithm does FTS5 use to rank results?",
+    "relevance_class": "positive",
+    "topic_family": "retrieval_core",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02001"],
+    "label_rationale": "Direct match: d02001 documents the BM25 algorithm and the standard k1/b parameters. The question is the textbook phrasing of the answer.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02003",
+    "query": "How does BM25 ranking work?",
+    "relevance_class": "positive",
+    "topic_family": "retrieval_core",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02001"],
+    "label_rationale": "Paraphrase of q02002 (same intent, different wording). d02001 is the single relevant doc.",
+    "source": "hand-authored",
+    "paraphrase_of": "q02002"
+  },
+  {
+    "query_id": "q02004",
+    "query": "Where are vector embeddings persisted?",
+    "relevance_class": "positive",
+    "topic_family": "schema_persistence",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02038"],
+    "label_rationale": "Direct match: d02038 documents the embedding BLOB column. Note: this query is in the calibration set but the topic family is held-out (d02038 is in topic family 'schema_persistence'). This is by design — calibration queries may target held-out documents; what is held-out is the DOCUMENT SET, not the query set. A held-out QUERY set exists separately in 'q03xxx' queries below.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02005",
+    "query": "What column stores the embedding BLOB?",
+    "relevance_class": "positive",
+    "topic_family": "schema_persistence",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02038"],
+    "label_rationale": "Paraphrase of q02004. d02038 is the single relevant doc.",
+    "source": "hand-authored",
+    "paraphrase_of": "q02004"
+  },
+  {
+    "query_id": "q02006",
+    "query": "What is the confidence floor for memories?",
+    "relevance_class": "positive",
+    "topic_family": "retrieval_core",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02007"],
+    "label_rationale": "Direct match: d02007 documents the [0.5, 1.0] confidence range and the floor. The query is the canonical phrasing.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02007",
+    "query": "What is the minimum confidence value?",
+    "relevance_class": "positive",
+    "topic_family": "retrieval_core",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02007"],
+    "label_rationale": "Paraphrase of q02006. d02007 is the single relevant doc.",
+    "source": "hand-authored",
+    "paraphrase_of": "q02006"
+  },
+  {
+    "query_id": "q02008",
+    "query": "What is the weight clamping range?",
+    "relevance_class": "positive",
+    "topic_family": "retrieval_core",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02008"],
+    "label_rationale": "Direct match: d02008 documents the [0.1, 10.0] weight clamp. The query is the canonical phrasing.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02009",
+    "query": "What is the shortID function used for?",
+    "relevance_class": "positive",
+    "topic_family": "retrieval_core",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02005"],
+    "label_rationale": "Direct match: d02005 documents the 8-character ULID truncation. The query is the canonical phrasing.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02010",
+    "query": "What does the hybrid score formula compute?",
+    "relevance_class": "positive",
+    "topic_family": "retrieval_core",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02003", "d02006"],
+    "label_rationale": "Direct match: d02003 documents the formula's high-level structure and d02006 documents the per-component formula. The query is canonical.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02011",
+    "query": "What is the ChallengeMemory cosine threshold?",
+    "relevance_class": "positive",
+    "topic_family": "challenge",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02025"],
+    "label_rationale": "Direct match: d02025 documents the 0.85 threshold. The query is canonical.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02012",
+    "query": "At what similarity is a memory challenged?",
+    "relevance_class": "positive",
+    "topic_family": "challenge",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02025"],
+    "label_rationale": "Paraphrase of q02011. d02025 is the single relevant doc.",
+    "source": "hand-authored",
+    "paraphrase_of": "q02011"
+  },
+  {
+    "query_id": "q02013",
+    "query": "What does mpm challenge restore do?",
+    "relevance_class": "positive",
+    "topic_family": "challenge",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02026"],
+    "label_rationale": "Direct match: d02026 documents the three restore actions (clear flag, restore weight, reset confidence). The query is canonical.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02014",
+    "query": "How is confidence reset on challenge restore?",
+    "relevance_class": "positive",
+    "topic_family": "challenge",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02031"],
+    "label_rationale": "Direct match: d02031 documents the confidence reset on restore and the F7.1 contract that the pre-challenge confidence is not re-promoted.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02015",
+    "query": "What is a free-text theory reference?",
+    "relevance_class": "positive",
+    "topic_family": "challenge",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02027"],
+    "label_rationale": "Direct match: d02027 documents the free-text fallback path and the metadata field it writes to. The query is canonical.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02016",
+    "query": "How does MPM identify a duplicate memory?",
+    "relevance_class": "positive",
+    "topic_family": "memory_lifecycle",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02019"],
+    "label_rationale": "Direct match: d02019 documents the identity_hash and its role in duplicate detection. The query is canonical.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02017",
+    "query": "What fields are tracked in retrieval_metadata?",
+    "relevance_class": "positive",
+    "topic_family": "retrieval_core",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02009"],
+    "label_rationale": "Direct match: d02009 enumerates reuse_count, last_retrieved_at, and success_count.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02018",
+    "query": "What happens to a memory's weight when it is challenged?",
+    "relevance_class": "positive",
+    "topic_family": "challenge",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02030"],
+    "label_rationale": "Direct match: d02030 documents the weight reset to 1.0 and the prior weight preservation.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02019",
+    "query": "What is the difference between long-term and prime directive memories?",
+    "relevance_class": "positive",
+    "topic_family": "memory_lifecycle",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02020"],
+    "label_rationale": "Direct match: d02020 documents the two flags and their independence. The query is canonical.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02020",
+    "query": "How does the bulk import path work?",
+    "relevance_class": "positive",
+    "topic_family": "memory_lifecycle",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02021"],
+    "label_rationale": "Direct match: d02021 documents the JSONL transaction path and the FTS5 deferred-indexing optimisation.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02021",
+    "query": "What is a memory's identity hash for?",
+    "relevance_class": "positive",
+    "topic_family": "memory_lifecycle",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02019"],
+    "label_rationale": "Paraphrase of q02016. d02019 is the single relevant doc.",
+    "source": "hand-authored",
+    "paraphrase_of": "q02016"
+  },
+  {
+    "query_id": "q02022",
+    "query": "What does soft delete do to a memory?",
+    "relevance_class": "positive",
+    "topic_family": "memory_lifecycle",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02016"],
+    "label_rationale": "Direct match: d02016 documents the deleted_at column and the exclusion from all retrieval paths.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02023",
+    "query": "What tags can be applied to a memory?",
+    "relevance_class": "positive",
+    "topic_family": "memory_lifecycle",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02022"],
+    "label_rationale": "Direct match: d02022 documents the JSON-array tags column and the synthesized sentinel.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02024",
+    "query": "What does reinforcement count track?",
+    "relevance_class": "positive",
+    "topic_family": "memory_lifecycle",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02017"],
+    "label_rationale": "Direct match: d02017 documents the per-retrieval increment policy and the observability-only role.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02025",
+    "query": "How does the IVF index speed up vector search?",
+    "relevance_class": "positive",
+    "topic_family": "retrieval_core",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02004"],
+    "label_rationale": "Direct match: d02004 documents the k-means clustering, the default 70 clusters / probe_p=4, and the recall trade-off.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02026",
+    "query": "What is the difference between lexical and semantic recall?",
+    "relevance_class": "positive",
+    "topic_family": "search_operators",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02041", "d02042"],
+    "label_rationale": "Direct match: d02041 documents lexical recall (BM25 + recency, no provider needed) and d02042 documents semantic recall (hybrid, provider required). The query is a comparison that requires both.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02027",
+    "query": "How does point-in-time reconstruction work?",
+    "relevance_class": "positive",
+    "topic_family": "search_operators",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02043"],
+    "label_rationale": "Direct match: d02043 documents the --as-of flag, the memory_revisions read path, and the post-as-of drop policy.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02028",
+    "query": "What does the --as-of flag do?",
+    "relevance_class": "positive",
+    "topic_family": "search_operators",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02043"],
+    "label_rationale": "Paraphrase of q02027. d02043 is the single relevant doc.",
+    "source": "hand-authored",
+    "paraphrase_of": "q02027"
+  },
+  {
+    "query_id": "q02029",
+    "query": "How do I filter by collection in recall?",
+    "relevance_class": "positive",
+    "topic_family": "search_operators",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02044"],
+    "label_rationale": "Direct match: d02044 documents the --collection flag and the default-empty behavior for unknown collections.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02030",
+    "query": "How does the time filter work?",
+    "relevance_class": "positive",
+    "topic_family": "search_operators",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02045"],
+    "label_rationale": "Direct match: d02045 documents --since/--until/--before and the YYYY-MM-DD date format.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02031",
+    "query": "What is the stale flag threshold?",
+    "relevance_class": "positive",
+    "topic_family": "search_operators",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02046"],
+    "label_rationale": "Direct match: d02046 documents the 14-day default and the is_stale JSON envelope field.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02032",
+    "query": "What does the token budget flag do?",
+    "relevance_class": "positive",
+    "topic_family": "retrieval_core",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02012"],
+    "label_rationale": "Direct match: d02012 documents the cumulative-token cap and the no-further-append behavior.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02033",
+    "query": "What is a provenance preamble?",
+    "relevance_class": "positive",
+    "topic_family": "search_operators",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02047"],
+    "label_rationale": "Direct match: d02047 documents the metadata-keyed preamble that surfaces source lineage without --why.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02034",
+    "query": "How does MPM detect concept drift?",
+    "relevance_class": "positive",
+    "topic_family": "search_operators",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02048"],
+    "label_rationale": "Direct match: d02048 documents the per-revision cosine comparison and the recall-time preamble.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02035",
+    "query": "Can I search across multiple collections?",
+    "relevance_class": "positive",
+    "topic_family": "search_operators",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02049"],
+    "label_rationale": "Direct match: d02049 documents the mpm search command (not mpm recall) and the union-of-collections semantics.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02036",
+    "query": "What does the --why flag surface?",
+    "relevance_class": "positive",
+    "topic_family": "search_operators",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02050"],
+    "label_rationale": "Direct match: d02050 enumerates the four ranking signals (lexicalRank, source, VectorSimilarity, CombinedScore).",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q02037",
+    "query": "What is the default value of stale_days?",
+    "relevance_class": "positive",
+    "topic_family": "search_operators",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02046"],
+    "label_rationale": "Paraphrase of q02031. d02046 is the single relevant doc (14 days).",
+    "source": "hand-authored",
+    "paraphrase_of": "q02031"
+  },
+  {
+    "query_id": "q02038",
+    "query": "What is the difference between --until and --before?",
+    "relevance_class": "positive",
+    "topic_family": "search_operators",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02045"],
+    "label_rationale": "Paraphrase of q02030. d02045 is the single relevant doc (both flags documented as time filters).",
+    "source": "hand-authored",
+    "paraphrase_of": "q02030"
+  },
+  {
+    "query_id": "q02039",
+    "query": "Why does my search return an empty result?",
+    "relevance_class": "positive",
+    "topic_family": "search_operators",
+    "split": "held-out",
+    "relevant_doc_ids": ["d02044"],
+    "label_rationale": "Paraphrase of q02029. d02044 documents the empty-result path for unknown collections; this is a soft-edge case where the corpus indeed has the relevant doc.",
+    "source": "hand-authored",
+    "paraphrase_of": "q02029"
+  },
+  {
+    "query_id": "q02040",
+    "query": "What happens to a memory that has never been retrieved?",
+    "relevance_class": "positive",
+    "topic_family": "memory_lifecycle",
+    "split": "calibration",
+    "relevant_doc_ids": ["d02017", "d02018"],
+    "label_rationale": "Direct match: d02017 documents the never-incremented reinforcement_count state and d02018 documents the never-updated last_accessed_at state. The query is a soft-edge case that requires both docs to answer fully.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03001",
+    "query": "What programming language is MPM written in?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the answer (Go) is not stated in any v2 document. The corpus documents MPM's INTERNAL semantics (recall, search, score, etc.) but not its implementation language. Verified by lexical search for 'Go' / 'Golang' / 'programming language' across all 50 documents: no hits in any document. (This is a hand-verification, not an automated gate.)",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03002",
+    "query": "What is MPM's license?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the answer (MIT / Apache 2.0 / etc.) is not in any v2 document. The corpus has no document about licensing. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03003",
+    "query": "Who created MPM?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the answer is not in the corpus. The corpus is about MPM internals, not about the project's authors. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03004",
+    "query": "What is the size limit of a memory content?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Hard negative: the question is MPM-related and the corpus documents the content column (d02014) but does NOT state a size limit. The lexical search will find d02014, but the answer (the limit) is not in the corpus. This tests whether the ranker can detect 'related but unanswered'.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03005",
+    "query": "How do I install MPM?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the corpus has no document about installation. The mpm commands documented are post-install operations. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03006",
+    "query": "What is the latest version of MPM?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the corpus has no document about versioning. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03007",
+    "query": "Does MPM support Windows?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the corpus has no document about platform support. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03008",
+    "query": "What is the MPM release cadence?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the corpus has no document about releases. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03009",
+    "query": "Does MPM have a web UI?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the corpus has no document about UI. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03010",
+    "query": "What is the MPM API rate limit?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the corpus has no document about rate limits. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03011",
+    "query": "How does MPM handle encrypted memories?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Hard negative: the question is MPM-related and lexically close to d02019 (identity hash) and d02038 (embedding BLOB), but the answer is NOT in the corpus. This tests whether the ranker can detect 'lexically-close-but-unanswered'.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03012",
+    "query": "What is MPM's consensus protocol?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Hard negative: the question is MPM-related and the corpus documents WAL mode (d02033), but MPM does not have a consensus protocol. The lexical search will find d02033, but the answer (no consensus protocol) is not in the corpus. Tests 'related-but-wrong-direction'.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03013",
+    "query": "How does MPM replicate across regions?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Hard negative: the question is MPM-related and the corpus documents SQLite WAL (d02033), but MPM does not have a replication layer. The lexical search will find d02033, but the answer (no replication) is not in the corpus.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03014",
+    "query": "How does MPM integrate with Kubernetes?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the corpus has no document about Kubernetes. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03015",
+    "query": "What is the difference between MPM and Redis?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "calibration",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the corpus has no document comparing MPM to other systems. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03016",
+    "query": "What is MPM's pricing?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "held-out",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the corpus has no document about pricing. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03017",
+    "query": "Does MPM offer a hosted version?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "held-out",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the corpus has no document about hosting. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03018",
+    "query": "What is MPM's SLA?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "held-out",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the corpus has no document about SLAs. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03019",
+    "query": "How does MPM compare to Elasticsearch?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "held-out",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the corpus has no document comparing MPM to other systems. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  },
+  {
+    "query_id": "q03020",
+    "query": "Does MPM support GraphQL?",
+    "relevance_class": "negative",
+    "topic_family": "all",
+    "split": "held-out",
+    "relevant_doc_ids": [],
+    "label_rationale": "Genuine negative: the corpus has no document about GraphQL. The MCP surface is JSON-RPC, not GraphQL. Verified by lexical search: no hits.",
+    "source": "hand-authored"
+  }
+]

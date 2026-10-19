@@ -24,10 +24,11 @@ the result independently.
   row level before and after the run. (Physical file SHA is not
   used; SQLite WAL mode can legitimately rewrite the same
   logical state.)
-- **Live-store sentinel**: the harness captures the live DB's
-  row counts at start and end. Drift is reported as
-  `inconclusive`, not `failed` (concurrent changes from other
-  processes are not automatically blamed on the benchmark).
+- **No live-store reads**: the harness never opens, reads from,
+  or inspects the operator's live MPM database. (The earlier
+  v2 `~/.mpm` row-count sentinel was removed in the v3 review.
+  The harness is hermetic against `MPM_WORKSPACE` and resolves
+  to a tempdir per run; see `bench/workspace.py:scrubbed_env`.)
 - **Optional raw-cosine experiment**: when run with
   `--raw-cosine-prefix`, the harness independently ranks vectors
   by cosine similarity, without using the hybrid ranker.

@@ -1,0 +1,9 @@
+{
+  "method": "mpm recall --semantic --json",
+  "top_k": 10,
+  "parameters": {
+    "vector_weight": 0.5,
+    "retrieval_threshold": -3.0,
+    "note": "Default HybridConfig at the v2 baseline. The retrieval_threshold of -3.0 is the log-space default; it is unreachable for 0-1 cosine similarity and the threshold check is therefore a no-op. The scoring uses the production ranker unchanged."
+  }
+}

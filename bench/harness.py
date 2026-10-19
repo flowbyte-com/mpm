@@ -122,6 +122,50 @@ DEFAULT_CORPUS_DIR = REPO_ROOT / "bench" / "corpus"
 CANONICAL_MPM_BINARY = REPO_ROOT / ".build" / "bin" / "mpm"
 DEFAULT_MPM_BINARY = CANONICAL_MPM_BINARY
 
+
+# Phase A.3 (V1 isolation): the bench ingests the corpus into a
+# non-default collection so the bench's evaluation surface is
+# isolated from MPM's production data. MPM's Baseline Cognitive
+# Bootstrap (see internal/core/seed/directives.go:92 and
+# internal/core/db.go:2968) seeds 5 prime-directive rows into
+# the `directives` collection at every `NewDatabaseManager`
+# call. By default the bench uses the `memories` collection
+# (the canonical MPM collection); the seed rows never appear
+# there. The V1 directive asks for an explicit isolation
+# mechanism so seed rows cannot influence evaluation. Two
+# layers of defence:
+#
+#   1. The verification (verify_regeneration_complete) is
+#      collection-scoped — it counts rows in the configured
+#      collection only, not the global `memories` table. A seed
+#      row in `directives` does not move the count.
+#   2. The bench ingests into a non-default collection name
+#      (`BENCH_CORPUS_COLLECTION`) and queries that same
+#      collection. Even if MPM changed its seeding policy in
+#      the future, the seeds would have to be in the bench's
+#      collection to influence evaluation.
+#
+# The default below is `memories` (the canonical MPM
+# collection) for backwards compatibility; the v2 corpus and
+# the Phase A.3 re-run use the explicit override
+# `BENCH_CORPUS_COLLECTION` so the second layer of defence is
+# active by default for real-model runs.
+DEFAULT_BENCH_CORPUS_COLLECTION = "memories"
+BENCH_CORPUS_COLLECTION = "bench_v2_corpus"
+
+
+def corpus_collection() -> str:
+    """Return the collection name to use for corpus ingestion and
+    recall. Defaults to the canonical `memories` collection for
+    backwards compatibility; can be overridden via the
+    `MPM_BENCH_COLLECTION` environment variable for explicit
+    isolation from MPM's production data.
+    """
+    override = os.environ.get("MPM_BENCH_COLLECTION")
+    if override:
+        return override
+    return DEFAULT_BENCH_CORPUS_COLLECTION
+
 # v3 review: the historical +0.022 MRR figure attributed to the
 # `search_query:` prefix on the lost 30-query corpus is the
 # reason this prefix is the second condition in the raw-cosine
@@ -404,7 +448,16 @@ def _ingest_corpus(snap: Path, corpus: Corpus) -> None:
     try:
         # Wipe any auto-created memories from the bootstrap so the
         # synthetic corpus is the only thing in the DB (gate 3).
-        con.execute("DELETE FROM memories")
+        # Phase A.3 (V1 isolation): the wipe is collection-scoped
+        # to the bench's collection. MPM-seed prime-directive
+        # rows in the `directives` collection are NOT wiped here;
+        # they are legitimate production data and live alongside
+        # the bench's evaluation surface.
+        collection = corpus_collection()
+        con.execute(
+            "DELETE FROM memories WHERE collection = ?",
+            (collection,),
+        )
         for d in corpus.documents:
             con.execute(
                 "INSERT OR REPLACE INTO memories "
@@ -412,7 +465,7 @@ def _ingest_corpus(snap: Path, corpus: Corpus) -> None:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     d.doc_id,
-                    "memories",
+                    collection,
                     d.content,
                     "[]",
                     "{}",
@@ -540,6 +593,101 @@ def _resolve_mpm_binary() -> Path:
     return CANONICAL_MPM_BINARY.resolve()
 
 
+def _binary_provenance(mpm_bin: Path) -> dict[str, Any]:
+    """Capture the load-bearing provenance of the mpm binary used for
+    this run (Phase A.3 V3).
+
+    The dict includes:
+      - `path`: the absolute path the harness resolved to
+      - `resolved_path`: realpath (catches symlinks)
+      - `size_bytes`: file size
+      - `mtime_iso`: ISO8601 mtime (catches silent rebuilds)
+      - `sha256`: SHA-256 of the binary file content
+      - `mpm_version`: what the binary reports via `mpm version`
+      - `git_head`: HEAD SHA at run time (NOT necessarily the
+        SHA the binary was built from — that is recorded below
+        when the binary's mpm version line itself names it)
+      - `build_config`: a string captured from the Makefile
+        recipe that produced the binary, so the build flags
+        are pinned alongside the binary
+      - `canonical`: True iff the binary is the canonical
+        `.build/bin/mpm` artifact (not an MPM_BENCH_BINARY
+        override or the root-level `mpm` convenience copy)
+
+    The provenance is recorded alongside the report so a HAL
+    reviewer can verify the binary matches the recorded SHA
+    without re-running the calibration. If the binary is
+    silently rebuilt, the SHA changes and the calibration
+    cannot be reproduced against the new build without
+    re-running the bench.
+    """
+    import hashlib
+    import subprocess as sp
+    p = Path(mpm_bin)
+    if not p.exists() or not p.is_file():
+        return {
+            "path": str(p),
+            "error": "binary not found or not a regular file",
+        }
+    real = p.resolve()
+    data = real.read_bytes()
+    h = hashlib.sha256()
+    h.update(data)
+    sha = h.hexdigest()
+    # Capture the binary's own version line.
+    try:
+        proc = sp.run(
+            [str(real), "version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        mpm_version = (proc.stdout or proc.stderr).strip()
+    except Exception as e:
+        mpm_version = f"<unavailable: {e!r}>"
+    # Build config captured from the Makefile recipe. This
+    # pins the CGO_CFLAGS / -tags fts5 / CGO_LDFLAGS triple.
+    makefile = REPO_ROOT / "Makefile"
+    build_config = "<Makefile missing>"
+    if makefile.exists():
+        try:
+            text = makefile.read_text()
+            # Capture the `build` recipe's first command line.
+            for line in text.splitlines():
+                if "build -tags fts5" in line and "-o" in line:
+                    build_config = line.strip()
+                    break
+        except OSError:
+            pass
+    # Resolve the current HEAD SHA at run time.
+    try:
+        head_proc = sp.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(REPO_ROOT),
+            capture_output=True, text=True, timeout=10,
+        )
+        git_head = (head_proc.stdout or "").strip()
+    except Exception:
+        git_head = "<unknown>"
+    # mtime in ISO8601.
+    import datetime as _dt
+    try:
+        mtime = _dt.datetime.fromtimestamp(
+            real.stat().st_mtime, tz=_dt.timezone.utc
+        ).isoformat()
+    except OSError:
+        mtime = "<unknown>"
+    return {
+        "path": str(p),
+        "resolved_path": str(real),
+        "size_bytes": real.stat().st_size,
+        "mtime_iso": mtime,
+        "sha256": sha,
+        "mpm_version": mpm_version,
+        "git_head": git_head,
+        "build_config": build_config,
+        "canonical": real == CANONICAL_MPM_BINARY.resolve(),
+    }
+
+
 def _backfill(snap: Path) -> tuple[int, str]:
     """Run mpm ops backfill-embeddings --include all --force-reembed.
     Returns (returncode, stdout). The returncode is informational;
@@ -583,7 +731,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     participation, and prints a report. Does not touch the live DB."""
     from bench.fake_server import make_server
 
-    corpus = load_corpus(DEFAULT_CORPUS_DIR)
+    corpus = load_corpus(DEFAULT_CORPUS_DIR, version=getattr(args, "corpus_version", None))
 
     # Start the fake server.
     dim = 64
@@ -634,6 +782,15 @@ def cmd_smoke(args: argparse.Namespace) -> int:
             expected_dimension=dim,
             expected_doc_ids={d.doc_id for d in corpus.documents},
             expected_memories_row_count=len(corpus.documents),
+            # Phase A.3: collection-scoped verification. Smoke
+            # uses the bench's collection (which defaults to
+            # `memories` for backwards compatibility, but is
+            # `bench_v2_corpus` when MPM_BENCH_COLLECTION is set
+            # for isolation). MPM-seed prime-directive rows live
+            # in `directives` and never appear in either
+            # collection, so the unfiltered count would always
+            # be wrong.
+            expected_collection=corpus_collection(),
         )
         print(f"REGENERATION: {'ok' if result.ok else 'FAILED'}")
         if not result.ok:
@@ -647,6 +804,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
             r = run_query(
                 q, snap, _resolve_mpm_binary(),
                 top_k=corpus.scoring.top_k,
+                collection=corpus_collection(),
             )
             results.append(r)
         p = per_query_participation(results, {q.query_id for q in corpus.positive_queries})
@@ -712,6 +870,7 @@ def _run_raw_cosine_both(
                 q, snap, _resolve_mpm_binary(),
                 raw_cosine=True, raw_cosine_prefix="",
                 top_k=top_k,
+                collection=corpus_collection(),
             )
             for q in queries
         ]
@@ -722,6 +881,7 @@ def _run_raw_cosine_both(
             raw_cosine=True, raw_cosine_prefix="",
             embedding_profile=embedding_profile,
             top_k=top_k,
+            collection=corpus_collection(),
         )
         for q in queries
     ]
@@ -731,6 +891,7 @@ def _run_raw_cosine_both(
             raw_cosine=True, raw_cosine_prefix=RAW_COSINE_PREFIX,
             embedding_profile=embedding_profile,
             top_k=top_k,
+            collection=corpus_collection(),
         )
         for q in queries
     ]
@@ -747,7 +908,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("--config is required for `run`", file=sys.stderr)
         return 2
 
-    corpus = load_corpus(DEFAULT_CORPUS_DIR)
+    corpus = load_corpus(DEFAULT_CORPUS_DIR, version=getattr(args, "corpus_version", None))
     output_dir = Path(args.output_dir).resolve()
     config = json.loads(Path(args.config).read_text())
 
@@ -798,6 +959,22 @@ def cmd_run(args: argparse.Namespace) -> int:
         expected_dimension=config["expected"]["dimension"],
         expected_doc_ids={d.doc_id for d in corpus.documents},
         expected_memories_row_count=len(corpus.documents),
+        # Phase A.3 (V1 isolation): the verification's row-count
+        # and doc_ids-set checks are scoped to the bench's
+        # collection, not to the global `memories` table. MPM
+        # auto-seeds 5 prime-directive rows into the `directives`
+        # collection at every `NewDatabaseManager` call; those
+        # rows legitimately exist alongside the bench's
+        # evaluation surface and never appear in the corpus
+        # collection. Without this filter, the count would
+        # always be corpus_size + 5 (or + N_seed), producing a
+        # spurious partial-backfill failure.
+        #
+        # The collection filter does not weaken the assertion.
+        # The expected_doc_ids check still catches missing rows;
+        # a new "no extra rows" check (Phase A.3) catches rows
+        # that exist in the collection but are not in the corpus.
+        expected_collection=corpus_collection(),
     )
 
     # v3 review: take the "before" snapshot IMMEDIATELY before
@@ -829,6 +1006,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         r = run_query(
             q, snap, _resolve_mpm_binary(),
             top_k=corpus.scoring.top_k,
+            collection=corpus_collection(),
         )
         after = _snapshot_full(db_path)
         d = _mutation_diff(before, after)
@@ -953,6 +1131,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             unprefixed, positive_ids
         )
         # Per-query tables for both conditions.
+        # v2 (HAL A2.4): also record the full top-k per query so a
+        # post-processing policy-D evaluator can compute top-k mean,
+        # max gap, source distribution, etc. The pre-v2 record only
+        # kept top_id/top_score which is insufficient for the
+        # abstention-policy decision.
         raw_cosine_table = [
             {
                 "query_id": r.query_id,
@@ -960,6 +1143,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "n_rows": len(r.rows),
                 "top_id": r.rows[0]["id"] if r.rows else "",
                 "top_score": r.rows[0]["score"] if r.rows else 0.0,
+                "top_k": [
+                    {
+                        "id": row["id"],
+                        "score": row["score"],
+                        "vector_similarity": row["vector_similarity"],
+                        "source": row["source"],
+                    }
+                    for row in r.rows
+                ],
             }
             for r in unprefixed
         ]
@@ -972,6 +1164,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                     "n_rows": len(r.rows),
                     "top_id": r.rows[0]["id"] if r.rows else "",
                     "top_score": r.rows[0]["score"] if r.rows else 0.0,
+                    "top_k": [
+                        {
+                            "id": row["id"],
+                            "score": row["score"],
+                            "vector_similarity": row["vector_similarity"],
+                            "source": row["source"],
+                        }
+                        for row in r.rows
+                    ],
                 }
                 for r in prefixed
             ]
@@ -988,6 +1189,18 @@ def cmd_run(args: argparse.Namespace) -> int:
             "sources": ",".join(sorted(r.sources())) or "(empty)",
             "vector_participated": r.vector_participated(),
             "search_mode": r.search_mode,
+            # v2 (HAL A2.4): per-row top-k for the hybrid ranker so
+            # policy-D features (top-1, top-k mean, max gap, source
+            # distribution, CombinedScore) can be computed offline.
+            "top_k": [
+                {
+                    "id": row["id"],
+                    "score": row["score"],
+                    "vector_similarity": row["vector_similarity"],
+                    "source": row["source"],
+                }
+                for row in r.rows
+            ],
         }
         for r in results
     ]
@@ -1011,6 +1224,23 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "passed" if not bad_out else f"FAILED: {bad_out}"
             ),
             "env_scrubbing": "passed (see test_env_scrubbing.py)",
+            # Phase A.3 (V3): the binary provenance block.
+            # Records the resolved path, SHA-256, size, mtime,
+            # mpm version line, current HEAD SHA, and the build
+            # configuration. A HAL reviewer can re-verify the
+            # SHA against the recorded value without re-running
+            # the bench. If a future run uses a different
+            # binary, the SHA mismatch is caught at review time
+            # (the per-query results would not be reproducible
+            # against the new build).
+            "binary_provenance": _binary_provenance(_resolve_mpm_binary()),
+            # Phase A.3 (V1): the bench's collection. The
+            # corpus is ingested into and queried against this
+            # collection; MPM's seed rows in `directives` never
+            # reach the bench's evaluation surface because they
+            # are in a different collection.
+            "bench_collection": corpus_collection(),
+            "expected_collection_verification": corpus_collection(),
         },
         snapshot_logical_mutation=cumulative_diff,
         per_query_table=per_query_table,
@@ -1062,6 +1292,16 @@ def build_parser() -> argparse.ArgumentParser:
             "Run the raw-cosine experiment. v3: BOTH unprefixed and "
             "`search_query:`-prefixed query embeddings are obtained from "
             "the configured provider; the report includes the metric delta."
+        ),
+    )
+    run.add_argument(
+        "--corpus-version",
+        default=None,
+        help=(
+            "Corpus version to load (e.g. 'v1', 'v2'). When omitted, the "
+            "loader reads the root-level MANIFEST.json (the v1 default). "
+            "Per-version subdirectories under bench/corpus/<version>/ "
+            "hold the per-version manifest and corpus files."
         ),
     )
     run.set_defaults(func=cmd_run)

@@ -30,6 +30,7 @@ class Document:
     doc_id: str
     content: str
     relevance_class: str  # "relevant" | "partially-relevant" | "not-relevant"
+    topic_family: str = ""  # v2+: optional family tag (e.g. "retrieval_core")
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "Document":
@@ -40,6 +41,7 @@ class Document:
             doc_id=d["doc_id"],
             content=d["content"],
             relevance_class=d["relevance_class"],
+            topic_family=d.get("topic_family", ""),
         )
 
 
@@ -49,6 +51,11 @@ class Query:
     query: str
     relevance_class: str  # "positive" | "negative"
     relevant_doc_ids: tuple[str, ...]
+    topic_family: str = ""  # v2+: optional family tag
+    split: str = ""  # v2+: "calibration" | "held-out"
+    label_rationale: str = ""  # v2+: independent justification
+    source: str = ""  # v2+: hand-authored | paraphrase
+    paraphrase_of: str = ""  # v2+: query_id of the base query when this is a paraphrase
 
     @property
     def is_positive(self) -> bool:
@@ -64,6 +71,11 @@ class Query:
             query=d["query"],
             relevance_class=d["relevance_class"],
             relevant_doc_ids=tuple(d["relevant_doc_ids"]),
+            topic_family=d.get("topic_family", ""),
+            split=d.get("split", ""),
+            label_rationale=d.get("label_rationale", ""),
+            source=d.get("source", ""),
+            paraphrase_of=d.get("paraphrase_of", ""),
         )
 
 
@@ -125,31 +137,63 @@ def _sha256_file(p: Path) -> str:
     return _sha256_bytes(p.read_bytes())
 
 
-def load_corpus(corpus_dir: Path) -> Corpus:
+def load_corpus(corpus_dir: Path, version: str | None = None) -> Corpus:
     """Load the versioned corpus from disk and verify the manifest's
     content hashes match the on-disk files. Refuses to start if any
     file has been modified since the manifest was written.
 
-    The corpus_dir is expected to be `bench/corpus/` and to contain:
+    The corpus_dir is expected to be `bench/corpus/`. The default
+    version (when `version is None`) is read from the root-level
+    `MANIFEST.json` (the v1 case). When `version` is given, the
+    loader reads `corpus_dir/<version>/MANIFEST.json` and the four
+    corpus files from `corpus_dir/<version>/`. This lets multiple
+    versions coexist with independent content-hashed manifests.
+
+    Required files in any version dir:
       - MANIFEST.json
-      - v1/documents.json
-      - v1/queries.json
-      - v1/expectations.json
-      - v1/scoring.json
+      - documents.json
+      - queries.json
+      - expectations.json
+      - scoring.json
     """
     if not corpus_dir.is_dir():
         raise CorpusError(f"corpus dir not found: {corpus_dir}")
 
-    manifest_path = corpus_dir / "MANIFEST.json"
+    if version is None:
+        # Default: read the root-level MANIFEST.json. The v1 layout
+        # uses corpus_dir/MANIFEST.json and stores the version
+        # directory at corpus_dir/<version>/. Backwards compatibility
+        # with the v3 review test fixtures depends on this.
+        manifest_path = corpus_dir / "MANIFEST.json"
+    else:
+        # Per-version layout: the v2 layout stores the manifest at
+        # corpus_dir/<version>/MANIFEST.json so each version is its
+        # own self-contained, content-hashed bundle.
+        manifest_path = corpus_dir / version / "MANIFEST.json"
     if not manifest_path.is_file():
-        raise CorpusError(f"MANIFEST.json not found in {corpus_dir}")
+        raise CorpusError(f"MANIFEST.json not found at {manifest_path}")
 
     manifest = json.loads(manifest_path.read_text())
-    version = manifest.get("version")
-    if not version:
+    actual_version = manifest.get("version")
+    if not actual_version:
         raise CorpusError(f"MANIFEST.json missing 'version': {manifest_path}")
+    if version is not None and actual_version != version:
+        raise CorpusError(
+            f"MANIFEST.json at {manifest_path} declares version {actual_version!r} "
+            f"but the caller requested {version!r}"
+        )
 
-    version_dir = corpus_dir / version
+    # Resolve version_dir. Two layouts are supported:
+    #   - Root-manifest layout (v1 default): manifest at
+    #     corpus_dir/MANIFEST.json, files at corpus_dir/<version>/.
+    #   - Per-version layout (v2+): manifest at
+    #     corpus_dir/<version>/MANIFEST.json, files at the same dir.
+    if manifest_path.parent == corpus_dir:
+        # Root manifest; the version directory is corpus_dir/<version>.
+        version_dir = corpus_dir / actual_version
+    else:
+        # Per-version manifest; the version directory is its parent.
+        version_dir = manifest_path.parent
     if not version_dir.is_dir():
         raise CorpusError(f"corpus version dir not found: {version_dir}")
 
@@ -202,6 +246,7 @@ def load_corpus(corpus_dir: Path) -> Corpus:
         raise CorpusError(
             f"corpus documents.json contains duplicate doc_ids: {dupes}"
         )
+    queries_by_id = {q.query_id: q for q in queries}
     for q in queries:
         for did in q.relevant_doc_ids:
             if did not in doc_ids:
@@ -217,6 +262,48 @@ def load_corpus(corpus_dir: Path) -> Corpus:
                 f"labelled relevance scoring requires a non-empty label set"
             )
 
+    # v2+ contract: every negative query's label_rationale must
+    # explain why the corpus does not contain the answer. A negative
+    # query without a rationale is a label defect — the harness would
+    # treat the empty-result as a positive signal even when the
+    # corpus is missing the answer, which is the v1 failure mode.
+    # Only enforced for v2+ corpora; v1 (the historical benchmark)
+    # is preserved unchanged and does not carry rationales.
+    if actual_version not in ("v1",):
+        for q in queries:
+            if not q.is_positive and not q.label_rationale:
+                raise CorpusError(
+                    f"negative query {q.query_id} has empty label_rationale; "
+                    f"{actual_version} contract requires an independent "
+                    f"justification that the answer is not in the corpus"
+                )
+
+    # v2+ contract: paraphrase_of, when present, must point to a
+    # positive query in the same corpus with a matching relevant set.
+    # Same version-conditional policy as the rationale check.
+    if actual_version not in ("v1",):
+        for q in queries:
+            if q.paraphrase_of:
+                if q.paraphrase_of not in queries_by_id:
+                    raise CorpusError(
+                        f"query {q.query_id} has paraphrase_of={q.paraphrase_of!r} "
+                        f"but no such query exists in the corpus"
+                    )
+                base = queries_by_id[q.paraphrase_of]
+                if not base.is_positive:
+                    raise CorpusError(
+                        f"query {q.query_id} paraphrases {q.paraphrase_of!r} "
+                        f"but the base query is not positive"
+                    )
+                if set(q.relevant_doc_ids) != set(base.relevant_doc_ids):
+                    raise CorpusError(
+                        f"paraphrase {q.query_id} relevant_doc_ids "
+                        f"{sorted(q.relevant_doc_ids)} != base "
+                        f"{q.paraphrase_of} relevant_doc_ids "
+                        f"{sorted(base.relevant_doc_ids)}; "
+                        f"a paraphrase must label the same doc set"
+                    )
+
     # Cross-check: expectations keys must match query IDs AND the
     # values must be a set-equal to the query's relevant_doc_ids.
     # `queries.json` is the source of truth (it is the contract
@@ -230,7 +317,6 @@ def load_corpus(corpus_dir: Path) -> Corpus:
         raise CorpusError(
             f"expectations key mismatch: missing={sorted(missing)} extra={sorted(extra)}"
         )
-    queries_by_id = {q.query_id: q for q in queries}
     for qid, exp_ids in expectations.by_query.items():
         q = queries_by_id[qid]
         if set(exp_ids) != set(q.relevant_doc_ids):
@@ -247,7 +333,7 @@ def load_corpus(corpus_dir: Path) -> Corpus:
         pass
 
     return Corpus(
-        version=version,
+        version=actual_version,
         documents=documents,
         queries=queries,
         expectations=expectations,

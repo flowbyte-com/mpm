@@ -1,0 +1,302 @@
+[
+  {
+    "doc_id": "d02001",
+    "content": "FTS5 ranks documents using the BM25 (Best Matching 25) algorithm. BM25 produces a relevance score from term frequency, inverse document frequency, and document length, with k1=1.2 and b=0.75 as the standard parameters. Lower (more negative) BM25 scores indicate more relevant matches in FTS5's convention.",
+    "relevance_class": "relevant",
+    "topic_family": "retrieval_core"
+  },
+  {
+    "doc_id": "d02002",
+    "content": "Vector similarity is computed as the cosine of the angle between two L2-normalized vectors. Identical vectors produce similarity 1.0, orthogonal vectors produce 0.0, and opposite vectors produce -1.0. MPM stores raw float32 vectors in a BLOB column and computes cosine at query time without normalizing on disk.",
+    "relevance_class": "relevant",
+    "topic_family": "retrieval_core"
+  },
+  {
+    "doc_id": "d02003",
+    "content": "Hybrid search blends the FTS5 lexical channel and the vector channel with a configurable weight. The default VectorWeight is 0.5, giving equal weight to BM25 and cosine similarity. Each channel produces a normalized [0,1] score before blending so the weights are directly comparable.",
+    "relevance_class": "relevant",
+    "topic_family": "retrieval_core"
+  },
+  {
+    "doc_id": "d02004",
+    "content": "The IVF (Inverted File) vector index partitions vectors into k-means clusters and only probes the closest clusters at query time. MPM uses 70 clusters by default with probe_p=4, which retains 95-99% of brute-force recall while reducing the per-query vector scan.",
+    "relevance_class": "relevant",
+    "topic_family": "retrieval_core"
+  },
+  {
+    "doc_id": "d02005",
+    "content": "The shortID function truncates a memory's full 22-character ULID to 8 characters for display in CLI output. The truncation is deterministic and reversible only by matching the prefix against the full-ID table; collision is possible but rare at 8 characters of ULID entropy.",
+    "relevance_class": "relevant",
+    "topic_family": "retrieval_core"
+  },
+  {
+    "doc_id": "d02006",
+    "content": "The combined score for a hybrid result is computed as (1 - VectorWeight) times the normalized BM25 score plus VectorWeight times the cosine similarity. The normalized BM25 score is computed as -bm25 / (1 + abs(bm25)), which maps FTS5's negative-better convention to the [0,1] higher-is-better convention used by the ranker.",
+    "relevance_class": "relevant",
+    "topic_family": "retrieval_core"
+  },
+  {
+    "doc_id": "d02007",
+    "content": "Confidence in MPM is a float in the closed interval [0.5, 1.0]. The minimum value 0.5 is the floor; values below 0.5 are clamped up to 0.5 on write. The challenge subsystem can reset a memory's confidence to the floor when flagging the memory as challenged.",
+    "relevance_class": "relevant",
+    "topic_family": "retrieval_core"
+  },
+  {
+    "doc_id": "d02008",
+    "content": "Weight in MPM is a positive float clamped to [0.1, 10.0] on write. The default value is 1.0. The challenge subsystem can drop a memory's weight to 1.0 if a duplicate is detected; the prior weight is preserved in the challenged_prior_weight metadata field for restore.",
+    "relevance_class": "relevant",
+    "topic_family": "retrieval_core"
+  },
+  {
+    "doc_id": "d02009",
+    "content": "The retrieval_metadata table tracks reuse_count, last_retrieved_at, and success_count for every cognitive node. It is observability only and does not alter search ranking. A successful retrieval increments success_count; a retrieval that the user reverts (or that timed out) does not.",
+    "relevance_class": "relevant",
+    "topic_family": "retrieval_core"
+  },
+  {
+    "doc_id": "d02010",
+    "content": "Per-source score normalization maps each channel's raw score into a common [0,1] range. FTS5 BM25 scores are normalized via -bm25 / (1 + abs(bm25)). Vector cosine is already in [-1,1] but in practice [0,1] for non-negative embeddings. The normalized scores are blended with VectorWeight.",
+    "relevance_class": "relevant",
+    "topic_family": "retrieval_core"
+  },
+  {
+    "doc_id": "d02011",
+    "content": "Source precedence ranking places hybrid-sourced rows above vector-sourced rows, which are placed above FTS5-sourced rows when scores are equal. The precedence is used as a tie-breaker after the per-source scores are normalized and blended. The threshold check is applied before precedence ordering.",
+    "relevance_class": "relevant",
+    "topic_family": "retrieval_core"
+  },
+  {
+    "doc_id": "d02012",
+    "content": "The token budget flag limits the cumulative number of tokens in the recall result set. When the running token total exceeds the budget, no further memories are appended. The flag is a per-invocation cap; it does not change the ranker's score or the threshold check.",
+    "relevance_class": "relevant",
+    "topic_family": "retrieval_core"
+  },
+  {
+    "doc_id": "d02013",
+    "content": "The mpm remember command creates a new memory with content, optional tags, optional metadata, and optional weight. The command fails cleanly on duplicate content (matched via identity_hash) and on validation errors. The auto-generated ID is a 22-character ULID.",
+    "relevance_class": "relevant",
+    "topic_family": "memory_lifecycle"
+  },
+  {
+    "doc_id": "d02014",
+    "content": "A memory's content is stored as TEXT in the content column. The content is searchable via FTS5 and embeddable via the configured embedding provider. Content length is bounded by the column's TEXT size limit, not by a separate enforced cap.",
+    "relevance_class": "relevant",
+    "topic_family": "memory_lifecycle"
+  },
+  {
+    "doc_id": "d02015",
+    "content": "Updating a memory's weight is a separate write that triggers FTS5 reindexing and embedding regeneration. Weight changes below the [0.1, 10.0] clamp range are rejected. The mpm memory update command is the public path; the weight column itself is not directly settable through the CLI.",
+    "relevance_class": "relevant",
+    "topic_family": "memory_lifecycle"
+  },
+  {
+    "doc_id": "d02016",
+    "content": "Soft delete sets a memory's deleted_at column to the current epoch; the row is excluded from FTS5 results, vector search, and the recall path. The row is preserved on disk and can be recovered via mpm memory restore if the soft-delete was recent. Hard delete (DROP) is not exposed through the CLI.",
+    "relevance_class": "relevant",
+    "topic_family": "memory_lifecycle"
+  },
+  {
+    "doc_id": "d02017",
+    "content": "The reinforcement_count column tracks how many times a memory has been re-retrieved. The count is incremented on each retrieval that the user does not revert. The count is observability only; it does not alter the ranker's score or the threshold check.",
+    "relevance_class": "relevant",
+    "topic_family": "memory_lifecycle"
+  },
+  {
+    "doc_id": "d02018",
+    "content": "The last_accessed_at column is updated on each retrieval, regardless of whether the retrieval was reverted. The field is observability; the stale flag (computed against last_accessed_at) is the only place this field affects user-visible behavior.",
+    "relevance_class": "relevant",
+    "topic_family": "memory_lifecycle"
+  },
+  {
+    "doc_id": "d02019",
+    "content": "A memory's identity_hash is a content-derived SHA-256 prefix. The hash is used for duplicate detection on the mpm remember path and as a stable join key for cross-process reconciliation. The hash is not cryptographic; it is only collision-resistant within a single workspace.",
+    "relevance_class": "relevant",
+    "topic_family": "memory_lifecycle"
+  },
+  {
+    "doc_id": "d02020",
+    "content": "Long-term memories are flagged via the is_long_term column; prime directive memories are flagged via is_prime_directive. The two flags are independent. The recall path surfaces both flags via the provenance preamble when they are set.",
+    "relevance_class": "relevant",
+    "topic_family": "memory_lifecycle"
+  },
+  {
+    "doc_id": "d02021",
+    "content": "The bulk import path ingests a JSONL file as a single transaction. The path is faster than per-row mpm remember calls because the FTS5 index is built once at the end of the transaction. The path does not preserve the source file's line order in the resulting memory IDs.",
+    "relevance_class": "relevant",
+    "topic_family": "memory_lifecycle"
+  },
+  {
+    "doc_id": "d02022",
+    "content": "Memory tags are stored as a JSON array in the tags column. The tags are searchable via the FTS5 channel and the lexical recall path. The synthesized tag is a sentinel for memories produced by the contradiction-apply path; it is not user-settable.",
+    "relevance_class": "relevant",
+    "topic_family": "memory_lifecycle"
+  },
+  {
+    "doc_id": "d02023",
+    "content": "Memory collections partition the memories table by namespace. The default collection is 'memories'. The recall command accepts a --collection flag to scope a query to a specific collection. Cross-collection search is not exposed through the CLI in the current release.",
+    "relevance_class": "relevant",
+    "topic_family": "memory_lifecycle"
+  },
+  {
+    "doc_id": "d02024",
+    "content": "Memory expiration is controlled by the expires_at column. When the current epoch exceeds expires_at, the memory is excluded from FTS5 and vector results. The expiration check is a runtime filter; the row is preserved on disk until soft delete or hard delete.",
+    "relevance_class": "relevant",
+    "topic_family": "memory_lifecycle"
+  },
+  {
+    "doc_id": "d02025",
+    "content": "The ChallengeMemory subsystem flags a memory as challenged when a candidate cosine similarity to an existing memory is at or above 0.85. The threshold is fixed at the subsystem level and is not per-collection or per-workspace configurable. The 0.85 threshold was chosen from the all-minilm historical calibration.",
+    "relevance_class": "relevant",
+    "topic_family": "challenge"
+  },
+  {
+    "doc_id": "d02026",
+    "content": "The mpm challenge restore command clears the challenged status flag, restores the prior weight from challenged_prior_weight when present, and resets confidence to 0.5. The restore is a single-row operation. The command refuses to restore rows whose prior weight is unknown.",
+    "relevance_class": "relevant",
+    "topic_family": "challenge"
+  },
+  {
+    "doc_id": "d02027",
+    "content": "When the challenge subsystem cannot match the candidate memory to a known theory identifier, it writes a free-text reason into the challenged_theory_id metadata field. Free-text values are not reversible identifiers and are reported as theory_reference_shape='free_text' by the challenge list surface.",
+    "relevance_class": "relevant",
+    "topic_family": "challenge"
+  },
+  {
+    "doc_id": "d02028",
+    "content": "Theory resolution has two paths: an identifier match (when the challenge candidate's source can be matched to a known theory row) and a free-text fallback (when it cannot). The identifier path marks the theory as disproven; the free-text path leaves the theory untouched.",
+    "relevance_class": "relevant",
+    "topic_family": "challenge"
+  },
+  {
+    "doc_id": "d02029",
+    "content": "The challenge audit log records every challenge write, including the source memory, the target memory, the cosine similarity at the time of challenge, and the timestamp. The log is append-only and is exposed via mpm ops challenge-log.",
+    "relevance_class": "relevant",
+    "topic_family": "challenge"
+  },
+  {
+    "doc_id": "d02030",
+    "content": "When a memory is challenged, its weight is reset to 1.0 and the prior weight is recorded in the challenged_prior_weight metadata field. The prior weight is preserved for restore; the new weight is the value used by the ranker until restore is invoked.",
+    "relevance_class": "relevant",
+    "topic_family": "challenge"
+  },
+  {
+    "doc_id": "d02031",
+    "content": "The mpm challenge restore command resets the memory's confidence to 0.5 (the floor). The pre-challenge confidence is NOT silently re-promoted; fresh evidence is required to re-elevate confidence. This is the F7.1 contract and is enforced by the restore path.",
+    "relevance_class": "relevant",
+    "topic_family": "challenge"
+  },
+  {
+    "doc_id": "d02032",
+    "content": "The challenge scope is per-collection. A challenge write in one collection does not affect memories in another collection. The 0.85 threshold is global; the scope is enforced by the challenge write path, not by the threshold.",
+    "relevance_class": "relevant",
+    "topic_family": "challenge"
+  },
+  {
+    "doc_id": "d02033",
+    "content": "SQLite's WAL (Write-Ahead Logging) mode allows readers to proceed without blocking writers and writers to proceed without blocking readers. MPM uses WAL by default. The mode is enabled at database creation and is preserved across schema migrations.",
+    "relevance_class": "relevant",
+    "topic_family": "schema_persistence"
+  },
+  {
+    "doc_id": "d02034",
+    "content": "The busy_timeout pragma tells SQLite to retry a write for up to N milliseconds when the database is locked by another connection. MPM sets busy_timeout to a value that survives short contention without surfacing SQLITE_BUSY errors to the user.",
+    "relevance_class": "relevant",
+    "topic_family": "schema_persistence"
+  },
+  {
+    "doc_id": "d02035",
+    "content": "FTS5 maintains a shadow contentless table for fast index scans. The shadow table is updated by triggers on the memories table; direct manipulation of the shadow table is not supported. MPM's backfill path rebuilds the shadow table after a bulk insert.",
+    "relevance_class": "relevant",
+    "topic_family": "schema_persistence"
+  },
+  {
+    "doc_id": "d02036",
+    "content": "The metadata column on the memories table is a JSON TEXT column. MPM parses the column on read and exposes its fields as a structured object. Writes through the public paths serialize the object back to JSON. Direct SQL writes to the column bypass the parser.",
+    "relevance_class": "relevant",
+    "topic_family": "schema_persistence"
+  },
+  {
+    "doc_id": "d02037",
+    "content": "FTS5 update triggers fire on INSERT, UPDATE, and DELETE of the memories table. The triggers are created at database initialization and are not user-configurable. Disabling the triggers is not supported; the backfill path rebuilds the index from scratch when needed.",
+    "relevance_class": "relevant",
+    "topic_family": "schema_persistence"
+  },
+  {
+    "doc_id": "d02038",
+    "content": "The embedding column on the memories table is a BLOB that stores a JSON-encoded array of float32 values. The column is populated by the backfill-embeddings command, which calls the configured embedding provider. The column is not directly settable through the public CLI.",
+    "relevance_class": "relevant",
+    "topic_family": "schema_persistence"
+  },
+  {
+    "doc_id": "d02039",
+    "content": "The mpm ops backfill-embeddings command re-embeds every memory and every reference chunk with the active embedding provider. The --force-reembed flag re-embeds rows that already have a stored embedding. The command always exits 0; the backfill is verified by Gate 1 of the bench harness.",
+    "relevance_class": "relevant",
+    "topic_family": "schema_persistence"
+  },
+  {
+    "doc_id": "d02040",
+    "content": "Schema migration tooling applies ordered, idempotent SQL files to the memories and reference_chunks tables. The tooling records the applied version in a metadata table and refuses to re-apply an already-applied migration. Migrations are not reversible through the tool.",
+    "relevance_class": "relevant",
+    "topic_family": "schema_persistence"
+  },
+  {
+    "doc_id": "d02041",
+    "content": "The mpm recall command with no --semantic flag runs a lexical search. Lexical search uses FTS5 with BM25 ranking and recency re-sort. The lexical path does not require an embedding provider. The output is a list of memories ranked by BM25 first, then by created_at desc.",
+    "relevance_class": "relevant",
+    "topic_family": "search_operators"
+  },
+  {
+    "doc_id": "d02042",
+    "content": "The mpm recall --semantic command runs hybrid search with the configured VectorWeight. The semantic path requires an embedding provider; without one, the command fails clean with a configuration error. The output is a list of memories ranked by the combined score.",
+    "relevance_class": "relevant",
+    "topic_family": "search_operators"
+  },
+  {
+    "doc_id": "d02043",
+    "content": "The --as-of flag on mpm recall returns memory state as of a specific timestamp. Reconstruction reads the memory_revisions table for the as-of version and substitutes the historical content into the result. Memories created after the as-of timestamp are silently dropped.",
+    "relevance_class": "relevant",
+    "topic_family": "search_operators"
+  },
+  {
+    "doc_id": "d02044",
+    "content": "The --collection flag on mpm recall scopes the search to a single collection. The default collection is 'memories'. The flag accepts any collection name; an unknown collection produces an empty result without error.",
+    "relevance_class": "relevant",
+    "topic_family": "search_operators"
+  },
+  {
+    "doc_id": "d02045",
+    "content": "The --since, --until, and --before flags on mpm recall filter the result by the memory's created_at timestamp. The flags accept YYYY-MM-DD dates. The flags are not required; the lexical and semantic paths accept them when present.",
+    "relevance_class": "relevant",
+    "topic_family": "search_operators"
+  },
+  {
+    "doc_id": "d02046",
+    "content": "The stale flag on a memory is true when the memory's last_accessed_at is older than the configured stale_days threshold. The default threshold is 14 days. The flag is computed at recall time and is exposed via the JSON envelope's is_stale field.",
+    "relevance_class": "relevant",
+    "topic_family": "search_operators"
+  },
+  {
+    "doc_id": "d02047",
+    "content": "The provenance preamble is a short string prepended to a memory's content when the memory has a non-empty metadata field of the form 'provenance'. The preamble surfaces the memory's source lineage to the user without requiring the --why flag.",
+    "relevance_class": "relevant",
+    "topic_family": "search_operators"
+  },
+  {
+    "doc_id": "d02048",
+    "content": "Concept drift is detected by comparing the embedding of a memory's content to the embeddings of the memory_revisions on file. When the cosine similarity falls below a threshold, the memory is marked as a concept-drift candidate and surfaced in the recall path's preamble.",
+    "relevance_class": "relevant",
+    "topic_family": "search_operators"
+  },
+  {
+    "doc_id": "d02049",
+    "content": "Multi-collection search is exposed via mpm search (not mpm recall). The command accepts a comma-separated list of collection names. The result is the union of the per-collection result sets, deduplicated by memory ID and ranked by the per-source score.",
+    "relevance_class": "relevant",
+    "topic_family": "search_operators"
+  },
+  {
+    "doc_id": "d02050",
+    "content": "The --why flag on mpm recall surfaces the ranking signals for each result: lexicalRank (1-based BM25 position before the recency re-sort), source (lexical/fts5/vector/hybrid), VectorSimilarity (cosine for vector and hybrid rows), and CombinedScore (the blended score for hybrid rows).",
+    "relevance_class": "relevant",
+    "topic_family": "search_operators"
+  }
+]

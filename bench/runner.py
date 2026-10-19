@@ -101,6 +101,7 @@ def run_query(
     raw_cosine_prefix: str = "",
     top_k: int = 5,
     embedding_profile: dict[str, object] | None = None,
+    collection: str = "memories",
 ) -> QueryResult:
     """Run a single query against the disposable workspace and return
     the parsed result.
@@ -144,6 +145,14 @@ def run_query(
             query, snap, top_k=top_k,
             embedding_profile=embedding_profile,
             prefix=raw_cosine_prefix,
+            # B1 review (HAL 2026-10-19): the raw-cosine path
+            # must rank against the same document universe as
+            # the hybrid recall path. The hybrid path scopes by
+            # `--collection <collection>`; the raw-cosine path
+            # must scope the same way at the SQL level so MPM's
+            # Baseline Cognitive Bootstrap prime-directive rows
+            # in `directives` cannot leak into the top-k.
+            collection=collection,
         )
         search_mode = "raw_cosine" if not raw_cosine_prefix else "raw_cosine_prefixed"
         return QueryResult(
@@ -173,7 +182,12 @@ def run_query(
         "--semantic",
         "--json",
         "--collection",
-        "memories",
+        # Phase A.3 (V1 isolation): query the bench's collection,
+        # not the default `memories`. MPM's seeded prime-directive
+        # rows in `directives` (and any other production data in
+        # `memories`) cannot appear in the bench's recall result
+        # because they are in a different collection.
+        collection,
         "--limit",
         str(int(top_k)),
         query.query,
@@ -238,6 +252,7 @@ def _raw_cosine_ranking(
     top_k: int,
     embedding_profile: dict[str, object] | None = None,
     prefix: str = "",
+    collection: str | None = None,
 ) -> list[dict[str, Any]]:
     """Compute raw-cosine ranking directly from the embedded vectors
     in the disposable DB. Does NOT use the hybrid ranker. This is
@@ -268,6 +283,18 @@ def _raw_cosine_ranking(
     For hermetic tests the `embedding_profile=None` fallback
     path is the only path that gives a meaningful answer
     without a real provider. Tests pass None explicitly.
+
+    B1 review (HAL 2026-10-19): both the dimension-discovery
+    query and the candidate-vector query now filter on
+    `collection = ?` when `collection` is provided. The
+    pre-fix path scanned the entire `memories` table, so
+    MPM's Baseline Cognitive Bootstrap prime-directive rows
+    in the `directives` collection leaked into the
+    raw-cosine top-k. The contamination was invisible because
+    the hybrid recall path is collection-scoped via the
+    `--collection` flag. When `collection` is None, this
+    function falls back to the unfiltered scan AND surfaces
+    a warning to make the leak explicit at the call site.
     """
     from bench.harness import _find_db_path
 
@@ -276,11 +303,42 @@ def _raw_cosine_ranking(
         return []
 
     # Discover the dimension the corpus was embedded with.
+    # B1: scoped to the selected benchmark collection so
+    # prime-directive rows in `directives` (no embeddings by
+    # default, but possibly backfilled in some scenarios) and
+    # any other collection cannot influence dimension discovery.
+    if collection is None:
+        # Fallback for callers that did not opt into the
+        # collection scope (e.g. older synthetic test benches
+        # that put everything in the default `memories`
+        # collection). Surface this in the docstring and
+        # warning text; the B1 contract is that real-model
+        # benchmark runs pass `collection`.
+        import warnings
+        warnings.warn(
+            "_raw_cosine_ranking: no `collection` provided; "
+            "scanning the entire `memories` table. This is the "
+            "B1 contamination path. Pass `collection=<bench_"
+            "collection>` for collection-scoped ranking.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        collection_clause_disc = ""
+        collection_clause_rank = ""
+        collection_args_disc: tuple = ()
+        collection_args_rank: tuple = ()
+    else:
+        collection_clause_disc = "AND collection = ?"
+        collection_clause_rank = "AND collection = ?"
+        collection_args_disc = (collection,)
+        collection_args_rank = (collection,)
+
     con = sqlite3.connect(str(db_path))
     try:
         row = con.execute(
-            "SELECT embedding_dimension FROM memories "
-            "WHERE embedding IS NOT NULL LIMIT 1"
+            f"SELECT embedding_dimension FROM memories "
+            f"WHERE embedding IS NOT NULL {collection_clause_disc} LIMIT 1",
+            collection_args_disc,
         ).fetchone()
         if row is None:
             return []
@@ -325,12 +383,16 @@ def _raw_cosine_ranking(
     # v3 review: L2-normalize document vectors at rank time so
     # cosine similarity is correct regardless of the provider's
     # scale. Document vectors are read once and cached.
+    # B1: candidate-vector query is collection-scoped so seed
+    # rows in other collections cannot leak into the top-k.
     con = sqlite3.connect(str(db_path))
     try:
         scored: list[tuple[float, str]] = []
         for did, blob in con.execute(
-            "SELECT id, embedding FROM memories "
-            "WHERE embedding IS NOT NULL AND deleted_at IS NULL"
+            f"SELECT id, embedding FROM memories "
+            f"WHERE embedding IS NOT NULL AND deleted_at IS NULL "
+            f"{collection_clause_rank}",
+            collection_args_rank,
         ):
             # BLOBs may be returned as bytes, str, or memoryview
             # depending on sqlite3 driver config.

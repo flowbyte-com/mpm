@@ -125,6 +125,7 @@ def verify_regeneration_complete(
     expected_reference_doc_ids: set[str] | None = None,
     expected_memories_row_count: int | None = None,
     expected_reference_chunks_row_count: int | None = None,
+    expected_collection: str | None = None,
 ) -> VerificationResult:
     """Open the snapshot read-only and assert every embedded row in
     both `memories` and `reference_chunks` has the exact intended
@@ -310,12 +311,31 @@ def verify_regeneration_complete(
         # v3 review: NULL/missing detection in BOTH tables.
         # The pre-fix code only checked the memories table; a
         # partial reference_chunks backfill would have passed.
-        mem_unembedded = con.execute(
-            """
-            SELECT COUNT(*) FROM memories
-            WHERE deleted_at IS NULL AND embedding IS NULL
-            """
-        ).fetchone()[0]
+        # Phase A.3 (HAL 2026-10-19): when `expected_collection`
+        # is provided, the NULL/missing detection on `memories`
+        # is also scoped to that collection. MPM's Baseline
+        # Cognitive Bootstrap inserts 5 prime-directive rows
+        # into the `directives` collection with no embedding;
+        # without the collection filter, those rows would
+        # always trigger a spurious missing-embedding failure
+        # on a fresh workspace.
+        if expected_collection is not None:
+            mem_unembedded = con.execute(
+                """
+                SELECT COUNT(*) FROM memories
+                WHERE deleted_at IS NULL
+                  AND embedding IS NULL
+                  AND collection = ?
+                """,
+                (expected_collection,),
+            ).fetchone()[0]
+        else:
+            mem_unembedded = con.execute(
+                """
+                SELECT COUNT(*) FROM memories
+                WHERE deleted_at IS NULL AND embedding IS NULL
+                """
+            ).fetchone()[0]
         ref_unembedded = con.execute(
             """
             SELECT COUNT(*) FROM reference_chunks
@@ -336,13 +356,32 @@ def verify_regeneration_complete(
         # Expected doc_ids coverage. If the caller passed the corpus
         # IDs, every one must have an embedded row.
         missing_doc_ids: list[str] = []
+        extra_doc_ids: list[str] = []
         if expected_doc_ids is not None:
-            rows = con.execute(
-                "SELECT id FROM memories WHERE deleted_at IS NULL"
-            ).fetchall()
+            if expected_collection is not None:
+                rows = con.execute(
+                    "SELECT id FROM memories "
+                    "WHERE deleted_at IS NULL AND collection = ?",
+                    (expected_collection,),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT id FROM memories WHERE deleted_at IS NULL"
+                ).fetchall()
             present = {r[0] for r in rows}
             missing_doc_ids = sorted(
                 d for d in expected_doc_ids if d not in present
+            )
+            # Phase A.3: detect extra rows that are NOT in the
+            # expected set. Without this check, a partial backfill
+            # that left orphan rows (or MPM-seed rows in the
+            # collection) would still pass the count check if the
+            # count happened to match by coincidence. The
+            # expected-doc-ids set is the source of truth for
+            # "which rows are supposed to be in the collection";
+            # anything else is a defect.
+            extra_doc_ids = sorted(
+                p for p in present if p not in expected_doc_ids
             )
         missing_reference_doc_ids: list[str] = []
         if expected_reference_doc_ids is not None:
@@ -363,17 +402,43 @@ def verify_regeneration_complete(
         # Expected row counts (v3 review): catch silent partial
         # backfills even when every expected doc is "covered"
         # by a chunk.
+        #
+        # Phase A.3 (HAL 2026-10-19): when `expected_collection` is
+        # provided, the count is restricted to that collection. This
+        # is the V1 isolation mechanism: MPM's Baseline Cognitive
+        # Bootstrap seeds 5 prime-directive rows into the
+        # `directives` collection at every `NewDatabaseManager` call,
+        # and those rows legitimately exist alongside the bench's
+        # evaluation surface. Without the collection filter, the
+        # count would always be corpus_size + 5 (or corpus_size +
+        # N_seed) on a fresh workspace, producing a spurious
+        # partial-backfill failure.
+        #
+        # The collection filter does NOT weaken the assertion: it
+        # scopes it correctly. The expected_doc_ids check still
+        # catches missing rows; the new "no extra rows beyond the
+        # expected set" check (also Phase A.3) catches rows that
+        # exist in the collection but are not in the corpus. Both
+        # checks are stronger, not weaker, than the unfiltered
+        # count.
+        collection_clause = ""
+        collection_args: tuple[Any, ...] = ()
+        if expected_collection is not None:
+            collection_clause = "AND collection = ?"
+            collection_args = (expected_collection,)
         if expected_memories_row_count is not None:
             actual_mem = con.execute(
-                """
+                f"""
                 SELECT COUNT(*) FROM memories
                 WHERE embedding IS NOT NULL
                   AND deleted_at IS NULL
                   AND embedding_model = ?
                   AND embedding_dimension = ?
                   AND embedding_source = ?
+                  {collection_clause}
                 """,
-                (expected_model, expected_dimension, expected_source),
+                (expected_model, expected_dimension, expected_source)
+                + collection_args,
             ).fetchone()[0]
             if actual_mem != expected_memories_row_count:
                 failures.append(
@@ -461,6 +526,19 @@ def verify_regeneration_complete(
         failures.append(
             f"memories: {len(missing_doc_ids)} expected doc_ids missing entirely: "
             f"{missing_doc_ids[:5]}{'...' if len(missing_doc_ids) > 5 else ''}"
+        )
+    if extra_doc_ids:
+        # Phase A.3: rows in the collection that are NOT in the
+        # expected set are a defect, not a feature. MPM-seed
+        # prime-directive rows live in the `directives` collection
+        # and never appear in the corpus collection; if they do,
+        # the isolation contract is broken.
+        failures.append(
+            f"memories: {len(extra_doc_ids)} extra embedded rows in "
+            f"collection {expected_collection!r} that are NOT in the "
+            # ` extra_doc_ids`
+            f"expected doc_ids set: "
+            f"{extra_doc_ids[:5]}{'...' if len(extra_doc_ids) > 5 else ''}"
         )
     if missing_reference_doc_ids:
         failures.append(
