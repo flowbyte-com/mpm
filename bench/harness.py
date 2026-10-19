@@ -583,7 +583,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     participation, and prints a report. Does not touch the live DB."""
     from bench.fake_server import make_server
 
-    corpus = load_corpus(DEFAULT_CORPUS_DIR)
+    corpus = load_corpus(DEFAULT_CORPUS_DIR, version=getattr(args, "corpus_version", None))
 
     # Start the fake server.
     dim = 64
@@ -747,7 +747,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("--config is required for `run`", file=sys.stderr)
         return 2
 
-    corpus = load_corpus(DEFAULT_CORPUS_DIR)
+    corpus = load_corpus(DEFAULT_CORPUS_DIR, version=getattr(args, "corpus_version", None))
     output_dir = Path(args.output_dir).resolve()
     config = json.loads(Path(args.config).read_text())
 
@@ -953,6 +953,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             unprefixed, positive_ids
         )
         # Per-query tables for both conditions.
+        # v2 (HAL A2.4): also record the full top-k per query so a
+        # post-processing policy-D evaluator can compute top-k mean,
+        # max gap, source distribution, etc. The pre-v2 record only
+        # kept top_id/top_score which is insufficient for the
+        # abstention-policy decision.
         raw_cosine_table = [
             {
                 "query_id": r.query_id,
@@ -960,6 +965,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "n_rows": len(r.rows),
                 "top_id": r.rows[0]["id"] if r.rows else "",
                 "top_score": r.rows[0]["score"] if r.rows else 0.0,
+                "top_k": [
+                    {
+                        "id": row["id"],
+                        "score": row["score"],
+                        "vector_similarity": row["vector_similarity"],
+                        "source": row["source"],
+                    }
+                    for row in r.rows
+                ],
             }
             for r in unprefixed
         ]
@@ -972,6 +986,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                     "n_rows": len(r.rows),
                     "top_id": r.rows[0]["id"] if r.rows else "",
                     "top_score": r.rows[0]["score"] if r.rows else 0.0,
+                    "top_k": [
+                        {
+                            "id": row["id"],
+                            "score": row["score"],
+                            "vector_similarity": row["vector_similarity"],
+                            "source": row["source"],
+                        }
+                        for row in r.rows
+                    ],
                 }
                 for r in prefixed
             ]
@@ -988,6 +1011,18 @@ def cmd_run(args: argparse.Namespace) -> int:
             "sources": ",".join(sorted(r.sources())) or "(empty)",
             "vector_participated": r.vector_participated(),
             "search_mode": r.search_mode,
+            # v2 (HAL A2.4): per-row top-k for the hybrid ranker so
+            # policy-D features (top-1, top-k mean, max gap, source
+            # distribution, CombinedScore) can be computed offline.
+            "top_k": [
+                {
+                    "id": row["id"],
+                    "score": row["score"],
+                    "vector_similarity": row["vector_similarity"],
+                    "source": row["source"],
+                }
+                for row in r.rows
+            ],
         }
         for r in results
     ]
@@ -1062,6 +1097,16 @@ def build_parser() -> argparse.ArgumentParser:
             "Run the raw-cosine experiment. v3: BOTH unprefixed and "
             "`search_query:`-prefixed query embeddings are obtained from "
             "the configured provider; the report includes the metric delta."
+        ),
+    )
+    run.add_argument(
+        "--corpus-version",
+        default=None,
+        help=(
+            "Corpus version to load (e.g. 'v1', 'v2'). When omitted, the "
+            "loader reads the root-level MANIFEST.json (the v1 default). "
+            "Per-version subdirectories under bench/corpus/<version>/ "
+            "hold the per-version manifest and corpus files."
         ),
     )
     run.set_defaults(func=cmd_run)

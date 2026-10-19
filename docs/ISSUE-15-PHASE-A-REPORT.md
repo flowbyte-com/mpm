@@ -755,3 +755,482 @@ has been performed. Awaiting HAL review of this report.**
 The /tmp artifacts are reproducible from the committed
 fixture and the v1 corpus. The fixture is the only durable
 change.
+
+---
+
+# Phase A.2 addendum — Repair calibration evidence
+
+**Status:** Phase A.2 complete. Awaiting HAL review of valid
+negative-query measurements before Phase B authorisation.
+**Worktree:** `worktree-issue-15-retrieval-calibration` (off
+`main` @ `8711ffb`).
+**Scope:** Read-only investigation + v2 corpus + Option D
+policy evaluation. No Go production code change. v1 corpus
+preserved unchanged. No push, no PR, no live-state mutation.
+**Run identifier:** v2 + nomic real-model run captured at
+`/tmp/mpm-bench-v2-nomic-20261019T131153/report.{json,md}`.
+Policy-sweep outputs at `/tmp/mpm-bench-v2-eval/{all,calibration,
+held-out}.json`.
+
+This addendum supersedes the v1-based negative-rejection
+measurements cited in §10. The v1 numbers were measured on a
+corpus whose negative queries had literal-answer decoys; that
+corpus is unsuitable as a calibration reference for abstention
+or confidence thresholds. The v1 corpus is preserved unchanged
+as a historical benchmark artifact.
+
+## A2.1 — v1 label defect verified
+
+**The defect.** All ten v1 negative queries (q0000011-q0000020)
+have a literal-answer document in the corpus's
+`d0000021`-`d0000030` block. The labels were derived from
+auto-labeling heuristics that treated any document that *could*
+answer the query as a relevant match, but the queries were
+labelled negative because the answer was not the document the
+author expected. A retrieval system that returns the literal
+answer to "What is the capital of France?" is behaving
+correctly, not making a false-positive relevance error. The v1
+negative-rejection percentages therefore cannot be used to
+justify a confidence threshold or abstention policy.
+
+| v1 negative query | Query text (excerpt) | v1 top result | Decoy doc id | Decoy relevance |
+|---|---|---|---|---|
+| q0000011 | "What is the capital of France?" | "Paris is the capital of France." | d0000021 | literal answer |
+| q0000012 | "What is the largest ocean?" | "The Pacific is the largest ocean." | d0000022 | literal answer |
+| q0000013 | "Who wrote Hamlet?" | "William Shakespeare wrote Hamlet." | d0000023 | literal answer |
+| q0000014 | "What is the speed of light?" | "299,792,458 m/s." | d0000024 | literal answer |
+| q0000015 | "Element symbol for gold?" | "Au is the symbol for gold." | d0000025 | literal answer |
+| q0000016 | "Pythagorean theorem?" | "a² + b² = c²" | d0000026 | literal answer |
+| q0000017 | "Boiling point of water?" | "100°C at sea level." | d0000027 | literal answer |
+| q0000018 | "Largest planet?" | "Jupiter is the largest." | d0000028 | literal answer |
+| q0000019 | "Square root of 144?" | "12" | d0000029 | literal answer |
+| q0000020 | "Chemical formula for water?" | "H₂O" | d0000030 | literal answer |
+
+(The decoy doc ids and relevance are derived from the v1
+corpus's documents.json and the label author's intent; the
+v1 queries.json did not record a `label_rationale` field. The
+defect is reproducible by reading any v1 negative query and
+its top result side by side.)
+
+**Original measurements preserved.** The v1 corpus, the v1
+nomic real-model report, and the v1 report's negative-rejection
+percentages are unchanged. They are recorded in Appendix A
+above. The interpretation in §10 — "0/10 v1 negative queries
+are correctly rejected" — is preserved as the v1 measurement
+but is explicitly marked as unsuitable for threshold or
+abstention-policy calibration.
+
+**Revised interpretation.** v1 is a retrieval-quality
+benchmark on a small synthetic labelled set, not a calibration
+corpus. Any v1-based threshold recommendation is invalid until
+re-measured on a corpus whose negative queries are guaranteed
+to have no relevant document.
+
+## A2.2 — v2 calibration corpus
+
+A new self-contained v2 corpus was added at
+`bench/corpus/v2/`. It is independent of v1 and content-hashed
+through its own MANIFEST.json. v1 is preserved unchanged at
+`bench/corpus/v1/`.
+
+| Property | v1 (preserved) | v2 (new) |
+|---|---|---|
+| Documents | 30 (d0000001-d0000030) | 50 (d02001-d02050) |
+| Queries | 20 (10 pos / 10 neg) | 60 (40 pos / 20 neg) |
+| Topic families | 1 (generic) | 5 (retrieval_core, memory_lifecycle, challenge, schema_persistence, search_operators) |
+| Calibration / held-out split | none | 41 calibration / 19 held-out |
+| Paraphrase pairs | 0 | 9 (each pair labels the same doc set) |
+| Hard negatives | unmarked | 3 (MPM-related queries whose answer is not in the corpus) |
+| Negative-query `label_rationale` | absent | required (v2 contract) |
+| SHA binding | root MANIFEST.json | per-version MANIFEST.json + per-file SHA-256 |
+| `bench/corpus.py:load_corpus` support | default (no flag) | `--corpus-version v2` |
+
+**v2 contract** (enforced at load time by
+`bench/tests/test_corpus_v2.py`):
+
+1. Every negative query has a non-empty `label_rationale` that
+   independently justifies the negative label (no "negative
+   because author says so" labels).
+2. Every `paraphrase_of` field points to a positive query in
+   the same corpus with matching `relevant_doc_ids` (a
+   paraphrase must label the same doc set as its base).
+3. Held-out topic family (search_operators) is held out: the
+   harness ingests all 50 documents, but the held-out queries
+   target docs in the held-out family only. Calibration
+   POSITIVE queries may target held-out documents by design
+   (the ranker is scored on the held-out doc set), but
+   calibration NEGATIVE queries must have zero relevant docs in
+   the held-out set.
+4. v1 is not retroactively altered. v1 queries have empty
+   `label_rationale`; the v2 contract is version-conditional
+   and is not applied to v1.
+
+**v2 file inventory and content-hash binding:**
+
+| File | SHA-256 (head) | Records |
+|---|---|---|
+| `bench/corpus/v2/documents.json` | `753dbb...` | 50 documents |
+| `bench/corpus/v2/queries.json` | `01c34...` | 60 queries (40 pos / 20 neg) |
+| `bench/corpus/v2/expectations.json` | `05a45...` | parallel audit of relevant_doc_ids |
+| `bench/corpus/v2/scoring.json` | `e532a...` | top_k=10, retrieval_threshold=-3.0, vector_weight=0.5 |
+| `bench/corpus/v2/MANIFEST.json` | (manifest) | version=v2, 5 topic families, 9 paraphrase pairs, 3 hard negatives |
+| `bench/corpus/v2/labels.md` | (text) | manual semantic review of each label_rationale |
+
+The v2 contract is enforced by 12 tests in
+`bench/tests/test_corpus_v2.py`. All 12 pass; v1 preservation
+is also covered by 3 regression tests in the same file.
+
+**Harness changes for v2 support:**
+
+- `bench/harness.py:cmd_run` accepts `--corpus-version` and
+  propagates it to `load_corpus`.
+- `bench/corpus.py:load_corpus` accepts a `version` argument
+  and supports both root-manifest (v1) and per-version-manifest
+  (v2) layouts. The v1 default path is unchanged.
+- `bench/corpus.py:load_corpus` applies the v2 negative-rationale
+  and paraphrase-contract checks only when the manifest's
+  declared version is not v1, so v1 is not retroactively
+  validated against the v2 contract.
+- `bench/harness.py` per-query tables now expose the full
+  `top_k` (id, score, vector_similarity, source) per query,
+  for the v2 Option D evaluation. The pre-v2 record only kept
+  `top_id` and `top_score` per query, which is insufficient
+  for the abstention-policy decision.
+
+## A2.3 — Actual retrieval contract
+
+The v2 run was executed with the production mpm binary
+(`/home/v/.local/bin/mpm`, the live install — not replaced,
+not rebuilt) and the live nomic-embed-text model
+(`http://127.0.0.1:11434/v1`, 768-dim).
+
+**Source distribution of v2 top-1 results** (across all 60
+queries × 10 top-k rows = 600 rows):
+
+| Source | Count | % |
+|---|---|---|
+| vector | 600 | 100% |
+| hybrid | 0 | 0% |
+| fts5 | 0 | 0% |
+
+Every result is `vector`-only. The v2 queries are MPM-specific
+free-form descriptions; the v2 documents use MPM terminology
+that does not match the v2 queries as literal text, so the
+FTS5 path never contributes. This is realistic MPM behaviour
+and is itself a useful observation: on a labelled topic-family
+corpus, the hybrid ranker is operating as a vector-only ranker.
+
+**CombinedScore conversion (vector source, VectorWeight=0.5):**
+
+| vector_similarity | CombinedScore | ratio |
+|---|---|---|
+| 0.7225 | 0.3612 | 0.5000 |
+| 0.7909 | 0.3954 | 0.5000 |
+| 0.7686 | 0.3843 | 0.5000 |
+| 0.6103 | 0.3052 | 0.5000 |
+| 0.8402 | 0.4201 | 0.5000 |
+| ... | ... | 0.5000 (every row) |
+
+The conversion is **exactly 0.5 across all 600 rows** (min
+0.5000, mean 0.5000, max 0.5000). This is the production
+contract: for vector-only rows, `CombinedScore = cosine ×
+VectorWeight = cosine × 0.5`.
+
+**Implications for any future threshold or abstention policy:**
+
+1. A "raw-cosine floor of 0.70" is equivalent to a
+   `HybridConfig.RetrievalThreshold` of **0.35** (cosine ×
+   VectorWeight = 0.7 × 0.5). A `HybridConfig.RetrievalThreshold`
+   of 0.70 would require a cosine > 1.4, which is impossible.
+2. The default `RetrievalThreshold: -3.0` is a log-space value
+   carried from the pre-cosine era. It is unreachable for any
+   0-1 cosine-derived score; the threshold check is a no-op
+   in practice for the vector-only path.
+3. A "hybrid source" combined score is in [0, 1] but is
+   **never observed** on the v2 corpus. A policy that keys
+   on `source == "hybrid"` would abstain on every v2 query.
+4. An FTS5-only path's combined score is in [0, 0.5]; on v2
+   this is **never observed** either.
+
+## A2.4 — Option D evaluation
+
+The v2 report's `per_query_table` exposes the full top-10 per
+query. Per-query features are computed offline by
+`bench/option_d.py`:
+
+- `top1_cosine` — top-1 raw cosine (the L2-normalized dot
+  product the vector source reports as `vector_similarity`).
+- `top1_combined` — top-1 `CombinedScore` (= 0.5 × cosine on v2,
+  see A2.3).
+- `top_k_mean_cosine` — mean of the top-10 cosines.
+- `top1_to_top2_gap` — top-1 minus top-2 cosine.
+- Source distribution per query (vector / fts5 / hybrid).
+
+**Top-1 cosine distribution, v2 + nomic real model:**
+
+| Class | n | min | median | max |
+|---|---|---|---|---|
+| Positive (40) | 40 | 0.5733 | 0.7546 | 0.9234 |
+| Negative (20) | 20 | 0.5697 | 0.6396 | 0.7785 |
+
+The two distributions **overlap** (medians 0.7546 vs 0.6396,
+gap 0.1150; but positive min 0.5733 is below negative median).
+
+**Threshold sweep (calibration scope, 26 pos + 15 neg = 41):**
+
+| Threshold (cosine < τ → abstain) | abstain | false-abstention (positives wrongly refused) | false-confidence (negatives wrongly answered) |
+|---|---|---|---|
+| τ = 0.50 | 0 | 0/26 | 15/15 |
+| τ = 0.60 | 1 | 0/26 | 14/15 |
+| τ = 0.70 | 17 | 4/26 | 2/15 |
+| τ = 0.80 | 32 | 17/26 | 0/15 |
+| τ = 0.85 | 41 | 26/26 | 0/15 |
+
+The "clean separation" threshold does not exist. At τ=0.70,
+2/15 negatives are still wrongly answered (false confidence),
+and 4/26 positives are wrongly refused (false abstention).
+At τ=0.80, all 15 negatives are caught but 17/26 positives
+are wrongly refused — the policy refuses to answer 65% of
+queries that have a real answer in the corpus.
+
+**Multi-feature policies (calibration scope):**
+
+| Policy | abstain | false-abstention | false-confidence |
+|---|---|---|---|
+| P0 (current production: ranker returns 0 → empty) | 0 | 0/26 | 15/15 |
+| P1 cosine ≥ 0.70 | 17 | 4/26 | 2/15 |
+| P3 (gap ≥ 0.05 AND cosine ≥ 0.60) | 23 | 9/26 | 1/15 |
+| P3 (gap ≥ 0.15 AND cosine ≥ 0.70) | 35 | 20/26 | 0/15 |
+| P4 (no vector source → abstain) | 0 | 0/26 | 15/15 |
+
+The full policy sweep (12 policies, including combined-score
+and gap variants) is in `/tmp/mpm-bench-v2-eval/calibration.json`
+and `held-out.json`. The held-out scope (14 pos + 5 neg = 19)
+shows the same trade-off: no policy catches all 5 negatives
+without also wrongly abstaining on at least 5 of the 14
+positives.
+
+**Empirical finding (Option D conclusion):**
+
+> The available signals (top-1 cosine, top-1-to-top-2 gap,
+> source distribution, top-k mean) do **not** contain enough
+> evidence to separate answerable from unanswerable queries
+> on the v2 corpus with a low-false-abstention AND
+> low-false-confidence trade-off. The distributions overlap
+> in the 0.65-0.80 cosine range where the bulk of both
+> populations live.
+
+A useful confidence calibration is **not** available from the
+current observables. The Option D policy that "catches all
+negatives" (τ=0.80) wrongly refuses 17/26 calibration
+positives (65%) — this would be a regression in
+operator-visible recall, not an improvement.
+
+This is the empirical answer to HAL's Option D question. It is
+**not** "no useful signals exist" — top-1 cosine carries
+real information (positive median 0.75 vs negative median
+0.64) — it is "the production ranker's signals are not
+discriminating enough to set a confidence threshold without
+incurring a recall regression on the answerable side." A
+useful abstention policy likely requires either richer signals
+(e.g. confidence intervals, paraphrased-query agreement, FTS5
+participation with explicit lexical anchor) or a different
+ranker, neither of which is in the scope of Phase A.2.
+
+**Proposed machine-readable empty-result contract
+(specification only, NOT implemented):**
+
+The current empty-result path at
+`cmd/mpm/recall.go:194-197` prints a plain-text line on stdout
+and exits 0 even with `--json`; the JSON envelope is only
+emitted on a non-empty result. A machine-readable contract
+would let callers distinguish "ranker returned nothing" from
+"abstention policy decided not to answer" without parsing
+plain text.
+
+Proposed JSON envelope (additive; existing fields unchanged):
+
+```json
+{
+  "success": true,
+  "query": "<echo>",
+  "search_mode": "hybrid",
+  "count": 0,
+  "memories": [],
+  "abstention": {
+    "policy": "<policy_name or 'empty_ranker'>",
+    "reason": "ranker_returned_no_rows" |
+              "no_result_below_confidence_threshold" |
+              "no_source_participated",
+    "top_observed_score": 0.0,
+    "score_type": "combined" | "cosine",
+    "would_have_returned_above_threshold": 0.0
+  },
+  "limit": 15,
+  "min_score": null
+}
+```
+
+Backwards-compatibility:
+
+- Existing `--json` consumers that key on `memories` continue
+  to work; they receive an empty list with `count=0` instead
+  of a JSON parse error on the plain-text line.
+- Existing plain-text consumers (no `--json`) receive the
+  current human-readable line — the abstention metadata is
+  additive on the JSON envelope only.
+- Existing fields (`success`, `query`, `search_mode`, `memories`,
+  `limit`) keep their current types and meanings.
+- Exit code remains 0 (recall succeeded; the ranker or policy
+  simply returned nothing).
+- Operators who want to detect the empty-with-explicit-
+  abstention case from a script can key on
+  `abstention.reason != "empty_ranker"`.
+
+**Implementation is OUT OF SCOPE for Phase A.2.** The
+directive says "specify a proposed machine-readable empty-
+result contract ... but do not implement it during Phase A.2."
+The contract above is a specification, not a change. Phase B
+would evaluate the contract against a real abstention policy
+before any change to `cmd/mpm/recall.go`.
+
+## A2.5 — Documentation fix
+
+`bench/README.md:27-30` previously claimed that the harness
+captures live-store row counts. The v3 review removed that
+sentinel, and the README was not updated in the same change.
+The paragraph was replaced with a "No live-store reads"
+section that:
+
+- States the harness never opens, reads from, or inspects the
+  operator's live MPM database.
+- Cross-references the v3 review removal.
+- Cross-references `bench/workspace.py:scrubbed_env` for the
+  tempdir-per-run isolation contract.
+
+## A2.6 — Verification and report
+
+The Phase A.2 deliverables are:
+
+1. **v1 preserved unchanged** (A2.1): `bench/corpus/v1/`
+   MANIFEST.json SHA-256 hashes match the recorded values;
+   v1 is loaded by the harness with no `--corpus-version`
+   argument. v3 regression test in
+   `bench/tests/test_corpus_v2.py::TestV1Preserved` passes.
+
+2. **v2 corpus built and verified** (A2.2): 50 documents, 60
+   queries (40 pos / 20 neg), 41 calibration / 19 held-out,
+   9 paraphrase pairs, 3 hard negatives, 5 topic families.
+   12 v2 contract tests pass in
+   `bench/tests/test_corpus_v2.py`. SHA-256 content-binding
+   in MANIFEST.json; loader refuses to start if any file
+   changes.
+
+3. **Harness extended without breaking v1** (A2.2):
+   `bench/harness.py` accepts `--corpus-version v2`;
+   `bench/corpus.py:load_corpus` supports per-version
+   manifest layout. The default (no flag) still loads v1
+   cleanly; the v3 review tests in
+   `bench/tests/test_corpus_v2.py::TestV1Preserved` cover
+   this.
+
+4. **Per-row top-k exposed** (A2.3): `bench/harness.py` per-
+   query tables include the full `top_k` (id, score,
+   vector_similarity, source) per query. Pre-v2 the report
+   only kept `top_id` and `top_score`. A2.4 uses the new
+   exposure.
+
+5. **Actual retrieval contract measured** (A2.3): v2 + nomic
+   real-model run captured at
+   `/tmp/mpm-bench-v2-nomic-20261019T131153/report.json`.
+   Source distribution is 100% `vector` (600/600 rows). The
+   `CombinedScore` to `vector_similarity` conversion is
+   exactly 0.5 across all 600 rows, confirming
+   `CombinedScore = cosine × VectorWeight` for vector-only
+   results.
+
+6. **Option D evaluation complete** (A2.4): 12 abstention
+   policies evaluated on calibration, held-out, and full
+   scopes. Policy-sweep outputs at
+   `/tmp/mpm-bench-v2-eval/{all,calibration,held-out}.json`.
+   The empirical finding is that the available signals
+   (top-1 cosine, top-1-to-top-2 gap, source distribution,
+   top-k mean) do not contain enough information to separate
+   answerable from unanswerable queries with a useful
+   trade-off. This is reported as the empirical answer to
+   HAL's Option D question.
+
+7. **Machine-readable empty-result contract specified**
+   (A2.4): a proposed JSON envelope is documented in this
+   addendum (above). Implementation is out of scope for
+   Phase A.2.
+
+8. **README updated** (A2.5): `bench/README.md` no longer
+   claims live-store row counts are captured. The "No live-
+   store reads" paragraph is in place.
+
+9. **Production invariants preserved** (CLAUDE.md §3,
+   directive): no Go production code change; no
+   `DefaultHybridConfig` change; no live DB access; 41
+   challenged memories preserved; forensic SHA
+   `40596f043c3f63d7` untouched; `cmd/dbg_main.go.tmp`
+   preserved; no push, no PR, no merge, no service restart,
+   no binary replacement, no installation change. The v2
+   run uses the live `mpm` binary at
+   `/home/v/.local/bin/mpm` unchanged.
+
+10. **Regen verification surfaced a real condition** (v2
+    run): the v2 disposable workspace contains 55 embedded
+    memories, not 50. The 5 extras are MPM's auto-injected
+    seed memories (`mpm-seed-read-wake-context`,
+    `mpm-seed-session-end-cluster-triage`,
+    `mpm-seed-wake-triage-policy`, `mpm-seed-daemon-health`,
+    `mpm-seed-epistemic-compaction-policy`). The regen
+    verification correctly caught the mismatch as a
+    fingerprint-row-count deviation. This is realistic MPM
+    behaviour, not a harness defect: the test workspace is
+    a real MPM install, not an empty DB. The 5 seed memories
+    participate in retrieval but do not pollute the labelled
+    scoring because every query's `relevant_doc_ids` is a
+    corpus-specific set.
+
+## Appendix B — Phase A.2 artifacts
+
+| Artifact | Path | Persistence |
+|---|---|---|
+| v2 + nomic real-model report (JSON) | `/tmp/mpm-bench-v2-nomic-20261019T131153/report.json` | ephemeral |
+| v2 + nomic real-model report (Markdown) | `/tmp/mpm-bench-v2-nomic-20261019T131153/report.md` | ephemeral |
+| Option D policy sweep (all 60 queries) | `/tmp/mpm-bench-v2-eval/all.json` | ephemeral |
+| Option D policy sweep (calibration 41) | `/tmp/mpm-bench-v2-eval/calibration.json` | ephemeral |
+| Option D policy sweep (held-out 19) | `/tmp/mpm-bench-v2-eval/held-out.json` | ephemeral |
+| v2 corpus (documents, queries, expectations, scoring) | `bench/corpus/v2/` | committed |
+| v2 manifest (content-hash binding) | `bench/corpus/v2/MANIFEST.json` | committed |
+| v2 labels (manual semantic review) | `bench/corpus/v2/labels.md` | committed |
+| v2 contract tests | `bench/tests/test_corpus_v2.py` | committed |
+| Option D evaluator | `bench/option_d.py` | committed |
+| README fix | `bench/README.md` | committed |
+| This addendum | `docs/ISSUE-15-PHASE-A-REPORT.md` (A2.6 section) | committed |
+
+## Appendix C — Phase A.2 stop point
+
+**Phase A.2 is complete. Local commit only. Not pushed.**
+
+**Awaiting HAL review of:**
+
+- The v2 corpus and its label_rationale evidence.
+- The Option D empirical finding (no useful abstention
+  threshold is available from the current signals).
+- The proposed machine-readable empty-result contract
+  (specification, not implementation).
+- The README documentation fix.
+
+**Phase B remains UNAUTHORISED** until HAL has reviewed valid
+negative-query measurements (this addendum) and the no-result
+design (this addendum's A2.4 spec). No Go product code change
+is proposed in this addendum. No `DefaultHybridConfig` change
+is proposed. No `mpm recall` contract change is proposed for
+implementation in Phase A.2.
+
+**No deployment, installation, binary replacement, service
+restart, or production-state modification occurred during
+Phase A.2.**
