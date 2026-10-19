@@ -126,7 +126,27 @@ class PolicyResult:
     false_abstention: int
     false_abstention_rate: float
     false_confidence: int
-    false_confidence_rate: float
+    false_confidence_rate: float    # Aliases with explicit semantics (B5 review, HAL
+    # 2026-10-19): these fields are QUERY-LEVEL ANSWERABILITY
+    # CLASSIFICATION measures for the ANSWERED subset, NOT
+    # retrieval-ranking Precision@k / Recall@k. Specifically:
+    #   precision_on_answered = (# answered positives with at
+    #     least one vector/hybrid row) / (total answered)
+    #     = how clean the answered set is.
+    #   recall_on_answered = (# answered positives with at
+    #     least one vector/hybrid row) / (# positives in the
+    #     scope) = how many of the scope's positives were
+    #     answered at all.
+    # These are NOT retrieval metrics; they describe the
+    # abstention policy's effect on the answered set's
+    # composition, not on per-document relevance ranking.
+    # A retrieval Precision@k / Recall@k report would key on
+    # `top_k` row IDs against `relevant_doc_ids`, not on
+    # policy decisions. The names are kept short for backward
+    # compatibility with the existing JSON consumers, but the
+    # `render_policy_result` JSON output exposes the
+    # `metric_kind` field so downstream readers can
+    # disambiguate.
     precision_on_answered: float | None
     recall_on_answered: float | None
     abstain_breakdown: dict[str, int] = field(default_factory=dict)
@@ -331,14 +351,53 @@ def evaluate_all_policies(features: list[PerQueryFeatures]) -> list[PolicyResult
                 lambda f, t=tau: _p_top1_cosine(f, t),
             )
         )
-    # Combined-score policies. CombinedScore in log space is
-    # in [-3.0, 0.0] for the production ranker; we sweep a
-    # representative set.
-    for tau in (-1.0, -0.5, 0.0):
+    # Combined-score policies. For the production hybrid
+    # ranker (default VectorWeight = 0.5), the
+    # CombinedScore for a vector-only candidate equals
+    # VectorSimilarity * VectorWeight = cosine * 0.5. With
+    # cosine in [0, 1] the CombinedScore is therefore in
+    # [0, 0.5] for vector-only rows. The pre-fix thresholds
+    # of -1.0, -0.5, +0.0 were unreachable for vector-only
+    # candidates and always abstained 0 queries — a no-op
+    # masquerading as a policy.
+    #
+    # B2 review (HAL 2026-10-19): the meaningful combined-
+    # score thresholds for vector-only candidates are
+    # +0.30, +0.35, +0.40, equivalent to raw-cosine 0.60,
+    # 0.70, 0.80 (because VectorWeight = 0.5). The original
+    # {-1.0, -0.5, +0.0} thresholds are retained as legacy
+    # names because they were the historical sweep; they
+    # are now annotated as unreachable-for-vector-only in
+    # their description.
+    #
+    # Note on equivalence: this equivalence applies ONLY to
+    # vector-only candidates (`source == "vector"` or rows
+    # whose top-1 combined is exactly `0.5 * cosine`). It
+    # does NOT apply to hybrid rows (where FTS5 contributes
+    # to CombinedScore) or to FTS5-only rows (where the
+    # CombinedScore is in the FTS5 BM25 log-space). The
+    # regression test `test_combined_thresholds_equivalent_
+    # to_cosine_for_vector_only` pins this property.
+    legacy_unreachable_thresholds = (-1.0, -0.5, 0.0)
+    for tau in legacy_unreachable_thresholds:
         policies.append(
             evaluate_policy(
                 f"P2_combined_{tau:+.2f}",
-                f"Abstain when top-1 CombinedScore < {tau:+.2f}.",
+                f"Abstain when top-1 CombinedScore < {tau:+.2f}. "
+                f"LEGACY: with VectorWeight=0.5, vector-only "
+                f"CombinedScore is in [0, 0.5]; this threshold is "
+                f"unreachable for vector-only rows.",
+                features,
+                lambda f, t=tau: _p_top1_combined(f, t),
+            )
+        )
+    for tau in (0.30, 0.35, 0.40):
+        policies.append(
+            evaluate_policy(
+                f"P2_combined_+{tau:.2f}",
+                f"Abstain when top-1 CombinedScore < +{tau:.2f}. "
+                f"Equivalent to raw cosine < {tau / 0.5:.2f} for "
+                f"vector-only candidates (VectorWeight=0.5).",
                 features,
                 lambda f, t=tau: _p_top1_combined(f, t),
             )
@@ -369,6 +428,21 @@ def evaluate_all_policies(features: list[PerQueryFeatures]) -> list[PolicyResult
 
 
 def render_policy_result(r: PolicyResult) -> dict[str, Any]:
+    """Render a PolicyResult to a JSON-safe dict.
+
+    B5 review (HAL 2026-10-19): the JSON output now carries
+    a `metric_kind` field that explicitly classifies
+    `precision_on_answered` and `recall_on_answered` as
+    QUERY-LEVEL ANSWERABILITY CLASSIFICATION metrics for the
+    ANSWERED subset, not as retrieval Precision@k /
+    Recall@k. Downstream readers that need retrieval
+    Precision@k should compute it directly from
+    `per_query_table[*].top_k[*]` against `relevant_doc_ids`,
+    which is what `bench/labelled_scoring` already does and is
+    reported separately in `bench/output/.../report.json` as
+    `labelled_scoring`. The names are preserved for backward
+    compatibility.
+    """
     return {
         "name": r.name,
         "description": r.description,
@@ -379,6 +453,9 @@ def render_policy_result(r: PolicyResult) -> dict[str, Any]:
         "false_abstention_rate": r.false_abstention_rate,
         "false_confidence": r.false_confidence,
         "false_confidence_rate": r.false_confidence_rate,
+        # B5: classify explicitly so consumers do not confuse
+        # these with retrieval ranking metrics.
+        "metric_kind": "query_level_answerability_classification",
         "precision_on_answered": r.precision_on_answered,
         "recall_on_answered": r.recall_on_answered,
         "abstain_breakdown": r.abstain_breakdown,
