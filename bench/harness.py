@@ -31,6 +31,26 @@ v3 review (HAL 2026-10-19):
   - The logical-mutation check is per-query: the "before"
     snapshot is taken immediately before the first query, and
     after every query the DB is re-snapshotted and compared.
+
+v5 review (HAL 2026-10-19):
+  - The canonical developer binary is `<repo>/.build/bin/mpm`
+    (the `make build` artifact). The harness prefers it
+    unconditionally. The root-level `mpm` convenience copy
+    is NOT used; the operator's installed binary at
+    `~/.mpm/bin/mpm` is NEVER used as a silent fallback
+    (it is production state and would route the harness
+    against the live DB). An explicit `MPM_BENCH_BINARY`
+    override is resolved to an absolute path and validated
+    (existence + executable bit) before subprocess execution.
+  - `corpus.scoring.top_k` is the single source of truth for
+    retrieval depth. It is passed to the `mpm recall`
+    subprocess as `--limit <top_k>`, AND to both raw-cosine
+    conditions (unprefixed and `search_query:`-prefixed).
+    The pre-v5 code relied on the runner's default of 5 and
+    did not pass any limit to the subprocess, so the corpus's
+    top_k was silently capped at 5. A corpus with top_k > 15
+    (MPM's default limit) now exercises the MPM limit
+    explicitly.
     Any tracked-field change fails the run.
   - The raw-cosine experiment runs BOTH the unprefixed and
     `search_query:`-prefixed query embeddings through the
@@ -80,7 +100,18 @@ from bench.workspace import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CORPUS_DIR = REPO_ROOT / "bench" / "corpus"
-DEFAULT_MPM_BINARY = REPO_ROOT / "mpm"  # built artifact in the repo root
+# v5 review (HAL 2026-10-19): the canonical developer binary
+# is the `make build` artifact at `.build/bin/mpm`. The root-
+# level `mpm` is a convenience copy that may be stale relative
+# to the source; the operator's installed binary at
+# `/home/v/.mpm/bin/mpm` is production state and must NEVER
+# be used as an implicit fallback (it would route the harness
+# against the live DB). The harness prefers `.build/bin/mpm`
+# when present, validates the file is executable, and treats
+# an explicit `MPM_BENCH_BINARY` override as a single, named,
+# absolute path that is validated before subprocess execution.
+CANONICAL_MPM_BINARY = REPO_ROOT / ".build" / "bin" / "mpm"
+DEFAULT_MPM_BINARY = CANONICAL_MPM_BINARY
 
 # v3 review: the historical +0.022 MRR figure attributed to the
 # `search_query:` prefix on the lost 30-query corpus is the
@@ -405,18 +436,68 @@ def _find_db_path(snap: Path) -> Path | None:
 
 
 def _resolve_mpm_binary() -> Path:
-    """Return the path to the mpm binary. For tests, allow override
-    via MPM_BENCH_BINARY env var."""
+    """Return the path to the mpm binary.
+
+    v5 review (HAL 2026-10-19): the canonical developer binary
+    is `<repo>/.build/bin/mpm` (the `make build` artifact). The
+    pre-v5 implementation preferred a root-level `mpm` that may
+    be stale relative to source, and would silently fall back
+    to the operator's installed `/home/v/.mpm/bin/mpm` (which
+    is production state and must NOT be used as an implicit
+    fallback — it would route the harness against the live DB).
+
+    Resolution order:
+      1. `MPM_BENCH_BINARY` (absolute path, validated to exist
+         and be executable). Used by tests and CI to point at a
+         specific build.
+      2. The canonical `.build/bin/mpm` (the make build artifact).
+         Validated to exist and be executable.
+      3. Hard error. The harness does NOT silently fall back to
+         a root-level or installed binary.
+
+    The returned path is absolute and the file is verified to
+    exist and be marked executable before subprocess execution.
+    """
     override = os.environ.get("MPM_BENCH_BINARY")
     if override:
-        return Path(override)
-    if DEFAULT_MPM_BINARY.exists():
-        return DEFAULT_MPM_BINARY
-    raise FileNotFoundError(
-        f"mpm binary not found at {DEFAULT_MPM_BINARY} and "
-        f"MPM_BENCH_BINARY not set; build with `make build` or "
-        f"set the env to an explicit path"
-    )
+        # v5 review: check absolute on the raw string BEFORE
+        # resolve(), because Path(...).resolve() will silently
+        # prepend the cwd and always return an absolute path
+        # (a relative override would then masquerade as a
+        # valid absolute path that just happens to not
+        # exist where the cwd expected it).
+        if not Path(override).is_absolute():
+            raise ValueError(
+                f"MPM_BENCH_BINARY must be an absolute path; got {override!r}"
+            )
+        p = Path(override)
+        if not p.exists():
+            raise FileNotFoundError(
+                f"MPM_BENCH_BINARY={p} does not exist"
+            )
+        if not os.access(p, os.X_OK):
+            raise PermissionError(
+                f"MPM_BENCH_BINARY={p} is not executable"
+            )
+        return p
+    if not CANONICAL_MPM_BINARY.exists():
+        raise FileNotFoundError(
+            f"canonical mpm binary not found at {CANONICAL_MPM_BINARY}; "
+            f"run `make build` to produce it, or set "
+            f"MPM_BENCH_BINARY=/absolute/path/to/mpm to override. "
+            f"The harness never falls back to the root-level `mpm` "
+            f"convenience copy (it may be stale) and never uses the "
+            f"operator's installed binary at $HOME/.mpm/bin/mpm "
+            f"(that is production state and would route this run "
+            f"against the live DB)."
+        )
+    if not os.access(CANONICAL_MPM_BINARY, os.X_OK):
+        raise PermissionError(
+            f"canonical mpm binary at {CANONICAL_MPM_BINARY} is "
+            f"not executable; re-run `make build` or check the "
+            f"file mode"
+        )
+    return CANONICAL_MPM_BINARY.resolve()
 
 
 def _backfill(snap: Path) -> tuple[int, str]:
@@ -518,10 +599,15 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         if not result.ok:
             for f in result.failures:
                 print(f"  - {f}")
-        # Run a few queries and check participation.
+        # Run a few queries and check participation. v5 review:
+        # pass corpus.scoring.top_k to the runner so the recall
+        # depth matches the labelled-scoring depth end-to-end.
         results = []
         for q in corpus.queries:
-            r = run_query(q, snap, _resolve_mpm_binary())
+            r = run_query(
+                q, snap, _resolve_mpm_binary(),
+                top_k=corpus.scoring.top_k,
+            )
             results.append(r)
         p = per_query_participation(results, {q.query_id for q in corpus.positive_queries})
         print(
@@ -560,9 +646,16 @@ def _run_raw_cosine_both(
     queries: tuple,
     snap: Path,
     embedding_profile: dict[str, object] | None,
+    top_k: int = 5,
 ) -> tuple[list[QueryResult], list[QueryResult] | None]:
     """Run the raw-cosine experiment for BOTH conditions: unprefixed
     and `search_query:`-prefixed. v3 review priority 4.
+
+    v5 review: `top_k` is passed to BOTH conditions (unprefixed
+    and prefixed) so the raw-cosine ranking depth matches the
+    labelled-scoring depth. The pre-v5 path used the runner's
+    default of 5, which silently capped the comparison at
+    top-5 even when the corpus requested more.
 
     Returns (unprefixed_results, prefixed_results). prefixed_results
     is None when no embedding_profile is available (the hermetic
@@ -578,6 +671,7 @@ def _run_raw_cosine_both(
             run_query(
                 q, snap, _resolve_mpm_binary(),
                 raw_cosine=True, raw_cosine_prefix="",
+                top_k=top_k,
             )
             for q in queries
         ]
@@ -587,6 +681,7 @@ def _run_raw_cosine_both(
             q, snap, _resolve_mpm_binary(),
             raw_cosine=True, raw_cosine_prefix="",
             embedding_profile=embedding_profile,
+            top_k=top_k,
         )
         for q in queries
     ]
@@ -595,6 +690,7 @@ def _run_raw_cosine_both(
             q, snap, _resolve_mpm_binary(),
             raw_cosine=True, raw_cosine_prefix=RAW_COSINE_PREFIX,
             embedding_profile=embedding_profile,
+            top_k=top_k,
         )
         for q in queries
     ]
@@ -758,7 +854,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
             return 1
         unprefixed, prefixed = _run_raw_cosine_both(
-            corpus.queries, snap, profile
+            corpus.queries, snap, profile,
+            top_k=top_k_for_scoring,
         )
         raw_cosine_unprefixed = unprefixed
         raw_cosine_prefixed = prefixed

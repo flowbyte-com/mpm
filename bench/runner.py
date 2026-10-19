@@ -121,6 +121,17 @@ def run_query(
     apples-to-oranges. The profile is a dict of the form written by
     `write_mpm_config`: `{"provider": ..., "model": ..., "base_url":
     ..., "api_key": ...}`.
+
+    v5 review (HAL 2026-10-19): `top_k` is now passed through to
+    the `mpm recall` subprocess as `--limit <top_k>` (the CLI
+    flag the production binary actually honours) AND is used to
+    slice the JSON envelope's `memories` array. MPM's default
+    recall limit is 15; the pre-v5 path relied on the runner's
+    default of 5 and only the scoring step saw `corpus.scoring
+    .top_k`, which meant scoring on `top-5 of top-15` was a
+    no-op for any corpus with `top_k > 5`. The new contract
+    passes `corpus.scoring.top_k` end-to-end; a corpus with
+    `top_k > 15` now exercises the MPM limit explicitly.
     """
     if raw_cosine:
         if embedding_profile is None:
@@ -145,6 +156,17 @@ def run_query(
         )
 
     env = scrubbed_env(snap)
+    # v5 review: pass `top_k` to the mpm recall subprocess as
+    # `--limit <top_k>`. This is the CLI flag the production
+    # binary actually honours (its default is 15). Pre-v5
+    # code relied on the runner's default of 5 and did not
+    # pass any limit to mpm, so the corpus's top_k was silently
+    # capped at 5. A corpus with top_k > 5 (and certainly
+    # top_k > 15) was retried and re-tested against an
+    # inadequate result size. The new contract is
+    # end-to-end: corpus.scoring.top_k is the source of truth
+    # and is passed to both the subprocess and the slicing of
+    # the JSON envelope.
     cmd = [
         mpm_binary,
         "recall",
@@ -152,6 +174,8 @@ def run_query(
         "--json",
         "--collection",
         "memories",
+        "--limit",
+        str(int(top_k)),
         query.query,
     ]
     proc = subprocess.run(
