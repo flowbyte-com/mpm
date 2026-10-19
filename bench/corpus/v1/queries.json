@@ -1,0 +1,122 @@
+[
+  {
+    "query_id": "q0000001",
+    "query": "How does MPM combine FTS5 and vector search?",
+    "relevance_class": "positive",
+    "relevant_doc_ids": ["d0000004", "d0000008"]
+  },
+  {
+    "query_id": "q0000002",
+    "query": "What does mpm challenge restore do?",
+    "relevance_class": "positive",
+    "relevant_doc_ids": ["d0000006", "d0000020"]
+  },
+  {
+    "query_id": "q0000003",
+    "query": "How are vector embeddings stored?",
+    "relevance_class": "positive",
+    "relevant_doc_ids": ["d0000003", "d0000009"]
+  },
+  {
+    "query_id": "q0000004",
+    "query": "What is the supported backfill command?",
+    "relevance_class": "positive",
+    "relevant_doc_ids": ["d0000010"]
+  },
+  {
+    "query_id": "q0000005",
+    "query": "How does MPM resolve a workspace?",
+    "relevance_class": "positive",
+    "relevant_doc_ids": ["d0000011"]
+  },
+  {
+    "query_id": "q0000006",
+    "query": "What is the ChallengeMemory threshold for flagging duplicates?",
+    "relevance_class": "positive",
+    "relevant_doc_ids": ["d0000005"]
+  },
+  {
+    "query_id": "q0000007",
+    "query": "What columns record model identity for stored vectors?",
+    "relevance_class": "positive",
+    "relevant_doc_ids": ["d0000003", "d0000009"]
+  },
+  {
+    "query_id": "q0000008",
+    "query": "What is shortID in MPM?",
+    "relevance_class": "positive",
+    "relevant_doc_ids": ["d0000019"]
+  },
+  {
+    "query_id": "q0000009",
+    "query": "How does the reference library work?",
+    "relevance_class": "positive",
+    "relevant_doc_ids": ["d0000007"]
+  },
+  {
+    "query_id": "q0000010",
+    "query": "What is bm25 and how does FTS5 use it?",
+    "relevance_class": "positive",
+    "relevant_doc_ids": ["d0000002", "d0000012"]
+  },
+  {
+    "query_id": "q0000011",
+    "query": "What is the capital of France?",
+    "relevance_class": "negative",
+    "relevant_doc_ids": []
+  },
+  {
+    "query_id": "q0000012",
+    "query": "How do you make pizza dough?",
+    "relevance_class": "negative",
+    "relevant_doc_ids": []
+  },
+  {
+    "query_id": "q0000013",
+    "query": "What is the speed of light?",
+    "relevance_class": "negative",
+    "relevant_doc_ids": []
+  },
+  {
+    "query_id": "q0000014",
+    "query": "How tall is Mount Everest?",
+    "relevance_class": "negative",
+    "relevant_doc_ids": []
+  },
+  {
+    "query_id": "q0000015",
+    "query": "What is the weather like in October?",
+    "relevance_class": "negative",
+    "relevant_doc_ids": []
+  },
+  {
+    "query_id": "q0000016",
+    "query": "How is coffee roasted?",
+    "relevance_class": "negative",
+    "relevant_doc_ids": []
+  },
+  {
+    "query_id": "q0000017",
+    "query": "What is the largest ocean?",
+    "relevance_class": "negative",
+    "relevant_doc_ids": []
+  },
+  {
+    "query_id": "q0000018",
+    "query": "Who was Wolfgang Amadeus Mozart?",
+    "relevance_class": "negative",
+    "relevant_doc_ids": []
+  },
+  {
+    "query_id": "q0000019",
+    "query": "How many players are on a basketball team?",
+    "relevance_class": "negative",
+    "relevant_doc_ids": []
+  },
+  {
+    "query_id": "q0000020",
+    "query": "When was Python first released?",
+    "relevance_class": "negative",
+    "relevant_doc_ids": []
+  }
+]

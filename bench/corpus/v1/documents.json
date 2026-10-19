@@ -1,0 +1,152 @@
+[
+  {
+    "doc_id": "d0000001",
+    "content": "MPM (Memory Persistence Module) is a SQLite-backed memory store for agent runtimes. It exposes memories, lessons, decisions, theories, and reference documents through a single CLI and a single MCP server.",
+    "relevance_class": "relevant"
+  },
+  {
+    "doc_id": "d0000002",
+    "content": "FTS5 is SQLite's full-text search engine. MPM uses FTS5 with the bm25() ranking function to power the lexical channel of hybrid search.",
+    "relevance_class": "relevant"
+  },
+  {
+    "doc_id": "d0000003",
+    "content": "Vector search in MPM uses cosine similarity over float32 vectors stored in the embedding BLOB column. Vectors are JSON-encoded arrays of float32 values, with embedding_model and embedding_dimension columns recording provenance.",
+    "relevance_class": "relevant"
+  },
+  {
+    "doc_id": "d0000004",
+    "content": "Hybrid search in MPM combines the FTS5 lexical channel and the vector channel using a weighted score. The default weight is 0.5 for fts5 and 0.5 for vector.",
+    "relevance_class": "relevant"
+  },
+  {
+    "doc_id": "d0000005",
+    "content": "The ChallengeMemory subsystem flags memories as obsolete when a similar memory already exists. The threshold is fixed at 0.85 cosine similarity.",
+    "relevance_class": "relevant"
+  },
+  {
+    "doc_id": "d0000006",
+    "content": "MPM challenge restore clears the 'challenged' status flag, restores the prior weight if present, and resets confidence to 0.5 (the floor).",
+    "relevance_class": "relevant"
+  },
+  {
+    "doc_id": "d0000007",
+    "content": "MPM's reference library holds reference_documents split into reference_chunks. Each chunk has its own embedding and source_path.",
+    "relevance_class": "relevant"
+  },
+  {
+    "doc_id": "d0000008",
+    "content": "The mpm recall --semantic command runs hybrid search with a query. The output JSON envelope has shape {query, memories, search_mode} where memories is a list of {id, content, source, score, vector_similarity}.",
+    "relevance_class": "relevant"
+  },
+  {
+    "doc_id": "d0000009",
+    "content": "embedding_model and embedding_dimension columns record the model identity for stored vectors. Two models sharing a dimension can still produce incomparable vector spaces.",
+    "relevance_class": "relevant"
+  },
+  {
+    "doc_id": "d0000010",
+    "content": "mpm ops backfill-embeddings --include all --force-reembed re-embeds every memory and every reference chunk. The command always exits 0; the harness must verify completion independently.",
+    "relevance_class": "relevant"
+  },
+  {
+    "doc_id": "d0000011",
+    "content": "MPM workspace resolution priority: MPM_WORKSPACE env var, then $HOME/.mpm, then the current working directory. Config file is <workspace>/mpm_config.json.",
+    "relevance_class": "partially-relevant"
+  },
+  {
+    "doc_id": "d0000012",
+    "content": "FTS5 bm25() returns lower (better) scores for more relevant documents. The default is the BM25 ranking with k1=1.2 and b=0.75.",
+    "relevance_class": "partially-relevant"
+  },
+  {
+    "doc_id": "d0000013",
+    "content": "Cosine similarity between two vectors is the dot product of the normalized vectors. Identical vectors have similarity 1.0; orthogonal vectors have 0.0; opposite vectors have -1.0.",
+    "relevance_class": "partially-relevant"
+  },
+  {
+    "doc_id": "d0000014",
+    "content": "SQLite WAL mode allows readers to proceed without blocking writers. The MPM database uses WAL by default, with a busy_timeout for contention handling.",
+    "relevance_class": "partially-relevant"
+  },
+  {
+    "doc_id": "d0000015",
+    "content": "Confidence in MPM is a float in [0, 1]. A confidence of 0.5 is the floor; values below the floor are clamped to 0.5 on write.",
+    "relevance_class": "partially-relevant"
+  },
+  {
+    "doc_id": "d0000016",
+    "content": "Weight in MPM is a positive float. The default is 1.0; values are clamped to [0.1, 10.0] on write. The challenge subsystem can drop a memory's weight to 1.0 if a duplicate is detected.",
+    "relevance_class": "partially-relevant"
+  },
+  {
+    "doc_id": "d0000017",
+    "content": "MPM's MCP server exposes a small JSON-RPC surface. The mpm__mpm_memory action returns memory rows; the mpm__mpm_context action returns wake context.",
+    "relevance_class": "partially-relevant"
+  },
+  {
+    "doc_id": "d0000018",
+    "content": "The retrieval_metadata table tracks reuse_count, last_retrieved_at, and success_count for every cognitive node. It is observability only and does not alter search ranking.",
+    "relevance_class": "partially-relevant"
+  },
+  {
+    "doc_id": "d0000019",
+    "content": "A memory's stable ID in MPM is a 22-character ULID. The shortID() function truncates to 8 characters for display in CLI output.",
+    "relevance_class": "partially-relevant"
+  },
+  {
+    "doc_id": "d0000020",
+    "content": "The challenge subsystem writes free-text reasons into challenged_theory_id when the source cannot be matched to a known theory. These free-text values are not reversible identifiers.",
+    "relevance_class": "partially-relevant"
+  },
+  {
+    "doc_id": "d0000021",
+    "content": "The weather in San Francisco in October is typically mild with morning fog. Average highs are around 65F and lows around 55F.",
+    "relevance_class": "not-relevant"
+  },
+  {
+    "doc_id": "d0000022",
+    "content": "Pizza dough is made from flour, water, yeast, salt, and olive oil. The dough is kneaded for 10 minutes and left to rise for at least 8 hours in the refrigerator.",
+    "relevance_class": "not-relevant"
+  },
+  {
+    "doc_id": "d0000023",
+    "content": "The capital of France is Paris. The Eiffel Tower was completed in 1889 and stands 330 meters tall.",
+    "relevance_class": "not-relevant"
+  },
+  {
+    "doc_id": "d0000024",
+    "content": "Coffee beans are roasted at temperatures between 180C and 240C. A light roast preserves more acidity; a dark roast produces more body and less acidity.",
+    "relevance_class": "not-relevant"
+  },
+  {
+    "doc_id": "d0000025",
+    "content": "The speed of light in vacuum is 299,792,458 meters per second. This is a fundamental physical constant used to define the meter in the SI system.",
+    "relevance_class": "not-relevant"
+  },
+  {
+    "doc_id": "d0000026",
+    "content": "Basketball is played with two teams of five players each. The objective is to shoot the ball through the opponent's hoop, which is 10 feet above the floor.",
+    "relevance_class": "not-relevant"
+  },
+  {
+    "doc_id": "d0000027",
+    "content": "The Pacific Ocean covers more than 60 million square miles, making it the largest ocean on Earth. Its deepest point is the Mariana Trench at about 36,000 feet.",
+    "relevance_class": "not-relevant"
+  },
+  {
+    "doc_id": "d0000028",
+    "content": "Python is a dynamically typed programming language created by Guido van Rossum and first released in 1991. It emphasizes code readability and uses indentation for block structure.",
+    "relevance_class": "not-relevant"
+  },
+  {
+    "doc_id": "d0000029",
+    "content": "Mount Everest is the highest mountain on Earth at 8,848.86 meters above sea level. It sits on the border between Nepal and the Tibet region of China.",
+    "relevance_class": "not-relevant"
+  },
+  {
+    "doc_id": "d0000030",
+    "content": "Mozart composed over 600 works including symphonies, operas, chamber music, and piano concertos. He lived from 1756 to 1791 and was a prolific composer of the Classical era.",
+    "relevance_class": "not-relevant"
+  }
+]

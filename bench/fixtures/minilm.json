@@ -1,0 +1,17 @@
+{
+  "profiles": {
+    "default": {
+      "provider": "openai-compatible",
+      "model": "all-minilm",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key": ""
+    }
+  },
+  "components": {
+    "embedding": "default"
+  },
+  "expected": {
+    "model": "openai-compatible:all-minilm",
+    "dimension": 384
+  }
+}

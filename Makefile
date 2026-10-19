@@ -147,6 +147,15 @@ SCRIPTS_TEST_MIN_TESTS := 50
 # catch a release_acceptance that has been silently emptied.
 RELEASE_TEST_MIN_TESTS := 20
 
+# Floor on the number of tests `test-bench` must collect. The same
+# silent-pass class of failure as SCRIPTS_TEST_MIN_TESTS: an empty
+# `unittest discover` returns 0 and the gate would pass without
+# running anything. The floor is set well below the measured
+# population (75 at 2026-10-19) so ordinary test removal does not
+# trip it; it exists to catch a gate that has stopped seeing
+# anything.
+BENCH_TEST_MIN_TESTS := 50
+
 # Floors for the two agent_installation gates. Same reasoning as
 # SCRIPTS_TEST_MIN_TESTS: `python3 -m unittest discover` and
 # `node --test` both exit 0 when they collect nothing, so a directory
@@ -173,7 +182,7 @@ AGENT_ADAPTERS_JS := mpm-memory-openclaw mpm-auto-mode-persona-openclaw
 # AGENT_ADAPTERS — the TS gate runs ONLY the TypeScript suite.
 AGENT_ADAPTERS_TS := mpm-opencode
 
-.PHONY: all assert-build-dir-safe print-build-dir build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit test-scripts test-agent-installation test-agent-adapters lint help clean refresh-installed check-installed-drift check-installed
+.PHONY: all assert-build-dir-safe print-build-dir build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-bench test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit test-scripts test-agent-installation test-agent-adapters lint help clean refresh-installed check-installed-drift check-installed
 
 all: build
 
@@ -485,6 +494,7 @@ test: build
 	$(MAKE) test-testenv
 	$(MAKE) test-tools
 	$(MAKE) test-scripts
+	$(MAKE) test-bench
 	$(MAKE) test-agent-installation
 
 # Run the pre-commit subset of internal/core tests with the same FTS5 flag
@@ -686,6 +696,82 @@ test-scripts: build
 	    exit 1; \
 	  fi; \
 	  echo "[test-scripts] collected $$n tests (floor $(SCRIPTS_TEST_MIN_TESTS))"; \
+	  exit $$status
+
+# Validation gate for the Python test suites under bench/tests/ (the
+# embedding benchmark harness for Issue #16).
+#
+# WHY THIS TARGET EXISTS
+#
+# `bench/tests/` ships the operator-facing test suite for the
+# embedding benchmark harness. The harness itself is hermetic —
+# it does not touch the live database, the live install, or any
+# real provider unless the operator explicitly opts in via
+# `python -m bench run --output-dir ... --config ...` — so its
+# test suite is safe to run in CI without any of the live-state
+# safety concerns the other gates carry.
+#
+# Before this target existed, the suite was reachable only by
+# `cd <worktree> && python -m bench selftest`, which is not a
+# gate: it has no floor on the collected test count, no
+# non-vacuity guard, and no CI step. The same regression class
+# as test-scripts and test-agent-installation: a suite with no
+# runner is a file, not a gate.
+#
+# SCOPE
+#
+# `bench/tests/` only. The harness is a separate concern from
+# the scripts and agent_installation suites; the existing
+# `test-scripts` (scripts/tests/) and `test-agent-installation`
+# (agent_installation/tests/) targets remain unchanged.
+#
+# The harness has 75 Python tests (measured 2026-10-19), broken
+# down as:
+#   - test_workspace_isolation.py: 9 (sentinels, symlinks, perms)
+#   - test_env_scrubbing.py: 4 (scrubbed env, dangerous keys)
+#   - test_corpus_provenance.py: 6 (manifest, hashes, tampering)
+#   - test_fingerprint.py: 7 (regen verification, bad/missing rows)
+#   - test_per_query_participation.py: 8 (positive/negative contract)
+#   - test_runner_smoke.py: 5 (deterministic vectors, raw cosine)
+#   - test_scoring.py: 12 (Precision/Recall/MRR/nDCG)
+#   - test_embed_query.py: 13 (provider-aware query embedding)
+#   - test_adversarial.py: 11 (priority-1/2/4 adversarial shapes)
+#
+# NON-VACUITY GUARD
+#
+# Same failure shape as SCRIPTS_TEST_MIN_TESTS: an empty
+# `unittest discover` returns 0 and the gate would pass without
+# running anything. The recipe parses the reported test count
+# and fails on an unparseable count, a zero count, or a count
+# below the floor, before propagating the suite's real exit
+# status. The floor is BENCH_TEST_MIN_TESTS, deliberately well
+# below 75 so ordinary test removal does not trip it; the
+# floor exists to catch a gate that has stopped seeing anything.
+#
+# NO BUILD PREREQUISITE
+#
+# Unlike `test-scripts` and `test-agent-installation`, this
+# target does not depend on `build`. The bench tests do not
+# exercise the mpm binary: `python -m bench selftest` is the
+# pure-Python subset of the harness's own tests. The
+# integration test that DOES call the mpm binary is
+# `python -m bench smoke`, which is operator-driven and not
+# part of this gate.
+test-bench:
+	@out=$$(python3 -m unittest discover -s bench/tests -t . 2>&1); status=$$?; \
+	  printf '%s\n' "$$out"; \
+	  n=$$(printf '%s\n' "$$out" | sed -n 's/^Ran \([0-9][0-9]*\) tests\?.*/\1/p' | tail -1); \
+	  if [ -z "$$n" ]; then \
+	    echo "[test-bench] FATAL: could not parse a test count from the run." >&2; \
+	    echo "  A silent pass here is indistinguishable from a green suite." >&2; \
+	    exit 1; \
+	  fi; \
+	  if [ "$$n" -lt $(BENCH_TEST_MIN_TESTS) ]; then \
+	    echo "[test-bench] FATAL: collected $$n tests, floor is $(BENCH_TEST_MIN_TESTS)." >&2; \
+	    echo "  A rename or deletion has probably silently reduced this gate." >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "[test-bench] collected $$n tests (floor $(BENCH_TEST_MIN_TESTS))"; \
 	  exit $$status
 
 # Local mirror of the `agent_installation/tests/` suite that CI already
@@ -1065,6 +1151,7 @@ test-race: build
 	$(MAKE) test-testenv-race
 	$(MAKE) test-tools-race
 	$(MAKE) test-scripts
+	$(MAKE) test-bench
 	$(MAKE) test-agent-installation
 
 # Run golangci-lint (advisory only — does not gate CI).

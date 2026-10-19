@@ -186,6 +186,20 @@ jobs:
       - name: Installer contract (scripts/tests)
         run: make test-scripts
 
+      # bench/tests/ (Issue #16 — embedding benchmark harness). 75
+      # hermetic tests covering workspace isolation, env scrubbing,
+      # corpus provenance, regeneration verification, per-query
+      # participation, raw-cosine ranking, labelled-relevance scoring,
+      # provider-aware query embedding, and adversarial regression
+      # shapes. Pure Python; no mpm binary, no live DB, no real
+      # network. Reachable from CI for the first time via this step;
+      # `make test-bench` is also wired into `make test` and
+      # `make test-race` so the local gates reach it. Non-vacuity
+      # floor (BENCH_TEST_MIN_TESTS) is enforced inside the Makefile
+      # target itself, not here.
+      - name: Embedding benchmark harness (bench/tests)
+        run: make test-bench
+
       - name: Run full test suite with coverage
         run: |
           # Run tests and write atomic coverage profile

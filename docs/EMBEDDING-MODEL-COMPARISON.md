@@ -249,12 +249,36 @@ this, and it is not claimed to. It is a ranker problem
 
 ## Reproducing
 
+The historical 30-query benchmark scripts under `/tmp/embench/`
+are no longer present in the repository. The corpus and
+hand-labelled relevance judgments that drove the historical run
+were not preserved as artifacts; the reproduction recipe
+above is therefore **not** runnable against the current
+repository state.
+
+The current harness (Issue #16) does not reproduce the historical
++0.022 MRR figure attributed to the `search_query:` prefix
+(§5 of [`NOMIC-MIGRATION.md`](./NOMIC-MIGRATION.md)). To
+reproduce it, the original 30-query corpus and its labels would
+have to be reconstructed; the new harness ships a small
+synthetic labelled set under `bench/corpus/v1/` instead. The
+manifest at `bench/corpus/MANIFEST.json` records this in its
+`note` field.
+
+What can be reproduced today, against the current repository:
+
 ```bash
-python3 /tmp/embench/build_snapshot.py <slug>   # isolate + re-embed
-python3 /tmp/embench/run_ext.py       <slug>     # 30 queries
-python3 /tmp/embench/qdist.py         <slug>     # scan-set pair exposure
-python3 /tmp/embench/simdist.py       <slug>     # all-pairs distribution
-python3 /tmp/embench/prefix_test.py              # instruction sensitivity
+# Self-tests: no mpm binary, no live DB, no network.
+python -m bench selftest
+
+# Smoke test: fake embeddings server, disposable DB, FTS5 mpm build.
+CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 CGO_LDFLAGS=-lm \
+    go build -tags fts5 -o mpm ./cmd/mpm
+python -m bench smoke
 ```
+
+See [`EMBEDDING-BENCHMARK-HARNESS.md`](./EMBEDDING-BENCHMARK-HARNESS.md)
+and [`EMBEDDING-BENCHMARK-HARNESS-DESIGN.md`](./EMBEDDING-BENCHMARK-HARNESS-DESIGN.md)
+for the user-facing and design documentation.
 
 Results: `/tmp/embench/{report,scores,qdist,simdist,prefix_test}.json`.
