@@ -1,0 +1,5 @@
+0f04f2ddacae809f4717fd7edb391b17307ad048274e2dd6e04ab840215412ae  bench/output/phase-a3/v2-nomic/report.md
+1ab727f2aa38471c3d531d05549f24e026129d18e738314c3e6e3220cffb2784  bench/output/phase-a3/v2-nomic/report.json
+ea61b822cd14b51a4a826fd958d7e60dc928a74c35594479230674a54d88e537  bench/output/phase-a3/v2-nomic-eval/calibration.json
+01914608517cafb13e705630c1aa8469dd30a7644f3abd38a2b91dd93ec86c72  bench/output/phase-a3/v2-nomic-eval/all.json
+4e13251a79561cecdfb628d719e330f92d63d49bbe5ded16de86c400cfb42ab5  bench/output/phase-a3/v2-nomic-eval/held-out.json

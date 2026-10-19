@@ -1,0 +1,190 @@
+{
+  "n_queries": 41,
+  "policies": [
+    {
+      "abstain_breakdown": {},
+      "abstain_rate": 0.0,
+      "description": "Current production: ranker returns 0 -> empty path; otherwise answer.",
+      "false_abstention": 0,
+      "false_abstention_rate": 0.0,
+      "false_confidence": 15,
+      "false_confidence_rate": 1.0,
+      "n_abstain": 0,
+      "n_total": 41,
+      "name": "P0_empty_ranker",
+      "precision_on_answered": 0.6341463414634146,
+      "recall_on_answered": 1.0
+    },
+    {
+      "abstain_breakdown": {},
+      "abstain_rate": 0.0,
+      "description": "Abstain when top-1 cosine similarity < 0.50.",
+      "false_abstention": 0,
+      "false_abstention_rate": 0.0,
+      "false_confidence": 15,
+      "false_confidence_rate": 1.0,
+      "n_abstain": 0,
+      "n_total": 41,
+      "name": "P1_cosine_0.50",
+      "precision_on_answered": 0.6341463414634146,
+      "recall_on_answered": 1.0
+    },
+    {
+      "abstain_breakdown": {
+        "top1_cosine<0.60": 1
+      },
+      "abstain_rate": 0.024390243902439025,
+      "description": "Abstain when top-1 cosine similarity < 0.60.",
+      "false_abstention": 0,
+      "false_abstention_rate": 0.0,
+      "false_confidence": 14,
+      "false_confidence_rate": 0.9333333333333333,
+      "n_abstain": 1,
+      "n_total": 41,
+      "name": "P1_cosine_0.60",
+      "precision_on_answered": 0.65,
+      "recall_on_answered": 1.0
+    },
+    {
+      "abstain_breakdown": {
+        "top1_cosine<0.70": 17
+      },
+      "abstain_rate": 0.4146341463414634,
+      "description": "Abstain when top-1 cosine similarity < 0.70.",
+      "false_abstention": 4,
+      "false_abstention_rate": 0.15384615384615385,
+      "false_confidence": 2,
+      "false_confidence_rate": 0.13333333333333333,
+      "n_abstain": 17,
+      "n_total": 41,
+      "name": "P1_cosine_0.70",
+      "precision_on_answered": 0.9166666666666666,
+      "recall_on_answered": 1.0
+    },
+    {
+      "abstain_breakdown": {
+        "top1_cosine<0.80": 32
+      },
+      "abstain_rate": 0.7804878048780488,
+      "description": "Abstain when top-1 cosine similarity < 0.80.",
+      "false_abstention": 17,
+      "false_abstention_rate": 0.6538461538461539,
+      "false_confidence": 0,
+      "false_confidence_rate": 0.0,
+      "n_abstain": 32,
+      "n_total": 41,
+      "name": "P1_cosine_0.80",
+      "precision_on_answered": 1.0,
+      "recall_on_answered": 1.0
+    },
+    {
+      "abstain_breakdown": {},
+      "abstain_rate": 0.0,
+      "description": "Abstain when top-1 CombinedScore < -1.00.",
+      "false_abstention": 0,
+      "false_abstention_rate": 0.0,
+      "false_confidence": 15,
+      "false_confidence_rate": 1.0,
+      "n_abstain": 0,
+      "n_total": 41,
+      "name": "P2_combined_-1.00",
+      "precision_on_answered": 0.6341463414634146,
+      "recall_on_answered": 1.0
+    },
+    {
+      "abstain_breakdown": {},
+      "abstain_rate": 0.0,
+      "description": "Abstain when top-1 CombinedScore < -0.50.",
+      "false_abstention": 0,
+      "false_abstention_rate": 0.0,
+      "false_confidence": 15,
+      "false_confidence_rate": 1.0,
+      "n_abstain": 0,
+      "n_total": 41,
+      "name": "P2_combined_-0.50",
+      "precision_on_answered": 0.6341463414634146,
+      "recall_on_answered": 1.0
+    },
+    {
+      "abstain_breakdown": {},
+      "abstain_rate": 0.0,
+      "description": "Abstain when top-1 CombinedScore < +0.00.",
+      "false_abstention": 0,
+      "false_abstention_rate": 0.0,
+      "false_confidence": 15,
+      "false_confidence_rate": 1.0,
+      "n_abstain": 0,
+      "n_total": 41,
+      "name": "P2_combined_+0.00",
+      "precision_on_answered": 0.6341463414634146,
+      "recall_on_answered": 1.0
+    },
+    {
+      "abstain_breakdown": {
+        "top1_cosine<0.60": 1,
+        "top1_top2_gap<0.05": 22
+      },
+      "abstain_rate": 0.5609756097560976,
+      "description": "Abstain when top1-top2 cosine gap < 0.05 OR top1 cosine < 0.60.",
+      "false_abstention": 9,
+      "false_abstention_rate": 0.34615384615384615,
+      "false_confidence": 1,
+      "false_confidence_rate": 0.06666666666666667,
+      "n_abstain": 23,
+      "n_total": 41,
+      "name": "P3_gap_0.05_min_0.60",
+      "precision_on_answered": 0.9444444444444444,
+      "recall_on_answered": 1.0
+    },
+    {
+      "abstain_breakdown": {
+        "top1_cosine<0.60": 1,
+        "top1_top2_gap<0.10": 30
+      },
+      "abstain_rate": 0.7560975609756098,
+      "description": "Abstain when top1-top2 cosine gap < 0.10 OR top1 cosine < 0.60.",
+      "false_abstention": 17,
+      "false_abstention_rate": 0.6538461538461539,
+      "false_confidence": 1,
+      "false_confidence_rate": 0.06666666666666667,
+      "n_abstain": 31,
+      "n_total": 41,
+      "name": "P3_gap_0.10_min_0.60",
+      "precision_on_answered": 0.9,
+      "recall_on_answered": 1.0
+    },
+    {
+      "abstain_breakdown": {
+        "top1_cosine<0.70": 17,
+        "top1_top2_gap<0.15": 18
+      },
+      "abstain_rate": 0.8536585365853658,
+      "description": "Abstain when top1-top2 cosine gap < 0.15 OR top1 cosine < 0.70.",
+      "false_abstention": 20,
+      "false_abstention_rate": 0.7692307692307693,
+      "false_confidence": 0,
+      "false_confidence_rate": 0.0,
+      "n_abstain": 35,
+      "n_total": 41,
+      "name": "P3_gap_0.15_min_0.70",
+      "precision_on_answered": 1.0,
+      "recall_on_answered": 1.0
+    },
+    {
+      "abstain_breakdown": {},
+      "abstain_rate": 0.0,
+      "description": "Abstain when no row came from vector or hybrid source.",
+      "false_abstention": 0,
+      "false_abstention_rate": 0.0,
+      "false_confidence": 15,
+      "false_confidence_rate": 1.0,
+      "n_abstain": 0,
+      "n_total": 41,
+      "name": "P4_no_vector_source",
+      "precision_on_answered": 0.6341463414634146,
+      "recall_on_answered": 1.0
+    }
+  ],
+  "report_path": "/tmp/mpm-bench-v2-nomic-a3/report.json",
+  "scope": "calibration"
+}

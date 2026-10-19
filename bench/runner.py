@@ -101,6 +101,7 @@ def run_query(
     raw_cosine_prefix: str = "",
     top_k: int = 5,
     embedding_profile: dict[str, object] | None = None,
+    collection: str = "memories",
 ) -> QueryResult:
     """Run a single query against the disposable workspace and return
     the parsed result.
@@ -173,7 +174,12 @@ def run_query(
         "--semantic",
         "--json",
         "--collection",
-        "memories",
+        # Phase A.3 (V1 isolation): query the bench's collection,
+        # not the default `memories`. MPM's seeded prime-directive
+        # rows in `directives` (and any other production data in
+        # `memories`) cannot appear in the bench's recall result
+        # because they are in a different collection.
+        collection,
         "--limit",
         str(int(top_k)),
         query.query,
