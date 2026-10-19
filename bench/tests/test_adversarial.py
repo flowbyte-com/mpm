@@ -387,3 +387,781 @@ class TestRawCosineQueryEmbeddingAdversarial(unittest.TestCase):
                 self.assertEqual(rows[0]["id"], "d0000001")
             finally:
                 server.shutdown()
+
+
+# ---- v3 review adversarial tests (HAL 2026-10-19) ----
+
+
+class TestLiveStoreNotInspected(unittest.TestCase):
+    """The harness must NEVER inspect the live `~/.mpm` SQLite DB.
+
+    v3 review priority 2: the v2 path read the live store's
+    row counts as a sentinel. The v3 contract is that synthetic
+    benchmark runs do not touch the live store at all.
+    """
+
+    def test_harness_does_not_call_live_store_snapshots(self) -> None:
+        import bench.harness as h
+        # The function must be gone; this raises AttributeError
+        # on the v2 code, which is the load-bearing assertion.
+        self.assertFalse(
+            hasattr(h, "_live_store_snapshots"),
+            "v3 must remove _live_store_snapshots; live-store "
+            "inspection is out of contract",
+        )
+        self.assertFalse(
+            hasattr(h, "_live_store_sentinel_compare"),
+            "v3 must remove _live_store_sentinel_compare",
+        )
+
+
+class TestOutputDirValidatedBeforeMkdir(unittest.TestCase):
+    """v3 review priority 2: the safety checks on the output dir
+    run BEFORE any `mkdir`. The pre-fix code called
+    `out.mkdir(parents=True, exist_ok=True, mode=0o700)` before
+    the sentinel check, which created
+    `~/.mpm/harness-output-should-be-rejected` on disk before
+    the WorkspaceError raised."""
+
+    def test_protected_root_path_not_created_on_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as home_root:
+            with tempfile.TemporaryDirectory() as td:
+                home = Path(home_root)
+                mpm = home / ".mpm"
+                mpm.mkdir(parents=True, exist_ok=True, mode=0o700)
+                out = mpm / "should-not-be-created"
+                snap = Path(td) / "snap"
+                snap.mkdir(parents=True)
+                real_snap = assert_safe_workspace(snap)
+                with self.assertRaises(WorkspaceError):
+                    assert_safe_output_dir(
+                        out, real_snap, protected_root=home, create=True
+                    )
+                self.assertFalse(
+                    out.exists(),
+                    "the rejection path must not create on disk",
+                )
+
+
+class TestSnapshotIsMkdtemp(unittest.TestCase):
+    """v3 review priority 2: the snapshot workspace is created via
+    `tempfile.mkdtemp` (not a PID-derived name)."""
+
+    def test_make_snap_workspace_uses_mkdtemp(self) -> None:
+        from bench.harness import _make_snap_workspace
+        a = _make_snap_workspace("mpm-bench-test-")
+        b = _make_snap_workspace("mpm-bench-test-")
+        try:
+            self.assertNotEqual(a, b, "each call must allocate a fresh dir")
+            self.assertTrue(a.is_dir())
+            self.assertTrue(b.is_dir())
+            # Permission is 0o700.
+            self.assertEqual(stat.S_IMODE(os.stat(a).st_mode), 0o700)
+        finally:
+            import shutil
+            shutil.rmtree(a, ignore_errors=True)
+            shutil.rmtree(b, ignore_errors=True)
+
+
+class TestSymlinkRejectedBeforeMpmLaunch(unittest.TestCase):
+    """v3 review priority 2: `reject_unsafe_symlinks` runs on the
+    snapshot workspace in addition to the output dir, BEFORE MPM
+    is launched. A within-snap symlink into a protected root
+    must be caught."""
+
+    def test_within_snap_symlink_to_protected_root_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as home_root:
+            with tempfile.TemporaryDirectory() as td:
+                home = Path(home_root)
+                mpm = home / ".mpm"
+                mpm.mkdir(parents=True, exist_ok=True, mode=0o700)
+                snap = Path(td) / "snap"
+                snap.mkdir(parents=True, mode=0o700)
+                try:
+                    (snap / "leak").symlink_to(mpm)
+                except (OSError, NotImplementedError):
+                    self.skipTest("symlinks unsupported")
+                bad = reject_unsafe_symlinks(snap)
+                self.assertEqual(
+                    len(bad), 1,
+                    f"within-snap symlink to a protected root must "
+                    f"be rejected; got bad={bad}",
+                )
+
+
+class TestPartialReferenceBackfillFails(unittest.TestCase):
+    """v3 review priority 3: NULL/missing detection in BOTH
+    `memories` AND `reference_chunks`. A partial backfill that
+    misses even one reference_chunks row must fail."""
+
+    def test_partial_reference_backfill_detected(self) -> None:
+        dim = 8
+        # 5 of 10 reference chunks have embeddings.
+        embedded_ids = {f"d{i:08d}" for i in range(1, 6)}
+        missing_ids = sorted(f"d{i:08d}" for i in range(6, 11))
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "test.db"
+            con = sqlite3.connect(str(db))
+            try:
+                con.executescript(SCHEMA)
+                # 5 fully-embedded ref_chunks.
+                for did in embedded_ids:
+                    con.execute(
+                        "INSERT INTO reference_chunks "
+                        "(id, doc_id, chunk_index, content, embedding, "
+                        "embedding_source, embedding_dimension, "
+                        "embedding_model) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            did,
+                            did,
+                            0,
+                            "x",
+                            _vec_blob([0.1] * dim),
+                            "provider",
+                            dim,
+                            "fake-embed-v1",
+                        ),
+                    )
+                # 5 ref_chunks with NULL embedding (partial backfill).
+                # The schema's embedding_source has NOT NULL DEFAULT
+                # 'provider', so omit it on partial rows to simulate
+                # a row that the embedder never wrote.
+                for did in missing_ids:
+                    con.execute(
+                        "INSERT INTO reference_chunks "
+                        "(id, doc_id, chunk_index, content, embedding, "
+                        "embedding_source, embedding_dimension, "
+                        "embedding_model) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            did,
+                            did,
+                            0,
+                            "x",
+                            None,
+                            "provider",
+                            None,
+                            None,
+                        ),
+                    )
+                con.commit()
+            finally:
+                con.close()
+            r = verify_regeneration_complete(
+                db,
+                expected_model="fake-embed-v1",
+                expected_dimension=dim,
+                expected_reference_doc_ids=embedded_ids | set(missing_ids),
+            )
+            self.assertFalse(
+                r.ok,
+                f"partial reference_chunks backfill must fail; "
+                f"got failures={r.failures}",
+            )
+            self.assertTrue(
+                any("NULL" in f for f in r.failures),
+                f"expected NULL/missing detection failure, got {r.failures}",
+            )
+            self.assertTrue(
+                any("missing entirely" in f or "no embedded chunk" in f
+                    for f in r.failures),
+                f"expected missing-doc coverage failure, got {r.failures}",
+            )
+
+    def test_expected_row_count_mismatch_detected(self) -> None:
+        # Caller passes expected_memories_row_count=10 but only 5
+        # rows have the expected fingerprint. Verification must
+        # catch the count mismatch even if every row is embedded.
+        dim = 8
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "test.db"
+            con = sqlite3.connect(str(db))
+            try:
+                con.executescript(SCHEMA)
+                for i in range(1, 6):
+                    con.execute(
+                        "INSERT INTO memories (id, collection, content, "
+                        "embedding, embedding_source, "
+                        "embedding_dimension, embedding_model) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            f"d{i:08d}",
+                            "memories",
+                            "x",
+                            _vec_blob([0.1] * dim),
+                            "provider",
+                            dim,
+                            "fake-embed-v1",
+                        ),
+                    )
+                con.commit()
+            finally:
+                con.close()
+            r = verify_regeneration_complete(
+                db,
+                expected_model="fake-embed-v1",
+                expected_dimension=dim,
+                expected_memories_row_count=10,
+            )
+            self.assertFalse(r.ok)
+            self.assertTrue(
+                any("row count" in f for f in r.failures),
+                f"expected row-count failure, got {r.failures}",
+            )
+
+
+class TestRawCosinePrefixComparison(unittest.TestCase):
+    """v3 review priority 4: the raw-cosine experiment runs BOTH
+    the unprefixed and `search_query:`-prefixed query embeddings
+    through the configured provider, on identical document
+    vectors. Both conditions must produce valid scores; the
+    delta between them is reported."""
+
+    def test_both_conditions_return_scores(self) -> None:
+        from bench.corpus import Query
+        from bench.runner import _raw_cosine_ranking, RAW_COSINE_PREFIX_NOTE
+        from bench.fake_server import deterministic_vector, make_server
+
+        with tempfile.TemporaryDirectory() as td:
+            dim = 16
+            server, base_url, port = make_server(
+                dim=dim, model_name="custom-model"
+            )
+            try:
+                snap = Path(td) / "snap"
+                snap.mkdir(parents=True)
+                db = snap / "mpm.db"
+                con = sqlite3.connect(str(db))
+                try:
+                    con.executescript(SCHEMA)
+                    con.execute(
+                        "INSERT INTO memories (id, collection, content, "
+                        "embedding, embedding_source, "
+                        "embedding_dimension, embedding_model) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            "d0000001",
+                            "memories",
+                            "x",
+                            _vec_blob(deterministic_vector("x", dim)),
+                            "provider",
+                            dim,
+                            "custom-model",
+                        ),
+                    )
+                    con.commit()
+                finally:
+                    con.close()
+                profile = {
+                    "provider": "openai-compatible",
+                    "model": "custom-model",
+                    "base_url": base_url,
+                    "api_key": "",
+                }
+                q = Query(
+                    query_id="q1",
+                    query="x",
+                    relevance_class="positive",
+                    relevant_doc_ids=("d0000001",),
+                )
+                # Unprefixed.
+                rows_u = _raw_cosine_ranking(
+                    q, db, top_k=1, embedding_profile=profile, prefix=""
+                )
+                self.assertEqual(len(rows_u), 1)
+                self.assertEqual(rows_u[0]["id"], "d0000001")
+                # Prefixed.
+                rows_p = _raw_cosine_ranking(
+                    q, db, top_k=1,
+                    embedding_profile=profile,
+                    prefix=RAW_COSINE_PREFIX_NOTE,
+                )
+                self.assertEqual(len(rows_p), 1)
+                self.assertEqual(rows_p[0]["id"], "d0000001")
+                # Both conditions produced a cosine score (the
+                # value will differ because the fake server
+                # hashes a different text each time).
+                self.assertGreater(rows_u[0]["score"], 0.0)
+                self.assertGreater(rows_p[0]["score"], 0.0)
+            finally:
+                server.shutdown()
+
+
+class TestRawCosineDocVectorNormalized(unittest.TestCase):
+    """v3 review priority 4: the runner L2-normalizes document
+    vectors at rank time, so a 2x scale on a doc still produces
+    the same ranking as a 1x scale."""
+
+    def test_ranking_invariant_under_doc_scale(self) -> None:
+        from bench.corpus import Query
+        from bench.runner import _raw_cosine_ranking
+        from bench.fake_server import deterministic_vector, make_server
+        import math
+
+        with tempfile.TemporaryDirectory() as td:
+            dim = 16
+            server, base_url, port = make_server(
+                dim=dim, model_name="m"
+            )
+            try:
+                snap = Path(td) / "snap"
+                snap.mkdir(parents=True)
+                db = snap / "mpm.db"
+                con = sqlite3.connect(str(db))
+                try:
+                    con.executescript(SCHEMA)
+                    # Two docs: one with a 1x-scaled vector, one
+                    # with a 2x-scaled vector. The query embedding
+                    # is the unit-L2 normalized version of the
+                    # fake-server output. Ranking should be
+                    # invariant under the 2x scale.
+                    v1 = deterministic_vector("a", dim)
+                    v2 = [2.0 * x for x in deterministic_vector("b", dim)]
+                    con.execute(
+                        "INSERT INTO memories (id, collection, content, "
+                        "embedding, embedding_source, "
+                        "embedding_dimension, embedding_model) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            "d0000001",
+                            "memories",
+                            "a",
+                            _vec_blob(v1),
+                            "provider",
+                            dim,
+                            "m",
+                        ),
+                    )
+                    con.execute(
+                        "INSERT INTO memories (id, collection, content, "
+                        "embedding, embedding_source, "
+                        "embedding_dimension, embedding_model) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            "d0000002",
+                            "memories",
+                            "b",
+                            _vec_blob(v2),
+                            "provider",
+                            dim,
+                            "m",
+                        ),
+                    )
+                    con.commit()
+                finally:
+                    con.close()
+                q = Query(
+                    query_id="q1",
+                    query="a",
+                    relevance_class="positive",
+                    relevant_doc_ids=("d0000001",),
+                )
+                rows = _raw_cosine_ranking(
+                    q, db, top_k=2,
+                    embedding_profile={
+                        "provider": "openai-compatible",
+                        "model": "m",
+                        "base_url": base_url,
+                        "api_key": "",
+                    },
+                )
+                self.assertEqual(len(rows), 2)
+                # The top result must be d0000001 (the doc whose
+                # text matches the query); the 2x-scaled doc
+                # must NOT jump ahead just because it was
+                # numerically larger.
+                self.assertEqual(rows[0]["id"], "d0000001")
+            finally:
+                server.shutdown()
+
+
+class TestRawCosineRefusesHashInRealRun(unittest.TestCase):
+    """v3 review priority 4: when an embedding_profile is provided
+    and the embed call fails, the function must NOT silently fall
+    back to the hash function. The exception propagates."""
+
+    def test_embed_failure_propagates(self) -> None:
+        from bench.corpus import Query
+        from bench.runner import _raw_cosine_ranking
+        from bench.embed_query import EmbedError
+
+        with tempfile.TemporaryDirectory() as td:
+            snap = Path(td) / "snap"
+            snap.mkdir(parents=True)
+            db = snap / "mpm.db"
+            con = sqlite3.connect(str(db))
+            try:
+                con.executescript(SCHEMA)
+                con.execute(
+                    "INSERT INTO memories (id, collection, content, "
+                    "embedding, embedding_source, "
+                    "embedding_dimension, embedding_model) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "d0000001",
+                        "memories",
+                        "x",
+                        _vec_blob([0.1] * 8),
+                        "provider",
+                        8,
+                        "x",
+                    ),
+                )
+                con.commit()
+            finally:
+                con.close()
+            q = Query(
+                query_id="q1",
+                query="x",
+                relevance_class="positive",
+                relevant_doc_ids=("d0000001",),
+            )
+            # Deliberately-broken base URL; the connect will
+            # fail. The runner must surface EmbedError, not
+            # silently substitute the hash.
+            with self.assertRaises(EmbedError):
+                _raw_cosine_ranking(
+                    q, db, top_k=1,
+                    embedding_profile={
+                        "provider": "openai-compatible",
+                        "model": "m",
+                        "base_url": "http://127.0.0.1:1",
+                        "api_key": "",
+                    },
+                )
+
+
+class TestCorpusIDUniqueness(unittest.TestCase):
+    """v3 review priority 5: load_corpus refuses a corpus whose
+    documents.json contains duplicate doc_ids."""
+
+    def test_duplicate_doc_ids_rejected(self) -> None:
+        from bench.corpus import CorpusError, load_corpus
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td) / "corpus"
+            v1 = base / "v1"
+            v1.mkdir(parents=True)
+            # Write a minimal valid MANIFEST and files except
+            # the documents have a duplicate doc_id.
+            docs = [
+                {
+                    "doc_id": "d0000001",
+                    "content": "a",
+                    "relevance_class": "relevant",
+                },
+                {
+                    "doc_id": "d0000001",
+                    "content": "b",
+                    "relevance_class": "relevant",
+                },
+            ]
+            qs = [
+                {
+                    "query_id": "q1",
+                    "query": "?",
+                    "relevance_class": "positive",
+                    "relevant_doc_ids": ["d0000001"],
+                }
+            ]
+            ex = {"q1": ["d0000001"]}
+            sc = {"method": "mpm recall --semantic --json", "top_k": 5, "parameters": {}}
+            (v1 / "documents.json").write_text(json.dumps(docs))
+            (v1 / "queries.json").write_text(json.dumps(qs))
+            (v1 / "expectations.json").write_text(json.dumps(ex))
+            (v1 / "scoring.json").write_text(json.dumps(sc))
+            import hashlib
+            manifest = {
+                "version": "v1",
+                "documents_sha256": hashlib.sha256(
+                    (v1 / "documents.json").read_bytes()
+                ).hexdigest(),
+                "queries_sha256": hashlib.sha256(
+                    (v1 / "queries.json").read_bytes()
+                ).hexdigest(),
+                "expectations_sha256": hashlib.sha256(
+                    (v1 / "expectations.json").read_bytes()
+                ).hexdigest(),
+                "scoring_sha256": hashlib.sha256(
+                    (v1 / "scoring.json").read_bytes()
+                ).hexdigest(),
+            }
+            (base / "MANIFEST.json").write_text(json.dumps(manifest))
+            with self.assertRaises(CorpusError) as cm:
+                load_corpus(base)
+            self.assertIn("duplicate", str(cm.exception).lower())
+
+
+class TestPositiveQueryMustHaveRelevantDocIds(unittest.TestCase):
+    """v3 review priority 5: load_corpus refuses a positive query
+    whose relevant_doc_ids is empty (Precision/Recall/MRR/nDCG
+    would be undefined)."""
+
+    def test_empty_relevant_doc_ids_rejected(self) -> None:
+        from bench.corpus import CorpusError, load_corpus
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td) / "corpus"
+            v1 = base / "v1"
+            v1.mkdir(parents=True)
+            docs = [
+                {
+                    "doc_id": "d0000001",
+                    "content": "a",
+                    "relevance_class": "relevant",
+                }
+            ]
+            qs = [
+                {
+                    "query_id": "q1",
+                    "query": "?",
+                    "relevance_class": "positive",
+                    "relevant_doc_ids": [],
+                }
+            ]
+            ex = {"q1": []}
+            sc = {"method": "mpm recall --semantic --json", "top_k": 5, "parameters": {}}
+            (v1 / "documents.json").write_text(json.dumps(docs))
+            (v1 / "queries.json").write_text(json.dumps(qs))
+            (v1 / "expectations.json").write_text(json.dumps(ex))
+            (v1 / "scoring.json").write_text(json.dumps(sc))
+            import hashlib
+            manifest = {
+                "version": "v1",
+                "documents_sha256": hashlib.sha256(
+                    (v1 / "documents.json").read_bytes()
+                ).hexdigest(),
+                "queries_sha256": hashlib.sha256(
+                    (v1 / "queries.json").read_bytes()
+                ).hexdigest(),
+                "expectations_sha256": hashlib.sha256(
+                    (v1 / "expectations.json").read_bytes()
+                ).hexdigest(),
+                "scoring_sha256": hashlib.sha256(
+                    (v1 / "scoring.json").read_bytes()
+                ).hexdigest(),
+            }
+            (base / "MANIFEST.json").write_text(json.dumps(manifest))
+            with self.assertRaises(CorpusError) as cm:
+                load_corpus(base)
+            self.assertIn("empty relevant_doc_ids", str(cm.exception))
+
+
+class TestExpectationsMatchQueries(unittest.TestCase):
+    """v3 review priority 5: expectations.json and queries.json
+    must be a set-equal parallel record. The queries file is the
+    source of truth; expectations must match."""
+
+    def test_expectations_mismatch_rejected(self) -> None:
+        from bench.corpus import CorpusError, load_corpus
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td) / "corpus"
+            v1 = base / "v1"
+            v1.mkdir(parents=True)
+            docs = [
+                {
+                    "doc_id": "d0000001",
+                    "content": "a",
+                    "relevance_class": "relevant",
+                },
+                {
+                    "doc_id": "d0000002",
+                    "content": "b",
+                    "relevance_class": "relevant",
+                },
+            ]
+            qs = [
+                {
+                    "query_id": "q1",
+                    "query": "?",
+                    "relevance_class": "positive",
+                    "relevant_doc_ids": ["d0000001"],
+                }
+            ]
+            # Mismatched expectations: says d0000002 instead of d0000001.
+            ex = {"q1": ["d0000002"]}
+            sc = {"method": "mpm recall --semantic --json", "top_k": 5, "parameters": {}}
+            (v1 / "documents.json").write_text(json.dumps(docs))
+            (v1 / "queries.json").write_text(json.dumps(qs))
+            (v1 / "expectations.json").write_text(json.dumps(ex))
+            (v1 / "scoring.json").write_text(json.dumps(sc))
+            import hashlib
+            manifest = {
+                "version": "v1",
+                "documents_sha256": hashlib.sha256(
+                    (v1 / "documents.json").read_bytes()
+                ).hexdigest(),
+                "queries_sha256": hashlib.sha256(
+                    (v1 / "queries.json").read_bytes()
+                ).hexdigest(),
+                "expectations_sha256": hashlib.sha256(
+                    (v1 / "expectations.json").read_bytes()
+                ).hexdigest(),
+                "scoring_sha256": hashlib.sha256(
+                    (v1 / "scoring.json").read_bytes()
+                ).hexdigest(),
+            }
+            (base / "MANIFEST.json").write_text(json.dumps(manifest))
+            with self.assertRaises(CorpusError) as cm:
+                load_corpus(base)
+            self.assertIn("set-equal", str(cm.exception).lower())
+
+
+class TestScoringTopKFromCorpus(unittest.TestCase):
+    """v3 review priority 5: scoring uses `corpus.scoring.top_k`,
+    not the operator's config."""
+
+    def test_scoring_top_k_from_corpus(self) -> None:
+        from bench.corpus import Corpus, Document, Query, Scoring
+        from bench.scoring import score_queries
+
+        # Construct an in-memory corpus with top_k=7.
+        corpus = Corpus(
+            version="v-test",
+            documents=(
+                Document(
+                    doc_id=f"d{i:07d}",
+                    content=f"c{i}",
+                    relevance_class="relevant",
+                )
+                for i in range(1, 11)
+            ),
+            queries=(
+                Query(
+                    query_id="q1",
+                    query="?",
+                    relevance_class="positive",
+                    relevant_doc_ids=("d0000001", "d0000002"),
+                ),
+            ),
+            expectations=None,  # type: ignore[arg-type]
+            scoring=Scoring(method="mpm recall", top_k=7, parameters={}),
+            manifest_path=None,  # type: ignore[arg-type]
+        )
+        # Pretend the ranker returned 10 rows, all in order.
+        top_ids = tuple(f"d{i:07d}" for i in range(1, 11))
+        result = score_queries(
+            [("q1", True, top_ids, ("d0000001", "d0000002"))],
+            k=corpus.scoring.top_k,
+        )
+        # k must be 7 (from corpus.scoring.top_k), not 5.
+        self.assertEqual(result["k"], 7)
+        # Precision@k = 2 relevant out of top-7 = 2/7.
+        agg = result["aggregates"]
+        self.assertAlmostEqual(agg["mean_precision_at_k"], 2.0 / 7.0)
+
+
+class TestEmptyPlainTextResult(unittest.TestCase):
+    """v3 review priority 6: MPM's plain-text 'No memories found'
+    response is a successful empty result, not a failure."""
+
+    def test_plain_text_empty_result_returns_empty_queryresult(self) -> None:
+        from bench.runner import _is_plain_text_empty, run_query, QueryResult
+        from bench.corpus import Query
+        from unittest import mock
+        import subprocess
+
+        # The marker check itself.
+        self.assertTrue(_is_plain_text_empty("No memories found."))
+        self.assertTrue(_is_plain_text_empty("no memories found."))
+        self.assertTrue(_is_plain_text_empty("  No memories found for query  "))
+        self.assertFalse(_is_plain_text_empty(""))
+        self.assertFalse(_is_plain_text_empty('{"memories": []}'))
+
+        # The runner: mock subprocess.run to return rc=0 with
+        # plain-text stdout; assert run_query returns an empty
+        # QueryResult.
+        q = Query(
+            query_id="q1",
+            query="?",
+            relevance_class="negative",
+            relevant_doc_ids=(),
+        )
+
+        fake_completed = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="No memories found.\n", stderr="",
+        )
+        with mock.patch("subprocess.run", return_value=fake_completed):
+            r = run_query(q, Path("/tmp/nope"), "/bin/true")
+        self.assertEqual(r.search_mode, "hybrid_empty")
+        self.assertEqual(len(r.rows), 0)
+        self.assertFalse(r.raw_cosine)
+
+    def test_malformed_response_still_raises(self) -> None:
+        from bench.runner import run_query
+        from bench.corpus import Query
+        from unittest import mock
+        import subprocess
+
+        q = Query(
+            query_id="q1",
+            query="?",
+            relevance_class="negative",
+            relevant_doc_ids=(),
+        )
+        # rc=0 but stdout is not "No memories found" and not
+        # valid JSON — must raise.
+        fake_completed = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="not json and not the empty marker", stderr="",
+        )
+        with mock.patch("subprocess.run", return_value=fake_completed):
+            with self.assertRaises(RuntimeError):
+                run_query(q, Path("/tmp/nope"), "/bin/true")
+
+
+class TestRecallMustNotMutateMemories(unittest.TestCase):
+    """v3 review priority 1: a recall run that mutates a tracked
+    field in the disposable DB (e.g. last_retrieved_at) is
+    detected by the per-query after-snapshot check.
+
+    This test does not invoke mpm; it constructs a snapshot
+    pair where the post-recall snapshot differs and asserts
+    the diff is non-empty.
+    """
+
+    def test_mutation_diff_detected(self) -> None:
+        from bench.harness import _mutation_diff
+
+        before = {
+            "memories": [
+                ("d0000001", "memories", "x", "[]", "{}", 1.0, None,
+                 "m", 8, "provider", 1, 0, 0),
+            ],
+            "retrieval_metadata": [],
+        }
+        after = {
+            "memories": [
+                ("d0000001", "memories", "x", "[]", "{}", 1.0, None,
+                 "m", 8, "provider", 1, 0, 1759000000),  # last_retrieved_at changed
+            ],
+            "retrieval_metadata": [
+                ("d0000001", 1, 1759000000, 0, 0),
+            ],
+        }
+        d = _mutation_diff(before, after)
+        self.assertEqual(d["status"], "FAIL")
+        self.assertTrue(
+            any(x.get("table") == "memories" for x in d["diffs"])
+            or any(x.get("table") == "retrieval_metadata" for x in d["diffs"]),
+            f"expected a diff on memories or retrieval_metadata, got {d['diffs']}",
+        )
+
+    def test_no_mutation_diff_clean(self) -> None:
+        from bench.harness import _mutation_diff
+
+        before = {
+            "memories": [("d0000001",)],
+            "retrieval_metadata": [],
+        }
+        after = {
+            "memories": [("d0000001",)],
+            "retrieval_metadata": [],
+        }
+        d = _mutation_diff(before, after)
+        self.assertEqual(d["status"], "clean")
+        self.assertEqual(d["diffs"], [])
+

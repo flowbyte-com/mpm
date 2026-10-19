@@ -26,6 +26,16 @@ Hardening (priority 1 of HAL's review, 2026-10-19):
   - Reject any environment variable whose name starts with
     `MPM_` or `OLLAMA_` (forward-compatible against future
     overrides MPM might add).
+
+v3 review (HAL 2026-10-19):
+  - All path safety checks run BEFORE any directory creation. If
+    the path resolves into a live-store sentinel or into the
+    snapshot workspace, the call raises and nothing is created
+    on disk. This avoids leaking side-effects into the live
+    store on the rejection path.
+  - Snapshot workspace helpers accept an optional `protected_root`
+    so tests can simulate ~/.mpm under a tempdir without ever
+    touching the real operator home.
 """
 
 from __future__ import annotations
@@ -75,6 +85,12 @@ DANGEROUS_ENV_PREFIXES: tuple[str, ...] = (
 # Paths that, if the realpath of a snapshot or output dir lands inside
 # them, cause a hard refusal. These are the load-bearing live-store
 # sentinels.
+#
+# v3 review: this is a module-level tuple populated at import time.
+# Tests that need to simulate a "home" root can pass a custom
+# `protected_root` to the assert_* helpers; the helpers do NOT
+# mutate this global. Production callers see the operator's real
+# home here.
 LIVE_STORE_SENTINELS: tuple[str, ...] = (
     str(Path.home() / ".mpm"),
     str(Path.home()),
@@ -108,75 +124,139 @@ def _path_is_under(child: Path, parent: Path) -> bool:
         return False
 
 
+def _sentinels_for(protected_root: Path | None) -> tuple[Path, ...]:
+    """Return the live-store sentinels to use for safety checks.
+
+    If `protected_root` is None, the module-level
+    `LIVE_STORE_SENTINELS` (which is rooted at the operator's real
+    `Path.home()`) is used. Tests pass a tempdir here to simulate
+    a "home" without touching the real one.
+    """
+    if protected_root is None:
+        return tuple(Path(s) for s in LIVE_STORE_SENTINELS)
+    return (protected_root, protected_root / ".mpm")
+
+
 def _assert_outside_live_store_sentinels(
-    real: Path, role: str
+    real: Path, role: str, sentinels: tuple[Path, ...]
 ) -> None:
     """Refuse if `real` is the same as or inside any live-store
     sentinel. `role` is "snapshot workspace" or "output dir" and
-    is used in the error message."""
-    for sentinel in LIVE_STORE_SENTINELS:
-        if _path_is_under(real, Path(sentinel)):
+    is used in the error message. `sentinels` is the
+    caller-supplied (or default) list of protected roots."""
+    for sentinel in sentinels:
+        if _path_is_under(real, sentinel):
             raise WorkspaceError(
                 f"refusing {role} {real}: resolves inside "
-                f"live-store sentinel {sentinel}"
+                f"protected root {sentinel}"
             )
 
 
-def assert_safe_workspace(snap: Path) -> Path:
+def assert_safe_workspace(
+    snap: Path,
+    protected_root: Path | None = None,
+    create: bool = True,
+) -> Path:
     """Resolve a snapshot workspace through realpath and refuse if it
-    lands inside any LIVE_STORE_SENTINELS, or if it is a symlink that
-    points outside the disposable set.
+    lands inside any live-store sentinel.
 
-    Returns the resolved realpath. The caller is expected to use the
-    returned path (not the original) for any further filesystem ops.
+    v3 review: the safety check runs BEFORE any directory creation.
+    If `snap` resolves into a protected root, the call raises and
+    nothing is created. If the path is safe, the dir is created
+    (when `create=True`) and the resolved realpath is returned.
+
+    Args:
+        snap: candidate snapshot workspace path.
+        protected_root: optional override for the live-store
+            sentinel set. Production callers leave this None
+            (uses `Path.home()` and `Path.home() / ".mpm"`).
+            Tests pass a tempdir here to simulate a "home" root
+            without touching the real one.
+        create: if True (default), create the dir with 0o700
+            after the safety check passes.
     """
-    if not snap.exists():
-        # Creating it is fine; just create under a known-safe parent
-        snap.mkdir(parents=True, exist_ok=True, mode=0o700)
+    sentinels = _sentinels_for(protected_root)
+    # Resolve as if the path existed. If it does not yet, realpath
+    # returns the parent-anchored absolute form. If it does, we
+    # get the resolved realpath including any symlinks. Either way
+    # the safety check uses the canonicalised form so a symlink
+    # pointing at ~/.mpm is caught.
     real = _realpath(snap)
-    _assert_outside_live_store_sentinels(real, "snapshot workspace")
+    _assert_outside_live_store_sentinels(real, "snapshot workspace", sentinels)
+    if create:
+        # Re-resolve to handle the case where `snap` is a new
+        # path whose parent might have changed (rare; cheap).
+        snap.mkdir(parents=True, exist_ok=True, mode=0o700)
+        real = _realpath(snap)
+        _assert_outside_live_store_sentinels(real, "snapshot workspace", sentinels)
     return real
 
 
-def assert_safe_output_dir(out: Path, snap_real: Path) -> Path:
+def assert_safe_output_dir(
+    out: Path,
+    snap_real: Path,
+    protected_root: Path | None = None,
+    create: bool = True,
+) -> Path:
     """Resolve an output directory and refuse if it lands inside the
     snapshot workspace, inside any live-store sentinel, or has
     permissions wider than 0o700.
 
-    The output dir is required for real runs (per C4(2)). The
-    --smoke and --selftest modes do not require it.
+    v3 review: the safety checks run BEFORE any directory creation.
+    If the path resolves into a protected root or the snapshot
+    workspace, the call raises and nothing is created on disk.
+    This is the load-bearing guarantee that the rejection path
+    does not leak a side-effect into the live store.
 
-    Hardening (priority 1 of HAL's review):
-      - Symlink-chain walk: refuse if any path component of `out`
-        (parents included) resolves into a live-store sentinel,
-        even if `out` itself is not currently a symlink.
-      - TOCTOU-aware: the realpath + permission check is repeated
-        at write time by `recheck_output_dir_safe`, which the
-        harness must call immediately before each write under
-        the output dir.
+    Args:
+        out: candidate output dir.
+        snap_real: the resolved realpath of the snapshot workspace;
+            `out` may not be inside it.
+        protected_root: optional override for the live-store
+            sentinel set (see `assert_safe_workspace`).
+        create: if True (default), create the dir with 0o700
+            after all safety checks pass.
     """
-    out.mkdir(parents=True, exist_ok=True, mode=0o700)
+    sentinels = _sentinels_for(protected_root)
     real = _realpath(out)
-
     if _path_is_under(real, snap_real):
         raise WorkspaceError(
             f"refusing output dir {out}: inside snapshot workspace {snap_real}"
         )
-    _assert_outside_live_store_sentinels(real, "output dir")
-
-    # Permission check. If a pre-existing dir is wider than 0o700,
-    # refuse; the harness must not write into a permissive dir.
-    mode = stat.S_IMODE(os.stat(real).st_mode)
-    if mode & 0o077:
-        raise WorkspaceError(
-            f"refusing output dir {real}: permissions {oct(mode)} are wider "
-            f"than 0o700; the harness requires private output dirs"
-        )
-
+    _assert_outside_live_store_sentinels(real, "output dir", sentinels)
+    # Permission check: a pre-existing dir wider than 0o700 is
+    # rejected. (If the dir does not exist yet, this check is
+    # skipped; the post-create chmod ensures 0o700.)
+    if real.exists():
+        mode = stat.S_IMODE(os.stat(real).st_mode)
+        if mode & 0o077:
+            raise WorkspaceError(
+                f"refusing output dir {real}: permissions {oct(mode)} are wider "
+                f"than 0o700; the harness requires private output dirs"
+            )
+    if create:
+        out.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Re-resolve after creation in case any intermediate path
+        # component was a symlink. Then re-run the sentinels
+        # check and the permission check.
+        real = _realpath(out)
+        _assert_outside_live_store_sentinels(real, "output dir", sentinels)
+        if _path_is_under(real, snap_real):
+            raise WorkspaceError(
+                f"refusing output dir {out}: inside snapshot workspace {snap_real}"
+            )
+        mode = stat.S_IMODE(os.stat(real).st_mode)
+        if mode & 0o077:
+            raise WorkspaceError(
+                f"refusing output dir {real}: permissions {oct(mode)} are wider "
+                f"than 0o700; the harness requires private output dirs"
+            )
     return real
 
 
-def recheck_output_dir_safe(out: Path, snap_real: Path) -> None:
+def recheck_output_dir_safe(
+    out: Path, snap_real: Path, protected_root: Path | None = None
+) -> None:
     """Re-run the output-dir safety checks immediately before a
     write. Closes the TOCTOU window between `assert_safe_output_dir`
     and the actual write: a malicious local actor could chmod the
@@ -184,10 +264,10 @@ def recheck_output_dir_safe(out: Path, snap_real: Path) -> None:
     gap. The harness MUST call this immediately before any write
     under `out`.
 
-    Raises WorkspaceError on any change that would make the output
-    dir unsafe (permissions widened, realpath now inside a sentinel
-    or inside the snapshot workspace, or the dir no longer exists).
+    `protected_root` follows the same convention as
+    `assert_safe_output_dir` (None = use real Path.home()).
     """
+    sentinels = _sentinels_for(protected_root)
     if not out.exists():
         raise WorkspaceError(
             f"output dir {out} disappeared between safe check and write"
@@ -195,10 +275,10 @@ def recheck_output_dir_safe(out: Path, snap_real: Path) -> None:
     real = _realpath(out)
     if _path_is_under(real, snap_real):
         raise WorkspaceError(
-            f"output dir {out} now resolves inside snapshot workspace "
+            f"refusing output dir {out}: now resolves inside snapshot workspace "
             f"{snap_real} (TOCTOU)"
         )
-    _assert_outside_live_store_sentinels(real, "output dir")
+    _assert_outside_live_store_sentinels(real, "output dir", sentinels)
     mode = stat.S_IMODE(os.stat(real).st_mode)
     if mode & 0o077:
         raise WorkspaceError(
@@ -256,10 +336,10 @@ def scrubbed_env(snap: Path) -> dict[str, str]:
       - Set HOME to a per-snapshot fake-home, pre-created by the
         harness, so MPM's $HOME/.mpm fallback (config.go:529-597)
         resolves to the fake-home and not the operator's real home.
-      - Explicitly UNSET DANGEROUS_ENV_KEYS. An empty-string value
-        for MPM_DB_LOCK is still picked up as a non-empty override
-        at handlers_shred_database_reset.go:397, so the only safe
-        thing is to leave the key absent.
+      - Explicitly UNSET DANGEROUS_INHERITED_KEYS. An empty-string value
+        for MPM_DB_LOCK is still picked up as a non-empty override at
+        handlers_shred_database_reset.go:397, so the only safe thing
+        is to leave the key absent.
       - Hardening (priority 1 of HAL's review): also scrub any
         env var whose name starts with one of the
         DANGEROUS_ENV_PREFIXES. This is a forward-compatible guard

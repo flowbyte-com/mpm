@@ -850,3 +850,160 @@ the `gate` job, so the suite is reachable from CI.
   creates the path as the rejected output target. The directory
   is empty (no leakage) and correctly reflects the rejection
   path. Per HAL's instruction, the directory is left in place.
+  (v3 review: the v2 mkdir-then-check ordering created this
+  artifact on disk before the safety check ran. v3 runs the
+  check first; the corresponding v3 test
+  `test_output_dir_in_simulated_home_mpm_rejected_no_mkdir`
+  uses a tempdir as the simulated home and asserts the
+  candidate path is NOT created on rejection. The existing
+  artifact is intentionally NOT removed.)
+
+## v3 review (HAL 2026-10-19) — design notes
+
+This section records the design-level changes from HAL's v3
+review. The harness skeleton (workspace, env scrubbing,
+fingerprint, runner, reporter) is unchanged in shape; the
+contracts inside those modules were tightened to address seven
+priorities.
+
+### P1 — per-query mutation capture
+
+The mutation check in v2 captured a single "before" and a single
+"after" snapshot, then compared. v3 captures the **before**
+snapshot **immediately before the first query**, then takes a
+fresh **after** snapshot **after every query**, and diffs. Any
+diff on any tracked table fails the run.
+
+Tracked tables and fields (v3):
+
+* `memories` — id, content, tags, metadata, weight, deleted_at,
+  embedding_model, embedding_dimension, embedding_source,
+  has_embedding, has_challenge, last_retrieved_at
+* `reference_chunks` — id, doc_id, chunk_index, section, content,
+  embedding_model, embedding_dimension, embedding_source,
+  has_embedding
+* `retrieval_metadata` — all columns
+* `contradiction_queue` — all columns
+* `challenges` — all columns
+
+The diff is computed as a multiset difference using
+`collections.Counter` over the tuple of tracked fields. A
+change to `last_retrieved_at`, for example, must surface as a
+diff. v2 would not have caught a "single row's
+`last_retrieved_at` changed between queries" pattern.
+
+### P2 — workspace validation order and `protected_root`
+
+The v2 `assert_safe_workspace` /
+`assert_safe_output_dir` ordered `mkdir(parents=True,
+exist_ok=True, mode=0o700)` **before** the safety checks. The
+side effect was that the rejection path could leave a directory
+behind. v3 inverts the order: safety checks first, mkdir only
+on success. The `protected_root` parameter (defaulting to
+`Path.home()`) lets tests simulate a home directory under
+`/tmp` without referencing the real one. The snapshot workspace
+is now created via `tempfile.mkdtemp` (per-run private),
+replacing the PID-derived reusable name.
+
+`reject_unsafe_symlinks` now runs on the snapshot workspace
+**before** the MPM subprocess spawns. A within-snap symlink
+into a protected root aborts the run before any external
+process sees the workspace.
+
+### P3 — regeneration coverage of `reference_chunks`
+
+`verify_regeneration_complete` now checks BOTH `memories` AND
+`reference_chunks`. New parameters
+`expected_reference_doc_ids`,
+`expected_memories_row_count`,
+`expected_reference_chunks_row_count` catch:
+
+* NULL/missing vectors in `reference_chunks` (was
+  references-chunks-silent)
+* A partial backfill where row count is satisfied but
+  doc-coverage is not
+* A partial backfill where doc-coverage is satisfied but
+  row count is not
+
+Failures are labelled in the report as
+`gate 1: missing/NULL detection` or
+`gate 1: partial backfill detection` so a future operator
+reading the report can tell which invariant failed.
+
+### P4 — two genuine raw-cosine measurements
+
+The v2 raw-cosine path used a SHA-256 hash of the query text
+as a fallback. That was appropriate for the original hermetic
+test, but a real-model experiment is supposed to compare
+**two** query embeddings through the configured provider,
+not a hash versus a hash. v3 runs both measurements
+(unprefixed and `search_query: `-prefixed) through the
+provider, with identical document vectors across conditions,
+and computes cosine similarity on L2-normalized vectors.
+
+The runner exposes `RAW_COSINE_PREFIX_NOTE` and the prefix
+parameter on `_raw_cosine_ranking`; the test suite uses
+these directly. When `embedding_profile` is supplied and
+the embed call fails, the function refuses to silently
+substitute the hash path; the exception propagates to the
+run-level handler.
+
+L2 normalization at rank time is the other load-bearing
+detail. Document vectors are stored as the provider's
+output (which may be unnormalized), and the cosine
+similarity must be invariant under provider scale. v2's
+unnormalized dot product would have let a 2x-scaled
+document jump ahead purely on magnitude.
+
+### P5 — corpus contracts and scoring top-k
+
+`load_corpus` now refuses:
+
+* Duplicate `doc_id`s in `documents.json`
+  (raises `CorpusError("duplicate doc_ids")`).
+* A positive query with empty `relevant_doc_ids`
+  (Precision/Recall/MRR/nDCG would be undefined).
+* An `expectations.json` whose keys disagree with
+  `queries.json`'s `relevant_doc_ids` as a set
+  (the queries file is the source of truth).
+
+The scoring top-k is now read from `corpus.scoring.top_k`,
+not from a separate config. The committed v1 corpus
+documents this in the `scoring.json` `top_k` field; tests
+assert `k == 7` flows through to the aggregates.
+
+### P6 — empty results are empty, not failures
+
+MPM's `rc=0` plain-text `No memories found.` response is now
+treated as a successful empty result
+(`QueryResult(search_mode="hybrid_empty")`). Malformed
+responses and non-zero exits still raise. The
+`_is_plain_text_empty` helper lower-cases the stdout and
+matches against the `EMPTY_RESULT_MARKERS` tuple.
+
+### P7 — adversarial regression coverage
+
+The v3 adversarial suite adds 15 test methods across 14
+classes in `test_adversarial.py` (27 total in the file).
+The full bench suite is 94 tests; the non-vacuity floor
+remains 50. Every v3 test would have failed against the v2
+implementation. The test set covers:
+
+* Live-store inspection removed
+* Output dir validation before mkdir
+* Snapshot workspace is mkdtemp-derived
+* Symlink rejection before MPM launch
+* Partial reference_chunks backfill detection
+* Expected row count mismatch detection
+* Both raw-cosine conditions return valid scores
+* Doc-vector normalization makes ranking scale-invariant
+* Raw-cosine refuses to fall back to hash on real-provider
+  failure
+* Empty plain-text results return empty `QueryResult`
+* Malformed responses still raise
+* Mutation diff detection (controlled mutation
+  → diff; clean → clean)
+* Corpus doc_id uniqueness
+* Positive query must have relevant_doc_ids
+* expectations.json set-equal to queries.json
+* Scoring top-k from `corpus.scoring.top_k`

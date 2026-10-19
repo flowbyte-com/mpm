@@ -122,6 +122,9 @@ def verify_regeneration_complete(
     expected_dimension: int,
     expected_source: str = "provider",
     expected_doc_ids: set[str] | None = None,
+    expected_reference_doc_ids: set[str] | None = None,
+    expected_memories_row_count: int | None = None,
+    expected_reference_chunks_row_count: int | None = None,
 ) -> VerificationResult:
     """Open the snapshot read-only and assert every embedded row in
     both `memories` and `reference_chunks` has the exact intended
@@ -138,6 +141,21 @@ def verify_regeneration_complete(
     NULL embeddings, not just incorrect fingerprints on populated
     rows. The expected_doc_ids check is how missing rows are caught:
     if a row is missing entirely, the doc_ids set will not be covered.
+
+    v3 review (HAL 2026-10-19):
+      - NULL/missing detection now runs on BOTH `memories` AND
+        `reference_chunks`. The pre-fix code only counted
+        `memories` rows with `embedding IS NULL`; reference_chunks
+        were checked only for fingerprint match on rows that
+        already had a non-NULL embedding. A partial reference
+        backfill would therefore have passed verification.
+      - `expected_reference_doc_ids`: when provided, every
+        expected ref doc_id must have an embedded row. Missing
+        IDs are listed in failures.
+      - `expected_memories_row_count` and
+        `expected_reference_chunks_row_count`: when provided,
+        the actual row count in the table (with the expected
+        fingerprint) must match.
 
     Hardening (priority 2 of HAL's review):
       - L2-norm check: reject zero vectors (a `provider` row whose
@@ -162,6 +180,14 @@ def verify_regeneration_complete(
         expected_doc_ids: optional set of corpus doc_ids that must
             have a non-NULL embedded row. If provided, missing IDs
             are listed in failures.
+        expected_reference_doc_ids: optional set of reference doc_ids
+            whose chunks must all be embedded.
+        expected_memories_row_count: optional expected count of
+            embedded memories; if provided, the actual count must
+            match exactly.
+        expected_reference_chunks_row_count: optional expected count
+            of embedded reference_chunks; if provided, the actual
+            count must match exactly.
     """
     import math
 
@@ -281,6 +307,32 @@ def verify_regeneration_complete(
                 ref_huge_norm += 1
                 continue
 
+        # v3 review: NULL/missing detection in BOTH tables.
+        # The pre-fix code only checked the memories table; a
+        # partial reference_chunks backfill would have passed.
+        mem_unembedded = con.execute(
+            """
+            SELECT COUNT(*) FROM memories
+            WHERE deleted_at IS NULL AND embedding IS NULL
+            """
+        ).fetchone()[0]
+        ref_unembedded = con.execute(
+            """
+            SELECT COUNT(*) FROM reference_chunks
+            WHERE embedding IS NULL
+            """
+        ).fetchone()[0]
+        if mem_unembedded:
+            failures.append(
+                f"memories: {mem_unembedded} rows have NULL embedding "
+                f"(gate 1: missing/NULL detection)"
+            )
+        if ref_unembedded:
+            failures.append(
+                f"reference_chunks: {ref_unembedded} rows have NULL "
+                f"embedding (gate 1: missing/NULL detection)"
+            )
+
         # Expected doc_ids coverage. If the caller passed the corpus
         # IDs, every one must have an embedded row.
         missing_doc_ids: list[str] = []
@@ -292,16 +344,59 @@ def verify_regeneration_complete(
             missing_doc_ids = sorted(
                 d for d in expected_doc_ids if d not in present
             )
-            # Also check the unembedded-row count.
-            unembedded = con.execute(
+        missing_reference_doc_ids: list[str] = []
+        if expected_reference_doc_ids is not None:
+            # A reference doc is considered "covered" when at least
+            # one of its chunks has a non-NULL embedding. The
+            # caller passes doc_ids (not chunk_ids); we map
+            # chunk -> doc via the doc_id column on
+            # reference_chunks.
+            rows = con.execute(
+                "SELECT DISTINCT doc_id FROM reference_chunks "
+                "WHERE embedding IS NOT NULL"
+            ).fetchall()
+            covered = {r[0] for r in rows}
+            missing_reference_doc_ids = sorted(
+                d for d in expected_reference_doc_ids if d not in covered
+            )
+
+        # Expected row counts (v3 review): catch silent partial
+        # backfills even when every expected doc is "covered"
+        # by a chunk.
+        if expected_memories_row_count is not None:
+            actual_mem = con.execute(
                 """
                 SELECT COUNT(*) FROM memories
-                WHERE deleted_at IS NULL AND embedding IS NULL
-                """
+                WHERE embedding IS NOT NULL
+                  AND deleted_at IS NULL
+                  AND embedding_model = ?
+                  AND embedding_dimension = ?
+                  AND embedding_source = ?
+                """,
+                (expected_model, expected_dimension, expected_source),
             ).fetchone()[0]
-            if unembedded:
+            if actual_mem != expected_memories_row_count:
                 failures.append(
-                    f"memories: {unembedded} rows have NULL embedding (gate 1: missing/NULL detection)"
+                    f"memories: embedded row count {actual_mem} != "
+                    f"expected {expected_memories_row_count} "
+                    f"(gate 1: partial backfill detection)"
+                )
+        if expected_reference_chunks_row_count is not None:
+            actual_ref = con.execute(
+                """
+                SELECT COUNT(*) FROM reference_chunks
+                WHERE embedding IS NOT NULL
+                  AND embedding_model = ?
+                  AND embedding_dimension = ?
+                  AND embedding_source = ?
+                """,
+                (expected_model, expected_dimension, expected_source),
+            ).fetchone()[0]
+            if actual_ref != expected_reference_chunks_row_count:
+                failures.append(
+                    f"reference_chunks: embedded row count {actual_ref} "
+                    f"!= expected {expected_reference_chunks_row_count} "
+                    f"(gate 1: partial backfill detection)"
                 )
     finally:
         con.close()
@@ -366,6 +461,12 @@ def verify_regeneration_complete(
         failures.append(
             f"memories: {len(missing_doc_ids)} expected doc_ids missing entirely: "
             f"{missing_doc_ids[:5]}{'...' if len(missing_doc_ids) > 5 else ''}"
+        )
+    if missing_reference_doc_ids:
+        failures.append(
+            f"reference_chunks: {len(missing_reference_doc_ids)} expected "
+            f"ref doc_ids have no embedded chunk: "
+            f"{missing_reference_doc_ids[:5]}{'...' if len(missing_reference_doc_ids) > 5 else ''}"
         )
 
     return VerificationResult(

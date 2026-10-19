@@ -71,3 +71,31 @@ class TestLoadCorpus(unittest.TestCase):
         for q in corpus.negative_queries:
             self.assertFalse(q.is_positive)
             self.assertEqual(len(q.relevant_doc_ids), 0)
+
+    def test_expectations_set_equal_to_queries(self) -> None:
+        # v3 review (HAL 2026-10-19): the queries.json file is the
+        # source of truth for which docs are relevant to a query.
+        # expectations.json must be a set-equal parallel record; if
+        # the two disagree, scoring becomes meaningless.
+        corpus = load_corpus(CORPUS_DIR)
+        # Read expectations.json directly to compare the raw sets.
+        expectations = json.loads(
+            (CORPUS_DIR / "v1" / "expectations.json").read_text()
+        )
+        queries = json.loads(
+            (CORPUS_DIR / "v1" / "queries.json").read_text()
+        )
+        # Every positive query in queries.json must have a key
+        # in expectations.json, and the two sets must be equal.
+        for q in queries:
+            qid = q["query_id"]
+            if q.get("relevance_class") != "positive":
+                continue
+            qset = set(q.get("relevant_doc_ids", []))
+            eset = set(expectations.get(qid, []))
+            self.assertEqual(
+                qset, eset,
+                f"expectations[{qid!r}] must be a set-equal "
+                f"parallel record of queries[{qid!r}].relevant_doc_ids. "
+                f"queries={sorted(qset)} expectations={sorted(eset)}",
+            )

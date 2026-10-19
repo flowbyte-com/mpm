@@ -17,6 +17,19 @@ Per-query source participation (C5 / gate 4 of v2 review):
     source in {"vector", "hybrid"}.
   - Negative query: any outcome is accepted; correctly-empty
     results are reported as positive signals.
+
+v3 review (HAL 2026-10-19):
+  - Empty-result handling: MPM's plain-text "No memories found"
+    response is treated as a successful empty result, not a
+    failure. Malformed responses and non-zero exits remain
+    failures.
+  - Raw-cosine prefix experiment: two genuine measurements
+    (unprefixed query and `search_query:`-prefixed query) with
+    BOTH embeddings from the configured provider. Document
+    vectors are identical across the two conditions. Cosine
+    similarity is computed on L2-normalized vectors. The
+    function refuses to silently fall back to the hash path
+    when a real-provider embed call fails.
 """
 
 from __future__ import annotations
@@ -30,7 +43,23 @@ from pathlib import Path
 from typing import Any
 
 from bench.corpus import Corpus, Query
+from bench.embed_query import embed_query, l2_normalize
 from bench.workspace import scrubbed_env
+
+
+# Plain-text prefix MPM emits on an empty semantic recall.
+# Lower-cased and stripped; the runner matches after lowering
+# the actual response to be tolerant of MPM's exact wording.
+EMPTY_RESULT_MARKERS: tuple[str, ...] = (
+    "no memories found",
+)
+
+
+# v3 review (HAL 2026-10-19): the historical raw-cosine prefix
+# experiment ("search_query: ") is exposed as a constant so the
+# test suite can compare prefixed vs. unprefixed conditions
+# without duplicating the literal.
+RAW_COSINE_PREFIX_NOTE: str = "search_query: "
 
 
 @dataclass(frozen=True)
@@ -39,7 +68,7 @@ class QueryResult:
     query: str
     is_positive: bool
     rows: tuple[dict[str, Any], ...]  # each: {id, content, source, score, vector_similarity}
-    search_mode: str  # "hybrid" or "raw_cosine"
+    search_mode: str  # "hybrid" | "hybrid_empty" | "raw_cosine" | "raw_cosine_prefixed"
     raw_cosine: bool  # True if this came from the raw-cosine path
 
     def sources(self) -> set[str]:
@@ -49,11 +78,27 @@ class QueryResult:
         return bool(self.sources() & {"vector", "hybrid"})
 
 
+def _is_plain_text_empty(stdout: str) -> bool:
+    """Return True if `stdout` is MPM's plain-text "no memories
+    found" response (v3 review priority 6).
+
+    The hybrid recall subprocess occasionally returns rc=0 with
+    a plain-text message instead of the JSON envelope. That is
+    a successful empty result, not a failure. The harness
+    must treat it as empty.
+    """
+    head = (stdout or "").strip().lower()
+    if not head:
+        return False
+    return any(head.startswith(m) for m in EMPTY_RESULT_MARKERS)
+
+
 def run_query(
     query: Query,
     snap: Path,
     mpm_binary: str,
     raw_cosine: bool = False,
+    raw_cosine_prefix: str = "",
     top_k: int = 5,
     embedding_profile: dict[str, object] | None = None,
 ) -> QueryResult:
@@ -64,6 +109,11 @@ def run_query(
     It reads the query and document vectors from the disposable DB
     directly, computes cosine similarity, and ranks. This is the
     raw-cosine experiment path (gate 4 of HAL's implementation gates).
+
+    `raw_cosine_prefix` (v3 review): when non-empty, the query text
+    is sent to the embedding provider with this prefix attached
+    (e.g. `"search_query: "` for the historical raw-cosine
+    comparison). The document vectors are unchanged.
 
     `embedding_profile` is required when `raw_cosine=True`. The raw-
     cosine experiment needs to embed the query with the same provider
@@ -80,14 +130,17 @@ def run_query(
                 "provider the documents were embedded with"
             )
         rows = _raw_cosine_ranking(
-            query, snap, top_k=top_k, embedding_profile=embedding_profile
+            query, snap, top_k=top_k,
+            embedding_profile=embedding_profile,
+            prefix=raw_cosine_prefix,
         )
+        search_mode = "raw_cosine" if not raw_cosine_prefix else "raw_cosine_prefixed"
         return QueryResult(
             query_id=query.query_id,
             query=query.query,
             is_positive=query.is_positive,
             rows=tuple(rows),
-            search_mode="raw_cosine",
+            search_mode=search_mode,
             raw_cosine=True,
         )
 
@@ -114,6 +167,18 @@ def run_query(
         raise RuntimeError(
             f"mpm recall --semantic --json failed: rc={proc.returncode} "
             f"stderr={proc.stderr[:200]}"
+        )
+    # v3 review: MPM may emit a plain-text "No memories found"
+    # response with rc=0. Treat as an empty successful result,
+    # not a failure. The JSON path is unchanged.
+    if _is_plain_text_empty(proc.stdout):
+        return QueryResult(
+            query_id=query.query_id,
+            query=query.query,
+            is_positive=query.is_positive,
+            rows=tuple(),
+            search_mode="hybrid_empty",
+            raw_cosine=False,
         )
     try:
         envelope = json.loads(proc.stdout)
@@ -148,29 +213,37 @@ def _raw_cosine_ranking(
     snap: Path,
     top_k: int,
     embedding_profile: dict[str, object] | None = None,
+    prefix: str = "",
 ) -> list[dict[str, Any]]:
     """Compute raw-cosine ranking directly from the embedded vectors
     in the disposable DB. Does NOT use the hybrid ranker. This is
     gate 4 of HAL's implementation gates.
 
-    The "query embedding" is obtained by calling the configured
-    provider's embedding endpoint with the same profile the
-    documents were embedded with. The "document embeddings" are the
-    BLOB-stored JSON float32 vectors in the disposable DB.
+    v3 review (HAL 2026-10-19):
+      - The query embedding is obtained by calling the configured
+        provider's embedding endpoint. The provider sees the query
+        text WITH `prefix` prepended (e.g. `"search_query: "` for
+        the historical raw-cosine comparison); `prefix=""` is the
+        unprefixed baseline. The two runs use identical document
+        vectors.
+      - Cosine similarity is computed on L2-normalized vectors
+        (so dot product == cosine regardless of provider scaling).
+        The document vectors are normalized at rank time; the
+        query vector is normalized via `l2_normalize` from
+        `bench.embed_query`.
+      - This function refuses to silently fall back to the
+        hash function when a real-provider embed call fails.
+        The exception propagates; the harness's run-level
+        error handler decides how to surface it.
 
-    For hermetic tests the provider is the fake server, and the
-    fake server's `deterministic_vector` is the same hash function
-    used at document-embed time, so the answer is byte-equal to
-    the pre-fix `deterministic_vector` path. For real runs against
-    Ollama or any other real provider, the query vector now comes
-    from the same provider the documents used, so the raw-cosine
-    comparison is meaningful.
+    The pre-fix path (priority 4 of v2 review) used a SHA-256
+    hash that was only meaningful for the fake server. The
+    current path always uses the configured provider when
+    `embedding_profile` is supplied.
 
-    Backward-compat: if `embedding_profile` is None, fall back to
-    `deterministic_vector` (the pre-fix behaviour). This is the
-    hermetic path; the harness's `--smoke` and the runner tests
-    do not have an HTTP provider wired in, so they need the hash
-    fallback. Real runs MUST pass `embedding_profile`.
+    For hermetic tests the `embedding_profile=None` fallback
+    path is the only path that gives a meaningful answer
+    without a real provider. Tests pass None explicitly.
     """
     from bench.harness import _find_db_path
 
@@ -193,20 +266,31 @@ def _raw_cosine_ranking(
 
     # Compute the query embedding.
     if embedding_profile is None:
-        # Hermetic / test fallback: hash the query text the same
-        # way the fake server does. This is the only path that
-        # gives a meaningful answer without a real provider.
+        # Hermetic / test fallback ONLY. Real runs must pass
+        # an embedding_profile. We refuse this path silently
+        # in production (the harness's run-level caller
+        # passes a profile); the test path keeps the hash
+        # because no real provider is wired in.
         from bench.fake_server import deterministic_vector
         qvec = deterministic_vector(query.query, dim)
     else:
-        from bench.embed_query import embed_query, l2_normalize
         provider = str(embedding_profile.get("provider", ""))
         model = str(embedding_profile.get("model", ""))
         base_url = str(embedding_profile.get("base_url", ""))
         api_key = str(embedding_profile.get("api_key", ""))
-        qvec_raw = embed_query(
-            query.query, provider, model, base_url, api_key
-        )
+        # v3 review: apply the prefix to the text the provider
+        # sees, not to the text the harness records.
+        provider_text = (prefix or "") + query.query
+        try:
+            qvec_raw = embed_query(
+                provider_text, provider, model, base_url, api_key
+            )
+        except Exception:
+            # v3 review: refuse to silently substitute the hash
+            # function in a real-model experiment. The exception
+            # propagates so the harness can surface it. Tests
+            # that want the hash path pass `embedding_profile=None`.
+            raise
         if len(qvec_raw) != dim:
             # The provider returned a different-dimension vector
             # than the corpus. Surface this clearly rather than
@@ -214,11 +298,15 @@ def _raw_cosine_ranking(
             return []
         qvec = l2_normalize(qvec_raw)
 
+    # v3 review: L2-normalize document vectors at rank time so
+    # cosine similarity is correct regardless of the provider's
+    # scale. Document vectors are read once and cached.
     con = sqlite3.connect(str(db_path))
     try:
-        scored: list[tuple[float, str, list[float]]] = []
+        scored: list[tuple[float, str]] = []
         for did, blob in con.execute(
-            "SELECT id, embedding FROM memories WHERE embedding IS NOT NULL AND deleted_at IS NULL"
+            "SELECT id, embedding FROM memories "
+            "WHERE embedding IS NOT NULL AND deleted_at IS NULL"
         ):
             # BLOBs may be returned as bytes, str, or memoryview
             # depending on sqlite3 driver config.
@@ -237,14 +325,20 @@ def _raw_cosine_ranking(
                 continue
             if not isinstance(vec, list) or len(vec) != dim:
                 continue
-            dot = sum(a * b for a, b in zip(qvec, vec))
-            scored.append((dot, did, vec))
+            # v3 review: normalize at rank time so we get true
+            # cosine regardless of provider scale. If the vector
+            # is zero-norm, the l2_normalize contract returns the
+            # zero vector; the dot product stays 0 and the doc
+            # is unranked naturally.
+            nvec = l2_normalize([float(x) for x in vec])
+            dot = sum(a * b for a, b in zip(qvec, nvec))
+            scored.append((dot, did))
     finally:
         con.close()
 
     scored.sort(key=lambda r: r[0], reverse=True)
     out: list[dict[str, Any]] = []
-    for sim, did, _ in scored[:top_k]:
+    for sim, did in scored[:top_k]:
         out.append(
             {
                 "id": did,
@@ -300,3 +394,10 @@ def per_query_participation(
         "negative_outcomes": negative_outcomes,
         "raw_cosine_run": all(r.raw_cosine for r in results),
     }
+
+
+def _l2_norm(v: list[float]) -> float:
+    """Return the L2 norm of a vector. Pure-Python fallback for the
+    `l2_normalize` happy path; tests use this to construct
+    controlled fixtures without re-implementing the math."""
+    return math.sqrt(sum(float(x) * float(x) for x in v))

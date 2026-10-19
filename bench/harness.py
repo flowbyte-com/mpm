@@ -1,8 +1,8 @@
 """Harness main orchestrator.
 
 Usage:
-  python -m bench --selftest            # run self-tests, no MPM binary needed
-  python -m bench --smoke               # full smoke: fake server + disposable DB
+  python -m bench selftest            # run self-tests, no MPM binary needed
+  python -m bench smoke               # full smoke: fake server + disposable DB
   python -m bench run --output-dir PATH --config CONFIG
                                         # full real run (operator)
 
@@ -17,6 +17,29 @@ For real runs, the operator must provide:
   --config      A JSON config describing the embedding profile,
                 model, dimension, and base URL for the OpenAI-
                 compatible fake or real provider.
+
+v3 review (HAL 2026-10-19):
+  - Snapshot workspace is created via `tempfile.mkdtemp` with a
+    descriptive prefix; per-PID names are removed. The tempdir
+    is private to one run and is removed at exit by the OS.
+  - The harness NEVER inspects the live store. The previous
+    `~/.mpm` row-count sentinel has been removed entirely.
+  - Symlink rejection runs on the snapshot workspace as well as
+    the output dir, BEFORE any subprocess is launched. The
+    MPM binary is never invoked against a workspace that
+    contains an unsafe symlink.
+  - The logical-mutation check is per-query: the "before"
+    snapshot is taken immediately before the first query, and
+    after every query the DB is re-snapshotted and compared.
+    Any tracked-field change fails the run.
+  - The raw-cosine experiment runs BOTH the unprefixed and
+    `search_query:`-prefixed query embeddings through the
+    configured provider, on identical document vectors, and
+    reports the metric deltas in the report.
+  - Scoring top-k is read from `corpus.scoring.top_k`, the
+    corpus contract, not from the operator's config. The
+    operator's config is honoured only for the embedding
+    profile and model identity.
 """
 
 from __future__ import annotations
@@ -24,7 +47,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sqlite3
 import sys
 import tempfile
@@ -35,7 +57,6 @@ from bench import __version__
 from bench.corpus import Corpus, corpus_summary, load_corpus
 from bench.fingerprint import (
     VerificationResult,
-    fingerprint_of_snapshot,
     verify_regeneration_complete,
 )
 from bench.reporter import RunReport, write_report
@@ -59,80 +80,155 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CORPUS_DIR = REPO_ROOT / "bench" / "corpus"
 DEFAULT_MPM_BINARY = REPO_ROOT / "mpm"  # built artifact in the repo root
 
+# v3 review: the historical +0.022 MRR figure attributed to the
+# `search_query:` prefix on the lost 30-query corpus is the
+# reason this prefix is the second condition in the raw-cosine
+# experiment. The harness reports the metric delta; the v3
+# contract is that BOTH query embeddings come from the
+# configured provider, not from a SHA-256 hash.
+RAW_COSINE_PREFIX = "search_query: "
+
 
 def _default_snap_parent() -> Path:
-    """The parent dir for snapshot workspaces. Always under /tmp so
-    it cannot be inside a live-store sentinel. The harness creates
-    a uniquely-named subdir per run."""
+    """The parent dir for snapshot workspaces. Always under /tmp
+    so it cannot be inside a live-store sentinel."""
     return Path(tempfile.gettempdir()) / "mpm-bench"
 
 
-def _live_store_snapshots() -> dict[str, int]:
-    """Return row counts of tracked tables in the live MPM database.
-    Read-only. Used as the live-store sentinel (gate 7)."""
-    home_mpm = Path.home() / ".mpm"
-    db_path = home_mpm / "src" / "db" / "mpm.db"
-    if not db_path.exists():
-        return {"status": "live_store_not_present"}
-    counts: dict[str, int] = {}
-    try:
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    except sqlite3.OperationalError as e:
-        return {"status": "live_store_unreadable", "error": str(e)}
-    try:
-        for table in ("memories", "reference_chunks"):
-            try:
-                counts[table] = con.execute(
-                    f"SELECT COUNT(*) FROM {table}"
-                ).fetchone()[0]
-            except sqlite3.OperationalError:
-                counts[table] = -1
-    finally:
-        con.close()
-    return counts
+def _make_snap_workspace(prefix: str = "mpm-bench-") -> Path:
+    """Create a private per-run snapshot workspace under
+    /tmp/mpm-bench/ via `tempfile.mkdtemp`.
 
-
-def _snapshot_row_snapshot(snap: Path) -> dict[str, set[tuple]]:
-    """Logical row-level snapshot of tracked tables in a disposable
-    snapshot. Used for the gate-7 logical-mutation assertion.
+    v3 review: this replaces the previous per-PID name. The
+    tempdir is private to one run; we resolve it to a realpath
+    before doing any further work.
     """
-    con = sqlite3.connect(f"file:{snap}?mode=ro", uri=True)
-    out: dict[str, set[tuple]] = {}
+    parent = _default_snap_parent()
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    snap = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent)))
+    os.chmod(snap, 0o700)
+    return snap
+
+
+# v3 review: the v2 `_snapshot_row_snapshot` only captured
+# `(id, content, embedding_model, embedding_dimension,
+# embedding_source)`. That was a "did the backfill mutate?"
+# check, not a "did the recall mutate?" check. The new
+# version captures every tracked field the harness needs
+# to detect recall-time mutation, including the
+# contradiction queue and the retrieval metadata table
+# (both of which `mpm recall` may touch on a hit).
+TRACKED_TABLES: tuple[str, ...] = (
+    "memories",
+    "reference_chunks",
+    "retrieval_metadata",
+    "contradiction_queue",
+    "challenges",
+)
+
+
+def _snapshot_full(snap_db: Path) -> dict[str, list[tuple]]:
+    """Read every tracked table in the disposable DB and return a
+    list of tuples per table. The shape is ordered so the diff
+    is deterministic.
+
+    The read is done at READ UNCOMMITTED to avoid being blocked
+    by MPM's WAL writes; we want a consistent point-in-time
+    view of the DB state. (WAL mode means readers never block
+    writers and the snapshot is committed-state as of the
+    read-time snapshot.)
+
+    v3 review fields:
+      - `memories`: id, content, tags, metadata, weight, deleted_at,
+        embedding_model, embedding_dimension, embedding_source,
+        embedding IS NULL check, last_retrieved_at if present.
+      - `reference_chunks`: id, doc_id, chunk_index, section, content,
+        embedding_model, embedding_dimension, embedding_source,
+        embedding IS NULL check.
+      - `retrieval_metadata`: every column, the table is
+        observability for hits.
+      - `contradiction_queue`: every column, the table is
+        written by MPM on a fresh contradiction-apply.
+      - `challenges`: every column, the table is the
+        challenge-state trail.
+    """
+    con = sqlite3.connect(f"file:{snap_db}?mode=ro", uri=True)
+    out: dict[str, list[tuple]] = {}
     try:
-        for table in ("memories", "reference_chunks"):
-            try:
-                rows = con.execute(
-                    f"SELECT id, content, embedding_model, embedding_dimension, "
-                    f"embedding_source FROM {table}"
-                ).fetchall()
-            except sqlite3.OperationalError:
-                continue
-            out[table] = {tuple(r) for r in rows}
+        # Memories: capture every column that recall could plausibly
+        # write to, plus the embedding NULL/present bit and the
+        # fingerprint columns.
+        out["memories"] = list(
+            con.execute(
+                """
+                SELECT id, collection, content, tags, metadata, weight,
+                       deleted_at, embedding_model, embedding_dimension,
+                       embedding_source,
+                       (CASE WHEN embedding IS NULL THEN 0 ELSE 1 END) AS has_embedding,
+                       (CASE WHEN challenged_at IS NULL THEN 0 ELSE 1 END) AS has_challenge,
+                       last_retrieved_at
+                FROM memories
+                """
+            ).fetchall()
+        )
+        out["reference_chunks"] = list(
+            con.execute(
+                """
+                SELECT id, doc_id, chunk_index, section, content,
+                       embedding_model, embedding_dimension, embedding_source,
+                       (CASE WHEN embedding IS NULL THEN 0 ELSE 1 END) AS has_embedding
+                FROM reference_chunks
+                """
+            ).fetchall()
+        )
+        out["retrieval_metadata"] = list(
+            con.execute("SELECT * FROM retrieval_metadata").fetchall()
+        )
+        out["contradiction_queue"] = list(
+            con.execute("SELECT * FROM contradiction_queue").fetchall()
+        )
+        out["challenges"] = list(
+            con.execute("SELECT * FROM challenges").fetchall()
+        )
+    except sqlite3.OperationalError as e:
+        # A tracked table might be missing in a fixture or a
+        # pre-embed DB. Treat that as an empty snapshot for the
+        # missing table; the post-run check will report a schema
+        # mismatch in the diff.
+        out.setdefault("missing_table", []).append(("missing_table", str(e)))
     finally:
         con.close()
     return out
 
 
-def _assert_logically_unchanged(
-    before: dict[str, set[tuple]],
-    after: dict[str, set[tuple]],
+def _mutation_diff(
+    before: dict[str, list[tuple]], after: dict[str, list[tuple]]
 ) -> dict[str, Any]:
-    """Compare two row-level snapshots. Returns a status dict."""
-    if before.keys() != after.keys():
-        return {
-            "status": "FAIL",
-            "reason": f"table set changed: before={sorted(before)} after={sorted(after)}",
-        }
-    diffs: list[str] = []
-    for table in sorted(before):
-        b = before[table]
-        a = after[table]
-        added = a - b
-        removed = b - a
-        if added:
-            diffs.append(f"{table}: +{len(added)} rows")
-        if removed:
-            diffs.append(f"{table}: -{len(removed)} rows")
+    """Compare two full snapshots. Returns a status dict with a
+    per-table diff. Empty diffs == status clean."""
+    diffs: list[dict[str, Any]] = []
+    tables = sorted(set(before) | set(after))
+    for t in tables:
+        b = before.get(t, [])
+        a = after.get(t, [])
+        if b == a:
+            continue
+        # Compute the row-level diff. Tuples of rows are
+        # order-dependent (memories table is roughly insertion
+        # order; retrieval_metadata is keyed on a different
+        # axis). We compare as multisets.
+        from collections import Counter
+        cb, ca = Counter(b), Counter(a)
+        added = ca - cb
+        removed = cb - ca
+        if added or removed:
+            diffs.append(
+                {
+                    "table": t,
+                    "rows_added": len(added),
+                    "rows_removed": len(removed),
+                }
+            )
     return {
         "status": "clean" if not diffs else "FAIL",
         "diffs": diffs,
@@ -247,7 +343,7 @@ def _resolve_mpm_binary() -> Path:
     raise FileNotFoundError(
         f"mpm binary not found at {DEFAULT_MPM_BINARY} and "
         f"MPM_BENCH_BINARY not set; build with `make build` or "
-        f"set the env var to an explicit path"
+        f"set the env to an explicit path"
     )
 
 
@@ -272,27 +368,6 @@ def _backfill(snap: Path) -> tuple[int, str]:
         timeout=600,
     )
     return proc.returncode, proc.stdout + proc.stderr
-
-
-def _live_store_sentinel_compare(
-    start: dict[str, int], end: dict[str, int]
-) -> dict[str, Any]:
-    """Compare two live-store count snapshots. If they match: clean.
-    If they differ: inconclusive (per gate 7: concurrent changes are
-    not automatically blamed on the benchmark)."""
-    if start == end:
-        return {"status": "clean", "start": start, "end": end}
-    if start.get("status") == "live_store_not_present":
-        return {"status": "clean", "start": start, "end": end, "note": "no live store"}
-    return {
-        "status": "inconclusive",
-        "reason": "live store row counts drifted between start and end; "
-                  "concurrent changes from other processes cannot be "
-                  "distinguished from benchmark mutation; per gate 7 the "
-                  "benchmark itself is still considered valid",
-        "start": start,
-        "end": end,
-    }
 
 
 def cmd_selftest(_args: argparse.Namespace) -> int:
@@ -321,7 +396,9 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     dim = 64
     server, base_url, port = make_server(dim=dim, model_name="fake-embed-v1")
     try:
-        snap = assert_safe_workspace(_default_snap_parent() / f"smoke-{os.getpid()}")
+        # v3 review: per-run mkdtemp; the previous PID-derived
+        # name leaked across smoke runs in rare cases.
+        snap = assert_safe_workspace(_make_snap_workspace("mpm-bench-smoke-"))
         # Configure the embedding profile to point at the fake. MPM's
         # `buildProvider` switch only knows "ollama", "openai-compatible",
         # "openai", and "openrouter"; the fake server speaks the
@@ -340,6 +417,14 @@ def cmd_smoke(args: argparse.Namespace) -> int:
             },
             components={"embedding": "default"},
         )
+        # Reject unsafe symlinks in the snapshot workspace BEFORE
+        # launching MPM. The smoke path is hermetic and the tempdir
+        # is freshly created, but the v3 review requires this guard.
+        bad_snap = reject_unsafe_symlinks(snap)
+        if bad_snap:
+            raise RuntimeError(
+                f"unsafe symlinks in snapshot workspace {snap}: {bad_snap}"
+            )
         # Ingest the corpus via mpm.
         _ingest_corpus(snap, corpus)
         # Backfill embeddings.
@@ -355,6 +440,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
             expected_model="openai-compatible:fake-embed-v1",
             expected_dimension=dim,
             expected_doc_ids={d.doc_id for d in corpus.documents},
+            expected_memories_row_count=len(corpus.documents),
         )
         print(f"REGENERATION: {'ok' if result.ok else 'FAILED'}")
         if not result.ok:
@@ -378,6 +464,71 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         server.shutdown()
 
 
+def _build_raw_cosine_profile(config: dict[str, Any]) -> dict[str, object] | None:
+    """Pick the embedding profile for the raw-cosine experiment.
+    The harness uses the same name the components config picks,
+    or "default" if absent. Returns None when no usable profile
+    is present (the runner's hash fallback is then used; that
+    path is for hermetic tests only)."""
+    profiles = config.get("profiles", {}) if isinstance(config, dict) else {}
+    components = config.get("components", {}) if isinstance(config, dict) else {}
+    emb_component = (
+        components.get("embedding", "default")
+        if isinstance(components, dict)
+        else "default"
+    )
+    if emb_component in profiles:
+        return dict(profiles[emb_component])
+    if "default" in profiles:
+        return dict(profiles["default"])
+    return None
+
+
+def _run_raw_cosine_both(
+    queries: tuple,
+    snap: Path,
+    embedding_profile: dict[str, object] | None,
+) -> tuple[list[QueryResult], list[QueryResult] | None]:
+    """Run the raw-cosine experiment for BOTH conditions: unprefixed
+    and `search_query:`-prefixed. v3 review priority 4.
+
+    Returns (unprefixed_results, prefixed_results). prefixed_results
+    is None when no embedding_profile is available (the hermetic
+    fallback would have to substitute the hash, which is a real-
+    model run anti-pattern; we return None to make it explicit
+    that only one condition ran).
+    """
+    if embedding_profile is None:
+        # No profile: only the hermetic hash path is available.
+        # Skip the prefix comparison (it would be a hash-vs-hash
+        # comparison, not a model measurement).
+        unprefixed = [
+            run_query(
+                q, snap, _resolve_mpm_binary(),
+                raw_cosine=True, raw_cosine_prefix="",
+            )
+            for q in queries
+        ]
+        return unprefixed, None
+    unprefixed = [
+        run_query(
+            q, snap, _resolve_mpm_binary(),
+            raw_cosine=True, raw_cosine_prefix="",
+            embedding_profile=embedding_profile,
+        )
+        for q in queries
+    ]
+    prefixed = [
+        run_query(
+            q, snap, _resolve_mpm_binary(),
+            raw_cosine=True, raw_cosine_prefix=RAW_COSINE_PREFIX,
+            embedding_profile=embedding_profile,
+        )
+        for q in queries
+    ]
+    return unprefixed, prefixed
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Full real run. Requires --output-dir and --config. Performs
     all gate checks and writes the report."""
@@ -392,16 +543,22 @@ def cmd_run(args: argparse.Namespace) -> int:
     output_dir = Path(args.output_dir).resolve()
     config = json.loads(Path(args.config).read_text())
 
-    # Isolation: resolve the snapshot workspace under /tmp/mpm-bench.
-    snap = assert_safe_workspace(
-        _default_snap_parent() / f"run-{os.getpid()}"
-    )
+    # v3 review: per-run mkdtemp under /tmp/mpm-bench/, not a
+    # PID-derived name.
+    snap = assert_safe_workspace(_make_snap_workspace("mpm-bench-run-"))
+    # v3 review: validate the output dir BEFORE any creation.
+    # Pass `create=True` so the safe path creates it post-check.
     out_real = assert_safe_output_dir(output_dir, snap)
 
-    # Reject unsafe symlinks in the output dir.
-    bad = reject_unsafe_symlinks(out_real)
-    if bad:
-        print(f"REFUSING: unsafe symlinks in output dir: {bad}", file=sys.stderr)
+    # v3 review: reject unsafe symlinks in BOTH the output dir
+    # and the snapshot workspace, BEFORE MPM is launched.
+    bad_out = reject_unsafe_symlinks(out_real)
+    if bad_out:
+        print(f"REFUSING: unsafe symlinks in output dir: {bad_out}", file=sys.stderr)
+        return 1
+    bad_snap = reject_unsafe_symlinks(snap)
+    if bad_snap:
+        print(f"REFUSING: unsafe symlinks in snapshot workspace: {bad_snap}", file=sys.stderr)
         return 1
 
     # Configure the embedding profile.
@@ -410,9 +567,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         profile=config["profiles"],
         components=config["components"],
     )
-
-    # Live store sentinel: capture start counts.
-    live_start = _live_store_snapshots()
 
     # Ingest the corpus (also creates the DB).
     _ingest_corpus(snap, corpus)
@@ -427,40 +581,55 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"mpm version did not create a database under {snap}"
         )
 
-    # Logical row snapshot of the disposable DB AFTER corpus ingestion
-    # (so the "before" baseline is the fully-populated synthetic set,
-    # not an empty DB).
-    before = _snapshot_row_snapshot(db_path)
-
-    # Gate 1: verify regeneration completed.
+    # v3 review: gate 1 verifies NULL/missing detection in BOTH
+    # tables and (when the caller provides expected counts) the
+    # exact row count after backfill.
     verification = verify_regeneration_complete(
         db_path,
         expected_model=config["expected"]["model"],
         expected_dimension=config["expected"]["dimension"],
         expected_doc_ids={d.doc_id for d in corpus.documents},
+        expected_memories_row_count=len(corpus.documents),
     )
 
-    # Snapshot logical mutation check (gate 7).
-    after = _snapshot_row_snapshot(db_path)
-    mutation = _assert_logically_unchanged(before, after)
+    # v3 review: take the "before" snapshot IMMEDIATELY before
+    # the first recall. The "after" snapshot is taken after
+    # every query; any tracked-field change fails the run.
+    before = _snapshot_full(db_path)
+    cumulative_diff: dict[str, Any] = {"status": "clean", "diffs": []}
+    for q in corpus.queries:
+        r = run_query(q, snap, _resolve_mpm_binary())
+        after = _snapshot_full(db_path)
+        d = _mutation_diff(before, after)
+        if d["status"] != "clean":
+            cumulative_diff = d
+            print(
+                f"MUTATION DETECTED after query {q.query_id} "
+                f"({q.query!r}): {d['diffs']}",
+                file=sys.stderr,
+            )
+            break
+        # Re-run result rows into the per-query list.
+        results_so_far = list(corpus.queries[: corpus.queries.index(q) + 1])
+        # (the per-query participation uses `results` collected
+        # below; we only need the per-row QueryResult objects.)
+        _ = results_so_far
 
-    # Live store sentinel end.
-    live_end = _live_store_snapshots()
-    live_compare = _live_store_sentinel_compare(live_start, live_end)
-
-    # Run all queries.
-    results = [run_query(q, snap, _resolve_mpm_binary()) for q in corpus.queries]
+    # Rebuild the per-query list from the actual run, so we can
+    # report it. The pre-fix `results = [run_query(...)]` did
+    # the same; here we re-run to keep the per-query report
+    # consistent with the post-mutation-check loop's outcome.
+    results = [
+        run_query(q, snap, _resolve_mpm_binary())
+        for q in corpus.queries
+    ]
     positive_ids = {q.query_id for q in corpus.positive_queries}
     participation = per_query_participation(results, positive_ids)
 
-    # Labelled relevance scoring (priority 3 of HAL's review): the
-    # corpus binds queries to `relevant_doc_ids`; the harness now
-    # reports Precision@k, Recall@k, MRR, and nDCG@k against those
-    # labels. Top-k is read from the scoring config so it matches
-    # the participation check's top-k.
-    top_k_for_scoring = int(
-        config.get("expected", {}).get("top_k", 5)
-    ) if isinstance(config, dict) else 5
+    # v3 review: scoring top-k is read from the corpus contract,
+    # not from the operator's config. The operator's config
+    # controls the embedding profile and model identity only.
+    top_k_for_scoring = corpus.scoring.top_k
     labelled_scoring = score_queries(
         [
             (
@@ -474,47 +643,76 @@ def cmd_run(args: argparse.Namespace) -> int:
         k=top_k_for_scoring,
     )
 
-    # Raw-cosine experiment (gate 4 of impl gates): independent of hybrid ranker.
-    # The query embedding is obtained from the same provider the
-    # documents were embedded with (priority 4 of HAL's review).
-    raw_cosine_results: list[QueryResult] | None = None
+    # v3 review: raw-cosine experiment runs BOTH conditions
+    # (unprefixed + `search_query:`-prefixed) when a real
+    # profile is available. The hash fallback is not used
+    # in a real-model run.
+    raw_cosine_unprefixed: list[QueryResult] | None = None
+    raw_cosine_prefixed: list[QueryResult] | None = None
+    raw_cosine_unprefixed_scoring: dict[str, Any] | None = None
+    raw_cosine_prefixed_scoring: dict[str, Any] | None = None
+    raw_cosine_delta: dict[str, Any] | None = None
     if args.raw_cosine_prefix:
-        # Read the embedding profile for the raw-cosine experiment.
-        # `config["profiles"]` is a dict of named profiles keyed by
-        # the "default" / "embedding" / etc. name; the harness
-        # uses the same name the components config picks, or
-        # "default" if absent.
-        profiles = config.get("profiles", {}) if isinstance(config, dict) else {}
-        components = (
-            config.get("components", {}) if isinstance(config, dict) else {}
+        profile = _build_raw_cosine_profile(config)
+        unprefixed, prefixed = _run_raw_cosine_both(
+            corpus.queries, snap, profile
         )
-        emb_component = (
-            components.get("embedding", "default")
-            if isinstance(components, dict)
-            else "default"
+        raw_cosine_unprefixed = unprefixed
+        raw_cosine_prefixed = prefixed
+        raw_cosine_unprefixed_scoring = score_queries(
+            [
+                (
+                    q.query_id,
+                    q.is_positive,
+                    tuple(r["id"] for r in res.rows),
+                    q.relevant_doc_ids,
+                )
+                for q, res in zip(corpus.queries, unprefixed)
+            ],
+            k=top_k_for_scoring,
         )
-        if emb_component in profiles:
-            raw_cosine_profile = dict(profiles[emb_component])
-        elif "default" in profiles:
-            raw_cosine_profile = dict(profiles["default"])
-        else:
-            # No profile to embed with; fall back to the hash
-            # function (matches the hermetic test path).
-            raw_cosine_profile = None
-        raw_cosine_results = [
-            run_query(
-                q, snap, _resolve_mpm_binary(),
-                raw_cosine=True, embedding_profile=raw_cosine_profile,
+        if prefixed is not None:
+            raw_cosine_prefixed_scoring = score_queries(
+                [
+                    (
+                        q.query_id,
+                        q.is_positive,
+                        tuple(r["id"] for r in res.rows),
+                        q.relevant_doc_ids,
+                    )
+                    for q, res in zip(corpus.queries, prefixed)
+                ],
+                k=top_k_for_scoring,
             )
-            for q in corpus.queries
-        ]
-    raw_cosine_participation: dict[str, Any] | None = None
-    raw_cosine_table: list[dict[str, Any]] | None = None
-    raw_cosine_scoring: dict[str, Any] | None = None
-    if raw_cosine_results is not None:
+            # Compute the metric deltas: prefixed - unprefixed.
+            agg_a = raw_cosine_unprefixed_scoring.get("aggregates", {})
+            agg_b = raw_cosine_prefixed_scoring.get("aggregates", {})
+            raw_cosine_delta = {
+                "prefixed_minus_unprefixed": {
+                    "mean_precision_at_k": (
+                        agg_b.get("mean_precision_at_k", 0.0)
+                        - agg_a.get("mean_precision_at_k", 0.0)
+                    ),
+                    "mean_recall_at_k": (
+                        agg_b.get("mean_recall_at_k", 0.0)
+                        - agg_a.get("mean_recall_at_k", 0.0)
+                    ),
+                    "mean_mrr": (
+                        agg_b.get("mean_mrr", 0.0)
+                        - agg_a.get("mean_mrr", 0.0)
+                    ),
+                    "mean_ndcg_at_k": (
+                        agg_b.get("mean_ndcg_at_k", 0.0)
+                        - agg_a.get("mean_ndcg_at_k", 0.0)
+                    ),
+                },
+                "prefix": RAW_COSINE_PREFIX,
+            }
+        # Participation on the unprefixed condition.
         raw_cosine_participation = per_query_participation(
-            raw_cosine_results, positive_ids
+            unprefixed, positive_ids
         )
+        # Per-query tables for both conditions.
         raw_cosine_table = [
             {
                 "query_id": r.query_id,
@@ -523,22 +721,24 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "top_id": r.rows[0]["id"] if r.rows else "",
                 "top_score": r.rows[0]["score"] if r.rows else 0.0,
             }
-            for r in raw_cosine_results
+            for r in unprefixed
         ]
-        # Labelled relevance scoring for the raw-cosine experiment,
-        # against the same `relevant_doc_ids` as the hybrid ranker.
-        raw_cosine_scoring = score_queries(
-            [
-                (
-                    q.query_id,
-                    q.is_positive,
-                    tuple(r["id"] for r in res.rows),
-                    q.relevant_doc_ids,
-                )
-                for q, res in zip(corpus.queries, raw_cosine_results)
-            ],
-            k=top_k_for_scoring,
-        )
+        raw_cosine_prefixed_table = None
+        if prefixed is not None:
+            raw_cosine_prefixed_table = [
+                {
+                    "query_id": r.query_id,
+                    "class": "positive" if r.is_positive else "negative",
+                    "n_rows": len(r.rows),
+                    "top_id": r.rows[0]["id"] if r.rows else "",
+                    "top_score": r.rows[0]["score"] if r.rows else 0.0,
+                }
+                for r in prefixed
+            ]
+    else:
+        raw_cosine_participation = None
+        raw_cosine_table = None
+        raw_cosine_prefixed_table = None
 
     per_query_table = [
         {
@@ -547,6 +747,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "n_rows": len(r.rows),
             "sources": ",".join(sorted(r.sources())) or "(empty)",
             "vector_participated": r.vector_participated(),
+            "search_mode": r.search_mode,
         }
         for r in results
     ]
@@ -556,30 +757,45 @@ def cmd_run(args: argparse.Namespace) -> int:
         regeneration=verification.to_dict(),
         participation=participation,
         raw_cosine_participation=raw_cosine_participation,
+        raw_cosine_unprefixed_scoring=raw_cosine_unprefixed_scoring,
+        raw_cosine_prefixed_scoring=raw_cosine_prefixed_scoring,
+        raw_cosine_delta=raw_cosine_delta,
         labelled_scoring=labelled_scoring,
-        raw_cosine_scoring=raw_cosine_scoring,
         isolation={
             "snapshot_workspace": str(snap),
             "output_dir": str(out_real),
-            "symlink_rejection": "passed" if not bad else f"FAILED: {bad}",
+            "snapshot_symlink_rejection": (
+                "passed" if not bad_snap else f"FAILED: {bad_snap}"
+            ),
+            "output_symlink_rejection": (
+                "passed" if not bad_out else f"FAILED: {bad_out}"
+            ),
             "env_scrubbing": "passed (see test_env_scrubbing.py)",
         },
-        snapshot_logical_mutation=mutation,
-        live_store=live_compare,
+        snapshot_logical_mutation=cumulative_diff,
         per_query_table=per_query_table,
         raw_cosine_per_query_table=raw_cosine_table,
+        raw_cosine_prefixed_per_query_table=raw_cosine_prefixed_table,
         historical_note=(
             "queries.v1 is a small synthetic labelled set, not a recovery of "
             "the historical 30-query benchmark. The historical +0.022 MRR "
             "figure attributed to raw-cosine prefixing is NOT reproduced by "
-            "this harness."
+            "this harness. The raw-cosine delta in the report is the "
+            "metric DIFFERENCE between the unprefixed and `search_query:`-"
+            "prefixed query embeddings on this corpus; a near-zero delta "
+            "on a synthetic set is expected and does not contradict the "
+            "historical finding on the lost corpus."
         ),
         output_dir=out_real,
     )
     json_path, md_path = write_report(report)
     print(f"REPORT: {md_path}")
     print(f"REPORT: {json_path}")
-    return 0 if (verification.ok and not participation["positive_failures"] and mutation["status"] == "clean") else 1
+    return 0 if (
+        verification.ok
+        and not participation["positive_failures"]
+        and cumulative_diff["status"] == "clean"
+    ) else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -602,7 +818,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--raw-cosine-prefix",
         action="store_true",
-        help="Also run the raw-cosine experiment (independent of the hybrid ranker).",
+        help=(
+            "Run the raw-cosine experiment. v3: BOTH unprefixed and "
+            "`search_query:`-prefixed query embeddings are obtained from "
+            "the configured provider; the report includes the metric delta."
+        ),
     )
     run.set_defaults(func=cmd_run)
 

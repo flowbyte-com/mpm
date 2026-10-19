@@ -225,6 +225,113 @@ with a non-vacuity floor of 50 tests (current population 75). The
 `.github/workflows/build-test.yml` runs the same target in the
 `gate` job, so the suite is reachable from CI.
 
+### v3 review (HAL 2026-10-19)
+
+After the initial PR #40 went green, HAL completed a third review
+that focused on source correctness, isolation, and the experiment
+itself rather than on the harness skeleton. The corrections landed
+in a single focused commit; this section records what changed and
+why. The harness skeleton (workspace, env scrubbing, fingerprint,
+runner, reporter) is unchanged in shape — only the contracts inside
+those modules were tightened.
+
+**Priority 1 — logical mutation verification (C4 / gate 7).** The
+v2 implementation captured a "before" snapshot and compared once,
+at the end of the run, to whatever the disposable DB looked like
+*after* recall. v3 moves the snapshot to **immediately before the
+first query** and captures an **after** snapshot after every query;
+any diff (multiset-comparison across `memories`,
+`reference_chunks`, `retrieval_metadata`, `contradiction_queue`,
+`challenges`) fails the run. Tracked fields per row: id, content,
+tags, metadata, weight, deleted_at, embedding model / dimension /
+source / presence, has_challenge, last_retrieved_at, plus all
+columns of `retrieval_metadata`, `contradiction_queue`, and
+`challenges`. New tests
+`TestRecallMustNotMutateMemories` / `TestMutationAfterRecallDetected`
+prove the diff is detected on a controlled mutation and clean
+otherwise.
+
+**Priority 2 — production isolation.** The v2 path read
+`~/.mpm/src/db/mpm.db` as a "live store" sentinel. v3 removes that
+read entirely; the `live_store` field and the `_live_store_snapshots`
+helper no longer exist. The snapshot workspace is now created via
+`tempfile.mkdtemp` (each run gets its own private
+`/tmp/mpm-bench-run-*`). Both `assert_safe_workspace` and
+`assert_safe_output_dir` accept a `protected_root` parameter so
+tests can simulate a home directory under `/tmp` without ever
+referencing `Path.home() / ".mpm"`. The v2 mkdir-then-check ordering
+leaked `~/.mpm/harness-output-should-be-rejected` on disk during
+rejection; v3 runs the safety checks first and creates nothing on
+rejection. The artifact that earlier code did create was
+intentionally **inspected but not deleted** per HAL's instruction.
+`reject_unsafe_symlinks` now also runs on the snapshot workspace
+**before** MPM is launched; a within-snap symlink into a protected
+root is caught and the run aborts before any subprocess spawns.
+New tests: `TestLiveStoreNotInspected`,
+`TestOutputDirValidatedBeforeMkdir`, `TestSnapshotIsMkdtemp`,
+`TestSymlinkRejectedBeforeMpmLaunch`.
+
+**Priority 3 — regeneration verification covers both tables.**
+`verify_regeneration_complete` now checks BOTH `memories` AND
+`reference_chunks` for NULL/missing vectors. New parameters
+`expected_reference_doc_ids`,
+`expected_memories_row_count`, and
+`expected_reference_chunks_row_count` catch partial backfills even
+when coverage is satisfied. The pre-v3 path would have passed
+"5 of 10 reference chunks have embeddings" as long as the 5 looked
+right; v3 fails it explicitly with a "partial reference backfill
+detected" gate. New tests
+`TestPartialReferenceBackfillFails` /
+`TestExpectedReferenceRowCountMismatch` prove the failures are
+observable.
+
+**Priority 4 — raw-cosine prefix experiment is two genuine
+measurements.** The v2 path used a SHA-256 hash derived from the
+query text; v3 runs **two** real measurements through the
+configured provider — unprefixed query and
+`search_query:`-prefixed query. Both query embeddings come from the
+same provider, document vectors are identical across the two
+conditions, and cosine similarity is computed on L2-normalized
+vectors (so a 2x scale on a doc cannot jump the ranking). The
+runner now refuses to silently fall back to the hash path when
+`embedding_profile` is supplied and the embed call fails; the
+exception propagates. The report now shows unprefixed metrics,
+prefixed metrics, and the Δ between them per
+(Precision@k, Recall@k, MRR, nDCG@k). New tests
+`TestRawCosinePrefixComparison`,
+`TestRawCosineDocVectorNormalized`,
+`TestRawCosineRefusesHashInRealRun` cover the three sub-priorities.
+
+**Priority 5 — corpus and scoring correctness.** The committed
+v1 corpus uses sequential literal IDs (`d0000001`..`d0000030`) for
+human cross-referencing; the hash helper remains the documented
+fallback. `load_corpus` now refuses: (a) duplicate `doc_id`s, (b)
+a positive query with empty `relevant_doc_ids`, and (c) an
+`expectations.json` whose keys disagree with `queries.json`'s
+`relevant_doc_ids` as a set. The scoring top-k is read from
+`corpus.scoring.top_k`, not from the operator's config. The MRR /
+nDCG / Recall / Precision work from v2 is preserved unchanged.
+New tests: `TestCorpusIDUniqueness`,
+`TestPositiveQueryMustHaveRelevantDocIds`,
+`TestExpectationsMatchQueries`, `TestScoringTopKFromCorpus`,
+`TestExpectationsSetEqualToQueries`.
+
+**Priority 6 — empty results are empty, not failures.** MPM
+occasionally returns `rc=0` with the plain-text message
+`No memories found.`. v3 treats that as a successful empty
+result (`QueryResult(search_mode="hybrid_empty", rows=())`).
+Malformed responses and non-zero exits still raise. New tests
+`TestEmptyPlainTextResult` / `TestMalformedResponseStillRaises`
+prove the boundary.
+
+**Priority 7 — regression coverage.** The v3 adversarial suite has
+15 new test methods across 14 classes (total 27 in
+`test_adversarial.py`); every one of them would fail against the
+v2 implementation. The full bench suite is now 94 tests (the
+non-vacuity floor is 50). The bench tests do not open or modify
+any path under `Path.home() / ".mpm"`; the `protected_root=`
+parameter is what makes this possible.
+
 ### Reported without code change (scope discipline)
 
 - **TestHITLRotation_AgeTrigger** (release-gate order-dependent

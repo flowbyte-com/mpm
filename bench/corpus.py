@@ -189,14 +189,39 @@ def load_corpus(corpus_dir: Path) -> Corpus:
 
     # Cross-check: every relevant_doc_id in queries must exist in documents.
     doc_ids = {d.doc_id for d in documents}
+    if len(doc_ids) != len(documents):
+        # Duplicate doc_ids in the committed corpus. Refuse to start;
+        # a non-unique key would make `INSERT OR REPLACE` collisions
+        # silently collapse two distinct documents into one row.
+        dupes: list[str] = []
+        seen: set[str] = set()
+        for d in documents:
+            if d.doc_id in seen and d.doc_id not in dupes:
+                dupes.append(d.doc_id)
+            seen.add(d.doc_id)
+        raise CorpusError(
+            f"corpus documents.json contains duplicate doc_ids: {dupes}"
+        )
     for q in queries:
         for did in q.relevant_doc_ids:
             if did not in doc_ids:
                 raise CorpusError(
                     f"query {q.query_id} references unknown doc_id {did!r}"
                 )
+        # Positive queries must have at least one labelled relevant
+        # doc; otherwise Precision/Recall/MRR/nDCG are undefined
+        # and the scoring aggregates divide by zero.
+        if q.is_positive and not q.relevant_doc_ids:
+            raise CorpusError(
+                f"positive query {q.query_id} has empty relevant_doc_ids; "
+                f"labelled relevance scoring requires a non-empty label set"
+            )
 
-    # Cross-check: expectations keys must match query IDs.
+    # Cross-check: expectations keys must match query IDs AND the
+    # values must be a set-equal to the query's relevant_doc_ids.
+    # `queries.json` is the source of truth (it is the contract
+    # the ranker is scored against); `expectations.json` is a
+    # parallel audit that the corpus is internally consistent.
     expected_keys = {q.query_id for q in queries}
     actual_keys = set(expectations.by_query.keys())
     if expected_keys != actual_keys:
@@ -205,6 +230,15 @@ def load_corpus(corpus_dir: Path) -> Corpus:
         raise CorpusError(
             f"expectations key mismatch: missing={sorted(missing)} extra={sorted(extra)}"
         )
+    queries_by_id = {q.query_id: q for q in queries}
+    for qid, exp_ids in expectations.by_query.items():
+        q = queries_by_id[qid]
+        if set(exp_ids) != set(q.relevant_doc_ids):
+            raise CorpusError(
+                f"expectations[{qid}] {sorted(exp_ids)} != "
+                f"queries[{qid}].relevant_doc_ids {sorted(q.relevant_doc_ids)}; "
+                f"the two files must be a set-equal parallel record"
+            )
 
     if len(documents) < 30:
         # Soft check; not a hard fail. The design says "N>=30 documents".
@@ -223,12 +257,20 @@ def load_corpus(corpus_dir: Path) -> Corpus:
 
 
 def stable_doc_id(content: str) -> str:
-    """Return the stable 8-character ID for a document. This is the
+    """Derive an 8-character ID from a document's content. This is the
     format that survives MPM's shortID() 8-char truncation. The mapping
     is identity for any ID <= 8 chars; we choose exactly 8 chars to
     guarantee the abbreviated ID equals the corpus ID byte-for-byte.
 
     See `cmd/mpm/handlers_cascade.go:331-333` for shortID.
+
+    Note: the committed v1 corpus uses sequential literal IDs
+    (`d0000001`..`d0000030`) so a human reader can cross-reference
+    `relevant_doc_ids` in `queries.json` against the document order
+    in `documents.json` without recomputing hashes. The harness
+    neither generates nor enforces sequential IDs; the helper
+    above is the documented fallback for any future corpus
+    version that does not include explicit IDs in the JSON.
     """
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]
 
