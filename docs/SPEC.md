@@ -1495,6 +1495,79 @@ When two memories disagree, the system has to notice. `shared.contradiction_log`
 > `mpm challenge restore` refuses those with an explicit "cannot be reversed
 > through MPM" error rather than guessing, and no backfill or migration
 > rewrites them.
+>
+> **Superseded 2026-10-20 — the proposal scan is bounded and transactional
+> (issue #21).** `--propose` used to compare every pair in the corpus and
+> write each qualifying candidate through a `SELECT`-then-`INSERT` pre-check.
+> That made an operator-triggered scan quadratic in the corpus and left two
+> defects: a partial candidate set could be persisted by a scan that did not
+> finish, and two concurrent proposals of the same fresh pair could both
+> insert.
+>
+> The proposal now runs in two bounded phases, and each phase **refuses**
+> rather than truncating:
+>
+> | Phase | Budgets | On refusal |
+> |---|---|---|
+> | Discovery | `--propose-limit` (100/source, max 2 000), `--compare-budget` (100 000, 1 000..10 000 000), `--candidate-cap` (10 000) | Nothing is persisted; the scan is reported as `compare_budget` / `candidate_cap`. |
+> | Persistence | `--write-budget` (250 new rows) | Nothing is persisted; the batch is reported as `write_budget`. |
+>
+> `--propose-limit=all` is not supported and is rejected explicitly, and the
+> four proposal-scoped budgets are refused when typed without `--propose`.
+> Raising the scan limit never bypasses the other three budgets.
+>
+> The write is now a single transaction on a pinned connection
+> (`BEGIN IMMEDIATE`), with the unresolved-pair check repeated *inside* it.
+> The batch is all-or-nothing, the reported count is the number of
+> **confirmed committed** rows (zero on every failure path, including the
+> uncertain one), and concurrent proposers of the same pair are serialised
+> by the write lock. No schema change is involved.
+>
+> `--json` now prints **exactly one** envelope per invocation — it used to
+> print the proposal statistics as a separate document — with a nested
+> `propose` object and a `queue_total_unresolved` count distinct from
+> `queue_size`. The envelope is emitted on **every** path, including the
+> failure paths: a total that could not be determined is reported as
+> `null` with the reason in the envelope's `error` field, never as `0`.
+> A failed proposal exits non-zero and stops before the
+> review. The adjudication gate above is unchanged: a proposal still writes
+> only unverified candidates, and only an adjudicated row may penalise a
+> memory. See
+> [`RECALL-MUTATION.md`](./RECALL-MUTATION.md) and
+> [`ISSUE-21-PHASE-B-REPORT.md`](./ISSUE-21-PHASE-B-REPORT.md).
+>
+> **Updated 2026-10-20 — the proposal scan reads both sides of the corpus,
+> and the adjudication write is reported request by request.** The scan used
+> to read the shared side over the connection pool. SQLite's `ATTACH` is
+> **per connection** and the pool is deliberately not limited to one
+> connection, so the shared schema could be missing on the connection that
+> served the read; the failure was then read as "no shared database", and the
+> scan returned the **local half** as a successful result. The scan now pins
+> a connection, verifies its shared attachment, and reads both sides on it.
+> A shared source that is **configured but unreachable** is now an explicit
+> **error** rather than a successful local-only scan; a shared source that
+> is **not configured** remains local-only and remains a success, because an
+> installation without a shared database is a normal installation.
+>
+> An adjudication is a **write**, so the envelope reports what happened to
+> **each** `--adjudicate` request (`adjudications`: `adjudicated`, `failed`
+> or `not_attempted`). An invocation whose earlier request succeeded and
+> whose later one failed now exits non-zero with one envelope that reports
+> both — the earlier write is a durable side effect and is not concealed.
+> The outcomes are carried into **every** envelope the invocation emits
+> after the adjudication has run — the normal completion, the empty-queue
+> completion, and every later failure path — so an adjudication that
+> succeeded is never reported as an empty adjudication history. The
+> pre-adjudication envelopes (a refusal, a help request) are answered
+> before any adjudication runs and carry an **empty** list. A
+> `--help` request in `--json` mode is one JSON document like any other,
+> with the help text inside the envelope; the human help path is unchanged.
+> That holds at the **command line** too: `mpm` intercepts help requests
+> before dispatch and would otherwise render the plain-text `mpm ops`
+> family page on stdout, so a JSON-mode help request for this command is
+> routed to the handler that owns the page. The human paths are untouched,
+> and a JSON-mode help request is inert — it opens no database and writes
+> no queue row.
 
 If the two candidates land within a small margin of each other, the system **does not** auto-resolve. It writes a pending theory and waits for an operator. A clean winner can be auto-resolved — but only once an operator has adjudicated the pair; a coin-flip always escalates.
 
@@ -1844,6 +1917,8 @@ mpm ops stance synthesize <name> [flags]
 mpm ops shared [status]
 mpm ops resolve-contradictions [--propose] [--apply] [--json]  # Arc 1: dry-run inspect, explicit candidate scan, or apply resolutions
         [--adjudicate=ID:REASON]                             #    (per-row; only adjudicated rows may be applied)
+        [--propose-limit=N] [--compare-budget=N]             #    proposal budgets (all require --propose)
+        [--candidate-cap=N] [--write-budget=N]
 mpm ops broadcast <memory_id>                          # Arc 2: fan-out an event wake
         [--kind=rule|resolution|arbitration|memory]    #    (auto-detected from collection if omitted)
         [--rationale="..."]                            #    (REQUIRED for kind=memory)
@@ -1940,6 +2015,10 @@ CLI commands enforce byte and char caps on input payloads and rendered output, p
 | Route-render body cap | 9 500 chars | `cmd/mpm/route_render.go:179` (`routeOutputCap`) | Total rendered body size for `mpm ops stance` output, deliberately under Claude Code's 10 000-char hook stdout limit so the directive isn't truncated mid-injection. | not user-overridable |
 | Route-render mode hard cap | 9 000 chars | `cmd/mpm/route_render.go:180` (`routeModeHardCap`) | Hard ceiling on the mode portion of a rendered route — preserves room for persona content under the 9 500-char body cap when both are present. | not user-overridable |
 | `mpm ops resolve-contradictions` default `--limit` | 100 | `cmd/mpm/ops_resolve_contradictions.go:40` (`defaultResolveLimit`) | Default row count for `mpm ops resolve-contradictions --limit`. Capped at 10× the default (1 000) regardless of caller-supplied limit. | caller-controlled (capped at 1 000) |
+| `mpm ops resolve-contradictions --propose` scan limit | 100 per source | `cmd/mpm/ops_resolve_contradictions.go` (`defaultProposeScanLimit`) | How many memories each side of the corpus (local, shared) contributes to the proposal comparison window. Duplicated IDs are removed before any comparison. Raising it never bypasses the comparison, candidate or write budgets. | `--propose-limit=N` (1..2000; `all` is rejected) |
+| `mpm ops resolve-contradictions --propose` comparison budget | 100 000 | `internal/core/similarity_candidates.go` (`DefaultCompareBudget`) | How many pairs the bounded discovery pass may evaluate. Exceeding it refuses the scan and persists nothing. | `--compare-budget=N` (1 000..10 000 000) |
+| `mpm ops resolve-contradictions --propose` candidate cap | 10 000 | `internal/core/similarity_candidates.go` (`DefaultCandidateCap`) | How many qualifying candidates the scan may retain. Exceeding it refuses the scan and persists nothing. | `--candidate-cap=N` (1..10 000) |
+| `mpm ops resolve-contradictions --propose` write budget | 250 | `internal/core/similarity_candidates_store.go` (`DefaultWriteBudget`) | How many **new** queue rows the write transaction may insert. Exceeding it refuses the batch before the first INSERT. | `--write-budget=N` (1..250) |
 | `mpm decisions` (no-args) default row cap | 20 | `cmd/mpm/handlers_epistemology.go:839` (`defaultDecisionsListLimit`) | Hard-bounded row count for the no-args legacy `mpm decisions` listing. Replaces an unbounded listing that scaled linearly with collection size (per pointer-indirection sweep F-S-2). Use `mpm decisions list --limit N` for explicit pagination. | not user-overridable on the no-args path; `--limit` flag for paginated callers |
 
 <!-- cli:begin — auto-generated by `go run ./cmd/gen-cli`. Do not edit by hand. -->

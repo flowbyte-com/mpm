@@ -119,9 +119,9 @@ was found, because none was established.
 Discovery and persistence were kept, and are reachable on demand:
 
 ```bash
-mpm ops resolve-contradictions --propose              # scan + enqueue, then review
-mpm ops resolve-contradictions --propose-limit=500   # shallower, cheaper scan
-mpm ops resolve-contradictions                       # review only; adds nothing
+mpm ops resolve-contradictions --propose                        # scan + enqueue, then review
+mpm ops resolve-contradictions --propose --propose-limit=500     # shallower, cheaper scan
+mpm ops resolve-contradictions                                 # review only; adds nothing
 ```
 
 `--propose` is the **only** way a row is ever added, and it writes
@@ -129,16 +129,21 @@ independently of `--apply`: `--apply` executes verdicts on rows already in
 the queue, `--propose` populates the queue. Omitting both, the command is a
 pure read.
 
-Idempotency of `EnqueueContradiction` for the sequential case comes
-from a **Go-level pre-check** on the unresolved pair, not from a
-database-level guarantee. `EnqueueContradictionReport`
-(`internal/core/contradiction_log.go:199`, the live writer; see its
-`# Why the explicit pre-check` comment at `:171-181`) runs
-`SELECT COUNT(*) ... WHERE memory_id_a = ? AND memory_id_b = ?
-AND resolved_at IS NULL` (`:235-238`) before the `INSERT OR IGNORE`;
-a pending match returns `(false, nil)` and never reaches SQL.
+Idempotency of the proposal path is now enforced **inside the write
+transaction** rather than by a Go-level pre-check that runs before it.
+`EnqueueSimilarityCandidatesTransactional`
+(`internal/core/similarity_candidates_store.go`) opens a pinned connection
+with `BEGIN IMMEDIATE`, takes the unresolved-pair snapshot *inside* that
+transaction, and only then inserts. Two concurrent proposals of the same
+fresh pair are therefore serialised by SQLite's write lock: the second one
+blocks until the first commits, and then sees the committed row. The old
+`SELECT`-then-`INSERT` race — two transactions both seeing the pair as
+absent and both inserting — is closed for this path.
 
-Three things the pre-check is **not**:
+`EnqueueContradictionReport` (`internal/core/contradiction_log.go`) keeps
+its Go-level pre-check for the callers that still use it, but the proposal
+path no longer depends on it, and the pre-check's limitations are now facts
+about a *different* writer rather than about the queue as a whole:
 
 - The `UNIQUE(memory_id_a, memory_id_b, detected_at)` index
   (`internal/core/contradiction_schema_patch.go:69`) is not what
@@ -148,18 +153,16 @@ Three things the pre-check is **not**:
   second — faster than an operator can type the command twice. The
   pre-check was added in `9e75074` after this exact failure mode was
   measured.
-- The check is `SELECT` then `INSERT`, not atomic. Two concurrent
-  enqueues of the same fresh pair can both insert. That race is
-  accepted in `contradiction_log.go:193-198`: the queue is a review
-  worklist, a duplicate costs an operator one glance, and the
-  alternative — a new `UNIQUE` index on the live shared schema — is
-  a larger change than the defect warrants. The callers that matter
-  are sequential operator invocations.
-- The pre-check is scoped to `resolved_at IS NULL` to match the
-  queue's worklist semantics (`contradiction_schema_patch.go:21-24`,
-  the partial index on `resolved_at IS NULL`). Once a pair is
-  resolved it is immediately eligible to be queued again,
-  deliberately.
+- The proposal path's own snapshot is scoped to `resolved_at IS NULL` to
+  match the queue's worklist semantics
+  (`contradiction_schema_patch.go:21-24`, the partial index on
+  `resolved_at IS NULL`). Once a pair is resolved it is immediately
+  eligible to be queued again, deliberately. See "Bounded proposals" below.
+- A pair re-proposed within the same second as its original detection is
+  suppressed by the table's own UNIQUE constraint rather than by the
+  pending check. The suppression is counted and reported as
+  `candidates_skipped_constrained`, so "eligible 1, proposed 0" has an
+  explanation instead of looking like a lost write.
 
 The sequential case is pinned by
 `TestEnqueueContradictionReport_RepeatAcrossSecondsIsNotANewWrite`
@@ -169,6 +172,287 @@ inserted — a repeat run reports **0**, not last run's total
 re-announced as new work — and the end-to-end shape is pinned by
 `TestEnqueueSimilarityCandidates_SecondRunOverUnchangedDataInsertsNothing`
 (`internal/core/contradiction_queue_idempotency_test.go:156`).
+
+## Bounded proposals (issue #21)
+
+A proposal scan compares every pair in a window of memories, so its cost
+grows with the square of the window; and it writes to a durable queue that
+an operator has to read. Both are now bounded, and both **refuse** rather
+than truncate: a scan that cannot finish does not persist a partial
+candidate set, and a write that cannot fit does not insert a partial batch.
+
+### The five budgets
+
+| Budget | Flag | Default | Range | What it bounds |
+|---|---|---|---|---|
+| Memories scanned per source | `--propose-limit=N` | 100 | 1..2000 | How many memories each side of the corpus (local, shared) contributes to the comparison window. |
+| Pair comparisons | `--compare-budget=N` | 100,000 | 1,000..10,000,000 | How many pairs the discovery pass may evaluate. |
+| Candidate materialisation | `--candidate-cap=N` | 10,000 | 1..10,000 | How many qualifying candidates the scan may retain. |
+| New queue insertions | `--write-budget=N` | 250 | 1..250 | How many **new** queue rows the write transaction may insert. |
+| Rows reviewed | `--limit=N` | 100 | 1..1,000 | How many existing queue rows one review pass looks at. |
+
+The scan limit applies **separately** to local and to shared memories, and
+IDs duplicated across the two are removed before any comparison. A limit of
+100 therefore admits up to 200 memories before deduplication. Raising the
+scan limit never bypasses the other three budgets: a wider window implies
+more pairs, and the comparison budget is checked against that implied count
+independently.
+
+`--propose-limit=all` is **not supported** and is rejected explicitly. An
+unbounded scan is exactly the thing these budgets exist to prevent.
+
+The four proposal-scoped budgets are refused if typed without `--propose`.
+They describe a scan that is not happening, and silently accepting them
+would make the command report budgets it never applied.
+
+### A bounded scan is not a corpus count
+
+The candidate count in the output is the count of what the bounded pass
+found **inside the window it actually compared**. It is not a count of the
+whole store, and it is not a sample of the whole store either: a smaller
+limit is a cheaper and shallower scan, not a representative one. The JSON
+envelope reports `scan_complete` alongside the count, and the human output
+says "Scanned N memories".
+
+### The scan reads both sides of the corpus
+
+The proposal scan compares local memories against shared memories. On an
+installation that has a shared database, that means **both** sides are
+read — and the shared side is read on a connection whose shared attachment
+has been verified. SQLite's `ATTACH` is **per connection**, and the
+connection pool is deliberately not limited to a single connection, so an
+attachment made at startup lives on one pooled connection only. A read of
+the shared side issued over the pool can land on a connection that has no
+shared schema at all.
+
+What the operator gets depends on what is actually configured:
+
+- **No shared source configured** — the scan is local-only, and that is
+  **success**. An installation with no shared database is a normal
+  installation, and the operator gets a scan of what actually exists.
+- **A shared source configured and reachable** — both sides are read.
+- **A shared source configured but unreachable** — the scan **fails**,
+  loudly, and returns nothing. It does not fall back to local-only. A
+  configured shared source that cannot be read is a broken installation,
+  and a scan that reported success over half the corpus would hide exactly
+  the rows the operator most needs to compare.
+
+### Transactional semantics
+
+The candidate batch is inserted in **one** transaction on a pinned
+connection (`BEGIN IMMEDIATE`), and the unresolved-pair check is repeated
+*inside* that transaction. Consequences an operator can rely on:
+
+- The batch is **all-or-nothing**. An insertion failure rolls the whole
+  batch back; no partial batch is left behind.
+- The reported row count is the number of **confirmed committed** rows. A
+  refused, rolled-back or uncertain transaction reports **0**, because an
+  unconfirmed write is not a write.
+- A pair that is already an unresolved queue row is not re-added.
+- A previously **resolved** pair may be proposed again, even when its
+  evidence has not changed. Re-queueing a resolved pair is intended
+  behaviour, not a duplicate bug — the pair may have drifted since it was
+  resolved.
+- Two writers proposing the same pair at the same time are serialised by
+  the write lock; the second sees the first one's row inside its own
+  transaction.
+
+Transaction certainty is decided by the **rollback**, because the rollback
+is the operation that proves nothing was written.
+
+- A failed **commit** whose **rollback was confirmed** is a **confirmed
+  rollback** (`commit_state: "rolled_back"`, `completion:
+  "db_commit_rolled_back"`). SQLite refuses to roll back a transaction
+  that has already committed, so a successful rollback after a failed
+  commit proves the commit did not take effect. Nothing was written, and
+  the report says so.
+- A failed **rollback** — whatever triggered it, including a validation,
+  budget or queue-read refusal — is identified explicitly (`commit_state:
+  "uncertain"`, `completion: "rollback_failed"`). Once the rollback has
+  failed, nothing proves the queue is unchanged, so the outcome is
+  **unknown** and the queue must be verified before it is trusted. A
+  rollback failure is never reported under a cleaner-sounding name such
+  as `write_budget`, because that name would tell the operator their
+  queue is untouched — the one claim they must not be given.
+
+Both errors are preserved when both exist: the primary error in the
+envelope's `error` field, and the rollback error in the nested
+`rollback_error` field.
+
+There is no `uncertain_commit` completion name. A failed commit whose
+outcome could not be established necessarily had an unconfirmed rollback,
+so it is reported as `rollback_failed`; a failed commit whose rollback WAS
+confirmed is a confirmed rollback and is reported as
+`db_commit_rolled_back`.
+
+### Review order, and the two queue counts
+
+Queue rows are reviewed **oldest first**. A queue of 4,000 unresolved rows
+reviewed 100 at a time therefore works through the stalest items before the
+freshest ones.
+
+A proposal may add **more** rows than the 100-row review batch holds. The
+review batch is bounded; the *write* that produced the candidates is
+separately budgeted, and those are different limits. Expect
+`queue_total_unresolved` to exceed `queue_size` after a busy scan. The
+JSON envelope reports both: `queue_size` is the batch this invocation
+reviewed, `queue_total_unresolved` is how many unresolved rows the queue
+holds in total.
+
+### JSON output
+
+`--json` prints **exactly one** JSON object per invocation — one envelope,
+never two, on **every** path including the failure paths. There is no
+exception: an explicit `--help` request in `--json` mode exits zero and
+prints the **same envelope**, with the help text inside it under the
+`help` key. Plain help text on stdout would be a second, unparseable
+document, and the contract is one document. The human path
+(`mpm ops resolve-contradictions --help`) still prints the help text to
+stdout exactly as before. The envelope always carries the same keys:
+
+```
+queue_size               rows reviewed in this batch
+queue_total_unresolved   unresolved rows in the queue in total, or null
+                         when the queue could not be counted (null means
+                         "not known", NOT "zero")
+applied                  resolutions applied (0 unless --apply)
+close_calls              near-tie arbitrations proposed
+needs_adjudication       rows awaiting an operator's judgement
+needs_adjudication_rows  those rows, with their queue ids
+dry_run                  true unless --apply
+decisions                per-row resolution decisions
+propose                  nested proposal statistics (always present)
+adjudications            per-request outcomes for the --adjudicate
+                         requests this invocation made (always present,
+                         empty when it made none)
+help                    the command's help text when help was asked for;
+                         empty on every other path
+error                    why this invocation could not do what was asked,
+                         or null when it did
+```
+
+The JSON contract holds at the **command line**, not only inside the
+handler. `mpm` intercepts a help request before it dispatches, and the
+interception renders the **family's** plain-text page — which would be a
+second, unparseable document on stdout in JSON mode. A JSON-mode help
+request for this command is therefore routed to the handler that **owns**
+the page, so the envelope is the only thing stdout carries. The order of
+the flags does not matter: `--json --help` and `--help --json` are the
+same request and both produce one JSON document. The human paths are
+untouched: `--help` still prints this command's own page, and a human
+invocation that carries a flag in front of the help token
+(`--propose --help`) still resolves to the `mpm ops` family page. A
+JSON-mode help request is **inert**: it opens no database and writes no
+queue row.
+
+The nested `propose` object reports `requested`, `scan_limit_per_source`,
+`entries_scanned`, `pairs_examined`, `candidates_found_in_scan`,
+`scan_complete`, `candidates_materialised`, `candidates_proposed`,
+`candidates_skipped_pending`, `candidates_skipped_duplicate`,
+`candidates_skipped_constrained`, `compare_budget`, `candidate_cap`,
+`write_budget`, `completion`, `commit_state` and `rollback_error`.
+
+`rollback_error` is populated only when the ROLLBACK statement itself
+failed; it is `null` otherwise, including on a confirmed rollback.
+
+`completion` names the outcome precisely:
+
+```
+not_run              --propose was not passed
+complete             the scan and the write both succeeded
+compare_budget       the scan was refused by the comparison budget
+candidate_cap        the scan found more candidates than it may retain
+write_budget         the batch was refused by the write budget
+invalid_candidate    a candidate failed validation; the batch was refused
+invalid_flags        the invocation was refused before anything ran
+db_unavailable       the queue could not be reached; nothing was attempted
+db_busy              another writer held the lock
+rollback_failed      the ROLLBACK itself failed; the outcome is unknown
+db_commit_rolled_back  the COMMIT failed and the ROLLBACK was confirmed
+db_insert            an insertion failed and the rollback was confirmed
+db_error             another statement failed; the transaction was rolled back
+scan_failed          the scan could not read the corpus
+```
+
+`commit_state` is the authoritative statement of what happened to the
+queue: `refused`, `rolled_back`, `uncertain` or `confirmed`. `uncertain`
+means the outcome could not be established and the queue must be verified
+before it is trusted. A completion name says which PHASE failed; the
+commit state says what that means for durable state.
+
+On any proposal failure the command exits **non-zero** and stops before
+reviewing or resolving anything. A half-proposal followed by a half-review
+would leave the operator unable to tell which part of the output describes
+durable state.
+
+An **early refusal** — an invalid budget value, an unsupported
+`--propose-limit=all`, a rejected flag combination, an unknown flag, a
+database that could not be opened — is reported the same way: the
+command exits **non-zero** and `--json` still prints **exactly one**
+envelope, with the reason inside it. The refusal envelope is built
+**without consulting the database**, so an operator gets the same answer
+whether or not a database happens to exist. In `--json` mode the help text
+that accompanies a refusal goes to stderr; stdout carries the document and
+nothing else. An explicit `--help` request is not a refusal: it exits
+zero, and its help text travels inside the envelope under `help`.
+
+### Adjudications are reported one by one
+
+`--adjudicate=ID:REASON` is a **write**: it stamps a queue row as
+operator-adjudicated, and that stamp is what makes the row eligible to
+penalise a memory later. An invocation that names several rows and fails
+on one of them has therefore already written the others.
+
+The envelope's `adjudications` array reports **every** request the
+operator made, in the order they were made:
+
+```
+{"queue_id": 42, "status": "adjudicated",    "error": null}
+{"queue_id": 43, "status": "failed",          "error": "adjudicate queue row 43: ..."}
+{"queue_id": 44, "status": "not_attempted",   "error": null}
+```
+
+`adjudicated` means the row was stamped. `failed` means the request did
+not take effect, and carries the reason. `not_attempted` means the
+invocation stopped at the first failure and never tried that row: the
+request is reported rather than dropped, so the operator can see that it
+was never made rather than wonder whether it was.
+
+A failed adjudication exits **non-zero**, and the envelope carries the
+error at the top level as well. The envelope does **not** conceal the
+earlier successes — the durable state and the report agree, and a
+consumer that reads only `error` still has the whole `adjudications` array
+in front of it.
+
+### An adjudication that succeeded stays visible
+
+The outcomes are carried into **every** envelope the invocation emits
+after the adjudication has run: the normal completion, the empty-queue
+completion, and every later failure path (a proposal that failed, a queue
+that could not be counted, a queue that could not be loaded).
+
+An adjudication is a **durable write**. A later stage failing — or
+succeeding — is no reason to report an empty adjudication history: the
+row WAS stamped, and a consumer reading only the envelope has to be able
+to see that. An invocation that adjudicated a row and then reported
+"nothing was adjudicated" would be reporting the opposite of what
+happened.
+
+The **pre-adjudication** envelopes are the exception, and they are
+unambiguous: a refusal and a help request are answered before any
+adjudication runs, so their `adjudications` array is present and **empty**.
+An empty list there means "no request was made"; a non-empty list in a
+post-adjudication envelope means "these writes happened".
+
+### The proposal is not a verdict
+
+**SIMILARITY IS EVIDENCE OF RELATIONSHIP, NOT PROOF OF CONTRADICTION.**
+
+The proposal path proposes *pairs to look at*. It does not propose
+contradictions, and a scan producing many candidates is not a scan finding
+many conflicts. Nothing a proposal writes may penalise a memory: `--apply`
+requires an explicit per-row `--adjudicate` first. See "Applying a
+candidate requires adjudication" below.
 
 ## Applying a candidate requires adjudication
 
@@ -422,6 +706,25 @@ stores; MCP surfaces write only `retrieval_metadata`.
 The net was verified against the old behaviour by temporarily reintroducing
 the Phase 4 write behind an environment guard: **five tests fail**
 (cases 3, 4, 5, 11, 13) and pass again once removed.
+
+### Bounded-proposal coverage (issue #21)
+
+| Suite | Pins |
+|---|---|
+| `internal/core/similarity_candidates_bounded_test.go` | The bounded discovery pass: default and overridden scan limits, local/shared overlap and ID deduplication, comparison-budget and candidate-cap boundaries, the 75-row duplicate cluster, overflow-safe pair arithmetic, and internally consistent statistics for skipped, invalid, below-threshold and qualifying pairs. |
+| `internal/core/similarity_candidates_transactional_test.go` | The write transaction: fresh and partially populated queues, repeated scans, already-resolved pairs re-queued, write-budget refusal with zero new rows, a mid-insertion fault with a confirmed rollback, commit and rollback failures reported as uncertain, concurrent writers, lock contention, different-timestamp duplicate attempts, and malformed, reversed and forged-adjudication candidates. It also pins that a failed rollback is reported as uncertain even when a **validation**, a **budget** or a **queue-read** refusal triggered it. |
+| `cmd/mpm/ops_propose_candidates_test.go` | The proposal engine end to end: candidates found vs rows written, the write budget counting new pairs only, and the comparison-budget and candidate-cap refusals being reported rather than swallowed. |
+| `cmd/mpm/ops_resolve_propose_cli_test.go` | The CLI contract: one JSON envelope per `--json` invocation with one stable key set, the refused flag combinations refused before any database access, the parser boundaries, `--propose --dry-run` still inserting proposal rows, and a failed proposal exiting non-zero and stopping before the review. |
+| `cmd/mpm/ops_resolve_propose_errors_test.go` | The JSON error contract: exactly one parseable document on every refusal path — invalid budget values, `--propose-limit=all`, rejected flag combinations, unknown flags, a database that will not open, an ordinary proposal failure and a queue-load failure — each with a non-zero exit, the reason inside the envelope, and (for the early refusals) no database access at all. |
+| `cmd/mpm/ops_resolve_propose_transaction_test.go` | The transaction-certainty contract: a failed commit with a confirmed rollback is a confirmed rollback; a failed rollback is identified and leaves the outcome uncertain; both errors are preserved; `candidates_proposed` is zero unless the commit was confirmed; and the human output and the JSON output agree. |
+| `internal/core/similarity_scan_federated_test.go` | The federated scan reads both sides of the corpus: both sides are read on a **fresh pooled connection** (the pooled read of the shared schema is asserted to fail first, so the hazard is proved live rather than assumed), a shared source that is **configured but unreachable** is an error rather than a local-only success, an **unconfigured** shared source stays local-only and succeeds, and the fingerprint filter, the newest-first ordering, the per-side limit and the cross-side ID dedupe all still hold. |
+| `cmd/mpm/ops_resolve_adjudicate_json_test.go` | The adjudication reporting contract: a failed `--json --adjudicate` produces exactly one envelope with a non-zero exit and the reason inside it; an invocation whose **earlier** request succeeded and whose later one failed reports both, and the durable state matches the report; a request after the failure is reported as `not_attempted` rather than dropped; `--json --help` produces one JSON document with the help inside it; and the human help path is unchanged. |
+| `cmd/mpm/ops_resolve_json_help_router_test.go` | The JSON help contract **at the router** (the layer a shell invocation reaches first): `--json --help`, `--json -h`, `--help --json` and `-h --json` all print exactly one JSON document and nothing else on stdout; the human `--help` still prints the command's own page; a human invocation with a flag in front of the help token still renders the `mpm ops` family page; and the JSON-mode help request is inert — the database and the workspace digests are unchanged. |
+| `cmd/mpm/ops_resolve_adjudicate_success_json_test.go` | The reporting of a **successful** adjudication: one successful `--json --adjudicate` reports `status: "adjudicated"` with its queue id; two successful adjudications report both, in **request** order (the fixture asks for the higher id first, so an id-ordered report cannot pass); a successful adjudication survives a **later** command-stage failure (the queue load fails on a queue table that predates the `evidence` column) and stays visible in the error envelope; a successful adjudication survives the **empty-queue** completion (a trigger resolves the row as it is adjudicated, as a concurrent operator would); the report agrees with the **durable** queue state (the row really carries the stamp and is still unresolved); the JSON path emits exactly one document and nothing else while the human path keeps its confirmation line; and the pre-adjudication envelopes (refusal, help) still carry an empty list rather than an absent or null one. |
+
+Every one of these runs against a disposable database. The live MPM
+database is never opened by the test suite, and the live
+`mpm ops resolve-contradictions --propose` command is never executed by it.
 
 ## Related
 
