@@ -994,6 +994,48 @@ var subcommandHelpOwners = map[string]bool{
 	"ops resolve-contradictions": true,
 }
 
+// jsonSubcommandHelpOwners lists the paths whose owner handler must also
+// receive a JSON-MODE help request.
+//
+// A JSON-mode help request cannot be answered by the family page. The
+// --json contract says stdout carries exactly one JSON document, and the
+// family page is plain text. So the request has to reach a handler that
+// can answer it in kind.
+//
+// The list is separate from subcommandHelpOwners because the two ask
+// different questions. The human map asks "is this handler inert when it
+// is handed the trailing help token?", and every entry in it was measured
+// for that. A JSON-mode request is a different shape: it carries an
+// extra flag into the handler, and a handler that does not recognise the
+// help token in that position RUNS instead of helping. Measured across
+// every entry of the human map on 2026-10-20:
+//
+//	mpm topic list --json --help            printed a topic list
+//	mpm config capability --json --help     exited 1
+//	mpm config detect-embedding --json ...  exited 1
+//	mpm ops changelog --json --help          exited 1
+//
+// None of those are acceptable, and none of them are this command's
+// problem to fix. So a path is listed here only when its handler
+// recognises the help token with a flag in front of it AND can answer
+// in kind.
+//
+// Entries are added only after a regression test proves the end-to-end
+// result: one JSON document on stdout, a zero exit, and no mutation.
+var jsonSubcommandHelpOwners = map[string]bool{
+	// The resolve-contradictions handler recognises a help token in any
+	// position and answers a JSON-mode request with the JSON envelope,
+	// carrying the help text inside it under the "help" key. The
+	// handler's help branch returns before getDBConcrete(), so no
+	// database is opened and no queue row is read or written.
+	//
+	// TestOpsResolveContradictions_JSONHelpAtTheRouterIsOneJSONDocument
+	// proves the end-to-end result, and
+	// TestOpsResolveContradictions_JSONHelpAtTheRouterIsInert proves
+	// the inertness.
+	"ops resolve-contradictions": true,
+}
+
 // isSubcommandHelp reports whether the given args (post-parseFlags, with
 // cmdName still at index 0) indicate that --help was meant for a
 // SUBCOMMAND whose handler owns its own help page.
@@ -1005,12 +1047,58 @@ var subcommandHelpOwners = map[string]bool{
 // Membership in subcommandHelpOwners is REQUIRED, not merely the family
 // being a dispatch command. See the comment above that map for the
 // measured mutations this replaced.
+//
+// A FLAG IS NOT PART OF THE PATH — IN JSON MODE ONLY.
+//
+// `mpm ops resolve-contradictions --json --help` is a request for the
+// resolve-contradictions help page. The --json changes HOW the answer
+// must be delivered, not WHICH page is being asked for. In JSON mode
+// the family page cannot be the answer at all: the --json contract says
+// stdout carries exactly one JSON document, and the family page is plain
+// text.
+//
+// So a JSON-mode help request asks a SEPARATE map —
+// jsonSubcommandHelpOwners — about the command path with the flags
+// dropped. The two maps are separate on purpose:
+//
+//   - subcommandHelpOwners is a SAFETY decision. Every entry in it was
+//     measured for inertness against a human help request, which
+//     carries no flags.
+//
+//   - A JSON-mode request carries an extra flag into the handler, and a
+//     handler that does not recognise the help token in that position
+//     RUNS instead of helping. Measured across every entry of the human
+//     map: `mpm topic list --json --help` printed a topic list, and
+//     `mpm config capability --json --help`, `mpm config
+//     detect-embedding --json --help` and `mpm ops changelog --json
+//     --help` each started failing. Those are the reasons the JSON map
+//     is an explicit opt-in rather than the human map consulted with
+//     the flags dropped.
+//
+// The HUMAN path is untouched: a non-JSON help request resolves exactly
+// as it did before this change, and a JSON-mode request for a path that
+// is not in the JSON map still renders the family page.
 func isSubcommandHelp(args []string, cmdName string) bool {
 	if !commandsWithSubcommandDispatch[cmdName] {
 		return false
 	}
 	if len(args) < 2 {
 		return false
+	}
+	// A JSON-mode help request is answered by the handler that owns the
+	// page, because the family page cannot be JSON.
+	//
+	// The JSON branch is evaluated BEFORE the trailing-token check below,
+	// because in JSON mode the help token does not have to be LAST. The
+	// operator's request is the same either way: `mpm ops
+	// resolve-contradictions --json --help` and `mpm ops
+	// resolve-contradictions --help --json` are one request, and the
+	// JSON contract must hold for both. The human path keeps its
+	// trailing-token rule unchanged.
+	if jsonMode, _ := ExtractJSONFlag(args); jsonMode {
+		if isJSONModeHelpRequest(args, cmdName) {
+			return true
+		}
 	}
 	if args[len(args)-1] != "help" {
 		return false
@@ -1025,6 +1113,46 @@ func isSubcommandHelp(args []string, cmdName string) bool {
 	path = append(path, cmdName)
 	path = append(path, args[1:len(args)-1]...)
 	return subcommandHelpOwners[strings.Join(path, " ")]
+}
+
+// isJSONModeHelpRequest reports whether a JSON-mode invocation is a help
+// request for a path listed in jsonSubcommandHelpOwners.
+//
+// It is deliberately narrower than the human lookup:
+//
+//   - the help token may be ANYWHERE in the argument list, not only
+//     last, because `--json --help` and `--help --json` are the same
+//     request and both must produce one JSON document;
+//
+//   - flags are dropped when the path is built, because a flag changes
+//     HOW the answer is delivered, not WHICH page is being asked for;
+//     and
+//
+//   - the help token itself is dropped, so it cannot become part of the
+//     path.
+//
+// A path that is not in the opt-in map returns false, and the caller
+// falls through to the human resolution — which renders the family
+// page. That is the pre-existing behaviour for every command that has
+// not been measured and opted in.
+func isJSONModeHelpRequest(args []string, cmdName string) bool {
+	helpSeen := false
+	path := make([]string, 0, len(args)-1)
+	path = append(path, cmdName)
+	for _, tok := range args[1:] {
+		if tok == "help" {
+			helpSeen = true
+			continue
+		}
+		if strings.HasPrefix(tok, "-") {
+			continue
+		}
+		path = append(path, tok)
+	}
+	if !helpSeen {
+		return false
+	}
+	return jsonSubcommandHelpOwners[strings.Join(path, " ")]
 }
 
 // ============================================================================

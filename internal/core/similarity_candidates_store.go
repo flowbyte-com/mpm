@@ -59,12 +59,38 @@ func (dm *DatabaseManager) LoadSimilarityScanEntries(limit int, schemaPrefix str
 	if dm.db == nil {
 		return nil, fmt.Errorf("LoadSimilarityScanEntries: dm.db is nil")
 	}
+	q, args, err := similarityScanQuery(schemaPrefix, limit)
+	if err != nil {
+		return nil, fmt.Errorf("LoadSimilarityScanEntries: %w", err)
+	}
+
+	rows, err := dm.db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("LoadSimilarityScanEntries: %w", err)
+	}
+	defer rows.Close()
+
+	out, err := scanSimilarityEntries(rows)
+	if err != nil {
+		return nil, fmt.Errorf("LoadSimilarityScanEntries: %w", err)
+	}
+	return out, nil
+}
+
+// similarityScanQuery builds the scan statement for ONE side of the corpus.
+//
+// It is shared by the pooled read and the pinned-connection read so the two
+// cannot drift: the fingerprint filter, the exclusions, the ordering and the
+// per-side limit are the same contract whichever way the rows are fetched,
+// and a second copy of the statement is a second chance to get the filter
+// wrong.
+func similarityScanQuery(schemaPrefix string, limit int) (string, []any, error) {
 	// schemaPrefix is interpolated into the statement, so it is validated the
 	// same way both HybridSearch call sites validate theirs. The scan is a
 	// WRITE path — it feeds EnqueueSimilarityCandidates — so an unvalidated
 	// prefix here is a far worse problem than a bad read.
 	if err := ValidateSchemaPrefix(schemaPrefix); err != nil {
-		return nil, fmt.Errorf("LoadSimilarityScanEntries: %w", err)
+		return "", nil, err
 	}
 	// An empty active model means no provider is configured, so there is no
 	// fingerprint to filter on. Selecting everything then is the honest
@@ -90,18 +116,20 @@ func (dm *DatabaseManager) LoadSimilarityScanEntries(limit int, schemaPrefix str
 	if limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", limit)
 	}
+	return q, args, nil
+}
 
-	rows, err := dm.db.Query(q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("LoadSimilarityScanEntries: %w", err)
-	}
-	defer rows.Close()
-
+// scanSimilarityEntries reads a scan result set into ScanEntry values.
+//
+// A row whose vector cannot be parsed, or is empty, is skipped rather than
+// failing the whole scan: one malformed row must not cost the operator the
+// other rows in the window.
+func scanSimilarityEntries(rows *sql.Rows) ([]ScanEntry, error) {
 	var out []ScanEntry
 	for rows.Next() {
 		var id, embStr, content, meta string
 		if err := rows.Scan(&id, &embStr, &content, &meta); err != nil {
-			return nil, fmt.Errorf("LoadSimilarityScanEntries: scan: %w", err)
+			return nil, fmt.Errorf("scan: %w", err)
 		}
 		var emb []float32
 		if embStr == "" || json.Unmarshal([]byte(embStr), &emb) != nil || len(emb) == 0 {
@@ -118,6 +146,27 @@ func (dm *DatabaseManager) LoadSimilarityScanEntries(limit int, schemaPrefix str
 	return out, rows.Err()
 }
 
+// loadSimilarityScanEntriesOnConn reads ONE side of the corpus over a pinned
+// connection.
+//
+// The pinned connection is the point. SQLite's ATTACH is per-connection, so
+// a pooled query can land on a connection that has no `shared` schema
+// attached and fail with "no such table: shared.memories" — a failure that
+// looks exactly like "there is no shared database". The caller owns the
+// attachment; this function only reads.
+func (dm *DatabaseManager) loadSimilarityScanEntriesOnConn(ctx context.Context, conn *sql.Conn, limit int, schemaPrefix string) ([]ScanEntry, error) {
+	q, args, err := similarityScanQuery(schemaPrefix, limit)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := conn.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSimilarityEntries(rows)
+}
+
 // LoadSimilarityScanEntriesFederated scans BOTH sides of the corpus — the
 // local `memories` table and the ATTACHed `shared.memories` — and returns the
 // union. This is the entry point the propose command uses.
@@ -130,26 +179,95 @@ func (dm *DatabaseManager) LoadSimilarityScanEntries(limit int, schemaPrefix str
 // lives on the shared side regardless, so the scan and its destination were
 // reading from different databases.
 //
-// The scan degrades to local-only when no shared DB is attached, matching
-// hybridSearchScope: an unattached shared side is a normal configuration, not
-// an error, and the operator gets a scan of what actually exists.
+// THREE INSTALLATIONS, THREE ANSWERS:
+//
+// The shared side is read differently depending on what the operator has
+// actually configured, and the difference is the whole point of this
+// function:
+//
+//   - NO shared source configured: the scan is local-only, and that is
+//     NOT an error. It matches hybridSearchScope: an installation with no
+//     shared database is a normal installation, and the operator gets a
+//     scan of what actually exists.
+//
+//   - A shared source CONFIGURED AND REACHABLE: both sides are read, on a
+//     connection whose shared attachment has been verified.
+//
+//   - A shared source CONFIGURED BUT UNREACHABLE: the scan FAILS, loudly.
+//     It does not fall back to local-only. A configured shared source
+//     that cannot be read is a broken installation, and a scan that
+//     reported success over half the corpus would hide exactly the rows
+//     the operator most needs to compare.
+//
+// The reachability of the shared side is not something this function can
+// assume. SQLite's ATTACH is PER CONNECTION, and the pool is not limited to
+// one connection (db.go deliberately does not call SetMaxOpenConns(1),
+// because a single-connection pool deadlocks against a concurrent
+// transaction). The attachment made at startup therefore lives on ONE
+// pooled connection, and a pooled query can land on another one that has no
+// `shared` schema at all. Reading the shared side over the pool could fail
+// with "no such table: shared.memories" on a perfectly healthy install —
+// indistinguishable from "there is no shared database". So the shared side
+// is read over a PINNED connection whose attachment is verified first, the
+// same discipline the transactional writer and the queue counter use.
 //
 // limit applies PER SIDE, exactly as hybridSearchScope applies its limit per
 // side. The union is therefore up to 2x limit. This is deliberate: the limit
 // is a per-source cost bound, and a scan that silently saw only half the
 // corpus would be worse than a wider one.
 func (dm *DatabaseManager) LoadSimilarityScanEntriesFederated(limit int) ([]ScanEntry, error) {
-	local, err := dm.LoadSimilarityScanEntries(limit, "")
-	if err != nil {
-		return nil, err
+	if dm.db == nil {
+		return nil, fmt.Errorf("LoadSimilarityScanEntriesFederated: dm.db is nil")
 	}
 
-	shared, err := dm.LoadSimilarityScanEntries(limit, "shared.")
-	if err != nil {
-		if isSharedUnavailable(err) {
-			return local, nil
+	// An UNCONFIGURED shared source is a local-only installation. The scan
+	// is local-only, and it succeeds.
+	if !dm.sharedSourceConfigured() {
+		local, err := dm.LoadSimilarityScanEntries(limit, "")
+		if err != nil {
+			return nil, err
 		}
+		return local, nil
+	}
+
+	// A CONFIGURED shared source. Both sides are read over one pinned
+	// connection whose shared attachment has been verified, so the shared
+	// side cannot be lost to the pool handing out a fresh connection.
+	//
+	// A configured source whose ATTACH never succeeded is a broken
+	// installation, and the scan cannot do what it was asked to do. It is
+	// NOT a reason to answer with the local half.
+	if dm.sharedPath == "" {
+		return nil, fmt.Errorf("LoadSimilarityScanEntriesFederated: the shared database (%s) is configured "+
+			"but is not attached; the federated scan cannot read the shared side of the corpus",
+			dm.sharedSourcePath())
+	}
+	ctx := context.Background()
+	conn, err := dm.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("LoadSimilarityScanEntriesFederated: acquire connection: %w", err)
+	}
+	defer conn.Close()
+
+	if err := dm.ensureSharedAttachedOnConn(ctx, conn); err != nil {
+		// The shared source is configured and could not be attached. That is
+		// an error, not a reason to scan half the corpus.
 		return nil, fmt.Errorf("LoadSimilarityScanEntriesFederated: %w", err)
+	}
+
+	local, err := dm.loadSimilarityScanEntriesOnConn(ctx, conn, limit, "")
+	if err != nil {
+		return nil, fmt.Errorf("LoadSimilarityScanEntriesFederated: local scan: %w", err)
+	}
+
+	shared, err := dm.loadSimilarityScanEntriesOnConn(ctx, conn, limit, "shared.")
+	if err != nil {
+		// The shared source is configured and its rows could not be read.
+		// Returning the local half here would be a successful scan over
+		// half the corpus, which is the failure this function exists to
+		// prevent.
+		return nil, fmt.Errorf("LoadSimilarityScanEntriesFederated: shared scan (%s): %w",
+			dm.sharedSourcePath(), err)
 	}
 
 	// A memory can be promoted to shared and remain in local. Both copies are
@@ -170,6 +288,28 @@ func (dm *DatabaseManager) LoadSimilarityScanEntriesFederated(limit int) ([]Scan
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+// sharedSourceConfigured reports whether the operator CONFIGURED a shared
+// database source.
+//
+// It is not the same question as "is a shared database attached". A manager
+// that was told to attach a shared database and could not is a broken
+// installation; a manager that was never told to attach one is a
+// local-only installation. The two must not be answered the same way, and
+// only the first one is recorded on a manager that failed to attach.
+func (dm *DatabaseManager) sharedSourceConfigured() bool {
+	return dm.sharedConfiguredPath != "" || dm.sharedPath != ""
+}
+
+// sharedSourcePath is the configured shared database path, for error
+// messages. It falls back to the attached path for managers whose
+// configuration was recorded by the attach itself.
+func (dm *DatabaseManager) sharedSourcePath() string {
+	if dm.sharedConfiguredPath != "" {
+		return dm.sharedConfiguredPath
+	}
+	return dm.sharedPath
 }
 
 // memoryIsChallenged reports whether the metadata carries the challenge flag.

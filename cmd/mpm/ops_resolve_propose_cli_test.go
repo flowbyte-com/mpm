@@ -151,7 +151,7 @@ func TestResolveContradictions_JSONEnvelopeHasOneStableKeySet(t *testing.T) {
 	for _, key := range []string{
 		"queue_size", "queue_total_unresolved", "applied", "close_calls",
 		"needs_adjudication", "needs_adjudication_rows", "dry_run",
-		"decisions", "propose", "error",
+		"decisions", "propose", "adjudications", "help", "error",
 	} {
 		require.Contains(t, env, key, "the envelope must always carry %q", key)
 	}

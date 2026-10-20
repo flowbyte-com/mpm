@@ -880,3 +880,327 @@ cd internal/core && go test -tags fts5 -count=1 \
 No live database access, no deployment, no push, no PR, no merge and no
 issue closure were performed. Every test in the new suites runs against a
 disposable database under `t.TempDir()`.
+
+---
+
+## 7. Final-review corrections (HAL directive on PR #42)
+
+A HAL final review of DRAFT PR #42 (`bb0bb9a`) authorised two targeted
+corrections and no architectural redesign. This section records them. The
+implementation commit (`013e862`) and the corrective commit (`bb0bb9a`) are
+both preserved and untouched; this work is a **third**, additional commit.
+
+### 7.1 Federated scan connection safety
+
+**The defect.** `LoadSimilarityScanEntriesFederated` read the shared side
+over the **pooled** database. SQLite's `ATTACH` is **per connection**, and
+`internal/core/db.go` deliberately does not call `SetMaxOpenConns(1)` — a
+single-connection pool self-deadlocks when a transaction holds the sole
+connection and a nested helper performs a bare `db` lookup. The `ATTACH`
+made at startup therefore lives on **one** pooled connection, and a pooled
+query can land on another one that has no `shared` schema at all.
+
+The failure was silent and total. The read failed with `no such table:
+shared.memories`; that failure was classified as "no shared database"; and
+the scan returned the **local half** as a successful result. The operator
+saw a scan of half the corpus and a successful exit code.
+
+The mirror-image defect sat next to it. A shared source that was
+**configured but unreachable** — an `ATTACH` that never succeeded, a shared
+file that was removed, a shared path replaced by a directory — produced the
+same local-only success. A broken installation answered exactly like a
+local-only one.
+
+**The fix.**
+
+| Installation | Answer |
+|---|---|
+| No shared source configured | local-only scan, and that is **success** |
+| Shared source configured and reachable | **both** sides are read |
+| Shared source configured but unreachable | **explicit error**, no partial result |
+
+- Both sides are read on one **pinned** `*sql.Conn`, whose shared attachment
+  is verified by `ensureSharedAttachedOnConn` before either side is read.
+- The local and shared statements now come from shared helpers
+  (`similarityScanQuery`, `scanSimilarityEntries`), so the two sides cannot
+  drift apart.
+- `DatabaseManager` gains `sharedConfiguredPath`: the shared path the
+  operator **CONFIGURED**, recorded whether or not the `ATTACH` succeeded.
+  `sharedPath` is only set on a successful attach, so it cannot tell "not
+  configured" from "configured but unattachable" — and collapsing those two
+  is exactly how a federated read answered with half the corpus and
+  reported success.
+- `ensureSharedAttachedOnConn` is **unchanged**, so the deployed count path
+  and the transactional write path keep their existing error messages.
+
+**What did not change.** The fingerprint filter, the
+`deleted_at IS NULL` / `embedding IS NOT NULL` / `embedding != 'null'` /
+`embedding_source != 'hash'` exclusions, the newest-first ordering, the
+per-side `LIMIT` and the cross-side ID dedupe all hold on both sides. The
+regressions pin each of them.
+
+**Regression proof.** The new suite was run against the pre-fix
+implementation (the file temporarily restored from `bb0bb9a`): the
+fresh-pooled-connection test and all three "configured but unreachable"
+subtests **fail**, and pass again once the fix is restored. The
+"unconfigured stays local-only" and "filters/dedupe" tests pass on both
+implementations — that is their point, and it is why they are there.
+
+**One guard fired.** The repository's own
+`TestDBSafety_NoLiveDBLeakInTests` rejected the new test file for calling
+`NewDatabaseManager("")`, which falls through to `config.GetMPMDir()` —
+the operator's live directory. The fixture was **fixed**, not
+whitelisted: it now passes the temporary workspace root explicitly, so the
+database it opens is hermetic by construction rather than by an
+environment variable that happens to be set. (No live database was opened
+in either form: `GetMPMDir()` honours `MPM_WORKSPACE`, which the first
+version of the fixture set. The guard rejects the *call shape*, and it is
+right to: the redirect is exactly the fragile thing it exists to catch.)
+
+### 7.2 Complete JSON failure reporting
+
+**The defect.** An adjudication is a **write**. It stamps a queue row as
+operator-adjudicated, and that stamp is what makes the row eligible to
+penalise a memory later. The command reported a failed adjudication by
+writing a line to stderr and exiting 1 — with **no JSON document at all**,
+even in `--json` mode. A consumer that asked for JSON got nothing: it could
+not tell a failed adjudication from a crash, and it could not tell which
+request failed.
+
+The worse half was the partial success. An invocation that named three rows
+and failed on the second had **already written the first**, and the report
+described only the failure. The durable side effect was invisible.
+
+**The fix.**
+
+- The adjudication loop collects a per-request outcome —
+  `adjudicated`, `failed` or `not_attempted` — and a failure now emits
+  **exactly one** envelope carrying the top-level error **and** every
+  request's outcome. The invocation still stops at the first failure (the
+  existing behaviour), and the requests after it are reported as
+  `not_attempted` rather than dropped.
+- The human path confirms each write as it happens (`✓ Adjudicated queue
+  row N.`) and reports the failure on stderr, so the earlier side effect is
+  not concealed there either.
+- `--json --help` now exits zero with the help text **inside** the
+  envelope's new `help` key. Plain help text on stdout would be a second,
+  unparseable document, and the contract is one document. The human
+  `--help` path is unchanged: help text to stdout, exit zero. The two are
+  pinned to be the *same* text.
+- The envelope's key set gains `adjudications` and `help`. Every emission
+  site sets `adjudications` to an empty **array** rather than leaving it
+  null, so both the key set and the value's type are stable across every
+  path.
+
+**Regression proof.** Five of the six new CLI tests **fail** against the
+pre-fix implementation. The sixth — the human help path — passes on both,
+which is exactly what it is there to prove.
+
+#### 7.2.1 The same defect, one layer up: the router
+
+The handler-level fix above is **correct and was not enough**. The handler
+honours `--json --help`; but a shell invocation does not reach the handler
+first.
+
+`Execute` intercepts a help request **before** dispatching, and the
+interception renders the **family's** help page — plain text, to stdout.
+The interception is skipped only when the request matches an entry in
+`subcommandHelpOwners`, and that lookup is made against the token sequence
+between the family name and the trailing `help` token:
+
+```text
+["ops", "resolve-contradictions", "--json", "help"]
+         path = "ops resolve-contradictions --json"    (not an owner)
+```
+
+The `--json` flag pushed the path out of the owners map, the family page was
+rendered, and `mpm ops resolve-contradictions --json --help` printed
+**plain help text on stdout** in a mode whose contract says stdout carries
+exactly one JSON document. A handler-level test cannot see this: the
+handler is right and the dispatch in front of it is wrong.
+
+**The fix is scoped, deliberately.** A first attempt — dropping flags from
+the lookup path for every command in JSON mode — was **measured and
+rejected**. Across all 27 owner paths, it changed more than one behaviour:
+`mpm config capability --json --help` and `mpm config detect-embedding
+--json --help` and `mpm ops changelog --json --help` flipped from exit 0 to
+exit 1, and `mpm topic list --json --help` **executed the listing** instead
+of printing help. The general rule was wrong.
+
+The shipped rule is an explicit opt-in map, `jsonSubcommandHelpOwners`,
+containing exactly one entry — `ops resolve-contradictions` — so that
+exactly one command's JSON-mode help is answered by the handler that owns
+the page. Measured again after the change: across all 27 owner paths with
+`--json --help`, **exactly one line changed** (`ops resolve-contradictions`
+went from exit 0 / plain text to exit 0 / JSON). Across 81 human
+invocations (27 paths × `--help` / `-h` / `help`), the output was
+**byte-identical** — 0 differences — so the human path kept everything it
+had.
+
+**The order of the two flags is irrelevant.** `--json --help` and
+`--help --json` are the same request, and the JSON contract must hold for
+both — otherwise `mpm ops resolve-contradictions --help --json` prints the
+plain family page on stdout in JSON mode, which is the very thing the
+contract forbids. The human path keeps its **trailing**-token rule
+untouched (`mpm ops resolve-contradictions --propose --help` still resolves
+to the family page); only the JSON branch accepts the help token anywhere
+in the argument list, and only for a path in the opt-in map. All four
+orderings (`--json --help`, `--json -h`, `--help --json`, `-h --json`) are
+pinned.
+
+**The human path is pinned too**, so the JSON fix cannot quietly widen
+into it:
+
+- `mpm ops resolve-contradictions --help` still prints the **command's own**
+  page, on stdout, exit 0.
+- `mpm ops resolve-contradictions --propose --help` still renders the
+  **family** page — a human invocation that carries a flag in front of the
+  help token resolves exactly as it did before.
+- The JSON-mode help request is **inert**: it opens no database and writes
+  no queue row. The routing change moved the request from the interception
+  to the handler, so the inertness the interception had is now the
+  handler's to prove; the test digests the database and the workspace
+  before and after.
+
+**Regression proof.** Against the pre-fix router, **all four** JSON-mode
+cases of the one-document test fail and the inertness test fails; the two
+human-page tests pass on both implementations, which is exactly what they
+are there to prove. All six pass again once the fix is restored.
+
+### 7.3 Files changed by the final-review commit
+
+| File | Change |
+|---|---|
+| `internal/core/db.go` | + `sharedConfiguredPath` (configured ≠ attached) |
+| `internal/core/similarity_candidates_store.go` | federated scan on a pinned, verified connection; shared statement/scan helpers; explicit error for a configured-but-unreachable shared source |
+| `internal/core/similarity_scan_federated_test.go` | new — the federated scan contract (5 test functions, 3 of them subtest groups) |
+| `cmd/mpm/ops_resolve_contradictions.go` | + per-request adjudication outcomes; one envelope on the adjudication failure path; `--json --help` as one document; + `adjudications` and `help` envelope keys |
+| `cmd/mpm/router.go` | + `jsonSubcommandHelpOwners` (explicit opt-in) and the JSON-mode branch of `isSubcommandHelp` (+ `isJSONModeHelpRequest`); the human lookup path is **unchanged** |
+| `cmd/mpm/ops_resolve_adjudicate_json_test.go` | new — the adjudication reporting contract (6 test functions) |
+| `cmd/mpm/ops_resolve_json_help_router_test.go` | new — the JSON help contract **at the router** (4 test functions, 6 cases), plus the human-path and inertness pins |
+| `cmd/mpm/ops_resolve_propose_cli_test.go` | updated for the two new envelope keys |
+| `docs/RECALL-MUTATION.md` | + the scan-reads-both-sides contract, + the adjudication reporting contract, + the two new envelope keys, + the corrected `--help` contract, + the two new suites in the coverage table |
+| `docs/SPEC.md` | + the 2026-10-20 update note on the scan and the adjudication reporting |
+| `docs/ISSUE-21-PHASE-B-REPORT.md` | + this section |
+
+### 7.4 Validation gate for the final-review commit
+
+All commands were run inside the worktree
+`.claude/worktrees/issue-21-bounded-proposals`, on top of the corrective
+commit `bb0bb9a`, against the staged tree
+`97f83eaae616e1a3f53e89019aa3b8c73f79f1e2`.
+
+The committed tree differs from the gated tree by **this section and
+nothing else** — one changed file, `docs/ISSUE-21-PHASE-B-REPORT.md`. A
+section that records the gate's own results cannot be inside the tree the
+gate ran against, by construction. Every Go file and every other document
+is byte-identical between the two trees, which is checkable directly:
+
+```
+git diff --name-only 97f83eaae616e1a3f53e89019aa3b8c73f79f1e2 \
+                   $(git rev-parse HEAD^{tree}) | grep -v '\.md$' | wc -l
+0
+```
+
+| Check | Result |
+|---|---|
+| `make build` | **PASS** — exit 0; all five binaries built to `.build/bin/` (run as the dependency of `make test`) |
+| `make test` | **PASS** — exit 0; 4 604 PASS, 26 SKIP, **0 FAIL** |
+| `make test-race` | **PASS** — exit 0; 4 604 PASS, 26 SKIP, **0 FAIL**, **0 `DATA RACE`** |
+| `make test-core-precommit` | **PASS** — exit 0 |
+| `make test-tools-precommit` | **PASS** — exit 0 |
+| `make test-testenv-precommit` | **PASS** — exit 0 |
+| `gofmt -l` on every modified/created Go file | **clean** — no output |
+| `go vet -tags fts5 ./cmd/mpm/...` | **PASS** — exit 0, no output |
+| `go vet -tags fts5 ./...` from the repository root | **PASS** — exit 0, no output |
+| `go vet -tags fts5 .` from `internal/core/` | **PASS** — exit 0, no output |
+
+The two suite runs agree exactly: 4 604 PASS / 26 SKIP / 0 FAIL in both, and
+the race run reports no `DATA RACE`. The baseline for this branch
+(`bb0bb9a`) reported 4 589 PASS / 26 SKIP / 0 FAIL, so the 15 additional
+passing tests are exactly the new ones — 5 in
+`internal/core/similarity_scan_federated_test.go`, 6 in
+`cmd/mpm/ops_resolve_adjudicate_json_test.go` and 4 in
+`cmd/mpm/ops_resolve_json_help_router_test.go`. (Sub-cases inside a
+single test function are counted once, by the function.)
+
+`TestDrillE2E_ClaudeCode` **skipped** in both runs. A skip is a skip — it
+is not counted as a pass, and the reason is recorded verbatim:
+
+```
+[claude stderr] [claude-code:unrecognized_model] {"model":"MiniMax-M3.1-Flash","query_source":"sdk"}
+    drill_e2e_claude_code_test.go:179: Claude Code rejected the harness model
+    (unrecognized_model on stderr); set MPM_E2E_CLAUDE=1 to bypass this gate
+--- SKIP: TestDrillE2E_ClaudeCode (18.46s)
+```
+
+The test shells out to the real `claude` CLI, and the ambient session model
+(`MiniMax-M3.1-Flash`) is rejected by Claude Code, so the test's own gate
+skips it. It is the same ambient dependency documented in §2.4, it skips on
+the unmodified baseline `9dba5e9` as well, and it is not affected by this
+patch. It did not fail in either run.
+
+Package timings from the `make test` run:
+
+```
+ok  github.com/flowbyte-com/mpm/cmd/mpm                    358.836s
+ok  github.com/flowbyte-com/mpm-core                        185.802s
+ok  github.com/flowbyte-com/mpm-core/tools                   28.345s
+ok  github.com/flowbyte-com/mpm/internal/testenv               2.767s
+ok  github.com/flowbyte-com/mpm/cmd/mpm-mcp                   3.828s
+[test-agent-adapters] Python: 281 tests (floor 150)
+[test-agent-adapters] JS: 165 passing tests (floor 100)
+[test-agent-adapters] TS: 17 passing tests (floor 15)
+[test-agent-installation] collected 427 tests (floor 300)
+```
+
+Focused runs for the new suites:
+
+```
+go test -tags fts5 -count=1 -v -run 'TestLoadSimilarityScanEntriesFederated' .
+    --- PASS: TestLoadSimilarityScanEntriesFederated_ReadsBothSidesOnAFreshPooledConnection (0.10s)
+    --- PASS: TestLoadSimilarityScanEntriesFederated_ConfiguredButUnreachableSharedSourceIsAnError (0.24s)
+        --- PASS: .../the_attach_never_succeeded (0.06s)
+        --- PASS: .../the_shared_file_was_removed (0.09s)
+        --- PASS: .../the_shared_path_is_no_longer_a_file (0.09s)
+    --- PASS: TestLoadSimilarityScanEntriesFederated_UnconfiguredSharedSourceStaysLocalOnly (0.06s)
+    --- PASS: TestLoadSimilarityScanEntriesFederated_KeepsTheFiltersOnBothSides (0.09s)
+    --- PASS: TestLoadSimilarityScanEntriesFederated_DeduplicatesAcrossSources (0.09s)
+    ok  github.com/flowbyte-com/mpm-core  0.582s
+
+go test -tags fts5 -count=1 -run 'TestResolveContradictions_JSON|\
+TestResolveContradictions_NonJSONHelp|TestResolveContradictions_Help|\
+TestResolveContradictions_Proposal|TestOpsResolveContradictions_JSONHelp|\
+TestOpsResolveContradictions_HumanHelp|TestOpsResolveContradictions_Help' ./cmd/mpm/
+    ok  github.com/flowbyte-com/mpm/cmd/mpm  9.482s
+```
+
+**The measurements behind the router change** (all against a real binary,
+with an isolated `MPM_WORKSPACE` and `HOME`). The "pre-fix" binary in
+these comparisons is built from `bb0bb9a`'s `cmd/mpm/router.go` with the
+rest of the tree unchanged, so the comparison isolates the routing change
+itself:
+
+| Measurement | Result |
+|---|---|
+| 27 owner paths × `--json --help`, pre-fix vs post-fix | **exactly one line differs** — `ops resolve-contradictions` goes from `exit=0 kind=TEXT` to `exit=0 kind=JSON`; every other path's exit code and output kind is unchanged |
+| 81 human invocations (27 paths × `--help` / `-h` / `help`), pre-fix vs post-fix | **0 differences** — the human path is byte-identical |
+| `mpm ops resolve-contradictions --json --help` end to end | exit 0; stdout parses as **one** JSON document with 12 keys; `help` populated; `error` null |
+| the same invocation, pre-fix | stdout carried the **plain-text** `mpm ops` family page |
+| stderr on that invocation | unchanged from the pre-fix binary: the pre-existing `[mpm] scheduler: not running` warning, which never touches stdout |
+
+**The regression proofs** — each new suite was run against the pre-fix
+implementation, with the pre-fix file temporarily restored:
+
+| Suite | Pre-fix result |
+|---|---|
+| `internal/core/similarity_scan_federated_test.go` | the fresh-pooled-connection test and **all three** "configured but unreachable" subtests **FAIL**; the "unconfigured stays local-only" and the filters/dedupe tests PASS (that is their point) |
+| `cmd/mpm/ops_resolve_adjudicate_json_test.go` | **5 of 6** functions **FAIL**; the human-help one PASSes on both (that is its point) |
+| `cmd/mpm/ops_resolve_json_help_router_test.go` | all **four** JSON-mode orderings and the inertness test **FAIL**; both human-path tests PASS on both |
+
+No live database access, no deployment, no push, no PR, no merge, no issue
+closure, no installed-binary replacement, no schema migration and no memory
+mutation were performed. Every test in the new suites runs against a
+disposable database under `t.TempDir()` or an isolated `MPM_WORKSPACE`. The
+forensic snapshot `cmd/dbg_main.go.tmp` is preserved unchanged
+(SHA-256 `d84e49cd…ae4575`).

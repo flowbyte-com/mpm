@@ -1535,6 +1535,33 @@ When two memories disagree, the system has to notice. `shared.contradiction_log`
 > memory. See
 > [`RECALL-MUTATION.md`](./RECALL-MUTATION.md) and
 > [`ISSUE-21-PHASE-B-REPORT.md`](./ISSUE-21-PHASE-B-REPORT.md).
+>
+> **Updated 2026-10-20 — the proposal scan reads both sides of the corpus,
+> and the adjudication write is reported request by request.** The scan used
+> to read the shared side over the connection pool. SQLite's `ATTACH` is
+> **per connection** and the pool is deliberately not limited to one
+> connection, so the shared schema could be missing on the connection that
+> served the read; the failure was then read as "no shared database", and the
+> scan returned the **local half** as a successful result. The scan now pins
+> a connection, verifies its shared attachment, and reads both sides on it.
+> A shared source that is **configured but unreachable** is now an explicit
+> **error** rather than a successful local-only scan; a shared source that
+> is **not configured** remains local-only and remains a success, because an
+> installation without a shared database is a normal installation.
+>
+> An adjudication is a **write**, so the envelope reports what happened to
+> **each** `--adjudicate` request (`adjudications`: `adjudicated`, `failed`
+> or `not_attempted`). An invocation whose earlier request succeeded and
+> whose later one failed now exits non-zero with one envelope that reports
+> both — the earlier write is a durable side effect and is not concealed. A
+> `--help` request in `--json` mode is one JSON document like any other,
+> with the help text inside the envelope; the human help path is unchanged.
+> That holds at the **command line** too: `mpm` intercepts help requests
+> before dispatch and would otherwise render the plain-text `mpm ops`
+> family page on stdout, so a JSON-mode help request for this command is
+> routed to the handler that owns the page. The human paths are untouched,
+> and a JSON-mode help request is inert — it opens no database and writes
+> no queue row.
 
 If the two candidates land within a small margin of each other, the system **does not** auto-resolve. It writes a pending theory and waits for an operator. A clean winner can be auto-resolved — but only once an operator has adjudicated the pair; a coin-flip always escalates.
 

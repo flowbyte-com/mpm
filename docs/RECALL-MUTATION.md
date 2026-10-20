@@ -214,6 +214,29 @@ limit is a cheaper and shallower scan, not a representative one. The JSON
 envelope reports `scan_complete` alongside the count, and the human output
 says "Scanned N memories".
 
+### The scan reads both sides of the corpus
+
+The proposal scan compares local memories against shared memories. On an
+installation that has a shared database, that means **both** sides are
+read — and the shared side is read on a connection whose shared attachment
+has been verified. SQLite's `ATTACH` is **per connection**, and the
+connection pool is deliberately not limited to a single connection, so an
+attachment made at startup lives on one pooled connection only. A read of
+the shared side issued over the pool can land on a connection that has no
+shared schema at all.
+
+What the operator gets depends on what is actually configured:
+
+- **No shared source configured** — the scan is local-only, and that is
+  **success**. An installation with no shared database is a normal
+  installation, and the operator gets a scan of what actually exists.
+- **A shared source configured and reachable** — both sides are read.
+- **A shared source configured but unreachable** — the scan **fails**,
+  loudly, and returns nothing. It does not fall back to local-only. A
+  configured shared source that cannot be read is a broken installation,
+  and a scan that reported success over half the corpus would hide exactly
+  the rows the operator most needs to compare.
+
 ### Transactional semantics
 
 The candidate batch is inserted in **one** transaction on a pinned
@@ -279,10 +302,13 @@ holds in total.
 ### JSON output
 
 `--json` prints **exactly one** JSON object per invocation — one envelope,
-never two, on **every** path including the failure paths. The one
-exception is an explicit `--help` request, which prints the help text
-and exits zero: help is a request for text, not a report. The envelope
-always carries the same keys:
+never two, on **every** path including the failure paths. There is no
+exception: an explicit `--help` request in `--json` mode exits zero and
+prints the **same envelope**, with the help text inside it under the
+`help` key. Plain help text on stdout would be a second, unparseable
+document, and the contract is one document. The human path
+(`mpm ops resolve-contradictions --help`) still prints the help text to
+stdout exactly as before. The envelope always carries the same keys:
 
 ```
 queue_size               rows reviewed in this batch
@@ -296,9 +322,28 @@ needs_adjudication_rows  those rows, with their queue ids
 dry_run                  true unless --apply
 decisions                per-row resolution decisions
 propose                  nested proposal statistics (always present)
+adjudications            per-request outcomes for the --adjudicate
+                         requests this invocation made (always present,
+                         empty when it made none)
+help                    the command's help text when help was asked for;
+                         empty on every other path
 error                    why this invocation could not do what was asked,
                          or null when it did
 ```
+
+The JSON contract holds at the **command line**, not only inside the
+handler. `mpm` intercepts a help request before it dispatches, and the
+interception renders the **family's** plain-text page — which would be a
+second, unparseable document on stdout in JSON mode. A JSON-mode help
+request for this command is therefore routed to the handler that **owns**
+the page, so the envelope is the only thing stdout carries. The order of
+the flags does not matter: `--json --help` and `--help --json` are the
+same request and both produce one JSON document. The human paths are
+untouched: `--help` still prints this command's own page, and a human
+invocation that carries a flag in front of the help token
+(`--propose --help`) still resolves to the `mpm ops` family page. A
+JSON-mode help request is **inert**: it opens no database and writes no
+queue row.
 
 The nested `propose` object reports `requested`, `scan_limit_per_source`,
 `entries_scanned`, `pairs_examined`, `candidates_found_in_scan`,
@@ -347,7 +392,37 @@ command exits **non-zero** and `--json` still prints **exactly one**
 envelope, with the reason inside it. The refusal envelope is built
 **without consulting the database**, so an operator gets the same answer
 whether or not a database happens to exist. In `--json` mode the help text
-goes to stderr; stdout carries the document and nothing else.
+that accompanies a refusal goes to stderr; stdout carries the document and
+nothing else. An explicit `--help` request is not a refusal: it exits
+zero, and its help text travels inside the envelope under `help`.
+
+### Adjudications are reported one by one
+
+`--adjudicate=ID:REASON` is a **write**: it stamps a queue row as
+operator-adjudicated, and that stamp is what makes the row eligible to
+penalise a memory later. An invocation that names several rows and fails
+on one of them has therefore already written the others.
+
+The envelope's `adjudications` array reports **every** request the
+operator made, in the order they were made:
+
+```
+{"queue_id": 42, "status": "adjudicated",    "error": null}
+{"queue_id": 43, "status": "failed",          "error": "adjudicate queue row 43: ..."}
+{"queue_id": 44, "status": "not_attempted",   "error": null}
+```
+
+`adjudicated` means the row was stamped. `failed` means the request did
+not take effect, and carries the reason. `not_attempted` means the
+invocation stopped at the first failure and never tried that row: the
+request is reported rather than dropped, so the operator can see that it
+was never made rather than wonder whether it was.
+
+A failed adjudication exits **non-zero**, and the envelope carries the
+error at the top level as well. The envelope does **not** conceal the
+earlier successes — the durable state and the report agree, and a
+consumer that reads only `error` still has the whole `adjudications` array
+in front of it.
 
 ### The proposal is not a verdict
 
@@ -622,6 +697,9 @@ the Phase 4 write behind an environment guard: **five tests fail**
 | `cmd/mpm/ops_resolve_propose_cli_test.go` | The CLI contract: one JSON envelope per `--json` invocation with one stable key set, the refused flag combinations refused before any database access, the parser boundaries, `--propose --dry-run` still inserting proposal rows, and a failed proposal exiting non-zero and stopping before the review. |
 | `cmd/mpm/ops_resolve_propose_errors_test.go` | The JSON error contract: exactly one parseable document on every refusal path — invalid budget values, `--propose-limit=all`, rejected flag combinations, unknown flags, a database that will not open, an ordinary proposal failure and a queue-load failure — each with a non-zero exit, the reason inside the envelope, and (for the early refusals) no database access at all. |
 | `cmd/mpm/ops_resolve_propose_transaction_test.go` | The transaction-certainty contract: a failed commit with a confirmed rollback is a confirmed rollback; a failed rollback is identified and leaves the outcome uncertain; both errors are preserved; `candidates_proposed` is zero unless the commit was confirmed; and the human output and the JSON output agree. |
+| `internal/core/similarity_scan_federated_test.go` | The federated scan reads both sides of the corpus: both sides are read on a **fresh pooled connection** (the pooled read of the shared schema is asserted to fail first, so the hazard is proved live rather than assumed), a shared source that is **configured but unreachable** is an error rather than a local-only success, an **unconfigured** shared source stays local-only and succeeds, and the fingerprint filter, the newest-first ordering, the per-side limit and the cross-side ID dedupe all still hold. |
+| `cmd/mpm/ops_resolve_adjudicate_json_test.go` | The adjudication reporting contract: a failed `--json --adjudicate` produces exactly one envelope with a non-zero exit and the reason inside it; an invocation whose **earlier** request succeeded and whose later one failed reports both, and the durable state matches the report; a request after the failure is reported as `not_attempted` rather than dropped; `--json --help` produces one JSON document with the help inside it; and the human help path is unchanged. |
+| `cmd/mpm/ops_resolve_json_help_router_test.go` | The JSON help contract **at the router** (the layer a shell invocation reaches first): `--json --help`, `--json -h`, `--help --json` and `-h --json` all print exactly one JSON document and nothing else on stdout; the human `--help` still prints the command's own page; a human invocation with a flag in front of the help token still renders the `mpm ops` family page; and the JSON-mode help request is inert — the database and the workspace digests are unchanged. |
 
 Every one of these runs against a disposable database. The live MPM
 database is never opened by the test suite, and the live

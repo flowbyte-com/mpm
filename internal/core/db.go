@@ -309,6 +309,17 @@ type DatabaseManager struct {
 	sharedPath     string
 	sharedAttached bool
 
+	// sharedConfiguredPath is the shared DB path the operator CONFIGURED,
+	// whether or not the ATTACH succeeded.
+	//
+	// It is deliberately separate from sharedPath. sharedPath is only set
+	// when an ATTACH worked, so it cannot distinguish "no shared database
+	// is configured" (a normal local-only installation) from "a shared
+	// database IS configured but could not be attached" (a broken
+	// installation). Collapsing the two is how a federated read ends up
+	// silently answering with half the corpus and reporting success.
+	sharedConfiguredPath string
+
 	// mirrorWG tracks in-flight fire-and-forget mirror writes
 	// (ChallengeMemoryAsync) so Close() can join them instead of tearing the
 	// DB down under a live writer. audit-go treats a WaitGroup-bound
@@ -1416,7 +1427,13 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	// to attach is non-fatal — mpm continues in local-only mode. This
 	// keeps single-instance use cases unaffected while making the
 	// plumbing available for operators who opt in.
+	//
+	// The CONFIGURED path is recorded even when the attach fails, so a
+	// later read can tell "no shared database is configured" from "one is
+	// configured and could not be attached". The two are different
+	// installations and must not be answered the same way.
 	if sharedPath := os.Getenv("MPM_SHARED_DB"); sharedPath != "" {
+		manager.sharedConfiguredPath = sharedPath
 		if err := manager.attachShared(sharedPath); err != nil {
 			slog.Warn("shared DB attach failed; continuing in local-only mode",
 				"path", sharedPath, "error", err.Error())
@@ -1613,12 +1630,12 @@ func NewDatabaseManagerReadOnly(projectRoot string) (*DatabaseManager, error) {
 	}
 
 	manager := &DatabaseManager{
-		db:          db,
-		dbPath:      resolvedDB, // realpath-resolved, mirrors NewDatabaseManager
-		dbPathRaw:   dbPath,
-		lockPath:    lockPath,
-		lockFD:      lockFD,
-		readOnly:    true, // structural enforcement of the no-write contract
+		db:           db,
+		dbPath:       resolvedDB, // realpath-resolved, mirrors NewDatabaseManager
+		dbPathRaw:    dbPath,
+		lockPath:     lockPath,
+		lockFD:       lockFD,
+		readOnly:     true, // structural enforcement of the no-write contract
 		watchdogPath: filepath.Join(filepath.Dir(dbPath), "watchdog.jsonl"),
 		mirrorPath:   filepath.Join(filepath.Dir(dbPath), "mirror.jsonl"),
 	}
@@ -1713,6 +1730,12 @@ func (dm *DatabaseManager) NewSession() (CoreDB, error) {
 // Returns nil on success; errors are non-fatal and the caller logs +
 // continues. SharedAttached() returns "" until this succeeds.
 func (dm *DatabaseManager) attachShared(sharedPath string) error {
+	// The configuration is recorded before the attempt, not after it. A
+	// failed ATTACH still leaves the operator with a CONFIGURED shared
+	// source, and a read that cannot reach it has to say so rather than
+	// quietly fall back to local-only.
+	dm.sharedConfiguredPath = sharedPath
+
 	// Ensure the directory exists so the file can be created on first write.
 	if err := os.MkdirAll(filepath.Dir(sharedPath), 0700); err != nil {
 		return fmt.Errorf("mkdir shared db dir: %w", err)

@@ -96,6 +96,40 @@ type adjudication struct {
 	reason  string
 }
 
+// The statuses an adjudication request can end in. They are stable
+// identifiers: a consumer may match on them.
+const (
+	// adjudicationSucceeded means the row was read and stamped.
+	adjudicationSucceeded = "adjudicated"
+
+	// adjudicationFailed means the row could not be adjudicated. The
+	// outcome carries the reason.
+	adjudicationFailed = "failed"
+
+	// adjudicationNotAttempted means an EARLIER request in the same
+	// invocation failed, so this one was never tried. It is reported
+	// rather than omitted: a request the operator typed and the command
+	// silently dropped is worse than one it says it did not reach.
+	adjudicationNotAttempted = "not_attempted"
+)
+
+// adjudicationOutcome is what happened to ONE --adjudicate request.
+//
+// It exists because an adjudication is a WRITE. An invocation that
+// adjudicates three rows and fails on the second has already written the
+// first, and a report that described only the failure would hide a durable
+// side effect the operator has to know about.
+type adjudicationOutcome struct {
+	// QueueID is the queue row the operator named.
+	QueueID int64 `json:"queue_id"`
+
+	// Status is one of adjudicated / failed / not_attempted.
+	Status string `json:"status"`
+
+	// Error is set only when Status is "failed".
+	Error *string `json:"error"`
+}
+
 // resolveOutcome pairs a queue row with its decision so the renderer does
 // not have to index two parallel slices. The unadjudicated rows are
 // reported from the same slice as the applied ones, which is what keeps
@@ -342,7 +376,42 @@ func refusalEnvelope(mode resolveInvocation, opts proposeOptions, completion, re
 		DryRun:                !mode.apply,
 		Decisions:             []mpminternal.ResolutionDecision{},
 		Propose:               summary,
+		Adjudications:         []adjudicationOutcome{},
 		Error:                 &reason,
+	}
+}
+
+// helpEnvelope builds the one JSON document for a --help request.
+//
+// The help text travels in the envelope rather than to stdout. The --json
+// contract says stdout carries exactly one JSON document, and plain help
+// text there would be a second, unparseable one. A consumer that asked for
+// help in JSON mode gets JSON — including the help.
+//
+// The help request is not a failure: the envelope carries no error, and the
+// exit code is zero.
+func helpEnvelope(mode resolveInvocation, opts proposeOptions, help string) jsonResolveEnvelope {
+	summary := proposeSummary{
+		Requested:          mode.propose,
+		ScanLimitPerSource: opts.scanLimit,
+		CompareBudget:      opts.compareBudget,
+		CandidateCap:       opts.candidateCap,
+		WriteBudget:        opts.writeBudget,
+		Completion:         "not_run",
+		CommitState:        "not_run",
+	}
+	return jsonResolveEnvelope{
+		QueueSize:             0,
+		QueueTotalUnresolved:  nil,
+		Applied:               0,
+		CloseCalls:            0,
+		NeedsAdjudication:     0,
+		NeedsAdjudicationRows: []map[string]interface{}{},
+		DryRun:                !mode.apply,
+		Decisions:             []mpminternal.ResolutionDecision{},
+		Propose:               summary,
+		Adjudications:         []adjudicationOutcome{},
+		Help:                  help,
 	}
 }
 
@@ -489,6 +558,13 @@ func handleOpsResolveContradictions(args []string) int {
 			}
 			adjudications = append(adjudications, adj)
 		case arg == "--help" || arg == "help":
+			if mode.jsonOutput {
+				// --json promises exactly one document on stdout, and plain
+				// help text there would be a second one. The help travels
+				// in the envelope instead; the human path is unchanged.
+				emitResolveEnvelope(helpEnvelope(mode, proposeOpts, resolveHelpText()))
+				return 0
+			}
 			printResolveHelp()
 			return 0
 		case strings.HasPrefix(arg, "--limit="):
@@ -559,6 +635,21 @@ func handleOpsResolveContradictions(args []string) int {
 			"database not initialized", false)
 	}
 
+	// The proposal summary is declared BEFORE anything runs, so that every
+	// exit path can report it — including the adjudication failure path
+	// below, which never reaches the proposal phase. Until a proposal
+	// actually runs, it says so.
+	//
+	proposeSummaryValue := proposeSummary{
+		Requested:          propose,
+		ScanLimitPerSource: proposeOpts.scanLimit,
+		CompareBudget:      proposeOpts.compareBudget,
+		CandidateCap:       proposeOpts.candidateCap,
+		WriteBudget:        proposeOpts.writeBudget,
+		Completion:         "not_run",
+		CommitState:        "not_run",
+	}
+
 	// --adjudicate runs BEFORE the queue is loaded, so the rows it
 	// names are eligible in the same invocation that adjudicated them.
 	//
@@ -568,11 +659,69 @@ func handleOpsResolveContradictions(args []string) int {
 	// and asking them to also pass --apply to make their own decision
 	// stick would be a worse interface. What the flag deliberately does
 	// NOT do is apply anything — no memory weight moves here.
+	// Every request is reported individually, because an adjudication is a
+	// WRITE. An invocation that adjudicates three rows and fails on the
+	// second has already written the first: a report that described only
+	// the failure would hide a durable side effect the operator has to know
+	// about. The invocation stops at the first failure - a later request is
+	// not attempted on top of a broken one - and the requests after it are
+	// reported as not attempted rather than dropped.
+	adjudicationOutcomes := make([]adjudicationOutcome, 0, len(adjudications))
+	var adjudicateErr error
 	for _, adj := range adjudications {
-		if err := dm.AdjudicateContradiction(adj.queueID, adj.reason); err != nil {
-			usererror.Error("adjudicate queue row %d: %v", adj.queueID, err)
-			return 1
+		if adjudicateErr != nil {
+			adjudicationOutcomes = append(adjudicationOutcomes, adjudicationOutcome{
+				QueueID: adj.queueID,
+				Status:  adjudicationNotAttempted,
+			})
+			continue
 		}
+		if err := dm.AdjudicateContradiction(adj.queueID, adj.reason); err != nil {
+			detail := fmt.Sprintf("adjudicate queue row %d: %v", adj.queueID, err)
+			adjudicationOutcomes = append(adjudicationOutcomes, adjudicationOutcome{
+				QueueID: adj.queueID,
+				Status:  adjudicationFailed,
+				Error:   &detail,
+			})
+			adjudicateErr = errors.New(detail)
+			continue
+		}
+		adjudicationOutcomes = append(adjudicationOutcomes, adjudicationOutcome{
+			QueueID: adj.queueID,
+			Status:  adjudicationSucceeded,
+		})
+		// The human path confirms each write as it happens, so an operator
+		// watching a long run can see which rows were stamped. The JSON
+		// path says the same thing in the envelope, and stdout there
+		// carries one document and nothing else.
+		if !mode.jsonOutput {
+			fmt.Printf("✓ Adjudicated queue row %d.\n", adj.queueID)
+		}
+	}
+
+	if adjudicateErr != nil {
+		detail := adjudicateErr.Error()
+		if mode.jsonOutput {
+			// The envelope reports the failure AND the requests that
+			// succeeded before it. A consumer that read only the error
+			// would not know that an earlier row was written.
+			emitResolveEnvelope(jsonResolveEnvelope{
+				QueueSize:             0,
+				QueueTotalUnresolved:  nil,
+				Applied:               0,
+				CloseCalls:            0,
+				NeedsAdjudication:     0,
+				NeedsAdjudicationRows: []map[string]interface{}{},
+				DryRun:                !apply,
+				Decisions:             []mpminternal.ResolutionDecision{},
+				Propose:               proposeSummaryValue,
+				Adjudications:         adjudicationOutcomes,
+				Error:                 &detail,
+			})
+		} else {
+			usererror.Error("%s", detail)
+		}
+		return 1
 	}
 
 	// --propose: the ONLY way candidates reach the queue.
@@ -591,15 +740,6 @@ func handleOpsResolveContradictions(args []string) int {
 	// governs the RESOLUTION phase; --propose is a separate phase, and
 	// its whole purpose is to add review items. A scan that found
 	// candidates and enqueued none would be a scan that did nothing.
-	proposeSummaryValue := proposeSummary{
-		Requested:          propose,
-		ScanLimitPerSource: proposeOpts.scanLimit,
-		CompareBudget:      proposeOpts.compareBudget,
-		CandidateCap:       proposeOpts.candidateCap,
-		WriteBudget:        proposeOpts.writeBudget,
-		Completion:         "not_run",
-		CommitState:        "not_run",
-	}
 	var proposeErr error
 	if propose {
 		proposeSummaryValue, proposeErr = runBoundedProposal(dm, proposeOpts)
@@ -663,6 +803,7 @@ func handleOpsResolveContradictions(args []string) int {
 				DryRun:                !apply,
 				Decisions:             []mpminternal.ResolutionDecision{},
 				Propose:               proposeSummaryValue,
+				Adjudications:         []adjudicationOutcome{},
 				Error:                 &envErr,
 			})
 		} else {
@@ -697,6 +838,7 @@ func handleOpsResolveContradictions(args []string) int {
 				DryRun:                !apply,
 				Decisions:             []mpminternal.ResolutionDecision{},
 				Propose:               proposeSummaryValue,
+				Adjudications:         []adjudicationOutcome{},
 				Error:                 &envErr,
 			})
 		} else {
@@ -732,6 +874,7 @@ func handleOpsResolveContradictions(args []string) int {
 				DryRun:                !apply,
 				Decisions:             []mpminternal.ResolutionDecision{},
 				Propose:               proposeSummaryValue,
+				Adjudications:         []adjudicationOutcome{},
 				Error:                 &envErr,
 			})
 		} else {
@@ -758,6 +901,7 @@ func handleOpsResolveContradictions(args []string) int {
 				DryRun:                !apply,
 				Decisions:             []mpminternal.ResolutionDecision{},
 				Propose:               proposeSummaryValue,
+				Adjudications:         []adjudicationOutcome{},
 			})
 		} else {
 			if propose {
@@ -854,6 +998,7 @@ func handleOpsResolveContradictions(args []string) int {
 			DryRun:                !apply,
 			Decisions:             decisions,
 			Propose:               proposeSummaryValue,
+			Adjudications:         []adjudicationOutcome{},
 		})
 	} else {
 		if propose {
@@ -894,6 +1039,24 @@ type jsonResolveEnvelope struct {
 
 	// Propose carries the proposal statistics. It is always present.
 	Propose proposeSummary `json:"propose"`
+
+	// Adjudications reports what happened to each --adjudicate request, in
+	// the order the operator gave them. It is always present, and it is
+	// empty when the invocation named no rows.
+	//
+	// It exists because an adjudication is a WRITE. An invocation that
+	// adjudicates several rows and fails on one of them has already
+	// written the others, and an envelope that described only the failure
+	// would conceal a durable side effect.
+	Adjudications []adjudicationOutcome `json:"adjudications"`
+
+	// Help carries the command's help text when the invocation asked for
+	// help. It is empty on every other path.
+	//
+	// In --json mode the help text travels HERE rather than to stdout: the
+	// contract says stdout carries exactly one JSON document, and plain
+	// help text there would be a second, unparseable one.
+	Help string `json:"help"`
 
 	// Error carries the reason this invocation could not do what was
 	// asked, or null when it did.
@@ -1283,6 +1446,17 @@ func printResolveDecisions(outcomes []resolveOutcome, applied bool, pendingAdjud
 // actual flag parsing above.
 // printResolveHelp writes the help text to stdout.
 func printResolveHelp() { printResolveHelpTo(os.Stdout) }
+
+// resolveHelpText captures the help text as a string.
+//
+// It exists so that --json can carry the help INSIDE the envelope. The
+// human path prints the help to stdout as before; the JSON path cannot,
+// because stdout there carries exactly one JSON document.
+func resolveHelpText() string {
+	var b strings.Builder
+	printResolveHelpTo(&b)
+	return b.String()
+}
 
 // printResolveHelpTo writes the help text to w.
 //
