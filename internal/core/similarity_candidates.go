@@ -91,10 +91,19 @@ const (
 	// MaxCompareBudget is the hard ceiling on the comparison budget.
 	//
 	// Ten million pairs is roughly 7.7e10 elementary operations at 768
-	// dimensions, which is seconds rather than minutes on any hardware
-	// this has run on. It is far enough above the default to allow a
-	// deliberate deep scan and far enough below "unbounded" that the
-	// number reads as a mistake when an operator types it.
+	// dimensions. That is an ARITHMETIC estimate, not a measurement: the
+	// budget has NOT been exercised at that scale, and no runtime figure
+	// for it is claimed here. The measurements that exist are two orders
+	// of magnitude smaller — 2,775 pairs took 1.22 ms and 19,900 pairs
+	// took 7.19 ms on one machine at one moment — and extrapolating from
+	// them to ten million pairs is exactly the kind of claim this
+	// repository does not make about its other budgets.
+	//
+	// What the ceiling IS for is boundedness. It is far enough above the
+	// default to allow a deliberate deep scan and far enough below
+	// "unbounded" that the number reads as a mistake when an operator
+	// types it. An operator who needs to know how long a given budget
+	// takes should measure it on their own corpus.
 	MaxCompareBudget = 10_000_000
 
 	// DefaultCandidateCap is the default maximum number of candidates a

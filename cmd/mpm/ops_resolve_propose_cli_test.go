@@ -164,7 +164,7 @@ func TestResolveContradictions_JSONEnvelopeHasOneStableKeySet(t *testing.T) {
 		"candidates_proposed", "candidates_skipped_pending",
 		"candidates_skipped_duplicate", "candidates_skipped_constrained",
 		"compare_budget", "candidate_cap", "write_budget", "completion",
-		"commit_state", "error",
+		"commit_state", "error", "rollback_error",
 	} {
 		require.Contains(t, propose, key, "the propose object must always carry %q", key)
 	}
@@ -869,7 +869,7 @@ func TestPrintProposalSummary_UncertainOutcomeDoesNotClaimNothingWasWritten(t *t
 		Requested:             true,
 		EntriesScanned:        10,
 		CandidatesFoundInScan: 2,
-		Completion:            "uncertain_commit",
+		Completion:            "rollback_failed",
 		CommitState:           "uncertain",
 	}
 
@@ -877,7 +877,7 @@ func TestPrintProposalSummary_UncertainOutcomeDoesNotClaimNothingWasWritten(t *t
 		printProposalSummary(summary)
 	})
 
-	require.Contains(t, out, "uncertain_commit")
+	require.Contains(t, out, "rollback_failed")
 	require.NotContains(t, out, "Nothing was written")
 	require.Contains(t, strings.ToLower(out), "verify the queue")
 }
@@ -889,7 +889,7 @@ func TestPrintProposalSummary_ConfirmedRollbackSaysNothingWasWritten(t *testing.
 		Requested:             true,
 		EntriesScanned:        10,
 		CandidatesFoundInScan: 2,
-		Completion:            "uncertain_commit",
+		Completion:            "db_commit_rolled_back",
 		CommitState:           "rolled_back",
 	}
 

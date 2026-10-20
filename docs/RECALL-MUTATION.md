@@ -234,10 +234,33 @@ connection (`BEGIN IMMEDIATE`), and the unresolved-pair check is repeated
   the write lock; the second sees the first one's row inside its own
   transaction.
 
-When a commit or a rollback itself fails, the outcome is **unknown** and is
-reported as such (`commit_state: "uncertain"`, `completion:
-"uncertain_commit"` or `"rollback"`). It is never reported as a confirmed
-success, and never as a confirmed rollback.
+Transaction certainty is decided by the **rollback**, because the rollback
+is the operation that proves nothing was written.
+
+- A failed **commit** whose **rollback was confirmed** is a **confirmed
+  rollback** (`commit_state: "rolled_back"`, `completion:
+  "db_commit_rolled_back"`). SQLite refuses to roll back a transaction
+  that has already committed, so a successful rollback after a failed
+  commit proves the commit did not take effect. Nothing was written, and
+  the report says so.
+- A failed **rollback** — whatever triggered it, including a validation,
+  budget or queue-read refusal — is identified explicitly (`commit_state:
+  "uncertain"`, `completion: "rollback_failed"`). Once the rollback has
+  failed, nothing proves the queue is unchanged, so the outcome is
+  **unknown** and the queue must be verified before it is trusted. A
+  rollback failure is never reported under a cleaner-sounding name such
+  as `write_budget`, because that name would tell the operator their
+  queue is untouched — the one claim they must not be given.
+
+Both errors are preserved when both exist: the primary error in the
+envelope's `error` field, and the rollback error in the nested
+`rollback_error` field.
+
+There is no `uncertain_commit` completion name. A failed commit whose
+outcome could not be established necessarily had an unconfirmed rollback,
+so it is reported as `rollback_failed`; a failed commit whose rollback WAS
+confirmed is a confirmed rollback and is reported as
+`db_commit_rolled_back`.
 
 ### Review order, and the two queue counts
 
@@ -256,7 +279,9 @@ holds in total.
 ### JSON output
 
 `--json` prints **exactly one** JSON object per invocation — one envelope,
-never two, on **every** path including the failure paths. The envelope
+never two, on **every** path including the failure paths. The one
+exception is an explicit `--help` request, which prints the help text
+and exits zero: help is a request for text, not a report. The envelope
 always carries the same keys:
 
 ```
@@ -280,24 +305,28 @@ The nested `propose` object reports `requested`, `scan_limit_per_source`,
 `scan_complete`, `candidates_materialised`, `candidates_proposed`,
 `candidates_skipped_pending`, `candidates_skipped_duplicate`,
 `candidates_skipped_constrained`, `compare_budget`, `candidate_cap`,
-`write_budget`, `completion` and `commit_state`.
+`write_budget`, `completion`, `commit_state` and `rollback_error`.
+
+`rollback_error` is populated only when the ROLLBACK statement itself
+failed; it is `null` otherwise, including on a confirmed rollback.
 
 `completion` names the outcome precisely:
 
 ```
-not_run            --propose was not passed
-complete           the scan and the write both succeeded
-compare_budget     the scan was refused by the comparison budget
-candidate_cap      the scan found more candidates than it may retain
-write_budget       the batch was refused by the write budget
-invalid_candidate  a candidate failed validation; the batch was refused
-db_unavailable     the queue could not be reached; nothing was attempted
-db_busy            another writer held the lock
-db_insert          an insertion failed and the rollback was confirmed
-db_error           another statement failed; the transaction was rolled back
-rollback           a rollback itself failed; the outcome is unknown
-uncertain_commit   the commit failed; the outcome is unknown
-scan_failed        the scan could not read the corpus
+not_run              --propose was not passed
+complete             the scan and the write both succeeded
+compare_budget       the scan was refused by the comparison budget
+candidate_cap        the scan found more candidates than it may retain
+write_budget         the batch was refused by the write budget
+invalid_candidate    a candidate failed validation; the batch was refused
+invalid_flags        the invocation was refused before anything ran
+db_unavailable       the queue could not be reached; nothing was attempted
+db_busy              another writer held the lock
+rollback_failed      the ROLLBACK itself failed; the outcome is unknown
+db_commit_rolled_back  the COMMIT failed and the ROLLBACK was confirmed
+db_insert            an insertion failed and the rollback was confirmed
+db_error             another statement failed; the transaction was rolled back
+scan_failed          the scan could not read the corpus
 ```
 
 `commit_state` is the authoritative statement of what happened to the
@@ -310,6 +339,15 @@ On any proposal failure the command exits **non-zero** and stops before
 reviewing or resolving anything. A half-proposal followed by a half-review
 would leave the operator unable to tell which part of the output describes
 durable state.
+
+An **early refusal** — an invalid budget value, an unsupported
+`--propose-limit=all`, a rejected flag combination, an unknown flag, a
+database that could not be opened — is reported the same way: the
+command exits **non-zero** and `--json` still prints **exactly one**
+envelope, with the reason inside it. The refusal envelope is built
+**without consulting the database**, so an operator gets the same answer
+whether or not a database happens to exist. In `--json` mode the help text
+goes to stderr; stdout carries the document and nothing else.
 
 ### The proposal is not a verdict
 
@@ -579,9 +617,11 @@ the Phase 4 write behind an environment guard: **five tests fail**
 | Suite | Pins |
 |---|---|
 | `internal/core/similarity_candidates_bounded_test.go` | The bounded discovery pass: default and overridden scan limits, local/shared overlap and ID deduplication, comparison-budget and candidate-cap boundaries, the 75-row duplicate cluster, overflow-safe pair arithmetic, and internally consistent statistics for skipped, invalid, below-threshold and qualifying pairs. |
-| `internal/core/similarity_candidates_transactional_test.go` | The write transaction: fresh and partially populated queues, repeated scans, already-resolved pairs re-queued, write-budget refusal with zero new rows, a mid-insertion fault with a confirmed rollback, commit and rollback failures reported as uncertain, concurrent writers, lock contention, different-timestamp duplicate attempts, and malformed, reversed and forged-adjudication candidates. |
+| `internal/core/similarity_candidates_transactional_test.go` | The write transaction: fresh and partially populated queues, repeated scans, already-resolved pairs re-queued, write-budget refusal with zero new rows, a mid-insertion fault with a confirmed rollback, commit and rollback failures reported as uncertain, concurrent writers, lock contention, different-timestamp duplicate attempts, and malformed, reversed and forged-adjudication candidates. It also pins that a failed rollback is reported as uncertain even when a **validation**, a **budget** or a **queue-read** refusal triggered it. |
 | `cmd/mpm/ops_propose_candidates_test.go` | The proposal engine end to end: candidates found vs rows written, the write budget counting new pairs only, and the comparison-budget and candidate-cap refusals being reported rather than swallowed. |
 | `cmd/mpm/ops_resolve_propose_cli_test.go` | The CLI contract: one JSON envelope per `--json` invocation with one stable key set, the refused flag combinations refused before any database access, the parser boundaries, `--propose --dry-run` still inserting proposal rows, and a failed proposal exiting non-zero and stopping before the review. |
+| `cmd/mpm/ops_resolve_propose_errors_test.go` | The JSON error contract: exactly one parseable document on every refusal path — invalid budget values, `--propose-limit=all`, rejected flag combinations, unknown flags, a database that will not open, an ordinary proposal failure and a queue-load failure — each with a non-zero exit, the reason inside the envelope, and (for the early refusals) no database access at all. |
+| `cmd/mpm/ops_resolve_propose_transaction_test.go` | The transaction-certainty contract: a failed commit with a confirmed rollback is a confirmed rollback; a failed rollback is identified and leaves the outcome uncertain; both errors are preserved; `candidates_proposed` is zero unless the commit was confirmed; and the human output and the JSON output agree. |
 
 Every one of these runs against a disposable database. The live MPM
 database is never opened by the test suite, and the live

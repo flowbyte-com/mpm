@@ -37,6 +37,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -178,25 +180,55 @@ type proposeSummary struct {
 
 	// Completion names the outcome. One of:
 	//
-	//	not_run          --propose was not passed
-	//	complete         the scan and the write both succeeded
-	//	compare_budget   the scan was refused before any pair was examined
-	//	candidate_cap    the scan found more candidates than it may retain
-	//	write_budget     the batch was refused by the write budget
-	//	invalid_candidate a candidate failed validation; the batch was refused
-	//	db_busy          another writer held the lock
-	//	db_insert        an insertion failed and was rolled back
-	//	rollback         a rollback itself failed; the outcome is unknown
-	//	uncertain_commit the commit failed; the outcome is unknown
-	//	scan_failed      the scan could not read the corpus
+	//	not_run             --propose was not passed
+	//	complete            the scan and the write both succeeded
+	//	compare_budget      the scan was refused before any pair was examined
+	//	candidate_cap       the scan found more candidates than it may retain
+	//	write_budget        the batch was refused by the write budget
+	//	invalid_candidate   a candidate failed validation; the batch was refused
+	//	invalid_flags       the invocation was refused before anything ran
+	//	db_busy             another writer held the lock
+	//	db_unavailable      the queue could not be reached; nothing was attempted
+	//	rollback_failed     the ROLLBACK itself failed; the outcome is unknown
+	//	db_commit_rolled_back the COMMIT failed and the ROLLBACK was confirmed
+	//	db_insert           an insertion failed and the rollback was confirmed
+	//	db_error            another statement failed; the transaction was rolled back
+	//	scan_failed         the scan could not read the corpus
+	//
+	// The names are stable identifiers: a consumer may match on them.
+	//
+	// There is no "uncertain_commit" name. A failed commit whose outcome
+	// could not be established necessarily had an unconfirmed rollback,
+	// so it is reported as rollback_failed; a failed commit whose
+	// rollback WAS confirmed is a confirmed rollback and is reported as
+	// db_commit_rolled_back. Both facts are carried by CommitState,
+	// which is the authority on what happened to the queue.
 	Completion string `json:"completion"`
 
 	// CommitState is the transaction's disposition: not_run, refused,
 	// rolled_back, uncertain or confirmed.
+	//
+	// It is the AUTHORITY on certainty. "rolled_back" means the queue is
+	// provably unchanged by this invocation. "uncertain" means that could
+	// not be established and the queue must be verified before it is
+	// trusted.
 	CommitState string `json:"commit_state"`
 
 	// Error carries the failure detail, or null on success.
+	//
+	// When the ROLLBACK itself failed, the detail carries BOTH the
+	// primary error and the rollback error. Neither is dropped: the
+	// primary error says what went wrong, and the rollback error says
+	// that the queue's state could not be established.
 	Error *string `json:"error"`
+
+	// RollbackError carries the ROLLBACK failure detail, or null when
+	// the rollback succeeded or was never needed.
+	//
+	// It is a separate field because the rollback failure is the fact
+	// that decides whether the queue's state is knowable, and a consumer
+	// must be able to see it without parsing the combined message.
+	RollbackError *string `json:"rollback_error"`
 }
 
 // strPtr returns a pointer to s, for the optional error field.
@@ -222,13 +254,133 @@ type proposeOptions struct {
 	writeBudget   int
 }
 
+// resolveInvocation is the SHAPE of an invocation, resolved before any
+// flag is validated.
+//
+// The JSON error contract requires that a refusal still produces exactly
+// one JSON document — but a refusal can happen on the FIRST argument, so
+// whether the operator asked for JSON is only knowable by reading the
+// whole argument list. This pre-pass does that reading.
+//
+// It recognises only the flags whose presence the refusal paths need in
+// order to describe the refusal. The main flag loop remains the
+// authority on VALUES; this pass never parses one.
+type resolveInvocation struct {
+	// jsonOutput is true when --json appears anywhere in the arguments.
+	jsonOutput bool
+
+	// propose is true when --propose appears anywhere in the arguments.
+	propose bool
+
+	// apply is true when the invocation asked to apply resolutions.
+	// A later --dry-run clears it again, exactly as the main loop does.
+	apply bool
+}
+
+// resolveInvocationMode reads the invocation's shape from the raw
+// argument list.
+//
+// It is deliberately NOT a second parser. It answers exactly one
+// question — "was JSON asked for?" — plus the two flags the refusal
+// envelope needs in order to describe itself. Every VALUE is parsed
+// once, in the main loop.
+func resolveInvocationMode(args []string) resolveInvocation {
+	mode := resolveInvocation{}
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			mode.jsonOutput = true
+		case "--propose":
+			mode.propose = true
+		case "--apply":
+			mode.apply = true
+		case "--dry-run":
+			mode.apply = false
+		}
+	}
+	return mode
+}
+
+// refusalEnvelope builds the one JSON document for an invocation that
+// was refused before it could do any work.
+//
+// It is built WITHOUT consulting the database. A refusal that had to
+// open a database to describe itself would be a refusal with side
+// effects, which is the opposite of what a refusal is for.
+//
+// The propose object reports "not_run" when no proposal was requested:
+// the refusal belongs to the invocation, and the top-level error says
+// why. When a proposal WAS requested and was refused before it started,
+// the propose object says so, so a consumer can tell "no proposal was
+// asked for" from "a proposal was asked for and did not happen".
+func refusalEnvelope(mode resolveInvocation, opts proposeOptions, completion, reason string) jsonResolveEnvelope {
+	summary := proposeSummary{
+		Requested:          mode.propose,
+		ScanLimitPerSource: opts.scanLimit,
+		CompareBudget:      opts.compareBudget,
+		CandidateCap:       opts.candidateCap,
+		WriteBudget:        opts.writeBudget,
+		Completion:         "not_run",
+		CommitState:        "not_run",
+	}
+	if mode.propose {
+		// The proposal phase was requested and was refused before it
+		// started. The reason goes in the propose object as well as at
+		// the top level, so a consumer that reads only the nested
+		// object still learns why nothing happened.
+		summary.Completion = completion
+		summary.CommitState = "refused"
+		summary.Error = &reason
+	}
+	return jsonResolveEnvelope{
+		QueueSize:             0,
+		QueueTotalUnresolved:  nil,
+		Applied:               0,
+		CloseCalls:            0,
+		NeedsAdjudication:     0,
+		NeedsAdjudicationRows: []map[string]interface{}{},
+		DryRun:                !mode.apply,
+		Decisions:             []mpminternal.ResolutionDecision{},
+		Propose:               summary,
+		Error:                 &reason,
+	}
+}
+
+// refuseInvocation reports an invalid invocation and returns the exit
+// code.
+//
+// In --json mode it emits the ONE document the contract promises, and
+// nothing else goes to stdout: the help text, when it is wanted, goes to
+// stderr so that a consumer parsing stdout still finds exactly one JSON
+// document.
+//
+// In human mode the reason goes to stderr, as an operator error does.
+func refuseInvocation(mode resolveInvocation, opts proposeOptions, completion, reason string, showHelp bool) int {
+	if mode.jsonOutput {
+		emitResolveEnvelope(refusalEnvelope(mode, opts, completion, reason))
+		if showHelp {
+			printResolveHelpTo(os.Stderr)
+		}
+		return 1
+	}
+	usererror.Error("%s", reason)
+	if showHelp {
+		printResolveHelp()
+	}
+	return 1
+}
+
 // handleOpsResolveContradictions parses flags and dispatches the
 // resolution loop. See printResolveHelp for the CLI shape.
 func handleOpsResolveContradictions(args []string) int {
+	// The invocation's shape is resolved BEFORE any flag is parsed: a
+	// refusal can happen on the first argument, and the JSON error
+	// contract requires that even that refusal produces one document.
+	mode := resolveInvocationMode(args)
+
 	dryRun := true
 	apply := false
 	applyRequested := false
-	jsonOutput := false
 	limit := defaultResolveLimit
 	loserFilter := ""
 	winnerFilter := ""
@@ -255,84 +407,85 @@ func handleOpsResolveContradictions(args []string) int {
 			dryRun = true
 			apply = false
 		case arg == "--json":
-			jsonOutput = true
+			// Already accounted for by resolveInvocationMode, which had
+			// to see the whole argument list before the first refusal
+			// could be reported.
 		case arg == "--propose":
 			propose = true
 		case strings.HasPrefix(arg, "--propose-limit="):
 			raw := strings.TrimPrefix(arg, "--propose-limit=")
 			if raw == "all" {
-				usererror.Error("--propose-limit=all is not supported. Use a numeric "+
-					"--propose-limit=N (%d..%d) to bound the scan.", 1, maxProposeScanLimit)
-				return 1
+				return refuseInvocation(mode, proposeOpts, "invalid_flags",
+					fmt.Sprintf("--propose-limit=all is not supported. Use a numeric "+
+						"--propose-limit=N (%d..%d) to bound the scan.", 1, maxProposeScanLimit), false)
 			}
 			n, err := strconv.Atoi(raw)
 			if err != nil {
-				usererror.Error("--propose-limit must be an integer, got %q", raw)
-				return 1
+				return refuseInvocation(mode, proposeOpts, "invalid_flags",
+					fmt.Sprintf("--propose-limit must be an integer, got %q", raw), false)
 			}
 			if n < 1 || n > maxProposeScanLimit {
-				usererror.Error("--propose-limit must be between 1 and %d, got %d", maxProposeScanLimit, n)
-				return 1
+				return refuseInvocation(mode, proposeOpts, "invalid_flags",
+					fmt.Sprintf("--propose-limit must be between 1 and %d, got %d", maxProposeScanLimit, n), false)
 			}
 			proposeOpts.scanLimit = n
 			proposeOnlyFlags = append(proposeOnlyFlags, "--propose-limit")
 		case arg == "--propose-limit":
-			usererror.Error("--propose-limit needs a value: use --propose-limit=N")
-			return 1
+			return refuseInvocation(mode, proposeOpts, "invalid_flags",
+				"--propose-limit needs a value: use --propose-limit=N", false)
 		case strings.HasPrefix(arg, "--compare-budget="):
 			raw := strings.TrimPrefix(arg, "--compare-budget=")
 			n, err := strconv.Atoi(raw)
 			if err != nil {
-				usererror.Error("--compare-budget must be an integer, got %q", raw)
-				return 1
+				return refuseInvocation(mode, proposeOpts, "invalid_flags",
+					fmt.Sprintf("--compare-budget must be an integer, got %q", raw), false)
 			}
 			if n < minCompareBudget || n > maxCompareBudget {
-				usererror.Error("--compare-budget must be between %d and %d, got %d",
-					minCompareBudget, maxCompareBudget, n)
-				return 1
+				return refuseInvocation(mode, proposeOpts, "invalid_flags",
+					fmt.Sprintf("--compare-budget must be between %d and %d, got %d",
+						minCompareBudget, maxCompareBudget, n), false)
 			}
 			proposeOpts.compareBudget = n
 			proposeOnlyFlags = append(proposeOnlyFlags, "--compare-budget")
 		case arg == "--compare-budget":
-			usererror.Error("--compare-budget needs a value: use --compare-budget=N")
-			return 1
+			return refuseInvocation(mode, proposeOpts, "invalid_flags",
+				"--compare-budget needs a value: use --compare-budget=N", false)
 		case strings.HasPrefix(arg, "--candidate-cap="):
 			raw := strings.TrimPrefix(arg, "--candidate-cap=")
 			n, err := strconv.Atoi(raw)
 			if err != nil {
-				usererror.Error("--candidate-cap must be an integer, got %q", raw)
-				return 1
+				return refuseInvocation(mode, proposeOpts, "invalid_flags",
+					fmt.Sprintf("--candidate-cap must be an integer, got %q", raw), false)
 			}
 			if n < 1 || n > maxCandidateCap {
-				usererror.Error("--candidate-cap must be between 1 and %d, got %d", maxCandidateCap, n)
-				return 1
+				return refuseInvocation(mode, proposeOpts, "invalid_flags",
+					fmt.Sprintf("--candidate-cap must be between 1 and %d, got %d", maxCandidateCap, n), false)
 			}
 			proposeOpts.candidateCap = n
 			proposeOnlyFlags = append(proposeOnlyFlags, "--candidate-cap")
 		case arg == "--candidate-cap":
-			usererror.Error("--candidate-cap needs a value: use --candidate-cap=N")
-			return 1
+			return refuseInvocation(mode, proposeOpts, "invalid_flags",
+				"--candidate-cap needs a value: use --candidate-cap=N", false)
 		case strings.HasPrefix(arg, "--write-budget="):
 			raw := strings.TrimPrefix(arg, "--write-budget=")
 			n, err := strconv.Atoi(raw)
 			if err != nil {
-				usererror.Error("--write-budget must be an integer, got %q", raw)
-				return 1
+				return refuseInvocation(mode, proposeOpts, "invalid_flags",
+					fmt.Sprintf("--write-budget must be an integer, got %q", raw), false)
 			}
 			if n < 1 || n > maxWriteBudget {
-				usererror.Error("--write-budget must be between 1 and %d, got %d", maxWriteBudget, n)
-				return 1
+				return refuseInvocation(mode, proposeOpts, "invalid_flags",
+					fmt.Sprintf("--write-budget must be between 1 and %d, got %d", maxWriteBudget, n), false)
 			}
 			proposeOpts.writeBudget = n
 			proposeOnlyFlags = append(proposeOnlyFlags, "--write-budget")
 		case arg == "--write-budget":
-			usererror.Error("--write-budget needs a value: use --write-budget=N")
-			return 1
+			return refuseInvocation(mode, proposeOpts, "invalid_flags",
+				"--write-budget needs a value: use --write-budget=N", false)
 		case strings.HasPrefix(arg, "--adjudicate="):
 			adj, err := parseAdjudicationFlag(strings.TrimPrefix(arg, "--adjudicate="))
 			if err != nil {
-				usererror.Error("%v", err)
-				return 1
+				return refuseInvocation(mode, proposeOpts, "invalid_flags", err.Error(), false)
 			}
 			adjudications = append(adjudications, adj)
 		case arg == "--help" || arg == "help":
@@ -341,8 +494,8 @@ func handleOpsResolveContradictions(args []string) int {
 		case strings.HasPrefix(arg, "--limit="):
 			n, err := strconv.Atoi(strings.TrimPrefix(arg, "--limit="))
 			if err != nil || n <= 0 {
-				usererror.Error("--limit must be a positive integer")
-				return 1
+				return refuseInvocation(mode, proposeOpts, "invalid_flags",
+					"--limit must be a positive integer", false)
 			}
 			limit = n
 		case strings.HasPrefix(arg, "--loser="):
@@ -350,16 +503,15 @@ func handleOpsResolveContradictions(args []string) int {
 		case strings.HasPrefix(arg, "--winner="):
 			winnerFilter = strings.TrimPrefix(arg, "--winner=")
 		default:
-			usererror.Error("unknown flag: %s", arg)
-			printResolveHelp()
-			return 1
+			return refuseInvocation(mode, proposeOpts, "invalid_flags",
+				fmt.Sprintf("unknown flag: %s", arg), true)
 		}
 	}
 
 	if apply && dryRun {
 		// Shouldn't happen with current flag logic, but defensive.
-		usererror.Error("--apply and --dry-run are mutually exclusive")
-		return 1
+		return refuseInvocation(mode, proposeOpts, "invalid_flags",
+			"--apply and --dry-run are mutually exclusive", false)
 	}
 
 	// ── Flag-combination validation ─────────────────────────────────
@@ -384,27 +536,27 @@ func handleOpsResolveContradictions(args []string) int {
 	// silently would make the command report budgets it never applied.
 	if propose {
 		if applyRequested {
-			usererror.Error("--propose and --apply cannot be combined. " +
-				"--propose writes new review items to the queue; --apply resolves " +
-				"existing ones. Run them as separate invocations.")
-			return 1
+			return refuseInvocation(mode, proposeOpts, "invalid_flags",
+				"--propose and --apply cannot be combined. "+
+					"--propose writes new review items to the queue; --apply resolves "+
+					"existing ones. Run them as separate invocations.", false)
 		}
 		if len(adjudications) > 0 {
-			usererror.Error("--propose and --adjudicate cannot be combined. " +
-				"An adjudication is a judgement about a queue row you have read; the " +
-				"rows a proposal creates are not those. Run --adjudicate separately.")
-			return 1
+			return refuseInvocation(mode, proposeOpts, "invalid_flags",
+				"--propose and --adjudicate cannot be combined. "+
+					"An adjudication is a judgement about a queue row you have read; the "+
+					"rows a proposal creates are not those. Run --adjudicate separately.", false)
 		}
 	} else if len(proposeOnlyFlags) > 0 {
-		usererror.Error("%s only applies to a proposal scan; add --propose or drop %s",
-			strings.Join(proposeOnlyFlags, ", "), strings.Join(proposeOnlyFlags, ", "))
-		return 1
+		return refuseInvocation(mode, proposeOpts, "invalid_flags",
+			fmt.Sprintf("%s only applies to a proposal scan; add --propose or drop %s",
+				strings.Join(proposeOnlyFlags, ", "), strings.Join(proposeOnlyFlags, ", ")), false)
 	}
 
 	dm := getDBConcrete()
 	if dm == nil {
-		usererror.Error("database not initialized")
-		return 1
+		return refuseInvocation(mode, proposeOpts, "db_unavailable",
+			"database not initialized", false)
 	}
 
 	// --adjudicate runs BEFORE the queue is loaded, so the rows it
@@ -486,11 +638,21 @@ func handleOpsResolveContradictions(args []string) int {
 	// the operator unable to tell which part of the output describes
 	// durable state.
 	if proposeErr != nil {
-		envErr := errorText(proposeErr)
+		// The failure detail is the SAME string in both surfaces, so the
+		// human path and the JSON path cannot disagree about what
+		// happened. When the ROLLBACK itself failed, the detail carries
+		// BOTH the primary error and the rollback error: neither is
+		// dropped, because the rollback error is the one that says the
+		// queue's state could not be established.
+		proposeDetail := errorText(proposeErr)
+		if proposeSummaryValue.Error != nil {
+			proposeDetail = *proposeSummaryValue.Error
+		}
+		envErr := proposeDetail
 		if countErr != nil {
 			envErr = envErr + "; " + errorText(countErr)
 		}
-		if jsonOutput {
+		if mode.jsonOutput {
 			emitResolveEnvelope(jsonResolveEnvelope{
 				QueueSize:             0,
 				QueueTotalUnresolved:  totalPtr,
@@ -509,7 +671,7 @@ func handleOpsResolveContradictions(args []string) int {
 			// operator reading only stderr would otherwise not know how far
 			// the scan got.
 			printProposalSummary(proposeSummaryValue)
-			usererror.Error("propose candidates: %v", proposeErr)
+			usererror.Error("propose candidates: %s", proposeDetail)
 			if countErr != nil {
 				usererror.Error("count queue: %v", countErr)
 			}
@@ -524,7 +686,7 @@ func handleOpsResolveContradictions(args []string) int {
 	// still gets its one document.
 	if countErr != nil {
 		envErr := errorText(countErr)
-		if jsonOutput {
+		if mode.jsonOutput {
 			emitResolveEnvelope(jsonResolveEnvelope{
 				QueueSize:             0,
 				QueueTotalUnresolved:  nil,
@@ -559,7 +721,7 @@ func handleOpsResolveContradictions(args []string) int {
 		// consumer that received nothing could not tell a failed review
 		// from a crash.
 		envErr := errorText(err)
-		if jsonOutput {
+		if mode.jsonOutput {
 			emitResolveEnvelope(jsonResolveEnvelope{
 				QueueSize:             0,
 				QueueTotalUnresolved:  totalPtr,
@@ -581,7 +743,7 @@ func handleOpsResolveContradictions(args []string) int {
 		return 1
 	}
 	if len(queue) == 0 {
-		if jsonOutput {
+		if mode.jsonOutput {
 			// Same key set as the populated branch below. A consumer
 			// scripting --json should not have to branch on whether the
 			// queue happened to be empty to find out whether
@@ -665,7 +827,7 @@ func handleOpsResolveContradictions(args []string) int {
 	}
 
 	// Output.
-	if jsonOutput {
+	if mode.jsonOutput {
 		decisions := make([]mpminternal.ResolutionDecision, 0, len(outcomes))
 		pendingRows := make([]map[string]interface{}, 0, pendingAdjudication)
 		for _, o := range outcomes {
@@ -827,13 +989,62 @@ func runBoundedProposal(dm *mpminternal.DatabaseManager, opts proposeOptions) (p
 		// not be durable.
 		summary.CandidatesProposed = 0
 		summary.Completion = classifyProposalFailure(tx, txErr)
-		summary.Error = strPtr(txErr.Error())
+		summary.RollbackError = errorPtr(tx.RollbackError)
+		summary.Error = strPtr(proposalFailureDetail(txErr, tx.RollbackError))
 		return summary, txErr
+	}
+
+	if tx.CommitState != mpminternal.CommitStateConfirmed {
+		// Defensive. The store reports a confirmed commit whenever it
+		// returns no error, so this cannot happen today. If it ever
+		// does, the count must not claim rows that were never
+		// confirmed — an unconfirmed write is not a write.
+		summary.CandidatesProposed = 0
+		summary.Completion = "db_error"
+		summary.Error = strPtr("proposal transaction ended without a confirmed commit")
+		return summary, errors.New("proposal transaction ended without a confirmed commit")
 	}
 
 	summary.CandidatesProposed = tx.Inserted
 	summary.Completion = "complete"
 	return summary, nil
+}
+
+// proposalFailureDetail renders a proposal failure for BOTH the JSON
+// envelope and the human path.
+//
+// The two surfaces must not be able to disagree about what happened, so
+// they share this one rendering.
+//
+// When the rollback itself failed, the primary error and the rollback
+// error are BOTH preserved: the primary error says what went wrong, and
+// the rollback error says that the queue's state could not be
+// established. Dropping either would leave the reader with a claim the
+// evidence does not support.
+func proposalFailureDetail(primary error, rollback error) string {
+	switch {
+	case primary == nil && rollback == nil:
+		return ""
+	case primary == nil:
+		return "rollback failed: " + rollback.Error()
+	case rollback == nil:
+		return primary.Error()
+	default:
+		return primary.Error() + " (rollback failed: " + rollback.Error() + ")"
+	}
+}
+
+// errorPtr returns a pointer to the error's message, or nil when err is
+// nil.
+//
+// It exists so that "no rollback error" is null rather than an empty
+// string, which would read like a failure with no reason.
+func errorPtr(err error) *string {
+	if err == nil {
+		return nil
+	}
+	s := err.Error()
+	return &s
 }
 
 // classifyProposalFailure names the failure mode of a proposal
@@ -846,25 +1057,39 @@ func runBoundedProposal(dm *mpminternal.DatabaseManager, opts proposeOptions) (p
 //
 // The mapping:
 //
-//	db_busy           the write lock could not be acquired; nothing written
-//	write_budget      the batch was refused before the first INSERT
-//	invalid_candidate a candidate failed validation; the batch was refused
-//	db_unavailable    the queue could not be reached; nothing was attempted
-//	db_insert         an INSERT failed and the rollback was confirmed
-//	db_error          another statement failed; the transaction was rolled back
-//	rollback          a ROLLBACK failed; the outcome is unknown
-//	uncertain_commit  the COMMIT failed; the outcome is unknown
+//	db_busy               the write lock could not be acquired; nothing written
+//	write_budget          the batch was refused before the first INSERT
+//	invalid_candidate     a candidate failed validation; the batch was refused
+//	db_unavailable        the queue could not be reached; nothing was attempted
+//	rollback_failed       the ROLLBACK itself failed; the outcome is unknown
+//	db_commit_rolled_back the COMMIT failed and the ROLLBACK was confirmed
+//	db_insert             an INSERT failed and the rollback was confirmed
+//	db_error              another statement failed; the transaction was rolled back
 //
-// A failed COMMIT whose subsequent ROLLBACK was confirmed still reports
-// uncertain_commit: the commit phase is what failed, and the operator's
-// next action — look at the queue before trusting it — is the same either
-// way. The finer fact is in commit_state.
+// A failed ROLLBACK is checked FIRST, because it dominates every other
+// classification. The rollback is the last thing that can go wrong, and
+// its failure is the one fact that decides whether the queue's state is
+// knowable: once the rollback has failed, nothing proves the queue is
+// unchanged. Naming such a failure "write_budget" or "invalid_candidate"
+// would tell the operator their queue is untouched — which is exactly
+// the claim they must not be given when the evidence does not support
+// it.
+//
+// A failed COMMIT whose subsequent ROLLBACK was CONFIRMED is a confirmed
+// rollback, not an uncertain commit outcome. SQLite refuses to roll back
+// a transaction that has already committed, so a successful ROLLBACK
+// after a failed COMMIT is proof that the commit did not take effect:
+// nothing was written. The finer fact is in commit_state.
 //
 // Every classification describes what ACTUALLY happened. In particular a
 // failure that occurred before the first INSERT is never reported as
 // db_insert, because that name says an insert failed and a rollback was
 // confirmed — two things that did not happen.
 func classifyProposalFailure(tx mpminternal.TransactionResult, err error) string {
+	// A failed ROLLBACK dominates everything else. See the note above.
+	if tx.RollbackError != nil {
+		return "rollback_failed"
+	}
 	var busyErr *mpminternal.ErrDatabaseBusy
 	if errors.As(err, &busyErr) || tx.Busy {
 		return "db_busy"
@@ -905,15 +1130,20 @@ func classifyProposalFailure(tx mpminternal.TransactionResult, err error) string
 	var insertionErr *mpminternal.ErrProposalInsertion
 	if errors.As(err, &insertionErr) {
 		if insertionErr.Phase == "commit" {
-			return "uncertain_commit"
-		}
-		if tx.RollbackError != nil {
-			return "rollback"
+			// The COMMIT failed. The rollback was confirmed — the
+			// check above already established that — and a confirmed
+			// rollback after a failed COMMIT proves the commit did not
+			// take effect. Nothing was written.
+			return "db_commit_rolled_back"
 		}
 		return "db_insert"
 	}
 	if tx.CommitState == mpminternal.CommitStateUncertain {
-		return "uncertain_commit"
+		// The store sets an uncertain state only when the rollback
+		// itself failed, which the check at the top already caught.
+		// This is the defensive path for a result that arrives from
+		// somewhere else: an uncertain outcome is reported as uncertain.
+		return "rollback_failed"
 	}
 	// Any other failure inside the transaction. The statement that failed
 	// was not an INSERT — it was the in-transaction read of the unresolved
@@ -1051,8 +1281,17 @@ func printResolveDecisions(outcomes []resolveOutcome, applied bool, pendingAdjud
 
 // printResolveHelp is the --help text. Kept in lock-step with the
 // actual flag parsing above.
-func printResolveHelp() {
-	fmt.Println(`mpm ops resolve-contradictions [--propose] [--dry-run] [--apply] [--json] [--limit=N] [--loser=ID] [--winner=ID] [--adjudicate=ID:REASON]
+// printResolveHelp writes the help text to stdout.
+func printResolveHelp() { printResolveHelpTo(os.Stdout) }
+
+// printResolveHelpTo writes the help text to w.
+//
+// It takes a writer because --json owns stdout: when the command refuses
+// an invocation in JSON mode, the help text has to go somewhere that is
+// not stdout, or a consumer parsing stdout would find the help text in
+// front of the one JSON document the contract promises.
+func printResolveHelpTo(w io.Writer) {
+	fmt.Fprintln(w, `mpm ops resolve-contradictions [--propose] [--dry-run] [--apply] [--json] [--limit=N] [--loser=ID] [--winner=ID] [--adjudicate=ID:REASON]
 
 Review and resolve rows in the shared queue (shared.contradiction_log).
 
@@ -1185,26 +1424,43 @@ JSON OUTPUT
   scan_complete, candidates_materialised, candidates_proposed,
   candidates_skipped_pending, candidates_skipped_duplicate,
   candidates_skipped_constrained, compare_budget, candidate_cap,
-  write_budget, completion and commit_state.
+  write_budget, completion, commit_state, error and rollback_error.
 
   "completion" names the outcome precisely:
-    not_run            --propose was not passed
-    complete           the scan and the write both succeeded
-    compare_budget     the scan was refused by the comparison budget
-    candidate_cap      the scan found more candidates than it may retain
-    write_budget       the batch had more new pairs than it may insert
-    invalid_candidate  a candidate failed validation; the batch was refused
-    db_unavailable     the queue could not be reached; nothing was attempted
-    db_busy            another writer held the lock
-    db_insert          an insertion failed and the rollback was confirmed
-    db_error           another statement failed; the transaction was rolled back
-    rollback           a rollback itself failed; the outcome is unknown
-    uncertain_commit   the commit failed; the outcome is unknown
-    scan_failed        the scan could not read the corpus
+    not_run              --propose was not passed
+    complete             the scan and the write both succeeded
+    compare_budget       the scan was refused by the comparison budget
+    candidate_cap        the scan found more candidates than it may retain
+    write_budget         the batch had more new pairs than it may insert
+    invalid_candidate    a candidate failed validation; the batch was refused
+    invalid_flags        the invocation was refused before anything ran
+    db_unavailable       the queue could not be reached; nothing was attempted
+    db_busy              another writer held the lock
+    rollback_failed      the ROLLBACK itself failed; the outcome is unknown
+    db_commit_rolled_back the COMMIT failed and the ROLLBACK was confirmed
+    db_insert            an insertion failed and the rollback was confirmed
+    db_error             another statement failed; the transaction was rolled back
+    scan_failed          the scan could not read the corpus
 
   "commit_state" is the authoritative statement of what happened to the
   queue: refused, rolled_back, uncertain or confirmed. "uncertain" means
   the outcome could not be established and the queue must be verified.
+  "rolled_back" means the queue is provably unchanged by this invocation —
+  which includes a failed COMMIT whose ROLLBACK was confirmed, because
+  SQLite refuses to roll back a transaction that has already committed.
+
+  "rollback_error" carries the ROLLBACK failure detail when the rollback
+  itself failed, and null otherwise. It is separate from "error" because
+  the rollback failure is the fact that decides whether the queue's state
+  is knowable: once it has failed, nothing proves the queue is unchanged,
+  whatever else went wrong. Both errors are preserved in both the human
+  and the JSON output.
+
+  ON ANY FAILURE --json STILL EMITS EXACTLY ONE DOCUMENT, including for
+  an invalid flag, an unsupported budget value, a rejected flag
+  combination and a database that could not be opened. A refusal is
+  reported INSIDE the envelope, with a non-zero exit status, and is
+  constructed WITHOUT consulting the database.
 
   On any proposal failure the command exits NON-ZERO and stops before
   reviewing or resolving anything. A half-proposal followed by a

@@ -712,9 +712,18 @@ var proposalTxFaults struct {
 	rollback func(ctx context.Context, conn *sql.Conn) error
 }
 
-// setProposalTxFaultsForTest installs the seam. Passing nil for either
-// function restores the real statement. Test-only; not exported.
-func setProposalTxFaultsForTest(commit, rollback func(ctx context.Context, conn *sql.Conn) error) {
+// SetProposalTxFaultsForTest installs the seam. Passing nil for either
+// function restores the real statement.
+//
+// It is EXPORTED so that the CLI layer can drive the same fault injection
+// the core tests use. The classification of a failed commit and a failed
+// rollback is a CLI contract as much as a core one: the operator reads the
+// JSON envelope and the human summary, and both have to agree with what
+// the transaction actually did. Testing that end to end needs the fault to
+// be injectable from outside the package.
+//
+// Test-only. Production behaviour is unchanged.
+func SetProposalTxFaultsForTest(commit, rollback func(ctx context.Context, conn *sql.Conn) error) {
 	proposalTxFaults.mu.Lock()
 	defer proposalTxFaults.mu.Unlock()
 	proposalTxFaults.commit = commit

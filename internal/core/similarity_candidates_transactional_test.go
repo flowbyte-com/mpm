@@ -694,11 +694,11 @@ func TestEnqueueSimilarityCandidatesTransactional_CommitFailureIsUncertain(t *te
 	dm := NewTestSharedDM(t)
 
 	// The commit statement fails; the rollback that follows succeeds.
-	setProposalTxFaultsForTest(
+	SetProposalTxFaultsForTest(
 		func(context.Context, *sql.Conn) error { return errors.New("injected commit failure") },
 		nil,
 	)
-	t.Cleanup(func() { setProposalTxFaultsForTest(nil, nil) })
+	t.Cleanup(func() { SetProposalTxFaultsForTest(nil, nil) })
 
 	res, err := dm.EnqueueSimilarityCandidatesTransactional(
 		context.Background(), []SimilarityCandidate{candidateFor("mem-a", "mem-b", 0.95)}, DefaultWriteBudget)
@@ -724,11 +724,11 @@ func TestEnqueueSimilarityCandidatesTransactional_CommitFailureIsUncertain(t *te
 func TestEnqueueSimilarityCandidatesTransactional_CommitAndRollbackFailureIsUncertain(t *testing.T) {
 	dm := NewTestSharedDM(t)
 
-	setProposalTxFaultsForTest(
+	SetProposalTxFaultsForTest(
 		func(context.Context, *sql.Conn) error { return errors.New("injected commit failure") },
 		func(context.Context, *sql.Conn) error { return errors.New("injected rollback failure") },
 	)
-	t.Cleanup(func() { setProposalTxFaultsForTest(nil, nil) })
+	t.Cleanup(func() { SetProposalTxFaultsForTest(nil, nil) })
 
 	res, err := dm.EnqueueSimilarityCandidatesTransactional(
 		context.Background(), []SimilarityCandidate{candidateFor("mem-a", "mem-b", 0.95)}, DefaultWriteBudget)
@@ -757,11 +757,11 @@ func TestEnqueueSimilarityCandidatesTransactional_InsertAndRollbackFailureIsUnce
 		END`)
 	require.NoError(t, err)
 
-	setProposalTxFaultsForTest(
+	SetProposalTxFaultsForTest(
 		nil,
 		func(context.Context, *sql.Conn) error { return errors.New("injected rollback failure") },
 	)
-	t.Cleanup(func() { setProposalTxFaultsForTest(nil, nil) })
+	t.Cleanup(func() { SetProposalTxFaultsForTest(nil, nil) })
 
 	res, err := dm.EnqueueSimilarityCandidatesTransactional(
 		context.Background(), []SimilarityCandidate{candidateFor("mem-a", "mem-b", 0.95)}, DefaultWriteBudget)
@@ -769,6 +769,103 @@ func TestEnqueueSimilarityCandidatesTransactional_InsertAndRollbackFailureIsUnce
 	require.Equal(t, CommitStateUncertain, res.CommitState)
 	require.NotNil(t, res.RollbackError)
 	require.Equal(t, 0, res.Inserted)
+}
+
+// ── a failed rollback, whatever triggered it ───────────────────────
+
+// A VALIDATION refusal whose ROLLBACK also fails is uncertain, and the
+// rollback failure is reported.
+//
+// The refusal itself is clean — nothing was written, because no INSERT
+// was attempted. But the rollback is the operation that PROVES nothing
+// was written, and once it has failed nothing proves it. The result must
+// therefore be uncertain, not a clean refusal.
+func TestEnqueueSimilarityCandidatesTransactional_ValidationRefusalWithFailedRollbackIsUncertain(t *testing.T) {
+	dm := NewTestSharedDM(t)
+
+	SetProposalTxFaultsForTest(
+		nil,
+		func(context.Context, *sql.Conn) error { return errors.New("injected rollback failure") },
+	)
+	t.Cleanup(func() { SetProposalTxFaultsForTest(nil, nil) })
+
+	// A self-pair fails validation.
+	res, err := dm.EnqueueSimilarityCandidatesTransactional(
+		context.Background(), []SimilarityCandidate{candidateFor("mem-a", "mem-a", 0.95)}, DefaultWriteBudget)
+	require.Error(t, err)
+	var invalidErr *ErrInvalidCandidate
+	require.ErrorAs(t, err, &invalidErr)
+
+	require.NotNil(t, res.RollbackError,
+		"a failed rollback must be reported even when a validation error triggered it")
+	require.Equal(t, CommitStateUncertain, res.CommitState)
+	require.Equal(t, 0, res.Inserted)
+	require.False(t, res.WroteTheNewRows)
+}
+
+// A BUDGET refusal whose ROLLBACK also fails is uncertain, and the
+// rollback failure is reported.
+//
+// The budget refusal happens INSIDE the transaction, after the write
+// lock has been taken, so the rollback is attempted — and its failure
+// is what makes the outcome unknowable.
+func TestEnqueueSimilarityCandidatesTransactional_BudgetRefusalWithFailedRollbackIsUncertain(t *testing.T) {
+	dm := NewTestSharedDM(t)
+
+	SetProposalTxFaultsForTest(
+		nil,
+		func(context.Context, *sql.Conn) error { return errors.New("injected rollback failure") },
+	)
+	t.Cleanup(func() { SetProposalTxFaultsForTest(nil, nil) })
+
+	res, err := dm.EnqueueSimilarityCandidatesTransactional(
+		context.Background(),
+		[]SimilarityCandidate{
+			candidateFor("mem-a", "mem-b", 0.95),
+			candidateFor("mem-c", "mem-d", 0.91),
+		},
+		1)
+	require.Error(t, err)
+	var budgetErr *ErrWriteBudgetExceeded
+	require.ErrorAs(t, err, &budgetErr)
+
+	require.NotNil(t, res.RollbackError,
+		"a failed rollback must be reported even when a budget refusal triggered it")
+	require.Equal(t, CommitStateUncertain, res.CommitState)
+	require.Equal(t, 0, res.Inserted)
+	require.False(t, res.WroteTheNewRows)
+}
+
+// A QUEUE-READ failure whose ROLLBACK also fails is uncertain, and the
+// rollback failure is reported.
+//
+// The unresolved-pair snapshot is taken INSIDE the transaction, so a
+// read that fails leaves an open transaction that has to be rolled back.
+// When that rollback fails too, nothing proves the queue is unchanged.
+func TestEnqueueSimilarityCandidatesTransactional_QueueReadFailureWithFailedRollbackIsUncertain(t *testing.T) {
+	dm := NewTestSharedDM(t)
+
+	// Remove the queue table so the in-transaction snapshot cannot be
+	// taken. The shared schema stays attached, so the transaction opens
+	// normally and the failure happens on the read inside it.
+	_, err := dm.SQLDB().Exec(`DROP TABLE shared.contradiction_log`)
+	require.NoError(t, err)
+
+	SetProposalTxFaultsForTest(
+		nil,
+		func(context.Context, *sql.Conn) error { return errors.New("injected rollback failure") },
+	)
+	t.Cleanup(func() { SetProposalTxFaultsForTest(nil, nil) })
+
+	res, err := dm.EnqueueSimilarityCandidatesTransactional(
+		context.Background(), []SimilarityCandidate{candidateFor("mem-a", "mem-b", 0.95)}, DefaultWriteBudget)
+	require.Error(t, err)
+
+	require.NotNil(t, res.RollbackError,
+		"a failed rollback must be reported even when a queue-read error triggered it")
+	require.Equal(t, CommitStateUncertain, res.CommitState)
+	require.Equal(t, 0, res.Inserted)
+	require.False(t, res.WroteTheNewRows)
 }
 
 // ── concurrency ────────────────────────────────────────────────────

@@ -418,6 +418,17 @@ The refusal path therefore triggers only when an operator explicitly raises
 `--propose-limit` — which is the correct behaviour: an explicit override
 should be the thing that hits the wall.
 
+**The 10,000,000-pair ceiling has NOT been exercised at that scale, and no
+runtime figure is claimed for it.** The measurements above are two orders of
+magnitude below it (2,775 and 19,900 pairs). Ten million pairs is roughly
+7.7e10 elementary operations at 768 dimensions — that is an *arithmetic*
+estimate, not a measurement, and it is not quoted here as one. Nothing in
+this report asserts that a 10,000,000-pair budget completes "in seconds";
+the budget exists to make the scan **bounded**, not to promise a duration.
+An operator who needs to know how long a given budget takes should measure
+it on their own corpus. The same statement is recorded next to the constant
+in `internal/core/similarity_candidates.go`.
+
 ### 2.3 Validation gate
 
 All commands were run inside the worktree
@@ -686,7 +697,7 @@ here so the next reader knows what the change does *not* guarantee.
 
 | Risk | Why it is acceptable (for now) |
 |---|---|
-| `isSQLiteBusyError` is consulted only for `BEGIN IMMEDIATE`. A busy error during the INSERT loop or the COMMIT is reported as `db_insert` / `uncertain_commit`, not `db_busy`, so a script that retries on `db_busy` would not retry those. | Largely theoretical: `BEGIN IMMEDIATE` takes the write lock, so a later write *inside the same transaction* cannot be blocked by another writer. The one case that could reach the COMMIT is a reader holding a shared lock in rollback-journal mode; MPM runs WAL. It was left alone rather than adding a branch that cannot be exercised deterministically — an untestable branch is worse than a documented limit. |
+| `isSQLiteBusyError` is consulted only for `BEGIN IMMEDIATE`. A busy error during the INSERT loop or the COMMIT is reported as `db_insert` / `db_commit_rolled_back`, not `db_busy`, so a script that retries on `db_busy` would not retry those. | Largely theoretical: `BEGIN IMMEDIATE` takes the write lock, so a later write *inside the same transaction* cannot be blocked by another writer. The one case that could reach the COMMIT is a reader holding a shared lock in rollback-journal mode; MPM runs WAL. It was left alone rather than adding a branch that cannot be exercised deterministically — an untestable branch is worse than a documented limit. |
 | `queue_total_unresolved` is read **before** the review, so under `--apply` it is the pre-review total; the remainder afterwards is `queue_total_unresolved - applied`. | Deliberate. The count is a pre-flight reading: a queue that cannot be counted is discovered before anything is mutated. Moving it after the review would mean learning that the queue was unreachable only after the review had already changed it. |
 | The `shared` schema is attached per connection, and the pool can open a connection with no attachment. The count and the queue load now attach on the connection they use, but other `shared.*` reads elsewhere in the codebase still run as pooled queries and remain exposed to the same fragility. | Out of this patch's scope. The fix here is where the patch's own contract required it. A general connect-hook would be the structural fix, and it would change connection management for the whole codebase. |
 | The table's `UNIQUE(memory_id_a, memory_id_b, detected_at)` still does not enforce unresolved-pair uniqueness — `detected_at` has one-second resolution. The protection is the unresolved-pair check repeated **inside** the write transaction, which holds the write lock for the duration. | Unchanged by this patch and inherent to the schema. Two proposals of the same pair against the same database file are serialised by that lock. |
@@ -709,3 +720,163 @@ here so the next reader knows what the change does *not* guarantee.
 | `docs/RECALL-MUTATION.md` | + "Bounded proposals (issue #21)", updated idempotency section, + coverage table |
 | `docs/SPEC.md` | + supersession note, command signature, five CLI limits rows |
 | `docs/ISSUE-21-PHASE-B-REPORT.md` | new — this document |
+
+---
+
+## 6. Post-commit corrections
+
+The implementation commit is `013e8627c6bde4dab9e348531fcba92501caa2bc`. It is
+**not amended**. A separate, additional local commit carries the corrections
+below, so the implementation and its corrections are separately auditable.
+
+### 6.1 The JSON error contract
+
+`--json` now produces **exactly one** valid JSON envelope on every path,
+including the ones where the command refuses to do anything at all:
+
+| Refusal | `completion` | `commit_state` |
+|---|---|---|
+| Invalid budget value or scan limit | `invalid_flags` (with `--propose`) / `not_run` (without) | `refused` |
+| Unsupported `--propose-limit=all` | `invalid_flags` / `not_run` | `refused` |
+| Rejected `--propose` flag combination | `invalid_flags` / `not_run` | `refused` |
+| Unknown flag | `invalid_flags` / `not_run` | `refused` |
+| Database initialisation failure | `db_unavailable` / `not_run` | `refused` |
+| Proposal failure | the phase that refused | as the transaction ended |
+| Queue-load failure | the phase that refused | `refused` |
+
+The refusal envelope is constructed **without consulting the database**. A
+refusal that opened a database to describe itself would be a refusal with
+side effects, and the whole point of refusing early is that the operator
+gets the same answer whether or not a database happens to exist. The tests
+prove this with a poisoned database manager: its sentinel message must
+**not** appear on stderr.
+
+Two implementation details make the contract hold:
+
+- The invocation mode is determined by a **pre-pass** over the raw argument
+  list, because a single-pass flag loop cannot know whether a document is
+  owed when it returns early on argument #1. `--json` first and `--json` last
+  therefore behave identically.
+- In `--json` mode the help text goes to **stderr**. stdout carries the
+  document and nothing else.
+
+An explicit `--help` request is **not** a failure path: it prints the
+help text and exits zero, in both modes, and that behaviour is unchanged
+from the implementation commit. The contract above is about the failure
+paths, and the help text says so in the same words ("ON ANY FAILURE
+--json STILL EMITS EXACTLY ONE DOCUMENT").
+
+### 6.2 Transaction failure classification
+
+The classification is now driven by the **rollback**, because the rollback
+is the operation that proves nothing was written:
+
+- A failed **rollback** is identified explicitly, whatever triggered it —
+  including a validation, budget or queue-read refusal — and the outcome is
+  `rollback_failed` / `commit_state: "uncertain"`.
+- A failed **COMMIT** whose **rollback was confirmed** is a **confirmed
+  rollback** (`db_commit_rolled_back` / `commit_state: "rolled_back"`).
+  SQLite refuses to roll back a transaction that has already committed, so a
+  successful rollback after a failed commit proves the commit did not take
+  effect. Nothing was written, and the report says so.
+- A failed COMMIT whose rollback was **not** confirmed is `rollback_failed`:
+  an uncertain commit outcome necessarily had an unconfirmed rollback, so
+  the `uncertain_commit` completion name is **removed** rather than kept as
+  a second way of saying the same thing.
+- Both the primary error and the rollback error are preserved — the primary
+  in the envelope's `error` field, the rollback in the nested
+  `rollback_error` field.
+- `candidates_proposed` is zero unless committed rows were confirmed.
+- The human output and the JSON output agree about transaction certainty.
+
+The fault-injection seam used by the core tests
+(`SetProposalTxFaultsForTest`) is **exported** so the CLI layer can drive
+the same end-to-end fault injection. The tests therefore assert what the
+transaction actually did, not a synthetic `TransactionResult`.
+
+### 6.3 Documentation accuracy
+
+The `MaxCompareBudget` constant's comment no longer claims a runtime for the
+10,000,000-pair ceiling. The ceiling exists to make the scan **bounded**; it
+has not been exercised at that scale, and no runtime figure is claimed for
+it. See §2.2.
+
+### 6.4 Files changed by the corrective commit
+
+| File | Change |
+|---|---|
+| `cmd/mpm/ops_resolve_contradictions.go` | + refusal envelope without the database, invocation pre-pass, rollback-dominant classification, `rollback_error`, help-to-stderr in JSON mode |
+| `cmd/mpm/ops_resolve_propose_errors_test.go` | new — the JSON error contract |
+| `cmd/mpm/ops_resolve_propose_transaction_test.go` | new — the transaction-certainty contract |
+| `cmd/mpm/ops_resolve_propose_cli_test.go` | updated for the new completion vocabulary and the `rollback_error` key |
+| `internal/core/similarity_candidates.go` | + the `MaxCompareBudget` comment correction (§6.3) |
+| `internal/core/similarity_candidates_store.go` | + `SetProposalTxFaultsForTest` exported seam |
+| `internal/core/similarity_candidates_transactional_test.go` | updated for the exported seam; + three failed-rollback tests |
+| `docs/RECALL-MUTATION.md` | + the refusal contract, the rollback/confirmed-rollback semantics, the corrected completion vocabulary, `rollback_error` |
+| `docs/ISSUE-21-PHASE-B-REPORT.md` | + this section; + §2.2's ceiling clarification; + one vocabulary fix in §4.1 |
+
+### 6.5 Validation gate for the corrective commit
+
+All commands were run inside the worktree
+`.claude/worktrees/issue-21-bounded-proposals`, on top of the implementation
+commit `013e862`.
+
+| Check | Result |
+|---|---|
+| `make build` | **PASS** — exit 0; all five binaries built to `.build/bin/` |
+| `make test` | **PASS** — exit 0; 4 589 PASS, 26 SKIP, **0 FAIL** |
+| `make test-race` | **PASS** — exit 0; 4 589 PASS, 26 SKIP, **0 FAIL**, **0 `DATA RACE`** |
+| `make test-core-precommit` | **PASS** — exit 0 |
+| `make test-tools-precommit` | **PASS** — exit 0 |
+| `make test-testenv-precommit` | **PASS** — exit 0 |
+| `gofmt -l` on all modified/created Go files | **clean** — no output |
+| `go vet -tags fts5 ./...` from `internal/core/` | **PASS** — exit 0, no output |
+| `go vet -tags fts5 ./...` from the repository root | **PASS** — exit 0, no output |
+
+`TestDrillE2E_ClaudeCode` **skipped** in both runs. A skip is a skip — it
+is not counted as a pass, and the reason is recorded verbatim:
+
+```
+[claude stderr] [claude-code:unrecognized_model] {"model":"MiniMax-M3.1-Flash","query_source":"sdk"}
+    drill_e2e_claude_code_test.go:179: Claude Code rejected the harness model
+    (unrecognized_model on stderr); set MPM_E2E_CLAUDE=1 to bypass this gate
+--- SKIP: TestDrillE2E_ClaudeCode (29.21s)
+```
+
+The test shells out to the real `claude` CLI, and the ambient session model
+(`MiniMax-M3.1-Flash`) is rejected by Claude Code, so the test's own gate
+skips it. It is the same ambient dependency documented in §2.4, it skips on
+the unmodified baseline `9dba5e9` as well, and it is not affected by this
+patch. It did not fail in either run.
+
+Package timings from the `make test` run:
+
+```
+ok  github.com/flowbyte-com/mpm/cmd/mpm                    340.833s
+ok  github.com/flowbyte-com/mpm-core                        195.867s
+ok  github.com/flowbyte-com/mpm-core/tools                   28.936s
+ok  github.com/flowbyte-com/mpm/internal/testenv               2.739s
+ok  github.com/flowbyte-com/mpm/cmd/mpm-mcp                   3.494s
+[test-agent-adapters] Python: 281 tests (floor 150)
+[test-agent-adapters] JS: 165 passing tests (floor 100)
+[test-agent-adapters] TS: 17 passing tests (floor 15)
+[test-agent-installation] collected 427 tests (floor 300)
+```
+
+Focused runs for the new suites:
+
+```
+go test -tags fts5 -count=1 -run 'TestResolveContradictions_JSONErrorContract|\
+TestResolveContradictions_Failed|TestResolveContradictions_Rollback|\
+TestResolveContradictions_HumanAndJSON|TestClassifyProposalFailure|\
+TestProposalFailureDetail|TestPrintProposalSummary' ./cmd/mpm/
+    ok  github.com/flowbyte-com/mpm/cmd/mpm  1.874s
+
+cd internal/core && go test -tags fts5 -count=1 \
+    -run 'TestEnqueueSimilarityCandidatesTransactional' ./...
+    ok  github.com/flowbyte-com/mpm-core  9.769s
+```
+
+No live database access, no deployment, no push, no PR, no merge and no
+issue closure were performed. Every test in the new suites runs against a
+disposable database under `t.TempDir()`.
