@@ -119,9 +119,9 @@ was found, because none was established.
 Discovery and persistence were kept, and are reachable on demand:
 
 ```bash
-mpm ops resolve-contradictions --propose              # scan + enqueue, then review
-mpm ops resolve-contradictions --propose-limit=500   # shallower, cheaper scan
-mpm ops resolve-contradictions                       # review only; adds nothing
+mpm ops resolve-contradictions --propose                        # scan + enqueue, then review
+mpm ops resolve-contradictions --propose --propose-limit=500     # shallower, cheaper scan
+mpm ops resolve-contradictions                                 # review only; adds nothing
 ```
 
 `--propose` is the **only** way a row is ever added, and it writes
@@ -129,16 +129,21 @@ independently of `--apply`: `--apply` executes verdicts on rows already in
 the queue, `--propose` populates the queue. Omitting both, the command is a
 pure read.
 
-Idempotency of `EnqueueContradiction` for the sequential case comes
-from a **Go-level pre-check** on the unresolved pair, not from a
-database-level guarantee. `EnqueueContradictionReport`
-(`internal/core/contradiction_log.go:199`, the live writer; see its
-`# Why the explicit pre-check` comment at `:171-181`) runs
-`SELECT COUNT(*) ... WHERE memory_id_a = ? AND memory_id_b = ?
-AND resolved_at IS NULL` (`:235-238`) before the `INSERT OR IGNORE`;
-a pending match returns `(false, nil)` and never reaches SQL.
+Idempotency of the proposal path is now enforced **inside the write
+transaction** rather than by a Go-level pre-check that runs before it.
+`EnqueueSimilarityCandidatesTransactional`
+(`internal/core/similarity_candidates_store.go`) opens a pinned connection
+with `BEGIN IMMEDIATE`, takes the unresolved-pair snapshot *inside* that
+transaction, and only then inserts. Two concurrent proposals of the same
+fresh pair are therefore serialised by SQLite's write lock: the second one
+blocks until the first commits, and then sees the committed row. The old
+`SELECT`-then-`INSERT` race — two transactions both seeing the pair as
+absent and both inserting — is closed for this path.
 
-Three things the pre-check is **not**:
+`EnqueueContradictionReport` (`internal/core/contradiction_log.go`) keeps
+its Go-level pre-check for the callers that still use it, but the proposal
+path no longer depends on it, and the pre-check's limitations are now facts
+about a *different* writer rather than about the queue as a whole:
 
 - The `UNIQUE(memory_id_a, memory_id_b, detected_at)` index
   (`internal/core/contradiction_schema_patch.go:69`) is not what
@@ -148,18 +153,16 @@ Three things the pre-check is **not**:
   second — faster than an operator can type the command twice. The
   pre-check was added in `9e75074` after this exact failure mode was
   measured.
-- The check is `SELECT` then `INSERT`, not atomic. Two concurrent
-  enqueues of the same fresh pair can both insert. That race is
-  accepted in `contradiction_log.go:193-198`: the queue is a review
-  worklist, a duplicate costs an operator one glance, and the
-  alternative — a new `UNIQUE` index on the live shared schema — is
-  a larger change than the defect warrants. The callers that matter
-  are sequential operator invocations.
-- The pre-check is scoped to `resolved_at IS NULL` to match the
-  queue's worklist semantics (`contradiction_schema_patch.go:21-24`,
-  the partial index on `resolved_at IS NULL`). Once a pair is
-  resolved it is immediately eligible to be queued again,
-  deliberately.
+- The proposal path's own snapshot is scoped to `resolved_at IS NULL` to
+  match the queue's worklist semantics
+  (`contradiction_schema_patch.go:21-24`, the partial index on
+  `resolved_at IS NULL`). Once a pair is resolved it is immediately
+  eligible to be queued again, deliberately. See "Bounded proposals" below.
+- A pair re-proposed within the same second as its original detection is
+  suppressed by the table's own UNIQUE constraint rather than by the
+  pending check. The suppression is counted and reported as
+  `candidates_skipped_constrained`, so "eligible 1, proposed 0" has an
+  explanation instead of looking like a lost write.
 
 The sequential case is pinned by
 `TestEnqueueContradictionReport_RepeatAcrossSecondsIsNotANewWrite`
@@ -169,6 +172,154 @@ inserted — a repeat run reports **0**, not last run's total
 re-announced as new work — and the end-to-end shape is pinned by
 `TestEnqueueSimilarityCandidates_SecondRunOverUnchangedDataInsertsNothing`
 (`internal/core/contradiction_queue_idempotency_test.go:156`).
+
+## Bounded proposals (issue #21)
+
+A proposal scan compares every pair in a window of memories, so its cost
+grows with the square of the window; and it writes to a durable queue that
+an operator has to read. Both are now bounded, and both **refuse** rather
+than truncate: a scan that cannot finish does not persist a partial
+candidate set, and a write that cannot fit does not insert a partial batch.
+
+### The five budgets
+
+| Budget | Flag | Default | Range | What it bounds |
+|---|---|---|---|---|
+| Memories scanned per source | `--propose-limit=N` | 100 | 1..2000 | How many memories each side of the corpus (local, shared) contributes to the comparison window. |
+| Pair comparisons | `--compare-budget=N` | 100,000 | 1,000..10,000,000 | How many pairs the discovery pass may evaluate. |
+| Candidate materialisation | `--candidate-cap=N` | 10,000 | 1..10,000 | How many qualifying candidates the scan may retain. |
+| New queue insertions | `--write-budget=N` | 250 | 1..250 | How many **new** queue rows the write transaction may insert. |
+| Rows reviewed | `--limit=N` | 100 | 1..1,000 | How many existing queue rows one review pass looks at. |
+
+The scan limit applies **separately** to local and to shared memories, and
+IDs duplicated across the two are removed before any comparison. A limit of
+100 therefore admits up to 200 memories before deduplication. Raising the
+scan limit never bypasses the other three budgets: a wider window implies
+more pairs, and the comparison budget is checked against that implied count
+independently.
+
+`--propose-limit=all` is **not supported** and is rejected explicitly. An
+unbounded scan is exactly the thing these budgets exist to prevent.
+
+The four proposal-scoped budgets are refused if typed without `--propose`.
+They describe a scan that is not happening, and silently accepting them
+would make the command report budgets it never applied.
+
+### A bounded scan is not a corpus count
+
+The candidate count in the output is the count of what the bounded pass
+found **inside the window it actually compared**. It is not a count of the
+whole store, and it is not a sample of the whole store either: a smaller
+limit is a cheaper and shallower scan, not a representative one. The JSON
+envelope reports `scan_complete` alongside the count, and the human output
+says "Scanned N memories".
+
+### Transactional semantics
+
+The candidate batch is inserted in **one** transaction on a pinned
+connection (`BEGIN IMMEDIATE`), and the unresolved-pair check is repeated
+*inside* that transaction. Consequences an operator can rely on:
+
+- The batch is **all-or-nothing**. An insertion failure rolls the whole
+  batch back; no partial batch is left behind.
+- The reported row count is the number of **confirmed committed** rows. A
+  refused, rolled-back or uncertain transaction reports **0**, because an
+  unconfirmed write is not a write.
+- A pair that is already an unresolved queue row is not re-added.
+- A previously **resolved** pair may be proposed again, even when its
+  evidence has not changed. Re-queueing a resolved pair is intended
+  behaviour, not a duplicate bug — the pair may have drifted since it was
+  resolved.
+- Two writers proposing the same pair at the same time are serialised by
+  the write lock; the second sees the first one's row inside its own
+  transaction.
+
+When a commit or a rollback itself fails, the outcome is **unknown** and is
+reported as such (`commit_state: "uncertain"`, `completion:
+"uncertain_commit"` or `"rollback"`). It is never reported as a confirmed
+success, and never as a confirmed rollback.
+
+### Review order, and the two queue counts
+
+Queue rows are reviewed **oldest first**. A queue of 4,000 unresolved rows
+reviewed 100 at a time therefore works through the stalest items before the
+freshest ones.
+
+A proposal may add **more** rows than the 100-row review batch holds. The
+review batch is bounded; the *write* that produced the candidates is
+separately budgeted, and those are different limits. Expect
+`queue_total_unresolved` to exceed `queue_size` after a busy scan. The
+JSON envelope reports both: `queue_size` is the batch this invocation
+reviewed, `queue_total_unresolved` is how many unresolved rows the queue
+holds in total.
+
+### JSON output
+
+`--json` prints **exactly one** JSON object per invocation — one envelope,
+never two, on **every** path including the failure paths. The envelope
+always carries the same keys:
+
+```
+queue_size               rows reviewed in this batch
+queue_total_unresolved   unresolved rows in the queue in total, or null
+                         when the queue could not be counted (null means
+                         "not known", NOT "zero")
+applied                  resolutions applied (0 unless --apply)
+close_calls              near-tie arbitrations proposed
+needs_adjudication       rows awaiting an operator's judgement
+needs_adjudication_rows  those rows, with their queue ids
+dry_run                  true unless --apply
+decisions                per-row resolution decisions
+propose                  nested proposal statistics (always present)
+error                    why this invocation could not do what was asked,
+                         or null when it did
+```
+
+The nested `propose` object reports `requested`, `scan_limit_per_source`,
+`entries_scanned`, `pairs_examined`, `candidates_found_in_scan`,
+`scan_complete`, `candidates_materialised`, `candidates_proposed`,
+`candidates_skipped_pending`, `candidates_skipped_duplicate`,
+`candidates_skipped_constrained`, `compare_budget`, `candidate_cap`,
+`write_budget`, `completion` and `commit_state`.
+
+`completion` names the outcome precisely:
+
+```
+not_run            --propose was not passed
+complete           the scan and the write both succeeded
+compare_budget     the scan was refused by the comparison budget
+candidate_cap      the scan found more candidates than it may retain
+write_budget       the batch was refused by the write budget
+invalid_candidate  a candidate failed validation; the batch was refused
+db_unavailable     the queue could not be reached; nothing was attempted
+db_busy            another writer held the lock
+db_insert          an insertion failed and the rollback was confirmed
+db_error           another statement failed; the transaction was rolled back
+rollback           a rollback itself failed; the outcome is unknown
+uncertain_commit   the commit failed; the outcome is unknown
+scan_failed        the scan could not read the corpus
+```
+
+`commit_state` is the authoritative statement of what happened to the
+queue: `refused`, `rolled_back`, `uncertain` or `confirmed`. `uncertain`
+means the outcome could not be established and the queue must be verified
+before it is trusted. A completion name says which PHASE failed; the
+commit state says what that means for durable state.
+
+On any proposal failure the command exits **non-zero** and stops before
+reviewing or resolving anything. A half-proposal followed by a half-review
+would leave the operator unable to tell which part of the output describes
+durable state.
+
+### The proposal is not a verdict
+
+**SIMILARITY IS EVIDENCE OF RELATIONSHIP, NOT PROOF OF CONTRADICTION.**
+
+The proposal path proposes *pairs to look at*. It does not propose
+contradictions, and a scan producing many candidates is not a scan finding
+many conflicts. Nothing a proposal writes may penalise a memory: `--apply`
+requires an explicit per-row `--adjudicate` first. See "Applying a
+candidate requires adjudication" below.
 
 ## Applying a candidate requires adjudication
 
@@ -422,6 +573,19 @@ stores; MCP surfaces write only `retrieval_metadata`.
 The net was verified against the old behaviour by temporarily reintroducing
 the Phase 4 write behind an environment guard: **five tests fail**
 (cases 3, 4, 5, 11, 13) and pass again once removed.
+
+### Bounded-proposal coverage (issue #21)
+
+| Suite | Pins |
+|---|---|
+| `internal/core/similarity_candidates_bounded_test.go` | The bounded discovery pass: default and overridden scan limits, local/shared overlap and ID deduplication, comparison-budget and candidate-cap boundaries, the 75-row duplicate cluster, overflow-safe pair arithmetic, and internally consistent statistics for skipped, invalid, below-threshold and qualifying pairs. |
+| `internal/core/similarity_candidates_transactional_test.go` | The write transaction: fresh and partially populated queues, repeated scans, already-resolved pairs re-queued, write-budget refusal with zero new rows, a mid-insertion fault with a confirmed rollback, commit and rollback failures reported as uncertain, concurrent writers, lock contention, different-timestamp duplicate attempts, and malformed, reversed and forged-adjudication candidates. |
+| `cmd/mpm/ops_propose_candidates_test.go` | The proposal engine end to end: candidates found vs rows written, the write budget counting new pairs only, and the comparison-budget and candidate-cap refusals being reported rather than swallowed. |
+| `cmd/mpm/ops_resolve_propose_cli_test.go` | The CLI contract: one JSON envelope per `--json` invocation with one stable key set, the refused flag combinations refused before any database access, the parser boundaries, `--propose --dry-run` still inserting proposal rows, and a failed proposal exiting non-zero and stopping before the review. |
+
+Every one of these runs against a disposable database. The live MPM
+database is never opened by the test suite, and the live
+`mpm ops resolve-contradictions --propose` command is never executed by it.
 
 ## Related
 

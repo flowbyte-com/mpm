@@ -49,6 +49,7 @@
 package internal
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -131,10 +132,11 @@ const SlashFraction = 0.5
 // WHO CALLS THIS, as of 2026-10-13: no production path. The one caller that
 // used to — HybridSearch's Phase 4 — was removed, because a retrieval must
 // not persist a contradiction claim it cannot substantiate. The only
-// production insert is EnqueueSimilarityCandidates (similarity_candidates_store.go),
-// reached solely from `mpm ops resolve-contradictions --propose`. This
-// wrapper is retained because it is part of the DatabaseManager surface and
-// is exercised by the queue's own tests.
+// production insert is EnqueueSimilarityCandidatesTransactional
+// (similarity_candidates_store.go), reached solely from
+// `mpm ops resolve-contradictions --propose`. This wrapper is retained
+// because it is part of the DatabaseManager surface and is exercised by the
+// queue's own tests.
 //
 // The doc comment here used to say this was called from ChallengeMemoryAsync.
 // That was wrong even when written: ChallengeMemoryAsync appends to
@@ -153,6 +155,86 @@ const SlashFraction = 0.5
 func (dm *DatabaseManager) EnqueueContradiction(ev ContradictionEvidence) error {
 	_, err := dm.EnqueueContradictionReport(ev)
 	return err
+}
+
+// ErrMissingMemoryID is returned when a contradiction evidence value names
+// an empty memory on either side of the pair.
+//
+// It is a distinct type rather than a plain error so a caller can tell a
+// malformed producer input (a bug, or a hostile payload) apart from a
+// database failure. The message is the one the check has always
+// produced, so the operator-facing text does not change.
+type ErrMissingMemoryID struct{}
+
+func (e *ErrMissingMemoryID) Error() string {
+	return "EnqueueContradiction: both memory IDs required"
+}
+
+// ErrSelfContradiction is returned when a contradiction evidence value names
+// the same memory on both sides of the pair.
+//
+// A memory cannot be in conflict with itself. The check exists because the
+// alternative — a self-pair row sitting in the operator's review queue —
+// is a defect that only shows up after a human has already spent attention
+// on it.
+type ErrSelfContradiction struct{}
+
+func (e *ErrSelfContradiction) Error() string {
+	return "EnqueueContradiction: a memory cannot contradict itself"
+}
+
+// validateAndNormaliseContradictionEvidence validates a contradiction
+// evidence value and canonicalises it in place.
+//
+// This is the SINGLE validation path for every writer of
+// shared.contradiction_log. Both the original per-row writer
+// (EnqueueContradictionReport) and the transactional batch writer
+// (EnqueueSimilarityCandidatesTransactional in similarity_candidates_store.go)
+// call it, so the two paths cannot drift apart and a new caller cannot
+// bypass it by accident.
+//
+// It enforces four properties:
+//
+//  1. Both memory IDs are non-empty.
+//  2. The pair is not a self-pair.
+//  3. The pair is normalised to lexicographic order, so (A,B) and (B,A)
+//     produce the same queue key and the same evidence JSON. This
+//     protects against the "order swapped at the call site" class of bug.
+//  4. A producer-supplied `adjudicated:` segment is stripped.
+//
+// Property 4 needs its own paragraph, because it is the one that is
+// easy to undo by accident. An `adjudicated:` segment is a record of an
+// operator having read both memories and concluded the claims conflict.
+// Creating a queue row is not that action, so an adjudication segment
+// supplied by a producer is unauthorised no matter what the producer
+// claims: verification is affirmative and never inferred from text
+// supplied by the party asking for the benefit of the doubt. Stripping it
+// before it reaches either the column or the evidence JSON that mirrors
+// this struct keeps AdjudicateContradiction the only way a row becomes
+// eligible to penalise a memory. See stripForgedAdjudication for why this
+// is enforced structurally rather than trusted to the call graph.
+//
+// Segments other than `adjudicated:` are preserved untouched. In
+// particular `similarity-scan` — the detection provenance that brought a
+// row to the queue — survives, and so does a `theory:<id>` triage flag.
+//
+// The struct is mutated in place, so the caller MUST marshal the evidence
+// JSON AFTER calling this. Marshalling first would persist a pair order
+// and a provenance string that differ from what was validated.
+func validateAndNormaliseContradictionEvidence(ev *ContradictionEvidence) error {
+	if ev.MemoryA == "" || ev.MemoryB == "" {
+		return &ErrMissingMemoryID{}
+	}
+	if ev.MemoryA == ev.MemoryB {
+		return &ErrSelfContradiction{}
+	}
+	if ev.MemoryA > ev.MemoryB {
+		ev.MemoryA, ev.MemoryB = ev.MemoryB, ev.MemoryA
+	}
+	if cleaned, forged := stripForgedAdjudication(ev.DetectedBy); forged {
+		ev.DetectedBy = cleaned
+	}
+	return nil
 }
 
 // EnqueueContradictionReport is EnqueueContradiction plus the one fact it
@@ -196,34 +278,18 @@ func (dm *DatabaseManager) EnqueueContradiction(ev ContradictionEvidence) error 
 // alternative — a new UNIQUE index on the live shared schema — is a larger
 // change than the defect warrants. The callers that matter are sequential
 // operator invocations.
+//
+// The transactional batch writer (EnqueueSimilarityCandidatesTransactional)
+// does NOT rely on this pre-check: it re-reads the unresolved pairs inside
+// an acquired write transaction, where the check and the inserts are
+// serialised against other writers. That is a strictly stronger guarantee,
+// and it exists because this pre-check is not atomic.
 func (dm *DatabaseManager) EnqueueContradictionReport(ev ContradictionEvidence) (bool, error) {
 	if dm.db == nil {
 		return false, fmt.Errorf("EnqueueContradiction: dm.db is nil")
 	}
-	if ev.MemoryA == "" || ev.MemoryB == "" {
-		return false, fmt.Errorf("EnqueueContradiction: both memory IDs required")
-	}
-	if ev.MemoryA == ev.MemoryB {
-		return false, fmt.Errorf("EnqueueContradiction: a memory cannot contradict itself")
-	}
-	// Normalize the pair: sort lexicographically so (A,B) and (B,A)
-	// produce the same dedup key. This protects against the "order
-	// swapped at the call site" class of bug.
-	if ev.MemoryA > ev.MemoryB {
-		ev.MemoryA, ev.MemoryB = ev.MemoryB, ev.MemoryA
-	}
-	// An `adjudicated:` segment is a record of an operator having read both
-	// memories. Creating a queue row is not that action, so an adjudication
-	// segment supplied by a producer is unauthorised no matter what the
-	// producer claims: verification is affirmative and never inferred from
-	// text supplied by the party asking for the benefit of the doubt.
-	// Strip it before it reaches either the column or the evidence JSON that
-	// mirrors this struct, so AdjudicateContradiction remains the only way a
-	// row becomes eligible to penalise a memory. See
-	// stripForgedAdjudication for why this is enforced here rather than
-	// trusted to the call graph.
-	if cleaned, forged := stripForgedAdjudication(ev.DetectedBy); forged {
-		ev.DetectedBy = cleaned
+	if err := validateAndNormaliseContradictionEvidence(&ev); err != nil {
+		return false, err
 	}
 
 	evJSON, _ := json.Marshal(ev)
@@ -286,7 +352,30 @@ func (dm *DatabaseManager) LoadContradictionQueue(limit int) ([]map[string]inter
 	if limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", limit)
 	}
-	rows, err := dm.db.Query(q)
+	// The queue lives in the `shared` schema, and SQLite attaches a
+	// database PER CONNECTION. The pool is not limited to one connection
+	// (see the note in db.go) and has no connect hook, so a pooled query
+	// can land on a connection with no `shared` attachment and fail with
+	// "no such table: shared.contradiction_log" even though the table
+	// exists.
+	//
+	// Pin a connection and verify the attachment, exactly as the
+	// transactional writer (ensureSharedAttachedOnConn, defined in
+	// similarity_candidates_store.go) and the queue count do, so that the
+	// read and the write agree about where the queue is.
+	ctx := context.Background()
+	if dm.db == nil {
+		return nil, &ErrDatabaseUnavailable{}
+	}
+	conn, err := dm.db.Conn(ctx)
+	if err != nil {
+		return nil, &ErrDatabaseUnavailable{Underlying: err}
+	}
+	defer conn.Close()
+	if err := dm.ensureSharedAttachedOnConn(ctx, conn); err != nil {
+		return nil, fmt.Errorf("LoadContradictionQueue: %w", err)
+	}
+	rows, err := conn.QueryContext(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("LoadContradictionQueue: %w", err)
 	}
