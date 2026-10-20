@@ -666,6 +666,13 @@ func handleOpsResolveContradictions(args []string) int {
 	// about. The invocation stops at the first failure - a later request is
 	// not attempted on top of a broken one - and the requests after it are
 	// reported as not attempted rather than dropped.
+	//
+	// The slice is carried into EVERY envelope this invocation emits from
+	// here on - the success path, the empty-queue path, and every later
+	// failure path. An adjudication that succeeded is a durable write, and
+	// a later stage failing (or succeeding) is no reason to report an
+	// empty adjudication history: the row WAS stamped, and a consumer
+	// reading only the envelope must be able to see that.
 	adjudicationOutcomes := make([]adjudicationOutcome, 0, len(adjudications))
 	var adjudicateErr error
 	for _, adj := range adjudications {
@@ -803,7 +810,7 @@ func handleOpsResolveContradictions(args []string) int {
 				DryRun:                !apply,
 				Decisions:             []mpminternal.ResolutionDecision{},
 				Propose:               proposeSummaryValue,
-				Adjudications:         []adjudicationOutcome{},
+				Adjudications:         adjudicationOutcomes,
 				Error:                 &envErr,
 			})
 		} else {
@@ -838,7 +845,7 @@ func handleOpsResolveContradictions(args []string) int {
 				DryRun:                !apply,
 				Decisions:             []mpminternal.ResolutionDecision{},
 				Propose:               proposeSummaryValue,
-				Adjudications:         []adjudicationOutcome{},
+				Adjudications:         adjudicationOutcomes,
 				Error:                 &envErr,
 			})
 		} else {
@@ -874,7 +881,7 @@ func handleOpsResolveContradictions(args []string) int {
 				DryRun:                !apply,
 				Decisions:             []mpminternal.ResolutionDecision{},
 				Propose:               proposeSummaryValue,
-				Adjudications:         []adjudicationOutcome{},
+				Adjudications:         adjudicationOutcomes,
 				Error:                 &envErr,
 			})
 		} else {
@@ -901,7 +908,7 @@ func handleOpsResolveContradictions(args []string) int {
 				DryRun:                !apply,
 				Decisions:             []mpminternal.ResolutionDecision{},
 				Propose:               proposeSummaryValue,
-				Adjudications:         []adjudicationOutcome{},
+				Adjudications:         adjudicationOutcomes,
 			})
 		} else {
 			if propose {
@@ -998,7 +1005,7 @@ func handleOpsResolveContradictions(args []string) int {
 			DryRun:                !apply,
 			Decisions:             decisions,
 			Propose:               proposeSummaryValue,
-			Adjudications:         []adjudicationOutcome{},
+			Adjudications:         adjudicationOutcomes,
 		})
 	} else {
 		if propose {

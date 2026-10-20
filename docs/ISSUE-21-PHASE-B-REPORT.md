@@ -1204,3 +1204,213 @@ mutation were performed. Every test in the new suites runs against a
 disposable database under `t.TempDir()` or an isolated `MPM_WORKSPACE`. The
 forensic snapshot `cmd/dbg_main.go.tmp` is preserved unchanged
 (SHA-256 `d84e49cd…ae4575`).
+
+## 8. Final reporting correction (HAL directive on PR #42)
+
+### 8.1 The defect
+
+An adjudication is a **write**. It stamps a queue row as
+operator-adjudicated, and that stamp is what makes the row eligible to
+penalise a memory later. §7.2 made the *failure* path report what
+happened to each request, and the per-request outcomes were carried in the
+`adjudications` array.
+
+Five of the seven post-adjudication emission sites, however, threw those
+outcomes away. They built their envelope with a hard-coded
+
+```go
+Adjudications: []adjudicationOutcome{},
+```
+
+instead of the `adjudicationOutcomes` slice the invocation had
+accumulated. The sites were:
+
+| Site | Envelope |
+|---|---|
+| propose failure | an error envelope — the proposal failed |
+| queue-count failure | an error envelope — the queue could not be counted |
+| queue-load failure | an error envelope — the queue could not be loaded |
+| empty-queue completion | a success envelope — the queue was empty |
+| normal successful completion | a success envelope — the review ran |
+
+So an invocation that adjudicated a row **successfully** and then went on
+to finish, or to fail at a later stage, reported an **empty adjudication
+history**.
+
+That is the wrong report in the direction that matters. The row WAS
+stamped. The envelope said nothing was stamped. A consumer reading only
+the envelope could not tell that a durable write had happened — and the
+one thing the `adjudications` array exists to say is exactly that.
+
+### 8.2 The correction
+
+The slice is now carried into every envelope the invocation emits from
+the point of the adjudication onwards. The two **pre-adjudication**
+envelopes are deliberately unchanged: a refusal and a help request are
+answered before any adjudication runs, so their array is present and
+empty.
+
+```
+cmd/mpm/ops_resolve_contradictions.go
+  refusalEnvelope  (pre-adjudication)  Adjudications: []adjudicationOutcome{}   unchanged
+  helpEnvelope     (pre-adjudication)  Adjudications: []adjudicationOutcome{}   unchanged
+  adjudication failure (post)          Adjudications: adjudicationOutcomes      unchanged
+  propose failure      (post)          Adjudications: adjudicationOutcomes      CHANGED
+  queue-count failure  (post)          Adjudications: adjudicationOutcomes      CHANGED
+  queue-load failure   (post)          Adjudications: adjudicationOutcomes      CHANGED
+  empty-queue          (post)          Adjudications: adjudicationOutcomes      CHANGED
+  normal completion    (post)          Adjudications: adjudicationOutcomes      CHANGED
+```
+
+### 8.3 The tests
+
+`cmd/mpm/ops_resolve_adjudicate_success_json_test.go` — seven new test
+functions, all against disposable databases:
+
+| Test | Pins |
+|---|---|
+| `..._JSONAdjudicateSuccessReportsTheAdjudicatedRow` | one successful `--json --adjudicate` reports `status: "adjudicated"` with its queue id and no error |
+| `..._JSONAdjudicateSuccessReportsBothRowsInRequestOrder` | two successful adjudications report both, in **request** order — the fixture asks for the higher id first, so an id-ordered report cannot pass |
+| `..._JSONAdjudicateSuccessSurvivesALaterQueueLoadFailure` | a successful adjudication followed by a **later command-stage failure** stays visible in the error envelope, and the write is durable |
+| `..._JSONAdjudicateSuccessSurvivesTheEmptyQueueCompletion` | a successful adjudication stays visible in the **empty-queue** envelope |
+| `..._JSONAdjudicationReportMatchesTheDurableQueueState` | the report agrees with the **durable** queue state: the row really carries the stamp, and it is still unresolved (an adjudication judges a pair, it does not settle it) |
+| `..._JSONAdjudicateEmitsOneDocumentAndNothingElse` | the JSON path emits **exactly one** document and nothing else; the human path keeps its per-row confirmation line |
+| `..._PreAdjudicationEnvelopesStillCarryAnEmptyAdjudicationList` | the pre-adjudication envelopes (refusal, help) still carry an **empty** list — present, not absent, not null |
+
+Two synthetic fixtures make the post-adjudication paths reachable at all:
+
+* **A schema mismatch** (`dropSharedQueueEvidenceColumn`) drops the
+  `evidence` column from the shared queue table. The count still works
+  and the adjudication still works; the queue **load** names `evidence`
+  and fails with "no such column: evidence". That is a command-stage
+  failure that happens *after* a durable write.
+* **A resolve-on-adjudication trigger** (`installResolveOnAdjudicationTrigger`)
+  resolves the row the moment it is adjudicated, as a concurrent operator
+  would. The queue is therefore empty by the time it is loaded, which is
+  the only way an invocation that adjudicated a row can reach the
+  empty-queue completion.
+
+Both fixtures need the shared file **ATTACHed under the name `shared`**,
+not opened as the helper connection's own `main` database: the shared
+schema contains trigger definitions that name the `shared` schema, and a
+connection without such a schema cannot re-parse it — every schema change
+against the file would fail with "cannot reference objects in database
+shared" before it reached its own statement.
+
+**One honest limit.** A queue-**count** failure after a successful
+adjudication is not reachable with these fixtures. The count and the
+adjudication run on the same pooled connection, and the count's only
+attach-failure mode — the shared file is unreachable — is equally a
+failure of the adjudication's read of that same attached file. The site
+is corrected in code, and its envelope shape is pinned by the
+pre-existing local-only-database test; what is pinned here is the
+load-failure path, which is reachable and is the shape the directive
+described. A count failure caused by a *SQL* error rather than an
+unreachable shared file would report the adjudication correctly, because
+the slice is carried there too.
+
+**The regression proof.** The new suite was run against the pre-fix
+implementation, with the five emission sites temporarily restored to the
+hard-coded empty slice:
+
+| Suite | Pre-fix result |
+|---|---|
+| `cmd/mpm/ops_resolve_adjudicate_success_json_test.go` | **6 of 7** functions **FAIL**; the pre-adjudication one PASSes on both (that is its point) |
+
+The **existing partial-failure tests are preserved**: all three
+pre-existing adjudication-reporting functions in
+`cmd/mpm/ops_resolve_adjudicate_json_test.go` still pass unchanged, and
+the new suite sits alongside them rather than replacing them.
+
+### 8.4 Files changed by the reporting-correction commit
+
+| File | Change |
+|---|---|
+| `cmd/mpm/ops_resolve_contradictions.go` | the five post-adjudication emission sites carry `adjudicationOutcomes`; the two pre-adjudication sites are unchanged |
+| `cmd/mpm/ops_resolve_adjudicate_success_json_test.go` | new — the reporting of a successful adjudication (7 test functions) |
+| `docs/RECALL-MUTATION.md` | + "An adjudication that succeeded stays visible", + the new suite in the coverage table |
+| `docs/SPEC.md` | + the sentence in the 2026-10-20 update note |
+| `docs/ISSUE-21-PHASE-B-REPORT.md` | + this section |
+
+### 8.5 Validation gate for the reporting-correction commit
+
+All commands were run inside the worktree
+`.claude/worktrees/issue-21-bounded-proposals`, on top of the
+final-review commit `7d7d1d3`, against the staged tree
+`0960b794b416022c31f71ad190ba79b239a84194`.
+
+The committed tree differs from the gated tree by **this section and
+nothing else** — one changed file, `docs/ISSUE-21-PHASE-B-REPORT.md`. A
+section that records the gate's own results cannot be inside the tree the
+gate ran against, by construction. Every Go file and every other document
+is byte-identical between the two trees, which is checkable directly:
+
+```
+git diff --name-only 0960b794b416022c31f71ad190ba79b239a84194 \
+                   $(git rev-parse HEAD^{tree}) | grep -v '\.md$' | wc -l
+0
+```
+
+| Check | Result |
+|---|---|
+| `make build` | **PASS** — exit 0; all five binaries built to `.build/bin/` |
+| `make test` | **PASS** — exit 0; 4 611 PASS, 26 SKIP, **0 FAIL** |
+| `make test-race` | **PASS** — exit 0; 4 611 PASS, 26 SKIP, **0 FAIL**, **0 `DATA RACE`** |
+| `make test-core-precommit` | **PASS** — exit 0 |
+| `make test-tools-precommit` | **PASS** — exit 0 |
+| `make test-testenv-precommit` | **PASS** — exit 0 |
+| `gofmt -l` on every modified/created Go file | **clean** — no output |
+| `go vet -tags fts5 ./cmd/...` | **PASS** — exit 0, no output |
+| `go vet -tags fts5 ./...` from the repository root | **PASS** — exit 0, no output |
+| `go vet -tags fts5 ./...` from `internal/core/` | **PASS** — exit 0, no output |
+
+The two suite runs agree exactly: 4 611 PASS / 26 SKIP / 0 FAIL in both, and
+the race run reports no `DATA RACE`. The baseline for this branch
+(`7d7d1d3`) reported 4 604 PASS / 26 SKIP / 0 FAIL, so the 7 additional
+passing tests are exactly the new ones — the seven in
+`cmd/mpm/ops_resolve_adjudicate_success_json_test.go`. (Sub-cases inside a
+single test function are counted once, by the function.)
+
+`TestDrillE2E_ClaudeCode` **skipped** in both runs, for the same ambient
+reason recorded in §2.4 and §7.4: the real `claude` CLI rejects the
+session model `MiniMax-M3.1-Flash`, so the test's own gate skips it. It
+skips on the unmodified baseline as well, and it is not affected by this
+patch.
+
+Package timings from the `make test` run:
+
+```
+ok  	github.com/flowbyte-com/mpm/cmd/mpm                    344.443s
+ok  	github.com/flowbyte-com/mpm-core                        184.949s
+ok  	github.com/flowbyte-com/mpm-core/tools                   29.156s
+ok  	github.com/flowbyte-com/mpm/internal/testenv               3.126s
+ok  	github.com/flowbyte-com/mpm/cmd/mpm-mcp                   4.265s
+[test-agent-adapters] Python: 281 tests (floor 150)
+[test-agent-adapters] JS: 165 passing tests (floor 100)
+[test-agent-adapters] TS: 17 passing tests (floor 15)
+[test-agent-installation] collected 427 tests (floor 300)
+```
+
+Focused runs for the new suite, and for the pre-existing
+partial-failure tests that must keep passing:
+
+```
+go test -tags fts5 -count=1 -v -run 'TestResolveContradictions' ./cmd/mpm/
+    --- PASS: TestResolveContradictions_JSONAdjudicateFailureProducesOneEnvelope (0.10s)
+    --- PASS: TestResolveContradictions_JSONAdjudicatePartialFailureKeepsTheEarlierSideEffect (0.10s)
+    --- PASS: TestResolveContradictions_JSONAdjudicateReportsTheRequestsItDidNotAttempt (0.09s)
+    --- PASS: TestResolveContradictions_JSONAdjudicateSuccessReportsTheAdjudicatedRow (0.09s)
+    --- PASS: TestResolveContradictions_JSONAdjudicateSuccessReportsBothRowsInRequestOrder (0.09s)
+    --- PASS: TestResolveContradictions_JSONAdjudicateSuccessSurvivesALaterQueueLoadFailure (0.09s)
+    --- PASS: TestResolveContradictions_JSONAdjudicateSuccessSurvivesTheEmptyQueueCompletion (0.09s)
+    --- PASS: TestResolveContradictions_JSONAdjudicationReportMatchesTheDurableQueueState (0.09s)
+    --- PASS: TestResolveContradictions_JSONAdjudicateEmitsOneDocumentAndNothingElse (0.09s)
+    --- PASS: TestResolveContradictions_PreAdjudicationEnvelopesStillCarryAnEmptyAdjudicationList (0.08s)
+    ok  	github.com/flowbyte-com/mpm/cmd/mpm	5.300s
+```
+
+No live database access, no deployment, no merge, no issue closure, no
+installed-binary replacement, no schema migration and no memory mutation
+were performed. Every test in the new suite runs against a disposable
+database under `t.TempDir()`. The forensic snapshot
+`cmd/dbg_main.go.tmp` is preserved unchanged (SHA-256 `d84e49cd…ae4575`).

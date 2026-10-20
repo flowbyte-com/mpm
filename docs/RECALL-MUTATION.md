@@ -424,6 +424,26 @@ earlier successes — the durable state and the report agree, and a
 consumer that reads only `error` still has the whole `adjudications` array
 in front of it.
 
+### An adjudication that succeeded stays visible
+
+The outcomes are carried into **every** envelope the invocation emits
+after the adjudication has run: the normal completion, the empty-queue
+completion, and every later failure path (a proposal that failed, a queue
+that could not be counted, a queue that could not be loaded).
+
+An adjudication is a **durable write**. A later stage failing — or
+succeeding — is no reason to report an empty adjudication history: the
+row WAS stamped, and a consumer reading only the envelope has to be able
+to see that. An invocation that adjudicated a row and then reported
+"nothing was adjudicated" would be reporting the opposite of what
+happened.
+
+The **pre-adjudication** envelopes are the exception, and they are
+unambiguous: a refusal and a help request are answered before any
+adjudication runs, so their `adjudications` array is present and **empty**.
+An empty list there means "no request was made"; a non-empty list in a
+post-adjudication envelope means "these writes happened".
+
 ### The proposal is not a verdict
 
 **SIMILARITY IS EVIDENCE OF RELATIONSHIP, NOT PROOF OF CONTRADICTION.**
@@ -700,6 +720,7 @@ the Phase 4 write behind an environment guard: **five tests fail**
 | `internal/core/similarity_scan_federated_test.go` | The federated scan reads both sides of the corpus: both sides are read on a **fresh pooled connection** (the pooled read of the shared schema is asserted to fail first, so the hazard is proved live rather than assumed), a shared source that is **configured but unreachable** is an error rather than a local-only success, an **unconfigured** shared source stays local-only and succeeds, and the fingerprint filter, the newest-first ordering, the per-side limit and the cross-side ID dedupe all still hold. |
 | `cmd/mpm/ops_resolve_adjudicate_json_test.go` | The adjudication reporting contract: a failed `--json --adjudicate` produces exactly one envelope with a non-zero exit and the reason inside it; an invocation whose **earlier** request succeeded and whose later one failed reports both, and the durable state matches the report; a request after the failure is reported as `not_attempted` rather than dropped; `--json --help` produces one JSON document with the help inside it; and the human help path is unchanged. |
 | `cmd/mpm/ops_resolve_json_help_router_test.go` | The JSON help contract **at the router** (the layer a shell invocation reaches first): `--json --help`, `--json -h`, `--help --json` and `-h --json` all print exactly one JSON document and nothing else on stdout; the human `--help` still prints the command's own page; a human invocation with a flag in front of the help token still renders the `mpm ops` family page; and the JSON-mode help request is inert — the database and the workspace digests are unchanged. |
+| `cmd/mpm/ops_resolve_adjudicate_success_json_test.go` | The reporting of a **successful** adjudication: one successful `--json --adjudicate` reports `status: "adjudicated"` with its queue id; two successful adjudications report both, in **request** order (the fixture asks for the higher id first, so an id-ordered report cannot pass); a successful adjudication survives a **later** command-stage failure (the queue load fails on a queue table that predates the `evidence` column) and stays visible in the error envelope; a successful adjudication survives the **empty-queue** completion (a trigger resolves the row as it is adjudicated, as a concurrent operator would); the report agrees with the **durable** queue state (the row really carries the stamp and is still unresolved); the JSON path emits exactly one document and nothing else while the human path keeps its confirmation line; and the pre-adjudication envelopes (refusal, help) still carry an empty list rather than an absent or null one. |
 
 Every one of these runs against a disposable database. The live MPM
 database is never opened by the test suite, and the live

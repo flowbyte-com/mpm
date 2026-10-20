@@ -1553,7 +1553,13 @@ When two memories disagree, the system has to notice. `shared.contradiction_log`
 > **each** `--adjudicate` request (`adjudications`: `adjudicated`, `failed`
 > or `not_attempted`). An invocation whose earlier request succeeded and
 > whose later one failed now exits non-zero with one envelope that reports
-> both — the earlier write is a durable side effect and is not concealed. A
+> both — the earlier write is a durable side effect and is not concealed.
+> The outcomes are carried into **every** envelope the invocation emits
+> after the adjudication has run — the normal completion, the empty-queue
+> completion, and every later failure path — so an adjudication that
+> succeeded is never reported as an empty adjudication history. The
+> pre-adjudication envelopes (a refusal, a help request) are answered
+> before any adjudication runs and carry an **empty** list. A
 > `--help` request in `--json` mode is one JSON document like any other,
 > with the help text inside the envelope; the human help path is unchanged.
 > That holds at the **command line** too: `mpm` intercepts help requests
