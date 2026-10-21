@@ -20,10 +20,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/flowbyte-com/mpm/internal/testenv"
@@ -42,14 +44,26 @@ var provenanceBinaries = []struct {
 	{"./cmd/mpm-telemetry", "mpm-telemetry"},
 }
 
+// The binaries these tests run are built ONCE per test binary and shared.
+//
+// Building a Go binary is the dominant cost of these tests, and the
+// cmd/mpm race suite already runs close to its wall-clock budget in CI.
+// The five binaries are therefore built once in each of their two forms
+// — stamped and unstamped — and reused by every test that needs them.
+//
+// The temporary directory is deliberately NOT removed: the binaries have
+// to outlive the test that built them. This follows the package's
+// existing convention (see buildMPMBinForIOTests in call_io_test.go).
+var (
+	provenanceBuildOnce sync.Once
+	provenanceBuildErr  error
+	provenanceStamped   map[string]string
+	provenanceUnstamped map[string]string
+)
+
 // buildProvenanceBinary builds one MPM binary from the repository root
 // with the given linker stamp.
-func buildProvenanceBinary(t *testing.T, pkg, outPath, ldflags string) {
-	t.Helper()
-	if _, err := exec.LookPath("go"); err != nil {
-		t.Skip("go toolchain not available")
-	}
-
+func buildProvenanceBinary(pkg, outPath, ldflags string) error {
 	args := []string{"build", "-tags", "fts5"}
 	if ldflags != "" {
 		args = append(args, "-ldflags", ldflags)
@@ -60,8 +74,52 @@ func buildProvenanceBinary(t *testing.T, pkg, outPath, ldflags string) {
 	// The test runs in cmd/mpm; the module root is two levels up.
 	cmd.Dir = "../.."
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("go build %s: %v\n%s", pkg, err, out)
+		return fmt.Errorf("go build %s: %v\n%s", pkg, err, out)
 	}
+	return nil
+}
+
+// buildProvenanceBinaries builds every MPM binary in its stamped and
+// unstamped forms, once each, and returns the paths keyed by the name
+// each binary reports for itself.
+func buildProvenanceBinaries(t *testing.T) (stamped, unstamped map[string]string) {
+	t.Helper()
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not available")
+	}
+
+	provenanceBuildOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "mpm-provenance-bin-")
+		if err != nil {
+			provenanceBuildErr = err
+			return
+		}
+		stamped = map[string]string{}
+		unstamped = map[string]string{}
+		for _, b := range provenanceBinaries {
+			bin := filepath.Join(dir, b.name)
+			if err := buildProvenanceBinary(b.pkg, bin, stampedLDFlags); err != nil {
+				provenanceBuildErr = err
+				return
+			}
+			stamped[b.name] = bin
+		}
+		for _, b := range provenanceBinaries {
+			bin := filepath.Join(dir, b.name+"-unstamped")
+			if err := buildProvenanceBinary(b.pkg, bin, ""); err != nil {
+				provenanceBuildErr = err
+				return
+			}
+			unstamped[b.name] = bin
+		}
+		provenanceStamped = stamped
+		provenanceUnstamped = unstamped
+	})
+
+	if provenanceBuildErr != nil {
+		t.Fatalf("build the MPM binaries: %v", provenanceBuildErr)
+	}
+	return provenanceStamped, provenanceUnstamped
 }
 
 // runProvenanceBinary runs a built binary with the given arguments and
@@ -94,13 +152,12 @@ func runProvenanceBinary(t *testing.T, bin string, env []string, args ...string)
 }
 
 func TestBuildProvenance_AllFiveBinariesCarryIdenticalProvenance(t *testing.T) {
-	dir := t.TempDir()
+	stamped, _ := buildProvenanceBinaries(t)
 
 	for _, b := range provenanceBinaries {
 		b := b
 		t.Run(b.name, func(t *testing.T) {
-			bin := filepath.Join(dir, b.name)
-			buildProvenanceBinary(t, b.pkg, bin, stampedLDFlags)
+			bin := stamped[b.name]
 
 			stdout, stderr, exit := runProvenanceBinary(t, bin, nil, "--version")
 			if exit != 0 {
@@ -122,13 +179,12 @@ func TestBuildProvenance_AllFiveBinariesCarryIdenticalProvenance(t *testing.T) {
 }
 
 func TestBuildProvenance_TheVersionSurfaceDoesNotStartTheDaemon(t *testing.T) {
-	dir := t.TempDir()
+	stamped, _ := buildProvenanceBinaries(t)
 
 	for _, b := range provenanceBinaries {
 		b := b
 		t.Run(b.name, func(t *testing.T) {
-			bin := filepath.Join(dir, b.name)
-			buildProvenanceBinary(t, b.pkg, bin, stampedLDFlags)
+			bin := stamped[b.name]
 
 			// A workspace that does not exist. A daemon that boots
 			// would materialise it; the version surface must not.
@@ -148,13 +204,12 @@ func TestBuildProvenance_TheVersionSurfaceDoesNotStartTheDaemon(t *testing.T) {
 }
 
 func TestBuildProvenance_UnstampedBinariesReportVisiblePlaceholders(t *testing.T) {
-	dir := t.TempDir()
+	_, unstamped := buildProvenanceBinaries(t)
 
 	for _, b := range provenanceBinaries {
 		b := b
 		t.Run(b.name, func(t *testing.T) {
-			bin := filepath.Join(dir, b.name)
-			buildProvenanceBinary(t, b.pkg, bin, "")
+			bin := unstamped[b.name]
 
 			stdout, stderr, exit := runProvenanceBinary(t, bin, nil, "--version")
 			if exit != 0 {
@@ -230,7 +285,12 @@ func TestBuildProvenance_TheCanonicalScriptStampIsEmbeddedInTheBinary(t *testing
 	wantCommit := strings.TrimSpace(string(commitOut))
 
 	bin := filepath.Join(t.TempDir(), "mpm")
-	buildProvenanceBinary(t, "./cmd/mpm", bin, canonicalLDFlags)
+	// This binary carries a DIFFERENT stamp from the shared ones (the
+	// canonical payload rather than the hand-written one), so it needs
+	// its own build. It is built once and used once.
+	if err := buildProvenanceBinary("./cmd/mpm", bin, canonicalLDFlags); err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	stdout, stderr, exit := runProvenanceBinary(t, bin, nil, "--version")
 	if exit != 0 {

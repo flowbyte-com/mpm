@@ -490,6 +490,23 @@ install-hooks:
 gen-cli:
 	$(GO) run ./cmd/gen-cli
 
+# The per-test-binary wall-clock budget for the cmd/... suites.
+#
+# Go's default is 10 minutes per test binary. cmd/mpm is the largest
+# package in the repository and, under the race detector on a two-core CI
+# runner, its suite measures 530-600 seconds — 88-100% of that default.
+# Measured: 529.896s at commit 06c029ba (CI run 39599085460, release
+# gate) and 569.440s on a later runner for the same tree. At that budget
+# the outcome of the pre-merge gate is decided by which runner the job
+# lands on, not by whether the code is correct.
+#
+# 20m is roughly twice the worst observed run: it gives a slow runner
+# real headroom while still failing a genuine deadlock or hang. This is a
+# HARNESS budget only — no assertion is weakened, skipped or removed by
+# it, and it changes no product behaviour. Overridable so an unusually
+# slow machine can extend it without editing the Makefile.
+CMD_TEST_TIMEOUT ?= 20m
+
 # THE test entry point. One command, correct from a fresh clone.
 #
 # Depends on `build`, and must keep depending on it.
@@ -523,7 +540,7 @@ gen-cli:
 # prerequisite does not add a second flag set; it delegates to the target
 # that already owns them.
 test: build
-	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./cmd/...
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -timeout $(CMD_TEST_TIMEOUT) -v ./cmd/...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/telemetry/...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/buildinfo/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./...
@@ -1181,7 +1198,7 @@ release-gate: test-race test-release
 # that unconditionally assume FTS5 is compiled in. Both flags are part of
 # the substrate's mandatory FTS5 integrity guarantee — see CLAUDE.md §3.
 test-race: build
-	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./cmd/...
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -timeout $(CMD_TEST_TIMEOUT) -v ./cmd/...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/telemetry/...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/buildinfo/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./...

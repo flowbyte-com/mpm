@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/flowbyte-com/mpm/internal/testenv"
 )
 
 // stampedBuildInfo is the provenance the test binaries are stamped with.
@@ -38,32 +40,39 @@ const stampedLDFlags = "-X github.com/flowbyte-com/mpm/internal/buildinfo.Versio
 	" -X github.com/flowbyte-com/mpm/internal/buildinfo.Dirty=false" +
 	" -X github.com/flowbyte-com/mpm/internal/buildinfo.BuildType=" + stampedBuildType
 
-// buildStampedMpm builds the production mpm binary with the canonical
-// build-provenance ldflags, exactly as the Makefile stamps them.
+// buildStampedMpm returns the path to the production mpm binary stamped
+// with the canonical build-provenance ldflags, exactly as the Makefile
+// stamps them.
+//
+// The binary is the same one the build-provenance tests use, so it is
+// built ONCE per test binary and shared by every test that needs it.
+// `go build` dominates these tests' cost: the version command's
+// behaviour can only be observed by running the real binary, and
+// building it once per test would spend the same wall clock eight times
+// over for no extra coverage. The cmd/mpm race suite already runs close
+// to its wall-clock budget in CI, so the tests here keep their
+// footprint to a single build.
 //
 // This is the "same process as install.sh" check: install.sh reaches its
 // binaries through `make build`, so a binary stamped the Makefile's way
 // must report its provenance.
 func buildStampedMpm(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("go"); err != nil {
-		t.Skip("go toolchain not available")
-	}
-
-	binPath := filepath.Join(t.TempDir(), "mpm")
-	cmd := exec.Command("go", "build", "-tags", "fts5",
-		"-ldflags", stampedLDFlags, "-o", binPath, ".")
-	cmd.Dir = "."
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("go build: %v\n%s", err, out)
-	}
-	return binPath
+	stamped, _ := buildProvenanceBinaries(t)
+	return stamped["mpm"]
 }
 
 func runMpmVersion(t *testing.T, bin string, env []string, args ...string) (string, string, int) {
 	t.Helper()
 	cmd := exec.Command(bin, args...)
-	cmd.Env = append(os.Environ(), env...)
+	// The environment comes from testenv.WithExtra, which pins
+	// MPM_WORKSPACE and HOME to temporary directories. A child that
+	// inherited the ambient environment could resolve the operator's
+	// live installation; the repository's subprocess-isolation guard
+	// (internal/testenv) exists for exactly that reason. `env` entries
+	// are appended last, so a caller can deliberately point
+	// MPM_WORKSPACE somewhere else.
+	cmd.Env = testenv.WithExtra(t, env...)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
