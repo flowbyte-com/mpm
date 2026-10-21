@@ -2469,6 +2469,8 @@ MPM_BENCH_COLLECTION=bench_v2_corpus python3 -m bench run \
 
 **No previously returned legitimate result was removed** — the per-query row sets are identical, not merely the aggregates.
 
+**Rankings and scores are unchanged, checked at the score level.** For each of the 40 positive queries the entire `top_k` list was compared element by element — every returned `id`, every `score`, every `vector_similarity`, every `source` — and **all 40 rows are byte-identical to the baseline**. The two raw-cosine per-query tables (`raw_cosine_per_query_table`, `raw_cosine_prefixed_per_query_table`) likewise have 0 differing rows across all 60 queries. This is the directive's "confirm existing positive-query rankings and scores unchanged" requirement, checked against the actual scores rather than against the aggregates alone.
+
 **Observed differences, reported rather than concealed.** A full leaf-by-leaf diff of the two `report.json` files finds **12 differing leaves, and not one of them is a measurement**. They fall into exactly five groups:
 
 | Field(s) | Why they differ |
@@ -2491,11 +2493,94 @@ The committed artefact is `bench/output/issue-15-phase-b/` (report.json, report.
 | `cmd/mpm/recall_semantic_contract_test.go` (new) | 12 tests — empty-result JSON, `--json` alias, non-empty count + status, nonsense query does not assert answerability, human output framing, human empty output, paraphrase results still available, lexical envelope unchanged, collection scoping unchanged, token-budget behaviour unchanged, provider failure is an error, provider failure is not an empty result. |
 | `bench/tests/test_issue15_contract.py` (new) | 10 tests — both empty markers recognised, `search_mode` classification under the explicit status, and the legacy path, and the runner reading the explicit status. |
 | `python3 -m pytest bench/tests/ -q` | 217 passed. |
+| `python3 -m bench selftest` | pass. |
 | `make build` | pass. |
-| `make test` | pass. |
-| `make test-race` | pass. |
+| `make test` | pass (exit 0). |
+| `make test-race` | pass on re-run (exit 0, zero failing tests). The first run had one environmental failure — `TestDrillE2E_ClaudeCode` — which is flaky on this host; see B5.4. |
+| `make test-release` | pass — 26 tests collected (floor 20). |
+| `make test-bench` | pass — 217 tests (floor 50). |
+| `make test-scripts` | pass — 448 tests (floor 50). |
+| `make test-agent-installation` | pass — 427 tests (floor 300). |
+| `make test-agent-adapters` | pass — Python 281 (floor 150), JS 165 (floor 100), TS 17 (floor 15). |
+| `mpm-lint --gate` | pass. |
+| `scripts/doc-gate-threshold-table.sh` | pass — 7 MCP-output-cap constants each have a SPEC §6.4 row. |
+| `scripts/doc-gate-cli-limits.sh` | pass — 7 CLI-side limits each have a SPEC §8 row. |
+| `scripts/pre-commit` | pass (exit 0, no `--no-verify`). |
 
 All fixtures are hermetic: `t.TempDir()` workspaces, disposable SQLite databases, and a stub embedding provider. No live database, no live store, no network.
+
+### B5.4 — The one failing test, and why it is not this change
+
+`make test-race` fails on exactly one test: `TestDrillE2E_ClaudeCode`
+(`internal/core/drill_e2e_claude_code_test.go`). It is **not** caused by
+this change — it is a flaky test on this host, and it **passes on
+re-run** (the re-run of `make test-race` on this branch exits 0 with
+zero failing tests). Four independent lines of evidence:
+
+**(1) The failure is a subprocess timeout, not a contract assertion.**
+
+```
+[claude stderr] [claude-code:unrecognized_model] {"model":"MiniMax-M3.1-Flash","query_source":"sdk"}
+    drill_e2e_claude_code_test.go:165: Finish: claude timed out: context deadline exceeded
+--- FAIL: TestDrillE2E_ClaudeCode (90.18s)
+```
+
+The test spawns the **ambient** `claude` CLI. On this host that CLI is
+configured with the model `MiniMax-M3.1-Flash`, which it rejects at
+startup. The child therefore never performs the two MCP calls the drill
+requires, and the test's own 90-second context expires inside
+`h.Finish` — which `t.Fatalf`s *before* the model-capability skip gate
+below it can fire.
+
+**(2) The same rejection happens at the baseline, and the outcome is a
+race with the child's exit time.** The test was run at the directive's
+baseline commit `56ad422` in a clean worktree
+(`git worktree add --detach /tmp/mpm-i15-baseline 56ad422`). Observed
+outcomes, all with the identical `unrecognized_model` rejection on
+stderr:
+
+| Run | Child outcome | Test outcome |
+|---|---|---|
+| baseline, full `make test-race` | exited at 23.53s | **SKIP** |
+| baseline, isolated `-race` | exited at 81.82s | **SKIP** |
+| this branch, `make test` (no `-race`) | exited at 82.79s | **SKIP** |
+| this branch, `make test-race` (first run) | did not exit before 90s | **FAIL** |
+| this branch, `make test-race` (**re-run**) | exited at 56.72s | **SKIP** |
+
+Whether the test skips or fails is decided entirely by whether the
+ambient CLI exits before the test's 90-second deadline — not by the code
+under test. **The decisive observation is the last row: the same branch,
+the same commit, the same day, re-run, passes.** `make test-race` on
+this branch exits 0 on the re-run, with zero failing tests. The baseline's
+own full `make test-race` likewise passed on the same host on the same
+day, with the same ambient rejection. The result is a property of the
+environment, not of the branch.
+
+**(3) The drill and MCP-server paths are untouched by this change.**
+The branch changes 14 files. None of them is under `cmd/mpm-mcp/`,
+`internal/core/tools/`, `cmd/mpm/drill_cmds.go`,
+`internal/core/drill_claude_code_harness.go` or
+`internal/core/memory_tools.go`:
+
+```bash
+git diff --name-only 56ad422..HEAD -- cmd/mpm-mcp internal/core/tools \
+  cmd/mpm/drill_cmds.go internal/core/drill_claude_code_harness.go \
+  internal/core/memory_tools.go
+# (no output)
+```
+
+The drill exercises `mpm-mcp` (a separate binary, `cmd/mpm-mcp`) and a
+throwaway workspace. It never calls `mpm recall`, the hybrid ranker,
+the JSON envelope or the embedding path.
+
+**(4) CI is unaffected.** The test skips immediately when `CI=true`
+unless `MPM_E2E_CLAUDE=1` is set, so the GitHub Actions "Release gate"
+job never runs it.
+
+**Not fixed here, deliberately.** Making this test *reliably* green would
+mean changing an unrelated drill-harness test to accommodate a local
+model configuration — out of scope for Issue #15, and exactly the kind
+of gate-editing this directive forbids. It is reported instead.
 
 ### B5.3 — The tests are load-bearing
 
