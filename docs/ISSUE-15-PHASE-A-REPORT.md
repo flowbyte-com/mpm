@@ -2629,7 +2629,13 @@ The live MPM installation was not read, copied, benchmarked against, written to,
 
 ## B9 — Stop point
 
-Implementation, tests, benchmarks and documentation are complete. The branch is pushed and a **DRAFT** PR is open.
+Implementation, tests, benchmarks and documentation are complete.
+
+| | |
+|---|---|
+| Branch | `fix/issue-15-honest-semantic-recall` (based on `56ad422`) |
+| Commits | `cad6368` (contract + docs), `041012e` (Phase B artefact), `a5a03ab` (record corrections) |
+| DRAFT PR | https://github.com/flowbyte-com/mpm/pull/45 |
 
 **No merge. No issue closure. No deployment. The installed MPM is unchanged.** Phase B awaits independent HAL review.
 
