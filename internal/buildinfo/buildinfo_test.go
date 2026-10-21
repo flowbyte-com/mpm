@@ -47,6 +47,64 @@ func TestCurrent_UnstampedBinaryReportsVisiblePlaceholders(t *testing.T) {
 	}
 }
 
+// TestCurrent_UnstampedBinaryHasAnUnknownDirtyState proves a binary with
+// no provenance at all does not claim a clean tree.
+//
+// An unstamped build knows nothing about the source it was compiled
+// from. Reporting its dirty state as "clean" would be a claim nobody
+// can support; "unknown" is the honest answer, and it is what a build
+// from an exported source tree (no Git metadata) reports too.
+func TestCurrent_UnstampedBinaryHasAnUnknownDirtyState(t *testing.T) {
+	info := Current("mpm")
+
+	if info.DirtyState != DirtyStateUnknown {
+		t.Errorf("unstamped DirtyState = %q, want %q (a build without a stamp knows nothing about its source tree)",
+			info.DirtyState, DirtyStateUnknown)
+	}
+	if info.Dirty {
+		t.Error("unstamped Dirty = true, want false")
+	}
+}
+
+// TestCurrent_DirtyStateDistinguishesCleanDirtyAndUnknown proves the
+// three states survive the trip from the build stamp to the report.
+//
+// The build script can say "unknown" (an exported source tree with no
+// Git metadata), and that is not the same fact as "clean". Collapsing
+// the two would tell an operator that a build was verified against a
+// revision when nobody ever checked.
+func TestCurrent_DirtyStateDistinguishesCleanDirtyAndUnknown(t *testing.T) {
+	cases := []struct {
+		stamp      string
+		wantState  string
+		wantDirty  bool
+		wantHuman  string
+		stampLabel string
+	}{
+		{stamp: "false", wantState: DirtyStateClean, wantDirty: false, wantHuman: "dirty:   no"},
+		{stamp: "true", wantState: DirtyStateDirty, wantDirty: true, wantHuman: "dirty:   yes"},
+		{stamp: "unknown", wantState: DirtyStateUnknown, wantDirty: false, wantHuman: "dirty:   unknown"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.stamp, func(t *testing.T) {
+			restore := swapStamps(t, map[string]string{"Dirty": tc.stamp})
+			defer restore()
+
+			info := Current("mpm")
+			if info.DirtyState != tc.wantState {
+				t.Errorf("DirtyState = %q, want %q", info.DirtyState, tc.wantState)
+			}
+			if info.Dirty != tc.wantDirty {
+				t.Errorf("Dirty = %v, want %v", info.Dirty, tc.wantDirty)
+			}
+			if out := FormatHuman(info); !strings.Contains(out, tc.wantHuman) {
+				t.Errorf("human output does not contain %q:\n%s", tc.wantHuman, out)
+			}
+		})
+	}
+}
+
 func TestCurrent_ShortCommitDerivedFromFullCommitWhenNotStamped(t *testing.T) {
 	// A build that stamps only the full SHA must still render a short
 	// SHA; otherwise the human output would show a bare 40-char hash.
@@ -90,7 +148,7 @@ func TestCurrent_DirtyStampIsParsed(t *testing.T) {
 }
 
 func TestCurrent_ReleaseBuildTypeImpliesRelease(t *testing.T) {
-	restore := swapStamps(t, map[string]string{"BuildType": "release"})
+	restore := swapStamps(t, map[string]string{"BuildType": "release", "Dirty": "false"})
 	defer restore()
 
 	info := Current("mpm")
@@ -99,6 +157,51 @@ func TestCurrent_ReleaseBuildTypeImpliesRelease(t *testing.T) {
 	}
 	if info.BuildType != "release" {
 		t.Errorf("BuildType = %q, want %q", info.BuildType, "release")
+	}
+}
+
+// TestCurrent_DirtyBuildNeverClaimsRelease proves a locally modified
+// build cannot present itself as an official release.
+//
+// The build script refuses to stamp build_type=release for a dirty
+// tree — a release tag says which revision the tree is based on, and
+// the working tree says whether that revision is what was actually
+// compiled. This is the other half of that rule: even if a stamp says
+// "release", a binary that reports its own source as modified must not
+// claim release status.
+func TestCurrent_DirtyBuildNeverClaimsRelease(t *testing.T) {
+	restore := swapStamps(t, map[string]string{"BuildType": "release", "Dirty": "true"})
+	defer restore()
+
+	info := Current("mpm")
+	if info.Release {
+		t.Error("Release = true, want false (a build with uncommitted changes is not a release)")
+	}
+	// The raw stamp is still reported: the revision the build was based
+	// on is a fact; whether the build IS that release is the judgement.
+	if info.BuildType != "release" {
+		t.Errorf("BuildType = %q, want %q", info.BuildType, "release")
+	}
+	if info.DirtyState != DirtyStateDirty {
+		t.Errorf("DirtyState = %q, want %q", info.DirtyState, DirtyStateDirty)
+	}
+}
+
+// TestCurrent_UnknownDirtyStateNeverClaimsRelease proves an
+// unverifiable build is not a release either.
+//
+// "The tree was clean" and "nobody could tell" are different facts.
+// Only the first one may back a release claim.
+func TestCurrent_UnknownDirtyStateNeverClaimsRelease(t *testing.T) {
+	restore := swapStamps(t, map[string]string{"BuildType": "release", "Dirty": "unknown"})
+	defer restore()
+
+	info := Current("mpm")
+	if info.Release {
+		t.Error("Release = true, want false (a build whose source could not be verified is not a release)")
+	}
+	if info.DirtyState != DirtyStateUnknown {
+		t.Errorf("DirtyState = %q, want %q", info.DirtyState, DirtyStateUnknown)
 	}
 }
 
@@ -132,7 +235,7 @@ func TestInfo_JSONHasTheDocumentedKeys(t *testing.T) {
 	}
 
 	for _, key := range []string{
-		"version", "commit", "short_commit", "dirty", "release",
+		"version", "commit", "short_commit", "dirty", "dirty_state", "release",
 		"build_type", "repository", "binary",
 	} {
 		if _, ok := got[key]; !ok {
@@ -146,8 +249,44 @@ func TestInfo_JSONHasTheDocumentedKeys(t *testing.T) {
 	if got["dirty"] != false {
 		t.Errorf("dirty = %v (%T), want the boolean false", got["dirty"], got["dirty"])
 	}
+	if got["dirty_state"] != DirtyStateClean {
+		t.Errorf("dirty_state = %v, want %q", got["dirty_state"], DirtyStateClean)
+	}
 	if got["release"] != false {
 		t.Errorf("release = %v (%T), want the boolean false", got["release"], got["release"])
+	}
+}
+
+// TestInfo_JSONDirtyStateIsAString proves the tri-state survives into
+// the machine-readable contract.
+//
+// The boolean `dirty` is kept for compatibility; `dirty_state` is the
+// precise answer. A consumer that reads only `dirty` still works, and
+// a consumer that needs to know whether the state was VERIFIED can
+// read `dirty_state`.
+func TestInfo_JSONDirtyStateIsAString(t *testing.T) {
+	restore := swapStamps(t, map[string]string{"Dirty": "unknown"})
+	defer restore()
+
+	raw, err := FormatJSON(Current("mpm"))
+	if err != nil {
+		t.Fatalf("FormatJSON: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("version JSON is not valid JSON: %v\n%s", err, raw)
+	}
+
+	state, ok := got["dirty_state"].(string)
+	if !ok {
+		t.Fatalf("dirty_state = %v (%T), want a string", got["dirty_state"], got["dirty_state"])
+	}
+	if state != DirtyStateUnknown {
+		t.Errorf("dirty_state = %q, want %q", state, DirtyStateUnknown)
+	}
+	if got["dirty"] != false {
+		t.Errorf("dirty = %v (%T), want the boolean false", got["dirty"], got["dirty"])
 	}
 }
 
@@ -202,6 +341,24 @@ func TestFormatHuman_CleanBuildIsNotMarkedDirty(t *testing.T) {
 	out := FormatHuman(Current("mpm"))
 	if strings.Contains(out, "dirty:   yes") {
 		t.Errorf("a clean build must not be marked dirty:\n%s", out)
+	}
+}
+
+// TestFormatHuman_UnknownDirtyStateIsVisible proves the human form does
+// not report an unverifiable build as a clean one.
+//
+// "clean" and "unknown" are different facts, and an operator reading
+// the human form must be able to tell them apart.
+func TestFormatHuman_UnknownDirtyStateIsVisible(t *testing.T) {
+	restore := swapStamps(t, map[string]string{"Dirty": "unknown"})
+	defer restore()
+
+	out := FormatHuman(Current("mpm"))
+	if !strings.Contains(out, "dirty:   unknown") {
+		t.Errorf("an unverifiable dirty state must be visible as unknown:\n%s", out)
+	}
+	if strings.Contains(out, "dirty:   no") {
+		t.Errorf("an unverifiable dirty state must not be reported as clean:\n%s", out)
 	}
 }
 

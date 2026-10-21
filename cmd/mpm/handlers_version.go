@@ -33,6 +33,11 @@ type versionJSON struct {
 //	  build:   development
 //	  dirty:   no
 //
+// The dirty line reads "no", "yes" or "unknown". "unknown" means the
+// build's source tree could not be compared against a revision — an
+// exported source tree with no Git metadata, or a binary that was never
+// stamped — which is not the same statement as "clean".
+//
 // Flags:
 //
 //	--json   emit the machine-readable form

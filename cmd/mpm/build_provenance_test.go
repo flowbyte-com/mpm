@@ -20,6 +20,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -303,4 +304,135 @@ func TestBuildProvenance_TheCanonicalScriptStampIsEmbeddedInTheBinary(t *testing
 	if !strings.Contains(stdout, wantCommit) {
 		t.Errorf("the canonically stamped binary does not report this checkout's HEAD commit %q:\n%s", wantCommit, stdout)
 	}
+}
+
+// TestBuildProvenance_AnExportedSourceTreeReportsUnknownProvenance is
+// the end-to-end proof for the "no Git metadata" case.
+//
+// It builds a REAL binary with the exact ldflags the canonical script
+// produces for an MPM source EXPORT — the sources with no .git
+// directory — and asserts the binary reports what it can establish and
+// nothing it cannot: the product version (from the VERSION file), and
+// "unknown" for every Git-derived fact.
+//
+// The export is nested inside an UNRELATED repository, because that is
+// where the mistake hides: Git resolves a repository by searching
+// parent directories, so without an explicit check the export would
+// inherit the enclosing project's commit — a commit that says nothing
+// about MPM, stamped into an MPM binary where an operator could not
+// tell it was wrong.
+func TestBuildProvenance_AnExportedSourceTreeReportsUnknownProvenance(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not available")
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// An unrelated repository, with a commit of its own.
+	outer := t.TempDir()
+	runGit(t, outer, "init", "-q", "-b", "main")
+	runGit(t, outer, "-c", "user.email=provenance@example.invalid",
+		"-c", "user.name=Provenance Test", "commit", "-q", "--allow-empty", "-m", "enclosing commit")
+	outerHead := strings.TrimSpace(runGit(t, outer, "rev-parse", "HEAD"))
+
+	// The MPM source export inside it: the sources, the provenance
+	// script, and no Git metadata of its own.
+	export := filepath.Join(outer, "mpm-export")
+	script := filepath.Join(export, "scripts", "build-provenance.sh")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatalf("create the export tree: %v", err)
+	}
+	repoScript, err := os.ReadFile(filepath.Join("..", "..", "scripts", "build-provenance.sh"))
+	if err != nil {
+		t.Fatalf("read the canonical provenance script: %v", err)
+	}
+	if err := os.WriteFile(script, repoScript, 0o755); err != nil {
+		t.Fatalf("write the export's provenance script: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(export, "VERSION"), []byte("1.2.3\n"), 0o644); err != nil {
+		t.Fatalf("write the export's VERSION: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(export, "go.mod"),
+		[]byte("module github.com/flowbyte-com/mpm\n\ngo 1.26.6\n"), 0o644); err != nil {
+		t.Fatalf("write the export's go.mod: %v", err)
+	}
+
+	// The canonical payload for that tree — the same one the Makefile
+	// and install.sh consume.
+	out, err := exec.Command("bash", script, "ldflags").Output()
+	if err != nil {
+		t.Fatalf("build-provenance.sh ldflags on the export: %v", err)
+	}
+	canonicalLDFlags := strings.TrimSpace(string(out))
+	for _, want := range []string{
+		".Version=1.2.3",
+		".Commit=unknown",
+		".ShortCommit=unknown",
+		".Dirty=unknown",
+		".BuildType=development",
+	} {
+		if !strings.Contains(canonicalLDFlags, want) {
+			t.Errorf("the export's ldflags payload does not carry %q:\n%s", want, canonicalLDFlags)
+		}
+	}
+	if strings.Contains(canonicalLDFlags, outerHead) {
+		t.Errorf("the enclosing repository's commit leaked into the payload:\n%s", canonicalLDFlags)
+	}
+
+	bin := filepath.Join(t.TempDir(), "mpm")
+	if err := buildProvenanceBinary("./cmd/mpm", bin, canonicalLDFlags); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	stdout, stderr, exit := runProvenanceBinary(t, bin, nil, "version", "--json")
+	if exit != 0 {
+		t.Fatalf("mpm version --json exited %d\nstdout=%s\nstderr=%s", exit, stdout, stderr)
+	}
+
+	var got struct {
+		Version    string `json:"version"`
+		Commit     string `json:"commit"`
+		Dirty      bool   `json:"dirty"`
+		DirtyState string `json:"dirty_state"`
+		Release    bool   `json:"release"`
+		BuildType  string `json:"build_type"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("version --json is not valid JSON: %v\n%s", err, stdout)
+	}
+
+	if got.Version != "1.2.3" {
+		t.Errorf("version = %q, want %q (the VERSION file is still authoritative)", got.Version, "1.2.3")
+	}
+	if got.Commit != "unknown" {
+		t.Errorf("commit = %q, want %q", got.Commit, "unknown")
+	}
+	if got.Dirty {
+		t.Error("dirty = true, want false (an unverifiable tree is not known to be dirty)")
+	}
+	if got.DirtyState != "unknown" {
+		t.Errorf("dirty_state = %q, want %q", got.DirtyState, "unknown")
+	}
+	if got.Release {
+		t.Error("release = true, want false (an unverifiable build is not a release)")
+	}
+	if got.BuildType != "development" {
+		t.Errorf("build_type = %q, want %q", got.BuildType, "development")
+	}
+}
+
+// runGit runs a git command in dir and returns its stdout.
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+	return string(out)
 }

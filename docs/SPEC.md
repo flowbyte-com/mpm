@@ -1857,14 +1857,38 @@ Makefile and by `install.sh`) stamps five values into all five binaries
 | product version | from the `VERSION` file |
 | full commit SHA | the exact source commit the binary was built from |
 | short commit SHA | the same commit, abbreviated to 8 characters |
-| dirty indicator | `true` when the build contained uncommitted source changes |
-| build type | `development` for an ordinary build, `release` for a build from a formally tagged release |
+| dirty indicator | `true` when the build contained uncommitted source changes; `unknown` when the build's source tree could not be compared against a revision |
+| build type | `development` for an ordinary build, `release` for a build from a formally tagged release **built from a clean tree** |
 
 The values are populated **at build time**, not by querying Git after
 installation. A binary therefore reports its own provenance even when it
 is executed outside a Git checkout — which is the normal case for an
 installed binary. Normal builds, CI builds and `install.sh` all go
 through the same script, so they cannot disagree.
+
+#### What the build may claim
+
+The provenance is only as good as the evidence behind it, so the build
+refuses to claim what it cannot establish.
+
+**Only MPM's own checkout is evidence.** The build resolves its Git
+metadata from the source tree it is building, and only when that tree
+*is* an MPM source tree — the `go.mod` module directive is what makes
+it one. Git resolves a repository by searching *parent* directories, so
+an MPM source export dropped inside an unrelated repository would
+otherwise inherit that repository's commit, and the binary would carry
+a revision that has nothing to do with MPM. When the tree has no Git
+metadata of its own, the commit and the dirty state are `unknown`: the
+product version is still established (it comes from the `VERSION`
+file), and the build still succeeds.
+
+**A release is a tagged revision built from a clean tree.** The tag
+says which revision the tree is based on; the working tree says whether
+that revision is what was actually compiled. A locally modified tree on
+a release tag is not the released artifact, so it is built and reported
+as `development`. The binary enforces this independently: a build that
+reports uncommitted source changes never reports itself as a release,
+whatever it was stamped with.
 
 #### The version surface
 
@@ -1883,6 +1907,13 @@ MPM v0.1.0-dev (06c029ba)
 The first line is stable in shape (`MPM v<version> (<short sha>)`) so it
 can be scraped; the detail lines carry the rest.
 
+The dirty line has three states: `no` (the tree was clean), `yes` (it
+differed from the commit) and `unknown` (nobody could tell — an
+exported source tree, or a binary that was never stamped). `unknown`
+is deliberately not rendered as `no`: "the tree was clean" and "the
+tree was never checked" are different statements, and an operator
+reading the human form has to be able to tell them apart.
+
 Reporting the version is **fast, offline and side-effect-free**. The
 command is intercepted before any other startup work, so it never runs
 the permission sweep, never reads the scheduler health bridge, never
@@ -1900,6 +1931,7 @@ $ mpm version --json
   "commit": "06c029ba11ce18c7f10aa60b0f0497ece2edda7c",
   "short_commit": "06c029ba",
   "dirty": false,
+  "dirty_state": "clean",
   "release": false,
   "build_type": "development",
   "repository": "flowbyte-com/mpm",
@@ -1907,10 +1939,21 @@ $ mpm version --json
 }
 ```
 
-The eight keys above are the documented contract. `release` is `true`
-only for a build from a formally tagged release; `build_type` is the
-rawer form of the same fact (`development` / `release`). Machine-
-readable output never depends on terminal rendering.
+The nine keys above are the documented contract. `release` is `true`
+only for a build from a formally tagged revision **built from a clean
+tree**; `build_type` is the rawer form of the same fact
+(`development` / `release`). Machine-readable output never depends on
+terminal rendering.
+
+`dirty` and `dirty_state` are two views of one fact, kept side by side
+for compatibility. `dirty` is the boolean an existing consumer already
+reads, and it is `true` only when the build is *known* to contain
+uncommitted source changes. `dirty_state` is the precise answer — one
+of `clean`, `dirty`, `unknown` — and it is what distinguishes a
+verified-clean build from a build nobody was able to verify. Changing
+`dirty` itself from a boolean to a string would have been a breaking
+change to a published contract, so the precise state was added beside
+it instead; `dirty` keeps its type and its meaning.
 
 #### Update check (`mpm version --check`)
 
@@ -1969,6 +2012,7 @@ $ mpm version --check --json
   "commit": "06c029ba11ce18c7f10aa60b0f0497ece2edda7c",
   "short_commit": "06c029ba",
   "dirty": false,
+  "dirty_state": "clean",
   "release": false,
   "build_type": "development",
   "repository": "flowbyte-com/mpm",

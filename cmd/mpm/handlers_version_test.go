@@ -143,7 +143,7 @@ func TestVersionCommand_JSONIsValidAndComplete(t *testing.T) {
 	}
 
 	for _, key := range []string{
-		"version", "commit", "short_commit", "dirty", "release",
+		"version", "commit", "short_commit", "dirty", "dirty_state", "release",
 		"build_type", "repository", "binary",
 	} {
 		if _, ok := got[key]; !ok {
@@ -162,6 +162,9 @@ func TestVersionCommand_JSONIsValidAndComplete(t *testing.T) {
 	}
 	if got["dirty"] != false {
 		t.Errorf("dirty = %v (%T), want the boolean false", got["dirty"], got["dirty"])
+	}
+	if got["dirty_state"] != "clean" {
+		t.Errorf("dirty_state = %v, want %q", got["dirty_state"], "clean")
 	}
 	if got["release"] != false {
 		t.Errorf("release = %v (%T), want the boolean false", got["release"], got["release"])

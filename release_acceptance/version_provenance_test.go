@@ -82,6 +82,7 @@ type versionInfo struct {
 	Commit      string `json:"commit"`
 	ShortCommit string `json:"short_commit"`
 	Dirty       bool   `json:"dirty"`
+	DirtyState  string `json:"dirty_state"`
 	Release     bool   `json:"release"`
 	BuildType   string `json:"build_type"`
 	Repository  string `json:"repository"`
@@ -161,8 +162,20 @@ func TestVersionSurface_HumanAndJSONFormsAgree(t *testing.T) {
 	if info.BuildType == "" {
 		t.Error("build_type is empty")
 	}
-	if info.Release != (info.BuildType == "release") {
-		t.Errorf("release = %v but build_type = %q; they must agree", info.Release, info.BuildType)
+	switch info.DirtyState {
+	case "clean", "dirty", "unknown":
+	default:
+		t.Errorf("dirty_state = %q; want one of clean, dirty, unknown", info.DirtyState)
+	}
+	// A release is a formally tagged revision built from a CLEAN tree.
+	// A locally modified build must never present itself as one, and a
+	// build whose dirty state could not be established certainly must
+	// not.
+	wantRelease := info.BuildType == "release" && info.DirtyState == "clean"
+	if info.Release != wantRelease {
+		t.Errorf("release = %v but build_type = %q and dirty_state = %q; "+
+			"release must be true only for a clean build of a tagged revision",
+			info.Release, info.BuildType, info.DirtyState)
 	}
 
 	// The human form.
@@ -179,6 +192,19 @@ func TestVersionSurface_HumanAndJSONFormsAgree(t *testing.T) {
 	}
 	if !strings.Contains(human, "binary:") || !strings.Contains(human, "mpm") {
 		t.Errorf("the human form does not name the binary:\n%s", human)
+	}
+
+	// The human form must carry the same dirty state as the JSON form.
+	// An operator reading the human form must be able to tell "the
+	// tree was clean" from "nobody could tell".
+	wantDirty := map[string]string{
+		"clean":   "dirty:   no",
+		"dirty":   "dirty:   yes",
+		"unknown": "dirty:   unknown",
+	}[info.DirtyState]
+	if wantDirty != "" && !strings.Contains(human, wantDirty) {
+		t.Errorf("the human form does not report dirty_state %q as %q:\n%s",
+			info.DirtyState, wantDirty, human)
 	}
 
 	// `-v` and the explicit `version` subcommand must agree with

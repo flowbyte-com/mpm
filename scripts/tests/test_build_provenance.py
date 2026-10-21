@@ -14,6 +14,19 @@ These tests build throwaway git repositories, copy the real script into
 them (so the script's "repo root is where I live" resolution is
 exercised, not a special test-only code path) and assert the answers.
 
+Three of the questions have an UNKNOWN answer, and the distinction
+matters:
+
+  - a source tree with no Git metadata of its own (an exported tarball,
+    a vendored copy) reports commit and dirty as "unknown", not as
+    "clean" — the script must never invent provenance;
+  - a source tree nested inside an UNRELATED repository must not be
+    attributed to that repository's history — Git searches parent
+    directories for a repository, and the enclosing commit says nothing
+    about MPM;
+  - a locally modified tree sitting on a release tag is not a release
+    build, however official the tag looks.
+
 Nothing here touches the live checkout, the live install or the live
 database: every repository is created under a temporary directory.
 """
@@ -31,6 +44,11 @@ SCRIPT_SRC = os.path.join(REPO_ROOT, SCRIPT_REL)
 # The linker package path the stamp must target. Every MPM binary links
 # this package, so `-X` against it is what actually reaches the binary.
 BUILDINFO_PKG = "github.com/flowbyte-com/mpm/internal/buildinfo"
+
+# The Go module path that identifies an MPM source tree. The provenance
+# script only claims Git history for a tree that IS an MPM source tree;
+# see TestGitRootVerification.
+MPM_MODULE = "github.com/flowbyte-com/mpm"
 
 
 def run_script(script_path, *args, cwd=None):
@@ -63,9 +81,14 @@ def git(repo, *args):
 
 
 class ProvenanceRepo:
-    """A throwaway git repository with the real script installed in it."""
+    """A throwaway git repository with the real script installed in it.
 
-    def __init__(self, version="0.1.0-dev"):
+    The repository is a stand-in for an MPM checkout, so it carries the
+    two markers that identify one: the VERSION file (the authoritative
+    product version) and the go.mod that declares MPM's module path.
+    """
+
+    def __init__(self, version="0.1.0-dev", mpm_source=True):
         self.root = tempfile.mkdtemp(prefix="mpm-provenance-")
         self.repo = os.path.join(self.root, "repo")
         os.makedirs(os.path.join(self.repo, "scripts"))
@@ -77,6 +100,8 @@ class ProvenanceRepo:
         git(self.repo, "config", "user.email", "provenance@example.invalid")
         git(self.repo, "config", "user.name", "Provenance Test")
         self.write("VERSION", version + "\n")
+        if mpm_source:
+            self.write("go.mod", "module %s\n\ngo 1.26.6\n" % MPM_MODULE)
         self.write("main.go", "package main\n")
         self.commit("initial")
 
@@ -95,6 +120,59 @@ class ProvenanceRepo:
 
     def cleanup(self):
         shutil.rmtree(self.root, ignore_errors=True)
+
+
+class UnrelatedGitRepo:
+    """A git repository that has nothing whatever to do with MPM.
+
+    It exists so the provenance script can be caught attributing MPM's
+    build to somebody else's history. Git searches parent directories
+    for a repository, so an MPM source tree dropped inside one of these
+    would otherwise inherit its commit.
+    """
+
+    def __init__(self):
+        self.root = tempfile.mkdtemp(prefix="mpm-provenance-outer-")
+        self.repo = os.path.join(self.root, "outer")
+        os.makedirs(self.repo)
+
+        git(self.repo, "init", "-q", "-b", "main")
+        git(self.repo, "config", "user.email", "provenance@example.invalid")
+        git(self.repo, "config", "user.name", "Provenance Test")
+        with open(os.path.join(self.repo, "unrelated.txt"), "w", encoding="utf-8") as handle:
+            handle.write("this repository is not MPM\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "unrelated commit")
+
+        self.head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    def cleanup(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+def make_mpm_export(parent_dir, version="1.2.3", name="mpm-export"):
+    """Create an MPM source EXPORT under parent_dir — no .git at all.
+
+    An export is what a tarball or a vendored copy looks like: the MPM
+    sources, the provenance script, and no Git metadata.
+    """
+    export = os.path.join(parent_dir, name)
+    os.makedirs(os.path.join(export, "scripts"))
+    script = os.path.join(export, SCRIPT_REL)
+    shutil.copy(SCRIPT_SRC, script)
+    os.chmod(script, 0o755)
+    with open(os.path.join(export, "VERSION"), "w", encoding="utf-8") as handle:
+        handle.write(version + "\n")
+    with open(os.path.join(export, "go.mod"), "w", encoding="utf-8") as handle:
+        handle.write("module %s\n\ngo 1.26.6\n" % MPM_MODULE)
+    return export
 
 
 class TestVersion(unittest.TestCase):
@@ -234,6 +312,126 @@ class TestBuildType(unittest.TestCase):
         self.assertEqual(run_script(prov.script, "build-type"), "development")
 
 
+class TestDirtyReleaseBuilds(unittest.TestCase):
+    """A release tag is not enough: the tree must also be CLEAN.
+
+    A locally modified tree sitting on a release tag is not the
+    released artifact. If it claimed release status, an operator
+    comparing two installations would be told that a build nobody
+    published is an official release.
+    """
+
+    def test_a_clean_tree_at_a_release_tag_is_a_release(self):
+        # The positive control: nothing modified, the tag counts.
+        prov = ProvenanceRepo(version="1.2.3")
+        self.addCleanup(prov.cleanup)
+        git(prov.repo, "tag", "v1.2.3")
+        self.assertEqual(run_script(prov.script, "dirty"), "false")
+        self.assertEqual(run_script(prov.script, "build-type"), "release")
+
+    def test_a_modified_tracked_file_at_a_release_tag_is_not_a_release(self):
+        prov = ProvenanceRepo(version="1.2.3")
+        self.addCleanup(prov.cleanup)
+        git(prov.repo, "tag", "v1.2.3")
+        prov.write("main.go", "package main\n\n// local edit\n")
+        self.assertEqual(run_script(prov.script, "dirty"), "true")
+        self.assertEqual(run_script(prov.script, "build-type"), "development")
+
+    def test_a_staged_change_at_a_release_tag_is_not_a_release(self):
+        prov = ProvenanceRepo(version="1.2.3")
+        self.addCleanup(prov.cleanup)
+        git(prov.repo, "tag", "v1.2.3")
+        prov.write("main.go", "package main\n\n// staged edit\n")
+        git(prov.repo, "add", "main.go")
+        self.assertEqual(run_script(prov.script, "build-type"), "development")
+
+    def test_an_untracked_go_file_at_a_release_tag_is_not_a_release(self):
+        prov = ProvenanceRepo(version="1.2.3")
+        self.addCleanup(prov.cleanup)
+        git(prov.repo, "tag", "v1.2.3")
+        prov.write("extra.go", "package main\n")
+        self.assertEqual(run_script(prov.script, "build-type"), "development")
+
+    def test_an_untracked_non_source_file_at_a_release_tag_is_still_a_release(self):
+        # A forensic artefact or scratch file is not compiled into the
+        # binary. It must not demote an otherwise clean release build,
+        # or the indicator stops carrying information.
+        prov = ProvenanceRepo(version="1.2.3")
+        self.addCleanup(prov.cleanup)
+        git(prov.repo, "tag", "v1.2.3")
+        prov.write("notes.tmp", "scratch\n")
+        self.assertEqual(run_script(prov.script, "dirty"), "false")
+        self.assertEqual(run_script(prov.script, "build-type"), "release")
+
+
+class TestGitRootVerification(unittest.TestCase):
+    """Provenance must come from MPM's OWN checkout.
+
+    Git resolves a repository by searching parent directories, so a
+    source tree that has no Git metadata of its own would silently
+    inherit the history of whatever repository encloses it. The commit
+    of an unrelated project says nothing about MPM, and stamping it into
+    an MPM binary would be a lie an operator could not detect.
+    """
+
+    def test_a_source_export_nested_in_an_unrelated_repo_reports_unknown(self):
+        outer = UnrelatedGitRepo()
+        self.addCleanup(outer.cleanup)
+        export = make_mpm_export(outer.repo)
+        script = os.path.join(export, SCRIPT_REL)
+
+        # The product version is still established: it comes from the
+        # VERSION file, not from Git.
+        self.assertEqual(run_script(script, "version"), "1.2.3")
+
+        # The Git facts are not established, so they are unknown.
+        self.assertEqual(run_script(script, "commit"), "unknown")
+        self.assertEqual(run_script(script, "short-commit"), "unknown")
+        self.assertEqual(run_script(script, "dirty"), "unknown")
+        self.assertEqual(run_script(script, "build-type"), "development")
+
+    def test_the_enclosing_repository_head_is_never_reported(self):
+        outer = UnrelatedGitRepo()
+        self.addCleanup(outer.cleanup)
+        export = make_mpm_export(outer.repo)
+        script = os.path.join(export, SCRIPT_REL)
+
+        for field in ("commit", "short-commit", "ldflags", "all"):
+            output = run_script(script, field)
+            self.assertNotIn(
+                outer.head_sha,
+                output,
+                "the enclosing repository's commit leaked into the %s output:\n%s"
+                % (field, output),
+            )
+
+    def test_the_script_in_an_unrelated_repository_reports_unknown(self):
+        # The script stamped into a repository that is not an MPM source
+        # tree has no MPM provenance to report.
+        prov = ProvenanceRepo(version="1.2.3", mpm_source=False)
+        self.addCleanup(prov.cleanup)
+
+        self.assertEqual(run_script(prov.script, "commit"), "unknown")
+        self.assertEqual(run_script(prov.script, "short-commit"), "unknown")
+        self.assertEqual(run_script(prov.script, "dirty"), "unknown")
+        self.assertEqual(run_script(prov.script, "build-type"), "development")
+
+    def test_an_mpm_checkout_reports_its_own_commit(self):
+        # The positive control: MPM's own checkout is used, and only it.
+        prov = ProvenanceRepo()
+        self.addCleanup(prov.cleanup)
+        expected = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=prov.repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        self.assertEqual(run_script(prov.script, "commit"), expected)
+        self.assertEqual(run_script(prov.script, "dirty"), "false")
+
+
 class TestLdflags(unittest.TestCase):
     def setUp(self):
         self.prov = ProvenanceRepo(version="1.2.3")
@@ -258,14 +456,14 @@ class TestLdflags(unittest.TestCase):
 
 class TestNoGitCheckout(unittest.TestCase):
     def test_missing_git_metadata_is_reported_as_unknown(self):
+        # An MPM source export: the sources and the script, no Git
+        # metadata at all. The product version is still known (it comes
+        # from the VERSION file); the Git facts are not, and the script
+        # says so instead of inventing them.
         root = tempfile.mkdtemp(prefix="mpm-provenance-nogit-")
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
-        os.makedirs(os.path.join(root, "scripts"))
-        script = os.path.join(root, SCRIPT_REL)
-        shutil.copy(SCRIPT_SRC, script)
-        os.chmod(script, 0o755)
-        with open(os.path.join(root, "VERSION"), "w", encoding="utf-8") as handle:
-            handle.write("1.2.3\n")
+        export = make_mpm_export(root)
+        script = os.path.join(export, SCRIPT_REL)
 
         self.assertEqual(run_script(script, "version"), "1.2.3")
         self.assertEqual(run_script(script, "commit"), "unknown")

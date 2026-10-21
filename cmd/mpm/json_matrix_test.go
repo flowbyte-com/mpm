@@ -87,7 +87,7 @@ func TestJSONMatrix_SupportedCommands_Contract(t *testing.T) {
 		// version command was given its own build-provenance surface.
 		// The envelope keys are the documented contract in
 		// docs/SPEC.md §8.
-		{Family: "version", Command: []string{"version", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"version", "commit", "short_commit", "dirty", "release", "build_type", "repository", "binary"}},
+		{Family: "version", Command: []string{"version", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"version", "commit", "short_commit", "dirty", "dirty_state", "release", "build_type", "repository", "binary"}},
 	}
 
 	for _, c := range cases {
