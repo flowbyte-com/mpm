@@ -77,7 +77,8 @@ func ValidateSchemaPrefix(prefix string) error {
 //
 // The two populations OVERLAP. Every unanswerable query still receives
 // vector candidates under the current default, and no similarity floor
-// separates them without destroying paraphrase recall:
+// separates them without destroying legitimate answerable queries
+// (paraphrase queries among them):
 //
 //	cosine floor 0.70   rejects 18/20 negatives   but 10/40 positives
 //	best gap policy     rejects 19/20 negatives   but 14/40 positives
@@ -91,24 +92,34 @@ func ValidateSchemaPrefix(prefix string) error {
 // WHY THE THRESHOLD AND GAP POLICIES WERE REJECTED (Issue #15, 2026-10-21):
 //
 //   - A cosine floor of 0.70 removes 18 of 20 nonsense results but also
-//     removes 10 of 40 legitimate ones. Those 10 are PARAPHRASES —
-//     semantic retrieval's whole purpose — so the floor trades a
+//     removes 10 of 40 legitimate answerable queries. Those 10 are not
+//     marginal hits: 3 of the 10 are the corpus's explicitly labelled
+//     paraphrase queries, and the other 7 are legitimate answerable
+//     queries that carry no paraphrase label. The floor trades a
 //     confidence-display problem for a recall problem, which is the
 //     worse failure.
 //   - The best gap-based policy (top1–top2 cosine gap < 0.05 OR top-1
 //     cosine < 0.60) removes ONE more negative (19/20) while removing
-//     14/40 positives. It is strictly worse on the axis that matters.
+//     14/40 positives (2 of the 14 are labelled paraphrase queries). It
+//     is strictly worse on the axis that matters.
 //   - The held-out split shows the same legitimate-answer losses, so
 //     neither policy is merely overfit to the calibration split.
 //
+// The 9 labelled paraphrase queries are NOT a low-similarity band: their
+// top-1 cosine spans 0.5733-0.8752, overlapping the non-paraphrase
+// positives' 0.5957-0.9234. A floor therefore cuts across the paraphrase
+// queries indiscriminately rather than isolating them, and most of the
+// legitimate answers it removes carry no paraphrase label at all.
+//
 // The measured signals therefore do not support reliable automatic
-// abstention at an acceptable paraphrase-recall cost. There is NO new
+// abstention at an acceptable legitimate-answer cost. There is NO new
 // default similarity threshold and NO confidence score. The remedy is
 // orthogonal to filtering: an honest retrieval contract that tells the
 // caller the returned rows are RANKED CANDIDATES whose relevance has not
 // been established (the retrieval_status field on the recall output). A
 // caller that wants a floor should still set RetrievalThreshold above 0
-// deliberately, knowing the paraphrase band contains true positives.
+// deliberately, knowing the rejected set contains legitimate answerable
+// queries, paraphrase queries among them.
 func DefaultHybridConfig() HybridConfig {
 	return HybridConfig{
 		VectorWeight: 0.5,
@@ -159,7 +170,7 @@ type HybridResult struct {
 // These values are deliberately NOT a confidence score. The Phase A.3
 // measurements (docs/ISSUE-15-PHASE-A-REPORT.md §A2.4) show that no
 // similarity or gap signal separates answerable from unanswerable queries
-// at an acceptable paraphrase-recall cost, so the contract reports what
+// at an acceptable legitimate-answer cost, so the contract reports what
 // the ranker DID rather than guessing what it MEANT.
 const (
 	// RetrievalStatusNoCandidates means the ranker returned no rows at
@@ -211,6 +222,15 @@ type HybridSearchOutcome struct {
 // callers (the MCP memory-query tool, the federated local+shared scope
 // search) depend on the historical behaviour of degrading to a lexical
 // result set rather than failing the whole query.
+//
+// This legacy degradation is DELIBERATELY RETAINED (Issue #15 scope
+// boundary, 2026-10-21). The three pre-existing callers —
+// HybridSearchMemories, hybridSearchScopeLocal and hybridSearchScopeAll
+// in internal/core/memory_tools.go — keep the historical behaviour: a
+// vector-channel failure degrades to a lexical result set and is not
+// surfaced as an error. Only the CLI semantic-recall path
+// (cmd/mpm/recall.go) uses HybridSearchWithOutcome and turns a
+// vector-channel failure into a hard error.
 //
 // Callers that must not present a degraded result set as a complete
 // semantic answer should use HybridSearchWithOutcome and inspect

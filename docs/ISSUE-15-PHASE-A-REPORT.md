@@ -2405,6 +2405,18 @@ Source artefacts: `bench/output/phase-a3/v2-nomic-eval/{all,calibration,held-out
 
 **Candidate 3 — cosine floor 0.80** (`P1_cosine_0.80`): 0 false confidence, but 28/40 positives lost (coverage 0.30). Rejected on the same grounds as Candidate 1, more so.
 
+**What the rejected positives actually are.** The corpus labels 9 of its 40 positives with `paraphrase_of` (each is a rephrasing of another positive query, sharing the same relevant document set); the other 31 positives are legitimate answerable queries with no paraphrase label. Reconstructing each policy's rejected set from the committed Phase A.3 per-query raw-cosine table (`bench/output/phase-a3/v2-nomic/report.json`, `raw_cosine_per_query_table`) and intersecting it with the corpus labels (`bench/corpus/v2/queries.json`):
+
+| Policy | Legitimate answerable queries rejected | of which labelled `paraphrase_of` | of which **not** labelled paraphrase |
+|---|---|---|---|
+| cosine floor 0.70 | 10/40 | 3 (`q02028`, `q02038`, `q02039`) | 7 |
+| best gap policy | 14/40 | 2 (`q02028`, `q02039`) | 12 |
+| cosine floor 0.80 | 28/40 | 7 | 21 |
+
+**The rejected positives are predominantly ordinary legitimate answerable queries, not paraphrase queries.** The 9 labelled paraphrases are not a low-similarity band: their top-1 cosine spans **0.5733–0.8752**, overlapping the non-paraphrase positives' **0.5957–0.9234**. A floor therefore cuts across the paraphrase queries indiscriminately rather than isolating them, and most of the legitimate answers it removes carry no paraphrase label at all.
+
+*(This table was added on 2026-10-21 during HAL's final review, which corrected an earlier overstatement in this document and in the in-code calibration comment: the phrase "those 10 are paraphrases" was wrong. The measurements themselves — 10/40, 14/40, 18/20, 19/20, 28/40, 20/20 — are unchanged and are reproduced exactly by the artefacts above.)*
+
 **The held-out split confirms the pattern is not a calibration artefact** (`held-out` scope: 14 positives, 5 negatives):
 
 | Policy | Legitimate positives lost | Unanswerable queries rejected |
@@ -2418,9 +2430,9 @@ The ordering of the two candidates on the *positive-loss* axis flips between spl
 
 ### Why they were rejected
 
-1. **The two populations overlap, and not separably.** On this corpus there is no similarity value that separates unanswerable queries from answerable ones at an acceptable cost. Every floor that removes most nonsense also removes paraphrases. The measured floor 0.70 sits *inside* the paraphrase band.
-2. **The losses are legitimate answers, not marginal ones.** The positives lost under the 0.70 floor include the corpus's paraphrase queries — questions phrased differently from the document they legitimately match. Suppressing them would break precisely the capability semantic recall exists for. This is the "legitimate paraphrase recall" the issue explicitly asked not to sacrifice.
-3. **The gap signal does not separate either.** The top1–top2 cosine gap is small when *all* retrieved rows are near-equally related — the normal case for a paraphrase query against a coherent corpus. It fires about as often on a legitimate paraphrase as on a nonsense query, which is why it loses 14 positives rather than 10.
+1. **The two populations overlap, and not separably.** On this corpus there is no similarity value that separates unanswerable queries from answerable ones at an acceptable cost. Every floor that removes most nonsense also removes legitimate answerable queries, paraphrase queries among them. The measured floor 0.70 rejects 3 of the 9 labelled paraphrase queries, but it also rejects 7 legitimate answerable queries that carry no paraphrase label — and the 9 paraphrases are not a separable low-similarity band (top-1 cosine 0.5733–0.8752, overlapping the non-paraphrase positives' 0.5957–0.9234).
+2. **The losses are legitimate answers, not marginal ones.** All 10 positives lost under the 0.70 floor are legitimate answerable queries; 3 of the 10 carry the corpus's explicit paraphrase label and 7 do not. Suppressing the labelled paraphrases would break precisely the capability semantic recall exists for, and suppressing the other 7 would destroy legitimate answers for no measured gain in rejection quality — 18 of 20 negatives rejected at the cost of 10 of 40 positives. This is the "legitimate paraphrase recall" the issue explicitly asked not to sacrifice.
+3. **The gap signal does not separate either.** The top1–top2 cosine gap is small when *all* retrieved rows are near-equally related — the normal case for a paraphrase query against a coherent corpus. It rejects 2 of the 9 labelled paraphrase queries, one fewer than the 0.70 floor, while adding 4 more legitimate answerable queries to the rejected set — none of which carries a paraphrase label. The signal does not separate the two populations, which is why it loses 14 positives rather than 10.
 4. **A threshold can only say "gone", not "unsure".** Both measured policies force a binary: abstain, or assert. Neither is what the interface needs. What the interface needs is to say *here are candidates; relevance is unverified*. That statement is strictly more informative than either branch, and it costs no recall at all.
 5. **Held-out numbers are reported as measured, not re-tuned.** No policy was re-fit on the held-out split after seeing its numbers.
 
@@ -2594,11 +2606,18 @@ Three deliberate mutations were introduced, each caught, each reverted:
 
 ## B6 — What Phase B does not do (remaining limitations)
 
-1. **Unanswerable queries are still served candidates.** All 20 negative queries in the v2 corpus still receive vector results. They are now labelled `candidates_unverified`, and the human path says "relevance not established" — but MPM does not know they are unanswerable. **This limitation is real, is not solved by this change, and is not concealed by it.** The honest contract is that the output is *ranked candidates*; identifying which of them actually answer the question remains unsolved.
-2. **No abstention, no threshold, no confidence score, no classifier.** Deliberately — see B3.
-3. **No new model, provider, reranker, pipeline, schema, or background service.** The change reuses the existing ranker and the existing embedding path.
-4. **The MCP surface is unchanged.** It already carried a provenance contract; extending `retrieval_status` there is an open decision, not a silent omission.
-5. **`retrieval_status` is a CLI-surface field.** CLI/MCP parity for it has not been established, and this document does not claim otherwise.
+**These are accepted scope boundaries, not invitations to implement additional subsystems.** HAL's final review (2026-10-21) confirmed the following boundaries explicitly; each is stated here so that no reader infers a capability that does not exist.
+
+1. **The new `retrieval_status` contract applies to CLI semantic recall.** The field is emitted by `mpm recall --semantic` (both the JSON and the human path). It is not a property of the ranker, of the core search API, or of any other surface.
+2. **Existing MCP callers do not receive the new field.** The MCP envelope already carries its own provenance contract (`retrieval.mode`, `retrieval.sources`, `retrieval.semantic_only`, `retrieval.vector_weight`, `retrieval.retrieval_threshold`, per-row `memories[].retrieval_source` — `internal/core/tools/handlers.go`). `retrieval_status` was **not** mirrored into it. Extending the MCP envelope is a separate decision with its own compatibility review and is deliberately left open rather than done quietly.
+3. **Existing `HybridSearch` callers retain legacy vector-error degradation.** `HybridSearch` (`internal/core/hybrid_search.go`) is preserved as a behaviour-preserving wrapper over `HybridSearchWithOutcome` and **discards** `VectorChannelError`. The three pre-existing callers — `HybridSearchMemories`, `hybridSearchScopeLocal` and `hybridSearchScopeAll` (`internal/core/memory_tools.go`) — therefore keep the historical behaviour: a vector-channel failure degrades to a lexical result set and is *not* surfaced as an error. Only the CLI semantic-recall path (`cmd/mpm/recall.go`) uses `HybridSearchWithOutcome` and turns a vector-channel failure into a hard error. This is a deliberate scope boundary, not an oversight: changing the three existing callers is a separate compatibility decision.
+4. **Automatic detection of unanswerable queries remains unsolved.** MPM still does not know which of the returned candidates actually answer the question. No abstention, no threshold, no confidence score and no classifier was added — deliberately, see B3.
+5. **All 20 benchmark negative queries still return ranked candidates.** Every one of the 20 unanswerable queries in the v2 corpus still receives vector results under the current default. They are now labelled `candidates_unverified` and the human path says "relevance not established" — but MPM does not know they are unanswerable. **This limitation is real, is not solved by this change, and is not concealed by it.** The honest contract is that the output is *ranked candidates*; identifying which of them actually answer the question remains unsolved.
+
+Two further boundaries, unchanged from the first submission:
+
+6. **No new model, provider, reranker, pipeline, schema, or background service.** The change reuses the existing ranker and the existing embedding path.
+7. **CLI/MCP parity for `retrieval_status` has not been established**, and this document does not claim otherwise.
 
 ## B7 — Proposal for Issue #15 closure
 
@@ -2616,7 +2635,7 @@ Three deliberate mutations were introduced, each caught, each reverted:
 | No previously returned legitimate result is removed | B5.1 — 0 of 60 per-query rows differ | **Yes** |
 | Negative-query candidate results are explicitly unverified, not asserted as answers | B2.1 — `candidates_unverified`; the human path says so explicitly | **Yes** |
 | All tests distinguish a genuine empty result from an embedding failure | `…_EmptyResultIsValidJSONWithExplicitStatus` vs `…_EmbeddingProviderFailureIsNotAnEmptyResult` | **Yes** |
-| Record that the remedy addresses retrieval-result semantics, not automatic identification of unanswerable queries | B0, B6.1 | **Yes** — stated explicitly |
+| Record that the remedy addresses retrieval-result semantics, not automatic identification of unanswerable queries | B0, B6.4–B6.5 | **Yes** — stated explicitly |
 | Record why the measured threshold and gap policies were rejected | B3, and the in-code calibration comment in `internal/core/hybrid_search.go` | **Yes** |
 | No new model, provider, reranker, pipeline, schema, background service, confidence classifier, or Work/checkpoint/Pi change | B4 file list — the change is confined to the recall contract and its documentation | **Yes** |
 | Live MPM untouched | B8 | **Yes** |
@@ -2634,8 +2653,41 @@ Implementation, tests, benchmarks and documentation are complete.
 | | |
 |---|---|
 | Branch | `fix/issue-15-honest-semantic-recall` (based on `56ad422`) |
-| Commits | `cad6368` (contract + docs), `041012e` (Phase B artefact), `a5a03ab` (record corrections) |
+| Commits | `cad6368` (contract + docs), `041012e` (Phase B artefact), `a5a03ab` (record corrections), `156bc46` (stop point), and the final corrective commit (HAL final review, 2026-10-21 — paraphrase-claim correction and scope-boundary documentation) |
 | DRAFT PR | https://github.com/flowbyte-com/mpm/pull/45 |
 
+The final corrective commit's SHA is recorded in the PR description and in the push output; it cannot appear here, because a commit cannot contain its own hash.
+
 **No merge. No issue closure. No deployment. The installed MPM is unchanged.** Phase B awaits independent HAL review.
+
+## B10 — HAL final-review correction (2026-10-21)
+
+HAL reviewed the DRAFT PR against HEAD `156bc46` and required one narrow correction: the claim that the positives rejected by the measured policies "are paraphrases" was an overstatement, and the accepted scope boundaries needed to be documented explicitly. The correction was made in a single focused commit.
+
+**The overstatement, and what is true instead.**
+
+- Wrong: "A cosine floor of 0.70 … removes 10 of 40 legitimate ones. Those 10 are PARAPHRASES" (`internal/core/hybrid_search.go`), and the equivalent sentence in the PR description and in §B3.
+- True: the v2 corpus labels **9** of its 40 positives with `paraphrase_of`; the other 31 are legitimate answerable queries with no paraphrase label. Of the **10** legitimate answerable queries the 0.70 floor rejects, **3** carry the paraphrase label (`q02028`, `q02038`, `q02039`) and **7** do not. Of the **14** the gap policy rejects, **2** carry it (`q02028`, `q02039`) and **12** do not. The rejected positives are predominantly ordinary legitimate answerable queries, and the labelled paraphrases are not a separable low-similarity band (top-1 cosine 0.5733–0.8752, overlapping the non-paraphrase positives' 0.5957–0.9234).
+- HAL's own figures were re-derived independently from the committed artefacts before any edit: `bench/output/phase-a3/v2-nomic/report.json` (`raw_cosine_per_query_table`) for the per-query top-1/top-2 cosine, `bench/corpus/v2/queries.json` for the labels, and `bench/output/phase-a3/v2-nomic-eval/all.json` for the policy aggregates. The reconstruction reproduces the committed policy counts exactly (28 abstains / 10 false abstentions for `P1_cosine_0.70`; 33 / 14 for `P3_gap_0.05_min_0.60`; 48 / 28 for `P1_cosine_0.80`).
+
+**What changed.** Terminology and documentation only:
+
+| File | Change |
+|---|---|
+| `internal/core/hybrid_search.go` | The `DefaultHybridConfig` calibration comment now states the composition of each rejected set (3 of 10 and 2 of 14 are labelled paraphrase queries) and that the labelled paraphrases are not a low-similarity band. The `HybridSearch` doc comment now names the three legacy callers and states explicitly that the legacy vector-error degradation is a deliberate, retained scope boundary. |
+| `docs/ISSUE-15-PHASE-A-REPORT.md` | §B3 gains the rejected-set composition table and the corrected "why they were rejected" items 1–3; §B6 is restructured as an explicit list of accepted scope boundaries; §B9 records the correction. |
+| `docs/CLOSEOUT.md` | §4.1 gains the "what those lost positives are" paragraph and the CLI/MCP/`HybridSearch` scope statement. |
+| `docs/SPEC.md` | §6.3 rule 3 uses the precise formulation, and the contract gains an explicit "scope of the contract" paragraph. |
+
+**What did not change.** No measurement, no model behaviour, no retrieval result, no code path, no public interface. The corrective commit touches two comment blocks in Go and three documentation files; it adds no code and changes no behaviour. The retrieval metrics remain exactly as reported in B5.1 (MRR@10 0.9181547619047619, Recall@10 0.9875, 0 of 60 per-query rows differing).
+
+**Scope boundaries now documented explicitly** (B6, and mirrored in `docs/SPEC.md` §6.3 and the PR description):
+
+1. The `retrieval_status` contract applies to **CLI semantic recall**.
+2. **Existing MCP callers do not receive the new field** — the MCP envelope keeps its own provenance contract.
+3. **Existing `HybridSearch` callers retain legacy vector-error degradation** — `HybridSearchMemories`, `hybridSearchScopeLocal` and `hybridSearchScopeAll` keep degrading a vector-channel failure to a lexical result set instead of erroring.
+4. **Automatic detection of unanswerable queries remains unsolved.**
+5. **All 20 benchmark negative queries still return ranked candidates.**
+
+These are accepted scope boundaries, not invitations to implement additional subsystems.
 
