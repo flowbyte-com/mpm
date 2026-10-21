@@ -11,13 +11,22 @@ four-condition measurement (A/B/C/D) on disposable workspaces, with the
 machine-readable artefact committed at
 `bench/output/issue-23-phase-a/`.
 
-**Issue #23's second acceptance criterion is only partially satisfied**:
-the run did not happen on the post-migration (live) store, because live
-access is prohibited for this work. The measurement is explicitly *not*
-comparable with the historical MRR 0.832. §9.1 states this in full and
-proposes the closeout rationale; it is not claimed as satisfied.
+**Issue #23's second acceptance criterion is WAIVED, not passed.** The
+run did not happen on the post-migration (live) store, because live
+access is prohibited for this work and because no further live-store
+measurement is authorised. The measurement is explicitly *not* comparable
+with the historical MRR 0.832. §9.1 states this in full, records the
+waiver and its rationale, and does not claim the criterion as satisfied.
 
-**Baseline.** `main` at `261d1c1d09cca39d226203962dc6377ffb4598f8`.
+**HAL accepted the measured result on 2026-10-21: Option C — retain the
+unprefixed baseline.** The corrected harness is in draft PR #43; the
+merge SHA and the issue closure follow that review, not this document.
+
+**Baseline.** The measurement was taken at `main` =
+`261d1c1d09cca39d226203962dc6377ffb4598f8`, which is this branch's base.
+`main` has since advanced to `4bbcaf65` through the independent,
+separately approved asset-removal PR (#44). That change is disjoint from
+this work and is not part of this branch.
 
 **Branch.** `research/issue-23-nomic-prefix-calibration`.
 
@@ -392,11 +401,11 @@ Issue #23's second criterion reads, in full:
 > the harness's fingerprint assertions active, and the result reported
 > alongside the 0.832 baseline rather than the pre-migration 0.783.
 
-**This criterion is only partially satisfied, and it is not claimed to be
-satisfied in full.** The measurement was deliberately *not* run against
-the post-migration (live) store, because live-database access is
-prohibited for this work and because a benchmark that runs against the
-operator's store must not be the thing that decides a production change.
+**This criterion is WAIVED. It is not satisfied, and it is not marked as
+passed.** The measurement was deliberately *not* run against the
+post-migration (live) store, because live-database access is prohibited
+for this work and because a benchmark that runs against the operator's
+store must not be the thing that decides a production change.
 
 What *was* satisfied: the fingerprint assertions were active for every
 workspace and every condition; the result is reported as a delta against
@@ -406,7 +415,7 @@ well-founded here.
 What was not satisfied: the run did not happen on the post-migration
 store, and the result is therefore **not** reported alongside 0.832.
 
-The proposed rationale for closing Issue #23 on this basis:
+The rationale for closing Issue #23 on this basis:
 
 1. The criterion's *purpose* is to stop a prefix claim from being
    attached to an incomparable number — "report alongside 0.832 rather
@@ -427,17 +436,26 @@ The proposed rationale for closing Issue #23 on this basis:
    unprefixed baseline" is the no-change outcome. Nothing is implemented,
    nothing is re-embedded, no vector in the live store is touched, and
    the measurement is committed so that a future run can re-litigate it.
-4. The criterion's *letter* would require a post-migration-store run.
-   That run needs **explicit authorisation for read-only access to the
-   live store**, which this work does not have. It is therefore
-   recorded here as an open item rather than quietly treated as done:
-   if HAL wants the criterion met in its letter, the follow-up is an
-   explicitly authorised read-only benchmark run against the
-   post-migration store. Copying the live database is *not* an
-   acceptable route — that is prohibited independently of this issue —
-   and such a run would still produce a *delta* rather than a number
-   comparable with 0.832, because the historical corpus and labels are
-   gone.
+4. **The criterion is waived, and no further live-store measurement is
+   authorised.** HAL's decision of 2026-10-21 accepts the measured
+   result and records this criterion as **waived** — explicitly not
+   passed. The waiver is deliberate and bounded. The criterion's letter
+   would have required a post-migration-store run; that access is not
+   authorised for this work and will not be sought. Copying the live
+   database was never an acceptable route either — that is prohibited
+   independently of this issue — and even a hypothetical authorised run
+   would still have produced a *delta* rather than a number comparable
+   with 0.832, because the historical corpus and labels are gone. The
+   obligation is therefore recorded as **waived**, not quietly treated
+   as done.
+
+**What a reader may and may not take from this report.** The decision
+rests on a same-corpus comparison whose every number is reproduced by
+the committed artefact in `bench/output/issue-23-phase-a/`. The
+criterion that would have placed the historical 0.832 next to these
+numbers was waived, so no such juxtaposition exists and none is
+implied. **No number in this report or in the artefact is comparable
+with the historical MRR 0.832.**
 
 ---
 
@@ -472,3 +490,69 @@ change:
   on this corpus — but the corpus is 50 synthetic documents, so the
   finding bounds the *decision* (do not prefix) rather than settling
   the *science* (prefixing never helps).
+
+---
+
+## 11. Post-review corrections (HAL, 2026-10-21)
+
+HAL reviewed the draft at `00bb776` and asked for two corrections to the
+harness. **Neither changes a measurement.** Both change how the harness
+*fails*, which is the property that makes a measurement trustworthy.
+
+### 11.1 A detected logical mutation now fails the complete experiment
+
+The hybrid benchmark checks the disposable workspace for tracked-state
+changes between queries. Before the correction, a detected mutation broke
+out of the query loop, scored the partial result, wrote it into the
+report and exited 0 — a broken measurement published as a successful one.
+A reader of that report could not tell the two apart.
+
+Now the mutation raises. The run exits nonzero and **no report is
+written at all**: there is no partial artefact for a later reader to
+mistake for a measurement.
+
+The committed measurement was taken with a clean mutation status
+(`hybrid_arm.snapshot_logical_mutation.status == "clean"`), so this
+correction does not alter it.
+
+### 11.2 Condition A is now required, and the baseline is A by identity
+
+Every comparison this experiment reports is "condition vs the same-corpus
+unprefixed baseline". Before the correction, a selection that omitted A
+fell back to the first selected condition as the baseline — so a run of
+`--conditions B,C,D` would have published deltas against the *prefixed*
+condition B and labelled them baseline deltas.
+
+Now a selection without A is refused with a clear error **before any
+workspace is created**, so an invalid selection costs nothing and touches
+nothing. The baseline is condition A by identity, not by position: the
+selection order no longer decides what a comparison is measured against.
+B, C and D are prefixed conditions and are never substituted for the
+unprefixed baseline.
+
+There is deliberately no "no-baseline mode". A run without a baseline
+would produce per-condition numbers with nothing to say what they are
+relative to, and would have to be read as a comparison anyway.
+
+### 11.3 The measurement is unchanged
+
+The corrected harness was re-run against the same corpus, the same model
+(digest `0a109f42…5e59f`) and the same four conditions. The result is
+identical to the committed artefact:
+
+| compared | result |
+|---|---|
+| all four conditions' aggregates at every depth | identical |
+| all 60 per-query rows (MRR, Recall, nDCG, first-relevant rank, top-1 id) | identical |
+| negative / positive / paraphrase / hard-negative subsets | identical |
+| calibration / held-out split metrics | identical |
+| `comparisons_vs_baseline` (including `baseline_condition: "A"` on every entry) | identical |
+| hybrid arm, its mutation status, and the hybrid-vs-raw-cosine agreement | identical (0 differing top-1 documents, 0 differing MRRs) |
+| the report's top-level structure | unchanged |
+| the rendered Markdown report | **byte-identical** — sha256 `489071f3f2bf9742f57f6c2eabfaa4313a977deff981cdbb7212e08832b842f3`, the committed checksum |
+
+The committed artefact in `bench/output/issue-23-phase-a/` is therefore
+still *the* measurement, and the corrections did not alter it. The
+corrections are covered by new hermetic regression tests: 9 new tests in
+`bench/tests/test_prefix_experiment.py` (40 in the file, up from 31).
+

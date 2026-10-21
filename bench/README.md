@@ -75,6 +75,18 @@ Design rules:
 - Every workspace gets a fresh fingerprint verification.
 - A corpus that already carries a prefix is REFUSED, so a
   double-prefixed measurement cannot happen silently.
+- **Condition A is required.** Every comparison the experiment
+  reports is against the same-corpus unprefixed baseline, and A is
+  the only baseline it has. A selection that omits A is REFUSED
+  before any workspace is created, with a clear error. B, C and D
+  are prefixed conditions, not baselines: one of them is never
+  substituted for the unprefixed one.
+- **A logical mutation FAILS the experiment.** The hybrid benchmark
+  checks the disposable workspace for tracked-state changes between
+  queries. If one is detected, the run aborts with a nonzero exit
+  and NO report is written — a partial result published as a
+  successful measurement is worse than no measurement, because the
+  next reader cannot tell the two apart.
 - `internal/core` is NOT modified. No production embedding behaviour
   changes.
 

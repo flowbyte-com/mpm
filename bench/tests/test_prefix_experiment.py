@@ -22,17 +22,28 @@ What these tests pin:
      headline MRR, at their own depths.
   6. The per-query comparison classifies improvements and
      regressions against the same-corpus baseline.
+  7. A logical mutation detected during the hybrid benchmark FAILS
+     the complete experiment with a nonzero exit and publishes no
+     report.
+  8. Condition A is required: a selection without it is refused
+     before any workspace is created, and no other condition is ever
+     substituted for the unprefixed baseline.
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
+from bench import prefix_experiment
 from bench.corpus import (
     Corpus,
     Document,
@@ -41,17 +52,22 @@ from bench.corpus import (
     Scoring,
 )
 from bench.fake_server import deterministic_vector, make_server
+from bench.fingerprint import VerificationResult
 from bench.harness import CANONICAL_MPM_BINARY
 from bench.prefix_experiment import (
+    BASELINE_CONDITION_KEY,
     CONDITIONS,
     CONDITIONS_BY_KEY,
     DOCUMENT_PREFIX,
     QUERY_PREFIX,
+    DocumentWorkspace,
+    LogicalMutationError,
     PrefixCondition,
     PrefixExperimentError,
     _assert_no_double_prefix,
     _document_preparation,
     _named_aggregates,
+    _validate_selection,
     compare_rankings,
     compare_to_baseline,
     provider_model_metadata,
@@ -68,6 +84,7 @@ def _make_corpus(
     docs: list[tuple[str, str]],
     queries: list[Query],
     top_k: int = 3,
+    manifest_path: str = "/nonexistent/MANIFEST.json",
 ) -> Corpus:
     return Corpus(
         version="test",
@@ -80,7 +97,7 @@ def _make_corpus(
             by_query={q.query_id: q.relevant_doc_ids for q in queries}
         ),
         scoring=Scoring(method="test", top_k=top_k, parameters={}),
-        manifest_path=Path("/nonexistent/MANIFEST.json"),
+        manifest_path=Path(manifest_path),
     )
 
 
@@ -770,6 +787,417 @@ class TestProviderModelMetadata(unittest.TestCase):
         self.assertEqual(meta["digest"], digest)
         self.assertEqual(meta["details"]["embedding_length"], 768)
         self.assertEqual(meta["template"], "{{ .Prompt }}")
+
+
+# --------------------------------------------------------------------------
+# 8. a detected logical mutation fails the COMPLETE experiment
+# --------------------------------------------------------------------------
+
+# A mutation diff as `_mutation_diff` reports it when the recall path
+# changed tracked state.
+_MUTATION_DIFF: dict[str, object] = {
+    "status": "FAIL",
+    "diffs": [{"table": "memories", "rows_added": 1, "rows_removed": 0}],
+}
+
+_CLEAN_DIFF: dict[str, object] = {"status": "clean", "diffs": []}
+
+
+def _fake_workspace(
+    root: Path, preparation: str, document_prefix: str = ""
+) -> DocumentWorkspace:
+    """A DocumentWorkspace with no database behind it.
+
+    The mutation checks are the only thing that reads the database in
+    these tests, and they are stubbed, so the workspace only has to
+    exist and have the right shape.
+    """
+    snap = root / preparation
+    snap.mkdir(parents=True, exist_ok=True)
+    db_path = snap / "src" / "db" / "mpm.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return DocumentWorkspace(
+        preparation=preparation,
+        document_prefix=document_prefix,
+        snap=snap,
+        db_path=db_path,
+        verification=VerificationResult(
+            ok=True,
+            failures=(),
+            expected=("fake-embed-v1", 64, "provider"),
+            snapshot_path=db_path,
+        ),
+        fingerprint={},
+        backfill_rc=0,
+        backfill_output="",
+    )
+
+
+class TestLogicalMutationFailsTheExperiment(unittest.TestCase):
+    """A logical mutation detected during the hybrid benchmark must
+    fail the complete experiment with a nonzero exit and publish
+    NOTHING.
+
+    The pre-correction behaviour broke out of the query loop, scored
+    the partial result, wrote it into the report and exited 0: a
+    broken measurement published as a successful one.
+    """
+
+    def _corpus(self, manifest_path: str = "/nonexistent/MANIFEST.json"):
+        return _make_corpus(
+            [("d1", "alpha document"), ("d2", "beta document")],
+            [_q("q1", "alpha query", relevant=("d1",))],
+            manifest_path=manifest_path,
+        )
+
+    def test_the_hybrid_arm_raises_instead_of_returning_a_partial_result(self) -> None:
+        corpus = self._corpus()
+        with tempfile.TemporaryDirectory() as td:
+            ws = _fake_workspace(Path(td), "doc_unprefixed")
+            with (
+                mock.patch.object(
+                    prefix_experiment, "_snapshot_full",
+                    return_value={"memories": []},
+                ),
+                mock.patch.object(
+                    prefix_experiment, "run_query",
+                    return_value=_result("q1", "alpha query", True, ["d1"]),
+                ),
+                mock.patch.object(
+                    prefix_experiment, "_resolve_mpm_binary",
+                    return_value=Path("/nonexistent/mpm"),
+                ),
+                mock.patch.object(
+                    prefix_experiment, "_mutation_diff",
+                    return_value=_MUTATION_DIFF,
+                ),
+            ):
+                with self.assertRaises(LogicalMutationError):
+                    prefix_experiment._run_hybrid_arm(corpus, ws, [1, 5, 10])
+
+    def test_a_clean_hybrid_arm_still_reports_its_mutation_status(self) -> None:
+        """The clean path is unchanged: the arm still returns and still
+        records that the mutation check ran and was clean."""
+        corpus = self._corpus()
+        with tempfile.TemporaryDirectory() as td:
+            ws = _fake_workspace(Path(td), "doc_unprefixed")
+            with (
+                mock.patch.object(
+                    prefix_experiment, "_snapshot_full",
+                    return_value={"memories": []},
+                ),
+                mock.patch.object(
+                    prefix_experiment, "run_query",
+                    return_value=_result("q1", "alpha query", True, ["d1"]),
+                ),
+                mock.patch.object(
+                    prefix_experiment, "_resolve_mpm_binary",
+                    return_value=Path("/nonexistent/mpm"),
+                ),
+                mock.patch.object(
+                    prefix_experiment, "_mutation_diff",
+                    return_value=_CLEAN_DIFF,
+                ),
+            ):
+                arm = prefix_experiment._run_hybrid_arm(corpus, ws, [1, 5, 10])
+            self.assertEqual(arm["snapshot_logical_mutation"]["status"], "clean")
+            self.assertEqual(arm["scoring"]["rows"][0]["query_id"], "q1")
+
+    def _run_experiment(
+        self,
+        root: Path,
+        conditions: str,
+        mutation_diff: dict[str, object],
+    ) -> tuple[int, Path, str]:
+        """Run the whole experiment against hermetic stubs.
+
+        Returns (exit code, output dir, stderr text).
+        """
+        manifest = root / "MANIFEST.json"
+        manifest.write_text(json.dumps({"generator": "test"}))
+        corpus = self._corpus(str(manifest))
+
+        config = {
+            "profiles": {
+                "default": {
+                    "provider": "openai-compatible",
+                    "model": "fake-embed-v1",
+                    "base_url": "http://127.0.0.1:1/v1",
+                    "api_key": "",
+                }
+            },
+            "components": {"embedding": "default"},
+            "expected": {
+                "model": "openai-compatible:fake-embed-v1",
+                "dimension": 64,
+            },
+        }
+        config_path = root / "config.json"
+        config_path.write_text(json.dumps(config))
+
+        out_dir = root / "out"
+        args = SimpleNamespace(
+            output_dir=str(out_dir),
+            config=str(config_path),
+            conditions=conditions,
+            corpus_version="test",
+        )
+
+        def _prepare(document_prefix: str, _corpus, _config):
+            prep = prefix_experiment._document_preparation(document_prefix)
+            return _fake_workspace(root, prep, document_prefix)
+
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
+            with (
+                mock.patch.object(
+                    prefix_experiment, "load_corpus", return_value=corpus
+                ),
+                mock.patch.object(
+                    prefix_experiment, "_build_raw_cosine_profile",
+                    return_value=config["profiles"]["default"],
+                ),
+                mock.patch.object(
+                    prefix_experiment, "prepare_document_workspace",
+                    side_effect=_prepare,
+                ),
+                mock.patch.object(
+                    prefix_experiment, "provider_model_metadata", return_value=None
+                ),
+                mock.patch.object(
+                    prefix_experiment, "_binary_provenance", return_value={}
+                ),
+                mock.patch.object(
+                    prefix_experiment, "_resolve_mpm_binary",
+                    return_value=Path("/nonexistent/mpm"),
+                ),
+                mock.patch.object(
+                    prefix_experiment, "_snapshot_full",
+                    return_value={"memories": []},
+                ),
+                mock.patch.object(
+                    prefix_experiment, "run_query",
+                    return_value=_result("q1", "alpha query", True, ["d1"]),
+                ),
+                mock.patch.object(
+                    prefix_experiment, "_run_raw_cosine",
+                    return_value=[_result("q1", "alpha query", True, ["d1"])],
+                ),
+                mock.patch.object(
+                    prefix_experiment, "_mutation_diff",
+                    return_value=mutation_diff,
+                ),
+            ):
+                rc = prefix_experiment.run_prefix_experiment(args)
+        return rc, out_dir, stderr.getvalue()
+
+    def test_the_experiment_exits_nonzero_and_publishes_no_report(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            rc, out_dir, stderr = self._run_experiment(
+                root, "A,B,C,D", _MUTATION_DIFF
+            )
+            self.assertNotEqual(rc, 0, "a detected mutation must not exit 0")
+            self.assertEqual(rc, 1)
+            self.assertFalse(
+                (out_dir / "prefix-experiment-report.json").exists(),
+                "a failed experiment must not publish a JSON report",
+            )
+            self.assertFalse(
+                (out_dir / "prefix-experiment-report.md").exists(),
+                "a failed experiment must not publish a Markdown report",
+            )
+            self.assertIn("MUTATION DETECTED", stderr)
+            self.assertIn("FAILED", stderr)
+
+    def test_the_experiment_still_publishes_a_report_when_nothing_mutated(
+        self,
+    ) -> None:
+        """The clean path is unchanged: the report is written and the
+        exit code is 0."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            rc, out_dir, stderr = self._run_experiment(
+                root, "A,B,C,D", _CLEAN_DIFF
+            )
+            self.assertEqual(rc, 0, f"clean run must exit 0; stderr={stderr}")
+            self.assertTrue((out_dir / "prefix-experiment-report.json").exists())
+            self.assertTrue((out_dir / "prefix-experiment-report.md").exists())
+
+
+# --------------------------------------------------------------------------
+# 9. condition A is the baseline and cannot be substituted away
+# --------------------------------------------------------------------------
+
+class TestBaselineConditionRequired(unittest.TestCase):
+    """Condition A is the unprefixed baseline.
+
+    Every comparison this experiment reports is against the
+    same-corpus unprefixed baseline. B, C and D are prefixed
+    conditions, not baselines: promoting one of them to "the
+    baseline" would publish a number whose reference point is a
+    prefix rather than the unprefixed text.
+    """
+
+    def test_a_selection_without_A_is_refused(self) -> None:
+        with self.assertRaises(PrefixExperimentError) as ctx:
+            _validate_selection({"B", "C", "D"})
+        message = str(ctx.exception)
+        self.assertIn("A", message)
+        self.assertIn("baseline", message.lower())
+
+    def test_a_selection_with_A_is_accepted(self) -> None:
+        _validate_selection({"A"})
+        _validate_selection({"A", "B", "C", "D"})
+        _validate_selection({"B", "A"})
+
+    def test_the_refusal_names_the_missing_condition(self) -> None:
+        with self.assertRaises(PrefixExperimentError) as ctx:
+            _validate_selection({"B", "C"})
+        message = str(ctx.exception)
+        self.assertIn(BASELINE_CONDITION_KEY, message)
+        # The message must say what to do, not just what went wrong.
+        self.assertIn("--conditions", message)
+
+    def test_the_experiment_refuses_a_baselineless_selection_before_any_workspace(
+        self,
+    ) -> None:
+        """The refusal happens BEFORE a workspace is created, so an
+        invalid selection costs nothing and touches nothing."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = root / "MANIFEST.json"
+            manifest.write_text(json.dumps({"generator": "test"}))
+            corpus = _make_corpus(
+                [("d1", "alpha document")],
+                [_q("q1", "alpha query", relevant=("d1",))],
+                manifest_path=str(manifest),
+            )
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({"profiles": {}, "components": {}}))
+            out_dir = root / "out"
+            args = SimpleNamespace(
+                output_dir=str(out_dir),
+                config=str(config_path),
+                conditions="B,C,D",
+                corpus_version="test",
+            )
+            prepare = mock.Mock()
+            stderr = io.StringIO()
+            stdout = io.StringIO()
+            with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
+                with (
+                    mock.patch.object(
+                        prefix_experiment, "load_corpus", return_value=corpus
+                    ),
+                    mock.patch.object(
+                        prefix_experiment, "_build_raw_cosine_profile",
+                        return_value={"provider": "openai-compatible"},
+                    ),
+                    mock.patch.object(
+                        prefix_experiment, "prepare_document_workspace", prepare
+                    ),
+                ):
+                    rc = prefix_experiment.run_prefix_experiment(args)
+            self.assertNotEqual(rc, 0)
+            prepare.assert_not_called()
+            self.assertIn("REFUSING", stderr.getvalue())
+            self.assertFalse((out_dir / "prefix-experiment-report.json").exists())
+
+    def test_the_report_records_condition_a_as_the_baseline(self) -> None:
+        """The baseline is condition A by IDENTITY, not by position:
+        the selection order must not change what the comparison is
+        measured against."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = root / "MANIFEST.json"
+            manifest.write_text(json.dumps({"generator": "test"}))
+            corpus = _make_corpus(
+                [("d1", "alpha document"), ("d2", "beta document")],
+                [_q("q1", "alpha query", relevant=("d1",))],
+                manifest_path=str(manifest),
+            )
+            config = {
+                "profiles": {
+                    "default": {
+                        "provider": "openai-compatible",
+                        "model": "fake-embed-v1",
+                        "base_url": "http://127.0.0.1:1/v1",
+                        "api_key": "",
+                    }
+                },
+                "components": {"embedding": "default"},
+                "expected": {
+                    "model": "openai-compatible:fake-embed-v1",
+                    "dimension": 64,
+                },
+            }
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(config))
+            out_dir = root / "out"
+            # B first, A second: the requested order must not matter.
+            args = SimpleNamespace(
+                output_dir=str(out_dir),
+                config=str(config_path),
+                conditions="B,A",
+                corpus_version="test",
+            )
+
+            def _prepare(document_prefix: str, _corpus, _config):
+                prep = prefix_experiment._document_preparation(document_prefix)
+                return _fake_workspace(root, prep, document_prefix)
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                with (
+                    mock.patch.object(
+                        prefix_experiment, "load_corpus", return_value=corpus
+                    ),
+                    mock.patch.object(
+                        prefix_experiment, "_build_raw_cosine_profile",
+                        return_value=config["profiles"]["default"],
+                    ),
+                    mock.patch.object(
+                        prefix_experiment, "prepare_document_workspace",
+                        side_effect=_prepare,
+                    ),
+                    mock.patch.object(
+                        prefix_experiment, "provider_model_metadata", return_value=None
+                    ),
+                    mock.patch.object(
+                        prefix_experiment, "_binary_provenance", return_value={}
+                    ),
+                    mock.patch.object(
+                        prefix_experiment, "_resolve_mpm_binary",
+                        return_value=Path("/nonexistent/mpm"),
+                    ),
+                    mock.patch.object(
+                        prefix_experiment, "_snapshot_full",
+                        return_value={"memories": []},
+                    ),
+                    mock.patch.object(
+                        prefix_experiment, "run_query",
+                        return_value=_result("q1", "alpha query", True, ["d1"]),
+                    ),
+                    mock.patch.object(
+                        prefix_experiment, "_run_raw_cosine",
+                        return_value=[_result("q1", "alpha query", True, ["d1"])],
+                    ),
+                    mock.patch.object(
+                        prefix_experiment, "_mutation_diff",
+                        return_value=_CLEAN_DIFF,
+                    ),
+                ):
+                    rc = prefix_experiment.run_prefix_experiment(args)
+            self.assertEqual(rc, 0)
+            report = json.loads(
+                (out_dir / "prefix-experiment-report.json").read_text()
+            )
+            comparisons = report["comparisons_vs_baseline"]
+            self.assertIn("B", comparisons)
+            self.assertEqual(comparisons["B"]["baseline_condition"], "A")
+            self.assertEqual(comparisons["B"]["condition"], "B")
 
 
 if __name__ == "__main__":

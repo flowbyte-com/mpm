@@ -129,6 +129,18 @@ def _document_preparation(document_prefix: str) -> str:
     return "doc_" + _slug(document_prefix).rstrip("_")
 
 
+# Condition A IS the unprefixed baseline. Every comparison this
+# experiment reports is "condition vs the same-corpus unprefixed
+# baseline", so A is not one condition among four -- it is the
+# reference every other condition is measured against.
+BASELINE_CONDITION_KEY = "A"
+
+# The workspace key the baseline condition lives in. The hybrid arm
+# (MPM's production ranker) can only be measured here, because the
+# production recall path embeds the query verbatim.
+BASELINE_PREPARATION = _document_preparation("")
+
+
 @dataclass(frozen=True)
 class PrefixCondition:
     """One cell of the condition matrix."""
@@ -253,6 +265,20 @@ METRIC_DEFINITIONS: dict[str, str] = {
 
 class PrefixExperimentError(RuntimeError):
     """Raised when the experiment cannot be run safely."""
+
+
+class LogicalMutationError(PrefixExperimentError):
+    """Raised when the hybrid benchmark detects a logical mutation.
+
+    A mutation means the measurement's premise is broken: the recall
+    path changed state that the comparison assumed was fixed, so the
+    numbers it produced are not comparable with anything.
+
+    The experiment FAILS on a mutation. It does not publish the
+    partial result it had accumulated: a broken measurement written
+    out as a successful one is worse than no measurement, because the
+    next reader cannot tell the two apart.
+    """
 
 
 @dataclass
@@ -841,6 +867,25 @@ def _run_raw_cosine(
 
 
 def run_prefix_experiment(args: Any) -> int:
+    """Run the full condition matrix and write the report.
+
+    This is the CLI entry point. It turns the experiment's refusals
+    and hard failures into a nonzero exit with a clear message, and
+    it guarantees that a failed run publishes NO report: a partial
+    result written out as a successful measurement is worse than no
+    measurement, because the next reader cannot tell them apart.
+    """
+    try:
+        return _run_prefix_experiment(args)
+    except LogicalMutationError as exc:
+        print(f"FAILED: {exc}", file=sys.stderr)
+        return 1
+    except PrefixExperimentError as exc:
+        print(f"REFUSING: {exc}", file=sys.stderr)
+        return 2
+
+
+def _run_prefix_experiment(args: Any) -> int:
     """Run the full condition matrix and write the report."""
     if not getattr(args, "output_dir", None):
         print("--output-dir is required", file=sys.stderr)
@@ -871,6 +916,11 @@ def run_prefix_experiment(args: Any) -> int:
     if not selected:
         print("REFUSING: no conditions selected", file=sys.stderr)
         return 2
+
+    # Condition A is the baseline every comparison is measured
+    # against, so a selection without it is refused BEFORE any
+    # workspace is created -- an invalid selection costs nothing.
+    _validate_selection(wanted)
 
     depths = sorted(set(FIXED_RECALL_DEPTHS) | {corpus.scoring.top_k})
     top_k = corpus.scoring.top_k
@@ -914,9 +964,9 @@ def run_prefix_experiment(args: Any) -> int:
     # Hybrid arm: the production MPM ranker, on the unprefixed
     # workspace only. The production recall path embeds the query
     # verbatim, so no prefix condition is expressible through it.
-    hybrid: dict[str, Any] | None = None
-    if "doc_unprefixed" in workspaces:
-        hybrid = _run_hybrid_arm(corpus, workspaces["doc_unprefixed"], depths)
+    # Condition A is required (see `_validate_selection`), so the
+    # unprefixed workspace always exists and this arm always runs.
+    hybrid = _run_hybrid_arm(corpus, workspaces[BASELINE_PREPARATION], depths)
 
     condition_reports: list[dict[str, Any]] = []
     for cond in selected:
@@ -947,31 +997,40 @@ def run_prefix_experiment(args: Any) -> int:
 
     by_key = {cr["condition"]["key"]: cr for cr in condition_reports}
     comparisons: dict[str, Any] = {}
-    baseline_key = "A" if "A" in by_key else (selected[0].key if selected else None)
-    if baseline_key:
-        for cr in condition_reports:
-            key = cr["condition"]["key"]
-            if key == baseline_key:
-                continue
-            comparisons[key] = compare_to_baseline(
-                by_key[baseline_key]["scoring"],
-                cr["scoring"],
-                baseline_key,
-                key,
-                depths,
-            )
+    # The baseline is condition A and only condition A. There is no
+    # fallback: `_validate_selection` guaranteed it is present, and
+    # substituting a prefixed condition for it would silently measure
+    # the wrong thing.
+    baseline_key = BASELINE_CONDITION_KEY
+    if baseline_key not in by_key:
+        raise PrefixExperimentError(
+            f"baseline condition {baseline_key} is missing from the "
+            f"completed conditions {sorted(by_key)}; refusing to compare "
+            f"against anything else"
+        )
+    for cr in condition_reports:
+        key = cr["condition"]["key"]
+        if key == baseline_key:
+            continue
+        comparisons[key] = compare_to_baseline(
+            by_key[baseline_key]["scoring"],
+            cr["scoring"],
+            baseline_key,
+            key,
+            depths,
+        )
 
     # Does the raw-cosine arm stand in for MPM's production ranker?
     # Only if the two agree per query on the unprefixed workspace.
-    hybrid_agreement: dict[str, Any] | None = None
-    if hybrid is not None and baseline_key in by_key:
-        hybrid_agreement = compare_rankings(
-            by_key[baseline_key]["scoring"],
-            hybrid["scoring"],
-            f"raw-cosine condition {baseline_key}",
-            "MPM production hybrid ranker",
-            top_k,
-        )
+    # The hybrid arm always runs (condition A is required), so this
+    # comparison is always available.
+    hybrid_agreement: dict[str, Any] = compare_rankings(
+        by_key[baseline_key]["scoring"],
+        hybrid["scoring"],
+        f"raw-cosine condition {baseline_key}",
+        "MPM production hybrid ranker",
+        top_k,
+    )
 
     model_meta = provider_model_metadata(profile)
     manifest = json.loads(corpus.manifest_path.read_text())
@@ -1108,6 +1167,38 @@ def _parse_conditions(spec: str | None) -> set[str]:
     return keys
 
 
+def _validate_selection(wanted: set[str]) -> None:
+    """Refuse a condition selection that has no baseline.
+
+    Condition A (`baseline-unprefixed`) is the ONLY baseline this
+    experiment has. Every comparison it reports is against the
+    same-corpus unprefixed baseline, so a selection that omits A
+    cannot produce a comparison at all.
+
+    B, C and D are not baselines. They are prefixed conditions, and
+    silently promoting one of them to "the baseline" would publish a
+    number whose reference point is a prefix rather than the
+    unprefixed text -- exactly the kind of unanchored figure this
+    experiment exists to replace.
+
+    There is deliberately no "no-baseline mode". A run without a
+    baseline would produce per-condition numbers with nothing to say
+    what they are relative to, and would have to be read as a
+    comparison anyway.
+    """
+    if BASELINE_CONDITION_KEY in wanted:
+        return
+    raise PrefixExperimentError(
+        f"condition {BASELINE_CONDITION_KEY} (baseline-unprefixed) is "
+        f"required: every comparison in this experiment is against the "
+        f"same-corpus unprefixed baseline, and the selection "
+        f"{sorted(wanted)} does not include it. Add "
+        f"{BASELINE_CONDITION_KEY} to --conditions. There is no "
+        f"no-baseline mode -- a comparison without a baseline is not a "
+        f"measurement, and B/C/D are prefixed conditions, not baselines."
+    )
+
+
 def _run_hybrid_arm(
     corpus: Corpus,
     workspace: DocumentWorkspace,
@@ -1118,6 +1209,13 @@ def _run_hybrid_arm(
     This is the production reference point: MPM's own ranker, MPM's
     own query embedding, MPM's own FTS5 blend. It is measured under
     the same mutation checking the rest of the harness uses.
+
+    A detected logical mutation RAISES. The arm does not return a
+    partial result: the measurements it had accumulated up to that
+    point were produced against a workspace whose state had changed
+    underneath it, so they cannot be compared with anything. The
+    caller turns the exception into a nonzero exit and no report is
+    written.
     """
     before = _snapshot_full(workspace.db_path)
     results: list[QueryResult] = []
@@ -1133,13 +1231,17 @@ def _run_hybrid_arm(
         after = _snapshot_full(workspace.db_path)
         d = _mutation_diff(before, after)
         if d["status"] != "clean":
-            mutation = d
             print(
                 f"MUTATION DETECTED after hybrid query {q.query_id}: "
                 f"{d['diffs']}",
                 file=sys.stderr,
             )
-            break
+            raise LogicalMutationError(
+                f"logical mutation detected in the hybrid arm after query "
+                f"{q.query_id}: {d['diffs']}. The measurement's premise is "
+                f"broken, so the experiment fails instead of publishing a "
+                f"partial result."
+            )
         results.append(r)
 
     scored = score_condition(corpus, results, depths)
