@@ -66,17 +66,46 @@ class FakeEmbeddingsHandler(BaseHTTPRequestHandler):
     The `model_name` and `dim` are class-level set by `make_server`.
     The `vector_fn` class attribute lets tests override the vector
     function (e.g. to inject controlled fixtures).
+
+    `api_show_reply` mirrors Ollama's `POST /api/show` model-metadata
+    endpoint so provenance capture can be tested without a real
+    provider. When it is None the endpoint is not served.
     """
 
     model_name: str = "fake-embedding-v1"
     dim: int = 64
     vector_fn: Callable[[str, int], list[float]] = staticmethod(deterministic_vector)
+    api_show_reply: dict | None = None
+    api_tags_reply: dict | None = None
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         # Silence default access logging; the harness records its own.
         return
 
+    def _send_json(self, payload: dict) -> None:
+        body_out = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body_out)))
+        self.end_headers()
+        self.wfile.write(body_out)
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path.rstrip("/").endswith("/api/tags"):
+            if self.api_tags_reply is None:
+                self.send_error(404, f"unknown path {self.path}")
+                return
+            self._send_json(self.api_tags_reply)
+            return
+        self.send_error(404, f"unknown path {self.path}")
+
     def do_POST(self) -> None:  # noqa: N802
+        if self.path.rstrip("/").endswith("/api/show"):
+            if self.api_show_reply is None:
+                self.send_error(404, f"unknown path {self.path}")
+                return
+            self._send_json(self.api_show_reply)
+            return
         if not self.path.rstrip("/").endswith("/v1/embeddings"):
             self.send_error(404, f"unknown path {self.path}")
             return
@@ -113,6 +142,8 @@ def make_server(
     dim: int = 64,
     model_name: str = "fake-embedding-v1",
     vector_fn: Callable[[str, int], list[float]] | None = None,
+    api_show_reply: dict | None = None,
+    api_tags_reply: dict | None = None,
 ) -> tuple[ThreadingHTTPServer, str, int]:
     """Start a fake embeddings server. Returns (server, base_url, port).
     The server runs in a background thread; the caller is responsible
@@ -122,9 +153,16 @@ def make_server(
     provider can append `/embeddings` and get a valid URL. The
     handler itself also accepts the un-versioned `/embeddings` path
     to match the live OpenAI-compatible behaviour.
+
+    `api_show_reply` and `api_tags_reply`, when given, are served
+    from `POST /api/show` and `GET /api/tags` (Ollama's model
+    metadata shapes) so the harness's provenance capture can be
+    exercised hermetically.
     """
     FakeEmbeddingsHandler.model_name = model_name
     FakeEmbeddingsHandler.dim = dim
+    FakeEmbeddingsHandler.api_show_reply = api_show_reply
+    FakeEmbeddingsHandler.api_tags_reply = api_tags_reply
     if vector_fn is not None:
         FakeEmbeddingsHandler.vector_fn = staticmethod(vector_fn)
 

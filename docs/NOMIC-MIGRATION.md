@@ -100,14 +100,24 @@ full database and not a list of changes.
 
 **No query prefixing.** Nomic's documented convention is
 `search_document: ` for indexed text and `search_query: ` for queries.
-Measured gain: **+0.022 MRR** (0.783 → 0.804, raw cosine, corpus fixed).
+The +0.022 MRR figure that motivated deferring the prefix
+(0.783 → 0.804, raw cosine, corpus fixed) was measured on a corpus and a
+harness that no longer exist.
 
-It is deferred, not forgotten. A retrieval gain and a model change that
-land together cannot be attributed separately: if the post-migration
-benchmark improves, there is no way to tell whether the model earned it or
-the prefix did, and the next person to tune the prefix has no baseline to
-subtract. Separating them costs one extra benchmark run and keeps the
-attribution honest.
+It was deferred so that a retrieval gain and a model change could not land
+together unattributably. It has now been measured on its own
+(Issue #23, four-condition matrix A/B/C/D, fingerprint-verified, on a
+synthetic corpus): **every prefix condition came out at or below the
+unprefixed baseline.** MRR@10 0.9182 unprefixed → 0.9146 with a
+`search_query: ` query prefix, 0.9113 with both roles prefixed, 0.8933
+with a document-side prefix only. The historical +0.022 was not
+reproduced, and it is not comparable with the numbers above — different
+corpus, different harness.
+
+The decision is therefore to **retain the unprefixed baseline**: no
+production prefixing, no re-embed. Full evidence, per-query regressions,
+held-out results, the exact model fingerprint and the reproduction command
+are in [`ISSUE-23-PREFIX-CALIBRATION-REPORT.md`](./ISSUE-23-PREFIX-CALIBRATION-REPORT.md).
 
 **No threshold recalibration.** The contradiction threshold
 (`ContradictionCandidateThreshold = 0.85`) is not a ranking constant; it

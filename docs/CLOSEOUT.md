@@ -880,7 +880,7 @@ a documented decision with its reasoning intact:
 - **§4.5 — FTS5 build discipline centralised.** A bare `go test ./...` without `-tags fts5` failing 11 tests is pre-existing and confirmed by stashing. `make test` is canonical.
 - **§4.6 — temporary-directory cleanup.** WORKING; all 15 `mktemp` sites audited, no leak.
 - **§1.7 — embedding config cached per process.** Documented intent, stated in the function's own doc comment. It interacts with §1.6 (test-order-dependent coverage), which is why it is recorded at all.
-- **The nomic `search_query:` prefix.** Deferred for a sound attribution reason. Tracked as [#23](https://github.com/flowbyte-com/mpm/issues/23) so the deferral has an owner, not because the reasoning was wrong.
+- **The nomic `search_query:` prefix.** Deferred for a sound attribution reason. Tracked as [#23](https://github.com/flowbyte-com/mpm/issues/23) so the deferral has an owner, not because the reasoning was wrong. **Measured since (2026-10):** every prefix condition came out at or below the unprefixed baseline, so the deferral stands and the unprefixed baseline is retained. See [`ISSUE-23-PREFIX-CALIBRATION-REPORT.md`](./ISSUE-23-PREFIX-CALIBRATION-REPORT.md).
 - **`sessions`, `topics` and `capabilities` are not migrated.** They hold zero vectors and cannot be fingerprinted. Stated in `docs/NOMIC-MIGRATION.md` §1; a schema migration is required before they could hold any.
 
 ### 7.4 Full index

@@ -391,7 +391,7 @@ def _mutation_diff(
     }
 
 
-def _ingest_corpus(snap: Path, corpus: Corpus) -> None:
+def _ingest_corpus(snap: Path, corpus: Corpus, document_prefix: str = "") -> None:
     """Insert the synthetic corpus's documents into the disposable DB
     as memories.
 
@@ -411,6 +411,22 @@ def _ingest_corpus(snap: Path, corpus: Corpus) -> None:
     The schema is created by triggering an mpm command on the empty
     workspace (which lazily creates the schema and lock file via
     NewDatabaseManager). Then we INSERT the corpus rows directly.
+
+    `document_prefix` (Issue #23 Phase A): when non-empty, the
+    prefix is prepended to each document's stored text before the
+    INSERT. MPM's production embed path embeds `mem.Content`
+    verbatim (`cmd/mpm/backfill_embeddings.go`), so the resulting
+    document vector is exactly the vector a prefixing implementation
+    would produce — the benchmark never re-implements the provider.
+
+    Two consequences, both deliberate and recorded in the report:
+      1. The STORED text carries the prefix in that workspace, so
+         the workspace's FTS5 index sees the prefix tokens too. That
+         is why the hybrid (production) ranker is only measured in
+         the unprefixed workspace.
+      2. A document whose text already carries the prefix is
+         REFUSED, so a double-prefixed measurement cannot happen
+         silently.
     """
     import subprocess as sp
 
@@ -459,6 +475,15 @@ def _ingest_corpus(snap: Path, corpus: Corpus) -> None:
             (collection,),
         )
         for d in corpus.documents:
+            content = d.content
+            if document_prefix:
+                if content.startswith(document_prefix):
+                    raise RuntimeError(
+                        f"corpus document {d.doc_id} already starts with "
+                        f"the document prefix {document_prefix!r}; refusing "
+                        f"to double-prefix"
+                    )
+                content = document_prefix + content
             con.execute(
                 "INSERT OR REPLACE INTO memories "
                 "(id, collection, content, tags, metadata, weight) "
@@ -466,7 +491,7 @@ def _ingest_corpus(snap: Path, corpus: Corpus) -> None:
                 (
                     d.doc_id,
                     collection,
-                    d.content,
+                    content,
                     "[]",
                     "{}",
                     1.0,
@@ -1306,7 +1331,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.set_defaults(func=cmd_run)
 
+    prefix = sub.add_parser(
+        "prefix-experiment",
+        help=(
+            "Run the Issue #23 Nomic instruction-prefix condition matrix "
+            "(A/B/C/D) over disposable workspaces."
+        ),
+    )
+    prefix.add_argument("--output-dir", required=False, help="Output dir for the report.")
+    prefix.add_argument("--config", required=False, help="JSON config file with embedding profile.")
+    prefix.add_argument(
+        "--corpus-version",
+        default=None,
+        help="Corpus version to load (e.g. 'v2').",
+    )
+    prefix.add_argument(
+        "--conditions",
+        default=None,
+        help=(
+            "Comma-separated condition keys to run (default: all). "
+            "A=baseline, B=query-prefix-only, C=both-roles, "
+            "D=document-prefix-diagnostic."
+        ),
+    )
+    prefix.set_defaults(func=cmd_prefix_experiment)
+
     return parser
+
+
+def cmd_prefix_experiment(args: argparse.Namespace) -> int:
+    """Run the Issue #23 prefix condition matrix.
+
+    The implementation lives in `bench.prefix_experiment`. The import
+    is deferred so the module graph stays acyclic: `prefix_experiment`
+    imports the harness helpers, so the harness must not import it at
+    module scope.
+    """
+    from bench.prefix_experiment import run_prefix_experiment
+
+    return run_prefix_experiment(args)
 
 
 def main(argv: list[str] | None = None) -> int:

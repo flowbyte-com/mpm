@@ -150,7 +150,11 @@ Measured on 12 vCPU / 30 GB, all models local via Ollama on CPU.
 distinction**: a document and a query take the identical path. For
 asymmetric models that is a documented requirement being violated. Measured
 directly — corpus held fixed, only the query string varied, raw cosine
-top-10 (so these MRRs differ from §1, which uses MPM's ranker):
+top-10 (so these MRRs differ from §1, which uses MPM's ranker).
+
+The figures below are the **historical** measurement, preserved verbatim.
+The nomic prefix line was re-measured from scratch in 2026-10 and was
+**not** reproduced; see the note under the table.
 
 ```
  minilm2  plain     MRR=0.7261 R@1=0.6087   control — no documented prefix
@@ -164,8 +168,15 @@ top-10 (so these MRRs differ from §1, which uses MPM's ranker):
 
 Three distinct regimes:
 
-- **`nomic` / `gemma`** — task prefixes help. MPM is currently leaving
-  +0.022 and +0.043 MRR unclaimed.
+- **`nomic` / `gemma`** — task prefixes help *on the corpus and harness
+  this table was measured on*. **That measurement did not survive**: the
+  corpus and the harness are gone (see *Reproducing*), and the nomic
+  prefix result was re-measured from scratch in 2026-10 with the
+  Issue #23 harness on a fresh synthetic corpus, where **every** nomic
+  prefix condition came out at or below the unprefixed baseline — the
+  +0.022 was not reproduced. See
+  [`ISSUE-23-PREFIX-CALIBRATION-REPORT.md`](./ISSUE-23-PREFIX-CALIBRATION-REPORT.md).
+  The gemma +0.043 has not been re-measured and is equally unverified.
 - **`qwen3-embedding`** — the Instruct prefix *hurts* (−0.066). An
   instructed query against plain documents is a mismatch; qwen3 wants
   matched formatting on both sides.
@@ -239,6 +250,19 @@ person to tune the prefix would have no baseline. +0.022 MRR stays on the
 table until it can be measured on its own. See
 [`NOMIC-MIGRATION.md`](./NOMIC-MIGRATION.md) §5.
 
+**Update (2026-10, Issue #23): (b) has now been measured on its own, and
+the answer is no.** The four-condition matrix A/B/C/D measured
+`search_query: `, `search_document: ` and both together against the
+unprefixed baseline, fingerprint-verified, on a synthetic corpus. MRR@10
+0.9182 unprefixed → 0.9146 / 0.9113 / 0.8933 — every prefix condition at
+or below baseline. **The unprefixed baseline is retained**; no prefixing
+is implemented and no re-embed is performed. Evidence, including the
+per-query regressions and the held-out split, is in
+[`ISSUE-23-PREFIX-CALIBRATION-REPORT.md`](./ISSUE-23-PREFIX-CALIBRATION-REPORT.md).
+That measurement is on a synthetic corpus and is **not** comparable with
+the 0.832 above; it is a comparison against a same-corpus baseline, not
+against a historical number.
+
 **Migration proceeded** to `ollama:nomic-embed-text`; the plan, backup and
 reversal procedure are in [`NOMIC-MIGRATION.md`](./NOMIC-MIGRATION.md).
 
@@ -264,6 +288,22 @@ have to be reconstructed; the new harness ships a small
 synthetic labelled set under `bench/corpus/v1/` instead. The
 manifest at `bench/corpus/MANIFEST.json` records this in its
 `note` field.
+
+**Issue #23 re-measured the prefix question from scratch and did not
+reproduce the +0.022 either.** The four-condition matrix is reproducible
+today against the current repository, and its committed artefact is
+`bench/output/issue-23-phase-a/`:
+
+```bash
+# The Issue #23 prefix condition matrix (A/B/C/D). Requires the
+# canonical FTS5 build and a local Ollama with `nomic-embed-text`.
+make build
+MPM_BENCH_COLLECTION=bench_v2_corpus python3 -m bench prefix-experiment \
+    --output-dir /tmp/mpm-bench-issue23 \
+    --config bench/fixtures/nomic-embed-text.json \
+    --corpus-version v2 \
+    --conditions A,B,C,D
+```
 
 What can be reproduced today, against the current repository:
 
