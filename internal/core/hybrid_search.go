@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const challengeWarning     = "[Note: This memory is challenged — treat as unverified]"
+const challengeWarning = "[Note: This memory is challenged — treat as unverified]"
 const conceptDriftWarning = "[SYSTEM WARNING: This knowledge is under active Concept Drift investigation — treat as potentially obsolete]"
 
 // HybridConfig controls how FTS5 and vector scores are blended.
@@ -68,33 +68,58 @@ func ValidateSchemaPrefix(prefix string) error {
 // for vector-only rows (see the threshold comment in HybridSearch). It was
 // measured rather than assumed — see the calibration below.
 //
-// CALIBRATION (22-query benchmark + 15 dedicated nonsense queries,
-// real all-minilm embeddings, 160 result rows):
+// CALIBRATION (Phase A.3 corpus v2: 50 synthetic documents, 40 answerable
+// + 20 unanswerable queries, nomic-embed-text 768-dim, top-10):
 //
-//	relevant hits   n=20   vector similarity 0.159 .. 0.828
-//	noise hits      n=140  vector similarity 0.030 .. 0.307
+//	positive-query MRR@10                                0.9182
+//	positive-query Recall@10                             0.9875
+//	unanswerable queries still served vector candidates   20/20
 //
-// The distributions OVERLAP: the strongest noise row (0.307) is more
-// similar than the weakest legitimate row (0.159), so no similarity floor
-// separates them cleanly:
+// The two populations OVERLAP. Every unanswerable query still receives
+// vector candidates under the current default, and no similarity floor
+// separates them without destroying legitimate answerable queries
+// (paraphrase queries among them):
 //
-//	floor   relevant kept   noise kept   noise filtered
-//	 0.15      20/20           22/140         84%
-//	 0.20      19/20            5/140         96%
-//	 0.25      17/20            3/140         98%
+//	cosine floor 0.70   rejects 18/20 negatives   but 10/40 positives
+//	best gap policy     rejects 19/20 negatives   but 14/40 positives
 //
-// A floor of 0.20 would suppress real results. Worse, every legitimate
-// hit below 0.25 is a PARAPHRASE — semantic retrieval's whole purpose:
+// (60-query policy sweep across the calibration and held-out splits;
+// bench/output/phase-a3/v2-nomic-eval/, tabulated in
+// docs/ISSUE-15-PHASE-A-REPORT.md §A2.4. The earlier 22-query /
+// all-minilm measurement reached the same conclusion and is recorded in
+// docs/CLOSEOUT.md §4.1.)
 //
-//	0.244  "how do I stop the attachments from breaking"  -> the actual answer
-//	0.212  "what model does the system use for writing"  -> the actual answer
-//	0.159  "why is my hard drive no longer protected"    -> the actual answer
+// WHY THE THRESHOLD AND GAP POLICIES WERE REJECTED (Issue #15, 2026-10-21):
 //
-// Raising the default would trade the confident-nonsense problem for a
-// paraphrase-recall problem, which is the worse failure. The default is
-// therefore left alone, and the real fix is orthogonal: a caller that
-// wants a floor should set RetrievalThreshold above 0 deliberately,
-// knowing the 0.159–0.244 band contains true positives.
+//   - A cosine floor of 0.70 removes 18 of 20 nonsense results but also
+//     removes 10 of 40 legitimate answerable queries. Those 10 are not
+//     marginal hits: 3 of the 10 are the corpus's explicitly labelled
+//     paraphrase queries, and the other 7 are legitimate answerable
+//     queries that carry no paraphrase label. The floor trades a
+//     confidence-display problem for a recall problem, which is the
+//     worse failure.
+//   - The best gap-based policy (top1–top2 cosine gap < 0.05 OR top-1
+//     cosine < 0.60) removes ONE more negative (19/20) while removing
+//     14/40 positives (2 of the 14 are labelled paraphrase queries). It
+//     is strictly worse on the axis that matters.
+//   - The held-out split shows the same legitimate-answer losses, so
+//     neither policy is merely overfit to the calibration split.
+//
+// The 9 labelled paraphrase queries are NOT a low-similarity band: their
+// top-1 cosine spans 0.5733-0.8752, overlapping the non-paraphrase
+// positives' 0.5957-0.9234. A floor therefore cuts across the paraphrase
+// queries indiscriminately rather than isolating them, and most of the
+// legitimate answers it removes carry no paraphrase label at all.
+//
+// The measured signals therefore do not support reliable automatic
+// abstention at an acceptable legitimate-answer cost. There is NO new
+// default similarity threshold and NO confidence score. The remedy is
+// orthogonal to filtering: an honest retrieval contract that tells the
+// caller the returned rows are RANKED CANDIDATES whose relevance has not
+// been established (the retrieval_status field on the recall output). A
+// caller that wants a floor should still set RetrievalThreshold above 0
+// deliberately, knowing the rejected set contains legitimate answerable
+// queries, paraphrase queries among them.
 func DefaultHybridConfig() HybridConfig {
 	return HybridConfig{
 		VectorWeight: 0.5,
@@ -134,13 +159,101 @@ type HybridResult struct {
 	ChallengedTheoryID string
 }
 
+// Retrieval status values for a hybrid (semantic) result set.
+//
+// The semantic ranker returns RANKED CANDIDATES, not verified answers. A
+// caller must be able to tell "the ranker produced nothing" from "the
+// ranker produced candidates whose relevance has not been established",
+// because those two call for opposite responses — rephrase the query,
+// versus treat the rows as leads to check.
+//
+// These values are deliberately NOT a confidence score. The Phase A.3
+// measurements (docs/ISSUE-15-PHASE-A-REPORT.md §A2.4) show that no
+// similarity or gap signal separates answerable from unanswerable queries
+// at an acceptable legitimate-answer cost, so the contract reports what
+// the ranker DID rather than guessing what it MEANT.
+const (
+	// RetrievalStatusNoCandidates means the ranker returned no rows at
+	// all — neither the lexical nor the vector channel produced a
+	// candidate.
+	RetrievalStatusNoCandidates = "no_candidates"
+	// RetrievalStatusCandidatesUnverified means rows were returned and
+	// ranked, but no relevance was established for any of them. The
+	// scores rank the rows; they do not assert that a row answers the
+	// query.
+	RetrievalStatusCandidatesUnverified = "candidates_unverified"
+)
+
+// HybridSearchOutcome carries the rows a hybrid search produced together
+// with the status of the semantic (vector) channel.
+//
+// Why it exists: the vector channel used to fail silently. A provider
+// that could not be reached, a provider that returned an empty vector, a
+// vector scan that errored — all of them left the caller with "whatever
+// the lexical channel produced" and no way to tell that apart from
+// "the corpus has nothing near this query". The first is an
+// infrastructure failure; the second is a result. Reporting them the
+// same way is how a broken embedding service comes to look like an
+// empty memory store.
+//
+// Rows holds exactly the rows HybridSearch returns, in the same order.
+type HybridSearchOutcome struct {
+	// Rows are the ranked results, identical to what HybridSearch returns.
+	Rows []HybridResult
+
+	// VectorChannelError is non-nil when an embedding provider was
+	// configured but the semantic arm could not run: the provider
+	// failed, returned an empty vector, or the vector scan errored.
+	//
+	// It is nil when the vector channel ran successfully, and also nil
+	// when no embedding provider is configured (the null provider) —
+	// that is a configuration state, not a failure, and the lexical
+	// channel's result set is the complete answer for that run.
+	VectorChannelError error
+}
+
 // HybridSearch performs a combined FTS5 + vector search.
 // It queries FTS5 and vector spaces independently, then merges and re-ranks.
 // FTS5 results that lack embeddings are still returned (graceful degradation).
 // Vector results that FTS5 would rank higher are boosted.
+//
+// A vector-channel failure is NOT reported through this function's error
+// return: the lexical channel may still have produced rows, and existing
+// callers (the MCP memory-query tool, the federated local+shared scope
+// search) depend on the historical behaviour of degrading to a lexical
+// result set rather than failing the whole query.
+//
+// This legacy degradation is DELIBERATELY RETAINED (Issue #15 scope
+// boundary, 2026-10-21). The three pre-existing callers —
+// HybridSearchMemories, hybridSearchScopeLocal and hybridSearchScopeAll
+// in internal/core/memory_tools.go — keep the historical behaviour: a
+// vector-channel failure degrades to a lexical result set and is not
+// surfaced as an error. Only the CLI semantic-recall path
+// (cmd/mpm/recall.go) uses HybridSearchWithOutcome and turns a
+// vector-channel failure into a hard error.
+//
+// Callers that must not present a degraded result set as a complete
+// semantic answer should use HybridSearchWithOutcome and inspect
+// VectorChannelError.
 func HybridSearch(dm *DatabaseManager, query string, collection string, cfg HybridConfig) ([]HybridResult, error) {
-	if err := ValidateSchemaPrefix(cfg.SchemaPrefix); err != nil {
+	outcome, err := HybridSearchWithOutcome(dm, query, collection, cfg)
+	if err != nil {
 		return nil, err
+	}
+	return outcome.Rows, nil
+}
+
+// HybridSearchWithOutcome performs the hybrid search and additionally
+// reports whether the semantic channel actually ran.
+//
+// The error return is reserved for a failure of the search itself (an
+// invalid schema prefix, or both FTS5 and the LIKE fallback failing).
+// A vector-channel failure is carried in
+// HybridSearchOutcome.VectorChannelError so a caller can distinguish
+// "no candidates" from "the semantic arm never ran".
+func HybridSearchWithOutcome(dm *DatabaseManager, query string, collection string, cfg HybridConfig) (HybridSearchOutcome, error) {
+	if err := ValidateSchemaPrefix(cfg.SchemaPrefix); err != nil {
+		return HybridSearchOutcome{}, err
 	}
 	// 2026-09-05 audit remediation pass 2: cfg.Limit is no longer
 	// silently coerced. Public callers route through parseLimitStrict
@@ -164,18 +277,34 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 		// Fall back to LIKE if FTS5 is unavailable
 		ftsResults, err = searchLike(dm.SQLDB(), query, collection, cfg.Limit*2, cfg.SchemaPrefix)
 		if err != nil {
-			return nil, fmt.Errorf("hybrid search: FTS5/LIKE failed: %w", err)
+			return HybridSearchOutcome{}, fmt.Errorf("hybrid search: FTS5/LIKE failed: %w", err)
 		}
 	}
 
 	// ── Step 2: Vector search ──────────────────────────────────────────────────
+	//
+	// Every failure mode of the semantic channel is captured rather than
+	// swallowed. The rows are still returned (the lexical channel may
+	// have produced some), but the caller is told the semantic arm did
+	// not run — see HybridSearchOutcome.VectorChannelError.
 	var vecResults []VectorMatch
+	var vectorChannelErr error
 	provider := DefaultEmbeddingConfig().Provider
 	if provider.Name() != "null" {
-		vec, err := provider.Embed(query)
-		if err == nil && len(vec) > 0 {
-			vecResults, err = dm.VectorMatch(collection, vec, cfg.Limit*2, cfg.SchemaPrefix)
-			// VecResults already sorted by similarity; ignore error and continue
+		vec, embedErr := provider.Embed(query)
+		switch {
+		case embedErr != nil:
+			vectorChannelErr = fmt.Errorf("embedding provider %q failed: %w", provider.Name(), embedErr)
+		case len(vec) == 0:
+			vectorChannelErr = fmt.Errorf("embedding provider %q returned an empty vector", provider.Name())
+		default:
+			matched, matchErr := dm.VectorMatch(collection, vec, cfg.Limit*2, cfg.SchemaPrefix)
+			if matchErr != nil {
+				vectorChannelErr = fmt.Errorf("vector channel failed: %w", matchErr)
+			} else {
+				// VecResults already sorted by similarity.
+				vecResults = matched
+			}
 		}
 	}
 
@@ -452,7 +581,7 @@ func HybridSearch(dm *DatabaseManager, query string, collection string, cfg Hybr
 		}
 	}
 
-	return combined, nil
+	return HybridSearchOutcome{Rows: combined, VectorChannelError: vectorChannelErr}, nil
 }
 
 // normalizeBM25 maps an FTS5 bm25() score onto a 0–1 scale where
@@ -569,11 +698,11 @@ func loadVectorOnlyMeta(dm *DatabaseManager, vecResults []VectorMatch, schemaPre
 		// nullable scalar — including JSON columns, which are TEXT
 		// under the hood.
 		var (
-			id, content, collection       string
-			tags, metadata                sql.NullString
-			createdAt                     int64
-			reinforcementCount            int
-			weight                        sql.NullFloat64
+			id, content, collection string
+			tags, metadata          sql.NullString
+			createdAt               int64
+			reinforcementCount      int
+			weight                  sql.NullFloat64
 		)
 		if err := rows.Scan(&id, &content, &collection, &tags, &metadata, &createdAt, &reinforcementCount, &weight); err != nil {
 			slog.Warn("loadVectorOnlyMeta: scan failed", "err", err)
@@ -615,11 +744,11 @@ type ftsEntry struct {
 	CreatedAt          int64
 	ReinforcementCount int
 	Weight             float64 // SQLite REAL — even though the schema declares INTEGER,
-	                          // values like 1.5 are stored as REAL via type affinity,
-	                          // so Scan must use a float destination.
-	LastAccessedAt     *int64
-	ReferenceID        *string
-	Score              float64
+	// values like 1.5 are stored as REAL via type affinity,
+	// so Scan must use a float destination.
+	LastAccessedAt *int64
+	ReferenceID    *string
+	Score          float64
 	// Retrieval metadata (Observability Layer, 2026-07-26).
 	// Populated by a LEFT JOIN against retrieval_metadata; today these
 	// fields are observability-only and do not influence Score or
@@ -956,7 +1085,6 @@ func (dm *DatabaseManager) VectorMatch(collection string, queryEmbedding []float
 	return results, rows.Err()
 }
 
-
 // IsStructuralPrefix returns true when content starts with a template
 // marker that dominates embedding similarity without carrying semantic
 // signal (CHOICE:, ##, Fact:, etc.). When two memories share such a
@@ -997,8 +1125,9 @@ func IsStructuralPrefix(s string) bool {
 // their combined score so the chain's final reading surfaces first.
 //
 // Tag conventions:
-//   "superseded"               — generic: this memory was refined by a later one
-//   "superseded-by:<id>"      — points at the chain's final reading
+//
+//	"superseded"               — generic: this memory was refined by a later one
+//	"superseded-by:<id>"      — points at the chain's final reading
 //
 // Generalized form covers any domain where a value gets refined over time
 // (calibration corrections, API version migrations, schema evolution).
@@ -1012,7 +1141,6 @@ func IsSuperseded(tags []string) bool {
 	}
 	return false
 }
-
 
 // isSupersededTagsString is the tags-as-string variant of IsSuperseded.
 // HybridResult.Tags is a comma-separated string (not a slice), so we

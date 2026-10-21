@@ -187,16 +187,22 @@ func handleRecall(args []string) int {
 		cfg := mpminternal.DefaultHybridConfig()
 		cfg.Limit = *limit
 		cfg.VectorWeight = *vectorWeight
-		hybridResults, err := mpminternal.HybridSearch(dm, query, *collection, cfg)
+		outcome, err := mpminternal.HybridSearchWithOutcome(dm, query, *collection, cfg)
 		if err != nil {
 			return usererror.Error("Semantic search failed: %v", err)
 		}
-		if len(hybridResults) == 0 {
-			fmt.Printf("No memories found for: %s\n", boundQueryEcho(query))
-			return 0
+		// A vector-channel failure is an ERROR, not an empty result. Before
+		// the two were distinguished, an unreachable or broken embedding
+		// service produced "No memories found" with exit code 0 — and, under
+		// --json, a plain-text line where a JSON envelope was promised. That
+		// made a broken provider indistinguishable from an empty corpus.
+		if outcome.VectorChannelError != nil {
+			return usererror.Error("Semantic search failed: %v", outcome.VectorChannelError)
 		}
-		// Render hybrid results as recall entries and output
-		return renderHybridResults(hybridResults, query, *jsonOutput, *tokenBudget, *staleDays, *why, dm)
+		// Render hybrid results as recall entries and output. An empty
+		// result set is rendered too: the JSON envelope is always valid
+		// JSON, and its retrieval_status states which case this is.
+		return renderHybridResults(outcome.Rows, query, *jsonOutput, *tokenBudget, *staleDays, *why, dm)
 	}
 
 	// Keyword search using LIKE + FTS5 fallback with time and weight filters
@@ -853,6 +859,30 @@ func ftsHitCount(db *sql.DB, query, collection, since, until string, weightBelow
 	return n
 }
 
+// recallEmptyMarkers are the phrases that tell the smart-recall
+// "did you mean?" hint (cmd/mpm/main.go) that recall produced zero
+// results.
+//
+// The lexical path says "No memories found for:" — it matched nothing.
+// The semantic path says "No candidates returned for:" — it produced no
+// ranked candidates. They are different claims and are kept distinct, so
+// the marker list has to cover both.
+var recallEmptyMarkers = []string{
+	"No memories found for:",
+	"No candidates returned for:",
+}
+
+// recallProducedNoResults reports whether a captured recall output
+// contains one of the empty-result markers.
+func recallProducedNoResults(output string) bool {
+	for _, marker := range recallEmptyMarkers {
+		if strings.Contains(output, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // boundQueryEcho keeps the no-results message readable when the query
 // itself is pathological (e.g. a pasted 30 KB verbatim blob). Queries at
 // or under 200 bytes print verbatim; longer ones print a prefix plus
@@ -978,6 +1008,11 @@ func isMemoryStale(createdAt int64, lastAccessed *int64, staleDays int) bool {
 }
 
 // renderHybridResults outputs hybrid search results in the same format as keyword recall.
+//
+// The JSON branch always emits a valid envelope — including when the ranker
+// produced nothing. It used to print a plain-text "No memories found" line
+// even under --json, which broke the JSON contract for exactly the case a
+// machine consumer most needs to read correctly.
 func renderHybridResults(results []mpminternal.HybridResult, query string, jsonOutput bool, tokenBudget, staleDays int, why bool, dm *mpminternal.DatabaseManager) int {
 	if jsonOutput {
 		type hybridEntry struct {
@@ -1011,7 +1046,17 @@ func renderHybridResults(results []mpminternal.HybridResult, query string, jsonO
 				IsStale:            isMemoryStale(r.CreatedAt, nil, staleDays),
 			})
 		}
-		data, _ := json.Marshal(map[string]interface{}{"query": query, "memories": entries, "search_mode": "hybrid"})
+		status := mpminternal.RetrievalStatusCandidatesUnverified
+		if len(entries) == 0 {
+			status = mpminternal.RetrievalStatusNoCandidates
+		}
+		data, _ := json.Marshal(map[string]interface{}{
+			"query":            query,
+			"memories":         entries,
+			"search_mode":      "hybrid",
+			"count":            len(entries),
+			"retrieval_status": status,
+		})
 		fmt.Println(string(data))
 		return 0
 	}
@@ -1019,7 +1064,18 @@ func renderHybridResults(results []mpminternal.HybridResult, query string, jsonO
 	cyan := "\033[36m"
 	reset := "\033[0m"
 	bold := "\033[1m"
+	dim := "\033[2m"
+
+	if len(results) == 0 {
+		fmt.Printf("No candidates returned for: %s\n", boundQueryEcho(query))
+		return 0
+	}
+
 	fmt.Printf("%s%sHybrid Recall — %s%s\n\n", bold, cyan, query, reset)
+	// One line, always. The rows below are ranked candidates, not verified
+	// answers: a high score is a ranking signal, never a probability that
+	// the row answers the question.
+	fmt.Printf("%sRanked candidates — relevance not established. Scores are ranking signals, not answerability.%s\n\n", dim, reset)
 
 	for i, r := range results {
 		createdAt := time.Unix(r.CreatedAt, 0)

@@ -686,6 +686,58 @@ the worse failure mode. Default unchanged; calibration recorded at
 `DefaultHybridConfig` so the next agent does not re-litigate it from
 scratch.
 
+**Re-measured on the Phase A.3 v2 corpus (Issue #15).** The table
+above is the original all-minilm measurement. It was re-measured on the
+larger v2 corpus — 50 synthetic documents, 40 answerable + 20
+unanswerable queries, `nomic-embed-text` (768-dim), top-10 — and the
+conclusion held, with more evidence:
+
+| Policy | Unanswerable queries rejected | Legitimate positives lost |
+|---|---|---|
+| `P0_empty_ranker` (current default) | 0/20 | 0/40 |
+| cosine floor 0.70 | 18/20 | 10/40 |
+| best gap policy (`gap < 0.05 OR cosine < 0.60`) | 19/20 | 14/40 |
+| cosine floor 0.80 | 20/20 | 28/40 |
+
+The gap policy buys **one** extra rejected negative for **four** extra
+lost positives. The held-out split (14 positives / 5 negatives) shows
+the same shape, so it is not a calibration artefact. Artefacts:
+`bench/output/phase-a3/v2-nomic-eval/{all,calibration,held-out}.json`;
+reasoning recorded in the calibration comment at `DefaultHybridConfig`
+and in `docs/ISSUE-15-PHASE-A-REPORT.md` §B3.
+
+**What those lost positives are.** The v2 corpus labels 9 of its 40
+positives with `paraphrase_of`; the other 31 are legitimate answerable
+queries with no paraphrase label. Of the 10 legitimate answerable
+queries the 0.70 floor rejects, **3** are labelled paraphrase queries and
+**7** are not; of the 14 the gap policy rejects, **2** are labelled
+paraphrase queries and **12** are not. The rejected positives are
+predominantly ordinary legitimate answerable queries, and the labelled
+paraphrases are not a separable low-similarity band (their top-1 cosine
+spans 0.5733–0.8752, overlapping the non-paraphrase positives'
+0.5957–0.9234). The rejection cost is a real recall cost whichever way
+it is counted; it is not specifically a paraphrase cost.
+
+**Phase B (Issue #15) — the output contract, not a filter.** The
+measurements above are why MPM still returns candidates for an
+unanswerable query. What Phase B changed is what the interface *says*
+about them. `mpm recall --semantic --json` now always emits a valid
+envelope with `count` and an explicit `retrieval_status` —
+`no_candidates` (the ranker produced nothing) or `candidates_unverified`
+(the ranker produced ranked candidates whose relevance has not been
+established) — and a similarity score is never presented as a
+probability that the row answers the question. A vector-channel failure
+is an error, not an empty result. The lexical path is unchanged.
+
+This does **not** identify unanswerable queries; it stops the interface
+from claiming it has. The contract is scoped to the **CLI semantic
+recall** path: the MCP envelope does not carry `retrieval_status` (it
+has its own provenance contract), and the pre-existing `HybridSearch`
+callers keep the legacy behaviour of degrading a vector-channel failure
+to a lexical result set instead of erroring. See `docs/SPEC.md` §6.3 for
+the contract and `docs/ISSUE-15-PHASE-A-REPORT.md` §B6 for the full list
+of accepted scope boundaries.
+
 ### 4.2 Lexical AND semantics — preserved
 
 `BuildFTS5Query` joins prefix-wildcard tokens with spaces, so FTS5's

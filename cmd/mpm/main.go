@@ -2523,9 +2523,9 @@ func runSmartRecallWithHint(token string, args []string, router *CommandRouter) 
 	}
 
 	// Hint logic only fires when recall produced zero results. The
-	// "No memories found for:" marker is emitted by both recall.go
-	// paths (semantic and keyword).
-	if strings.Contains(output, "No memories found for:") {
+	// empty-result markers are emitted by both recall.go paths
+	// (semantic and keyword) — see recallEmptyMarkers.
+	if recallProducedNoResults(output) {
 		if suggestion := suggestCommandName(token, router); suggestion != "" {
 			fmt.Fprintf(origStdout,
 				"Unknown command %q. Did you mean %q? Try `mpm %s --help`.\n",

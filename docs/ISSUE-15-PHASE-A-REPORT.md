@@ -1702,9 +1702,29 @@ distinguished by callers. This addendum names the
 four cases; **no Go product code change is proposed**
 in this addendum.
 
+> **CORRECTION (Phase B, 2026-10-21).** Row (1) of this table was
+> factually wrong when written. The CLI envelope has **never**
+> emitted `search_mode: "hybrid_empty"`. The semantic JSON
+> envelope emits `search_mode: "hybrid"` in every case, empty
+> or not. `"hybrid_empty"` is a **harness-side label** produced by
+> `bench/runner.py` when it classifies an empty result, and it
+> appears in the committed Phase A.3 report because the harness
+> wrote it there — not because the CLI produced it. The Phase B
+> contract corrects this at the source: the CLI now emits an
+> explicit `retrieval_status` (`no_candidates` /
+> `candidates_unverified`), and the harness reads that field when
+> present while retaining the legacy plain-text sniffing for
+> pre-Issue-15 binaries — so the label `"hybrid_empty"` is
+> reproduced identically either way. See the Phase B addendum at the
+> end of this document. The other three rows (2)–(4) were
+> proposals and remain unimplemented; cases (2) and (3) require
+> filter/abstention machinery that Phase B explicitly did not
+> introduce, and case (4)'s `relevance_calibration` field is
+> superseded in spirit by `retrieval_status`.
+
 | Case | Field | Backwards compat | Semantics |
 |---|---|---|---|
-| (1) Ranker found no candidates | `search_mode: "hybrid_empty"` (already present) | OK — same field name | The hybrid ranker returned 0 rows because neither the FTS5 channel nor the vector channel produced a candidate. No `score` and no `vector_similarity` because there are no rows. |
+| (1) Ranker found no candidates | ~~`search_mode: "hybrid_empty"` (already present)~~ → now `retrieval_status: "no_candidates"` (see correction above) | OK — new field, additive | The hybrid ranker returned 0 rows because neither the FTS5 channel nor the vector channel produced a candidate. No `score` and no `vector_similarity` because there are no rows. |
 | (2) Explicit filter rejected candidates | (not yet present) | New field `filter_rejected_count: int` (optional) | The ranker produced N candidates; M≥0 were rejected by an explicit configured filter (e.g. `--collection`, `--since`, `--tag`). The remaining M results are returned. An optional `filter_rejected_count: M` field distinguishes this from case (1). |
 | (3) Low similarity, no abstention evidence | (not yet present) | New field `top_similarity: float \| null` (optional) | The ranker produced N candidates; all N were below the configured `RetrievalThreshold` (or its log-space equivalent). No row is returned. `top_similarity` carries the highest observed similarity for the caller's use (e.g. to log "best was 0.42, below 0.50 threshold"). |
 | (4) Unknown / uncalibrated | (not yet present) | New field `relevance_calibration: "uncalibrated"` (optional) | The query was processed but no calibrated abstention policy is active; the absence of rows is a default of the ranker, not a confidence statement. **This field is critical: callers must NOT interpret empty as "the system is sure there is no answer" when this field is set.** |
@@ -1718,6 +1738,10 @@ in this addendum.
 - The historical `search_mode: "hybrid_empty"` field
   remains the canonical "ranker found nothing" signal.
   Case (1) is the default when no other field is set.
+  **(Corrected in Phase B: `"hybrid_empty"` was never a CLI field —
+  it is a harness-side label. The CLI's "ranker found nothing" signal
+  is now the explicit `retrieval_status: "no_candidates"`. See the
+  correction at the head of this section.)**
 
 **What this design avoids:**
 
@@ -2260,3 +2284,410 @@ with their original SHAs (`1ab727f2aa38471c...` for
 The forensic README's SHA (`3b55cc166a94d48f...`) was
 preserved by the B1–B5 commit and is updated by the
 B7 commit to `e1474596b3b2aa08...`.
+
+---
+
+# Phase B addendum — Honest semantic retrieval contract (Issue #15)
+
+**Date:** 2026-10-21
+**Branch:** `fix/issue-15-honest-semantic-recall`
+**Baseline:** `56ad422e8674c100b243646164432dba69e4715d`
+**Status:** implementation complete; DRAFT PR open. **Awaiting independent HAL review — no merge, no issue closure, no deployment.**
+
+## B0 — What Phase B is, and is not
+
+Phase A measured the problem and produced a design. Phase B implements the part of that design the measurements support, and refuses the part they do not.
+
+- **Phase B changes:** the *semantics* of the semantic-recall output — what the interface claims about what it returned, and what it does when the retrieval itself failed.
+- **Phase B does not change:** ranking, scores, thresholds, which documents are returned, the embedding pipeline, the retrieval pipeline, the schema, or the MCP surface.
+
+The remedy addresses **retrieval-result semantics and machine-readable uncertainty**. It does **not** attempt automatic identification of unanswerable queries. That limitation is stated plainly in B6 rather than hidden.
+
+## B1 — The defect this fixes
+
+`mpm recall --semantic` printed, on the empty case:
+
+```
+No memories found for: <query>
+```
+
+in **plain text, even under `--json`**, and exited 0. Three distinct problems followed:
+
+1. **The JSON contract broke exactly where it matters most.** A machine consumer of `mpm recall --semantic --json` received a non-JSON body for the empty case — the one case a machine consumer most needs to read correctly.
+2. **The envelope made no claim about what it had returned.** It had no `count`, and no field distinguishing *"the ranker produced nothing"* from *"the ranker produced ranked candidates whose relevance has not been established"*. A consumer had to guess.
+3. **Vector-channel failures were swallowed.** `HybridSearch` discarded every error from the semantic arm — a failed embedding provider, an empty vector, a vector-channel failure — and returned the lexical arm's result, or nothing. "We could not look" was reported identically to "nothing matched". This is the serious one: the interface asserted an outcome it had not observed.
+
+## B2 — The contract
+
+### B2.1 — CLI surface (`cmd/mpm/recall.go`)
+
+`mpm recall --semantic --json` now always emits a parseable JSON envelope and exits 0 on a successful retrieval, empty or not.
+
+**Empty result** (captured verbatim from a disposable workspace with a live
+embedding provider configured):
+
+```json
+{"count":0,"memories":[],"query":"a query nothing matches","retrieval_status":"no_candidates","search_mode":"hybrid"}
+```
+
+**Non-empty result** (captured verbatim; one memory stored, queried with a
+paraphrase that shares no token with it):
+
+```json
+{"count":1,"memories":[{"id":"d591fb2d","content":"[Source: Human | Authority: Absolute]\npipeline handling of bulky payloads","tags":"[]","created_at":"2026-10-21T09:40:43Z","reinforcement_count":0,"weight":5,"score":0.2553357183933258,"source":"vector","vector_similarity":0.5106714367866516,"rationale":"vector-only similarity=0.511","is_stale":false}],"query":"why do oversized attachments fail to upload","retrieval_status":"candidates_unverified","search_mode":"hybrid"}
+```
+
+(Go marshals the envelope's map keys in sorted order, so the wire order is
+`count`, `memories`, `query`, `retrieval_status`, `search_mode`.)
+
+
+Rules, in full:
+
+| Rule | Behaviour |
+|---|---|
+| Always-valid JSON | The envelope is a JSON object in every successful case, including the empty case. `memories` is always an array — `[]`, never `null`, never absent. |
+| `count` | The actual number of returned entries. |
+| `retrieval_status` | `no_candidates` — the ranker returned nothing. `candidates_unverified` — the ranker returned ranked candidates whose relevance to the query has **not** been established. |
+| `search_mode` | Unchanged: `hybrid`. Its meaning does not change. |
+| Provider failure | An embedding-provider failure, an empty vector, or a vector-channel failure is an **error**: non-zero exit, diagnostic on stderr. It is never reported as an empty result. |
+| Scores | `score` and `vector_similarity` are **ranking signals**. They are not probabilities and not answerability confidences. A high similarity score never means "verified relevant". |
+| Existing fields | Every pre-existing result field, the ranking order, and the non-semantic behaviour are unchanged. |
+| Lexical path | `mpm recall` without `--semantic` is untouched — same output, same `--json` envelope, same `--json`/`-j` aliases, same collection scoping, same token-budget behaviour. |
+
+**Human-readable path.** The text output labels the list explicitly, in one line:
+
+```
+Hybrid Recall — <query>
+
+Ranked candidates — relevance not established. Scores are ranking signals, not answerability.
+```
+
+and reports the empty case as:
+
+```
+No candidates returned for: <query>
+```
+
+— not "No memories found for:", which asserted that no memories existed rather than that no candidates were returned.
+
+### B2.2 — Core surface (`internal/core/hybrid_search.go`)
+
+- `HybridSearchOutcome{Rows []HybridResult; VectorChannelError error}` — the new outcome type.
+- `HybridSearchWithOutcome(dm, query, collection, cfg) (HybridSearchOutcome, error)` — the new entry point; the semantic arm's failures are *recorded* rather than swallowed.
+- `HybridSearch(dm, query, collection, cfg) ([]HybridResult, error)` — **unchanged signature and behaviour**, now a thin wrapper over `HybridSearchWithOutcome`. No existing caller was modified; the MCP path is untouched.
+- `RetrievalStatusNoCandidates` / `RetrievalStatusCandidatesUnverified` — the two status constants.
+
+### B2.3 — Why the fix is CLI-scoped
+
+The MCP retrieval surface already carried an honest provenance contract before Phase B: `retrieval.mode` (`hybrid` / `lexical_only`), `retrieval.sources`, `retrieval.semantic_only`, `retrieval.vector_weight`, `retrieval.retrieval_threshold`, and a per-row `retrieval_source` — see `internal/core/tools/handlers.go`. The gap was in the CLI's semantic path, so that is where the contract was added. `retrieval_status` is **not** mirrored into MCP; doing so would be a separate, explicit decision, not something to take unilaterally inside a scoped correction.
+
+### B2.4 — Harness compatibility (`bench/runner.py`)
+
+The harness classifies an empty semantic result as `search_mode: "hybrid_empty"`. That label must survive the contract change, or the committed Phase A.3 baseline would stop being reproducible and a labelling difference would be reported as a metric difference. The harness now:
+
+- reads `retrieval_status` when it is present, and maps `no_candidates` to the existing `"hybrid_empty"` label;
+- retains the legacy plain-text sniffing (`no memories found`, `no candidates returned`) so a pre-Issue-15 binary is classified identically;
+- leaves the populated case on the `"hybrid"` label.
+
+Both paths produce the identical label, so the committed baseline remains byte-comparable. This is pinned by 10 new harness tests.
+
+## B3 — Why the measured threshold and gap policies were rejected
+
+*Recorded explicitly, as required.*
+
+Source artefacts: `bench/output/phase-a3/v2-nomic-eval/{all,calibration,held-out}.json`. Corpus: Phase A.3 v2 — 50 synthetic documents, 40 answerable + 20 unanswerable queries, `nomic-embed-text` (768-dim), top-10.
+
+**The problem being solved.** Under the existing default, every unanswerable query receives vector results: **20/20 false confidence**, 0/40 false abstentions (policy `P0_empty_ranker`, all scope). The interface asserts an answer for every nonsense query.
+
+**Candidate 1 — absolute cosine floor 0.70** (`P1_cosine_0.70`, all scope): 28 abstains, of which **10 are legitimate positives** (10/40 positives lost; positive-query coverage 0.75) and **18 are unanswerable queries correctly rejected** (18/20). Answerability precision rises from 0.667 to 0.938 — at the cost of answering 25% of legitimate queries with silence.
+
+**Candidate 2 — best gap policy** (`P3_gap_0.05_min_0.60`: abstain when the top1–top2 cosine gap < 0.05 **or** top-1 cosine < 0.60; all scope): 33 abstains, of which **14 are legitimate positives** (14/40 lost; coverage 0.65) and **19 are unanswerable queries correctly rejected** (19/20). Answerability precision 0.963. It buys **one** extra correctly-rejected negative for **four** extra lost positives.
+
+**Candidate 3 — cosine floor 0.80** (`P1_cosine_0.80`): 0 false confidence, but 28/40 positives lost (coverage 0.30). Rejected on the same grounds as Candidate 1, more so.
+
+**What the rejected positives actually are.** The corpus labels 9 of its 40 positives with `paraphrase_of` (each is a rephrasing of another positive query, sharing the same relevant document set); the other 31 positives are legitimate answerable queries with no paraphrase label. Reconstructing each policy's rejected set from the committed Phase A.3 per-query raw-cosine table (`bench/output/phase-a3/v2-nomic/report.json`, `raw_cosine_per_query_table`) and intersecting it with the corpus labels (`bench/corpus/v2/queries.json`):
+
+| Policy | Legitimate answerable queries rejected | of which labelled `paraphrase_of` | of which **not** labelled paraphrase |
+|---|---|---|---|
+| cosine floor 0.70 | 10/40 | 3 (`q02028`, `q02038`, `q02039`) | 7 |
+| best gap policy | 14/40 | 2 (`q02028`, `q02039`) | 12 |
+| cosine floor 0.80 | 28/40 | 7 | 21 |
+
+**The rejected positives are predominantly ordinary legitimate answerable queries, not paraphrase queries.** The 9 labelled paraphrases are not a low-similarity band: their top-1 cosine spans **0.5733–0.8752**, overlapping the non-paraphrase positives' **0.5957–0.9234**. A floor therefore cuts across the paraphrase queries indiscriminately rather than isolating them, and most of the legitimate answers it removes carry no paraphrase label at all.
+
+*(This table was added on 2026-10-21 during HAL's final review, which corrected an earlier overstatement in this document and in the in-code calibration comment: the phrase "those 10 are paraphrases" was wrong. The measurements themselves — 10/40, 14/40, 18/20, 19/20, 28/40, 20/20 — are unchanged and are reproduced exactly by the artefacts above.)*
+
+**The held-out split confirms the pattern is not a calibration artefact** (`held-out` scope: 14 positives, 5 negatives):
+
+| Policy | Legitimate positives lost | Unanswerable queries rejected |
+|---|---|---|
+| `P0_empty_ranker` (current default) | 0/14 | 0/5 |
+| `P1_cosine_0.70` | 6/14 | 5/5 |
+| `P3_gap_0.05_min_0.60` | 5/14 | 5/5 |
+| `P1_cosine_0.80` | 11/14 | 5/5 |
+
+The ordering of the two candidates on the *positive-loss* axis flips between splits (the gap policy loses 5/14 on held-out against the floor's 6/14, where on the full set it loses 14 against the floor's 10) — the split sizes are too small for that difference to mean anything. What does not flip is the shape: **every candidate that rejects all 5 held-out unanswerable queries also loses at least 5 of 14 legitimate ones**, on a split neither policy was fitted to. Both candidates buy their rejection rate by destroying more than a third of the legitimate answers.
+
+### Why they were rejected
+
+1. **The two populations overlap, and not separably.** On this corpus there is no similarity value that separates unanswerable queries from answerable ones at an acceptable cost. Every floor that removes most nonsense also removes legitimate answerable queries, paraphrase queries among them. The measured floor 0.70 rejects 3 of the 9 labelled paraphrase queries, but it also rejects 7 legitimate answerable queries that carry no paraphrase label — and the 9 paraphrases are not a separable low-similarity band (top-1 cosine 0.5733–0.8752, overlapping the non-paraphrase positives' 0.5957–0.9234).
+2. **The losses are legitimate answers, not marginal ones.** All 10 positives lost under the 0.70 floor are legitimate answerable queries; 3 of the 10 carry the corpus's explicit paraphrase label and 7 do not. Suppressing the labelled paraphrases would break precisely the capability semantic recall exists for, and suppressing the other 7 would destroy legitimate answers for no measured gain in rejection quality — 18 of 20 negatives rejected at the cost of 10 of 40 positives. This is the "legitimate paraphrase recall" the issue explicitly asked not to sacrifice.
+3. **The gap signal does not separate either.** The top1–top2 cosine gap is small when *all* retrieved rows are near-equally related — the normal case for a paraphrase query against a coherent corpus. It rejects 2 of the 9 labelled paraphrase queries, one fewer than the 0.70 floor, while adding 4 more legitimate answerable queries to the rejected set — none of which carries a paraphrase label. The signal does not separate the two populations, which is why it loses 14 positives rather than 10.
+4. **A threshold can only say "gone", not "unsure".** Both measured policies force a binary: abstain, or assert. Neither is what the interface needs. What the interface needs is to say *here are candidates; relevance is unverified*. That statement is strictly more informative than either branch, and it costs no recall at all.
+5. **Held-out numbers are reported as measured, not re-tuned.** No policy was re-fit on the held-out split after seeing its numbers.
+
+**Decision: no new default similarity threshold, no confidence score, no abstention policy.** The remedy is a contract, not a filter. The calibration note in `internal/core/hybrid_search.go` now carries this rationale in-code, next to the constant it governs.
+
+## B4 — Files changed
+
+| File | Change |
+|---|---|
+| `cmd/mpm/recall.go` | Semantic branch uses `HybridSearchWithOutcome`; a recorded vector-channel failure becomes an error, not an empty result; JSON envelope gains `count` + `retrieval_status` and is always valid JSON; human path frames results as unverified candidates and reports "No candidates returned for: …". |
+| `cmd/mpm/main.go` | The zero-result hint now fires on both empty markers (`No memories found for:` and `No candidates returned for:`) via the new `recallEmptyMarkers` helper. |
+| `internal/core/hybrid_search.go` | `HybridSearchOutcome` + `HybridSearchWithOutcome`; vector-channel failures recorded, not swallowed; `RetrievalStatus*` constants; the calibration comment rewritten with the v2 evidence and the rejection rationale. `HybridSearch` kept as a behaviour-preserving wrapper. |
+| `bench/runner.py` | Reads `retrieval_status` when present; legacy plain-text sniffing retained; the `search_mode` label is unchanged. |
+| `cmd/mpm/recall_semantic_contract_test.go` | **new** — 12 CLI contract tests. |
+| `bench/tests/test_issue15_contract.py` | **new** — 10 harness contract tests. |
+| `docs/SPEC.md` | §6.3 — new "Semantic recall contract — `mpm recall --semantic`" subsection. |
+| `docs/ISSUE-15-PHASE-A-REPORT.md` | This addendum, plus the A3.7 correction above. |
+| `docs/CLOSEOUT.md` | §4.1 extended with the v2 re-measurement and the Phase B outcome. |
+| `bench/output/issue-15-phase-b/` | **new** — the committed Phase B re-measurement: `v2-nomic/report.json`, `v2-nomic/report.md`, `README.md` (provenance table + the full field-level diff against the baseline) and `SHA256SUMS`. |
+| `bench/README.md` | The `output/` layout block now lists the new `issue-15-phase-b/` directory. |
+
+## B5 — Verification
+
+### B5.1 — Retrieval metrics: before vs after
+
+The Phase A.3 v2 corpus was re-run against the new binary, using the exact pinned invocation:
+
+```bash
+make build
+MPM_BENCH_COLLECTION=bench_v2_corpus python3 -m bench run \
+  --output-dir /tmp/mpm-issue15-phaseb-final/v2-nomic \
+  --config bench/fixtures/nomic-embed-text.json \
+  --corpus-version v2 --raw-cosine-prefix
+```
+
+(The harness refuses to write into a protected root, so the output directory must live outside the checkout; the result was then copied into `bench/output/issue-15-phase-b/v2-nomic/`.)
+
+| Metric | Baseline (`bench/output/phase-a3/v2-nomic/report.json`) | After Phase B | Delta |
+|---|---|---|---|
+| mean MRR@10 | 0.9181547619047619 | 0.9181547619047619 | 0 |
+| mean Recall@10 | 0.9875 | 0.9875 | 0 |
+| mean nDCG@10 | 0.9269176160435514 | 0.9269176160435514 | 0 |
+| mean Precision@10 | 0.1075 | 0.1075 | 0 |
+
+**Per-query rows differing: 0 of 60.** Raw-cosine blocks (unprefixed scoring, prefixed scoring, delta, participation) are identical. Participation is identical in both runs: 40/40 positives vector-participated with zero failures, all 20 negatives vector-participated, `correctly_empty` empty.
+
+**No previously returned legitimate result was removed** — the per-query row sets are identical, not merely the aggregates.
+
+**Rankings and scores are unchanged, checked at the score level.** For each of the 40 positive queries the entire `top_k` list was compared element by element — every returned `id`, every `score`, every `vector_similarity`, every `source` — and **all 40 rows are byte-identical to the baseline**. The two raw-cosine per-query tables (`raw_cosine_per_query_table`, `raw_cosine_prefixed_per_query_table`) likewise have 0 differing rows across all 60 queries. This is the directive's "confirm existing positive-query rankings and scores unchanged" requirement, checked against the actual scores rather than against the aggregates alone.
+
+**Observed differences, reported rather than concealed.** A full leaf-by-leaf diff of the two `report.json` files finds **12 differing leaves, and not one of them is a measurement**. They fall into exactly five groups:
+
+| Field(s) | Why they differ |
+|---|---|
+| `corpus.manifest_path` | The run happened in a different worktree (`issue-15-calibration` → `issue-15-honest-recall`). |
+| `isolation.binary_provenance.git_head`, `.mpm_version`, `.mtime_iso`, `.path`, `.resolved_path`, `.sha256`, `.size_bytes` | A different binary — the Phase B binary contains the contract change, so it has a different VCS stamp and a different size. |
+| `isolation.output_dir`, `output_dir` | The per-run output directory. |
+| `isolation.snapshot_workspace`, `regeneration.snapshot_path` | The per-run disposable workspace. |
+
+Unchanged: every aggregate (MRR@10, Recall@10, nDCG@10, Precision@10), all 60 per-query rows, the raw-cosine arms and their delta, the regeneration verification (`ok: true`), the snapshot logical-mutation check (`clean`), and the participation record (40/40 positives vector-participated with zero failures, 20/20 negatives vector-participated, `correctly_empty` empty).
+
+No aggregate, no per-query row, no participation count and no raw-cosine value moved.
+
+The committed artefact is `bench/output/issue-15-phase-b/` (report.json, report.md, README.md, SHA256SUMS), with the binary provenance recorded as git head `cad636884e85636f5a25a1d728d7ea0e0efe76b4`, binary sha256 `6bdf2f2b610285b7c08edf91b13fe3fa711fe841654d212aed776267f9d98ac6`, corpus manifest sha256 `48fdb92d6dd28bb58e56dfba6c1e8267bf2a2450b7f990cd4ca4c97eb80c9add`, model digest `0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f`.
+
+### B5.2 — Tests
+
+| Suite | Result |
+|---|---|
+| `cmd/mpm/recall_semantic_contract_test.go` (new) | 12 tests — empty-result JSON, `--json` alias, non-empty count + status, nonsense query does not assert answerability, human output framing, human empty output, paraphrase results still available, lexical envelope unchanged, collection scoping unchanged, token-budget behaviour unchanged, provider failure is an error, provider failure is not an empty result. |
+| `bench/tests/test_issue15_contract.py` (new) | 10 tests — both empty markers recognised, `search_mode` classification under the explicit status, and the legacy path, and the runner reading the explicit status. |
+| `python3 -m pytest bench/tests/ -q` | 217 passed. |
+| `python3 -m bench selftest` | pass. |
+| `make build` | pass. |
+| `make test` | pass (exit 0). |
+| `make test-race` | pass on re-run (exit 0, zero failing tests). The first run had one environmental failure — `TestDrillE2E_ClaudeCode` — which is flaky on this host; see B5.4. |
+| `make test-release` | pass — 26 tests collected (floor 20). |
+| `make test-bench` | pass — 217 tests (floor 50). |
+| `make test-scripts` | pass — 448 tests (floor 50). |
+| `make test-agent-installation` | pass — 427 tests (floor 300). |
+| `make test-agent-adapters` | pass — Python 281 (floor 150), JS 165 (floor 100), TS 17 (floor 15). |
+| `mpm-lint --gate` | pass. |
+| `scripts/doc-gate-threshold-table.sh` | pass — 7 MCP-output-cap constants each have a SPEC §6.4 row. |
+| `scripts/doc-gate-cli-limits.sh` | pass — 7 CLI-side limits each have a SPEC §8 row. |
+| `scripts/pre-commit` | pass (exit 0, no `--no-verify`). |
+
+All fixtures are hermetic: `t.TempDir()` workspaces, disposable SQLite databases, and a stub embedding provider. No live database, no live store, no network.
+
+### B5.4 — The one failing test, and why it is not this change
+
+`make test-race` fails on exactly one test: `TestDrillE2E_ClaudeCode`
+(`internal/core/drill_e2e_claude_code_test.go`). It is **not** caused by
+this change — it is a flaky test on this host, and it **passes on
+re-run** (the re-run of `make test-race` on this branch exits 0 with
+zero failing tests). Four independent lines of evidence:
+
+**(1) The failure is a subprocess timeout, not a contract assertion.**
+
+```
+[claude stderr] [claude-code:unrecognized_model] {"model":"MiniMax-M3.1-Flash","query_source":"sdk"}
+    drill_e2e_claude_code_test.go:165: Finish: claude timed out: context deadline exceeded
+--- FAIL: TestDrillE2E_ClaudeCode (90.18s)
+```
+
+The test spawns the **ambient** `claude` CLI. On this host that CLI is
+configured with the model `MiniMax-M3.1-Flash`, which it rejects at
+startup. The child therefore never performs the two MCP calls the drill
+requires, and the test's own 90-second context expires inside
+`h.Finish` — which `t.Fatalf`s *before* the model-capability skip gate
+below it can fire.
+
+**(2) The same rejection happens at the baseline, and the outcome is a
+race with the child's exit time.** The test was run at the directive's
+baseline commit `56ad422` in a clean worktree
+(`git worktree add --detach /tmp/mpm-i15-baseline 56ad422`). Observed
+outcomes, all with the identical `unrecognized_model` rejection on
+stderr:
+
+| Run | Child outcome | Test outcome |
+|---|---|---|
+| baseline, full `make test-race` | exited at 23.53s | **SKIP** |
+| baseline, isolated `-race` | exited at 81.82s | **SKIP** |
+| this branch, `make test` (no `-race`) | exited at 82.79s | **SKIP** |
+| this branch, `make test-race` (first run) | did not exit before 90s | **FAIL** |
+| this branch, `make test-race` (**re-run**) | exited at 56.72s | **SKIP** |
+
+Whether the test skips or fails is decided entirely by whether the
+ambient CLI exits before the test's 90-second deadline — not by the code
+under test. **The decisive observation is the last row: the same branch,
+the same commit, the same day, re-run, passes.** `make test-race` on
+this branch exits 0 on the re-run, with zero failing tests. The baseline's
+own full `make test-race` likewise passed on the same host on the same
+day, with the same ambient rejection. The result is a property of the
+environment, not of the branch.
+
+**(3) The drill and MCP-server paths are untouched by this change.**
+The branch changes 14 files. None of them is under `cmd/mpm-mcp/`,
+`internal/core/tools/`, `cmd/mpm/drill_cmds.go`,
+`internal/core/drill_claude_code_harness.go` or
+`internal/core/memory_tools.go`:
+
+```bash
+git diff --name-only 56ad422..HEAD -- cmd/mpm-mcp internal/core/tools \
+  cmd/mpm/drill_cmds.go internal/core/drill_claude_code_harness.go \
+  internal/core/memory_tools.go
+# (no output)
+```
+
+The drill exercises `mpm-mcp` (a separate binary, `cmd/mpm-mcp`) and a
+throwaway workspace. It never calls `mpm recall`, the hybrid ranker,
+the JSON envelope or the embedding path.
+
+**(4) CI is unaffected.** The test skips immediately when `CI=true`
+unless `MPM_E2E_CLAUDE=1` is set, so the GitHub Actions "Release gate"
+job never runs it.
+
+**Not fixed here, deliberately.** Making this test *reliably* green would
+mean changing an unrelated drill-harness test to accommodate a local
+model configuration — out of scope for Issue #15, and exactly the kind
+of gate-editing this directive forbids. It is reported instead.
+
+### B5.3 — The tests are load-bearing
+
+Three deliberate mutations were introduced, each caught, each reverted:
+
+| Mutation | Failures observed |
+|---|---|
+| Swallow the recorded vector-channel error again | 4 |
+| Force `retrieval_status` to `candidates_unverified` | 4 |
+| Restore the plain-text empty path under `--json` | 3 |
+
+## B6 — What Phase B does not do (remaining limitations)
+
+**These are accepted scope boundaries, not invitations to implement additional subsystems.** HAL's final review (2026-10-21) confirmed the following boundaries explicitly; each is stated here so that no reader infers a capability that does not exist.
+
+1. **The new `retrieval_status` contract applies to CLI semantic recall.** The field is emitted by `mpm recall --semantic` (both the JSON and the human path). It is not a property of the ranker, of the core search API, or of any other surface.
+2. **Existing MCP callers do not receive the new field.** The MCP envelope already carries its own provenance contract (`retrieval.mode`, `retrieval.sources`, `retrieval.semantic_only`, `retrieval.vector_weight`, `retrieval.retrieval_threshold`, per-row `memories[].retrieval_source` — `internal/core/tools/handlers.go`). `retrieval_status` was **not** mirrored into it. Extending the MCP envelope is a separate decision with its own compatibility review and is deliberately left open rather than done quietly.
+3. **Existing `HybridSearch` callers retain legacy vector-error degradation.** `HybridSearch` (`internal/core/hybrid_search.go`) is preserved as a behaviour-preserving wrapper over `HybridSearchWithOutcome` and **discards** `VectorChannelError`. The three pre-existing callers — `HybridSearchMemories`, `hybridSearchScopeLocal` and `hybridSearchScopeAll` (`internal/core/memory_tools.go`) — therefore keep the historical behaviour: a vector-channel failure degrades to a lexical result set and is *not* surfaced as an error. Only the CLI semantic-recall path (`cmd/mpm/recall.go`) uses `HybridSearchWithOutcome` and turns a vector-channel failure into a hard error. This is a deliberate scope boundary, not an oversight: changing the three existing callers is a separate compatibility decision.
+4. **Automatic detection of unanswerable queries remains unsolved.** MPM still does not know which of the returned candidates actually answer the question. No abstention, no threshold, no confidence score and no classifier was added — deliberately, see B3.
+5. **All 20 benchmark negative queries still return ranked candidates.** Every one of the 20 unanswerable queries in the v2 corpus still receives vector results under the current default. They are now labelled `candidates_unverified` and the human path says "relevance not established" — but MPM does not know they are unanswerable. **This limitation is real, is not solved by this change, and is not concealed by it.** The honest contract is that the output is *ranked candidates*; identifying which of them actually answer the question remains unsolved.
+
+Two further boundaries, unchanged from the first submission:
+
+6. **No new model, provider, reranker, pipeline, schema, or background service.** The change reuses the existing ranker and the existing embedding path.
+7. **CLI/MCP parity for `retrieval_status` has not been established**, and this document does not claim otherwise.
+
+## B7 — Proposal for Issue #15 closure
+
+| Acceptance criterion | Evidence | Met |
+|---|---|---|
+| Correct misleading semantic-recall output without sacrificing legitimate paraphrase recall | B2.1 (contract), B5.1 (MRR/Recall byte-identical, 0/60 rows differ) | **Yes** |
+| Both empty and non-empty `--json` results are valid JSON; `memories` is always an array; `count` is accurate | B2.1; `TestRecallSemantic_EmptyResultIsValidJSONWithExplicitStatus`, `…_NonEmptyResultReportsCountAndUnverifiedStatus` | **Yes** |
+| An explicit machine-readable status distinguishes "no candidates" from "ranked, relevance not established" | `retrieval_status: no_candidates \| candidates_unverified`; B5.3 mutation 2 proves it is load-bearing | **Yes** |
+| Ranking scores are not represented as probabilities or calibrated confidence | B2.1 (contract wording, human-path line); no confidence field exists | **Yes** |
+| Existing result fields, ranking order and non-semantic behaviour remain compatible | B5.1; `…_LexicalRecallEnvelopeIsUnchanged`, `…_CollectionScopingIsUnchanged`, `…_TokenBudgetBehaviourIsUnchanged` | **Yes** |
+| Human-readable output makes clear the results are ranked candidates, not verified answers | B2.1 human path; `…_HumanOutputFramesResultsAsUnverifiedCandidates` | **Yes** |
+| Tests cover the real failure modes (empty, non-empty, nonsense, paraphrase, lexical compatibility, provider failure) | 12 CLI tests + 10 harness tests; B5.3 | **Yes** |
+| A provider failure remains an error, never disguised as an empty result | `HybridSearchOutcome.VectorChannelError` → `usererror.Error`; `…_EmbeddingProviderFailureIsAnError`, `…_IsNotAnEmptyResult` | **Yes** |
+| Positive-query MRR@10 remains 0.9182; Recall@10 remains 0.9875 | B5.1 — identical to 16 decimal places | **Yes** |
+| No previously returned legitimate result is removed | B5.1 — 0 of 60 per-query rows differ | **Yes** |
+| Negative-query candidate results are explicitly unverified, not asserted as answers | B2.1 — `candidates_unverified`; the human path says so explicitly | **Yes** |
+| All tests distinguish a genuine empty result from an embedding failure | `…_EmptyResultIsValidJSONWithExplicitStatus` vs `…_EmbeddingProviderFailureIsNotAnEmptyResult` | **Yes** |
+| Record that the remedy addresses retrieval-result semantics, not automatic identification of unanswerable queries | B0, B6.4–B6.5 | **Yes** — stated explicitly |
+| Record why the measured threshold and gap policies were rejected | B3, and the in-code calibration comment in `internal/core/hybrid_search.go` | **Yes** |
+| No new model, provider, reranker, pipeline, schema, background service, confidence classifier, or Work/checkpoint/Pi change | B4 file list — the change is confined to the recall contract and its documentation | **Yes** |
+| Live MPM untouched | B8 | **Yes** |
+
+**The one criterion that is only partly satisfiable, stated plainly:** Issue #15 cannot be closed on the reading "the system now identifies unanswerable queries" — it cannot, and the measurements say why (B3). It can be closed on the reading "the system no longer *misrepresents* what it returned, and the remaining limitation is documented and machine-readable". If HAL's acceptance criteria require automatic abstention, **this scoped approach does not satisfy them and should not be closed** — the honest position is that the remedy is a contract correction, and the abstention problem remains open as a separate, separately-measured piece of work.
+
+## B8 — Live-system statement
+
+The live MPM installation was not read, copied, benchmarked against, written to, re-embedded, reinstalled, restarted, or reconfigured. All measurement used the disposable benchmark workspace and synthetic corpus. The only network access in the whole change was `npm ci` in `agent_installation/mpm-opencode` to install the adapter's dev dependencies, which the `make test` / `make test-race` gates require in a fresh worktree; it touches no MPM state.
+
+## B9 — Stop point
+
+Implementation, tests, benchmarks and documentation are complete.
+
+| | |
+|---|---|
+| Branch | `fix/issue-15-honest-semantic-recall` (based on `56ad422`) |
+| Commits | `cad6368` (contract + docs), `041012e` (Phase B artefact), `a5a03ab` (record corrections), `156bc46` (stop point), and the final corrective commit (HAL final review, 2026-10-21 — paraphrase-claim correction and scope-boundary documentation) |
+| DRAFT PR | https://github.com/flowbyte-com/mpm/pull/45 |
+
+The final corrective commit's SHA is recorded in the PR description and in the push output; it cannot appear here, because a commit cannot contain its own hash.
+
+**No merge. No issue closure. No deployment. The installed MPM is unchanged.** Phase B awaits independent HAL review.
+
+## B10 — HAL final-review correction (2026-10-21)
+
+HAL reviewed the DRAFT PR against HEAD `156bc46` and required one narrow correction: the claim that the positives rejected by the measured policies "are paraphrases" was an overstatement, and the accepted scope boundaries needed to be documented explicitly. The correction was made in a single focused commit.
+
+**The overstatement, and what is true instead.**
+
+- Wrong: "A cosine floor of 0.70 … removes 10 of 40 legitimate ones. Those 10 are PARAPHRASES" (`internal/core/hybrid_search.go`), and the equivalent sentence in the PR description and in §B3.
+- True: the v2 corpus labels **9** of its 40 positives with `paraphrase_of`; the other 31 are legitimate answerable queries with no paraphrase label. Of the **10** legitimate answerable queries the 0.70 floor rejects, **3** carry the paraphrase label (`q02028`, `q02038`, `q02039`) and **7** do not. Of the **14** the gap policy rejects, **2** carry it (`q02028`, `q02039`) and **12** do not. The rejected positives are predominantly ordinary legitimate answerable queries, and the labelled paraphrases are not a separable low-similarity band (top-1 cosine 0.5733–0.8752, overlapping the non-paraphrase positives' 0.5957–0.9234).
+- HAL's own figures were re-derived independently from the committed artefacts before any edit: `bench/output/phase-a3/v2-nomic/report.json` (`raw_cosine_per_query_table`) for the per-query top-1/top-2 cosine, `bench/corpus/v2/queries.json` for the labels, and `bench/output/phase-a3/v2-nomic-eval/all.json` for the policy aggregates. The reconstruction reproduces the committed policy counts exactly (28 abstains / 10 false abstentions for `P1_cosine_0.70`; 33 / 14 for `P3_gap_0.05_min_0.60`; 48 / 28 for `P1_cosine_0.80`).
+
+**What changed.** Terminology and documentation only:
+
+| File | Change |
+|---|---|
+| `internal/core/hybrid_search.go` | The `DefaultHybridConfig` calibration comment now states the composition of each rejected set (3 of 10 and 2 of 14 are labelled paraphrase queries) and that the labelled paraphrases are not a low-similarity band. The `HybridSearch` doc comment now names the three legacy callers and states explicitly that the legacy vector-error degradation is a deliberate, retained scope boundary. |
+| `docs/ISSUE-15-PHASE-A-REPORT.md` | §B3 gains the rejected-set composition table and the corrected "why they were rejected" items 1–3; §B6 is restructured as an explicit list of accepted scope boundaries; §B9 records the correction. |
+| `docs/CLOSEOUT.md` | §4.1 gains the "what those lost positives are" paragraph and the CLI/MCP/`HybridSearch` scope statement. |
+| `docs/SPEC.md` | §6.3 rule 3 uses the precise formulation, and the contract gains an explicit "scope of the contract" paragraph. |
+
+**What did not change.** No measurement, no model behaviour, no retrieval result, no code path, no public interface. The corrective commit touches two comment blocks in Go and three documentation files; it adds no code and changes no behaviour. The retrieval metrics remain exactly as reported in B5.1 (MRR@10 0.9181547619047619, Recall@10 0.9875, 0 of 60 per-query rows differing).
+
+**Scope boundaries now documented explicitly** (B6, and mirrored in `docs/SPEC.md` §6.3 and the PR description):
+
+1. The `retrieval_status` contract applies to **CLI semantic recall**.
+2. **Existing MCP callers do not receive the new field** — the MCP envelope keeps its own provenance contract.
+3. **Existing `HybridSearch` callers retain legacy vector-error degradation** — `HybridSearchMemories`, `hybridSearchScopeLocal` and `hybridSearchScopeAll` keep degrading a vector-channel failure to a lexical result set instead of erroring.
+4. **Automatic detection of unanswerable queries remains unsolved.**
+5. **All 20 benchmark negative queries still return ranked candidates.**
+
+These are accepted scope boundaries, not invitations to implement additional subsystems.
+

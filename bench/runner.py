@@ -50,9 +50,22 @@ from bench.workspace import scrubbed_env
 # Plain-text prefix MPM emits on an empty semantic recall.
 # Lower-cased and stripped; the runner matches after lowering
 # the actual response to be tolerant of MPM's exact wording.
+#
+# "no candidates returned" is the semantic path's marker (Issue #15,
+# 2026-10-21): the semantic ranker returns ranked candidates, so an empty
+# result is "no candidates were returned", not "no memories exist". The
+# older "no memories found" marker is kept because a pre-Issue-15 binary
+# still emits it, and the harness must stay able to read one.
 EMPTY_RESULT_MARKERS: tuple[str, ...] = (
     "no memories found",
+    "no candidates returned",
 )
+
+# The retrieval_status value the semantic envelope carries when the
+# ranker produced no candidates. It replaces the plain-text sniffing for
+# current binaries and keeps the harness's "hybrid_empty" label stable
+# across the Issue #15 contract change.
+NO_CANDIDATES_STATUS: str = "no_candidates"
 
 
 # v3 review (HAL 2026-10-19): the historical raw-cosine prefix
@@ -241,9 +254,25 @@ def run_query(
         query=query.query,
         is_positive=query.is_positive,
         rows=tuple(rows),
-        search_mode=envelope.get("search_mode", "hybrid"),
+        search_mode=_search_mode_for_envelope(envelope),
         raw_cosine=False,
     )
+
+
+def _search_mode_for_envelope(envelope: dict[str, Any]) -> str:
+    """Classify a semantic recall envelope into the harness's search_mode.
+
+    The Issue #15 contract (2026-10-21) gives the semantic envelope an
+    explicit ``retrieval_status``. A current binary therefore reports an
+    empty result as a valid JSON envelope with
+    ``retrieval_status == "no_candidates"`` instead of a plain-text
+    line — the runner must read the explicit field rather than sniff the
+    text, and must keep reporting the same "hybrid_empty" label so the
+    committed Phase A.3 report stays reproducible.
+    """
+    if envelope.get("retrieval_status") == NO_CANDIDATES_STATUS:
+        return "hybrid_empty"
+    return envelope.get("search_mode", "hybrid")
 
 
 def _raw_cosine_ranking(
