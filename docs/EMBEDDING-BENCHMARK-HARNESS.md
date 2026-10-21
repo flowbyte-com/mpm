@@ -128,6 +128,13 @@ The report includes:
   figure attributed to `search_query:` prefixing on the lost
   30-query corpus. The historical corpus was not preserved as
   an artifact; the harness ships a small synthetic set instead.
+  **Update (2026-10, Issue #23):** the prefix question was then
+  measured directly by the harness's `prefix-experiment` subcommand,
+  on a fresh synthetic corpus, with the fingerprint gate active. Every
+  prefix condition came out at or below the unprefixed baseline, so
+  the historical +0.022 was not reproduced and **MPM applies no
+  instruction prefix on either role.** See
+  [`ISSUE-23-PREFIX-CALIBRATION-REPORT.md`](./ISSUE-23-PREFIX-CALIBRATION-REPORT.md).
 - It does **not** measure the production MPM database. All
   measurements are against disposable workspaces under `/tmp/`.
 - It does **not** alter retrieval, embedding, or contradiction-apply

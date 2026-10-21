@@ -106,6 +106,15 @@ would require a code change to the Ollama provider and is **out of scope for
 this comparison** — the numbers above are bare-input, which is what MPM would
 actually produce today.
 
+**Update (2026-10, Issue #23): the same question was asked of Nomic's
+documented `search_query: ` / `search_document: ` prefixes and answered
+there: measured on its own, every prefix condition came out at or below
+the unprefixed baseline, so MPM applies **no instruction prefix on either
+role**.** See
+[`ISSUE-23-PREFIX-CALIBRATION-REPORT.md`](./ISSUE-23-PREFIX-CALIBRATION-REPORT.md).
+The qwen3 instruction above remains unmeasured by MPM and is untouched by
+that result.
+
 ## 5. The decisive finding: qwen3 triggers spurious memory challenges
 
 Running the benchmark against the qwen3 snapshot, **4 memories had their
