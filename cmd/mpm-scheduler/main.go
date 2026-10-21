@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -26,10 +27,20 @@ import (
 	mpmcore_config "github.com/flowbyte-com/mpm-core/config"
 
 	"github.com/flowbyte-com/mpm-core/mpmcli"
+	"github.com/flowbyte-com/mpm/internal/buildinfo"
 	"github.com/flowbyte-com/mpm/internal/scheduler"
 )
 
 func main() {
+	// The version surface is answered FIRST, before the umask sweep,
+	// the flag parsing, the permission gate, the singleton lock and
+	// the database open. Asking the daemon what it is must never
+	// start it.
+	if buildinfo.ArgvRequestsVersion(os.Args[1:]) {
+		fmt.Print(buildinfo.FormatHuman(buildinfo.Current("mpm-scheduler")))
+		return
+	}
+
 	// 2026-09-18 hardening pass: process umask 0077 BEFORE any DB
 	// open or file creation. See internal/core/config/umask.go.
 	mpmcore_config.EnforcePrivateUmask()

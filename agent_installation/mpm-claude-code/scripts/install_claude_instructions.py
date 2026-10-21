@@ -37,6 +37,17 @@ import shutil
 import sys
 from pathlib import Path
 
+# The shared build-provenance mechanism. It lives in
+# agent_installation/scripts/ alongside the renderer and the reconciler,
+# and is imported by path rather than by package name because every
+# adapter's installer is executed as a standalone script with no
+# package context.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+import block_provenance  # noqa: E402
+
 
 # We recognize two forms:
 #   - New:    <!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions --> / matching END
@@ -84,6 +95,12 @@ def build_managed_block(snippet_body: str) -> str:
     drift after every successful refresh. The body comparison below is
     the authoritative currency check: byte-equality between the
     extracted managed block and the rendered canonical block.
+
+    The build provenance is added AFTER this function, at install time,
+    by block_provenance.annotate(). It is deliberately not part of the
+    canonical render: the render is byte-compared against committed
+    snippets and against the README, and a per-build commit SHA or
+    timestamp in it would make every one of those comparisons drift.
     """
     return f"{OUTER_BEGIN}\n{snippet_body.rstrip()}\n{OUTER_END}\n"
 
@@ -100,14 +117,18 @@ def install(scope: str, home: str, target: str, snippet_path: str) -> int:
     managed_block = build_managed_block(snippet)
 
     if not target_path.exists():
-        # Fresh install: write header + managed block.
+        # Fresh install: write header + managed block. The block carries
+        # the build provenance of the run that installed it.
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(HEAD_COMMENT + "\n\n" + managed_block)
+        target_path.write_text(
+            HEAD_COMMENT + "\n\n" + block_provenance.annotate(managed_block)
+        )
         print(f"[install_claude_instructions] wrote fresh {target_path}")
         return 0
 
     # Existing file: parse, decide, write.
     existing = target_path.read_text()
+    existing_block = _extract_managed_block(existing)
 
     if MANAGED_BEGIN_RE.search(existing) and MANAGED_END_RE.search(existing):
         # Already managed — compare the extracted block against the
@@ -121,8 +142,15 @@ def install(scope: str, home: str, target: str, snippet_path: str) -> int:
         # END marker, and the canonical block has a trailing \n.
         # Without normalization, an otherwise-current file would
         # appear stale on every run (false-positive drift).
-        new_managed = managed_block.rstrip()
-        if (_extract_managed_block(existing) or "").rstrip() == new_managed:
+        #
+        # `annotate` carries the build provenance forward. When nothing
+        # about the block changed, it preserves the timestamp already
+        # in the file, so this comparison stays byte-stable across
+        # repeated runs.
+        new_managed = block_provenance.annotate(
+            managed_block, existing=existing_block,
+        )
+        if (existing_block or "").rstrip() == new_managed.rstrip():
             print(f"[install_claude_instructions] {target_path} already has current managed section; no-op")
             return 0
         backup = backup_path(target_path)
@@ -154,7 +182,10 @@ def install(scope: str, home: str, target: str, snippet_path: str) -> int:
                 file=sys.stderr,
             )
             return 2
-        replacement = existing.replace(legacy_block, managed_block.rstrip() + "\n")
+        replacement = existing.replace(
+            legacy_block,
+            block_provenance.annotate(managed_block).rstrip() + "\n",
+        )
         target_path.write_text(replacement)
         print(
             f"[install_claude_instructions] {target_path} had legacy managed "
@@ -189,7 +220,10 @@ def install(scope: str, home: str, target: str, snippet_path: str) -> int:
     # No managed block present: back up and append.
     backup = backup_path(target_path)
     shutil.copy2(target_path, backup)
-    insertion = "\n\n" + HEAD_COMMENT + "\n\n" + managed_block.rstrip() + "\n"
+    insertion = (
+        "\n\n" + HEAD_COMMENT + "\n\n"
+        + block_provenance.annotate(managed_block).rstrip() + "\n"
+    )
     target_path.write_text(existing.rstrip() + insertion)
     print(
         f"[install_claude_instructions] appended managed section to "
@@ -258,13 +292,26 @@ def extract_legacy_block(content: str) -> str | None:
 
 
 def _extract_managed_block(content: str) -> str | None:
-    """Return the raw managed block (BEGIN/END inclusive) or None."""
+    """Return the raw managed block (BEGIN/END inclusive) or None.
+
+    The trailing newline after the END marker is included, so the slice
+    is byte-identical to what `build_managed_block` produces. The
+    build-provenance comparison depends on that: the timestamp is
+    preserved only when the block that would be written is
+    byte-identical to the one already installed.
+    """
     m = re.search(
         MANAGED_BEGIN_RE.pattern + r".*?" + MANAGED_END_RE.pattern,
         content,
         flags=re.DOTALL,
     )
-    return m.group(0) if m else None
+    if not m:
+        return None
+    end = m.end()
+    newline = content.find("\n", end)
+    if newline == -1:
+        return content[m.start():]
+    return content[m.start():newline + 1]
 
 
 def main() -> int:

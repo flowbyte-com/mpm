@@ -42,64 +42,68 @@ type errorMatrixCase struct {
 // New public commands added to the router should be exercised here too.
 var errorMatrix = []errorMatrixCase{
 	{
-		Family:             "memory show missing id",
-		Command:            []string{"memory", "show"},
-		WantExitNonZero:    true,
+		Family:              "memory show missing id",
+		Command:             []string{"memory", "show"},
+		WantExitNonZero:     true,
 		ForbiddenSubstrings: []string{"SELECT", "INSERT", "FROM memories", "scan error", "sql:"},
 	},
 	{
-		Family:             "memory shred missing id",
-		Command:            []string{"memory", "shred"},
-		WantExitNonZero:    true,
+		Family:              "memory shred missing id",
+		Command:             []string{"memory", "shred"},
+		WantExitNonZero:     true,
 		ForbiddenSubstrings: []string{"SELECT", "INSERT", "FROM memories", "scan error", "sql:"},
 	},
 	{
-		Family:             "memory show unknown id",
-		Command:            []string{"memory", "show", "no-such-id-xyz"},
-		WantExitNonZero:    true,
+		Family:              "memory show unknown id",
+		Command:             []string{"memory", "show", "no-such-id-xyz"},
+		WantExitNonZero:     true,
 		ForbiddenSubstrings: []string{"SELECT", "INSERT", "FROM memories", "scan error"},
 	},
 	{
-		Family:             "lesson list invalid type",
-		Command:            []string{"lesson", "list", "--type=bogus"},
-		WantExitNonZero:    true,
+		Family:              "lesson list invalid type",
+		Command:             []string{"lesson", "list", "--type=bogus"},
+		WantExitNonZero:     true,
 		ForbiddenSubstrings: []string{"SELECT", "INSERT", "scan error", "sql:"},
 	},
 	{
-		Family:             "decisions unknown subcommand",
-		Command:            []string{"decisions", "bogus"},
-		WantExitNonZero:    true,
+		Family:              "decisions unknown subcommand",
+		Command:             []string{"decisions", "bogus"},
+		WantExitNonZero:     true,
 		ForbiddenSubstrings: []string{"SELECT", "INSERT", "scan error", "sql:"},
 	},
 	{
-		Family:             "theories unknown filter",
-		Command:            []string{"theories", "bogus"},
-		WantExitNonZero:    true,
+		Family:              "theories unknown filter",
+		Command:             []string{"theories", "bogus"},
+		WantExitNonZero:     true,
 		ForbiddenSubstrings: []string{"SELECT", "INSERT", "scan error", "sql:"},
 	},
 	{
-		Family:             "work unknown subcommand",
-		Command:            []string{"work", "bogus"},
-		WantExitNonZero:    true,
+		Family:              "work unknown subcommand",
+		Command:             []string{"work", "bogus"},
+		WantExitNonZero:     true,
 		ForbiddenSubstrings: []string{"SELECT", "INSERT", "scan error", "sql:"},
 	},
 	{
-		Family:             "doctor unknown flag",
-		Command:            []string{"doctor", "--bogus"},
-		WantExitNonZero:    true,
+		Family:              "doctor unknown flag",
+		Command:             []string{"doctor", "--bogus"},
+		WantExitNonZero:     true,
 		ForbiddenSubstrings: []string{"SELECT", "INSERT", "scan error", "sql:"},
 	},
 	{
-		Family:             "info unknown flag",
-		Command:            []string{"info", "--bogus"},
-		WantExitNonZero:    true,
+		Family:              "info unknown flag",
+		Command:             []string{"info", "--bogus"},
+		WantExitNonZero:     true,
 		ForbiddenSubstrings: []string{"SELECT", "INSERT", "scan error", "sql:"},
 	},
 	{
-		Family:             "version rejected --json",
-		Command:            []string{"version", "--json"},
-		WantExitNonZero:    true,
-		ForbiddenSubstrings: []string{"MPM mpm v"}, // version --json should NOT silently print the version string
+		// `version --json` is a SUPPORTED surface since the version
+		// command gained a machine-readable form; the error path it
+		// used to cover is now an unknown flag, which must still fail
+		// cleanly rather than printing the version and exiting 0.
+		Family:              "version rejected unknown flag",
+		Command:             []string{"version", "--not-a-flag"},
+		WantExitNonZero:     true,
+		ForbiddenSubstrings: []string{"SELECT", "INSERT", "scan error", "sql:"},
 	},
 }
 

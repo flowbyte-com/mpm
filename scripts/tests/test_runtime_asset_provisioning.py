@@ -50,6 +50,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -583,6 +584,93 @@ class TestInstallSurfaceWiring(unittest.TestCase):
             self.assertIn(target, makefile)
             section = makefile.split(target, 1)[1].split("\n\n", 1)[0]
             self.assertNotIn("install-runtime-assets", section, f"{target.strip()} deploys")
+
+
+# ---------------------------------------------------------------------------
+# Shared agent_installation modules must ship to the runtime root
+# ---------------------------------------------------------------------------
+
+
+class TestSharedAdapterModulesAreStaged(unittest.TestCase):
+    """Every shared module an adapter imports by path must be staged.
+
+    The per-adapter installers resolve the shared scripts directory as a
+    SIBLING of the adapter directory and import shared modules from it by
+    path. In a source checkout that sibling is right there. In an
+    installed runtime root it is only populated by the explicit asset
+    list in scripts/install_runtime_assets.py: the per-adapter
+    scripts/*.py files are discovered automatically, but the SHARED ones
+    are enumerated by hand.
+
+    A shared module missing from that list is a deployment bug that no
+    repository-local test can otherwise see — the adapters' own suites
+    run from the source checkout, where the shared directory is right
+    there. The first symptom is an installed agent whose managed block
+    silently stopped being refreshed, because the adapter died at
+    import time.
+
+    This test is the structural gate: the next shared module lands, it
+    is not added to the list, and this fails by name.
+    """
+
+    def _staged_assets(self) -> set[str]:
+        """The explicit asset list from the reconciler under test."""
+        source = RECONCILER.read_text()
+        match = re.search(r"ONBOARDING_SUPPORT\s*=\s*\[(.*?)\]", source, re.DOTALL)
+        self.assertIsNotNone(match, "ONBOARDING_SUPPORT not found in the reconciler")
+        return set(re.findall(r'"([^"]+)"', match.group(1)))
+
+    def _adapter_installers(self) -> list[Path]:
+        agent_installation = REPO_ROOT / "agent_installation"
+        return sorted(
+            path
+            for adapter in sorted(agent_installation.iterdir())
+            if adapter.is_dir()
+            for path in sorted(adapter.glob("scripts/*.py"))
+        )
+
+    def test_every_shared_module_an_adapter_imports_is_staged(self):
+        shared_dir = REPO_ROOT / "agent_installation" / "scripts"
+        staged = self._staged_assets()
+
+        missing: list[str] = []
+        for installer in self._adapter_installers():
+            source = installer.read_text()
+            for name in set(re.findall(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_]*)", source, re.M)):
+                module = shared_dir / f"{name}.py"
+                if not module.is_file():
+                    # Not a shared module — a standard library import.
+                    continue
+                rel = module.relative_to(REPO_ROOT).as_posix()
+                if rel not in staged:
+                    missing.append(f"{installer.relative_to(REPO_ROOT)} imports {name} ({rel})")
+
+        self.assertEqual(
+            missing,
+            [],
+            "these shared modules are imported by path by an adapter but are "
+            "not staged into the runtime root by install_runtime_assets.py:\n  "
+            + "\n  ".join(missing)
+            + "\nAdd each to ONBOARDING_SUPPORT, or the installed adapters "
+            "cannot import them.",
+        )
+
+    def test_the_shared_provenance_module_is_staged(self):
+        """The named case: the managed-block provenance mechanism.
+
+        Pinned separately from the structural test above so that adding
+        the mechanism to the adapters without adding it to the runtime
+        assets fails with a message that names the actual defect rather
+        than a list of import sites.
+        """
+        staged = self._staged_assets()
+        self.assertIn(
+            "agent_installation/scripts/block_provenance.py",
+            staged,
+            "the shared build-provenance mechanism is not staged into the "
+            "runtime root; every adapter installer imports it by path and "
+            "would die at import time in an installed environment",
+        )
 
 
 # ---------------------------------------------------------------------------

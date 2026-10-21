@@ -34,12 +34,21 @@ import (
 	"github.com/flowbyte-com/mpm-core/config"
 
 	"github.com/flowbyte-com/mpm-core/mpmcli"
+	"github.com/flowbyte-com/mpm/internal/buildinfo"
 	"github.com/flowbyte-com/mpm/internal/critic"
 	"github.com/flowbyte-com/mpm/internal/runtimebin"
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
 
 func main() {
+	// The version surface is answered FIRST, before the umask sweep,
+	// the flag parsing and the database open. Asking the critic what
+	// it is must never run a critique.
+	if buildinfo.ArgvRequestsVersion(os.Args[1:]) {
+		fmt.Print(buildinfo.FormatHuman(buildinfo.Current("mpm-critic")))
+		return
+	}
+
 	// 2026-09-18 hardening pass: process umask 0077 BEFORE any DB
 	// open or file creation.
 	config.EnforcePrivateUmask()

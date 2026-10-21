@@ -44,11 +44,21 @@ from pathlib import Path
 # from the repository so they work without an installed MPM.
 ADAPTER_DIR = Path(__file__).resolve().parent.parent
 INSTALL_SH = ADAPTER_DIR / "install.sh"
-# The provisioning library lives at agent_installation/scripts/, i.e. a
-# sibling of every adapter directory. A staged adapter copy is therefore
-# only faithful to the real layout if that sibling is staged too.
+# The shared library directory lives at agent_installation/scripts/, i.e.
+# a sibling of every adapter directory. A staged adapter copy is
+# therefore only faithful to the real layout if that sibling is staged
+# too.
 AGENT_INSTALLATION_DIR = ADAPTER_DIR.parent
-STAGE_LIBRARY = AGENT_INSTALLATION_DIR / "scripts" / "stage_runtime_package.sh"
+SHARED_SCRIPTS_DIR = AGENT_INSTALLATION_DIR / "scripts"
+# The canonical behavioural source. The shared build-provenance
+# mechanism reads it to determine the behavioural protocol version, and
+# an installed runtime root stages it next to the shared scripts
+# directory — so a faithful sandbox stages it too. Without it the
+# sandbox's managed blocks would carry protocol=unknown, and a future
+# assertion about the protocol version would either fail for a reason
+# that has nothing to do with the code under test, or (worse) pass
+# against a value the product never produces.
+CANONICAL_SOURCE = AGENT_INSTALLATION_DIR / "MPM_AGENT_INTEGRATION_SNIPPETS.md"
 
 
 def _stage_sibling_scripts(adapter_dir: Path) -> None:
@@ -58,10 +68,32 @@ def _stage_sibling_scripts(adapter_dir: Path) -> None:
     agent_installation/scripts/ is always a sibling of the adapter
     directory. A hermetic sandbox that stages only the adapter would
     otherwise test an installer whose library is missing.
+
+    The WHOLE shared directory is staged, not a hand-picked subset. The
+    adapters import shared modules from it by path — the provisioning
+    library, the convergence engine, the build-provenance mechanism —
+    and a maintained list of "the shared files this adapter happens to
+    need today" is a trap: the next shared module lands, the list is
+    not updated, and the adapter dies at import time inside the sandbox
+    while production works fine. That is the worst possible failure
+    shape: a test-only break that hides a real one, or a real one that
+    hides behind a test-only break.
+
+    Copying the directory also keeps this fixture honest about the
+    production layout instead of asserting it.
     """
-    scripts_dir = adapter_dir.parent / "scripts"
-    scripts_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(STAGE_LIBRARY, scripts_dir / "stage_runtime_package.sh")
+    install_root = adapter_dir.parent
+    scripts_dir = install_root / "scripts"
+    if scripts_dir.exists():
+        shutil.rmtree(scripts_dir)
+    shutil.copytree(
+        SHARED_SCRIPTS_DIR,
+        scripts_dir,
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    # The canonical behavioural source sits beside the shared scripts
+    # directory in an installed runtime root, for the same reason.
+    shutil.copy2(CANONICAL_SOURCE, install_root / CANONICAL_SOURCE.name)
 
 
 # A tiny stub TypeScript compiler used to make build_dist() hermetic in

@@ -34,6 +34,11 @@ RENDER_SH = REPO_ROOT / "agent_installation" / "scripts" / "render_managed_block
 CHECK_INSTALLED = REPO_ROOT / "agent_installation" / "scripts" / "check_installed_managed_blocks.py"
 CANONICAL_SOURCE = REPO_ROOT / "agent_installation" / "MPM_AGENT_INTEGRATION_SNIPPETS.md"
 
+if str(REPO_ROOT / "agent_installation" / "scripts") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "agent_installation" / "scripts"))
+
+import block_provenance  # noqa: E402
+
 # Per-host target paths expressed as relative-to-HOME strings (the
 # same keys check_installed_managed_blocks.HOST_INSTALL_TARGETS uses).
 # Each host's BEGIN/END markers are host-specific (the installer only
@@ -201,8 +206,13 @@ class UpdatePathRegression(unittest.TestCase):
             canonical = _canonical_block_for(
                 {"pi": "mpm-pi", "claude_code": "mpm-claude-code", "opencode": "mpm-opencode"}[host]
             )
+            # The installed block carries the build provenance of the
+            # run that installed it — a per-install fact about the
+            # build, not part of the behavioural contract. The canonical
+            # render carries none, so it is removed before comparing.
             self.assertEqual(
-                installed, canonical,
+                block_provenance.strip_provenance(installed),
+                block_provenance.strip_provenance(canonical),
                 f"{host}: installed block drifted from canonical render "
                 f"after ./install.sh --reconcile",
             )

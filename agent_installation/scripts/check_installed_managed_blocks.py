@@ -82,6 +82,7 @@ if str(AGENT_INSTALLATION / "scripts") not in sys.path:
     sys.path.insert(0, str(AGENT_INSTALLATION / "scripts"))
 
 import managed_block_convergence as convergence  # noqa: E402
+import block_provenance  # noqa: E402
 
 
 # Host-by-host install target map. Each entry pairs the adapter name
@@ -317,6 +318,22 @@ def _normalize_generated_ts(text: str) -> str:
     so it must not be compared.
     """
     return _GENERATED_TS_RE.sub("<!-- generated: <TS> -->", text)
+
+
+def _normalize_provenance(text: str) -> str:
+    """Erase the installed block's build-provenance comment.
+
+    The provenance names the product version, the source commit and
+    the moment the block was applied. Those are per-install facts about
+    the BUILD, not part of the behavioural contract, so they must not
+    be compared against the canonical render — which by construction
+    carries no provenance at all.
+
+    Removing it on both sides of the comparison leaves exactly the
+    behavioural text comparable, which is what this diagnostic is
+    about.
+    """
+    return block_provenance.strip_provenance(text)
 
 
 def _extract_installed_block(text: str, outer_begin: str, outer_end: str) -> str | None:
@@ -657,19 +674,28 @@ def _classify(entry: dict, _render, home: Path) -> HostResult:
             marker_state=marker_state, markers=markers,
         )
 
-    # The preserved install timestamp is not part of the canonical
-    # contract, so normalize it on both sides before comparing.
-    installed_cmp = _normalize_generated_ts(installed)
-    expected_cmp = _normalize_generated_ts(expected)
+    # The preserved install timestamp and the build provenance are not
+    # part of the canonical contract, so normalize them on both sides
+    # before comparing.
+    installed_cmp = _normalize_provenance(_normalize_generated_ts(installed))
+    expected_cmp = _normalize_provenance(_normalize_generated_ts(expected))
 
     if installed_cmp == expected_cmp:
+        provenance = block_provenance.parse_provenance(installed)
+        detail = "installed block byte-matches canonical render"
+        if provenance:
+            detail += (
+                f" (installed by MPM {provenance.get('version', 'unknown')} "
+                f"at commit {provenance.get('commit', 'unknown')}, "
+                f"applied {provenance.get('applied', 'unknown')})"
+            )
         return HostResult(
             host=entry["host"],
             file="present",
             block="present",
             install_path=str(install_path),
             verdict=VERDICT_PASS,
-            detail="installed block byte-matches canonical render",
+            detail=detail,
             repair="",
             marker_state=marker_state, markers=markers,
         )

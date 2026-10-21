@@ -294,7 +294,7 @@ func (r *CommandRouter) Execute(args []string) int {
 	// Route to appropriate handler
 	switch cmd.Name {
 	case "version":
-		return r.handleVersion()
+		return handleVersion(args[1:])
 	case "wake":
 		return handleWake(args)
 	case "gc":
@@ -565,17 +565,7 @@ func forceRequested() bool {
 // ============================================================================
 
 func (r *CommandRouter) handleVersion() int {
-	// Final release-pass contract: --json is explicit-or-error.
-	// `version` does NOT support --json; silently falling back to
-	// text mode is the anti-pattern the brief calls out. Reject.
-	for _, a := range os.Args[1:] {
-		if a == "--json" || a == "-j" {
-			fmt.Fprintln(os.Stderr, "{\"error\":\"version does not support --json\"}")
-			return 1
-		}
-	}
-	fmt.Printf("MPM mpm %s\n", buildVersion)
-	return 0
+	return handleVersion(nil)
 }
 
 // handleHelp routes help requests per the cognitive-interface RFC §4

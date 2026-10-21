@@ -145,6 +145,7 @@ if str(AGENT_INSTALLATION / "scripts") not in sys.path:
     sys.path.insert(0, str(AGENT_INSTALLATION / "scripts"))
 
 import managed_block_convergence as convergence  # noqa: E402
+import block_provenance  # noqa: E402
 
 _convergence = convergence
 
@@ -162,6 +163,17 @@ _GENERATED_TS_RE = re.compile(r"<!-- generated: [^\n]* -->")
 
 def _normalize_generated_ts(text: str) -> str:
     return _GENERATED_TS_RE.sub("<!-- generated: <TS> -->", text)
+
+
+def _normalize_provenance(text: str) -> str:
+    """Erase the installed block's build-provenance comment.
+
+    The provenance (product version, source commit, applied timestamp)
+    is a per-install fact about the build, not part of the behavioural
+    contract. The canonical render carries none, so removing it from
+    the installed side leaves exactly the behavioural text comparable.
+    """
+    return block_provenance.strip_provenance(text)
 
 
 def _load_module(name: str, path: Path):
@@ -412,7 +424,7 @@ def detect_installed_block_drift(home: Path) -> tuple[list[str], list[str]]:
                 )
             continue
 
-        if _normalize_generated_ts(installed) != _normalize_generated_ts(expected):
+        if _normalize_provenance(_normalize_generated_ts(installed)) != _normalize_provenance(_normalize_generated_ts(expected)):
             # Show the *first* divergent line plus a byte offset to
             # help the operator locate the drift. A full unified
             # diff would be too noisy for a test failure summary.

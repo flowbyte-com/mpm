@@ -127,8 +127,21 @@ ASSET_DIRS = {
 # AGENT_INSTALLATION/<adapter>/reconcile.json and fails closed to ABSENT
 # when the manifest or the reconciler module is missing, so a half-staged
 # install converts "I could not look" into a false "no hosts installed".
+#
+# block_provenance.py belongs here for a different reason: every
+# per-adapter installer imports it by path (they resolve the shared
+# scripts directory as a sibling of the adapter directory), so a runtime
+# root without it cannot install or refresh ANY managed block — the
+# adapters die at import time. The per-adapter scripts/*.py files are
+# discovered automatically (see discover_assets); the SHARED scripts
+# are an explicit list, so a new shared module has to be added here or
+# it silently does not ship.
+#
+# scripts/tests/test_runtime_asset_provisioning.py pins the invariant:
+# every shared module an adapter imports by path must be in this list.
 ONBOARDING_SUPPORT = [
     "agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md",
+    "agent_installation/scripts/block_provenance.py",
     "agent_installation/scripts/check_installed_managed_blocks.py",
     "agent_installation/scripts/managed_block_convergence.py",
     "agent_installation/scripts/reconcile_managed_blocks.py",

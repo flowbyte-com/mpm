@@ -1826,6 +1826,171 @@ mpm config capability list|get|set <capability>   # Capability registry (operato
 mpm config validate                                # Structural validation (5 layers of checks; exit 0/1/2)
 ```
 
+### `version` — Build Provenance and Update Check
+
+Every MPM binary carries its own build provenance, stamped in at link time.
+The provenance answers three questions an operator asks when something
+looks wrong: *which version is this*, *which source commit is it*, and
+*was it built from a clean tree*.
+
+#### The single version source
+
+The product version lives in one place: the `VERSION` file at the
+repository root. It is a Semantic Versioning string (`0.1.0-dev` at the
+time of writing). The build reads it once and stamps the result into
+every binary; the binary never re-derives it, and no second file, tag or
+constant declares a competing version.
+
+`mpm_agent_integration_version` (currently `2.1.0`) is a **different**
+version — it versions the behavioural contract, not the software. It is
+declared by the canonical managed-block source and moves on its own
+schedule. Neither version is ever substituted for the other.
+
+#### What is embedded
+
+The canonical build (`scripts/build-provenance.sh`, driven by the
+Makefile and by `install.sh`) stamps five values into all five binaries
+(`mpm`, `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`):
+
+| Value | Meaning |
+|---|---|
+| product version | from the `VERSION` file |
+| full commit SHA | the exact source commit the binary was built from |
+| short commit SHA | the same commit, abbreviated to 8 characters |
+| dirty indicator | `true` when the build contained uncommitted source changes |
+| build type | `development` for an ordinary build, `release` for a build from a formally tagged release |
+
+The values are populated **at build time**, not by querying Git after
+installation. A binary therefore reports its own provenance even when it
+is executed outside a Git checkout — which is the normal case for an
+installed binary. Normal builds, CI builds and `install.sh` all go
+through the same script, so they cannot disagree.
+
+#### The version surface
+
+`mpm -v`, `mpm --version` and `mpm version` are all accepted and all
+print the same block:
+
+```console
+$ mpm version
+MPM v0.1.0-dev (06c029ba)
+  binary:  mpm
+  commit:  06c029ba11ce18c7f10aa60b0f0497ece2edda7c
+  build:   development
+  dirty:   no
+```
+
+The first line is stable in shape (`MPM v<version> (<short sha>)`) so it
+can be scraped; the detail lines carry the rest.
+
+Reporting the version is **fast, offline and side-effect-free**. The
+command is intercepted before any other startup work, so it never runs
+the permission sweep, never reads the scheduler health bridge, never
+opens the database and never reads the configuration directory. It
+works even when the installation is broken — which is when an operator
+needs it most. The other four binaries answer the same way from their
+own `binary:` field.
+
+#### Machine-readable output
+
+```console
+$ mpm version --json
+{
+  "version": "0.1.0-dev",
+  "commit": "06c029ba11ce18c7f10aa60b0f0497ece2edda7c",
+  "short_commit": "06c029ba",
+  "dirty": false,
+  "release": false,
+  "build_type": "development",
+  "repository": "flowbyte-com/mpm",
+  "binary": "mpm"
+}
+```
+
+The eight keys above are the documented contract. `release` is `true`
+only for a build from a formally tagged release; `build_type` is the
+rawer form of the same fact (`development` / `release`). Machine-
+readable output never depends on terminal rendering.
+
+#### Update check (`mpm version --check`)
+
+The update check is **opt-in**. There is no automatic update checking
+anywhere: no background task, no startup check, no phone-home. Ordinary
+`mpm --version` never touches the network.
+
+`mpm version --check` compares the embedded commit against the upstream
+`main` branch and classifies the result:
+
+| Status | Meaning |
+|---|---|
+| `current` | the installed commit **is** the upstream head |
+| `behind` | upstream main is ahead of the installed commit |
+| `ahead` | the installed commit is ahead of upstream main |
+| `diverged` | the two revisions have diverged |
+| `unknown` | the relationship could not be established |
+
+```console
+$ mpm version --check
+MPM v0.1.0-dev (06c029ba)
+  binary:  mpm
+  commit:  06c029ba11ce18c7f10aa60b0f0497ece2edda7c
+  build:   development
+  dirty:   no
+
+Update: behind — 3 commit(s) behind upstream main (06c029ba → 4bbcaf65)
+```
+
+The commit distance is reported **only when it is supported by verified
+Git ancestry** — specifically, by the upstream comparison API, which
+computes it from the repository's commit graph. MPM never infers commit
+distance by comparing SHA strings, by timestamps, or by semantic
+version ordering; those order nothing.
+
+Guarantees of the check:
+
+* **Bounded.** The whole check is under an 8-second timeout, and
+  response bodies are read under a hard size cap.
+* **Credential-free.** It never requires GitHub credentials. Both calls
+  it makes are public, unauthenticated reads.
+* **Privacy-preserving.** It transmits the upstream repository name and
+  two public source revision identifiers. It does **not** transmit MPM
+  configuration, memories, database content, or any other user
+  information.
+* **Read-only.** It never fetches, pulls, installs, updates or modifies
+  anything. It reports; it does not act.
+* **Degrades cleanly.** Offline, an unreachable API, a rate limit, an
+  unknown commit and a missing embedded commit all yield `unknown` with
+  an explanation, never a guess and never a crash.
+
+```console
+$ mpm version --check --json
+{
+  "version": "0.1.0-dev",
+  "commit": "06c029ba11ce18c7f10aa60b0f0497ece2edda7c",
+  "short_commit": "06c029ba",
+  "dirty": false,
+  "release": false,
+  "build_type": "development",
+  "repository": "flowbyte-com/mpm",
+  "binary": "mpm",
+  "update": {
+    "status": "behind",
+    "behind_by": 3,
+    "ahead_by": 0,
+    "upstream_commit": "4bbcaf6518...",
+    "checked_at": "2026-10-21T18:04:11Z"
+  }
+}
+```
+
+The `update` object is present only when `--check` was requested. When
+the status is `unknown`, `behind_by` and `ahead_by` are meaningless and
+`error` explains why.
+
+`MPM_UPDATE_CHECK_API_BASE` redirects the check at a different API root
+(a GitHub Enterprise instance, or a local stand-in used by the tests).
+It carries no user data.
+
 ### `kb` — Knowledge Base
 
 Entity-centric interface to all MPM collections.
@@ -2059,7 +2224,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`call`** — Universal tool boundary (JSON): mpm call <tool> [--payload <json>] [--payload-file <path>] | (stdin)
 - **`capability`** — Manage capabilities (seed, lifecycle, governance)
 - **`cascade`** — Materialize cascade intents
-- **`challenge`** — Flag memory as obsolete (atomic theory + patch; use 'restore' subcommand to undo)
+- **`challenge`** — Flag memory as obsolete; 'list' enumerates challenged rows, 'restore <id>' undoes one (issue #20)
 - **`compact`** — Operator commands for the compaction deferral lifecycle (deferred|requeue-deferred)
 - **`config`** — Configure LLM and embedding profiles manually (wizard | show | get | set | profile | component | capability)
 - **`continue`** — Resume previous session — composes working context, wake context, decisions, skills, theories
@@ -2070,7 +2235,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`directives`** — Show behavioral directives
 - **`doctor`** — Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)
 - **`drills`** — Behavioural drill execution + compatibility matrix (list|show|run|report)
-- **`evidence`** — Manage evidence (add|list) — confidence foundation; `add` accepts `--reference-url`
+- **`evidence`** — Manage evidence (add|list) — confidence foundation
 - **`export`** — Export memories to JSON
 - **`gc`** — Run decay sweep (--dry-run, --review, --purge)
 - **`handoff`** — Manage handoffs (write|read|list|shred)
@@ -2114,7 +2279,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`session`** — Manage sessions
 - **`set-weight`** — Set stored weight 0–100 (decay/LTM/provenance; does not affect current retrieval ranking — see §6.3)
 - **`show`** — Show memory details
-- **`shred`** — Hard-delete memory
+- **`shred`** — Remove memory from active state (hard delete + cascades; not byte erasure)
 - **`skill`** — Skill CRUD + workshop (form | refine)
 - **`snooze`** — Suppress from recall (temporary)
 - **`stats`** — Show memory statistics

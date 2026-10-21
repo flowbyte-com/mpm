@@ -59,6 +59,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import managed_block_convergence as convergence  # noqa: E402
+import block_provenance  # noqa: E402
 
 
 # Marker conventions follow the per-host pattern used by the other
@@ -226,12 +227,22 @@ def read_managed_section(text: str) -> str | None:
 
     Only recognizes THIS host's markers. Use of the engine's
     `analyze` is what generalizes; this helper exists for callers that
-    specifically mean "my own section" (notably timestamp recovery).
+    specifically mean "my own section" (notably timestamp recovery and
+    build-provenance recovery).
+
+    The returned slice spans the same bytes `build_managed_section`
+    produces, including the trailing newline after the END marker, so
+    the two can be compared directly.
     """
     begin = MANAGED_BEGIN_RE.search(text)
     end = MANAGED_END_RE.search(text)
     if begin and end and end.start() > begin.end():
-        return text[begin.start():end.end()]
+        end_line_end = text.find("\n", end.end())
+        if end_line_end == -1:
+            end_line_end = len(text)
+        else:
+            end_line_end += 1
+        return text[begin.start():end_line_end]
     return None
 
 
@@ -247,10 +258,11 @@ def do_install(target: Path, snippet: Path) -> int:
         # snippet body + wrapper footer. The snippet is the canonical
         # header + block + footer produced by the renderer; we wrap it
         # in the outer section markers so the file has the same shape
-        # as a refreshed install.
+        # as a refreshed install. The build provenance is added here,
+        # at install time, and never to the canonical render.
         backup_target(target)  # no-op when target doesn't exist
         target.parent.mkdir(parents=True, exist_ok=True)
-        managed = build_managed_section(snippet_text)
+        managed = block_provenance.annotate(build_managed_section(snippet_text))
         target.write_text(managed, encoding="utf-8")
         sys.stderr.write(
             f"[openclaw install] created {target} ({len(managed)} bytes)\n"
@@ -268,6 +280,14 @@ def do_install(target: Path, snippet: Path) -> int:
     existing_ts = extract_generated_ts_from_managed_region(text)
 
     new_section = build_managed_section(snippet_text, existing_ts=existing_ts)
+
+    # The build provenance is layered on top of the canonical section.
+    # `annotate` preserves the timestamp already in the file when
+    # nothing about the block changed, so a repeated reconciliation is
+    # byte-stable and takes no new backup.
+    new_section = block_provenance.annotate(
+        new_section, existing=read_managed_section(text),
+    )
     plan = convergence.plan_convergence(text, new_section, OWN_HOST_IDS)
 
     if plan.action == convergence.PLAN_REFUSE:

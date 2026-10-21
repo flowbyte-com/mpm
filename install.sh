@@ -877,6 +877,39 @@ EOF
 
 
 # ---------------------------------------------------------------------------
+# export_build_provenance
+# ---------------------------------------------------------------------------
+#
+# Publish the build provenance to the managed-block installers.
+#
+# An installed managed block names the MPM product version and the
+# exact source commit it was applied from. Those two values come from
+# the SAME script the Makefile uses to stamp the binaries, so an
+# installed block and the installed binary can never disagree about
+# which build they are.
+#
+# When a value cannot be established — a checkout without git, a
+# missing VERSION file — the installers record "unknown", which is a
+# statement of absence rather than a guess. They never claim a version
+# or a commit this installer could not establish.
+export_build_provenance() {
+    local provenance_script="$PROJECT_ROOT/scripts/build-provenance.sh"
+    if [ ! -f "$provenance_script" ]; then
+        warn "  build-provenance.sh missing at $provenance_script"
+        warn "  (installed managed blocks will record an unknown version/commit)"
+        MPM_BUILD_VERSION="unknown"
+        MPM_BUILD_COMMIT="unknown"
+        export MPM_BUILD_VERSION MPM_BUILD_COMMIT
+        return 0
+    fi
+    MPM_BUILD_VERSION="$(bash "$provenance_script" version 2>/dev/null || printf 'unknown')"
+    MPM_BUILD_COMMIT="$(bash "$provenance_script" commit 2>/dev/null || printf 'unknown')"
+    export MPM_BUILD_VERSION MPM_BUILD_COMMIT
+    log "  build provenance: version=$MPM_BUILD_VERSION commit=$MPM_BUILD_COMMIT"
+}
+
+
+# ---------------------------------------------------------------------------
 # phase_agent_reconcile
 # ---------------------------------------------------------------------------
 #
@@ -911,6 +944,7 @@ phase_agent_reconcile() {
         warn "  (this is unexpected on a stock MPM checkout)"
         return 0
     fi
+    export_build_provenance
     if python3 "$reconcile_script" --home "$HOME"; then
         log "  reconciliation ok"
     else

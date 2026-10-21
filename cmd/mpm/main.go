@@ -69,16 +69,6 @@ func init() {
 		}
 		logging.Setup()
 	}
-
-	// Initialize global mode manager
-	// Will be used to set default 808 mode on daemon startup
-	//
-	// Resolve the base through config.GetMPMDir() rather than a hard-coded
-	// path. NewModeManager only falls back to GetMPMDir() when handed an
-	// empty string, so any non-empty literal here silently overrides the
-	// canonical ~/.mpm workspace — that is how this ended up pointing at
-	// $HOME/.openclaw/workspace/projects/mpm, which does not exist.
-	modeManager = mpminternal.NewModeManager(config.GetMPMDir())
 }
 
 // isMachineMode reports whether the current invocation is a machine-facing
@@ -89,9 +79,6 @@ func init() {
 func isMachineMode(args []string) bool {
 	return len(args) >= 2 && args[1] == "call"
 }
-
-// buildVersion is set at compile time via -ldflags
-var buildVersion = "dev"
 
 // startTime is the wall-clock timestamp of process entry — used for uptime display
 var startTime = time.Now()
@@ -312,6 +299,30 @@ func main() {
 	// perms check, BEFORE any DB open, BEFORE any goroutine that may
 	// write to disk. See internal/core/config/umask.go.
 	config.EnforcePrivateUmask()
+
+	// Version reporting is intercepted BEFORE the permission sweep, the
+	// scheduler health nudge and any database access. It is the command
+	// an operator runs when something looks wrong, so it must answer
+	// fast, offline, and without touching the configuration, the
+	// database or the network.
+	if code, handled := runVersionCommand(os.Args[1:]); handled {
+		os.Exit(code)
+	}
+
+	// Initialize global mode manager
+	// Will be used to set default 808 mode on daemon startup
+	//
+	// Resolve the base through config.GetMPMDir() rather than a hard-coded
+	// path. NewModeManager only falls back to GetMPMDir() when handed an
+	// empty string, so any non-empty literal here silently overrides the
+	// canonical ~/.mpm workspace — that is how this ended up pointing at
+	// $HOME/.openclaw/workspace/projects/mpm, which does not exist.
+	//
+	// This runs here, not in init(), because GetMPMDir() materialises the
+	// workspace directory as a side effect. A package-level init() would
+	// do that before main() could intercept a version request, and the
+	// version surface is contractually free of configuration access.
+	modeManager = mpminternal.NewModeManager(config.GetMPMDir())
 
 	// Security gate: refuse to start (and refuse to allow auto-heal
 	// to silently proceed) if the runtime dir perms are wider than 0700
