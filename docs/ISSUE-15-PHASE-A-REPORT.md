@@ -2439,6 +2439,8 @@ The ordering of the two candidates on the *positive-loss* axis flips between spl
 | `docs/SPEC.md` | §6.3 — new "Semantic recall contract — `mpm recall --semantic`" subsection. |
 | `docs/ISSUE-15-PHASE-A-REPORT.md` | This addendum, plus the A3.7 correction above. |
 | `docs/CLOSEOUT.md` | §4.1 extended with the v2 re-measurement and the Phase B outcome. |
+| `bench/output/issue-15-phase-b/` | **new** — the committed Phase B re-measurement: `v2-nomic/report.json`, `v2-nomic/report.md`, `README.md` (provenance table + the full field-level diff against the baseline) and `SHA256SUMS`. |
+| `bench/README.md` | The `output/` layout block now lists the new `issue-15-phase-b/` directory. |
 
 ## B5 — Verification
 
@@ -2447,11 +2449,14 @@ The ordering of the two candidates on the *positive-loss* axis flips between spl
 The Phase A.3 v2 corpus was re-run against the new binary, using the exact pinned invocation:
 
 ```bash
+make build
 MPM_BENCH_COLLECTION=bench_v2_corpus python3 -m bench run \
-  --output-dir <tmp>/v2-nomic \
-  --config <tmp>/nomic-config.json \
+  --output-dir /tmp/mpm-issue15-phaseb-final/v2-nomic \
+  --config bench/fixtures/nomic-embed-text.json \
   --corpus-version v2 --raw-cosine-prefix
 ```
+
+(The harness refuses to write into a protected root, so the output directory must live outside the checkout; the result was then copied into `bench/output/issue-15-phase-b/v2-nomic/`.)
 
 | Metric | Baseline (`bench/output/phase-a3/v2-nomic/report.json`) | After Phase B | Delta |
 |---|---|---|---|
@@ -2464,14 +2469,20 @@ MPM_BENCH_COLLECTION=bench_v2_corpus python3 -m bench run \
 
 **No previously returned legitimate result was removed** — the per-query row sets are identical, not merely the aggregates.
 
-**Observed differences, reported rather than concealed.** Exactly two fields differ between the baseline report and the new one, and neither is a retrieval metric:
+**Observed differences, reported rather than concealed.** A full leaf-by-leaf diff of the two `report.json` files finds **12 differing leaves, and not one of them is a measurement**. They fall into exactly five groups:
 
-| Field | Baseline | After | Why |
-|---|---|---|---|
-| `regeneration.snapshot_path` | a different temp directory | a different temp directory | The regeneration snapshot lives in a per-run temp path. |
-| `isolation.binary_provenance.sha256` | the Phase A.3 binary | the Phase B binary | Different binary — the Phase B binary contains the contract change. `git_head` differs for the same reason. |
+| Field(s) | Why they differ |
+|---|---|
+| `corpus.manifest_path` | The run happened in a different worktree (`issue-15-calibration` → `issue-15-honest-recall`). |
+| `isolation.binary_provenance.git_head`, `.mpm_version`, `.mtime_iso`, `.path`, `.resolved_path`, `.sha256`, `.size_bytes` | A different binary — the Phase B binary contains the contract change, so it has a different VCS stamp and a different size. |
+| `isolation.output_dir`, `output_dir` | The per-run output directory. |
+| `isolation.snapshot_workspace`, `regeneration.snapshot_path` | The per-run disposable workspace. |
+
+Unchanged: every aggregate (MRR@10, Recall@10, nDCG@10, Precision@10), all 60 per-query rows, the raw-cosine arms and their delta, the regeneration verification (`ok: true`), the snapshot logical-mutation check (`clean`), and the participation record (40/40 positives vector-participated with zero failures, 20/20 negatives vector-participated, `correctly_empty` empty).
 
 No aggregate, no per-query row, no participation count and no raw-cosine value moved.
+
+The committed artefact is `bench/output/issue-15-phase-b/` (report.json, report.md, README.md, SHA256SUMS), with the binary provenance recorded as git head `cad636884e85636f5a25a1d728d7ea0e0efe76b4`, binary sha256 `6bdf2f2b610285b7c08edf91b13fe3fa711fe841654d212aed776267f9d98ac6`, corpus manifest sha256 `48fdb92d6dd28bb58e56dfba6c1e8267bf2a2450b7f990cd4ca4c97eb80c9add`, model digest `0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f`.
 
 ### B5.2 — Tests
 
