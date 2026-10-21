@@ -209,6 +209,7 @@ bench/
       scoring.json       # scoring method + parameters
   output/
     phase-a3/            # committed Issue #15 A.3 measurement
+    issue-15-phase-b/    # committed Issue #15 Phase B re-measurement (contract change; retrieval unchanged)
     issue-23-phase-a/    # committed Issue #23 prefix condition matrix
   tests/
     __init__.py

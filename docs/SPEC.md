@@ -1165,6 +1165,30 @@ with `vector_weight = 0.5` by default. Use `--semantic` to drop BM25 and search 
 
 **LTM promotion:** `weight ≥ 10` OR explicit `mpm promote` OR auto-ingested `.md` file.
 
+#### Semantic recall contract — `mpm recall --semantic`
+
+*A ranked candidate is not a verified answer — because a vector-nearest-neighbour search says "these are the closest rows", not "these rows answer the question".*
+
+`mpm recall --semantic` ranks by embedding similarity alone. Its JSON output carries an explicit, machine-readable statement of what that output *is*:
+
+| Field | Meaning |
+|---|---|
+| `count` | The actual number of returned entries. |
+| `retrieval_status` | `no_candidates` — the ranker returned nothing. `candidates_unverified` — the ranker returned ranked candidates whose relevance to the query has **not** been established. |
+| `search_mode` | `hybrid`. Unchanged by this contract. |
+| `memories` | Always an array — `[]` when nothing was returned, never `null`, never absent. |
+
+The contract rules:
+
+1. **The envelope is always valid.** `mpm recall --semantic --json` exits 0 and emits a parseable JSON object whether or not the ranker produced candidates. An empty result is a successful, fully-described outcome, not a silent plain-text message.
+2. **`no_candidates` and `candidates_unverified` are different claims.** The first says there was nothing to rank. The second says there *was* something to rank and its relevance is unverified. A consumer that collapses them will read a nearest-neighbour list as an answer set.
+3. **A high similarity score never means "verified relevant".** `score` and `vector_similarity` are **ranking signals** — not probabilities, and not answerability confidences. MPM ships no calibrated answerability classifier: none could be measured to be supportable without sacrificing legitimate paraphrase recall (see the calibration note in `internal/core/hybrid_search.go` for the rejected threshold and gap policies and the recall cost they carried).
+4. **An embedding-provider failure is an error, not an empty result.** If the provider fails, returns an empty vector, or the vector channel errors, `mpm recall --semantic` exits non-zero with a diagnostic. It never reports "nothing found" for a retrieval that could not be performed. That is the difference between *nothing matched* and *we could not look*.
+5. **The human-readable path says the same thing.** The text output labels the list *"Ranked candidates — relevance not established"* and reports an empty result as *"No candidates returned for: …"*.
+6. **The lexical path is unchanged.** `mpm recall` without `--semantic` keeps its existing envelope and existing behaviour; `count` and `retrieval_status` are additions to the *semantic* envelope only.
+
+**What this contract does not do.** It does not identify unanswerable queries. A nonsense query still returns its nearest neighbours — now labelled explicitly as unverified candidates instead of presented as answers. Calibrated abstention was measured and rejected; the measurements and the reason are recorded in the calibration note in `internal/core/hybrid_search.go` and in `docs/ISSUE-15-PHASE-A-REPORT.md`.
+
 #### Concept Drift Detection
 
 Concept drift detection — autonomously identifying paradigm shifts where historically trusted knowledge is decaying under a sudden barrage of new counter-evidence — is implemented as a **synchronous** operation that runs inline with `mpm_memory action=query` (no background ticker). The detection signature:
