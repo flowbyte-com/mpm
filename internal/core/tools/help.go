@@ -16,9 +16,15 @@
 // The consequence of being a closure is that `mpm call` — which
 // dispatches registry-backed tools only — could not reach it, leaving
 // shell-only agents with no way to discover the substrate. The fix is
-// not a second catalogue: both transports serve the implementation
-// below, so an agent cannot discover a conflicting schema depending on
-// which transport it used.
+// not a second catalogue: both DISCOVERY transports serve the
+// implementation below, so an agent cannot discover a conflicting schema
+// depending on which discovery transport it used.
+//
+// That parity is between the two ways of asking for discovery. It is
+// NOT a claim that every tool's registered schema is the schema its
+// native compact MCP wrapper publishes — those wrappers publish
+// simplified schemas of their own and may accept transport-specific
+// actions (see inputSchemaField).
 //
 // The returned map is the transport-neutral payload; both the MCP
 // handler and the `mpm call` fallback add their own envelope around it.
@@ -38,9 +44,27 @@ import (
 // The name follows this repository's JSON convention: MPM's own envelopes
 // use snake_case keys (tool_count, discovery_hint, compatibility_mode,
 // reach_via_cli, schema_version), so the discovery catalogue does too. It
-// is the snake_case spelling of the MCP wire name "inputSchema" — the
-// same schema the MCP surface publishes for the tool and the runtime
-// dispatcher validates against.
+// is the snake_case spelling of the MCP wire name "inputSchema".
+//
+// WHAT SCHEMA THIS CARRIES: the tool's REGISTERED schema — the registry
+// entry's own `Tool.Schema`, which is the schema the `mpm call` path and
+// the runtime dispatcher validate an incoming payload against.
+//
+// WHAT SCHEMA THIS DOES NOT CLAIM: the schema the native COMPACT MCP
+// wrapper for the same tool publishes. Those wrappers deliberately
+// publish a simplified input schema, and a compact wrapper may
+// additionally accept transport-specific actions the registry entry does
+// not list. `mpm_context` is the concrete case: its compact wrapper
+// accepts `write_handoff` and `read_handoff` — the session-continuity
+// actions, which the compact adapter routes to the mpm_handoff handler —
+// while the registry entry's action enum does not contain them, and the
+// registry handler rejects them as unknown actions.
+//
+// So describing the registered schema as "the schema the MCP surface
+// publishes" overstates the parity: the compact MCP surface and the
+// registered CLI / substrate surface are genuinely different contracts.
+// The discovery catalogue reports the registered one, and says so.
+// See docs/SPEC.md, "MCP/CLI parity: what is exposed via both surfaces".
 const inputSchemaField = "input_schema"
 
 // cliReachTemplate is the canonical `mpm call` form for a tool. It is
@@ -73,12 +97,18 @@ func HelpActions() []string {
 // toolInputSchema decodes a tool's registered JSON input schema into a
 // JSON object.
 //
-// The registry's schema is the authority: it is the same object the MCP
-// surface publishes as the tool's inputSchema and the same object the
-// runtime dispatcher validates an incoming payload against. Discovery
-// therefore returns that object verbatim rather than a second,
-// hand-written summary of it — a summary would drift from the schema
-// that actually decides whether a call is legal.
+// The registry's schema is the authority: it is the same object the
+// runtime dispatcher validates an incoming payload against, and the same
+// object the `mpm call` path accepts. Discovery therefore returns that
+// object verbatim rather than a second, hand-written summary of it — a
+// summary would drift from the schema that actually decides whether a
+// call is legal.
+//
+// It is NOT the native compact MCP wrapper's schema. The compact
+// wrappers publish deliberately simplified input schemas and may expose
+// transport-specific actions (see inputSchemaField). Discovery reports
+// the registered contract; the compact surface is described by its own
+// published schema.
 //
 // An empty schema is not an error: it means the tool declares no input
 // constraints, and the honest answer is an empty JSON object. A schema
@@ -104,7 +134,9 @@ func toolInputSchema(t Tool) (map[string]interface{}, error) {
 // action "list" enumerates every registry tool with a one-line summary
 // and the `mpm call` form that reaches it. action "show" returns one
 // tool's full description together with its registered JSON input
-// schema under "input_schema".
+// schema under "input_schema". The schema is the tool's REGISTERED
+// (CLI / substrate) schema — see inputSchemaField for why that is a
+// different statement from "the schema the MCP surface publishes".
 //
 // The schema is returned as a JSON object, not as an escaped JSON
 // string, so an agent can read the action vocabulary, the required

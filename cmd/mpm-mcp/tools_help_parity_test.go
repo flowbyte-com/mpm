@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,13 +35,78 @@ var (
 	helpParityBinOnce sync.Once
 	helpParityBin     string
 	helpParityBinErr  error
+
+	// helpParityBuildDir is the temporary directory the shared parity
+	// binary is built into.
+	//
+	// It is a package-level value because the binary has to OUTLIVE the
+	// test that built it: several tests reuse one build, so no single
+	// test may delete it. A t.TempDir() would be exactly the wrong
+	// owner — its cleanup runs when THAT test ends, taking the binary
+	// away from the tests still to come. The package owns the directory
+	// instead, and package teardown (TestMain) removes it.
+	helpParityBuildDir string
 )
+
+// TestMain owns the package's temporary build directory.
+//
+// The parity tests build one shared CLI binary into a temporary
+// directory. That directory used to be created with os.MkdirTemp and
+// never removed — the same F1 leak class the repository documents
+// elsewhere — so every run of this package left a built binary behind
+// in the system temporary directory.
+//
+// The removal lives here, at package teardown, for two reasons:
+//
+//   - it runs after EVERY test has finished, whether they passed or
+//     failed, so an ordinary test failure cannot leak the directory;
+//   - it does not run while any test still needs the binary, which a
+//     per-test cleanup would.
+//
+// A cleanup failure is reported on stderr and turns a passing run into
+// a failing one. A leaked directory is a real defect, and a silent
+// cleanup failure would let it return unnoticed.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if err := removeHelpParityBuildDir(helpParityBuildDir); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"mpm-mcp: could not remove the temporary parity build directory %q: %v\n",
+			helpParityBuildDir, err)
+		if code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
+}
+
+// removeHelpParityBuildDir removes the temporary directory the parity
+// binary was built into.
+//
+// It is deliberately tolerant of "there was nothing to remove": the
+// build directory is created lazily, so a run that never builds the
+// binary has no directory, and a directory that was already removed
+// (by an operator cleaning the temporary directory) must not be
+// reported as a failure. An empty path is the same case.
+//
+// A failure that is NOT "already gone" is returned. Swallowing it would
+// make a leaked directory invisible: the run would be green and the
+// directory would still be on disk.
+func removeHelpParityBuildDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	return os.RemoveAll(dir)
+}
 
 // buildMPMBinForHelpParity builds the mpm CLI binary once per test run.
 //
 // The CLI is built from the repository root with the repository's
 // required FTS5 configuration so the subprocess exercises the same
 // binary shape the release gate installs.
+//
+// The binary is shared by every test in this file, so it is built once
+// (sync.Once) and the temporary directory it lives in is removed at
+// package teardown rather than at the end of any one test.
 func buildMPMBinForHelpParity(t *testing.T) string {
 	t.Helper()
 	helpParityBinOnce.Do(func() {
@@ -49,6 +115,11 @@ func buildMPMBinForHelpParity(t *testing.T) string {
 			helpParityBinErr = err
 			return
 		}
+		// The directory is recorded the moment it exists and BEFORE the
+		// build is attempted. A build that fails part-way through still
+		// leaves a directory behind, and package teardown can only
+		// remove what it was told about.
+		helpParityBuildDir = tmp
 		bin := filepath.Join(tmp, "mpm")
 		cmd := exec.Command("go", "build", "-tags", "fts5", "-o", bin, "./cmd/mpm")
 		pkgDir, err := os.Getwd()
@@ -312,6 +383,94 @@ func TestHelpHandler_NotARegistryEntry(t *testing.T) {
 	}
 	if _, ok := tools.ByName("mpm_help"); ok {
 		t.Error("tools.ByName(\"mpm_help\") must not resolve")
+	}
+}
+
+// TestHelpParity_BuildDirectoryIsTrackedForTeardown pins that the
+// directory package teardown removes is the one the shared binary
+// actually lives in.
+//
+// The binary is shared: several tests reuse one build, so no test may
+// delete it — but the package must still remove the directory it left
+// behind. The package can only do that if it knows where the directory
+// is. If the build stopped recording it, teardown would silently remove
+// nothing and the leak would return unnoticed.
+func TestHelpParity_BuildDirectoryIsTrackedForTeardown(t *testing.T) {
+	bin := buildMPMBinForHelpParity(t)
+
+	if helpParityBuildDir == "" {
+		t.Fatal("the parity build directory was not recorded; package teardown would have nothing to remove")
+	}
+	if !strings.HasPrefix(bin, helpParityBuildDir+string(os.PathSeparator)) {
+		t.Errorf("the shared binary %q is not inside the tracked build directory %q", bin, helpParityBuildDir)
+	}
+}
+
+// TestHelpParity_CleanupRemovesTheBuildDirectory proves the cleanup
+// helper removes what it is given, including the nested binary inside
+// it.
+//
+// The directory is removed by the PACKAGE, so this test exercises the
+// helper against a directory of its own. It deliberately does not touch
+// the shared build directory: that binary is still required by the
+// other tests in this file.
+func TestHelpParity_CleanupRemovesTheBuildDirectory(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "nested", "mpm")
+	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+		t.Fatalf("create the build directory: %v", err)
+	}
+	if err := os.WriteFile(bin, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("create the build artifact: %v", err)
+	}
+
+	if err := removeHelpParityBuildDir(dir); err != nil {
+		t.Fatalf("cleanup of %q failed: %v", dir, err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the build directory %q still exists after cleanup (stat error: %v)", dir, err)
+	}
+}
+
+// TestHelpParity_CleanupIsANoOpWhenNothingWasBuilt proves cleanup
+// tolerates the two "there was nothing to remove" cases.
+//
+// The build directory is created lazily, so a run that never builds the
+// binary has no directory at all — and a directory an operator already
+// cleaned away must not be reported as a failure. Either case would
+// otherwise fail an otherwise-green test run for no reason.
+func TestHelpParity_CleanupIsANoOpWhenNothingWasBuilt(t *testing.T) {
+	if err := removeHelpParityBuildDir(""); err != nil {
+		t.Errorf("cleanup of an empty path must be a no-op, got %v", err)
+	}
+	never := filepath.Join(t.TempDir(), "never-created")
+	if err := removeHelpParityBuildDir(never); err != nil {
+		t.Errorf("cleanup of a directory that was never created must be a no-op, got %v", err)
+	}
+}
+
+// TestHelpParity_CleanupReportsAFailure proves the cleanup helper
+// REPORTS a failure instead of swallowing it.
+//
+// A cleanup that cannot remove its directory leaves the leak in place.
+// Swallowing the error would make that leak invisible: the run would be
+// green and the directory would still be on disk.
+//
+// The realistic failure is a permission problem — a directory the
+// owner cannot write to. That variant does not stop root from
+// removing it, so this test uses the equivalent failure that behaves
+// the same for every user: a path whose parent is a regular file,
+// which cannot be removed by anybody.
+func TestHelpParity_CleanupReportsAFailure(t *testing.T) {
+	base := t.TempDir()
+	blocker := filepath.Join(base, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatalf("create the blocking file: %v", err)
+	}
+
+	err := removeHelpParityBuildDir(filepath.Join(blocker, "build-dir"))
+	if err == nil {
+		t.Error("cleanup must report a failure it could not complete")
 	}
 }
 

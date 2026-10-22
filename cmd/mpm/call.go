@@ -79,6 +79,14 @@ action=show returns the tool's full description AND its registered JSON
 input schema under "input_schema" — the action vocabulary, the required
 fields and the nested params — as a JSON object, not as a string.
 
+That schema is the tool's REGISTERED schema: the CLI / substrate
+vocabulary this path enforces. The native compact MCP wrappers publish
+their own simplified input schemas, and a compact wrapper may accept
+transport-specific actions the registered schema does not list — the
+compact mpm_context wrapper, for one, accepts write_handoff and
+read_handoff, which the registered mpm_context action enum does not
+contain.
+
 Friendly CLI commands follow the Unix convention directly: validation
 failures print a human message on stderr and exit non-zero. Bare
 unknown tokens are the one exception — they fall through to

@@ -387,9 +387,9 @@ mpm call mpm_help --payload '{"action":"show","params":{"tool":"mpm_memory"}}'
 ```
 
 The CLI and the native MCP surface serve the same catalogue, so an
-agent discovers the same tools and the same schemas whichever transport
-it uses. Discovery is read-only: it does not create, open or mutate a
-database.
+agent discovers the same tools and the same discovery payloads whichever
+transport it uses. Discovery is read-only: it does not create, open or
+mutate a database.
 
 `action=show` returns the tool's full description **and** its
 registered JSON input schema under `input_schema` — the action
@@ -397,6 +397,16 @@ vocabulary, the required fields and the nested `params` properties, as
 a JSON object rather than a string. Read the schema before you call an
 unfamiliar operation: a description says what a tool is for, but only
 the schema says which actions and fields are actually accepted.
+
+`input_schema` is the tool's **registered** schema — the CLI and
+substrate vocabulary that this path enforces. It is not a claim that
+every tool's registered schema is the schema its native compact MCP
+wrapper publishes: those wrappers publish simplified schemas of their
+own, and a compact wrapper may accept transport-specific actions the
+registered schema does not list. `mpm_context` is the concrete case —
+its compact wrapper accepts `write_handoff` and `read_handoff`, which
+the registered `mpm_context` action enum does not contain. When you
+need one of those actions, use the surface that advertises them.
 
 Do not abandon persistence when the preferred integration breaks — use
 the fallback until the host recovers.
