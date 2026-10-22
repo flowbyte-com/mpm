@@ -1874,7 +1874,7 @@ binaries.
 #### What is embedded
 
 The canonical build (`scripts/build-provenance.sh`, driven by the
-Makefile and by `install.sh`) stamps five values into all five binaries
+Makefile and by `install.sh`) stamps six values into all five binaries
 (`mpm`, `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`):
 
 | Value | Meaning |
@@ -1882,14 +1882,37 @@ Makefile and by `install.sh`) stamps five values into all five binaries
 | product version | from the `VERSION` file |
 | full commit SHA | the exact source commit the binary was built from |
 | short commit SHA | the same commit, abbreviated to 8 characters |
-| dirty indicator | `true` when the build contained uncommitted source changes; `unknown` when the build's source tree could not be compared against a revision |
+| dirty indicator | `true` when the build contained uncommitted source changes; `false` when the tree matched its commit exactly; `unknown` when the build's source tree could not be compared against a revision |
 | build type | `development` for an ordinary build, `release` for a build from a formally tagged release **built from a clean tree** |
+| build epoch | the UTC Unix epoch second the build ran at |
 
 The values are populated **at build time**, not by querying Git after
 installation. A binary therefore reports its own provenance even when it
 is executed outside a Git checkout — which is the normal case for an
 installed binary. Normal builds, CI builds and `install.sh` all go
 through the same script, so they cannot disagree.
+
+**What "dirty" means, precisely.** Two things make a build dirty: a
+**tracked** file differs from `HEAD` (staged or unstaged), or an
+**untracked** file *would be compiled into the binary*. Only Go sources
+count for the second case — a forensic artefact, a scratch file or a test
+file is not linked into the shipped binary, so it must not make every
+build look dirty. Files matched by `.gitignore` are excluded by Git
+itself. A build whose source tree could not be compared against a
+revision at all is **`unknown`**, not `false`: an exported source tree
+has no baseline, and reporting it as clean would claim a certainty nobody
+has.
+
+**The build epoch** is captured once, when the build runs, and stamped
+into the binary. It is never re-derived when the version command runs:
+a binary that reported its build time from the clock at the moment it
+was asked would claim a new build time on every invocation.
+`SOURCE_DATE_EPOCH` takes precedence when it holds a non-negative
+integer — the reproducible-builds convention — so that two builds of the
+same source produce the same identity, and a builder who publishes the
+source and the epoch can have their build matched exactly. A
+`SOURCE_DATE_EPOCH` that is not a non-negative integer is reported as
+`unknown`, with a warning; it is never silently replaced by the clock.
 
 #### What the build may claim
 
@@ -1922,22 +1945,47 @@ print the same block:
 
 ```console
 $ mpm version
-MPM v0.1.0-dev (06c029ba)
+MPM 0.1.0-dev+g06c029ba.t1792679720
   binary:  mpm
   commit:  06c029ba11ce18c7f10aa60b0f0497ece2edda7c
   build:   development
+  built:   2026-10-22T14:35:20Z
   dirty:   no
 ```
 
-The first line is stable in shape (`MPM v<version> (<short sha>)`) so it
-can be scraped; the detail lines carry the rest.
+The first line is the **build identity**: the product version plus the
+build metadata that says which commit the binary came from, whether the
+source tree was clean, and when it was built. It is a Semantic
+Versioning version with build metadata, so it can be compared and sorted
+by ordinary SemVer tooling, and it is the one line an operator copies
+into a bug report and another operator can match against their own
+build.
+
+The identity's components are:
+
+| Component | Meaning |
+|---|---|
+| `<version>` | the product version from the `VERSION` file |
+| `g<commit>` | the abbreviated source commit — at least 8 hexadecimal characters — or `gunknown` when the build had no Git metadata |
+| `.dirty` | present only when the source tree differed from that commit; `.dirty-unknown` when the tree could not be compared against a revision at all |
+| `.t<epoch>` | the UTC Unix epoch second the build ran at, or `tunknown` |
+
+A **release** carries no build metadata at all: `MPM 0.1.0` identifies
+it, which is the conventional stable-release output. The commit and the
+build time are still reported in the detail lines and in the JSON form.
+
+Nothing in the identity is ever invented. A commit the build could not
+establish is `gunknown`, not a hash that looks real; a build time it
+could not establish is `tunknown`, not the current clock. And an
+unverifiable source tree is marked `.dirty-unknown` rather than being
+presented as clean — "the tree was clean" and "the tree was never
+checked" are different statements, and an operator reading the human
+form has to be able to tell them apart.
 
 The dirty line has three states: `no` (the tree was clean), `yes` (it
 differed from the commit) and `unknown` (nobody could tell — an
 exported source tree, or a binary that was never stamped). `unknown`
-is deliberately not rendered as `no`: "the tree was clean" and "the
-tree was never checked" are different statements, and an operator
-reading the human form has to be able to tell them apart.
+is deliberately not rendered as `no`.
 
 Reporting the version is **fast, offline and side-effect-free**. The
 command is intercepted before any other startup work, so it never runs
@@ -1946,6 +1994,14 @@ opens the database and never reads the configuration directory. It
 works even when the installation is broken — which is when an operator
 needs it most. The other four binaries answer the same way from their
 own `binary:` field.
+
+The identity survives installation because it is **stamped into the
+binary at link time**, not derived from the environment when the command
+runs. An installed binary normally executes outside any Git checkout;
+resolving the commit by running Git at that point would report nothing
+there, or — worse — the revision of whatever repository happened to
+enclose the working directory. Ordinary `mpm -v` therefore runs **no
+Git command at all**.
 
 #### Machine-readable output
 
@@ -1960,15 +2016,19 @@ $ mpm version --json
   "release": false,
   "build_type": "development",
   "repository": "flowbyte-com/mpm",
-  "binary": "mpm"
+  "binary": "mpm",
+  "build_epoch": 1792679720,
+  "build_identity": "0.1.0-dev+g06c029ba.t1792679720"
 }
 ```
 
-The nine keys above are the documented contract. `release` is `true`
+The eleven keys above are the documented contract. `release` is `true`
 only for a build from a formally tagged revision **built from a clean
 tree**; `build_type` is the rawer form of the same fact
-(`development` / `release`). Machine-readable output never depends on
-terminal rendering.
+(`development` / `release`). `build_identity` is the identity the human
+form prints, and `build_epoch` is the build time in Unix seconds — `0`
+means no build time could be established. Machine-readable output never
+depends on terminal rendering.
 
 `dirty` and `dirty_state` are two views of one fact, kept side by side
 for compatibility. `dirty` is the boolean an existing consumer already
@@ -1999,10 +2059,11 @@ anywhere: no background task, no startup check, no phone-home. Ordinary
 
 ```console
 $ mpm version --check
-MPM v0.1.0-dev (06c029ba)
+MPM 0.1.0-dev+g06c029ba.t1792679720
   binary:  mpm
   commit:  06c029ba11ce18c7f10aa60b0f0497ece2edda7c
   build:   development
+  built:   2026-10-22T14:35:20Z
   dirty:   no
 
 Update: behind — 3 commit(s) behind upstream main (06c029ba → 4bbcaf65)
@@ -2042,6 +2103,8 @@ $ mpm version --check --json
   "build_type": "development",
   "repository": "flowbyte-com/mpm",
   "binary": "mpm",
+  "build_epoch": 1792679720,
+  "build_identity": "0.1.0-dev+g06c029ba.t1792679720",
   "update": {
     "status": "behind",
     "behind_by": 3,

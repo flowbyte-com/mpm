@@ -8,6 +8,7 @@
 #   scripts/build-provenance.sh short-commit  # the abbreviated source commit SHA
 #   scripts/build-provenance.sh dirty         # "true" | "false" | "unknown"
 #   scripts/build-provenance.sh build-type    # "development" | "release"
+#   scripts/build-provenance.sh build-epoch   # the UTC Unix epoch second of the build
 #   scripts/build-provenance.sh ldflags       # the -ldflags payload
 #   scripts/build-provenance.sh               # every field, "key=value" lines
 #
@@ -33,6 +34,10 @@
 #   build    "release" only for a formally tagged release; "development"
 #            for everything else. The repository's archive/* preservation
 #            tags are NOT release tags.
+#   epoch    the UTC Unix epoch second the build ran at. SOURCE_DATE_EPOCH
+#            wins when it holds a non-negative integer — the
+#            reproducible-builds convention — so two builds of the same
+#            source produce the same identity.
 #
 # WHEN THE VALUES ARE NOT ESTABLISHED, THEY ARE "unknown"
 #
@@ -221,14 +226,44 @@ build_type() {
     echo "development"
 }
 
+# build_epoch reports the UTC Unix epoch second at which the build ran.
+#
+# The value is captured HERE, at build time, and stamped into the binary.
+# It is never re-derived when the version command runs: a binary that
+# reported its build time from the clock at the moment it was asked would
+# claim a new build time on every invocation.
+#
+# SOURCE_DATE_EPOCH wins when it holds a non-negative integer. That is the
+# reproducible-builds convention, and honouring it means two builds of the
+# same source produce the same identity — which is what makes a build
+# verifiable by anyone who rebuilds it.
+#
+# A SOURCE_DATE_EPOCH that is not a non-negative integer is not silently
+# ignored: the build time is reported as unknown, with a warning on
+# stderr. Ignoring it would stamp the current clock into a binary whose
+# builder asked for a reproducible one.
+build_epoch() {
+    if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+        if [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]]; then
+            printf '%s\n' "$SOURCE_DATE_EPOCH"
+            return
+        fi
+        echo "build-provenance.sh: SOURCE_DATE_EPOCH is not a non-negative integer; the build time is unknown" >&2
+        echo "unknown"
+        return
+    fi
+    date -u +%s
+}
+
 # ldflags emits the linker payload that stamps the provenance.
 ldflags() {
-    printf -- '-X %s.Version=%s -X %s.Commit=%s -X %s.ShortCommit=%s -X %s.Dirty=%s -X %s.BuildType=%s' \
+    printf -- '-X %s.Version=%s -X %s.Commit=%s -X %s.ShortCommit=%s -X %s.Dirty=%s -X %s.BuildType=%s -X %s.BuildEpoch=%s' \
         "$BUILDINFO_PKG" "$(version)" \
         "$BUILDINFO_PKG" "$(commit)" \
         "$BUILDINFO_PKG" "$(short_commit)" \
         "$BUILDINFO_PKG" "$(dirty)" \
-        "$BUILDINFO_PKG" "$(build_type)"
+        "$BUILDINFO_PKG" "$(build_type)" \
+        "$BUILDINFO_PKG" "$(build_epoch)"
 }
 
 # all_fields emits every field as "key=value" lines.
@@ -238,6 +273,7 @@ all_fields() {
     printf 'short_commit=%s\n' "$(short_commit)"
     printf 'dirty=%s\n' "$(dirty)"
     printf 'build_type=%s\n' "$(build_type)"
+    printf 'build_epoch=%s\n' "$(build_epoch)"
     printf 'ldflags=%s\n' "$(ldflags)"
 }
 
@@ -247,10 +283,11 @@ case "${1:-all}" in
     short-commit) short_commit ;;
     dirty) dirty ;;
     build-type) build_type ;;
+    build-epoch) build_epoch ;;
     ldflags) ldflags ;;
     all) all_fields ;;
     *)
-        echo "usage: $(basename "$0") {version|commit|short-commit|dirty|build-type|ldflags|all}" >&2
+        echo "usage: $(basename "$0") {version|commit|short-commit|dirty|build-type|build-epoch|ldflags|all}" >&2
         exit 2
         ;;
 esac
