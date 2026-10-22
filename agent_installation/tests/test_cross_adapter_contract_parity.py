@@ -13,10 +13,10 @@ Layer model (post-2026-09-04 canonical-snippets refactor):
      principles; documents §4.1 (session != work) and the rationale.
   2. **Canonical source** (`MPM_AGENT_INTEGRATION_SNIPPETS.md`) — owns
      the universal managed block AND the tool-reference stability
-     contract table. The block teaches the seven invariants; the table
-     pins the exact action enums and parameters that agents see.
+     contract table. The block teaches the ten responsibilities; the
+     table pins the exact action enums and parameters that agents see.
   3. **Per-host rendered snippet** — derived (not hand-edited). Tests
-     verify the seven invariants made it through transport-namespace
+     verify the ten responsibilities made it through transport-namespace
      substitution.
 
 Drift signatures pinned (must be ABSENT from current operational material):
@@ -27,7 +27,7 @@ Drift signatures pinned (must be ABSENT from current operational material):
   - `mpm_session.end`, `mpm__mpm_session`, `mpm__mpm_session.end`
 
 Adapter-rendered-block invariants pinned (must be PRESENT in every host
-snippet — the seven non-negotiable invariants survive transport
+snippet — the managed behavioural contract survives transport
 substitution):
   - mpm_work mention with its real action verbs (create / update / note /
     complete / resolve_contradiction)
@@ -317,65 +317,67 @@ class AdapterContractMixin:
         cls.text = _read(cls.snippet_path)
 
     def test_work_lifecycle_distinct_from_session(self):
-        # Every adapter must teach that session closure, work completion,
-        # and verification are three separate events. The OpenCode drift
-        # came partly from this paragraph being missing in older templates.
+        # Every adapter must teach that work attempted, work succeeded and
+        # verification are three separate things, and that a session ending
+        # does not make an objective complete. The OpenCode drift came
+        # partly from this paragraph being missing in older templates.
         #
-        # 2026-09-29: this asserted the exact phrase "Session closure is
-        # not work completion". The approved compact block states the
-        # stronger three-way distinction instead, so this asserts the
-        # concept rather than one wording of it.
+        # The approved contract states the distinction in the
+        # "Maintain project continuity" responsibility; the anchor is
+        # matched semantically rather than against one exact wording.
         normalized = re.sub(r"\s+", " ", self.text)
         self.assertTrue(
             any(p in normalized for p in (
-                "Session closure, work completion, and verification "
-                "are separate events",
-                "Session closure is not work completion",
+                "Distinguish work that was attempted from work that "
+                "succeeded, and implementation from verification",
+                "Do not claim an objective is complete merely because a "
+                "session has ended",
             )),
-            f"{self.snippet_path.name}: must teach that session closure, "
-            f"work completion, and verification are separate events; "
-            f"found neither the approved three-way phrasing nor the "
-            f"legacy two-way phrasing",
+            f"{self.snippet_path.name}: must teach that work attempted, work "
+            f"succeeded and verification are separate, and that a session "
+            f"ending is not completion",
         )
 
     def test_teaches_durable_work_tracking(self):
-        # 2026-09-29: this replaces test_mentions_mpm_work_with_real_actions,
-        # which asserted the literal `mpm_work` action verbs create/complete
-        # inside every managed host block. Action enums are operational
-        # detail: the approved architecture assigns them to the tool-
-        # reference stability table (pinned by
+        # Action enums are operational detail: the approved architecture
+        # assigns them to the tool-reference stability table (pinned by
         # ToolReferenceStabilityContract::test_mpm_work_actions_documented)
         # and to the live registry schema. The managed block carries the
-        # BEHAVIOURAL decision — use durable work state for substantial
-        # continuing work, and do not let session end stand in for
-        # completion — which is what this now asserts.
+        # BEHAVIOURAL decision — keep durable work state for substantial
+        # work, and keep it current — which is what this asserts.
         normalized = re.sub(r"\s+", " ", self.text)
         self.assertTrue(
             any(p in normalized for p in (
-                "Track substantial continuing work",
-                "durable work state",
+                "Durable work state preserves progress",
+                "maintain an accurate record of objectives, completed "
+                "steps",
             )),
             f"{self.snippet_path.name}: must teach durable work tracking "
             f"for substantial continuing work",
         )
 
     def test_teaches_handoff_as_continuation_state(self):
-        # 2026-09-29: this replaces test_mentions_mpm_handoff_write, which
-        # asserted the literal `mpm_handoff` action `write` in every host
-        # block. The action enum lives in the tool-reference table (pinned
-        # by ToolReferenceStabilityContract::test_mpm_handoff_no_note_param,
+        # The action enum lives in the tool-reference table (pinned by
+        # ToolReferenceStabilityContract::test_mpm_handoff_no_note_param,
         # which asserts the `write` row and the absence of the stale `note`
         # param). The managed block carries the behavioural decision —
-        # leave useful continuation state at genuine session closure — which
-        # is what this now asserts.
+        # leave useful continuation state at genuine session closure, and
+        # make it actionable rather than a title — which is what this
+        # asserts.
         normalized = re.sub(r"\s+", " ", self.text)
         self.assertTrue(
             any(p in normalized for p in (
-                "Leave useful continuation state",
-                "write a handoff",
+                "At genuine session closure, preserve meaningful "
+                "continuation state",
+                "preserve meaningful continuation state",
             )),
             f"{self.snippet_path.name}: must teach leaving continuation "
             f"state at session closure",
+        )
+        self.assertIn(
+            "A title is not continuation state", normalized,
+            f"{self.snippet_path.name}: continuation state must be taught "
+            f"as actionable content, not as a task title",
         )
 
     def test_does_not_pin_scratchpad_action_enums(self):
@@ -395,24 +397,25 @@ class AdapterContractMixin:
         )
 
     def test_teaches_persist_during_work_not_just_at_end(self):
-        # 2026-09-29: this replaces test_mentions_persist_during_work, which
-        # required >=3 of the 5 named persistence tool families
-        # (memory/decisions/lessons/topics/references) to appear in every
-        # host block. Enumerating the tool set is operational detail; the
-        # families are all listed in the tool-reference table. What must
-        # survive in the managed block is the BEHAVIOURAL rule: persist
-        # during the session, and persist durable state rather than trivia.
+        # Enumerating the tool set is operational detail; the families are
+        # all listed in the tool-reference table. What must survive in the
+        # managed block is the BEHAVIOURAL rule: record meaningful
+        # discoveries as they become worth preserving rather than at the
+        # end of the task, and do not record trivia.
         normalized = re.sub(r"\s+", " ", self.text)
         self.assertTrue(
             any(p in normalized for p in (
-                "Persist during work, not only at the end",
-                "persist during work",
+                "Record meaningful discoveries when they become worth "
+                "preserving, not merely when the current task is complete",
+                "Record meaningful discoveries when they become worth "
+                "preserving",
             )),
             f"{self.snippet_path.name}: must teach persisting during work, "
             f"not only at the end",
         )
         self.assertTrue(
-            "not trivia" in normalized or "one-off noise" in normalized,
+            "Avoid trivia, redundant memories" in normalized
+            or "one-off noise" in normalized,
             f"{self.snippet_path.name}: persist-during-work rule must "
             f"carry the restraint clause (do not store trivia/one-off noise)",
         )
@@ -438,14 +441,23 @@ class AdapterContractMixin:
         self.assertIn("mpm call", self.text,
                       f"{self.snippet_path.name}: must mention the CLI fallback path")
 
-    def test_mentions_projection_default(self):
-        # `mpm_memory query` defaults to `summary` projection. Agents that
-        # always pull full content waste context. Snippets must name the
-        # projection knob.
-        self.assertTrue(
-            "projection" in self.text.lower() or "summary" in self.text.lower(),
-            f"{self.snippet_path.name}: must mention projection default "
-            f"so agents don't always pull full content",
+    def test_does_not_pin_projection_knob(self):
+        # `mpm_memory query` defaults to `summary` projection. That knob
+        # is operational detail: it is pinned by
+        # ToolReferenceStabilityContract::test_mpm_memory_projection_default_pinned
+        # against the canonical source's tool-reference table, and by the
+        # live registry schema. The managed block has no projection rule,
+        # so asserting the knob here would re-teach an API surface the
+        # block deliberately does not carry. This asserts the architectural
+        # boundary instead.
+        #
+        # This assertion previously passed only because the block happened
+        # to contain the word "summary" in an unrelated sentence — a
+        # vacuous pass that would not have detected a regression.
+        self.assertNotIn(
+            "projection", self.text.lower(),
+            f"{self.snippet_path.name}: managed block must not carry the "
+            f"projection knob (owned by the tool-reference table)",
         )
 
     def test_no_drift_signature_mpm_session(self):

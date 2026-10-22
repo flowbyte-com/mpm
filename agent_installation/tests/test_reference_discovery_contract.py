@@ -15,17 +15,34 @@ The incident, in the shape an agent experienced it:
 Nothing about retrieval was broken. The document was findable. The
 defect is that no surface an agent reads BEFORE deciding what to look
 at told it the reference corpus is a separate subsystem you query
-yourself. The managed block taught seven invariants, none about
-references. The mpm_references MCP description was written entirely
+yourself. The managed block taught a set of behavioural invariants,
+none about references. The mpm_references MCP description was written entirely
 from the ingestion side and said nothing about searching or reading.
 An agent that had no other reason to look there did not look there,
 and correctly reasoned from the wrong subsystem.
 
 The fix lives at the canonical integration source, not in generated
-files: agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md gains
-item 8, which the renderer propagates to every adapter. These tests
+files, and the renderer propagates it to every adapter. These tests
 pin that the guidance actually reaches agents, survives install, and
 does not drift into documentation of something that does not exist.
+
+Since the approved inheritance-oriented behavioural contract
+(protocol version 3.0.0) the guidance is expressed differently, and
+the anchors here follow it:
+
+  - the managed block states the commitment semantically — references
+    are a distinct form of persistent state, and stored references are
+    read at the source rather than through a search-result summary,
+    with version and freshness checked. The block deliberately does
+    NOT enumerate MPM tools: naming one reference tool there would
+    start the static catalogue the contract forbids;
+  - the operational detail — which tool, which actions, which CLI
+    commands — lives in the full behavioural protocol
+    (`agent_installation/mpm-agent-protocol.md`, sections 7 and 8),
+    which is what an agent reads when discovery needs detail.
+
+Both halves are pinned below, so the contract cannot quietly lose
+either the commitment or the operations.
 
 The seven properties this file pins, one per requirement:
 
@@ -120,11 +137,42 @@ def _rendered_block_for(adapter_name: str) -> str:
     return _render.render_for_host(_canonical_block(), adapter["tool_prefix"])
 
 
-# The stable label. Referenced by the invariant test in
+def _strip_guidance_sentence(text: str) -> tuple[str, list[str]]:
+    """Remove the line that carries the reference-discovery guidance.
+
+    The line is found by the guidance label itself, so the fixture does
+    not depend on which responsibility the sentence happens to sit
+    under. The removed lines are returned so the caller can assert that
+    exactly one line — and that line — was taken out: a fixture that
+    matched nothing, or that matched a whole section, would otherwise
+    let the test pass without reconciling anything.
+
+    The canonical block writes one paragraph per line and the
+    installers do not re-wrap, so the sentence occupies a single line.
+    """
+    kept: list[str] = []
+    removed: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if GUIDANCE_LABEL in _unwrapped(line):
+            removed.append(line)
+        else:
+            kept.append(line)
+    return "".join(kept), removed
+
+
+# The stable label. Referenced by the commitment test in
 # test_render_managed_blocks.py; kept here so a wording change to the
 # body does not require hunting through two files to find out what
 # changed.
-GUIDANCE_LABEL = "Search references before concluding external material is"
+#
+# This is the sentence that carries the reference-discovery commitment
+# in the approved contract: a stored reference is read at its source,
+# not through the summary a search returns, and its version and
+# freshness are checked before it is relied on.
+GUIDANCE_LABEL = (
+    "read the underlying source rather than relying solely on a "
+    "search-result summary"
+)
 
 
 def _has_mcp_binary() -> bool:
@@ -134,63 +182,109 @@ def _has_mcp_binary() -> bool:
 class ReferenceGuidanceIsPresent(unittest.TestCase):
     """Property 1 — the guidance is actionable, not merely present.
 
-    "Actionable" is doing real work in that sentence. A block that
+    "Actionable" is doing real work in those sentences. A block that
     says references exist teaches an agent nothing; what changes the
-    incident is naming the two operations that answer the question
-    (search, then read the document), naming both the CLI and the MCP
-    route, and saying why the memory subsystem cannot stand in for
-    the reference subsystem.
+    incident is saying that a stored reference is read at its source
+    rather than through the summary a search returns, and that its
+    version and freshness are checked before it is relied on.
+
+    The block does not name the reference tool or the CLI commands.
+    The approved contract forbids a static catalogue of MPM tools in
+    the block, so the operational names are asserted against the full
+    behavioural protocol instead — see
+    `ReferenceOperationalDetailLivesInTheProtocol`.
     """
 
     def test_canonical_block_carries_the_guidance_label(self):
         self.assertIn(
-            GUIDANCE_LABEL, _canonical_block(),
-            "the canonical managed block must carry the reference-search "
-            "invariant; without it an agent has no instruction to consult "
+            GUIDANCE_LABEL, _unwrapped(_canonical_block()),
+            "the canonical managed block must carry the reference-discovery "
+            "commitment; without it an agent has no instruction to consult "
             "the reference corpus at all",
         )
 
-    def test_canonical_block_states_the_two_subsystems_are_separate(self):
+    def test_canonical_block_states_the_artifact_kinds_are_distinct(self):
+        """The inference that caused the incident was treating the
+        reference corpus as if it were part of the memory store. The
+        block must say the artifact kinds are distinct, so an agent
+        knows a memory query is not the way to look for a document."""
         self.assertTrue(
             _block_contains(
-                "Memories and references are separate subsystems"
+                "Memories, references, decisions, theories, skills and work "
+                "are distinct forms of persistent state"
             ),
-            "the block must state that memories and references are different "
-            "subsystems — that inference is the incident",
+            "the block must state that references are a distinct form of "
+            "persistent state, not part of the memory store — that "
+            "inference is the incident",
         )
-        self.assertTrue(
-            _block_contains("an empty memory search is not evidence of absence"),
-            "the block must say an empty memory search does not establish "
-            "absence; without it the two subsystems are indistinguishable",
-        )
-
-    def test_canonical_block_names_both_lookup_operations(self):
-        block = _canonical_block()
-        # Search alone is not enough: an agent that searches and acts
-        # on the snippet it got back has still not read the document.
-        self.assertIn("`mpm reference search", block,
-                      "the block must name the CLI search command")
-        self.assertIn("`mpm reference show", block,
-                      "the block must name the CLI read command; a search "
-                      "snippet is not the document")
-        self.assertIn("action `search`", block,
-                      "the block must name the MCP search action")
-        self.assertIn("action `read`", block,
-                      "the block must name the MCP read action")
 
     def test_canonical_block_requires_reading_the_document(self):
+        """Two halves of one instruction: go to the source, and do not
+        stop at the summary. Either half alone leaves a gap — an agent
+        that only knows to look may act on the snippet, and an agent
+        that only knows the summary is insufficient may not look."""
         self.assertTrue(
-            _block_contains("not a search-result summary"),
+            _block_contains("read the underlying source"),
             "the block must tell the agent to read the document, not stop "
             "at the search-result summary",
+        )
+        self.assertTrue(
+            _block_contains("relying solely on a search-result summary"),
+            "the block must rule out acting on the search-result summary "
+            "alone — that is the step the original incident skipped",
         )
 
     def test_canonical_block_requires_a_freshness_check(self):
         self.assertIn(
-            "Check version and freshness", _canonical_block(),
+            "Check its version and freshness", _canonical_block(),
             "the block must require a freshness check before technical "
             "documentation is relied on — a stale reference is a wrong "
             "answer that looks like a right one",
+        )
+
+
+class ReferenceOperationalDetailLivesInTheProtocol(unittest.TestCase):
+    """The block states the commitment; the protocol states the
+    operations.
+
+    The approved contract forbids a static catalogue of MPM tools in the
+    managed block. The tool names, the actions and the CLI commands an
+    agent needs therefore have to live in the full behavioural
+    protocol, which the block points at. This class pins that they do.
+
+    Without it, "the block does not name the commands" would be
+    indistinguishable from "nobody names the commands".
+    """
+
+    def setUp(self):
+        self.protocol = (
+            AGENT_INSTALLATION / "mpm-agent-protocol.md"
+        ).read_text(encoding="utf-8")
+
+    def test_protocol_names_the_reference_tool(self):
+        self.assertIn(
+            "mpm_references", self.protocol,
+            "the protocol must name the reference tool; the managed block "
+            "deliberately does not, so the protocol is the only place an "
+            "agent can learn how to reach the corpus",
+        )
+
+    def test_protocol_names_both_lookup_operations(self):
+        """Search alone is not enough: an agent that searches and acts
+        on the snippet it got back has still not read the document."""
+        flat = _unwrapped(self.protocol)
+        self.assertIn(
+            "mpm_references list` (then `read`/`search`", flat,
+            "the protocol must name both the reference tool and its "
+            "read/search actions",
+        )
+
+    def test_protocol_requires_a_freshness_check(self):
+        flat = _unwrapped(self.protocol)
+        self.assertIn(
+            "Verify freshness before relying", flat,
+            "the protocol must require a freshness check before a "
+            "reference is relied on",
         )
 
 
@@ -198,12 +292,12 @@ class ReferenceGuidanceReachesEveryHost(unittest.TestCase):
     """The block is generated per host; the guidance must survive
     generation for all of them.
 
-    Generation rewrites tool names per host's transport prefix. A
-    guidance sentence that names a tool by its bare registry name in
-    the canonical source renders correctly only if the renderer's
-    token rule fires — and if it does not, the host receives a
-    sentence naming a tool it cannot call. Both failure directions
-    matter, so each host is asserted on the PREFIXED name.
+    Generation rewrites tool names per host's transport prefix. The
+    canonical block names the tool it invokes (`mpm_context`, with the
+    `read_wake_context` action) — that is the one tool the contract
+    names, and it must render under each host's own transport. Both
+    failure directions matter, so each host is asserted on the
+    PREFIXED name.
     """
 
     def test_every_adapter_render_carries_the_guidance(self):
@@ -211,15 +305,15 @@ class ReferenceGuidanceReachesEveryHost(unittest.TestCase):
             with self.subTest(adapter=adapter["name"]):
                 rendered = _rendered_block_for(adapter["name"])
                 self.assertIn(
-                    GUIDANCE_LABEL, rendered,
+                    GUIDANCE_LABEL, _unwrapped(rendered),
                     f"{adapter['name']}: the generated block lost the "
-                    f"reference-search guidance",
+                    f"reference-discovery guidance",
                 )
 
     def test_every_adapter_render_names_its_own_prefixed_tool(self):
         for adapter in _render.ADAPTERS:
             prefix = adapter["tool_prefix"]
-            expected = f"{prefix}mpm_references"
+            expected = f"{prefix}mpm_context"
             with self.subTest(adapter=adapter["name"]):
                 rendered = _rendered_block_for(adapter["name"])
                 self.assertIn(
@@ -233,45 +327,43 @@ class ReferenceGuidanceReachesEveryHost(unittest.TestCase):
                     # other, or the source drifted. Either way the host
                     # is being told about a tool name it may not have.
                     self.assertNotIn(
-                        "`mpm_references`", rendered,
-                        f"{adapter['name']}: unprefixed mpm_references "
+                        "`mpm_context`", rendered,
+                        f"{adapter['name']}: unprefixed mpm_context "
                         f"survived rendering for a {prefix!r} host",
                     )
 
     def test_every_adapter_render_keeps_the_cli_form_unprefixed(self):
         """The CLI spelling contains a space, so the renderer's token
         rule cannot rewrite it — and must not. An agent told to run
-        `mcp__mpm__ reference search` would run a command that does not
+        `mcp__mpm__ call <tool>` would run a command that does not
         exist.
 
-        The check is scoped to backticked spans naming a reference
-        SUBCOMMAND. A broad `mpm__` sweep would flag legitimate MCP
-        tool names like `mcp__mpm__mpm_context`, which are supposed to
-        carry the prefix.
+        The check is scoped to backticked spans naming the CLI form. A
+        broad `mpm__` sweep would flag legitimate MCP tool names like
+        `mcp__mpm__mpm_context`, which are supposed to carry the
+        prefix.
         """
         for adapter in _render.ADAPTERS:
             prefix = adapter["tool_prefix"]
             with self.subTest(adapter=adapter["name"]):
                 rendered = _rendered_block_for(adapter["name"])
-                self.assertIn("`mpm reference search", rendered)
-                self.assertIn("`mpm reference show", rendered)
+                self.assertIn("`mpm call <tool>`", rendered)
                 if not prefix:
                     continue
-                for mangled in re.findall(r"`[^`]*reference (?:search|show)[^`]*`",
-                                          rendered):
+                for mangled in re.findall(r"`[^`]*mpm call[^`]*`", rendered):
                     # Look for the prefix verbatim. `rstrip("_")` would
                     # reduce "mpm__" to "mpm" and then match the CORRECT
                     # spelling, so the separator has to stay.
                     self.assertNotIn(
                         prefix, mangled,
-                        f"{adapter['name']}: a CLI reference subcommand was "
+                        f"{adapter['name']}: the CLI fallback was "
                         f"tool-prefixed into {mangled!r}, which is not a "
                         f"command that exists",
                     )
                     self.assertTrue(
-                        mangled.lstrip("`").startswith("mpm reference"),
+                        mangled.lstrip("`").startswith("mpm call"),
                         f"{adapter['name']}: the CLI command must start with "
-                        f"the literal `mpm reference`, got {mangled!r}",
+                        f"the literal `mpm call`, got {mangled!r}",
                     )
 
     def test_generated_snippet_files_are_in_parity(self):
@@ -287,8 +379,8 @@ class ReferenceGuidanceReachesEveryHost(unittest.TestCase):
             with self.subTest(adapter=adapter["name"]):
                 self.assertTrue(snippet.is_file(), f"missing snippet {snippet}")
                 text = snippet.read_text(encoding="utf-8")
-                self.assertIn(GUIDANCE_LABEL, text)
-                self.assertIn(f"{adapter['tool_prefix']}mpm_references", text)
+                self.assertIn(GUIDANCE_LABEL, _unwrapped(text))
+                self.assertIn(f"{adapter['tool_prefix']}mpm_context", text)
 
     def test_renderer_check_gate_passes(self):
         """`render_managed_blocks.py --check` is what CI runs to prove
@@ -324,9 +416,9 @@ class DocumentedCommandsActuallyExist(unittest.TestCase):
     This is the property that keeps an instruction fix honest. A block
     that teaches an agent to run a command MPM does not have is worse
     than no guidance: it converts a gap into a confident dead end. So
-    the names in item 8 are checked against the two places that define
-    them — the CLI router and the tool registry — and, when a build is
-    present, against the binary itself.
+    the names the guidance commits to are checked against the two
+    places that define them — the CLI router and the tool registry —
+    and, when a build is present, against the binary itself.
 
     Both a static and a live check run. The static one works on a
     clean checkout; the live one proves the binary agrees with the
@@ -498,15 +590,15 @@ class ReferenceGuidanceSurvivesInstallation(unittest.TestCase):
                 )
                 text = installed.read_text(encoding="utf-8")
                 self.assertIn(
-                    GUIDANCE_LABEL, text,
+                    GUIDANCE_LABEL, _unwrapped(text),
                     f"{adapter_name}: the installed block lacks the "
-                    f"reference-search guidance",
+                    f"reference-discovery guidance",
                 )
                 adapter = next(
                     a for a in _render.ADAPTERS if a["name"] == adapter_name
                 )
                 self.assertIn(
-                    f"{adapter['tool_prefix']}mpm_references", text,
+                    f"{adapter['tool_prefix']}mpm_context", text,
                     f"{adapter_name}: installed block does not name the "
                     f"tool as this host spells it",
                 )
@@ -534,8 +626,8 @@ class ReferenceGuidanceSurvivesInstallation(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         text = target.read_text(encoding="utf-8")
-        self.assertIn(GUIDANCE_LABEL, text)
-        self.assertIn("mcp__mpm__mpm_references", text,
+        self.assertIn(GUIDANCE_LABEL, _unwrapped(text))
+        self.assertIn("mcp__mpm__mpm_context", text,
                       "hermes is an mcp__mpm__ host; the guidance must name "
                       "the tool under that transport")
 
@@ -552,34 +644,45 @@ class ReferenceGuidanceSurvivesInstallation(unittest.TestCase):
                 self._install(adapter_name)
                 installed = self._installed_path_for(adapter_name)
                 first = installed.read_text(encoding="utf-8")
-                self.assertIn(GUIDANCE_LABEL, first)
+                self.assertIn(GUIDANCE_LABEL, _unwrapped(first))
 
                 # Simulate an older MPM having written this file: strip
                 # the guidance from the managed region while leaving the
                 # user's own content intact, then reconcile forward.
                 #
-                # Anchored to the label that opens the invariant and to
-                # the structural END marker rather than to the last line
-                # of the prose: item 8 is the final invariant, so the
-                # marker bounds it exactly, and a reworded tail must not
-                # silently turn this fixture into a no-op.
-                stripped = re.sub(
-                    r"\n8\. \*\*Search references before concluding external "
-                    r"material is\n(?:.*\n)*?"
-                    r"(?=<!-- END MPM MANAGED BLOCK -->)",
-                    "\n", first,
+                # The fixture locates the intended sentence by its
+                # semantic anchor, not by the number of the responsibility
+                # it happens to sit under. A test that reached for "the
+                # eighth numbered item" would silently stop modifying the
+                # right section the moment the contract was renumbered,
+                # and would then pass without ever reconciling.
+                stripped, removed = _strip_guidance_sentence(first)
+
+                self.assertEqual(
+                    len(removed), 1,
+                    f"{adapter_name}: the stale fixture must remove exactly "
+                    f"one sentence — the one carrying the guidance — but it "
+                    f"removed {len(removed)}: {removed!r}",
                 )
                 self.assertNotIn(
-                    GUIDANCE_LABEL, stripped,
+                    GUIDANCE_LABEL, _unwrapped(stripped),
                     f"{adapter_name}: stale fixture failed to strip the "
                     f"guidance, so this test would pass without reconciling",
+                )
+                # The fixture must have changed the intended text and
+                # nothing else: the rest of the block, and the operator's
+                # own content, must be byte-identical.
+                self.assertIn(
+                    "The session ends. The learning continues.", stripped,
+                    f"{adapter_name}: the stale fixture removed more than the "
+                    f"guidance sentence",
                 )
                 installed.write_text(stripped, encoding="utf-8")
 
                 self._install(adapter_name)
                 refreshed = installed.read_text(encoding="utf-8")
                 self.assertIn(
-                    GUIDANCE_LABEL, refreshed,
+                    GUIDANCE_LABEL, _unwrapped(refreshed),
                     f"{adapter_name}: refresh did not restore the guidance",
                 )
 

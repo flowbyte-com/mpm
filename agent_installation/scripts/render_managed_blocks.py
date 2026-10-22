@@ -208,7 +208,8 @@ ADAPTERS: list[dict] = [
             "at session start, but it carries protocol guidance only —\n"
             "**not** the dynamic wake payload. The first agent turn must\n"
             "call `mcp__mpm__mpm_context` action `read_wake_context` to\n"
-            "obtain wake (see protocol item 1 in the managed block above).\n"
+            "obtain wake (see the 'Inherit before you begin' responsibility\n"
+            "in the managed block above).\n"
             "On the other supported hosts (ClaudeCode, OpenClaw, OpenCode,\n"
             "Pi) the host fires the fetch automatically; Hermes is the\n"
             "exception.\n"
@@ -250,12 +251,13 @@ ADAPTERS: list[dict] = [
         # default compact surface and the call will be rejected."
         #
         # The bare canonical name is correct in BOTH modes because the
-        # universal block's rule 7 already documents `mpm call <tool>` as
-        # the way to reach any capability the host does not expose
-        # natively, and rule 1's wake fetch is exactly such a capability.
-        # One canonical wording therefore serves both OpenClaw modes
-        # without a host-specific prefix and without a second OpenClaw
-        # behavioural contract to keep in sync.
+        # universal block's "Discover MPM rather than assuming its limits"
+        # responsibility already documents `mpm call <tool>` as the way
+        # to reach any capability the host does not expose natively, and
+        # the "Inherit before you begin" wake fetch is exactly such a
+        # capability. One canonical wording therefore serves both
+        # OpenClaw modes without a host-specific prefix and without a
+        # second OpenClaw behavioural contract to keep in sync.
         "tool_prefix": "",
         "snippet_path": "templates/SOUL.md.snippet",
         "copy_paste_outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->",

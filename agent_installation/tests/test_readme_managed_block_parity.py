@@ -63,6 +63,29 @@ def _run_renderer(*args: str, repo_root: Path | None = None) -> subprocess.Compl
     )
 
 
+def _tamper_block_heading(block: str, new_heading: str) -> str:
+    """Rewrite the managed block's top-level heading.
+
+    The heading is LOCATED, not hardcoded: the block's own first
+    top-level heading line is the one that gets replaced. A hardcoded
+    string that no longer appears would turn every tamper fixture into
+    a no-op, and the drift test would then pass without ever exercising
+    the detection path.
+
+    Raises AssertionError when the block has no top-level heading, so
+    a malformed fixture fails loudly instead of silently.
+    """
+    lines = block.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("# "):
+            lines[i] = f"{new_heading}\n"
+            return "".join(lines)
+    raise AssertionError(
+        "the managed block has no top-level heading to tamper with; "
+        "the tamper fixture would be a no-op",
+    )
+
+
 class ReadmeManagedBlockParity(unittest.TestCase):
     """The checked-in README must already be in parity with the
     canonical source."""
@@ -123,9 +146,8 @@ class ReadmeManagedBlockParity(unittest.TestCase):
         before, owned, after = _render._split_readme(text)
         # Hand-edit the managed block the way a well-meaning contributor
         # would: replace the canonical heading.
-        tampered = owned.replace(
-            "## MPM behavioural contract",
-            "## MPM behaviour (hand-edited, will drift)",
+        tampered = _tamper_block_heading(
+            owned, "# MPM behaviour (hand-edited, will drift)",
         )
         self.assertNotEqual(
             tampered, owned, "tamper fixture did not modify the block",
@@ -186,7 +208,10 @@ class ReadmeManagedBlockParity(unittest.TestCase):
         target = sandbox / "README.md"
         text = README.read_text(encoding="utf-8")
         before, owned, after = _render._split_readme(text)
-        tampered = owned.replace("MPM behavioural contract", "MPM wrong heading")
+        tampered = _tamper_block_heading(owned, "# MPM wrong heading")
+        self.assertNotEqual(
+            tampered, owned, "tamper fixture did not modify the block",
+        )
         target.write_text(before + tampered + after, encoding="utf-8")
 
         proc = _run_renderer("--only", "mpm-opencode", repo_root=sandbox)
@@ -300,7 +325,10 @@ class ReadmeManagedBlockParity(unittest.TestCase):
             encoding="utf-8",
         )
         # Drift the block so the regeneration has real work to do.
-        tampered = owned.replace("MPM behavioural contract", "MPM stale heading")
+        tampered = _tamper_block_heading(owned, "# MPM stale heading")
+        self.assertNotEqual(
+            tampered, owned, "tamper fixture did not modify the block",
+        )
         target.write_text(
             f"{sentinel_before}\n{before}{tampered}{after}\n{sentinel_after}\n",
             encoding="utf-8",
@@ -319,7 +347,7 @@ class ReadmeManagedBlockParity(unittest.TestCase):
             "content below the managed section must survive regeneration",
         )
         self.assertIn(
-            "MPM behavioural contract", result,
+            "# MPM: Your persistent memory", result,
             "the block itself must be restored to canonical",
         )
         self.assertNotIn("MPM stale heading", result)

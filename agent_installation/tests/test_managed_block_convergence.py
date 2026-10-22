@@ -552,7 +552,7 @@ class IntegrationModeRendering(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             text = target.read_text(encoding="utf-8")
             # The behavioural contract names the capability bare...
-            self.assertIn("fetch it through `mpm_context`", text)
+            self.assertIn("recover it through `mpm_context`", text)
             # ...and never with an MCP-client transport prefix, because
             # this host has no MCP server and no such namespace.
             self.assertNotIn("mcp__mpm__mpm_context", text)
@@ -576,7 +576,7 @@ class IntegrationModeRendering(unittest.TestCase):
             r = self.run_installer(target)
             self.assertEqual(r.returncode, 0, r.stderr)
             text = target.read_text(encoding="utf-8")
-            self.assertIn("fetch it through `mpm_context`", text)
+            self.assertIn("recover it through `mpm_context`", text)
             self.assertNotIn("mcp__", text)
 
     def test_snippet_itself_carries_no_mcp_prefix(self):

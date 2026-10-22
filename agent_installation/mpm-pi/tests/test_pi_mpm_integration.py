@@ -555,13 +555,31 @@ class TestDocumentationAccuracy(unittest.TestCase):
         text = _read(SNIPPET)
         self.assertIn("BEGIN MPM MANAGED BLOCK", text)
         self.assertIn("END MPM MANAGED BLOCK", text)
-        # Current contract wording in the canonical managed block.
-        # Earlier "Wake is auto-injected on session start" /
-        # "Handoff before genuine session closure" was tied to an
-        # older snippet shape; the auto-wake + handoff intent is
-        # preserved under the current wording.
-        self.assertIn("wake context normally arrives", text)
-        self.assertIn("write a handoff when meaningful state remains", text)
+        # Current contract wording in the canonical managed block:
+        # "Wake context may arrive automatically. If it does not,
+        # recover it through `mpm_context` using `read_wake_context`"
+        # and "At genuine session closure, preserve meaningful
+        # continuation state …". Earlier "Wake is auto-injected on
+        # session start" / "Handoff before genuine session closure"
+        # was tied to an older snippet shape; the wake + handoff
+        # intent is preserved under the current wording. The anchors
+        # are matched by meaning rather than by one exact sentence.
+        self.assertTrue(
+            any(p in text for p in (
+                "Wake context may arrive automatically",
+                "wake context normally arrives",
+            )),
+            "the snippet must tell the agent that wake context arrives "
+            "on its own",
+        )
+        self.assertTrue(
+            any(p in text for p in (
+                "At genuine session closure, preserve meaningful continuation state",
+                "write a handoff when meaningful state remains",
+            )),
+            "the snippet must tell the agent to leave meaningful "
+            "continuation state at genuine session closure",
+        )
         # Note: Pi is one of the auto-inject hosts (ClaudeCode,
         # OpenClaw, OpenCode, Pi) listed in INSTALL.md and the Hermes
         # snippet. Pi's own snippet does not need to enumerate the

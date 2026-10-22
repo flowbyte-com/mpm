@@ -519,8 +519,13 @@ class InstalledBlockDriftHermetic(unittest.TestCase):
             if entry.get("integration_probe"):
                 continue
             text = self._expected_block(entry)
+            # Anchor the mutation on the block's reference-discovery
+            # commitment, not on the number of the responsibility it
+            # sits under: a numbered anchor would silently stop
+            # mutating once the contract was renumbered.
             stale = text.replace(
-                "Search references before concluding external material is",
+                "read the underlying source rather than relying solely on "
+                "a search-result summary",
                 "Older invariant label that the current source no longer"
                 " emits",
             )
