@@ -70,8 +70,30 @@ TELEMETRY_SERVICE_DST := $(HOME)/.config/systemd/user/$(TELEMETRY_SERVICE_NAME).
 # ~/.bashrc isn't sourced.
 GO := $(shell command -v go 2>/dev/null || echo /usr/local/go/bin/go)
 
-VERSION     := $(shell git describe --tags 2>/dev/null || echo "dev")
-BUILD_LDFLAGS := -ldflags "-X main.buildVersion=$(VERSION)"
+# BUILD PROVENANCE — one convention for every MPM binary.
+#
+# The provenance stamped into a binary (product version, source commit,
+# dirty-build flag, build type) is decided by scripts/build-provenance.sh
+# and read from the VERSION file at the repository root. That script is
+# the single source of truth, so `make build`, the CI build and the build
+# install.sh performs (which reaches its binaries through `make build`)
+# all stamp identical values.
+#
+# The stamp targets internal/buildinfo, the package every binary links.
+# An earlier revision stamped `main.buildVersion`, a symbol only two of
+# the five binaries declared — so the stamp was a silent no-op in the
+# other three.
+#
+# The script resolves the repository root from its own location, so it
+# works from any working directory.
+BUILD_PROVENANCE := $(dir $(lastword $(MAKEFILE_LIST)))scripts/build-provenance.sh
+MPM_BUILD_VERSION      := $(shell $(BUILD_PROVENANCE) version)
+MPM_BUILD_COMMIT       := $(shell $(BUILD_PROVENANCE) commit)
+MPM_BUILD_SHORT_COMMIT := $(shell $(BUILD_PROVENANCE) short-commit)
+MPM_BUILD_DIRTY        := $(shell $(BUILD_PROVENANCE) dirty)
+MPM_BUILD_TYPE         := $(shell $(BUILD_PROVENANCE) build-type)
+VERSION      := $(MPM_BUILD_VERSION)
+BUILD_LDFLAGS := -ldflags "$(shell $(BUILD_PROVENANCE) ldflags)"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
 CGO_LDFLAGS := -lm
 # Run filter for make test-release; override with `make test-release RUN='-run TestFoo'`.
@@ -182,7 +204,7 @@ AGENT_ADAPTERS_JS := mpm-memory-openclaw mpm-auto-mode-persona-openclaw
 # AGENT_ADAPTERS — the TS gate runs ONLY the TypeScript suite.
 AGENT_ADAPTERS_TS := mpm-opencode
 
-.PHONY: all assert-build-dir-safe print-build-dir build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-bench test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit test-scripts test-agent-installation test-agent-adapters lint help clean refresh-installed check-installed-drift check-installed
+.PHONY: all assert-build-dir-safe print-build-dir print-build-provenance build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-bench test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit test-scripts test-agent-installation test-agent-adapters lint help clean refresh-installed check-installed-drift check-installed
 
 all: build
 
@@ -281,6 +303,21 @@ BUILD_DIR_ABS := $(shell realpath -m "$(CURDIR)/$(BUILD_DIR)")
 
 print-build-dir:
 	@echo '$(BUILD_DIR_ABS)'
+
+# Machine-readable query: the provenance stamped into the binaries this
+# checkout builds. install.sh captures it and exports it to the agent
+# reconciliation step, so the managed block an installer writes can
+# identify the exact MPM build it came from.
+#
+# Same shape as print-build-dir: a single "key=value" block on stdout,
+# one key per line, no decoration.
+.PHONY: print-build-provenance
+print-build-provenance:
+	@echo 'MPM_BUILD_VERSION=$(MPM_BUILD_VERSION)'
+	@echo 'MPM_BUILD_COMMIT=$(MPM_BUILD_COMMIT)'
+	@echo 'MPM_BUILD_SHORT_COMMIT=$(MPM_BUILD_SHORT_COMMIT)'
+	@echo 'MPM_BUILD_DIRTY=$(MPM_BUILD_DIRTY)'
+	@echo 'MPM_BUILD_TYPE=$(MPM_BUILD_TYPE)'
 
 # DEPLOY: promote the developer artifacts in $(BUILD_DIR) to the runtime
 # install at $(PREFIX)/bin/. This is the ONLY target that writes there.
@@ -453,6 +490,23 @@ install-hooks:
 gen-cli:
 	$(GO) run ./cmd/gen-cli
 
+# The per-test-binary wall-clock budget for the cmd/... suites.
+#
+# Go's default is 10 minutes per test binary. cmd/mpm is the largest
+# package in the repository and, under the race detector on a two-core CI
+# runner, its suite measures 530-600 seconds — 88-100% of that default.
+# Measured: 529.896s at commit 06c029ba (CI run 39599085460, release
+# gate) and 569.440s on a later runner for the same tree. At that budget
+# the outcome of the pre-merge gate is decided by which runner the job
+# lands on, not by whether the code is correct.
+#
+# 20m is roughly twice the worst observed run: it gives a slow runner
+# real headroom while still failing a genuine deadlock or hang. This is a
+# HARNESS budget only — no assertion is weakened, skipped or removed by
+# it, and it changes no product behaviour. Overridable so an unusually
+# slow machine can extend it without editing the Makefile.
+CMD_TEST_TIMEOUT ?= 20m
+
 # THE test entry point. One command, correct from a fresh clone.
 #
 # Depends on `build`, and must keep depending on it.
@@ -486,8 +540,9 @@ gen-cli:
 # prerequisite does not add a second flag set; it delegates to the target
 # that already owns them.
 test: build
-	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./cmd/...
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -timeout $(CMD_TEST_TIMEOUT) -v ./cmd/...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/telemetry/...
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/buildinfo/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/scheduler/...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -tags fts5 -v ./internal/critic/...
@@ -1143,8 +1198,9 @@ release-gate: test-race test-release
 # that unconditionally assume FTS5 is compiled in. Both flags are part of
 # the substrate's mandatory FTS5 integrity guarantee — see CLAUDE.md §3.
 test-race: build
-	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./cmd/...
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -timeout $(CMD_TEST_TIMEOUT) -v ./cmd/...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/telemetry/...
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/buildinfo/...
 	cd internal/core && CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/scheduler/...
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) test -race -tags fts5 -v ./internal/critic/...
@@ -1204,7 +1260,8 @@ refresh-installed:
 	@cd $(AGENT_INSTALL_DIR) && python3 scripts/render_managed_blocks.py || { echo "    FAIL: render_managed_blocks.py failed" >&2; exit 2; }
 	@echo ""
 	@echo "    [2/N] reconciling installed managed blocks via the host-agnostic entry point"
-	@python3 $(AGENT_INSTALL_DIR)/scripts/reconcile_managed_blocks.py --home $(HOME) || { echo "    FAIL: reconcile_managed_blocks.py failed" >&2; exit 3; }
+	@MPM_BUILD_VERSION="$(MPM_BUILD_VERSION)" MPM_BUILD_COMMIT="$(MPM_BUILD_COMMIT)" \
+	    python3 $(AGENT_INSTALL_DIR)/scripts/reconcile_managed_blocks.py --home $(HOME) || { echo "    FAIL: reconcile_managed_blocks.py failed" >&2; exit 3; }
 	@echo ""
 	@cd $(AGENT_INSTALL_DIR) && python3 scripts/render_managed_blocks.py --check \
 	    && echo "==> refresh complete; render check PASS." \

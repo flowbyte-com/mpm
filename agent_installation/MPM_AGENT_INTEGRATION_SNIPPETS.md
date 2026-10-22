@@ -810,3 +810,59 @@ tool-reference stability contract table changes in a way that
 matters to consumers. The marker does **not** replace byte-for-byte
 parity; the render script's `--check` mode remains the authoritative
 drift detector.
+
+## Installed-block provenance (added at install time)
+
+An installed managed block records where it came from. Immediately after
+the inner `<!-- BEGIN MPM MANAGED BLOCK -->` marker, the installer
+writes one HTML comment whose fields are:
+
+| Field | Meaning |
+|---|---|
+| `version` | the MPM **product** version of the build that wrote the block |
+| `commit` | the exact **source commit** that build was made from |
+| `protocol` | the behavioural protocol version — the `mpm_agent_integration_version` declared by this file |
+| `applied` | the UTC moment the block was last applied or updated |
+
+The comment's exact text is **not reproduced here on purpose**. This
+file is the single source of truth for the exact agent-facing
+instruction text, and it is guarded against carrying per-install
+metadata — a per-build commit SHA or a timestamp baked into it would
+make every byte-parity gate drift on every build, and a literal example
+of the comment would put that metadata one copy-paste away from every
+host. The rendered form is documented in
+`agent_installation/README.md`, which is where the managed-block
+convention lives. The mechanism itself is
+`scripts/block_provenance.py`, and the prefix it emits is
+`block_provenance.PROVENANCE_PREFIX`.
+
+The `protocol` field carries the `mpm_agent_integration_version` from
+the top of this file. It is **independent** of the product version: it
+versions the behavioural contract, not the software, and the two move
+on separate schedules. Neither is ever substituted for the other.
+
+The product version and the source commit come from the environment
+(`MPM_BUILD_VERSION` / `MPM_BUILD_COMMIT`), which `install.sh` and
+`make refresh-installed` both export from the canonical build script
+(`scripts/build-provenance.sh`). An adapter installer run on its own —
+outside a build — may establish neither, and then it writes `unknown`
+rather than claiming a version it cannot establish. It does not erase an
+established value either: when the behavioural text is unchanged, the
+value the block already carries is kept.
+
+**The comment is not part of the canonical text.** It is per-install
+metadata layered on top of it, and that is deliberate: the drift gates
+(snippet, copy/paste, README, installed-drift) normalise the provenance
+comment away on both sides of their comparison, so they still compare the
+behavioural text — which is what they are about — byte for byte.
+
+**The timestamp records the last change, not the last run.** It is
+preserved when the version, the commit, the protocol version and the
+behavioural text are all unchanged, and refreshed whenever any of them
+changes. Re-running the installer with the same version, commit and
+instructions is a genuine no-op: same bytes, same timestamp, no new
+backup. (The same rule already governed OpenClaw's `<!-- generated: ... -->`
+line.)
+
+The mechanism lives in `scripts/block_provenance.py` and is shared by
+every host adapter, so the convention is identical across all five.

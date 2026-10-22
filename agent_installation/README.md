@@ -263,6 +263,50 @@ Once the integration is present, a missing or stale `SOUL.md` block is
 drift and gets repaired here; `mpm-memory-openclaw/install.sh` remains
 the full installer, including the plugin wiring.
 
+### Installed-block provenance
+
+Every installed managed block records where it came from. Immediately
+after the inner `<!-- BEGIN MPM MANAGED BLOCK -->` marker, the installer
+writes one HTML comment:
+
+```text
+<!-- mpm-provenance: version=0.1.0-dev commit=06c029ba11ce18c7f10aa60b0f0497ece2edda7c protocol=2.1.0 applied=2026-10-21T18:04:11Z -->
+```
+
+It carries the MPM **product version** of the build that wrote the
+block, the exact **source commit** that build was made from, the
+**behavioural protocol version** (`mpm_agent_integration_version`, which
+versions the contract rather than the software and moves independently
+of the product version), and the UTC moment the block was last applied
+or updated.
+
+Two properties matter more than the fields themselves:
+
+* **It is install-time metadata, not canonical text.** A per-build
+  commit SHA or a timestamp inside the canonical source would make every
+  byte-parity gate (snippet, copy/paste, README, installed-drift) drift
+  on every build. The drift gates normalise the comment away on both
+  sides of their comparison, so they still compare the behavioural text
+  byte for byte.
+* **It is idempotent.** The timestamp is preserved when the version, the
+  commit, the protocol version and the behavioural text are all
+  unchanged, and refreshed whenever any of them changes. Re-running the
+  installer with the same version, commit and instructions is a genuine
+  no-op: same bytes, same timestamp, no new backup.
+
+An adapter installer run on its own — outside a build — may not be able
+to establish a product version or a commit, and then it writes
+`unknown` rather than claiming a version it cannot establish. It does
+not erase an established value either: when the behavioural text is
+unchanged, the value the block already carries is kept.
+
+The mechanism is shared by every host adapter (`scripts/block_provenance.py`),
+so the convention is identical across all five. `install.sh` and
+`make refresh-installed` both export `MPM_BUILD_VERSION` and
+`MPM_BUILD_COMMIT` from the canonical build script
+(`scripts/build-provenance.sh`), so an installed block and the installed
+binary cannot disagree about the build.
+
 ### One behavioural contract per file
 
 `scripts/managed_block_convergence.py` is the single place that decides

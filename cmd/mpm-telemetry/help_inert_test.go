@@ -257,7 +257,7 @@ func readDir(dir string) ([]string, error) {
 // build identity. The stamp must match the default `dev` value
 // when the binary is built without explicit ldflags, and must
 // match the stamped value when the binary is built with the
-// canonical `-X main.buildVersion=...` flag.
+// canonical `-X ...buildinfo.Version=...` flag.
 func TestTelemetry_Version(t *testing.T) {
 	// Build a fresh binary so we control the stamp. Default stamp
 	// is "dev" so the assertions pin that fallback.
@@ -296,7 +296,7 @@ func TestTelemetry_Version(t *testing.T) {
 	const stamp = "vTEST-release-pass-2026-09-14"
 	stampedPath := filepath.Join(t.TempDir(), "mpm-telemetry-stamped")
 	stampedBuild := exec.Command("go", "build", "-tags", "fts5",
-		"-ldflags", "-X main.buildVersion="+stamp,
+		"-ldflags", "-X "+buildinfoPkg+".Version="+stamp,
 		"-o", stampedPath, ".")
 	if out, err := stampedBuild.CombinedOutput(); err != nil {
 		t.Fatalf("stamped go build: %v\n%s", err, out)

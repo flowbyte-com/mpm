@@ -83,6 +83,11 @@ func TestJSONMatrix_SupportedCommands_Contract(t *testing.T) {
 		{Family: "handoff list", Command: []string{"handoff", "list", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"success", "count", "results"}},
 		{Family: "info", Command: []string{"info", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"version", "database", "workspace"}},
 		{Family: "doctor", Command: []string{"doctor", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"checks", "timestamp"}, WantExitCodes: []int{0, 1, 2}},
+		// `version --json` gained a machine-readable form when the
+		// version command was given its own build-provenance surface.
+		// The envelope keys are the documented contract in
+		// docs/SPEC.md §8.
+		{Family: "version", Command: []string{"version", "--json"}, WantSuccess: true, WantEnvelopeKeys: []string{"version", "commit", "short_commit", "dirty", "dirty_state", "release", "build_type", "repository", "binary"}},
 	}
 
 	for _, c := range cases {
@@ -104,7 +109,14 @@ func TestJSONMatrix_RejectsUnsupportedJSON(t *testing.T) {
 	if bin == "" {
 		t.Skip("mpm binary not found; run `make build` first")
 	}
-	unsupported := []string{"version --json"}
+	// Command families with NO JSON surface. Asking for one must be
+	// rejected, not silently answered in text.
+	//
+	// This list used to hold `version --json`, because the version
+	// command had no machine-readable form. It has one now, so the
+	// entry moved to the supported matrix above; the replacement
+	// below is a family that still has no JSON surface.
+	unsupported := []string{"decision --json"}
 
 	for _, argstr := range unsupported {
 		t.Run(argstr, func(t *testing.T) {

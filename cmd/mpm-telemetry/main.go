@@ -18,14 +18,33 @@ import (
 	"os"
 
 	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm/internal/buildinfo"
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
 
-// buildVersion is a `var` (not `const`) so the canonical ldflags
-// `-ldflags "-X main.buildVersion=$(VERSION)"` can stamp the actual build
-// identifier at link time. A `const` would bake into the binary at
-// compile time and the linker flag would silently no-op (D-003).
-var buildVersion = "dev"
+// buildVersion is the linker-stamped product version.
+//
+// It is read from internal/buildinfo — the package every MPM binary
+// links — so the canonical stamp
+//
+//	-ldflags "-X github.com/flowbyte-com/mpm/internal/buildinfo.Version=..."
+//
+// reaches it. An earlier revision stamped `main.buildVersion` directly;
+// the stamp now lives in one shared package, so all five binaries carry
+// identical provenance.
+//
+// It is a `var` (never a `const`): a const would bake the placeholder
+// into the binary at compile time and the linker flag would silently
+// no-op (audit finding D-003).
+var buildVersion = buildinfo.Version
+
+// telemetryBuildInfo is the provenance this binary reports.
+//
+// The binary names itself, so an operator running `mpm --version` and
+// `mpm-telemetry --version` can tell which one answered.
+func telemetryBuildInfo() buildinfo.Info {
+	return buildinfo.Current("mpm-telemetry")
+}
 
 // topLevelHelpFlag reports whether the top-level argv contains a
 // help flag (`--help`, `-h`, or the literal token `help`). This
@@ -68,7 +87,7 @@ func main() {
 	//    identity and exits 0. Distinct from `version` subcommand
 	//    so help/version never collide.
 	if len(os.Args) >= 2 && topLevelVersionFlag(os.Args[1:2]) {
-		writeVersion(os.Stdout, buildVersion)
+		writeVersion(os.Stdout, telemetryBuildInfo())
 		return
 	}
 
@@ -131,7 +150,7 @@ func main() {
 		// that prints the linker-stamped build identity. Tiny
 		// switch case; no architectural churn. Tests assert
 		// parity with `--version` and with the build stamp.
-		writeVersion(os.Stdout, buildVersion)
+		writeVersion(os.Stdout, telemetryBuildInfo())
 		return
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n", sub)

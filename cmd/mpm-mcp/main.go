@@ -22,6 +22,7 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -41,6 +42,7 @@ import (
 	"github.com/flowbyte-com/mpm-core/mpmcli"
 	"github.com/flowbyte-com/mpm-core/tools"
 	"github.com/flowbyte-com/mpm/internal/blobstore"
+	"github.com/flowbyte-com/mpm/internal/buildinfo"
 )
 
 // defaultCoreTools is the canonical initial MCP surface for MPM. Tools
@@ -108,6 +110,16 @@ func coreToolFilter(_ context.Context, registered []mcp.Tool) []mcp.Tool {
 // point, so Evaluate() is pure string matching with zero parsing overhead.
 
 func main() {
+	// The version surface is answered FIRST, before the umask sweep,
+	// the log setup, the workspace resolution and the database open.
+	// Asking the server what it is must never boot it: an operator
+	// runs `mpm-mcp --version` precisely when something is wrong, and
+	// the answer has to arrive.
+	if buildinfo.ArgvRequestsVersion(os.Args[1:]) {
+		fmt.Print(buildinfo.FormatHuman(buildinfo.Current("mpm-mcp")))
+		return
+	}
+
 	// 2026-09-18 hardening pass: process umask 0077 BEFORE any DB
 	// open, log setup, or tool registration that may write to disk.
 	config.EnforcePrivateUmask()

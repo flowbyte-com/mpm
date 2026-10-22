@@ -15,7 +15,7 @@
 // shape: a single screen of static-or-slowly-changing facts.
 //
 // Architecture: handlers_info.go composes existing helpers —
-// buildVersion (package var), dm.DBPath, dm.SQLDB(), GetMemoryStats,
+// buildinfo.Version (linker-stamped), dm.DBPath, dm.SQLDB(), GetMemoryStats,
 // LoadActiveJSON, the scheduled_tasks table — without duplicating
 // any query logic. It does NOT own SQL.
 
@@ -33,6 +33,7 @@ import (
 	"github.com/flowbyte-com/mpm-core/usererror"
 
 	"github.com/flowbyte-com/mpm/cmd/mpm/render"
+	"github.com/flowbyte-com/mpm/internal/buildinfo"
 )
 
 // infoOutput is the JSON shape for `mpm info --json`. The human-readable
@@ -156,7 +157,7 @@ func collectInfo(dm *mpminternal.DatabaseManager) infoOutput {
 	}
 
 	out := infoOutput{
-		Version: buildVersion,
+		Version: buildinfo.Version,
 		DataDir: config.GetMPMDir(),
 		DBPath:  dm.DBPath(),
 		Workspace: infoWorkspace{

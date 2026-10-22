@@ -28,6 +28,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/flowbyte-com/mpm/internal/buildinfo"
 )
 
 // telemetryHelpHeading is the canonical heading token used at the
@@ -198,10 +200,14 @@ func writeHelpObserve(w io.Writer, buildID string) {
 // writeVersion prints the linker-stamped build identity. Used by
 // both the `version` subcommand and the `--version` top-level
 // flag.
-func writeVersion(w io.Writer, buildID string) {
+//
+// The identity is the same provenance every MPM binary carries
+// (product version, source commit, build type), so an operator can
+// tell exactly which build of MPM a telemetry sidecar came from.
+func writeVersion(w io.Writer, info buildinfo.Info) {
 	fmt.Fprintf(w, "MPM · Telemetry · version\n")
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  %s\n", buildID)
+	fmt.Fprint(w, buildinfo.FormatHuman(info))
 }
 
 // splitTrimmed is a small helper used by help-aware arg parsing:

@@ -203,7 +203,15 @@ jobs:
       - name: Run full test suite with coverage
         run: |
           # Run tests and write atomic coverage profile
-          go test -tags fts5 -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+          #
+          # -timeout 20m: Go's default per-test-binary budget is 10m, and
+          # cmd/mpm is the largest package in the tree. Measured under the
+          # race detector on a two-core runner it takes 530-600s, so the
+          # default leaves no headroom and turns the gate into a
+          # coin flip on which runner the job lands on. This matches
+          # CMD_TEST_TIMEOUT in the Makefile (see the comment there); it is
+          # a harness budget only and weakens no assertion.
+          go test -tags fts5 -race -timeout 20m -count=1 -covermode=atomic -coverprofile=coverage.out ./...
 
           # Print per-function and total coverage percentage to workflow logs
           go tool cover -func=coverage.out
@@ -256,7 +264,11 @@ jobs:
 
       - name: Full test sweep
         run: |
-          go test -tags fts5 -count=1 ./... 2>&1 | tee test-output.log
+          # -timeout 20m: same reason as the gate job above — cmd/mpm's
+          # suite is the dominant cost of this sweep and Go's default
+          # 10m per-test-binary budget leaves no headroom for it. Matches
+          # CMD_TEST_TIMEOUT in the Makefile.
+          go test -tags fts5 -timeout 20m -count=1 ./... 2>&1 | tee test-output.log
           make test-tools 2>&1 | tee tools-output.log
 
   release-gate:

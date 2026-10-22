@@ -52,6 +52,17 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+# The shared build-provenance mechanism. It lives in
+# agent_installation/scripts/ alongside the renderer and the reconciler,
+# and is imported by path rather than by package name because every
+# adapter's installer is executed as a standalone script with no
+# package context.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+import block_provenance  # noqa: E402
+
 # Header marker — written at the top of the produced .hermes.md.
 # Hermes doesn't have a managed-block convention; we use HTML comments
 # so they remain invisible in rendered output but stable for grep.
@@ -90,7 +101,14 @@ def _atomic_write(path: Path, content: str) -> None:
 
 
 def _render_block(snippet: str) -> str:
-    """Wrap snippet body in marker comments. Idempotent re-render."""
+    """Wrap snippet body in marker comments. Idempotent re-render.
+
+    The build provenance is added at install time by
+    block_provenance.annotate(), not here: the canonical render is
+    byte-compared against committed snippets and against the README,
+    and a per-build commit SHA or timestamp inside it would make every
+    one of those comparisons drift.
+    """
     return (
         f"{HERMES_MPM_MARKER_BEGIN}\n"
         f"{snippet}"
@@ -123,7 +141,7 @@ def install(target: Path, snippet: str) -> str:
     block = _render_block(snippet)
 
     if not target.exists():
-        _atomic_write(target, block)
+        _atomic_write(target, block_provenance.annotate(block))
         return "fresh"
 
     text = target.read_text(encoding="utf-8")
@@ -137,7 +155,11 @@ def install(target: Path, snippet: str) -> str:
     rng = _find_mpm_section(text)
     if rng is not None:
         begin, end = rng
-        new_text = text[:begin] + block + text[end:]
+        # `annotate` carries the build provenance forward and preserves
+        # the timestamp already in the file when nothing about the
+        # block changed, so a repeated reconciliation is byte-stable.
+        effective = block_provenance.annotate(block, existing=text[begin:end])
+        new_text = text[:begin] + effective + text[end:]
         if new_text == text:
             return "no-op"
         _backup(target)
@@ -146,7 +168,7 @@ def install(target: Path, snippet: str) -> str:
 
     # No MPM block present — append.
     sep = "" if text.endswith("\n") else "\n"
-    new_text = text + sep + "\n" + block
+    new_text = text + sep + "\n" + block_provenance.annotate(block)
     _backup(target)
     _atomic_write(target, new_text)
     return "appended"
