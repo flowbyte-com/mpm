@@ -714,56 +714,30 @@ func makeRouteHandler(router *core.Router) server.ToolHandlerFunc {
 	}
 }
 
-// makeHelpHandler wires the mpm_help discovery tool. It iterates the
-// live tools.Registry (the canonical source of truth) and emits a
-// terse JSON catalog. Specialists that the default initial surface
-// hides from tools/list are still listed here, with reach_via_cli
-// pointing at the mpm call escape hatch — so agents that need a
-// specialist tool have a deterministic discovery path that does not
-// depend on host-side listChanged support.
+// makeHelpHandler serves mpm_help, MPM's capability-discovery surface.
+//
+// It iterates the live tools.Registry (the canonical source of truth)
+// and emits a terse JSON catalog. Specialists that the default initial
+// surface hides from tools/list are still listed here, with
+// reach_via_cli pointing at the mpm call escape hatch — so agents that
+// need a specialist tool have a deterministic discovery path that does
+// not depend on host-side listChanged support.
+//
+// The catalogue itself lives in tools.Help, so the native MCP surface
+// and the `mpm call mpm_help` CLI fallback cannot drift apart: an
+// agent must not discover a different schema depending on which
+// transport it used. This handler only adapts the MCP envelope (a JSON
+// text result, or an error result) to that shared implementation.
 func makeHelpHandler(dm *core.DatabaseManager, ac core.ActiveContext) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		action, _ := args["action"].(string)
-		switch action {
-		case "list":
-			rows := make([]map[string]interface{}, 0, len(tools.Registry))
-			for _, t := range tools.Registry {
-				short := t.Description
-				if i := strings.Index(short, "\n"); i >= 0 {
-					short = short[:i]
-				}
-				rows = append(rows, map[string]interface{}{
-					"name":          t.Name,
-					"one_liner":     short,
-					"reach_via_cli": "mpm call " + t.Name + " --payload '{\"action\":\"<op>\",\"params\":{...}}'",
-				})
-			}
-			return jsonResult(map[string]interface{}{
-				"success":            true,
-				"tool_count":         len(rows),
-				"tools":              rows,
-				"discovery_hint":     "Specialist tools not initially exposed via tools/list are still registered and reachable via the host shell using `mpm call <tool>` (see reach_via_cli per row).",
-				"compatibility_mode": "Set MPM_EXPOSE_ALL_TOOLS=1 to revert to the full surface for hosts that need it.",
-			}), nil
-		case "show":
-			toolName, _ := args["tool"].(string)
-			if toolName == "" {
-				return mcp.NewToolResultError("mpm_help show: 'tool' param required"), nil
-			}
-			t, ok := tools.ByName(toolName)
-			if !ok {
-				return mcp.NewToolResultError(fmt.Sprintf("mpm_help: unknown tool %q", toolName)), nil
-			}
-			return jsonResult(map[string]interface{}{
-				"success":       true,
-				"name":          t.Name,
-				"description":   t.Description,
-				"reach_via_cli": "mpm call " + t.Name + " --payload '{\"action\":\"<op>\",\"params\":{...}}'",
-			}), nil
-		default:
-			return mcp.NewToolResultError(fmt.Sprintf("mpm_help: unknown action %q (valid: list, show)", action)), nil
+		toolName, _ := args["tool"].(string)
+		result, err := tools.Help(action, toolName)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
+		return jsonResult(result), nil
 	}
 }
 

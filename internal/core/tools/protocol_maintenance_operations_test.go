@@ -32,6 +32,16 @@
 // resolves the protocol's documented invocations against that
 // registry, so a documented operation that is not supported fails the
 // build instead of failing an agent mid-task.
+//
+// A documented invocation may also name a CALL-ROUTED capability: one
+// that `mpm call` dispatches by name rather than through the registry.
+// mpm_help is such a capability — it is registered as a native MCP
+// closure rather than as a registry entry, because a registry entry
+// would double-register under MPM_EXPOSE_ALL_TOOLS=1 — and it is
+// reachable through the CLI fallback. Those capabilities carry their
+// own action vocabulary, held in tools.CallRoutedTools, and this test
+// resolves them there. Resolving against the registry alone would
+// report a genuinely supported operation as undocumented.
 package tools
 
 import (
@@ -138,9 +148,33 @@ func allowedActions(t *testing.T, tool Tool) []string {
 	return out
 }
 
+// documentedActions returns the action names a documented `mpm call`
+// target accepts.
+//
+// A target resolves in one of two ways. Most are registry entries, and
+// their accepted actions come from their schema. A few are call-routed
+// capabilities — `mpm call` dispatches them by name because they are
+// deliberately not registry entries — and they carry their own action
+// vocabulary, held in tools.CallRoutedTools.
+//
+// ok is false when the name is neither: the documented operation does
+// not exist at all.
+func documentedActions(t *testing.T, toolName string) ([]string, bool) {
+	t.Helper()
+
+	if tool, ok := ByName(toolName); ok {
+		return allowedActions(t, tool), true
+	}
+	if actions, ok := CallRoutedActions(toolName); ok {
+		return actions, true
+	}
+	return nil, false
+}
+
 // TestProtocol_DocumentedCallsAreSupportedOperations resolves every
 // `mpm call <tool> --payload '{"action":"X"'` invocation in the agent
-// protocol against the live tool registry.
+// protocol against the live tool registry and the call-routed
+// capability table.
 func TestProtocol_DocumentedCallsAreSupportedOperations(t *testing.T) {
 	protocol := readProtocol(t)
 
@@ -155,19 +189,19 @@ func TestProtocol_DocumentedCallsAreSupportedOperations(t *testing.T) {
 	for _, m := range matches {
 		toolName, action := m[1], m[2]
 
-		tool, ok := ByName(toolName)
+		allowed, ok := documentedActions(t, toolName)
 		require.True(
 			t, ok,
-			"the protocol documents `%s` but no such tool is registered; "+
-				"document only operations MPM actually supports",
+			"the protocol documents `%s` but no such tool is registered "+
+				"and it is not a call-routed capability; document only "+
+				"operations MPM actually supports",
 			toolName,
 		)
 
-		allowed := allowedActions(t, tool)
 		require.Contains(
 			t, allowed, action,
-			"the protocol documents `%s` action %q, which the registry "+
-				"does not accept; accepted actions are %v",
+			"the protocol documents `%s` action %q, which the tool does "+
+				"not accept; accepted actions are %v",
 			toolName, action, allowed,
 		)
 
