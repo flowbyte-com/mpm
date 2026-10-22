@@ -8,6 +8,10 @@ accomplish, why it made a decision, and what actually happened across sessions.
 > architecture, behavioural contracts, cognitive model, runtime semantics,
 > reliability guarantees, and implementation reference.
 >
+> **The idea behind it:** See
+> [docs/PRINCIPLE-OF-INHERITED-INTELLIGENCE.md](docs/PRINCIPLE-OF-INHERITED-INTELLIGENCE.md)
+> — why MPM is built around an accumulating body of knowledge rather than
+> around individual agents.
 
 ## Why MPM?
 
@@ -375,6 +379,7 @@ CLI-only path, manual service setup, and first cognitive commands.
 | Start here | Purpose |
 |---|---|
 | [Technical specification](docs/SPEC.md) | Canonical architecture, cognitive model, behavioural contracts, CLI reference, and reliability details |
+| [The Principle of Inherited Intelligence](docs/PRINCIPLE-OF-INHERITED-INTELLIGENCE.md) | The intellectual commitment behind MPM: intelligence that accumulates as knowledge rather than persisting as an individual |
 | [Agent installation](agent_installation/INSTALL.md) | Install and verify an integration with your agent host |
 | [Supported integrations](agent_installation/README.md) | Host overview and links to adapter-specific documentation |
 | [Agent protocol](agent_installation/mpm-agent-protocol.md) | Wake, persistence, skill discovery, handoff, and recovery contract |

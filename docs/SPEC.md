@@ -136,6 +136,12 @@ That distinction transforms memory from passive storage into persistent reasonin
 
 The goal is not simply remembering information. **The goal is preserving intellectual progress.**
 
+The reasoning behind that goal — why continuity of accumulated knowledge is a
+different thing from continuity of a mind, and what follows from it — is stated
+in [`PRINCIPLE-OF-INHERITED-INTELLIGENCE.md`](./PRINCIPLE-OF-INHERITED-INTELLIGENCE.md).
+That document is the project's standing intellectual commitment; this section
+is the product behaviour it licenses.
+
 ---
 
 ## 3. The Cognitive Model
