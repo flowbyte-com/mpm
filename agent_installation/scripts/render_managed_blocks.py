@@ -208,7 +208,8 @@ ADAPTERS: list[dict] = [
             "at session start, but it carries protocol guidance only —\n"
             "**not** the dynamic wake payload. The first agent turn must\n"
             "call `mcp__mpm__mpm_context` action `read_wake_context` to\n"
-            "obtain wake (see protocol item 1 in the managed block above).\n"
+            "obtain wake (see the 'Inherit before you begin' responsibility\n"
+            "in the managed block above).\n"
             "On the other supported hosts (ClaudeCode, OpenClaw, OpenCode,\n"
             "Pi) the host fires the fetch automatically; Hermes is the\n"
             "exception.\n"
@@ -250,12 +251,13 @@ ADAPTERS: list[dict] = [
         # default compact surface and the call will be rejected."
         #
         # The bare canonical name is correct in BOTH modes because the
-        # universal block's rule 7 already documents `mpm call <tool>` as
-        # the way to reach any capability the host does not expose
-        # natively, and rule 1's wake fetch is exactly such a capability.
-        # One canonical wording therefore serves both OpenClaw modes
-        # without a host-specific prefix and without a second OpenClaw
-        # behavioural contract to keep in sync.
+        # universal block's "Discover MPM rather than assuming its limits"
+        # responsibility already documents `mpm call <tool>` as the way
+        # to reach any capability the host does not expose natively, and
+        # the "Inherit before you begin" wake fetch is exactly such a
+        # capability. One canonical wording therefore serves both
+        # OpenClaw modes without a host-specific prefix and without a
+        # second OpenClaw behavioural contract to keep in sync.
         "tool_prefix": "",
         "snippet_path": "templates/SOUL.md.snippet",
         "copy_paste_outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->",
@@ -368,6 +370,26 @@ _SENTENCE_END_RE = re.compile(r"[.!?](?:\s|$)")
 # listings like "actions `flush`, `read`, ..." are caught.
 _ACTION_RE = re.compile(r"\baction(?:s)?\b")
 
+# Connector words that introduce an action identifier after a tool
+# token: "using `read_wake_context`", "action `read_wake_context`",
+# "via `read_wake_context`", "with `read_wake_context`". The approved
+# behavioural contract (contract version 3.0.0) names the action
+# directly — "recover it through `mpm_context` using
+# `read_wake_context`" — so the connector word carries the invocation
+# signal in place of the literal word "action".
+_INVOCATION_CONNECTOR_RE = re.compile(
+    r"\b(?:action|actions|using|via|through|with|call|calls|calling"
+    r"|invoke|invokes|invoking)\b",
+)
+
+# A backticked token, capturing its content.
+_BACKTICKED_RE = re.compile(r"`([^`\n]+)`")
+
+# A backticked snake_case identifier names an ACTION of the tool it is
+# attached to (e.g. `read_wake_context`). A tool name (`mpm_…`) is a
+# second tool, not an action of the first, and is excluded.
+_ACTION_IDENT_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$")
+
 # The universal managed-block markers (used both in canonical source and in
 # the per-host copy/paste examples inside the source).
 _BARE_BLOCK_RE = re.compile(
@@ -400,17 +422,44 @@ _ITEM_ACTION_RE = re.compile(
 
 # ---------------------------------------------------------------------------
 
+def _names_action(span: str) -> bool:
+    """Return True when `span` — the text between a tool token and the
+    end of its sentence — names an ACTION of that tool.
+
+    An action identifier is a backticked snake_case name that is not a
+    tool name, introduced by an invocation connector word ("using",
+    "action", "via", "with", ...). This is what makes the approved
+    contract's phrasing — "recover it through `mpm_context` using
+    `read_wake_context`" — an invocation reference, even though the
+    sentence never says "action".
+    """
+    for m in _BACKTICKED_RE.finditer(span):
+        ident = m.group(1)
+        if ident.startswith("mpm_"):
+            continue  # a second tool, not an action of the first
+        if not _ACTION_IDENT_RE.match(ident):
+            continue  # not an action-shaped identifier (a value, a path)
+        if _INVOCATION_CONNECTOR_RE.search(span[:m.start()]):
+            return True
+    return False
+
+
 def render_for_host(block: str, prefix: str) -> str:
     """Return the canonical block rendered for one host.
 
     The renderer applies the host's transport-namespace prefix only to
-    `` `mpm_X` `` tokens that occur in `mpm_X action Y` invocation
-    context within the same sentence (i.e., the sentence containing the
-    token has the `action` keyword ahead of the next sentence
-    boundary). Tool references that appear in prose — with no
-    invocation keyword in the same sentence — are preserved (NOT
-    rewritten) so the renderer does not accidentally transform names
-    that happen to appear in explanatory prose.
+    `` `mpm_X` `` tokens that occur in an invocation context within the
+    same sentence. A token is in an invocation context when either:
+
+      * the sentence carries the `action` keyword ("`mpm_X` action
+        `Y`"), or
+      * the sentence names a backticked action identifier attached to
+        the token by an invocation connector ("`mpm_X` using `Y`").
+
+    Tool references that appear in prose — with no invocation signal in
+    the same sentence — are preserved (NOT rewritten) so the renderer
+    does not accidentally transform names that happen to appear in
+    explanatory prose.
 
     With an empty prefix (OpenCode, Pi), the result is byte-identical
     to the input block.
@@ -422,7 +471,8 @@ def render_for_host(block: str, prefix: str) -> str:
     for m in _MPM_TOKEN_RE.finditer(block):
         sentence_end_m = _SENTENCE_END_RE.search(block, m.end())
         sentence_end = sentence_end_m.start() if sentence_end_m else len(block)
-        if _ACTION_RE.search(block, m.end(), sentence_end):
+        span = block[m.end():sentence_end]
+        if _ACTION_RE.search(block, m.end(), sentence_end) or _names_action(span):
             out.append(block[cursor:m.start()])
             out.append(f"`{prefix}{m.group(1)}`")
             cursor = m.end()

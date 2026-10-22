@@ -68,6 +68,40 @@ MAKEFILE = REPO_ROOT / "Makefile"
 INSTALL_SH = REPO_ROOT / "install.sh"
 RECONCILE = AGENT_INSTALLATION / "scripts" / "reconcile_managed_blocks.py"
 CHECK_INSTALLED = AGENT_INSTALLATION / "scripts" / "check_installed_managed_blocks.py"
+OPENCLAW_SNIPPET = (
+    AGENT_INSTALLATION / "mpm-memory-openclaw" / "templates" / "SOUL.md.snippet"
+)
+
+_MANAGED_BLOCK_BEGIN = "<!-- BEGIN MPM MANAGED BLOCK -->"
+_MANAGED_BLOCK_END = "<!-- END MPM MANAGED BLOCK -->"
+
+
+def _managed_block_heading(text: str) -> str:
+    """The top-level heading inside the managed block.
+
+    The heading is LOCATED between the managed-block markers rather
+    than hardcoded. A hardcoded string that no longer appears in the
+    contract would turn every tamper fixture into a no-op, and the
+    refresh path would then be exercised without any drift to repair —
+    the failure would be invisible instead of loud.
+    """
+    begin = text.find(_MANAGED_BLOCK_BEGIN)
+    if begin == -1:
+        raise AssertionError("no managed block found")
+    end = text.find(_MANAGED_BLOCK_END, begin + 1)
+    if end == -1:
+        raise AssertionError("managed block is not terminated")
+    for line in text[begin:end].splitlines():
+        if line.lstrip().startswith("# "):
+            return line
+    raise AssertionError("the managed block has no top-level heading")
+
+
+def _canonical_block_heading() -> str:
+    """The heading the freshly-installed block must carry."""
+    return _managed_block_heading(
+        OPENCLAW_SNIPPET.read_text(encoding="utf-8"),
+    )
 
 
 def _sandbox_home() -> tuple[Path, dict]:
@@ -493,7 +527,10 @@ class OpenClawManagedBlockRepaired(unittest.TestCase):
         )
         text = self.target.read_text(encoding="utf-8")
         self.assertNotIn("stale body from an old contract", text)
-        self.assertIn("MPM behavioural contract", text)
+        self.assertIn(
+            _canonical_block_heading(), text,
+            "the refreshed block must carry the canonical heading",
+        )
 
     def test_user_content_outside_block_preserved_byte_for_byte(self):
         """Content above and below the managed markers must survive a
@@ -513,8 +550,13 @@ class OpenClawManagedBlockRepaired(unittest.TestCase):
         self.target.write_text(above + text[b:e] + below, encoding="utf-8")
 
         # Drift the block so the second run has real work to do.
-        stale = self.target.read_text(encoding="utf-8").replace(
-            "MPM behavioural contract", "MPM stale heading",
+        current = self.target.read_text(encoding="utf-8")
+        heading = _managed_block_heading(current)
+        stale = current.replace(heading, "# MPM stale heading", 1)
+        self.assertNotEqual(
+            stale, current,
+            "the drift fixture did not change the installed block, so this "
+            "test would pass without exercising the refresh path",
         )
         self.target.write_text(stale, encoding="utf-8")
 
@@ -534,7 +576,7 @@ class OpenClawManagedBlockRepaired(unittest.TestCase):
             f"content below the managed block must be preserved verbatim.\n"
             f"--- got tail ---\n{after[-200:]!r}",
         )
-        self.assertIn("MPM behavioural contract", after)
+        self.assertIn(_canonical_block_heading(), after)
 
     def test_second_reconciliation_is_a_noop(self):
         """Reconciliation is idempotent: a second run leaves the file

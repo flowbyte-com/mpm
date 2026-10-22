@@ -94,16 +94,32 @@ class TestInstallerContract(unittest.TestCase):
         self.assertEqual(text.count("<!-- END MPM-MANAGED SECTION:pi-instructions -->"), 1)
         # Current contract is in. The canonical managed block in
         # agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md (the
-        # pi-instructions block) states the auto-wake contract as
-        # "wake context normally arrives at session start" and the
-        # handoff contract as "write a handoff when meaningful state
-        # remains". The earlier assertion wording
-        # ("Wake is auto-injected on session start" / "Handoff
-        # before genuine session closure") was tied to an older
-        # snippet shape; the intent — auto-wake + handoff discipline
-        # — is unchanged.
-        self.assertIn("wake context normally arrives", text)
-        self.assertIn("write a handoff when meaningful state remains", text)
+        # pi-instructions block) states the wake contract as "Wake
+        # context may arrive automatically. If it does not, recover it
+        # through `mpm_context` using `read_wake_context`" and the
+        # handoff contract as "At genuine session closure, preserve
+        # meaningful continuation state …". The intent — wake arrives
+        # on its own, and meaningful closure leaves continuation state
+        # — is unchanged. The anchors are matched by meaning rather
+        # than by one exact sentence, so a re-wording cannot silently
+        # turn a present commitment into an absent one, while dropping
+        # the wake promise or the handoff discipline still fails here.
+        self.assertTrue(
+            any(p in text for p in (
+                "Wake context may arrive automatically",
+                "wake context normally arrives",
+            )),
+            "the installed block must tell the agent that wake context "
+            "arrives on its own",
+        )
+        self.assertTrue(
+            any(p in text for p in (
+                "At genuine session closure, preserve meaningful continuation state",
+                "write a handoff when meaningful state remains",
+            )),
+            "the installed block must tell the agent to leave meaningful "
+            "continuation state at genuine session closure",
+        )
 
     def test_fresh_install_project_scope(self):
         cp = _run(["--scope", "project", "--target-dir", str(self.tmp), "--snippet", str(SNIPPET)])

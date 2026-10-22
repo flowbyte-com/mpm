@@ -136,6 +136,12 @@ That distinction transforms memory from passive storage into persistent reasonin
 
 The goal is not simply remembering information. **The goal is preserving intellectual progress.**
 
+The reasoning behind that goal — why continuity of accumulated knowledge is a
+different thing from continuity of a mind, and what follows from it — is stated
+in [`PRINCIPLE-OF-INHERITED-INTELLIGENCE.md`](./PRINCIPLE-OF-INHERITED-INTELLIGENCE.md).
+That document is the project's standing intellectual commitment; this section
+is the product behaviour it licenses.
+
 ---
 
 ## 3. The Cognitive Model
@@ -1841,10 +1847,25 @@ time of writing). The build reads it once and stamps the result into
 every binary; the binary never re-derives it, and no second file, tag or
 constant declares a competing version.
 
-`mpm_agent_integration_version` (currently `2.1.0`) is a **different**
+`mpm_agent_integration_version` (currently `3.0.0`) is a **different**
 version — it versions the behavioural contract, not the software. It is
 declared by the canonical managed-block source and moves on its own
 schedule. Neither version is ever substituted for the other.
+
+The two versions moved independently in October 2026. The managed
+behavioural contract was replaced wholesale — a new inheritance-oriented
+contract with ten responsibilities — and every host adapter was
+regenerated from the new canonical source. Under the convention
+documented in
+[`agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md`](../agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md)
+("major — breaking — … render-contract change that would force adapter
+re-verification"), a wholesale contract replacement is a **major** bump:
+`2.1.0` → `3.0.0`. It was not a minor bump, because a minor bump means
+existing contracts still resolve under the old version, and this one does
+not — the rendered block an adapter installs is a different document. The
+product version did **not** move: the behavioural contract is not the
+software, and changing the text agents read is not a release of the
+binaries.
 
 #### What is embedded
 

@@ -16,7 +16,7 @@ Layered reference architecture (post-2026-09-04 canonical-snippets
 refactor):
 
   1. **Installed/snippet surface** (CLAUDE.md / AGENTS.md /
-     .hermes.md) — host-pinned minimal block (seven invariants).
+     .hermes.md) — host-pinned managed behavioural block.
   2. **Canonical source** (`MPM_AGENT_INTEGRATION_SNIPPETS.md`) —
      tool-reference stability contract table; deeper MPM surface
      (mpm_wakes, mpm_retrieval_diagnose, mpm_resolve, etc.).

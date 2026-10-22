@@ -26,8 +26,9 @@ per-host installers write; the installers are a convenience, not a
 requirement.
 
 If you are using OpenClaw, you don't need a snippets file at all —
-the runtime injects the same seven invariants into the system prompt
-automatically. See the OpenClaw row in [INSTALL.md](./INSTALL.md).
+the runtime injects the same managed behavioural block into the system
+prompt automatically. See the OpenClaw row in
+[INSTALL.md](./INSTALL.md).
 
 On Hermes, the managed block is delivered via `.hermes.md` (protocol
 guidance only — not the dynamic wake payload). The agent must call
@@ -272,6 +273,10 @@ writes one HTML comment:
 ```text
 <!-- mpm-provenance: version=0.1.0-dev commit=06c029ba11ce18c7f10aa60b0f0497ece2edda7c protocol=2.1.0 applied=2026-10-21T18:04:11Z -->
 ```
+
+That is one real installation, captured verbatim: the protocol version in
+it is the behavioural contract that installation carried, which is why it
+is not necessarily the current one.
 
 It carries the MPM **product version** of the build that wrote the
 block, the exact **source commit** that build was made from, the

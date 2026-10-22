@@ -92,7 +92,7 @@ class CanonicalProtocol(unittest.TestCase):
         #     fail to convey the cross-session continuity contract;
         #     force substantive content.
         #
-        #   upper bound (< 28,000 chars): the protocol's intent is to
+        #   upper bound (< 40,000 chars): the protocol's intent is to
         #     be a principles document, not a kitchen-sink reference.
         #     Above this threshold the file has likely accumulated
         #     host-specific implementation detail, duplicated host-
@@ -111,6 +111,20 @@ class CanonicalProtocol(unittest.TestCase):
         #     (commit 32dd25c, 2026-09-21), which replaced earlier
         #     prose describing the contextual routing pipeline with
         #     a bounded semantic interpretation contract.
+        #   40,000 — bumped for §9 "Event-driven maintenance of
+        #     inherited knowledge" (October 2026). §9 is a new
+        #     architectural principle, not accumulated detail: the
+        #     approved behavioural contract assigns the agent a
+        #     "maintain what you inherit" responsibility, and the
+        #     protocol is where the operations behind it live. The
+        #     section is 232 lines of normative prose — the causal
+        #     maintenance question, the three kinds of stale knowledge,
+        #     provenance preservation when superseding — and it
+        #     replaced no existing prose; the protocol grew rather
+        #     than accumulated. The ceiling is raised with the same
+        #     proportional headroom the previous bumps used (28,000
+        #     over a 26,160-char document is ~7%; 40,000 over a
+        #     37,530-char document is ~6.6%).
         #
         # This test is intentionally a maintainability heuristic, not
         # a hard constraint: bumping the ceiling again is acceptable
@@ -123,9 +137,9 @@ class CanonicalProtocol(unittest.TestCase):
         self.assertGreater(len(self.text), 2000)
         current = len(self.text)
         self.assertLess(
-            current, 28000,
+            current, 40000,
             f"canonical protocol is too large ({current} chars); "
-            f"the upper bound is 28000. Trim template syntax, "
+            f"the upper bound is 40000. Trim template syntax, "
             f"duplicated host-adapter guidance, or implementation "
             f"details that duplicate the underlying Go code. "
             f"If a new architectural principle genuinely requires "
@@ -315,16 +329,24 @@ class InstallerRoundTrip(unittest.TestCase):
         self.assertNotIn("stale-handoff", result)
         # Current contract is in. The canonical managed block in
         # agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md states the
-        # auto-wake contract as "wake context normally arrives at session
-        # start" and the recovery contract as a `read_wake_context`
-        # fallback path. The earlier test wording ("Wake is auto-injected"
-        # / "Recovery / fallback") was tied to an older snippet shape that
-        # the canonical source no longer uses; the intent — auto-wake at
-        # session start with a fetch fallback — is unchanged. Asserting
-        # against the current wording means a regression that drops the
-        # wake-promise or the recovery hint will fail here, which is what
-        # this test exists to pin.
-        self.assertIn("wake context normally arrives", result)
+        # wake contract as "Wake context may arrive automatically. If it
+        # does not, recover it through `mpm_context` using
+        # `read_wake_context`" — the "Inherit before you begin"
+        # responsibility. The intent — wake arrives on its own, and
+        # there is an explicit recovery path when it does not — is what
+        # this test pins. The anchors are matched by meaning rather
+        # than by one exact sentence, so a re-wording of the contract
+        # does not silently turn a present commitment into an absent
+        # one, while dropping the wake promise or the recovery hint
+        # still fails here.
+        self.assertTrue(
+            any(p in result for p in (
+                "Wake context may arrive automatically",
+                "wake context normally arrives",
+            )),
+            "the installed block must tell the agent that wake context "
+            "arrives on its own",
+        )
         self.assertIn("read_wake_context", result)
         # Exactly one managed section
         self.assertEqual(result.count("BEGIN MPM-MANAGED SECTION"), 1)

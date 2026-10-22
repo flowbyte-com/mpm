@@ -95,11 +95,31 @@ class TestInstallerContract(unittest.TestCase):
         # a real product defect for Hermes.
         self.assertIn("Hermes does **not** have a native session-start", text)
         self.assertIn("first agent turn must", text)
-        # Handoff contract: the canonical prose is "write a handoff when
-        # meaningful state remains for another session", not the older
-        # "Handoff before genuine session closure" string the test used
-        # to grep for.
-        self.assertIn("write a handoff when meaningful state remains", text)
+        # Handoff contract: the canonical prose is now "At genuine
+        # session closure, preserve meaningful continuation state when
+        # unfinished work or important context remains" — the "Pass on
+        # what matters" responsibility — together with the explicit
+        # "Avoid ceremonial handoffs for trivial interactions" limit.
+        # The anchors are matched by meaning rather than by one exact
+        # sentence, so a re-wording cannot silently turn a present
+        # commitment into an absent one, while dropping the handoff
+        # discipline still fails here.
+        self.assertTrue(
+            any(p in text for p in (
+                "At genuine session closure, preserve meaningful continuation state",
+                "write a handoff when meaningful state remains",
+            )),
+            "the installed block must tell the agent to leave meaningful "
+            "continuation state at genuine session closure",
+        )
+        self.assertTrue(
+            any(p in text for p in (
+                "Avoid ceremonial handoffs for trivial interactions",
+                "A handoff is not a substitute for recording important discoveries",
+            )),
+            "the installed block must limit handoffs to sessions that have "
+            "something meaningful to preserve",
+        )
 
     def test_idempotent_double_install_is_noop(self):
         target = self._target()

@@ -177,11 +177,11 @@ When the current task context suggests a specialized procedure, invoke
 the discovery surface explicitly:
 
 ```bash
-mpm call mpm_context '{"action":"proactive_recall_hint","params":{"conversation_text":"<recent task summary>"}}'
+mpm call mpm_context --payload '{"action":"proactive_recall_hint","params":{"conversation_text":"<recent task summary>"}}'
 ```
 
 The surface returns a list of skill hints. For each hint, read the
-skill with `mpm call mpm_skills '{"action":"read","params":{"name":"<skill-name>"}}'`
+skill with `mpm call mpm_skills --payload '{"action":"read","params":{"name":"<skill-name>"}}'`
 and follow its procedure.
 
 **What `when_to_use` means.** The field is a case-insensitive keyword
@@ -371,7 +371,10 @@ mpm call <tool> --payload-file /tmp/payload.json
 
 `mpm call` is the canonical escape hatch across all hosts. It speaks the
 exact same shape as the host-native MCP tools and writes to the same
-artifact_provenance rows.
+artifact_provenance rows — the registry, the handlers, and the
+provenance mechanism are shared. What differs by transport is the
+actor attribution: a write made through the CLI is recorded as the CLI
+actor, not the host's agent.
 
 Do not abandon persistence when the preferred integration breaks — use
 the fallback until the host recovers.
@@ -491,6 +494,238 @@ instructions is **material to consult**, not a procedure to run. Do
 not auto-invoke reference contents the way you would invoke a skill
 read via `mpm_skills`. Skills are approved-for-reuse; references are
 consult-and-verify.
+
+---
+
+## 9. EVENT-DRIVEN MAINTENANCE OF INHERITED KNOWLEDGE
+
+The managed behavioural block assigns you a responsibility that is easy
+to state and hard to practise: **maintain what you inherit.** This
+section is the operational reading of that responsibility. It says how
+to notice that inherited knowledge has changed, how to find the records
+that change touches, and how to correct them without destroying the
+history that made them worth keeping in the first place.
+
+The trigger is **an event, not a schedule.** Maintenance is not a
+periodic sweep performed to demonstrate diligence. It happens when
+something you learned this session changes the meaning of something a
+previous session recorded.
+
+### 9.1 The causal question
+
+Ask one question when you learn something:
+
+> Which existing record would a future agent act on incorrectly because
+> of what I just learned?
+
+That question is the whole of event-driven maintenance. If the answer is
+"none", there is nothing to maintain — write the new knowledge (§2) and
+move on. If the answer names a record, you have a maintenance
+obligation, and that obligation extends to the record's dependents.
+
+Do not re-read the whole store to answer it. The question is answered
+from the change you just made, plus retrieval targeted at that change.
+
+### 9.2 What counts as a meaningful change
+
+A change is meaningful for maintenance when it would make an existing
+record misleading if a future agent relied on it.
+
+| Your change                                  | Why inherited knowledge may now mislead                |
+| -------------------------------------------- | ----------------------------------------------------- |
+| A decision you rely on has been reversed      | The old rationale is still stored, and still reads as authoritative |
+| A hypothesis has been disproven               | The theory still reads as an open question            |
+| An API, file format, or environment changed   | A recorded "how to" is now wrong, not merely dated    |
+| A memory's subject was renamed, moved, or removed | A pointer now resolves to nothing, or to the wrong thing |
+| You found the earlier record was wrong        | The record states something untrue                    |
+| A dependency, constraint, or policy changed    | The "why" behind an old choice no longer holds        |
+
+Trivial changes are not maintenance triggers. A new file created in an
+unrelated directory, a formatting preference, a routine test run — none
+of these imply that a stored record has become misleading.
+
+### 9.3 Find the affected records with targeted retrieval
+
+Target the retrieval at the thing that changed. The domain tools expose
+query surfaces for exactly this; use them instead of listing the store.
+
+```bash
+# decisions about the subject you just changed
+mpm call mpm_decisions --payload '{"action":"query","params":{"query":"<subject>"}}'
+
+# hypotheses about the same subject
+mpm call mpm_theories --payload '{"action":"query","params":{"query":"<subject>"}}'
+
+# memories mentioning it
+mpm call mpm_memory --payload '{"action":"query","params":{"query":"<subject>","collection":"memories","limit":10}}'
+```
+
+Read the returned rows before writing anything. A query tells you
+*which records exist*; it does not tell you what they say, whether they
+are still live, or whether they relate to your change at all. Read the
+record (`mpm_memory` action `show` with the row's `id`) and then
+decide.
+
+If your change concerns external material rather than project
+knowledge, the reference corpus is a separate subsystem: a memory query
+cannot establish whether it holds a document. Search the references and
+read the document itself (see §8).
+
+### 9.4 Three kinds of stale knowledge — do not confuse them
+
+Not every stale record is wrong, and the difference determines what you
+may do to it.
+
+| Kind                | What it means                                                                                 | What you may do |
+| ------------------- | --------------------------------------------------------------------------------------------- | ---------------- |
+| **Previously correct, now outdated** | The claim was true under earlier circumstances; those circumstances have changed. | Supersede it. The original stays readable as history. |
+| **Incorrect**       | The claim was mistaken when it was recorded.                                                   | Correct it, and preserve the correction. Never silently rewrite. |
+| **Unresolved**      | Available evidence does not yet establish whether the claim remains valid.                    | Flag it. Do not resolve it. |
+
+Collapsing these three is the most common way inherited knowledge gets
+corrupted. An outdated record rewritten as if it had always been wrong
+destroys the reasoning that made it worth keeping. An incorrect record
+left in place because it "might still be right" propagates an error. An
+unresolved record resolved with confidence is exactly the failure the
+behavioural contract forbids: **never silently promote speculation into
+certainty.**
+
+### 9.5 Flagging suspected stale knowledge without inventing corrections
+
+When you suspect a record is stale but cannot show it, **flag it instead
+of correcting it.** A flag is honest; an invented correction is not.
+
+The supported way to flag a memory is to patch its **metadata**, never
+its text:
+
+```bash
+mpm call mpm_memory --payload '{"action":"patch","params":{"memory_id":"<id>","patch":{"review_note":"<what is uncertain and why>"}}}'
+```
+
+`mpm_memory` action `patch` applies a JSON merge-patch to the memory's
+**metadata column only**. The stored fact text of a memory is not
+editable through this path, by design — an inherited fact cannot be
+silently rewritten in place. (A patch that carries a `fact` key lands in
+metadata and leaves the stored text untouched; it does not rewrite the
+claim.) That constraint is what makes the flag honest: a future agent
+can see that a record was flagged and why, and can still read the
+original claim unchanged.
+
+When a flag cannot carry the uncertainty — when the question needs an
+owner and a resolution — record it as **work**:
+
+```bash
+mpm call mpm_work --payload '{"action":"create","params":{"title":"<what must be checked>","content":"<why it matters>"}}'
+```
+
+Work items are state, not knowledge (§7.1). A work item says "this
+question is open"; it does not assert an answer.
+
+### 9.6 Preserve provenance when you resolve or supersede
+
+Corrections must be traceable. A future agent that meets a changed claim
+must be able to see the original claim, the reason for the change, and
+who made it.
+
+**Decisions** have a first-class path:
+
+```bash
+mpm call mpm_decisions --payload '{"action":"supersede","params":{"id":"<original id>","choice":"<new choice>","rationale":"<why>","outcome":"<what happened>","source_ids":["<evidence ids>"]}}'
+```
+
+`supersede` records the replacement decision with full provenance and
+marks the original as superseded: it stays readable, it is linked to its
+replacement, and it no longer competes with the current claim.
+`invalidate` retires a decision without a replacement and records the
+reason. Both take the decision's `id`.
+
+**Theories** resolve rather than get edited:
+
+```bash
+mpm call mpm_theories --payload '{"action":"resolve","params":{"theoryId":"<id>","conclusion":"<what the evidence showed>","newStatus":"proven"}}'
+```
+
+`newStatus` is `proven` or `disproven`. The hypothesis and its
+validation criteria remain on the record, so the reasoning survives the
+outcome.
+
+**Evidence** is the least-destructive strengthening available. When a
+claim is right and you simply have more proof, add evidence instead of
+rewriting the claim:
+
+```bash
+mpm call mpm_evidence --payload '{"action":"add","params":{"artifact_id":"<id>","artifact_type":"memory","type":"test","source_group":"test","created_by":"<who observed it>","strength":0.8,"notes":"<what was observed>"}}'
+```
+
+`artifact_type` is one of `memory`, `theory`, `decision`, `lesson`,
+`skill`, `work`. `type` is the kind of evidence and comes from a fixed
+vocabulary — `observation`, `test`, `reproduction`, `challenge`,
+`decision_outcome`, `external_reference` — and an unrecognised value is
+rejected. `source_group` identifies where the observation came from
+(`test`, `filesystem`, `api_response`, `manual_review`, `ci`, `git`,
+`external`, `tool_invocation`, `api_call`, `process`) and is likewise
+rejected if unrecognised; `mpm_evidence` action `source_groups` returns
+the accepted vocabulary. `artifact_id`, `type`, `source_group` and
+`created_by` are required. `strength` and `independence_factor` are
+optional numbers.
+
+**A superseded memory** is marked through its metadata, not by editing
+it:
+
+```bash
+mpm call mpm_memory --payload '{"action":"patch","params":{"memory_id":"<old id>","patch":{"superseded_by":"<new id>","superseded_at":"<rfc3339>"}}}'
+```
+
+`metadata.superseded_by` is the canonical supersede marker: it records
+the chain edge to the replacement, and the materializer treats the
+original as no longer live. The original row is retained — superseded,
+not deleted.
+
+Do not use `mpm_memory` action `shred` for maintenance. `shred` is a
+permanent hard delete with no restore path; it is right for data that
+should no longer exist, and wrong for knowledge that has been
+corrected. `delete` is the soft, reversible alternative — `restore`
+brings the row back.
+
+**Do not launder history.** A correction that erases the original
+claim, its provenance, or the reasoning for the change leaves a future
+agent with a bare statement and no way to judge it. Record the
+correction *over* the claim, with the claim still there.
+
+### 9.7 Housekeeping is not maintenance
+
+Two habits are worth naming, because they look like diligence and
+destroy value:
+
+- **Store-wide scans.** Listing every memory, decision, and theory to
+  see whether anything is stale is not maintenance. It consumes context,
+  it surfaces records irrelevant to what you changed, and it invites
+  edits nobody asked for. Retrieve against the subject of your change
+  (§9.3), and against nothing else.
+- **Ceremonial housekeeping.** `mpm_memory` action `review` lists
+  memories that have not been reinforced recently. It is a diagnostic for
+  a specific question — "which of my memories is going cold?" — not a
+  routine step, and a listing is not a finding. Do not run it to show
+  that maintenance occurred, and do not rewrite a record merely because
+  it appeared in a review list.
+
+Maintenance is justified by a causal link to something you learned. If
+you cannot state the link, do not perform the write.
+
+### 9.8 Continuation state, not titles
+
+Maintenance includes leaving the next session able to continue. This is
+the same obligation as §4, seen from the maintenance side.
+
+A title is not continuation state. "Fix the scheduler" tells a successor
+agent nothing about where to start. What a successor needs is the
+reasoning, the relevant progress, the unresolved dependencies, and the
+next concrete action.
+
+When a work item carries that content — in its body, in its notes, or in
+the handoff written alongside it — the maintenance survives the session.
+When it carries only a title, the successor must rediscover the work,
+and the knowledge you carefully maintained was never actually inherited.
 
 ---
 

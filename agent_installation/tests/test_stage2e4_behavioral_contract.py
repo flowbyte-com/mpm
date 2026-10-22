@@ -132,14 +132,10 @@ class ContinuityContract(unittest.TestCase):
         """Every block must teach wake orientation AND the
         read_wake_context recovery path.
 
-        2026-09-29: the required phrase was the exact string
-        "Wake is auto-injected on session start". The approved compact
-        block states the same behavioural fact in rule 1 ("MPM wake
-        context normally arrives at session start ... If you do not have
-        it, fetch it through `mpm_context` action `read_wake_context` as
-        a recovery path"), and adds the integration-failure signal that
-        repeated absence is a host bug rather than normal operation.
-        This asserts the behaviour, not one wording of it.
+        The approved contract states the same behavioural fact in the
+        "Inherit before you begin" responsibility: wake context may
+        arrive automatically, and when it does not, the agent recovers it
+        explicitly. This asserts the behaviour, not one wording of it.
         """
         for host, block in self.blocks:
             with self.subTest(host=host):
@@ -149,55 +145,61 @@ class ContinuityContract(unittest.TestCase):
                     f"{host}: managed block must name the "
                     f"read_wake_context recovery path",
                 )
-                # Wake normally arrives at session start (orientation).
+                # Wake normally arrives on its own (orientation).
                 normalized = re.sub(r"\s+", " ", block)
                 self.assertTrue(
                     any(p in normalized for p in (
+                        "Wake context may arrive automatically",
                         "Wake is auto-injected on session start",
                         "wake context normally arrives at session start",
                     )),
                     f"{host}: managed block must teach that wake context "
-                    f"arrives at session start",
+                    f"arrives without the agent having to fetch it",
                 )
-                # Absent wake on an auto-injecting host is a defect, not
-                # normal operation — the recovery path is for that case.
+                # When it does not arrive, the agent must be told how to
+                # recover it rather than proceeding uninformed.
                 self.assertTrue(
-                    "recovery path" in normalized or "integration problem" in normalized,
+                    any(p in normalized for p in (
+                        "recover it through",
+                        "recovery path",
+                    )),
                     f"{host}: managed block must frame read_wake_context as "
-                    f"the recovery path and repeated absence as an "
-                    f"integration problem",
+                    f"the recovery path when wake context does not arrive",
                 )
 
     def test_pointer_semantics_survive_as_rule_two(self):
-        """2026-09-29 replacement for
-        test_contextual_focus_described_in_every_block.
+        """Replacement for test_contextual_focus_described_in_every_block.
 
-        The compact managed block no longer names `contextual_focus` —
-        that term is wake-payload internals, not a behavioural decision
-        the agent makes before tool selection. The BEHAVIOUR it taught
-        is preserved verbatim as rule 2: wake context is bounded
-        inherited awareness, not a ranking or a verdict, and pointers
-        are followed when the summary is insufficient. This asserts that
-        behaviour survives rendering into every host.
+        The managed block no longer names `contextual_focus` — that term
+        is wake-payload internals, not a behavioural decision the agent
+        makes before tool selection. The BEHAVIOUR it taught is
+        preserved: inherited context is a pointer into durable
+        knowledge, not a complete or unquestionable account, and the
+        pointers are followed when the summary is insufficient. This
+        asserts that behaviour survives rendering into every host.
         """
         for host, block in self.blocks:
             with self.subTest(host=host):
                 normalized = re.sub(r"\s+", " ", block)
                 self.assertTrue(
-                    "inherited awareness" in normalized
+                    "Treat inherited context as pointers into durable "
+                    "knowledge" in normalized
+                    or "inherited awareness" in normalized
                     or "inherited working awareness" in normalized,
-                    f"{host}: managed block must teach that wake context is "
-                    f"bounded inherited awareness",
+                    f"{host}: managed block must teach that inherited "
+                    f"context points into durable knowledge rather than "
+                    f"being self-sufficient",
                 )
                 self.assertTrue(
-                    "not a ranking or a verdict" in normalized
+                    "not a complete or unquestionable account" in normalized
+                    or "not a ranking or a verdict" in normalized
                     or "not a ranking" in normalized,
-                    f"{host}: managed block must teach that wake context is "
-                    f"not a ranking or a verdict",
+                    f"{host}: managed block must teach that inherited "
+                    f"context is not a complete or unquestionable account",
                 )
                 # The staleness/supersession caveat that the old
                 # contextual_focus wording carried.
-                for concept in ("superseded", "hypothesis", "stale"):
+                for concept in ("outdated", "supersede", "hypothesis"):
                     self.assertIn(
                         concept, block,
                         f"{host}: managed block must teach that stored "

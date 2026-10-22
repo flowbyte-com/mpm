@@ -12,7 +12,7 @@ These tests pin:
     file; earlier occurrences are host-rendered copy/paste examples).
   - The canonical block uses bare canonical tool names (no {TOOL_PREFIX}
     placeholder; no host-specific prefix text).
-  - The canonical block teaches all seven behavioural invariants using
+  - The canonical block teaches all ten responsibilities using
     their stable label strings.
   - The canonical block does NOT advertise `note` as a parameter on
     `mpm_handoff write` (regression for the 2026-09-04 audit finding;
@@ -66,30 +66,47 @@ def _load_render_module():
 _render = _load_render_module()
 
 
-# The behavioural-invariant label strings the canonical block must
-# teach. Substring match — the bold header text after the numbered
-# item marker is enough. Order is the order they appear in the canonical
-# block. The list reflects the 2026-09-29 instruction-architecture
-# simplification (contract version 1.3.0): the canonical block now
-# carries seven compact rules instead of the prior ten invariants.
-# Substantively the rules are:
-#   1. orientation / wake recovery ("Orient before you work")
-#   2. inherited context is pointers, not truth ("Treat wake context as pointers, not truth")
-#   3. persist durable state but not trivia ("Persist during work - and not trivia")
-#   4. reuse before reacquisition ("Reuse before reacquiring")
-#   5. substantial continuing work lifecycle ("Track substantial continuing work")
-#   6. meaningful handoff ("Leave useful continuation state")
-#   7. capability discovery / CLI recovery ("Do not assume an MPM capability is unavailable")
-INVARIANT_LABELS = (
-    "Orient before you work",
-    "Treat wake context as pointers, not truth",
-    "Persist during work",
-    "Reuse before reacquiring",
-    "Track substantial continuing work",
-    "Leave useful continuation state",
-    "Do not assume an MPM capability is unavailable",
-    "Search references before concluding external material is",
+# The behavioural-responsibility headings the canonical block must
+# teach. Substring match — the heading text under each `###` marker is
+# enough. Order is the order they appear in the canonical block.
+#
+# The list reflects the approved inheritance-oriented behavioural
+# contract (protocol version 3.0.0, "The Principle of Inherited
+# Intelligence"). It replaced the numbered-rule list that preceded it;
+# the responsibilities are:
+#   1. inherit before you begin
+#   2. discover MPM rather than assuming its limits
+#   3. preserve discoveries as they happen
+#   4. decisions deserve their reasoning
+#   5. theories are an inheritance too
+#   6. maintain project continuity
+#   7. reuse, challenge and improve inherited knowledge
+#   8. maintain what you inherit
+#   9. pass on what matters
+#   10. value knowledge, not volume
+RESPONSIBILITY_HEADINGS = (
+    "Inherit before you begin",
+    "Discover MPM rather than assuming its limits",
+    "Preserve discoveries as they happen",
+    "Decisions deserve their reasoning",
+    "Theories are an inheritance too",
+    "Maintain project continuity",
+    "Reuse, challenge and improve inherited knowledge",
+    "Maintain what you inherit",
+    "Pass on what matters",
+    "Value knowledge, not volume",
 )
+
+
+def _flat(text: str) -> str:
+    """Collapse all whitespace runs to single spaces.
+
+    The canonical block's prose is hard-wrapped at the source's column
+    width, so an anchor that spans a wrap point would not match the raw
+    text. Anchors are matched against this flattened form instead, which
+    makes them independent of where the source happens to wrap.
+    """
+    return re.sub(r"\s+", " ", text)
 
 
 class CanonicalSourceExists(unittest.TestCase):
@@ -160,28 +177,25 @@ class CanonicalBlockExtraction(unittest.TestCase):
                 f"host-specific prefix {prefix!r} leaked into canonical source",
             )
 
-    def test_block_teaches_all_behavioural_invariants(self):
-        """The canonical block must enumerate every behavioural invariant
-        by its stable label string.
+    def test_block_teaches_all_behavioural_responsibilities(self):
+        """The canonical block must name every behavioural responsibility
+        by its stable heading text.
 
-        This docstring previously claimed a "version 1.2.0 expansion"
-        lifted the count from 7 to 10 and that "reference acquisition"
-        had become an explicit numbered invariant. No such expansion ever
-        landed: the block sat at 7 items with no reference-discovery
-        guidance, while this docstring described the intended state. An
-        agent reading only the managed block therefore had no instruction
-        to consult the reference corpus at all — the WordPress incident
-        in issue #25 is that gap made visible. The label is now genuinely
-        required, so the description matches what is enforced."""
-        for label in INVARIANT_LABELS:
-            self.assertIn(label, self.block, f"canonical block missing invariant: {label!r}")
+        The headings are the contract's structure. They are matched as
+        substrings rather than by position, so adding, removing or
+        reordering a responsibility is a deliberate edit to this list
+        rather than a silent drift in the source."""
+        for heading in RESPONSIBILITY_HEADINGS:
+            self.assertIn(
+                heading, self.block,
+                f"canonical block missing responsibility: {heading!r}",
+            )
 
     def test_block_uses_stable_non_negotiable_wording(self):
         """The block must NOT use brittle numbered phrasings like
         'The seven non-negotiable invariants below...' which break
-        when the count changes. Post-2026-09-29 the canonical block
-        no longer uses a numbered 'invariants' framing — it uses the
-        stable prose 'behavioural contract' header instead."""
+        when the count changes. The canonical block uses the stable
+        'Your responsibilities' framing instead."""
         self.assertNotIn(
             "The seven non-negotiable invariants below",
             self.block,
@@ -208,10 +222,14 @@ class CanonicalBlockExtraction(unittest.TestCase):
 
     def test_block_describes_compact_projection_semantically(self):
         """The wake-projection description must NOT pin a specific
-        field count. Post-2026-09-29 the canonical block dropped
-        payload field enumeration entirely — the wake envelope
-        documents its fields, the block orients the user on what to
-        do with the bounded result."""
+        field count. The canonical block dropped payload field
+        enumeration entirely — the wake envelope documents its fields,
+        the block orients the user on how to treat what it returns.
+
+        The semantic anchor is the "pointers, not a complete or
+        unquestionable account" phrasing. It must be matched against the
+        flattened text: the canonical source hard-wraps its prose, so
+        the raw substring would not survive the wrap point."""
         # No `9-field`, `10-field`, `N-field` wording.
         for bad in ("9-field", "10-field", "11-field", "8-field"):
             self.assertNotIn(
@@ -220,8 +238,164 @@ class CanonicalBlockExtraction(unittest.TestCase):
             )
         # The semantic description IS present.
         self.assertIn(
-            "bounded", self.block,
-            "wake boundedness semantic description missing",
+            "not a complete or unquestionable account", _flat(self.block),
+            "wake-projection semantic description missing",
+        )
+
+
+class CanonicalBlockSelection(unittest.TestCase):
+    """The extractor must pick the canonical block out of a document
+    that contains several managed blocks.
+
+    The canonical source is not just the contract: it also carries a
+    copy/paste example per supported host, and every one of those
+    examples contains a full managed block. The examples are host-
+    rendered — they carry a tool-namespace prefix — so the block the
+    extractor returns is the difference between "the contract, ready
+    to render" and "one host's already-rendered copy".
+
+    Getting this wrong is silent. A block extracted from the wrong
+    occurrence still has the right markers, still has the right
+    responsibilities, and still renders — it just renders the wrong
+    text into every host, with one host's prefix baked in. These tests
+    pin the selection, not the presence.
+    """
+
+    # The heading the canonical source uses for the host-neutral block.
+    # The extractor does not parse headings; this is the landmark a
+    # test uses to prove the right occurrence was chosen.
+    CANONICAL_HEADING = "# The canonical managed block (host-neutral)"
+
+    BLOCK_RE = re.compile(
+        r"<!-- BEGIN MPM MANAGED BLOCK -->\n.*?<!-- END MPM MANAGED BLOCK -->\n",
+        re.DOTALL,
+    )
+
+    def setUp(self):
+        self.text = CANONICAL_SOURCE.read_text(encoding="utf-8")
+        self.block = _render.extract_canonical_block(self.text)
+        self.matches = list(self.BLOCK_RE.finditer(self.text))
+
+    def test_the_source_really_does_contain_several_blocks(self):
+        """The scenario this class guards is only real if the document
+        contains more than one managed block."""
+        self.assertGreater(
+            len(self.matches), 1,
+            "the canonical source is expected to carry a managed block in "
+            "each copy/paste example as well as the canonical one",
+        )
+        self.assertIn(
+            self.CANONICAL_HEADING, self.text,
+            "the canonical source is expected to label the host-neutral "
+            "block so the selection can be verified against it",
+        )
+
+    def test_the_extractor_returns_the_canonical_occurrence(self):
+        """The returned block is the one under the host-neutral
+        heading — not one of the copy/paste examples."""
+        heading_at = self.text.index(self.CANONICAL_HEADING)
+        after_heading = [m for m in self.matches if m.start() > heading_at]
+        self.assertEqual(
+            len(after_heading), 1,
+            "expected exactly one managed block after the host-neutral "
+            f"heading, found {len(after_heading)}",
+        )
+        self.assertEqual(
+            self.block, after_heading[0].group(0),
+            "the extractor did not return the canonical block",
+        )
+
+    def test_the_extracted_block_is_not_any_prefixed_example(self):
+        """No host-rendered example may be what the extractor returned.
+
+        Note what this does NOT claim. The copy/paste examples for the
+        bare-name hosts (OpenCode, Pi) are byte-identical to the
+        canonical block, because those hosts use the canonical tool
+        names as-is. Equality with those examples is therefore not
+        evidence of a mis-selection; inequality with a PREFIXED
+        example is. The prefix is what makes an example an example.
+        """
+        heading_at = self.text.index(self.CANONICAL_HEADING)
+        examples = [m.group(0) for m in self.matches if m.start() < heading_at]
+        self.assertTrue(examples, "expected at least one copy/paste example")
+
+        prefixed = [
+            example for example in examples
+            if "mpm__mpm_" in example or "mcp__mpm__mpm_" in example
+        ]
+        self.assertTrue(
+            prefixed,
+            "expected at least one host-prefixed copy/paste example",
+        )
+        for example in prefixed:
+            self.assertNotEqual(
+                self.block, example,
+                "the extractor returned a host-rendered copy/paste example "
+                "instead of the canonical block",
+            )
+
+    def test_bare_name_examples_are_identical_to_the_canonical_block(self):
+        """The OpenCode and Pi examples equal the canonical block.
+
+        This is the property that makes the previous test's scope
+        precise: for a bare-name host the "example" IS the canonical
+        text, so byte-equality with it carries no information about
+        which occurrence was selected.
+        """
+        heading_at = self.text.index(self.CANONICAL_HEADING)
+        examples = [m.group(0) for m in self.matches if m.start() < heading_at]
+        bare = [
+            example for example in examples
+            if "mpm__mpm_" not in example and "mcp__mpm__mpm_" not in example
+        ]
+        self.assertTrue(
+            bare,
+            "expected at least one bare-name copy/paste example",
+        )
+        for example in bare:
+            self.assertEqual(
+                self.block, example,
+                "a bare-name copy/paste example must equal the canonical "
+                "block byte-for-byte",
+            )
+
+    def test_the_extracted_block_carries_no_host_prefix(self):
+        """The canonical block is host-neutral. An example would carry
+        its host's namespace prefix."""
+        for prefix in ("mpm__mpm_", "mcp__mpm__mpm_"):
+            self.assertNotIn(
+                prefix, self.block,
+                f"the extracted block carries the host-specific prefix "
+                f"{prefix!r}; an example block was extracted",
+            )
+
+    def test_the_selection_does_not_depend_on_the_examples(self):
+        """Removing every copy/paste example must not change what the
+        extractor returns.
+
+        The extraction is a last-occurrence rule over a document whose
+        canonical block is written last. If the result were somehow
+        derived from the examples, removing them would change it. This
+        test pins that the examples are inert as far as the canonical
+        block is concerned.
+        """
+        heading_at = self.text.index(self.CANONICAL_HEADING)
+        without_examples = self.text[heading_at:]
+        extracted = _render.extract_canonical_block(without_examples)
+        self.assertEqual(
+            extracted, self.block,
+            "the extracted canonical block changed when the copy/paste "
+            "examples were removed; the selection is coupled to them",
+        )
+
+    def test_the_selected_block_is_what_the_renderer_renders(self):
+        """The selected block, rendered with a bare prefix, is the
+        canonical output — and it is idempotent under re-rendering."""
+        rendered = _render.render_for_host(self.block, "")
+        self.assertEqual(
+            rendered, self.block,
+            "the canonical block is not stable under a bare-prefix "
+            "render; the extracted occurrence is not the canonical one",
         )
 
 
@@ -239,11 +413,15 @@ class PerHostRendering(unittest.TestCase):
 
     def test_claude_code_uses_mpm_double_namespace(self):
         """Claude renders `mpm_context` as `mpm__mpm_context` when it
-        appears in an invocation context (rule 1 of the canonical
-        block: `mpm_context` action `read_wake_context`). The block
-        names only `mpm_context` and `mpm_call` directly; other tools
-        live in mpm_help / tool descriptions, so the assertion below
-        checks the one tool the canonical block actually invokes."""
+        appears in an invocation context (the "Inherit before you
+        begin" responsibility of the canonical block: `mpm_context`
+        action `read_wake_context`). The responsibility is named, not
+        numbered: a test that reached for "rule 1" would stop pointing
+        at the right sentence the moment the contract was renumbered.
+        The block names only `mpm_context` and `mpm_call` directly;
+        other tools live in mpm_help / tool descriptions, so the
+        assertion below checks the one tool the canonical block
+        actually invokes."""
         out = self._render_host("mpm__")
         self.assertIn("mpm__mpm_context", out)
         # No triple-prefix regression.
@@ -625,40 +803,39 @@ class RendererSemanticGuard(unittest.TestCase):
     def test_rendered_canonical_preserves_prose_in_wake_payload(self):
         """End-to-end lock on the actual canonical source: the renderer
         must transform the invocation reference to `mpm_context` in
-        rule 1 of the canonical block, while leaving prose-only
-        mentions of MPM (no backtick tokens in an action context)
-        alone.
+        the "Inherit before you begin" responsibility of the canonical
+        block, while leaving prose-only mentions of MPM (no backtick
+        tokens in an invocation context) alone.
 
-        Post-2026-09-29 the canonical block names exactly one tool
-        in an invocation context: `mpm_context` in rule 1
-        (`fetch it through `mpm_context` action `read_wake_context`).
+        The canonical block names exactly one tool in an invocation
+        context: `mpm_context`, recovered "using `read_wake_context`".
         Every other "mpm_*" or "MPM" mention is prose. The renderer's
-        prose/invocation distinction must still work end-to-end on
-        the live source — this test exercises the actual file, not
-        a synthetic input."""
+        prose/invocation distinction must still work end-to-end on the
+        live source — this test exercises the actual file, not a
+        synthetic input."""
         text = CANONICAL_SOURCE.read_text(encoding="utf-8")
         block = _render.extract_canonical_block(text)
 
-        # Rule 1's invocation reference must receive each host's
-        # transport prefix. (The anchor is short to survive the
-        # canonical source's column wrap, which inserts a newline
-        # between `mpm_context` and `action`.)
+        # The invocation reference must receive each host's transport
+        # prefix. The anchor is matched against the flattened text: the
+        # canonical source hard-wraps its prose, so the raw substring
+        # would not survive the wrap point.
         prefix_to_expected = {
-            "mpm__":      "fetch it through `mpm__mpm_context`",
-            "mcp__mpm__": "fetch it through `mcp__mpm__mpm_context`",
-            "":            "fetch it through `mpm_context`",
+            "mpm__":      "recover it through `mpm__mpm_context`",
+            "mcp__mpm__": "recover it through `mcp__mpm__mpm_context`",
+            "":            "recover it through `mpm_context`",
         }
         for prefix, expected_prefix_phrase in prefix_to_expected.items():
             rendered = _render.render_for_host(block, prefix)
             self.assertIn(
-                expected_prefix_phrase, rendered,
-                f"rule 1 invocation `mpm_context` did not get the "
-                f"expected prefix under {prefix!r}. Expected substring "
+                expected_prefix_phrase, _flat(rendered),
+                f"invocation `mpm_context` did not get the expected "
+                f"prefix under {prefix!r}. Expected substring "
                 f"{expected_prefix_phrase!r} in rendered output.",
             )
 
-        # Sanity: rule 1's read_wake_context action must survive the
-        # prefix substitution (the action name is host-neutral).
+        # Sanity: the read_wake_context action must survive the prefix
+        # substitution (the action name is host-neutral).
         for prefix in ("mpm__", "mcp__mpm__", ""):
             rendered = _render.render_for_host(block, prefix)
             self.assertIn(
@@ -667,11 +844,12 @@ class RendererSemanticGuard(unittest.TestCase):
                 f"{prefix!r}",
             )
 
-        # The block also contains a "mpm call <tool>" mention in
-        # rule 7. This is a prose mention (not a backtick-bounded
-        # `mpm_<X>` token the renderer's regex matches), so it must
-        # NOT receive the host prefix — and the substring "mpm call"
-        # must survive under every prefix.
+        # The block also contains a "mpm call <tool>" mention in the
+        # "Discover MPM rather than assuming its limits" responsibility.
+        # This is a prose mention (not a backtick-bounded `mpm_<X>` token
+        # the renderer's regex matches), so it must NOT receive the host
+        # prefix — and the substring "mpm call" must survive under every
+        # prefix.
         for prefix in ("mpm__", "mcp__mpm__", ""):
             rendered = _render.render_for_host(block, prefix)
             self.assertIn(
@@ -737,54 +915,103 @@ class CanonicalVersionMarker(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 2026-09-29 instruction-architecture simplification tests.
+# Behavioural-commitment coverage tests.
 # ---------------------------------------------------------------------------
 #
-# These tests pin behavioural concepts in the slim canonical block,
-# not the old verbose wording. They replace the prior
-# INVARIANT_LABELS substring set with seven concept-presence tests,
-# one per rule, and add a generous size ceiling to stop future
-# verbose regression. The ceiling is chosen from the actual accepted
-# block size with headroom, not from an arbitrary token target.
+# These tests pin the behavioural commitments of the canonical managed
+# block, not the old verbose wording. They replace the prior
+# INVARIANT_LABELS substring set with one concept-presence test per
+# commitment, and carry a generous size ceiling to stop future verbose
+# regression. The ceiling is chosen from the actual accepted block size
+# with headroom, not from an arbitrary token target.
 
-# Concept-presence anchors: stable phrases each of the seven rules
-# must carry. The substring set was assembled from the approved
-# 2026-09-29 compact block; each anchor is unique to its rule.
+# Concept-presence anchors: stable phrases each of the behavioural
+# commitments must carry. The set was assembled from the approved
+# inheritance-oriented contract (protocol version 3.0.0); each anchor
+# is unique to its commitment.
 #
-# Anchors are intentionally short so the soft-wrap behaviour of
-# the canonical source doesn't break matching. (The block wraps at
-# 70-ish columns; longer anchors that span a wrap point would
-# need line-aware matching.)
-COMPACT_RULE_ANCHORS = {
-    "orientation": (
-        "Orient before you work",
-        "wake context normally arrives",
-        "fetch it through `mpm_context`",
+# Anchors are matched against the whitespace-collapsed block (see
+# `_flat`), so the canonical source's hard wrapping cannot break a
+# match. Each anchor is a phrase that would only survive a rewrite
+# that changed the commitment itself — not one that merely renames a
+# heading.
+COMMITMENT_ANCHORS = {
+    # 1. Inheritance and successor responsibility.
+    "inheritance": (
+        "You are both an inheritor of previous agents' knowledge and a "
+        "predecessor of agents yet to come.",
+        "Do not begin by rediscovering what another agent has already "
+        "established.",
     ),
-    "wake_is_pointers": (
-        "Treat wake context as pointers",
-        "not a ranking or a verdict",
+    # 2. Meaningful persistence during work, not only at the end.
+    "persistence_during_work": (
+        "Record meaningful discoveries when they become worth preserving, "
+        "not merely when the current task is complete.",
+        "Do not allow a session ending, context compaction or interrupted "
+        "task to erase knowledge that could benefit future work.",
     ),
-    "persistence_with_restraint": (
-        "Persist during work",
-        "not trivia",
+    # 3. Decisions preserved with their reasoning.
+    "decisions_with_reasoning": (
+        "Preserve what was decided, why it was chosen, the alternatives "
+        "considered",
+        "Remember not only what was decided, but why.",
     ),
-    "reuse_before_reacquire": (
-        "Reuse before reacquiring",
-        "absent, stale, or inadequate",
+    # 4. Theories carried with their uncertainty and evidence.
+    "theories_with_uncertainty": (
+        "Never silently promote speculation into certainty.",
+        "A disproven theory can remain valuable because it explains what "
+        "was tested and why that explanation failed.",
     ),
-    "work_lifecycle": (
-        "Track substantial continuing work",
-        "verification are separate events",
+    # 5. Discovery before use.
+    "discovery_first": (
+        "obtain the appropriate schema before invoking an unfamiliar "
+        "operation",
+        "Do not mistake an undiscovered capability for a nonexistent one.",
     ),
-    "handoff_conditional": (
-        "Leave useful continuation state",
-        "Routine",
+    # 6. Event-driven maintenance of inherited knowledge.
+    "event_driven_maintenance": (
+        "When your work changes what is known, consider what existing "
+        "knowledge that change affects.",
+        "Maintenance should follow meaningful changes, not arbitrary "
+        "schedules.",
     ),
-    "discovery_cli_recovery": (
-        "Do not assume an MPM capability is unavailable",
-        "affordance",  # short anchor survives the wrap
-        "`mpm call <tool>` fallback",
+    # 7. Targeted retrieval rather than ceremonial searching.
+    "targeted_retrieval": (
+        "Do not perform broad memory searches merely to demonstrate that "
+        "maintenance occurred.",
+        "discover and retrieve it through the appropriate MPM capabilities",
+    ),
+    # 8. Outdated, incorrect and uncertain records kept distinct.
+    "outdated_incorrect_uncertain": (
+        "The knowledge was valid under earlier circumstances, but those "
+        "circumstances have changed.",
+        "The original claim or interpretation was mistaken.",
+        "Available evidence does not yet establish whether the knowledge "
+        "remains valid.",
+    ),
+    # 9. Provenance preserved when knowledge is corrected.
+    "preserved_provenance": (
+        "Do not launder history.",
+        "Preserve the original provenance, the correction and its reasoning.",
+    ),
+    # 10. Continuation state that is actionable, not a title.
+    "actionable_continuation": (
+        "A title is not continuation state.",
+        "Preserve the reasoning, relevant progress, unresolved dependencies "
+        "and next concrete action needed to resume the work.",
+    ),
+    # 11. Selective persistence — value over volume.
+    "selective_persistence": (
+        "Record what is worth inheriting.",
+        "Avoid trivia, redundant memories, unsupported certainty, transient "
+        "noise and unnecessary sensitive information.",
+    ),
+    # 12. The closing principle.
+    "closing_principle": (
+        "The session ends. The learning continues.",
+        "Do not make your successors rediscover what you already learned, "
+        "repeat what you already disproved, or abandon what you began to "
+        "understand.",
     ),
 }
 
@@ -795,21 +1022,17 @@ COMPACT_RULE_ANCHORS = {
 # (host-neutral canonical). Ceilings were raised for issue #25 to 5000
 # bytes / 750 words.
 #
-# The earlier 3500/500 pair was tight enough that adding the
-# reference-discovery invariant (item 8) forced a choice between a
-# useful instruction and a compressed one. That is the wrong trade for
-# a block loaded into agent context: a few hundred extra bytes are
-# negligible next to an agent concluding that documentation it already
-# has access to does not exist. The objective is an effective agent,
-# not an impressively small instruction file.
+# The approved inheritance-oriented contract (protocol version 3.0.0)
+# replaced that block wholesale at 11224 bytes / 1564 words. The
+# ceiling is raised to 14000 bytes / 2000 words to match: the contract
+# is deliberately behavioural rather than enumerative, and compressing
+# it back toward the old ceiling would undo the approved wording.
 #
-# These numbers are a backstop against the old 12492-byte / 1612-word
-# verbose shape, which duplicated operational detail that belongs in
-# tool descriptions. If a future genuinely essential instruction would
-# exceed them, raise the ceiling rather than mutilating the
-# instruction.
-COMPACT_BLOCK_BYTE_CEILING = 5000
-COMPACT_BLOCK_WORD_CEILING = 750
+# The ceiling remains a backstop against runaway growth. If a future
+# genuinely essential instruction would exceed it, raise the ceiling
+# rather than mutilating the instruction.
+COMPACT_BLOCK_BYTE_CEILING = 14000
+COMPACT_BLOCK_WORD_CEILING = 2000
 
 
 class CompactBlockSizeCeiling(unittest.TestCase):
@@ -921,18 +1144,26 @@ class ManagedBlockDuplicationGuard(unittest.TestCase):
             f"{dupes}. Duplicated instruction is pure bloat — it costs "
             f"agent context and signals an unfinished edit.")
 
-    def test_no_invariant_repeats_another_invariants_opening(self):
-        """Each numbered invariant should say something the others do
-        not. Catches a copy-paste edit that clones a rule body."""
-        # DOTALL because several bold labels are hard-wrapped and the
-        # closing `**` lands on the following line.
-        openings = re.findall(r"^\s*\d+\.\s+\*\*(.+?)\*\*", self.block,
-                              re.MULTILINE | re.DOTALL)
-        self.assertGreaterEqual(len(openings), 8,
-                                "expected at least 8 invariants in the block")
-        norm = [re.sub(r"\s+", " ", o).strip().lower() for o in openings]
-        self.assertEqual(len(norm), len(set(norm)),
-                         f"duplicate invariant labels: {norm}")
+    def test_no_responsibility_repeats_another_responsibility_title(self):
+        """Each numbered responsibility should say something the others
+        do not. Catches a copy-paste edit that clones a responsibility
+        heading or body.
+
+        The heading shape is `### N. Title`. The title is captured
+        without the number so a duplicated title is detected even if
+        the ordinals were renumbered."""
+        headings = re.findall(
+            r"^\s*#{2,4}\s*\d+\.\s+(.+?)\s*$", self.block, re.MULTILINE,
+        )
+        self.assertGreaterEqual(
+            len(headings), 10,
+            "expected at least 10 numbered responsibilities in the block",
+        )
+        norm = [re.sub(r"\s+", " ", h).strip().lower() for h in headings]
+        self.assertEqual(
+            len(norm), len(set(norm)),
+            f"duplicate responsibility titles: {norm}",
+        )
 
     def test_instruction_budget_policy_is_stated_in_canonical_source(self):
         """The budget policy must be documented where the block is
@@ -959,55 +1190,68 @@ class ManagedBlockDuplicationGuard(unittest.TestCase):
             "appear in the agent-facing managed block")
 
 
-class CompactBlockConceptPresence(unittest.TestCase):
-    """Pin behavioural concepts in the slim canonical block.
+class InheritedIntelligenceCommitmentCoverage(unittest.TestCase):
+    """Pin the behavioural commitments of the canonical managed block.
 
-    Each rule has one or two anchoring phrases that capture its
-    behavioural load. The test fails if any rule's anchor is missing,
-    regardless of how the rest of the prose is worded. This replaces
-    the prior INVARIANT_LABELS substring set, which was anchored to
-    verbose wording that no longer survives in the slim block.
+    Each commitment has anchoring phrases that capture its behavioural
+    load. The test fails if any commitment's anchor is missing,
+    regardless of how the rest of the prose is worded.
+
+    The anchors are matched against the whitespace-collapsed block, so a
+    hard-wrap in the canonical source cannot make a present commitment
+    look absent. They are also matched by meaning, not by position: no
+    anchor names a section number, so re-ordering the responsibilities
+    does not break the coverage.
     """
 
     def setUp(self):
         self.block = _render.extract_canonical_block(
             CANONICAL_SOURCE.read_text(encoding="utf-8"),
         )
+        self.flat = _flat(self.block)
 
-    def test_orientation_wake_recovery(self):
-        for anchor in COMPACT_RULE_ANCHORS["orientation"]:
-            self.assertIn(anchor, self.block,
-                f"orientation rule missing anchor {anchor!r}")
+    def _assert_commitment(self, key: str) -> None:
+        for anchor in COMMITMENT_ANCHORS[key]:
+            self.assertIn(
+                anchor, self.flat,
+                f"commitment {key!r} missing anchor {anchor!r}",
+            )
 
-    def test_wake_is_pointers_not_truth(self):
-        for anchor in COMPACT_RULE_ANCHORS["wake_is_pointers"]:
-            self.assertIn(anchor, self.block,
-                f"wake-as-pointers rule missing anchor {anchor!r}")
+    def test_inheritance_and_successor_responsibility(self):
+        self._assert_commitment("inheritance")
 
-    def test_persistence_with_restraint(self):
-        for anchor in COMPACT_RULE_ANCHORS["persistence_with_restraint"]:
-            self.assertIn(anchor, self.block,
-                f"persistence-restraint rule missing anchor {anchor!r}")
+    def test_meaningful_persistence_during_work(self):
+        self._assert_commitment("persistence_during_work")
 
-    def test_reuse_before_reacquire(self):
-        for anchor in COMPACT_RULE_ANCHORS["reuse_before_reacquire"]:
-            self.assertIn(anchor, self.block,
-                f"reuse rule missing anchor {anchor!r}")
+    def test_decisions_preserve_their_reasoning(self):
+        self._assert_commitment("decisions_with_reasoning")
 
-    def test_work_lifecycle(self):
-        for anchor in COMPACT_RULE_ANCHORS["work_lifecycle"]:
-            self.assertIn(anchor, self.block,
-                f"work-lifecycle rule missing anchor {anchor!r}")
+    def test_theories_carry_uncertainty_and_evidence(self):
+        self._assert_commitment("theories_with_uncertainty")
 
-    def test_handoff_conditional(self):
-        for anchor in COMPACT_RULE_ANCHORS["handoff_conditional"]:
-            self.assertIn(anchor, self.block,
-                f"handoff rule missing anchor {anchor!r}")
+    def test_discovery_precedes_use(self):
+        self._assert_commitment("discovery_first")
 
-    def test_discovery_cli_recovery(self):
-        for anchor in COMPACT_RULE_ANCHORS["discovery_cli_recovery"]:
-            self.assertIn(anchor, self.block,
-                f"discovery rule missing anchor {anchor!r}")
+    def test_maintenance_is_event_driven(self):
+        self._assert_commitment("event_driven_maintenance")
+
+    def test_retrieval_is_targeted_not_ceremonial(self):
+        self._assert_commitment("targeted_retrieval")
+
+    def test_outdated_incorrect_and_uncertain_are_distinguished(self):
+        self._assert_commitment("outdated_incorrect_uncertain")
+
+    def test_provenance_is_preserved_when_knowledge_is_corrected(self):
+        self._assert_commitment("preserved_provenance")
+
+    def test_continuation_state_is_actionable(self):
+        self._assert_commitment("actionable_continuation")
+
+    def test_persistence_is_selective(self):
+        self._assert_commitment("selective_persistence")
+
+    def test_the_closing_principle_is_present(self):
+        self._assert_commitment("closing_principle")
 
 
 class CompactBlockForbiddenSubstrings(unittest.TestCase):
