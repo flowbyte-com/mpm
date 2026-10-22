@@ -100,6 +100,36 @@ func newTestScheduler(t *testing.T) *Scheduler {
 	}
 }
 
+// stopScheduler cancels the scheduler's context and waits for its Run
+// goroutine to exit.
+//
+// The wait is bounded so a genuine shutdown failure is reported as a
+// test failure instead of hanging the suite.
+//
+// Joining is not cosmetic. Context cancellation only *signals* Run; it
+// does not wait for it. A Run goroutine that is still alive when the
+// test function returns keeps using the scheduler's SQLite files under
+// t.TempDir(), and the framework's cleanup then fails with
+//
+//	TempDir RemoveAll cleanup: unlinkat .../001: directory not empty
+//
+// That is how CI run 39757594086 reddened the "Release gate" job: the
+// orphaned goroutine's cancelled deadline query logged
+// "compute earliest deadline failed: context canceled" *after* the
+// test that started it had already been reported as failed.
+//
+// Run's error is deliberately not returned: the tests that assert on
+// it keep their own inline select.
+func stopScheduler(t *testing.T, cancel context.CancelFunc, done <-chan error) {
+	t.Helper()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler Run goroutine did not exit within 2s of ctx cancel")
+	}
+}
+
 // seedWake inserts a wake directly. Bypasses ScheduleWake so tests don't
 // depend on the absolute/relative time parser.
 func seedWake(t *testing.T, s *Scheduler, id string, targetTime time.Time, kind string) {
@@ -811,20 +841,18 @@ func TestScheduler_FiresAtTargetTime(t *testing.T) {
 	for {
 		select {
 		case <-deadline:
-			cancel()
-			<-done
+			stopScheduler(t, cancel, done)
 			t.Fatal("wake not dispatched within 2s (deadline-driven dispatch did not pick it up)")
 		case <-time.After(50 * time.Millisecond):
 			var dispatchedAt sql.NullInt64
 			if err := s.db.QueryRow(
 				`SELECT dispatched_at FROM scheduled_wakes WHERE id='soon'`,
 			).Scan(&dispatchedAt); err != nil {
-				cancel()
-				<-done
+				stopScheduler(t, cancel, done)
 				t.Fatal(err)
 			}
 			if dispatchedAt.Valid {
-				cancel()
+				stopScheduler(t, cancel, done)
 				return // PASS
 			}
 		}
@@ -857,8 +885,7 @@ func TestScheduler_FiresMultipleDueWakesInOrder(t *testing.T) {
 	for {
 		select {
 		case <-deadline:
-			cancel()
-			<-done
+			stopScheduler(t, cancel, done)
 			var count int
 			_ = s.db.QueryRow(
 				`SELECT COUNT(*) FROM scheduled_wakes WHERE dispatched_at IS NOT NULL`,
@@ -869,12 +896,11 @@ func TestScheduler_FiresMultipleDueWakesInOrder(t *testing.T) {
 			if err := s.db.QueryRow(
 				`SELECT COUNT(*) FROM scheduled_wakes WHERE dispatched_at IS NOT NULL`,
 			).Scan(&count); err != nil {
-				cancel()
-				<-done
+				stopScheduler(t, cancel, done)
 				t.Fatal(err)
 			}
 			if count == N {
-				cancel()
+				stopScheduler(t, cancel, done)
 				return // PASS
 			}
 		}
@@ -908,8 +934,7 @@ func TestScheduler_FoldsCronTasks(t *testing.T) {
 	for {
 		select {
 		case <-deadline:
-			cancel()
-			<-done
+			stopScheduler(t, cancel, done)
 			t.Fatal("cron task did not produce an injected wake row within 4s")
 		case <-time.After(50 * time.Millisecond):
 			var n int
@@ -917,12 +942,11 @@ func TestScheduler_FoldsCronTasks(t *testing.T) {
 				`SELECT COUNT(*) FROM scheduled_wakes WHERE reason LIKE 'cron:%' AND created_by = ?`,
 				"mpm-scheduler", // CronCreatedBy per internal/core/scheduled_tasks.go
 			).Scan(&n); err != nil {
-				cancel()
-				<-done
+				stopScheduler(t, cancel, done)
 				t.Fatal(err)
 			}
 			if n > 0 {
-				cancel()
+				stopScheduler(t, cancel, done)
 				return // PASS
 			}
 		}

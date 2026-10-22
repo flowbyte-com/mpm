@@ -870,8 +870,10 @@ derives the count at runtime instead of hard-coding it).
 
 Do not hard-code either number into new framework-specific
 documentation or adapter logic: derive the surface from the live
-Registry (via `mpm_help action=list` or `tools.ByName`) so future
-Registry growth does not silently desynchronise downstream adapters.
+Registry (via `mpm_help action=list` — natively, or through the CLI
+fallback `mpm call mpm_help --payload '{"action":"list"}'` — or
+`tools.ByName`) so future Registry growth does not silently
+desynchronise downstream adapters.
 
 ---
 

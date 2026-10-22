@@ -336,6 +336,61 @@ var CompactMpmContextDescription = "Session context. read_wake_context (browses 
 	"routing pipeline (not part of normal session-start " +
 	"workflow)."
 
+// CompactMpmContextActionVocabulary is the action list the COMPACT
+// mpm_context tool publishes to MCP clients.
+//
+// It is deliberately NOT the registry's mpm_context action enum, and the
+// difference is load-bearing rather than cosmetic:
+//
+//   - the compact wrapper additionally accepts `write_handoff` and
+//     `read_handoff`, which the compact adapter routes to the
+//     mpm_handoff handler. The registry's mpm_context handler does not
+//     serve them and rejects them as unknown actions;
+//   - the compact wrapper publishes a shorter list than the registry
+//     entry, which also carries retire_global_rule, recent_activity and
+//     the three contextual_* diagnostics.
+//
+// So the compact MCP schema and the registered (CLI / substrate) schema
+// describe two different surfaces. `mpm_help show mpm_context` returns
+// the REGISTERED schema — the vocabulary the CLI enforces — and must
+// not be described as "the schema the MCP surface publishes".
+//
+// Exposed as a package-level constant so the regression test can
+// register the production tool against a fresh server and assert what
+// clients actually receive.
+var CompactMpmContextActionVocabulary = "read_wake_context | write_handoff | read_handoff | " +
+	"read_directives | proactive_recall_hint | " +
+	"query_global_rules | record_global_rule | route."
+
+// registerCompactMpmContext registers the compact mpm_context tool.
+//
+// It is a named function rather than an inline registration so a test
+// can register the PRODUCTION tool against a fresh server and read back
+// the published schema — the same shape the compact-distinction
+// regression test uses for the description. Duplicating the
+// registration inside a test would let the test drift from what
+// production actually publishes, which is precisely the distinction
+// this file has to keep honest.
+func registerCompactMpmContext(s *server.MCPServer, dm *core.DatabaseManager, ac core.ActiveContext) {
+	s.AddTool(
+		mcp.NewTool("mpm_context",
+			mcp.WithDescription(CompactMpmContextDescription),
+			mcp.WithString("action",
+				mcp.Required(),
+				mcp.Description(CompactMpmContextActionVocabulary),
+			),
+			mcp.WithObject("params",
+				mcp.Description(
+					"Per-action params. read_wake_context accepts "+
+						"projection (compact|full). write_handoff "+
+						"requires summary (string); read_handoff accepts "+
+						"session_id (string). route accepts prompt (string)."),
+			),
+		),
+		mcpAdapter(dm, ac, contextAdapter(dm, ac)),
+	)
+}
+
 func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.ActiveContext, router *core.Router, bs *blobstore.FilesystemBackend, op tools.OutputPolicy) {
 	blobStore = bs
 	blobAdapter := &blobStoreAdapter{bs: bs}
@@ -396,7 +451,9 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 			mcp.WithDescription(
 				"Capability discovery. action=list: every MPM tool "+
 					"name + reach_via_cli. action=show tool=<name>: "+
-					"full description. Specialists via 'mpm call <tool>'."),
+					"full description plus the registered JSON input "+
+					"schema (input_schema: action vocabulary, required "+
+					"fields, nested params). Specialists via 'mpm call <tool>'."),
 			mcp.WithString("action",
 				mcp.Required(),
 				mcp.Description("list or show."),
@@ -450,26 +507,7 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 	// sentence below; full semantic coverage remains in
 	// `internal/core/tools/registry_list.go::mpm_context` and
 	// `mpm-agent-protocol.md §1.2`.
-	s.AddTool(
-		mcp.NewTool("mpm_context",
-			mcp.WithDescription(CompactMpmContextDescription),
-			mcp.WithString("action",
-				mcp.Required(),
-				mcp.Description(
-					"read_wake_context | write_handoff | read_handoff | "+
-						"read_directives | proactive_recall_hint | "+
-						"query_global_rules | record_global_rule | route."),
-			),
-			mcp.WithObject("params",
-				mcp.Description(
-					"Per-action params. read_wake_context accepts "+
-						"projection (compact|full). write_handoff "+
-						"requires summary (string); read_handoff accepts "+
-						"session_id (string). route accepts prompt (string)."),
-			),
-		),
-		mcpAdapter(dm, ac, contextAdapter(dm, ac)),
-	)
+	registerCompactMpmContext(s, dm, ac)
 
 	// mpm_help: capability discovery. Registered as a closure
 	// (not in tools.Registry) to avoid the init-order cycle that
@@ -714,56 +752,35 @@ func makeRouteHandler(router *core.Router) server.ToolHandlerFunc {
 	}
 }
 
-// makeHelpHandler wires the mpm_help discovery tool. It iterates the
-// live tools.Registry (the canonical source of truth) and emits a
-// terse JSON catalog. Specialists that the default initial surface
-// hides from tools/list are still listed here, with reach_via_cli
-// pointing at the mpm call escape hatch — so agents that need a
-// specialist tool have a deterministic discovery path that does not
-// depend on host-side listChanged support.
+// makeHelpHandler serves mpm_help, MPM's capability-discovery surface.
+//
+// It iterates the live tools.Registry (the canonical source of truth)
+// and emits a terse JSON catalog. Specialists that the default initial
+// surface hides from tools/list are still listed here, with
+// reach_via_cli pointing at the mpm call escape hatch — so agents that
+// need a specialist tool have a deterministic discovery path that does
+// not depend on host-side listChanged support.
+//
+// The show action returns the tool's description AND its registered
+// JSON input schema, because the approved behavioural contract tells
+// agents to obtain the appropriate schema before invoking an unfamiliar
+// operation — and a description is not a schema.
+//
+// The catalogue itself lives in tools.Help, so the native MCP surface
+// and the `mpm call mpm_help` CLI fallback cannot drift apart: an
+// agent must not discover a different schema depending on which
+// transport it used. This handler only adapts the MCP envelope (a JSON
+// text result, or an error result) to that shared implementation.
 func makeHelpHandler(dm *core.DatabaseManager, ac core.ActiveContext) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		action, _ := args["action"].(string)
-		switch action {
-		case "list":
-			rows := make([]map[string]interface{}, 0, len(tools.Registry))
-			for _, t := range tools.Registry {
-				short := t.Description
-				if i := strings.Index(short, "\n"); i >= 0 {
-					short = short[:i]
-				}
-				rows = append(rows, map[string]interface{}{
-					"name":          t.Name,
-					"one_liner":     short,
-					"reach_via_cli": "mpm call " + t.Name + " --payload '{\"action\":\"<op>\",\"params\":{...}}'",
-				})
-			}
-			return jsonResult(map[string]interface{}{
-				"success":            true,
-				"tool_count":         len(rows),
-				"tools":              rows,
-				"discovery_hint":     "Specialist tools not initially exposed via tools/list are still registered and reachable via the host shell using `mpm call <tool>` (see reach_via_cli per row).",
-				"compatibility_mode": "Set MPM_EXPOSE_ALL_TOOLS=1 to revert to the full surface for hosts that need it.",
-			}), nil
-		case "show":
-			toolName, _ := args["tool"].(string)
-			if toolName == "" {
-				return mcp.NewToolResultError("mpm_help show: 'tool' param required"), nil
-			}
-			t, ok := tools.ByName(toolName)
-			if !ok {
-				return mcp.NewToolResultError(fmt.Sprintf("mpm_help: unknown tool %q", toolName)), nil
-			}
-			return jsonResult(map[string]interface{}{
-				"success":       true,
-				"name":          t.Name,
-				"description":   t.Description,
-				"reach_via_cli": "mpm call " + t.Name + " --payload '{\"action\":\"<op>\",\"params\":{...}}'",
-			}), nil
-		default:
-			return mcp.NewToolResultError(fmt.Sprintf("mpm_help: unknown action %q (valid: list, show)", action)), nil
+		toolName, _ := args["tool"].(string)
+		result, err := tools.Help(action, toolName)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
+		return jsonResult(result), nil
 	}
 }
 

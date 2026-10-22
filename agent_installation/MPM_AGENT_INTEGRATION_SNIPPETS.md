@@ -22,6 +22,9 @@
 > closure) is reachable via `mpm_help list` discovery + the
 > `mpm call <tool> --payload '…'` CLI fallback, and is fully restored
 > on hosts that set `MPM_EXPOSE_ALL_TOOLS=1` in their MCP env block.
+> Discovery itself is reachable over that CLI fallback
+> (`mpm call mpm_help --payload '{"action":"list"}'`), so a shell-only
+> agent can enumerate the surface without a hard-coded tool list.
 > `mpm_handoff` is reachable on the compact surface through
 > `mpm_context action=write_handoff` / `read_handoff`. The canonical
 > managed block below is deliberately behavioural rather than

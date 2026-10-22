@@ -251,11 +251,8 @@ func TestBuildProvenance_UnstampedBinariesReportVisiblePlaceholders(t *testing.T
 // and would report the "dev"/"unknown" placeholders. Only this test
 // notices.
 func TestBuildProvenance_TheCanonicalScriptStampIsEmbeddedInTheBinary(t *testing.T) {
-	if _, err := exec.LookPath("go"); err != nil {
-		t.Skip("go toolchain not available")
-	}
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available")
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
 	}
 
 	repoRoot := "../.."
@@ -285,13 +282,11 @@ func TestBuildProvenance_TheCanonicalScriptStampIsEmbeddedInTheBinary(t *testing
 	}
 	wantCommit := strings.TrimSpace(string(commitOut))
 
-	bin := filepath.Join(t.TempDir(), "mpm")
 	// This binary carries a DIFFERENT stamp from the shared ones (the
 	// canonical payload rather than the hand-written one), so it needs
-	// its own build. It is built once and used once.
-	if err := buildProvenanceBinary("./cmd/mpm", bin, canonicalLDFlags); err != nil {
-		t.Fatalf("%v", err)
-	}
+	// its own build. It is built once and shared with the identity
+	// tests.
+	bin := buildCanonicalProvenanceBinary(t).Path
 
 	stdout, stderr, exit := runProvenanceBinary(t, bin, nil, "--version")
 	if exit != 0 {

@@ -60,14 +60,32 @@ Payload sources (priority): --payload, --payload-file, stdin.
 
 Exit-code contract (callers read BOTH signals):
   exit 0  request handled; inspect the JSON envelope on stdout.
-          Application outcomes — including {"success":false} validations
-          such as unknown actions or bad field values — exit 0 here by
-          design (same handlers serve MCP, where process exit codes do
-          not exist). Shell scripts MUST check the "success" field.
-  exit 1  transport failure: unknown tool, malformed JSON payload,
-          unreadable payload file, DB open failure, or a handler-level
-          Go error. The stdout envelope still carries {"success":false,
-          "error":...} so stdout-only adapters keep working (F1).
+          A handler's own application-level outcome — including a
+          {"success":false} payload it returns without a Go error —
+          exits 0 here by design (the same handlers serve MCP, where
+          process exit codes do not exist). Shell scripts MUST still
+          check the "success" field.
+  exit 1  a Go-level error: unknown tool, malformed JSON payload,
+          unreadable payload file, DB open failure, an unknown action,
+          a missing required field, or any other handler error. The
+          stdout envelope still carries {"success":false,"error":...}
+          so stdout-only adapters keep working (F1).
+
+Capability discovery is reachable through this same path:
+  mpm call mpm_help --payload '{"action":"list"}'
+  mpm call mpm_help --payload '{"action":"show","params":{"tool":"<name>"}}'
+The catalogue served here is the one the native MCP surface serves.
+action=show returns the tool's full description AND its registered JSON
+input schema under "input_schema" — the action vocabulary, the required
+fields and the nested params — as a JSON object, not as a string.
+
+That schema is the tool's REGISTERED schema: the CLI / substrate
+vocabulary this path enforces. The native compact MCP wrappers publish
+their own simplified input schemas, and a compact wrapper may accept
+transport-specific actions the registered schema does not list — the
+compact mpm_context wrapper, for one, accepts write_handoff and
+read_handoff, which the registered mpm_context action enum does not
+contain.
 
 Friendly CLI commands follow the Unix convention directly: validation
 failures print a human message on stderr and exit non-zero. Bare
@@ -98,6 +116,24 @@ smart-recall search (exit 0 on empty results) by design.
 		// Rebuild the canonical {action, params} envelope the registry
 		// handlers expect.
 		payload = map[string]interface{}{"action": action, "params": params}
+	}
+
+	// Some capabilities are reachable through `mpm call` without being
+	// registry entries — mpm_help is MPM's capability-discovery surface,
+	// and a registry entry for it would double-register under
+	// MPM_EXPOSE_ALL_TOOLS=1, where the full surface is exposed
+	// alongside the compact one. The routing table for those lives in
+	// tools.CallRoutedTools; the CLI dispatches from it, so the set of
+	// names the CLI can serve and the set the agent protocol
+	// documentation guard accepts cannot drift apart.
+	//
+	// Discovery is answered BEFORE the database is opened: asking what
+	// MPM can do must not create a store, mutate one, or leave a
+	// heartbeat behind. The catalogue itself is tools.Help, the same
+	// implementation the native MCP surface serves, so an agent cannot
+	// discover a conflicting schema depending on its transport.
+	if tools.IsCallRouted(resolvedName) {
+		return handleCallRouted(resolvedName, payload)
 	}
 
 	tool, ok := tools.ByName(resolvedName)
@@ -278,6 +314,53 @@ smart-recall search (exit 0 on empty results) by design.
 		result = resultMap
 	}
 
+	writeEnvelope(os.Stdout, result)
+	return 0
+}
+
+// handleCallRouted dispatches a capability that `mpm call` reaches by
+// name rather than through the registry.
+//
+// The set of such names is defined once, in tools.CallRoutedTools. A
+// name listed there without a handler here would be advertised as
+// reachable and then fail at call time, so cmd/mpm's regression test
+// dispatches every name in that table and requires it to reach a
+// handler rather than the router.
+func handleCallRouted(name string, payload map[string]interface{}) int {
+	switch name {
+	case tools.CallRoutedHelp:
+		return handleCallHelp(payload)
+	default:
+		writeEnvelope(os.Stdout, map[string]interface{}{
+			"success": false,
+			"error":   fmt.Sprintf("call-routed tool %q has no CLI handler", name),
+		})
+		return 1
+	}
+}
+
+// handleCallHelp answers `mpm call mpm_help`.
+//
+// It reads the action and the optional tool name from the payload in
+// both accepted shapes — the canonical {action, params} envelope and
+// the flat shape the native MCP tool uses — and serves the shared
+// tools.Help catalogue.
+//
+// Failures follow the same contract every other `mpm call` failure
+// follows (see the usage text in handleCall): a parseable
+// {"success":false,"error":...} envelope on stdout and a non-zero exit.
+func handleCallHelp(payload map[string]interface{}) int {
+	action, _ := payloadStringField(payload, "action")
+	toolName, _ := payloadStringField(payload, "tool")
+
+	result, err := tools.Help(action, toolName)
+	if err != nil {
+		writeEnvelope(os.Stdout, map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return 1
+	}
 	writeEnvelope(os.Stdout, result)
 	return 0
 }

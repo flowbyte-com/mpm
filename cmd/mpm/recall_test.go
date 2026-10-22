@@ -409,7 +409,22 @@ func TestMain(m *testing.M) {
 		mpmBin = bin
 	}
 
-	os.Exit(m.Run())
+	// m.Run() returns the exit code rather than exiting, so the
+	// teardown below runs on an ordinary test failure too. The
+	// canonically stamped binary has to outlive the individual test
+	// that built it, which is why it is removed here — at package
+	// teardown — rather than by a per-test cleanup.
+	code := m.Run()
+	if err := removeCanonicalProvenanceDir(); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"mpm: could not remove the temporary canonical-provenance build directory %q: %v\n",
+			canonicalProvenanceDir, err)
+		if code == 0 {
+			code = 1
+		}
+	}
+
+	os.Exit(code)
 }
 
 // TestKeywordSearchWithTime_ExcludesExpiredRows pins the

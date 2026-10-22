@@ -57,7 +57,8 @@ import (
 //
 //	mpm_memory   persist/recall/show/shred (and reinforce/weaken/snooze/patch/promote)
 //	mpm_context  wake/directives/route/handoff (write/read) — absorbs mpm_handoff
-//	mpm_help     capability discovery (lists every Registry entry + per-tool reach_via_cli)
+//	mpm_help     capability discovery (lists every Registry entry + per-tool reach_via_cli;
+//	             action=show returns a tool's description AND its registered input schema)
 //
 // Specialists reachable via mpm_help + mpm call:
 //

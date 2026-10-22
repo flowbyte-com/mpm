@@ -92,6 +92,10 @@ MPM_BUILD_COMMIT       := $(shell $(BUILD_PROVENANCE) commit)
 MPM_BUILD_SHORT_COMMIT := $(shell $(BUILD_PROVENANCE) short-commit)
 MPM_BUILD_DIRTY        := $(shell $(BUILD_PROVENANCE) dirty)
 MPM_BUILD_TYPE         := $(shell $(BUILD_PROVENANCE) build-type)
+# The build time is captured once, when make starts, and stamped into the
+# binaries it builds. SOURCE_DATE_EPOCH wins when it is set, so a
+# reproducible build reports the time the builder asked for.
+MPM_BUILD_EPOCH        := $(shell $(BUILD_PROVENANCE) build-epoch)
 VERSION      := $(MPM_BUILD_VERSION)
 BUILD_LDFLAGS := -ldflags "$(shell $(BUILD_PROVENANCE) ldflags)"
 CGO_CFLAGS := -DSQLITE_ENABLE_FTS5=1
@@ -318,6 +322,7 @@ print-build-provenance:
 	@echo 'MPM_BUILD_SHORT_COMMIT=$(MPM_BUILD_SHORT_COMMIT)'
 	@echo 'MPM_BUILD_DIRTY=$(MPM_BUILD_DIRTY)'
 	@echo 'MPM_BUILD_TYPE=$(MPM_BUILD_TYPE)'
+	@echo 'MPM_BUILD_EPOCH=$(MPM_BUILD_EPOCH)'
 
 # DEPLOY: promote the developer artifacts in $(BUILD_DIR) to the runtime
 # install at $(PREFIX)/bin/. This is the ONLY target that writes there.

@@ -38,7 +38,7 @@ var defaultCoreTools = map[string]bool{
 // mpmHelpDescription is the description as registered via the
 // cmd/mpm-mcp closure (NOT in tools.Registry — kept here only so
 // the probe can measure it).
-const mpmHelpDescription = "Capability discovery. action=list: every MPM tool name + reach_via_cli. action=show tool=<name>: full description. Specialists via 'mpm call <tool>'."
+const mpmHelpDescription = "Capability discovery. action=list: every MPM tool name + reach_via_cli. action=show tool=<name>: full description plus the registered JSON input schema (input_schema: action vocabulary, required fields, nested params). Specialists via 'mpm call <tool>'."
 
 // mpmHelpSchema is the schema as registered via the cmd/mpm-mcp
 // closure (mcp.WithString / mcp.WithDescription). We compute its

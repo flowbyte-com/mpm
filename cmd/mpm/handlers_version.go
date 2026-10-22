@@ -27,11 +27,17 @@ type versionJSON struct {
 // handleVersion renders the build provenance of this binary.
 //
 //	mpm version
-//	MPM v0.1.0-dev (06c029ba)
+//	MPM 0.1.0-dev+g06c029ba.t1792679720
 //	  binary:  mpm
 //	  commit:  06c029ba11ce18c7f10aa60b0f0497ece2edda7c
 //	  build:   development
+//	  built:   2026-10-22T14:35:20Z
 //	  dirty:   no
+//
+// The first line is the build identity: the product version plus the
+// build metadata that says which commit the binary came from, whether
+// the source tree was clean, and when it was built. It is a Semantic
+// Versioning version with build metadata.
 //
 // The dirty line reads "no", "yes" or "unknown". "unknown" means the
 // build's source tree could not be compared against a revision — an

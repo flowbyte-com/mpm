@@ -42,6 +42,9 @@ func TestCurrent_UnstampedBinaryReportsVisiblePlaceholders(t *testing.T) {
 	if info.BuildType != "development" {
 		t.Errorf("unstamped BuildType = %q, want %q", info.BuildType, "development")
 	}
+	if info.BuildEpoch != 0 {
+		t.Errorf("unstamped BuildEpoch = %d, want 0 (a build without a stamp knows no build time)", info.BuildEpoch)
+	}
 	if info.Binary != "mpm" {
 		t.Errorf("Binary = %q, want %q", info.Binary, "mpm")
 	}
@@ -290,12 +293,21 @@ func TestInfo_JSONDirtyStateIsAString(t *testing.T) {
 	}
 }
 
-func TestFormatHuman_FirstLineIsStableAndCarriesVersionAndShortCommit(t *testing.T) {
+// TestFormatHuman_FirstLineCarriesTheBuildIdentity pins the human
+// version surface's first line.
+//
+// The first line is the build identity — the product version plus the
+// build metadata that says which commit, which source state and which
+// build time. It is the one line an operator can copy into a bug report
+// and another operator can match against their own build.
+func TestFormatHuman_FirstLineCarriesTheBuildIdentity(t *testing.T) {
 	restore := swapStamps(t, map[string]string{
 		"Version":     "0.1.0-dev",
 		"Commit":      "06c029ba11ce18c7f10aa60b0f0497ece2edda7c",
 		"ShortCommit": "06c029ba",
+		"Dirty":       "false",
 		"BuildType":   "development",
+		"BuildEpoch":  "1792679720",
 	})
 	defer restore()
 
@@ -305,7 +317,7 @@ func TestFormatHuman_FirstLineIsStableAndCarriesVersionAndShortCommit(t *testing
 		t.Fatal("FormatHuman produced no output")
 	}
 
-	if want := "MPM v0.1.0-dev (06c029ba)"; lines[0] != want {
+	if want := "MPM 0.1.0-dev+g06c029ba.t1792679720"; lines[0] != want {
 		t.Errorf("first line = %q, want %q", lines[0], want)
 	}
 
@@ -318,6 +330,47 @@ func TestFormatHuman_FirstLineIsStableAndCarriesVersionAndShortCommit(t *testing
 		if !strings.Contains(body, want) {
 			t.Errorf("human output is missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestFormatHuman_TheBuildTimeComesFromTheStamp proves the reported
+// build time is the one the build captured, not the moment the command
+// ran.
+//
+// A version command that stamped the current time would tell an
+// operator their binary was built a moment ago, however old it is. The
+// rendered time is derived from the captured epoch alone.
+func TestFormatHuman_TheBuildTimeComesFromTheStamp(t *testing.T) {
+	restore := swapStamps(t, map[string]string{
+		"Version":    "0.1.0-dev",
+		"BuildEpoch": "1792679720",
+	})
+	defer restore()
+
+	out := FormatHuman(Current("mpm"))
+
+	// 1792679720 is 2026-10-22T14:35:20Z. The exact rendering is
+	// checked rather than the date, so the assertion does not depend on
+	// the machine's clock or timezone.
+	if want := "built:   2026-10-22T14:35:20Z"; !strings.Contains(out, want) {
+		t.Errorf("human output does not carry the stamped build time %q:\n%s", want, out)
+	}
+}
+
+// TestFormatHuman_AnUnknownBuildTimeIsVisible proves an unstamped or
+// unestablished build time is reported as unknown rather than as the
+// current clock.
+func TestFormatHuman_AnUnknownBuildTimeIsVisible(t *testing.T) {
+	restore := swapStamps(t, map[string]string{
+		"Version":    "0.1.0-dev",
+		"BuildEpoch": "unknown",
+	})
+	defer restore()
+
+	out := FormatHuman(Current("mpm"))
+
+	if !strings.Contains(out, "built:   unknown") {
+		t.Errorf("an unknown build time must be visible as unknown:\n%s", out)
 	}
 }
 
@@ -391,6 +444,10 @@ func swapStamps(t *testing.T, values map[string]string) func() {
 		previous["BuildType"] = BuildType
 		BuildType = v
 	}
+	if v, ok := values["BuildEpoch"]; ok {
+		previous["BuildEpoch"] = BuildEpoch
+		BuildEpoch = v
+	}
 
 	return func() {
 		for k, v := range previous {
@@ -405,6 +462,8 @@ func swapStamps(t *testing.T, values map[string]string) func() {
 				Dirty = v
 			case "BuildType":
 				BuildType = v
+			case "BuildEpoch":
+				BuildEpoch = v
 			}
 		}
 	}
