@@ -192,6 +192,43 @@ func TestPrincipleDocument_DistinguishesKnowledgeFromConsciousness(t *testing.T)
 			)
 		}
 	}
+
+	// The distinction must be drawn as an ABSENCE OF CLAIM. Asserting
+	// that agents cannot possess subjective experience, or that no
+	// subjective thread can exist, is a categorical claim about agents
+	// that MPM has no standing to make — and it is the kind of claim
+	// that reads as settled fact precisely because it is stated that
+	// way. What MPM can say is what it establishes and what it claims.
+	//
+	// Pinned so the distinction cannot quietly slide back into a
+	// denial.
+	if !strings.Contains(flat, "neither establishes nor claims") {
+		t.Errorf(
+			"%s must state that MPM neither establishes nor claims "+
+				"continuity of consciousness, identity or subjective "+
+				"experience; a categorical denial of subjective "+
+				"experience is a claim MPM should not make",
+			principleDocRelPath,
+		)
+	}
+
+	// The positive half of the same correction: MPM's mechanism does
+	// preserve inspectable records that distinct agent sessions can
+	// inherit and develop. Stating only what is not claimed would
+	// leave the document's actual mechanism unstated.
+	for _, phrase := range []string{
+		"inspectable records",
+		"inherit and develop",
+	} {
+		if !strings.Contains(flat, strings.ToLower(phrase)) {
+			t.Errorf(
+				"%s must state that MPM's mechanism preserves %q so the "+
+					"correction says what MPM does, not only what it "+
+					"declines to claim",
+				principleDocRelPath, phrase,
+			)
+		}
+	}
 }
 
 // collapseWhitespace reduces every run of whitespace to a single space
@@ -199,6 +236,50 @@ func TestPrincipleDocument_DistinguishesKnowledgeFromConsciousness(t *testing.T)
 // author wrapped the line.
 func collapseWhitespace(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// TestPrincipleDocument_SelectivePersistenceNotCompulsoryRecording
+// pins the statement of what a session is worth.
+//
+// The approved principle is "record what is worth inheriting" — a
+// principle of SELECTIVE persistence. It is easy to over-read that as
+// "record everything", and the over-reading produces a claim that a
+// session which creates no durable record has produced no value at
+// all. That is not what the principle says, and it is wrong: a session
+// can do valuable work and still be right to create nothing durable.
+// What the principle requires is that knowledge whose loss would force
+// meaningful rediscovery be preserved.
+//
+// Both halves are pinned here. The corrected statement must be present,
+// and the superseded claim must be absent.
+func TestPrincipleDocument_SelectivePersistenceNotCompulsoryRecording(t *testing.T) {
+	doc := readPrincipleDoc(t)
+	flat := collapseWhitespace(doc)
+
+	for _, phrase := range []string{
+		"can produce valuable work without creating a new memory",
+		"forfeits part of its contribution to future agents",
+	} {
+		if !strings.Contains(flat, strings.ToLower(phrase)) {
+			t.Errorf(
+				"%s must state that a session can produce valuable work "+
+					"without creating a new memory; missing %q",
+				principleDocRelPath, phrase,
+			)
+		}
+	}
+
+	// The superseded claim must not be back. It is the compulsory-
+	// recording reading of the principle, and it contradicts both the
+	// corrected statement above and the principle's own wording.
+	if strings.Contains(flat, "has produced no value") {
+		t.Errorf(
+			"%s must not claim that a session producing no record has "+
+				"produced no value; that contradicts the principle "+
+				"that what is worth inheriting is what earns a place",
+			principleDocRelPath,
+		)
+	}
 }
 
 // TestPrincipleDocument_FailedHypothesisIsValuable pins the passage

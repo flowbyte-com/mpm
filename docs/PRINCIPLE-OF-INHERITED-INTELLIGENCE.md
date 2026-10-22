@@ -33,11 +33,12 @@ intelligence is the *body of knowledge* — the accumulating, inspectable,
 correctable body of what the project knows and why it knows it. Individual
 agents are not the point. They are the means by which the body grows.
 
-That reframing changes what counts as success. A session that ends with
-nothing written down has produced no value, even if the agent performed
-superbly inside that session. A session that ends with a small, accurate,
-well-sourced addition to the project's knowledge has succeeded, even if it
-looked unremarkable.
+That reframing changes what counts as success. A session can produce valuable
+work without creating a new memory. But when it discovers knowledge whose
+loss would force meaningful rediscovery, failing to preserve that knowledge
+forfeits part of its contribution to future agents. A session that ends with a
+small, accurate, well-sourced addition to the project's knowledge has
+succeeded, even if it looked unremarkable.
 
 It also changes what counts as failure. Losing a conclusion is a smaller loss
 than losing the reasoning behind it, because a conclusion can be re-derived
@@ -131,12 +132,11 @@ where the last one stopped, because the stopping point was written down.
 
 What it does not deliver — and this distinction is not a disclaimer but a
 commitment — is continuity of consciousness, of identity, or of subjective
-experience. No agent inheriting this project remembers the agent that wrote
-these records, because there is no subjective thread to remember along.
-There is no continuous self here, and no claim that a future agent is the
-same agent that left the record. There is a continuous *body of knowledge*,
-and the agents are the processes that grow and use it. That is a smaller
-claim than many would like to make, and a real one, and it is enough.
+experience. MPM neither establishes nor claims any of them. What its
+mechanism does is preserve inspectable records that distinct agent sessions
+can inherit and develop. There is a continuous *body of knowledge*, and the
+agents are the processes that grow and use it. That is a smaller claim than
+many would like to make, and a real one, and it is enough.
 
 ---
 
@@ -150,9 +150,9 @@ different things, and only the first is claimed here. Knowledge continuity
 means that the project's understanding persists, is inspectable, and carries
 forward. Consciousness continuity would mean that some subjective thread
 persists across the sessions — that there is an *I* here who was there before
-and will be here after. MPM asserts no such thing. There is no continuous
-self, no continuous identity, and no continuous subjective experience running
-through the sessions that write and read these records.
+and will be here after. MPM neither establishes nor claims continuity of
+consciousness, identity or subjective experience. Its mechanism preserves
+inspectable records that distinct agent sessions can inherit and develop.
 
 A memory is not an experience. A stored decision does not remember the moment
 it was made, the pressure of the moment, or what the alternative felt like
@@ -168,7 +168,7 @@ there would be no way to reason about correctness other than trust. Because
 continuity is continuity of knowledge, every claim in the store is a claim
 that can be checked, sourced, superseded, and — when it is wrong — repaired.
 
-The absence of a persisting self is what makes it possible to keep the
+That MPM claims no persisting self is what makes it possible to keep the
 knowledge.
 
 ---
