@@ -464,8 +464,118 @@ class TestCrossAdapterConsistency(ProvenanceTestCase):
                               f"{adapter}: the provenance comment has no {key} field")
 
 
+class TestUnknownFallback(ProvenanceTestCase):
+    """Case 8 — "unknown" is a statement of absence, never a claim.
+
+    An adapter installer can be run on its own — outside install.sh,
+    outside a build — and then it can establish neither the product
+    version nor the source commit. The provenance must then say
+    "unknown". What it must NOT do is carry a value it cannot
+    support: not an invented version, and not a stale one presented
+    as though this run had verified it.
+
+    The two halves of the contract are not the same rule, and the
+    difference is the whole point:
+
+      - When the behavioural text is UNCHANGED, the block is not being
+        rewritten. The version an earlier, informed run established is
+        still true of these bytes, so it is kept. Erasing it would
+        destroy information for no gain.
+
+      - When the behavioural text HAS changed, this run is the one
+        writing the block, and it cannot say what wrote the block it
+        is replacing. Carrying the old value forward would be a claim
+        about bytes that no longer exist — the kind of quiet false
+        attribution that provenance exists to prevent. An honest
+        "unknown" beats a stale claim.
+    """
+
+    # An environment in which the build provenance cannot be
+    # established: the variables are present but empty, exactly as a
+    # bare `install.sh` run outside a build would leave them.
+    NO_BUILD_ENV = {"MPM_BUILD_VERSION": "", "MPM_BUILD_COMMIT": ""}
+
+    def test_a_run_that_cannot_establish_the_version_says_unknown(self) -> None:
+        adapter, installer, snippet_name = "mpm-claude-code", "install_claude_instructions", "CLAUDE.md.snippet"
+        target = self.target_for(adapter)
+        snippet = self.snippet_for(adapter, snippet_name)
+
+        run_installer(adapter, installer, target, snippet, self.home, self.NO_BUILD_ENV)
+
+        fields = provenance_of(target.read_text(encoding="utf-8"))
+        self.assertEqual(
+            fields.get("version"), block_provenance.UNKNOWN,
+            "a run that cannot establish the product version must say so; "
+            "claiming one it cannot support is a false provenance claim",
+        )
+        self.assertEqual(
+            fields.get("commit"), block_provenance.UNKNOWN,
+            "a run that cannot establish the source commit must say so",
+        )
+        # The behavioural protocol version is declared by the canonical
+        # source, not by the build, so it is establishable either way.
+        self.assertEqual(
+            fields.get("protocol"), block_provenance.read_protocol_version(),
+            "the behavioural protocol version does not depend on the build "
+            "and must remain establishable",
+        )
+
+    def test_a_no_op_run_keeps_the_version_an_earlier_run_established(self) -> None:
+        adapter, installer, snippet_name = "mpm-claude-code", "install_claude_instructions", "CLAUDE.md.snippet"
+        target = self.target_for(adapter)
+        snippet = self.snippet_for(adapter, snippet_name)
+
+        run_installer(adapter, installer, target, snippet, self.home, self.env)
+        set_applied_timestamp(target, OLD_APPLIED)
+
+        # A second run that cannot establish the version, against
+        # UNCHANGED behavioural text.
+        run_installer(adapter, installer, target, snippet, self.home, self.NO_BUILD_ENV)
+
+        fields = provenance_of(target.read_text(encoding="utf-8"))
+        self.assertEqual(
+            fields.get("version"), TEST_VERSION,
+            "an unestablished value must not erase a version an earlier "
+            "informed run established; the block's bytes are unchanged",
+        )
+        self.assertEqual(
+            fields.get("applied"), OLD_APPLIED,
+            "a reconciliation that changes nothing must preserve the "
+            "existing timestamp",
+        )
+
+    def test_a_changed_block_does_not_keep_a_stale_version_claim(self) -> None:
+        adapter, installer, snippet_name = "mpm-claude-code", "install_claude_instructions", "CLAUDE.md.snippet"
+        target = self.target_for(adapter)
+        snippet = self.snippet_for(adapter, snippet_name)
+
+        run_installer(adapter, installer, target, snippet, self.home, self.env)
+
+        # A copy of the snippet whose behavioural text differs, written
+        # by a run that cannot establish the version.
+        changed = self.tmp / "CLAUDE.changed.snippet"
+        changed.write_text(
+            snippet.read_text(encoding="utf-8") + "\nan extra behavioural line.\n",
+            encoding="utf-8",
+        )
+        run_installer(adapter, installer, target, changed, self.home, self.NO_BUILD_ENV)
+
+        fields = provenance_of(target.read_text(encoding="utf-8"))
+        self.assertNotEqual(
+            fields.get("version"), TEST_VERSION,
+            "a run that rewrites the block and cannot establish the version "
+            "must not present the previous run's version as this block's "
+            "provenance",
+        )
+        self.assertEqual(
+            fields.get("version"), block_provenance.UNKNOWN,
+            "a run that rewrites the block and cannot establish the version "
+            "must say so",
+        )
+
+
 class TestCanonicalRendererUnaffected(ProvenanceTestCase):
-    """Case 8 — the canonical renderer and its byte-equivalence gates are intact."""
+    """Case 9 — the canonical renderer and its byte-equivalence gates are intact."""
 
     def test_the_renderer_reports_no_drift(self) -> None:
         result = subprocess.run(
