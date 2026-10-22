@@ -396,7 +396,9 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 			mcp.WithDescription(
 				"Capability discovery. action=list: every MPM tool "+
 					"name + reach_via_cli. action=show tool=<name>: "+
-					"full description. Specialists via 'mpm call <tool>'."),
+					"full description plus the registered JSON input "+
+					"schema (input_schema: action vocabulary, required "+
+					"fields, nested params). Specialists via 'mpm call <tool>'."),
 			mcp.WithString("action",
 				mcp.Required(),
 				mcp.Description("list or show."),
@@ -722,6 +724,11 @@ func makeRouteHandler(router *core.Router) server.ToolHandlerFunc {
 // reach_via_cli pointing at the mpm call escape hatch — so agents that
 // need a specialist tool have a deterministic discovery path that does
 // not depend on host-side listChanged support.
+//
+// The show action returns the tool's description AND its registered
+// JSON input schema, because the approved behavioural contract tells
+// agents to obtain the appropriate schema before invoking an unfamiliar
+// operation — and a description is not a schema.
 //
 // The catalogue itself lives in tools.Help, so the native MCP surface
 // and the `mpm call mpm_help` CLI fallback cannot drift apart: an

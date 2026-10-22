@@ -9,6 +9,8 @@ package tools
 
 import (
 	"encoding/json"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -222,4 +224,292 @@ func TestCallRoutedTools_PinsTheDiscoverySurface(t *testing.T) {
 	if IsCallRouted("mpm_definitely_not_a_tool") {
 		t.Error("IsCallRouted accepted an unknown name")
 	}
+}
+
+// ── input_schema: the registered JSON input schema ──────────────────────
+//
+// A description says what a tool is for. A schema says what a payload may
+// contain. An agent invoking an unfamiliar operation needs the schema —
+// the action vocabulary, the required fields, the nested parameter
+// properties — because guessing any of them produces a rejected call.
+//
+// The schema must be the registry's OWN schema, verbatim: the same object
+// the MCP surface publishes as the tool's inputSchema and the same object
+// the runtime dispatcher validates against. A second, hand-written copy
+// would drift from the one that actually decides whether a call is legal.
+
+// helpSchemaOf returns a tool's registered schema decoded as a JSON object.
+func helpSchemaOf(t *testing.T, tool Tool) map[string]interface{} {
+	t.Helper()
+	var out map[string]interface{}
+	if err := json.Unmarshal(tool.Schema, &out); err != nil {
+		t.Fatalf("registry schema for %q is not a JSON object: %v", tool.Name, err)
+	}
+	return out
+}
+
+// helpActionEnum returns the enum of a schema's top-level "action"
+// property — the action vocabulary the dispatcher accepts.
+func helpActionEnum(schema map[string]interface{}) []string {
+	props, _ := schema["properties"].(map[string]interface{})
+	action, _ := props["action"].(map[string]interface{})
+	raw, _ := action["enum"].([]interface{})
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		s, _ := v.(string)
+		out = append(out, s)
+	}
+	return out
+}
+
+// helpStringSlice renders a JSON array of strings.
+func helpStringSlice(v interface{}) []string {
+	raw, _ := v.([]interface{})
+	out := make([]string, 0, len(raw))
+	for _, e := range raw {
+		s, _ := e.(string)
+		out = append(out, s)
+	}
+	return out
+}
+
+// helpNestedParamKeys returns the property names of a schema's nested
+// "params" object — the per-action parameters, one level down.
+func helpNestedParamKeys(schema map[string]interface{}) []string {
+	props, _ := schema["properties"].(map[string]interface{})
+	params, _ := props["params"].(map[string]interface{})
+	nested, _ := params["properties"].(map[string]interface{})
+	out := make([]string, 0, len(nested))
+	for k := range nested {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestHelp_ShowIncludesRegisteredInputSchema pins that show returns the
+// tool's registered JSON input schema for EVERY registry tool, and that
+// it returns it as a JSON object rather than an escaped JSON string.
+//
+// The type assertion is the load-bearing part: a schema serialised as a
+// string is unreadable to an agent that wants to introspect it, and an
+// agent that must unescape and re-parse it is one step away from
+// misreading it.
+func TestHelp_ShowIncludesRegisteredInputSchema(t *testing.T) {
+	if len(Registry) == 0 {
+		t.Fatal("the registry is empty; the test would prove nothing")
+	}
+
+	for _, target := range Registry {
+		t.Run(target.Name, func(t *testing.T) {
+			res, err := Help("show", target.Name)
+			if err != nil {
+				t.Fatalf("Help(show, %q) returned error: %v", target.Name, err)
+			}
+
+			raw, ok := res["input_schema"]
+			if !ok {
+				t.Fatalf("show response for %q has no input_schema: %+v", target.Name, res)
+			}
+			got, ok := raw.(map[string]interface{})
+			if !ok {
+				t.Fatalf("input_schema is %T, want a JSON object (map[string]interface{})", raw)
+			}
+
+			want := helpSchemaOf(t, target)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("input_schema differs from the registry schema for %q\n got: %#v\nwant: %#v", target.Name, got, want)
+			}
+		})
+	}
+}
+
+// TestHelp_ShowSchemaSurvivesJSONRoundTripAsAnObject pins that the
+// schema reaches the wire as a JSON object, not as an escaped string.
+//
+// The transports marshal the whole response, so a schema that is a
+// string on the way out of Help would arrive at the agent as a string.
+// This checks the marshalled bytes directly, because that is what the
+// agent actually sees.
+func TestHelp_ShowSchemaSurvivesJSONRoundTripAsAnObject(t *testing.T) {
+	res, err := Help("show", "mpm_memory")
+	if err != nil {
+		t.Fatalf("Help(show) returned error: %v", err)
+	}
+	data, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), `"input_schema":"`) {
+		t.Error("input_schema was serialised as a JSON string; it must be a JSON object")
+	}
+	if !strings.Contains(string(data), `"input_schema":{`) {
+		t.Errorf("input_schema is not a JSON object in the marshalled payload: %s", helpFirstN(string(data), 200))
+	}
+
+	var back map[string]interface{}
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := back["input_schema"].(map[string]interface{}); !ok {
+		t.Fatalf("input_schema is %T after the round trip, want map[string]interface{}", back["input_schema"])
+	}
+}
+
+// TestHelp_ShowSchemaCarriesActionEnumRequiredAndNestedProperties pins
+// the three structural things an agent needs from a schema, against
+// values that are asserted independently of the registry — so a bug that
+// returns the wrong tool's schema, or flattens the nesting, is caught
+// even if the registry itself changed.
+func TestHelp_ShowSchemaCarriesActionEnumRequiredAndNestedProperties(t *testing.T) {
+	target, ok := ByName("mpm_memory")
+	if !ok {
+		t.Fatal("mpm_memory is not registered")
+	}
+
+	res, err := Help("show", target.Name)
+	if err != nil {
+		t.Fatalf("Help(show) returned error: %v", err)
+	}
+	got, ok := res["input_schema"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("input_schema is %T, want map[string]interface{}", res["input_schema"])
+	}
+
+	// 1. The action enum — the action vocabulary the dispatcher accepts.
+	actions := helpActionEnum(got)
+	for _, want := range []string{"save", "query", "show", "shred", "reinforce"} {
+		if !helpContains(actions, want) {
+			t.Errorf("action enum %v is missing %q", actions, want)
+		}
+	}
+	if !reflect.DeepEqual(actions, helpActionEnum(helpSchemaOf(t, target))) {
+		t.Errorf("action enum differs from the registry:\n got: %v\nwant: %v", actions, helpActionEnum(helpSchemaOf(t, target)))
+	}
+
+	// 2. The required fields.
+	required := helpStringSlice(got["required"])
+	if !helpContains(required, "action") {
+		t.Errorf("required = %v, want it to contain \"action\"", required)
+	}
+	if !reflect.DeepEqual(required, helpStringSlice(helpSchemaOf(t, target)["required"])) {
+		t.Errorf("required differs from the registry:\n got: %v\nwant: %v", required, helpStringSlice(helpSchemaOf(t, target)["required"]))
+	}
+
+	// 3. The nested parameter properties — one level down, inside "params".
+	nested := helpNestedParamKeys(got)
+	for _, want := range []string{"fact", "query", "projection", "limit"} {
+		if !helpContains(nested, want) {
+			t.Errorf("nested params properties %v are missing %q", nested, want)
+		}
+	}
+	if !reflect.DeepEqual(nested, helpNestedParamKeys(helpSchemaOf(t, target))) {
+		t.Errorf("nested params properties differ from the registry:\n got: %v\nwant: %v", nested, helpNestedParamKeys(helpSchemaOf(t, target)))
+	}
+}
+
+// TestHelp_ShowSchemaPreservesOneOfBranches pins that a schema with
+// more than one branch keeps every branch.
+//
+// Three registry tools (mpm_handoff, mpm_system, mpm_work) declare a
+// top-level "oneOf" alongside their properties. A schema that lost those
+// branches would still look like an object and would still carry an
+// action enum, so only an explicit check catches the loss.
+func TestHelp_ShowSchemaPreservesOneOfBranches(t *testing.T) {
+	checked := 0
+	for _, target := range Registry {
+		want := helpSchemaOf(t, target)
+		branches, hasBranches := want["oneOf"].([]interface{})
+		if !hasBranches {
+			continue
+		}
+		checked++
+
+		res, err := Help("show", target.Name)
+		if err != nil {
+			t.Fatalf("Help(show, %q) returned error: %v", target.Name, err)
+		}
+		got, ok := res["input_schema"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("input_schema is %T, want map[string]interface{}", res["input_schema"])
+		}
+		gotBranches, ok := got["oneOf"].([]interface{})
+		if !ok {
+			t.Errorf("%q has a oneOf in the registry but none in the returned schema", target.Name)
+			continue
+		}
+		if len(gotBranches) != len(branches) {
+			t.Errorf("%q oneOf has %d branches in the returned schema, want %d", target.Name, len(gotBranches), len(branches))
+			continue
+		}
+		if !reflect.DeepEqual(gotBranches, branches) {
+			t.Errorf("%q oneOf branches differ from the registry", target.Name)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no registry tool declares a oneOf; the fixture proves nothing")
+	}
+}
+
+// TestHelp_ShowPreservesExistingFields pins that adding the schema did
+// not disturb the fields show already returned.
+func TestHelp_ShowPreservesExistingFields(t *testing.T) {
+	target := Registry[0]
+	res, err := Help("show", target.Name)
+	if err != nil {
+		t.Fatalf("Help(show) returned error: %v", err)
+	}
+	if res["success"] != true {
+		t.Errorf("success = %v, want true", res["success"])
+	}
+	if res["name"] != target.Name {
+		t.Errorf("name = %v, want %q", res["name"], target.Name)
+	}
+	if res["description"] != target.Description {
+		t.Error("description changed")
+	}
+	reach, _ := res["reach_via_cli"].(string)
+	if !strings.Contains(reach, "mpm call "+target.Name) {
+		t.Errorf("reach_via_cli = %q, want it to name the mpm call form", reach)
+	}
+}
+
+// TestHelp_ListDoesNotCarrySchemas pins that the list action stays a
+// summary.
+//
+// The list is the cheap enumeration an agent scans; embedding 21 full
+// schemas in it would make the common case expensive for no benefit. The
+// schema belongs to show, which is the per-tool detail request.
+func TestHelp_ListDoesNotCarrySchemas(t *testing.T) {
+	res, err := Help("list", "")
+	if err != nil {
+		t.Fatalf("Help(list) returned error: %v", err)
+	}
+	rows, ok := res["tools"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("tools is %T, want []map[string]interface{}", res["tools"])
+	}
+	for _, row := range rows {
+		if _, present := row["input_schema"]; present {
+			t.Errorf("row %v carries a schema; the list action must stay a summary", row["name"])
+		}
+	}
+}
+
+// helpContains reports whether needle is in haystack.
+func helpContains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// helpFirstN returns at most n leading characters of s.
+func helpFirstN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }

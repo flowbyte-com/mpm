@@ -391,6 +391,13 @@ agent discovers the same tools and the same schemas whichever transport
 it uses. Discovery is read-only: it does not create, open or mutate a
 database.
 
+`action=show` returns the tool's full description **and** its
+registered JSON input schema under `input_schema` — the action
+vocabulary, the required fields and the nested `params` properties, as
+a JSON object rather than a string. Read the schema before you call an
+unfamiliar operation: a description says what a tool is for, but only
+the schema says which actions and fields are actually accepted.
+
 Do not abandon persistence when the preferred integration breaks — use
 the fallback until the host recovers.
 

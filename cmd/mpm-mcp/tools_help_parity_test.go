@@ -199,6 +199,77 @@ func TestHelpHandler_ParityWithCLIShow(t *testing.T) {
 	}
 }
 
+// TestHelpHandler_ShowSchemaParityWithCLI pins that both transports
+// return the tool's registered JSON input schema as a structured JSON
+// object, and that the object is the registry's own schema.
+//
+// This is the check that matters for an agent acting on the result: it
+// must be able to read the action vocabulary, the required fields and
+// the nested parameter properties out of either transport's answer. A
+// schema serialised as an escaped JSON string would force the reader to
+// unescape and re-parse it — and the two transports could then drift in
+// how that string is shaped without any test noticing.
+//
+// The comparison is against the registry definition, not against a
+// hand-written expectation, so a second copy of the schema cannot
+// quietly diverge from the one the dispatcher validates against.
+func TestHelpHandler_ShowSchemaParityWithCLI(t *testing.T) {
+	bin := buildMPMBinForHelpParity(t)
+
+	native, errText := nativeHelp(t, map[string]any{"action": "show", "tool": "mpm_memory"})
+	if errText != "" {
+		t.Fatalf("native mpm_help show failed: %s", errText)
+	}
+	cli, exitCode := cliHelp(t, bin, `{"action":"show","params":{"tool":"mpm_memory"}}`)
+	if exitCode != 0 {
+		t.Fatalf("CLI mpm_help show exited %d, want 0", exitCode)
+	}
+
+	nativeSchema, ok := native["input_schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("native input_schema is %T, want a JSON object", native["input_schema"])
+	}
+	cliSchema, ok := cli["input_schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("CLI input_schema is %T, want a JSON object", cli["input_schema"])
+	}
+
+	nativeJSON, _ := json.Marshal(nativeSchema)
+	cliJSON, _ := json.Marshal(cliSchema)
+	if string(nativeJSON) != string(cliJSON) {
+		t.Errorf("native and CLI schemas differ\nnative=%s\ncli=%s", nativeJSON, cliJSON)
+	}
+
+	registered, ok := tools.ByName("mpm_memory")
+	if !ok {
+		t.Fatal("mpm_memory is not registered")
+	}
+	var want map[string]any
+	if err := json.Unmarshal(registered.Schema, &want); err != nil {
+		t.Fatalf("registry schema for mpm_memory is not a JSON object: %v", err)
+	}
+	wantJSON, _ := json.Marshal(want)
+	if string(nativeJSON) != string(wantJSON) {
+		t.Errorf("native schema differs from the registry schema\n got: %s\nwant: %s", nativeJSON, wantJSON)
+	}
+
+	// The structure that makes the schema actionable must survive the
+	// transport: the action vocabulary, the required fields, and the
+	// nested parameter properties.
+	props, _ := nativeSchema["properties"].(map[string]any)
+	action, _ := props["action"].(map[string]any)
+	if enum, _ := action["enum"].([]any); len(enum) == 0 {
+		t.Error("native schema has no action enum")
+	}
+	if required, _ := nativeSchema["required"].([]any); len(required) == 0 {
+		t.Error("native schema has no required fields")
+	}
+	params, _ := props["params"].(map[string]any)
+	if nested, _ := params["properties"].(map[string]any); len(nested) == 0 {
+		t.Error("native schema has no nested params properties")
+	}
+}
+
 // TestHelpHandler_ParityWithCLIError pins that both transports report
 // the same reason for a rejected request.
 //

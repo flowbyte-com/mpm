@@ -2,7 +2,8 @@
 //
 // mpm_help is MPM's capability-discovery surface: action=list returns
 // every registry tool with its reachability, action=show returns a
-// tool's full description. It is registered as a native MCP closure
+// tool's full description together with its registered JSON input
+// schema. It is registered as a native MCP closure
 // (cmd/mpm-mcp/tools.go::makeHelpHandler), which made it the one
 // capability a shell-only agent could not reach: `mpm call` dispatches
 // registry-backed tools, and the discovery closure is not a registry
@@ -18,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -289,6 +291,70 @@ func TestCallHelp_DoesNotTouchWorkspaceDatabase(t *testing.T) {
 	dbPath := filepath.Join(workspace, "src", "db", "mpm.db")
 	if _, statErr := os.Stat(dbPath); statErr == nil {
 		t.Errorf("discovery created %s; capability discovery must not materialise a database", dbPath)
+	}
+}
+
+// TestCallHelp_ShowReturnsInputSchemaAsAJSONObject pins that the CLI
+// fallback hands the agent the tool's registered JSON input schema, and
+// hands it over as a JSON object rather than an escaped JSON string.
+//
+// The description says what a tool is for; the schema says what a payload
+// may contain. An agent invoking an unfamiliar operation needs the
+// schema — the action vocabulary, the required fields, the nested
+// parameter properties — because guessing any of them produces a
+// rejected call. A schema serialised as a string has to be unescaped and
+// re-parsed by the reader, which is one step away from misreading it.
+//
+// The schema is compared against the registry's own definition, so a
+// second hand-written copy would fail here rather than drift silently.
+func TestCallHelp_ShowReturnsInputSchemaAsAJSONObject(t *testing.T) {
+	stdout, stderr, err := callHelpMPM(t, nil, "", "call", "mpm_help",
+		"--payload", `{"action":"show","params":{"tool":"mpm_memory"}}`)
+	if err != nil {
+		t.Fatalf("mpm call mpm_help show failed: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+
+	// The wire form matters: an object, not a string.
+	if strings.Contains(stdout, `"input_schema":"`) {
+		t.Errorf("input_schema was serialised as a JSON string; it must be a JSON object\nstdout=%s", stdout)
+	}
+	if !strings.Contains(stdout, `"input_schema":{`) {
+		t.Errorf("input_schema is not a JSON object in the CLI envelope\nstdout=%s", stdout)
+	}
+
+	env := decodeHelpEnvelope(t, stdout)
+	got, ok := env["input_schema"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("input_schema is %T, want a JSON object\nstdout=%s", env["input_schema"], stdout)
+	}
+
+	registered, ok := tools.ByName("mpm_memory")
+	if !ok {
+		t.Fatal("mpm_memory is not registered")
+	}
+	var want map[string]interface{}
+	if err := json.Unmarshal(registered.Schema, &want); err != nil {
+		t.Fatalf("registry schema for mpm_memory is not a JSON object: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("input_schema differs from the registry schema\n got: %#v\nwant: %#v", got, want)
+	}
+
+	// The schema must still carry the structure that makes it usable:
+	// the action vocabulary, the required fields, the nested parameters.
+	props, _ := got["properties"].(map[string]interface{})
+	action, _ := props["action"].(map[string]interface{})
+	enum, _ := action["enum"].([]interface{})
+	if len(enum) == 0 {
+		t.Error("input_schema has no action enum; the schema cannot guide an action choice")
+	}
+	if required, _ := got["required"].([]interface{}); len(required) == 0 {
+		t.Error("input_schema has no required fields")
+	}
+	params, _ := props["params"].(map[string]interface{})
+	nested, _ := params["properties"].(map[string]interface{})
+	if len(nested) == 0 {
+		t.Error("input_schema has no nested params properties")
 	}
 }
 

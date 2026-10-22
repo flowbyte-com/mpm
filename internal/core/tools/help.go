@@ -1,9 +1,17 @@
 // help.go — mpm_help's discovery catalogue, shared by both transports.
 //
-// mpm_help answers one question: what can MPM do, and how do I call it?
-// It is registered as a native MCP closure rather than a registry entry
-// (a registry entry would double-register under MPM_EXPOSE_ALL_TOOLS=1,
-// where the full surface is exposed alongside the compact one).
+// mpm_help answers two questions: what can MPM do and how do I call it,
+// and — for a specific tool — what payload shape will it accept? The
+// second question needs the tool's registered JSON input schema, not its
+// description: a description says what a tool is for, while the schema
+// says which actions and fields are actually legal. The approved
+// behavioural contract tells agents to obtain the appropriate schema
+// before invoking an unfamiliar operation, so discovery returns it.
+//
+// mpm_help is registered as a native MCP closure rather than a registry
+// entry (a registry entry would double-register under
+// MPM_EXPOSE_ALL_TOOLS=1, where the full surface is exposed alongside
+// the compact one).
 //
 // The consequence of being a closure is that `mpm call` — which
 // dispatches registry-backed tools only — could not reach it, leaving
@@ -18,10 +26,22 @@
 package tools
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 )
+
+// inputSchemaField is the response field that carries a tool's registered
+// JSON input schema.
+//
+// The name follows this repository's JSON convention: MPM's own envelopes
+// use snake_case keys (tool_count, discovery_hint, compatibility_mode,
+// reach_via_cli, schema_version), so the discovery catalogue does too. It
+// is the snake_case spelling of the MCP wire name "inputSchema" — the
+// same schema the MCP surface publishes for the tool and the runtime
+// dispatcher validates against.
+const inputSchemaField = "input_schema"
 
 // cliReachTemplate is the canonical `mpm call` form for a tool. It is
 // the same string in every transport and in every row of the list
@@ -50,11 +70,46 @@ func HelpActions() []string {
 	return out
 }
 
+// toolInputSchema decodes a tool's registered JSON input schema into a
+// JSON object.
+//
+// The registry's schema is the authority: it is the same object the MCP
+// surface publishes as the tool's inputSchema and the same object the
+// runtime dispatcher validates an incoming payload against. Discovery
+// therefore returns that object verbatim rather than a second,
+// hand-written summary of it — a summary would drift from the schema
+// that actually decides whether a call is legal.
+//
+// An empty schema is not an error: it means the tool declares no input
+// constraints, and the honest answer is an empty JSON object. A schema
+// that is present but unreadable IS an error — it is a registry defect,
+// and reporting it is better than handing an agent a schema that does
+// not describe the tool.
+func toolInputSchema(t Tool) (map[string]interface{}, error) {
+	if len(t.Schema) == 0 {
+		return map[string]interface{}{}, nil
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(t.Schema, &out); err != nil {
+		return nil, fmt.Errorf("mpm_help: tool %q has an unreadable registered schema: %w", t.Name, err)
+	}
+	if out == nil {
+		return map[string]interface{}{}, nil
+	}
+	return out, nil
+}
+
 // Help answers mpm_help's discovery contract.
 //
 // action "list" enumerates every registry tool with a one-line summary
 // and the `mpm call` form that reaches it. action "show" returns one
-// tool's full description.
+// tool's full description together with its registered JSON input
+// schema under "input_schema".
+//
+// The schema is returned as a JSON object, not as an escaped JSON
+// string, so an agent can read the action vocabulary, the required
+// fields and the nested parameter properties directly out of the
+// response.
 //
 // The returned map carries "success": true. A failed request returns a
 // nil map and an error whose message is the operator-facing reason;
@@ -94,11 +149,16 @@ func Help(action, toolName string) (map[string]interface{}, error) {
 		if !ok {
 			return nil, fmt.Errorf("mpm_help: unknown tool %q", toolName)
 		}
+		schema, err := toolInputSchema(t)
+		if err != nil {
+			return nil, err
+		}
 		return map[string]interface{}{
-			"success":       true,
-			"name":          t.Name,
-			"description":   t.Description,
-			"reach_via_cli": cliReach(t.Name),
+			"success":        true,
+			"name":           t.Name,
+			"description":    t.Description,
+			inputSchemaField: schema,
+			"reach_via_cli":  cliReach(t.Name),
 		}, nil
 	default:
 		return nil, fmt.Errorf("mpm_help: unknown action %q (valid: %s)", action, strings.Join(helpActions, ", "))

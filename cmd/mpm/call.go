@@ -75,6 +75,9 @@ Capability discovery is reachable through this same path:
   mpm call mpm_help --payload '{"action":"list"}'
   mpm call mpm_help --payload '{"action":"show","params":{"tool":"<name>"}}'
 The catalogue served here is the one the native MCP surface serves.
+action=show returns the tool's full description AND its registered JSON
+input schema under "input_schema" — the action vocabulary, the required
+fields and the nested params — as a JSON object, not as a string.
 
 Friendly CLI commands follow the Unix convention directly: validation
 failures print a human message on stderr and exit non-zero. Bare
