@@ -430,6 +430,11 @@ func TestMain(m *testing.M) {
 	// binaries (see build_provenance_test.go): they are built once per
 	// package run and shared by every test that needs them, so the
 	// package owns their directory and removes it here.
+	//
+	// And to the shared mpm binary the IO tests exec (see
+	// call_io_test.go): it is built once per package run and shared by
+	// every IO test, so its directory is removed here too. That
+	// directory used to survive every run, leaving ~22 MB behind.
 	code := m.Run()
 	if err := removeCanonicalProvenanceDir(); err != nil {
 		fmt.Fprintf(os.Stderr,
@@ -441,6 +446,12 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr,
 			"mpm: could not remove the temporary provenance build directory %q: %v\n",
 			provenanceBuildDir, err)
+		code = teardownFailureCode(code)
+	}
+	if err := removeCallIOBinDir(); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"mpm: could not remove the temporary call-io build directory %q: %v\n",
+			callIOBinDir, err)
 		code = teardownFailureCode(code)
 	}
 
