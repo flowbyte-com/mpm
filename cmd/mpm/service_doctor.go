@@ -800,14 +800,48 @@ func (s *DoctorService) checkReviewBacklog() DoctorCheck {
 //
 //	A. mpm_config.json absent (fresh install / test env) → INFO
 //	B. mpm_config.json unreadable                       → WARN
-//	C. no binding (Components["memory"] empty)           → WARN
-//	D. binding == "disabled" sentinel                    → INFO
-//	E. binding points at a missing profile name         → WARN
-//	   (and no Profiles["default"] fallback)
-//	F. profile exists but required field missing        → WARN
+//	C. binding == "disabled" sentinel                    → INFO
+//	D. explicit binding points at a missing profile     → WARN
+//	   (a genuinely broken binding, whether or not the
+//	   default-profile fallback happens to cover for it)
+//	E. no explicit binding and nothing resolves at all   → WARN
+//	F. profile resolved but a required field is missing → WARN
 //	   (provider / model / base_url — credential
 //	   state is NEVER included in the message)
-//	G. profile bound and structurally complete         → PASS
+//	G. profile resolved and structurally complete       → PASS
+//	   (the row names the source of the resolution: an
+//	   explicit binding, the "default" profile, or the
+//	   legacy synth block)
+//
+// 2026-10-23 (HAL-9001 Finding 3): this check used to read the
+// RAW binding (`cfg.DefaultComponentProfile("memory")`) and
+// report WARN "no profile configured" whenever Components["memory"]
+// was unset — even when the runtime would happily resolve the
+// memory component through Profiles["default"]. The onboarding
+// wizard writes Profiles["default"] (the canonical destination,
+// cmd/mpm/handlers_config.go:201) and does not write an explicit
+// memory binding, so a correctly configured install was reported
+// as having no memory LLM at all.
+//
+// The diagnostic now resolves through the SAME canonical resolver
+// the runtime uses — config.ResolveProfile("memory") — whose
+// documented precedence chain (internal/core/config/config.go:245)
+// is: explicit binding, then Profiles["default"], then the legacy
+// synth block. The dashboard (resolveDashboardLLM), the onboarding
+// plan (planModelStep) and the synthesis worker already resolve
+// that way; Doctor was the odd one out.
+//
+// The fallback is made VISIBLE rather than hidden: the row says
+// which profile the component resolves to and whether that
+// resolution was inherited. A broken explicit binding still WARNs,
+// because an operator who bound "review" and got "default" has a
+// configuration that does not do what they asked.
+//
+// The configuration model is deliberately NOT changed: the wizard
+// still writes Profiles["default"], and the resolver still falls
+// back to it. Binding every component explicitly at wizard time
+// would change what `mpm config component list` reports for every
+// operator without changing what the runtime actually resolves.
 //
 // The "config absent" branch (A) is INFO rather than WARN because
 // it matches the dashboard's resolveDashboardLLM behaviour and
@@ -853,13 +887,51 @@ func (s *DoctorService) checkMemoryLLM() DoctorCheck {
 		return check
 	}
 
-	// Raw operator-set binding name. Empty string means "not bound";
-	// the ProfileFor fallback chain is treated as a config-resolution
-	// courtesy, not an explicit binding, so Doctor surfaces it.
-	configuredName := cfg.DefaultComponentProfile("memory")
+	// C. Canonical resolution. Doctor and the runtime must agree on
+	// what the memory component resolves to, so this is
+	// config.ResolveProfile — the one precedence chain in the
+	// package — rather than a hand-rolled read of the raw binding.
+	resolution := cfg.ResolveProfile("memory")
 
-	// A. binding missing — Components["memory"] is unset.
-	if configuredName == "" {
+	// C. binding == "disabled" sentinel — only meaningful for the
+	// embedding component (per config.ResolveProfile); for memory
+	// we surface INFO with the same wording the embedding check
+	// uses for its disabled state, so operators see one consistent
+	// vocabulary.
+	if resolution.ConfiguredName == "disabled" {
+		check.Status = "INFO"
+		check.Message = "intentionally disabled"
+		return check
+	}
+
+	// D. Explicit binding that points at a profile that does NOT
+	// exist. This is a genuinely broken binding: the operator asked
+	// for a specific profile and the runtime cannot give it to
+	// them. The resolver falls through to Profiles["default"] (and
+	// the row says so), but the verdict stays WARN — a silent
+	// fallback would hide a configuration that does not do what the
+	// operator asked for. The recommended `profile add` form uses
+	// ONLY the documented noninteractive flags (--model,
+	// --base-url) per the public CLI contract.
+	if resolution.ConfiguredName != "" {
+		if _, ok := cfg.Profiles[resolution.ConfiguredName]; !ok {
+			check.Status = "WARN"
+			check.Message = fmt.Sprintf("profile %q not found", resolution.ConfiguredName)
+			check.Details = []string{
+				fmt.Sprintf("Run 'mpm config profile add %s --model <model> --base-url <url>' to create it, or 'mpm config component set memory <other>' to rebind.", resolution.ConfiguredName),
+			}
+			if resolution.Profile != nil {
+				check.Details = append(check.Details,
+					fmt.Sprintf("Until then the runtime falls back to profile %q.", resolution.Profile.Name))
+			}
+			return check
+		}
+	}
+
+	// E. Nothing resolves — no explicit binding, no "default"
+	// profile, no legacy synth block. There is genuinely no usable
+	// profile for the memory component.
+	if resolution.Profile == nil {
 		check.Status = "WARN"
 		check.Message = "no profile configured"
 		// Remediation uses ONLY the public `profile add` contract:
@@ -877,35 +949,9 @@ func (s *DoctorService) checkMemoryLLM() DoctorCheck {
 		return check
 	}
 
-	// B. binding == "disabled" sentinel — only meaningful for the
-	// embedding component (per config.ResolveProfile); for memory
-	// we surface INFO with the same wording the embedding check
-	// uses for its disabled state, so operators see one consistent
-	// vocabulary.
-	if configuredName == "disabled" {
-		check.Status = "INFO"
-		check.Message = "intentionally disabled"
-		return check
-	}
+	p := resolution.Profile
 
-	// C. binding points at a profile that does NOT exist AND the
-	// default-profile fallback is also missing. ProfileFor returns
-	// nil for this combination; we surface the operator's intent
-	// (the literal binding name) in the message so the remediation
-	// command is unambiguous. The recommended `profile add` form
-	// uses ONLY the documented noninteractive flags (--model,
-	// --base-url) per the public CLI contract.
-	p := cfg.ProfileFor("memory")
-	if p == nil {
-		check.Status = "WARN"
-		check.Message = fmt.Sprintf("profile %q not found", configuredName)
-		check.Details = []string{
-			fmt.Sprintf("Run 'mpm config profile add %s --model <model> --base-url <url>' to create it, or 'mpm config component set memory <other>' to rebind.", configuredName),
-		}
-		return check
-	}
-
-	// D. profile exists but lacks a material field. The message
+	// F. profile exists but lacks a material field. The message
 	// names the missing field(s) but NEVER includes the credential
 	// (api_key) or any value-bearing secret. The remediation
 	// command uses the canonical `profile set` path — one
@@ -936,15 +982,32 @@ func (s *DoctorService) checkMemoryLLM() DoctorCheck {
 		return check
 	}
 
-	// E. profile bound and structurally complete — PASS.
+	// G. profile resolved and structurally complete — PASS.
 	// Message uses the canonical `<model> · <Provider>` form
 	// (formatProviderModel helper) so it matches the Embedding
 	// model row. Network reachability is intentionally NOT
 	// asserted here — that's the probe layer's job (Critic
 	// row), which shares this profile's fingerprint and
 	// therefore performs one IO, not two.
+	//
+	// The row also names WHERE the resolution came from, so an
+	// inherited profile is never mistaken for an explicit binding.
 	check.Status = "PASS"
 	check.Message = formatProviderModel(p.Provider + ":" + p.Model)
+	switch resolution.Source {
+	case config.ResolutionDefault:
+		check.Message += " (default profile)"
+		check.Details = []string{
+			"No explicit memory binding; the memory component resolves to the \"default\" profile.",
+			"Run 'mpm config component set memory <name>' to bind a dedicated profile.",
+		}
+	case config.ResolutionLegacy:
+		check.Message += " (legacy synth block)"
+		check.Details = []string{
+			"No explicit memory binding; the memory component resolves to the legacy \"synth\" block.",
+			"Run 'mpm config profile add <name> --model <model> --base-url <url>' to migrate to a profile, then 'mpm config component set memory <name>' to bind it.",
+		}
+	}
 	return check
 }
 

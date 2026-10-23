@@ -39,9 +39,14 @@ import (
 // exercise the Memory LLM diagnostic. It mirrors the shape of a
 // real mpm_config.json (Profiles + Components) without needing
 // the substrate's full defaulting chain.
+//
+// synth carries the LEGACY single-profile block, so the
+// legacy-fallback resolution can be exercised without a second
+// writer.
 type doctorMemoryLLMFixture struct {
 	profiles   map[string]config.Profile
 	components map[string]string
+	synth      *config.SynthConfig
 }
 
 // withTestConfigWorkspace points MPM_WORKSPACE at a temp dir for the
@@ -77,6 +82,9 @@ func writeTestConfig(t *testing.T, ws string, fx doctorMemoryLLMFixture) {
 	if fx.components != nil {
 		cfg.Components = fx.components
 	}
+	if fx.synth != nil {
+		cfg.Synth = fx.synth
+	}
 	if err := config.SaveConfig(cfg); err != nil {
 		t.Fatalf("writeTestConfig: SaveConfig: %v", err)
 	}
@@ -94,23 +102,24 @@ func writeTestConfig(t *testing.T, ws string, fx doctorMemoryLLMFixture) {
 	}
 }
 
-// TestDoctorService_checkMemoryLLM_NoBinding pins the canonical
-// "no general LLM binding" diagnostic. Components["memory"] is
-// absent. Status is WARN (not INFO) — memory LLM is classified as
-// REQUIRED for normal LLM-backed MPM work, so absence is a defect
-// signal on the Doctor trust-signal flagship. The remediation
-// references the safe canonical command (component set, not profile
-// set with a positional secret).
-func TestDoctorService_checkMemoryLLM_NoBinding(t *testing.T) {
+// TestDoctorService_checkMemoryLLM_NoProfileAtAll pins the
+// "nothing resolves" diagnostic. There is no explicit binding, no
+// Profiles["default"] and no legacy synth block, so the memory
+// component genuinely has no usable profile.
+//
+// Status is WARN (not INFO) — memory LLM is classified as REQUIRED
+// for normal LLM-backed MPM work, so absence is a defect signal on
+// the Doctor trust-signal flagship. The remediation references the
+// safe canonical command (component set, not profile set with a
+// positional secret).
+func TestDoctorService_checkMemoryLLM_NoProfileAtAll(t *testing.T) {
 	dm := newTestDMForCmd(t)
 	svc := NewDoctorService(dm)
 	_, restore := withTestConfigWorkspace(t)
 	defer restore()
 	writeTestConfig(t, os.Getenv("MPM_WORKSPACE"), doctorMemoryLLMFixture{
-		profiles: map[string]config.Profile{
-			"default": {Provider: "minimax", Model: "MiniMax-M3[1m]", BaseURL: "https://api.minimax.io/anthropic/v1", APIKey: "sk-test"},
-		},
-		// Components deliberately has no "memory" key.
+		// No profiles at all — nothing resolves.
+		profiles:   map[string]config.Profile{},
 		components: map[string]string{},
 	})
 
@@ -119,15 +128,15 @@ func TestDoctorService_checkMemoryLLM_NoBinding(t *testing.T) {
 		t.Errorf("check.Name = %q, want %q", check.Name, "Memory LLM")
 	}
 	if check.Status != "WARN" {
-		t.Errorf("no-binding must WARN; got %q (msg: %q)", check.Status, check.Message)
+		t.Errorf("no usable profile must WARN; got %q (msg: %q)", check.Status, check.Message)
 	}
 	if check.Message != "no profile configured" {
-		t.Errorf("no-binding message = %q, want %q", check.Message, "no profile configured")
+		t.Errorf("no-profile message = %q, want %q", check.Message, "no profile configured")
 	}
 	// Remediation must reference the canonical safe command and
 	// must NOT include a positional credential on argv.
 	if len(check.Details) == 0 {
-		t.Fatalf("no-binding check must carry remediation Details")
+		t.Fatalf("no-profile check must carry remediation Details")
 	}
 	hint := strings.Join(check.Details, " ")
 	if !strings.Contains(hint, "mpm config component set memory") {
@@ -135,6 +144,120 @@ func TestDoctorService_checkMemoryLLM_NoBinding(t *testing.T) {
 	}
 	if strings.Contains(hint, "api_key ") && !strings.Contains(hint, "api_key [--stdin]") {
 		t.Errorf("remediation must not include positional api_key argv form; got: %q", hint)
+	}
+}
+
+// TestDoctorService_checkMemoryLLM_ImplicitDefaultProfileFallback
+// pins that the diagnostic agrees with the runtime's canonical
+// resolver.
+//
+// 2026-10-23 (HAL-9001 Finding 3): this is the state the onboarding
+// wizard leaves behind. The wizard writes Profiles["default"] — the
+// canonical destination — and does not write Components["memory"].
+// The runtime resolves that to the default profile, so the memory
+// component IS configured and usable. Doctor used to read the RAW
+// binding, found it empty, and reported "no profile configured" for
+// a correctly configured install.
+//
+// The verdict is PASS because a usable profile exists; the fallback
+// is made VISIBLE in the row so an inherited profile is never
+// mistaken for an explicit binding.
+func TestDoctorService_checkMemoryLLM_ImplicitDefaultProfileFallback(t *testing.T) {
+	dm := newTestDMForCmd(t)
+	svc := NewDoctorService(dm)
+	_, restore := withTestConfigWorkspace(t)
+	defer restore()
+	writeTestConfig(t, os.Getenv("MPM_WORKSPACE"), doctorMemoryLLMFixture{
+		profiles: map[string]config.Profile{
+			"default": {Provider: "minimax", Model: "MiniMax-M3[1m]", BaseURL: "https://api.minimax.io/anthropic/v1", APIKey: "sk-test"},
+		},
+		// Components deliberately has no "memory" key — the runtime
+		// falls back to Profiles["default"].
+		components: map[string]string{},
+	})
+
+	check := svc.checkMemoryLLM()
+	if check.Status != "PASS" {
+		t.Fatalf("the default-profile fallback resolves to a usable profile; got %q (msg: %q)",
+			check.Status, check.Message)
+	}
+	if strings.Contains(check.Message, "no profile configured") {
+		t.Errorf("the fallback must not be reported as an absent profile; got %q", check.Message)
+	}
+	if !strings.Contains(check.Message, "default profile") {
+		t.Errorf("the inherited resolution must be visible in the row; got %q", check.Message)
+	}
+	if !strings.Contains(check.Message, "MiniMax-M3[1m]") {
+		t.Errorf("the row must still name the resolved model; got %q", check.Message)
+	}
+	hint := strings.Join(check.Details, " ")
+	if !strings.Contains(hint, "default") {
+		t.Errorf("the details must explain the inherited resolution; got: %q", hint)
+	}
+}
+
+// TestDoctorService_checkMemoryLLM_DanglingBindingFallsBackToDefault
+// pins that a genuinely broken binding still WARNs even though the
+// runtime would cover for it.
+//
+// An operator who bound Components["memory"] = "review" and has no
+// "review" profile asked for something the substrate cannot
+// deliver. The resolver falls through to Profiles["default"], but
+// the diagnostic must not report that as a healthy explicit
+// binding — the configuration does not do what was asked.
+func TestDoctorService_checkMemoryLLM_DanglingBindingFallsBackToDefault(t *testing.T) {
+	dm := newTestDMForCmd(t)
+	svc := NewDoctorService(dm)
+	_, restore := withTestConfigWorkspace(t)
+	defer restore()
+	writeTestConfig(t, os.Getenv("MPM_WORKSPACE"), doctorMemoryLLMFixture{
+		profiles: map[string]config.Profile{
+			"default": {Provider: "minimax", Model: "MiniMax-M3[1m]", BaseURL: "https://api.minimax.io/anthropic/v1"},
+		},
+		components: map[string]string{"memory": "ghost"},
+	})
+
+	check := svc.checkMemoryLLM()
+	if check.Status != "WARN" {
+		t.Fatalf("a dangling binding must WARN even when the default profile covers for it; got %q (msg: %q)",
+			check.Status, check.Message)
+	}
+	if !strings.Contains(check.Message, `"ghost"`) {
+		t.Errorf("the message must name the literal binding; got %q", check.Message)
+	}
+	hint := strings.Join(check.Details, " ")
+	if !strings.Contains(hint, "default") {
+		t.Errorf("the details must say which profile the runtime falls back to; got: %q", hint)
+	}
+	if !strings.Contains(hint, "mpm config component set memory") {
+		t.Errorf("the details must offer the rebind command; got: %q", hint)
+	}
+}
+
+// TestDoctorService_checkMemoryLLM_LegacySynthFallback pins the
+// legacy resolution path: a pre-profiles configuration still works,
+// so the row is PASS — and says where the profile came from.
+func TestDoctorService_checkMemoryLLM_LegacySynthFallback(t *testing.T) {
+	dm := newTestDMForCmd(t)
+	svc := NewDoctorService(dm)
+	_, restore := withTestConfigWorkspace(t)
+	defer restore()
+	writeTestConfig(t, os.Getenv("MPM_WORKSPACE"), doctorMemoryLLMFixture{
+		profiles:   map[string]config.Profile{},
+		components: map[string]string{},
+		synth: &config.SynthConfig{
+			Model:   "legacy-model",
+			BaseURL: "https://legacy.invalid/v1",
+		},
+	})
+
+	check := svc.checkMemoryLLM()
+	if check.Status != "PASS" {
+		t.Fatalf("the legacy synth block resolves to a usable profile; got %q (msg: %q)",
+			check.Status, check.Message)
+	}
+	if !strings.Contains(check.Message, "legacy") {
+		t.Errorf("the inherited legacy resolution must be visible in the row; got %q", check.Message)
 	}
 }
 
@@ -437,26 +560,29 @@ func TestDoctorReport_Tally_FailureCounts(t *testing.T) {
 }
 
 // TestDoctorService_Check_AbsentLLM_IncrementsWarnings pins that
-// the new Memory LLM row counts toward report.Warnings when the
-// binding is absent (operator-facing semantic). Embedding-absent
+// the new Memory LLM row counts toward report.Warnings when NO
+// usable profile exists (operator-facing semantic). Embedding-absent
 // stays INFO and does NOT increment Warnings — that asymmetry is
 // intentional and matches the runtime contract.
+//
+// Note the fixture: it must contain no usable profile at all. A
+// configuration that merely LACKS an explicit memory binding is not
+// "absent" — the runtime resolves it through Profiles["default"]
+// (HAL-9001 Finding 3).
 func TestDoctorService_Check_AbsentLLM_IncrementsWarnings(t *testing.T) {
 	dm := newTestDMForCmd(t)
 	svc := NewDoctorService(dm)
 	_, restore := withTestConfigWorkspace(t)
 	defer restore()
-	// No config → Components["memory"] is empty → checkMemoryLLM
-	// returns WARN. The tally must include the new row in
+	// No profiles and no binding → nothing resolves →
+	// checkMemoryLLM returns WARN. The tally must include the row in
 	// Warnings.
 	// Note: writing an empty Profiles/Components fixture still
 	// triggers a "could not read mpm_config.json" path because
 	// SaveConfig persists the empty struct, but config.LoadConfig
 	// happily returns it. We just need no Components["memory"].
 	writeTestConfig(t, os.Getenv("MPM_WORKSPACE"), doctorMemoryLLMFixture{
-		profiles: map[string]config.Profile{
-			"default": {Provider: "minimax", Model: "MiniMax-M3[1m]", BaseURL: "https://api.minimax.io/anthropic/v1"},
-		},
+		profiles:   map[string]config.Profile{},
 		components: map[string]string{},
 	})
 
@@ -671,12 +797,23 @@ func TestDoctorService_checkMemoryLLM_NoConfigFile(t *testing.T) {
 }
 // pins the semantic: when Components["memory"] is empty but
 // Profiles["default"] exists, the runtime falls through to the
-// default profile (config resolution courtesy), but Doctor still
-// surfaces the binding as WARN — operators should bind explicitly.
+// default profile — and Doctor must report that resolution, not
+// claim that no profile exists.
 //
-// This pins the rule that the default profile is config
-// resolution, not failover (see cmd/mpm/handlers_config.go
-// printConfigHelp "Config resolution vs runtime failover").
+// 2026-10-23 (HAL-9001 Finding 3): this test previously asserted
+// the opposite ("default-only must surface WARN (explicit binding
+// is required)"). That expectation contradicted the product's own
+// public contract — `mpm config --help` states:
+//
+//	"unbound component → default profile is CONFIG RESOLUTION,
+//	 not failover"
+//
+// and contradicted every other consumer of the same resolver (the
+// dashboard, the onboarding plan, the synthesis worker). The
+// assertion is now
+// TestDoctorService_checkMemoryLLM_ImplicitDefaultProfileFallback
+// above; this entry keeps the historical name so the change is
+// traceable in the diff.
 func TestDoctorService_checkMemoryLLM_DefaultProfileNotExplicitBinding(t *testing.T) {
 	dm := newTestDMForCmd(t)
 	svc := NewDoctorService(dm)
@@ -690,12 +827,15 @@ func TestDoctorService_checkMemoryLLM_DefaultProfileNotExplicitBinding(t *testin
 	})
 
 	check := svc.checkMemoryLLM()
-	if check.Status != "WARN" {
-		t.Errorf("default-only must surface WARN (explicit binding is required); got %q (msg: %q)",
+	if check.Status != "PASS" {
+		t.Errorf("the default profile IS the configured resolution; got %q (msg: %q)",
 			check.Status, check.Message)
 	}
-	if check.Message != "no profile configured" {
-		t.Errorf("default-only message = %q, want %q", check.Message, "no profile configured")
+	if check.Message == "no profile configured" {
+		t.Errorf("default-only must not be reported as an absent profile; got %q", check.Message)
+	}
+	if !strings.Contains(check.Message, "default profile") {
+		t.Errorf("the inherited resolution must be visible in the row; got %q", check.Message)
 	}
 }
 

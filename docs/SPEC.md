@@ -1874,6 +1874,53 @@ written:
   stays legal: the providers normalise it to their own default
   endpoint.
 
+#### How a component resolves to a profile, and what Doctor reports
+
+A generative component (memory, critic, …) resolves to a profile
+through **one** chain, in this order:
+
+1. an explicit binding in `components.<component>`;
+2. the `default` profile;
+3. the legacy `synth` block (a migration path for pre-profiles
+   configurations).
+
+An unbound component resolving to the `default` profile is **config
+resolution, not failover**: once a component has resolved to profile
+X, a provider failure on X must never cause a request to profile Y.
+The wizard writes `profiles.default` — the canonical destination — and
+does not write an explicit binding for every component.
+
+Every consumer of that chain agrees: the dashboard, the onboarding
+plan, the synthesis worker, and `mpm config component list`, which
+renders the source as `(explicit)`, `(inherited, default)`,
+`(inherited, legacy)` or `(explicit, invalid)`.
+
+`mpm doctor`'s **Memory LLM** row is a binding check and resolves
+through that same chain, so its verdict reflects what the runtime will
+actually do:
+
+| Configuration | Verdict | Row |
+| --- | --- | --- |
+| explicit binding → complete profile | PASS | `<model> · <Provider>` |
+| no explicit binding, `default` profile present | PASS | `<model> · <Provider> (default profile)` |
+| no explicit binding, legacy `synth` block present | PASS | `<model> · <Provider> (legacy synth block)` |
+| explicit binding → missing profile (dangling) | WARN | `profile "<name>" not found`, naming the profile the runtime falls back to |
+| no binding, no `default`, no legacy | WARN | `no profile configured` |
+| resolved profile missing provider / model / base_url | WARN | `profile "<name>" incomplete (missing: …)` |
+| `components.memory == "disabled"` | INFO | `intentionally disabled` |
+| no `mpm_config.json` at all | INFO | `no config file present` |
+
+Two consequences are deliberate:
+
+* An **inherited** profile is never reported as an absent one. The
+  fallback is made *visible* — the row names the profile it resolved
+  to and says the resolution was inherited — rather than hidden, and
+  it is never reported as a healthy explicit binding.
+* A **dangling explicit binding** still WARNs even when the
+  `default` profile happens to cover for it. The operator asked for a
+  specific profile and the substrate cannot give it to them; a silent
+  fallback would hide a configuration that does not do what was asked.
+
 ### `version` — Build Provenance and Update Check
 
 Every MPM binary carries its own build provenance, stamped in at link time.
