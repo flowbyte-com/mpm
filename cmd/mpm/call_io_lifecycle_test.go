@@ -13,6 +13,14 @@
 // `m.Run()` returns. A test running INSIDE the package cannot observe
 // that, so the residue this file is about is measured from outside the
 // package — see the external post-process check in the PR report.
+//
+// A PRIVATE directory — one a single test creates for itself — is a
+// different case. That directory belongs to the test, so it is removed
+// by a t.Cleanup registered the moment it exists. Removing it at the
+// end of the test body instead leaks it whenever the body is abandoned:
+// t.Fatal() calls runtime.Goexit, which unwinds the test goroutine —
+// deferred functions and registered cleanups still run, but the body
+// never reaches a trailing removal.
 package main
 
 import (
@@ -22,6 +30,62 @@ import (
 	"strings"
 	"testing"
 )
+
+const (
+	// callIOEarlyFailureEnv makes the re-executed test binary take the
+	// early-failure path instead of the parent path.
+	callIOEarlyFailureEnv = "MPM_CALL_IO_EARLY_FAILURE"
+
+	// callIOEarlyFailurePathEnv carries the path of the file the child
+	// writes the directory it created to, so that the parent can check
+	// that directory after the child has exited.
+	callIOEarlyFailurePathEnv = "MPM_CALL_IO_EARLY_FAILURE_PATH"
+)
+
+// newPrivateCallIOBinDir creates a build directory owned by a single
+// test and guarantees its removal.
+//
+// The removal is registered as a t.Cleanup the moment the directory
+// exists, not as a statement at the end of the test body, so a test
+// that ends early with t.Fatal() still removes what it created.
+//
+// The package pointer is restored to the value it had before, so the
+// package teardown keeps owning the SHARED binary's directory.
+//
+// The removal is performed on the captured path and never through
+// removeCallIOBinDir(): by the time the cleanup runs the package
+// pointer has already been restored, and removeCallIOBinDir() would
+// then remove the shared directory instead of the private one.
+func newPrivateCallIOBinDir(t *testing.T) string {
+	t.Helper()
+
+	saved := callIOBinDir
+	dir, err := newCallIOBinDir()
+	if err != nil {
+		callIOBinDir = saved
+		t.Fatalf("create the private build directory: %v", err)
+	}
+
+	t.Cleanup(func() {
+		// Restore first, so the package teardown keeps owning the
+		// shared directory even when this cleanup runs after an early
+		// failure.
+		callIOBinDir = saved
+		if err := removeBuildDir(dir); err != nil {
+			t.Errorf("remove the private build directory %q: %v", dir, err)
+		}
+		// The shared directory must survive: a private test may never
+		// remove the binary the rest of the package still execs.
+		if saved != "" {
+			if _, err := os.Stat(saved); err != nil {
+				t.Errorf("the shared build directory %q was removed by a private test: %v",
+					saved, err)
+			}
+		}
+	})
+
+	return dir
+}
 
 // TestCallIO_TheSharedBinaryLivesInsideTheRecordedDirectory proves
 // every shared binary lives in a directory the package teardown knows
@@ -96,15 +160,10 @@ func TestCallIO_TheSharedBinaryStillProducesMachineCleanOutput(t *testing.T) {
 // A directory recorded only after a successful build leaks precisely in
 // the case that needs cleaning up most: a build that failed halfway.
 func TestCallIO_TheDirectoryIsRecordedBeforeTheBuild(t *testing.T) {
-	// The shared pointer is saved and restored: the real directory
-	// holds the binary the other tests in this package still need.
-	saved := callIOBinDir
-	defer func() { callIOBinDir = saved }()
-
-	dir, err := newCallIOBinDir()
-	if err != nil {
-		t.Fatalf("create the shared build directory: %v", err)
-	}
+	// The private directory is removed by the helper's cleanup, and
+	// the package pointer is restored to the shared directory when
+	// this test ends — whatever ends it.
+	dir := newPrivateCallIOBinDir(t)
 	if callIOBinDir != dir {
 		t.Fatalf("the build directory was not recorded: recorded %q, created %q",
 			callIOBinDir, dir)
@@ -138,13 +197,8 @@ func TestCallIO_TheDirectoryIsRecordedBeforeTheBuild(t *testing.T) {
 // recording were conditional on the build's success, exactly this
 // directory would be the one left behind.
 func TestCallIO_APartialBuildStillLeavesARemovableRecordedDirectory(t *testing.T) {
-	saved := callIOBinDir
-	defer func() { callIOBinDir = saved }()
+	dir := newPrivateCallIOBinDir(t)
 
-	dir, err := newCallIOBinDir()
-	if err != nil {
-		t.Fatalf("create the shared build directory: %v", err)
-	}
 	// The artefact a half-finished build would leave behind.
 	if err := os.WriteFile(filepath.Join(dir, "mpm"), []byte("partial"), 0o755); err != nil {
 		t.Fatalf("write the partial artefact: %v", err)
@@ -159,6 +213,74 @@ func TestCallIO_APartialBuildStillLeavesARemovableRecordedDirectory(t *testing.T
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("the recorded build directory %q still exists after the teardown", dir)
+	}
+}
+
+// TestCallIO_AnEarlyFailureStillRemovesThePrivateDirectory proves the
+// private directory is removed even when the test that created it ends
+// early with t.Fatal().
+//
+// A test that removes its directory at the end of its body leaks that
+// directory whenever the body is abandoned — and t.Fatal() abandons it
+// by design. The pointer restoration still happens, so the package
+// teardown no longer knows about the directory: it is left behind with
+// nobody left to remove it.
+//
+// The failure has to happen in a separate process: a failing subtest
+// fails its parent, so the parent could not assert anything. The child
+// is this same test binary, re-executed with the early-failure path
+// enabled. It creates the directory through the same helper as every
+// other private directory and then fails on purpose.
+func TestCallIO_AnEarlyFailureStillRemovesThePrivateDirectory(t *testing.T) {
+	if os.Getenv(callIOEarlyFailureEnv) == "1" {
+		// The child process: create the directory, record where it is,
+		// then fail before reaching any removal of its own.
+		dir := newPrivateCallIOBinDir(t)
+		if pathFile := os.Getenv(callIOEarlyFailurePathEnv); pathFile != "" {
+			if err := os.WriteFile(pathFile, []byte(dir), 0o600); err != nil {
+				t.Fatalf("record the created directory: %v", err)
+			}
+		}
+		t.Fatalf("intentional early failure: the private directory %q must still be removed", dir)
+	}
+
+	// The parent process: run the child and check what it left behind.
+	pathFile := filepath.Join(t.TempDir(), "created-dir.txt")
+
+	cmd := exec.Command(os.Args[0],
+		"-test.run=^TestCallIO_AnEarlyFailureStillRemovesThePrivateDirectory$",
+		"-test.timeout=20m")
+	cmd.Env = append(os.Environ(),
+		callIOEarlyFailureEnv+"=1",
+		callIOEarlyFailurePathEnv+"="+pathFile,
+	)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("the child test was supposed to fail early, but it succeeded:\nstdout=%s\nstderr=%s",
+			stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "intentional early failure") &&
+		!strings.Contains(stderr.String(), "intentional early failure") {
+		t.Fatalf("the child did not take the early-failure path:\nstdout=%s\nstderr=%s",
+			stdout.String(), stderr.String())
+	}
+
+	recorded, readErr := os.ReadFile(pathFile)
+	if readErr != nil {
+		t.Fatalf("the child did not record the directory it created: %v\nstdout=%s\nstderr=%s",
+			readErr, stdout.String(), stderr.String())
+	}
+	dir := strings.TrimSpace(string(recorded))
+	if dir == "" {
+		t.Fatal("the child recorded an empty directory path")
+	}
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Errorf("the private directory %q survived the child's early failure (stat error: %v)",
+			dir, statErr)
 	}
 }
 
@@ -194,10 +316,18 @@ func TestCallIO_ATeardownFailureCannotLeaveThePackageGreen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create the locked directory: %v", err)
 	}
-	defer func() {
-		os.Chmod(locked, 0o700)
-		os.RemoveAll(locked)
-	}()
+	// The removal is registered the moment the directory exists, so it
+	// happens even if this test ends early, and it reports its errors.
+	t.Cleanup(func() {
+		// The directory is made read-only below; it has to be writable
+		// again before it can be removed.
+		if err := os.Chmod(locked, 0o700); err != nil {
+			t.Errorf("make the locked directory writable again: %v", err)
+		}
+		if err := os.RemoveAll(locked); err != nil {
+			t.Errorf("remove the locked directory %q: %v", locked, err)
+		}
+	})
 	// The directory holds a file: removing an EMPTY read-only directory
 	// succeeds, because the parent's write permission is what governs
 	// the removal of the directory entry itself.
@@ -209,7 +339,7 @@ func TestCallIO_ATeardownFailureCannotLeaveThePackageGreen(t *testing.T) {
 	}
 
 	saved := callIOBinDir
-	defer func() { callIOBinDir = saved }()
+	t.Cleanup(func() { callIOBinDir = saved })
 	callIOBinDir = locked
 	if err := removeCallIOBinDir(); err == nil {
 		t.Error("removing a read-only directory must report a failure, not swallow it")
