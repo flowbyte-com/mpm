@@ -76,13 +76,47 @@ func TestWizardEmbeddingCustom_OllamaSelectionResolvesThroughTheRuntime(t *testi
 			res.Status, mpminternal.EmbeddingStatusConfigured, res.LastError)
 	}
 
-	// And it must be the file on disk that carries it.
+	// The wizard's FINAL save is the only commit point (HAL-9001
+	// Finding 4). What the final save writes is what matters.
+	if err := config.SaveConfig(c); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
 	raw, err := os.ReadFile(config.ConfigPath())
 	if err != nil {
 		t.Fatalf("read saved config: %v", err)
 	}
 	if !strings.Contains(string(raw), `"provider": "ollama"`) {
 		t.Errorf("the saved configuration does not record the runtime provider; got:\n%s", raw)
+	}
+}
+
+// TestWizardEmbeddingCustom_DoesNotWriteBeforeTheFinalSave pins the
+// save semantics the onboarding flow depends on.
+//
+// The embedding step used to call config.SaveConfig itself. Because
+// that happened in the MIDDLE of the wizard — before the operator's
+// final "Save?" decision — declining the final save still committed
+// the embedding profile to disk. The operator was shown "nothing
+// saved" while their configuration had in fact changed.
+//
+// The step must therefore mutate the in-memory configuration only,
+// and leave the single commit to the wizard's final save.
+func TestWizardEmbeddingCustom_DoesNotWriteBeforeTheFinalSave(t *testing.T) {
+	isolatedEmbeddingWorkspace(t)
+	c := &config.Config{}
+
+	session := "2\nnomic-embed-text\nhttp://127.0.0.1:11434\n"
+	wizardEmbeddingCustomWith(bufio.NewReader(strings.NewReader(session)), c)
+
+	// The profile was built in memory...
+	if _, ok := c.Profiles["embedding"]; !ok {
+		t.Fatalf("the wizard did not create an embedding profile; profiles: %v", c.Profiles)
+	}
+
+	// ...but nothing was written to disk.
+	if _, err := os.Stat(config.ConfigPath()); err == nil {
+		t.Errorf("the embedding step wrote the configuration before the wizard's final save; path: %s",
+			config.ConfigPath())
 	}
 }
 

@@ -1921,6 +1921,41 @@ Two consequences are deliberate:
   specific profile and the substrate cannot give it to them; a silent
   fallback would hide a configuration that does not do what was asked.
 
+#### When the wizard commits, and what the onboarding report describes
+
+The interactive wizard has **exactly one commit point**: the final
+`Save?` confirmation at the end of the run. Every step before it —
+the generative profile, the optional embedding profile, the optional
+critic profile — mutates the in-memory configuration only. Declining
+the final save therefore leaves the operator's configuration exactly as
+it was, which is what "Aborted." means.
+
+`mpm onboard` reports the same fact in two layers, because "the wizard
+ran" and "the configuration changed" are different facts:
+
+* The step outcome records **saved** — whether the configuration on
+  disk actually changed. The wizard exits `0` whether it committed or
+  the operator declined, so the exit code alone cannot answer this.
+* The report is **re-collected** after a step that changed the
+  configuration, and is marked as an after-state. A report of a
+  configuration the run itself has just replaced describes a moment
+  that no longer exists.
+
+The two are separate on purpose. The step's own findings (what it
+planned, what it left outstanding, what it could not do) are carried
+across the re-collection; the collected rows and the collected
+problems are replaced, so a problem the run resolved is not reported as
+an open one.
+
+Four states are distinguished, and the report never conflates them:
+
+| State | Where it is shown |
+| --- | --- |
+| **saved** | the model step's outcome — the configuration on disk changed |
+| **structurally valid** | the Models section — `mpm config validate`'s verdict |
+| **runtime-resolvable** | the Models section — the profile each component resolves to |
+| **live-verified** | *never* by onboarding — `mpm onboard` opens no endpoint; `mpm doctor` is what probes a provider |
+
 ### `version` — Build Provenance and Update Check
 
 Every MPM binary carries its own build provenance, stamped in at link time.

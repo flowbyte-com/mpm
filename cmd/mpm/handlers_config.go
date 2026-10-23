@@ -1291,8 +1291,18 @@ func wizardEmbeddingCustomWith(rw *bufio.Reader, c *config.Config) {
 
 	// Embedding profiles skip role validation (an embedding
 	// profile is precisely what should hold an embedding
-	// model). The wizard creates the profile + binding and
-	// saves.
+	// model). The wizard creates the profile + binding.
+	//
+	// 2026-10-23 (HAL-9001 Finding 4): this step does NOT write.
+	// It used to call config.SaveConfig here, which meant the
+	// embedding profile was committed to disk in the middle of the
+	// wizard — before the operator's final "Save?" decision. An
+	// operator who configured an embedding endpoint and then
+	// declined the final save was left with a half-applied
+	// configuration they had declined. Every other wizard step
+	// (the default profile, the critic step) only mutates the
+	// in-memory configuration and is committed by the final save.
+	// This step now behaves like the rest.
 	if c.Profiles == nil {
 		c.Profiles = map[string]config.Profile{}
 	}
@@ -1301,13 +1311,10 @@ func wizardEmbeddingCustomWith(rw *bufio.Reader, c *config.Config) {
 	}
 	c.Profiles["embedding"] = prof
 	c.Components["embedding"] = "embedding"
-	if err := config.SaveConfig(c); err != nil {
-		fmt.Println("Failed to save config:", err)
-		return
-	}
 	fmt.Println()
-	fmt.Printf("✓ embedded profile \"embedding\" (provider=%s, model=%s)\n", prof.Provider, prof.Model)
+	fmt.Printf("✓ embedding profile \"embedding\" (provider=%s, model=%s)\n", prof.Provider, prof.Model)
 	fmt.Println("✓ bound components.embedding = embedding")
+	fmt.Println("✓ will be saved together with the rest of the configuration")
 }
 
 // wizardCriticStep presents the only specialist model that matters in
