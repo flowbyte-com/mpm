@@ -58,6 +58,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -74,6 +75,69 @@ OPENCLAW_SNIPPET = (
 
 _MANAGED_BLOCK_BEGIN = "<!-- BEGIN MPM MANAGED BLOCK -->"
 _MANAGED_BLOCK_END = "<!-- END MPM MANAGED BLOCK -->"
+
+
+# ---------------------------------------------------------------------------
+# Sandbox lifecycle (issue #49).
+#
+# These sandboxes used to leave ~98 MB behind per run. The cause was NOT
+# the removal call itself but WHAT the sandbox contained: `go` derives
+# GOMODCACHE and GOPATH from HOME, so a sandbox that redirects HOME gets
+# a PRIVATE copy of the Go module cache — and the toolchain writes it as
+# mode-0555 directories, which shutil.rmtree cannot empty because
+# unlinking a file needs write permission on its parent directory.
+#
+# So there are two halves to the fix, and both are needed:
+#
+#   1. PREVENTION — pin the toolchain at the operator's real caches, so
+#      the sandbox never grows a private module cache in the first
+#      place. This is the same reasoning that already governs
+#      scripts/tests/test_build_install_separation.py.
+#   2. REMOVAL — a cleanup that can empty a permission-constrained
+#      tree AND that reports, rather than swallows, a failure.
+#
+# The previous cleanup was `shutil.rmtree(tmp, ignore_errors=True)`:
+# every failure was indistinguishable from success, so the residue was
+# invisible until someone measured /tmp.
+# ---------------------------------------------------------------------------
+
+# Where the Go toolchain keeps its module cache, GOPATH and build cache
+# on the OPERATOR's real machine.
+#
+# Resolved from `go env` at import time, so the sandbox follows whatever
+# Go the developer actually has installed rather than whatever the test
+# happened to inherit. The values are then passed EXPLICITLY into every
+# sandboxed subprocess — an explicit value is the contract `go help
+# environment` documents; an empty one would re-enable the default
+# derivation from the sandboxed HOME.
+def _resolve_real_go_env() -> tuple[str | None, str | None, str | None]:
+    """Return (GOMODCACHE, GOPATH, GOCACHE) as the toolchain resolves
+    them for this process, or (None, None, None) if `go` is absent."""
+    try:
+        out = subprocess.run(
+            ["go", "env", "GOMODCACHE", "GOPATH", "GOCACHE"],
+            capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+    except (FileNotFoundError, subprocess.CalledProcessError, OSError):
+        return (None, None, None)
+    if len(out) < 3:
+        return (None, None, None)
+    mod, gopath, cache = (line.strip() for line in out[:3])
+    return (mod or None, gopath or None, cache or None)
+
+
+_REAL_GOMODCACHE, _REAL_GOPATH, _REAL_GOCACHE = _resolve_real_go_env()
+
+
+class SandboxCleanupError(RuntimeError):
+    """Raised when a test-owned sandbox could not be fully removed.
+
+    Raising is the point: a leak must never be mistaken for a pass.
+    """
+
+
+def _running_as_root() -> bool:
+    return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
 def _managed_block_heading(text: str) -> str:
@@ -104,8 +168,14 @@ def _canonical_block_heading() -> str:
     )
 
 
-def _sandbox_home() -> tuple[Path, dict]:
+def _sandbox_home(case: unittest.TestCase) -> tuple[Path, dict]:
     """Create an isolated HOME and return (tmpdir, env).
+
+    `case` is the TestCase. The sandbox's cleanup is REGISTERED HERE —
+    the moment the sandbox exists, before any other setup step can fail
+    — so a partial setup cannot leave a sandbox behind. It is not a
+    `tearDown`: `addCleanup` also runs when the test body raises,
+    including when a subprocess call times out.
 
     HOME alone is NOT sufficient isolation here. One of these tests runs
     a FULL `./install.sh`, which reaches `phase_service` and issues:
@@ -141,6 +211,9 @@ def _sandbox_home() -> tuple[Path, dict]:
     happened fails the assertion rather than passing unnoticed.
     """
     tmp = Path(tempfile.mkdtemp(prefix="mpm-openclaw-safety-"))
+    # Registered FIRST: everything below this line can fail, and a
+    # failure after the sandbox exists must not leak it.
+    case.addCleanup(_cleanup, tmp)
     home = tmp / "home"
     home.mkdir(parents=True, exist_ok=True)
 
@@ -197,24 +270,118 @@ def _sandbox_home() -> tuple[Path, dict]:
     (tmp / "xdg-runtime").mkdir(exist_ok=True)
     env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={tmp / 'nonexistent-bus'}"
 
-    # Share the caller's Go build cache.
+    # Share the caller's Go caches — the module cache, GOPATH and the
+    # build cache.
     #
-    # Sandboxing HOME alone makes `go` derive GOCACHE from it, so every
-    # run starts cold and recompiles the whole dependency tree — which
-    # pushed a full install.sh past this test's timeout and made the
-    # canonical gate flaky for reasons unrelated to what it asserts. The
-    # build cache is a pure compiler cache: sharing it cannot leak state
-    # into the install sandbox, it only avoids recompiling identical
-    # inputs. The install still writes only inside the sandbox HOME.
-    if "GOCACHE" not in env and os.path.isdir(
+    # Sandboxing HOME alone makes `go` derive GOCACHE, GOMODCACHE and
+    # GOPATH from it, so every run starts cold and recompiles — and
+    # re-downloads — the whole dependency tree. That pushed a full
+    # install.sh past this test's timeout and made the canonical gate
+    # flaky for reasons unrelated to what it asserts.
+    #
+    # The module cache was worse than slow: it was the residue. `go`
+    # writes it as mode-0555 directories, so the sandbox ended up
+    # holding ~98 MB of read-only tree that shutil.rmtree could not
+    # empty. Sharing the real caches removes that copy entirely — these
+    # are content-addressed developer caches, and the install still
+    # writes only inside the sandbox HOME.
+    if _REAL_GOCACHE:
+        env["GOCACHE"] = _REAL_GOCACHE
+    elif "GOCACHE" not in env and os.path.isdir(
         os.path.expanduser("~/.cache/go-build")
     ):
         env["GOCACHE"] = os.path.expanduser("~/.cache/go-build")
+    if _REAL_GOMODCACHE:
+        env["GOMODCACHE"] = _REAL_GOMODCACHE
+    if _REAL_GOPATH:
+        env["GOPATH"] = _REAL_GOPATH
     return tmp, env
 
 
 def _cleanup(tmp: Path) -> None:
-    shutil.rmtree(tmp, ignore_errors=True)
+    """Remove a test-owned sandbox completely, or fail loudly.
+
+    The old implementation was `shutil.rmtree(tmp, ignore_errors=True)`:
+    every failure was indistinguishable from success, which is how a
+    ~98 MB residue per run stayed invisible for as long as it did.
+
+    This version does three things:
+
+      1. It empties a PERMISSION-CONSTRAINED tree. The Go module cache
+         is written as mode-0555 directories, and unlinking a file needs
+         write permission on its parent directory — so a plain rmtree
+         fails with PermissionError on the first module it meets. The
+         walk below makes every directory writable first.
+
+      2. It refuses to follow a symlink. `os.chmod` follows symlinks by
+         default, so chmod'ing a link would change the mode of a file
+         the operator owns. Every symlink encountered is unlinked BEFORE
+         any chmod could run on it, and the walk never descends into a
+         symlinked directory.
+
+      3. It REPORTS a failure instead of swallowing it. The path and
+         the underlying error are raised as a SandboxCleanupError, so a
+         cleanup failure surfaces as a test error rather than as a
+         silent pass.
+
+    Only the sandbox is touched. The operator's real Go caches, home
+    files, OpenClaw configuration and live MPM installation are never
+    inside `tmp` and are never visited by this function.
+    """
+    if tmp.is_symlink():
+        raise SandboxCleanupError(
+            f"refusing to remove symlinked sandbox root {tmp}: the sandbox "
+            "root must be a real directory so cleanup cannot escape it"
+        )
+    if not tmp.exists():
+        return
+
+    errors: list[str] = []
+
+    # Bottom-up walk: a child directory is processed before its parent,
+    # so its contents are emptied before it is made writable.
+    # followlinks=False (the default, stated explicitly) is what stops
+    # os.walk from descending into a symlinked directory.
+    for dirpath, dirnames, filenames in os.walk(
+        str(tmp), topdown=False, followlinks=False
+    ):
+        try:
+            os.chmod(dirpath, 0o700)
+        except OSError as exc:
+            errors.append(f"chmod {dirpath}: {exc}")
+        # Unlink symlinks BEFORE any chmod could follow one.
+        for name in dirnames + filenames:
+            entry = os.path.join(dirpath, name)
+            if os.path.islink(entry):
+                try:
+                    os.unlink(entry)
+                except OSError as exc:
+                    errors.append(f"unlink symlink {entry}: {exc}")
+
+    # Remove. A subprocess killed by a test timeout can still be
+    # writing into the sandbox for a moment, so a "directory not empty"
+    # race is retried rather than reported as a leak.
+    last: OSError | None = None
+    for attempt in range(3):
+        try:
+            shutil.rmtree(tmp)
+            last = None
+            break
+        except OSError as exc:
+            last = exc
+            if attempt < 2:
+                time.sleep(0.2)
+
+    if last is not None:
+        errors.append(f"rmtree {tmp}: {last}")
+    if tmp.exists():
+        errors.append(f"sandbox still present after removal: {tmp}")
+
+    if errors:
+        raise SandboxCleanupError(
+            "could not fully remove the test-owned sandbox:\n  "
+            + "\n  ".join(errors)
+        )
 
 
 def _run(cmd: list[str], *, env: dict, timeout: int = 240) -> subprocess.CompletedProcess:
@@ -340,14 +507,11 @@ class OpenClawNotOptedIn(unittest.TestCase):
     use it."""
 
     def setUp(self):
-        self.tmpdir, self.env = _sandbox_home()
+        self.tmpdir, self.env = _sandbox_home(self)
         self.home = self.tmpdir / "home"
         oc = _openclaw_target(self.home)
         if oc.exists():
             oc.unlink()
-
-    def tearDown(self):
-        _cleanup(self.tmpdir)
 
     def _assert_openclaw_untouched(self, oc: Path, label: str, stderr: str):
         self.assertFalse(
@@ -482,13 +646,10 @@ class OpenClawManagedBlockRepaired(unittest.TestCase):
     is required and reconciliation converges it."""
 
     def setUp(self):
-        self.tmpdir, self.env = _sandbox_home()
+        self.tmpdir, self.env = _sandbox_home(self)
         self.home = self.tmpdir / "home"
         _install_integration(self.home)
         self.target = _openclaw_target(self.home)
-
-    def tearDown(self):
-        _cleanup(self.tmpdir)
 
     def test_missing_block_is_installed(self):
         """Integration installed + block missing -> block is installed."""
@@ -601,12 +762,9 @@ class OpenClawDiagnostics(unittest.TestCase):
     with a missing block as a healthy intentional state."""
 
     def setUp(self):
-        self.tmpdir, _ = _sandbox_home()
+        self.tmpdir, _ = _sandbox_home(self)
         self.home = self.tmpdir / "home"
         self.target = _openclaw_target(self.home)
-
-    def tearDown(self):
-        _cleanup(self.tmpdir)
 
     def _check(self) -> subprocess.CompletedProcess:
         return _run(
@@ -691,12 +849,9 @@ class OpenClawCliFallbackMode(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmpdir, _ = _sandbox_home()
+        self.tmpdir, _ = _sandbox_home(self)
         self.home = self.tmpdir / "home"
         self.target = _openclaw_target(self.home)
-
-    def tearDown(self):
-        _cleanup(self.tmpdir)
 
     def _check(self) -> subprocess.CompletedProcess:
         return _run(
@@ -823,6 +978,256 @@ class OpenClawCliFallbackMode(unittest.TestCase):
             row["verdict"], "PASS",
             f"a repaired CLI-fallback host must read PASS. detail={row['detail']!r}",
         )
+
+
+# ---------------------------------------------------------------------------
+# 6. Sandbox lifecycle (issue #49).
+#
+# The classes above are the SAFETY contract. This one is the RESOURCE
+# contract: the sandboxes they create must not survive them.
+#
+# A regression test that merely asserted "the cleanup helper was
+# called" would have PASSED against the old
+# `shutil.rmtree(..., ignore_errors=True)`: that helper did run, and it
+# did leave ~98 MB behind. So these tests assert on the filesystem
+# instead — a sandbox that cannot be removed must be reported with its
+# path, and a sandbox that can be removed must actually be gone.
+# ---------------------------------------------------------------------------
+
+def _force_remove(path: Path) -> None:
+    """Best-effort removal for a fixture this module built DELIBERATELY
+    to be hard to remove.
+
+    This is the safety net for the test's own fixture only — it is
+    never used for the sandbox under test, and it never touches
+    anything outside the fixture it was given.
+    """
+    if path.is_symlink():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return
+    if not path.exists():
+        return
+    for dirpath, dirnames, filenames in os.walk(
+        str(path), topdown=False, followlinks=False
+    ):
+        try:
+            os.chmod(dirpath, 0o700)
+        except OSError:
+            pass
+        for name in dirnames + filenames:
+            entry = os.path.join(dirpath, name)
+            if os.path.islink(entry):
+                try:
+                    os.unlink(entry)
+                except OSError:
+                    pass
+    shutil.rmtree(path, ignore_errors=True)
+
+
+class SandboxLifecycle(unittest.TestCase):
+    """The sandbox must not survive the test that created it."""
+
+    def test_cleanup_removes_a_permission_constrained_sandbox(self):
+        """The shape the Go module cache produces.
+
+        The toolchain writes cache FILES read-only and the directories
+        that hold them read-only as well (0o555). Unlinking a file needs
+        write permission on its parent directory, so a plain rmtree
+        fails with PermissionError on the first module it meets — which
+        is exactly how ~98 MB per run survived.
+        """
+        root = Path(tempfile.mkdtemp(prefix="mpm-openclaw-cleanup-"))
+        self.addCleanup(_force_remove, root)
+        module = (
+            root / "home" / "go" / "pkg" / "mod"
+            / "github.com" / "google" / "uuid@v1.6.0"
+        )
+        module.mkdir(parents=True)
+        (module / "uuid.go").write_text("package uuid\n", encoding="utf-8")
+        (module / "LICENSE").write_text("license\n", encoding="utf-8")
+        (module / "uuid.go").chmod(0o444)
+        os.chmod(module, 0o555)
+
+        _cleanup(root)
+
+        self.assertFalse(
+            root.exists(),
+            "a permission-constrained sandbox must be removed completely",
+        )
+
+    def test_cleanup_removes_read_only_files(self):
+        """A read-only FILE in a writable directory is removable; the
+        file's own mode bits are not on the critical path."""
+        root = Path(tempfile.mkdtemp(prefix="mpm-openclaw-cleanup-"))
+        self.addCleanup(_force_remove, root)
+        read_only = root / "read-only.txt"
+        read_only.write_text("x\n", encoding="utf-8")
+        read_only.chmod(0o444)
+
+        _cleanup(root)
+
+        self.assertFalse(root.exists())
+
+    def test_cleanup_of_an_already_removed_sandbox_is_not_an_error(self):
+        """Cleanup is idempotent: the registered cleanup runs after an
+        explicit one, and must not fail on the second pass."""
+        root = Path(tempfile.mkdtemp(prefix="mpm-openclaw-cleanup-"))
+        self.addCleanup(_force_remove, root)
+        _cleanup(root)
+        _cleanup(root)
+        self.assertFalse(root.exists())
+
+    def test_cleanup_refuses_a_symlinked_root(self):
+        """The cleanup must never follow a symlink out of the sandbox.
+
+        `os.chmod` follows symlinks, so a link whose target belongs to
+        the operator would have its mode changed — and a link to a
+        directory would have that directory emptied.
+        """
+        base = Path(tempfile.mkdtemp(prefix="mpm-openclaw-symlink-"))
+        self.addCleanup(_force_remove, base)
+        target = base / "target"
+        target.mkdir()
+        keeper = target / "keep.txt"
+        keeper.write_text("not the sandbox's file\n", encoding="utf-8")
+        link = base / "link"
+        link.symlink_to(target, target_is_directory=True)
+
+        with self.assertRaises(SandboxCleanupError):
+            _cleanup(link)
+
+        self.assertTrue(
+            keeper.exists(),
+            "a symlinked sandbox root must not be followed: the target's "
+            "contents are not the sandbox's to delete",
+        )
+
+    @unittest.skipIf(
+        _running_as_root(), "root ignores the write-permission restriction"
+    )
+    def test_cleanup_reports_the_path_when_the_sandbox_cannot_be_removed(self):
+        """A removal that genuinely cannot succeed must be REPORTED,
+        with its path — not swallowed into a silent pass.
+
+        The obstacle here is the sandbox's PARENT: it is not writable,
+        so the sandbox directory inside it cannot be unlinked, and no
+        amount of chmod'ing the sandbox itself can change that.
+        """
+        base = Path(tempfile.mkdtemp(prefix="mpm-openclaw-locked-"))
+        self.addCleanup(_force_remove, base)
+        locked = base / "sandbox"
+        locked.mkdir()
+        (locked / "file.txt").write_text("x\n", encoding="utf-8")
+        os.chmod(base, 0o500)
+
+        with self.assertRaises(SandboxCleanupError) as ctx:
+            _cleanup(locked)
+
+        self.assertIn(
+            str(locked), str(ctx.exception),
+            "a cleanup failure must name the path that could not be removed",
+        )
+        self.assertTrue(
+            locked.exists(),
+            "a failed cleanup must leave the sandbox in place and REPORT it, "
+            "never pretend it succeeded",
+        )
+
+    def test_the_sandbox_is_removed_when_the_setup_fails(self):
+        """The cleanup is registered when the sandbox is CREATED, so a
+        setup failure after that point cannot leak it.
+
+        The helper TestCase is defined INSIDE this method on purpose:
+        unittest's loader turns any TestCase subclass without a
+        `test_*` method into a spurious `runTest` case, so a module-level
+        helper would be collected and run as a test of its own.
+        """
+        class FailingSetupCase(unittest.TestCase):
+            tmpdir: Path
+
+            def setUp(self) -> None:
+                self.tmpdir, _ = _sandbox_home(self)
+                raise RuntimeError(
+                    "deliberate setup failure after the sandbox exists"
+                )
+
+            def runTest(self) -> None:
+                pass
+
+        result = unittest.TestResult()
+        case = FailingSetupCase()
+        case.run(result)
+
+        tmpdir = getattr(case, "tmpdir", None)
+        self.assertIsNotNone(tmpdir, "the sandbox was never created")
+        self.assertFalse(
+            tmpdir.exists(),
+            "a setup failure after the sandbox was created must not leak it",
+        )
+        # The deliberate setup error is recorded exactly once: the
+        # cleanup itself must not have failed as well.
+        self.assertEqual(len(result.errors), 1, result.errors)
+        self.assertEqual(len(result.failures), 0, result.failures)
+
+    def test_the_sandbox_is_removed_when_the_test_body_fails(self):
+        """The same contract on the ordinary failure path."""
+        class FailingBodyCase(unittest.TestCase):
+            tmpdir: Path
+
+            def setUp(self) -> None:
+                self.tmpdir, _ = _sandbox_home(self)
+
+            def runTest(self) -> None:
+                # An AssertionError is recorded as a FAILURE; any other
+                # exception is recorded as an ERROR. The distinction
+                # lets this test prove that the failure path produced
+                # exactly one failure and no cleanup error.
+                raise AssertionError("deliberate test-body failure")
+
+        result = unittest.TestResult()
+        case = FailingBodyCase()
+        case.run(result)
+
+        self.assertFalse(
+            case.tmpdir.exists(),
+            "a failing test body must not leak its sandbox",
+        )
+        self.assertEqual(len(result.failures), 1, result.failures)
+        self.assertEqual(len(result.errors), 0, result.errors)
+
+    def test_a_sandbox_created_by_the_harness_is_removed(self):
+        """End to end: the sandbox the harness hands out is removable by
+        the harness's own cleanup."""
+        tmp, _ = _sandbox_home(self)
+        self.assertTrue(tmp.is_dir())
+        _cleanup(tmp)
+        self.assertFalse(tmp.exists())
+
+    def test_the_sandbox_env_pins_the_real_go_module_cache(self):
+        """The prevention half of the fix.
+
+        `go` derives GOMODCACHE from HOME. If the sandbox's HOME is
+        allowed to become the cache root, the sandbox grows a private
+        ~98 MB module cache of read-only directories again — the
+        residue this issue is about.
+        """
+        if _REAL_GOMODCACHE is None:
+            self.skipTest("the Go toolchain is not available")
+        tmp, env = _sandbox_home(self)
+        self.assertEqual(env.get("GOMODCACHE"), _REAL_GOMODCACHE)
+        home = str(tmp / "home")
+        for name in ("GOMODCACHE", "GOPATH", "GOCACHE"):
+            value = env.get(name)
+            if not value:
+                continue
+            self.assertFalse(
+                value.startswith(home + os.sep),
+                f"{name} resolves inside the sandbox HOME ({value}); the "
+                "toolchain would populate a private, read-only copy there",
+            )
 
 
 if __name__ == "__main__":

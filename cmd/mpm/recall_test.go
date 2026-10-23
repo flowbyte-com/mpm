@@ -94,7 +94,6 @@ func insertMemory(t *testing.T, db *sql.DB, id, collection, content, sessionID, 
 func TestRecallDeduplicatesReinforcement(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
-	
 
 	// Insert two memories with same keyword so they both match
 	insertMemory(t, db, "mem-1", "memories", "golang programming language", "sess1", `[]`)
@@ -181,7 +180,6 @@ func TestRecallDeduplicatesReinforcement(t *testing.T) {
 func TestRecallDeduplicatesAccessAcrossMultipleRows(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
-	
 
 	// Insert a single memory
 	insertMemory(t, db, "mem-dup", "memories", "duplicate test content", "sess1", `[]`)
@@ -245,7 +243,6 @@ func TestRecallDeduplicatesAccessAcrossMultipleRows(t *testing.T) {
 func TestRecallReinforceSQLPattern(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
-	
 
 	// Insert a memory
 	insertMemory(t, db, "mem-real", "memories", "real reinforcement test", "sess1", `[]`)
@@ -397,6 +394,20 @@ func TestFormatRationale(t *testing.T) {
 	}
 }
 
+// teardownFailureCode returns the exit code for a package run whose
+// teardown failed.
+//
+// A cleanup failure must not leave the package GREEN: the temporary
+// directories this package owns hold hundreds of megabytes, and a
+// silent failure turns into a slow exhaustion of the temporary
+// filesystem. An already-failing package keeps its own exit code.
+func teardownFailureCode(code int) int {
+	if code == 0 {
+		return 1
+	}
+	return code
+}
+
 func TestMain(m *testing.M) {
 	// Run tests with temporary home to avoid polluting real config
 	tmpDir := os.TempDir()
@@ -414,14 +425,23 @@ func TestMain(m *testing.M) {
 	// canonically stamped binary has to outlive the individual test
 	// that built it, which is why it is removed here — at package
 	// teardown — rather than by a per-test cleanup.
+	//
+	// The same applies to the shared stamped/unstamped provenance
+	// binaries (see build_provenance_test.go): they are built once per
+	// package run and shared by every test that needs them, so the
+	// package owns their directory and removes it here.
 	code := m.Run()
 	if err := removeCanonicalProvenanceDir(); err != nil {
 		fmt.Fprintf(os.Stderr,
 			"mpm: could not remove the temporary canonical-provenance build directory %q: %v\n",
 			canonicalProvenanceDir, err)
-		if code == 0 {
-			code = 1
-		}
+		code = teardownFailureCode(code)
+	}
+	if err := removeProvenanceBuildDir(); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"mpm: could not remove the temporary provenance build directory %q: %v\n",
+			provenanceBuildDir, err)
+		code = teardownFailureCode(code)
 	}
 
 	os.Exit(code)

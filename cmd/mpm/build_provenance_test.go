@@ -52,15 +52,55 @@ var provenanceBinaries = []struct {
 // The five binaries are therefore built once in each of their two forms
 // — stamped and unstamped — and reused by every test that needs them.
 //
-// The temporary directory is deliberately NOT removed: the binaries have
-// to outlive the test that built them. This follows the package's
-// existing convention (see buildMPMBinForIOTests in call_io_test.go).
+// Because the binaries have to outlive the test that built them, they
+// cannot live in a t.TempDir() and they cannot be removed by a
+// per-test cleanup. They live in a package-level temporary directory
+// that the package's TestMain removes once every test has finished —
+// the same pattern the canonical-provenance build directory already
+// uses (see build_identity_test.go).
+//
+// That directory used to survive every run of this package, leaving
+// ~148 MB behind each time.
 var (
 	provenanceBuildOnce sync.Once
 	provenanceBuildErr  error
 	provenanceStamped   map[string]string
 	provenanceUnstamped map[string]string
+
+	// provenanceBuildDir holds the shared stamped and unstamped
+	// binaries.
+	//
+	// It is recorded the moment the directory is created — BEFORE any
+	// build — so that a build that fails halfway still leaves a
+	// directory the package teardown can remove. Recording it only
+	// after a successful build would leak precisely in the case that
+	// needs cleaning up most.
+	provenanceBuildDir string
 )
+
+// newProvenanceBuildDir creates the shared build directory and records
+// it, so the package teardown can remove it.
+//
+// The recording happens inside this function, before the caller builds
+// anything, and that ordering is the contract.
+func newProvenanceBuildDir() (string, error) {
+	dir, err := os.MkdirTemp("", "mpm-provenance-bin-")
+	if err != nil {
+		return "", err
+	}
+	provenanceBuildDir = dir
+	return dir, nil
+}
+
+// removeProvenanceBuildDir removes the shared build directory.
+//
+// It is called from the package's TestMain, after the tests have run.
+// A removal failure is reported rather than swallowed: the directory
+// holds ~148 MB, and a silent failure turns into a slow exhaustion of
+// the temporary filesystem.
+func removeProvenanceBuildDir() error {
+	return removeBuildDir(provenanceBuildDir)
+}
 
 // buildProvenanceBinary builds one MPM binary from the repository root
 // with the given linker stamp.
@@ -90,7 +130,7 @@ func buildProvenanceBinaries(t *testing.T) (stamped, unstamped map[string]string
 	}
 
 	provenanceBuildOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "mpm-provenance-bin-")
+		dir, err := newProvenanceBuildDir()
 		if err != nil {
 			provenanceBuildErr = err
 			return
@@ -430,4 +470,98 @@ func runGit(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 	return string(out)
+}
+
+// ---------------------------------------------------------------------------
+// The lifecycle of the shared build directory (issue #50).
+//
+// The provenance assertions above are about the CONTENT of the binaries.
+// These are about the FILESYSTEM they live in: the directory has to be
+// owned by the package, recorded before anything is built into it, and
+// removed when the package's tests are done with it.
+// ---------------------------------------------------------------------------
+
+// TestBuildProvenance_TheSharedBuildDirectoryIsOwnedByThePackage proves
+// every shared binary lives in a directory the package teardown knows
+// about.
+//
+// If a future change wrote one of them somewhere else, the teardown
+// would leave it behind and the residue would return.
+func TestBuildProvenance_TheSharedBuildDirectoryIsOwnedByThePackage(t *testing.T) {
+	stamped, unstamped := buildProvenanceBinaries(t)
+
+	if provenanceBuildDir == "" {
+		t.Fatal("the shared build directory was not recorded, so the package teardown cannot remove it")
+	}
+	if _, err := os.Stat(provenanceBuildDir); err != nil {
+		t.Fatalf("the recorded build directory does not exist: %v", err)
+	}
+
+	for name, path := range stamped {
+		if filepath.Dir(path) != provenanceBuildDir {
+			t.Errorf("the %s binary lives in %q, not in the recorded build directory %q",
+				name, filepath.Dir(path), provenanceBuildDir)
+		}
+	}
+	for name, path := range unstamped {
+		if filepath.Dir(path) != provenanceBuildDir {
+			t.Errorf("the unstamped %s binary lives in %q, not in the recorded build directory %q",
+				name, filepath.Dir(path), provenanceBuildDir)
+		}
+	}
+}
+
+// TestBuildProvenance_TheBuildDirectoryIsRecordedBeforeTheBuild proves
+// the recording happens BEFORE anything is built into the directory.
+//
+// A directory recorded only after a successful build leaks precisely in
+// the case that needs cleaning up most: a build that failed halfway.
+func TestBuildProvenance_TheBuildDirectoryIsRecordedBeforeTheBuild(t *testing.T) {
+	// The shared pointer is saved and restored: the real directory
+	// holds the binaries the other tests in this package still need.
+	saved := provenanceBuildDir
+	defer func() { provenanceBuildDir = saved }()
+
+	dir, err := newProvenanceBuildDir()
+	if err != nil {
+		t.Fatalf("create the shared build directory: %v", err)
+	}
+	if provenanceBuildDir != dir {
+		t.Fatalf("the build directory was not recorded: recorded %q, created %q",
+			provenanceBuildDir, dir)
+	}
+
+	// A build that fails must not discard the recording.
+	if err := buildProvenanceBinary("./cmd/this-package-does-not-exist",
+		filepath.Join(dir, "mpm"), ""); err == nil {
+		t.Error("building a package that does not exist must fail")
+	}
+	if provenanceBuildDir != dir {
+		t.Errorf("a failed build discarded the recorded directory: %q != %q",
+			provenanceBuildDir, dir)
+	}
+
+	// And the package teardown removes it.
+	if err := removeProvenanceBuildDir(); err != nil {
+		t.Fatalf("remove the recorded build directory: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the recorded build directory %q still exists after the teardown", dir)
+	}
+}
+
+// TestBuildProvenance_ATeardownFailureCannotLeaveThePackageGreen proves
+// the package teardown turns a cleanup failure into a FAILING package
+// result.
+//
+// A swallowed cleanup failure is how a temporary filesystem fills up
+// slowly: the directory holds ~148 MB and nothing says so. The
+// original exit code is preserved when the tests already failed.
+func TestBuildProvenance_ATeardownFailureCannotLeaveThePackageGreen(t *testing.T) {
+	if got := teardownFailureCode(0); got == 0 {
+		t.Error("a cleanup failure must turn a green package result into a failing one")
+	}
+	if got := teardownFailureCode(3); got != 3 {
+		t.Errorf("an already-failing package must keep its exit code, got %d", got)
+	}
 }

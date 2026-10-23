@@ -42,17 +42,168 @@ Scope note
   cannot return. Driving the script end-to-end against a fixture repo
   would require either changing that `cd` (out of scope here) or
   running it against the real repository's history.
+
+Fixture lifecycle
+-----------------
+
+  The synthetic Git repository lives in a `mpm-history-check.*`
+  directory under the system temp directory. Its removal is registered
+  the moment the directory exists — before the repository is built — so
+  a failure part-way through setup is covered too. The cleanup refuses
+  to remove anything that is not such a fixture, which is what keeps it
+  from ever being pointed at the real repository, and a removal that
+  cannot succeed is raised rather than swallowed.
+
+  A symlinked fixture root is refused too, and the refusal happens
+  BEFORE any traversal: os.walk() follows a symbolic link supplied as
+  its starting path, so the permission walk would otherwise chmod the
+  link's target — a directory this module does not own.
 """
 
 from __future__ import annotations
 
+import os
+import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "git-history-check"
+
+# Every fixture this module creates carries this prefix. The cleanup
+# refuses to remove anything that does not, which is what keeps it
+# from ever being pointed at the real repository.
+FIXTURE_PREFIX = "mpm-history-check."
+
+
+class FixtureCleanupError(RuntimeError):
+    """Raised when a test-owned fixture could not be fully removed.
+
+    A leak must never be mistaken for a pass.
+    """
+
+
+def _is_own_fixture(root: Path) -> tuple[bool, str]:
+    """Is `root` a fixture this module created?
+
+    Returns (ok, reason). The checks are deliberately strict: the
+    name must carry the fixture prefix and the directory must sit
+    directly inside the system temp directory. Nothing else — in
+    particular, never the repository — may be removed by this module.
+    """
+    if root.is_symlink():
+        return False, (
+            f"refusing to remove {root}: the fixture root is a symbolic link, "
+            "so it could point outside the test-owned directory"
+        )
+    if not root.name.startswith(FIXTURE_PREFIX):
+        return False, (
+            f"refusing to remove {root}: it is not a {FIXTURE_PREFIX}* fixture"
+        )
+    try:
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        parent = root.parent.resolve()
+    except OSError as exc:  # pragma: no cover - resolve() rarely fails
+        return False, f"refusing to remove {root}: cannot resolve its path ({exc})"
+    if parent != temp_root:
+        return False, (
+            f"refusing to remove {root}: it is not directly inside the "
+            f"system temp directory {temp_root}"
+        )
+    return True, ""
+
+
+def _remove_tree(root: Path) -> list[str]:
+    """Remove a directory tree, reporting every failure.
+
+    The permission walk comes first: a fixture may contain
+    directories the current user cannot write to, and those cannot
+    have their children unlinked until they are made writable again.
+
+    A symlinked root is refused before the walk. os.walk() follows a
+    symbolic link supplied as its STARTING path, so the chmod below
+    would otherwise change the mode of the link's TARGET — a directory
+    this module does not own.
+    """
+    if root.is_symlink():
+        return [
+            f"refusing to remove {root}: the fixture root is a symbolic link, "
+            "so removing it could reach outside the test-owned directory"
+        ]
+    errors: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(str(root), topdown=False):
+        try:
+            os.chmod(dirpath, 0o700)
+        except OSError as exc:
+            errors.append(f"chmod {dirpath}: {exc}")
+        for name in dirnames + filenames:
+            entry = os.path.join(dirpath, name)
+            if os.path.islink(entry):
+                try:
+                    os.unlink(entry)
+                except OSError as exc:
+                    errors.append(f"unlink symlink {entry}: {exc}")
+    try:
+        shutil.rmtree(root)
+    except OSError as exc:
+        errors.append(f"rmtree {root}: {exc}")
+    if root.exists():
+        errors.append(f"the fixture directory {root} still exists")
+    return errors
+
+
+def _remove_fixture(root: Path) -> list[str]:
+    """Remove ONLY the test-owned fixture tree.
+
+    Returns the list of errors; an empty list means the fixture is
+    gone. A removal that cannot succeed is reported, never swallowed.
+    """
+    # The symlink check comes FIRST — before exists(). A dangling
+    # symlink is "not existing" as far as Path.exists() is concerned,
+    # so an existence check first would silently accept one, and a
+    # symlink whose target does exist would take the walk below into
+    # a directory this module does not own.
+    if root.is_symlink():
+        return [
+            f"refusing to remove {root}: the fixture root is a symbolic link, "
+            "so removing it could reach outside the test-owned directory"
+        ]
+    if not root.exists():
+        return []
+    ok, reason = _is_own_fixture(root)
+    if not ok:
+        return [reason]
+    return _remove_tree(root)
+
+
+def _cleanup_fixture(root: Path) -> None:
+    """Teardown callable: remove the fixture or raise.
+
+    `addCleanup` ignores return values, so the removal helper's error
+    list is converted into an exception here — a leaked fixture must
+    surface as a test error rather than as a silent pass.
+    """
+    errors = _remove_fixture(root)
+    if errors:
+        raise FixtureCleanupError(
+            "could not remove the test fixture:\n  " + "\n  ".join(errors)
+        )
+
+
+def _create_fixture(case: unittest.TestCase) -> Path:
+    """Create the test-owned fixture and register its removal.
+
+    The removal is registered the moment the directory exists — before
+    the fixture repository is built — so a failure part-way through
+    setup still leaves the fixture covered by the teardown.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix=FIXTURE_PREFIX))
+    case.addCleanup(_cleanup_fixture, tmp)
+    return tmp
 
 
 class PathArgIsNotARegex(unittest.TestCase):
@@ -103,7 +254,10 @@ class FixedStringMatchSemantics(unittest.TestCase):
         )
 
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="mpm-history-check."))
+        # Registered immediately, before the fixture repository is
+        # built: a failure part-way through setup still leaves the
+        # fixture covered by the teardown.
+        self.tmp = _create_fixture(self)
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         env = {
@@ -164,6 +318,184 @@ class FixedStringMatchSemantics(unittest.TestCase):
 
     def test_fixed_string_form_still_finds_the_exact_path(self):
         self.assertTrue(self._grep("secretXkey", self.objects, fixed=True))
+
+
+class GitHistoryFixtureLifecycle(unittest.TestCase):
+    """The fixture must not survive the test that created it.
+
+    `FixedStringMatchSemantics` builds a synthetic Git repository in a
+    temp directory so the fixed-string semantics can be demonstrated
+    against real `git rev-list` output. That directory used to have no
+    teardown at all, so every run of the module left a
+    `mpm-history-check.*` tree behind. These tests pin the lifecycle:
+    the fixture is created, it is covered from the moment it exists, and
+    it is gone when the test ends.
+    """
+
+    def test_the_fixture_is_removed_when_the_test_case_finishes(self):
+        """End to end: a real test case runs and its fixture is gone."""
+        case = FixedStringMatchSemantics(
+            "test_fixed_string_form_still_finds_the_exact_path"
+        )
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertEqual(len(result.errors), 0, result.errors)
+        self.assertEqual(len(result.failures), 0, result.failures)
+        self.assertFalse(
+            case.tmp.exists(), "the fixture must not survive the test"
+        )
+
+    def test_the_fixture_is_removed_when_the_setup_fails(self):
+        """A failure part-way through setup must not leak the fixture.
+
+        The cleanup is registered as soon as the directory exists, so a
+        setUp that raises afterwards still has the fixture covered.
+        """
+        created: dict[str, Path] = {}
+
+        class FailingSetupCase(unittest.TestCase):
+            def setUp(self) -> None:
+                created["tmp"] = _create_fixture(self)
+                raise RuntimeError("deliberate setup failure")
+
+            def runTest(self) -> None:
+                pass
+
+        result = unittest.TestResult()
+        FailingSetupCase().run(result)
+
+        self.assertEqual(len(result.errors), 1, result.errors)
+        self.assertIn("deliberate setup failure", result.errors[0][1])
+        self.assertFalse(
+            created["tmp"].exists(),
+            "a fixture created before a setup failure must still be removed",
+        )
+
+    def test_the_cleanup_refuses_a_symlinked_fixture_root(self):
+        """A symlinked fixture root must be refused BEFORE any traversal.
+
+        os.walk() follows a symbolic link supplied as its STARTING
+        path, so the permission walk would chmod the link's TARGET — a
+        directory this module does not own. The refusal must leave the
+        external target exactly as it was: same permission bits, same
+        contents.
+        """
+        target = Path(tempfile.mkdtemp(prefix="mpm-history-check-target-"))
+        self.addCleanup(shutil.rmtree, target, ignore_errors=True)
+        os.chmod(target, 0o750)
+        (target / "keep.txt").write_text("not the fixture's file\n")
+        original_mode = stat.S_IMODE(target.stat().st_mode)
+
+        link = Path(tempfile.gettempdir()) / (FIXTURE_PREFIX + "linked")
+        link.symlink_to(target, target_is_directory=True)
+        self.addCleanup(link.unlink, missing_ok=True)
+
+        errors = _remove_fixture(link)
+
+        # The external target must be untouched: same mode, same
+        # contents. These are asserted FIRST — they are the load-bearing
+        # property, and they are what fails if the walk reaches the
+        # link's target.
+        self.assertTrue(target.exists(), "the external target must survive")
+        self.assertEqual(
+            stat.S_IMODE(target.stat().st_mode),
+            original_mode,
+            "the external target's permissions must not be changed",
+        )
+        self.assertTrue((target / "keep.txt").exists())
+        self.assertEqual(
+            (target / "keep.txt").read_text(), "not the fixture's file\n"
+        )
+
+        # And the refusal itself must be reported, not swallowed.
+        self.assertTrue(errors, "a symlinked fixture root must be refused")
+        self.assertIn("symbolic link", errors[0])
+
+    def test_a_dangling_symlinked_fixture_root_is_refused_not_ignored(self):
+        """A dangling symlink is "not existing" for Path.exists(), so an
+        existence check first would silently accept it. The refusal must
+        be reported instead."""
+        link = Path(tempfile.gettempdir()) / (FIXTURE_PREFIX + "dangling")
+        link.symlink_to(
+            Path(tempfile.gettempdir()) / "mpm-history-check-does-not-exist"
+        )
+        self.addCleanup(link.unlink, missing_ok=True)
+
+        self.assertFalse(
+            link.exists(),
+            "the fixture must be a dangling symlink for this test to mean anything",
+        )
+
+        errors = _remove_fixture(link)
+
+        self.assertTrue(
+            errors,
+            "a dangling symlinked fixture root must be reported, not ignored",
+        )
+        self.assertIn("symbolic link", errors[0])
+
+    def test_the_cleanup_refuses_a_path_that_is_not_a_fixture(self):
+        """The cleanup only ever touches its own fixtures."""
+        other = Path(tempfile.gettempdir()) / "mpm-not-a-history-fixture"
+        other.mkdir(exist_ok=True)
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        (other / "keep.txt").write_text("not a fixture\n")
+
+        errors = _remove_fixture(other)
+
+        self.assertTrue(errors, "a refusal must be reported")
+        self.assertIn(FIXTURE_PREFIX, errors[0])
+        self.assertTrue(other.exists(), "a refused path must not be removed")
+        self.assertTrue((other / "keep.txt").exists())
+
+    def test_the_cleanup_refuses_a_fixture_outside_the_temp_directory(self):
+        """Even a correctly-named path is refused outside $TMPDIR."""
+        holder = Path(tempfile.gettempdir()) / "mpm-history-check-holder"
+        holder.mkdir(exist_ok=True)
+        self.addCleanup(shutil.rmtree, holder, ignore_errors=True)
+        nested = holder / (FIXTURE_PREFIX + "nested")
+        nested.mkdir(exist_ok=True)
+
+        errors = _remove_fixture(nested)
+
+        self.assertTrue(errors, "a refusal must be reported")
+        self.assertIn("system temp directory", errors[0])
+        self.assertTrue(nested.exists(), "a refused path must not be removed")
+
+    def test_a_removal_that_cannot_succeed_is_reported(self):
+        """A removal that cannot succeed must be REPORTED, with its
+        path — never swallowed into a silent pass."""
+        fixture = Path(tempfile.mkdtemp(prefix=FIXTURE_PREFIX))
+        self.addCleanup(shutil.rmtree, fixture, ignore_errors=True)
+        (fixture / "file.txt").write_text("x\n")
+
+        def failing_rmtree(path, *args, **kwargs):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        with mock.patch.object(shutil, "rmtree", failing_rmtree):
+            errors = _remove_fixture(fixture)
+
+        self.assertTrue(
+            errors, "a removal that cannot succeed must be reported"
+        )
+        self.assertTrue(
+            any(str(fixture) in err for err in errors),
+            f"the error must name the path that could not be removed: {errors}",
+        )
+        self.assertTrue(fixture.exists())
+
+    def test_the_teardown_raises_rather_than_swallowing_a_failure(self):
+        """`addCleanup` ignores return values, so the teardown has to
+        raise for a leak to surface as a test error."""
+        fixture = Path(tempfile.mkdtemp(prefix=FIXTURE_PREFIX))
+        self.addCleanup(shutil.rmtree, fixture, ignore_errors=True)
+
+        def failing_rmtree(path, *args, **kwargs):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        with mock.patch.object(shutil, "rmtree", failing_rmtree):
+            with self.assertRaises(FixtureCleanupError):
+                _cleanup_fixture(fixture)
 
 
 if __name__ == "__main__":
