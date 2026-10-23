@@ -173,10 +173,36 @@ func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string
 	// or fail-fast.
 	switch class {
 	case FailureAuth:
-		// An authentication refusal is never retried. A generic 401 is
-		// an invalid credential; repeating the request with another
-		// header cannot fix it, and reporting the credential as merely
-		// mis-presented would be a falsehood.
+		// A bounded alternative authentication attempt is permitted
+		// only when the caller approved connection verification AND
+		// the provider's refusal names a different authentication
+		// header. A generic 401 is an invalid credential and is not
+		// retried — see negotiationCandidate.
+		if alt, ok := sc.negotiationCandidate(httpStatus, respBody, auth); ok {
+			if rerr := plan.AttemptRecovery(fingerprint, RecoveryRetry); rerr != nil {
+				return nil, rerr
+			}
+			altBody, altClass, altStatus, altErr := sc.doOnce(ctx, payload, alt)
+			if altErr == nil && altClass == 0 {
+				plan.RecordSuccess()
+				// Retain the scheme that worked so subsequent
+				// operations against this endpoint use it without
+				// negotiating again.
+				rememberNegotiatedAuth(sc.BaseURL, sc.APIKey, alt)
+				return altBody, nil
+			}
+			if altErr != nil {
+				if altStatus > 0 {
+					altClass = classifyFromStatus(altStatus)
+				} else {
+					altClass = classifyFromStatus(0)
+				}
+			}
+			plan.RecordFailure(altClass)
+			return nil, fmt.Errorf(
+				"provider refused request (%s) with scheme %q and the alternative authentication scheme %q was also refused: %s",
+				class, auth, alt, errString(err, httpStatus))
+		}
 		return nil, fmt.Errorf("provider refused request (%s): %s",
 			class, errString(err, httpStatus))
 
@@ -366,6 +392,35 @@ func guardCredentialRedirect(req *http.Request, via []*http.Request) error {
 			origin.Scheme, origin.Host, req.URL.Scheme, req.URL.Host)
 	}
 	return nil
+}
+
+// negotiationCandidate decides whether a single bounded alternative
+// authentication attempt is permitted for this refusal.
+//
+// Every condition must hold:
+//
+//   - the caller approved connection verification (AllowAuthNegotiation);
+//   - the refusal is an authentication refusal (401 / 403) — NOT a
+//     billing refusal (402, which is an expired subscription and is
+//     fixed by paying, not by changing a header) and NOT a transport
+//     failure;
+//   - the provider's response names a DIFFERENT authentication header,
+//     which is explicit evidence of a header mismatch.
+//
+// A generic 401 — "invalid api key", "unauthorized" — is an INVALID
+// CREDENTIAL. Repeating the request with another header cannot fix it,
+// and the operator would be told a falsehood if MPM reported the
+// credential as merely mis-presented.
+func (sc *SynthClient) negotiationCandidate(httpStatus int, body []byte, sent AuthScheme) (AuthScheme, bool) {
+	if !sc.AllowAuthNegotiation {
+		return "", false
+	}
+	switch httpStatus {
+	case http.StatusUnauthorized, http.StatusForbidden:
+	default:
+		return "", false
+	}
+	return authMismatchEvidence(body, sent)
 }
 
 // errString returns the most informative of (error, status).

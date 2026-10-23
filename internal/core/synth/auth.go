@@ -31,19 +31,47 @@
 //     endpoints whose authentication cannot be discovered reliably.
 //  2. The endpoint's own documented rule, matched on the parsed URL
 //     HOST against an exact domain set — never a substring search.
-//  3. The protocol default: OpenAI-compatible → Bearer,
+//  3. A scheme negotiated during an approved connection verification
+//     for this exact (base URL, credential) pair.
+//  4. The protocol default: OpenAI-compatible → Bearer,
 //     Anthropic-compatible → X-Api-Key.
 //
-// Steps 1 and 2 are PREFERRED and are always tried before the
-// protocol default. Step 3 is the historical behaviour, unchanged.
+// Steps 1 and 2 are PREFERRED and are always tried before any
+// alternative attempt. Step 3 only exists because a verification
+// observed the endpoint refusing the scheme that was sent and naming
+// the one it wanted. Step 4 is the historical behaviour, unchanged.
 //
+// BOUNDED NEGOTIATION
+//
+// A bounded alternative attempt is permitted ONLY when every one of
+// these holds:
+//
+//   - the caller explicitly approved connection verification (the
+//     Doctor active probe and the post-save verification probe set
+//     AllowAuthNegotiation; normal synthesis never does);
+//   - the refusal is an authentication refusal (401 / 403), not a
+//     billing refusal (402) and not a transport failure;
+//   - the provider's response names a DIFFERENT authentication header
+//     — explicit evidence of a header mismatch, not a generic 401.
+//
+// A generic "invalid api key" is an INVALID CREDENTIAL. Repeating the
+// request with another header cannot help and would be dishonest, so it
+// never triggers an attempt.
+//
+// The attempt is bounded: at most one alternative, it consumes the
+// plan's single recovery slot (so the bounded-execution invariant
+// "1 fresh + 1 recovery per stage" still holds), and it never runs
+// during normal application startup.
 
 package synth
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 )
 
 // AuthScheme names how a credential is presented to an endpoint.
@@ -207,10 +235,6 @@ func hostMatchesDomain(host, domain string) bool {
 // ResolveAuthScheme resolves the authentication scheme for a base URL,
 // inferring the message protocol from the URL.
 //
-// The credential argument identifies WHICH credential the scheme will
-// be used with. It does not affect the outcome while the resolution is
-// derived from the endpoint and the protocol alone.
-//
 // Callers that already hold a *SynthClient should use the client's own
 // resolution (SynthClient.resolvedAuth) so that the protocol and the
 // scheme can never disagree — a client whose protocol was set
@@ -221,6 +245,9 @@ func ResolveAuthScheme(baseURL, credential, override string) AuthScheme {
 		return s
 	}
 	if s, ok := documentedAuthScheme(baseURL); ok {
+		return s
+	}
+	if s, ok := negotiatedAuth(baseURL, credential); ok {
 		return s
 	}
 	return protocolDefaultAuthScheme(inferWire(baseURL))
@@ -241,7 +268,111 @@ func (sc *SynthClient) resolvedAuth() AuthScheme {
 	if s, ok := documentedAuthScheme(sc.BaseURL); ok {
 		return s
 	}
+	if s, ok := negotiatedAuth(sc.BaseURL, sc.APIKey); ok {
+		return s
+	}
 	return protocolDefaultAuthScheme(sc.Wire)
+}
+
+// negotiatedAuthCache retains the scheme discovered by a successful
+// bounded negotiation, keyed by the exact (base URL, credential) pair.
+//
+// Changing the endpoint or the credential changes the key, so the
+// retained entry is invalidated implicitly and exactly when it should
+// be.
+//
+// This is bounded operational state, not authoritative configuration:
+// it records an observation, it is re-derivable by repeating the
+// verification, and it never overrides an explicit operator override or
+// the endpoint's documented rule.
+//
+// The retention lasts for the life of the PROCESS. An operator who wants
+// a discovered scheme to survive a restart pins it durably with
+// `mpm config profile set <name> auth_scheme <scheme>`; that is the
+// operator's decision to make, not something a probe should write into
+// their configuration behind their back.
+var negotiatedAuthCache = struct {
+	mu sync.RWMutex
+	m  map[string]AuthScheme
+}{m: map[string]AuthScheme{}}
+
+// maxNegotiatedAuthEntries bounds the cache. An install has a handful
+// of profiles; the bound exists only so a misconfigured install that
+// churns endpoints cannot grow the map without limit.
+const maxNegotiatedAuthEntries = 32
+
+// negotiatedAuthKey derives the cache key from the endpoint and the
+// credential. The credential is hashed, never stored as a key, so the
+// map holds no recoverable secret.
+func negotiatedAuthKey(baseURL, credential string) string {
+	h := sha256.New()
+	h.Write([]byte(baseURL))
+	h.Write([]byte{0})
+	h.Write([]byte(credential))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// rememberNegotiatedAuth records the scheme that a bounded negotiation
+// proved works for this endpoint and credential.
+func rememberNegotiatedAuth(baseURL, credential string, scheme AuthScheme) {
+	if baseURL == "" || credential == "" || scheme == "" {
+		return
+	}
+	negotiatedAuthCache.mu.Lock()
+	defer negotiatedAuthCache.mu.Unlock()
+	if len(negotiatedAuthCache.m) >= maxNegotiatedAuthEntries {
+		for k := range negotiatedAuthCache.m {
+			delete(negotiatedAuthCache.m, k)
+			break
+		}
+	}
+	negotiatedAuthCache.m[negotiatedAuthKey(baseURL, credential)] = scheme
+}
+
+// negotiatedAuth returns the retained scheme for this endpoint and
+// credential, if one was negotiated.
+func negotiatedAuth(baseURL, credential string) (AuthScheme, bool) {
+	if baseURL == "" || credential == "" {
+		return "", false
+	}
+	negotiatedAuthCache.mu.RLock()
+	defer negotiatedAuthCache.mu.RUnlock()
+	s, ok := negotiatedAuthCache.m[negotiatedAuthKey(baseURL, credential)]
+	return s, ok
+}
+
+// authMismatchEvidence inspects an authentication-refusal body for
+// evidence that the endpoint expected a DIFFERENT authentication header
+// than the one that was sent.
+//
+// Evidence must be EXPLICIT: the provider has to name the header it
+// wants. A generic "invalid api key" / "unauthorized" body is not
+// evidence — that is an invalid credential, and repeating the request
+// with another header would neither help nor be honest.
+//
+// Recognised evidence:
+//
+//	"…carry the API secret key in the Authorization field"  → Bearer
+//	"…the x-api-key header is required"                    → X-Api-Key
+//
+// The proposed scheme is always different from the one that was sent;
+// when the body names the header that was already used, no alternative
+// is proposed.
+func authMismatchEvidence(body []byte, sent AuthScheme) (AuthScheme, bool) {
+	if len(body) == 0 {
+		return "", false
+	}
+	lower := strings.ToLower(string(body))
+	wantsBearer := strings.Contains(lower, "authorization")
+	wantsXAPIKey := strings.Contains(lower, "x-api-key") ||
+		strings.Contains(lower, "x_api_key")
+	switch {
+	case wantsBearer && sent != AuthSchemeBearer:
+		return AuthSchemeBearer, true
+	case wantsXAPIKey && sent != AuthSchemeXAPIKey:
+		return AuthSchemeXAPIKey, true
+	}
+	return "", false
 }
 
 // AuthFailureKind distinguishes the sub-cases of an authentication

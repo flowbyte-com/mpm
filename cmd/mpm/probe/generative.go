@@ -104,6 +104,12 @@ func probeGenerativeWithTimeout(ctx context.Context, p *config.Profile, kind Pro
 	// profile succeeded; re-deriving the wire here meant the probe
 	// could disagree with the model factory about the protocol.
 	sc := synth.NewClientForProfile(*p, timeout, probeMaxTokens)
+	// The probe IS the explicitly approved connection verification, so
+	// it — and only it — may make the bounded alternative
+	// authentication attempt when the provider names a different
+	// authentication header. The attempt is bounded to one extra
+	// request and consumes the plan's single recovery slot.
+	sc.AllowAuthNegotiation = true
 
 	body := map[string]interface{}{
 		"model":       p.Model,

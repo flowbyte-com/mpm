@@ -3173,9 +3173,12 @@ MPM resolves the scheme per request, first match wins:
 
 1. the operator's explicit override — `mpm config profile set <name> auth_scheme bearer|x-api-key|none` (an empty value clears the override and returns the profile to derived resolution);
 2. the endpoint's own documented rule, matched on the **parsed URL host** against an exact domain set — never a substring search over the whole URL, so `https://notminimax.io` is not mistaken for MiniMax;
-3. the protocol default — OpenAI-compatible → `Authorization: Bearer`, Anthropic-compatible → `X-Api-Key`.
+3. a scheme negotiated during an explicitly approved connection verification, for this exact (endpoint, credential) pair;
+4. the protocol default — OpenAI-compatible → `Authorization: Bearer`, Anthropic-compatible → `X-Api-Key`.
 
-Steps 1 and 2 are always tried before the protocol default. An authentication refusal is never retried with a different header: a generic "invalid api key" is an invalid credential, and repeating the request would neither fix it nor be honest.
+Steps 1 and 2 are always tried before any alternative attempt. Step 3 exists only because a verification observed the endpoint refusing the scheme that was sent **and naming the one it wanted**; the retained scheme is invalidated when the endpoint or the credential changes, and it lasts for the life of the process. An operator who wants a discovered scheme to survive a restart pins it durably with `mpm config profile set <name> auth_scheme <scheme>` — a probe never writes into the operator's configuration on its own.
+
+A bounded alternative attempt happens **only** during connection verification (the Doctor probe and the post-save verification probe), **only** on HTTP 401 / 403, and **only** when the provider's response names a different authentication header. A generic "invalid api key" is an invalid credential and is never retried; HTTP 402 (subscription) is never negotiated, because paying — not changing a header — is the remedy. Normal synthesis never negotiates, so no application start-up ever spends an extra provider call guessing.
 
 Authentication refusals stay distinguishable in the operator's report: an invalid credential, an unbilled subscription and an under-privileged key are three different problems with three different remedies.
 

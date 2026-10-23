@@ -61,6 +61,12 @@ type SynthClient struct {
 	// the scheme is then resolved from the endpoint's documented rule
 	// and, failing that, from the message protocol.
 	AuthOverride string
+	// AllowAuthNegotiation enables the bounded alternative
+	// authentication attempt. It is set ONLY by connection-verification
+	// surfaces (the Doctor active probe and the post-save verification
+	// probe). Normal synthesis never negotiates: a synthesis run must
+	// not spend an extra provider call guessing at an auth header.
+	AllowAuthNegotiation bool
 }
 
 // NewClientForProfile builds a *SynthClient from a resolved profile using

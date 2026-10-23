@@ -2420,6 +2420,14 @@ func extractStringFlag(args []string, name string) ([]string, string) {
 func printProbeOnSaveHint(r probe.ProbeResult) {
 	switch r.Status {
 	case probe.ProbeHealthy:
+		// Name the authentication scheme that worked. The operator's
+		// question after a first save is "how did it authenticate?",
+		// and the answer should not require a debug log.
+		if r.AuthScheme != "" {
+			fmt.Printf("✓ Connection verified · %s · %s · %s · %dms\n",
+				r.Provider, r.Model, r.AuthScheme, r.LatencyMs)
+			return
+		}
 		fmt.Printf("✓ Connection verified · %s · %s · %dms\n", r.Provider, r.Model, r.LatencyMs)
 	default:
 		summary := r.ErrorSummary
@@ -2427,6 +2435,13 @@ func printProbeOnSaveHint(r probe.ProbeResult) {
 			summary = r.Status.String()
 		}
 		fmt.Printf("✗ Verification failed · %s\n", summary)
+		// Distinguish the three authentication refusals: an invalid
+		// credential, an unbilled subscription and an under-privileged
+		// key are three different problems with three different
+		// remedies.
+		if reason := authFailureReason(r.AuthFailure); reason != "" {
+			fmt.Printf("  %s\n", reason)
+		}
 		fmt.Println("Configuration was saved.")
 	}
 }

@@ -121,6 +121,46 @@ func TestProbe_MiniMaxAnthropicSurfaceIsAuthenticatedWithBearer(t *testing.T) {
 	}
 }
 
+// TestProbe_NegotiatesTheNamedAuthenticationHeader pins the bounded
+// alternative attempt.
+//
+// An endpoint whose refusal explicitly names the authentication header
+// it wants has given MPM evidence that the credential was presented in
+// the wrong form — not that the credential is invalid. During an
+// explicitly approved connection verification the probe may make ONE
+// alternative attempt with the named scheme.
+func TestProbe_NegotiatesTheNamedAuthenticationHeader(t *testing.T) {
+	const apiKey = "gateway-secret-key"
+
+	var attempts atomic.Int32
+	newRoutedProbeTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") == "Bearer "+apiKey {
+			_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"OK READY"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"authentication failed: please carry the API secret key in the Authorization field"}}`))
+	}))
+
+	p := &config.Profile{
+		Name:     "gateway",
+		Provider: "custom",
+		Model:    "some-model",
+		BaseURL:  "https://gateway.example.com/v1",
+		APIKey:   apiKey,
+	}
+
+	res := probeGenerative(context.Background(), p, ProbeKindGenerative)
+	if res.Status != ProbeHealthy {
+		t.Fatalf("probe status = %q (%s); want healthy", res.Status, res.ErrorSummary)
+	}
+	if n := attempts.Load(); n != 2 {
+		t.Errorf("attempts = %d, want 2 (the original scheme plus exactly one bounded alternative)", n)
+	}
+}
+
 // TestProbe_DoesNotNegotiateAnInvalidCredential pins that a refusal
 // which names no authentication header is an INVALID CREDENTIAL.
 //
@@ -184,6 +224,50 @@ func TestProbe_DoesNotNegotiateASubscriptionRefusal(t *testing.T) {
 	}
 	if res.Status == ProbeHealthy {
 		t.Error("probe reported healthy for a refused subscription")
+	}
+}
+
+// TestProbe_RetainsTheNegotiatedSchemeForSubsequentProbes pins that a
+// scheme discovered by a successful negotiation is reused.
+//
+// Otherwise every operation against the endpoint would pay for another
+// failed request before succeeding, and the operator's configured
+// endpoint would look intermittently broken.
+func TestProbe_RetainsTheNegotiatedSchemeForSubsequentProbes(t *testing.T) {
+	const apiKey = "reuse-secret-key"
+
+	var attempts atomic.Int32
+	newRoutedProbeTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") == "Bearer "+apiKey {
+			_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"OK READY"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"please carry the API secret key in the Authorization field"}}`))
+	}))
+
+	p := &config.Profile{
+		Name:     "reuse",
+		Provider: "custom",
+		Model:    "some-model",
+		BaseURL:  "https://reuse-gateway.example.com/v1",
+		APIKey:   apiKey,
+	}
+
+	first := probeGenerative(context.Background(), p, ProbeKindGenerative)
+	if first.Status != ProbeHealthy {
+		t.Fatalf("first probe status = %q (%s); want healthy", first.Status, first.ErrorSummary)
+	}
+	afterFirst := attempts.Load()
+
+	second := probeGenerative(context.Background(), p, ProbeKindGenerative)
+	if second.Status != ProbeHealthy {
+		t.Fatalf("second probe status = %q (%s); want healthy", second.Status, second.ErrorSummary)
+	}
+	if afterSecond := attempts.Load(); afterSecond != afterFirst+1 {
+		t.Errorf("second probe made %d requests, want exactly 1 (the negotiated scheme must be reused, not renegotiated)", afterSecond-afterFirst)
 	}
 }
 

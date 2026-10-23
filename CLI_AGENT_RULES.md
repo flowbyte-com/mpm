@@ -336,7 +336,13 @@ rule and falls back to the protocol default; an operator can always pin
 it with `mpm config profile set <name> auth_scheme bearer|x-api-key|none`.
 The scheme MUST NOT be inferred from the protocol alone, and MUST NOT be
 guessed by retrying: a refusal that names no authentication header is an
-invalid credential, not a mis-presented one.
+invalid credential, not a mis-presented one. During an explicitly
+approved connection verification only, a refusal that explicitly NAMES a
+different authentication header may be retried exactly once with that
+scheme; the scheme that works is then retained for the same endpoint and
+credential. That bounded negotiation MUST NOT run during normal
+application start-up, MUST NOT run on HTTP 402, and MUST NOT turn into
+credential guessing.
 
 The protocol choice drives the default `base_url` and whether an API
 key is required; the operator can override any field. Public
