@@ -11,8 +11,14 @@
 //                          adopted by: OpenAI, OpenRouter, LM Studio, Ollama-Compose
 //
 // Both protocols share the messages-array body shape, so the request body
-// itself doesn't diverge — only the URL path, the auth header, and the
-// response parser do. That's why this file is small.
+// itself doesn't diverge — only the URL path and the response parser do.
+// That's why this file is small.
+//
+// The AUTHENTICATION SCHEME is deliberately NOT owned here. Protocol and
+// authentication are independent: MiniMax's Anthropic-compatible surface
+// speaks the Anthropic message protocol but authenticates with
+// `Authorization: Bearer`, not `X-Api-Key`. The authentication half
+// lives in auth.go.
 //
 // Wire selection is inferred from the base URL at client construction
 // time. Inference is the same heuristic `inferProviderFromURL` uses
@@ -30,13 +36,17 @@ import (
 	"strings"
 )
 
-// wireShape names the HTTP wire the client will speak.
+// wireShape names the HTTP MESSAGE PROTOCOL the client will speak.
 //
 // New shapes would land here, not as scattered conditionals on
 // `if URL contains X` inside client.go. Each shape owns:
 //   - the URL path suffix (POST /messages vs POST /chat/completions)
-//   - the auth header (X-Api-Key vs Authorization: Bearer)
 //   - the response body parsing (Anthropic-style vs OpenAI-style)
+//
+// It does NOT own the authentication header: the scheme is chosen
+// independently (see auth.go), because the protocol does not determine
+// the authentication scheme — MiniMax's Anthropic-compatible endpoint
+// is Anthropic-protocol and bearer-authenticated.
 type wireShape int
 
 const (
@@ -112,19 +122,6 @@ func (w wireShape) path() string {
 		return "/chat/completions"
 	default:
 		return "/messages"
-	}
-}
-
-// authHeader returns (headerName, headerValue) for a wire. Anthropic
-// sends X-Api-Key with the key as value; OpenAI sends Authorization:
-// Bearer <key>. The header is set verbatim — no escaping, since both
-// protocols forbid CRLF in header values and our keys are short ASCII.
-func (w wireShape) authHeader(apiKey string) (string, string) {
-	switch w {
-	case wireOpenAI:
-		return "Authorization", "Bearer " + apiKey
-	default:
-		return "X-Api-Key", apiKey
 	}
 }
 

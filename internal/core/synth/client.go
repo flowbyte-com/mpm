@@ -39,6 +39,11 @@ type SynthClientInterface interface {
 // BaseURL at construction. The Model/BaseURL/APIKey set here shape the
 // wire — operators don't pick the wire explicitly; URL is the operative
 // signal. See internal/core/synth/wire.go for the dispatch table.
+//
+// The AUTHENTICATION SCHEME is resolved independently of the wire (see
+// auth.go): the protocol does not determine how the credential is
+// presented. MiniMax's Anthropic-compatible endpoint is
+// Anthropic-protocol and bearer-authenticated.
 type SynthClient struct {
 	Model     string
 	APIKey    string
@@ -51,6 +56,51 @@ type SynthClient struct {
 	// orchestrator's ModelFactory which sometimes needs to render the
 	// wire label to operators.
 	Wire wireShape
+	// AuthOverride is the operator's explicit authentication-scheme
+	// override (config.Profile.AuthScheme). Empty means "no override";
+	// the scheme is then resolved from the endpoint's documented rule
+	// and, failing that, from the message protocol.
+	AuthOverride string
+}
+
+// NewClientForProfile builds a *SynthClient from a resolved profile using
+// the canonical protocol / credential / authentication resolution.
+//
+// This is the ONE construction point every runtime surface uses —
+// synthesis, the orchestration model factory, the Doctor active probe and
+// the post-save verification probe — so those surfaces can never disagree
+// about which protocol, which credential or which authentication scheme
+// applies. Before this constructor existed, each surface re-derived the
+// answer on its own and the model factory in particular left the wire at
+// its zero value, which meant it always spoke the Anthropic protocol
+// regardless of the profile's endpoint.
+//
+// timeout <= 0 selects the substrate default (300s). maxTokens <= 0
+// selects the substrate's internal output-token ceiling; the ceiling is
+// never operator-configurable.
+func NewClientForProfile(p config.Profile, timeout time.Duration, maxTokens int) *SynthClient {
+	if timeout <= 0 {
+		timeout = 300 * time.Second
+	}
+	if maxTokens <= 0 {
+		maxTokens = synthInternalMaxTokens
+	}
+	return &SynthClient{
+		Model:        p.Model,
+		BaseURL:      p.BaseURL,
+		APIKey:       ResolveAPIKey(p.APIKey, p.BaseURL),
+		Timeout:      timeout,
+		MaxTokens:    maxTokens,
+		Wire:         inferWire(p.BaseURL),
+		AuthOverride: p.AuthScheme,
+	}
+}
+
+// AuthScheme returns the authentication scheme this client will use for
+// its next request. Exposed so operator-facing surfaces can report the
+// scheme that will be presented without re-deriving it.
+func (sc *SynthClient) AuthScheme() AuthScheme {
+	return sc.resolvedAuth()
 }
 
 // NewSynthClient reads LLM configuration from mpm_config.json, returning a
@@ -120,14 +170,19 @@ func NewSynthClient() *SynthClient {
 			if prof.APIKey != "" {
 				sc.APIKey = prof.APIKey
 			}
+			// The operator's explicit authentication-scheme override,
+			// when present, wins over every discovered rule.
+			sc.AuthOverride = prof.AuthScheme
 		}
 	}
-	// Wire and credential are resolved independently: the wire comes
-	// from the URL alone, the credential from explicit config first and
-	// the provider's own environment variable second. Both go through
-	// the shared resolver so the synthesis client, the orchestration
+	// Wire, credential and authentication scheme are resolved
+	// independently: the wire comes from the URL alone, the credential
+	// from explicit config first and the provider's own environment
+	// variable second, and the scheme from the operator's override
+	// first and the endpoint's documented rule second. All go through
+	// the shared resolvers so the synthesis client, the orchestration
 	// model factory and the generative probe can never disagree about
-	// which credential applies.
+	// which protocol, credential or scheme applies.
 	sc.Wire = inferWire(sc.BaseURL)
 	sc.APIKey = ResolveAPIKey(sc.APIKey, sc.BaseURL)
 	// 2026-09-10 cleanup: synthesis is OPTIONAL — a successful memory

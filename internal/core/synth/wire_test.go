@@ -82,28 +82,49 @@ func TestInferWire_Anthropic(t *testing.T) {
 	}
 }
 
-// TestWireOpenAI_AuthHeader pins Bearer token for OpenAI-protocol.
-// This is the breaking case vs the prior hardcoded X-Api-Key.
-func TestWireOpenAI_AuthHeader(t *testing.T) {
-	name, value := wireOpenAI.authHeader("sk-or-test-key-1234")
+// TestProtocolDefaultAuthScheme_OpenAI pins the DEFAULT
+// authentication scheme for the OpenAI protocol: Bearer.
+//
+// The scheme is no longer a property of the wire shape — the protocol
+// and the authentication scheme are independent, because MiniMax's
+// Anthropic-compatible endpoint is Anthropic-protocol and
+// bearer-authenticated. What the protocol still determines is the
+// DEFAULT, used when nothing better is known about the endpoint.
+func TestProtocolDefaultAuthScheme_OpenAI(t *testing.T) {
+	if got := protocolDefaultAuthScheme(wireOpenAI); got != AuthSchemeBearer {
+		t.Errorf("OpenAI protocol default scheme = %q; want %q", got, AuthSchemeBearer)
+	}
+	name, value, present := AuthSchemeBearer.headerFor("sk-or-test-key-1234")
+	if !present {
+		t.Fatal("bearer scheme presented no header")
+	}
 	if name != "Authorization" {
-		t.Errorf("OpenAI auth header name = %q; want Authorization", name)
+		t.Errorf("bearer auth header name = %q; want Authorization", name)
 	}
 	want := "Bearer sk-or-test-key-1234"
 	if value != want {
-		t.Errorf("OpenAI auth header value = %q; want %q", value, want)
+		t.Errorf("bearer auth header value = %q; want %q", value, want)
 	}
 }
 
-// TestWireAnthropic_AuthHeader pins X-Api-Key for Anthropic-protocol.
-// Regression guard — the prior hardcoded behaviour must remain.
-func TestWireAnthropic_AuthHeader(t *testing.T) {
-	name, value := wireAnthropic.authHeader("minimax-key-xyz")
-	if name != "X-Api-Key" {
-		t.Errorf("Anthropic auth header name = %q; want X-Api-Key", name)
+// TestProtocolDefaultAuthScheme_Anthropic pins the DEFAULT
+// authentication scheme for the Anthropic protocol: X-Api-Key.
+//
+// Regression guard — the prior hardcoded behaviour must remain for
+// ordinary Anthropic endpoints.
+func TestProtocolDefaultAuthScheme_Anthropic(t *testing.T) {
+	if got := protocolDefaultAuthScheme(wireAnthropic); got != AuthSchemeXAPIKey {
+		t.Errorf("Anthropic protocol default scheme = %q; want %q", got, AuthSchemeXAPIKey)
 	}
-	if value != "minimax-key-xyz" {
-		t.Errorf("Anthropic auth header value = %q; want minimax-key-xyz", value)
+	name, value, present := AuthSchemeXAPIKey.headerFor("anthropic-key-xyz")
+	if !present {
+		t.Fatal("x-api-key scheme presented no header")
+	}
+	if name != "X-Api-Key" {
+		t.Errorf("x-api-key auth header name = %q; want X-Api-Key", name)
+	}
+	if value != "anthropic-key-xyz" {
+		t.Errorf("x-api-key auth header value = %q; want anthropic-key-xyz", value)
 	}
 }
 

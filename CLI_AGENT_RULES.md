@@ -322,10 +322,21 @@ After `Custom`, the operator picks a **protocol**:
   covers any `text-embedding-…` model exposed by an OpenAI-shaped
   endpoint.
 - `Anthropic-compatible` — works with Anthropic, MiniMax, and any
-  other `x-api-key` `/v1/messages` endpoint. LLM-only (no native
-  `/embeddings`); the embedding manual path does NOT expose this
-  protocol.
+  other `/v1/messages` endpoint. LLM-only (no native `/embeddings`);
+  the embedding manual path does NOT expose this protocol.
 - `Ollama` — local daemon, no authentication. LLM + embedding.
+
+The protocol is the **message format**, not the authentication scheme.
+An Anthropic-compatible endpoint may still expect a bearer token —
+MiniMax's Anthropic-compatible surface at
+`https://api.minimax.io/anthropic/v1` answers `POST /messages` and
+authenticates with `Authorization: Bearer`, while Anthropic's own API
+uses `X-Api-Key`. MPM resolves the scheme from the endpoint's documented
+rule and falls back to the protocol default; an operator can always pin
+it with `mpm config profile set <name> auth_scheme bearer|x-api-key|none`.
+The scheme MUST NOT be inferred from the protocol alone, and MUST NOT be
+guessed by retrying: a refusal that names no authentication header is an
+invalid credential, not a mis-presented one.
 
 The protocol choice drives the default `base_url` and whether an API
 key is required; the operator can override any field. Public

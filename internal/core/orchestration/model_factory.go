@@ -68,29 +68,28 @@ func DefaultModelFactory() ModelFactory {
 		if timeout <= 0 {
 			timeout = 300 * time.Second // substrate default
 		}
-		sc := &synth.SynthClient{
-			Model:  profile.Model,
-			APIKey: apiKey,
-			// Operator-configurable, and honoured. NOTE: this literal
-			// leaves SynthClient.Wire at its zero value, so the wire
-			// protocol is NOT inferred from BaseURL the way
-			// NewSynthClient infers it — the zero value selects the
-			// Anthropic shape. That is a separate defect from the
-			// output-token contract fixed here and is deliberately
-			// left alone; recorded here so the next reader does not
-			// assume BaseURL already drives wire selection.
-			BaseURL: profile.BaseURL,
-			// Output tokens are NOT user-configurable. The substrate
-			// owns the budget (synth/client.go documents the contract);
-			// this factory previously copied profile.MaxTokens into the
-			// literal, which put the wire cap in the operator's hands.
-			// A profile with max_tokens=10 capped every review response
-			// at ten tokens, and a profile that simply omitted the field
-			// put `max_tokens: 0` on the wire. Sourced from the synth
-			// package so the ceiling has exactly one definition.
-			MaxTokens: synth.InternalMaxTokens(),
-			Timeout:   timeout,
-		}
+		// The client is built through the substrate's single
+		// construction point so the protocol, the credential and the
+		// authentication scheme are resolved exactly as they are for
+		// synthesis and for the Doctor probe.
+		//
+		// The previous struct literal here left SynthClient.Wire at its
+		// zero value, so the factory ALWAYS spoke the Anthropic
+		// protocol regardless of the profile's endpoint, and it had no
+		// way to present a bearer token to an OpenAI-compatible
+		// endpoint. That divergence is what let the Doctor probe and
+		// the review coordinator disagree with synthesis about the same
+		// profile.
+		//
+		// Output tokens are NOT user-configurable. The substrate owns
+		// the budget (synth/client.go documents the contract); this
+		// factory previously copied profile.MaxTokens into the literal,
+		// which put the wire cap in the operator's hands. A profile with
+		// max_tokens=10 capped every review response at ten tokens, and
+		// a profile that simply omitted the field put `max_tokens: 0` on
+		// the wire. Sourced from the synth package so the ceiling has
+		// exactly one definition.
+		sc := synth.NewClientForProfile(profile, timeout, synth.InternalMaxTokens())
 		return &synthClientAdapter{sc: sc}, nil
 	}
 }

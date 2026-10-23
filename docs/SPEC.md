@@ -965,7 +965,8 @@ mpm config profile set router provider openrouter
 mpm config profile set router api_key                     # hidden prompt (no echo)
                                                         # or: printf '%s' "$KEY" | mpm config profile set router api_key --stdin
 mpm config component set memory router                   # bind memory writes to the new profile
-                                                        # (auth header + endpoint are inferred from base_url)
+                                                        # (endpoint and authentication scheme are inferred from base_url;
+                                                        #  pin the scheme explicitly with `mpm config profile set <name> auth_scheme bearer`)
 
 # Free tier is just a model suffix — `meta-llama/llama-3.3-70b-instruct:free`:
 mpm config profile set router model meta-llama/llama-3.3-70b-instruct:free
@@ -3163,6 +3164,22 @@ This section is the operator-facing view of the same model: what runs, when, and
 | Disabled (`Components["embedding"] == "disabled"`) | Reported as neutral — excluded from the health denominator. |
 
 The probe exercises MPM's real inference path via `synth.SynthClient.DoLLMRequest` and the `EmbeddingProvider` factory — there is no second HTTP code path or alternative wire library. Failed probes never roll back valid configuration: provider outages (cold local models, transient rate limits, mid-provision credentials) are legitimate intermediate states.
+
+#### Authentication is resolved separately from the message protocol
+
+The **message protocol** (Anthropic-compatible / OpenAI-compatible / Ollama) and the **authentication scheme** (`Authorization: Bearer`, `X-Api-Key`, none) are independent. An endpoint may speak the Anthropic message format and still expect a bearer token — MiniMax's Anthropic-compatible surface at `https://api.minimax.io/anthropic/v1` does exactly that.
+
+MPM resolves the scheme per request, first match wins:
+
+1. the operator's explicit override — `mpm config profile set <name> auth_scheme bearer|x-api-key|none` (an empty value clears the override and returns the profile to derived resolution);
+2. the endpoint's own documented rule, matched on the **parsed URL host** against an exact domain set — never a substring search over the whole URL, so `https://notminimax.io` is not mistaken for MiniMax;
+3. the protocol default — OpenAI-compatible → `Authorization: Bearer`, Anthropic-compatible → `X-Api-Key`.
+
+Steps 1 and 2 are always tried before the protocol default. An authentication refusal is never retried with a different header: a generic "invalid api key" is an invalid credential, and repeating the request would neither fix it nor be honest.
+
+Authentication refusals stay distinguishable in the operator's report: an invalid credential, an unbilled subscription and an under-privileged key are three different problems with three different remedies.
+
+The credential never leaves the configured origin: a redirect to a different host or port is refused rather than followed, and a downgrade from `https` to `http` is refused too.
 
 ### Self-Healing Integrity Loop
 

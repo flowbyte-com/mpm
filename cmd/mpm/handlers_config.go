@@ -90,6 +90,7 @@ import (
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/synth"
 	"github.com/flowbyte-com/mpm-core/usererror"
 
 	"github.com/flowbyte-com/mpm/cmd/mpm/probe"
@@ -1791,7 +1792,7 @@ func printConfigProfileHelp() {
 	render.Label(os.Stdout, "mpm config profile add [name]", "interactive wizard; supply --model and --base-url for non-interactive add")
 	render.Label(os.Stdout, "mpm config profile list", "render all profiles (--json for machine output)")
 	render.Label(os.Stdout, "mpm config profile get <name>", "show one profile (--json for machine output; api_key redacted)")
-	render.Label(os.Stdout, "mpm config profile set <name> <key> <value>", "set one field (provider, model, base_url, temperature, timeout_seconds, reasoning)")
+	render.Label(os.Stdout, "mpm config profile set <name> <key> <value>", "set one field (provider, model, base_url, temperature, timeout_seconds, reasoning, auth_scheme)")
 	render.Label(os.Stdout, "mpm config profile set <name> api_key", "prompt for api_key with terminal echo suppressed")
 	render.Label(os.Stdout, "mpm config profile set <name> api_key --stdin", "read api_key from stdin (automation path)")
 	render.Label(os.Stdout, "mpm config profile remove <name>", "delete; refused if any component binds to this profile (lists all bindings on refusal)")
@@ -1909,7 +1910,7 @@ func handleConfigProfile(args []string) int {
 		return handleProfileGet(loadOrInitConfig(), args[1])
 	case "set":
 		if len(args) < 3 {
-			usererror.Error("mpm config profile set <name> <key> [value|--stdin]\n  keys: provider, model, base_url, api_key, temperature, timeout_seconds, reasoning\n  api_key accepts no positional value: omit for a hidden prompt, or pass --stdin")
+			usererror.Error("mpm config profile set <name> <key> [value|--stdin]\n  keys: provider, model, base_url, api_key, temperature, timeout_seconds, reasoning, auth_scheme\n  api_key accepts no positional value: omit for a hidden prompt, or pass --stdin")
 			return 1
 		}
 		name := args[1]
@@ -1934,7 +1935,7 @@ func handleConfigProfile(args []string) int {
 			return handleProfileSet(loadOrInitConfig(), name, key, value, true /*silenceValue*/)
 		}
 		if len(rest) == 0 {
-			usererror.Error("mpm config profile set <name> <key> <value>\n  keys: provider, model, base_url, temperature, timeout_seconds, reasoning")
+			usererror.Error("mpm config profile set <name> <key> <value>\n  keys: provider, model, base_url, temperature, timeout_seconds, reasoning, auth_scheme")
 			return 1
 		}
 		return handleProfileSet(loadOrInitConfig(), name, key, strings.Join(rest, " "), false /*silenceValue*/)
@@ -2177,6 +2178,9 @@ func handleProfileList(c *config.Config) int {
 		if p.Reasoning != "" {
 			fmt.Printf("    reasoning   : %s\n", p.Reasoning)
 		}
+		if p.AuthScheme != "" {
+			fmt.Printf("    auth scheme : %s\n", p.AuthScheme)
+		}
 		fmt.Println()
 	}
 	return 0
@@ -2209,6 +2213,9 @@ func handleProfileGet(c *config.Config, name string) int {
 	}
 	if p.Reasoning != "" {
 		fmt.Printf("  reasoning   : %s\n", p.Reasoning)
+	}
+	if p.AuthScheme != "" {
+		fmt.Printf("  auth scheme : %s\n", p.AuthScheme)
 	}
 	return 0
 }
@@ -2278,8 +2285,29 @@ func handleProfileSet(c *config.Config, name, key, value string, silenceValue bo
 		p.TimeoutSecs = n
 	case "reasoning":
 		p.Reasoning = value
+	case "auth_scheme", "authscheme", "auth":
+		// 2026-10-23 (HAL-9001): the authentication scheme is a
+		// first-class profile field, separate from the message
+		// protocol. Most endpoints need no configuration: the scheme
+		// is derived from the endpoint's host (documented) or from
+		// the protocol (default). This field exists for the endpoints
+		// that cannot be reliably discovered.
+		//
+		// An empty value CLEARS the override and returns the profile
+		// to derived resolution — that is how an operator undoes an
+		// override they no longer need.
+		if strings.TrimSpace(value) == "" {
+			p.AuthScheme = ""
+			break
+		}
+		scheme, ok := synth.ParseAuthScheme(value)
+		if !ok {
+			usererror.Error("unsupported auth_scheme %q (supported: bearer, x-api-key, none; empty clears the override)", value)
+			return 1
+		}
+		p.AuthScheme = scheme.String()
 	default:
-		usererror.Error("unknown profile field %q (try: provider, model, base_url, api_key, temperature, timeout_seconds, reasoning)", key)
+		usererror.Error("unknown profile field %q (try: provider, model, base_url, api_key, temperature, timeout_seconds, reasoning, auth_scheme)", key)
 		return 1
 	}
 	c.Profiles[name] = p
@@ -2317,6 +2345,10 @@ func isMaterialChange(p config.Profile, key string) bool {
 	materialKeys := map[string]bool{
 		"provider": true, "model": true, "base_url": true, "endpoint": true,
 		"api_key": true, "token": true,
+		// The authentication scheme is part of the connection
+		// fingerprint: changing it changes the bytes on the wire.
+		// 2026-10-23 (HAL-9001).
+		"auth_scheme": true, "authscheme": true, "auth": true,
 	}
 	if key == "" {
 		// Empty key signals "the entire profile was just created with
@@ -2832,6 +2864,10 @@ type profileJSONShape struct {
 	Temperature    *float64 `json:"temperature,omitempty"`
 	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
 	Reasoning      string   `json:"reasoning,omitempty"`
+	// AuthScheme is the operator's explicit authentication-scheme
+	// override ("bearer", "x-api-key", "none"). Empty means the scheme
+	// is derived from the endpoint. 2026-10-23 (HAL-9001).
+	AuthScheme string `json:"auth_scheme,omitempty"`
 }
 
 func toProfileJSON(p config.Profile, name string) profileJSONShape {
@@ -2844,6 +2880,7 @@ func toProfileJSON(p config.Profile, name string) profileJSONShape {
 		Temperature:    p.Temperature,
 		TimeoutSeconds: p.TimeoutSecs,
 		Reasoning:      p.Reasoning,
+		AuthScheme:     p.AuthScheme,
 	}
 }
 
