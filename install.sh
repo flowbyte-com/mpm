@@ -936,6 +936,13 @@ export_build_provenance() {
 # `make refresh-installed` to retry.
 # hosts. Operators can re-run the failed host's installer or
 # `make refresh-installed` to retry.
+#
+# RETURN VALUE: non-zero means "at least one adapter failed". It does NOT
+# mean "the installation failed". Callers MUST capture it
+# (`phase_agent_reconcile || rc=$?`) rather than call the phase bare:
+# under `set -e` an uncaptured non-zero return aborts the script at the
+# call site, which would turn this documented warning into a silent
+# fatal exit that never reaches validation.
 phase_agent_reconcile() {
     note "AGENT INSTALL RECONCILE"
     local reconcile_script="$PROJECT_ROOT/agent_installation/scripts/reconcile_managed_blocks.py"
@@ -1044,7 +1051,19 @@ mode_install() {
     phase_data_dir
     phase_runtime_assets
     phase_service
-    phase_agent_reconcile
+    # Adapter reconciliation is NON-FATAL by contract (see
+    # phase_agent_reconcile): one broken host adapter must not abort the
+    # install. The phase returns non-zero to report "some adapter
+    # failed", and under `set -e` an uncaptured non-zero return would
+    # abort the install RIGHT HERE — before validation, before the
+    # completion banner — turning a documented warning into a silent
+    # fatal exit. Capture it, report it, and continue.
+    local reconcile_rc=0
+    phase_agent_reconcile || reconcile_rc=$?
+    if [ "$reconcile_rc" -ne 0 ]; then
+        warn "  agent adapter reconciliation reported warnings (non-fatal)."
+        warn "  Re-run the failing adapter's installer, or 'make refresh-installed', to retry."
+    fi
     phase_validate
     note "INSTALL COMPLETE"
     # Use the canonical path so the next-steps commands are runnable
@@ -1272,8 +1291,18 @@ parse_args() {
 mode_reconcile() {
     note "RECONCILE (managed-block reconciliation only)"
     preflight
-    phase_agent_reconcile
+    # Reconciliation IS this mode's purpose, so a failed adapter is
+    # reported as a failure — but it must not abort the mode silently
+    # before the completion banner prints. The capture keeps the
+    # distinction explicit: the work is done and reported, and the exit
+    # status still says "not everything reconciled".
+    local reconcile_rc=0
+    phase_agent_reconcile || reconcile_rc=$?
+    if [ "$reconcile_rc" -ne 0 ]; then
+        warn "  one or more adapters did not reconcile (see above)."
+    fi
     note "RECONCILE COMPLETE"
+    return "$reconcile_rc"
 }
 
 main() {

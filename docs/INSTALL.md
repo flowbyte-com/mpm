@@ -217,6 +217,27 @@ row is not a failure.
 > adding `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'`
 > to `mpm-scheduler.service` via `systemctl --user edit mpm-scheduler`.
 
+### 1f. Reading the installer's report
+
+A successful install ends with a `VALIDATION` section and an `INSTALL COMPLETE`
+banner. Every message the installer prints — progress, warnings, errors, the
+completion banners — goes to **stderr**, so capture it if you are logging the
+install (`./install.sh 2>&1 | tee install.log`).
+
+Two failure classes are distinguished, and the distinction is load-bearing:
+
+- **Fatal.** The install aborts and exits non-zero, naming what failed — a
+  failed validation, a service that would not start, a refused or rolled-back
+  binary promotion. The message is always printed.
+- **Non-fatal.** A host-adapter reconciliation failure is a *warning*. One
+  broken adapter (a host whose managed-block installer fails) does not abort
+  the install: the installer says so, names the adapter, and carries on to
+  validation and the completion banner. Retry it later with that adapter's own
+  installer, or with `make refresh-installed`.
+
+So: an install whose output ends without `INSTALL COMPLETE` did not complete.
+Read the error immediately above the end of the output — it is there.
+
 ## 2. Agentic Cron (recurring tasks, optional)
 
 > **Skip this subsection if:** self-scheduled one-off wakes via `schedule_wake`

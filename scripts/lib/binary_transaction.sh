@@ -152,7 +152,25 @@ _bt_lock() {
 }
 
 _bt_unlock() {
-    exec 9>&- 2>/dev/null || true
+    # Close the lock fd.
+    #
+    # The stderr redirection MUST be scoped to this compound command.
+    #
+    # `exec 9>&- 2>/dev/null` applies BOTH redirections to the SHELL,
+    # because `exec` with no command changes the shell's own state. The
+    # `2>/dev/null` was meant to swallow a possible "bad file
+    # descriptor" complaint from closing fd 9, but its actual effect was
+    # to point the shell's stderr at /dev/null for the REST OF THE
+    # SCRIPT. Every later message the installer emits — the completion
+    # banner, a validation failure, a fatal error — was then silently
+    # discarded, and the install looked like it had stopped for no
+    # reason. The Makefile's `install:` target shares this library, so
+    # its post-promotion failure report was lost the same way.
+    #
+    # Wrapping the close in `{ ...; } 2>/dev/null` scopes the
+    # redirection to that one compound command, so stderr is restored
+    # the moment the group finishes.
+    { exec 9>&-; } 2>/dev/null || true
 }
 
 # ---------- candidate validation ----------
