@@ -250,7 +250,21 @@ func TestCallIO_AnEarlyFailureStillRemovesThePrivateDirectory(t *testing.T) {
 	cmd := exec.Command(os.Args[0],
 		"-test.run=^TestCallIO_AnEarlyFailureStillRemovesThePrivateDirectory$",
 		"-test.timeout=20m")
+	// The child is this same test binary — an MPM-capable binary — so it
+	// must not inherit an environment that could resolve the operator's
+	// MPM state. MPM_WORKSPACE is pinned to a temporary directory, which
+	// closes both resolution paths: config.GetMPMDir's $HOME/.mpm
+	// fallback and mpmcli.ResolveWorkspace's "." fallback. os/exec
+	// dedups Env with the last entry winning, so this overrides an
+	// ambient MPM_WORKSPACE rather than racing it.
+	//
+	// The rest of the ambient environment is inherited deliberately: the
+	// child's own TestMain runs `go build`, and a hermetic environment
+	// without GOPATH/GOMODCACHE/GOCACHE would relocate the Go module
+	// cache into a temporary HOME, turning a one-second build into a
+	// full module re-download.
 	cmd.Env = append(os.Environ(),
+		"MPM_WORKSPACE="+t.TempDir(),
 		callIOEarlyFailureEnv+"=1",
 		callIOEarlyFailurePathEnv+"="+pathFile,
 	)
