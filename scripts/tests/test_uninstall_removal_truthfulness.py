@@ -49,6 +49,7 @@ from __future__ import annotations
 import os
 import re  # noqa: F401  (used only if a future case needs re.search)
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -57,6 +58,87 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 UNINSTALL = REPO_ROOT / "uninstall.sh"
 
+# The mode the negative-control fixtures are locked to, and the mode
+# they are restored to once the scenario is over.
+#
+# The restrictive mode is PART OF THE SCENARIO: it is what makes
+# uninstall.sh's `rm -rf` fail, which is what the exit-code-7 and
+# honest-reporting assertions are about. It therefore has to be in
+# force for the whole duration of the uninstall invocation — restoring
+# it earlier would quietly weaken the tests into passing vacuously.
+#
+# It is restored afterwards, before the runner removes the fixture,
+# because a directory that cannot have its children unlinked also
+# cannot be removed: the old `shutil.rmtree(..., ignore_errors=True)`
+# silently left the whole `mpm-uninstall-truth.*` tree behind.
+RESTRICTED_MODE = 0o500
+RESTORED_MODE = 0o700
+
+
+class FixtureCleanupError(RuntimeError):
+    """Raised when a test-owned fixture could not be fully removed.
+
+    A leak must never be mistaken for a pass: the previous cleanup
+    swallowed every removal failure.
+    """
+
+
+def _restore_permissions(paths) -> tuple[list[Path], list[str]]:
+    """Restore a writable mode on every path this module locked.
+
+    Returns (restored, errors). The paths are restored to
+    RESTORED_MODE so that the fixture can then be removed.
+    """
+    restored: list[Path] = []
+    errors: list[str] = []
+    for path in paths:
+        try:
+            path.chmod(RESTORED_MODE)
+        except OSError as exc:
+            errors.append(f"chmod {path}: {exc}")
+            continue
+        restored.append(path)
+    return restored, errors
+
+
+def _remove_fixture(root: Path, restricted=()) -> list[str]:
+    """Restore the locked permissions, then remove the fixture.
+
+    Returns the list of errors; an empty list means the fixture is
+    gone. Only the test-owned fixture is touched.
+    """
+    _restored, errors = _restore_permissions(restricted)
+    if not root.exists():
+        return errors
+    try:
+        shutil.rmtree(root)
+    except OSError as exc:
+        errors.append(f"rmtree {root}: {exc}")
+    if root.exists():
+        errors.append(f"the fixture directory {root} still exists")
+    return errors
+
+
+def _force_remove(root: Path) -> None:
+    """Best-effort removal for a fixture this module built DELIBERATELY
+    to be hard to remove. Safety net only; never used for the fixture
+    under test."""
+    if not root.exists():
+        return
+    for dirpath, dirnames, filenames in os.walk(str(root), topdown=False):
+        try:
+            os.chmod(dirpath, 0o700)
+        except OSError:
+            pass
+        for name in dirnames + filenames:
+            entry = os.path.join(dirpath, name)
+            if os.path.islink(entry):
+                try:
+                    os.unlink(entry)
+                except OSError:
+                    pass
+    shutil.rmtree(root, ignore_errors=True)
+
 
 def _running_as_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
@@ -64,10 +146,34 @@ def _running_as_root() -> bool:
 
 class UninstallRemovalTruthfulness(unittest.TestCase):
     def setUp(self) -> None:
+        # The locked paths are tracked so the teardown can restore them.
+        self._restricted: list[Path] = []
         self.tmp = Path(tempfile.mkdtemp(prefix="mpm-uninstall-truth."))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        # Registered before anything else can fail, so a partial setup
+        # is covered too. The teardown restores the locked permissions
+        # and then removes the fixture — it does NOT hide a failure.
+        self.addCleanup(self._teardown)
         self.home = self.tmp / "home"
         (self.home / ".mpm").mkdir(parents=True)
+
+    def _teardown(self) -> None:
+        """Restore the locked permissions, then remove the fixture.
+
+        The restrictive mode is what makes uninstall.sh's removal
+        FAIL, so it stays in place for the whole uninstall invocation
+        and the assertions that follow it. It is restored HERE — after
+        the assertions, before the removal — because a directory whose
+        children cannot be unlinked also cannot itself be removed.
+
+        A removal failure is raised rather than swallowed: the old
+        `shutil.rmtree(..., ignore_errors=True)` turned the leak into
+        a silent pass.
+        """
+        errors = _remove_fixture(self.tmp, self._restricted)
+        if errors:
+            raise FixtureCleanupError(
+                "could not remove the test fixture:\n  " + "\n  ".join(errors)
+            )
 
     def _run(self, *args: str) -> subprocess.CompletedProcess:
         env = {
@@ -89,7 +195,10 @@ class UninstallRemovalTruthfulness(unittest.TestCase):
         (path / "app.log").write_text("sensitive log line\n")
         (path / "stub").mkdir(exist_ok=True)
         (path / "stub" / "mpm.db").write_text("row\n")
-        (path / "stub").chmod(0o500)
+        (path / "stub").chmod(RESTRICTED_MODE)
+        # Remembered so the teardown can restore it. The restriction is
+        # part of the scenario and must survive the uninstall.
+        self._restricted.append(path / "stub")
         return True
 
     # ---- the defect itself -------------------------------------------------
@@ -194,6 +303,127 @@ class UninstallRemovalHelperContract(unittest.TestCase):
     def test_exit_code_7_is_documented(self):
         # Inline (?m) — assertRegex's third positional arg is `msg`, not flags.
         self.assertRegex(self.src, r"(?m)^#\s+7\s+a required removal step failed")
+
+
+class UninstallFixtureLifecycle(unittest.TestCase):
+    """The fixture must not survive the test that created it.
+
+    The negative controls deliberately lock a nested directory to 0o500.
+    That restriction is the SCENARIO — it is what makes uninstall.sh's
+    removal fail — and it is also what used to defeat the runner's own
+    teardown, leaving a `mpm-uninstall-truth.*` tree behind on every
+    run. These tests pin both halves: the restriction stays in force
+    during the uninstall, and the fixture is gone afterwards.
+    """
+
+    def _make_locked_fixture(self) -> tuple[Path, Path]:
+        """A fixture shaped like the negative controls'."""
+        root = Path(tempfile.mkdtemp(prefix="mpm-uninstall-truth."))
+        self.addCleanup(_force_remove, root)
+        logs = root / "home" / ".mpm" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "app.log").write_text("sensitive log line\n")
+        stub = logs / "stub"
+        stub.mkdir()
+        (stub / "mpm.db").write_text("row\n")
+        stub.chmod(RESTRICTED_MODE)
+        return root, stub
+
+    def test_a_locked_fixture_cannot_be_removed_while_it_is_locked(self):
+        """While the restriction is in force the tree cannot be
+        removed: unlinking a file needs write permission on its parent
+        directory, and the parent has none."""
+        root, stub = self._make_locked_fixture()
+        self.assertEqual(stat.S_IMODE(stub.stat().st_mode), RESTRICTED_MODE)
+        with self.assertRaises(OSError):
+            shutil.rmtree(root)
+        self.assertTrue(
+            root.exists(),
+            "the fixture must survive while it is locked — otherwise the "
+            "negative controls would be testing nothing",
+        )
+
+    def test_the_restricted_mode_is_restored_before_the_removal(self):
+        """The permissions are restored explicitly, and the restored
+        mode is a writable one."""
+        _root, stub = self._make_locked_fixture()
+        restored, errors = _restore_permissions([stub])
+        self.assertEqual(errors, [])
+        self.assertEqual(restored, [stub])
+        self.assertEqual(stat.S_IMODE(stub.stat().st_mode), RESTORED_MODE)
+
+    def test_the_fixture_is_removed_after_the_permissions_are_restored(self):
+        root, stub = self._make_locked_fixture()
+        errors = _remove_fixture(root, [stub])
+        self.assertEqual(errors, [])
+        self.assertFalse(root.exists(), "the fixture must be gone")
+
+    @unittest.skipIf(
+        _running_as_root(), "root ignores the write-permission restriction"
+    )
+    def test_a_fixture_that_cannot_be_removed_is_reported(self):
+        """A removal that cannot succeed must be REPORTED, with its
+        path — never swallowed into a silent pass.
+
+        The obstacle is the fixture's PARENT: it is not writable, so
+        the fixture cannot be unlinked from it, and no chmod of the
+        fixture itself can change that.
+        """
+        base = Path(tempfile.mkdtemp(prefix="mpm-uninstall-truth-locked."))
+        self.addCleanup(_force_remove, base)
+        fixture = base / "fixture"
+        fixture.mkdir()
+        (fixture / "file.txt").write_text("x\n")
+        os.chmod(base, 0o500)
+
+        errors = _remove_fixture(fixture, [])
+
+        self.assertTrue(
+            errors, "a removal that cannot succeed must be reported"
+        )
+        self.assertTrue(
+            any(str(fixture) in err for err in errors),
+            f"the error must name the path that could not be removed: {errors}",
+        )
+        self.assertTrue(fixture.exists())
+
+    def test_the_test_case_teardown_removes_its_fixture(self):
+        """End to end: a real test method runs, and the fixture it
+        created is gone afterwards."""
+        case = UninstallRemovalTruthfulness(
+            "test_dry_run_performs_no_removal_and_exits_zero"
+        )
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertEqual(len(result.errors), 0, result.errors)
+        self.assertEqual(len(result.failures), 0, result.failures)
+        self.assertFalse(
+            case.tmp.exists(), "the fixture must not survive the test"
+        )
+
+    @unittest.skipIf(
+        _running_as_root(), "root bypasses the 0500 unlink restriction"
+    )
+    def test_a_locked_fixture_does_not_survive_the_test_that_created_it(self):
+        """THE regression.
+
+        The negative-control fixture is locked, the test passes, and the
+        fixture is still gone. With the old
+        `shutil.rmtree(..., ignore_errors=True)` teardown the locked
+        directory defeated the removal and the whole
+        `mpm-uninstall-truth.*` tree survived the run.
+        """
+        case = UninstallRemovalTruthfulness(
+            "test_default_mode_exits_7_on_failed_removal"
+        )
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertEqual(len(result.errors), 0, result.errors)
+        self.assertEqual(len(result.failures), 0, result.failures)
+        self.assertFalse(
+            case.tmp.exists(),
+            "the locked fixture must not survive the test that created it",
+        )
 
 
 if __name__ == "__main__":
