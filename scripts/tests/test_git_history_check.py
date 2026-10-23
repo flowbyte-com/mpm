@@ -53,12 +53,18 @@ Fixture lifecycle
   to remove anything that is not such a fixture, which is what keeps it
   from ever being pointed at the real repository, and a removal that
   cannot succeed is raised rather than swallowed.
+
+  A symlinked fixture root is refused too, and the refusal happens
+  BEFORE any traversal: os.walk() follows a symbolic link supplied as
+  its starting path, so the permission walk would otherwise chmod the
+  link's target — a directory this module does not own.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -89,6 +95,11 @@ def _is_own_fixture(root: Path) -> tuple[bool, str]:
     directly inside the system temp directory. Nothing else — in
     particular, never the repository — may be removed by this module.
     """
+    if root.is_symlink():
+        return False, (
+            f"refusing to remove {root}: the fixture root is a symbolic link, "
+            "so it could point outside the test-owned directory"
+        )
     if not root.name.startswith(FIXTURE_PREFIX):
         return False, (
             f"refusing to remove {root}: it is not a {FIXTURE_PREFIX}* fixture"
@@ -112,7 +123,17 @@ def _remove_tree(root: Path) -> list[str]:
     The permission walk comes first: a fixture may contain
     directories the current user cannot write to, and those cannot
     have their children unlinked until they are made writable again.
+
+    A symlinked root is refused before the walk. os.walk() follows a
+    symbolic link supplied as its STARTING path, so the chmod below
+    would otherwise change the mode of the link's TARGET — a directory
+    this module does not own.
     """
+    if root.is_symlink():
+        return [
+            f"refusing to remove {root}: the fixture root is a symbolic link, "
+            "so removing it could reach outside the test-owned directory"
+        ]
     errors: list[str] = []
     for dirpath, dirnames, filenames in os.walk(str(root), topdown=False):
         try:
@@ -141,6 +162,16 @@ def _remove_fixture(root: Path) -> list[str]:
     Returns the list of errors; an empty list means the fixture is
     gone. A removal that cannot succeed is reported, never swallowed.
     """
+    # The symlink check comes FIRST — before exists(). A dangling
+    # symlink is "not existing" as far as Path.exists() is concerned,
+    # so an existence check first would silently accept one, and a
+    # symlink whose target does exist would take the walk below into
+    # a directory this module does not own.
+    if root.is_symlink():
+        return [
+            f"refusing to remove {root}: the fixture root is a symbolic link, "
+            "so removing it could reach outside the test-owned directory"
+        ]
     if not root.exists():
         return []
     ok, reason = _is_own_fixture(root)
@@ -339,6 +370,69 @@ class GitHistoryFixtureLifecycle(unittest.TestCase):
             created["tmp"].exists(),
             "a fixture created before a setup failure must still be removed",
         )
+
+    def test_the_cleanup_refuses_a_symlinked_fixture_root(self):
+        """A symlinked fixture root must be refused BEFORE any traversal.
+
+        os.walk() follows a symbolic link supplied as its STARTING
+        path, so the permission walk would chmod the link's TARGET — a
+        directory this module does not own. The refusal must leave the
+        external target exactly as it was: same permission bits, same
+        contents.
+        """
+        target = Path(tempfile.mkdtemp(prefix="mpm-history-check-target-"))
+        self.addCleanup(shutil.rmtree, target, ignore_errors=True)
+        os.chmod(target, 0o750)
+        (target / "keep.txt").write_text("not the fixture's file\n")
+        original_mode = stat.S_IMODE(target.stat().st_mode)
+
+        link = Path(tempfile.gettempdir()) / (FIXTURE_PREFIX + "linked")
+        link.symlink_to(target, target_is_directory=True)
+        self.addCleanup(link.unlink, missing_ok=True)
+
+        errors = _remove_fixture(link)
+
+        # The external target must be untouched: same mode, same
+        # contents. These are asserted FIRST — they are the load-bearing
+        # property, and they are what fails if the walk reaches the
+        # link's target.
+        self.assertTrue(target.exists(), "the external target must survive")
+        self.assertEqual(
+            stat.S_IMODE(target.stat().st_mode),
+            original_mode,
+            "the external target's permissions must not be changed",
+        )
+        self.assertTrue((target / "keep.txt").exists())
+        self.assertEqual(
+            (target / "keep.txt").read_text(), "not the fixture's file\n"
+        )
+
+        # And the refusal itself must be reported, not swallowed.
+        self.assertTrue(errors, "a symlinked fixture root must be refused")
+        self.assertIn("symbolic link", errors[0])
+
+    def test_a_dangling_symlinked_fixture_root_is_refused_not_ignored(self):
+        """A dangling symlink is "not existing" for Path.exists(), so an
+        existence check first would silently accept it. The refusal must
+        be reported instead."""
+        link = Path(tempfile.gettempdir()) / (FIXTURE_PREFIX + "dangling")
+        link.symlink_to(
+            Path(tempfile.gettempdir()) / "mpm-history-check-does-not-exist"
+        )
+        self.addCleanup(link.unlink, missing_ok=True)
+
+        self.assertFalse(
+            link.exists(),
+            "the fixture must be a dangling symlink for this test to mean anything",
+        )
+
+        errors = _remove_fixture(link)
+
+        self.assertTrue(
+            errors,
+            "a dangling symlinked fixture root must be reported, not ignored",
+        )
+        self.assertIn("symbolic link", errors[0])
 
     def test_the_cleanup_refuses_a_path_that_is_not_a_fixture(self):
         """The cleanup only ever touches its own fixtures."""

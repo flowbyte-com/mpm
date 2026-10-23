@@ -46,6 +46,7 @@ Isolation
 
 from __future__ import annotations
 
+import importlib
 import os
 import re  # noqa: F401  (used only if a future case needs re.search)
 import shutil
@@ -54,6 +55,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 UNINSTALL = REPO_ROOT / "uninstall.sh"
@@ -329,10 +331,18 @@ class UninstallFixtureLifecycle(unittest.TestCase):
         stub.chmod(RESTRICTED_MODE)
         return root, stub
 
+    @unittest.skipIf(
+        _running_as_root(), "root bypasses the 0500 unlink restriction"
+    )
     def test_a_locked_fixture_cannot_be_removed_while_it_is_locked(self):
         """While the restriction is in force the tree cannot be
         removed: unlinking a file needs write permission on its parent
-        directory, and the parent has none."""
+        directory, and the parent has none.
+
+        Root can bypass the restriction, so this check is skipped there
+        — the same convention the negative-control uninstall cases
+        already use.
+        """
         root, stub = self._make_locked_fixture()
         self.assertEqual(stat.S_IMODE(stub.stat().st_mode), RESTRICTED_MODE)
         with self.assertRaises(OSError):
@@ -341,6 +351,72 @@ class UninstallFixtureLifecycle(unittest.TestCase):
             root.exists(),
             "the fixture must survive while it is locked — otherwise the "
             "negative controls would be testing nothing",
+        )
+
+    def test_the_locked_fixture_check_is_skipped_when_running_as_root(self):
+        """The root guard is verified WITHOUT becoming root.
+
+        Root bypasses the 0o500 unlink restriction, so the locked
+        fixture survives removal there and the assertion above cannot
+        hold. The guard is therefore proven by re-importing this module
+        with `os.geteuid` patched to 0 — the decorator is then
+        evaluated under exactly the condition it has to handle. No
+        privilege escalation and no installer run is involved.
+        """
+        module = importlib.import_module(__name__)
+        method_name = "test_a_locked_fixture_cannot_be_removed_while_it_is_locked"
+
+        # The guard's predicate must follow the effective uid.
+        with mock.patch.object(os, "geteuid", return_value=0):
+            self.assertTrue(module._running_as_root())
+        with mock.patch.object(os, "geteuid", return_value=1000):
+            self.assertFalse(module._running_as_root())
+
+        # Re-import under a simulated root so `skipIf` is evaluated
+        # with the predicate it will see in production.
+        with mock.patch.object(os, "geteuid", return_value=0):
+            reloaded = importlib.reload(module)
+        try:
+            method = getattr(
+                reloaded.UninstallFixtureLifecycle, method_name
+            )
+            self.assertTrue(
+                getattr(method, "__unittest_skip__", False),
+                "the locked-fixture check must be skipped when running as root",
+            )
+            self.assertIn(
+                "root",
+                getattr(method, "__unittest_skip_why__", ""),
+                "the skip must say that root bypasses the restriction",
+            )
+        finally:
+            # Restore the module to the real (non-root) decorator state
+            # so the rest of the suite is unaffected by the reload.
+            importlib.reload(module)
+
+    def test_the_negative_control_exit_code_checks_are_still_present(self):
+        """The root guard must not have weakened the negative controls.
+
+        The exit-code-7 assertions are what make the uninstall
+        truthfulness contract load-bearing. They are unchanged, but a
+        guard test that only ever added skips could quietly drop them,
+        so their presence is pinned here.
+        """
+        module = importlib.import_module(__name__)
+        for name in (
+            "test_default_mode_exits_7_on_failed_removal",
+            "test_purge_mode_exits_7_on_failed_removal",
+            "test_default_mode_does_not_claim_removed_when_path_survives",
+            "test_purge_mode_does_not_claim_removed_when_db_survives",
+        ):
+            self.assertTrue(
+                hasattr(module.UninstallRemovalTruthfulness, name),
+                f"the negative control {name} must remain in place",
+            )
+        self.assertRegex(
+            module.UNINSTALL.read_text(),
+            r"(?m)^#\s+7\s+a required removal step failed",
+            "uninstall.sh must still document exit code 7",
         )
 
     def test_the_restricted_mode_is_restored_before_the_removal(self):
