@@ -31,30 +31,77 @@ import (
 // add ~10s to the suite for no benefit.
 var mpmBin string
 
-// buildMPMBinForIOTests is invoked by the package TestMain. It returns
-// the path to a freshly-built mpm binary, or empty string on failure
-// (the IO tests will be skipped in that case).
+// callIOBinDir holds the shared mpm binary the IO tests exec.
+//
+// It is recorded the moment the directory is created — BEFORE any
+// build — so that a build that fails halfway still leaves a directory
+// the package teardown can remove. Recording it only after a
+// successful build would leak precisely in the case that needs
+// cleaning up most.
+//
+// The directory used to survive every run of this package, leaving
+// ~22 MB behind each time.
+var callIOBinDir string
+
+// newCallIOBinDir creates the shared build directory and records it,
+// so the package teardown can remove it.
+//
+// The recording happens inside this function, before the caller builds
+// anything, and that ordering is the contract.
+func newCallIOBinDir() (string, error) {
+	dir, err := os.MkdirTemp("", "mpm-call-io-bin-")
+	if err != nil {
+		return "", err
+	}
+	callIOBinDir = dir
+	return dir, nil
+}
+
+// removeCallIOBinDir removes the shared build directory.
+//
+// It is called from the package's TestMain, after the tests have run.
+// A removal failure is reported rather than swallowed: the directory
+// holds a freshly built ~22 MB binary, and a silent failure turns into
+// a slow exhaustion of the temporary filesystem.
+func removeCallIOBinDir() error {
+	return removeBuildDir(callIOBinDir)
+}
+
+// buildCallIOBinary builds the MPM binary from pkg into outPath and
+// returns the build's combined output.
 //
 // The build runs from the parent directory of cmd/mpm/ because that's
 // where `./cmd/mpm` resolves correctly under `go build`. `go test
 // ./cmd/mpm/` runs with cwd = cmd/mpm, so a relative path of
 // `./cmd/mpm` would resolve to cmd/mpm/cmd/mpm and fail.
-func buildMPMBinForIOTests() string {
-	tmp, err := os.MkdirTemp("", "mpm-call-io-bin-")
-	if err != nil {
-		return ""
-	}
-	bin := filepath.Join(tmp, "mpm")
-	cmd := exec.Command("go", "build", "-tags", "fts5", "-o", bin, "./cmd/mpm")
+func buildCallIOBinary(pkg, outPath string) (string, error) {
+	cmd := exec.Command("go", "build", "-tags", "fts5", "-o", outPath, pkg)
 	// chdir to the parent directory so `./cmd/mpm` resolves to the
 	// cmd/mpm package directory.
 	repoRoot, err := os.Getwd()
 	if err != nil {
-		return ""
+		return "", err
 	}
 	cmd.Dir = filepath.Dir(filepath.Dir(repoRoot))
 	cmd.Env = append(os.Environ(), "CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// buildMPMBinForIOTests is invoked by the package TestMain. It returns
+// the path to a freshly-built mpm binary, or empty string on failure
+// (the IO tests will be skipped in that case).
+//
+// The build directory is recorded BEFORE the build starts, so a build
+// that fails halfway is still cleaned up by the package teardown.
+func buildMPMBinForIOTests() string {
+	dir, err := newCallIOBinDir()
+	if err != nil {
+		return ""
+	}
+	bin := filepath.Join(dir, "mpm")
+	out, err := buildCallIOBinary("./cmd/mpm", bin)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "buildMPMBinForIOTests failed: %v\n%s\n", err, out)
 		return ""
 	}
