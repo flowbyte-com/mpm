@@ -1470,7 +1470,8 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 	// Basic counts. Each one is best-effort — log audit and default to 0 on failure.
 	var total, active, deleted, ltm, reinforced, neverAccessed, expired int
 	// Canonical NULL-safe directive-exclusion used by every count below.
-	const directiveExcl = `NOT (collection = 'directives' OR COALESCE(is_prime_directive, 0) = 1)`
+	// (DirectiveExclusionClause — see directive_tools.go.)
+	const directiveExcl = DirectiveExclusionClause
 	err := dm.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE ` + directiveExcl).Scan(&total)
 	if err != nil {
 		return nil, err

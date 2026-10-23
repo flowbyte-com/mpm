@@ -245,17 +245,16 @@ func (s *DoctorService) checkDatabase() DoctorCheck {
 	return check
 }
 
-// checkEmbeddings inspects the embedding_source provenance of live memories.
+// checkEmbeddings inspects the embedding provenance of live memories.
 // Reports per spec §7.1 table:
 //
-//	hash>0 AND provider=0 → FAIL (fully degraded)
-//	hash>0               → WARN (legacy rows present)
-//	null/total > 10%     → WARN (backfill needed)
-//	all real provider    → PASS
+//	hash>0 AND no provider vectors → FAIL (fully degraded)
+//	hash>0                        → WARN (legacy rows present)
+//	no vector / total > 10%       → WARN (backfill needed)
+//	all provider vectors          → PASS
 //
-// checkEmbeddings measures embedding COVERAGE: the distribution of the
-// `embedding_source` label across live memories, against a statistical
-// tolerance (it warns only when nulls exceed 10% of rows).
+// checkEmbeddings measures embedding COVERAGE against a statistical
+// tolerance (it warns only when the shortfall exceeds 10% of rows).
 //
 // It deliberately does NOT validate payloads. Coverage is not validity —
 // "12% of memories lack a vector" is a different claim from "the vectors
@@ -269,40 +268,75 @@ func (s *DoctorService) checkDatabase() DoctorCheck {
 // must not make the substrate look unhealthy, so this check keeps its
 // forgiving tolerance, while integrity — which is about data that IS
 // present — has none.
+//
+// 2026-10-23 (HAL-9001 Finding 5): this check counted the
+// `embedding_source` LABEL, not the stored body:
+//
+//	providerCount := total - hashCount - nullCount
+//
+// `memories.embedding_source` DEFAULTS to 'provider' and is not set on
+// the ordinary insert path, so a row holding NO vector at all was
+// counted as provider-covered. On a clean install that produced "6
+// memories, all provider-generated" directly above an integrity row
+// reading "6 live memories have no vector" — the two rows contradicted
+// each other and the coverage row was the one that lied.
+//
+// The correction measures the body: a row counts as covered only when
+// it actually holds a vector. The population is ORDINARY memories —
+// bootstrap directives are excluded and disclosed, because a directive
+// is policy text and is never a vector-search candidate, so its absent
+// vector is an expected policy choice rather than an indexing gap.
+// Genuine gaps in ordinary memories are still reported and still WARN.
 func (s *DoctorService) checkEmbeddings() DoctorCheck {
-	check := DoctorCheck{Name: "Embeddings"}
-	var total, hashCount, nullCount int
+	check := DoctorCheck{Name: "Stored embeddings"}
+
+	// ordTotal       — live ordinary memories (directives excluded)
+	// ordVector      — ordinary live memories holding a vector body
+	// providerVector — ordinary live memories holding a provider-sourced body
+	// hashCount      — ordinary live memories carrying a legacy hash body
+	// directiveCount — live directive rows
+	var ordTotal, ordVector, providerVector, hashCount, directiveCount int
 	if err := s.dm.QueryRowTracked(
-		`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`,
-	).Scan(&total); err != nil {
+		`SELECT
+			COALESCE(SUM(CASE WHEN `+mpminternal.DirectiveExclusionClause+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN `+mpminternal.DirectiveExclusionClause+` AND `+hasVectorBodySQL+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN `+mpminternal.DirectiveExclusionClause+` AND embedding_source='provider' AND `+hasVectorBodySQL+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN `+mpminternal.DirectiveExclusionClause+` AND embedding_source='hash' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN `+mpminternal.DirectivePredicate+` THEN 1 ELSE 0 END), 0)
+		FROM memories WHERE deleted_at IS NULL`,
+	).Scan(&ordTotal, &ordVector, &providerVector, &hashCount, &directiveCount); err != nil {
 		check.Status = "WARN"
 		check.Message = fmt.Sprintf("could not count memories: %v", err)
 		return check
 	}
-	if err := s.dm.QueryRowTracked(
-		`SELECT
-			COALESCE(SUM(CASE WHEN embedding_source='hash' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN embedding_source='null' THEN 1 ELSE 0 END), 0)
-		FROM memories WHERE deleted_at IS NULL`,
-	).Scan(&hashCount, &nullCount); err != nil {
-		check.Status = "WARN"
-		check.Message = fmt.Sprintf("could not count embedding sources: %v", err)
-		return check
+
+	noVector := ordTotal - ordVector
+
+	// The directive population is disclosed rather than dropped: the
+	// operator can see why the database holds rows without vectors.
+	if directiveCount > 0 {
+		check.Details = append(check.Details, fmt.Sprintf(
+			"%d bootstrap directive rows are excluded from this count. A directive is "+
+				"standing policy read at wake time, not a searchable memory, so it holds "+
+				"no vector by design — this is not an indexing gap.", directiveCount))
 	}
-	providerCount := total - hashCount - nullCount
+
 	switch {
-	case hashCount > 0 && providerCount == 0:
+	case hashCount > 0 && providerVector == 0:
 		check.Status = "FAIL"
 		check.Message = fmt.Sprintf("%d legacy hash rows; no real embeddings persisted; semantic search fully degraded", hashCount)
-		check.Details = []string{"Run `mpm ops migrate-embeddings` to classify and remediate."}
+		check.Details = append(check.Details, "Run `mpm ops migrate-embeddings` to classify and remediate.")
 	case hashCount > 0:
 		check.Status = "WARN"
 		check.Message = fmt.Sprintf("%d legacy hash rows present", hashCount)
-		check.Details = []string{"Run `mpm ops migrate-embeddings` to classify and remediate."}
-	case total > 0 && nullCount*10 > total: // > 10%
+		check.Details = append(check.Details, "Run `mpm ops migrate-embeddings` to classify and remediate.")
+	case ordTotal == 0 && directiveCount > 0:
+		check.Status = "PASS"
+		check.Message = fmt.Sprintf("no memories stored; %d bootstrap directives present", directiveCount)
+	case noVector > 0 && noVector*10 > ordTotal: // > 10%
 		check.Status = "WARN"
-		check.Message = fmt.Sprintf("%d / %d without embedding — run `mpm ops backfill-embeddings`", nullCount, total)
-	default:
+		check.Message = fmt.Sprintf("%d / %d without embedding — run `mpm ops backfill-embeddings`", noVector, ordTotal)
+	case providerVector == ordTotal:
 		check.Status = "PASS"
 		// Final release-pass wording (defect: doctor said "all from real
 		// provider" while the embedding-provider check said "no
@@ -316,11 +350,21 @@ func (s *DoctorService) checkEmbeddings() DoctorCheck {
 		// Final-pass wording: label this row "Stored embeddings" so
 		// the historical-vs-current distinction is unambiguous in
 		// the rendered output (the Embedding provider row directly
-		// below is the forward-looking signal). The label change is
-		// in service_doctor.go's Check.Name; the message stays in
+		// below is the forward-looking signal). The message stays in
 		// passive voice so it doesn't claim current provider state.
-		check.Name = "Stored embeddings"
-		check.Message = fmt.Sprintf("%d memories, all provider-generated", total)
+		check.Message = fmt.Sprintf("%d memories, all provider-generated", ordTotal)
+	default:
+		// A shortfall below the 10% tolerance: the row stays PASS (the
+		// coverage tolerance is deliberate), but the message no longer
+		// claims "all" — it states the ratio, and the detail names the
+		// shortfall. The integrity row reports the same fact without a
+		// tolerance.
+		check.Status = "PASS"
+		check.Message = fmt.Sprintf("%d of %d memories carry a provider-generated vector", providerVector, ordTotal)
+		check.Details = append(check.Details, fmt.Sprintf(
+			"%d of %d live memories hold no vector. The shortfall is below this row's "+
+				"10%% tolerance; the Embedding integrity row reports it without a tolerance.",
+			noVector, ordTotal))
 	}
 	return check
 }

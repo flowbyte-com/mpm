@@ -49,10 +49,26 @@ import (
 
 // embeddingIntegrityResult accumulates the observations the check renders.
 type embeddingIntegrityResult struct {
-	// Coverage-adjacent counters, reported for context.
+	// Coverage-adjacent counters, reported for context. These count
+	// ORDINARY memories only — directive rows are accounted for
+	// separately, below.
 	totalVectors   int
 	nullVectors    int
 	legacyHashRows int
+
+	// Bootstrap directive rows.
+	//
+	// 2026-10-23 (HAL-9001 Finding 5): a directive is policy text, not
+	// a searchable memory — `mpm recall` searches collection='memories'
+	// and the hybrid search filters on the same collection — so its
+	// missing vector is an EXPECTED POLICY CHOICE rather than an
+	// indexing gap. Directive rows are therefore excluded from the
+	// vector statistics (a directive's vector is never ranked against
+	// anything) and disclosed separately instead of being silently
+	// dropped or counted as a defect.
+	directiveRows        int // live directive rows
+	directiveNullVectors int // directive rows holding no vector
+	directiveDefects     int // directive rows whose body is malformed, empty or non-finite
 
 	// Integrity failures, any of which is disqualifying on its own.
 	malformedRows int // present but not decodable as a float array
@@ -139,6 +155,20 @@ func classifyEmbeddingPayload(body string) (dim int, malformed, empty, nonFinite
 	return len(vec), false, false, false
 }
 
+// hasVectorBodySQL is the SQL form of classifyEmbeddingPayload's
+// "this row holds no vector" definition: the column is SQL NULL, empty
+// after trimming whitespace, or the literal string "null".
+//
+// The trim set mirrors Go's unicode.IsSpace ASCII subset so the SQL
+// predicate and the Go classifier agree on every body —
+// TestHasVectorBodySQL_MatchesTheGoClassifier pins that agreement.
+//
+// 2026-10-23 (HAL-9001 Finding 5): the coverage check used to infer
+// coverage from the `embedding_source` LABEL, whose column default is
+// 'provider'. A row that held no vector at all was therefore counted
+// as provider-covered.
+const hasVectorBodySQL = `embedding IS NOT NULL AND TRIM(CAST(embedding AS TEXT), ' ' || char(9) || char(10) || char(11) || char(12) || char(13)) NOT IN ('', 'null')`
+
 // collectEmbeddingIntegrity reads every live memory vector and every
 // reference-chunk fingerprint. Read-only.
 func collectEmbeddingIntegrity(s *DoctorService) (embeddingIntegrityResult, error) {
@@ -172,7 +202,7 @@ func collectEmbeddingIntegrity(s *DoctorService) (embeddingIntegrityResult, erro
 	}
 
 	rows, err := s.dm.QueryTracked(
-		`SELECT embedding FROM memories WHERE deleted_at IS NULL`)
+		`SELECT embedding, collection, COALESCE(is_prime_directive, 0) FROM memories WHERE deleted_at IS NULL`)
 	if err != nil {
 		return res, fmt.Errorf("query memory embeddings: %w", err)
 	}
@@ -180,7 +210,9 @@ func collectEmbeddingIntegrity(s *DoctorService) (embeddingIntegrityResult, erro
 
 	for rows.Next() {
 		var body sql.NullString
-		if err := rows.Scan(&body); err != nil {
+		var collection sql.NullString
+		var primeDirective int
+		if err := rows.Scan(&body, &collection, &primeDirective); err != nil {
 			return res, fmt.Errorf("scan memory embedding: %w", err)
 		}
 		text := ""
@@ -188,6 +220,25 @@ func collectEmbeddingIntegrity(s *DoctorService) (embeddingIntegrityResult, erro
 			text = body.String
 		}
 		dim, malformed, empty, nonFinite := classifyEmbeddingPayload(text)
+
+		// Directive rows are policy text, not ranked memories. Route
+		// them into their own counters so their missing vector is
+		// disclosed rather than counted as an indexing gap — and so a
+		// directive's vector (if it ever has one) cannot skew the
+		// dimension histogram of the vectors that ARE ranked.
+		isDirective := primeDirective == 1 ||
+			(collection.Valid && collection.String == "directives")
+		if isDirective {
+			res.directiveRows++
+			switch {
+			case malformed, empty, nonFinite:
+				res.directiveDefects++
+			case dim == 0:
+				res.directiveNullVectors++
+			}
+			continue
+		}
+
 		switch {
 		case malformed:
 			res.malformedRows++
@@ -269,6 +320,13 @@ func collectEmbeddingIntegrity(s *DoctorService) (embeddingIntegrityResult, erro
 // provider call, which the removed embedding probe performed and which
 // this design does not restore. The report states what was observed and
 // leaves the comparison to the operator.
+//
+// 2026-10-23 (HAL-9001 Finding 5): bootstrap directive rows are routed
+// into their own counters rather than the vector statistics. A directive
+// is standing policy, never a vector-search candidate, so its absent
+// vector is an expected policy choice and not an indexing gap — but it
+// is DISCLOSED in the details rather than dropped, and a genuine gap in
+// an ordinary memory still WARNs exactly as before.
 func (s *DoctorService) checkEmbeddingIntegrity() DoctorCheck {
 	check := DoctorCheck{Name: "Embedding integrity"}
 
@@ -330,6 +388,27 @@ func (s *DoctorService) checkEmbeddingIntegrity() DoctorCheck {
 			fmt.Sprintf("%d live memories have no vector. This is reported here as a "+
 				"count, not a percentage: a null vector is an absent vector, and no "+
 				"threshold makes it valid.", res.nullVectors))
+	}
+
+	// -- bootstrap directives ------------------------------------------
+	//
+	// Disclosed, not counted as gaps. A directive is policy text read
+	// at wake time; it is never a vector-search candidate, so its
+	// missing vector is a policy choice rather than an indexing gap.
+	// The row is still reported so the operator can see why the
+	// database holds rows without vectors.
+	if res.directiveRows > 0 {
+		msg := fmt.Sprintf(
+			"%d bootstrap directive rows are excluded from these statistics. A directive "+
+				"is standing policy read at wake time, not a searchable memory, so it "+
+				"carries no vector by design — this is not an indexing gap. %d of them "+
+				"hold no vector.", res.directiveRows, res.directiveNullVectors)
+		if res.directiveDefects > 0 {
+			msg += fmt.Sprintf(" %d directive rows carry a malformed, empty or non-finite "+
+				"body; that IS a data defect, but it does not affect ranking because a "+
+				"directive is never ranked.", res.directiveDefects)
+		}
+		details = append(details, msg)
 	}
 
 	// -- model fingerprints ---------------------------------------------

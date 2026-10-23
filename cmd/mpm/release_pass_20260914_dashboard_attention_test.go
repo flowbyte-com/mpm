@@ -91,6 +91,37 @@ func TestDashboard_AttentionVisibleWithBacklog(t *testing.T) {
 	}
 }
 
+// TestDashboard_NoSubstrateWarningsOnCleanInstall pins the substrate
+// half of the negative invariant: a clean install must not surface a
+// substrate readiness row in a warning state.
+//
+// 2026-10-23 (HAL-9001 Finding 5): this assertion did not exist
+// before, because the Attention-line test it belongs to SKIPPED on
+// every run — a clean install carried the five baseline bootstrap
+// directives as a spaced-review backlog, which tripped the old guard.
+// The directives are no longer review candidates (they are standing
+// policy, and their `last_accessed_at` is never written, so that
+// backlog could never be cleared), so the invariant is enforceable.
+//
+// This test never skips: the substrate rows it inspects are read from
+// the database and do not depend on the host environment.
+func TestDashboard_NoSubstrateWarningsOnCleanInstall(t *testing.T) {
+	bin := buildAttentionBin(t)
+	ws := t.TempDir()
+
+	dashOut := mustRunAttention(t, bin, ws)
+
+	for _, row := range []string{
+		"LLM provider", "Database connected", "Embedding model",
+		"Gateway connected", "Working Context", "Open theories",
+		"Wake backlog", "Review backlog",
+	} {
+		if strings.Contains(dashOut, "⚠  "+row) {
+			t.Errorf("clean dashboard surfaces a substrate warning on %q:\n%s", row, dashOut)
+		}
+	}
+}
+
 // TestDashboard_AttentionAbsentOnCleanInstall pins the
 // negative invariant: when no actionable Doctor warnings
 // exist, the dashboard's Attention line must NOT appear
@@ -99,18 +130,33 @@ func TestDashboard_AttentionVisibleWithBacklog(t *testing.T) {
 //
 // The test uses an empty workspace (no seeds) so no memories
 // are review-eligible.
+//
+// 2026-10-23 (HAL-9001 Finding 5): this test previously SKIPPED on
+// every run, because a clean install carried the five baseline
+// bootstrap directives as a spaced-review backlog and the guard below
+// tripped on them. The guard is replaced by the real assertion.
+//
+// The scheduler row probes the systemd USER bus, which the stripped
+// environment this harness runs the binary in cannot reach. That probe
+// is an environment artifact, not a substrate signal, so the
+// Attention-line invariant is asserted whenever the environment
+// contributes no warning of its own. The substrate half of the
+// invariant lives in TestDashboard_NoSubstrateWarningsOnCleanInstall,
+// which never skips.
 func TestDashboard_AttentionAbsentOnCleanInstall(t *testing.T) {
 	bin := buildAttentionBin(t)
 	ws := t.TempDir()
 
 	dashOut := mustRunAttention(t, bin, ws)
 
-	// Clean install may still carry some default seed rows
-	// that the substrate creates on first run. We tolerate
-	// those by checking the Attention line state in
-	// relation to actual review backlog state.
-	if strings.Contains(dashOut, "⚠  Review backlog") {
-		t.Skip("clean install fixture has review backlog from baseline seeds; skipping negative-invariant check")
+	// The Attention line aggregates WARN-level readiness items. When
+	// the environment itself contributes one (the systemd user-bus
+	// probe above), the aggregate is not a substrate signal and the
+	// invariant cannot be asserted.
+	if strings.Contains(dashOut, "⚠  Scheduler running") {
+		t.Skip("the scheduler probe cannot reach the systemd user bus in this environment; " +
+			"the Attention-line invariant is not assertable here " +
+			"(see TestDashboard_NoSubstrateWarningsOnCleanInstall for the substrate half)")
 	}
 	if strings.Contains(dashOut, "Attention") {
 		t.Fatalf("clean dashboard must NOT show Attention summary; got:\n%s", dashOut)
