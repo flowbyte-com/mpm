@@ -139,14 +139,26 @@ alternative.
 ### 1d. Bootstrap cognitive state
 
 ```bash
-~/.mpm/bin/mpm ops init directives          # seed prime directives (idempotent)
 ~/.mpm/bin/mpm status                      # verify DB reachable
 ~/.mpm/bin/mpm call mpm_context --payload '{"action":"read_wake_context","params":{}}'        # first agent tool call
 ```
 
-`ops init directives` is the *only* command that touches cognitive state during
-install. It seeds prime directives (wake protocol, canonical DB path, etc.)
-into the database. Re-running is safe — local edits are preserved.
+The Baseline Cognitive Bootstrap — the five prime directives that close MPM's
+cognitive loops (wake protocol, cluster triage, wake triage, daemon health,
+epistemic compaction) — is seeded **automatically** when the database is first
+created. A fresh install therefore already carries it.
+
+`mpm ops init directives` re-runs the same idempotent seed. Use it to recover
+after an accidental shred, or to seed the shared database of a multi-agent
+workspace:
+
+```bash
+~/.mpm/bin/mpm ops init directives          # re-seed prime directives (idempotent)
+```
+
+Re-running is safe — local edits are preserved. On a fresh install the command
+reports `0 created, 5 skipped`, because the rows are already there; a skipped
+row is not a failure.
 
 ### 1e. Script modes reference
 

@@ -790,7 +790,7 @@ service. Try it without installing anything — no daemon setup, no service regi
 
 ### 5.2 Run it as a daemon
 
-This section shows the daemon + systemd setup manually, for transparency and for operators who want to customize individual steps. If you don't need that control, run `./install.sh` instead — it does most of the below (build, install to `~/.mpm/bin`, `make service-scheduler`, `systemctl --user enable --now`, the eCryptfs autostart workaround, and OpenClaw wiring) in one idempotent step. `mpm ops init directives` (see the "Seed the baseline cognitive directives" step in [§5.2](#52-run-it-as-a-daemon)) is **not** part of `install.sh` — it is a separate post-install command by design (the installer prints it as a `next steps` hint at the end). `make service-telemetry` likewise is a separate manual step. Use the manual steps below when you need to pin a specific version, point a unit at a non-canonical install path, or otherwise deviate from the canonical layout.
+This section shows the daemon + systemd setup manually, for transparency and for operators who want to customize individual steps. If you don't need that control, run `./install.sh` instead — it does most of the below (build, install to `~/.mpm/bin`, `make service-scheduler`, `systemctl --user enable --now`, the eCryptfs autostart workaround, and OpenClaw wiring) in one idempotent step. `mpm ops init directives` (see the "Seed the baseline cognitive directives" step in [§5.2](#52-run-it-as-a-daemon)) is **not** part of `install.sh`: the baseline is seeded automatically when the database is created, so the command is a re-run / recovery path rather than a required install step. `make service-telemetry` likewise is a separate manual step. Use the manual steps below when you need to pin a specific version, point a unit at a non-canonical install path, or otherwise deviate from the canonical layout.
 
 For autonomous operation — the scheduler dispatches system-kind wakes (critic audits, snapshots, GC, broadcasts) on a 60s ticker, and `mpm-mcp` exposes MPM to MCP hosts (Claude Code, OpenClaw) over stdio:
 
@@ -908,13 +908,15 @@ source checkout therefore reads and writes the canonical runtime, never
 the checkout — which is what makes it safe for the checkout to live
 somewhere else entirely.
 
-**Seed the baseline cognitive directives** (recommended once after install):
+**Seed the baseline cognitive directives** (optional — the baseline is already seeded when the database is created):
 
 ```bash
 mpm ops init directives
 ```
 
-MPM provides advanced cognitive machinery — wake-context surfacing, audit-cluster detection, session-end triage — but that machinery requires specific agent behaviors to close the loop. These seed directives are the **Baseline Cognitive Bootstrap**: the "batteries-included" operating manual for that machinery. Without them, the scheduler will dispatch wakes but the cognitive loop won't close. Idempotent — safe to re-run; local edits are preserved.
+MPM provides advanced cognitive machinery — wake-context surfacing, audit-cluster detection, session-end triage — but that machinery requires specific agent behaviors to close the loop. These seed directives are the **Baseline Cognitive Bootstrap**: the "batteries-included" operating manual for that machinery. Without them, the scheduler will dispatch wakes but the cognitive loop won't close.
+
+The baseline is applied **automatically** when the database is created, so a fresh install already carries the five reference directives. The command above re-runs the same idempotent seed — useful after an accidental shred, or to seed the shared database of a multi-agent workspace. On a fresh install it reports `0 created, 5 skipped`, because the rows are already there. Idempotent — safe to re-run; local edits are preserved.
 
 **Wire up the MCP host** (Claude Code, OpenClaw, etc.). `mpm-mcp` is spawned by the host as a stdio child process — no separate service to manage. Example `.mcp.json`:
 
@@ -1011,7 +1013,7 @@ difference between a chatbot and an assistant that feels like a colleague.
 - **Workspace files** — who the agent _is_ (OpenClaw-side, markdown in
   `~/.openclaw/workspace/`)
 - **MPM prime directives** — how MPM's machinery hooks in (DB-side, rows in
-  the `directives` table, seeded by `mpm ops init directives`)
+  the `directives` table, seeded automatically when the database is created)
 - **MPM memories** — what the agent _believes_ (DB-side,
   `mpm_memory action=save` / `mpm_memory action=query`, scales to thousands of rows)
 
@@ -1448,7 +1450,7 @@ shared_attached: true
 Agent sees one merged view
 ```
 
-When the agent calls `mpm_memory action=query`, `mpm_context action=read_directives`, or any read tool, the core queries both sources and merges. For directives, `ReadDirectivesForFramework` reads the local baseline (the four baseline directives seeded by `mpm ops init directives` against the *local* `mpm.db`) and overlays the shared-database directives, deduplicating by `stable_id` (shared takes precedence — it is the operator-curated truth). For memory searches, FTS5 runs across both schemas and merges relevance scores with a multiplicative **Shared Premium** (1.20× for shared results, 1.35× when the shared row also matches a `query_global_rules` scan). House rules outrank noisy local memories without being able to *invent* matches.
+When the agent calls `mpm_memory action=query`, `mpm_context action=read_directives`, or any read tool, the core queries both sources and merges. For directives, `ReadDirectivesForFramework` reads the local baseline (the five baseline directives seeded into the *local* `mpm.db` when the database is created) and overlays the shared-database directives, deduplicating by `stable_id` (shared takes precedence — it is the operator-curated truth). For memory searches, FTS5 runs across both schemas and merges relevance scores with a multiplicative **Shared Premium** (1.20× for shared results, 1.35× when the shared row also matches a `query_global_rules` scan). House rules outrank noisy local memories without being able to *invent* matches.
 
 The agent never makes a decision to "call shared.db". It calls `mpm_memory` or `mpm_context`, and MPM serves the union. The only agent-visible surface is the `shared_attached` boolean in `health_check` responses — present so operators can verify the wiring, not so agents need to branch on it.
 
@@ -2338,8 +2340,8 @@ mpm ops backup [path]
 mpm ops restore-db <path>
 mpm ops ingest <path>
 
-# Init (one-time bootstrap — idempotent)
-mpm ops init directives       # Seed baseline cognitive directives
+# Init (idempotent re-runs of the automatic bootstrap)
+mpm ops init directives       # Re-run the baseline cognitive directive seed
 mpm ops init skills           # Seed baseline skill library (status, health, etc.)
 mpm ops init topics           # Link existing theories/decisions memories to their topics
 
@@ -2712,6 +2714,14 @@ mpm ops review --promoted   # Show recently elevated LTM memories
 mpm ops review --stale      # Surface forgotten LTM memories
 ```
 
+The stale queue covers **memories**, not directives. A directive is standing
+policy read at wake time; it is never a vector-search candidate, and its
+`last_accessed_at` is never written, so a directive in the queue could never
+be cleared by doing the work. Directives are therefore excluded from the
+review candidate set by the canonical directive predicate — the same one the
+active-memory metric uses — while ordinary high-weight memories stay in the
+queue untouched.
+
 
 ---
 
@@ -2816,9 +2826,13 @@ Elevation: `mpm call mpm_memory --payload '{"action":"save","params":{"fact":"Al
 The `mpm_context action=proactive_recall_hint` engine also elevates directive-adjacent memories when the current conversation context matches their semantic territory.
 #### Baseline Cognitive Bootstrap
 
-For fresh installs, MPM ships a small set of reference directives that close the system's most important cognitive loops (wake-context reading, session-end cluster triage). Seed them once with `mpm ops init directives` — idempotent, never overwrites local edits. See §5 step "Initialize baseline directives" for context.
+MPM ships five reference directives that close the system's most important cognitive loops: wake-context reading, session-end cluster triage, wake triage, daemon health, and epistemic compaction.
 
-> **Implementation note:** The reference directives live in `internal/seed/directives.go`. The bootstrap command detects existing directives by stable ID and skips them; local edits to a seeded directive are preserved, never silently overwritten.
+They are seeded **automatically** when the database is first created — every production constructor applies the registry, so a fresh install is never directive-blind. `mpm ops init directives` re-runs the same idempotent seed; it is useful after an accidental shred, or to seed the shared database of a multi-agent workspace. Re-running is safe: local edits to a seeded directive are preserved, never silently overwritten.
+
+Because the seed is automatic, a fresh install reports `0 created, 5 skipped` — the rows are already there. A skipped row is not a failure.
+
+> **Implementation note:** The reference directives live in `internal/core/seed/directives.go`. The bootstrap command detects existing directives by stable ID and skips them; local edits to a seeded directive are preserved, never silently overwritten.
 
 #### Multi-Framework Scope
 
@@ -3328,6 +3342,35 @@ because the standard report has no remediation path. `--all` is not
 supported: `mpm doctor` already runs every available check. `--explain`
 is a separate mode that prints the FTS5 query plan, and cannot be
 combined with `--deep-scan`.
+
+#### What the Doctor counts, and what it excludes
+
+Several Doctor rows count "memories". They must count the same
+population, or the report contradicts itself — as it did on a clean
+install, where the coverage row read *6 memories, all provider-generated*
+directly above an integrity row reading *6 live memories have no vector*.
+
+**Coverage is measured from the stored body, not the label.** The
+`memories.embedding_source` column defaults to `'provider'` and is not
+set on the ordinary insert path, so counting the label counts
+vector-less rows as covered. The **Stored embeddings** row therefore
+counts a memory as covered only when it actually holds a vector.
+
+**Bootstrap directives are excluded, and disclosed.** A directive is
+standing policy, not a searchable memory: `mpm recall` searches
+`collection='memories'` and the hybrid search filters on the same
+collection, so a directive is never a vector-search candidate and its
+missing vector is an expected policy choice rather than an indexing
+gap. Directives are therefore excluded from the vector statistics, from
+the active-memory counts and from the spaced-review queue — by the
+canonical directive predicate — and the rows that exclude them say so,
+rather than dropping them silently.
+
+Excluding directives never hides a real gap: a genuine missing vector in
+an ordinary memory still warns, and a genuine high-weight memory still
+appears in the review queue. The exclusion is a difference of
+*population*, not of *evidence*.
+
 
 #### Doctor is observational
 

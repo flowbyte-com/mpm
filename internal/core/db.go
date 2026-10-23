@@ -2976,7 +2976,7 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 }
 
 // seedBaselineDirectives runs the Baseline Cognitive Bootstrap
-// (tiered fallback seeding, 2026-08-19): the four constitutional
+// (tiered fallback seeding, 2026-08-19): the five constitutional
 // global directives are ALWAYS seeded into the local store, so a
 // standalone runtime (no MPM_SHARED_DB) is never directive-blind.
 // Idempotent by stable-id primary key — existing rows with matching

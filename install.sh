@@ -1010,7 +1010,9 @@ phase_validate() {
         warn "  ! lock file not found (daemon may not have ticked yet)"
     fi
 
-    # 4. Directives seeded (warn-only — install does not auto-seed)
+    # 4. Directives seeded (warn-only — the baseline is seeded automatically
+    #    when the database is created, so a zero count here means the seed
+    #    did not take, not that the operator has to seed it by hand)
     local directives_count=0
     local directives_json
     directives_json=$("$PREFIX/bin/mpm" call mpm_context --payload '{"action":"read_directives","params":{}}' 2>/dev/null \
@@ -1023,7 +1025,8 @@ phase_validate() {
     else
         warn "  ! no directives found"
         warn "    the agent will boot without cognitive bootstrap"
-        warn "    to seed the baseline, run: $PREFIX/bin/mpm ops init directives"
+        warn "    the baseline is seeded automatically when the database is created;"
+        warn "    to (re-)seed it explicitly, run: $PREFIX/bin/mpm ops init directives"
     fi
 
     if [ $errors -gt 0 ]; then
