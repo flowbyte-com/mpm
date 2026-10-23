@@ -1110,6 +1110,70 @@ func wizardEmbeddingStep(c *config.Config) {
 	}
 }
 
+// embeddingProtocolChoices is the embedding protocol picker.
+//
+// 2026-10-23 (HAL-9001): each choice now carries the RUNTIME provider
+// the saved profile must record. The wizard used to write
+// provider="custom" — the vendor-neutral label the LLM path uses —
+// but "custom" is not an implemented embedding provider, so every
+// embedding profile the wizard created was rejected by the runtime
+// resolver ("provider \"custom\" is not implemented (supported: …)").
+//
+// The public interface is unchanged and stays vendor-neutral: the
+// operator still picks a PROTOCOL, never a vendor, and the labels
+// below name wire shapes. What changed is the translation from the
+// operator's choice to the provider the resolver understands.
+var embeddingProtocolChoices = []choice{
+	{
+		id:    "openai-compatible",
+		label: "OpenAI-compatible",
+		defaults: config.Profile{
+			Provider: "openai-compatible",
+			BaseURL:  "https://api.openai.com/v1",
+		},
+		needsAPIKey: true,
+	},
+	{
+		id:    "ollama",
+		label: "Ollama (local)",
+		defaults: config.Profile{
+			Provider: "ollama",
+			BaseURL:  "http://127.0.0.1:11434",
+		},
+		needsAPIKey: false,
+	},
+}
+
+// verifyEmbeddingProfile resolves a generated embedding profile
+// through the SAME resolver the runtime uses, so a configuration the
+// wizard offers to save is known to be both structurally valid and
+// executable by the selected backend.
+//
+// It performs NO network I/O: the resolver builds the provider object
+// and validates it, it does not call the endpoint. Reachability is
+// `mpm doctor`'s job.
+//
+// The profile is resolved in isolation — a throwaway Config holding
+// only this profile and its binding — so the check cannot be
+// satisfied by an unrelated profile in the operator's configuration.
+func verifyEmbeddingProfile(p config.Profile) error {
+	probe := &config.Config{
+		Profiles:   map[string]config.Profile{p.Name: p},
+		Components: map[string]string{"embedding": p.Name},
+	}
+	res := mpminternal.ResolveEmbeddingConfig(probe)
+	if res == nil {
+		return fmt.Errorf("the embedding resolver returned no result")
+	}
+	if res.Status != mpminternal.EmbeddingStatusConfigured {
+		if res.LastError != nil {
+			return res.LastError
+		}
+		return fmt.Errorf("the profile does not resolve to a usable embedding provider")
+	}
+	return nil
+}
+
 // wizardEmbeddingCustom walks the operator through manual
 // embedding configuration via Custom + protocol picker. There
 // is NO "Max tokens" prompt on this path — embeddings have no
@@ -1118,6 +1182,19 @@ func wizardEmbeddingStep(c *config.Config) {
 // is removed because Anthropic exposes no native /embeddings
 // endpoint.
 func wizardEmbeddingCustom(c *config.Config) {
+	wizardEmbeddingCustomWith(rwFromStdin(), c)
+}
+
+// wizardEmbeddingCustomWith is wizardEmbeddingCustom with an explicit
+// prompt source.
+//
+// The reader is a parameter rather than a call to rwFromStdin() per
+// prompt because rwFromStdin() builds a NEW buffered reader every
+// time, and a buffered reader consumes everything it can read ahead.
+// The wizard asks several questions, so the production path shares
+// one reader for the whole step and a test can drive the whole step
+// from one scripted session.
+func wizardEmbeddingCustomWith(rw *bufio.Reader, c *config.Config) {
 	fmt.Println()
 	fmt.Println("Embedding · Custom")
 	fmt.Println("Custom lets you connect any supported embedding endpoint.")
@@ -1137,41 +1214,54 @@ func wizardEmbeddingCustom(c *config.Config) {
 	// Embedding-protocol picker. Subset of the LLM protocol
 	// list (no Anthropic-compatible — it has no native
 	// /embeddings endpoint).
-	embedProtocols := []choice{
-		{
-			id:    "openai-compatible",
-			label: "OpenAI-compatible",
-			defaults: config.Profile{
-				BaseURL: "https://api.openai.com/v1",
-			},
-			needsAPIKey: true,
-		},
-		{
-			id:    "ollama",
-			label: "Ollama (local)",
-			defaults: config.Profile{
-				BaseURL: "http://127.0.0.1:11434",
-			},
-			needsAPIKey: false,
-		},
-	}
-	protocol := promptChoiceDefault(rwFromStdin(), "Protocol", embedProtocols, "openai-compatible")
+	protocol := promptChoiceDefault(rw, "Protocol", embeddingProtocolChoices, "openai-compatible")
 	if protocol == nil {
 		fmt.Println("Aborted.")
 		return
 	}
 
-	prof := config.Profile{Name: "embedding", Provider: "custom"}
+	// The profile records the RUNTIME provider, taken from the
+	// protocol choice. It is deliberately NOT "custom": the LLM
+	// path can infer its wire shape from the endpoint at
+	// construction time, but the embedding resolver selects its
+	// backend from the provider name, and "custom" selects none.
+	prof := config.Profile{Name: "embedding"}
 	mergeProfileDefaults(&prof, protocol.defaults)
 
-	model := promptString(rwFromStdin(), "Model", "")
+	model := promptString(rw, "Model", "")
 	if model != "" {
 		prof.Model = strings.TrimSpace(model)
 	}
-	baseURL := promptString(rwFromStdin(), "Base URL", prof.BaseURL)
+
+	// Endpoint validation happens BEFORE the profile is stored, and
+	// before anything is written. A malformed URL used to be
+	// accepted here and only surfaced later as an unreachable
+	// endpoint; the operator is told what is wrong while they can
+	// still fix it.
+	baseURL := promptString(rw, "Base URL", prof.BaseURL)
 	if baseURL != "" {
 		prof.BaseURL = strings.TrimSpace(baseURL)
 	}
+	for attempt := 0; ; attempt++ {
+		err := config.ValidateEndpointURL(prof.BaseURL)
+		if err == nil {
+			break
+		}
+		fmt.Printf("  ! %v\n", err)
+		fmt.Println("    expected an http:// or https:// endpoint, e.g.")
+		fmt.Println("      http://127.0.0.1:11434")
+		fmt.Println("      https://api.openai.com/v1")
+		if attempt >= 2 {
+			fmt.Println()
+			fmt.Println("Aborted: no valid embedding endpoint was given. Nothing was changed.")
+			return
+		}
+		baseURL = promptString(rw, "Base URL", prof.BaseURL)
+		if baseURL != "" {
+			prof.BaseURL = strings.TrimSpace(baseURL)
+		}
+	}
+
 	if protocol.needsAPIKey {
 		key, err := promptSecret("API key (leave empty if not required)", "")
 		if err != nil {
@@ -1185,6 +1275,17 @@ func wizardEmbeddingCustom(c *config.Config) {
 
 	if prof.Model == "" || prof.BaseURL == "" {
 		fmt.Println("A model and base URL are required to bind an embedding profile.")
+		return
+	}
+
+	// The generated profile must survive the runtime's own resolver
+	// before it is offered to the operator. A profile the runtime
+	// rejects is not a configuration; it is a trap for the next
+	// command that reads it.
+	if err := verifyEmbeddingProfile(prof); err != nil {
+		fmt.Println()
+		fmt.Println("The embedding profile would not run: " + err.Error())
+		fmt.Println("Nothing was changed.")
 		return
 	}
 

@@ -1837,6 +1837,43 @@ mpm config capability list|get|set <capability>   # Capability registry (operato
 mpm config validate                                # Structural validation (5 layers of checks; exit 0/1/2)
 ```
 
+#### What the wizard records, and what it refuses
+
+The wizard's public interface is deliberately vendor-neutral: the
+operator picks a **protocol**, never a vendor, and no model or
+provider catalogue is offered. What the wizard writes into
+`mpm_config.json` is a different matter, and the two must not be
+confused.
+
+The **LLM** profile records `provider: "custom"`. That is meaningful:
+the runtime infers the message protocol from the endpoint at
+construction time (see *Model Connectivity Probes* below), so the
+profile itself names no vendor.
+
+The **embedding** profile records the **runtime provider** — the name
+that selects a backend in the embedding resolver (`ollama`,
+`openai-compatible`, `openai`, `openrouter`). The embedding resolver
+has no inference step: the provider name *is* the backend selector, so
+`"custom"` selects nothing and the resulting configuration is
+rejected by the runtime (`provider "custom" is not implemented`). The
+wizard's protocol picker is the translation point: each protocol it
+offers maps onto exactly one implemented provider.
+
+Two rules follow from that, and both are enforced before anything is
+written:
+
+* **The generated profile must resolve.** The wizard passes the
+  profile it just built through the runtime's own embedding resolver
+  before offering it for saving. A profile the runtime cannot act on
+  is not offered.
+* **The endpoint must be a usable URL.** A base URL must carry an
+  explicit `http://` or `https://` scheme and a host. A value such as
+  `http:://127.0.0.1:11434` — a hand-typed "http://" with the colon
+  entered twice — is refused at the prompt, with the expected shape
+  shown, rather than saved and left to fail later. An empty base URL
+  stays legal: the providers normalise it to their own default
+  endpoint.
+
 ### `version` — Build Provenance and Update Check
 
 Every MPM binary carries its own build provenance, stamped in at link time.

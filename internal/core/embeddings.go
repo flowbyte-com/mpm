@@ -524,9 +524,21 @@ func validateEmbeddingProfile(p *config.Profile) error {
 	// (same wire shape, same auth header).
 	switch p.Provider {
 	case "ollama", "openai-compatible", "openai", "openrouter":
-		return nil
+	default:
+		return fmt.Errorf("embedding profile %q: provider %q is not implemented (supported: \"ollama\", \"openai\", \"openai-compatible\", \"openrouter\")", p.Name, p.Provider)
 	}
-	return fmt.Errorf("embedding profile %q: provider %q is not implemented (supported: \"ollama\", \"openai\", \"openai-compatible\", \"openrouter\")", p.Name, p.Provider)
+	// 2026-10-23 (HAL-9001): the endpoint is part of the profile's
+	// structural validity, not just a request-time detail. A
+	// malformed base URL ("http:://localhost:11434") used to be
+	// accepted here and only surfaced as an unreachable endpoint
+	// later. An empty base URL stays legal: the providers normalise
+	// it to their own default endpoint.
+	if p.BaseURL != "" {
+		if err := config.ValidateEndpointURL(p.BaseURL); err != nil {
+			return fmt.Errorf("embedding profile %q: base_url %w", p.Name, err)
+		}
+	}
+	return nil
 }
 
 func buildProvider(p *config.Profile) (EmbeddingProvider, error) {
