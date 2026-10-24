@@ -402,6 +402,11 @@ The reconciler's exit codes are therefore: **0** everything reconciled,
 **1** an advisory failure (a managed block did not converge — the install
 continues), **2** a required provisioning failure (the install stops).
 
+The root installer honours that contract without naming any host: a
+reconciler exit of **2** makes `install.sh` stop with *"required host
+provisioning failed — the installation is incomplete"* and exit **6**. An
+exit of **1** is a warning, and the install continues.
+
 ---
 
 ## 7. Report contract

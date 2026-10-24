@@ -677,6 +677,14 @@ be tied back to a revision:
 cat ~/.mpm/agent_installation/mpm-opencode/dist/mpm-build-provenance.json
 ```
 
+To confirm that the deployed payload was built from the deployed release:
+
+```bash
+cd ~/.mpm/agent_installation/mpm-opencode && ./install.sh --verify
+# verify: deployed payload was built from revision <sha>
+# verify: ok
+```
+
 To rebuild by hand while editing the plugin source:
 
 ```bash
