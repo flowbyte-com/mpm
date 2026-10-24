@@ -1302,6 +1302,134 @@ class OpenCodeInstallToolchainBootstrap(unittest.TestCase):
                          "a registration was written despite a failed build")
 
 
+class OpenCodePayloadRevisionContract(unittest.TestCase):
+    """The deployed payload must correspond to the deployed revision.
+
+    A release that touches no adapter file leaves `src/*.ts`
+    byte-identical, so a file modification time cannot tell a payload
+    built for the PREVIOUS revision from one built for this one. The
+    recorded build provenance is what makes the payload's revision
+    verifiable rather than assumed.
+
+    Without that check an upgrade silently deploys the old plugin: the
+    OpenCode host loads a payload from a revision that is not the
+    installed release, and every check that asks "does the deployed
+    artefact match the deployed source?" answers no.
+    """
+
+    OLD_REVISION = "1111111111111111111111111111111111111111"
+    NEW_REVISION = "2222222222222222222222222222222222222222"
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp(prefix="mpm-opencode-revision-"))
+        self.addCleanup(lambda: shutil.rmtree(self._tmp, ignore_errors=True))
+        self.home = self._tmp / "home"
+        self.home.mkdir()
+        self.bindir = self._tmp / "bin"
+        self.bindir.mkdir()
+
+    def _stage_adapter(self) -> Path:
+        """The adapter as it sits on a machine that already has it:
+        no node_modules and no dist/ — both are gitignored, so neither
+        is ever in a checkout."""
+        canonical = self.home / ".mpm" / "agent_installation" / "mpm-opencode"
+        shutil.copytree(
+            ADAPTER_DIR, canonical,
+            ignore=shutil.ignore_patterns("node_modules", "dist"),
+        )
+        _stage_sibling_scripts(canonical)
+        return canonical
+
+    def _install_fake_npm(self) -> None:
+        """A fake `npm`/`node` so the build is hermetic: the suite never
+        depends on what the host happens to have installed."""
+        npm = self.bindir / "npm"
+        npm.write_text(FAKE_NPM_BODY.replace("@@TSC_BODY@@", FAKE_TSC_BODY))
+        npm.chmod(0o755)
+        node = self.bindir / "node"
+        node.write_text("#!/usr/bin/env bash\nexit 0\n")
+        node.chmod(0o755)
+
+    def _run_install(self, canonical: Path, revision: str):
+        env = os.environ.copy()
+        env["HOME"] = str(self.home)
+        env.pop("MPM_WORKSPACE", None)
+        env["PATH"] = f"{self.bindir}:{BOOTSTRAP_PATH}"
+        env["MPM_TEST_NPM_LOG"] = str(self._tmp / "npm-calls.log")
+        env["MPM_BUILD_COMMIT"] = revision
+        return subprocess.run(
+            ["bash", str(canonical / "install.sh")],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+
+    def test_a_payload_built_from_another_revision_is_rebuilt(self):
+        """An upgrade must not ship the previous revision's payload."""
+        canonical = self._stage_adapter()
+        self._install_fake_npm()
+
+        # The first installation builds the payload and records it
+        # against the OLD revision.
+        first = self._run_install(canonical, self.OLD_REVISION)
+        self.assertEqual(first.returncode, 0, first.stderr)
+
+        payload = canonical / "dist" / "index.v2.js"
+        sidecar = canonical / "dist" / "mpm-build-provenance.json"
+        self.assertTrue(payload.exists(), "the payload was never built")
+        self.assertEqual(
+            json.loads(sidecar.read_text())["source_commit"], self.OLD_REVISION,
+            "the build provenance does not record the revision the payload "
+            "was built from",
+        )
+
+        # The source tree is unchanged, so ONLY the recorded revision
+        # distinguishes the two payloads. Mark the payload so a rebuild
+        # is observable, and make sure its modification time cannot
+        # trigger one — otherwise the test would pass for the wrong
+        # reason.
+        payload.write_text("// STALE PAYLOAD FROM THE PREVIOUS REVISION\n")
+        old_time = 1_600_000_000
+        for src in (canonical / "src").glob("*.ts"):
+            os.utime(src, (old_time, old_time))
+        os.utime(payload, (old_time + 60, old_time + 60))
+
+        second = self._run_install(canonical, self.NEW_REVISION)
+        self.assertEqual(second.returncode, 0, second.stderr)
+
+        self.assertNotIn(
+            "STALE PAYLOAD", payload.read_text(),
+            "the payload from the previous revision was deployed unchanged: "
+            "the OpenCode plugin would not match the installed release",
+        )
+        self.assertEqual(
+            json.loads(sidecar.read_text())["source_commit"], self.NEW_REVISION,
+            "the recorded build revision was not updated to the deployed one",
+        )
+
+    def test_a_payload_built_from_the_deployed_revision_is_left_alone(self):
+        """The rebuild must not fire on every installation."""
+        canonical = self._stage_adapter()
+        self._install_fake_npm()
+
+        first = self._run_install(canonical, self.NEW_REVISION)
+        self.assertEqual(first.returncode, 0, first.stderr)
+
+        payload = canonical / "dist" / "index.v2.js"
+        payload.write_text("// PAYLOAD FROM THE DEPLOYED REVISION\n")
+        old_time = 1_600_000_000
+        for src in (canonical / "src").glob("*.ts"):
+            os.utime(src, (old_time, old_time))
+        os.utime(payload, (old_time + 60, old_time + 60))
+
+        second = self._run_install(canonical, self.NEW_REVISION)
+        self.assertEqual(second.returncode, 0, second.stderr)
+
+        self.assertIn(
+            "PAYLOAD FROM THE DEPLOYED REVISION", payload.read_text(),
+            "the payload was rebuilt although it already matches the "
+            "deployed revision",
+        )
+
+
 class OpenCodeProvisioningThroughTheGenericReconciler(unittest.TestCase):
     """The installation path that was broken, exercised end to end.
 
