@@ -469,11 +469,20 @@ func runModelStep(opts onboardOptions, rep *onboardReport) {
 
 // reloadConfig re-reads configuration after the wizard ran, recording a
 // read failure as a report error rather than panicking.
+//
+// The failure is recorded in BOTH the report and the step's own error
+// list. The report is the pre-change one; after a run that saved, the
+// merge replaces the report's collected errors with the step's — so an
+// error recorded only in the report is dropped exactly when it matters
+// most. The step's list is the one that survives.
 func reloadConfig(rep *onboardReport) *config.Config {
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		rep.Errors = append(rep.Errors,
-			fmt.Sprintf("cannot re-read %s after configuration: %v", config.ConfigPath(), err))
+		entry := fmt.Sprintf("cannot re-read %s after configuration: %v", config.ConfigPath(), err)
+		rep.Errors = append(rep.Errors, entry)
+		if rep.ModelStep != nil {
+			rep.ModelStep.Errors = append(rep.ModelStep.Errors, entry)
+		}
 		return &config.Config{}
 	}
 	return cfg

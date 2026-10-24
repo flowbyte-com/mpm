@@ -421,6 +421,18 @@ func handleOnboard(args []string) int {
 // them, carrying them forward would report a resolved problem as an
 // open one. That is why modelStepOutcome keeps the step's entries
 // separately.
+//
+// NotVerified and NotAvailable are collected entries too, and they
+// are taken from `after` alone. They used to be carried forward
+// alongside the step's own findings, which was wrong for two reasons.
+// The step contributes nothing to them — the merge dedups on exact
+// string equality, so an entry whose text changed between the two
+// collections (an embedding model identity, for instance) survives
+// the carry-forward and appears TWICE under a banner that claims to
+// describe the current state. And the argument that applies to the
+// attention entries applies verbatim here: an entry that described
+// what onboarding could not check BEFORE the run is not evidence that
+// it still cannot check it AFTER.
 func mergeOnboardAfterState(after, step onboardReport) onboardReport {
 	out := after
 	out.Plan = step.Plan
@@ -434,9 +446,24 @@ func mergeOnboardAfterState(after, step onboardReport) onboardReport {
 		out.Skipped = mergeUniqueStrings(after.Skipped, step.ModelStep.Skipped)
 		out.Errors = mergeUniqueStrings(after.Errors, step.ModelStep.Errors)
 	}
-	out.NotVerified = mergeUniqueStrings(after.NotVerified, step.NotVerified)
-	out.NotAvailable = mergeUniqueStrings(after.NotAvailable, step.NotAvailable)
+	// NotVerified and NotAvailable come from `after` alone — see the
+	// note above. The mergeUniqueStrings call that used to carry the
+	// pre-change entries forward is deliberately absent.
+	out.NotVerified = nonNilStrings(out.NotVerified)
+	out.NotAvailable = nonNilStrings(out.NotAvailable)
 	return out
+}
+
+// nonNilStrings returns an empty slice for a nil input.
+//
+// The report contract says every collection is initialised to empty
+// (never nil) so a JSON consumer can iterate unconditionally. A merge
+// that took a zero-valued report would otherwise serialise `null`.
+func nonNilStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 // mergeUniqueStrings appends the entries of src to dst, skipping any
