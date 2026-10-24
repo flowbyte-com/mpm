@@ -918,41 +918,96 @@ class WordPressScenarioIsRetrievable(unittest.TestCase):
             shutil.rmtree(workspace, ignore_errors=True)
 
     @unittest.skipUnless(_has_mcp_binary(), "mpm binary not built; run `make build`")
-    def test_the_live_corpus_is_readable_without_being_written(self):
-        """Read-only confirmation that the document the agent claimed
-        was absent is present on this machine.
+    def test_a_fixture_corpus_is_readable_without_being_written(self):
+        """The reference corpus is read through a read-only connection.
 
-        Opened with mode=ro, so SQLite itself refuses a write rather
-        than trusting this test to behave. If the corpus is not where
-        the default layout says, the test says so and stops — it does
-        not fall back to creating one, which would turn a finding about
-        the operator's data into a fixture.
+        This test used to assert against the operator's LIVE ``~/.mpm``
+        corpus (issue #57). That made a unit test depend on host data: a
+        populated store with no WordPress chunk failed even though the
+        code was fine, while CI — with no store at all — skipped it. It
+        also meant the assertion could not distinguish a broken read path
+        from an ordinary fresh install.
+
+        The corpus is built in a disposable workspace instead, and the
+        SAME read-only contract is asserted on it: the chunk is present,
+        it is findable through the documented search command, and SQLite
+        itself refuses a write through the connection. That is a property
+        of the code and is reproducible on every host.
         """
-        candidates = [
-            Path(os.environ.get("MPM_WORKSPACE", "")) / "src" / "db" / "mpm.db",
-            Path.home() / ".mpm" / "src" / "db" / "mpm.db",
-        ]
-        db = next((c for c in candidates if c.is_file() and c.stat().st_size > 0), None)
-        if db is None:
-            self.skipTest(f"no populated MPM database among {candidates}")
-
-        uri = f"file:{db}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True)
+        workspace = Path(tempfile.mkdtemp(prefix="mpm-refdisc-ro-"))
         try:
-            hits = conn.execute(
-                "SELECT doc_id, chunk_index FROM reference_chunks "
-                "WHERE content LIKE ? LIMIT 5",
-                ("%wp_update_nav_menu_item%",),
-            ).fetchall()
-        finally:
-            conn.close()
+            doc = workspace / "wordpress-rest-api.md"
+            doc.write_text(
+                "# WordPress REST API Reference\n"
+                "\n"
+                "## Nav Menu\n"
+                "\n"
+                "### wp_update_nav_menu_item\n"
+                "\n"
+                "Updates a single nav menu item. Requires an assigned\n"
+                "menu, menu_item_id, and optionally menu_id.\n"
+                "\n"
+                "Returns the updated menu item object on success.\n",
+                encoding="utf-8",
+            )
+            env = {**os.environ, "MPM_WORKSPACE": str(workspace)}
+            added = subprocess.run(
+                [str(MPM_BIN), "reference", "add", str(doc), "--tag", "wordpress"],
+                capture_output=True, text=True, env=env, timeout=180,
+            )
+            self.assertEqual(
+                added.returncode, 0,
+                f"fixture ingest failed:\n{added.stdout}\n{added.stderr}",
+            )
 
-        self.assertTrue(
-            hits,
-            f"no reference chunk in {db} mentions wp_update_nav_menu_item. "
-            f"The original incident assumed this document was present; if "
-            f"it is not, the root cause is different and needs revisiting.",
-        )
+            db = workspace / "src" / "db" / "mpm.db"
+            self.assertTrue(
+                db.is_file() and db.stat().st_size > 0,
+                f"fixture ingest did not create a populated database at {db}",
+            )
+
+            uri = f"file:{db}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                hits = conn.execute(
+                    "SELECT doc_id, chunk_index FROM reference_chunks "
+                    "WHERE content LIKE ? LIMIT 5",
+                    ("%wp_update_nav_menu_item%",),
+                ).fetchall()
+                self.assertTrue(
+                    hits,
+                    "the fixture corpus was ingested but the chunk is not "
+                    "in reference_chunks — reference persistence is broken",
+                )
+                with self.assertRaises(sqlite3.OperationalError):
+                    conn.execute("CREATE TABLE readonly_probe (id INTEGER)")
+            finally:
+                conn.close()
+
+            # The documented retrieval path must find the same fixture.
+            searched = subprocess.run(
+                [str(MPM_BIN), "reference", "search", "wp_update_nav_menu_item"],
+                capture_output=True, text=True, env=env, timeout=180,
+            )
+            self.assertEqual(searched.returncode, 0, searched.stderr)
+            self.assertIn(
+                "wp_update_nav_menu_item", searched.stdout,
+                "`mpm reference search` did not find the function in the "
+                "fixture corpus — reference retrieval is broken",
+            )
+            # Negative control: the search must not return the document
+            # for a term the fixture does not contain.
+            absent = subprocess.run(
+                [str(MPM_BIN), "reference", "search", "zzz_not_in_fixture_zzz"],
+                capture_output=True, text=True, env=env, timeout=180,
+            )
+            self.assertNotIn(
+                "wp_update_nav_menu_item", absent.stdout,
+                "search returned the fixture for a term it does not contain, "
+                "so the positive assertion above would pass vacuously",
+            )
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
 
 
 def _function_body(source: str, func_name: str) -> str:
