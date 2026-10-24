@@ -1730,9 +1730,34 @@ func readSecretFromStdin() (string, error) {
 // branded catalogues; the catalogues are gone.
 
 // confirmPrompt reads a Y/n confirmation.
+//
+// EOF and read errors are CANCELLATION, never consent.
+//
+// The distinction matters because this prompt's default is YES. An
+// operator who presses Ctrl-D at the final "Save?" prompt is using
+// the standard "I'm done" gesture; treating that as an empty line
+// resolves the [Y/n] default to the affirmative and COMMITS the
+// configuration the operator was trying to abandon — while the
+// onboarding report records the configuration as saved.
+//
+// An ACTUAL empty line — the operator pressing Enter — is a complete
+// answer and keeps the documented [Y/n] default. A read error is
+// also cancellation: an unreadable stdin is not an answer.
+//
+// The rule is therefore simple: a confirmation is a terminated line,
+// or it is not a confirmation. An unterminated answer ("y" followed
+// by Ctrl-D) is an aborted line, not a consent.
+//
+// This prompt is the wizard's single commit point, so a cancellation
+// here must leave the configuration exactly as it was.
 func confirmPrompt(rw *bufio.Reader, label string) bool {
 	fmt.Printf("  %s [Y/n]: ", label)
-	raw, _ := rw.ReadString('\n')
+	raw, err := rw.ReadString('\n')
+	if err != nil {
+		// io.EOF (Ctrl-D), a closed stdin, a broken pipe — none of
+		// them is an answer, and none of them may be read as consent.
+		return false
+	}
 	raw = strings.TrimSpace(strings.ToLower(raw))
 	if raw == "" || raw == "y" || raw == "yes" {
 		return true

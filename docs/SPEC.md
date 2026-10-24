@@ -1932,6 +1932,14 @@ critic profile — mutates the in-memory configuration only. Declining
 the final save therefore leaves the operator's configuration exactly as
 it was, which is what "Aborted." means.
 
+**An absent answer is a decline, not a consent.** The confirmation
+prompt defaults to Yes on an empty line, so EOF and read errors are
+handled as cancellation: pressing Ctrl-D at the `Save?` prompt — the
+standard "I'm done" gesture — aborts the run and writes nothing.
+An operator's abort must never be recorded as an approved commit. An
+actual empty line (the operator pressing Enter) is a complete answer
+and keeps the `[Y/n]` default; a read error is not an answer at all.
+
 `mpm onboard` reports the same fact in two layers, because "the wizard
 ran" and "the configuration changed" are different facts:
 
