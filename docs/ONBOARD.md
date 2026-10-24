@@ -359,6 +359,54 @@ operator-selected hosts, that detection is read-only, and that the
 reconciliation guard itself is unchanged. This is a **documentation change
 only** — no behavioural change to the reconcile path.
 
+### 6.9 Provisioning a host artifact (2026-10-24)
+
+A managed block is *instruction*: it tells an agent how to reach MPM.
+Some hosts additionally need a **built artifact** before that instruction
+means anything — OpenCode's plugin payload is compiled TypeScript, and
+OpenCode resolves a directory plugin by a root-level `server.*` module
+and drops a directory without one **silently**.
+
+Until 2026-10-24 the root installer reached adapters only through the
+managed-block installer named in `reconcile.json`. For OpenCode that was
+the AGENTS.md writer, so the adapter's own `install.sh` — which builds,
+stages and registers the payload — was never invoked by any installation
+path. A fresh install therefore produced a registration and a managed
+block and **no payload**: the plugin loaded nothing, and every install
+reported success.
+
+The fix is a declarative `provision` block in the adapter's
+`reconcile.json`, dispatched by the same generic reconciler:
+
+```json
+"provision": {
+  "installer": "install.sh",
+  "installer_type": "bash",
+  "args": [],
+  "required": true,
+  "if": { "any_of": [ ...probes... ] }
+}
+```
+
+The rules that keep this inside the boundary above:
+
+| Rule | Reason |
+|---|---|
+| The `if` gate must be open | MPM never provisions a host the machine does not use — the §6.1 invariant, unchanged. |
+| The adapter's own `reconcile_if` gate still applies | A host MPM has not been wired into receives no artifact. |
+| `opt_in: true` adapters are never provisioned | Same rule as the managed block. |
+| `required: true` failures exit **2** | The install must not report success for a host wired to an artifact that does not exist. |
+| The root installer stays host-agnostic | It honours the reconciler's exit-code contract; it never names an adapter or a host. |
+
+The reconciler's exit codes are therefore: **0** everything reconciled,
+**1** an advisory failure (a managed block did not converge — the install
+continues), **2** a required provisioning failure (the install stops).
+
+The root installer honours that contract without naming any host: a
+reconciler exit of **2** makes `install.sh` stop with *"required host
+provisioning failed — the installation is incomplete"* and exit **6**. An
+exit of **1** is a warning, and the install continues.
+
 ---
 
 ## 7. Report contract

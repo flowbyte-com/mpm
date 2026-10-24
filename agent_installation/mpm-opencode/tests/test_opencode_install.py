@@ -27,12 +27,14 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # Derive the source-tree adapter directory from this test file's
 # location rather than a hardcoded author-machine absolute path. The
@@ -1036,6 +1038,656 @@ class OpenCodeInstallProvisioning(unittest.TestCase):
             str(workspace),
             " ".join(self._registered_entry()),
             "registration did not follow MPM_WORKSPACE",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Toolchain bootstrap
+# ---------------------------------------------------------------------------
+#
+# A machine that has never run the OpenCode adapter has no
+# node_modules/ — the directory is gitignored, so it is never in a
+# checkout, and `npm ci` has never run there. Before this contract,
+# build_dist() found no compiler and died with "run 'npm ci'", so the
+# only way to a working OpenCode plugin was a manual, out-of-band
+# compile step that the installer never performed and never verified.
+#
+# The installer now obtains its own build dependencies. The tests below
+# pin that, and pin the diagnostics for the cases where it cannot:
+# a machine with no Node, a registry that cannot be reached, and a
+# compiler that fails.
+#
+# The stubs are hermetic: a fake `npm` on PATH stands in for the real
+# one, and the tests that need a toolchain-free host build their PATH
+# so that the real node/npm cannot be resolved at all.
+
+# The PATH every test in this section runs with: coreutils and python3
+# (the JSONC migration needs python3). It is used AFTER the test's own
+# bin dir, so the fake npm/node always win.
+#
+# It is NOT sufficient on its own to create a "no node" scenario: it
+# contains the standard directories, and a host that keeps node in one
+# of them (a CI image installs Node.js in /usr/local/bin) satisfies the
+# installer's `command -v node`. Use _path_without_tools() for that.
+BOOTSTRAP_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+# A PATH from which the named tools provably cannot be resolved.
+#
+# "No Node on the machine at all" is a SCENARIO, not an ambient
+# property: it can only be created by controlling PATH completely.
+# BOOTSTRAP_PATH alone does not do that — it ASSUMES the host keeps
+# node outside the standard directories. That assumption holds for a
+# version-manager install and fails for a CI image, which ships node
+# in /usr/local/bin. There the installer found node, built the payload,
+# registered the plugin and exited 0, and the missing-Node test failed
+# on `assertNotEqual(result.returncode, 0)` while proving nothing
+# (CI run 40087139539).
+#
+# So the PATH is rebuilt as ONE directory of symlinks to everything the
+# ambient PATH can reach, minus the named tools: coreutils and python3
+# resolve exactly as before, and the excluded tools cannot resolve at
+# all — wherever this host happens to keep them.
+def _path_without_tools(tools: tuple[str, ...], into: Path) -> str:
+    """Build a PATH in which the named tools cannot be resolved.
+
+    `into` is a directory the test owns; the returned PATH is a single
+    directory of symlinks to the ambient PATH's executables, minus the
+    named tools.
+    """
+    excluded = set(tools)
+    shadow = into / ("shadow-" + "-".join(sorted(excluded)))
+    shadow.mkdir(parents=True, exist_ok=True)
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory or not os.path.isdir(directory):
+            continue
+        try:
+            with os.scandir(directory) as scan:
+                entries = sorted(scan, key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name in excluded:
+                continue
+            link = shadow / entry.name
+            if link.is_symlink() or link.exists():
+                continue
+            try:
+                if not entry.is_file():
+                    continue
+                os.symlink(entry.path, link)
+            except OSError:
+                continue
+    return str(shadow)
+
+# A fake `npm` that stands in for the real one. `npm ci` populates the
+# adapter's devDependencies (typescript + @types/node) from the
+# committed package-lock.json. The stub records every invocation so a
+# test can assert that npm was NOT called when it was not needed.
+FAKE_NPM_BODY = """#!/usr/bin/env bash
+# fake npm for mpm-opencode toolchain-bootstrap tests.
+set -u
+echo "$*" >> "${MPM_TEST_NPM_LOG:?}"
+if [ "${1:-}" != "ci" ]; then
+  echo "fake npm: unsupported command '$*'" >&2
+  exit 64
+fi
+if [ "${MPM_TEST_NPM_FAIL:-0}" != "0" ]; then
+  echo "npm error code ENOTFOUND" >&2
+  echo "npm error network request to https://registry.npmjs.org/typescript failed" >&2
+  exit 1
+fi
+mkdir -p node_modules/.bin
+if [ "${MPM_TEST_TSC_FAIL:-0}" != "0" ]; then
+  cat > node_modules/.bin/tsc <<'MPM_TEST_TSC_FAIL_EOF'
+#!/usr/bin/env bash
+echo "tsc: compile error" >&2
+exit 2
+MPM_TEST_TSC_FAIL_EOF
+else
+  cat > node_modules/.bin/tsc <<'MPM_TEST_TSC_EOF'
+@@TSC_BODY@@MPM_TEST_TSC_EOF
+fi
+chmod 0755 node_modules/.bin/tsc
+echo "added 3 packages"
+"""
+
+
+class OpenCodeInstallToolchainBootstrap(unittest.TestCase):
+    """The installer must obtain its own build dependencies.
+
+    The contract under test: a normal installation produces a working
+    OpenCode plugin with no manual compilation step, and when it cannot
+    it says exactly what is missing instead of reporting success.
+    """
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp(prefix="mpm-opencode-bootstrap-"))
+        self.addCleanup(lambda: shutil.rmtree(self._tmp, ignore_errors=True))
+        self.home = self._tmp / "home"
+        self.home.mkdir()
+        self.bindir = self._tmp / "bin"
+        self.bindir.mkdir()
+        self.npm_log = self._tmp / "npm-calls.log"
+
+    def _stage_adapter_without_toolchain(self) -> Path:
+        """Stage the adapter with NO node_modules and NO dist/.
+
+        This is the state of a machine that has never run the adapter:
+        node_modules/ and dist/ are gitignored, so neither is ever in a
+        checkout.
+        """
+        canonical = self.home / ".mpm" / "agent_installation" / "mpm-opencode"
+        shutil.copytree(
+            ADAPTER_DIR, canonical,
+            ignore=shutil.ignore_patterns("node_modules", "dist"),
+        )
+        _stage_sibling_scripts(canonical)
+        return canonical
+
+    def _install_fake_npm(self, *, fail: bool = False) -> None:
+        body = FAKE_NPM_BODY.replace("@@TSC_BODY@@", FAKE_TSC_BODY)
+        npm = self.bindir / "npm"
+        npm.write_text(body)
+        npm.chmod(0o755)
+        # A fake `node` so the installer sees a toolchain at all; the
+        # real one is never invoked (npm is a stub, tsc is a stub).
+        node = self.bindir / "node"
+        node.write_text("#!/usr/bin/env bash\nexit 0\n")
+        node.chmod(0o755)
+        self._npm_fail = fail
+
+    def _run_install(self, canonical: Path, args=None):
+        env = os.environ.copy()
+        env["HOME"] = str(self.home)
+        env.pop("MPM_WORKSPACE", None)
+        env["PATH"] = f"{self.bindir}:{BOOTSTRAP_PATH}"
+        env["MPM_TEST_NPM_LOG"] = str(self.npm_log)
+        if getattr(self, "_npm_fail", False):
+            env["MPM_TEST_NPM_FAIL"] = "1"
+        if getattr(self, "_tsc_fail", False):
+            env["MPM_TEST_TSC_FAIL"] = "1"
+        return subprocess.run(
+            ["bash", str(canonical / "install.sh"), *(args or [])],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+
+    def _npm_calls(self) -> str:
+        if not self.npm_log.exists():
+            return ""
+        return self.npm_log.read_text()
+
+    # -- the deployment gap this closes --
+
+    def test_missing_toolchain_is_bootstrapped_by_the_installer(self):
+        """No node_modules, no dist/ — and the install still produces a
+        usable plugin, with no manual compilation step."""
+        canonical = self._stage_adapter_without_toolchain()
+        self._install_fake_npm()
+
+        result = self._run_install(canonical)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ci", self._npm_calls(),
+                      "the installer never obtained its build dependencies")
+        self.assertTrue(
+            (canonical / "dist" / "index.v2.js").exists(),
+            "the plugin payload was not compiled",
+        )
+        # The plugin is usable: the registered package holds the root
+        # entry AND the payload it re-exports.
+        registered = self.home / ".mpm" / "agent_installation" / "mpm-opencode"
+        for rel in ("server.js", "dist/index.v2.js"):
+            self.assertTrue((registered / rel).exists(),
+                            f"registered package is missing {rel}")
+
+    def test_bootstrap_uses_npm_ci_not_an_offline_cache(self):
+        """A fresh machine has no npm cache, so the dependency install
+        must be allowed to reach the registry."""
+        canonical = self._stage_adapter_without_toolchain()
+        self._install_fake_npm()
+
+        self.assertEqual(self._run_install(canonical).returncode, 0)
+
+        calls = self._npm_calls()
+        self.assertIn("ci", calls)
+        self.assertNotIn("--offline", calls,
+                         "the installer assumed a populated npm cache")
+
+    def test_toolchain_is_not_reinstalled_when_the_compiler_is_present(self):
+        """A repeat install must not reach the network at all."""
+        canonical = self._stage_adapter_without_toolchain()
+        self._install_fake_npm()
+        self.assertEqual(self._run_install(canonical).returncode, 0)
+        self.npm_log.unlink(missing_ok=True)
+
+        self.assertEqual(self._run_install(canonical).returncode, 0)
+
+        self.assertEqual(
+            self._npm_calls(), "",
+            "npm was invoked again although the compiler was already present",
+        )
+
+    # -- diagnostics: the failure modes must be named, not swallowed --
+    #
+    # Each diagnostic must name ITS OWN cause. The pre-fix installer
+    # failed every one of these with the single generic message
+    # "TypeScript compiler not found ... run 'npm ci'", which mentions
+    # both "node" and "npm" while saying nothing about the real cause.
+    # So each assertion below also requires that the generic message is
+    # ABSENT — otherwise the test would pass against the very defect it
+    # is meant to pin.
+
+    def test_missing_node_is_reported_and_registers_nothing(self):
+        """No Node on the machine at all."""
+        canonical = self._stage_adapter_without_toolchain()
+        env = os.environ.copy()
+        env["HOME"] = str(self.home)
+        env.pop("MPM_WORKSPACE", None)
+        # No node and no npm on PATH — by construction, not by an
+        # assumption about where this host keeps them.
+        env["PATH"] = _path_without_tools(("node", "npm"), self._tmp)
+        self.assertIsNone(
+            shutil.which("node", path=env["PATH"]),
+            "the missing-Node scenario was not created: node is still "
+            "reachable through this PATH",
+        )
+        result = subprocess.run(
+            ["bash", str(canonical / "install.sh")],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+        output = result.stderr + result.stdout
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(
+            output.lower(),
+            r"node",
+            "the diagnostic does not name the missing prerequisite",
+        )
+        self.assertNotIn(
+            "TypeScript compiler not found", output,
+            "the diagnostic blames the compiler instead of the absent "
+            "Node runtime",
+        )
+        cfg = self.home / ".config" / "opencode" / "opencode.jsonc"
+        self.assertFalse(cfg.exists(),
+                         "a registration was written without a payload")
+
+    def test_a_host_installed_node_does_not_defeat_the_scenario(self):
+        """A host that ships node in a standard directory must not
+        turn the missing-Node scenario into a successful install.
+
+        CI runners do exactly that: the image installs Node.js in
+        /usr/local/bin, which is on every standard PATH. A scenario
+        built by assuming the host keeps node elsewhere is not a
+        scenario at all — the installer finds node, builds the payload,
+        registers the plugin and exits 0, so the test fails while
+        proving nothing (CI run 40087139539).
+        """
+        decoy = self._tmp / "decoy-bin"
+        decoy.mkdir()
+        node = decoy / "node"
+        node.write_text("#!/bin/sh\nexit 0\n")
+        node.chmod(0o755)
+        npm = decoy / "npm"
+        npm.write_text("#!/bin/sh\nexit 0\n")
+        npm.chmod(0o755)
+
+        canonical = self._stage_adapter_without_toolchain()
+        ambient = f"{decoy}{os.pathsep}{os.environ.get('PATH', '')}"
+        with mock.patch.dict(os.environ, {"PATH": ambient}):
+            env = os.environ.copy()
+            env["HOME"] = str(self.home)
+            env.pop("MPM_WORKSPACE", None)
+            env["PATH"] = _path_without_tools(("node", "npm"), self._tmp)
+            self.assertIsNone(
+                shutil.which("node", path=env["PATH"]),
+                "the host's node is still reachable through this PATH",
+            )
+            result = subprocess.run(
+                ["bash", str(canonical / "install.sh")],
+                capture_output=True, text=True, timeout=120, env=env,
+            )
+        output = result.stderr + result.stdout
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(
+            output.lower(),
+            r"node",
+            "the diagnostic does not name the missing prerequisite",
+        )
+        cfg = self.home / ".config" / "opencode" / "opencode.jsonc"
+        self.assertFalse(cfg.exists(),
+                         "a registration was written without a payload")
+
+    def test_unreachable_registry_is_reported_and_registers_nothing(self):
+        """The dependency install fails (no network, no cache)."""
+        canonical = self._stage_adapter_without_toolchain()
+        self._install_fake_npm(fail=True)
+
+        result = self._run_install(canonical)
+        output = result.stderr + result.stdout
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(
+            output.lower(),
+            r"npm",
+            "the diagnostic does not name the failed dependency install",
+        )
+        self.assertNotIn(
+            "TypeScript compiler not found", output,
+            "the diagnostic blames the compiler instead of the failed "
+            "dependency install",
+        )
+        cfg = self.home / ".config" / "opencode" / "opencode.jsonc"
+        self.assertFalse(cfg.exists(),
+                         "a registration was written without a payload")
+
+    def test_compile_failure_is_reported_and_registers_nothing(self):
+        """The dependencies installed but the compiler fails."""
+        canonical = self._stage_adapter_without_toolchain()
+        self._install_fake_npm()
+        # The compiler npm installs is a failing one.
+        self._tsc_fail = True
+
+        result = self._run_install(canonical)
+        output = result.stderr + result.stdout
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(
+            output.lower(),
+            r"(compile|tsc)",
+            "the diagnostic does not name the failed compilation",
+        )
+        self.assertNotIn(
+            "TypeScript compiler not found", output,
+            "the diagnostic blames a missing compiler instead of the "
+            "compiler that ran and failed",
+        )
+        cfg = self.home / ".config" / "opencode" / "opencode.jsonc"
+        self.assertFalse(cfg.exists(),
+                         "a registration was written despite a failed build")
+
+
+class OpenCodePayloadRevisionContract(unittest.TestCase):
+    """The deployed payload must correspond to the deployed revision.
+
+    A release that touches no adapter file leaves `src/*.ts`
+    byte-identical, so a file modification time cannot tell a payload
+    built for the PREVIOUS revision from one built for this one. The
+    recorded build provenance is what makes the payload's revision
+    verifiable rather than assumed.
+
+    Without that check an upgrade silently deploys the old plugin: the
+    OpenCode host loads a payload from a revision that is not the
+    installed release, and every check that asks "does the deployed
+    artefact match the deployed source?" answers no.
+    """
+
+    OLD_REVISION = "1111111111111111111111111111111111111111"
+    NEW_REVISION = "2222222222222222222222222222222222222222"
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp(prefix="mpm-opencode-revision-"))
+        self.addCleanup(lambda: shutil.rmtree(self._tmp, ignore_errors=True))
+        self.home = self._tmp / "home"
+        self.home.mkdir()
+        self.bindir = self._tmp / "bin"
+        self.bindir.mkdir()
+
+    def _stage_adapter(self) -> Path:
+        """The adapter as it sits on a machine that already has it:
+        no node_modules and no dist/ — both are gitignored, so neither
+        is ever in a checkout."""
+        canonical = self.home / ".mpm" / "agent_installation" / "mpm-opencode"
+        shutil.copytree(
+            ADAPTER_DIR, canonical,
+            ignore=shutil.ignore_patterns("node_modules", "dist"),
+        )
+        _stage_sibling_scripts(canonical)
+        return canonical
+
+    def _install_fake_npm(self) -> None:
+        """A fake `npm`/`node` so the build is hermetic: the suite never
+        depends on what the host happens to have installed."""
+        npm = self.bindir / "npm"
+        npm.write_text(FAKE_NPM_BODY.replace("@@TSC_BODY@@", FAKE_TSC_BODY))
+        npm.chmod(0o755)
+        node = self.bindir / "node"
+        node.write_text("#!/usr/bin/env bash\nexit 0\n")
+        node.chmod(0o755)
+
+    def _run_install(self, canonical: Path, revision: str):
+        env = os.environ.copy()
+        env["HOME"] = str(self.home)
+        env.pop("MPM_WORKSPACE", None)
+        env["PATH"] = f"{self.bindir}:{BOOTSTRAP_PATH}"
+        env["MPM_TEST_NPM_LOG"] = str(self._tmp / "npm-calls.log")
+        env["MPM_BUILD_COMMIT"] = revision
+        return subprocess.run(
+            ["bash", str(canonical / "install.sh")],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+
+    def test_a_payload_built_from_another_revision_is_rebuilt(self):
+        """An upgrade must not ship the previous revision's payload."""
+        canonical = self._stage_adapter()
+        self._install_fake_npm()
+
+        # The first installation builds the payload and records it
+        # against the OLD revision.
+        first = self._run_install(canonical, self.OLD_REVISION)
+        self.assertEqual(first.returncode, 0, first.stderr)
+
+        payload = canonical / "dist" / "index.v2.js"
+        sidecar = canonical / "dist" / "mpm-build-provenance.json"
+        self.assertTrue(payload.exists(), "the payload was never built")
+        self.assertEqual(
+            json.loads(sidecar.read_text())["source_commit"], self.OLD_REVISION,
+            "the build provenance does not record the revision the payload "
+            "was built from",
+        )
+
+        # The source tree is unchanged, so ONLY the recorded revision
+        # distinguishes the two payloads. Mark the payload so a rebuild
+        # is observable, and make sure its modification time cannot
+        # trigger one — otherwise the test would pass for the wrong
+        # reason.
+        payload.write_text("// STALE PAYLOAD FROM THE PREVIOUS REVISION\n")
+        old_time = 1_600_000_000
+        for src in (canonical / "src").glob("*.ts"):
+            os.utime(src, (old_time, old_time))
+        os.utime(payload, (old_time + 60, old_time + 60))
+
+        second = self._run_install(canonical, self.NEW_REVISION)
+        self.assertEqual(second.returncode, 0, second.stderr)
+
+        self.assertNotIn(
+            "STALE PAYLOAD", payload.read_text(),
+            "the payload from the previous revision was deployed unchanged: "
+            "the OpenCode plugin would not match the installed release",
+        )
+        self.assertEqual(
+            json.loads(sidecar.read_text())["source_commit"], self.NEW_REVISION,
+            "the recorded build revision was not updated to the deployed one",
+        )
+
+    def test_a_payload_built_from_the_deployed_revision_is_left_alone(self):
+        """The rebuild must not fire on every installation."""
+        canonical = self._stage_adapter()
+        self._install_fake_npm()
+
+        first = self._run_install(canonical, self.NEW_REVISION)
+        self.assertEqual(first.returncode, 0, first.stderr)
+
+        payload = canonical / "dist" / "index.v2.js"
+        payload.write_text("// PAYLOAD FROM THE DEPLOYED REVISION\n")
+        old_time = 1_600_000_000
+        for src in (canonical / "src").glob("*.ts"):
+            os.utime(src, (old_time, old_time))
+        os.utime(payload, (old_time + 60, old_time + 60))
+
+        second = self._run_install(canonical, self.NEW_REVISION)
+        self.assertEqual(second.returncode, 0, second.stderr)
+
+        self.assertIn(
+            "PAYLOAD FROM THE DEPLOYED REVISION", payload.read_text(),
+            "the payload was rebuilt although it already matches the "
+            "deployed revision",
+        )
+
+
+class OpenCodeProvisioningThroughTheGenericReconciler(unittest.TestCase):
+    """The installation path that was broken, exercised end to end.
+
+    Until 2026-10-24 the root installer reached adapters ONLY through
+    the managed-block installer named in `reconcile.json`. For OpenCode
+    that was `scripts/install_agents_instructions.py` — which writes
+    ~/.config/opencode/AGENTS.md and nothing else. The adapter's own
+    install.sh, which builds the payload, stages it and registers it,
+    was never invoked by ANY installation path.
+
+    The consequence on a real machine: a fresh install produced a
+    registration and a managed block, and NO plugin payload. OpenCode
+    resolves a directory plugin by a root-level server.*/index.* module
+    and drops a directory without one SILENTLY, so the plugin loaded
+    nothing while every install reported success.
+
+    These tests drive the REAL generic reconciler against the REAL
+    adapter in a hermetic HOME: no manual compilation, no manual npm
+    step, and a plugin that is actually loadable afterwards.
+    """
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp(prefix="mpm-opencode-reconcile-"))
+        self.addCleanup(lambda: shutil.rmtree(self._tmp, ignore_errors=True))
+        self.home = self._tmp / "home"
+        self.home.mkdir()
+        self.bindir = self._tmp / "bin"
+        self.bindir.mkdir()
+        self.npm_log = self._tmp / "npm-calls.log"
+        # The runtime root is the same tree as the source in a live
+        # install (~/.mpm IS the checkout), so the sandbox mirrors it.
+        self.runtime_root = self.home / ".mpm"
+        self.adapter = self.runtime_root / "agent_installation" / "mpm-opencode"
+        shutil.copytree(
+            ADAPTER_DIR,
+            self.adapter,
+            ignore=shutil.ignore_patterns("node_modules", "dist"),
+        )
+        _stage_sibling_scripts(self.adapter)
+        # The reconciler discovers adapters as a sibling of scripts/.
+        self.reconciler = (
+            self.adapter.parent / "scripts" / "reconcile_managed_blocks.py"
+        )
+        # OpenCode is present on this machine (the gate the manifest
+        # declares): ~/.config/opencode exists.
+        (self.home / ".config" / "opencode").mkdir(parents=True)
+
+    def _install_fake_toolchain(self) -> None:
+        npm = self.bindir / "npm"
+        npm.write_text(
+            FAKE_NPM_BODY.replace("@@TSC_BODY@@", FAKE_TSC_BODY)
+        )
+        npm.chmod(0o755)
+        node = self.bindir / "node"
+        node.write_text("#!/usr/bin/env bash\nexit 0\n")
+        node.chmod(0o755)
+
+    def _run_reconciler(self):
+        env = os.environ.copy()
+        env["HOME"] = str(self.home)
+        env.pop("MPM_WORKSPACE", None)
+        env["PATH"] = f"{self.bindir}:{BOOTSTRAP_PATH}"
+        env["MPM_TEST_NPM_LOG"] = str(self.npm_log)
+        return subprocess.run(
+            [sys.executable, str(self.reconciler), "--home", str(self.home)],
+            capture_output=True, text=True, timeout=180, env=env,
+        )
+
+    def test_the_installation_path_provisions_a_usable_plugin(self):
+        """No manual compilation, no manual npm step: the installation
+        path produces a plugin OpenCode can actually load."""
+        self._install_fake_toolchain()
+
+        result = self._run_reconciler()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        # The payload was compiled by the installer itself.
+        self.assertIn(
+            "ci",
+            (self.npm_log.read_text() if self.npm_log.exists() else ""),
+            "the installer never obtained its build dependencies",
+        )
+        payload = self.adapter / "dist" / "index.v2.js"
+        self.assertTrue(payload.exists(), "the plugin payload was not compiled")
+        self.assertTrue(payload.stat().st_size > 0, "the payload is empty")
+
+        # The registration points at the package directory, and that
+        # package holds BOTH the root entry OpenCode resolves and the
+        # payload behind it. A directory without server.js is dropped
+        # silently by the loader.
+        registered = self.adapter
+        self.assertTrue(
+            (registered / "server.js").exists(),
+            "the registered package has no root entry",
+        )
+        self.assertTrue(
+            (registered / "dist" / "index.v2.js").exists(),
+            "the registered package has no payload",
+        )
+
+        config = self.home / ".config" / "opencode" / "opencode.jsonc"
+        self.assertTrue(config.exists(), "no registration was written")
+        self.assertIn(
+            f"file://{registered}",
+            config.read_text(),
+            "the registration does not name the package directory",
+        )
+
+    def test_the_installation_path_records_the_build_provenance(self):
+        """The deployed payload is tied to a source revision."""
+        self._install_fake_toolchain()
+
+        result = self._run_reconciler()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sidecar = self.adapter / "dist" / "mpm-build-provenance.json"
+        self.assertTrue(
+            sidecar.exists(),
+            "the deployed payload carries no build provenance",
+        )
+        data = json.loads(sidecar.read_text())
+        self.assertIn("source_commit", data)
+        self.assertIn("payload_sha256", data)
+        self.assertEqual(
+            data["payload_sha256"],
+            hashlib.sha256(
+                (self.adapter / "dist" / "index.v2.js").read_bytes()
+            ).hexdigest(),
+            "the recorded hash is not the deployed payload's hash",
+        )
+
+    def test_the_manifest_declares_the_adapters_own_installer(self):
+        """The provision block must name the adapter's own installer —
+        the one that builds, stages and registers."""
+        manifest = json.loads(
+            (self.adapter / "reconcile.json").read_text()
+        )
+        provision = manifest.get("provision")
+        self.assertIsNotNone(
+            provision,
+            "the OpenCode manifest declares no provisioning step",
+        )
+        self.assertEqual(provision.get("installer"), "install.sh")
+        self.assertTrue(
+            (self.adapter / "install.sh").is_file(),
+            "the named provisioner does not exist",
+        )
+        self.assertTrue(
+            provision.get("required"),
+            "a provisioning failure would not be reported as a failure",
         )
 
 
