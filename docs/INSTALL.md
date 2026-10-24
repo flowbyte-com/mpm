@@ -228,12 +228,17 @@ Two failure classes are distinguished, and the distinction is load-bearing:
 
 - **Fatal.** The install aborts and exits non-zero, naming what failed — a
   failed validation, a service that would not start, a refused or rolled-back
-  binary promotion. The message is always printed.
+  binary promotion, or a host reconciliation that could not be performed at all
+  (the reconciler itself failed, so the host integration state is unknown). The
+  message is always printed.
 - **Non-fatal.** A host-adapter reconciliation failure is a *warning*. One
   broken adapter (a host whose managed-block installer fails) does not abort
-  the install: the installer says so, names the adapter, and carries on to
-  validation and the completion banner. Retry it later with that adapter's own
-  installer, or with `make refresh-installed`.
+  the install: the installer says so and carries on to validation and the
+  completion banner. The reconciler's per-adapter lines, which name the adapter,
+  are written to **stdout**; the installer's own warning is on stderr. Capture
+  both streams (`./install.sh 2>&1 | tee install.log`) to see which adapter
+  failed. Retry it later with that adapter's own installer, or with
+  `make refresh-installed`.
 
 So: an install whose output ends without `INSTALL COMPLETE` did not complete.
 Read the error immediately above the end of the output — it is there.

@@ -6,7 +6,7 @@ Background
 ----------
 
 `agent_installation/scripts/reconcile_managed_blocks.py` distinguishes
-two failure modes:
+three failure modes:
 
   rc=1  advisory — a managed block did not converge. One broken
         adapter must not abort an install for every other host.
@@ -14,6 +14,10 @@ two failure modes:
         builds (a compiled plugin payload and its registration) could
         not be produced. The install MUST NOT report success: the
         host is wired to an artifact that does not exist.
+  rc=70 the reconciler itself failed (an uncaught internal error).
+        The host integration state is unknown, so the install MUST NOT
+        report success. Distinct from rc=1 so that the reconciler's own
+        crash is never mistaken for an adapter failure.
 
 The root installer stays host-agnostic — it never names an adapter or
 a host — so it cannot know WHICH host failed. It honours the
@@ -96,12 +100,13 @@ class ReconcileExitContract(unittest.TestCase):
                 """)
         )
 
-    def _drive(self, body: str) -> subprocess.CompletedProcess:
+    def _drive(self, body: str, *, errexit: bool = False) -> subprocess.CompletedProcess:
         driver = self.project / "_drive.sh"
+        shell_opts = "set -euo pipefail" if errexit else "set -uo pipefail"
         driver.write_text(
             textwrap.dedent(f"""\
                 #!/usr/bin/env bash
-                set -uo pipefail
+                {shell_opts}
                 export PROJECT_ROOT={self.project}
                 source {self.project}/install.sh.lib
                 export HOME={self.home}
@@ -180,6 +185,90 @@ class ReconcileExitContract(unittest.TestCase):
             "die",
             block,
             "mode_install does not stop on a required provisioning failure",
+        )
+
+
+    def test_phase_reports_internal_error_code(self):
+        """A crash in the reconciler is neither an adapter failure (1)
+        nor a required provisioning failure (2). It has its own code."""
+        self._stage_reconciler(70)
+        result = self._drive("phase_agent_reconcile")
+        self.assertEqual(
+            result.returncode, 70, result.stdout + result.stderr
+        )
+
+    def test_phase_does_not_swallow_provenance_failure_under_errexit(self):
+        """The `phase || rc=$?` capture idiom disables errexit inside the
+        function body. A failing inner step must be guarded explicitly,
+        not rely on the caller's suppression."""
+        self._stage_reconciler(0)
+        result = self._drive(
+            'export_build_provenance() { return 7; }; '
+            'rc=0; phase_agent_reconcile || rc=$?; echo "rc=$rc"',
+            errexit=True,
+        )
+        self.assertIn(
+            "rc=7", result.stdout,
+            "a failing export_build_provenance was swallowed because the "
+            "phase relied on the caller's errexit suppression:\n"
+            + result.stdout + result.stderr,
+        )
+
+    def test_internal_error_stops_the_install(self):
+        """rc=70 must NOT be treated as an advisory warning."""
+        self._stage_reconciler(70)
+        result = self._drive(
+            'rc=0; phase_agent_reconcile || rc=$?; '
+            'outcome=0; reconcile_outcome "$rc" || outcome=$?; '
+            'echo "outcome=$outcome"'
+        )
+        self.assertIn("outcome=70", result.stdout)
+        self.assertNotIn("outcome=0", result.stdout)
+
+    def test_mode_reconcile_uses_a_distinct_exit_code(self):
+        """`--reconcile` must not exit 1, which the usage table reserves
+        for "preflight failed"."""
+        for reconciler_rc in (1, 2, 70):
+            with self.subTest(reconciler_rc=reconciler_rc):
+                self._stage_reconciler(reconciler_rc)
+                result = self._drive(
+                    'preflight() { return 0; }; '
+                    'rc=0; mode_reconcile || rc=$?; echo "mode_rc=$rc"'
+                )
+                self.assertIn(
+                    "mode_rc=6", result.stdout,
+                    f"reconciler rc={reconciler_rc} did not map to the "
+                    f"dedicated reconciliation-failed code 6:\n"
+                    + result.stdout + result.stderr,
+                )
+                self.assertIn("RECONCILE COMPLETE", result.stderr)
+
+    def test_mode_reconcile_still_exits_zero_on_success(self):
+        self._stage_reconciler(0)
+        result = self._drive(
+            'preflight() { return 0; }; '
+            'rc=0; mode_reconcile || rc=$?; echo "mode_rc=$rc"'
+        )
+        self.assertIn("mode_rc=0", result.stdout)
+
+
+    def test_install_docs_do_not_claim_stderr_names_the_adapter(self):
+        """Issue #72 item 3: the per-adapter lines are stdout, not stderr.
+
+        The installer's own messages go to stderr, but the reconciler's
+        per-adapter lines — the only place an adapter is named — are
+        printed to stdout. The docs used to say the installer "names the
+        adapter" while recommending stderr-only capture, which could not
+        show it.
+        """
+        doc = (REPO_ROOT / "docs" / "INSTALL.md").read_text(encoding="utf-8")
+        self.assertNotIn(
+            "installer says so, names the adapter", doc,
+            "the docs claim the stderr message names the adapter; it does not",
+        )
+        self.assertIn(
+            "written to **stdout**", doc,
+            "the docs must say where the adapter-naming lines are written",
         )
 
 

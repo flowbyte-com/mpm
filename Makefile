@@ -372,13 +372,19 @@ install: build refresh-installed install-runtime-assets
 	  fi; \
 	  echo "==> deploying (all five land as one transaction; a failure restores the previous set)"; \
 	  . scripts/lib/binary_transaction.sh; \
-	  mpm_promote_binaries "$(BUILD_DIR)" "$(PREFIX)/bin"; \
-	  _rc=$$?; \
+	  _rc=0; \
+	  mpm_promote_binaries "$(BUILD_DIR)" "$(PREFIX)/bin" || _rc=$$?; \
 	  if [ $$_rc -ne 0 ]; then \
 	    echo "    FAIL: transactional binary promotion did not complete (rc=$$_rc)." >&2; \
-	    echo "    See the error above: on a promotion failure the previous binary set" >&2; \
-	    echo "    has been restored and $(PREFIX)/bin/ matches its pre-install state" >&2; \
-	    echo "    exactly. Nothing is deployed; re-run make install." >&2; \
+	    if [ $$_rc -eq 11 ]; then \
+	      echo "    The rollback was INCOMPLETE: the previous binary set is NOT fully" >&2; \
+	      echo "    restored. The recovery material and the manual command are named" >&2; \
+	      echo "    above; do NOT delete the rollback directory. Nothing is deployed." >&2; \
+	    else \
+	      echo "    See the error above: the previous binary set has been restored and" >&2; \
+	      echo "    $(PREFIX)/bin/ matches its pre-install state exactly. Nothing is" >&2; \
+	      echo "    deployed; re-run make install." >&2; \
+	    fi; \
 	    exit 1; \
 	  fi; \
 	  echo "    (deployed $(BUILD_DIR)/ to $(PREFIX)/bin/)"'
