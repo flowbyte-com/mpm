@@ -265,7 +265,8 @@ class _InstallDriver(unittest.TestCase):
     # ------------------------------------------------------------------
     def _drive(self, project_root: Path, prefix: Path, data_root: Path,
                phases: str = "phase_binaries",
-               build_dir: Path | None = None) -> dict:
+               build_dir: Path | None = None,
+               env_extra: dict[str, str] | None = None) -> dict:
         """Run the named install.sh phases in a subprocess with
         controlled env, and return stdout/stderr/returncode.
 
@@ -301,6 +302,8 @@ class _InstallDriver(unittest.TestCase):
         # so the readonly LOCAL_BIN resolves inside the temp tree.
         env = os.environ.copy()
         env["HOME"] = str(self.home)
+        if env_extra:
+            env.update(env_extra)
         result = subprocess.run(
             ["bash", "--noprofile", "--norc", str(driver)],
             capture_output=True,
@@ -882,6 +885,103 @@ class ContractStillDeclaredInInstallScript(unittest.TestCase):
         self.assertIsNotNone(m, "could not find the symlink loop")
         self.assertEqual(sorted(m.group(1).split()),
                          sorted(_InstallDriver.LINKED))
+
+
+class RollbackReporting(_InstallDriver):
+    """issue #69 — an incomplete rollback must never be reported as a
+    complete restoration.
+
+    The transaction library distinguishes rc=10 (rolled back cleanly) from
+    rc=11 (rollback incomplete, recovery material preserved). install.sh
+    used to collapse both into one message claiming the previous set "has
+    been returned to its pre-install state" — the opposite of what the
+    library had just said for rc=11.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._project = self._tmp / "src" / "mpm"
+        self._build_fake_project(self._project)
+        self._prefix = self.home / ".mpm"
+        self._data_root = self._prefix
+        bindir = self._prefix / "bin"
+        bindir.mkdir(parents=True, exist_ok=True)
+        # A pre-install set, so rollback has something to restore and the
+        # clean/incomplete distinction is real rather than a fresh install.
+        for name in self.BINARIES:
+            p = bindir / name
+            p.write_text(f"#!/usr/bin/env bash\necho OLD-{name}\n")
+            p.chmod(0o755)
+
+    def _injected_run(self, *, break_restoration: bool) -> dict:
+        env_extra = {"MPM_INSTALL_TEST_FAIL_AFTER": "2"}
+        if break_restoration:
+            stub = self._tmp / "stub"
+            stub.mkdir()
+            # Fail `mv` only when moving a binary OUT of the rollback
+            # directory, i.e. the restoration step. Backup and promotion
+            # still work, so the transaction really reaches rollback.
+            (stub / "mv").write_text(
+                "#!/usr/bin/env bash\n"
+                'src=""\n'
+                'for a in "$@"; do case "$a" in -*) continue;; esac; '
+                'src="$a"; break; done\n'
+                'case "$src" in *.mpm-rollback.*/*) exit 1;; esac\n'
+                'exec /usr/bin/mv "$@"\n'
+            )
+            (stub / "mv").chmod(0o755)
+            env_extra["PATH"] = f"{stub}:/usr/bin:/bin"
+        return self._drive(
+            self._project, self._prefix, self._data_root,
+            env_extra=env_extra,
+        )
+
+    def test_clean_rollback_says_the_previous_set_was_restored(self):
+        result = self._injected_run(break_restoration=False)
+        self.assertEqual(
+            result["returncode"], 3,
+            f"a rolled-back promotion must exit 3:\n{result['stderr']}",
+        )
+        self.assertIn(
+            "has been restored to its pre-install state", result["stderr"],
+            "a clean rollback (rc=10) must say the previous set was restored",
+        )
+        self.assertNotIn(
+            "INCOMPLETE", result["stderr"],
+            "a clean rollback must not be described as incomplete",
+        )
+
+    def test_incomplete_rollback_is_not_reported_as_restored(self):
+        result = self._injected_run(break_restoration=True)
+        self.assertNotEqual(result["returncode"], 0)
+        self.assertEqual(
+            result["returncode"], 3,
+            f"an incomplete rollback must still exit 3:\n{result['stderr']}",
+        )
+        self.assertNotIn(
+            "returned to its pre-install state", result["stderr"],
+            "install.sh claimed a complete restoration after the transaction "
+            "reported rc=11 — the operator would believe no recovery is "
+            "needed while the only copy of their binaries sits in the "
+            "rollback directory",
+        )
+        self.assertNotIn(
+            "has been restored", result["stderr"],
+            "install.sh claimed the previous binaries were restored even "
+            "though restoration failed",
+        )
+        self.assertIn(
+            "INCOMPLETE", result["stderr"],
+            "an incomplete rollback must be reported loudly",
+        )
+        self.assertIn(
+            "rollback", result["stderr"].lower(),
+            "the operator must be pointed at the rollback material",
+        )
+        self.assertIn(
+            "manually", result["stderr"].lower(),
+            "the operator must be told that manual recovery is required",
+        )
 
 
 if __name__ == "__main__":

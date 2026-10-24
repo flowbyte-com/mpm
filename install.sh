@@ -558,11 +558,17 @@ installer report a deployment that did not happen." 2
         0)
             log "  installed all five binaries transactionally"
             ;;
-        10|11)
-            # The transaction already reported the outcome, including which
-            # binaries could not be restored. Re-announcing here would be
-            # noise; just exit with the install-failed code.
-            die "binary promotion failed; the previous binary set has been returned to its pre-install state" 3
+        10)
+            # The transaction rolled back cleanly: the previous set is
+            # back in place, and the library has already said so.
+            die "binary promotion failed; the previous binary set has been restored to its pre-install state" 3
+            ;;
+        11)
+            # The transaction could not restore the previous set. The
+            # library has printed which binaries failed and where the only
+            # recoverable copies are. Never claim a complete restoration
+            # here: the operator must act manually.
+            die "binary promotion failed and the rollback was INCOMPLETE. Your previous binaries are preserved in the rollback directory named above — do NOT delete it. Restore them manually with the recovery command printed above. Nothing else is deployed." 3
             ;;
         12)
             die "binary promotion refused before modifying anything (see the error above)" 3
@@ -953,12 +959,13 @@ export_build_provenance() {
 # file stays host-agnostic and honours the reconciler's exit-code
 # contract.
 #
-# RETURN VALUE: non-zero means "at least one adapter failed". It does NOT
-# mean "the installation failed" for rc=1. Callers MUST capture it
-# (`phase_agent_reconcile || rc=$?`) rather than call the phase bare:
-# under `set -e` an uncaptured non-zero return aborts the script at the
-# call site, which would turn this documented warning into a silent
-# fatal exit that never reaches validation.
+# RETURN VALUE: 0 reconciled, 1 at least one adapter failed (advisory),
+# 2 a required provisioning step failed, 70 the reconciler itself failed.
+# Only 0 means "everything was reconciled". Callers MUST capture a
+# non-zero return (`phase_agent_reconcile || rc=$?`) rather than call the
+# phase bare: under `set -e` an uncaptured non-zero return aborts the
+# script at the call site, which would turn the documented advisory
+# warning into a silent fatal exit that never reaches validation.
 phase_agent_reconcile() {
     note "AGENT INSTALL RECONCILE"
     local reconcile_script="$PROJECT_ROOT/agent_installation/scripts/reconcile_managed_blocks.py"
@@ -967,7 +974,7 @@ phase_agent_reconcile() {
         warn "  (this is unexpected on a stock MPM checkout)"
         return 0
     fi
-    export_build_provenance
+    export_build_provenance || return $?
     local rc=0
     python3 "$reconcile_script" --home "$HOME" || rc=$?
     if [ "$rc" -eq 0 ]; then
@@ -981,6 +988,16 @@ phase_agent_reconcile() {
         err "  The installation is NOT complete — fix the reported cause"
         err "  and re-run, or run 'make refresh-installed' to retry."
         return 2
+    fi
+    if [ "$rc" -eq 70 ]; then
+        # The reconciler's own error handling did not complete. This is
+        # NOT an adapter failure: the script may have died before invoking
+        # any adapter, so the host integration state is unknown. The
+        # operator must not be told the installation succeeded.
+        err "the host-adapter reconciliation script failed internally (see above)"
+        err "  the host integration state is UNKNOWN; the installation is NOT complete."
+        err "  fix the reported cause and re-run."
+        return 70
     fi
     warn "  one or more adapters reported non-zero exit (continuing)"
     return 1
@@ -1001,14 +1018,26 @@ phase_agent_reconcile() {
 #      success: the host would be wired to an artifact that does not
 #      exist, which is the false-success this whole mechanism exists
 #      to prevent.
+#   70 the reconciler itself failed (its error handling did not
+#      complete), so the host integration state is unknown. The
+#      install must NOT report success.
 #
-# Returns 0 for "continue" and 2 for "stop".
+# Returns 0 for "continue" and a non-zero code for "stop".
 reconcile_outcome() {
     local rc="$1"
+    if [ "$rc" -eq 70 ]; then
+        err "host adapter reconciliation could not be performed (internal reconciler error)"
+        err "  the host integration state is unknown — the installation is incomplete"
+        return 70
+    fi
     if [ "$rc" -eq 2 ]; then
         err "required host provisioning failed — the installation is incomplete"
         err "  fix the reported cause and re-run the installer"
         return 2
+    fi
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+        err "host adapter reconciliation failed unexpectedly (rc=$rc)"
+        return "$rc"
     fi
     if [ "$rc" -ne 0 ]; then
         warn "  agent adapter reconciliation reported warnings (non-fatal)."
@@ -1122,7 +1151,7 @@ mode_install() {
     # it must also not leave a half-installed state behind silently, so
     # this is a hard stop with a diagnostic.
     reconcile_outcome "$reconcile_rc" \
-        || die "required host provisioning failed — the installation is incomplete" 6
+        || die "host reconciliation failed — the installation is incomplete" 6
     phase_validate
     note "INSTALL COMPLETE"
     # Use the canonical path so the next-steps commands are runnable
@@ -1318,6 +1347,8 @@ Exit codes:
   3  install failed
   4  service start failed
   5  validation failed
+  6  reconciliation failed (--reconcile, or a fatal host-adapter
+     reconciliation during install)
 
 Notes:
   - The user-space install requires no root.
@@ -1355,13 +1386,20 @@ mode_reconcile() {
     # before the completion banner prints. The capture keeps the
     # distinction explicit: the work is done and reported, and the exit
     # status still says "not everything reconciled".
+    #
+    # Exit code 6 is dedicated to reconciliation failure. Returning the
+    # reconciler's own code (1 for an adapter failure) would collide with
+    # "1 = preflight failed" in the documented table, so a CI job could
+    # not tell the two apart.
     local reconcile_rc=0
     phase_agent_reconcile || reconcile_rc=$?
+    local failure_code=0
     if [ "$reconcile_rc" -ne 0 ]; then
         warn "  one or more adapters did not reconcile (see above)."
+        failure_code=6
     fi
     note "RECONCILE COMPLETE"
-    return "$reconcile_rc"
+    return "$failure_code"
 }
 
 main() {
