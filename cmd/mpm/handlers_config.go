@@ -104,7 +104,8 @@ import (
 // to the appropriate subcommand handler.
 func handleConfig(args []string) int {
 	if len(args) == 0 {
-		return handleConfigInteractive(loadOrInitConfig())
+		code, _ := handleConfigInteractive(loadOrInitConfig())
+		return code
 	}
 	// 2026-09-14 release-pass: `--help` / `-h` / "help" (the
 	// parseFlags rewrite) at the dispatcher level short-circuits
@@ -745,7 +746,14 @@ func protocolForBaseURL(baseURL string) string {
 // backward compatibility (ProfileFor falls through to it as a one-way
 // migration path), but new installs should configure
 // Profiles["default"].
-func handleConfigInteractive(c *config.Config) int {
+//
+// The returned bool reports whether the wizard COMMITTED the
+// configuration — whether it wrote the file. The exit code cannot
+// answer that question: the wizard exits 0 whether it saved the
+// configuration or the operator declined the final "Save?". A caller
+// that has to tell "the operator said no" from "the wizard rewrote the
+// same bytes" needs the write itself, not its exit status.
+func handleConfigInteractive(c *config.Config) (int, bool) {
 	if !isatty(os.Stdin) {
 		fmt.Println("Configure MPM")
 		fmt.Println()
@@ -758,7 +766,7 @@ func handleConfigInteractive(c *config.Config) int {
 		fmt.Println("  mpm config component set memory default")
 		fmt.Println()
 		fmt.Println("Or run `mpm config` interactively from a real terminal.")
-		return 0
+		return 0, false
 	}
 
 	fmt.Println("Configure MPM")
@@ -797,7 +805,7 @@ func handleConfigInteractive(c *config.Config) int {
 	preset := promptChoiceDefault(rwFromStdin(), "Provider", presets, defaultPresetID)
 	if preset == nil {
 		fmt.Println("Aborted.")
-		return 0
+		return 0, false
 	}
 
 	// Snapshot the existing profile BEFORE applying defaults.
@@ -824,7 +832,7 @@ func handleConfigInteractive(c *config.Config) int {
 	protocol := promptProtocol(rwFromStdin(), "Protocol")
 	if protocol == nil {
 		fmt.Println("Aborted.")
-		return 0
+		return 0, false
 	}
 
 	// Print protocol-specific helper text up front, before
@@ -890,7 +898,7 @@ func handleConfigInteractive(c *config.Config) int {
 			fmt.Println(RejectEmbeddingOnlyLLM(prof.Model))
 			fmt.Println()
 			fmt.Println("Aborted.")
-			return 1
+			return 1, false
 		}
 	}
 
@@ -918,7 +926,7 @@ func handleConfigInteractive(c *config.Config) int {
 		key, err := promptSecret("API key", keyDefault)
 		if err != nil {
 			usererror.Error("%v", err)
-			return 1
+			return 1, false
 		}
 		if key != "" {
 			prof.APIKey = key
@@ -948,7 +956,7 @@ func handleConfigInteractive(c *config.Config) int {
 	if prof.Model == "" && prof.BaseURL == "" && !hadModel && !hadBaseURL {
 		fmt.Println()
 		fmt.Println("A model or base URL is required. Run `mpm config profile set default model <id>` for non-interactive configuration, or re-run the wizard and provide a model or URL.")
-		return 1
+		return 1, false
 	}
 
 	// Public wizard always writes provider="custom" (the only
@@ -991,16 +999,21 @@ func handleConfigInteractive(c *config.Config) int {
 	fmt.Println()
 	if !confirmPrompt(rwFromStdin(), "Save?") {
 		fmt.Println("Aborted.")
-		return 0
+		return 0, false
 	}
 	c.Profiles["default"] = prof
 	if err := config.SaveConfig(c); err != nil {
 		usererror.Error("saving config: %v", err)
-		return 1
+		return 1, false
 	}
 	fmt.Println()
 	fmt.Println("✓ Configuration saved to " + config.ConfigPath())
-	return 0
+	// The configuration was COMMITTED. It may be byte-identical to what
+	// was already on disk — the operator re-ran the wizard and
+	// confirmed the same values — but the file was written, and a
+	// caller that says "nothing was committed" about this run is
+	// contradicting the line printed just above.
+	return 0, true
 }
 
 // isLegacyOnlyConfig returns true when the only provider configuration

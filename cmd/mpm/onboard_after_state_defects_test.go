@@ -27,6 +27,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,5 +142,136 @@ func TestReloadConfig_KeepsTheReReadErrorAcrossTheAfterStateMerge(t *testing.T) 
 	if !strings.Contains(merged.Errors[0], "cannot re-read") {
 		t.Errorf("the after-state report does not carry the re-read failure; errors = %v",
 			merged.Errors)
+	}
+}
+
+// TestApplyAfterState_RecordsACollectionFailureAndMarksTheReportStale
+// pins defect 3.
+//
+// A run that changed the configuration and then failed to re-read it
+// must not present the PRE-change rows as if nothing had happened, and
+// must not present them as an after-state report either — they are
+// neither. The failure is recorded and the report is marked stale.
+func TestApplyAfterState_RecordsACollectionFailureAndMarksTheReportStale(t *testing.T) {
+	rep := onboardReport{ModelStep: &modelStepOutcome{Saved: true}}
+
+	out := applyAfterState(onboardOptions{}, rep, func(onboardOptions) (onboardReport, error) {
+		return onboardReport{}, errors.New("the database is locked")
+	})
+
+	if !out.Stale {
+		t.Error("a failed re-collection did not mark the report stale")
+	}
+	if out.AfterState {
+		t.Error("a failed re-collection is presented as an after-state report; " +
+			"the rows in it do not describe the current state")
+	}
+	if len(out.Errors) == 0 {
+		t.Fatal("a failed re-collection was recorded nowhere")
+	}
+	if !strings.Contains(out.Errors[0], "cannot re-read the configuration state") {
+		t.Errorf("the recorded failure does not say what went wrong: %v", out.Errors)
+	}
+	if !strings.Contains(out.Errors[0], "the database is locked") {
+		t.Errorf("the recorded failure does not carry the underlying cause: %v", out.Errors)
+	}
+}
+
+// TestApplyAfterState_MergesASuccessfulCollection is the control for
+// the test above: a successful re-collection must still produce an
+// after-state report, and must not be marked stale.
+func TestApplyAfterState_MergesASuccessfulCollection(t *testing.T) {
+	rep := onboardReport{ModelStep: &modelStepOutcome{Saved: true}}
+
+	out := applyAfterState(onboardOptions{}, rep, func(onboardOptions) (onboardReport, error) {
+		return onboardReport{NotVerified: []string{"an after-state entry"}}, nil
+	})
+
+	if !out.AfterState {
+		t.Error("a successful re-collection did not produce an after-state report")
+	}
+	if out.Stale {
+		t.Error("a successful re-collection marked the report stale")
+	}
+	if len(out.NotVerified) != 1 || out.NotVerified[0] != "an after-state entry" {
+		t.Errorf("not-verified entries = %v, want the after-state entry", out.NotVerified)
+	}
+}
+
+// TestRenderOnboardReport_MarksAStaleReport pins the human-facing
+// half of defect 3: the operator must be able to see that the rows
+// below describe the state as it was found.
+func TestRenderOnboardReport_MarksAStaleReport(t *testing.T) {
+	out := captureStdout(t, func() {
+		renderOnboardReport(onboardReport{Stale: true})
+	})
+	if !strings.Contains(out, "could not be re-read") {
+		t.Errorf("a stale report is not marked as stale:\n%s", out)
+	}
+	if strings.Contains(out, "After this run") {
+		t.Errorf("a stale report claims to describe the state as it is now:\n%s", out)
+	}
+}
+
+// TestRenderModelStep_DoesNotClaimNothingWasCommittedWhenTheWizard
+// Committed pins defect 4.
+//
+// The wizard prints "✓ Configuration saved to …" the moment it writes.
+// A report that says "nothing was committed" about the same run
+// contradicts it in the same terminal.
+func TestRenderModelStep_DoesNotClaimNothingWasCommittedWhenTheWizardCommitted(t *testing.T) {
+	out := captureStdout(t, func() {
+		renderModelStep(onboardReport{ModelStep: &modelStepOutcome{
+			Reason: "approved", Applied: true, Saved: false, Committed: true,
+		}})
+	})
+	if strings.Contains(out, "nothing was committed") {
+		t.Errorf("a run that wrote the configuration is reported as having committed nothing:\n%s", out)
+	}
+	if !strings.Contains(out, "unchanged") {
+		t.Errorf("a run that wrote byte-identical content does not say the configuration is unchanged:\n%s", out)
+	}
+}
+
+// TestRenderModelStep_ClaimsNothingWasCommittedWhenTheWizardDidNot
+// is the control for the test above.
+//
+// "Nothing was committed" is the right thing to say when the operator
+// DECLINED the final save. The fix must not make the report vague in
+// that case.
+func TestRenderModelStep_ClaimsNothingWasCommittedWhenTheWizardDidNot(t *testing.T) {
+	out := captureStdout(t, func() {
+		renderModelStep(onboardReport{ModelStep: &modelStepOutcome{
+			Reason: "approved", Applied: true, Saved: false, Committed: false,
+		}})
+	})
+	if !strings.Contains(out, "nothing was committed") {
+		t.Errorf("a run that committed nothing is not reported as such:\n%s", out)
+	}
+}
+
+// TestWizard_ReportsWhetherItCommittedTheConfiguration pins the
+// mechanism defect 4 rests on.
+//
+// The wizard's exit code is 0 whether it committed the configuration
+// or the operator declined the final "Save?", so it cannot answer the
+// question the report has to answer.
+func TestWizard_ReportsWhetherItCommittedTheConfiguration(t *testing.T) {
+	isolatedEmbeddingWorkspace(t)
+	c := &config.Config{}
+
+	_, committed := runWizardInPTY(t, c, "y\n")
+	if !committed {
+		t.Error("the wizard did not report committing the configuration after the operator approved the save")
+	}
+}
+
+func TestWizard_ReportsNotCommittingWhenTheOperatorDeclines(t *testing.T) {
+	isolatedEmbeddingWorkspace(t)
+	c := &config.Config{}
+
+	_, committed := runWizardInPTY(t, c, "\x04") // Ctrl-D: the terminal's EOF character.
+	if committed {
+		t.Error("the wizard reported committing the configuration after the operator aborted")
 	}
 }

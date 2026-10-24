@@ -276,6 +276,17 @@ type modelStepOutcome struct {
 	// actually changed.
 	Saved bool `json:"saved"`
 
+	// Committed is true when the wizard COMMITTED the configuration —
+	// it wrote the file — whether or not the bytes differ from what
+	// was already on disk.
+	//
+	// Saved and Committed are different facts, and the report needs
+	// both. A run that rewrites byte-identical content has committed
+	// the configuration without changing it; reporting that as "nothing
+	// was committed" contradicts the wizard's own "✓ Configuration
+	// saved" line from moments earlier.
+	Committed bool `json:"committed"`
+
 	Done      []string       `json:"done,omitempty"`
 	Remaining []string       `json:"remaining,omitempty"`
 	After     *modelStepPlan `json:"after,omitempty"`
@@ -419,7 +430,7 @@ func runModelStep(opts onboardOptions, rep *onboardReport) {
 		// honoured.
 		before := takeConfigSnapshot()
 		out.Applied = true
-		out.ExitCode = handleConfigInteractive(cfg)
+		out.ExitCode, out.Committed = handleConfigInteractive(cfg)
 		out.Saved = before.changed(takeConfigSnapshot())
 		after = planModelStep(reloadConfig(rep))
 	}

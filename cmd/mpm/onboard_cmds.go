@@ -382,9 +382,7 @@ func handleOnboard(args []string) int {
 		// collected rows stale. The host step refreshes its own rows
 		// (refreshHostRows) for the same reason.
 		if rep.ModelStep != nil && rep.ModelStep.Saved {
-			if after, aerr := collectOnboardReport(opts); aerr == nil {
-				rep = mergeOnboardAfterState(after, rep)
-			}
+			rep = applyAfterState(opts, rep, collectOnboardReport)
 		}
 	}
 	if opts.hostInstall {
@@ -402,6 +400,32 @@ func handleOnboard(args []string) int {
 		renderOnboardReport(rep)
 	}
 	return onboardExitCode(rep)
+}
+
+// applyAfterState re-collects the report after a run that changed the
+// configuration, and folds the result into the run's report.
+//
+// The collector is a parameter so that the failure path can be
+// exercised: collectOnboardReport does not fail today, but nothing
+// guarantees that it never will, and a failure that is swallowed
+// leaves the operator reading pre-change rows with no marker at all.
+//
+// A failed re-collection is recorded and the report is marked stale —
+// it is NOT presented as an after-state report, because the rows in it
+// do not describe the current state.
+func applyAfterState(
+	opts onboardOptions,
+	rep onboardReport,
+	collect func(onboardOptions) (onboardReport, error),
+) onboardReport {
+	after, aerr := collect(opts)
+	if aerr != nil {
+		rep.Errors = append(rep.Errors,
+			fmt.Sprintf("cannot re-read the configuration state after the run: %v", aerr))
+		rep.Stale = true
+		return rep
+	}
+	return mergeOnboardAfterState(after, rep)
 }
 
 // mergeOnboardAfterState folds the outcome of a run into a freshly
@@ -523,6 +547,16 @@ type onboardReport struct {
 	// the operator has no way to tell that from a report of the
 	// current state.
 	AfterState bool `json:"after_state"`
+
+	// Stale is true when the report could NOT be re-collected after a
+	// run that changed the configuration.
+	//
+	// The rows below still describe the state as it was FOUND, and the
+	// operator has to be told. Without this flag a run that changed the
+	// configuration but could not re-read it presents the pre-change
+	// rows with no marker at all — the precise failure the after-state
+	// banner exists to prevent.
+	Stale bool `json:"stale"`
 
 	// Installation is MPM's own presence and workspace health.
 	Installation []onboardRow `json:"installation"`
@@ -1327,6 +1361,15 @@ func renderOnboardReport(rep onboardReport) {
 		fmt.Println("After this run — the sections below describe the state as it is now.")
 		fmt.Println()
 	}
+	if rep.Stale {
+		// The opposite, and just as necessary. The run changed the
+		// configuration, but the state could not be re-read, so the
+		// rows below are the ones collected BEFORE the run. Saying
+		// nothing would present them as current.
+		fmt.Println("This run changed the configuration, but its state could not be re-read — " +
+			"the sections below describe the state as it was found.")
+		fmt.Println()
+	}
 
 	renderSection("Installation", rep.Installation)
 	renderSection("Readiness", rep.Readiness)
@@ -1418,9 +1461,17 @@ func renderModelStep(rep onboardReport) {
 	fmt.Printf("  · %s\n", step.Reason)
 	if step.Applied {
 		fmt.Printf("  · the existing `mpm config` wizard ran and exited %d\n", step.ExitCode)
-		if step.Saved {
+		switch {
+		case step.Saved:
 			fmt.Printf("  ✓ the configuration was saved to %s\n", config.ConfigPath())
-		} else {
+		case step.Committed:
+			// The wizard wrote the configuration, but the bytes are
+			// identical to what was already on disk. Claiming "nothing
+			// was committed" here would contradict the wizard's own
+			// "✓ Configuration saved to …" from moments earlier.
+			fmt.Printf("  ✓ the configuration was saved to %s (its contents are unchanged)\n",
+				config.ConfigPath())
+		default:
 			fmt.Println("  · the configuration on disk is unchanged — nothing was committed")
 		}
 	}
