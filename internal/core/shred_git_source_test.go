@@ -47,6 +47,11 @@ func initRepo(t *testing.T, dir string) {
 	gitOut(t, dir, "init", "-q", ".")
 	gitOut(t, dir, "config", "user.email", "test@example.invalid")
 	gitOut(t, dir, "config", "user.name", "Test")
+	// Keep git's automatic maintenance off for this fixture: `git commit`
+	// otherwise schedules a DETACHED `git maintenance` process that
+	// outlives the test and writes into the directory the test framework
+	// deletes on cleanup, which can fail the cleanup with ENOTEMPTY.
+	gitOut(t, dir, "config", "maintenance.auto", "false")
 }
 
 func TestModeRemoveAll_RefusesInNormalGitCheckout(t *testing.T) {

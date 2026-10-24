@@ -48,6 +48,11 @@ func newTestRepo(t *testing.T, markerFile, markerCommit string) string {
 	gitRun(t, dir, "config", "user.email", "test@example.invalid")
 	gitRun(t, dir, "config", "user.name", "MPM Test")
 	gitRun(t, dir, "config", "commit.gpgsign", "false")
+	// Keep git's automatic maintenance off for this fixture: `git commit`
+	// otherwise schedules a DETACHED `git maintenance` process that
+	// outlives the test and writes into the directory the test framework
+	// deletes on cleanup, which can fail the cleanup with ENOTEMPTY.
+	gitRun(t, dir, "config", "maintenance.auto", "false")
 	if err := os.WriteFile(filepath.Join(dir, markerFile), []byte(markerCommit), 0o644); err != nil {
 		t.Fatalf("write marker: %v", err)
 	}
