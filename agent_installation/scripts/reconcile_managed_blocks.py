@@ -451,7 +451,21 @@ def _invoke_installer(
     for raw in raw_args:
         argv.append(resolve_arg(raw, home, adapter_dir))
 
-    result = subprocess.run(argv, capture_output=True, text=True)
+    # The child must see the SAME home the reconciler is reasoning about.
+    #
+    # The reconciler probes paths under the `--home` it was given. A
+    # python installer receives its paths already expanded against that
+    # home, so it is consistent by construction. A bash installer reads
+    # `$HOME` from its environment instead — so without this, a
+    # reconciler run with `--home <sandbox>` would probe the sandbox and
+    # then MUTATE the parent's real configuration. That is not a
+    # theoretical hazard: it is exactly what a sandboxed check does.
+    env = dict(os.environ)
+    env["HOME"] = home
+
+    result = subprocess.run(
+        argv, capture_output=True, text=True, env=env
+    )
     return result.returncode, result.stdout, result.stderr, argv, None
 
 

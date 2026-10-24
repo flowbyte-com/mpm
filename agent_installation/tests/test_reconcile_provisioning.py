@@ -131,9 +131,9 @@ class _ReconcilerHarness(unittest.TestCase):
             json.dumps(manifest, indent=2), encoding="utf-8"
         )
 
-    def _run(self) -> subprocess.CompletedProcess:
+    def _run(self, *, process_home: Path | None = None) -> subprocess.CompletedProcess:
         env = os.environ.copy()
-        env["HOME"] = str(self.home)
+        env["HOME"] = str(process_home or self.home)
         return subprocess.run(
             [
                 sys.executable,
@@ -173,6 +173,53 @@ class ProvisioningDispatch(_ReconcilerHarness):
             "provision",
             self._call_log(),
             "the provisioner was never invoked",
+        )
+
+    def test_provisioner_runs_against_the_home_the_reconciler_was_given(self):
+        """The provisioner must act on the home the reconciler is reasoning about.
+
+        A bash provisioner reads `$HOME`. The reconciler probes paths under
+        the `--home` it was given. If the two disagree, the reconciler checks
+        one machine's state and then mutates ANOTHER one's configuration —
+        which, for an operator running a sandboxed check, means a test
+        rewrites the real user's host configuration.
+
+        The reconciler is therefore responsible for making the child
+        process see the same home it is reasoning about, whatever the
+        parent's HOME happens to be.
+        """
+        present = self.home / ".config" / "fakehost"
+        present.mkdir(parents=True)
+        other_home = self._tmp / "other-home"
+        other_home.mkdir()
+        # The provisioner records the home it was given, by writing into it.
+        self._install_fake_adapter(
+            _provision_manifest(
+                gate={"any_of": [{"path": "~/.config/fakehost", "kind": "dir"}]}
+            )
+        )
+        self._write_executable(
+            self.adapter / "provision.sh",
+            f"""\
+            #!/usr/bin/env bash
+            mkdir -p "$HOME/provisioned"
+            echo "provision" >> "{self.calls}"
+            exit 0
+            """,
+        )
+
+        result = self._run(process_home=other_home)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(
+            (self.home / "provisioned").is_dir(),
+            "the provisioner did not act on the home the reconciler was given",
+        )
+        self.assertFalse(
+            (other_home / "provisioned").exists(),
+            "the provisioner acted on the PARENT's home instead of the "
+            "reconciler's home — a sandboxed run would mutate the real "
+            "operator's configuration",
         )
 
     def test_provision_is_skipped_when_its_gate_is_closed(self):
