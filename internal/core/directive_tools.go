@@ -20,6 +20,40 @@ import (
 	"strings"
 )
 
+// DirectivePredicate matches the rows that ARE directives.
+//
+// A row is a directive when either identifier is set:
+// collection='directives' (the canonical path) or is_prime_directive=1
+// (the legacy column-based path). Both identifiers reach the same set
+// once either is set — see the directives section of docs/SPEC.md.
+//
+// COALESCE keeps the predicate NULL-safe, so a row whose flag is NULL
+// (imported, legacy or manually created) is treated as "not a
+// directive" rather than UNKNOWN.
+//
+// This is the canonical spelling. Prefer it over writing the predicate
+// inline so that the surfaces which must agree cannot drift apart.
+const DirectivePredicate = `(collection = 'directives' OR COALESCE(is_prime_directive, 0) = 1)`
+
+// DirectiveExclusionClause excludes directive rows from a query about
+// ORDINARY memories.
+//
+// A directive is policy text, not a memory the agent learned. It is
+// read directly at wake time (ReadDirectives) and is NOT part of the
+// default retrieval scope: `mpm recall` searches collection='memories'
+// and the hybrid search filters on the same collection. A directive is
+// therefore never a vector-search candidate, it is never a
+// spaced-reinforcement review candidate, and it must not inflate any
+// count of active memories.
+//
+// 2026-10-23 (HAL-9001 Finding 5): this predicate was already used by
+// the `memories_active` metric and by GetMemoryStats, but NOT by the
+// review-candidate query, so the five baseline bootstrap directives
+// appeared on a fresh install as a permanent spaced-review backlog
+// that could never be cleared — their `last_accessed_at` is never
+// written by the directive read path.
+const DirectiveExclusionClause = `NOT ` + DirectivePredicate
+
 // ReadDirectives returns all memories that are prime directives.
 // A memory is a directive if either it was ingested with
 // collection='directives' (the MCP path) or has is_prime_directive=1

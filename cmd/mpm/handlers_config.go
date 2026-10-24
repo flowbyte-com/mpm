@@ -90,6 +90,7 @@ import (
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/synth"
 	"github.com/flowbyte-com/mpm-core/usererror"
 
 	"github.com/flowbyte-com/mpm/cmd/mpm/probe"
@@ -1109,6 +1110,70 @@ func wizardEmbeddingStep(c *config.Config) {
 	}
 }
 
+// embeddingProtocolChoices is the embedding protocol picker.
+//
+// 2026-10-23 (HAL-9001): each choice now carries the RUNTIME provider
+// the saved profile must record. The wizard used to write
+// provider="custom" — the vendor-neutral label the LLM path uses —
+// but "custom" is not an implemented embedding provider, so every
+// embedding profile the wizard created was rejected by the runtime
+// resolver ("provider \"custom\" is not implemented (supported: …)").
+//
+// The public interface is unchanged and stays vendor-neutral: the
+// operator still picks a PROTOCOL, never a vendor, and the labels
+// below name wire shapes. What changed is the translation from the
+// operator's choice to the provider the resolver understands.
+var embeddingProtocolChoices = []choice{
+	{
+		id:    "openai-compatible",
+		label: "OpenAI-compatible",
+		defaults: config.Profile{
+			Provider: "openai-compatible",
+			BaseURL:  "https://api.openai.com/v1",
+		},
+		needsAPIKey: true,
+	},
+	{
+		id:    "ollama",
+		label: "Ollama (local)",
+		defaults: config.Profile{
+			Provider: "ollama",
+			BaseURL:  "http://127.0.0.1:11434",
+		},
+		needsAPIKey: false,
+	},
+}
+
+// verifyEmbeddingProfile resolves a generated embedding profile
+// through the SAME resolver the runtime uses, so a configuration the
+// wizard offers to save is known to be both structurally valid and
+// executable by the selected backend.
+//
+// It performs NO network I/O: the resolver builds the provider object
+// and validates it, it does not call the endpoint. Reachability is
+// `mpm doctor`'s job.
+//
+// The profile is resolved in isolation — a throwaway Config holding
+// only this profile and its binding — so the check cannot be
+// satisfied by an unrelated profile in the operator's configuration.
+func verifyEmbeddingProfile(p config.Profile) error {
+	probe := &config.Config{
+		Profiles:   map[string]config.Profile{p.Name: p},
+		Components: map[string]string{"embedding": p.Name},
+	}
+	res := mpminternal.ResolveEmbeddingConfig(probe)
+	if res == nil {
+		return fmt.Errorf("the embedding resolver returned no result")
+	}
+	if res.Status != mpminternal.EmbeddingStatusConfigured {
+		if res.LastError != nil {
+			return res.LastError
+		}
+		return fmt.Errorf("the profile does not resolve to a usable embedding provider")
+	}
+	return nil
+}
+
 // wizardEmbeddingCustom walks the operator through manual
 // embedding configuration via Custom + protocol picker. There
 // is NO "Max tokens" prompt on this path — embeddings have no
@@ -1117,6 +1182,19 @@ func wizardEmbeddingStep(c *config.Config) {
 // is removed because Anthropic exposes no native /embeddings
 // endpoint.
 func wizardEmbeddingCustom(c *config.Config) {
+	wizardEmbeddingCustomWith(rwFromStdin(), c)
+}
+
+// wizardEmbeddingCustomWith is wizardEmbeddingCustom with an explicit
+// prompt source.
+//
+// The reader is a parameter rather than a call to rwFromStdin() per
+// prompt because rwFromStdin() builds a NEW buffered reader every
+// time, and a buffered reader consumes everything it can read ahead.
+// The wizard asks several questions, so the production path shares
+// one reader for the whole step and a test can drive the whole step
+// from one scripted session.
+func wizardEmbeddingCustomWith(rw *bufio.Reader, c *config.Config) {
 	fmt.Println()
 	fmt.Println("Embedding · Custom")
 	fmt.Println("Custom lets you connect any supported embedding endpoint.")
@@ -1136,41 +1214,54 @@ func wizardEmbeddingCustom(c *config.Config) {
 	// Embedding-protocol picker. Subset of the LLM protocol
 	// list (no Anthropic-compatible — it has no native
 	// /embeddings endpoint).
-	embedProtocols := []choice{
-		{
-			id:    "openai-compatible",
-			label: "OpenAI-compatible",
-			defaults: config.Profile{
-				BaseURL: "https://api.openai.com/v1",
-			},
-			needsAPIKey: true,
-		},
-		{
-			id:    "ollama",
-			label: "Ollama (local)",
-			defaults: config.Profile{
-				BaseURL: "http://127.0.0.1:11434",
-			},
-			needsAPIKey: false,
-		},
-	}
-	protocol := promptChoiceDefault(rwFromStdin(), "Protocol", embedProtocols, "openai-compatible")
+	protocol := promptChoiceDefault(rw, "Protocol", embeddingProtocolChoices, "openai-compatible")
 	if protocol == nil {
 		fmt.Println("Aborted.")
 		return
 	}
 
-	prof := config.Profile{Name: "embedding", Provider: "custom"}
+	// The profile records the RUNTIME provider, taken from the
+	// protocol choice. It is deliberately NOT "custom": the LLM
+	// path can infer its wire shape from the endpoint at
+	// construction time, but the embedding resolver selects its
+	// backend from the provider name, and "custom" selects none.
+	prof := config.Profile{Name: "embedding"}
 	mergeProfileDefaults(&prof, protocol.defaults)
 
-	model := promptString(rwFromStdin(), "Model", "")
+	model := promptString(rw, "Model", "")
 	if model != "" {
 		prof.Model = strings.TrimSpace(model)
 	}
-	baseURL := promptString(rwFromStdin(), "Base URL", prof.BaseURL)
+
+	// Endpoint validation happens BEFORE the profile is stored, and
+	// before anything is written. A malformed URL used to be
+	// accepted here and only surfaced later as an unreachable
+	// endpoint; the operator is told what is wrong while they can
+	// still fix it.
+	baseURL := promptString(rw, "Base URL", prof.BaseURL)
 	if baseURL != "" {
 		prof.BaseURL = strings.TrimSpace(baseURL)
 	}
+	for attempt := 0; ; attempt++ {
+		err := config.ValidateEndpointURL(prof.BaseURL)
+		if err == nil {
+			break
+		}
+		fmt.Printf("  ! %v\n", err)
+		fmt.Println("    expected an http:// or https:// endpoint, e.g.")
+		fmt.Println("      http://127.0.0.1:11434")
+		fmt.Println("      https://api.openai.com/v1")
+		if attempt >= 2 {
+			fmt.Println()
+			fmt.Println("Aborted: no valid embedding endpoint was given. Nothing was changed.")
+			return
+		}
+		baseURL = promptString(rw, "Base URL", prof.BaseURL)
+		if baseURL != "" {
+			prof.BaseURL = strings.TrimSpace(baseURL)
+		}
+	}
+
 	if protocol.needsAPIKey {
 		key, err := promptSecret("API key (leave empty if not required)", "")
 		if err != nil {
@@ -1187,10 +1278,31 @@ func wizardEmbeddingCustom(c *config.Config) {
 		return
 	}
 
+	// The generated profile must survive the runtime's own resolver
+	// before it is offered to the operator. A profile the runtime
+	// rejects is not a configuration; it is a trap for the next
+	// command that reads it.
+	if err := verifyEmbeddingProfile(prof); err != nil {
+		fmt.Println()
+		fmt.Println("The embedding profile would not run: " + err.Error())
+		fmt.Println("Nothing was changed.")
+		return
+	}
+
 	// Embedding profiles skip role validation (an embedding
 	// profile is precisely what should hold an embedding
-	// model). The wizard creates the profile + binding and
-	// saves.
+	// model). The wizard creates the profile + binding.
+	//
+	// 2026-10-23 (HAL-9001 Finding 4): this step does NOT write.
+	// It used to call config.SaveConfig here, which meant the
+	// embedding profile was committed to disk in the middle of the
+	// wizard — before the operator's final "Save?" decision. An
+	// operator who configured an embedding endpoint and then
+	// declined the final save was left with a half-applied
+	// configuration they had declined. Every other wizard step
+	// (the default profile, the critic step) only mutates the
+	// in-memory configuration and is committed by the final save.
+	// This step now behaves like the rest.
 	if c.Profiles == nil {
 		c.Profiles = map[string]config.Profile{}
 	}
@@ -1199,13 +1311,10 @@ func wizardEmbeddingCustom(c *config.Config) {
 	}
 	c.Profiles["embedding"] = prof
 	c.Components["embedding"] = "embedding"
-	if err := config.SaveConfig(c); err != nil {
-		fmt.Println("Failed to save config:", err)
-		return
-	}
 	fmt.Println()
-	fmt.Printf("✓ embedded profile \"embedding\" (provider=%s, model=%s)\n", prof.Provider, prof.Model)
+	fmt.Printf("✓ embedding profile \"embedding\" (provider=%s, model=%s)\n", prof.Provider, prof.Model)
 	fmt.Println("✓ bound components.embedding = embedding")
+	fmt.Println("✓ will be saved together with the rest of the configuration")
 }
 
 // wizardCriticStep presents the only specialist model that matters in
@@ -1621,9 +1730,34 @@ func readSecretFromStdin() (string, error) {
 // branded catalogues; the catalogues are gone.
 
 // confirmPrompt reads a Y/n confirmation.
+//
+// EOF and read errors are CANCELLATION, never consent.
+//
+// The distinction matters because this prompt's default is YES. An
+// operator who presses Ctrl-D at the final "Save?" prompt is using
+// the standard "I'm done" gesture; treating that as an empty line
+// resolves the [Y/n] default to the affirmative and COMMITS the
+// configuration the operator was trying to abandon — while the
+// onboarding report records the configuration as saved.
+//
+// An ACTUAL empty line — the operator pressing Enter — is a complete
+// answer and keeps the documented [Y/n] default. A read error is
+// also cancellation: an unreadable stdin is not an answer.
+//
+// The rule is therefore simple: a confirmation is a terminated line,
+// or it is not a confirmation. An unterminated answer ("y" followed
+// by Ctrl-D) is an aborted line, not a consent.
+//
+// This prompt is the wizard's single commit point, so a cancellation
+// here must leave the configuration exactly as it was.
 func confirmPrompt(rw *bufio.Reader, label string) bool {
 	fmt.Printf("  %s [Y/n]: ", label)
-	raw, _ := rw.ReadString('\n')
+	raw, err := rw.ReadString('\n')
+	if err != nil {
+		// io.EOF (Ctrl-D), a closed stdin, a broken pipe — none of
+		// them is an answer, and none of them may be read as consent.
+		return false
+	}
 	raw = strings.TrimSpace(strings.ToLower(raw))
 	if raw == "" || raw == "y" || raw == "yes" {
 		return true
@@ -1791,7 +1925,7 @@ func printConfigProfileHelp() {
 	render.Label(os.Stdout, "mpm config profile add [name]", "interactive wizard; supply --model and --base-url for non-interactive add")
 	render.Label(os.Stdout, "mpm config profile list", "render all profiles (--json for machine output)")
 	render.Label(os.Stdout, "mpm config profile get <name>", "show one profile (--json for machine output; api_key redacted)")
-	render.Label(os.Stdout, "mpm config profile set <name> <key> <value>", "set one field (provider, model, base_url, temperature, timeout_seconds, reasoning)")
+	render.Label(os.Stdout, "mpm config profile set <name> <key> <value>", "set one field (provider, model, base_url, temperature, timeout_seconds, reasoning, auth_scheme)")
 	render.Label(os.Stdout, "mpm config profile set <name> api_key", "prompt for api_key with terminal echo suppressed")
 	render.Label(os.Stdout, "mpm config profile set <name> api_key --stdin", "read api_key from stdin (automation path)")
 	render.Label(os.Stdout, "mpm config profile remove <name>", "delete; refused if any component binds to this profile (lists all bindings on refusal)")
@@ -1909,7 +2043,7 @@ func handleConfigProfile(args []string) int {
 		return handleProfileGet(loadOrInitConfig(), args[1])
 	case "set":
 		if len(args) < 3 {
-			usererror.Error("mpm config profile set <name> <key> [value|--stdin]\n  keys: provider, model, base_url, api_key, temperature, timeout_seconds, reasoning\n  api_key accepts no positional value: omit for a hidden prompt, or pass --stdin")
+			usererror.Error("mpm config profile set <name> <key> [value|--stdin]\n  keys: provider, model, base_url, api_key, temperature, timeout_seconds, reasoning, auth_scheme\n  api_key accepts no positional value: omit for a hidden prompt, or pass --stdin")
 			return 1
 		}
 		name := args[1]
@@ -1934,7 +2068,7 @@ func handleConfigProfile(args []string) int {
 			return handleProfileSet(loadOrInitConfig(), name, key, value, true /*silenceValue*/)
 		}
 		if len(rest) == 0 {
-			usererror.Error("mpm config profile set <name> <key> <value>\n  keys: provider, model, base_url, temperature, timeout_seconds, reasoning")
+			usererror.Error("mpm config profile set <name> <key> <value>\n  keys: provider, model, base_url, temperature, timeout_seconds, reasoning, auth_scheme")
 			return 1
 		}
 		return handleProfileSet(loadOrInitConfig(), name, key, strings.Join(rest, " "), false /*silenceValue*/)
@@ -2177,6 +2311,9 @@ func handleProfileList(c *config.Config) int {
 		if p.Reasoning != "" {
 			fmt.Printf("    reasoning   : %s\n", p.Reasoning)
 		}
+		if p.AuthScheme != "" {
+			fmt.Printf("    auth scheme : %s\n", p.AuthScheme)
+		}
 		fmt.Println()
 	}
 	return 0
@@ -2209,6 +2346,9 @@ func handleProfileGet(c *config.Config, name string) int {
 	}
 	if p.Reasoning != "" {
 		fmt.Printf("  reasoning   : %s\n", p.Reasoning)
+	}
+	if p.AuthScheme != "" {
+		fmt.Printf("  auth scheme : %s\n", p.AuthScheme)
 	}
 	return 0
 }
@@ -2278,8 +2418,29 @@ func handleProfileSet(c *config.Config, name, key, value string, silenceValue bo
 		p.TimeoutSecs = n
 	case "reasoning":
 		p.Reasoning = value
+	case "auth_scheme", "authscheme", "auth":
+		// 2026-10-23 (HAL-9001): the authentication scheme is a
+		// first-class profile field, separate from the message
+		// protocol. Most endpoints need no configuration: the scheme
+		// is derived from the endpoint's host (documented) or from
+		// the protocol (default). This field exists for the endpoints
+		// that cannot be reliably discovered.
+		//
+		// An empty value CLEARS the override and returns the profile
+		// to derived resolution — that is how an operator undoes an
+		// override they no longer need.
+		if strings.TrimSpace(value) == "" {
+			p.AuthScheme = ""
+			break
+		}
+		scheme, ok := synth.ParseAuthScheme(value)
+		if !ok {
+			usererror.Error("unsupported auth_scheme %q (supported: bearer, x-api-key, none; empty clears the override)", value)
+			return 1
+		}
+		p.AuthScheme = scheme.String()
 	default:
-		usererror.Error("unknown profile field %q (try: provider, model, base_url, api_key, temperature, timeout_seconds, reasoning)", key)
+		usererror.Error("unknown profile field %q (try: provider, model, base_url, api_key, temperature, timeout_seconds, reasoning, auth_scheme)", key)
 		return 1
 	}
 	c.Profiles[name] = p
@@ -2317,6 +2478,10 @@ func isMaterialChange(p config.Profile, key string) bool {
 	materialKeys := map[string]bool{
 		"provider": true, "model": true, "base_url": true, "endpoint": true,
 		"api_key": true, "token": true,
+		// The authentication scheme is part of the connection
+		// fingerprint: changing it changes the bytes on the wire.
+		// 2026-10-23 (HAL-9001).
+		"auth_scheme": true, "authscheme": true, "auth": true,
 	}
 	if key == "" {
 		// Empty key signals "the entire profile was just created with
@@ -2388,6 +2553,14 @@ func extractStringFlag(args []string, name string) ([]string, string) {
 func printProbeOnSaveHint(r probe.ProbeResult) {
 	switch r.Status {
 	case probe.ProbeHealthy:
+		// Name the authentication scheme that worked. The operator's
+		// question after a first save is "how did it authenticate?",
+		// and the answer should not require a debug log.
+		if r.AuthScheme != "" {
+			fmt.Printf("✓ Connection verified · %s · %s · %s · %dms\n",
+				r.Provider, r.Model, r.AuthScheme, r.LatencyMs)
+			return
+		}
 		fmt.Printf("✓ Connection verified · %s · %s · %dms\n", r.Provider, r.Model, r.LatencyMs)
 	default:
 		summary := r.ErrorSummary
@@ -2395,6 +2568,13 @@ func printProbeOnSaveHint(r probe.ProbeResult) {
 			summary = r.Status.String()
 		}
 		fmt.Printf("✗ Verification failed · %s\n", summary)
+		// Distinguish the three authentication refusals: an invalid
+		// credential, an unbilled subscription and an under-privileged
+		// key are three different problems with three different
+		// remedies.
+		if reason := authFailureReason(r.AuthFailure); reason != "" {
+			fmt.Printf("  %s\n", reason)
+		}
 		fmt.Println("Configuration was saved.")
 	}
 }
@@ -2832,6 +3012,10 @@ type profileJSONShape struct {
 	Temperature    *float64 `json:"temperature,omitempty"`
 	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
 	Reasoning      string   `json:"reasoning,omitempty"`
+	// AuthScheme is the operator's explicit authentication-scheme
+	// override ("bearer", "x-api-key", "none"). Empty means the scheme
+	// is derived from the endpoint. 2026-10-23 (HAL-9001).
+	AuthScheme string `json:"auth_scheme,omitempty"`
 }
 
 func toProfileJSON(p config.Profile, name string) profileJSONShape {
@@ -2844,6 +3028,7 @@ func toProfileJSON(p config.Profile, name string) profileJSONShape {
 		Temperature:    p.Temperature,
 		TimeoutSeconds: p.TimeoutSecs,
 		Reasoning:      p.Reasoning,
+		AuthScheme:     p.AuthScheme,
 	}
 }
 

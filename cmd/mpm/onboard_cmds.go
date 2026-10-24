@@ -370,18 +370,30 @@ func handleOnboard(args []string) int {
 	}
 
 	// The guided steps run AFTER the read-only report is collected, so
-	// the report they render is the state as it was found — not the
-	// state onboarding made it look like. Re-collection after a mutation
-	// would be a nicer ending, but it would also mean the sections above
-	// were describing a machine state that no longer exists, and the
-	// delta would have to be reconstructed from the step outcome.
-	// Instead the step records what it did and what it did not finish,
-	// and the exit code reflects the combination.
+	// the report they render is the state as it was found — unless the
+	// step changed the configuration, in which case the report is
+	// collected again and describes the state as it IS (HAL-9001
+	// Finding 4). A report of a configuration that the run itself has
+	// just replaced is not a report of anything the operator can act on.
 	if opts.scope == onboardScopeModels || opts.scope == onboardScopeFull {
 		runModelStep(opts, &rep)
+		// The model step is the only step that changes MPM's own
+		// configuration, so it is the only step that makes the
+		// collected rows stale. The host step refreshes its own rows
+		// (refreshHostRows) for the same reason.
+		if rep.ModelStep != nil && rep.ModelStep.Saved {
+			if after, aerr := collectOnboardReport(opts); aerr == nil {
+				rep = mergeOnboardAfterState(after, rep)
+			}
+		}
 	}
 	if opts.hostInstall {
 		runHostStep(opts, &rep)
+	}
+	if rep.HostStep != nil && rep.HostStep.Applied {
+		// The host step already refreshed its own rows; the flag only
+		// says that the report describes the state after the run.
+		rep.AfterState = true
 	}
 
 	if opts.json {
@@ -390,6 +402,60 @@ func handleOnboard(args []string) int {
 		renderOnboardReport(rep)
 	}
 	return onboardExitCode(rep)
+}
+
+// mergeOnboardAfterState folds the outcome of a run into a freshly
+// collected report.
+//
+// `after` is a report collected from the configuration as it now is.
+// `step` is the report as it was, plus what the run did to it.
+//
+// The collected rows (Installation, Readiness, Models, Hosts) and the
+// collected attention/skipped/error entries come from `after`: they
+// describe the configuration as it IS, which is the whole point of
+// re-collecting. The step's own outcome — the plan, the step record,
+// and the entries the step contributed — comes from `step`.
+//
+// The split is not cosmetic. The collected attention entries describe
+// what was wrong when the report was taken; after a run that fixed
+// them, carrying them forward would report a resolved problem as an
+// open one. That is why modelStepOutcome keeps the step's entries
+// separately.
+func mergeOnboardAfterState(after, step onboardReport) onboardReport {
+	out := after
+	out.Plan = step.Plan
+	out.ModelPlan = step.ModelPlan
+	out.ModelStep = step.ModelStep
+	out.HostStep = step.HostStep
+	out.AfterState = true
+
+	if step.ModelStep != nil {
+		out.Attention = mergeUniqueStrings(after.Attention, step.ModelStep.Attention)
+		out.Skipped = mergeUniqueStrings(after.Skipped, step.ModelStep.Skipped)
+		out.Errors = mergeUniqueStrings(after.Errors, step.ModelStep.Errors)
+	}
+	out.NotVerified = mergeUniqueStrings(after.NotVerified, step.NotVerified)
+	out.NotAvailable = mergeUniqueStrings(after.NotAvailable, step.NotAvailable)
+	return out
+}
+
+// mergeUniqueStrings appends the entries of src to dst, skipping any
+// entry dst already contains. Order is preserved: dst first, then src.
+func mergeUniqueStrings(dst, src []string) []string {
+	out := append([]string{}, dst...)
+	for _, s := range src {
+		found := false
+		for _, d := range out {
+			if d == s {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // onboardExitCode: 0 when nothing needs attention, 1 otherwise.
@@ -419,6 +485,17 @@ type onboardReport struct {
 	Success bool   `json:"success"`
 	Mode    string `json:"mode"`
 	DryRun  bool   `json:"dry_run"`
+
+	// AfterState is true when this report describes the state AFTER a
+	// guided step changed something, rather than the state as it was
+	// found.
+	//
+	// It is the flag that makes the report honest about time. A report
+	// that collected its rows before the wizard ran and rendered them
+	// afterwards describes a configuration that no longer exists — and
+	// the operator has no way to tell that from a report of the
+	// current state.
+	AfterState bool `json:"after_state"`
 
 	// Installation is MPM's own presence and workspace health.
 	Installation []onboardRow `json:"installation"`
@@ -1216,6 +1293,13 @@ func renderOnboardReport(rep onboardReport) {
 	fmt.Println()
 	fmt.Println("MPM · Onboarding report")
 	fmt.Println()
+	if rep.AfterState {
+		// Unmistakable. The rows below were collected after the run
+		// changed something, and the operator must not have to guess
+		// which moment they describe.
+		fmt.Println("After this run — the sections below describe the state as it is now.")
+		fmt.Println()
+	}
 
 	renderSection("Installation", rep.Installation)
 	renderSection("Readiness", rep.Readiness)
@@ -1292,6 +1376,12 @@ func renderOnboardReport(rep onboardReport) {
 // "✓ model configuration complete" would tell the operator something
 // untrue, and rendering it as a failure would train them to distrust a
 // run that did exactly what they approved.
+//
+// The saved/unchanged line is separate from the exit code for the same
+// reason. The wizard exits 0 whether it committed the configuration or
+// the operator declined the final "Save?", so "the wizard ran and exited
+// 0" says nothing about whether anything was written. An operator who
+// said "no" needs to be told that their "no" was honoured.
 func renderModelStep(rep onboardReport) {
 	step := rep.ModelStep
 	if step == nil {
@@ -1301,6 +1391,11 @@ func renderModelStep(rep onboardReport) {
 	fmt.Printf("  · %s\n", step.Reason)
 	if step.Applied {
 		fmt.Printf("  · the existing `mpm config` wizard ran and exited %d\n", step.ExitCode)
+		if step.Saved {
+			fmt.Printf("  ✓ the configuration was saved to %s\n", config.ConfigPath())
+		} else {
+			fmt.Println("  · the configuration on disk is unchanged — nothing was committed")
+		}
 	}
 	for _, d := range step.Done {
 		fmt.Printf("  ✓ %s is settled\n", d)
@@ -1453,6 +1548,12 @@ func printOnboardHelp() {
 	fmt.Println()
 	fmt.Println("The three scopes are mutually exclusive: `--models` and --hosts select")
 	fmt.Println("different steps, and running one never implies running the other.")
+	fmt.Println()
+	fmt.Println("Save semantics")
+	fmt.Println("  The model wizard commits once, at the end. Declining its final `Save?`")
+	fmt.Println("  leaves your configuration exactly as it was. The report says whether")
+	fmt.Println("  anything was written, and — when it was — describes the state as it is")
+	fmt.Println("  AFTER the run rather than as it was found.")
 	fmt.Println()
 	fmt.Println("Host installation")
 	fmt.Println("  mpm onboard --hosts install <target>...")

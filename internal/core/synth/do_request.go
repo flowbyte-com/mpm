@@ -128,6 +128,12 @@ func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string
 		return nil, fmt.Errorf("marshal llm request: %w", err)
 	}
 
+	// The authentication scheme is resolved per request, not once at
+	// construction: a scheme discovered by a bounded negotiation is
+	// retained for subsequent operations on the same endpoint, and the
+	// operator's override always wins over any discovered rule.
+	auth := sc.resolvedAuth()
+
 	switch mode {
 	case AttemptFresh:
 		if err := plan.AttemptFresh(fingerprint); err != nil {
@@ -142,7 +148,7 @@ func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string
 		return nil, fmt.Errorf("invalid AttemptMode: %d", mode)
 	}
 
-	respBody, class, httpStatus, err := sc.doOnce(ctx, payload)
+	respBody, class, httpStatus, err := sc.doOnce(ctx, payload, auth)
 	if err == nil && class == 0 {
 		plan.RecordSuccess()
 		return respBody, nil
@@ -167,8 +173,44 @@ func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string
 	// or fail-fast.
 	switch class {
 	case FailureAuth:
-		return nil, fmt.Errorf("provider refused request (%s): %s",
-			class, errString(err, httpStatus))
+		// A bounded alternative authentication attempt is permitted
+		// only when the caller approved connection verification AND
+		// the provider's refusal names a different authentication
+		// header. A generic 401 is an invalid credential and is not
+		// retried — see negotiationCandidate.
+		if alt, ok := sc.negotiationCandidate(httpStatus, respBody, auth); ok {
+			if rerr := plan.AttemptRecovery(fingerprint, RecoveryRetry); rerr != nil {
+				return nil, rerr
+			}
+			altBody, altClass, altStatus, altErr := sc.doOnce(ctx, payload, alt)
+			if altErr == nil && altClass == 0 {
+				plan.RecordSuccess()
+				// Retain the scheme that worked so subsequent
+				// operations against this endpoint use it without
+				// negotiating again.
+				rememberNegotiatedAuth(sc.BaseURL, sc.APIKey, alt)
+				return altBody, nil
+			}
+			if altErr != nil {
+				if altStatus > 0 {
+					altClass = classifyFromStatus(altStatus)
+				} else {
+					altClass = classifyFromStatus(0)
+				}
+			}
+			plan.RecordFailure(altClass)
+			return nil, fmt.Errorf(
+				"provider refused request (%s) with scheme %q and the alternative authentication scheme %q was also refused: %s",
+				class, auth, alt, errString(err, httpStatus))
+		}
+		// The scheme is named so the operator can tell WHICH
+		// presentation was refused. Without it, a failure against a
+		// pinned scheme is indistinguishable from a failure against a
+		// derived one — and "which scheme did MPM actually send?" is
+		// exactly the question an operator with an explicit
+		// auth_scheme has.
+		return nil, fmt.Errorf("provider refused request (%s) with scheme %q: %s",
+			class, auth, errString(err, httpStatus))
 
 	case FailureRateLimit:
 		retryAfterSeconds, retryable := retryAfterBoundedSeconds()
@@ -188,7 +230,7 @@ func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string
 			return nil, ctx.Err()
 		case <-time.After(delay):
 		}
-		respBody, class, httpStatus, err = sc.doOnce(ctx, payload)
+		respBody, class, httpStatus, err = sc.doOnce(ctx, payload, auth)
 		if err == nil && class == 0 {
 			plan.RecordSuccess()
 			return respBody, nil
@@ -217,7 +259,7 @@ func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string
 			return nil, ctx.Err()
 		case <-time.After(transientBackoff):
 		}
-		respBody, class, httpStatus, err = sc.doOnce(ctx, payload)
+		respBody, class, httpStatus, err = sc.doOnce(ctx, payload, auth)
 		if err == nil && class == 0 {
 			plan.RecordSuccess()
 			return respBody, nil
@@ -249,7 +291,11 @@ func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string
 // failure). The Retry-After response header (if present) is
 // captured into lastRetryAfterHeader so the rate-limit
 // branch above can consult it without re-parsing.
-func (sc *SynthClient) doOnce(ctx context.Context, payload []byte) ([]byte, FailureClass, int, error) {
+//
+// The authentication scheme is a PARAMETER, not a field read from the
+// client, so that the bounded alternative attempt can present a
+// different scheme without mutating shared client state.
+func (sc *SynthClient) doOnce(ctx context.Context, payload []byte, auth AuthScheme) ([]byte, FailureClass, int, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST",
 		sc.BaseURL+sc.Wire.path(), bytes.NewReader(payload))
 	if err != nil {
@@ -257,10 +303,14 @@ func (sc *SynthClient) doOnce(ctx context.Context, payload []byte) ([]byte, Fail
 			fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	authName, authValue := sc.Wire.authHeader(sc.APIKey)
-	req.Header.Set(authName, authValue)
+	if name, value, present := auth.headerFor(sc.APIKey); present {
+		req.Header.Set(name, value)
+	}
 
-	client := &http.Client{Timeout: sc.Timeout}
+	client := &http.Client{
+		Timeout:       sc.Timeout,
+		CheckRedirect: guardCredentialRedirect,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, FailureTransientTransport, 0,
@@ -292,6 +342,13 @@ func (sc *SynthClient) doOnce(ctx context.Context, payload []byte) ([]byte, Fail
 // FailureTransientTransport as appropriate. The default is
 // FailureUnknown — treated conservatively as non-retriable
 // by the policy dispatcher.
+//
+// 401, 402 and 403 share the FailureAuth class because the
+// bounded-execution policy treats all three the same way: zero
+// recovery, stop immediately. The DISTINCTION between an invalid
+// credential, an unbilled subscription and an under-privileged key
+// is preserved separately by ClassifyAuthFailure, which the
+// operator-facing surfaces render.
 func classifyFromStatus(status int) FailureClass {
 	switch {
 	case status == 401 || status == 403 || status == 402:
@@ -302,6 +359,97 @@ func classifyFromStatus(status int) FailureClass {
 		return FailureTransientTransport
 	}
 	return FailureUnknown
+}
+
+// guardCredentialRedirect refuses a redirect that would carry the
+// request — and therefore the operator's credential — away from the
+// origin they configured.
+//
+// Go's default redirect handling drops the Authorization header on a
+// cross-host redirect, but it does NOT drop X-Api-Key: Go treats that
+// header as ordinary. An Anthropic-protocol endpoint that redirects to
+// another origin would therefore leak the operator's API key in a
+// header the standard library considers harmless. Refusing the redirect
+// is the only behaviour that keeps the credential on the configured
+// origin.
+//
+// A same-origin redirect is allowed, including an http→https upgrade
+// that keeps the same host:port — the credential stays on the same
+// origin and only becomes better protected. A scheme DOWNGRADE
+// (https→http) is refused — it would send the credential in cleartext.
+//
+// The comparison is on the ORIGIN (host AND port), not on the bare
+// hostname: 127.0.0.1:8081 and 127.0.0.1:8082 are different origins,
+// and a credential forwarded between them has left the origin the
+// operator configured.
+func guardCredentialRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return nil
+	}
+	origin := via[0].URL
+	if !strings.EqualFold(req.URL.Host, origin.Host) {
+		return fmt.Errorf(
+			"refusing cross-origin redirect from %s://%s to %s://%s: the credential would leave the configured origin",
+			origin.Scheme, origin.Host, req.URL.Scheme, req.URL.Host)
+	}
+	if origin.Scheme == "https" && req.URL.Scheme != "https" {
+		return fmt.Errorf(
+			"refusing redirect from %s://%s to %s://%s: the credential would be sent in cleartext",
+			origin.Scheme, origin.Host, req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
+
+// negotiationCandidate decides whether a single bounded alternative
+// authentication attempt is permitted for this refusal.
+//
+// Every condition must hold:
+//
+//   - the caller approved connection verification (AllowAuthNegotiation);
+//   - the operator has NOT pinned a scheme (see below);
+//   - the refusal is an authentication refusal (401 / 403) — NOT a
+//     billing refusal (402, which is an expired subscription and is
+//     fixed by paying, not by changing a header) and NOT a transport
+//     failure;
+//   - the provider's response names a DIFFERENT authentication header,
+//     which is explicit evidence of a header mismatch.
+//
+// A generic 401 — "invalid api key", "unauthorized" — is an INVALID
+// CREDENTIAL. Repeating the request with another header cannot fix it,
+// and the operator would be told a falsehood if MPM reported the
+// credential as merely mis-presented.
+//
+// AN EXPLICIT OVERRIDE GOVERNS THE REQUEST.
+//
+// The alternative attempt is MPM's guess about how the credential
+// should be presented. When the operator has said how — `auth_scheme`
+// pinned in the profile — guessing is precisely the thing they
+// declined, and the alternative attempt is the attempt that actually
+// transmits.
+//
+// The `auth_scheme=none` case is the sharp one: the operator said
+// "present no credential to this endpoint", and a provider that names
+// "Authorization" in its refusal would otherwise talk MPM into
+// transmitting the credential anyway. The credential would still go to
+// the configured origin, so this is not a cross-origin leak — but it
+// IS a violation of explicit operator intent, which is a fail-open
+// and must not happen.
+//
+// An UNSUPPORTED override ("basic", "query-param") is not a pin:
+// ParseAuthScheme rejects it, and the scheme is then derived as usual.
+func (sc *SynthClient) negotiationCandidate(httpStatus int, body []byte, sent AuthScheme) (AuthScheme, bool) {
+	if !sc.AllowAuthNegotiation {
+		return "", false
+	}
+	if _, pinned := ParseAuthScheme(sc.AuthOverride); pinned {
+		return "", false
+	}
+	switch httpStatus {
+	case http.StatusUnauthorized, http.StatusForbidden:
+	default:
+		return "", false
+	}
+	return authMismatchEvidence(body, sent)
 }
 
 // errString returns the most informative of (error, status).

@@ -447,7 +447,7 @@ func countMemories(dm *mpminternal.DatabaseManager, where string) (int, error) {
 	// is the dedicated countDirectives function below.
 	var query string
 	var args []interface{}
-	directiveExclusion := `NOT (collection = 'directives' OR COALESCE(is_prime_directive, 0) = 1)`
+	directiveExclusion := mpminternal.DirectiveExclusionClause
 	if where == "" {
 		// D-5.2: apply the canonical EXPIRE filter (expires_at IS NULL
 		// OR expires_at > now). The prior code only filtered deleted_at,

@@ -96,6 +96,14 @@ type CachedProbe struct {
 	ErrorClass   string `json:"error_class,omitempty"`   // synth.FailureClass string (preserves truth)
 	ErrorSummary string `json:"error_summary,omitempty"` // bounded human-readable summary, ≤160 chars, sanitized
 	CheckedAt    int64  `json:"checked_at"`              // unix seconds
+	// AuthScheme is the authentication scheme that was presented for
+	// this probe ("bearer" / "x-api-key" / "none"). It is a transport
+	// mechanism label, never secret material.
+	AuthScheme string `json:"auth_scheme,omitempty"`
+	// AuthFailure distinguishes the sub-cases of an authentication
+	// refusal: "invalid_credential" / "subscription" / "permission".
+	// Empty when the failure was not an authentication refusal.
+	AuthFailure string `json:"auth_failure,omitempty"`
 }
 
 // ProbeResult is the in-memory shape returned by RunActiveProbes. It carries
@@ -116,6 +124,14 @@ type ProbeResult struct {
 	ErrorSummary string // bounded ≤160 chars, no secrets
 	CheckedAt    time.Time
 	SourceCached bool // true when produced from ReadCachedHealth; false when fresh
+	// AuthScheme is the authentication scheme that was presented for
+	// this probe ("bearer" / "x-api-key" / "none").
+	AuthScheme string
+	// AuthFailure distinguishes an invalid credential ("invalid_credential")
+	// from an unbilled subscription ("subscription") and an
+	// under-privileged key ("permission"). Empty when the failure was
+	// not an authentication refusal.
+	AuthFailure string
 }
 
 // ProbeKind discriminates which production path the probe invoked.

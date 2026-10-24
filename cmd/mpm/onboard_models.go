@@ -33,6 +33,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"strings"
@@ -256,12 +257,41 @@ func nonInteractiveModelCommands() []string {
 // same success as "both configured", and the report must not conflate
 // them.
 type modelStepOutcome struct {
-	Reason    string         `json:"reason"`
-	Applied   bool           `json:"applied"`
-	ExitCode  int            `json:"exit_code,omitempty"`
+	Reason   string `json:"reason"`
+	Applied  bool   `json:"applied"`
+	ExitCode int    `json:"exit_code,omitempty"`
+
+	// Saved is true when the configuration ON DISK changed as a result
+	// of this step.
+	//
+	// Applied is not Saved. Applied means the wizard ran. The wizard
+	// returns the same exit code whether it saved or the operator
+	// declined the final "Save?" — so the exit code cannot answer the
+	// question, and a report that implied it did would be wrong in the
+	// exact case the operator most needs to know about: they said "no"
+	// and need to know that nothing was committed.
+	//
+	// A run that re-saved byte-identical content is reported as
+	// unchanged, because nothing about the operator's configuration
+	// actually changed.
+	Saved bool `json:"saved"`
+
 	Done      []string       `json:"done,omitempty"`
 	Remaining []string       `json:"remaining,omitempty"`
 	After     *modelStepPlan `json:"after,omitempty"`
+
+	// Attention, Skipped and Errors are the entries THIS STEP
+	// contributed to the report.
+	//
+	// They are kept apart from the report's collected entries on
+	// purpose. The collected entries describe the configuration as it
+	// was FOUND; after the wizard has saved, the report re-collects
+	// them so they describe the configuration as it IS. Without this
+	// split, an after-state report would carry forward an attention
+	// entry that the very step in question had just resolved.
+	Attention []string `json:"attention,omitempty"`
+	Skipped   []string `json:"skipped,omitempty"`
+	Errors    []string `json:"errors,omitempty"`
 }
 
 // summariseModelOutcome splits a post-run plan into what landed and what
@@ -288,6 +318,46 @@ func summariseModelOutcome(after modelStepPlan) (done, remaining []string) {
 // ---------------------------------------------------------------------------
 // Execution — delegates
 // ---------------------------------------------------------------------------
+
+// configSnapshot captures the configuration on disk at a point in time.
+//
+// The guided model step delegates to the `mpm config` wizard, and the
+// wizard returns the same exit code whether it saved the configuration
+// or the operator declined the final "Save?". The only honest way to
+// tell the two apart is to compare what is on disk before and after.
+type configSnapshot struct {
+	exists bool
+	data   []byte
+}
+
+// takeConfigSnapshot reads the configuration file.
+//
+// A configuration that cannot be read is recorded as absent: the
+// comparison is about what changed, and an unreadable file is not a
+// state the operator can have deliberately saved.
+func takeConfigSnapshot() configSnapshot {
+	path := config.ConfigPath()
+	if path == "" {
+		return configSnapshot{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return configSnapshot{}
+	}
+	return configSnapshot{exists: true, data: data}
+}
+
+// changed reports whether the configuration on disk differs from the
+// snapshot s.
+func (s configSnapshot) changed(now configSnapshot) bool {
+	if s.exists != now.exists {
+		return true
+	}
+	if !s.exists {
+		return false
+	}
+	return !bytes.Equal(s.data, now.data)
+}
 
 // runModelStep runs the guided model step and records what it did.
 //
@@ -341,15 +411,25 @@ func runModelStep(opts onboardOptions, rep *onboardReport) {
 	if dec.Proceed {
 		// Delegation. The wizard prompts, validates and saves; onboarding
 		// re-implements none of it.
+		//
+		// The snapshot is taken around the wizard so the outcome can say
+		// whether anything was actually committed. "The wizard ran" and
+		// "the configuration changed" are different facts, and only the
+		// second one tells the operator whether their decline was
+		// honoured.
+		before := takeConfigSnapshot()
 		out.Applied = true
 		out.ExitCode = handleConfigInteractive(cfg)
+		out.Saved = before.changed(takeConfigSnapshot())
 		after = planModelStep(reloadConfig(rep))
 	}
 	out.After = &after
 	out.Done, out.Remaining = summariseModelOutcome(after)
 
 	if !dec.Proceed {
-		rep.Skipped = append(rep.Skipped, "model configuration: "+dec.Reason)
+		entry := "model configuration: " + dec.Reason
+		out.Skipped = append(out.Skipped, entry)
+		rep.Skipped = append(rep.Skipped, entry)
 		if !isTTY {
 			// Hand over the scriptable path rather than just declining.
 			// Naming `mpm config` here matters: an operator who reads only
@@ -369,17 +449,21 @@ func runModelStep(opts onboardOptions, rep *onboardReport) {
 		// "presents partial completion as total success" failure — and it
 		// is the common case, because the wizard's embedding step
 		// DEFAULTS to leaving it unchanged.
-		rep.Attention = append(rep.Attention, fmt.Sprintf(
+		entry := fmt.Sprintf(
 			"model configuration is incomplete: %s still %s",
 			strings.Join(out.Remaining, ", "),
-			pluralVerb(len(out.Remaining), "does", "do")))
+			pluralVerb(len(out.Remaining), "does", "do"))
+		out.Attention = append(out.Attention, entry)
+		rep.Attention = append(rep.Attention, entry)
 	} else {
-		rep.Skipped = append(rep.Skipped,
-			"model configuration: complete after this run")
+		entry := "model configuration: complete after this run"
+		out.Skipped = append(out.Skipped, entry)
+		rep.Skipped = append(rep.Skipped, entry)
 	}
 	if out.ExitCode != 0 {
-		rep.Errors = append(rep.Errors,
-			fmt.Sprintf("`mpm config` wizard exited %d", out.ExitCode))
+		entry := fmt.Sprintf("`mpm config` wizard exited %d", out.ExitCode)
+		out.Errors = append(out.Errors, entry)
+		rep.Errors = append(rep.Errors, entry)
 	}
 }
 

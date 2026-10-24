@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"strings"
 )
 
@@ -48,9 +49,15 @@ func classifyFromWire(err error, class string, httpStatus int, bodyFragment stri
 	// HTTP-derived signals.
 	switch class {
 	case "FailureAuth":
-		// HTTP 401 / 403 / 402 (intentionally excluded from ProbeAuthFailed
-		// per the spec — but FailureAuth is only set for 401/403 by
-		// classifyFromStatus, so this never triggers on 402).
+		// HTTP 401 / 403 are authentication refusals. HTTP 402 is a
+		// BILLING refusal: the credential may be perfectly valid and
+		// the account is simply not billed for the request. The status
+		// enum keeps 402 out of ProbeAuthFailed (which documents
+		// 401/403); the operator-facing reason travels separately as
+		// the auth-failure sub-kind ("subscription").
+		if httpStatus == http.StatusPaymentRequired {
+			return ProbeUnknown
+		}
 		return ProbeAuthFailed
 	case "FailureInvalidMachineResponse":
 		// Parse fail / empty body / empty Content / NaN-Inf vector.

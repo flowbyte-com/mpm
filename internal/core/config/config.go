@@ -70,6 +70,17 @@ type Profile struct {
 	MaxTokens   int     `json:"max_tokens,omitempty"`
 	TimeoutSecs int     `json:"timeout_seconds,omitempty"`
 	Reasoning   string  `json:"reasoning,omitempty"`
+	// AuthScheme is the operator's EXPLICIT authentication-scheme
+	// override: "bearer", "x-api-key" or "none". Empty means "no
+	// override", and the scheme is then resolved from the endpoint's
+	// documented rule and, failing that, from the message protocol.
+	//
+	// The override exists for endpoints whose authentication cannot be
+	// discovered reliably — a self-hosted gateway, a corporate proxy.
+	// It is deliberately NOT a provider catalogue: it names a
+	// transport-level mechanism, not a vendor, and it never changes
+	// which endpoint the credential is sent to.
+	AuthScheme string `json:"auth_scheme,omitempty"`
 }
 
 // ExternalDB describes an external SQLite database to poll for memories.

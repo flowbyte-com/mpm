@@ -790,7 +790,7 @@ service. Try it without installing anything — no daemon setup, no service regi
 
 ### 5.2 Run it as a daemon
 
-This section shows the daemon + systemd setup manually, for transparency and for operators who want to customize individual steps. If you don't need that control, run `./install.sh` instead — it does most of the below (build, install to `~/.mpm/bin`, `make service-scheduler`, `systemctl --user enable --now`, the eCryptfs autostart workaround, and OpenClaw wiring) in one idempotent step. `mpm ops init directives` (see the "Seed the baseline cognitive directives" step in [§5.2](#52-run-it-as-a-daemon)) is **not** part of `install.sh` — it is a separate post-install command by design (the installer prints it as a `next steps` hint at the end). `make service-telemetry` likewise is a separate manual step. Use the manual steps below when you need to pin a specific version, point a unit at a non-canonical install path, or otherwise deviate from the canonical layout.
+This section shows the daemon + systemd setup manually, for transparency and for operators who want to customize individual steps. If you don't need that control, run `./install.sh` instead — it does most of the below (build, install to `~/.mpm/bin`, `make service-scheduler`, `systemctl --user enable --now`, the eCryptfs autostart workaround, and OpenClaw wiring) in one idempotent step. `mpm ops init directives` (see the "Seed the baseline cognitive directives" step in [§5.2](#52-run-it-as-a-daemon)) is **not** part of `install.sh`: the baseline is seeded automatically when the database is created, so the command is a re-run / recovery path rather than a required install step. `make service-telemetry` likewise is a separate manual step. Use the manual steps below when you need to pin a specific version, point a unit at a non-canonical install path, or otherwise deviate from the canonical layout.
 
 For autonomous operation — the scheduler dispatches system-kind wakes (critic audits, snapshots, GC, broadcasts) on a 60s ticker, and `mpm-mcp` exposes MPM to MCP hosts (Claude Code, OpenClaw) over stdio:
 
@@ -908,13 +908,15 @@ source checkout therefore reads and writes the canonical runtime, never
 the checkout — which is what makes it safe for the checkout to live
 somewhere else entirely.
 
-**Seed the baseline cognitive directives** (recommended once after install):
+**Seed the baseline cognitive directives** (optional — the baseline is already seeded when the database is created):
 
 ```bash
 mpm ops init directives
 ```
 
-MPM provides advanced cognitive machinery — wake-context surfacing, audit-cluster detection, session-end triage — but that machinery requires specific agent behaviors to close the loop. These seed directives are the **Baseline Cognitive Bootstrap**: the "batteries-included" operating manual for that machinery. Without them, the scheduler will dispatch wakes but the cognitive loop won't close. Idempotent — safe to re-run; local edits are preserved.
+MPM provides advanced cognitive machinery — wake-context surfacing, audit-cluster detection, session-end triage — but that machinery requires specific agent behaviors to close the loop. These seed directives are the **Baseline Cognitive Bootstrap**: the "batteries-included" operating manual for that machinery. Without them, the scheduler will dispatch wakes but the cognitive loop won't close.
+
+The baseline is applied **automatically** when the database is created, so a fresh install already carries the five reference directives. The command above re-runs the same idempotent seed — useful after an accidental shred, or to seed the shared database of a multi-agent workspace. On a fresh install it reports `0 created, 5 skipped`, because the rows are already there. Idempotent — safe to re-run; local edits are preserved.
 
 **Wire up the MCP host** (Claude Code, OpenClaw, etc.). `mpm-mcp` is spawned by the host as a stdio child process — no separate service to manage. Example `.mcp.json`:
 
@@ -965,7 +967,8 @@ mpm config profile set router provider openrouter
 mpm config profile set router api_key                     # hidden prompt (no echo)
                                                         # or: printf '%s' "$KEY" | mpm config profile set router api_key --stdin
 mpm config component set memory router                   # bind memory writes to the new profile
-                                                        # (auth header + endpoint are inferred from base_url)
+                                                        # (endpoint and authentication scheme are inferred from base_url;
+                                                        #  pin the scheme explicitly with `mpm config profile set <name> auth_scheme bearer`)
 
 # Free tier is just a model suffix — `meta-llama/llama-3.3-70b-instruct:free`:
 mpm config profile set router model meta-llama/llama-3.3-70b-instruct:free
@@ -1010,7 +1013,7 @@ difference between a chatbot and an assistant that feels like a colleague.
 - **Workspace files** — who the agent _is_ (OpenClaw-side, markdown in
   `~/.openclaw/workspace/`)
 - **MPM prime directives** — how MPM's machinery hooks in (DB-side, rows in
-  the `directives` table, seeded by `mpm ops init directives`)
+  the `directives` table, seeded automatically when the database is created)
 - **MPM memories** — what the agent _believes_ (DB-side,
   `mpm_memory action=save` / `mpm_memory action=query`, scales to thousands of rows)
 
@@ -1447,7 +1450,7 @@ shared_attached: true
 Agent sees one merged view
 ```
 
-When the agent calls `mpm_memory action=query`, `mpm_context action=read_directives`, or any read tool, the core queries both sources and merges. For directives, `ReadDirectivesForFramework` reads the local baseline (the four baseline directives seeded by `mpm ops init directives` against the *local* `mpm.db`) and overlays the shared-database directives, deduplicating by `stable_id` (shared takes precedence — it is the operator-curated truth). For memory searches, FTS5 runs across both schemas and merges relevance scores with a multiplicative **Shared Premium** (1.20× for shared results, 1.35× when the shared row also matches a `query_global_rules` scan). House rules outrank noisy local memories without being able to *invent* matches.
+When the agent calls `mpm_memory action=query`, `mpm_context action=read_directives`, or any read tool, the core queries both sources and merges. For directives, `ReadDirectivesForFramework` reads the local baseline (the five baseline directives seeded into the *local* `mpm.db` when the database is created) and overlays the shared-database directives, deduplicating by `stable_id` (shared takes precedence — it is the operator-curated truth). For memory searches, FTS5 runs across both schemas and merges relevance scores with a multiplicative **Shared Premium** (1.20× for shared results, 1.35× when the shared row also matches a `query_global_rules` scan). House rules outrank noisy local memories without being able to *invent* matches.
 
 The agent never makes a decision to "call shared.db". It calls `mpm_memory` or `mpm_context`, and MPM serves the union. The only agent-visible surface is the `shared_attached` boolean in `health_check` responses — present so operators can verify the wiring, not so agents need to branch on it.
 
@@ -1836,6 +1839,133 @@ mpm config capability list|get|set <capability>   # Capability registry (operato
 mpm config validate                                # Structural validation (5 layers of checks; exit 0/1/2)
 ```
 
+#### What the wizard records, and what it refuses
+
+The wizard's public interface is deliberately vendor-neutral: the
+operator picks a **protocol**, never a vendor, and no model or
+provider catalogue is offered. What the wizard writes into
+`mpm_config.json` is a different matter, and the two must not be
+confused.
+
+The **LLM** profile records `provider: "custom"`. That is meaningful:
+the runtime infers the message protocol from the endpoint at
+construction time (see *Model Connectivity Probes* below), so the
+profile itself names no vendor.
+
+The **embedding** profile records the **runtime provider** — the name
+that selects a backend in the embedding resolver (`ollama`,
+`openai-compatible`, `openai`, `openrouter`). The embedding resolver
+has no inference step: the provider name *is* the backend selector, so
+`"custom"` selects nothing and the resulting configuration is
+rejected by the runtime (`provider "custom" is not implemented`). The
+wizard's protocol picker is the translation point: each protocol it
+offers maps onto exactly one implemented provider.
+
+Two rules follow from that, and both are enforced before anything is
+written:
+
+* **The generated profile must resolve.** The wizard passes the
+  profile it just built through the runtime's own embedding resolver
+  before offering it for saving. A profile the runtime cannot act on
+  is not offered.
+* **The endpoint must be a usable URL.** A base URL must carry an
+  explicit `http://` or `https://` scheme and a host. A value such as
+  `http:://127.0.0.1:11434` — a hand-typed "http://" with the colon
+  entered twice — is refused at the prompt, with the expected shape
+  shown, rather than saved and left to fail later. An empty base URL
+  stays legal: the providers normalise it to their own default
+  endpoint.
+
+#### How a component resolves to a profile, and what Doctor reports
+
+A generative component (memory, critic, …) resolves to a profile
+through **one** chain, in this order:
+
+1. an explicit binding in `components.<component>`;
+2. the `default` profile;
+3. the legacy `synth` block (a migration path for pre-profiles
+   configurations).
+
+An unbound component resolving to the `default` profile is **config
+resolution, not failover**: once a component has resolved to profile
+X, a provider failure on X must never cause a request to profile Y.
+The wizard writes `profiles.default` — the canonical destination — and
+does not write an explicit binding for every component.
+
+Every consumer of that chain agrees: the dashboard, the onboarding
+plan, the synthesis worker, and `mpm config component list`, which
+renders the source as `(explicit)`, `(inherited, default)`,
+`(inherited, legacy)` or `(explicit, invalid)`.
+
+`mpm doctor`'s **Memory LLM** row is a binding check and resolves
+through that same chain, so its verdict reflects what the runtime will
+actually do:
+
+| Configuration | Verdict | Row |
+| --- | --- | --- |
+| explicit binding → complete profile | PASS | `<model> · <Provider>` |
+| no explicit binding, `default` profile present | PASS | `<model> · <Provider> (default profile)` |
+| no explicit binding, legacy `synth` block present | PASS | `<model> · <Provider> (legacy synth block)` |
+| explicit binding → missing profile (dangling) | WARN | `profile "<name>" not found`, naming the profile the runtime falls back to |
+| no binding, no `default`, no legacy | WARN | `no profile configured` |
+| resolved profile missing provider / model / base_url | WARN | `profile "<name>" incomplete (missing: …)` |
+| `components.memory == "disabled"` | INFO | `intentionally disabled` |
+| no `mpm_config.json` at all | INFO | `no config file present` |
+
+Two consequences are deliberate:
+
+* An **inherited** profile is never reported as an absent one. The
+  fallback is made *visible* — the row names the profile it resolved
+  to and says the resolution was inherited — rather than hidden, and
+  it is never reported as a healthy explicit binding.
+* A **dangling explicit binding** still WARNs even when the
+  `default` profile happens to cover for it. The operator asked for a
+  specific profile and the substrate cannot give it to them; a silent
+  fallback would hide a configuration that does not do what was asked.
+
+#### When the wizard commits, and what the onboarding report describes
+
+The interactive wizard has **exactly one commit point**: the final
+`Save?` confirmation at the end of the run. Every step before it —
+the generative profile, the optional embedding profile, the optional
+critic profile — mutates the in-memory configuration only. Declining
+the final save therefore leaves the operator's configuration exactly as
+it was, which is what "Aborted." means.
+
+**An absent answer is a decline, not a consent.** The confirmation
+prompt defaults to Yes on an empty line, so EOF and read errors are
+handled as cancellation: pressing Ctrl-D at the `Save?` prompt — the
+standard "I'm done" gesture — aborts the run and writes nothing.
+An operator's abort must never be recorded as an approved commit. An
+actual empty line (the operator pressing Enter) is a complete answer
+and keeps the `[Y/n]` default; a read error is not an answer at all.
+
+`mpm onboard` reports the same fact in two layers, because "the wizard
+ran" and "the configuration changed" are different facts:
+
+* The step outcome records **saved** — whether the configuration on
+  disk actually changed. The wizard exits `0` whether it committed or
+  the operator declined, so the exit code alone cannot answer this.
+* The report is **re-collected** after a step that changed the
+  configuration, and is marked as an after-state. A report of a
+  configuration the run itself has just replaced describes a moment
+  that no longer exists.
+
+The two are separate on purpose. The step's own findings (what it
+planned, what it left outstanding, what it could not do) are carried
+across the re-collection; the collected rows and the collected
+problems are replaced, so a problem the run resolved is not reported as
+an open one.
+
+Four states are distinguished, and the report never conflates them:
+
+| State | Where it is shown |
+| --- | --- |
+| **saved** | the model step's outcome — the configuration on disk changed |
+| **structurally valid** | the Models section — `mpm config validate`'s verdict |
+| **runtime-resolvable** | the Models section — the profile each component resolves to |
+| **live-verified** | *never* by onboarding — `mpm onboard` opens no endpoint; `mpm doctor` is what probes a provider |
+
 ### `version` — Build Provenance and Update Check
 
 Every MPM binary carries its own build provenance, stamped in at link time.
@@ -2218,8 +2348,8 @@ mpm ops backup [path]
 mpm ops restore-db <path>
 mpm ops ingest <path>
 
-# Init (one-time bootstrap — idempotent)
-mpm ops init directives       # Seed baseline cognitive directives
+# Init (idempotent re-runs of the automatic bootstrap)
+mpm ops init directives       # Re-run the baseline cognitive directive seed
 mpm ops init skills           # Seed baseline skill library (status, health, etc.)
 mpm ops init topics           # Link existing theories/decisions memories to their topics
 
@@ -2592,6 +2722,14 @@ mpm ops review --promoted   # Show recently elevated LTM memories
 mpm ops review --stale      # Surface forgotten LTM memories
 ```
 
+The stale queue covers **memories**, not directives. A directive is standing
+policy read at wake time; it is never a vector-search candidate, and its
+`last_accessed_at` is never written, so a directive in the queue could never
+be cleared by doing the work. Directives are therefore excluded from the
+review candidate set by the canonical directive predicate — the same one the
+active-memory metric uses — while ordinary high-weight memories stay in the
+queue untouched.
+
 
 ---
 
@@ -2696,9 +2834,13 @@ Elevation: `mpm call mpm_memory --payload '{"action":"save","params":{"fact":"Al
 The `mpm_context action=proactive_recall_hint` engine also elevates directive-adjacent memories when the current conversation context matches their semantic territory.
 #### Baseline Cognitive Bootstrap
 
-For fresh installs, MPM ships a small set of reference directives that close the system's most important cognitive loops (wake-context reading, session-end cluster triage). Seed them once with `mpm ops init directives` — idempotent, never overwrites local edits. See §5 step "Initialize baseline directives" for context.
+MPM ships five reference directives that close the system's most important cognitive loops: wake-context reading, session-end cluster triage, wake triage, daemon health, and epistemic compaction.
 
-> **Implementation note:** The reference directives live in `internal/seed/directives.go`. The bootstrap command detects existing directives by stable ID and skips them; local edits to a seeded directive are preserved, never silently overwritten.
+They are seeded **automatically** when the database is first created — every production constructor applies the registry, so a fresh install is never directive-blind. `mpm ops init directives` re-runs the same idempotent seed; it is useful after an accidental shred, or to seed the shared database of a multi-agent workspace. Re-running is safe: local edits to a seeded directive are preserved, never silently overwritten.
+
+Because the seed is automatic, a fresh install reports `0 created, 5 skipped` — the rows are already there. A skipped row is not a failure.
+
+> **Implementation note:** The reference directives live in `internal/core/seed/directives.go`. The bootstrap command detects existing directives by stable ID and skips them; local edits to a seeded directive are preserved, never silently overwritten.
 
 #### Multi-Framework Scope
 
@@ -3164,6 +3306,27 @@ This section is the operator-facing view of the same model: what runs, when, and
 
 The probe exercises MPM's real inference path via `synth.SynthClient.DoLLMRequest` and the `EmbeddingProvider` factory — there is no second HTTP code path or alternative wire library. Failed probes never roll back valid configuration: provider outages (cold local models, transient rate limits, mid-provision credentials) are legitimate intermediate states.
 
+#### Authentication is resolved separately from the message protocol
+
+The **message protocol** (Anthropic-compatible / OpenAI-compatible / Ollama) and the **authentication scheme** (`Authorization: Bearer`, `X-Api-Key`, none) are independent. An endpoint may speak the Anthropic message format and still expect a bearer token — MiniMax's Anthropic-compatible surface at `https://api.minimax.io/anthropic/v1` does exactly that.
+
+MPM resolves the scheme per request, first match wins:
+
+1. the operator's explicit override — `mpm config profile set <name> auth_scheme bearer|x-api-key|none` (an empty value clears the override and returns the profile to derived resolution);
+2. the endpoint's own documented rule, matched on the **parsed URL host** against an exact domain set — never a substring search over the whole URL, so `https://notminimax.io` is not mistaken for MiniMax;
+3. a scheme negotiated during an explicitly approved connection verification, for this exact (endpoint, credential) pair;
+4. the protocol default — OpenAI-compatible → `Authorization: Bearer`, Anthropic-compatible → `X-Api-Key`.
+
+Steps 1 and 2 are always tried before any alternative attempt. Step 3 exists only because a verification observed the endpoint refusing the scheme that was sent **and naming the one it wanted**; the retained scheme is invalidated when the endpoint or the credential changes, and it lasts for the life of the process. An operator who wants a discovered scheme to survive a restart pins it durably with `mpm config profile set <name> auth_scheme <scheme>` — a probe never writes into the operator's configuration on its own.
+
+A bounded alternative attempt happens **only** during connection verification (the Doctor probe and the post-save verification probe), **only** on HTTP 401 / 403, **only** when the provider's response names a different authentication header, and **only** when the operator has **not** pinned a scheme. An explicit override governs the whole request: the alternative attempt is MPM's guess about how the credential should be presented, and a pinned scheme is the operator's own answer to that question. `auth_scheme=none` therefore means no credential is transmitted to that endpoint, and MPM never negotiates its way back into an authenticated attempt — a provider that names `Authorization` in its refusal does not get to overrule the operator. A generic "invalid api key" is an invalid credential and is never retried; HTTP 402 (subscription) is never negotiated, because paying — not changing a header — is the remedy. Normal synthesis never negotiates, so no application start-up ever spends an extra provider call guessing.
+
+A refusal names the scheme that was actually presented, so an operator can tell a pinned scheme from a derived one.
+
+Authentication refusals stay distinguishable in the operator's report: an invalid credential, an unbilled subscription and an under-privileged key are three different problems with three different remedies.
+
+The credential never leaves the configured origin: a redirect to a different host or port is refused rather than followed, and a downgrade from `https` to `http` is refused too.
+
 ### Self-Healing Integrity Loop
 
 Long-running databases accumulate drift. Soft-deleted memories leave ghost rows in FTS5 indexes. Cascade-deletes fail to clean up all related tables. Schema migrations introduce orphans. Without a closed feedback loop, this drift degrades search quality silently and compounds over time.
@@ -3189,6 +3352,35 @@ because the standard report has no remediation path. `--all` is not
 supported: `mpm doctor` already runs every available check. `--explain`
 is a separate mode that prints the FTS5 query plan, and cannot be
 combined with `--deep-scan`.
+
+#### What the Doctor counts, and what it excludes
+
+Several Doctor rows count "memories". They must count the same
+population, or the report contradicts itself — as it did on a clean
+install, where the coverage row read *6 memories, all provider-generated*
+directly above an integrity row reading *6 live memories have no vector*.
+
+**Coverage is measured from the stored body, not the label.** The
+`memories.embedding_source` column defaults to `'provider'` and is not
+set on the ordinary insert path, so counting the label counts
+vector-less rows as covered. The **Stored embeddings** row therefore
+counts a memory as covered only when it actually holds a vector.
+
+**Bootstrap directives are excluded, and disclosed.** A directive is
+standing policy, not a searchable memory: `mpm recall` searches
+`collection='memories'` and the hybrid search filters on the same
+collection, so a directive is never a vector-search candidate and its
+missing vector is an expected policy choice rather than an indexing
+gap. Directives are therefore excluded from the vector statistics, from
+the active-memory counts and from the spaced-review queue — by the
+canonical directive predicate — and the rows that exclude them say so,
+rather than dropping them silently.
+
+Excluding directives never hides a real gap: a genuine missing vector in
+an ordinary memory still warns, and a genuine high-weight memory still
+appears in the review queue. The exclusion is a difference of
+*population*, not of *evidence*.
+
 
 #### Doctor is observational
 

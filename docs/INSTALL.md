@@ -139,14 +139,26 @@ alternative.
 ### 1d. Bootstrap cognitive state
 
 ```bash
-~/.mpm/bin/mpm ops init directives          # seed prime directives (idempotent)
 ~/.mpm/bin/mpm status                      # verify DB reachable
 ~/.mpm/bin/mpm call mpm_context --payload '{"action":"read_wake_context","params":{}}'        # first agent tool call
 ```
 
-`ops init directives` is the *only* command that touches cognitive state during
-install. It seeds prime directives (wake protocol, canonical DB path, etc.)
-into the database. Re-running is safe — local edits are preserved.
+The Baseline Cognitive Bootstrap — the five prime directives that close MPM's
+cognitive loops (wake protocol, cluster triage, wake triage, daemon health,
+epistemic compaction) — is seeded **automatically** when the database is first
+created. A fresh install therefore already carries it.
+
+`mpm ops init directives` re-runs the same idempotent seed. Use it to recover
+after an accidental shred, or to seed the shared database of a multi-agent
+workspace:
+
+```bash
+~/.mpm/bin/mpm ops init directives          # re-seed prime directives (idempotent)
+```
+
+Re-running is safe — local edits are preserved. On a fresh install the command
+reports `0 created, 5 skipped`, because the rows are already there; a skipped
+row is not a failure.
 
 ### 1e. Script modes reference
 
@@ -204,6 +216,27 @@ into the database. Re-running is safe — local edits are preserved.
 > headless deployments) can opt out by removing the autostart entry and instead
 > adding `ExecStartPre=/bin/bash -c 'until mountpoint -q $HOME; do sleep 1; done'`
 > to `mpm-scheduler.service` via `systemctl --user edit mpm-scheduler`.
+
+### 1f. Reading the installer's report
+
+A successful install ends with a `VALIDATION` section and an `INSTALL COMPLETE`
+banner. Every message the installer prints — progress, warnings, errors, the
+completion banners — goes to **stderr**, so capture it if you are logging the
+install (`./install.sh 2>&1 | tee install.log`).
+
+Two failure classes are distinguished, and the distinction is load-bearing:
+
+- **Fatal.** The install aborts and exits non-zero, naming what failed — a
+  failed validation, a service that would not start, a refused or rolled-back
+  binary promotion. The message is always printed.
+- **Non-fatal.** A host-adapter reconciliation failure is a *warning*. One
+  broken adapter (a host whose managed-block installer fails) does not abort
+  the install: the installer says so, names the adapter, and carries on to
+  validation and the completion banner. Retry it later with that adapter's own
+  installer, or with `make refresh-installed`.
+
+So: an install whose output ends without `INSTALL COMPLETE` did not complete.
+Read the error immediately above the end of the output — it is there.
 
 ## 2. Agentic Cron (recurring tasks, optional)
 

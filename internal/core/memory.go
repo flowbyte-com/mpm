@@ -1979,6 +1979,22 @@ func cosineSimilarityFloat32(a, b []float32) float32 {
 
 // SpacedReinforcementReview returns memories that should be reviewed for reinforcement.
 // These are memories that are LTM or high-weight but haven't been accessed recently.
+//
+// 2026-10-23 (HAL-9001 Finding 5): directive rows are excluded.
+//
+// A directive is standing policy, not a memory the agent learned: it is
+// read directly at wake time and is never a vector-search candidate.
+// The seeded baseline directives carry weight=10 and never have
+// `last_accessed_at` written (the directive read path does not touch
+// it), so they matched this query forever. On a clean install that
+// produced "6 memories due for spaced review (>5 considered backlog)"
+// for five rows that are not memories and one that is — and the
+// backlog could never be cleared, because clearing it would mean
+// "reviewing" the bootstrap policy.
+//
+// The exclusion is the canonical directive predicate, the same one the
+// `memories_active` metric and GetMemoryStats already use, so every
+// surface that counts ordinary memories agrees.
 func (s *MemoryStore) SpacedReinforcementReview(daysSinceAccess int, limit int) ([]*Memory, error) {
 	if s.DB == nil {
 		if err := s.InitSQLite(); err != nil {
@@ -2000,6 +2016,7 @@ func (s *MemoryStore) SpacedReinforcementReview(daysSinceAccess int, limit int) 
 		       last_accessed_at
 		FROM memories
 		WHERE deleted_at IS NULL
+		  AND ` + DirectiveExclusionClause + `
 		  AND (is_long_term = 1 OR weight >= 5)
 		  AND (last_accessed_at IS NULL OR last_accessed_at < CAST(strftime('%s','now', '-' || ? || ' days') AS INTEGER))
 		ORDER BY last_accessed_at ASC NULLS FIRST,

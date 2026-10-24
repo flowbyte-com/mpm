@@ -93,20 +93,23 @@ func probeGenerativeWithTimeout(ctx context.Context, p *config.Profile, kind Pro
 	}
 
 	// Build a probe-specific SynthClient with probeMaxTokens.
-	// The credential goes through synth.ResolveAPIKey so the probe
-	// resolves the same credential the runtime would: an explicit
-	// profile api_key first, the provider's own environment variable
-	// second. Reading p.APIKey directly here made every environment-only
-	// install report a false auth failure from the probe while real
-	// synthesis against the same profile succeeded.
-	sc := &synth.SynthClient{
-		Model:     p.Model,
-		APIKey:    synth.ResolveAPIKey(p.APIKey, p.BaseURL),
-		BaseURL:   p.BaseURL,
-		Timeout:   timeout,
-		MaxTokens: probeMaxTokens,
-		Wire:      synth.InferWire(p.BaseURL),
-	}
+	//
+	// The client is built through the substrate's single construction
+	// point, so the probe resolves exactly what the runtime resolves:
+	// the same protocol, the same credential (an explicit profile
+	// api_key first, the provider's own environment variable second)
+	// and the same authentication scheme. Reading p.APIKey directly
+	// here made every environment-only install report a false auth
+	// failure from the probe while real synthesis against the same
+	// profile succeeded; re-deriving the wire here meant the probe
+	// could disagree with the model factory about the protocol.
+	sc := synth.NewClientForProfile(*p, timeout, probeMaxTokens)
+	// The probe IS the explicitly approved connection verification, so
+	// it — and only it — may make the bounded alternative
+	// authentication attempt when the provider names a different
+	// authentication header. The attempt is bounded to one extra
+	// request and consumes the plan's single recovery slot.
+	sc.AllowAuthNegotiation = true
 
 	body := map[string]interface{}{
 		"model":       p.Model,
@@ -125,6 +128,11 @@ func probeGenerativeWithTimeout(ctx context.Context, p *config.Profile, kind Pro
 		Model:      p.Model,
 		BaseURL:    p.BaseURL,
 		Credential: p.APIKey,
+		// The explicit authentication-scheme override participates in
+		// the fingerprint: changing it changes the request that would
+		// be made, so a cached result for the previous override must
+		// not be presented as current.
+		OtherKeyValues: []FingerprintField{{Key: "auth_scheme", Value: p.AuthScheme}},
 	})
 
 	res := ProbeResult{
@@ -136,6 +144,10 @@ func probeGenerativeWithTimeout(ctx context.Context, p *config.Profile, kind Pro
 		LatencyMs:   latency.Milliseconds(),
 		Fingerprint: fp,
 		CheckedAt:   start,
+		// The authentication scheme that was presented. After a
+		// successful bounded negotiation this is the scheme that
+		// actually worked, which is what the operator needs to pin.
+		AuthScheme: sc.AuthScheme().String(),
 	}
 
 	if err != nil {
@@ -152,6 +164,12 @@ func probeGenerativeWithTimeout(ctx context.Context, p *config.Profile, kind Pro
 		bodyFrag := extractBodyFragment(err)
 		res.Status = classifyFromWire(err, class, httpStatus, bodyFrag)
 		res.ErrorSummary = sanitizeError(err.Error())
+		// Keep an invalid credential, an unbilled subscription and an
+		// under-privileged key distinguishable. They are three
+		// different problems with three different remedies, and
+		// collapsing them into one "auth failed" line is what made the
+		// first clean-install report untrustworthy.
+		res.AuthFailure = synth.ClassifyAuthFailure(httpStatus).String()
 		return res
 	}
 
@@ -213,6 +231,14 @@ func classifySynthError(err error) (class string, httpStatus int) {
 			httpStatus = n
 			switch {
 			case n == 401 || n == 403:
+				class = "FailureAuth"
+			case n == 402:
+				// 2026-10-23 (HAL-9001): the production classifier
+				// (synth.classifyFromStatus) maps 401 / 402 / 403 to
+				// FailureAuth. This duplicate of it omitted 402, so
+				// the probe reported an EMPTY ErrorClass for a billing
+				// refusal and the operator's report had no truthful
+				// class at all. Keep the two classifiers in agreement.
 				class = "FailureAuth"
 			case n == 429:
 				class = "FailureRateLimit"

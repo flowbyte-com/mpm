@@ -143,6 +143,8 @@ func ToCachedProbe(r ProbeResult) CachedProbe {
 		ErrorClass:   r.ErrorClass,
 		ErrorSummary: r.ErrorSummary,
 		CheckedAt:    r.CheckedAt.Unix(),
+		AuthScheme:   r.AuthScheme,
+		AuthFailure:  r.AuthFailure,
 	}
 }
 

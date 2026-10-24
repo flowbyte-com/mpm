@@ -7,17 +7,24 @@
 // detected (content hash mismatch) and surfaced in the report; the
 // edit is never silently overwritten.
 //
-// This is the explicit alternative to auto-seeding at install. The
-// "Truth is external" and "no auto-noise" principles forbid silent
-// state mutation, so the operator runs this command when they want
-// the baseline directives seeded. Re-runs are safe no-ops.
+// This command RE-RUNS the baseline seed; it is not how the baseline
+// gets there. NewDatabaseManager applies the registry whenever the
+// database is created, so a fresh install already carries the five
+// reference directives before this command is ever run — and a fresh
+// install therefore reports "0 created, 5 skipped".
+//
+// The "Truth is external" and "no auto-noise" principles apply to what
+// the SEED contains (MPM never invents the operator's own directives),
+// not to the presence of the shipped baseline. The command remains the
+// documented recovery path after an accidental shred, and the way to
+// seed the shared database of a multi-agent workspace.
 //
 // Architecture:
 //
-//	registry:  internal/seed/directives.go (SeedDirectives slice)
-//	engine:    internal/seed/engine.go   (ApplyDirectives + insertSeedRow)
-//	cli:       this file                 (handleOpsInitDirectives)
-//	router:    cmd/mpm/router.go         (case "init": "directives")
+//	registry:  internal/core/seed/directives.go (SeedDirectives slice)
+//	engine:    internal/core/seed/engine.go   (ApplyDirectives + insertSeedRow)
+//	cli:       this file                      (handleOpsInitDirectives)
+//	router:    cmd/mpm/router.go              (case "init": "directives")
 package main
 
 import (
@@ -101,5 +108,21 @@ func printSeedReport(banner string, s seed.SeedSummary, label string) {
 			fmt.Println("proactive_recall_hint when conversation keywords overlap with")
 			fmt.Println("a skill's when_to_use field.")
 		}
+		return
+	}
+
+	// Directives only: on a fresh install the baseline was already seeded
+	// when the database was created, so this command legitimately creates
+	// nothing. "0 created, 5 skipped" is the correct outcome there, not a
+	// failed bootstrap — say so, because an unexplained zero reads as a
+	// defect to a first-time operator.
+	//
+	// Skills are NOT auto-seeded (ApplySkills is only reachable from this
+	// CLI), so the "already there" explanation must not leak into the
+	// skills report.
+	if label == "directives" && len(s.Skipped) > 0 {
+		fmt.Println("\nAlready seeded — the baseline is applied automatically when the")
+		fmt.Println("database is created, so this command had nothing left to create.")
+		fmt.Println("Nothing was changed; to re-seed, delete the rows first.")
 	}
 }

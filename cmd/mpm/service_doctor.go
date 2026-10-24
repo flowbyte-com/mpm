@@ -245,17 +245,16 @@ func (s *DoctorService) checkDatabase() DoctorCheck {
 	return check
 }
 
-// checkEmbeddings inspects the embedding_source provenance of live memories.
+// checkEmbeddings inspects the embedding provenance of live memories.
 // Reports per spec §7.1 table:
 //
-//	hash>0 AND provider=0 → FAIL (fully degraded)
-//	hash>0               → WARN (legacy rows present)
-//	null/total > 10%     → WARN (backfill needed)
-//	all real provider    → PASS
+//	hash>0 AND no provider vectors → FAIL (fully degraded)
+//	hash>0                        → WARN (legacy rows present)
+//	no vector / total > 10%       → WARN (backfill needed)
+//	all provider vectors          → PASS
 //
-// checkEmbeddings measures embedding COVERAGE: the distribution of the
-// `embedding_source` label across live memories, against a statistical
-// tolerance (it warns only when nulls exceed 10% of rows).
+// checkEmbeddings measures embedding COVERAGE against a statistical
+// tolerance (it warns only when the shortfall exceeds 10% of rows).
 //
 // It deliberately does NOT validate payloads. Coverage is not validity —
 // "12% of memories lack a vector" is a different claim from "the vectors
@@ -269,40 +268,75 @@ func (s *DoctorService) checkDatabase() DoctorCheck {
 // must not make the substrate look unhealthy, so this check keeps its
 // forgiving tolerance, while integrity — which is about data that IS
 // present — has none.
+//
+// 2026-10-23 (HAL-9001 Finding 5): this check counted the
+// `embedding_source` LABEL, not the stored body:
+//
+//	providerCount := total - hashCount - nullCount
+//
+// `memories.embedding_source` DEFAULTS to 'provider' and is not set on
+// the ordinary insert path, so a row holding NO vector at all was
+// counted as provider-covered. On a clean install that produced "6
+// memories, all provider-generated" directly above an integrity row
+// reading "6 live memories have no vector" — the two rows contradicted
+// each other and the coverage row was the one that lied.
+//
+// The correction measures the body: a row counts as covered only when
+// it actually holds a vector. The population is ORDINARY memories —
+// bootstrap directives are excluded and disclosed, because a directive
+// is policy text and is never a vector-search candidate, so its absent
+// vector is an expected policy choice rather than an indexing gap.
+// Genuine gaps in ordinary memories are still reported and still WARN.
 func (s *DoctorService) checkEmbeddings() DoctorCheck {
-	check := DoctorCheck{Name: "Embeddings"}
-	var total, hashCount, nullCount int
+	check := DoctorCheck{Name: "Stored embeddings"}
+
+	// ordTotal       — live ordinary memories (directives excluded)
+	// ordVector      — ordinary live memories holding a vector body
+	// providerVector — ordinary live memories holding a provider-sourced body
+	// hashCount      — ordinary live memories carrying a legacy hash body
+	// directiveCount — live directive rows
+	var ordTotal, ordVector, providerVector, hashCount, directiveCount int
 	if err := s.dm.QueryRowTracked(
-		`SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL`,
-	).Scan(&total); err != nil {
+		`SELECT
+			COALESCE(SUM(CASE WHEN `+mpminternal.DirectiveExclusionClause+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN `+mpminternal.DirectiveExclusionClause+` AND `+hasVectorBodySQL+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN `+mpminternal.DirectiveExclusionClause+` AND embedding_source='provider' AND `+hasVectorBodySQL+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN `+mpminternal.DirectiveExclusionClause+` AND embedding_source='hash' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN `+mpminternal.DirectivePredicate+` THEN 1 ELSE 0 END), 0)
+		FROM memories WHERE deleted_at IS NULL`,
+	).Scan(&ordTotal, &ordVector, &providerVector, &hashCount, &directiveCount); err != nil {
 		check.Status = "WARN"
 		check.Message = fmt.Sprintf("could not count memories: %v", err)
 		return check
 	}
-	if err := s.dm.QueryRowTracked(
-		`SELECT
-			COALESCE(SUM(CASE WHEN embedding_source='hash' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN embedding_source='null' THEN 1 ELSE 0 END), 0)
-		FROM memories WHERE deleted_at IS NULL`,
-	).Scan(&hashCount, &nullCount); err != nil {
-		check.Status = "WARN"
-		check.Message = fmt.Sprintf("could not count embedding sources: %v", err)
-		return check
+
+	noVector := ordTotal - ordVector
+
+	// The directive population is disclosed rather than dropped: the
+	// operator can see why the database holds rows without vectors.
+	if directiveCount > 0 {
+		check.Details = append(check.Details, fmt.Sprintf(
+			"%d bootstrap directive rows are excluded from this count. A directive is "+
+				"standing policy read at wake time, not a searchable memory, so it holds "+
+				"no vector by design — this is not an indexing gap.", directiveCount))
 	}
-	providerCount := total - hashCount - nullCount
+
 	switch {
-	case hashCount > 0 && providerCount == 0:
+	case hashCount > 0 && providerVector == 0:
 		check.Status = "FAIL"
 		check.Message = fmt.Sprintf("%d legacy hash rows; no real embeddings persisted; semantic search fully degraded", hashCount)
-		check.Details = []string{"Run `mpm ops migrate-embeddings` to classify and remediate."}
+		check.Details = append(check.Details, "Run `mpm ops migrate-embeddings` to classify and remediate.")
 	case hashCount > 0:
 		check.Status = "WARN"
 		check.Message = fmt.Sprintf("%d legacy hash rows present", hashCount)
-		check.Details = []string{"Run `mpm ops migrate-embeddings` to classify and remediate."}
-	case total > 0 && nullCount*10 > total: // > 10%
+		check.Details = append(check.Details, "Run `mpm ops migrate-embeddings` to classify and remediate.")
+	case ordTotal == 0 && directiveCount > 0:
+		check.Status = "PASS"
+		check.Message = fmt.Sprintf("no memories stored; %d bootstrap directives present", directiveCount)
+	case noVector > 0 && noVector*10 > ordTotal: // > 10%
 		check.Status = "WARN"
-		check.Message = fmt.Sprintf("%d / %d without embedding — run `mpm ops backfill-embeddings`", nullCount, total)
-	default:
+		check.Message = fmt.Sprintf("%d / %d without embedding — run `mpm ops backfill-embeddings`", noVector, ordTotal)
+	case providerVector == ordTotal:
 		check.Status = "PASS"
 		// Final release-pass wording (defect: doctor said "all from real
 		// provider" while the embedding-provider check said "no
@@ -316,11 +350,21 @@ func (s *DoctorService) checkEmbeddings() DoctorCheck {
 		// Final-pass wording: label this row "Stored embeddings" so
 		// the historical-vs-current distinction is unambiguous in
 		// the rendered output (the Embedding provider row directly
-		// below is the forward-looking signal). The label change is
-		// in service_doctor.go's Check.Name; the message stays in
+		// below is the forward-looking signal). The message stays in
 		// passive voice so it doesn't claim current provider state.
-		check.Name = "Stored embeddings"
-		check.Message = fmt.Sprintf("%d memories, all provider-generated", total)
+		check.Message = fmt.Sprintf("%d memories, all provider-generated", ordTotal)
+	default:
+		// A shortfall below the 10% tolerance: the row stays PASS (the
+		// coverage tolerance is deliberate), but the message no longer
+		// claims "all" — it states the ratio, and the detail names the
+		// shortfall. The integrity row reports the same fact without a
+		// tolerance.
+		check.Status = "PASS"
+		check.Message = fmt.Sprintf("%d of %d memories carry a provider-generated vector", providerVector, ordTotal)
+		check.Details = append(check.Details, fmt.Sprintf(
+			"%d of %d live memories hold no vector. The shortfall is below this row's "+
+				"10%% tolerance; the Embedding integrity row reports it without a tolerance.",
+			noVector, ordTotal))
 	}
 	return check
 }
@@ -800,14 +844,48 @@ func (s *DoctorService) checkReviewBacklog() DoctorCheck {
 //
 //	A. mpm_config.json absent (fresh install / test env) → INFO
 //	B. mpm_config.json unreadable                       → WARN
-//	C. no binding (Components["memory"] empty)           → WARN
-//	D. binding == "disabled" sentinel                    → INFO
-//	E. binding points at a missing profile name         → WARN
-//	   (and no Profiles["default"] fallback)
-//	F. profile exists but required field missing        → WARN
+//	C. binding == "disabled" sentinel                    → INFO
+//	D. explicit binding points at a missing profile     → WARN
+//	   (a genuinely broken binding, whether or not the
+//	   default-profile fallback happens to cover for it)
+//	E. no explicit binding and nothing resolves at all   → WARN
+//	F. profile resolved but a required field is missing → WARN
 //	   (provider / model / base_url — credential
 //	   state is NEVER included in the message)
-//	G. profile bound and structurally complete         → PASS
+//	G. profile resolved and structurally complete       → PASS
+//	   (the row names the source of the resolution: an
+//	   explicit binding, the "default" profile, or the
+//	   legacy synth block)
+//
+// 2026-10-23 (HAL-9001 Finding 3): this check used to read the
+// RAW binding (`cfg.DefaultComponentProfile("memory")`) and
+// report WARN "no profile configured" whenever Components["memory"]
+// was unset — even when the runtime would happily resolve the
+// memory component through Profiles["default"]. The onboarding
+// wizard writes Profiles["default"] (the canonical destination,
+// cmd/mpm/handlers_config.go:201) and does not write an explicit
+// memory binding, so a correctly configured install was reported
+// as having no memory LLM at all.
+//
+// The diagnostic now resolves through the SAME canonical resolver
+// the runtime uses — config.ResolveProfile("memory") — whose
+// documented precedence chain (internal/core/config/config.go:245)
+// is: explicit binding, then Profiles["default"], then the legacy
+// synth block. The dashboard (resolveDashboardLLM), the onboarding
+// plan (planModelStep) and the synthesis worker already resolve
+// that way; Doctor was the odd one out.
+//
+// The fallback is made VISIBLE rather than hidden: the row says
+// which profile the component resolves to and whether that
+// resolution was inherited. A broken explicit binding still WARNs,
+// because an operator who bound "review" and got "default" has a
+// configuration that does not do what they asked.
+//
+// The configuration model is deliberately NOT changed: the wizard
+// still writes Profiles["default"], and the resolver still falls
+// back to it. Binding every component explicitly at wizard time
+// would change what `mpm config component list` reports for every
+// operator without changing what the runtime actually resolves.
 //
 // The "config absent" branch (A) is INFO rather than WARN because
 // it matches the dashboard's resolveDashboardLLM behaviour and
@@ -853,13 +931,51 @@ func (s *DoctorService) checkMemoryLLM() DoctorCheck {
 		return check
 	}
 
-	// Raw operator-set binding name. Empty string means "not bound";
-	// the ProfileFor fallback chain is treated as a config-resolution
-	// courtesy, not an explicit binding, so Doctor surfaces it.
-	configuredName := cfg.DefaultComponentProfile("memory")
+	// C. Canonical resolution. Doctor and the runtime must agree on
+	// what the memory component resolves to, so this is
+	// config.ResolveProfile — the one precedence chain in the
+	// package — rather than a hand-rolled read of the raw binding.
+	resolution := cfg.ResolveProfile("memory")
 
-	// A. binding missing — Components["memory"] is unset.
-	if configuredName == "" {
+	// C. binding == "disabled" sentinel — only meaningful for the
+	// embedding component (per config.ResolveProfile); for memory
+	// we surface INFO with the same wording the embedding check
+	// uses for its disabled state, so operators see one consistent
+	// vocabulary.
+	if resolution.ConfiguredName == "disabled" {
+		check.Status = "INFO"
+		check.Message = "intentionally disabled"
+		return check
+	}
+
+	// D. Explicit binding that points at a profile that does NOT
+	// exist. This is a genuinely broken binding: the operator asked
+	// for a specific profile and the runtime cannot give it to
+	// them. The resolver falls through to Profiles["default"] (and
+	// the row says so), but the verdict stays WARN — a silent
+	// fallback would hide a configuration that does not do what the
+	// operator asked for. The recommended `profile add` form uses
+	// ONLY the documented noninteractive flags (--model,
+	// --base-url) per the public CLI contract.
+	if resolution.ConfiguredName != "" {
+		if _, ok := cfg.Profiles[resolution.ConfiguredName]; !ok {
+			check.Status = "WARN"
+			check.Message = fmt.Sprintf("profile %q not found", resolution.ConfiguredName)
+			check.Details = []string{
+				fmt.Sprintf("Run 'mpm config profile add %s --model <model> --base-url <url>' to create it, or 'mpm config component set memory <other>' to rebind.", resolution.ConfiguredName),
+			}
+			if resolution.Profile != nil {
+				check.Details = append(check.Details,
+					fmt.Sprintf("Until then the runtime falls back to profile %q.", resolution.Profile.Name))
+			}
+			return check
+		}
+	}
+
+	// E. Nothing resolves — no explicit binding, no "default"
+	// profile, no legacy synth block. There is genuinely no usable
+	// profile for the memory component.
+	if resolution.Profile == nil {
 		check.Status = "WARN"
 		check.Message = "no profile configured"
 		// Remediation uses ONLY the public `profile add` contract:
@@ -877,35 +993,9 @@ func (s *DoctorService) checkMemoryLLM() DoctorCheck {
 		return check
 	}
 
-	// B. binding == "disabled" sentinel — only meaningful for the
-	// embedding component (per config.ResolveProfile); for memory
-	// we surface INFO with the same wording the embedding check
-	// uses for its disabled state, so operators see one consistent
-	// vocabulary.
-	if configuredName == "disabled" {
-		check.Status = "INFO"
-		check.Message = "intentionally disabled"
-		return check
-	}
+	p := resolution.Profile
 
-	// C. binding points at a profile that does NOT exist AND the
-	// default-profile fallback is also missing. ProfileFor returns
-	// nil for this combination; we surface the operator's intent
-	// (the literal binding name) in the message so the remediation
-	// command is unambiguous. The recommended `profile add` form
-	// uses ONLY the documented noninteractive flags (--model,
-	// --base-url) per the public CLI contract.
-	p := cfg.ProfileFor("memory")
-	if p == nil {
-		check.Status = "WARN"
-		check.Message = fmt.Sprintf("profile %q not found", configuredName)
-		check.Details = []string{
-			fmt.Sprintf("Run 'mpm config profile add %s --model <model> --base-url <url>' to create it, or 'mpm config component set memory <other>' to rebind.", configuredName),
-		}
-		return check
-	}
-
-	// D. profile exists but lacks a material field. The message
+	// F. profile exists but lacks a material field. The message
 	// names the missing field(s) but NEVER includes the credential
 	// (api_key) or any value-bearing secret. The remediation
 	// command uses the canonical `profile set` path — one
@@ -936,15 +1026,32 @@ func (s *DoctorService) checkMemoryLLM() DoctorCheck {
 		return check
 	}
 
-	// E. profile bound and structurally complete — PASS.
+	// G. profile resolved and structurally complete — PASS.
 	// Message uses the canonical `<model> · <Provider>` form
 	// (formatProviderModel helper) so it matches the Embedding
 	// model row. Network reachability is intentionally NOT
 	// asserted here — that's the probe layer's job (Critic
 	// row), which shares this profile's fingerprint and
 	// therefore performs one IO, not two.
+	//
+	// The row also names WHERE the resolution came from, so an
+	// inherited profile is never mistaken for an explicit binding.
 	check.Status = "PASS"
 	check.Message = formatProviderModel(p.Provider + ":" + p.Model)
+	switch resolution.Source {
+	case config.ResolutionDefault:
+		check.Message += " (default profile)"
+		check.Details = []string{
+			"No explicit memory binding; the memory component resolves to the \"default\" profile.",
+			"Run 'mpm config component set memory <name>' to bind a dedicated profile.",
+		}
+	case config.ResolutionLegacy:
+		check.Message += " (legacy synth block)"
+		check.Details = []string{
+			"No explicit memory binding; the memory component resolves to the legacy \"synth\" block.",
+			"Run 'mpm config profile add <name> --model <model> --base-url <url>' to migrate to a profile, then 'mpm config component set memory <name>' to bind it.",
+		}
+	}
 	return check
 }
 

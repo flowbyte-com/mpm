@@ -274,17 +274,34 @@ func modelChecksFromProbes(results []probe.ProbeResult) []DoctorCheck {
 			name = strings.Title(r.Components[0])
 		}
 		check := DoctorCheck{Name: name}
+		authReason := authFailureReason(r.AuthFailure)
 		switch r.Status {
 		case probe.ProbeHealthy:
 			check.Status = "PASS"
 			check.Message = fmt.Sprintf("%s · %s · %dms",
 				r.Provider, r.Model, r.LatencyMs)
+			// Name the authentication scheme that worked. Without it the
+			// operator cannot tell which header the endpoint was asked
+			// for, and a future endpoint change would be invisible.
+			if r.AuthScheme != "" {
+				check.Message = fmt.Sprintf("%s · %s · %s · %dms",
+					r.Provider, r.Model, r.AuthScheme, r.LatencyMs)
+			}
 		case probe.ProbeDisabled:
 			check.Status = "INFO"
 			check.Message = "intentionally disabled"
 		case probe.ProbeAuthFailed:
 			check.Status = "WARN"
-			check.Message = fmt.Sprintf("%s · auth failed: %s", r.Provider, r.ErrorSummary)
+			// An invalid credential, an unbilled subscription and an
+			// under-privileged key are three different problems with
+			// three different remedies. Report which one it is rather
+			// than collapsing them into one "auth failed" line.
+			if authReason != "" {
+				check.Message = fmt.Sprintf("%s · auth failed (%s): %s",
+					r.Provider, authReason, r.ErrorSummary)
+			} else {
+				check.Message = fmt.Sprintf("%s · auth failed: %s", r.Provider, r.ErrorSummary)
+			}
 		case probe.ProbeModelNotFound:
 			check.Status = "WARN"
 			check.Message = fmt.Sprintf("%s · model not found", r.Provider)
@@ -303,6 +320,12 @@ func modelChecksFromProbes(results []probe.ProbeResult) []DoctorCheck {
 			if check.Message == "" {
 				check.Message = "unknown"
 			}
+			// A billing refusal lands here (its status is not
+			// ProbeAuthFailed), but the operator still needs to know
+			// WHICH refusal it was.
+			if authReason != "" {
+				check.Message = fmt.Sprintf("%s (%s)", authReason, check.Message)
+			}
 		}
 		if r.ErrorSummary != "" && check.Status != "PASS" && check.Status != "INFO" {
 			check.Details = []string{r.ErrorSummary}
@@ -315,3 +338,23 @@ func modelChecksFromProbes(results []probe.ProbeResult) []DoctorCheck {
 // touch mpminternal for the import-grouping lint rule that
 // other handlers in this file use; no symbol reference required.
 var _ = mpminternal.CoreDB(nil)
+
+// authFailureReason renders the authentication-failure sub-kind as an
+// operator-facing phrase.
+//
+// The probe reports the sub-kind (invalid_credential / subscription /
+// permission); this maps it to the wording an operator can act on. An
+// unrecognised or absent sub-kind yields an empty string, and the
+// caller falls back to the generic "auth failed" phrasing.
+func authFailureReason(kind string) string {
+	switch kind {
+	case "invalid_credential":
+		return "invalid credential"
+	case "subscription":
+		return "subscription expired or not billed"
+	case "permission":
+		return "key not permitted for this model"
+	default:
+		return ""
+	}
+}
