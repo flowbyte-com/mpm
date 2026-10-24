@@ -443,6 +443,30 @@ Attention
 `skipped` keys, reusing doctor's `{"success": true, ...}` convention and
 normalising nil slices to `[]` so scripts can iterate unconditionally.
 
+**Which moment the report describes.** A guided model step that changed the
+configuration re-collects the report afterwards, because a report collected
+before the run and rendered after it describes a configuration that no
+longer exists. The re-collected report is marked `"after_state": true` and
+the human rendering says *"After this run — the sections below describe the
+state as it is now."*
+
+If the re-collection itself fails, the report keeps the rows it has, records
+the failure under `errors`, and is marked `"stale": true`. A stale report is
+**not** an after-state report: its rows describe the state as it was found,
+and the human rendering says so.
+
+The model step records two separate facts about the wizard's write:
+
+| field | meaning |
+|---|---|
+| `saved` | the configuration on disk **changed** (a byte comparison) |
+| `committed` | the wizard **wrote** the configuration, whether or not the bytes differ |
+
+A run that rewrites byte-identical content has `committed: true` and
+`saved: false`. The report says *"the configuration was saved … (its
+contents are unchanged)"* rather than *"nothing was committed"*, which
+would contradict the wizard's own `✓ Configuration saved` line.
+
 **Not-TTY behaviour.** Following the `mpm tour` precedent
 (`handlers_tour.go:20-24`), onboard pauses for input only when stdin is a
 terminal; piped or agent-invoked it emits the whole stream without
