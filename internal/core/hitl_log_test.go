@@ -322,6 +322,28 @@ func TestHITLRotation_AgeTrigger(t *testing.T) {
 	if err := s.Append([]byte(`{"v":2,"op":"memory_created","preview":"first"}`)); err != nil {
 		t.Fatalf("append: %v", err)
 	}
+
+	// Pin the active file's modification time to the injected clock.
+	//
+	// The age trigger measures the file's age as `now - mtime`, and this
+	// test's window is exactly MaxActiveAge, so the assertion "the trigger
+	// fires at MaxActiveAge" is only true when the file's recorded mtime
+	// is at or before `now`. The file is created AFTER `now` is captured,
+	// so the only thing that made that hold was the filesystem recording
+	// mtime from the kernel's COARSE clock — truncated DOWN to the tick,
+	// and therefore sometimes earlier than `now`. That is a scheduling
+	// accident, not a property of the product: once the create-and-append
+	// takes longer than one clock tick (which it does under `-race` on a
+	// loaded runner), the file lands in the NEXT tick, its mtime becomes
+	// later than `now`, the computed age is permanently short of the
+	// window, and the trigger can never fire.
+	//
+	// Pinning the mtime removes the dependency on the tick boundary. The
+	// same idiom is used by the retention tests below.
+	if err := os.Chtimes(s.path, now, now); err != nil {
+		t.Fatalf("pin the active file's mtime: %v", err)
+	}
+
 	if rots, _ := listRotations(s.path); len(rots) != 0 {
 		t.Fatalf("rotated before the age trigger was due: %v", rots)
 	}
