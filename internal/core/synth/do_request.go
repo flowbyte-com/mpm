@@ -203,8 +203,14 @@ func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string
 				"provider refused request (%s) with scheme %q and the alternative authentication scheme %q was also refused: %s",
 				class, auth, alt, errString(err, httpStatus))
 		}
-		return nil, fmt.Errorf("provider refused request (%s): %s",
-			class, errString(err, httpStatus))
+		// The scheme is named so the operator can tell WHICH
+		// presentation was refused. Without it, a failure against a
+		// pinned scheme is indistinguishable from a failure against a
+		// derived one — and "which scheme did MPM actually send?" is
+		// exactly the question an operator with an explicit
+		// auth_scheme has.
+		return nil, fmt.Errorf("provider refused request (%s) with scheme %q: %s",
+			class, auth, errString(err, httpStatus))
 
 	case FailureRateLimit:
 		retryAfterSeconds, retryable := retryAfterBoundedSeconds()
@@ -400,6 +406,7 @@ func guardCredentialRedirect(req *http.Request, via []*http.Request) error {
 // Every condition must hold:
 //
 //   - the caller approved connection verification (AllowAuthNegotiation);
+//   - the operator has NOT pinned a scheme (see below);
 //   - the refusal is an authentication refusal (401 / 403) — NOT a
 //     billing refusal (402, which is an expired subscription and is
 //     fixed by paying, not by changing a header) and NOT a transport
@@ -411,8 +418,30 @@ func guardCredentialRedirect(req *http.Request, via []*http.Request) error {
 // CREDENTIAL. Repeating the request with another header cannot fix it,
 // and the operator would be told a falsehood if MPM reported the
 // credential as merely mis-presented.
+//
+// AN EXPLICIT OVERRIDE GOVERNS THE REQUEST.
+//
+// The alternative attempt is MPM's guess about how the credential
+// should be presented. When the operator has said how — `auth_scheme`
+// pinned in the profile — guessing is precisely the thing they
+// declined, and the alternative attempt is the attempt that actually
+// transmits.
+//
+// The `auth_scheme=none` case is the sharp one: the operator said
+// "present no credential to this endpoint", and a provider that names
+// "Authorization" in its refusal would otherwise talk MPM into
+// transmitting the credential anyway. The credential would still go to
+// the configured origin, so this is not a cross-origin leak — but it
+// IS a violation of explicit operator intent, which is a fail-open
+// and must not happen.
+//
+// An UNSUPPORTED override ("basic", "query-param") is not a pin:
+// ParseAuthScheme rejects it, and the scheme is then derived as usual.
 func (sc *SynthClient) negotiationCandidate(httpStatus int, body []byte, sent AuthScheme) (AuthScheme, bool) {
 	if !sc.AllowAuthNegotiation {
+		return "", false
+	}
+	if _, pinned := ParseAuthScheme(sc.AuthOverride); pinned {
 		return "", false
 	}
 	switch httpStatus {
