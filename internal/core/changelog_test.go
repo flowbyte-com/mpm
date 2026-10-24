@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -223,11 +224,163 @@ func TestFetchGitLog_Integration(t *testing.T) {
 	// tag). The original test asserted >= 50 entries since that tag
 	// to catch silent breakage of the git log walker; this fixture
 	// version reproduces that guarantee with synthetic data.
+	repo := newChangelogFixtureRepo(t)
+
+	out, err := FetchGitLog(GitLogOptions{RepoDir: repo, Since: "v0.0.1"})
+	if err != nil {
+		t.Fatalf("FetchGitLog: %v", err)
+	}
+	entries := ParseCommitLog(out)
+	if len(entries) < 50 {
+		t.Errorf("expected at least 50 entries since v0.0.1, got %d", len(entries))
+	}
+	// Every entry must have a non-empty commit hash and a non-empty
+	// author — git log %H and %an are non-optional fields. If these
+	// are empty, the pretty-format string has been corrupted.
+	for i, e := range entries {
+		if e.CommitHash == "" {
+			t.Errorf("entry[%d] missing CommitHash", i)
+		}
+		if e.Author == "" {
+			t.Errorf("entry[%d] missing Author", i)
+		}
+	}
+}
+
+// TestChangelogFixture_SchedulesNoBackgroundGitMaintenance pins the property
+// that makes the fixture's cleanup deterministic.
+//
+// `git commit` runs git's automatic maintenance, which spawns
+//
+//	git maintenance run --auto --quiet --detach
+//
+// — a DETACHED background process that the caller never waits for. That
+// process writes `.git/objects/maintenance.lock` inside the very directory
+// the test framework deletes when the test ends, so it can recreate
+// `.git/objects` after the framework has already removed it. The final rmdir
+// of `.git` then fails with ENOTEMPTY and the test is reported as
+//
+//	TempDir RemoveAll cleanup: unlinkat /tmp/.../.git: directory not empty
+//
+// The release gate's CI run 40091380326 failed on exactly this and on
+// nothing else. The fixture must therefore keep git's automatic maintenance
+// switched off, and this test fails if that ever regresses.
+func TestChangelogFixture_SchedulesNoBackgroundGitMaintenance(t *testing.T) {
+	tracePath := filepath.Join(t.TempDir(), "git-trace.json")
+	t.Setenv("GIT_TRACE2_EVENT", tracePath)
+
+	newChangelogFixtureRepo(t)
+
+	events, err := readGitTraceEvents(tracePath)
+	if err != nil {
+		t.Fatalf("read the git trace: %v", err)
+	}
+
+	commits := 0
+	maintenance := 0
+	for _, ev := range events {
+		if len(ev.Argv) == 0 || filepath.Base(ev.Argv[0]) != "git" {
+			continue
+		}
+		switch ev.Event {
+		case "start":
+			if containsArg(ev.Argv, "commit") {
+				commits++
+			}
+		case "child_start":
+			if containsArg(ev.Argv, "maintenance") {
+				maintenance++
+			}
+		}
+	}
+
+	// Non-vacuity: the trace must have observed the fixture's own commits.
+	// Without this, a git that ignores GIT_TRACE2_EVENT would make the
+	// assertion below pass without proving anything.
+	if commits == 0 {
+		t.Fatalf("the git trace recorded no commit: GIT_TRACE2_EVENT produced no usable output, so this test cannot observe the fixture's behaviour and would pass vacuously")
+	}
+	if maintenance != 0 {
+		t.Errorf("the fixture scheduled %d detached background `git maintenance` process(es): git's automatic maintenance must be disabled on the fixture repository, because those processes outlive the test and write into the directory the test framework deletes", maintenance)
+	}
+}
+
+// gitTraceEvent is one line of git's GIT_TRACE2_EVENT JSONL output.
+type gitTraceEvent struct {
+	Event string   `json:"event"`
+	Argv  []string `json:"argv"`
+}
+
+// containsArg reports whether argv holds the given argument. The fixtures
+// invoke git as `git -C <dir> <subcommand>`, so a subcommand is not at a
+// fixed position.
+func containsArg(argv []string, want string) bool {
+	for _, a := range argv {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+// readGitTraceEvents parses git's GIT_TRACE2_EVENT file. A malformed or
+// partially written trailing line is skipped rather than fatal: the file is
+// appended to by several processes.
+func readGitTraceEvents(path string) ([]gitTraceEvent, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var events []gitTraceEvent
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var ev gitTraceEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
+		}
+		events = append(events, ev)
+	}
+	return events, nil
+}
+
+func writeGitFixtureFile(t *testing.T, dir, name, body string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+// newChangelogFixtureRepo builds the git repository the changelog tests
+// parse: three commits, a tag, then sixty commits after the tag.
+//
+// Hermetic by construction — the fixture carries its own history and never
+// touches the real MPM repository.
+func newChangelogFixtureRepo(t *testing.T) string {
+	t.Helper()
 	repo := t.TempDir()
 
 	// Initialize a fresh git repo. `git config` below requires .git to exist;
 	// -b main avoids the "default branch name" warning on modern git.
 	runGit(t, repo, "init", "-b", "main")
+
+	// Switch git's automatic maintenance off for this fixture.
+	//
+	// `git commit` otherwise schedules `git maintenance run --auto --quiet
+	// --detach` — a DETACHED background process that the caller never waits
+	// for. It writes `.git/objects/maintenance.lock` inside the very
+	// directory the test framework deletes when the test ends, so it can
+	// recreate `.git/objects` after the framework has already removed it;
+	// the final rmdir of `.git` then fails with ENOTEMPTY and the test is
+	// reported as "TempDir RemoveAll cleanup: unlinkat .../.git: directory
+	// not empty". The fixture's 63 commits made that race likely enough to
+	// fail the release gate's CI run 40091380326.
+	//
+	// See TestChangelogFixture_SchedulesNoBackgroundGitMaintenance.
+	runGit(t, repo, "config", "maintenance.auto", "false")
 
 	// Seed commits require a user identity for git author/committer.
 	for _, kv := range [][2]string{
@@ -255,33 +408,7 @@ func TestFetchGitLog_Integration(t *testing.T) {
 		runGit(t, repo, "commit", "-m", fmt.Sprintf("post commit %d", i))
 	}
 
-	out, err := FetchGitLog(GitLogOptions{RepoDir: repo, Since: "v0.0.1"})
-	if err != nil {
-		t.Fatalf("FetchGitLog: %v", err)
-	}
-	entries := ParseCommitLog(out)
-	if len(entries) < 50 {
-		t.Errorf("expected at least 50 entries since v0.0.1, got %d", len(entries))
-	}
-	// Every entry must have a non-empty commit hash and a non-empty
-	// author — git log %H and %an are non-optional fields. If these
-	// are empty, the pretty-format string has been corrupted.
-	for i, e := range entries {
-		if e.CommitHash == "" {
-			t.Errorf("entry[%d] missing CommitHash", i)
-		}
-		if e.Author == "" {
-			t.Errorf("entry[%d] missing Author", i)
-		}
-	}
-}
-
-func writeGitFixtureFile(t *testing.T, dir, name, body string) {
-	t.Helper()
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
-		t.Fatalf("write %s: %v", name, err)
-	}
+	return repo
 }
 
 func runGit(t *testing.T, dir string, args ...string) {
