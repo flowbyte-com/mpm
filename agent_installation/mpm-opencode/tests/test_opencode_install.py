@@ -34,6 +34,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # Derive the source-tree adapter directory from this test file's
 # location rather than a hardcoded author-machine absolute path. The
@@ -1057,14 +1058,67 @@ class OpenCodeInstallProvisioning(unittest.TestCase):
 # compiler that fails.
 #
 # The stubs are hermetic: a fake `npm` on PATH stands in for the real
-# one, and PATH never contains the real node/npm, so the suite does not
-# depend on what the host happens to have installed.
+# one, and the tests that need a toolchain-free host build their PATH
+# so that the real node/npm cannot be resolved at all.
 
 # The PATH every test in this section runs with: coreutils and python3
-# (the JSONC migration needs python3) but no node and no npm. The real
-# node lives under a version-manager directory that is deliberately not
-# on this PATH.
+# (the JSONC migration needs python3). It is used AFTER the test's own
+# bin dir, so the fake npm/node always win.
+#
+# It is NOT sufficient on its own to create a "no node" scenario: it
+# contains the standard directories, and a host that keeps node in one
+# of them (a CI image installs Node.js in /usr/local/bin) satisfies the
+# installer's `command -v node`. Use _path_without_tools() for that.
 BOOTSTRAP_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+# A PATH from which the named tools provably cannot be resolved.
+#
+# "No Node on the machine at all" is a SCENARIO, not an ambient
+# property: it can only be created by controlling PATH completely.
+# BOOTSTRAP_PATH alone does not do that — it ASSUMES the host keeps
+# node outside the standard directories. That assumption holds for a
+# version-manager install and fails for a CI image, which ships node
+# in /usr/local/bin. There the installer found node, built the payload,
+# registered the plugin and exited 0, and the missing-Node test failed
+# on `assertNotEqual(result.returncode, 0)` while proving nothing
+# (CI run 40087139539).
+#
+# So the PATH is rebuilt as ONE directory of symlinks to everything the
+# ambient PATH can reach, minus the named tools: coreutils and python3
+# resolve exactly as before, and the excluded tools cannot resolve at
+# all — wherever this host happens to keep them.
+def _path_without_tools(tools: tuple[str, ...], into: Path) -> str:
+    """Build a PATH in which the named tools cannot be resolved.
+
+    `into` is a directory the test owns; the returned PATH is a single
+    directory of symlinks to the ambient PATH's executables, minus the
+    named tools.
+    """
+    excluded = set(tools)
+    shadow = into / ("shadow-" + "-".join(sorted(excluded)))
+    shadow.mkdir(parents=True, exist_ok=True)
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory or not os.path.isdir(directory):
+            continue
+        try:
+            with os.scandir(directory) as scan:
+                entries = sorted(scan, key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name in excluded:
+                continue
+            link = shadow / entry.name
+            if link.is_symlink() or link.exists():
+                continue
+            try:
+                if not entry.is_file():
+                    continue
+                os.symlink(entry.path, link)
+            except OSError:
+                continue
+    return str(shadow)
 
 # A fake `npm` that stands in for the real one. `npm ci` populates the
 # adapter's devDependencies (typescript + @types/node) from the
@@ -1230,8 +1284,14 @@ class OpenCodeInstallToolchainBootstrap(unittest.TestCase):
         env = os.environ.copy()
         env["HOME"] = str(self.home)
         env.pop("MPM_WORKSPACE", None)
-        # No bindir on PATH: node and npm are absent.
-        env["PATH"] = BOOTSTRAP_PATH
+        # No node and no npm on PATH — by construction, not by an
+        # assumption about where this host keeps them.
+        env["PATH"] = _path_without_tools(("node", "npm"), self._tmp)
+        self.assertIsNone(
+            shutil.which("node", path=env["PATH"]),
+            "the missing-Node scenario was not created: node is still "
+            "reachable through this PATH",
+        )
         result = subprocess.run(
             ["bash", str(canonical / "install.sh")],
             capture_output=True, text=True, timeout=120, env=env,
@@ -1248,6 +1308,53 @@ class OpenCodeInstallToolchainBootstrap(unittest.TestCase):
             "TypeScript compiler not found", output,
             "the diagnostic blames the compiler instead of the absent "
             "Node runtime",
+        )
+        cfg = self.home / ".config" / "opencode" / "opencode.jsonc"
+        self.assertFalse(cfg.exists(),
+                         "a registration was written without a payload")
+
+    def test_a_host_installed_node_does_not_defeat_the_scenario(self):
+        """A host that ships node in a standard directory must not
+        turn the missing-Node scenario into a successful install.
+
+        CI runners do exactly that: the image installs Node.js in
+        /usr/local/bin, which is on every standard PATH. A scenario
+        built by assuming the host keeps node elsewhere is not a
+        scenario at all — the installer finds node, builds the payload,
+        registers the plugin and exits 0, so the test fails while
+        proving nothing (CI run 40087139539).
+        """
+        decoy = self._tmp / "decoy-bin"
+        decoy.mkdir()
+        node = decoy / "node"
+        node.write_text("#!/bin/sh\nexit 0\n")
+        node.chmod(0o755)
+        npm = decoy / "npm"
+        npm.write_text("#!/bin/sh\nexit 0\n")
+        npm.chmod(0o755)
+
+        canonical = self._stage_adapter_without_toolchain()
+        ambient = f"{decoy}{os.pathsep}{os.environ.get('PATH', '')}"
+        with mock.patch.dict(os.environ, {"PATH": ambient}):
+            env = os.environ.copy()
+            env["HOME"] = str(self.home)
+            env.pop("MPM_WORKSPACE", None)
+            env["PATH"] = _path_without_tools(("node", "npm"), self._tmp)
+            self.assertIsNone(
+                shutil.which("node", path=env["PATH"]),
+                "the host's node is still reachable through this PATH",
+            )
+            result = subprocess.run(
+                ["bash", str(canonical / "install.sh")],
+                capture_output=True, text=True, timeout=120, env=env,
+            )
+        output = result.stderr + result.stdout
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex(
+            output.lower(),
+            r"node",
+            "the diagnostic does not name the missing prerequisite",
         )
         cfg = self.home / ".config" / "opencode" / "opencode.jsonc"
         self.assertFalse(cfg.exists(),
