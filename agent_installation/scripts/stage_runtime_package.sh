@@ -494,7 +494,7 @@ mpm_validate_runtime_package_opencode() {
   local payload="dist/index.v2.js"
   if [ ! -f "$dir/$payload" ]; then
     echo "[stage] ERROR: staged OpenCode package is missing $payload" >&2
-    echo "[stage]        run 'npm install && npm run build' in the adapter" >&2
+    echo "[stage]        the adapter's installer builds this payload; re-run it" >&2
     echo "[stage]        source directory first, or add $payload to the manifest" >&2
     fail=1
   elif [ ! -s "$dir/$payload" ]; then

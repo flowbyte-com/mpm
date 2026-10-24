@@ -8,5 +8,19 @@
     "--target", "~/.config/opencode/AGENTS.md",
     "--snippet", "@/templates/AGENTS.md.snippet"
   ],
-  "opt_in": false
+  "opt_in": false,
+  "provision": {
+    "description": "OpenCode plugin provisioning (build, stage and register the plugin package)",
+    "installer": "install.sh",
+    "installer_type": "bash",
+    "args": [],
+    "required": true,
+    "if": {
+      "any_of": [
+        {"path": "~/.config/opencode/opencode.jsonc", "kind": "file"},
+        {"path": "~/.config/opencode", "kind": "dir"},
+        {"path": "~/.opencode", "kind": "dir"}
+      ]
+    }
+  }
 }

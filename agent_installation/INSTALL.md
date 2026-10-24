@@ -654,13 +654,35 @@ subsequent turns hit the cache by `sessionID`. Manual refresh path
 is `mpm call mpm_context --payload '{"action":"read_wake_context",…}'`
 (or `mpm_context` typed tool action `read_wake_context`).
 
-### Build (only needed if you edit the plugin source)
+### Build (automatic)
+
+The plugin payload is compiled by the **installer**, not by hand. When
+`dist/index.v2.js` is missing — or was built from a different source
+revision — the adapter's `install.sh` installs its build dependencies
+(`npm ci`, against the committed `package-lock.json`) and compiles the
+payload itself. `npm ci` is allowed to reach the npm registry: a fresh
+machine has no npm cache, and assuming one is what made the old manual
+workaround fail.
+
+Requirements: **Node.js 18+ and npm** on `PATH`. If either is missing,
+or the dependency install fails, the installer stops with a diagnostic
+that names the missing prerequisite and registers nothing — a partially
+installed plugin is never reported as a successful install.
+
+The compiled payload's source revision is recorded in
+`dist/mpm-build-provenance.json` next to it, so the deployed payload can
+be tied back to a revision:
+
+```bash
+cat ~/.mpm/agent_installation/mpm-opencode/dist/mpm-build-provenance.json
+```
+
+To rebuild by hand while editing the plugin source:
 
 ```bash
 cd ~/.mpm/agent_installation/mpm-opencode
-npm install
+npm ci
 npm run build
-# emits dist/index.js (the runtime entry) and dist/index.d.ts
 ```
 
 ### Uninstall

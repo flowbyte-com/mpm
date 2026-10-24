@@ -937,8 +937,24 @@ export_build_provenance() {
 # hosts. Operators can re-run the failed host's installer or
 # `make refresh-installed` to retry.
 #
+# There is ONE failure mode that is NOT advisory. The reconciler
+# distinguishes two:
+#
+#   rc=1  an advisory failure — a managed block did not converge.
+#         The install continues; the operator is told how to retry.
+#   rc=2  a REQUIRED provisioning step failed — a host integration
+#         MPM is responsible for (a built plugin payload, its
+#         registration) could not be produced. The install CANNOT
+#         report success: the host is wired to an artifact that does
+#         not exist, which is the false-success this phase exists to
+#         prevent.
+#
+# The distinction is made by the generic reconciler, not here: this
+# file stays host-agnostic and honours the reconciler's exit-code
+# contract.
+#
 # RETURN VALUE: non-zero means "at least one adapter failed". It does NOT
-# mean "the installation failed". Callers MUST capture it
+# mean "the installation failed" for rc=1. Callers MUST capture it
 # (`phase_agent_reconcile || rc=$?`) rather than call the phase bare:
 # under `set -e` an uncaptured non-zero return aborts the script at the
 # call site, which would turn this documented warning into a silent
@@ -952,12 +968,53 @@ phase_agent_reconcile() {
         return 0
     fi
     export_build_provenance
-    if python3 "$reconcile_script" --home "$HOME"; then
+    local rc=0
+    python3 "$reconcile_script" --home "$HOME" || rc=$?
+    if [ "$rc" -eq 0 ]; then
         log "  reconciliation ok"
-    else
-        warn "  one or more adapters reported non-zero exit (continuing)"
-        return 1
+        return 0
     fi
+    if [ "$rc" -eq 2 ]; then
+        err "a REQUIRED host provisioning step failed (see above)"
+        err "  a host integration MPM builds could not be produced;"
+        err "  nothing was registered for that host."
+        err "  The installation is NOT complete — fix the reported cause"
+        err "  and re-run, or run 'make refresh-installed' to retry."
+        return 2
+    fi
+    warn "  one or more adapters reported non-zero exit (continuing)"
+    return 1
+}
+
+
+# ---------------------------------------------------------------------------
+# reconcile_outcome <reconciler-exit-code>
+# ---------------------------------------------------------------------------
+#
+# Translate the reconciler's exit code into what the INSTALL does.
+#
+#   0  everything reconciled.
+#   1  an advisory failure — a managed block did not converge. The
+#      install continues; the operator is told how to retry.
+#   2  a REQUIRED provisioning step failed — a host integration MPM
+#      builds could not be produced. The install must NOT report
+#      success: the host would be wired to an artifact that does not
+#      exist, which is the false-success this whole mechanism exists
+#      to prevent.
+#
+# Returns 0 for "continue" and 2 for "stop".
+reconcile_outcome() {
+    local rc="$1"
+    if [ "$rc" -eq 2 ]; then
+        err "required host provisioning failed — the installation is incomplete"
+        err "  fix the reported cause and re-run the installer"
+        return 2
+    fi
+    if [ "$rc" -ne 0 ]; then
+        warn "  agent adapter reconciliation reported warnings (non-fatal)."
+        warn "  Re-run the failing adapter's installer, or 'make refresh-installed', to retry."
+    fi
+    return 0
 }
 
 
@@ -1060,10 +1117,12 @@ mode_install() {
     # fatal exit. Capture it, report it, and continue.
     local reconcile_rc=0
     phase_agent_reconcile || reconcile_rc=$?
-    if [ "$reconcile_rc" -ne 0 ]; then
-        warn "  agent adapter reconciliation reported warnings (non-fatal)."
-        warn "  Re-run the failing adapter's installer, or 'make refresh-installed', to retry."
-    fi
+    # A REQUIRED provisioning step failed: a host integration MPM builds
+    # could not be produced. The install must not report success — but
+    # it must also not leave a half-installed state behind silently, so
+    # this is a hard stop with a diagnostic.
+    reconcile_outcome "$reconcile_rc" \
+        || die "required host provisioning failed — the installation is incomplete" 6
     phase_validate
     note "INSTALL COMPLETE"
     # Use the canonical path so the next-steps commands are runnable

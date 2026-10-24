@@ -98,6 +98,49 @@ skipped as "integration not installed" — the machine is left exactly
 as it was. MPM never creates the integration it would then have to
 reconcile.
 
+Provisioning (optional)
+------------------------
+
+An adapter may also declare a `provision` block:
+
+  "provision": {
+    "installer": "install.sh",
+    "installer_type": "bash",
+    "args": [],
+    "required": true,
+    "if": { "any_of": [ ...probes... ] }
+  }
+
+A managed block is INSTRUCTION: it tells an agent how to reach MPM.
+Some hosts also need a BUILT ARTIFACT — a compiled plugin payload, for
+instance — before that instruction means anything. The `provision`
+block says how to produce it, using the same host-agnostic probe
+vocabulary as `reconcile_if`.
+
+The `if` gate is what keeps this safe: provisioning runs only where
+the host's integration is already present on the machine. Without that
+gate, an install on a host-less machine would CREATE the integration
+MPM was supposed to adapt to — the exact opt-in this script exists to
+prevent.
+
+`required` distinguishes two failure modes:
+
+  required: false  the provisioning step failed; the adapter is
+                   reported as advisory and the other adapters
+                   continue. Exit code 1.
+  required: true   the host integration MPM is responsible for could
+                   not be built or registered. Exit code 2 — the
+                   caller must NOT report success, because a broken
+                   host integration that "installs" cleanly is the
+                   false-success this script exists to prevent.
+
+Exit codes
+----------
+
+  0  every adapter reconciled
+  1  at least one adapter reported an advisory failure
+  2  at least one REQUIRED provisioning step failed
+
 The contract:
   - Successful reconciliation converges installed managed blocks to
     the current canonical render.
@@ -105,8 +148,6 @@ The contract:
   - An adapter is never reconciled unless its integration is already
     installed on this machine.
   - Failures in one adapter do NOT abort the others.
-
-Exit code 0 on full success, non-zero if any adapter failed.
 """
 
 from __future__ import annotations
@@ -384,6 +425,36 @@ def _describe_probe(probe) -> str:
     return label
 
 
+def _invoke_installer(
+    adapter_dir: Path,
+    installer_rel: str,
+    installer_type: str,
+    raw_args,
+    home: str,
+):
+    """Resolve and run one adapter installer.
+
+    Returns ``(returncode, stdout, stderr, argv, error)``. ``error`` is
+    a message when the installer could not be located or its type is
+    unknown; ``returncode`` is then None.
+    """
+    installer_path = adapter_dir / installer_rel
+    if not installer_path.is_file():
+        return None, "", "", [], f"installer not found at {installer_path}"
+    if installer_type not in ("python", "bash"):
+        return None, "", "", [], f"unknown installer_type {installer_type!r}"
+
+    argv = []
+    if installer_type == "python":
+        argv.append(sys.executable)
+    argv.append(str(installer_path))
+    for raw in raw_args:
+        argv.append(resolve_arg(raw, home, adapter_dir))
+
+    result = subprocess.run(argv, capture_output=True, text=True)
+    return result.returncode, result.stdout, result.stderr, argv, None
+
+
 def reconcile_one(adapter_dir: Path, manifest: dict, home: str) -> bool:
     """Reconcile one adapter. Returns True on success."""
     label = manifest.get("host_label", adapter_dir.name)
@@ -404,14 +475,6 @@ def reconcile_one(adapter_dir: Path, manifest: dict, home: str) -> bool:
         print(f"[reconcile]  {label}: SKIP (manifest has no 'installer')")
         return True
 
-    installer_path = adapter_dir / installer_rel
-    if not installer_path.is_file():
-        print(
-            f"[reconcile]  {label}: SKIP "
-            f"(installer not found at {installer_path})"
-        )
-        return True
-
     installer_type = manifest.get("installer_type", "python")
     if installer_type not in ("python", "bash"):
         print(
@@ -419,32 +482,132 @@ def reconcile_one(adapter_dir: Path, manifest: dict, home: str) -> bool:
             f"(unknown installer_type {installer_type!r})"
         )
         return True
-
-    argv = []
-    if installer_type == "python":
-        argv.append(sys.executable)
-    argv.append(str(installer_path))
-    for raw in manifest.get("args", []):
-        argv.append(resolve_arg(raw, home, adapter_dir))
+    if not (adapter_dir / installer_rel).is_file():
+        print(
+            f"[reconcile]  {label}: SKIP "
+            f"(installer not found at {adapter_dir / installer_rel})"
+        )
+        return True
 
     description = manifest.get("description", "")
     desc_suffix = f"  ({description})" if description else ""
     print(f"[reconcile]  {label}: invoking {installer_rel}{desc_suffix}")
-    result = subprocess.run(argv, capture_output=True, text=True)
-    if result.returncode == 0:
+    rc, stdout, stderr, _argv, error = _invoke_installer(
+        adapter_dir,
+        installer_rel,
+        installer_type,
+        manifest.get("args", []),
+        home,
+    )
+    if error is not None:
+        print(f"[reconcile]  {label}: SKIP ({error})")
+        return True
+
+    if rc == 0:
         # Surface installer stdout briefly so the operator sees the
         # no-op message; full output goes to the installer's own logs.
-        stdout_tail = result.stdout.strip().splitlines()
+        stdout_tail = stdout.strip().splitlines()
         if stdout_tail:
             print(f"[reconcile]  {label}: ok — {stdout_tail[-1][:120]}")
         else:
             print(f"[reconcile]  {label}: ok")
         return True
     print(
-        f"[reconcile]  {label}: FAIL (rc={result.returncode}); "
-        f"stderr={result.stderr.strip()[:200]}"
+        f"[reconcile]  {label}: FAIL (rc={rc}); "
+        f"stderr={stderr.strip()[:200]}"
     )
     return False
+
+
+def provision_one(adapter_dir: Path, manifest: dict, home: str):
+    """Run an adapter's provisioning step, if it declares one.
+
+    Returns ``(ok, required_failure)``:
+
+      * ``ok`` — the step succeeded, was skipped, or failed
+        advisorily.
+      * ``required_failure`` — a REQUIRED provisioning step failed.
+        The caller must not report success.
+    """
+    spec = manifest.get("provision")
+    if not isinstance(spec, dict):
+        return True, False
+
+    label = manifest.get("host_label", adapter_dir.name)
+
+    if manifest.get("opt_in", False):
+        print(
+            f"[reconcile]  {label}: SKIP provisioning "
+            f"(opt-in adapter)"
+        )
+        return True, False
+
+    # The adapter's own integration gate still applies: a host MPM has
+    # not been wired into must not receive a provisioned artifact.
+    installed, why = integration_installed(manifest, home)
+    if not installed:
+        print(f"[reconcile]  {label}: SKIP provisioning ({why})")
+        return True, False
+
+    # The provision-level gate says where the artifact is actually
+    # needed. It is closed on a machine that does not use the host at
+    # all, and MPM must not create the host in order to provision it.
+    gate = spec.get("if")
+    if isinstance(gate, dict):
+        probes = gate.get("any_of") or []
+        if not any(probe_matches(p, home) for p in probes):
+            print(
+                f"[reconcile]  {label}: SKIP provisioning "
+                f"(integration not installed)"
+            )
+            return True, False
+
+    required = bool(spec.get("required", False))
+    installer_rel = spec.get("installer")
+    if not installer_rel:
+        message = "provision block has no 'installer'"
+        print(f"[reconcile]  {label}: FAIL provisioning ({message})")
+        return False, required
+
+    installer_type = spec.get("installer_type", "bash")
+    rc, stdout, stderr, _argv, error = _invoke_installer(
+        adapter_dir,
+        installer_rel,
+        installer_type,
+        spec.get("args", []),
+        home,
+    )
+    if error is not None:
+        print(f"[reconcile]  {label}: FAIL provisioning ({error})")
+        return False, required
+
+    description = spec.get("description", "")
+    desc_suffix = f"  ({description})" if description else ""
+    print(
+        f"[reconcile]  {label}: provisioning {installer_rel}{desc_suffix}"
+    )
+    if rc == 0:
+        stdout_tail = stdout.strip().splitlines()
+        if stdout_tail:
+            print(
+                f"[reconcile]  {label}: provisioned — "
+                f"{stdout_tail[-1][:120]}"
+            )
+        else:
+            print(f"[reconcile]  {label}: provisioned")
+        return True, False
+
+    print(
+        f"[reconcile]  {label}: FAIL provisioning (rc={rc}); "
+        f"stderr={stderr.strip()[:200]}"
+    )
+    if required:
+        print(
+            f"[reconcile]  {label}: this integration is REQUIRED — the "
+            f"installation cannot be reported as successful."
+        )
+        return False, True
+    return False, False
 
 
 def main() -> int:
@@ -477,9 +640,24 @@ def main() -> int:
 
     print(f"[reconcile]  discovering {len(discovered)} adapter(s)")
     rc = 0
+    required_failed = False
     for adapter_dir, manifest in discovered:
+        # Provisioning runs FIRST: the artifact a managed block talks
+        # about has to exist before the block that references it is
+        # reconciled.
+        provisioned, required_failure = provision_one(
+            adapter_dir, manifest, args.home
+        )
+        if required_failure:
+            required_failed = True
+        if not provisioned:
+            rc = 1
         if not reconcile_one(adapter_dir, manifest, args.home):
             rc = 1
+    if required_failed:
+        # A required provisioning step failed. This outranks the
+        # advisory rc=1: the caller must not report success.
+        return 2
     return rc
 
 

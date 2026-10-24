@@ -4,8 +4,13 @@
 #
 # Idempotent. Performs four ordered responsibilities:
 #
-#   1. Compile dist/ from canonical source (if dist/index.v2.js missing
-#      or older than any module under src/).
+#   1. Compile dist/ from canonical source (if dist/index.v2.js is
+#      missing, older than any module under src/, or was built from a
+#      different source revision). The build DEPENDENCIES are installed
+#      by this script when they are missing — `npm ci` against the
+#      committed package-lock.json. There is no manual compilation
+#      step: an installation that cannot build the payload says so and
+#      registers nothing.
 #   2. Provision the compiled payload into the MPM runtime root via the
 #      shared stage_runtime_package.sh library, and validate it. The
 #      plugin[] entry is never written for a path that holds nothing.
@@ -179,10 +184,195 @@ done
 #
 # The local TypeScript compiler (./node_modules/.bin/tsc) is the
 # canonical build. We rebuild only when the staged payload
-# (dist/index.v2.js) is missing or some module under src/ is newer than
-# it — incremental build keeps this fast on repeat invocations. See
+# (dist/index.v2.js) is missing, some module under src/ is newer than
+# it, or the payload was built from a DIFFERENT source revision — the
+# incremental build keeps this fast on repeat invocations. See
 # build_dist() for why we don't use `npx tsc` (the deprecated npm
 # package lookup).
+
+# The build-provenance sidecar. It records WHICH source revision
+# produced the compiled payload, so "the deployed payload matches the
+# deployed revision" is a fact that can be checked rather than assumed.
+#
+# It is deliberately NOT part of OPENCODE_RUNTIME_MANIFEST: the manifest
+# is an explicit allowlist of files the runtime package needs to LOAD,
+# and this file is evidence, not payload. It is published into the
+# runtime package after staging (see publish_build_provenance) so the
+# deployed copy — the one OpenCode actually loads — carries it.
+PROVENANCE_FILE="dist/mpm-build-provenance.json"
+
+# --------------------------------------------------------------------------
+# build_provenance_commit
+# --------------------------------------------------------------------------
+#
+# The revision the payload is built from, in priority order:
+#
+#   1. MPM_BUILD_COMMIT — exported by the root installer and by the
+#      Makefile's refresh-installed target. This is the revision of the
+#      release being installed.
+#   2. git -C <adapter dir> rev-parse HEAD — correct when the adapter
+#      lives inside an MPM checkout (the live ~/.mpm runtime root is
+#      one).
+#   3. "unknown" — a statement of absence, never a guess. The same
+#      convention the Go binaries use for their own provenance.
+build_provenance_commit() {
+    if [ -n "${MPM_BUILD_COMMIT:-}" ] && [ "$MPM_BUILD_COMMIT" != "unknown" ]; then
+        printf '%s' "$MPM_BUILD_COMMIT"
+        return 0
+    fi
+    if command -v git >/dev/null 2>&1; then
+        local commit
+        commit="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
+        if [ -n "$commit" ]; then
+            printf '%s' "$commit"
+            return 0
+        fi
+    fi
+    printf 'unknown'
+}
+
+# provenance_recorded_commit — the revision the CURRENT payload was
+# built from, or "" when there is no sidecar (or it cannot be read).
+provenance_recorded_commit() {
+    local file="$SCRIPT_DIR/$PROVENANCE_FILE"
+    [ -f "$file" ] || { printf ''; return 0; }
+    command -v python3 >/dev/null 2>&1 || { printf ''; return 0; }
+    python3 - "$file" <<'PY' 2>/dev/null || printf ''
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        print(json.load(fh).get("source_commit", "") or "")
+except Exception:
+    print("")
+PY
+}
+
+# payload_sha256 — the hash of the compiled payload, so the sidecar
+# identifies the exact bytes that were deployed.
+payload_sha256() {
+    python3 - "$1" <<'PY'
+import hashlib, sys
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as fh:
+    for chunk in iter(lambda: fh.read(65536), b""):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY
+}
+
+# write_build_provenance — record the revision, payload hash and build
+# time of the payload just produced.
+write_build_provenance() {
+    local payload="$SCRIPT_DIR/dist/index.v2.js"
+    [ -f "$payload" ] || return 0
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "python3 not found — the build provenance sidecar was not written"
+        return 0
+    fi
+    local commit sha built_at
+    commit="$(build_provenance_commit)"
+    sha="$(payload_sha256 "$payload")"
+    built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if ! python3 - "$SCRIPT_DIR/$PROVENANCE_FILE" "$commit" "$sha" "$built_at" <<'PY'
+import json, os, sys
+path, commit, sha, built_at = sys.argv[1:5]
+data = {
+    "adapter": "mpm-opencode",
+    "source_commit": commit,
+    "payload_sha256": sha,
+    "built_at": built_at,
+}
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+os.replace(tmp, path)
+PY
+    then
+        warn "could not write the build provenance sidecar"
+        return 0
+    fi
+}
+
+# publish_build_provenance — copy the sidecar into the PUBLISHED runtime
+# package. The manifest does not carry it (it is evidence, not payload),
+# so without this the deployed copy — the one OpenCode loads — could not
+# be tied back to a revision.
+publish_build_provenance() {
+    local src="$SCRIPT_DIR/$PROVENANCE_FILE"
+    local dst="$CANONICAL_ADAPTER_DIR/$PROVENANCE_FILE"
+    [ -f "$src" ] || return 0
+    mkdir -p "$(dirname "$dst")" 2>/dev/null || true
+    cp -p "$src" "$dst" 2>/dev/null || true
+}
+
+# --------------------------------------------------------------------------
+# npm_output_tail
+# --------------------------------------------------------------------------
+#
+# Print the tail of npm's own output so the operator sees WHY the
+# dependency install failed — with anything that looks like a credential
+# redacted, because npm can echo a registry URL that carries a token and
+# installer output reaches terminals and CI logs.
+npm_output_tail() {
+    local file="$1" lines="${2:-8}" text
+    [ -f "$file" ] || return 0
+    text="$(tail -n "$lines" "$file" 2>/dev/null || true)"
+    [ -n "$text" ] || return 0
+    printf '%s\n' "$text" \
+        | sed -E \
+            -e 's#(_authToken=)[^&[:space:]]+#\1REDACTED#g' \
+            -e 's#((npm|NPM|auth|AUTH|token|TOKEN|password|PASSWORD)[[:space:]]*[:=][[:space:]]*)[^[:space:]]+#\1REDACTED#g' \
+        >&2
+}
+
+# --------------------------------------------------------------------------
+# ensure_toolchain
+# --------------------------------------------------------------------------
+#
+# Obtain the adapter's build dependencies.
+#
+# The compiled payload is produced by the TypeScript compiler in
+# node_modules/.bin/tsc. node_modules/ is gitignored, so it is never
+# present in a checkout — the installer has to create it.
+#
+# Until this existed, the installer simply died with "TypeScript
+# compiler not found ... run 'npm ci'" and stopped there. That left the
+# operator with a manual step that NO installation path performed, so a
+# fresh install reported success while the plugin loaded nothing.
+#
+# `npm ci` (not `npm install`) is the canonical bootstrap because the
+# committed package-lock.json pins the dependency graph. It is NOT run
+# with --offline: a fresh machine has no npm cache, and assuming one is
+# exactly the assumption that made the manual workaround fail.
+ensure_toolchain() {
+    if ! command -v node >/dev/null 2>&1; then
+        err "Node.js is required to build the mpm-opencode plugin but was not found on PATH."
+        err "  Install Node.js (18 or newer) and re-run this installer."
+        err "  MPM will not register a plugin it cannot build."
+        exit 3
+    fi
+    if ! command -v npm >/dev/null 2>&1; then
+        err "npm is required to install the mpm-opencode plugin's build dependencies"
+        err "  but was not found on PATH (node was found at $(command -v node))."
+        err "  Install npm and re-run this installer."
+        exit 3
+    fi
+
+    log "installing build dependencies (npm ci) in $SCRIPT_DIR"
+    local npm_out="$INSTALL_LOG.npm"
+    local rc=0
+    (cd "$SCRIPT_DIR" && npm ci --no-audit --no-fund) >>"$npm_out" 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log "build dependencies installed"
+        return 0
+    fi
+    err "npm ci failed (exit $rc) in $SCRIPT_DIR — the plugin's build dependencies could not be installed."
+    err "  Full output: $npm_out"
+    npm_output_tail "$npm_out" 8
+    err "  Check access to the npm registry, then re-run this installer."
+    exit 3
+}
 
 build_dist() {
     # The staged payload is dist/index.v2.js (the OpenCode-2 plugin
@@ -202,6 +392,21 @@ build_dist() {
                 break
             fi
         done
+        if [ -z "$newer" ]; then
+            # mtime alone cannot see a revision change that leaves
+            # src/*.ts byte-identical (a release that touches no
+            # adapter file, or a checkout that restores the same
+            # content). The recorded provenance is what makes the
+            # payload's revision verifiable rather than assumed.
+            local recorded current
+            recorded="$(provenance_recorded_commit)"
+            current="$(build_provenance_commit)"
+            if [ -z "$recorded" ]; then
+                newer="no recorded build provenance"
+            elif [ "$recorded" != "$current" ]; then
+                newer="revision $current (payload was built from $recorded)"
+            fi
+        fi
     fi
     if [ -n "$newer" ]; then
         log "rebuilding dist/ from source ($newer)..."
@@ -218,11 +423,23 @@ build_dist() {
         # `make test-agent-adapters` exercise in CI.
         local tsc_bin="$SCRIPT_DIR/node_modules/.bin/tsc"
         if [ ! -x "$tsc_bin" ]; then
-            die "TypeScript compiler not found at $tsc_bin; run 'npm ci' (preferred, matches the committed package-lock.json) or 'npm install' in the mpm-opencode adapter directory to populate devDependencies" 3
+            # The compiler is missing because the dependencies were
+            # never installed. Install them rather than telling the
+            # operator to do it by hand.
+            ensure_toolchain
+            tsc_bin="$SCRIPT_DIR/node_modules/.bin/tsc"
+            if [ ! -x "$tsc_bin" ]; then
+                die "the TypeScript compiler is still missing at $tsc_bin after installing the build dependencies" 3
+            fi
         fi
         if ! (cd "$SCRIPT_DIR" && "$tsc_bin" 2>>"$INSTALL_LOG") >>"$INSTALL_LOG" 2>&1; then
-            die "tsc build failed; see $INSTALL_LOG" 2
+            err "the TypeScript compilation failed (tsc exited non-zero)."
+            err "  Full output: $INSTALL_LOG"
+            tail -n 20 "$INSTALL_LOG" 2>/dev/null | sed -E \
+                -e 's#(_authToken=)[^&[:space:]]+#\1REDACTED#g' >&2 || true
+            exit 2
         fi
+        write_build_provenance
         log "dist/ rebuilt"
     else
         log "dist/ is up to date"
@@ -494,6 +711,11 @@ case "$MODE" in
         # Registration names a path. Provision and validate it before
         # writing anything, so an entry never exists without a payload.
         stage_opencode_runtime_package
+        # The provenance sidecar is evidence, not payload: it is not in
+        # the runtime manifest, so it is published into the staged
+        # package explicitly. Without this the DEPLOYED payload could
+        # not be tied back to a revision.
+        publish_build_provenance
         # A failed migration means MPM is NOT registered with OpenCode.
         # Continuing would print "done" and a verification summary that
         # claims the plugin entry points at the canonical path — the exact
@@ -528,6 +750,12 @@ case "$MODE" in
         else
             log "  [FAIL] $OPENCODE_CONFIG does not register the package directory"
             log "         (a historical file-path registration also fails this check)"
+        fi
+        if [ -f "$CANONICAL_ADAPTER_DIR/$PROVENANCE_FILE" ]; then
+            log "  [ok]   build provenance recorded for the deployed payload"
+            log "         $(cat "$CANONICAL_ADAPTER_DIR/$PROVENANCE_FILE" | tr -d '\n' | sed 's/  */ /g')"
+        else
+            log "  [FAIL] build provenance missing at $CANONICAL_ADAPTER_DIR/$PROVENANCE_FILE"
         fi
         log "  [ok]   AGENTS.md managed block refreshed"
         log "NOT verified:"
@@ -571,7 +799,33 @@ case "$MODE" in
             ok=0
         fi
         if [ ! -x "$SCRIPT_DIR/node_modules/.bin/tsc" ]; then
-            warn "verify: local TypeScript compiler missing at $SCRIPT_DIR/node_modules/.bin/tsc; 'npm ci' (preferred) or 'npm install' is needed for fresh builds"
+            warn "verify: local TypeScript compiler missing at $SCRIPT_DIR/node_modules/.bin/tsc"
+            warn "  (the installer installs it automatically — re-run this installer)"
+        fi
+        # The deployed payload's provenance. Reported, not asserted: the
+        # recorded revision is the one the payload was BUILT from, which
+        # is the fact an operator needs when the installed tree and the
+        # checkout disagree.
+        if [ -f "$CANONICAL_ADAPTER_DIR/$PROVENANCE_FILE" ]; then
+            recorded="$(python3 - "$CANONICAL_ADAPTER_DIR/$PROVENANCE_FILE" <<'PY' 2>/dev/null || printf 'unknown'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        print(json.load(fh).get("source_commit", "unknown"))
+except Exception:
+    print("unknown")
+PY
+)"
+            current="$(build_provenance_commit)"
+            log "verify: deployed payload was built from revision ${recorded}"
+            if [ "$recorded" != "$current" ]; then
+                warn "verify: the installed source revision is ${current},"
+                warn "  but the deployed payload was built from ${recorded}"
+                warn "  (re-run this installer to rebuild the payload)"
+            fi
+        else
+            warn "verify: no build provenance at $CANONICAL_ADAPTER_DIR/$PROVENANCE_FILE"
+            warn "  (the payload predates provenance recording; re-run this installer)"
         fi
         if [ ! -f "$OPENCODE_CONFIG" ]; then
             err "verify: $OPENCODE_CONFIG missing"
