@@ -68,73 +68,74 @@ package synth
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+
+	"github.com/flowbyte-com/mpm-core/config"
 )
 
 // AuthScheme names how a credential is presented to an endpoint.
 //
-// The set is deliberately small: these are the mechanisms MPM
-// implements and can therefore guarantee. A scheme that is not in this
-// set is not silently approximated — an operator asking for an
-// unsupported scheme gets an explicit error.
-type AuthScheme string
+// The vocabulary lives in the config package so that the configuration
+// layer can VALIDATE an operator's value: the config package cannot
+// import this one (this package imports config), so the canonical set
+// has to sit below both.
+//
+// The alias keeps every existing `synth.AuthScheme...` reference
+// working.
+type AuthScheme = config.AuthScheme
 
 const (
 	// AuthSchemeNone sends no credential at all. Correct for
 	// locally-hosted servers that run without authentication.
-	AuthSchemeNone AuthScheme = "none"
+	AuthSchemeNone = config.AuthSchemeNone
 
 	// AuthSchemeBearer sends `Authorization: Bearer <credential>`.
 	// Used by OpenAI-compatible endpoints and by MiniMax on both of
 	// its surfaces (including the Anthropic-compatible one).
-	AuthSchemeBearer AuthScheme = "bearer"
+	AuthSchemeBearer = config.AuthSchemeBearer
 
 	// AuthSchemeXAPIKey sends `X-Api-Key: <credential>`. Used by the
 	// Anthropic API and by Anthropic-protocol proxies.
-	AuthSchemeXAPIKey AuthScheme = "x-api-key"
+	AuthSchemeXAPIKey = config.AuthSchemeXAPIKey
 )
-
-// String returns the canonical lowercase label. Stable across releases:
-// it is persisted in configuration and rendered in operator output.
-func (a AuthScheme) String() string { return string(a) }
 
 // ParseAuthScheme parses an operator-supplied scheme name.
 //
 // The accepted spellings are the canonical labels plus the obvious
-// punctuation variants an operator might type. An empty string is NOT
-// a scheme — it means "no override", and the caller falls through to
-// the next resolution tier.
+// punctuation variants an operator might type. An empty string is NOT a
+// scheme - it means "no override", and the caller falls through to the
+// next resolution tier.
+//
+// An unrecognised value returns ok=false. The caller MUST NOT treat
+// that as "no override": an operator who wrote `auth_scheme: "basic"`
+// asked for something specific, and silently substituting a derived
+// scheme hides the mistake behind a confusing 401.
 func ParseAuthScheme(raw string) (AuthScheme, bool) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "":
-		return "", false
-	case "bearer":
-		return AuthSchemeBearer, true
-	case "x-api-key", "x_api_key", "xapikey", "api-key":
-		return AuthSchemeXAPIKey, true
-	case "none", "no-auth", "noauth":
-		return AuthSchemeNone, true
-	}
-	return "", false
+	return config.ParseAuthScheme(raw)
 }
 
-// headerFor returns the (header name, header value) pair that presents
-// credential under this scheme.
+// authHeaderFor returns the (header name, header value) pair that
+// presents credential under this scheme.
 //
 // present is false when NO header is sent: either the scheme sends no
 // credential, or there is no credential to send. Sending an empty
 // `Authorization: Bearer ` to an endpoint that needs no credential is
 // noise, and some servers reject a malformed Authorization header
-// outright — an absent header is the honest representation of "no
+// outright - an absent header is the honest representation of "no
 // credential".
-func (a AuthScheme) headerFor(credential string) (name string, value string, present bool) {
+//
+// It is a package-level function rather than a method because the
+// scheme type is an alias of the config package's type, and Go does not
+// allow methods to be declared on a non-local type.
+func authHeaderFor(scheme AuthScheme, credential string) (name string, value string, present bool) {
 	if credential == "" {
 		return "", "", false
 	}
-	switch a {
+	switch scheme {
 	case AuthSchemeBearer:
 		return "Authorization", "Bearer " + credential, true
 	case AuthSchemeXAPIKey:
@@ -175,7 +176,25 @@ func protocolDefaultAuthScheme(w wireShape) AuthScheme {
 // `POST {base}/anthropic/v1/messages` with
 // `Authorization: Bearer <MINIMAX_API_KEY>`; its OpenAI-compatible
 // surface is `POST {base}/v1/chat/completions` with the same header.
-// Both are covered by the domain rule.
+//
+// WHAT THE DOMAIN RULE COVERS — AND WHAT IT DOES NOT.
+//
+// The domain rule covers the AUTH half only: it sets Bearer for both of
+// MiniMax's surfaces, and it does so by matching the parsed host, so
+// `notminimax.io` and `minimax.io.example.com` are somebody else's
+// server.
+//
+// The PROTOCOL half is still inferred from the URL. `https://api.minimax.io/v1`
+// contains none of the OpenAI keywords, so the wire is the Anthropic one
+// and the request path is `/messages` — not MiniMax's OpenAI-compatible
+// `/v1/chat/completions`. The domain rule does NOT close that gap; an
+// earlier version of this comment claimed it did, and the claim was
+// wrong.
+//
+// The protocol is a separate concern from the authentication scheme,
+// and the two are resolved independently: a correct MiniMax
+// configuration is one whose base URL names the surface it means
+// (`/anthropic/v1` for the Anthropic-compatible surface).
 var documentedBearerDomains = []string{
 	"minimax.io",
 	"minimaxi.com",
@@ -232,46 +251,49 @@ func hostMatchesDomain(host, domain string) bool {
 	return strings.HasSuffix(host, "."+domain)
 }
 
-// ResolveAuthScheme resolves the authentication scheme for a base URL,
-// inferring the message protocol from the URL.
+// resolveAuth is the client's own authentication-scheme resolution.
 //
-// Callers that already hold a *SynthClient should use the client's own
-// resolution (SynthClient.resolvedAuth) so that the protocol and the
-// scheme can never disagree — a client whose protocol was set
-// explicitly must use that protocol's default, not one re-derived from
-// the URL.
-func ResolveAuthScheme(baseURL, credential, override string) AuthScheme {
-	if s, ok := ParseAuthScheme(override); ok {
-		return s
-	}
-	if s, ok := documentedAuthScheme(baseURL); ok {
-		return s
-	}
-	if s, ok := negotiatedAuth(baseURL, credential); ok {
-		return s
-	}
-	return protocolDefaultAuthScheme(inferWire(baseURL))
-}
-
-// resolvedAuth is the client's own resolution. Same order as
-// ResolveAuthScheme, except the protocol default follows the client's
-// actual wire rather than a URL re-derivation.
+// Order (first match wins):
 //
-// Resolution happens per request rather than once at construction, so
-// a scheme discovered by a bounded negotiation is retained for
-// subsequent operations on the same endpoint without any shared mutable
-// client state.
-func (sc *SynthClient) resolvedAuth() AuthScheme {
-	if s, ok := ParseAuthScheme(sc.AuthOverride); ok {
-		return s
+//  1. the operator's explicit override (config.Profile.AuthScheme);
+//  2. the endpoint's own documented rule, matched on the parsed URL
+//     host against an exact domain set;
+//  3. a scheme negotiated during an approved connection verification
+//     for this exact (base URL, credential) pair;
+//  4. the protocol default: OpenAI-compatible -> Bearer,
+//     Anthropic-compatible -> X-Api-Key.
+//
+// The protocol default follows the client's ACTUAL wire rather than a
+// URL re-derivation, so the protocol and the scheme can never disagree.
+//
+// An UNRECOGNISED override is an ERROR, not a fall-through.
+//
+// The override used to be parsed with a matcher that returned ("", false)
+// for anything it did not recognise, and the resolution simply moved on
+// to the next tier. An operator who wrote `auth_scheme: "basic"` - or
+// simply misspelled the value - was therefore never told: the endpoint
+// was authenticated with a DERIVED scheme and answered 401, and the
+// symptom pointed in exactly the wrong direction.
+//
+// Resolution happens per request rather than once at construction, so a
+// scheme discovered by a bounded negotiation is retained for subsequent
+// operations on the same endpoint without any shared mutable client
+// state.
+func (sc *SynthClient) resolveAuth() (AuthScheme, error) {
+	if strings.TrimSpace(sc.AuthOverride) != "" {
+		if s, ok := ParseAuthScheme(sc.AuthOverride); ok {
+			return s, nil
+		}
+		return "", fmt.Errorf("unsupported auth_scheme %q in the profile (supported: %s)",
+			strings.TrimSpace(sc.AuthOverride), strings.Join(config.SupportedAuthSchemes(), ", "))
 	}
 	if s, ok := documentedAuthScheme(sc.BaseURL); ok {
-		return s
+		return s, nil
 	}
 	if s, ok := negotiatedAuth(sc.BaseURL, sc.APIKey); ok {
-		return s
+		return s, nil
 	}
-	return protocolDefaultAuthScheme(sc.Wire)
+	return protocolDefaultAuthScheme(sc.Wire), nil
 }
 
 // negotiatedAuthCache retains the scheme discovered by a successful

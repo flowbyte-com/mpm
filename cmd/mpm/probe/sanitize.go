@@ -95,6 +95,8 @@ func sanitizeError(msg string) string {
 			trimmed = trimmed[:i] + redacted + trimmed[i+end:]
 		}
 	}
+	// Scrub secret-bearing key=value pairs the prefix list does not know.
+	trimmed = scrubKeyLikePairs(trimmed)
 	// Truncate.
 	const max = 160
 	if len(trimmed) > max {
@@ -169,3 +171,22 @@ func ComputeFingerprint(in FingerprintInput) string {
 // keyLikePattern matches any obvious secret-bearing key= pair in summary
 // text. Compiled once at package init.
 var keyLikePattern = regexp.MustCompile(`(?i)(api[_-]?key|token|password|secret|access[_-]?token)\s*[:=]\s*\S+`)
+
+// scrubKeyLikePairs redacts secret-bearing `key=value` / `key: value`
+// pairs in a summary string.
+//
+// The prefix scrub above only knows the credential formats MPM has seen
+// (`sk-`, `sk-or-`, `xoxb-`, `Bearer `). A provider or a proxy that
+// echoes a credential in a different shape — `api_key=…`, `token: …`,
+// `password=…` — would have it captured verbatim in the probe's
+// error_summary, which is PERSISTED in the probe cache and rendered by
+// `mpm doctor`.
+//
+// The pattern was declared for exactly this purpose and never wired up.
+func scrubKeyLikePairs(s string) string {
+	if s == "" {
+		return s
+	}
+	return keyLikePattern.ReplaceAllString(s, "$1=[REDACTED]")
+}
+

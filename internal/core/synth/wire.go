@@ -33,6 +33,7 @@ package synth
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -91,7 +92,7 @@ func InferWire(baseURL string) wireShape {
 }
 
 func inferWire(baseURL string) wireShape {
-	lu := strings.ToLower(baseURL)
+	lu := strings.ToLower(wireMatchString(baseURL))
 	switch {
 	case strings.Contains(lu, "openrouter"),
 		strings.Contains(lu, "openai.com"),
@@ -112,6 +113,42 @@ func inferWire(baseURL string) wireShape {
 		return wireOpenAI
 	}
 	return wireAnthropic
+}
+
+// wireMatchString returns the part of a base URL the wire heuristic
+// matches on: the scheme, the host (with its port) and the path.
+//
+// The QUERY STRING and the FRAGMENT are excluded.
+//
+// A URL's query string is a request's parameters, not the endpoint's
+// identity. Matching the whole URL meant that a parameter could decide
+// the protocol — and with it the default authentication scheme — so
+// `https://api.anthropic.com/v1?mirror=ollama` inferred the OpenAI
+// protocol and presented the Anthropic credential as
+// `Authorization: Bearer` on Anthropic's own API.
+//
+// The credential's presentation shape must never be decided by a
+// parameter. Host and path still decide it, which is where the
+// provider signal actually lives.
+func wireMatchString(baseURL string) string {
+	raw := strings.TrimSpace(baseURL)
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		// Unparseable: fall back to the whole string. A malformed URL
+		// is refused by the configuration surfaces; the heuristic only
+		// has to be deterministic.
+		return raw
+	}
+	// u.Host carries the port; u.User (any credentials in the URL) is
+	// deliberately excluded — a password in the URL must not influence
+	// the protocol.
+	return u.Scheme + "://" + u.Host + u.Path
 }
 
 // pathFor returns the URL path suffix to POST to on a given wire.

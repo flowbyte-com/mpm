@@ -94,7 +94,7 @@ func TestProtocolDefaultAuthScheme_OpenAI(t *testing.T) {
 	if got := protocolDefaultAuthScheme(wireOpenAI); got != AuthSchemeBearer {
 		t.Errorf("OpenAI protocol default scheme = %q; want %q", got, AuthSchemeBearer)
 	}
-	name, value, present := AuthSchemeBearer.headerFor("sk-or-test-key-1234")
+	name, value, present := authHeaderFor(AuthSchemeBearer, "sk-or-test-key-1234")
 	if !present {
 		t.Fatal("bearer scheme presented no header")
 	}
@@ -116,7 +116,7 @@ func TestProtocolDefaultAuthScheme_Anthropic(t *testing.T) {
 	if got := protocolDefaultAuthScheme(wireAnthropic); got != AuthSchemeXAPIKey {
 		t.Errorf("Anthropic protocol default scheme = %q; want %q", got, AuthSchemeXAPIKey)
 	}
-	name, value, present := AuthSchemeXAPIKey.headerFor("anthropic-key-xyz")
+	name, value, present := authHeaderFor(AuthSchemeXAPIKey, "anthropic-key-xyz")
 	if !present {
 		t.Fatal("x-api-key scheme presented no header")
 	}
