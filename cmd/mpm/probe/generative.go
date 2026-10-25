@@ -13,6 +13,7 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -205,13 +206,41 @@ func probeGenerativeWithTimeout(ctx context.Context, p *config.Profile, kind Pro
 }
 
 // classifySynthError extracts the production FailureClass and HTTP status
-// from a synth.DoLLMRequest error. synth wraps failures as
-// `API returned HTTP <code>: <body>` or `API request failed: <reason>`.
-// We surface the human-readable message into ErrorSummary (sanitized) and
-// recover the structured class via regex / prefix match.
+// from a synth.DoLLMRequest error.
+//
+// The production layer hands the status over as a TYPED field
+// (synth.AuthRefusalError) whenever the refusal was an authentication
+// refusal. That field is authoritative and is read first: the negotiated
+// path can produce TWO statuses — one per authentication scheme — and
+// only the FINAL one describes the failure the operator has to act on.
+// Parsing the status back out of a formatted message took the FIRST
+// occurrence, which reported an unbilled account (402 on the second
+// attempt) as an invalid credential (401 on the first).
+//
+// The message-parsing fallback remains for the failure shapes the
+// production layer does not type.
 func classifySynthError(err error) (class string, httpStatus int) {
 	if err == nil {
 		return "", 0
+	}
+	// Typed authentication refusal: the status is carried by the error.
+	var refusal *synth.AuthRefusalError
+	if errors.As(err, &refusal) {
+		httpStatus = refusal.Status
+		switch {
+		case refusal.Status == 401 || refusal.Status == 402 || refusal.Status == 403:
+			class = "FailureAuth"
+		case refusal.Status == 429:
+			class = "FailureRateLimit"
+		case refusal.Status >= 500:
+			class = "FailureUnknown"
+		case refusal.Status == 0:
+			// The final attempt never reached an HTTP response.
+			class = "FailureTransientTransport"
+		default:
+			class = "FailureUnknown"
+		}
+		return class, httpStatus
 	}
 	msg := err.Error()
 	// Standard synth error format: `API returned HTTP <n>: <body>`.
@@ -276,13 +305,17 @@ func classifySynthError(err error) (class string, httpStatus int) {
 //
 // We take everything after the first colon of `API returned HTTP <n>:`,
 // bounded to 512 chars.
+//
+// The LAST occurrence is used, not the first: on the negotiated path the
+// message names both attempts, and the body that describes the failure
+// the operator must act on is the final attempt's.
 func extractBodyFragment(err error) string {
 	if err == nil {
 		return ""
 	}
 	msg := err.Error()
 	prefix := "API returned HTTP "
-	i := indexOf(msg, prefix)
+	i := lastIndexOf(msg, prefix)
 	if i < 0 {
 		return ""
 	}
@@ -332,6 +365,27 @@ func indexOf(haystack, needle string) int {
 		return -1
 	}
 	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return i
+		}
+	}
+	return -1
+}
+
+// lastIndexOf is the mirror of indexOf: it returns the position of the
+// LAST occurrence of needle, or -1.
+//
+// The negotiated authentication path names both attempts in one message,
+// so the final attempt's answer is the one that describes the failure
+// the operator has to act on.
+func lastIndexOf(haystack, needle string) int {
+	if len(needle) == 0 {
+		return 0
+	}
+	if len(needle) > len(haystack) {
+		return -1
+	}
+	for i := len(haystack) - len(needle); i >= 0; i-- {
 		if haystack[i:i+len(needle)] == needle {
 			return i
 		}
