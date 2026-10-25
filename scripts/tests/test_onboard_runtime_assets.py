@@ -167,19 +167,49 @@ class TestHalfProvisionedInstallIsWorseThanNone(unittest.TestCase):
                 any((root / "agent_installation").glob("*/reconcile.json")),
                 "precondition: no manifests staged")
 
+            # The inspector is pointed at an ISOLATED home. It defaults
+            # to $HOME, which on a machine that actually has MPM
+            # installed means it reads the operator's REAL managed blocks
+            # (~/.pi/agent/AGENTS.md, ~/.claude/CLAUDE.md,
+            # ~/.config/opencode/AGENTS.md) and reports them as present.
+            # This file's own contract is "Hermeticity: every runtime
+            # root is a fresh mktemp directory ... Nothing resolves into
+            # the real ~/.mpm", and the inspector exposes --home for
+            # exactly this: "so tests and sandboxed diagnostics can point
+            # at a fixture tree without touching the real installed
+            # files".
+            fixture_home = root / "fixture-home"
+            fixture_home.mkdir(parents=True, exist_ok=True)
             proc = subprocess.run(
-                [sys.executable, str(root / INSPECTOR), "--json"],
+                [sys.executable, str(root / INSPECTOR), "--json",
+                 "--home", str(fixture_home)],
                 capture_output=True, text=True, cwd=str(root))
-            # The inspector must not be able to assert ANY host is installed.
+
+            # The inspector must not be able to assert ANY host is
+            # installed.
             out = proc.stdout.strip()
-            if proc.returncode == 0 and out:
-                hosts = json.loads(out)
-                hosts = hosts.get("hosts", hosts) if isinstance(hosts, dict) else hosts
-                for h in hosts:
-                    self.assertNotEqual(
-                        h.get("block"), "present",
-                        "without reconcile.json the inspector must not claim "
-                        "a managed block is present")
+            # A non-zero exit means the inspector found a WARN or ERROR
+            # verdict. The assertion below only runs on a clean exit, so
+            # without this check the test would pass VACUOUSLY whenever
+            # the inspector reported anything other than PASS/ABSENT --
+            # including the "installed block drifted from canonical
+            # render" case, which is the normal state of a machine whose
+            # managed blocks were written by an older release. The
+            # assertion is the point of the test, so it is asserted here
+            # that it actually ran.
+            self.assertEqual(
+                proc.returncode, 0,
+                f"the inspector must report a clean result for an empty "
+                f"fixture home, so that the assertion below actually runs; "
+                f"got rc={proc.returncode} stderr={proc.stderr!r}")
+            self.assertTrue(out, "the inspector produced no output")
+            hosts = json.loads(out)
+            hosts = hosts.get("hosts", hosts) if isinstance(hosts, dict) else hosts
+            for h in hosts:
+                self.assertNotEqual(
+                    h.get("block"), "present",
+                    "without reconcile.json the inspector must not claim "
+                    "a managed block is present")
 
 
 class TestAgentProtocolIsReachable(unittest.TestCase):
