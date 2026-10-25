@@ -1119,6 +1119,8 @@ Initial confidence is also fixed by artifact type:
 
 The stored `confidence` column is a performance cache. The evidence ledger is the source of truth. If they disagree, the cache is wrong. `mpm ops confidence recompute` triggers a manual recompute; `mpm_confidence action=query_history` derives its view from evidence, not the cached column.
 
+**Time decay is maintained, not implied.** The formula subtracts `λ · days` of elapsed time, but a cache does not change by itself. A bounded maintenance pass keeps it honest: `mpm ops confidence decay` (also run automatically by the `confidence_decay` scheduler task, cadence-gated) recomputes at most `confidence.decay.limit` due artifacts per invocation, and only those not checked within `confidence.decay.min_age_hours`. Each artifact is recomputed and its `confidence_checked_at` watermark advanced in one transaction, so a failure retries exactly that artifact and a completed pass is a no-op until the minimum age elapses. An unchanged result advances the watermark but appends no `confidence_history` row; a changed result goes through the same authoritative path as an evidence event, including cascade crossings. Participants are memory, theory and decision rows (the `memories` table). Lessons (`lessons_base`) are not part of this pass: their cached confidence is not consulted by any gate, and adding a second watermark surface is a follow-up rather than a silent omission.
+
 This is one of the four enforcement patterns that make MPM's guarantees stick. See **Appendix C** for the rest (property tests, AST guard rails, self-heal whitelist + escalation).
 
 ### 6.3 Retrieval Architecture

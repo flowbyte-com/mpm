@@ -170,6 +170,8 @@ func main() {
 		},
 	).TickHandler())
 	s.RegisterTickHandler("openclaw_ingest", scheduler.NewIngestHandler(dm, logger).TickHandler())
+	// confidence_decay → bounded decay recompute for memories-backed
+	//                    artifacts (cadence-gated; see the handler).
 	// cascade_wake_reconcile → per-tick recovery pass for wake
 	// bookings lost to crash windows. Reads rows where status=
 	// 'materialized' AND wake_scheduled=0 and re-schedules the wake.
@@ -177,6 +179,13 @@ func main() {
 	// (LIMIT 100, flag-flip semantics) so re-running is safe.
 	s.RegisterTickHandler("cascade_wake_reconcile",
 		scheduler.NewCascadeWakeReconcileHandler(dm, logger).TickHandler())
+	// confidence_decay → bounded time-based confidence recompute. The
+	// substrate models decay; without this, a stored confidence is a
+	// snapshot that never moves until an unrelated evidence write
+	// happens to touch the artifact. Cadence and batch size are
+	// configurable (confidence.decay.*) and the pass is safe to re-run.
+	s.RegisterTickHandler("confidence_decay",
+		scheduler.NewConfidenceDecayHandler(dm, logger).TickHandler())
 
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)

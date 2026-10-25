@@ -334,6 +334,25 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 // pre-cascade behavior where AddEvidence's WithTx wrapper was the
 // only path that mattered.
 func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason RecomputeReason) error {
+	_, err := recomputeConfidenceAt(node, artifactID, artifactType, reason, time.Now(), false)
+	return err
+}
+
+// recomputeConfidenceAt is the shared body of every confidence
+// recomputation. `now` is explicit so deterministic maintenance tests can
+// drive the decay term; production callers use time.Now via
+// RecomputeConfidence.
+//
+// `onlyIfChanged` is the maintenance contract: when the derived value is
+// effectively identical to the stored one, do NOT write the artifact
+// column and do NOT append a confidence_history row. That keeps a
+// periodic decay pass from growing the history ledger with rows that
+// record no change, while the changed/skipped distinction is reported by
+// the caller. Ordinary evidence-driven recomputes pass false and keep
+// their append-always behaviour.
+//
+// Returns whether the stored confidence changed.
+func recomputeConfidenceAt(node DBNode, artifactID, artifactType string, reason RecomputeReason, now time.Time, onlyIfChanged bool) (bool, error) {
 	// Validate artifact existence. Without this, a recompute against a
 	// nonexistent artifact silently succeeds: loadEvidenceForRecompute
 	// anchors lastPositiveAt to now (no decay), computeConfidence returns
@@ -344,13 +363,11 @@ func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason Re
 	// documentation warns against, so we surface a clear error instead.
 	exists, err := artifactExists(node, artifactID, artifactType)
 	if err != nil {
-		return fmt.Errorf("artifact existence check: %w", err)
+		return false, fmt.Errorf("artifact existence check: %w", err)
 	}
 	if !exists {
-		return fmt.Errorf("artifact %s/%s does not exist", artifactType, artifactID)
+		return false, fmt.Errorf("artifact %s/%s does not exist", artifactType, artifactID)
 	}
-
-	now := time.Now()
 
 	// Snapshot the OLD confidence before the recompute. The crossing
 	// detector compares old (this read) vs new (the post-recompute
@@ -362,15 +379,22 @@ func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason Re
 	// Load the evidence set.
 	ev, lastPositiveAt, err := loadEvidenceForRecompute(node, artifactID, artifactType, now)
 	if err != nil {
-		return fmt.Errorf("load evidence: %w", err)
+		return false, fmt.Errorf("load evidence: %w", err)
 	}
 
 	// Run the math.
 	conf := computeConfidence(artifactType, ev, now, lastPositiveAt, 0.005)
 
+	// Maintenance no-op: nothing to record. The tolerance is far below
+	// any observable movement (a day of decision decay moves the value by
+	// ~2.4e-4; a second by ~3e-9), so this cannot mask a real change.
+	if onlyIfChanged && hasOldConf && math.Abs(conf-oldConf) < 1e-6 {
+		return false, nil
+	}
+
 	// Update the artifact's confidence column.
 	if err := writeArtifactConfidence(node, artifactID, artifactType, conf); err != nil {
-		return fmt.Errorf("write artifact confidence: %w", err)
+		return false, fmt.Errorf("write artifact confidence: %w", err)
 	}
 
 	// Append the history row.
@@ -380,7 +404,7 @@ func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason Re
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`, 0, historyID, artifactID, artifactType, conf, now.Unix(), len(ev), string(reason))
 	if err != nil {
-		return fmt.Errorf("insert history row: %w", err)
+		return false, fmt.Errorf("insert history row: %w", err)
 	}
 
 	// Hard-confidence invalidation hook (Task 4). Enqueue cascade
@@ -397,7 +421,7 @@ func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason Re
 				artifactID, artifactType,
 				"confidence_floor", "", 0,
 			); err != nil {
-				return fmt.Errorf("confidence cascade enqueue: %w", err)
+				return false, fmt.Errorf("confidence cascade enqueue: %w", err)
 			}
 		}
 
@@ -405,7 +429,7 @@ func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason Re
 		// the proven threshold (HardConfidenceProvenThreshold).
 		// Mirror image of the invalidation crossing above: old below
 		// threshold AND new >= threshold. Downstream artifacts that
-		// opted in via polarity='assumes_false' (i.e. they were
+		// opted out via polarity='assumes_false' (i.e. they were
 		// running on the assumption the foundation was uncertain)
 		// are surfaced to the materializer so a reviewer can decide
 		// whether their conclusions still hold given the foundation
@@ -418,12 +442,12 @@ func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason Re
 				artifactID, artifactType,
 				ReasonConfidenceCeiling, "", 0,
 			); err != nil {
-				return fmt.Errorf("confidence positive cascade enqueue: %w", err)
+				return false, fmt.Errorf("confidence positive cascade enqueue: %w", err)
 			}
 		}
 	}
 
-	return nil
+	return true, nil
 }
 
 // readArtifactConfidence reads the live confidence column from the

@@ -34,9 +34,26 @@ func parseOpsConfidenceArgs(args []string) (map[string]interface{}, string, erro
 	}
 	sub := args[0]
 	switch sub {
+	case "decay":
+		// decay is the one subcommand that is not artifact-scoped: it
+		// maintains a bounded batch of artifacts that are due for a
+		// time-based recompute. Parsed separately so the --artifact
+		// requirement below does not apply.
+		fs := flag.NewFlagSet("ops-confidence-decay", flag.ContinueOnError)
+		limit := fs.Int("limit", mpminternal.DefaultConfidenceDecayLimit, "maximum artifacts to recompute in this invocation")
+		minAgeHours := fs.Int("min-age-hours", int(mpminternal.DefaultConfidenceDecayMinAge/time.Hour), "only artifacts whose last confidence check is at least this old")
+		dryRun := fs.Bool("dry-run", false, "report what would change without writing")
+		if err := fs.Parse(args[1:]); err != nil {
+			return nil, "", err
+		}
+		return map[string]interface{}{
+			"limit":         *limit,
+			"min_age_hours": *minAgeHours,
+			"dry_run":       *dryRun,
+		}, sub, nil
 	case "show", "recompute", "changes", "trend", "explain", "history":
 	default:
-		return nil, "", fmt.Errorf("unknown subcommand: %q (want show|recompute|changes|trend|explain|history)", sub)
+		return nil, "", fmt.Errorf("unknown subcommand: %q (want show|recompute|changes|trend|explain|history|decay)", sub)
 	}
 	fs := flag.NewFlagSet("ops-confidence-"+sub, flag.ContinueOnError)
 	artifactID := fs.String("artifact", "", "artifact id (required)")
@@ -74,6 +91,10 @@ Subcommands:
   trend       Confidence trend over --window-days (default 30)
   explain     Evidence breakdown + reasoning trace
   history     Full confidence_history timeline
+  decay       Bounded time-based decay pass over due artifacts
+                --limit N            max artifacts this invocation (default 100)
+                --min-age-hours N    only artifacts unchecked for N hours (default 24)
+                --dry-run            report the batch without writing
 
 Canonical machine surface:
   mpm call mpm_confidence --payload '{"action":"show","params":{"artifact_id":"<id>"}}'
@@ -113,6 +134,29 @@ func handleOpsConfidence(args []string) int {
 
 	var res interface{}
 	switch sub {
+	case "decay":
+		limit, _ := payload["limit"].(int)
+		minAgeHours, _ := payload["min_age_hours"].(int)
+		dryRun, _ := payload["dry_run"].(bool)
+		decayRes, err := dm.RunConfidenceDecay(mpminternal.ConfidenceDecayOptions{
+			Limit:  limit,
+			MinAge: time.Duration(minAgeHours) * time.Hour,
+			DryRun: dryRun,
+		})
+		if err != nil {
+			printError("ops confidence decay: %v", err)
+			return 1
+		}
+		out, _ := json.MarshalIndent(decayRes, "", "  ")
+		fmt.Println(string(out))
+		if decayRes.Failed > 0 {
+			// Per-artifact failures are reported in the envelope AND in
+			// the exit status: a partially swept store must not look like
+			// a clean run to a script.
+			printError("ops confidence decay: %d artifact(s) failed; they remain due for the next pass", decayRes.Failed)
+			return 1
+		}
+		return 0
 	case "show":
 		limit, _ := payload["limit"].(int)
 		snap, err := mpminternal.GetConfidenceForArtifact(dm, artifactID, artifactType, limit)
