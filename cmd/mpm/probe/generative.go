@@ -158,6 +158,17 @@ func probeGenerativeWithTimeout(ctx context.Context, p *config.Profile, kind Pro
 		// here without exposing it. Use the HTTP status / classification
 		// heuristics via substring match against the formatted message.
 		class, httpStatus := classifySynthError(err)
+		// A TYPED authentication refusal overrides that. The status it
+		// carries belongs to the attempt that produced the failure: on
+		// the negotiated path that is the FINAL attempt, and only the
+		// final one describes the failure the operator must act on
+		// (402 on the second attempt means "unbilled", not "invalid
+		// credential").
+		var refusal *synth.AuthRefusalError
+		if errors.As(err, &refusal) {
+			httpStatus = refusal.Status
+			class = authRefusalClass(refusal.Status)
+		}
 		res.ErrorClass = class
 		// Capture a bounded body fragment for model-not-found detection
 		// when available. We extract the first 512 chars between
@@ -205,11 +216,42 @@ func probeGenerativeWithTimeout(ctx context.Context, p *config.Profile, kind Pro
 	return res
 }
 
+// authRefusalClass maps an authentication refusal's HTTP status onto
+// the probe's failure-class vocabulary.
+//
+// The three refusals the operator can act on — an invalid credential, an
+// unbilled subscription and an under-privileged key — share one class
+// (FailureAuth) and are distinguished separately by AuthFailure.
+func authRefusalClass(status int) string {
+	switch {
+	case status == 401 || status == 402 || status == 403:
+		return "FailureAuth"
+	case status == 429:
+		return "FailureRateLimit"
+	case status >= 500:
+		return "FailureUnknown"
+	case status == 0:
+		// The attempt never reached an HTTP response.
+		return "FailureTransientTransport"
+	}
+	return "FailureUnknown"
+}
+
 // classifySynthError extracts the production FailureClass and HTTP status
-// from a synth.DoLLMRequest error. synth wraps failures as
-// `API returned HTTP <code>: <body>` or `API request failed: <reason>`.
-// We surface the human-readable message into ErrorSummary (sanitized) and
-// recover the structured class via regex / prefix match.
+// from a synth.DoLLMRequest error.
+//
+// The production layer hands the status over as a TYPED field
+// (synth.AuthRefusalError) whenever the refusal was an authentication
+// refusal. That field is authoritative, and the caller reads it — see
+// probeGenerative, which consults it before trusting this function's
+// message parsing.
+//
+// The message parsing below is the fallback for the failure shapes the
+// production layer does not type. On the negotiated path it now agrees
+// with the typed field: the message names the FINAL attempt's status in
+// the standard "API returned HTTP <n>:" form, and the initial attempt's
+// status is named without that prefix, so there is exactly one
+// occurrence to find.
 func classifySynthError(err error) (class string, httpStatus int) {
 	if err == nil {
 		return "", 0
@@ -285,13 +327,17 @@ func classifySynthError(err error) (class string, httpStatus int) {
 //
 // We take everything after the first colon of `API returned HTTP <n>:`,
 // bounded to 512 chars.
+//
+// The LAST occurrence is used, not the first: on the negotiated path the
+// message names both attempts, and the body that describes the failure
+// the operator must act on is the final attempt's.
 func extractBodyFragment(err error) string {
 	if err == nil {
 		return ""
 	}
 	msg := err.Error()
 	prefix := "API returned HTTP "
-	i := indexOf(msg, prefix)
+	i := lastIndexOf(msg, prefix)
 	if i < 0 {
 		return ""
 	}
@@ -341,6 +387,27 @@ func indexOf(haystack, needle string) int {
 		return -1
 	}
 	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return i
+		}
+	}
+	return -1
+}
+
+// lastIndexOf is the mirror of indexOf: it returns the position of the
+// LAST occurrence of needle, or -1.
+//
+// The negotiated authentication path names both attempts in one message,
+// so the final attempt's answer is the one that describes the failure
+// the operator has to act on.
+func lastIndexOf(haystack, needle string) int {
+	if len(needle) == 0 {
+		return 0
+	}
+	if len(needle) > len(haystack) {
+		return -1
+	}
+	for i := len(haystack) - len(needle); i >= 0; i-- {
 		if haystack[i:i+len(needle)] == needle {
 			return i
 		}
