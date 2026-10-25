@@ -266,7 +266,7 @@ All seven default operational surfaces exclude archived work: `mpm wake` open wo
 
 #### Reference
 
-External material ingested for the agent to consult — documentation, specs, articles, code. Reference artifacts are distinct from Memory: Memory is what the agent synthesises internally; Reference is what the agent can look up. References are ingested from a local file path and are stored with their section markers and ingestion timestamp, searchable via the same FTS5 index as memories. MPM does not fetch URLs: `mpm reference add --url` is a reserved, explicitly-rejected stub. When an ingested document needs a durable pointer back to where it came from, that pointer is an `evidence` row carrying a `reference_url` (§4.2).
+External material ingested for the agent to consult — documentation, specs, articles, code. Reference artifacts are distinct from Memory: Memory is what the agent synthesises internally; Reference is what the agent can look up. References are ingested from a local file path, stored with their section markers and ingestion timestamp, and searchable via the same FTS5 index as memories. Identity is canonical: one source is one document regardless of the path spelling used to name it (§7.6). MPM does not fetch URLs: `mpm reference add --url` is a reserved, explicitly-rejected stub. When an ingested document needs a durable pointer back to where it came from, that pointer is an `evidence` row carrying a `reference_url` (§4.2).
 
 #### Lesson
 
@@ -2289,6 +2289,8 @@ mpm kb session shred <id>
 
 # Reference library (PDF, EPUB, MD, TXT, HTML)
 mpm kb reference add <file> [--tag tag1,tag2] [--reason "..."] [--chunk-size 512]
+                                       # idempotent: same source → same document
+mpm kb reference duplicates [--json]   # read-only: same-source groups + repair plan
 mpm kb reference ls
 mpm kb reference search <query>
 mpm kb reference show <id>
@@ -3268,6 +3270,26 @@ Context-aware deduplication: synthesis deletes the triggering memory after LTM s
 *A separate shelf of long-form sources, not promoted to memory on ingest — the operator decides what to commit.*
 
 PDF, EPUB, HTML, Markdown ingestion with token-aware chunking (`--chunk-size`, 64–2048 tokens, default 512). Sources are diff-keyed by content hash: re-ingesting an unchanged document costs zero embedding work. Embedding is a separate phase from chunk insert, so slow embed calls never block ingest. Reference docs are a *shelf*, not a memory: they live in SQLite, are indexed for full-text and semantic search, and are surfaced to agents on demand. Admission (whether a pattern from a consulted reference is worth promoting to long-term memory) is a per-consult decision, not an ingest-time gate.
+
+**Source identity.** A document's identity is its canonical source, not the string the caller typed:
+
+| Source | Identity |
+| --- | --- |
+| Local file | absolute, `.`/`..`-cleaned path with symlinks resolved |
+| URL | normalized URL (lowercased scheme/host, default port and fragment dropped; query and path preserved) |
+
+Consequences, all deliberate:
+
+- `menus.md`, `docs/menus.md`, `./docs/../docs/menus.md` and `/corpus/docs/menus.md` name one document. Before this rule each spelling created a separate document with its own chunks, and retrieval competed against its own copies.
+- A symlink is an alias of its target, not a second document.
+- **Content hashes are not identity.** Two publishers may ship identical text; merging them by hash would conflate their provenance. Hash equality decides only whether an identified document *changed*.
+- Document ids are derived from the canonical identity, so two concurrent imports of one new source converge on the same row instead of racing two inserts.
+
+**Outcomes.** Every ingest reports one of `imported`, `updated`, `unchanged` or `duplicate`, plus the chunk diff (`chunks_added`/`updated`/`reused`/`removed`), the embedding state (`embedded`, `pending_embeddings`), and separate `lexical_searchable` / `semantic_searchable` claims. `unchanged` writes no chunk rows, so chunk ids and vectors survive a re-import. `duplicate` means several existing documents already resolve to that source: nothing is written, the ids are returned, and the repair is an operator decision.
+
+**Legacy rows.** Documents written before identity canonicalization keep their stored path, and a re-import recognises them by resolving the stored value against the ancestors of the imported file (and by URL canonicalization). A recognised legacy row is upgraded to its canonical path in place on that write. Existing duplicates are **not** merged automatically: `mpm reference duplicates` prints the groups, their confidence (`certain` when canonical paths agree, `probable` when a legacy relative path could only be matched by suffix), a suggested survivor and an explicit repair plan. Deleting the copies you do not want and re-importing is the supported repair; nothing is ever removed for you.
+
+**Structure and provenance.** Markdown chunks carry the heading path they live under (`Parameters › args`), so a retrieved chunk can be cited by section. HTML is extracted structurally — headings, fenced code with language hints, tables, callouts and absolute links retained; navigation, cookie banners, sidebars and footers removed — and the extraction notes disclose anything that was dropped or guessed. A leading front-matter block that would dominate the first chunk is removed and reported. Publisher attribution (`og:site_name`, author, licence) is kept as document metadata rather than prepended to chunk text.
 
 ## 10. Reliability
 

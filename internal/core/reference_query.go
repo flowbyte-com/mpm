@@ -39,11 +39,21 @@ func FindReferenceBySourcePath(db *sql.DB, sourcePath string) (*ReferenceDoc, er
 		return nil, fmt.Errorf("FindReferenceBySourcePath: empty sourcePath")
 	}
 	var doc ReferenceDoc
-	var tagsJSON sql.NullString
+	var (
+		tagsJSON  sql.NullString
+		kind      sql.NullString
+		sourceURL sql.NullString
+		reqURL    sql.NullString
+		fetchedAt sql.NullInt64
+		etag      sql.NullString
+		lastMod   sql.NullString
+	)
 	err := db.QueryRow(`
 		SELECT id, title, file_path, source_type, tags,
 		       content, content_hash, import_reason,
-		       total_chunks, last_indexed, created_at
+		       total_chunks, last_indexed, created_at,
+		       source_kind, source_url, requested_url, fetched_at,
+		       http_etag, http_last_modified
 		FROM reference_docs
 		WHERE file_path = ?
 		LIMIT 1
@@ -51,6 +61,7 @@ func FindReferenceBySourcePath(db *sql.DB, sourcePath string) (*ReferenceDoc, er
 		&doc.ID, &doc.Title, &doc.SourcePath, &doc.SourceType, &tagsJSON,
 		&doc.Content, &doc.ContentHash, &doc.ImportReason,
 		&doc.TotalChunks, &doc.LastIndexed, &doc.Created,
+		&kind, &sourceURL, &reqURL, &fetchedAt, &etag, &lastMod,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -60,6 +71,24 @@ func FindReferenceBySourcePath(db *sql.DB, sourcePath string) (*ReferenceDoc, er
 	}
 	if tagsJSON.Valid && strings.TrimSpace(tagsJSON.String) != "" && tagsJSON.String != "null" {
 		_ = UnmarshalJSON(tagsJSON.String, &doc.Tags)
+	}
+	if kind.Valid {
+		doc.SourceKind = kind.String
+	}
+	if sourceURL.Valid {
+		doc.SourceURL = sourceURL.String
+	}
+	if reqURL.Valid {
+		doc.RequestedURL = reqURL.String
+	}
+	if fetchedAt.Valid {
+		doc.FetchedAt = fetchedAt.Int64
+	}
+	if etag.Valid {
+		doc.HTTPETag = etag.String
+	}
+	if lastMod.Valid {
+		doc.HTTPLastModified = lastMod.String
 	}
 	return &doc, nil
 }

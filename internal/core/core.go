@@ -220,6 +220,9 @@ type CoreDB interface {
 	SearchReferenceChunksHybrid(query string, limit int) ([]map[string]interface{}, error)
 	AddReferenceFromFile(filepath, title string) (map[string]interface{}, error)
 	AddReferenceFromFileWith(filepath, title string, tags []string, reason string, chunkSize int) (map[string]interface{}, error)
+	// IngestReference is the single ingestion pipeline behind every
+	// reference-writing surface (CLI add/import, MCP add/import).
+	IngestReference(ctx context.Context, req ReferenceIngestRequest) (*ReferenceIngestResult, error)
 	EmbedReferenceChunks(ctx context.Context, docID string) (embedded int, failed int, err error)
 	GetReferenceDoc(docID string) (*ReferenceDocRef, error)
 	GetInteractionsForDoc(docID string, limit int) ([]map[string]interface{}, error)

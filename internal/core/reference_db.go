@@ -59,27 +59,46 @@ func embeddingBytes(vec []float32) ([]byte, error) {
 // retry against an already-populated chunk table doesn't duplicate
 // rows or fail on the primary-key constraint.
 func (dm *DatabaseManager) AddReference(doc *ReferenceDoc, chunks []ReferenceChunk) error {
+	_, err := dm.applyReference(doc, chunks)
+	return err
+}
+
+// applyReference is AddReference plus the applied chunk diff. The ingest
+// pipeline reports "N new, M reused, K removed" to the caller, and the
+// only place that knows those numbers is the diff that was actually
+// applied — recomputing it outside the transaction would report a
+// different diff than the one written.
+func (dm *DatabaseManager) applyReference(doc *ReferenceDoc, chunks []ReferenceChunk) (*ChunkDiff, error) {
 	if dm == nil || dm.db == nil {
-		return fmt.Errorf("AddReference: database not initialized")
+		return nil, fmt.Errorf("AddReference: database not initialized")
 	}
 	if doc == nil {
-		return fmt.Errorf("AddReference: nil reference doc")
+		return nil, fmt.Errorf("AddReference: nil reference doc")
 	}
 	if doc.ContentHash == "" {
 		doc.ContentHash = HashContent(doc.Content)
 	}
 
-	return dm.WithTx(func(node DBNode) error {
+	var applied *ChunkDiff
+	err := dm.WithTx(func(node DBNode) error {
 		tagsJSON, _ := MarshalJSON(doc.Tags)
 
 		// Upsert the doc row. ON CONFLICT(id) DO UPDATE keeps metadata
 		// fresh on re-ingest; callers that want strict one-shot
 		// semantics must check existence first and pick a fresh id.
+		//
+		// source_kind/source_url/requested_url/fetched_at and the HTTP
+		// validators are written from the struct. COALESCE keeps a
+		// re-ingest from erasing fetch provenance when the caller did not
+		// supply it (a local re-import of a URL-sourced row is not a
+		// thing, but a metadata-only refresh is).
 		_, err := node.ExecTracked(`
 			INSERT INTO reference_docs
 			(id, title, file_path, source_type, tags, content, content_hash,
-			 import_reason, total_chunks, last_indexed, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 import_reason, total_chunks, last_indexed, created_at,
+			 source_kind, source_url, requested_url, fetched_at,
+			 http_etag, http_last_modified)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				title = excluded.title,
 				file_path = excluded.file_path,
@@ -89,11 +108,19 @@ func (dm *DatabaseManager) AddReference(doc *ReferenceDoc, chunks []ReferenceChu
 				content_hash = excluded.content_hash,
 				import_reason = excluded.import_reason,
 				total_chunks = excluded.total_chunks,
-				last_indexed = excluded.last_indexed
+				last_indexed = excluded.last_indexed,
+				source_kind = COALESCE(NULLIF(excluded.source_kind,''), reference_docs.source_kind),
+				source_url = COALESCE(NULLIF(excluded.source_url,''), reference_docs.source_url),
+				requested_url = COALESCE(NULLIF(excluded.requested_url,''), reference_docs.requested_url),
+				fetched_at = COALESCE(NULLIF(excluded.fetched_at,0), reference_docs.fetched_at),
+				http_etag = COALESCE(NULLIF(excluded.http_etag,''), reference_docs.http_etag),
+				http_last_modified = COALESCE(NULLIF(excluded.http_last_modified,''), reference_docs.http_last_modified)
 		`, 0,
 			doc.ID, doc.Title, doc.SourcePath, doc.SourceType, tagsJSON,
 			doc.Content, doc.ContentHash, doc.ImportReason,
 			doc.TotalChunks, doc.LastIndexed, doc.Created,
+			doc.SourceKind, doc.SourceURL, doc.RequestedURL, doc.FetchedAt,
+			doc.HTTPETag, doc.HTTPLastModified,
 		)
 		if err != nil {
 			return fmt.Errorf("add reference %q: %w", doc.ID, err)
@@ -105,6 +132,7 @@ func (dm *DatabaseManager) AddReference(doc *ReferenceDoc, chunks []ReferenceChu
 		if err != nil {
 			return fmt.Errorf("AddReference: diff chunks: %w", err)
 		}
+		applied = diff
 
 		for _, c := range diff.Inserted {
 			if _, err := node.ExecTracked(`
@@ -157,6 +185,10 @@ func (dm *DatabaseManager) AddReference(doc *ReferenceDoc, chunks []ReferenceChu
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return applied, nil
 }
 
 // DeleteReference removes a reference, its chunks, and its audit rows

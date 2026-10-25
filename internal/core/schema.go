@@ -757,7 +757,20 @@ var ReferenceTables = []string{
 		content TEXT NOT NULL DEFAULT '', content_hash TEXT,
 		import_reason TEXT,
 		total_chunks INTEGER DEFAULT 0, last_indexed INTEGER,
-		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		-- Source identity and fetch provenance (added for URL ingestion).
+		-- file_path holds the canonical identity: an absolute,
+		-- symlink-resolved path for files, the effective URL for URLs.
+		-- source_kind distinguishes the two; NULL means a legacy row,
+		-- which is always a file. The remaining columns record what
+		-- happened at retrieval time — they cannot be recomputed later,
+		-- so they are stored rather than derived.
+		source_kind TEXT,
+		source_url TEXT,
+		requested_url TEXT,
+		fetched_at INTEGER,
+		http_etag TEXT,
+		http_last_modified TEXT
 	);`,
 
 	// Reference chunks table - stores chunked content of reference documents.
@@ -1458,6 +1471,15 @@ var SafeMigrations = [][3]string{
 	// migrateLessonsToView, when the table doesn't exist yet, so it's
 	// deliberately absent here.
 	{"reference_docs", "import_reason", "TEXT"},
+	// Reference source identity + fetch provenance (URL ingestion).
+	// file_path/source_type predate this; a NULL source_kind means the row
+	// was written before canonical identity existed and is a local file.
+	{"reference_docs", "source_kind", "TEXT"},
+	{"reference_docs", "source_url", "TEXT"},
+	{"reference_docs", "requested_url", "TEXT"},
+	{"reference_docs", "fetched_at", "INTEGER"},
+	{"reference_docs", "http_etag", "TEXT"},
+	{"reference_docs", "http_last_modified", "TEXT"},
 	// Explicit, user-supplied external reference URL on an evidence row.
 	// Nullable so every pre-existing row and every pre-existing caller —
 	// none of which supply the field — stays valid. `evidence` is also in the
