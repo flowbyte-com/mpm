@@ -26,10 +26,10 @@ func TestAddReferenceFromFile_PathSpellingsAreOneDocument(t *testing.T) {
 	absolute := writeTestDoc(t, filepath.Join(corpus, "docs"), "wordpress-menus.md", menusMarkdown)
 
 	for _, spelling := range []string{
-		filepath.Base(absolute),               // bare name, from inside docs/
+		filepath.Base(absolute),                     // bare name, from inside docs/
 		filepath.Join("docs", "wordpress-menus.md"), // relative, from corpus/
-		"./docs/../docs/wordpress-menus.md",   // dot-dot path
-		absolute,                              // absolute
+		"./docs/../docs/wordpress-menus.md",         // dot-dot path
+		absolute,                                    // absolute
 	} {
 		source := spelling
 		if !filepath.IsAbs(spelling) {

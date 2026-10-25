@@ -36,7 +36,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -667,11 +666,4 @@ func splitPathComponents(p string) []string {
 		out = append(out, part)
 	}
 	return out
-}
-
-// fileExists is a small helper used by the ingest pipeline to give a
-// precise error before any database work happens.
-func fileExists(path string) bool {
-	st, err := os.Stat(path)
-	return err == nil && st.Mode().IsRegular()
 }
