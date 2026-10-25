@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/synth"
 )
 
 // EmbeddingProvider is the interface for generating text embeddings.
@@ -80,6 +81,13 @@ func NewOpenAICompatibleProvider(endpoint, model, apiKey string) *OpenAICompatib
 		Timeout:  30 * time.Second,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
+			// The bearer token must not follow a redirect off the
+			// configured origin. Go's own redirect handling copies
+			// `Authorization` to any SUBDOMAIN of the original host,
+			// so an endpoint that redirects api.example.com →
+			// evil.api.example.com would receive the operator's key.
+			// The shared guard refuses every origin change.
+			CheckRedirect: synth.GuardCredentialRedirect,
 		},
 	}
 }
@@ -182,6 +190,10 @@ func NewOllamaProvider(endpoint, model string) *OllamaProvider {
 		Timeout:  30 * time.Second,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
+			// Same guard as the OpenAI-compatible provider: a
+			// redirect that leaves the configured origin is refused
+			// rather than followed.
+			CheckRedirect: synth.GuardCredentialRedirect,
 		},
 	}
 }

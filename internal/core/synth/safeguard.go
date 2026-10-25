@@ -181,6 +181,16 @@ const (
 	// failure per the tightening pass). The recovery slot
 	// may be allocated to RepairKind here.
 	FailureInvalidMachineResponse
+
+	// FailureCredentialRedirectRefused: the endpoint answered with a
+	// redirect that would have carried the credential off the
+	// configured origin, and this client REFUSED to follow it.
+	//
+	// It is a decision, not a fault: the endpoint is reachable, the
+	// credential never left, and repeating the identical request would
+	// be refused identically. Zero recovery — fail immediately, and
+	// report it as a refusal rather than as a reachability problem.
+	FailureCredentialRedirectRefused
 )
 
 // String returns a stable label for the failure class — used
@@ -198,6 +208,8 @@ func (f FailureClass) String() string {
 		return "rate_limit"
 	case FailureInvalidMachineResponse:
 		return "invalid_machine_response"
+	case FailureCredentialRedirectRefused:
+		return "credential_redirect_refused"
 	}
 	return "unknown"
 }

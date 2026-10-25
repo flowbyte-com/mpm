@@ -153,6 +153,15 @@ func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string
 		plan.RecordSuccess()
 		return respBody, nil
 	}
+	// A deliberate credential-redirect refusal is a DECISION, not a
+	// failure to classify. It is reported as itself, it is never
+	// retried (the identical request would be refused identically),
+	// and it never reaches the transient-transport branch that would
+	// otherwise sleep and repeat the request.
+	if class == FailureCredentialRedirectRefused {
+		plan.RecordFailure(class)
+		return nil, fmt.Errorf("credential-bearing request refused: %w", err)
+	}
 	if err != nil {
 		if httpStatus > 0 {
 			class = classifyFromStatus(httpStatus)
@@ -309,10 +318,19 @@ func (sc *SynthClient) doOnce(ctx context.Context, payload []byte, auth AuthSche
 
 	client := &http.Client{
 		Timeout:       sc.Timeout,
-		CheckRedirect: guardCredentialRedirect,
+		CheckRedirect: GuardCredentialRedirect,
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		// A refused redirect is not a transport failure. The endpoint
+		// ANSWERED — this client declined to follow the redirect — so
+		// the failure is reported as a refusal and carries no HTTP
+		// status. Recognising it here is what keeps it out of the
+		// transient-transport retry branch and out of the operator's
+		// "endpoint unreachable" report.
+		if errors.Is(err, ErrCredentialRedirectRefused) {
+			return nil, FailureCredentialRedirectRefused, 0, err
+		}
 		return nil, FailureTransientTransport, 0,
 			fmt.Errorf("API request failed: %w", err)
 	}
@@ -359,45 +377,6 @@ func classifyFromStatus(status int) FailureClass {
 		return FailureTransientTransport
 	}
 	return FailureUnknown
-}
-
-// guardCredentialRedirect refuses a redirect that would carry the
-// request — and therefore the operator's credential — away from the
-// origin they configured.
-//
-// Go's default redirect handling drops the Authorization header on a
-// cross-host redirect, but it does NOT drop X-Api-Key: Go treats that
-// header as ordinary. An Anthropic-protocol endpoint that redirects to
-// another origin would therefore leak the operator's API key in a
-// header the standard library considers harmless. Refusing the redirect
-// is the only behaviour that keeps the credential on the configured
-// origin.
-//
-// A same-origin redirect is allowed, including an http→https upgrade
-// that keeps the same host:port — the credential stays on the same
-// origin and only becomes better protected. A scheme DOWNGRADE
-// (https→http) is refused — it would send the credential in cleartext.
-//
-// The comparison is on the ORIGIN (host AND port), not on the bare
-// hostname: 127.0.0.1:8081 and 127.0.0.1:8082 are different origins,
-// and a credential forwarded between them has left the origin the
-// operator configured.
-func guardCredentialRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) == 0 {
-		return nil
-	}
-	origin := via[0].URL
-	if !strings.EqualFold(req.URL.Host, origin.Host) {
-		return fmt.Errorf(
-			"refusing cross-origin redirect from %s://%s to %s://%s: the credential would leave the configured origin",
-			origin.Scheme, origin.Host, req.URL.Scheme, req.URL.Host)
-	}
-	if origin.Scheme == "https" && req.URL.Scheme != "https" {
-		return fmt.Errorf(
-			"refusing redirect from %s://%s to %s://%s: the credential would be sent in cleartext",
-			origin.Scheme, origin.Host, req.URL.Scheme, req.URL.Host)
-	}
-	return nil
 }
 
 // negotiationCandidate decides whether a single bounded alternative

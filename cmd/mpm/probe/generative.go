@@ -13,6 +13,7 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -212,6 +213,14 @@ func probeGenerativeWithTimeout(ctx context.Context, p *config.Profile, kind Pro
 func classifySynthError(err error) (class string, httpStatus int) {
 	if err == nil {
 		return "", 0
+	}
+	// A deliberate credential-redirect refusal is recognised through the
+	// typed sentinel rather than through a substring of the message. It
+	// is NOT a transport failure: the endpoint answered, MPM declined
+	// to follow the redirect, and the refusal's own message must reach
+	// the operator instead of being reported as "unreachable".
+	if errors.Is(err, synth.ErrCredentialRedirectRefused) {
+		return "FailureCredentialRedirectRefused", 0
 	}
 	msg := err.Error()
 	// Standard synth error format: `API returned HTTP <n>: <body>`.
