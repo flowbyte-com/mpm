@@ -341,40 +341,6 @@ func negotiatedAuth(baseURL, credential string) (AuthScheme, bool) {
 	return s, ok
 }
 
-// authMismatchEvidence inspects an authentication-refusal body for
-// evidence that the endpoint expected a DIFFERENT authentication header
-// than the one that was sent.
-//
-// Evidence must be EXPLICIT: the provider has to name the header it
-// wants. A generic "invalid api key" / "unauthorized" body is not
-// evidence — that is an invalid credential, and repeating the request
-// with another header would neither help nor be honest.
-//
-// Recognised evidence:
-//
-//	"…carry the API secret key in the Authorization field"  → Bearer
-//	"…the x-api-key header is required"                    → X-Api-Key
-//
-// The proposed scheme is always different from the one that was sent;
-// when the body names the header that was already used, no alternative
-// is proposed.
-func authMismatchEvidence(body []byte, sent AuthScheme) (AuthScheme, bool) {
-	if len(body) == 0 {
-		return "", false
-	}
-	lower := strings.ToLower(string(body))
-	wantsBearer := strings.Contains(lower, "authorization")
-	wantsXAPIKey := strings.Contains(lower, "x-api-key") ||
-		strings.Contains(lower, "x_api_key")
-	switch {
-	case wantsBearer && sent != AuthSchemeBearer:
-		return AuthSchemeBearer, true
-	case wantsXAPIKey && sent != AuthSchemeXAPIKey:
-		return AuthSchemeXAPIKey, true
-	}
-	return "", false
-}
-
 // AuthFailureKind distinguishes the sub-cases of an authentication
 // refusal.
 //

@@ -208,9 +208,23 @@ func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string
 				}
 			}
 			plan.RecordFailure(altClass)
-			return nil, fmt.Errorf(
-				"provider refused request (%s) with scheme %q and the alternative authentication scheme %q was also refused: %s",
-				class, auth, alt, errString(err, httpStatus))
+			// The alternative attempt's status is the one that
+			// describes the failure the operator has to act on. The
+			// first attempt's status is kept alongside it, so the
+			// operator can see what BOTH attempts were told.
+			//
+			// Reporting only the first attempt's status is what made
+			// an unbilled account (402 on the second attempt) look
+			// like an invalid credential (401 on the first).
+			return nil, &AuthRefusalError{
+				Class:         altClass,
+				Status:        altStatus,
+				Scheme:        alt,
+				InitialClass:  class,
+				InitialStatus: httpStatus,
+				InitialScheme: auth,
+				Detail:        errString(altErr, altStatus),
+			}
 		}
 		// The scheme is named so the operator can tell WHICH
 		// presentation was refused. Without it, a failure against a
@@ -218,8 +232,16 @@ func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string
 		// derived one — and "which scheme did MPM actually send?" is
 		// exactly the question an operator with an explicit
 		// auth_scheme has.
-		return nil, fmt.Errorf("provider refused request (%s) with scheme %q: %s",
-			class, auth, errString(err, httpStatus))
+		//
+		// The status travels with the error as a typed field, so the
+		// operator-facing classifier reads it directly instead of
+		// parsing it back out of this message.
+		return nil, &AuthRefusalError{
+			Class:  class,
+			Status: httpStatus,
+			Scheme: auth,
+			Detail: errString(err, httpStatus),
+		}
 
 	case FailureRateLimit:
 		retryAfterSeconds, retryable := retryAfterBoundedSeconds()
