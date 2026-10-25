@@ -1739,6 +1739,15 @@ type AutoPruneConfig struct {
 // AutoPrunePolicy applies the configured pruning policy.
 // Returns number of memories pruned and any error.
 //
+// Standing directives are exempt from both age-based rules (issue #59).
+// A directive is policy, not a memory awaiting reinforcement: its read
+// path never writes last_accessed_at, so an access-based rule would
+// select it forever — soft-deleting seed rows on every maintenance cycle
+// and relying on boot-time revival to undo the damage. The canonical
+// DirectiveExclusionClause keeps the exemption identical to the one the
+// review queue, stats and doctor already use. Explicit lifecycle
+// operations (delete/restore/shred) are unaffected.
+//
 // Uses updated_at to determine staleness so recently-reinforced or recently-accessed
 // memories are never archived. Soft-deletes via SET deleted_at to preserve
 // append-only retrospectivity through the memories_rev_au trigger.
@@ -1773,6 +1782,7 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 			WHERE id IN (
 				SELECT id FROM memories
 				WHERE deleted_at IS NULL
+				  AND `+DirectiveExclusionClause+`
 				  AND last_accessed_at IS NULL
 				  AND reinforcement_count = 0
 				  AND is_long_term = 0
@@ -1795,6 +1805,7 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 			WHERE id IN (
 				SELECT id FROM memories
 				WHERE deleted_at IS NULL
+				  AND `+DirectiveExclusionClause+`
 				  AND weight = 1
 				  AND reinforcement_count = 0
 				  AND is_long_term = 0

@@ -2840,6 +2840,8 @@ They are seeded **automatically** when the database is first created — every p
 
 Because the seed is automatic, a fresh install reports `0 created, 5 skipped` — the rows are already there. A skipped row is not a failure.
 
+**Retention (policy, issue #59).** Directive rows are exempt from access-based retention: the never-accessed and low-weight rules in `AutoPrunePolicy`, and the legacy `PruneNeverAccessed` path, all apply the canonical `DirectiveExclusionClause`. A directive is standing policy, not a memory awaiting reinforcement — its read path never writes `last_accessed_at`, so an access-based rule selects it forever and relies on boot-time revival to undo itself. The exemption recognises both identifiers (`collection='directives'` and `is_prime_directive=1`), so operator-edited and legacy directive rows are covered alike; explicit lifecycle operations (`delete`/`restore`, and the operator-only shred) are unaffected. Two limitations are deliberate: removing a directive from `SeedDirectives` does **not** delete existing rows (registry membership is a seeding decision, not a retention event), and an orphaned directive row therefore persists until an explicit operator action removes it.
+
 > **Implementation note:** The reference directives live in `internal/core/seed/directives.go`. The bootstrap command detects existing directives by stable ID and skips them; local edits to a seeded directive are preserved, never silently overwritten.
 
 #### Multi-Framework Scope

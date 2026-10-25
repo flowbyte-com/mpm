@@ -1730,9 +1730,13 @@ func (dm *DatabaseManager) PruneOlderThan(beforeUnixSec int64) (int, error) {
 
 // PruneNeverAccessed deletes memories that were never accessed
 func (dm *DatabaseManager) PruneNeverAccessed() (int, error) {
+	// Directives are exempt (issue #59): they are policy, never
+	// "accessed" through the memory-read path, and must have no implicit
+	// reclamation route. See DirectiveExclusionClause.
 	result, err := dm.db.Exec(`
 		DELETE FROM memories
-		WHERE last_accessed_at IS NULL
+		WHERE `+DirectiveExclusionClause+`
+		  AND last_accessed_at IS NULL
 		  AND reinforcement_count = 0
 		  AND weight = 1
 		  AND is_long_term = 0
