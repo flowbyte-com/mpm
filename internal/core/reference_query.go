@@ -31,6 +31,12 @@ import (
 // first. In practice a single source path maps to one doc — the
 // caller is expected to use this helper as part of the ingest flow
 // where they own the source path key.
+const referenceDocColumns = `id, title, file_path, source_type, tags,
+	       content, content_hash, import_reason,
+	       total_chunks, last_indexed, created_at,
+	       source_kind, source_url, requested_url, fetched_at,
+	       http_etag, http_last_modified, attribution`
+
 func FindReferenceBySourcePath(db *sql.DB, sourcePath string) (*ReferenceDoc, error) {
 	if db == nil {
 		return nil, fmt.Errorf("FindReferenceBySourcePath: database not initialized")
@@ -38,27 +44,49 @@ func FindReferenceBySourcePath(db *sql.DB, sourcePath string) (*ReferenceDoc, er
 	if sourcePath == "" {
 		return nil, fmt.Errorf("FindReferenceBySourcePath: empty sourcePath")
 	}
+	return scanReferenceDoc(db.QueryRow(`
+		SELECT `+referenceDocColumns+`
+		FROM reference_docs
+		WHERE file_path = ?
+		LIMIT 1
+	`, sourcePath))
+}
+
+// findReferenceDocByID loads one document by primary key.
+//
+// Identity resolution uses this instead of a second path lookup: when two
+// rows share a stored path (a historical duplicate), a path lookup can
+// return either of them, and the resolver has already decided which row
+// the evidence points at.
+func findReferenceDocByID(db *sql.DB, id string) (*ReferenceDoc, error) {
+	if db == nil {
+		return nil, fmt.Errorf("findReferenceDocByID: database not initialized")
+	}
+	if id == "" {
+		return nil, fmt.Errorf("findReferenceDocByID: empty id")
+	}
+	return scanReferenceDoc(db.QueryRow(`
+		SELECT `+referenceDocColumns+`
+		FROM reference_docs
+		WHERE id = ?
+	`, id))
+}
+
+// scanReferenceDoc maps one row onto a ReferenceDoc, tolerating NULL on
+// every column that predates the source-identity migration.
+func scanReferenceDoc(row *sql.Row) (*ReferenceDoc, error) {
 	var doc ReferenceDoc
 	var (
-		tagsJSON  sql.NullString
-		kind      sql.NullString
-		sourceURL sql.NullString
-		reqURL    sql.NullString
-		fetchedAt sql.NullInt64
+		tagsJSON    sql.NullString
+		kind        sql.NullString
+		sourceURL   sql.NullString
+		reqURL      sql.NullString
+		fetchedAt   sql.NullInt64
 		etag        sql.NullString
 		lastMod     sql.NullString
 		attribution sql.NullString
 	)
-	err := db.QueryRow(`
-		SELECT id, title, file_path, source_type, tags,
-		       content, content_hash, import_reason,
-		       total_chunks, last_indexed, created_at,
-		       source_kind, source_url, requested_url, fetched_at,
-		       http_etag, http_last_modified, attribution
-		FROM reference_docs
-		WHERE file_path = ?
-		LIMIT 1
-	`, sourcePath).Scan(
+	err := row.Scan(
 		&doc.ID, &doc.Title, &doc.SourcePath, &doc.SourceType, &tagsJSON,
 		&doc.Content, &doc.ContentHash, &doc.ImportReason,
 		&doc.TotalChunks, &doc.LastIndexed, &doc.Created,
@@ -68,7 +96,7 @@ func FindReferenceBySourcePath(db *sql.DB, sourcePath string) (*ReferenceDoc, er
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("FindReferenceBySourcePath %q: %w", sourcePath, err)
+		return nil, fmt.Errorf("scan reference doc: %w", err)
 	}
 	if tagsJSON.Valid && strings.TrimSpace(tagsJSON.String) != "" && tagsJSON.String != "null" {
 		_ = UnmarshalJSON(tagsJSON.String, &doc.Tags)

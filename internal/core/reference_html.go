@@ -271,6 +271,13 @@ func pruneChrome(root *html.Node) int {
 
 func shouldDropElement(n *html.Node) bool {
 	tag := strings.ToLower(n.Data)
+	// <aside> is chrome on most documentation sites, but it is also the
+	// markup many sites use for admonitions ("aside.callout",
+	// "aside.warning"). A warning is content: keep an aside that names
+	// itself as one, and drop the rest.
+	if tag == "aside" && calloutKind(n) != "" {
+		return false
+	}
 	if htmlDropTags[tag] {
 		return true
 	}

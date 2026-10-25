@@ -13,6 +13,9 @@
 package internal
 
 import (
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"net"
@@ -273,6 +276,91 @@ func TestFetchReferenceURL_RefusesOversizedResponse(t *testing.T) {
 	}
 }
 
+// TestFetchReferenceURL_RefusesResidualContentEncoding pins that a body the
+// transport did not decode is refused instead of parsed as text.
+//
+// Go inflates gzip when it negotiated it, and strips the header when it
+// does. It does NOT handle deflate. A deflate-encoded documentation page
+// therefore used to be handed to the HTML parser as raw bytes, which
+// produced a plausible-looking but truncated document ("# Doc" instead of
+// the page) with no warning. Refusing is the honest outcome.
+func TestFetchReferenceURL_RefusesResidualContentEncoding(t *testing.T) {
+	var compressed bytes.Buffer
+	zw, err := flate.NewWriter(&compressed, flate.DefaultCompression)
+	if err != nil {
+		t.Fatalf("flate writer: %v", err)
+	}
+	fmt.Fprint(zw, `<html><body><main><h1>Doc</h1><p>compressed body that must not be parsed</p></main></body></html>`)
+	zw.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Content-Encoding", "deflate")
+		w.Write(compressed.Bytes())
+	}))
+	defer srv.Close()
+
+	_, err = fetchReferenceURLWithConfig(context.Background(), mustIdentity(t, srv.URL), nil, loopbackFetchConfig())
+	if err == nil {
+		t.Fatal("a deflate-encoded body was accepted and parsed as text")
+	}
+	if !strings.Contains(err.Error(), "Content-Encoding") {
+		t.Errorf("error did not name the encoding: %v", err)
+	}
+}
+
+// TestFetchReferenceURL_DecodesNegotiatedGzip pins the positive half: when
+// the transport inflates gzip itself (the ordinary case for a
+// documentation server), the document is complete, not refused.
+func TestFetchReferenceURL_DecodesNegotiatedGzip(t *testing.T) {
+	const page = `<html><body><main><h1>Compressed</h1><p>Full body survives gzip transport encoding.</p></main></body></html>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only gzip when the client advertised it, exactly as a normal
+		// server behaves.
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			t.Error("client did not advertise gzip support")
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, page)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		defer gz.Close()
+		fmt.Fprint(gz, page)
+	}))
+	defer srv.Close()
+
+	acq, err := fetchReferenceURLWithConfig(context.Background(), mustIdentity(t, srv.URL), nil, loopbackFetchConfig())
+	if err != nil {
+		t.Fatalf("gzip response was not decoded: %v", err)
+	}
+	if !strings.Contains(acq.Content, "Full body survives gzip") {
+		t.Errorf("gzip body was not fully decoded: %q", acq.Content)
+	}
+}
+
+// TestFetchReferenceURL_ErrorSnippetHasNoControlCharacters pins that an
+// attacker-chosen error body cannot carry terminal escape sequences into
+// the operator's console or an agent's context.
+func TestFetchReferenceURL_ErrorSnippetHasNoControlCharacters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, "denied\x1b[31mRED\x1b[0m \x07bell")
+	}))
+	defer srv.Close()
+
+	_, err := fetchReferenceURLWithConfig(context.Background(), mustIdentity(t, srv.URL), nil, loopbackFetchConfig())
+	if err == nil {
+		t.Fatal("403 was treated as success")
+	}
+	for _, r := range err.Error() {
+		if r < 0x20 || r == 0x7f {
+			t.Fatalf("error message contains control character %U: %q", r, err.Error())
+		}
+	}
+}
+
 // TestFetchReferenceURL_RefusesUnsupportedContentType pins that a binary
 // payload is not stored as documentation.
 func TestFetchReferenceURL_RefusesUnsupportedContentType(t *testing.T) {
@@ -354,7 +442,7 @@ func TestClassifyFetchAddr(t *testing.T) {
 		"10.0.0.1", "172.16.5.4", "192.168.1.1",
 		"169.254.169.254", // cloud metadata
 		"100.64.0.1",      // CGNAT
-		"0.0.0.0", "::",
+		"0.0.0.0", "0.0.0.1", "0.255.255.255", "::",
 		"224.0.0.1", "ff02::1",
 		"198.18.0.1", "192.0.2.5", "198.51.100.7", "203.0.113.9",
 		"240.0.0.1", "2001:db8::1", "fd00::1",
@@ -441,7 +529,7 @@ func (dm *DatabaseManager) ingestReferenceForTest(t *testing.T, req ReferenceIng
 	if err != nil {
 		return nil, err
 	}
-	preMatch, err := resolveReferenceIdentity(dm.db, identity)
+	preMatch, err := resolveReferenceIdentity(dm.db, identity, "")
 	if err != nil {
 		return nil, err
 	}

@@ -228,7 +228,11 @@ func (dm *DatabaseManager) IngestReference(ctx context.Context, req ReferenceIng
 	// validators and get a 304 instead of re-downloading the document, and
 	// a fetch failure cannot leave a document row behind because no write
 	// has happened yet.
-	preMatch, err := resolveReferenceIdentity(dm.db, identity)
+	// No content hash yet, so only decisive evidence is used: canonical,
+	// absolute-path or URL rows. A weak (relative-path) legacy candidate
+	// must not supply HTTP validators — sending an unrelated document's
+	// ETag could produce a 304 for content this row never held.
+	preMatch, err := resolveReferenceIdentity(dm.db, identity, "")
 	if err != nil {
 		return nil, fmt.Errorf("resolve existing reference: %w", err)
 	}
@@ -273,7 +277,7 @@ func (dm *DatabaseManager) ingestAcquiredReference(ctx context.Context, identity
 	content := acquired.Content
 	contentHash := HashContent(content)
 
-	match, err := resolveReferenceIdentity(dm.db, identity)
+	match, err := resolveReferenceIdentity(dm.db, identity, contentHash)
 	if err != nil {
 		return nil, fmt.Errorf("resolve existing reference: %w", err)
 	}
@@ -309,6 +313,13 @@ func (dm *DatabaseManager) ingestAcquiredReference(ctx context.Context, identity
 		Title:           title,
 		ExtractionNotes: acquired.Notes,
 		Warnings:        acquired.Warnings,
+	}
+
+	if len(match.RejectedAliasIDs) > 0 {
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("%d legacy document(s) store a relative path that could also name this source, but their content differs (%s); "+
+				"they were left untouched and this source was imported separately. Run `mpm reference duplicates` to reconcile.",
+				len(match.RejectedAliasIDs), strings.Join(match.RejectedAliasIDs, ", ")))
 	}
 
 	// Unchanged content: refresh metadata only. Chunk rows (and therefore

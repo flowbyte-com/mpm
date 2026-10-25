@@ -202,13 +202,16 @@ func fetchReferenceURLWithConfig(ctx context.Context, identity SourceIdentity, c
 		return nil, fmt.Errorf("fetch %s: %w", effective.Redacted(), err)
 	}
 
-	// Reject an encoding we cannot decode rather than storing the
-	// compressed bytes as if they were text. Go's transport already
-	// decompressed gzip/deflate when it negotiated them itself.
-	switch enc := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))); enc {
-	case "", "identity", "gzip", "deflate":
-	default:
-		return nil, fmt.Errorf("fetch %s: unsupported Content-Encoding %q", effective.Redacted(), enc)
+	// Any Content-Encoding still present here was NOT decoded by the
+	// transport. Go only inflates gzip, and only when it negotiated it
+	// itself — at which point it removes the header. A residual header
+	// therefore means the body is still compressed (deflate, zstd, br …
+	// or an unsolicited gzip), and parsing it as text stores a mangled
+	// document instead of failing. A deflate-encoded page was observed to
+	// yield a plausible-looking but truncated extraction rather than an
+	// error, which is the worst outcome: it looks like content.
+	if enc := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))); enc != "" && enc != "identity" {
+		return nil, fmt.Errorf("fetch %s: unsupported Content-Encoding %q (the body arrives compressed; MPM stores text, so this is refused rather than parsed as text)", effective.Redacted(), enc)
 	}
 
 	// charset.NewReader transcodes a declared legacy charset to UTF-8 and
@@ -401,6 +404,10 @@ func classifyFetchAddr(addr netip.Addr, allowLoopback bool) string {
 	// Ranges that are global-unicast by classification but never a
 	// documentation host.
 	for _, prefix := range []netip.Prefix{
+		// RFC 1122 "this network". netip.IsGlobalUnicast accepts 0.0.0.1
+		// (only the all-zero address counts as unspecified), no host lives
+		// here, and it is never a documentation origin.
+		netip.MustParsePrefix("0.0.0.0/8"),
 		netip.MustParsePrefix("100.64.0.0/10"),   // CGNAT
 		netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments
 		netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking
@@ -415,6 +422,11 @@ func classifyFetchAddr(addr netip.Addr, allowLoopback bool) string {
 			return "reserved or non-public address range " + prefix.String() + " is not fetched"
 		}
 	}
+	// Tunnel and translation prefixes (6to4 2002::/16, Teredo 2001::/32,
+	// NAT64 64:ff9b::/96) are deliberately NOT blocked: they are legitimate
+	// on some networks. Control inspects the address actually dialled, so a
+	// translation layer mapping one of them onto a private address is still
+	// judged by the address it connects to.
 	return ""
 }
 
@@ -458,6 +470,15 @@ func firstLineSnippet(b []byte) string {
 		text = text[:i]
 	}
 	text = strings.Join(strings.Fields(text), " ")
+	// The excerpt is remote, attacker-chosen text on its way to a terminal
+	// and into an agent's context. Drop non-printables so it cannot carry
+	// escape sequences.
+	text = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, text)
 	if len(text) > 160 {
 		text = text[:160] + "…"
 	}
