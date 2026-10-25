@@ -235,6 +235,14 @@ type ReferenceIdentityMatch struct {
 	// already canonical. The write path upgrades it so the next import
 	// takes the fast canonical path.
 	AliasPath string
+	// RejectedAliasIDs lists legacy rows whose stored *relative* path
+	// resolved to this source but whose stored content did not match the
+	// content being imported. They are deliberately NOT adopted: a
+	// relative path is not evidence of identity, and adopting on path
+	// suffix alone would rewrite one historical document's provenance to
+	// point at a different file. The caller reports them so the operator
+	// can reconcile.
+	RejectedAliasIDs []string
 }
 
 // resolveReferenceIdentity finds the existing document for a canonical
@@ -256,7 +264,7 @@ type ReferenceIdentityMatch struct {
 // If more than one row matches, the result is ambiguous: the caller
 // reports it instead of picking one, because picking would either hide a
 // duplicate or silently rewrite one document's provenance onto another's.
-func resolveReferenceIdentity(db *sql.DB, id SourceIdentity) (*ReferenceIdentityMatch, error) {
+func resolveReferenceIdentity(db *sql.DB, id SourceIdentity, contentHash string) (*ReferenceIdentityMatch, error) {
 	if db == nil {
 		return nil, fmt.Errorf("resolveReferenceIdentity: database not initialized")
 	}
@@ -264,41 +272,52 @@ func resolveReferenceIdentity(db *sql.DB, id SourceIdentity) (*ReferenceIdentity
 		return nil, fmt.Errorf("resolveReferenceIdentity: empty identity")
 	}
 
+	// 1. Exact canonical match. Unambiguous by construction: the stored
+	// value IS the canonical identity, so no corroboration is needed.
 	if doc, err := FindReferenceBySourcePath(db, id.Canonical); err != nil {
 		return nil, err
 	} else if doc != nil {
 		return &ReferenceIdentityMatch{Doc: doc, MatchedVia: "canonical"}, nil
 	}
 
-	if id.Raw != "" && id.Raw != id.Canonical {
-		if doc, err := FindReferenceBySourcePath(db, id.Raw); err != nil {
-			return nil, err
-		} else if doc != nil {
-			return &ReferenceIdentityMatch{
-				Doc:        doc,
-				MatchedVia: "raw",
-				AliasPath:  doc.SourcePath,
-			}, nil
-		}
-	}
-
-	rows, err := db.Query(`SELECT id, file_path FROM reference_docs`)
+	// 2. Legacy rows. Two classes, with different evidentiary weight:
+	//
+	//    strong — the stored value is absolute (or a URL for a URL
+	//    identity), so canonicalizing it is decisive regardless of the
+	//    working directory the row was written from.
+	//
+	//    weak — the stored value is a relative path. Its meaning depends
+	//    on a working directory that was never recorded, so resolving it
+	//    against an ancestor of the imported file proves only that the
+	//    imported file could have been the one written. That is not
+	//    enough to adopt: /corpusA/docs/guide.md and /corpusB/docs/guide.md
+	//    both "match" a stored "docs/guide.md". Adopting on that evidence
+	//    overwrites the historical document's content and rewrites its
+	//    provenance to a different file. Weak candidates are therefore
+	//    adopted only when the stored content hash corroborates that this
+	//    really is the same document.
+	rows, err := db.Query(`SELECT id, file_path, COALESCE(content_hash,'') FROM reference_docs`)
 	if err != nil {
 		return nil, fmt.Errorf("resolveReferenceIdentity: scan sources: %w", err)
 	}
 	defer rows.Close()
 
+	type candidate struct {
+		id     string
+		stored string
+	}
 	var (
-		aliasIDs   []string
-		aliasPath  string
-		aliasFound string
+		strong   []candidate
+		weak     []candidate
+		rejected []string
 	)
 	for rows.Next() {
 		var (
 			docID   string
 			rawPath sql.NullString
+			hash    string
 		)
-		if err := rows.Scan(&docID, &rawPath); err != nil {
+		if err := rows.Scan(&docID, &rawPath, &hash); err != nil {
 			return nil, fmt.Errorf("resolveReferenceIdentity: scan row: %w", err)
 		}
 		if !rawPath.Valid || strings.TrimSpace(rawPath.String) == "" {
@@ -306,42 +325,73 @@ func resolveReferenceIdentity(db *sql.DB, id SourceIdentity) (*ReferenceIdentity
 		}
 		stored := rawPath.String
 		if stored == id.Canonical {
-			continue // already handled above; a second row this exact is an ambiguous dup below
+			// Already handled by the exact lookup above; anything else
+			// carrying the same canonical value is a genuine duplicate.
+			strong = append(strong, candidate{docID, stored})
+			continue
 		}
 		if !legacySourceResolvesTo(id, stored) {
 			continue
 		}
-		aliasIDs = append(aliasIDs, docID)
-		if aliasPath == "" {
-			aliasPath = stored
-			aliasFound = docID
+		if isDecisiveSourceValue(id.Kind, stored) {
+			strong = append(strong, candidate{docID, stored})
+			continue
 		}
+		if contentHash != "" && hash != "" && hash == contentHash {
+			weak = append(weak, candidate{docID, stored})
+			continue
+		}
+		rejected = append(rejected, docID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("resolveReferenceIdentity: rows: %w", err)
 	}
 
-	switch len(aliasIDs) {
-	case 0:
-		return &ReferenceIdentityMatch{}, nil
-	case 1:
-		doc, err := FindReferenceBySourcePath(db, aliasPath)
-		if err != nil {
-			return nil, err
+	adopt := func(class []candidate, via string) (*ReferenceIdentityMatch, error) {
+		switch len(class) {
+		case 0:
+			return nil, nil
+		case 1:
+			doc, err := findReferenceDocByID(db, class[0].id)
+			if err != nil {
+				return nil, err
+			}
+			if doc == nil {
+				// Row vanished between the two reads (concurrent shred).
+				return &ReferenceIdentityMatch{}, nil
+			}
+			return &ReferenceIdentityMatch{
+				Doc:        doc,
+				MatchedVia: via,
+				AliasPath:  class[0].stored,
+			}, nil
+		default:
+			ids := make([]string, 0, len(class))
+			for _, c := range class {
+				ids = append(ids, c.id)
+			}
+			sort.Strings(ids)
+			return &ReferenceIdentityMatch{AmbiguousIDs: ids, MatchedVia: via}, nil
 		}
-		if doc == nil {
-			// Row vanished between the two reads (concurrent shred).
-			return &ReferenceIdentityMatch{}, nil
-		}
-		return &ReferenceIdentityMatch{
-			Doc:        doc,
-			MatchedVia: "legacy-alias",
-			AliasPath:  aliasFound,
-		}, nil
-	default:
-		sort.Strings(aliasIDs)
-		return &ReferenceIdentityMatch{AmbiguousIDs: aliasIDs, MatchedVia: "legacy-alias"}, nil
 	}
+
+	if m, err := adopt(strong, "legacy-absolute"); err != nil || m != nil {
+		return m, err
+	}
+	if m, err := adopt(weak, "legacy-relative"); err != nil || m != nil {
+		return m, err
+	}
+	sort.Strings(rejected)
+	return &ReferenceIdentityMatch{RejectedAliasIDs: rejected}, nil
+}
+
+// isDecisiveSourceValue reports whether a stored source value identifies a
+// resource without reference to the caller's working directory.
+func isDecisiveSourceValue(kind, stored string) bool {
+	if kind == ReferenceSourceURL {
+		return true // canonicalization (in legacySourceResolvesTo) already matched
+	}
+	return filepath.IsAbs(stored)
 }
 
 // legacySourceResolvesTo reports whether a stored (possibly

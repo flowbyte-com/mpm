@@ -99,6 +99,40 @@ func TestExtractHTMLDocument_PreservesStructureAndDropsChrome(t *testing.T) {
 	}
 }
 
+// TestExtractHTMLDocument_KeepsAsideCallouts pins that an admonition
+// marked up as <aside> survives.
+//
+// <aside> is chrome on most documentation sites, so the extractor prunes it
+// wholesale — which also removed the markup many sites use for warnings
+// ("aside.callout", "aside.warning", "aside.note"). A warning is content:
+// silently dropping it means a document can read as complete while missing
+// the one sentence that says "do not do this".
+func TestExtractHTMLDocument_KeepsAsideCallouts(t *testing.T) {
+	const page = `<html><body><main>
+	  <h1>Turnstile</h1>
+	  <p>Validate the token server-side.</p>
+	  <aside class="warning callout"><p>Tokens are single-use and expire after 300 seconds.</p></aside>
+	  <article><aside class="note"><p>Widgets must be rendered before validation.</p></aside></article>
+	  <aside class="sidebar"><p>Related pages</p></aside>
+	</main></body></html>`
+	base, _ := url.Parse("https://example.org/docs")
+	doc, err := ExtractHTMLDocument(strings.NewReader(page), base)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	for _, want := range []string{"Tokens are single-use", "rendered before validation"} {
+		if !strings.Contains(doc.Body, want) {
+			t.Errorf("aside callout text %q was dropped:\n%s", want, doc.Body)
+		}
+	}
+	if !strings.Contains(doc.Body, "**Warning:**") || !strings.Contains(doc.Body, "**Note:**") {
+		t.Errorf("callout kinds were not preserved:\n%s", doc.Body)
+	}
+	if strings.Contains(doc.Body, "Related pages") {
+		t.Errorf("sidebar content was kept as if it were documentation:\n%s", doc.Body)
+	}
+}
+
 // TestExtractHTMLDocument_NoMainRegionIsHonest pins that a page without
 // a content region still extracts, and says it had to guess.
 func TestExtractHTMLDocument_NoMainRegionIsHonest(t *testing.T) {
