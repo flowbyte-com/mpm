@@ -21,6 +21,7 @@ package seed
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -43,6 +44,7 @@ func ApplyDirectives(dm interface {
 		Created: []string{},
 		Skipped: []string{},
 		Updated: []string{},
+		Revived: []string{},
 	}
 
 	db := dm.SQLDB()
@@ -56,12 +58,13 @@ func ApplyDirectives(dm interface {
 		// (legacy installs wrote deleted_at = 0; current code writes
 		// NULL and soft-deletes with a real Unix-epoch value).
 		var existingContent string
+		var existingTags sql.NullString
 		var existingID string
 		var existingDeleted sql.NullInt64
 		err := db.QueryRow(
-			`SELECT id, content, deleted_at FROM memories WHERE id = ?`,
+			`SELECT id, content, tags, deleted_at FROM memories WHERE id = ?`,
 			sd.StableID,
-		).Scan(&existingID, &existingContent, &existingDeleted)
+		).Scan(&existingID, &existingContent, &existingTags, &existingDeleted)
 		if err != nil && err != sql.ErrNoRows {
 			return summary, fmt.Errorf("seed lookup %s: %w", sd.StableID, err)
 		}
@@ -69,9 +72,15 @@ func ApplyDirectives(dm interface {
 		softDeleted := err == nil && existingDeleted.Valid && existingDeleted.Int64 > 0
 
 		switch {
-		case err == sql.ErrNoRows || softDeleted:
-			// 2a. No live row. Insert if truly absent, otherwise revive
-			// the soft-deleted row with the current seed content.
+		case err == sql.ErrNoRows:
+			// 2a. No row at all. Insert.
+			if err := insertSeedRow(db, sd); err != nil {
+				return summary, fmt.Errorf("insert %s: %w", sd.StableID, err)
+			}
+			summary.Created = append(summary.Created, sd.StableID)
+
+		case softDeleted:
+			// 2a-bis. The row exists but is soft-deleted.
 			//
 			// INSERT OR IGNORE alone cannot restore a shredded baseline:
 			// the stable-id PRIMARY KEY is still occupied by the dead
@@ -82,14 +91,22 @@ func ApplyDirectives(dm interface {
 			// collide. This also makes `mpm ops init directives` actually
 			// usable as the documented recovery path after an accidental
 			// shred.
-			if softDeleted {
-				if err := reviveSeedRow(db, sd); err != nil {
-					return summary, fmt.Errorf("revive %s: %w", sd.StableID, err)
-				}
-			} else if err := insertSeedRow(db, sd); err != nil {
-				return summary, fmt.Errorf("insert %s: %w", sd.StableID, err)
+			//
+			// The restore must not destroy what the operator had
+			// customised: a row whose content still matches the seed is
+			// restored exactly, and a row whose content DRIFTED is
+			// restored WITH the operator's content. The drifted case is
+			// reported under its own bucket so the summary never claims
+			// a fresh creation for a row that carried operator content.
+			drifted, err := reviveSeedRow(db, sd, existingContent, existingTags.String)
+			if err != nil {
+				return summary, fmt.Errorf("revive %s: %w", sd.StableID, err)
 			}
-			summary.Created = append(summary.Created, sd.StableID)
+			if drifted {
+				summary.Revived = append(summary.Revived, sd.StableID)
+			} else {
+				summary.Created = append(summary.Created, sd.StableID)
+			}
 
 		case err != nil:
 			// 2b. Real DB error.
@@ -111,14 +128,49 @@ func ApplyDirectives(dm interface {
 }
 
 // reviveSeedRow restores a soft-deleted seed row (see ApplyDirectives
-// 2a). A soft-deleted stable id still occupies the PRIMARY KEY, so a
-// plain insert would be silently swallowed by INSERT OR IGNORE. UNDELETE
-// instead and refresh the row with the current seed content/tags/scope.
+// 2a-bis). A soft-deleted stable id still occupies the PRIMARY KEY, so
+// a plain insert would be silently swallowed by INSERT OR IGNORE.
+// UNDELETE instead.
+//
+// The row's CONTENT is the operator's. The restore used to overwrite
+// content, tags and metadata with the seed's values, so an operator who
+// had edited a baseline directive lost the edit on the next seed run —
+// silently — and the summary reported the row as freshly "Created",
+// the same label used for a row that had never existed.
+//
+// The contract the seed has always had is "ApplyDirectives never
+// overwrites a local edit", and the live-row path honours it. The
+// restore path now honours it too:
+//
+//   - content still MATCHES the seed → the row is restored exactly.
+//     Nothing was customised, so nothing is lost, and the row is
+//     reported under Created (the baseline is back).
+//   - content DRIFTED from the seed → the row is restored WITH the
+//     operator's content and tags, and reported under its own bucket so
+//     the report never claims a fresh creation for a row that carried
+//     operator content.
+//
+// The METADATA is regenerated either way: it carries the seed's scope
+// and provenance, which are substrate bookkeeping rather than operator
+// content (the scope is seed-owned by contract — every baseline
+// directive is global).
+//
 // The FTS reindex and memory-revision triggers fire on the UPDATE, so
 // the revived directive becomes searchable and revisioned like any
 // other write.
-func reviveSeedRow(db *sql.DB, sd SeedDirective) error {
+//
+// Returns drifted=true when the operator's content was preserved rather
+// than refreshed from the seed.
+func reviveSeedRow(db *sql.DB, sd SeedDirective, existingContent, existingTags string) (bool, error) {
+	drifted := seedRowDrifted(existingContent, existingTags, sd)
+	content := sd.Content
 	tagsJSON := "[" + strings.Join(quoteStrings(sd.Tags), ",") + "]"
+	if drifted {
+		content = existingContent
+		if trimmed := strings.TrimSpace(existingTags); trimmed != "" {
+			tagsJSON = trimmed
+		}
+	}
 	scope := sd.Scope
 	if scope == "" {
 		scope = "global"
@@ -129,8 +181,11 @@ func reviveSeedRow(db *sql.DB, sd SeedDirective) error {
 		SET deleted_at = NULL, content = ?, tags = ?, metadata = ?,
 		    is_prime_directive = 1, collection = 'directives'
 		WHERE id = ? AND deleted_at IS NOT NULL AND deleted_at > 0`,
-		sd.Content, tagsJSON, meta, sd.StableID)
-	return err
+		content, tagsJSON, meta, sd.StableID)
+	if err != nil {
+		return false, err
+	}
+	return drifted, nil
 }
 
 // insertSeedRow writes one seed row. Uses INSERT OR IGNORE on the
@@ -165,6 +220,51 @@ func insertSeedRow(db *sql.DB, sd SeedDirective) error {
 		    (?, 'directives', ?, ?, ?, 1, 10, 1.0, 1.0, 1.0, ?, ?)`,
 		sd.StableID, sd.Content, tagsJSON, meta, now, now)
 	return err
+}
+
+// seedRowDrifted reports whether a stored row differs from the seed in
+// any way the restore would overwrite.
+//
+// CONTENT is compared verbatim (trimmed). TAGS are compared as SETS: the
+// column holds a JSON array, and a row written by a different code path
+// may order or space its tags differently without being customised.
+//
+// The tag comparison exists because the restore writes the tags as well
+// as the content, and a tag the operator added is as much their
+// customisation as the text they wrote. Anything the restore would
+// overwrite has to be detected before it is overwritten.
+//
+// The LIVE-row path compares the content only. It writes nothing, so a
+// tag-only difference there destroys nothing and is not flagged.
+func seedRowDrifted(content, tags string, sd SeedDirective) bool {
+	if strings.TrimSpace(content) != strings.TrimSpace(sd.Content) {
+		return true
+	}
+	return !sameTagSet(tags, sd.Tags)
+}
+
+// sameTagSet reports whether a stored JSON tags column carries exactly
+// the seed's tags.
+func sameTagSet(stored string, seedTags []string) bool {
+	var parsed []string
+	if err := json.Unmarshal([]byte(stored), &parsed); err != nil {
+		// Not a JSON array — fall back to a literal comparison so an
+		// unreadable column is never mistaken for a match.
+		return strings.TrimSpace(stored) == strings.TrimSpace("["+strings.Join(quoteStrings(seedTags), ",")+"]")
+	}
+	if len(parsed) != len(seedTags) {
+		return false
+	}
+	have := make(map[string]bool, len(parsed))
+	for _, t := range parsed {
+		have[t] = true
+	}
+	for _, t := range seedTags {
+		if !have[t] {
+			return false
+		}
+	}
+	return true
 }
 
 // quoteStrings wraps each tag in JSON double quotes. Replaces the
@@ -205,6 +305,7 @@ func ApplySkills(dm interface {
 		Created: []string{},
 		Skipped: []string{},
 		Updated: []string{},
+		Revived: []string{},
 	}
 
 	db := dm.SQLDB()

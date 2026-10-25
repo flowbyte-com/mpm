@@ -211,6 +211,23 @@ type SeedSummary struct {
 	Skipped []string // StableIDs that already existed with matching content
 	Updated []string // StableIDs where the local row's content drifted from the seed (operator's edit preserved; flagged for visibility)
 
+	// Revived is the bucket for a SOFT-DELETED row that was restored
+	// while its content DRIFTED from the seed.
+	//
+	// It is a bucket of its own because the two cases need different
+	// operator guidance, and because a drifted revival must never be
+	// reported as a fresh creation:
+	//
+	//   - Updated (live row, drifted): the operator's edit is
+	//     preserved and the row was always there.
+	//   - Revived (soft-deleted row, drifted): the operator's edit is
+	//     preserved AND the row is live again.
+	//
+	// A soft-deleted row whose content still MATCHES the seed is
+	// restored exactly and reported under Created: nothing was
+	// customised, so nothing was lost, and the baseline is back.
+	Revived []string
+
 	// Drifted is the capability-specific drift bucket. It
 	// carries the same meaning as Updated but is named
 	// differently because capabilities have a stricter
