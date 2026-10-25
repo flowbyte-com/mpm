@@ -132,7 +132,13 @@ func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string
 	// construction: a scheme discovered by a bounded negotiation is
 	// retained for subsequent operations on the same endpoint, and the
 	// operator's override always wins over any discovered rule.
-	auth := sc.resolvedAuth()
+	//
+	// An unrecognised override is refused here rather than silently
+	// replaced with a derived scheme.
+	auth, authErr := sc.resolveAuth()
+	if authErr != nil {
+		return nil, authErr
+	}
 
 	switch mode {
 	case AttemptFresh:
@@ -334,7 +340,7 @@ func (sc *SynthClient) doOnce(ctx context.Context, payload []byte, auth AuthSche
 			fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if name, value, present := auth.headerFor(sc.APIKey); present {
+	if name, value, present := authHeaderFor(auth, sc.APIKey); present {
 		req.Header.Set(name, value)
 	}
 

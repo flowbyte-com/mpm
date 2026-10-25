@@ -105,8 +105,11 @@ func NewClientForProfile(p config.Profile, timeout time.Duration, maxTokens int)
 // AuthScheme returns the authentication scheme this client will use for
 // its next request. Exposed so operator-facing surfaces can report the
 // scheme that will be presented without re-deriving it.
-func (sc *SynthClient) AuthScheme() AuthScheme {
-	return sc.resolvedAuth()
+//
+// An UNRECOGNISED operator override is reported as an error: the scheme
+// is not silently replaced with a derived one.
+func (sc *SynthClient) AuthScheme() (AuthScheme, error) {
+	return sc.resolveAuth()
 }
 
 // NewSynthClient reads LLM configuration from mpm_config.json, returning a

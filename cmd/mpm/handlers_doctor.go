@@ -178,6 +178,9 @@ func handleDoctor(args []string) int {
 	// without persisting their results"). See internal/core/probe/run.go
 	// for the dm=nil gate.
 	if cfg, lerr := config.LoadConfig(); lerr == nil && cfg != nil {
+		if authCheck := authSchemeConfigCheck(cfg); authCheck != nil {
+			report.Checks = append(report.Checks, *authCheck)
+		}
 		if pres, perr := probe.RunActiveProbes(context.Background(), cfg, nil); perr == nil && len(pres) > 0 {
 			report.Checks = append(report.Checks, modelChecksFromProbes(pres)...)
 		}
@@ -240,6 +243,29 @@ func handleDoctor(args []string) int {
 		return 1
 	default:
 		return 0
+	}
+}
+
+// authSchemeConfigCheck reports profiles whose auth_scheme value is not
+// a supported scheme.
+//
+// The value used to be validated only when it was TYPED at the CLI. A
+// hand-edited mpm_config.json carrying `auth_scheme: "basic"` — or a
+// plain typo — was silently dropped, the endpoint was authenticated with
+// a DERIVED scheme, and the operator saw a bare 401 with no explanation.
+//
+// The row is a WARN when something is wrong, and is omitted entirely
+// when nothing is: a clean configuration should not add a line to the
+// operator's report.
+func authSchemeConfigCheck(cfg *config.Config) *DoctorCheck {
+	issues := cfg.InvalidAuthSchemes()
+	if len(issues) == 0 {
+		return nil
+	}
+	return &DoctorCheck{
+		Name:    "Auth schemes",
+		Status:  "WARN",
+		Message: strings.Join(issues, "; "),
 	}
 }
 

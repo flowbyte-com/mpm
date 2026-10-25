@@ -136,6 +136,19 @@ func probeGenerativeWithTimeout(ctx context.Context, p *config.Profile, kind Pro
 		OtherKeyValues: []FingerprintField{{Key: "auth_scheme", Value: p.AuthScheme}},
 	})
 
+	// The authentication scheme that was presented. After a
+	// successful bounded negotiation this is the scheme that actually
+	// worked, which is what the operator needs to pin.
+	//
+	// An unrecognised operator override resolves to an error: the
+	// scheme is left empty rather than reporting a derived scheme the
+	// operator never asked for. The request itself fails with the
+	// explicit error, which the summary below carries.
+	authScheme := ""
+	if scheme, schemeErr := sc.AuthScheme(); schemeErr == nil {
+		authScheme = scheme.String()
+	}
+
 	res := ProbeResult{
 		Kind:        kind,
 		Provider:    p.Provider,
@@ -145,10 +158,7 @@ func probeGenerativeWithTimeout(ctx context.Context, p *config.Profile, kind Pro
 		LatencyMs:   latency.Milliseconds(),
 		Fingerprint: fp,
 		CheckedAt:   start,
-		// The authentication scheme that was presented. After a
-		// successful bounded negotiation this is the scheme that
-		// actually worked, which is what the operator needs to pin.
-		AuthScheme: sc.AuthScheme().String(),
+		AuthScheme:  authScheme,
 	}
 
 	if err != nil {
