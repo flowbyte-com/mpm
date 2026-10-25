@@ -422,15 +422,30 @@ func (dm *DatabaseManager) PromoteRawMemoryBatch(importBatch string, dryRun bool
 			continue
 		}
 
-		_, _, err := dm.SaveMemoryWithContext(p.text, "memories", tags, float64(weight), ttl, ActiveContext{})
+		out, _, err := dm.SaveMemoryWithContext(p.text, "memories", tags, float64(weight), ttl, ActiveContext{})
 		if err != nil {
 			_, _ = dm.db.Exec(`UPDATE raw_memories SET status='rejected', llm_notes=?, updated_at=? WHERE id=?`,
 				fmt.Sprintf("save failed: %v", err), float64(time.Now().Unix()), p.id)
 			continue
 		}
 
-		_, _ = dm.db.Exec(`UPDATE raw_memories SET status='approved', updated_at=? WHERE id=?`,
-			float64(time.Now().Unix()), p.id)
+		// Durable source linkage (2026-10-25). The staging row keeps the
+		// imported text; the memory records which staging row produced it,
+		// so ShredMemoryWithCascade can remove the staged copy by identity
+		// instead of guessing by text.
+		memoryID, _ := out["id"].(string)
+		var linkArg interface{}
+		if memoryID != "" {
+			linkArg = memoryID
+		}
+		if _, err := dm.db.Exec(`UPDATE raw_memories SET status='approved', memory_id=?, updated_at=? WHERE id=?`,
+			linkArg, float64(time.Now().Unix()), p.id); err != nil {
+			// The memory exists but the staging row could not be linked.
+			// Leave it pending so the operator can see it, and stop rather
+			// than reporting a promotion whose linkage is missing — the
+			// staged text would remain undiscoverable to the shred path.
+			return promoted, fmt.Errorf("link raw memory %s to memory %s: %w", p.id, memoryID, err)
+		}
 		promoted++
 	}
 
