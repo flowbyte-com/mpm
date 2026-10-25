@@ -186,6 +186,25 @@ func MigrateEpistemicPressureDeferral(tx *sql.Tx) error {
 
 	// The sentinel is still recorded: it is the repo's migration
 	// bookkeeping convention, and other tooling reads it.
+	//
+	// Probe before writing. `INSERT OR IGNORE` still takes the database
+	// write lock even when the row already exists, and on a WAL database
+	// a write after this transaction's reads fails with
+	// SQLITE_BUSY_SNAPSHOT when another process committed schema init
+	// concurrently — busy_timeout does not retry that class. On an
+	// already-migrated database this was the one unconditional write in
+	// the boot migration transaction, so every open raced for it (2 of
+	// 12 parallel `mpm remember` processes failed with "database is
+	// locked"). A steady-state open should be read-only.
+	var alreadyApplied int
+	switch err := tx.QueryRow(
+		`SELECT 1 FROM schema_migrations WHERE id = ?`, sentinel,
+	).Scan(&alreadyApplied); {
+	case err == nil:
+		return nil
+	case err != sql.ErrNoRows:
+		return fmt.Errorf("probe %s sentinel: %w", sentinel, err)
+	}
 	if _, err := tx.Exec(
 		`INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)`,
 		sentinel, time.Now().Unix(),

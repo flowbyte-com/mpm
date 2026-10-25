@@ -41,6 +41,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // MaintenanceLockPath returns the canonical lock file path for the
@@ -297,6 +298,77 @@ func ReleaseSharedMaintenanceLock(f *os.File) error {
 // with a nil file (no-op). Same kernel-release semantics as the shared
 // variant.
 func ReleaseExclusiveMaintenanceLock(f *os.File) error {
+	if f == nil {
+		return nil
+	}
+	return f.Close()
+}
+
+// ---------------------------------------------------------------------------
+// Schema-initialisation lock
+// ---------------------------------------------------------------------------
+//
+// Separate from the H-4 maintenance lease, on a separate file: it serialises
+// the boot migration transaction across processes that open the same fresh or
+// just-upgraded database at the same time. The lease guards destructive
+// operations against live DatabaseManagers; this lock guards the one-time
+// schema transition. Sharing the lease file would conflate the two protocols
+// (every opener already holds LOCK_SH, so an exclusive acquisition on the same
+// inode could never succeed from a peer).
+
+// schemaInitLockTimeout bounds the wait for a peer mid-migration. Schema
+// initialisation is short; a longer wait means something is genuinely stuck
+// and the caller should see an error rather than hang forever.
+const schemaInitLockTimeout = 30 * time.Second
+
+// SchemaInitLockPath returns the lock file used to serialise schema
+// initialisation for the database at dbPath. It lives beside the database and
+// is derived from the resolved dbPath so every opener of the same file
+// converges on the same identity.
+func SchemaInitLockPath(dbPath string) string {
+	if dbPath == "" {
+		return ""
+	}
+	return dbPath + ".schema-init.lock"
+}
+
+// AcquireSchemaInitLock takes the exclusive schema-init lock, waiting up to
+// schemaInitLockTimeout for a peer. Returns the locked file; the caller MUST
+// pass it to ReleaseSchemaInitLock. In-memory databases (test fixtures) have
+// no cross-process peers and return (nil, nil).
+func AcquireSchemaInitLock(dbPath string) (*os.File, error) {
+	lockPath := SchemaInitLockPath(dbPath)
+	if lockPath == "" || IsInMemoryDSN(dbPath) {
+		return nil, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		return nil, fmt.Errorf("schema-init lock: mkdir %s: %w", filepath.Dir(lockPath), err)
+	}
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("schema-init lock: open %s: %w", lockPath, err)
+	}
+	deadline := time.Now().Add(schemaInitLockTimeout)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+			_ = f.Close()
+			return nil, fmt.Errorf("schema-init lock: flock %s: %w", lockPath, err)
+		}
+		if time.Now().After(deadline) {
+			_ = f.Close()
+			return nil, fmt.Errorf("schema-init lock: %s held for more than %s; another process may be stuck", lockPath, schemaInitLockTimeout)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return f, nil
+}
+
+// ReleaseSchemaInitLock releases and closes the schema-init lock file.
+func ReleaseSchemaInitLock(f *os.File) error {
 	if f == nil {
 		return nil
 	}
