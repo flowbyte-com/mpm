@@ -576,10 +576,10 @@ func (dm *DatabaseManager) fillReferenceRetrievalState(ctx context.Context, docI
 	if pending > 0 {
 		if CurrentEmbeddingFingerprint().Model == "" {
 			out.Warnings = append(out.Warnings,
-				fmt.Sprintf("%d of %d chunks have no embedding: no embedding provider is configured, so semantic retrieval will not see this document (lexical search still works). Configure one and run `mpm ops backfill-embeddings`.", pending, total))
+				fmt.Sprintf("%d of %d chunks have no embedding: no embedding provider is configured, so semantic retrieval will not see this document (lexical search still works). Configure one and run `mpm ops backfill-embeddings --include references`.", pending, total))
 		} else {
 			out.Warnings = append(out.Warnings,
-				fmt.Sprintf("%d of %d chunks could not be embedded; semantic retrieval will not see them (lexical search still works). Retry with `mpm ops backfill-embeddings`.", pending, total))
+				fmt.Sprintf("%d of %d chunks could not be embedded; semantic retrieval will not see them (lexical search still works). Retry with `mpm ops backfill-embeddings --include references`.", pending, total))
 		}
 	}
 }
