@@ -10,6 +10,7 @@ import (
 )
 
 func TestMpmWhy_UnknownFallbackForLegacyArtifact(t *testing.T) {
+	clearAmbientProvenanceEnv(t)
 	dm := newTestDMForCmd(t)
 
 	// Create a memory WITHOUT any artifact_provenance row (legacy case).
@@ -46,6 +47,7 @@ func TestMpmWhy_UnknownFallbackForLegacyArtifact(t *testing.T) {
 // no provenance row was inserted by SaveMemory itself). The rendering
 // "(unknown)" case is covered by the test above.
 func TestMpmWhy_ProvenanceFieldsPopulated(t *testing.T) {
+	clearAmbientProvenanceEnv(t)
 	dm := newTestDMForCmd(t)
 
 	memID, err := dm.SaveMemory("memories", "memory with no provenance row", "", nil, nil, nil, false, 3)
