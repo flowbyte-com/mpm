@@ -7,6 +7,8 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // ---------------------------------------------------------------------------
@@ -92,6 +94,30 @@ type embeddingIntegrityResult struct {
 	// exist while every row predates it, which is the state the live
 	// database was in when the column was added on 2026-10-13 (all 149).
 	memoryUnlabelledRows int
+
+	// Partial-migration split (2026-10-25, Hermes review, priority 3).
+	//
+	// A store can be HALF migrated: some vectors carry the active model's
+	// fingerprint, some carry another model's, and some carry none. The
+	// retrieval filter accepts only the first group, so a partially
+	// migrated database silently ranks a subset of the corpus. These
+	// counters make the split visible, and memoryActiveModel records the
+	// fingerprint "compatible" was measured against.
+	memoryActiveModel      string
+	memoryCompatibleRows   int // labelled with memoryActiveModel
+	memoryIncompatibleRows int // labelled with a different model
+	memoryLabelledRows     int // any non-empty fingerprint
+	// memoryUnlabelledVectors counts embedded rows (real vector body) with
+	// no fingerprint. Distinct from memoryUnlabelledRows, which keeps the
+	// legacy predicate (embedding IS NOT NULL, including the literal
+	// 'null' body) behind the pre-existing disclosure message.
+	memoryUnlabelledVectors int
+
+	// Vector retrieval mode, as it would actually run right now:
+	// zero clusters means IVFSearch returns nil and VectorMatch
+	// brute-forces every compatible row.
+	ivfClusterCount int
+	vectorMaxScan   int
 }
 
 // distinctDimensions returns the observed dimensions in ascending order.
@@ -169,6 +195,23 @@ func classifyEmbeddingPayload(body string) (dim int, malformed, empty, nonFinite
 // as provider-covered.
 const hasVectorBodySQL = `embedding IS NOT NULL AND TRIM(CAST(embedding AS TEXT), ' ' || char(9) || char(10) || char(11) || char(12) || char(13)) NOT IN ('', 'null')`
 
+// activeEmbeddingModelName returns the configured provider's model name
+// WITHOUT probing it.
+//
+// This mirrors the model half of CurrentEmbeddingFingerprint (which is
+// what VectorMatch's compatibility filter compares against) but
+// deliberately skips the dimension half: ActiveEmbeddingDimension issues
+// a sample embed, and `mpm doctor` is read-only — a diagnostic must not
+// make a provider call, allocate a vector, or depend on provider
+// reachability to report local state.
+func activeEmbeddingModelName() string {
+	cfg := mpminternal.DefaultEmbeddingConfig()
+	if cfg == nil || cfg.Provider == nil || cfg.Provider.Name() == "null" {
+		return ""
+	}
+	return cfg.Provider.Name()
+}
+
 // collectEmbeddingIntegrity reads every live memory vector and every
 // reference-chunk fingerprint. Read-only.
 func collectEmbeddingIntegrity(s *DoctorService) (embeddingIntegrityResult, error) {
@@ -176,8 +219,11 @@ func collectEmbeddingIntegrity(s *DoctorService) (embeddingIntegrityResult, erro
 		dimensionHistogram: map[int]int{},
 		referenceModels:    map[string]int{},
 		referenceDims:      map[int]int{},
-		memoryHasModelCol:  memoryEmbeddingModelColumnExists(s),
 	}
+	if s == nil || s.dm == nil {
+		return res, fmt.Errorf("no database")
+	}
+	res.memoryHasModelCol = memoryEmbeddingModelColumnExists(s)
 
 	// Count unlabelled vectors separately from the column's existence.
 	// Only meaningful once the column is present; before the migration
@@ -195,6 +241,55 @@ func collectEmbeddingIntegrity(s *DoctorService) (embeddingIntegrityResult, erro
 			}
 			rows.Close()
 		}
+	}
+
+	// The fingerprint split. Read-only and provider-agnostic: the active
+	// model NAME comes from local configuration (no probe, no network),
+	// and the groups come from the stored column. Directive rows and
+	// vectorless rows are excluded for the same reasons they are
+	// excluded from the dimension statistics above.
+	res.memoryActiveModel = activeEmbeddingModelName()
+	if res.memoryHasModelCol {
+		if rows, err := s.dm.QueryTracked(
+			`SELECT COALESCE(embedding_model, ''), COUNT(*)
+			 FROM memories
+			 WHERE deleted_at IS NULL AND ` + hasVectorBodySQL + `
+			   AND COALESCE(is_prime_directive, 0) = 0
+			   AND COALESCE(collection, '') <> 'directives'
+			 GROUP BY 1`); err == nil {
+			for rows.Next() {
+				var model string
+				var n int
+				if err := rows.Scan(&model, &n); err != nil {
+					continue
+				}
+				switch {
+				case strings.TrimSpace(model) == "":
+					// Real vector, no fingerprint. Counted separately from
+					// memoryUnlabelledRows (legacy predicate, which also
+					// counts rows whose body is the literal 'null').
+					res.memoryUnlabelledVectors += n
+				case res.memoryActiveModel != "" && model == res.memoryActiveModel:
+					res.memoryCompatibleRows += n
+					res.memoryLabelledRows += n
+				default:
+					res.memoryIncompatibleRows += n
+					res.memoryLabelledRows += n
+				}
+			}
+			rows.Close()
+		}
+	}
+
+	if err := s.dm.QueryRowTracked(`SELECT COUNT(*) FROM vector_clusters`).Scan(&res.ivfClusterCount); err != nil {
+		// Index table absent (pre-IVF database) or unreadable: report the
+		// state we can prove rather than failing the whole check.
+		res.ivfClusterCount = 0
+	}
+	res.vectorMaxScan = s.dm.GetConfigInt("vector.max_scan", 5000)
+
+	if s == nil || s.dm == nil {
+		return res, fmt.Errorf("no database")
 	}
 
 	if s == nil || s.dm == nil {
@@ -428,6 +523,36 @@ func (s *DoctorService) checkEmbeddingIntegrity() DoctorCheck {
 				"`mpm ops backfill-embeddings`.", res.memoryUnlabelledRows)
 		}
 		details = append(details, msg)
+
+		// Partial-migration split. A half-migrated store is the silent
+		// case: retrieval keeps working, on whatever subset happens to
+		// match the active model, and nothing above says how large that
+		// subset is.
+		totalLabelled := res.memoryLabelledRows
+		excluded := res.memoryIncompatibleRows + res.memoryUnlabelledVectors
+		switch {
+		case totalLabelled == 0 && res.memoryUnlabelledVectors == 0:
+			// Nothing embedded; already reported by the dimension section.
+		case res.memoryActiveModel == "":
+			details = append(details, fmt.Sprintf(
+				"No embedding model is configured, so no stored vector can be attributed to "+
+					"the model producing queries: %d vectors carry a fingerprint (%d other model(s), "+
+					"%d active) and %d carry none. Retrieval compares raw vectors without a "+
+					"model-compatibility filter in this state. Configure the embedding profile "+
+					"(`mpm config`) and re-embed with `mpm ops backfill-embeddings --force-reembed`.",
+				res.memoryLabelledRows, res.memoryIncompatibleRows, res.memoryCompatibleRows,
+				res.memoryUnlabelledVectors))
+		default:
+			details = append(details, fmt.Sprintf(
+				"Active embedding model %q: %d of %d embedded memories are compatible and "+
+					"eligible for vector matching; %d were embedded by a different model and %d "+
+					"carry no fingerprint, so they are excluded (never compared on dimension "+
+					"alone). Retrieval ranks only the compatible subset until they are "+
+					"re-embedded: `mpm ops backfill-embeddings`.",
+				res.memoryActiveModel, res.memoryCompatibleRows,
+				res.memoryCompatibleRows+excluded,
+				res.memoryIncompatibleRows, res.memoryUnlabelledVectors))
+		}
 	} else {
 		details = append(details,
 			"Model identity for memory vectors is NOT recoverable: `memories` has no "+
@@ -473,11 +598,34 @@ func (s *DoctorService) checkEmbeddingIntegrity() DoctorCheck {
 				len(res.referenceModels), strings.Join(parts, ", ")))
 	}
 
+	// -- retrieval mode --------------------------------------------------
+	//
+	// Report the path VectorMatch would actually take, not the path the
+	// operator might assume. An empty IVF index means every semantic
+	// query falls through to a brute-force scan of all compatible rows,
+	// bounded only by vector.max_scan.
+	mode := "brute force"
+	if res.ivfClusterCount > 0 {
+		mode = fmt.Sprintf("IVF (%d clusters, probe_p=%d)",
+			res.ivfClusterCount, mpminternal.DefaultIVFConfig().ProbeP)
+	}
+	capNote := "no scan cap"
+	if res.vectorMaxScan > 0 {
+		capNote = fmt.Sprintf("scan cap %d rows", res.vectorMaxScan)
+	}
+	modeMsg := fmt.Sprintf("Vector retrieval mode: %s; %s.", mode, capNote)
+	if res.ivfClusterCount == 0 {
+		modeMsg += " The IVF index holds no clusters, so each semantic query scans every " +
+			"compatible vector. Build the index with `mpm ops rebalance`."
+	}
+	details = append(details, modeMsg)
+
 	check.Details = details
 
 	// -- verdict --------------------------------------------------------
 	fatal := res.malformedRows > 0 || res.emptyRows > 0 ||
 		res.nonFiniteRows > 0 || len(dims) > 1 || len(res.referenceModels) > 1
+	partialExcluded := res.memoryIncompatibleRows + res.memoryUnlabelledVectors
 	switch {
 	case fatal:
 		check.Status = "FAIL"
@@ -485,6 +633,15 @@ func (s *DoctorService) checkEmbeddingIntegrity() DoctorCheck {
 			"%d stored vectors are malformed, non-finite, or dimension-inconsistent; "+
 				"vector-based similarity ranking cannot be trusted",
 			res.malformedRows+res.emptyRows+res.nonFiniteRows)
+	case res.memoryActiveModel != "" && res.memoryCompatibleRows > 0 && partialExcluded > 0:
+		// Partially migrated store: retrieval works, but silently on a
+		// subset. That is exactly the state that reads as healthy.
+		check.Status = "WARN"
+		check.Message = fmt.Sprintf(
+			"%d of %d embedded memories are excluded from vector matching "+
+				"(different model or no fingerprint); semantic recall ranks only the "+
+				"compatible subset",
+			partialExcluded, res.memoryCompatibleRows+partialExcluded)
 	case res.nullVectors > 0 && res.totalVectors == 0:
 		check.Status = "WARN"
 		check.Message = fmt.Sprintf(
