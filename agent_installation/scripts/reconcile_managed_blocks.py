@@ -140,6 +140,10 @@ Exit codes
   0  every adapter reconciled
   1  at least one adapter reported an advisory failure
   2  at least one REQUIRED provisioning step failed
+  70 the reconciler itself failed (an uncaught internal error). The host
+     integration state is unknown; the caller must not report success.
+     This is deliberately distinct from rc=1 so that "an adapter failed"
+     is never inferred from the reconciler's own crash.
 
 The contract:
   - Successful reconciliation converges installed managed blocks to
@@ -463,9 +467,21 @@ def _invoke_installer(
     env = dict(os.environ)
     env["HOME"] = home
 
-    result = subprocess.run(
-        argv, capture_output=True, text=True, env=env
-    )
+    try:
+        result = subprocess.run(
+            argv, capture_output=True, text=True, env=env
+        )
+    except OSError as exc:
+        # The installer exists but could not be invoked — e.g. it is not
+        # executable, or its interpreter is missing. This is an ADAPTER
+        # failure, not a crash in this reconciler: catch it, name the
+        # adapter, and let the caller continue with the others. An
+        # uncaught PermissionError used to kill the whole script and get
+        # reported as a generic adapter failure.
+        return (
+            None, "", "", argv,
+            f"installer could not be invoked: {installer_path}: {exc}",
+        )
     return result.returncode, result.stdout, result.stderr, argv, None
 
 
@@ -514,8 +530,11 @@ def reconcile_one(adapter_dir: Path, manifest: dict, home: str) -> bool:
         home,
     )
     if error is not None:
-        print(f"[reconcile]  {label}: SKIP ({error})")
-        return True
+        # A manifest naming an installer that cannot be located or invoked
+        # is a broken adapter contract, not a safe skip: the operator
+        # asked for this host to be reconciled and it was not.
+        print(f"[reconcile]  {label}: FAIL ({error})")
+        return False
 
     if rc == 0:
         # Surface installer stdout briefly so the operator sees the
@@ -676,4 +695,18 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001 - this is the process boundary
+        # The reconciler's own failure is not an adapter failure. Exit 70
+        # so the installer can distinguish "an adapter failed" (rc=1)
+        # from "the reconciliation could not be performed" (rc=70) and
+        # refuse to report a successful installation.
+        print(
+            f"[reconcile]  internal error: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(70)
