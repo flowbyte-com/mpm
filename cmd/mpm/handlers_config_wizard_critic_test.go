@@ -242,7 +242,12 @@ func TestWizardCritic_AnEmptyProfileIsReplacedWithoutAConfirmation(t *testing.T)
 // which would swallow the rest of the script). A pseudo-terminal
 // delivers one line at a time, so the script is answered prompt by
 // prompt.
-func runWizardWithAnswersInPTY(t *testing.T, c *config.Config, answers string, finalInput string) int {
+//
+// The wizard is entered through `handleConfig` rather than through
+// `handleConfigInteractive`: the former loads the configuration from the
+// workspace (which is what a real operator run does) and has a stable
+// signature, so this test does not constrain the wizard's internal API.
+func runWizardWithAnswersInPTY(t *testing.T, answers string, finalInput string) int {
 	t.Helper()
 
 	ptmx, ptytty, err := pty.Open()
@@ -266,7 +271,7 @@ func runWizardWithAnswersInPTY(t *testing.T, c *config.Config, answers string, f
 	}
 
 	done := make(chan int, 1)
-	go func() { done <- handleConfigInteractive(c) }()
+	go func() { done <- handleConfig([]string{}) }()
 
 	select {
 	case code := <-done:
@@ -276,6 +281,22 @@ func runWizardWithAnswersInPTY(t *testing.T, c *config.Config, answers string, f
 		_ = ptmx.Close()
 		t.Fatal("the wizard did not finish within 30s — it is probably waiting for an answer the script does not supply")
 		return 1
+	}
+}
+
+// writeConfiguredCriticConfig writes a configuration with a CONFIGURED
+// critic profile into the isolated workspace.
+func writeConfiguredCriticConfig(t *testing.T) {
+	t.Helper()
+	body := `{
+  "profiles": {
+    "default": {"provider": "custom", "model": "gpt-4o", "base_url": "https://api.example.com/v1"},
+    "critic":  {"provider": "anthropic", "model": "claude-opus", "base_url": "https://api.anthropic.com/v1", "api_key": "sk-stored-critic-key"}
+  },
+  "components": {"critic": "critic"}
+}`
+	if err := os.WriteFile(config.ConfigPath(), []byte(body), 0o600); err != nil {
+		t.Fatalf("write the configuration: %v", err)
 	}
 }
 
@@ -302,9 +323,9 @@ const criticSessionAnswers = "1\n3\n\n\n\n1\ny\ncritic\nn\n"
 // must survive the save with its credential intact.
 func TestWizardCritic_SessionPreservesTheConfiguredCritic(t *testing.T) {
 	isolatedEmbeddingWorkspace(t)
-	c := configuredCriticConfig()
+	writeConfiguredCriticConfig(t)
 
-	runWizardWithAnswersInPTY(t, c, criticSessionAnswers, "y\n")
+	runWizardWithAnswersInPTY(t, criticSessionAnswers, "y\n")
 
 	written, err := os.ReadFile(config.ConfigPath())
 	if err != nil {
@@ -327,12 +348,19 @@ func TestWizardCritic_SessionPreservesTheConfiguredCritic(t *testing.T) {
 // operator abandoned.
 func TestWizardCritic_SessionCancellationWritesNothing(t *testing.T) {
 	isolatedEmbeddingWorkspace(t)
-	c := configuredCriticConfig()
+	writeConfiguredCriticConfig(t)
+	before, err := os.ReadFile(config.ConfigPath())
+	if err != nil {
+		t.Fatalf("read the configuration before the run: %v", err)
+	}
 
-	runWizardWithAnswersInPTY(t, c, criticSessionAnswers, "\x04") // Ctrl-D: abort.
+	runWizardWithAnswersInPTY(t, criticSessionAnswers, "\x04") // Ctrl-D: abort.
 
-	if _, err := os.Stat(config.ConfigPath()); err == nil {
-		t.Errorf("the wizard wrote %s after the operator aborted; an abort must leave the configuration exactly as it was",
-			config.ConfigPath())
+	after, err := os.ReadFile(config.ConfigPath())
+	if err != nil {
+		t.Fatalf("read the configuration after the aborted run: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("the configuration changed after the operator aborted:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
