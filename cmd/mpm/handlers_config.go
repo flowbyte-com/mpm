@@ -977,7 +977,7 @@ func handleConfigInteractive(c *config.Config) (int, bool) {
 	// Specialist (critic) step: optional, default to "no" when the
 	// operator hasn't already configured a critic profile.
 	fmt.Println()
-	wizardCriticStep(c)
+	wizardCriticStep(c, rwFromStdin())
 
 	// Capability informational block.
 	fmt.Println()
@@ -1334,7 +1334,7 @@ func wizardEmbeddingCustomWith(rw *bufio.Reader, c *config.Config) {
 // v0.1: critic. When the operator already has a critic profile bound,
 // defaults to "no change". When the operator accepts, configures
 // profiles.critic and binds components.critic = "critic".
-func wizardCriticStep(c *config.Config) {
+func wizardCriticStep(c *config.Config, rw *bufio.Reader) {
 	boundName, hasCriticBinding := c.Components["critic"]
 	_, hasCriticProfile := c.Profiles["critic"]
 	fmt.Println("Specialised models")
@@ -1347,26 +1347,106 @@ func wizardCriticStep(c *config.Config) {
 		fmt.Println("  critic profile  : (using default model)")
 		fmt.Println("  Configure a separate critic model? [y/N]")
 	}
-	answer := promptString(rwFromStdin(), "", "N")
-	if strings.EqualFold(strings.TrimSpace(answer), "y") {
-		fmt.Println("  Profile name [critic]:")
-		name := strings.TrimSpace(promptString(rwFromStdin(), "", "critic"))
-		if name == "" {
-			name = "critic"
+	answer := promptString(rw, "", "N")
+	if !strings.EqualFold(strings.TrimSpace(answer), "y") {
+		fmt.Println("Critic unchanged.")
+		return
+	}
+
+	// The default name is the conventional one, so it usually collides
+	// with a profile the operator already has. Say so BEFORE asking for
+	// it: entering a DIFFERENT name adds a separate critic, and the
+	// same name is the destructive path.
+	if existing, taken := c.Profiles["critic"]; taken && profileHasStoredConfiguration(existing) {
+		fmt.Println()
+		fmt.Printf("  A configured profile named %q already exists (%s/%s).\n",
+			"critic",
+			displayProviderOrEmpty(existing.Provider),
+			displayModelOrEmpty(existing.Model))
+		fmt.Println("  Enter a DIFFERENT name to add a separate critic model.")
+		fmt.Println("  Using the same name replaces it — you will be asked to confirm.")
+	}
+
+	fmt.Println("  Profile name [critic]:")
+	name := strings.TrimSpace(promptString(rw, "", "critic"))
+	if name == "" {
+		name = "critic"
+	}
+	if c.Profiles == nil {
+		c.Profiles = map[string]config.Profile{}
+	}
+	if c.Components == nil {
+		c.Components = map[string]string{}
+	}
+
+	// NEVER silently replace an existing profile.
+	//
+	// The step used to assign `config.Profile{Name: name}` over
+	// whatever was there, destroying the stored provider, model, base
+	// URL and API key of a CONFIGURED critic — and the wizard's single
+	// commit point then persisted the empty replacement to disk. An
+	// operator who already had a working critic lost it by answering
+	// one question.
+	//
+	// An existing CONFIGURED profile is replaced only when the operator
+	// is shown exactly what is at stake and confirms. The default
+	// answer preserves.
+	existing, taken := c.Profiles[name]
+	switch {
+	case taken && profileHasStoredConfiguration(existing):
+		fmt.Println()
+		fmt.Printf("  Profile %q is already configured:\n", name)
+		fmt.Printf("    provider : %s\n", displayProviderOrEmpty(existing.Provider))
+		fmt.Printf("    model    : %s\n", displayModelOrEmpty(existing.Model))
+		if existing.BaseURL != "" {
+			fmt.Printf("    base url : %s\n", existing.BaseURL)
 		}
-		if c.Profiles == nil {
-			c.Profiles = map[string]config.Profile{}
+		if existing.APIKey != "" {
+			fmt.Println("    api key  : stored — it will be discarded")
+		}
+		fmt.Println("  Replacing it discards the configuration above.")
+		if !confirmPrompt(rw, "Replace it?") {
+			fmt.Println("Existing profile preserved. Critic unchanged.")
+			return
 		}
 		c.Profiles[name] = config.Profile{Name: name}
-		if c.Components == nil {
-			c.Components = map[string]string{}
-		}
+		c.Components["critic"] = name
+		fmt.Printf("Replaced profile %q. Use `mpm config profile set %s provider ...` to fill.\n", name, name)
+		fmt.Println("(Component bound. Run `mpm config validate` after filling the profile.)")
+	case taken:
+		// An existing but EMPTY profile carries nothing to lose.
+		c.Profiles[name] = config.Profile{Name: name}
+		c.Components["critic"] = name
+		fmt.Printf("Replaced empty profile %q. Use `mpm config profile set %s provider ...` to fill.\n", name, name)
+		fmt.Println("(Component bound. Run `mpm config validate` after filling the profile.)")
+	default:
+		c.Profiles[name] = config.Profile{Name: name}
 		c.Components["critic"] = name
 		fmt.Printf("Created empty profile %q. Use `mpm config profile set %s provider ...` to fill.\n", name, name)
 		fmt.Println("(Component bound. Run `mpm config validate` after filling the profile.)")
-	} else {
-		fmt.Println("Critic unchanged.")
 	}
+}
+
+// profileHasStoredConfiguration reports whether a profile carries any
+// operator-set configuration.
+//
+// An EMPTY profile has nothing to lose, so replacing it is harmless. A
+// profile with a provider, a model, a base URL, a stored credential or
+// an explicit authentication scheme is the operator's work, and
+// replacing it is a destructive act that needs their confirmation.
+//
+// MaxTokens is deliberately NOT counted: the runtime never honours it
+// (the substrate supplies the token ceiling), so destroying it loses
+// nothing.
+func profileHasStoredConfiguration(p config.Profile) bool {
+	return p.Provider != "" ||
+		p.Model != "" ||
+		p.BaseURL != "" ||
+		p.APIKey != "" ||
+		p.AuthScheme != "" ||
+		p.Temperature != nil ||
+		p.TimeoutSecs > 0 ||
+		p.Reasoning != ""
 }
 
 // wizardShowCapabilities prints the built-in capability mappings so
