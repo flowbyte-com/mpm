@@ -351,7 +351,15 @@ func handleIngestHistory(args []string) int {
 	return 0
 }
 
-// handleIngestUndo reverts an ingest run
+// handleIngestUndo reverts an ingest run.
+//
+// What it actually reverts is the STAGING side: the raw_memories rows for
+// the batch are deleted. Anything already promoted into `memories` stays,
+// because an ingest batch does not (yet) own the memories it produced —
+// promotion is not tracked per batch, so there is no safe set to remove.
+// The previous output said "Removed N entries" with no mention of that
+// limit, and printed the same success shape when the staging delete
+// matched nothing (or when RowsAffected failed and was discarded).
 func handleIngestUndo(args []string) int {
 	if len(args) < 1 {
 		usererror.Usage("mpm ingest --undo <batch_id>")
@@ -372,11 +380,23 @@ func handleIngestUndo(args []string) int {
 		usererror.Error("Undo failed: %v", err)
 		return 1
 	}
-	deleted, _ := result.RowsAffected()
-	fmt.Printf("Removed %d entries from raw_memories (batch: %s).\n", deleted, batchID)
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		// Without the count the command cannot say what it removed; a
+		// success line here would be a claim it cannot support.
+		usererror.Error("Undo failed: cannot confirm how many staging rows were removed: %v", err)
+		return 1
+	}
+	if deleted == 0 {
+		usererror.Warn("No staging rows matched batch %q; nothing was removed.", batchID)
+	} else {
+		fmt.Printf("Removed %d staging entries (batch: %s).\n", deleted, batchID)
+	}
 
-	// Note: promoted memories still remain in the memory table.
-	// Full undo would require tracking promoted_at per batch — Phase 5 feature.
+	// Say what undo does not do. Promoted memories are normal memories now;
+	// retiring them is a separate, per-object decision (`mpm memory
+	// delete`, or the operator-only `mpm memory shred`).
+	fmt.Println("Note: memories already promoted from this batch are NOT removed — undo clears staging rows only.")
 
 	return 0
 }
