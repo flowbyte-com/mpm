@@ -3325,7 +3325,11 @@ A refusal names the scheme that was actually presented, so an operator can tell 
 
 Authentication refusals stay distinguishable in the operator's report: an invalid credential, an unbilled subscription and an under-privileged key are three different problems with three different remedies.
 
-The credential never leaves the configured origin: a redirect to a different host or port is refused rather than followed, and a downgrade from `https` to `http` is refused too.
+The credential never leaves the configured origin. A redirect is followed **only** when it stays on the same origin — same scheme, same host, same *effective* port, where the effective port is the explicit port when the URL spells one out and the scheme's default (443 for `https`, 80 for `http`) when it does not. A redirect to a different host — including a **subdomain** of the configured host — a different port, or a different scheme (both the `https` → `http` downgrade, which would send the credential in cleartext, and the `http` → `https` upgrade, which is a different origin) is **refused** rather than followed. Go's own redirect handling is strictly weaker: it forwards `X-Api-Key` to any host and `Authorization` to any subdomain.
+
+The same guard applies to the embedding providers, whose bearer token is a real API key.
+
+A refused redirect is reported as a refusal, not as a reachability problem: the endpoint answered, MPM declined to follow the redirect, and the request is not retried — repeating the identical request would be refused identically. It surfaces in the operator's report as `redirect_refused`, with the guard's own explanation naming the difference that caused the refusal (host, scheme or port).
 
 ### Self-Healing Integrity Loop
 

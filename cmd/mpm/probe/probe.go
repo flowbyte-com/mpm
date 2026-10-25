@@ -49,6 +49,12 @@ const (
 	// ProbeDisabled: the binding is intentionally disabled (e.g.
 	// Components["embedding"] == "disabled"). Never a failure.
 	ProbeDisabled
+	// ProbeRedirectRefused: the endpoint answered with a redirect that
+	// would have carried the credential off the configured origin, and
+	// MPM REFUSED to follow it. The endpoint is reachable; the
+	// credential never left. It is not an unreachable endpoint and not
+	// an authentication failure.
+	ProbeRedirectRefused
 	// ProbeUnknown: anything not confidently classified; preserves truth in
 	// ErrorClass (e.g. FailureRateLimit, FailureUnknown).
 	ProbeUnknown
@@ -72,6 +78,8 @@ func (s ProbeStatus) String() string {
 		return "invalid_response"
 	case ProbeDisabled:
 		return "disabled"
+	case ProbeRedirectRefused:
+		return "redirect_refused"
 	case ProbeUnknown:
 		return "unknown"
 	}

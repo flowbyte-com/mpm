@@ -14,6 +14,7 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -21,6 +22,7 @@ import (
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/synth"
 )
 
 // probeEmbedText is the canonical input for embedding probes. Tiny, fixed,
@@ -123,6 +125,14 @@ func probeEmbedding(ctx context.Context, p *config.Profile) ProbeResult {
 func classifyEmbeddingError(err error) (class string, httpStatus int) {
 	if err == nil {
 		return "", 0
+	}
+	// A deliberate credential-redirect refusal is recognised through the
+	// typed sentinel, not through a substring of the message. The
+	// embedding providers share the synthesis redirect guard, so a
+	// refused redirect reaches here too — and it must not be reported
+	// as a transport failure.
+	if errors.Is(err, synth.ErrCredentialRedirectRefused) {
+		return "FailureCredentialRedirectRefused", 0
 	}
 	msg := err.Error()
 	// Try both status-code-bearing prefixes.

@@ -314,6 +314,17 @@ func modelChecksFromProbes(results []probe.ProbeResult) []DoctorCheck {
 		case probe.ProbeInvalidResponse:
 			check.Status = "WARN"
 			check.Message = fmt.Sprintf("%s · invalid response", r.Provider)
+		case probe.ProbeRedirectRefused:
+			// MPM refused to follow a redirect that would have carried
+			// the credential off the configured origin. The endpoint is
+			// reachable; this is a security decision, not a fault of
+			// the endpoint. The refusal's own message is the most
+			// useful thing the operator can be told.
+			check.Status = "FAIL"
+			check.Message = fmt.Sprintf("%s · redirect refused (the credential would have left the configured origin)", r.Provider)
+			if r.ErrorSummary != "" {
+				check.Message = fmt.Sprintf("%s · redirect refused: %s", r.Provider, r.ErrorSummary)
+			}
 		default:
 			check.Status = "WARN"
 			check.Message = r.ErrorSummary

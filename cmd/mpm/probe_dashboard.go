@@ -191,6 +191,8 @@ func friendlyLabelFromStatus(s string) string {
 		return "invalid response"
 	case "disabled":
 		return "disabled"
+	case "redirect_refused":
+		return "redirect refused"
 	case "unknown":
 		return "unknown"
 	}

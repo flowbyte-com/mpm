@@ -29,6 +29,14 @@ import (
 // requested model is missing — typed error or explicit field. A generic
 // HTTP 404 with no model evidence becomes ProbeUnknown.
 func classifyFromWire(err error, class string, httpStatus int, bodyFragment string) ProbeStatus {
+	// A deliberate credential-redirect refusal is checked FIRST, before
+	// the transport signals. The endpoint answered and MPM declined to
+	// follow the redirect: it is neither unreachable nor an
+	// authentication failure, and the refusal's own message must reach
+	// the operator intact.
+	if class == "FailureCredentialRedirectRefused" {
+		return ProbeRedirectRefused
+	}
 	// Transport-level signals first.
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
