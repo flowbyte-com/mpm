@@ -124,11 +124,12 @@ func TestConfirmPrompt_UnterminatedAnswerIsCancellation(t *testing.T) {
 const wizardAnswers = "1\n3\n\n\n\n1\nn\n"
 
 // runWizardInPTY drives the interactive wizard through a
-// pseudo-terminal and returns its exit code.
+// pseudo-terminal and returns its exit code and whether the wizard
+// committed the configuration.
 //
 // finalInput is what the operator supplies at the final "Save?"
 // prompt: "y\n" to approve, or the terminal's EOF character to abort.
-func runWizardInPTY(t *testing.T, c *config.Config, finalInput string) int {
+func runWizardInPTY(t *testing.T, c *config.Config, finalInput string) (int, bool) {
 	t.Helper()
 
 	ptmx, ptytty, err := pty.Open()
@@ -151,12 +152,19 @@ func runWizardInPTY(t *testing.T, c *config.Config, finalInput string) int {
 		t.Fatalf("write the session to the pseudo-terminal: %v", err)
 	}
 
-	done := make(chan int, 1)
-	go func() { done <- handleConfigInteractive(c) }()
+	type result struct {
+		code      int
+		committed bool
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, committed := handleConfigInteractive(c)
+		done <- result{code: code, committed: committed}
+	}()
 
 	select {
-	case code := <-done:
-		return code
+	case res := <-done:
+		return res.code, res.committed
 	case <-time.After(30 * time.Second):
 		// Close the master so the pending read fails and the wizard
 		// goroutine can finish, and leave os.Stdin alone: restoring it
@@ -164,7 +172,7 @@ func runWizardInPTY(t *testing.T, c *config.Config, finalInput string) int {
 		restoreStdin = false
 		_ = ptmx.Close()
 		t.Fatal("the wizard did not finish within 30s — it is probably waiting for an answer the script does not supply")
-		return 1
+		return 1, false
 	}
 }
 
