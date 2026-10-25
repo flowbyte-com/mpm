@@ -35,6 +35,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/url"
 	"path/filepath"
 	"sort"
@@ -150,9 +151,18 @@ func CanonicalizeReferenceURL(raw string) (string, error) {
 		port = ""
 	}
 	u.Scheme = scheme
-	u.Host = host
+	// Rebuild the authority. An IPv6 literal must stay bracketed, or the
+	// colon-separated address is parsed as a host/port pair.
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
 	if port != "" {
-		u.Host = host + ":" + port
+		u.Host = net.JoinHostPort(strings.Trim(host, "[]"), port)
+		if strings.Contains(host, ":") {
+			u.Host = host + ":" + port
+		}
+	} else {
+		u.Host = host
 	}
 	u.Fragment = ""
 	u.RawFragment = ""
@@ -183,9 +193,48 @@ func IsURLSource(source string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
+// UnsupportedURLScheme reports whether a source string names a
+// non-http(s) URL scheme, which must be refused rather than treated as a
+// local path.
+//
+// The distinction matters: `file:///etc/passwd` is not a file called
+// "file:///etc/passwd", and silently reporting "file not found" hides the
+// fact that a caller asked for a scheme the fetcher will never support.
+// `http:notes.md` is deliberately NOT reported — a local file may be
+// named that, and only the `//`-authority form or a well-known opaque
+// scheme counts as a URL.
+func UnsupportedURLScheme(source string) (string, bool) {
+	trimmed := strings.TrimSpace(source)
+	i := strings.Index(trimmed, ":")
+	if i <= 0 {
+		return "", false
+	}
+	scheme := strings.ToLower(trimmed[:i])
+	switch scheme {
+	case "http", "https":
+		return "", false
+	}
+	for _, r := range scheme {
+		if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '+' && r != '-' && r != '.' {
+			return "", false
+		}
+	}
+	if strings.HasPrefix(trimmed[i+1:], "//") {
+		return scheme, true
+	}
+	switch scheme {
+	case "file", "data", "javascript", "vbscript", "ftp", "ftps", "gopher", "mailto", "about", "blob", "jar":
+		return scheme, true
+	}
+	return "", false
+}
+
 // ResolveReferenceIdentity classifies a source string and returns its
 // canonical identity. Exactly one of local path / URL is produced.
 func ResolveReferenceIdentity(source string) (SourceIdentity, error) {
+	if scheme, bad := UnsupportedURLScheme(source); bad {
+		return SourceIdentity{}, fmt.Errorf("unsupported URL scheme %q: only http and https are fetched, and non-http(s) schemes are never treated as local paths", scheme)
+	}
 	if IsURLSource(source) {
 		canonical, err := CanonicalizeReferenceURL(source)
 		if err != nil {

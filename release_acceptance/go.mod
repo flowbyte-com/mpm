@@ -15,6 +15,7 @@ require (
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/text v0.35.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 

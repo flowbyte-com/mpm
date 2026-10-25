@@ -770,7 +770,11 @@ var ReferenceTables = []string{
 		requested_url TEXT,
 		fetched_at INTEGER,
 		http_etag TEXT,
-		http_last_modified TEXT
+		http_last_modified TEXT,
+		-- Publisher attribution (JSON: site_name, author, license). Kept
+		-- as metadata so a retrieved chunk can be cited without the
+		-- attribution text polluting the chunk body.
+		attribution TEXT
 	);`,
 
 	// Reference chunks table - stores chunked content of reference documents.
@@ -1480,6 +1484,7 @@ var SafeMigrations = [][3]string{
 	{"reference_docs", "fetched_at", "INTEGER"},
 	{"reference_docs", "http_etag", "TEXT"},
 	{"reference_docs", "http_last_modified", "TEXT"},
+	{"reference_docs", "attribution", "TEXT"},
 	// Explicit, user-supplied external reference URL on an evidence row.
 	// Nullable so every pre-existing row and every pre-existing caller —
 	// none of which supply the field — stays valid. `evidence` is also in the

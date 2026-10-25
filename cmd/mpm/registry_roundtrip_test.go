@@ -358,8 +358,15 @@ func stripVolatile(jsonBytes []byte) []byte {
 // CLI and MCP error messages can be compared directly. The prefix is
 // useful for agents (it tells them WHICH tool failed) but the test
 // cares about the underlying error message, not the prefix.
+//
+// The adapter always puts its prefix FIRST, so the first ": " is the
+// boundary. This used to use LastIndex, which happened to work only while
+// no underlying message contained a colon of its own — an error such as
+// `a source is required: pass "filepath" … or "url" …` silently lost its
+// first half and reported a false CLI/MCP drift. A tool name never
+// contains ": ", so the first occurrence is the correct boundary.
 func stripErrorPrefix(msg string) string {
-	idx := strings.LastIndex(msg, ": ")
+	idx := strings.Index(msg, ": ")
 	if idx < 0 {
 		return msg
 	}

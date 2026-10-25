@@ -35,7 +35,7 @@ const referenceDocColumns = `id, title, file_path, source_type, tags,
 	       content, content_hash, import_reason,
 	       total_chunks, last_indexed, created_at,
 	       source_kind, source_url, requested_url, fetched_at,
-	       http_etag, http_last_modified`
+	       http_etag, http_last_modified, attribution`
 
 func FindReferenceBySourcePath(db *sql.DB, sourcePath string) (*ReferenceDoc, error) {
 	if db == nil {
@@ -77,19 +77,20 @@ func findReferenceDocByID(db *sql.DB, id string) (*ReferenceDoc, error) {
 func scanReferenceDoc(row *sql.Row) (*ReferenceDoc, error) {
 	var doc ReferenceDoc
 	var (
-		tagsJSON  sql.NullString
-		kind      sql.NullString
-		sourceURL sql.NullString
-		reqURL    sql.NullString
-		fetchedAt sql.NullInt64
-		etag      sql.NullString
-		lastMod   sql.NullString
+		tagsJSON    sql.NullString
+		kind        sql.NullString
+		sourceURL   sql.NullString
+		reqURL      sql.NullString
+		fetchedAt   sql.NullInt64
+		etag        sql.NullString
+		lastMod     sql.NullString
+		attribution sql.NullString
 	)
 	err := row.Scan(
 		&doc.ID, &doc.Title, &doc.SourcePath, &doc.SourceType, &tagsJSON,
 		&doc.Content, &doc.ContentHash, &doc.ImportReason,
 		&doc.TotalChunks, &doc.LastIndexed, &doc.Created,
-		&kind, &sourceURL, &reqURL, &fetchedAt, &etag, &lastMod,
+		&kind, &sourceURL, &reqURL, &fetchedAt, &etag, &lastMod, &attribution,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -117,6 +118,9 @@ func scanReferenceDoc(row *sql.Row) (*ReferenceDoc, error) {
 	}
 	if lastMod.Valid {
 		doc.HTTPLastModified = lastMod.String
+	}
+	if attribution.Valid {
+		doc.Attribution = attribution.String
 	}
 	return &doc, nil
 }

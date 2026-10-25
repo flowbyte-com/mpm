@@ -995,7 +995,9 @@ func (dm *DatabaseManager) ListReferences(limit, offset int) ([]map[string]inter
 	if limit <= 0 {
 		limit = 50
 	}
-	query := `SELECT id, title, file_path, source_type, tags, import_reason, total_chunks, last_indexed, created_at FROM reference_docs ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	query := `SELECT id, title, file_path, source_type, tags, import_reason, total_chunks, last_indexed, created_at,
+	                COALESCE(source_kind,''), COALESCE(source_url,''), COALESCE(attribution,'')
+	           FROM reference_docs ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	rows, err := dm.db.Query(query, limit, offset)
 	if err != nil {
 		return nil, err
@@ -1005,14 +1007,23 @@ func (dm *DatabaseManager) ListReferences(limit, offset int) ([]map[string]inter
 	refs := []map[string]interface{}{}
 	for rows.Next() {
 		var id, title, filePath, sourceType, tags, importReason, lastIndexed, createdAt string
+		var sourceKind, sourceURL, attribution string
 		var totalChunks int
-		if err := rows.Scan(&id, &title, &filePath, &sourceType, &tags, &importReason, &totalChunks, &lastIndexed, &createdAt); err != nil {
+		if err := rows.Scan(&id, &title, &filePath, &sourceType, &tags, &importReason, &totalChunks, &lastIndexed, &createdAt,
+			&sourceKind, &sourceURL, &attribution); err != nil {
 			return nil, fmt.Errorf("scanning reference list row: %w", err)
+		}
+		if sourceKind == "" {
+			sourceKind = ReferenceSourceFile
 		}
 		refs = append(refs, map[string]interface{}{
 			"id":            id,
 			"title":         title,
 			"file_path":     filePath,
+			"source_path":   filePath,
+			"source_kind":   sourceKind,
+			"source_url":    sourceURL,
+			"attribution":   attribution,
 			"source_type":   sourceType,
 			"tags":          tags,
 			"import_reason": importReason,
@@ -1033,19 +1044,32 @@ func (dm *DatabaseManager) ListReferences(limit, offset int) ([]map[string]inter
 // GetReference returns a reference document with its chunks
 func (dm *DatabaseManager) GetReference(refID string) (map[string]interface{}, error) {
 	var id, title, filePath, sourceType, tags, lastIndexed, createdAt, importReason string
+	var sourceKind, sourceURL, requestedURL, etag, lastModified, attribution string
+	var fetchedAt sql.NullInt64
 	var totalChunks int
 	err := dm.db.QueryRow(`
-		SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at, import_reason
+		SELECT id, title, file_path, source_type, tags, total_chunks, last_indexed, created_at, import_reason,
+		       COALESCE(source_kind,''), COALESCE(source_url,''), COALESCE(requested_url,''),
+		       fetched_at, COALESCE(http_etag,''), COALESCE(http_last_modified,''), COALESCE(attribution,'')
 		FROM reference_docs WHERE id = ?
-	`, refID).Scan(&id, &title, &filePath, &sourceType, &tags, &totalChunks, &lastIndexed, &createdAt, &importReason)
+	`, refID).Scan(&id, &title, &filePath, &sourceType, &tags, &totalChunks, &lastIndexed, &createdAt, &importReason,
+		&sourceKind, &sourceURL, &requestedURL, &fetchedAt, &etag, &lastModified, &attribution)
 	if err != nil {
 		return nil, err
+	}
+	if sourceKind == "" {
+		sourceKind = ReferenceSourceFile
 	}
 
 	ref := map[string]interface{}{
 		"id":            id,
 		"title":         title,
 		"file_path":     filePath,
+		"source_path":   filePath,
+		"source_kind":   sourceKind,
+		"source_url":    sourceURL,
+		"requested_url": requestedURL,
+		"attribution":   attribution,
 		"source_type":   sourceType,
 		"tags":          tags,
 		"import_reason": importReason,
@@ -1055,6 +1079,15 @@ func (dm *DatabaseManager) GetReference(refID string) (map[string]interface{}, e
 		// Freshness: derived from existing fields (no schema change).
 		// See internal/core/reference_freshness.go + protocol §8.
 		"freshness": string(ClassifyReferenceFreshnessFromFields(tags, importReason, lastIndexed, time.Now())),
+	}
+	if fetchedAt.Valid {
+		ref["fetched_at"] = fetchedAt.Int64
+	}
+	if etag != "" {
+		ref["http_etag"] = etag
+	}
+	if lastModified != "" {
+		ref["http_last_modified"] = lastModified
 	}
 
 	// Get chunks

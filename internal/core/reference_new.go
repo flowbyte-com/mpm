@@ -66,6 +66,10 @@ type ReferenceDoc struct {
 	// re-downloading the body. Empty when the server sent none.
 	HTTPETag         string `json:"http_etag,omitempty"`
 	HTTPLastModified string `json:"http_last_modified,omitempty"`
+	// Attribution is publisher identity as a JSON object with the keys
+	// site_name, author and license that the source actually provided.
+	// Empty when the document advertised none.
+	Attribution string `json:"attribution,omitempty"`
 }
 
 // ReferenceChunk represents a chunk of a reference document

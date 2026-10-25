@@ -139,7 +139,7 @@ func ExtractHTMLDocument(r io.Reader, baseURL *url.URL) (*ExtractedDocument, err
 
 	var b strings.Builder
 	renderNode(&b, main, baseURL, 0)
-	doc.Body = normaliseMarkdown(b.String())
+	doc.Body = normaliseMarkdown(sanitizeReferenceText(b.String()))
 	doc.Notes = notes
 
 	if strings.TrimSpace(doc.Body) == "" {

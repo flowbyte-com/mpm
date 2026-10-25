@@ -122,6 +122,17 @@ type ReferenceHybridResult struct {
 	CombinedScore    float64 // diagnostic: weighted blend, NOT used for sort
 	RelevanceScore   float64 // the comparable relevance used for the final sort
 	Source           string  // "fts5" | "vector" | "hybrid"
+
+	// SourcePath is the document's canonical source — an absolute path for
+	// a local file, the effective URL for a fetched page. Returned with
+	// every hit so a caller can cite what it retrieved without a second
+	// round-trip, and so attribution does not have to be prepended to the
+	// chunk body.
+	SourcePath string
+	// SourceKind is "file" or "url".
+	SourceKind string
+	// SourceType is the parsed document format ("markdown", "html", …).
+	SourceType string
 }
 
 // ReferenceHybridSearch runs hybrid lexical + semantic retrieval over
@@ -291,6 +302,65 @@ func referenceSearchFTS5(db *sql.DB, query string, limit int) ([]referenceFTSToM
 	if ftsQuery == "" {
 		return nil, nil
 	}
+	hits, err := referenceSearchFTS5Match(db, ftsQuery, ftsQuery, limit)
+	if err != nil || len(hits) > 0 {
+		return hits, err
+	}
+	// Strict all-token AND matched nothing. A prose question usually
+	// contains at least one word the document does not, and an empty
+	// result set is indistinguishable from "not in the corpus" to the
+	// caller.
+	//
+	// Relaxation is deliberately conditional. An identifier lookup
+	// ("edit_theme_options") must keep meaning "all of these tokens are
+	// present": a document that merely mentions "theme" and "options"
+	// separately is not the document about that symbol, and widening it
+	// would defeat the tag/exact-symbol contract. A prose question is a
+	// different shape, and it is the shape that produced the observed
+	// empty result. See referenceRelaxedFTSQuery.
+	relaxed := referenceRelaxedFTSQuery(query)
+	if relaxed == "" || relaxed == ftsQuery {
+		return hits, nil
+	}
+	return referenceSearchFTS5Match(db, relaxed, ftsQuery, limit)
+}
+
+// referenceRelaxedFTSQuery returns an OR expression for a prose query, or
+// "" when the query should not be relaxed.
+//
+// When it does relax, the English function words are dropped from the OR:
+// they carry no retrieval signal themselves, and leaving them in would let
+// "the"/"a"/"is" match arbitrary chunks.
+func referenceRelaxedFTSQuery(query string) string {
+	tokens := ftsTokenize(query)
+	if len(tokens) < 3 {
+		return ""
+	}
+	var content []string
+	sawMarker := false
+	for _, tok := range tokens {
+		lower := strings.ToLower(tok)
+		if ftsProseMarkers[lower] {
+			sawMarker = true
+			continue
+		}
+		content = append(content, tok)
+	}
+	if !sawMarker || len(content) == 0 {
+		return ""
+	}
+	parts := make([]string, len(content))
+	for i, tok := range content {
+		parts[i] = tok + "*"
+	}
+	return strings.Join(parts, " OR ")
+}
+
+// referenceSearchFTS5Match runs the FTS5 legs with the given match
+// expressions. chunkMatch drives chunk-level retrieval; tagMatch drives
+// the doc-level tag boost.
+func referenceSearchFTS5Match(db *sql.DB, chunkMatch, tagMatchBase string, limit int) ([]referenceFTSToMerge, error) {
+	ftsQuery := chunkMatch
 
 	// docLevelBaseBoost is the flat negative offset added to
 	// every doc-level tag MATCH score. The MATCH expression
@@ -320,7 +390,7 @@ func referenceSearchFTS5(db *sql.DB, query string, limit int) ([]referenceFTSToM
 	// MATCH syntax is "column:term"; we prefix the ftsQuery
 	// (which is "edit* theme* options*"-style) with "tags:" so
 	// only docs whose tags include any query token fire.
-	tagMatch := "tags:" + ftsQuery
+	tagMatch := "tags:" + tagMatchBase
 
 	rows, err := db.Query(`
 		WITH chunk_scores AS (
@@ -582,9 +652,10 @@ func mergeReferenceResults(db *sql.DB, fts []referenceFTSToMerge, vec []referenc
 	}
 	sort.Strings(allIDs)
 
-	// DocTitle is missing for vector-only candidates. Batch-fetch
-	// it in a single query so the merge doesn't regress to N+1.
-	titles := batchFetchReferenceDocTitles(db, ftsByID, vecByID)
+	// DocTitle is missing for vector-only candidates. Batch-fetch the
+	// document metadata (title + canonical source) in a single query so
+	// the merge doesn't regress to N+1 and every hit carries provenance.
+	metas := batchFetchReferenceDocMeta(db, ftsByID, vecByID)
 
 	out := make([]ReferenceHybridResult, 0, len(all))
 	for _, id := range allIDs {
@@ -624,13 +695,17 @@ func mergeReferenceResults(db *sql.DB, fts []referenceFTSToMerge, vec []referenc
 			chunkIndex = veci.ChunkIndex
 			section = veci.Section
 			content = veci.Content
-			docTitle = titles[veci.DocID]
+			docTitle = metas[veci.DocID].Title
 			vecSim = veci.Similarity
 			// Vector-only: weighted by VectorWeight so a pure
 			// semantic hit scales to the same range as a hybrid
 			// hit.
 			combined = vecSim * vecWeight
 			source = "vector"
+		}
+		meta := metas[docID]
+		if docTitle == "" {
+			docTitle = meta.Title
 		}
 		out = append(out, ReferenceHybridResult{
 			ID:               id,
@@ -644,7 +719,83 @@ func mergeReferenceResults(db *sql.DB, fts []referenceFTSToMerge, vec []referenc
 			CombinedScore:    combined,
 			RelevanceScore:   relevanceScore(ftsScore, vecSim),
 			Source:           source,
+			SourcePath:       meta.SourcePath,
+			SourceKind:       meta.SourceKind,
+			SourceType:       meta.SourceType,
 		})
+	}
+	return out
+}
+
+// referenceDocMeta is the document-level metadata every search hit
+// carries: the title plus the canonical source, so a retrieved chunk can
+// be cited without a second query.
+type referenceDocMeta struct {
+	Title      string
+	SourcePath string
+	SourceKind string
+	SourceType string
+}
+
+// batchFetchReferenceDocMeta fetches the metadata for every document
+// referenced by the FTS or vector candidates in a single query.
+//
+// db may be nil — the test suite constructs synthetic result sets without
+// a connection, and an empty map simply leaves the provenance fields
+// blank, which the renderers tolerate.
+func batchFetchReferenceDocMeta(db *sql.DB, ftsByID map[string]referenceFTSToMerge, vecByID map[string]referenceVecHit) map[string]referenceDocMeta {
+	out := make(map[string]referenceDocMeta)
+	if db == nil {
+		return out
+	}
+	wanted := make(map[string]bool)
+	for _, h := range ftsByID {
+		if h.DocID != "" {
+			wanted[h.DocID] = true
+		}
+	}
+	for _, h := range vecByID {
+		if h.DocID != "" {
+			wanted[h.DocID] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return out
+	}
+	ids := make([]string, 0, len(wanted))
+	for id := range wanted {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	// No injection vector: ids come from the database, and the statement
+	// is parameterised regardless.
+	rows, err := db.Query(
+		`SELECT id, title, COALESCE(file_path,''), COALESCE(source_kind,''), COALESCE(source_type,'')
+		   FROM reference_docs WHERE id IN (`+strings.Join(placeholders, ",")+`)`,
+		args...,
+	)
+	if err != nil {
+		slog.Warn("batchFetchReferenceDocMeta: query failed", "err", err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var meta referenceDocMeta
+		if err := rows.Scan(&id, &meta.Title, &meta.SourcePath, &meta.SourceKind, &meta.SourceType); err != nil {
+			slog.Warn("batchFetchReferenceDocMeta: scan failed", "err", err)
+			continue
+		}
+		if meta.SourceKind == "" {
+			meta.SourceKind = ReferenceSourceFile
+		}
+		out[id] = meta
 	}
 	return out
 }

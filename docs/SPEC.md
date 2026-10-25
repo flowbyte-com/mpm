@@ -266,7 +266,7 @@ All seven default operational surfaces exclude archived work: `mpm wake` open wo
 
 #### Reference
 
-External material ingested for the agent to consult — documentation, specs, articles, code. Reference artifacts are distinct from Memory: Memory is what the agent synthesises internally; Reference is what the agent can look up. References are ingested from a local file path, stored with their section markers and ingestion timestamp, and searchable via the same FTS5 index as memories. Identity is canonical: one source is one document regardless of the path spelling used to name it (§7.6). MPM does not fetch URLs: `mpm reference add --url` is a reserved, explicitly-rejected stub. When an ingested document needs a durable pointer back to where it came from, that pointer is an `evidence` row carrying a `reference_url` (§4.2).
+External material ingested for the agent to consult — documentation, specs, articles, code. Reference artifacts are distinct from Memory: Memory is what the agent synthesises internally; Reference is what the agent can look up. References are ingested from a local file path, stored with their section markers and ingestion timestamp, and searchable via the same FTS5 index as memories. Identity is canonical: one source is one document regardless of the path spelling used to name it (§7.6). References are ingested from a local path or an http(s) URL; URL retrieval is a guarded fetch (SSRF-boundary checks, bounded size/time/redirects, no credential forwarding) documented in §7.6. When an ingested document needs a durable pointer back to where it came from, the reference row itself carries `source_url` / `requested_url`, and an `evidence` row can additionally carry a `reference_url` (§4.2).
 
 #### Lesson
 
@@ -2289,7 +2289,9 @@ mpm kb session shred <id>
 
 # Reference library (PDF, EPUB, MD, TXT, HTML)
 mpm kb reference add <file> [--tag tag1,tag2] [--reason "..."] [--chunk-size 512]
+mpm kb reference add <https://…>       # fetch a documentation page (SSRF-guarded)
                                        # idempotent: same source → same document
+mpm kb reference import <manifest.json|-> [--json]   # batch; per-document status [--json]   # batch; per-document status
 mpm kb reference duplicates [--json]   # read-only: same-source groups + repair plan
 mpm kb reference ls
 mpm kb reference search <query>
@@ -3278,6 +3280,24 @@ PDF, EPUB, HTML, Markdown ingestion with token-aware chunking (`--chunk-size`, 6
 | Local file | absolute, `.`/`..`-cleaned path with symlinks resolved |
 | URL | normalized URL (lowercased scheme/host, default port and fragment dropped; query and path preserved) |
 
+**URL ingestion.** `mpm reference add <https://…>` (or `--url <…>`) fetches the page, extracts it, and stores it through the same pipeline as a local file. The URL may be supplied by an autonomous agent, so retrieval is a security boundary before it is a convenience:
+
+| Control | Enforcement |
+| --- | --- |
+| Scheme allowlist (http, https) | URL parse + every redirect hop; `file:`, `data:`, `javascript:` and friends are refused, never treated as paths |
+| Forbidden destinations (loopback, private, link-local/metadata, CGNAT, multicast, reserved, IPv4-mapped) | `net.Dialer.Control` — i.e. on the **resolved address immediately before connect**, not on the string |
+| Redirect into a forbidden destination | the same dial check runs per hop; https→http downgrades are refused |
+| Credentials in the URL | rejected at parse time and never stored |
+| Credentials to a peer | never sent; a cross-origin redirect does not carry them |
+| TLS verification | never disabled |
+| Download size | 16 MiB ceiling on the **decompressed** body, then a clear error |
+| Time / redirects | 20 s per fetch, 5 hops |
+| Content type | allowlist (HTML/XHTML, Markdown, plain text, JSON); anything else is refused with the type named |
+
+Because the destination check runs after DNS resolution on the socket address, an IP literal, a hostname that resolves to `169.254.169.254`, an IPv4-mapped IPv6 form and a rebinding answer are all judged by the address actually dialled. Tests exercise this through a loopback seam that is unexported and unavailable to production callers.
+
+Markdown is requested via `Accept: text/markdown` and preferred when the publisher sends it; HTML is extracted structurally. HTTP provenance is stored on the document: effective `source_url`, `requested_url` (differs under redirect), `fetched_at`, `ETag` and `Last-Modified`. Those validators make a re-import a conditional request: a `304 Not Modified` keeps the stored document, its chunks and its embeddings untouched, and reports `unchanged`. Publishers that send no validators still converge by content hash.
+
 Consequences, all deliberate:
 
 - `menus.md`, `docs/menus.md`, `./docs/../docs/menus.md` and `/corpus/docs/menus.md` name one document. Before this rule each spelling created a separate document with its own chunks, and retrieval competed against its own copies.
@@ -3288,6 +3308,30 @@ Consequences, all deliberate:
 **Outcomes.** Every ingest reports one of `imported`, `updated`, `unchanged` or `duplicate`, plus the chunk diff (`chunks_added`/`updated`/`reused`/`removed`), the embedding state (`embedded`, `pending_embeddings`), and separate `lexical_searchable` / `semantic_searchable` claims. `unchanged` writes no chunk rows, so chunk ids and vectors survive a re-import. `duplicate` means several existing documents already resolve to that source: nothing is written, the ids are returned, and the repair is an operator decision.
 
 **Legacy rows.** Documents written before identity canonicalization keep their stored path, and a re-import recognises them by resolving the stored value against the ancestors of the imported file (and by URL canonicalization). A recognised legacy row is upgraded to its canonical path in place on that write. Existing duplicates are **not** merged automatically: `mpm reference duplicates` prints the groups, their confidence (`certain` when canonical paths agree, `probable` when a legacy relative path could only be matched by suffix), a suggested survivor and an explicit repair plan. Deleting the copies you do not want and re-importing is the supported repair; nothing is ever removed for you.
+
+**Batch ingestion.** `mpm reference import <manifest.json|->` (and MCP `mpm_references action=import`) takes a list and reports each document separately:
+
+```json
+{"documents": [
+  {"url": "https://developer.wordpress.org/reference/functions/wp_nav_menu/", "tags": ["wordpress", "menus"], "reason": "AgentShell development"},
+  {"path": "./vendor/turnstile.md", "tags": ["cloudflare-turnstile"]}
+]}
+```
+
+Local paths and URLs may be mixed. Each entry reports `imported` / `updated` / `unchanged` / `duplicate` / `failed` with its own error, and the batch's `ok` is false if anything failed or was ambiguous — a partial import is never reported as success. Processing is sequential (bounded to one fetch and one write at a time, no background system). Re-running the same manifest is the retry path: unchanged documents write nothing, so a corpus that failed in the middle resumes without duplicating the part that worked.
+
+**Discovery.** The agent-facing contract is one tool (`mpm_references`) with the decision rule stated in its own description:
+
+| Need | Action |
+| --- | --- |
+| existing source material | `search` → `read` |
+| new source material (one) | `add` with `filepath` **or** `url` |
+| new source material (many) | `import` with `documents` |
+| what is in the corpus | `list` |
+
+`mpm_help action=show tool=mpm_references` returns that tool's registered schema, and the CLI prints the same vocabulary from `mpm reference help`. An unknown action names both the valid actions and that discovery call, so an agent that guesses (`help`, `fetch`, `ingest`) is redirected instead of dead-ended.
+
+A search hit carries `doc_title`, `section`, `source_path` (absolute path or effective URL), `source_kind`, `chunk_id` and `doc_id`, so a citation does not require a second call; `read` returns the stored document with its provenance and attribution.
 
 **Structure and provenance.** Markdown chunks carry the heading path they live under (`Parameters › args`), so a retrieved chunk can be cited by section. HTML is extracted structurally — headings, fenced code with language hints, tables, callouts and absolute links retained; navigation, cookie banners, sidebars and footers removed — and the extraction notes disclose anything that was dropped or guessed. A leading front-matter block that would dominate the first chunk is removed and reported. Publisher attribution (`og:site_name`, author, licence) is kept as document metadata rather than prepended to chunk text.
 

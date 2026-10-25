@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -2228,15 +2229,154 @@ func handleShowTopic(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	}, nil
 }
 
-// callAddReference ingests a document as a reference.
+// handleAddReference ingests one document — a local file or an http(s)
+// URL — through the shared ingestion pipeline.
+//
+// Source selection is explicit: `filepath`, `url` and `source` all name a
+// source, and supplying more than one distinct value is an error rather
+// than a silent precedence rule. The CLI has the same rule, because both
+// surfaces call the same pipeline.
 func handleAddReference(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	filepath, _ := p["filepath"].(string)
-	if filepath == "" {
-		return nil, fmt.Errorf("filepath is required")
+	source, err := referenceSourceFromParams(p)
+	if err != nil {
+		return nil, err
 	}
-	title := internal.ParseStringOr(p["title"], "")
+	concrete, ok := dm.(*mpminternal.DatabaseManager)
+	if !ok {
+		// The pipeline writes through DatabaseManager (identity lookup,
+		// chunk diff, embedding pass). A non-DM CoreDB implementation
+		// cannot participate, and pretending otherwise would silently
+		// create duplicates.
+		return nil, fmt.Errorf("reference ingestion requires the SQLite substrate")
+	}
+	res, err := concrete.IngestReference(context.Background(), mpminternal.ReferenceIngestRequest{
+		Source:    source,
+		Title:     internal.ParseStringOr(p["title"], ""),
+		Tags:      internal.ParseStringSliceOr(p["tags"]),
+		Reason:    internal.ParseStringOr(p["reason"], ""),
+		ChunkSize: int(internal.ParseFloatOr(p["chunk_size"], 0)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return referenceIngestEnvelope(res), nil
+}
 
-	return dm.AddReferenceFromFile(filepath, title)
+// referenceSourceFromParams extracts the single source to ingest.
+func referenceSourceFromParams(p map[string]interface{}) (string, error) {
+	filepath := strings.TrimSpace(internal.ParseStringOr(p["filepath"], ""))
+	rawURL := strings.TrimSpace(internal.ParseStringOr(p["url"], ""))
+	source := strings.TrimSpace(internal.ParseStringOr(p["source"], ""))
+	set := map[string]bool{}
+	for _, v := range []string{filepath, rawURL, source} {
+		if v != "" {
+			set[v] = true
+		}
+	}
+	if len(set) == 0 {
+		return "", fmt.Errorf("a source is required: pass \"filepath\" for a local document or \"url\" for an http(s) page")
+	}
+	if len(set) > 1 {
+		return "", fmt.Errorf("conflicting sources: pass exactly one of \"filepath\" or \"url\"")
+	}
+	for v := range set {
+		return v, nil
+	}
+	return "", fmt.Errorf("a source is required")
+}
+
+// referenceIngestEnvelope is the wire shape for one ingestion.
+//
+// `status` is the field callers must branch on: `success` alone cannot
+// distinguish a first import from a no-op re-import or from a source that
+// already exists as several documents.
+func referenceIngestEnvelope(res *mpminternal.ReferenceIngestResult) map[string]interface{} {
+	if res == nil {
+		return map[string]interface{}{"success": false}
+	}
+	out := map[string]interface{}{
+		"success":             res.Status != mpminternal.ReferenceStatusDuplicate,
+		"status":              res.Status,
+		"id":                  res.ID,
+		"title":               res.Title,
+		"source":              res.Source,
+		"source_kind":         res.SourceKind,
+		"source_type":         res.SourceType,
+		"requested_source":    res.RequestedSource,
+		"total_chunks":        res.TotalChunks,
+		"chunks_added":        res.ChunksAdded,
+		"chunks_updated":      res.ChunksUpdated,
+		"chunks_reused":       res.ChunksReused,
+		"chunks_removed":      res.ChunksRemoved,
+		"embedded":            res.Embedded,
+		"pending_embeddings":  res.PendingEmbeddings,
+		"lexical_searchable":  res.LexicalSearchable,
+		"semantic_searchable": res.SemanticSearchable,
+	}
+	if len(res.DuplicateIDs) > 0 {
+		out["duplicate_ids"] = res.DuplicateIDs
+	}
+	if len(res.Warnings) > 0 {
+		out["warnings"] = res.Warnings
+	}
+	if len(res.ExtractionNotes) > 0 {
+		out["extraction_notes"] = res.ExtractionNotes
+	}
+	return out
+}
+
+// handleImportReferences ingests a corpus from an inline document list or
+// a manifest file.
+func handleImportReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	concrete, ok := dm.(*mpminternal.DatabaseManager)
+	if !ok {
+		return nil, fmt.Errorf("reference ingestion requires the SQLite substrate")
+	}
+	var manifest *mpminternal.ReferenceManifest
+	switch {
+	case p["documents"] != nil:
+		raw, err := json.Marshal(p["documents"])
+		if err != nil {
+			return nil, fmt.Errorf("encode documents: %w", err)
+		}
+		manifest, err = mpminternal.ParseReferenceManifest(raw)
+		if err != nil {
+			// ParseReferenceManifest expects {"documents": [...]}; retry with
+			// the wrapper so an inline array is accepted too.
+			wrapped, wrapErr := mpminternal.ParseReferenceManifest([]byte(`{"documents":` + string(raw) + `}`))
+			if wrapErr != nil {
+				return nil, err
+			}
+			manifest = wrapped
+		}
+	case strings.TrimSpace(internal.ParseStringOr(p["manifest"], "")) != "":
+		path := internal.ParseStringOr(p["manifest"], "")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read manifest %q: %w", path, err)
+		}
+		manifest, err = mpminternal.ParseReferenceManifest(data)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("documents is required: pass \"documents\": [{\"path\"|\"url\": ...}] or \"manifest\": \"<path>\"")
+	}
+	res, err := concrete.IngestReferenceManifest(context.Background(), manifest)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success":   res.OK,
+		"ok":        res.OK,
+		"total":     res.Total,
+		"imported":  res.Imported,
+		"updated":   res.Updated,
+		"unchanged": res.Unchanged,
+		"duplicate": res.Duplicate,
+		"failed":    res.Failed,
+		"documents": res.Documents,
+	}, nil
 }
 
 // callSearchReferences searches reference content using the hybrid
@@ -2301,14 +2441,22 @@ func handleSearchReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 	}
 	items := make([]map[string]interface{}, 0, len(results))
 	for _, r := range results {
+		// Provenance travels with the hit: `source_path` is the canonical
+		// file path or effective URL, and `source_kind` says which. An agent
+		// citing a retrieved chunk should not have to issue a second call to
+		// learn where the chunk came from.
 		items = append(items, map[string]interface{}{
 			"id":                r.ID,
+			"chunk_id":          r.ID,
 			"doc_id":            r.DocID,
 			"doc_title":         r.DocTitle,
 			"chunk_index":       r.ChunkIndex,
 			"section":           r.Section,
 			"content":           r.Content,
 			"source":            r.Source,
+			"source_path":       r.SourcePath,
+			"source_kind":       r.SourceKind,
+			"source_type":       r.SourceType,
 			"fts5_score":        r.FTS5Score,
 			"vector_similarity": r.VectorSimilarity,
 			"combined_score":    r.CombinedScore,
@@ -6523,6 +6671,8 @@ func handleMpmReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, pa
 	switch action {
 	case "add":
 		return handleAddReference(dm, ac, params)
+	case "import":
+		return handleImportReferences(dm, ac, params)
 	case "read":
 		// W-004: parity with mpm_memory/mpm_lessons/mpm_decisions.
 		// Closes the gap where the only way to read a reference was
@@ -6533,7 +6683,13 @@ func handleMpmReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, pa
 	case "list":
 		return handleListReferences(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_references. Valid actions include add, read, search, list", action)
+		// The help pointer comes BEFORE the action list: the parity guard
+		// parses everything after "Valid actions include " up to the next
+		// quote and splits on commas, so any comma-separated prose after
+		// the list would be read as an action.
+		return nil, fmt.Errorf("unknown action %q for mpm_references. "+
+			"Call mpm_help with action=show and tool=mpm_references for the full schema and examples. "+
+			"Valid actions include add, import, read, search, list", action)
 	}
 }
 
