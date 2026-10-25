@@ -430,18 +430,14 @@ func TestAcceptance_C_LargeMemory_BoundedByDefault_FullOnDemand(t *testing.T) {
 		t.Fatalf("full resolve returned %d bytes; expected %d (complete content)", len(fullContent), len(bigContent))
 	}
 
-	// E. shred owner cleans up storage
-	shredResp, err := handleMpmMemory(dm, mpminternal.ActiveContext{}, map[string]interface{}{
-		"action": "shred",
-		"params": map[string]interface{}{
-			"id": memID,
-		},
-	})
-	if err != nil {
+	// E. shred owner cleans up storage.
+	//
+	// This test exercises resolve's pointer lifecycle, not the agent
+	// shred surface: permanent deletion is operator-only (see
+	// operatorOnlyShredError), so the cleanup goes through the
+	// DatabaseManager primitive the CLI verb uses.
+	if _, err := dm.ShredMemoryWithCascade(memID); err != nil {
 		t.Fatalf("shred: %v", err)
-	}
-	if s, _ := shredResp.(map[string]interface{}); s == nil {
-		t.Fatalf("shred returned nil response")
 	}
 
 	// resolve after shred must fail

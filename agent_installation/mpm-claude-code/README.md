@@ -278,9 +278,9 @@ live `mpm-mcp` binary. Tests:
 | J — Shared substrate | The DB the agent uses is the same inode as the canonical DB |
 | K — SessionStart hook | `~/.claude/hooks/mpm-session-start` exists, is executable, and emits a valid `hookSpecificOutput.additionalContext` envelope on stdout |
 
-Cleanup is automatic: probe memories and the test handoff are removed via
-the supported `mpm_memory shred` and `mpm_handoff(action: "shred")`
-interfaces.
+Cleanup is automatic: probe memories are soft-deleted via the supported
+`mpm_memory delete` action (permanent shredding is operator-only on the
+CLI) and the test handoff is removed via `mpm_handoff(action: "shred")`.
 
 ## Limitations
 

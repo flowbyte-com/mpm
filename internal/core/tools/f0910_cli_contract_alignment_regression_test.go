@@ -270,7 +270,9 @@ func TestF0910_LessonsDelete_Added(t *testing.T) {
 		t.Errorf("lessons delete failed: %v", err)
 	}
 
-	// Re-seed and use 'shred' (alias).
+	// Re-seed and confirm the 'shred' alias is now refused as
+	// operator-only (the alias still resolves; the action is gated).
+	// The lesson must survive.
 	out2, _, err := dm.SaveLesson("f0910-test lesson body 2", "insight", nil)
 	if err != nil {
 		t.Fatalf("seed 2: %v", err)
@@ -279,8 +281,13 @@ func TestF0910_LessonsDelete_Added(t *testing.T) {
 	if _, err := handleMpmLessons(dm, ac, map[string]interface{}{
 		"action": "shred",
 		"params": map[string]interface{}{"id": id2},
-	}); err != nil {
-		t.Errorf("lessons shred alias failed: %v", err)
+	}); err == nil {
+		t.Error("lessons shred must be refused from the agent surface")
+	} else if !strings.Contains(err.Error(), "operator-only") {
+		t.Errorf("expected the operator-only refusal, got: %v", err)
+	}
+	if _, err := dm.GetLesson(id2); err != nil {
+		t.Errorf("lesson must survive a refused shred: %v", err)
 	}
 
 	// Missing id must error.
@@ -291,16 +298,19 @@ func TestF0910_LessonsDelete_Added(t *testing.T) {
 		t.Error("delete without id must error")
 	}
 
-	// Unknown action must error AND mention the new valid set
-	// including delete and shred.
+	// Unknown action must error AND mention the advertised set.
+	// shred is operator-only, so it must NOT be advertised.
 	_, err = handleMpmLessons(dm, ac, map[string]interface{}{"action": "bogus"})
 	if err == nil {
 		t.Fatal("lessons bogus action must error")
 	}
-	for _, want := range []string{"delete", "shred"} {
+	for _, want := range []string{"delete", "restore"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("lessons unknown-action error must list %q, got: %v", want, err)
 		}
+	}
+	if strings.Contains(err.Error(), "shred") {
+		t.Errorf("lessons unknown-action error must not advertise shred, got: %v", err)
 	}
 }
 

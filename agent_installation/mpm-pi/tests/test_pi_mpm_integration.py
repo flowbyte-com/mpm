@@ -740,7 +740,7 @@ class TestLiveIntegration(unittest.TestCase):
         self.addCleanup(
             self._mpm_call,
             "mpm_memory",
-            {"action": "shred", "params": {"memory_id": memory_id}},
+            {"action": "delete", "params": {"memory_id": memory_id}},
             "pi",
         )
         # Inspect provenance via mpm provenance CLI.

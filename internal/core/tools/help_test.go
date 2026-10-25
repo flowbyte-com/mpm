@@ -378,7 +378,7 @@ func TestHelp_ShowSchemaCarriesActionEnumRequiredAndNestedProperties(t *testing.
 
 	// 1. The action enum — the action vocabulary the dispatcher accepts.
 	actions := helpActionEnum(got)
-	for _, want := range []string{"save", "query", "show", "shred", "reinforce"} {
+	for _, want := range []string{"save", "query", "show", "delete", "reinforce"} {
 		if !helpContains(actions, want) {
 			t.Errorf("action enum %v is missing %q", actions, want)
 		}
