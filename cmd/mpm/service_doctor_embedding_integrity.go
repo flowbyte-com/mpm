@@ -261,7 +261,8 @@ func collectEmbeddingIntegrity(s *DoctorService) (embeddingIntegrityResult, erro
 				var model string
 				var n int
 				if err := rows.Scan(&model, &n); err != nil {
-					continue
+					rows.Close()
+					return res, fmt.Errorf("scan embedding-model counts: %w", err)
 				}
 				switch {
 				case strings.TrimSpace(model) == "":
