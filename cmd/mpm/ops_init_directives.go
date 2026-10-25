@@ -90,15 +90,24 @@ func printSeedReport(banner string, s seed.SeedSummary, label string) {
 		fmt.Println("     To re-sync, delete the local row and re-run.)")
 	}
 
-	total := len(s.Created) + len(s.Skipped) + len(s.Updated)
+	if len(s.Revived) > 0 {
+		fmt.Printf("\n  ↻ Revived (%d) — restored from a soft-deleted state, local content preserved:\n", len(s.Revived))
+		for _, id := range s.Revived {
+			fmt.Printf("    ↻ %s\n", id)
+		}
+		fmt.Println("    (The local edit survived the restore and the entry is live again.")
+		fmt.Println("     To re-sync with the shipped baseline, delete the local row and re-run.)")
+	}
+
+	total := len(s.Created) + len(s.Skipped) + len(s.Updated) + len(s.Revived)
 	if total == 0 {
 		fmt.Printf("\n  No entries in registry. (Empty seed.%s slice.)\n", label)
 	} else {
-		fmt.Printf("\n  %d total: %d created, %d skipped, %d drifted.\n",
-			total, len(s.Created), len(s.Skipped), len(s.Updated))
+		fmt.Printf("\n  %d total: %d created, %d skipped, %d drifted, %d revived.\n",
+			total, len(s.Created), len(s.Skipped), len(s.Updated), len(s.Revived))
 	}
 
-	if len(s.Created) > 0 {
+	if len(s.Created) > 0 || len(s.Revived) > 0 {
 		switch label {
 		case "directives":
 			fmt.Println("\nThese directives are now active. The agent will read them on")
