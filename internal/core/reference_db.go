@@ -97,8 +97,8 @@ func (dm *DatabaseManager) applyReference(doc *ReferenceDoc, chunks []ReferenceC
 			(id, title, file_path, source_type, tags, content, content_hash,
 			 import_reason, total_chunks, last_indexed, created_at,
 			 source_kind, source_url, requested_url, fetched_at,
-			 http_etag, http_last_modified)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 http_etag, http_last_modified, attribution)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 				title = excluded.title,
 				file_path = excluded.file_path,
@@ -114,13 +114,14 @@ func (dm *DatabaseManager) applyReference(doc *ReferenceDoc, chunks []ReferenceC
 				requested_url = COALESCE(NULLIF(excluded.requested_url,''), reference_docs.requested_url),
 				fetched_at = COALESCE(NULLIF(excluded.fetched_at,0), reference_docs.fetched_at),
 				http_etag = COALESCE(NULLIF(excluded.http_etag,''), reference_docs.http_etag),
-				http_last_modified = COALESCE(NULLIF(excluded.http_last_modified,''), reference_docs.http_last_modified)
+				http_last_modified = COALESCE(NULLIF(excluded.http_last_modified,''), reference_docs.http_last_modified),
+				attribution = COALESCE(NULLIF(excluded.attribution,''), reference_docs.attribution)
 		`, 0,
 			doc.ID, doc.Title, doc.SourcePath, doc.SourceType, tagsJSON,
 			doc.Content, doc.ContentHash, doc.ImportReason,
 			doc.TotalChunks, doc.LastIndexed, doc.Created,
 			doc.SourceKind, doc.SourceURL, doc.RequestedURL, doc.FetchedAt,
-			doc.HTTPETag, doc.HTTPLastModified,
+			doc.HTTPETag, doc.HTTPLastModified, doc.Attribution,
 		)
 		if err != nil {
 			return fmt.Errorf("add reference %q: %w", doc.ID, err)

@@ -223,9 +223,16 @@ func (dm *DatabaseManager) IngestReference(ctx context.Context, req ReferenceIng
 		return nil, fmt.Errorf("chunk size must be between 64 and 2048 tokens (got %d)", req.ChunkSize)
 	}
 
-	// Acquire the text before touching the database: a failed download or
-	// a missing file must not leave a document row behind.
-	acquired, err := dm.acquireReferenceContent(ctx, identity, req)
+	// Resolve the identity before fetching. Two reasons: a URL re-import
+	// can then send If-None-Match / If-Modified-Since from the stored
+	// validators and get a 304 instead of re-downloading the document, and
+	// a fetch failure cannot leave a document row behind because no write
+	// has happened yet.
+	preMatch, err := resolveReferenceIdentity(dm.db, identity)
+	if err != nil {
+		return nil, fmt.Errorf("resolve existing reference: %w", err)
+	}
+	acquired, err := dm.acquireReferenceContent(ctx, identity, preMatch)
 	if err != nil {
 		return nil, err
 	}
@@ -307,6 +314,42 @@ func (dm *DatabaseManager) ingestAcquiredReference(ctx context.Context, identity
 	// Unchanged content: refresh metadata only. Chunk rows (and therefore
 	// chunk ids and embeddings) are not touched — that is the whole point
 	// of the diff-based ingest.
+	// A 304 means the publisher confirms the stored document is current.
+	// Keep it byte-for-byte: no chunk writes, no re-embedding, and the
+	// stored content hash stays valid.
+	if acquired.NotModified && existing != nil {
+		mergedTags := mergeReferenceTags(existing.Tags, req.Tags)
+		reason := existing.ImportReason
+		if strings.TrimSpace(req.Reason) != "" {
+			reason = strings.TrimSpace(req.Reason)
+		}
+		title := existing.Title
+		if strings.TrimSpace(req.Title) != "" {
+			title = strings.TrimSpace(req.Title)
+		}
+		if err := dm.updateReferenceMetadata(existing.ID, title, mergedTags, reason, identity, acquired); err != nil {
+			return nil, err
+		}
+		res := &ReferenceIngestResult{
+			Status:            ReferenceStatusUnchanged,
+			ID:                existing.ID,
+			Title:             title,
+			Source:            identity.Canonical,
+			SourceKind:        identity.Kind,
+			RequestedSource:   source,
+			SourceType:        existing.SourceType,
+			TotalChunks:       existing.TotalChunks,
+			ChunksReused:      existing.TotalChunks,
+			LexicalSearchable: existing.TotalChunks > 0,
+			Warnings:          []string{"the publisher reported no change (HTTP 304); the stored document and its embeddings were kept as-is"},
+		}
+		dm.fillReferenceRetrievalState(ctx, existing.ID, res)
+		return res, nil
+	}
+	if acquired.NotModified && existing == nil {
+		return nil, fmt.Errorf("fetch %s: server replied 304 Not Modified but no stored copy exists; retry without conditional headers", identity.Canonical)
+	}
+
 	if existing != nil && existing.ContentHash == contentHash {
 		mergedTags := mergeReferenceTags(existing.Tags, req.Tags)
 		reason := existing.ImportReason
@@ -359,6 +402,7 @@ func (dm *DatabaseManager) ingestAcquiredReference(ctx context.Context, identity
 		RequestedURL:     acquired.RequestedURL,
 		HTTPETag:         acquired.ETag,
 		HTTPLastModified: acquired.LastModified,
+		Attribution:      referenceAttributionJSON(acquired),
 	}
 	if !acquired.FetchedAt.IsZero() {
 		doc.FetchedAt = acquired.FetchedAt.Unix()
@@ -407,12 +451,19 @@ func (dm *DatabaseManager) ingestAcquiredReference(ctx context.Context, identity
 //
 // The file branch is here; the URL branch is the fetch pipeline
 // (reference_fetch.go), which owns its own security boundary.
-func (dm *DatabaseManager) acquireReferenceContent(ctx context.Context, identity SourceIdentity, req ReferenceIngestRequest) (*acquiredReferenceContent, error) {
+func (dm *DatabaseManager) acquireReferenceContent(ctx context.Context, identity SourceIdentity, existing *ReferenceIdentityMatch) (*acquiredReferenceContent, error) {
 	switch identity.Kind {
 	case ReferenceSourceFile:
 		return acquireReferenceFile(identity)
 	case ReferenceSourceURL:
-		return acquireReferenceURL(ctx, identity)
+		var cond *referenceConditional
+		if existing != nil && existing.Doc != nil && (existing.Doc.HTTPETag != "" || existing.Doc.HTTPLastModified != "") {
+			cond = &referenceConditional{
+				ETag:         existing.Doc.HTTPETag,
+				LastModified: existing.Doc.HTTPLastModified,
+			}
+		}
+		return fetchReferenceURL(ctx, identity, cond)
 	default:
 		return nil, fmt.Errorf("unsupported source kind %q", identity.Kind)
 	}
@@ -440,6 +491,15 @@ type acquiredReferenceContent struct {
 	Notes []string
 	// Warnings are non-fatal observations.
 	Warnings []string
+	// SiteName / Byline / License are publisher attribution, kept as
+	// document metadata so retrieving a chunk can cite its source without
+	// the attribution text being part of the chunk body.
+	SiteName string
+	Byline   string
+	License  string
+	// NotModified is set when a conditional request was answered with 304:
+	// the stored document is still current and nothing was transferred.
+	NotModified bool
 }
 
 // acquireReferenceFile reads and parses a local document.
@@ -515,6 +575,33 @@ func (dm *DatabaseManager) updateReferenceMetadata(id, title string, tags []stri
 		return fmt.Errorf("update reference metadata: %w", err)
 	}
 	return nil
+}
+
+// referenceAttributionJSON renders the publisher identity that the source
+// actually advertised, omitting empty fields. Returns "" when nothing was
+// advertised so the column stays NULL rather than holding "{}".
+func referenceAttributionJSON(a *acquiredReferenceContent) string {
+	if a == nil {
+		return ""
+	}
+	fields := map[string]string{}
+	if a.SiteName != "" {
+		fields["site_name"] = a.SiteName
+	}
+	if a.Byline != "" {
+		fields["author"] = a.Byline
+	}
+	if a.License != "" {
+		fields["license"] = a.License
+	}
+	if len(fields) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(fields)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func acquiredFetchedAt(a *acquiredReferenceContent) int64 {

@@ -2355,7 +2355,7 @@ func printRefHelp() int {
 	render.Plain(os.Stdout, "  mpm reference <subcommand> [args]")
 	render.BlankLine(os.Stdout)
 	render.Section(os.Stdout, "Subcommands")
-	render.Label(os.Stdout, "add <file> [--tag tags]", "ingest a document")
+	render.Label(os.Stdout, "add <file|url> [--tag tags]", "ingest a document (local file or http(s) URL)")
 	render.Label(os.Stdout, "ls", "list all references")
 	render.Label(os.Stdout, "show <id>", "show reference with chunks")
 	render.Label(os.Stdout, "search <query>", "search reference content")
@@ -2368,6 +2368,7 @@ func printRefHelp() int {
 	render.Label(os.Stdout, "add", "idempotent: re-importing unchanged content reuses the document id and its chunks")
 	render.BlankLine(os.Stdout)
 	render.Hint(os.Stdout, "Supported formats: .txt, .md, .html, .epub, .pdf")
+	render.Hint(os.Stdout, "URLs are fetched over http(s) only; loopback, private and link-local destinations are refused.")
 	render.Hint(os.Stdout, "Search before importing: `mpm reference search \"<topic>\"` shows what is already available.")
 	return 0
 }

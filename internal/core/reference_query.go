@@ -45,15 +45,16 @@ func FindReferenceBySourcePath(db *sql.DB, sourcePath string) (*ReferenceDoc, er
 		sourceURL sql.NullString
 		reqURL    sql.NullString
 		fetchedAt sql.NullInt64
-		etag      sql.NullString
-		lastMod   sql.NullString
+		etag        sql.NullString
+		lastMod     sql.NullString
+		attribution sql.NullString
 	)
 	err := db.QueryRow(`
 		SELECT id, title, file_path, source_type, tags,
 		       content, content_hash, import_reason,
 		       total_chunks, last_indexed, created_at,
 		       source_kind, source_url, requested_url, fetched_at,
-		       http_etag, http_last_modified
+		       http_etag, http_last_modified, attribution
 		FROM reference_docs
 		WHERE file_path = ?
 		LIMIT 1
@@ -61,7 +62,7 @@ func FindReferenceBySourcePath(db *sql.DB, sourcePath string) (*ReferenceDoc, er
 		&doc.ID, &doc.Title, &doc.SourcePath, &doc.SourceType, &tagsJSON,
 		&doc.Content, &doc.ContentHash, &doc.ImportReason,
 		&doc.TotalChunks, &doc.LastIndexed, &doc.Created,
-		&kind, &sourceURL, &reqURL, &fetchedAt, &etag, &lastMod,
+		&kind, &sourceURL, &reqURL, &fetchedAt, &etag, &lastMod, &attribution,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -89,6 +90,9 @@ func FindReferenceBySourcePath(db *sql.DB, sourcePath string) (*ReferenceDoc, er
 	}
 	if lastMod.Valid {
 		doc.HTTPLastModified = lastMod.String
+	}
+	if attribution.Valid {
+		doc.Attribution = attribution.String
 	}
 	return &doc, nil
 }

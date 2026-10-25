@@ -266,7 +266,7 @@ All seven default operational surfaces exclude archived work: `mpm wake` open wo
 
 #### Reference
 
-External material ingested for the agent to consult — documentation, specs, articles, code. Reference artifacts are distinct from Memory: Memory is what the agent synthesises internally; Reference is what the agent can look up. References are ingested from a local file path, stored with their section markers and ingestion timestamp, and searchable via the same FTS5 index as memories. Identity is canonical: one source is one document regardless of the path spelling used to name it (§7.6). MPM does not fetch URLs: `mpm reference add --url` is a reserved, explicitly-rejected stub. When an ingested document needs a durable pointer back to where it came from, that pointer is an `evidence` row carrying a `reference_url` (§4.2).
+External material ingested for the agent to consult — documentation, specs, articles, code. Reference artifacts are distinct from Memory: Memory is what the agent synthesises internally; Reference is what the agent can look up. References are ingested from a local file path, stored with their section markers and ingestion timestamp, and searchable via the same FTS5 index as memories. Identity is canonical: one source is one document regardless of the path spelling used to name it (§7.6). References are ingested from a local path or an http(s) URL; URL retrieval is a guarded fetch (SSRF-boundary checks, bounded size/time/redirects, no credential forwarding) documented in §7.6. When an ingested document needs a durable pointer back to where it came from, the reference row itself carries `source_url` / `requested_url`, and an `evidence` row can additionally carry a `reference_url` (§4.2).
 
 #### Lesson
 
@@ -2289,6 +2289,7 @@ mpm kb session shred <id>
 
 # Reference library (PDF, EPUB, MD, TXT, HTML)
 mpm kb reference add <file> [--tag tag1,tag2] [--reason "..."] [--chunk-size 512]
+mpm kb reference add <https://…>       # fetch a documentation page (SSRF-guarded)
                                        # idempotent: same source → same document
 mpm kb reference duplicates [--json]   # read-only: same-source groups + repair plan
 mpm kb reference ls
@@ -3277,6 +3278,24 @@ PDF, EPUB, HTML, Markdown ingestion with token-aware chunking (`--chunk-size`, 6
 | --- | --- |
 | Local file | absolute, `.`/`..`-cleaned path with symlinks resolved |
 | URL | normalized URL (lowercased scheme/host, default port and fragment dropped; query and path preserved) |
+
+**URL ingestion.** `mpm reference add <https://…>` (or `--url <…>`) fetches the page, extracts it, and stores it through the same pipeline as a local file. The URL may be supplied by an autonomous agent, so retrieval is a security boundary before it is a convenience:
+
+| Control | Enforcement |
+| --- | --- |
+| Scheme allowlist (http, https) | URL parse + every redirect hop; `file:`, `data:`, `javascript:` and friends are refused, never treated as paths |
+| Forbidden destinations (loopback, private, link-local/metadata, CGNAT, multicast, reserved, IPv4-mapped) | `net.Dialer.Control` — i.e. on the **resolved address immediately before connect**, not on the string |
+| Redirect into a forbidden destination | the same dial check runs per hop; https→http downgrades are refused |
+| Credentials in the URL | rejected at parse time and never stored |
+| Credentials to a peer | never sent; a cross-origin redirect does not carry them |
+| TLS verification | never disabled |
+| Download size | 16 MiB ceiling on the **decompressed** body, then a clear error |
+| Time / redirects | 20 s per fetch, 5 hops |
+| Content type | allowlist (HTML/XHTML, Markdown, plain text, JSON); anything else is refused with the type named |
+
+Because the destination check runs after DNS resolution on the socket address, an IP literal, a hostname that resolves to `169.254.169.254`, an IPv4-mapped IPv6 form and a rebinding answer are all judged by the address actually dialled. Tests exercise this through a loopback seam that is unexported and unavailable to production callers.
+
+Markdown is requested via `Accept: text/markdown` and preferred when the publisher sends it; HTML is extracted structurally. HTTP provenance is stored on the document: effective `source_url`, `requested_url` (differs under redirect), `fetched_at`, `ETag` and `Last-Modified`. Those validators make a re-import a conditional request: a `304 Not Modified` keeps the stored document, its chunks and its embeddings untouched, and reports `unchanged`. Publishers that send no validators still converge by content hash.
 
 Consequences, all deliberate:
 

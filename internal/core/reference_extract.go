@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // parseAbsoluteURL is the small parser used for title derivation and
@@ -75,7 +76,7 @@ func parseReferenceDocument(path string) (string, []string, error) {
 		if err != nil {
 			return "", nil, fmt.Errorf("read %q: %w", path, err)
 		}
-		body, notes := stripFrontMatter(string(data))
+		body, notes := prepareMarkdown(string(data))
 		return body, notes, nil
 	case ".txt", "":
 		data, err := os.ReadFile(path)
@@ -92,6 +93,200 @@ func parseReferenceDocument(path string) (string, []string, error) {
 		}
 		return string(data), []string{"unknown extension " + ext + ": read as plain text"}, nil
 	}
+}
+
+// prepareMarkdown turns raw Markdown into document text.
+//
+// Four transformations, each reported:
+//
+//  1. sanitizeReferenceText — non-breaking spaces become spaces and
+//     Unicode format/tag characters are dropped. Documentation exports
+//     routinely carry "copy link" glyphs (U+E0001 … U+E007F) and NBSP
+//     runs from code samples; both corrupt section names and tokenization.
+//  2. stripFrontMatter — a `---`/`+++` delimited metadata block.
+//  3. stripLabelPreamble — a `Title: …` / `Published: …` header ending in
+//     `---`, which is how several documentation exporters (WordPress
+//     among them) render their Markdown rendition.
+//  4. dropLeadingTOC — an "In this article" / "Contents" section that is
+//     nothing but anchor links.
+//
+// None of these touch prose: each fires only on a shape it can recognise,
+// and every removal is reported so a caller can see what was dropped.
+func prepareMarkdown(content string) (string, []string) {
+	text := sanitizeReferenceText(content)
+	var notes []string
+	text, frontNotes := stripFrontMatter(text)
+	notes = append(notes, frontNotes...)
+	text, preambleNotes := stripLabelPreamble(text)
+	notes = append(notes, preambleNotes...)
+	text, tocNotes := dropLeadingTOC(text)
+	notes = append(notes, tocNotes...)
+	return text, notes
+}
+
+// sanitizeReferenceText normalises characters that corrupt retrieval
+// without carrying content.
+func sanitizeReferenceText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\u00a0':
+			b.WriteRune(' ')
+		case r == '\ufeff':
+			// byte-order mark
+		case r >= 0xE0000 && r <= 0xE007F:
+			// Unicode tag characters (invisible link markers)
+		case unicode.Is(unicode.Cf, r):
+			// zero-width joiners, directional marks, soft hyphens
+		case r == '\r':
+			// normalise line endings below
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := strings.ReplaceAll(b.String(), "\r\n", "\n")
+	return strings.ReplaceAll(out, "\r", "\n")
+}
+
+// stripLabelPreamble removes a `Key: value` header block terminated by a
+// horizontal rule.
+//
+// The shape is: at least two consecutive `Label: value` lines, then a
+// `---` line, before any heading. That is metadata (title, publication
+// date, modification date), not documentation, and on a long export it
+// occupies the whole first chunk.
+func stripLabelPreamble(content string) (string, []string) {
+	lines := strings.Split(content, "\n")
+	labels := 0
+	terminator := -1
+	for i, line := range lines {
+		if i > 12 {
+			break
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "---" && labels >= 2 {
+			terminator = i
+			break
+		}
+		if trimmed == "" && labels == 0 {
+			return content, nil // leading blank line: not this shape
+		}
+		if trimmed == "" {
+			continue
+		}
+		if !isMetadataLabelLine(trimmed) {
+			return content, nil
+		}
+		labels++
+	}
+	if terminator < 0 || labels < 2 {
+		return content, nil
+	}
+	rest := strings.TrimLeft(strings.Join(lines[terminator+1:], "\n"), "\n")
+	if strings.TrimSpace(rest) == "" {
+		return content, nil
+	}
+	return rest, []string{fmt.Sprintf("markdown: removed a %d-line metadata header (title/date labels) so it does not dominate the first chunk", labels+1)}
+}
+
+// isMetadataLabelLine reports whether a line looks like `Label: value`
+// with a short capitalised label — the shape of an exported metadata
+// header, not of prose that happens to contain a colon.
+func isMetadataLabelLine(line string) bool {
+	i := strings.Index(line, ":")
+	if i < 2 || i > 24 {
+		return false
+	}
+	label := line[:i]
+	for _, r := range label {
+		if !(r >= 'A' && r <= 'Z') && !(r >= 'a' && r <= 'z') && r != ' ' {
+			return false
+		}
+	}
+	// Uppercase first letter, letters and spaces only: `Last modified`,
+	// `Published`, `Title`. Prose with a colon ("Note: this is prose")
+	// also matches, which is why at least two such lines and a closing
+	// rule are required before anything is removed.
+	return label[0] >= 'A' && label[0] <= 'Z'
+}
+
+// tocHeadingNames are headings whose body is navigation rather than
+// documentation when the body is almost entirely links.
+var tocHeadingNames = []string{"in this article", "in this section", "on this page", "contents", "table of contents", "sections"}
+
+// dropLeadingTOC removes a leading table-of-contents section.
+//
+// The test is deliberately narrow: the heading must be one of the known
+// names, the body must contain at least three link list items, and
+// almost all of the body must be those links. A "Contents" section that
+// explains something is left alone.
+func dropLeadingTOC(content string) (string, []string) {
+	lines := strings.Split(content, "\n")
+	// Look for a TOC-ish heading among the first few headings. A document
+	// may open with its own h1 before the contents block (WordPress does),
+	// so stopping at the first heading would miss it entirely.
+	start, level, seen := -1, 0, 0
+	for i, line := range lines {
+		l, text, ok := parseATXHeading(line)
+		if !ok {
+			continue
+		}
+		seen++
+		if seen > 4 {
+			break
+		}
+		lower := strings.ToLower(strings.TrimSpace(plainHeadingText(text)))
+		for _, name := range tocHeadingNames {
+			if lower == name {
+				start, level = i, l
+				break
+			}
+		}
+		if start >= 0 {
+			break
+		}
+	}
+	if start < 0 {
+		return content, nil
+	}
+	// Body runs until the next heading of the same or higher level.
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		l, _, ok := parseATXHeading(lines[i])
+		if ok && l <= level {
+			end = i
+			break
+		}
+	}
+	body := lines[start+1 : end]
+	linkItems, other := 0, 0
+	for _, line := range body {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if (strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "+ ")) && strings.Contains(trimmed, "](") {
+			linkItems++
+			continue
+		}
+		if strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "+ ") {
+			// nested list item belonging to a link entry
+			if linkItems > 0 {
+				continue
+			}
+		}
+		other += len(strings.Fields(trimmed))
+	}
+	if linkItems < 3 || other > 20 {
+		return content, nil
+	}
+	kept := append(append([]string{}, lines[:start]...), lines[end:]...)
+	out := strings.Join(kept, "\n")
+	if strings.TrimSpace(out) == "" {
+		return content, nil
+	}
+	return out, []string{fmt.Sprintf("markdown: removed a %d-entry table-of-contents section", linkItems)}
 }
 
 // maxFrontMatterBytes bounds the YAML/TOML front-matter block that is
@@ -249,8 +444,8 @@ func chunkReferenceDocument(content, sourceType string, chunkSize int) ([]Chunk,
 		// "wp_nav_menu()" above the signature is materially easier to
 		// retrieve and to cite than one that does not.
 		text := body
-		if sec.Section != "" {
-			heading := strings.Repeat("#", max(sec.Level, 1)) + " " + sec.Section
+		if sec.Leaf != "" {
+			heading := strings.Repeat("#", max(sec.Level, 1)) + " " + sec.Leaf
 			if !strings.HasPrefix(strings.TrimSpace(body), strings.Repeat("#", max(sec.Level, 1))) {
 				text = heading + "\n\n" + body
 			}
@@ -278,9 +473,14 @@ func chunkReferenceDocument(content, sourceType string, chunkSize int) ([]Chunk,
 
 // markdownSection is one heading-delimited span of a Markdown document.
 type markdownSection struct {
+	// Section is the full heading path ("A › B").
 	Section string
-	Level   int
-	Body    string
+	// Leaf is just this section's own heading text, used for the heading
+	// line written into the chunk so the chunk does not open with a
+	// breadcrumb.
+	Leaf  string
+	Level int
+	Body  string
 }
 
 // splitMarkdownSections splits content at ATX headings, tracking the
@@ -326,12 +526,16 @@ func splitMarkdownSections(content string) []markdownSection {
 				}
 				haveAny = true
 				if level <= 3 {
-					path[level-1] = text
+					path[level-1] = plainHeadingText(text)
 					for i := level; i < len(path); i++ {
 						path[i] = ""
 					}
 				}
-				current = markdownSection{Section: joinHeadingPath(path[:]), Level: level}
+				current = markdownSection{
+					Section: joinHeadingPath(path[:]),
+					Leaf:    plainHeadingText(text),
+					Level:   level,
+				}
 				// The heading line itself is re-added by the caller.
 				continue
 			}
@@ -343,6 +547,40 @@ func splitMarkdownSections(content string) []markdownSection {
 		flush()
 	}
 	return out
+}
+
+// plainHeadingText strips the Markdown decoration that documentation
+// exports put inside headings, so a section label reads
+// "Parameters" rather than "[Parameters](https://…#parameters)".
+func plainHeadingText(text string) string {
+	out := text
+	// [label](target) → label
+	for {
+		open := strings.Index(out, "[")
+		if open < 0 {
+			break
+		}
+		close := strings.Index(out[open:], "]")
+		if close < 0 {
+			break
+		}
+		close += open
+		label := out[open+1 : close]
+		rest := out[close+1:]
+		if !strings.HasPrefix(rest, "(") {
+			break
+		}
+		end := strings.Index(rest, ")")
+		if end < 0 {
+			break
+		}
+		out = out[:open] + label + rest[end+1:]
+	}
+	out = strings.ReplaceAll(out, "`", "")
+	out = strings.ReplaceAll(out, "**", "")
+	out = strings.ReplaceAll(out, "__", "")
+	out = strings.ReplaceAll(out, "*", "")
+	return strings.TrimSpace(collapseWhitespace(out))
 }
 
 // joinHeadingPath renders the heading stack as "A › B › C".
