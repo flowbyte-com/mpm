@@ -223,6 +223,7 @@ func classifySynthError(err error) (class string, httpStatus int) {
 	if err == nil {
 		return "", 0
 	}
+	msg := err.Error()
 	// Typed authentication refusal: the status is carried by the error.
 	var refusal *synth.AuthRefusalError
 	if errors.As(err, &refusal) {
@@ -242,7 +243,6 @@ func classifySynthError(err error) (class string, httpStatus int) {
 		}
 		return class, httpStatus
 	}
-	msg := err.Error()
 	// Standard synth error format: `API returned HTTP <n>: <body>`.
 	var httpPrefix = "API returned HTTP "
 	if i := indexOf(msg, httpPrefix); i >= 0 {
