@@ -122,6 +122,17 @@ type ReferenceHybridResult struct {
 	CombinedScore    float64 // diagnostic: weighted blend, NOT used for sort
 	RelevanceScore   float64 // the comparable relevance used for the final sort
 	Source           string  // "fts5" | "vector" | "hybrid"
+
+	// SourcePath is the document's canonical source — an absolute path for
+	// a local file, the effective URL for a fetched page. Returned with
+	// every hit so a caller can cite what it retrieved without a second
+	// round-trip, and so attribution does not have to be prepended to the
+	// chunk body.
+	SourcePath string
+	// SourceKind is "file" or "url".
+	SourceKind string
+	// SourceType is the parsed document format ("markdown", "html", …).
+	SourceType string
 }
 
 // ReferenceHybridSearch runs hybrid lexical + semantic retrieval over
@@ -641,9 +652,10 @@ func mergeReferenceResults(db *sql.DB, fts []referenceFTSToMerge, vec []referenc
 	}
 	sort.Strings(allIDs)
 
-	// DocTitle is missing for vector-only candidates. Batch-fetch
-	// it in a single query so the merge doesn't regress to N+1.
-	titles := batchFetchReferenceDocTitles(db, ftsByID, vecByID)
+	// DocTitle is missing for vector-only candidates. Batch-fetch the
+	// document metadata (title + canonical source) in a single query so
+	// the merge doesn't regress to N+1 and every hit carries provenance.
+	metas := batchFetchReferenceDocMeta(db, ftsByID, vecByID)
 
 	out := make([]ReferenceHybridResult, 0, len(all))
 	for _, id := range allIDs {
@@ -683,13 +695,17 @@ func mergeReferenceResults(db *sql.DB, fts []referenceFTSToMerge, vec []referenc
 			chunkIndex = veci.ChunkIndex
 			section = veci.Section
 			content = veci.Content
-			docTitle = titles[veci.DocID]
+			docTitle = metas[veci.DocID].Title
 			vecSim = veci.Similarity
 			// Vector-only: weighted by VectorWeight so a pure
 			// semantic hit scales to the same range as a hybrid
 			// hit.
 			combined = vecSim * vecWeight
 			source = "vector"
+		}
+		meta := metas[docID]
+		if docTitle == "" {
+			docTitle = meta.Title
 		}
 		out = append(out, ReferenceHybridResult{
 			ID:               id,
@@ -703,7 +719,83 @@ func mergeReferenceResults(db *sql.DB, fts []referenceFTSToMerge, vec []referenc
 			CombinedScore:    combined,
 			RelevanceScore:   relevanceScore(ftsScore, vecSim),
 			Source:           source,
+			SourcePath:       meta.SourcePath,
+			SourceKind:       meta.SourceKind,
+			SourceType:       meta.SourceType,
 		})
+	}
+	return out
+}
+
+// referenceDocMeta is the document-level metadata every search hit
+// carries: the title plus the canonical source, so a retrieved chunk can
+// be cited without a second query.
+type referenceDocMeta struct {
+	Title      string
+	SourcePath string
+	SourceKind string
+	SourceType string
+}
+
+// batchFetchReferenceDocMeta fetches the metadata for every document
+// referenced by the FTS or vector candidates in a single query.
+//
+// db may be nil — the test suite constructs synthetic result sets without
+// a connection, and an empty map simply leaves the provenance fields
+// blank, which the renderers tolerate.
+func batchFetchReferenceDocMeta(db *sql.DB, ftsByID map[string]referenceFTSToMerge, vecByID map[string]referenceVecHit) map[string]referenceDocMeta {
+	out := make(map[string]referenceDocMeta)
+	if db == nil {
+		return out
+	}
+	wanted := make(map[string]bool)
+	for _, h := range ftsByID {
+		if h.DocID != "" {
+			wanted[h.DocID] = true
+		}
+	}
+	for _, h := range vecByID {
+		if h.DocID != "" {
+			wanted[h.DocID] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return out
+	}
+	ids := make([]string, 0, len(wanted))
+	for id := range wanted {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	// No injection vector: ids come from the database, and the statement
+	// is parameterised regardless.
+	rows, err := db.Query(
+		`SELECT id, title, COALESCE(file_path,''), COALESCE(source_kind,''), COALESCE(source_type,'')
+		   FROM reference_docs WHERE id IN (`+strings.Join(placeholders, ",")+`)`,
+		args...,
+	)
+	if err != nil {
+		slog.Warn("batchFetchReferenceDocMeta: query failed", "err", err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var meta referenceDocMeta
+		if err := rows.Scan(&id, &meta.Title, &meta.SourcePath, &meta.SourceKind, &meta.SourceType); err != nil {
+			slog.Warn("batchFetchReferenceDocMeta: scan failed", "err", err)
+			continue
+		}
+		if meta.SourceKind == "" {
+			meta.SourceKind = ReferenceSourceFile
+		}
+		out[id] = meta
 	}
 	return out
 }

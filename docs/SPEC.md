@@ -2291,6 +2291,7 @@ mpm kb session shred <id>
 mpm kb reference add <file> [--tag tag1,tag2] [--reason "..."] [--chunk-size 512]
 mpm kb reference add <https://…>       # fetch a documentation page (SSRF-guarded)
                                        # idempotent: same source → same document
+mpm kb reference import <manifest.json|-> [--json]   # batch; per-document status [--json]   # batch; per-document status
 mpm kb reference duplicates [--json]   # read-only: same-source groups + repair plan
 mpm kb reference ls
 mpm kb reference search <query>
@@ -3307,6 +3308,30 @@ Consequences, all deliberate:
 **Outcomes.** Every ingest reports one of `imported`, `updated`, `unchanged` or `duplicate`, plus the chunk diff (`chunks_added`/`updated`/`reused`/`removed`), the embedding state (`embedded`, `pending_embeddings`), and separate `lexical_searchable` / `semantic_searchable` claims. `unchanged` writes no chunk rows, so chunk ids and vectors survive a re-import. `duplicate` means several existing documents already resolve to that source: nothing is written, the ids are returned, and the repair is an operator decision.
 
 **Legacy rows.** Documents written before identity canonicalization keep their stored path, and a re-import recognises them by resolving the stored value against the ancestors of the imported file (and by URL canonicalization). A recognised legacy row is upgraded to its canonical path in place on that write. Existing duplicates are **not** merged automatically: `mpm reference duplicates` prints the groups, their confidence (`certain` when canonical paths agree, `probable` when a legacy relative path could only be matched by suffix), a suggested survivor and an explicit repair plan. Deleting the copies you do not want and re-importing is the supported repair; nothing is ever removed for you.
+
+**Batch ingestion.** `mpm reference import <manifest.json|->` (and MCP `mpm_references action=import`) takes a list and reports each document separately:
+
+```json
+{"documents": [
+  {"url": "https://developer.wordpress.org/reference/functions/wp_nav_menu/", "tags": ["wordpress", "menus"], "reason": "AgentShell development"},
+  {"path": "./vendor/turnstile.md", "tags": ["cloudflare-turnstile"]}
+]}
+```
+
+Local paths and URLs may be mixed. Each entry reports `imported` / `updated` / `unchanged` / `duplicate` / `failed` with its own error, and the batch's `ok` is false if anything failed or was ambiguous — a partial import is never reported as success. Processing is sequential (bounded to one fetch and one write at a time, no background system). Re-running the same manifest is the retry path: unchanged documents write nothing, so a corpus that failed in the middle resumes without duplicating the part that worked.
+
+**Discovery.** The agent-facing contract is one tool (`mpm_references`) with the decision rule stated in its own description:
+
+| Need | Action |
+| --- | --- |
+| existing source material | `search` → `read` |
+| new source material (one) | `add` with `filepath` **or** `url` |
+| new source material (many) | `import` with `documents` |
+| what is in the corpus | `list` |
+
+`mpm_help action=show tool=mpm_references` returns that tool's registered schema, and the CLI prints the same vocabulary from `mpm reference help`. An unknown action names both the valid actions and that discovery call, so an agent that guesses (`help`, `fetch`, `ingest`) is redirected instead of dead-ended.
+
+A search hit carries `doc_title`, `section`, `source_path` (absolute path or effective URL), `source_kind`, `chunk_id` and `doc_id`, so a citation does not require a second call; `read` returns the stored document with its provenance and attribution.
 
 **Structure and provenance.** Markdown chunks carry the heading path they live under (`Parameters › args`), so a retrieved chunk can be cited by section. HTML is extracted structurally — headings, fenced code with language hints, tables, callouts and absolute links retained; navigation, cookie banners, sidebars and footers removed — and the extraction notes disclose anything that was dropped or guessed. A leading front-matter block that would dominate the first chunk is removed and reported. Publisher attribution (`og:site_name`, author, licence) is kept as document metadata rather than prepended to chunk text.
 
