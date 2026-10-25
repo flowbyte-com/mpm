@@ -251,6 +251,57 @@ func hostMatchesDomain(host, domain string) bool {
 	return strings.HasSuffix(host, "."+domain)
 }
 
+// derivedAuth resolves the scheme WITHOUT the operator's override:
+//
+//  1. the endpoint's own documented rule, matched on the parsed URL host
+//     against an exact domain set;
+//  2. a scheme negotiated during an approved connection verification for
+//     this exact (base URL, credential) pair;
+//  3. the protocol default: OpenAI-compatible -> Bearer,
+//     Anthropic-compatible -> X-Api-Key.
+//
+// The protocol default follows the client's ACTUAL wire rather than a URL
+// re-derivation, so the protocol and the scheme can never disagree.
+func (sc *SynthClient) derivedAuth() AuthScheme {
+	if s, ok := documentedAuthScheme(sc.BaseURL); ok {
+		return s
+	}
+	if s, ok := negotiatedAuth(sc.BaseURL, sc.APIKey); ok {
+		return s
+	}
+	return protocolDefaultAuthScheme(sc.Wire)
+}
+
+// ResolveAuthScheme resolves the authentication scheme for a base URL,
+// inferring the message protocol from the URL.
+//
+// Deprecated: prefer the client's own resolution
+// (SynthClient.resolveAuth), so that the protocol and the scheme can
+// never disagree - a client whose protocol was set explicitly must use
+// that protocol's default, not one re-derived from the URL.
+//
+// This helper cannot express a REFUSAL, so an unrecognised override
+// falls through to a derived scheme - the behaviour it has always had,
+// kept here so that existing callers keep working. The RUNTIME path
+// behaves differently and better: SynthClient.resolveAuth refuses an
+// unrecognised override with an explicit error, and the configuration
+// layer validates the operator's value (config.ValidateAuthScheme).
+//
+// The resolution order is unchanged: a recognised override wins, then the
+// endpoint's documented rule, then a negotiated scheme, then the
+// protocol default.
+func ResolveAuthScheme(baseURL, credential, override string) AuthScheme {
+	if s, ok := ParseAuthScheme(override); ok {
+		return s
+	}
+	sc := &SynthClient{
+		BaseURL: baseURL,
+		APIKey:  credential,
+		Wire:    inferWire(baseURL),
+	}
+	return sc.derivedAuth()
+}
+
 // resolveAuth is the client's own authentication-scheme resolution.
 //
 // Order (first match wins):
@@ -287,13 +338,7 @@ func (sc *SynthClient) resolveAuth() (AuthScheme, error) {
 		return "", fmt.Errorf("unsupported auth_scheme %q in the profile (supported: %s)",
 			strings.TrimSpace(sc.AuthOverride), strings.Join(config.SupportedAuthSchemes(), ", "))
 	}
-	if s, ok := documentedAuthScheme(sc.BaseURL); ok {
-		return s, nil
-	}
-	if s, ok := negotiatedAuth(sc.BaseURL, sc.APIKey); ok {
-		return s, nil
-	}
-	return protocolDefaultAuthScheme(sc.Wire), nil
+	return sc.derivedAuth(), nil
 }
 
 // negotiatedAuthCache retains the scheme discovered by a successful

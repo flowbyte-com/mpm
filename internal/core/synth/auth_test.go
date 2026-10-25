@@ -289,3 +289,70 @@ func TestAuthScheme_HeaderFor_NoCredentialSendsNoHeader(t *testing.T) {
 		t.Error("the none scheme presented a credential header")
 	}
 }
+
+// TestResolveAuthScheme_DeprecatedHelperKeepsItsBehaviour pins the
+// exported helper's backward-compatible behaviour.
+//
+// The helper was removed in an earlier draft of this change and then
+// restored: it has no in-tree production callers, so removing it was an
+// API break with no correctness or security requirement behind it.
+//
+// Its semantics are unchanged from before the removal:
+//
+//   - a RECOGNISED override wins;
+//   - an unrecognised override falls through to a derived scheme,
+//     because the signature cannot express a refusal.
+//
+// The RUNTIME path behaves differently and better: SynthClient.resolveAuth
+// refuses an unrecognised override. That difference is pinned by
+// TestResolveAuth_UnsupportedOverrideIsRefused.
+func TestResolveAuthScheme_DeprecatedHelperKeepsItsBehaviour(t *testing.T) {
+	cases := []struct {
+		name       string
+		baseURL    string
+		credential string
+		override   string
+		want       AuthScheme
+	}{
+		{
+			name:       "documented MiniMax endpoint is bearer",
+			baseURL:    "https://api.minimax.io/anthropic/v1",
+			credential: "k",
+			want:       AuthSchemeBearer,
+		},
+		{
+			name:       "operator override beats the documented rule",
+			baseURL:    "https://api.minimax.io/anthropic/v1",
+			credential: "k",
+			override:   "x-api-key",
+			want:       AuthSchemeXAPIKey,
+		},
+		{
+			name:       "ordinary Anthropic keeps the protocol default",
+			baseURL:    "https://api.anthropic.com/v1",
+			credential: "k",
+			want:       AuthSchemeXAPIKey,
+		},
+		{
+			name:       "ordinary OpenAI-compatible keeps the protocol default",
+			baseURL:    "https://api.openai.com/v1",
+			credential: "k",
+			want:       AuthSchemeBearer,
+		},
+		{
+			name:       "an unrecognised override falls through to a derived scheme",
+			baseURL:    "https://api.anthropic.com/v1",
+			credential: "k",
+			override:   "basic",
+			want:       AuthSchemeXAPIKey,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResolveAuthScheme(tc.baseURL, tc.credential, tc.override); got != tc.want {
+				t.Errorf("ResolveAuthScheme(%q, override=%q) = %q; want %q",
+					tc.baseURL, tc.override, got, tc.want)
+			}
+		})
+	}
+}
