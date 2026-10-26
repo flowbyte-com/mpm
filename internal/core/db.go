@@ -2535,6 +2535,17 @@ func (dm *DatabaseManager) InitSchema() error {
 }
 
 func (dm *DatabaseManager) initUnifiedSchema() error {
+	// Serialise schema initialisation across processes. Concurrent opens
+	// of a fresh/upgraded database race the boot migration transaction;
+	// in WAL mode that surfaces as SQLITE_BUSY_SNAPSHOT, which
+	// busy_timeout does not retry. See the schema-init lock section of
+	// maintenance_lock.go.
+	schemaLock, err := AcquireSchemaInitLock(dm.dbPath)
+	if err != nil {
+		return fmt.Errorf("schema init lock: %w", err)
+	}
+	defer func() { _ = ReleaseSchemaInitLock(schemaLock) }()
+
 	// PRAGMA settings. WAL allows concurrent readers and a single writer;
 	// busy_timeout gives the writer up to 5s to wait.
 	//
