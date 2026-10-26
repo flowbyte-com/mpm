@@ -507,6 +507,7 @@ STAGE_LIBRARY="${SCRIPT_DIR}/../scripts/stage_runtime_package.sh"
 OPENCODE_RUNTIME_MANIFEST=(
     server.js
     dist/index.v2.js
+    dist/wake-context.js
     dist/workspace.js
     dist/resolve-mpm-binary.js
     package.json

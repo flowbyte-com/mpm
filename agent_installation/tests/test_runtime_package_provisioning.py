@@ -758,6 +758,7 @@ class TestAdapterManifestsMatchInstallers(unittest.TestCase):
         ("mpm-opencode", "install.sh", "OPENCODE_RUNTIME_MANIFEST", [
             "server.js",
             "dist/index.v2.js",
+            "dist/wake-context.js",
             "dist/workspace.js",
             "dist/resolve-mpm-binary.js",
             "package.json",
@@ -802,6 +803,7 @@ class TestManifestEntriesExistInSource(unittest.TestCase):
         expected = sorted([
             "dist/index.js",
             "dist/index.v2.js",
+            "dist/wake-context.js",
             "dist/workspace.js",
             "dist/resolve-mpm-binary.js",
         ])
