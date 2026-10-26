@@ -979,34 +979,77 @@ Session B — name: Session B (intelligence core)   contract version accepted: m
   referred to A: A-1 (M5 tension), A-2 (6.1 storage), A-3 (6.4 surface), A-4/A-5 (registry),
                   A-6 (environment), A-7 (runbook), A-8 (triage), A-9 (registry/evidence)
 
-Session C — name: Session C (OpenCode adapter)   contract version accepted: mpm-event/0.1
-  date: 2026-10-26  (second pass; supersedes the withdrawn first pass of the same day)
-  M1 envelope ....................... agree
-  M2 vocabulary & classification ... AGREE — objection WITHDRAWN. The host event stream IS
-                                       reachable (`ctx.event.subscribe({signal})` ->
-                                       AsyncIterable); `session.created` and the compaction
-                                       pair are live-captured. `session.observed` stays the
-                                       unconditional base. Missing must never be inferred.
-  M3 identity ....................... AGREE — objection downgraded. Every event carries a
-                                       stable `evt_<hex>` id, so strict derivation cannot
-                                       collide. R1 accepted as amendment A2 (`event_type` in
-                                       the derivation input) and A1 (the host's `callID` is a
-                                       CORRELATION id — nested calls share one — and is
-                                       removed from the unique-key chain).
-  M4 ordering ....................... agree
-  M5 trust ......................... agree — the adapter is structurally incapable of
-                                       promotion. NOTE: the event stream widens what is
-                                       COLLECTED, so §3.8's allowlist is load-bearing.
-  M6 ingest contract ............... agree — transport (6.2) stays open; ~39 ms per
-                                       `mpm call`; no subprocess call inside the event loop.
-  M7 outcomes ...................... agree, one request — SATISFIED: A pins the
-                                       host-status -> ToolOutcomeClass mapping in §3.7.
+Session C — name: Session C (OpenCode adapter & behavioural evaluation)  contract version accepted: mpm-event/0.1
+  date: 2026-10-26   (revised same day — see "superseded block" below)
+  M1 envelope ....................... agree — every required field is obtainable: `observed_at_ms`
+                                       is the host event's own `created` (unix ms), `host_version` is
+                                       ctx.app.version, `adapter_version` is the plugin build.
+  M2 vocabulary & classification ... AGREE — objection withdrawn. Measured: the host event stream
+                                       IS reachable from a plugin
+                                       (ctx.event.subscribe({signal}) -> AsyncIterable), and both
+                                       previously-objected rows are directly observable:
+                                       `session.started` <- `session.created` (carries sessionID,
+                                       projectID, parentID, agent, model) and the pair
+                                       <- `session.compaction.started` / `.ended` (both live-captured;
+                                       `.delta` and `.failed` also exist). `session.observed` stays
+                                       as the unconditional base: the adapter's OWN first session is
+                                       created before its iteration loop runs, so that one
+                                       `session.created` can be missed. Missing must never be
+                                       inferred. Closed vocabulary, no-neighbour-mapping and
+                                       observed-only are all implementable and endorsed.
+  M3 identity ....................... AGREE — objection downgraded to a non-blocking recommendation.
+                                       Every event carries a stable per-event `evt_<hex>` id, i.e.
+                                       §3.5's first-choice `host_event_id`, so strict-mode derivation
+                                       cannot collide even when nested tool calls share one callID.
+                                       RECOMMENDATION (R1, not a blocker): still add `event_type`
+                                       (+ host tool name when present) to the derivation input and
+                                       add `TestEventID_NestedToolCallsDoNotCollide`, so the guarantee
+                                       does not depend on which host key a future adapter picks.
+                                       Project identity (improvement): adopt the host's id when a git
+                                       remote is independently confirmed — see report §4.3.
+  M4 ordering ....................... agree — the event carries `created` in ms; the host gives no
+                                       monotonic per-session counter, so `host_seq` is null in
+                                       practice and §3.6's NULL ordering already covers it.
+                                       Causality stays explicit (parentID / callID / parent_event_id).
+  M5 trust ......................... agree — the adapter is structurally incapable of promotion.
+                                       NOTE: the event stream widens what is COLLECTED (full tool
+                                       input/output, compaction summary text, assistant text), so
+                                       §3.8's allowlist is now the load-bearing control.
+  M6 ingest contract ............... agree — validate/classify/dedup/stamp/store/receipt plus an
+                                       observable rejection counter are implementable. Transport
+                                       (§6.2) remains open; measured cost of one `mpm call` spawn is
+                                       ~39 ms, and the stream is volatile by contract, so no
+                                       subprocess call may run inside the event loop.
+  M7 outcomes ...................... agree, one request — §3.7 needs an explicit mapping from the
+                                       host's tool-execution status vocabulary to
+                                       internal.ToolOutcomeClass's nine values. The host supplies
+                                       `session.execution.failed` / `session.tool.failed`, so real
+                                       outcomes exist; the mapping must still be pinned by A or B.
   blocking objections: 0  (was 2 — both withdrawn by measurement, not by preference)
-  non-blocking recommendations: R1 -> A2 (adopted); R2 -> A4 (adopted)
-  referred to A: C-3 (project id -> A13), C-4 (outcomes -> A12), C-5 (transport -> A8),
-                  C-6 (capability table -> A6), C-7 (allowlist -> A7), C-8 (ceilings -> closed),
-                  C-9 (volatility -> A5)
+  non-blocking recommendations: R1 add event_type to the strict-mode derivation (+ its test);
+                                R2 document the first-session startup race beside §4's
+                                   `session.started`.
+  Evidence: docs/dev/session-c-event-stream-correction.md (supersedes the M2/M3 analysis in
+            docs/dev/session-c-host-findings.md §1.1-§1.2 and §4.1.1).
 ```
+
+**Amendments A1–A13, applied by Session A on 2026-10-26:**
+
+| # | Amendment |
+|---|---|
+| A1 | §3.5 — the host's `callID` is removed from the unique host-event-key chain; it is a **correlation** id (`meta.host_call_id`), never an identity. Nested tool calls share one. |
+| A2 | §3.5 — `event_type` is added to the strict-mode derivation input. |
+| A3 | §3.5 — the measured host event identity is recorded: `evt_<hex>`, unique per published event. |
+| A4 | §4 — the first-session startup race is recorded beside `session.started`. |
+| A5 | §3.8 / §6.2 — the stream's volatility and the "no subprocess inside the iterator" rule are binding. |
+| A6 | §5 — the capability table is **replaced** with the measured surface. |
+| A7 | §3.8 / §6.7 — the `meta` allowlist gains `host_event_type`, `host_call_id`, `host_message_id`. |
+| A8 | §6.2 — the transport constraint is fixed; the choice stays open. |
+| A9 | §6.4 — **decided**: `mpm_system`, with a read-backed receipt. |
+| A10 | §6.1 — **decided: deferred.** No new table; not the first milestone. |
+| A11 | §3.7 / M5 — the M5 tension is ruled: the critic's existing automatic lesson-writing is a **pre-existing substrate behaviour** that this contract neither creates nor endorses. Amending it would require a schema change on `lessons_base`, which this sprint does not take. |
+| A12 | §3.7 / M7 — the host-status → `ToolOutcomeClass` mapping is **pinned**. |
+| A13 | §3.3 / M3 — a host project id is adopted only when a git remote independently confirms it (`host-git-remote`). |
 
 **Amendments A1–A13, applied by Session A on 2026-10-26:**
 
