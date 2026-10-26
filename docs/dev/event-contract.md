@@ -323,6 +323,25 @@ project id.
 **Cross-worktree pinning:** `TestProjectID_SameAcrossLinkedWorktrees` (§8)
 builds a repository with two linked worktrees and asserts identical ids.
 
+> **Verified empirically on 2026-10-26**, before this contract was put up for
+> agreement — the derivation was executed, not only specified:
+>
+> ```
+> $ for d in ~/src/mpm ~/src/mpm-core ~/src/mpm-opencode ~/src/mpm-release; do
+>     git -C "$d" config --get remote.origin.url
+>   done
+> https://github.com/flowbyte-com/mpm        (all four)
+>
+> all four worktrees → project_id = pj_5a6c0d9dbf77282fe197b644291fd9e9
+> ```
+>
+> A throwaway repository with two linked worktrees was also built to confirm
+> the mechanism: all three directories report the **same**
+> `--git-common-dir`, all three return the same `remote.origin.url`, and
+> `git@github.com:flowbyte-com/mpm.git` and
+> `https://github.com/flowbyte-com/mpm` both normalise to
+> `github.com/flowbyte-com/mpm` and therefore to the same id.
+
 ### 3.4 Session identity, and the observed / inferred distinction
 
 | Identifier | Rule |
