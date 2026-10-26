@@ -211,6 +211,37 @@ a *duplicated* comment block in `scripts/tests/test_install_sh_contracts.py`
 (the equivalent change, with a single clean comment, is already in `main`).
 Neither was product work.
 
+### Adjudicated implementation sequence — 2026-10-26
+
+> Recorded by Session A after independently verifying both investigations.
+> The full adjudication is [`session-a-adjudication.md`](session-a-adjudication.md).
+>
+> **The contract is AGREED** on `mpm-event/0.1` (M1–M7, zero blocking
+> objections from either session), with amendments A1–A13 applied to
+> [`event-contract.md`](event-contract.md).
+
+| # | PR | Owner | Depends on the contract? | Schema? | Registry? |
+|---|---|---|---|---|---|
+| **P1** | `fix(opencode): deliver the wake context` — extraction (`content`, type-checked, never coerced), per-session cache, concurrent-build suppression, retry-on-empty, session attribution on the fetch | **C** | No | No | No |
+| **P2** | `feat(critic): typed, validated, idempotent evidence citations on proposals` — optional `source_type` beside `source_ids`, validated before insert; plus the one-line `artifact_type='skill'` registry correction (A-9) | **B** | No | **No** | Yes (one optional parameter) |
+| **P3** | `feat(critic): a retrospective missed-opportunity hunt` over the existing `tool_invocations` × `artifact_provenance` join | **B** | No | No | No |
+| **P4** | `feat(opencode): observe lifecycle events` — subscribe, consume off the hot path, map an explicit allowlist, emit `session.observed` / `session.started` (when actually seen) / `tool.outcome` / `compaction.*` | **C** | Yes (M2, now agreed) | No | No |
+| **P5** | The ingest entry point, receipt, `mpm_system action=event_counters`, and the storage decision | **A** | Yes | only if §6.1 later authorises it | Yes (one action) |
+
+* **P1 and P2 are independent and may proceed in parallel.** P3 depends on
+  P2. P4 depends on the contract and on P1's plumbing. P5 is A's and is
+  explicitly last.
+* **The lifecycle-events table is NOT the first milestone.** B's audit shows
+  the first end-to-end acceptance test needs no new table: `epistemic_provenance`
+  already provides typed, validated and idempotent citations, and the
+  retrospective join runs over existing tables. No `SafeMigrations` entry is
+  authorised by this adjudication.
+* **The existing specialised MPM tool surface is unchanged** pending
+  evidence-based review.
+* **P4 must not start until the structural allowlist test exists**, and that
+  test must use the **real captured shapes** in
+  `agent_installation/mpm-opencode/measure/evidence/`.
+
 ### Cross-session dependencies
 
 | From | To | Dependency | Status |

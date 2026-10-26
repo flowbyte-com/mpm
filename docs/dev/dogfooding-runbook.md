@@ -140,10 +140,19 @@ aborts without a TTY. In an automated procedure, pipe `yes`.
 ### 2.5 ⚠ A hazard found during verification — **confirmed, not closed**
 
 `mpm info` reported `mpm-scheduler : running (pid 3050)` while pointed at
-the **isolated** workspace. The scheduler check is **process-based, not
-workspace-scoped**. A session working in the dogfooding workspace will
-therefore be told that a scheduler is running when the scheduler is in fact
-maintaining a *different* workspace.
+the **isolated** workspace. The check is **systemd-unit-based**:
+`cmd/mpm/handlers_info.go:418` runs `systemctl --user is-active
+mpm-scheduler` and then `systemctl --user show … MainPID`. There is exactly
+**one** such unit, and the installed one pins
+`MPM_WORKSPACE=/home/v/.mpm` — so the line is evidence about the **live**
+workspace and about nothing else.
+
+> **Correction (2026-10-26, A-7).** An earlier revision of this runbook
+> described the check as "process-based". That was **wrong**, and the
+> conclusion was right for the wrong reason. The correct statement is
+> stronger: the check resolves a **single systemd unit**, and that unit is
+> pinned to the live workspace by its own `Environment=` lines. Credit to
+> Session B for catching it.
 
 **Re-confirmed on 2026-10-26, with the process's own environment read
 directly** (§8.5):
@@ -578,7 +587,7 @@ deployment.
 | Does `~/.mpm-dogfood` have a dedicated scheduler? | **No.** |
 | Does it have any scheduler at all? | **No.** |
 | Is there a supported isolation mechanism for one? | **Yes, but not deployed.** The scheduler takes `--db` and `--lock`; a dogfooding scheduler would need its own unit file with its own `MPM_WORKSPACE`/`MPM_DB_PATH`/`--lock`. Creating one is a deployment act, and the brief for this round explicitly says **do not modify the live systemd service**. No second unit was created. |
-| What does `mpm info` report for the dogfooding workspace? | `mpm-scheduler : running (pid 3050)` — **misleading**. That is the *live* scheduler, whose environment and open file descriptors are shown in §2.5. The check is process-based, not workspace-scoped. |
+| What does `mpm info` report for the dogfooding workspace? | `mpm-scheduler : running (pid 3050)` — **misleading**. That is the *live* scheduler, whose environment and open file descriptors are shown in §2.5. The check is **systemd-unit-based** (`systemctl --user is-active mpm-scheduler` + its `MainPID`); the unit is pinned to `MPM_WORKSPACE=/home/v/.mpm`, so the line says nothing about any other workspace. |
 | What did the live systemd service do during this work? | **Nothing.** It was not stopped, restarted, edited or reloaded. |
 
 **Consequence for the sprint:** the dogfooding workspace's knowledge is
@@ -686,6 +695,58 @@ suite*. It does **not** cover a script, a manual command, or an agent that
 constructs a `DatabaseManager` outside the test tree — which is why §8.3's
 scratch discipline and §8.2's `MPM_DB_PATH` pinning still matter for
 anything a session runs by hand.
+
+### 8.11 The environment mechanism — a separately launched, pinned host
+
+> **Added 2026-10-26.** Measured, not assumed. See
+> [`session-a-adjudication.md`](session-a-adjudication.md) §3 for the full
+> record.
+
+**The defect.** The running OpenCode processes do not inherit the sprint's
+pins. Read from `/proc/<pid>/environ`, the desktop app, its renderer and
+`opencode-cli serve --service` each have **no** `MPM_WORKSPACE`, no
+`MPM_DB_PATH` and no `MPM_BINARY`. The plugin therefore resolves
+`~/.mpm` (the **live** workspace) and `~/.mpm/bin/mpm` (the **stale**
+binary `0.1.0-dev+g3df72315`). Plugin traffic lands in the live database;
+shell-side `mpm call` lands in `~/.mpm-dogfood`. The two channels are
+**split across two databases**, and neither is attributed to a session.
+
+**What is NOT available.** The host's **plugin-options** channel is not
+usable in opencode v2.1.4: the config normaliser rejects the tuple form
+(`$.plugins.0 kind=invalid action="skipped malformed recognized value"`),
+and a probe confirms `effect(input, options)` is called with
+`options = null`. There is no first-class "configure this plugin" mechanism
+in this host version.
+
+**What IS available: a separately launched, pinned, isolated development
+host.** A probe plugin, started by an isolated `opencode run --standalone`
+with the pins exported, observed `MPM_WORKSPACE`, `MPM_DB_PATH` and
+`MPM_BINARY` **in its own process environment**. The **real** MPM plugin,
+run the same way, wrote its rows into the scratch database and **nothing**
+into `~/.mpm` or `~/.mpm-dogfood`.
+
+The launch must:
+
+1. **require** the three pins and **refuse to start** if any is missing or
+   resolves to `~/.mpm` — so it **cannot silently fall back** to the live
+   workspace;
+2. redirect `XDG_{CONFIG,DATA,STATE,CACHE}_HOME` and `OPENCODE_CONFIG_DIR`
+   to a disposable tree, so the host's own state, session store and database
+   are never touched;
+3. register the **repository's** plugin, not the installed payload;
+4. use `opencode run --standalone` (or `opencode serve` on a free port with
+   `OPENCODE_PASSWORD` read from its own log), so no shared managed service
+   is contacted;
+5. point `resolveMpmBinary` at the **development** build.
+
+**Verification is from inside the plugin process**, never from the
+launching shell's variables: the plugin writes its own resolved
+`MPM_WORKSPACE` / `MPM_BINARY` to a probe log, and the acceptance harness
+reads the **actual system-prompt array** the agent received.
+
+**The desktop application is not touched.** Changing how a running
+user-facing process is launched is an operator decision, recorded as an open
+item in [`session-a-adjudication.md`](session-a-adjudication.md) §7.
 
 ### 8.10 Summary
 
