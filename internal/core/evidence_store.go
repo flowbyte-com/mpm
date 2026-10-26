@@ -538,16 +538,44 @@ func readArtifactCreatedAt(node DBNode, artifactID, artifactType string) (time.T
 	default:
 		table = "memories"
 	}
-	var createdAt string
-	err := node.QueryRowTracked(fmt.Sprintf(`SELECT created_at FROM %s WHERE id = ?`, table), artifactID).Scan(&createdAt)
+	// The column has two shapes in the wild. `memories.created_at` is
+	// `INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))`
+	// (schema.go) and the production write path stores an integer epoch
+	// (db.go, saveMemoryRow), while some legacy rows and some writers
+	// store an RFC3339 string. Both are read here.
+	//
+	// Reading only the string shape (as this function used to) made the
+	// integer epoch unparseable, so the decay anchor silently fell back
+	// to "now" and `tDays` was 0 — no decay was ever applied to an
+	// artifact without positive evidence, which is the population this
+	// anchor exists for.
+	var raw interface{}
+	err := node.QueryRowTracked(fmt.Sprintf(`SELECT created_at FROM %s WHERE id = ?`, table), artifactID).Scan(&raw)
 	if err != nil {
 		return time.Time{}, false
 	}
-	t, err := parseTime(createdAt)
-	if err != nil {
+	switch v := raw.(type) {
+	case nil:
+		return time.Time{}, false
+	case int64:
+		return time.Unix(v, 0), true
+	case float64:
+		return time.Unix(int64(v), 0), true
+	case []byte:
+		t, perr := parseTime(string(v))
+		if perr != nil {
+			return time.Time{}, false
+		}
+		return t, true
+	case string:
+		t, perr := parseTime(v)
+		if perr != nil {
+			return time.Time{}, false
+		}
+		return t, true
+	default:
 		return time.Time{}, false
 	}
-	return t, true
 }
 
 // artifactExists returns whether a row exists for the given (artifactID,

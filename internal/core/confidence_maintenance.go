@@ -109,6 +109,23 @@ type confidenceDecayCandidate struct {
 //
 // Both the count and the page query read this one definition, so the
 // reported backlog cannot drift from the rows the pass actually scans.
+//
+// Terminal states are EXCLUDED from the participant set:
+//
+//   - status='challenged' — a challenge pins the memory's confidence to
+//     ChallengedMemoryConfidenceFloor and expires its evidence, so that
+//     fresh evidence is the only thing that can re-elevate it (F7.1).
+//     Recomputing such a memory from an empty evidence set derives the
+//     INITIAL confidence, which would silently REVERSE the challenge.
+//   - status='proven' — a theory the operator has explicitly proven. Its
+//     cached confidence decaying to the invalidation threshold would
+//     enqueue a confidence_floor cascade that invalidates every
+//     downstream artifact citing a theory the operator declared sound.
+//
+// The json_extract is guarded by json_valid because json_extract raises
+// "malformed JSON" on a non-JSON metadata value, which would abort the
+// whole participant query. The trigger that writes metadata uses the
+// same guard (internal/core/db.go).
 const confidenceDecayDueSelect = `
 SELECT id, collection, last_check FROM (
 	SELECT id, collection,
@@ -123,6 +140,10 @@ SELECT id, collection, last_check FROM (
 	  AND COALESCE(is_prime_directive, 0) = 0
 	  AND COALESCE(collection, '') IN ('', 'memories', 'theories', 'decisions')
 	  AND confidence IS NOT NULL
+	  AND COALESCE(
+	        CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.status') END,
+	        ''
+	      ) NOT IN ('challenged', 'proven')
 )`
 
 const confidenceDecayDueWhere = ` WHERE last_check <= ?`
