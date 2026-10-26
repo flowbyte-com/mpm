@@ -110,6 +110,29 @@ func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		return nil, fmt.Errorf("fact is required")
 	}
 
+	// `evidence` is a CHALLENGE-only parameter that lives in the shared
+	// action-agnostic params object, so it reaches save too. This handler
+	// has never read it: a caller sending evidence with action=save got a
+	// success response while the observation was silently discarded —
+	// exactly the failure mode where an agent believes it recorded
+	// support that the substrate never saw.
+	//
+	// It is refused rather than persisted, because free text is not a
+	// verified observation: storing it would let a caller mint
+	// evidentiary weight by writing prose. The refusal names the path
+	// that does attach evidence to a real artifact.
+	if raw, present := p["evidence"]; present && raw != nil {
+		evStr, isString := raw.(string)
+		if !isString || strings.TrimSpace(evStr) != "" {
+			return nil, fmt.Errorf(
+				"mpm_memory action=save does not persist 'evidence' (the shared parameter " +
+					"is used by action=challenge only); nothing was saved. Save the memory " +
+					"first, then attach the observation with mpm_evidence action=add " +
+					"(artifact_id=<memory id>, artifact_type=memory, source_group=<how it was " +
+					"observed>, ...). Free text is not recorded as evidence without a source.")
+		}
+	}
+
 	// Alpha cleanup (2026-09-10): projection parity across save/show/query.
 	// Default "summary" keeps the bounded-preview behavior (F4 audit
 	// finding — bounded echoes prevent context-bloat on large saves).

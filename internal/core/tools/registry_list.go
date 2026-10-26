@@ -51,7 +51,7 @@ Lifecycle asymmetry: weaken uses an internal floor-protected path (the weight ca
 						"delta":           {"type": "number"},
 						"days":            {"type": "number"},
 						"patch":           {"type": "object"},
-						"evidence":         {"type": "string"},
+						"evidence":         {"type": "string", "description": "action=challenge only: the observation that contradicts the memory. Other actions reject a non-empty value rather than discard it; to attach evidence to a saved memory use mpm_evidence action=add."},
 						"summary":         {"type": "string"},
 						"flavor":          {"type": "string", "enum": ["shipped","insight"]},
 						"_confidence_band": {"type": "string"},
