@@ -23,6 +23,7 @@ import stat
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -604,40 +605,146 @@ class TestSignalCleanup(TransactionBase):
     restore the previous set before exiting.
     """
 
-    def _drive_slowly(self, bindir, dest):
-        """A driver whose `mv` sleeps, so a signal reliably lands mid-promotion."""
+    # The announcement the driver writes when it reaches the rendezvous
+    # point, and the line the test writes back to release it.
+    READY_TOKEN = "MPM-TXN-READY"
+    RELEASE_LINE = "go\n"
+
+    def _drive_slowly(self, bindir, dest, announce_on_mv=1):
+        """A driver that STOPS at a known point in the promotion.
+
+        The old version of this driver overrode `mv` to sleep and then
+        relied on the test to GUESS when the transaction had reached its
+        destructive window ("sleep 1.1 seconds, then signal"). That guess
+        is a wall-clock assumption about how fast the child gets through
+        its sleeps, and it is wrong under load: if the parent is
+        descheduled for long enough, the signal arrives after the
+        transaction has already committed, so nothing is rolled back and
+        the prefix is left holding the NEW release. The test then failed
+        against a correct library — a real flake, reproducible on
+        pristine origin/main under the full-suite load.
+
+        This driver instead announces the exact point it has reached and
+        then blocks until the test releases it, so the interrupt is
+        delivered at a DETERMINATE point in the transaction rather than a
+        guessed one. The `mv` override is kept (it makes the rename
+        window observable) but the rendezvous, not the clock, decides
+        when the signal is sent.
+
+        announce_on_mv selects which rename to stop at:
+          1 -> the first BACKUP rename: this binary is out of the prefix
+               and in the rollback directory, the rest are still OLD.
+          6 -> the first PROMOTE rename: this binary is NEW in the
+               prefix, the rest are still OLD.
+        Both are genuinely mixed states that must roll back.
+        """
         d = self._tmp / "drive-slow.sh"
         d.write_text(
             f'#!/usr/bin/env bash\nset -uo pipefail\n. {LIB}\n'
-            'mv() { sleep 0.5; command mv "$@"; }\n'
+            # The rename is slowed so the window is wide, and counted so
+            # the transaction can be stopped at a chosen rename, announced
+            # from inside the transaction, and released by the test. The
+            # signal is sent while the driver is parked there, so it is
+            # guaranteed to land inside the destructive window.
+            'if [ -z "${_bt_test_mv_count:-}" ]; then _bt_test_mv_count=0; fi\n'
+            'mv() {\n'
+            '  sleep 0.05\n'
+            '  command mv "$@"\n'
+            '  _bt_test_mv_count=$((_bt_test_mv_count + 1))\n'
+            f'  if [ "$_bt_test_mv_count" -eq {announce_on_mv} ]; then\n'
+            f'    printf "{self.READY_TOKEN}\\n" >&2\n'
+            '    read -r _ || true\n'
+            '  fi\n'
+            '}\n'
             f'mpm_promote_binaries "{bindir}" "{dest}"\n'
             f"exit $?\n"
         )
         d.chmod(0o755)
         return d
 
-    def _assert_restored_after_signal(self, signum):
+    def _read_until(self, stream, token, deadline):
+        """Read from `stream` until `token` appears or the deadline passes.
+
+        `deadline` is an absolute time.monotonic() value. Returns
+        (found, text). Uses select() on the raw descriptor so a driver
+        that never announces is a test FAILURE rather than a hang.
+        """
+        import select
+        fd = stream.fileno()
+        buf = b""
+        while token.encode() not in buf:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False, buf.decode("utf-8", "replace")
+            ready, _, _ = select.select([fd], [], [], min(remaining, 0.5))
+            if not ready:
+                continue
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                # EOF: the driver exited before announcing.
+                return False, buf.decode("utf-8", "replace")
+            buf += chunk
+        return True, buf.decode("utf-8", "replace")
+
+    def _assert_restored_after_signal(self, signum, announce_on_mv=1):
         import signal as _signal
-        driver = self._drive_slowly(self.build, self.bindir)
+        driver = self._drive_slowly(self.build, self.bindir, announce_on_mv)
         proc = subprocess.Popen(
             ["bash", "--noprofile", "--norc", str(driver)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            text=True, env={**os.environ, "HOME": str(self.home)},
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, bufsize=0,
+            env={**os.environ, "HOME": str(self.home)},
         )
+        stderr_text = ""
         try:
-            # Let it get past staging and into the backup/promotion window.
-            _signal.pause  # no-op; keeps the import obviously used
-            import time
-            time.sleep(1.1)
+            # Wait for the driver to reach the rendezvous. This is a
+            # handshake, not a delay: the driver announces from inside the
+            # transaction, so when the token arrives the prefix is
+            # provably in the mixed state under test.
+            found, stderr_text = self._read_until(
+                proc.stderr, self.READY_TOKEN,
+                deadline=time.monotonic() + 60.0)
+            if not found:
+                proc.kill()
+                proc.communicate()
+                self.fail(
+                    "the driver never reached the rendezvous point; the "
+                    f"signal would have been sent at an unknown moment in "
+                    f"the transaction. stderr so far:\n{stderr_text}"
+                )
+
+            # The signal is now delivered at a known point: the prefix
+            # holds a MIXED set and the transaction's handlers are armed.
             proc.send_signal(signum)
-            out, err = proc.communicate(timeout=30)
+            # Release the driver so the deferred trap can run.
+            try:
+                proc.stdin.write(self.RELEASE_LINE.encode())
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+            proc.stdin.close()
+            out, err = proc.communicate(timeout=60)
+            if isinstance(err, bytes):
+                err = err.decode("utf-8", "replace")
+            stderr_text += err or ""
         finally:
             if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
 
-        self._assert_equals_pre_state(f"SIG{signum} mid-promotion")
-        self._assert_no_transaction_leftovers(f"SIG{signum} mid-promotion")
+        label = f"SIG{signum} mid-promotion (rename #{announce_on_mv})"
+
+        # The trap must have run: the library exits with the signal number
+        # after a successful restoration. A child that exited 0 instead
+        # committed the transaction, which is NOT the outcome under test.
+        self.assertEqual(
+            proc.returncode, signum,
+            f"{label}: the driver exited {proc.returncode}, want {signum}; "
+            f"the interrupt must be handled by the transaction's handler "
+            f"rather than committed. stderr:\n{stderr_text}",
+        )
+        self._assert_equals_pre_state(label)
+        self._assert_no_transaction_leftovers(label)
 
     def test_sigterm_during_promotion_restores_previous_set(self):
         import signal
@@ -646,6 +753,17 @@ class TestSignalCleanup(TransactionBase):
     def test_sigint_during_promotion_restores_previous_set(self):
         import signal
         self._assert_restored_after_signal(signal.SIGINT)
+
+    def test_sigint_during_promote_restores_previous_set(self):
+        """The other mixed state: a binary already replaced by the NEW one.
+
+        The backup-phase case leaves every destination binary holding the
+        OLD bytes; the promote-phase case leaves one of them holding the
+        NEW bytes with its OLD copy still in the rollback directory. Both
+        must roll back to the exact pre-promotion state.
+        """
+        import signal
+        self._assert_restored_after_signal(signal.SIGINT, announce_on_mv=6)
 
     def test_library_installs_signal_handlers(self):
         """The handlers must exist in the shipped source, not just in a test."""
