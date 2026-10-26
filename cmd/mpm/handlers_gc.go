@@ -62,20 +62,25 @@ func handleGC(args []string) int {
 	}(); shredNegative {
 		negMemories, err := dm.GetNegativeWeightMemories()
 		if err != nil {
-			usererror.Error("%v", err)
+			// Fail closed. The previous shape printed the error and then
+			// fell through to "No negative-weight memories found." with
+			// exit 0 — a failed READ reported as a successful empty scan.
+			usererror.Error("gc --shred-negative: could not read negative-weight memories: %v", err)
+			return 1
 		}
 		if len(negMemories) == 0 {
 			fmt.Println("No negative-weight memories found.")
 			return 0
 		}
 		fmt.Printf("Found %d negative-weight memories:\n\n", len(negMemories))
-		var shredded int
+		var shredded, shredFailures int
 		for _, m := range negMemories {
 			id, _ := m["id"].(string)
 			weight, _ := m["weight"].(int)
 			theory, err := dm.GetProvenTheoryForMemory(id)
 			if err != nil {
 				usererror.Warn("error checking theory: %s: %v", id, err)
+				shredFailures++
 				continue
 			}
 			if theory != nil {
@@ -84,6 +89,7 @@ func handleGC(args []string) int {
 				} else {
 					if err := dm.ShredMemory(id); err != nil {
 						usererror.Warn("shred error: %s: %v", id, err)
+						shredFailures++
 						continue
 					}
 					fmt.Printf("  [%s] weight=%d → SHREDDED (proven theory %s)\n", id, weight, theory["id"])
@@ -95,6 +101,12 @@ func handleGC(args []string) int {
 		}
 		if !dryRun && shredded > 0 {
 			fmt.Printf("\nShredded %d memories with proven theories.\n", shredded)
+		}
+		if shredFailures > 0 {
+			// A partially-failed destructive sweep must not read as a
+			// clean one.
+			usererror.Error("gc --shred-negative: %d memory/memories could NOT be shredded; the store is NOT fully swept", shredFailures)
+			return 1
 		}
 		return 0
 	}
@@ -271,7 +283,12 @@ func handleGC(args []string) int {
 			runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE deleted_at IS NULL
 		`, int64(monotonicNow.Sub(mpminternal.GCProcessStart()).Seconds())); err != nil {
-			usererror.Warn("handleGC: runtime accrual failed, continuing: %v", err)
+			// The runtime accrual is the INPUT to the whole decay
+			// computation. If it fails, the weights computed below are
+			// derived from stale accumulators — a maintenance sweep that
+			// did not do what it was asked. Count it like any other
+			// failed sweep rather than continuing silently.
+			pruneFailed("runtime accrual", err)
 		}
 	}
 
@@ -281,7 +298,12 @@ func handleGC(args []string) int {
 		FROM memories WHERE deleted_at IS NULL
 	`)
 	if err != nil {
-		usererror.Error("%v", err)
+		// Fail closed. The previous shape printed the error and fell
+		// through to `defer rows.Close()` on a nil *sql.Rows — a nil
+		// pointer dereference, i.e. a panic in the middle of the
+		// maintenance pass.
+		usererror.Error("gc: could not read the memory set: %v", err)
+		return 1
 	}
 	defer rows.Close()
 
@@ -390,10 +412,15 @@ func handleGC(args []string) int {
 			}
 			if batchErr != nil {
 				tx.Rollback()
-				usererror.Error("batch update failed, rolled back: %v", batchErr)
+				// The weight-decay batch IS the maintenance pass. A
+				// rolled-back batch means no weight changed at all, so it
+				// must be counted like any other failed sweep — the
+				// previous shape printed the error and let the command
+				// exit 0.
+				pruneFailed("weight decay batch update", batchErr)
 			} else if err := tx.Commit(); err != nil {
 				tx.Rollback()
-				usererror.Error("batch commit failed, rolled back: %v", err)
+				pruneFailed("weight decay batch commit", err)
 			}
 		}
 	}
@@ -404,13 +431,27 @@ func handleGC(args []string) int {
 		softDeleted, softDeleteFailures := 0, 0
 		for _, m := range deadMemories {
 			id, _ := m["id"].(string)
-			if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?`, id); err != nil {
+			res, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL`, id)
+			if err != nil {
 				softDeleteFailures++
 				slog.Warn("gc soft-delete failed", "id", id, "error", err)
 				usererror.Error("gc --review: soft-delete %s failed: %v", id, err)
 				continue
 			}
-			softDeleted++
+			// Count what actually changed, not what was attempted. A
+			// row that was already tombstoned (deleted concurrently)
+			// matches no row under the `deleted_at IS NULL` guard and is
+			// neither a soft-delete nor a failure.
+			n, err := res.RowsAffected()
+			if err != nil {
+				softDeleteFailures++
+				slog.Warn("gc soft-delete row count unavailable", "id", id, "error", err)
+				usererror.Error("gc --review: cannot confirm the soft-delete of %s: %v", id, err)
+				continue
+			}
+			if n > 0 {
+				softDeleted++
+			}
 		}
 		// Clean any lingering zombies not caught by this pass
 		if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE weight <= 0 AND is_long_term = 0 AND deleted_at IS NULL`); err != nil {
