@@ -13,9 +13,10 @@
 > | What this document says | Current state |
 > |---|---|
 > | the three worktrees at `414b276` | all three at **`b5b1840`** |
-> | `~/src/mpm-release` holds `main` @ `3df7231`, 12 commits behind | `main` @ the **tip**, 0 behind |
+> | `~/src/mpm-release` holds `main` @ `3df7231`, 12 commits behind | **retired** (2026-10-26); `main` tracks `origin/main` with no worktree |
 > | 12 open-PR branches, "all twelve remain OPEN and UNMERGED" | **all 15 PRs merged** — see [`integration-matrix.md`](integration-matrix.md) §1 |
 > | the dogfooding workspace "not yet initialised" | **initialised and verified** — see [`dogfooding-runbook.md`](dogfooding-runbook.md) §8 |
+> | §7's cleanup candidates (24 worktrees, 12 branches) | **executed** — see [`coordination.md`](coordination.md) §5 for the cleanup record and what was preserved |
 > | §6's four MPM records awaiting a decision | still awaiting the operator's decision; they were **not** shredded |
 >
 > The current state is in [`README.md`](README.md) §2–§3. Nothing in §6 was

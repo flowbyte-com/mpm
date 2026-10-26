@@ -149,7 +149,15 @@ development build used for dogfooding        0.1.0-dev+gb5b18401.t1793023964
 CI run on the PR head fa80f48                40332886651   ✅ all three green
 CI run on main = b5b1840                     40337045142   ✅ all three green
 CI run on main = this document's merge       40344867185   ✅ all three green
+CI run on main = the final merge             40351939110   ✅ all three green
 ```
+
+**Post-merge cleanup (2026-10-26):** 38 local branches, 26 worktrees and
+15 remote branches removed — each proven obsolete first. `~/src/worktrees`
+went from **1.8 GB to 25 MB**. One piece of unmerged work was found and
+**preserved** onto `chore/mpm-core-gomod-uuid-direct`; the two integration
+checkpoints survive as branches. The record is in
+[`coordination.md`](coordination.md) §5.
 
 > **How to read "the tip of main" here.** The fifteen corrective PRs are
 > merged as `b5b1840`, and this document set is the commit that follows it
@@ -211,9 +219,10 @@ pre-existing untracked file, `cmd/dbg_main.go.tmp` (579 B, 2026-10-17) —
 1. **The four MPM memory records** created during housekeeping — keep,
    refine, or shred. Details and a recommendation in
    [`inventory.md`](inventory.md) §6.
-2. **Whether `~/src/mpm-release` should be retired** so `main` can live in
-   `~/src/mpm`. It is clean and now current (the tip of `main`); retiring it
-   reclaims a second checkout of the same repository.
+2. ~~**Whether `~/src/mpm-release` should be retired**~~ — **done
+   (2026-10-26).** The worktree was removed; the local `main` branch tracks
+   `origin/main` without a worktree, and `~/src/mpm` remains Session A's
+   `integration/session-a`.
 3. **Whether to keep the 12 open-PR worktrees** under `~/src/worktrees/`.
    Their PRs are all merged now; they are reclaimable.
 4. **Whether to give the dogfooding workspace its own scheduler unit.** The

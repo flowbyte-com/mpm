@@ -76,13 +76,26 @@ Boundaries are drawn on real directories, verified by inspection (not guessed).
 
 | Worktree | Branch | Owner | HEAD | Rule |
 |---|---|---|---|---|
-| `~/src/mpm` | `integration/session-a` | **A** | `b5b1840` | integration base; A merges here first |
-| `~/src/mpm-core` | `dev/session-b-core` | **B** | `b5b1840` | B's feature branches branch from here |
-| `~/src/mpm-opencode` | `dev/session-c-opencode` | **C** | `b5b1840` | C's feature branches branch from here |
+| `~/src/mpm` | `integration/session-a` | **A** | tip of `main` | integration base; A merges here first |
+| `~/src/mpm-core` | `dev/session-b-core` | **B** | tip of `main` | B's feature branches branch from here |
+| `~/src/mpm-opencode` | `dev/session-c-opencode` | **C** | tip of `main` | C's feature branches branch from here |
 
 All three are **linked worktrees of one Git object store** (`~/src/mpm/.git`),
 so they share objects and a single `origin`. They are not independent
 clones.
+
+> **`main` is not checked out in any worktree.** After the post-merge
+> cleanup (2026-10-26) `~/src/mpm-release` was retired and the local `main`
+> branch was left tracking `origin/main` without a worktree. Session A syncs
+> it with `git fetch origin && git branch -f main origin/main`, and
+> `integration/session-a` is fast-forwarded with
+> `git merge --ff-only origin/main`.
+>
+> **The two integration checkpoints survive as branches, not worktrees:**
+> `hal9001/r3-integration` (`cbe6af7`) and `integration/pre-release-12`
+> (`a8c3b60`). Recreate a worktree for either with
+> `git worktree add ~/src/worktrees/<name> <branch>`. They are **evidence
+> only** — `main` is the verified integration result.
 
 Per-session feature branches:
 
@@ -153,12 +166,49 @@ against it simultaneously.
 
 | Branch | Session | HEAD | Status |
 |---|---|---|---|
-| `integration/session-a` | A | `b5b1840` | Session A integration base |
-| `dev/session-b-core` | B | `b5b1840` | Session B base |
-| `dev/session-c-opencode` | C | `b5b1840` | Session C base |
-| `docs/sprint-foundation` | A | `0134246`+ | this documentation set (PR #105) |
-| `hal9001/r3-integration` | A | `cbe6af7` | pre-existing combined tree — **evidence only** |
-| `integration/pre-release-12` | A | `a8c3b60` | **validation checkpoint — evidence only, not a baseline** |
+| `integration/session-a` | A | tip of `main` | Session A integration base |
+| `dev/session-b-core` | B | tip of `main` | Session B base |
+| `dev/session-c-opencode` | C | tip of `main` | Session C base |
+| `main` | A | tip of `main` | tracks `origin/main`; **not checked out** — syncs with `git branch -f main origin/main` |
+| `docs/sprint-foundation` | A | — | this documentation set (PRs #105, #106) |
+| `hal9001/r3-integration` | A | `cbe6af7` | pre-existing combined tree — **evidence only**, no worktree |
+| `integration/pre-release-12` | A | `a8c3b60` | **validation checkpoint — evidence only, not a baseline**, no worktree |
+| `chore/mpm-core-gomod-uuid-direct` | A | `1a16e90` | **the one piece of unmerged work found in the whole repository**, preserved onto a branch before its worktree was removed |
+
+### Post-merge cleanup record — 2026-10-26
+
+With every agent inactive and every PR merged, the tree was inventoried and
+reduced. **Nothing was deleted before it was proven obsolete.**
+
+| What | How many | How it was proven obsolete |
+|---|---|---|
+| local branches deleted | **38** | every commit on them is present in `main` by patch-id equivalence, or reverse-applies cleanly onto `main`, or (where the patch context had been rebased) every symbol it introduces exists in `main` |
+| worktrees removed | **26** | each held only a branch already proven merged, or a debug-only scratch state; nothing unique was lost |
+| remote branches deleted | **15** | the merged-PR heads `origin/fix/hal9001-*`; all proven present in `main` |
+
+**Reclaimed:** `~/src/worktrees` went from **1.8 GB to 25 MB**.
+
+**What was preserved, deliberately:**
+
+* `hal9001/r3-integration` and `integration/pre-release-12` — the two
+  integration checkpoints, kept as branches.
+* `chore/mpm-core-gomod-uuid-direct` — the **only** unmerged work found
+  anywhere in the repository: an uncommitted `internal/core/go.mod` edit in
+  the `baseline-main` worktree, marking `github.com/google/uuid` as a direct
+  dependency of the `mpm-core` module (it is imported directly by five files
+  in `internal/core`, but the module's `go.mod` listed it as `// indirect`).
+  It was saved onto a branch off the current `main`, verified to build, and
+  is **available to merge as a one-line PR** — it was deliberately not
+  merged in this foundation task.
+* `cmd/dbg_main.go.tmp` in `~/src/mpm` — a pre-existing untracked file
+  (579 B, 2026-10-17). **Not mine to delete.**
+
+**What was discarded, and why:** two debug-only modifications in worktrees
+that were being removed — three `PROBE` print statements added to
+`scripts/tests/test_binary_transaction.py` during the #103 investigation, and
+a *duplicated* comment block in `scripts/tests/test_install_sh_contracts.py`
+(the equivalent change, with a single clean comment, is already in `main`).
+Neither was product work.
 
 ### Cross-session dependencies
 
