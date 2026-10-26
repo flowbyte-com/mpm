@@ -37,6 +37,28 @@ def sha(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+def _reset_signal_dispositions():
+    """Restore INT/TERM to their default disposition in the child.
+
+    Python's subprocess restores SIGPIPE/SIGXFZ/SIGXFSZ by default, but
+    NOT SIGINT or SIGTERM: an ignored disposition is inherited across
+    exec(2). A test runner started as a background job from a
+    non-interactive shell has SIGINT ignored (POSIX requires it), and a
+    non-interactive bash cannot install a trap for a signal that was
+    ignored on entry. The transaction's handlers are then unreachable,
+    the driver commits, and the test reports a failure against a correct
+    library — the exact class of launcher-dependent flake #103 exists to
+    remove.
+
+    Resetting here measures the library, not how the suite was launched.
+    This runs in the child between fork and exec; the suite is
+    single-threaded, so the usual preexec_fn caveat does not apply.
+    """
+    import signal as _signal
+    _signal.signal(_signal.SIGINT, _signal.SIG_DFL)
+    _signal.signal(_signal.SIGTERM, _signal.SIG_DFL)
+
+
 class TransactionBase(unittest.TestCase):
     """Shared fixture: an OLD set, a NEW set, and a destination holding OLD."""
 
@@ -694,6 +716,7 @@ class TestSignalCleanup(TransactionBase):
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE, bufsize=0,
             env={**os.environ, "HOME": str(self.home)},
+            preexec_fn=_reset_signal_dispositions,
         )
         stderr_text = ""
         try:
@@ -779,6 +802,29 @@ class TestSignalCleanup(TransactionBase):
         """
         import signal
         self._assert_restored_after_signal(signal.SIGINT, announce_on_mv=6)
+
+    def test_sigint_case_is_independent_of_launcher_disposition(self):
+        """A launcher that ignores SIGINT must not break the signal test.
+
+        POSIX starts a background job of a non-interactive shell with
+        SIGINT ignored (that is how `make release-gate ... &` runs), and
+        an ignored disposition survives exec(2). A non-interactive bash
+        cannot install a trap for a signal ignored on entry, so without
+        the child-side reset the transaction commits and this test
+        reports a failure against a correct library. That is a
+        launcher-dependent flake of exactly the class this PR removes.
+
+        This test proves the independence by ignoring SIGINT in the
+        TEST process while the driver runs; the child's reset is what
+        keeps the handler reachable.
+        """
+        import signal
+        previous = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            self._assert_restored_after_signal(signal.SIGINT, announce_on_mv=6)
+        finally:
+            signal.signal(signal.SIGINT, previous)
 
     def test_library_installs_signal_handlers(self):
         """The handlers must exist in the shipped source, not just in a test."""
