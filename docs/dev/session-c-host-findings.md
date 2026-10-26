@@ -11,6 +11,27 @@
 > no deploy, no change to the tool surface, the tool registry, `package.json` or
 > the lockfile.**
 
+> ## ⚠ SUPERSEDED IN PART — read
+> [`session-c-event-stream-correction.md`](session-c-event-stream-correction.md)
+> ## first
+>
+> Three conclusions below were **withdrawn on 2026-10-26** after a second
+> measurement pass. The text is left in place deliberately (the error is a
+> reusable lesson), but do not act on it:
+>
+> | Below | Correct position |
+> |---|---|
+> | §4.1.1 "`ctx.event.subscribe` exists but is inert" and every "unreachable from a plugin" claim | **Wrong.** `ctx.event.subscribe({signal})` returns an **`AsyncIterable`**. The probe passed a *callback* and never iterated the result, so it saw nothing. 31 distinct event types were captured on the second pass, including `session.created`, `session.compaction.started`/`.ended`, `session.tool.*` and `session.execution.*`. |
+> | §1.1 — blocking objection **M2** (`session.started`, `compaction.started`, `compaction.completed` not populatable) | **Withdrawn.** All three are directly observable as host events. |
+> | §1.2 — blocking objection **M3** (strict-mode `event_id` collision) | **Downgraded to a non-blocking recommendation.** Every event carries a stable `evt_…` id, so the derivation cannot collide. The nested-`callID` measurement itself still holds. |
+> | §5 observability matrix — session start/resume/idle/completion/interruption "unobservable" | **Start, idle, completion and interruption are observable** in the event stream (`session.created`, `session.idle`, `session.execution.succeeded/failed/interrupted`). Resume remains unobservable. |
+>
+> Also corrected: §3's "no change is required" for the environment pins. **None
+> of the three pins reaches the running host** — see the correction report §6.
+>
+> §6.3's behavioural measurements, §6.2's tool-surface figures, §7.1's
+> wake-context defect and §7.2's plugin-surface gap were re-tested and **stand**.
+
 ---
 
 ## 0. Executive summary
@@ -63,6 +84,13 @@ event implementation may proceed until A resolves them.
 
 ### 1.1 Blocking objection to M2 — two §4 vocabulary rows are not populatable
 
+> **WITHDRAWN — see
+> [`session-c-event-stream-correction.md`](session-c-event-stream-correction.md)
+> §3 and §5.** This entire subsection rests on "the host event stream is
+> unreachable from a plugin", which is false: the stream is an `AsyncIterable`
+> and `session.created` plus `session.compaction.started`/`.ended` were
+> captured live. M2 is **agreed**.
+
 **`session.started` — required capability "an observable session-creation
 signal".** There is none.
 
@@ -109,6 +137,13 @@ timestamp-gap inference §3.6 forbids.
 > consequences.
 
 ### 1.2 Blocking objection to M3 — the strict-mode `event_id` derivation collides
+
+> **DOWNGRADED to a non-blocking recommendation (R1) — see
+> [`session-c-event-stream-correction.md`](session-c-event-stream-correction.md)
+> §5.** The measurement below (nested tool calls share one `callID`) is correct
+> and still matters. What changed is that the host event stream supplies a
+> stable per-event `evt_…` id, so a strict-mode derivation keyed on it cannot
+> collide. Adding `event_type` is still recommended, as defence in depth.
 
 §3.5 derives a strict-mode id as:
 
@@ -294,6 +329,14 @@ Method shapes (all own-key lists confirmed at runtime):
 
 #### 4.1.1 `ctx.event.subscribe` exists but is inert
 
+> **WRONG — RETRACTED. See
+> [`session-c-event-stream-correction.md`](session-c-event-stream-correction.md)
+> §1 and §3.** `ctx.event.subscribe({signal})` returns an `AsyncIterable`; it
+> is not a callback registration. The probe below (still preserved in
+> `measure/probe/host_surface_probe.js`) passed a callback as the *options*
+> argument and never iterated the returned stream, which is why it recorded
+> `dispKeys: []` and zero events. The stream works.
+
 The plugin-facing event bus registers without error and delivers **zero**
 events across a full agent turn — while the server's own log and the
 `opencode.db` `event` table show the host publishing `session.*`,
@@ -464,6 +507,14 @@ introduced" is meant to prevent. This is the M7 minor request.
 ---
 
 ## 5. Per-event observability matrix
+
+> **SUPERSEDED — see
+> [`session-c-event-stream-correction.md`](session-c-event-stream-correction.md)
+> §3.3 for the corrected matrix.** The rows below were produced under the false
+> premise that only the hook surface is available. `session.started`,
+> `compaction.started`, `compaction.completed`, session idle, completion and
+> interruption are all observable in the host event stream; only **resume**
+> remains unobservable.
 
 Classification per the launch gate §4.2.
 

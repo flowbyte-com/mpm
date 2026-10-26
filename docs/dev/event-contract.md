@@ -833,43 +833,78 @@ Session B — name: ....................  contract version accepted: mpm-event/0
   blocking objections: ............................................
 
 Session C — name: Session C (OpenCode adapter & behavioural evaluation)  contract version accepted: mpm-event/0.1
-  date: 2026-10-26
-  M1 envelope ....................... agree — every required field is implementable against the
-                                       measured host (ctx.app.version, ctx.location.project.id,
-                                       tool-context callID/messageID/agent).
-  M2 vocabulary & classification ... object (BLOCKING) — §4's `session.started` has no observable
-                                       signal in opencode v2.1.4 (no session-creation hook; the host
-                                       event stream is unreachable from a plugin), and
-                                       `compaction.started`/`compaction.completed` cannot be
-                                       populated from the single `ctx.session.hook("compaction")`
-                                       signal. Proposal: `session.observed` + one `compaction.context`.
-  M3 identity ....................... agree, object (BLOCKING) — §3.5's strict-mode derivation must
-                                       also include `event_type` (+ host tool name): measured, nested
-                                       tool calls SHARE one callID, so the derivation as written gives
-                                       the outer and inner tool events the same event_id and the
-                                       second is silently deduplicated away. Separately (improvement,
-                                       not objection): the host already supplies a project id that
-                                       satisfies §3.3 — see the report §4.3.
-  M4 ordering ....................... agree — ms precision obtainable; the host gives the plugin no
-                                       monotonic counter, so `host_seq` is null in practice and §3.6's
-                                       NULL ordering already covers it.
+  date: 2026-10-26   (revised same day — see "superseded block" below)
+  M1 envelope ....................... agree — every required field is obtainable: `observed_at_ms`
+                                       is the host event's own `created` (unix ms), `host_version` is
+                                       ctx.app.version, `adapter_version` is the plugin build.
+  M2 vocabulary & classification ... AGREE — objection withdrawn. Measured: the host event stream
+                                       IS reachable from a plugin
+                                       (ctx.event.subscribe({signal}) -> AsyncIterable), and both
+                                       previously-objected rows are directly observable:
+                                       `session.started` <- `session.created` (carries sessionID,
+                                       projectID, parentID, agent, model) and the pair
+                                       <- `session.compaction.started` / `.ended` (both live-captured;
+                                       `.delta` and `.failed` also exist). `session.observed` stays
+                                       as the unconditional base: the adapter's OWN first session is
+                                       created before its iteration loop runs, so that one
+                                       `session.created` can be missed. Missing must never be
+                                       inferred. Closed vocabulary, no-neighbour-mapping and
+                                       observed-only are all implementable and endorsed.
+  M3 identity ....................... AGREE — objection downgraded to a non-blocking recommendation.
+                                       Every event carries a stable per-event `evt_<hex>` id, i.e.
+                                       §3.5's first-choice `host_event_id`, so strict-mode derivation
+                                       cannot collide even when nested tool calls share one callID.
+                                       RECOMMENDATION (R1, not a blocker): still add `event_type`
+                                       (+ host tool name when present) to the derivation input and
+                                       add `TestEventID_NestedToolCallsDoNotCollide`, so the guarantee
+                                       does not depend on which host key a future adapter picks.
+                                       Project identity (improvement): adopt the host's id when a git
+                                       remote is independently confirmed — see report §4.3.
+  M4 ordering ....................... agree — the event carries `created` in ms; the host gives no
+                                       monotonic per-session counter, so `host_seq` is null in
+                                       practice and §3.6's NULL ordering already covers it.
+                                       Causality stays explicit (parentID / callID / parent_event_id).
   M5 trust ......................... agree — the adapter is structurally incapable of promotion.
+                                       NOTE: the event stream widens what is COLLECTED (full tool
+                                       input/output, compaction summary text, assistant text), so
+                                       §3.8's allowlist is now the load-bearing control.
   M6 ingest contract ............... agree — validate/classify/dedup/stamp/store/receipt plus an
                                        observable rejection counter are implementable. Transport
-                                       (§6.2) remains open; measured cost of one `mpm call` spawn
-                                       is ~39 ms, which bears on that decision.
+                                       (§6.2) remains open; measured cost of one `mpm call` spawn is
+                                       ~39 ms, and the stream is volatile by contract, so no
+                                       subprocess call may run inside the event loop.
   M7 outcomes ...................... agree, one request — §3.7 needs an explicit mapping from the
-                                       host's opaque tool-execution status token to
-                                       internal.ToolOutcomeClass's nine values.
-  blocking objections: 2 — (1) M2: the §4 vocabulary rows `session.started`,
-                       `compaction.started` and `compaction.completed` are not populatable as
-                       written against opencode v2.1.4; (2) M3: §3.5's strict-mode event_id
-                       derivation must include `event_type`, or nested tool calls collide and one
-                       event is silently lost.
-                       Evidence: docs/dev/session-c-host-findings.md (Session C branch
-                       dev/session-c-opencode @ 70deac2b). Recorded in the shared dogfooding
-                       workspace as decision 8cf1f0e3cc41465e.
+                                       host's tool-execution status vocabulary to
+                                       internal.ToolOutcomeClass's nine values. The host supplies
+                                       `session.execution.failed` / `session.tool.failed`, so real
+                                       outcomes exist; the mapping must still be pinned by A or B.
+  blocking objections: 0  (was 2 — both withdrawn by measurement, not by preference)
+  non-blocking recommendations: R1 add event_type to the strict-mode derivation (+ its test);
+                                R2 document the first-session startup race beside §4's
+                                   `session.started`.
+  Evidence: docs/dev/session-c-event-stream-correction.md (supersedes the M2/M3 analysis in
+            docs/dev/session-c-host-findings.md §1.1-§1.2 and §4.1.1).
 ```
+
+> ### Superseded Session C block — recorded verbatim, not deleted
+>
+> The block below was Session C's first position (`70deac2b`). **Both of its
+> blocking objections were withdrawn on 2026-10-26** after the host event
+> stream was measured correctly. The text is preserved because the reason it
+> was wrong is a reusable lesson: the first-pass probe called
+> `ctx.event.subscribe(callback)` and never iterated the returned
+> `AsyncIterable`, so "the stream is inert" was an artifact of the call shape,
+> not a host limitation. A negative capability claim is only as strong as the
+> call that produced it.
+>
+> ```
+> M2 vocabulary & classification ... object (BLOCKING) — §4's `session.started` has no observable
+>                                        signal in opencode v2.1.4 (no session-creation hook; the host
+>                                        event stream is unreachable from a plugin) ...
+> M3 identity ....................... agree, object (BLOCKING) — §3.5's strict-mode derivation must
+>                                        also include `event_type` ...
+> blocking objections: 2 ...
+> ```
 
 **Until this block is filled in, Sessions B and C may audit and investigate,
 but may not implement against the contract.** A single unresolved blocking

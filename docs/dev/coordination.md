@@ -215,35 +215,45 @@ Neither was product work.
 
 | From | To | Dependency | Status |
 |---|---|---|---|
-| C | B | C emits lifecycle events; B ingests and validates them | ⛔ **dependent implementation blocked** — C has acknowledged M1–M7 with **two blocking objections** (M2: §4's `session.started` / `compaction.started` / `compaction.completed` are not populatable against opencode v2.1.4; M3: §3.5's strict-mode derivation must include `event_type`, or nested tool calls that share one callID collide). A must adjudicate. B's input is needed on the §3.7 host-status → `ToolOutcomeClass` mapping. |
+| C | B | C emits lifecycle events; B ingests and validates them | ✅ **unblocked** — C's revised acknowledgement records **zero blocking objections** (`docs/dev/session-c-event-stream-correction.md`). The host event stream **is** reachable from a plugin (`ctx.event.subscribe({signal})` → `AsyncIterable`); 31 event types were captured, including `session.created`, `session.compaction.started`/`.ended`, `session.tool.*` and `session.execution.*`. B should now assume **event-derived observations**, not hook-derived only. **B must tolerate missing and duplicate events:** the stream is volatile by the host's own contract (slow consumer → overflow), and the adapter's own first session can miss `session.created`. Two items still need B's input: the §3.7 host-status → `ToolOutcomeClass` mapping, and whether the proposal shape can cite `event_id`s. |
 | C | A | C's adapter changes must keep `test_makefile_agent_adapter_wiring.py` and `test_release_gate_bootstrap_wiring.py` green | open — C's first PR (the wake-context extraction fix) touches no shared interface; the later plugin-surface PR (adding `mpm_help` / `mpm_resolve` / `mpm_work`) **is** a shared-interface change under §2 and needs A's PR. |
 | B | A | B's schema migrations land in `internal/core/schema.go` — one PR, reviewed together | open — and **no migration may be added before A agrees the implementation PR** |
-| B | C | B may consume the adapter's raw event stream; the stream is *evidence*, not trusted knowledge | open — **measured constraint:** the host's event stream is **not reachable from a plugin** in opencode v2.1.4 (`ctx.event.subscribe` registers but delivers nothing). Every §4 vocabulary row must be sourced from the **hook** surface instead. B should assume hook-derived observations only. |
+| B | C | B may consume the adapter's raw event stream; the stream is *evidence*, not trusted knowledge | open — **measured constraint (corrected 2026-10-26):** the host event stream **is** reachable from a plugin (`ctx.event.subscribe({signal})` → `AsyncIterable`; 31 event types captured). It is **volatile by the host's own contract** (a slow consumer overflows and fails the stream; no replay), so the adapter must queue and must never `await` a subprocess inside the iterator. Missing observations are normal and must never be inferred. |
 | A | B, C | A merges; B and C submit PRs only | standing |
 
 ### Session C — first-investigation deliverables (2026-10-26)
 
 | Item | Where | Status |
 |---|---|---|
-| Technical report — host findings, observability matrix, tool-surface measurements, failures, minimal integration, contract changes, recommended PRs | [`session-c-host-findings.md`](session-c-host-findings.md) | ✅ complete |
-| M1–M7 acknowledgement with two blocking objections | [`event-contract.md`](event-contract.md) §10 (Session C block) and shared dogfooding decision `8cf1f0e3cc41465e` | ✅ recorded |
-| Measurement harness + raw evidence | `agent_installation/mpm-opencode/measure/` | ✅ committed |
-| Shared dogfooding records | `~/.mpm-dogfood` — memory `880914fcb252f6ce`, lessons `3d4c577a76580dc5`, `4007e7bcf2ae89ce`, `850112858d8562f8`, `24486718472717f8`, handoff `de56dc39fcf8fb14` | ✅ written |
+| Technical report — host findings, observability matrix, tool-surface measurements, failures, minimal integration, contract changes, recommended PRs | [`session-c-host-findings.md`](session-c-host-findings.md) | ✅ complete (first pass) |
+| **Second pass — event-stream correction: M2/M3 objections withdrawn, corrected observability matrix, redaction hazard, environment verification** | [`session-c-event-stream-correction.md`](session-c-event-stream-correction.md) | ✅ complete — **supersedes part of the first pass** |
+| M1–M7 acknowledgement — **final: zero blocking objections** | [`event-contract.md`](event-contract.md) §10 (Session C block, revised; the superseded block is preserved beneath it) | ✅ revised 2026-10-26 |
+| Measurement harness + raw evidence | `agent_installation/mpm-opencode/measure/` (incl. `probe/event_stream_probe.js` and `evidence/event_stream_probe_run*.jsonl`) | ✅ committed |
+| Shared dogfooding records | `~/.mpm-dogfood` — memory `880914fcb252f6ce`, lessons `3d4c577a76580dc5`, `4007e7bcf2ae89ce`, `850112858d8562f8`, `24486718472717f8`, handoff `de56dc39fcf8fb14`; second pass: decision + lesson + handoff recorded below | ✅ written |
 
-**Two findings A must act on independently of the contract:**
+**Three findings A must act on independently of the contract:**
 
 1. **Production defect — the wake context is never injected into an OpenCode
    agent's system prompt.** The installed plugin reads
-   `payload.context ?? payload.text`; the substrate returns the text under
-   **`payload.content`**. Consequences: the wake context is never delivered,
-   the per-session cache never populates, and the plugin makes **~19
-   redundant `mpm call mpm_context` subprocess spawns per session**
-   (~39 ms each, none session-attributed). Fix and regression tests:
-   report §11.1.
-2. **The plugin's tool surface omits `mpm_help`, `mpm_resolve` and
-   `mpm_work`** (plus `mpm_route` and the two blob tools). `mpm_work` is the
-   contract's `task.boundary` capability, and it is reachable only shell-side
-   — where `framework_session_id` is lost. Report §7.2.
+   `payload.context ?? payload.text`; `callMpm` sets `payload` to the **whole
+   envelope**, and `read_wake_context` with `format: "system-prompt"` returns
+   `{content, format, success}`. Consequences: wake context never delivered,
+   per-session cache never populates, **~19 redundant `mpm call mpm_context`
+   spawns per session** (~39 ms each, unattributed). Verified against **both**
+   the stale installed binary and the dev build. Fix and tests: report §11.1.
+2. **The environment pins do not reach the running host.** No `MPM_*` variable
+   exists in the desktop app, the CLI service or the agent process
+   (`/proc/<pid>/environ`). The plugin therefore resolves `~/.mpm` and the
+   **pre-sprint** binary `0.1.0-dev+g3df72315`. Measured consequence: 410 plugin
+   wake-context fetches in 2 h hit the **live** DB, and 12 memories + 2
+   decisions written by OpenCode agents in 12 h also landed there — while
+   `~/.mpm-dogfood` is written only via explicit shell exports with
+   `framework_session_id = NULL`. **The sprint's reasoning channel is split
+   across two databases.** Correction report §6.
+3. **The plugin's tool surface omits `mpm_help`, `mpm_resolve` and `mpm_work`**
+   (plus `mpm_route` and the two blob tools). `mpm_work` is the contract's
+   `task.boundary` capability, and it is reachable only shell-side — where
+   `framework_session_id` is lost. Report §7.2.
 
 ### Integration status
 

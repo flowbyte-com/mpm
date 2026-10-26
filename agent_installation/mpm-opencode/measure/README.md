@@ -15,7 +15,8 @@ are in [`docs/dev/session-c-host-findings.md`](../../../docs/dev/session-c-host-
 |---|---|
 | `measure_tool_surface.py` | Starts `mpm-mcp`, performs the MCP handshake, issues `tools/list`, and reports description/schema bytes and a token estimate for the compact (3-tool) and full (23-tool) surfaces. Calls no tool. |
 | `fixture_run.sh` | Runs one prompt against an **isolated** OpenCode instance whose MPM plugin is pointed at a **disposable** MPM workspace, then reports the MPM tool calls the agent actually made, read from the substrate's own `tool_invocations` audit. |
-| `probe/host_surface_probe.js` | An OpenCode v2 plugin that records the real `ctx` surface and the payloads of every hook the host fires. |
+| `probe/host_surface_probe.js` | An OpenCode v2 plugin that records the real `ctx` surface and the payloads of every hook the host fires. **Note:** its `ctx.event.subscribe(callback)` call is *wrong* and produced the first pass's false "inert stream" conclusion — kept as-is because the error is instructive. Use `event_stream_probe.js` instead. |
+| `probe/event_stream_probe.js` | **Corrected** event-stream probe: registers the callback form (to show it yields nothing) *and* consumes the real `AsyncIterable`, recording every delivered event type, its `data` keys and a bounded payload. Also exercises `ctx.session.compact` so both halves of the compaction pair are captured. |
 | `probe/project_identity_probe.js` | A minimal plugin that records `ctx.location` only — used to test whether the host's project id is stable across linked worktrees and across remote spellings. |
 | `evidence/` | The raw captures the report cites. |
 
@@ -54,6 +55,18 @@ opencode debug paths    # verify isolation before doing anything else
 > happens when the hook *fires* — so a typo registers silently and then
 > throws a `TypeError` the first time any tool executes in that process.
 > `ctx.session.hook` is safe (it accepts any name and simply never fires it).
+
+> **A probe must export `{ id, setup }`** (or use `Plugin.define`). A
+> function-shaped default export is rejected by the v2 loader:
+> `Plugin must export a default definition with an id and an effect or setup
+> function`. Always grep the host log for `failed to load plugin` before
+> trusting a capture that contains no events — "the probe saw nothing" and
+> "the probe never loaded" look identical in an empty log file.
+
+> **`ctx.event.subscribe` returns an `AsyncIterable`, not a callback
+> registration.** Consume it with `for await (const ev of
+> ctx.event.subscribe({ signal }))`. Passing a function as the first argument
+> silently returns a stream that is never read.
 
 ## Running the tool-surface measurement
 
