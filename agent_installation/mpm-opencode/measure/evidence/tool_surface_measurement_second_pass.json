@@ -1,0 +1,192 @@
+{
+  "reproducibility": {
+    "mcp_binary": "/home/v/src/mpm/.build/bin/mpm-mcp",
+    "workspace": "/home/v/.mpm-dogfood",
+    "db_path": "/home/v/.mpm-dogfood/src/db/mpm.db",
+    "measured_at_utc": "2026-10-26T20:42:25Z",
+    "estimator": "bytes/4 (documented approximation, not a tokenizer)"
+  },
+  "compact": {
+    "tool_count": 3,
+    "tools": [
+      {
+        "name": "mpm_context",
+        "description_bytes": 558,
+        "schema_bytes": 484,
+        "description": "Session context. read_wake_context (browses recent memories, overdue wakes); write_handoff / read_handoff (session continuity); read_directives; route (auto-selects mode/persona); query_global_rules. For read_wake_context use projection=compact for ~130 token bounded output. recent_activity is the chronological / observational activity feed (not relevance-ranked); contextual_candidates, contextual_selection, and contextual_materialization are diagnostic surfaces for inspecting the contextual routing pipeline (not part of normal session-start workflow)."
+      },
+      {
+        "name": "mpm_help",
+        "description_bytes": 253,
+        "schema_bytes": 178,
+        "description": "Capability discovery. action=list: every MPM tool name + reach_via_cli. action=show tool=<name>: full description plus the registered JSON input schema (input_schema: action vocabulary, required fields, nested params). Specialists via 'mpm call <tool>'."
+      },
+      {
+        "name": "mpm_memory",
+        "description_bytes": 331,
+        "schema_bytes": 440,
+        "description": "Persistent memory: save/query/show facts across sessions. Required: action. Use projection=summary (default, ~256 chars + pointer) for recall; projection=full for unabridged content. delete is reversible via restore; permanent shredding is operator-only (CLI) and is refused here. Call mpm_help show mpm_memory for the full schema."
+      }
+    ],
+    "description_bytes_total": 1142,
+    "schema_bytes_total": 1102,
+    "surface_bytes_total": 2244,
+    "description_tokens_est": 286,
+    "surface_tokens_est": 561
+  },
+  "full": {
+    "tool_count": 23,
+    "tools": [
+      {
+        "name": "mpm_blob_read",
+        "description_bytes": 317,
+        "schema_bytes": 160,
+        "description": "Read a raw blob by ID with optional byte offset and server-side size cap.\nUse when: you need the raw bytes of a blob (a spilled tool result, a large document, binary data) and want server-side pagination rather than fetching the entire thing.\nFor pointer dereferencing with content type awareness, prefer mpm_resolve."
+      },
+      {
+        "name": "mpm_blob_search",
+        "description_bytes": 314,
+        "schema_bytes": 313,
+        "description": "Server-side regex search within a blob's content.\nUse when: you have a blob ID and need to find a specific pattern inside it without downloading and scanning the entire thing. The search runs server-side and returns matching snippets with byte offsets.\nFor indexed search across all memories, use mpm_memory query."
+      },
+      {
+        "name": "mpm_confidence",
+        "description_bytes": 392,
+        "schema_bytes": 212,
+        "description": "Inspect and reason about the system's certainty regarding any stored artifact.\nUse when: you need to understand how reliable a piece of information is before acting on it; you want to see the evidence weight behind a memory, theory, or decision; you suspect memory degradation and want to audit the system's confidence signal.\nDo not use when: you just want to store a fact (mpm_memory save)."
+      },
+      {
+        "name": "mpm_context",
+        "description_bytes": 558,
+        "schema_bytes": 484,
+        "description": "Session context. read_wake_context (browses recent memories, overdue wakes); write_handoff / read_handoff (session continuity); read_directives; route (auto-selects mode/persona); query_global_rules. For read_wake_context use projection=compact for ~130 token bounded output. recent_activity is the chronological / observational activity feed (not relevance-ranked); contextual_candidates, contextual_selection, and contextual_materialization are diagnostic surfaces for inspecting the contextual routing pipeline (not part of normal session-start workflow)."
+      },
+      {
+        "name": "mpm_decisions",
+        "description_bytes": 418,
+        "schema_bytes": 457,
+        "description": "Immutable record of architectural choices and the reasoning behind them.\nUse when: you make a choice between approaches (\"we chose SQLite WAL mode over DELETE journal for concurrent access\") and want to preserve the rationale so future-you understands why, even when the alternative is no longer fresh in context.\nDo not use when: the choice is trivial or easily reversible; you just want to store a fact (mpm_memory)."
+      },
+      {
+        "name": "mpm_evidence",
+        "description_bytes": 476,
+        "schema_bytes": 1250,
+        "description": "Attach observations, test results, or external references as evidence to any artifact.\nUse when: you want to substantiate a memory, theory, or decision with a concrete observation (\"tested on 3 machines, same result\"), a test output, a reproduction case, or an external source.\nDo not use when: you are storing raw facts without evidentiary context (mpm_memory save). Evidence gives artifacts weight \u2014 use it when the truth of something is important enough to require proof."
+      },
+      {
+        "name": "mpm_handoff",
+        "description_bytes": 772,
+        "schema_bytes": 1382,
+        "description": "Inter-session communication: write, read, and audit handoff records.\nUse when: you are ending a session and need to leave a summary for the next session to pick up. The handoff record is the bridge between two distinct agent shifts \u2014 it carries the session summary, not the work itself.\nCRITICAL: the write action requires a non-empty summary. Mid-session acknowledgements (ok/thanks/ty/ack) are NOT session-closing events \u2014 do not write a handoff in response to a chat ack; only do so at genuine session closure.\nOptional commitments and open_questions are persisted and round-tripped: open_questions surface in the next session's wake context. Keep them short \u2014 the handoff is a bridge, not a work log (use mpm_work for tasks, mpm_theories for testable questions)."
+      },
+      {
+        "name": "mpm_help",
+        "description_bytes": 253,
+        "schema_bytes": 178,
+        "description": "Capability discovery. action=list: every MPM tool name + reach_via_cli. action=show tool=<name>: full description plus the registered JSON input schema (input_schema: action vocabulary, required fields, nested params). Specialists via 'mpm call <tool>'."
+      },
+      {
+        "name": "mpm_lessons",
+        "description_bytes": 969,
+        "schema_bytes": 675,
+        "description": "Durable lessons from failures, anti-patterns, and hard-won insights.\nUse when: something failed and you want to make sure the system never repeats the same mistake; you encounter an unexpected success and want to record why it worked; you want to tag a memory as a \"warning\" or \"practice\" so it surfaces in future relevant contexts.\nDo not use when: you are documenting a decision (mpm_decisions) or forming a testable hypothesis (mpm_theories).\nFor broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.\nLifecycle asymmetry: delete is soft and reversible via action=restore. Permanent shredding (hard delete of the row and its FTS entry) is operator-only and is NOT an agent action: it is refused at the execution point for MCP and 'mpm call', and no payload field unlocks it. An operator can shred permanently with 'mpm lesson shred <id>'."
+      },
+      {
+        "name": "mpm_log_to_changelog",
+        "description_bytes": 1312,
+        "schema_bytes": 1857,
+        "description": "Self-report agent work as a structured changelog entry tied to a git commit SHA.\nUse when: you have completed a meaningful unit of work (a fix, a feature, a refactor) and want to record it in the project changelog with a reference to the commit that shipped it. The changelog entry is permanent and queryable.\n\nOptional assertion params (epistemic confirmation / contradiction, see docs/epistemic-confirmation.md):\n  - confirms_lesson_id / confirms_decision_id / confirms_theory_id (string or array of strings): the named artifacts this commit explicitly validates; each produces an evidence row of type 'reproduction' (+0.85) and a confidence recompute against the asserted artifact.\n  - contradicts_lesson_id / contradicts_decision_id / contradicts_theory_id (string or array of strings): the named artifacts this commit explicitly shows to be wrong; each produces an evidence row of type 'challenge' (-0.6) and a confidence recompute. A contradiction strong enough to cross confidence below 0.3 triggers the existing cascade invalidation machinery.\n\nEvery assertion is explicit-only \u2014 no keyword matching, no semantic inference. An empty or absent param is a no-op; both directions can coexist in one call; all assertions and the changelog memory write share a single transaction (all-or-nothing atomicity)."
+      },
+      {
+        "name": "mpm_memory",
+        "description_bytes": 331,
+        "schema_bytes": 440,
+        "description": "Persistent memory: save/query/show facts across sessions. Required: action. Use projection=summary (default, ~256 chars + pointer) for recall; projection=full for unabridged content. delete is reversible via restore; permanent shredding is operator-only (CLI) and is refused here. Call mpm_help show mpm_memory for the full schema."
+      },
+      {
+        "name": "mpm_references",
+        "description_bytes": 2329,
+        "schema_bytes": 2123,
+        "description": "Search and read previously ingested external documents: PDFs, specs, API and framework documentation, whitepapers, books, fetched web pages.\nUse when: you need authoritative source material \u2014 API references, framework manuals, specifications, or previously acquired external material. Search first (action search with a query), then read the document itself with action read using the id \u2014 do not act on a search-result summary alone.\n\nREFERENCES ARE A SEPARATE SUBSYSTEM FROM MEMORIES: a memory query or collection listing does not establish whether the reference corpus holds a document, so an empty memory search is NOT evidence of absence. Search here before concluding something is unavailable.\n\nEvery result carries a freshness classification (current, stale, version-bound, historical, unknown); check it before relying on technical documentation, because a reference can be relevant and still be not current.\n\nGetting material in:\n- action add takes EITHER \"filepath\" (a local document: .md, .txt, .html, .pdf, .epub) OR \"url\" (an http(s) documentation page MPM fetches for you), plus optional \"tags\", \"reason\" and \"chunk_size\". Supplying both is an error, never a silent preference.\n- action import takes \"documents\": [{path|url, tags, reason}] for a whole corpus, and reports each document's own status.\n- Ingestion is idempotent: the same source resolves to the same document, so re-adding unchanged material writes nothing.\n- To check what is already there, action list enumerates the corpus and action search looks it up.\n\nRead the outcome, not just success: \"status\" is imported | updated | unchanged | duplicate. \"duplicate\" means several existing documents already resolve to that source and nothing was written \u2014 the repair is the CLI diagnostic \"mpm reference duplicates\". \"pending_embeddings\" > 0 means lexical search works but semantic search does not yet see those chunks; \"semantic_searchable\" says which.\n\nSearch results carry provenance: doc_title, section, source_path (absolute path or effective URL), source_kind, chunk_id and doc_id. Cite from those rather than restating the body.\n\nDo not use when: the material is ephemeral, or you only want to record a URL for later \u2014 use mpm_evidence action=add with reference_url, which stores the pointer durably on the evidence row without fetching it."
+      },
+      {
+        "name": "mpm_request_review",
+        "description_bytes": 545,
+        "schema_bytes": 605,
+        "description": "Concurrent multi-component review: ask multiple independent perspectives to evaluate the same artifact simultaneously.\nUse when: you want cross-validation before committing a significant decision; you need a second opinion on a memory, theory, or architecture choice; you want to stress-test a plan against different agent personas (memory, critic, scheduler) at the same time.\nEach component responds independently and in parallel. One component's failure does not block the others. No consensus synthesis \u2014 you read all responses and decide."
+      },
+      {
+        "name": "mpm_resolve",
+        "description_bytes": 498,
+        "schema_bytes": 377,
+        "description": "Resolve a mpm:// URI to its content. Phase 2 supports mpm://blob/<id>, mpm://work/<id>, mpm://memory/<id>, mpm://lesson/<id>, and mpm://theory/<id>.\nUse when: you have a pointer from a previous result and need to dereference it to get the actual content. This is the dereferencing step \u2014 you get back the bounded projection by default; pass full=true to retrieve the complete unabridged payload.\nmax_bytes applies a soft materialization ceiling for large results. full=true bypasses that ceiling."
+      },
+      {
+        "name": "mpm_retrieval_diagnose",
+        "description_bytes": 531,
+        "schema_bytes": 582,
+        "description": "Diagnostic for retrieval pipeline failures. Run this when your query returns unexpected results, zero results, or results in the wrong order.\nUse when: you search for something you know is in memory but it doesn't appear; you want to understand why a particular result ranked where it did; you are debugging FTS5 behavior or retrieval ranking.\nReturns per-node diagnostics: BM25 score, reuse count, last-retrieved timestamp, and success count for each node in the result set. Use trace=true for the full 3-stage pipeline breakdown."
+      },
+      {
+        "name": "mpm_route",
+        "description_bytes": 374,
+        "schema_bytes": 134,
+        "description": "Evaluate a user prompt and auto-select the best-matching MPM mode(s) and persona. Modes use threshold filtering (multiple can activate); personas use max-pooling (only the highest scorer wins, if any beats threshold 1). Patterns are pre-compiled at server boot. Anti-patterns penalize false positives. Returns a full diagnostic report with scores and triggers per component."
+      },
+      {
+        "name": "mpm_scratchpad",
+        "description_bytes": 612,
+        "schema_bytes": 285,
+        "description": "Intra-session volatile working memory for thoughts, partial conclusions, and working context that may not survive to the next session.\nUse when: you are mid-thought on something complex and need to externalize your working state so you can recover if the session crashes; you want to capture a partial result that is not yet ready to be a proper memory; you need to preserve a chain of reasoning that spans multiple turns.\nPromote to memory when the thought is complete and worth preserving. Discard when the thread is abandoned. Scratchpads are not cross-session \u2014 they are for within-session resilience only."
+      },
+      {
+        "name": "mpm_skills",
+        "description_bytes": 942,
+        "schema_bytes": 945,
+        "description": "Reusable procedural knowledge stored as markdown with YAML frontmatter.\nUse when: you develop a workflow that works well and want to\u56fa\u5316 it as a persistent skill that can be listed, read by name, and reused across sessions without re-inventing the procedure. The save action requires content (the skill markdown body) and name. Skills are versioned and can be shared globally or kept local to this workstation.\nLifecycle asymmetry: delete is soft (the row stays with deleted_at stamped; save with force=true resurrects the tombstoned row). This is deliberately different from mpm_memory.shred, which is permanent and irrecoverable.\nLifecycle asymmetry: promote_to_global is one-way / additive. The local row is preserved (Phase 3 of shared-epistemology design); there is no demote operation. To retire a globally-promoted skill, shred the local copy if you want it gone from the workstation, or rely on the shared substrate's own lifecycle."
+      },
+      {
+        "name": "mpm_system",
+        "description_bytes": 2477,
+        "schema_bytes": 6668,
+        "description": "Maintenance, diagnostics, and housekeeping for the MPM substrate.\nUse when: you need to run a lifecycle decay sweep (gc_run); compact raw memories into lessons (compact); check SQLite integrity (health_check); audit the anomaly ledger (query_audit_log); manage or dismiss audit clusters; list active audit clusters (list_clusters); surface critic-emitted findings (critic_findings).\nThis tool is for system health \u2014 not for daily agent work. Prefer specific tools for regular operations.\n\nPer-action semantics:\n\n- gc_run: Lifecycle decay sweep. Optional params: dry_run (default true), aggressive, max_age_hours (default 24). gc_run is NOT for epistemic compaction \u2014 it decays stale/expired artifacts by age. Use \"compact\" instead when epistemic_pressure.exceeded is true.\n\n- compact: Drain eligible raw memories into lessons in sequential batches of at most 50 (the LLM context safeguard); each batch is independently synthesized, validated, and committed. force=false (default) RELIEVES pressure \u2014 the drain stops as soon as raw_count <= threshold and may leave eligible raw memories remaining. force=true DRAINS everything \u2014 the threshold gate is bypassed and the drain continues until the substrate is empty or the per-invocation cap is hit. force does NOT widen the 50-item per-batch limit. A refused batch is NOT an error: the model declining to synthesise a lesson is a considered judgement, so the rows are annotated and held back (deferred) instead of being offered again on the next drain. Optional params: force (default false), max_batches (default 8, hard cap 8, silently clamped) \u2014 a budget of SEMANTIC STAGES, not batches: a successful batch costs 1 stage, a refused batch costs 3 (the attempt plus up to two split children). Result envelope: success (false ONLY on mid-drain failure), batches_processed, raw_processed, lessons_created, raw_remaining, semantic_stages_spent, rows_deferred, raw_deferred, actionable_pending, deferral_batch_ids, lesson_ids, stop_reason (\"no_work\" | \"completed\" | \"threshold_reached\" | \"max_batches_reached\" | \"failure\"), skipped_reason (set on no_work / threshold_reached / synthesis_refused), and failed_batch + failure_reason on \"failure\". Inspect actionable_pending (not raw_remaining) to know whether work is still OFFERABLE: raw_remaining includes rows the model has declined, which no amount of re-invoking this tool will clear. Requeueing those is an operator-only CLI action and is deliberately not exposed here."
+      },
+      {
+        "name": "mpm_theories",
+        "description_bytes": 458,
+        "schema_bytes": 678,
+        "description": "Hypothesis management with explicit validation criteria and resolution.\nUse when: you form a hypothesis about causality (\"I think the FTS tokenizer is producing different results on this OS\") and can define a concrete test that would confirm or disprove it. Theories are not guesses \u2014 they are testable claims with defined success conditions.\nDo not use when: you just want to remember something (mpm_memory); you have a confirmed decision (mpm_decisions)."
+      },
+      {
+        "name": "mpm_topics",
+        "description_bytes": 365,
+        "schema_bytes": 376,
+        "description": "Topic labels for clustering related memories and organizing knowledge.\nUse when: you want to link multiple memories under a shared theme (\"UN-system\", \"Qatar-Mission\", \"eCryptfs-boot-order\") so future queries can surface the full cluster with a single term.\nDo not use when: you just want to store a single fact (mpm_memory save); you need to track work (mpm_work)."
+      },
+      {
+        "name": "mpm_wakes",
+        "description_bytes": 2534,
+        "schema_bytes": 1206,
+        "description": "Deferred work triggers scheduled for future execution.\nUse when: you need to schedule a check-in, reminder, or follow-up task to fire automatically at a specific time without the agent running continuously. Wakes survive agent restarts \u2014 the scheduler fires them regardless of what session is active.\nTasks (upsert_task) are recurring cron-style triggers; one-shot wakes (schedule) fire once and are marked fired.\nLifecycle asymmetry: delete_task is permanent removal of the task row. For reversibility / preserving history, prefer upsert_task with status='paused' (the row stays, the scheduler skips it, you can flip back to 'active' later without losing state).\nThe resolve action is the explicit, audited mechanism for retiring a non-scheduled-task wake without consuming it through the delivery path (the CheckPendingWakes / list cycle). Idempotent; refuses scheduled_tasks-owned rows. Required params: wake_id, reason (reconciled|obsolete|superseded|already_satisfied). The reason taxonomy is canonical and bounded \u2014 see internal/core/wake_tools.go:isValidWakeResolveReason.\n\nCron-wake retention model (the bookkeeping rows emitted by recurring cron tasks):\n\n- Each cron task (e.g. epistemic-compaction on a 1-minute schedule) emits one scheduled_wakes row per minute, tagged kind=cron.\n- These rows are intentionally retained for ~1 hour (CronRetentionWindow), then retired by the cron-retention sweep in wake_expiration.go.\n- Sweep cadence is ~1 hour; normal cap is 60 rows per sweep; catch-up cap is 180 rows when the eligible backlog >= 240.\n- Strict '<' cutoff means a row is only eligible after it is strictly more than 1 hour old.\n- After a fresh daemon start, the first actual row retirement normally occurs around T+2h (the runOnce sweep at +0h seeds the cadence, the +1h gate-pass finds 0 eligible due to the strict-'<' cutoff, and the +2h sweep is the first to retire rows). Subsequent sweeps run every hour.\n- At steady state, the pending cron-wake pool oscillates between ~0 (just after a sweep) and ~60 (just before the next). ~1 retention-window of recent cron rows is the steady-state contract \u2014 NOT a fixed count.\n- Diagnose retention health via 'mpm doctor' (which surfaces the cron_retention phase + backlog + sweep timing) or 'mpm status --json'. A nonzero eligible backlog is normal between sweep opportunities; only backlog past an expected sweep opportunity is degraded.\n- The retention logic itself is in internal/scheduler/wake_expiration.go (CronRetention* constants and CronRetentionTickHandler)."
+      },
+      {
+        "name": "mpm_work",
+        "description_bytes": 978,
+        "schema_bytes": 3805,
+        "description": "Named work items with an immutable event ledger: create, complete, cancel, or track history.\nUse when: you have made a commitment to do something that will span multiple sessions; you need to track a task's progress over time; you want to record a note or completion evidence against a specific piece of work.\nThe event ledger (history) provides full provenance: who created it, when it was completed, what evidence was attached.\nCRITICAL: the complete action requires work_id. Host session termination does NOT auto-complete a work item \u2014 the agent decides when work is done and calls action=complete explicitly.\nARCHIVE: action=archive removes a FINISHED (done or cancelled) item from wake context and every default listing, without deleting anything; action=unarchive puts it back. Archiving never reopens work. Listing accepts an independent visibility filter: active (default) | archived | all.\nDo not use when: you just want to store a fact or insight (mpm_memory save)."
+      }
+    ],
+    "description_bytes_total": 18755,
+    "schema_bytes_total": 25192,
+    "surface_bytes_total": 43947,
+    "description_tokens_est": 4689,
+    "surface_tokens_est": 10987
+  },
+  "delta": {
+    "tool_count": 20,
+    "description_bytes": 17613,
+    "surface_bytes": 41703,
+    "surface_tokens_est": 10426,
+    "ratio_surface": 19.58
+  }
+}
