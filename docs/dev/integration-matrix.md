@@ -194,22 +194,39 @@ $ cd ~/src/mpm && git rev-parse HEAD
 b5b18401974ee559a485cda20abf8f7779f11bf2
 $ make test-race
 …
+ok  	github.com/flowbyte-com/mpm/internal/scheduler	23.161s
+ok  	github.com/flowbyte-com/mpm/internal/critic	1.408s
+ok  	github.com/flowbyte-com/mpm/internal/testenv	8.213s
+ok  	github.com/flowbyte-com/mpm-core/tools	42.040s
+…
+[test-agent-adapters] TS: 17 passing tests (floor 15)
+[test-agent-adapters] all adapter suites green
+…
+Ran 494 tests in 28.676s
+OK (skipped=1)
+[test-agent-installation] collected 494 tests (floor 300)
 EXIT=0
 ```
+
+`make test-race` reaches, and passed: the Go race sweep (every package, zero
+data races), `make test-scripts` (**540** tests, floor 50),
+`make test-agent-installation` (**494** tests, floor 300) and the TypeScript
+adapter suite (**17** tests, floor 15).
 
 ### 4.2 CI on the merged commit
 
 The gate was re-run against the **merged commit**, not against the PR head.
-See the CI report in this round's deliverables for the run ids and the
-per-check conclusions.
 
-The PR-head runs are recorded too, because they are the evidence for the
-merge decisions themselves:
+| Run | Commit | Conclusion | "Build + core tests" | "Full test suite" | "Release gate …" |
+|---|---|---|---|---|---|
+| `40332886651` | `fa80f48` (#104's PR head) | success | ✅ | ✅ | ✅ |
+| **`40337045142`** | **`b5b1840` (`origin/main`)** | **success** | ✅ | ✅ | ✅ |
 
-| PR | Head | Run | Result |
-|---|---|---|---|
-| #104 | `fa80f48` | `40332886651` | ✅ all three green |
-| `main` | `b5b1840` | `40337045142` | ✅ all three green |
+Both runs are green on all three required checks. The second is the one that
+matters: it is the **merged** commit, and the ruleset does **not** enforce
+strict required checks (`strict_required_status_checks_policy: false`), so
+re-checking against the merge result is a required step rather than a
+nicety.
 
 ---
 
