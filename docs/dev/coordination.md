@@ -186,7 +186,8 @@ reduced. **Nothing was deleted before it was proven obsolete.**
 | worktrees removed | **26** | each held only a branch already proven merged, or a debug-only scratch state; nothing unique was lost |
 | remote branches deleted | **15** | the merged-PR heads `origin/fix/hal9001-*`; all proven present in `main` |
 
-**Reclaimed:** `~/src/worktrees` went from **1.8 GB to 25 MB**.
+**Reclaimed:** `~/src/worktrees` went from **1.8 GB to under 25 MB** (4 KB once the
+documentation worktree was retired as well).
 
 **What was preserved, deliberately:**
 

@@ -154,10 +154,14 @@ CI run on main = the final merge             40351939110   ✅ all three green
 
 **Post-merge cleanup (2026-10-26):** 38 local branches, 26 worktrees and
 15 remote branches removed — each proven obsolete first. `~/src/worktrees`
-went from **1.8 GB to 25 MB**. One piece of unmerged work was found and
+went from **1.8 GB to under 25 MB**. One piece of unmerged work was found and
 **preserved** onto `chore/mpm-core-gomod-uuid-direct`; the two integration
 checkpoints survive as branches. The record is in
 [`coordination.md`](coordination.md) §5.
+
+**The verified integration result for this round** is the tip of `main`, with
+CI run **`40370094369`** green on all three required checks — that run
+covers the fifteen corrective PRs and this documentation set.
 
 > **How to read "the tip of main" here.** The fifteen corrective PRs are
 > merged as `b5b1840`, and this document set is the commit that follows it
