@@ -19,7 +19,7 @@ Three findings dominate this report. They are ordered by consequence.
 
 | # | Finding | Consequence |
 |---|---|---|
-| **F1** | **The MPM wake context has never been injected into an OpenCode agent's system prompt.** The installed plugin reads `payload.context ?? payload.text`; the substrate returns the text under **`payload.content`**. The extractor always yields `""`, so the context is never pushed and the per-session cache is never populated. | The system's central mechanism is dead in the OpenCode adapter. Measured: **19 wasted `mpm call mpm_context` subprocess spawns per session** (~39 ms each) and **zero** wake-context delivery. |
+| **F1** | **The MPM wake context has never been injected into an OpenCode agent's system prompt.** The installed plugin reads `payload.context ?? payload.text`; the substrate returns the text under **`payload.content`**. The extractor always yields `""`, so the context is never pushed and the per-session cache is never populated. | The system's central mechanism is dead in the OpenCode adapter — **confirmed live**: the installed plugin made **370 wake-context fetches in the last hour** (~12 per minute), each a ~39 ms process spawn, and **delivered nothing**. |
 | **F2** | **The event contract's strict-mode `event_id` derivation collides.** OpenCode gives nested tool calls **one shared `callID`**. `sha256(schema_version ‖ host ‖ host_event_key)` alone gives the outer and inner tool events the *same* id, so one is silently deduplicated away. | **Blocking objection to M3.** The derivation input must include `event_type`. |
 | **F3** | **Two §4 vocabulary rows cannot be populated as written.** There is no session-creation hook, and the only compaction signal the plugin can receive is a single "compaction context was assembled" event, not a started/finished pair. | **Blocking objection to M2.** The vocabulary needs A's adjudication. |
 
@@ -784,6 +784,24 @@ recorded **57 `read_wake_context` invocations made by the plugin itself**
 `mpm` process spawn + database open at **~39 ms**. None of them carried a
 session id, because `fetchWakeContext` uses `callMpm` **without** the
 provenance env that `callMpmWithProvenance` applies.
+
+**And it is not hypothetical — it is happening in the live install right
+now.** The live `~/.mpm` database was read read-only at the end of this
+session:
+
+```
+read_wake_context in the last hour:  370
+read_wake_context in the last 30 min: 367
+```
+
+Every one of them is `framework_name = "mpm-cli"` with a **null**
+`framework_session_id`, i.e. the plugin's own `fetchWakeContext` path, not an
+agent call. The live plugin is spending **~12 process spawns per minute** on
+a fetch that, per the above, **returns nothing to the agent**. The only
+other live invocations in the same window are the plugin's own boot-time
+`mpm_system health_check` and one read — **no knowledge write of any kind
+reached `~/.mpm`** (0 memories created in the two hours covered by this
+session).
 
 **The irony worth stating plainly:** the wake context's own content says
 *"On every session start, call read_wake_context before responding to the
