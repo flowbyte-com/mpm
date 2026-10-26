@@ -124,10 +124,10 @@ func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 		evStr, isString := raw.(string)
 		if !isString || strings.TrimSpace(evStr) != "" {
 			return nil, fmt.Errorf(
-				"mpm_memory action=save does not persist 'evidence' (the shared parameter "+
-					"is used by action=challenge only); nothing was saved. Save the memory "+
-					"first, then attach the observation with mpm_evidence action=add "+
-					"(artifact_id=<memory id>, artifact_type=memory, source_group=<how it was "+
+				"mpm_memory action=save does not persist 'evidence' (the shared parameter " +
+					"is used by action=challenge only); nothing was saved. Save the memory " +
+					"first, then attach the observation with mpm_evidence action=add " +
+					"(artifact_id=<memory id>, artifact_type=memory, source_group=<how it was " +
 					"observed>, ...). Free text is not recorded as evidence without a source.")
 		}
 	}
