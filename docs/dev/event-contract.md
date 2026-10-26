@@ -832,16 +832,43 @@ Session B — name: ....................  contract version accepted: mpm-event/0
   M7 outcomes ...................... agree / object (reason) ................
   blocking objections: ............................................
 
-Session C — name: ....................  contract version accepted: mpm-event/0.1
-  date: ............
-  M1 envelope ....................... agree / object (reason) ................
-  M2 vocabulary & classification .... agree / object (reason) ................
-  M3 identity ....................... agree / object (reason) ................
-  M4 ordering ....................... agree / object (reason) ................
-  M5 trust ......................... agree / object (reason) ................
-  M6 ingest contract ............... agree / object (reason) ................
-  M7 outcomes ...................... agree / object (reason) ................
-  blocking objections: ............................................
+Session C — name: Session C (OpenCode adapter & behavioural evaluation)  contract version accepted: mpm-event/0.1
+  date: 2026-10-26
+  M1 envelope ....................... agree — every required field is implementable against the
+                                       measured host (ctx.app.version, ctx.location.project.id,
+                                       tool-context callID/messageID/agent).
+  M2 vocabulary & classification ... object (BLOCKING) — §4's `session.started` has no observable
+                                       signal in opencode v2.1.4 (no session-creation hook; the host
+                                       event stream is unreachable from a plugin), and
+                                       `compaction.started`/`compaction.completed` cannot be
+                                       populated from the single `ctx.session.hook("compaction")`
+                                       signal. Proposal: `session.observed` + one `compaction.context`.
+  M3 identity ....................... agree, object (BLOCKING) — §3.5's strict-mode derivation must
+                                       also include `event_type` (+ host tool name): measured, nested
+                                       tool calls SHARE one callID, so the derivation as written gives
+                                       the outer and inner tool events the same event_id and the
+                                       second is silently deduplicated away. Separately (improvement,
+                                       not objection): the host already supplies a project id that
+                                       satisfies §3.3 — see the report §4.3.
+  M4 ordering ....................... agree — ms precision obtainable; the host gives the plugin no
+                                       monotonic counter, so `host_seq` is null in practice and §3.6's
+                                       NULL ordering already covers it.
+  M5 trust ......................... agree — the adapter is structurally incapable of promotion.
+  M6 ingest contract ............... agree — validate/classify/dedup/stamp/store/receipt plus an
+                                       observable rejection counter are implementable. Transport
+                                       (§6.2) remains open; measured cost of one `mpm call` spawn
+                                       is ~39 ms, which bears on that decision.
+  M7 outcomes ...................... agree, one request — §3.7 needs an explicit mapping from the
+                                       host's opaque tool-execution status token to
+                                       internal.ToolOutcomeClass's nine values.
+  blocking objections: 2 — (1) M2: the §4 vocabulary rows `session.started`,
+                       `compaction.started` and `compaction.completed` are not populatable as
+                       written against opencode v2.1.4; (2) M3: §3.5's strict-mode event_id
+                       derivation must include `event_type`, or nested tool calls collide and one
+                       event is silently lost.
+                       Evidence: docs/dev/session-c-host-findings.md (Session C branch
+                       dev/session-c-opencode @ 70deac2b). Recorded in the shared dogfooding
+                       workspace as decision 8cf1f0e3cc41465e.
 ```
 
 **Until this block is filled in, Sessions B and C may audit and investigate,
