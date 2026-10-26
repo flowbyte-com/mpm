@@ -427,6 +427,148 @@ P4, and P4 does not start until the allowlist test exists.
 
 ---
 
+## 6b. Addendum — Session B's audit incorporated, and three additions
+
+Session B's audit (`docs/dev/session-b-audit.md`, commit `93011a0`, merged as
+`05e102c`) was read, independently verified and adjudicated in §0 and §2 above.
+This section records the three things the addendum adds on top of it, and the
+conflicts found.
+
+### 6b.1 The critic's automatic path is WIRED BUT NOT ARMED — and it is one API call from being armed
+
+Session B's finding D2 is that the critic writes **trusted lessons** with no
+evidence, no review, and nowhere to record a pending state (§2, A-11). A's
+ruling in A-11 was that this is a **pre-existing substrate behaviour** the
+event contract neither creates nor endorses — and that amending it would need
+a schema change on `lessons_base`, which this sprint does not take.
+
+That ruling is about the *behaviour*. The addendum's instruction — *"do not
+enable automated critic scheduling while duplicate evidence, proposal
+idempotency and trust-promotion risks remain unresolved"* — is about a
+different question, and A checked it directly:
+
+| Question | A's finding |
+|---|---|
+| Is there a `critic_audit` handler? | ✅ **yes** — `internal/scheduler/scheduler.go:921`, registered at `cmd/mpm-scheduler/main.go:159` (`s.Register("critic_audit", scheduler.CriticAuditHandler)`) |
+| Does it run automatically? | **No.** The scheduler **queries due wakes** and dispatches those whose kind has a handler (`scheduler.go:440-475`). System wakes are **not auto-seeded**. |
+| Does a `critic_audit` wake exist in the live workspace? | **No.** The live `scheduled_wakes` table holds exactly four rows: one `cascade_summary` (fired) and three `cron:epistemic-compaction` (all fired). **No `critic_audit` wake has ever been created.** |
+| Has the critic written anything trusted? | **No.** The live `lessons_base` holds **2** lessons, neither critic-authored, both with `source_session_id = NULL`. Zero lessons mention the critic's findings. |
+| **Could one be armed?** | **Yes — and this is the sharp edge.** `ScheduleWake` accepts the wake `kind` from the caller's `metadata` and only *defaults* it to `notification` when absent (`internal/core/wake_tools.go:216-217`). The public `mpm` scheduling tool reaches it. **A `kind=critic_audit` wake is one API call away from automatic execution.** |
+
+**And if it were armed**, the critic would run against the workspace and its
+hunts would write `mpm_lessons` findings with **no evidence citation** and a
+`cycle_%d` tag — the exact combination of D2 (no evidence, no review) and D4
+(cycle tags defeat idempotency) — while duplicate evidence inflates
+confidence (D1/D5). And `CriticAuditHandler` sets
+`MPM_DB_PATH=defaultDBPath()` (`scheduler.go:927`), which **honours
+`MPM_DB_PATH`** — the hazard already documented in
+[`dogfooding-runbook.md`](dogfooding-runbook.md) §8.2. A dogfooding
+scheduler that inherited the live unit's `MPM_DB_PATH` would let the critic
+write to the **live** database.
+
+> **A's ruling: the guard is a gate, not a note.** The addendum's instruction
+> is turned into a **concrete, small, independent change** — see **P2b** in
+> §6b.4. Until the trust boundary is enforced, `kind=critic_audit` is
+> **rejected at the wake-creation path** with a message that says why. That
+> converts a latent, one-call-away hazard into a closed one, without
+> touching the critic, the schema or the tool surface.
+
+### 6b.2 "Invocation gaps are candidate opportunities, not proof"
+
+The addendum's fifth point is accepted and is sharper than it first appears,
+because it collides with the contract's own evidence rule.
+
+The contract (§3.7, M5) requires a proposal to **cite resolvable evidence**,
+and a citation that cannot be resolved is **rejected**, not downgraded. A
+hunt that finds an *invocation with no corresponding artifact* has found the
+**absence** of a record. **Absence is not evidence.** A gap can therefore:
+
+* be **reported as a candidate opportunity** — an observation that a lesson
+  *may* be warranted, carried as a finding with its reasoning; but
+* **never be cited as the evidence** for the proposal that follows, and
+* never be treated as evidence that a particular lesson *exists*.
+
+This is not a new rule; it is the existing rule applied to a case the draft
+did not name. It is recorded so that P3 cannot be implemented in a way that
+turns "no artifact found" into "this lesson is proven".
+
+**A's ruling: P3's proposals must cite something that *exists*.** Where the
+only thing available is a gap, the proposal is **not** promotable under M5 as
+written; it is a finding for a human, not a proposal.
+
+### 6b.3 P3 and P4 are complementary, not substitutes
+
+The addendum is right that Session B's implementation does not replace
+Session C's lifecycle integration, and A's sequence already reflects that —
+but the reason is worth stating, because it is a difference in **coverage**,
+not in quality:
+
+| | Coverage | Blind spot |
+|---|---|---|
+| **P3** (B's hunt over `tool_invocations` × `artifact_provenance`) | **MPM-visible activity** — every tool invocation MPM recorded | Sessions that **never invoked MPM** are invisible to it, by construction |
+| **P4** (C's lifecycle events) | **Host-level activity**, including sessions that never call MPM | Depends on the event stream's volatility (events can be missed) and on the storage decision (A10, still deferred) |
+
+They answer **different questions** and both are wanted. P3 is the
+evidence-backed retrospective detection B owns; P4 extends detection to the
+sessions that never touch MPM. **P4 does not make P3 redundant, and P3 does
+not make P4 redundant.** P4 additionally requires the allowlist test (§6) and
+the storage decision, so it is later in any case.
+
+### 6b.4 The implementation sequence, updated
+
+| # | PR | Owner | Contract? | Schema? | Registry? | State |
+|---|---|---|---|---|---|---|
+| **P1** | wake-context fix + session attribution | C | No | No | No | ✅ **merged** (#113) |
+| **P2** | typed, validated, idempotent evidence citations on `mpm_theories propose` (+ the `artifact_type='skill'` registry correction) | **B** | No | **No** | Yes | 🔄 B in flight |
+| **P2b** | **gate the `critic_audit` wake kind at the wake-creation path** until the trust boundary is enforced | **B** (or A) | No | No | No | **new, from §6b.1** |
+| **P3** | retrospective missed-opportunity hunt over the existing join, **with §6b.2's gap rule** | **B** | No | No | No | queued |
+| **P4** | observe lifecycle events (allowlist-mapped, off the hot path) | **C** | Yes | No | No | queued |
+| **P5** | ingest entry point, receipt, `mpm_system action=event_counters`, storage decision | **A** | Yes | only if §6.1 authorises it | Yes | last |
+
+**P2b is independent of P2, P3 and P4** and can land immediately: it is a
+narrow rejection at one call site, it changes no schema and no tool surface,
+and it is what makes the addendum's instruction enforceable rather than
+advisory.
+
+### 6b.5 Conflicts found
+
+**None between the two investigations.** Session B's audit and Session C's
+corrected investigation do not conflict: B's audit is about *MPM-visible*
+activity and the substrate's trust and evidence integrity; C's is about the
+*host* surface and the adapter. They answer different questions.
+
+**Two conflicts between the addendum and the repository's actual state**, both
+reported rather than silently accepted:
+
+1. **"Session B has now completed its audit" is behind reality.** Session B
+   has committed a **second** deliverable on `dev/session-b-core`
+   (`2cc19da`, rebased onto the current `main`): a test-only M5 regression
+   suite — a **characterization** suite (no build tag, always green, pins
+   the current behaviour including the defects) and a **contract** suite
+   behind an `m5contract` build tag that **fails today by design**, plus a
+   **gate** test that proves the contract suite can never be absorbed into a
+   required green gate. A verified it is **CI-safe**: the default build
+   passes (`ok`, 211 s) and the contract suite is **absent** from the default
+   build; the tag appears in **no** Makefile target and **no** CI workflow.
+   Session B has **not** opened a PR for it, and it is **Session B's** to
+   submit. A has not merged it.
+2. **Session B's own referral A-2 is now answered differently than B
+   framed it.** B framed A-2 as "the §6.1 storage path" — i.e. *where* to
+   put lifecycle events. A's answer was **deferred**, because the audits show
+   the first end-to-end acceptance test needs **no** new table: P2's typed
+   citation reuses `epistemic_provenance`, and P3's hunt reads
+   `tool_invocations` × `artifact_provenance`. B's later M5 deliverable
+   refers to an "A-2 (the D1/D5 observation-identity mechanism — a schema
+   change)". **That is a different question** — how to make two *deliberate*
+   observations distinct from one duplicated observation — and it is **not**
+   authorised by A's A-2 ruling. It needs its own ruling, and it is the one
+   place where a schema change might eventually be justified. A's position
+   stands: **no `SafeMigrations` entry is authorised**, and any proposal
+   for one must come with the measured evidence that no existing field
+   carries observation identity.
+
+---
+
 ## 7. Open items requiring the operator
 
 | # | Item | Why it is the operator's |
