@@ -193,6 +193,7 @@ func handleGC(args []string) int {
 			DELETE FROM memories
 			WHERE deleted_at IS NOT NULL
 			AND deleted_at < strftime('%s','now', '-30 days')
+			AND ` + mpminternal.DirectiveExclusionClause + `
 		`)
 		if err != nil {
 			// Fail closed. The previous shape logged the error, then
