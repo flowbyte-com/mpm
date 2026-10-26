@@ -14,9 +14,11 @@ are in [`docs/dev/session-c-host-findings.md`](../../../docs/dev/session-c-host-
 | Path | What it is |
 |---|---|
 | `measure_tool_surface.py` | Starts `mpm-mcp`, performs the MCP handshake, issues `tools/list`, and reports description/schema bytes and a token estimate for the compact (3-tool) and full (23-tool) surfaces. Calls no tool. |
+| `wake_context_e2e.sh` | End-to-end proof for the wake-context fix. Runs an isolated host with this repository's plugin plus `probe/wake_context_probe.js`, against a disposable MPM workspace seeded with a unique marker, and reports whether the marker reached a system-prompt part. Pass a deliberately defective plugin directory as the second argument for a negative control. |
 | `fixture_run.sh` | Runs one prompt against an **isolated** OpenCode instance whose MPM plugin is pointed at a **disposable** MPM workspace, then reports the MPM tool calls the agent actually made, read from the substrate's own `tool_invocations` audit. |
 | `probe/host_surface_probe.js` | An OpenCode v2 plugin that records the real `ctx` surface and the payloads of every hook the host fires. **Note:** its `ctx.event.subscribe(callback)` call is *wrong* and produced the first pass's false "inert stream" conclusion — kept as-is because the error is instructive. Use `event_stream_probe.js` instead. |
 | `probe/event_stream_probe.js` | **Corrected** event-stream probe: registers the callback form (to show it yields nothing) *and* consumes the real `AsyncIterable`, recording every delivered event type, its `data` keys and a bounded payload. Also exercises `ctx.session.compact` so both halves of the compaction pair are captured. |
+| `probe/wake_context_probe.js` | Witness plugin for `wake_context_e2e.sh`. Records the system-prompt parts visible to a `context` hook, both in registration order and by array reference at teardown. |
 | `probe/project_identity_probe.js` | A minimal plugin that records `ctx.location` only — used to test whether the host's project id is stable across linked worktrees and across remote spellings. |
 | `evidence/` | The raw captures the report cites. |
 

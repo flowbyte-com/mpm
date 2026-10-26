@@ -43,6 +43,10 @@ import { spawn } from "node:child_process";
 import { Plugin } from "@opencode/plugin";
 import { withWorkspace } from "./workspace.js";
 import { resolveMpmBinary, DiscoveryAttempt } from "./resolve-mpm-binary.js";
+import {
+  createWakeContextInjector,
+  extractWakeContextText,
+} from "./wake-context.js";
 
 /**
  * JSON decoded from mpm's stdout. Deliberately `any`-shaped: mpm's payload
@@ -76,8 +80,6 @@ const RESOLVED_MPM_BINARY = resolveMpmBinary(process.env, undefined, _discoveryA
 // --------------------------------------------------------------------------
 const DEFAULT_TIMEOUT_MS = 30_000;
 const HEALTH_CHECK_TIMEOUT_MS = 2_000;
-// Session wake context cache — only inject once per session
-const wakeContextCache = new Map<string, string>();
 
 function callMpm(
   bin: string,
@@ -195,18 +197,28 @@ function jsonToText(payload: MpmPayload | null): string {
 // --------------------------------------------------------------------------
 // Wake context injection (OpenCode V2 equivalent of Claude Code SessionStart)
 // --------------------------------------------------------------------------
-async function fetchWakeContext(bin: string): Promise<string> {
-  const r = await callMpm(
+// The substrate returns the prose body under the envelope's `content` key
+// for `format: "system-prompt"`. Reading `context`/`text` therefore yielded
+// "" for every real response — the extractor (src/wake-context.ts) fixes
+// that and keeps the alternate string shapes working. See that module for
+// the full defect record.
+async function fetchWakeContext(bin: string, sessionID?: string): Promise<string> {
+  // Session-attributed: the wake fetch is a real MPM tool call and must
+  // carry the host's session identity, exactly like every other tool call
+  // the plugin makes.  Without it the substrate records the row with
+  // framework_session_id = NULL and the traffic cannot be attributed to
+  // any conversation - measured on the live database, 5748 of 5754
+  // read_wake_context rows carried no session id for exactly this reason.
+  const r = await callMpmWithProvenance(
     bin,
     "mpm_context",
     { action: "read_wake_context", params: { format: "system-prompt" } },
-    { timeoutMs: 5_000 },
+    { sessionID, timeoutMs: 5_000 },
   );
   if (!r.success || r.payload === null) {
     return "";
   }
-  const payload = r.payload;
-  return payload?.context ?? payload?.text ?? "";
+  return extractWakeContextText(r.payload);
 }
 
 // --------------------------------------------------------------------------
@@ -592,16 +604,15 @@ export default Plugin.define({
         // ----- Hook: wake context injection ---------------------------------
         // V1: experimental.chat.system.transform. Injects MPM wake context
         // into the system prompt once per session (cached by sessionID).
+        //
+        // The injection rules (skip-without-session, cache, concurrent
+        // suppression, retry-on-empty) live in src/wake-context.ts so they
+        // are testable without loading the host module.
+        const wakeContext = createWakeContextInjector({
+            fetch: (sessionID?: string) => fetchWakeContext(bin, sessionID),
+        });
         await ctx.session.hook("context", async (event) => {
-            if (!event.sessionID)
-                return;
-            if (wakeContextCache.has(event.sessionID))
-                return;
-            const context = await fetchWakeContext(bin);
-            if (context) {
-                wakeContextCache.set(event.sessionID, context);
-                event.system.push({ type: "text", text: context });
-            }
+            await wakeContext.inject(event.sessionID, event.system);
         });
 
         // ----- Hook: shell provenance ---------------------------------------
@@ -617,7 +628,7 @@ export default Plugin.define({
 
         return () => {
             // cleanup: drop per-session wake cache (session store is process-local)
-            wakeContextCache.clear();
+            wakeContext.clear();
         };
     },
 });
