@@ -717,12 +717,20 @@ class TestSignalCleanup(TransactionBase):
             # holds a MIXED set and the transaction's handlers are armed.
             proc.send_signal(signum)
             # Release the driver so the deferred trap can run.
+            #
+            # The write end is deliberately NOT closed here. Popen.communicate()
+            # flushes and closes stdin itself, and closing it first makes
+            # that call raise "I/O operation on closed file" and then
+            # "Popen object has no attribute _fileobj2output" — the
+            # failure surfaces as an ERROR in this test rather than as the
+            # result it is checking. Writing and flushing is enough: the
+            # driver reads the line, and communicate() closes the pipe
+            # afterwards, which the driver sees as EOF.
             try:
                 proc.stdin.write(self.RELEASE_LINE.encode())
                 proc.stdin.flush()
-            except (BrokenPipeError, OSError):
+            except (BrokenPipeError, OSError, ValueError):
                 pass
-            proc.stdin.close()
             out, err = proc.communicate(timeout=60)
             if isinstance(err, bytes):
                 err = err.decode("utf-8", "replace")
@@ -730,7 +738,14 @@ class TestSignalCleanup(TransactionBase):
         finally:
             if proc.poll() is None:
                 proc.kill()
-                proc.communicate()
+                try:
+                    proc.communicate(timeout=30)
+                except (ValueError, OSError):
+                    # communicate() cannot be called twice if the first
+                    # call raised part-way through its own setup; the
+                    # process is already dead, so there is nothing left to
+                    # drain.
+                    pass
 
         label = f"SIG{signum} mid-promotion (rename #{announce_on_mv})"
 
