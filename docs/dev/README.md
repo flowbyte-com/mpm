@@ -253,7 +253,7 @@ pre-existing untracked file, `cmd/dbg_main.go.tmp` (579 B, 2026-10-17) —
 |---|---|
 | CI on `main` is trustworthy | ✅ #104 merged; the full-suite sweep can now fail; all three checks green on the merged commit |
 | Three isolated development worktrees on one verified base | ✅ all at the tip of `main`, clean, independent branches |
-| Existing unique and unmerged work preserved | ✅ 15 local branches, 21 worktrees; nothing deleted this round |
+| Existing unique and unmerged work preserved | ✅ **7 local branches, 3 worktrees** after the post-merge cleanup; the one piece of unmerged work found was preserved onto `chore/mpm-core-gomod-uuid-direct` |
 | Branch and file ownership boundaries documented | ✅ [`coordination.md`](coordination.md) |
 | Shared event contract reviewed and presented | ✅ revised `mpm-event/0.1` — **awaiting B/C acknowledgement of M1–M7** |
 | Core/adapter ownership split unambiguous | ✅ [`coordination.md`](coordination.md) §2 |

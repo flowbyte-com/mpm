@@ -100,7 +100,7 @@ clones.
 Per-session feature branches:
 
 ```
-Session A:  integration/session-a, docs/sprint-foundation
+Session A:  integration/session-a, main (unattached), chore/<topic>
 Session B:  dev/session-b-core, feat/session-b-<topic>
 Session C:  dev/session-c-opencode, feat/session-c-<topic>
 ```
@@ -170,7 +170,7 @@ against it simultaneously.
 | `dev/session-b-core` | B | tip of `main` | Session B base |
 | `dev/session-c-opencode` | C | tip of `main` | Session C base |
 | `main` | A | tip of `main` | tracks `origin/main`; **not checked out** — syncs with `git branch -f main origin/main` |
-| `docs/sprint-foundation` | A | — | this documentation set (PRs #105, #106) |
+| *(no docs branch)* | A | — | the documentation set is merged into `main` (PRs #105, #106, #107); its branch was deleted after the merge |
 | `hal9001/r3-integration` | A | `cbe6af7` | pre-existing combined tree — **evidence only**, no worktree |
 | `integration/pre-release-12` | A | `a8c3b60` | **validation checkpoint — evidence only, not a baseline**, no worktree |
 | `chore/mpm-core-gomod-uuid-direct` | A | `1a16e90` | **the one piece of unmerged work found in the whole repository**, preserved onto a branch before its worktree was removed |
