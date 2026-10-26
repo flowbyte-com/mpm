@@ -1169,7 +1169,7 @@ mode_install() {
     log ""
     log "next steps (manual):"
     log "  $cli status                # verify DB reachable"
-    log "  $cli call read_wake_context  # first agent tool call"
+    log "  $cli call mpm_context --payload '{\"action\":\"read_wake_context\"}'  # first agent tool call"
     log ""
     log "tip: ~/.local/bin/mpm will normally be available after a new login session;"
     log "     until then, use $cli directly."
