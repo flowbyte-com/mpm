@@ -280,26 +280,64 @@ class NextStepsUseCanonicalPath(unittest.TestCase):
     Bare `mpm` only resolves where ~/.local/bin is already on PATH. The
     installer runs in a non-login shell where it is not, so the operator
     copies the command and gets `mpm: command not found`.
+
+    The same rule applies to the TOOL NAME. `read_wake_context` is an
+    action of the `mpm_context` tool, not a tool of its own, so
+    `mpm call read_wake_context` fails with "unknown tool". The runnable
+    spelling is the payload form:
+
+        mpm call mpm_context --payload '{"action":"read_wake_context"}'
     """
+
+    # Canonical-path spellings of the two verification commands. These are
+    # matched against install.sh SOURCE text, so the shell's escaped quotes
+    # are literal here.
+    STATUS_FORMS = (
+        "$cli status",
+        r"""\"$PREFIX/bin/mpm\" status""",
+        '"$PREFIX/bin/mpm" status',
+    )
+    WAKE_FORMS = (
+        r"""$cli call mpm_context --payload '{\"action\":\"read_wake_context\"}'""",
+        r"""\"$PREFIX/bin/mpm\" call mpm_context --payload '{\"action\":\"read_wake_context\"}'""",
+        r""""$PREFIX/bin/mpm" call mpm_context --payload '{\"action\":\"read_wake_context\"}'""",
+    )
+    # Spellings that resolve to no tool at all. `read_wake_context` is an
+    # ACTION of the `mpm_context` tool, not a tool of its own, so
+    # `mpm call read_wake_context` exits 1 with "unknown tool".
+    DEAD_WAKE_FORMS = (
+        "$cli call read_wake_context",
+        r"""\"$PREFIX/bin/mpm\" call read_wake_context""",
+        '"$PREFIX/bin/mpm" call read_wake_context',
+    )
 
     def test_uses_a_canonical_path_for_the_verification_commands(self):
         body = _install_sh()
-        canonical_forms = (
-            "$cli status",
-            "$cli call read_wake_context",
-            """\\"$PREFIX/bin/mpm\\" status""",
-            """\\"$PREFIX/bin/mpm\\" call read_wake_context""",
-            '"$PREFIX/bin/mpm" status',
-            '"$PREFIX/bin/mpm" call read_wake_context',
-        )
         self.assertTrue(
-            any(f in body for f in canonical_forms if "status" in f),
+            any(f in body for f in self.STATUS_FORMS),
             "next steps must render a canonical-path `status` command",
         )
         self.assertTrue(
-            any(f in body for f in canonical_forms if "read_wake_context" in f),
+            any(f in body for f in self.WAKE_FORMS),
             "next steps must render a canonical-path read_wake_context command",
         )
+
+    def test_next_steps_never_advertise_a_command_that_names_no_tool(self):
+        """The canonical path is necessary but not sufficient.
+
+        `mpm call read_wake_context` exits 1 with
+        `{"error":"unknown tool: read_wake_context"}`; the supported
+        spelling is the payload form. A canonical path does not rescue a
+        command that names no tool, so the dead spellings must never be
+        rendered.
+        """
+        body = _install_sh()
+        for dead in self.DEAD_WAKE_FORMS:
+            self.assertNotIn(
+                dead,
+                body,
+                f"next steps advertise a command that names no tool: {dead!r}",
+            )
 
     def test_pre_fix_bare_mpm_next_steps_are_absent(self):
         body = _install_sh()
