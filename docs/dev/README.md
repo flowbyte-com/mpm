@@ -1,123 +1,189 @@
 # Development sprint foundation — index and readiness report
 
-> **Scope:** Session A foundation assignment (integration + release engineering).
-> **Prepared:** 2026-10-26. **Target:** OpenCode-only release candidate, Friday 30 October 2026.
-
-This directory holds the eight foundation deliverables. Every claim below is
-backed by command output captured on 2026-10-26; nothing here is a plan
-presented as a completed action.
+> **Scope:** Session A — integration and release engineering.
+> **Prepared:** 2026-10-26. **Target:** OpenCode-only release candidate,
+> Friday 30 October 2026.
+>
+> **This is the second revision.** The first revision was the foundation
+> audit. This one records what Session A did **after** it: the CI
+> integration, the contract correction, the dogfooding verification and the
+> launch gate. Every claim below is backed by command output or a commit SHA
+> captured on 2026-10-26.
 
 | # | Deliverable | Document | Status |
 |---|---|---|---|
-| A | Repository inventory and cleanup record | [`inventory.md`](inventory.md) | Complete |
-| B | Corrective PR integration matrix | [`integration-matrix.md`](integration-matrix.md) | Complete |
-| C | CI optimization report | [`ci-optimization.md`](ci-optimization.md) | Baseline complete; two quick wins merged as PRs, larger restructuring deferred |
-| D | Coordination and ownership specification | [`coordination.md`](coordination.md) | Complete |
-| E | Shared event-contract proposal | [`event-contract.md`](event-contract.md) | **Draft for B/C review — not agreed** |
-| F | Dogfooding and isolation runbook | [`dogfooding-runbook.md`](dogfooding-runbook.md) | Complete |
-| G | Tool-surface evaluation baseline | [`tool-surface-baseline.md`](tool-surface-baseline.md) | Baseline complete; comparative work deferred to Session C |
+| A | Repository inventory and cleanup record | [`inventory.md`](inventory.md) | Complete (round 1) |
+| B | Corrective PR integration — **post-merge verification** | [`integration-matrix.md`](integration-matrix.md) | **Complete — all 15 PRs merged; `main` = `b5b1840` verified** |
+| C | CI optimization report | [`ci-optimization.md`](ci-optimization.md) | **Complete — the false-green defect is fixed and merged** |
+| D | Coordination and ownership specification | [`coordination.md`](coordination.md) | Complete, ledger refreshed |
+| E | Shared event-contract proposal | [`event-contract.md`](event-contract.md) | **Revised proposal `mpm-event/0.1` — awaiting B/C acknowledgement** |
+| F | Dogfooding and isolation runbook | [`dogfooding-runbook.md`](dogfooding-runbook.md) | **Complete — `~/.mpm-dogfood` initialised and verified** |
+| G | Tool-surface evaluation baseline | [`tool-surface-baseline.md`](tool-surface-baseline.md) | Baseline complete; measurement assigned to Session C |
 | H | Foundation readiness report | this file | Complete |
+| I | **Parallel launch gate and B/C handoff** | [`launch-gate.md`](launch-gate.md) | **Complete — launch conditions met** |
 
 ---
 
-## 1. What was accomplished
+## 1. What changed since the foundation audit
 
-### 1.1 Three permanent development worktrees exist and build
+### 1.1 CI is trustworthy on `main`
 
-| Path | Branch | HEAD | Purpose | Builds |
-|---|---|---|---|---|
-| `~/src/mpm` | `integration/session-a` | `414b276` | Session A — integration and release | ✅ 5 binaries |
-| `~/src/mpm-core` | `dev/session-b-core` | `414b276` | Session B — intelligence core | ✅ 5 binaries |
-| `~/src/mpm-opencode` | `dev/session-c-opencode` | `414b276` | Session C — OpenCode adapter | ✅ 5 binaries |
-
-All three are **linked worktrees of one Git object store** (`~/src/mpm/.git`),
-verified by `git worktree list`; they are not independent clones. All three
-sit on the same verified base, `origin/main` = `414b27651ee66ec5dcad9ba75cd43b6c4b2fac9c`.
-
-### 1.2 Corrective PR work advanced
-
-| PR | Change | Head | CI |
+| PR | Change | Merge SHA | CI |
 |---|---|---|---|
-| **#99** | contract test corrected to the supported `mpm_context` payload form | `0f67fcb` | ✅ **all three checks pass** |
-| **#102** | `mpmcli` environment isolation (new) | `af8a699` | ✅ green |
-| **#103** | signal-interruption test determinism (new) | `5c687d0` | re-running after a CI-caught fix |
-| **#104** | CI gate integrity (new, stacked on #103) | `4c0bfb0` | queued |
-| **#96** | gofmt correction pushed to its owning branch | `49c8e6f` | re-running |
+| **#102** | `mpmcli` environment isolation | `e093bcc` | ✅ green before merge |
+| **#103** | signal-interruption test determinism | `cefe14b` | ✅ green before merge |
+| **#104** | CI gate integrity | `b5b1840` | ✅ green before merge, ✅ green on `main` after |
 
-### 1.3 CI false-green defect found and fixed
+**#103** removed a flake that made the "Build + core tests" job red for
+*any* PR — 4 of 4 full-suite runs failed on pristine `origin/main` before
+it.
 
-The "Full test suite" job **could not fail**: its step piped `go test` into
-`tee` under GitHub's default shell, which has no `pipefail`. PR #104 restores
-the gate and adds superseded-run cancellation. See
-[`ci-optimization.md`](ci-optimization.md).
+**#104** fixed a **false-green defect**: the "Full test suite" job ran
+`go test … | tee test-output.log` under GitHub's default shell
+(`bash -e {0}`, errexit only, **no pipefail**), so a failing `go test`
+reported `tee`'s exit status and **could not fail the job**. The job read
+`success` while its own log showed `FAIL`. The fix declares `shell: bash`
+on the piped steps and adds a per-ref `concurrency` group with
+`cancel-in-progress: true`. It **adds** a gate; it removes none.
 
-### 1.4 Two pre-existing test defects found, diagnosed and fixed
+Verified, not assumed:
 
-| Defect | Evidence | PR |
-|---|---|---|
-| `mpm-core/mpmcli` inherits ambient `MPM_PROVENANCE_FRAMEWORK` | reproduces identically on pristine `origin/main` | #102 |
-| signal-interruption test is timing-dependent | **4 of 4** full-suite runs failed on pristine `origin/main` | #103 |
+```
+$ bash -e -c 'false | tee /dev/null'; echo $?
+0                                        # the default shell: pipefail absent
+$ bash --noprofile --norc -eo pipefail -c 'false | tee /dev/null'; echo $?
+1                                        # shell: bash: the failure propagates
+```
 
-### 1.5 The four MPM records created during housekeeping were **not** shredded
+And the new regression test is **not vacuous**: removing the real
+`shell: bash` line from the "Full test sweep" step makes **2 of its 10
+tests fail**.
 
-They are reported in [`inventory.md`](inventory.md) §6 for the user's decision.
-No further MPM writes were made to the live database during this assignment.
+### 1.2 #104's branch did contain #103's commits — and was corrected
+
+`fix/hal9001-ci-gate-integrity` was branched from `5c687d0`, which is
+#103's **second** commit. #103 was then **squash-merged** as `cefe14b`,
+which also carries #103's third commit `bd51e78` — a commit the #104 branch
+did not have. Merging #104 as it stood therefore produced a **content
+conflict** in `scripts/tests/test_binary_transaction.py`.
+
+Resolved by `git rebase --onto origin/main 5c687d0
+fix/hal9001-ci-gate-integrity`, which replays **only** #104's own commit
+(`4c0bfb0`) onto the new `main` and drops #103's already-merged commits.
+The resulting head `fa80f48` is a single commit on top of `cefe14b`; no
+duplicate or stale change was integrated.
+
+### 1.3 The event contract was corrected, not merely re-drafted
+
+The first draft was a useful foundation. It was **wrong** in eight
+substantive respects, and two of its claims did not survive contact with
+the code:
+
+* it claimed raw lifecycle events could be routed into the `evidence`
+  table — **they cannot**: that table requires an `artifact_id` and a
+  CHECK-constrained `artifact_type`;
+* it claimed "two events with the same hash and the same type are the same
+  observation" — **repeated identical operations are legitimate
+  independent events**.
+
+The full correction table is in [`event-contract.md`](event-contract.md) §0.
+The version string stays `mpm-event/0.1`, because no implemented interface
+depends on the field set yet.
+
+### 1.4 The dogfooding workspace exists and is verified
+
+`~/.mpm-dogfood` was created and seeded earlier on 2026-10-26 (it was
+already populated with the sprint's shared decisions, lessons and one
+handoff — the foundation report's "not yet initialised" blocker was stale).
+It has now been **verified**:
+
+* its database is a **distinct inode** (`36706413`) from the live one
+  (`36984047`);
+* `mpm` and `mpm-mcp` **ignore `MPM_DB_PATH`** (proven with a sentinel path
+  that was never created) — but **`mpm-critic` and `mpm-scheduler` honour
+  it**, so it must be pinned;
+* the OpenCode plugin's `resolveWorkspace()` / `withWorkspace()` and
+  `resolveMpmBinary()` were run and their behaviour confirmed;
+* scratch isolation, 8 concurrent writers + 8 concurrent readers, and
+  backup/restore against disposable data all pass;
+* the live database's **knowledge tables are unchanged**.
+
+### 1.5 The scheduler question has an honest answer
+
+The dogfooding workspace has **no scheduler**, and the `mpm info` line
+`mpm-scheduler : running (pid 3050)` is **not** evidence that it does —
+the check is process-based, not workspace-scoped. The live scheduler's own
+environment and open file descriptors were read to prove it maintains only
+`~/.mpm`. The live systemd service was **not** modified.
 
 ---
 
 ## 2. Exact relevant commit SHAs
 
 ```
-origin/main                                  414b27651ee66ec5dcad9ba75cd43b6c4b2fac9c
-LICENSE blob (unchanged)                     be628ce05bea64f91149c26557612de16bc212c6
+origin/main                                  b5b18401974ee559a485cda20abf8f7779f11bf2
+  #102 mpmcli environment isolation          e093bcc3d90a4d7fb3eb2086568fa79f0b6aa06e
+  #89  provenance test isolation              bf142f3
+  #90  gc reporting honesty                  8c640d1
+  #91  ingest undo honesty                   9e62fd2
+  #87  embedding-migration doctor            b50f27c
+  #96  reject evidence on save               ea775ad
+  #85  operator-only shred                   9a5661c
+  #88  staged-row shred linkage              3c18840
+  #86  provenance-only evidence              765334b
+  #97  directive retention                   d89c11c
+  #98  schema-init serialisation             321a695
+  #99  installer next steps                  f7e0185
+  #95  confidence decay                      f2c1ff4
+  #103 signal-test determinism               cefe14b
+  #104 CI gate integrity                     b5b1840
 
-#99  fix/hal9001-r3-install-next-steps       0f67fcbed9f5733593e93b5e1a0233891d4537f4
-#96  fix/hal9001-r2-save-evidence            49c8e6f354baff68378dd432c00f63e4e1cfa5b0
-#102 fix/hal9001-mpmcli-env-isolation         af8a699e8f91e5a89e95bd9d99520970d0aa8219
-#103 fix/hal9001-signal-test-determinism      5c687d0017892c5317835ba32be638c57c36df1d
-#104 fix/hal9001-ci-gate-integrity            4c0bfb0e8461f968490fc752cdd4eec40ada3e62
-
-integration/session-a                        414b27651ee66ec5dcad9ba75cd43b6c4b2fac9c
-dev/session-b-core                           414b27651ee66ec5dcad9ba75cd43b6c4b2fac9c
-dev/session-c-opencode                       414b27651ee66ec5dcad9ba75cd43b6c4b2fac9c
-hal9001/r3-integration                       cbe6af7c27e172ef0c8e87057238fb830924d88f
-integration/pre-release-12                   a8c3b6037e8d3404978259aa545ced496a97cf5c
+integration/session-a                        b5b1840
+dev/session-b-core                           b5b1840
+dev/session-c-opencode                       b5b1840
+main (checked out at ~/src/mpm-release)      b5b1840
 
 installed runtime (~/.mpm)                   3df723156d7649517508212453de72d347759f43
 installed binary                             0.1.0-dev+g3df72315.t1792851233
+development build used for dogfooding        0.1.0-dev+gb5b18401.t1793023964
+
+CI run on the PR head fa80f48                40332886651   ✅ all three green
+CI run on main = b5b1840                     40337045142   ✅ all three green
 ```
 
 ---
 
-## 3. Uncommitted changes
+## 3. The three worktrees
 
-| Location | State |
-|---|---|
-| `~/src/mpm` | clean except the pre-existing untracked `cmd/dbg_main.go.tmp` (579 B, 2026-10-17) — **preserved, not mine to delete** |
-| `~/src/mpm-core`, `~/src/mpm-opencode` | clean |
-| `~/src/mpm-release` | clean, `main` @ `3df7231` |
-| all 12 other worktrees | clean |
+| Path | Branch | HEAD | Purpose |
+|---|---|---|---|
+| `~/src/mpm` | `integration/session-a` | `b5b1840` | Session A — integration and release |
+| `~/src/mpm-core` | `dev/session-b-core` | `b5b1840` | Session B — intelligence core |
+| `~/src/mpm-opencode` | `dev/session-c-opencode` | `b5b1840` | Session C — OpenCode adapter |
 
-The only work-in-progress lives on pushed branches:
-`fix/hal9001-mpmcli-env-isolation`, `fix/hal9001-signal-test-determinism`,
-`fix/hal9001-ci-gate-integrity`, and this documentation branch
-`docs/sprint-foundation` (unpushed at the time of writing).
+All three are **linked worktrees of one Git object store** (`~/src/mpm/.git`),
+all three sit on the same verified base, and all three were fast-forwarded
+from `414b276` to `b5b1840` in this round. `~/src/mpm` carries one
+pre-existing untracked file, `cmd/dbg_main.go.tmp` (579 B, 2026-10-17) —
+**preserved, not mine to delete**.
 
 ---
 
 ## 4. Safety checks performed
 
-- Every branch deletion and worktree removal in the preceding housekeeping
-  round re-verified the SHA **immediately before** the destructive command.
-- The 12-way integration merge was performed in a **disposable worktree**
-  with the single conflict resolved by keeping both index lines; the result
-  passed `make build` and `make test-race` (24/24 Go packages, 0 data races).
 - The live database was read **read-only** throughout (`file:…?mode=ro`).
-- `~/.mpm`, its databases, installed binaries and running services were not
-  modified, migrated or restarted.
-- Every automated test used an isolated `HOME` / `MPM_WORKSPACE`, or a
-  `t.TempDir()`-scoped fixture.
-- The `LICENSE` blob is byte-identical to `origin/main`'s.
+  Its knowledge tables are byte-for-byte unchanged; only
+  `tool_invocations` grows, from the live OpenCode plugin's own
+  `read_wake_context` polling.
+- `~/.mpm`, its databases, its installed binaries and its running services
+  were **not** modified, migrated or restarted. The systemd unit was not
+  edited, reloaded or stopped.
+- Every destructive or experimental operation ran in a `mktemp -d` scratch
+  area with its own `HOME`, `MPM_WORKSPACE` and `MPM_DB_PATH`.
+- Backup and restore were exercised **only** against disposable data.
+- The CI negative test (removing the fix to prove the regression test
+  catches it) was run in a scratch copy of the workflow, not against the
+  repository.
 
 ---
 
@@ -125,60 +191,43 @@ The only work-in-progress lives on pushed branches:
 
 | # | Blocker | Who | Blocking what |
 |---|---|---|---|
-| 1 | **Event contract not yet agreed** | Sessions B + C | Substantial lifecycle implementation. **Mandatory gate.** |
-| 2 | `#103` must merge before `#104` is green | Session A | #104's CI |
-| 3 | `integration/pre-release-12` is a *checkpoint*, not a baseline | Session A | Must be rebuilt from reviewed PR heads before the final integration |
-| 4 | `~/src/mpm-release` holds `main` and is 12 commits behind | Session A | Promoting `main` into `~/src/mpm` (one command, deferred) |
-| 5 | Dogfooding workspace **not yet initialised** | Session A | Shared-knowledge verification (procedure is fully specified and verified in [`dogfooding-runbook.md`](dogfooding-runbook.md)) |
-| 6 | `feature/version-build-provenance` shows `[gone]` upstream | Session A | Cosmetic; branch content is proven merged |
+| 1 | **The event contract is not yet acknowledged** by B and C | B + C | Dependent lifecycle implementation. **Not** investigation, and **not** the launch. |
+| 2 | **The storage gap for lifecycle observations is real but not yet closed** — one minimal implementation PR after the audits | A | The durable storage of lifecycle events |
+| 3 | **The release candidate is not assembled** — the B/C work is not started | B + C | The 30 October target |
+| 4 | **Nothing has been deployed** to `~/.mpm` (still 27 commits behind) | A | The release candidate — deliberately, per the deployment gate |
+| 5 | `idx_memories_confidence_checked` does not accelerate the decay query it was added for | A | Nothing — a performance claim defect, recorded, not fixed this round |
 
 ---
 
-## 6. Decisions requiring approval
+## 6. Decisions requiring the operator's approval
 
-1. **The four MPM memory records** — keep, refine, or shred. Details and my
-   recommendation in [`inventory.md`](inventory.md) §6.
-2. **Whether `~/src/mpm-release` should be retired** so that `main` can live
-   in `~/src/mpm`. It is clean and 12 commits stale; retiring it reclaims
-   124 MB and removes a second checkout of the same repo.
-3. **Whether to keep the 12 open-PR worktrees** under `~/src/worktrees/`
-   until their PRs merge, or retire the six whose branches are already
-   represented in `hal9001/r3-integration`. Reclaimable now: ~750 MB.
-4. **CI restructuring beyond the two merged quick wins** — the full-suite
-   job's redundancy is documented but not changed, because removing it would
-   reduce verification.
-5. **Event contract v0.1 acceptance** by Sessions B and C.
+1. **The four MPM memory records** created during housekeeping — keep,
+   refine, or shred. Details and a recommendation in
+   [`inventory.md`](inventory.md) §6.
+2. **Whether `~/src/mpm-release` should be retired** so `main` can live in
+   `~/src/mpm`. It is clean and now current (`b5b1840`); retiring it
+   reclaims a second checkout of the same repository.
+3. **Whether to keep the 12 open-PR worktrees** under `~/src/worktrees/`.
+   Their PRs are all merged now; they are reclaimable.
+4. **Whether to give the dogfooding workspace its own scheduler unit.** The
+   mechanism exists (`--db`, `--lock`, `MPM_WORKSPACE`), but creating a unit
+   is a deployment act and the brief for this round forbade touching the
+   live systemd service.
+5. **Event contract v0.1 acceptance** by Sessions B and C — the MSI items
+   M1–M7 in [`event-contract.md`](event-contract.md) §7.
 
 ---
 
-## 7. Recommended next actions
+## 7. What Session A does next, while B and C investigate
 
-**Session A (now)**
-
-1. Merge `#103` (signal-test determinism) — it unblocks `#104` and removes a
-   flake that makes *any* PR's "Build + core tests" job intermittently red.
-2. Merge `#104` (CI gate integrity), then `#102` (mpmcli isolation).
-3. Merge the 12 corrective PRs in the order in
-   [`integration-matrix.md`](integration-matrix.md), resolving the single
-   `internal/core/schema.go` conflict by keeping **both** index lines.
-4. Rebuild the integration result from the *merged* heads, then re-run the
-   full gate (`make test-race`) on the rebuilt tree.
-5. Present the event contract (document E) to Sessions B and C for explicit
-   acknowledgement of a versioned contract.
-6. Only then: milestone promotion to `~/.mpm` per
-   [`dogfooding-runbook.md`](dogfooding-runbook.md) §6.
-
-**Session B** — may begin *investigation and auditing* of the existing critic,
-scheduler, evidence and telemetry implementations immediately (read-only,
-in `~/src/mpm-core`). Substantial new lifecycle ingestion waits on the
-agreed contract.
-
-**Session C** — may begin *read-only investigation* of the installed OpenCode
-plugin API in `~/src/mpm-opencode` immediately. See
-[`event-contract.md`](event-contract.md) §4 for what is actually known today
-about the available hooks.
-
-**Neither session may merge to `main` or deploy to `~/.mpm`.**
+1. **Hold the CI gate** on `main` and keep the release checks honest.
+2. **Adjudicate** B's and C's proposed contract changes against the
+   evidence in the contract.
+3. **Prepare the single minimal implementation PR** for whatever the audits
+   show is genuinely missing — one PR, with its contract tests.
+4. **Keep the deployment gate closed** until an accepted milestone has
+   passed the full verification gate.
+5. **Refresh the integration record** if B and C's PRs land.
 
 ---
 
@@ -186,17 +235,23 @@ about the available hooks.
 
 | Requirement | Status |
 |---|---|
-| Three isolated development worktrees verified | ✅ built, clean, independent branches, one object store |
-| Existing unique and unmerged work preserved | ✅ 16 local branches, 13 remote, 15 worktrees; nothing deleted this round |
+| CI on `main` is trustworthy | ✅ #104 merged; the full-suite sweep can now fail; all three checks green on `b5b1840` |
+| Three isolated development worktrees on one verified base | ✅ all at `b5b1840`, clean, independent branches |
+| Existing unique and unmerged work preserved | ✅ 15 local branches, 21 worktrees; nothing deleted this round |
 | Branch and file ownership boundaries documented | ✅ [`coordination.md`](coordination.md) |
-| Shared event-contract draft reviewed and agreed | ⛔ **drafted, not agreed — blocks substantial B/C work** |
+| Shared event contract reviewed and presented | ✅ revised `mpm-event/0.1` — **awaiting B/C acknowledgement of M1–M7** |
 | Core/adapter ownership split unambiguous | ✅ [`coordination.md`](coordination.md) §2 |
-| Shared dogfooding workspace configured or setup fully verified | ⚠️ **procedure verified, not yet initialised** |
-| Destructive tests isolated from live and shared knowledge | ✅ see [`dogfooding-runbook.md`](dogfooding-runbook.md) §5 |
-| PR dependencies and major integration conflicts understood | ✅ [`integration-matrix.md`](integration-matrix.md) |
-| CI release-verification requirements known | ✅ [`ci-optimization.md`](ci-optimization.md) |
-| Session A remains sole merge and deployment authority | ✅ stated in [`coordination.md`](coordination.md) §1 |
+| Shared dogfooding workspace configured **and verified** | ✅ `~/.mpm-dogfood`; isolation, concurrency, backup/restore all verified |
+| Destructive tests isolated from live and shared knowledge | ✅ [`dogfooding-runbook.md`](dogfooding-runbook.md) §8.3 |
+| PR dependencies and integration conflicts understood and resolved | ✅ both conflicting schema indexes preserved and re-reviewed |
+| CI release-verification requirements known and preserved | ✅ [`ci-optimization.md`](ci-optimization.md) §6 |
+| Session A remains sole merge and deployment authority | ✅ [`coordination.md`](coordination.md) §1 |
 
-**Verdict: the foundation is safe and Sessions B and C may launch for
-read-only investigation and audit immediately. Substantial lifecycle
-implementation waits on the event contract being agreed.**
+**Verdict: the gate conditions for launching Sessions B and C are met.**
+They may launch, read, audit and measure immediately. Substantive lifecycle
+implementation waits on the contract being acknowledged — that is a gate on
+*implementation*, not on *starting*.
+
+> **Session A does not launch B and C.** The launch is the operator's call.
+> The requirements each session must satisfy on its first hour are in
+> [`launch-gate.md`](launch-gate.md).

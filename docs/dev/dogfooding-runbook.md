@@ -137,7 +137,7 @@ $ python3 -c "... select count(*) from sqlite_master where type='table'"
 **`restore-db` is interactive.** It reads a confirmation from stdin and
 aborts without a TTY. In an automated procedure, pipe `yes`.
 
-### 2.5 ⚠ A hazard found during verification
+### 2.5 ⚠ A hazard found during verification — **confirmed, not closed**
 
 `mpm info` reported `mpm-scheduler : running (pid 3050)` while pointed at
 the **isolated** workspace. The scheduler check is **process-based, not
@@ -145,12 +145,37 @@ workspace-scoped**. A session working in the dogfooding workspace will
 therefore be told that a scheduler is running when the scheduler is in fact
 maintaining a *different* workspace.
 
-**Consequence for the sprint: the dogfooding workspace needs its own
-scheduler, or the sessions must be told explicitly that no scheduler is
-maintaining it.** This is recorded as an open issue, not silently worked
-around.
+**Re-confirmed on 2026-10-26, with the process's own environment read
+directly** (§8.5):
 
-## 3. The shared dogfooding workspace — proposal
+```
+$ tr '\0' '\n' < /proc/3050/environ | grep ^MPM_
+MPM_WORKSPACE=/home/v/.mpm
+MPM_DB_PATH=/home/v/.mpm/src/db/mpm.db
+MPM_BACKUP_DIR=/home/v/.mpm/backups/critic-pre
+MPM_CRITIC_BIN=/home/v/.mpm/bin/mpm-critic
+MPM_BIN=/home/v/.mpm/bin/mpm
+
+$ ls -l /proc/3050/fd | grep mpm.db
+  6 -> /home/v/.mpm/src/db/mpm.db.lock
+  7 -> /home/v/.mpm/src/db/mpm.db
+  8 -> /home/v/.mpm/src/db/mpm.db-wal
+  9 -> /home/v/.mpm/src/db/mpm.db-shm
+```
+
+The running scheduler holds **only** the live database open. There is no
+scheduler maintaining `~/.mpm-dogfood`.
+
+**Consequence for the sprint — now a stated fact, not an open issue:** the
+dogfooding workspace has **no scheduler of its own**, and the `mpm info`
+line "mpm-scheduler : running" must **never** be read as evidence that a
+given workspace is maintained. See §8.5.
+
+## 3. The shared dogfooding workspace — initialised 2026-10-26
+
+> **Status change (2026-10-26):** the workspace is no longer a proposal. It
+> was created and seeded earlier on 2026-10-26 and has been **verified**;
+> see §8 for the verification record and §8.5 for the scheduler status.
 
 ### 3.1 Location
 
@@ -167,24 +192,35 @@ writes cannot corrupt the live install.
 
 ### 3.2 Initialisation (verified procedure)
 
+The commands below **do** exist in the current build: `mpm ops init
+directives`, `mpm ops init skills`, `mpm ops init tasks` and
+`mpm ops init topics` are listed by `mpm ops --help` and implemented in
+`cmd/mpm/ops_init_*.go`. (They are easy to miss — `mpm ops --help` lists
+them at the very end of a long list, and `mpm ops init` on its own prints
+the generic `ops` help.)
+
 ```bash
 export MPM_WORKSPACE="$HOME/.mpm-dogfood"
+export MPM_DB_PATH="$MPM_WORKSPACE/src/db/mpm.db"   # see §8.2 — this matters
+export MPM_BINARY="$HOME/src/mpm/.build/bin/mpm"      # the development build
 mkdir -p "$MPM_WORKSPACE" "$MPM_WORKSPACE/home"
 
 # 1. Create the schema (lazy; verified above).
 MPM_WORKSPACE="$MPM_WORKSPACE" HOME="$MPM_WORKSPACE/home" \
-  /home/v/.mpm/bin/mpm info
+  "$MPM_BINARY" info
 
 # 2. Seed the standing directives and skills so the workspace is
 #    equivalent to a fresh install.
 MPM_WORKSPACE="$MPM_WORKSPACE" HOME="$MPM_WORKSPACE/home" \
-  /home/v/.mpm/bin/mpm ops init directives
+  "$MPM_BINARY" ops init directives
 MPM_WORKSPACE="$MPM_WORKSPACE" HOME="$MPM_WORKSPACE/home" \
-  /home/v/.mpm/bin/mpm ops init skills
+  "$MPM_BINARY" ops init skills
+MPM_WORKSPACE="$MPM_WORKSPACE" HOME="$MPM_WORKSPACE/home" \
+  "$MPM_BINARY" ops init tasks
 
 # 3. Verify.
 MPM_WORKSPACE="$MPM_WORKSPACE" HOME="$MPM_WORKSPACE/home" \
-  /home/v/.mpm/bin/mpm ops stats
+  "$MPM_BINARY" ops stats
 ```
 
 ### 3.3 Pointing the sessions at it
@@ -412,4 +448,198 @@ systemctl --user restart mpm-scheduler
 - It does **not** make `~/.mpm` a development worktree. It is a deployment
   target.
 - It does **not** promise that the dogfooding workspace can be pointlessly
-  pointed at a *running scheduler*. See §2.5.
+  pointed at a *running scheduler*. See §2.5 and §8.5.
+
+---
+
+## 8. Verification record — 2026-10-26
+
+Everything below was **executed**, not reasoned about. The live database was
+never a write target.
+
+### 8.0 Binary provenance
+
+The dogfooding workspace is driven by the **development build at `main`**,
+not by the installed runtime:
+
+```
+$ ~/src/mpm/.build/bin/mpm --version
+MPM 0.1.0-dev+gb5b18401.t1793023964
+  binary:  mpm
+  commit:  b5b18401974ee559a485cda20abf8f7779f11bf2
+  build:   development
+  built:   2026-10-26T14:12:44Z
+  dirty:   no
+```
+
+The installed runtime at `~/.mpm/bin/mpm` reports
+`0.1.0-dev+g3df72315.t1792851233` — commit `3df72315`, which is **27
+commits behind `main`**. `MPM_BINARY` selects the development build; see
+§8.4 for the proof that the plugin honours it.
+
+### 8.1 Database isolation — proven by inode and by resolved path
+
+```
+$ stat -c '%n dev=%d ino=%i size=%s' ~/.mpm/src/db/mpm.db ~/.mpm-dogfood/src/db/mpm.db
+/home/v/.mpm/src/db/mpm.db            dev=64513 ino=36984047 size=8441856
+/home/v/.mpm-dogfood/src/db/mpm.db    dev=64513 ino=36706413 size=1105920
+```
+
+Different inodes, different realpaths, different files. The dogfooding
+database holds the sprint's shared knowledge (12 memories, 5 standing
+directives, 1 skill, 3 decisions, 1 handoff, 11 evidence rows).
+
+### 8.2 `MPM_DB_PATH` cannot silently redirect the CLI or the MCP server
+
+**This is the precise finding, and it has two halves.**
+
+* `mpm` and `mpm-mcp` **ignore `MPM_DB_PATH` entirely.** `NewDatabaseManager`
+  derives the path from the workspace (`internal/core/db.go`: *"The database
+  is ALWAYS at `mpm/src/db/mpm.db` regardless of `projectRoot`"*), and there
+  is no `MPM_DB_PATH` reference in `internal/core/db.go` or
+  `internal/core/config/`. Proven with a sentinel:
+
+  ```
+  MPM_WORKSPACE=~/.mpm-dogfood MPM_DB_PATH=/tmp/.../sentinel/mpm.db mpm info
+    → database path : /home/v/.mpm-dogfood/src/db/mpm.db
+    → the sentinel file was NEVER created
+  ```
+
+* **`mpm-critic` and `mpm-scheduler` DO honour `MPM_DB_PATH`** — it is the
+  default of their `-db` flag (`cmd/mpm-critic/main.go:57`,
+  `cmd/mpm-scheduler/main.go:51`), and `internal/scheduler/scheduler.go:988`
+  reads it first as well. Proven against a sentinel:
+
+  ```
+  $ MPM_DB_PATH=/tmp/.../sentinel/mpm.db mpm-critic --help
+    -db string
+       Path to mpm.db (default: $MPM_DB_PATH or src/db/mpm.db via DatabaseManager)
+       (default "/tmp/.../sentinel/mpm.db")
+  ```
+
+**Therefore the rule for the dogfooding environment is: pin `MPM_DB_PATH`
+to the dogfooding database, alongside `MPM_WORKSPACE`.** Without that pin, a
+scheduler or a critic started from a dogfooding shell with a live
+`MPM_DB_PATH` in its environment would open the **live** database.
+
+### 8.3 Scratch isolation — verified
+
+A scratch area with its own `HOME`, `MPM_WORKSPACE` and `MPM_DB_PATH`:
+
+* the scratch database was created under the scratch workspace;
+* neither the scratch `HOME` nor the dogfooding scratch `HOME` acquired a
+  `.mpm` directory;
+* a write through the scratch environment left the **live** database's
+  mtime and size byte-identical.
+
+### 8.4 The OpenCode plugin and the MCP subprocesses inherit the intended configuration
+
+Proven by running the **installed** plugin's compiled modules:
+
+```
+$ node -e "import('~/.mpm/agent_installation/mpm-opencode/dist/workspace.js')
+             .then(m=>console.log(m.resolveWorkspace()))"
+/home/v/.mpm                                     # MPM_WORKSPACE unset → the LIVE workspace
+$ MPM_WORKSPACE=~/.mpm-dogfood node -e "... m.resolveWorkspace()"
+/home/v/.mpm-dogfood                             # → the dogfooding workspace
+$ MPM_WORKSPACE=~/.mpm-dogfood node -e "... m.withWorkspace({})"
+{"MPM_WORKSPACE":"/home/v/.mpm-dogfood"}         # pinned into the child's env
+
+$ MPM_BINARY=~/src/mpm/.build/bin/mpm node -e "... m.resolveMpmBinary(process.env)"
+/home/v/src/mpm/.build/bin/mpm                   # the development build
+$ (no MPM_BINARY) node -e "... m.resolveMpmBinary(process.env)"
+/home/v/.mpm/bin/mpm                             # the installed runtime
+```
+
+Two consequences worth stating:
+
+1. **The plugin resolves the workspace from `process.env.MPM_WORKSPACE` and
+   pins it for every MPM subprocess.** Exporting it in the OpenCode process
+   environment is therefore sufficient — and it is the *only* thing that
+   switches the plugin off the live workspace.
+2. **The OpenCode plugin loaded by the host is the installed payload** at
+   `~/.mpm/agent_installation/mpm-opencode`, referenced by
+   `~/.config/opencode/opencode.jsonc`. Its source is **unchanged** between
+   the installed runtime's commit (`3df72315`) and `main` (`b5b1840`), so
+   the behaviour measured above is the behaviour of the repository's current
+   plugin source. It will diverge once Session C changes the plugin — until
+   then, adapter changes need `install.sh` to become visible to the host.
+
+The MCP server is wired separately: `~/.mpm/.mcp.json` pins
+`MPM_WORKSPACE: ${HOME}/.mpm` — **the live workspace**. That file is
+project-scoped wiring inside the runtime root and is changed only by a
+deployment.
+
+### 8.5 Scheduler status — stated plainly
+
+| Question | Answer |
+|---|---|
+| Does `~/.mpm-dogfood` have a dedicated scheduler? | **No.** |
+| Does it have any scheduler at all? | **No.** |
+| Is there a supported isolation mechanism for one? | **Yes, but not deployed.** The scheduler takes `--db` and `--lock`; a dogfooding scheduler would need its own unit file with its own `MPM_WORKSPACE`/`MPM_DB_PATH`/`--lock`. Creating one is a deployment act, and the brief for this round explicitly says **do not modify the live systemd service**. No second unit was created. |
+| What does `mpm info` report for the dogfooding workspace? | `mpm-scheduler : running (pid 3050)` — **misleading**. That is the *live* scheduler, whose environment and open file descriptors are shown in §2.5. The check is process-based, not workspace-scoped. |
+| What did the live systemd service do during this work? | **Nothing.** It was not stopped, restarted, edited or reloaded. |
+
+**Consequence for the sprint:** the dogfooding workspace's knowledge is
+maintained only by the sessions themselves. Anything that depends on the
+scheduler — scheduled wakes, confidence decay, retention, the critic's
+periodic cycle — **does not run** against it. Sessions must not infer from
+`mpm info` that it does.
+
+### 8.6 Concurrency — verified against one workspace
+
+8 concurrent writers and 8 concurrent readers against a single workspace
+database, then 16 further serial operations:
+
+* every operation succeeded;
+* **all 16 probe rows landed** — no lost writes;
+* the substrate's own discipline was used (WAL + `busy_timeout=5000` +
+  `*sql.Tx` discipline, **not** `SetMaxOpenConns(1)`, which the codebase
+  forbids).
+
+### 8.7 Backup and restore — verified against disposable data only
+
+* `mpm ops backup` against the dogfooding workspace produced a 141 771-byte
+  SQL dump.
+* `mpm ops restore-db` into a **scratch** workspace produced a database with
+  the same memory count (12) as the source.
+* No restore was performed against the live database. `restore-db` is
+  destructive and interactive; it is a milestone-only operation (§6.3).
+
+### 8.8 The live database's contents — unchanged
+
+| Table | Before | After | |
+|---|---|---|---|
+| `reference_docs` | 27 | 27 | unchanged |
+| `reference_chunks` | 116 | 116 | unchanged |
+| `memories` | 85 | 85 | unchanged |
+| `lessons_base` | 2 | 2 | unchanged |
+| `evidence` | 61 | 61 | unchanged |
+| `system_audit_log` | 5 | 5 | unchanged |
+| `tool_invocations` | 4516 | 4657+ | **grows** — see below |
+
+**`tool_invocations` grows, and that is expected.** It is the live
+*OpenCode plugin's own* traffic: the plugin polls `read_wake_context` every
+few seconds, and each poll is a tool invocation that the plugin's audit hook
+records. In the observed window it added ~190 `mpm-cli` / `mpm_context` /
+`read_wake_context` rows. The live scheduler contributes its own activity.
+
+**This is the strongest practical argument for the dogfooding workspace:**
+an agent session that has not been switched to `~/.mpm-dogfood` writes its
+audit trail into the live install, continuously.
+
+### 8.9 Summary
+
+| Requirement | Status | Evidence |
+|---|---|---|
+| The workspace uses its own SQLite database | ✅ | §8.1 — distinct inode |
+| The binary has recorded provenance | ✅ | §8.0 — `b5b18401` |
+| `MPM_WORKSPACE` is pinned correctly | ✅ | §8.4 — the plugin honours and pins it |
+| `MPM_DB_PATH` cannot silently redirect into the live database | ✅ for `mpm`/`mpm-mcp`; ⚠ for `mpm-critic`/`mpm-scheduler`, which is **mitigated by pinning it** | §8.2 |
+| The plugin and MCP subprocesses inherit the intended configuration | ✅ for the plugin (the MCP wiring in `~/.mpm/.mcp.json` still points at the live workspace, by design) | §8.4 |
+| Scratch tests use independently isolated `HOME` / `MPM_WORKSPACE` / DB overrides | ✅ | §8.3 |
+| The live database's contents remain unchanged | ✅ for every knowledge table; `tool_invocations` grows from the live plugin's own traffic | §8.8 |
+| Concurrent reads and writes work | ✅ | §8.6 |
+| Backup and restore verified only against disposable data | ✅ | §8.7 |
+| The scheduler situation is documented honestly | ✅ — **no scheduler** for the dogfooding workspace; the `mpm info` line is not evidence | §8.5 |
+| The live systemd service was not modified | ✅ | §8.5 |

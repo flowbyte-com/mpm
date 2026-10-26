@@ -4,6 +4,27 @@
 > `40299775451` (#102), `40297056201` (#96), `40293891450` (#99),
 > `40241395644` (push to `main`).
 
+> ## Update — 2026-10-26, after the merge
+>
+> **The false-green defect in §2 is fixed and merged.** PR #104 landed as
+> `b5b18401974ee559a485cda20abf8f7779f11bf2`.
+>
+> | Fact | Evidence |
+> |---|---|
+> | The defect was real | `bash -e -c 'false \| tee /dev/null'` exits **0**; `bash --noprofile --norc -eo pipefail -c 'false \| tee /dev/null'` exits **1**. The default shell for a `run:` step has no pipefail. |
+> | The fix works | The "Full test sweep" step now declares `shell: bash`. The "Full test suite" job went green on the fixed head (`fa80f48`, run `40332886651`) **and** on the merged commit (`b5b1840`, run `40337045142`). |
+> | The regression test is not vacuous | Removing the real `shell: bash` line from the "Full test sweep" step in a scratch copy of the workflow makes **2 of the 10** tests in `scripts/tests/test_ci_gate_integrity.py` fail. |
+> | Nothing was removed | §6's inventory is unchanged. #104 **added** a gate and reclaimed superseded runner-minutes. |
+> | Superseded runs are now cancelled | `concurrency: {group: ${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true}` — per-ref, so two PRs never cancel each other. |
+> | #103 was merged first | `cefe14b`, before #104. #104's branch was rebased with `git rebase --onto origin/main 5c687d0` so #103's commits were **not** duplicated. |
+>
+> **§4's ranking stands.** Changes 1 and 2 are merged; 3–5 are low-risk and
+> deferred; **6 and 7 remain explicitly deferred** with the reasoning in
+> §3.2 and §3.3. The brief for this round said not to begin broad CI
+> performance restructuring until trustworthy failure reporting was
+> established — that is now established, but the sprint's priority is the
+> parallel launch, so 3–5 stay queued rather than started.
+
 ## 1. Measured baseline
 
 ### 1.1 Job wall-clock

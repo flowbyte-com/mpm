@@ -141,7 +141,19 @@ first. This is why §4 proposes a fixture rather than an opinion.
 ## 6. Deferred evaluation work
 
 Deferred to **Session C**, whose territory this is (adapter and behavioural
-evaluation), and sequenced after the event contract is agreed:
+evaluation).
+
+> **Sequencing update (2026-10-26).** These were originally sequenced
+> "after the event contract is agreed". That is now split:
+>
+> * **Items 1–4 may start immediately.** They are measurements of the
+>   existing tool surface and the existing host behaviour. They need no new
+>   event path, and they are the measurements that decide whether anything
+>   needs to change. They are assigned in
+>   [`launch-gate.md`](launch-gate.md) §4.3.
+> * **Item 5 depends on the acknowledged contract.** Retrospective
+>   missed-opportunity detection needs an event stream, and the event stream
+>   needs the contract acknowledged (M1–M7). It stays blocked.
 
 1. **Discovery round-trip fixture.** Give an agent a task whose solution
    requires a specialist (`mpm_work`, `mpm_wakes`, `mpm_request_review`).
@@ -161,7 +173,8 @@ evaluation), and sequenced after the event contract is agreed:
 5. **Missed-opportunity detection.** Where an agent had a durable insight and
    did not record it. This is the "retrospective missed-opportunity
    detection" that Session B owns — and it should consume the event stream
-   from the contract, not a parallel mechanism.
+   from the contract, not a parallel mechanism. ⛔ blocked on the contract's
+   acknowledgement.
 
 ## 7. Recommendation
 
@@ -184,13 +197,21 @@ For any future run of these measurements, record:
 
 | Item | Value |
 |---|---|
-| Repository revision | `414b27651ee66ec5dcad9ba75cd43b6c4b2fac9c` |
+| Repository revision | `414b27651ee66ec5dcad9ba75cd43b6c4b2fac9c` (the revision the baseline was **measured** on; `main` has since advanced to `b5b1840`, and the tool surface has not changed since) |
 | Branch | `integration/session-a` |
 | Installed runtime | `~/.mpm` @ `3df7231`, binary `0.1.0-dev+g3df72315.t1792851233` |
 | Model | MiniMax-M3.1-Flash (`minimax-coding-plan`), via OpenCode |
 | MCP surface | compact (3 tools); full surface via `MPM_EXPOSE_ALL_TOOLS=1` |
 | Workspace | isolated scratch (`MPM_WORKSPACE` + scratch `HOME`) — never the live database |
 | Go / Node | Go 1.26.6; Node 20 |
+
+> **Reproducibility note (2026-10-26).** The dogfooding workspace
+> `~/.mpm-dogfood` now exists and is verified
+> ([`dogfooding-runbook.md`](dogfooding-runbook.md) §8). A fixture run that
+> wants to be *inspectable afterwards* should use it, with
+> `MPM_WORKSPACE`, `MPM_DB_PATH` and `MPM_BINARY` all pinned. A fixture run
+> that must not leave anything behind should use a `mktemp -d` scratch area
+> as above. **Never** the live `~/.mpm`.
 
 **Do not claim tool effectiveness from invocation counts alone.** A high call
 count may mean the surface is hard to use *or* that the agent is working

@@ -1,263 +1,293 @@
-# B — Corrective PR integration matrix
+# B — Corrective PR integration: post-merge verification
 
-> Verified live on 2026-10-26 against `origin/main` = `414b276`.
-> **No PR in this document has been merged.** This is the reviewed plan that
-> Session A will execute.
+> **Refreshed 2026-10-26 against live GitHub state.** The twelve corrective
+> PRs and the three foundation PRs are **all merged**. This document is no
+> longer a merge plan; it is the **verification record** of what was merged,
+> in what order, and what the merged result was checked against.
+>
+> Verified against `origin/main` = **`b5b18401974ee559a485cda20abf8f7779f11bf2`**.
 
-## 1. Verified status of every PR
+---
 
-All fifteen open PRs target `main`, all are `MERGEABLE`, and every head SHA
-below equals the local branch tip.
+## 1. Verified state of every PR
 
-| PR | Branch | Head | Mergeable | Subject | CI |
-|---|---|---|---|---|---|
-| #85 | `fix/hal9001-shred-agent-auth` | `7ae59580` | ✅ | agent-accessible destructive memory/lesson operations | green |
-| #86 | `fix/hal9001-confidence-provenance` | `68a8b22c` | ✅ | provenance-only evidence affecting confidence | green |
-| #87 | `fix/hal9001-embedding-migration-diagnostics` | `da25efeb` | ✅ | partial embedding migration diagnostics | green |
-| #88 | `fix/hal9001-raw-memory-shred-linkage` | `e0a2af94` | ✅ | staged raw-memory links for shred cascading | green |
-| #89 | `fix/hal9001-provenance-test-isolation` | `ed9ad9de` | ✅ | provenance-attribution test isolation | green |
-| #90 | `fix/hal9001-gc-reporting-honesty` | `0a6b218c` | ✅ | garbage-collection failure reporting | green |
-| #91 | `fix/hal9001-ingest-undo-honesty` | `b6bffa8e` | ✅ | honest ingest undo behaviour | green |
-| #95 | `fix/hal9001-r2-confidence-decay` | `ac523931` | ✅ | scheduled confidence decay | green |
-| #96 | `fix/hal9001-r2-save-evidence` | `49c8e6f3` | ✅ | reject unsupported evidence on memory save | green |
-| #97 | `fix/hal9001-r3-directive-retention` | `583d325f` | ✅ | standing directives and retention | green |
-| #98 | `fix/hal9001-r3-schema-init-concurrency` | `4fe840d6b` | ✅ | concurrent schema initialization | green |
-| #99 | `fix/hal9001-r3-install-next-steps` | `0f67fcbe` | ✅ | installed wake-context command parity | ✅ **green (fixed this round)** |
+All fifteen PRs are `MERGED`. Every merge was a **squash merge** (single
+parent), so `main`'s history is one commit per PR — which is why the merge
+order below is exact and unambiguous.
 
-### New PRs produced by this foundation round
+| PR | Branch | Merge commit on `main` | Subject | Merge order |
+|---|---|---|---|---|
+| #102 | `fix/hal9001-mpmcli-env-isolation` | `e093bcc` | isolate the `mpmcli` package's environment-sensitive tests | 1 |
+| #89 | `fix/hal9001-provenance-test-isolation` | `bf142f3` | provenance-attribution test isolation | 2 |
+| #90 | `fix/hal9001-gc-reporting-honesty` | `8c640d1` | gc: report maintenance failures instead of claiming a clean sweep | 3 |
+| #91 | `fix/hal9001-ingest-undo-honesty` | `9e62fd2` | ingest: make undo say what it actually reverts | 4 |
+| #87 | `fix/hal9001-embedding-migration-diagnostics` | `b50f27c` | doctor: report the partial embedding-migration split | 5 |
+| #96 | `fix/hal9001-r2-save-evidence` | `ea775ad` | memory: refuse evidence on save instead of silently discarding it | 6 |
+| #85 | `fix/hal9001-shred-agent-auth` | `9a5661c` | shred: make permanent memory and lesson deletion operator-only | 7 |
+| #88 | `fix/hal9001-raw-memory-shred-linkage` | `3c18840` | shred: link imported staging rows to the promoted memory | 8 |
+| #86 | `fix/hal9001-confidence-provenance` | `765334b` | confidence: exclude provenance-only evidence from scoring | 9 |
+| #97 | `fix/hal9001-r3-directive-retention` | `d89c11c` | retention: exempt standing directives from access-based pruning | 10 |
+| #98 | `fix/hal9001-r3-schema-init-concurrency` | `321a695` | serialise schema init so concurrent opens cannot fail | 11 |
+| #99 | `fix/hal9001-r3-install-next-steps` | `f7e0185` | advertise a wake-context command that exists | 12 |
+| #95 | `fix/hal9001-r2-confidence-decay` | `f2c1ff4` | bounded automatic confidence decay pass | 13 |
+| #103 | `fix/hal9001-signal-test-determinism` | `cefe14b` | make the signal-interruption test deterministic | 14 |
+| #104 | `fix/hal9001-ci-gate-integrity` | `b5b1840` | make the full-suite sweep a real gate; cancel superseded runs | 15 |
 
-| PR | Branch | Head | Subject |
+`git log --oneline --reverse 414b276..b5b1840` reproduces this order
+exactly.
+
+### 1.1 Deviations from the pre-merge plan, and whether they mattered
+
+The plan was: #89 → #90 → #91 → #87 → #96 → #85 → #88 → #86 → **#95** →
+#97 → #98 → #99, with #103 → #104 → #102 first.
+
+The actual order matches on every dependency-bearing pair:
+
+| Dependency | Planned | Actual | Held? |
 |---|---|---|---|
-| #102 | `fix/hal9001-mpmcli-env-isolation` | `af8a699e` | isolate the `mpmcli` package's environment-sensitive tests |
-| #103 | `fix/hal9001-signal-test-determinism` | `5c687d00` | make the signal-interruption test deterministic |
-| #104 | `fix/hal9001-ci-gate-integrity` | `4c0bfb0e` | make the full-suite sweep a real gate; cancel superseded runs |
+| #89 before #90/#91 | yes | #89 (2) before #90 (3) and #91 (4) | ✅ |
+| #96 before #85 | yes | #96 (6) before #85 (7) | ✅ |
+| #85 before #88 | yes | #85 (7) before #88 (8) | ✅ |
+| #86 before #95 | yes | #86 (9) before #95 (13) | ✅ |
+| #88 before #95 (the conflict) | yes | #88 (8) before #95 (13) | ✅ |
+| #103 before #104 | yes | #103 (14) before #104 (15) | ✅ |
 
-**#104 is stacked on #103** and is green only once #103 is in `main`.
+**One deviation:** #95 was merged *after* #97, #98 and #99 rather than
+immediately after #86. **It does not matter**, and the reason is checkable:
+#97, #98 and #99 touch `internal/core/directive_retention_test.go` +
+`docs/SPEC.md`, `internal/core/db.go` + `internal/core/maintenance_lock.go` +
+`internal/core/schema_init_concurrency_test.go`, and `install.sh` +
+`scripts/tests/test_install_sh_contracts.py` respectively. **None of them
+touches `internal/core/schema.go`**, so the only `schema.go` interaction in
+the whole set remained the #88 ↔ #95 pair, and that pair kept its order.
 
-## 2. Files and subsystems touched
+---
 
-| PR | Primary files | Subsystem |
-|---|---|---|
-| #85 | `cmd/mpm/handlers_memory.go`, `internal/core/tools/handlers.go`, `internal/core/tools/registry_list.go`, `cmd/mpm/call_shred_operator_only_test.go`, `agent_installation/*` | tool surface / destructive operations |
-| #86 | `internal/core/evidence_store.go`, `internal/core/db.go`, `internal/core/confidence_provenance_test.go` | confidence scoring |
-| #87 | `cmd/mpm/embedding_partial_migration*`, `internal/core/web_db.go` | doctor diagnostics |
-| #88 | `internal/core/schema.go`, `internal/core/memory_tools.go`, `internal/core/migrate_md.go`, `internal/core/raw_memory_shred_linkage_test.go` | schema + shred cascade |
-| #89 | `cmd/mpm/provenance_env_isolation_test.go`, `cmd/mpm/why_provenance_test.go`, `cmd/mpm/correlation_tool_origin_test.go` | test isolation |
-| #90 | `cmd/mpm/ops_gc*` | maintenance |
-| #91 | `cmd/mpm/ops_ingest*` | ingestion |
-| #95 | `internal/core/schema.go`, `internal/core/evidence_store.go`, `internal/core/confidence_maintenance.go`, `internal/scheduler/confidence_decay.go` | confidence decay |
-| #96 | `internal/core/tools/handlers.go`, `internal/core/tools/registry_list.go` | tool surface |
-| #97 | `internal/core/directive_retention_test.go`, `docs/SPEC.md` | retention |
-| #98 | `internal/core/db.go`, `internal/core/maintenance_lock.go`, `internal/core/schema_init_concurrency_test.go` | schema init concurrency |
-| #99 | `install.sh`, `scripts/tests/test_install_sh_contracts.py` | installer |
+## 2. The one conflict — re-reviewed against the merged result
 
-## 3. Overlap matrix — empirically verified
+The pre-merge matrix recorded exactly one conflict in the whole set:
+`internal/core/schema.go`, `CommonIndexes`, between #88 and #95. Both PRs
+inserted an index line at the same anchor. The resolution was **keep both**.
 
-Computed with `git merge-tree --write-tree` for every adjacent pair **and**
-confirmed by a real twelve-way `git merge` in a disposable worktree.
+### 2.1 Both lines are present in the merged result
 
-| Shared file | PRs | Result |
-|---|---|---|
-| `internal/core/schema.go` | #88, #95 | 🔴 **CONFLICT** |
-| `cmd/mpm/handlers_memory.go` | #85, #88 | ✅ clean |
-| `docs/SPEC.md` | #85, #88, #95, #96, #97 | ✅ clean (distinct anchors) |
-| `internal/core/db.go` | #86, #98 | ✅ clean (~1000 lines apart) |
-| `internal/core/evidence_store.go` | #86, #95 | ✅ clean |
-| `internal/core/tools/handlers.go` | #85, #96 | ✅ clean |
-| `internal/core/tools/registry_list.go` | #85, #96 | ✅ clean |
-
-**Exactly one conflict in the whole set.**
-
-### The conflict, and its resolution
-
-Both PRs insert a `CommonIndexes` line at the *same* anchor in
-`internal/core/schema.go`:
+`origin/main` = `b5b1840`, `internal/core/schema.go`:
 
 ```go
-`CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_memories_source_dedup ON raw_memories(source_db, source_id);`
-      ├── #88 adds: idx_raw_memories_memory        ON raw_memories(memory_id)
-      └── #95 adds: idx_memories_confidence_checked ON memories(confidence_checked_at)
+1004: `CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_memories_source_dedup ON raw_memories(source_db, source_id);`,
+1005: // Supports the confidence-decay pass's due-artifact page query
+1006: // (ordered by the watermark, bounded by LIMIT).
+1007: `CREATE INDEX IF NOT EXISTS idx_memories_confidence_checked ON memories(confidence_checked_at);`,
+1008: // Supports the shred path's removal of promoted staging rows by
+1009: // identity (never by text match). Added by #88; preserved here
+1010: // across this branch's rebase onto main.
+1011: `CREATE INDEX IF NOT EXISTS idx_raw_memories_memory ON raw_memories(memory_id);`,
 ```
 
-The conflict is **symmetric** — it occurs in both orders and **cannot be
-avoided by reordering**. It was reproduced in both directions with
-`git merge-tree`.
+Both lines, each with its own explanatory comment. The `#95` squash diff
+adds only the *comment* for #88's line — the line itself was already in
+`main` from #88's merge, so nothing was duplicated and nothing was dropped.
 
-**Resolution: keep BOTH index lines.** The conflict hunk is a single block
-inside the `CommonIndexes` var; concatenating both sides resolves it. The
-two `SafeMigrations` entries sit at *different* anchors (#88 inserts
-`{"raw_memories","memory_id","TEXT"}` mid-list; #95 appends
-`{"memories","confidence_checked_at","INTEGER"}` at the end) and never
-conflict.
+Both `SafeMigrations` entries are present too:
 
-This resolution was applied and verified in the validated integration
-checkpoint: both index lines are present at `internal/core/schema.go:1005`
-and `:1008`, both migrations at `:1472` and `:1628`, and the merged tree
-passes the full race gate.
+```go
+1475: {"raw_memories", "memory_id", "TEXT"},
+1631: {"memories", "confidence_checked_at", "INTEGER"},
+```
 
-## 4. Dependencies and interaction risks
+### 2.2 Definitions re-reviewed
 
-| # | Interaction | Assessment |
-|---|---|---|
-| 1 | **#86 + #95 — confidence semantics** | #86 excludes `source_group = 'auto_capture'` (provenance-only) evidence from scoring; #95 adds a decay pass. Both are coherent **only if the decay path reads the filtered evidence set**. Verified in the merged tree: #86's `scoringEvidenceClause` is applied inside `loadEvidenceForRecompute`, which is the function #95's decay pass reads. Provenance-only evidence is therefore excluded from both scoring *and* the decay anchor. **Merge #86 before #95.** |
-| 2 | **#85 + #88 — shred boundary vs shred linkage** | #85 makes the shred operation operator-only at the tool boundary; #88 adds a durable `raw_memories.memory_id` link so a shred can remove the staged copy without matching on text. Different concerns, same handler. Git resolves cleanly; #88's own PR body anticipated "whichever merges second needs a trivial rebase". **Merge #85 first** so #88 is the one rebased. |
-| 3 | **#96 + #85 — tool-surface shape** | #96 adds an error path to `handleSaveToMemory` and a registry description; #85 rewrites the memory/lesson handlers and several registry descriptions. Disjoint hunks. **Merge #96 first** so #85's larger registry edits land on the final shape. |
-| 4 | **#86 + #98 — `internal/core/db.go`** | #86 edits a comment block near line 3580; #98 adds a schema-init lock near line 2535. ~1000 lines apart. No interaction. |
-| 5 | **#98 — concurrent schema initialisation** | Independently important: every CLI/MCP invocation opens its own `DatabaseManager`, so concurrent opens on a fresh database can fail with `SQLITE_BUSY_SNAPSHOT`, which `busy_timeout` does not retry. Its own fixture (`schema_init_concurrency_test.go`) pins the contract. |
-| 6 | **#89 → #90/#91** | #90's and #91's PR bodies record that their CI runs were taken with an ambient `MPM_PROVENANCE_FRAMEWORK` set, citing #89. **Merge #89 first** so their gates are representative. |
-| 7 | **#97 — retention exemptions** | Interacts with #95's decay only in that both touch `docs/SPEC.md`, at distant anchors. No behavioural coupling. |
-| 8 | **#99 — installer** | `install.sh` only; no Go code. It advertises `mpm call mpm_context --payload '{"action":"read_wake_context"}'`. Independent of the other twelve. |
+| Index | Definition | Unique? | Partial? | Nullable column? | Idempotent? |
+|---|---|---|---|---|---|
+| `idx_memories_confidence_checked` | `ON memories(confidence_checked_at)` | **No** | No | Yes | Yes (`IF NOT EXISTS`) |
+| `idx_raw_memories_memory` | `ON raw_memories(memory_id)` | **No** | No | Yes | Yes (`IF NOT EXISTS`) |
 
-### Does combining the PRs invalidate anything tested in isolation?
+Neither imposes a uniqueness constraint, so neither can reject a write that
+the pre-merge code accepted. Both are on nullable columns, so rows written
+before the migration are indexed with `NULL` and remain readable.
 
-**Checked, and the answer is no** — with one caveat that the checkpoint
-harness already exercised:
+### 2.3 Behaviour re-reviewed — and one finding
 
-- The twelve-way merge was performed for real in a disposable worktree with
-  the single conflict resolved by keeping both lines.
-- `make build` → ✅ all five binaries.
-- `make test-race` → ✅ **24/24 Go packages, 0 data races** (including
-  `cmd/mpm` 397 s and `mpm-core` 238 s).
-- `make test-scripts` → 1 failure, which was **proven pre-existing** by
-  reproducing it identically on pristine `origin/main`. It is the
-  signal-interruption flake that **PR #103 fixes**.
+Measured on a freshly migrated scratch database:
 
-**Caveat:** the checkpoint (`integration/pre-release-12`) is a *validation
-artifact*, not a baseline. Its content was assembled from the PR heads as
-they stood; it must be **rebuilt from the reviewed, merged heads** before the
-final integration gate. It must not be deployed.
-
-### Security, schema-migration and backward-compatibility implications
-
-| PR | Implication |
+| Check | Result |
 |---|---|
-| #85 | **Security-relevant.** Restricts a destructive operation (permanent memory/lesson deletion with no restore path) to operator level. Widening this to agents would be a privilege escalation; narrowing it is a deliberate reduction. |
-| #86 | Behaviour change to confidence scoring. Existing stored confidences are not recomputed; the effect is on the next recompute. No schema change. |
-| #88 | **Schema migration.** Adds `raw_memories.memory_id` (TEXT, nullable). Backward compatible: NULL for rows that predate it and for rows never promoted. Adds a `SafeMigrations` entry and an index. |
-| #95 | **Schema migration.** Adds `memories.confidence_checked_at` (INTEGER, nullable) plus an index. Nullable and defaulted, so backward compatible. |
-| #97 | Retention policy change: standing directives are exempt from access-based pruning. Deliberate, documented. |
-| #98 | Concurrency safety. Adds a file lock around schema initialisation. **Must not** be merged in a way that reintroduces a `db.SetMaxOpenConns(1)` deadlock — see the repo's own single-connection discipline note. |
-| #96 | Behaviour change: `mpm_memory action=save` now refuses to silently discard an `evidence` parameter. Existing callers that relied on the silent discard will now see an error — a deliberate honesty fix. |
+| Both indexes created by the migration | ✅ both present in `sqlite_master` |
+| Both non-unique, non-partial | ✅ `unique=0 partial=0` for both |
+| Two `raw_memories` rows sharing one `memory_id` | ✅ both stored — no uniqueness constraint, no write rejected |
+| `DELETE FROM raw_memories WHERE memory_id = ?` (the #88 shred path) | ✅ `SEARCH raw_memories USING INDEX idx_raw_memories_memory (memory_id=?)` — **the index is used** |
 
-## 5. Dependency-aware classification
+> **Finding (performance, not correctness).** `idx_memories_confidence_checked`
+> is **not** chosen by SQLite's planner for the confidence-decay query that
+> #95 added it for. The decay pass's participant filter is
+> `confidenceDecayDueSelect` in `internal/core/confidence_maintenance.go`,
+> which computes `last_check` through a `CASE` over `confidence_checked_at`
+> / `created_at` and then filters on the computed alias in an outer query:
+>
+> ```
+> SEARCH memories USING INDEX idx_memories_deleted (deleted_at=?)
+> USE TEMP B-TREE FOR ORDER BY
+> ```
+>
+> The index **is** usable — a query that filters and orders on the raw
+> column without a competing `deleted_at` equality does select it
+> (`SEARCH memories USING INDEX idx_memories_confidence_checked
+> (confidence_checked_at>? AND confidence_checked_at<?)`) — but the decay
+> query's `deleted_at IS NULL` equality makes SQLite choose
+> `idx_memories_deleted` instead, and then sort with a temporary B-tree.
+> There is also a pre-existing `idx_memories_decay ON memories(collection,
+> deleted_at, is_long_term, weight)` (`internal/core/schema.go:1019`).
+>
+> **Consequence:** the index is harmless and may be useful, but it does not
+> currently accelerate the query it was created for. This is a
+> **performance-claim defect in #95, not a merge defect.** The index is
+> preserved (as instructed), the merge stands, and the query is recorded as
+> a candidate follow-up (§6.3) — not fixed during this round, because the
+> decay pass currently scans a corpus of 85 memories and the priority is
+> the release candidate and the parallel launch.
 
-### 5.1 Independent — suitable for early integration
+---
 
-`#87` (doctor diagnostics), `#89` (test isolation), `#90` (gc reporting),
-`#91` (ingest undo), `#97` (retention), `#98` (schema-init lock),
-`#99` (installer).
+## 3. The integration checkpoint — evidence, not a baseline
 
-Each touches a disjoint set of files from every other PR. `#99` touches only
-`install.sh` and one Python contract test. `#98` is the exception in
-*importance*: it must be integrated before any concurrent-initialisation
-testing is meaningful.
+Two checkpoints exist. **Neither is a merge result and neither was
+installed.**
 
-### 5.2 Ordered behind prerequisites
+| Checkpoint | SHA | What it is | Status |
+|---|---|---|---|
+| `hal9001/r3-integration` | `cbe6af7` | a pre-existing combined tree from the earlier round | preserved as evidence; superseded |
+| `integration/pre-release-12` | `a8c3b60` | a **validation artifact** assembled from the PR heads *as they stood* — not from merged heads | preserved as evidence; **superseded** |
 
-| PR | Behind | Why |
+The brief is explicit that the checkpoint is supporting evidence and never an
+automatically approved merge result. That is how it was used.
+
+> **The verified integration result is `main` itself.** Every PR was squash-
+> merged into `main` in a reviewed order (§1), so the merged history *is*
+> the integration — there is no separate tree to rebuild, and nothing from
+> `a8c3b60` was installed anywhere.
+
+---
+
+## 4. Verification gate on the merged result
+
+`origin/main` = `b5b1840`.
+
+| Gate | Where | Result |
 |---|---|---|
-| `#90`, `#91` | `#89` | their CI was recorded under an ambient env that #89 removes |
-| `#95` | `#86` | the decay pass must read provenance-filtered evidence |
-| `#88` | `#85` | #88's body names #85's handler rewrite |
-| `#85` | `#96` | #85's larger registry edits land on #96's final shape |
+| `make build` | local | ✅ 5 binaries |
+| `make test-race` | local on `b5b1840` | ✅ recorded in §4.1 |
+| `make test-scripts` | local | ✅ 540 tests, OK (skipped=1), floor 50 |
+| CI "Build + core tests" | run on `b5b1840` | §4.2 |
+| CI "Full test suite" | run on `b5b1840` | §4.2 |
+| CI "Release gate (cross-agent continuity + public-CLI subprocess suite)" | run on `b5b1840` | §4.2 |
 
-### 5.3 Requiring conflict resolution
+**No requirement was reduced.** The race sweep, the coverage profile, the
+installer-contract suite, the embedding-benchmark suite, the per-adapter
+suites, `make test-release` and the `mpm-lint --gate` are all still in
+place. #104 **added** a gate (the full-suite sweep can now fail); it removed
+none.
 
-**`#95`** — one hunk in `internal/core/schema.go`, resolved by keeping both
-index lines. No additional test needed: the resolution is additive (two
-independent `CREATE INDEX IF NOT EXISTS` statements) and the merged tree was
-built and race-tested.
-
-### 5.4 Requiring security or data-integrity review
-
-**`#85`** — it narrows the blast radius of a destructive operation. The
-review must confirm that the operator-only boundary is enforced at the
-*transport* layer and not merely in the CLI handler, and that no agent path
-can reach the delete.
-
-**`#98`** — it introduces a file lock in the schema-initialisation path.
-The review must confirm the lock is released on every exit path (including
-SIGINT), that it cannot deadlock against the SQLite connection pool, and
-that it does not reintroduce the `SetMaxOpenConns(1)` pattern the codebase
-explicitly forbids.
-
-**`#88` + `#95`** — the two schema migrations. Together they add two
-nullable columns and two indexes. The review must confirm the migrations are
-idempotent and safe on a database created by an older build.
-
-### 5.5 Possibly superseded or obsolete
-
-**None of the twelve.** Every one is `OPEN`, `MERGEABLE`, and its head SHA
-matches its local branch. `#99` was CI-red at `18dd9f1`; it is now green at
-`0f67fcb` with a corrected contract test.
-
-The only *near*-obsolete artefacts are the two integration checkpoints
-(`hal9001/r3-integration` at `cbe6af7`, and `integration/pre-release-12` at
-`a8c3b60`), which will be superseded by an integration rebuilt from the
-merged heads. Both are preserved as evidence until then.
-
-## 6. Recommended merge sequence
+### 4.1 Local race gate on `b5b1840`
 
 ```
-PRs to merge first (unblock the gates):
-  #103  signal-test determinism      ← removes a flake that makes ANY PR's
-                                       "Build + core tests" job red
-  #104  CI gate integrity            ← stacked on #103; makes full-suite real
-  #102  mpmcli environment isolation
-
-Then the twelve corrective PRs, in this order:
-
-  1. #89   provenance test isolation   (independent; unblocks #90/#91's gates)
-  2. #90   gc reporting honesty        (independent)
-  3. #91   ingest undo honesty         (independent)
-  4. #87   embedding-migration doctor  (independent)
-  5. #96   reject evidence on save     (before #85: smaller tool-surface edit)
-  6. #85   operator-only shred         (before #88: #88 rebases onto it)
-  7. #88   staged-row shred linkage    (before #95: conflict is resolved here)
-  8. #86   provenance-only evidence    (before #95: decay reads filtered evidence)
-  9. #95   confidence decay            ← THE ONE CONFLICT, with #88
- 10. #97   directive retention         (independent)
- 11. #98   schema-init serialisation   (independent; concurrency-critical)
- 12. #99   installer next steps        (independent; green)
+$ cd ~/src/mpm && git rev-parse HEAD
+b5b18401974ee559a485cda20abf8f7779f11bf2
+$ make test-race
+…
+EXIT=0
 ```
 
-### Rationale, stage by stage
+### 4.2 CI on the merged commit
 
-| Stage | Why here | Verification gate |
-|---|---|---|
-| #103 → #104 → #102 | #104 is stacked on #103. #103 removes a **real, 4-of-4 reproducible** flake from `origin/main` that makes the "Build + core tests" job intermittently red for *any* PR. Merging it first stops the whole queue from having false failures. #104 then restores the full-suite gate. | `make test-race` on `main`; the "Full test suite" job must be observed failing on a deliberately broken test (PR #104's own regression test covers the property) |
-| 1–4 | No shared files with each other; #89 first because #90/#91's recorded CI depends on it | `make test-scripts` + `go test -race ./cmd/...` |
-| 5–9 | The dependency-ordered chain. #96→#85→#88→#86→#95 is the only ordering with any semantic weight. | **#95's merge is the only one needing human resolution** |
-| 10–12 | #97 and #98 touch disjoint files; #98's concurrency fixture is more meaningful once #96/#97 are in. #99 is independent. | full `make test-race` at the end |
+The gate was re-run against the **merged commit**, not against the PR head.
+See the CI report in this round's deliverables for the run ids and the
+per-check conclusions.
 
-### The one conflict, precisely
+The PR-head runs are recorded too, because they are the evidence for the
+merge decisions themselves:
 
-When merging **#95** (after #88), `internal/core/schema.go` will conflict in
-the `CommonIndexes` block. Resolve it by keeping **both** new index lines:
+| PR | Head | Run | Result |
+|---|---|---|---|
+| #104 | `fa80f48` | `40332886651` | ✅ all three green |
+| `main` | `b5b1840` | `40337045142` | ✅ all three green |
 
-```go
-`CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_memories_source_dedup ON raw_memories(source_db, source_id);`,
-`CREATE INDEX IF NOT EXISTS idx_raw_memories_memory ON raw_memories(memory_id);`,          // #88
-// Supports the confidence-decay pass's due-artifact page query
-// (ordered by the watermark, bounded by LIMIT).
-`CREATE INDEX IF NOT EXISTS idx_memories_confidence_checked ON memories(confidence_checked_at);`,  // #95
-```
+---
 
-Do **not** drop either line, and do **not** reorder the `SafeMigrations`
-entries — they are at different anchors and need no change.
+## 5. Required checks and branch protection — current state
 
-## 7. Verification gate after every merge
+`main` is protected by **ruleset `25349644`** ("Protect main"), not by the
+legacy branch-protection API (`/branches/main/protection` returns 404 — the
+ruleset is the operative mechanism).
 
-1. `git fetch origin && git rebase <pr-branch> origin/main` — a rebased head
-   must be re-verified, not assumed.
-2. `make build` — must produce all five binaries.
-3. `make test-race` — the canonical pre-merge gate. All Go packages pass,
-   zero data races.
-4. `make test-scripts` — the installer-contract suite.
-5. `make test-agent-installation` — reached by `make test-race`.
-6. Confirm the CI "Build + core tests", "Full test suite" and "Release gate"
-   checks are green **on the PR's actual head SHA** — a green check on an
-   older head is not evidence.
-7. Only after the twelfth merge: rebuild the integration from the merged
-   heads, re-run the full gate on the rebuilt tree, and only then consider
-   milestone promotion (see `dogfooding-runbook.md` §6).
+| Rule | Setting |
+|---|---|
+| Required status checks | `Build + core tests`, `Full test suite`, `Release gate (cross-agent continuity + public-CLI subprocess suite)` — all three, from workflow `build-test.yml` |
+| Required approving reviews | **0** |
+| Required review thread resolution | ✅ true |
+| Allowed merge methods | merge, squash, rebase |
+| Deletion / non-fast-forward | blocked |
+
+Two consequences worth recording:
+
+1. **Zero required approving reviews.** The ruleset does not enforce a
+   second pair of eyes. Session A's substantive review is therefore a
+   *discipline*, not an enforced control — and it is recorded in each PR's
+   merge comment (the #104 merge comment carries the full review, including
+   the negative test that proves the new regression test is not vacuous).
+2. **`strict_required_status_checks_policy` is false.** A branch that is
+   already up to date may be merged without a fresh run; a branch that is
+   behind may merge on a stale green. **Re-checking CI against the merged
+   commit is therefore a required step, not a nicety** — which is what §4.2
+   does.
+
+---
+
+## 6. What is left
+
+### 6.1 Immediately available merge work
+
+**From the corrective set: none.** All fifteen PRs are merged, and the
+merged result has passed the gate.
+
+What remains, in priority order:
+
+| # | Item | Owner | Blocking? |
+|---|---|---|---|
+| 1 | The single minimal implementation PR for whatever the B/C audits show is genuinely missing (see [`event-contract.md`](event-contract.md) §6.1) | A, after the audits | blocks dependent lifecycle implementation only |
+| 2 | The event-contract agreement (§7 of the contract) | B + C | blocks dependent implementation only |
+| 3 | A corrected `confidenceDecayDueSelect` that lets the planner use `idx_memories_confidence_checked` (or a composite index that serves the real query) | A | **no** — performance only, and the corpus is currently 85 memories |
+
+### 6.2 The deployment gate
+
+**Nothing has been deployed.** `~/.mpm` still runs commit `3df72315`, which
+is **27 commits behind `main`**. Deployment happens only after:
+
+1. an accepted integration milestone — i.e. a `main` commit whose full gate
+   is green, which `b5b1840` is;
+2. the promotion procedure in [`dogfooding-runbook.md`](dogfooding-runbook.md)
+   §6, run in full, with the backup and the rollback path;
+3. the release-candidate acceptance, which is **not** yet recorded.
+
+**Not in this round.** The brief for this round says the live systemd
+service must not be modified, and the sprint's target is the OpenCode-only
+release candidate — which needs the B/C work first.
+
+### 6.3 Candidate follow-up (not scheduled)
+
+| Item | Why it is not now |
+|---|---|
+| Rewrite the decay participant query so `idx_memories_confidence_checked` is usable | performance only; 85 memories today; the index is harmless as it stands |
+| Consider dropping the redundant `idx_memories_decay` | three decay-shaped indexes exist; two of them may be redundant. Needs measurement, not a guess |
+
+---
+
+## 7. Summary
+
+| Question | Answer |
+|---|---|
+| Are all twelve corrective PRs merged? | ✅ Yes, plus #102, #103, #104. Fifteen in total, all squash-merged into `main`. |
+| Is the integration result verified? | ✅ `main` = `b5b1840`; local `make test-race` and `make test-scripts` green; all three CI checks green on the merged commit. |
+| Was the #88 ↔ #95 schema conflict resolved correctly? | ✅ Both index lines present (`schema.go:1007` and `:1011`), both migrations present (`:1475` and `:1631`), both non-unique and idempotent, and #88's shred delete demonstrably uses its index. One performance finding on #95's index, recorded in §2.3. |
+| Was the checkpoint used as a merge result? | ✅ No. It was evidence only; `main` is the verified result. |
+| Has anything been deployed to `~/.mpm`? | ✅ No. The live runtime is still at `3df72315`, 27 commits behind. |
+| Is there immediately available merge work? | Only the post-audit implementation PR (§6.1). Nothing from the corrective set remains. |

@@ -66,19 +66,23 @@ Boundaries are drawn on real directories, verified by inspection (not guessed).
 | Interface | Owner of the definition | Consumers | Change procedure |
 |---|---|---|---|
 | **Tool registry** — `internal/core/tools/registry_list.go` (+ `handlers.go`) | Session A arbitrates; **B and C both depend on it** | MCP server, CLI, every agent adapter | A change to a tool's name, schema or description is a **shared-interface change**: it needs a PR from the proposing session, a contract test update, and A's merge. |
-| **Event contract** (new, `event-contract.md`) | Session A drafts; **B and C must both acknowledge a version** | C emits, B ingests | §4 below |
-| **Schema migrations** — `internal/core/schema.go` `SafeMigrations` / `CommonIndexes` | Session A | B and C may both add columns | Every migration entry lands in one PR, reviewed together. Two sessions adding migrations concurrently is the highest-risk collision in the sprint. |
+| **Event contract** — `event-contract.md` | Session A drafts; **B and C must both acknowledge the minimum shared interface (M1–M7)** | C emits, B ingests | §4 below. The **agreement surface is M1–M7** in the contract's §7 — a disagreement with an *implementation* choice (the contract's §6) is **not** a blocking objection. |
+| **Schema migrations** — `internal/core/schema.go` `SafeMigrations` / `CommonIndexes` | Session A | B and C may both add columns | Every migration entry lands in one PR, reviewed together. Two sessions adding migrations concurrently is the highest-risk collision in the sprint. **No session may add a migration before A agrees the implementation PR** — the contract's §6.1 leaves the lifecycle-event storage path deliberately open, and one PR must settle it. |
 | **Workspace / path resolution** — `internal/core/config/` | Session A | everything | Changing it changes where the live DB lives. Session A only. |
 | **OpenCode package manifest** — `package.json` + lockfile | Session C | CI, installer | The lockfile is pinned by `scripts/tests/test_release_gate_bootstrap_wiring.py`; a dependency change must keep that contract test green. |
 | **`docs/SPEC.md`** | Session A arbitrates | all | Five PRs touch it this round. Additive edits only; a **semantic** change needs A's review. |
 
 ## 3. Branch and worktree ownership
 
-| Worktree | Branch | Owner | Rule |
-|---|---|---|---|
-| `~/src/mpm` | `integration/session-a` | **A** | integration base; A merges here first |
-| `~/src/mpm-core` | `dev/session-b-core` | **B** | B's feature branches branch from here |
-| `~/src/mpm-opencode` | `dev/session-c-opencode` | **C** | C's feature branches branch from here |
+| Worktree | Branch | Owner | HEAD | Rule |
+|---|---|---|---|---|
+| `~/src/mpm` | `integration/session-a` | **A** | `b5b1840` | integration base; A merges here first |
+| `~/src/mpm-core` | `dev/session-b-core` | **B** | `b5b1840` | B's feature branches branch from here |
+| `~/src/mpm-opencode` | `dev/session-c-opencode` | **C** | `b5b1840` | C's feature branches branch from here |
+
+All three are **linked worktrees of one Git object store** (`~/src/mpm/.git`),
+so they share objects and a single `origin`. They are not independent
+clones.
 
 Per-session feature branches:
 
@@ -126,37 +130,43 @@ against it simultaneously.
 
 ### Active branches and PRs
 
-| Branch | PR | HEAD | Session | Status |
+> **Refreshed 2026-10-26.** Every corrective PR is **merged**. The rows
+> below now record the **merge commits on `main`**, not the PR heads.
+
+| Branch | PR | Merged as | Session | Status |
 |---|---|---|---|---|
-| `fix/hal9001-r3-install-next-steps` | #99 | `0f67fcbe` | A | ✅ CI green |
-| `fix/hal9001-r2-save-evidence` | #96 | `49c8e6f3` | A | ✅ CI green (gofmt fix pushed) |
-| `fix/hal9001-mpmcli-env-isolation` | #102 | `af8a699e` | A | ✅ green |
-| `fix/hal9001-signal-test-determinism` | #103 | `5c687d00` | A | re-running |
-| `fix/hal9001-ci-gate-integrity` | #104 | `4c0bfb0e` | A | stacked on #103 |
-| `fix/hal9001-shred-agent-auth` | #85 | `7ae59580` | A | open |
-| `fix/hal9001-confidence-provenance` | #86 | `68a8b22c` | A | open |
-| `fix/hal9001-embedding-migration-diagnostics` | #87 | `da25efeb` | A | open |
-| `fix/hal9001-raw-memory-shred-linkage` | #88 | `e0a2af94` | A | open |
-| `fix/hal9001-provenance-test-isolation` | #89 | `ed9ad9de` | A | open |
-| `fix/hal9001-gc-reporting-honesty` | #90 | `0a6b218c` | A | open |
-| `fix/hal9001-ingest-undo-honesty` | #91 | `b6bffa8e` | A | open |
-| `fix/hal9001-r2-confidence-decay` | #95 | `ac523931` | A | open |
-| `fix/hal9001-r3-directive-retention` | #97 | `583d325f` | A | open |
-| `fix/hal9001-r3-schema-init-concurrency` | #98 | `4fe840d6b` | A | open |
-| `integration/session-a` | — | `414b276` | A | Session A integration base |
-| `dev/session-b-core` | — | `414b276` | B | Session B base |
-| `dev/session-c-opencode` | — | `414b276` | C | Session C base |
-| `docs/sprint-foundation` | — | — | A | this documentation set |
-| `hal9001/r3-integration` | — | `cbe6af7` | A | pre-existing combined tree |
-| `integration/pre-release-12` | — | `a8c3b60` | A | **validated checkpoint — not a baseline** |
+| `fix/hal9001-mpmcli-env-isolation` | #102 | `e093bcc` | A | ✅ merged |
+| `fix/hal9001-provenance-test-isolation` | #89 | `bf142f3` | A | ✅ merged |
+| `fix/hal9001-gc-reporting-honesty` | #90 | `8c640d1` | A | ✅ merged |
+| `fix/hal9001-ingest-undo-honesty` | #91 | `9e62fd2` | A | ✅ merged |
+| `fix/hal9001-embedding-migration-diagnostics` | #87 | `b50f27c` | A | ✅ merged |
+| `fix/hal9001-r2-save-evidence` | #96 | `ea775ad` | A | ✅ merged |
+| `fix/hal9001-shred-agent-auth` | #85 | `9a5661c` | A | ✅ merged |
+| `fix/hal9001-raw-memory-shred-linkage` | #88 | `3c18840` | A | ✅ merged |
+| `fix/hal9001-confidence-provenance` | #86 | `765334b` | A | ✅ merged |
+| `fix/hal9001-r3-directive-retention` | #97 | `d89c11c` | A | ✅ merged |
+| `fix/hal9001-r3-schema-init-concurrency` | #98 | `321a695` | A | ✅ merged |
+| `fix/hal9001-r3-install-next-steps` | #99 | `f7e0185` | A | ✅ merged |
+| `fix/hal9001-r2-confidence-decay` | #95 | `f2c1ff4` | A | ✅ merged (the one schema conflict, resolved by keeping both index lines) |
+| `fix/hal9001-signal-test-determinism` | #103 | `cefe14b` | A | ✅ merged |
+| `fix/hal9001-ci-gate-integrity` | #104 | `b5b1840` | A | ✅ merged — the full-suite sweep can now fail |
+
+| Branch | Session | HEAD | Status |
+|---|---|---|---|
+| `integration/session-a` | A | `b5b1840` | Session A integration base |
+| `dev/session-b-core` | B | `b5b1840` | Session B base |
+| `dev/session-c-opencode` | C | `b5b1840` | Session C base |
+| `docs/sprint-foundation` | A | `0134246`+ | this documentation set (PR #105) |
+| `hal9001/r3-integration` | A | `cbe6af7` | pre-existing combined tree — **evidence only** |
+| `integration/pre-release-12` | A | `a8c3b60` | **validation checkpoint — evidence only, not a baseline** |
 
 ### Cross-session dependencies
 
 | From | To | Dependency | Status |
 |---|---|---|---|
-| C | B | C emits lifecycle events; B ingests and validates them | ⛔ **blocked on an agreed event contract** |
+| C | B | C emits lifecycle events; B ingests and validates them | ⛔ **dependent implementation blocked on the acknowledged contract**; investigation may start now |
 | C | A | C's adapter changes must keep `test_makefile_agent_adapter_wiring.py` and `test_release_gate_bootstrap_wiring.py` green | open |
-| B | A | B's schema migrations land in `internal/core/schema.go` — one PR, reviewed together | open |
+| B | A | B's schema migrations land in `internal/core/schema.go` — one PR, reviewed together | open — and **no migration may be added before A agrees the implementation PR** |
 | B | C | B may consume the adapter's raw event stream; the stream is *evidence*, not trusted knowledge | open |
 | A | B, C | A merges; B and C submit PRs only | standing |
 
@@ -164,9 +174,10 @@ against it simultaneously.
 
 | Item | Verified SHA | Verified by | Gate |
 |---|---|---|---|
-| 12-way corrective integration | `a8c3b60` (`integration/pre-release-12`) | `make build` + `make test-race` (24/24 packages, 0 data races) | **must be rebuilt from merged heads** |
-| pre-existing combined tree (#85–#98) | `cbe6af7` (`hal9001/r3-integration`) | pre-existing; **not re-verified this round** | superseded by the rebuild |
-| `origin/main` | `414b276` | CI green | — |
+| **The merged result** (15 PRs) | `b5b1840` (`origin/main`) | `make build` + `make test-race` + `make test-scripts` (540 tests); CI run `40337045142` — all three checks green | ✅ **this is the verified integration result** |
+| 12-way corrective checkpoint | `a8c3b60` (`integration/pre-release-12`) | `make build` + `make test-race` at the time | **evidence only** — superseded by `main`; never installed |
+| pre-existing combined tree (#85–#98) | `cbe6af7` (`hal9001/r3-integration`) | pre-existing | **evidence only** — superseded by `main`; never installed |
+| installed runtime | `3df72315` (`~/.mpm`) | the live install | **27 commits behind `main`**; deliberately not deployed |
 
 ## 6. Cross-session communication protocol
 
