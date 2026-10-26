@@ -629,7 +629,65 @@ records. In the observed window it added ~190 `mpm-cli` / `mpm_context` /
 an agent session that has not been switched to `~/.mpm-dogfood` writes its
 audit trail into the live install, continuously.
 
-### 8.9 Summary
+### 8.9 Strict isolation for automated tests — enforced, not merely documented
+
+The rule in §5 ("every potentially destructive test runs with an isolated
+`HOME` / `MPM_WORKSPACE` / `MPM_DB_PATH`") is not left to discipline. The
+repository enforces it with a **repo-wide AST guard**,
+`internal/core/test_db_safety_test.go`, which is part of the test suite
+that CI runs.
+
+**What it detects.** The dangerous calls are *constructors*, so the guard
+walks the AST rather than grepping for strings (a grep hits comments and
+doc examples; the guard's own rule table would trip it):
+
+| Constructor | Rule | Why it leaks |
+|---|---|---|
+| `NewDatabaseManager("")` | empty first argument only | falls through to `config.GetMPMDir()` → `$HOME/.mpm/src/db/mpm.db` |
+| `NewMemoryStore(<anything>)` | **every** call | the path argument is *discarded* (`func NewMemoryStore(_ string)`), so every call resolves `config.GetMPMDir()`; the store stays inert until something calls `InitSQLite()`, which then writes the full DDL to the live database |
+
+**Legitimate isolation does not go through those constructors at all** — it
+goes through `NewTestDM` / `NewTestLocalOnlyDM` / `NewTestSharedDM` (all of
+which route through `t.TempDir()` or an in-memory DSN), or through
+`NewDatabaseManager(t.TempDir())`, whose non-empty argument the rule does
+not match. A test that genuinely needs a raw constructor must add itself to
+`testDBSafetyWhitelist` **by repo-relative path with a justification** — the
+guard fails the build if a whitelist entry has an empty justification,
+because an unexplained exception is indistinguishable from a hole in the
+guard.
+
+**The guard is itself pinned, so it cannot quietly decay:**
+
+| Pinning test | What it prevents |
+|---|---|
+| `TestDBSafety_ScanCoversEveryModuleArea` | the scan resolving the *nearest* `go.mod` and stopping before `cmd/mpm`, `internal/scheduler`, `internal/core/tools` and `release_acceptance` — 265+ test files, one of them in a module only `make test-release` executes. **This is exactly how the previous version of the guard became decorative.** |
+| `TestDBSafety_NotShortSkipped` | the guard skipping under `-short`, which would make it never run in either of the two places it exists to protect (`make test-core-precommit` and CI's "Core tests" step) |
+| `TestDBSafety_DetectsProductionPathConstructorInTestFile` | the detection logic silently ceasing to detect |
+| `TestDBSafety_AllowsIsolatedFixture` | the guard becoming so broad that legitimate isolated fixtures are rejected |
+| `TestDBSafety_EmptyScanScopeIsAnError` | the scan silently covering nothing and passing vacuously |
+
+**Verified on 2026-10-26** (run from the `internal/core` module, which is
+where it lives — it is a separate Go module, `github.com/flowbyte-com/mpm-core`):
+
+```
+$ cd internal/core && go test -tags fts5 -run 'TestDBSafety' -v ./
+--- PASS: TestDBSafety_NoLiveDBLeakInTests (0.23s)
+--- PASS: TestDBSafety_ScanCoversEveryModuleArea (0.01s)
+--- PASS: TestDBSafety_NotShortSkipped (0.00s)
+--- PASS: TestDBSafety_DetectsProductionPathConstructorInTestFile (0.00s)
+--- PASS: TestDBSafety_AllowsIsolatedFixture (0.00s)
+--- PASS: TestDBSafety_EmptyScanScopeIsAnError (0.00s)
+PASS
+ok  	github.com/flowbyte-com/mpm-core	0.244s
+```
+
+**What this does and does not cover.** It covers *the repository's own test
+suite*. It does **not** cover a script, a manual command, or an agent that
+constructs a `DatabaseManager` outside the test tree — which is why §8.3's
+scratch discipline and §8.2's `MPM_DB_PATH` pinning still matter for
+anything a session runs by hand.
+
+### 8.10 Summary
 
 | Requirement | Status | Evidence |
 |---|---|---|
@@ -644,3 +702,4 @@ audit trail into the live install, continuously.
 | Backup and restore verified only against disposable data | ✅ | §8.7 |
 | The scheduler situation is documented honestly | ✅ — **no scheduler** for the dogfooding workspace; the `mpm info` line is not evidence | §8.5 |
 | The live systemd service was not modified | ✅ | §8.5 |
+| Automated tests are strictly isolated from the live database | ✅ — enforced in-repo by an AST guard, not by convention | §8.9 |

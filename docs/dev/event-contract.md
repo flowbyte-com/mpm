@@ -327,13 +327,17 @@ builds a repository with two linked worktrees and asserts identical ids.
 > agreement — the derivation was executed, not only specified:
 >
 > ```
-> $ for d in ~/src/mpm ~/src/mpm-core ~/src/mpm-opencode ~/src/mpm-release; do
+> $ for d in ~/src/mpm ~/src/mpm-core ~/src/mpm-opencode; do
 >     git -C "$d" config --get remote.origin.url
 >   done
-> https://github.com/flowbyte-com/mpm        (all four)
+> https://github.com/flowbyte-com/mpm        (all three)
 >
-> all four worktrees → project_id = pj_5a6c0d9dbf77282fe197b644291fd9e9
+> all three worktrees → project_id = pj_5a6c0d9dbf77282fe197b644291fd9e9
 > ```
+>
+> (A fourth checkout, `~/src/mpm-release`, was verified at the same time and
+> produced the same id. It has since been retired — see
+> [`coordination.md`](coordination.md) §5.)
 >
 > A throwaway repository with two linked worktrees was also built to confirm
 > the mechanism: all three directories report the **same**
