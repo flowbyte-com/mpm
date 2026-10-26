@@ -200,7 +200,40 @@ probe log — never inferred from the launching shell's variables. A's
 verification harness is at `measure/probe/` and its verdict is measured from
 the host's own system-prompt array.
 
-### 3.4 What A is NOT doing, and why
+### 3.4 The mechanism, implemented and verified
+
+`scripts/dev_host.sh` implements the decision above. It:
+
+1. **requires** `MPM_WORKSPACE`, `MPM_DB_PATH` and `MPM_BINARY`, and refuses
+   to start without them;
+2. **refuses** to start if `MPM_WORKSPACE` resolves inside `$HOME/.mpm` **or**
+   `MPM_DB_PATH` resolves to the live database — **there is no silent
+   fallback to the live workspace**;
+3. **refuses** to start if the repository's plugin build is **stale** (a
+   tracked-source-newer-than-`dist/` check), because `dist/` is a build
+   artifact and a stale build silently runs the *old* adapter;
+4. redirects `XDG_{CONFIG,DATA,STATE,CACHE}_HOME` and `OPENCODE_CONFIG_DIR`
+   to a disposable tree;
+5. registers **this repository's** plugin, optionally followed by a witness
+   probe (`MPM_DEV_HOST_PROBE`);
+6. runs `opencode run --standalone` (private) or `opencode serve` on its own
+   port — never the shared managed service.
+
+**Verified end-to-end, with the fix merged**, from inside the plugin
+process:
+
+| Check | Result |
+|---|---|
+| The script refuses an unpinned launch | ✅ |
+| The script refuses the live workspace | ✅ |
+| The script refuses the live database | ✅ |
+| The script refuses a stale plugin build | ✅ |
+| The plugin process's own resolved values | `MPM_WORKSPACE=/home/v/.mpm-dogfood`, `MPM_BINARY=/home/v/src/mpm/.build/bin/mpm`, `XDG_CONFIG_HOME`/`XDG_DATA_HOME` under `/tmp/opencode/dev-host` |
+| **The agent actually received the wake context** | ✅ **5 system blocks, 1 MPM wake block of 3968 characters** |
+| Where the plugin's wake fetch landed | ✅ the **dogfood** database, `mpm_context / read_wake_context / opencode / ses_e858a9969ffeacyLNNPHpqnQjQ` — attributed to the session |
+| The live database | untouched by the isolated host; the rows appearing there are the **live desktop plugin** continuing to poll, which is the open operator item |
+
+### 3.5 What A is NOT doing, and why
 
 * **Not** modifying the installed plugin payload, the live database, the
   live scheduler, the live systemd unit, or `~/.mpm/.mcp.json`.
