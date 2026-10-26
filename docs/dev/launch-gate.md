@@ -27,10 +27,10 @@ can actually observe, and only Session C can answer that.
 
 | # | Condition | Status | Evidence |
 |---|---|---|---|
-| G1 | CI on `main` is trustworthy: the full-suite sweep can fail, and every required check is green on the merged commit | ✅ **met** | #104 merged as `b5b18401974ee559a485cda20abf8f7779f11bf2`; the "Full test suite" job now runs under `shell: bash` (pipefail); run `40332886651` green on head `fa80f48`, and run `40337045142` on `main` = `b5b1840` |
+| G1 | CI on `main` is trustworthy: the full-suite sweep can fail, and every required check is green on the merged commit | ✅ **met** | #104 merged as `b5b18401974ee559a485cda20abf8f7779f11bf2`; the "Full test suite" job now runs under `shell: bash` (pipefail); run `40332886651` green on head `fa80f48`, run `40337045142` green on `main` = `b5b1840`, and run `40344867185` green on the merge of this document set |
 | G2 | The shared event contract exists in a corrected, reviewable form and its agreement surface is explicit | ✅ **met** | [`event-contract.md`](event-contract.md), revised 2026-10-26 |
 | G3 | The shared dogfooding workspace exists, is isolated from the live install, and is verified | ✅ **met** | [`dogfooding-runbook.md`](dogfooding-runbook.md) §8; `~/.mpm-dogfood` |
-| G4 | The three worktrees sit on one verified base with clean, independent branches | ✅ **met** | `~/src/mpm` = `~/src/mpm-core` = `~/src/mpm-opencode` = `b5b1840`; branches `integration/session-a`, `dev/session-b-core`, `dev/session-c-opencode`; all clean |
+| G4 | The three worktrees sit on one verified base with clean, independent branches | ✅ **met** | `~/src/mpm` = `~/src/mpm-core` = `~/src/mpm-opencode` = the tip of `main`; branches `integration/session-a`, `dev/session-b-core`, `dev/session-c-opencode`; all clean |
 | G5 | The correction sequence for the remaining PRs is known and the one known schema conflict is resolved | ✅ **met** | [`integration-matrix.md`](integration-matrix.md) §6; both conflicting index lines are present in `origin/main`'s `internal/core/schema.go` (lines 1007 and 1011) |
 | G6 | No session other than A may merge or deploy | ✅ **met** | [`coordination.md`](coordination.md) §1, §7 |
 | G7 | B and C have a defined first investigation with a defined deliverable | ✅ **met** | §3 and §4 below |
@@ -44,7 +44,7 @@ immediately.
 
 ## 3. Session B — first investigation
 
-**Directory:** `~/src/mpm-core` (branch `dev/session-b-core`, base `b5b1840`).
+**Directory:** `~/src/mpm-core` (branch `dev/session-b-core`, base = the tip of `main`).
 
 ### 3.1 What to audit
 
@@ -103,7 +103,7 @@ A written report, in `~/src/mpm-core`, addressed to Session A:
 
 ## 4. Session C — first investigation
 
-**Directory:** `~/src/mpm-opencode` (branch `dev/session-c-opencode`, base `b5b1840`).
+**Directory:** `~/src/mpm-opencode` (branch `dev/session-c-opencode`, base = the tip of `main`).
 
 ### 4.1 What to inspect — the installed host, not the repository's declarations
 
@@ -224,7 +224,8 @@ export MPM_BINARY="$HOME/src/mpm/.build/bin/mpm"
 * `MPM_DB_PATH` — pinned because `mpm-critic` and `mpm-scheduler` honour it
   (verified). `mpm` and `mpm-mcp` ignore it.
 * `MPM_BINARY` — the development build at `b5b1840`. Without it the plugin
-  resolves `$HOME/.mpm/bin/mpm`, which is 27 commits behind `main`.
+  resolves `$HOME/.mpm/bin/mpm`, which predates every one of the fifteen
+  corrective PRs.
 
 **Do not** point any experiment at `~/.mpm`. The live install holds real
 reference material and is not a test bench.
@@ -264,5 +265,5 @@ without waiting for B and C:
 | Is the event contract agreed? | **No** — it is a proposal. B and C must acknowledge M1–M7. That blocks *dependent implementation*, not *investigation*. |
 | May B and C merge? | **No.** Only A merges to `main` and deploys. |
 | What do B and C deliver first? | A **report**, not a PR (§3.3, §4.4). |
-| Where do B and C work? | `~/src/mpm-core` and `~/src/mpm-opencode`, on `dev/session-b-core` and `dev/session-c-opencode`, base `b5b1840`. |
+| Where do B and C work? | `~/src/mpm-core` and `~/src/mpm-opencode`, on `dev/session-b-core` and `dev/session-c-opencode`, at the tip of `main`. |
 | Where do their findings go? | The shared dogfooding workspace `~/.mpm-dogfood` — the reasoning channel — and the coordination ledger in [`coordination.md`](coordination.md). |

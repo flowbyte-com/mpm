@@ -277,7 +277,7 @@ What remains, in priority order:
 ### 6.2 The deployment gate
 
 **Nothing has been deployed.** `~/.mpm` still runs commit `3df72315`, which
-is **27 commits behind `main`**. Deployment happens only after:
+predates **all fifteen corrective PRs**. Deployment happens only after:
 
 1. an accepted integration milestone — i.e. a `main` commit whose full gate
    is green, which `b5b1840` is;
@@ -306,5 +306,5 @@ release candidate — which needs the B/C work first.
 | Is the integration result verified? | ✅ `main` = `b5b1840`; local `make test-race` and `make test-scripts` green; all three CI checks green on the merged commit. |
 | Was the #88 ↔ #95 schema conflict resolved correctly? | ✅ Both index lines present (`schema.go:1007` and `:1011`), both migrations present (`:1475` and `:1631`), both non-unique and idempotent, and #88's shred delete demonstrably uses its index. One performance finding on #95's index, recorded in §2.3. |
 | Was the checkpoint used as a merge result? | ✅ No. It was evidence only; `main` is the verified result. |
-| Has anything been deployed to `~/.mpm`? | ✅ No. The live runtime is still at `3df72315`, 27 commits behind. |
+| Has anything been deployed to `~/.mpm`? | ✅ No. The live runtime is still at `3df72315`, which predates all fifteen corrective PRs. |
 | Is there immediately available merge work? | Only the post-audit implementation PR (§6.1). Nothing from the corrective set remains. |

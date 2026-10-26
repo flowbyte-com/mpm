@@ -13,7 +13,7 @@
 | # | Deliverable | Document | Status |
 |---|---|---|---|
 | A | Repository inventory and cleanup record | [`inventory.md`](inventory.md) | Complete (round 1) |
-| B | Corrective PR integration — **post-merge verification** | [`integration-matrix.md`](integration-matrix.md) | **Complete — all 15 PRs merged; `main` = `b5b1840` verified** |
+| B | Corrective PR integration — **post-merge verification** | [`integration-matrix.md`](integration-matrix.md) | **Complete — all 15 PRs merged; the merged result is verified** |
 | C | CI optimization report | [`ci-optimization.md`](ci-optimization.md) | **Complete — the false-green defect is fixed and merged** |
 | D | Coordination and ownership specification | [`coordination.md`](coordination.md) | Complete, ledger refreshed |
 | E | Shared event-contract proposal | [`event-contract.md`](event-contract.md) | **Revised proposal `mpm-event/0.1` — awaiting B/C acknowledgement** |
@@ -121,7 +121,6 @@ environment and open file descriptors were read to prove it maintains only
 ## 2. Exact relevant commit SHAs
 
 ```
-origin/main                                  b5b18401974ee559a485cda20abf8f7779f11bf2
   #102 mpmcli environment isolation          e093bcc3d90a4d7fb3eb2086568fa79f0b6aa06e
   #89  provenance test isolation              bf142f3
   #90  gc reporting honesty                  8c640d1
@@ -138,10 +137,10 @@ origin/main                                  b5b18401974ee559a485cda20abf8f7779f
   #103 signal-test determinism               cefe14b
   #104 CI gate integrity                     b5b1840
 
-integration/session-a                        b5b1840
-dev/session-b-core                           b5b1840
-dev/session-c-opencode                       b5b1840
-main (checked out at ~/src/mpm-release)      b5b1840
+integration/session-a                        the tip of main
+dev/session-b-core                           the tip of main
+dev/session-c-opencode                       the tip of main
+main (checked out at ~/src/mpm-release)      the tip of main
 
 installed runtime (~/.mpm)                   3df723156d7649517508212453de72d347759f43
 installed binary                             0.1.0-dev+g3df72315.t1792851233
@@ -149,7 +148,15 @@ development build used for dogfooding        0.1.0-dev+gb5b18401.t1793023964
 
 CI run on the PR head fa80f48                40332886651   ✅ all three green
 CI run on main = b5b1840                     40337045142   ✅ all three green
+CI run on main = this document's merge       40344867185   ✅ all three green
 ```
+
+> **How to read "the tip of main" here.** The fifteen corrective PRs are
+> merged as `b5b1840`, and this document set is the commit that follows it
+> on `main`. A document cannot quote its own merge SHA, so the SHAs it
+> quotes are the **code** SHAs it describes; the tip is whatever `main`
+> points at. To reproduce the state: check out the tip of `main` and read
+> `docs/dev/`.
 
 ---
 
@@ -157,13 +164,13 @@ CI run on main = b5b1840                     40337045142   ✅ all three green
 
 | Path | Branch | HEAD | Purpose |
 |---|---|---|---|
-| `~/src/mpm` | `integration/session-a` | `b5b1840` | Session A — integration and release |
-| `~/src/mpm-core` | `dev/session-b-core` | `b5b1840` | Session B — intelligence core |
-| `~/src/mpm-opencode` | `dev/session-c-opencode` | `b5b1840` | Session C — OpenCode adapter |
+| `~/src/mpm` | `integration/session-a` | tip of `main` | Session A — integration and release |
+| `~/src/mpm-core` | `dev/session-b-core` | tip of `main` | Session B — intelligence core |
+| `~/src/mpm-opencode` | `dev/session-c-opencode` | tip of `main` | Session C — OpenCode adapter |
 
 All three are **linked worktrees of one Git object store** (`~/src/mpm/.git`),
 all three sit on the same verified base, and all three were fast-forwarded
-from `414b276` to `b5b1840` in this round. `~/src/mpm` carries one
+from `414b276` through `b5b1840` to the tip of `main` in this round. `~/src/mpm` carries one
 pre-existing untracked file, `cmd/dbg_main.go.tmp` (579 B, 2026-10-17) —
 **preserved, not mine to delete**.
 
@@ -194,7 +201,7 @@ pre-existing untracked file, `cmd/dbg_main.go.tmp` (579 B, 2026-10-17) —
 | 1 | **The event contract is not yet acknowledged** by B and C | B + C | Dependent lifecycle implementation. **Not** investigation, and **not** the launch. |
 | 2 | **The storage gap for lifecycle observations is real but not yet closed** — one minimal implementation PR after the audits | A | The durable storage of lifecycle events |
 | 3 | **The release candidate is not assembled** — the B/C work is not started | B + C | The 30 October target |
-| 4 | **Nothing has been deployed** to `~/.mpm` (still 27 commits behind) | A | The release candidate — deliberately, per the deployment gate |
+| 4 | **Nothing has been deployed** to `~/.mpm` (still at `3df72315`, which predates all fifteen corrective PRs) | A | The release candidate — deliberately, per the deployment gate |
 | 5 | `idx_memories_confidence_checked` does not accelerate the decay query it was added for | A | Nothing — a performance claim defect, recorded, not fixed this round |
 
 ---
@@ -205,7 +212,7 @@ pre-existing untracked file, `cmd/dbg_main.go.tmp` (579 B, 2026-10-17) —
    refine, or shred. Details and a recommendation in
    [`inventory.md`](inventory.md) §6.
 2. **Whether `~/src/mpm-release` should be retired** so `main` can live in
-   `~/src/mpm`. It is clean and now current (`b5b1840`); retiring it
+   `~/src/mpm`. It is clean and now current (the tip of `main`); retiring it
    reclaims a second checkout of the same repository.
 3. **Whether to keep the 12 open-PR worktrees** under `~/src/worktrees/`.
    Their PRs are all merged now; they are reclaimable.
@@ -235,8 +242,8 @@ pre-existing untracked file, `cmd/dbg_main.go.tmp` (579 B, 2026-10-17) —
 
 | Requirement | Status |
 |---|---|
-| CI on `main` is trustworthy | ✅ #104 merged; the full-suite sweep can now fail; all three checks green on `b5b1840` |
-| Three isolated development worktrees on one verified base | ✅ all at `b5b1840`, clean, independent branches |
+| CI on `main` is trustworthy | ✅ #104 merged; the full-suite sweep can now fail; all three checks green on the merged commit |
+| Three isolated development worktrees on one verified base | ✅ all at the tip of `main`, clean, independent branches |
 | Existing unique and unmerged work preserved | ✅ 15 local branches, 21 worktrees; nothing deleted this round |
 | Branch and file ownership boundaries documented | ✅ [`coordination.md`](coordination.md) |
 | Shared event contract reviewed and presented | ✅ revised `mpm-event/0.1` — **awaiting B/C acknowledgement of M1–M7** |

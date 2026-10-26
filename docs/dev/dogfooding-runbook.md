@@ -474,7 +474,8 @@ MPM 0.1.0-dev+gb5b18401.t1793023964
 
 The installed runtime at `~/.mpm/bin/mpm` reports
 `0.1.0-dev+g3df72315.t1792851233` — commit `3df72315`, which is **27
-commits behind `main`**. `MPM_BINARY` selects the development build; see
+behind `main`** — it predates every one of the fifteen corrective PRs.
+`MPM_BINARY` selects the development build; see
 §8.4 for the proof that the plugin honours it.
 
 ### 8.1 Database isolation — proven by inode and by resolved path
