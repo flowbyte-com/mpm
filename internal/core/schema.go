@@ -1002,6 +1002,12 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_raw_memories_expires ON raw_memories(expires_at);`,
 	`CREATE INDEX IF NOT EXISTS idx_raw_memories_import_batch ON raw_memories(import_batch);`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_memories_source_dedup ON raw_memories(source_db, source_id);`,
+	// Supports the confidence-decay pass's due-artifact page query
+	// (ordered by the watermark, bounded by LIMIT).
+	`CREATE INDEX IF NOT EXISTS idx_memories_confidence_checked ON memories(confidence_checked_at);`,
+	// Supports the shred path's removal of promoted staging rows by
+	// identity (never by text match). Added by #88; preserved here
+	// across this branch's rebase onto main.
 	`CREATE INDEX IF NOT EXISTS idx_raw_memories_memory ON raw_memories(memory_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_revisions_timeline ON memory_revisions(memory_id, created_at);`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_retrieval_priority ON memories(retrieval_priority);`,
@@ -1615,4 +1621,12 @@ var SafeMigrations = [][3]string{
 	// (deterministic but semantically empty fingerprints) must be excluded
 	// from dedup cosine comparison since hash vectors carry no semantic signal.
 	{"capabilities", "embedding_source", "TEXT NOT NULL DEFAULT 'provider'"},
+
+	// 2026-10-26: maintenance watermark for the bounded confidence-decay
+	// pass (internal/core/confidence_maintenance.go). Records when the
+	// stored confidence was last re-derived against elapsed time. It is a
+	// maintenance fact, not a derived score: without it, an unchanged
+	// artifact would be re-selected on every pass forever, and recording
+	// "no change" in confidence_history would grow the ledger for nothing.
+	{"memories", "confidence_checked_at", "INTEGER"},
 }
