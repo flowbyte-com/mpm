@@ -12,6 +12,7 @@ import (
 // canonical user runtime. It used to assert "." (the cwd), which only ever
 // made sense while the checkout and the runtime root were one directory.
 func TestResolveWorkspace_DefaultsToCanonicalRuntime(t *testing.T) {
+	clearAmbientProvenanceEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("MPM_WORKSPACE", "")
@@ -25,6 +26,7 @@ func TestResolveWorkspace_DefaultsToCanonicalRuntime(t *testing.T) {
 // violated: where the process is launched from must not decide where runtime
 // state lives.
 func TestResolveWorkspace_IsIndependentOfCwd(t *testing.T) {
+	clearAmbientProvenanceEnv(t)
 	home := t.TempDir()
 	elsewhere := t.TempDir()
 	t.Setenv("HOME", home)
@@ -46,6 +48,7 @@ func TestResolveWorkspace_IsIndependentOfCwd(t *testing.T) {
 }
 
 func TestResolveWorkspace_UsesEnvWhenSet(t *testing.T) {
+	clearAmbientProvenanceEnv(t)
 	t.Setenv("MPM_WORKSPACE", "/tmp/openclaw")
 	if got := ResolveWorkspace(); got != "/tmp/openclaw" {
 		t.Fatalf("expected /tmp/openclaw, got %q", got)
@@ -53,6 +56,7 @@ func TestResolveWorkspace_UsesEnvWhenSet(t *testing.T) {
 }
 
 func TestActiveContextFromEnv_Empty(t *testing.T) {
+	clearAmbientProvenanceEnv(t)
 	t.Setenv("MPM_ACTIVE_MODE", "")
 	t.Setenv("MPM_ACTIVE_PERSONA", "")
 	ac := ActiveContextFromEnv()
@@ -62,6 +66,7 @@ func TestActiveContextFromEnv_Empty(t *testing.T) {
 }
 
 func TestActiveContextFromEnv_Populated(t *testing.T) {
+	clearAmbientProvenanceEnv(t)
 	t.Setenv("MPM_ACTIVE_MODE", "808")
 	t.Setenv("MPM_ACTIVE_PERSONA", "openclaw-808")
 	ac := ActiveContextFromEnv()
@@ -78,8 +83,15 @@ func TestActiveContextFromEnv_Populated(t *testing.T) {
 // which ReadDirectivesForFramework uses to filter wake-time directives.
 // Empty/unset must fall back to "mcp" so existing single-MCP callers
 // see no behaviour change.
+//
+// The canonical MPM_PROVENANCE_FRAMEWORK takes precedence over the legacy
+// MPM_FRAMEWORK, so it has to be cleared here as well: a shell that
+// exports it (this repository's own OpenCode environment does) would
+// otherwise decide the outcome of the "unset defaults to mcp" case and
+// make this test fail against a correct binary.
 func TestActiveContextFromEnv_MPM_FRAMEWORK(t *testing.T) {
 	t.Run("unset defaults to mcp", func(t *testing.T) {
+		clearAmbientProvenanceEnv(t)
 		t.Setenv("MPM_FRAMEWORK", "")
 		ac := ActiveContextFromEnv()
 		if ac.FrameworkName != "mcp" {
@@ -88,6 +100,7 @@ func TestActiveContextFromEnv_MPM_FRAMEWORK(t *testing.T) {
 	})
 
 	t.Run("openclaw reaches FrameworkName", func(t *testing.T) {
+		clearAmbientProvenanceEnv(t)
 		t.Setenv("MPM_FRAMEWORK", "openclaw")
 		ac := ActiveContextFromEnv()
 		if ac.FrameworkName != "openclaw" {
@@ -96,6 +109,7 @@ func TestActiveContextFromEnv_MPM_FRAMEWORK(t *testing.T) {
 	})
 
 	t.Run("opencode reaches FrameworkName", func(t *testing.T) {
+		clearAmbientProvenanceEnv(t)
 		t.Setenv("MPM_FRAMEWORK", "opencode")
 		ac := ActiveContextFromEnv()
 		if ac.FrameworkName != "opencode" {
@@ -112,9 +126,9 @@ func TestActiveContextFromEnv_MPM_FRAMEWORK(t *testing.T) {
 // (call.go) had honored canonical-first since 2026-08.
 //
 // Precedence (after fix):
-//   1. MPM_PROVENANCE_FRAMEWORK (canonical)
-//   2. MPM_FRAMEWORK (legacy fallback)
-//   3. "mcp" (default)
+//  1. MPM_PROVENANCE_FRAMEWORK (canonical)
+//  2. MPM_FRAMEWORK (legacy fallback)
+//  3. "mcp" (default)
 func TestActiveContextFromEnv_FrameworkPrecedence(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -129,6 +143,7 @@ func TestActiveContextFromEnv_FrameworkPrecedence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			clearAmbientProvenanceEnv(t)
 			t.Setenv("MPM_PROVENANCE_FRAMEWORK", tc.provenanceEnv)
 			t.Setenv("MPM_FRAMEWORK", tc.frameworkEnv)
 			ac := ActiveContextFromEnv()
