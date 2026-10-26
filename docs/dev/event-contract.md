@@ -277,6 +277,14 @@ directory. It is **not** the MPM workspace.
 | 3 | git remote identity of `<project_dir>` | derived (§ below) | `git-remote` |
 | 4 | none of the above | **`project_id` is absent (null)** | `unresolved` |
 
+> **A host-supplied project id is adopted only when a git remote
+> independently confirms it.** The measured host supplies one
+> (`session.created.data.projectID`, and `ctx.location.project.id`), and it
+> agrees with the git-derived identity. When both are present and agree, the
+> derived value is used and `project_id_source` becomes **`host-git-remote`**,
+> which records that two independent sources confirmed it. A host id on its
+> own is **not** a project identity — it is another party's label.
+
 Normalisation for sources 1 and 2: trim surrounding whitespace; the value must
 match `^[A-Za-z0-9._:-]{1,128}$`. A value that does not is **rejected with a
 counted diagnostic** and the chain continues at source 3. A rejected value
@@ -393,16 +401,39 @@ The prefix makes the mode self-describing: a reader can tell at a glance
 whether an id is content-derived.
 
 **Derivation in strict mode.** The host event key is the first non-empty of:
-`host_event_id`, the host's `callID`, the host's `messageID` (+ `partID` when
-present), or a host-provided monotonic `(session, seq)` pair. The id is
-computed over a **length-prefixed** encoding so that no field boundary is
-ambiguous:
+`host_event_id`, the host's `messageID` (+ `partID` when present), or a
+host-provided monotonic `(session, seq)` pair. The id is computed over a
+**length-prefixed** encoding so that no field boundary is ambiguous:
 
 ```
 encode(s)   := uvarint(len(s)) ‖ s_bytes
-event_input := encode(schema_version) ‖ encode(host) ‖ encode(host_event_key)
+event_input := encode(schema_version) ‖ encode(host) ‖ encode(event_type) ‖ encode(host_event_key)
 event_id    := "ev1_" ‖ hex(sha256(event_input))
 ```
+
+**`event_type` is part of the derivation input.** It costs nothing and it
+removes the guarantee's dependence on *which* host key an adapter happens
+to select.
+
+> **A host's per-call correlation id is NOT an event identity.**
+>
+> The measured host behaviour is that **nested tool calls share a single
+> correlation id** — one `call_…` value covers both an outer call and the
+> call nested inside it. Such a value is an **operation correlation
+> identifier**, not an event identifier: deriving an `event_id` from it
+> would give the outer and the inner event the same id, and the second
+> would be silently deduplicated away.
+>
+> A host correlation id therefore travels as `meta.host_call_id` — a
+> **correlation** field, usable for pairing a "before" with an "after" —
+> and is **never** used as a unique event key.
+>
+> The **measured** host event identity for OpenCode v2.1.4 is a per-event
+> `evt_<hex>` id: unique per published event (119 of 119 distinct in the
+> committed captures), present on **every** event, and accompanied by a
+> millisecond `created` stamp on the event itself. That is the contract's
+> first-choice `host_event_id`, and it is what makes strict-mode identity
+> trivially available without any derivation risk.
 
 Length-prefixing removes the ambiguity of delimiter-joined concatenation: the
 draft's `sha256(schema_version ‖ host ‖ framework_session_id ‖ host_event_id ‖
@@ -485,6 +516,25 @@ dressed up as a completed operation:
 events that are not calls, `result_status` is `success` and `outcome_class` is
 `ok`" is withdrawn: it asserted a success that was never observed.
 
+**The host-status → MPM-outcome mapping (pinned by A, 2026-10-26).** Both
+sessions asked A to pin this so the adapter would not invent a vocabulary.
+The rule is that the **host's vocabulary is opaque** and lives in
+`meta.host_result`; the **MPM vocabulary is used only when an MPM operation
+actually produced the observation**:
+
+| Host signal | `meta.host_result` | `operation` | `result_status` | `outcome_class` |
+|---|---|---|---|---|
+| `session.execution.succeeded` | `"succeeded"` | `absent` | `unknown` | *absent* |
+| `session.execution.failed` | `"failed"` | `absent` | `unknown` | *absent* |
+| `session.execution.interrupted` | `"interrupted"` | `absent` | `unknown` | *absent* |
+| `session.tool.success` | `"success"` | `present` | `success` | `ok` |
+| `session.tool.failed` | `"failed"` | `present` | `error` | `internal` **only** when the host gives no finer signal; otherwise the adapter maps the host's finer code through the **existing** enum and documents the mapping |
+| `session.compaction.started` / `.ended` | `"started"` / `"ended"` | `absent` | `unknown` | *absent* |
+| `session.compaction.failed` | `"failed"` | `absent` | `unknown` | *absent* |
+
+**No host status is coerced into `ToolOutcomeClass` without an operation
+behind it, and no new enum value is introduced.**
+
 **No change to the existing CHECK constraint.** `tool_invocations.result_status`
 remains `CHECK (result_status IN ('success','error'))`. The envelope's
 `unknown` is an **envelope-only** value and is never written into that column.
@@ -519,6 +569,21 @@ proposal ──(explicit review: mpm_request_review / challenge)──▶  memor
 adapter boundary. Nothing is collected and then pattern-matched for secrets —
 that ordering is what makes secret-scanning unreliable in the first place.
 
+> **The stream is volatile by contract, and that constrains the adapter.**
+> The host's own API description of the same stream states: *"Subscribe to
+> events … Volatile by contract: a slow consumer overflows and fails the
+> stream, and events during disconnection are missed."* Two consequences are
+> binding on any implementation:
+>
+> 1. **No subprocess call may run inside the event iterator.** The adapter
+>    must enqueue and handle envelopes out of band. (Measured: one `mpm call`
+>    spawn costs ~39 ms; a synchronous call inside the loop is a slow
+>    consumer, and a slow consumer fails the stream.)
+> 2. **Best-effort delivery is not a fallback — it is the contract.** The
+>    stream does not replay, and a missing event is not evidence that
+>    nothing happened. §3.5 already refuses to claim exactly-once; this is
+>    why.
+
 `meta` is the only field bag in `mpm-event/0.1`. `payload` exists in the
 envelope but is **always null** in 0.1.
 
@@ -539,6 +604,9 @@ envelope but is **always null** in 0.1.
 | `duration_ms` | integer | ≥ 0 | |
 | `diff_stat_summary` | string | ≤ 256 B | counts only, no paths |
 | `payload_hash` | string | ≤ 80 B | the substrate's `sha256:<hex>` format (§3.5) |
+| `host_event_type` | string | ≤ 64 B | the host's own event-type token, verbatim |
+| `host_call_id` | string | ≤ 128 B | the host's per-call **correlation** id — **never** an event identity (§3.5) |
+| `host_message_id` | string | ≤ 128 B | the host's message id, when present |
 
 **Never collected, therefore never needing secret-scanning:** prompts, message
 or assistant content, file contents, file paths, command lines, command
@@ -641,7 +709,7 @@ placeholder** — only a capability-report entry (§5).
 
 | Event type | Required capability | What it asserts | Notes |
 |---|---|---|---|
-| `session.started` | an observable session-creation signal | a session was created | may legitimately carry a null `framework_session_id` if the host gives none — then it is a **degraded** observation and is flagged, not fabricated |
+| `session.started` | an observable session-creation signal | a session was created | may legitimately carry a null `framework_session_id` if the host gives none — then it is a **degraded** observation and is flagged, not fabricated. **Startup race (measured):** the host creates the adapter's *own* first session *before* the adapter's iterator starts consuming, so that one creation event may never arrive. Its absence must **not** be read as "no session started", and it must **not** be inferred — `session.observed` is the unconditional base type. |
 | `session.observed` | any host event that carries a session id | the adapter saw an event for this session | the neutral alternative to `session.started` when the host exposes no creation signal |
 | `context.changed` | `experimental.chat.system.transform` | the system-prompt context was assembled | **already registered** by the plugin |
 | `tool.outcome` | a host tool-execution signal | a host tool call completed | distinct from MPM's own `tool_invocations` row: the former is the *host's* observation, the latter is *MPM's* audit of its own dispatch |
@@ -661,42 +729,97 @@ and needs a migration note.
 
 ---
 
-## 5. Part III — Host capabilities requiring verification
+## 5. Part III — Host capabilities — **measured** (replaces the declared table)
 
-**What follows is the honest state of knowledge.** The repository's
-`agent_installation/mpm-opencode/src/opencode-sdk.d.ts` is a **hand-written
-curated subset** — a mapping of the host's hook surface onto a
-`PluginContext` shape (`tool.transform`, `session.hook`, `shell.hook`). It is
-**not** evidence about what the installed host exposes.
+> **This section was rewritten on 2026-10-26.** The previous version listed
+> capabilities *declared* in a type file and asked Session C to verify them.
+> Session C has now measured the installed host, and A has independently
+> confirmed the central facts. **The table below is measured, not declared.**
 
-The host actually installed on this machine is **`opencode v2.1.4`**
-(`~/.opencode/bin/opencode`), a compiled binary. Its plugin API is supplied
-at runtime by its own loader. The `@opencode/plugin` package present in the
-plugin's `node_modules` is a **probe stub** (`"version": "0.0.0-probe"`) whose
-only job is to satisfy the import outside the host — it contains no type
-information. The `@opencode-ai/plugin@1.19.0` package in the repo's
-`node_modules` is the **v1** SDK and is likewise not the v2 host's surface.
+**The measurement.** An isolated OpenCode v2.1.4 host, three runs, a probe
+that consumed the stream correctly. Committed captures:
+`agent_installation/mpm-opencode/measure/evidence/event_stream_probe_run*.jsonl`.
+**119 event records, 32 distinct types, per run 22 / 31 / 26.**
 
-So the capabilities below are **declared somewhere**, and each still has to be
-**verified against the installed host** by Session C.
+**The host's own dispatcher** (extracted from `~/.opencode/bin/opencode` at
+byte offset `163945713`):
 
-| Capability | Where it is declared | Must be verified by C |
+```js
+event:{subscribe:(o)=>z(e.event.subscribe().pipe(Ga((r)=>T(r)),Ir((r)=>r)),o)}
+```
+
+`z` is `Plugin.Event.makeStreams`, whose only public member is
+`[Symbol.asyncIterator]`. **The signature is `subscribe(options?) -> AsyncIterable`.**
+The v1 SDK's `Hooks.event?: (input: {event})` and the repository's
+hand-written `opencode-sdk.d.ts` describe a **different** API and are not
+evidence about this host.
+
+### 5.1 The measured surface
+
+| Capability | Status on opencode v2.1.4 | Evidence |
 |---|---|---|
-| host event stream (`event` hook) | `@opencode-ai/plugin@1.19.0` `Hooks.event?: (input: { event: Event })` | whether the **v2.1.4** host exposes an equivalent, and exactly what it delivers |
-| `session.compacted` / `session.idle` / `session.error` | `@opencode-ai/sdk` `Event` union (`types.gen.d.ts:414,420,519`) | whether the host's event stream delivers them, and with which payload |
-| compaction hooks | `@opencode-ai/plugin@1.19.0`: `experimental.session.compacting` (sessionID), `experimental.compaction.autocontinue` (sessionID, agent, model, provider, message, overflow) | whether the v2 host exposes them; whether they fire in practice |
-| `tool.execute.before` / `tool.execute.after` | v1 `Hooks` — both carry `tool`, `sessionID`, **`callID`** | whether v2 exposes them; whether `callID` is stable across the before/after pair (**the leading candidate for a strict-mode host event key**) |
-| `chat.message` | v1 `Hooks` — `sessionID`, `agent`, `model`, `messageID` | whether v2 exposes it; whether `messageID` is a stable key |
-| `command.execute.before` | v1 `Hooks` — `command`, `sessionID`, `arguments` | whether v2 exposes it; a task-boundary candidate |
-| `experimental.chat.system.transform` | v1 `Hooks`; **already used** by the plugin via `ctx.session.hook("context")` | already verified by the plugin working |
-| `shell.env` | v1 `Hooks`; **already used** via `ctx.shell.hook("create.before")` — and it carries **no** `sessionID` | already verified; note the absent session id is a real constraint, not an oversight |
-| project identity from the host | v1 `PluginInput` carries `directory`, `worktree`, `project: Project`; `WorkspaceInfo` carries `projectID` | whether the v2 host's plugin input exposes a **stable project id**, and whether `worktree` differs per linked worktree — this could supersede the git-remote derivation in §3.3 |
+| **host event stream** | ✅ **WORKS** — `ctx.event.subscribe({signal})` returns an `AsyncIterable` | 119 records / 32 types captured; `formA.result → isAsyncIterable:true` |
+| **per-event identity** | ✅ every event carries a unique `evt_<hex>` id | 119/119 distinct, all `evt_`-prefixed |
+| **per-event timestamp** | ✅ `created`, unix **milliseconds**, host-stamped | all 119 values integer, ms magnitude |
+| **session creation** | ✅ `session.created` — `sessionID, projectID, parentID, slug, title, agent, model, version, location, subpath` | live-captured |
+| **compaction pair** | ✅ `session.compaction.started` (`sessionID, reason, inputID`) and `.ended` (`sessionID, reason, model, text, cost, tokens`); `.delta` and `.failed` also in the host vocabulary | live-captured |
+| **execution lifecycle** | ✅ `session.execution.started` / `.succeeded` (`sessionID`); `.failed` / `.interrupted` named in the host, **not yet exercised** | live-captured / expected |
+| **tool lifecycle** | ✅ `session.tool.input.started/.ended`, `.called`, `.progress`, `.success` (`.failed` named, not yet exercised) — all carry the tool `id` (`call_…`) | live-captured |
+| **session identity** | ✅ `ctx.session.hook("context")` carries `sessionID` | already used by the plugin |
+| **shell provenance** | ✅ `ctx.shell.hook("create.before")` — **carries no `sessionID`** | already used by the plugin |
+| **compaction *hooks*** | ❌ `experimental.session.compacting` / `experimental.compaction.autocontinue` **do not exist** on this host — but `session.compaction.*` **events** do | measured absence |
+| **`chat.message` hook** | ❌ does not exist on this host | measured absence |
+| **`command.execute.before` hook** | ❌ does not exist on this host | measured absence |
+| **plugin options** | ❌ **the v2.1.4 config normaliser rejects the tuple form** (`$.plugins.0 kind=invalid action="skipped malformed recognized value"`); `effect(input, options)` receives `options = null` | measured — **there is no plugin-options configuration channel in this host version** |
+| **host project identity** | ⚠ `session.created.data.projectID` and `ctx.location.project.id` both supply an id. A host id is adopted **only when a git remote independently confirms it** (§3.3) | measured; qualifier added |
 
-**Session C's first task is to replace this table with measured facts**, and to
-classify every type in §4 as *directly observable*, *reliably inferable*, or
-*unobservable / unsupported*. Until then, every type in §4 is a **candidate**.
+### 5.2 The redaction hazard — the allowlist is now load-bearing
 
----
+The stream delivers **full tool input, full tool output content, the entire
+compaction summary text, assistant text, and user-authored titles.** The
+measured `data` keys that carry forbidden content:
+
+| Field | Contains |
+|---|---|
+| `session.text.delta` / `.ended`.`text` | assistant output |
+| `session.tool.input.ended`.`text` | raw tool input |
+| `session.tool.called`.`input` | the parsed input object |
+| `session.tool.success`.`content` | raw tool output |
+| `session.compaction.delta` / `.ended`.`text` | the full compaction summary |
+| `session.created`.`title`, `session.renamed`.`title` | user-authored text |
+| `session.instructions.updated`.`delta` | instruction-content hashes |
+
+**Consequences, binding on any implementation:**
+
+1. The adapter **maps explicitly** per event type. **No spread, no `data`
+   forwarding.**
+2. The envelope's `payload` **stays `null`** in `mpm-event/0.1`.
+3. The regression test must run against a **real captured shape** — the
+   committed captures are the fixtures. A hand-written shape is not
+   sufficient evidence.
+
+### 5.3 The first-session startup race
+
+The host creates the adapter's **own** first session before the adapter's
+iterator starts consuming, so that one `session.created` may never be
+delivered. Every child/subagent session created afterwards **is** delivered.
+
+* `session.created` is directly observable **for sessions created while the
+  adapter is consuming**.
+* For the adapter's own first session it may be missed — so the adapter must
+  not treat its absence as "no session started", and must **not** infer it.
+* `session.observed` remains the unconditional base type.
+
+### 5.4 What the first pass got wrong, and why it is kept
+
+Session C's first pass concluded the stream was unreachable. That was a
+**measurement error**: the probe called `ctx.event.subscribe(callback)` and
+never iterated the returned `AsyncIterable`. Its own capture recorded
+`{"dispKeys":[]}`, which it read as "the host publishes nothing".
+
+The lesson, kept in the record because it is the sprint's recurring failure
+mode: **a negative capability claim is only as strong as the call that
+produced it.** The first-pass report is preserved unedited.
 
 ## 6. Part IV — Unresolved implementation choices
 
@@ -705,14 +828,14 @@ that has to be made and by whom.
 
 | # | Question | Who decides | Status |
 |---|---|---|---|
-| 6.1 | **Storage path for lifecycle events.** (a) A new core-owned table — the recommendation, since the gap in §2.6 is demonstrated; (b) reuse `tool_invocations` through an `mpm_lifecycle` tool — rejected for now, because it makes the dispatch the event and the dispatch is best-effort | A, after the B/C audits, as **one** implementation PR landing in `internal/core/schema.go` with its contract tests in the same PR | **Open.** The contract does not imply a durable capability that does not exist yet. |
-| 6.2 | **Transport** from adapter to core. The adapter is a Node plugin and the core is a Go binary, so it is out-of-process. Options: a unix socket owned by the core, a batched file, `mpm call` per event (expensive, and its audit row is best-effort) | A + C, in the implementation PR | **Open.** |
+| 6.1 | **Storage path for lifecycle events.** (a) A new core-owned table; (b) reuse `tool_invocations` through an `mpm_lifecycle` tool — rejected, because it makes the dispatch the event and the dispatch is best-effort | A | **DECIDED — deferred. No new table is authorised now, and it is explicitly NOT the first implementation milestone.** The B/C audits show the first end-to-end acceptance test needs no lifecycle store: `epistemic_provenance` already provides typed, validated and idempotent citations, and the retrospective join runs over the existing `tool_invocations` × `artifact_provenance`. Revisit only against a **measured** gap, and then as one PR in `internal/core/schema.go` with its contract tests. |
+| 6.2 | **Transport** from adapter to core. The adapter is a Node plugin and the core is a Go binary, so it is out-of-process. Options: a unix socket owned by the core, a batched file, `mpm call` per event (expensive, and its audit row is best-effort) | A + C, in the implementation PR | **Open**, with one constraint now fixed (§3.8): **no subprocess call may run inside the event iterator** — measured ~39 ms per spawn, and the stream is volatile by contract. Envelopes must be queued and handled out of band. |
 | 6.3 | **Retention policy** | A, after storage and scheduler behaviour are verified (§3.8) | **Deferred.** |
-| 6.4 | **The exact surface** of the ingest entry point, the receipt, and the rejection counter | A, in the implementation PR | **Open.** |
+| 6.4 | **The exact surface** of the ingest entry point, the receipt, and the rejection counter | A | **DECIDED — `mpm_system`**, not `mpm_context`. A new action `mpm_system action=event_counters` beside `critic_findings` and `query_audit_log`. `mpm_context` is the session-start surface and already carries `contextual_focus`; ingestion counters would add tokens to every wake for information no agent needs at session start. **The receipt's new-or-duplicate determination must come from a read-back of the stored row, not from the `INSERT` result** (Substrate Defense Triad rule 3). |
 | 6.5 | Whether `project_id` / `project_id_source` become columns | A, in the implementation PR | **Open.** |
 | 6.6 | Whether any inferred event type is admitted in a later version | B + C | **Open.** Excluded from 0.1. |
-| 6.7 | The final `meta` allowlist | C, once the host's real payload shapes are measured | **Proposed above; not final.** |
-| 6.8 | The exact byte ceilings | A + C, after measurement | **Proposed; not measured.** |
+| 6.7 | The final `meta` allowlist | C, once the host's real payload shapes are measured | **CLOSED.** The measured shapes are in §5.2; the allowlist gains `host_event_type`, `host_call_id` and `host_message_id` (§3.8). Everything content-bearing stays out, and a regression test must use the **real captured shapes**. |
+| 6.8 | The exact byte ceilings | A + C, after measurement | **CLOSED — no change.** The richest *allowlisted* envelope is tiny; the rich fields are exactly the ones that must not be collected (§5.2). |
 | 6.9 | Whether the ingest accepts batches, and whether a batch is atomic | A | **Open.** |
 | 6.10 | Whether `mpm-event/0.2` is needed for anything | A | **Not needed** — `unknown` is envelope-only and never enters the `tool_invocations` CHECK constraint. |
 
@@ -814,36 +937,91 @@ this contract is accepted.**
 
 ## 10. Agreement block
 
-> **To be completed by Sessions B and C. Session A's acceptance is not
-> sufficient, and Session A does not fill this in on their behalf.**
+> **RECORDED AS AGREED — 2026-10-26, by Session A.**
 >
-> Agreement is on the **minimum shared interface** (§7). Disagreeing with a
-> row of §6 is not a blocking objection; disagreeing with a row of §7 is.
+> Both Sessions B and C accepted `mpm-event/0.1` on the **minimum shared
+> interface (M1–M7)** with **zero blocking objections**. A has applied
+> amendments **A1–A13** (see
+> [`session-a-adjudication.md`](session-a-adjudication.md) §1.2).
+>
+> **Agreement is not implementation.** Nothing in the substrate yet receives,
+> stores or counts a lifecycle event. §6.1 is explicitly deferred and the
+> lifecycle-events table is **not** the first implementation milestone.
+>
+> The agreement evidence, in the shared dogfooding workspace:
+> Session B's decision `3a987eca2c708fac`; Session C's decision
+> `281d5267b2e9d4d4`, which supersedes its withdrawn first-pass
+> acknowledgement `8cf1f0e3cc41465e`.
 
 ```
-Session B — name: ....................  contract version accepted: mpm-event/0.1
-  date: ............
-  M1 envelope ....................... agree / object (reason) ................
-  M2 vocabulary & classification .... agree / object (reason) ................
-  M3 identity ....................... agree / object (reason) ................
-  M4 ordering ....................... agree / object (reason) ................
-  M5 trust ......................... agree / object (reason) ................
-  M6 ingest contract ............... agree / object (reason) ................
-  M7 outcomes ...................... agree / object (reason) ................
-  blocking objections: ............................................
+Session B — name: Session B (intelligence core)   contract version accepted: mpm-event/0.1
+  date: 2026-10-26
+  M1 envelope ....................... agree  (2 notes: the always-null `payload` field is
+                                       sustained as reserved and outside the frozen set's
+                                       byte accounting; a host timestamp is a NEW `meta`
+                                       field in a 0.2 bump, never a substitute for
+                                       observed_at_ms)
+  M2 vocabulary & classification .... agree  (dependency recorded, not a disagreement:
+                                       M2/M6 depend on 6.1 and 6.4 being decided)
+  M3 identity ....................... agree  (clarification: `mpm_session_id` is the MPM
+                                       interaction-lifecycle identity, not a per-conversation
+                                       one)
+  M4 ordering ....................... agree
+  M5 trust ......................... agree  (one clause-internal tension referred to A —
+                                       ruled in session-a-adjudication.md §2, A-1)
+  M6 ingest contract ............... agree  (one requirement added: the receipt's
+                                       new-or-duplicate determination comes from a READ-BACK
+                                       of the stored row, not the INSERT result)
+  M7 outcomes ...................... agree  (clarification: `result_status`/`outcome_class`
+                                       are MPM-scoped, not host-scoped; the host's status
+                                       belongs in `meta.host_result`)
+  blocking objections: 0
+  referred to A: A-1 (M5 tension), A-2 (6.1 storage), A-3 (6.4 surface), A-4/A-5 (registry),
+                  A-6 (environment), A-7 (runbook), A-8 (triage), A-9 (registry/evidence)
 
-Session C — name: ....................  contract version accepted: mpm-event/0.1
-  date: ............
-  M1 envelope ....................... agree / object (reason) ................
-  M2 vocabulary & classification .... agree / object (reason) ................
-  M3 identity ....................... agree / object (reason) ................
-  M4 ordering ....................... agree / object (reason) ................
-  M5 trust ......................... agree / object (reason) ................
-  M6 ingest contract ............... agree / object (reason) ................
-  M7 outcomes ...................... agree / object (reason) ................
-  blocking objections: ............................................
+Session C — name: Session C (OpenCode adapter)   contract version accepted: mpm-event/0.1
+  date: 2026-10-26  (second pass; supersedes the withdrawn first pass of the same day)
+  M1 envelope ....................... agree
+  M2 vocabulary & classification ... AGREE — objection WITHDRAWN. The host event stream IS
+                                       reachable (`ctx.event.subscribe({signal})` ->
+                                       AsyncIterable); `session.created` and the compaction
+                                       pair are live-captured. `session.observed` stays the
+                                       unconditional base. Missing must never be inferred.
+  M3 identity ....................... AGREE — objection downgraded. Every event carries a
+                                       stable `evt_<hex>` id, so strict derivation cannot
+                                       collide. R1 accepted as amendment A2 (`event_type` in
+                                       the derivation input) and A1 (the host's `callID` is a
+                                       CORRELATION id — nested calls share one — and is
+                                       removed from the unique-key chain).
+  M4 ordering ....................... agree
+  M5 trust ......................... agree — the adapter is structurally incapable of
+                                       promotion. NOTE: the event stream widens what is
+                                       COLLECTED, so §3.8's allowlist is load-bearing.
+  M6 ingest contract ............... agree — transport (6.2) stays open; ~39 ms per
+                                       `mpm call`; no subprocess call inside the event loop.
+  M7 outcomes ...................... agree, one request — SATISFIED: A pins the
+                                       host-status -> ToolOutcomeClass mapping in §3.7.
+  blocking objections: 0  (was 2 — both withdrawn by measurement, not by preference)
+  non-blocking recommendations: R1 -> A2 (adopted); R2 -> A4 (adopted)
+  referred to A: C-3 (project id -> A13), C-4 (outcomes -> A12), C-5 (transport -> A8),
+                  C-6 (capability table -> A6), C-7 (allowlist -> A7), C-8 (ceilings -> closed),
+                  C-9 (volatility -> A5)
 ```
 
-**Until this block is filled in, Sessions B and C may audit and investigate,
-but may not implement against the contract.** A single unresolved blocking
-objection stops dependent implementation; it is not a matter of degree.
+**Amendments A1–A13, applied by Session A on 2026-10-26:**
+
+| # | Amendment |
+|---|---|
+| A1 | §3.5 — the host's `callID` is removed from the unique host-event-key chain; it is a **correlation** id (`meta.host_call_id`), never an identity. Nested tool calls share one. |
+| A2 | §3.5 — `event_type` is added to the strict-mode derivation input. |
+| A3 | §3.5 — the measured host event identity is recorded: `evt_<hex>`, unique per published event. |
+| A4 | §4 — the first-session startup race is recorded beside `session.started`. |
+| A5 | §3.8 / §6.2 — the stream's volatility and the "no subprocess inside the iterator" rule are binding. |
+| A6 | §5 — the capability table is **replaced** with the measured surface. |
+| A7 | §3.8 / §6.7 — the `meta` allowlist gains `host_event_type`, `host_call_id`, `host_message_id`. |
+| A8 | §6.2 — the transport constraint is fixed; the choice stays open. |
+| A9 | §6.4 — **decided**: `mpm_system`, with a read-backed receipt. |
+| A10 | §6.1 — **decided: deferred.** No new table; not the first milestone. |
+| A11 | §3.7 / M5 — the M5 tension is ruled: the critic's existing automatic lesson-writing is a **pre-existing substrate behaviour** that this contract neither creates nor endorses. Amending it would require a schema change on `lessons_base`, which this sprint does not take. |
+| A12 | §3.7 / M7 — the host-status → `ToolOutcomeClass` mapping is **pinned**. |
+| A13 | §3.3 / M3 — a host project id is adopted only when a git remote independently confirms it (`host-git-remote`). |
