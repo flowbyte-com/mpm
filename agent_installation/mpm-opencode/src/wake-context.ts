@@ -80,8 +80,12 @@ export interface WakeContextInjectorDeps {
    * Performs the substrate call and returns the extracted text. Returning
    * `""` means "this attempt produced nothing" — the session is NOT marked
    * as injected, so a later hook can retry.
+   *
+   * The session id is passed in so the call can be ATTRIBUTED: the wake
+   * fetch is a real MPM tool call, and a row with a null
+   * framework_session_id cannot be tied to any conversation.
    */
-  fetch: () => Promise<string>;
+  fetch: (sessionID?: string) => Promise<string>;
   /** Injectable for tests; defaults to a fresh Map. */
   cache?: Map<string, string>;
 }
@@ -130,7 +134,7 @@ export function createWakeContextInjector(
       inFlight.add(sessionID);
       let text: string;
       try {
-        text = await deps.fetch();
+        text = await deps.fetch(sessionID);
       } catch {
         // A thrown fetch is a failed attempt, not a permanent verdict: do
         // not cache, so the next context hook can retry.

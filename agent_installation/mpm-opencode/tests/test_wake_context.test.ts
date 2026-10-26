@@ -301,6 +301,26 @@ test("5d: an absent sessionID never fetches (unattributable observation)", async
 });
 
 // ---------------------------------------------------------------------------
+// 5e. Attribution — the fetch must be told which session it is for
+// ---------------------------------------------------------------------------
+test("5e: the fetch is given the session id, so the call can be attributed", async () => {
+  // The wake fetch is a real MPM tool call. If it is issued without the
+  // host's session identity, the substrate records the row with
+  // framework_session_id = NULL and the traffic cannot be tied to any
+  // conversation. The injector therefore hands the session id to the fetch.
+  const seen: (string | undefined)[] = [];
+  const inj = createWakeContextInjector({
+    fetch: async (sessionID?: string) => {
+      seen.push(sessionID);
+      return "CTX";
+    },
+  });
+
+  assert.equal(await inj.inject("ses_attributed", []), true);
+  assert.deepEqual(seen, ["ses_attributed"]);
+});
+
+// ---------------------------------------------------------------------------
 // 6. Duplicate injection prevention
 // ---------------------------------------------------------------------------
 test("6a: repeated sequential hooks produce exactly one injection", async () => {
