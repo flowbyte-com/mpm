@@ -1599,17 +1599,39 @@ func handleMigrate(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[st
 	// Pure undo mode: delegate via direct SQL (no DM method exists yet;
 	// rollback is rare enough that adding a method is overkill).
 	if undoBatch != "" {
-		// Best-effort undo: delete pending/approved rows for the batch.
-		// Approved rows that have been promoted to memories are tombstoned
-		// rather than hard-deleted so audit trails survive.
+		// Undo of an import batch. This path TOMBSTONES the staging rows
+		// (`status='rejected'`) rather than deleting them, so the audit
+		// trail survives; the CLI undo (`mpm ingest --undo`) hard-deletes
+		// them. Both are staging-only: memories already promoted from the
+		// batch are NOT removed by either.
+		//
+		// The previous shape discarded the write error and reported
+		// success unconditionally, so a failed undo looked exactly like a
+		// successful one — and the result carried no count and no
+		// disclosure, so the caller could not tell what had been reverted.
+		affected := 0
 		if !dryRun {
-			_, _ = dm.SQLDB().Exec(
+			res, err := dm.SQLDB().Exec(
 				`UPDATE raw_memories SET status='rejected', llm_notes='undo by mcp tool', updated_at=? WHERE import_batch=? AND status IN ('pending','approved')`,
 				float64(time.Now().Unix()), undoBatch)
+			if err != nil {
+				return nil, fmt.Errorf("undo failed for batch %q: %w", undoBatch, err)
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				// Without the count the result cannot say what was
+				// reverted; a success line would be a claim it cannot
+				// support.
+				return nil, fmt.Errorf("undo failed for batch %q: cannot confirm how many staging rows were reverted: %w", undoBatch, err)
+			}
+			affected = int(n)
 		}
 		result["action"] = "undo"
 		result["batch_id"] = undoBatch
 		result["dry_run"] = dryRun
+		result["rows_reverted"] = affected
+		result["reverted"] = "staging rows marked rejected (not deleted)"
+		result["note"] = "memories already promoted from this batch are NOT removed — undo reverts staging rows only"
 		return result, nil
 	}
 
