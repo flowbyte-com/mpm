@@ -229,7 +229,7 @@ Neither was product work.
 | **Second pass — event-stream correction: M2/M3 objections withdrawn, corrected observability matrix, redaction hazard, environment verification** | [`session-c-event-stream-correction.md`](session-c-event-stream-correction.md) | ✅ complete — **supersedes part of the first pass** |
 | M1–M7 acknowledgement — **final: zero blocking objections** | [`event-contract.md`](event-contract.md) §10 (Session C block, revised; the superseded block is preserved beneath it) | ✅ revised 2026-10-26 |
 | Measurement harness + raw evidence | `agent_installation/mpm-opencode/measure/` (incl. `probe/event_stream_probe.js` and `evidence/event_stream_probe_run*.jsonl`) | ✅ committed |
-| Shared dogfooding records | `~/.mpm-dogfood` — memory `880914fcb252f6ce`, lessons `3d4c577a76580dc5`, `4007e7bcf2ae89ce`, `850112858d8562f8`, `24486718472717f8`, handoff `de56dc39fcf8fb14`; second pass: decision + lesson + handoff recorded below | ✅ written |
+| Shared dogfooding records | `~/.mpm-dogfood` — first pass: memory `880914fcb252f6ce`, lessons `3d4c577a76580dc5`, `4007e7bcf2ae89ce`, `850112858d8562f8`, `24486718472717f8`, handoff `de56dc39fcf8fb14`. **Second pass:** decision `281d5267b2e9d4d4` (supersedes the first acknowledgement `8cf1f0e3cc41465e`), practice `0748acce2e286a4e` (probe methodology), warning `66e1bade14d256f8` (environment pins do not reach the host), handoff `287bba3565dbfc66` (to Session A, with open questions) | ✅ written |
 
 **Three findings A must act on independently of the contract:**
 
