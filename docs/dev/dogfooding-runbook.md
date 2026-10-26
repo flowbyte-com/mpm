@@ -1,0 +1,415 @@
+# F — Dogfooding and isolation runbook
+
+> Session A foundation assignment. Every procedure below was **executed and
+> verified** on 2026-10-26, not merely reasoned about.
+
+## 1. The three environments — they are NOT the same thing
+
+| # | Environment | Location | Holds | Who may write |
+|---|---|---|---|---|
+| **1** | **Installed runtime** | `~/.mpm` | the live knowledge database (`src/db/mpm.db`), the installed binaries, the scheduler's state | **Session A only**, at a milestone |
+| **2** | **Shared dogfooding workspace** | `~/.mpm-dogfood` (proposed) | the sprint's shared knowledge: decisions, lessons, handoffs | Sessions A, B, C |
+| **3** | **Disposable test workspace** | `$(mktemp -d)` | nothing durable — created, used, destroyed | any automated test |
+
+### Why they must be distinct
+
+- **The live database holds real content that must not be overwritten or
+  migrated casually**: 27 reference documents / 116 reference chunks / 73
+  memories, including a WordPress and Cloudflare documentation corpus. That
+  corpus is *reference material*, not scratch space.
+- **The sprint's shared knowledge is disposable.** It is dogfooding: the
+  point is to exercise MPM's real multi-agent behaviour, not to build a
+  permanent archive inside the live install.
+- **Automated tests must touch neither.** A test that connects to the live
+  database is a data-integrity incident waiting to happen.
+
+### The current state, measured
+
+The OpenCode MCP wiring that ships with MPM points at the **live** workspace:
+
+`~/.mpm/.mcp.json` → `command: ./.build/bin/mpm-mcp`, with `MPM_WORKSPACE`
+set to `${HOME}/.mpm`. Its own comment documents the ghost-DB bug that
+occurred when that value was `.`:
+
+> Setting it to `.` made the mpm-mcp server treat the checkout as a runtime
+> workspace … the MCP server then bootstrap-created `mode/` and `persona/`
+> inside the source tree and resolved its DB there — source pollution, and a
+> ghost database distinct from the canonical one.
+
+So **as installed, the adapter's MPM tools write to the live database.**
+Switching the sprint to the dogfooding workspace is a one-environment
+variable change (below) — and it must be done deliberately, not assumed.
+
+## 2. The verified workspace mechanism
+
+### 2.1 How the workspace is resolved
+
+`internal/core/config/config.go`:
+
+```
+GetMPMDir():
+  1. $MPM_WORKSPACE            (explicit; MkdirAll'd 0700)
+  2. $HOME/.mpm
+  3. cwd                        (last-resort failsafe; loudly surfaced)
+
+GetWorkspace():
+  1. $MPM_WORKSPACE
+  2. $HOME/.mpm
+```
+
+And the database path is **absolute and workspace-derived**:
+
+> The database is ALWAYS at `mpm/src/db/mpm.db` regardless of projectRoot.
+> — `internal/core/db.go:1241`
+
+There is a second, more specific override, `MPM_DB_PATH`, which the
+installed scheduler unit uses:
+
+```
+Environment=MPM_WORKSPACE=/home/v/.mpm
+Environment=MPM_DB_PATH=/home/v/.mpm/src/db/mpm.db
+```
+
+**Conclusion: `MPM_WORKSPACE` fully determines which database is used.**
+That is the isolation mechanism. There is no per-project partitioning in the
+schema (see `event-contract.md` §4.3).
+
+### 2.2 How the OpenCode adapter resolves it
+
+`agent_installation/mpm-opencode/src/workspace.ts` — the plugin **pins**
+`MPM_WORKSPACE` on every `mpm` subprocess it spawns:
+
+```ts
+export function resolveWorkspace(): string {
+  const env = process.env.MPM_WORKSPACE;
+  if (env && env.trim() !== "") return env;
+  return path.join(os.homedir(), ".mpm");
+}
+export function withWorkspace(env = {}) {
+  return { ...env, MPM_WORKSPACE: env.MPM_WORKSPACE ?? resolveWorkspace() };
+}
+```
+
+The binary is resolved separately (`resolve-mpm-binary.ts`):
+`$MPM_BINARY` → `$HOME/.mpm/bin/mpm` → `$HOME/.local/bin/mpm`.
+
+**So dogfooding with a developer build is `MPM_WORKSPACE` + `MPM_BINARY`.**
+
+### 2.3 Verified: an isolated workspace is created lazily and stays isolated
+
+```
+$ export MPM_WORKSPACE=/tmp/opencode/dogfood-verify
+$ /home/v/.mpm/bin/mpm info
+...
+$ find /tmp/opencode/dogfood-verify -maxdepth 3
+/tmp/opencode/dogfood-verify/src/db/mpm.db
+/tmp/opencode/dogfood-verify/src/db/mpm.db-shm
+/tmp/opencode/dogfood-verify/src/db/mpm.db-wal
+/tmp/opencode/dogfood-verify/src/db/mpm.db.lock
+```
+
+The schema is created on first use; the live database was **not** touched
+(27 / 116 / 73 before and after).
+
+### 2.4 Verified: backup and restore
+
+```
+$ MPM_WORKSPACE=$WS mpm ops backup $WS/backups/test.sql
+Backup written: .../test.sql (86806 bytes)
+
+$ head -3 test.sql
+/* WARNING: Script requires that SQLITE_DBCONFIG_DEFENSIVE be disabled */
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+```
+
+The dump contains **76 `CREATE TABLE` statements** and restores cleanly:
+
+```
+$ yes | MPM_WORKSPACE=$WS2 mpm ops restore-db $WS/backups/test.sql
+About to restore DB from: .../test.sql
+This will overwrite the current database. Continue? [y/N] Restored from: ...
+$ python3 -c "... select count(*) from sqlite_master where type='table'"
+  tables: 77
+  memories: 5
+```
+
+**`restore-db` is interactive.** It reads a confirmation from stdin and
+aborts without a TTY. In an automated procedure, pipe `yes`.
+
+### 2.5 ⚠ A hazard found during verification
+
+`mpm info` reported `mpm-scheduler : running (pid 3050)` while pointed at
+the **isolated** workspace. The scheduler check is **process-based, not
+workspace-scoped**. A session working in the dogfooding workspace will
+therefore be told that a scheduler is running when the scheduler is in fact
+maintaining a *different* workspace.
+
+**Consequence for the sprint: the dogfooding workspace needs its own
+scheduler, or the sessions must be told explicitly that no scheduler is
+maintaining it.** This is recorded as an open issue, not silently worked
+around.
+
+## 3. The shared dogfooding workspace — proposal
+
+### 3.1 Location
+
+```
+~/.mpm-dogfood/
+├── src/db/mpm.db          the shared knowledge database
+├── mode/  persona/  config/  blobs/
+└── backups/
+```
+
+`~/.mpm-dogfood` is **outside** `~/.mpm`, so a deployment that replaces
+`~/.mpm` cannot destroy the sprint's shared knowledge, and the sprint's
+writes cannot corrupt the live install.
+
+### 3.2 Initialisation (verified procedure)
+
+```bash
+export MPM_WORKSPACE="$HOME/.mpm-dogfood"
+mkdir -p "$MPM_WORKSPACE" "$MPM_WORKSPACE/home"
+
+# 1. Create the schema (lazy; verified above).
+MPM_WORKSPACE="$MPM_WORKSPACE" HOME="$MPM_WORKSPACE/home" \
+  /home/v/.mpm/bin/mpm info
+
+# 2. Seed the standing directives and skills so the workspace is
+#    equivalent to a fresh install.
+MPM_WORKSPACE="$MPM_WORKSPACE" HOME="$MPM_WORKSPACE/home" \
+  /home/v/.mpm/bin/mpm ops init directives
+MPM_WORKSPACE="$MPM_WORKSPACE" HOME="$MPM_WORKSPACE/home" \
+  /home/v/.mpm/bin/mpm ops init skills
+
+# 3. Verify.
+MPM_WORKSPACE="$MPM_WORKSPACE" HOME="$MPM_WORKSPACE/home" \
+  /home/v/.mpm/bin/mpm ops stats
+```
+
+### 3.3 Pointing the sessions at it
+
+For an OpenCode session, the plugin reads `MPM_WORKSPACE` from the process
+environment and pins it for every MPM subprocess:
+
+```bash
+export MPM_WORKSPACE="$HOME/.mpm-dogfood"
+export MPM_BINARY="$HOME/src/mpm/.build/bin/mpm"   # optional: dogfood a developer build
+```
+
+**Verification that the switch took effect:**
+
+```bash
+MPM_WORKSPACE="$MPM_WORKSPACE" mpm info | grep -i "workspace\|database"
+```
+
+### 3.4 The three properties the brief requires
+
+| Property | How it is achieved | Verified? |
+|---|---|---|
+| All three sessions retrieve the same shared decisions and lessons | one workspace, one database, one `mpm` binary | ✅ by construction — same path ⇒ same file |
+| Concurrent writes are serialised | the substrate's existing single-writer SQLite discipline + WAL + `busy_timeout=5000`; **not** re-implemented | existing mechanism, preserved |
+| Duplicate knowledge is not silently accumulated | the existing provenance/dedup machinery and the `mpm_memory` de-duplication paths | existing mechanism, preserved |
+| Project identity is stable across worktrees | **not implemented.** See `event-contract.md` §4.3 — MPM has no project column; the workspace is the boundary | ⛔ open |
+| Provenance identifies the originating session | `framework_name`, `framework_session_id`, `mpm_session_id`, `invocation_id` are already recorded on `tool_invocations` | ✅ existing |
+| Retrieval distinguishes relevant project knowledge from unrelated data | `memory_store` (`local` / `shared`), FTS scoping, `contextual_focus` routing | existing mechanism, preserved |
+| Crashes or interrupted writes do not corrupt shared state | WAL + transactional writes; `mpm ops backup`/`restore-db` for recovery | ✅ verified above |
+| The runtime version in use is recorded and verified | `mpm version` / `mpm --version` report the build provenance; `mpm info` reports installation identity | ✅ available |
+
+**Honest gaps:** *project identity across worktrees* is not implemented, and
+the *scheduler* does not follow the workspace (see §2.5). Both are recorded
+as open issues. Neither blocks the sprint's read-only investigation phase.
+
+## 4. Concurrent access — what to expect
+
+- SQLite in WAL mode: one writer at a time, concurrent readers.
+- `busy_timeout=5000` gives a writer 5 s to acquire the lock.
+- The substrate uses `*sql.Tx` discipline, **not** `SetMaxOpenConns(1)` —
+  the codebase forbids the latter (it deadlocks). Sessions must not
+  introduce it.
+- If a write times out, it fails loudly. It does not silently drop.
+
+**Practical guidance:** have one session write at a time when recording
+decisions or lessons. The substrate will serialise them; doing it
+sequentially avoids 5-second waits.
+
+## 5. Automated test isolation — the rule
+
+> Every potentially destructive, experimental or schema-changing test must run
+> with an isolated effective `HOME` and `MPM_WORKSPACE` **throughout its
+> entire process tree**.
+
+### 5.1 The mechanism, verified
+
+`MPM_WORKSPACE` is read from the environment by `GetMPMDir()`, and the
+database path is derived from it. Setting it in the environment of a process
+**and its children** is sufficient: `os.environ` in the parent, `env={...}`
+in `subprocess`, and `MPM_WORKSPACE` in a `shell:` block all work.
+
+Two complementary controls are needed, because `HOME` alone is not enough:
+
+| Control | Why |
+|---|---|
+| `HOME` → a scratch directory | `GetMPMDir()` falls back to `$HOME/.mpm`; the scratch `HOME` keeps the fallback inside the scratch area |
+| `MPM_WORKSPACE` → an explicit scratch path | makes the target unambiguous, independent of `HOME` |
+
+`MPM_DB_PATH` is the belt-and-braces override, used by the installed
+scheduler unit. Set it too when a test must be certain.
+
+### 5.2 The canonical pattern
+
+```bash
+WS="$(mktemp -d)"
+export HOME="$WS/home"
+export MPM_WORKSPACE="$WS/workspace"
+export MPM_DB_PATH="$WS/workspace/src/db/mpm.db"
+mkdir -p "$HOME" "$MPM_WORKSPACE"
+trap 'rm -rf "$WS"' EXIT
+```
+
+In Go tests, `t.Setenv("HOME", t.TempDir())` plus
+`t.Setenv("MPM_WORKSPACE", t.TempDir())` covers the process; **child
+processes must receive the environment explicitly** — `subprocess` inherits
+`os.environ` by default, so `t.Setenv` propagates, but an explicitly
+constructed `env=` dict does not. The repository's own tests use
+`env={**os.environ, "HOME": str(self.home)}` for exactly this reason.
+
+### 5.3 The failure mode this prevents
+
+`~/.mpm/.mcp.json`'s own comment records it: a mis-set `MPM_WORKSPACE`
+made the server create `mode/` and `persona/` **inside the source tree** and
+resolve a *ghost database* distinct from the canonical one. A test that
+points at the wrong workspace does not fail loudly — it silently writes
+somewhere else.
+
+**Verification, not assumption:** the isolation mechanism above was
+executed end-to-end during this assignment. A scratch workspace was created,
+backed up, restored into a second scratch workspace, and the live database's
+row counts were confirmed unchanged (27 / 116 / 73) before and after.
+
+### 5.4 The scheduler is not isolated
+
+The scheduler is a **systemd user service** with `MPM_WORKSPACE` pinned to
+`/home/v/.mpm` in its unit file. It cannot be redirected by an environment
+variable in a test's shell.
+
+**Therefore: no automated test may rely on the scheduler being absent.**
+Any test whose correctness depends on the scheduler *not* running must
+isolate at the **service** level, not the environment level. This is a real
+constraint and is why §2.5's "scheduler: running" report matters.
+
+## 6. Milestone promotion procedure — documented, **not executed**
+
+Session A only, and only at a milestone — never for every experimental
+commit.
+
+### 6.1 Preconditions
+
+1. The milestone's commits are merged to `main`.
+2. The integration gate has passed **on the merged commit**:
+   - `make build`
+   - `make test-race` (all Go packages, zero data races)
+   - `make test-scripts`
+   - `make test-agent-installation`
+   - CI's three gating jobs green **on that SHA**.
+3. A milestone tag or a recorded SHA exists.
+
+### 6.2 The procedure
+
+```bash
+# STEP 1 — Record what is currently installed (before anything changes).
+mpm --version
+mpm info
+git -C ~/.mpm rev-parse HEAD
+
+# STEP 2 — Back up the live database and record the provenance.
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -p ~/.mpm/backups/promote
+mpm ops backup ~/.mpm/backups/promote/pre-$TS.sql
+sha256sum ~/.mpm/backups/promote/pre-$TS.sql
+
+# STEP 3 — Evaluate migration and rollback compatibility.
+#   - Which SafeMigrations will run against the live schema?
+#   - Is every one of them idempotent and safe on the current schema?
+#   - Is there a downgrade path for each? (Migrations here are additive:
+#     nullable columns and CREATE INDEX IF NOT EXISTS.)
+#   - Is the rollback (restore from the dump) acceptable?
+
+# STEP 4 — Fast-forward the RUNTIME checkout from its verified upstream.
+#   ~/.mpm is an independent clone of the same upstream; it is advanced
+#   here, NOT from a local branch.
+git -C ~/.mpm fetch origin
+git -C ~/.mpm checkout main
+git -C ~/.mpm pull --ff-only origin main
+git -C ~/.mpm rev-parse HEAD        # MUST equal the verified milestone SHA
+
+# STEP 5 — Install using the repository's OWN installer and safety checks.
+cd ~/.mpm && ./install.sh
+#   install.sh builds from ~/.mpm and installs into ~/.mpm/bin.
+#   It owns the transactional five-binary promotion and its rollback.
+
+# STEP 6 — Verify the installed provenance and database health.
+mpm --version
+mpm info
+mpm doctor --deep-scan
+
+# STEP 7 — Validate the scheduler and the OpenCode integration.
+systemctl --user status mpm-scheduler
+systemctl --user restart mpm-scheduler
+#   Then verify the OpenCode plugin can reach the new runtime.
+
+# STEP 8 — Reconnect affected sessions if necessary.
+#   Long-lived OpenCode sessions hold an mpm-mcp child process; they must
+#   be restarted to pick up the new binary.
+
+# STEP 9 — Record the promotion.
+#   - deployed SHA
+#   - binary provenance string
+#   - backup path and its sha256
+#   - the migration entries that ran
+#   - the verification results
+```
+
+### 6.3 Rollback
+
+```bash
+# Restore the database.
+yes | mpm ops restore-db ~/.mpm/backups/promote/pre-$TS.sql
+
+# Roll the runtime checkout back.
+git -C ~/.mpm checkout <previous-sha>
+cd ~/.mpm && ./install.sh
+
+# Verify.
+mpm --version
+mpm doctor --deep-scan
+systemctl --user restart mpm-scheduler
+```
+
+### 6.4 Known limitations of the rollback path — stated plainly
+
+1. **The binary promotion is transactional; the database migration is not.**
+   `install.sh` rolls back the *binaries* if a promotion fails. A migration
+   that has already run against the live database is **not** undone by
+   re-installing an older binary. Rollback of the database requires the
+   dump in step 2. The migrations currently in flight (from PRs #88 and #95)
+   are additive — a nullable column and a `CREATE INDEX IF NOT EXISTS` — so
+   rolling the *binary* back is safe: the extra column and index are
+   simply unused by the older binary. **This is the reason to prefer
+   additive migrations.**
+2. **`restore-db` overwrites the current database.** It is destructive and
+   it is interactive. Confirm the target path before running it.
+3. **The scheduler's `MPM_WORKSPACE` is pinned in the unit file.** Moving
+   the live workspace means editing the unit, not setting an environment
+   variable.
+4. **A promoted binary is not automatically picked up by running sessions.**
+   `mpm-mcp` is a long-lived child process; it must be restarted.
+
+## 7. What this runbook does *not* do
+
+- It does **not** migrate or move the live database. The live reference
+  corpus stays where it is.
+- It does **not** make `~/.mpm` a development worktree. It is a deployment
+  target.
+- It does **not** promise that the dogfooding workspace can be pointlessly
+  pointed at a *running scheduler*. See §2.5.
