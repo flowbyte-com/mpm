@@ -174,10 +174,10 @@ against it simultaneously.
 
 | Item | Verified SHA | Verified by | Gate |
 |---|---|---|---|
-| **The merged result** (15 PRs) | `b5b1840` (`origin/main`) | `make build` + `make test-race` + `make test-scripts` (540 tests); CI run `40337045142` — all three checks green | ✅ **this is the verified integration result** |
+| **The merged result** (15 PRs) | `b5b1840` (the tip of `origin/main` carries this document on top) | `make build` + `make test-race` + `make test-scripts` (540 tests); CI run `40337045142` — all three checks green | ✅ **this is the verified integration result** |
 | 12-way corrective checkpoint | `a8c3b60` (`integration/pre-release-12`) | `make build` + `make test-race` at the time | **evidence only** — superseded by `main`; never installed |
 | pre-existing combined tree (#85–#98) | `cbe6af7` (`hal9001/r3-integration`) | pre-existing | **evidence only** — superseded by `main`; never installed |
-| installed runtime | `3df72315` (`~/.mpm`) | the live install | **27 commits behind `main`**; deliberately not deployed |
+| installed runtime | `3df72315` (`~/.mpm`) | the live install | **predates all fifteen corrective PRs**; deliberately not deployed |
 
 ## 6. Cross-session communication protocol
 

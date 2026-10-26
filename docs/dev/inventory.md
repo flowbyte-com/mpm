@@ -13,7 +13,7 @@
 > | What this document says | Current state |
 > |---|---|
 > | the three worktrees at `414b276` | all three at **`b5b1840`** |
-> | `~/src/mpm-release` holds `main` @ `3df7231`, 12 commits behind | `main` @ **`b5b1840`**, 0 behind |
+> | `~/src/mpm-release` holds `main` @ `3df7231`, 12 commits behind | `main` @ the **tip**, 0 behind |
 > | 12 open-PR branches, "all twelve remain OPEN and UNMERGED" | **all 15 PRs merged** — see [`integration-matrix.md`](integration-matrix.md) §1 |
 > | the dogfooding workspace "not yet initialised" | **initialised and verified** — see [`dogfooding-runbook.md`](dogfooding-runbook.md) §8 |
 > | §6's four MPM records awaiting a decision | still awaiting the operator's decision; they were **not** shredded |
