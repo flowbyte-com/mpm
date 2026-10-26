@@ -3580,6 +3580,12 @@ func (dm *DatabaseManager) initFTSTables() error {
 		// queryable through the existing evidence infrastructure without
 		// adding any schema. No-op if neither field is present.
 		//
+		// PROVENANCE-ONLY: source_group='auto_capture' rows are excluded
+		// from every confidence computation (see
+		// ProvenanceOnlySourceGroup in evidence_store.go). Saving a claim
+		// is not evidence that it is true, and a memory must not raise its
+		// own confidence by existing. The row is retained for attribution.
+		//
 		// Malformed JSON guard: json_extract raises "malformed JSON" when
 		// NEW.metadata is not valid JSON, which would abort the parent
 		// INSERT and roll back the memory write. We wrap each json_extract
