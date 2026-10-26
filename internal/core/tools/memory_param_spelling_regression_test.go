@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/flowbyte-com/mpm-core"
@@ -87,13 +88,25 @@ func TestMpmMemory_ParamSpellingAliases(t *testing.T) {
 		t.Errorf("challenge with canonical memory_id failed: %v", err)
 	}
 
-	// shred last (irrecoverable) with canonical memory_id.
+	// shred is operator-only. The canonical memory_id must still reach
+	// the authorization refusal (not an id/param error), and the row
+	// must survive the attempt.
 	victim := save("f4 shred victim")
-	if _, err := handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
+	_, err := handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
 		"action": "shred",
 		"params": map[string]interface{}{"memory_id": victim},
-	}); err != nil {
-		t.Errorf("shred with canonical memory_id failed: %v", err)
+	})
+	if err == nil {
+		t.Fatal("shred must be refused from the agent surface")
+	}
+	if strings.Contains(err.Error(), "memory_id is required") {
+		t.Errorf("canonical memory_id was not recognised by the shred path: %v", err)
+	}
+	if !strings.Contains(err.Error(), "operator-only") {
+		t.Errorf("expected the operator-only refusal, got: %v", err)
+	}
+	if _, err := dm.GetMemory(victim); err != nil {
+		t.Errorf("memory must survive a refused shred: %v", err)
 	}
 }
 
@@ -153,12 +166,24 @@ func TestMpmMemory_LegacyCamelCaseAlias(t *testing.T) {
 		}
 	}
 
-	// shred last (irrecoverable) with legacy camelCase alias.
+	// shred is operator-only. The legacy camelCase alias must still be
+	// normalised before the authorization refusal fires, and the row
+	// must survive.
 	victim := save("d6 backward-compat shred victim")
-	if _, err := handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
+	_, err := handleMpmMemory(dm, internal.ActiveContext{}, map[string]interface{}{
 		"action": "shred",
 		"params": map[string]interface{}{"memoryId": victim},
-	}); err != nil {
-		t.Errorf("shred with legacy memoryId alias failed: %v", err)
+	})
+	if err == nil {
+		t.Fatal("shred must be refused from the agent surface")
+	}
+	if strings.Contains(err.Error(), "memory_id is required") {
+		t.Errorf("legacy memoryId alias was not normalised on the shred path: %v", err)
+	}
+	if !strings.Contains(err.Error(), "operator-only") {
+		t.Errorf("expected the operator-only refusal, got: %v", err)
+	}
+	if _, err := dm.GetMemory(victim); err != nil {
+		t.Errorf("memory must survive a refused shred: %v", err)
 	}
 }

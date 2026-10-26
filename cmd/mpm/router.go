@@ -923,8 +923,10 @@ var subcommandHelpOwners = map[string]bool{
 	"topic add": true, "topic list": true,
 
 	// reference — leaf handlers print "MPM · Reference".
+	// "reference import" and "reference duplicates" only print the shared
+	// reference page on a help token; neither touches the corpus.
 	"reference add": true, "reference list": true, "reference show": true,
-	"reference search": true,
+	"reference search": true, "reference import": true, "reference duplicates": true,
 
 	// compact — both leaves print "MPM · compact …".
 	"compact deferred": true, "compact requeue-deferred": true,

@@ -47,7 +47,7 @@ free-form `params`:
 
 | Domain | Actions |
 |---|---|
-| `mpm_memory` | save, query, shred, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, commit_milestone |
+| `mpm_memory` | save, query, show, delete, restore, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, commit_milestone |
 | `mpm_handoff` | write, read, list, shred | (also reachable on the default compact MCP surface as `mpm_context action=write_handoff` / `read_handoff`) |
 | `mpm_scratchpad` | flush, read, discard, promote |
 | `mpm_wakes` | schedule, check, check_pending_event, list, digest, upsert_task, list_tasks, delete_task |

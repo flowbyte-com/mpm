@@ -27,14 +27,14 @@ var Registry = []Tool{
 Use when: you learn something worth remembering (a fact, a lesson, a decision context); you need to find something you previously stored; or you want to mark something as long-term and suppress it from casual retrieval; you want to commit a milestone against a long-term goal (commit_milestone).
 Do not use when: the information is ephemeral working context (use mpm_scratchpad instead); you are making a commitment or tracking work (use mpm_work instead).
 For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.
-Lifecycle asymmetry: shred is permanent (hard delete — the row is removed with cascade cleanup of dependent topic_memberships, memory_revisions, and confidence_history). There is no restore path. This is deliberately different from mpm_skills.delete, which is soft and recoverable via save with force=true.
 Lifecycle asymmetry: delete is soft (the row stays with deleted_at stamped; action=restore brings it back). Reversible via action=restore.
+Lifecycle asymmetry: permanent shredding (hard delete with cascade cleanup of dependent topic_memberships, memory_revisions, confidence_history — and a linked theory) is operator-only and is NOT an agent action. It is refused at the execution point for MCP and 'mpm call'; no payload field unlocks it. An operator can shred permanently with 'mpm memory shred <id>'. Agents retire memories with action=delete and undo with action=restore.
 Lifecycle asymmetry: weaken uses an internal floor-protected path (the weight cannot drop below the safety floor of 1). reinforce and weaken accept the same delta shape but their internal mechanics differ; the user-visible contract is symmetric.`,
 
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["save","query","show","shred","delete","restore","reinforce","weaken","snooze","set_weight","patch","promote","review","synthesize","challenge","restore_challenge","commit_milestone"]},
+				"action": {"type": "string", "enum": ["save","query","show","delete","restore","reinforce","weaken","snooze","set_weight","patch","promote","review","synthesize","challenge","restore_challenge","commit_milestone"]},
 				"params": {
 					"type": "object",
 					"properties": {
@@ -51,7 +51,7 @@ Lifecycle asymmetry: weaken uses an internal floor-protected path (the weight ca
 						"delta":           {"type": "number"},
 						"days":            {"type": "number"},
 						"patch":           {"type": "object"},
-						"evidence":         {"type": "string"},
+						"evidence":         {"type": "string", "description": "action=challenge only: the observation that contradicts the memory. Other actions reject a non-empty value rather than discard it; to attach evidence to a saved memory use mpm_evidence action=add."},
 						"summary":         {"type": "string"},
 						"flavor":          {"type": "string", "enum": ["shipped","insight"]},
 						"_confidence_band": {"type": "string"},
@@ -135,11 +135,12 @@ Do not use when: the choice is trivial or easily reversible; you just want to st
 		Description: `Durable lessons from failures, anti-patterns, and hard-won insights.
 Use when: something failed and you want to make sure the system never repeats the same mistake; you encounter an unexpected success and want to record why it worked; you want to tag a memory as a "warning" or "practice" so it surfaces in future relevant contexts.
 Do not use when: you are documenting a decision (mpm_decisions) or forming a testable hypothesis (mpm_theories).
-For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.`,
+For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.
+Lifecycle asymmetry: delete is soft and reversible via action=restore. Permanent shredding (hard delete of the row and its FTS entry) is operator-only and is NOT an agent action: it is refused at the execution point for MCP and 'mpm call', and no payload field unlocks it. An operator can shred permanently with 'mpm lesson shred <id>'.`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["save","search","list","delete","restore","shred"]},
+				"action": {"type": "string", "enum": ["save","search","list","delete","restore"]},
 				"params": {
 					"type": "object",
 					"properties": {
@@ -147,8 +148,8 @@ For broad queries, projection defaults to 'summary' to keep context bounded. Use
 						"type":      {"type": "string", "enum": ["insight","warning","practice"]},
 						"tags":      {"type": "array", "items": {"type": "string"}},
 						"query":     {"type": "string"},
-						"id":        {"type": "string", "description": "Canonical id (used by delete/restore/shred)."},
-						"lesson_id": {"type": "string", "description": "Backward-compat alias for id on delete/restore/shred."},
+						"id":        {"type": "string", "description": "Canonical id (used by delete/restore)."},
+						"lesson_id": {"type": "string", "description": "Backward-compat alias for id on delete/restore."},
 						"projection": {"type": "string", "enum": ["summary", "full"], "default": "summary", "description": "Output detail level. Defaults to summary."}
 					},
 					"additionalProperties": true
@@ -186,24 +187,44 @@ Do not use when: you just want to store a single fact (mpm_memory save); you nee
 	},
 	{
 		Name: "mpm_references",
-		Description: `Search and read previously ingested external documents: PDFs, specs, API and framework documentation, whitepapers, books.
-Use when: you need documentation you have already ingested — API references, framework manuals, specifications, or previously acquired external material. REFERENCES ARE A SEPARATE SUBSYSTEM FROM MEMORIES: a memory query or collection listing does not establish whether the reference corpus holds a document, so an empty memory search is NOT evidence of absence. Search first (action search with a query), then read the document itself with action read using the id — do not act on a search-result summary alone. Every result carries a freshness classification (current, stale, version-bound, historical, unknown); check it before relying on technical documentation, because a reference can be relevant and still be not current.
-Use action list to enumerate what is in the corpus when you do not know what to look for. Use action add when you have a new document to make searchable.
-Do not use when: the document is ephemeral, or you only want to record a URL for later — use mpm_evidence action=add with reference_url, which stores the pointer durably on the evidence row (MPM never fetches it).`,
+		Description: `Search and read previously ingested external documents: PDFs, specs, API and framework documentation, whitepapers, books, fetched web pages.
+Use when: you need authoritative source material — API references, framework manuals, specifications, or previously acquired external material. Search first (action search with a query), then read the document itself with action read using the id — do not act on a search-result summary alone.
+
+REFERENCES ARE A SEPARATE SUBSYSTEM FROM MEMORIES: a memory query or collection listing does not establish whether the reference corpus holds a document, so an empty memory search is NOT evidence of absence. Search here before concluding something is unavailable.
+
+Every result carries a freshness classification (current, stale, version-bound, historical, unknown); check it before relying on technical documentation, because a reference can be relevant and still be not current.
+
+Getting material in:
+- action add takes EITHER "filepath" (a local document: .md, .txt, .html, .pdf, .epub) OR "url" (an http(s) documentation page MPM fetches for you), plus optional "tags", "reason" and "chunk_size". Supplying both is an error, never a silent preference.
+- action import takes "documents": [{path|url, tags, reason}] for a whole corpus, and reports each document's own status.
+- Ingestion is idempotent: the same source resolves to the same document, so re-adding unchanged material writes nothing.
+- To check what is already there, action list enumerates the corpus and action search looks it up.
+
+Read the outcome, not just success: "status" is imported | updated | unchanged | duplicate. "duplicate" means several existing documents already resolve to that source and nothing was written — the repair is the CLI diagnostic "mpm reference duplicates". "pending_embeddings" > 0 means lexical search works but semantic search does not yet see those chunks; "semantic_searchable" says which.
+
+Search results carry provenance: doc_title, section, source_path (absolute path or effective URL), source_kind, chunk_id and doc_id. Cite from those rather than restating the body.
+
+Do not use when: the material is ephemeral, or you only want to record a URL for later — use mpm_evidence action=add with reference_url, which stores the pointer durably on the evidence row without fetching it.`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["add","read","search","list"]},
+				"action": {"type": "string", "enum": ["add","import","read","search","list"]},
 				"params": {
 					"type": "object",
 					"properties": {
-						"filepath":     {"type": "string"},
-						"title":        {"type": "string"},
-						"query":        {"type": "string"},
+						"filepath":     {"type": "string", "description": "action=add: local document to ingest (.md, .txt, .html, .pdf, .epub). Mutually exclusive with url."},
+						"url":          {"type": "string", "description": "action=add: http(s) documentation page to fetch and ingest. Mutually exclusive with filepath. Loopback, private, link-local and non-http(s) destinations are refused."},
+						"title":        {"type": "string", "description": "Optional title override; otherwise the document's own title (or the filename) is used."},
+						"tags":         {"type": "array", "items": {"type": "string"}, "description": "Labels for the document. Merged with any tags already stored for the same source."},
+						"reason":       {"type": "string", "description": "Why this document is being imported (the seed of the admission justification)."},
+						"chunk_size":   {"type": "integer", "minimum": 64, "maximum": 2048, "description": "Target chunk size in tokens. Defaults to 512."},
+						"documents":    {"type": "array", "items": {"type": "object"}, "description": "action=import: inline list of {path|url, tags, reason, title, chunk_size}. Each entry reports its own status."},
+						"manifest":     {"type": "string", "description": "action=import: path to a JSON manifest {\"documents\": [...]} instead of an inline list."},
+						"query":        {"type": "string", "description": "action=search: what to look for. Natural-language questions work; an all-token match is tried first."},
 						"id":           {"type": "string", "description": "Reference doc id; required for the read action."},
 						"limit":        {"type": "integer", "minimum": 1, "description": "Maximum number of results to return for the search action. Defaults to 20."},
 						"offset":       {"type": "integer", "minimum": 0, "description": "Number of results to skip before returning rows. Defaults to 0."},
-						"vector_weight": {"type": "number",  "minimum": 0, "maximum": 1, "description": "Weighting between lexical (FTS5) and vector similarity in the hybrid reference search. 0.0 = pure lexical, 1.0 = pure vector. Defaults to 0.5; values outside [0, 1] are clamped to 0.5 by the handler."}
+						"vector_weight": {"type": "number",  "minimum": 0, "maximum": 1, "description": "Weighting between lexical (FTS5) and vector similarity in the hybrid reference search. 0.0 = pure lexical, 1.0 = pure vector. Defaults to 0.5; values outside [0, 1] are clamped to 0.5."}
 					},
 					"additionalProperties": true
 				}

@@ -66,21 +66,11 @@ func BuildFTS5Query(query string) string {
 	if strings.TrimSpace(query) == "" {
 		return ""
 	}
-	fields := strings.FieldsFunc(query, func(r rune) bool {
-		if r == '\'' {
-			return false // unicode61 keeps in-word apostrophes as token chars
-		}
-		return !isTokenChar(r)
-	})
-	// Drop tokens with no alphanumeric content (e.g. a standalone
-	// apostrophe): unicode61 only preserves apostrophes INSIDE words.
-	filtered := make([]string, 0, len(fields))
-	for _, f := range fields {
-		if strings.IndexFunc(f, isTokenChar) >= 0 {
-			filtered = append(filtered, f)
-		}
-	}
-	fields = filtered
+	// Tokenize with the shared primitive so the AND and OR builders can
+	// never disagree about what a token is. Tokens with no alphanumeric
+	// content (a standalone apostrophe) are dropped: unicode61 only
+	// preserves apostrophes INSIDE words.
+	fields := ftsTokenize(query)
 	if len(fields) == 0 {
 		return ""
 	}
@@ -89,6 +79,69 @@ func BuildFTS5Query(query string) string {
 		parts[i] = f + "*"
 	}
 	return strings.Join(parts, " ")
+}
+
+// BuildFTS5ORQuery joins every query token with explicit OR instead of
+// FTS5's implicit AND.
+//
+// This is the mechanical half of query relaxation; deciding WHEN to relax
+// is the caller's job, because widening a query that already matched
+// changes ranking, and widening an identifier lookup breaks exact-symbol
+// semantics. Reference retrieval gates this behind
+// referenceRelaxedFTSQuery (prose questions only).
+func BuildFTS5ORQuery(query string) string {
+	tokens := ftsTokenize(query)
+	if len(tokens) == 0 {
+		return ""
+	}
+	parts := make([]string, len(tokens))
+	for i, tok := range tokens {
+		parts[i] = tok + "*"
+	}
+	return strings.Join(parts, " OR ")
+}
+
+// ftsProseMarkers are the English function words whose presence marks a
+// query as prose rather than an identifier lookup.
+//
+// The signal is not linguistic sophistication: it is that a question
+// carries grammar words, and an identifier does not. "How do I render a
+// selected menu?" and "edit_theme_options" fail for opposite reasons under
+// an all-token AND, and this list is what distinguishes them.
+var ftsProseMarkers = map[string]bool{
+	"a": true, "an": true, "and": true, "are": true, "as": true, "at": true,
+	"be": true, "been": true, "but": true, "by": true, "can": true, "could": true,
+	"did": true, "do": true, "does": true, "for": true, "from": true, "had": true,
+	"has": true, "have": true, "how": true, "i": true, "if": true, "in": true,
+	"into": true, "is": true, "it": true, "its": true, "me": true, "my": true,
+	"of": true, "on": true, "or": true, "our": true, "should": true, "so": true,
+	"that": true, "the": true, "their": true, "them": true, "then": true,
+	"there": true, "these": true, "they": true, "this": true, "to": true,
+	"was": true, "we": true, "were": true, "what": true, "when": true,
+	"where": true, "which": true, "who": true, "why": true, "will": true,
+	"with": true, "would": true, "you": true, "your": true,
+}
+
+// ftsTokenize splits a query the way the unicode61 indexer tokenizes
+// content. It is the shared primitive behind BuildFTS5Query and
+// BuildFTS5ORQuery so both cannot drift.
+func ftsTokenize(query string) []string {
+	if strings.TrimSpace(query) == "" {
+		return nil
+	}
+	fields := strings.FieldsFunc(query, func(r rune) bool {
+		if r == '\'' {
+			return false // unicode61 keeps in-word apostrophes as token chars
+		}
+		return !isTokenChar(r)
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if strings.IndexFunc(f, isTokenChar) >= 0 {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // isTokenChar reports whether r belongs to a unicode61 token: Unicode

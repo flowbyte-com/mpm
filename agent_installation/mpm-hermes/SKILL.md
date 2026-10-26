@@ -50,7 +50,7 @@ project source tree — see *DB path invariance* below).
 
 | Tool | Purpose |
 |---|---|
-| `mcp__mpm__mpm_memory` | Persistent memory: `save`, `query`, `show`, `shred`, … |
+| `mcp__mpm__mpm_memory` | Persistent memory: `save`, `query`, `show`, `delete`, `restore`, … (permanent shredding is operator-only) |
 | `mcp__mpm__mpm_context` | Session state, wake context, directives, mode routing |
 | `mcp__mpm__mpm_help` | Capability discovery (full Registry enumeration + CLI fallback) |
 

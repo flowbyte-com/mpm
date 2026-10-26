@@ -202,6 +202,7 @@ func TestCorrelation_AutomaticInvocationID_ToolOriginated_Save(t *testing.T) {
 // the explicit value flows through the same dispatch chain and
 // surfaces on BOTH rows. No downstream UUID regeneration.
 func TestCorrelation_ExplicitInvocationID_ToolOriginated_Save(t *testing.T) {
+	clearAmbientProvenanceEnv(t)
 	ws := t.TempDir()
 	t.Setenv("MPM_WORKSPACE", ws)
 

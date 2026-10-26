@@ -161,7 +161,8 @@ func handleOpsMilestones(args []string) int {
 		fmt.Printf("          id=%s\n", e.id)
 	}
 	fmt.Println()
-	fmt.Println("Tactical:  delete via `mpm call mpm_memory --payload '{\"action\":\"shred\",\"params\":{\"memory_id\":\"<id>\"}}'`.")
+	fmt.Println("Tactical:  soft-delete via `mpm memory delete <id>` (reversible: `mpm memory restore <id>`).")
+	fmt.Println("           Permanent destruction is operator-only: `mpm memory shred <id>` from a terminal.")
 	fmt.Println("Strategic: same primitive — a milestone is a memory with a tag.")
 
 	return 0

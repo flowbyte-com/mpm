@@ -94,6 +94,17 @@ func handleBackfillEmbeddings(args []string) int {
 		}
 		fmt.Printf("   Total memories %s: %d\n", label, total)
 
+		// The default scope is memories. A reference corpus imported while
+		// no provider was configured stays semantically unsearchable, and
+		// "Memory backfill complete" reads as "everything is embedded".
+		// Say what this run does not cover, and how to cover it — including
+		// when the provider gate below is about to refuse.
+		if *include == "memories" {
+			if hint := referenceBackfillHint(dm.SQLDB()); hint != "" {
+				fmt.Println(hint)
+			}
+		}
+
 		if *dryRun {
 			// Skip the provider gate; dry-run is a count-only probe.
 			if *include == "all" {
@@ -308,6 +319,18 @@ func runReferenceBackfill(dm mpminternal.CoreDB, cfg *mpminternal.EmbeddingConfi
 // row → Scan pattern rather than inline) so the mpm-lint
 // no-check / ctx-plain-missing gate does not flag the
 // QueryRow call.
+// referenceBackfillHint reports reference chunks that this run did not
+// embed, so a "Memory backfill complete" message cannot be mistaken for a
+// statement about the whole substrate. Returns "" when there is nothing to
+// say.
+func referenceBackfillHint(db *sql.DB) string {
+	n, err := countReferencesWithUnembeddedChunks(db)
+	if err != nil || n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("   %d reference document(s) still have no chunk embeddings; run `mpm ops backfill-embeddings --include references` to embed them.", n)
+}
+
 func countReferencesWithUnembeddedChunks(db *sql.DB) (int, error) {
 	var count int
 	row := db.QueryRow(`

@@ -266,7 +266,7 @@ All seven default operational surfaces exclude archived work: `mpm wake` open wo
 
 #### Reference
 
-External material ingested for the agent to consult — documentation, specs, articles, code. Reference artifacts are distinct from Memory: Memory is what the agent synthesises internally; Reference is what the agent can look up. References are ingested from a local file path and are stored with their section markers and ingestion timestamp, searchable via the same FTS5 index as memories. MPM does not fetch URLs: `mpm reference add --url` is a reserved, explicitly-rejected stub. When an ingested document needs a durable pointer back to where it came from, that pointer is an `evidence` row carrying a `reference_url` (§4.2).
+External material ingested for the agent to consult — documentation, specs, articles, code. Reference artifacts are distinct from Memory: Memory is what the agent synthesises internally; Reference is what the agent can look up. References are ingested from a local file path, stored with their section markers and ingestion timestamp, and searchable via the same FTS5 index as memories. Identity is canonical: one source is one document regardless of the path spelling used to name it (§7.6). References are ingested from a local path or an http(s) URL; URL retrieval is a guarded fetch (SSRF-boundary checks, bounded size/time/redirects, no credential forwarding) documented in §7.6. When an ingested document needs a durable pointer back to where it came from, the reference row itself carries `source_url` / `requested_url`, and an `evidence` row can additionally carry a `reference_url` (§4.2).
 
 #### Lesson
 
@@ -468,6 +468,8 @@ The cognitive sequence above shows how artifacts come into being. The relationsh
 **`reference_url` (optional, evidence rows only).** Every evidence row may carry a `reference_url`: an absolute `http`/`https` URL of at most 2048 characters, supplied by hand, answering one question — *what external reference did this claim come from?* MPM stores and returns it **verbatim** — no normalization, no query or fragment stripping, no parameter reordering — and **never fetches, resolves, redirects, verifies, or endorses it**. A stored reference is a claim by the author that the document exists and is relevant; it is not evidence that MPM checked, and not an assertion that the document is correct. Accepted on `mpm_evidence action=add` and `mpm evidence add --reference-url`; omitting it is the common case and is always valid. A malformed or non-`http`/`https` value is rejected with an error naming the accepted set and leaves no partial state. **It carries no evidentiary weight:** it is not read by the confidence formula, does not affect a `source_group`'s outcome/audit/action class, and cannot move a work's derived verification. An evidence row with a URL and an otherwise identical row without one derive identical confidence. It is also scanned by the same secret/poison scanner as every other user-supplied evidence field, since a URL query string is a common place for a credential to leak.
 
 
+`mpm_memory action=save` does not persist an `evidence` parameter. The tool's params object is action-agnostic, and `evidence` belongs to `action=challenge`; rather than silently discarding a supplied value, save refuses a non-empty `evidence` and points at `mpm_evidence action=add` after the memory exists. Free text is never promoted to evidence without a source group.
+
 A piece of evidence can support or challenge **any** artifact — memory, decision, or theory — not just the most recently created one. The artifacts that have evidence attached accumulate that evidence over time. Decay reduces confidence over time. Retrieval surfaces artifacts; new observations restart the cycle.
 
 ```
@@ -619,7 +621,7 @@ The memory surface exposes four lifecycle verbs whose names and effects must sta
 |---|---|---|---|
 | `mpm memory delete <id>` (CLI) / `mpm_memory action=delete` (tool) | Soft-delete: sets `deleted_at`. Row stays in substrate with full content + history preserved. | **Yes** — `mpm memory restore <id>` / `mpm_memory action=restore` clears the tombstone and re-adds the FTS5 entry. | `shred` (permanent) |
 | `mpm memory restore <id>` (CLI) / `mpm_memory action=restore` (tool) | Reverse a soft-delete. Idempotent on live rows (errors with "not soft-deleted"). | n/a | `mpm challenge restore` (only clears the `challenged` status flag, not the `deleted_at` tombstone) |
-| `mpm memory shred <id>` (CLI) / `mpm_memory action=shred` (tool) | Permanent removal from active state. Broad sweep across topic_memberships, memory_revisions, evidence, confidence_history, artifact_provenance, synth_runs. | **No.** | `delete` (soft, reversible) |
+| `mpm memory shred <id>` (CLI, operator-only) / ~~`mpm_memory action=shred`~~ | Permanent removal from active state. Broad sweep across topic_memberships, memory_revisions, evidence, confidence_history, artifact_provenance, synth_runs. The tool action is refused on every agent surface (MCP, `mpm call`): a hard delete requires the CLI verb. | **No.** | `delete` (soft, reversible) |
 | `mpm shred <id>` (CLI, no `memory` subcommand) | Same as `mpm memory shred` — hard delete with cascade. | **No.** | `delete` (soft, reversible) |
 | `mpm shred session <id>` / `mpm session shred <id>` | **Soft delete** — sets `deleted_at`; row stays in substrate with full content + history. The verb "shred" in the subcommand is the historical name; the *operation* is reversible and the success message says "Session soft-deleted" so the truth is visible at the response layer. | **Yes** — `mpm memory restore <id>` clears the tombstone. | The hard-delete `mpm shred <id>` (cascaded removal from active state). The two are reachable through the same dispatcher; the only difference is the collection (`session` vs default) and the verb truthfulness at the success-message layer. |
 
@@ -642,6 +644,7 @@ The word "secure delete" is therefore not used for any `shred` surface. Two diff
 - Database backups and `mpm backup` dumps, which are separate files shred never opens.
 - The SQLite WAL, and free pages in the main DB file. A deleted row's bytes remain until SQLite reuses the page. MPM issues no `PRAGMA secure_delete`, no `VACUUM`, and no `wal_checkpoint` on any shred path, so removal of the bytes is incidental to later page reuse and maintenance, never a shred guarantee.
 - Filesystem snapshots, and any copy already transcribed into a handoff summary, another memory body, or an operator's own notes.
+- `raw_memories` staging rows that predate the durable source linkage. Promotion records which memory a staging row became (`raw_memories.memory_id`), and a shred deletes exactly that linked row — by identity, never by text matching. Rows imported before the linkage existed carry no `memory_id`, cannot be attributed to this memory, and are deliberately left untouched; the shred report discloses that they may remain.
 
 The distinction that matters operationally: **a shredded object is no longer reachable through MPM and is not restorable — it is not gone from the storage medium.**
 
@@ -1290,7 +1293,7 @@ Because the rule lives in the transport rather than in any one handler, it appli
 
 Every `mpm call <tool>` entry has a matching MCP tool spec; both call the same `CoreDB` methods. The one tool that is not a Registry entry — the `mpm_help` discovery closure — is reachable through `mpm call mpm_help` as well, and both **discovery** transports serve the same catalogue, so discovery never reports a different schema depending on which discovery transport was used. (That parity is between the two ways of asking for discovery. It is not a claim that a tool's registered schema is the schema its native compact MCP wrapper publishes — see the `mpm_help` actions paragraph below.) The set of names `mpm call` can reach without a Registry entry is defined once (`tools.CallRoutedTools`) and is read both by the CLI dispatcher and by the agent-protocol documentation guard, so a name cannot be documented as reachable and then fail at call time. The full Registry has **21 entries** (the MCP surface is 22 — those 21 plus the `mpm_help` discovery closure registered at server init by `cmd/mpm-mcp`). Of those 21:
 
-- **15 aggregator tools** (`{action, params}` shape): `mpm_memory`, `mpm_theories`, `mpm_decisions`, `mpm_lessons`, `mpm_topics`, `mpm_references`, `mpm_evidence`, `mpm_confidence`, `mpm_context`, `mpm_skills`, `mpm_wakes`, `mpm_handoff`, `mpm_scratchpad`, `mpm_system`, `mpm_work`. These cover the daily cognitive workflow: read/write memory and the memory feedback loop (`mpm_memory` actions `save`/`query`/`shred`/`reinforce`/`weaken`/`snooze`/`set_weight`/`patch`/`promote`/`review`/`synthesize`/`challenge`/`commit_milestone`), lessons, topics, references, theories, decisions, evidence, confidence, route + wake + directives, cross-session handoff (`mpm_handoff` actions `write`/`read`/`list`/`shred`), intra-session scratchpad (`mpm_scratchpad` actions `flush`/`read`/`discard`/`promote`), work tracking (`mpm_work` — same Fat-RPC pattern), and system maintenance + health.
+- **15 aggregator tools** (`{action, params}` shape): `mpm_memory`, `mpm_theories`, `mpm_decisions`, `mpm_lessons`, `mpm_topics`, `mpm_references`, `mpm_evidence`, `mpm_confidence`, `mpm_context`, `mpm_skills`, `mpm_wakes`, `mpm_handoff`, `mpm_scratchpad`, `mpm_system`, `mpm_work`. These cover the daily cognitive workflow: read/write memory and the memory feedback loop (`mpm_memory` actions `save`/`query`/`show`/`delete`/`restore`/`reinforce`/`weaken`/`snooze`/`set_weight`/`patch`/`promote`/`review`/`synthesize`/`challenge`/`commit_milestone`; permanent shredding is operator-only on the CLI and refused here), lessons, topics, references, theories, decisions, evidence, confidence, route + wake + directives, cross-session handoff (`mpm_handoff` actions `write`/`read`/`list`/`shred`), intra-session scratchpad (`mpm_scratchpad` actions `flush`/`read`/`discard`/`promote`), work tracking (`mpm_work` — same Fat-RPC pattern), and system maintenance + health.
 - **6 standalone tools** (each with its own narrower schema): `mpm_retrieval_diagnose` (per-node BM25 diagnostic with 3-stage trace; CLI form `mpm call explain_retrieval`), `mpm_resolve` (resolves `mpm://memory/<id>` / `mpm://lesson/<id>` / `mpm://theory/<id>` / `mpm://work/<id>` URI pointers with a default 512-byte cap, caller-controllable via `opts.MaxBytes`), `mpm_blob_read` (raw blob fetch by id, 256 KiB server ceiling), `mpm_blob_search` (pointer search across the blobstore), `mpm_log_to_changelog` (self-report agent work tied to a git commit SHA), and `mpm_request_review` (concurrent multi-component review).
 
 **`mpm_help` actions.** `list` enumerates every Registry entry with a one-line summary and its `mpm call` form — a summary, deliberately carrying no schemas. `show` returns one tool's full description **and** its registered JSON input schema under `input_schema`: the action vocabulary, the required fields and the nested `params` properties, returned as a JSON object rather than an escaped JSON string. The schema is the Registry's own schema — the same object the runtime dispatcher validates an incoming payload against, and the schema the `mpm call` path accepts — not a second hand-written summary, so it cannot drift from the contract that decides whether a call is legal. A description says what a tool is for; only the schema says which actions and fields are actually accepted, which is why `show` returns both.
@@ -2291,6 +2294,10 @@ mpm kb session shred <id>
 
 # Reference library (PDF, EPUB, MD, TXT, HTML)
 mpm kb reference add <file> [--tag tag1,tag2] [--reason "..."] [--chunk-size 512]
+mpm kb reference add <https://…>       # fetch a documentation page (SSRF-guarded)
+                                       # idempotent: same source → same document
+mpm kb reference import <manifest.json|-> [--json]   # batch; per-document status [--json]   # batch; per-document status
+mpm kb reference duplicates [--json]   # read-only: same-source groups + repair plan
 mpm kb reference ls
 mpm kb reference search <query>
 mpm kb reference show <id>
@@ -3270,6 +3277,68 @@ Context-aware deduplication: synthesis deletes the triggering memory after LTM s
 *A separate shelf of long-form sources, not promoted to memory on ingest — the operator decides what to commit.*
 
 PDF, EPUB, HTML, Markdown ingestion with token-aware chunking (`--chunk-size`, 64–2048 tokens, default 512). Sources are diff-keyed by content hash: re-ingesting an unchanged document costs zero embedding work. Embedding is a separate phase from chunk insert, so slow embed calls never block ingest. Reference docs are a *shelf*, not a memory: they live in SQLite, are indexed for full-text and semantic search, and are surfaced to agents on demand. Admission (whether a pattern from a consulted reference is worth promoting to long-term memory) is a per-consult decision, not an ingest-time gate.
+
+**Source identity.** A document's identity is its canonical source, not the string the caller typed:
+
+| Source | Identity |
+| --- | --- |
+| Local file | absolute, `.`/`..`-cleaned path with symlinks resolved |
+| URL | normalized URL (lowercased scheme/host, default port and fragment dropped; query and path preserved) |
+
+**URL ingestion.** `mpm reference add <https://…>` (or `--url <…>`) fetches the page, extracts it, and stores it through the same pipeline as a local file. The URL may be supplied by an autonomous agent, so retrieval is a security boundary before it is a convenience:
+
+| Control | Enforcement |
+| --- | --- |
+| Scheme allowlist (http, https) | URL parse + every redirect hop; `file:`, `data:`, `javascript:` and friends are refused, never treated as paths |
+| Forbidden destinations (loopback, private, link-local/metadata, CGNAT, multicast, reserved, IPv4-mapped) | `net.Dialer.Control` — i.e. on the **resolved address immediately before connect**, not on the string |
+| Redirect into a forbidden destination | the same dial check runs per hop; https→http downgrades are refused |
+| Credentials in the URL | rejected at parse time and never stored |
+| Credentials to a peer | never sent; a cross-origin redirect does not carry them |
+| TLS verification | never disabled |
+| Download size | 16 MiB ceiling on the **decompressed** body, then a clear error |
+| Time / redirects | 20 s per fetch, 5 hops |
+| Content type | allowlist (HTML/XHTML, Markdown, plain text, JSON); anything else is refused with the type named |
+
+Because the destination check runs after DNS resolution on the socket address, an IP literal, a hostname that resolves to `169.254.169.254`, an IPv4-mapped IPv6 form and a rebinding answer are all judged by the address actually dialled. Tests exercise this through a loopback seam that is unexported and unavailable to production callers.
+
+Markdown is requested via `Accept: text/markdown` and preferred when the publisher sends it; HTML is extracted structurally. HTTP provenance is stored on the document: effective `source_url`, `requested_url` (differs under redirect), `fetched_at`, `ETag` and `Last-Modified`. Those validators make a re-import a conditional request: a `304 Not Modified` keeps the stored document, its chunks and its embeddings untouched, and reports `unchanged`. Publishers that send no validators still converge by content hash.
+
+Consequences, all deliberate:
+
+- `menus.md`, `docs/menus.md`, `./docs/../docs/menus.md` and `/corpus/docs/menus.md` name one document. Before this rule each spelling created a separate document with its own chunks, and retrieval competed against its own copies.
+- A symlink is an alias of its target, not a second document.
+- **Content hashes are not identity.** Two publishers may ship identical text; merging them by hash would conflate their provenance. Hash equality decides only whether an identified document *changed*.
+- Document ids are derived from the canonical identity, so two concurrent imports of one new source converge on the same row instead of racing two inserts.
+
+**Outcomes.** Every ingest reports one of `imported`, `updated`, `unchanged` or `duplicate`, plus the chunk diff (`chunks_added`/`updated`/`reused`/`removed`), the embedding state (`embedded`, `pending_embeddings`), and separate `lexical_searchable` / `semantic_searchable` claims. `unchanged` writes no chunk rows, so chunk ids and vectors survive a re-import. `duplicate` means several existing documents already resolve to that source: nothing is written, the ids are returned, and the repair is an operator decision.
+
+**Legacy rows.** Documents written before identity canonicalization keep their stored path, and a re-import recognises them by resolving the stored value against the ancestors of the imported file (and by URL canonicalization). A recognised legacy row is upgraded to its canonical path in place on that write. Existing duplicates are **not** merged automatically: `mpm reference duplicates` prints the groups, their confidence (`certain` when canonical paths agree, `probable` when a legacy relative path could only be matched by suffix), a suggested survivor and an explicit repair plan. Deleting the copies you do not want and re-importing is the supported repair; nothing is ever removed for you.
+
+**Batch ingestion.** `mpm reference import <manifest.json|->` (and MCP `mpm_references action=import`) takes a list and reports each document separately:
+
+```json
+{"documents": [
+  {"url": "https://developer.wordpress.org/reference/functions/wp_nav_menu/", "tags": ["wordpress", "menus"], "reason": "AgentShell development"},
+  {"path": "./vendor/turnstile.md", "tags": ["cloudflare-turnstile"]}
+]}
+```
+
+Local paths and URLs may be mixed. Each entry reports `imported` / `updated` / `unchanged` / `duplicate` / `failed` with its own error, and the batch's `ok` is false if anything failed or was ambiguous — a partial import is never reported as success. Processing is sequential (bounded to one fetch and one write at a time, no background system). Re-running the same manifest is the retry path: unchanged documents write nothing, so a corpus that failed in the middle resumes without duplicating the part that worked.
+
+**Discovery.** The agent-facing contract is one tool (`mpm_references`) with the decision rule stated in its own description:
+
+| Need | Action |
+| --- | --- |
+| existing source material | `search` → `read` |
+| new source material (one) | `add` with `filepath` **or** `url` |
+| new source material (many) | `import` with `documents` |
+| what is in the corpus | `list` |
+
+`mpm_help action=show tool=mpm_references` returns that tool's registered schema, and the CLI prints the same vocabulary from `mpm reference help`. An unknown action names both the valid actions and that discovery call, so an agent that guesses (`help`, `fetch`, `ingest`) is redirected instead of dead-ended.
+
+A search hit carries `doc_title`, `section`, `source_path` (absolute path or effective URL), `source_kind`, `chunk_id` and `doc_id`, so a citation does not require a second call; `read` returns the stored document with its provenance and attribution.
+
+**Structure and provenance.** Markdown chunks carry the heading path they live under (`Parameters › args`), so a retrieved chunk can be cited by section. HTML is extracted structurally — headings, fenced code with language hints, tables, callouts and absolute links retained; navigation, cookie banners, sidebars and footers removed — and the extraction notes disclose anything that was dropped or guessed. A leading front-matter block that would dominate the first chunk is removed and reported. Publisher attribution (`og:site_name`, author, licence) is kept as document metadata rather than prepended to chunk text.
 
 ## 10. Reliability
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -107,6 +108,29 @@ func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	fact, _ := p["fact"].(string)
 	if fact == "" {
 		return nil, fmt.Errorf("fact is required")
+	}
+
+	// `evidence` is a CHALLENGE-only parameter that lives in the shared
+	// action-agnostic params object, so it reaches save too. This handler
+	// has never read it: a caller sending evidence with action=save got a
+	// success response while the observation was silently discarded —
+	// exactly the failure mode where an agent believes it recorded
+	// support that the substrate never saw.
+	//
+	// It is refused rather than persisted, because free text is not a
+	// verified observation: storing it would let a caller mint
+	// evidentiary weight by writing prose. The refusal names the path
+	// that does attach evidence to a real artifact.
+	if raw, present := p["evidence"]; present && raw != nil {
+		evStr, isString := raw.(string)
+		if !isString || strings.TrimSpace(evStr) != "" {
+			return nil, fmt.Errorf(
+				"mpm_memory action=save does not persist 'evidence' (the shared parameter " +
+					"is used by action=challenge only); nothing was saved. Save the memory " +
+					"first, then attach the observation with mpm_evidence action=add " +
+					"(artifact_id=<memory id>, artifact_type=memory, source_group=<how it was " +
+					"observed>, ...). Free text is not recorded as evidence without a source.")
+		}
 	}
 
 	// Alpha cleanup (2026-09-10): projection parity across save/show/query.
@@ -1329,34 +1353,53 @@ func handleInvalidateDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContex
 // quoting and parse text output — neither works reliably across
 // punctuation-heavy memory ids or non-ASCII content.
 
+// ── Irreversible-deletion (shred) authorization boundary ────────────
+//
+// Shred is a hard delete with no restore path. Memory shred is worse
+// than a row delete: ShredMemoryWithCascade also purges a linked
+// theory and sweeps topic memberships, revisions, evidence and
+// confidence history. Lesson shred removes the row from lessons_base
+// and its FTS entry. Both are durable substrate state that an
+// autonomous agent must not be able to destroy on its own judgement.
+//
+// The tool handlers below are the single execution point shared by
+// every agent-facing surface — the native MCP tool, the compact MCP
+// wrapper, `mpm call`, and the adapters layered on top of them — so
+// the refusal lives here, not in a schema or a per-transport guard.
+// Permanent destruction remains available to the operator through the
+// dedicated CLI verbs (`mpm memory shred <id>`, `mpm lesson shred
+// <id>`), which call the DatabaseManager primitives directly.
+//
+// Deliberately NOT a `confirm=true` gate. MPM uses that shape for
+// operator-gated writes (record_global_rule, migrate), but a boolean
+// the caller supplies is not evidence of operator intent: an agent
+// that can call the tool can also set the field. Refusing outright is
+// the only fail-closed shape.
+
+// operatorOnlyShredError is the refusal returned by every
+// agent-accessible hard-delete action. It names what was NOT done, why
+// no payload field can unlock it, the reversible alternative, and the
+// operator's actual path.
+func operatorOnlyShredError(toolName, action, subject, operatorVerb string) error {
+	return fmt.Errorf(
+		"%s action=%s is operator-only: %s is a permanent delete with no restore path, "+
+			"so it is not reachable from the agent tool surface (MCP, `mpm call`, adapters). "+
+			"Nothing was deleted. No payload field — including confirm=true — authorizes it: "+
+			"a value the caller supplies is not operator intent. Use action=delete for a "+
+			"reversible removal (action=restore undoes it). An operator can shred permanently "+
+			"from a terminal with: %s",
+		toolName, action, subject, operatorVerb,
+	)
+}
+
 func handleShredMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, err := requireMemoryID(p)
 	if err != nil {
 		return nil, err
 	}
-
-	result, err := dm.ShredMemoryWithCascade(id)
-	if err != nil {
-		return nil, err
-	}
-	// Forensic log — irrecoverable hard delete. Without this, a
-	// "rogue agent shreds foundational theory" event is invisible
-	// until someone notices the absence of data. AuditInfo is gated
-	// out of cluster detection (see audit.go).
-	if memoryID, _ := result["memory_id"].(string); memoryID != "" {
-		ctx := mpminternal.AuditContext{
-			"memory_id": memoryID,
-		}
-		if tp, ok := result["theory_purged"].(string); ok && tp != "" {
-			ctx["theory_purged"] = tp
-		}
-		dm.LogAudit(
-			mpminternal.AuditInfo, "epistemology",
-			fmt.Sprintf("shred_memory %s", memoryID), "",
-			ctx,
-		)
-	}
-	return result, nil
+	return nil, operatorOnlyShredError(
+		"mpm_memory", "shred", "memory "+id, "mpm memory shred "+id,
+	)
 }
 
 // handleDeleteMemory soft-deletes a memory row (sets deleted_at). Reversible
@@ -1598,17 +1641,39 @@ func handleMigrate(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[st
 	// Pure undo mode: delegate via direct SQL (no DM method exists yet;
 	// rollback is rare enough that adding a method is overkill).
 	if undoBatch != "" {
-		// Best-effort undo: delete pending/approved rows for the batch.
-		// Approved rows that have been promoted to memories are tombstoned
-		// rather than hard-deleted so audit trails survive.
+		// Undo of an import batch. This path TOMBSTONES the staging rows
+		// (`status='rejected'`) rather than deleting them, so the audit
+		// trail survives; the CLI undo (`mpm ingest --undo`) hard-deletes
+		// them. Both are staging-only: memories already promoted from the
+		// batch are NOT removed by either.
+		//
+		// The previous shape discarded the write error and reported
+		// success unconditionally, so a failed undo looked exactly like a
+		// successful one — and the result carried no count and no
+		// disclosure, so the caller could not tell what had been reverted.
+		affected := 0
 		if !dryRun {
-			_, _ = dm.SQLDB().Exec(
+			res, err := dm.SQLDB().Exec(
 				`UPDATE raw_memories SET status='rejected', llm_notes='undo by mcp tool', updated_at=? WHERE import_batch=? AND status IN ('pending','approved')`,
 				float64(time.Now().Unix()), undoBatch)
+			if err != nil {
+				return nil, fmt.Errorf("undo failed for batch %q: %w", undoBatch, err)
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				// Without the count the result cannot say what was
+				// reverted; a success line would be a claim it cannot
+				// support.
+				return nil, fmt.Errorf("undo failed for batch %q: cannot confirm how many staging rows were reverted: %w", undoBatch, err)
+			}
+			affected = int(n)
 		}
 		result["action"] = "undo"
 		result["batch_id"] = undoBatch
 		result["dry_run"] = dryRun
+		result["rows_reverted"] = affected
+		result["reverted"] = "staging rows marked rejected (not deleted)"
+		result["note"] = "memories already promoted from this batch are NOT removed — undo reverts staging rows only"
 		return result, nil
 	}
 
@@ -2228,15 +2293,154 @@ func handleShowTopic(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	}, nil
 }
 
-// callAddReference ingests a document as a reference.
+// handleAddReference ingests one document — a local file or an http(s)
+// URL — through the shared ingestion pipeline.
+//
+// Source selection is explicit: `filepath`, `url` and `source` all name a
+// source, and supplying more than one distinct value is an error rather
+// than a silent precedence rule. The CLI has the same rule, because both
+// surfaces call the same pipeline.
 func handleAddReference(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
-	filepath, _ := p["filepath"].(string)
-	if filepath == "" {
-		return nil, fmt.Errorf("filepath is required")
+	source, err := referenceSourceFromParams(p)
+	if err != nil {
+		return nil, err
 	}
-	title := internal.ParseStringOr(p["title"], "")
+	concrete, ok := dm.(*mpminternal.DatabaseManager)
+	if !ok {
+		// The pipeline writes through DatabaseManager (identity lookup,
+		// chunk diff, embedding pass). A non-DM CoreDB implementation
+		// cannot participate, and pretending otherwise would silently
+		// create duplicates.
+		return nil, fmt.Errorf("reference ingestion requires the SQLite substrate")
+	}
+	res, err := concrete.IngestReference(context.Background(), mpminternal.ReferenceIngestRequest{
+		Source:    source,
+		Title:     internal.ParseStringOr(p["title"], ""),
+		Tags:      internal.ParseStringSliceOr(p["tags"]),
+		Reason:    internal.ParseStringOr(p["reason"], ""),
+		ChunkSize: int(internal.ParseFloatOr(p["chunk_size"], 0)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return referenceIngestEnvelope(res), nil
+}
 
-	return dm.AddReferenceFromFile(filepath, title)
+// referenceSourceFromParams extracts the single source to ingest.
+func referenceSourceFromParams(p map[string]interface{}) (string, error) {
+	filepath := strings.TrimSpace(internal.ParseStringOr(p["filepath"], ""))
+	rawURL := strings.TrimSpace(internal.ParseStringOr(p["url"], ""))
+	source := strings.TrimSpace(internal.ParseStringOr(p["source"], ""))
+	set := map[string]bool{}
+	for _, v := range []string{filepath, rawURL, source} {
+		if v != "" {
+			set[v] = true
+		}
+	}
+	if len(set) == 0 {
+		return "", fmt.Errorf("a source is required: pass \"filepath\" for a local document or \"url\" for an http(s) page")
+	}
+	if len(set) > 1 {
+		return "", fmt.Errorf("conflicting sources: pass exactly one of \"filepath\" or \"url\"")
+	}
+	for v := range set {
+		return v, nil
+	}
+	return "", fmt.Errorf("a source is required")
+}
+
+// referenceIngestEnvelope is the wire shape for one ingestion.
+//
+// `status` is the field callers must branch on: `success` alone cannot
+// distinguish a first import from a no-op re-import or from a source that
+// already exists as several documents.
+func referenceIngestEnvelope(res *mpminternal.ReferenceIngestResult) map[string]interface{} {
+	if res == nil {
+		return map[string]interface{}{"success": false}
+	}
+	out := map[string]interface{}{
+		"success":             res.Status != mpminternal.ReferenceStatusDuplicate,
+		"status":              res.Status,
+		"id":                  res.ID,
+		"title":               res.Title,
+		"source":              res.Source,
+		"source_kind":         res.SourceKind,
+		"source_type":         res.SourceType,
+		"requested_source":    res.RequestedSource,
+		"total_chunks":        res.TotalChunks,
+		"chunks_added":        res.ChunksAdded,
+		"chunks_updated":      res.ChunksUpdated,
+		"chunks_reused":       res.ChunksReused,
+		"chunks_removed":      res.ChunksRemoved,
+		"embedded":            res.Embedded,
+		"pending_embeddings":  res.PendingEmbeddings,
+		"lexical_searchable":  res.LexicalSearchable,
+		"semantic_searchable": res.SemanticSearchable,
+	}
+	if len(res.DuplicateIDs) > 0 {
+		out["duplicate_ids"] = res.DuplicateIDs
+	}
+	if len(res.Warnings) > 0 {
+		out["warnings"] = res.Warnings
+	}
+	if len(res.ExtractionNotes) > 0 {
+		out["extraction_notes"] = res.ExtractionNotes
+	}
+	return out
+}
+
+// handleImportReferences ingests a corpus from an inline document list or
+// a manifest file.
+func handleImportReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	concrete, ok := dm.(*mpminternal.DatabaseManager)
+	if !ok {
+		return nil, fmt.Errorf("reference ingestion requires the SQLite substrate")
+	}
+	var manifest *mpminternal.ReferenceManifest
+	switch {
+	case p["documents"] != nil:
+		raw, err := json.Marshal(p["documents"])
+		if err != nil {
+			return nil, fmt.Errorf("encode documents: %w", err)
+		}
+		manifest, err = mpminternal.ParseReferenceManifest(raw)
+		if err != nil {
+			// ParseReferenceManifest expects {"documents": [...]}; retry with
+			// the wrapper so an inline array is accepted too.
+			wrapped, wrapErr := mpminternal.ParseReferenceManifest([]byte(`{"documents":` + string(raw) + `}`))
+			if wrapErr != nil {
+				return nil, err
+			}
+			manifest = wrapped
+		}
+	case strings.TrimSpace(internal.ParseStringOr(p["manifest"], "")) != "":
+		path := internal.ParseStringOr(p["manifest"], "")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read manifest %q: %w", path, err)
+		}
+		manifest, err = mpminternal.ParseReferenceManifest(data)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("documents is required: pass \"documents\": [{\"path\"|\"url\": ...}] or \"manifest\": \"<path>\"")
+	}
+	res, err := concrete.IngestReferenceManifest(context.Background(), manifest)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success":   res.OK,
+		"ok":        res.OK,
+		"total":     res.Total,
+		"imported":  res.Imported,
+		"updated":   res.Updated,
+		"unchanged": res.Unchanged,
+		"duplicate": res.Duplicate,
+		"failed":    res.Failed,
+		"documents": res.Documents,
+	}, nil
 }
 
 // callSearchReferences searches reference content using the hybrid
@@ -2301,14 +2505,22 @@ func handleSearchReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 	}
 	items := make([]map[string]interface{}, 0, len(results))
 	for _, r := range results {
+		// Provenance travels with the hit: `source_path` is the canonical
+		// file path or effective URL, and `source_kind` says which. An agent
+		// citing a retrieved chunk should not have to issue a second call to
+		// learn where the chunk came from.
 		items = append(items, map[string]interface{}{
 			"id":                r.ID,
+			"chunk_id":          r.ID,
 			"doc_id":            r.DocID,
 			"doc_title":         r.DocTitle,
 			"chunk_index":       r.ChunkIndex,
 			"section":           r.Section,
 			"content":           r.Content,
 			"source":            r.Source,
+			"source_path":       r.SourcePath,
+			"source_kind":       r.SourceKind,
+			"source_type":       r.SourceType,
 			"fts5_score":        r.FTS5Score,
 			"vector_similarity": r.VectorSimilarity,
 			"combined_score":    r.CombinedScore,
@@ -5952,6 +6164,10 @@ func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		// real arrays/objects, not stringified blobs (W-013).
 		return handleShowMemory(dm, ac, params)
 	case "shred":
+		// Operator-only irreversible hard delete. The handler refuses
+		// for every agent-facing caller at the execution point; the
+		// operator path is `mpm memory shred <id>`. See
+		// operatorOnlyShredError.
 		return handleShredMemory(dm, ac, params)
 	case "delete":
 		// Alpha cleanup (2026-09-10): explicit soft-delete verb. Reversible
@@ -5994,7 +6210,7 @@ func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 	case "commit_milestone":
 		return handleCommitMilestone(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_memory. Valid actions include save, query, show, shred, delete, restore, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, restore_challenge, commit_milestone", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_memory. Valid actions include save, query, show, delete, restore, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, restore_challenge, commit_milestone", action)
 	}
 }
 
@@ -6304,11 +6520,12 @@ func handleMpmLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		// list/search/get. Idempotent on an already-visible lesson.
 		return handleRestoreLesson(dm, ac, params)
 	case "shred":
-		// Irreversible hard delete. Removes the row from
-		// lessons_base + lessons_fts. No restore path.
+		// Irreversible hard delete. Operator-only: refused for every
+		// agent-facing caller; the operator path is
+		// `mpm lesson shred <id>`. See operatorOnlyShredError.
 		return handleShredLesson(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_lessons. Valid actions include save, search, list, delete, restore, shred", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_lessons. Valid actions include save, search, list, delete, restore", action)
 	}
 }
 
@@ -6348,8 +6565,12 @@ func handleRestoreLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	return map[string]interface{}{"success": true, "id": id, "action": "restore"}, nil
 }
 
-// handleShredLesson implements the irreversible hard-delete action.
-// No restore path. Field vocabulary matches handleDeleteLesson.
+// handleShredLesson is the irreversible hard-delete action. No restore
+// path. Field vocabulary matches handleDeleteLesson.
+//
+// Operator-only: see operatorOnlyShredError. The permanent deletion is
+// performed by `mpm lesson shred <id>`, which calls
+// LessonStore.ShredLesson directly.
 func handleShredLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["id"].(string)
 	if id == "" {
@@ -6358,10 +6579,9 @@ func handleShredLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 	if id == "" {
 		return nil, fmt.Errorf("shred lesson: id is required")
 	}
-	if err := dm.ShredLesson(id); err != nil {
-		return nil, fmt.Errorf("shred lesson: %w", err)
-	}
-	return map[string]interface{}{"success": true, "id": id, "action": "shred", "reversible": false}, nil
+	return nil, operatorOnlyShredError(
+		"mpm_lessons", "shred", "lesson "+id, "mpm lesson shred "+id,
+	)
 }
 
 func handleMpmDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {
@@ -6523,6 +6743,8 @@ func handleMpmReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, pa
 	switch action {
 	case "add":
 		return handleAddReference(dm, ac, params)
+	case "import":
+		return handleImportReferences(dm, ac, params)
 	case "read":
 		// W-004: parity with mpm_memory/mpm_lessons/mpm_decisions.
 		// Closes the gap where the only way to read a reference was
@@ -6533,7 +6755,13 @@ func handleMpmReferences(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, pa
 	case "list":
 		return handleListReferences(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_references. Valid actions include add, read, search, list", action)
+		// The help pointer comes BEFORE the action list: the parity guard
+		// parses everything after "Valid actions include " up to the next
+		// quote and splits on commas, so any comma-separated prose after
+		// the list would be read as an action.
+		return nil, fmt.Errorf("unknown action %q for mpm_references. "+
+			"Call mpm_help with action=show and tool=mpm_references for the full schema and examples. "+
+			"Valid actions include add, import, read, search, list", action)
 	}
 }
 

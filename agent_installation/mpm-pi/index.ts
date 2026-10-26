@@ -380,7 +380,8 @@ export default function piMpmExtension(pi: ExtensionAPI) {
 		description: `Memory CRUD and lifecycle. Literal actions:
   save — Required params.fact. Optional: params.collection, params.tags, params.weight, params.ttl.
   query — Search memories (FTS5 + semantic). Required params.query. Optional: params.limit, params.collection, params.scope ("all"|"local"|"shared").
-  shred — Soft-delete a memory / hard-delete a lesson. Required params.memory_id.
+  delete — Reversible soft delete. Required params.memory_id. Undo with restore.
+  restore — Clear a soft-delete tombstone. Required params.memory_id.
   reinforce — Bump weight. Required params.memory_id. Optional: params.delta (default 1).
   weaken — Reduce weight. Required params.memory_id. Optional: params.delta (default 1).
   snooze — Suppress from retrieval for N days. Required params.memory_id. Optional: params.days (default 1).

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -1252,12 +1253,16 @@ func handleShredMem(args []string) int {
 // Reference Commands
 // =============================================================================
 
-// handleRefAdd ingests a file as a reference document
+// handleRefAdd ingests a document as a reference.
+//
+// All of the work — identity resolution, parsing, extraction, chunking,
+// the content diff, embedding and the outcome classification — lives in
+// mpminternal.IngestReference. This handler owns flags, rendering and
+// exit codes only, so the CLI cannot drift from the MCP surface.
 func handleRefAdd(args []string) int {
-	// R3: --help / -h / "help" short-circuit. See handleMemoryAdd for
-	// the rationale; same defect, same fix. Without this, `mpm reference
-	// add --help` would attempt to open a file named "help" and surface
-	// "File not found" instead of printing reference help.
+	// R3: --help / -h / "help" short-circuit. Without this,
+	// `mpm reference add --help` would attempt to open a file named
+	// "help" and surface "File not found" instead of printing help.
 	for _, a := range args {
 		if a == "-h" || a == "--help" || a == "help" {
 			return printRefHelp()
@@ -1265,217 +1270,288 @@ func handleRefAdd(args []string) int {
 	}
 	fs := flag.NewFlagSet("reference add", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	tag := fs.String("tag", "", "Tags for the reference")
+	tag := fs.String("tag", "", "Comma-separated tags for the reference")
 	reason := fs.String("reason", "", "Import reason (why this is being added)")
+	title := fs.String("title", "", "Override the document title")
 	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
-	chunkSize := fs.Int("chunk-size", 512, "Target chunk size in tokens (default: 512, range: 64-2048)")
-	// --url is recognised but not yet implemented. The alpha-4.1.2
-	// auditor (D-005/W-002) observed that `mpm reference add --url`
-	// silently does nothing. The surface has always been filesystem-
-	// only — there's no http fetch code in internal/core/reference_*.
-	// Per the alpha-4.1.2 spec, this is classified FUTURE FEATURE
-	// (preserving the current architecture) and we surface an explicit
-	// error so operators are not silently misled.
-	urlFlag := fs.String("url", "", "DEPRECATED stub: URL ingestion is not yet supported (alpha-4.1.2 D-005). Downloads the URL into a local file first, then re-run.")
-	// Defect O (2026-09-13 acceptance): the pre-fix parser required
-	// --tag/--reason/--chunk-size BEFORE the file path. The documented
-	// shape (`mpm reference add <file> [--tag tags]`) puts the flags
-	// AFTER the positional, which Go's stdlib `flag` silently drops.
-	// The pre-fix code rejected the documented shape with a "flag
-	// must come BEFORE the file path" error — the help and the
-	// parser were inconsistent. The fix uses reorderFlagsBeforePositionals
-	// (the same helper `mpm add` uses) so the canonical
-	// `mpm reference add <file> --tag foo` syntax works.
+	chunkSize := fs.Int("chunk-size", 0, "Target chunk size in tokens (default: 512, range: 64-2048)")
+	urlFlag := fs.String("url", "", "Ingest this http(s) URL instead of a local file")
+
+	// Defect O (2026-09-13 acceptance): the flag package requires flags
+	// before positionals, but the documented shape puts them after. Use
+	// the shared reorderer so `mpm reference add <file> --tag foo` works.
 	cleaned := reorderFlagsBeforePositionals(args[1:],
-		"--tag", "--reason", "--chunk-size", "--json")
+		"--tag", "--reason", "--title", "--url", "--chunk-size", "--json")
 	if err := fs.Parse(cleaned); err != nil {
 		return 1
 	}
 
-	if *urlFlag != "" {
-		return usererror.Error("--url is reserved for a future release. " +
-			"In the meantime, download the document (curl/wget) and pass the local path to `mpm reference add <file>`. " +
-			"Tracked as alpha-4.1.2 D-005/W-002 FUTURE FEATURE.")
-	}
-
-	if fs.NArg() < 1 {
-		usererror.Usage("mpm reference add <file> [--tag tag1,tag2] [--reason <text>] [--chunk-size <tokens>] [--json]\n" +
-			"  --reason: import reason (why this is being added; seed of the admission justification chain)\n" +
+	source := ""
+	switch {
+	case *urlFlag != "" && fs.NArg() > 0:
+		return usererror.Error("conflicting sources: pass either a local path or --url, not both")
+	case *urlFlag != "":
+		source = *urlFlag
+	case fs.NArg() > 0:
+		source = fs.Arg(0)
+	default:
+		usererror.Usage("mpm reference add <file|url> [--tag tag1,tag2] [--reason <text>] [--title <text>] [--chunk-size <tokens>] [--json]\n" +
+			"  mpm reference add --url <https://...> [--tag ...] [--reason ...]\n" +
+			"  <file|url>: a local document or an http(s) URL (the scheme selects which)\n" +
+			"  --reason: import reason (the seed of the admission justification chain)\n" +
 			"  --chunk-size: target chunk size in tokens (default: 512, range: 64-2048)")
 		return 1
 	}
 
-	filePath := fs.Arg(0)
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		return usererror.Error("File not found: %s", filePath)
-	}
+	return dispatchReferenceIngest(mpminternal.ReferenceIngestRequest{
+		Source:    source,
+		Title:     *title,
+		Tags:      splitCSV(*tag),
+		Reason:    *reason,
+		ChunkSize: *chunkSize,
+	}, *jsonOutput)
+}
 
-	// Size guard: cap reference ingest at 100 MiB so a stray huge file
-	// can't OOM the CLI. The parsed content (text extracted from PDF/
-	// EPUB) is usually a fraction of the raw file size; this is a
-	// defence-in-depth ceiling on the input, not on memory use.
-	const maxRefBytes = 100 << 20 // 100 MiB
-	if info, err := os.Stat(filePath); err == nil && info.Size() > maxRefBytes {
-		return usererror.Error("reference file too large: %d bytes (max %d = 100 MiB)", info.Size(), maxRefBytes)
+// splitCSV splits a comma-separated flag value, trimming blanks.
+func splitCSV(v string) []string {
+	if strings.TrimSpace(v) == "" {
+		return nil
 	}
-
-	// Validate chunk size range (flag.Parse already applied the value)
-	if *chunkSize < 64 || *chunkSize > 2048 {
-		return usererror.Error("--chunk-size must be between 64 and 2048 (got %d)", *chunkSize)
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
 	}
+	return out
+}
 
+// dispatchReferenceIngest runs one ingestion and renders the outcome.
+//
+// Exit code follows the outcome: 0 for imported/updated/unchanged, 1 for
+// duplicate or any error. A duplicate is not success — the caller asked
+// to make a source available and the library could not give it one
+// unambiguous document.
+func dispatchReferenceIngest(req mpminternal.ReferenceIngestRequest, jsonOutput bool) int {
+	dm := getDBConcrete()
+	if dm == nil {
+		return usererror.Error("database not available")
+	}
+	res, err := dm.IngestReference(context.Background(), req)
+	if err != nil {
+		return usererror.Error("%v", err)
+	}
+	if jsonOutput {
+		out, marshalErr := mpminternal.MarshalReferenceResultJSON(res)
+		if marshalErr != nil {
+			return usererror.Error("render result: %v", marshalErr)
+		}
+		fmt.Println(out)
+	} else {
+		renderReferenceIngestResult(res)
+	}
+	if res.Status == mpminternal.ReferenceStatusDuplicate {
+		return usererror.Error("reference %s already exists as %d separate documents; nothing was imported",
+			res.Source, len(res.DuplicateIDs))
+	}
+	return 0
+}
+
+// renderReferenceIngestResult prints the human view of one ingestion.
+func renderReferenceIngestResult(res *mpminternal.ReferenceIngestResult) {
+	switch res.Status {
+	case mpminternal.ReferenceStatusUnchanged:
+		fmt.Printf("Reference unchanged: %s (id=%s, %d chunks, embeddings preserved)\n", res.Title, res.ID, res.TotalChunks)
+	case mpminternal.ReferenceStatusImported:
+		fmt.Printf("Added reference: %s (id=%s)\n", res.Title, res.ID)
+	case mpminternal.ReferenceStatusUpdated:
+		fmt.Printf("Updated reference: %s (id=%s)\n", res.Title, res.ID)
+	default:
+		fmt.Printf("Reference not imported: %s\n", res.Source)
+	}
+	if res.Status != mpminternal.ReferenceStatusUnchanged {
+		fmt.Printf("  source:      %s\n", res.Source)
+		fmt.Printf("  chunks:      %d (%d new, %d changed, %d reused, %d removed)\n",
+			res.TotalChunks, res.ChunksAdded, res.ChunksUpdated, res.ChunksReused, res.ChunksRemoved)
+		fmt.Printf("  embedded:    %d now, %d pending\n", res.Embedded, res.PendingEmbeddings)
+		fmt.Printf("  searchable:  lexical=%t semantic=%t\n", res.LexicalSearchable, res.SemanticSearchable)
+	}
+	for _, n := range res.ExtractionNotes {
+		fmt.Printf("  extracted:   %s\n", n)
+	}
+	for _, w := range res.Warnings {
+		fmt.Printf("  warning:     %s\n", w)
+	}
+}
+
+// handleRefDuplicates reports documents that resolve to the same source
+// identity. Read-only by design: the copies may carry different
+// annotations, import reasons or retrieval history, and only an operator
+// can decide which one is canonical. The output therefore ends with an
+// explicit repair plan rather than performing one.
+func handleRefDuplicates(args []string) int {
+	jsonOutput := false
+	for _, a := range args[1:] {
+		switch a {
+		case "--json":
+			jsonOutput = true
+		case "-h", "--help", "help":
+			_ = printRefHelp()
+			return 0
+		default:
+			return usererror.Error("mpm reference duplicates takes no arguments (got %q)", a)
+		}
+	}
 	dm := getDB()
 	if dm == nil {
 		return 1
 	}
-
-	ext := strings.ToLower(filepath.Ext(filePath))
-	var content string
-	var parseErr error
-
-	switch ext {
-	case ".pdf":
-		content, parseErr = mpminternal.ParsePDF(filePath)
-	case ".epub":
-		content, parseErr = mpminternal.ParseEPUB(filePath)
-	case ".html", ".xhtml":
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			usererror.Error("Error reading file: %v", err)
-			return 1
-		}
-		content = mpminternal.StripHTML(string(data))
-	case ".txt", ".md":
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			usererror.Error("Error reading file: %v", err)
-			return 1
-		}
-		content = string(data)
-	default:
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			usererror.Error("Error reading file: %v", err)
-			return 1
-		}
-		content = string(data)
-	}
-
-	if parseErr != nil {
-		usererror.Error("Error parsing file: %v", parseErr)
-		return 1
-	}
-
-	title := filepath.Base(filePath)
-	sourceType := mpminternal.DetectSourceType(filePath)
-	contentHash := mpminternal.HashContent(content)
-
-	tags := []string{}
-	if *tag != "" {
-		for _, t := range strings.Split(*tag, ",") {
-			t = strings.TrimSpace(t)
-			if t != "" {
-				tags = append(tags, t)
-			}
-		}
-	}
-
-	chunks, err := mpminternal.ChunkByTokens(content, *chunkSize)
+	groups, err := mpminternal.FindReferenceDuplicates(dm.SQLDB())
 	if err != nil {
-		usererror.Error("failed to chunk content: %v", err)
+		return usererror.Error("scan for duplicate references: %v", err)
 	}
-
-	// Look up an existing doc by source path so re-ingest reuses the
-	// doc id; the chunk_hash diff in AddReference then runs against
-	// the existing chunk rows. Without this every CLI ingest would
-	// create a fresh doc (different id) and the diff would never
-	// fire. Short-circuit when the file is byte-identical to last time.
-	existing, err := mpminternal.FindReferenceBySourcePath(dm.SQLDB(), filePath)
-	if err != nil {
-		usererror.Error("Error looking up existing reference: %v", err)
-		return 1
-	}
-	if existing != nil && existing.ContentHash == contentHash {
-		if *jsonOutput {
-			data, _ := json.Marshal(map[string]interface{}{
-				"success":      true,
-				"id":           existing.ID,
-				"title":        existing.Title,
-				"total_chunks": existing.TotalChunks,
-				"unchanged":    true,
-			})
-			fmt.Println(string(data))
-		} else {
-			fmt.Printf("Reference unchanged: %s (id=%s)\n", existing.Title, existing.ID)
-		}
-		return 0
-	}
-
-	now := strconv.FormatInt(time.Now().Unix(), 10)
-	docID := mpminternal.GenerateID()
-	if existing != nil {
-		docID = existing.ID
-	}
-
-	refChunks := make([]mpminternal.ReferenceChunk, len(chunks))
-	for i, c := range chunks {
-		refChunks[i] = mpminternal.ReferenceChunk{
-			ID:         mpminternal.ComputeChunkID(docID, c.Index, contentHash), // stable across re-ingest
-			DocID:      docID,
-			ChunkIndex: c.Index,
-			Section:    c.Section,
-			Content:    c.Content,
-			SourcePath: filePath,
-		}
-	}
-
-	doc := &mpminternal.ReferenceDoc{
-		ID:           docID,
-		Title:        title,
-		SourcePath:   filePath,
-		SourceType:   sourceType,
-		Tags:         tags,
-		ImportReason: *reason,
-		Content:      content,
-		ContentHash:  contentHash,
-		TotalChunks:  len(chunks),
-		LastIndexed:  now,
-		Created:      now,
-	}
-
-	err = dm.AddReference(doc, refChunks)
-	if err != nil {
-		usererror.Error("Error saving reference: %v", err)
-	}
-
-	// Embed chunks in a separate phase after the chunk-insert tx
-	// commits. Embedding failures are best-effort: chunk rows are
-	// already durable, and embedding can be retried via a separate
-	// pass. We surface the count so the operator sees what was
-	// embedded without failing the ingest.
-	embedded, _, _ := dm.EmbedReferenceChunks(context.Background(), doc.ID)
-
-	if *jsonOutput {
-		tagsStr := strings.Join(tags, ",")
+	if jsonOutput {
 		data, _ := json.Marshal(map[string]interface{}{
-			"success":       true,
-			"id":            doc.ID,
-			"title":         doc.Title,
-			"total_chunks":  doc.TotalChunks,
-			"embedded":      embedded,
-			"tags":          tagsStr,
-			"import_reason": doc.ImportReason,
+			"success":    true,
+			"duplicates": groups,
+			"count":      len(groups),
 		})
 		fmt.Println(string(data))
-	} else {
-		if doc.ImportReason != "" {
-			fmt.Printf("Added reference: %s (%d chunks, %d embedded)\n  reason: %s\n", title, len(chunks), embedded, doc.ImportReason)
-		} else {
-			fmt.Printf("Added reference: %s (%d chunks, %d embedded)\n", title, len(chunks), embedded)
+		return 0
+	}
+	if len(groups) == 0 {
+		render.Plain(os.Stdout, "No duplicate reference documents found.")
+		return 0
+	}
+	noun := "identities"
+	if len(groups) == 1 {
+		noun = "identity"
+	}
+	fmt.Printf("%d source %s with more than one stored document:\n\n", len(groups), noun)
+	for _, g := range groups {
+		fmt.Printf("  %s [%s, %s]\n", g.Identity, g.Kind, g.Confidence)
+		if g.Note != "" {
+			fmt.Printf("     %s\n", g.Note)
 		}
+		for _, d := range g.Docs {
+			marker := " "
+			if d.Preferred {
+				marker = "*"
+			}
+			fmt.Printf("   %s %s  %-42s %2d chunk(s)  last indexed %s\n",
+				marker, d.ID, truncateForDisplay(d.Title, 42), d.TotalChunks, d.LastIndexed)
+			if d.ImportReason != "" {
+				fmt.Printf("       reason: %s\n", d.ImportReason)
+			}
+		}
+		fmt.Println()
+	}
+	render.Plain(os.Stdout, "Repair plan (nothing was changed):")
+	render.Plain(os.Stdout, "  1. Review each group; `mpm reference show <id>` prints the stored text and chunks.")
+	render.Plain(os.Stdout, "  2. Keep the copy marked * (richest/ newest) — or keep several if they genuinely differ.")
+	render.Plain(os.Stdout, "  3. Delete the others: `mpm reference shred <id>` (permanent; no restore).")
+	render.Plain(os.Stdout, "  4. Re-run `mpm reference add <source>`; it now lands on the kept document.")
+	render.BlankLine(os.Stdout)
+	render.Hint(os.Stdout, "New imports are deduplicated by canonical source identity, so this set does not grow.")
+	return 0
+}
+
+// handleRefImport ingests a corpus described by a JSON manifest.
+//
+// The manifest is the unit of work: one command, per-document status, and
+// a non-zero exit when any document failed or was ambiguous. Re-running
+// the same manifest is the retry path — unchanged documents report
+// "unchanged" and are not re-fetched or re-embedded.
+func handleRefImport(args []string) int {
+	for _, a := range args[1:] {
+		if a == "-h" || a == "--help" || a == "help" {
+			return printRefHelp()
+		}
+	}
+	fs := flag.NewFlagSet("reference import", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
+	// Same post-positional flag shape as `reference add`: the documented
+	// form puts --json after the manifest path, and the stdlib flag
+	// package stops parsing at the first positional.
+	if err := fs.Parse(reorderFlagsBeforePositionals(args[1:], "--json")); err != nil {
+		return 1
+	}
+	if fs.NArg() < 1 {
+		usererror.Usage("mpm reference import <manifest.json|-> [--json]\n" +
+			"  manifest: {\"documents\": [{\"path\"|\"url\": ..., \"tags\": [...], \"reason\": \"...\"}]}\n" +
+			"  use '-' to read the manifest from stdin")
+		return 1
+	}
+	path := fs.Arg(0)
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(io.LimitReader(os.Stdin, 8<<20))
+	} else {
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			return usererror.Error("manifest not found: %s", path)
+		}
+		if info.Size() > 8<<20 {
+			return usererror.Error("manifest is too large: %d bytes (max 8 MiB)", info.Size())
+		}
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return usererror.Error("read manifest: %v", err)
+	}
+	manifest, err := mpminternal.ParseReferenceManifest(data)
+	if err != nil {
+		return usererror.Error("%v", err)
+	}
+	dm := getDBConcrete()
+	if dm == nil {
+		return usererror.Error("database not available")
+	}
+	res, err := dm.IngestReferenceManifest(context.Background(), manifest)
+	if err != nil {
+		return usererror.Error("%v", err)
+	}
+
+	if *jsonOutput {
+		out, marshalErr := json.Marshal(res)
+		if marshalErr != nil {
+			return usererror.Error("render result: %v", marshalErr)
+		}
+		fmt.Println(string(out))
+	} else {
+		for _, d := range res.Documents {
+			switch d.Status {
+			case "failed":
+				fmt.Printf("  %3d  FAILED    %s\n       %s\n", d.Index+1, d.Source, d.Error)
+			case mpminternal.ReferenceStatusDuplicate:
+				fmt.Printf("  %3d  DUPLICATE %s\n       %d existing documents resolve to this source; nothing imported\n",
+					d.Index+1, d.Source, len(d.Result.DuplicateIDs))
+			default:
+				detail := ""
+				if d.Result != nil {
+					detail = fmt.Sprintf("%s — %d chunks (%d reused), %d pending embeddings",
+						d.Result.Title, d.Result.TotalChunks, d.Result.ChunksReused, d.Result.PendingEmbeddings)
+				}
+				fmt.Printf("  %3d  %-10s %s\n       %s\n", d.Index+1, strings.ToUpper(d.Status), d.Source, detail)
+			}
+			if d.Result != nil {
+				for _, w := range d.Result.Warnings {
+					fmt.Printf("       warning: %s\n", w)
+				}
+			}
+		}
+		fmt.Printf("\n%d document(s): %d imported, %d updated, %d unchanged, %d duplicate, %d failed\n",
+			res.Total, res.Imported, res.Updated, res.Unchanged, res.Duplicate, res.Failed)
+	}
+	if !res.OK {
+		return usererror.Error("batch incomplete: %d failed, %d duplicate (re-run the same manifest to retry)",
+			res.Failed, res.Duplicate)
 	}
 	return 0
 }
+
 
 // indexOfFirstPositional returns the index (within args) of the first
 // token that Go's `flag` package treated as a positional argument. Used
@@ -1503,7 +1579,10 @@ func indexOfFirstPositional(args []string, fs *flag.FlagSet) int {
 func handleRefList(args []string) int {
 	fs := flag.NewFlagSet("reference ls", flag.ContinueOnError)
 	jsonOutput := fs.Bool("json", false, "Output JSON for tool integration")
-	if err := fs.Parse(args[1:]); err != nil {
+	// Same post-positional flag shape as `reference add`: the documented
+	// form puts --json after the manifest path, and the stdlib flag
+	// package stops parsing at the first positional.
+	if err := fs.Parse(reorderFlagsBeforePositionals(args[1:], "--json")); err != nil {
 		return 1
 	}
 	*jsonOutput, _ = ExtractJSONFlag(args[1:])
@@ -1868,7 +1947,7 @@ func handleRefSearch(args []string) int {
 
 	if len(results) == 0 {
 		if jsonOutput {
-			data, _ := json.Marshal(map[string]interface{}{"query": query, "results": []interface{}{}, "message": "No results found"})
+			data, _ := json.Marshal(map[string]interface{}{"query": query, "results": []interface{}{}, "count": 0, "message": "No results found"})
 			fmt.Println(string(data))
 		} else {
 			fmt.Printf("No results found for: %s\n", query)
@@ -1877,13 +1956,19 @@ func handleRefSearch(args []string) int {
 	}
 
 	if jsonOutput {
+		// Field set matches the MCP mpm_references search result so an
+		// agent gets the same provenance from either surface.
 		type chunkResult struct {
+			ChunkID          string  `json:"chunk_id"`
 			DocID            string  `json:"doc_id"`
 			DocTitle         string  `json:"doc_title"`
-			ChunkID          string  `json:"chunk_id"`
 			ChunkIndex       int     `json:"chunk_index"`
+			Section          string  `json:"section"`
 			Content          string  `json:"content"`
 			Source           string  `json:"source"`
+			SourcePath       string  `json:"source_path"`
+			SourceKind       string  `json:"source_kind"`
+			SourceType       string  `json:"source_type"`
 			FTS5Score        float64 `json:"fts5_score"`
 			VectorSimilarity float64 `json:"vector_similarity"`
 			CombinedScore    float64 `json:"combined_score"`
@@ -1892,12 +1977,16 @@ func handleRefSearch(args []string) int {
 		out := make([]chunkResult, 0, len(results))
 		for _, r := range results {
 			out = append(out, chunkResult{
+				ChunkID:          r.ID,
 				DocID:            r.DocID,
 				DocTitle:         r.DocTitle,
-				ChunkID:          r.ID,
 				ChunkIndex:       r.ChunkIndex,
+				Section:          r.Section,
 				Content:          r.Content,
 				Source:           r.Source,
+				SourcePath:       r.SourcePath,
+				SourceKind:       r.SourceKind,
+				SourceType:       r.SourceType,
 				FTS5Score:        r.FTS5Score,
 				VectorSimilarity: r.VectorSimilarity,
 				CombinedScore:    r.CombinedScore,
@@ -1921,9 +2010,13 @@ func handleRefSearch(args []string) int {
 		}
 		idStr := r.ID
 		docIDStr := r.DocID
-		fmt.Printf("[%s chunk %d] source=%s chunk %s (ref %s)\n",
-			r.DocTitle, r.ChunkIndex, r.Source,
-			idStr[:min(len(idStr), 8)], docIDStr[:min(len(docIDStr), 16)])
+		fmt.Printf("[%s chunk %d] %s via %s\n", r.DocTitle, r.ChunkIndex, r.Source, idStr[:min(len(idStr), 8)])
+		if r.Section != "" {
+			fmt.Printf("    section: %s\n", r.Section)
+		}
+		if r.SourcePath != "" {
+			fmt.Printf("    source:  %s (%s)\n", r.SourcePath, r.SourceKind)
+		}
 		fmt.Printf("    fts5=%.3f vector=%.3f combined=%.3f relevance=%.3f\n",
 			r.FTS5Score, r.VectorSimilarity, r.CombinedScore, r.RelevanceScore)
 		fmt.Printf("    %s\n\n       → mpm reference show %s\n\n", content, docIDStr)
@@ -2356,6 +2449,10 @@ func handleRef(args []string) int {
 		return handleRefUsed(args)
 	case "admit":
 		return handleRefAdmit(args)
+	case "duplicates":
+		return handleRefDuplicates(args)
+	case "import":
+		return handleRefImport(args)
 	default:
 		_ = printRefHelp()
 		return 1
@@ -2374,16 +2471,22 @@ func printRefHelp() int {
 	render.Plain(os.Stdout, "  mpm reference <subcommand> [args]")
 	render.BlankLine(os.Stdout)
 	render.Section(os.Stdout, "Subcommands")
-	render.Label(os.Stdout, "add <file> [--tag tags]", "ingest a document")
+	render.Label(os.Stdout, "add <file|url> [--tag tags]", "ingest a document (local file or http(s) URL)")
+	render.Label(os.Stdout, "import <manifest.json|->", "ingest a corpus from a manifest; per-document status")
 	render.Label(os.Stdout, "ls", "list all references")
 	render.Label(os.Stdout, "show <id>", "show reference with chunks")
 	render.Label(os.Stdout, "search <query>", "search reference content")
 	render.Label(os.Stdout, "used", "show most-retrieved references")
 	render.Label(os.Stdout, "interactions", "show recent retrieval events")
 	render.Label(os.Stdout, "admit [--limit N] [--dry-run]", "run admission function on candidates")
+	render.Label(os.Stdout, "duplicates [--json]", "report documents that resolve to the same source (read-only)")
 	render.Label(os.Stdout, "shred <id>", "delete a reference")
 	render.BlankLine(os.Stdout)
+	render.Label(os.Stdout, "add", "idempotent: re-importing unchanged content reuses the document id and its chunks")
+	render.BlankLine(os.Stdout)
 	render.Hint(os.Stdout, "Supported formats: .txt, .md, .html, .epub, .pdf")
+	render.Hint(os.Stdout, "URLs are fetched over http(s) only; loopback, private and link-local destinations are refused.")
+	render.Hint(os.Stdout, "Search before importing: `mpm reference search \"<topic>\"` shows what is already available.")
 	return 0
 }
 

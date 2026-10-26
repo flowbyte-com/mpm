@@ -62,20 +62,25 @@ func handleGC(args []string) int {
 	}(); shredNegative {
 		negMemories, err := dm.GetNegativeWeightMemories()
 		if err != nil {
-			usererror.Error("%v", err)
+			// Fail closed. The previous shape printed the error and then
+			// fell through to "No negative-weight memories found." with
+			// exit 0 — a failed READ reported as a successful empty scan.
+			usererror.Error("gc --shred-negative: could not read negative-weight memories: %v", err)
+			return 1
 		}
 		if len(negMemories) == 0 {
 			fmt.Println("No negative-weight memories found.")
 			return 0
 		}
 		fmt.Printf("Found %d negative-weight memories:\n\n", len(negMemories))
-		var shredded int
+		var shredded, shredFailures int
 		for _, m := range negMemories {
 			id, _ := m["id"].(string)
 			weight, _ := m["weight"].(int)
 			theory, err := dm.GetProvenTheoryForMemory(id)
 			if err != nil {
 				usererror.Warn("error checking theory: %s: %v", id, err)
+				shredFailures++
 				continue
 			}
 			if theory != nil {
@@ -84,6 +89,7 @@ func handleGC(args []string) int {
 				} else {
 					if err := dm.ShredMemory(id); err != nil {
 						usererror.Warn("shred error: %s: %v", id, err)
+						shredFailures++
 						continue
 					}
 					fmt.Printf("  [%s] weight=%d → SHREDDED (proven theory %s)\n", id, weight, theory["id"])
@@ -95,6 +101,12 @@ func handleGC(args []string) int {
 		}
 		if !dryRun && shredded > 0 {
 			fmt.Printf("\nShredded %d memories with proven theories.\n", shredded)
+		}
+		if shredFailures > 0 {
+			// A partially-failed destructive sweep must not read as a
+			// clean one.
+			usererror.Error("gc --shred-negative: %d memory/memories could NOT be shredded; the store is NOT fully swept", shredFailures)
+			return 1
 		}
 		return 0
 	}
@@ -183,9 +195,18 @@ func handleGC(args []string) int {
 			AND deleted_at < strftime('%s','now', '-30 days')
 		`)
 		if err != nil {
-			usererror.Error("%v", err)
+			// Fail closed. The previous shape logged the error, then
+			// called RowsAffected on the nil Result (panic) and, if that
+			// had not panicked, printed "Purged 0" and exited 0 — a
+			// failed destructive sweep reported as a successful no-op.
+			usererror.Error("gc --purge: delete failed, nothing was purged: %v", err)
+			return 1
 		}
-		purged, _ := result.RowsAffected()
+		purged, err := result.RowsAffected()
+		if err != nil {
+			usererror.Error("gc --purge: cannot confirm the purge row count: %v", err)
+			return 1
+		}
 		fmt.Printf("Purged %d old deleted memories\n", purged)
 		return 0
 	}
@@ -194,12 +215,24 @@ func handleGC(args []string) int {
 		fmt.Println("Dry run: --purge would hard-delete soft-deleted memories older than 30 days.")
 	}
 
+	// A failed maintenance sweep must be visible in the RUN, not only in a
+	// structured log line: `mpm ops gc` exiting 0 while a requested sweep
+	// did nothing reads as "the store is clean" when it is not. The sweep
+	// is not fatal to the rest of the pass (decay and review still run),
+	// but it is counted and the command exits non-zero.
+	maintenanceFailures := 0
+	pruneFailed := func(what string, err error) {
+		maintenanceFailures++
+		slog.Warn(what+" prune failed", "error", err.Error())
+		usererror.Error("gc: %s prune failed: %v", what, err)
+	}
+
 	// Audit log retention sweep — drop entries older than 30 days. Wired
 	// into the GC cycle rather than a separate cron because GC is the
 	// canonical cleanup pass and we want one place to tune retention.
 	if !dryRun {
 		if pruned, err := dm.PruneAuditLog(30); err != nil {
-			slog.Warn("audit prune failed", "error", err.Error(), "retention_days", 30)
+			pruneFailed("audit log", err)
 		} else if pruned > 0 {
 			fmt.Printf("Pruned %d audit log entries older than 30 days\n", pruned)
 		}
@@ -209,7 +242,7 @@ func handleGC(args []string) int {
 		// retention window. The next session may need to look back more than
 		// 30 days to understand a long-running project.
 		if pruned, err := dm.PruneHandoffs(90); err != nil {
-			slog.Warn("handoff prune failed", "error", err.Error(), "retention_days", 90)
+			pruneFailed("session handoffs", err)
 		} else if pruned > 0 {
 			fmt.Printf("Pruned %d session handoffs older than 90 days\n", pruned)
 		}
@@ -218,7 +251,7 @@ func handleGC(args []string) int {
 		// (materialized/failed) accumulate monotonically with every
 		// shred event; without a sweep the table grows forever.
 		if pruned, err := dm.PruneCascadeOutbox(30); err != nil {
-			slog.Warn("cascade outbox prune failed", "error", err.Error(), "retention_days", 30)
+			pruneFailed("cascade outbox", err)
 		} else if pruned > 0 {
 			fmt.Printf("Pruned %d terminal cascade intents older than 30 days\n", pruned)
 		}
@@ -250,7 +283,12 @@ func handleGC(args []string) int {
 			runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE deleted_at IS NULL
 		`, int64(monotonicNow.Sub(mpminternal.GCProcessStart()).Seconds())); err != nil {
-			usererror.Warn("handleGC: runtime accrual failed, continuing: %v", err)
+			// The runtime accrual is the INPUT to the whole decay
+			// computation. If it fails, the weights computed below are
+			// derived from stale accumulators — a maintenance sweep that
+			// did not do what it was asked. Count it like any other
+			// failed sweep rather than continuing silently.
+			pruneFailed("runtime accrual", err)
 		}
 	}
 
@@ -260,7 +298,12 @@ func handleGC(args []string) int {
 		FROM memories WHERE deleted_at IS NULL
 	`)
 	if err != nil {
-		usererror.Error("%v", err)
+		// Fail closed. The previous shape printed the error and fell
+		// through to `defer rows.Close()` on a nil *sql.Rows — a nil
+		// pointer dereference, i.e. a panic in the middle of the
+		// maintenance pass.
+		usererror.Error("gc: could not read the memory set: %v", err)
+		return 1
 	}
 	defer rows.Close()
 
@@ -369,10 +412,15 @@ func handleGC(args []string) int {
 			}
 			if batchErr != nil {
 				tx.Rollback()
-				usererror.Error("batch update failed, rolled back: %v", batchErr)
+				// The weight-decay batch IS the maintenance pass. A
+				// rolled-back batch means no weight changed at all, so it
+				// must be counted like any other failed sweep — the
+				// previous shape printed the error and let the command
+				// exit 0.
+				pruneFailed("weight decay batch update", batchErr)
 			} else if err := tx.Commit(); err != nil {
 				tx.Rollback()
-				usererror.Error("batch commit failed, rolled back: %v", err)
+				pruneFailed("weight decay batch commit", err)
 			}
 		}
 	}
@@ -380,17 +428,46 @@ func handleGC(args []string) int {
 	// --review mode: soft-delete all dead and zombie memories (LTM already excluded above).
 	// Also catches existing zombies (weight <= 0 from previous GC runs that were never cleaned).
 	if review && !dryRun {
+		softDeleted, softDeleteFailures := 0, 0
 		for _, m := range deadMemories {
-			if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?`, m["id"]); err != nil {
-				slog.Warn("gc soft-delete failed", "id", m["id"], "error", err)
+			id, _ := m["id"].(string)
+			res, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL`, id)
+			if err != nil {
+				softDeleteFailures++
+				slog.Warn("gc soft-delete failed", "id", id, "error", err)
+				usererror.Error("gc --review: soft-delete %s failed: %v", id, err)
+				continue
+			}
+			// Count what actually changed, not what was attempted. A
+			// row that was already tombstoned (deleted concurrently)
+			// matches no row under the `deleted_at IS NULL` guard and is
+			// neither a soft-delete nor a failure.
+			n, err := res.RowsAffected()
+			if err != nil {
+				softDeleteFailures++
+				slog.Warn("gc soft-delete row count unavailable", "id", id, "error", err)
+				usererror.Error("gc --review: cannot confirm the soft-delete of %s: %v", id, err)
+				continue
+			}
+			if n > 0 {
+				softDeleted++
 			}
 		}
 		// Clean any lingering zombies not caught by this pass
 		if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE weight <= 0 AND is_long_term = 0 AND deleted_at IS NULL`); err != nil {
+			softDeleteFailures++
 			slog.Warn("gc zombie cleanup failed", "error", err)
+			usererror.Error("gc --review: zombie cleanup failed: %v", err)
 		}
-		if len(deadMemories) > 0 {
-			fmt.Printf("Soft-deleted %d dead memories\n", len(deadMemories))
+		// Report what actually happened. The previous shape printed
+		// len(deadMemories) — the number ATTEMPTED — so a failed update
+		// was reported as a successful soft delete.
+		if softDeleted > 0 {
+			fmt.Printf("Soft-deleted %d dead memories\n", softDeleted)
+		}
+		if softDeleteFailures > 0 {
+			fmt.Printf("%d dead memories could NOT be soft-deleted\n", softDeleteFailures)
+			maintenanceFailures += softDeleteFailures
 		}
 	}
 
@@ -402,18 +479,20 @@ func handleGC(args []string) int {
 	// Output
 	if jsonOutput {
 		type gcResult struct {
-			Scanned      int                      `json:"scanned"`
-			Updated      int                      `json:"updated"`
-			DeadCount    int                      `json:"dead_count"`
-			DeadMemories []map[string]interface{} `json:"dead_memories,omitempty"`
-			DryRun       bool                     `json:"dry_run"`
+			Scanned             int                      `json:"scanned"`
+			Updated             int                      `json:"updated"`
+			DeadCount           int                      `json:"dead_count"`
+			DeadMemories        []map[string]interface{} `json:"dead_memories,omitempty"`
+			DryRun              bool                     `json:"dry_run"`
+			MaintenanceFailures int                      `json:"maintenance_failures"`
 		}
 		result := gcResult{
-			Scanned:      scanned,
-			Updated:      updated,
-			DeadCount:    len(deadMemories),
-			DeadMemories: deadMemories,
-			DryRun:       dryRun,
+			Scanned:             scanned,
+			Updated:             updated,
+			DeadCount:           len(deadMemories),
+			DeadMemories:        deadMemories,
+			DryRun:              dryRun,
+			MaintenanceFailures: maintenanceFailures,
 		}
 		data, _ := json.Marshal(result)
 		fmt.Println(string(data))
@@ -429,6 +508,10 @@ func handleGC(args []string) int {
 				fmt.Printf("  [%s] %s\n", m["id"].(string)[:8], content)
 			}
 		}
+	}
+	if maintenanceFailures > 0 {
+		usererror.Error("gc: %d maintenance operation(s) failed; the store is NOT fully swept (see messages above)", maintenanceFailures)
+		return 1
 	}
 	return 0
 }

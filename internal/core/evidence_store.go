@@ -19,6 +19,29 @@ import (
 // values must match the CHECK constraint on confidence_history.trigger.
 type RecomputeReason string
 
+// ProvenanceOnlySourceGroup is the source_group used by evidence rows
+// that exist to record WHO/WHAT wrote an artifact, not to support the
+// claim's truth.
+//
+// The memory_source_evidence_ai trigger writes one such row for every
+// memory INSERT, attributed to the write's metadata source/model. Saving
+// a claim does not make it more likely to be correct, and an artifact
+// must not be able to raise its own confidence by existing — so these
+// rows are deliberately excluded from every confidence computation.
+// They remain queryable, which is the point: source attribution stays
+// available without being mistaken for independent confirmation.
+//
+// This is a semantic boundary, not a schema one: evidence validation
+// (docs/SPEC.md `source_group` vocabulary) does not accept
+// 'auto_capture' from callers, so only the trigger produces it.
+const ProvenanceOnlySourceGroup = "auto_capture"
+
+// scoringEvidenceClause is the shared SQL predicate both confidence
+// loaders append so the stored value, the recompute and the reasoning
+// trace all see the same evidence set. Keeping it in one place is what
+// prevents the stored/derived divergence this predicate fixes.
+const scoringEvidenceClause = ` AND source_group <> '` + ProvenanceOnlySourceGroup + `'`
+
 const (
 	RecomputeReasonEvidenceAdded   RecomputeReason = "evidence_added"
 	RecomputeReasonEvidenceUpdated RecomputeReason = "evidence_updated"
@@ -489,8 +512,8 @@ func loadEvidenceForRecompute(node DBNode, artifactID, artifactType string, now 
 	rows, err := node.QueryTracked(`
 		SELECT strength, independence_factor, created_at, expires_at
 		FROM evidence
-		WHERE artifact_id = ? AND artifact_type = ?
-	`, artifactID, artifactType)
+		WHERE artifact_id = ? AND artifact_type = ?`+scoringEvidenceClause,
+		artifactID, artifactType)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -710,7 +733,7 @@ func ExplainConfidence(dm *DatabaseManager, artifactID, artifactType string) (*C
 	rows, err := dm.QueryTracked(`
 		SELECT id, type, source_group, created_by, strength, independence_factor, created_at, expires_at
 		FROM evidence
-		WHERE artifact_id = ? AND artifact_type = ?
+		WHERE artifact_id = ? AND artifact_type = ?`+scoringEvidenceClause+`
 		ORDER BY created_at ASC
 	`, artifactID, artifactType)
 	if err != nil {

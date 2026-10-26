@@ -474,18 +474,19 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 				"Persistent memory: save/query/show facts across "+
 					"sessions. Required: action. Use projection=summary "+
 					"(default, ~256 chars + pointer) for recall; "+
-					"projection=full for unabridged content. shred is "+
-					"permanent. Call mpm_help show mpm_memory for the "+
-					"full schema."),
+					"projection=full for unabridged content. delete is "+
+					"reversible via restore; permanent shredding is "+
+					"operator-only (CLI) and is refused here. Call "+
+					"mpm_help show mpm_memory for the full schema."),
 			mcp.WithString("action",
 				mcp.Required(),
-				mcp.Description("save | query | show | shred | reinforce | weaken | snooze | patch | promote."),
+				mcp.Description("save | query | show | delete | restore | reinforce | weaken | snooze | patch | promote."),
 			),
 			mcp.WithObject("params",
 				mcp.Description(
 					"save: fact (string). query: query (string), "+
 						"projection (summary|full), limit (number). "+
-						"show: id (string). shred: id (string). "+
+						"show: id (string). delete/restore: id (string). "+
 						"reinforce/weaken: id (string), delta (number). "+
 						"See mpm_help."),
 			),

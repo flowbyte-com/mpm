@@ -757,15 +757,14 @@ func handleMemoryShow(args []string) int {
 }
 
 func handleMemoryShred(args []string) int {
-	// Alpha cleanup (2026-09-10): `mpm memory shred` now matches the
-	// `mpm_memory action=shred` contract — irreversible hard delete with
-	// broad sweep across topic_memberships, memory_revisions,
-	// evidence, confidence_history, etc. The pre-fix path called
-	// `store.DeleteMemory` (a soft delete via deleted_at), which left
-	// the row recoverable in the substrate — a silent contract drift
-	// between "shred" and the user's mental model of permanent
-	// destruction. For reversible (soft) deletion, use
-	// `mpm memory delete <id>` instead.
+	// Alpha cleanup (2026-09-10): `mpm memory shred` is the operator
+	// verb for irreversible hard delete with broad sweep across
+	// topic_memberships, memory_revisions, evidence, confidence_history,
+	// etc. It calls the same DatabaseManager primitive
+	// (ShredMemoryWithCascade) as before; what changed is who may reach
+	// it. The agent-facing `mpm_memory action=shred` is refused at the
+	// handler boundary (operator-only), so this CLI verb is now the only
+	// path. For reversible (soft) deletion, use `mpm memory delete <id>`.
 	if len(args) == 0 {
 		return respond("", "Usage: mpm memory shred <id>\n\nPermanent, irreversible destruction. Use `mpm memory delete <id>` for reversible soft delete.\n", 1)
 	}
@@ -784,11 +783,26 @@ func handleMemoryShred(args []string) int {
 		return respond("", fmt.Sprintf("Failed to shred memory: %v\n", err), 1)
 	}
 
+	// Forensic log — irrecoverable hard delete. The agent-facing tool
+	// action no longer reaches the delete (shred is operator-only; see
+	// tools.operatorOnlyShredError), so this operator verb is the one
+	// place the audit entry can be written.
+	auditCtx := mpminternal.AuditContext{"memory_id": id}
+	if theoryID, _ := result["theory_purged"].(string); theoryID != "" {
+		auditCtx["theory_purged"] = theoryID
+	}
+	dm.LogAudit(
+		mpminternal.AuditInfo, "epistemology",
+		fmt.Sprintf("shred_memory %s", id), "",
+		auditCtx,
+	)
+
 	output := fmt.Sprintf("⚡ Memory shredded: %s\n", id)
 	if theoryID, _ := result["theory_purged"].(string); theoryID != "" {
 		output += fmt.Sprintf("  theory purged: %s\n", theoryID)
 	}
-	if sweep, ok := result["sweep"].(map[string]int64); ok && len(sweep) > 0 {
+	sweep, _ := result["sweep"].(map[string]int64)
+	if len(sweep) > 0 {
 		// Stable ordering so the output is reproducible across runs.
 		tables := make([]string, 0, len(sweep))
 		for t := range sweep {
@@ -805,8 +819,20 @@ func handleMemoryShred(args []string) int {
 	// or the compressed journal history, and it does not overwrite bytes on
 	// the storage medium. An operator who needs those copies gone has to
 	// act on them separately, and they can only do that if told they exist.
+	//
+	// Imported staging rows are the exception on the removed side: when the
+	// promotion recorded which memory a raw_memories row became, the sweep
+	// deletes that row by identity. Rows that predate the linkage cannot be
+	// attributed and stay — deleting them by text match would destroy
+	// unrelated imports — so their survival is disclosed rather than hidden.
+	if n := sweep["raw_memories"]; n > 0 {
+		output += fmt.Sprintf("  removed imported staging row(s) linked to this memory: %d\n", n)
+	}
 	output += "  removed from the active substrate and its defined cascades\n"
 	output += "  still present by design:\n"
+	output += "    - imported staging rows that predate the source linkage\n"
+	output += "      (raw_memories.memory_id IS NULL): they cannot be attributed to this\n"
+	output += "      memory without guessing by text, so they are left untouched\n"
 	output += "    - audit-log rows and any database backup taken before now\n"
 	output += "    - compressed mirror.jsonl / watchdog.jsonl history\n"
 	output += "      (remove those log copies with: mpm ops logs purge --scope mirror --force)\n"

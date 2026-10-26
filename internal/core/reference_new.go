@@ -29,9 +29,18 @@ import (
 
 // ReferenceDoc represents a reference document in the database
 type ReferenceDoc struct {
-	ID           string   `json:"id"`
-	Title        string   `json:"title"`
-	SourcePath   string   `json:"source_path"`
+	ID string `json:"id"`
+	// Title is the document's own title (extracted for HTML, first
+	// heading for Markdown when available, otherwise the file name).
+	Title string `json:"title"`
+	// SourcePath is the canonical source identity. For local files it is
+	// an absolute, symlink-resolved path; for URLs it is the effective
+	// (post-redirect) URL. Legacy rows may hold a non-canonical path; see
+	// reference_identity.go.
+	SourcePath string `json:"source_path"`
+	// SourceType is the document format: pdf, epub, markdown, text,
+	// json, html, unknown. It describes how the bytes were parsed, not
+	// where they came from.
 	SourceType   string   `json:"source_type"`
 	Tags         []string `json:"tags"`
 	ImportReason string   `json:"import_reason"`
@@ -40,6 +49,27 @@ type ReferenceDoc struct {
 	TotalChunks  int      `json:"total_chunks"`
 	LastIndexed  string   `json:"last_indexed"`
 	Created      string   `json:"created"`
+
+	// SourceKind is "file" or "url" ("" on legacy rows = file).
+	SourceKind string `json:"source_kind,omitempty"`
+	// SourceURL is the effective URL a URL document was retrieved from.
+	// Empty for local files.
+	SourceURL string `json:"source_url,omitempty"`
+	// RequestedURL is the URL the caller asked for, which differs from
+	// SourceURL when redirects were followed.
+	RequestedURL string `json:"requested_url,omitempty"`
+	// FetchedAt is the unix second of the successful retrieval. 0 for
+	// local files and legacy rows.
+	FetchedAt int64 `json:"fetched_at,omitempty"`
+	// HTTPETag / HTTPLastModified are the publisher's validators, stored
+	// so a future freshness check can ask "has this changed?" without
+	// re-downloading the body. Empty when the server sent none.
+	HTTPETag         string `json:"http_etag,omitempty"`
+	HTTPLastModified string `json:"http_last_modified,omitempty"`
+	// Attribution is publisher identity as a JSON object with the keys
+	// site_name, author and license that the source actually provided.
+	// Empty when the document advertised none.
+	Attribution string `json:"attribution,omitempty"`
 }
 
 // ReferenceChunk represents a chunk of a reference document

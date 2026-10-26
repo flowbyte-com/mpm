@@ -713,11 +713,11 @@ the chain edge to the replacement, and the materializer treats the
 original as no longer live. The original row is retained — superseded,
 not deleted.
 
-Do not use `mpm_memory` action `shred` for maintenance. `shred` is a
-permanent hard delete with no restore path; it is right for data that
-should no longer exist, and wrong for knowledge that has been
-corrected. `delete` is the soft, reversible alternative — `restore`
-brings the row back.
+Do not use `mpm memory shred` for maintenance; it is not even reachable
+from the agent tool surface. `shred` is an operator-only permanent hard
+delete with no restore path; it is right for data that should no longer
+exist, and wrong for knowledge that has been corrected. `delete` is the
+soft, reversible alternative — `restore` brings the row back.
 
 **Do not launder history.** A correction that erases the original
 claim, its provenance, or the reasoning for the change leaves a future

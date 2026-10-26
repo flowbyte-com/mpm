@@ -35,7 +35,7 @@ Each Domain Tool dispatches on an `action` enum with free-form
 
 | Domain | Actions |
 |---|---|
-| `mpm_memory` | save, query, shred, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, commit_milestone |
+| `mpm_memory` | save, query, delete, restore, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, commit_milestone |
 | `mpm_handoff` | write, read, list, shred — typed substrate tool on Pi; on hosts using the compact MCP surface (ClaudeCode, Hermes, OpenClaw), the same operation is `mpm_context` action `write_handoff` / `read_handoff` |
 | `mpm_scratchpad` | flush, read, discard, promote |
 | `mpm_wakes` | schedule, check, check_pending_event, list, digest, upsert_task, list_tasks, delete_task |

@@ -147,7 +147,12 @@ var BaseTables = []string{
 		reviewer_prompt TEXT,
 		expires_at    REAL,
 		import_batch  TEXT,
-		updated_at    REAL NOT NULL
+		updated_at    REAL NOT NULL,
+		-- memory_id links this staging row to the memory it was promoted
+		-- into. NULL for rows that were never promoted and for rows that
+		-- predate this column (2026-10-25); the shred path uses the link
+		-- to remove the staged copy, and never matches on text.
+		memory_id     TEXT
 	);`,
 
 	// External database cursors - tracks sync position with external dbs
@@ -757,7 +762,24 @@ var ReferenceTables = []string{
 		content TEXT NOT NULL DEFAULT '', content_hash TEXT,
 		import_reason TEXT,
 		total_chunks INTEGER DEFAULT 0, last_indexed INTEGER,
-		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+		created_at INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		-- Source identity and fetch provenance (added for URL ingestion).
+		-- file_path holds the canonical identity: an absolute,
+		-- symlink-resolved path for files, the effective URL for URLs.
+		-- source_kind distinguishes the two; NULL means a legacy row,
+		-- which is always a file. The remaining columns record what
+		-- happened at retrieval time — they cannot be recomputed later,
+		-- so they are stored rather than derived.
+		source_kind TEXT,
+		source_url TEXT,
+		requested_url TEXT,
+		fetched_at INTEGER,
+		http_etag TEXT,
+		http_last_modified TEXT,
+		-- Publisher attribution (JSON: site_name, author, license). Kept
+		-- as metadata so a retrieved chunk can be cited without the
+		-- attribution text polluting the chunk body.
+		attribution TEXT
 	);`,
 
 	// Reference chunks table - stores chunked content of reference documents.
@@ -983,6 +1005,10 @@ var CommonIndexes = []string{
 	// Supports the confidence-decay pass's due-artifact page query
 	// (ordered by the watermark, bounded by LIMIT).
 	`CREATE INDEX IF NOT EXISTS idx_memories_confidence_checked ON memories(confidence_checked_at);`,
+	// Supports the shred path's removal of promoted staging rows by
+	// identity (never by text match). Added by #88; preserved here
+	// across this branch's rebase onto main.
+	`CREATE INDEX IF NOT EXISTS idx_raw_memories_memory ON raw_memories(memory_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_revisions_timeline ON memory_revisions(memory_id, created_at);`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_retrieval_priority ON memories(retrieval_priority);`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);`,
@@ -1441,6 +1467,12 @@ var SafeMigrations = [][3]string{
 	{"sessions", "metadata", "JSON"},
 	{"raw_memories", "next_retry", "TEXT"},
 	{"raw_memories", "attempt", "INTEGER DEFAULT 0"},
+	// 2026-10-25: durable source linkage from a promoted memory back to
+	// the staging row it came from. Imported rows kept their full text
+	// forever after promotion; without a link, a shred could not remove
+	// the staged copy without guessing by text. See
+	// PromoteRawMemoryBatch and shredBroadSweep.
+	{"raw_memories", "memory_id", "TEXT"},
 	{"memories", "retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
 	{"memories", "importance", "REAL NOT NULL DEFAULT 0.5"},
 	{"memories", "confidence", "REAL NOT NULL DEFAULT 0.8"},
@@ -1461,6 +1493,16 @@ var SafeMigrations = [][3]string{
 	// migrateLessonsToView, when the table doesn't exist yet, so it's
 	// deliberately absent here.
 	{"reference_docs", "import_reason", "TEXT"},
+	// Reference source identity + fetch provenance (URL ingestion).
+	// file_path/source_type predate this; a NULL source_kind means the row
+	// was written before canonical identity existed and is a local file.
+	{"reference_docs", "source_kind", "TEXT"},
+	{"reference_docs", "source_url", "TEXT"},
+	{"reference_docs", "requested_url", "TEXT"},
+	{"reference_docs", "fetched_at", "INTEGER"},
+	{"reference_docs", "http_etag", "TEXT"},
+	{"reference_docs", "http_last_modified", "TEXT"},
+	{"reference_docs", "attribution", "TEXT"},
 	// Explicit, user-supplied external reference URL on an evidence row.
 	// Nullable so every pre-existing row and every pre-existing caller —
 	// none of which supply the field — stays valid. `evidence` is also in the
