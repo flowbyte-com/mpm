@@ -27,14 +27,14 @@ var Registry = []Tool{
 Use when: you learn something worth remembering (a fact, a lesson, a decision context); you need to find something you previously stored; or you want to mark something as long-term and suppress it from casual retrieval; you want to commit a milestone against a long-term goal (commit_milestone).
 Do not use when: the information is ephemeral working context (use mpm_scratchpad instead); you are making a commitment or tracking work (use mpm_work instead).
 For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.
-Lifecycle asymmetry: shred is permanent (hard delete — the row is removed with cascade cleanup of dependent topic_memberships, memory_revisions, and confidence_history). There is no restore path. This is deliberately different from mpm_skills.delete, which is soft and recoverable via save with force=true.
 Lifecycle asymmetry: delete is soft (the row stays with deleted_at stamped; action=restore brings it back). Reversible via action=restore.
+Lifecycle asymmetry: permanent shredding (hard delete with cascade cleanup of dependent topic_memberships, memory_revisions, confidence_history — and a linked theory) is operator-only and is NOT an agent action. It is refused at the execution point for MCP and 'mpm call'; no payload field unlocks it. An operator can shred permanently with 'mpm memory shred <id>'. Agents retire memories with action=delete and undo with action=restore.
 Lifecycle asymmetry: weaken uses an internal floor-protected path (the weight cannot drop below the safety floor of 1). reinforce and weaken accept the same delta shape but their internal mechanics differ; the user-visible contract is symmetric.`,
 
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["save","query","show","shred","delete","restore","reinforce","weaken","snooze","set_weight","patch","promote","review","synthesize","challenge","restore_challenge","commit_milestone"]},
+				"action": {"type": "string", "enum": ["save","query","show","delete","restore","reinforce","weaken","snooze","set_weight","patch","promote","review","synthesize","challenge","restore_challenge","commit_milestone"]},
 				"params": {
 					"type": "object",
 					"properties": {
@@ -135,11 +135,12 @@ Do not use when: the choice is trivial or easily reversible; you just want to st
 		Description: `Durable lessons from failures, anti-patterns, and hard-won insights.
 Use when: something failed and you want to make sure the system never repeats the same mistake; you encounter an unexpected success and want to record why it worked; you want to tag a memory as a "warning" or "practice" so it surfaces in future relevant contexts.
 Do not use when: you are documenting a decision (mpm_decisions) or forming a testable hypothesis (mpm_theories).
-For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.`,
+For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.
+Lifecycle asymmetry: delete is soft and reversible via action=restore. Permanent shredding (hard delete of the row and its FTS entry) is operator-only and is NOT an agent action: it is refused at the execution point for MCP and 'mpm call', and no payload field unlocks it. An operator can shred permanently with 'mpm lesson shred <id>'.`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["save","search","list","delete","restore","shred"]},
+				"action": {"type": "string", "enum": ["save","search","list","delete","restore"]},
 				"params": {
 					"type": "object",
 					"properties": {
@@ -147,8 +148,8 @@ For broad queries, projection defaults to 'summary' to keep context bounded. Use
 						"type":      {"type": "string", "enum": ["insight","warning","practice"]},
 						"tags":      {"type": "array", "items": {"type": "string"}},
 						"query":     {"type": "string"},
-						"id":        {"type": "string", "description": "Canonical id (used by delete/restore/shred)."},
-						"lesson_id": {"type": "string", "description": "Backward-compat alias for id on delete/restore/shred."},
+						"id":        {"type": "string", "description": "Canonical id (used by delete/restore)."},
+						"lesson_id": {"type": "string", "description": "Backward-compat alias for id on delete/restore."},
 						"projection": {"type": "string", "enum": ["summary", "full"], "default": "summary", "description": "Output detail level. Defaults to summary."}
 					},
 					"additionalProperties": true

@@ -1353,34 +1353,53 @@ func handleInvalidateDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContex
 // quoting and parse text output — neither works reliably across
 // punctuation-heavy memory ids or non-ASCII content.
 
+// ── Irreversible-deletion (shred) authorization boundary ────────────
+//
+// Shred is a hard delete with no restore path. Memory shred is worse
+// than a row delete: ShredMemoryWithCascade also purges a linked
+// theory and sweeps topic memberships, revisions, evidence and
+// confidence history. Lesson shred removes the row from lessons_base
+// and its FTS entry. Both are durable substrate state that an
+// autonomous agent must not be able to destroy on its own judgement.
+//
+// The tool handlers below are the single execution point shared by
+// every agent-facing surface — the native MCP tool, the compact MCP
+// wrapper, `mpm call`, and the adapters layered on top of them — so
+// the refusal lives here, not in a schema or a per-transport guard.
+// Permanent destruction remains available to the operator through the
+// dedicated CLI verbs (`mpm memory shred <id>`, `mpm lesson shred
+// <id>`), which call the DatabaseManager primitives directly.
+//
+// Deliberately NOT a `confirm=true` gate. MPM uses that shape for
+// operator-gated writes (record_global_rule, migrate), but a boolean
+// the caller supplies is not evidence of operator intent: an agent
+// that can call the tool can also set the field. Refusing outright is
+// the only fail-closed shape.
+
+// operatorOnlyShredError is the refusal returned by every
+// agent-accessible hard-delete action. It names what was NOT done, why
+// no payload field can unlock it, the reversible alternative, and the
+// operator's actual path.
+func operatorOnlyShredError(toolName, action, subject, operatorVerb string) error {
+	return fmt.Errorf(
+		"%s action=%s is operator-only: %s is a permanent delete with no restore path, "+
+			"so it is not reachable from the agent tool surface (MCP, `mpm call`, adapters). "+
+			"Nothing was deleted. No payload field — including confirm=true — authorizes it: "+
+			"a value the caller supplies is not operator intent. Use action=delete for a "+
+			"reversible removal (action=restore undoes it). An operator can shred permanently "+
+			"from a terminal with: %s",
+		toolName, action, subject, operatorVerb,
+	)
+}
+
 func handleShredMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, err := requireMemoryID(p)
 	if err != nil {
 		return nil, err
 	}
-
-	result, err := dm.ShredMemoryWithCascade(id)
-	if err != nil {
-		return nil, err
-	}
-	// Forensic log — irrecoverable hard delete. Without this, a
-	// "rogue agent shreds foundational theory" event is invisible
-	// until someone notices the absence of data. AuditInfo is gated
-	// out of cluster detection (see audit.go).
-	if memoryID, _ := result["memory_id"].(string); memoryID != "" {
-		ctx := mpminternal.AuditContext{
-			"memory_id": memoryID,
-		}
-		if tp, ok := result["theory_purged"].(string); ok && tp != "" {
-			ctx["theory_purged"] = tp
-		}
-		dm.LogAudit(
-			mpminternal.AuditInfo, "epistemology",
-			fmt.Sprintf("shred_memory %s", memoryID), "",
-			ctx,
-		)
-	}
-	return result, nil
+	return nil, operatorOnlyShredError(
+		"mpm_memory", "shred", "memory "+id, "mpm memory shred "+id,
+	)
 }
 
 // handleDeleteMemory soft-deletes a memory row (sets deleted_at). Reversible
@@ -6145,6 +6164,10 @@ func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		// real arrays/objects, not stringified blobs (W-013).
 		return handleShowMemory(dm, ac, params)
 	case "shred":
+		// Operator-only irreversible hard delete. The handler refuses
+		// for every agent-facing caller at the execution point; the
+		// operator path is `mpm memory shred <id>`. See
+		// operatorOnlyShredError.
 		return handleShredMemory(dm, ac, params)
 	case "delete":
 		// Alpha cleanup (2026-09-10): explicit soft-delete verb. Reversible
@@ -6187,7 +6210,7 @@ func handleMpmMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 	case "commit_milestone":
 		return handleCommitMilestone(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_memory. Valid actions include save, query, show, shred, delete, restore, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, restore_challenge, commit_milestone", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_memory. Valid actions include save, query, show, delete, restore, reinforce, weaken, snooze, set_weight, patch, promote, review, synthesize, challenge, restore_challenge, commit_milestone", action)
 	}
 }
 
@@ -6497,11 +6520,12 @@ func handleMpmLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		// list/search/get. Idempotent on an already-visible lesson.
 		return handleRestoreLesson(dm, ac, params)
 	case "shred":
-		// Irreversible hard delete. Removes the row from
-		// lessons_base + lessons_fts. No restore path.
+		// Irreversible hard delete. Operator-only: refused for every
+		// agent-facing caller; the operator path is
+		// `mpm lesson shred <id>`. See operatorOnlyShredError.
 		return handleShredLesson(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_lessons. Valid actions include save, search, list, delete, restore, shred", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_lessons. Valid actions include save, search, list, delete, restore", action)
 	}
 }
 
@@ -6541,8 +6565,12 @@ func handleRestoreLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	return map[string]interface{}{"success": true, "id": id, "action": "restore"}, nil
 }
 
-// handleShredLesson implements the irreversible hard-delete action.
-// No restore path. Field vocabulary matches handleDeleteLesson.
+// handleShredLesson is the irreversible hard-delete action. No restore
+// path. Field vocabulary matches handleDeleteLesson.
+//
+// Operator-only: see operatorOnlyShredError. The permanent deletion is
+// performed by `mpm lesson shred <id>`, which calls
+// LessonStore.ShredLesson directly.
 func handleShredLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, _ := p["id"].(string)
 	if id == "" {
@@ -6551,10 +6579,9 @@ func handleShredLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 	if id == "" {
 		return nil, fmt.Errorf("shred lesson: id is required")
 	}
-	if err := dm.ShredLesson(id); err != nil {
-		return nil, fmt.Errorf("shred lesson: %w", err)
-	}
-	return map[string]interface{}{"success": true, "id": id, "action": "shred", "reversible": false}, nil
+	return nil, operatorOnlyShredError(
+		"mpm_lessons", "shred", "lesson "+id, "mpm lesson shred "+id,
+	)
 }
 
 func handleMpmDecisions(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payload map[string]interface{}) (interface{}, error) {

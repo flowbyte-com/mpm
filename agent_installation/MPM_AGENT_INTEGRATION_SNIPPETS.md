@@ -1575,9 +1575,9 @@ in this file's git log.
 |---|---|---|
 | `mpm_handoff` | `write`, `read`, `list`, `shred` | `write` requires `summary`. `state` enum: `clean` `crashed` `interrupted` `force_end`. No `note` parameter. |
 | `mpm_scratchpad` | `flush`, `read`, `discard`, `promote` | — |
-| `mpm_memory` | `save`, `query`, `shred`, `reinforce`, `weaken`, `snooze`, `set_weight`, `patch`, `promote`, `review`, `synthesize`, `challenge`, `commit_milestone` | `query` defaults `projection: "summary"`; full via `projection: "full"` |
+| `mpm_memory` | `save`, `query`, `show`, `delete`, `restore`, `reinforce`, `weaken`, `snooze`, `set_weight`, `patch`, `promote`, `review`, `synthesize`, `challenge`, `restore_challenge`, `commit_milestone` | `query` defaults `projection: "summary"`; full via `projection: "full"`. `delete` is a reversible soft delete; `restore` clears the tombstone. Permanent shredding is operator-only (`mpm memory shred <id>` from a terminal) and is refused on every agent surface — no payload field, including `confirm=true`, unlocks it. |
 | `mpm_decisions` | `record`, `supersede`, `invalidate` | — |
-| `mpm_lessons` | `save`, `search`, `list`, `delete`, `restore`, `shred` | `save` defaults `type` to `"insight"` if absent; valid values: `"insight"`, `"warning"`, `"practice"`; lifecycle: `delete` is reversible soft delete (sets tombstone), `restore` clears the tombstone, `shred` is irreversible hard delete. All three accept canonical `id` (alias: `lesson_id`). |
+| `mpm_lessons` | `save`, `search`, `list`, `delete`, `restore` | `save` defaults `type` to `"insight"` if absent; valid values: `"insight"`, `"warning"`, `"practice"`; lifecycle: `delete` is reversible soft delete (sets tombstone), `restore` clears the tombstone. Permanent shredding is operator-only (`mpm lesson shred <id>`) and is refused on every agent surface. All lifecycle actions accept canonical `id` (alias: `lesson_id`). |
 | `mpm_topics` | `create`, `search`, `link` | — |
 | `mpm_references` | `add`, `read`, `search`, `list` | freshness surfaced as `current` `stale` `version-bound` `historical` `unknown` |
 | `mpm_context` | `read_wake_context`, `read_directives`, `proactive_recall_hint`, `query_global_rules`, `record_global_rule`, `promote_to_global`, `route` | `read_wake_context` accepts `params.projection: "compact"` |

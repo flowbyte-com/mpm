@@ -173,6 +173,12 @@ func TestF0910_LessonRestore_AlreadyVisible_NoOp(t *testing.T) {
 
 // TestF0910_LessonShred_Permanent pins requirement #3: shred is
 // irreversible hard delete. Row is gone; restore fails cleanly.
+//
+// The permanent deletion is operator-only on the agent surface (see
+// operatorOnlyShredError), so this test drives the same
+// DatabaseManager primitive that `mpm lesson shred <id>` calls. The
+// refusal of the agent-facing action is pinned separately in
+// operator_only_shred_regression_test.go.
 func TestF0910_LessonShred_Permanent(t *testing.T) {
 	dm := newTestDMForTools(t)
 	ac := mpminternal.ActiveContext{}
@@ -183,11 +189,8 @@ func TestF0910_LessonShred_Permanent(t *testing.T) {
 	}
 	id, _ := out["id"].(string)
 
-	// Shred via the tool action.
-	if _, err := handleMpmLessons(dm, ac, map[string]interface{}{
-		"action": "shred",
-		"params": map[string]interface{}{"id": id},
-	}); err != nil {
+	// Operator shred primitive (the CLI verb's path).
+	if err := dm.ShredLesson(id); err != nil {
 		t.Fatalf("shred action failed: %v", err)
 	}
 
@@ -275,10 +278,9 @@ func TestF0910_LessonLifecycleIsolation(t *testing.T) {
 		t.Errorf("B must still be visible")
 	}
 
-	// Shred A; B must remain visible AND content searchable.
-	if _, err := handleMpmLessons(dm, ac, map[string]interface{}{
-		"action": "shred", "params": map[string]interface{}{"id": idA},
-	}); err != nil {
+	// Shred A (operator primitive); B must remain visible AND content
+	// searchable.
+	if err := dm.ShredLesson(idA); err != nil {
 		t.Fatalf("shred A: %v", err)
 	}
 	if _, err := dm.GetLesson(idA); err == nil {
@@ -310,10 +312,9 @@ func TestF0910_LessonDeleteThenShred_WorksAsExpected(t *testing.T) {
 	}
 
 	// Shred on a soft-deleted lesson must succeed (the shred path
-	// bypasses the view filter).
-	if _, err := handleMpmLessons(dm, ac, map[string]interface{}{
-		"action": "shred", "params": map[string]interface{}{"id": id},
-	}); err != nil {
+	// bypasses the view filter). Operator primitive: the agent-facing
+	// action is refused — see operator_only_shred_regression_test.go.
+	if err := dm.ShredLesson(id); err != nil {
 		t.Fatalf("shred after soft delete failed: %v", err)
 	}
 
@@ -331,7 +332,10 @@ func TestF0910_LessonDeleteThenShred_WorksAsExpected(t *testing.T) {
 
 // TestF0910_LessonDispatcher_AdvertisesLifecycleActions pins the
 // JSON Schema enum parity lock: the dispatcher's claimed action set
-// must include delete, restore, and shred.
+// must include delete and restore. shred is intentionally NOT
+// advertised — it is operator-only and refused on the agent surface
+// (see operatorOnlyShredError and
+// operator_only_shred_regression_test.go).
 func TestF0910_LessonDispatcher_AdvertisesLifecycleActions(t *testing.T) {
 	dm := newTestDMForTools(t)
 	ac := mpminternal.ActiveContext{}
@@ -340,10 +344,13 @@ func TestF0910_LessonDispatcher_AdvertisesLifecycleActions(t *testing.T) {
 	if err == nil {
 		t.Fatal("bogus action must error")
 	}
-	for _, want := range []string{"delete", "restore", "shred"} {
+	for _, want := range []string{"delete", "restore"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("dispatcher unknown-action error must list %q, got: %v", want, err)
 		}
+	}
+	if strings.Contains(err.Error(), "shred") {
+		t.Errorf("dispatcher must not advertise operator-only action shred, got: %v", err)
 	}
 }
 

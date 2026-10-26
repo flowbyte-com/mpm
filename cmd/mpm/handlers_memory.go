@@ -757,15 +757,14 @@ func handleMemoryShow(args []string) int {
 }
 
 func handleMemoryShred(args []string) int {
-	// Alpha cleanup (2026-09-10): `mpm memory shred` now matches the
-	// `mpm_memory action=shred` contract — irreversible hard delete with
-	// broad sweep across topic_memberships, memory_revisions,
-	// evidence, confidence_history, etc. The pre-fix path called
-	// `store.DeleteMemory` (a soft delete via deleted_at), which left
-	// the row recoverable in the substrate — a silent contract drift
-	// between "shred" and the user's mental model of permanent
-	// destruction. For reversible (soft) deletion, use
-	// `mpm memory delete <id>` instead.
+	// Alpha cleanup (2026-09-10): `mpm memory shred` is the operator
+	// verb for irreversible hard delete with broad sweep across
+	// topic_memberships, memory_revisions, evidence, confidence_history,
+	// etc. It calls the same DatabaseManager primitive
+	// (ShredMemoryWithCascade) as before; what changed is who may reach
+	// it. The agent-facing `mpm_memory action=shred` is refused at the
+	// handler boundary (operator-only), so this CLI verb is now the only
+	// path. For reversible (soft) deletion, use `mpm memory delete <id>`.
 	if len(args) == 0 {
 		return respond("", "Usage: mpm memory shred <id>\n\nPermanent, irreversible destruction. Use `mpm memory delete <id>` for reversible soft delete.\n", 1)
 	}
@@ -783,6 +782,20 @@ func handleMemoryShred(args []string) int {
 	if err != nil {
 		return respond("", fmt.Sprintf("Failed to shred memory: %v\n", err), 1)
 	}
+
+	// Forensic log — irrecoverable hard delete. The agent-facing tool
+	// action no longer reaches the delete (shred is operator-only; see
+	// tools.operatorOnlyShredError), so this operator verb is the one
+	// place the audit entry can be written.
+	auditCtx := mpminternal.AuditContext{"memory_id": id}
+	if theoryID, _ := result["theory_purged"].(string); theoryID != "" {
+		auditCtx["theory_purged"] = theoryID
+	}
+	dm.LogAudit(
+		mpminternal.AuditInfo, "epistemology",
+		fmt.Sprintf("shred_memory %s", id), "",
+		auditCtx,
+	)
 
 	output := fmt.Sprintf("⚡ Memory shredded: %s\n", id)
 	if theoryID, _ := result["theory_purged"].(string); theoryID != "" {

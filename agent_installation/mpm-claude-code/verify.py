@@ -463,8 +463,8 @@ def test_j_shared_substrate(report: Report) -> None:
 def cleanup(memory_id: Optional[str], handoff_target: Optional[tuple[str, str]]) -> None:
     print("\nCleanup")
     if memory_id:
-        resp = mcp_call("mpm_memory", {"action": "shred", "params": {"memory_id": memory_id}})
-        print(f"  shredded memory {memory_id}: success={resp.get('success')}")
+        resp = mcp_call("mpm_memory", {"action": "delete", "params": {"memory_id": memory_id}})
+        print(f"  deleted memory {memory_id} (reversible): success={resp.get('success')}")
     if handoff_target:
         session_id, handoff_id = handoff_target
         if handoff_id:
@@ -486,7 +486,7 @@ def cleanup(memory_id: Optional[str], handoff_target: Optional[tuple[str, str]])
     for m in resp.get("memories") or []:
         mid = m.get("id")
         if mid:
-            sh = mcp_call("mpm_memory", {"action": "shred", "params": {"memory_id": mid}})
+            sh = mcp_call("mpm_memory", {"action": "delete", "params": {"memory_id": mid}})
             if sh.get("success"):
                 swept += 1
     print(f"  swept {swept} leftover test memories")

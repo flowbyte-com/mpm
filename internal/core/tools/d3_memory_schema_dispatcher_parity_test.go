@@ -46,7 +46,12 @@ var mpmMemoryDispatcherActions = []string{
 	"save",
 	"query",
 	"show", // W-003: handleShowMemory
-	"shred",
+	// "shred" is deliberately absent: the action still exists in the
+	// dispatcher so `mpm call` gets an explicit refusal instead of
+	// "unknown action", but it is operator-only (see
+	// operatorOnlyShredError) and therefore MUST NOT be advertised in
+	// the agent-facing schema. The schema enum is the advertised
+	// vocabulary, not the set of strings the dispatcher can name.
 	"reinforce",
 	"weaken",
 	"snooze",
