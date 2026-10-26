@@ -6,6 +6,24 @@ on:
   pull_request:
     branches: [main]
 
+# Superseded-run cancellation.
+#
+# Without this, pushing a new commit to a PR starts a fresh run while the
+# previous one keeps burning runner minutes to a conclusion nobody will
+# read — the previous head's result is obsolete the moment the new one
+# starts. The group is per-workflow and per-ref, so:
+#
+#   * a new push to a PR cancels that PR's in-flight run;
+#   * a new push to main cancels main's in-flight run;
+#   * two different PRs never cancel each other.
+#
+# The run that survives is the one for the newest commit, and it executes
+# every check the workflow defines — nothing is skipped, shortened or
+# relaxed. This reclaims wasted minutes; it does not weaken the gate.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Three-job split is intentional. The "gate" job must pass for merge; it
 # covers the build, the migration-relevant test subset, the renderer
 # parity tests, the scripts/tests/ installer-contract suite, the
@@ -226,6 +244,12 @@ jobs:
         run: make test-tools-race
 
       - name: Generate Workflow Step Summary
+        # shell: bash for the same reason as the full-suite sweep: this
+        # step pipes `go tool cover` into `tail`, and without pipefail a
+        # failure of `go tool cover` would be swallowed. This step does
+        # not gate anything by itself, but a step whose failure is
+        # invisible is the habit that hides the ones that do.
+        shell: bash
         run: |
           echo "### 🧪 Go Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
           echo '```text' >> $GITHUB_STEP_SUMMARY
@@ -263,6 +287,25 @@ jobs:
         run: make build
 
       - name: Full test sweep
+        # shell: bash (NOT the default) is REQUIRED here, and it is the
+        # whole point of this step.
+        #
+        # GitHub Actions runs a `run:` step with the default shell
+        # `bash -e {0}` — errexit only, NO pipefail. It applies
+        # `-o pipefail` ONLY when the step opts in with `shell: bash`
+        # (`bash --noprofile --norc -eo pipefail {0}`). Under the default
+        # shell, `go test ... | tee test-output.log` reports the exit
+        # status of `tee`, which is 0, so a FAILING test sweep could not
+        # fail this step: the job read `success` while its own log showed
+        # `FAIL github.com/flowbyte-com/mpm/cmd/mpm`. The sweep was
+        # therefore decorative — it printed a log, it did not gate
+        # anything.
+        #
+        # `shell: bash` restores the gate: pipefail makes the pipeline's
+        # status the failure of any element in it, so a failing `go test`
+        # or a failing `make test-tools` fails the step and the job. This
+        # ADDS verification; it removes none.
+        shell: bash
         run: |
           # -timeout 20m: same reason as the gate job above — cmd/mpm's
           # suite is the dominant cost of this sweep and Go's default
