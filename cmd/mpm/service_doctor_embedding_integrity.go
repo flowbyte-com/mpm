@@ -289,14 +289,6 @@ func collectEmbeddingIntegrity(s *DoctorService) (embeddingIntegrityResult, erro
 	}
 	res.vectorMaxScan = s.dm.GetConfigInt("vector.max_scan", 5000)
 
-	if s == nil || s.dm == nil {
-		return res, fmt.Errorf("no database")
-	}
-
-	if s == nil || s.dm == nil {
-		return res, fmt.Errorf("no database")
-	}
-
 	rows, err := s.dm.QueryTracked(
 		`SELECT embedding, collection, COALESCE(is_prime_directive, 0) FROM memories WHERE deleted_at IS NULL`)
 	if err != nil {
@@ -643,6 +635,26 @@ func (s *DoctorService) checkEmbeddingIntegrity() DoctorCheck {
 				"(different model or no fingerprint); semantic recall ranks only the "+
 				"compatible subset",
 			partialExcluded, res.memoryCompatibleRows+partialExcluded)
+	case res.memoryActiveModel != "" && res.memoryCompatibleRows == 0 && res.memoryIncompatibleRows > 0:
+		// Totally mismatched store: EVERY stored vector was produced by a
+		// different model, so retrieval's compatibility filter excludes
+		// all of them and vector matching returns nothing. Strictly
+		// worse than the partial case above, which still ranks a subset.
+		//
+		// The partial-case rule (compatible > 0 AND excluded > 0) cannot
+		// reach this state, so it used to fall through to the default
+		// verdict — "N stored vectors, all well-formed and uniformly
+		// D-dimensional", PASS — for a store whose semantic recall
+		// cannot match a single row. The vectors ARE well-formed; they
+		// are incomparable with the configured model, which is exactly
+		// what the compatibility filter exists to prevent.
+		check.Status = "WARN"
+		check.Message = fmt.Sprintf(
+			"0 of %d embedded memories are compatible with the active embedding model %q: "+
+				"every one of them was produced by a different model and is excluded from "+
+				"vector matching, so semantic recall cannot use them; re-embed with "+
+				"`mpm ops backfill-embeddings --force-reembed`",
+			res.memoryIncompatibleRows, res.memoryActiveModel)
 	case res.nullVectors > 0 && res.totalVectors == 0:
 		check.Status = "WARN"
 		check.Message = fmt.Sprintf(

@@ -116,6 +116,53 @@ func TestEmbeddingIntegrity_PartialMigrationWarnsWithSplit(t *testing.T) {
 	}
 }
 
+// TestEmbeddingIntegrity_NoCompatibleVectorWarns pins the verdict for
+// the store where EVERY stored vector was produced by a different model.
+//
+// This is the most severe form of the mismatch the split report
+// describes. Retrieval's compatibility filter is
+// `embedding_model = <active model>` (internal/core/db.go,
+// VectorSearch): a vector from a different model is never compared,
+// because two models can share a dimension while producing incomparable
+// vector spaces. When every stored vector is excluded, vector matching
+// returns NOTHING — semantic recall is dead.
+//
+// The verdict rule the split report installed WARNs the PARTIAL case
+// only (`compatible > 0 AND excluded > 0`). A store with zero
+// compatible rows therefore fell through to the default verdict:
+// "N stored vectors, all well-formed and uniformly D-dimensional" —
+// PASS. The vectors really are well-formed; they are simply
+// incomparable with the configured model, which is precisely the
+// condition the compatibility filter exists to prevent. Reporting PASS
+// for a store whose semantic recall cannot match a single row is the
+// silent failure this check exists to expose.
+func TestEmbeddingIntegrity_NoCompatibleVectorWarns(t *testing.T) {
+	svc := newIntegrityFixture(t)
+	withActiveEmbeddingModel(t, "model-a")
+
+	// Every embedded row carries a different model's fingerprint.
+	for i := 0; i < 3; i++ {
+		seedEmbeddedMemory(t, svc, "othermodel", i, `[0.1,0.2,0.3]`, "model-b")
+	}
+
+	check := svc.checkEmbeddingIntegrity()
+	joined := strings.Join(check.Details, "\n")
+
+	if check.Status != "WARN" {
+		t.Errorf("all-incompatible store: status = %s (%s), want WARN; details:\n%s",
+			check.Status, check.Message, joined)
+	}
+	if !strings.Contains(check.Message, "0 of 3") {
+		t.Errorf("message does not state that no stored vector is compatible: %q", check.Message)
+	}
+	if !strings.Contains(check.Message, "model-a") {
+		t.Errorf("message does not name the active model: %q", check.Message)
+	}
+	if !strings.Contains(joined, "backfill-embeddings") {
+		t.Errorf("details must name the remediation:\n%s", joined)
+	}
+}
+
 // TestEmbeddingIntegrity_FullyCompatibleStorePasses guards against
 // over-warning: a fully migrated, fully compatible store must still
 // PASS.
