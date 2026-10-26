@@ -1717,10 +1717,20 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 // PruneOlderThan deletes memories created before the given Unix-epoch seconds.
 // Boundary accepts int64 directly (created_at is INTEGER seconds since epoch).
 // Callers in cmd/mpm pass `time.Now().Add(-duration).Unix()`.
+//
+// Directives are exempt (issue #59), exactly as they are in
+// PruneNeverAccessed below and in both AutoPrunePolicy rules. This is a
+// HARD delete, so a directive removed here is gone for good: the
+// boot-time seed re-creates it from the canonical text and the
+// operator's edits are lost with it. The two flags of the same command
+// (`mpm prune --never-accessed` and `mpm prune --older-than 90d`) must
+// not disagree about the same rows.
 func (dm *DatabaseManager) PruneOlderThan(beforeUnixSec int64) (int, error) {
 	result, err := dm.db.Exec(`
-		DELETE FROM memories WHERE created_at < ? AND deleted_at IS NULL
-	`, beforeUnixSec)
+		DELETE FROM memories
+		WHERE created_at < ? AND deleted_at IS NULL
+		  AND `+DirectiveExclusionClause,
+		beforeUnixSec)
 	if err != nil {
 		return 0, err
 	}
