@@ -1007,6 +1007,12 @@ func shredBroadSweep(tx *sql.Tx, id string) (map[string]int64, error) {
 		{"synth_runs", `DELETE FROM synth_runs WHERE result_memory_id = ?`},
 		{"memory_revisions", `DELETE FROM memory_revisions WHERE memory_id = ?`},
 
+		// Imported staging rows that produced this memory. Matched by the
+		// durable linkage recorded at promotion, never by text: rows that
+		// predate the linkage (memory_id IS NULL) may hold identical text
+		// and must not be destroyed on a guess.
+		{"raw_memories", `DELETE FROM raw_memories WHERE memory_id = ?`},
+
 		// DELIBERATELY NOT swept here:
 		//   epistemic_cascade_outbox — this is the DESTINATION for
 		//     cascade intents, not a victim. The shred above just

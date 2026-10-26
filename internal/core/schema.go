@@ -147,7 +147,12 @@ var BaseTables = []string{
 		reviewer_prompt TEXT,
 		expires_at    REAL,
 		import_batch  TEXT,
-		updated_at    REAL NOT NULL
+		updated_at    REAL NOT NULL,
+		-- memory_id links this staging row to the memory it was promoted
+		-- into. NULL for rows that were never promoted and for rows that
+		-- predate this column (2026-10-25); the shred path uses the link
+		-- to remove the staged copy, and never matches on text.
+		memory_id     TEXT
 	);`,
 
 	// External database cursors - tracks sync position with external dbs
@@ -997,6 +1002,7 @@ var CommonIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_raw_memories_expires ON raw_memories(expires_at);`,
 	`CREATE INDEX IF NOT EXISTS idx_raw_memories_import_batch ON raw_memories(import_batch);`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_memories_source_dedup ON raw_memories(source_db, source_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_raw_memories_memory ON raw_memories(memory_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_revisions_timeline ON memory_revisions(memory_id, created_at);`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_retrieval_priority ON memories(retrieval_priority);`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);`,
@@ -1455,6 +1461,12 @@ var SafeMigrations = [][3]string{
 	{"sessions", "metadata", "JSON"},
 	{"raw_memories", "next_retry", "TEXT"},
 	{"raw_memories", "attempt", "INTEGER DEFAULT 0"},
+	// 2026-10-25: durable source linkage from a promoted memory back to
+	// the staging row it came from. Imported rows kept their full text
+	// forever after promotion; without a link, a shred could not remove
+	// the staged copy without guessing by text. See
+	// PromoteRawMemoryBatch and shredBroadSweep.
+	{"raw_memories", "memory_id", "TEXT"},
 	{"memories", "retrieval_priority", "REAL NOT NULL DEFAULT 0.5"},
 	{"memories", "importance", "REAL NOT NULL DEFAULT 0.5"},
 	{"memories", "confidence", "REAL NOT NULL DEFAULT 0.8"},

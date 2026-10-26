@@ -801,7 +801,8 @@ func handleMemoryShred(args []string) int {
 	if theoryID, _ := result["theory_purged"].(string); theoryID != "" {
 		output += fmt.Sprintf("  theory purged: %s\n", theoryID)
 	}
-	if sweep, ok := result["sweep"].(map[string]int64); ok && len(sweep) > 0 {
+	sweep, _ := result["sweep"].(map[string]int64)
+	if len(sweep) > 0 {
 		// Stable ordering so the output is reproducible across runs.
 		tables := make([]string, 0, len(sweep))
 		for t := range sweep {
@@ -818,8 +819,20 @@ func handleMemoryShred(args []string) int {
 	// or the compressed journal history, and it does not overwrite bytes on
 	// the storage medium. An operator who needs those copies gone has to
 	// act on them separately, and they can only do that if told they exist.
+	//
+	// Imported staging rows are the exception on the removed side: when the
+	// promotion recorded which memory a raw_memories row became, the sweep
+	// deletes that row by identity. Rows that predate the linkage cannot be
+	// attributed and stay — deleting them by text match would destroy
+	// unrelated imports — so their survival is disclosed rather than hidden.
+	if n := sweep["raw_memories"]; n > 0 {
+		output += fmt.Sprintf("  removed imported staging row(s) linked to this memory: %d\n", n)
+	}
 	output += "  removed from the active substrate and its defined cascades\n"
 	output += "  still present by design:\n"
+	output += "    - imported staging rows that predate the source linkage\n"
+	output += "      (raw_memories.memory_id IS NULL): they cannot be attributed to this\n"
+	output += "      memory without guessing by text, so they are left untouched\n"
 	output += "    - audit-log rows and any database backup taken before now\n"
 	output += "    - compressed mirror.jsonl / watchdog.jsonl history\n"
 	output += "      (remove those log copies with: mpm ops logs purge --scope mirror --force)\n"

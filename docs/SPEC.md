@@ -644,6 +644,7 @@ The word "secure delete" is therefore not used for any `shred` surface. Two diff
 - Database backups and `mpm backup` dumps, which are separate files shred never opens.
 - The SQLite WAL, and free pages in the main DB file. A deleted row's bytes remain until SQLite reuses the page. MPM issues no `PRAGMA secure_delete`, no `VACUUM`, and no `wal_checkpoint` on any shred path, so removal of the bytes is incidental to later page reuse and maintenance, never a shred guarantee.
 - Filesystem snapshots, and any copy already transcribed into a handoff summary, another memory body, or an operator's own notes.
+- `raw_memories` staging rows that predate the durable source linkage. Promotion records which memory a staging row became (`raw_memories.memory_id`), and a shred deletes exactly that linked row — by identity, never by text matching. Rows imported before the linkage existed carry no `memory_id`, cannot be attributed to this memory, and are deliberately left untouched; the shred report discloses that they may remain.
 
 The distinction that matters operationally: **a shredded object is no longer reachable through MPM and is not restorable — it is not gone from the storage medium.**
 
