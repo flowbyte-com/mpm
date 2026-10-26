@@ -174,6 +174,7 @@ against it simultaneously.
 | `hal9001/r3-integration` | A | `cbe6af7` | pre-existing combined tree — **evidence only**, no worktree |
 | `integration/pre-release-12` | A | `a8c3b60` | **validation checkpoint — evidence only, not a baseline**, no worktree |
 | `chore/mpm-core-gomod-uuid-direct` | A | `1a16e90` | **the one piece of unmerged work found in the whole repository**, preserved onto a branch before its worktree was removed |
+| `dev/session-b-core` | B | `dev/session-b-core` (audit commit, on top of `70deac2`) | Session B audit deliverable — **not merged**. `docs/dev/session-b-audit.md`: M1–M7 acknowledged with no blocking objection (recorded in `~/.mpm-dogfood` as decision `3a987eca2c708fac`); capability audit; minimal-change recommendation; **no schema change requested**. |
 
 ### Post-merge cleanup record — 2026-10-26
 
