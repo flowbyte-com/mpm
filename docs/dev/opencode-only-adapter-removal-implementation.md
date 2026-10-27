@@ -260,6 +260,37 @@ The third row is the important one: it shows the fresh-install suite's
 "nothing else was configured" assertions are **not** vacuously true.
 A reconciler that did nothing at all would fail them.
 
+### 7.3 Two regressions the release gate caught — and what they teach
+
+The gate earned its place twice. Both regressions were invisible to the
+umbrella suite, and both are worth recording because the *shape* of them
+will recur.
+
+**1. The umbrella suite and the per-adapter suite cover different
+directories.** `agent_installation/tests/` and
+`agent_installation/mpm-opencode/tests/` are separate trees, and neither
+runner reaches the other. Rewriting `agent_installation/INSTALL.md` took a
+"14 Domain Tools" statement with it — that statement had lived in the
+**Pi** section, and the test that checks it reads the whole document. The
+umbrella stayed green (452 tests); the per-adapter suite failed.
+
+The rule that follows: after any change to `agent_installation/INSTALL.md`,
+`agent_installation/README.md`,
+`agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md` or
+`mpm_integration_check.md`, run **both** suites. And when a per-host
+document section is removed, the facts it carried must be **re-homed to
+the host that remains**, not deleted with the section.
+
+**2. A statement can live in an unrelated section and satisfy a test that
+appears to be about something else.** That is the same defect seen from
+the other side: the test was right, the document was not. A removal that
+deletes a section can therefore break a test that reads the whole file
+and has nothing to do with the deleted host.
+
+Both regressions were fixed by re-homing the fact to the OpenCode
+section, which is where it belongs now that OpenCode is the only host
+that exposes those tools.
+
 ---
 
 ## 8. What was deliberately NOT done
