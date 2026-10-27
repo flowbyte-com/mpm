@@ -126,6 +126,25 @@ func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, 
 	return dm.ProposeTheoryWithExtras(hypothesis, validationCriteria, dependencies, sourceIDs, tags, nil)
 }
 
+// ProposeTheoryWithCitations is the TYPED entry point for a proposal.
+//
+// It differs from ProposeTheory in exactly one way: the citations it is
+// given carry a source TYPE. A typed citation must name a type from the
+// canonical vocabulary and the cited id must resolve AS THAT TYPE; a
+// citation that does not is REJECTED and — because the proposal and its
+// citations are written in one transaction — leaves no partial proposal
+// record behind (no theory row, no dependency patch, no citation row).
+//
+// A citation whose Type is empty is a LEGACY citation and behaves exactly
+// as the historical source_ids path behaved: type auto-resolved, not
+// validated. Callers that pass no typed citations therefore keep today's
+// behaviour unchanged.
+//
+// See citation.go for the full contract.
+func (dm *DatabaseManager) ProposeTheoryWithCitations(hypothesis, validationCriteria string, dependencies []string, citations []Citation, tags []string) (map[string]interface{}, error) {
+	return dm.proposeTheory(hypothesis, validationCriteria, dependencies, citations, tags, nil)
+}
+
 // ProposeTheoryWithExtras extends ProposeTheory with an optional map of
 // additional top-level metadata fields. Used by the cascade materializer
 // to store cascade metadata (cascade=true, cascade_version, dead_artifact_id,
@@ -133,7 +152,22 @@ func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, 
 // filter and read cascade fields directly without parsing nested blobs.
 // cascadeFields is only appended; it never overwrites the standard fields
 // (status, validation_criteria, dependencies).
+//
+// Its source_ids argument is the LEGACY (untyped, unvalidated) citation
+// path and is unchanged. The cascade materializer cites artifacts it has
+// just read, so it has no reason to take the typed path.
 func (dm *DatabaseManager) ProposeTheoryWithExtras(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string, cascadeFields map[string]interface{}) (map[string]interface{}, error) {
+	return dm.proposeTheory(hypothesis, validationCriteria, dependencies, legacyCitations(sourceIDs), tags, cascadeFields)
+}
+
+// proposeTheory is the single write path for a proposal. Every public entry
+// point delegates here, so the artifact insert, the dependency patch and the
+// citation loop can never drift apart.
+//
+// The citation loop runs INSIDE the transaction: a citation that cannot be
+// resolved aborts the whole transaction, and no partial proposal record
+// survives.
+func (dm *DatabaseManager) proposeTheory(hypothesis, validationCriteria string, dependencies []string, citations []Citation, tags []string, cascadeFields map[string]interface{}) (map[string]interface{}, error) {
 	if tags == nil {
 		tags = []string{}
 	}
@@ -174,13 +208,24 @@ func (dm *DatabaseManager) ProposeTheoryWithExtras(hypothesis, validationCriteri
 				return fmt.Errorf("persist dependencies: %w", err)
 			}
 		}
-		// Persist source_ids as typed provenance citations so the
+		// Persist the citations as typed provenance citations so the
 		// cascade materializer can discover dependency edges during
-		// invalidation. Event id is the theory's own id — this is the
-		// "explicit decision/time citation" case in the design spec
-		// (vs. retrieval-time citations whose event_id is the wake id).
-		if err := dm.recordSourceCitationsNode(node, sourceIDs, id, "theory"); err != nil {
-			return fmt.Errorf("persist theory source_ids: %w", err)
+		// invalidation, and so a reader can tell WHAT the proposal
+		// rests on.
+		//
+		// A LEGACY citation (empty Type) records the historical shape
+		// exactly: source_type left empty for recordProvenanceNode to
+		// auto-resolve, and the event id is the theory's own id — the
+		// "explicit decision/time citation" case in the design spec (vs.
+		// retrieval-time citations whose event_id is the wake id).
+		//
+		// A TYPED citation records the declared type verbatim and uses
+		// the CITED id as the event id, which makes the citation
+		// self-describing and gives the unique key
+		// (source_id, downstream_id, event_id) per-citation granularity
+		// — so re-submitting the same proposal is idempotent.
+		if err := dm.recordCitationsNode(node, citations, id, "theory"); err != nil {
+			return fmt.Errorf("persist theory citations: %w", err)
 		}
 		memID = id
 		return nil
@@ -673,24 +718,80 @@ func (dm *DatabaseManager) InvalidateDecision(decisionID, reason string) (map[st
 // artifact itself).
 //
 // Empty / nil sourceIDs is a clean no-op (no rows to write).
+//
+// This is the LEGACY path: the cited ids are untyped and unvalidated. It
+// is retained unchanged for callers that do not supply the optional typed
+// citation field — see recordCitationsNode for the typed path.
 func (dm *DatabaseManager) recordSourceCitationsNode(node DBNode, sourceIDs []string, downstreamID, downstreamType string) error {
 	if len(sourceIDs) == 0 {
 		return nil
 	}
+	return dm.recordCitationsNode(node, legacyCitations(sourceIDs), downstreamID, downstreamType)
+}
+
+// recordCitationsNode writes the citation rows for a downstream artifact.
+//
+// Two behaviours, chosen by the citation's Type:
+//
+//   - Type == "" (LEGACY): recorded exactly as the historical source_ids
+//     path recorded it. The source type is left empty and
+//     recordProvenanceNode resolves it against the artifact tables,
+//     falling back to "memory" when the id is not an artifact. The event
+//     id is the DOWNSTREAM id.
+//
+//   - Type != "" (TYPED): the type must be in the canonical vocabulary and
+//     the cited id must resolve AS THAT TYPE. The row records the declared
+//     type verbatim and uses the CITED id as the event id.
+//
+// A typed citation that fails either check returns an error, which aborts
+// the caller's transaction: the proposal is rejected and no partial
+// proposal record survives.
+//
+// A legacy citation is never rejected — that is what keeps callers that do
+// not supply the optional typed field behaving exactly as before.
+//
+// The DBNode parameter lets the caller run the citation writes inside an
+// active transaction, so the resolution and the write share one snapshot.
+func (dm *DatabaseManager) recordCitationsNode(node DBNode, citations []Citation, downstreamID, downstreamType string) error {
+	if len(citations) == 0 {
+		return nil
+	}
 	if downstreamID == "" {
-		return fmt.Errorf("recordSourceCitations: downstream_id is empty")
+		return fmt.Errorf("recordCitations: downstream_id is empty")
 	}
 	if downstreamType == "" {
-		return fmt.Errorf("recordSourceCitations: downstream_type is empty")
+		return fmt.Errorf("recordCitations: downstream_type is empty")
 	}
-	for _, src := range sourceIDs {
-		if src == "" {
+	for _, c := range citations {
+		if c.ID == "" {
 			// Skip empties rather than fail — the source_ids JSON
 			// sometimes carries a trailing empty from upstream
 			// parsers and the user's intent is "ignore blanks".
 			continue
 		}
-		if err := dm.recordProvenanceNode(node, src, "", downstreamID, downstreamType, downstreamID, ""); err != nil {
+		if c.Type == "" {
+			// LEGACY: exactly the historical behaviour.
+			if err := dm.recordProvenanceNode(node, c.ID, "", downstreamID, downstreamType, downstreamID, ""); err != nil {
+				return err
+			}
+			continue
+		}
+		// TYPED: the declared type must be known, and the cited id must
+		// resolve AS THAT TYPE. Both are checked inside the caller's
+		// transaction, so a citation that cannot be resolved cannot be
+		// written.
+		if !ValidCitationSourceType(c.Type) {
+			return fmt.Errorf("unknown citation source type %q for citation %q (valid: %s)",
+				c.Type, c.ID, strings.Join(citationSourceTypes(), ", "))
+		}
+		resolved, err := citationSourceExists(node, c.ID, c.Type)
+		if err != nil {
+			return err
+		}
+		if !resolved {
+			return fmt.Errorf("citation source %q does not resolve as type %q", c.ID, c.Type)
+		}
+		if err := dm.recordProvenanceNode(node, c.ID, c.Type, downstreamID, downstreamType, c.ID, ""); err != nil {
 			return err
 		}
 	}

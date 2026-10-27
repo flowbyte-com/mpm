@@ -97,12 +97,30 @@ func HelpActions() []string {
 // toolInputSchema decodes a tool's registered JSON input schema into a
 // JSON object.
 //
-// The registry's schema is the authority: it is the same object the
-// runtime dispatcher validates an incoming payload against, and the same
-// object the `mpm call` path accepts. Discovery therefore returns that
-// object verbatim rather than a second, hand-written summary of it — a
-// summary would drift from the schema that actually decides whether a
-// call is legal.
+// The registry's schema is the tool's PUBLISHED CONTRACT: it is what an MCP
+// client receives as the tool's input schema, and it is what this discovery
+// surface returns. Discovery therefore returns that object verbatim rather
+// than a second, hand-written summary of it — a summary would drift from
+// the contract the client is shown.
+//
+// A correction to an earlier version of this comment, which claimed the
+// schema is "the same object the runtime dispatcher validates an incoming
+// payload against". That was wrong, and it is worth being precise here
+// because the distinction decides where a rule belongs:
+//
+//   - There is NO JSON-schema validation in MPM's Go code. Neither the
+//     `mpm call` dispatcher nor the runtime dispatcher validates a payload
+//     against the registered schema, and the MCP server does not either —
+//     mcp-go's input-schema validation is opt-in via
+//     server.WithInputSchemaValidation, which the server does not set, and
+//     mcp.NewToolWithRawSchema (the form this server registers with)
+//     bypasses the structured-schema helpers entirely.
+//   - So the schema is DISCOVERY, not enforcement. A rule that must hold
+//     belongs in the handler or the core, where it is transport-independent.
+//
+// A caller that trusts the published schema to be enforced would be wrong.
+// The registry schema tells an agent what the parameters ARE; the handler
+// and the core decide what is ACCEPTED.
 //
 // It is NOT the native compact MCP wrapper's schema. The compact
 // wrappers publish deliberately simplified input schemas and may expose

@@ -291,6 +291,12 @@ type CoreDB interface {
 	// ─── Epistemology ────────────────────────────────────────────────
 	ProposeTheory(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string) (map[string]interface{}, error)
 	ProposeTheoryWithExtras(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string, cascadeFields map[string]interface{}) (map[string]interface{}, error)
+	// ProposeTheoryWithCitations is the TYPED proposal entry point: each
+	// citation carries a source type, and a citation that does not
+	// resolve AS THAT TYPE rejects the proposal. ProposeTheory and
+	// ProposeTheoryWithExtras remain the LEGACY untyped path and are
+	// unchanged.
+	ProposeTheoryWithCitations(hypothesis, validationCriteria string, dependencies []string, citations []Citation, tags []string) (map[string]interface{}, error)
 	ResolveTheory(theoryID, conclusion, newStatus string) (map[string]interface{}, error)
 	ResolveArbitrationTheory(theoryID, winnerID, conclusion string) (map[string]interface{}, error)
 	ChallengeMemoryWithTheory(memoryID, evidence string) (map[string]interface{}, error)
