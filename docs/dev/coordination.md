@@ -546,6 +546,65 @@ fails it.
 
 **No deployment.** The live runtime is untouched.
 
+### The red release gate on the post-#137 head — 2026-10-27 (Session A)
+
+Main run `40564010549` (head `9406936`, the #137 squash) was **red**: the
+release gate failed in the OpenCode TypeScript suite, `TS: 46 passing tests`
+against a floor of 15, with every lifecycle-events test failing on
+
+```
+The requested module './event-envelope.js' does not provide an export named 'ADAPTER_SOURCE'
+```
+
+**It is a data race, not a source regression.** The identical tree passed on
+the previous main (`3abfdda`, run `40550339159`), and #137 changed nothing
+under `agent_installation/mpm-opencode/src/` or `tests/`.
+
+**The cause, measured.** Three test files each ran a full `tsc` build into the
+SAME `dist/` directory — `test_lifecycle_events.test.ts` and
+`test_wake_context.test.ts` via the local compiler, and
+`test_resolve_mpm_binary.test.ts` via `npx tsc` — while `node --test` runs
+test files in **parallel processes**. Two compilers writing one output
+directory is a race, and `tsc` truncates an output file before rewriting it, so
+a reader that catches a file mid-rewrite sees a **zero-byte file**, which is a
+*valid* module with *no* exports. The parse succeeds; the missing export is
+then reported by the importer — so the error names a TypeScript symbol and
+says nothing about the race.
+
+Measured during a single `tsc` run: `dist/event-envelope.js` observed at
+**0, 16384, 20480 and 23039** bytes. The CI failure reproduced deterministically
+by truncating the file to zero bytes and importing its importer:
+
+```
+SyntaxError: The requested module './event-envelope.js' does not provide an export named 'ADAPTER_SOURCE'
+```
+
+— byte-for-byte the CI message.
+
+**The fix.** The gate builds the adapter payload once, before any test file
+runs, using the same pinned local `tsc`; the tests only READ `dist/`. The
+`before` hooks that built it are gone (all three).
+
+**The non-vacuity is demonstrated, not asserted:**
+
+| Mutation | Result |
+|---|---|
+| re-add a self-build to a test file | the pin fails, naming the offender |
+| delete the payload build from the recipe | the pin fails |
+| move the payload build after `node --test` | the pin fails |
+| drop the empty-`dist/` FATAL | the pin fails |
+
+**The behavioural proof:** the suite now passes 89/89 with `dist/` made
+**read-only** — which was impossible while the tests built it.
+
+A second, unrelated local-only failure was found and cleared: the retired
+adapter directories (`mpm-claude-code`, `mpm-hermes`, `mpm-memory-openclaw`,
+`mpm-pi`) survived #137's removal as **gitignored `__pycache__` and
+`.pytest_cache` leftovers**, and their presence made
+`test_agent_adapters_python_list_matches_the_adapters_on_disk` fail locally.
+A clean CI checkout never saw them, so this was never a CI failure; the
+leftovers are gone.
+
 ## 6. Cross-session communication protocol
 
 1. **The ledger is the channel of record.** A session updates its own rows in

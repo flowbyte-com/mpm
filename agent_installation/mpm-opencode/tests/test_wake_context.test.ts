@@ -37,7 +37,6 @@
 
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -71,19 +70,27 @@ let extractWakeContextText: (payload: unknown) => string;
 let createWakeContextInjector: (deps: any) => any;
 
 before(async () => {
-  // The compiled module must exist before import. The Makefile gate compiles
-  // tests, not src, so build dist here — same pattern as
-  // test_resolve_mpm_binary.test.ts.
-  const bin = path.join(ADAPTER_DIR, "node_modules", ".bin", "tsc");
-  const r = existsSync(bin)
-    ? spawnSync(bin, [], { cwd: ADAPTER_DIR, encoding: "utf8" })
-    : spawnSync("npx", ["tsc"], { cwd: ADAPTER_DIR, encoding: "utf8" });
-  assert.equal(
-    r.status,
-    0,
-    `tsc build failed (status=${r.status})\nstdout=${r.stdout || ""}\nstderr=${r.stderr || ""}`,
+  // The compiled module must exist before import. The adapter payload
+  // (dist/) is built ONCE, by `make test-agent-adapters`, BEFORE any
+  // test file runs.
+  //
+  // It used to be built HERE — and again in test_lifecycle_events.test.ts
+  // — by each test file's own `before` hook, both writing into the SAME
+  // dist/ directory, while `node --test` runs test files in parallel
+  // processes. Two compilers writing one output directory is a data
+  // race: a reader that catches a file mid-rewrite (tsc truncates
+  // before it writes) sees a VALID module with no exports, and the
+  // failure names a TypeScript symbol instead of the race.
+  //
+  // The build belongs to the gate, which owns the order. This hook
+  // only READS dist/.
+  assert.ok(
+    existsSync(DIST_MODULE),
+    `missing compiled module: ${DIST_MODULE} — the adapter payload (dist/) is built ` +
+      `once by 'make test-agent-adapters' (or by 'npm run build' in ${ADAPTER_DIR}). ` +
+      `The test files must NOT build it themselves: two test files building into the ` +
+      `same directory race, and the failure names a symbol rather than the race.`,
   );
-  assert.ok(existsSync(DIST_MODULE), `missing compiled module: ${DIST_MODULE}`);
 
   const mod = await import(pathToFileURL(DIST_MODULE).href);
   extractWakeContextText = mod.extractWakeContextText;

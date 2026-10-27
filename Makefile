@@ -1177,6 +1177,31 @@ test-agent-adapters:
 	     echo "[test-agent-adapters] FATAL: $$d TypeScript compile failed." >&2; \
 	     exit 1; \
 	   fi; \
+	   # The adapter's OWN PAYLOAD (dist/) is built HERE, once, before \
+	   # any test file runs. It used to be built by the test files \
+	   # themselves — two of them, each running a full `tsc` build \
+	   # into the SAME dist/ directory — while `node --test` runs \
+	   # test files in PARALLEL processes. Two compilers writing one \
+	   # output directory is a data race, and the failure it produces \
+	   # is silent and misleading: a reader that catches a file \
+	   # mid-rewrite (tsc truncates before it writes) sees a VALID \
+	   # module with no exports, which surfaces as \
+	   #   "The requested module './event-envelope.js' does not \
+	   #    provide an export named 'ADAPTER_SOURCE'" \
+	   # — an error that names a TypeScript symbol rather than the \
+	   # race that caused it. The build belongs to the gate, which \
+	   # owns the order; the tests only READ dist/. \
+	   printf '[test-agent-adapters] %s: building the adapter payload (dist/) via local tsc...\n' "$$d" >&2; \
+	   if ! (cd "agent_installation/$$d" && "$$tsc" -p tsconfig.json 2>&1); then \
+	     echo "[test-agent-adapters] FATAL: $$d adapter payload compile failed." >&2; \
+	     exit 1; \
+	   fi; \
+	   if [ ! -d "agent_installation/$$d/dist" ] || [ -z "$$(ls -A "agent_installation/$$d/dist" 2>/dev/null)" ]; then \
+	     echo "[test-agent-adapters] FATAL: $$d compiled no adapter payload into dist/." >&2; \
+	     echo "  The TS suite imports the compiled adapter modules from dist/." >&2; \
+	     echo "  An empty dist/ would make every one of those imports fail." >&2; \
+	     exit 1; \
+	   fi; \
 	   js_files=$$(cd "agent_installation/$$d" && ls tests-build/*.test.js 2>/dev/null | sort); \
 	   if [ -z "$$js_files" ]; then \
 	     echo "[test-agent-adapters] FATAL: $$d compiled no .test.js files under tests-build/." >&2; \
