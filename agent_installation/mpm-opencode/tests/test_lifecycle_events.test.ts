@@ -13,7 +13,8 @@
 
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -745,11 +746,11 @@ test("36: the iterator is consumed and bounded cancellation stops it", async () 
   assert.equal(observer.counters().host_events_seen, 1);
 
   const t0 = Date.now();
-  const counters = await observer.stop({ timeoutMs: 300 });
+  const snapshot = await observer.stop({ timeoutMs: 300 });
   const elapsed = Date.now() - t0;
   assert.ok(elapsed < 2000, `stop must be bounded, took ${elapsed}ms`);
   assert.equal(sawAbort, true, "the signal the stream received was aborted");
-  assert.equal(counters.stream_errors, 0, "an aborted stream is not an error");
+  assert.equal(snapshot.counters.stream_errors, 0, "an aborted stream is not an error");
 });
 
 test("37: a throwing stream is counted, not propagated", async () => {
@@ -778,7 +779,7 @@ test("38: stop() is idempotent and returns stable counters", async () => {
   observer.start();
   const a = await observer.stop({ timeoutMs: 100 });
   const b = await observer.stop({ timeoutMs: 100 });
-  assert.equal(a.host_events_seen, b.host_events_seen);
+  assert.equal(a.counters.host_events_seen, b.counters.host_events_seen);
 });
 
 // ---------------------------------------------------------------------------
@@ -861,10 +862,10 @@ test("43: stop() settles even when the stream never reacts to abort", async () =
     await new Promise((r) => setTimeout(r, 5));
   }
   const t0 = Date.now();
-  const counters = await observer.stop({ timeoutMs: 150 });
+  const snapshot = await observer.stop({ timeoutMs: 150 });
   const elapsed = Date.now() - t0;
   assert.ok(elapsed < 1500, `stop must resolve despite a stuck stream, took ${elapsed}ms`);
-  assert.equal(counters.host_events_seen, 1);
+  assert.equal(snapshot.counters.host_events_seen, 1);
 });
 
 test("42: drainOnce processes everything currently buffered, in order", async () => {
@@ -888,4 +889,561 @@ test("42: drainOnce processes everything currently buffered, in order", async ()
     ["tool.outcome", "tool.outcome", "tool.outcome", "tool.outcome"],
   );
   assert.equal(observer.counters().delivered, 4);
+});
+
+// ---------------------------------------------------------------------------
+// Delivery accounting (the 2026-10-27 correction)
+// ---------------------------------------------------------------------------
+//
+// THE REPORTED DEFECT.
+//
+// Session A's isolated P4/P5 end-to-end run recorded:
+//
+//   core:   10 lifecycle events durably stored
+//   audit:  10 successful event_ingest rows
+//   client: enqueued=10, delivered=9
+//
+// The server stored TEN. The client reported NINE. The question these
+// tests answer is the only question that matters: was the tenth event
+// LOST, or was it IN FLIGHT and uncounted?
+//
+// It was IN FLIGHT. The observer delivers SERIALLY — one envelope at a
+// time — so exactly one delivery can be outstanding, and the old
+// counters had no bucket for it: a snapshot taken in that window showed
+// `enqueued=10 delivered=9`, and the outstanding delivery was
+// indistinguishable from a dropped event.
+//
+// WHAT IS PINNED HERE.
+//
+//   * every enqueued envelope is in exactly ONE bucket — delivered,
+//     failed, evicted by the bound, abandoned at teardown, still queued,
+//     or in flight — and the buckets sum to `enqueued`;
+//   * a delivery requires a VALID RECEIPT for THIS envelope; a transport
+//     attempt is never a delivery;
+//   * `duplicates` is a SUBSET of `delivered`, not an extra bucket;
+//   * the reading written SYNCHRONOUSLY at teardown — the only one that
+//     survives a host exit — is truthful;
+//   * an acknowledged delivery is on record even when the final reading
+//     is lost to an interrupted teardown.
+//
+// WHAT IS NOT CLAIMED.
+//
+// The host event stream is volatile and delivery is best-effort. Nothing
+// here claims exactly-once delivery: MPM's ingest endpoint performs the
+// durable deduplication, not the adapter.
+
+/** A temporary directory for a diagnostic dump. */
+function dumpDir(): string {
+  return mkdtempSync(path.join(tmpdir(), "mpm-lifecycle-"));
+}
+
+/** The rows of a diagnostic dump, in order. */
+function readDump(p: string): any[] {
+  if (!existsSync(p)) return [];
+  return readFileSync(p, "utf8")
+    .split("\n")
+    .filter((l) => l.trim() !== "")
+    .map((l) => JSON.parse(l));
+}
+
+/** Wait until a predicate holds, or fail loudly. */
+async function waitFor(predicate: () => boolean, label: string, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((r) => setTimeout(r, 1));
+  }
+}
+
+/**
+ * A transport whose every delivery is HELD until the test releases it.
+ *
+ * The gate is what makes the in-flight window deterministic: a timer
+ * would make the test a race, and a race cannot prove anything about a
+ * window that lasts microseconds.
+ */
+function gatedTransport() {
+  const gates: Array<(receipt: any) => void> = [];
+  const attempts: string[] = [];
+  const transport = {
+    mode: "mpm_system" as const,
+    attempts,
+    async deliver(envelope: any) {
+      attempts.push(envelope.event_id);
+      return new Promise((resolve) => {
+        gates.push((receipt: any) =>
+          resolve({
+            ok: true,
+            receipt: {
+              event_id: envelope.event_id,
+              ingested_at_ms: 1,
+              duplicate: false,
+              ...receipt,
+            },
+          }),
+        );
+      });
+    },
+  };
+  /** release every held delivery */
+  const releaseAll = (receipt: any = {}) => {
+    while (gates.length > 0) gates.shift()!(receipt);
+  };
+  return { transport, gates, releaseAll };
+}
+
+/** An observer over a given transport, with optional overrides. */
+function makeObserver(transport: any, over: any = {}) {
+  return sub.createLifecycleObserver({
+    subscribe: () => ({ async *[Symbol.asyncIterator]() {} }),
+    transport,
+    mapping: mappingCtx(),
+    ...over,
+  });
+}
+
+/** The balance of a snapshot read from a diagnostic dump row. */
+function dumpBalance(row: any): any {
+  return sub.accountingBalance({ counters: row.counters, state: row.state });
+}
+
+test("44: a successful delivery is counted only with a valid receipt, and the accounting closes", async () => {
+  const transport = countingTransport((e: any) => ({
+    ok: true,
+    receipt: { event_id: e.event_id, ingested_at_ms: 1, duplicate: false },
+  }));
+  const observer = makeObserver(transport);
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_ok"));
+  await observer.drainOnce();
+
+  const snap = observer.snapshot();
+  assert.equal(snap.counters.delivered, 1, "a valid receipt is a delivery");
+  assert.equal(snap.counters.duplicates, 0);
+  assert.equal(snap.counters.delivery_attempts, 1, "one attempt, one delivery");
+  assert.equal(snap.state.queued, 0);
+  assert.equal(snap.state.in_flight, 0);
+  const balance = sub.accountingBalance(snap);
+  assert.equal(balance.balanced, true, `accounting must close: ${JSON.stringify(balance)}`);
+  assert.equal(balance.accounted, 1);
+});
+
+test("45: a duplicate acknowledgement IS a delivery, and duplicates are a subset of delivered", async () => {
+  const transport = countingTransport((e: any) => ({
+    ok: true,
+    receipt: { event_id: e.event_id, ingested_at_ms: 1, duplicate: true },
+  }));
+  const observer = makeObserver(transport);
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_dup"));
+  await observer.drainOnce();
+
+  const snap = observer.snapshot();
+  assert.equal(snap.counters.delivered, 1, "a duplicate receipt is still a delivery");
+  assert.equal(snap.counters.duplicates, 1);
+  assert.ok(snap.counters.duplicates <= snap.counters.delivered, "duplicates ⊆ delivered");
+  const balance = sub.accountingBalance(snap);
+  assert.equal(balance.balanced, true, `accounting must close: ${JSON.stringify(balance)}`);
+  assert.equal(balance.accounted, 1, "a duplicate must not be counted a second time");
+});
+
+test("46: an explicit server rejection is counted as rejected, never as a delivery", async () => {
+  const transport = countingTransport(() => ({ ok: false, reason: "rejected" }));
+  const observer = makeObserver(transport);
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_rej"));
+  await observer.drainOnce();
+
+  const snap = observer.snapshot();
+  assert.equal(snap.counters.rejected, 1);
+  assert.equal(snap.counters.delivered, 0, "a rejection is not a delivery");
+  assert.equal(snap.counters.unavailable, 0, "a rejection is not an outage");
+  const balance = sub.accountingBalance(snap);
+  assert.equal(balance.balanced, true, `accounting must close: ${JSON.stringify(balance)}`);
+});
+
+test("47: an unavailable endpoint is counted as unavailable, never as a delivery", async () => {
+  const transport = countingTransport(() => ({ ok: false, reason: "unavailable" }));
+  const observer = makeObserver(transport, { maxDeliveryAttempts: 1 });
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_unav"));
+  await observer.drainOnce();
+
+  const snap = observer.snapshot();
+  assert.equal(snap.counters.unavailable, 1);
+  assert.equal(snap.counters.delivered, 0, "an unreachable endpoint delivers nothing");
+  assert.equal(snap.counters.delivery_attempts, 1);
+  const balance = sub.accountingBalance(snap);
+  assert.equal(balance.balanced, true, `accounting must close: ${JSON.stringify(balance)}`);
+});
+
+test("48: a retried delivery is ONE delivery and TWO attempts", async () => {
+  let n = 0;
+  const transport = countingTransport((e: any) => {
+    n++;
+    if (n === 1) return { ok: false, reason: "unavailable" };
+    return { ok: true, receipt: { event_id: e.event_id, ingested_at_ms: 1, duplicate: false } };
+  });
+  const observer = makeObserver(transport, { maxDeliveryAttempts: 2, retryDelayMs: 1 });
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_retry"));
+  await observer.drainOnce();
+
+  const snap = observer.snapshot();
+  assert.equal(snap.counters.delivery_attempts, 2, "two transport attempts were made");
+  assert.equal(snap.counters.delivered, 1, "one envelope, one delivery");
+  assert.equal(snap.counters.unavailable, 0, "a retry that succeeds is not a terminal failure");
+  const balance = sub.accountingBalance(snap);
+  assert.equal(balance.balanced, true, `accounting must close: ${JSON.stringify(balance)}`);
+  assert.equal(balance.accounted, 1, "the retry must not double-count the envelope");
+});
+
+test("48b: a retry that never succeeds ends in ONE terminal failure", async () => {
+  const transport = countingTransport(() => ({ ok: false, reason: "unavailable" }));
+  const observer = makeObserver(transport, { maxDeliveryAttempts: 3, retryDelayMs: 1 });
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_exh"));
+  await observer.drainOnce();
+
+  const snap = observer.snapshot();
+  assert.equal(snap.counters.delivery_attempts, 3, "three transport attempts were made");
+  assert.equal(snap.counters.unavailable, 1, "one envelope, one terminal failure");
+  assert.equal(snap.counters.delivered, 0);
+  const balance = sub.accountingBalance(snap);
+  assert.equal(balance.balanced, true, `accounting must close: ${JSON.stringify(balance)}`);
+});
+
+test("49: shutdown with a nonempty queue abandons what was never attempted", async () => {
+  const { transport, releaseAll } = gatedTransport();
+  const observer = makeObserver(transport);
+  observer.start();
+  for (let i = 0; i < 5; i++) {
+    observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: `call_${i}` }, `evt_q_${i}`));
+  }
+  await waitFor(() => observer.state().in_flight === 1, "the first delivery to start");
+
+  const snap = await observer.stop({ timeoutMs: 120 });
+  assert.equal(snap.counters.delivered, 0, "nothing was acknowledged");
+  assert.equal(snap.state.queued, 0, "the queue was emptied at teardown");
+  assert.ok(
+    snap.counters.abandoned + snap.state.in_flight === 5,
+    `every envelope must be accounted for: abandoned=${snap.counters.abandoned} in_flight=${snap.state.in_flight}`,
+  );
+  assert.ok(snap.counters.abandoned >= 1, "the queued envelopes were abandoned, not lost");
+  const balance = sub.accountingBalance(snap);
+  assert.equal(balance.balanced, true, `accounting must close: ${JSON.stringify(balance)}`);
+  assert.equal(balance.accounted, 5);
+
+  releaseAll();
+});
+
+test("50: shutdown with one delivery in flight — the reading that survives a host exit says so", async () => {
+  const dir = dumpDir();
+  const dump = path.join(dir, "dump.jsonl");
+  const { transport, gates } = gatedTransport();
+  const observer = makeObserver(transport, { debugDumpPath: dump });
+  observer.start();
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_inflight"));
+  await waitFor(() => observer.state().in_flight === 1, "the delivery to start");
+
+  const before = observer.snapshot();
+  assert.equal(before.counters.enqueued, 1);
+  assert.equal(before.counters.delivered, 0, "not acknowledged yet");
+  assert.equal(before.state.in_flight, 1, "the delivery is IN FLIGHT, not lost");
+  assert.equal(sub.accountingBalance(before).balanced, true);
+
+  // stop() writes the teardown reading SYNCHRONOUSLY, before any await:
+  // that is the reading that survives a host exit.
+  const stopped = observer.stop({ timeoutMs: 120 });
+  const rows = readDump(dump);
+  const teardown = rows.find((r) => r.kind === "observer.counters" && r.phase === "teardown");
+  assert.ok(teardown, "the teardown reading is written synchronously");
+  assert.equal(teardown.counters.delivered, 0);
+  assert.equal(teardown.state.in_flight, 1, "the teardown reading accounts for the in-flight delivery");
+  assert.equal(dumpBalance(teardown).balanced, true, "the teardown reading balances");
+
+  gates[0]({});
+  await stopped;
+  const after = observer.snapshot();
+  assert.equal(after.counters.delivered, 1, "the acknowledged delivery is counted once it lands");
+  assert.equal(after.state.in_flight, 0);
+  assert.equal(sub.accountingBalance(after).balanced, true);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("51: shutdown immediately after the acknowledgement keeps the delivery on record", async () => {
+  const dir = dumpDir();
+  const dump = path.join(dir, "dump.jsonl");
+  const { transport, gates } = gatedTransport();
+  const observer = makeObserver(transport, { debugDumpPath: dump });
+  observer.start();
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_ack"));
+  await waitFor(() => observer.state().in_flight === 1, "the delivery to start");
+
+  // The server acknowledges.
+  gates[0]({});
+  await waitFor(() => observer.counters().delivered === 1, "the acknowledgement to land");
+
+  const snap = await observer.stop({ timeoutMs: 120 });
+  assert.equal(snap.counters.delivered, 1, "the acknowledged delivery is not lost from the counters");
+  assert.equal(snap.state.in_flight, 0);
+  assert.equal(sub.accountingBalance(snap).balanced, true);
+
+  // And it is on record per-delivery, so it survives even if the final
+  // reading is lost to an interrupted teardown.
+  const rows = readDump(dump);
+  const delivery = rows.find((r) => r.kind === "observer.delivery");
+  assert.ok(delivery, "a per-delivery record was written");
+  assert.equal(delivery.outcome, "delivered");
+  assert.equal(delivery.duplicate, false);
+  assert.equal(delivery.attempts, 1);
+  assert.ok(
+    !("event_id" in delivery),
+    "a delivery row must not carry `event_id` — the dump is also the envelope dump",
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("52: an interrupted teardown still leaves a truthful reading on disk", async () => {
+  const dir = dumpDir();
+  const dump = path.join(dir, "dump.jsonl");
+  const { transport, releaseAll } = gatedTransport();
+  const observer = makeObserver(transport, { debugDumpPath: dump });
+  observer.start();
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_abort"));
+  await waitFor(() => observer.state().in_flight === 1, "the delivery to start");
+
+  // The host's cleanup is fire-and-forget: OpenCode's contract is a
+  // SYNCHRONOUS `() => void`, so nothing can be awaited.
+  void observer.stop({ timeoutMs: 500 });
+
+  // No await between the call and the assertion: the teardown reading
+  // must already be on disk, because it is written synchronously.
+  const rows = readDump(dump);
+  const teardown = rows.find((r) => r.kind === "observer.counters" && r.phase === "teardown");
+  assert.ok(teardown, "the teardown reading is written before the first await");
+  assert.equal(teardown.state.in_flight, 1, "it accounts for the in-flight delivery");
+  assert.equal(teardown.counters.delivered, 0);
+  assert.equal(dumpBalance(teardown).balanced, true, "the teardown reading balances");
+
+  releaseAll();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("53: a queue overflow is counted as evicted, and the accounting still closes", async () => {
+  const transport = countingTransport((e: any) => ({
+    ok: true,
+    receipt: { event_id: e.event_id, ingested_at_ms: 1, duplicate: false },
+  }));
+  const observer = makeObserver(transport, { bufferCapacity: 2 });
+  for (let i = 0; i < 5; i++) {
+    observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: `call_${i}` }, `evt_o_${i}`));
+  }
+  const before = observer.snapshot();
+  assert.equal(before.counters.enqueued, 5);
+  assert.equal(before.counters.dropped_overflow, 3, "capacity 2 of 5 → 3 oldest evicted");
+  assert.equal(before.state.queued, 2, "two remain in the queue");
+  assert.equal(
+    sub.accountingBalance(before).balanced,
+    true,
+    `evictions must balance: ${JSON.stringify(sub.accountingBalance(before))}`,
+  );
+
+  await observer.drainOnce();
+  const after = observer.snapshot();
+  assert.equal(after.counters.delivered, 2, "the two survivors were delivered");
+  assert.equal(after.counters.dropped_overflow, 3);
+  const balance = sub.accountingBalance(after);
+  assert.equal(balance.balanced, true, `accounting must close: ${JSON.stringify(balance)}`);
+  assert.equal(balance.accounted, 5, "2 delivered + 3 evicted = 5 enqueued");
+});
+
+test("54: THE REPORTED CASE — ten stored, nine reported — the tenth is IN FLIGHT", async () => {
+  const dir = dumpDir();
+  const dump = path.join(dir, "dump.jsonl");
+  const { transport, gates } = gatedTransport();
+  const observer = makeObserver(transport, { debugDumpPath: dump, maxDeliveryAttempts: 1 });
+  observer.start();
+
+  for (let i = 0; i < 10; i++) {
+    observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: `call_${i}` }, `evt_c_${i}`));
+  }
+  // Nine settle; the tenth is held in the transport. The drain loop is
+  // serial, so each delivery must be released before the next starts.
+  while (observer.counters().delivered < 9) {
+    if (gates.length > 0) gates.shift()!({});
+    else await new Promise((r) => setTimeout(r, 1));
+  }
+  await waitFor(() => gates.length === 1, "the tenth delivery to be held in the transport");
+  await waitFor(() => observer.state().in_flight === 1, "the tenth delivery to be in flight");
+
+  const before = observer.snapshot();
+  assert.equal(before.counters.enqueued, 10);
+  assert.equal(before.counters.delivered, 9, "nine acknowledged so far");
+  assert.equal(before.state.in_flight, 1, "the tenth is IN FLIGHT — this is what was missing");
+  assert.equal(before.state.queued, 0);
+  const balance = sub.accountingBalance(before);
+  assert.equal(balance.balanced, true, `the accounting closes: ${JSON.stringify(balance)}`);
+  assert.equal(balance.accounted, 10, "10 = 9 delivered + 1 in flight");
+
+  // The teardown reading — the one that survives a host exit — accounts
+  // for the tenth event instead of implying it was lost.
+  const stopped = observer.stop({ timeoutMs: 750 });
+  const teardown = readDump(dump).find((r) => r.kind === "observer.counters" && r.phase === "teardown");
+  assert.ok(teardown);
+  assert.equal(teardown.counters.delivered, 9);
+  assert.equal(teardown.state.in_flight, 1);
+  assert.equal(dumpBalance(teardown).balanced, true);
+
+  // The tenth lands: the server stores all ten.
+  gates.shift()!({});
+  await stopped;
+  await waitFor(() => observer.counters().delivered === 10, "the tenth delivery to land");
+  const after = observer.snapshot();
+  assert.equal(after.counters.delivered, 10);
+  assert.equal(after.state.in_flight, 0);
+  assert.equal(sub.accountingBalance(after).balanced, true);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("55: the accounting check is not vacuous", async () => {
+  const { transport, gates } = gatedTransport();
+  const observer = makeObserver(transport);
+  observer.start();
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_nv"));
+  await waitFor(() => observer.state().in_flight === 1, "the delivery to start");
+
+  const real = observer.snapshot();
+
+  // (a) the real reading balances.
+  assert.equal(sub.accountingBalance(real).balanced, true, "the real reading balances");
+
+  // (b) a reading with one envelope over-counted does NOT balance: the
+  //     check is sensitive to the counters, not a tautology.
+  const over = { counters: { ...real.counters, delivered: real.counters.delivered + 1 }, state: real.state };
+  assert.equal(sub.accountingBalance(over).balanced, false, "the check must reject an over-count");
+
+  // (c) THE decisive one: the balance closes BECAUSE of the in-flight
+  //     bucket. Remove it and the reading stops balancing — which is
+  //     exactly the old behaviour that made the tenth event look lost.
+  const withoutInFlight = { counters: real.counters, state: { ...real.state, in_flight: 0 } };
+  assert.equal(
+    sub.accountingBalance(withoutInFlight).balanced,
+    false,
+    "without the in-flight bucket the envelope is unaccounted for",
+  );
+  assert.equal(real.state.in_flight, 1, "and the real reading really does have one in flight");
+
+  // (d) an empty observer balances trivially — but (c) shows the check
+  //     is not trivially true.
+  const empty = makeObserver(countingTransport(() => ({ ok: false, reason: "unavailable" })));
+  assert.equal(sub.accountingBalance(empty.snapshot()).balanced, true);
+  assert.equal(empty.snapshot().counters.enqueued, 0);
+
+  gates[0]({});
+  await waitFor(() => observer.counters().delivered === 1, "the delivery to land");
+});
+
+test("56: the counters are cumulative and the state is instantaneous", async () => {
+  const { transport, gates } = gatedTransport();
+  const observer = makeObserver(transport);
+  observer.start();
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_cum"));
+  await waitFor(() => observer.state().in_flight === 1, "the delivery to start");
+
+  const first = observer.snapshot();
+  assert.equal(first.state.in_flight, 1);
+  assert.equal(first.counters.delivered, 0);
+
+  gates[0]({});
+  await waitFor(() => observer.counters().delivered === 1, "the delivery to land");
+
+  const second = observer.snapshot();
+  assert.equal(second.counters.delivered, 1, "the cumulative counter only grows");
+  assert.equal(second.state.in_flight, 0, "the instantaneous state fell back");
+  assert.ok(second.counters.delivered >= first.counters.delivered, "cumulative counters never shrink");
+});
+
+test("57: a response that is not a valid receipt for THIS envelope is never a delivery", async () => {
+  // (a) a receipt naming a different event
+  const wrongId = countingTransport(() => ({
+    ok: true,
+    receipt: { event_id: "ev1_someone_else", ingested_at_ms: 1, duplicate: false },
+  }));
+  const o1 = makeObserver(wrongId);
+  o1.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_m1"));
+  await o1.drainOnce();
+  assert.equal(o1.counters().delivered, 0, "a receipt for another event is not a delivery");
+  assert.equal(o1.counters().malformed_receipt, 1);
+  assert.equal(sub.accountingBalance(o1.snapshot()).balanced, true);
+
+  // (b) no receipt at all
+  const noReceipt = countingTransport(() => ({ ok: true } as any));
+  const o2 = makeObserver(noReceipt);
+  o2.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_m2"));
+  await o2.drainOnce();
+  assert.equal(o2.counters().delivered, 0, "a silent ok is not a delivery");
+  assert.equal(o2.counters().malformed_receipt, 1);
+  assert.equal(sub.accountingBalance(o2.snapshot()).balanced, true);
+});
+
+test("58: a transport that throws is a failed delivery, not a lost envelope", async () => {
+  const transport = {
+    mode: "mpm_system" as const,
+    async deliver(): Promise<any> {
+      throw new Error("spawn failed");
+    },
+  };
+  const observer = makeObserver(transport);
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_throw"));
+  await observer.drainOnce();
+
+  const snap = observer.snapshot();
+  assert.equal(snap.counters.delivered, 0);
+  assert.equal(snap.counters.delivery_failed, 1, "the envelope failed; it did not vanish");
+  assert.equal(snap.state.in_flight, 0, "the in-flight slot was released");
+  const balance = sub.accountingBalance(snap);
+  assert.equal(balance.balanced, true, `accounting must close: ${JSON.stringify(balance)}`);
+});
+
+test("59: an unconfigured transport never enqueues, and the accounting still closes", async () => {
+  const observer = makeObserver(sub.createUnconfiguredTransport());
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_unc"));
+  const snap = observer.snapshot();
+  assert.equal(snap.counters.envelopes_built, 1);
+  assert.equal(snap.counters.dropped_unconfigured, 1);
+  assert.equal(snap.counters.enqueued, 0, "an unconfigured envelope is never enqueued");
+  assert.equal(snap.counters.delivered, 0);
+  const balance = sub.accountingBalance(snap);
+  assert.equal(balance.balanced, true, `accounting must close: ${JSON.stringify(balance)}`);
+});
+
+test("60: stop() stays bounded when the transport never answers", async () => {
+  const { transport, releaseAll } = gatedTransport();
+  const observer = makeObserver(transport);
+  observer.start();
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_bound"));
+  await waitFor(() => observer.state().in_flight === 1, "the delivery to start");
+
+  const t0 = Date.now();
+  const snap = await observer.stop({ timeoutMs: 150 });
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 1500, `stop must be bounded, took ${elapsed}ms`);
+  assert.equal(snap.state.in_flight, 1, "the delivery is still in flight — and says so");
+  const balance = sub.accountingBalance(snap);
+  assert.equal(balance.balanced, true, `accounting must close: ${JSON.stringify(balance)}`);
+
+  releaseAll();
+});
+
+test("61: the operator summary carries the state, not just the totals", async () => {
+  const { transport, gates } = gatedTransport();
+  const observer = makeObserver(transport);
+  observer.start();
+  observer.observe(hostEvent("session.tool.success", { sessionID: "s", id: "call_1" }, "evt_sum"));
+  await waitFor(() => gates.length === 1, "the delivery to start");
+
+  // The summary must name the buckets that close the accounting, so a
+  // reader can tell an in-flight delivery from a lost one without
+  // opening the diagnostic file.
+  const line = sub.summariseSnapshot(observer.snapshot());
+  for (const needle of ["delivered=", "queued=", "in_flight=", "abandoned=", "balanced="]) {
+    assert.ok(line.includes(needle), `the summary must carry ${needle}: ${line}`);
+  }
+  assert.ok(line.includes("in_flight=1"), `the summary must show the in-flight delivery: ${line}`);
+  gates[0]({});
 });

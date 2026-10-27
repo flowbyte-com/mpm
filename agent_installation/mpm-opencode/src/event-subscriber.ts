@@ -52,7 +52,10 @@ export interface IngestReceipt {
 
 export type DeliverResult =
   | { ok: true; receipt: IngestReceipt }
-  | { ok: false; reason: "unconfigured" | "unavailable" | "rejected" | "malformed_receipt" };
+  | {
+      ok: false;
+      reason: "unconfigured" | "unavailable" | "rejected" | "malformed_receipt" | "delivery_failed";
+    };
 
 export interface EventTransport {
   readonly mode: "unconfigured" | "mpm_system";
@@ -159,6 +162,39 @@ export function createMpmSystemTransport(opts: {
 // --------------------------------------------------------------------------
 // Counters
 // --------------------------------------------------------------------------
+//
+// TWO KINDS OF NUMBER, AND THE DISTINCTION IS THE POINT.
+//
+// CUMULATIVE counters (ObserverCounters) are monotonic totals: they only
+// ever go up, and they describe what has happened so far.
+//
+// INSTANTANEOUS state (ObserverState) describes what is true RIGHT NOW:
+// how many envelopes are still queued, and how many deliveries are in
+// flight.
+//
+// Mixing the two was the defect. `delivered` is cumulative, so an
+// envelope whose delivery is still in flight is in NEITHER `delivered`
+// nor any failure bucket — and a snapshot taken at that moment made the
+// envelope look lost, when the only truth was that it had not finished
+// yet. The 2026-10-27 isolated run recorded 10 events stored by the core
+// against a client summary of `enqueued=10, delivered=9`: the tenth
+// delivery was IN FLIGHT, and the client had no way to say so.
+//
+// So the accounting is now closed. At any snapshot:
+//
+//   enqueued = delivered + failed + dropped_overflow + abandoned
+//               + queued + in_flight
+//
+// where `failed` is unavailable + rejected + malformed_receipt +
+// delivery_failed, and `duplicates` is a SUBSET of `delivered` (a
+// duplicate is a successful delivery the server recognised as one) and
+// is therefore not added separately.
+//
+// `delivered` counts a delivery ONLY when the server returned a receipt
+// that validated against THIS envelope's event id. A transport attempt
+// is never a delivery. The host stream is volatile and delivery is
+// best-effort; MPM's ingest endpoint performs the durable
+// deduplication. Nothing here claims exactly-once delivery.
 
 export interface ObserverCounters {
   /** host events the iterator delivered */
@@ -180,17 +216,54 @@ export interface ObserverCounters {
   enqueued: number;
   dropped_overflow: number;
   dropped_unconfigured: number;
-  /** delivery outcomes */
+  /**
+   * deliveries that ended in a RECEIPT that validated for this envelope.
+   * Includes `duplicates`. A transport attempt alone is never a delivery.
+   */
   delivered: number;
+  /** subset of `delivered`: the server reported the event id as already stored */
   duplicates: number;
+  /** the endpoint was not reachable (absent action, timeout, spawn failure) */
   unavailable: number;
+  /** the server explicitly refused the envelope */
   rejected: number;
+  /** a response that was not a valid receipt for THIS envelope */
   malformed_receipt: number;
+  /** any other delivery failure */
   delivery_failed: number;
+  /**
+   * total transport ATTEMPTS. A retried delivery counts once per
+   * attempt, so this exceeds the number of envelopes attempted.
+   */
+  delivery_attempts: number;
+  /**
+   * envelopes discarded at teardown WITHOUT a delivery attempt. They
+   * were queued, and the queue was abandoned because the observer stopped.
+   */
+  abandoned: number;
   /** stream health */
   stream_errors: number;
   /** diagnostic: per-event-type unsupported/ignored tally */
   unmapped_by_type: Record<string, number>;
+}
+
+/**
+ * INSTANTANEOUS state — what is true at the instant of the snapshot.
+ *
+ * These are NOT cumulative. `queued` shrinks as the queue drains;
+ * `in_flight` rises and falls with the transport.
+ */
+export interface ObserverState {
+  /** envelopes in the bounded queue, not yet attempted */
+  queued: number;
+  /** deliveries currently awaiting the transport */
+  in_flight: number;
+}
+
+/** A cumulative reading and an instantaneous reading, taken together. */
+export interface ObserverSnapshot {
+  counters: ObserverCounters;
+  state: ObserverState;
 }
 
 function freshCounters(): ObserverCounters {
@@ -214,8 +287,43 @@ function freshCounters(): ObserverCounters {
     rejected: 0,
     malformed_receipt: 0,
     delivery_failed: 0,
+    delivery_attempts: 0,
+    abandoned: 0,
     stream_errors: 0,
     unmapped_by_type: {},
+  };
+}
+
+/** The delivery-failure total: every terminal failure bucket. */
+function failedTotal(c: ObserverCounters): number {
+  return c.unavailable + c.rejected + c.malformed_receipt + c.delivery_failed;
+}
+
+/**
+ * The DELIVERY ACCOUNTING invariant, evaluated against a snapshot.
+ *
+ * Every envelope that was enqueued must be in exactly one bucket:
+ * delivered, failed, evicted by the bound, abandoned at teardown, still
+ * queued, or in flight. A snapshot that does not balance is a
+ * diagnostic bug, not a transport condition — and the difference between
+ * the two is exactly what this function exists to expose.
+ */
+export function accountingBalance(s: ObserverSnapshot): {
+  enqueued: number;
+  accounted: number;
+  balanced: boolean;
+} {
+  const accounted =
+    s.counters.delivered +
+    failedTotal(s.counters) +
+    s.counters.dropped_overflow +
+    s.counters.abandoned +
+    s.state.queued +
+    s.state.in_flight;
+  return {
+    enqueued: s.counters.enqueued,
+    accounted,
+    balanced: accounted === s.counters.enqueued,
   };
 }
 
@@ -252,6 +360,20 @@ export class BoundedEventBuffer {
   shift(): EventEnvelope | undefined {
     return this.items.shift();
   }
+  /**
+   * Drop everything still queued and return how many envelopes were
+   * discarded.
+   *
+   * This is the teardown path: the queue is abandoned because the
+   * observer stopped, and the count says so. Without it the abandoned
+   * envelopes would sit in a bucket nobody counts — indistinguishable
+   * from envelopes that were never observed at all.
+   */
+  discard(): number {
+    const n = this.items.length;
+    this.items.length = 0;
+    return n;
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -272,10 +394,33 @@ export interface ObserverOptions {
   sessionMemory?: number;
 }
 
+/**
+ * The outcome of ONE envelope's delivery attempt sequence.
+ *
+ * The vocabulary is deliberately closed and one-to-one with the
+ * cumulative counters, so a diagnostic record can be aggregated into the
+ * same totals the counters carry. `delivered` means a receipt validated
+ * for THIS envelope's event id — a transport attempt is never a
+ * delivery. `duplicate` is a property of a delivery, not an outcome of
+ * its own (a duplicate is still a delivery).
+ */
+export type DeliveryOutcome =
+  | "delivered"
+  | "malformed_receipt"
+  | "unavailable"
+  | "rejected"
+  | "delivery_failed";
+
 export interface LifecycleObserver {
   start(): void;
-  stop(opts?: { timeoutMs?: number }): Promise<ObserverCounters>;
+  /** bounded teardown; returns the FINAL reading (cumulative + instantaneous) */
+  stop(opts?: { timeoutMs?: number }): Promise<ObserverSnapshot>;
+  /** the cumulative counters alone (a reading, not the live object) */
   counters(): ObserverCounters;
+  /** the cumulative counters AND the instantaneous queue/in-flight state */
+  snapshot(): ObserverSnapshot;
+  /** the instantaneous queue/in-flight state alone */
+  state(): ObserverState;
   /** deterministic test seam: process everything currently buffered */
   drainOnce(): Promise<void>;
   /** deterministic test seam: map+enqueue one event without a stream */
@@ -298,6 +443,16 @@ export function createLifecycleObserver(opts: ObserverOptions): LifecycleObserve
   let loopDone: Promise<void> | null = null;
   let drainDone: Promise<void> | null = null;
   let started = false;
+  /**
+   * Deliveries currently awaiting the transport.
+   *
+   * This is INSTANTANEOUS state, not a cumulative counter: it rises when
+   * an envelope leaves the queue for the transport and falls when the
+   * transport answers. Before this existed, an envelope in this window
+   * was in no bucket at all, and a reading taken in that window made it
+   * look lost.
+   */
+  let inFlight = 0;
 
   /**
    * Wake signal for the drain loop. Polling with a timer is wrong here: the
@@ -434,40 +589,96 @@ export function createLifecycleObserver(opts: ObserverOptions): LifecycleObserve
   }
 
   async function deliverOne(envelope: EventEnvelope): Promise<void> {
-    let attempt = 0;
-    let result: DeliverResult = { ok: false, reason: "unavailable" };
-    while (attempt < maxAttempts) {
-      attempt++;
-      result = await opts.transport.deliver(envelope);
-      if (result.ok || result.reason !== "unavailable") break;
-      if (attempt < maxAttempts && retryDelayMs > 0) {
-        await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+    // The envelope leaves the queue and enters the transport. Registering
+    // that transition SYNCHRONOUSLY — before the first await — is what
+    // closes the accounting gap: there is no instant at which an
+    // envelope is in neither `queued` nor `in_flight`.
+    inFlight++;
+    try {
+      let attempt = 0;
+      let result: DeliverResult = { ok: false, reason: "unavailable" };
+      while (attempt < maxAttempts) {
+        attempt++;
+        // An ATTEMPT is not a delivery. The two are counted separately:
+        // `delivery_attempts` is what the transport was asked, `delivered`
+        // is what the server acknowledged with a valid receipt.
+        counters.delivery_attempts++;
+        try {
+          result = await opts.transport.deliver(envelope);
+        } catch {
+          // A transport that throws is a delivery failure, not a reason
+          // to lose the envelope from the accounting.
+          result = { ok: false, reason: "delivery_failed" };
+        }
+        if (result.ok || result.reason !== "unavailable") break;
+        if (attempt < maxAttempts && retryDelayMs > 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+        }
       }
-    }
-    if (result.ok) {
-      // Defence in depth: a receipt that names a different event is not a
-      // receipt for THIS event, whatever the transport claimed.
-      if (result.receipt.event_id !== envelope.event_id) {
-        counters.malformed_receipt++;
-        return;
+
+      // ONE synchronous block: the outcome counters and the diagnostic
+      // record all move together. Splitting them across an await would
+      // recreate the very gap this file exists to close.
+      let outcome: DeliveryOutcome;
+      let duplicate = false;
+      if (result.ok) {
+        // Defence in depth: a receipt that names a different event is not a
+        // receipt for THIS event, whatever the transport claimed.
+        if (!result.receipt || result.receipt.event_id !== envelope.event_id) {
+          counters.malformed_receipt++;
+          outcome = "malformed_receipt";
+        } else {
+          counters.delivered++;
+          duplicate = result.receipt.duplicate === true;
+          if (duplicate) counters.duplicates++;
+          outcome = "delivered";
+        }
+      } else {
+        switch (result.reason) {
+          case "unavailable":
+            counters.unavailable++;
+            outcome = "unavailable";
+            break;
+          case "rejected":
+            counters.rejected++;
+            outcome = "rejected";
+            break;
+          case "malformed_receipt":
+            counters.malformed_receipt++;
+            outcome = "malformed_receipt";
+            break;
+          case "delivery_failed":
+            counters.delivery_failed++;
+            outcome = "delivery_failed";
+            break;
+          default:
+            // "unconfigured" can only reach here if the transport
+            // contradicted its own mode. The envelope WAS enqueued, so it
+            // is a failed delivery — not an unconfigured drop, which would
+            // break the accounting by counting an envelope that was never
+            // enqueued.
+            counters.delivery_failed++;
+            outcome = "delivery_failed";
+            break;
+        }
       }
-      counters.delivered++;
-      if (result.receipt.duplicate) counters.duplicates++;
-      return;
-    }
-    switch (result.reason) {
-      case "unavailable":
-        counters.unavailable++;
-        break;
-      case "rejected":
-        counters.rejected++;
-        break;
-      case "malformed_receipt":
-        counters.malformed_receipt++;
-        break;
-      default:
-        counters.delivery_failed++;
-        break;
+      // A per-delivery record, so an ACKNOWLEDGED delivery is on record
+      // even if the final snapshot is lost to an interrupted teardown. The
+      // key is `envelope_event_id`, not `event_id`: the diagnostic file is
+      // also the envelope dump, and a delivery row must not be mistaken
+      // for an envelope.
+      diagnostic({
+        kind: "observer.delivery",
+        envelope_event_id: envelope.event_id,
+        outcome,
+        duplicate,
+        attempts: attempt,
+      });
+    } finally {
+      // The in-flight slot is ALWAYS released. A leaked slot would make
+      // every later reading unbalanced, which is worse than the defect
+      // this file exists to correct.
+      inFlight--;
     }
   }
 
@@ -518,13 +729,41 @@ export function createLifecycleObserver(opts: ObserverOptions): LifecycleObserve
     })();
   }
 
-  async function stop(stopOpts: { timeoutMs?: number } = {}): Promise<ObserverCounters> {
+  /** the instantaneous state — what is true at this instant */
+  function readState(): ObserverState {
+    return { queued: buffer.size, in_flight: inFlight };
+  }
+
+  /** a reading: the cumulative counters plus the instantaneous state */
+  function snapshot(): ObserverSnapshot {
+    return { counters: { ...counters }, state: readState() };
+  }
+
+  async function stop(stopOpts: { timeoutMs?: number } = {}): Promise<ObserverSnapshot> {
     const timeoutMs = stopOpts.timeoutMs ?? 500;
     const deadline = Date.now() + timeoutMs;
-    // Snapshot BEFORE any await: teardown may be interrupted by process exit,
-    // and a diagnostic that only lands after a flush is not reliable evidence.
-    diagnostic({ kind: "observer.counters", phase: "teardown", counters: { ...counters } });
+
+    // Stop accepting new work FIRST. Aborting is synchronous and its
+    // effect on the drain loop lands in a microtask, so the reading
+    // below still describes the instant of teardown.
     controller?.abort();
+
+    // The reading is taken SYNCHRONOUSLY and written SYNCHRONOUSLY:
+    // teardown may be interrupted by process exit, and a diagnostic that
+    // only lands after a flush is not reliable evidence. This is the
+    // snapshot that survives a host exit — so it must be TRUTHFUL, which
+    // is why it now carries the instantaneous `queued` and `in_flight`
+    // state and not only cumulative counters.
+    //
+    // Before the correction this reading said `enqueued=10 delivered=9`
+    // for a run in which the core had stored ten events: the tenth
+    // delivery was in flight, and the reading had no way to say so.
+    diagnostic({
+      kind: "observer.counters",
+      phase: "teardown",
+      counters: { ...counters },
+      state: readState(),
+    });
 
     const bounded = async (p: Promise<void> | null): Promise<void> => {
       if (!p) return;
@@ -557,21 +796,45 @@ export function createLifecycleObserver(opts: ObserverOptions): LifecycleObserve
         if (timer !== undefined) clearTimeout(timer);
       }
     }
-    diagnostic({ kind: "observer.counters", phase: "final", counters });
-    return counters;
+
+    // Whatever is STILL queued was never attempted: the observer stopped
+    // before the transport was asked. Counting it as `abandoned` is the
+    // difference between "not delivered" and "not even tried", and it
+    // keeps the accounting closed.
+    counters.abandoned += buffer.discard();
+
+    const finalSnapshot = snapshot();
+    diagnostic({
+      kind: "observer.counters",
+      phase: "final",
+      counters: { ...finalSnapshot.counters },
+      state: finalSnapshot.state,
+    });
+    return finalSnapshot;
   }
 
   return {
     start,
     stop,
-    counters: () => counters,
+    counters: () => ({ ...counters }),
+    snapshot,
+    state: readState,
     drainOnce,
     observe,
   };
 }
 
-/** One-line, operator-facing summary; contains counts only. */
-export function summariseCounters(c: ObserverCounters): string {
+/**
+ * One-line, operator-facing summary; contains counts only.
+ *
+ * The instantaneous state (`queued`, `in_flight`) is on the same line as
+ * the cumulative counters, because a reader who sees `enqueued=10
+ * delivered=9` must be able to tell, from the line itself, whether the
+ * tenth delivery was still in flight, still queued, or genuinely gone.
+ */
+export function summariseSnapshot(s: ObserverSnapshot): string {
+  const c = s.counters;
+  const balance = accountingBalance(s);
   return [
     "mpm-opencode lifecycle observer:",
     `host_events=${c.host_events_seen}`,
@@ -591,6 +854,12 @@ export function summariseCounters(c: ObserverCounters): string {
     `unavailable=${c.unavailable}`,
     `rejected=${c.rejected}`,
     `malformed_receipt=${c.malformed_receipt}`,
+    `delivery_failed=${c.delivery_failed}`,
+    `delivery_attempts=${c.delivery_attempts}`,
+    `abandoned=${c.abandoned}`,
+    `queued=${s.state.queued}`,
+    `in_flight=${s.state.in_flight}`,
+    `balanced=${balance.balanced}`,
     `stream_errors=${c.stream_errors}`,
   ].join(" ");
 }

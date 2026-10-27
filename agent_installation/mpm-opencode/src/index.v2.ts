@@ -56,7 +56,7 @@ import {
   createLifecycleObserver,
   createMpmSystemTransport,
   createUnconfiguredTransport,
-  summariseCounters,
+  summariseSnapshot,
   type EventTransport,
   type LifecycleObserver,
 } from "./event-subscriber.js";
@@ -754,11 +754,19 @@ export default Plugin.define({
             // cleanup: drop per-session wake cache (session store is process-local)
             wakeContext.clear();
             if (lifecycle) {
-                // Bounded, best-effort flush. The process may exit before it
-                // completes; the summary line is diagnostic, not a receipt.
+                // Bounded, best-effort flush. The host's cleanup contract is
+                // a SYNCHRONOUS `() => void`, so nothing here can be awaited:
+                // the process may exit before the flush completes, and the
+                // summary line is diagnostic, not a receipt.
+                //
+                // What DOES survive an exit is the teardown reading the
+                // observer writes synchronously inside `stop()`: it carries
+                // the instantaneous `queued`/`in_flight` state alongside the
+                // cumulative counters, so a reader can tell an in-flight
+                // delivery from a lost one.
                 void lifecycle
                     .stop({ timeoutMs: 750 })
-                    .then((c) => console.warn(summariseCounters(c)))
+                    .then((s) => console.warn(summariseSnapshot(s)))
                     .catch(() => undefined);
             }
         };
