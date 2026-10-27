@@ -536,5 +536,154 @@ class TestNegativeControlExecution(unittest.TestCase):
         )
 
 
+class TestSingleAdapterPayloadBuildContract(unittest.TestCase):
+    """The adapter payload (dist/) must be built ONCE, by the recipe,
+    BEFORE any test file runs — and no test file may build it itself.
+
+    Background (the regression this pins).
+
+    The mpm-opencode TS suite used to build the adapter payload in the
+    `before` hook of TWO test files: `test_lifecycle_events.test.ts` and
+    `test_wake_context.test.ts`. Each ran a full `tsc` build into the
+    SAME `dist/` directory, and `node --test` runs test files in
+    PARALLEL processes. Two compilers writing one output directory is a
+    data race.
+
+    The failure it produces is silent and misleading. `tsc` truncates an
+    output file before rewriting it, so a reader that catches a file
+    mid-rewrite sees a VALID JavaScript module with NO exports — the
+    parse succeeds and the missing export is reported later, by whichever
+    module imports it:
+
+        The requested module './event-envelope.js' does not provide an
+        export named 'ADAPTER_SOURCE'
+
+    That message names a TypeScript symbol; it says nothing about the
+    race. It was observed as a RED release gate on the OpenCode TS suite
+    (main run 40564010549) while the identical tree passed locally — the
+    collision depends on the relative phase of two concurrent compiles.
+
+    The fix: the gate owns the build, in one place, before the tests
+    run. The tests only READ `dist/`.
+    """
+
+    # Markers a test file must NOT contain. Each is a way of invoking a
+    # TypeScript compiler from inside a test:
+    #   * the LOCAL compiler by path (the form the two former builders
+    #     used);
+    #   * the `npx tsc` fallback (which resolves the deprecated `tsc` npm
+    #     package rather than the project's own compiler — the very thing
+    #     test_recipe_compiles_via_local_tsc_only forbids in the recipe).
+    SELF_BUILD_MARKERS = (
+        '"node_modules", ".bin", "tsc"',
+        '["tsc"]',
+    )
+
+    def _adapter_test_sources(self) -> list[Path]:
+        tests_dir = REPO_ROOT / "agent_installation" / "mpm-opencode" / "tests"
+        return sorted(tests_dir.glob("*.test.ts"))
+
+    def test_recipe_builds_the_adapter_payload_before_the_tests(self):
+        """The recipe must compile the adapter payload (`tsconfig.json`
+        -> `dist/`) BEFORE it invokes `node --test` on the compiled
+        test files. Order is the whole point: the payload build must be
+        complete and exclusive before any test process can read it.
+        """
+        text = _read_makefile()
+        build_at = text.find('-p tsconfig.json')
+        self.assertNotEqual(
+            build_at,
+            -1,
+            "test-agent-adapters must build the adapter payload "
+            "(tsc -p tsconfig.json -> dist/) itself. The test files "
+            "used to build it, two at a time, into the same directory.",
+        )
+        # The TS branch's `node --test` invocation is the one that
+        # consumes `$$js_glob` (the compiled tests-build files). The JS
+        # branch's invocation is earlier in the file and is a different
+        # gate; anchoring on the TS marker keeps the comparison honest.
+        tests_at = text.find("node --test --test-reporter=tap $$js_glob")
+        self.assertNotEqual(
+            tests_at,
+            -1,
+            "test-agent-adapters must invoke `node --test "
+            "--test-reporter=tap $$js_glob` on the compiled TS tests.",
+        )
+        self.assertLess(
+            build_at,
+            tests_at,
+            "the adapter payload (dist/) must be built BEFORE the TS "
+            "tests run. A test process that reads dist/ while a "
+            "compiler is still writing it sees a truncated module and "
+            "reports a missing export instead of the race.",
+        )
+
+    def test_recipe_fails_closed_on_an_empty_adapter_payload(self):
+        """A payload compile that succeeds but emits nothing must be
+        refused, for the same reason the empty `.test.js` glob is
+        refused: an empty `dist/` makes every import in the suite fail
+        with a misleading message.
+        """
+        text = _read_makefile()
+        self.assertIn(
+            "compiled no adapter payload into dist/",
+            text,
+            "test-agent-adapters must FATAL when the adapter payload "
+            "compile produces an empty dist/. The TS suite imports its "
+            "modules from dist/, so an empty dist/ is a red gate whose "
+            "message points at the imports rather than at the build.",
+        )
+
+    def test_no_test_file_builds_the_adapter_payload_itself(self):
+        """THE LOAD-BEARING PIN — the non-vacuity anchor.
+
+        No test file may invoke a TypeScript compiler. A test file that
+        builds the payload reintroduces the race, and the regression it
+        brings back is a RED CI run whose message names a TypeScript
+        symbol rather than the race. This assertion is what makes the
+        fix stick: re-adding a self-build to any `*.test.ts` fails here,
+        at the test layer, rather than in CI.
+
+        THREE test files carried such a build: the two that used the
+        local compiler and `test_resolve_mpm_binary.test.ts`, which used
+        `npx tsc` — a THIRD writer into the same directory, and one that
+        resolves the deprecated `tsc` npm package rather than the
+        project's own compiler.
+        """
+        offenders = []
+        for path in self._adapter_test_sources():
+            src = path.read_text(encoding="utf-8")
+            for marker in self.SELF_BUILD_MARKERS:
+                if marker in src:
+                    offenders.append(f"{path.name} ({marker})")
+        self.assertEqual(
+            offenders,
+            [],
+            "These test files build the adapter payload themselves. "
+            "The payload must be built ONCE by `make test-agent-adapters` "
+            "before any test file runs: two test files compiling into "
+            "the same dist/ directory race, and the failure surfaces as "
+            f"'does not provide an export named ADAPTER_SOURCE'. Offenders: {offenders!r}",
+        )
+
+    def test_the_three_builders_are_gone_by_name(self):
+        """The three files that used to carry a self-build are named
+        explicitly, so that a rename or a split cannot quietly move
+        the race somewhere this class does not look.
+        """
+        sources = {p.name for p in self._adapter_test_sources()}
+        for name in (
+            "test_lifecycle_events.test.ts",
+            "test_resolve_mpm_binary.test.ts",
+            "test_wake_context.test.ts",
+        ):
+            self.assertIn(
+                name,
+                sources,
+                f"the {name} suite must still exist; this assertion "
+                "pins the file that used to carry a racing self-build.",
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

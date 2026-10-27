@@ -29,7 +29,7 @@
 // loose. Production code (`src/`) is unaffected — it is still
 // checked under the strict tsconfig.json that anchors `npm run
 // build`.
-import { test, before, after } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert";
 import { spawnSync, spawn } from "node:child_process";
 import {
@@ -140,7 +140,10 @@ function tsEvalResolver(env: NodeJS.ProcessEnv, execFileArg: ReturnType<typeof e
   const distFile = path.join(ADAPTER_DIR, "dist", "resolve-mpm-binary.js");
   assert.ok(
     existsSync(distFile),
-    `missing compiled resolver: ${distFile} — run 'npx tsc' in the adapter dir`,
+    `missing compiled resolver: ${distFile} — the adapter payload (dist/) is built ` +
+      `once by 'make test-agent-adapters' (or by 'npm run build' in ${ADAPTER_DIR}). ` +
+      `The test files must NOT build it themselves: two test files building into the ` +
+      `same directory race, and the failure names a symbol rather than the race.`,
   );
   // We import via dynamic import to allow overriding the module's
   // resolved-at-module-load behaviour.
@@ -311,8 +314,8 @@ test("B9: adapter canonical identity is mpm-opencode (no active opencode-mpm)", 
   );
 });
 test("B9b: stale dist is canonical after rebuild (no opencode-mpm in dist)", () => {
-  // We rebuild dist before this test runs (in the before() hook).
-  // Pin that the dist matches the source.
+  // The gate rebuilds dist before any test file runs (see the
+  // test-agent-adapters recipe). Pin that the dist matches the source.
   const dist = readFileSync(path.join(ADAPTER_DIR, "dist", "index.js"), "utf8");
   assert.ok(
     !/opencode-mpm/.test(dist),
@@ -450,15 +453,16 @@ test("B5c: boot health succeeds when mpm absent from PATH and only $HOME/.mpm/bi
   assert.strictEqual(r.status, 0, `stub mpm failed: ${r.stderr}`);
 });
 // ---- Setup / teardown ---------------------------------------------------
-before(() => {
-  // Rebuild dist so B9b sees the canonical compile.
-  const r = spawnSync("npx", ["tsc"], { cwd: ADAPTER_DIR, encoding: "utf8" });
-  assert.strictEqual(
-    r.status,
-    0,
-    `rebuild failed: status=${r.status} stderr=${r.stderr}`,
-  );
-});
+// The adapter payload (dist/) is built ONCE, by `make
+// test-agent-adapters`, BEFORE any test file runs. This file used to
+// rebuild it here as well — a THIRD writer into the same directory,
+// concurrent with the two other test files' rebuilds, and (worse) via
+// `npx tsc`, which resolves the deprecated `tsc` npm package rather
+// than the project's own compiler.
+//
+// The rebuild was only there so B9b would see the canonical compile.
+// The gate's build IS the canonical compile, and it happens first.
+
 // ---- Boot warning contract (Part 4) ---------------------------------------
 //
 // The warning must truthfully tell the operator:

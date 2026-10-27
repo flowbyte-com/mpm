@@ -276,6 +276,28 @@ Concretely, as of 2026-10-16:
   no global TypeScript dependency. The floor
   `AGENT_ADAPTER_TEST_MIN_TS_TESTS := 15` refuses a silently-
   zero suite.
+* **The adapter payload (`dist/`) is built ONCE, by the gate, before
+  any test file runs** (the same pinned local `tsc`, driven by
+  `tsconfig.json`). It used to be built by the test files
+  themselves — `test_lifecycle_events.test.ts`,
+  `test_wake_context.test.ts` (both via the local compiler) and
+  `test_resolve_mpm_binary.test.ts` (via `npx tsc`) — each writing
+  into the SAME `dist/` directory, while `node --test` runs test
+  files in parallel processes. Two compilers writing one output
+  directory is a data race, and the failure it produces names a
+  TypeScript symbol rather than the race:
+
+  ```
+  The requested module './event-envelope.js' does not provide an
+  export named 'ADAPTER_SOURCE'
+  ```
+
+  `tsc` truncates an output file before rewriting it, so a reader
+  that catches a file mid-rewrite sees a zero-byte file — which is a
+  VALID module with NO exports, so the parse succeeds and the missing
+  export is reported by the importer. Measured during a single `tsc`
+  run: `dist/event-envelope.js` observed at 0, 16384, 20480 and 23039
+  bytes. The gate owns the build; the tests only read `dist/`.
 
 The reviewer of the previous VALIDATION entry conflated
 "file-level tests" with "gate-level tests" in the brief; that is

@@ -13,7 +13,6 @@
 
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -28,11 +27,33 @@ let mapper: any; // event-mapper
 let sub: any; // event-subscriber
 
 before(async () => {
-  const bin = path.join(ADAPTER_DIR, "node_modules", ".bin", "tsc");
-  const r = existsSync(bin)
-    ? spawnSync(bin, [], { cwd: ADAPTER_DIR, encoding: "utf8" })
-    : spawnSync("npx", ["tsc"], { cwd: ADAPTER_DIR, encoding: "utf8" });
-  assert.equal(r.status, 0, `tsc failed: ${r.stderr || ""}`);
+  // The adapter payload (dist/) is built ONCE, by `make
+  // test-agent-adapters`, BEFORE any test file runs.
+  //
+  // It used to be built HERE — and again in test_wake_context.test.ts —
+  // by each test file's own `before` hook, both writing into the SAME
+  // dist/ directory, while `node --test` runs test files in parallel
+  // processes. Two compilers writing one output directory is a data
+  // race: a reader that catches a file mid-rewrite (tsc truncates
+  // before it writes) sees a VALID module with no exports, and the
+  // failure names a TypeScript symbol instead of the race:
+  //
+  //   "The requested module './event-envelope.js' does not provide an
+  //    export named 'ADAPTER_SOURCE'"
+  //
+  // The build belongs to the gate, which owns the order. This hook
+  // only READS dist/.
+  const required = ["event-envelope.js", "event-mapper.js", "event-subscriber.js"];
+  for (const name of required) {
+    const p = path.join(ADAPTER_DIR, "dist", name);
+    assert.ok(
+      existsSync(p),
+      `missing compiled adapter module: ${p} — the adapter payload (dist/) is built ` +
+        `once by 'make test-agent-adapters' (or by 'npm run build' in ${ADAPTER_DIR}). ` +
+        `The test files must NOT build it themselves: two test files building into ` +
+        `the same directory race, and the failure names a symbol rather than the race.`,
+    );
+  }
   env = await import(pathToFileURL(path.join(ADAPTER_DIR, "dist", "event-envelope.js")).href);
   mapper = await import(pathToFileURL(path.join(ADAPTER_DIR, "dist", "event-mapper.js")).href);
   sub = await import(pathToFileURL(path.join(ADAPTER_DIR, "dist", "event-subscriber.js")).href);
