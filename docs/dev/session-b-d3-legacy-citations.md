@@ -505,9 +505,13 @@ database in an isolated `HOME` / `MPM_WORKSPACE` / `MPM_DB_PATH` root.
 | Gate | Result |
 |---|---|
 | `make test-race` | **PASS** — `EXIT=0`, **24 Go packages ok under `-race`, zero `FAIL` and zero `DATA RACE`**; `make test-scripts` OK (540 tests, floor 50), `make test-bench` OK (217 tests, floor 50), `make test-agent-installation` OK (503 tests, floor 300), `make test-agent-adapters` OK (Python 312 / floor 150, JS 164 / floor 100, TS 89 / floor 15) |
-| CI — Build + core tests | **SUCCESS** |
-| CI — Full test suite | **SUCCESS** |
-| CI — Release gate (cross-agent continuity + public-CLI subprocess suite) | *pending* |
+| CI — Build + core tests | **SUCCESS** — 19:25:28Z → 19:39:48Z (14m20s) |
+| CI — Full test suite | **SUCCESS** — 19:25:29Z → 19:36:55Z (11m26s) |
+| CI — Release gate (cross-agent continuity + public-CLI subprocess suite) | **SUCCESS** — 19:25:28Z → 19:47:43Z (22m15s) |
+
+**CI run `40568962538`, at head `9b00dc9` — all three jobs green.** The commit that follows
+this one is **documentation only** — it records these results and changes no code, no test
+and no configuration.
 
 The race-gate package timings:
 
