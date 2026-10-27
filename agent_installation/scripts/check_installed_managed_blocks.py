@@ -227,18 +227,19 @@ def _host_integration_installed(entry: dict, home: Path) -> bool:
 def _canonical_block_for_host(_render, adapter_name: str) -> str:
     """Return the exact bytes this host's installer writes today.
 
-    Two installer shapes exist in the repository:
+    Two installer shapes are supported:
 
-      plain      outer markers + rendered snippet + outer markers
-                 (claude-code, opencode, pi, hermes)
+      plain      outer markers + rendered snippet + outer markers.
+                 This is the shape the shipped adapter uses.
 
       bannered   the adapter's own installer wraps the snippet in a
                  section banner carrying a `<!-- generated: TS -->`
-                 line and source comments (mpm-memory-openclaw).
-
-    For the bannered shape we must ask the adapter's installer to
-    build the section, or the diagnostic compares against bytes the
-    installer never produces and the host can never reach PASS.
+                 line and source comments. No shipped adapter uses this
+                 shape any more, but the diagnostic supports it: for
+                 the bannered shape we must ask the adapter's installer
+                 to build the section, or the diagnostic compares
+                 against bytes the installer never produces and the host
+                 can never reach PASS.
     """
     canonical_text = CANONICAL_SOURCE.read_text(encoding="utf-8")
     canonical_block = _render.extract_canonical_block(canonical_text)

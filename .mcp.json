@@ -21,8 +21,9 @@
     "",
     "Pinned by scripts/tests/test_runtime_asset_provisioning.py.",
     "",
-    "Operator-facing runtime wiring is a separate concern and lives in",
-    "agent_installation/mpm-memory-openclaw/.mcp.json."
+    "Operator-facing runtime wiring is a separate concern: each host",
+    "adapter under agent_installation/ owns its own registration and its",
+    "own managed block. Nothing here configures a host."
   ],
   "mcpServers": {
     "mpm": {

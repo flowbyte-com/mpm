@@ -122,8 +122,8 @@ if [ -z "$PLUGIN_ID" ]; then
     exit 2
 fi
 
-# Canonical MPM install — same resolution rule as mpm-opencode/src/index.ts
-# and mpm-memory-openclaw/install.sh. Order matters: the substrate install
+# Canonical MPM install — same resolution rule as mpm-opencode/src/index.ts.
+# Order matters: the substrate install
 # (install.sh) writes ~/.mpm/bin/mpm and symlinks it into
 # ~/.local/bin/mpm. We accept either. We never rely on PATH resolution
 # alone — on a freshly-created ~/.local/bin the current login session
@@ -135,8 +135,8 @@ OPENCODE_PLUGIN_DIR="${OPENCODE_CONFIG_DIR}/plugin"
 
 # Where MPM keeps installed adapter assets.
 #
-# MPM_WORKSPACE is the same override the mpm-pi installer honours, and the
-# same variable mpm itself reads to locate the workspace. Previously this
+# MPM_WORKSPACE is the same variable mpm itself reads to locate the
+# workspace. Previously this
 # was hardcoded to $HOME/.mpm, so an operator running against a relocated
 # workspace got a plugin[] entry pointing at a directory that was never
 # populated — the registration looked correct and loaded nothing. The

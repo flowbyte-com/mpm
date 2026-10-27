@@ -83,10 +83,6 @@ WHITELIST: dict[str, str] = {
         "comment narrating prior /home/v path defect",
     "agent_installation/tests/test_render_managed_blocks.py":
         "comment narrating prior /home/v path defect (also CI runner path)",
-    # The shell uninstaller documents the previous literal in its
-    # header comment; the runtime path uses ${HOME}/.mpm/bin/mpm.
-    "agent_installation/uninstall-openclaw.sh":
-        "header comment narrating prior hardcoded /home/v literal",
     # The guard itself references the patterns it forbids, in
     # docstrings, constant declarations, and error messages. The
     # pattern values are not used as runtime paths.

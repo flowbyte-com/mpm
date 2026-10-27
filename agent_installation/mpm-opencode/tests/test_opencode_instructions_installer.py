@@ -3,10 +3,11 @@ test_opencode_instructions_installer.py — Regression coverage for the
 mpm-opencode AGENTS.md installer.
 
 Closes the parity gap surfaced by the 2026-09-04 forensic audit:
-mpm-claude-code, mpm-hermes, mpm-pi, mpm-memory-openclaw, and
-mpm-auto-mode-persona-openclaw all have tests/ directories with
-installer coverage; mpm-opencode had none. This file brings the
-adapter into parity.
+the other adapters had tests/ directories with installer coverage;
+mpm-opencode had none. This file brings the adapter into parity.
+(The sibling adapters it names were retired on 2026-10-27; their
+suites went with them, and this file is the installer coverage that
+remains.)
 
 Pins the contract for:
   - canonical protocol file exists at ~/.mpm/agent_installation/mpm-agent-protocol.md
@@ -22,7 +23,7 @@ Pins the contract for:
     user scope)
 
 Adapter parity invariants pinned:
-  - same marker convention as mpm-claude-code: BEGIN/END MPM-MANAGED
+  - the managed-section marker convention: BEGIN/END MPM-MANAGED
     SECTION:opencode-instructions with optional tail comment
   - same idempotent semantics: re-run converges on the canonical block
     from the snippet, refreshes stale blocks whose snippet content has
