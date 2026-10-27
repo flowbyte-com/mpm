@@ -17,16 +17,51 @@ package internal
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// overdueClockResolutionSeconds is the number of seconds by which a
+// measured overdue may differ from the delta the test seeded.
+//
+// WHY IT IS NOT ZERO.
+//
+// The overdue is computed as
+//
+//	CAST(strftime('%s','now') AS INTEGER) - target_time
+//
+// — read at ONE instant — while the test's seed read
+// `strftime('%s','now')` at a DIFFERENT instant. The clock has a SECOND
+// resolution, so crossing a second boundary between the two reads shifts
+// the measurement by exactly one second.
+//
+// One second is therefore the tightest bound that is true of EVERY run.
+// Zero is not: it is a claim about the clock that the clock does not
+// honour, and asserting it turns a timing coincidence into a red build.
+//
+// The flake is not theoretical. It turned `main` red on the P3b merge
+// commit (CI run 40497954940), where
+// TestGatherOverdueWakes_IncludesDueUnfired failed with
+// `expected: 3600, actual: 3601`.
+//
+// The defect was in the ASSERTION, not in the wake path: the wake path
+// reported the correct overdue, measured on a clock that ticks.
+const overdueClockResolutionSeconds = 1
+
+// requireOverdueWithin asserts that a measured overdue is within the
+// clock's resolution of the expected delta.
+func requireOverdueWithin(t *testing.T, measured, expected int64, msg string) {
+	t.Helper()
+	require.InDelta(t, expected, measured, float64(overdueClockResolutionSeconds), msg)
+}
 
 // seedWake inserts a scheduled_wakes row with explicit fired / target_time
 // / metadata so tests can pin every input dimension independently. Pass
 // fired=1 to model an already-dispatched wake; pass reason="" to model
 // the empty-reason defensive-skip branch. Schema enforces reason
 // NOT NULL but does NOT enforce non-empty — the gather query's
-// `reason != ''` clause is the real defensive guard.
+// `reason != ”` clause is the real defensive guard.
 func seedWake(t *testing.T, dm *DatabaseManager, id string, targetTime int64, fired int, kind string, reason string) {
 	t.Helper()
 	var meta string
@@ -51,7 +86,19 @@ func TestGatherOverdueWakes_IncludesDueUnfired(t *testing.T) {
 	require.Len(t, got, 1)
 	require.Equal(t, "wk-due", got[0].ID)
 	require.Equal(t, "reminder", got[0].Kind)
-	require.Equal(t, int64(3600), got[0].OverdueSecs)
+	// The overdue is measured against `strftime('%s','now')` — a SECOND
+	// resolution — read at a DIFFERENT instant from the one the seed
+	// read. If the wall clock crosses a second boundary between the two
+	// reads, the measured value is 3601, not 3600. That is a property of
+	// the clock, not a defect in the wake, so the assertion tolerates
+	// one second.
+	//
+	// The tolerance is not slack for its own sake: it is the clock's
+	// resolution. TestGatherOverdueWakes_SurvivesASecondBoundaryCrossing
+	// crosses a boundary deliberately and pins that the measurement
+	// lands inside this window.
+	requireOverdueWithin(t, got[0].OverdueSecs, 3600,
+		"a wake due an hour ago is overdue by an hour")
 }
 
 func TestGatherOverdueWakes_SkipsFired(t *testing.T) {
@@ -117,7 +164,7 @@ func TestGatherOverdueWakes_CapsAt5(t *testing.T) {
 func TestGatherOverdueWakes_SkipsEmptyReason(t *testing.T) {
 	dm := NewTestDM(t)
 	now := dm.nowUnix(t)
-	seedWake(t, dm, "wk-empty", now-3600, 0, "reminder", "")  // defensive skip
+	seedWake(t, dm, "wk-empty", now-3600, 0, "reminder", "") // defensive skip
 	seedWake(t, dm, "wk-good", now-3600, 0, "reminder", "Real reason")
 
 	got := dm.gatherOverdueWakes()
@@ -163,7 +210,16 @@ func TestGatherOverdueWakes_NegativeOverdueClampedToZero(t *testing.T) {
 
 	got := dm.gatherOverdueWakes()
 	require.Len(t, got, 1)
-	require.Equal(t, int64(0), got[0].OverdueSecs, "boundary target_time=now → overdue=0 (not negative)")
+	// The clamp invariant is asserted STRICTLY and separately: the
+	// overdue must never be negative. That is the point of this test.
+	require.GreaterOrEqual(t, got[0].OverdueSecs, int64(0),
+		"boundary target_time=now → overdue must never be negative — the clamp must hold")
+	// The upper bound tolerates the same one-second clock resolution as
+	// the test above: a wake whose target_time was `now` at seed time may
+	// measure as overdue by one second if the clock ticked between the
+	// two reads.
+	requireOverdueWithin(t, got[0].OverdueSecs, 0,
+		"target_time=now may tick to overdue=1 across a second boundary")
 }
 
 func TestHumanizeOverdueSecs_CoarseBucketing(t *testing.T) {
@@ -204,6 +260,82 @@ func TestGatherWakeContext_IncludesOverdueWakesInPayload(t *testing.T) {
 		"renderer must show the kind tag")
 	require.Contains(t, rendered, "wk-cross",
 		"renderer must show the wake id")
+}
+
+// TestGatherOverdueWakes_SurvivesASecondBoundaryCrossing is the
+// regression test for a latent flake in this file.
+//
+// THE DEFECT. The overdue is computed as
+//
+//	CAST(strftime('%s','now') AS INTEGER) - target_time
+//
+// read at ONE instant, while the test's seed read `strftime('%s','now')`
+// at a DIFFERENT instant. If the wall clock crosses a second boundary
+// between those two reads, a wake seeded 3600 seconds in the past
+// measures as 3601 — and the original assertion, which demanded exactly
+// 3600, fails.
+//
+// This is not a defect in the wake path. It is a defect in the ASSERTION:
+// it demanded a precision the wall clock cannot provide. And it is a
+// flake that can turn `main` red for no reason — which is exactly what
+// it did on the P3b merge commit (run 40497954940), where
+// TestGatherOverdueWakes_IncludesDueUnfired failed with
+// `expected: 3600, actual: 3601`.
+//
+// THE FIX. The assertions above tolerate one second, because one second
+// is the clock's resolution.
+//
+// THE NON-VACUITY. This test crosses a boundary ON PURPOSE, so the
+// measurement it observes is deterministically 3601 (or 1). Under the
+// original exact assertions, both would fail. Here it must pass — which
+// is what proves the tolerance is load-bearing rather than decorative.
+func TestGatherOverdueWakes_SurvivesASecondBoundaryCrossing(t *testing.T) {
+	dm := NewTestDM(t)
+	now := dm.nowUnix(t)
+	seedWake(t, dm, "wk-due", now-3600, 0, "reminder", "Re-evaluate X")
+
+	// Cross a wall-clock second boundary between the seed and the gather.
+	waitForSecondTick(t, dm, now)
+
+	got := dm.gatherOverdueWakes()
+	require.Len(t, got, 1)
+	requireOverdueWithin(t, got[0].OverdueSecs, 3600,
+		"crossing a second boundary must not break the assertion")
+
+	// And the same, at the other boundary: target_time=now measures 1
+	// once the clock has ticked, and the CLAMP still holds — the value
+	// is never negative.
+	dm2 := NewTestDM(t)
+	now2 := dm2.nowUnix(t)
+	seedWake(t, dm2, "wk-now", now2, 0, "reminder", "Due right now")
+
+	waitForSecondTick(t, dm2, now2)
+
+	got2 := dm2.gatherOverdueWakes()
+	require.Len(t, got2, 1)
+	require.GreaterOrEqual(t, got2[0].OverdueSecs, int64(0),
+		"the clamp must hold across a second boundary too")
+	requireOverdueWithin(t, got2[0].OverdueSecs, 0,
+		"target_time=now may tick to overdue=1 across a second boundary")
+}
+
+// waitForSecondTick blocks until the database's own clock has advanced
+// past `from`, and fails the test if it has not within a few seconds.
+//
+// It uses the SAME clock the gather query uses — the test DB's
+// `strftime('%s','now')` — so "the clock has ticked" is exactly the
+// condition the flake needs. It waits at most about a second on
+// average, and never more than the bound.
+func waitForSecondTick(t *testing.T, dm *DatabaseManager, from int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if dm.nowUnix(t) > from {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("the database clock did not advance past %d within 5s", from)
 }
 
 // nowUnix is a tiny helper that returns the current Unix-seconds from
