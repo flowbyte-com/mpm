@@ -463,14 +463,14 @@ gone from three failures to two, and no test was weakened, inverted or deleted.
 
 ---
 
-## 10. Commit and PR
+## 10. Commit, PR and results
 
 | | |
 |---|---|
 | Branch | `feat/session-b-d3-legacy-citations` |
 | Base | `origin/main` = `3abfdda` |
-| Commit | `0643b22` — *fix(core): a legacy citation must record the type of what it cites (D3)* |
-| PR | see below |
+| PR | **#141** |
+| Commits | `0643b22` — *fix(core): a legacy citation must record the type of what it cites (D3)*<br>`2495ed8` — *docs(dev): the D3 report*<br>`e826290` — *test(m5): the legacy path's fingerprint is its event_id, not its mislabel* |
 
 Files changed:
 
@@ -480,3 +480,50 @@ Files changed:
 | `internal/core/d3_legacy_citation_test.go` | **new** — 4 regression tests |
 | `internal/core/tools/p2_citation_tool_test.go` | **amended** — the legacy-path test now asserts the legacy `event_id` fingerprint and the corrected `source_type` (§5.2) |
 | `cmd/mpm-mcp/p2_citation_mcp_test.go` | **amended** — the same, over MCP; plus a corrected comment on the typed-path test |
+| `docs/dev/session-b-d3-legacy-citations.md` | **new** — this report |
+
+### 10.1 Test results
+
+Every suite below was run against the branch head `e826290`, on a disposable file-backed
+database in an isolated `HOME` / `MPM_WORKSPACE` / `MPM_DB_PATH` root.
+
+| Suite | Command | Result |
+|---|---|---|
+| `internal/core` (+ 10 sub-packages) | `go test -tags fts5 -count=1 ./...` | **ok** — `mpm-core` 222.0s, `capability` 7.2s, `orchestration` 0.2s, `seed` 1.8s, `synth` 8.1s, and 5 more; **zero failures** |
+| `internal/core/tools` | `go test -tags fts5 -count=1 ./...` | **ok** 33.9s — zero failures |
+| root module (17 packages) | `go test -tags fts5 -count=1 ./...` | **ok** — `cmd/mpm` 393.2s, `cmd/mpm-mcp` 7.2s, `cmd/mpm-telemetry` 13.6s, `internal/critic` 4.3s, `internal/scheduler` 22.6s, `internal/testenv` 5.0s, and 11 more; **zero failures** |
+| the M5 contract suite | `go test -tags 'fts5 m5contract' -count=1 -run 'TestM5Contract'` | **2 failures, both OPEN by design** — `UnresolvableCitationIsRejected` (D3-a) and `CycleVaryingTagDoesNotCreateSecondProposal` (D4, PR #140). `CitationPreservesItsType` — D3-b — **passes**. |
+| the M5 characterization suite | `go test -tags fts5 -count=1 -run 'TestM5Characterization'` | **ok** — all three pass; the defective behaviours remain pinned as characterizations |
+| `go vet ./...` | — | clean |
+| `gofmt -l` on the touched files | — | clean |
+| `mpm-lint --gate` | — | **PASS** |
+| `make test-race` | — | see §10.2 |
+| CI (PR #141) | — | see §10.2 |
+
+### 10.2 The race-detector gate and CI
+
+| Gate | Result |
+|---|---|
+| `make test-race` | **PASS** — `EXIT=0`, **24 Go packages ok under `-race`, zero `FAIL` and zero `DATA RACE`**; `make test-scripts` OK (540 tests, floor 50), `make test-bench` OK (217 tests, floor 50), `make test-agent-installation` OK (503 tests, floor 300), `make test-agent-adapters` OK (Python 312 / floor 150, JS 164 / floor 100, TS 89 / floor 15) |
+| CI — Build + core tests | **SUCCESS** |
+| CI — Full test suite | **SUCCESS** |
+| CI — Release gate (cross-agent continuity + public-CLI subprocess suite) | *pending* |
+
+The race-gate package timings:
+
+| Package | Time under `-race` |
+|---|---|
+| `cmd/mpm` | 403.1s |
+| `mpm-core` (`internal/core`) | 243.0s |
+| `internal/core/tools` | 40.9s |
+| `internal/scheduler` | 22.7s |
+| `cmd/mpm-mcp` | 8.2s |
+| `internal/critic` | 4.1s |
+| `internal/testenv` | 8.0s |
+
+**Note for the reviewer.** The D3 branch's race gate is green *because* of the two P2
+amendments. The first CI run on the branch failed on all three jobs — and the failure was
+the unamended `TestP2MCP_LegacyCitationIsUnchangedOverMCP`, which asserted the old
+`"memory"` value. That is the compatibility conflict of §5.2 showing up in CI rather than
+in a report: the two suites cannot both hold, and the amendment is what makes the branch
+buildable.
