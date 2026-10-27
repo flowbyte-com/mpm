@@ -168,15 +168,24 @@ func TestM5Characterization_DuplicateEvidenceInflatesConfidence(t *testing.T) {
 // carries NO status column, so a lesson that has been written is
 // indistinguishable from a lesson that has been reviewed and accepted.
 //
-// The critic writes lessons directly (SurvivalAsymmetryHunt and
-// WeakTheoryHunt both emit `mpm_lessons save` on every cycle, with no
-// evidence and no review — see internal/critic/hunts.go:106-118 and
-// :297-309). The critic-side characterization of that emission lives in
-// internal/critic/m5_trust_characterization_test.go.
+// The critic no longer writes lessons directly. Session B's P3b
+// (2026-10-27) moved SurvivalAsymmetryHunt and WeakTheoryHunt to
+// `mpm_theories propose` — the only existing untrusted proposal surface —
+// so the critic stopped writing into the trusted lesson surface at all.
+//
+// What this test pins is therefore the SUBSTRATE half of D2, which is NOT
+// closed: the lesson surface itself still has no way to record "proposed
+// but not reviewed". Any other writer — an agent, an adapter, a future
+// tool — that writes a lesson still writes TRUSTED knowledge on arrival.
+// The critic-side characterization of the old behaviour lived in
+// internal/critic/m5_trust_characterization_test.go and is retired; its
+// M5-compliant counterpart is now ordinary CI coverage as
+// TestP3b_CriticFindingIsNotTrustedWithoutReview in
+// internal/critic/p3b_trust_boundary_test.go.
 //
 // WHY IT MATTERS. M5 requires that neither the adapter nor the critic
-// promotes. Today the critic writes into a surface where every row is
-// trusted on arrival.
+// promotes. The critic no longer does; the SURFACE still cannot express
+// the difference.
 //
 // MEASURED (Session B, 2026-10-26): the pragma of lessons_base lists
 // rowid, id, type, content, tags, reinforcement_count, source_session_id,

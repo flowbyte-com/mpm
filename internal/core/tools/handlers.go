@@ -2996,7 +2996,8 @@ func fetchRecentMemoriesByCollection(dm mpminternal.CoreDB, collection string, l
 		limit = 5
 	}
 	rows, err := dm.SQLDB().Query(`
-		SELECT id, content, created_at FROM memories
+		SELECT id, content, created_at, coalesce(json_extract(metadata, '$.status'), '')
+		FROM memories
 		WHERE deleted_at IS NULL AND collection = ?
 		ORDER BY created_at DESC LIMIT ?`, collection, limit)
 	if err != nil {
@@ -3014,8 +3015,8 @@ func fetchRecentMemoriesByCollection(dm mpminternal.CoreDB, collection string, l
 	pointerKind := memoryPointerKindForCollection(collection)
 	out := make([]map[string]interface{}, 0, limit)
 	for rows.Next() {
-		var id, content, createdAt string
-		if scanErr := rows.Scan(&id, &content, &createdAt); scanErr != nil {
+		var id, content, createdAt, status string
+		if scanErr := rows.Scan(&id, &content, &createdAt, &status); scanErr != nil {
 			// Wake-context surfacing is best-effort: a malformed row must not
 			// abort the whole wake payload. Logged-swallow (warn to watchdog)
 			// rather than silent-continue so an operator can investigate
@@ -3034,12 +3035,31 @@ func fetchRecentMemoriesByCollection(dm mpminternal.CoreDB, collection string, l
 			summary = summary[:256]
 		}
 		summary = strings.ReplaceAll(summary, "\n", " ")
-		out = append(out, map[string]interface{}{
+		entry := map[string]interface{}{
 			"id":         id,
 			"summary":    summary,
 			"pointer":    pointerKind + "/" + id,
 			"created_at": createdAt,
-		})
+		}
+		// P3b (2026-10-27): the artifact's own status, when it has one.
+		//
+		// WHY. The critic now emits PENDING PROPOSALS, and a pending
+		// proposal reaches the agent's context through this very
+		// surface. Adjudication §6c.2 limitation 2 states that such a
+		// proposal "would reach the agent's context immediately — labelled
+		// pending, not promoted". Before this field the label did not
+		// exist: the pointer carried an id, a summary and a pointer URI,
+		// and nothing distinguished a pending proposal from a resolved
+		// one. A consumer could not tell an unreviewed proposal from
+		// established knowledge without a second round trip.
+		//
+		// The key is emitted ONLY when the row carries a status, so
+		// collections that have none (decisions use `invalidated` /
+		// `superseded` flags instead) are unchanged on the wire.
+		if status != "" {
+			entry["status"] = status
+		}
+		out = append(out, entry)
 	}
 	if out == nil {
 		out = []map[string]interface{}{}
