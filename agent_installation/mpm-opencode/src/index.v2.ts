@@ -40,6 +40,7 @@
  * so the operator sees it on every restart. Per-call failures fail-open.
  */
 import { spawn } from "node:child_process";
+import { appendFileSync } from "node:fs";
 import { Plugin } from "@opencode/plugin";
 import { withWorkspace } from "./workspace.js";
 import { resolveMpmBinary, DiscoveryAttempt } from "./resolve-mpm-binary.js";
@@ -47,6 +48,19 @@ import {
   createWakeContextInjector,
   extractWakeContextText,
 } from "./wake-context.js";
+import {
+  resolveAdapterVersion,
+  resolveProjectIdentity,
+} from "./event-envelope.js";
+import {
+  createLifecycleObserver,
+  createMpmSystemTransport,
+  createUnconfiguredTransport,
+  summariseCounters,
+  type EventTransport,
+  type LifecycleObserver,
+} from "./event-subscriber.js";
+import type { HostEvent } from "./event-mapper.js";
 
 /**
  * JSON decoded from mpm's stdout. Deliberately `any`-shaped: mpm's payload
@@ -315,6 +329,110 @@ function emitBootWarning(bin: string, reason: string): void {
     ``,
   ];
   for (const line of lines) console.warn(line);
+}
+
+// --------------------------------------------------------------------------
+// Lifecycle observer (P4) — subscription, mapping, bounded delivery
+// --------------------------------------------------------------------------
+//
+// The host event stream is an AsyncIterable (measured on v2.1.4:
+// `ctx.event.subscribe({signal})`). Subscription is best-effort and the
+// stream is volatile, so this is observation only: it maps an explicit
+// allowlist, buffers with a bound, and hands envelopes to a transport.
+//
+// Core ingestion is P5. `MPM_EVENT_INGEST` selects the transport:
+//   unset / anything else -> unconfigured (counted, nothing delivered)
+//   "mpm_system"          -> the provisional P5 client (degrades cleanly
+//                            while the endpoint does not exist)
+type HostContextForEvents = {
+  app?: { version?: string };
+  location?: {
+    directory?: string;
+    project?: { id?: string; directory?: string };
+  };
+  event?: {
+    subscribe(options?: { signal?: AbortSignal }): AsyncIterable<unknown>;
+  };
+};
+
+function resolveEventTransport(bin: string): EventTransport {
+  const mode = (process.env.MPM_EVENT_INGEST ?? "").trim().toLowerCase();
+  if (mode !== "mpm_system") {
+    return createUnconfiguredTransport();
+  }
+  return createMpmSystemTransport({
+    call: async (toolName, payload) => {
+      const r = await callMpm(bin, toolName, payload, { timeoutMs: 5_000 });
+      return { success: r.success, payload: r.payload };
+    },
+    retryDelayMs: 50,
+  });
+}
+
+function startLifecycleObserver(bin: string, ctx: HostContextForEvents): LifecycleObserver | null {
+  if ((process.env.MPM_EVENT_OBSERVABILITY ?? "").trim().toLowerCase() === "off") {
+    return null;
+  }
+  const stream = ctx.event;
+  if (!stream || typeof stream.subscribe !== "function") {
+    // A host without the event surface yields no events and no placeholder
+    // (contract §4). This is a capability absence, not an error.
+    if ((process.env.MPM_EVENT_DEBUG_DUMP ?? "").trim() !== "") {
+      try {
+        appendFileSync(
+          (process.env.MPM_EVENT_DEBUG_DUMP as string).trim(),
+          JSON.stringify({ kind: "observer.init", has_event_stream: false }) + "\n",
+        );
+      } catch {
+        /* diagnostic only */
+      }
+    }
+    return null;
+  }
+
+  const app = ctx.app ?? {};
+  const location = ctx.location ?? {};
+  const projectDir = location.project?.directory ?? location.directory;
+  // A13: the host's id is adopted only when a git remote confirms it.
+  const identity = resolveProjectIdentity({
+    projectDir,
+    hostProjectId: location.project?.id ?? null,
+  });
+  if (identity.note) {
+    console.warn(`mpm-opencode lifecycle: ${identity.note}`);
+  }
+
+  const observer = createLifecycleObserver({
+    subscribe: ({ signal }) => stream.subscribe({ signal }) as AsyncIterable<HostEvent>,
+    transport: resolveEventTransport(bin),
+    mapping: {
+      hostVersion:
+        typeof app.version === "string" && app.version !== "" ? app.version : "unknown",
+      adapterVersion: resolveAdapterVersion(),
+      projectId: identity.project_id,
+      projectIdSource: identity.project_id_source,
+    },
+    debugDumpPath: (process.env.MPM_EVENT_DEBUG_DUMP ?? "").trim() || undefined,
+  });
+  observer.start();
+  if ((process.env.MPM_EVENT_DEBUG_DUMP ?? "").trim() !== "") {
+    try {
+      appendFileSync(
+        (process.env.MPM_EVENT_DEBUG_DUMP as string).trim(),
+        JSON.stringify({
+          kind: "observer.init",
+          has_event_stream: true,
+          transport: resolveEventTransport(bin).mode,
+          project_id: identity.project_id,
+          project_id_source: identity.project_id_source,
+          host_version: app.version ?? null,
+        }) + "\n",
+      );
+    } catch {
+      /* diagnostic only */
+    }
+  }
+  return observer;
 }
 
 // --------------------------------------------------------------------------
@@ -626,9 +744,23 @@ export default Plugin.define({
             }
         });
 
+        // ----- Lifecycle events (P4) ----------------------------------------
+        // Observes host session/tool/compaction events through the measured
+        // AsyncIterable stream, maps an explicit allowlist, and buffers with a
+        // bound. Emits nothing to storage: core ingestion is P5.
+        const lifecycle = startLifecycleObserver(bin, ctx as unknown as HostContextForEvents);
+
         return () => {
             // cleanup: drop per-session wake cache (session store is process-local)
             wakeContext.clear();
+            if (lifecycle) {
+                // Bounded, best-effort flush. The process may exit before it
+                // completes; the summary line is diagnostic, not a receipt.
+                void lifecycle
+                    .stop({ timeoutMs: 750 })
+                    .then((c) => console.warn(summariseCounters(c)))
+                    .catch(() => undefined);
+            }
         };
     },
 });
