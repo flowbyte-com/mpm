@@ -124,19 +124,34 @@ func TestCriticCycle_PoisonPillAcrossProcessInvocations(t *testing.T) {
 	}
 }
 
-// TestCriticCycle_PoisonPillTagUsesDurableCycle pins that the fifth
-// invocation tags the finding with the DURABLE cycle number, not a
-// process-local one.
-func TestCriticCycle_PoisonPillTagUsesDurableCycle(t *testing.T) {
+// TestCriticCycle_PoisonPillReflectsDurableCycle pins that the fifth
+// invocation observes the DURABLE cycle number, not a process-local one.
+//
+// The observable changed on 2026-10-27 (Session B's P3). The cycle number
+// used to be carried in the poison pill's TAGS, but the tags are part of
+// the proposal's identity hash, so a cycle-varying tag made every cycle's
+// poison pill a DISTINCT proposal — the D4 defect, which floods the
+// substrate with indistinguishable pending theories.
+//
+// The cycle number now lives in the finding's Reason, which is logged and
+// never persisted. The durable counter itself is observed through
+// Audit.Cycle(), which is what this test is actually about: that the
+// counter survives a process boundary.
+func TestCriticCycle_PoisonPillReflectsDurableCycle(t *testing.T) {
 	db := newSharedCriticDB(t)
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	seed, _ := New(db, log)
 	seedMemory(t, seed, "target", "memories", "high conf", "", 0.95, "", time.Now())
 
 	for inv := 1; inv <= 5; inv++ {
-		_, cli := simulateProcessInvocation(t, db)
+		a, cli := simulateProcessInvocation(t, db)
 		if inv != 5 {
 			continue
+		}
+		// The fifth process observes cycle 5 — durable, not
+		// process-local.
+		if a.Cycle() != 5 {
+			t.Errorf("fifth invocation cycle=%d, want 5", a.Cycle())
 		}
 		found := false
 		for _, c := range cli.Calls() {
@@ -151,16 +166,19 @@ func TestCriticCycle_PoisonPillTagUsesDurableCycle(t *testing.T) {
 				t.Fatalf("decode payload: %v", err)
 			}
 			for _, tag := range payload.Tags {
-				if tag == "cycle_5" {
-					found = true
-				}
-				if tag == "cycle_0" || tag == "cycle_1" {
-					t.Errorf("poison pill tagged with process-local cycle %q; want cycle_5", tag)
+				// The cycle marker must NOT be in the payload: the
+				// payload's identity-bearing fields are the hypothesis,
+				// the tags and the validation criteria.
+				if tag == "cycle_0" || tag == "cycle_1" || tag == "cycle_5" {
+					t.Errorf("poison pill tagged with cycle marker %q; the "+
+						"cycle number belongs in the finding's Reason, not in "+
+						"the proposal's identity", tag)
 				}
 			}
+			found = true
 		}
 		if !found {
-			t.Errorf("fifth invocation did not tag poison pill with cycle_5")
+			t.Errorf("fifth invocation did not emit the poison pill")
 		}
 	}
 }
