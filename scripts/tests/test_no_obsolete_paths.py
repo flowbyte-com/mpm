@@ -187,7 +187,6 @@ class TestCanonicalRepositoryRoot(unittest.TestCase):
     # Only these are checked: current, user-facing install documentation.
     GUARDED_DOCS = (
         "README.md",
-        "AUTO_AGENT_INSTALL.md",
         "docs/INSTALL.md",
         "docs/SPEC.md",
         "agent_installation/INSTALL.md",

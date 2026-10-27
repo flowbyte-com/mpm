@@ -68,6 +68,17 @@ OBSOLETE_ADAPTERS = {
 # tracked file is a regression.
 FORBIDDEN_NAMES = sorted(OBSOLETE_ADAPTERS)
 
+# The subset of the obsolete names that were ADAPTER DIRECTORY names
+# (the pre-2026-09-17 convention renamed the directories themselves).
+# The remaining obsolete names are legacy PLUGIN ids that a migration
+# or uninstall path may legitimately name.
+OBSOLETE_ADAPTER_DIR_NAMES = {
+    "claude-code-mpm",
+    "hermes-mmp",
+    "opencode-mpm",
+    "pi-mpm",
+}
+
 # Paths that are allowed to retain old names. They are explicitly
 # historical record and are not active code.
 HISTORICAL_ALLOWLIST_DIRS = (
@@ -334,14 +345,28 @@ class TestNamingInvariants(unittest.TestCase):
                 f"install.sh must not reference '{name}' — it is host-agnostic",
             )
 
-    def test_auto_agent_install_md_references_only_canonical(self) -> None:
-        """AUTO_AGENT_INSTALL.md references only the six canonical adapter paths."""
-        src = (REPO_ROOT / "AUTO_AGENT_INSTALL.md").read_text()
-        for name in FORBIDDEN_NAMES:
+    def test_canonical_install_doc_references_only_canonical(self) -> None:
+        """The canonical installation doc names only canonical adapter paths.
+
+        AUTO_AGENT_INSTALL.md was retired (it described a multi-host
+        dispatch that no longer reflects the release). The canonical
+        installation authority is now agent_installation/INSTALL.md, and
+        it must carry the same "no obsolete adapter directory" invariant
+        the retired file carried.
+
+        The legacy *plugin ids* (`openclaw-mpm-memory`,
+        `openclaw-mpm-auto-mode-persona`) remain permitted here: the
+        OpenClaw uninstall section documents them so the operator
+        recognises a pre-2026-09-17 registration. That file is already
+        exempted as MIGRATION_AWARE.
+        """
+        src = (REPO_ROOT / "agent_installation" / "INSTALL.md").read_text()
+        for name in OBSOLETE_ADAPTER_DIR_NAMES:
             self.assertNotIn(
                 name,
                 src,
-                f"AUTO_AGENT_INSTALL.md must not reference obsolete '{name}'",
+                f"agent_installation/INSTALL.md must not reference obsolete "
+                f"adapter directory '{name}'",
             )
 
 

@@ -162,10 +162,11 @@ ONBOARDING_SUPPORT = [
 # it — which is exactly what it is invited to do — found nothing.
 #
 # The protocol is the detailed semantics behind the managed block's
-# summary rules (AUTO_AGENT_INSTALL.md names it as source-of-truth tier
-# 3). The block is the always-loaded summary; this document is what an
-# agent reads when it needs the full contract. Without it installed,
-# that distinction is invisible.
+# summary rules (agent_installation/INSTALL.md names it as the
+# source-of-truth tier below the adapter implementation). The block is
+# the always-loaded summary; this document is what an agent reads when
+# it needs the full contract. Without it installed, that distinction is
+# invisible.
 #
 # This stages the existing canonical file. It does not create a second
 # copy: the repo file remains the single source of truth, and the

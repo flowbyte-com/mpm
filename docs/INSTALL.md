@@ -373,23 +373,65 @@ why pre-compute `next_run_at`) documented in [Specification: Agentic Cron](SPEC.
 
 ## 3. Wire to your host
 
-> **Pick one.** MPM supports five host adapters — Claude Code, OpenCode,
-> Pi, Hermes, and OpenClaw — each pinned by a managed-section install of
-> the canonical MPM behavioral protocol (`~/.mpm/agent_installation/
-> mpm-agent-protocol.md`). See `agent_installation/INSTALL.md` for the
-> per-host install/verify/uninstall walkthroughs. The recommended
-> install (Section 1) auto-wires the OpenClaw adapter when it detects
-> the `openclaw` binary; the other four adapters ship their own
-> `./install.sh` and Python snippet installers. Re-run the host adapter
-> installer after switching hosts. No `sudo` is required at any point —
-> every command below runs in the user's context.
+> **OpenCode is the officially supported agent host for this release.**
+> The supported integration is the `mpm-opencode` adapter: an OpenCode
+> plugin plus a managed behavioural block in the host's `AGENTS.md`.
+>
+> ```bash
+> cd ~/.mpm/agent_installation/mpm-opencode
+> ./install.sh
+> ```
+>
+> The installer builds the plugin payload, registers it in
+> `~/.config/opencode/opencode.jsonc`, and refreshes the managed block in
+> `~/.config/opencode/AGENTS.md`. Restart OpenCode afterwards.
+>
+> `agent_installation/INSTALL.md` is the canonical installation and
+> integration authority and carries the full OpenCode walkthrough —
+> prerequisites, verification, updates, recovery and uninstall.
+>
+> **The other adapters.** `agent_installation/` still contains adapter
+> directories for Claude Code, Pi, Hermes and OpenClaw. They are **not
+> supported in this release** and are not maintained for it; they remain
+> in the tree for operators who already run them. No `sudo` is required at
+> any point — every command runs in the user's context.
+>
+> **The substrate is host-independent.** The MPM CLI, `mpm call <tool>
+> --payload '<json>'`, and the `mpm-mcp` stdio server work from any host.
+> What an unsupported host lacks is the managed behavioural block and
+> host-native wake-context delivery.
 
-### 3a. OpenClaw (auto-wired by install script)
+### 3a. OpenCode (the supported host)
 
-The install script detects OpenClaw and registers the MCP server automatically,
-pointing at `$HOME/.local/bin/mpm-mcp` (the symlink the installer created)
-with `MPM_WORKSPACE=$HOME/.mpm`. If you skipped that step or need to
-re-register manually:
+See `agent_installation/INSTALL.md` § OpenCode for the authoritative
+walkthrough. The short form:
+
+```bash
+# Build, register the plugin, refresh the managed behavioural block.
+cd ~/.mpm/agent_installation/mpm-opencode
+./install.sh
+
+# Verify the plugin registered and the managed block is present.
+opencode # then :tools — expect 17 tool registrations named `mpm_*`
+grep -c 'BEGIN MPM-MANAGED SECTION:opencode-instructions' \
+  ~/.config/opencode/AGENTS.md
+# expect: 1
+```
+
+### 3b. Other adapters (not supported in this release)
+
+The remaining adapter directories keep their own per-host walkthroughs in
+`agent_installation/INSTALL.md`. They are retained for operators who
+already run them; they are not maintained for this release. They are
+**not** the supported integration and their instructions are not part of
+the OpenCode release path.
+
+#### OpenClaw
+
+The OpenClaw adapter reconciles only on a machine that **already has the
+MPM OpenClaw integration installed** (its plugin directory or its
+`openclaw.json` plugin entry). A fresh MPM install does **not** detect the
+`openclaw` binary and wire the adapter for you. To wire it by hand:
 
 ```bash
 openclaw mcp add mpm \
@@ -421,7 +463,7 @@ openclaw mcp show mpm | grep MPM_WORKSPACE   # expect: "$HOME/.mpm"
 openclaw mcp doctor mpm --probe              # expect: probe passes
 ```
 
-### 3b. Hermes
+#### Hermes
 
 ```bash
 hermes mcp add mpm \

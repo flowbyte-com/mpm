@@ -12,8 +12,9 @@
 #   with, or restart any agent framework (OpenClaw, Claude Code,
 #   OpenCode, Pi, Hermes, …). Framework-specific MCP / plugin
 #   wiring lives exclusively under agent_installation/ and is
-#   installed by each host's own installer. See AUTO_AGENT_INSTALL.md
-#   for framework discovery and per-host dispatch.
+#   installed by each host's own installer. See
+#   agent_installation/INSTALL.md for framework discovery and per-host
+#   dispatch.
 #
 # What this script does:
 #   1. Builds binaries (mpm, mpm-mcp, mpm-scheduler, mpm-critic, mpm-telemetry)
@@ -217,7 +218,7 @@ detect_os() {
 
 # Detect the init system. systemd is the only supported init; the
 # legacy `--system` install path that wrote to /etc/systemd/system
-# has been removed (see AUTO_AGENT_INSTALL.md for host-specific
+# has been removed (see agent_installation/INSTALL.md for host-specific
 # wiring; this script owns the MPM substrate only).
 detect_init_system() {
     if command -v systemctl >/dev/null 2>&1 && \

@@ -51,7 +51,7 @@ func TestRegistry_mpm_challenge_Retired(t *testing.T) {
 //
 // Change this constant deliberately, with a corresponding update to
 // generator/docs that hard-code the count (e.g. specification tool listing,
-// agent_installation INSTALL.md `expect: 21`, AUTO_AGENT_INSTALL.md).
+// agent_installation/INSTALL.md).
 func TestRegistry_CurrentToolCount(t *testing.T) {
 	const want = 21
 	if got := len(Registry); got != want {

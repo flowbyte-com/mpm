@@ -3,17 +3,29 @@
 OpenCode plugin that wires MPM's cognitive substrate in as **17 typed
 tools** (a curated subset of the full MPM Registry).
 
-## Parity with Claude Code Integration
+## Host lifecycle surface
 
-This plugin achieves functional parity with the [Claude Code integration](agent_installation/mpm-claude-code/CLAUDE_CODE_INTEGRATION.md) through OpenCode's hook system:
+OpenCode is the officially supported agent host for this release. The plugin
+uses the **OpenCode 2 plugin API** (`@opencode/plugin`, `Plugin.define` +
+`ctx.tool.transform`); the lifecycle surface is OpenCode's own, not another
+host's:
 
-| Claude Code Mechanism | OpenCode Equivalent |
+| Behaviour | OpenCode 2 surface |
 |---|---|
-| `SessionStart` hook → `~/.claude/hooks/mpm-session-start` | `experimental.chat.system.transform` hook → push into `output.system` |
-| `MPM_PROVENANCE_*` env vars from `CLAUDE_*` runtime vars | `shell.env` hook + per-call provenance in `callMpmWithProvenance` |
-| Session End ≠ Claimed Complete (semantic contract) | Same contract applies — use `mpm_work complete` explicitly |
+| Wake context delivered before the first model turn | `ctx.session.hook("context")` → push into `output.system` |
+| `MPM_PROVENANCE_*` env vars for shell-spawned `mpm call` | `ctx.shell.hook("create.before")` |
+| Provenance on every programmatic tool call | `callMpmWithProvenance` (per-call env) |
+| Session End ≠ Claimed Complete (semantic contract) | Use `mpm_work complete` explicitly |
 
-The OpenCode plugin provides **automatic wake context injection** at session start (via `experimental.chat.system.transform`) and **provenance tracking** for all MPM calls (via `shell.env` hook and per-call env vars). The lifecycle surface is host-specific (ClaudeCode's `SessionStart` vs. OpenCode's `experimental.chat.system.transform`); the *behavior* — wake context delivered before the first model turn — is shared.
+The plugin provides **automatic wake context injection** at session start (via
+`ctx.session.hook("context")`) and **provenance tracking** for all MPM calls
+(via `ctx.shell.hook("create.before")` and per-call env vars).
+
+> **Naming.** `experimental.chat.system.transform` and `shell.env` are the
+> **OpenCode V1** hook names. The V1 implementation is retained at
+> `src/index.ts` as a historical reference only; it is not loadable by
+> OpenCode 2. The loadable plugin is `src/index.v2.ts`, and the hook names
+> above are the ones it actually registers.
 
 ## Coverage
 
@@ -21,8 +33,8 @@ The OpenCode plugin provides **automatic wake context injection** at session sta
 
 | Layer | Count | Source |
 |---|---|---|
-| Unified Domain Tools ("Fat RPC") | 14 | `src/index.ts` (hand-written) |
-| Standalone tools | 3 | `src/index.ts` (hand-written) |
+| Unified Domain Tools ("Fat RPC") | 14 | `src/index.v2.ts` (hand-written) |
+| Standalone tools | 3 | `src/index.v2.ts` (hand-written) |
 
 ### 14 Domain Tools
 
@@ -40,7 +52,7 @@ free-form `params`:
 > is the compact 3-tool surface (`mpm_memory`, `mpm_context`,
 > `mpm_help`); `MPM_EXPOSE_ALL_TOOLS=1` in the MCP env block restores
 > the full registered MCP surface. The OpenCode plugin's typed tools
-> (`mpm__mpm_handoff`, `mpm__mpm_scratchpad`, etc.) are exposed
+> (`mpm_handoff`, `mpm_scratchpad`, etc.) are exposed
 > directly regardless of the MCP filter because the OpenCode plugin
 > registers its own typed tools via OpenCode's plugin API, not via
 > `mpm-mcp`'s `tools/list`.
@@ -62,7 +74,7 @@ free-form `params`:
 | `mpm_skills` | save, read, list, delete, promote_to_global |
 | `mpm_system` | gc_run, compact, health_check, migrate, query_audit_log, list_clusters, snooze_cluster, resolve_cluster, annotate_cluster |
 
-All 13 share the same `args` shape:
+All 14 share the same `args` shape:
 
 ```ts
 {
@@ -121,7 +133,7 @@ On plugin initialization, the plugin pings `mpm call mpm_system action:health_ch
   tools will fail-open on each call until mpm is reachable.
 ```
 
-This is the same defensive boot hook we added to `@openclaw/mpm-memory` (see `agent_installation/mpm-memory-openclaw/index.js`). The check fires loud on every OpenCode restart so the operator sees it. Per-call failures still fail-open (each tool returns a soft error envelope) so a transient mpm blip doesn't kill the turn.
+This is a defensive boot hook: the plugin refuses to be silently broken. The check fires loud on every OpenCode restart so the operator sees it. Per-call failures still fail-open (each tool returns a soft error envelope) so a transient mpm blip doesn't kill the turn.
 
 Triggers DEGRADED on:
 - spawn / timeout / parse failure
@@ -131,17 +143,19 @@ Triggers DEGRADED on:
 
 ## Hooks: Wake Context & Provenance
 
-### `experimental.chat.system.transform` — Wake Context Injection
+### `ctx.session.hook("context")` — Wake Context Injection
 
 This hook runs as part of OpenCode's chat-prompt preparation, before the first model turn. It calls `mpm_context.read_wake_context` with `format: "system-prompt"` and pushes the returned context into the `output.system` array that OpenCode ships as the model-facing system prompt.
 
 - Only injects once per session (cached by `sessionID`)
-- This is OpenCode's native lifecycle surface — it is **not** equivalent to ClaudeCode's `SessionStart` hook or `mpm-wake.sh`. The behaviour is the same (wake before first turn); the implementation is host-specific.
+- This is OpenCode 2's native lifecycle surface. (The V1 plugin used the
+  experimental hook `experimental.chat.system.transform`; V1 is not loadable
+  by OpenCode 2 — see the naming note above.)
 - The wake context includes: active mode, persona, pending work, recent memories, recent milestones, last handoff, overdue wakes, and the bounded `<available_skills>` catalogue.
 
-### `shell.env` — Provenance Environment Variables
+### `ctx.shell.hook("create.before")` — Provenance Environment Variables
 
-This hook sets `MPM_PROVENANCE_*` environment variables for shell commands, ensuring that any `mpm call` invoked directly from the shell (e.g., user typing commands) has proper provenance tracking.
+This hook sets `MPM_PROVENANCE_*` environment variables for shell commands, ensuring that any `mpm call` invoked directly from the shell (e.g., user typing commands) has proper provenance tracking. (The V1 plugin used the `shell.env` hook; V1 is not loadable by OpenCode 2.)
 
 Variables set:
 | Variable | Value |
@@ -167,14 +181,16 @@ substrate records it as framework-owned session identity on
 `MPM_PROVENANCE_PARENT_INVOCATION_ID` slot stays empty unless OpenCode
 separately exposes a true causal parent invocation identifier.
 
-These match the [Claude Code integration's provenance variables](agent_installation/mpm-claude-code/CLAUDE_CODE_INTEGRATION.md#12-provenance-environment-variables).
+These four variables are the canonical `MPM_PROVENANCE_*` set for any MPM
+host integration; the substrate records them on `tool_invocations` and
+`artifact_provenance` regardless of which host produced them.
 
 ### Semantic Contract: Session End ≠ Claimed Complete
 
 > **An OpenCode session ending does not automatically emit `claimed_complete`.**
 > Only emit it when the agent explicitly closes work via `mpm call mpm_work` with `{"action":"complete","params":{"work_id":"..."}}`.
 
-This is the same semantic contract as the [Claude Code integration](agent_installation/mpm-claude-code/CLAUDE_CODE_INTEGRATION.md#33-semantic-contract-session-end--claimed-complete). A session ending is a lifecycle event, not an epistemic one — the agent may have been interrupted, hit a timeout, or simply run out of context. Emitting `claimed_complete` on session end would silently undo the verification model.
+A session ending is a lifecycle event, not an epistemic one — the agent may have been interrupted, hit a timeout, or simply run out of context. Emitting `claimed_complete` on session end would silently undo the verification model.
 
 The correct pattern:
 ```
@@ -205,27 +221,39 @@ The lightweight adapter:
 
 ## Install
 
+The adapter ships its own installer. It performs four steps, in order:
+
 ```bash
-# 1. install the plugin into opencode's plugin dir
-ln -s /path/to/agent_installation/mpm-opencode ~/.config/opencode/plugin/mpm-opencode
-
-# 2. make sure ~/.mpm/bin/mpm is on PATH (or set MPM_BINARY)
-export PATH=$HOME/.mpm/bin:$PATH
-
-# 3. install the AGENTS.md behavioral section (user scope):
-python3 ~/.mpm/agent_installation/mpm-opencode/scripts/install_agents_instructions.py \
-    --scope user \
-    --target ~/.config/opencode/AGENTS.md \
-    --snippet ~/.mpm/agent_installation/mpm-opencode/templates/AGENTS.md.snippet
-
-# 4. (re)start opencode — the plugin will register, emit the boot health check,
-#    and fire `experimental.chat.system.transform` on the first session turn.
+cd ~/.mpm/agent_installation/mpm-opencode
+./install.sh
 ```
 
-There is no shell-based `install.sh` for this adapter — the installer is
-`scripts/install_agents_instructions.py`. Manual `ln -s` is required for the
-plugin symlink because OpenCode's plugin loader does not auto-link from
-arbitrary paths; it reads `~/.config/opencode/plugin/*` directly.
+1. **Build** the plugin payload (`npm ci` against the committed
+   `package-lock.json`, then `npm run build`) into `dist/index.v2.js`,
+   recording the source revision in `dist/mpm-build-provenance.json`.
+2. **Stage** the payload into the runtime tree
+   (`~/.mpm/agent_installation/mpm-opencode/dist/`).
+3. **Register** the plugin in `~/.config/opencode/opencode.jsonc` by writing
+   a `plugins` array entry that points at the plugin **package directory**.
+4. **Refresh** the managed behavioural block in
+   `~/.config/opencode/AGENTS.md` (delegating the content work to
+   `scripts/install_agents_instructions.py`).
+
+Then restart OpenCode. The plugin registers, emits the boot health check,
+and delivers wake context on the first session turn.
+
+> **There is no symlink.** The OpenCode 2 loader resolves a *directory*
+> plugin from the `plugins` array in `opencode.jsonc`; a hand-made symlink
+> under `~/.config/opencode/plugin/` is not what the loader reads. The
+> installer writes the JSONC entry with `scripts/jsonc_config.py`, which
+> preserves unrelated plugin entries, comments and trailing commas
+> byte-for-byte.
+
+The installer is idempotent and non-destructive: re-running it refreshes the
+plugin entry and the managed block without touching other plugins, other
+config sections, or any text outside the managed-block markers. Use
+`./install.sh --verify` to confirm the deployed payload was built from the
+deployed revision, and `--uninstall` to reverse it.
 
 The plugin reads `MPM_BINARY` from env (explicit per-call override)
 and otherwise resolves the MPM binary deterministically via
@@ -237,17 +265,18 @@ depend on `$PATH` being sane in the OpenCode runtime env. The
 `MPM_WORKSPACE` env defaults to `$HOME/.mpm` (computed by
 `src/workspace.ts`).
 
-The behavioral section in step 3 is **required** for the agent to
-honor the MPM persistent-state, skill-discovery, and handoff
-invariants. The plugin wires wake-context injection automatically via
-`experimental.chat.system.transform`; the AGENTS.md managed section
-delivers the rest of the protocol.
+The managed behavioural block is **required** for the agent to honor the MPM
+persistent-state, skill-discovery, and handoff invariants. The plugin wires
+wake-context injection automatically via `ctx.session.hook("context")`; the
+AGENTS.md managed block delivers the rest of the protocol.
 
 ## Verification
 
 ```bash
 # Plugin loaded? List its typed tools in an OpenCode session:
-#   :tools — expect 17 mpm__ prefixed tool registrations
+#   :tools — expect 17 tool registrations named `mpm_*`
+#   (the OpenCode adapter registers the bare canonical names — there is no
+#    `mpm__` prefix; that prefix belongs to hosts that namespace MCP tools)
 
 # AGENTS.md has exactly one managed block:
 grep -c '<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->' \
@@ -255,10 +284,10 @@ grep -c '<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->' \
 # expect: 1
 
 # Tool count — 17 typed tools registered by this adapter:
-opencode # then :tools — count entries prefixed with `mpm__`
+opencode # then :tools — count entries named `mpm_*`
 
 # End-to-end via the plugin's exposed tool (in OpenCode):
-#   "use mpm__mpm_memory action=save to remember that mpm-opencode integration smoke test passed"
+#   "use mpm_memory action=save to remember that mpm-opencode integration smoke test passed"
 mpm recall --semantic "mpm-opencode integration smoke test"
 ```
 
@@ -268,17 +297,29 @@ mpm recall --semantic "mpm-opencode integration smoke test"
 ~/.mpm/agent_installation/mpm-opencode/install.sh --uninstall
 ```
 
-It removes MPM registrations from opencode.jsonc and strips the
-AGENTS.md managed block. For project scope, repeat the AGENTS.md step
-with `--scope project --target <project>/AGENTS.md`.
+This reverses both halves of the install in one pass:
 
-The managed-block uninstall strips both the current
-`opencode-instructions` managed block and any legacy `MPM-MANAGED
-SECTION` block (without `:opencode-instructions` suffix). If the file
-would be empty afterwards, the file is unlinked. A backup is written
-before any mutation. The config uninstall (step 1) keeps unrelated
-plugins and all comments intact and removes MPM's key entirely when
-it is emptied.
+- **Config** — removes MPM's entry from `~/.config/opencode/opencode.jsonc`,
+  including every historical shape (package directory, `dist/index.js` file
+  url, the legacy hyphenated `opencode`-`mpm` form). Unrelated plugin
+  entries, other config sections, comments and trailing commas are
+  preserved; MPM's key is removed entirely only when it is left empty.
+- **Instructions** — strips the managed block from
+  `~/.config/opencode/AGENTS.md`, covering both the current
+  `opencode-instructions` block and any legacy `MPM-MANAGED SECTION`
+  block (without the `:opencode-instructions` suffix). If the file would
+  be empty afterwards it is unlinked.
+
+A backup is written before any mutation, and **text outside the managed-block
+markers is never touched** — a user's own AGENTS.md content survives.
+
+The installer's uninstall covers the **user** scope. For a **project**-scope
+managed block, repeat the instruction step explicitly:
+
+```bash
+python3 ~/.mpm/agent_installation/mpm-opencode/scripts/install_agents_instructions.py \
+    --scope project --target <project>/AGENTS.md --uninstall
+```
 
 ## Build
 
@@ -326,21 +367,6 @@ can typecheck without vendoring the SDK; the runtime contract is pinned
 by the isolated harness test, not by types. Note also that the V1 SDK
 (`@opencode-ai/*`) is no longer resolvable from the npm registry, which
 is why the historical source must not anchor the build.
-
-## Uninstall
-
-```bash
-# 1. Remove MPM registrations from opencode.jsonc (all historical
-#    shapes: package dir, dist/index.js file url, the legacy
-#    hyphenated `opencode`-`mpm` form):
-~/.mpm/agent_installation/mpm-opencode/install.sh --uninstall
-
-# 2. Strip the managed section from AGENTS.md (user scope):
-python3 ~/.mpm/agent_installation/mpm-opencode/scripts/install_agents_instructions.py \
-    --scope user --target ~/.config/opencode/AGENTS.md --uninstall
-
-# 3. (For project scope, repeat with --scope project and the project --target.)
-```
 
 ## Manual smoke test
 
