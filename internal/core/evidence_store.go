@@ -129,8 +129,11 @@ func addEvidenceInTx(node DBNode, in EvidenceInput, expiresAt *int64) (EvidenceO
 	}, nil
 }
 
-// rowsAffected reports how many rows an INSERT actually wrote. It tolerates
-// a driver that does not implement RowsAffected for the statement.
+// rowsAffected reports how many rows an INSERT actually wrote.
+//
+// For the identity-backed insert it is the replay detector: zero means the
+// observation was already recorded (the primary key skipped the row), one
+// means this delivery recorded it.
 func rowsAffected(res sql.Result) (int64, error) {
 	n, err := res.RowsAffected()
 	if err != nil {
