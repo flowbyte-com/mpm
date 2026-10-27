@@ -21,7 +21,7 @@ NRestarts 0, binary mtime 24 October.
 | Base of this sprint | `a8320fb` |
 | Main CI run on that SHA | `40599592681` |
 | Release-gate evidence | see §3 |
-| Substrate binaries built from that SHA | `mpm`, `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry` — all five carry `Commit=4111c46d…` |
+| Substrate binaries built from that SHA | `mpm`, `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry` — all five carry a build identity. The isolated install was verified against the exact **tree** `4111c46` contains: `git diff d04d390 4111c46` is **empty**, and the binary's embedded identity is `Commit=d04d3900…` |
 
 ### 1.1 The merged PRs
 
@@ -134,7 +134,7 @@ touched, because one is not enough:
 | 5 | The OpenCode config was written | PASS |
 | 5b | **Exactly the OpenCode plugin is registered — no retired adapter** | PASS |
 | 5c | The registered plugin points at the **disposable** staged payload, and that payload exists | PASS |
-| 6 | The installed binary carries the build identity (`Commit=d04d3900…` → now `4111c46…`) | PASS |
+| 6 | The installed binary carries the build identity (`Commit=d04d3900…` — the **tree** `4111c46` contains; `git diff d04d390 4111c46` is empty) | PASS |
 | 7 | The installed binary answers a `health_check` against the disposable database | PASS |
 | 7a | The `health_check` **names the disposable database**, not the live one | PASS |
 | 7b | The database is created under the disposable data root | PASS |
