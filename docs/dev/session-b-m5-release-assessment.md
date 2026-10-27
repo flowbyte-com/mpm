@@ -7,6 +7,12 @@
 blockers, produced without touching A's integration sprint, the live workspace, the
 scheduler configuration or the installed runtime.
 
+> **Updated after Session A's PR #138 landed on `main`.** The branch this document rides is
+> based on `3abfdda`; `main` has since advanced to `9406936` (PR #137, the legacy host
+> adapter retirement) and `7d18237` (PR #138, the telemetry hunt read-only). Both PRs are
+> **MERGEABLE** against the current `main`, and neither touches the files this PR changes.
+> The §4 findings are updated for #138, and §4.5 records the one sibling it left behind.
+
 ---
 
 ## 1. The one-paragraph answer
@@ -20,11 +26,20 @@ artifact: **D3-a** (the legacy citation path still accepts an unresolvable id),
 are lost to `SQLITE_BUSY`), and **D2-core** (the lesson surface has no pending state, so any
 writer to it publishes trusted knowledge directly). Each is classified in §5.
 
-**The one finding that changes the release's shape rather than its safety:** the opt-in
-`mpm-critic --telemetry-hunt` path is **completely inert** — every lesson save it attempts
-is rejected, twice over, and the reason is never surfaced. It therefore does **not**
-reproduce D2, but it also does not work at all. It should be fixed or removed before anyone
-enables it (§4).
+**The trust-boundary exception in the telemetry hunt is RESOLVED** — by Session A's own
+adjudication, PR #138, which made the hunt **read-only** while this assessment was being
+written. This document's §4 records the independent measurement that motivated that
+adjudication; the finding it produced is now closed on `main`.
+
+**One sibling of that defect remains, and it is the one thing this assessment asks A to
+look at.** The **same** broken count and the **same** broken lesson payload still live in
+`cmd/mpm-telemetry/observe.go` — the standalone `mpm-telemetry observe` command, which PR
+#138 did not touch. Measured against the real binary, it calls `mpm call mpm_provenance`
+(a tool that is **not in the registry and never was**) and then calls `mpm call mpm_lessons`
+with a flat payload that the params-envelope check rejects. It therefore cannot write
+either — it is inert, exactly as the critic's copy was — but it is a **live, advertised
+command** on the release's `mpm-telemetry` binary, and if anyone repairs its count the way
+#138 repaired the critic's, they would **arm a trusted-lesson write**. §4.2.
 
 ---
 
@@ -34,7 +49,7 @@ enables it (§4).
 |---|---|---|---|
 | **D1** — a repeated delivery counted as independent corroboration | **CLOSED** | PR #130; `internal/core/evidence_identity_test.go` (16 tests, ordinary CI) | no |
 | **D5** — two distinct observations scored the same as one delivered twice | **CLOSED** | PR #130, same mechanism | no |
-| **D2** — the critic wrote trusted lessons with no review | **CLOSED on the critic's default path** | the three hunts and the poison pill now emit `mpm_theories propose` with typed, validated, resolvable citations; `TestP3b_NoHuntTargetsTheTrustedLessonSurface`, `TestP3b_CriticFindingIsNotTrustedWithoutReview` | the **lesson surface itself** still has no pending state (§3.2); the opt-in telemetry hunt still *targets* it (§4) |
+| **D2** — the critic wrote trusted lessons with no review | **CLOSED** | the three hunts and the poison pill now emit `mpm_theories propose` with typed, validated, resolvable citations; `TestP3b_NoHuntTargetsTheTrustedLessonSurface`, `TestP3b_CriticFindingIsNotTrustedWithoutReview`; and **PR #138** made the opt-in telemetry hunt read-only | the **lesson surface itself** still has no pending state (§3.2); the standalone `mpm-telemetry observe` command still carries the same exception (§4.2) |
 | **D3-b** — a citation recorded the wrong type | **CLOSED** | this sprint's D3 PR; `TestM5Contract_CitationPreservesItsType` now passes | no |
 | **D3-a** — the legacy citation path accepts an unresolvable id | **OPEN** | `TestM5Contract_UnresolvableCitationIsRejected` — still red | yes, §5.1 |
 | **D4** — a cycle-varying tag creates a second proposal | **CLOSED in production**; the substrate residual is open | the critic's emission fix landed; `TestD4_PoisonPillRepeatedCyclesProduceOnePendingProposal` proves it end to end | yes, §5.2 |
@@ -89,15 +104,21 @@ The gate's own documentation states the condition (`internal/core/wake_tools.go`
 **⇒ Recommendation to A: the P2b gate's stated preconditions are satisfied, and lifting it
 is A's call.** It is a release decision, not a defect.
 
-**One caveat A must weigh before lifting it:** the gate's condition says "the critic", and
-the critic has an **opt-in second path** — `--telemetry-hunt` — that still targets the
-trusted lesson surface. §4.
+**The caveat that applied before Session A's #138 no longer applies.** The gate's condition
+says "the critic", and the critic had an **opt-in second path** — `--telemetry-hunt` — that
+still targeted the trusted lesson surface. **PR #138 made that path read-only**, so the
+critic now has no path to the lesson surface at all, opt-in or not. §4.
+
+**One residual of that caveat remains, outside the critic:** the standalone
+`mpm-telemetry observe` command carries the same exception and was not touched by #138.
+It is manual-only and inert, so it does not bear on the gate — but it is the thing to fix
+next. §4.5, decision **R7**.
 
 ### 3.3 D2-core: the lesson surface still has no pending state
 
-The critic no longer writes to it, but the surface itself is unchanged: `mpm_lessons save`
-publishes **trusted** knowledge directly. There is no pending state, no review step and no
-"proposed lesson" concept on that surface.
+The critic no longer writes to it — and since #138, not even the opt-in path does. But the
+surface itself is unchanged: `mpm_lessons save` publishes **trusted** knowledge directly.
+There is no pending state, no review step and no "proposed lesson" concept on that surface.
 
 So D2 is closed **as a behaviour of the critic** and open **as a property of the surface**.
 Any future writer to `mpm_lessons` inherits the same unbounded trust. The M5 specification
@@ -107,12 +128,16 @@ authority. **Recommendation: record it as the accepted residual for the initial 
 
 ---
 
-## 4. The opt-in telemetry hunt — inert, and quietly so
+## 4. The telemetry hunt — RESOLVED by Session A's #138, with one sibling left
 
-### 4.1 What it does
+> **STATUS: this section was written against `3abfdda` and updated after Session A's
+> adjudication landed on `main` as PR #138 (`7d18237`).** The finding below is what
+> motivated that adjudication; the adjudication is now in `main`.
 
-`mpm-critic --telemetry-hunt` additionally runs `HighTokenNoArtifactHunt` from the
-telemetry store and emits each finding as a **lesson**:
+### 4.1 What the path did
+
+`mpm-critic --telemetry-hunt` additionally ran `HighTokenNoArtifactHunt` from the
+telemetry store and emitted each finding as a **lesson**:
 
 ```go
 // internal/telemetry/observe.go
@@ -126,7 +151,7 @@ func FindingLessonPayload(f Finding, cycleTag string) map[string]any {
 }
 ```
 
-### 4.2 It cannot write anything — two independent rejections
+### 4.2 It could not write anything — two independent rejections
 
 Measured with the real binary against a disposable workspace:
 
@@ -143,34 +168,89 @@ the surface does not accept. The two disagree, and the disagreement is the whole
 **The same payload with `"type":"insight"` succeeds** — so the trusted surface would
 accept it if the type matched.
 
-### 4.3 The failure is invisible
+### 4.3 The failure was invisible
 
-`cmd/mpm-critic/main.go` captures the child's **stdout only** (`cmd.Output()`), so the
-tool's error message on stderr is discarded, and the hunt logs:
+`cmd/mpm-critic/main.go` captured the child's **stdout only** (`cmd.Output()`), so the
+tool's error message on stderr was discarded, and the hunt logged:
 
 ```
 telemetry lesson save failed  session=…  err=mpm_lessons: : exit status 1
 ```
 
-— an error message with the reason removed. The hunt then **continues to the next
-finding**, and the process exits **0**.
+— an error message with the reason removed. The hunt then **continued to the next
+finding**, and the process exited **0**.
 
-⇒ An operator who enables `--telemetry-hunt` sees "telemetry hunt complete" and a
+⇒ An operator who enabled `--telemetry-hunt` saw "telemetry hunt complete" and a
 successful exit code, and **nothing was recorded**.
 
-### 4.4 What this means for M5
+**Session A's #138 found a third breakage in the same path, independently of this
+measurement:** the artifact count shelled out to `mpm call mpm_provenance`, a tool that is
+**not in the registry and never was**. So the hunt failed on every qualifying session and
+exited 1. (Both exit codes are consistent with the measurement above: with no qualifying
+session the count is never called and the hunt exits 0 having written nothing; with one, it
+exits 1 before any write.)
 
-* **D2 does NOT reproduce on this path.** The trusted lesson surface is never written, so
-  the "critic writes trusted knowledge without review" failure does not occur here — not
-  because the path was fixed, but because it is inert.
-* **But the path is not safe to enable.** If the type were "fixed" to `insight`, the hunt
-  would write trusted observations with **no review step and no pending state**, and the
-  content it writes is a **live measurement**: `f.Reason` embeds the token count, which
-  grows between cycles. `AddLesson` deduplicates on the content hash, so a growing count
-  means a **new lesson every cycle** rather than a reinforcement — unbounded accumulation
-  of trusted observations about the same session.
-* **Recommendation: fix the payload shape and the type before the flag is documented, or
-  remove the flag.** It is currently advertised (`mpm-critic --help`) but cannot work.
+### 4.4 The adjudication, and what it established
+
+**PR #138 (`7d18237`, on `main`):** the telemetry hunt is now a **read-only diagnostic**. It
+computes the observation and **reports** it; it writes nothing — not a lesson, not a
+theory, not an artifact, not a wake. The count is computed **in-process** from the
+substrate's own attribution (`internal/critic/artifact_count.go`,
+`critic.SessionArtifactCount`), so no subprocess is involved and the path has no way to
+write. The regression is `cmd/mpm-critic/telemetry_hunt_readonly_test.go`, with its
+non-vacuity demonstrated by putting one `INSERT INTO lessons_base` back into the hunt.
+
+The reasoning A recorded is worth keeping, because it is the general rule:
+
+> *The ordering rule this establishes: close the trust boundary FIRST. Repairing the count
+> against a substrate that still accepted a trusted-lesson write would ARM the write, not
+> fix it.*
+
+**⇒ This assessment's §4 finding is CLOSED.** The telemetry hunt does not reproduce D2, and
+it now cannot write at all.
+
+### 4.5 ⚠️ The sibling: `mpm-telemetry observe` carries the SAME exception
+
+**PR #138 fixed `cmd/mpm-critic/main.go`. It did not touch `cmd/mpm-telemetry/observe.go`** —
+the standalone `mpm-telemetry observe` command, which the `mpm-telemetry` binary advertises
+in its help output.
+
+That file still contains **both** breakages, verbatim:
+
+| In `cmd/mpm-telemetry/observe.go` | The breakage | Verified against the real binary |
+|---|---|---|
+| `defaultArtifactCountFn` | `mpm call mpm_provenance` with `{"action":"count_by_session","session_id":…}` — **the tool does not exist** | `{"error":"unknown tool: mpm_provenance. available: mpm_memory, mpm_theories, …"}` |
+| `defaultLessonSaveFn` | `mpm call mpm_lessons` with the **flat** `FindingLessonPayload` | `{"error":"mpm_lessons: payload has top-level field(s) [fact type tags] outside the params envelope …"}` |
+
+The count failure is fatal to the command: `telemetry.Hunt` returns the error, `observe`
+returns it, and the process exits non-zero. So `mpm-telemetry observe` **cannot write a
+lesson** — it is inert, exactly as the critic's copy was.
+
+**But it is a live, advertised command on the release's `mpm-telemetry` binary, and the
+inertness is an accident of two independent breakages rather than a designed boundary.**
+The hazard is concrete: someone who "fixes" the count the way #138 fixed the critic's
+count — by computing it in-process — would **ARM** the lesson write, because the payload
+is still wrong. The payload is wrong in a way that is *easy* to "fix" too (move the fields
+into `params`, change `"observation"` to `"insight"`), and then the path would write
+**trusted** observations with no review step, no pending state, and a **live measurement**
+in the content (`f.Reason` embeds the token count, which grows between cycles — so
+`AddLesson`'s content-hash dedup would produce a **new lesson every cycle** rather than a
+reinforcement).
+
+**Reachability.** `mpm-telemetry observe` is **manual only**: no systemd unit runs it, and
+`scripts/tests/test_runtime_asset_provisioning.py` asserts that *no scheduler handler
+shells out to `mpm-telemetry observe`*. The scheduled telemetry component is
+`mpm-telemetry serve` (the collector), which does not write to the substrate at all.
+
+**Recommendation for A (decision R7):** extend the #138 adjudication to
+`mpm-telemetry observe` — make it read-only, exactly as #138 made the critic's copy
+read-only, and reuse `critic.SessionArtifactCount` for the count. **This is A's call and
+A's surface**, so it is reported here rather than implemented: the same reasoning #138
+recorded applies, and it is the same class of defect in the same trust boundary.
+
+**Nothing about this blocks the release.** The path is inert, it is manual, and it is not
+scheduled. It is reported because it is a **live trap** for whoever next repairs it, and
+because the repair is trivially able to make things worse.
 
 ---
 
@@ -243,10 +323,10 @@ Two things follow for this assessment:
 
 | Question | Answer |
 |---|---|
-| Blocking safe **manual** critic use? | **NO.** The critic does not write to the surface. |
-| Blocking **automatic scheduled** critic use? | **NO**, provided `--telemetry-hunt` is not enabled (§4). |
+| Blocking safe **manual** critic use? | **NO.** The critic does not write to the surface — and since #138, neither does the opt-in telemetry path. |
+| Blocking **automatic scheduled** critic use? | **NO.** The critic has no path to the surface. |
 | Blocking the **OpenCode-only release**? | **NO.** |
-| Acceptable as a **documented limitation**? | **YES — and this is the one limitation that should be written into the release notes.** The surface publishes trusted knowledge directly, so it must be treated as an operator-only surface until a pending state exists. The M5 specification asks for that pending state; implementing it is a schema change (A's authority). |
+| Acceptable as a **documented limitation**? | **YES — and this is the one limitation that should be written into the release notes.** The surface publishes trusted knowledge directly, so it must be treated as an operator-only surface until a pending state exists. The M5 specification asks for that pending state; implementing it is a schema change (A's authority). The two paths that tried to reach it are now inert or read-only (§4), so the residual is a property of the SURFACE, not of any writer. |
 
 ---
 
@@ -255,11 +335,12 @@ Two things follow for this assessment:
 | # | Decision | A's authority because | Session B's recommendation |
 |---|---|---|---|
 | **R1** | Lift the **P2b gate**? | it is a release risk decision | **Yes** — its stated removal condition is met (§3.2). But fix F2 first if the cadence is short. |
-| **R2** | `mpm-critic --telemetry-hunt`: **fix or remove**? | it is an advertised but inert flag | **Fix the payload shape and the type** — or remove the flag until it can be done properly. Do not enable it as it stands (§4). |
+| **R2** | `mpm-critic --telemetry-hunt`: **fix or remove**? | it is an advertised but inert flag | **DECIDED — by A, in PR #138**: the hunt is now a **read-only diagnostic**. Closed (§4.4). |
 | **R3** | Should an **incidental tag difference** split a proposal? | it is a shared identity-semantics decision | The brief's D4 criteria are already met; accept the current model, retire the synthetic contract test, and file F1 as a cosmetic limitation — **or** mandate a scoped identity change (§5.2 of the D4 report). |
 | **R4** | Does the legacy citation path get **tightened**? | it changes a public tool's behaviour for every caller | **Not for the initial release.** The typed path is the answer; the migration steps are in the D3 report §6.3. |
 | **R5** | Add `source_type` to `mpm_decisions record`/`supersede`? | it is a tool-registry change | **Yes** — it is the concrete gap that makes a decision's citations unvalidatable, and it mirrors `mpm_theories.propose` exactly. |
 | **R6** | A **pending lesson state** on the lesson surface? | it is a schema change | **Defer**, and record the surface as operator-only in the release notes (§5.4). |
+| **R7** | **NEW — extend #138 to `mpm-telemetry observe`?** | it is A's release surface, and the same trust boundary | **Yes** — make it read-only, exactly as #138 made the critic's copy read-only, and reuse `critic.SessionArtifactCount` for the count. It is inert and manual-only, so it does not block the release; but it is a **live trap** for whoever next repairs its count (§4.5). |
 
 ---
 
@@ -277,7 +358,8 @@ measurement reproduced in this document.
 | the same, across a process restart | **`TestD4_CriticCyclesAcrossAProcessRestartProduceOnePendingProposal`** (new) |
 | a pending proposal is never promoted | **`TestD4_PendingProposalIsNeverAutomaticallyPromoted`** (new) |
 | concurrent proposals are lost | measured in the D4 report §6.1, mechanism isolated in §6.3, **reproduced under `-race` by the D4 matrix's own test** (§5.3.1) |
-| the telemetry hunt's payload is rejected twice over | measured with the real binary in §4.2 |
+| the telemetry hunt's payload is rejected twice over | measured with the real binary in §4.2; **and PR #138 made the path read-only** (§4.4) |
+| **`mpm-telemetry observe` carries the same exception** | `cmd/mpm-telemetry/observe.go` — `defaultArtifactCountFn` calls `mpm_provenance` (**not in the registry**) and `defaultLessonSaveFn` sends the flat payload; both verified against the real binary (§4.5) |
 | the remaining contract failures are exactly two | §2.1 |
 
 Every test used a disposable file-backed database in an isolated `HOME` /
@@ -294,6 +376,8 @@ were touched.**
 * No change to the **P2b gates** — neither removed nor enabled.
 * No change to the scheduler's configuration.
 * No implementation of F2, and no implementation of the D3-a tightening, the D4 identity
-  change, the `source_type` registry addition or the pending lesson state. All four are
-  decisions listed in §6.
+  change, the `source_type` registry addition, the pending lesson state, or the
+  `mpm-telemetry observe` read-only change. All five are decisions listed in §6.
+* **No change to `cmd/mpm-critic` or `cmd/mpm-telemetry`** — Session A's #138 owns the
+  telemetry hunt, and the sibling finding in §4.5 is reported, not implemented.
 * No M5 regression test weakened, inverted or deleted.
