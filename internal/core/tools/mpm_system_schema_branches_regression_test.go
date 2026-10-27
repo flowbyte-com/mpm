@@ -74,6 +74,11 @@ var mpmSystemActionBranches = []string{
 	"resolve_cluster",
 	"annotate_cluster",
 	"critic_findings",
+	// P5: the mpm-event/0.1 ingest entry point and its counter surface
+	// (§3.10, §6.4). Both are routed by handleMpmSystem and advertised
+	// by the schema, so both belong in this list.
+	"event_ingest",
+	"event_counters",
 }
 
 // findMpmSystemTool returns the Registry entry for mpm_system or
