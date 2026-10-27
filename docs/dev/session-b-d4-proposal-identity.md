@@ -386,13 +386,29 @@ removed.
 
 ### 7.3 The contract suite — unchanged
 
+Run against **this branch's head** (which does not carry the D3 correction — that is a
+separate PR, #141):
+
 ```
 --- FAIL: TestM5Contract_UnresolvableCitationIsRejected              ← D3-a, open
+--- FAIL: TestM5Contract_CitationPreservesItsType                    ← D3-b, fixed in PR #141
 --- FAIL: TestM5Contract_CycleVaryingTagDoesNotCreateSecondProposal   ← D4, open
 ```
 
-**Both D4 and D3-a contract failures remain.** No contract test was weakened, inverted or
-deleted by this PR. §5.4 states exactly what A's ruling would retire.
+**All three failures are unchanged by this PR.** No contract test was weakened, inverted
+or deleted.
+
+**After PR #141 (the D3 correction) merges, exactly two remain** — `UnresolvableCitationIsRejected`
+(D3-a) and `CycleVaryingTagDoesNotCreateSecondProposal` (D4) — because
+`CitationPreservesItsType` is D3-b and PR #141 closes it. The two PRs are independent and
+merge in either order.
+
+§5.4 states exactly what A's ruling would retire, and **until A rules, the D4 contract test
+stays red** — retiring it would assert a decision that has not been made.
+
+The **characterization** suite (`TestM5Characterization*`) stays green in full on this
+branch — all three pass — so the defective behaviours remain pinned as characterizations
+and nothing has been quietly changed.
 
 ---
 
@@ -410,7 +426,7 @@ canonical pre-merge gate.
 | `gofmt -l` on the touched files | **clean** |
 | `mpm-lint --gate` | **PASS** |
 | **`make test-race`** | **PASS** — `EXIT=0`, 24 Go packages ok under `-race`, **zero `FAIL` and zero `DATA RACE`**; `make test-scripts` OK (540 tests, floor 50), `make test-bench` OK (217 tests, floor 50), `make test-agent-installation` OK (503 tests, floor 300), `make test-agent-adapters` OK (Python 312 / floor 150, JS 164 / floor 100, TS 89 / floor 15) |
-| the M5 contract suite | **2 failures, both OPEN by design** — D4 and D3-a. See §7.3. |
+| the M5 contract suite | **3 failures, all unchanged by this PR** — D4, D3-a and D3-b (D3-b is closed by PR #141). Two remain once #141 merges. See §7.3. |
 | the M5 characterization suite | **ok** — all three pass |
 | the new D4 tests under `-race` | **10 consecutive runs, zero failures** — after the rewrite in §6.5 |
 | CI (PR #140) | see §11.1 |
