@@ -1065,9 +1065,22 @@ func handleProposeTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 	if err != nil {
 		return nil, err
 	}
-	sourceIDs := internal.ParseStringSliceOr(p["source_ids"])
-	if sourceIDs == nil {
-		sourceIDs = []string{}
+	// D7: the CITATION list is parsed as a WHOLE.
+	//
+	// The previous shape routed source_ids through ParseStringSliceOr,
+	// which silently returned nil for a Go-native []string and silently
+	// dropped non-string elements from an array. Either way the proposal
+	// was created with FEWER citations than its author declared — and the
+	// author was told it succeeded. A proposal that rests on less than it
+	// claims is unsupported, so a list that cannot be represented exactly
+	// is an error, not a shorter list.
+	//
+	// The typed path already rejected a citation that does not resolve
+	// (no partial proposal survives); this closes the remaining hole,
+	// which is in the PARSE rather than in the resolution.
+	sourceIDs, err := internal.ParseStringSliceStrict("source_ids", p["source_ids"])
+	if err != nil {
+		return nil, err
 	}
 
 	// Optional typed citations.
@@ -1249,9 +1262,12 @@ func handleRecordDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 	if err != nil {
 		return nil, err
 	}
-	sourceIDs := internal.ParseStringSliceOr(p["source_ids"])
-	if sourceIDs == nil {
-		sourceIDs = []string{}
+	// D7: the CITATION list is parsed as a WHOLE — see the same guard on
+	// mpm_theories.propose. A decision that records fewer citations than
+	// its author declared is a decision resting on less than it claims.
+	sourceIDs, err := internal.ParseStringSliceStrict("source_ids", p["source_ids"])
+	if err != nil {
+		return nil, err
 	}
 
 	return dm.RecordDecision(
@@ -1277,23 +1293,17 @@ func handleRecordDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 //
 // Unlike ParseStringSliceOr this never silently coerces or drops
 // malformed input — the caller learns about the shape mismatch.
+//
+// D7: the implementation now lives in internal/core
+// (ParseStringSliceArrayOnly) so the canonical parsing has ONE home, and
+// it accepts a Go-native []string as well. Before, an in-process caller
+// that supplied []string{"a","b"} got "tags must be an array of strings,
+// got []string" — a loud failure, but a failure all the same, on a
+// representation that is perfectly valid Go.
+//
+// The error strings are unchanged.
 func parseStrictStringArrayOrEmpty(field string, v interface{}) ([]string, error) {
-	if v == nil {
-		return []string{}, nil
-	}
-	arr, ok := v.([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("%s must be an array of strings, got %T", field, v)
-	}
-	out := make([]string, 0, len(arr))
-	for i, x := range arr {
-		s, ok := x.(string)
-		if !ok {
-			return nil, fmt.Errorf("%s[%d] must be a string, got %T", field, i, x)
-		}
-		out = append(out, s)
-	}
-	return out, nil
+	return internal.ParseStringSliceArrayOnly(field, v)
 }
 
 // handleSupersedeDecision implements the F9 invalidation path: a corrected
@@ -1325,9 +1335,13 @@ func handleSupersedeDecision(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 	if tags == nil {
 		tags = []string{}
 	}
-	sourceIDs := internal.ParseStringSliceOr(p["source_ids"])
-	if sourceIDs == nil {
-		sourceIDs = []string{}
+	// D7: the CITATION list is parsed as a WHOLE — see the same guard on
+	// mpm_theories.propose. The superseding decision records the
+	// replacement's citations, so a partially accepted list would leave
+	// the replacement resting on less than its author declared.
+	sourceIDs, err := internal.ParseStringSliceStrict("source_ids", p["source_ids"])
+	if err != nil {
+		return nil, err
 	}
 	return dm.SupersedeDecision(
 		originalID,

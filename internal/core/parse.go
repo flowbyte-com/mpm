@@ -14,6 +14,7 @@ package internal
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -52,15 +53,37 @@ func parseStringDefault(v interface{}, def string) string {
 	return def
 }
 
-// parseStringSliceAny accepts the two payload shapes agents emit:
+// parseStringSliceAny accepts the payload shapes agents emit:
 //   - `[]interface{}` of strings (the JSON-native array form)
+//   - `[]string` (the Go-native form — an in-process caller, or a client
+//     that built the payload in Go rather than from JSON)
 //   - a single comma-separated string (a compact form some clients use)
 //
 // Returns nil on any other shape or empty input — callers that need a
 // non-nil slice should default locally.
+//
+// D7: the `[]string` case was missing. A Go-native slice fell through to
+// the nil return, so every identifier a caller supplied in that shape
+// disappeared without an error. A proposal could be created without the
+// citations its author declared. The native form is a COMPLETE
+// representation of the parameter, exactly like the JSON-decoded array
+// form, so it is accepted and copied — copied, because the caller keeps
+// ownership of the slice it handed over.
+//
+// nil stays nil (an absent parameter and an explicitly nil slice mean the
+// same thing) and an empty slice stays an empty slice (like the JSON `[]`
+// form), so the two representations agree element for element.
 func parseStringSliceAny(v interface{}) []string {
 	if v == nil {
 		return nil
+	}
+	if arr, ok := v.([]string); ok {
+		if arr == nil {
+			return nil
+		}
+		out := make([]string, len(arr))
+		copy(out, arr)
+		return out
 	}
 	if arr, ok := v.([]interface{}); ok {
 		out := make([]string, 0, len(arr))
@@ -87,6 +110,97 @@ func parseStringSliceAny(v interface{}) []string {
 		return strings.Split(s, ",")
 	}
 	return nil
+}
+
+// ParseStringSliceStrict parses a string-list parameter as a WHOLE.
+//
+// It accepts every shape ParseStringSliceOr accepts — a Go-native
+// `[]string`, a JSON-decoded array, a JSON-encoded array string, a
+// comma-separated string — and returns an error in exactly the cases where
+// the lenient form would SILENTLY LOSE an element.
+//
+// The difference is the point. A list that is accepted in part is a list
+// the caller did not ask for: the caller believes every identifier it
+// supplied is recorded, and a partial parse records fewer. For a CITATION
+// list that means a proposal resting on less than its author declared — a
+// data-integrity failure, not a convenience issue.
+//
+// The error is RETURNED, not logged and not swallowed: the caller decides
+// whether the field is optional. This is the explicitly designed stricter
+// API; the lenient ParseStringSliceOr keeps its fallback semantics for the
+// callers that want them.
+//
+// A malformed ELEMENT is an error, not a drop. A non-array, non-string
+// value is an error too — the lenient form would read it as "no value at
+// all", which is how a caller's citations vanish.
+func ParseStringSliceStrict(field string, v interface{}) ([]string, error) {
+	switch t := v.(type) {
+	case nil:
+		return []string{}, nil
+	case []string:
+		out := make([]string, len(t))
+		copy(out, t)
+		return out, nil
+	case []interface{}:
+		out := make([]string, 0, len(t))
+		for i, x := range t {
+			s, ok := x.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s[%d] must be a string, got %T", field, i, x)
+			}
+			out = append(out, s)
+		}
+		return out, nil
+	case string:
+		if t == "" {
+			return []string{}, nil
+		}
+		// A JSON-encoded array (the shape an MCP framework produces when
+		// it coerces an array argument to a string) and the compact
+		// comma-separated form are both WHOLE parses: no element is
+		// lost, so both are accepted. An empty JSON array is an empty
+		// list, not the literal one-element list ["[]"].
+		var arr []string
+		if err := json.Unmarshal([]byte(t), &arr); err == nil {
+			return arr, nil
+		}
+		return strings.Split(t, ","), nil
+	}
+	return nil, fmt.Errorf("%s must be a string array (or a comma-separated string), got %T", field, v)
+}
+
+// ParseStringSliceArrayOnly parses a string-list parameter under the
+// SCHEMA contract: the parameter is an array of strings, or absent.
+//
+// It differs from ParseStringSliceStrict in one respect — a scalar (a
+// comma-separated string, a number) is REJECTED rather than interpreted.
+// That is the right contract for a declared array field: a scalar is a
+// caller mistake worth reporting, not a shape to guess at.
+//
+// The absent case is an empty list, and a non-string ELEMENT is an error
+// rather than a drop. The error strings are the ones the boundary already
+// used, unchanged.
+func ParseStringSliceArrayOnly(field string, v interface{}) ([]string, error) {
+	if v == nil {
+		return []string{}, nil
+	}
+	switch t := v.(type) {
+	case []string:
+		out := make([]string, len(t))
+		copy(out, t)
+		return out, nil
+	case []interface{}:
+		out := make([]string, 0, len(t))
+		for i, x := range t {
+			s, ok := x.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s[%d] must be a string, got %T", field, i, x)
+			}
+			out = append(out, s)
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("%s must be an array of strings, got %T", field, v)
 }
 
 // ── Exported aliases (cmd/mpm and cmd/mpm-mcp packages can't see
