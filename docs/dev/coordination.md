@@ -408,6 +408,70 @@ Neither was product work.
 | pre-existing combined tree (#85–#98) | `cbe6af7` (`hal9001/r3-integration`) | pre-existing | **evidence only** — superseded by `main`; never installed |
 | installed runtime | `3df72315` (`~/.mpm`) | the live install | **predates all fifteen corrective PRs**; deliberately not deployed |
 
+### Release-cleanup round — 2026-10-27
+
+Session A's round on C's OpenCode-only release cleanup. `origin/main` =
+`4de89ea` at the time of writing; CI run `40517704744` green.
+
+| Item | Where | Status |
+|---|---|---|
+| **#125** — the OpenCode documentation corrections and the retirement of the superseded automatic-agent-install guide | merged as `84d852e` | ✅ **verified, not re-merged.** The retired document is gone; the only remaining references to it are the two tests that **pin** its retirement; root `install.sh` names no adapter. All five accuracy claims (plugin-directory registration, `ctx.session.hook("context")` / `ctx.shell.hook("create.before")`, `MPM_WORKSPACE` → `$HOME/.mpm`, the `MPM_BINARY` → `~/.mpm/bin/mpm` → `~/.local/bin/mpm` → PATH chain, Node 20+, bare tool names) check out against source. |
+| **#126** — the legacy-adapter removal proposal | adjudication posted as a PR comment | ✅ **approved.** OpenCode-only supported-host scope; removal authorized in a **separate implementation PR** under four decisions (telemetry spec relocated, historical `created_by` not rewritten, the refresh-safety guarantee preserved host-independently, the JS family handled explicitly). |
+| **#133** — the §3 host-independent preservation regression | `agent_installation/tests/test_legacy_installation_preserved.py` (9 regressions) | ✅ **merged into `main` with this ledger entry.** Names no adapter directory; the adapters that exist are **discovered at run time**, so it is correct before and after the removal — verified by running it against a tree with **every adapter directory removed**. |
+| **#134** — the adapter's client-side counters do not reconcile | `agent_installation/mpm-opencode/src/event-subscriber.ts` | ⏳ open with C. `enqueued=10, delivered=9` while the server stored 10. `stop()` snapshots before any await (one delivery in flight) and the reconciling `phase:"final"` snapshot never lands, because the plugin's cleanup is fire-and-forget and the host exits first. **No `pending`/buffer-depth field exists**, so "in flight" and "lost" are indistinguishable. The **wire** contract is unaffected. |
+
+**The §3 guarantee has a carrier that outlives the removal.** Every
+host-specific safety suite dies with its adapter — taking the guarantee's
+only test at the exact moment it becomes load-bearing. The carrier is
+therefore host-independent: a synthetic host with no adapter, and a
+**simulated retirement** (a copy of `agent_installation/` with every
+adapter directory removed). Its non-vacuity was **demonstrated**, not
+asserted: a reconciler that cleans up orphan managed blocks fails 5 of the
+9; an installer that clobbers the user's own text fails exactly the one
+that covers it; the shared-script lint catches both the direct and the
+indirect (`rm -rf "${VAR}"`) form of a destructive cleanup.
+
+**Measured release-gate impact of the removal** (per-adapter populations,
+each figure from an actual run):
+
+| Family | Per adapter | Total today | After removal | Floor |
+|---|---|---|---|---|
+| Python | claude-code 68, hermes 38, memory-openclaw 13, **opencode 119**, pi 74 | 312 | **119** | 150 → **must drop** (measured: `FATAL: collected 119 Python tests, floor is 150`) |
+| JS | memory-openclaw 143, auto-mode-persona 21 | 164 | **0** | 100 → **explicit empty handling; 0 is wrong in either branch** |
+| TS | opencode 89 | 89 | 89 | 15 → unchanged |
+| umbrella | `agent_installation/tests/` | **503** | ~395–410 | 300 → unchanged |
+
+`scripts/tests/test_makefile_agent_adapter_wiring.py`'s *"at least 3
+Python suites"* assertion **fails** at 1 (measured). Its *"at least 1 JS
+suite"* assertion is a **false green**: its regex parses the following
+comment line as the list when the list is empty.
+
+**The coupled halves cannot land separately.** The Go registry
+(`cmd/mpm/onboard_hosts.go`, `cmd/mpm/onboard_cmds.go`) and the Python
+registry (`agent_installation/scripts/check_installed_managed_blocks.py`)
+are guarded by two-way drift guards, and the `Makefile` adapter lists are
+guarded by a recipe that fails closed on a missing `tests/` directory.
+The removal PR must therefore carry both sides, or `main` is red in
+between. A granted C the shared-surface edits for exactly this reason.
+
+**P4/P5 end-to-end verification — complete, against the real isolated
+OpenCode v2.1.4 host** (`scripts/dev_host.sh run`, disposable workspaces
+`/tmp/opencode/e2e-ws{,2}`, binary `g4de89ea7`):
+
+| Requirement | Result |
+|---|---|
+| durable ingestion + read-backed receipt | ✅ 10/10 envelopes delivered and stored (2 `session.observed` + 8 `tool.outcome`), 10 `event_ingest` audit rows, all success |
+| duplicate delivery → `duplicate: true` | ✅ replay returned `{"duplicate": true, "ingested_at_ms": 1793111198891}` — the **original** stored timestamp; row count unchanged |
+| invalid envelopes rejected | ✅ `invalid_envelope: event_id must be ev1_<64 lowercase hex> in strict mode`; nothing stored |
+| correct event counters | ✅ `stored_total=10, stored_by_event_type={session.observed:2, tool.outcome:8}, stored_by_schema_version={mpm-event/0.1:10}, rejected_total=1, rejected_by_reason={invalid_envelope:1}` |
+| no raw agent content in lifecycle storage | ✅ the canary `PROMPT_SECRET_e2e_canary_7f3a` appears only in `memories.content` (the agent's deliberate save); **0** occurrences in `lifecycle_events.meta` or any `tool_invocations` column |
+| no writes to the live database | ✅ the live DB has **no `lifecycle_events` table** and **0** `event_ingest`/`event_counters` rows; the e2e's own traffic landed in the disposable workspaces. The live DB's byte hash moved only because the **live scheduler** (PID 2804, `NRestarts=0`) is doing its job — the live binary (`g3df72315`) and checkout (`3df7231`) are unchanged. |
+| no false missed-opportunity detection | ✅ the critic ran 4 hunts and emitted **0 findings**. The adapter's ingest audit rows carry `framework_session_id = NULL`, so P3's candidate query sees `invocations=4, recording_calls=1, ingest_rows=0`. **Forward-looking risk, quantified in the ledger:** if the ingest transport ever carries `MPM_PROVENANCE_FRAMEWORK_SESSION_ID`, those rows join the candidate set and — being the oldest — become the cited evidence. |
+
+**Deployment was not performed.** The live runtime is untouched: binary
+`g3df72315`, checkout `3df7231`, MainPID 2804, `NRestarts=0`, and no
+`lifecycle_events` table in the live database.
+
 ## 6. Cross-session communication protocol
 
 1. **The ledger is the channel of record.** A session updates its own rows in
