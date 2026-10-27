@@ -398,16 +398,41 @@ deleted by this PR. §5.4 states exactly what A's ruling would retire.
 
 ## 8. Gates
 
+Every gate below was run against the branch head. The `make test-race` result is the
+canonical pre-merge gate.
+
 | Gate | Result |
 |---|---|
-| `internal/core` | see the table in §11 |
-| `internal/core/tools` | see §11 |
-| root module | see §11 |
-| `go vet ./...` | clean |
-| `gofmt -l` on the touched files | clean |
+| `internal/core` (+ 10 sub-packages) | **ok** — zero failures |
+| `internal/core/tools` | **ok** — zero failures |
+| root module (17 packages) | **ok** — zero failures |
+| `go vet ./...` | **clean** |
+| `gofmt -l` on the touched files | **clean** |
 | `mpm-lint --gate` | **PASS** |
-| `make test-race` | see §11 |
-| CI | see §11 |
+| **`make test-race`** | **PASS** — `EXIT=0`, 24 Go packages ok under `-race`, **zero `FAIL` and zero `DATA RACE`**; `make test-scripts` OK (540 tests, floor 50), `make test-bench` OK (217 tests, floor 50), `make test-agent-installation` OK (503 tests, floor 300), `make test-agent-adapters` OK (Python 312 / floor 150, JS 164 / floor 100, TS 89 / floor 15) |
+| the M5 contract suite | **2 failures, both OPEN by design** — D4 and D3-a. See §7.3. |
+| the M5 characterization suite | **ok** — all three pass |
+| the new D4 tests under `-race` | **10 consecutive runs, zero failures** — after the rewrite in §6.5 |
+| CI (PR #140) | see §11.1 |
+
+The race-gate package timings (the ones that matter for a reviewer's patience):
+
+| Package | Time under `-race` |
+|---|---|
+| `cmd/mpm` | 406.6s |
+| `mpm-core` (`internal/core`) | 270.0s |
+| `internal/core/tools` | 41.1s |
+| `internal/scheduler` | 22.8s |
+| `cmd/mpm-telemetry` | 15.6s |
+| `internal/critic` | 4.4s |
+| `internal/testenv` | 9.4s |
+| `cmd/mpm-mcp` | 9.5s |
+
+**The `internal/core` figure includes the 13 new D4 tests**, and it is the number that
+would have exposed the §6.5 flakiness: the first draft of the concurrent-proposals test
+failed under `-race` and did not fail in the ordinary suite. That gap — between the two
+gates — is exactly why the race gate is the canonical one, and why this report records
+both.
 
 ---
 
@@ -445,7 +470,8 @@ deleted by this PR. §5.4 states exactly what A's ruling would retire.
 |---|---|
 | Branch | `feat/session-b-d4-proposal-identity` |
 | Base | `origin/main` = `3abfdda` |
-| PR | see below |
+| PR | **#140** |
+| Commits | `75ae307` — *test(m5): the M5 integrity matrix, and D4's production-path proof*<br>`2c73a58` — *test(m5): a concurrency test must not assert the absence of a real defect* |
 
 Files changed:
 
@@ -455,3 +481,20 @@ Files changed:
 | `internal/critic/d4_proposal_idempotency_test.go` | **new** — 2 production-path tests |
 | `docs/dev/session-b-d4-proposal-identity.md` | **new** — this report |
 | `docs/dev/session-b-m5-release-assessment.md` | **new** — the release-blocker classification |
+
+### 11.1 CI
+
+| Job | Result |
+|---|---|
+| Build + core tests | *pending* |
+| Full test suite | *pending* |
+| Release gate (cross-agent continuity + public-CLI subprocess suite) | *pending* |
+
+### 11.2 The two things a reviewer should read first
+
+1. **§6.5** — the race detector reproduced F2 in this PR's own test, and the test was
+   rewritten. It is the clearest evidence in the sprint that F2 is real, and it is the
+   reason the matrix's concurrency assertions are shaped the way they are.
+2. **§5.4** — the decision. "Should an incidental difference (a tag) split a proposal?"
+   Until A rules, the `m5contract` D4 test stays red, and that is deliberate: retiring it
+   would assert a decision that has not been made.

@@ -216,6 +216,29 @@ ordinary agent, and the same decision would fix it.
 
 **Recommendation:** schedule it as an independent PR, before the P2b gate is lifted.
 
+### 5.3.1 F2 reproduced itself, under the race detector
+
+F2 is not a theoretical risk, and the strongest evidence for it is not the probe but the
+**D4 PR's own test**. The M5 integrity matrix's concurrent-identical-proposals test was
+first written to assert that all eight concurrent callers succeed. Under
+`make test-race` it failed — **roughly one run in six** — with:
+
+```
+concurrent ProposeTheory: propose theory: database is locked
+```
+
+That is F2, reproduced by the matrix written to detect it. The test was rewritten to pin
+the dedup invariant and to treat a lost race as the loud failure it must be (D4 report
+§6.5).
+
+Two things follow for this assessment:
+
+1. **The defect is real enough to break a test that asserted its absence.** It is not a
+   corner case that only a synthetic probe can reach.
+2. **The ordinary suite did not catch it — the race gate did.** A reviewer who runs only
+   `go test` would have seen a green matrix and a defect hiding inside it. The canonical
+   gate is `make test-race`, and the numbers in D4 report §8 are from that gate.
+
 ### 5.4 D2-core — the lesson surface has no pending state
 
 | Question | Answer |
@@ -253,7 +276,7 @@ measurement reproduced in this document.
 | repeated critic cycles produce one pending proposal | **`TestD4_PoisonPillRepeatedCyclesProduceOnePendingProposal`** (new) |
 | the same, across a process restart | **`TestD4_CriticCyclesAcrossAProcessRestartProduceOnePendingProposal`** (new) |
 | a pending proposal is never promoted | **`TestD4_PendingProposalIsNeverAutomaticallyPromoted`** (new) |
-| concurrent proposals are lost | measured in the D4 report §6.1, mechanism isolated in §6.3 |
+| concurrent proposals are lost | measured in the D4 report §6.1, mechanism isolated in §6.3, **reproduced under `-race` by the D4 matrix's own test** (§5.3.1) |
 | the telemetry hunt's payload is rejected twice over | measured with the real binary in §4.2 |
 | the remaining contract failures are exactly two | §2.1 |
 
