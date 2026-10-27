@@ -329,7 +329,7 @@ and the `save_payload` hand-off pattern are host-agnostic.
 
 | File / dir | Managed by | Purpose |
 |---|---|---|
-| `~/.config/opencode/opencode.jsonc` → `plugins[]` entry | `mpm-opencode/install.sh` (via `scripts/jsonc_config.py`) | OpenCode plugin registration: a `file://` URL pointing at the plugin **package directory** (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full MPM Registry) |
+| `~/.config/opencode/opencode.jsonc` → `plugins[]` entry | `mpm-opencode/install.sh` (via `scripts/jsonc_config.py`) | OpenCode plugin registration: a `file://` URL pointing at the plugin **package directory** (TypeScript, 17 typed tools — 14 Domain Tools + 3 Standalone Tools — + `mpm call` CLI fallback to the full MPM Registry) |
 | `~/.mpm/agent_installation/mpm-opencode/dist/` | `mpm-opencode/install.sh` | The compiled plugin payload (`dist/index.v2.js` + `dist/mpm-build-provenance.json`) |
 | `~/.config/opencode/AGENTS.md` (or `<project>/AGENTS.md`) | `install_agents_instructions.py` (invoked by `install.sh`) | Persistent instructions: MPM behavioral protocol in a managed block |
 | `~/.mpm/bin/mpm` | External (Makefile + install.sh) | `mpm` binary on `$PATH` |
