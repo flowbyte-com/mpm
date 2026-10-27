@@ -148,6 +148,11 @@ The gate's own documentation states the condition (`internal/core/wake_tools.go`
 **⇒ Recommendation to A: the P2b gate's stated preconditions are satisfied, and lifting it
 is A's call.** It is a release decision, not a defect.
 
+> **RULED (PR #144): the gate STAYS CLOSED.** *"Session B's assessment argues the removal
+> condition is met; the gate stays closed, and F2 and D2-core give the reason beyond the
+> standing instruction."* The recommendation above stands as this assessment's advice; the
+> decision is A's, and A took the other way. The P2b gates are intact and tested.
+
 **The caveat that applied before Session A's #138 no longer applies.** The gate's condition
 says "the critic", and the critic had an **opt-in second path** — `--telemetry-hunt` — that
 still targeted the trusted lesson surface. **PR #138 made that path read-only**, so the
