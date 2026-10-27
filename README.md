@@ -55,12 +55,12 @@ The instructions that make MPM usable are split deliberately:
 | Tool descriptions, schemas, discovery surfaces | **How** to use MPM | MPM's own tool registry |
 | [Agent protocol](agent_installation/mpm-agent-protocol.md) | Detailed semantics | Repository documentation |
 
-For OpenClaw specifically, the integration is layered:
+For **OpenCode** — the officially supported agent host for this release —
+the integration is layered:
 
 ```text
-SOUL.md managed block            -> persistent behavioural bootstrap
-mpm-memory-openclaw              -> dynamic wake / context injection
-mpm-auto-mode-persona-openclaw   -> dynamic mode / persona injection
+AGENTS.md managed block         -> persistent behavioural bootstrap
+mpm-opencode plugin             -> dynamic wake / context injection
 ```
 
 Dynamic injection **supplements** the persistent managed block. It does not

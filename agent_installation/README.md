@@ -123,13 +123,23 @@ canonical source.
 
 ## Supported hosts
 
-| Host | Adapter directory | Mechanism | Persistent-instruction surface |
-|---|---|---|---|
-| **OpenClaw** | [`mpm-memory-openclaw/`](./mpm-memory-openclaw/) + [`mpm-auto-mode-persona-openclaw/`](./mpm-auto-mode-persona-openclaw/) | OpenClaw plugin (`mpm_memory_search`/`mpm_memory_get` slot, kind:memory) + auto-mode/persona plugin (turn-key mode/persona injection) | `~/.openclaw/workspace/SOUL.md` + `AGENTS.md` (loaded by OpenClaw runtime) |
-| **Claude Code** | [`mpm-claude-code/`](./mpm-claude-code/) | MCP server (user-scope `mcpServers.mpm` in `~/.claude.json`, default 3-tool initial surface via `mpm-mcp` — `MPM_EXPOSE_ALL_TOOLS=1` restores the full registered MCP surface) + CLAUDE.md managed block | `~/.claude/CLAUDE.md` (managed-block convention) |
-| **OpenCode** | [`mpm-opencode/`](./mpm-opencode/) | OpenCode plugin (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full MPM Registry) + AGENTS.md managed block | `<project>/AGENTS.md` or `~/.config/opencode/AGENTS.md` (managed-block convention) |
-| **Hermes** | [`mpm-hermes/`](./mpm-hermes/) | Hermes MCP client (`~/.hermes/config.yaml`, default 3-tool initial surface via `mpm-mcp` — `MPM_EXPOSE_ALL_TOOLS=1` restores the full registered MCP surface) + .hermes.md behavioral section | `<project>/.hermes.md` (or `HERMES.md`, walked from cwd to git root) — persona stays in `~/.hermes/SOUL.md` |
-| **Pi** | [`mpm-pi/`](./mpm-pi/) | Pi extension (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full MPM Registry) + AGENTS.md managed block | `~/.pi/agent/AGENTS.md` (global) or `<project>/AGENTS.md` (per-pi-docs search order) |
+**OpenCode is the officially supported agent host for this release.** The
+other adapter directories are retained in the tree for operators who
+already run them; they are **not supported in this release** and are not
+maintained for it.
+
+| Host | Release status | Adapter directory | Mechanism | Persistent-instruction surface |
+|---|---|---|---|---|
+| **OpenCode** | **supported** | [`mpm-opencode/`](./mpm-opencode/) | OpenCode plugin (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full MPM Registry) + AGENTS.md managed block | `<project>/AGENTS.md` or `~/.config/opencode/AGENTS.md` (managed-block convention) |
+| **Claude Code** | not supported in this release | [`mpm-claude-code/`](./mpm-claude-code/) | MCP server (user-scope `mcpServers.mpm` in `~/.claude.json`, default 3-tool initial surface via `mpm-mcp` — `MPM_EXPOSE_ALL_TOOLS=1` restores the full registered MCP surface) + CLAUDE.md managed block | `~/.claude/CLAUDE.md` (managed-block convention) |
+| **Pi** | not supported in this release | [`mpm-pi/`](./mpm-pi/) | Pi extension (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full MPM Registry) + AGENTS.md managed block | `~/.pi/agent/AGENTS.md` (global) or `<project>/AGENTS.md` (per-pi-docs search order) |
+| **Hermes** | not supported in this release | [`mpm-hermes/`](./mpm-hermes/) | Hermes MCP client (`~/.hermes/config.yaml`, default 3-tool initial surface via `mpm-mcp` — `MPM_EXPOSE_ALL_TOOLS=1` restores the full registered MCP surface) + .hermes.md behavioral section | `<project>/.hermes.md` (or `HERMES.md`, walked from cwd to git root) — persona stays in `~/.hermes/SOUL.md` |
+| **OpenClaw** | not supported in this release | [`mpm-memory-openclaw/`](./mpm-memory-openclaw/) + [`mpm-auto-mode-persona-openclaw/`](./mpm-auto-mode-persona-openclaw/) | OpenClaw plugin (`mpm_memory_search`/`mpm_memory_get` slot, kind:memory) + auto-mode/persona plugin (turn-key mode/persona injection) | `~/.openclaw/workspace/SOUL.md` + `AGENTS.md` (loaded by OpenClaw runtime) |
+
+> **The MPM substrate is host-independent.** The `mpm` CLI, `mpm call
+> <tool> --payload '<json>'`, and the `mpm-mcp` stdio server work from any
+> host. What an unsupported host lacks is the *managed behavioural block*
+> and host-native wake-context delivery.
 
 ## Directory map
 
@@ -156,9 +166,9 @@ One-line entry points (full procedure in INSTALL.md):
 
 | Host | Install |
 |---|---|
+| **OpenCode** (supported) | `cd mpm-opencode && ./install.sh` — builds the payload, registers the plugin in `~/.config/opencode/opencode.jsonc`, and refreshes the AGENTS.md managed block |
 | OpenClaw | `cd mpm-memory-openclaw && ./install.sh` |
 | Claude Code | `cd mpm-claude-code && ./install.sh` |
-| OpenCode | `ln -s "$PWD/mpm-opencode" ~/.config/opencode/plugin/mpm-opencode` |
 | Hermes | (config already in `~/.hermes/config.yaml`; run `mpm-hermes/scripts/install_hermes_instructions.py` for the behavioral section) |
 | Pi | add `~/.mpm/agent_installation/mpm-pi` to `~/.pi/agent/settings.json` `extensions` |
 

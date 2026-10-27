@@ -19,6 +19,147 @@ This document covers:
 
 ---
 
+## Installing MPM from an agent
+
+> **OpenCode is the officially supported agent host for this release.** If you
+> are an agent reading this inside OpenCode, the procedure is the OpenCode
+> section below plus the discipline in this section. If you are running
+> inside another host, **fail closed** — see
+> [If no adapter exists for your host](#if-no-adapter-exists-for-your-host).
+
+### The procedure
+
+1. **Discover, do not invent.** Look for an existing adapter before writing
+   anything:
+
+   ```bash
+   ls agent_installation/
+   ```
+
+   `agent_installation/` is reserved for hand-reviewed, version-controlled
+   integrations shipped with this repository. **Never scaffold a new adapter
+   directory, never fabricate a plugin, and never write files under
+   `agent_installation/`** — an auto-generated integration is exactly the
+   kind of side-effect that pollutes the source tree and cannot be audited.
+   If no adapter exists for your host, see
+   [If no adapter exists for your host](#if-no-adapter-exists-for-your-host).
+
+2. **Install MPM itself** (one install, one database). The canonical root is
+   `~/.mpm`; see [`docs/INSTALL.md`](../docs/INSTALL.md) for the runtime
+   reference and `docs/INSTALL.md` §5 for the path cheat sheet.
+
+3. **Install the host adapter.** For OpenCode:
+
+   ```bash
+   cd ~/.mpm/agent_installation/mpm-opencode && ./install.sh
+   ```
+
+   The adapter builds the plugin payload, registers it in
+   `~/.config/opencode/opencode.jsonc`, and refreshes the managed
+   behavioural block in `~/.config/opencode/AGENTS.md`.
+
+4. **Never overwrite user working instructions.** Before touching
+   `AGENTS.md`, inspect it. The installer preserves everything outside the
+   managed-block markers; if the target has a malformed or partial managed
+   section, follow the adapter's fail-closed behaviour rather than
+   repairing it destructively.
+
+5. **Verify behavioural adoption.** The installation is incomplete if the
+   plugin exists but the agent's persistent instruction file does not
+   contain the MPM contract. For a fresh session, confirm at least:
+
+   ```text
+   wake context delivered before the first model turn
+   durable persistence instruction present
+   handoff instruction present
+   recovery/fallback instruction present
+   ```
+
+   The [OpenCode section](#opencode) below carries the exact commands and
+   a verification block that exercises these paths.
+
+6. **Verify idempotency.** Run the installation operation twice. The second
+   run must not duplicate managed sections, overwrite user instructions,
+   duplicate PATH entries, create duplicate configuration entries, or
+   corrupt existing MPM state. The installers are written to preserve user
+   content and manage only their own sections; use them rather than
+   replacing them with ad-hoc edits.
+
+7. **Verify safe failure behaviour.** If the integration cannot be used,
+   report the missing prerequisite clearly and identify what must be fixed.
+   **Failure must never destroy existing user files or databases.** Do not
+   silently continue with a half-installed integration.
+
+### The architecture-idempotency contract
+
+Re-runs must not reintroduce deprecated architecture patterns, on first
+install or on any re-run:
+
+- **The retired session-boundary tool** — the single "session" tool that
+  predates the split is retired. The current session-boundary surface is
+  `mpm_handoff` (write/read/list/shred) and `mpm_scratchpad`
+  (flush/read/discard/promote). A re-run must not produce any tool
+  manifest, instruction snippet, or config file that references the
+  retired name. This is **enforced, not merely advised**: the repository's
+  drift guard (`TestNoRetiredMpmSessionReferences` in
+  `cmd/mpm/template_drift_test.go`) fails the build if the retired name
+  reappears in an installed surface or in the operational documentation.
+- **Legacy Python MCP shims** — there is no Python wrapper layer between
+  the host and `mpm-mcp`. A re-run must not recreate any `mpm_*.py` shim
+  files or wrapper scripts under `agent_installation/`, the user's config
+  directory, or anywhere on the resolved tool path.
+- **Split-tool violations** — `mpm_handoff` and `mpm_scratchpad` are
+  independent tools. Do not collapse them into a single "session" tool and
+  do not write instruction text that presents them as a unified surface.
+- **Shell rc mutation** — re-runs must not touch `.bashrc`, `.zshrc`,
+  `.profile`, or any shell startup file. The `~/.local/bin` symlinks
+  created on first install are the durable PATH surface.
+
+Verify by grepping the installed instruction files for the failure modes
+that can actually reach a user's file:
+
+```bash
+grep -rE 'python.*mcp.*shim|session\.py|mpm_handoff_scratchpad' \
+    agent_installation/ "$HOME/.config/opencode" 2>/dev/null
+
+# expected: no matches (or matches only in passive migration warnings
+# under agent_installation/ — these are documentation, not active code)
+```
+
+Surface any active (non-documentation) hit as a regression and refuse to
+declare the installation complete.
+
+### If no adapter exists for your host
+
+There is no supported adapter for your host in this release. Fail closed:
+do not fabricate a native plugin, scaffold an adapter directory, or write
+any files under `agent_installation/`.
+
+The MPM substrate itself remains fully available to any host through the
+host-independent surfaces — the `mpm` CLI, `mpm call <tool> --payload
+'<json>'`, and the `mpm-mcp` stdio server. What an unsupported host lacks
+is the *managed behavioural block* and the host-native wake-context
+delivery; see [`mpm-agent-protocol.md`](./mpm-agent-protocol.md) for the
+contract those provide and the documented manual fallback.
+
+### Source-of-truth hierarchy
+
+When instructions disagree, use this order:
+
+```text
+1. Current running MPM/tool registry and implementation
+2. The matching adapter implementation under agent_installation/
+3. agent_installation/mpm-agent-protocol.md
+4. This document and the rest of agent_installation/ documentation
+5. README/examples
+6. Historical/archive material
+```
+
+Do not use an archived audit report to override current implementation, and
+do not modify runtime behaviour merely to preserve a stale document.
+
+---
+
 ## Prerequisites
 
 MPM itself must be installed and running before any host integration.
@@ -584,9 +725,17 @@ regenerate.
 
 | File / dir | Managed by | Purpose |
 |---|---|---|
-| `~/.config/opencode/plugin/mpm-opencode` | Symlink (manual or installer) | OpenCode plugin entry (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full MPM Registry) |
-| `<project>/AGENTS.md` (or `~/.config/opencode/AGENTS.md`) | `install_agents_instructions.py` | Persistent instructions: MPM behavioral protocol in a managed block |
+| `~/.config/opencode/opencode.jsonc` → `plugins[]` entry | `mpm-opencode/install.sh` (via `scripts/jsonc_config.py`) | OpenCode plugin registration: a `file://` URL pointing at the plugin **package directory** (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full MPM Registry) |
+| `~/.mpm/agent_installation/mpm-opencode/dist/` | `mpm-opencode/install.sh` | The compiled plugin payload (`dist/index.v2.js` + `dist/mpm-build-provenance.json`) |
+| `~/.config/opencode/AGENTS.md` (or `<project>/AGENTS.md`) | `install_agents_instructions.py` (invoked by `install.sh`) | Persistent instructions: MPM behavioral protocol in a managed block |
 | `~/.mpm/bin/mpm` | External (Makefile + install.sh) | `mpm` binary on `$PATH` |
+
+> **No symlink is created.** The OpenCode 2 loader resolves a *directory*
+> plugin from the `plugins` array in `opencode.jsonc`; a hand-made symlink
+> under `~/.config/opencode/plugin/` is not what it reads. The installer
+> writes the JSONC entry with `scripts/jsonc_config.py`, which preserves
+> unrelated plugin entries, other config sections, comments and trailing
+> commas byte-for-byte.
 
 ### User scope
 
@@ -603,34 +752,38 @@ the user-level one when both exist.
 ### Installation
 
 ```bash
-# 1. install the plugin into opencode's plugin dir
-ln -s "$HOME/.mpm/agent_installation/mpm-opencode" \
-      "$HOME/.config/opencode/plugin/mpm-opencode"
+# 1. install (builds the payload, registers the plugin, refreshes AGENTS.md)
+cd ~/.mpm/agent_installation/mpm-opencode
+./install.sh
 
-# 2. make sure ~/.mpm/bin/mpm is on PATH (the plugin's PATH-resolved
-#    default is `mpm`; this exports the canonical install root)
-export PATH=$HOME/.mpm/bin:$PATH
-
-# 3. install the AGENTS.md behavioral section (user scope):
-python3 ~/.mpm/agent_installation/mpm-opencode/scripts/install_agents_instructions.py \
-    --scope user \
-    --snippet ~/.mpm/agent_installation/mpm-opencode/templates/AGENTS.md.snippet
-
-# 4. (re)start opencode — the plugin will register and emit the boot
+# 2. (re)start opencode — the plugin will register and emit the boot
 #    health check
 ```
 
-The plugin reads the binary from `$PATH` by default (`mpm`); if you
-need a deterministic absolute path, set it via the OpenCode env block
-(`MPM_BINARY=$HOME/.mpm/bin/mpm` is the plugin's recognized
-override). The plugin also reads `MPM_WORKSPACE` from env (defaults to
-`<cwd>`).
+The installer performs four steps in order: build the payload (`npm ci`
+against the committed `package-lock.json`, then `npm run build`), stage it
+into `~/.mpm/agent_installation/mpm-opencode/dist/`, register it in
+`~/.config/opencode/opencode.jsonc`, and refresh the managed behavioural
+block in `~/.config/opencode/AGENTS.md`.
+
+It is idempotent and non-destructive: re-running it refreshes the plugin
+entry and the managed block without touching other plugins, other config
+sections, or any text outside the managed-block markers.
+
+The plugin resolves the MPM binary deterministically rather than trusting
+`$PATH`: `MPM_BINARY` if set, else `$HOME/.mpm/bin/mpm`, else
+`$HOME/.local/bin/mpm`, else `command -v mpm`. The resolved absolute path is
+used for every subprocess invocation, so the integration does not depend on
+`$PATH` being sane in the OpenCode runtime environment. `MPM_WORKSPACE`
+defaults to `$HOME/.mpm` when unset.
 
 ### Verification
 
 ```bash
 # Plugin loaded? List its typed tools in an OpenCode session:
-opencode # then :tools — expect 17 mpm__ prefixed tool registrations
+opencode # then :tools — expect 17 tool registrations named `mpm_*`
+# (the OpenCode adapter registers the bare canonical names; there is no
+#  `mpm__` prefix — that prefix belongs to hosts that namespace MCP tools)
 
 # AGENTS.md has exactly one managed block:
 grep -c 'BEGIN MPM-MANAGED SECTION:opencode-instructions' \
@@ -638,14 +791,14 @@ grep -c 'BEGIN MPM-MANAGED SECTION:opencode-instructions' \
 # expect: 1
 
 # End-to-end via the plugin's exposed tool:
-# (in OpenCode): "use mpm__mpm_memory action=save to remember that mpm-opencode integration smoke test passed"
+# (in OpenCode): "use mpm_memory action=save to remember that mpm-opencode integration smoke test passed"
 mpm recall --semantic "mpm-opencode integration smoke test"
 ```
 
-### Wake-context delivery — `experimental.chat.system.transform`
+### Wake-context delivery — `ctx.session.hook("context")`
 
 The OpenCode plugin delivers MPM wake context automatically at session
-start via OpenCode's `experimental.chat.system.transform` hook. It
+start via OpenCode 2's `ctx.session.hook("context")` lifecycle hook. It
 calls `mpm_context.read_wake_context` with `format: "system-prompt"`
 through a subprocess and pushes the returned context into the
 `output.system` array that OpenCode ships as the model-facing system
@@ -653,6 +806,11 @@ prompt. The wake context lands in the system prompt of the first turn;
 subsequent turns hit the cache by `sessionID`. Manual refresh path
 is `mpm call mpm_context --payload '{"action":"read_wake_context",…}'`
 (or `mpm_context` typed tool action `read_wake_context`).
+
+> The experimental hook `experimental.chat.system.transform` is the
+> **OpenCode V1** name. The V1 plugin source is retained at
+> `agent_installation/mpm-opencode/src/index.ts` as a historical reference;
+> OpenCode 2 cannot load it. The loadable plugin is `src/index.v2.js`.
 
 ### Build (automatic)
 
@@ -664,7 +822,8 @@ payload itself. `npm ci` is allowed to reach the npm registry: a fresh
 machine has no npm cache, and assuming one is what made the old manual
 workaround fail.
 
-Requirements: **Node.js 18+ and npm** on `PATH`. If either is missing,
+Requirements: **Node.js 20+ and npm** on `PATH` (the adapter's
+`package.json` declares `engines.node: ">=20"`). If either is missing,
 or the dependency install fails, the installer stops with a diagnostic
 that names the missing prerequisite and registers nothing — a partially
 installed plugin is never reported as a successful install.
@@ -696,15 +855,19 @@ npm run build
 ### Uninstall
 
 ```bash
-# Remove the plugin symlink:
-rm "$HOME/.config/opencode/plugin/mpm-opencode"
+# Removes MPM's entry from ~/.config/opencode/opencode.jsonc (every
+# historical shape: package dir, dist/index.js file url, the legacy
+# hyphenated `opencode`-`mpm` form) AND strips the managed block from
+# ~/.config/opencode/AGENTS.md. Unrelated plugins, other config sections,
+# comments, and any AGENTS.md text outside the managed-block markers are
+# preserved. A backup is written before any mutation.
+cd ~/.mpm/agent_installation/mpm-opencode
+./install.sh --uninstall
 
-# Strip the managed section from AGENTS.md:
+# For a project-scope managed block, repeat the instruction step:
 python3 ~/.mpm/agent_installation/mpm-opencode/scripts/install_agents_instructions.py \
-    --scope user \
+    --scope project --target <project>/AGENTS.md \
     --uninstall
-
-# (or for project scope, repeat with --scope project)
 ```
 
 ---
