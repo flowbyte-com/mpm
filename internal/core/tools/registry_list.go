@@ -82,7 +82,8 @@ Do not use when: you just want to remember something (mpm_memory); you have a co
 								"validation_criteria": {"type": "string"},
 								"tags":             {"type": "array", "items": {"type": "string"}},
 								"dependencies":     {"type": "array", "items": {"type": "string"}},
-								"source_ids":       {"type": "array", "items": {"type": "string"}}
+								"source_ids":       {"type": "array", "items": {"type": "string"}},
+								"source_type":      {"type": "string", "enum": ["memory","theory","decision","lesson","work","tool_invocation"], "description": "Optional. Declares the type of EVERY id in source_ids, so each citation is typed and validated: a cited id that does not resolve as that type rejects the whole proposal and leaves no partial record. Omit it and the citations are recorded in the historical untyped way (type auto-resolved, not validated)."}
 							},
 							"required": ["hypothesis"]
 						},
@@ -246,7 +247,8 @@ Do not use when: you are storing raw facts without evidentiary context (mpm_memo
 					"type": "object",
 					"properties": {
 						"artifact_id":         {"type": "string"},
-						"artifact_type":        {"type": "string", "enum": ["memory","theory","decision","lesson","skill","work"]},
+						"artifact_type":        {"type": "string", "enum": ["memory","theory","decision","lesson","work"],
+							"description": "The artifact the evidence is attached to. The vocabulary is exactly the evidence table's CHECK constraint (memory, theory, decision, lesson, work) — 'skill' was previously advertised here and rejected by the database."},
 						"type":               {"type": "string"},
 						"source_group":        {"type": "string", "enum": ["filesystem","test","api_response","manual_review","git","ci","external","tool_invocation","api_call","process"],
 							"description": "outcome=filesystem,test,api_response,manual_review; audit=git,ci,external; action=tool_invocation,api_call,process. Unknown values are rejected (F6)."},

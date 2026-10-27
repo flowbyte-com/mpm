@@ -1070,7 +1070,30 @@ func handleProposeTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 		sourceIDs = []string{}
 	}
 
-	result, err := dm.ProposeTheory(hypothesis, validationCriteria, dependencies, sourceIDs, tags)
+	// Optional typed citations.
+	//
+	// source_type declares the type of EVERY source id in this call. When
+	// it is absent (or empty) the LEGACY path runs and the citations are
+	// recorded exactly as they always were — type auto-resolved, not
+	// validated — so existing callers are unaffected.
+	//
+	// When it is present, each cited id must resolve AS THAT TYPE; one
+	// that does not rejects the whole proposal and leaves no partial
+	// proposal record. The type vocabulary is validated by the core, so
+	// there is one authority for it.
+	sourceType, _ := p["source_type"].(string)
+	sourceType = strings.TrimSpace(sourceType)
+
+	var result map[string]interface{}
+	if sourceType == "" {
+		result, err = dm.ProposeTheory(hypothesis, validationCriteria, dependencies, sourceIDs, tags)
+	} else {
+		citations := make([]internal.Citation, 0, len(sourceIDs))
+		for _, id := range sourceIDs {
+			citations = append(citations, internal.Citation{ID: id, Type: sourceType})
+		}
+		result, err = dm.ProposeTheoryWithCitations(hypothesis, validationCriteria, dependencies, citations, tags)
+	}
 	if err != nil {
 		return nil, err
 	}
