@@ -351,7 +351,7 @@ error message, is unchanged.
 
 ## 6. Regression coverage
 
-Two new files, 15 tests, no database required for the parser-level suite.
+Two new files, 16 tests, no database required for the parser-level suite.
 
 ### 6.1 `internal/core/d7_string_slice_parsing_test.go` (9 tests)
 
@@ -367,7 +367,7 @@ Two new files, 15 tests, no database required for the parser-level suite.
 | `TestD7_ParseStringSliceArrayOnly_SchemaContract` | **10** — the array-only contract, with the **original** error strings |
 | `TestD7_CitationListIsAcceptedWholeOrNotAtAll` | **7** — three identifiers in, three identifiers out, in both representations |
 
-### 6.2 `internal/core/tools/d7_string_slice_tools_test.go` (6 tests)
+### 6.2 `internal/core/tools/d7_string_slice_tools_test.go` (7 tests)
 
 Disposable file-backed databases in an isolated `t.TempDir()` workspace root
 (`HOME`, `MPM_WORKSPACE` and `MPM_DB_PATH` all redirected). No live workspace is touched.
@@ -380,6 +380,7 @@ Disposable file-backed databases in an isolated `t.TempDir()` workspace root
 | `TestD7_CLIMCPAndInProcessParity` | **9** — the JSON-decoded path and the native in-process path produce equivalent proposals citing the same artifact |
 | `TestD7_DecisionRecordKeepsEverySuppliedSourceID` | **7** — the decision side of the same guarantee |
 | `TestD7_ExistingCallersRetainTheirDocumentedBehaviour` | **10** — `mpm_decisions.record`'s scalar-`tags` error and `mpm_theories.propose`'s scalar-`dependencies` error keep their **exact** messages; a valid JSON array still works; the native shape is now accepted by the same contract |
+| `TestD7_CitationSitesStillAcceptTheCompactStringForms` | **10** — the comma-separated string and the JSON-encoded array string still work at a citation site, and cite **exactly** the two supplied artifacts: a working caller that sends either form is not broken by the correction |
 | `TestD7_NativeTagsAndSourceIDsAreAcceptedEverywhere` | the lenient path's parity — native tags are persisted, not dropped |
 
 ### 6.3 The end-to-end proof, in detail
@@ -434,8 +435,20 @@ The unsupported proposal is reproduced exactly:
 **Probe C — make the strict parser drop a malformed element instead of rejecting it.**
 The same test fails, on the same count — a partial parse still produces the artifact.
 
-The worktree was restored with `git checkout -- .` and the D7 suite re-run green, then
-the worktree was removed. The main checkout was never modified.
+**Probe D — make the strict parser reject the compact string forms.**
+The test that pins the compact forms at a citation site fails, and the error is the
+one a broken caller would see:
+
+```
+--- FAIL: TestD7_CitationSitesStillAcceptTheCompactStringForms
+    comma-separated string: propose: source_ids must be a string array (or a comma-separated string), got string
+```
+
+Probes A–C were run in the isolated worktree, which was restored with
+`git checkout -- .`, re-run green, and removed. Probe D was run in the main checkout
+against a byte-copy of `parse.go` that was restored immediately afterwards; `git diff`
+confirmed the only remaining change was the new test file. The working tree was never
+left modified by a probe.
 
 ---
 
@@ -564,8 +577,8 @@ cleanup, and D7's boundary says no unrelated repairs.
 |---|---|
 | Branch | `feat/session-b-d7-string-slice-parsing` |
 | Base | `origin/main` = `4de89ea` |
-| Commit | `f2ab066` — *fix(core): a Go-native []string must not vanish at the parse boundary (D7)* |
-| PR | see below |
+| Commits | `f2ab066` — *fix(core): a Go-native []string must not vanish at the parse boundary (D7)*<br>`3ce3953` — *docs(dev): the D7 report*<br>`c39edac` — *test(core): the compact citation forms must survive the strict parse too* |
+| PR | [#135](https://github.com/flowbyte-com/mpm/pull/135) |
 
 Files changed:
 
@@ -574,4 +587,4 @@ Files changed:
 | `internal/core/parse.go` | `parseStringSliceAny` accepts `[]string`; new `ParseStringSliceStrict`; new `ParseStringSliceArrayOnly`; `fmt` import |
 | `internal/core/tools/handlers.go` | the three citation sites use `ParseStringSliceStrict`; `parseStrictStringArrayOrEmpty` delegates to `ParseStringSliceArrayOnly` |
 | `internal/core/d7_string_slice_parsing_test.go` | **new** — 9 parser-level tests |
-| `internal/core/tools/d7_string_slice_tools_test.go` | **new** — 6 tool-level tests, including the end-to-end proof |
+| `internal/core/tools/d7_string_slice_tools_test.go` | **new** — 7 tool-level tests, including the end-to-end proof |
