@@ -1,17 +1,22 @@
 # Session B — M5 release assessment for Session A
 
-**Branch:** `feat/session-b-d4-proposal-identity` (from `origin/main` = `3abfdda`)
+**Branch:** authored on `feat/session-b-d4-proposal-identity` (from `origin/main` = `3abfdda`);
+this final update rides on `feat/session-b-release-assessment-merge-state` (from `origin/main`
+= `a4e3da9`).
 **Target:** the OpenCode-only release candidate, Friday 30 October 2026.
 **Audience:** Session A (integration and release acceptance).
 **Status of this document:** an **independent** classification of the remaining M5 risks and
 blockers, produced without touching A's integration sprint, the live workspace, the
 scheduler configuration or the installed runtime.
 
-> **Updated after Session A's PR #138 landed on `main`.** The branch this document rides is
-> based on `3abfdda`; `main` has since advanced to `9406936` (PR #137, the legacy host
-> adapter retirement) and `7d18237` (PR #138, the telemetry hunt read-only). Both PRs are
-> **MERGEABLE** against the current `main`, and neither touches the files this PR changes.
+> **Final state.** Session A merged both of this sprint's PRs: **#141** (the D3
+> correction, `434e47e`) and **#140** (the D4 integrity matrix and production-path proof,
+> `a4e3da9`). `main` also carries PR #137 (the legacy host adapter retirement), PR #138
+> (the telemetry hunt read-only), PR #132 (D6), PR #135 (D7) and PR #143.
+>
 > The §4 findings are updated for #138, and §4.5 records the one sibling it left behind.
+> **§2.2 records the verification of the merged tree** — `origin/main` + PR #140, merged
+> in a scratch worktree and swept — which is the state A released.
 
 ---
 
@@ -57,8 +62,8 @@ command** on the release's `mpm-telemetry` binary, and if anyone repairs its cou
 
 ### 2.1 The remaining contract failures
 
-The `m5contract` suite is deliberately red. After the D3 PR, exactly **two** failures
-remain, and **no contract test has been weakened, inverted or deleted** by this sprint:
+The `m5contract` suite is deliberately red. **Exactly two** failures remain on `main`, and
+**no contract test has been weakened, inverted or deleted** by this sprint:
 
 ```
 --- FAIL: TestM5Contract_UnresolvableCitationIsRejected              ← D3-a
@@ -68,6 +73,36 @@ remain, and **no contract test has been weakened, inverted or deleted** by this 
 The green characterization suite (`TestM5Characterization*`) still passes in full — the
 defective behaviours remain pinned as characterizations, so nothing has been quietly
 changed.
+
+### 2.2 The merged-tree verification — what A released
+
+Because `main` advanced six times while this sprint ran (PRs #137, #138, #132, #135, #143
+and #141), the PR was verified against the **merged** result rather than against its own
+base: `origin/main` + PR #140, merged in a scratch worktree, then swept.
+
+| Check | Result |
+|---|---|
+| the merge | **automatic, with no conflicts** |
+| the 13 new D3 + D4 tests on the merged tree | **all pass** |
+| the M5 characterization suite on the merged tree | **all 3 pass** |
+| the M5 contract suite on the merged tree | **exactly 2 failures** — D3-a and D4; `CitationPreservesItsType` **passes** |
+| `internal/core` (+ 10 sub-packages) on the merged tree | **ok** — 210.4s, zero failures |
+| `internal/core/tools` on the merged tree | **ok** — 37.0s, zero failures |
+| root module (17 packages) on the merged tree | **ok** — 411.6s for `cmd/mpm`, zero failures |
+| `internal/critic` on the merged tree | **ok** — 4.6s, zero failures |
+
+**So the state A released is: two contract failures, both OPEN by design, both with a
+decision attached.**
+
+> **A note on how the merged-tree sweep was run, because the first attempt looked like a
+> failure and was not.** The sweep was first run as raw `go test` in a scratch worktree
+> with no build, and it reported failures — the root-module CLI tests
+> (*"developer build artifact missing: … Run `make build` first"*) and the build-config
+> invariant (*"… must exist (run `make build` first)"*). Both are **build-ordering
+> artefacts of the scratch worktree**, not defects: `make test` depends on `build`, and
+> the raw `go test` sweep skips it. After `make build`, every one of those tests passes
+> and the whole tree is green. Recorded because a scratch-tree sweep that skips the build
+> is a trap, and the next agent to run one will meet it too.
 
 ---
 

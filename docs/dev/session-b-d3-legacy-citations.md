@@ -469,7 +469,7 @@ gone from three failures to two, and no test was weakened, inverted or deleted.
 |---|---|
 | Branch | `feat/session-b-d3-legacy-citations` |
 | Base | `origin/main` = `3abfdda` |
-| PR | **#141** |
+| PR | **#141** — **MERGED** into `main` as `434e47e` |
 | Commits | `0643b22` — *fix(core): a legacy citation must record the type of what it cites (D3)*<br>`2495ed8` — *docs(dev): the D3 report*<br>`e826290` — *test(m5): the legacy path's fingerprint is its event_id, not its mislabel* |
 
 Files changed:

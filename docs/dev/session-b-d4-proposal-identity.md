@@ -386,7 +386,7 @@ removed.
 
 ### 7.3 The contract suite — unchanged
 
-Run against **this branch's head** (which does not carry the D3 correction — that is a
+Run against **this PR's head** (which does not carry the D3 correction — that was a
 separate PR, #141):
 
 ```
@@ -398,17 +398,20 @@ separate PR, #141):
 **All three failures are unchanged by this PR.** No contract test was weakened, inverted
 or deleted.
 
-**After PR #141 (the D3 correction) merges, exactly two remain** — `UnresolvableCitationIsRejected`
-(D3-a) and `CycleVaryingTagDoesNotCreateSecondProposal` (D4) — because
-`CitationPreservesItsType` is D3-b and PR #141 closes it. The two PRs are independent and
-merge in either order.
+**Both PRs have since been merged** — #141 as `434e47e` and #140 as `a4e3da9` — so the
+state on `main` is **exactly two** failures: `UnresolvableCitationIsRejected` (D3-a) and
+`CycleVaryingTagDoesNotCreateSecondProposal` (D4), because `CitationPreservesItsType` is
+D3-b and PR #141 closed it. The merged result was verified locally (`origin/main` + this
+branch, merged in a scratch worktree): all 13 D3 and D4 tests pass, the characterization
+suite is green, and the contract suite shows exactly those two failures. The two PRs were
+independent and merged in either order.
 
 §5.4 states exactly what A's ruling would retire, and **until A rules, the D4 contract test
 stays red** — retiring it would assert a decision that has not been made.
 
-The **characterization** suite (`TestM5Characterization*`) stays green in full on this
-branch — all three pass — so the defective behaviours remain pinned as characterizations
-and nothing has been quietly changed.
+The **characterization** suite (`TestM5Characterization*`) stays green in full — all three
+pass — so the defective behaviours remain pinned as characterizations and nothing has been
+quietly changed.
 
 ---
 
