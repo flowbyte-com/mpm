@@ -8,14 +8,18 @@ package internal
 import "fmt"
 
 // SaveLesson persists a lesson. Mirrors callSaveLesson.
-func (dm *DatabaseManager) SaveLesson(fact, lessonType string, tags []string) (map[string]interface{}, *Lesson, error) {
+//
+// The optional ac carries the invocation identity of the call that produced
+// the lesson, so the lesson's artifact_provenance row joins to the
+// tool_invocations row of that invocation (D6).
+func (dm *DatabaseManager) SaveLesson(fact, lessonType string, tags []string, ac ...ActiveContext) (map[string]interface{}, *Lesson, error) {
 	if lessonType == "" {
 		lessonType = "insight"
 	}
 	if err := ValidateLessonType(lessonType); err != nil {
 		return nil, nil, err
 	}
-	lesson, err := dm.AddLesson(fact, LessonType(lessonType), tags, "")
+	lesson, err := dm.AddLesson(fact, LessonType(lessonType), tags, "", ac...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("add lesson: %w", err)
 	}

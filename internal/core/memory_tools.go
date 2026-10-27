@@ -175,15 +175,25 @@ func (dm *DatabaseManager) saveMemoryWithContextImpl(
 		meta["weight_intent"] = int(weight * 10)
 	}
 
-	// Per-call provenance bridge (Task 5b): overlay ActiveContext onto the
-	// effective provenance so artifact_provenance.framework_name and model_name
-	// are populated when the caller sets them (e.g., OpenCode MCP sets
-	// ac.FrameworkName="opencode"). The override is scoped to this save path;
-	// it is cleared by the defer below regardless of success or error.
-	if ac.FrameworkName != "" || ac.Model != "" || ac.SessionID != "" || ac.InvocationID != "" {
-		dm.perCallProvenanceOverride = dm.provenanceFromContext(ac)
-		defer func() { dm.perCallProvenanceOverride = nil }()
-	}
+	// D6: the provenance bridge no longer lives here.
+	//
+	// This used to set dm.perCallProvenanceOverride — SHARED, per-manager
+	// mutable state — so the save's provenance row carried the caller's
+	// framework/model. Two properties were wrong with that:
+	//
+	//   1. It was a race. A long-lived MCP server dispatches calls
+	//      concurrently; two overlapping saves would overwrite each
+	//      other's override, and one artifact would be stamped with the
+	//      other's invocation id. Distinct invocations were conflated.
+	//   2. It only covered THIS path. Every other recording path read the
+	//      resolver base, which never carries an invocation id, so a
+	//      decision, a lesson or a theory lost its invocation identity.
+	//
+	// The bridge now lives in saveMemoryRow, which receives the caller's
+	// ActiveContext as an argument and resolves the provenance from it
+	// (provenanceForWrite). An explicit argument cannot be conflated by a
+	// concurrent dispatch, and every write path that carries a context
+	// benefits from the same bridge.
 
 	// Use AddMemoryWithWeightForInvocation so the caller's weight actually
 	// reaches the weight column (instead of falling back to the DB default

@@ -103,6 +103,14 @@ type CoreDB interface {
 	// / framework_*_id columns. Background callers continue to use
 	// SaveMemoryNode (NULL correlation, brief §17 background policy).
 	SaveMemoryNodeForInvocation(collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, ac ActiveContext, expiresAt ...time.Time) (string, error)
+	// SaveMemoryNodeWithInvocation is the TRANSACTION-AWARE,
+	// identity-carrying form of SaveMemoryNode. It is what the recording
+	// paths that write inside a WithTx block use (decision, theory
+	// proposal, changelog entry, promoted scratchpad), so the artifact's
+	// artifact_provenance row carries the invocation that produced it
+	// (D6). SaveMemoryNode is tx-aware but carries no identity;
+	// SaveMemoryNodeForInvocation carries identity but is not tx-aware.
+	SaveMemoryNodeWithInvocation(node DBNode, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, ac ActiveContext, expiresAt ...time.Time) (string, error)
 
 	// ─── Memory Search & Query ───────────────────────────────────────
 	QueryMemories(collection string, primeOnly bool, limit, offset int) ([]map[string]interface{}, error)
@@ -179,7 +187,12 @@ type CoreDB interface {
 	GetRecentUserTopics(limit int) ([]string, error)
 
 	// ─── Lessons ─────────────────────────────────────────────────────
-	AddLesson(content string, lessonType LessonType, tags []string, sourceSessionID string) (*Lesson, error)
+	// AddLesson and SaveLesson take an OPTIONAL trailing ActiveContext
+	// carrying the invocation identity of the call that produced the
+	// lesson. Supplied, the lesson's artifact_provenance row joins to the
+	// tool_invocations row of that invocation; omitted, the row records
+	// invocation_id NULL (D6).
+	AddLesson(content string, lessonType LessonType, tags []string, sourceSessionID string, ac ...ActiveContext) (*Lesson, error)
 	GetLesson(id string) (*Lesson, error)
 	ListLessons(lessonType string) ([]*Lesson, error)
 	SearchLessons(query string, limit int) ([]*Lesson, error)
@@ -187,7 +200,7 @@ type CoreDB interface {
 	RestoreLesson(id string) error
 	ShredLesson(id string) error
 	GetLessonStats() (map[string]interface{}, error)
-	SaveLesson(fact, lessonType string, tags []string) (map[string]interface{}, *Lesson, error)
+	SaveLesson(fact, lessonType string, tags []string, ac ...ActiveContext) (map[string]interface{}, *Lesson, error)
 	SearchLessonsLimited(query string) ([]map[string]interface{}, error)
 	ListLessonsFiltered(lessonType string) ([]map[string]interface{}, error)
 
@@ -229,9 +242,13 @@ type CoreDB interface {
 	GetMostUsedReferences(limit int) ([]map[string]interface{}, error)
 
 	// ─── Changelog ──────────────────────────────────────────────
-	LogChangelogEntry(fact, commitHash string, extraTags []string) (string, error)
-	LogChangelogEntryWithConfirmations(fact, commitHash string, extraTags []string, confirmations []ConfirmationSpec) (string, error)
-	LogChangelogEntryWithAssertions(fact, commitHash string, extraTags []string, confirmations []ConfirmationSpec, contradictions []ContradictionSpec) (string, error)
+	// The changelog writers take an OPTIONAL trailing ActiveContext
+	// carrying the invocation identity of the call that produced the
+	// entry, so the entry's artifact_provenance row joins to the
+	// tool_invocations row of that invocation (D6).
+	LogChangelogEntry(fact, commitHash string, extraTags []string, ac ...ActiveContext) (string, error)
+	LogChangelogEntryWithConfirmations(fact, commitHash string, extraTags []string, confirmations []ConfirmationSpec, ac ...ActiveContext) (string, error)
+	LogChangelogEntryWithAssertions(fact, commitHash string, extraTags []string, confirmations []ConfirmationSpec, contradictions []ContradictionSpec, ac ...ActiveContext) (string, error)
 
 	// ─── Cluster Proposals ───────────────────────────────────────────
 	ActiveClusters() (known, unknown []ClusterProposal, err error)
@@ -289,14 +306,18 @@ type CoreDB interface {
 	GetExternalDBCursor(label string) (string, error)
 
 	// ─── Epistemology ────────────────────────────────────────────────
-	ProposeTheory(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string) (map[string]interface{}, error)
-	ProposeTheoryWithExtras(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string, cascadeFields map[string]interface{}) (map[string]interface{}, error)
+	// The proposal writers take an OPTIONAL trailing ActiveContext
+	// carrying the invocation identity of the call that produced the
+	// proposal, so the proposal's artifact_provenance row joins to the
+	// tool_invocations row of that invocation (D6).
+	ProposeTheory(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string, ac ...ActiveContext) (map[string]interface{}, error)
+	ProposeTheoryWithExtras(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string, cascadeFields map[string]interface{}, ac ...ActiveContext) (map[string]interface{}, error)
 	// ProposeTheoryWithCitations is the TYPED proposal entry point: each
 	// citation carries a source type, and a citation that does not
 	// resolve AS THAT TYPE rejects the proposal. ProposeTheory and
 	// ProposeTheoryWithExtras remain the LEGACY untyped path and are
 	// unchanged.
-	ProposeTheoryWithCitations(hypothesis, validationCriteria string, dependencies []string, citations []Citation, tags []string) (map[string]interface{}, error)
+	ProposeTheoryWithCitations(hypothesis, validationCriteria string, dependencies []string, citations []Citation, tags []string, ac ...ActiveContext) (map[string]interface{}, error)
 	ResolveTheory(theoryID, conclusion, newStatus string) (map[string]interface{}, error)
 	ResolveArbitrationTheory(theoryID, winnerID, conclusion string) (map[string]interface{}, error)
 	ChallengeMemoryWithTheory(memoryID, evidence string) (map[string]interface{}, error)
@@ -392,7 +413,11 @@ type CoreDB interface {
 	EnqueueCascadeInvalidation(tx *sql.Tx, deadArtifactID, deadArtifactType, reason, triggerEvidenceID string, depth int) (int, error)
 
 	// ─── Handoffs ────────────────────────────────────────────────────
-	EndSession(sessionID, summary, endedState string, commitments, openQuestions []string) (*Handoff, error)
+	// EndSession takes an OPTIONAL trailing ActiveContext carrying the
+	// invocation identity of the call that wrote the handoff, so the
+	// handoff's artifact_provenance row joins to the tool_invocations row
+	// of that invocation (D6).
+	EndSession(sessionID, summary, endedState string, commitments, openQuestions []string, ac ...ActiveContext) (*Handoff, error)
 	GetLatestHandoff() (*Handoff, error)
 	GetLatestUnreadHandoff() (*Handoff, error)
 	GetHandoffByID(id string) (*Handoff, error)
@@ -468,7 +493,16 @@ type CoreDB interface {
 	// ─── Skills (procedural memory) ─────────────────────────────────
 	ReadSkill(nameOrID, version string) (*Skill, error)
 	ListSkills(scope string) ([]SkillSummary, error)
+	// SaveSkill takes no identity: it is the background/CLI path, and the
+	// seed package (which cannot import internal/core) declares an
+	// interface with this exact signature.
 	SaveSkill(name, version, content, authorAgent string, force bool) (string, error)
+	// SaveSkillWithInvocation is the identity-carrying sibling of
+	// SaveSkill. The caller's ActiveContext carries the invocation
+	// identity of the call that wrote the skill, so the skill's
+	// artifact_provenance row joins to the tool_invocations row of that
+	// invocation (D6).
+	SaveSkillWithInvocation(name, version, content, authorAgent string, force bool, ac ActiveContext) (string, error)
 	PromoteSkillToGlobal(skillID string, confirm bool) error
 	ShredSkill(skillID string) error
 	// PermanentlyShredSkill is the destructive complement of ShredSkill:

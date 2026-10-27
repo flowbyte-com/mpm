@@ -540,10 +540,28 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 // directives, route, and handoff in one tool. The full mpm_handoff
 // tool (write/read/list/shred) remains in the substrate for direct
 // access via `mpm call mpm_handoff`.
+//
+// D6: the adapter forwards the PER-CALL ActiveContext, not the captured
+// process-level one. The captured `ac` has no per-call invocation id —
+// mcpAdapter mints one per dispatch and hands it to the handler as the
+// second argument. Using the captured one dropped the invocation
+// identity on the floor for every mpm_context action, which meant a
+// handoff written through `mpm_context write_handoff` produced a
+// provenance row with no invocation id: the artifact existed and could
+// not be joined back to the call that wrote it.
+//
+// The per-call context is a strict superset of the captured one (mcpAdapter
+// copies it and fills in the invocation id), so nothing else changes.
 func contextAdapter(dm *core.DatabaseManager, ac core.ActiveContext) tools.HandlerFunc {
 	handoffHandler := tools.MustByName("mpm_handoff").Handler
 	contextHandler := tools.MustByName("mpm_context").Handler
-	return func(_ core.CoreDB, _ core.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+	return func(_ core.CoreDB, callAC core.ActiveContext, payload map[string]interface{}) (interface{}, error) {
+		// Prefer the per-call context; fall back to the captured one if a
+		// caller ever invokes the adapter without one.
+		effectiveAC := callAC
+		if effectiveAC.InvocationID == "" && ac.InvocationID != "" {
+			effectiveAC = ac
+		}
 		action, _ := payload["action"].(string)
 		switch action {
 		case "write_handoff", "read_handoff":
@@ -560,9 +578,9 @@ func contextAdapter(dm *core.DatabaseManager, ac core.ActiveContext) tools.Handl
 			// TestContextAdapter_HandoffDispatchRewritesSuffix
 			// pins this contract.
 			reshaped["action"] = strings.TrimSuffix(action, "_handoff")
-			return handoffHandler(dm, ac, reshaped)
+			return handoffHandler(dm, effectiveAC, reshaped)
 		default:
-			return contextHandler(dm, ac, payload)
+			return contextHandler(dm, effectiveAC, payload)
 		}
 	}
 }

@@ -1099,13 +1099,13 @@ func handleProposeTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 
 	var result map[string]interface{}
 	if sourceType == "" {
-		result, err = dm.ProposeTheory(hypothesis, validationCriteria, dependencies, sourceIDs, tags)
+		result, err = dm.ProposeTheory(hypothesis, validationCriteria, dependencies, sourceIDs, tags, ac)
 	} else {
 		citations := make([]internal.Citation, 0, len(sourceIDs))
 		for _, id := range sourceIDs {
 			citations = append(citations, internal.Citation{ID: id, Type: sourceType})
 		}
-		result, err = dm.ProposeTheoryWithCitations(hypothesis, validationCriteria, dependencies, citations, tags)
+		result, err = dm.ProposeTheoryWithCitations(hypothesis, validationCriteria, dependencies, citations, tags, ac)
 	}
 	if err != nil {
 		return nil, err
@@ -1937,7 +1937,10 @@ func handleSaveLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	lessonType := internal.ParseStringOr(p["type"], "insight")
 	tags := internal.ParseStringSliceOr(p["tags"])
 
-	out, _, err := dm.SaveLesson(fact, lessonType, tags)
+	// D6: the caller's context carries the invocation identity, so the
+	// lesson's provenance row joins to the tool_invocations row of the
+	// call that recorded it.
+	out, _, err := dm.SaveLesson(fact, lessonType, tags, ac)
 	if err != nil {
 		return nil, err
 	}
@@ -3471,9 +3474,9 @@ func handleMpmLogToChangelog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 		// mixed-direction batch is one transaction.
 		id, err = dm.LogChangelogEntryWithAssertions(
 			fact, commitHash, internal.ParseStringSliceOr(p["tags"]),
-			confirmations, contradictions)
+			confirmations, contradictions, ac)
 	default:
-		id, err = dm.LogChangelogEntry(fact, commitHash, internal.ParseStringSliceOr(p["tags"]))
+		id, err = dm.LogChangelogEntry(fact, commitHash, internal.ParseStringSliceOr(p["tags"]), ac)
 	}
 	if err != nil {
 		return nil, err
@@ -3677,7 +3680,10 @@ func handleSaveSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 		return nil, fmt.Errorf("invalid frontmatter: %w", err)
 	}
 
-	id, err := dm.SaveSkill(name, version, content, author, force)
+	// D6: the caller's context carries the invocation identity, so the
+	// skill's provenance row joins to the tool_invocations row of the
+	// call that saved it.
+	id, err := dm.SaveSkillWithInvocation(name, version, content, author, force, ac)
 	if err != nil {
 		return nil, err
 	}
@@ -4289,7 +4295,7 @@ func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	// data.FrameworkSessionID exposed in handleReadWakeContext).
 	// When the WIP merges, this call site can swap to EndSessionV2
 	// again without further ceremony.
-	h, err := dm.EndSession(sessionID, summary, state, commitments, openQuestions)
+	h, err := dm.EndSession(sessionID, summary, state, commitments, openQuestions, ac)
 	if err != nil {
 		return nil, err
 	}
@@ -5540,17 +5546,20 @@ func handlePromoteScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 
 		// Step 2: INSERT memory. SaveMemoryNode runs the 20-pattern
 		// scanner; rejection here returns an error and the tx aborts.
-		// SaveMemoryNode is the canonical tx-aware primitive (see
-		// db.go:1433); it accepts the DBNode so the INSERT joins
-		// the same tx as the DELETE below.
+		// SaveMemoryNodeWithInvocation is the canonical tx-aware
+		// primitive (see db.go:1433) that also carries the caller's
+		// invocation identity into the promoted memory's provenance row;
+		// it accepts the DBNode so the INSERT joins the same tx as the
+		// DELETE below.
 		content := fmt.Sprintf("Thesis: %s\nSupporting Context: %s", thesis, supporting)
 		tags := []string{lineage}
 		var err error
-		memoryID, err = dm.SaveMemoryNode(
+		memoryID, err = dm.SaveMemoryNodeWithInvocation(
 			node,
 			"memories", content, "", tags, nil, nil,
 			false, 5, // weight=5 (medium), isLongTerm=false
 			"", "0.5", "0.5", "", // referenceID, retrieval, importance, createdAt (defaults)
+			ac,
 		)
 		if err != nil {
 			return fmt.Errorf("promote scratchpad: %w", err)

@@ -651,6 +651,41 @@ type ActiveContext struct {
 	ParentInvocationID string
 }
 
+// hasProvenanceIdentity reports whether the ActiveContext carries any
+// identity a provenance row can honestly record.
+//
+// It is the gate on the provenance bridge: when it is false, the write
+// falls back to the process-wide resolver base instead of the caller's
+// context. It asks "does this context know WHO produced the artifact?",
+// never "can we invent an id" — a context with a framework name but no
+// invocation id still knows something true (the framework), and a context
+// with nothing at all knows nothing.
+//
+// D6: the absence of an invocation id is a FACT, not a gap to be filled.
+// See provenanceForWrite in db.go.
+func (ac ActiveContext) hasProvenanceIdentity() bool {
+	return ac.SessionID != "" ||
+		ac.InvocationID != "" ||
+		ac.FrameworkName != "" ||
+		ac.Model != "" ||
+		ac.Agent != ""
+}
+
+// firstActiveContext returns the first supplied ActiveContext, or the zero
+// value when none was supplied.
+//
+// It exists so a recording method can accept the caller's identity as an
+// OPTIONAL trailing argument without changing the shape of every existing
+// call site. A caller that supplies no context gets the zero value, which
+// has no provenance identity — and therefore writes a provenance row with
+// invocation_id NULL. Absent stays absent.
+func firstActiveContext(acs []ActiveContext) ActiveContext {
+	if len(acs) == 0 {
+		return ActiveContext{}
+	}
+	return acs[0]
+}
+
 // provenanceMeta is deprecated. The full provenance block is now
 // captured at the artifact_provenance table by RecordArtifactProvenance.
 // The legacy metadata.provenance.* JSON block is left in existing rows

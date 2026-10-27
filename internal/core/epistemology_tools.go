@@ -122,8 +122,8 @@ func (dm *DatabaseManager) ChallengeMemoryWithTheory(memoryID, evidence string) 
 // topic-link step (AddMemoryToTopic) runs outside the transaction
 // because topic memberships are observability metadata, not
 // load-bearing for the cascade materializer.
-func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string) (map[string]interface{}, error) {
-	return dm.ProposeTheoryWithExtras(hypothesis, validationCriteria, dependencies, sourceIDs, tags, nil)
+func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string, ac ...ActiveContext) (map[string]interface{}, error) {
+	return dm.ProposeTheoryWithExtras(hypothesis, validationCriteria, dependencies, sourceIDs, tags, nil, ac...)
 }
 
 // ProposeTheoryWithCitations is the TYPED entry point for a proposal.
@@ -141,8 +141,8 @@ func (dm *DatabaseManager) ProposeTheory(hypothesis, validationCriteria string, 
 // behaviour unchanged.
 //
 // See citation.go for the full contract.
-func (dm *DatabaseManager) ProposeTheoryWithCitations(hypothesis, validationCriteria string, dependencies []string, citations []Citation, tags []string) (map[string]interface{}, error) {
-	return dm.proposeTheory(hypothesis, validationCriteria, dependencies, citations, tags, nil)
+func (dm *DatabaseManager) ProposeTheoryWithCitations(hypothesis, validationCriteria string, dependencies []string, citations []Citation, tags []string, ac ...ActiveContext) (map[string]interface{}, error) {
+	return dm.proposeTheory(hypothesis, validationCriteria, dependencies, citations, tags, nil, ac...)
 }
 
 // ProposeTheoryWithExtras extends ProposeTheory with an optional map of
@@ -156,8 +156,8 @@ func (dm *DatabaseManager) ProposeTheoryWithCitations(hypothesis, validationCrit
 // Its source_ids argument is the LEGACY (untyped, unvalidated) citation
 // path and is unchanged. The cascade materializer cites artifacts it has
 // just read, so it has no reason to take the typed path.
-func (dm *DatabaseManager) ProposeTheoryWithExtras(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string, cascadeFields map[string]interface{}) (map[string]interface{}, error) {
-	return dm.proposeTheory(hypothesis, validationCriteria, dependencies, legacyCitations(sourceIDs), tags, cascadeFields)
+func (dm *DatabaseManager) ProposeTheoryWithExtras(hypothesis, validationCriteria string, dependencies []string, sourceIDs []string, tags []string, cascadeFields map[string]interface{}, ac ...ActiveContext) (map[string]interface{}, error) {
+	return dm.proposeTheory(hypothesis, validationCriteria, dependencies, legacyCitations(sourceIDs), tags, cascadeFields, ac...)
 }
 
 // proposeTheory is the single write path for a proposal. Every public entry
@@ -167,7 +167,7 @@ func (dm *DatabaseManager) ProposeTheoryWithExtras(hypothesis, validationCriteri
 // The citation loop runs INSIDE the transaction: a citation that cannot be
 // resolved aborts the whole transaction, and no partial proposal record
 // survives.
-func (dm *DatabaseManager) proposeTheory(hypothesis, validationCriteria string, dependencies []string, citations []Citation, tags []string, cascadeFields map[string]interface{}) (map[string]interface{}, error) {
+func (dm *DatabaseManager) proposeTheory(hypothesis, validationCriteria string, dependencies []string, citations []Citation, tags []string, cascadeFields map[string]interface{}, ac ...ActiveContext) (map[string]interface{}, error) {
 	if tags == nil {
 		tags = []string{}
 	}
@@ -192,8 +192,13 @@ func (dm *DatabaseManager) proposeTheory(hypothesis, validationCriteria string, 
 	}
 
 	var memID string
+	acCtx := firstActiveContext(ac)
 	err = dm.WithTx(func(node DBNode) error {
-		id, err := dm.SaveMemoryNode(node, "theories", content, "", tags, meta, nil, false, 1, "", "0.5", "0.5", "")
+		// D6: SaveMemoryNodeWithInvocation is the tx-aware,
+		// identity-carrying form. SaveMemoryNode would write the
+		// proposal's artifact_provenance row with invocation_id NULL,
+		// because the resolver base carries no invocation id.
+		id, err := dm.SaveMemoryNodeWithInvocation(node, "theories", content, "", tags, meta, nil, false, 1, "", "0.5", "0.5", "", acCtx)
 		if err != nil {
 			return fmt.Errorf("propose theory: %w", err)
 		}
@@ -483,7 +488,12 @@ func (dm *DatabaseManager) RecordDecision(contextText, choice, rationale, outcom
 
 	var memID string
 	err := dm.WithTx(func(node DBNode) error {
-		id, err := dm.SaveMemoryNode(node, "decisions", content, "", tags, meta, nil, false, 1, "", "0.5", "0.5", "")
+		// D6: the decision's provenance row must carry the invocation
+		// that recorded it. Before this, RecordDecision received an
+		// ActiveContext and used it only for metadata; the provenance
+		// row was written with invocation_id NULL, so NO decision row
+		// joined to its producing invocation.
+		id, err := dm.SaveMemoryNodeWithInvocation(node, "decisions", content, "", tags, meta, nil, false, 1, "", "0.5", "0.5", "", ac)
 		if err != nil {
 			return fmt.Errorf("record decision: %w", err)
 		}
