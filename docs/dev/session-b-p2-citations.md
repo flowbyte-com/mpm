@@ -122,12 +122,47 @@ rest on, which is exactly the state M5 forbids.
                 "description": "Optional. Declares the type of EVERY id in source_ids, so each citation is typed and validated: a cited id that does not resolve as that type rejects the whole proposal and leaves no partial record. Omit it and the citations are recorded in the historical untyped way (type auto-resolved, not validated)."}
 ```
 
-The registry schema **is** the MCP server's published input schema
-(`cmd/mpm-mcp/tools.go:412` → `mcp.NewToolWithRawSchema(tool.Name,
-tool.Description, tool.Schema)`), so declaring the parameter here is what
-makes the MCP path accept it. A test reads the registry schema and asserts
-the enum is **exactly** the canonical vocabulary — no drift in either
-direction.
+The registry schema is what the MCP server **publishes** to clients
+(`cmd/mpm-mcp/tools.go:412` → `mcp.NewToolWithRawSchema`) and what
+`mpm_help show mpm_theories` returns to an agent. A test reads the registry
+schema and asserts the enum is **exactly** the canonical vocabulary — no
+drift in either direction — and a second test asserts the **published**
+schema (`mpm_help show`) carries the declaration, because that is the
+surface an agent actually reads.
+
+### 3.0 A correction to what the registry schema actually does
+
+I initially wrote that declaring the parameter is "what makes the MCP path
+accept it". **That was wrong, and a negative proof caught it.**
+
+Removing the `source_type` declaration from the registry schema and re-running
+the MCP tests left them **green**. So the MCP server does **not** validate
+arguments against the published schema:
+
+* mcp-go's input-schema validation is **opt-in** via
+  `server.WithInputSchemaValidation()`, and `buildMCPServerCore()` does not
+  set it;
+* `mcp.NewToolWithRawSchema` — the form this server registers with — is
+  skipped by the structured-schema helpers entirely; and
+* there is **no JSON-schema validation anywhere in MPM's own Go code** —
+  neither the `mpm call` dispatcher nor the runtime dispatcher validates a
+  payload against the registered schema.
+
+**So the registry schema is DISCOVERY, not enforcement.** It tells an agent
+what the parameters are; the handler and the core decide what is accepted.
+
+This is exactly why P2's validation lives in the **core**
+(`ProposeTheoryWithCitations`) and not in the schema: a core-level check is
+transport-independent, so it holds for the MCP surface, the `mpm call` CLI
+path and every other caller alike. The registry declaration's role is to make
+the parameter **discoverable** — and that role is now pinned by
+`TestP2Tool_HelpPublishesSourceType`, which fails if the declaration is
+removed.
+
+The same correction is applied to a comment in `internal/core/tools/help.go`,
+which claimed the registry schema is "the same object the runtime dispatcher
+validates an incoming payload against". That was inaccurate; the comment now
+states the distinction and says where a rule belongs.
 
 ### 3.1 The one limitation, stated rather than hidden
 
@@ -180,18 +215,46 @@ the two cannot drift again.
 | `LegacyPathIsUnchanged` | **backward compatibility** — an unresolvable id is still accepted, the type is still auto-resolved to `"memory"`, the event id is still the downstream id |
 | `LegacyAndTypedPathsAreDistinct` | **backward compatibility** — the two paths' event ids differ, so a migration from one to the other cannot silently collide |
 
-### 4.2 Tool surface — `internal/core/tools/p2_citation_tool_test.go` (6 tests)
+### 4.2 Tool surface — `internal/core/tools/p2_citation_tool_test.go` (7 tests)
 
 | Test | Covers |
 |---|---|
 | `RegistryDeclaresSourceType` | the registry declares the parameter, typed `string`, with the canonical enum |
+| `HelpPublishesSourceType` | the **published** schema (`mpm_help show mpm_theories`) carries the declaration — the discoverability effect |
 | `HandleProposeWithSourceTypeIsTyped` | the handler routes to the **typed** path when the parameter is present |
 | `HandleProposeWithoutSourceTypeIsLegacy` | the handler routes to the **legacy** path when it is absent |
 | `HandleProposeRejectsUnresolvableTypedCitation` | rejection at the tool boundary, with no proposal surviving |
 | `HandleProposeRejectsUnknownSourceType` | an unknown type is rejected, not ignored |
 | `EvidenceArtifactTypeEnumMatchesDatabase` | the A-9 correction, checked against the live CHECK constraint |
 
-### 4.3 The D3 split
+### 4.3 MCP surface — `cmd/mpm-mcp/p2_citation_mcp_test.go` (3 tests)
+
+These send a real `tools/call` through the **production** MCP server
+(`buildMCPServer`, the same constructor `main()` uses) and read the result
+back, which is what a client does. The in-process tool tests call the
+handler directly and never exercise the MCP adapter, the output policy or
+the tool filter.
+
+| Test | Covers |
+|---|---|
+| `SourceTypeIsAcceptedOverMCPToolsCall` | the parameter flows through the real server and the **core's** typed path ran: the declared type and the cited event id are recorded |
+| `UnresolvableTypedCitationIsRejectedOverMCP` | the rejection happens on the wire, and no proposal survives |
+| `LegacyCitationIsUnchangedOverMCP` | backward compatibility on the wire: the legacy path still records `"memory"` |
+
+### 4.4 Non-vacuity — proven, not asserted
+
+Both P2 test groups were verified against deliberate violations in a
+disposable copy of the tree:
+
+| Violation | Result |
+|---|---|
+| the handler stops honouring `source_type` (falls back to legacy) | **FAIL** — the MCP test reported `expected source_type "tool_invocation" … got "memory"`, and the tool-surface test reported `the handler must route to the typed path` |
+| the `source_type` declaration is removed from the registry schema | **FAIL** — `the propose branch does not declare source_type` and `the published schema does NOT declare source_type — an agent reading mpm_help would never learn that the parameter exists` |
+
+The first proof proves the tests detect the **behaviour**. The second proves
+they detect the **declaration**. Together they cover both halves of P2.
+
+### 4.5 The D3 split
 
 P2 fixes the **typed** path. The **legacy** path is deliberately unchanged, so
 the defect that the M5 contract suite pins does not go away:
@@ -215,10 +278,12 @@ D1, D2, D4 and D5 are **untouched** and remain separately tracked.
 | CI "Core tests" step regex (`-short -tags fts5`) | **ok** |
 | `go vet -tags fts5` (root, core, tools) | **clean** |
 | `mpm-lint --gate` (the fatal-class gate) | **PASS** — mutex, sql, fd and imports thresholds all ok |
+| `cmd/mpm-mcp` full suite | **ok** (6.1 s) |
 | `make test-scripts` | **ok** — 540 tests |
 | `make test-agent-installation` | **ok** — 494 tests + 46 TS adapter tests |
 | P2 core tests | **11/11 ok** |
-| P2 tool-surface tests | **6/6 ok** |
+| P2 tool-surface tests | **7/7 ok** |
+| P2 MCP-surface tests | **3/3 ok** |
 | `gofmt` on every file this PR touches | **clean** (the two pre-existing `gofmt` complaints in `epistemology_tools.go` are at `origin/main` and are **not** reformattted here — reformatting them would bury the diff) |
 | Live database knowledge tables | **byte-identical** to the runbook baseline (27/116/85/2/61/5) |
 

@@ -98,9 +98,9 @@ func TestP2Tool_RegistryDeclaresSourceType(t *testing.T) {
 	}
 	declared, ok := props["source_type"].(map[string]interface{})
 	if !ok {
-		t.Fatal("the propose branch does not declare source_type — the MCP " +
-			"server publishes this schema verbatim, so the parameter would not " +
-			"be accepted")
+		t.Fatal("the propose branch does not declare source_type — nothing " +
+			"publishes the parameter to an agent, so it would never be " +
+			"discoverable")
 	}
 	if declared["type"] != "string" {
 		t.Errorf("expected source_type to be a string, got %v", declared["type"])
@@ -353,4 +353,78 @@ func p2SortedKeys(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestP2Tool_HelpPublishesSourceType pins the DISCOVERY effect of the
+// registry change.
+//
+// The registry schema is not enforced anywhere in MPM's Go code — there is
+// no JSON-schema validation in the CLI dispatcher, the runtime dispatcher
+// or the MCP server (mcp-go's input-schema validation is opt-in via
+// server.WithInputSchemaValidation, which the server does not set). What
+// the schema IS, is the tool's published contract:
+//
+//   - it is what `mpm_help show mpm_theories` returns to an agent as the
+//     tool's input schema; and
+//   - it is what an MCP client receives as the tool's input schema.
+//
+// So the registry declaration is what makes the new parameter DISCOVERABLE.
+// An agent that has never read the source learns the parameter and its
+// vocabulary from this surface. This test pins that.
+//
+// It is the test that makes the registry change non-vacuously pinned:
+// removing the declaration breaks this test even though no call is
+// rejected.
+func TestP2Tool_HelpPublishesSourceType(t *testing.T) {
+	// Help is the discovery surface: it returns the registered schema
+	// verbatim, so this is exactly what an agent reads.
+	out, err := Help("show", "mpm_theories")
+	if err != nil {
+		t.Fatalf("mpm_help show mpm_theories: %v", err)
+	}
+	schema, ok := out[inputSchemaField].(map[string]interface{})
+	if !ok {
+		t.Fatalf("mpm_help show returned no input_schema: %v", out)
+	}
+
+	props, ok := schema["properties"].(map[string]interface{})["params"].(map[string]interface{})
+	if !ok {
+		t.Fatal("the published schema has no params object")
+	}
+	branches, ok := props["oneOf"].([]interface{})
+	if !ok || len(branches) == 0 {
+		t.Fatal("the published schema has no oneOf branches")
+	}
+	var found map[string]interface{}
+	for _, b := range branches {
+		branch, _ := b.(map[string]interface{})
+		branchProps, _ := branch["properties"].(map[string]interface{})
+		if _, has := branchProps["hypothesis"]; has {
+			found = branchProps
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("the published schema has no propose branch")
+	}
+	declared, ok := found["source_type"].(map[string]interface{})
+	if !ok {
+		t.Fatal("the published schema does NOT declare source_type — an agent " +
+			"reading mpm_help would never learn that the parameter exists")
+	}
+	enum, ok := declared["enum"].([]interface{})
+	if !ok {
+		t.Fatalf("the published source_type has no enum: %v", declared)
+	}
+	got := map[string]bool{}
+	for _, e := range enum {
+		s, _ := e.(string)
+		got[s] = true
+	}
+	for _, want := range internal.CitationSourceTypes() {
+		if !got[want] {
+			t.Errorf("the published source_type enum is missing %q — an agent "+
+				"must be able to learn the whole vocabulary from discovery", want)
+		}
+	}
 }
