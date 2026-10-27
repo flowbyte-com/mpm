@@ -560,6 +560,14 @@ proposal ──(explicit review: mpm_request_review / challenge)──▶  memor
   them must resolve to a stored event (or to a `tool_invocations` row). A
   proposal whose evidence cannot be resolved is **rejected** — not silently
   downgraded to an unevidenced proposal.
+* **Absence is not evidence.** A hunt that finds an *invocation with no
+  corresponding artifact* has found the **absence** of a record, not a
+  positive observation. Such a gap may be reported as a **candidate
+  opportunity** — an observation that a lesson *may* be warranted, carried
+  with its reasoning — but it **may not be cited as the evidence** for the
+  proposal that follows, and it is **never** evidence that a particular
+  lesson exists. A proposal whose only support is a gap is not promotable
+  under this clause: it is a finding for a human, not a proposal.
 * Promotion follows the existing review and authority rules. Session A and the
   reviewing agent promote; neither the adapter nor the critic does.
 
@@ -1033,7 +1041,7 @@ Session C — name: Session C (OpenCode adapter & behavioural evaluation)  contr
             docs/dev/session-c-host-findings.md §1.1-§1.2 and §4.1.1).
 ```
 
-**Amendments A1–A13, applied by Session A on 2026-10-26:**
+**Amendments A1–A15, applied by Session A on 2026-10-26:**
 
 | # | Amendment |
 |---|---|
@@ -1050,21 +1058,5 @@ Session C — name: Session C (OpenCode adapter & behavioural evaluation)  contr
 | A11 | §3.7 / M5 — the M5 tension is ruled: the critic's existing automatic lesson-writing is a **pre-existing substrate behaviour** that this contract neither creates nor endorses. Amending it would require a schema change on `lessons_base`, which this sprint does not take. |
 | A12 | §3.7 / M7 — the host-status → `ToolOutcomeClass` mapping is **pinned**. |
 | A13 | §3.3 / M3 — a host project id is adopted only when a git remote independently confirms it (`host-git-remote`). |
-
-**Amendments A1–A13, applied by Session A on 2026-10-26:**
-
-| # | Amendment |
-|---|---|
-| A1 | §3.5 — the host's `callID` is removed from the unique host-event-key chain; it is a **correlation** id (`meta.host_call_id`), never an identity. Nested tool calls share one. |
-| A2 | §3.5 — `event_type` is added to the strict-mode derivation input. |
-| A3 | §3.5 — the measured host event identity is recorded: `evt_<hex>`, unique per published event. |
-| A4 | §4 — the first-session startup race is recorded beside `session.started`. |
-| A5 | §3.8 / §6.2 — the stream's volatility and the "no subprocess inside the iterator" rule are binding. |
-| A6 | §5 — the capability table is **replaced** with the measured surface. |
-| A7 | §3.8 / §6.7 — the `meta` allowlist gains `host_event_type`, `host_call_id`, `host_message_id`. |
-| A8 | §6.2 — the transport constraint is fixed; the choice stays open. |
-| A9 | §6.4 — **decided**: `mpm_system`, with a read-backed receipt. |
-| A10 | §6.1 — **decided: deferred.** No new table; not the first milestone. |
-| A11 | §3.7 / M5 — the M5 tension is ruled: the critic's existing automatic lesson-writing is a **pre-existing substrate behaviour** that this contract neither creates nor endorses. Amending it would require a schema change on `lessons_base`, which this sprint does not take. |
-| A12 | §3.7 / M7 — the host-status → `ToolOutcomeClass` mapping is **pinned**. |
-| A13 | §3.3 / M3 — a host project id is adopted only when a git remote independently confirms it (`host-git-remote`). |
+| **A14** | §3.7 / M5 — **absence is not evidence.** An invocation with no corresponding artifact is a *candidate opportunity*, never a citation and never proof that a lesson exists. | The contract's evidence rule applied to a case the draft did not name: the trust clause requires *resolvable* evidence, and a gap is the absence of a record, not a positive observation. |
+| **A15** | §6.1 / §2 — **the critic's automatic path is armed-on-demand, and gated.** The `critic_audit` wake kind is caller-supplied and unvalidated at the wake-creation path, so it is one API call from automatic execution. Until the trust boundary is enforced, that kind is **rejected at the creation path**. | The addendum's instruction, turned from a note into an enforced gate. The live workspace has no `critic_audit` wake and the critic has written no trusted lesson, so this is a latent hazard, not a live one. |

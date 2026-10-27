@@ -225,6 +225,7 @@ Neither was product work.
 |---|---|---|---|---|---|
 | **P1** | `fix(opencode): deliver the wake context` — extraction (`content`, type-checked, never coerced), per-session cache, concurrent-build suppression, retry-on-empty, session attribution on the fetch | **C** | No | No | No |
 | **P2** | `feat(critic): typed, validated, idempotent evidence citations on proposals` — optional `source_type` beside `source_ids`, validated before insert; plus the one-line `artifact_type='skill'` registry correction (A-9) | **B** | No | **No** | Yes (one optional parameter) |
+| **P2b** | **gate the `critic_audit` wake kind at the wake-creation path** until the trust boundary is enforced | **B** (or A) | No | No | No |
 | **P3** | `feat(critic): a retrospective missed-opportunity hunt` over the existing `tool_invocations` × `artifact_provenance` join | **B** | No | No | No |
 | **P4** | `feat(opencode): observe lifecycle events` — subscribe, consume off the hot path, map an explicit allowlist, emit `session.observed` / `session.started` (when actually seen) / `tool.outcome` / `compaction.*` | **C** | Yes (M2, now agreed) | No | No |
 | **P5** | The ingest entry point, receipt, `mpm_system action=event_counters`, and the storage decision | **A** | Yes | only if §6.1 later authorises it | Yes (one action) |
@@ -232,6 +233,20 @@ Neither was product work.
 * **P1 and P2 are independent and may proceed in parallel.** P3 depends on
   P2. P4 depends on the contract and on P1's plumbing. P5 is A's and is
   explicitly last.
+* **P2b is independent of everything** and can land immediately: a narrow
+  rejection at one call site, no schema and no tool-surface change.
+  **Automated critic scheduling is not enabled** while the duplicate-
+  evidence, proposal-idempotency and trust-promotion risks are unresolved.
+  The critic's automatic path is **wired but not armed** — the live
+  workspace has no `critic_audit` wake and the critic has written no trusted
+  lesson — but the wake `kind` is caller-supplied and unvalidated, so it is
+  one API call from firing. P2b closes it.
+* **P3's proposals may not cite a gap.** An invocation with no corresponding
+  artifact is a *candidate opportunity*, never a citation and never proof
+  that a lesson exists (contract §3.7, amendment A14).
+* **P3 and P4 are complementary, not substitutes.** P3 covers MPM-visible
+  activity; P4 extends detection to sessions that never invoke MPM. Neither
+  makes the other redundant.
 * **The lifecycle-events table is NOT the first milestone.** B's audit shows
   the first end-to-end acceptance test needs no new table: `epistemic_provenance`
   already provides typed, validated and idempotent citations, and the
