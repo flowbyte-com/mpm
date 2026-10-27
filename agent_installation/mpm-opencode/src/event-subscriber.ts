@@ -299,6 +299,34 @@ export function createLifecycleObserver(opts: ObserverOptions): LifecycleObserve
   let drainDone: Promise<void> | null = null;
   let started = false;
 
+  /**
+   * Wake signal for the drain loop. Polling with a timer is wrong here: the
+   * host process must be free to exit, so a timer would have to be unref'd —
+   * and an unref'd timer can leave `stop()` waiting on a promise the event
+   * loop will never resolve. A promise resolved by enqueue/abort has neither
+   * problem.
+   */
+  let wakeDrain: (() => void) | null = null;
+  function notifyDrain(): void {
+    const wake = wakeDrain;
+    wakeDrain = null;
+    wake?.();
+  }
+  function waitForWork(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      wakeDrain = resolve;
+      signal.addEventListener(
+        "abort",
+        () => {
+          if (wakeDrain === resolve) wakeDrain = null;
+          resolve();
+        },
+        { once: true },
+      );
+    });
+  }
+
   /** A diagnostic sink only: absent unless the operator opts in. */
   function diagnostic(record: Record<string, unknown>): void {
     if (!opts.debugDumpPath) return;
@@ -373,6 +401,7 @@ export function createLifecycleObserver(opts: ObserverOptions): LifecycleObserve
     if (buffer.push(envelope) === "evicted") {
       counters.dropped_overflow++;
     }
+    notifyDrain();
   }
 
   function recordUnmapped(type: string): void {
@@ -412,11 +441,7 @@ export function createLifecycleObserver(opts: ObserverOptions): LifecycleObserve
       result = await opts.transport.deliver(envelope);
       if (result.ok || result.reason !== "unavailable") break;
       if (attempt < maxAttempts && retryDelayMs > 0) {
-        await new Promise<void>((resolve) => {
-          const t = setTimeout(resolve, retryDelayMs);
-          // never keep the host process alive for a retry
-          (t as unknown as { unref?: () => void }).unref?.();
-        });
+        await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
       }
     }
     if (result.ok) {
@@ -485,10 +510,7 @@ export function createLifecycleObserver(opts: ObserverOptions): LifecycleObserve
     drainDone = (async () => {
       while (!signal.aborted) {
         if (buffer.size === 0) {
-          await new Promise<void>((resolve) => {
-            const t = setTimeout(resolve, 5);
-            (t as unknown as { unref?: () => void }).unref?.();
-          });
+          await waitForWork(signal);
           continue;
         }
         await drainOnce();
@@ -507,26 +529,33 @@ export function createLifecycleObserver(opts: ObserverOptions): LifecycleObserve
     const bounded = async (p: Promise<void> | null): Promise<void> => {
       if (!p) return;
       const remaining = Math.max(0, deadline - Date.now());
-      await Promise.race([
-        p.catch(() => undefined),
-        new Promise<void>((resolve) => {
-          const t = setTimeout(resolve, remaining);
-          (t as unknown as { unref?: () => void }).unref?.();
-        }),
-      ]);
+      // A ref'd timer, cleared as soon as the promise wins: the bounded wait
+      // must be *observable* to the event loop, or a stalled promise turns
+      // into "the event loop resolved while a promise was still pending".
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, remaining);
+      });
+      try {
+        await Promise.race([p.catch(() => undefined), timeout]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
     };
 
     await bounded(loopDone);
     await bounded(drainDone);
     // Final bounded flush; never waits past the deadline.
     if (buffer.size > 0 && Date.now() < deadline) {
-      await Promise.race([
-        drainOnce(),
-        new Promise<void>((resolve) => {
-          const t = setTimeout(resolve, Math.max(0, deadline - Date.now()));
-          (t as unknown as { unref?: () => void }).unref?.();
-        }),
-      ]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, Math.max(0, deadline - Date.now()));
+      });
+      try {
+        await Promise.race([drainOnce().catch(() => undefined), timeout]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
     }
     diagnostic({ kind: "observer.counters", phase: "final", counters });
     return counters;

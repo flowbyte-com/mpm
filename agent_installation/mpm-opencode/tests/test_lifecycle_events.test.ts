@@ -817,6 +817,35 @@ test("41: a success:true envelope with no receipt is malformed, not delivered", 
   assert.deepEqual(await transport.deliver(validEnvelope()), { ok: false, reason: "malformed_receipt" });
 });
 
+test("43: stop() settles even when the stream never reacts to abort", async () => {
+  // Regression for the CI failure mode: an unref'd bounded-wait timer let the
+  // event loop drain while a promise was still pending, so node:test reported
+  // "Promise resolution is still pending but the event loop has already
+  // resolved" and cancelled every later test in the file.
+  const subscribe = () => ({
+    async *[Symbol.asyncIterator]() {
+      yield hostEvent("session.tool.success", { sessionID: "s", id: "c1" }, "evt_hang");
+      await new Promise<void>(() => {
+        /* deliberately ignores the abort signal */
+      });
+    },
+  });
+  const observer = sub.createLifecycleObserver({
+    subscribe,
+    transport: sub.createUnconfiguredTransport(),
+    mapping: mappingCtx(),
+  });
+  observer.start();
+  for (let i = 0; i < 100 && observer.counters().host_events_seen === 0; i++) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  const t0 = Date.now();
+  const counters = await observer.stop({ timeoutMs: 150 });
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 1500, `stop must resolve despite a stuck stream, took ${elapsed}ms`);
+  assert.equal(counters.host_events_seen, 1);
+});
+
 test("42: drainOnce processes everything currently buffered, in order", async () => {
   const transport = countingTransport((e: any) => ({
     ok: true,
