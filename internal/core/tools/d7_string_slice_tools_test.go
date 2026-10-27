@@ -341,6 +341,60 @@ func TestD7_DecisionRecordKeepsEverySuppliedSourceID(t *testing.T) {
 
 // ── 10. Existing callers retain their documented behaviour ───────────────
 
+// TestD7_CitationSitesStillAcceptTheCompactStringForms pins requirement
+// 10 for the COMPACT string forms at the citation sites.
+//
+// The MCP server does not validate arguments against the schema it
+// publishes, so a comma-separated string really does reach the handler.
+// The strict form keeps that shape — it is a WHOLE parse, so no element
+// is lost — and the JSON-encoded array string with it. A working caller
+// that sends either form must not be broken by the correction.
+func TestD7_CitationSitesStillAcceptTheCompactStringForms(t *testing.T) {
+	dm := d7ToolTestDM(t)
+	ac := mpminternal.ActiveContext{}
+
+	memA := d7SeedCitableMemory(t, dm, "a cited observation for the compact form")
+	memB := d7SeedCitableMemory(t, dm, "another cited observation for the compact form")
+
+	cases := []struct {
+		name  string
+		value interface{}
+	}{
+		{"comma-separated string", memA + "," + memB},
+		{"json-encoded array string", `["` + memA + `","` + memB + `"]`},
+	}
+
+	for _, tc := range cases {
+		res, err := handleMpmTheories(dm, ac, map[string]interface{}{
+			"action": "propose",
+			"params": map[string]interface{}{
+				"hypothesis": "a proposal citing via the " + tc.name,
+				"source_ids": tc.value,
+			},
+		})
+		if err != nil {
+			t.Fatalf("%s: propose: %v", tc.name, err)
+		}
+		env := res.(map[string]interface{})
+		theoryID, _ := env["id"].(string)
+		if theoryID == "" {
+			t.Fatalf("%s: no theory id: %+v", tc.name, env)
+		}
+
+		cited := d7CitationRows(t, dm, theoryID)
+		want := []string{memA, memB}
+		sort.Strings(want)
+		if len(cited) != len(want) {
+			t.Fatalf("%s: citations = %v, want %v", tc.name, cited, want)
+		}
+		for i := range want {
+			if cited[i] != want[i] {
+				t.Fatalf("%s: citations = %v, want %v", tc.name, cited, want)
+			}
+		}
+	}
+}
+
 // TestD7_ExistingCallersRetainTheirDocumentedBehaviour pins requirement 10.
 //
 // The callers that already had a strict contract keep it, including the
