@@ -626,13 +626,13 @@ meaningful for the paths it covers.
 
 ## 11. CI
 
-PR #132, head `f55f1a7`:
+PR #132, head `7d1d458` — **all three jobs green**:
 
 | Job | Result | Duration |
 |---|---|---|
-| Build + core tests | **pass** | 19m 8s |
-| Full test suite | **pass** | 12m 8s |
-| Release gate (cross-agent continuity + public-CLI subprocess suite) | see the PR | — |
+| Build + core tests | **pass** | 18m 40s |
+| Full test suite | **pass** | 12m 26s |
+| Release gate (cross-agent continuity + public-CLI subprocess suite) | **pass** | 20m 59s |
 
 ---
 
@@ -683,6 +683,9 @@ still not an `artifact_provenance` row (§8.1).
 * Branch: `feat/session-b-d6-invocation-provenance`, from `origin/main` = `3584190`.
 * The correction and its tests: **`552c86d`** —
   *"fix(core): carry the invocation identity into every recording path (D6)"*.
-* This report: the commit that follows it.
-* PR: `https://github.com/flowbyte-com/mpm/pull/132`, base `main`, head `158de35`, MERGEABLE.
+* The race the gate found, and its fix: **`f55f1a7`** —
+  *"fix(core): guard the lazy provenance resolver — a race D6 made reachable"*.
+* This report: **`7d1d458`** (+ the CI results appended in `…`).
+* PR: **`https://github.com/flowbyte-com/mpm/pull/132`**, base `main`, head `7d1d458`,
+  MERGEABLE, all three CI jobs green.
 * Merge authority is Session A's.
