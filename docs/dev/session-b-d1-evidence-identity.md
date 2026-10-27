@@ -431,9 +431,10 @@ introduced. The scratch tree was removed afterwards.
 | M5 contract suite (`-tags 'fts5 m5contract'`) | 3 expected failures (D3, D3, D4) — the unaddressed defects |
 | `go vet` | clean |
 | `mpm-lint --gate` | **PASS** |
-| `make test-scripts` | **PASS** |
-| `make test-agent-installation` | **PASS** |
+| `make test-scripts` | **PASS** — 540 tests, OK |
+| `make test-agent-installation` | **PASS** — 494 tests, OK |
 | `gofmt` | clean on every changed file |
+| **CI on the PR head** (`0298c8d`) | **all three jobs green** — Build + core tests (18m42s), Full test suite (11m56s), Release gate (18m59s) |
 
 ### 11.5 Non-vacuity measurement
 
@@ -532,5 +533,7 @@ correction. The same suite passes on the branch. The tests are not vacuous.
 * The correction and its tests: **`66f44a8`** —
   *"fix(core): an observation identity for evidence, so a repeated delivery is
   not corroboration (D1, D5)"*.
-* This report is the second commit on the branch; the PR head is the branch
-  head (see the MPM handoff for the link).
+* This report: **`0298c8d`** (+ the CI results appended).
+* **PR #130** — `https://github.com/flowbyte-com/mpm/pull/130`, base `main`,
+  head `0298c8d`, MERGEABLE, all three CI jobs green at that head.
+* Merge authority is Session A's.
