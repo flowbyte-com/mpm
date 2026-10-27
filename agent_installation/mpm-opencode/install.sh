@@ -508,6 +508,9 @@ OPENCODE_RUNTIME_MANIFEST=(
     server.js
     dist/index.v2.js
     dist/wake-context.js
+    dist/event-envelope.js
+    dist/event-mapper.js
+    dist/event-subscriber.js
     dist/workspace.js
     dist/resolve-mpm-binary.js
     package.json

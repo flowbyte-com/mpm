@@ -79,6 +79,33 @@ declare module "@opencode/plugin" {
   }
 
   export interface PluginContext {
+    /** `{ name, version, channel }` — measured on v2.1.4. */
+    app?: {
+      name?: string;
+      version?: string;
+      channel?: string;
+      [key: string]: unknown;
+    };
+    /** `{ directory, workspaceID, project }` — measured on v2.1.4. */
+    location?: {
+      directory?: string;
+      workspaceID?: string;
+      project?: {
+        id?: string;
+        directory?: string;
+        canonical?: string;
+        [key: string]: unknown;
+      };
+      [key: string]: unknown;
+    };
+    /**
+     * `ctx.event.subscribe(options?)` returns an **AsyncIterable**.
+     * Verified on opencode v2.1.4: it is NOT a callback registration, and
+     * passing a function returns a stream that is never read.
+     */
+    event?: {
+      subscribe(options?: { signal?: AbortSignal }): AsyncIterable<unknown>;
+    };
     tool: {
       transform(fn: (editor: ToolEditor) => void | Promise<void>): Promise<void>;
     };
