@@ -38,10 +38,18 @@ package internal
 // WHAT IS DELIBERATELY NOT ASSERTED.
 //
 // The existence of at least one contract test file. The retirement procedure
-// deletes a contract test when its defect is fixed or accepted, so requiring
-// a non-empty population would break the retirement. What is required is the
+// deletes a contract test when its defect is fixed or accepted, and promotes
+// a repaired contract into ordinary CI coverage, so requiring a non-empty
+// population would break the retirement. What is required is the
 // INVARIANT — every contract test is tagged, no characterization test is
 // tagged — which holds both before and after retirement.
+//
+// For the same reason the per-package "the tagged build must compile a
+// contract file" requirement is CONDITIONAL on that package actually
+// declaring a contract test. Session B's P3b (2026-10-27) retired the
+// critic package's only contract test — defect D2 was fixed and the
+// contract was promoted into ordinary CI coverage — and a package with no
+// contract test left must not be forced to carry an empty contract file.
 //
 // ISOLATION. This file reads repository sources and constructs no database.
 
@@ -136,6 +144,10 @@ func TestM5TrustGate_ContractTestsAreExcludedFromEveryGreenGate(t *testing.T) {
 
 	contractFiles := 0
 	characterizationFiles := 0
+	// dirsWithContract records which package directories declare at least
+	// one contract test. A directory with NO contract test must not be
+	// required to carry a contract FILE — see the retirement note below.
+	dirsWithContract := map[string]bool{}
 	for _, rel := range files {
 		path := filepath.Join(root, filepath.FromSlash(rel))
 		funcs := m5DeclaredTestFuncs(t, path)
@@ -159,6 +171,7 @@ func TestM5TrustGate_ContractTestsAreExcludedFromEveryGreenGate(t *testing.T) {
 
 		if hasContract {
 			contractFiles++
+			dirsWithContract[filepath.ToSlash(filepath.Dir(rel))] = true
 			if satisfiesDefault {
 				t.Errorf("%s declares %s* functions but is compiled by the "+
 					"DEFAULT build — a contract test would be running in a "+
@@ -214,10 +227,26 @@ func TestM5TrustGate_ContractTestsAreExcludedFromEveryGreenGate(t *testing.T) {
 				"a failing contract test would be inside a required green gate",
 				dir, got)
 		}
-		if got := m5ContractFilesIn(taggedPkg.TestGoFiles); len(got) == 0 {
-			t.Errorf("%s: the %q-tagged build does NOT compile %s — the "+
-				"contract suite is unreachable", dir, m5ContractTag,
-				m5ContractFileName)
+		// RETIREMENT. A contract test is deleted when its defect is fixed
+		// or accepted, and a repaired contract is PROMOTED into ordinary
+		// CI coverage. When a package has no contract test left, requiring
+		// it to carry a contract FILE would break that retirement — the
+		// guard would fail a correct fix for the wrong reason.
+		//
+		// So the requirement is conditional on the package actually
+		// DECLARING a contract test. The invariant this guard protects is
+		// "every contract test is tagged, no characterization test is
+		// tagged" — and that holds whether or not a package still has
+		// contract tests at all.
+		if dirsWithContract[dir] {
+			if got := m5ContractFilesIn(taggedPkg.TestGoFiles); len(got) == 0 {
+				t.Errorf("%s: the %q-tagged build does NOT compile %s — the "+
+					"contract suite is unreachable", dir, m5ContractTag,
+					m5ContractFileName)
+			}
+		} else {
+			t.Logf("%s: no contract test remains in this package (retired) — "+
+				"the contract-file requirement does not apply", dir)
 		}
 		t.Logf("%s: default build compiles %d test file(s), %d contract file(s); "+
 			"tagged build compiles %d test file(s), %d contract file(s)", dir,

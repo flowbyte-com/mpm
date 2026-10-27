@@ -227,8 +227,15 @@ func TestSurvivalAsymmetryHunt_FiresAboveThreshold(t *testing.T) {
 	if len(findings) != 1 {
 		t.Fatalf("expected 1 finding, got %d", len(findings))
 	}
-	if findings[0].Tool != "mpm_lessons" || findings[0].Action != "save" {
-		t.Errorf("expected mpm_lessons/save, got %s/%s", findings[0].Tool, findings[0].Action)
+	// P3b: the finding is a PENDING PROPOSAL on the untrusted surface,
+	// not a trusted lesson. The lesson surface has no pending state, so
+	// a lesson written here is trusted on arrival — which is defect D2.
+	if findings[0].Tool != "mpm_theories" || findings[0].Action != "propose" {
+		t.Errorf("expected mpm_theories/propose, got %s/%s", findings[0].Tool, findings[0].Action)
+	}
+	if findings[0].Payload["source_type"] != "memory" {
+		t.Errorf("expected the typed citation source_type %q, got %v",
+			"memory", findings[0].Payload["source_type"])
 	}
 	if findings[0].Priority != 2 {
 		t.Errorf("expected priority 2, got %d", findings[0].Priority)
@@ -376,8 +383,13 @@ func TestWeakTheoryHunt_FlagsBelowThreshold(t *testing.T) {
 		t.Fatalf("expected 2 findings (weak-1 + weak-2), got %d", len(findings))
 	}
 	for _, f := range findings {
-		if f.Tool != "mpm_lessons" || f.Action != "save" {
-			t.Errorf("expected mpm_lessons/save, got %s/%s", f.Tool, f.Action)
+		// P3b: a pending proposal citing the theory it observed.
+		if f.Tool != "mpm_theories" || f.Action != "propose" {
+			t.Errorf("expected mpm_theories/propose, got %s/%s", f.Tool, f.Action)
+		}
+		if f.Payload["source_type"] != "theory" {
+			t.Errorf("expected the typed citation source_type %q, got %v",
+				"theory", f.Payload["source_type"])
 		}
 	}
 }
@@ -534,14 +546,20 @@ func TestAudit_Run_EmitsFindingsViaCLI(t *testing.T) {
 	if len(calls) < 1 {
 		t.Fatalf("expected ≥1 emitted findings, got %d", len(calls))
 	}
-	foundSaveLesson := false
+	// P3b: the critic's emission target is the untrusted proposal
+	// surface. A lesson emission here would be defect D2.
+	foundProposal := false
 	for _, c := range calls {
-		if c.Tool == "mpm_lessons" && c.Action == "save" {
-			foundSaveLesson = true
+		if c.Tool == "mpm_theories" && c.Action == "propose" {
+			foundProposal = true
+		}
+		if c.Tool == "mpm_lessons" {
+			t.Errorf("the critic must not write to the trusted lesson surface, "+
+				"got an mpm_lessons emission in calls=%v", calls)
 		}
 	}
-	if !foundSaveLesson {
-		t.Errorf("expected mpm_lessons/save emission in calls=%v", calls)
+	if !foundProposal {
+		t.Errorf("expected mpm_theories/propose emission in calls=%v", calls)
 	}
 }
 
@@ -591,7 +609,7 @@ func TestAudit_Run_HuntFailureDoesNotStopCycle(t *testing.T) {
 	// The WeakTheory hunt should still have emitted its finding.
 	found := false
 	for _, c := range cli.Calls() {
-		if c.Tool == "mpm_lessons" && c.Action == "save" {
+		if c.Tool == "mpm_theories" && c.Action == "propose" {
 			found = true
 			break
 		}
@@ -603,7 +621,7 @@ func TestAudit_Run_HuntFailureDoesNotStopCycle(t *testing.T) {
 
 func TestAudit_Run_EmitFailureLogsButContinues(t *testing.T) {
 	a, _ := newTestAudit(t)
-	a.cli.(*fakeCLI).failTool = "mpm_lessons" // every lesson-save call errors
+	a.cli.(*fakeCLI).failTool = "mpm_theories" // every proposal call errors
 	ctx := context.Background()
 
 	seedMemory(t, a, "weak", "theories", "weak", "", 0.3, "", time.Now())

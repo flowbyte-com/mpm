@@ -14,16 +14,32 @@ package critic
 //
 // DEFECT D2 — the critic creates TRUSTED lessons without explicit review.
 //
-// Two of the four hunts — SurvivalAsymmetryHunt (hunts.go:106-118) and
-// WeakTheoryHunt (hunts.go:297-309) — emit `mpm_lessons save` findings on
-// every cycle. A lesson is trusted knowledge in MPM: it lands in
-// lessons_base, is indexed in lessons_fts, is served by the wake-context
-// payload and is returned by retrieval. The findings carry no evidence and
-// no review step, and lessons_base has no status column to record one.
+// CLOSED ON THE CRITIC SIDE by Session B's P3b (2026-10-27).
 //
-// The core-side half of the same defect (the missing pending state on the
-// lesson surface) is pinned in
-// internal/core/m5_trust_characterization_test.go.
+// It WAS: two of the four hunts — SurvivalAsymmetryHunt and
+// WeakTheoryHunt — emitted `mpm_lessons save` findings on every cycle. A
+// lesson is trusted knowledge in MPM: it lands in lessons_base, is indexed
+// in lessons_fts, is served by the wake-context payload and is returned by
+// retrieval. The findings carried no evidence and no review step, and
+// lessons_base has no status column to record one.
+//
+// IT IS NOW: both hunts emit `mpm_theories propose` — the only existing
+// untrusted proposal surface (adjudication §6c.1) — with typed, resolvable
+// citations through P2's path. The proposal is pending until a reviewer
+// resolves it, and the critic never promotes.
+//
+// The characterization that pinned the old behaviour
+// (TestM5Characterization_CriticEmitsTrustedLessonWithoutReview) is
+// DELETED rather than inverted: the behaviour it described no longer
+// exists, and its M5-compliant counterpart is now ordinary passing CI
+// coverage as TestP3b_CriticFindingIsNotTrustedWithoutReview in
+// internal/critic/p3b_trust_boundary_test.go, alongside the structural
+// guard TestP3b_NoHuntTargetsTheTrustedLessonSurface.
+//
+// The core-side half of the same defect — the missing pending state on the
+// lesson surface itself — is NOT closed, and remains pinned in
+// internal/core/m5_trust_characterization_test.go. The critic simply no
+// longer writes there.
 //
 // DEFECT D4 — the critic's cycle marker defeats proposal idempotency.
 //
@@ -113,115 +129,6 @@ func m5SeedWeakTheory(t *testing.T, dm *mpmcore.DatabaseManager) string {
 		t.Fatalf("ProposeTheory returned no id: %v", res)
 	}
 	return id
-}
-
-// TestM5Characterization_CriticEmitsTrustedLessonWithoutReview pins the
-// critic half of defect D2.
-//
-// REPRODUCTION (today):
-// a WeakTheoryHunt over a pending theory emits a finding whose target is
-// `mpm_lessons save` — the trusted lesson surface. The finding carries no
-// evidence, no citation and no review step; it is a fact, a type and tags.
-//
-// Applying that finding to the real core schema writes a lesson that is
-// immediately retrievable through lessons_fts with a full confidence value.
-// There is no pending state to mark, because lessons_base has no status
-// column.
-//
-// WHY IT MATTERS. mpm-event/0.1 §3.7 (M5) requires that neither the adapter
-// nor the critic promotes, and that trust is always observation. The critic
-// writes trusted knowledge today, with no review, on every cycle.
-//
-// EXISTING IMPLEMENTATION RESPONSIBLE:
-// internal/critic/hunts.go:297-309 (WeakTheoryHunt) and :106-118
-// (SurvivalAsymmetryHunt) emit Tool "mpm_lessons", Action "save". The
-// lesson surface itself is internal/core/db.go:5366 (AddLesson) over a
-// lessons_base table with no status column.
-//
-// MINIMAL PROPOSED CORRECTION: Session A's adjudication A-1 — either the
-// critic may only write to a PENDING surface (which needs a status column on
-// lessons_base, a schema change), or A records the behaviour as a known
-// pre-existing exception and the contract is amended to say so.
-//
-// NEEDS SESSION A'S APPROVAL: YES — this is the M5 tension referred to A.
-func TestM5Characterization_CriticEmitsTrustedLessonWithoutReview(t *testing.T) {
-	a, dm, _ := m5NewAudit(t)
-	m5SeedWeakTheory(t, dm)
-
-	findings, err := (&WeakTheoryHunt{MaxConfidence: 0.6}).Run(context.Background(), a)
-	if err != nil {
-		t.Fatalf("WeakTheoryHunt.Run: %v", err)
-	}
-	if len(findings) == 0 {
-		t.Fatalf("expected the weak-theory hunt to emit a finding — " +
-			"the characterization of defect D2 is stale")
-	}
-
-	f := findings[0]
-
-	// CURRENT BEHAVIOUR: the finding targets the TRUSTED lesson surface.
-	if f.Tool != "mpm_lessons" || f.Action != "save" {
-		t.Errorf("expected the critic to target mpm_lessons/save, got %s/%s — "+
-			"the characterization of defect D2 is stale", f.Tool, f.Action)
-	}
-
-	// CURRENT BEHAVIOUR: the finding carries no evidence and no review
-	// step. Its payload is a fact, a type and tags — nothing else.
-	for _, forbidden := range []string{
-		"evidence", "evidence_ids", "source_ids", "review",
-		"review_status", "status", "confidence",
-	} {
-		if _, present := f.Payload[forbidden]; present {
-			t.Errorf("expected the critic finding to carry NO %q field — "+
-				"the characterization of defect D2 is stale", forbidden)
-		}
-	}
-
-	// CURRENT BEHAVIOUR: applying the finding writes an IMMEDIATELY
-	// TRUSTED lesson — retrievable through the FTS index that backs
-	// retrieval, with a full confidence value.
-	fact, _ := f.Payload["fact"].(string)
-	lessonType, _ := f.Payload["type"].(string)
-	tags, _ := f.Payload["tags"].([]string)
-	if fact == "" {
-		t.Fatalf("critic finding carried no fact: %v", f.Payload)
-	}
-	if _, err := dm.AddLesson(fact, mpmcore.LessonType(lessonType), tags, ""); err != nil {
-		t.Fatalf("AddLesson (applying the critic finding): %v", err)
-	}
-
-	// The marker token is a single alphanumeric word on purpose:
-	// lessons_fts is an external-content FTS5 table over the `lessons`
-	// view with columns (content, tags), and an unquoted multi-word MATCH
-	// term is parsed as a column filter and fails with "no such column".
-	const marker = "m5criticunreviewedmarker"
-	marked := fact + " " + marker + "."
-	if _, err := dm.AddLesson(marked, mpmcore.LessonType(lessonType), tags, ""); err != nil {
-		t.Fatalf("AddLesson (marked): %v", err)
-	}
-
-	var ftsHits int
-	if err := dm.SQLDB().QueryRow(
-		`SELECT COUNT(*) FROM lessons_fts WHERE lessons_fts MATCH ?`, marker).
-		Scan(&ftsHits); err != nil {
-		t.Fatalf("query lessons_fts: %v", err)
-	}
-	if ftsHits != 1 {
-		t.Errorf("expected the critic-authored lesson to be immediately "+
-			"retrievable through lessons_fts (1 hit), got %d — the "+
-			"characterization of defect D2 is stale", ftsHits)
-	}
-
-	var baseRows int
-	if err := dm.SQLDB().QueryRow(
-		`SELECT COUNT(*) FROM lessons_base WHERE content LIKE ?`, "%"+marker+"%").
-		Scan(&baseRows); err != nil {
-		t.Fatalf("query lessons_base: %v", err)
-	}
-	if baseRows != 1 {
-		t.Errorf("expected exactly 1 critic-authored lesson row, got %d — "+
-			"the characterization of defect D2 is stale", baseRows)
-	}
 }
 
 // TestM5Characterization_CycleMarkerDefeatsProposalIdentity pins the critic
