@@ -11,11 +11,12 @@ NEVER affect agent correctness (spec invariant 1), so:
 - A 100ms connect timeout means a missing collector adds <100ms to a
   retry, then drops the frame.
 
-This plugin ships 16 native MCP tools to Claude Code; it is a shell-out
-wrapper that proxies JSON-RPC to mpm-mcp. The LLM call site is in
-Claude Code's own runtime, not here. The adapter is therefore shipped
-as a reusable library; future consumers (custom Claude Code wrappers,
-mpm-agent hooks) import it and call TelemetryEmitter.record_invocation(...)
+This is a HOST-INDEPENDENT library: it wraps one LLM call into one
+telemetry frame and pushes it to the collector over the collector's Unix
+socket. It is not tied to any agent host — the LLM call site belongs to
+the consumer, not here. The adapter is therefore shipped as a reusable
+library; consumers (agent host wrappers, mpm-agent hooks, custom
+integrations) import it and call TelemetryEmitter.record_invocation(...)
 after their own LLM call.
 
 Public surface:

@@ -6,8 +6,8 @@ The 2026-09-17 namespace migration established the canonical convention:
 
     mpm-<host>                    for a single-integration host
     mpm-<capability>-<host>       for a host with multiple independent
-                                  MPM integrations (OpenClaw is the
-                                  current case)
+                                  MPM integrations (OpenClaw was the
+                                  retired case)
 
 The pre-2026-09-17 convention used the inverted namespace:
 
@@ -16,13 +16,20 @@ The pre-2026-09-17 convention used the inverted namespace:
 
 This test pins the canonical invariant:
 
-    1. The six canonical adapter directories exist.
+    1. The canonical adapter directories exist.
     2. None of the six obsolete adapter directories remain.
     3. Active tracked files do not reference any of the six obsolete
        directory names or plugin ids — with the EXPLICIT exception of
        historical archive (docs/archive/*) and dated audit/validation
        snapshots (VALIDATION-*.md, FEATURE_DRIVEN_AUDIT_*.md,
        changelog.md). Those intentionally document the old state.
+
+After the 2026-10-27 OpenCode-only adapter removal, OpenCode is the
+only supported host, so mpm-opencode is the only canonical adapter
+directory. The adapter RETIREMENT is not the same as the NAMESPACE
+migration: the obsolete-name invariant below still holds, and the
+historical allowlist still names the retired adapters' own documents
+where they survive.
 
 If this test fails, somebody reintroduced an old namespace reference in
 active code/docs. The remediation is the same migration that produced
@@ -36,6 +43,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import subprocess
 import unittest
 from pathlib import Path
@@ -44,10 +52,18 @@ AGENT_INSTALLATION = Path(__file__).resolve().parent.parent
 REPO_ROOT = AGENT_INSTALLATION.parent
 
 # Canonical adapter directory names (the post-2026-09-17 convention).
+# OpenCode is the only supported host since the 2026-10-27 adapter
+# removal, so mpm-opencode is the only adapter directory that remains.
 CANONICAL_ADAPTERS = {
+    "mpm-opencode",
+}
+
+# Adapter directories retired on 2026-10-27 (Session A's adjudication on
+# PR #126). They are recorded here so the retirement is pinned rather
+# than merely implied by their absence.
+RETIRED_ADAPTERS = {
     "mpm-claude-code",
     "mpm-hermes",
-    "mpm-opencode",
     "mpm-pi",
     "mpm-memory-openclaw",
     "mpm-auto-mode-persona-openclaw",
@@ -87,9 +103,7 @@ HISTORICAL_ALLOWLIST_DIRS = (
 HISTORICAL_ALLOWLIST_FILES = (
     REPO_ROOT / "changelog.md",
     REPO_ROOT / "agent_installation" / "FEATURE_DRIVEN_AUDIT_2026-09-04.md",
-    REPO_ROOT / "agent_installation" / "mpm-claude-code" / "VALIDATION-2026-08-19.md",
     REPO_ROOT / "agent_installation" / "mpm-opencode" / "VALIDATION-2026-08-19.md",
-    REPO_ROOT / "agent_installation" / "mpm-memory-openclaw" / "VALIDATION-2026-08-19.md",
 )
 
 # Files that intentionally mention legacy namespace strings because
@@ -103,28 +117,6 @@ HISTORICAL_ALLOWLIST_FILES = (
 # It does NOT broadly exempt the entire adapter directory — new code,
 # prose, or runtime identifiers must use the canonical mpm-* namespace.
 MIGRATION_AWARE_FILES = {
-    # The OpenClaw memory adapter installer — declares LEGACY_PLUGIN_ID
-    # and uses it to probe for legacy config to migrate.
-    "agent_installation/mpm-memory-openclaw/install.sh",
-    # The OpenClaw memory adapter reconcile.json — the `reconcile_if`
-    # probes recognize a machine that still carries the pre-2026-09-17
-    # legacy plugin id, so those installs get their managed block
-    # reconciled alongside canonical-id installs.
-    "agent_installation/mpm-memory-openclaw/reconcile.json",
-    # The OpenClaw memory installer tests — assert the legacy id is
-    # absent from active surfaces (manifest, index.js) and that the
-    # migration step is silent when the legacy id is not present.
-    "agent_installation/mpm-memory-openclaw/tests/installer.test.js",
-    # The OpenClaw uninstall-flow tests — exercise the migration from
-    # the legacy `openclaw-mpm-memory` / `openclaw-mpm-auto-mode-persona`
-    # plugin ids to the canonical `mpm-*` ones, so the legacy ids
-    # appear in test assertions and in the fake-binary fixture.
-    "agent_installation/tests/test_uninstall_openclaw.mjs",
-    "agent_installation/tests/fixtures/fake-openclaw.sh",
-    # The OpenClaw uninstaller — performs the legacy-id migration when
-    # removing an OpenClaw install (config unset, plugin entry removal).
-    # Same migration pattern as the installer; same allowlist.
-    "agent_installation/uninstall-openclaw.sh",
     # INSTALL.md OpenClaw section — documents the legacy plugin ids so
     # operators with pre-2026-09-17 installs know what to remove.
     "agent_installation/INSTALL.md",
@@ -154,13 +146,6 @@ MIGRATION_AWARE_FILES = {
     # references it (B9 invariant). Removing the references would
     # remove the test of the invariant.
     "agent_installation/mpm-opencode/tests/test_resolve_mpm_binary.test.ts",
-    # The Pi adapter installer — uses 'pi-mpm' in comments and
-    # migration-detection logic to recognise and migrate the legacy
-    # namespace from `pi-mpm` to `mpm-pi`.
-    "agent_installation/mpm-pi/install.sh",
-    # The Pi adapter installer tests — assert the migration behavior
-    # on the legacy path.
-    "agent_installation/mpm-pi/tests/test_pi_settings_installer.py",
     # The managed-block convergence tests — managed_block_convergence
     # is the single owner of "what is an MPM-owned region", and it must
     # recognize every marker form MPM has ever written, including
@@ -236,10 +221,16 @@ class TestNamingInvariants(unittest.TestCase):
             )
 
     def test_no_dual_layout(self) -> None:
-        """There is exactly one canonical layout — no compatibility aliases."""
+        """There is exactly one canonical layout — no compatibility aliases.
+
+        `lib/` holds the host-INDEPENDENT pieces of MPM's agent
+        installation (the telemetry adapter lives there, so retiring a
+        host cannot take it with it). It is part of the canonical
+        layout, not a compatibility alias.
+        """
         siblings = sorted(p.name for p in AGENT_INSTALLATION.iterdir() if p.is_dir())
-        # Expect the 6 canonical adapters + scripts + tests
-        expected_dirs = {"scripts", "tests"} | CANONICAL_ADAPTERS
+        # The canonical adapters + scripts + tests + the host-independent lib
+        expected_dirs = {"scripts", "tests", "lib"} | CANONICAL_ADAPTERS
         self.assertEqual(
             set(siblings),
             expected_dirs,
@@ -289,28 +280,51 @@ class TestNamingInvariants(unittest.TestCase):
 
     # ---- Plugin identity invariants ----------------------------------
 
-    def test_openclaw_memory_manifest_id_is_canonical(self) -> None:
-        """mpm-memory-openclaw manifest id is mpm-memory-openclaw."""
-        import json
-        manifest = AGENT_INSTALLATION / "mpm-memory-openclaw" / "openclaw.plugin.json"
-        data = json.loads(manifest.read_text())
-        self.assertEqual(
-            data["id"],
-            "mpm-memory-openclaw",
-            "openclaw.plugin.json id must be mpm-memory-openclaw",
-        )
+    def test_retired_adapter_directories_are_absent(self) -> None:
+        """The adapters retired on 2026-10-27 must not come back.
 
-    def test_openclaw_auto_mode_persona_manifest_id_is_canonical(self) -> None:
-        """mpm-auto-mode-persona-openclaw manifest id matches."""
-        import json
-        manifest = (
-            AGENT_INSTALLATION / "mpm-auto-mode-persona-openclaw" / "openclaw.plugin.json"
-        )
-        data = json.loads(manifest.read_text())
-        self.assertEqual(
-            data["id"],
+        Claude Code, Pi, Hermes and the two OpenClaw integrations are
+        no longer supported hosts. Their directories are gone from the
+        repository; this pins that, so a stray copy (or a re-added
+        package) cannot quietly become a second source of truth for
+        the shared registries.
+        """
+        for name in sorted(RETIRED_ADAPTERS):
+            d = AGENT_INSTALLATION / name
+            self.assertFalse(
+                d.exists(),
+                f"retired adapter directory is back on disk: agent_installation/{name}/",
+            )
+
+    def test_no_active_adapter_ships_a_retired_plugin_id(self) -> None:
+        """A surviving adapter must not claim a retired plugin id.
+
+        The retired adapters' plugin ids (`mpm-memory-openclaw`,
+        `mpm-auto-mode-persona-openclaw`) are historical provenance
+        identifiers: they stay in the historical record, but no live
+        manifest may present itself as one of them. A resurrected
+        OpenClaw package would trip this.
+        """
+        retired_ids = {
+            "mpm-memory-openclaw",
             "mpm-auto-mode-persona-openclaw",
-            "openclaw.plugin.json id must be mpm-auto-mode-persona-openclaw",
+        }
+        offenders = []
+        for adapter in sorted(AGENT_INSTALLATION.glob("mpm-*")):
+            if not adapter.is_dir():
+                continue
+            for manifest in adapter.rglob("*.plugin.json"):
+                try:
+                    data = json.loads(manifest.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if data.get("id") in retired_ids:
+                    offenders.append(f"{manifest}: {data.get('id')}")
+        self.assertEqual(
+            offenders,
+            [],
+            "a live adapter manifest claims a retired plugin id: "
+            + "; ".join(offenders),
         )
 
     def test_opencode_plugin_id_is_canonical(self) -> None:

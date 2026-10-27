@@ -186,18 +186,69 @@ BENCH_TEST_MIN_TESTS := 50
 # SCRIPTS_TEST_MIN_TESTS: `python3 -m unittest discover` and
 # `node --test` both exit 0 when they collect nothing, so a directory
 # rename or a pattern change would turn either gate into a silent pass.
-# Measured populations: 318 (agent_installation/tests/), 178 Python +
-# 137 passing JS (the per-adapter suites).
+#
+# MEASURED POPULATIONS — 2026-10-27, after the OpenCode-only adapter
+# removal (the Claude Code / Pi / Hermes / OpenClaw adapters and
+# their suites were retired). The command and its output are recorded
+# here so a future reader can REPRODUCE the number instead of trusting
+# it. A floor is always set a small margin BELOW the measured
+# population: high enough that a gate which has stopped seeing
+# anything trips, low enough that ordinary test removal does not.
+#
+#   $ cd agent_installation && python3 -m unittest discover tests
+#   Ran 452 tests                           <- the umbrella suite
+#
+#   $ cd agent_installation/mpm-opencode && python3 -m unittest discover tests
+#   Ran 119 tests                            <- the per-adapter suites
+#
+#   $ cd agent_installation/mpm-opencode && node_modules/.bin/tsc -p tsconfig.tests.json
+#   $ node --test --test-reporter=tap $(ls tests-build/*.test.js | sort)
+#   # pass 89                                <- the per-adapter TS suite
+#
+# The umbrella measured 443 immediately after the removal and 452 once
+# PR #133 (the host-independent installation-preservation carrier) was
+# merged into main: it contributes 9. The floor below is unchanged at
+# 300 — it was set against the 443 measurement with a deliberate
+# margin, and a margin that does not trip on ordinary test removal is
+# the property that matters, not the tightest possible number.
+#
+# BEFORE the removal the populations were: umbrella 494; per-adapter
+# Python mpm-claude-code 68, mpm-hermes 38, mpm-memory-openclaw 13,
+# mpm-opencode 119, mpm-pi 74 (312 total); per-adapter JS
+# mpm-memory-openclaw 143, mpm-auto-mode-persona-openclaw 21 (164
+# total). Those adapters are retired; only the OpenCode numbers above
+# survive.
 AGENT_INSTALL_TEST_MIN_TESTS := 300
-AGENT_ADAPTER_TEST_MIN_PY_TESTS := 150
-AGENT_ADAPTER_TEST_MIN_JS_TESTS := 100
+AGENT_ADAPTER_TEST_MIN_PY_TESTS := 100
 AGENT_ADAPTER_TEST_MIN_TS_TESTS := 15
 # Adapters whose Python suites are reachable via `unittest discover`.
 # Every directory with a tests/ package is listed explicitly; a new
 # adapter must be added here or it is silently skipped.
-AGENT_ADAPTERS := mpm-claude-code mpm-hermes mpm-memory-openclaw mpm-opencode mpm-pi
+AGENT_ADAPTERS := mpm-opencode
 # Adapters that additionally ship a `node --test` suite.
-AGENT_ADAPTERS_JS := mpm-memory-openclaw mpm-auto-mode-persona-openclaw
+#
+# DECISION (Session A's adjudication on PR #126, 2026-10-27): the
+# JavaScript adapter family was retired WITH its adapters
+# (mpm-memory-openclaw: 143 passing tests; mpm-auto-mode-persona-
+# openclaw: 21). No JavaScript adapter family remains.
+#
+# The empty state is DECLARED here, not accidental. It is deliberately
+# NOT a "floor of 0" — that would be a gate which can never fail —
+# and NOT a silently deleted branch, which would hide the fact that a
+# language family left the gate. The recipe below refuses to continue
+# if a JavaScript suite ever appears without being wired in here.
+#
+# If a JavaScript adapter is added back: fill in AGENT_ADAPTERS_JS
+# AND set AGENT_ADAPTER_TEST_MIN_JS_TESTS to a measured pass-count
+# floor (count the suite, then set the floor just below it).
+AGENT_ADAPTERS_JS :=
+AGENT_ADAPTERS_JS_EMPTY_REASON := retired with the Claude Code / Pi / Hermes / OpenClaw adapter removal (2026-10-27)
+# Pass-count floor for the JavaScript adapter family. INTENTIONALLY
+# EMPTY while AGENT_ADAPTERS_JS is empty: there is no measured
+# population to floor, and the recipe treats "JavaScript list
+# non-empty but floor unset" as a FATAL, so this cannot drift into a
+# silent pass.
+AGENT_ADAPTER_TEST_MIN_JS_TESTS :=
 # Adapters whose suites are written in TypeScript and are compiled
 # to JavaScript by the local `node_modules/.bin/tsc` before the
 # standard `node --test` invocation runs. Every entry here MUST
@@ -951,10 +1002,13 @@ test-agent-installation: build
 # ubuntu-24.04 runner emits by default — that is the failure
 # that this fix closes.
 #
-# NOT INCLUDED: mpm-claude-code/tests/session_start_hook.test.sh. It is
-# a host-specific live check — it exports MPM_WORKSPACE="$HOME/.mpm" and
-# invokes "$HOME/.local/bin/mpm" — so it depends on this machine's
-# actual install and must not join a hermetic gate. Run it by hand.
+# NOT INCLUDED (and now GONE): mpm-claude-code/tests/session_start_hook.test.sh.
+# It was a host-specific live check — it exports MPM_WORKSPACE="$HOME/.mpm"
+# and invokes "$HOME/.local/bin/mpm" — so it depended on this machine's
+# actual install and could never join a hermetic gate. It was retired
+# with the Claude Code adapter on 2026-10-27. The exclusion is still
+# recorded here so the reasoning is not lost: a live check that reads
+# the operator's own HOME is not a gate, it is a manual smoke test.
 #
 # Currently invoked by test-agent-installation (which `make test`,
 # `make test-race`, and `make release-gate` already depend on). Direct
@@ -990,6 +1044,36 @@ test-agent-adapters:
 	   exit 1; \
 	 fi; \
 	 echo "[test-agent-adapters] Python: $$py_total tests (floor $(AGENT_ADAPTER_TEST_MIN_PY_TESTS))"; \
+	 # The JavaScript adapter family was retired with its adapters \
+	 # (2026-10-27). The empty state is EXPLICIT, not a skipped \
+	 # gate: the recipe says so out loud, and it refuses to \
+	 # continue if a JavaScript suite exists that is not wired in. \
+	 if [ -z "$(strip $(AGENT_ADAPTERS_JS))" ]; then \
+	   if [ -n "$(strip $(AGENT_ADAPTER_TEST_MIN_JS_TESTS))" ]; then \
+	     echo "[test-agent-adapters] FATAL: AGENT_ADAPTERS_JS is empty but AGENT_ADAPTER_TEST_MIN_JS_TESTS is set." >&2; \
+	     echo "  The retired JavaScript family has no measured population, so a floor" >&2; \
+	     echo "  for it is meaningless. Remove the floor, or wire the family back in." >&2; \
+	     exit 1; \
+	   fi; \
+	   echo "[test-agent-adapters] JS: no JavaScript adapter family remains — $(AGENT_ADAPTERS_JS_EMPTY_REASON)"; \
+	   echo "[test-agent-adapters] JS: a DECLARED empty state, not a skipped gate."; \
+	   js_unlisted=$$(for d in agent_installation/mpm-*/; do \
+	     if [ -d "$$d" ] && ls "$$d"tests/*.test.js >/dev/null 2>&1; then echo "$$d"; fi; \
+	   done); \
+	   if [ -n "$$js_unlisted" ]; then \
+	     echo "[test-agent-adapters] FATAL: JavaScript adapter suites exist but AGENT_ADAPTERS_JS is empty:" >&2; \
+	     echo "$$js_unlisted" >&2; \
+	     echo "  Wire the adapter into AGENT_ADAPTERS_JS and set" >&2; \
+	     echo "  AGENT_ADAPTER_TEST_MIN_JS_TESTS to a measured pass-count floor." >&2; \
+	     echo "  An unwired JavaScript suite is a silent gap in the gate." >&2; \
+	     exit 1; \
+	   fi; \
+	 else \
+	   if [ -z "$(strip $(AGENT_ADAPTER_TEST_MIN_JS_TESTS))" ]; then \
+	     echo "[test-agent-adapters] FATAL: AGENT_ADAPTERS_JS is non-empty but AGENT_ADAPTER_TEST_MIN_JS_TESTS is unset." >&2; \
+	     echo "  A JavaScript family with no pass-count floor is a silent gate." >&2; \
+	     exit 1; \
+	   fi; \
 	 for d in $(AGENT_ADAPTERS_JS); do \
 	   if [ ! -d "agent_installation/$$d/tests" ]; then \
 	     echo "[test-agent-adapters] FATAL: agent_installation/$$d/tests is missing." >&2; \
@@ -1049,6 +1133,7 @@ test-agent-adapters:
 	   exit 1; \
 	   fi; \
 	 echo "[test-agent-adapters] JS: $$js_total passing tests (floor $(AGENT_ADAPTER_TEST_MIN_JS_TESTS))"; \
+	 fi; \
 	 # TypeScript-compiled JS suite gate. Every entry in \
 	 # AGENT_ADAPTERS_TS ships a `tsconfig.tests.json` and a `tests/` \
 	 # tree of `.test.ts` files. The local pin for the compiler is \

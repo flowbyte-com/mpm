@@ -1,9 +1,0 @@
-{
-  "host_label": "hermes",
-  "description": "Hermes has no persistent managed block; manual flow only",
-  "installer": "",
-  "installer_type": "python",
-  "args": [],
-  "opt_in": true,
-  "skip_reason": "Hermes has no persistent managed block; SKILL.md documents the manual flow"
-}

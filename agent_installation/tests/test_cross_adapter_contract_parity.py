@@ -2,10 +2,17 @@
 test_cross_adapter_contract_parity.py — Cross-adapter drift regression.
 
 Pins the contract for the MPM behavioural instruction surface across the
-canonical source, the canonical protocol, and all four persistent-file
-adapters. The drift class this guards against: any single layer drifts
+canonical source, the canonical protocol, and the shipped host's
+snippet. The drift class this guards against: any single layer drifts
 out of sync with the others, so a host plugin ends up teaching agents a
 stale or incomplete subset of the MPM surface.
+
+OpenCode is the only supported host since the 2026-10-27 adapter
+removal, so the "every adapter honours the same managed-block contract"
+shape this file used to carry over four adapters is now a
+single-adapter assertion. The host-independent halves — the canonical
+protocol contract, the tool-reference stability contract, and the
+no-duplicate-managed-section contract — are unchanged.
 
 Layer model (post-2026-09-04 canonical-snippets refactor):
 
@@ -70,12 +77,11 @@ Installer contract pinned:
     encountered (an OpenCode session that still tried `mpm_session` after
     the templates were updated, because the installer refused to refresh).
 
-OpenClaw runtime binding (brief §11 Test 6):
-  - OpenClaw uses runtime injection, not a persistent managed file.
-    Verified by the absence of openclaw adapters from the
-    `render_managed_blocks.py` ADAPTERS list (covered in
-    `test_render_managed_blocks.py::AdapterExclusion`). No persistent-
-    block search is needed.
+Retired adapters:
+  - The Claude Code, Pi, Hermes and OpenClaw adapters were retired on
+    2026-10-27. Their absence from the `render_managed_blocks.py`
+    ADAPTERS list is covered in
+    `test_render_managed_blocks.py::AdapterExclusion`.
 
 See MPM cross-adapter integrity audit, 2026-09-04.
 """
@@ -136,22 +142,14 @@ _PERSIST_FAMILIES = ("memory", "decisions", "lessons", "topics", "references")
 # the adapter name alone because the conventions differ (e.g.,
 # `install_claude_instructions.py` vs `install_agents_instructions.py`).
 _INSTALLERS = {
-    "mpm-claude-code":      AGENT_INSTALLATION / "mpm-claude-code/scripts/install_claude_instructions.py",
     "mpm-opencode":         AGENT_INSTALLATION / "mpm-opencode/scripts/install_agents_instructions.py",
-    "mpm-pi":               AGENT_INSTALLATION / "mpm-pi/scripts/install_agents_instructions.py",
-    "mpm-hermes":           AGENT_INSTALLATION / "mpm-hermes/scripts/install_hermes_instructions.py",
-    "mpm-memory-openclaw":  AGENT_INSTALLATION / "mpm-memory-openclaw/scripts/install_openclaw_instructions.py",
 }
 
 # Per-host extra CLI args for the installer. Each adapter's installer
 # takes different scope flags and home-dir overrides; this is a
 # test-only concern (the render script does not invoke installers).
 _EXTRA_INSTALL_ARGS = {
-    "mpm-claude-code":     ["--scope", "user", "--home", str(Path.home())],
     "mpm-opencode":        ["--scope", "user"],
-    "mpm-pi":              [],
-    "mpm-hermes":          [],
-    "mpm-memory-openclaw": ["--home", str(Path.home())],
 }
 
 # Outer markers the installer actually emits in the target file. These
@@ -162,25 +160,9 @@ _EXTRA_INSTALL_ARGS = {
 # hyphen; others use MPM-MANAGED SECTION). The cross-adapter test counts
 # the installer-emitted markers, not the canonical-source wrappers.
 _INSTALL_OUTER_MARKERS = {
-    "mpm-claude-code": (
-        "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->",
-        "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->",
-    ),
     "mpm-opencode": (
         "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->",
         "<!-- END MPM-MANAGED SECTION:opencode-instructions -->",
-    ),
-    "mpm-pi": (
-        "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->",
-        "<!-- END MPM-MANAGED SECTION:pi-instructions -->",
-    ),
-    "mpm-hermes": (
-        "<!-- BEGIN MPM-MANAGED BLOCK:mpm-hermes -->",
-        "<!-- END MPM-MANAGED BLOCK:mpm-hermes -->",
-    ),
-    "mpm-memory-openclaw": (
-        "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->",
-        "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->",
     ),
 }
 
@@ -556,53 +538,17 @@ class InstallerContentAwareRefresh(unittest.TestCase):
             f"== text).",
         )
 
-    def test_claude_code_installer_is_content_aware(self):
-        self._assert_content_aware(ADAPTERS["mpm-claude-code"]["installer"])
-
     def test_opencode_installer_is_content_aware(self):
         self._assert_content_aware(ADAPTERS["mpm-opencode"]["installer"])
 
-    def test_pi_installer_is_content_aware(self):
-        self._assert_content_aware(ADAPTERS["mpm-pi"]["installer"])
-
-    def test_hermes_installer_is_content_aware(self):
-        self._assert_content_aware(ADAPTERS["mpm-hermes"]["installer"])
-
 
 # --- adapter test case classes (built dynamically) -------------------------
-
-
-class Test_ClaudeCode(AdapterContractMixin, unittest.TestCase):
-    snippet_path = ADAPTERS["mpm-claude-code"]["snippet"]
-    tool_prefix = ADAPTERS["mpm-claude-code"]["tool_prefix"]
-    persist_families = ADAPTERS["mpm-claude-code"]["persist_families"]
 
 
 class Test_OpenCode(AdapterContractMixin, unittest.TestCase):
     snippet_path = ADAPTERS["mpm-opencode"]["snippet"]
     tool_prefix = ADAPTERS["mpm-opencode"]["tool_prefix"]
     persist_families = ADAPTERS["mpm-opencode"]["persist_families"]
-
-
-class Test_Pi(AdapterContractMixin, unittest.TestCase):
-    snippet_path = ADAPTERS["mpm-pi"]["snippet"]
-    tool_prefix = ADAPTERS["mpm-pi"]["tool_prefix"]
-    persist_families = ADAPTERS["mpm-pi"]["persist_families"]
-
-
-class Test_Hermes(AdapterContractMixin, unittest.TestCase):
-    snippet_path = ADAPTERS["mpm-hermes"]["snippet"]
-    tool_prefix = ADAPTERS["mpm-hermes"]["tool_prefix"]
-    persist_families = ADAPTERS["mpm-hermes"]["persist_families"]
-
-
-# --- canonical-source tool-reference stability contract ---------------------
-#
-# Brief §13: the agent-facing managed block does NOT enumerate every MPM
-# tool (that would duplicate the protocol preamble and inflate the
-# instruction surface). The deeper tool reference lives in the canonical
-# source's "Tool-reference stability contract" table — this class pins
-# that table's contents so the deeper surface does not drift silently.
 
 
 class ToolReferenceStabilityContract(unittest.TestCase):

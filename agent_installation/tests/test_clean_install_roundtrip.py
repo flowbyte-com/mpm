@@ -2,8 +2,8 @@
 test_clean_install_roundtrip.py — Verify clean install/uninstall
 round-trips for each host adapter using the regenerated snippets.
 
-For each of the four file-based adapters (mpm-claude-code, mpm-opencode,
-mpm-pi, mpm-hermes), this test:
+For each of the file-based adapters (mpm-opencode is the only one left after
+the 2026-10-27 OpenCode-only adapter removal), this test:
 
   1. Creates a fresh empty target file (or a target with pre-existing
      user content).
@@ -54,41 +54,19 @@ _render = _load_render_module()
 
 # Per-adapter installer invocation. Each entry maps the adapter name to
 # the installer CLI args and the expected managed-section regex.
+#
+# OpenCode is the only supported host since the 2026-10-27 adapter
+# removal, so this map has one entry. It stays a MAP rather than a
+# single constant because the property under test is "every shipped
+# host round-trips cleanly" — a shape that must keep working when a
+# host is added.
 INSTALLERS = {
-    "mpm-claude-code": {
-        "installer": AGENT_INSTALLATION / "mpm-claude-code/scripts/install_claude_instructions.py",
-        "snippet": AGENT_INSTALLATION / "mpm-claude-code/templates/CLAUDE.md.snippet",
-        "managed_begin": "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->",
-        "managed_end": "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->",
-        "extra_args": ["--scope", "user", "--home", str(Path.home())],
-    },
     "mpm-opencode": {
         "installer": AGENT_INSTALLATION / "mpm-opencode/scripts/install_agents_instructions.py",
         "snippet": AGENT_INSTALLATION / "mpm-opencode/templates/AGENTS.md.snippet",
         "managed_begin": "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->",
         "managed_end": "<!-- END MPM-MANAGED SECTION:opencode-instructions -->",
         "extra_args": ["--scope", "user"],
-    },
-    "mpm-pi": {
-        "installer": AGENT_INSTALLATION / "mpm-pi/scripts/install_agents_instructions.py",
-        "snippet": AGENT_INSTALLATION / "mpm-pi/templates/AGENTS.md.snippet",
-        "managed_begin": "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->",
-        "managed_end": "<!-- END MPM-MANAGED SECTION:pi-instructions -->",
-        "extra_args": [],  # Pi installer defaults to user scope
-    },
-    "mpm-hermes": {
-        "installer": AGENT_INSTALLATION / "mpm-hermes/scripts/install_hermes_instructions.py",
-        "snippet": AGENT_INSTALLATION / "mpm-hermes/templates/hermes.md.snippet",
-        "managed_begin": "<!-- BEGIN MPM-MANAGED BLOCK:mpm-hermes -->",
-        "managed_end": "<!-- END MPM-MANAGED BLOCK:mpm-hermes -->",
-        "extra_args": [],  # --target-dir provided per-call
-    },
-    "mpm-memory-openclaw": {
-        "installer": AGENT_INSTALLATION / "mpm-memory-openclaw/scripts/install_openclaw_instructions.py",
-        "snippet": AGENT_INSTALLATION / "mpm-memory-openclaw/templates/SOUL.md.snippet",
-        "managed_begin": "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->",
-        "managed_end": "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->",
-        "extra_args": ["--home", str(Path.home())],
     },
 }
 
@@ -151,9 +129,6 @@ class CleanInstallRoundTrip(unittest.TestCase):
                             *cfg["extra_args"],
                             "--target", str(target),
                             "--snippet", str(cfg["snippet"])]
-                    if name == "mpm-hermes":
-                        # Hermes installer takes --target, not --target-dir
-                        pass  # already handled
                     proc = _run(args)
                     self.assertEqual(
                         proc.returncode, 0,

@@ -55,6 +55,29 @@ def provision(runtime_root: Path) -> subprocess.CompletedProcess:
     )
 
 
+def _section_builders() -> dict[str, str]:
+    """The inspector's SECTION_BUILDERS map, read from the source.
+
+    The map is parsed out of the script rather than duplicated: the
+    inspector is the single owner of "which adapter wraps its block in a
+    section banner", and a copy here would rot the moment an adapter
+    changed shape.
+    """
+    import re
+
+    source = (REPO / INSPECTOR).read_text(encoding="utf-8")
+    match = re.search(r"SECTION_BUILDERS[^=]*=\s*\{(.*?)\}", source, re.S)
+    if match is None:
+        raise AssertionError(
+            f"could not find SECTION_BUILDERS in {INSPECTOR}; if the "
+            f"declaration changed shape, update this reader")
+    return {
+        adapter: module
+        for adapter, module in re.findall(
+            r"\"([^\"]+)\"\s*:\s*\"([^\"]+)\"", match.group(1))
+    }
+
+
 class TestOnboardingSupportAssets(unittest.TestCase):
     """The runtime root must carry what host inspection transitively reads."""
 
@@ -128,7 +151,12 @@ class TestOnboardingSupportAssets(unittest.TestCase):
         # SECTION_BUILDERS maps an adapter to a module imported BY FILE PATH
         # to build the expected block. Those modules import their own
         # siblings, so the whole per-adapter scripts/ dir must travel.
-        builders = {"mpm-memory-openclaw": "install_openclaw_instructions"}
+        #
+        # The map is DERIVED from the inspector rather than copied here: a
+        # hard-coded copy silently stops covering a section builder that is
+        # added later, and the omission would only surface as "could not
+        # construct the expected block" on a user's machine.
+        builders = _section_builders()
         for adapter, module in builders.items():
             staged = (self.root / "agent_installation" / adapter
                       / "scripts" / f"{module}.py")

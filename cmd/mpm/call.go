@@ -107,7 +107,7 @@ smart-recall search (exit 0 on empty results) by design.
 	}
 
 	// Legacy tool-name aliasing (F1): the retired `mpm_session` surface is
-	// still registered by agent plugins (mpm-opencode, mpm-pi). Routing it
+	// still registered by agent plugins (mpm-opencode). Routing it
 	// here keeps those callers working against the split
 	// mpm_handoff/mpm_scratchpad tools instead of failing with empty stdout.
 	resolvedName := toolName

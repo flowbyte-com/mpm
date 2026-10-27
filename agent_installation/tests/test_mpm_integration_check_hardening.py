@@ -475,18 +475,20 @@ class PersonaReadableVsInjectedVsOnce(unittest.TestCase):
 
     def test_persona_three_duplication_source_distinguished(self):
         """The diagnostic must distinguish the two source classes of persona duplication
-        (multiple bootstrap fires per turn, or multiple persona plugins loaded)."""
+        (the host firing its injection hook more than once per turn, or more than one
+        persona integration being loaded)."""
         self.assertTrue(
             _phrase_present(
                 self.text,
-                "agent:bootstrap more than once per turn",
-                "two persona plugins",
+                "more than once per turn",
+                "two persona integrations",
             ) or _phrase_present(
                 self.text,
-                "agent:bootstrap",
+                "session-start hook",
                 "duplicat",
             ),
-            "Diagnostic must enumerate the duplication source classes (bootstrap fires + plugin count)",
+            "Diagnostic must enumerate the duplication source classes "
+            "(hook fires per turn + integration count)",
         )
 
 
@@ -572,77 +574,100 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class OpenClawPersistentBlockContract(unittest.TestCase):
-    """OpenClaw follows the same persistent-block model as the other
-    four hosts. The diagnostic must explicitly distinguish the
-    persistent behavioural contract (SOUL.md) from runtime wake /
-    persona injection, and must classify each layer separately."""
+class OpenCodePersistentBlockContract(unittest.TestCase):
+    """OpenCode follows the persistent-block model every host that has a
+    persistent instruction surface follows. The diagnostic must
+    explicitly distinguish the persistent behavioural contract
+    (`AGENTS.md`) from runtime wake / persona injection, and must
+    classify each layer separately.
 
-    def test_openclaw_section_documents_three_layer_model(self):
+    These tests were retargeted from the retired OpenClaw host on
+    2026-10-27. The property they guard is host-independent — the
+    false-PASS mode is a single combined verdict, not a host-specific
+    one — so the retargeting loses no coverage.
+    """
+
+    SECTION = "## 17.2 OpenCode"
+
+    def _section_text(self, text: str) -> str:
+        """The §17.2 body, bounded by the next heading of ANY level.
+
+        Bounding on `\\n#` rather than `\\n## ` matters now that §17.2
+        is the last subsection of §17: a `\\n## ` scan would run past
+        the section into the following top-level chapters, and the
+        section-scoped assertions would stop being section-scoped.
+        """
+        idx = text.find(self.SECTION)
+        self.assertGreater(idx, 0, "OpenCode section must exist")
+        next_idx = text.find("\n#", idx + 1)
+        if next_idx < 0:
+            next_idx = len(text)
+        return text[idx:next_idx]
+
+    def test_opencode_section_documents_three_layer_model(self):
         text = _read_diagnostic()
-        # §17.3 must mention SOUL.md as the persistent surface.
+        # §17.2 must name AGENTS.md as the persistent surface.
         self.assertRegex(
-            text, r"17\.3[^\n]*\n[\s\S]{0,400}SOUL\.md",
-            "OpenClaw section must mention SOUL.md as the persistent surface",
+            text, r"17\.2[^\n]*\n[\s\S]{0,400}AGENTS\.md",
+            "OpenCode section must mention AGENTS.md as the persistent surface",
         )
 
-    def test_openclaw_section_documents_managed_section_markers(self):
+    def test_opencode_section_documents_managed_section_markers(self):
         text = _read_diagnostic()
-        # The diagnostic must name the OpenClaw managed-section markers
+        # The diagnostic must name the OpenCode managed-section markers
         # so the regression that the persistent block is present can
         # actually be verified by name.
         self.assertIn(
-            "BEGIN MPM-MANAGED SECTION:openclaw-instructions",
+            "BEGIN MPM-MANAGED SECTION:opencode-instructions",
             text,
-            "OpenClaw section must name the managed-section markers",
+            "OpenCode section must name the managed-section markers",
         )
 
-    def test_openclaw_section_distinguishes_runtime_from_persistent(self):
+    def test_opencode_section_distinguishes_runtime_from_persistent(self):
         text = _read_diagnostic()
         # The diagnostic must explicitly say runtime injection is NOT
         # a substitute for the persistent block. Without this, a host
         # with only wake injection could falsely report behavioural
-        # adoption = PASS. Look anywhere in the OpenClaw section, not
+        # adoption = PASS. Look anywhere in the OpenCode section, not
         # at a fixed offset — the explicit not-equivalent statement is
         # placed after the per-host check list.
-        idx = text.find("## 17.3 OpenClaw")
-        self.assertGreater(idx, 0, "OpenClaw section must exist")
-        # Section ends at the next "## " heading.
-        next_idx = text.find("\n## ", idx + 1)
-        if next_idx < 0:
-            next_idx = len(text)
-        snippet = text[idx:next_idx]
+        snippet = self._section_text(text)
         self.assertIn(
             "runtime", snippet.lower(),
-            "OpenClaw section must reference runtime injection",
+            "OpenCode section must reference runtime injection",
         )
         self.assertIn(
             "persistent", snippet.lower(),
-            "OpenClaw section must reference persistent contract",
+            "OpenCode section must reference persistent contract",
         )
         # Must explicitly say runtime is not equivalent / not a substitute.
         # Allow markdown emphasis between the words (e.g., "**not**
         # equivalent").
         self.assertRegex(
             snippet, r"not\b\*?\*?\s+equivalent|not\s+a\s+substitute",
-            "OpenClaw section must state runtime wake ≠ persistent contract",
+            "OpenCode section must state runtime wake ≠ persistent contract",
         )
 
-    def test_openclaw_managed_block_check_command_present(self):
+    def test_opencode_managed_block_check_command_present(self):
         text = _read_diagnostic()
         self.assertIn(
-            "BEGIN MPM-MANAGED SECTION:openclaw-instructions",
+            "BEGIN MPM-MANAGED SECTION:opencode-instructions",
             text,
-            "Diagnostic must include the OpenClaw managed-block check command",
+            "Diagnostic must include the OpenCode managed-block check command",
+        )
+        # The named diagnostic command must be there too: the markers
+        # alone tell an operator WHAT to look for, not HOW to look.
+        self.assertIn(
+            "make check-installed",
+            self._section_text(text),
+            "OpenCode section must name the canonical diagnostic command",
         )
 
-    def test_openclaw_runtime_managed_split_verdicts(self):
+    def test_opencode_runtime_managed_split_verdicts(self):
         # The diagnostic must surface BOTH "Wake runtime injection" and
-        # "MPM managed block in SOUL.md" as separate verdict rows for
-        # OpenClaw. A single combined verdict is the false-PASS mode.
+        # "MPM managed block in AGENTS.md" as separate verdict rows for
+        # OpenCode. A single combined verdict is the false-PASS mode.
         text = _read_diagnostic()
-        idx = text.find("## 17.3 OpenClaw")
-        self.assertGreater(idx, 0)
-        snippet = text[idx:idx + 2000]
+        snippet = self._section_text(text)
         self.assertIn("Wake runtime injection", snippet)
-        self.assertIn("MPM managed block in SOUL.md", snippet)
+        self.assertIn("MPM managed block in AGENTS.md", snippet)

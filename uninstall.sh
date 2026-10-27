@@ -6,8 +6,8 @@
 # context. It is intentionally framework/host agnostic:
 #
 #   * It does NOT invoke, detect, restart, or remove any host integration
-#     (OpenClaw, OpenCode, Claude Code, Pi, Hermes). Host integrations
-#     are adapter-owned and live under agent_installation/mpm-*/.
+#     (OpenCode). Host integrations are adapter-owned and live under
+#     agent_installation/mpm-*/.
 #
 #   * It does NOT undo shared account/system state it does not own
 #     (e.g. loginctl enable-linger). Shared state may be relied on by
@@ -107,10 +107,9 @@ Notes:
   * --purge and --shred are mutually exclusive. Choose one.
   * --shred is best-effort only. SSD, CoW, snapshot, journaled and
     virtualised storage are NOT guaranteed to be physically erased.
-  * Host integrations (OpenClaw, OpenCode, Claude Code, Pi, Hermes)
-    are NOT removed by this script. Use the corresponding adapter's
-    uninstaller under agent_installation/mpm-*/ if you need to
-    remove a host integration.
+  * Host integrations (OpenCode) are NOT removed by this script. Use the
+    corresponding adapter's uninstaller under agent_installation/mpm-*/ if
+    you need to remove a host integration.
 USAGE
 }
 

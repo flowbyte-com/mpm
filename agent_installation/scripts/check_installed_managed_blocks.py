@@ -98,40 +98,12 @@ import block_provenance  # noqa: E402
 # treated as installed whenever their install target exists.
 HOST_INSTALL_TARGETS: list[dict] = [
     {
-        "host": "pi",
-        "adapter": "mpm-pi",
-        "filename": "AGENTS.md",
-        "relative_to_home": ".pi/agent/AGENTS.md",
-        "outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->",
-        "outer_end": "<!-- END MPM-MANAGED SECTION:pi-instructions -->",
-    },
-    {
-        "host": "claude_code",
-        "adapter": "mpm-claude-code",
-        "filename": "CLAUDE.md",
-        "relative_to_home": ".claude/CLAUDE.md",
-        "outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->",
-        "outer_end": "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->",
-    },
-    {
         "host": "opencode",
         "adapter": "mpm-opencode",
         "filename": "AGENTS.md",
         "relative_to_home": ".config/opencode/AGENTS.md",
         "outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->",
         "outer_end": "<!-- END MPM-MANAGED SECTION:opencode-instructions -->",
-    },
-    {
-        "host": "openclaw",
-        "adapter": "mpm-memory-openclaw",
-        "filename": "SOUL.md",
-        "relative_to_home": ".openclaw/workspace/SOUL.md",
-        "outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->",
-        "outer_end": "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->",
-        # OpenClaw's persistent managed block is REQUIRED once the
-        # MPM OpenClaw integration is installed. Runtime wake
-        # injection supplements it; it does not replace it.
-        "integration_probe": "mpm-memory-openclaw",
     },
 ]
 
@@ -147,9 +119,10 @@ VERDICT_ERROR = "ERROR"
 # section banner rather than emitting bare outer markers. Maps adapter
 # name -> installer module name under `<adapter>/scripts/`. Adapters
 # absent from this map use the plain outer-marker shape.
-SECTION_BUILDERS: dict[str, str] = {
-    "mpm-memory-openclaw": "install_openclaw_instructions",
-}
+#
+# Empty in the OpenCode-only release: the only shipped adapter
+# (mpm-opencode) emits bare outer markers.
+SECTION_BUILDERS: dict[str, str] = {}
 
 # Timestamp placeholder used when asking a bannered installer to build
 # its expected section. Normalized away before comparison.

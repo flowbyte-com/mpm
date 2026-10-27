@@ -15,21 +15,24 @@
 # installers, which then hand the RUNTIME path to their framework's
 # registration mechanism.
 #
-# Which adapters need it is a per-adapter fact, not a blanket rule:
-#   * OpenClaw    — yes. `openclaw plugins install <dir> --link` links a
-#                   package directory that must be runtime-owned.
+# Whether an adapter needs it is a per-adapter fact, not a blanket rule:
 #   * OpenCode    — yes. Registration names a file:// URL into the runtime
 #                   tree, and the compiled bundle must exist there.
-#   * Pi          — yes. Registration names a directory Pi loads index.ts
-#                   from at runtime.
-#   * Claude Code — no. It registers the canonical ~/.mpm/bin/mpm-mcp
-#                   binary and materialises its one executable asset (the
-#                   session-start hook) into ~/.claude/hooks/ at install
-#                   time. Nothing resolves into the adapter directory
-#                   afterwards.
-#   * Hermes      — no. Its installer is a managed-block writer; it reads
-#                   its snippet at install time and registers nothing.
+#   * A host that registers a directory it loads code from — yes. The
+#     package it loads must be runtime-owned.
+#   * A host that registers the canonical ~/.mpm/bin/mpm-mcp binary — no.
+#     It materialises its one executable asset at install time. Nothing
+#     resolves into the adapter directory afterwards.
+#   * A host whose installer is a managed-block writer — no. It reads its
+#     snippet at install time and registers nothing.
 #
+# The OpenClaw validator (mpm_validate_runtime_package_openclaw) is
+# retained as the library's historical default even though the OpenClaw
+# adapters were retired on 2026-10-27: an installer that has not been
+# updated must keep its existing checks rather than silently lose them.
+# The shipped OpenCode adapter names its own hook explicitly, so the
+# default is never the path it takes.
+
 # Why the runtime path and not the source path:
 #   * A linked or file://-registered package must be runtime-owned.
 #     Pointing it at a source checkout makes the live integration depend
@@ -64,8 +67,6 @@
 # Usage:
 #     . "$(dirname "$0")/../scripts/stage_runtime_package.sh"
 #     RUNTIME_ROOT="$(mpm_runtime_root_from_bin "$MPM_BIN")"
-#     stage_runtime_package "$SCRIPT_DIR" "$RUNTIME_ROOT" "$PLUGIN_ID" \
-#         index.js package.json openclaw.plugin.json README.md lib/workspace.js
 #
 #     MPM_RUNTIME_PACKAGE_VALIDATOR=mpm_validate_runtime_package_opencode \
 #     stage_runtime_package "$SCRIPT_DIR" "$RUNTIME_ROOT" "mpm-opencode" \

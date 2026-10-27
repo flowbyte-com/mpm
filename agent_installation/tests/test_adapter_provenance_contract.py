@@ -25,6 +25,12 @@ Canonical framework identifiers (mirrored from
 internal/core/activity_classifier.go::knownAgentFrameworks):
   claude-code, openclaw, opencode, pi, hermes
 
+OpenCode is the only supported host since the 2026-10-27 adapter
+removal, so the adapter table below has one entry. The substrate's
+known framework set is NOT narrowed with it: those identifiers are
+historical provenance in the audit trail, and an operator's existing
+rows keep their values.
+
 Per-adapter contract: the canonical identifier must appear at least
 once in the rendered instruction surface for that host, AND the
 adapter's source/runtime layer must propagate it via at least one
@@ -65,22 +71,6 @@ CANONICAL_FRAMEWORKS = {
 
 ADAPTERS = [
     {
-        "host_dir": "mpm-pi",
-        "canonical": "pi",
-        "rendered_pattern": r"(?:rendered-managed-blocks|mpm-pi|managed-blocks-mpm-pi)",
-        "expected_in_rendered": [
-            r"MPM_PROVENANCE_FRAMEWORK[^\n]*\bpi\b",
-            r"MPM_FRAMEWORK[^\n]*\bpi\b",
-            r"\bpi\b",  # bare occurrence is acceptable when one of the above is absent
-        ],
-        "source_must_declare": [
-            # withProvenance() / buildProvenanceEnv emits the framework
-            # id into the env passed to `mpm` subprocess invocations.
-            r"MPM_PROVENANCE_FRAMEWORK.{0,40}\bpi\b",
-            r"MPM_FRAMEWORK.{0,40}\bpi\b",
-        ],
-    },
-    {
         "host_dir": "mpm-opencode",
         "canonical": "opencode",
         "rendered_pattern": r"mpm-opencode",
@@ -93,68 +83,8 @@ ADAPTERS = [
             r"MPM_FRAMEWORK.{0,40}\bopencode\b",
         ],
     },
-    {
-        "host_dir": "mpm-hermes",
-        "canonical": "hermes",
-        "rendered_pattern": r"mpm-hermes",
-        "expected_in_rendered": [
-            r"MPM_PROVENANCE_FRAMEWORK[^\n]*\bhermes\b",
-            r"MPM_FRAMEWORK[^\n]*\bhermes\b",
-        ],
-        # Hermes' adapter is documentation-driven (Hermes is itself an
-        # LLM agent platform); the canonical name lives in the rendered
-        # instruction surface and SKILL.md. The test accepts any source
-        # manifest declaring the canonical id.
-        "source_must_declare": [
-            r"\bhermes\b",
-        ],
-    },
-    {
-        "host_dir": "mpm-claude-code",
-        "canonical": "claude-code",
-        "rendered_pattern": r"mpm-claude-code",
-        "expected_in_rendered": [
-            r"MPM_PROVENANCE_FRAMEWORK[^\n]*\bclaude-code\b",
-            r"MPM_FRAMEWORK[^\n]*\bclaude-code\b",
-        ],
-        "source_must_declare": [
-            # .mcp.json.template materialises one of the canonical env vars
-            # with the framework id.
-            r"MPM_PROVENANCE_FRAMEWORK.{0,80}\bclaude-code\b",
-            r"MPM_FRAMEWORK.{0,80}\bclaude-code\b",
-        ],
-    },
-    {
-        "host_dir": "mpm-memory-openclaw",
-        "canonical": "openclaw",
-        "rendered_pattern": r"mpm-memory-openclaw",
-        "expected_in_rendered": [
-            r"MPM_PROVENANCE_FRAMEWORK[^\n]*\bopenclaw\b",
-            r"MPM_FRAMEWORK[^\n]*\bopenclaw\b",
-        ],
-        "source_must_declare": [
-            # Plugin's index.js emits MPM_PROVENANCE_FRAMEWORK=openclaw
-            # via resolve_exec_env hook and/or .mcp.json MPL launch env.
-            r"MPM_PROVENANCE_FRAMEWORK.{0,80}\bopenclaw\b",
-            r"MPM_FRAMEWORK.{0,80}\bopenclaw\b",
-        ],
-    },
-    {
-        "host_dir": "mpm-auto-mode-persona-openclaw",
-        "canonical": "openclaw",
-        "rendered_pattern": r"mpm-auto-mode-persona-openclaw",
-        "expected_in_rendered": [
-            r"MPM_PROVENANCE_FRAMEWORK[^\n]*\bopenclaw\b",
-            r"MPM_FRAMEWORK[^\n]*\bopenclaw\b",
-        ],
-        "source_must_declare": [
-            # Plugin's lib/workspace.js stamps MPM_PROVENANCE_FRAMEWORK=openclaw
-            # via withWorkspace() on every spawn.
-            r"MPM_PROVENANCE_FRAMEWORK.{0,80}\bopenclaw\b",
-            r"MPM_FRAMEWORK.{0,80}\bopenclaw\b",
-        ],
-    },
 ]
+
 
 
 def _read_text(path: Path) -> str:
@@ -340,6 +270,8 @@ class AdapterProvenanceContract(unittest.TestCase):
         # are absent today, so the pattern must NOT match any production
         # source file.
         bad_assignments = [
+            # Historical patterns from the retired hosts. They are kept
+            # so a future adapter cannot reintroduce the mistake.
             # OpenClaw patterns
             (r'env\.MPM_PROVENANCE_PARENT_INVOCATION_ID\s*=\s*.*sessionKey',
              "OpenClaw sessionKey must not populate MPM_PROVENANCE_PARENT_INVOCATION_ID; "
@@ -383,14 +315,14 @@ class AdapterProvenanceContract(unittest.TestCase):
         # canonical MPM_PROVENANCE_FRAMEWORK_SESSION_ID slot. Adapters
         # that have no native session id (Pi, Hermes) must NOT
         # fabricate one.
-        # Claude Code + OpenClaw + OpenCode: must write the env var.
-        # Pi + Hermes: must not (no host session concept).
+        # OpenCode: must write the env var.
+        #
+        # The retired hosts' entries are gone with their adapters. Their
+        # patterns below stay in `bad_assignments` as historical
+        # record: a future adapter that reintroduced one of those
+        # mistakes would be caught.
         propagated = {
-            "mpm-claude-code": True,
-            "mpm-memory-openclaw": True,
             "mpm-opencode": True,
-            "mpm-pi": False,
-            "mpm-hermes": False,
         }
         workspaces = self._adapter_workspace()
         offenders: list[str] = []

@@ -11,8 +11,19 @@ import (
 	"testing"
 )
 
-// callSite represents one `callMpm(tool, payload)` or
-// `callMpmTool(tool, payload, opts)` invocation in an adapter file.
+// callSite represents one place an adapter names an MPM tool.
+//
+// Two shapes exist, and both are drift surfaces:
+//
+//   - a CALL SITE — `callMpm(tool, payload)` or `callMpmTool(tool, payload, opts)`.
+//     The retired subprocess adapters (Claude Code, Pi, Hermes, OpenClaw)
+//     reached MPM this way, so the tool name and the forwarded payload
+//     were both visible at the call.
+//   - a DECLARATION — `name: "mpm_memory"`. The surviving OpenCode
+//     adapter registers its tools in a descriptor table and forwards to
+//     the registry by name, so the tool name is visible in the
+//     declaration and nowhere else.
+//
 // Used by TestAdapterCallsites_MatchGoSchema to verify the adapter
 // uses only tool names + actions that exist in the live Registry.
 type callSite struct {
@@ -22,6 +33,12 @@ type callSite struct {
 	keys    []string // top-level keys of the literal payload (sorted); empty when literal=false
 	action  string   // populated when the literal payload includes action: "foo"; empty otherwise
 	literal bool     // false if the second arg is a variable, not an object literal
+	// declaration is true for a tool DECLARATION rather than a call
+	// site. A declaration carries the adapter's own JSON schema for the
+	// tool, not a payload forwarded to the Go registry, so the
+	// payload-level checks do not apply to it — the tool NAME is the
+	// whole drift surface there.
+	declaration bool
 }
 
 // TestAdapterCallsites_MatchGoSchema is the structural enforcement of
@@ -37,11 +54,17 @@ type callSite struct {
 // in every agent turn. Doc sweep catches some of this but at
 // the wrong layer (after merge, not at compile time).
 //
-// This test parses every TypeScript/JavaScript adapter under
-// `agent_installation/*/index.{ts,js}` for the mpm-callSite pattern
-// `callMpm(<tool>, <payload>)` (or `callMpmTool(...)`), extracts
-// the tool name + literal payload keys, and verifies against
-// the live Registry:
+// This test parses every TypeScript/JavaScript adapter entry module under
+// `agent_installation/` for the two shapes in which an adapter names an
+// MPM tool:
+//
+//   (a) a call site — `callMpm(<tool>, <payload>)` (or `callMpmTool(...)`),
+//       the shape the retired subprocess adapters used; and
+//   (b) a tool declaration — `name: "<tool>"`, the shape the surviving
+//       OpenCode adapter uses.
+//
+// It extracts the tool name (and, for call sites, the literal payload
+// keys) and verifies against the live Registry:
 //
 //   (a) The tool name must exist in Registry. Renames or removals
 //       trip this immediately.
@@ -120,10 +143,16 @@ func TestAdapterCallsites_MatchGoSchema(t *testing.T) {
 			err)
 	}
 
-	// Walk every adapter file and extract callMpm(...) callSites.
-	// Two patterns are recognised: `callMpm(...)` (JS/TS pattern used
-	// by openclaw + mpm-pi) and the underlying `callMpmTool(...)`
-	// (openclaw's wrapper). Both share the same (tool, payload) shape.
+	// Walk every adapter entry module and extract the places an adapter
+	// names an MPM tool.
+	//
+	// Two call shapes are recognised: `callMpm(...)` (the pattern used by
+	// the retired subprocess adapters) and the underlying
+	// `callMpmTool(...)` wrapper. Both share the same (tool, payload)
+	// shape. The surviving OpenCode adapter registers its tools in a
+	// descriptor table instead, so its tool names appear as
+	// DECLARATIONS; those are extracted too, or the guard would have
+	// nothing to inspect for the one adapter that remains.
 	var sites []callSite
 
 	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -131,10 +160,12 @@ func TestAdapterCallsites_MatchGoSchema(t *testing.T) {
 			return err
 		}
 		if info.IsDir() {
+			if path != root && adapterBuildDirs[info.Name()] {
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		base := filepath.Base(path)
-		if base != "index.js" && base != "index.ts" {
+		if !adapterEntryModules[filepath.Base(path)] {
 			return nil
 		}
 		found, err := extractCallsites(path)
@@ -142,17 +173,23 @@ func TestAdapterCallsites_MatchGoSchema(t *testing.T) {
 			return fmt.Errorf("parse %s: %w", path, err)
 		}
 		sites = append(sites, found...)
+		declared, err := extractDeclaredTools(path)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+		sites = append(sites, declared...)
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk agent_installation: %v", err)
 	}
 	if len(sites) == 0 {
-		t.Fatalf("no callMpm(...) or callMpmTool(...) call sites found under %s.\n"+
+		t.Fatalf("no MPM tool call sites or declarations found under %s.\n"+
 			"The registry contains %d tools and this guard exists to catch adapters that call a tool "+
-			"the registry no longer has. Zero discovered call sites means the guard is inspecting "+
-			"nothing while reporting success — either every adapter was rewritten to call some other "+
-			"helper, or the walk pattern (index.js / index.ts) no longer matches the adapter layout.",
+			"the registry no longer has. Zero discovered sites means the guard is inspecting "+
+			"nothing while reporting success — either every adapter was rewritten to name its tools "+
+			"some other way, or the walk pattern (the adapter entry module names) no longer matches "+
+			"the adapter layout.",
 			root, len(Registry))
 	}
 
@@ -162,11 +199,19 @@ func TestAdapterCallsites_MatchGoSchema(t *testing.T) {
 	for _, s := range sites {
 		entry, ok := registry[s.tool]
 		if !ok {
-			failures = append(failures, fmt.Sprintf(
-				"%s:%d  callMpm(%q, ...) — tool not in Registry. "+
-					"Either rename the callSite to match the new schema, or "+
-					"remove the callSite if the tool was deleted.",
-				s.file, s.line, s.tool))
+			if s.declaration {
+				failures = append(failures, fmt.Sprintf(
+					"%s:%d  declared tool %q — not in Registry. "+
+						"Either rename the declaration to match the new schema, or "+
+						"remove it if the tool was deleted.",
+					s.file, s.line, s.tool))
+			} else {
+				failures = append(failures, fmt.Sprintf(
+					"%s:%d  callMpm(%q, ...) — tool not in Registry. "+
+						"Either rename the callSite to match the new schema, or "+
+						"remove the callSite if the tool was deleted.",
+					s.file, s.line, s.tool))
+			}
 			continue
 		}
 		if !s.literal {
@@ -227,11 +272,17 @@ func TestAdapterCallsites_MatchGoSchema(t *testing.T) {
 	// Report the population actually checked, so a future run against a
 	// shrunken adapter tree is visible in the log rather than inferred.
 	distinctTools := map[string]bool{}
+	declarations := 0
 	for _, s := range sites {
 		distinctTools[s.tool] = true
+		if s.declaration {
+			declarations++
+		}
 	}
-	t.Logf("adapter schema drift guard: %d call sites across %d distinct tools, %d registry tools",
-		len(sites), len(distinctTools), len(Registry))
+	t.Logf("adapter schema drift guard: %d sites (%d tool declarations, %d call sites) "+
+		"across %d distinct tools, %d registry tools",
+		len(sites), declarations, len(sites)-declarations,
+		len(distinctTools), len(Registry))
 }
 
 // findAgentPluginsRoot was the original, working-directory-based
@@ -241,6 +292,79 @@ func TestAdapterCallsites_MatchGoSchema(t *testing.T) {
 // not wherever the command was invoked from — and its failure was
 // answered with t.Skipf, silently disarming the guard. Kept as a note so
 // the resolution model is not re-invented.
+
+// adapterEntryModules are the adapter entry modules the guard reads.
+//
+// The names are the adapter layout's convention, not a hard-coded list of
+// adapters: an adapter that registers its plugin elsewhere would have to
+// be added here, and the guard's own zero-sites failure is what says so
+// loudly rather than letting the coverage lapse.
+//
+// `index.v2.*` is the OpenCode adapter's V2 plugin entry — the module it
+// actually stages — and it is a separate file from the V1-era `index.*`.
+var adapterEntryModules = map[string]bool{
+	"index.ts":    true,
+	"index.js":    true,
+	"index.v2.ts": true,
+	"index.v2.js": true,
+}
+
+// adapterBuildDirs are directories the guard never walks.
+//
+// `node_modules` is a vendored tree of thousands of unrelated `index.js`
+// files; `dist` and `tests-build` are the compiled copies of source the
+// guard already reads. Walking them is pure cost, and a compiled copy
+// would double-count every site.
+var adapterBuildDirs = map[string]bool{
+	"node_modules": true,
+	"dist":         true,
+	"tests-build":  true,
+	"tests":        true,
+	".git":         true,
+}
+
+// declaredToolPattern recognises an adapter's TOOL DECLARATION:
+//
+//	name: "mpm_memory",
+//
+// Only `mpm_`-prefixed names are recognised. The descriptor table also
+// carries other names (an adapter's own model names, parameter names),
+// and what this guard is about is a REGISTRY rename — a tool the Go
+// registry no longer publishes.
+var declaredToolPattern = regexp.MustCompile(`\bname:\s*["'](mpm_[a-z0-9_]+)["']`)
+
+// extractDeclaredTools scans one adapter entry module for tool
+// declarations and returns one site per declaration.
+//
+// The payload-level checks do NOT apply to a declaration: it carries the
+// adapter's own JSON schema for the tool, not a payload forwarded to the
+// Go registry, so there is nothing there to compare against the registry
+// schema. The TOOL NAME is the whole drift surface, and that is what the
+// declaration pins.
+func extractDeclaredTools(path string) ([]callSite, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var out []callSite
+	for lineIdx, line := range strings.Split(string(raw), "\n") {
+		// Strip line comments: a commented-out declaration is not a
+		// declaration.
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		for _, m := range declaredToolPattern.FindAllStringSubmatch(line, -1) {
+			out = append(out, callSite{
+				file:        path,
+				line:        lineIdx + 1,
+				tool:        m[1],
+				literal:     false,
+				declaration: true,
+			})
+		}
+	}
+	return out, nil
+}
 
 // callSitePattern recognises `callMpm("X", <arg>)` and
 // `callMpmTool("X", <arg>, ...)`. Captures: (1) full literal payload

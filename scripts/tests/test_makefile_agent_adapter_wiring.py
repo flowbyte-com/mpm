@@ -3,13 +3,11 @@ test_makefile_agent_adapter_wiring.py — Regression coverage for the
 gate wiring of the per-adapter suites under agent_installation/mpm-*/tests/.
 
 Background:
-  Before this wiring existed, the per-adapter suites (one Python suite per
-  adapter under agent_installation/mpm-claude-code/tests/, mpm-hermes/tests/,
-  mpm-memory-openclaw/tests/, mpm-opencode/tests/, mpm-pi/tests/, plus two
-  Node suites under mpm-memory-openclaw/tests/ and mpm-auto-mode-*/tests/)
-  were reachable from NO local gate — not from `make test`, not from
-  `make test-race`, not from `make release-gate`, and not from the CI
-  workflow. The only Python suite the project treated as a merge gate
+  Before this wiring existed, the per-adapter suites (one Python suite
+  per adapter under agent_installation/mpm-*/tests/, plus two Node
+  suites) were reachable from NO local gate — not from `make test`, not
+  from `make test-race`, not from `make release-gate`, and not from the
+  CI workflow. The only Python suite the project treated as a merge gate
   (the renderer-parity suite under agent_installation/tests/) was
   reachable from CI; the per-adapter contract tests were invisible to
   every gate the developer runs locally.
@@ -27,19 +25,29 @@ Contract pinned by this test:
      `test_makefile_typescript_test_wiring.py` carries the executable
      negative controls (omitting mpm-opencode from AGENT_ADAPTERS_TS,
      `tsc --version` reading from the wrong path, etc.).
-  2. `test-agent-installation`'s recipe in the root Makefile invokes
+  2. The adapter lists are checked AGAINST THE ADAPTERS ON DISK, not
+     against a hard-coded count. A hard-coded count silently rots the
+     moment an adapter is added or retired; a set comparison either
+     matches reality or fails loudly.
+  3. The retired JavaScript adapter family is checked as a DECLARED
+     empty state: the list is empty, the reason is recorded, the
+     recipe says so out loud, and the recipe refuses to continue if a
+     JavaScript suite ever appears without being wired in. It is
+     deliberately NOT a "floor of 0" (a gate that can never fail) and
+     NOT a silently deleted branch.
+  4. `test-agent-installation`'s recipe in the root Makefile invokes
      `test-agent-adapters` via a `$(MAKE) test-agent-adapters` line
      (the standard Makefile recursive-make form). This is the
      foundational wiring: the per-adapter suites inherit every gate
      that already depends on `test-agent-installation`.
-  3. `make test`, `make test-race`, and `make release-gate` all
+  5. `make test`, `make test-race`, and `make release-gate` all
      reach `test-agent-installation` via their dependency graph
      (verified by `make -n` and grep). This is what makes the
      promotion meaningful — if any of these gates stops depending on
      `test-agent-installation`, the per-adapter suites stop being
      exercised locally and the regression class this test exists
      to prevent re-appears.
-  4. `test-agent-installation` returns a non-zero exit if either
+  6. `test-agent-installation` returns a non-zero exit if either
      part of its umbrella fails (per-adapter suite or renderer-
      parity suite). The wiring must not silently mask the
      per-adapter exit status with the renderer-parity exit status,
@@ -55,7 +63,7 @@ Hermeticity:
   All assertions read the repository's own Makefile or run `make -n`
   against it. No subprocess is spawned that mutates host state. No
   test runs the real `test-agent-adapters` recipe (that would re-run
-  the 316-test suite on each invocation of the gate-wiring test).
+  the per-adapter suites on each invocation of the gate-wiring test).
   `make -n` is the dry-run form and emits no side effects.
 """
 
@@ -69,10 +77,67 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 MAKEFILE = REPO_ROOT / "Makefile"
+AGENT_INSTALLATION_DIR = REPO_ROOT / "agent_installation"
 
 
 def _read_makefile() -> str:
     return MAKEFILE.read_text(encoding="utf-8")
+
+
+def _make_var(text: str, name: str) -> str | None:
+    """Return the value of a `NAME := value` Make assignment.
+
+    The match is ANCHORED to the assignment's own line. The previous
+    implementation used `\\s*` after the `:=`, and `\\s` matches a
+    NEWLINE — so an empty assignment (`AGENT_ADAPTERS_JS :=`) made the
+    regex run on into the following comment line and capture THAT as
+    the value. The list then looked non-empty, and the "the JS list is
+    not empty" assertion passed against a comment. That was a measured
+    false green; this parser cannot reproduce it.
+
+    Returns None when the variable is not assigned at all.
+    """
+    match = re.search(
+        rf"^{re.escape(name)}[ \t]*:=[ \t]*(?P<value>[^\n]*)$",
+        text,
+        re.MULTILINE,
+    )
+    if not match:
+        return None
+    return match.group("value").strip()
+
+
+def _adapters_on_disk() -> set[str]:
+    """Adapter directories that ship a Python-testable `tests/` tree.
+
+    Derived from the filesystem, not from a hard-coded list, so the
+    Makefile's adapter lists can be checked against reality.
+    """
+    if not AGENT_INSTALLATION_DIR.is_dir():
+        return set()
+    found = set()
+    for child in AGENT_INSTALLATION_DIR.iterdir():
+        if not child.is_dir() or not child.name.startswith("mpm-"):
+            continue
+        if (child / "tests").is_dir():
+            found.add(child.name)
+    return found
+
+
+def _js_suite_adapters_on_disk() -> set[str]:
+    """Adapter directories that ship a `tests/*.test.js` suite."""
+    found = set()
+    if not AGENT_INSTALLATION_DIR.is_dir():
+        return found
+    for child in AGENT_INSTALLATION_DIR.iterdir():
+        if not child.is_dir() or not child.name.startswith("mpm-"):
+            continue
+        tests = child / "tests"
+        if not tests.is_dir():
+            continue
+        if any(tests.glob("*.test.js")):
+            found.add(child.name)
+    return found
 
 
 def _make_dry(target: str) -> str:
@@ -80,7 +145,7 @@ def _make_dry(target: str) -> str:
 
     `make -n` is the dry-run form: it prints the commands a real run
     would execute but never executes them. We rely on this to inspect
-    the dependency graph without re-running the 316-test suite.
+    the dependency graph without re-running the per-adapter suites.
     """
     make = shutil.which("make") or "/usr/bin/make"
     cp = subprocess.run(
@@ -137,45 +202,112 @@ def _extract_recipe(makefile_text: str, target: str) -> str:
 
 
 class TestAdapterLists(unittest.TestCase):
-    """The per-adapter targets must reference both Python and JS
-    adapter lists, and both must be non-empty. Without these, the
-    `test-agent-adapters` recipe has nothing to walk.
+    """The per-adapter targets must reference the adapter families that
+    actually exist, and every family that exists must be wired in.
     """
 
-    def test_agent_adapters_python_list_nonempty(self):
-        text = _read_makefile()
-        match = re.search(
-            r"^AGENT_ADAPTERS\s*:=\s*(?P<list>.+?)$",
-            text,
-            re.MULTILINE,
+    def test_make_var_parser_does_not_capture_the_next_comment_line(self):
+        """The anchor fix must be a real fix.
+
+        The previous parser used `\\s*` after the `:=`, and `\\s`
+        matches a NEWLINE. An empty assignment therefore captured the
+        FOLLOWING COMMENT LINE as its value — a measured false green
+        that made an empty adapter list look non-empty. This test
+        pins the corrected behaviour directly, on a synthetic
+        Makefile, so the parser cannot silently regress.
+        """
+        synthetic = (
+            "AGENT_ADAPTERS_JS :=\n"
+            "# Adapters that additionally ship a `node --test` suite.\n"
         )
-        self.assertIsNotNone(
-            match,
-            "AGENT_ADAPTERS must be defined as a Make variable.",
-        )
-        names = match.group("list").split()
-        self.assertGreaterEqual(
-            len(names),
-            3,
-            f"AGENT_ADAPTERS should list at least 3 Python suites; got {names!r}",
+        self.assertEqual(
+            _make_var(synthetic, "AGENT_ADAPTERS_JS"),
+            "",
+            "an empty Make assignment must parse as an EMPTY list, "
+            "never as the comment line that follows it.",
         )
 
-    def test_agent_adapters_js_list_nonempty(self):
+    def test_agent_adapters_python_list_matches_the_adapters_on_disk(self):
+        """AGENT_ADAPTERS must list exactly the adapter directories
+        that ship a `tests/` tree.
+
+        Checked as a SET against the filesystem, not as a count: a
+        count silently rots when an adapter is added or retired,
+        while a set comparison either matches reality or fails loudly.
+        """
         text = _read_makefile()
-        match = re.search(
-            r"^AGENT_ADAPTERS_JS\s*:=\s*(?P<list>.+?)$",
-            text,
-            re.MULTILINE,
-        )
+        value = _make_var(text, "AGENT_ADAPTERS")
         self.assertIsNotNone(
-            match,
-            "AGENT_ADAPTERS_JS must be defined as a Make variable.",
+            value,
+            "AGENT_ADAPTERS must be defined as a Make variable.",
         )
-        names = match.group("list").split()
-        self.assertGreaterEqual(
-            len(names),
-            1,
-            f"AGENT_ADAPTERS_JS should list at least 1 JS suite; got {names!r}",
+        listed = set(value.split())
+        on_disk = _adapters_on_disk()
+        self.assertTrue(
+            on_disk,
+            "the repository is expected to ship at least one adapter "
+            "with a tests/ tree; found none.",
+        )
+        self.assertEqual(
+            listed,
+            on_disk,
+            "AGENT_ADAPTERS must list exactly the adapters that ship a "
+            f"tests/ tree. listed={sorted(listed)} on_disk={sorted(on_disk)}. "
+            "An adapter that is not listed is SILENTLY SKIPPED by the "
+            "gate; a listed adapter that does not exist is a packaging "
+            "error.",
+        )
+
+    def test_agent_adapters_js_list_is_a_declared_empty_state(self):
+        """The JavaScript adapter family was retired with its adapters.
+
+        The empty state must be EXPLICIT, not accidental:
+          - the list is empty;
+          - the reason is recorded next to it;
+          - the recipe says the fact out loud instead of passing in
+            silence;
+          - the recipe refuses to continue if a JavaScript suite
+            appears without being wired in.
+
+        It is deliberately NOT a "floor of 0" (a gate that can never
+        fail) and NOT a silently deleted branch.
+        """
+        text = _read_makefile()
+        value = _make_var(text, "AGENT_ADAPTERS_JS")
+        self.assertIsNotNone(
+            value,
+            "AGENT_ADAPTERS_JS must still be DECLARED (empty is a "
+            "decision; an absent variable is an accident).",
+        )
+        self.assertEqual(
+            value.split(),
+            [],
+            "AGENT_ADAPTERS_JS is expected to be EMPTY — the "
+            "JavaScript adapter family was retired with its adapters.",
+        )
+        reason = _make_var(text, "AGENT_ADAPTERS_JS_EMPTY_REASON")
+        self.assertIsNotNone(reason, "the empty state must carry a reason.")
+        self.assertTrue(
+            reason.strip(),
+            "AGENT_ADAPTERS_JS_EMPTY_REASON must not be blank.",
+        )
+
+    def test_agent_adapters_js_list_covers_every_js_suite_on_disk(self):
+        """No adapter may ship a `tests/*.test.js` suite without being
+        wired into AGENT_ADAPTERS_JS.
+
+        This is the check that keeps the declared empty state honest:
+        if a JavaScript adapter is added back without touching the
+        list, its suite would never run and the gate would still be
+        green.
+        """
+        js_on_disk = _js_suite_adapters_on_disk()
+        listed = set(_make_var(_read_makefile(), "AGENT_ADAPTERS_JS").split())
+        self.assertEqual(
+            js_on_disk - listed,
+            set(),
+            "these adapters ship a tests/*.test.js suite but are not "
+            "listed in AGENT_ADAPTERS_JS; their suite would never run.",
         )
 
     def test_agent_adapters_ts_list_includes_mpm_opencode(self):
@@ -186,40 +318,49 @@ class TestAdapterLists(unittest.TestCase):
         silent green — the regression we are pinning.
         """
         text = _read_makefile()
-        match = re.search(
-            r"^AGENT_ADAPTERS_TS\s*:=\s*(?P<list>.+?)$",
-            text,
-            re.MULTILINE,
-        )
-        self.assertIsNotNone(
-            match,
-            "AGENT_ADAPTERS_TS must be defined as a Make variable.",
-        )
-        names = match.group("list").split()
+        names = (_make_var(text, "AGENT_ADAPTERS_TS") or "").split()
         self.assertIn(
             "mpm-opencode",
             names,
             "AGENT_ADAPTERS_TS must list mpm-opencode so its "
-            "17-test TypeScript suite runs through the canonical "
+            "TypeScript suite runs through the canonical "
             f"test-agent-adapters gate. Got: {names!r}",
         )
 
     def test_per_language_floors_present(self):
+        """The Python and TypeScript floors must be real numbers.
+
+        The JavaScript floor must be EMPTY, because there is no
+        JavaScript family left to measure: a floor of 0 would be a
+        gate that can never fail, and a floor of 100 against a
+        population of 0 would be a gate that always fails. The recipe
+        refuses to run a JavaScript family whose floor is unset, so
+        the empty floor cannot drift into a silent pass.
+        """
         text = _read_makefile()
         self.assertRegex(
             text,
-            r"(?m)^AGENT_ADAPTER_TEST_MIN_PY_TESTS\s*:=\s*\d+$",
+            r"(?m)^AGENT_ADAPTER_TEST_MIN_PY_TESTS[ \t]*:=[ \t]*\d+$",
         )
         self.assertRegex(
             text,
-            r"(?m)^AGENT_ADAPTER_TEST_MIN_JS_TESTS\s*:=\s*\d+$",
-        )
-        self.assertRegex(
-            text,
-            r"(?m)^AGENT_ADAPTER_TEST_MIN_TS_TESTS\s*:=\s*\d+$",
+            r"(?m)^AGENT_ADAPTER_TEST_MIN_TS_TESTS[ \t]*:=[ \t]*\d+$",
             "AGENT_ADAPTER_TEST_MIN_TS_TESTS must be defined so "
             "the TypeScript pass-count floor trips on a "
             "silently-zero suite.",
+        )
+        js_floor = _make_var(text, "AGENT_ADAPTER_TEST_MIN_JS_TESTS")
+        self.assertIsNotNone(
+            js_floor,
+            "AGENT_ADAPTER_TEST_MIN_JS_TESTS must still be DECLARED "
+            "(empty is a decision; an absent variable is an accident).",
+        )
+        self.assertEqual(
+            js_floor,
+            "",
+            "AGENT_ADAPTER_TEST_MIN_JS_TESTS must be EMPTY while "
+            "AGENT_ADAPTERS_JS is empty: there is no measured "
+            "population to floor.",
         )
 
 
@@ -247,6 +388,64 @@ class TestAdapterTargetExists(unittest.TestCase):
                       "test-agent-adapters must iterate AGENT_ADAPTERS (Python).")
         self.assertIn("$(AGENT_ADAPTERS_JS)", recipe,
                       "test-agent-adapters must iterate AGENT_ADAPTERS_JS (JS).")
+
+    def test_recipe_declares_the_empty_js_state_loudly(self):
+        """The recipe must SAY that the JavaScript family is gone.
+
+        A branch that simply disappears leaves a reader — and a future
+        maintainer — unable to tell the difference between "no
+        JavaScript adapter exists" and "the JavaScript gate was
+        accidentally removed". The empty state must be printed, with
+        the recorded reason.
+        """
+        recipe = _extract_recipe(_read_makefile(), "test-agent-adapters")
+        self.assertIn(
+            "no JavaScript adapter family remains",
+            recipe,
+            "test-agent-adapters must print the declared empty "
+            "JavaScript state instead of passing in silence.",
+        )
+        self.assertIn(
+            "AGENT_ADAPTERS_JS_EMPTY_REASON",
+            recipe,
+            "test-agent-adapters must print the recorded reason for "
+            "the empty JavaScript state.",
+        )
+
+    def test_recipe_refuses_an_unwired_js_suite(self):
+        """A JavaScript suite that is not wired into AGENT_ADAPTERS_JS
+        must be a hard refusal.
+
+        This is what keeps the declared empty state honest: a new
+        JavaScript adapter added without touching the list would
+        otherwise have its suite silently skipped.
+        """
+        recipe = _extract_recipe(_read_makefile(), "test-agent-adapters")
+        self.assertIn(
+            "JavaScript adapter suites exist but AGENT_ADAPTERS_JS is empty",
+            recipe,
+            "test-agent-adapters must FATAL when a JavaScript suite "
+            "exists that AGENT_ADAPTERS_JS does not list.",
+        )
+        self.assertIn(
+            "tests/*.test.js",
+            recipe,
+            "the unwired-suite guard must look for tests/*.test.js "
+            "under the adapter directories.",
+        )
+
+    def test_recipe_refuses_a_js_family_without_a_floor(self):
+        """A JavaScript family with NO pass-count floor is a silent
+        gate: the suite could vanish and the recipe would still be
+        green. The recipe must refuse that combination outright.
+        """
+        recipe = _extract_recipe(_read_makefile(), "test-agent-adapters")
+        self.assertIn(
+            "AGENT_ADAPTERS_JS is non-empty but AGENT_ADAPTER_TEST_MIN_JS_TESTS is unset",
+            recipe,
+            "test-agent-adapters must FATAL when a JavaScript family "
+            "is wired in without a measured pass-count floor.",
+        )
 
     def test_recipe_invokes_ts_family_with_local_tsc(self):
         """The recipe must walk AGENT_ADAPTERS_TS and compile each
