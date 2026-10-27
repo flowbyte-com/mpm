@@ -155,6 +155,11 @@ var CanonicalMPMSchema = []string{
 	"evidence",
 	"external_db_cursors",
 	"lessons",
+	// lifecycle_events: the mpm-event/0.1 lifecycle store (P5). MPM
+	// creates it, so a dump declaring it is legitimate and it belongs in
+	// the restore allow-list — the same reason every other
+	// schema-declared table is here.
+	"lifecycle_events",
 	"memories",
 	"memory_revisions",
 	"memory_settling_baselines",

@@ -532,7 +532,7 @@ Per-action semantics:
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["gc_run","compact","health_check","migrate","query_audit_log","list_clusters","snooze_cluster","unsnooze_cluster","resolve_cluster","annotate_cluster","critic_findings"]},
+				"action": {"type": "string", "enum": ["gc_run","compact","health_check","migrate","query_audit_log","list_clusters","snooze_cluster","unsnooze_cluster","resolve_cluster","annotate_cluster","critic_findings","event_ingest","event_counters"]},
 				"params": {"type": "object", "description": "Action-specific params envelope. Per-action shape is constrained by the oneOf branches below; the top-level declaration here exists so the schema accurately reflects what handleMpmSystem reads (via extractParamsOrFail)."}
 			},
 			"required": ["action"],
@@ -690,6 +690,32 @@ Per-action semantics:
 							"properties": {
 								"limit": {"type": "number", "default": 50, "description": "Max rows to return. Default 50."}
 							},
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "event_ingest"},
+						"params": {
+							"type": "object",
+							"properties": {
+								"schema_version": {"type": "string", "description": "The event schema version. Must be \"mpm-event/0.1\" and must equal the envelope's own schema_version. The ingest endpoint is the version authority: an unrecognised version is REJECTED and counted, never silently ignored."},
+								"event": {"type": "object", "description": "One mpm-event/0.1 envelope, verbatim. It is validated against the contract's frozen field set, the closed event-type vocabulary, the structural meta allowlist and the hard limits. Capturing an observation creates NO memory, lesson, decision or theory."}
+							},
+							"required": ["schema_version", "event"],
+							"additionalProperties": false
+						}
+					},
+					"required": ["params"]
+				},
+				{
+					"properties": {
+						"action": {"const": "event_counters"},
+						"params": {
+							"type": "object",
+							"properties": {},
 							"additionalProperties": false
 						}
 					},

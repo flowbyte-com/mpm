@@ -739,6 +739,115 @@ var BaseTables = []string{
 	`CREATE INDEX IF NOT EXISTS idx_events_capability_time ON capability_events(capability_id, occurred_at DESC);`,
 	`CREATE INDEX IF NOT EXISTS idx_events_type           ON capability_events(event_type, occurred_at DESC);`,
 	`CREATE INDEX IF NOT EXISTS idx_events_actor          ON capability_events(actor);`,
+
+	// ── Lifecycle events (mpm-event/0.1) ──────────────────────────────
+	//
+	// ONE narrow, core-owned table for the lifecycle-event store.
+	// Nothing else in the substrate fits, and the reasons are recorded
+	// in docs/dev/session-a-p5-lifecycle-ingest.md §1.1:
+	//
+	//   * tool_invocations is CHECK-constrained to result_status IN
+	//     ('success','error') — the envelope's vocabulary also has
+	//     'unknown' — and its id is a fresh UUID, not the event id. It
+	//     is the substrate's audit of its OWN dispatch; a lifecycle
+	//     event is the HOST's observation.
+	//   * evidence requires an artifact_id of an artifact type; it
+	//     carries epistemic weight (strength, independence_factor) that
+	//     an observation has not earned.
+	//   * system_audit_log is the substrate's operational log: no
+	//     unique event identity, so no dedup.
+	//   * work_events / capability_events are scoped to a work item or
+	//     a capability.
+	//   * memories would be automatic promotion, which M5 forbids.
+	//
+	// The PRIMARY KEY IS THE DEDUP MECHANISM: inserting the same
+	// strict-mode event_id twice yields one row, which is exactly the
+	// "at most one stored row per event_id" guarantee the contract
+	// (§3.5) claims. The store is append-only; nothing prunes an event
+	// until a retention policy is measured (§3.8).
+	//
+	// THE COLUMNS THAT LOOK INVENTED ARE NOT:
+	//
+	//   * event_type has NO CHECK. The vocabulary is closed but it
+	//     widens on a MINOR bump (§4: "Adding a type is additive and
+	//     minor"), and a SQL CHECK would make every minor bump require
+	//     a table rebuild. The vocabulary is enforced in Go, where the
+	//     error can name the offending value.
+	//   * outcome_class has NO CHECK, exactly like
+	//     tool_invocations.outcome_class: the existing nine-value
+	//     internal.ToolOutcomeClass enum is reused verbatim (§3.7).
+	//   * observation has NO CHECK: §3.2 anticipates observation:
+	//     "inferred" in a later version, and a CHECK would have to be
+	//     widened by a table rebuild.
+	//   * trust, operation, result_status and idempotency DO have
+	//     CHECKs: their vocabularies are closed and are not expected
+	//     to widen.
+	//
+	// There is NO payload column. The envelope's payload is always
+	// null in 0.1 (§3.8), so a payload column would be a permanently
+	// null column — persisted fiction, and a violation of the
+	// Projection Test in AGENTS.md §2. When 0.2 needs it, it is one
+	// SafeMigrations column addition.
+	//
+	// The four causal columns (mpm_session_id, invocation_id, task_id,
+	// parent_event_id) are the contract's EXPLICIT causality carriers
+	// (§3.6: "Causality is never inferred from timestamps"). They are
+	// nullable because the reference adapter does not emit them yet;
+	// they are stored rather than dropped so that a later adapter's
+	// causal fields are not silently discarded.
+	`CREATE TABLE IF NOT EXISTS lifecycle_events (
+		-- STRICT EVENT IDENTITY (§3.5). The primary key IS the dedup
+		-- mechanism.
+		-- NOT NULL is explicit and load-bearing: SQLite permits a NULL in
+		-- a TEXT PRIMARY KEY of a non-STRICT table (a long-standing
+		-- compatibility quirk), and a NULL event_id would defeat the
+		-- uniqueness the dedup guarantee depends on.
+		event_id             TEXT PRIMARY KEY NOT NULL,
+
+		-- The envelope's own idempotency mode, stored rather than
+		-- inferred: a reader must be able to tell a content-derived id
+		-- from a random one without re-deriving it.
+		idempotency          TEXT NOT NULL CHECK (idempotency IN ('strict','best_effort')),
+
+		schema_version       TEXT NOT NULL,
+		event_type           TEXT NOT NULL,
+		observation          TEXT NOT NULL,
+		trust                TEXT NOT NULL CHECK (trust = 'observation'),
+
+		-- Observation order and ingestion order are DIFFERENT (§3.6)
+		-- and are never interchangeable. ingested_at_ms is NEVER an
+		-- ordering key for "what happened".
+		observed_at_ms       INTEGER NOT NULL,
+		ingested_at_ms       INTEGER NOT NULL,
+		host_seq             INTEGER,
+
+		host                 TEXT NOT NULL,
+		host_version         TEXT,
+		source               TEXT NOT NULL,
+		adapter_version      TEXT NOT NULL,
+
+		project_id           TEXT,
+		project_id_source    TEXT,
+		framework_name       TEXT NOT NULL,
+		framework_session_id TEXT,
+
+		-- The contract's explicit causality carriers (§3.6).
+		mpm_session_id       TEXT,
+		invocation_id        TEXT,
+		task_id              TEXT,
+		parent_event_id      TEXT,
+
+		operation            TEXT NOT NULL CHECK (operation IN ('present','absent')),
+		result_status        TEXT NOT NULL CHECK (result_status IN ('success','error','unknown')),
+		outcome_class        TEXT,
+		outcome_code         TEXT,
+
+		-- The ONLY field bag in mpm-event/0.1 (§3.8), stored verbatim
+		-- as the adapter emitted it. The core re-validates the
+		-- allowlist and the bounds on the way in; it never rewrites a
+		-- value.
+		meta                 TEXT NOT NULL DEFAULT '{}'
+	);`,
 }
 
 // ReferenceTables contains the reference-library table creation statements.
@@ -1378,6 +1487,32 @@ var CommonIndexes = []string{
 	// CREATE INDEX IF NOT EXISTS keeps this path idempotent across boots.
 	`CREATE INDEX IF NOT EXISTS idx_provenance_parent_invocation
 		ON artifact_provenance(parent_invocation_id);`,
+
+	// ── Lifecycle event indexes (mpm-event/0.1) ──────────────────────
+	//
+	// idx_lifecycle_events_order carries the CONTRACT'S TOTAL ORDERING
+	// KEY (§3.6): (observed_at_ms ASC, host_seq ASC, event_id ASC), with
+	// host_seq NULL sorting AFTER all non-NULL values at the same
+	// observed_at_ms and event_id compared as an ASCII string.
+	//
+	// SQLite sorts NULLs FIRST in ASC order, so a plain
+	// (observed_at_ms, host_seq, event_id) index would return the
+	// opposite of the contract's order. The index therefore carries the
+	// (host_seq IS NULL) term explicitly, and the read uses the
+	// identical expression list, so SQLite matches the index exactly
+	// (verified: EXPLAIN QUERY PLAN reports a COVERING INDEX scan).
+	`CREATE INDEX IF NOT EXISTS idx_lifecycle_events_order
+		ON lifecycle_events(observed_at_ms, (host_seq IS NULL), host_seq, event_id);`,
+
+	// Per-host-session read: "what did this session do", ordered by
+	// observation time.
+	`CREATE INDEX IF NOT EXISTS idx_lifecycle_events_session
+		ON lifecycle_events(framework_session_id, observed_at_ms);`,
+
+	// The counters' GROUP BY event_type, and "what of this type
+	// happened, newest first".
+	`CREATE INDEX IF NOT EXISTS idx_lifecycle_events_type
+		ON lifecycle_events(event_type, observed_at_ms DESC);`,
 
 	// ── Drill Run Ledger (2026-08-12) ──────────────────────────────
 	//

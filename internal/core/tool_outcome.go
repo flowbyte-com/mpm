@@ -223,6 +223,27 @@ func ClassifyError(err error) (ToolOutcomeClass, string) {
 	if errors.Is(err, ErrPoisonContentBlocked) {
 		return OutcomeClassValidation, "poison_content_blocked"
 	}
+	// Lifecycle-event ingest rejections (mpm-event/0.1). A rejected
+	// envelope is DELIBERATE POLICY ENFORCEMENT, not a substrate fault:
+	// the envelope violated the contract, so the store refuses it and
+	// says why. The typed reason travels into the dispatch audit as the
+	// outcome_code, which is what makes "counts every rejection ... with
+	// a machine-readable reason" (§3.10 step 8) countable WITHOUT
+	// parsing prose and WITHOUT a second persisted counter.
+	//
+	// The reason is validated against the closed vocabulary before it is
+	// used as an outcome_code: an outcome_code is a bounded identifier,
+	// and an unbounded reason string would leak envelope content into
+	// the audit trail.
+	var lifecycleRejection *LifecycleEventRejection
+	if errors.As(err, &lifecycleRejection) {
+		for _, reason := range LifecycleEventRejectionReasons {
+			if lifecycleRejection.Reason == reason {
+				return OutcomeClassValidation, reason
+			}
+		}
+		return OutcomeClassValidation, "lifecycle_event_rejected"
+	}
 	msg := err.Error()
 	// Bound checks — only inspect the head so we don't speculate on
 	// the variable tail of a stack trace. Each check is intentionally
