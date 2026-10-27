@@ -500,11 +500,16 @@ Files changed:
 
 ### 11.1 CI
 
-| Job | Result |
-|---|---|
-| Build + core tests | *pending* |
-| Full test suite | *pending* |
-| Release gate (cross-agent continuity + public-CLI subprocess suite) | *pending* |
+**Run `40569380306`, at head `89f3de5` — all three jobs green.**
+
+| Job | Result | Duration |
+|---|---|---|
+| Build + core tests | **SUCCESS** | 19:28:56Z → 19:47:17Z (18m21s) |
+| Full test suite | **SUCCESS** | 19:28:56Z → 19:40:58Z (12m02s) |
+| Release gate (cross-agent continuity + public-CLI subprocess suite) | **SUCCESS** | 19:28:55Z → 19:58:23Z (29m28s) |
+
+The commit that follows this one is **documentation only** — it records these results and
+changes no code, no test and no configuration.
 
 ### 11.2 The two things a reviewer should read first
 
