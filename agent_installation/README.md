@@ -18,23 +18,11 @@ here.
 
 **→ [`MPM_AGENT_INTEGRATION_SNIPPETS.md`](./MPM_AGENT_INTEGRATION_SNIPPETS.md)**
 
-The top of that file carries four copy/paste blocks — one per
-persistent-file host (Claude Code, OpenCode, Pi, Hermes) — with the
-exact wording to paste into your host's persistent instruction file
-(CLAUDE.md / AGENTS.md / .hermes.md). The same content is what the
-per-host installers write; the installers are a convenience, not a
-requirement.
-
-If you are using OpenClaw, you don't need a snippets file at all —
-the runtime injects the same managed behavioural block into the system
-prompt automatically. See the OpenClaw row in
-[INSTALL.md](./INSTALL.md).
-
-On Hermes, the managed block is delivered via `.hermes.md` (protocol
-guidance only — not the dynamic wake payload). The agent must call
-`mcp__mpm__mpm_context` action `read_wake_context` itself at the
-start of its first turn to obtain the wake payload; Hermes has no
-session-start hook for automatic wake injection.
+The top of that file carries the copy/paste block for the supported
+host (OpenCode) — with the exact wording to paste into the host's
+persistent instruction file (`~/.config/opencode/AGENTS.md`). The same
+content is what the host's installer writes; the installer is a
+convenience, not a requirement.
 
 For installation, the rest of this README explains the architecture;
 the actual procedural manual is [INSTALL.md](./INSTALL.md).
@@ -45,14 +33,14 @@ A bundle of per-agent installation assets:
 
 | Kind | Examples | Purpose |
 |---|---|---|
-| **Plugins / extensions** | `mpm-opencode/`, `mpm-memory-openclaw/`, `mpm-auto-mode-persona-openclaw/`, `mpm-pi/` | Native host extension code (TypeScript, JS) |
-| **MCP bundles** | `mpm-claude-code/`, `mpm-hermes/` | `.mcp.json` configs + install scripts for hosts that wire MCP via a side-channel config file |
-| **Behavioral-instruction installers** | `mpm-claude-code/`, `mpm-opencode/`, `mpm-hermes/`, `mpm-pi/` | Snippet + Python installer that writes the MPM behavioral protocol into the host's persistent instruction file (CLAUDE.md / AGENTS.md / .hermes.md) |
+| **Plugins / extensions** | `mpm-opencode/` | Native host extension code (TypeScript) |
+| **Behavioral-instruction installers** | `mpm-opencode/` | Snippet + Python installer that writes the MPM behavioral protocol into the host's persistent instruction file (`AGENTS.md`) |
+| **Host-independent libraries** | `lib/` | Code that belongs to no single host (the telemetry adapter) — retiring a host must not take it with it |
 | **Canonical protocol doc** | `mpm-agent-protocol.md` | Host-independent behavioral contract — the single source of truth that host adapters reference |
 
 The name `agent_installation/` (rather than `agent_plugins/`) reflects
 this mix: only a subset of the directories are plugins in the strict
-sense; the rest is install scripts, MCP bundles, and protocol
+sense; the rest is install scripts, shared libraries, and protocol
 documentation.
 
 ## Design principle
@@ -60,12 +48,12 @@ documentation.
 > **MPM provides capability. Host instructions make that capability
 > part of normal agent behavior.**
 
-An MCP bundle wires `mpm__*` tools into the agent (capability).
+A plugin wires MPM's tools into the agent (capability).
 A behavioral-instruction installer writes the MPM protocol into the
-host's persistent instruction file (CLAUDE.md / AGENTS.md / .hermes.md /
-SOUL.md), so the agent actually invokes wake-context, persists during
-work, writes handoffs at session end, and falls back to `mpm call` when
-the preferred integration breaks.
+host's persistent instruction file (`AGENTS.md`), so the agent actually
+invokes wake-context, persists during work, writes handoffs at session
+end, and falls back to `mpm call` when the preferred integration
+breaks.
 
 Without the second layer, capability may exist but adoption is
 inconsistent — agents may skip wake, persist nothing, and leave no
@@ -97,19 +85,15 @@ block (between `<!-- BEGIN MPM MANAGED BLOCK -->` and
 `<!-- END MPM MANAGED BLOCK -->` markers) with `{TOOL_PREFIX}`
 placeholders for each host's transport namespace.
 
-The four file-based adapter snippets
-(`mpm-claude-code/templates/CLAUDE.md.snippet`,
-`mpm-opencode/templates/AGENTS.md.snippet`,
-`mpm-pi/templates/AGENTS.md.snippet`,
-`mpm-hermes/templates/hermes.md.snippet`) are **generated**, not
+The file-based adapter snippets
+(`mpm-opencode/templates/AGENTS.md.snippet`) are **generated**, not
 hand-edited. The render script
 [`scripts/render_managed_blocks.py`](./scripts/render_managed_blocks.py):
 
 1. Reads the canonical source.
 2. Extracts the canonical managed block.
-3. Substitutes each adapter's `{TOOL_PREFIX}` (e.g., `mpm__` for
-   Claude Code, `mcp__mpm__` for Hermes, empty for OpenCode, Pi, and
-   OpenClaw — see the capability-name note below).
+3. Substitutes each adapter's `{TOOL_PREFIX}` (empty for OpenCode —
+   see the capability-name note below).
 4. Composes each adapter's full snippet (header + rendered block +
    host-specific notes).
 5. Writes the snippet to the adapter's `templates/` directory.
@@ -123,18 +107,21 @@ canonical source.
 
 ## Supported hosts
 
-**OpenCode is the officially supported agent host for this release.** The
-other adapter directories are retained in the tree for operators who
-already run them; they are **not supported in this release** and are not
-maintained for it.
+**OpenCode is the only supported agent host in this release.** The
+Claude Code, Pi, Hermes and OpenClaw adapters were retired on
+2026-10-27; their directories are gone from the tree.
+
+Retiring an adapter stops MPM from CONFIGURING that host. It does not
+touch an integration an operator already has: an existing
+`~/.claude/CLAUDE.md`, `~/.pi/agent/AGENTS.md`,
+`~/.openclaw/workspace/SOUL.md` or `.hermes.md` is left exactly as it
+is, and the diagnostic no longer reports it (a retired host is not
+MPM's business any more, and reporting it would tell the operator to
+repair an integration MPM no longer supports).
 
 | Host | Release status | Adapter directory | Mechanism | Persistent-instruction surface |
 |---|---|---|---|---|
 | **OpenCode** | **supported** | [`mpm-opencode/`](./mpm-opencode/) | OpenCode plugin (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full MPM Registry) + AGENTS.md managed block | `<project>/AGENTS.md` or `~/.config/opencode/AGENTS.md` (managed-block convention) |
-| **Claude Code** | not supported in this release | [`mpm-claude-code/`](./mpm-claude-code/) | MCP server (user-scope `mcpServers.mpm` in `~/.claude.json`, default 3-tool initial surface via `mpm-mcp` — `MPM_EXPOSE_ALL_TOOLS=1` restores the full registered MCP surface) + CLAUDE.md managed block | `~/.claude/CLAUDE.md` (managed-block convention) |
-| **Pi** | not supported in this release | [`mpm-pi/`](./mpm-pi/) | Pi extension (TypeScript, 17 typed tools + `mpm call` CLI fallback to the full MPM Registry) + AGENTS.md managed block | `~/.pi/agent/AGENTS.md` (global) or `<project>/AGENTS.md` (per-pi-docs search order) |
-| **Hermes** | not supported in this release | [`mpm-hermes/`](./mpm-hermes/) | Hermes MCP client (`~/.hermes/config.yaml`, default 3-tool initial surface via `mpm-mcp` — `MPM_EXPOSE_ALL_TOOLS=1` restores the full registered MCP surface) + .hermes.md behavioral section | `<project>/.hermes.md` (or `HERMES.md`, walked from cwd to git root) — persona stays in `~/.hermes/SOUL.md` |
-| **OpenClaw** | not supported in this release | [`mpm-memory-openclaw/`](./mpm-memory-openclaw/) + [`mpm-auto-mode-persona-openclaw/`](./mpm-auto-mode-persona-openclaw/) | OpenClaw plugin (`mpm_memory_search`/`mpm_memory_get` slot, kind:memory) + auto-mode/persona plugin (turn-key mode/persona injection) | `~/.openclaw/workspace/SOUL.md` + `AGENTS.md` (loaded by OpenClaw runtime) |
 
 > **The MPM substrate is host-independent.** The `mpm` CLI, `mpm call
 > <tool> --payload '<json>'`, and the `mpm-mcp` stdio server work from any
@@ -145,16 +132,13 @@ maintained for it.
 
 | Directory | What it contains |
 |---|---|
-| `mpm-claude-code/` | MCP wiring (`.mcp.json.template` + `install.sh`) + CLAUDE.md behavioral-protocol installer (snippet + Python installer + 27 tests) |
-| `mpm-opencode/` | TypeScript plugin (`src/index.ts`, 17 typed tools + `mpm call` fallback to full registry) + AGENTS.md behavioral-protocol installer (snippet + Python installer) |
-| `mpm-memory-openclaw/` | OpenClaw plugin (`index.js`): `mpm_memory_search`/`mpm_memory_get` slot + wake-context injection hooks + provenance env var hooks |
-| `mpm-auto-mode-persona-openclaw/` | OpenClaw plugin (`index.js`): per-turn `mpm route --apply` invocation + bootstrap injection |
-| `mpm-hermes/` | MCP wiring (config reference in SKILL.md) + .hermes.md behavioral-protocol installer (snippet + Python installer + 19 tests) |
-| `mpm-pi/` | Pi extension (`index.ts`, 17 typed tools + `mpm call` fallback to full registry) + AGENTS.md behavioral-protocol installer (snippet + Python installer + 19 tests) |
+| `mpm-opencode/` | TypeScript plugin (`src/index.v2.ts`, 17 typed tools + `mpm call` fallback to full registry) + AGENTS.md behavioral-protocol installer (snippet + Python installer) |
+| `lib/` | Host-independent libraries (the telemetry adapter) |
+| `scripts/` | Shared host-independent tooling: the renderer, the reconciler, the diagnostic, the managed-block convergence engine, the runtime-package staging library |
+| `tests/` | The cross-adapter contract suite (renderer parity, reconciliation, provenance, diagnostics) |
 
-Each adapter directory's own README (or SKILL.md for Hermes) is the
-host-specific deep dive. See [INSTALL.md](./INSTALL.md) for
-installation procedures.
+The adapter directory's own README is the host-specific deep dive. See
+[INSTALL.md](./INSTALL.md) for installation procedures.
 
 ## Installation
 
@@ -167,25 +151,18 @@ One-line entry points (full procedure in INSTALL.md):
 | Host | Install |
 |---|---|
 | **OpenCode** (supported) | `cd mpm-opencode && ./install.sh` — builds the payload, registers the plugin in `~/.config/opencode/opencode.jsonc`, and refreshes the AGENTS.md managed block |
-| OpenClaw | `cd mpm-memory-openclaw && ./install.sh` |
-| Claude Code | `cd mpm-claude-code && ./install.sh` |
-| Hermes | (config already in `~/.hermes/config.yaml`; run `mpm-hermes/scripts/install_hermes_instructions.py` for the behavioral section) |
-| Pi | add `~/.mpm/agent_installation/mpm-pi` to `~/.pi/agent/settings.json` `extensions` |
 
-To remove the OpenClaw MPM integration cleanly (BOTH canonical
-plugins + legacy ids + memory slot — without touching the MPM
-substrate or OpenClaw itself):
+To remove the OpenCode MPM integration cleanly (without touching the
+MPM substrate):
 
 ```bash
-./uninstall-openclaw.sh --dry-run   # show the plan first
-./uninstall-openclaw.sh --yes       # confirm and execute
+cd mpm-opencode && ./install.sh --uninstall
 ```
 
-The uninstaller is idempotent and refuses to seize plugin
-registrations whose recorded source path does not match the canonical
-adapter directory. Re-running on a clean host is a no-op. The
-substrate (`~/.mpm`, `~/.local/bin/mpm`) and the gateway service are
-preserved.
+It removes MPM's entry from `~/.config/opencode/opencode.jsonc` and
+strips the managed block from `~/.config/opencode/AGENTS.md`.
+Unrelated plugins, other config sections, comments, and any AGENTS.md
+text outside the managed-block markers are preserved.
 
 ## Documentation map
 
@@ -203,11 +180,11 @@ preserved.
 
 | Date | Host | Verdict | Evidence |
 |---|---|---|---|
-| 2026-08-19 | OpenClaw | **READY** | Tests A–E live-verified; error paths tested; PATH/DB invariants exercised. See [`mpm-memory-openclaw/VALIDATION-2026-08-19.md`](./mpm-memory-openclaw/VALIDATION-2026-08-19.md). |
 | 2026-08-19 | OpenCode | **READY** | Tests A–E live-verified via fresh `opencode run` sessions + plugin-level tests. Plugin required repair (missing `id` export) before it could load. See [`mpm-opencode/VALIDATION-2026-08-19.md`](./mpm-opencode/VALIDATION-2026-08-19.md). |
-| 2026-08-19 | Claude Code | **READY** | 9/10 tests PASS, 1/10 INSPECTED via direct JSON-RPC against `mpm-mcp`. Integration uses canonical `mpm-mcp` server. See [`mpm-claude-code/VALIDATION-2026-08-19.md`](./mpm-claude-code/VALIDATION-2026-08-19.md). |
-| 2026-08-21 | Hermes | **READY** | Tests A–E live-verified via MCP. MCP wiring was already active and functional. Phantom FTS5 corruption bug fixed (WAL timing race in HealthCheck). Legacy dead code excised. See [`mpm-hermes/SKILL.md`](./mpm-hermes/SKILL.md). |
-| 2026-08-28 | Pi | **READY (code-inspected)** | `mpm-pi` extension registered 16 typed tools; AGENTS.md behavioral installer tests green (19/19). Live agent-session validation not run in this environment — see INSTALL.md verification section for the post-install checks. |
+
+The validation records of the retired adapters were removed with the
+adapters themselves; the historical record of what they were lives in
+the repository's history and in `docs/archive/`.
 
 ## Skill formation
 
@@ -231,11 +208,10 @@ This target runs:
 
 1. **`render_managed_blocks.py`** — regenerates each adapter's
    `<adapter>/templates/<file>.snippet` from the canonical source.
-2. **Each persistent-file host's installer** — refreshes the user's
-   installed managed block in `~/.claude/CLAUDE.md`,
-   `~/.config/opencode/AGENTS.md`, `~/.pi/agent/AGENTS.md`. Installers
-   are content-aware: if the installed block already matches the
-   snippet, the install is a no-op (idempotent).
+2. **The host's installer** — refreshes the user's installed managed
+   block in `~/.config/opencode/AGENTS.md`. Installers are
+   content-aware: if the installed block already matches the snippet,
+   the install is a no-op (idempotent).
 3. **`render_managed_blocks.py --check`** — verifies byte-for-byte
    parity between the canonical source and the refreshed artifacts.
 
@@ -244,35 +220,10 @@ source has drifted from a host's installed file. It is also the
 post-edit verification step for any change to
 `MPM_AGENT_INTEGRATION_SNIPPETS.md`.
 
-Hermes is skipped here (no installed managed block in this
-environment; the `mpm-hermes/SKILL.md` documents the manual flow).
-
-OpenClaw's `SOUL.md` managed block is refreshed by this same pass —
-but only on a machine where the MPM OpenClaw integration is already
-installed. The reconciler checks the integration first and skips the
-adapter entirely when it is absent, so `make refresh-installed` never
-opts a machine into a host it does not use.
-
-OpenClaw has **two** supported integration modes, and the reconciler
-gates on both, because a machine legitimately running either one must
-have its block repaired:
-
-| Mode | How the agent reaches MPM | How it is detected |
-|---|---|---|
-| **Native plugin** | `mpm-memory-openclaw` installed; typed `mpm_memory_*` tools + runtime wake injection | plugin directory, `plugins.entries.*`, or `plugins.slots.memory` |
-| **CLI fallback** | no plugin; `mpm call <tool>` over the agent's shell tool | the `mpm` binary is installed **and** the OpenClaw workspace's persistent instruction surface (`AGENTS.md` / `MEMORY.md` / `CLAUDE.md`, resolved from `openclaw.json`) already names MPM |
-
-CLI-fallback mode is a supported mode, not a degraded one. The managed
-block is what tells the agent the `mpm call` fallback exists, so on a
-CLI-fallback host a missing block means the agent never learns MPM is
-reachable at all. That is why the gate requires **both** halves:
-reachability alone would be satisfied on any machine that has any MPM
-integration and would wrongly opt an unrelated OpenClaw in, so the
-host's own instruction surface must already name MPM too.
-
-Once the integration is present, a missing or stale `SOUL.md` block is
-drift and gets repaired here; `mpm-memory-openclaw/install.sh` remains
-the full installer, including the plugin wiring.
+The reconciler refreshes the managed block only on a machine where the
+MPM integration is already present. It checks the integration first and
+skips the adapter entirely when it is absent, so `make refresh-installed`
+never opts a machine into a host it does not use.
 
 ### Installed-block provenance
 
@@ -316,7 +267,7 @@ not erase an established value either: when the behavioural text is
 unchanged, the value the block already carries is kept.
 
 The mechanism is shared by every host adapter (`scripts/block_provenance.py`),
-so the convention is identical across all five. `install.sh` and
+so the convention is identical across adapters. `install.sh` and
 `make refresh-installed` both export `MPM_BUILD_VERSION` and
 `MPM_BUILD_COMMIT` from the canonical build script
 (`scripts/build-provenance.sh`), so an installed block and the installed
@@ -359,29 +310,18 @@ Anything else is refused. A refusal is always better than a second
 contract. Bytes outside MPM-owned regions are copied through
 byte-for-byte, and a backup is written before any change.
 
-### Tool names in the OpenClaw block are capability names
+### Tool names are capability names
 
-OpenClaw renders with **bare canonical** tool names, not
-`mcp__mpm__`-prefixed ones, in both integration modes:
+The OpenCode adapter registers the **bare canonical** tool names
+(`mpm_memory`, `mpm_context`, `mpm_handoff`, …) — there is no
+`mpm__` / `mcp__mpm__` prefix, because those are namespaces an MCP
+*client* puts on a server's tools, and the OpenCode plugin is not an
+MCP client: it exposes typed plugin tools of its own and reaches the
+rest of the registry through `mpm call <tool> --payload '<json>'`.
 
-- **native plugin mode** — the plugin calls `registerTool()` exactly
-  twice, for `mpm_memory_search` and `mpm_memory_get`. It reaches
-  `mpm_context` internally by shelling out to `mpm call mpm_context`.
-  No `mcp__mpm__` namespace is ever created.
-- **CLI-fallback mode** — no plugin at all; the agent reaches MPM
-  through its own shell tool, again via `mpm call`.
-
-`mcp__mpm__` is the prefix an MCP *client* puts on a server's tools.
-OpenClaw has no MPM MCP server, so that prefix names a tool that cannot
-exist. The adapter's own README already warned about this for a
-neighbouring tool: "Do NOT call `mcp__mpm__mpm_handoff` — that tool is
-not on the default compact surface and the call will be rejected."
-
-One canonical wording therefore serves both modes, with no
-host-specific prefix and no second OpenClaw contract to keep in sync.
-The universal managed-block wording is unchanged; only the renderer's
-per-adapter prefix table and the OpenClaw-specific prose outside the
-block differ.
+The universal managed-block wording is therefore the same one the
+adapter renders: no host-specific prefix table entry, and no second
+contract to keep in sync.
 
 ### Diagnostics
 

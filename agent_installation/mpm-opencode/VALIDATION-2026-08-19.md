@@ -16,10 +16,18 @@ Verdict: **READY**
 > authoritative 2026-10-13-era position, which this addendum brings
 > current. See also issue #19 for the audit trail.
 
+> **Scope notice (2026-10-27).** The Claude Code, Pi, Hermes and OpenClaw
+> adapters were retired on 2026-10-27; their directories are gone from
+> the tree. The cross-reference to the OpenClaw canary record below
+> therefore no longer resolves — that record was removed with its
+> adapter, and its content lives in the repository's history. The
+> gate-topology table further down describes the tree as of 2026-10-16
+> and is likewise a dated snapshot.
+
 Adversarial onboarding test run by an OpenCode agent against the local MPM
 installation (`~/.mpm` → `/home/v/workspace/projects/mpm`). Same prompt used for
-the OpenClaw canary earlier the same day (see
-`../openclaw-mpm-memory/VALIDATION-2026-08-19.md`).
+the OpenClaw canary earlier the same day (that canary's record was removed
+with the OpenClaw adapter on 2026-10-27; see the repository's history).
 
 ## Integration
 
@@ -219,6 +227,13 @@ records from before 2026-10-16 are not evidence of plugin loading.)
   `test_runtime_package_provisioning.py` (52).
 
 ### Test ownership — what each gate actually collects (NOT file totals)
+
+> **Dated snapshot (2026-10-16).** The table below records the gate
+> topology as it stood on that date. The Claude Code, Pi, Hermes and
+> OpenClaw adapters it names were retired on 2026-10-27, so
+> `AGENT_ADAPTERS` now lists `mpm-opencode` alone and `AGENT_ADAPTERS_JS`
+> is empty. The OpenCode row is the part that still describes the
+> current tree.
 
 File-level counts above (52, 32, 35, 21, 17-TS) are the populations
 inside each file; the gates own them differently. Pin this

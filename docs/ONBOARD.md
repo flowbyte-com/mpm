@@ -329,9 +329,8 @@ and does not invent its own.
 
 Declining an adapter, or having none applicable, is a **successful**
 onboarding outcome, reported under *deliberately skipped* — not a failure,
-and not something requiring remediation. `opt_in: true` adapters
-(`mpm-auto-mode-persona-openclaw`, `mpm-hermes`) are skipped by the existing
-gate and onboard honours that.
+and not something requiring remediation. Adapters that declare
+`opt_in: true` are skipped by the existing gate and onboard honours that.
 
 ### 6.7 Rollback gap that onboarding must not paper over
 
@@ -430,14 +429,19 @@ Models
       configure later:  mpm config
 
 Hosts
-  ✓ Claude Code     ~/.claude/CLAUDE.md          MPM section present
-  ○ OpenCode        not detected
-  ! Pi              ~/.pi/agent/AGENTS.md        installed, section drifted
+  ! OpenCode        ~/.config/opencode/AGENTS.md installed, section drifted
       remedy:       make refresh-installed
 
 Attention
-  ! Pi managed section has drifted from the source of truth
+  ! OpenCode managed section has drifted from the source of truth
 ```
+
+The example shows the drifted case, because it is the one that produces
+a row in both sections. The other two states render as a single host
+row: a host whose managed section is present and current is `✓`, and a
+host MPM has not been wired into is `○` with a `skipped:` line naming
+it. The report renders one row per host — OpenCode is the only supported
+host in this release.
 
 `--json` mirrors this with `success`, `models`, `hosts`, `attention`,
 `skipped` keys, reusing doctor's `{"success": true, ...}` convention and
