@@ -32,7 +32,8 @@ import (
 // through this method, so neither surface can bypass validation.
 //
 // Returns the same map the previous callAddEvidence returned:
-//   {"success": true, "confidence": <float>}
+//
+//	{"success": true, "confidence": <float>}
 //
 // Required fields: artifact_id, type, source_group, created_by.
 func (dm *DatabaseManager) AddEvidence(in EvidenceInput) (map[string]interface{}, error) {
@@ -65,7 +66,7 @@ func (dm *DatabaseManager) AddEvidence(in EvidenceInput) (map[string]interface{}
 		in.IndependenceFactor = 1.0
 	}
 
-	if err := AddEvidence(dm, in); err != nil {
+	if _, err := AddEvidenceWithOutcome(dm, in); err != nil {
 		return nil, err
 	}
 

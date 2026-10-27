@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/flowbyte-com/mpm-core"
@@ -128,7 +129,11 @@ func TestCallQueryConfidenceChanges_ReturnsDeltas(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, mem)
 
-	// Add evidence twice to produce two history rows with deltas.
+	// Add two DISTINCT observations to produce two history rows with
+	// deltas. The two must be different observations, not two deliveries of
+	// one: an evidence row carries the identity of the observation it
+	// records (internal/core/evidence_identity.go), so a repeated delivery
+	// is a replay and moves nothing.
 	for i := 0; i < 2; i++ {
 		_, err = runHandler(dm, "mpm_evidence", map[string]interface{}{
 			"action": "add",
@@ -139,6 +144,7 @@ func TestCallQueryConfidenceChanges_ReturnsDeltas(t *testing.T) {
 				"source_group":  "test",
 				"strength":      0.4,
 				"created_by":    "test",
+				"notes":         fmt.Sprintf("observation %d", i+1),
 			},
 		})
 		require.NoError(t, err)
