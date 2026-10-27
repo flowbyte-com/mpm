@@ -21,6 +21,7 @@
 | G | Tool-surface evaluation baseline | [`tool-surface-baseline.md`](tool-surface-baseline.md) | Baseline complete; measurement assigned to Session C |
 | H | Foundation readiness report | this file | Complete |
 | I | **Parallel launch gate and B/C handoff** | [`launch-gate.md`](launch-gate.md) | **Complete — launch conditions met** |
+| J | Legacy agent adapter removal — dependency matrix and proposed change set | [`opencode-only-legacy-adapter-removal.md`](opencode-only-legacy-adapter-removal.md) | **PROPOSAL by Session C — awaiting Session A's approval. Nothing applied.** |
 
 ---
 
