@@ -429,6 +429,94 @@ func (dm *DatabaseManager) provenanceWithParent(parentArtifactID string) *Effect
 	return r.Resolve("", "", parentArtifactID, "")
 }
 
+// provenanceForWrite resolves the provenance for ONE artifact write.
+//
+// It is the single bridge from a tool invocation to the provenance row
+// that describes the artifact the invocation produced. Precedence:
+//
+//  1. an explicit per-call override (WithProvenanceOverride) — the
+//     cascade materializer's parent_artifact_id thread. The override is
+//     the caller's deliberate statement about causality and wins over
+//     everything the context could say;
+//  2. the caller's ActiveContext identity — the invocation correlation
+//     the dispatcher minted for this tool call;
+//  3. the process-wide resolver base — what the environment knows.
+//
+// D6: the resolver base NEVER carries an invocation id (Resolve is asked
+// for "" and returns ""), so step 3 always writes invocation_id NULL.
+// That is the honest record for a write whose caller had no invocation
+// identity: the artifact exists, and no invocation is known to have
+// produced it. Nothing in this function manufactures an id — a
+// synthesized id joins to nothing and reads as attribution.
+//
+// The precedence matters for one more reason. The alternative — a
+// DatabaseManager-level overlay set by the save path — is shared mutable
+// state: two concurrent MCP dispatches in one process would race, and the
+// loser would stamp its artifact with the winner's invocation id. An
+// explicit per-call argument cannot be conflated that way.
+func (dm *DatabaseManager) provenanceForWrite(ac ActiveContext) *EffectiveProvenance {
+	if dm.perCallProvenanceOverride != nil {
+		return dm.perCallProvenanceOverride
+	}
+	if ac.hasProvenanceIdentity() {
+		return dm.provenanceFromContext(ac)
+	}
+	return dm.getEffectiveProvenance()
+}
+
+// refreshArtifactProvenance rewrites the identity columns of an artifact's
+// provenance row, creating the row when it does not exist yet.
+//
+// It exists for artifacts whose identity is STABLE across rewrites:
+//
+//   - the session handoff, which is UPSERTed on session_id and keeps its id;
+//   - a skill version, whose id is deterministic and whose content is
+//     replaced in place by a force-overwrite.
+//
+// For those artifacts a second write lands on the SAME artifact_id, so a
+// plain provenance INSERT would fail the UNIQUE (artifact_id, artifact_type)
+// constraint and leave the row describing the FIRST writer while the
+// artifact's content belongs to the LATEST one. That is false attribution:
+// the row would name an invocation that did not produce what is there now.
+//
+// The refresh is best-effort and non-fatal. It opens its own short-lived
+// transaction — it is called after the artifact's own write has committed —
+// and logs failures rather than propagating them.
+func (dm *DatabaseManager) refreshArtifactProvenance(artifactID, artifactType string, ac ActiveContext) {
+	if artifactID == "" {
+		return
+	}
+	prov := dm.provenanceForWrite(ac)
+	if prov == nil {
+		return
+	}
+	tx, err := dm.db.Begin()
+	if err != nil {
+		dm.LogAudit(AuditWarn, "provenance", "refresh begin failed", "", AuditContext{
+			"artifact_id": artifactID,
+			"reason":      err.Error(),
+		})
+		return
+	}
+	res := dm.RecordArtifactProvenanceUpsert(tx, artifactID, artifactType, prov, true)
+	if !res.Recorded {
+		tx.Rollback()
+		dm.LogAudit(AuditWarn, "provenance", "refresh record failed", "", AuditContext{
+			"artifact_id":   artifactID,
+			"artifact_type": artifactType,
+			"reason":        res.ValidationReason,
+			"sql_error":     res.SQLError,
+		})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		dm.LogAudit(AuditWarn, "provenance", "refresh commit failed", "", AuditContext{
+			"artifact_id": artifactID,
+			"reason":      err.Error(),
+		})
+	}
+}
+
 // provenanceWithParentInvocation returns an effective provenance with
 // parent_invocation_id set to the spawning invocation's ID. Used by
 // agents that spawn sub-invocations (Hermes → Claude Code → memory)
@@ -4060,6 +4148,23 @@ func (dm *DatabaseManager) SaveMemoryNodeForInvocation(collection, content, sess
 	return saveMemoryRow(dm, dm, id, collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, referenceID, retrievalPriority, importance, createdAt, ac, expiresAt...)
 }
 
+// SaveMemoryNodeWithInvocation is the TRANSACTION-AWARE, identity-carrying
+// form of SaveMemoryNode.
+//
+// SaveMemoryNode runs inside a caller's transaction (it takes a DBNode) but
+// deliberately passes an empty ActiveContext, so its artifact_provenance row
+// carries no invocation identity. SaveMemoryNodeForInvocation carries the
+// identity but is not transaction-aware. The recording paths that need BOTH —
+// a decision, a theory proposal, a changelog entry, a promoted scratchpad —
+// all write the memory inside a WithTx block, so they need this third form.
+//
+// D6: this is the method that makes an artifact's provenance row join to the
+// tool_invocations row of the invocation that produced it.
+func (dm *DatabaseManager) SaveMemoryNodeWithInvocation(node DBNode, collection, content, sessionID string, tags []string, metadata map[string]interface{}, embedding []float32, isLongTerm bool, weight float64, referenceID, retrievalPriority, importance, createdAt string, ac ActiveContext, expiresAt ...time.Time) (string, error) {
+	id := GenerateID()
+	return saveMemoryRow(node, dm, id, collection, content, sessionID, tags, metadata, embedding, isLongTerm, weight, referenceID, retrievalPriority, importance, createdAt, ac, expiresAt...)
+}
+
 // saveMemoryRow is the shared INSERT primitive that backs both
 // SaveMemoryNode (which generates a random id) and SaveSkill (which
 // uses a deterministic skill:<name>-v<version> id). Routing both
@@ -4237,7 +4342,12 @@ func saveMemoryRow(node DBNode, dm *DatabaseManager, id, collection, content, se
 	// we reuse the caller's tx so both the artifact and provenance INSERTs
 	// commit atomically together.
 	artifactType := artifactTypeFromCollection(collection)
-	if prov := dm.getEffectiveProvenance(); prov != nil {
+	// D6: the provenance for this write comes from the CALLER's context
+	// when the caller has one, so the row carries the invocation that
+	// produced this artifact. Previously this read the resolver base
+	// only, which never carries an invocation id — every memory written
+	// outside the one bridged save path lost its invocation identity.
+	if prov := dm.provenanceForWrite(ac); prov != nil {
 		var tx *sql.Tx
 		var err error
 		if existing := nodeUnwrapTx(node); existing != nil {
@@ -5363,7 +5473,15 @@ func (dm *DatabaseManager) GetActiveDirectiveIDs(framework string) []string {
 }
 
 // AddLesson adds a new lesson, checking for duplicates by content hash
-func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags []string, sourceSessionID string) (*Lesson, error) {
+//
+// The optional ac carries the invocation identity of the call that produced
+// the lesson, so the lesson's artifact_provenance row joins to the
+// tool_invocations row of that invocation.
+//
+// D6: without it the lesson's provenance row was written with
+// invocation_id NULL, because the resolver base never carries an invocation
+// id — so a lesson looked attributable and was not.
+func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags []string, sourceSessionID string, ac ...ActiveContext) (*Lesson, error) {
 	if err := ValidateLessonType(string(lessonType)); err != nil {
 		return nil, err
 	}
@@ -5437,7 +5555,7 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 	// scoped to just the provenance INSERT. For in-tx writes (via WithTx),
 	// we reuse the caller's tx so both the artifact and provenance INSERTs
 	// commit atomically together.
-	if prov := dm.getEffectiveProvenance(); prov != nil {
+	if prov := dm.provenanceForWrite(firstActiveContext(ac)); prov != nil {
 		var tx *sql.Tx
 		var err error
 		if existing := nodeUnwrapTx(dm); existing != nil {
@@ -6388,44 +6506,56 @@ type WorkFrameworkModel struct {
 //  2. artifact_provenance — the artifact-level record (provider/model),
 //     matched via the work's own artifact row so the create event is
 //     covered even when tool_invocations rows have aged out.
+//
+// D6: the artifact-level fallback is ALSO published under the EMPTY
+// invocation id. A work event with no invocation id — a direct DM caller,
+// or any write whose invocation identity is unknown — still belongs to the
+// work, and the work's own provenance row is the authoritative description
+// of it. Before D6 that event carried a FABRICATED invocation id, so it
+// matched the per-invocation fallback by accident; with the fabrication
+// removed, the fallback has to be reachable honestly.
+//
+// The empty key is safe for the map's only production consumer (the work
+// history handler), which looks up by the event's own invocation id.
 func (dm *DatabaseManager) ResolveFrameworkModelForInvocations(workID string, invocationIDs []string) map[string]WorkFrameworkModel {
-	out := make(map[string]WorkFrameworkModel, len(invocationIDs))
-	if len(invocationIDs) == 0 {
-		return out
-	}
-	placeholders := strings.Repeat("?,", len(invocationIDs))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]interface{}, 0, len(invocationIDs)+1)
-	for _, id := range invocationIDs {
-		args = append(args, id)
-	}
-
-	rows, err := dm.db.Query(`
-		SELECT invocation_id, COALESCE(framework_name,''), ''
-		FROM tool_invocations WHERE invocation_id IN (`+placeholders+`)
-	`, args...)
-	if err == nil {
-		for rows.Next() {
-			var invID, fw, model string
-			if err := rows.Scan(&invID, &fw, &model); err == nil {
-				out[invID] = WorkFrameworkModel{FrameworkName: fw, Model: model}
-			}
-		}
-		rows.Close()
-	} else {
-		slog.Warn("ResolveFrameworkModelForInvocations: tool_invocations probe failed", "error", err.Error())
-	}
+	out := make(map[string]WorkFrameworkModel, len(invocationIDs)+1)
 
 	// Artifact-level fallback: fills model (and framework if absent) from
 	// the work's own provenance row. Also seeds entries for invocation ids
 	// that had no tool_invocations row (direct DM callers never write that
 	// table — it belongs to the CLI/MCP dispatchers).
 	var apFW, apModel string
-	err = dm.db.QueryRow(`
+	apErr := dm.db.QueryRow(`
 		SELECT COALESCE(framework_name,''), COALESCE(model_name,'')
 		FROM artifact_provenance WHERE artifact_id = ? AND artifact_type = 'work'
 	`, workID).Scan(&apFW, &apModel)
-	if err == nil && (apFW != "" || apModel != "") {
+
+	if len(invocationIDs) > 0 {
+		placeholders := strings.Repeat("?,", len(invocationIDs))
+		placeholders = placeholders[:len(placeholders)-1]
+		args := make([]interface{}, 0, len(invocationIDs)+1)
+		for _, id := range invocationIDs {
+			args = append(args, id)
+		}
+
+		rows, err := dm.db.Query(`
+			SELECT invocation_id, COALESCE(framework_name,''), ''
+			FROM tool_invocations WHERE invocation_id IN (`+placeholders+`)
+		`, args...)
+		if err == nil {
+			for rows.Next() {
+				var invID, fw, model string
+				if err := rows.Scan(&invID, &fw, &model); err == nil {
+					out[invID] = WorkFrameworkModel{FrameworkName: fw, Model: model}
+				}
+			}
+			rows.Close()
+		} else {
+			slog.Warn("ResolveFrameworkModelForInvocations: tool_invocations probe failed", "error", err.Error())
+		}
+	}
+
+	if apErr == nil && (apFW != "" || apModel != "") {
 		for _, invID := range invocationIDs {
 			fm, ok := out[invID]
 			if !ok {
@@ -6438,6 +6568,10 @@ func (dm *DatabaseManager) ResolveFrameworkModelForInvocations(workID string, in
 				fm.Model = apModel
 			}
 			out[invID] = fm
+		}
+		// The work-level fallback for events with no invocation id.
+		if fm, ok := out[""]; !ok || (fm.FrameworkName == "" && fm.Model == "") {
+			out[""] = WorkFrameworkModel{FrameworkName: apFW, Model: apModel}
 		}
 	}
 	return out
@@ -6685,10 +6819,17 @@ func (dm *DatabaseManager) provenanceFromContext(ac ActiveContext) *EffectivePro
 		// Explicit framework from ActiveContext (e.g., MPM_FRAMEWORK=claude-code or mcp) wins
 		base.FrameworkName = ac.FrameworkName
 	}
+	// Invocation identity is NEVER synthesized here. The resolver was
+	// asked for ac.InvocationID and returned exactly that; when the
+	// caller had none, the honest answer is none.
+	//
+	// D6: this branch used to mint `GenerateID()` when ac.InvocationID
+	// was empty, which wrote a plausible-looking but unjoinable id into
+	// artifact_provenance.invocation_id — an id that matched no row in
+	// tool_invocations, so the provenance looked complete and the join
+	// silently failed. A missing invocation id must stay missing.
 	if ac.InvocationID != "" {
 		base.InvocationID = ac.InvocationID
-	} else if base.InvocationID == "" {
-		base.InvocationID = GenerateID()
 	}
 	if ac.ParentInvocationID != "" {
 		base.ParentInvocationID = ac.ParentInvocationID
@@ -8011,11 +8152,16 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 		parentInvocationID = ep.ParentInvocationID
 	}
 	if invocationID == "" {
-		// Fall back to resolver's invocation if available, else generate.
+		// Fall back to the resolver's invocation if it has one.
+		//
+		// D6: this branch used to mint GenerateID() when no invocation
+		// was known. work_events.invocation_id is NULLABLE, so the
+		// honest record is NULL. A minted id joins to no row in
+		// tool_invocations, so it reads as attribution while
+		// attributing nothing — the same defect as the fabrication in
+		// provenanceFromContext, on the sibling table.
 		if base := dm.getEffectiveProvenance(); base != nil && base.InvocationID != "" {
 			invocationID = base.InvocationID
-		} else {
-			invocationID = GenerateID()
 		}
 	}
 	if parentInvocationID == "" && ep != nil {

@@ -1051,26 +1051,29 @@ func TestP3MissedOpportunity_EndToEnd_RejectsAnUnresolvableCitation(t *testing.T
 	}
 }
 
-// ── the defect the hunt had to work around ───────────────────────────────
+// ── the defect the hunt had to work around (D6: now corrected) ──────────
 
-// TestP3ArtifactProvenance_InvocationIDIsPopulatedOnlyByTheMemorySavePath
-// pins the substrate defect that forced the hunt's two-signal design.
+// TestP3ArtifactProvenance_InvocationIDIsPopulatedOnEveryRecordingPath pins
+// the D6 correction.
 //
-// `artifact_provenance.invocation_id` is populated ONLY by the mpm_memory
-// save path, because the per-call provenance bridge that overlays the
-// ActiveContext's invocation id exists only there. Every other write path
-// — decisions, theories, lessons — resolves its provenance with an EMPTY
-// invocation id, so its artifact cannot be joined back to the call that
-// produced it.
+// BEFORE D6: `artifact_provenance.invocation_id` was populated ONLY by the
+// mpm_memory save path, because the per-call provenance bridge that
+// overlays the ActiveContext's invocation id existed only there. Every
+// other write path — decisions, theories, lessons — resolved its provenance
+// with an EMPTY invocation id, so its artifact could not be joined back to
+// the call that produced it. That is why the hunt needed two signals.
 //
-// THIS IS A CHARACTERIZATION OF CURRENT BEHAVIOUR, NOT A CONTRACT. If a
-// future change populates the invocation id on every write path, this test
-// FAILS and the hunt's second signal can be simplified.
+// NOW: every recording path that receives the dispatcher's ActiveContext
+// writes the invocation id into its artifact_provenance row, so the
+// artifact joins back to the tool_invocations row of the call that produced
+// it.
 //
-// It is pinned here rather than left implicit because the hunt's design
-// rests on it: without it, the join alone reports a session that recorded
-// eight decisions as one that recorded nothing.
-func TestP3ArtifactProvenance_InvocationIDIsPopulatedOnlyByTheMemorySavePath(t *testing.T) {
+// The hunt's recording-call signal is NOT removed by this. It still covers
+// the recording actions that write no artifact_provenance row at all —
+// mpm_references.add/import, mpm_topics.create, mpm_evidence.add — and the
+// join alone would still report those sessions as gaps. D6 repaired the
+// join; it did not weaken the vocabulary.
+func TestP3ArtifactProvenance_InvocationIDIsPopulatedOnEveryRecordingPath(t *testing.T) {
 	a, dm := p3RealAudit(t)
 
 	ac := mpmcore.ActiveContext{
@@ -1078,30 +1081,88 @@ func TestP3ArtifactProvenance_InvocationIDIsPopulatedOnlyByTheMemorySavePath(t *
 		InvocationID: "inv_probe_1",
 	}
 
-	// The mpm_memory path: the per-call provenance bridge applies.
+	// A real invocation row for the join to land on.
+	if _, err := dm.SQLDB().Exec(`
+		INSERT INTO tool_invocations
+			(id, session_id, tool_name, action, invocation_id, actor_kind,
+			 framework_name, payload_hash, result_status, started_at)
+		VALUES ('ti-probe', 'mpm-sess-real', 'mpm_decisions', 'record',
+		        'inv_probe_1', 'agent', 'opencode', 'sha256:probe', 'success', 1)`); err != nil {
+		t.Fatalf("seed tool_invocations: %v", err)
+	}
+
+	// The mpm_memory path.
 	if _, err := dm.SaveMemoryNodeForInvocation(
 		"memories", "a memory", "", []string{"p3"}, nil, nil, false, 1.0, "",
 		"0.8", "0.8", "", ac); err != nil {
 		t.Fatalf("SaveMemoryNodeForInvocation: %v", err)
 	}
 
-	// The decision path: no bridge.
+	// The decision path.
 	dec, err := dm.RecordDecision("ctx", "choice", "why", "out", []string{"p3"}, nil, ac)
 	if err != nil {
 		t.Fatalf("RecordDecision: %v", err)
 	}
 	decID, _ := dec["id"].(string)
 
-	var inv string
-	if err := dm.SQLDB().QueryRow(
-		`SELECT coalesce(invocation_id,'') FROM artifact_provenance WHERE artifact_id = ?`,
-		decID).Scan(&inv); err != nil {
-		t.Fatalf("read the decision's provenance: %v", err)
+	// The lesson path.
+	_, lesson, err := dm.SaveLesson("a lesson", "insight", []string{"p3"}, ac)
+	if err != nil {
+		t.Fatalf("SaveLesson: %v", err)
 	}
-	if inv != "" {
-		t.Errorf("expected the decision's artifact_provenance.invocation_id to be "+
-			"EMPTY (the defect this hunt works around), got %q — if this now "+
-			"populates, the hunt's recording-call signal can be simplified", inv)
+
+	// The theory path.
+	theory, err := dm.ProposeTheory("a hypothesis", "some criteria", nil, nil, []string{"p3"}, ac)
+	if err != nil {
+		t.Fatalf("ProposeTheory: %v", err)
+	}
+	theoryID, _ := theory["id"].(string)
+
+	// The handoff (continuity) path.
+	handoff, err := dm.EndSession("ses_probe", "a summary", "clean", nil, nil, ac)
+	if err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+
+	// Every one of them must carry the invocation id.
+	for _, tc := range []struct {
+		name         string
+		artifactID   string
+		artifactType string
+	}{
+		{"decision", decID, "decision"},
+		{"lesson", lesson.ID, "lesson"},
+		{"theory", theoryID, "theory"},
+		{"handoff", handoff.ID, "handoff"},
+	} {
+		if tc.artifactID == "" {
+			t.Fatalf("%s: no artifact id", tc.name)
+		}
+		var inv string
+		if err := dm.SQLDB().QueryRow(
+			`SELECT coalesce(invocation_id,'') FROM artifact_provenance
+			 WHERE artifact_id = ? AND artifact_type = ?`,
+			tc.artifactID, tc.artifactType).Scan(&inv); err != nil {
+			t.Fatalf("read the %s's provenance: %v", tc.name, err)
+		}
+		if inv != "inv_probe_1" {
+			t.Errorf("%s provenance invocation_id = %q, want %q — the artifact must "+
+				"join back to the invocation that produced it",
+				tc.name, inv, "inv_probe_1")
+		}
+	}
+
+	// And the join must land on the invocation row.
+	var joined int
+	if err := dm.SQLDB().QueryRow(`
+		SELECT COUNT(*)
+		FROM artifact_provenance ap
+		JOIN tool_invocations ti ON ti.invocation_id = ap.invocation_id
+		WHERE ap.invocation_id = 'inv_probe_1'`).Scan(&joined); err != nil {
+		t.Fatalf("join provenance to invocations: %v", err)
+	}
+	if joined < 4 {
+		t.Errorf("provenance→invocation join matched %d artifacts, want at least 4", joined)
 	}
 
 	// The hunt must still see the recording, which is why the signal

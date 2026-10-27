@@ -76,7 +76,7 @@ var fullSHARe = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 // On success the memory is tagged with #changelog (always) and
 // #commit:<full-hash> (always) plus any caller-supplied extra tags.
 // The #changelog tag is the synthesis engine's lookup key.
-func (dm *DatabaseManager) LogChangelogEntry(fact, commitHash string, extraTags []string) (string, error) {
+func (dm *DatabaseManager) LogChangelogEntry(fact, commitHash string, extraTags []string, ac ...ActiveContext) (string, error) {
 	if dm == nil || dm.db == nil {
 		return "", fmt.Errorf("LogChangelogEntry: database not initialized")
 	}
@@ -118,13 +118,18 @@ func (dm *DatabaseManager) LogChangelogEntry(fact, commitHash string, extraTags 
 	// makes debugging easier.
 	body := fmt.Sprintf("[commit: %s]\n\n%s", commitHash, fact)
 
+	// D6: the changelog entry is a durable record, so its provenance row
+	// must carry the invocation that wrote it. The caller's identity is
+	// overlaid on the marker context; the marker only fills a model name
+	// the caller did not supply.
+	acCtx := changelogProvenanceContext(ac)
 	out, _, err := dm.SaveMemoryWithContext(
 		body,
 		"changelog", // dedicated collection so synthesis queries can scope cheaply
 		tags,
-		1.0, // weight 1.0 — changelog memories are permanent, high-importance
-		"0", // TTL 0 — no expiry
-		ActiveContext{Model: "mpm_log_to_changelog"}, // provenance: this memory came from the changelog tool
+		1.0,   // weight 1.0 — changelog memories are permanent, high-importance
+		"0",   // TTL 0 — no expiry
+		acCtx, // provenance: this memory came from the changelog tool
 	)
 	if err != nil {
 		return "", fmt.Errorf("LogChangelogEntry: persist: %w", err)
@@ -213,6 +218,7 @@ func (dm *DatabaseManager) LogChangelogEntryWithAssertions(
 	extraTags []string,
 	confirmations []ConfirmationSpec,
 	contradictions []ContradictionSpec,
+	ac ...ActiveContext,
 ) (string, error) {
 	// Mirror LogChangelogEntry validation so the contract surface is
 	// identical for the no-assertions case.
@@ -277,14 +283,16 @@ func (dm *DatabaseManager) LogChangelogEntryWithAssertions(
 	body := fmt.Sprintf("[commit: %s]\n\n%s", commitHash, fact)
 
 	var memoryID string
+	acCtx := changelogProvenanceContext(ac)
 	err := dm.WithTx(func(node DBNode) error {
 		// 1. Write the changelog memory inside the tx so the scanner
 		// boundary + INSERT stay atomic with the assertion writes.
-		// SaveMemoryNode is the tx-aware primitive that runs the same
-		// security scanners as SaveMemoryWithContext (validation +
-		// isSensitiveContent + isPoisoned).
+		// SaveMemoryNodeWithInvocation is the tx-aware primitive that runs
+		// the same security scanners as SaveMemoryWithContext (validation +
+		// isSensitiveContent + isPoisoned) AND carries the caller's
+		// invocation identity into the provenance row (D6).
 		var err error
-		memoryID, err = dm.SaveMemoryNode(node, "changelog", body, "", tags, nil, nil, false, 1.0, "", "0.5", "0.5", "")
+		memoryID, err = dm.SaveMemoryNodeWithInvocation(node, "changelog", body, "", tags, nil, nil, false, 1.0, "", "0.5", "0.5", "", acCtx)
 		if err != nil {
 			return fmt.Errorf("write changelog memory: %w", err)
 		}
@@ -335,8 +343,28 @@ func (dm *DatabaseManager) LogChangelogEntryWithConfirmations(
 	fact, commitHash string,
 	extraTags []string,
 	confirmations []ConfirmationSpec,
+	ac ...ActiveContext,
 ) (string, error) {
-	return dm.LogChangelogEntryWithAssertions(fact, commitHash, extraTags, confirmations, nil)
+	return dm.LogChangelogEntryWithAssertions(fact, commitHash, extraTags, confirmations, nil, ac...)
+}
+
+// changelogProvenanceContext builds the provenance context for a changelog
+// write.
+//
+// The caller's ActiveContext (when supplied) carries the invocation identity
+// that produced the entry. The "mpm_log_to_changelog" model marker — the
+// historical provenance of this write — is applied only to a model name the
+// caller did not supply, so a real model name is never overwritten by a
+// marker and a caller with no model still gets the marker.
+//
+// D6: without the caller's context the changelog row's provenance carried no
+// invocation id, because the marker context names a model but no invocation.
+func changelogProvenanceContext(ac []ActiveContext) ActiveContext {
+	ctx := firstActiveContext(ac)
+	if ctx.Model == "" {
+		ctx.Model = "mpm_log_to_changelog"
+	}
+	return ctx
 }
 
 // writeContradictionInTx is the contradiction counterpart of

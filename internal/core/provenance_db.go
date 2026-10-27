@@ -62,6 +62,48 @@ func (dm *DatabaseManager) RecordArtifactProvenance(
 	prov *EffectiveProvenance,
 	skipAudit bool,
 ) ProvenanceRecordResult {
+	return dm.recordArtifactProvenance(tx, artifactID, artifactType, prov, skipAudit, false)
+}
+
+// RecordArtifactProvenanceUpsert records — or REFRESHES — the provenance row
+// for an artifact whose identity is stable across rewrites.
+//
+// The plain RecordArtifactProvenance INSERT fails on the UNIQUE
+// (artifact_id, artifact_type) constraint when the artifact has already been
+// recorded. For an artifact that is rewritten IN PLACE that failure is not a
+// nuisance: it is false attribution. The session handoff is UPSERTed on
+// session_id and KEEPS ITS ID, so a second handoff write for the same session
+// lands on the same artifact_id. A plain INSERT would leave the provenance row
+// describing the FIRST writer while the handoff's content belongs to the
+// LATEST writer.
+//
+// This variant therefore refreshes the identity columns of an existing row
+// and keeps the original created_at: the provenance row describes the
+// artifact as it stands now. The fact that it was rewritten is recorded by
+// the artifact's own history, not by a second provenance row.
+//
+// The `handoff` artifact type is in the canonical vocabulary already
+// (ProvenanceArtifactTypes), so this needs no schema change.
+func (dm *DatabaseManager) RecordArtifactProvenanceUpsert(
+	tx *sql.Tx,
+	artifactID, artifactType string,
+	prov *EffectiveProvenance,
+	skipAudit bool,
+) ProvenanceRecordResult {
+	return dm.recordArtifactProvenance(tx, artifactID, artifactType, prov, skipAudit, true)
+}
+
+// recordArtifactProvenance is the shared implementation of the two recording
+// shapes. refresh selects the conflict clause: plain INSERT (the default,
+// which fails loudly on a duplicate) or INSERT ... ON CONFLICT DO UPDATE
+// (which refreshes the identity columns of an existing row).
+func (dm *DatabaseManager) recordArtifactProvenance(
+	tx *sql.Tx,
+	artifactID, artifactType string,
+	prov *EffectiveProvenance,
+	skipAudit bool,
+	refresh bool,
+) ProvenanceRecordResult {
 	// Pre-tx validation. Rejections never touch the tx.
 	if reason := validateProvenance(prov); reason != "" {
 		if !skipAudit {
@@ -114,7 +156,7 @@ func (dm *DatabaseManager) RecordArtifactProvenance(
 		nilOrString(prov.ProviderMetadata),
 	}
 
-	_, err := tx.Exec(`INSERT INTO artifact_provenance (
+	insertSQL := `INSERT INTO artifact_provenance (
 		id, artifact_id, artifact_type, created_at,
 		actor_kind, actor_id,
 		framework_name, framework_version, framework_adapter,
@@ -125,9 +167,38 @@ func (dm *DatabaseManager) RecordArtifactProvenance(
 		session_id, invocation_id, parent_artifact_id,
 		parent_invocation_id,
 		provider_metadata
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		args...,
-	)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	if refresh {
+		// The refresh clause updates the identity columns of an existing
+		// row for the same (artifact_id, artifact_type). id and created_at
+		// are deliberately NOT updated: the row's original write time is
+		// part of its history.
+		insertSQL += `
+		ON CONFLICT(artifact_id, artifact_type) DO UPDATE SET
+			actor_kind           = excluded.actor_kind,
+			actor_id             = excluded.actor_id,
+			framework_name       = excluded.framework_name,
+			framework_version    = excluded.framework_version,
+			framework_adapter    = excluded.framework_adapter,
+			provider_name        = excluded.provider_name,
+			model_name           = excluded.model_name,
+			model_revision       = excluded.model_revision,
+			api_endpoint         = excluded.api_endpoint,
+			temperature          = excluded.temperature,
+			max_tokens           = excluded.max_tokens,
+			reasoning_mode       = excluded.reasoning_mode,
+			reasoning_effort     = excluded.reasoning_effort,
+			thinking_level       = excluded.thinking_level,
+			thinking_tokens      = excluded.thinking_tokens,
+			thinking_visible     = excluded.thinking_visible,
+			session_id           = excluded.session_id,
+			invocation_id        = excluded.invocation_id,
+			parent_artifact_id   = excluded.parent_artifact_id,
+			parent_invocation_id = excluded.parent_invocation_id,
+			provider_metadata    = excluded.provider_metadata`
+	}
+
+	_, err := tx.Exec(insertSQL, args...)
 	if err != nil {
 		// Rollback the SAVEPOINT only — the artifact tx is preserved.
 		tx.Exec("ROLLBACK TO SAVEPOINT prov_rec")

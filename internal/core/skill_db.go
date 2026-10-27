@@ -474,6 +474,22 @@ func (dm *DatabaseManager) ListSkills(scope string) ([]SkillSummary, error) {
 // schema that lands in saveMemoryRow will automatically reach skills
 // without re-deriving a parallel writer.
 func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string, force bool) (string, error) {
+	return dm.SaveSkillWithInvocation(name, version, content, authorAgent, force, ActiveContext{})
+}
+
+// SaveSkillWithInvocation is the identity-carrying sibling of SaveSkill.
+//
+// D6: the skill's artifact_provenance row must carry the invocation that
+// saved it. SaveSkill itself passes an empty ActiveContext, so its row
+// records invocation_id NULL — which is honest for the background/CLI
+// callers that have no invocation, but wrong for a tool call that does.
+//
+// The separate method (rather than a variadic trailing argument) exists
+// because internal/core/seed declares an interface with SaveSkill's exact
+// signature, and the seed package cannot import internal/core — it would be
+// an import cycle. The same shape as SaveMemoryNode /
+// SaveMemoryNodeForInvocation.
+func (dm *DatabaseManager) SaveSkillWithInvocation(name, version, content, authorAgent string, force bool, ac ActiveContext) (string, error) {
 	// Parse frontmatter first so a malformed content string never reaches
 	// the DB layer. The contract here is that any rejected frontmatter
 	// is a 400, not a write-conflict.
@@ -615,6 +631,12 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 		if err != nil {
 			return "", fmt.Errorf("update skill: %w", err)
 		}
+		// D6: a force-overwrite replaces the skill's CONTENT in place.
+		// The skill's artifact_provenance row was written when the skill
+		// was first saved, so it still names the invocation that wrote
+		// the OLD content — stale attribution. Refresh it so the row
+		// describes the skill as it stands now.
+		dm.refreshArtifactProvenance(id, artifactTypeFromCollection("skills"), ac)
 		return id, nil
 	}
 
@@ -705,7 +727,7 @@ func (dm *DatabaseManager) SaveSkill(name, version, content, authorAgent string,
 	// above. Skills don't carry embeddings, so IVF assignment is a
 	// no-op here.
 	txDBNode := &txNode{tx: tx, dm: dm}
-	_, err = saveMemoryRow(txDBNode, dm, id, "skills", content, "", tags, metadata, nil, true, 5, "", "", "", "", ActiveContext{})
+	_, err = saveMemoryRow(txDBNode, dm, id, "skills", content, "", tags, metadata, nil, true, 5, "", "", "", "", ac)
 	if err != nil {
 		return "", fmt.Errorf("insert skill: %w", err)
 	}

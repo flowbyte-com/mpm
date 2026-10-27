@@ -80,13 +80,13 @@ const (
 // row to the audit ledger on real error. If the DB is nil or the upsert
 // fails, returns an error — but never panics. Callers should treat
 // EndSession as best-effort: log the error, move on.
-func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, commitments, openQuestions []string) (*Handoff, error) {
+func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, commitments, openQuestions []string, ac ...ActiveContext) (*Handoff, error) {
 	// Stage 2C: forward to the canonical three-ID variant. legacy
 	// session_id routes into the session_id column; frameworkSessionID
 	// is empty; explicitMPMSessionID is empty (so AcquireMPMSessionID
 	// allocates the canonical MPM-owned session identity at this
 	// interaction boundary).
-	return dm.EndSessionV2(sessionID, "", "", summary, endedState, commitments, openQuestions)
+	return dm.EndSessionV2(sessionID, "", "", summary, endedState, commitments, openQuestions, ac...)
 }
 
 // EndSessionV2 is the canonical three-ID variant of EndSession.
@@ -104,7 +104,7 @@ func (dm *DatabaseManager) EndSession(sessionID, summary, endedState string, com
 // legacy session_id column when non-empty (back-compat); plain
 // INSERT otherwise. mpm_session_id is NEVER unique, so multiple
 // handoffs from the same lifecycle all share the same value.
-func (dm *DatabaseManager) EndSessionV2(sessionID, frameworkSessionID, explicitMPMSessionID, summary, endedState string, commitments, openQuestions []string) (*Handoff, error) {
+func (dm *DatabaseManager) EndSessionV2(sessionID, frameworkSessionID, explicitMPMSessionID, summary, endedState string, commitments, openQuestions []string, ac ...ActiveContext) (*Handoff, error) {
 	if dm == nil || dm.db == nil {
 		return nil, fmt.Errorf("EndSessionV2: db not initialized")
 	}
@@ -209,17 +209,35 @@ func (dm *DatabaseManager) EndSessionV2(sessionID, frameworkSessionID, explicitM
 	// Read-back assertion (Defense Triad #3). Returns the canonical id
 	// (the one that survived the upsert, or the freshly generated id on
 	// the no-session-id path).
+	var persisted *Handoff
 	if sessionID != "" {
-		persisted, err := dm.GetHandoffBySessionID(sessionID)
+		persisted, err = dm.GetHandoffBySessionID(sessionID)
 		if err != nil {
 			return nil, fmt.Errorf("EndSessionV2: read back: %w", err)
 		}
-		return persisted, nil
+	} else {
+		persisted, err = dm.GetHandoffByID(newID)
+		if err != nil {
+			return nil, fmt.Errorf("EndSessionV2: read back by id: %w", err)
+		}
 	}
-	persisted, err := dm.GetHandoffByID(newID)
-	if err != nil {
-		return nil, fmt.Errorf("EndSessionV2: read back by id: %w", err)
-	}
+
+	// D6: a handoff is a durable continuity record, so its provenance row
+	// must carry the invocation that wrote it. Before this, the handoff
+	// wrote NO artifact_provenance row at all — the continuity-writing
+	// action was invisible to the invocation join.
+	//
+	// The row is REFRESHED rather than inserted: the handoff is UPSERTed
+	// on session_id and keeps its id, so a second write for the same
+	// session lands on the same artifact_id. Refreshing keeps the row
+	// describing the content as it stands NOW (the latest writer). A
+	// plain insert would fail the UNIQUE constraint and leave the row
+	// describing the FIRST writer — false attribution.
+	//
+	// Provenance failures are non-fatal: the handoff itself is already
+	// persisted, and the handoff is the durable record.
+	dm.refreshArtifactProvenance(persisted.ID, "handoff", firstActiveContext(ac))
+
 	return persisted, nil
 }
 
