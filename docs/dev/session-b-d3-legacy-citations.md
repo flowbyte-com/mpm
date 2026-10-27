@@ -1,9 +1,12 @@
 # Session B — D3: the legacy citation path must record what it actually cites
 
-**Branch:** `feat/session-b-d3-legacy-citations` (from `origin/main` = `3abfdda`)
+**Branch:** `feat/session-b-d3-legacy-citations` (from `origin/main` = `3abfdda`) — **MERGED**
+as `434e47e` (PR #141).
 **Status:** D3 **split**. **D3-b is CLOSED** by a backward-compatible correction: a legacy
-citation now records the type of the artifact it actually cites. **D3-a remains OPEN** and
-needs Session A's compatibility ruling — the evidence and the retirement proposal are in §6.
+citation now records the type of the artifact it actually cites. **D3-a remains OPEN as a
+documented limitation**, and **Session A has ruled** on the retirement proposal of §6:
+**step 1 approved** (it cannot reject anything accepted today), **step 2 approved in
+principle** as its own shared-interface PR, **step 3 deferred** behind a deprecation period.
 **Scope:** the legacy citation path's type resolution. No schema change, no migration, no
 registry change, no new tool, no rejection of anything that was accepted before. D1, D4,
 D5, D6, D7 and the P2b scheduler gate are untouched; interactions are reported in §8.
@@ -333,7 +336,22 @@ explicit compatibility decision."* Rejecting in the legacy path tightens it for 
 caller of `mpm_theories propose` and `mpm_decisions record` at once — a public-tool
 behaviour change that turns today's successes into errors. That is Session A's call.
 
-### 6.3 The retirement proposal — for Session A's ruling
+### 6.3 The retirement proposal — and Session A's ruling
+
+> **RULED.** Session A's ledger (`docs/dev/session-b-m5-trust-regression.md`, PR #144,
+> `ef7a535`) records the ruling on this proposal:
+>
+> * **Step 1 — APPROVED.** *"it cannot reject anything accepted today"*.
+> * **Step 2 — APPROVED IN PRINCIPLE**, as its own shared-interface PR.
+> * **Step 3 — DEFERRED** behind a deprecation period.
+>
+> D3-a itself is recorded as **OPEN, accepted as a documented limitation** — so the
+> `m5contract` assertion stays red, deliberately, until step 3 lands.
+>
+> **Session B has not implemented step 1.** The sprint's brief was to stop after its
+> assigned deliverables and to leave the remaining decisions and their implementation to
+> Session A; step 1 changes a public tool's semantics, and step 2 is explicitly to be its
+> own shared-interface PR. It is offered below as a ready-made, narrowly scoped change.
 
 Three steps, in order of increasing commitment. **Step 1 is recommended.**
 
@@ -375,6 +393,53 @@ This is the change that turns today's successes into errors, so it needs the sun
    naming the typed parameter — for one release.
 2. The legacy path rejects an id that resolves to nothing.
 3. The legacy path is removed; `source_type` becomes required.
+
+**What step 1 would be, concretely** — for whoever implements it, so the shape is settled
+and the implementation is a matter of care rather than of design.
+
+The place to change it is `internal/core/epistemology_tools.go`, `proposeTheory` — the
+single point where the citation list is built. Today:
+
+```go
+// LEGACY: exactly the historical behaviour.
+if c.Type == "" {
+    if err := dm.recordProvenanceNode(node, c.ID, "", downstreamID, downstreamType, downstreamID, ""); err != nil {
+        return err
+    }
+    continue
+}
+```
+
+Step 1 is: when `c.Type == ""` **and** `c.ID` resolves unambiguously to exactly one
+canonical type, fill `c.Type` in with that resolved type and fall through to the typed
+branch. When it does **not** resolve, leave `c.Type` empty and take the legacy branch
+unchanged — that is the property that makes step 1 a non-tightening.
+
+Three properties the implementation must preserve, each of which is already pinned by a
+test in this repository:
+
+| Property | Pinned by |
+|---|---|
+| an id that resolves to nothing is still accepted, and still recorded as `"memory"` | `TestD3_LegacyCitationOfAnUnresolvableIdIsStillAccepted` (this PR) and `TestP2Citation_LegacyPathIsUnchanged` |
+| the two paths never disagree about what an id IS | `TestD3_LegacyAndTypedPathsAgreeOnTheType` (this PR) |
+| the typed path still records the declared type verbatim and still rejects an unresolvable citation atomically | `TestD3_TypedPathIsUnchanged` (this PR) and the existing P2 suite |
+
+**The one subtlety worth naming:** filling `c.Type` in moves the citation from the legacy
+branch to the typed branch, and the typed branch uses the **cited id** as the provenance
+`event_id` where the legacy branch uses the **downstream** id. That is a real change in
+what lands in `epistemic_provenance` for a caller that omits `source_type` — a *better*
+record (the event id is the thing that was actually cited), but a different one. Two
+consequences to decide deliberately:
+
+* the `epistemic_provenance` unique key is `(source_id, downstream_id, event_id)` — a
+  legacy citation and a typed citation of the same id by the same downstream are
+  therefore **distinct rows** today. If step 1 moves a caller's citation onto the typed
+  branch, a caller that previously wrote a legacy row and now writes a typed row for the
+  same pair would leave **two** rows rather than one. Whether that is acceptable (and
+  whether the unique key needs widening) is part of step 1's design, not an afterthought.
+* the legacy branch's `event_id` overloading is what the amended P2 tests now assert as
+  the legacy path's fingerprint (§5.2). Those assertions must keep describing the legacy
+  path — they must not be updated to accommodate a default that is no longer legacy.
 
 ### 6.4 What the correction in this PR already buys
 
@@ -469,7 +534,7 @@ gone from three failures to two, and no test was weakened, inverted or deleted.
 |---|---|
 | Branch | `feat/session-b-d3-legacy-citations` |
 | Base | `origin/main` = `3abfdda` |
-| PR | **#141** |
+| PR | **#141** — **MERGED** into `main` as `434e47e` |
 | Commits | `0643b22` — *fix(core): a legacy citation must record the type of what it cites (D3)*<br>`2495ed8` — *docs(dev): the D3 report*<br>`e826290` — *test(m5): the legacy path's fingerprint is its event_id, not its mislabel* |
 
 Files changed:
