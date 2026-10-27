@@ -100,6 +100,8 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
+	mpminternal "github.com/flowbyte-com/mpm-core"
+
 	core "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/mpmcli"
 )
@@ -531,6 +533,19 @@ func (s *Scheduler) dispatchTickHandlers(ctx context.Context) {
 // trace that proves a handler ran end-to-end — the entry log alone doesn't
 // distinguish a fast success from a hung handler killed by ctx.
 func (s *Scheduler) executeOne(ctx context.Context, w Wake) error {
+	// DISPATCH GATE. A wake whose kind is blocked must not be executed,
+	// however it got persisted. The producer-side gate (ScheduleWake in
+	// the core module) covers wakes armed from now on; this covers the
+	// ones that already exist - created before the gate, by an older
+	// binary, or by direct SQL.
+	//
+	// The refusal is an ERROR on purpose: the caller marks the wake
+	// fired with this reason in `last_error`, so the wake is recorded as
+	// processed-and-refused (it does NOT retry forever) and the refusal
+	// is observable rather than silent.
+	if mpminternal.WakeKindBlocked(w.Kind()) {
+		return mpminternal.BlockedWakeKindError(w.Kind())
+	}
 	s.mu.RLock()
 	h, ok := s.handlers[w.Kind()]
 	s.mu.RUnlock()
