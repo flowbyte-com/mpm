@@ -14,6 +14,12 @@ scheduler configuration or the installed runtime.
 > `a4e3da9`). `main` also carries PR #137 (the legacy host adapter retirement), PR #138
 > (the telemetry hunt read-only), PR #132 (D6), PR #135 (D7) and PR #143.
 >
+> **Session A then ruled on every decision in §6** — PR #144 (`ef7a535`), the restated
+> trust-blocker ledger. D3-a is accepted as a documented limitation with the retirement
+> proposal ruled step by step; the P2b gate **stays closed**; F2 and D2-core are both named
+> in the ledger; and the `mpm-telemetry observe` sibling is tracked as **#139**. Each ruling
+> is recorded against its row in §6 below.
+>
 > The §4 findings are updated for #138, and §4.5 records the one sibling it left behind.
 > **§2.2 records the verification of the merged tree** — `origin/main` + PR #140, merged
 > in a scratch worktree and swept — which is the state A released.
@@ -24,12 +30,15 @@ scheduler configuration or the installed runtime.
 
 **Nothing found blocks the OpenCode-only release.** The three defects that would have
 blocked it — D1, D5 and the critic's automatic trust behaviour — are closed, and the
-**P2b gate that keeps the automatic scheduled critic OFF can now be lifted** because its
-stated removal condition is met. Four residuals remain, none of which corrupts an
-artifact: **D3-a** (the legacy citation path still accepts an unresolvable id),
-**D4** (an incidental tag difference still splits a proposal), **F2** (concurrent proposals
-are lost to `SQLITE_BUSY`), and **D2-core** (the lesson surface has no pending state, so any
-writer to it publishes trusted knowledge directly). Each is classified in §5.
+**P2b gate that keeps the automatic scheduled critic OFF** has been **left closed by
+Session A's ruling** (PR #144) — this assessment had argued its stated removal condition
+is met, and A chose to keep it shut on the strength of F2 and D2-core. Four residuals
+remain, none of which corrupts an artifact: **D3-a** (the legacy citation path still
+accepts an unresolvable id — accepted as a documented limitation, with the retirement
+proposal ruled), **D4** (an incidental tag difference still splits a proposal), **F2**
+(concurrent proposals are lost to `SQLITE_BUSY`), and **D2-core** (the lesson surface has
+no pending state, so any writer to it publishes trusted knowledge directly). Each is
+classified in §5, and each carries A's ruling where one has been made.
 
 **The trust-boundary exception in the telemetry hunt is RESOLVED** — by Session A's own
 adjudication, PR #138, which made the hunt **read-only** while this assessment was being
@@ -56,7 +65,7 @@ command** on the release's `mpm-telemetry` binary, and if anyone repairs its cou
 | **D5** — two distinct observations scored the same as one delivered twice | **CLOSED** | PR #130, same mechanism | no |
 | **D2** — the critic wrote trusted lessons with no review | **CLOSED** | the three hunts and the poison pill now emit `mpm_theories propose` with typed, validated, resolvable citations; `TestP3b_NoHuntTargetsTheTrustedLessonSurface`, `TestP3b_CriticFindingIsNotTrustedWithoutReview`; and **PR #138** made the opt-in telemetry hunt read-only | the **lesson surface itself** still has no pending state (§3.2); the standalone `mpm-telemetry observe` command still carries the same exception (§4.2) |
 | **D3-b** — a citation recorded the wrong type | **CLOSED** | this sprint's D3 PR; `TestM5Contract_CitationPreservesItsType` now passes | no |
-| **D3-a** — the legacy citation path accepts an unresolvable id | **OPEN** | `TestM5Contract_UnresolvableCitationIsRejected` — still red | yes, §5.1 |
+| **D3-a** — the legacy citation path accepts an unresolvable id | **OPEN, accepted as a documented limitation** | `TestM5Contract_UnresolvableCitationIsRejected` — still red, deliberately. **Session A has ruled** on the retirement proposal (D3 report §6.3): step 1 approved, step 2 approved in principle as its own shared-interface PR, step 3 deferred behind a deprecation period. | yes, §5.1 |
 | **D4** — a cycle-varying tag creates a second proposal | **CLOSED in production**; the substrate residual is open | the critic's emission fix landed; `TestD4_PoisonPillRepeatedCyclesProduceOnePendingProposal` proves it end to end | yes, §5.2 |
 | **F2** (new) — concurrent proposals are lost to `SQLITE_BUSY` | **OPEN** | measured: 2–4 of 8 concurrent proposals lost; mechanism isolated | yes, §5.3 |
 
@@ -295,12 +304,19 @@ Four questions, four answers per residual.
 
 ### 5.1 D3-a — the legacy citation path accepts an unresolvable id
 
+> **RULED.** Session A's ledger (PR #144, `ef7a535`) records D3-a as **OPEN, accepted as
+> a documented limitation**, with the ruling on this assessment's retirement proposal:
+> **step 1 approved** (the typed path becomes the default for `mpm_theories propose` — it
+> cannot reject anything accepted today), **step 2 approved in principle** as its own
+> shared-interface PR, **step 3 deferred** behind a deprecation period. The contract test
+> therefore stays red, deliberately, until step 3 lands.
+
 | Question | Answer |
 |---|---|
 | Blocking safe **manual** critic use? | **NO.** The critic uses the **typed** path on every hunt; its citations are validated and resolvable. The legacy path is reachable only when a caller omits `source_type`. |
 | Blocking **automatic scheduled** critic use? | **NO.** Same reason. |
-| Blocking the **OpenCode-only release**? | **NO.** |
-| Acceptable as a **documented limitation**? | **YES**, with one caveat: the caveat is that `mpm_decisions record`/`supersede` have **no `source_type` parameter at all**, so a decision's citations can never be validated. That is a registry gap, and it is A's shared interface — see the D3 PR's §6.3 (step 2). |
+| Blocking the **OpenCode-only release**? | **NO** — and A has ruled: accepted as a documented limitation. |
+| Acceptable as a **documented limitation**? | **YES — RULED**, with one caveat recorded in the ledger: `mpm_decisions record`/`supersede` have **no `source_type` parameter at all**, so a decision's citations can never be validated. That is the registry gap, and it is A's shared interface — the D3 report's §6.3 step 2, approved in principle. |
 
 **Why it is not a data-integrity risk:** a legacy citation of an id that resolves to
 nothing is recorded with `source_type = "memory"` — a mislabel, not a false claim of
@@ -330,6 +346,13 @@ ordinary agent, and the same decision would fix it.
 | Acceptable as a **documented limitation**? | **YES for the initial release**, **but it should be fixed before the scheduled critic is enabled at a short cadence**, and it deserves its own PR (it is not a D4 change). The mechanism is isolated and the candidate fix is validated: a deferred transaction that reads and then writes cannot upgrade to a write in WAL when another writer has committed since its snapshot — `BEGIN IMMEDIATE` eliminates it (measured: 4/8 lost → 0/8). |
 
 **Recommendation:** schedule it as an independent PR, before the P2b gate is lifted.
+
+**Session A's ruling (PR #144):** F2 is named in the ledger as **NEW, and the most
+consequential residual** — *"concurrent proposals are lost to SQLITE_BUSY (2-4 of 8
+measured; reproduced under make test-race), and the critic's emission failure is logged and
+the cycle continues, so a finding can be lost SILENTLY. Candidate fix validated:
+BEGIN IMMEDIATE (4/8 lost -> 0/8)."* It is one of the two reasons the P2b gate stays
+closed.
 
 ### 5.3.1 F2 reproduced itself, under the race detector
 
@@ -369,13 +392,13 @@ Two things follow for this assessment:
 
 | # | Decision | A's authority because | Session B's recommendation |
 |---|---|---|---|
-| **R1** | Lift the **P2b gate**? | it is a release risk decision | **Yes** — its stated removal condition is met (§3.2). But fix F2 first if the cadence is short. |
+| **R1** | Lift the **P2b gate**? | it is a release risk decision | **Session B recommended yes** — the stated removal condition is met (§3.2), after F2 if the cadence is short. **A's ruling (PR #144): the gate STAYS CLOSED.** *"Session B's assessment argues the removal condition is met; the gate stays closed, and F2 and D2-core give the reason beyond the standing instruction."* A's call, taken, and the reasoning is A's own. |
 | **R2** | `mpm-critic --telemetry-hunt`: **fix or remove**? | it is an advertised but inert flag | **DECIDED — by A, in PR #138**: the hunt is now a **read-only diagnostic**. Closed (§4.4). |
-| **R3** | Should an **incidental tag difference** split a proposal? | it is a shared identity-semantics decision | The brief's D4 criteria are already met; accept the current model, retire the synthetic contract test, and file F1 as a cosmetic limitation — **or** mandate a scoped identity change (§5.2 of the D4 report). |
-| **R4** | Does the legacy citation path get **tightened**? | it changes a public tool's behaviour for every caller | **Not for the initial release.** The typed path is the answer; the migration steps are in the D3 report §6.3. |
-| **R5** | Add `source_type` to `mpm_decisions record`/`supersede`? | it is a tool-registry change | **Yes** — it is the concrete gap that makes a decision's citations unvalidatable, and it mirrors `mpm_theories.propose` exactly. |
-| **R6** | A **pending lesson state** on the lesson surface? | it is a schema change | **Defer**, and record the surface as operator-only in the release notes (§5.4). |
-| **R7** | **NEW — extend #138 to `mpm-telemetry observe`?** | it is A's release surface, and the same trust boundary | **Yes** — make it read-only, exactly as #138 made the critic's copy read-only, and reuse `critic.SessionArtifactCount` for the count. It is inert and manual-only, so it does not block the release; but it is a **live trap** for whoever next repairs its count (§4.5). |
+| **R3** | Should an **incidental tag difference** split a proposal? | it is a shared identity-semantics decision | The brief's D4 criteria are already met; accept the current model, retire the synthetic contract test, and file F1 as a cosmetic limitation — **or** mandate a scoped identity change (§5.2 of the D4 report). **A's ledger (PR #144): D4 is CLOSED in production, substrate residual OPEN, and "the extra finding F1 rides with the same decision."** |
+| **R4** | Does the legacy citation path get **tightened**? | it changes a public tool's behaviour for every caller | **RULED (PR #144):** D3-a is **accepted as a documented limitation**; step 1 of the retirement proposal is **approved**, step 2 approved in principle as its own shared-interface PR, step 3 deferred behind a deprecation period (D3 report §6.3). |
+| **R5** | Add `source_type` to `mpm_decisions record`/`supersede`? | it is a tool-registry change | **Yes** — it is the concrete gap that makes a decision's citations unvalidatable, and it mirrors `mpm_theories.propose` exactly. **Approved in principle by A (PR #144), to be its own shared-interface PR.** |
+| **R6** | A **pending lesson state** on the lesson surface? | it is a schema change | **Defer**, and record the surface as operator-only in the release notes (§5.4). **A's ledger (PR #144): D2-core is NEW, "must be in the release notes."** |
+| **R7** | **NEW — extend #138 to `mpm-telemetry observe`?** | it is A's release surface, and the same trust boundary | **Yes** — make it read-only, exactly as #138 made the critic's copy read-only, and reuse `critic.SessionArtifactCount` for the count. **A's ledger (PR #144) records it as OPEN under #139**: *"Currently INERT, so it cannot write, but repairing its count would ARM a trusted-lesson write."* |
 
 ---
 
