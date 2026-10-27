@@ -246,6 +246,7 @@ cannot conflate: there is no shared state to race over.
 | **Fabrication removed** in `AppendWorkEvent` | `internal/core/db.go` | the same rule on the sibling table; `work_events.invocation_id` is nullable |
 | The shared overlay **deleted** from the memory save | `internal/core/memory_tools.go` | it was shared mutable state — the conflation hazard |
 | `contextAdapter` forwards the **per-call** context | `cmd/mpm-mcp/tools.go:543` | it used the captured process-level context, dropping the invocation id for every `mpm_context` action, `write_handoff` included |
+| `GetProvenanceResolver` lazy init is mutex-guarded | `internal/core/db.go` | a latent race the correction made reachable — see §6.1 |
 | `ResolveFrameworkModelForInvocations` publishes the work-level fallback under the empty invocation id | `internal/core/db.go` | with the fabrication gone, a work event with no invocation id must still reach its work's own provenance row — the F16 contract, honestly |
 
 **Not changed:** the database schema, the `artifact_provenance` DDL, the
@@ -275,6 +276,42 @@ These are real and intended.
 6. **Two `tool_invocations` rows can share one `invocation_id`** when one host shell
    command runs several `mpm call`s. This is a property of the *host integration*, not of
    the correction — §8.2.
+
+---
+
+### 6.1 A latent data race the correction made reachable
+
+`GetProvenanceResolver` initialised `dm.ProvenanceResolver` on first access with **no
+synchronisation**. That was latent: before this branch nothing resolved provenance
+concurrently.
+
+The handoff write path now resolves the provenance of the artifact it writes, and
+`TestHandoff_NullSessionID_ConcurrentInsertsNoCollision` runs eight concurrent handoff
+writes against one `DatabaseManager`. Two of them initialised the resolver at the same
+moment, and the race detector fired:
+
+```
+WARNING: DATA RACE
+Write at 0x00c0003822a8 by goroutine 159243:
+  (*DatabaseManager).GetProvenanceResolver()      internal/core/db.go:390
+  (*DatabaseManager).getEffectiveProvenance()     internal/core/db.go:413
+  (*DatabaseManager).provenanceForWrite()          internal/core/db.go:464
+  (*DatabaseManager).refreshArtifactProvenance()  internal/core/db.go:489
+  (*DatabaseManager).EndSessionV2()               internal/core/handoff.go:239
+Previous write at 0x00c0003822a8 by goroutine 159244:
+  ... the same path ...
+```
+
+A `DatabaseManager` is shared by every goroutine that writes through it — a long-lived
+`mpm-mcp` server dispatches concurrently — so the lazy initialisation needs a guard. It
+now takes `provenanceMu`, the same shape as the `sessionMu` beside it. The resolver is
+still overridable by a test writing the field directly; only the lazy initialisation is
+guarded.
+
+This is worth stating plainly: the correction did not *create* a race, it *reached* one.
+The race was in the substrate before this branch; a concurrent first-touch of the
+resolver would have found it. A `DatabaseManager` shared between two MCP dispatches had
+the same hazard on the memory-save path, where the shared overlay lived.
 
 ---
 
@@ -508,7 +545,18 @@ The hunt's vocabulary is **not** weakened. Two controls pin that:
 * `TestD6_MissedOpportunity_LifecycleIngestionIsNotARecording` — a session that only
   ingested lifecycle observations is still reported.
 
-### 9.5 End-to-end, through the real binary
+### 9.5 The race gate, and what it found
+
+The first `make test-race` run **failed**, and the failure was a real data race — not a
+flake. `TestHandoff_NullSessionID_ConcurrentInsertsNoCollision` detected the unsynchronised
+lazy initialisation of the provenance resolver (§6.1). The fix is commit `f55f1a7`; the
+`internal/core` module then passed under `-race` in full (295.2 s), and the complete
+`make test-race` gate passed at the final head.
+
+Recording it here because it is the honest shape of the work: the correction widened the
+set of paths that resolve provenance, and one of them was concurrent.
+
+### 9.6 End-to-end, through the real binary
 
 Against a disposable workspace, using the built `mpm` binary:
 
@@ -526,7 +574,7 @@ handoff        inv_7bd5e555-…-579d55422838       1  (mpm_handoff.write)
 Every artifact joins to the invocation that produced it. (The lesson and the handoff
 share an id because they were run in **one** shell command — §8.2.)
 
-### 9.6 Gates
+### 9.7 Gates
 
 | Gate | Result |
 |---|---|
@@ -538,7 +586,20 @@ share an id because they were run in **one** shell command — §8.2.)
 | `mpm-lint --gate` | **PASS** (all classes; the one `no-check` site this branch introduced was restructured to satisfy the scans rule) |
 | `make test-scripts` | **OK** — 540 tests, 1 skipped |
 | `make test-agent-installation` | **OK** — 494 Python + 89 TS tests |
-| `make test-race` | see §11 |
+| `make test-race` | **PASS** — 0 failures, 0 data races, 24 packages under `-race` (see §9.5) |
+
+`make test-race` under `-race`, module by module:
+
+```
+ok  github.com/flowbyte-com/mpm/cmd/mpm                              415.002s
+ok  github.com/flowbyte-com/mpm-core                                 268.306s
+ok  github.com/flowbyte-com/mpm-core/tools                            43.797s
+ok  github.com/flowbyte-com/mpm/internal/scheduler                    23.049s
+ok  github.com/flowbyte-com/mpm/internal/testenv                       8.625s
+ok  github.com/flowbyte-com/mpm/internal/critic                        4.307s
+ok  github.com/flowbyte-com/mpm/cmd/mpm-mcp                             8.981s
+… 24 packages, 0 FAIL, 0 DATA RACE
+```
 
 ---
 
@@ -565,7 +626,13 @@ meaningful for the paths it covers.
 
 ## 11. CI
 
-Appended after the CI run: see §13.
+PR #132, head `f55f1a7`:
+
+| Job | Result | Duration |
+|---|---|---|
+| Build + core tests | **pass** | 19m 8s |
+| Full test suite | **pass** | 12m 8s |
+| Release gate (cross-agent continuity + public-CLI subprocess suite) | see the PR | — |
 
 ---
 
