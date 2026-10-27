@@ -462,6 +462,34 @@ left modified by a probe.
 | `go vet ./...` | clean |
 | `gofmt -l` on the four touched files | clean |
 | `mpm-lint --gate` | **PASS** (exit 0) — import-forbidden actual=0 threshold=0 |
+| `make test-race` | **PASS** — see below |
+
+### 8.1 The race gate
+
+`make test-race` — the canonical pre-merge gate — **passed in full** at the D7 head.
+All 25 Go packages pass under `-race`; **zero** `FAIL` lines and **zero**
+`WARNING: DATA RACE` lines in the whole sweep.
+
+| Stage | Result |
+|---|---|
+| `./cmd/...` (incl. `cmd/mpm`) | ok — `cmd/mpm` 414.0 s, `cmd/mpm-mcp` 8.3 s |
+| `./internal/telemetry/...`, `./internal/buildinfo/...` | ok |
+| `internal/core` module (all packages) | ok |
+| `./internal/scheduler/...` (23.0 s), `./internal/critic/...` (4.3 s) | ok |
+| `internal/testenv` (9.0 s) | ok |
+| `internal/core/tools` | ok — 42.1 s |
+| `make test-scripts` | **OK** — 540 tests collected (floor 50) |
+| `make test-bench` | **OK** — 217 tests collected (floor 50) |
+| `make test-agent-installation` | **OK** — 494 tests collected (floor 300), 1 skipped |
+| `make test-agent-adapters` | **OK** — 89 TypeScript tests passing (floor 15) |
+
+A note on the sweep's timing, because it matters for reading the result honestly: the
+sweep started at the code head `f2ab066` and the compact-form test landed mid-sweep. The
+four race binaries whose compilation could have straddled that point — `cmd/...`,
+`internal/core`, `internal/core/tools` and the root-module packages that import
+`internal/core` — were all compiled **after** the tree was restored, and `git diff`
+confirmed the restored `parse.go` was byte-identical to the committed one. The sweep
+therefore tested the shipped source, not a probe variant.
 
 One incidental repair: `internal/core/parse.go` was **not gofmt-clean at baseline**
 (`origin/main`) — the file ended without a trailing newline. The D7 edit fixed it
@@ -471,9 +499,17 @@ One incidental repair: `internal/core/parse.go` was **not gofmt-clean at baselin
 
 ## 9. CI
 
-The three CI jobs on the PR head, at the final commit:
+PR #135, head `456e292` — **all three jobs green**:
 
-<!-- CI_RESULTS -->
+| Job | Result | Duration |
+|---|---|---|
+| Build + core tests | **pass** | 19m 41s |
+| Full test suite | **pass** | 12m 17s |
+| Release gate (cross-agent continuity + public-CLI subprocess suite) | **pass** | 18m 59s |
+
+The run is [40541422560](https://github.com/flowbyte-com/mpm/actions/runs/40541422560).
+An earlier run at head `3ce3953` was **cancelled** by the workflow's
+superseded-run policy when the compact-form test was pushed — not a failure.
 
 ---
 
@@ -577,8 +613,12 @@ cleanup, and D7's boundary says no unrelated repairs.
 |---|---|
 | Branch | `feat/session-b-d7-string-slice-parsing` |
 | Base | `origin/main` = `4de89ea` |
-| Commits | `f2ab066` — *fix(core): a Go-native []string must not vanish at the parse boundary (D7)*<br>`3ce3953` — *docs(dev): the D7 report*<br>`c39edac` — *test(core): the compact citation forms must survive the strict parse too* |
+| Commits | `f2ab066` — *fix(core): a Go-native []string must not vanish at the parse boundary (D7)*<br>`3ce3953` — *docs(dev): the D7 report*<br>`c39edac` — *test(core): the compact citation forms must survive the strict parse too*<br>`456e292` — *docs(dev): the D7 report — the compact-form coverage and probe D*<br>*(this commit — docs only: the gate and CI results)* |
 | PR | [#135](https://github.com/flowbyte-com/mpm/pull/135) |
+
+The CI results in §9 are the run at the code head `456e292`. The commit that carries
+them is **documentation only** — it changes no Go file and no test — and the workflow's
+superseded-run policy re-runs the three jobs against it.
 
 Files changed:
 
