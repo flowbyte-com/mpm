@@ -57,7 +57,7 @@ for evidence), #133 (the installation-preservation carrier), #131, #136, #129.
 
 | Gate | Result |
 |---|---|
-| `make test-race` (the canonical pre-merge validation) | **PASS** — 0 failures across the root module and both sub-modules |
+| `make test-race` (the canonical pre-merge validation) | **PASS** — exit 0, 0 failures. This is the **stricter** gate: it also runs the **full** `-race` sweep of the `internal/core` module, which CI covers only under `-short`. |
 | `make test-scripts` | **PASS** — **543 tests**, `OK (skipped=1)` |
 | `make test-agent-adapters` | **PASS** — Python **119** (floor 100), TypeScript **108** (floor 15), JavaScript an **explicit declared-empty state** (not a skipped gate) |
 | `mpm-lint --gate` | **PASS** — mutex, SQL, fd and import thresholds all within their bounds |
