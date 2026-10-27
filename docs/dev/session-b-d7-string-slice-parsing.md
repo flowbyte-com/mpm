@@ -499,7 +499,9 @@ One incidental repair: `internal/core/parse.go` was **not gofmt-clean at baselin
 
 ## 9. CI
 
-PR #135, head `456e292` — **all three jobs green**:
+PR #135 — **all three jobs green**, twice over.
+
+**At the code head `456e292`** — run [40541422560](https://github.com/flowbyte-com/mpm/actions/runs/40541422560):
 
 | Job | Result | Duration |
 |---|---|---|
@@ -507,9 +509,18 @@ PR #135, head `456e292` — **all three jobs green**:
 | Full test suite | **pass** | 12m 17s |
 | Release gate (cross-agent continuity + public-CLI subprocess suite) | **pass** | 18m 59s |
 
-The run is [40541422560](https://github.com/flowbyte-com/mpm/actions/runs/40541422560).
-An earlier run at head `3ce3953` was **cancelled** by the workflow's
-superseded-run policy when the compact-form test was pushed — not a failure.
+**At the documentation head `9c0d344`** — run [40545591133](https://github.com/flowbyte-com/mpm/actions/runs/40545591133):
+
+| Job | Result | Duration |
+|---|---|---|
+| Build + core tests | **pass** | 18m 56s |
+| Full test suite | **pass** | 10m 18s |
+| Release gate (cross-agent continuity + public-CLI subprocess suite) | **pass** | 27m 31s |
+
+An earlier run at head `3ce3953` was **cancelled** by the workflow's superseded-run
+policy when the compact-form test was pushed — not a failure. The two runs above are
+the ones that matter: the first at the code, the second confirming that the
+documentation commit changes nothing the build can see.
 
 ---
 
@@ -613,12 +624,12 @@ cleanup, and D7's boundary says no unrelated repairs.
 |---|---|
 | Branch | `feat/session-b-d7-string-slice-parsing` |
 | Base | `origin/main` = `4de89ea` |
-| Commits | `f2ab066` — *fix(core): a Go-native []string must not vanish at the parse boundary (D7)*<br>`3ce3953` — *docs(dev): the D7 report*<br>`c39edac` — *test(core): the compact citation forms must survive the strict parse too*<br>`456e292` — *docs(dev): the D7 report — the compact-form coverage and probe D*<br>*(this commit — docs only: the gate and CI results)* |
+| Commits | `f2ab066` — *fix(core): a Go-native []string must not vanish at the parse boundary (D7)*<br>`3ce3953` — *docs(dev): the D7 report*<br>`c39edac` — *test(core): the compact citation forms must survive the strict parse too*<br>`456e292` — *docs(dev): the D7 report — the compact-form coverage and probe D*<br>`9c0d344` — *docs(dev): the D7 report — the race gate and the CI results*<br>*(this commit — docs only: the CI results at the final head)* |
 | PR | [#135](https://github.com/flowbyte-com/mpm/pull/135) |
 
-The CI results in §9 are the run at the code head `456e292`. The commit that carries
-them is **documentation only** — it changes no Go file and no test — and the workflow's
-superseded-run policy re-runs the three jobs against it.
+Three of the five commits are documentation. The code is `f2ab066` plus the one test
+file `c39edac`; the CI results in §9 are the run at the code head `456e292` and the
+re-run at `9c0d344`, both green.
 
 Files changed:
 
