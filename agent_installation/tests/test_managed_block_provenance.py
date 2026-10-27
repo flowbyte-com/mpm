@@ -59,31 +59,23 @@ def _adapter_argv(adapter: str, script: Path, target: Path, snippet: Path, home:
     Each adapter has its own installer with its own arguments; this
     keeps the per-adapter difference in one place.
     """
-    if adapter == "mpm-claude-code":
-        return [str(script), "--scope", "user", "--home", str(home),
-                "--target", str(target), "--snippet", str(snippet)]
     if adapter == "mpm-opencode":
         return [str(script), "--scope", "user", "--target", str(target),
-                "--snippet", str(snippet)]
-    if adapter == "mpm-pi":
-        return [str(script), "--scope", "user", "--target", str(target),
-                "--snippet", str(snippet)]
-    if adapter == "mpm-hermes":
-        return [str(script), "--target", str(target), "--snippet", str(snippet)]
-    if adapter == "mpm-memory-openclaw":
-        return [str(script), "--home", str(home), "--target", str(target),
                 "--snippet", str(snippet)]
     raise AssertionError(f"unknown adapter {adapter!r}")
 
 
 # The persistent-file hosts, and the snippet each one installs.
+#
+# OpenCode is the only supported host since the 2026-10-27 adapter
+# removal, so this list has exactly one member. The list stays a LIST
+# (rather than a single constant) because the property under test is
+# "every shipped host stamps its block the same way" — a shape that
+# must keep working when a host is added.
 ADAPTERS = [
-    ("mpm-claude-code", "install_claude_instructions", "CLAUDE.md.snippet"),
     ("mpm-opencode", "install_agents_instructions", "AGENTS.md.snippet"),
-    ("mpm-pi", "install_agents_instructions", "AGENTS.md.snippet"),
-    ("mpm-hermes", "install_hermes_instructions", "hermes.md.snippet"),
-    ("mpm-memory-openclaw", "install_openclaw_instructions", "SOUL.md.snippet"),
 ]
+
 
 
 def run_installer(adapter: str, installer: str, target: Path, snippet: Path,
@@ -137,8 +129,7 @@ class ProvenanceTestCase(unittest.TestCase):
         return AGENT_INSTALLATION / adapter / "templates" / name
 
     def target_for(self, adapter: str) -> Path:
-        suffix = ".hermes.md" if adapter == "mpm-hermes" else ".md"
-        return self.tmp / f"{adapter}{suffix}"
+        return self.tmp / f"{adapter}.md"
 
 
 class TestFreshInstall(ProvenanceTestCase):
@@ -184,10 +175,10 @@ class TestFreshInstall(ProvenanceTestCase):
                     self.fail(f"{adapter}: no managed-block marker in the installed file")
 
     def test_the_timestamp_is_utc(self) -> None:
-        target = self.target_for("mpm-claude-code")
+        target = self.target_for("mpm-opencode")
         run_installer(
-            "mpm-claude-code", "install_claude_instructions", target,
-            self.snippet_for("mpm-claude-code", "CLAUDE.md.snippet"), self.home, self.env,
+            "mpm-opencode", "install_agents_instructions", target,
+            self.snippet_for("mpm-opencode", "AGENTS.md.snippet"), self.home, self.env,
         )
         applied = provenance_of(target.read_text(encoding="utf-8")).get("applied", "")
         self.assertRegex(applied, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
@@ -217,7 +208,7 @@ class TestLegacyUpgrade(ProvenanceTestCase):
                 self.assertEqual(fields.get("version"), TEST_VERSION)
 
     def test_the_behavioural_text_is_not_changed_by_the_upgrade(self) -> None:
-        adapter, installer, snippet_name = "mpm-claude-code", "install_claude_instructions", "CLAUDE.md.snippet"
+        adapter, installer, snippet_name = "mpm-opencode", "install_agents_instructions", "AGENTS.md.snippet"
         target = self.target_for(adapter)
         snippet = self.snippet_for(adapter, snippet_name)
 
@@ -234,7 +225,7 @@ class TestVersionAndCommitChange(ProvenanceTestCase):
     """Case 3 — a new product version or source commit refreshes the metadata."""
 
     def test_a_new_product_version_refreshes_the_metadata(self) -> None:
-        adapter, installer, snippet_name = "mpm-claude-code", "install_claude_instructions", "CLAUDE.md.snippet"
+        adapter, installer, snippet_name = "mpm-opencode", "install_agents_instructions", "AGENTS.md.snippet"
         target = self.target_for(adapter)
         snippet = self.snippet_for(adapter, snippet_name)
 
@@ -255,7 +246,7 @@ class TestVersionAndCommitChange(ProvenanceTestCase):
         )
 
     def test_a_new_source_commit_refreshes_the_metadata(self) -> None:
-        adapter, installer, snippet_name = "mpm-claude-code", "install_claude_instructions", "CLAUDE.md.snippet"
+        adapter, installer, snippet_name = "mpm-opencode", "install_agents_instructions", "AGENTS.md.snippet"
         target = self.target_for(adapter)
         snippet = self.snippet_for(adapter, snippet_name)
 
@@ -275,7 +266,7 @@ class TestVersionAndCommitChange(ProvenanceTestCase):
 
     def test_changed_behavioural_text_refreshes_the_metadata(self) -> None:
         """A changed behavioural block refreshes the timestamp too."""
-        adapter, installer, snippet_name = "mpm-claude-code", "install_claude_instructions", "CLAUDE.md.snippet"
+        adapter, installer, snippet_name = "mpm-opencode", "install_agents_instructions", "AGENTS.md.snippet"
         target = self.target_for(adapter)
         snippet = self.snippet_for(adapter, snippet_name)
 
@@ -283,7 +274,7 @@ class TestVersionAndCommitChange(ProvenanceTestCase):
         set_applied_timestamp(target, OLD_APPLIED)
 
         # A copy of the snippet whose behavioural text differs.
-        changed = self.tmp / "CLAUDE.changed.snippet"
+        changed = self.tmp / "AGENTS.changed.snippet"
         changed.write_text(
             snippet.read_text(encoding="utf-8") + "\nan extra behavioural line.\n",
             encoding="utf-8",
@@ -328,12 +319,12 @@ class TestProtocolVersionChange(ProvenanceTestCase):
         return shadow
 
     def test_a_changed_protocol_version_refreshes_the_metadata(self) -> None:
-        adapter, installer, _ = "mpm-claude-code", "install_claude_instructions", None
+        adapter, installer, _ = "mpm-opencode", "install_agents_instructions", None
         target = self.target_for(adapter)
 
         shadow_a = self._shadow_tree("2.1.0")
         script_a = shadow_a / adapter / "scripts" / f"{installer}.py"
-        snippet_a = self.snippet_for(adapter, "CLAUDE.md.snippet")
+        snippet_a = self.snippet_for(adapter, "AGENTS.md.snippet")
         argv_a = _adapter_argv(adapter, script_a, target, snippet_a, self.home)
         env = dict(os.environ)
         env.update(self.env)
@@ -391,7 +382,7 @@ class TestIdempotency(ProvenanceTestCase):
                                  f"{adapter}: a repeated reconciliation moved the timestamp")
 
     def test_a_repeated_reconciliation_takes_no_new_backup(self) -> None:
-        adapter, installer, snippet_name = "mpm-claude-code", "install_claude_instructions", "CLAUDE.md.snippet"
+        adapter, installer, snippet_name = "mpm-opencode", "install_agents_instructions", "AGENTS.md.snippet"
         target = self.target_for(adapter)
         snippet = self.snippet_for(adapter, snippet_name)
 
@@ -496,7 +487,7 @@ class TestUnknownFallback(ProvenanceTestCase):
     NO_BUILD_ENV = {"MPM_BUILD_VERSION": "", "MPM_BUILD_COMMIT": ""}
 
     def test_a_run_that_cannot_establish_the_version_says_unknown(self) -> None:
-        adapter, installer, snippet_name = "mpm-claude-code", "install_claude_instructions", "CLAUDE.md.snippet"
+        adapter, installer, snippet_name = "mpm-opencode", "install_agents_instructions", "AGENTS.md.snippet"
         target = self.target_for(adapter)
         snippet = self.snippet_for(adapter, snippet_name)
 
@@ -521,7 +512,7 @@ class TestUnknownFallback(ProvenanceTestCase):
         )
 
     def test_a_no_op_run_keeps_the_version_an_earlier_run_established(self) -> None:
-        adapter, installer, snippet_name = "mpm-claude-code", "install_claude_instructions", "CLAUDE.md.snippet"
+        adapter, installer, snippet_name = "mpm-opencode", "install_agents_instructions", "AGENTS.md.snippet"
         target = self.target_for(adapter)
         snippet = self.snippet_for(adapter, snippet_name)
 
@@ -545,7 +536,7 @@ class TestUnknownFallback(ProvenanceTestCase):
         )
 
     def test_a_changed_block_does_not_keep_a_stale_version_claim(self) -> None:
-        adapter, installer, snippet_name = "mpm-claude-code", "install_claude_instructions", "CLAUDE.md.snippet"
+        adapter, installer, snippet_name = "mpm-opencode", "install_agents_instructions", "AGENTS.md.snippet"
         target = self.target_for(adapter)
         snippet = self.snippet_for(adapter, snippet_name)
 
@@ -553,7 +544,7 @@ class TestUnknownFallback(ProvenanceTestCase):
 
         # A copy of the snippet whose behavioural text differs, written
         # by a run that cannot establish the version.
-        changed = self.tmp / "CLAUDE.changed.snippet"
+        changed = self.tmp / "AGENTS.changed.snippet"
         changed.write_text(
             snippet.read_text(encoding="utf-8") + "\nan extra behavioural line.\n",
             encoding="utf-8",

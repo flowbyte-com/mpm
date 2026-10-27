@@ -1,29 +1,26 @@
 """
-test_refresh_installed_openclaw_safety.py — OpenClaw reconciliation
-safety contract.
+test_refresh_installed_absent_adapter_safety.py — refresh-safety contract
+for a RETIRED adapter.
 
-Two distinct properties are pinned here, and they are NOT the same
-property:
+TWO DISTINCT PROPERTIES ARE PINNED HERE, AND THEY ARE NOT THE SAME
+PROPERTY:
 
   SAFETY BOUNDARY (must never regress)
-    MPM must not install or opt a machine into OpenClaw merely
-    because OpenClaw integration code exists in the repository. A
-    machine with no OpenClaw MPM integration stays untouched by
-    every documented update path.
+    MPM must not install or opt a machine into a retired host merely
+    because integration code for it once existed in the repository. A
+    machine with no such integration stays untouched by every
+    documented update path.
 
-  MANAGED-BLOCK CONTRACT (the current contract)
-    Once the OpenClaw MPM integration IS already installed, the
-    persistent managed block is a REQUIRED part of that integration.
-    A missing or stale block is drift that reconciliation repairs;
-    a current block is a byte-stable no-op. Dynamic wake injection
-    supplements the block, it does not replace it.
+  INSTALLATION PRESERVATION (the non-negotiable one)
+    An integration the operator ALREADY HAS must survive every update
+    path byte-for-byte. Retiring an adapter from the repository stops
+    MPM from CONFIGURING that host; it must never remove, rewrite or
+    disable what is already on disk.
 
-The old version of this file pinned the superseded assumption that
-"OpenClaw is intentionally absent" and that no path may ever write
-SOUL.md. That assumption was invalidated by direct runtime evidence:
-without the managed block an OpenClaw agent can have MPM tools
-exposed and still fail to use MPM, and with the block it discovers
-and uses MPM reliably.
+The second property is the one this file exists for now. It was
+previously expressed as "the OpenClaw managed block is repaired",
+which had a subject only while the OpenClaw adapter existed. The
+subject is gone; the guarantee is not.
 
 Covers:
   - make refresh-installed (the standalone reconciliation target)
@@ -31,22 +28,11 @@ Covers:
   - ./install.sh --reconcile (content-only update mode)
   - ./install.sh (full install, including the reconciliation phase)
 
-All tests use a sandboxed HOME so the real machine state — including
-the real installed SOUL.md — is never touched.
+All tests use a sandboxed HOME so the real machine state is never
+touched.
 
-Two integration MODES are covered, because OpenClaw supports both and
-a machine legitimately running either one must have its block repaired:
-
-  native plugin   mpm-memory-openclaw installed as an OpenClaw plugin
-                  -> typed mpm_memory_* tools + runtime wake injection
-  CLI fallback    no MPM plugin, but the agent reaches MPM through
-                  `mpm call <tool>` over its shell tool
-
-The CLI-fallback mode is the one a live investigation surfaced on the
-real machine, and the one a plugin-only detector misses entirely. It is
-a supported mode, not a degraded one: the managed block is what tells
-the agent the `mpm call` fallback exists, so on a CLI-fallback host a
-missing block means the agent never learns MPM is reachable at all.
+The host-independent carrier for the same property is
+`test_legacy_installation_preserved.py` (PR #133).
 """
 
 from __future__ import annotations
@@ -69,47 +55,24 @@ MAKEFILE = REPO_ROOT / "Makefile"
 INSTALL_SH = REPO_ROOT / "install.sh"
 RECONCILE = AGENT_INSTALLATION / "scripts" / "reconcile_managed_blocks.py"
 CHECK_INSTALLED = AGENT_INSTALLATION / "scripts" / "check_installed_managed_blocks.py"
-OPENCLAW_SNIPPET = (
-    AGENT_INSTALLATION / "mpm-memory-openclaw" / "templates" / "SOUL.md.snippet"
+
+# The snippet of the host that IS shipped. It is the control for the
+# non-vacuity assertions below: the same harness must still detect and
+# repair drift for OpenCode.
+OPENCODE_SNIPPET = (
+    AGENT_INSTALLATION / "mpm-opencode" / "templates" / "AGENTS.md.snippet"
 )
+
+# The retired adapter this suite is about, and its canonical install
+# target. The adapter directory no longer exists; the target path is
+# what an operator's pre-existing installation still uses.
+RETIRED_ADAPTER = "mpm-memory-openclaw"
+RETIRED_TARGET = ".openclaw/workspace/SOUL.md"
 
 _MANAGED_BLOCK_BEGIN = "<!-- BEGIN MPM MANAGED BLOCK -->"
 _MANAGED_BLOCK_END = "<!-- END MPM MANAGED BLOCK -->"
 
 
-# ---------------------------------------------------------------------------
-# Sandbox lifecycle (issue #49).
-#
-# These sandboxes used to leave ~98 MB behind per run. The cause was NOT
-# the removal call itself but WHAT the sandbox contained: `go` derives
-# GOMODCACHE and GOPATH from HOME, so a sandbox that redirects HOME gets
-# a PRIVATE copy of the Go module cache — and the toolchain writes it as
-# mode-0555 directories, which shutil.rmtree cannot empty because
-# unlinking a file needs write permission on its parent directory.
-#
-# So there are two halves to the fix, and both are needed:
-#
-#   1. PREVENTION — pin the toolchain at the operator's real caches, so
-#      the sandbox never grows a private module cache in the first
-#      place. This is the same reasoning that already governs
-#      scripts/tests/test_build_install_separation.py.
-#   2. REMOVAL — a cleanup that can empty a permission-constrained
-#      tree AND that reports, rather than swallows, a failure.
-#
-# The previous cleanup was `shutil.rmtree(tmp, ignore_errors=True)`:
-# every failure was indistinguishable from success, so the residue was
-# invisible until someone measured /tmp.
-# ---------------------------------------------------------------------------
-
-# Where the Go toolchain keeps its module cache, GOPATH and build cache
-# on the OPERATOR's real machine.
-#
-# Resolved from `go env` at import time, so the sandbox follows whatever
-# Go the developer actually has installed rather than whatever the test
-# happened to inherit. The values are then passed EXPLICITLY into every
-# sandboxed subprocess — an explicit value is the contract `go help
-# environment` documents; an empty one would re-enable the default
-# derivation from the sandboxed HOME.
 def _resolve_real_go_env() -> tuple[str | None, str | None, str | None]:
     """Return (GOMODCACHE, GOPATH, GOCACHE) as the toolchain resolves
     them for this process, or (None, None, None) if `go` is absent."""
@@ -139,7 +102,6 @@ class SandboxCleanupError(RuntimeError):
 def _running_as_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
-
 def _managed_block_heading(text: str) -> str:
     """The top-level heading inside the managed block.
 
@@ -159,14 +121,6 @@ def _managed_block_heading(text: str) -> str:
         if line.lstrip().startswith("# "):
             return line
     raise AssertionError("the managed block has no top-level heading")
-
-
-def _canonical_block_heading() -> str:
-    """The heading the freshly-installed block must carry."""
-    return _managed_block_heading(
-        OPENCLAW_SNIPPET.read_text(encoding="utf-8"),
-    )
-
 
 def _sandbox_home(case: unittest.TestCase) -> tuple[Path, dict]:
     """Create an isolated HOME and return (tmpdir, env).
@@ -297,7 +251,6 @@ def _sandbox_home(case: unittest.TestCase) -> tuple[Path, dict]:
         env["GOPATH"] = _REAL_GOPATH
     return tmp, env
 
-
 def _cleanup(tmp: Path) -> None:
     """Remove a test-owned sandbox completely, or fail loudly.
 
@@ -383,32 +336,55 @@ def _cleanup(tmp: Path) -> None:
             + "\n  ".join(errors)
         )
 
-
 def _run(cmd: list[str], *, env: dict, timeout: int = 240) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd, capture_output=True, text=True, env=env, timeout=timeout,
     )
 
 
-def _openclaw_target(home: Path) -> Path:
-    """The canonical OpenClaw install target (per
-    check_installed_managed_blocks.HOST_INSTALL_TARGETS)."""
-    return home / ".openclaw" / "workspace" / "SOUL.md"
+def _canonical_block_heading() -> str:
+    """The heading the freshly-installed block must carry.
+
+    Read from the SHIPPED host's snippet. It is the control for the
+    non-vacuity assertions: the same harness that must leave a retired
+    host alone must still repair the shipped host, so the heading is
+    what "repaired" means here.
+    """
+    return _managed_block_heading(
+        OPENCODE_SNIPPET.read_text(encoding="utf-8"),
+    )
+
+
+
+# ---------------------------------------------------------------------------
+# Fixtures: a pre-existing installation of the retired host.
+# ---------------------------------------------------------------------------
+
+
+def _retired_target(home: Path) -> Path:
+    """The canonical install target of the retired host."""
+    return home / RETIRED_TARGET
+
+
+def _shipped_target(home: Path) -> Path:
+    """The canonical install target of the shipped host."""
+    return home / ".config" / "opencode" / "AGENTS.md"
 
 
 def _install_integration(home: Path) -> None:
-    """Simulate NATIVE PLUGIN mode: mpm-memory-openclaw installed.
+    """Simulate NATIVE PLUGIN mode: the retired adapter is installed.
 
-    Mirrors what `mpm-memory-openclaw/install.sh` produces: a
-    registered plugin entry in the host config. The reconciler's
-    `reconcile_if` probes key off exactly this.
+    Mirrors what `mpm-memory-openclaw/install.sh` used to produce: a
+    registered plugin entry in the host config. This is the shape an
+    operator's machine still has after the adapter is retired from the
+    repository.
     """
-    extensions = home / ".openclaw" / "extensions" / "mpm-memory-openclaw"
+    extensions = home / ".openclaw" / "extensions" / RETIRED_ADAPTER
     extensions.mkdir(parents=True, exist_ok=True)
     config = home / ".openclaw" / "openclaw.json"
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(json.dumps({
-        "plugins": {"entries": {"mpm-memory-openclaw": {"enabled": True}}},
+        "plugins": {"entries": {RETIRED_ADAPTER: {"enabled": True}}},
     }), encoding="utf-8")
 
 
@@ -418,15 +394,13 @@ def _install_cli_fallback_integration(home: Path) -> None:
     No MPM plugin anywhere. Instead, exactly the two facts the live
     investigation established:
 
-      reachability  the mpm binary is installed where an OpenClaw
-                    agent's shell tool can find it
+      reachability  the mpm binary is installed where the host's
+                    shell tool can find it
       intent        the operator already wired MPM into THIS
-                    OpenClaw workspace's persistent instruction
-                    surface (AGENTS.md / MEMORY.md), which is where
-                    the agent is told the `mpm call` fallback exists
+                    workspace's persistent instruction surface
+                    (AGENTS.md / MEMORY.md)
 
-    Note SOUL.md itself is left without a managed block — that is the
-    drift this mode must still be able to repair.
+    Note SOUL.md itself is left without a managed block.
     """
     (home / ".mpm" / "bin").mkdir(parents=True, exist_ok=True)
     (home / ".mpm" / "bin" / "mpm").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -459,13 +433,12 @@ def _install_cli_fallback_integration(home: Path) -> None:
 
 
 def _install_unrelated_openclaw(home: Path) -> None:
-    """An OpenClaw install that has never been integrated with MPM.
+    """A host install that has never been integrated with MPM.
 
     MPM IS installed on this machine (so reachability alone is
-    satisfied) and OpenClaw IS installed with a real workspace — but
-    the workspace has never heard of MPM. Reconciliation must leave it
-    alone. This is the false-positive the conjunction gate exists to
-    prevent.
+    satisfied) and the host IS installed with a real workspace — but
+    the workspace has never heard of MPM. Every update path must leave
+    it alone.
     """
     (home / ".mpm" / "bin").mkdir(parents=True, exist_ok=True)
     (home / ".mpm" / "bin" / "mpm").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -490,6 +463,45 @@ def _install_unrelated_openclaw(home: Path) -> None:
     }), encoding="utf-8")
 
 
+def _seed_pre_existing_installation(home: Path) -> Path:
+    """Seed a COMPLETE pre-existing installation of the retired host.
+
+    Every file an operator's machine would carry is seeded, so the
+    preservation assertions cover the whole shape and not just the
+    instruction file: the host config, the plugin registration, the
+    instruction file with its managed block, and the user's own text
+    around it.
+    """
+    _install_integration(home)
+    target = _retired_target(home)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "persona line above\n\n"
+        "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->\n"
+        "the managed block an older MPM wrote\n"
+        "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->\n"
+        "user line below\n",
+        encoding="utf-8",
+    )
+    return target
+
+
+def _fingerprint(root: Path) -> dict[str, bytes]:
+    """Every file under `root`, keyed by relative path.
+
+    A missing file and an empty file are different states, so the
+    fingerprint records presence as well as bytes: a deletion and a
+    truncation must both be visible.
+    """
+    out: dict[str, bytes] = {}
+    if not root.exists():
+        return out
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            out[str(path.relative_to(root))] = path.read_bytes()
+    return out
+
+
 def _reconcile(home: Path, *extra: str) -> subprocess.CompletedProcess:
     return _run(
         [sys.executable, str(RECONCILE), "--home", str(home), *extra],
@@ -498,52 +510,73 @@ def _reconcile(home: Path, *extra: str) -> subprocess.CompletedProcess:
 
 
 # ---------------------------------------------------------------------------
-# 1. Safety boundary: a machine without OpenClaw is never opted in.
+# 1. Safety boundary: a machine without the retired host is never opted in.
 # ---------------------------------------------------------------------------
 
-class OpenClawNotOptedIn(unittest.TestCase):
+class RetiredHostNotOptedIn(unittest.TestCase):
     """The safety boundary that motivated the original file, kept
-    intact: MPM must not install OpenClaw on a machine that does not
-    use it."""
+    intact: MPM must not install a retired host on a machine that does
+    not use it."""
 
     def setUp(self):
         self.tmpdir, self.env = _sandbox_home(self)
         self.home = self.tmpdir / "home"
-        oc = _openclaw_target(self.home)
-        if oc.exists():
-            oc.unlink()
+        target = _retired_target(self.home)
+        if target.exists():
+            target.unlink()
 
-    def _assert_openclaw_untouched(self, oc: Path, label: str, stderr: str):
+    def _assert_retired_host_untouched(self, target: Path, label: str, stderr: str):
         self.assertFalse(
-            oc.exists(),
-            f"{label}: must not create {oc} — MPM must not opt a machine "
+            target.exists(),
+            f"{label}: must not create {target} — MPM must not opt a machine "
             f"into a host it does not already use. stderr={stderr[:500]!r}",
         )
-        if oc.parent.exists():
-            remaining = list(oc.parent.iterdir())
+        if target.parent.exists():
+            remaining = list(target.parent.iterdir())
             self.assertEqual(
                 remaining, [],
-                f"{label}: openclaw parent dir should be empty, found {remaining}",
+                f"{label}: the retired host's parent dir should be empty, "
+                f"found {remaining}",
             )
 
-    def test_reconcile_does_not_install_openclaw_without_integration(self):
-        """The generic reconciler must leave a machine with no
-        OpenClaw MPM integration completely alone."""
+    def test_reconcile_does_not_install_the_retired_host(self):
+        """The generic reconciler must leave a machine with no retired
+        host completely alone."""
         result = _reconcile(self.home)
         self.assertEqual(
             result.returncode, 0,
             f"reconcile failed:\nstdout={result.stdout}\nstderr={result.stderr}",
         )
-        self.assertIn(
-            "integration not installed", result.stdout,
-            "the reconciler must report the integration gate as closed",
-        )
-        self._assert_openclaw_untouched(
-            _openclaw_target(self.home), "reconcile_managed_blocks.py",
+        self._assert_retired_host_untouched(
+            _retired_target(self.home), "reconcile_managed_blocks.py",
             result.stderr,
         )
 
-    def test_make_refresh_installed_does_not_install_openclaw(self):
+    def test_the_reconciler_reports_the_absent_adapter_as_a_clean_no_op(self):
+        """ADDITIONAL PROPERTY: an absent adapter is a CLEAN no-op.
+
+        The reconciler is asked for the retired adapter by name. There
+        is no such adapter any more, so the reconciler must say so and
+        do nothing — not fall over, and not fall back to some other
+        adapter.
+        """
+        result = _reconcile(self.home, "--only", RETIRED_ADAPTER)
+        self.assertEqual(
+            result.returncode, 0,
+            f"reconcile with an absent adapter must succeed:\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}",
+        )
+        self.assertIn(
+            "no adapters matched", result.stdout + result.stderr,
+            "the reconciler must report that the retired adapter matched "
+            f"nothing; stdout={result.stdout!r} stderr={result.stderr!r}",
+        )
+        self._assert_retired_host_untouched(
+            _retired_target(self.home), "reconcile --only <absent adapter>",
+            result.stderr,
+        )
+
+    def test_make_refresh_installed_does_not_install_the_retired_host(self):
         result = _run(
             ["make", "-C", str(REPO_ROOT), "refresh-installed"],
             env=self.env,
@@ -553,13 +586,13 @@ class OpenClawNotOptedIn(unittest.TestCase):
             f"make refresh-installed failed:\nstdout={result.stdout}\n"
             f"stderr={result.stderr}",
         )
-        self._assert_openclaw_untouched(
-            _openclaw_target(self.home),
+        self._assert_retired_host_untouched(
+            _retired_target(self.home),
             "make refresh-installed",
             result.stderr,
         )
 
-    def test_make_install_does_not_install_openclaw(self):
+    def test_make_install_does_not_install_the_retired_host(self):
         """make install is the documented update entry point."""
         result = _run(
             ["make", "-n", "-C", str(REPO_ROOT), "install"],
@@ -578,11 +611,11 @@ class OpenClawNotOptedIn(unittest.TestCase):
             "dependency chain, or the documented `git pull && make install` "
             "flow cannot guarantee managed-block reconciliation.",
         )
-        self._assert_openclaw_untouched(
-            _openclaw_target(self.home), "make -n install", result.stderr,
+        self._assert_retired_host_untouched(
+            _retired_target(self.home), "make -n install", result.stderr,
         )
 
-    def test_install_sh_reconcile_does_not_install_openclaw(self):
+    def test_install_sh_reconcile_does_not_install_the_retired_host(self):
         result = _run(
             ["bash", str(INSTALL_SH), "--reconcile"],
             env=self.env, timeout=180,
@@ -592,22 +625,15 @@ class OpenClawNotOptedIn(unittest.TestCase):
             f"install.sh --reconcile failed:\nstdout={result.stdout}\n"
             f"stderr={result.stderr}",
         )
-        self._assert_openclaw_untouched(
-            _openclaw_target(self.home), "install.sh --reconcile", result.stderr,
+        self._assert_retired_host_untouched(
+            _retired_target(self.home), "install.sh --reconcile", result.stderr,
         )
 
-    def test_install_sh_does_not_install_openclaw(self):
+    def test_install_sh_does_not_install_the_retired_host(self):
         result = _run(
             ["bash", str(INSTALL_SH)],
             env=self.env, timeout=180,
         )
-        # The service-control stubs exit 97 on any mutating verb. A full
-        # install.sh legitimately REQUESTS `systemctl --user restart`
-        # (install.sh phase_service), so under this sandbox that call is
-        # expected to be refused — the stub exists to prove the test is
-        # not reaching the operator's live user manager, not to make the
-        # install succeed. Assert the refusal happened rather than
-        # ignoring it, so the sandbox cannot silently regress.
         combined = result.stdout + result.stderr
         self.assertEqual(
             result.returncode, 0,
@@ -632,96 +658,107 @@ class OpenClawNotOptedIn(unittest.TestCase):
             "this regresses, the sandbox may no longer be intercepting "
             f"the dangerous call.\nlog:\n{log_text}",
         )
-        self._assert_openclaw_untouched(
-            _openclaw_target(self.home), "install.sh (full)", result.stderr,
+        self._assert_retired_host_untouched(
+            _retired_target(self.home), "install.sh (full)", result.stderr,
         )
 
 
 # ---------------------------------------------------------------------------
-# 2. Managed-block contract: an installed integration is repaired.
+# 2. Installation preservation: a pre-existing installation survives.
 # ---------------------------------------------------------------------------
 
-class OpenClawManagedBlockRepaired(unittest.TestCase):
-    """Once the integration is installed, the persistent managed block
-    is required and reconciliation converges it."""
+class RetiredHostInstallationPreserved(unittest.TestCase):
+    """The non-negotiable property.
+
+    An operator who already ran the retired adapter has files on disk.
+    Every documented update path must leave every one of them
+    byte-for-byte identical: the host config, the plugin registration,
+    the instruction file, and the user's own text around it.
+    """
 
     def setUp(self):
         self.tmpdir, self.env = _sandbox_home(self)
         self.home = self.tmpdir / "home"
-        _install_integration(self.home)
-        self.target = _openclaw_target(self.home)
+        self.target = _seed_pre_existing_installation(self.home)
+        self.before = _fingerprint(self.home / ".openclaw")
 
-    def test_missing_block_is_installed(self):
-        """Integration installed + block missing -> block is installed."""
-        self.assertFalse(self.target.exists())
-        result = _reconcile(self.home, "--only", "mpm-memory-openclaw")
+    def _assert_preserved(self, label: str):
+        after = _fingerprint(self.home / ".openclaw")
+        self.assertEqual(
+            sorted(after), sorted(self.before),
+            f"{label}: the retired host's installation changed shape — "
+            f"files were added or removed. before={sorted(self.before)} "
+            f"after={sorted(after)}",
+        )
+        for rel, original in self.before.items():
+            self.assertEqual(
+                after[rel], original,
+                f"{label}: {rel} was rewritten by the update path",
+            )
+
+    def test_the_reconcile_path_leaves_the_installation_untouched(self):
+        result = _reconcile(self.home)
         self.assertEqual(
             result.returncode, 0,
             f"reconcile failed:\nstdout={result.stdout}\nstderr={result.stderr}",
         )
-        self.assertTrue(
-            self.target.is_file(),
-            "reconciliation must install the managed block when the "
-            "OpenClaw MPM integration is already present",
-        )
-        text = self.target.read_text(encoding="utf-8")
-        self.assertIn(
-            "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->", text,
-        )
+        self._assert_preserved("reconcile_managed_blocks.py")
 
-    def test_stale_block_is_refreshed(self):
-        """Integration installed + block stale -> block is refreshed to
-        the current canonical render."""
-        self.target.parent.mkdir(parents=True, exist_ok=True)
-        self.target.write_text(
-            "persona line above\n\n"
-            "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->\n"
-            "stale body from an old contract\n"
-            "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->\n"
-            "user line below\n",
-            encoding="utf-8",
-        )
-        result = _reconcile(self.home, "--only", "mpm-memory-openclaw")
-        self.assertEqual(
-            result.returncode, 0,
-            f"reconcile failed:\nstdout={result.stdout}\nstderr={result.stderr}",
-        )
+    def test_the_reconcile_path_for_the_absent_adapter_is_a_no_op(self):
+        """Asking for the retired adapter by name must not do anything
+        at all."""
+        result = _reconcile(self.home, "--only", RETIRED_ADAPTER)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self._assert_preserved("reconcile --only <absent adapter>")
+
+    def test_a_missing_block_is_not_installed(self):
+        """The seeded installation's managed block is NOT (re)written.
+
+        The adapter that would have repaired it is gone; nothing else
+        may take its place and start writing the host's file.
+        """
         text = self.target.read_text(encoding="utf-8")
-        self.assertNotIn("stale body from an old contract", text)
-        self.assertIn(
+        self.assertNotIn(
             _canonical_block_heading(), text,
-            "the refreshed block must carry the canonical heading",
+            "the fixture precondition failed: the seeded block already "
+            "carries the shipped host's canonical heading",
         )
+        result = _reconcile(self.home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self._assert_preserved("reconcile (missing block)")
+        self.assertNotIn(
+            _canonical_block_heading(),
+            self.target.read_text(encoding="utf-8"),
+            "the update path must not install a managed block into a "
+            "retired host's file",
+        )
+
+    def test_a_stale_block_is_not_refreshed(self):
+        """A stale block in a retired host's file stays stale.
+
+        MPM no longer supports that host, so it has no business
+        rewriting the operator's file — even to a newer contract.
+        """
+        result = _reconcile(self.home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = self.target.read_text(encoding="utf-8")
+        self.assertIn(
+            "the managed block an older MPM wrote", text,
+            "the stale block must be left exactly as it was",
+        )
+        self._assert_preserved("reconcile (stale block)")
 
     def test_user_content_outside_block_preserved_byte_for_byte(self):
-        """Content above and below the managed markers must survive a
+        """Content above and below the managed markers survives a
         refresh byte-for-byte."""
         above = "# SOUL.md\n\npersona: 808\n\nuser notes line one\nuser notes line two\n"
         below = "\ntrailing user content\nsecond trailing line\n"
         self.target.parent.mkdir(parents=True, exist_ok=True)
-        _reconcile(self.home, "--only", "mpm-memory-openclaw")
-        self.assertTrue(self.target.is_file())
-        # Inject user content around the freshly installed block, then
-        # force a refresh.
-        text = self.target.read_text(encoding="utf-8")
-        begin = "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->"
-        end = "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->"
-        b = text.find(begin)
-        e = text.find(end) + len(end) + 1
-        self.target.write_text(above + text[b:e] + below, encoding="utf-8")
+        self.target.write_text(above + self.target.read_text(encoding="utf-8") + below,
+                               encoding="utf-8")
+        before = self.target.read_bytes()
 
-        # Drift the block so the second run has real work to do.
-        current = self.target.read_text(encoding="utf-8")
-        heading = _managed_block_heading(current)
-        stale = current.replace(heading, "# MPM stale heading", 1)
-        self.assertNotEqual(
-            stale, current,
-            "the drift fixture did not change the installed block, so this "
-            "test would pass without exercising the refresh path",
-        )
-        self.target.write_text(stale, encoding="utf-8")
-
-        result = _reconcile(self.home, "--only", "mpm-memory-openclaw")
+        result = _reconcile(self.home)
         self.assertEqual(
             result.returncode, 0,
             f"reconcile failed:\nstdout={result.stdout}\nstderr={result.stderr}",
@@ -737,14 +774,18 @@ class OpenClawManagedBlockRepaired(unittest.TestCase):
             f"content below the managed block must be preserved verbatim.\n"
             f"--- got tail ---\n{after[-200:]!r}",
         )
-        self.assertIn(_canonical_block_heading(), after)
+        self.assertEqual(
+            self.target.read_bytes(), before,
+            "the retired host's file must be byte-identical after the "
+            "update path",
+        )
 
     def test_second_reconciliation_is_a_noop(self):
         """Reconciliation is idempotent: a second run leaves the file
         byte-identical."""
-        _reconcile(self.home, "--only", "mpm-memory-openclaw")
+        _reconcile(self.home)
         first = self.target.read_bytes()
-        result = _reconcile(self.home, "--only", "mpm-memory-openclaw")
+        result = _reconcile(self.home)
         self.assertEqual(result.returncode, 0, result.stderr)
         second = self.target.read_bytes()
         self.assertEqual(
@@ -752,19 +793,76 @@ class OpenClawManagedBlockRepaired(unittest.TestCase):
             "a second reconciliation must be a byte-stable no-op",
         )
 
+    def test_the_shipped_host_is_still_reconciled(self):
+        """THE NON-VACUITY CONTROL.
+
+        Every assertion above says "the update path did nothing". That
+        is only meaningful if the update path still DOES something for
+        the host that is shipped. This test drives the same harness
+        against OpenCode and asserts that the drift IS detected and
+        repaired.
+
+        Without it, a reconciler that had stopped reconciling anything
+        would pass this whole file.
+        """
+        shipped = _shipped_target(self.home)
+        shipped.parent.mkdir(parents=True, exist_ok=True)
+        shipped.write_text(
+            "persona line above\n\n"
+            "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->\n"
+            "stale body from an old contract\n"
+            "<!-- END MPM-MANAGED SECTION:opencode-instructions -->\n"
+            "user line below\n",
+            encoding="utf-8",
+        )
+        before = _fingerprint(self.home / ".openclaw")
+
+        result = _reconcile(self.home, "--only", "mpm-opencode")
+        self.assertEqual(
+            result.returncode, 0,
+            f"reconcile failed:\nstdout={result.stdout}\nstderr={result.stderr}",
+        )
+        text = shipped.read_text(encoding="utf-8")
+        self.assertNotIn(
+            "stale body from an old contract", text,
+            "the reconciler must still REPAIR the shipped host's stale "
+            "block; if it does not, this file's preservation assertions "
+            "are vacuous",
+        )
+        self.assertIn(
+            _canonical_block_heading(), text,
+            "the repaired block must carry the canonical heading",
+        )
+        self.assertIn("persona line above", text)
+        self.assertIn("user line below", text)
+        # ...and the retired host's own installation is still untouched
+        # by that same run.
+        after = _fingerprint(self.home / ".openclaw")
+        for rel, original in before.items():
+            self.assertEqual(
+                after[rel], original,
+                f"{rel}: the retired host's installation must be untouched "
+                "even when the shipped host IS reconciled",
+            )
+
 
 # ---------------------------------------------------------------------------
-# 3. Diagnostics report the new contract.
+# 3. Diagnostics must not report a retired host.
 # ---------------------------------------------------------------------------
 
-class OpenClawDiagnostics(unittest.TestCase):
-    """Installed-block diagnostics must not report an installed OpenClaw
-    with a missing block as a healthy intentional state."""
+class RetiredHostDiagnostics(unittest.TestCase):
+    """A retired host is not MPM's business any more.
+
+    Reporting it — as PASS, as drift, or as ABSENT — would tell the
+    operator to repair an integration MPM no longer supports, and
+    would make the diagnostic's exit code a function of hosts MPM has
+    retired.
+    """
 
     def setUp(self):
         self.tmpdir, _ = _sandbox_home(self)
         self.home = self.tmpdir / "home"
-        self.target = _openclaw_target(self.home)
+        self.target = _retired_target(self.home)
 
     def _check(self) -> subprocess.CompletedProcess:
         return _run(
@@ -772,31 +870,40 @@ class OpenClawDiagnostics(unittest.TestCase):
             env=os.environ.copy(),
         )
 
-    def _openclaw_row(self, proc: subprocess.CompletedProcess) -> dict:
-        rows = json.loads(proc.stdout)
-        return next(r for r in rows if r["host"] == "openclaw")
+    def _hosts(self, proc: subprocess.CompletedProcess) -> list[str]:
+        return sorted(r["host"] for r in json.loads(proc.stdout))
 
-    def test_pass_when_block_current(self):
+    def test_a_current_block_is_not_reported(self):
         _install_integration(self.home)
-        _reconcile(self.home, "--only", "mpm-memory-openclaw")
-        row = self._openclaw_row(self._check())
-        self.assertEqual(row["verdict"], "PASS", row["detail"])
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        self.target.write_text(
+            "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->\n"
+            "current\n"
+            "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->\n",
+            encoding="utf-8",
+        )
+        proc = self._check()
+        self.assertEqual(
+            self._hosts(proc), ["opencode"],
+            "the diagnostic must report exactly the shipped hosts",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
-    def test_warn_when_block_missing_on_installed_integration(self):
+    def test_a_missing_block_is_not_reported_as_drift(self):
         _install_integration(self.home)
         self.target.parent.mkdir(parents=True, exist_ok=True)
         self.target.write_text("persona only, no block\n", encoding="utf-8")
         proc = self._check()
-        row = self._openclaw_row(proc)
         self.assertEqual(
-            row["verdict"], "WARN",
-            "an installed OpenClaw integration with a missing managed block "
-            "is drift, not a healthy intentional state",
+            self._hosts(proc), ["opencode"],
+            "a retired host with a missing block must not be reported",
         )
-        self.assertEqual(row["file"], "present")
-        self.assertEqual(row["block"], "absent")
+        self.assertEqual(
+            proc.returncode, 0,
+            f"a retired host must not fail the diagnostic; stdout={proc.stdout}",
+        )
 
-    def test_warn_when_block_stale_on_installed_integration(self):
+    def test_a_stale_block_is_not_reported_as_drift(self):
         _install_integration(self.home)
         self.target.parent.mkdir(parents=True, exist_ok=True)
         self.target.write_text(
@@ -805,53 +912,44 @@ class OpenClawDiagnostics(unittest.TestCase):
             "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->\n",
             encoding="utf-8",
         )
-        row = self._openclaw_row(self._check())
-        self.assertEqual(row["verdict"], "WARN", row["detail"])
+        proc = self._check()
+        self.assertEqual(
+            self._hosts(proc), ["opencode"],
+            "a retired host with a stale block must not be reported",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
-    def test_absent_when_integration_not_installed(self):
-        """A machine that does not use OpenClaw reports ABSENT, which is
-        informational and not a failure."""
+    def test_a_retired_host_is_not_reported_at_all(self):
+        """Not even as ABSENT: a retired host is not MPM's business."""
         self.target.parent.mkdir(parents=True, exist_ok=True)
         self.target.write_text("persona only, no block\n", encoding="utf-8")
         proc = self._check()
-        row = self._openclaw_row(proc)
         self.assertEqual(
-            row["verdict"], "ABSENT",
-            "OpenClaw integration is not installed here, so this is "
-            "informational",
+            self._hosts(proc), ["opencode"],
+            "the retired host must not appear in the diagnostic at all",
         )
-        self.assertEqual(
-            proc.returncode, 0,
-            f"ABSENT must remain informational (exit 0); stdout={proc.stdout}",
-        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
 # ---------------------------------------------------------------------------
-# 5. CLI-fallback mode — the real machine's shape.
+# 4. The CLI-fallback shape — the real machine's shape.
 # ---------------------------------------------------------------------------
 
-class OpenClawCliFallbackMode(unittest.TestCase):
-    """The regression that matters most.
+class RetiredHostCliFallbackShape(unittest.TestCase):
+    """The shape a live investigation found on the real machine.
 
-    A live investigation of the real machine established that its
-    OpenClaw reaches MPM with NO mpm-memory-openclaw plugin installed
-    at all: no `~/.openclaw/extensions/`, no `plugins.entries.*`, no
-    `plugins.slots.memory`. The agent reaches MPM through `mpm call
-    <tool>` over its shell tool, and the managed block is what tells
-    it that fallback exists.
+    The host reaches MPM with NO MPM plugin installed at all: no
+    `~/.openclaw/extensions/`, no `plugins.entries.*`. The agent
+    reaches MPM through `mpm call <tool>` over its shell tool.
 
-    A plugin-only detector classifies that machine as "integration not
-    installed" and therefore never repairs the block on the exact
-    machine whose runtime behaviour proved the block is required.
-
-    These tests pin both halves of the corrected rule: the real shape
-    IS reconciled, and an unrelated OpenClaw is still left alone.
+    With the adapter retired, none of that is MPM's business any more
+    — but every update path must still leave it alone.
     """
 
     def setUp(self):
         self.tmpdir, _ = _sandbox_home(self)
         self.home = self.tmpdir / "home"
-        self.target = _openclaw_target(self.home)
+        self.target = _retired_target(self.home)
 
     def _check(self) -> subprocess.CompletedProcess:
         return _run(
@@ -859,140 +957,109 @@ class OpenClawCliFallbackMode(unittest.TestCase):
             env=os.environ.copy(),
         )
 
-    def _openclaw_row(self, proc: subprocess.CompletedProcess) -> dict:
-        rows = json.loads(proc.stdout)
-        return next(r for r in rows if r["host"] == "openclaw")
+    def _hosts(self, proc: subprocess.CompletedProcess) -> list[str]:
+        return sorted(r["host"] for r in json.loads(proc.stdout))
 
     def test_no_plugin_present_in_this_fixture(self):
         """Guards the fixture itself: if a future edit adds a plugin
-        entry, this class stops testing CLI-fallback mode and would
-        pass for the wrong reason."""
+        entry, this class stops testing the CLI-fallback shape and
+        would pass for the wrong reason."""
         _install_cli_fallback_integration(self.home)
         self.assertFalse((self.home / ".openclaw" / "extensions").exists())
         config = json.loads(
             (self.home / ".openclaw" / "openclaw.json").read_text(encoding="utf-8")
         )
-        self.assertNotIn("mpm-memory-openclaw", config["plugins"]["entries"])
+        self.assertNotIn(RETIRED_ADAPTER, config["plugins"]["entries"])
 
-    def test_missing_block_on_cli_fallback_host_is_repaired(self):
-        """THE regression. Real-machine shape + missing managed block
-        -> reconciliation writes the block."""
+    def test_a_cli_fallback_host_is_left_alone(self):
+        """The update path must not write the host's instruction file."""
         _install_cli_fallback_integration(self.home)
         self.assertFalse(
             self.target.exists(),
-            "fixture precondition: SOUL.md starts with no managed block",
+            "fixture precondition: the instruction file starts with no "
+            "managed block",
         )
+        before = _fingerprint(self.home / ".openclaw")
 
-        result = _reconcile(self.home, "--only", "mpm-memory-openclaw")
+        result = _reconcile(self.home)
 
         self.assertEqual(
             result.returncode, 0,
-            f"reconcile must succeed on a CLI-fallback host. "
-            f"stdout={result.stdout!r} stderr={result.stderr!r}",
+            f"reconcile must succeed. stdout={result.stdout!r} "
+            f"stderr={result.stderr!r}",
         )
-        self.assertIn("openclaw", result.stdout)
-        self.assertNotIn(
-            "SKIP", result.stdout,
-            "a CLI-fallback host must NOT be skipped as 'integration not "
-            f"installed'. stdout={result.stdout!r}",
-        )
-        self.assertTrue(
+        self.assertFalse(
             self.target.exists(),
-            "the managed block must be written on a CLI-fallback host",
+            "the update path must not create a managed block for a "
+            "retired host",
         )
-        self.assertIn(
-            "MPM MANAGED BLOCK", self.target.read_text(encoding="utf-8"),
-            "written file must contain the canonical managed block",
-        )
+        after = _fingerprint(self.home / ".openclaw")
+        self.assertEqual(after, before, "the CLI-fallback host's files changed")
 
-    def test_block_converges_and_second_run_is_a_no_op(self):
-        """Repair converges; re-running changes nothing."""
+    def test_a_second_pass_is_a_no_op(self):
+        """Re-running changes nothing."""
         _install_cli_fallback_integration(self.home)
-        _reconcile(self.home, "--only", "mpm-memory-openclaw")
-        first = self.target.read_bytes()
+        _reconcile(self.home)
+        first = _fingerprint(self.home / ".openclaw")
 
-        _reconcile(self.home, "--only", "mpm-memory-openclaw")
-        second = self.target.read_bytes()
+        _reconcile(self.home)
+        second = _fingerprint(self.home / ".openclaw")
 
         self.assertEqual(
             first, second,
-            "a second reconcile on a converged CLI-fallback host must be "
-            "byte-stable",
+            "a second reconcile must be byte-stable",
         )
 
-    def test_unrelated_openclaw_is_still_untouched(self):
-        """MPM is installed AND OpenClaw is installed, but this
-        OpenClaw was never integrated. Reachability alone must not opt
-        it in."""
+    def test_an_unrelated_host_is_still_untouched(self):
+        """MPM is installed AND the host is installed, but this host was
+        never integrated. Reachability alone must not opt it in."""
         _install_unrelated_openclaw(self.home)
         before = self.target.read_bytes()
 
-        result = _reconcile(self.home, "--only", "mpm-memory-openclaw")
+        _reconcile(self.home)
 
-        self.assertIn(
-            "integration not installed", result.stdout,
-            f"an unrelated OpenClaw must be skipped. stdout={result.stdout!r}",
-        )
         self.assertEqual(
             before, self.target.read_bytes(),
-            "an unrelated OpenClaw's SOUL.md must be byte-for-byte untouched",
+            "an unrelated host's instruction file must be byte-for-byte "
+            "untouched",
         )
 
-    def test_diagnostic_agrees_with_reconciliation(self):
-        """Reconciliation and the diagnostic must not disagree.
-
-        Both derive from the reconciler's `integration_installed`, so a
-        divergence here means one of them stopped sharing the gate.
-        """
+    def test_the_diagnostic_does_not_report_a_cli_fallback_host(self):
+        """The diagnostic must not report a retired host as drift."""
         _install_cli_fallback_integration(self.home)
         self.target.parent.mkdir(parents=True, exist_ok=True)
         self.target.write_text("persona only, no block\n", encoding="utf-8")
 
-        row = self._openclaw_row(self._check())
+        proc = self._check()
         self.assertEqual(
-            row["verdict"], "WARN",
-            "diagnostic must treat a CLI-fallback host with a missing block "
-            f"as drift, not as an unused host. detail={row['detail']!r}",
+            self._hosts(proc), ["opencode"],
+            "the diagnostic must not report a retired host, even on the "
+            "CLI-fallback shape",
         )
-        self.assertEqual(row["file"], "present")
-        self.assertEqual(row["block"], "absent")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
-    def test_diagnostic_reports_absent_for_unrelated_openclaw(self):
+    def test_the_diagnostic_does_not_report_an_unrelated_host(self):
         """The other half of the consistency property."""
         _install_unrelated_openclaw(self.home)
         proc = self._check()
-        row = self._openclaw_row(proc)
-        self.assertEqual(
-            row["verdict"], "ABSENT",
-            f"an unrelated OpenClaw is informational, not drift. "
-            f"detail={row['detail']!r}",
+        self.assertEqual(self._hosts(proc), ["opencode"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_the_diagnostic_reports_pass_for_the_shipped_host(self):
+        """The control: the diagnostic still has a subject."""
+        shipped = _shipped_target(self.home)
+        shipped.parent.mkdir(parents=True, exist_ok=True)
+        shipped.write_text(
+            "persona only, no block\n", encoding="utf-8",
         )
-        self.assertEqual(proc.returncode, 0)
-
-    def test_diagnostic_reports_pass_after_repair(self):
-        """Once repaired, a CLI-fallback host reads PASS."""
-        _install_cli_fallback_integration(self.home)
-        _reconcile(self.home, "--only", "mpm-memory-openclaw")
-        row = self._openclaw_row(self._check())
+        rows = {r["host"]: r for r in json.loads(self._check().stdout)}
         self.assertEqual(
-            row["verdict"], "PASS",
-            f"a repaired CLI-fallback host must read PASS. detail={row['detail']!r}",
+            rows["opencode"]["verdict"], "WARN",
+            "the shipped host's missing block must still read as drift; "
+            "if it does not, this file's 'not reported' assertions are "
+            "vacuous",
         )
 
-
-# ---------------------------------------------------------------------------
-# 6. Sandbox lifecycle (issue #49).
-#
-# The classes above are the SAFETY contract. This one is the RESOURCE
-# contract: the sandboxes they create must not survive them.
-#
-# A regression test that merely asserted "the cleanup helper was
-# called" would have PASSED against the old
-# `shutil.rmtree(..., ignore_errors=True)`: that helper did run, and it
-# did leave ~98 MB behind. So these tests assert on the filesystem
-# instead — a sandbox that cannot be removed must be reported with its
-# path, and a sandbox that can be removed must actually be gone.
-# ---------------------------------------------------------------------------
 
 def _force_remove(path: Path) -> None:
     """Best-effort removal for a fixture this module built DELIBERATELY
@@ -1228,7 +1295,6 @@ class SandboxLifecycle(unittest.TestCase):
                 f"{name} resolves inside the sandbox HOME ({value}); the "
                 "toolchain would populate a private, read-only copy there",
             )
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

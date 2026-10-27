@@ -1,6 +1,9 @@
 import os
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+# The library is host-independent: it lives at agent_installation/lib/,
+# not inside any adapter directory, so a host retirement cannot take it
+# with it. The path insert is the only change this test needed.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 
 import json
 import socket

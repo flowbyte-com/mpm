@@ -57,10 +57,9 @@ The contract:
     call) OR a directive that points to the canonical protocol for
     the answer. If the union is silent, the test fails and the
     reference stack has a behavioural hole.
-  - The test runs against the ACTUAL installed files on this machine
-    (~/.claude/CLAUDE.md and ~/.pi/agent/AGENTS.md) plus the source
-    snippets for OpenCode and Hermes (which don't have a globally
-    installed file here).
+  - The test runs against the ACTUAL installed file on this machine
+    (~/.config/opencode/AGENTS.md) plus the source snippet for OpenCode
+    (which does not have a globally installed file here).
 
 See MPM feature-driven audit, 2026-09-04.
 """
@@ -173,31 +172,27 @@ BEHAVIOURAL_QUESTIONS = (
 # --- the installed surfaces under audit -------------------------------------
 
 
-CLAUDE_INSTALLED = Path(os.path.expanduser("~/.claude/CLAUDE.md"))
-PI_INSTALLED = Path(os.path.expanduser("~/.pi/agent/AGENTS.md"))
+OPENCODE_INSTALLED = Path(
+    os.path.expanduser("~/.config/opencode/AGENTS.md"),
+)
 
-# Snippets that don't have a globally installed file on this machine
-# (Hermes is per-project; OpenCode isn't installed). Audit them as the
-# authoritative source instead — that's what would be installed if/when
-# the host plugin runs. Path is derived from the test file location so
-# the suite runs in any environment (CI, fresh clone, alternate mount).
+# The snippet is audited as the authoritative source — it is what gets
+# installed if/when the host plugin runs, and it is present on every
+# machine. Path is derived from the test file location so the suite
+# runs in any environment (CI, fresh clone, alternate mount).
 # Previously hardcoded to /home/v/workspace/projects/mpm — see the
 # fix-history in test_render_managed_blocks.py / test_clean_install_roundtrip.py
-# / test_cross_adapter_contract_parity.py / test_refresh_installed.py.
+# / test_refresh_installed.py.
 AGENT_INSTALLATION = Path(__file__).resolve().parent.parent
-HERMES_SNIPPET = AGENT_INSTALLATION / "mpm-hermes" / "templates" / "hermes.md.snippet"
 OPENCODE_SNIPPET = AGENT_INSTALLATION / "mpm-opencode" / "templates" / "AGENTS.md.snippet"
-CLAUDE_SNIPPET = AGENT_INSTALLATION / "mpm-claude-code" / "templates" / "CLAUDE.md.snippet"
-PI_SNIPPET = AGENT_INSTALLATION / "mpm-pi" / "templates" / "AGENTS.md.snippet"
 
 
+# OpenCode is the only supported host since the 2026-10-27 adapter
+# removal, so these are the only surfaces under audit. A retired
+# host's installed file is not MPM's business any more.
 SURFACES = [
-    ("claude-installed", CLAUDE_INSTALLED),
-    ("claude-snippet", CLAUDE_SNIPPET),
+    ("opencode-installed", OPENCODE_INSTALLED),
     ("opencode-snippet", OPENCODE_SNIPPET),
-    ("pi-installed", PI_INSTALLED),
-    ("pi-snippet", PI_SNIPPET),
-    ("hermes-snippet", HERMES_SNIPPET),
 ]
 
 
@@ -352,15 +347,10 @@ class LivePersistenceContract(unittest.TestCase):
             f"navigate to canonical reference material",
         )
 
-    def test_claude_installed_has_universal_block(self):
-        if not CLAUDE_INSTALLED.exists():
-            self.skipTest(f"not installed: {CLAUDE_INSTALLED}")
-        self._assert_has_universal_block("claude-installed", CLAUDE_INSTALLED)
-
-    def test_pi_installed_has_universal_block(self):
-        if not PI_INSTALLED.exists():
-            self.skipTest(f"not installed: {PI_INSTALLED}")
-        self._assert_has_universal_block("pi-installed", PI_INSTALLED)
+    def test_opencode_installed_has_universal_block(self):
+        if not OPENCODE_INSTALLED.exists():
+            self.skipTest(f"not installed: {OPENCODE_INSTALLED}")
+        self._assert_has_universal_block("opencode-installed", OPENCODE_INSTALLED)
 
     def test_installed_files_match_snippets_universal_block(self):
         """If the installed file's managed section doesn't carry the
@@ -368,8 +358,7 @@ class LivePersistenceContract(unittest.TestCase):
         (or no-op'd). Detect it. Pre-refactor installed files are
         skipped — they pre-date this convention."""
         pairs = [
-            ("claude", CLAUDE_INSTALLED, CLAUDE_SNIPPET),
-            ("pi", PI_INSTALLED, PI_SNIPPET),
+            ("opencode", OPENCODE_INSTALLED, OPENCODE_SNIPPET),
         ]
         for name, installed, snippet in pairs:
             if not installed.exists():

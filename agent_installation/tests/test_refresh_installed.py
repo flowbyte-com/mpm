@@ -90,11 +90,8 @@ class RefreshInstalledTargetRegistered(unittest.TestCase):
         # installer names. This pins the host-agnostic invariant from
         # the install target's perspective.
         for forbidden in [
-            "mpm-claude-code/scripts/install_claude_instructions.py",
             "mpm-opencode/install.sh",
             "mpm-opencode/scripts/install_agents_instructions.py",
-            "mpm-pi/scripts/install_agents_instructions.py",
-            "mpm-memory-openclaw/install.sh",
         ]:
             self.assertNotIn(
                 forbidden, self.recipe_body,
@@ -137,41 +134,16 @@ class RefreshInstalledPathsResolve(unittest.TestCase):
             "delegates to this entry point.",
         )
 
-    def test_claude_code_installer_exists(self):
-        self.assertTrue(
-            (AGENT_INSTALL_DIR / "mpm-claude-code" / "scripts" / "install_claude_instructions.py").is_file(),
-            "mpm-claude-code installer missing",
-        )
-
     def test_opencode_installer_exists(self):
         self.assertTrue(
             (AGENT_INSTALL_DIR / "mpm-opencode" / "scripts" / "install_agents_instructions.py").is_file(),
             "mpm-opencode installer missing",
         )
 
-    def test_pi_installer_exists(self):
-        self.assertTrue(
-            (AGENT_INSTALL_DIR / "mpm-pi" / "scripts" / "install_agents_instructions.py").is_file(),
-            "mpm-pi installer missing",
-        )
-
-    def test_hermes_installer_exists(self):
-        # The hermes installer is part of the supported adapter set
-        # even though `make refresh-installed` skips the installed-
-        # block step (no installed managed block in this environment).
-        # The script itself must still exist on disk.
-        self.assertTrue(
-            (AGENT_INSTALL_DIR / "mpm-hermes" / "scripts" / "install_hermes_instructions.py").is_file(),
-            "mpm-hermes installer missing",
-        )
-
     def test_all_template_snippets_exist(self):
         """The installers consume these per-host rendered snippets."""
         expected = {
-            "mpm-claude-code": "mpm-claude-code/templates/CLAUDE.md.snippet",
             "mpm-opencode":    "mpm-opencode/templates/AGENTS.md.snippet",
-            "mpm-pi":          "mpm-pi/templates/AGENTS.md.snippet",
-            "mpm-hermes":      "mpm-hermes/templates/hermes.md.snippet",
         }
         for name, rel in expected.items():
             path = AGENT_INSTALL_DIR / rel

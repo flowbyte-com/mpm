@@ -1,4 +1,4 @@
-"""Runtime-package provisioning contract for the OpenClaw adapters.
+"""Runtime-package provisioning contract for the shipped adapter.
 
 The source/runtime split means the source checkout (``~/src/mpm``) and the
 runtime root (``~/.mpm``) are separate trees. Nothing in this repository
@@ -6,9 +6,9 @@ populates ``<runtime-root>/agent_installation/<plugin>/`` from Git, because
 Git no longer owns that path — it used to, when ``~/.mpm`` *was* the
 checkout.
 
-The adapters therefore have to provision a runtime package themselves and
-link THAT, rather than linking their own source directory. Two failure
-shapes matter and both are pinned here:
+The adapter therefore has to provision a runtime package itself and link
+THAT, rather than linking its own source directory. Two failure shapes
+matter and both are pinned here:
 
   A. Post-split world: source checkout lives outside the runtime root and
      the runtime tree was never provisioned. A normal install must produce
@@ -17,12 +17,27 @@ shapes matter and both are pinned here:
 
   B. The exact broken state observed on the live host: the runtime plugin
      directory exists but holds only empty directories and ``__pycache__``
-     residue, with ``index.js`` / ``package.json`` / ``openclaw.plugin.json``
-     all absent. It looks installed and loads nothing. A normal reinstall
-     must repair it.
+     residue, with the payload entries all absent. It looks installed and
+     loads nothing. A normal reinstall must repair it.
 
 Every test runs against a temporary runtime prefix. The real ``~/.mpm``,
-the real OpenClaw config, and the production database are never touched.
+the real host configuration, and the production database are never touched.
+
+THE SOURCE TREE IS SYNTHESISED, NOT THE REAL ONE
+------------------------------------------------
+
+The shipped adapter's ``dist/`` is a build artefact (``npm ci`` +
+``tsc``) and is gitignored, so a CI job that has not built the adapter
+cannot stage the real tree. The property under test here is the
+*library's* behaviour given a manifest and a source tree — not the
+adapter's build output — so the source tree is synthesized with exactly
+the shape the manifest declares. The manifest itself is checked against
+the real ``install.sh`` in ``TestManifestMatchesInstaller``, so the
+synthetic tree can never drift away from what the installer stages.
+
+After the 2026-10-27 OpenCode-only adapter removal this suite covers
+OpenCode alone. The OpenClaw and Pi adapters took their own scenarios
+with them; the shared library and the OpenCode payload contract stayed.
 """
 
 from __future__ import annotations
@@ -40,39 +55,77 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENT_DIR = REPO_ROOT / "agent_installation"
 STAGE_LIB = AGENT_DIR / "scripts" / "stage_runtime_package.sh"
 
-# The two OpenClaw adapters, with the runtime manifest each one stages.
-OPENCLAW_PLUGINS: dict[str, tuple[Path, list[str]]] = {
-    "mpm-memory-openclaw": (
-        AGENT_DIR / "mpm-memory-openclaw",
-        [
-            "index.js",
-            "openclaw.plugin.json",
-            "package.json",
-            "README.md",
-            ".mcp.json",
-            "lib/workspace.js",
-            "lib/mcp-client.js",
-            "lib/memory-transport.js",
-        ],
-    ),
-    "mpm-auto-mode-persona-openclaw": (
-        AGENT_DIR / "mpm-auto-mode-persona-openclaw",
-        [
-            "index.js",
-            "openclaw.plugin.json",
-            "package.json",
-            "README.md",
-            "lib/workspace.js",
-        ],
-    ),
-}
+# The plugin id of the shipped adapter.
+PLUGIN_ID = "mpm-opencode"
+
+# The OpenCode runtime manifest — a mirror of install.sh's
+# OPENCODE_RUNTIME_MANIFEST. TestManifestMatchesInstaller fails if the
+# two ever drift.
+OPENCODE_MANIFEST = [
+    "server.js",
+    "dist/index.v2.js",
+    "dist/wake-context.js",
+    "dist/event-envelope.js",
+    "dist/event-mapper.js",
+    "dist/event-subscriber.js",
+    "dist/workspace.js",
+    "dist/resolve-mpm-binary.js",
+    "package.json",
+]
+
+# The validator the OpenCode installer selects. The library's DEFAULT
+# validator is the historical OpenClaw one; the OpenCode installer
+# overrides it with this hook.
+OPENCODE_VALIDATOR = "mpm_validate_runtime_package_opencode"
 
 # Never shipped to the runtime root, whatever else changes.
 DEV_RESIDUE = ("tests", "__pycache__", "install.sh", "reconcile.json")
 
 
+def opencode_source_tree(root: Path) -> Path:
+    """A synthetic OpenCode-shaped source tree under `root`.
+
+    Mirrors the shape the runtime manifest declares: a root-level
+    ``server.js`` shim that re-exports the compiled payload, the
+    ``dist/`` payload modules, and a ``package.json`` whose ``main``
+    names the payload.
+    """
+    src = root / PLUGIN_ID
+    (src / "dist").mkdir(parents=True)
+    (src / "server.js").write_text(
+        'export { default } from "./dist/index.v2.js";\n', encoding="utf-8"
+    )
+    (src / "dist" / "index.v2.js").write_text(
+        'import { w } from "./workspace.js";\n'
+        'import { r } from "./resolve-mpm-binary.js";\n'
+        "export default { w, r };\n",
+        encoding="utf-8",
+    )
+    for name in (
+        "wake-context",
+        "event-envelope",
+        "event-mapper",
+        "event-subscriber",
+        "workspace",
+        "resolve-mpm-binary",
+    ):
+        (src / "dist" / f"{name}.js").write_text(
+            "export const x = () => {};\n", encoding="utf-8"
+        )
+    (src / "package.json").write_text(json.dumps({
+        "name": PLUGIN_ID,
+        "type": "module",
+        "main": "./dist/index.v2.js",
+    }), encoding="utf-8")
+    # Development surface the manifest must NOT carry.
+    (src / "tests").mkdir()
+    (src / "install.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (src / "reconcile.json").write_text("{}\n", encoding="utf-8")
+    return src
+
+
 def run_stage(src: Path, runtime_root: Path, plugin_id: str,
-              manifest: list[str]) -> subprocess.CompletedProcess:
+              manifest: list[str], validator: str | None = None) -> subprocess.CompletedProcess:
     """Drive the staging library directly, with a hermetic HOME."""
     home = runtime_root / "home"
     home.mkdir(parents=True, exist_ok=True)
@@ -83,6 +136,8 @@ def run_stage(src: Path, runtime_root: Path, plugin_id: str,
     ]
     env = dict(os.environ)
     env["HOME"] = str(home)
+    if validator is not None:
+        env["MPM_RUNTIME_PACKAGE_VALIDATOR"] = validator
     return subprocess.run(cmd, capture_output=True, text=True, env=env)
 
 
@@ -95,42 +150,46 @@ class StagingHarness(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="mpm-runtime-pkg-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.runtime = self.tmp / "rt"
+        self.src = opencode_source_tree(self.tmp)
 
-    def stage(self, plugin_id: str) -> subprocess.CompletedProcess:
-        src, manifest = OPENCLAW_PLUGINS[plugin_id]
-        return run_stage(src, self.runtime, plugin_id, manifest)
+    def stage(self, plugin_id: str = PLUGIN_ID,
+              manifest: list[str] | None = None,
+              validator: str = OPENCODE_VALIDATOR) -> subprocess.CompletedProcess:
+        return run_stage(
+            self.src, self.runtime, plugin_id,
+            OPENCODE_MANIFEST if manifest is None else manifest,
+            validator,
+        )
 
 
 class TestManifestMatchesInstaller(unittest.TestCase):
     """The fixture manifest must not drift from what the installer stages.
 
-    OPENCLAW_PLUGINS above is a hand-copied mirror of each plugin's
-    RUNTIME_PACKAGE_MANIFEST in its install.sh. Nothing enforced that,
-    so adding a runtime file to the installer alone left the real
-    installer correct and every staging test failing on an unresolved
-    import — the JS suite stayed green and only the Go gate caught it.
+    OPENCODE_MANIFEST above is a hand-copied mirror of the installer's
+    OPENCODE_RUNTIME_MANIFEST. Nothing enforced that, so adding a
+    runtime file to the installer alone would leave the real installer
+    correct and every staging test failing on an unresolved import —
+    the gate stayed green and only a later run caught it.
     """
 
     def test_fixture_manifest_matches_installer_manifest(self) -> None:
-        for plugin_id, (src, manifest) in OPENCLAW_PLUGINS.items():
-            with self.subTest(plugin=plugin_id):
-                install_sh = (src / "install.sh").read_text(encoding="utf-8")
-                block = re.search(
-                    r"RUNTIME_PACKAGE_MANIFEST=\(\s*(.*?)\n\)", install_sh, re.S
-                )
-                self.assertIsNotNone(
-                    block, f"{plugin_id}/install.sh has no RUNTIME_PACKAGE_MANIFEST"
-                )
-                declared = [
-                    line.strip()
-                    for line in block.group(1).splitlines()
-                    if line.strip()
-                ]
-                self.assertEqual(
-                    sorted(declared),
-                    sorted(manifest),
-                    f"{plugin_id}: test manifest is out of sync with install.sh",
-                )
+        install_sh = (AGENT_DIR / PLUGIN_ID / "install.sh").read_text(encoding="utf-8")
+        block = re.search(
+            r"OPENCODE_RUNTIME_MANIFEST=\(\s*(.*?)\n\)", install_sh, re.S
+        )
+        self.assertIsNotNone(
+            block, f"{PLUGIN_ID}/install.sh has no OPENCODE_RUNTIME_MANIFEST"
+        )
+        declared = [
+            line.strip()
+            for line in block.group(1).splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(
+            sorted(declared),
+            sorted(OPENCODE_MANIFEST),
+            "the test manifest is out of sync with install.sh",
+        )
 
 
 class TestRuntimeRootDerivation(StagingHarness):
@@ -178,22 +237,17 @@ class TestPostSplitWorld(StagingHarness):
     """Regression A: source outside the runtime root, runtime unprovisioned."""
 
     def test_fresh_install_provisions_complete_package(self) -> None:
-        for plugin_id in OPENCLAW_PLUGINS:
-            with self.subTest(plugin=plugin_id):
-                res = self.stage(plugin_id)
-                self.assertEqual(res.returncode, 0, res.stderr)
-                pkg = Path(staging_stdout(res))
-                self.assertEqual(
-                    pkg, self.runtime / "agent_installation" / plugin_id
-                )
-                self.assertTrue(pkg.is_dir())
+        res = self.stage()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        pkg = Path(staging_stdout(res))
+        self.assertEqual(pkg, self.runtime / "agent_installation" / PLUGIN_ID)
+        self.assertTrue(pkg.is_dir())
 
-                manifest = json.loads((pkg / "openclaw.plugin.json").read_text())
-                self.assertEqual(manifest["id"], plugin_id)
-                self.assertEqual(manifest["id"], plugin_id)
+        for rel in OPENCODE_MANIFEST:
+            self.assertTrue((pkg / rel).is_file(), f"{rel} missing from the staged package")
 
-                pkgjson = json.loads((pkg / "package.json").read_text())
-                self.assertTrue((pkg / pkgjson["main"]).is_file())
+        pkgjson = json.loads((pkg / "package.json").read_text())
+        self.assertTrue((pkg / pkgjson["main"]).is_file())
 
     def test_source_checkout_can_disappear_after_install(self) -> None:
         """The linked package must not depend on the checkout existing.
@@ -202,89 +256,82 @@ class TestPostSplitWorld(StagingHarness):
         package reaches back into the source tree, deleting the checkout
         breaks the live integration.
         """
-        src, manifest = OPENCLAW_PLUGINS["mpm-memory-openclaw"]
         copied = self.tmp / "src-copy"
-        shutil.copytree(src, copied)
-        res = run_stage(copied, self.runtime, "mpm-memory-openclaw", manifest)
+        shutil.copytree(self.src, copied)
+        res = run_stage(copied, self.runtime, PLUGIN_ID, OPENCODE_MANIFEST,
+                        OPENCODE_VALIDATOR)
         self.assertEqual(res.returncode, 0, res.stderr)
         pkg = Path(staging_stdout(res))
 
         shutil.rmtree(copied)
         self.assertFalse(copied.exists())
 
-        for rel in manifest:
+        for rel in OPENCODE_MANIFEST:
             self.assertTrue((pkg / rel).is_file(), f"{rel} missing after source removal")
         # No staged file may name the source tree it came from.
         for path in pkg.rglob("*"):
             if path.is_file() and path.suffix in {".js", ".json", ".md"}:
                 text = path.read_text(encoding="utf-8", errors="replace")
                 self.assertNotIn(
-                    str(src), text,
+                    str(self.src), text,
                     f"{path} references the source checkout",
                 )
 
     def test_no_development_residue_ships(self) -> None:
-        for plugin_id in OPENCLAW_PLUGINS:
-            with self.subTest(plugin=plugin_id):
-                res = self.stage(plugin_id)
-                pkg = Path(staging_stdout(res))
-                names = {p.name for p in pkg.rglob("*")}
-                for residue in ("tests", "__pycache__", "install.sh", "reconcile.json"):
-                    self.assertNotIn(residue, names)
-                self.assertEqual(
-                    [p for p in pkg.rglob("*.pyc")], [],
-                    "bytecode cache shipped to the runtime package",
-                )
+        res = self.stage()
+        pkg = Path(staging_stdout(res))
+        names = {p.name for p in pkg.rglob("*")}
+        for residue in DEV_RESIDUE:
+            self.assertNotIn(residue, names)
+        self.assertEqual(
+            [p for p in pkg.rglob("*.pyc")], [],
+            "bytecode cache shipped to the runtime package",
+        )
 
     def test_internal_imports_resolve_inside_the_package(self) -> None:
-        for plugin_id in OPENCLAW_PLUGINS:
-            with self.subTest(plugin=plugin_id):
-                res = self.stage(plugin_id)
-                pkg = Path(staging_stdout(res))
-                entry = pkg / "index.js"
-                self.assertIn('from "./lib/workspace.js"', entry.read_text())
-                self.assertTrue((pkg / "lib" / "workspace.js").is_file())
+        res = self.stage()
+        pkg = Path(staging_stdout(res))
+        entry = pkg / "dist" / "index.v2.js"
+        self.assertIn('from "./workspace.js"', entry.read_text())
+        self.assertTrue((pkg / "dist" / "workspace.js").is_file())
 
 
 class TestRepairsBrokenRuntimeState(StagingHarness):
     """Regression B: the exact incomplete-directory state observed live."""
 
-    def _make_broken(self, plugin_id: str) -> Path:
+    def _make_broken(self, plugin_id: str = PLUGIN_ID) -> Path:
         """Recreate the live signature: directories and caches only."""
         pkg = self.runtime / "agent_installation" / plugin_id
-        (pkg / "lib").mkdir(parents=True)
+        (pkg / "dist").mkdir(parents=True)
         (pkg / "scripts" / "__pycache__").mkdir(parents=True)
-        (pkg / "templates").mkdir(parents=True)
         (pkg / "tests" / "__pycache__").mkdir(parents=True)
-        (pkg / "scripts" / "__pycache__" / "install_openclaw_instructions.cpython-314.pyc").write_text("")
-        (pkg / "tests" / "__pycache__" / "test_install_openclaw_instructions.cpython-314.pyc").write_text("")
+        (pkg / "scripts" / "__pycache__" / "stale.cpython-314.pyc").write_text("")
+        (pkg / "tests" / "__pycache__" / "stale.cpython-314.pyc").write_text("")
         return pkg
 
     def test_reinstall_repairs_the_exact_broken_state(self) -> None:
-        for plugin_id in OPENCLAW_PLUGINS:
-            with self.subTest(plugin=plugin_id):
-                pkg = self._make_broken(plugin_id)
-                # Precondition: broken, and visibly so.
-                for missing in ("index.js", "package.json", "openclaw.plugin.json"):
-                    self.assertFalse((pkg / missing).exists())
+        pkg = self._make_broken()
+        # Precondition: broken, and visibly so.
+        for missing in ("server.js", "dist/index.v2.js", "package.json"):
+            self.assertFalse((pkg / missing).exists())
 
-                res = self.stage(plugin_id)
-                self.assertEqual(res.returncode, 0, res.stderr)
+        res = self.stage()
+        self.assertEqual(res.returncode, 0, res.stderr)
 
-                for required in ("index.js", "package.json", "openclaw.plugin.json"):
-                    self.assertTrue((pkg / required).is_file(), required)
-                data = json.loads((pkg / "openclaw.plugin.json").read_text())
-                self.assertEqual(data["id"], plugin_id)
-                self.assertEqual(
-                    [p for p in pkg.rglob("*.pyc")], [],
-                    "stale bytecode survived the repair",
-                )
+        for required in ("server.js", "dist/index.v2.js", "package.json"):
+            self.assertTrue((pkg / required).is_file(), required)
+        self.assertEqual(
+            [p for p in pkg.rglob("*.pyc")], [],
+            "stale bytecode survived the repair",
+        )
 
     def test_repair_sweeps_empty_directories_of_residue(self) -> None:
-        pkg = self._make_broken("mpm-memory-openclaw")
-        self.stage("mpm-memory-openclaw")
-        self.assertFalse((pkg / "scripts" / "__pycache__").exists())
-        self.assertFalse((pkg / "tests" / "__pycache__").exists())
+        self._make_broken()
+        self.stage()
+        self.assertFalse((self.runtime / "agent_installation" / PLUGIN_ID
+                          / "scripts" / "__pycache__").exists())
+        self.assertFalse((self.runtime / "agent_installation" / PLUGIN_ID
+                          / "tests" / "__pycache__").exists())
 
     def test_operator_file_is_preserved_across_reprovisioning(self) -> None:
         """Ownership: MPM replaces its own files and nothing else.
@@ -292,90 +339,97 @@ class TestRepairsBrokenRuntimeState(StagingHarness):
         An operator who dropped a local override into the runtime package
         must not have it silently deleted by the next install.
         """
-        pkg = self._make_broken("mpm-memory-openclaw")
+        pkg = self._make_broken()
         mine = pkg / "OPERATOR-NOTES.md"
         mine.write_text("operator-owned\n")
 
-        self.stage("mpm-memory-openclaw")
+        self.stage()
 
         self.assertTrue(mine.is_file(), "operator file was deleted by the installer")
         self.assertEqual(mine.read_text(), "operator-owned\n")
 
     def test_repeated_install_is_idempotent(self) -> None:
-        first = self.stage("mpm-memory-openclaw")
+        first = self.stage()
         pkg = Path(staging_stdout(first))
         snap = {p.relative_to(pkg): p.read_bytes()
                 for p in pkg.rglob("*") if p.is_file()}
 
-        second = self.stage("mpm-memory-openclaw")
+        second = self.stage()
         self.assertEqual(staging_stdout(second), str(pkg))
         again = {p.relative_to(pkg): p.read_bytes()
                  for p in pkg.rglob("*") if p.is_file()}
         self.assertEqual(snap, again)
 
     def test_converges_when_source_changes(self) -> None:
-        src, manifest = OPENCLAW_PLUGINS["mpm-memory-openclaw"]
-        res = self.stage("mpm-memory-openclaw")
+        res = self.stage()
         pkg = Path(staging_stdout(res))
-        self.assertNotIn("STAGED-MARKER", (pkg / "index.js").read_text())
+        self.assertNotIn("STAGED-MARKER", (pkg / "dist" / "index.v2.js").read_text())
 
         mutated = self.tmp / "mutated"
-        shutil.copytree(src, mutated)
-        target = mutated / "index.js"
+        shutil.copytree(self.src, mutated)
+        target = mutated / "dist" / "index.v2.js"
         target.write_text(target.read_text() + "\n// STAGED-MARKER\n")
 
-        run_stage(mutated, self.runtime, "mpm-memory-openclaw", manifest)
-        self.assertIn("STAGED-MARKER", (pkg / "index.js").read_text())
+        run_stage(mutated, self.runtime, PLUGIN_ID, OPENCODE_MANIFEST,
+                  OPENCODE_VALIDATOR)
+        self.assertIn("STAGED-MARKER", (pkg / "dist" / "index.v2.js").read_text())
 
 
 class TestStagingFailsClosed(StagingHarness):
     """A package that cannot be validated must never be exposed."""
 
     def test_missing_manifest_entry_in_source_aborts(self) -> None:
-        src, manifest = OPENCLAW_PLUGINS["mpm-memory-openclaw"]
-        res = run_stage(src, self.runtime, "mpm-memory-openclaw",
-                        manifest + ["lib/does_not_exist.js"])
+        res = run_stage(
+            self.src, self.runtime, PLUGIN_ID,
+            OPENCODE_MANIFEST + ["dist/does_not_exist.js"],
+            OPENCODE_VALIDATOR,
+        )
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("manifest entry not found in source", res.stderr)
         self.assertFalse((self.runtime / "agent_installation").exists())
 
-    def test_id_mismatch_aborts(self) -> None:
-        src, manifest = OPENCLAW_PLUGINS["mpm-memory-openclaw"]
-        res = run_stage(src, self.runtime, "some-other-plugin", manifest)
+    def test_missing_root_entry_aborts(self) -> None:
+        """A package without the loader-resolvable root entry is rejected.
+
+        OpenCode drops a directory registration without a root entry and
+        says nothing — so the stage must refuse it.
+        """
+        without = [m for m in OPENCODE_MANIFEST if m != "server.js"]
+        res = run_stage(self.src, self.runtime, PLUGIN_ID, without,
+                        OPENCODE_VALIDATOR)
         self.assertNotEqual(res.returncode, 0)
-        self.assertIn("plugin id mismatch", res.stderr)
+        self.assertIn("missing the root entry server.js", res.stderr)
 
     def test_unresolved_internal_import_aborts(self) -> None:
-        src, manifest = OPENCLAW_PLUGINS["mpm-memory-openclaw"]
-        without_lib = [m for m in manifest if not m.startswith("lib/")]
-        res = run_stage(src, self.runtime, "mpm-memory-openclaw", without_lib)
+        without = [m for m in OPENCODE_MANIFEST if m != "dist/workspace.js"]
+        res = run_stage(self.src, self.runtime, PLUGIN_ID, without,
+                        OPENCODE_VALIDATOR)
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("unresolved internal imports", res.stderr)
-        self.assertIn("./lib/workspace.js", res.stderr)
+        self.assertIn("./workspace.js", res.stderr)
 
     def test_failed_restage_leaves_previous_package_intact(self) -> None:
         """The swap is all-or-nothing; a bad run must not destroy a good install."""
-        src, manifest = OPENCLAW_PLUGINS["mpm-memory-openclaw"]
-        good = self.stage("mpm-memory-openclaw")
+        good = self.stage()
         pkg = Path(staging_stdout(good))
         before = {p.relative_to(pkg): p.read_bytes()
                   for p in pkg.rglob("*") if p.is_file()}
 
         broken_src = self.tmp / "broken-src"
-        shutil.copytree(src, broken_src)
-        (broken_src / "index.js").unlink()  # manifest entry vanishes
+        shutil.copytree(self.src, broken_src)
+        (broken_src / "server.js").unlink()  # manifest entry vanishes
 
-        bad = run_stage(broken_src, self.runtime, "mpm-memory-openclaw", manifest)
+        bad = run_stage(broken_src, self.runtime, PLUGIN_ID, OPENCODE_MANIFEST,
+                        OPENCODE_VALIDATOR)
         self.assertNotEqual(bad.returncode, 0)
 
-        self.assertTrue((pkg / "index.js").is_file())
+        self.assertTrue((pkg / "server.js").is_file())
         after = {p.relative_to(pkg): p.read_bytes()
                  for p in pkg.rglob("*") if p.is_file()}
         self.assertEqual(before, after, "a failed restage mutated the live package")
 
     def test_empty_manifest_aborts(self) -> None:
-        src, _ = OPENCLAW_PLUGINS["mpm-memory-openclaw"]
-        res = run_stage(src, self.runtime, "mpm-memory-openclaw", [])
+        res = run_stage(self.src, self.runtime, PLUGIN_ID, [], OPENCODE_VALIDATOR)
         self.assertNotEqual(res.returncode, 0)
 
 
@@ -392,104 +446,91 @@ class TestMissingStagingLibraryIsReportable(unittest.TestCase):
         print anything. The installer therefore exited 1 with an empty
         log and no clue what was wrong. Pin the reportability, not just
         the exit code.
+
+        The adapter's build step is stubbed: a real `tsc` run would
+        need the adapter's node_modules (populated by `npm ci`, which
+        is a network operation and is NOT part of the CI job that runs
+        this suite). The stub produces the payload files the build step
+        expects, so the installer reaches the provisioning step — the
+        one under test — and reports the missing library.
         """
-        for plugin_id, (src, _) in OPENCLAW_PLUGINS.items():
-            with self.subTest(plugin=plugin_id):
-                detached = self.tmp / f"detached-{plugin_id}"
-                detached.mkdir()
-                shutil.copytree(src, detached / plugin_id)
+        detached = self.tmp / f"detached-{PLUGIN_ID}"
+        detached.mkdir()
+        shutil.copytree(
+            AGENT_DIR / PLUGIN_ID, detached / PLUGIN_ID,
+            ignore=shutil.ignore_patterns("node_modules", "tests-build"),
+        )
+        # A stand-in for the adapter's build toolchain.
+        tsc = detached / PLUGIN_ID / "node_modules" / ".bin" / "tsc"
+        tsc.parent.mkdir(parents=True)
+        tsc.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "mkdir -p dist\n"
+            "for f in index.v2.js wake-context.js event-envelope.js "
+            "event-mapper.js event-subscriber.js workspace.js "
+            "resolve-mpm-binary.js; do\n"
+            "  [ -f \"dist/$f\" ] || printf 'export default {};\\n' > \"dist/$f\"\n"
+            "done\n",
+            encoding="utf-8",
+        )
+        tsc.chmod(0o755)
 
-                home = self.tmp / f"home-detached-{plugin_id}"
-                home.mkdir(parents=True, exist_ok=True)
-                rt = self.tmp / f"rt-detached-{plugin_id}"
-                (rt / "bin").mkdir(parents=True)
-                stub = rt / "bin" / "mpm"
-                stub.write_text('#!/bin/sh\n[ "$1" = "--version" ] && exit 0\nexit 0\n')
-                stub.chmod(0o755)
+        home = self.tmp / "home-detached"
+        home.mkdir(parents=True, exist_ok=True)
+        rt = self.tmp / "rt-detached"
+        (rt / "bin").mkdir(parents=True)
+        stub = rt / "bin" / "mpm"
+        stub.write_text('#!/bin/sh\n[ "$1" = "--version" ] && exit 0\nexit 0\n')
+        stub.chmod(0o755)
 
-                env = {
-                    **os.environ,
-                    "HOME": str(home),
-                    "PATH": f"{rt / 'bin'}:{os.environ.get('PATH', '')}",
-                }
-                res = subprocess.run(
-                    ["bash", str(detached / plugin_id / "install.sh")],
-                    capture_output=True, text=True, env=env, cwd=str(self.tmp),
-                )
-                self.assertNotEqual(res.returncode, 0)
-                self.assertIn(
-                    "staging library not found", res.stderr,
-                    "a missing provisioning library must be named, not silent",
-                )
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "PATH": f"{rt / 'bin'}:{os.environ.get('PATH', '')}",
+        }
+        res = subprocess.run(
+            ["bash", str(detached / PLUGIN_ID / "install.sh")],
+            capture_output=True, text=True, env=env, cwd=str(self.tmp),
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn(
+            "runtime provisioning library not found", res.stderr,
+            "a missing provisioning library must be named, not silent",
+        )
 
 
-class TestAdaptersLinkTheRuntimePackage(unittest.TestCase):
-    """Static contract: the adapters must link the runtime path, not source.
+class TestAdapterLinksTheRuntimePackage(unittest.TestCase):
+    """Static contract: the adapter must link the runtime path, not source.
 
-    Guards against a future edit reintroducing `plugins install "$SCRIPT_DIR"`
-    or the persona adapter's original bare `plugins install .`, either of
-    which re-couples the live integration to the checkout or to the
-    caller's working directory.
+    Guards against a future edit registering the source checkout, which
+    re-couples the live integration to a directory the operator may
+    delete.
     """
 
-    def test_memory_adapter_stages_and_links_runtime_path(self) -> None:
-        text = (AGENT_DIR / "mpm-memory-openclaw" / "install.sh").read_text()
+    def test_the_adapter_stages_and_links_the_runtime_path(self) -> None:
+        text = (AGENT_DIR / PLUGIN_ID / "install.sh").read_text()
         self.assertIn("stage_runtime_package", text)
-        self.assertIn(
-            'openclaw plugins install "$PLUGIN_PKG_DIR"', text,
-            "memory adapter must link the provisioned runtime package",
-        )
-        self.assertNotIn(
-            'openclaw plugins install "$SCRIPT_DIR"', text,
-            "memory adapter must not link the source checkout",
-        )
+        self.assertIn("CANONICAL_ADAPTER_DIR", text)
+        self.assertIn("CANONICAL_PLUGIN_ENTRY", text)
 
-    def test_persona_adapter_stages_and_links_runtime_path(self) -> None:
-        text = (AGENT_DIR / "mpm-auto-mode-persona-openclaw" / "install.sh").read_text()
-        self.assertIn("stage_runtime_package", text)
-        self.assertIn(
-            'openclaw plugins install "$PLUGIN_PKG_DIR"', text,
-            "persona adapter must link the provisioned runtime package",
-        )
-        # Only executable lines count. The file legitimately *mentions*
-        # the old bare-dot form in a comment explaining why it was
-        # replaced; what must not come back is a live invocation.
-        code = "\n".join(
-            line for line in text.splitlines()
-            if not line.lstrip().startswith("#")
-        )
-        self.assertNotIn(
-            "openclaw plugins install .",
-            code,
-            "persona adapter must not link the caller's CWD",
-        )
+    def test_the_adapter_sources_the_shared_staging_library(self) -> None:
+        text = (AGENT_DIR / PLUGIN_ID / "install.sh").read_text()
+        self.assertIn("stage_runtime_package.sh", text)
 
-    def test_adapters_source_the_shared_staging_library(self) -> None:
-        for plugin_id, (src, _) in OPENCLAW_PLUGINS.items():
-            with self.subTest(plugin=plugin_id):
-                text = (src / "install.sh").read_text()
-                self.assertIn("stage_runtime_package.sh", text)
+    def test_the_adapter_selects_the_opencode_validator(self) -> None:
+        """The staged package must be validated by the OpenCode hook.
 
-    def test_legacy_id_ownership_accepts_our_runtime_package(self) -> None:
-        """A legacy-id record at OUR path is ours, not a foreign plugin.
-
-        The conflict arm previously compared only against the legacy
-        former location. A record pointing at the runtime package we
-        provision today — our own record from a prior run — was
-        therefore misread as an unrelated plugin, and the installer
-        refused to proceed on its own idempotent re-run.
+        The library's DEFAULT validator is the historical OpenClaw one,
+        which demands an openclaw.plugin.json the OpenCode package does
+        not carry — so the hook must be selected explicitly.
         """
-        text = (AGENT_DIR / "mpm-memory-openclaw" / "install.sh").read_text()
+        text = (AGENT_DIR / PLUGIN_ID / "install.sh").read_text()
         self.assertIn(
-            'paths_match "$legacy_inspect_root" "$OUR_REAL"', text,
-            "legacy-id ownership must also accept our own runtime package path",
+            "MPM_RUNTIME_PACKAGE_VALIDATOR=mpm_validate_runtime_package_opencode",
+            text,
+            "the OpenCode installer must select the OpenCode validator",
         )
-        self.assertIn(
-            'paths_match "$rp" "$OUR_REAL"', text,
-            "registry-path ownership must also accept our own runtime package",
-        )
-        # ...and the conflict protection must survive that widening.
-        self.assertIn('legacy_ownership="conflict"', text)
 
     def test_staging_library_is_shipped_in_the_checkout(self) -> None:
         """The library must exist in source or no adapter can provision."""
@@ -605,8 +646,7 @@ class TestOpenCodePayloadValidation(ValidatorFixture):
             "workspace.js": "export const w = () => {};\n",
             "resolve-mpm-binary.js": "export const r = () => {};\n",
         })
-        self.assertEqual(run_staged(d, "mpm_validate_runtime_package_opencode",
-                                    "mpm-opencode").returncode, 0)
+        self.assertEqual(run_staged(d, OPENCODE_VALIDATOR, PLUGIN_ID).returncode, 0)
 
     def test_root_entry_required(self) -> None:
         """A staged package without the root server.js entry registers and
@@ -616,7 +656,7 @@ class TestOpenCodePayloadValidation(ValidatorFixture):
             "index.v2.js": "export default {};\n",
             "workspace.js": "export const w = () => {};\n",
         }, server_js=None)
-        res = run_staged(d, "mpm_validate_runtime_package_opencode", "mpm-opencode")
+        res = run_staged(d, OPENCODE_VALIDATOR, PLUGIN_ID)
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("missing the root entry server.js", res.stderr)
 
@@ -625,13 +665,13 @@ class TestOpenCodePayloadValidation(ValidatorFixture):
             "index.v2.js": "export default {};\n",
             "workspace.js": "export const w = () => {};\n",
         }, server_js="")
-        res = run_staged(d, "mpm_validate_runtime_package_opencode", "mpm-opencode")
+        res = run_staged(d, OPENCODE_VALIDATOR, PLUGIN_ID)
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("root entry server.js is empty", res.stderr)
 
     def test_missing_v2_payload_is_rejected(self) -> None:
         d = self._pkg({})
-        res = run_staged(d, "mpm_validate_runtime_package_opencode", "mpm-opencode")
+        res = run_staged(d, OPENCODE_VALIDATOR, PLUGIN_ID)
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("missing dist/index.v2.js", res.stderr)
 
@@ -639,13 +679,13 @@ class TestOpenCodePayloadValidation(ValidatorFixture):
         """tsc can produce a zero-byte file on some failure paths; an empty
         payload registers and loads nothing."""
         d = self._pkg({"index.v2.js": ""})
-        res = run_staged(d, "mpm_validate_runtime_package_opencode", "mpm-opencode")
+        res = run_staged(d, OPENCODE_VALIDATOR, PLUGIN_ID)
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("is empty", res.stderr)
 
     def test_unresolved_relative_import_is_rejected(self) -> None:
         d = self._pkg({"index.v2.js": 'import { w } from "./workspace.js";\n'})
-        res = run_staged(d, "mpm_validate_runtime_package_opencode", "mpm-opencode")
+        res = run_staged(d, OPENCODE_VALIDATOR, PLUGIN_ID)
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("unresolved internal imports", res.stderr)
         self.assertIn("./workspace.js", res.stderr)
@@ -658,72 +698,7 @@ class TestOpenCodePayloadValidation(ValidatorFixture):
             "index.v2.js": 'import { Plugin } from "@opencode/plugin";\n'
                            "export default Plugin.define({ id: 'x', setup() {} });\n",
         })
-        self.assertEqual(run_staged(d, "mpm_validate_runtime_package_opencode",
-                                    "mpm-opencode").returncode, 0)
-
-
-class TestPiPayloadValidation(ValidatorFixture):
-    """Pi's contract is narrow and silent when unmet, which is what makes
-    these checks worth having."""
-
-    def _pkg(self, index_ts: str | None, **modules: str) -> Path:
-        d = self.tmp / "pi"
-        (d / "src").mkdir(parents=True)
-        if index_ts is not None:
-            (d / "index.ts").write_text(index_ts)
-        for name, body in modules.items():
-            (d / "src" / name).write_text(body)
-        return d
-
-    def test_conforming_extension_passes(self) -> None:
-        d = self._pkg(
-            'import { w } from "./src/workspace.js";\n'
-            'import type { E } from "@earendil-works/pi-coding-agent";\n'
-            "export default function activate(api: E) { return w(); }\n",
-            **{"workspace.ts": "export const w = () => 1;\n"},
-        )
-        self.assertEqual(run_staged(d, "mpm_validate_runtime_package_pi",
-                                    "mpm-pi").returncode, 0)
-
-    def test_js_specifier_resolving_to_a_ts_file_is_accepted(self) -> None:
-        """TypeScript imports carry a .js specifier and load a .ts file.
-        Treating that as unresolved would reject every correct package."""
-        d = self._pkg(
-            'import { w } from "./src/workspace.js";\nexport default () => w;\n',
-            **{"workspace.ts": "export const w = () => 1;\n"},
-        )
-        self.assertEqual(run_staged(d, "mpm_validate_runtime_package_pi",
-                                    "mpm-pi").returncode, 0)
-
-    def test_missing_index_is_rejected(self) -> None:
-        """Pi silently ignores a registered directory with no index.ts."""
-        d = self._pkg(None, **{"workspace.ts": "export const w = 1;\n"})
-        res = run_staged(d, "mpm_validate_runtime_package_pi", "mpm-pi")
-        self.assertNotEqual(res.returncode, 0)
-        self.assertIn("missing index.ts", res.stderr)
-
-    def test_no_default_export_is_rejected(self) -> None:
-        d = self._pkg("export const activate = () => {};\n")
-        res = run_staged(d, "mpm_validate_runtime_package_pi", "mpm-pi")
-        self.assertNotEqual(res.returncode, 0)
-        self.assertIn("no default export", res.stderr)
-
-    def test_unresolved_relative_import_is_rejected(self) -> None:
-        d = self._pkg(
-            'import { w } from "./src/gone.js";\nexport default () => w;\n'
-        )
-        res = run_staged(d, "mpm_validate_runtime_package_pi", "mpm-pi")
-        self.assertNotEqual(res.returncode, 0)
-        self.assertIn("unresolved internal imports", res.stderr)
-
-    def test_bare_virtual_module_is_not_treated_as_unresolved(self) -> None:
-        """@earendil-works/* are bundled virtual modules from the host."""
-        d = self._pkg(
-            'import { Type } from "@earendil-works/pi-ai";\n'
-            "export default () => Type;\n"
-        )
-        self.assertEqual(run_staged(d, "mpm_validate_runtime_package_pi",
-                                    "mpm-pi").returncode, 0)
+        self.assertEqual(run_staged(d, OPENCODE_VALIDATOR, PLUGIN_ID).returncode, 0)
 
 
 class TestValidatorDispatch(ValidatorFixture):
@@ -733,13 +708,21 @@ class TestValidatorDispatch(ValidatorFixture):
         d = self.tmp / "d"
         d.mkdir()
         (d / "index.ts").write_text("export default () => {}\n")
-        res = run_staged(d, "mpm_validate_does_not_exist", "mpm-pi")
+        res = run_staged(d, "mpm_validate_does_not_exist", PLUGIN_ID)
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("unknown runtime package validator", res.stderr)
 
-    def test_default_validator_is_still_openclaw(self) -> None:
-        """An installer that predates the hook mechanism must keep its
-        existing checks rather than silently losing them."""
+    def test_the_library_default_validator_is_still_the_openclaw_shape(self) -> None:
+        """The library's DEFAULT validator is the historical OpenClaw one.
+
+        The shared library is retained as-is by the 2026-10-27 removal,
+        so its default still demands an openclaw.plugin.json. The
+        shipped adapter does not use the default — it selects the
+        OpenCode hook explicitly (pinned above) — but the default's
+        behaviour is still part of the library's contract, and a change
+        to it would be a change to shared infrastructure rather than an
+        adapter retirement.
+        """
         d = self.tmp / "d"
         d.mkdir()
         (d / "index.ts").write_text("module.exports = {};\n")
@@ -748,44 +731,6 @@ class TestValidatorDispatch(ValidatorFixture):
         (d / "openclaw.plugin.json").write_text('{"id": "thing"}\n')
         res = run_staged(d, "mpm_validate_runtime_package", "thing")
         self.assertEqual(res.returncode, 0, res.stderr)
-
-
-class TestAdapterManifestsMatchInstallers(unittest.TestCase):
-    """Same drift guard the OpenClaw adapters already have: the fixture
-    manifest must mirror what the installer actually stages."""
-
-    CASES = [
-        ("mpm-opencode", "install.sh", "OPENCODE_RUNTIME_MANIFEST", [
-            "server.js",
-            "dist/index.v2.js",
-            "dist/wake-context.js",
-            "dist/event-envelope.js",
-            "dist/event-mapper.js",
-            "dist/event-subscriber.js",
-            "dist/workspace.js",
-            "dist/resolve-mpm-binary.js",
-            "package.json",
-        ]),
-        ("mpm-pi", "install.sh", "PI_RUNTIME_MANIFEST", [
-            "index.ts",
-            "src/workspace.ts",
-            "src/resolve-mpm-binary.ts",
-        ]),
-    ]
-
-    def test_manifests_match(self) -> None:
-        for adapter, script, var, expected in self.CASES:
-            with self.subTest(adapter=adapter):
-                text = (AGENT_DIR / adapter / script).read_text(encoding="utf-8")
-                block = re.search(
-                    rf"{var}=\(\s*(.*?)\n\)", text, re.S
-                )
-                self.assertIsNotNone(block, f"{adapter} has no {var}")
-                declared = [
-                    line.strip() for line in block.group(1).splitlines()
-                    if line.strip()
-                ]
-                self.assertEqual(sorted(declared), sorted(expected))
 
 
 class TestManifestEntriesExistInSource(unittest.TestCase):
@@ -797,7 +742,7 @@ class TestManifestEntriesExistInSource(unittest.TestCase):
         except for ambient declarations (.d.ts), which emit nothing. The
         manifest is therefore the compilable src/ file list plus
         package.json — anything else would be a manifest drift bug."""
-        src = AGENT_DIR / "mpm-opencode" / "src"
+        src = AGENT_DIR / PLUGIN_ID / "src"
         emitted = sorted(
             f"dist/{p.stem}.js"
             for p in src.glob("*.ts")
@@ -822,84 +767,14 @@ class TestManifestEntriesExistInSource(unittest.TestCase):
         MUST be in the manifest: without it OpenCode drops the directory
         registration silently (the 2026-10-16 defect)."""
         self.assertTrue(
-            (AGENT_DIR / "mpm-opencode" / "server.js").exists(),
+            (AGENT_DIR / PLUGIN_ID / "server.js").exists(),
             "server.js missing from the adapter source tree",
         )
-        reexport = (AGENT_DIR / "mpm-opencode" / "server.js").read_text(
+        reexport = (AGENT_DIR / PLUGIN_ID / "server.js").read_text(
             encoding="utf-8"
         )
         self.assertIn("./dist/index.v2.js", reexport,
                       "server.js must re-export the compiled payload")
-
-    def test_pi_manifest_matches_source_tree(self) -> None:
-        src = AGENT_DIR / "mpm-pi"
-        for rel in ("index.ts", "src/workspace.ts", "src/resolve-mpm-binary.ts"):
-            self.assertTrue((src / rel).exists(), f"missing source file: {rel}")
-
-
-class TestAdaptersWithoutARuntimePackage(unittest.TestCase):
-    """Adding a provisioning step to an adapter that does not need one is
-    its own defect: it introduces a build or copy the adapter has no use
-    for, and a new way to fail an install that used to be trivial.
-
-    Claude Code registers the canonical mpm-mcp binary and materialises
-    its session-start hook at install time. Hermes is a managed-block
-    writer. Neither resolves anything out of its own directory after the
-    installer returns.
-    """
-
-    NO_RUNTIME_PACKAGE = ["mpm-claude-code", "mpm-hermes"]
-
-    def test_no_staging_library_is_sourced(self) -> None:
-        for adapter in self.NO_RUNTIME_PACKAGE:
-            with self.subTest(adapter=adapter):
-                for script in (AGENT_DIR / adapter).rglob("*.sh"):
-                    text = script.read_text(encoding="utf-8")
-                    self.assertNotIn(
-                        "stage_runtime_package", text,
-                        f"{script.relative_to(REPO_ROOT)} provisions a "
-                        f"runtime package but this adapter does not need one",
-                    )
-                for script in (AGENT_DIR / adapter).rglob("*.py"):
-                    text = script.read_text(encoding="utf-8")
-                    self.assertNotIn(
-                        "stage_runtime_package", text,
-                        f"{script.relative_to(REPO_ROOT)} provisions a "
-                        f"runtime package but this adapter does not need one",
-                    )
-
-    def test_claude_code_registers_the_canonical_binary(self) -> None:
-        """The reason Claude Code needs no package: its registration names
-        a binary in the runtime root, not a file in the adapter tree."""
-        text = (AGENT_DIR / "mpm-claude-code" / "install.sh").read_text(
-            encoding="utf-8")
-        self.assertIn(".mpm/bin/mpm-mcp", text)
-
-
-class TestOpenClawCompatibility(unittest.TestCase):
-    """The generalisation must not have changed the OpenClaw path. These
-    run the real shipped manifests through the library."""
-
-    def test_both_openclaw_plugins_stage_and_validate(self) -> None:
-        tmp = Path(tempfile.mkdtemp(prefix="mpm-ocl-compat-"))
-        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        for plugin_id, (src, manifest) in OPENCLAW_PLUGINS.items():
-            with self.subTest(plugin=plugin_id):
-                res = run_stage(src, tmp, plugin_id, manifest)
-                self.assertEqual(res.returncode, 0, res.stderr)
-                self.assertTrue(
-                    (tmp / "agent_installation" / plugin_id).is_dir())
-
-    def test_openclaw_validator_still_demands_plugin_metadata(self) -> None:
-        tmp = Path(tempfile.mkdtemp(prefix="mpm-ocl-meta-"))
-        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        d = tmp / "d"
-        d.mkdir()
-        (d / "index.js").write_text("module.exports = {};\n")
-        (d / "package.json").write_text('{"main": "index.js"}\n')
-        res = run_staged(d, "mpm_validate_runtime_package", "thing")
-        self.assertNotEqual(res.returncode, 0)
-        self.assertIn("openclaw.plugin.json", res.stderr)
 
 
 if __name__ == "__main__":

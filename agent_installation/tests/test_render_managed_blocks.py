@@ -305,34 +305,71 @@ class CanonicalBlockSelection(unittest.TestCase):
             "the extractor did not return the canonical block",
         )
 
-    def test_the_extracted_block_is_not_any_prefixed_example(self):
-        """No host-rendered example may be what the extractor returned.
+    def test_a_prefixed_example_earlier_in_the_document_is_not_selected(self):
+        """A host-PREFIXED example that appears BEFORE the canonical
+        block must not be what the extractor returns.
 
-        Note what this does NOT claim. The copy/paste examples for the
-        bare-name hosts (OpenCode, Pi) are byte-identical to the
-        canonical block, because those hosts use the canonical tool
-        names as-is. Equality with those examples is therefore not
-        evidence of a mis-selection; inequality with a PREFIXED
-        example is. The prefix is what makes an example an example.
+        Note what this does NOT claim about the live document. The only
+        copy/paste example that ships today is OpenCode's, and OpenCode
+        renders the canonical tool names bare — so that example is
+        byte-identical to the canonical block, and inequality with it
+        would carry no information about the selection. The prefix is
+        what makes an example distinguishable from the canonical block,
+        and no shipped host uses one.
+
+        So the property is checked against a SYNTHETIC document that
+        does contain a prefixed example, placed before the canonical
+        block exactly as a copy/paste example would be. The extractor's
+        rule is "the LAST occurrence of the universal markers"; a
+        regression that selected the FIRST occurrence — or that matched
+        on something other than the markers — would return the
+        prefixed example here.
+
+        This is a control, not a restatement of the live document: it
+        exercises the mis-selection shape that the live document can
+        no longer produce.
         """
-        heading_at = self.text.index(self.CANONICAL_HEADING)
-        examples = [m.group(0) for m in self.matches if m.start() < heading_at]
-        self.assertTrue(examples, "expected at least one copy/paste example")
-
-        prefixed = [
-            example for example in examples
-            if "mpm__mpm_" in example or "mcp__mpm__mpm_" in example
-        ]
-        self.assertTrue(
-            prefixed,
-            "expected at least one host-prefixed copy/paste example",
+        prefixed_example = (
+            "<!-- BEGIN MPM MANAGED BLOCK -->\n"
+            "1. **Wake on session start.** Call `mpm__mpm_context` action\n"
+            "   `read_wake_context`.\n"
+            "<!-- END MPM MANAGED BLOCK -->\n"
         )
-        for example in prefixed:
-            self.assertNotEqual(
-                self.block, example,
-                "the extractor returned a host-rendered copy/paste example "
-                "instead of the canonical block",
-            )
+        synthetic = (
+            "# A host copy/paste example\n\n"
+            "<!-- BEGIN MPM-MANAGED SECTION:some-host-instructions -->\n"
+            + prefixed_example
+            + "<!-- END MPM-MANAGED SECTION:some-host-instructions -->\n\n"
+            "# The canonical managed block (host-neutral)\n\n"
+            + self.block
+        )
+
+        # The control is only meaningful if the synthetic document really
+        # does contain a prefixed occurrence to mis-select.
+        occurrences = list(self.BLOCK_RE.finditer(synthetic))
+        self.assertEqual(
+            len(occurrences), 2,
+            "the synthetic document must contain exactly two managed "
+            f"blocks (a prefixed example and the canonical one); found "
+            f"{len(occurrences)}",
+        )
+        self.assertIn(
+            "mpm__mpm_context", occurrences[0].group(0),
+            "the synthetic document's FIRST occurrence must be the "
+            "prefixed one, or the control proves nothing",
+        )
+
+        selected = _render.extract_canonical_block(synthetic)
+        self.assertNotEqual(
+            selected, prefixed_example,
+            "the extractor returned the prefixed example instead of the "
+            "canonical block",
+        )
+        self.assertEqual(
+            selected, self.block,
+            "the extractor did not return the canonical block from a "
+            "document that contains a prefixed example before it",
+        )
 
     def test_bare_name_examples_are_identical_to_the_canonical_block(self):
         """The OpenCode and Pi examples equal the canonical block.
@@ -401,7 +438,14 @@ class CanonicalBlockSelection(unittest.TestCase):
 
 class PerHostRendering(unittest.TestCase):
     """render_for_host() must apply each host's tool-namespace prefix
-    correctly: Claude `mpm__`, OpenCode/Pi bare, Hermes `mcp__mpm__`."""
+    correctly.
+
+    OpenCode is the only supported host since the 2026-10-27 adapter
+    removal, and its prefix is empty. The prefixed cases stay in the
+    suite: `render_for_host` is a SHARED renderer, and a future host
+    with a transport prefix must still be rendered correctly — so the
+    property is pinned on the renderer, not on the shipped adapter
+    set."""
 
     def setUp(self):
         self.block = _render.extract_canonical_block(
@@ -430,13 +474,6 @@ class PerHostRendering(unittest.TestCase):
     def test_opencode_uses_bare_names(self):
         """OpenCode has an empty prefix; rendered output preserves
         bare canonical names."""
-        out = self._render_host("")
-        self.assertNotIn("mpm__mpm_", out)
-        self.assertNotIn("mcp__mpm__mpm_", out)
-
-    def test_pi_uses_bare_names(self):
-        """Pi has an empty prefix; rendered output preserves bare
-        canonical names."""
         out = self._render_host("")
         self.assertNotIn("mpm__mpm_", out)
         self.assertNotIn("mcp__mpm__mpm_", out)
@@ -470,17 +507,6 @@ class CopyPasteExampleParity(unittest.TestCase):
                 return a
         self.fail(f"adapter {name!r} not in ADAPTERS list")
 
-    def test_claude_copy_paste_matches_rendered(self):
-        a = self._adapter("mpm-claude-code")
-        actual = _render.extract_copy_paste_block(
-            self.text, a["copy_paste_outer_begin"],
-            a["copy_paste_outer_end"], a["name"],
-        )
-        self.assertEqual(
-            actual, self.rendered_by_host[a["name"]],
-            "Claude copy/paste example drifted from canonical block",
-        )
-
     def test_opencode_copy_paste_matches_rendered(self):
         a = self._adapter("mpm-opencode")
         actual = _render.extract_copy_paste_block(
@@ -490,28 +516,6 @@ class CopyPasteExampleParity(unittest.TestCase):
         self.assertEqual(
             actual, self.rendered_by_host[a["name"]],
             "OpenCode copy/paste example drifted from canonical block",
-        )
-
-    def test_pi_copy_paste_matches_rendered(self):
-        a = self._adapter("mpm-pi")
-        actual = _render.extract_copy_paste_block(
-            self.text, a["copy_paste_outer_begin"],
-            a["copy_paste_outer_end"], a["name"],
-        )
-        self.assertEqual(
-            actual, self.rendered_by_host[a["name"]],
-            "Pi copy/paste example drifted from canonical block",
-        )
-
-    def test_hermes_copy_paste_matches_rendered(self):
-        a = self._adapter("mpm-hermes")
-        actual = _render.extract_copy_paste_block(
-            self.text, a["copy_paste_outer_begin"],
-            a["copy_paste_outer_end"], a["name"],
-        )
-        self.assertEqual(
-            actual, self.rendered_by_host[a["name"]],
-            "Hermes copy/paste example drifted from canonical block",
         )
 
 
@@ -541,25 +545,38 @@ class ByteForByteParity(unittest.TestCase):
 
 
 class AdapterExclusion(unittest.TestCase):
-    """mpm-auto-mode-persona-openclaw uses runtime persona injection
-    and must NOT be in the adapter list — it has no persistent managed
-    file. mpm-memory-openclaw IS in the adapter list (per the 2026-09
-    persistent-block architecture) and writes SOUL.md as the persistent
-    behavioural contract on top of the runtime wake injection layer."""
+    """The retired adapters must NOT be in the renderer\'s adapter list.
 
-    def test_persona_plugin_not_in_adapter_list(self):
+    The renderer is the single source of the managed-block text every
+    host installs. An adapter that is retired but still listed here
+    would keep generating a snippet for a host MPM no longer
+    supports — and `render_managed_blocks.py --check` would keep
+    demanding that the snippet exist.
+    """
+
+    RETIRED = (
+        "mpm-claude-code",
+        "mpm-hermes",
+        "mpm-pi",
+        "mpm-memory-openclaw",
+        "mpm-auto-mode-persona-openclaw",
+    )
+
+    def test_retired_adapters_are_not_in_the_adapter_list(self):
         names = {a["name"] for a in _render.ADAPTERS}
-        self.assertNotIn(
-            "mpm-auto-mode-persona-openclaw", names,
-            "mpm-auto-mode-persona-openclaw uses runtime injection — must not be in ADAPTERS",
-        )
+        for retired in self.RETIRED:
+            self.assertNotIn(
+                retired, names,
+                f"{retired} was retired on 2026-10-27 and must not be in "
+                "the renderer\'s adapter list",
+            )
 
-    def test_memory_openclaw_in_adapter_list(self):
-        # mpm-memory-openclaw is now a persistent-block host.
+    def test_opencode_is_in_the_adapter_list(self):
         names = {a["name"] for a in _render.ADAPTERS}
         self.assertIn(
-            "mpm-memory-openclaw", names,
-            "mpm-memory-openclaw is a persistent-block host; must be in ADAPTERS",
+            "mpm-opencode", names,
+            "mpm-opencode is the only supported host and must be in "
+            "ADAPTERS",
         )
 
 
@@ -1419,13 +1436,21 @@ class CopyPasteExampleStructure(unittest.TestCase):
                     f"the outer copy/paste closer",
                 )
 
-    def test_four_file_backed_hosts_have_extractable_blocks(self):
-        """The four persistent-file hosts must each yield a parseable
-        managed block. This is the invariant whose breakage made the
-        Hermes defect visible downstream as a host-count failure
-        (ContinuityContract extracts 3 of 4 when the Hermes outer
-        markers are lost)."""
+    def test_every_file_backed_host_has_an_extractable_block(self):
+        """Every persistent-file host must yield a parseable managed
+        block.
+
+        This is the invariant whose breakage made the Hermes defect
+        visible downstream as a host-count failure (ContinuityContract
+        extracted 3 of 4 when the Hermes outer markers were lost). The
+        count is derived from the adapter list rather than hard-coded,
+        so it cannot rot when an adapter is added or retired.
+        """
         text = CANONICAL_SOURCE.read_text(encoding="utf-8")
+        expected = {
+            a["name"] for a in _render.ADAPTERS
+            if a["name"] != "mpm-memory-openclaw"
+        }
         found = set()
         for adapter in _render.ADAPTERS:
             if adapter["name"] == "mpm-memory-openclaw":
@@ -1439,9 +1464,9 @@ class CopyPasteExampleStructure(unittest.TestCase):
             if block:
                 found.add(adapter["name"])
         self.assertEqual(
-            len(found), 4,
-            f"expected 4 file-backed hosts with extractable managed "
-            f"blocks, got {sorted(found)}",
+            found, expected,
+            "every file-backed host must have an extractable managed "
+            f"block; got {sorted(found)}",
         )
 
 

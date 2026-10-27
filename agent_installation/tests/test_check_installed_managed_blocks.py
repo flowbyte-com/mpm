@@ -18,6 +18,11 @@ setup". It is deliberately NOT reachable by having the install target
 file present without a managed block: the managed behavioural block is
 a required part of a functional host integration, so a host that
 exposes MPM tools without the block is drifting, not healthy.
+
+OpenCode is the only supported host since the 2026-10-27 adapter
+removal, so this file exercises the whole verdict vocabulary against
+that one host — and pins that the retired hosts are no longer reported
+at all.
 """
 
 from __future__ import annotations
@@ -43,22 +48,6 @@ RENDER_SCRIPT = AGENT_INSTALLATION / "scripts" / "render_managed_blocks.py"
 # own target list.
 HOST_INSTALL_TARGETS: list[dict] = [
     {
-        "host": "pi",
-        "adapter": "mpm-pi",
-        "filename": "AGENTS.md",
-        "relative_to_home": ".pi/agent/AGENTS.md",
-        "outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->",
-        "outer_end": "<!-- END MPM-MANAGED SECTION:pi-instructions -->",
-    },
-    {
-        "host": "claude_code",
-        "adapter": "mpm-claude-code",
-        "filename": "CLAUDE.md",
-        "relative_to_home": ".claude/CLAUDE.md",
-        "outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->",
-        "outer_end": "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->",
-    },
-    {
         "host": "opencode",
         "adapter": "mpm-opencode",
         "filename": "AGENTS.md",
@@ -66,15 +55,12 @@ HOST_INSTALL_TARGETS: list[dict] = [
         "outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->",
         "outer_end": "<!-- END MPM-MANAGED SECTION:opencode-instructions -->",
     },
-    {
-        "host": "openclaw",
-        "adapter": "mpm-memory-openclaw",
-        "filename": "SOUL.md",
-        "relative_to_home": ".openclaw/workspace/SOUL.md",
-        "outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->",
-        "outer_end": "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->",
-    },
 ]
+
+# The hosts this repository used to support and no longer does. The
+# diagnostic must not report them: a retired host is not "absent", it
+# is not MPM's business any more.
+RETIRED_HOSTS = ("claude_code", "pi", "hermes", "openclaw")
 
 
 def _load_render_module():
@@ -113,20 +99,17 @@ def _find_host(results: list[dict], host: str) -> dict:
     raise KeyError(host)
 
 
-class Verdicts(unittest.TestCase):
-    """End-to-end: each verdict class is reproducible by controlling
-    the home directory the script reads."""
+class _DiagnosticFixture(unittest.TestCase):
+    """A disposable HOME plus the rendered canonical block."""
 
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp(prefix="check-installed-"))
         self._render = _load_render_module()
-        # Pre-render all four host blocks so we can drop current or
-        # stale content into per-host files.
+        entry = HOST_INSTALL_TARGETS[0]
         self._blocks = {
             e["host"]: _render_block(self._render, e["adapter"])
             for e in HOST_INSTALL_TARGETS
         }
-        # Per-host file path inside the fake home.
         self._paths = {
             e["host"]: self.tmpdir / e["relative_to_home"].lstrip("/")
             for e in HOST_INSTALL_TARGETS
@@ -157,69 +140,57 @@ class Verdicts(unittest.TestCase):
         results = json.loads(proc.stdout)
         return {r["host"]: r for r in results}
 
+
+class Verdicts(_DiagnosticFixture):
+    """End-to-end: each verdict class is reproducible by controlling
+    the home directory the script reads."""
+
     # ---- PASS --------------------------------------------------------
 
     def test_pass_when_block_byte_matches_canonical(self):
-        results = self._run_and_get({
-            "pi": self._blocks["pi"],
-            "claude_code": self._blocks["claude_code"],
-            "opencode": self._blocks["opencode"],
-        })
-        for host in ("pi", "claude_code", "opencode"):
-            self.assertEqual(results[host]["verdict"], "PASS", host)
-            self.assertIn("byte-matches", results[host]["detail"])
+        results = self._run_and_get({"opencode": self._blocks["opencode"]})
+        self.assertEqual(results["opencode"]["verdict"], "PASS")
+        self.assertIn("byte-matches", results["opencode"]["detail"])
 
     # ---- WARN --------------------------------------------------------
 
     def test_warn_when_block_drifted(self):
-        # Stale body: the contract had 7 items when the canonical now
-        # has 11. Mimic by replacing the canonical block with a
-        # smaller hand-rolled block.
+        # Stale body: a smaller hand-rolled block.
         stale = (
-            "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->\n"
+            "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->\n"
             "## stale (3 items only)\n\n"
             "1. stale-wake\n"
             "2. stale-persist\n"
             "3. stale-handoff\n"
-            "<!-- END MPM-MANAGED SECTION:pi-instructions -->\n"
+            "<!-- END MPM-MANAGED SECTION:opencode-instructions -->\n"
         )
-        results = self._run_and_get({
-            "pi": stale,
-            "claude_code": self._blocks["claude_code"],
-        })
-        self.assertEqual(results["pi"]["verdict"], "WARN")
-        self.assertIn("make refresh-installed", results["pi"]["repair"])
-        self.assertEqual(results["claude_code"]["verdict"], "PASS")
+        results = self._run_and_get({"opencode": stale})
+        self.assertEqual(results["opencode"]["verdict"], "WARN")
+        self.assertIn("make refresh-installed", results["opencode"]["repair"])
 
     # ---- ABSENT (file missing) --------------------------------------
 
     def test_absent_when_install_target_file_does_not_exist(self):
-        results = self._run_and_get({
-            "pi": self._blocks["pi"],
-            "claude_code": None,  # file does not exist
-            "opencode": self._blocks["opencode"],
-        })
-        self.assertEqual(results["claude_code"]["verdict"], "ABSENT")
-        self.assertEqual(results["claude_code"]["presence"], "absent")
+        results = self._run_and_get({"opencode": None})
+        self.assertEqual(results["opencode"]["verdict"], "ABSENT")
+        self.assertEqual(results["opencode"]["presence"], "absent")
         # ABSENT is informational, not a failure. Exit code 0.
         proc = _run_script(self.tmpdir)
-        # Re-run with only some hosts present to confirm exit code.
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
     # ---- WARN (markers missing in an existing install target) -------
 
     def test_warn_when_markers_missing_in_existing_file(self):
         # The install target exists but contains no managed-section
-        # markers. For the always-on persistent-instruction hosts
-        # (claude_code, opencode, pi) this file IS MPM's managed
-        # instruction surface, so a missing block is drift to repair,
-        # not an informational absence. This was previously ABSENT,
-        # which let a host expose MPM tools with no behavioural
-        # contract and no operator signal.
+        # markers. For an always-on persistent-instruction host
+        # (OpenCode) this file IS MPM's managed instruction surface, so
+        # a missing block is drift to repair, not an informational
+        # absence. This was previously ABSENT, which let a host expose
+        # MPM tools with no behavioural contract and no operator signal.
         results = self._run_and_get({
-            "claude_code": "# user content, no MPM block here\n",
+            "opencode": "# user content, no MPM block here\n",
         })
-        row = results["claude_code"]
+        row = results["opencode"]
         self.assertEqual(row["verdict"], "WARN", row["detail"])
         self.assertEqual(row["file"], "present")
         self.assertEqual(row["block"], "absent")
@@ -243,9 +214,9 @@ class Verdicts(unittest.TestCase):
     def test_absent_when_install_target_does_not_exist(self):
         # The genuinely absent case: the host's install target is not
         # on disk at all, so there is nothing to be current or stale.
-        results = self._run_and_get({"claude_code": None})
-        self.assertEqual(results["claude_code"]["verdict"], "ABSENT")
-        self.assertEqual(results["claude_code"]["repair"], "")
+        results = self._run_and_get({"opencode": None})
+        self.assertEqual(results["opencode"]["verdict"], "ABSENT")
+        self.assertEqual(results["opencode"]["repair"], "")
 
     # ---- ERROR -------------------------------------------------------
 
@@ -253,8 +224,8 @@ class Verdicts(unittest.TestCase):
         # BEGIN present, no matching END. This is the structurally
         # dangerous case the installer would refuse to touch.
         results = self._run_and_get({
-            "claude_code": (
-                "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->\n"
+            "opencode": (
+                "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->\n"
                 "## half a block\n"
             ),
         })
@@ -262,81 +233,80 @@ class Verdicts(unittest.TestCase):
         # this; it surfaces the structural issue as ERROR so the
         # operator inspects.
         self.assertIn(
-            results["claude_code"]["verdict"],
+            results["opencode"]["verdict"],
             ("ABSENT", "ERROR"),
-            f"unexpected verdict: {results['claude_code']}",
+            f"unexpected verdict: {results['opencode']}",
         )
         # At minimum, presence is recorded as present (the file is
         # there) and the diagnostic flags the structural problem.
-        self.assertEqual(results["claude_code"]["presence"], "present")
+        self.assertEqual(results["opencode"]["presence"], "present")
 
     # ---- Pass / Warn exit codes --------------------------------------
 
     def test_exit_code_zero_when_all_pass(self):
-        self._run_and_get({
-            "pi": self._blocks["pi"],
-            "claude_code": self._blocks["claude_code"],
-            "opencode": self._blocks["opencode"],
-        })
+        self._run_and_get({"opencode": self._blocks["opencode"]})
         proc = _run_script(self.tmpdir)
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_exit_code_one_on_warn(self):
         stale = (
-            "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->\n"
-            "## stale\n<!-- END MPM-MANAGED SECTION:claude-code-instructions -->\n"
+            "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->\n"
+            "## stale\n<!-- END MPM-MANAGED SECTION:opencode-instructions -->\n"
         )
-        self._run_and_get({
-            "pi": self._blocks["pi"],
-            "claude_code": stale,
-        })
+        self._run_and_get({"opencode": stale})
         proc = _run_script(self.tmpdir)
         self.assertEqual(proc.returncode, 1, proc.stderr)
 
     def test_exit_code_zero_on_absent_only(self):
         # ABSENT alone is informational, not a failure.
-        self._run_and_get({
-            "claude_code": None,
-        })
+        self._run_and_get({"opencode": None})
         proc = _run_script(self.tmpdir)
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
-class PresenceAndCurrencyAreSeparate(unittest.TestCase):
+class OnlyOpenCodeIsReported(_DiagnosticFixture):
+    """The retired hosts must not appear in the diagnostic at all.
+
+    A retired host is not "absent" — it is not MPM's business any
+    more. Reporting it would tell the operator to repair an
+    integration MPM no longer supports.
+    """
+
+    def test_only_opencode_is_reported(self):
+        self._run_and_get({"opencode": self._blocks["opencode"]})
+        proc = _run_script(self.tmpdir)
+        results = json.loads(proc.stdout)
+        hosts = sorted(r["host"] for r in results)
+        self.assertEqual(
+            hosts, ["opencode"],
+            "the diagnostic must report exactly the shipped hosts",
+        )
+        for retired in RETIRED_HOSTS:
+            self.assertNotIn(retired, hosts)
+
+
+class PresenceAndCurrencyAreSeparate(_DiagnosticFixture):
     """Two-file check: a host can be PASS (currency) without being
     present elsewhere, and ABSENT is a presence concern, not a
     currency one. The diagnostic must keep these axes separate."""
 
-    def setUp(self):
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="check-installed-"))
-        self._render = _load_render_module()
-        self._blocks = {
-            e["host"]: _render_block(self._render, e["adapter"])
-            for e in HOST_INSTALL_TARGETS
-        }
-        self._paths = {
-            e["host"]: self.tmpdir / e["relative_to_home"].lstrip("/")
-            for e in HOST_INSTALL_TARGETS
-        }
-
-    def tearDown(self):
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
     def test_presence_field_is_present_absent(self):
-        path = self._paths["claude_code"]
+        path = self._paths["opencode"]
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self._blocks["claude_code"])
+        path.write_text(self._blocks["opencode"])
         proc = _run_script(self.tmpdir)
         results = {r["host"]: r for r in json.loads(proc.stdout)}
-        self.assertEqual(results["claude_code"]["presence"], "present")
-        self.assertEqual(results["pi"]["presence"], "absent")
+        self.assertEqual(results["opencode"]["presence"], "present")
+
+    def test_presence_field_is_absent_when_the_file_is_gone(self):
+        proc = _run_script(self.tmpdir)
+        results = {r["host"]: r for r in json.loads(proc.stdout)}
         self.assertEqual(results["opencode"]["presence"], "absent")
-        self.assertEqual(results["openclaw"]["presence"], "absent")
 
     def test_currency_field_is_in_verdict(self):
-        path = self._paths["claude_code"]
+        path = self._paths["opencode"]
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self._blocks["claude_code"])
+        path.write_text(self._blocks["opencode"])
         proc = _run_script(self.tmpdir)
         results = {r["host"]: r for r in json.loads(proc.stdout)}
         # The verdict vocabulary includes the four states.

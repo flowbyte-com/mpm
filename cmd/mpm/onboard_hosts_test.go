@@ -4,15 +4,32 @@ package main
 // installation.
 //
 // The rule under test, from the brief: "Detection must be read-only. Never
-// install an integration merely because Claude Code, OpenCode, Pi or
-// another framework is present." Every test here is an attempt to make
-// onboarding install something it should not, plus the tests that prove a
-// host the operator DID name does get installed.
+// install an integration merely because a framework is present." Every test
+// here is an attempt to make onboarding install something it should not,
+// plus the tests that prove a host the operator DID name does get installed.
+//
+// HOST SCOPE
+//
+// OpenCode is the only supported host since the 2026-10-27 OpenCode-only
+// adapter removal. Two consequences run through this file:
+//
+//   - Where a test names a REAL host, it names "opencode". The retired
+//     hosts (claude_code, pi, hermes, openclaw) are not hosts any more:
+//     `mpm onboard --hosts install pi` is now an unknown-target refusal,
+//     and the refusal must say so rather than invite the operator to
+//     try one.
+//
+//   - Where a test needs SEVERAL hosts to exercise a rule, it uses
+//     NEUTRAL SYNTHETIC LABELS ("host-current", "host-absent",
+//     "host-drifted"). The consent matrix in decideHostInstall is
+//     label-agnostic — it switches on the inspected verdict, not on the
+//     host's name — so the matrix stays fully covered with one real
+//     host. Naming the retired hosts here would have meant exercising a
+//     registry that no longer exists.
 //
 // Isolation is the same as onboard_cmds_test.go, with one addition: the
 // tests that exercise a real installer run it against a temporary HOME,
-// so nothing in the developer's own ~/.claude, ~/.pi, ~/.config/opencode
-// or ~/.openclaw can be reached.
+// so nothing in the developer's own ~/.config/opencode can be reached.
 
 import (
 	"encoding/json"
@@ -60,9 +77,17 @@ func TestOnboardParserRefusesUnknownTarget(t *testing.T) {
 	if err == nil {
 		t.Fatal("parseOnboardArgs accepted an unknown host target")
 	}
-	for _, want := range []string{"unknown host target", "claude_code", "openclaw", "opencode", "pi"} {
+	for _, want := range []string{"unknown host target", "opencode"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal omits %q: %q", want, err)
+		}
+	}
+	// A retired host is not a target. The refusal lists the KNOWN targets
+	// and nothing else: a retired name in that list would send the
+	// operator back to a host MPM no longer supports.
+	for _, retired := range []string{"claude_code", "pi", "hermes", "openclaw"} {
+		if strings.Contains(err.Error(), retired) {
+			t.Errorf("refusal still lists the retired host %q: %q", retired, err)
 		}
 	}
 }
@@ -87,7 +112,7 @@ func TestOnboardParserRequiresNamedTargetsForInstall(t *testing.T) {
 // without `install` inspects it. This is the mistake an operator makes by
 // omitting one word, and the cost of the mistake must be zero.
 func TestOnboardParserKeepsInspectionReadOnlyWithoutInstall(t *testing.T) {
-	_, err := parseOnboardArgs([]string{"--hosts", "pi"})
+	_, err := parseOnboardArgs([]string{"--hosts", "opencode"})
 	if err == nil {
 		t.Fatal("a host named without `install` was accepted")
 	}
@@ -108,9 +133,9 @@ func TestOnboardParserScopesRepairToInstall(t *testing.T) {
 		t.Errorf("refusal does not scope the flag: %q", err)
 	}
 
-	opts, err := parseOnboardArgs([]string{"--hosts", "install", "pi", "--repair"})
+	opts, err := parseOnboardArgs([]string{"--hosts", "install", "opencode", "--repair"})
 	if err != nil {
-		t.Fatalf("--hosts install pi --repair: %v", err)
+		t.Fatalf("--hosts install opencode --repair: %v", err)
 	}
 	if !opts.hostRepair {
 		t.Error("--repair did not set hostRepair")
@@ -130,16 +155,34 @@ func TestOnboardParserRefusesInstallOutsideHostScope(t *testing.T) {
 	}
 }
 
-// TestOnboardParserNormalisesHostTargets: operators type "PI" and
-// "opencode" and case should not decide whether a host is recognised —
-// nor should it produce a second spelling that reaches the adapter map
-// under a different key.
+// TestOnboardParserNormalisesHostTargets: operators type "OPENCODE" and
+// case should not decide whether a host is recognised — nor should it
+// produce a second spelling that reaches the adapter map under a
+// different key.
+//
+// The spellings are derived from the registry rather than hard-coded, so
+// the test keeps its shape when a host is added back.
 func TestOnboardParserNormalisesHostTargets(t *testing.T) {
-	opts, err := parseOnboardArgs([]string{"--hosts", "install", "PI", "OpenCode", "--yes"})
+	if len(onboardHostLabels) == 0 {
+		t.Fatal("the host registry is empty; there is nothing to normalise")
+	}
+	tokens := make([]string, 0, len(onboardHostLabels))
+	want := make([]string, 0, len(onboardHostLabels))
+	for i, label := range onboardHostLabels {
+		if i%2 == 0 {
+			tokens = append(tokens, strings.ToUpper(label))
+		} else {
+			tokens = append(tokens, strings.ToUpper(label[:1])+label[1:])
+		}
+		want = append(want, label)
+	}
+	args := append([]string{"--hosts", "install"}, tokens...)
+	args = append(args, "--yes")
+
+	opts, err := parseOnboardArgs(args)
 	if err != nil {
 		t.Fatalf("case-insensitive targets rejected: %v", err)
 	}
-	want := []string{"pi", "opencode"}
 	if len(opts.hostTargets) != len(want) {
 		t.Fatalf("targets = %v, want %v", opts.hostTargets, want)
 	}
@@ -156,17 +199,35 @@ func TestOnboardParserNormalisesHostTargets(t *testing.T) {
 
 // TestOnboardParserPreservesNamedOrder: the report reads in the order the
 // operator typed, so the parse must not sort or deduplicate away a
-// deliberate second mention... but it must not treat a repeat as a second
-// install either. Order is preserved; repetition is harmless.
+// deliberate second mention.
+//
+// Only one host is supported today, so the ORDER of two DISTINCT labels
+// cannot be exercised here. What remains observable — and what the parse
+// actually decides — is that the sequence reaches the report in the order
+// it was typed, with every mention intact. A parser that sorted or
+// deduplicated would collapse this to a single target, so the assertion
+// still bites.
 func TestOnboardParserPreservesNamedOrder(t *testing.T) {
-	opts, err := parseOnboardArgs([]string{"--hosts", "install", "opencode", "claude_code", "pi"})
+	tokens := make([]string, 0, len(onboardHostLabels)*2)
+	for _, label := range onboardHostLabels {
+		tokens = append(tokens, label)
+	}
+	// A second mention of every label. The parser keeps it; what a
+	// repeated target means for the run is the host step's business, not
+	// the parser's.
+	for _, label := range onboardHostLabels {
+		tokens = append(tokens, label)
+	}
+	args := append([]string{"--hosts", "install"}, tokens...)
+	args = append(args, "--yes")
+
+	opts, err := parseOnboardArgs(args)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	want := []string{"opencode", "claude_code", "pi"}
-	if strings.Join(opts.hostTargets, ",") != strings.Join(want, ",") {
+	if strings.Join(opts.hostTargets, ",") != strings.Join(tokens, ",") {
 		t.Errorf("targets = %v, want %v (named order must be preserved)",
-			opts.hostTargets, want)
+			opts.hostTargets, tokens)
 	}
 }
 
@@ -174,12 +235,21 @@ func TestOnboardParserPreservesNamedOrder(t *testing.T) {
 // decideHostInstall — the pure consent matrix
 // ---------------------------------------------------------------------------
 
+// hostStates is the synthetic inspection result the consent-matrix tests
+// run against.
+//
+// The labels are NEUTRAL ON PURPOSE: decideHostInstall switches on the
+// inspected verdict, not on the host's name, so the matrix is fully
+// covered without inventing hosts MPM no longer supports. Each name
+// describes the STATE ("host-current"), not a host.
+//
+// InstallPath values are inert: the matrix never touches the filesystem.
 func hostStates() []hostTargetState {
 	return []hostTargetState{
-		{Host: "pi", Verdict: hostVerdictPass, InstallPath: "/h/.pi/agent/AGENTS.md"},
-		{Host: "opencode", Verdict: hostVerdictAbsent, InstallPath: "/h/.config/opencode/AGENTS.md"},
-		{Host: "claude_code", Verdict: hostVerdictWarn,
-			Detail: "marker block differs", InstallPath: "/h/.claude/CLAUDE.md"},
+		{Host: "host-current", Verdict: hostVerdictPass, InstallPath: "/h/current/AGENTS.md"},
+		{Host: "host-absent", Verdict: hostVerdictAbsent, InstallPath: "/h/absent/AGENTS.md"},
+		{Host: "host-drifted", Verdict: hostVerdictWarn,
+			Detail: "marker block differs", InstallPath: "/h/drifted/AGENTS.md"},
 	}
 }
 
@@ -199,7 +269,7 @@ func decisionFor(t *testing.T, host string, decided []hostTargetDecision) hostTa
 // not an opportunity to ask either.
 func TestOnboardHostDecisionPreservesACurrentIntegration(t *testing.T) {
 	opts := onboardOptions{assumeYes: true}
-	d := decisionFor(t, "pi", decideHostInstall(hostStates(), opts, false, nil))
+	d := decisionFor(t, "host-current", decideHostInstall(hostStates(), opts, false, nil))
 	if d.Proceed {
 		t.Error("a PASS host was scheduled for installation; a working " +
 			"integration must be left exactly as it is")
@@ -214,7 +284,7 @@ func TestOnboardHostDecisionPreservesACurrentIntegration(t *testing.T) {
 // different decision from filling a gap, and it carries its own flag.
 func TestOnboardHostDecisionNeverRepairsWithoutApproval(t *testing.T) {
 	opts := onboardOptions{assumeYes: true}
-	d := decisionFor(t, "claude_code", decideHostInstall(hostStates(), opts, false, nil))
+	d := decisionFor(t, "host-drifted", decideHostInstall(hostStates(), opts, false, nil))
 	if d.Proceed {
 		t.Error("--yes authorised repairing a drifted managed block; " +
 			"repair requires --repair")
@@ -229,7 +299,7 @@ func TestOnboardHostDecisionNeverRepairsWithoutApproval(t *testing.T) {
 
 func TestOnboardHostDecisionRepairsOnlyWhenRepairIsRequested(t *testing.T) {
 	opts := onboardOptions{assumeYes: true, hostRepair: true}
-	d := decisionFor(t, "claude_code", decideHostInstall(hostStates(), opts, false, nil))
+	d := decisionFor(t, "host-drifted", decideHostInstall(hostStates(), opts, false, nil))
 	if !d.Proceed {
 		t.Errorf("--repair did not authorise the drifted host: %q", d.Reason)
 	}
@@ -240,7 +310,7 @@ func TestOnboardHostDecisionRepairsOnlyWhenRepairIsRequested(t *testing.T) {
 // mutation approval". Targets are present; approval is not.
 func TestOnboardHostDecisionRefusesWithoutATerminalOrYes(t *testing.T) {
 	opts := onboardOptions{}
-	d := decisionFor(t, "opencode", decideHostInstall(hostStates(), opts, false, nil))
+	d := decisionFor(t, "host-absent", decideHostInstall(hostStates(), opts, false, nil))
 	if d.Proceed {
 		t.Fatal("an unattended run with no --yes installed a host; " +
 			"piped stdin is not consent")
@@ -255,7 +325,7 @@ func TestOnboardHostDecisionRefusesWithoutATerminalOrYes(t *testing.T) {
 // otherwise `--yes` would be a flag that only ever refuses.
 func TestOnboardHostDecisionAssumesYesAuthorisesUnattendedInstall(t *testing.T) {
 	opts := onboardOptions{assumeYes: true}
-	d := decisionFor(t, "opencode", decideHostInstall(hostStates(), opts, false, nil))
+	d := decisionFor(t, "host-absent", decideHostInstall(hostStates(), opts, false, nil))
 	if !d.Proceed {
 		t.Fatalf("--yes did not authorise installation: %q", d.Reason)
 	}
@@ -270,8 +340,8 @@ func TestOnboardHostDecisionAssumesYesAuthorisesUnattendedInstall(t *testing.T) 
 func TestOnboardHostDecisionBareEnterIsNotApproval(t *testing.T) {
 	opts := onboardOptions{}
 	for _, answer := range []string{"", "n", "no", "sure", "why not"} {
-		d := decisionFor(t, "opencode",
-			decideHostInstall(hostStates(), opts, true, map[string]string{"opencode": answer}))
+		d := decisionFor(t, "host-absent",
+			decideHostInstall(hostStates(), opts, true, map[string]string{"host-absent": answer}))
 		if d.Proceed {
 			t.Errorf("answer %q was accepted as approval", answer)
 		}
@@ -280,8 +350,8 @@ func TestOnboardHostDecisionBareEnterIsNotApproval(t *testing.T) {
 		}
 	}
 	for _, answer := range []string{"y", "yes", "YES", " yes "} {
-		d := decisionFor(t, "opencode",
-			decideHostInstall(hostStates(), opts, true, map[string]string{"opencode": answer}))
+		d := decisionFor(t, "host-absent",
+			decideHostInstall(hostStates(), opts, true, map[string]string{"host-absent": answer}))
 		if !d.Proceed {
 			t.Errorf("answer %q did not approve: %q", answer, d.Reason)
 		}
@@ -295,7 +365,7 @@ func TestOnboardHostDecisionBareEnterIsNotApproval(t *testing.T) {
 // blank.
 func TestOnboardHostDecisionPlansButDoesNotExecuteOnDryRun(t *testing.T) {
 	opts := onboardOptions{dryRun: true, assumeYes: true}
-	d := decisionFor(t, "opencode", decideHostInstall(hostStates(), opts, false, nil))
+	d := decisionFor(t, "host-absent", decideHostInstall(hostStates(), opts, false, nil))
 	if !d.Proceed {
 		t.Fatalf("dry run did not plan the installation, so nothing would be "+
 			"printed: %q", d.Reason)
@@ -318,10 +388,10 @@ func TestOnboardHostDecisionDoesNotPromptWhereTheRulesAlreadyDecided(t *testing.
 		t.Error("the ABSENT host should still be asked about")
 	}
 	for _, d := range decided {
-		if d.Host == "pi" && promptsForHost(d, opts, true) {
+		if d.Host == "host-current" && promptsForHost(d, opts, true) {
 			t.Error("a PASS host was prompted for installation")
 		}
-		if d.Host == "claude_code" && promptsForHost(d, opts, true) {
+		if d.Host == "host-drifted" && promptsForHost(d, opts, true) {
 			t.Error("a drifted host was prompted without --repair")
 		}
 	}
@@ -333,11 +403,11 @@ func TestOnboardHostDecisionDoesNotPromptWhereTheRulesAlreadyDecided(t *testing.
 func TestOnboardHostDecisionIgnoresAnswersItNeverAsked(t *testing.T) {
 	opts := onboardOptions{hostRepair: true}
 	decided := decideHostInstall(hostStates(), opts, true,
-		map[string]string{"opencode": "yes"})
-	if !decisionFor(t, "opencode", decided).Proceed {
+		map[string]string{"host-absent": "yes"})
+	if !decisionFor(t, "host-absent", decided).Proceed {
 		t.Error("the host that WAS asked about did not receive its approval")
 	}
-	if decisionFor(t, "pi", decided).Proceed {
+	if decisionFor(t, "host-current", decided).Proceed {
 		t.Error("an answer for a different host authorised this one")
 	}
 }
@@ -474,8 +544,8 @@ func TestOnboardHostDryRunWritesNothing(t *testing.T) {
 	f.warmUp(t)
 	before := digestOnboardTree(t, f)
 
-	rep := f.report(t, "hosts", "install", "pi", "--dry-run")
-	assertUnchanged(t, "`--hosts install pi --dry-run`", before, digestOnboardTree(t, f))
+	rep := f.report(t, "hosts", "install", "opencode", "--dry-run")
+	assertUnchanged(t, "`--hosts install opencode --dry-run`", before, digestOnboardTree(t, f))
 
 	if rep.HostStep == nil {
 		t.Fatal("dry run recorded no host step; there is nothing to show the plan in")
@@ -500,8 +570,8 @@ func TestOnboardHostInstallWithoutATerminalInstallsNothing(t *testing.T) {
 	f.warmUp(t)
 	before := digestOnboardTree(t, f)
 
-	rep := f.report(t, "hosts", "install", "pi")
-	assertUnchanged(t, "`--hosts install pi` (no terminal, no --yes)",
+	rep := f.report(t, "hosts", "install", "opencode")
+	assertUnchanged(t, "`--hosts install opencode` (no terminal, no --yes)",
 		before, digestOnboardTree(t, f))
 
 	if rep.HostStep == nil || len(rep.HostStep.Results) != 1 {
@@ -521,18 +591,24 @@ func TestOnboardHostInstallWithoutATerminalInstallsNothing(t *testing.T) {
 // TestOnboardHostInstallJSONCarriesTheStep: --json is a contract, and a
 // consumer must be able to see which hosts were named and what happened
 // to each without scraping prose.
+//
+// The same host is named twice here. Only one host is supported today, so
+// two DISTINCT names are not available, and the property under test is
+// the ENVELOPE's arithmetic: one result row per NAMED target, so a
+// consumer can account for all of them without inferring from the absence
+// of an entry. The parser documents a repeated target as harmless.
 func TestOnboardHostInstallJSONCarriesTheStep(t *testing.T) {
 	f := newOnboardFixture(t, "fresh")
 	f.warmUp(t)
 	// Dry run: this test is about the envelope's shape, and a dry run
 	// produces the full envelope without needing a real installer.
-	rep := f.report(t, "hosts", "install", "pi", "opencode", "--yes", "--dry-run")
+	rep := f.report(t, "hosts", "install", "opencode", "opencode", "--yes", "--dry-run")
 
 	if rep.HostStep == nil {
 		t.Fatal("host_step missing from the JSON envelope")
 	}
-	if strings.Join(rep.HostStep.Targets, ",") != "pi,opencode" {
-		t.Errorf("targets = %v, want [pi opencode] in named order",
+	if strings.Join(rep.HostStep.Targets, ",") != "opencode,opencode" {
+		t.Errorf("targets = %v, want [opencode opencode] in named order",
 			rep.HostStep.Targets)
 	}
 	// Every named host has a result row, whether it was installed,
@@ -614,29 +690,38 @@ func stagedAdapterRoot(t *testing.T, stubs map[string]string, omit []string) str
 	return root
 }
 
-const succeedingStubInstaller = `#!/usr/bin/env bash
+// stubInstallerThatRegistersButDoesNotIntegrate exits 0 and does the part
+// of an install that leaves a trace — it registers the plugin — without
+// writing the managed block that would make the host actually integrated.
+//
+// It is the shape of the failure the report has to be honest about: the
+// installer SUCCEEDED, and the integration still is not there.
+const stubInstallerThatRegistersButDoesNotIntegrate = `#!/usr/bin/env bash
 set -euo pipefail
-mkdir -p "$HOME/.pi/agent"
-cp "$HOME/.pi/agent/AGENTS.md.bak" "$HOME/.pi/agent/AGENTS.md" 2>/dev/null || \
-  printf 'stub managed block\n' > "$HOME/.pi/agent/AGENTS.md"
-printf 'stub installer wrote %s\n' "$HOME/.pi/agent/AGENTS.md"
+mkdir -p "$HOME/.config/opencode"
+cat > "$HOME/.config/opencode/opencode.jsonc" <<'JSON'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["file:///stub/mpm-opencode"]
+}
+JSON
+printf 'stub installer registered the plugin\n'
 `
 
-// TestOnboardHostInstallReportsPartialCompletion: pi installs, opencode
-// has no adapter in the staged tree. The brief requires that "what
-// succeeded and what remains incomplete" be recorded — so the report must
-// carry one success AND one failure, and must not present the run as a
-// total success.
-func TestOnboardHostInstallReportsPartialCompletion(t *testing.T) {
+// TestOnboardHostInstallRecordsAMissingAdapterAsAFailure: an adapter that
+// is not in the tree must fail loudly, not quietly succeed.
+//
+// The brief requires that "what succeeded and what remains incomplete" be
+// recorded — so the failure must be visible in the result row AND in the
+// error list, and the report must not present the run as a total success.
+func TestOnboardHostInstallRecordsAMissingAdapterAsAFailure(t *testing.T) {
 	f := newOnboardFixture(t, "fresh")
 	f.warmUp(t)
-	root := stagedAdapterRoot(t,
-		map[string]string{"mpm-pi": succeedingStubInstaller},
-		// The opencode adapter is absent from this tree, so installing it
-		// must fail rather than quietly succeed.
-		[]string{"mpm-opencode"})
+	// The opencode adapter is absent from this tree, so installing it
+	// must fail rather than quietly succeed.
+	root := stagedAdapterRoot(t, nil, []string{"mpm-opencode"})
 
-	out, err := f.runInRepo(t, root, "onboard", "--hosts", "install", "pi", "opencode",
+	out, err := f.runInRepo(t, root, "onboard", "--hosts", "install", "opencode",
 		"--yes", "--json")
 	if err != nil {
 		var ee *exec.ExitError
@@ -649,30 +734,15 @@ func TestOnboardHostInstallReportsPartialCompletion(t *testing.T) {
 		t.Fatalf("decode: %v\n---output---\n%s", jerr, out)
 	}
 
-	if rep.HostStep == nil || len(rep.HostStep.Results) != 2 {
-		t.Fatalf("results = %+v, want two (one per named host)", rep.HostStep)
+	if rep.HostStep == nil || len(rep.HostStep.Results) != 1 {
+		t.Fatalf("results = %+v, want one (the one named host)", rep.HostStep)
 	}
-	var pi, opencode *hostInstallResult
-	for i := range rep.HostStep.Results {
-		switch rep.HostStep.Results[i].Host {
-		case "pi":
-			pi = &rep.HostStep.Results[i]
-		case "opencode":
-			opencode = &rep.HostStep.Results[i]
-		}
+	res := rep.HostStep.Results[0]
+	if res.Verdict != "failed" {
+		t.Errorf("result = %+v; a missing adapter is a failure, not a skip", res)
 	}
-	if pi == nil || opencode == nil {
-		t.Fatalf("results did not cover both hosts: %+v", rep.HostStep.Results)
-	}
-	if pi.Verdict != hostVerdictPass || pi.ExitCode != 0 {
-		t.Errorf("pi result = %+v; the stub installer should have succeeded", pi)
-	}
-	if opencode.Verdict != "failed" {
-		t.Errorf("opencode result = %+v; a missing adapter is a failure, not a skip",
-			opencode)
-	}
-	if !strings.Contains(opencode.Detail, "adapter installer not found") {
-		t.Errorf("opencode detail does not say what was missing: %q", opencode.Detail)
+	if !strings.Contains(res.Detail, "adapter installer not found") {
+		t.Errorf("detail does not say what was missing: %q", res.Detail)
 	}
 
 	// The failure must surface as actionable, not as a silent partial.
@@ -680,10 +750,61 @@ func TestOnboardHostInstallReportsPartialCompletion(t *testing.T) {
 	if !strings.Contains(joined, "opencode") {
 		t.Errorf("errors do not name the failed host: %q", rep.Errors)
 	}
+	if rep.Success != true {
+		t.Errorf("Success=%v; onboard's Success means the REPORT was produced, "+
+			"not that every install succeeded — a failed host belongs in errors",
+			rep.Success)
+	}
+	if rep.HostStep.Rollback == "" {
+		t.Error("a partially applied step must state how to undo the part that landed")
+	}
 
-	// And the surviving state must be honestly reported: the stub wrote a
-	// file, not a real managed block, so the host is still not installed.
-	// "Installer exited 0" must not be reported as "integrated".
+	// And nothing may have been written on the way to the failure.
+	agents := filepath.Join(f.home, ".config", "opencode", "AGENTS.md")
+	if _, statErr := os.Stat(agents); statErr == nil {
+		t.Errorf("%s exists; a failed install must not leave a managed block "+
+			"behind", agents)
+	}
+}
+
+// TestOnboardHostInstallCaveatsAnInstallerThatDidNotIntegrate: the
+// installer exited 0, and the integration is still not there.
+//
+// "Installer exited 0" must not be reported as "integrated". The report
+// has to say the managed block was not confirmed present, and it must
+// still leave the work that DID land alone — onboarding has no
+// compensation pass and must not have invented one.
+func TestOnboardHostInstallCaveatsAnInstallerThatDidNotIntegrate(t *testing.T) {
+	f := newOnboardFixture(t, "fresh")
+	f.warmUp(t)
+	root := stagedAdapterRoot(t,
+		map[string]string{"mpm-opencode": stubInstallerThatRegistersButDoesNotIntegrate},
+		nil)
+
+	out, err := f.runInRepo(t, root, "onboard", "--hosts", "install", "opencode",
+		"--yes", "--json")
+	if err != nil {
+		var ee *exec.ExitError
+		if !errorAs(err, &ee) {
+			t.Fatalf("onboard: %v\n%s", err, out)
+		}
+	}
+	var rep onboardReport
+	if jerr := json.Unmarshal([]byte(out), &rep); jerr != nil {
+		t.Fatalf("decode: %v\n---output---\n%s", jerr, out)
+	}
+
+	if rep.HostStep == nil || len(rep.HostStep.Results) != 1 {
+		t.Fatalf("results = %+v, want one (the one named host)", rep.HostStep)
+	}
+	res := rep.HostStep.Results[0]
+	if res.Verdict != hostVerdictPass || res.ExitCode != 0 {
+		t.Errorf("result = %+v; the stub installer should have succeeded", res)
+	}
+
+	// The surviving state must be honestly reported: the stub registered
+	// a plugin but wrote no managed block, so the host is still not
+	// integrated.
 	sawHonestCaveat := false
 	for _, a := range rep.Attention {
 		if strings.Contains(a, "not confirmed present") {
@@ -696,26 +817,25 @@ func TestOnboardHostInstallReportsPartialCompletion(t *testing.T) {
 	}
 	if rep.Success != true {
 		t.Errorf("Success=%v; onboard's Success means the REPORT was produced, "+
-			"not that every install succeeded — a failed host belongs in errors",
-			rep.Success)
+			"not that every install succeeded", rep.Success)
 	}
 	if rep.HostStep.Rollback == "" {
-		t.Error("a partially applied step must state how to undo the part that landed")
+		t.Error("a step that may have written must state how to undo it")
 	}
 
-	// What the interrupted run LEFT BEHIND. pi ran before opencode failed
-	// and its work is still on disk: onboarding does not attempt to undo
-	// it, and must not claim to have. A compensation pass here would be
-	// worse than useless — it would restore Pi to a state the operator
-	// may have wanted, based on a failure in an unrelated host.
-	agents := filepath.Join(f.home, ".pi", "agent", "AGENTS.md")
-	if _, err := os.Stat(agents); err != nil {
-		t.Errorf("the first adapter's output is gone (%v); onboarding has no "+
-			"compensation pass and must not have invented one", err)
+	// What the run LEFT BEHIND. The stub wrote a registration, and it is
+	// still on disk: onboarding does not attempt to undo it, and must
+	// not claim to have. A compensation pass here would be worse than
+	// useless — it would undo work the operator may have wanted, based
+	// on a failure in an unrelated concern.
+	registered := filepath.Join(f.home, ".config", "opencode", "opencode.jsonc")
+	if _, statErr := os.Stat(registered); statErr != nil {
+		t.Errorf("the installer's output is gone (%v); onboarding has no "+
+			"compensation pass and must not have invented one", statErr)
 	}
-	if len(pi.Backups) != 0 {
+	if len(res.Backups) != 0 {
 		t.Errorf("the stub installer left backups %v; the report lists files "+
-			"that do not exist", pi.Backups)
+			"that do not exist", res.Backups)
 	}
 }
 
@@ -725,8 +845,8 @@ func TestOnboardHostInstallIsRepeatable(t *testing.T) {
 	f := newOnboardFixture(t, "fresh")
 	f.warmUp(t)
 
-	first := f.report(t, "hosts", "install", "pi", "--yes", "--dry-run")
-	second := f.report(t, "hosts", "install", "pi", "--yes", "--dry-run")
+	first := f.report(t, "hosts", "install", "opencode", "--yes", "--dry-run")
+	second := f.report(t, "hosts", "install", "opencode", "--yes", "--dry-run")
 	if len(first.HostStep.Results) != len(second.HostStep.Results) {
 		t.Fatalf("dry-run results differ between runs: %+v vs %+v",
 			first.HostStep.Results, second.HostStep.Results)
@@ -748,24 +868,37 @@ func TestOnboardHostInstallIsRepeatable(t *testing.T) {
 // installer runs against a temporary HOME, and the inspector afterwards
 // reports the host as installed.
 //
-// Long (the pi adapter stages a runtime package), so it is skipped under
-// -short.
+// Long (the adapter compiles and stages a runtime package), so it is
+// skipped under -short.
 func TestOnboardHostInstallRunsTheRealAdapter(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs a real adapter installer against a temporary HOME")
 	}
+	// The OpenCode adapter compiles its own payload before it can be
+	// staged, so the checkout must be bootstrapped first (`npm ci` in
+	// agent_installation/mpm-opencode). The release-gate job does that
+	// before `make release-gate`; a job that has not bootstrapped the
+	// adapter skips this test rather than running a network install
+	// inside a unit test.
+	adapterDir := filepath.Join(repoRoot(t), "agent_installation", "mpm-opencode")
+	if !adapterBootstrapped(adapterDir) {
+		t.Skip("the OpenCode adapter's build toolchain is not bootstrapped; " +
+			"run `npm ci` in agent_installation/mpm-opencode (the release-gate " +
+			"job does this before `make release-gate`)")
+	}
+
 	f := newOnboardFixture(t, "fresh")
 	f.warmUp(t)
 
 	before := f.report(t, "hosts")
 	for _, r := range before.Hosts {
-		if r.Subject == displayHostName("pi") && r.State == onboardStateOperational {
-			t.Skip("the fixture HOME already reports a Pi integration; " +
+		if r.Subject == displayHostName("opencode") && r.State == onboardStateOperational {
+			t.Skip("the fixture HOME already reports an OpenCode integration; " +
 				"the staged HOME should be empty")
 		}
 	}
 
-	rep := f.report(t, "hosts", "install", "pi", "--yes")
+	rep := f.report(t, "hosts", "install", "opencode", "--yes")
 	if rep.HostStep == nil || len(rep.HostStep.Results) != 1 {
 		t.Fatalf("host step = %+v, want one result", rep.HostStep)
 	}
@@ -776,32 +909,32 @@ func TestOnboardHostInstallRunsTheRealAdapter(t *testing.T) {
 	}
 
 	// The installer must have written the file it was pointed at.
-	agents := filepath.Join(f.home, ".pi", "agent", "AGENTS.md")
+	agents := filepath.Join(f.home, ".config", "opencode", "AGENTS.md")
 	if _, err := os.Stat(agents); err != nil {
 		t.Errorf("the adapter reported success but wrote nothing at %s: %v", agents, err)
 	}
 
-	// And a fresh inspection must now report Pi as installed — the
+	// And a fresh inspection must now report OpenCode as installed — the
 	// idempotency claim, checked through the real inspector rather than
 	// through onboarding's own bookkeeping.
 	after := f.report(t, "hosts")
 	found := false
 	for _, r := range after.Hosts {
-		if r.Subject == displayHostName("pi") {
+		if r.Subject == displayHostName("opencode") {
 			found = true
 			if r.State != onboardStateOperational {
-				t.Errorf("after installation the Pi row is %q, want %q: the report "+
+				t.Errorf("after installation the OpenCode row is %q, want %q: the report "+
 					"was not refreshed to the state onboarding left behind",
 					r.State, onboardStateOperational)
 			}
 		}
 	}
 	if !found {
-		t.Error("no Pi row in the post-install report")
+		t.Error("no OpenCode row in the post-install report")
 	}
 	for _, s := range after.Skipped {
-		if s == displayHostName("pi")+": integration not installed" {
-			t.Error("the post-install report still claims Pi is not installed; " +
+		if s == displayHostName("opencode")+": integration not installed" {
+			t.Error("the post-install report still claims OpenCode is not installed; " +
 				"the pre-install inventory line was not superseded")
 		}
 	}
@@ -814,11 +947,26 @@ func TestOnboardHostInstallRunsTheRealAdapter(t *testing.T) {
 	}
 
 	// Re-running must preserve rather than rewrite.
-	again := f.report(t, "hosts", "install", "pi", "--yes")
+	again := f.report(t, "hosts", "install", "opencode", "--yes")
 	if again.HostStep.Applied {
 		t.Error("a second run re-installed an already current host")
 	}
 	if r := again.HostStep.Results[0]; r.Detail != hostReasonAlreadyCurrent {
 		t.Errorf("second run detail = %q, want %q", r.Detail, hostReasonAlreadyCurrent)
 	}
+}
+
+// adapterBootstrapped reports whether the OpenCode adapter can build and
+// stage its own payload in this checkout: either the local TypeScript
+// compiler is installed, or a compiled payload is already present.
+func adapterBootstrapped(adapterDir string) bool {
+	for _, rel := range []string{
+		filepath.Join("node_modules", ".bin", "tsc"),
+		filepath.Join("dist", "index.v2.js"),
+	} {
+		if _, err := os.Stat(filepath.Join(adapterDir, rel)); err == nil {
+			return true
+		}
+	}
+	return false
 }

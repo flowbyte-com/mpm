@@ -45,10 +45,7 @@ import (
 // TestOnboardHostAdaptersMatchPython parses that file and fails on drift,
 // so this cannot quietly become a second source of truth.
 var onboardHostAdapters = map[string]string{
-	"claude_code": "mpm-claude-code",
-	"openclaw":    "mpm-memory-openclaw",
-	"opencode":    "mpm-opencode",
-	"pi":          "mpm-pi",
+	"opencode": "mpm-opencode",
 }
 
 // Host verdicts, as reported by the inspector. Re-declared as constants

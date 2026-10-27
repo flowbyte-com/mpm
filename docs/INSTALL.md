@@ -85,8 +85,11 @@ What the script does, in order:
 5. **Systemd service (user)** — installs
    `$HOME/.config/systemd/user/mpm-scheduler.service`, enables lingering
    via `loginctl enable-linger`, enables and starts the service
-6. **Host integration** — if OpenClaw is detected, registers `mpm` MCP server
-   with `MPM_WORKSPACE=$HOME/.mpm` and restarts the gateway
+6. **Host integration** — reconciles the installed host managed block
+   (`~/.config/opencode/AGENTS.md`) to the current canonical render. The
+   reconciler is host-agnostic: it discovers the adapters that ship with
+   this release and touches nothing on a machine that does not already
+   use them.
 7. **Validation** — verifies service active (user scope), CLI health check
    passes, MCP points at correct workspace
 
@@ -390,11 +393,12 @@ why pre-compute `next_run_at`) documented in [Specification: Agentic Cron](SPEC.
 > integration authority and carries the full OpenCode walkthrough —
 > prerequisites, verification, updates, recovery and uninstall.
 >
-> **The other adapters.** `agent_installation/` still contains adapter
-> directories for Claude Code, Pi, Hermes and OpenClaw. They are **not
-> supported in this release** and are not maintained for it; they remain
-> in the tree for operators who already run them. No `sudo` is required at
-> any point — every command runs in the user's context.
+> **The other adapters.** The Claude Code, Pi, Hermes and OpenClaw
+> adapters were retired on 2026-10-27; their directories are gone from
+> the tree. Retiring an adapter stops MPM from CONFIGURING that host — it
+> never removes, rewrites or disables an integration an operator already
+> has installed. No `sudo` is required at any point — every command runs
+> in the user's context.
 >
 > **The substrate is host-independent.** The MPM CLI, `mpm call <tool>
 > --payload '<json>'`, and the `mpm-mcp` stdio server work from any host.
@@ -418,79 +422,37 @@ grep -c 'BEGIN MPM-MANAGED SECTION:opencode-instructions' \
 # expect: 1
 ```
 
-### 3b. Other adapters (not supported in this release)
+### 3b. Other adapters (retired)
 
-The remaining adapter directories keep their own per-host walkthroughs in
-`agent_installation/INSTALL.md`. They are retained for operators who
-already run them; they are not maintained for this release. They are
-**not** the supported integration and their instructions are not part of
-the OpenCode release path.
+The Claude Code, Pi, Hermes and OpenClaw adapters were retired on
+2026-10-27. Their directories are gone from `agent_installation/`, and
+this release configures OpenCode and nothing else.
 
-#### OpenClaw
+**What that means for an existing installation.** Retiring an adapter
+stops MPM from CONFIGURING that host. It never removes, rewrites or
+disables an integration an operator already has: an existing
+`~/.claude/CLAUDE.md`, `~/.pi/agent/AGENTS.md`,
+`~/.openclaw/workspace/SOUL.md` or `.hermes.md` is left exactly as it
+is, and the diagnostic no longer reports it (a retired host is not MPM's
+business any more — reporting it would tell the operator to repair an
+integration MPM no longer supports).
 
-The OpenClaw adapter reconciles only on a machine that **already has the
-MPM OpenClaw integration installed** (its plugin directory or its
-`openclaw.json` plugin entry). A fresh MPM install does **not** detect the
-`openclaw` binary and wire the adapter for you. To wire it by hand:
+**What to do with a retired integration.** Remove it with the host's own
+mechanism, at your own pace — MPM will not do it for you. What MPM
+guarantees is that it will not interfere while you decide.
 
-```bash
-openclaw mcp add mpm \
-  --command "$HOME/.local/bin/mpm-mcp" \
-  --env MPM_WORKSPACE="$HOME/.mpm"
-
-openclaw gateway restart                  # gateway caches MCP servers at startup
-```
-
-> **Note:** `MPM_ACTIVE_MODE` and `MPM_ACTIVE_PERSONA` are intentionally
-> not set here. MPM resolves both from env at request time via
-> `internal/core/mpmcli.ActiveContextFromEnv()` and applies its own
-> `default`/`default` contract when unset. Hardcoding framework-specific
-> defaults at MCP-wiring time was a pre-2026-08-29 drift that leaked
-> old mode taxonomy into every registration. To pin a non-default mode
-> for this OpenClaw session, set the env vars on the gateway process
-> itself, not on the MCP server entry.
-
-> **Important:** `openclaw mcp add` is a silent no-op if `mpm` is already
-> registered. To update an existing registration, use `set`:
-> ```bash
-> openclaw mcp set mpm '{"command":"'"$HOME"'/.local/bin/mpm-mcp","env":{"MPM_WORKSPACE":"'"$HOME"'/.mpm"}}'
-> ```
-
-**Validate:**
+**The substrate is unchanged.** `mpm`, `mpm call <tool> --payload
+'<json>'` and the `mpm-mcp` stdio server are host-independent, so a
+retired host that speaks MCP can still reach MPM directly:
 
 ```bash
-openclaw mcp show mpm | grep MPM_WORKSPACE   # expect: "$HOME/.mpm"
-openclaw mcp doctor mpm --probe              # expect: probe passes
+mpm-mcp < /dev/null                 # the stdio server speaks JSON-RPC
 ```
 
-#### Hermes
-
-```bash
-hermes mcp add mpm \
-  --command "$HOME/.local/bin/mpm-mcp" \
-  --env MPM_WORKSPACE="$HOME/.mpm" \
-  --connect-timeout 15
-```
-
-Edit `~/.hermes/config.yaml`:
-
-```yaml
-mcp_servers:
-  mpm:
-    command: /home/<your-username>/.local/bin/mpm-mcp
-    env:
-      MPM_WORKSPACE: /home/<your-username>/.mpm
-    timeout: 60
-    connect_timeout: 30
-    enabled: true
-```
-
-**Validate:**
-
-```bash
-hermes mcp test mpm                    # expect: Connected, 3 tools discovered (default initial surface; MPM_EXPOSE_ALL_TOOLS=1 → 22)
-hermes mcp list | grep mpm             # expect: mpm ... ✓ enabled
-```
+What a retired host loses is the *managed behavioural block* and
+host-native wake-context delivery — the two layers that make MPM part
+of normal agent behaviour rather than a tool the agent has to remember
+to reach for.
 
 ---
 
@@ -542,7 +504,7 @@ user-owned; no `/usr/local` or `/var/lib/mpm` exists.
 | Path | Owner | Purpose |
 |------|-------|---------|
 | `~/.local/bin/mpm` | $USER | Symlink → `~/.mpm/bin/mpm`. User-PATH entry; subprocesses resolve this by name. |
-| `~/.local/bin/mpm-mcp` | $USER | Symlink → `~/.mpm/bin/mpm-mcp`. User-PATH entry for MCP hosts (Claude Code / OpenClaw / Hermes). |
+| `~/.local/bin/mpm-mcp` | $USER | Symlink → `~/.mpm/bin/mpm-mcp`. User-PATH entry for MCP hosts. |
 | `~/.mpm/bin/mpm` | $USER | Compiled Go CLI binary. Defaults `MPM_WORKSPACE` to `$HOME/.mpm` via `internal/core/config.GetMPMDir()`; the env var overrides at invocation. |
 | `~/.mpm/bin/mpm-mcp` | $USER | MCP server stdio binary |
 | `~/.mpm/bin/mpm-scheduler` | $USER | Scheduler daemon (invoked by systemd --user only — not on PATH) |
@@ -704,10 +666,7 @@ command to recover by hand.
 | CLI reads from a different DB than the daemon | `mpm ops health_check`; `echo $MPM_WORKSPACE` | Both sides must resolve `MPM_WORKSPACE` the same way. The canonical DB is `~/.mpm/src/db/mpm.db`; a DB under some other checkout means `MPM_WORKSPACE` is set to a non-default value. Unset it, or point it at `~/.mpm` consistently in `~/.config/mpm/mpm.env` and the unit. |
 | Spawn ENOENT when host tries to launch mpm-mcp | `ls -l ~/.mpm/bin/mpm-mcp` (or `.build/bin/mpm-mcp` for a local build) | If missing: run `./install.sh` (or `make install`) to place the binary in `~/.mpm/bin/`. `make build` alone only fills `.build/bin/`. If not executable: `chmod +x`. Then re-register with correct path. |
 | `mpm` not found on PATH after install | `command -v mpm`; `echo $PATH` | Verify `~/.local/bin` is on PATH: most shells pick it up via `/etc/profile.d/` defaults. If not: `export PATH="$HOME/.local/bin:$PATH"`. Internal daemons (mpm-scheduler, mpm-critic, mpm-telemetry) are NOT on PATH by design — they are invoked by systemd, never directly. |
-| MCP tools return data, but writes don't persist | `openclaw mcp show mpm` | Check `MPM_WORKSPACE` matches the canonical path (`$HOME/.mpm`); restart gateway |
-| `openclaw mcp add mpm` is a silent no-op | `openclaw mcp list` | Server already exists — use `openclaw mcp set mpm '<json>'` instead |
-| OpenClaw: agent doesn't see MPM tools in chat | `openclaw mcp list \| grep mpm` | `openclaw gateway restart` (Gateway caches MCP servers at startup) |
-| Hermes: agent doesn't see MPM tools in chat | `hermes mcp list \| grep mpm` | Confirm `mcp` toolset in `~/.hermes/config.yaml:toolsets`. Restart session (`/reset`) — config changes don't apply mid-conversation. |
+| MCP tools return data, but writes don't persist | the host's MCP server listing | Check `MPM_WORKSPACE` matches the canonical path (`$HOME/.mpm`) |
 | `mpm ops init directives` errors: "no such table: directives" | `mpm status` | Schema not initialized. Run `mpm status` first to init, then re-run `mpm ops init directives`. |
 | MCP tools load but `read_wake_context` returns empty | `mpm ops stats` | DB may be empty. Confirm `MPM_WORKSPACE` matches the canonical db path prime directive. |
 | Stale legacy unit at `/etc/systemd/system/mpm-scheduler.service` | `systemctl status mpm-scheduler` (system) shows `loaded failed` or `active` against the old path | The user installer cannot remove it (no sudo). Disable manually: `sudo systemctl disable --now mpm-scheduler && sudo rm -f /etc/systemd/system/mpm-scheduler.service && sudo systemctl daemon-reload`. The current user-space install is unaffected. |
@@ -747,8 +706,7 @@ saved before the resolver existed — those rows carry partial snapshots.
 ## 7. Migrating from an older layout
 
 Older installs kept the MPM checkout somewhere other than `~/.mpm`, most
-commonly `~/.openclaw/workspace/projects/mpm` (inside the OpenClaw agent
-workspace) or `~/projects/mpm`. The canonical *runtime* root is `~/.mpm`; the
+commonly `~/projects/mpm`. The canonical *runtime* root is `~/.mpm`; the
 checkout may live anywhere outside it, and `~/src/mpm` is the suggested
 convention.
 
@@ -827,5 +785,3 @@ separate concerns, and they must be moved separately.
 - [install.sh](../install.sh) — the install script (read the source)
 - [scripts/](../scripts/) — utility scripts (smoke tests, completion, etc.)
 - [contrib/systemd/](../contrib/systemd/) — unit file templates (user only; the legacy system template has been removed)
-- [OpenClaw docs](https://docs.openclaw.ai) — platform reference
-- [Hermes Agent docs](https://hermes-agent.nousresearch.com/docs) — runtime reference

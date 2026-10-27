@@ -37,6 +37,12 @@ CANONICAL_SNIPPETS = (
     .parent.parent.joinpath("MPM_AGENT_INTEGRATION_SNIPPETS.md")
 )
 
+RENDER_SH = (
+    __import__("pathlib")
+    .Path(__file__)
+    .parent.parent.joinpath("scripts/render_managed_blocks.py")
+)
+
 CANONICAL_PROTOCOL = (
     __import__("pathlib")
     .Path(__file__)
@@ -51,26 +57,37 @@ def _extract_block(text: str, begin: str, end: str) -> str:
     return text[i + len(begin):j]
 
 
-def _all_canonical_blocks(text: str) -> list[tuple[str, str]]:
-    """Find every (host_label, managed_block) inside the snippets file.
+def _adapter_outer_markers() -> list[tuple[str, str, str]]:
+    """(adapter_name, outer_begin, outer_end) for every shipped adapter.
 
-    Each copy-paste example contains one outer `MANAGED SECTION` (or
-    `MANAGED BLOCK:mpm-hermes`) marker wrapping one inner `MANAGED BLOCK`
-    pair. The behavioral contract lives in the inner block, so extract
-    that.
+    Derived from the RENDERER, which owns the adapter list, rather than
+    copied here. A hard-coded copy is a liability: it silently stops
+    covering an adapter that is added back, and it keeps naming adapters
+    that have been retired. Deriving it means the population under test
+    is exactly the population that ships.
     """
-    outer_markers = [
-        ("Claude Code", "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->",
-            "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->"),
-        ("OpenCode", "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->",
-            "<!-- END MPM-MANAGED SECTION:opencode-instructions -->"),
-        ("Pi", "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->",
-            "<!-- END MPM-MANAGED SECTION:pi-instructions -->"),
-        ("Hermes", "<!-- BEGIN MPM MANAGED BLOCK:mpm-hermes -->",
-            "<!-- END MPM MANAGED BLOCK:mpm-hermes -->"),
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "render_managed_blocks", RENDER_SH,
+    )
+    render = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(render)
+    return [
+        (a["name"], a["copy_paste_outer_begin"], a["copy_paste_outer_end"])
+        for a in render.ADAPTERS
     ]
+
+
+def _all_canonical_blocks(text: str) -> list[tuple[str, str]]:
+    """Find every (adapter_name, managed_block) inside the snippets file.
+
+    Each copy/paste example contains one outer `MANAGED SECTION` marker
+    wrapping one inner `MANAGED BLOCK` pair. The behavioral contract
+    lives in the inner block, so extract that.
+    """
     blocks = []
-    for host, outer_begin, outer_end in outer_markers:
+    for host, outer_begin, outer_end in _adapter_outer_markers():
         # Skip the description-backticks occurrence: find the FIRST
         # marker that is NOT preceded by a backtick (descriptions wrap
         # the marker in ``).
@@ -108,24 +125,47 @@ class ContinuityContract(unittest.TestCase):
     def setUp(self):
         self.text = CANONICAL_SNIPPETS.read_text(encoding="utf-8")
         self.blocks = _all_canonical_blocks(self.text)
-        # At minimum: 4 host blocks (claude-code, opencode, pi, hermes).
-        # The OpenClaw hosts inherit the universal canonical block.
+        # The population under test is the population that SHIPS: every
+        # adapter the renderer knows about must have a copy/paste block
+        # in the canonical snippets file, and every block found must
+        # belong to one of them.
+        #
+        # This is derived, not counted. A hard-coded count rots the
+        # moment an adapter is added or retired — and a count that is
+        # merely LOWERED to match the current tree is exactly the
+        # "silent pass" this suite exists to prevent.
+        self.adapters = {name for name, _, _ in _adapter_outer_markers()}
+        self.assertTrue(
+            self.adapters,
+            "the renderer knows about no adapters; the population under "
+            "test would be empty",
+        )
         self.assertGreaterEqual(
-            len(self.blocks), 4,
-            f"expected ≥ 4 host blocks; got {len(self.blocks)}",
+            len(self.blocks), len(self.adapters),
+            f"expected at least one copy/paste block per shipped adapter "
+            f"({len(self.adapters)}); found {len(self.blocks)}",
         )
 
-    def test_each_block_present(self):
-        # Spot-check that the 4 supported hosts with their own copy/paste
-        # block appear. OpenClaw hosts inherit the universal canonical
-        # block via the same prefix as Claude Code.
+    def test_every_shipped_adapter_has_a_copy_paste_block(self):
+        """Every adapter the renderer ships must appear in the canonical
+        snippets file.
+
+        The renderer and the snippets file are two artefacts that must
+        agree. A host added to the renderer without a copy/paste block
+        would leave an operator with a host the documentation does not
+        cover — and a host retired from the renderer without removing
+        its block would leave a block that documents nothing.
+        """
         hosts = {host for host, _ in self.blocks}
-        for required in (
-            "Claude Code", "OpenCode", "Pi", "Hermes",
-        ):
+        for required in sorted(self.adapters):
             self.assertIn(
                 required, hosts,
-                f"missing copy/paste example for host: {required}",
+                f"missing copy/paste example for adapter: {required}",
+            )
+        for found in sorted(hosts - self.adapters):
+            self.fail(
+                f"the canonical snippets file carries a copy/paste block "
+                f"for {found!r}, which the renderer does not ship"
             )
 
     def test_read_wake_context_described_as_continuity_entry_point(self):

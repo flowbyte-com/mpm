@@ -3,7 +3,7 @@ test_install_update_path.py — End-to-end regression for the
 git-pull-then-update-path contract.
 
 Demonstrates:
-    stale installed managed block (Pi / Claude Code / OpenCode)
+    stale installed managed block (OpenCode — the only supported host)
         ↓
     ./install.sh --reconcile  (the documented update entry point)
         ↓
@@ -46,26 +46,25 @@ import block_provenance  # noqa: E402
 # stale fixture must use the canonical host-specific markers for the
 # installer to detect the existing block and replace it in-place.
 HOST_TARGETS = {
-    "pi":          ".pi/agent/AGENTS.md",
-    "claude_code": ".claude/CLAUDE.md",
     "opencode":    ".config/opencode/AGENTS.md",
-    # openclaw is intentionally absent on this machine; not exercised
-    # by this regression.
 }
 HOST_MARKERS = {
-    "pi":          (
-        "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->",
-        "<!-- END MPM-MANAGED SECTION:pi-instructions -->",
-    ),
-    "claude_code": (
-        "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->",
-        "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->",
-    ),
     "opencode":    (
         "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->",
         "<!-- END MPM-MANAGED SECTION:opencode-instructions -->",
     ),
 }
+
+# The install targets of the hosts that were retired on 2026-10-27.
+# The reconcile pass must neither create them nor touch the ones an
+# operator already has. Retiring a host from the repository must not
+# remove, rewrite or disable an integration that is already installed
+# on the machine.
+RETIRED_HOST_TARGETS = (
+    ".claude/CLAUDE.md",
+    ".pi/agent/AGENTS.md",
+    ".openclaw/workspace/SOUL.md",
+)
 
 
 def _run(cmd: list[str], *, env: dict, timeout: int = 120) -> subprocess.CompletedProcess:
@@ -163,12 +162,21 @@ class UpdatePathRegression(unittest.TestCase):
         self.env = os.environ.copy()
         self.env["HOME"] = str(self.home)
 
-        # Seed three stale installed files (one per host with a
-        # persistent managed block). The fourth host (openclaw) is
-        # intentionally absent and must remain absent after the
-        # reconcile pass.
-        for host in ("pi", "claude_code", "opencode"):
+        # Seed a stale installed file for the one host with a
+        # persistent managed block.
+        for host in ("opencode",):
             _make_stale_target(host, self.home)
+
+        # Seed a pre-existing file for each RETIRED host. It must
+        # survive the reconcile pass byte-for-byte.
+        for rel in RETIRED_HOST_TARGETS:
+            legacy = self.home / rel
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            legacy.write_text(
+                f"# pre-existing operator file ({rel})\n"
+                "keep me exactly as I am.\n",
+                encoding="utf-8",
+            )
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -203,9 +211,7 @@ class UpdatePathRegression(unittest.TestCase):
                 installed,
                 f"{host}: no managed section in installed file",
             )
-            canonical = _canonical_block_for(
-                {"pi": "mpm-pi", "claude_code": "mpm-claude-code", "opencode": "mpm-opencode"}[host]
-            )
+            canonical = _canonical_block_for("mpm-opencode")
             # The installed block carries the build provenance of the
             # run that installed it — a per-install fact about the
             # build, not part of the behavioural contract. The canonical
@@ -236,17 +242,18 @@ class UpdatePathRegression(unittest.TestCase):
                 f"{host}: user content below managed block was lost",
             )
 
-    def test_install_sh_reconcile_intentionally_absent_host_stays_absent(self):
-        """OpenClaw on this machine is intentionally absent. The reconcile
-        pass must NOT auto-install its managed block — that would
-        violate the explicit-installation requirement.
+    def test_install_sh_reconcile_leaves_retired_host_installations_untouched(self):
+        """A retired host's existing installation must survive the
+        reconcile pass byte-for-byte.
+
+        Retiring an adapter from the repository stops MPM from
+        CONFIGURING that host. It must never remove, rewrite or
+        disable an integration the operator already has on disk.
         """
-        # Make sure the openclaw target is absent before we run.
-        openclaw_target = self.home / ".openclaw" / "workspace" / "SOUL.md"
-        self.assertFalse(
-            openclaw_target.exists(),
-            "test setup invariant: openclaw target should not exist before reconcile",
-        )
+        before = {
+            rel: (self.home / rel).read_bytes()
+            for rel in RETIRED_HOST_TARGETS
+        }
 
         result = _run(
             ["bash", str(INSTALL_SH), "--reconcile"],
@@ -254,10 +261,41 @@ class UpdatePathRegression(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-        self.assertFalse(
-            openclaw_target.exists(),
-            "install.sh --reconcile must NOT auto-install the openclaw managed block",
+        for rel, original in before.items():
+            path = self.home / rel
+            self.assertTrue(
+                path.is_file(),
+                f"{rel}: the reconcile pass deleted a pre-existing file",
+            )
+            self.assertEqual(
+                path.read_bytes(), original,
+                f"{rel}: the reconcile pass rewrote a pre-existing file",
+            )
+
+    def test_install_sh_reconcile_does_not_configure_retired_hosts(self):
+        """The reconcile pass must not CONFIGURE a retired host.
+
+        A fresh machine must end up with OpenCode configured and
+        nothing else: no `.claude/`, no `.pi/`, no `.openclaw/` path
+        created by the reconcile pass.
+        """
+        result = _run(
+            ["bash", str(INSTALL_SH), "--reconcile"],
+            env=self.env, timeout=180,
         )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        # The seeded legacy files are still there (the previous test
+        # proves they are untouched). What must NOT happen is a new
+        # managed block appearing in them, or a fresh install target
+        # being created for a retired host.
+        for rel in RETIRED_HOST_TARGETS:
+            text = (self.home / rel).read_text(encoding="utf-8")
+            self.assertNotIn(
+                "MPM-MANAGED SECTION", text,
+                f"{rel}: the reconcile pass wrote a managed block into a "
+                f"retired host's file",
+            )
 
     # ---------- step 2: second invocation is a no-op ----------
 
@@ -337,7 +375,7 @@ class UpdatePathRegression(unittest.TestCase):
         payload = _json.loads(proc.stdout)
         by_host = {row["host"]: row for row in payload}
 
-        for host in ("pi", "claude_code", "opencode"):
+        for host in ("opencode",):
             self.assertEqual(
                 by_host[host]["verdict"], "PASS",
                 f"{host}: diagnostic verdict after reconcile is "
@@ -346,12 +384,13 @@ class UpdatePathRegression(unittest.TestCase):
             self.assertEqual(by_host[host]["file"], "present")
             self.assertEqual(by_host[host]["block"], "present")
 
-        self.assertEqual(
-            by_host["openclaw"]["verdict"], "ABSENT",
-            "openclaw verdict should remain ABSENT (intentional)",
-        )
-        self.assertEqual(by_host["openclaw"]["file"], "absent")
-        self.assertEqual(by_host["openclaw"]["block"], "absent")
+        # A retired host is not MPM's business any more: the diagnostic
+        # must not report it at all (neither ABSENT nor WARN).
+        for retired in ("claude_code", "pi", "openclaw"):
+            self.assertNotIn(
+                retired, by_host,
+                f"the diagnostic still reports the retired host {retired!r}",
+            )
 
 
 if __name__ == "__main__":

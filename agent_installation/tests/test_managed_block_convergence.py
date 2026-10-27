@@ -7,12 +7,25 @@ The invariant under test:
 
 These tests are deliberately written against the shapes that actually
 occur on real machines, not idealized ones. The `RealShape` class in
-particular reproduces the file this work was written for: an OpenClaw
-`SOUL.md` carrying another host's (Pi's) managed section whose outer END
-marker was never written — the state that previously caused the
+particular reproduces the file this work was written for: an OpenCode
+`AGENTS.md` carrying another host's (Pi's) managed section whose outer
+END marker was never written — the state that previously caused the
 installer to append a second, contradictory behavioural contract.
 
 No test touches a real installed file. Every one builds its own fixture.
+
+HOST SCOPE
+----------
+
+OpenCode is the only supported host since the 2026-10-27 adapter
+removal, so the *subject* of these tests is OpenCode's marker form and
+OpenCode's installer.
+
+The RETIRED host marker forms (claude-code, pi, hermes, openclaw) stay
+in the fixtures, and must: a machine that ran an older MPM still
+carries those blocks on disk, and the convergence engine has to
+recognise every marker form MPM has ever written — otherwise it cannot
+converge them. Those ids are historical provenance, not live hosts.
 """
 
 from __future__ import annotations
@@ -25,22 +38,25 @@ from pathlib import Path
 
 AGENT_INSTALLATION = Path(__file__).resolve().parent.parent
 SCRIPTS = AGENT_INSTALLATION / "scripts"
-ADAPTERS = AGENT_INSTALLATION / "mpm-memory-openclaw"
-INSTALLER = ADAPTERS / "scripts" / "install_openclaw_instructions.py"
-SNIPPET = ADAPTERS / "templates" / "SOUL.md.snippet"
+ADAPTERS = AGENT_INSTALLATION / "mpm-opencode"
+INSTALLER = ADAPTERS / "scripts" / "install_agents_instructions.py"
+SNIPPET = ADAPTERS / "templates" / "AGENTS.md.snippet"
 
 sys.path.insert(0, str(SCRIPTS))
 import managed_block_convergence as conv  # noqa: E402
 
 
+# The marker form of the one shipped host.
+HOST_ID = "opencode-instructions"
+
 SECTION = (
-    "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->\n"
+    f"<!-- BEGIN MPM-MANAGED SECTION:{HOST_ID} -->\n"
     "<!-- generated: 20260101T000000Z -->\n"
     "<!-- NEW SECTION -->\n"
     "<!-- BEGIN MPM MANAGED BLOCK -->\n"
     "NEW CONTRACT BODY\n"
     "<!-- END MPM MANAGED BLOCK -->\n"
-    "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->\n"
+    f"<!-- END MPM-MANAGED SECTION:{HOST_ID} -->\n"
 )
 
 PERSONA = (
@@ -73,7 +89,15 @@ def wrap(ident: str, body: str) -> str:
 class EngineBasics(unittest.TestCase):
     """Structural parsing of every marker form MPM has ever written."""
 
-    def test_recognizes_every_current_host_id(self):
+    def test_recognizes_every_marker_form_mpm_has_written(self):
+        """Every host id MPM has ever written must still parse.
+
+        The retired ids are here on purpose: a machine that ran an
+        older MPM still carries those blocks on disk, and an engine
+        that cannot recognise them cannot converge them. Dropping them
+        from this list would make the engine silently blind to real
+        files.
+        """
         for ident in ("claude-code-instructions", "opencode-instructions",
                       "pi-instructions", "openclaw-instructions"):
             with self.subTest(ident=ident):
@@ -132,18 +156,18 @@ class EngineBasics(unittest.TestCase):
         )
         a = conv.analyze(text)
         self.assertEqual(a.regions, [])
-        self.assertEqual(conv.plan_convergence(text, SECTION, {"openclaw-instructions"}).action,
+        self.assertEqual(conv.plan_convergence(text, SECTION, {HOST_ID}).action,
                          conv.PLAN_INSERT)
 
 
 class Convergence(unittest.TestCase):
     """The decision table the user's Phase 2 specifies."""
 
-    def plan(self, text, ids=("openclaw-instructions",)):
+    def plan(self, text, ids=(HOST_ID,)):
         return conv.plan_convergence(text, SECTION, set(ids))
 
     def test_no_block_inserts(self):
-        p = self.plan("# SOUL.md\n\npersona\n")
+        p = self.plan("# AGENTS.md\n\npersona\n")
         self.assertEqual(p.action, conv.PLAN_INSERT)
         self.assertIn("<!-- NEW SECTION -->", p.text)
         self.assertIn("persona", p.text)
@@ -152,14 +176,14 @@ class Convergence(unittest.TestCase):
         # Build a genuinely current file by round-tripping. This host's
         # own stale block is a `replace`, not a `migrate` — the marker
         # id already matches, so nothing is being adopted.
-        first = self.plan(wrap("openclaw-instructions", "x"))
+        first = self.plan(wrap(HOST_ID, "x"))
         self.assertEqual(first.action, conv.PLAN_REPLACE)
         second = self.plan(first.text)
         self.assertEqual(second.action, conv.PLAN_NOOP)
         self.assertEqual(second.text, first.text)
 
     def test_stale_block_replaces(self):
-        text = wrap("openclaw-instructions", "stale content")
+        text = wrap(HOST_ID, "stale content")
         p = self.plan(text)
         self.assertEqual(p.action, conv.PLAN_REPLACE)
         self.assertNotIn("stale content", p.text)
@@ -197,7 +221,7 @@ class Convergence(unittest.TestCase):
         text = (
             wrap("pi-instructions", "one")
             + PERSONA
-            + wrap("openclaw-instructions", "two")
+            + wrap(HOST_ID, "two")
         )
         p = self.plan(text)
         self.assertEqual(p.action, conv.PLAN_CONVERGE)
@@ -222,7 +246,7 @@ class Convergence(unittest.TestCase):
         silently normalized by a careless reconstruction.
         """
         span_a = (
-            "# SOUL.md\n\n"
+            "# AGENTS.md\n\n"
             "**Fiercely Architectural:** 808 doesn't just execute "
             "commands.\tIt evaluates the structure underneath them.   \n\n"
             "\n\n"
@@ -240,7 +264,7 @@ class Convergence(unittest.TestCase):
             span_a
             + wrap("pi-instructions", "one")
             + span_b
-            + wrap("opencode-instructions", "two")
+            + wrap(HOST_ID, "two")
             + span_c
             + wrap("claude-code-instructions", "three")
         )
@@ -289,7 +313,7 @@ class Convergence(unittest.TestCase):
 
     def test_user_content_outside_block_is_byte_identical(self):
         persona = (
-            "# SOUL.md\n\n"
+            "# AGENTS.md\n\n"
             "PERSONA LINE ONE\n\n"
             "PERSONA LINE TWO with `code` and | pipes |\n\n"
             "  trailing indentation   \n\tand a tab\n"
@@ -312,7 +336,7 @@ class Convergence(unittest.TestCase):
         text = (
             "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->\nA\n"
             "<!-- END MPM-MANAGED SECTION:pi-instructions -->\n"
-            "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->\nB\n"
+            f"<!-- BEGIN MPM-MANAGED SECTION:{HOST_ID} -->\nB\n"
         )
         p = self.plan(text)
         self.assertEqual(p.action, conv.PLAN_REFUSE)
@@ -343,7 +367,7 @@ class Convergence(unittest.TestCase):
 
     def test_truncated_inner_contract_refuses(self):
         text = (
-            "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->\n"
+            f"<!-- BEGIN MPM-MANAGED SECTION:{HOST_ID} -->\n"
             "<!-- BEGIN MPM MANAGED BLOCK -->\ntruncated...\n"
         )
         p = self.plan(text)
@@ -353,7 +377,7 @@ class Convergence(unittest.TestCase):
     def test_crossed_markers_refuse(self):
         text = (
             "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->\n"
-            "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->\n"
+            f"<!-- END MPM-MANAGED SECTION:{HOST_ID} -->\n"
         )
         p = self.plan(text)
         self.assertEqual(p.action, conv.PLAN_REFUSE)
@@ -362,8 +386,8 @@ class Convergence(unittest.TestCase):
 class RealShape(unittest.TestCase):
     """The exact file this work was written for.
 
-    An OpenClaw `SOUL.md` carrying a Pi-rendered MPM managed block whose
-    OUTER END marker was never written. Before convergence, the OpenClaw
+    An OpenCode `AGENTS.md` carrying a Pi-rendered MPM managed block
+    whose OUTER END marker was never written. Before convergence, the
     installer matched none of its own markers, fell through to the
     append branch, and produced a file with TWO behavioural contracts
     whose tool prefixes contradicted each other.
@@ -371,7 +395,7 @@ class RealShape(unittest.TestCase):
 
     def _real_shape(self) -> str:
         return (
-            "# SOUL.md\n\n"
+            "# AGENTS.md\n\n"
             "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->\n"
             "> Pi header prose that is MPM-generated, not user content.\n"
             "<!-- BEGIN MPM MANAGED BLOCK -->\n"
@@ -388,7 +412,7 @@ class RealShape(unittest.TestCase):
 
     def test_converges_to_exactly_one_block(self):
         p = conv.plan_convergence(
-            self._real_shape(), SECTION, {"openclaw-instructions"},
+            self._real_shape(), SECTION, {HOST_ID},
         )
         self.assertEqual(p.action, conv.PLAN_REPAIR)
         self.assertEqual(p.text.count("<!-- BEGIN MPM-MANAGED SECTION:"), 1)
@@ -399,25 +423,25 @@ class RealShape(unittest.TestCase):
 
     def test_persona_preserved_exactly(self):
         p = conv.plan_convergence(
-            self._real_shape(), SECTION, {"openclaw-instructions"},
+            self._real_shape(), SECTION, {HOST_ID},
         )
         self.assertIn("***The Ghost in the Circuit***", p.text)
         self.assertIn("**Fiercely Architectural:**", p.text)
-        self.assertTrue(p.text.startswith("# SOUL.md"))
+        self.assertTrue(p.text.startswith("# AGENTS.md"))
 
     def test_second_pass_is_byte_identical(self):
         first = conv.plan_convergence(
-            self._real_shape(), SECTION, {"openclaw-instructions"},
+            self._real_shape(), SECTION, {HOST_ID},
         )
         second = conv.plan_convergence(
-            first.text, SECTION, {"openclaw-instructions"},
+            first.text, SECTION, {HOST_ID},
         )
         self.assertEqual(second.action, conv.PLAN_NOOP)
         self.assertEqual(second.text, first.text)
 
 
 class InstallerEndToEnd(unittest.TestCase):
-    """Drive the real OpenClaw installer over fixture files.
+    """Drive the real OpenCode installer over fixture files.
 
     These run the actual script as a subprocess so the contract under
     test is the one `make refresh-installed` exercises, not a
@@ -427,86 +451,98 @@ class InstallerEndToEnd(unittest.TestCase):
     def run_installer(self, target: Path, *extra: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, str(INSTALLER),
-             "--home", str(target.parent),
+             "--scope", "user",
              "--target", str(target),
              "--snippet", str(SNIPPET), *extra],
             capture_output=True, text=True,
         )
 
-    def test_repairs_foreign_malformed_section_on_disk(self):
+    def test_a_foreign_well_formed_block_is_replaced_not_duplicated(self):
+        """A block left by a retired host must be REPLACED, never
+        appended alongside.
+
+        This is the "never write a second contract" property for the
+        one shipped host: an operator who ran an older MPM has a
+        `pi-instructions` block in their AGENTS.md, and the installer
+        must leave exactly one behavioural contract behind.
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "SOUL.md"
+            target = Path(tmp) / "AGENTS.md"
             target.write_text(
-                "# SOUL.md\n\n"
-                "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->\n"
-                "> pi header\n"
-                "<!-- BEGIN MPM MANAGED BLOCK -->\nold\n"
-                "<!-- END MPM MANAGED BLOCK -->\n"
-                + PERSONA,
+                wrap("pi-instructions", "pi contract") + PERSONA,
                 encoding="utf-8",
             )
             r = self.run_installer(target)
             self.assertEqual(r.returncode, 0, r.stderr)
             text = target.read_text(encoding="utf-8")
-            self.assertEqual(
-                text.count("<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->"), 1,
-            )
             self.assertEqual(text.count("<!-- BEGIN MPM MANAGED BLOCK -->"), 1)
-            self.assertNotIn("mcp__mpm__", text)
+            self.assertNotIn("pi contract", text)
+            # The persona is the operator's own content and survives.
             self.assertIn("The Ghost in the Circuit", text)
 
     def test_never_writes_a_second_contract(self):
+        """Reconciling a file that already carries this host's block
+        must not add another one.
+
+        The installer replaces or appends — it never stacks a second
+        behavioural contract of its own on top of the first.
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "SOUL.md"
+            target = Path(tmp) / "AGENTS.md"
             target.write_text(
-                wrap("pi-instructions", "one") + PERSONA
-                + wrap("openclaw-instructions", "two"),
+                wrap(HOST_ID, "one") + PERSONA,
                 encoding="utf-8",
             )
             r = self.run_installer(target)
             self.assertEqual(r.returncode, 0, r.stderr)
             text = target.read_text(encoding="utf-8")
             self.assertEqual(text.count("<!-- BEGIN MPM MANAGED BLOCK -->"), 1)
+            self.assertEqual(
+                text.count(f"<!-- BEGIN MPM-MANAGED SECTION:{HOST_ID} -->"), 1,
+            )
 
     def test_backup_written_before_destructive_change(self):
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "SOUL.md"
+            target = Path(tmp) / "AGENTS.md"
             original = wrap("pi-instructions", "old") + PERSONA
             target.write_text(original, encoding="utf-8")
             r = self.run_installer(target)
             self.assertEqual(r.returncode, 0, r.stderr)
-            backups = list(Path(tmp).glob("SOUL.md.bak.*"))
+            backups = list(Path(tmp).glob("AGENTS.md.bak*"))
             self.assertEqual(len(backups), 1, "no backup was taken")
             self.assertEqual(backups[0].read_text(encoding="utf-8"), original)
 
-    def test_refuses_on_ambiguous_markers_without_writing(self):
+    def test_refuses_on_an_orphan_begin_without_writing(self):
+        """A BEGIN with no matching END is structurally dangerous: the
+        regex would walk past the missing END and consume arbitrary
+        user content. The installer must refuse and leave the file
+        alone."""
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "SOUL.md"
+            target = Path(tmp) / "AGENTS.md"
             ambiguous = (
-                "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->\n"
+                f"<!-- BEGIN MPM-MANAGED SECTION:{HOST_ID} -->\n"
                 "prose that is user content\n"
             )
             target.write_text(ambiguous, encoding="utf-8")
             r = self.run_installer(target)
-            self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+            self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertEqual(
                 target.read_text(encoding="utf-8"), ambiguous,
                 "installer modified an ambiguous file",
             )
-            self.assertEqual(list(Path(tmp).glob("*.bak.*")), [])
 
     def test_idempotent_second_run(self):
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "SOUL.md"
+            target = Path(tmp) / "AGENTS.md"
             target.write_text(PERSONA, encoding="utf-8")
             self.assertEqual(self.run_installer(target).returncode, 0)
             once = target.read_bytes()
             self.assertEqual(self.run_installer(target).returncode, 0)
             self.assertEqual(target.read_bytes(), once)
 
-    def test_uninstall_removes_foreign_section_too(self):
+    def test_uninstall_removes_the_managed_section(self):
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "SOUL.md"
+            target = Path(tmp) / "AGENTS.md"
             target.write_text(
                 wrap("pi-instructions", "old") + PERSONA, encoding="utf-8",
             )
@@ -530,24 +566,34 @@ class IntegrationModeRendering(unittest.TestCase):
         no MCP server, `mpm` on PATH, workspace naming MPM."""
         (root / ".mpm" / "bin").mkdir(parents=True)
         (root / ".mpm" / "bin" / "mpm").write_text("#!/bin/sh\n", encoding="utf-8")
-        ws = root / ".openclaw" / "workspace"
-        ws.mkdir(parents=True)
-        (root / ".openclaw" / "openclaw.json").write_text(
-            '{"agents": {"defaults": {"workspace": "%s"}}}' % ws,
+        config = root / ".config" / "opencode"
+        config.mkdir(parents=True)
+        (config / "opencode.jsonc").write_text(
+            '{"$schema": "https://opencode.ai/config.json", "plugin": []}\n',
             encoding="utf-8",
         )
-        (ws / "AGENTS.md").write_text(
+        target = config / "AGENTS.md"
+        target.write_text(
             "MPM is your native SQLite-backed persistence layer. "
             "Use `mpm call <tool> --payload` to reach it.\n",
             encoding="utf-8",
         )
-        return ws / "SOUL.md"
+        return target
+
+    def run_installer(self, target: Path, *extra: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(INSTALLER),
+             "--scope", "user",
+             "--target", str(target),
+             "--snippet", str(SNIPPET), *extra],
+            capture_output=True, text=True,
+        )
 
     def test_cli_fallback_gets_bare_names_not_mcp_prefix(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             target = self._cli_fallback_home(home)
-            target.write_text("# SOUL.md\n" + PERSONA, encoding="utf-8")
+            target.write_text("# AGENTS.md\n" + PERSONA, encoding="utf-8")
             r = self.run_installer(target)
             self.assertEqual(r.returncode, 0, r.stderr)
             text = target.read_text(encoding="utf-8")
@@ -558,7 +604,7 @@ class IntegrationModeRendering(unittest.TestCase):
             self.assertNotIn("mcp__mpm__mpm_context", text)
             self.assertNotIn("mcp__", text)
             # The host-specific footer still teaches the working call.
-            self.assertIn("mpm call mpm_context", text)
+            self.assertIn("mpm call <tool>", text)
 
     def test_native_plugin_mode_also_gets_bare_names(self):
         """Plugin mode registers only mpm_memory_search / mpm_memory_get
@@ -566,13 +612,13 @@ class IntegrationModeRendering(unittest.TestCase):
         wrong there too."""
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            (home / ".openclaw" / "extensions" / "mpm-memory-openclaw").mkdir(
+            (home / ".mpm" / "agent_installation" / "mpm-opencode").mkdir(
                 parents=True,
             )
-            ws = home / ".openclaw" / "workspace"
-            ws.mkdir(parents=True)
-            target = ws / "SOUL.md"
-            target.write_text("# SOUL.md\n" + PERSONA, encoding="utf-8")
+            config = home / ".config" / "opencode"
+            config.mkdir(parents=True)
+            target = config / "AGENTS.md"
+            target.write_text("# AGENTS.md\n" + PERSONA, encoding="utf-8")
             r = self.run_installer(target)
             self.assertEqual(r.returncode, 0, r.stderr)
             text = target.read_text(encoding="utf-8")
@@ -583,15 +629,6 @@ class IntegrationModeRendering(unittest.TestCase):
         """Guards the render, not just the install: the checked-in
         snippet must not reintroduce the prefix."""
         self.assertNotIn("mcp__", SNIPPET.read_text(encoding="utf-8"))
-
-    def run_installer(self, target: Path, *extra: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [sys.executable, str(INSTALLER),
-             "--home", str(target.parent),
-             "--target", str(target),
-             "--snippet", str(SNIPPET), *extra],
-            capture_output=True, text=True,
-        )
 
 
 if __name__ == "__main__":

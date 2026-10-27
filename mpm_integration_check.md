@@ -22,12 +22,13 @@ A configuration file, registered plugin, MCP entry, extension directory, running
 The procedure is host-agnostic and applies to supported integrations including:
 
 ```text
-Claude Code
-OpenClaw
 OpenCode
-Pi
-Hermes
 ```
+
+Hosts that MPM no longer supports are still worth checking by hand if
+you operate one — the checks below are capability-based, and the
+substrate does not care which host you ask it from. What MPM will not
+do is configure a retired host for you.
 
 Future hosts should use the same capability-based checks rather than copying assumptions from an existing adapter.
 
@@ -494,9 +495,8 @@ Perform at least one harmless MPM operation through the mechanism the current ag
 Examples:
 
 ```text
-Pi/OpenCode native typed tool
-Claude Code/Hermes MCP tool
-OpenClaw plugin/runtime binding
+OpenCode native typed tool
+mpm-mcp JSON-RPC tool call
 documented host fallback
 ```
 
@@ -602,15 +602,11 @@ manual wake gatherer (substrate side):         PASS / FAIL
   mpm call mpm_context --payload '{"action":"read_wake_context",...}' returns populated WakeContextData
 
 automatic host session-start injection:     PASS / FAIL / UNKNOWN
-  OpenClaw mpm-memory-openclaw session_start hook fires AND
-  agent_turn_prepare returns { prependContext: <wake> } for the
-  same sessionKey that session_start stored.
-  Verify via the gateway journal:
-    journalctl --user -u openclaw-gateway.service -n 500 --no-pager \
-      | grep -E "mpm-memory-openclaw: (session_start|agent_turn_prepare)"
-  Successful injection logs show:
-    "session_start wake fetched for <sessionKey> (length=N)"
-    "agent_turn_prepare for <sessionKey> (cached=true, wakeLength=N)"
+  The OpenCode plugin's session hook fires AND the wake payload it
+  pushes reaches the model-facing system prompt for that session.
+  Verify inside an OpenCode session:
+    the first turn's system prompt carries the MPM wake context
+    (mpm_context.read_wake_context with format=system-prompt)
   See §17 (host-specific wiring) for the per-host probe commands.
 ```
 
@@ -629,7 +625,7 @@ manual FAIL + automatic *        ->  substrate side broken; nothing can
 ```
 
 This separation is the key fix for the false-PASS class: a fresh
-OpenClaw session where persona injects but wake does not shows up as
+session where persona injects but wake does not shows up as
 `automatic FAIL` here, not `Wake/context: PASS`.
 
 Record:
@@ -782,7 +778,7 @@ Without an existing suitable wake to observe, end-to-end delivery may legitimate
 
 Determine the host's actual current mode/persona contract.
 
-Do not assume every host implements OpenClaw-style automatic per-turn routing.
+Do not assume every host implements automatic per-turn routing.
 
 Distinguish:
 
@@ -801,9 +797,9 @@ Like wake/context (§10.1), the persona integration has three distinct
 layers that must be reported separately. A session where the persona
 block appears in the agent's prompt is **not by itself** proof that
 automatic host injection is working — the persona body might be baked
-into a static file (SOUL.md, CLAUDE.md, AGENTS.md) that the host loads
-unconditionally. Conversely, "persona visible on manual probe" does
-not prove automatic injection either.
+into a static file the host loads unconditionally (e.g. `AGENTS.md`).
+Conversely, "persona visible on manual probe" does not prove automatic
+injection either.
 
 Distinguish:
 
@@ -813,18 +809,17 @@ persona state readable (substrate side):       PASS / FAIL
   active.json at the workspace root carries the persona id.
 
 persona automatically injected (host side):   PASS / FAIL / UNKNOWN
-  OpenClaw mpm-auto-mode-persona-openclaw message:received + agent:bootstrap
-  hooks both fire for the same sessionKey. Verify via:
-    journalctl --user -u openclaw-gateway.service -n 500 --no-pager \
-      | grep -E "mpm-auto-mode-persona-openclaw|bootstrap|reminder"
-  Successful injection logs show a single append per session turn.
+  The host's session-start hook pushes the rendered persona into the
+  model-facing system prompt for that session. Verify by reading the
+  assembled system prompt the model actually receives.
+  Successful injection shows a single append per session turn.
 
 persona injected exactly once (idempotency):   PASS / FAIL / UNKNOWN
-  The persona block must not appear N times in the assembled SOUL.md
-  content. N>1 indicates either:
-    - the host fires agent:bootstrap more than once per turn AND the
-      plugin appends on every fire, OR
-    - two persona plugins are loaded and both append.
+  The persona block must not appear N times in the assembled system
+  prompt. N>1 indicates either:
+    - the host fires its session-start hook more than once per turn AND
+      the integration appends on every fire, OR
+    - two persona integrations are loaded and both append.
   Verify by reading the actual bootstrapFiles content the model sees
   and counting occurrences of the rendered persona block.
 ```
@@ -833,7 +828,7 @@ The pre-fix regression mode the operator can detect with this
 section:
 
 ```text
-automatic routing:           PASS   (mpm-auto-mode-persona-openclaw is loaded)
+automatic routing:           PASS   (the persona is loaded)
 persona injected exactly once: FAIL   (3 occurrences in the model prompt)
 ```
 
@@ -967,129 +962,27 @@ path does not exist
 
 without an intervening change.
 
-## 17.2 Pi
+## 17.2 OpenCode
 
-Inspect the actual Pi extension registration and its current workspace/binary/provenance behaviour.
+OpenCode follows the **persistent managed instruction** model: the
+agent's `AGENTS.md` is the persistent behavioural-contract surface, and
+the plugin pushes the wake context at session start.
 
-Check:
-
-```text
-extension registered
-native typed tools load
-CLI fallback resolves
-workspace resolution is correct
-framework provenance is pi
-runtime model metadata is not statically fabricated
-```
-
-## 17.3 OpenClaw
-
-OpenClaw follows the same **persistent managed instruction** model as
-the other four hosts. The agent's `SOUL.md` (resolved per-agent from
-`openclaw.json` → `agents.entries.<id>.workspace`) is the persistent
-behavioural-contract surface. `mpm-memory-openclaw/install.sh` writes
-the MPM managed block to that path on install and refreshes it on
-reinstall. Persona (808) and any user content outside the managed
-markers is preserved verbatim.
-
-Inspect current OpenClaw plugin identities from their manifests/configuration.
-
-For OpenClaw explicitly distinguish:
-
-```text
-repository adapter directory  (e.g. agent_installation/mpm-memory-openclaw/)
-package.json name            (e.g. "openclaw-mpm-memory")
-openclaw.plugin.json id      (e.g. "openclaw-mpm-memory")
-plugins.entries key          (in host config)
-plugins.slots.memory value   (in host config)
-agent SOUL.md path           (per-agent workspace / SOUL.md)
-managed-block markers       (BEGIN/END MPM-MANAGED SECTION:openclaw-instructions)
-historical names in memories/docs
-```
-
-Do not label a name an npm package name, manifest ID, repository directory, or config key without inspecting the authoritative source for that namespace.
+Inspect the actual plugin registration and its current
+workspace/binary/provenance behaviour.
 
 Check:
 
 ```text
-plugin registered
-plugin enabled
-correct memory slot where applicable
-absolute mpm binary binding where required
-gateway health
-runtime hook wiring
-wake/context delivery
-mode/persona plugin behaviour where installed
-persistent behavioural contract present in SOUL.md
-persona / user content above managed markers preserved
+plugin registration
+native typed tool loading
+CLI fallback
+workspace resolution
+managed behavioural instructions
 ```
 
-The persistent behavioural contract in `SOUL.md` is **not** equivalent
-to runtime wake injection. Both layers must pass for the agent to be
-fully MPM-capable:
-
-```text
-Wake gatherer (substrate side):                   PASS / FAIL
-Wake runtime injection (auto session_start → agent_turn_prepare):  PASS / FAIL / UNKNOWN
-MPM managed block in SOUL.md:                    PASS / FAIL
-Persona injection (auto message:received + agent:bootstrap):   PASS / FAIL / UNKNOWN
-```
-
-A host that reports `Wake runtime injection: PASS` MUST also pass
-`MPM managed block in SOUL.md`; otherwise the operator has been told
-a partial truth — runtime wake delivery without the persistent
-behavioural contract produces agents that receive current context but
-do not know how to use MPM across the session.
-
-The same holds when wake injection reports `FAIL` or `UNKNOWN` for a
-host that has no MPM plugin at all. OpenClaw supports a **CLI-fallback
-mode** in which the agent reaches MPM through `mpm call <tool>` over
-its shell tool instead of through a plugin. That mode delivers no wake
-injection, so the managed block is not merely supplementing a
-dynamic layer there — it is the *only* thing that tells the agent the
-fallback exists. Classify such a host as MPM-enabled on the strength of
-reachability plus intent, not on plugin presence:
-
-```text
-native plugin mode  mpm-memory-openclaw installed
-                    (plugin dir / plugins.entries.* / plugins.slots.memory)
-CLI fallback mode   mpm binary installed at ~/.mpm/bin/mpm or ~/.local/bin/mpm
-                    AND the OpenClaw workspace instruction surface
-                    (AGENTS.md / MEMORY.md / CLAUDE.md, workspace resolved from
-                    openclaw.json) already names MPM
-```
-
-Both halves are required. MPM is installed on any machine that has any
-MPM integration, so reachability alone is far too permissive; and a
-workspace that mentions MPM in passing has not been integrated. A
-machine satisfying neither is an OpenClaw that has never been
-integrated with MPM and must not be opted in.
-
-`make check-installed` applies exactly this rule, and
-`make refresh-installed` uses the same one, so the two can never
-disagree about whether a host is in scope. To confirm the managed
-section directly:
-
-```bash
-test -f "$HOME/.openclaw/workspace/SOUL.md" \
-  && grep -q 'BEGIN MPM-MANAGED SECTION:openclaw-instructions' \
-       "$HOME/.openclaw/workspace/SOUL.md"
-```
-
-to confirm the managed section is present in the agent's SOUL.md.
-
-## 17.4 Claude Code
-
-Check:
-
-```text
-MCP registration
-mpm-mcp resolution
-managed MPM behavioural instructions
-live MCP call
-```
-
-For the managed MPM behavioural instructions: the install target is `~/.claude/CLAUDE.md`. Use the canonical diagnostic:
+For the managed behavioural instructions: the install target is
+`~/.config/opencode/AGENTS.md`. Use the canonical diagnostic:
 
 ```bash
 make check-installed
@@ -1104,32 +997,63 @@ ABSENT  install target absent or managed-section markers absent
 ERROR   install target present, markers present, but file malformed
 ```
 
-PASS and WARN are currency concerns; ABSENT is a presence concern. The `make check-installed` diagnostic reports presence and currency separately, so an operator can tell the two apart at a glance. WARN's repair path is `make refresh-installed`. ABSENT's repair path is the per-host `install.sh` (not `refresh-installed` — there is no managed block to refresh).
+PASS and WARN are currency concerns; ABSENT is a presence concern. The
+`make check-installed` diagnostic reports presence and currency
+separately, so an operator can tell the two apart at a glance. WARN's
+repair path is `make refresh-installed`. ABSENT's repair path is the
+per-host `install.sh` (not `refresh-installed` — there is no managed
+block to refresh).
 
-## 17.5 OpenCode
-
-Check:
-
-```text
-plugin registration
-native typed tool loading
-CLI fallback
-workspace resolution
-managed behavioural instructions
-```
-
-For the managed behavioural instructions: the install target is `~/.config/opencode/AGENTS.md`. Use the same `make check-installed` diagnostic. Repair paths match those listed in §17.4.
-
-## 17.6 Hermes
-
-Check:
+The persistent behavioural contract in `AGENTS.md` is **not** equivalent
+to runtime wake injection. Both layers must pass for the agent to be
+fully MPM-capable:
 
 ```text
-MCP registration/configuration
-mpm-mcp resolution
-behavioural instruction loading
-live MCP call
+Wake gatherer (substrate side):                   PASS / FAIL
+Wake runtime injection (the plugin's session hook):  PASS / FAIL / UNKNOWN
+MPM managed block in AGENTS.md:                   PASS / FAIL
 ```
+
+A host that reports `Wake runtime injection: PASS` MUST also pass
+`MPM managed block in AGENTS.md`; otherwise the operator has been told
+a partial truth — runtime wake delivery without the persistent
+behavioural contract produces agents that receive current context but
+do not know how to use MPM across the session.
+
+The same holds when wake injection reports `FAIL` or `UNKNOWN` for a
+host that has no MPM plugin at all. A **CLI-fallback mode** reaches MPM
+through `mpm call <tool>` over the host's shell tool instead of through
+a plugin. That mode delivers no wake injection, so the managed block is
+not merely supplementing a dynamic layer there — it is the *only* thing
+that tells the agent the fallback exists. Classify such a host as
+MPM-enabled on the strength of reachability plus intent, not on plugin
+presence:
+
+```text
+native plugin mode  the OpenCode plugin is registered
+                    (plugins[] entry in ~/.config/opencode/opencode.jsonc)
+CLI fallback mode   mpm binary installed at ~/.mpm/bin/mpm or ~/.local/bin/mpm
+                    AND the host's instruction surface
+                    (~/.config/opencode/AGENTS.md) already names MPM
+```
+
+Both halves are required. MPM is installed on any machine that has any
+MPM integration, so reachability alone is far too permissive; and an
+instruction surface that mentions MPM in passing has not been
+integrated. A machine satisfying neither has never been integrated with
+MPM and must not be opted in.
+
+`make check-installed` applies exactly this rule, and
+`make refresh-installed` uses the same one, so the two can never
+disagree about whether a host is in scope. To confirm the managed
+section directly:
+
+```bash
+test -f "$HOME/.config/opencode/AGENTS.md" \
+  && grep -q 'BEGIN MPM-MANAGED SECTION:opencode-instructions' \
+       "$HOME/.config/opencode/AGENTS.md"
+```
+
 
 ---
 
@@ -1318,7 +1242,7 @@ mpm CLI works
 and:
 
 ```text
-Pi/OpenClaw/Claude/OpenCode/Hermes integration works
+OpenCode integration works
 ```
 
 are different claims.

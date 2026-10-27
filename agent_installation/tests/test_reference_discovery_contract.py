@@ -60,10 +60,9 @@ The seven properties this file pins, one per requirement:
      orphaned target.
 
 Isolation: every test that installs or reconciles sets HOME to a
-fresh tmp dir, so the operator's real ~/.claude/CLAUDE.md,
-~/.pi/agent/AGENTS.md, ~/.config/opencode/AGENTS.md and
-~/.openclaw/workspace/SOUL.md are never read as inputs and never
-written. Tests 6 and 5 assert on sandbox files only.
+fresh tmp dir, so the operator's real ~/.config/opencode/AGENTS.md is
+never read as an input and never written. Tests 6 and 5 assert on
+sandbox files only.
 
 The Go-side counterpart — pinning the mpm_references MCP description
 so the discovery fix cannot regress independently of the block — is
@@ -402,11 +401,7 @@ class ReferenceGuidanceReachesEveryHost(unittest.TestCase):
 
 def _snippet_name_for(adapter_name: str) -> str:
     return {
-        "mpm-claude-code": "CLAUDE.md.snippet",
         "mpm-opencode": "AGENTS.md.snippet",
-        "mpm-pi": "AGENTS.md.snippet",
-        "mpm-hermes": "hermes.md.snippet",
-        "mpm-memory-openclaw": "SOUL.md.snippet",
     }[adapter_name]
 
 
@@ -515,10 +510,10 @@ class ReferenceGuidanceSurvivesInstallation(unittest.TestCase):
     right text and shipping the wrong text are different failures, and
     only the second one bites an operator.
 
-    Hermes is the exception, and it is an exception by design rather
-    than by omission: it has no persistent managed block and its
-    reconcile.json declares no installer, so the real path for Hermes
-    is its own documented manual script, invoked directly.
+    OpenCode is the only supported host since the 2026-10-27 adapter
+    removal, so this class exercises the real installation path for the
+    one host that remains. The retired hosts took their own cases with
+    them.
     """
 
     def setUp(self):
@@ -565,11 +560,7 @@ class ReferenceGuidanceSurvivesInstallation(unittest.TestCase):
 
     def _installed_path_for(self, adapter_name: str) -> Path:
         return {
-            "mpm-pi": self.home / ".pi" / "agent" / "AGENTS.md",
-            "mpm-claude-code": self.home / ".claude" / "CLAUDE.md",
             "mpm-opencode": self.home / ".config" / "opencode" / "AGENTS.md",
-            "mpm-memory-openclaw": self.home / ".openclaw" / "workspace" / "SOUL.md",
-            "mpm-hermes": self.home / ".hermes.md",
         }[adapter_name]
 
     # ---------- property 6: reaches every host ----------
@@ -579,8 +570,7 @@ class ReferenceGuidanceSurvivesInstallation(unittest.TestCase):
         manifest arguments, must land the guidance in the file that
         host actually reads.
         """
-        for adapter_name in ("mpm-claude-code", "mpm-opencode", "mpm-pi",
-                             "mpm-memory-openclaw"):
+        for adapter_name in ("mpm-opencode",):
             with self.subTest(adapter=adapter_name):
                 self._install(adapter_name)
                 installed = self._installed_path_for(adapter_name)
@@ -603,34 +593,6 @@ class ReferenceGuidanceSurvivesInstallation(unittest.TestCase):
                     f"tool as this host spells it",
                 )
 
-    def test_hermes_manual_installer_delivers_the_guidance(self):
-        """Hermes has no persistent managed block by design — its
-        reconcile.json declares no installer and its SKILL.md documents
-        a manual flow. The real path for Hermes is therefore
-        install_hermes_instructions.py, driven the way SKILL.md drives
-        it. It is asserted here rather than skipped, because "no
-        managed block" must not become "no guidance".
-        """
-        installer = (AGENT_INSTALLATION / "mpm-hermes" / "scripts"
-                     / "install_hermes_instructions.py")
-        snippet = (AGENT_INSTALLATION / "mpm-hermes" / "templates"
-                   / "hermes.md.snippet")
-        target = self.home / "project" / ".hermes.md"
-        target.parent.mkdir(parents=True, exist_ok=True)
-
-        proc = subprocess.run(
-            [sys.executable, str(installer),
-             "--target", str(target), "--snippet", str(snippet)],
-            capture_output=True, text=True,
-            env={**os.environ, "HOME": str(self.home)}, timeout=120,
-        )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        text = target.read_text(encoding="utf-8")
-        self.assertIn(GUIDANCE_LABEL, _unwrapped(text))
-        self.assertIn("mcp__mpm__mpm_context", text,
-                      "hermes is an mcp__mpm__ host; the guidance must name "
-                      "the tool under that transport")
-
     # ---------- property 3: install and refresh retain it ----------
 
     def test_reinstall_after_an_upgrade_retains_the_guidance(self):
@@ -639,7 +601,7 @@ class ReferenceGuidanceSurvivesInstallation(unittest.TestCase):
         A stale block predating the guidance must converge on a block
         that carries it, with everything around it untouched.
         """
-        for adapter_name in ("mpm-claude-code", "mpm-opencode", "mpm-pi"):
+        for adapter_name in ("mpm-opencode",):
             with self.subTest(adapter=adapter_name):
                 self._install(adapter_name)
                 installed = self._installed_path_for(adapter_name)
@@ -689,8 +651,7 @@ class ReferenceGuidanceSurvivesInstallation(unittest.TestCase):
     # ---------- property 4: idempotency ----------
 
     def test_repeated_installation_is_idempotent(self):
-        for adapter_name in ("mpm-claude-code", "mpm-opencode", "mpm-pi",
-                             "mpm-memory-openclaw"):
+        for adapter_name in ("mpm-opencode",):
             with self.subTest(adapter=adapter_name):
                 self._install(adapter_name)
                 installed = self._installed_path_for(adapter_name)
@@ -732,15 +693,9 @@ class ReferenceGuidanceSurvivesInstallation(unittest.TestCase):
         nothing about whether the user's notes survived.
         """
         cases = {
-            "mpm-claude-code": (".claude/CLAUDE.md",
-                                "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->",
-                                "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->"),
             "mpm-opencode": (".config/opencode/AGENTS.md",
                              "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->",
                              "<!-- END MPM-MANAGED SECTION:opencode-instructions -->"),
-            "mpm-pi": (".pi/agent/AGENTS.md",
-                       "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->",
-                       "<!-- END MPM-MANAGED SECTION:pi-instructions -->"),
         }
         for adapter_name, (rel, begin, end) in cases.items():
             with self.subTest(adapter=adapter_name):

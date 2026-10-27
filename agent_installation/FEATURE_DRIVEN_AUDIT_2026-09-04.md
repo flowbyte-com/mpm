@@ -1,5 +1,16 @@
 # MPM Feature-Driven Audit — 2026-09-04
 
+> **Scope notice (2026-10-27).** This document is the historical record of
+> the 2026-09-04 audit: it describes the adapters, the paths and the
+> verification commands as they stood on that date, and it is not updated
+> as work proceeds. The Claude Code, Pi, Hermes and OpenClaw adapters it
+> names were retired on 2026-10-27 — their directories are gone from the
+> tree, so the paths and commands below no longer resolve. OpenCode is
+> the only supported host in the current release; see
+> [`INSTALL.md`](./INSTALL.md) and [`README.md`](./README.md) for the
+> current topology, and the repository's history for what the retired
+> adapters contained.
+
 **Scope:** BEHAVIOURAL CONTRACT between MPM and its supported agent hosts.
 **Goal:** A freshly installed supported agent should understand the MPM
 capabilities relevant to its work, when to use them, how to use them

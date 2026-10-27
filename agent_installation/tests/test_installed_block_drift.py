@@ -153,9 +153,7 @@ _convergence = convergence
 # Adapters whose installer wraps the snippet in a section banner
 # rather than emitting bare outer markers. Kept in sync with
 # check_installed_managed_blocks.SECTION_BUILDERS.
-SECTION_BUILDERS: dict[str, str] = {
-    "mpm-memory-openclaw": "install_openclaw_instructions",
-}
+SECTION_BUILDERS: dict[str, str] = {}
 
 TS_SENTINEL = "__MPM_TS__"
 _GENERATED_TS_RE = re.compile(r"<!-- generated: [^\n]* -->")
@@ -211,33 +209,13 @@ def _integration_installed(adapter_name: str, home: Path) -> bool:
 # absent) are out of scope for this test.
 #
 # Path resolution follows the same conventions as the per-host
-# installers themselves (mpm-pi/scripts/install_agents_instructions.py
-# uses Path.home() / ".pi" / "agent" / "AGENTS.md" for user scope; the
-# mpm-claude-code installer uses Path.home() / ".claude" / "CLAUDE.md";
-# the mpm-opencode installer uses Path.home() / ".config" / "opencode"
-# / "AGENTS.md"; the mpm-memory-openclaw installer writes to the
-# resolved agent workspace SOUL.md). All five paths are $HOME-anchored
-# so the test runs in any user environment.
+# installers themselves (the mpm-opencode installer uses
+# Path.home() / ".config" / "opencode" / "AGENTS.md"). The path is
+# $HOME-anchored so the test runs in any user environment.
 #
 # Adding a new persistent-file host: append an entry here AND register
 # the adapter in render_managed_blocks.ADAPTERS.
 HOST_INSTALL_TARGETS: list[dict] = [
-    {
-        "host": "pi",
-        "adapter": "mpm-pi",
-        "filename": "AGENTS.md",
-        "relative_to_home": ".pi/agent/AGENTS.md",
-        "outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:pi-instructions -->",
-        "outer_end": "<!-- END MPM-MANAGED SECTION:pi-instructions -->",
-    },
-    {
-        "host": "claude_code",
-        "adapter": "mpm-claude-code",
-        "filename": "CLAUDE.md",
-        "relative_to_home": ".claude/CLAUDE.md",
-        "outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:claude-code-instructions -->",
-        "outer_end": "<!-- END MPM-MANAGED SECTION:claude-code-instructions -->",
-    },
     {
         "host": "opencode",
         "adapter": "mpm-opencode",
@@ -245,22 +223,6 @@ HOST_INSTALL_TARGETS: list[dict] = [
         "relative_to_home": ".config/opencode/AGENTS.md",
         "outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->",
         "outer_end": "<!-- END MPM-MANAGED SECTION:opencode-instructions -->",
-    },
-    {
-        "host": "openclaw",
-        "adapter": "mpm-memory-openclaw",
-        # OpenClaw resolves the SOUL.md path per-agent from
-        # openclaw.json -> agents.entries.<id>.workspace. The default
-        # location is $HOME/.openclaw/workspace/SOUL.md per the
-        # canonical installer and INSTALL.md.
-        "filename": "SOUL.md",
-        "relative_to_home": ".openclaw/workspace/SOUL.md",
-        "outer_begin": "<!-- BEGIN MPM-MANAGED SECTION:openclaw-instructions -->",
-        "outer_end": "<!-- END MPM-MANAGED SECTION:openclaw-instructions -->",
-        # OpenClaw's managed block is required once the integration is
-        # installed, so it is in scope exactly when the reconciler
-        # would reconcile it.
-        "integration_probe": "mpm-memory-openclaw",
     },
 ]
 

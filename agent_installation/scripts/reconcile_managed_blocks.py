@@ -22,8 +22,7 @@ this, and they are mutually exclusive:
 
   `opt_in: true`      The adapter is never reconciled automatically.
                        Used by adapters with no persistent managed
-                       block (e.g. mpm-hermes, whose documented flow
-                       is manual).
+                       block, whose documented flow is manual.
 
   `reconcile_if:      The adapter IS reconciled, but only once its
    {"any_of": [...]}`  integration is already present on the machine.
@@ -63,9 +62,9 @@ identifies a genuinely MPM-enabled host.
 
 Reachability alone is far too permissive. MPM is installed on any
 machine that has ANY MPM integration, so a probe of the form "the
-`mpm` binary exists" would be satisfied on a machine whose OpenClaw
-has never heard of MPM — silently opting an unrelated OpenClaw into
-MPM, which is exactly what this gate exists to prevent.
+`mpm` binary exists" would be satisfied on a machine whose host has
+never heard of MPM — silently opting an unrelated host into MPM, which
+is exactly what this gate exists to prevent.
 
 Conversely, intent alone is too permissive. A workspace that merely
 mentions MPM in passing has not been integrated.
@@ -74,13 +73,12 @@ So a host counts as integrated when it can reach MPM *and* its own
 persistent instruction surface already names MPM. Neither half is
 sufficient alone.
 
-OpenClaw is the worked example, and it has TWO supported integration
-modes — the manifest gates on both, because a machine legitimately
-running either one must have its managed block repaired:
+A host can have TWO supported integration modes, and the manifest
+gates on both, because a machine legitimately running either one must
+have its managed block repaired:
 
-  native plugin mode  `mpm-memory-openclaw` installed as an OpenClaw
-                      plugin, providing typed `mpm_memory_*` tools and
-                      runtime wake injection.
+  native plugin mode  the host's MPM plugin is installed, providing
+                      typed tools and runtime wake injection.
   CLI fallback mode   no MPM plugin, but the agent reaches MPM through
                       `mpm call <tool>` over its shell tool, which the
                       managed block itself documents. This is a
@@ -241,16 +239,16 @@ def probe_matches(probe, home: str) -> bool:
     conjunction identifies a host that is genuinely MPM-enabled. Reachability
     alone is far too loose: MPM is installed on any machine that has ANY MPM
     integration, so a bare "the mpm binary exists" probe would opt an
-    unrelated OpenClaw into MPM. Requiring the host's own persistent
+    unrelated host into MPM. Requiring the host's own persistent
     instruction surface to already name MPM is what makes the gate safe in
     both directions.
 
     A `path` may also be resolved INDIRECTLY, for hosts whose integration
     surfaces live at a host-configured location rather than a fixed one:
 
-      {"path_from": {"config": "~/.../openclaw.json",
+      {"path_from": {"config": "~/.../<host-config>.json",
                      "json_key": "agents.defaults.workspace",
-                     "fallback": "~/.openclaw/workspace"},
+                     "fallback": "~/<host>/workspace"},
        "kind": "dir"}
 
     This keeps host-specific path knowledge in the manifest instead of
@@ -656,7 +654,7 @@ def main() -> int:
         "--only",
         action="append",
         default=None,
-        help="Restrict to a single adapter dir name (e.g. mpm-pi). Repeatable.",
+        help="Restrict to a single adapter dir name (e.g. mpm-opencode). Repeatable.",
     )
     args = ap.parse_args()
 

@@ -1118,7 +1118,7 @@ func orDefault(s, fallback string) string {
 // is the authoritative list. TestOnboardHostInventoryMatchesPython
 // parses that Python file and fails if the two drift, so this table
 // can never quietly become a second source of truth.
-var onboardHostLabels = []string{"claude_code", "openclaw", "opencode", "pi"}
+var onboardHostLabels = []string{"opencode"}
 
 // collectHosts runs the substrate's read-only managed-block
 // diagnostic and maps its verdict vocabulary onto the report.

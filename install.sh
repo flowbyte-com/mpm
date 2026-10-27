@@ -46,10 +46,9 @@
 #      that runs after login/decrypt: daemon-reload + start scheduler (and
 #      telemetry if present), plus graphical-session.target Wants as secondary.
 #
-# Migration guidance: framework-specific setup (OpenClaw MCP, Claude
-# Code instructions, OpenCode plugin, etc.) belongs under
-# agent_installation/<host>-mpm/ and is installed by that host's
-# own installer.
+# Migration guidance: framework-specific setup (the OpenCode plugin, etc.)
+# belongs under agent_installation/mpm-<host>/ and is installed by that
+# host's own installer.
 #
 # Multi-tenant / multi-user safety:
 #   - No root required for the default flow; everything lives in $HOME
@@ -924,9 +923,9 @@ export_build_provenance() {
 #
 # Why: this installer (the documented "git pull && ./install.sh" update path)
 # rebuilds the binary but does NOT otherwise touch host state. Without this
-# phase, an installed ~/.claude/CLAUDE.md, ~/.config/opencode/AGENTS.md, or
-# ~/.pi/agent/AGENTS.md whose managed section was written from an older
-# canonical contract would silently drift further on every update.
+# phase, an installed ~/.config/opencode/AGENTS.md whose managed section was
+# written from an older canonical contract would silently drift further on
+# every update.
 #
 # This phase delegates to the host-agnostic generic entry point at
 # agent_installation/scripts/reconcile_managed_blocks.py. That script
