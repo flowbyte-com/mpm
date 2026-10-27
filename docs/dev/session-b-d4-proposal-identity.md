@@ -161,7 +161,7 @@ substrate does not defend itself against a caller that varies an incidental fiel
 | 4b. Different dependencies | `TestD4_DifferentDependenciesRemainDistinct` | different foundations stay **two** proposals |
 | 5. Repeated cycles after a restart | `TestD4_ProposalIdentitySurvivesAProcessRestart` | the identity is recomputable from what is stored |
 | 9. Previously resolved proposals | `TestD4_ResolvedProposalIsNotReopenedByAnIdenticalReproposal` | an adjudicated proposal is **not** reopened by a repeat call |
-| 11. Concurrent submissions | `TestD4_ConcurrentIdenticalProposalsProduceOneProposal` | N concurrent identical proposals → **one** proposal |
+| 11. Concurrent submissions | `TestD4_ConcurrentIdenticalProposalsProduceOneProposal` | N concurrent identical proposals → **one** proposal, and every success names the row that was actually recorded |
 | 11b. Concurrent distinct submissions | `TestD4_ConcurrentDistinctProposalsAreNeverSilentlyLost` | a success always corresponds to a recorded row, and distinct proposals never share an id — **finding F2** |
 | 12. No automatic promotion | `TestD4_PendingProposalIsNeverAutomaticallyPromoted` | a pending proposal stays pending, writes nothing to the lesson surface, and keeps the base confidence |
 
@@ -314,7 +314,45 @@ the investigation discovers them."* ⇒ **reported, measured, mechanism-proven a
 fix-designed — not implemented.** It is the first item of the release assessment
 (`docs/dev/session-b-m5-release-assessment.md`).
 
-### 6.5 What it costs
+### 6.5 The finding is reproducible, and it bit this PR's own test
+
+F2 is not a theoretical risk. It reproduced **roughly one run in six** under the race
+detector, in the test this PR added.
+
+`TestD4_ConcurrentIdenticalProposalsProduceOneProposal` was first written to assert that
+**all eight** concurrent callers succeed and return the same id. Under `make test-race` it
+failed on exactly that assertion:
+
+```
+--- FAIL: TestD4_ConcurrentIdenticalProposalsProduceOneProposal (3.20s)
+    concurrent ProposeTheory: propose theory: database is locked
+    concurrent proposal 1 returned no id
+```
+
+That is F2, reproduced by the matrix that was written to detect it. The test was
+**rewritten** to pin the DEDUP invariant — every success names the same proposal, exactly
+one row exists, and that row is the one every success named — while treating a lost race
+as what it is: **a loud failure**, never a success with nothing recorded. Asserting that
+all N callers succeed would be asserting that F2 does not exist.
+
+The rewritten test was then re-proven non-vacuous: with the dedup defeated (the
+pre-insert duplicate probe short-circuited), it fails on exactly the assertion it exists to
+make —
+
+```
+    concurrent proposal 3 returned "fffe2a83669c9206", want "7aad3d4747834c85" — identical concurrent proposals must resolve to ONE proposal
+    theory rows = 4 ([7aad3d4747834c85 97c643d17173e110 a5011b61e9607a8e fffe2a83669c9206]), want exactly 1
+```
+
+— and it was run **ten times** under `-race` with no failure.
+
+**This is worth A's attention for one reason beyond F2 itself:** a concurrency test that
+asserts the absence of a real defect is not a regression test, it is a landmine. It fails
+on a slow machine, in CI, in a fortnight, and the failure looks like flakiness in a new
+test rather than the discovery of an old defect. The matrix is only useful if each of its
+assertions is one the substrate actually guarantees.
+
+### 6.6 What it costs
 
 * An **agent** that proposes concurrently with another writer loses the proposal and gets
   an **error** — loud, retryable, no corruption.

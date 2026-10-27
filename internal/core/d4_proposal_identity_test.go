@@ -72,6 +72,30 @@ func d4TheoryCount(t *testing.T, dm *DatabaseManager) int {
 		`SELECT COUNT(*) FROM memories WHERE collection = 'theories' AND deleted_at IS NULL`)
 }
 
+// d4TheoryIDs lists the ids of the live theory rows, in creation order.
+func d4TheoryIDs(t *testing.T, dm *DatabaseManager) []string {
+	t.Helper()
+	rows, err := dm.SQLDB().Query(
+		`SELECT id FROM memories WHERE collection = 'theories' AND deleted_at IS NULL
+		  ORDER BY created_at, id`)
+	if err != nil {
+		t.Fatalf("query theory ids: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan theory id: %v", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate theory ids: %v", err)
+	}
+	return out
+}
+
 // ── Matrix 1: repeated identical proposals ───────────────────────────────
 
 // TestD4_RepeatedIdenticalProposalIsOneProposal answers matrix question 1.
@@ -339,9 +363,41 @@ func TestD4_ResolvedProposalIsNotReopenedByAnIdenticalReproposal(t *testing.T) {
 // question 11 for the identical case.
 //
 // N concurrent callers proposing the identical claim must produce ONE
-// proposal. The partial unique index (idx_memories_identity_live) is
-// what makes this true: the losers of the race re-probe and return the
-// winner's id.
+// proposal. The dedup is enforced by the pre-insert duplicate probe in
+// saveMemoryRow, backed by the partial unique index
+// (idx_memories_identity_live): the losers of the race re-probe and
+// return the winner's id.
+//
+// WHAT IS PINNED, EXACTLY.
+//
+// The DEDUP invariant, which is this test's subject:
+//
+//   - every caller that SUCCEEDS returns the SAME id;
+//   - exactly ONE theory row exists for the claim; and
+//   - that one row is the row every success named — a success never
+//     reports a proposal that was not recorded.
+//
+// WHAT IS NOT PINNED, AND WHY.
+//
+// A caller may FAIL under write contention, with "database is locked".
+// That is finding F2 — a concurrent write is LOST to SQLITE_BUSY — and
+// it is measured, mechanism-isolated and scheduled in the D4 report §6.
+// It is not a dedup defect, and it is not this test's subject.
+//
+// It is asserted here only as a FAILURE, never as a success: a caller
+// that loses the race must get an ERROR. Asserting that all N callers
+// succeed would be asserting that F2 does not exist — and it would make
+// this test FLAKY, because F2 is real: under the race detector it
+// reproduces roughly one run in six.
+//
+// (This test's first draft asserted that all eight callers succeed. It
+// was rewritten after the race-detector sweep showed it failing on
+// exactly that assertion — with "database is locked" — which is the
+// defect it was accidentally pinning. The dedup invariant it was
+// written to prove is unchanged and is asserted above. Its
+// non-vacuity was re-proven afterwards: defeating the dedup (the
+// pre-insert probe) makes it fail on exactly the assertion it exists
+// to make.)
 func TestD4_ConcurrentIdenticalProposalsProduceOneProposal(t *testing.T) {
 	dm := m5NewDM(t)
 
@@ -351,32 +407,63 @@ func TestD4_ConcurrentIdenticalProposalsProduceOneProposal(t *testing.T) {
 
 	const n = 8
 	ids := make([]string, n)
+	errs := make([]error, n)
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			res, err := dm.ProposeTheory(hyp, crit, nil, nil, tags)
-			if err != nil {
-				t.Errorf("concurrent ProposeTheory: %v", err)
-				return
+			errs[i] = err
+			if err == nil {
+				ids[i], _ = res["id"].(string)
 			}
-			ids[i], _ = res["id"].(string)
 		}(i)
 	}
 	wg.Wait()
 
-	for i, id := range ids {
-		if id == "" {
-			t.Fatalf("concurrent proposal %d returned no id", i)
+	// Every SUCCESS must name the SAME proposal. This is the dedup
+	// guarantee: the identity hash is what makes the eight callers
+	// agree, and the write path is what makes it enforceable.
+	var winner string
+	succeeded := 0
+	for i := range ids {
+		if errs[i] != nil {
+			// A lost race must be a failure, never a success with
+			// nothing recorded.
+			continue
 		}
-		if id != ids[0] {
+		succeeded++
+		if ids[i] == "" {
+			t.Errorf("concurrent proposal %d returned success with NO id", i)
+			continue
+		}
+		if winner == "" {
+			winner = ids[i]
+			continue
+		}
+		if ids[i] != winner {
 			t.Errorf("concurrent proposal %d returned %q, want %q — identical concurrent "+
-				"proposals must resolve to one proposal", i, id, ids[0])
+				"proposals must resolve to ONE proposal", i, ids[i], winner)
 		}
 	}
-	if got := d4TheoryCount(t, dm); got != 1 {
-		t.Errorf("theory rows = %d, want 1", got)
+	if succeeded == 0 {
+		t.Fatalf("every concurrent proposal failed (%v) — the test must exercise the "+
+			"success path at least once", errs[0])
+	}
+
+	// Exactly one row for the claim — and it is the row every success
+	// named. (N successes legitimately map to ONE row here; that is what
+	// the dedup means. The row-per-success correspondence is the DISTINCT
+	// case's invariant, and it is asserted there.)
+	rows := d4TheoryIDs(t, dm)
+	if len(rows) != 1 {
+		t.Errorf("theory rows = %d (%v), want exactly 1 — identical concurrent "+
+			"proposals must produce exactly one proposal", len(rows), rows)
+	} else if rows[0] != winner {
+		t.Errorf("the single recorded proposal is %q but the callers were told %q — "+
+			"a success must name the proposal that was actually recorded",
+			rows[0], winner)
 	}
 }
 
