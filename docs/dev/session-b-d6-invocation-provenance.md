@@ -17,7 +17,9 @@ rows existed for decisions, lessons, theories and work items — but the
 `invocation_id` column was **empty** on all but one write path, so the artifact could not
 be joined back to the call that made it.
 
-Measured on the live workspace before the correction (`~/.mpm/src/db/mpm.db`, read-only):
+Measured on the live workspace before the correction (`~/.mpm/src/db/mpm.db`, **read-only**;
+the workspace is live and still growing, so the row counts are a snapshot — the *rates* are the
+finding, not the totals):
 
 | `artifact_type` | rows | with `invocation_id` | join to `tool_invocations` |
 |---|---|---|---|
@@ -54,15 +56,15 @@ OpenCode plugin                     agent_installation/mpm-opencode/src/index.ts
   ├─ programmatic calls             callMpmWithProvenance → buildProvenanceEnv → per call
   └─ shell calls                    shellEnv → buildProvenanceEnv → PER SHELL COMMAND
 
-CLI transport                       cmd/mpm/call.go:185-238
+CLI transport                       cmd/mpm/call.go:185-210, 249
   invocationID := os.Getenv("MPM_PROVENANCE_INVOCATION_ID")
   if invocationID == "" { invocationID = uuid.NewString() }
   ac := ActiveContext{ …, InvocationID: invocationID }
-  → tool.Handler(dm, ac, payload)                       cmd/mpm/call.go
+  → tool.Handler(dm, ac, payload)                       cmd/mpm/call.go:249
   → recordToolInvocation(dm, ac, …)                     cmd/mpm/audit_hook.go:67
       (the audit row and the handler SHARE one id)
 
-MCP transport                       cmd/mpm-mcp/tools.go:571-600
+MCP transport                       cmd/mpm-mcp/tools.go:589-617
   callAC := ac
   if callAC.InvocationID == "" { callAC.InvocationID = uuid.NewString() }
   → handler(dm, callAC, payload)
@@ -76,7 +78,7 @@ core handler                       internal/core/tools/handlers.go
   → dm.LogChangelogEntry(…, ac)
 
 core write path
-  → saveMemoryRow(…, ac)              internal/core/db.go:4081
+  → saveMemoryRow(…, ac)              internal/core/db.go:4186
       prov := dm.getEffectiveProvenance()   ← resolver base: InvocationID == ""
       → RecordArtifactProvenance(tx, id, artifactType, prov, false)
 ```
@@ -113,7 +115,7 @@ So the defect had two faces, and both had to be fixed:
 A missing invocation id was never left missing. Two places minted one:
 
 ```go
-// internal/core/db.go — provenanceFromContext (pre-fix)
+// internal/core/db.go — provenanceFromContext (pre-fix; now db.go:6797)
 if ac.InvocationID != "" {
     base.InvocationID = ac.InvocationID
 } else if base.InvocationID == "" {
@@ -615,5 +617,5 @@ still not an `artifact_provenance` row (§8.1).
 * The correction and its tests: **`552c86d`** —
   *"fix(core): carry the invocation identity into every recording path (D6)"*.
 * This report: the commit that follows it.
-* PR: `https://github.com/flowbyte-com/mpm/pull/131`, base `main`.
+* PR: `https://github.com/flowbyte-com/mpm/pull/132`, base `main`, head `158de35`, MERGEABLE.
 * Merge authority is Session A's.

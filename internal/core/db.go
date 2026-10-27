@@ -333,7 +333,16 @@ type DatabaseManager struct {
 	// No package-level global mutability — tests cannot pollute
 	// parallel tests, and production code cannot be accidentally
 	// affected by test-SetOverride.
+	//
+	// The lazy initialization is guarded by provenanceMu: a
+	// DatabaseManager is shared by every goroutine that writes through
+	// it (a long-lived MCP server dispatches concurrently), and two
+	// concurrent first-touches would otherwise race on the pointer.
+	// D6 made that reachable — the handoff write path now resolves
+	// provenance on every write, so two concurrent handoffs could
+	// initialise the resolver at the same time.
 	ProvenanceResolver *ProvenanceResolver
+	provenanceMu       sync.Mutex
 
 	// perCallProvenanceOverride is set by callers that need to inject
 	// per-call provenance (e.g., the cascade materializer setting
@@ -385,7 +394,15 @@ func (dm *DatabaseManager) IsReadOnly() bool {
 // GetProvenanceResolver returns the resolver, lazily initializing
 // from env if not set. Tests override the field directly and restore
 // in t.Cleanup. No package-level global mutability.
+//
+// The lazy initialization is mutex-guarded: a DatabaseManager is shared
+// by every goroutine that writes through it, and two concurrent
+// first-touches would otherwise race on the pointer (D6 — the race
+// detector caught it once the handoff write path began resolving
+// provenance on every write).
 func (dm *DatabaseManager) GetProvenanceResolver() *ProvenanceResolver {
+	dm.provenanceMu.Lock()
+	defer dm.provenanceMu.Unlock()
 	if dm.ProvenanceResolver == nil {
 		dm.ProvenanceResolver = NewFromEnv()
 	}
