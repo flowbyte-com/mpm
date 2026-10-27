@@ -7077,6 +7077,13 @@ func handleMpmSystem(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		return handleResolveCluster(dm, ac, params)
 	case "annotate_cluster":
 		return handleAnnotateCluster(dm, ac, params)
+	case "event_ingest":
+		// P5: the mpm-event/0.1 ingest entry point (§3.10).
+		return handleEventIngest(dm, ac, params)
+	case "event_counters":
+		// P5: the observable rejection/stored counters (§3.10 step 8,
+		// §6.4).
+		return handleEventCounters(dm, ac, params)
 	case "critic_findings":
 		// W-006: discover critic-emitted findings. The critic (mpm-critic)
 		// emits findings as `mpm call mpm_memory challenge` invocations;
@@ -7085,8 +7092,125 @@ func handleMpmSystem(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payloa
 		// operator/agent can read them without grepping system_audit_log.
 		return handleCriticFindings(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_system. Valid actions include gc_run, compact, health_check, migrate, query_audit_log, list_clusters, snooze_cluster, unsnooze_cluster, resolve_cluster, annotate_cluster, critic_findings", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_system. Valid actions include gc_run, compact, health_check, migrate, query_audit_log, list_clusters, snooze_cluster, unsnooze_cluster, resolve_cluster, annotate_cluster, critic_findings, event_ingest, event_counters", action)
 	}
+}
+
+// ── mpm-event/0.1 lifecycle ingest (P5) ──────────────────────────────
+//
+// The ingest entry point the contract fixes (§3.10) and the counter
+// surface §6.4 places on mpm_system.
+//
+// The receipt is returned as a TOP-LEVEL SIBLING of "success", not nested
+// under a "payload" key. That is not a quirk of this action: it is the
+// substrate's handler convention — none of the handlers in this file that
+// return {"success": true, …} nest their result under "payload". The
+// reference adapter reads the receipt from the envelope's top level, so a
+// nested receipt would be a malformed receipt.
+
+// handleEventIngest validates, deduplicates, stamps and stores ONE
+// mpm-event/0.1 observation, and returns a READ-BACK receipt.
+//
+// The request shape is fixed by the contract:
+//
+//	{ "action": "event_ingest",
+//	  "params": { "schema_version": "mpm-event/0.1", "event": { …envelope… } } }
+//
+// The receipt's new-or-duplicate determination comes from a read-back of
+// the stored row, never from the INSERT's own result (§6.4, Substrate
+// Defense Triad rule 3).
+//
+// NOTHING IS PROMOTED. Capturing an observation creates no memory, no
+// lesson, no decision and no theory (§3.9 rule 2).
+func handleEventIngest(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	// The VERSION AUTHORITY. The endpoint knows which versions it
+	// accepts, so an unrecognised version is a REJECTION, not an
+	// ignore: the receipt is the only success signal in this protocol,
+	// and returning success for an event that was not stored would be
+	// exactly the silent drop the contract's counter requirement exists
+	// to prevent.
+	//
+	// "Ignore and count" remains correct for a CONSUMER that meets a
+	// version it does not recognise — that is the adapter. This
+	// endpoint is the authority, not a consumer.
+	schemaVersion, _ := p["schema_version"].(string)
+	if schemaVersion == "" {
+		return nil, &mpminternal.LifecycleEventRejection{
+			Reason: mpminternal.LifecycleRejectInvalidEnvelope,
+			Detail: "schema_version is required",
+		}
+	}
+	if schemaVersion != mpminternal.LifecycleEventSchemaVersion {
+		return nil, &mpminternal.LifecycleEventRejection{
+			Reason: mpminternal.LifecycleRejectUnknownVersion,
+			Detail: "schema_version must be " + mpminternal.LifecycleEventSchemaVersion,
+		}
+	}
+	rawEvent, ok := p["event"].(map[string]interface{})
+	if !ok {
+		return nil, &mpminternal.LifecycleEventRejection{
+			Reason: mpminternal.LifecycleRejectInvalidEnvelope,
+			Detail: "event must be an object",
+		}
+	}
+	// The ENVELOPE's own version is checked against the authority too, so
+	// an envelope of an unknown version is reported as an unknown
+	// version rather than as a mismatch.
+	envVersion, _ := rawEvent["schema_version"].(string)
+	if envVersion != mpminternal.LifecycleEventSchemaVersion {
+		return nil, &mpminternal.LifecycleEventRejection{
+			Reason: mpminternal.LifecycleRejectUnknownVersion,
+			Detail: "the envelope's schema_version must be " + mpminternal.LifecycleEventSchemaVersion,
+		}
+	}
+	// The request's schema_version and the envelope's own must agree.
+	// Both have already been checked against the authority above, so
+	// they are equal by construction here; the check is kept as a cheap
+	// invariant against a future refactor that reorders them.
+	if envVersion != schemaVersion {
+		return nil, &mpminternal.LifecycleEventRejection{
+			Reason: mpminternal.LifecycleRejectInvalidEnvelope,
+			Detail: "the envelope's schema_version does not match the request's",
+		}
+	}
+
+	receipt, err := mpminternal.IngestLifecycleEvent(dm.SQLDB(), rawEvent)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success": true,
+		"receipt": map[string]interface{}{
+			"event_id":       receipt.EventID,
+			"ingested_at_ms": receipt.IngestedAtMs,
+			"duplicate":      receipt.Duplicate,
+		},
+	}, nil
+}
+
+// handleEventCounters exposes the observable counters (§3.10 step 8).
+//
+// A silent drop is indistinguishable from a working system, so the
+// counters are REQUIRED.
+//
+// Nothing is persisted for them: both families are computed from
+// authoritative state at read time. The stored counts come from the stored
+// events; the rejection counts come from the substrate's own dispatch
+// audit, where a rejected ingest is a failed dispatch carrying a typed
+// outcome_code.
+//
+// Duplicates are deliberately NOT counted: a duplicate leaves no row, so a
+// durable duplicate total is not derivable from authoritative state. The
+// receipt tells the caller `duplicate: true` at the moment it matters.
+func handleEventCounters(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	counters, err := mpminternal.LifecycleEventCounters(dm.SQLDB())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"success":  true,
+		"counters": counters,
+	}, nil
 }
 
 // handleCriticFindings (alpha-4 W-006) returns a list of critic-emitted

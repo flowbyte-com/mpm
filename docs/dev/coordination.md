@@ -225,13 +225,13 @@ Neither was product work.
 | # | PR | Owner | Depends on the contract? | Schema? | Registry? |
 |---|---|---|---|---|---|
 | **P1** | `fix(opencode): deliver the wake context` — extraction (`content`, type-checked, never coerced), per-session cache, concurrent-build suppression, retry-on-empty, session attribution on the fetch | **C** | No | No | No |
-| **P2** | `feat(critic): typed, validated, idempotent evidence citations on proposals` — optional `source_type` beside `source_ids`, validated before insert; plus the one-line `artifact_type='skill'` registry correction (A-9) | **B** | No | **No** | Yes (one optional parameter) | 🔄 PR #120 open |
+| **P2** | `feat(theory): typed, validated, idempotent evidence citations on proposals` — optional `source_type` beside `source_ids`, validated before insert; plus the one-line `artifact_type='skill'` registry correction (A-9) | **B** | No | **No** | Yes (one optional parameter) | ✅ **merged** (#120) |
 | **P2b** | **gate the `critic_audit` wake kind at the arming AND dispatch boundaries** until the trust boundary is enforced | **A** | No | No | No | ✅ **merged** (#118) |
 | **P2 status** | **PR #120 open — awaiting A's merge.** Branch `feat/session-b-p2-citations`, rebased onto the current `main`. Report: `docs/dev/session-b-p2-citations.md`. The legacy `source_ids` path is **unchanged** (that is D3-b, separately tracked); the typed path validates and rejects atomically. **21 tests** — 11 core + 7 tool-surface + 3 MCP-surface — all green, with **non-vacuity proven** against two deliberate violations (disabling the handler's `source_type` routing; removing the registry declaration). Gates: `internal/core` ok, `internal/core/tools` ok, `cmd/mpm-mcp` ok, root `go test ./...` ok, `mpm-lint --gate` PASS, `make test-scripts` ok (540), `make test-agent-installation` ok (494 + 46 TS). **No schema change, no deployment, no merge.** **Correction A should note:** there is **no JSON-schema validation anywhere in MPM's Go code** — mcp-go's input-schema validation is opt-in and unset, `NewToolWithRawSchema` bypasses the structured-schema helpers, and neither the `mpm call` nor the runtime dispatcher validates against the registered schema. The registry schema is therefore **discovery, not enforcement**; P2's validation deliberately lives in the core, where it is transport-independent. A comment in `internal/core/tools/help.go` that claimed otherwise is corrected in this PR. Open for A: **A-new-1** (the `source_type` single-type limitation — accept, or require a per-citation array), **A-new-2** (D3-b, the legacy path's validation — B recommends leaving it unchanged this sprint), **A-new-3** (awareness: a new source file must be `git add`-ed before `make test-scripts` passes, because `test_build_install_separation.py` stages via `git ls-files`). |
-| **P3** | `feat(critic): a retrospective missed-opportunity hunt` over the existing `tool_invocations` × `artifact_provenance` join | **B** | No | No | No | 🔄 PR open |
+| **P3** | `feat(critic): a retrospective missed-opportunity hunt` over the existing `tool_invocations` × `artifact_provenance` join | **B** | No | No | No | ✅ **merged** (#123) |
 | **P3 status** | **PR open — awaiting A's merge.** Branch `feat/session-b-p3-missed-opportunity`, base `9337f04` (P2 merged). Report: `docs/dev/session-b-p3-missed-opportunity.md`. One new hunt (`internal/critic/missed_opportunity.go`), no schema change, no new tool, no registry change. **The join alone is NOT sufficient**: `artifact_provenance.invocation_id` is populated ONLY by the `mpm_memory save` path (0 of 26 live decision rows join), so a join-only hunt reports a session that recorded 8 decisions as one that recorded nothing — the audit's own "real observed gap" was a false positive. The hunt therefore requires TWO signals to be absent: the join, and a declared vocabulary of recording actions. **The cycle tags are gone from every hunt** (`survival_asymmetry`, `weak_theory`, `poison_pill`) — inert on the lesson surface, fatal on the proposal surface — which is what makes A's §6c.3 surface switch safe. The poison pill's volatile confidence moved to the Reason for the same reason. **26 tests** (20 hunt + 3 identity + 3 inverted/updated), all green, with **non-vacuity proven against six deliberate violations**. Gates: `internal/critic` ok, `internal/core` ok, `internal/core/tools` ok, root `go test ./...` ok, `mpm-lint --gate` PASS, `make test-scripts` ok (540), `make test-agent-installation` ok (494). M5 contract suite still **6 expected failures** (unchanged). **No schema change, no deployment, no merge.** Open for A: **A-new-4** (the hunt is registered in `critic.New` by default — keep, or make it a flag), **A-new-5** (the recording-action vocabulary must be extended whenever MPM gains a recording action; its failure mode is a false gap), **A-new-6** (**D6** — `artifact_provenance.invocation_id` is populated only by the `mpm_memory save` path; recommend tracking and fixing separately), **A-new-7** (a latent silent drop: `ParseStringSliceOr` returns nil for a Go-native `[]string`, so an in-process caller's `source_ids` are dropped; production is unaffected), **A-new-8** (the next step — moving the two lesson-emitting hunts to `mpm_theories propose` needs the operator's product decision, §6c.2 limitation 4; P3 has made it safe). |
-| **P4** | `feat(opencode): observe lifecycle events` — subscribe, consume off the hot path, map an explicit allowlist, emit `session.observed` / `session.started` (when actually seen) / `tool.outcome` / `compaction.*` | **C** | Yes (M2, now agreed) | No | No | 🔄 PR #119 open |
-| **P5** | The ingest entry point, receipt, `mpm_system action=event_counters`, and the storage decision | **A** | Yes | only if §6.1 later authorises it | Yes (one action) |
+| **P4** | `feat(opencode): observe lifecycle events` — subscribe, consume off the hot path, map an explicit allowlist, emit `session.observed` / `session.started` (when actually seen) / `tool.outcome` / `compaction.*` | **C** | Yes (M2, now agreed) | No | No | ✅ **merged** (#119) |
+| **P5** | The ingest entry point, receipt, `mpm_system action=event_counters`, and the storage decision | **A** | Yes | **Yes — one narrow core-owned `lifecycle_events` table** (§6.1 decided 2026-10-27, amendment A17) | Yes (two actions on `mpm_system`) | 🔄 in progress |
 
 * **P1 and P2 are independent and may proceed in parallel.** P3 depends on
   P2. P4 depends on the contract and on P1's plumbing. P5 is A's and is
@@ -259,11 +259,47 @@ Neither was product work.
 * **P3 and P4 are complementary, not substitutes.** P3 covers MPM-visible
   activity; P4 extends detection to sessions that never invoke MPM. Neither
   makes the other redundant.
-* **The lifecycle-events table is NOT the first milestone.** B's audit shows
-  the first end-to-end acceptance test needs no new table: `epistemic_provenance`
-  already provides typed, validated and idempotent citations, and the
-  retrospective join runs over existing tables. No `SafeMigrations` entry is
-  authorised by this adjudication.
+* **The lifecycle-events table was NOT the first milestone — and is now
+  authorised (P5, 2026-10-27).** B's audit showed the first end-to-end
+  acceptance test needed no new table: `epistemic_provenance` already
+  provides typed, validated and idempotent citations, and the retrospective
+  join runs over existing tables. That remains true of the *acceptance test
+  itself*. But P4 now produces real envelopes and there is **nowhere for
+  them to go**, which is the measured gap §6.1 asked for. One narrow
+  core-owned table — `lifecycle_events` — is authorised (amendment A17), with
+  the DDL, index plan, rollback and regression plan in
+  `session-a-p5-lifecycle-ingest.md`. No `SafeMigrations` entry is
+  authorised: the migration is a `CREATE TABLE IF NOT EXISTS` in
+  `BaseTables`, which is self-applying.
+* **P5 × P3: the ingest's audit row must not carry the host session id.**
+  The reference adapter's ingest transport issues a plain `mpm call`
+  **without** the provenance env, so the ingest's `tool_invocations` row
+  lands with `framework_session_id = NULL` — verified end to end against
+  the dogfooding workspace. That matters because P3's hunt groups
+  `tool_invocations` by `framework_session_id`: a NULL session id places
+  the adapter's ingest rows outside both the hunt's candidate query and
+  its citation query, so they cannot be counted as the agent's
+  MPM-mediated work and cannot become the cited evidence.
+  **If the ingest transport is ever changed to carry the provenance env**
+  — a reasonable thing to want, so the ingest's own audit row is
+  attributable to the host session — the adapter's ingest calls would
+  enter the hunt's candidate set: they would count toward
+  `MinInvocations`, and (being the oldest) they would be **cited as the
+  evidence**, which would make the proposal rest on "the adapter observed
+  some events" rather than on the agent's work. The clean fix is a
+  symmetric **exclusion** vocabulary beside `recordingActions`:
+  invocations that are not the agent's work, excluded from both the
+  candidate set and the citations. **No code change is needed today.**
+* **P3 will need a `lifecycle_event` citation source type.** Contract §3.7
+  says a critic proposal "must carry the `event_id`s it rests on, and each
+  of them must resolve to a stored event (or to a `tool_invocations` row)".
+  P2's canonical vocabulary (`internal.CitationSourceTypes()`) has
+  `tool_invocation` but **no** `lifecycle_event`, so a proposal that cites a
+  stored lifecycle event cannot be typed against it today. The registry enum
+  and the core vocabulary are pinned to each other by an enforceable test, so
+  adding the type is a one-line change in both places — but it must be done
+  in **P3**, when the critic's proposals start citing event ids, not
+  retrofitted afterwards.
 * **The existing specialised MPM tool surface is unchanged** pending
   evidence-based review.
 * **P4 must not start until the structural allowlist test exists**, and that

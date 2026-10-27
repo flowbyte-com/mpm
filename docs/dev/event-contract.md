@@ -201,9 +201,19 @@ Everything in Part I applies to **every** event, without exception.
 "schema_version": "mpm-event/0.1"
 ```
 
-* A consumer that does not recognise the version **ignores** the event and
-  increments a counter. There is no partial parsing and no best-effort
+* A **consumer** that does not recognise the version **ignores** the event
+  and increments a counter. There is no partial parsing and no best-effort
   fallback.
+* **AMENDED (P5, 2026-10-27 — A-16).** The rule above binds a *consumer* —
+  a reader that meets an envelope of a version it does not know. It does
+  **not** bind the **ingest endpoint**, which is the **version authority**:
+  it knows which versions it accepts, so an unrecognised version is
+  **rejected and counted**, not ignored. The reason is the receipt: it is
+  the only success signal in the ingest protocol, so an endpoint that
+  "ignored" an unknown version and returned success would tell the caller
+  an observation is durable when nothing stored it — precisely the silent
+  drop the counter requirement exists to prevent. The rejection reason is
+  `unknown_version`.
 * The field set of `mpm-event/0.1` is **frozen on acceptance**. Any change
   to it — including an additive one — is `mpm-event/0.2`.
 * Adding an *event type* is a minor bump and is additive.
@@ -672,6 +682,10 @@ Collected here so the mandatory set is in one place:
 7. Only allowlisted metadata crosses the boundary.
 8. Over-limit events are rejected, not truncated.
 9. An unrecognised version is ignored and counted, not partially parsed.
+   **AMENDED (A-16):** this binds a *consumer*. The **ingest endpoint** is
+   the version authority and **rejects** an unrecognised version (reason
+   `unknown_version`) rather than ignoring it — a receipt must never
+   report success for an event that was not stored.
 10. An observation with no operation outcome carries no outcome fields.
 
 ### 3.10 The ingest contract, and observable rejection
@@ -681,7 +695,13 @@ contract; the storage that implements it is not yet authorised — §6.1.*
 
 On receipt of an envelope, the core:
 
-1. **Validates** `schema_version`; unrecognised → ignore + count.
+1. **Validates** `schema_version`; unrecognised → **reject + count**
+   (reason `unknown_version`). **AMENDED (A-16):** the draft said
+   "ignore + count". The ingest endpoint is the **version authority**, and
+   the receipt is the only success signal in this protocol — returning
+   success for an event that was not stored would be exactly the silent
+   drop step 8 exists to prevent. "Ignore and count" remains correct for a
+   *consumer* — the adapter — that meets a version it does not recognise.
 2. **Validates** the envelope's shape, required fields and limits; failure →
    reject + count.
 3. **Validates** `event_type` against the closed vocabulary; unknown →
@@ -836,10 +856,10 @@ that has to be made and by whom.
 
 | # | Question | Who decides | Status |
 |---|---|---|---|
-| 6.1 | **Storage path for lifecycle events.** (a) A new core-owned table; (b) reuse `tool_invocations` through an `mpm_lifecycle` tool — rejected, because it makes the dispatch the event and the dispatch is best-effort | A | **DECIDED — deferred. No new table is authorised now, and it is explicitly NOT the first implementation milestone.** The B/C audits show the first end-to-end acceptance test needs no lifecycle store: `epistemic_provenance` already provides typed, validated and idempotent citations, and the retrospective join runs over the existing `tool_invocations` × `artifact_provenance`. Revisit only against a **measured** gap, and then as one PR in `internal/core/schema.go` with its contract tests. |
+| 6.1 | **Storage path for lifecycle events.** (a) A new core-owned table; (b) reuse `tool_invocations` through an `mpm_lifecycle` tool — rejected, because it makes the dispatch the event and the dispatch is best-effort | A | **DECIDED — 2026-10-27 (P5). One narrow, core-owned table: `lifecycle_events`.** The deferral condition ("revisit only against a **measured** gap") is met: P4 produces real envelopes and there is nowhere for them to go. Every existing candidate was checked and none fits without distortion — `tool_invocations` is CHECK-constrained to `result_status IN ('success','error')` and its id is a fresh UUID; `evidence` requires an artifact id and carries epistemic weight an observation has not earned; `system_audit_log` has no unique event identity and therefore no dedup; `work_events`/`capability_events` are scoped; `memories` would be automatic promotion, which M5 forbids. The table, its DDL, its index plan, its rollback and its regression plan are in [`session-a-p5-lifecycle-ingest.md`](session-a-p5-lifecycle-ingest.md), implemented as one PR in `internal/core/schema.go`. |
 | 6.2 | **Transport** from adapter to core. The adapter is a Node plugin and the core is a Go binary, so it is out-of-process. Options: a unix socket owned by the core, a batched file, `mpm call` per event (expensive, and its audit row is best-effort) | A + C, in the implementation PR | **Open**, with one constraint now fixed (§3.8): **no subprocess call may run inside the event iterator** — measured ~39 ms per spawn, and the stream is volatile by contract. Envelopes must be queued and handled out of band. |
 | 6.3 | **Retention policy** | A, after storage and scheduler behaviour are verified (§3.8) | **Deferred.** |
-| 6.4 | **The exact surface** of the ingest entry point, the receipt, and the rejection counter | A | **DECIDED — `mpm_system`**, not `mpm_context`. A new action `mpm_system action=event_counters` beside `critic_findings` and `query_audit_log`. `mpm_context` is the session-start surface and already carries `contextual_focus`; ingestion counters would add tokens to every wake for information no agent needs at session start. **The receipt's new-or-duplicate determination must come from a read-back of the stored row, not from the `INSERT` result** (Substrate Defense Triad rule 3). |
+| 6.4 | **The exact surface** of the ingest entry point, the receipt, and the rejection counter | A | **DECIDED — `mpm_system`**, not `mpm_context`. A new action `mpm_system action=event_counters` beside `critic_findings` and `query_audit_log`. `mpm_context` is the session-start surface and already carries `contextual_focus`; ingestion counters would add tokens to every wake for information no agent needs at session start. **The receipt's new-or-duplicate determination must come from a read-back of the stored row, not from the `INSERT` result** (Substrate Defense Triad rule 3). **The exact bytes — 2026-10-27 (P5), agreed with Session C:** the request is `mpm_system { action: "event_ingest", params: { schema_version: "mpm-event/0.1", event: <envelope> } }`; the success envelope is `{"success":true,"receipt":{"event_id":…,"ingested_at_ms":…,"duplicate":…}}` — the receipt is a **top-level sibling** of `success`, which is the substrate's handler convention and what the reference adapter reads; a rejection is `{"success":false,"error":"<reason>: <detail>"}` with `reason` drawn from `unknown_version` / `unknown_event_type` / `invalid_envelope` / `limit_exceeded`. The counters surface is `{"success":true,"counters":{…}}`. **No counter rows are persisted**: the stored counts are computed from the stored events and the rejection counts from the substrate's own dispatch audit, both at read time. |
 | 6.5 | Whether `project_id` / `project_id_source` become columns | A, in the implementation PR | **Open.** |
 | 6.6 | Whether any inferred event type is admitted in a later version | B + C | **Open.** Excluded from 0.1. |
 | 6.7 | The final `meta` allowlist | C, once the host's real payload shapes are measured | **CLOSED.** The measured shapes are in §5.2; the allowlist gains `host_event_type`, `host_call_id` and `host_message_id` (§3.8). Everything content-bearing stays out, and a regression test must use the **real captured shapes**. |
@@ -1041,7 +1061,7 @@ Session C — name: Session C (OpenCode adapter & behavioural evaluation)  contr
             docs/dev/session-c-host-findings.md §1.1-§1.2 and §4.1.1).
 ```
 
-**Amendments A1–A15, applied by Session A on 2026-10-26:**
+**Amendments A1–A15, applied by Session A on 2026-10-26. A16 applied 2026-10-27 (P5).:**
 
 | # | Amendment |
 |---|---|
@@ -1060,3 +1080,6 @@ Session C — name: Session C (OpenCode adapter & behavioural evaluation)  contr
 | A13 | §3.3 / M3 — a host project id is adopted only when a git remote independently confirms it (`host-git-remote`). |
 | **A14** | §3.7 / M5 — **absence is not evidence.** An invocation with no corresponding artifact is a *candidate opportunity*, never a citation and never proof that a lesson exists. | The contract's evidence rule applied to a case the draft did not name: the trust clause requires *resolvable* evidence, and a gap is the absence of a record, not a positive observation. |
 | **A15** | §6.1 / §2 — **the critic's automatic path is armed-on-demand, and gated.** The `critic_audit` wake kind is caller-supplied and unvalidated at the wake-creation path, so it is one API call from automatic execution. Until the trust boundary is enforced, that kind is **rejected at the creation path**. | The addendum's instruction, turned from a note into an enforced gate. The live workspace has no `critic_audit` wake and the critic has written no trusted lesson, so this is a latent hazard, not a live one. |
+| **A16** | §3.1 / §3.9 rule 9 / §3.10 step 1 — **the ingest endpoint REJECTS an unrecognised `schema_version` (reason `unknown_version`); it does not ignore it.** "Ignore and count" binds a *consumer* — the adapter — that meets a version it does not recognise. The endpoint is the **version authority**, and the receipt is the only success signal in the ingest protocol, so returning success for an event that was not stored would be exactly the silent drop §3.10 step 8 exists to prevent. | The rule was written for a consumer and read as binding every reader. The distinction matters operationally: an ignore is invisible at the call site, while a rejection is a typed, countable `rejected` at the caller **and** a counter. |
+| **A17** | §6.1 — **decided: one narrow, core-owned `lifecycle_events` table.** The deferral condition ("revisit only against a **measured** gap") is met: P4 produces real envelopes and there is nowhere for them to go. Every existing candidate was checked and none fits without distortion. The DDL, index plan, rollback and regression plan are in `session-a-p5-lifecycle-ingest.md`. | The measured gap arrived. The table's primary key IS the dedup mechanism; `event_type`, `outcome_class` and `observation` deliberately carry **no** SQL CHECK, because each of those vocabularies widens on a version bump and a CHECK would make a minor bump require a table rebuild. |
+| **A18** | §3.7 — **the lifecycle store's `result_status` stores the envelope's value verbatim**, including `unknown`. The draft suggested the store's column be nullable with NULL meaning "no operation outcome". The store instead keeps the envelope's own value, and `operation = 'absent'` is the authoritative signal for "no operation outcome". | Losslessness: the stored row IS the envelope. A NULL would be ambiguous between "the envelope said unknown" and "not recorded", and the envelope always records a `result_status`. What the draft wanted — no CHECK inherited from `tool_invocations` — is achieved: the column's vocabulary is `success｜error｜unknown`. |
