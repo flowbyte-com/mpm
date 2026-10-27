@@ -141,8 +141,11 @@ func p2BuildMCPServer(t *testing.T, dm *core.DatabaseManager) *server.MCPServer 
 //
 // It is non-vacuous with respect to the CORE's routing: if the handler
 // ignored `source_type` and fell back to the legacy path, the recorded
-// source_type would be "memory" and this test would fail. It is NOT a
-// proof about the registry schema — see the file header.
+// event_id would be the DOWNSTREAM id rather than the cited id, and this
+// test would fail. (The source_type assertion alone no longer
+// discriminates, since D3 made the legacy auto-resolution name what is
+// actually cited — the event_id is the legacy path's fingerprint.) It is
+// NOT a proof about the registry schema — see the file header.
 func TestP2MCP_SourceTypeIsAcceptedOverMCPToolsCall(t *testing.T) {
 	// The initial MCP surface is three tools; the full surface is behind
 	// MPM_EXPOSE_ALL_TOOLS. mpm_theories is a specialist.
@@ -233,7 +236,19 @@ func TestP2MCP_UnresolvableTypedCitationIsRejectedOverMCP(t *testing.T) {
 
 // TestP2MCP_LegacyCitationIsUnchangedOverMCP pins backward compatibility
 // on the wire: a propose with no source_type still records the historical
-// auto-resolved type.
+// auto-resolved type, with the historical event_id.
+//
+// D3 changed ONE thing about the auto-resolution: it now finds the two
+// canonical artifact kinds the historical resolver could not see — a work
+// item and a tool invocation — so the recorded source_type names what is
+// actually cited instead of falling back to "memory". The compatibility
+// guarantee this test pins ("callers that do not supply source_type must
+// be unaffected") is about the CALLER's experience — the call succeeds,
+// the citation is recorded, nothing is rejected — and that is unchanged.
+//
+// The event_id assertion is what keeps this test non-vacuous: on the TYPED
+// path the event_id is the CITED id, so a handler that routed a legacy
+// call to the typed path would fail here.
 func TestP2MCP_LegacyCitationIsUnchangedOverMCP(t *testing.T) {
 	t.Setenv("MPM_EXPOSE_ALL_TOOLS", "1")
 
@@ -264,15 +279,23 @@ func TestP2MCP_LegacyCitationIsUnchangedOverMCP(t *testing.T) {
 		t.Fatalf("the MCP call did not return a proposal id: %v", payload)
 	}
 
-	var sourceType string
+	var sourceType, eventID string
 	if err := dm.SQLDB().QueryRow(
-		`SELECT source_type FROM epistemic_provenance WHERE downstream_id = ?`,
-		proposalID).Scan(&sourceType); err != nil {
+		`SELECT source_type, event_id FROM epistemic_provenance WHERE downstream_id = ?`,
+		proposalID).Scan(&sourceType, &eventID); err != nil {
 		t.Fatalf("query epistemic_provenance: %v", err)
 	}
-	if sourceType != "memory" {
-		t.Errorf("expected the legacy path's auto-resolved fallback %q over the "+
-			"MCP surface, got %q — callers that do not supply source_type must "+
-			"be unaffected", "memory", sourceType)
+	// D3: the auto-resolution now names what is actually cited. Before
+	// the correction this was "memory" — a mislabel for a tool
+	// invocation.
+	if sourceType != "tool_invocation" {
+		t.Errorf("expected the legacy path's auto-resolved type %q over the MCP "+
+			"surface, got %q — a citation must record the type of what it actually cites",
+			"tool_invocation", sourceType)
+	}
+	// The legacy overloading: the event_id is the DOWNSTREAM id.
+	if eventID != proposalID {
+		t.Errorf("expected the legacy path's event_id to be the DOWNSTREAM id %q over "+
+			"the MCP surface, got %q", proposalID, eventID)
 	}
 }

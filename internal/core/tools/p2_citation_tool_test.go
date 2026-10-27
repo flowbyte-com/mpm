@@ -163,8 +163,23 @@ func TestP2Tool_HandleProposeWithSourceTypeIsTyped(t *testing.T) {
 }
 
 // TestP2Tool_HandleProposeWithoutSourceTypeIsLegacy pins that the handler
-// routes to the legacy path when the parameter is absent: the citation is
-// recorded with the auto-resolved type, exactly as before P2.
+// routes to the legacy path when the parameter is absent.
+//
+// The legacy path is still the legacy path: the citation is recorded
+// unvalidated, its event_id is the DOWNSTREAM id (the legacy
+// overloading), and the proposal is accepted.
+//
+// D3 changed ONE thing about it: the auto-resolution now finds the two
+// canonical artifact kinds the historical resolver could not see — a work
+// item and a tool invocation — so the recorded source_type names what is
+// actually cited instead of falling back to "memory". The compatibility
+// guarantee this test pins ("callers that do not supply source_type must
+// be unaffected") is about the CALLER's experience — the call succeeds,
+// the citation is recorded, nothing is rejected — and that is unchanged.
+//
+// The event_id assertion is what keeps this test non-vacuous: on the
+// TYPED path the event_id is the CITED id, so a handler that routed a
+// legacy call to the typed path would fail here.
 func TestP2Tool_HandleProposeWithoutSourceTypeIsLegacy(t *testing.T) {
 	dm := newTestSharedDM(t)
 	invocationID := p2SeedToolInvocation(t, dm, "p2-tool-legacy-invocation")
@@ -182,16 +197,26 @@ func TestP2Tool_HandleProposeWithoutSourceTypeIsLegacy(t *testing.T) {
 	result, _ := res.(map[string]interface{})
 	proposalID, _ := result["id"].(string)
 
-	var sourceType string
+	var sourceType, eventID string
 	if err := dm.SQLDB().QueryRow(
-		`SELECT source_type FROM epistemic_provenance WHERE downstream_id = ?`,
-		proposalID).Scan(&sourceType); err != nil {
+		`SELECT source_type, event_id FROM epistemic_provenance WHERE downstream_id = ?`,
+		proposalID).Scan(&sourceType, &eventID); err != nil {
 		t.Fatalf("query epistemic_provenance: %v", err)
 	}
-	if sourceType != "memory" {
-		t.Errorf("expected the legacy path's auto-resolved fallback %q, got %q — "+
-			"callers that do not supply source_type must be unaffected",
-			"memory", sourceType)
+	// D3: the auto-resolution now names what is actually cited. Before
+	// the correction this was "memory" — a mislabel for a tool
+	// invocation.
+	if sourceType != "tool_invocation" {
+		t.Errorf("expected the legacy path's auto-resolved type %q, got %q — a citation "+
+			"must record the type of what it actually cites",
+			"tool_invocation", sourceType)
+	}
+	// The legacy overloading: the event_id is the DOWNSTREAM id, not the
+	// cited id. This is the legacy path's fingerprint, and it is what
+	// distinguishes this row from a typed one.
+	if eventID != proposalID {
+		t.Errorf("expected the legacy path's event_id to be the DOWNSTREAM id %q, got %q",
+			proposalID, eventID)
 	}
 }
 

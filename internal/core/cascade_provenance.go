@@ -155,27 +155,18 @@ func (dm *DatabaseManager) recordProvenanceNode(node DBNode, sourceID, sourceTyp
 	}
 
 	// Legacy untyped ID compatibility: when the caller passes
-	// sourceType="" we resolve against the local memories table so
-	// the row lands with the correct type. This is the bridge for
-	// callers that pre-date the typed-source contract and pass bare
-	// IDs from prior-session recall. The downstream side is NOT
-	// resolved because callers know what they just minted.
+	// sourceType="" we resolve the cited id so the row lands with the
+	// correct type. This is the bridge for callers that pre-date the
+	// typed-source contract and pass bare IDs from prior-session
+	// recall. The downstream side is NOT resolved because callers know
+	// what they just minted.
 	//
 	// Resolution happens against the DM (not node) because the
 	// ResolveArtifactType lookup is a read that doesn't need to be
 	// in the transaction. The caller may already be inside a tx,
 	// so we use dm.db directly rather than node.
 	if sourceType == "" {
-		resolved, err := dm.ResolveArtifactType(sourceID)
-		if err != nil {
-			// Fall back to "memory" — better than failing the whole
-			// write when a legacy caller cites an ID that has since
-			// been shredded. The retrieval_metadata IncrementSuccess
-			// path uses the same fallback for the same reason.
-			sourceType = "memory"
-		} else {
-			sourceType = resolved
-		}
+		sourceType = dm.resolveLegacySourceType(sourceID)
 	}
 
 	// Local write. Always executes — the local table is the
@@ -346,6 +337,75 @@ func (dm *DatabaseManager) listDownstreamCitationsOn(tx *sql.Tx, sourceID string
 	return out, nil
 }
 
+// legacyCitationExtraTypes are the canonical citation source types the
+// historical resolver cannot find.
+//
+// ResolveArtifactType looks in the memories table (by its collection
+// discriminator) and in the lessons table. The canonical CITATION
+// vocabulary knows two more kinds of artifact — a work item and a tool
+// invocation — and those live in their own tables.
+//
+// D3: a LEGACY citation of one of those two used to fall through the
+// historical resolver and be recorded as source_type="memory". That is
+// not a label of convenience, it is a FALSE RECORD: the id names a tool
+// invocation, and the row said it was a memory. A reader could not tell
+// the two apart, and the typed path — which asks the very same
+// questions — resolves it as "tool_invocation".
+//
+// The vocabulary order is fixed so the resolution is deterministic. The
+// two types live in their own tables, so the order cannot change an
+// answer; it is fixed anyway, because a resolver that depends on map
+// iteration order is a resolver that produces different rows on
+// different days.
+var legacyCitationExtraTypes = []string{
+	CitationSourceWork,
+	CitationSourceToolInvocation,
+}
+
+// legacyCitationTypeFallback is the type recorded for a cited id that
+// resolves to nothing at all.
+//
+// It is the historical behaviour and it is deliberately preserved: a
+// legacy caller citing an id that has since been shredded must not fail
+// the whole write. Tightening that is a compatibility decision for
+// Session A (defect D3-a), not a silent change — see
+// docs/dev/session-b-d3-legacy-citations.md.
+const legacyCitationTypeFallback = "memory"
+
+// resolveLegacySourceType resolves the type of a LEGACY (undeclared-type)
+// citation.
+//
+// The order is deliberate:
+//
+//  1. ResolveArtifactType answers for the memories table (by collection,
+//     locally and shared) and the lessons table. Its answer is EXACTLY
+//     what it was before this change, so the common case costs the same
+//     two queries it always cost.
+//  2. The canonical vocabulary is then asked about the two kinds of
+//     artifact the historical resolver cannot find. This is the D3
+//     correction: the recorded type becomes the type of what is actually
+//     cited.
+//  3. An id that resolves to nothing keeps the historical "memory"
+//     fallback. Nothing is rejected — see legacyCitationTypeFallback.
+func (dm *DatabaseManager) resolveLegacySourceType(sourceID string) string {
+	if resolved, err := dm.ResolveArtifactType(sourceID); err == nil {
+		return resolved
+	}
+	for _, t := range legacyCitationExtraTypes {
+		query, ok := citationSourceQueries[t]
+		if !ok {
+			continue
+		}
+		var one int
+		// A query error is not a resolution: fall through to the
+		// fallback rather than failing the citation write.
+		if err := dm.db.QueryRow(query, sourceID).Scan(&one); err == nil {
+			return t
+		}
+	}
+	return legacyCitationTypeFallback
+}
+
 // ResolveArtifactType returns the canonical type string for an
 // artifact ID, looking it up against the local memories table's
 // `collection` column and the lessons table. Returns ("", err) when
@@ -365,6 +425,11 @@ func (dm *DatabaseManager) listDownstreamCitationsOn(tx *sql.Tx, sourceID string
 // small set of types the cascade materializer dispatches on), and
 // keeping the helper local to the caller makes the dependency edge
 // between RecordProvenance and the lookup obvious to future readers.
+//
+// It is NOT the whole canonical citation vocabulary: it cannot find a
+// work item or a tool invocation, because those live in their own
+// tables. resolveLegacySourceType is the citation path's resolver and
+// covers those two as well.
 func (dm *DatabaseManager) ResolveArtifactType(id string) (string, error) {
 	if id == "" {
 		return "", fmt.Errorf("ResolveArtifactType: id is empty")
@@ -416,8 +481,12 @@ func (dm *DatabaseManager) ResolveArtifactType(id string) (string, error) {
 // collectionToArtifactType maps the `memories.collection` value to
 // the canonical artifact type string used by the cascade materializer.
 // The `decisions` -> `decision` and `theories` -> `theory` flips are
-// the only renames; everything else (including `memories`, `''`,
-// NULL) maps to `memory`.
+// the only renames; everything else (including `memories`, the empty
+// collection, and NULL) maps to `memory`.
+//
+// (The empty collection is spelled out in words rather than as a pair of
+// quotes: Go's doc-comment formatter rewrites a quoted pair into a
+// typographic quote, which would change what the comment says.)
 func collectionToArtifactType(collection string) string {
 	switch collection {
 	case "decisions":
