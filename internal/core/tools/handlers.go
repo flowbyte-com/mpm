@@ -3307,9 +3307,14 @@ func handleAddEvidence(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, payl
 		Strength:           strength,
 		IndependenceFactor: independence,
 		CreatedBy:          getString(payload, "created_by"),
-		CreatedAt:          time.Now(),
-		Notes:              getString(payload, "notes"),
-		ReferenceURL:       getString(payload, "reference_url"),
+		// CreatedAt is deliberately NOT set here. The substrate fills in the
+		// delivery timestamp itself, and it does so AFTER it derives the
+		// observation's identity — so a delivery of the same observation
+		// twice is recognised as the same observation and counted once.
+		// A caller that wants to state WHEN the observation was made says
+		// so in the observation itself; the transport does not.
+		Notes:        getString(payload, "notes"),
+		ReferenceURL: getString(payload, "reference_url"),
 	})
 }
 

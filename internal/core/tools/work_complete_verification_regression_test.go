@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -353,6 +354,13 @@ func TestWorkCancel_F81LifecycleGate(t *testing.T) {
 		// even on cancelled work" — the dispute must be corroborated:
 		// attach TWO challenge rows at the default -0.6 strength, totaling
 		// -1.2, which crosses negativeCorroborationSum.
+		//
+		// The two rows must be DISTINCT observations, not two deliveries of
+		// one observation: an evidence row carries the identity of the
+		// observation it records (internal/core/evidence_identity.go), and
+		// repetition is not corroboration. The notes say which reviewer
+		// raised which challenge, which is also what the tool surface lets
+		// a caller express — it has no observation-key parameter yet.
 		for i := 0; i < 2; i++ {
 			if err := internal.AddEvidence(typeAssertDBM(dm), internal.EvidenceInput{
 				ArtifactID:         workID,
@@ -362,6 +370,7 @@ func TestWorkCancel_F81LifecycleGate(t *testing.T) {
 				Strength:           -0.6,
 				IndependenceFactor: 1.0,
 				CreatedBy:          "f81-challenge-test",
+				Notes:              fmt.Sprintf("challenge raised by reviewer %d", i+1),
 			}); err != nil {
 				t.Fatalf("AddEvidence(challenge %d): %v", i, err)
 			}

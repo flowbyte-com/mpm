@@ -59,29 +59,172 @@ const (
 // evidence rows) can reuse the same INSERT + recompute path without
 // opening a nested transaction.
 //
-// The id and expiresAt arguments are computed by AddEvidence before the
-// WithTx boundary; passing them in keeps the in-tx path a pure side-
-// effect with no derived-state computation, so any caller's tx stays
-// a single INSERT + recompute.
-func addEvidenceInTx(node DBNode, id string, in EvidenceInput, expiresAt *int64) error {
-	if _, err := node.ExecTracked(`
+// The row's id is NOT passed in: it is derived from the observation's
+// identity (see evidence_identity.go), and the evidence table's PRIMARY KEY
+// is what enforces "at most one stored row per observation per artifact".
+// The expiresAt argument is computed by AddEvidence before the WithTx
+// boundary; passing it in keeps the in-tx path a pure side-effect with no
+// derived-state computation, so any caller's tx stays a single INSERT +
+// recompute.
+//
+// A delivery of an observation that is already recorded is a REPLAY: the
+// INSERT is skipped by the primary key, nothing is recomputed, and the
+// outcome says so. The replay is not an error — the observation IS
+// recorded, which is exactly what the caller asked for.
+func addEvidenceInTx(node DBNode, in EvidenceInput, expiresAt *int64) (EvidenceOutcome, error) {
+	// The identity is derived BEFORE the delivery timestamp is filled in:
+	// whether the caller stated an observation time is part of the identity,
+	// and the fill-in would erase that distinction. See evidence_identity.go.
+	identity, err := deriveObservationIdentity(in)
+	if err != nil {
+		return EvidenceOutcome{}, err
+	}
+	if in.CreatedAt.IsZero() {
+		in.CreatedAt = time.Now()
+	}
+
+	res, err := node.ExecTracked(`
 		INSERT INTO evidence (id, artifact_id, artifact_type, type, source_group,
 		                     strength, independence_factor, created_by, created_at, expires_at, notes,
 		                     reference_url)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, 0, id, in.ArtifactID, in.ArtifactType, in.Type, in.SourceGroup,
+		ON CONFLICT(id) DO NOTHING
+	`, 0, identity.RowID, in.ArtifactID, in.ArtifactType, in.Type, in.SourceGroup,
 		in.Strength, in.IndependenceFactor, in.CreatedBy, in.CreatedAt.Unix(), expiresAt, in.Notes,
 		// Absent persists as SQL NULL rather than ''. ValidateReferenceURL
 		// guarantees a non-empty string always means "a reference was
 		// supplied", so NULL and '' are never ambiguous on the read side —
 		// and keeping the distinction in SQL lets a query ask
 		// "which evidence carries an external reference?" directly.
-		nullableReferenceURL(in.ReferenceURL)); err != nil {
-		return fmt.Errorf("insert evidence: %w", err)
+		nullableReferenceURL(in.ReferenceURL))
+	if err != nil {
+		return EvidenceOutcome{}, fmt.Errorf("insert evidence: %w", err)
 	}
+
+	inserted, err := rowsAffected(res)
+	if err != nil {
+		return EvidenceOutcome{}, fmt.Errorf("insert evidence: %w", err)
+	}
+	if inserted == 0 {
+		// The observation is already recorded: this delivery is a replay.
+		// Reconcile it against what is stored — a strict-mode key that now
+		// carries different content is a conflict, not a replay — and
+		// record a reference URL the stored row does not have yet.
+		if err := reconcileReplayedObservation(node, identity, in); err != nil {
+			return EvidenceOutcome{}, err
+		}
+		return EvidenceOutcome{
+			EvidenceID: identity.RowID,
+			Duplicate:  true,
+			Mode:       identity.Mode,
+		}, nil
+	}
+
 	if err := RecomputeConfidence(node, in.ArtifactID, in.ArtifactType, RecomputeReasonEvidenceAdded); err != nil {
-		return fmt.Errorf("recompute confidence: %w", err)
+		return EvidenceOutcome{}, fmt.Errorf("recompute confidence: %w", err)
 	}
+	return EvidenceOutcome{
+		EvidenceID: identity.RowID,
+		Mode:       identity.Mode,
+	}, nil
+}
+
+// rowsAffected reports how many rows an INSERT actually wrote.
+//
+// For the identity-backed insert it is the replay detector: zero means the
+// observation was already recorded (the primary key skipped the row), one
+// means this delivery recorded it.
+func rowsAffected(res sql.Result) (int64, error) {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected: %w", err)
+	}
+	return n, nil
+}
+
+// reconcileReplayedObservation resolves a delivery whose observation is
+// already recorded.
+//
+// Two things can be true of a replay, and only one of them is an error:
+//
+//   - the delivery says the same thing the stored row says — that is a
+//     replay, and the only write it may cause is recording a reference URL
+//     the stored row does not carry yet; and
+//   - the delivery says something DIFFERENT from the stored row while
+//     claiming the same identity — that is a conflict, and the substrate
+//     refuses it rather than silently keeping one of the two claims.
+//
+// The conflict check only applies in strict mode, where the caller named the
+// observation: in best_effort mode the identity IS the content, so a match
+// already means the content agrees.
+//
+// The check reads the stored row rather than assuming, so it is a fact about
+// the ledger. It is skipped for an expired stored row: the challenge path
+// (F7.1) and the contradiction resolver deliberately neutralize rows by
+// expiring them, and a replay must not resurrect or contradict a
+// deliberately neutralized observation.
+func reconcileReplayedObservation(node DBNode, identity observationIdentity, in EvidenceInput) error {
+	var (
+		storedType, storedSourceGroup, storedCreatedBy string
+		storedNotes                                    sql.NullString
+		storedStrength, storedIndependence             float64
+		storedExpiresAt                                sql.NullInt64
+		storedReferenceURL                             sql.NullString
+	)
+	err := node.QueryRowTracked(`
+		SELECT type, source_group, strength, independence_factor, created_by,
+		       notes, expires_at, reference_url
+		FROM evidence
+		WHERE id = ?
+	`, identity.RowID).Scan(
+		&storedType, &storedSourceGroup, &storedStrength, &storedIndependence,
+		&storedCreatedBy, &storedNotes, &storedExpiresAt, &storedReferenceURL,
+	)
+	if err != nil {
+		return fmt.Errorf("read back evidence row %s: %w", identity.RowID, err)
+	}
+
+	live := !storedExpiresAt.Valid || storedExpiresAt.Int64 > time.Now().Unix()
+	if identity.Mode == EvidenceObservationStrict && live {
+		storedDigest := evidenceContentDigest(EvidenceInput{
+			Type:               storedType,
+			SourceGroup:        storedSourceGroup,
+			Strength:           storedStrength,
+			IndependenceFactor: storedIndependence,
+			CreatedBy:          storedCreatedBy,
+			Notes:              storedNotes.String,
+		})
+		if storedDigest != identity.ContentDigest {
+			return fmt.Errorf(
+				"observation identity conflict: the observation recorded as %s already says something "+
+					"different, so this delivery is refused rather than merged into it",
+				identity.RowID)
+		}
+	}
+
+	// A reference URL the stored row does not carry yet is recorded on it.
+	// The URL is provably confidence-neutral (evidence_reference_url.go), and
+	// dropping caller-supplied provenance would lose data.
+	if in.ReferenceURL != "" && !storedReferenceURL.Valid {
+		if _, err := node.ExecTracked(
+			`UPDATE evidence SET reference_url = ? WHERE id = ? AND reference_url IS NULL`,
+			0, in.ReferenceURL, identity.RowID,
+		); err != nil {
+			return fmt.Errorf("record reference_url on evidence row %s: %w", identity.RowID, err)
+		}
+		// Write-path read-back assertion: the UPDATE returning no error does
+		// not prove the value landed.
+		var readBack sql.NullString
+		if err := node.QueryRowTracked(
+			`SELECT reference_url FROM evidence WHERE id = ?`, identity.RowID,
+		).Scan(&readBack); err != nil {
+			return fmt.Errorf("read back reference_url on evidence row %s: %w", identity.RowID, err)
+		}
+		if !readBack.Valid || readBack.String != in.ReferenceURL {
+			return fmt.Errorf("reference_url did not persist on evidence row %s", identity.RowID)
+		}
+	}
+
 	return nil
 }
 
@@ -118,6 +261,20 @@ type EvidenceInput struct {
 	// affect strength, confidence, SourceGroupClass, or derived verification,
 	// and MPM never fetches or verifies it. See evidence_reference_url.go.
 	ReferenceURL string
+	// ObservationKey is an OPTIONAL, caller-supplied stable identity for the
+	// OBSERVATION this evidence records — not for the delivery of it.
+	//
+	// Empty means "no observation identity was supplied", and the substrate
+	// falls back to the submission's semantic fingerprint: two submissions
+	// that agree in every semantic dimension are then ONE observation. A
+	// non-empty key says "this is the same observation as the one recorded
+	// under this key", which is what lets a caller record two INDEPENDENT
+	// observations that happen to carry identical text.
+	//
+	// The key is used verbatim and is never persisted: only its SHA-256
+	// digest reaches the stored identity. See evidence_identity.go for the
+	// whole model, and for what a replay does and does not change.
+	ObservationKey string
 }
 
 // EvidenceSourceGroupClass is how DeriveWorkVerification classifies
@@ -197,18 +354,36 @@ func classifySourceGroup(sg string) EvidenceSourceGroupClass {
 // silently ignored by DeriveWorkVerification — permanently capping work
 // verification at whatever the remaining evidence supported. It is now a
 // precise, actionable rejection with zero partial state.
+//
+// A delivery of an observation that is ALREADY recorded is a replay: no
+// second row is written, no confidence is recomputed, and the artifact's
+// confidence is untouched. Use AddEvidenceWithOutcome when the caller needs
+// to know which of the two happened.
 func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
+	_, err := AddEvidenceWithOutcome(dm, in)
+	return err
+}
+
+// AddEvidenceWithOutcome is AddEvidence plus the outcome of the delivery.
+//
+// The outcome says whether the delivery recorded a NEW observation or
+// replayed one that is already recorded, and carries the id of the stored
+// evidence row — the same id for every delivery of the same observation.
+//
+// Everything else about the write is exactly AddEvidence's: the same
+// validation, the same transaction, the same single authoritative recompute.
+func AddEvidenceWithOutcome(dm *DatabaseManager, in EvidenceInput) (EvidenceOutcome, error) {
 	if !IsValidEvidenceType(in.Type) {
-		return fmt.Errorf("invalid evidence type: %q", in.Type)
+		return EvidenceOutcome{}, fmt.Errorf("invalid evidence type: %q", in.Type)
 	}
 	if in.ArtifactType == "" {
-		return fmt.Errorf("artifact_type required")
+		return EvidenceOutcome{}, fmt.Errorf("artifact_type required")
 	}
 	if in.SourceGroup == "" {
-		return fmt.Errorf("source_group required")
+		return EvidenceOutcome{}, fmt.Errorf("source_group required")
 	}
 	if in.CreatedBy == "" {
-		return fmt.Errorf("created_by required")
+		return EvidenceOutcome{}, fmt.Errorf("created_by required")
 	}
 	// Validate the explicit reference URL BEFORE any DB work, alongside the
 	// other acceptance checks, so a rejected value leaves zero partial state.
@@ -222,7 +397,7 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	// "every user field is scanned" invariant.
 	referenceURL, err := ValidateReferenceURL(in.ReferenceURL)
 	if err != nil {
-		return err
+		return EvidenceOutcome{}, err
 	}
 	in.ReferenceURL = referenceURL
 	// Scan every user-supplied text field for secrets and poison phrases
@@ -233,31 +408,31 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	// Scanner runs before the vocabulary check so a hostile value gets
 	// the security rejection, not a syntax complaint.
 	if isSensitive, reason := isSensitiveContent(in.Notes); isSensitive {
-		return fmt.Errorf("sensitive content in evidence notes: %s", reason)
+		return EvidenceOutcome{}, fmt.Errorf("sensitive content in evidence notes: %s", reason)
 	}
 	if isSensitive, reason := isSensitiveContent(in.SourceGroup); isSensitive {
-		return fmt.Errorf("sensitive content in evidence source_group: %s", reason)
+		return EvidenceOutcome{}, fmt.Errorf("sensitive content in evidence source_group: %s", reason)
 	}
 	if isSensitive, reason := isSensitiveContent(in.CreatedBy); isSensitive {
-		return fmt.Errorf("sensitive content in evidence created_by: %s", reason)
+		return EvidenceOutcome{}, fmt.Errorf("sensitive content in evidence created_by: %s", reason)
 	}
 	if isSensitive, reason := isSensitiveContent(in.ReferenceURL); isSensitive {
-		return fmt.Errorf("sensitive content in evidence reference_url: %s", reason)
+		return EvidenceOutcome{}, fmt.Errorf("sensitive content in evidence reference_url: %s", reason)
 	}
 	if isPoisoned, reason := dm.scanPoisoned(in.Notes); isPoisoned {
-		return fmt.Errorf("poison content in evidence notes: %s", reason)
+		return EvidenceOutcome{}, fmt.Errorf("poison content in evidence notes: %s", reason)
 	}
 	if isPoisoned, reason := dm.scanPoisoned(in.SourceGroup); isPoisoned {
-		return fmt.Errorf("poison content in evidence source_group: %s", reason)
+		return EvidenceOutcome{}, fmt.Errorf("poison content in evidence source_group: %s", reason)
 	}
 	if isPoisoned, reason := dm.scanPoisoned(in.CreatedBy); isPoisoned {
-		return fmt.Errorf("poison content in evidence created_by: %s", reason)
+		return EvidenceOutcome{}, fmt.Errorf("poison content in evidence created_by: %s", reason)
 	}
 	if isPoisoned, reason := dm.scanPoisoned(in.ReferenceURL); isPoisoned {
-		return fmt.Errorf("poison content in evidence reference_url: %s", reason)
+		return EvidenceOutcome{}, fmt.Errorf("poison content in evidence reference_url: %s", reason)
 	}
 	if !ValidEvidenceSourceGroup(in.SourceGroup) {
-		return fmt.Errorf(
+		return EvidenceOutcome{}, fmt.Errorf(
 			"invalid source_group %q: must be one of outcome=%v, audit=%v, action=%v "+
 				"(run `mpm call mpm_evidence --payload '{\"action\":\"source_groups\"}'` to list them)",
 			in.SourceGroup,
@@ -265,13 +440,14 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 			EvidenceSourceGroupOfClass(SourceGroupClassAudit),
 			EvidenceSourceGroupOfClass(SourceGroupClassAction))
 	}
-	if in.CreatedAt.IsZero() {
-		in.CreatedAt = time.Now()
-	}
 	if in.IndependenceFactor == 0 {
 		in.IndependenceFactor = 1.0
 	}
 
+	// The delivery timestamp is NOT filled in here. addEvidenceInTx fills it
+	// in AFTER the observation identity has been derived, because whether the
+	// caller stated an observation time is part of that identity and the
+	// substrate's own delivery time is not. See evidence_identity.go.
 	// Reject evidence for nonexistent artifacts BEFORE inserting anything.
 	// The evidence table has no FK to memories/lessons (intentional, to
 	// preserve evidence history even after artifact deletion in v2), so
@@ -283,13 +459,12 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	// documentation warns about.
 	exists, err := artifactExists(dm, in.ArtifactID, in.ArtifactType)
 	if err != nil {
-		return fmt.Errorf("artifact existence check: %w", err)
+		return EvidenceOutcome{}, fmt.Errorf("artifact existence check: %w", err)
 	}
 	if !exists {
-		return fmt.Errorf("artifact %s/%s does not exist", in.ArtifactType, in.ArtifactID)
+		return EvidenceOutcome{}, fmt.Errorf("artifact %s/%s does not exist", in.ArtifactType, in.ArtifactID)
 	}
 
-	id := GenerateID()
 	var expiresAt *int64
 	if in.ExpiresAt != nil {
 		exp := in.ExpiresAt.Unix()
@@ -300,10 +475,24 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 	// rolls back the evidence row. Without this, an orphan evidence row would
 	// remain if the process dies between the INSERT and the recompute, or if
 	// the recompute itself fails (e.g., CHECK constraint violation).
+	var outcome EvidenceOutcome
 	if err := dm.WithTx(func(node DBNode) error {
-		return addEvidenceInTx(node, id, in, expiresAt)
+		out, err := addEvidenceInTx(node, in, expiresAt)
+		if err != nil {
+			return err
+		}
+		outcome = out
+		return nil
 	}); err != nil {
-		return err
+		return EvidenceOutcome{}, err
+	}
+
+	// A replay changed nothing: the evidence set is the same, so there is
+	// nothing to re-derive and no observation to record. Re-deriving would
+	// write the same verification again and append an evidence_observed
+	// event for an observation that was not observed again.
+	if outcome.Duplicate {
+		return outcome, nil
 	}
 
 	// F7/F12: derived work verification must track evidence changes.
@@ -324,10 +513,10 @@ func AddEvidence(dm *DatabaseManager, in EvidenceInput) error {
 			slog.Warn("AddEvidence: evidence_observed event failed", "work", in.ArtifactID, "error", err.Error())
 		}
 		if _, err := dm.DeriveWorkVerification(in.ArtifactID); err != nil {
-			return fmt.Errorf("derive work verification: %w", err)
+			return EvidenceOutcome{}, fmt.Errorf("derive work verification: %w", err)
 		}
 	}
-	return nil
+	return outcome, nil
 }
 
 // RecomputeConfidence is the single authoritative entry point. It loads the
@@ -534,9 +723,9 @@ func loadEvidenceForRecompute(node DBNode, artifactID, artifactType string, now 
 		}
 		ts := time.Unix(createdAt, 0)
 		out = append(out, evidenceInput{
-			Strength:    strength,
+			Strength:     strength,
 			Independence: independence,
-			CreatedAt:   ts,
+			CreatedAt:    ts,
 		})
 		if strength > 0 && ts.After(lastPositiveAt) {
 			lastPositiveAt = ts
@@ -675,9 +864,9 @@ type EvidenceComponent struct {
 
 // DecayComponent breaks down the time-based confidence penalty.
 type DecayComponent struct {
-	Lambda       float64   `json:"lambda"`
-	TDays       float64   `json:"t_days"`
-	Penalty     float64   `json:"penalty"`
+	Lambda         float64   `json:"lambda"`
+	TDays          float64   `json:"t_days"`
+	Penalty        float64   `json:"penalty"`
 	LastPositiveAt time.Time `json:"last_positive_at"`
 }
 
@@ -699,11 +888,11 @@ type ConfidenceExplanation struct {
 // TopContributor is an evidence piece ranked by absolute impact on confidence.
 // This answers "what's driving this belief?" without scrolling through all rows.
 type TopContributor struct {
-	EvidenceID string  `json:"evidence_id"`
-	Type       string  `json:"type"`
-	SourceGroup string `json:"source_group"`
-	Impact     float64 `json:"impact"` // effective_strength; sign encodes direction
-	Rank       int     `json:"rank"`
+	EvidenceID  string  `json:"evidence_id"`
+	Type        string  `json:"type"`
+	SourceGroup string  `json:"source_group"`
+	Impact      float64 `json:"impact"` // effective_strength; sign encodes direction
+	Rank        int     `json:"rank"`
 }
 
 // ExplainConfidence returns the full component breakdown of f(evidence, decay)
@@ -838,25 +1027,25 @@ func ExplainConfidence(dm *DatabaseManager, artifactID, artifactType string) (*C
 	for i := 0; i < topN; i++ {
 		topContributors = append(topContributors, TopContributor{
 			EvidenceID:  sorted[i].ID,
-			Type:       sorted[i].Type,
+			Type:        sorted[i].Type,
 			SourceGroup: sorted[i].SourceGroup,
-			Impact:     sorted[i].EffectiveStrength,
-			Rank:       i + 1,
+			Impact:      sorted[i].EffectiveStrength,
+			Rank:        i + 1,
 		})
 	}
 
 	return &ConfidenceExplanation{
-		ArtifactID:    artifactID,
-		ArtifactType:  artifactType,
-		Confidence:    conf,
-		Initial:       initial,
-		InitialOdds:   initialOdds,
-		Positive:      pos,
-		Negative:      neg,
+		ArtifactID:   artifactID,
+		ArtifactType: artifactType,
+		Confidence:   conf,
+		Initial:      initial,
+		InitialOdds:  initialOdds,
+		Positive:     pos,
+		Negative:     neg,
 		Decay: DecayComponent{
 			Lambda:         lambda,
-			TDays:         tDays,
-			Penalty:       decayPenalty,
+			TDays:          tDays,
+			Penalty:        decayPenalty,
 			LastPositiveAt: lastPositiveAt,
 		},
 		TopContributors: topContributors,
@@ -869,9 +1058,9 @@ func toEvidenceInputs(comps []EvidenceComponent) []evidenceInput {
 	out := make([]evidenceInput, len(comps))
 	for i, c := range comps {
 		out[i] = evidenceInput{
-			Strength:    c.Strength,
+			Strength:     c.Strength,
 			Independence: c.Independence,
-			CreatedAt:   c.CreatedAt,
+			CreatedAt:    c.CreatedAt,
 		}
 	}
 	return out
@@ -1025,10 +1214,10 @@ func ListEvidence(dm *DatabaseManager) ([]Evidence, error) {
 
 // ConfidenceSnapshot is a point-in-time view of an artifact's confidence state.
 type ConfidenceSnapshot struct {
-	ArtifactID   string                `json:"artifact_id"`
-	ArtifactType string                `json:"artifact_type"`
-	Confidence   float64               `json:"confidence"`
-	HistoryCount int                   `json:"history_count"`
+	ArtifactID   string                 `json:"artifact_id"`
+	ArtifactType string                 `json:"artifact_type"`
+	Confidence   float64                `json:"confidence"`
+	HistoryCount int                    `json:"history_count"`
 	History      []ConfidenceHistoryRow `json:"history"`
 }
 
@@ -1344,16 +1533,16 @@ func QueryConfidenceTrend(dm *DatabaseManager, artifactID, artifactType string, 
 // All inputs are existing primitives: memories, evidence, confidence_history.
 // No new schema.
 type MemoryQualityBySource struct {
-	Source              string  `json:"source"`
-	MemoryCount         int     `json:"memory_count"`
+	Source               string  `json:"source"`
+	MemoryCount          int     `json:"memory_count"`
 	AvgCurrentConfidence float64 `json:"avg_current_confidence"`
-	AvgConfidenceDelta  float64 `json:"avg_confidence_delta"`
-	TotalEvidence       int     `json:"total_evidence"`
-	PositiveEvidence    int     `json:"positive_evidence"`
-	NegativeEvidence    int     `json:"negative_evidence"`
-	ChallengeCount      int     `json:"challenge_count"`
-	ChallengeRate       float64 `json:"challenge_rate"`
-	SurvivalRate        float64 `json:"survival_rate"` // memories with confidence >= 0.5 / total
+	AvgConfidenceDelta   float64 `json:"avg_confidence_delta"`
+	TotalEvidence        int     `json:"total_evidence"`
+	PositiveEvidence     int     `json:"positive_evidence"`
+	NegativeEvidence     int     `json:"negative_evidence"`
+	ChallengeCount       int     `json:"challenge_count"`
+	ChallengeRate        float64 `json:"challenge_rate"`
+	SurvivalRate         float64 `json:"survival_rate"` // memories with confidence >= 0.5 / total
 }
 
 // QueryMemoryQualityBySource returns per-source memory statistics, sorted by

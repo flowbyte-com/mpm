@@ -122,8 +122,8 @@ func (dm *DatabaseManager) LogChangelogEntry(fact, commitHash string, extraTags 
 		body,
 		"changelog", // dedicated collection so synthesis queries can scope cheaply
 		tags,
-		1.0,  // weight 1.0 — changelog memories are permanent, high-importance
-		"0",  // TTL 0 — no expiry
+		1.0, // weight 1.0 — changelog memories are permanent, high-importance
+		"0", // TTL 0 — no expiry
 		ActiveContext{Model: "mpm_log_to_changelog"}, // provenance: this memory came from the changelog tool
 	)
 	if err != nil {
@@ -291,8 +291,17 @@ func (dm *DatabaseManager) LogChangelogEntryWithAssertions(
 
 		// 2. Fire one evidence row + recompute per confirmation.
 		// Positive direction; cascade hook unreachable.
+		//
+		// The occurrence index counts how many times THIS artifact already
+		// appears in the list: it is what makes three confirmations of the
+		// same artifact three distinct observations, while a retry of the
+		// same list replays the same three identities.
+		confirmationOccurrences := map[[2]string]int{}
 		for i, conf := range confirmations {
-			if err := writeConfirmationInTx(node, conf, commitHash); err != nil {
+			key := [2]string{conf.ArtifactType, conf.ArtifactID}
+			occurrence := confirmationOccurrences[key]
+			confirmationOccurrences[key] = occurrence + 1
+			if err := writeConfirmationInTx(node, conf, commitHash, occurrence); err != nil {
 				return fmt.Errorf("confirmation[%d] %s/%s: %w", i, conf.ArtifactType, conf.ArtifactID, err)
 			}
 		}
@@ -302,8 +311,12 @@ func (dm *DatabaseManager) LogChangelogEntryWithAssertions(
 		// invalidation logic handles enqueue (evidence_store.go:328-340).
 		// The cascade path is the same one any other negative-evidence
 		// write would trigger; we deliberately do not gate it.
+		contradictionOccurrences := map[[2]string]int{}
 		for i, contra := range contradictions {
-			if err := writeContradictionInTx(node, contra, commitHash); err != nil {
+			key := [2]string{contra.ArtifactType, contra.ArtifactID}
+			occurrence := contradictionOccurrences[key]
+			contradictionOccurrences[key] = occurrence + 1
+			if err := writeContradictionInTx(node, contra, commitHash, occurrence); err != nil {
 				return fmt.Errorf("contradiction[%d] %s/%s: %w", i, contra.ArtifactType, contra.ArtifactID, err)
 			}
 		}
@@ -343,7 +356,14 @@ func (dm *DatabaseManager) LogChangelogEntryWithConfirmations(
 // invalidates the artifact and its downstream dependents. Per
 // docs/epistemic-confirmation.md §"Cascade cross-fire asymmetry",
 // we do not gate this path.
-func writeContradictionInTx(node DBNode, spec ContradictionSpec, commitHash string) error {
+//
+// IDENTITY. The row carries an explicit observation key (see
+// evidence_identity.go), because a changelog entry is re-submittable: the
+// same commit, logged twice, must be one observation and not two. The key
+// names the commit, the artifact and which occurrence of that artifact the
+// entry is — so three contradictions of the SAME artifact in one call are
+// three observations, while a retry of that same call replays all three.
+func writeContradictionInTx(node DBNode, spec ContradictionSpec, commitHash string, occurrence int) error {
 	exists, err := artifactExists(node, spec.ArtifactID, spec.ArtifactType)
 	if err != nil {
 		return fmt.Errorf("artifact existence check: %w", err)
@@ -361,8 +381,11 @@ func writeContradictionInTx(node DBNode, spec ContradictionSpec, commitHash stri
 		CreatedBy:          fmt.Sprintf("mpm_log_to_changelog:%s", commitHash),
 		CreatedAt:          time.Now(),
 		Notes:              fmt.Sprintf("contradicted by changelog entry %s", commitHash),
+		ObservationKey: fmt.Sprintf("changelog-contradiction:%s:%s:%s:%d",
+			commitHash, spec.ArtifactType, spec.ArtifactID, occurrence),
 	}
-	return addEvidenceInTx(node, GenerateID(), in, nil)
+	_, err = addEvidenceInTx(node, in, nil)
+	return err
 }
 
 // writeConfirmationInTx is the tx-aware helper that inserts one
@@ -378,7 +401,14 @@ func writeContradictionInTx(node DBNode, spec ContradictionSpec, commitHash stri
 // handling" promises, and it's why the validation happens BEFORE the
 // INSERT (no orphan evidence row, no orphan history row, no orphan
 // cascade intent).
-func writeConfirmationInTx(node DBNode, conf ConfirmationSpec, commitHash string) error {
+//
+// IDENTITY. The row carries an explicit observation key (see
+// evidence_identity.go), because a changelog entry is re-submittable: the
+// same commit, logged twice, must be one observation and not two. The key
+// names the commit, the artifact and which occurrence of that artifact the
+// entry is — so three confirmations of the SAME artifact in one call are
+// three observations, while a retry of that same call replays all three.
+func writeConfirmationInTx(node DBNode, conf ConfirmationSpec, commitHash string, occurrence int) error {
 	exists, err := artifactExists(node, conf.ArtifactID, conf.ArtifactType)
 	if err != nil {
 		return fmt.Errorf("artifact existence check: %w", err)
@@ -396,6 +426,9 @@ func writeConfirmationInTx(node DBNode, conf ConfirmationSpec, commitHash string
 		CreatedBy:          fmt.Sprintf("mpm_log_to_changelog:%s", commitHash),
 		CreatedAt:          time.Now(),
 		Notes:              fmt.Sprintf("confirmed by changelog entry %s", commitHash),
+		ObservationKey: fmt.Sprintf("changelog-confirmation:%s:%s:%s:%d",
+			commitHash, conf.ArtifactType, conf.ArtifactID, occurrence),
 	}
-	return addEvidenceInTx(node, GenerateID(), in, nil)
+	_, err = addEvidenceInTx(node, in, nil)
+	return err
 }

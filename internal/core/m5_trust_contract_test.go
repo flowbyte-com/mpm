@@ -63,78 +63,26 @@ import (
 	"testing"
 )
 
-// ── D1: duplicate evidence must not inflate confidence ─────────────────────
-
-// TestM5Contract_DuplicateEvidenceDoesNotInflateConfidence covers defect D1.
+// ── D1: RETIRED — the duplicate-evidence contract now passes ──────────────
 //
-// REPRODUCTION (today, green in the characterization suite):
-// two byte-identical mpm_evidence submissions against one artifact create
-// two evidence rows and raise the artifact's confidence twice — measured at
-// 0.5 → 0.6224593183800414 → 0.7310585651678245.
+// The correction landed with the observation-identity mechanism (see
+// internal/core/evidence_identity.go): the evidence row's id is derived from
+// the observation's identity and the evidence table's PRIMARY KEY enforces
+// "at most one stored row per observation per artifact". The contract
+// therefore passes, and it was PROMOTED into the ordinary regression suite —
+// internal/core/evidence_identity_test.go
+// (TestEvidenceIdentity_RepeatedDeliveryDoesNotInflateConfidence) — so it
+// runs in every green gate instead of behind this tag.
 //
-// EXPECTED CORRECT BEHAVIOUR:
-// submitting the same observation twice must leave the artifact's confidence
-// where one submission left it, and must leave exactly one evidence row.
+// WHAT IT ASSERTED:
 //
-// EXISTING IMPLEMENTATION RESPONSIBLE:
-// internal/core/evidence_store.go:292 mints a fresh id per insert; the
-// evidence table has no unique index beyond its primary key and no
-// content-hash column; the confidence recompute at
-// internal/core/evidence_store.go:511-554 sums every non-expired,
-// non-auto_capture row.
+//	submitting the same observation twice must leave the artifact's
+//	confidence where one submission left it, and must leave exactly one
+//	evidence row.
 //
-// MINIMAL PROPOSED CORRECTION:
-// give the evidence row an observation identity and refuse a second row that
-// carries the same identity for the same artifact. Whether that identity is
-// a new column, a stored hash, or a unique index over existing columns is
-// Session A's decision — the contract test is written against the BEHAVIOUR,
-// not the mechanism, so A's choice does not invalidate it.
-//
-// NEEDS SESSION A'S APPROVAL: YES — the mechanism is a schema change
-// (internal/core/schema.go), which is the sprint's highest-collision file.
-func TestM5Contract_DuplicateEvidenceDoesNotInflateConfidence(t *testing.T) {
-	dm := m5NewDM(t)
-	id := m5ProposePendingTheory(t, dm,
-		"Scheduler heartbeat rename is not atomic across filesystems.",
-		[]string{"m5", "contract"})
-
-	before := m5Confidence(t, dm, id)
-
-	in := EvidenceInput{
-		ArtifactID:         id,
-		ArtifactType:       "theory",
-		Type:               "observation",
-		SourceGroup:        "tool_invocation",
-		Strength:           0.5,
-		IndependenceFactor: 1.0,
-		CreatedBy:          "critic:probe",
-		Notes:              "source observation O-1",
-	}
-	if _, err := dm.AddEvidence(in); err != nil {
-		t.Fatalf("first AddEvidence: %v", err)
-	}
-	afterFirst := m5Confidence(t, dm, id)
-
-	if _, err := dm.AddEvidence(in); err != nil {
-		t.Fatalf("second AddEvidence (identical): %v", err)
-	}
-	afterSecond := m5Confidence(t, dm, id)
-
-	rows := m5ScalarInt(t, dm.SQLDB(),
-		`SELECT COUNT(*) FROM evidence WHERE artifact_id = ?`, id)
-	if rows != 1 {
-		t.Errorf("expected exactly 1 evidence row after two identical submissions "+
-			"(defect D1), got %d", rows)
-	}
-	if diff := afterSecond - afterFirst; diff > 1e-9 || diff < -1e-9 {
-		t.Errorf("expected the duplicate submission not to change confidence "+
-			"(defect D1): %.9f -> %.9f", afterFirst, afterSecond)
-	}
-	if diff := afterFirst - before; diff <= 0 {
-		t.Errorf("expected the FIRST submission to raise confidence: %.9f -> %.9f",
-			before, afterFirst)
-	}
-}
+// and what it asserts now, in the promoted form: the same thing, plus the
+// outcome (a replay is reported as a replay) and the ledger (no second
+// confidence_history row).
 
 // ── D3: a proposal must cite resolvable evidence ──────────────────────────
 
@@ -305,82 +253,19 @@ func TestM5Contract_CycleVaryingTagDoesNotCreateSecondProposal(t *testing.T) {
 	}
 }
 
-// ── D5: repeated delivery is not independent corroboration ─────────────────
-
-// TestM5Contract_RepeatedDeliveryDoesNotCountAsIndependentCorroboration
-// covers defect D5.
+// ── D5: RETIRED — the repeated-delivery contract now passes ──────────────
 //
-// REPRODUCTION (today, green in the characterization suite):
-// two submissions describing the SAME observation and two submissions
-// describing DIFFERENT observations produce the SAME confidence, because the
-// evidence table carries no identity for the underlying observation and the
-// confidence formula sums every row in full.
+// The same correction closed D5: an observation's identity is durable, so a
+// delivery of the same observation is a REPLAY (no row, no recompute, no
+// confidence change) while two distinct observations continue to contribute
+// twice. The contract was PROMOTED into the ordinary regression suite —
+// internal/core/evidence_identity_test.go
+// (TestEvidenceIdentity_RepeatedCriticCyclesDoNotManufactureCorroboration,
+//  TestEvidenceIdentity_DistinctIndependentEvidenceStillRaisesConfidence) —
+// so it runs in every green gate instead of behind this tag.
 //
-// EXPECTED CORRECT BEHAVIOUR:
-// the same observation delivered again must contribute what ONE observation
-// contributes, while two distinct observations must continue to contribute
-// twice. The distinction must be preserved, not merely asserted.
+// WHAT IT ASSERTED:
 //
-// EXISTING IMPLEMENTATION RESPONSIBLE:
-// internal/core/confidence.go:119-138 sums strength × independence over
-// every scoring evidence row; internal/core/evidence_store.go:511-554 loads
-// them. independence_factor is the intended dependence signal but it is
-// caller-asserted and unenforced, and there is no observation identity to
-// enforce it against.
-//
-// MINIMAL PROPOSED CORRECTION:
-// the same observation identity that closes defect D1 also closes D5 —
-// once the substrate can tell two submissions of one observation from two
-// submissions of two observations, the dependence is representable and
-// enforceable. The mechanism is A's choice; this test pins the BEHAVIOUR.
-//
-// NEEDS SESSION A'S APPROVAL: YES — the mechanism is a schema change
-// (internal/core/schema.go), which is the sprint's highest-collision file.
-func TestM5Contract_RepeatedDeliveryDoesNotCountAsIndependentCorroboration(t *testing.T) {
-	dm := m5NewDM(t)
-
-	// The SAME observation, submitted twice.
-	repeatedID := m5ProposePendingTheory(t, dm,
-		"A repeated observation must not read as independent corroboration.",
-		[]string{"m5", "contract", "repeated"})
-	repeated := EvidenceInput{
-		ArtifactID:         repeatedID,
-		ArtifactType:       "theory",
-		Type:               "observation",
-		SourceGroup:        "tool_invocation",
-		Strength:           0.5,
-		IndependenceFactor: 1.0,
-		CreatedBy:          "critic:probe",
-		Notes:              "observation O-1",
-	}
-	if _, err := dm.AddEvidence(repeated); err != nil {
-		t.Fatalf("AddEvidence (repeated, first): %v", err)
-	}
-	if _, err := dm.AddEvidence(repeated); err != nil {
-		t.Fatalf("AddEvidence (repeated, second): %v", err)
-	}
-
-	// TWO DIFFERENT observations.
-	distinctID := m5ProposePendingTheory(t, dm,
-		"Two distinct observations must read as independent corroboration.",
-		[]string{"m5", "contract", "distinct"})
-	distinct := repeated
-	distinct.ArtifactID = distinctID
-	distinct.Notes = "observation O-2"
-	if _, err := dm.AddEvidence(distinct); err != nil {
-		t.Fatalf("AddEvidence (distinct, first): %v", err)
-	}
-	distinct.Notes = "observation O-3"
-	if _, err := dm.AddEvidence(distinct); err != nil {
-		t.Fatalf("AddEvidence (distinct, second): %v", err)
-	}
-
-	repeatedConf := m5Confidence(t, dm, repeatedID)
-	distinctConf := m5Confidence(t, dm, distinctID)
-
-	if !(distinctConf > repeatedConf) {
-		t.Errorf("expected two DISTINCT observations to score higher than one "+
-			"observation delivered twice (defect D5): distinct=%.9f repeated=%.9f",
-			distinctConf, repeatedConf)
-	}
-}
+//	the same observation delivered again must contribute what ONE observation
+//	contributes, while two distinct observations must continue to contribute
+//	twice. The distinction must be preserved, not merely asserted.

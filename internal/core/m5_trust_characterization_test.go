@@ -15,6 +15,17 @@ package internal
 // characterization test is INVERTED (or deleted where the defect is accepted
 // as-is). The inversion is part of the fix's PR, not an afterthought.
 //
+// RETIRED. D1 (duplicate evidence inflates confidence) and D5 (repeated
+// delivery counts as independent corroboration) were REPAIRED on the
+// feat/session-b-d1-evidence-identity branch: the observation-identity
+// mechanism in internal/core/evidence_identity.go gives an evidence row a
+// durable observation identity, and the evidence table's PRIMARY KEY enforces
+// "at most one stored row per observation per artifact". Their M5-COMPLIANT
+// counterparts are ordinary regression tests now, in
+// internal/core/evidence_identity_test.go — they run in every green gate
+// instead of behind the `m5contract` tag. The D2, D3 and D4
+// characterizations below still pin defects that are open.
+//
 // THE M5-COMPLIANT COUNTERPARTS live in m5_trust_contract_test.go, which is
 // gated behind the `m5contract` build tag and therefore FAILS today. They are
 // deliberately NOT part of any green CI gate — see m5_trust_gate_test.go, which
@@ -41,122 +52,29 @@ import (
 	"testing"
 )
 
-// ── D1: duplicate evidence inflates confidence ─────────────────────────────
-
-// TestM5Characterization_DuplicateEvidenceInflatesConfidence pins defect D1.
+// ── D1: RETIRED — duplicate evidence no longer inflates confidence ────────
 //
-// Two byte-identical evidence submissions against the same artifact produce
-// two evidence rows, and the artifact's confidence rises with each one. The
-// confidence_history ledger records both, with evidence_count 1 then 2.
+// The characterization that pinned the DEFECTIVE behaviour is retired. The
+// correction landed with the observation-identity mechanism (see
+// internal/core/evidence_identity.go): the evidence row's id is derived from
+// the observation's identity and the table's PRIMARY KEY enforces "at most
+// one stored row per observation per artifact".
 //
-// WHY IT MATTERS. A periodic critic re-submitting the same observation would
-// accumulate duplicate rows and monotonically inflate the proposal's
-// confidence on every cycle — repetition mistaken for corroboration, which is
-// the exact inverse of M5's trust boundary.
+// The M5-COMPLIANT counterpart of this characterization is now an ordinary
+// regression test in internal/core/evidence_identity_test.go
+// (TestEvidenceIdentity_RepeatedDeliveryDoesNotInflateConfidence), which
+// runs in every green gate.
 //
-// MEASURED (Session B, 2026-10-26, disposable workspace):
+// WHAT WAS MEASURED (Session B, 2026-10-26, disposable workspace):
 //
 //	confidence: 0.5 → 0.6224593183800414 → 0.7310585651678245
 //	confidence_history: (0.622459…, evidence_count=1, evidence_added)
 //	                   (0.731058…, evidence_count=2, evidence_added)
 //
-// ROOT CAUSE. The evidence table has no unique index beyond its primary key
-// and no content-hash column, and AddEvidence mints a fresh id on every
-// insert (internal/core/evidence_store.go:292). The confidence recompute
-// sums every non-expired, non-auto_capture row
-// (internal/core/evidence_store.go:511-554), so each duplicate counts in
-// full.
+// and is now:
 //
-// CONTRACT COUNTERPART (m5contract, currently failing):
-// TestM5Contract_DuplicateEvidenceDoesNotInflateConfidence.
-func TestM5Characterization_DuplicateEvidenceInflatesConfidence(t *testing.T) {
-	dm := m5NewDM(t)
-	id := m5ProposePendingTheory(t, dm,
-		"Scheduler heartbeat rename is not atomic across filesystems.",
-		[]string{"m5", "probe"})
-
-	before := m5Confidence(t, dm, id)
-
-	in := EvidenceInput{
-		ArtifactID:         id,
-		ArtifactType:       "theory",
-		Type:               "observation",
-		SourceGroup:        "tool_invocation",
-		Strength:           0.5,
-		IndependenceFactor: 1.0,
-		CreatedBy:          "critic:probe",
-		Notes:              "source observation O-1",
-	}
-
-	first, err := dm.AddEvidence(in)
-	if err != nil {
-		t.Fatalf("first AddEvidence: %v", err)
-	}
-	afterFirst := m5Confidence(t, dm, id)
-
-	// The second submission is byte-identical to the first.
-	second, err := dm.AddEvidence(in)
-	if err != nil {
-		t.Fatalf("second AddEvidence: %v", err)
-	}
-	afterSecond := m5Confidence(t, dm, id)
-
-	// CURRENT BEHAVIOUR: two rows.
-	rows := m5ScalarInt(t, dm.SQLDB(),
-		`SELECT COUNT(*) FROM evidence WHERE artifact_id = ?`, id)
-	if rows != 2 {
-		t.Fatalf("expected 2 evidence rows after two identical submissions, got %d", rows)
-	}
-
-	// CURRENT BEHAVIOUR: confidence rises twice, and each AddEvidence
-	// reports the new (higher) value.
-	if !(afterFirst > before) {
-		t.Errorf("expected confidence to rise after the first submission: %.6f -> %.6f",
-			before, afterFirst)
-	}
-	if !(afterSecond > afterFirst) {
-		t.Errorf("expected confidence to rise again after the duplicate submission: %.6f -> %.6f",
-			afterFirst, afterSecond)
-	}
-
-	firstConf, _ := first["confidence"].(float64)
-	secondConf, _ := second["confidence"].(float64)
-	if !(firstConf > 0 && secondConf > firstConf) {
-		t.Errorf("expected AddEvidence to report a rising confidence: first=%v second=%v",
-			firstConf, secondConf)
-	}
-
-	// CURRENT BEHAVIOUR: the ledger records both, with a growing evidence
-	// count — the audit trail shows the duplication explicitly.
-	var historyRows int
-	var counts []int
-	rowsQ, err := dm.SQLDB().Query(
-		`SELECT evidence_count FROM confidence_history
-		  WHERE artifact_id = ? AND trigger = 'evidence_added'
-		  ORDER BY rowid ASC`, id)
-	if err != nil {
-		t.Fatalf("query confidence_history: %v", err)
-	}
-	defer rowsQ.Close()
-	for rowsQ.Next() {
-		var n int
-		if err := rowsQ.Scan(&n); err != nil {
-			t.Fatalf("scan confidence_history: %v", err)
-		}
-		counts = append(counts, n)
-		historyRows++
-	}
-	if err := rowsQ.Err(); err != nil {
-		t.Fatalf("iterate confidence_history: %v", err)
-	}
-	if historyRows != 2 {
-		t.Fatalf("expected 2 confidence_history rows for the duplicate pair, got %d (%v)",
-			historyRows, counts)
-	}
-	if counts[0] != 1 || counts[1] != 2 {
-		t.Errorf("expected evidence_count 1 then 2 in confidence_history, got %v", counts)
-	}
-}
+//	confidence: 0.5 → 0.6224593183800414 → 0.6224593183800414
+//	confidence_history: one row (evidence_count=1, evidence_added)
 
 // ── D2: the trusted lesson surface has no pending state ───────────────────
 
@@ -424,101 +342,20 @@ func TestM5Characterization_CycleTagBreaksProposalIdempotency(t *testing.T) {
 	}
 }
 
-// ── D5: repeated delivery is indistinguishable from corroboration ─────────
-
-// TestM5Characterization_RepeatedDeliveryCountsAsIndependentCorroboration
-// pins defect D5.
+// ── D5: RETIRED — repeated delivery is no longer independent corroboration ─
 //
-// The confidence formula sums strength × independence over every
-// non-expired, non-auto_capture evidence row
-// (internal/core/confidence.go:119-138). The evidence table carries no
-// identity for the underlying observation, so two rows describing the SAME
-// observation are counted exactly like two rows describing DIFFERENT
-// observations.
+// The characterization that pinned the DEFECTIVE behaviour is retired. The
+// same correction that closed D1 closes D5: an observation's identity is
+// durable, so a delivery of the same observation is a REPLAY (no row, no
+// recompute, no confidence change) while two distinct observations continue
+// to contribute twice.
 //
-// The independence_factor field is the intended mechanism for expressing
-// dependence, but it is caller-asserted and nothing enforces it against the
-// observation's identity — and there is no identity to enforce it against.
+// The M5-COMPLIANT counterpart of this characterization is now an ordinary
+// regression test in internal/core/evidence_identity_test.go
+// (TestEvidenceIdentity_RepeatedCriticCyclesDoNotManufactureCorroboration),
+// which runs in every green gate.
 //
-// WHY IT MATTERS. M5's evidence-backed-proposal rule presumes that attached
-// evidence is a set of DISTINCT observations. Without an observation
-// identity, a retried delivery, a duplicated ingestion and a replayed
-// collector all masquerade as independent corroboration.
-//
-// MEASURED (Session B, 2026-10-26): two byte-identical evidence rows and
-// two genuinely different rows produce the same confidence.
-func TestM5Characterization_RepeatedDeliveryCountsAsIndependentCorroboration(t *testing.T) {
-	dm := m5NewDM(t)
-
-	// Case A: the SAME observation, delivered twice.
-	repeatedID := m5ProposePendingTheory(t, dm,
-		"A repeated observation must not read as independent corroboration.",
-		[]string{"m5", "probe", "repeated"})
-	repeated := EvidenceInput{
-		ArtifactID:         repeatedID,
-		ArtifactType:       "theory",
-		Type:               "observation",
-		SourceGroup:        "tool_invocation",
-		Strength:           0.5,
-		IndependenceFactor: 1.0,
-		CreatedBy:          "critic:probe",
-		Notes:              "observation O-1",
-	}
-	if _, err := dm.AddEvidence(repeated); err != nil {
-		t.Fatalf("AddEvidence (repeated, first): %v", err)
-	}
-	if _, err := dm.AddEvidence(repeated); err != nil {
-		t.Fatalf("AddEvidence (repeated, second): %v", err)
-	}
-
-	// Case B: TWO DIFFERENT observations, one source group.
-	distinctID := m5ProposePendingTheory(t, dm,
-		"Two distinct observations must read as independent corroboration.",
-		[]string{"m5", "probe", "distinct"})
-	distinct := repeated
-	distinct.ArtifactID = distinctID
-	distinct.Notes = "observation O-2"
-	if _, err := dm.AddEvidence(distinct); err != nil {
-		t.Fatalf("AddEvidence (distinct, first): %v", err)
-	}
-	distinct.Notes = "observation O-3"
-	if _, err := dm.AddEvidence(distinct); err != nil {
-		t.Fatalf("AddEvidence (distinct, second): %v", err)
-	}
-
-	repeatedConf := m5Confidence(t, dm, repeatedID)
-	distinctConf := m5Confidence(t, dm, distinctID)
-
-	// CURRENT BEHAVIOUR: identical. The substrate cannot tell repeated
-	// delivery from independent corroboration, because it has no way to
-	// identify the underlying observation.
-	if diff := repeatedConf - distinctConf; diff > 1e-9 || diff < -1e-9 {
-		t.Errorf("expected repeated delivery and independent corroboration to be "+
-			"indistinguishable today (both %.9f vs %.9f) — the characterization of "+
-			"defect D5 is stale", repeatedConf, distinctConf)
-	}
-
-	// The dependence signal EXISTS but is purely caller-asserted: a single
-	// row at independence 0.5 contributes the same as two rows at 0.5, so
-	// nothing forces a caller to declare the dependence.
-	halfID := m5ProposePendingTheory(t, dm,
-		"A caller may declare dependence through independence_factor.",
-		[]string{"m5", "probe", "half"})
-	half := repeated
-	half.ArtifactID = halfID
-	half.IndependenceFactor = 0.5
-	half.Notes = "observation O-4"
-	if _, err := dm.AddEvidence(half); err != nil {
-		t.Fatalf("AddEvidence (half): %v", err)
-	}
-	halfConf := m5Confidence(t, dm, halfID)
-
-	// 0.5 strength at independence 0.5 == 0.25 effective, which is half of
-	// the 0.5 contributed by one full-strength row. The mechanism works
-	// when a caller uses it; nothing enforces that it IS used.
-	if halfConf >= repeatedConf {
-		t.Errorf("expected a declared-dependent single row (%.9f) to score below the "+
-			"repeated-delivery case (%.9f) — the characterization of defect D5 is stale",
-			halfConf, repeatedConf)
-	}
-}
+// WHAT WAS MEASURED (Session B, 2026-10-26): two byte-identical evidence
+// rows and two genuinely different rows produced the same confidence. Now:
+// the repeated delivery lands on one row and the distinct observations land
+// on two.
