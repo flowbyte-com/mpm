@@ -106,13 +106,19 @@ func (h *SurvivalAsymmetryHunt) Run(ctx context.Context, a *Audit) ([]Finding, e
 	finding := Finding{
 		Tool:   "mpm_lessons",
 		Action: "save",
-		Reason: "survival asymmetry exceeds threshold",
+		// The cycle number lives HERE, not in the tags. A `cycle_<n>`
+		// tag claims a per-cycle identity that the finding does not
+		// have, and the tags are part of a proposal's identity hash —
+		// so the moment this hunt moves to a proposal surface, the tag
+		// would make every cycle a DISTINCT proposal. Removing it now
+		// is what makes the surface switch safe.
+		Reason: fmt.Sprintf("survival asymmetry exceeds threshold (critic cycle %d)", a.Cycle()),
 		Payload: map[string]interface{}{
 			"fact": fmt.Sprintf(
 				"Survival-rate asymmetry: direct=%.3f (%d memories) vs call=%.3f (%d memories), ratio=%.2fx. challenge_count=0 on both — decay is the driver. Investigate decay/auto-archive path for source-prior bias.",
 				directS.survival, directS.n, callS.survival, callS.n, ratio),
-			"type":  "warning",
-			"tags":  []string{"critic", "survival-asymmetry", "decay-investigation", fmt.Sprintf("cycle_%d", a.Cycle())},
+			"type": "warning",
+			"tags": []string{"critic", "survival-asymmetry", "decay-investigation"},
 		},
 		Priority: 2,
 	}
@@ -297,13 +303,14 @@ func (h *WeakTheoryHunt) Run(ctx context.Context, a *Audit) ([]Finding, error) {
 		findings = append(findings, Finding{
 			Tool:   "mpm_lessons",
 			Action: "save",
-			Reason: fmt.Sprintf("weak pending theory %s (conf=%.3f): %s", id, conf, desc),
+			Reason: fmt.Sprintf("weak pending theory %s (conf=%.3f, critic cycle %d): %s",
+				id, conf, a.Cycle(), desc),
 			Payload: map[string]interface{}{
 				"fact": fmt.Sprintf(
 					"Pending theory %s has confidence %.3f (<%.2f). Hypothesis: %s. Consider resolution (disproven) or further evidence gathering.",
 					id, conf, maxConf, desc),
 				"type": "warning",
-				"tags": []string{"critic", "weak-theory", fmt.Sprintf("theory_%s", id), fmt.Sprintf("cycle_%d", a.Cycle())},
+				"tags": []string{"critic", "weak-theory", fmt.Sprintf("theory_%s", id)},
 			},
 			Priority: 1,
 		})
@@ -357,24 +364,49 @@ func (h *PoisonPillHunt) Run(ctx context.Context, a *Audit) ([]Finding, error) {
 		desc = desc[:197] + "..."
 	}
 
-	// Manufacture the counter-claim. Tag it poison_pill + cycle_N so
+	// Manufacture the counter-claim. Tag it poison_pill + target_<id> so
 	// 808 can identify and arbitrate cleanly.
+	//
+	// D4 (2026-10-27, Session B's P3): the hypothesis and the tags must
+	// be a PURE FUNCTION of the evidence. Two volatile values used to
+	// live here and both are now in the Reason, which is logged and never
+	// persisted:
+	//
+	//   - the CYCLE NUMBER. A `cycle_<n>` tag made every cycle's poison
+	//     pill a DIFFERENT proposal (the tags are part of the F19
+	//     identity hash), so the hunt flooded the substrate with
+	//     indistinguishable pending theories — and it defeated the
+	//     hunt's own idempotency. The cycle number is now in the Reason.
+	//   - the CONFIDENCE. The confidence of a memory DECAYS between
+	//     cycles, so embedding it made the hypothesis text change and
+	//     produced a second proposal for the SAME target. It is a derived,
+	//     moving property, not evidence; a reviewer reads the current
+	//     value from the memory itself.
+	//
+	// The target's id and content remain in the hypothesis: they are the
+	// evidence the claim rests on, and they are stable.
 	hyp := fmt.Sprintf(
-		"POISON PILL cycle %d: manufactured counter-claim that the following high-confidence memory is false. Target memory %s (conf=%.3f): %s",
-		h.Cycle, id, conf, desc)
+		"POISON PILL: manufactured counter-claim that the following high-confidence memory is false. Target memory %s: %s",
+		id, desc)
 
 	finding := Finding{
 		Tool:   "mpm_theories",
 		Action: "propose",
-		Reason: fmt.Sprintf("poison pill cycle %d targeting %s", h.Cycle, id),
+		Reason: fmt.Sprintf("poison pill cycle %d targeting %s (conf=%.3f)", h.Cycle, id, conf),
 		Payload: map[string]interface{}{
-			"hypothesis":         hyp,
+			"hypothesis":          hyp,
 			"validation_criteria": "Defense must cite evidence ledgers for " + id + " and resolve_theory as disproven within 7 days. If unresolved at next poison pill cycle, the inverse path is broken.",
 			"tags": []string{
 				"poison_pill",
-				fmt.Sprintf("cycle_%d", h.Cycle),
 				fmt.Sprintf("target_%s", id),
 			},
+			// The counter-claim rests on the target's existence, so the
+			// target is cited. The typed path resolves it against the
+			// memories collection, and REJECTS the proposal if the
+			// memory is gone — which is right: a counter-claim about a
+			// memory that no longer exists is not a counter-claim.
+			"source_ids":  []string{id},
+			"source_type": "memory",
 		},
 		Priority: 2,
 	}

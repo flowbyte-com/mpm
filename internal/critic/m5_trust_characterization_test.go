@@ -227,24 +227,33 @@ func TestM5Characterization_CriticEmitsTrustedLessonWithoutReview(t *testing.T) 
 // TestM5Characterization_CycleMarkerDefeatsProposalIdentity pins the critic
 // half of defect D4.
 //
-// REPRODUCTION (today):
-// PoisonPillHunt tags its proposal with cycle_N. Because the proposal's
-// identity hash includes json(tags), the cycle marker makes each poison pill
-// a DISTINCT proposal rather than a re-observation of the same target.
+// INVERTED 2026-10-27 by Session B's P3. This test previously asserted
+// that the poison pill's cycle marker DID defeat the proposal identity.
+// That was the defect, and P3 fixed it: the cycle marker is gone from the
+// poison pill's hypothesis and its tags, so the same target now yields the
+// SAME proposal in every cycle.
 //
-// EXISTING IMPLEMENTATION RESPONSIBLE:
-// internal/critic/hunts.go:373-378 (the cycle_N tag) combined with
-// internal/core/db.go:6269-6287 (tags participate in the identity hash).
+// WHY THE CHARACTERIZATION WAS INVERTED RATHER THAN DELETED: the
+// two-file discipline from PR #117 — a characterization test pins the
+// CURRENT behaviour and is inverted by the fix's PR; the matching contract
+// test (behind the m5contract build tag) is deleted by the fix's PR.
 //
-// MINIMAL PROPOSED CORRECTION: carry the cycle marker outside the proposal
-// identity — e.g. in the validation_criteria text or in the proposal's
-// metadata — so the same finding re-emitted in a later cycle lands on the
-// same proposal. No schema change and no shared-interface change; it is a
-// change to how the critic emits findings.
+// WHAT REMAINS OPEN: the SUBSTRATE half of D4 is untouched. A caller that
+// explicitly proposes with a cycle-varying tag still gets two proposals,
+// because the tags are part of the identity hash. That property is pinned
+// by internal/core/m5_trust_characterization_test.go
+// (TestM5Characterization_CycleTagBreaksProposalIdempotency) and its
+// contract twin TestM5Contract_CycleVaryingTagDoesNotCreateSecondProposal
+// still fails by design. Closing it would mean changing the identity hash
+// itself, which touches shared dedup semantics and needs Session A's
+// arbitration.
 //
-// NEEDS SESSION A'S APPROVAL: NO for the emission-side fix (Session B's
-// area). YES if A instead mandates a change to the identity hash, which
-// touches shared dedup semantics in internal/core/db.go.
+// MINIMAL PROPOSED CORRECTION (applied): keep the cycle marker out of the
+// proposal's identity-bearing fields. It now lives in the finding's Reason,
+// which is logged and never persisted. Note that the audit's own suggestion
+// of carrying it in the validation_criteria would NOT have worked:
+// validation_criteria is part of the proposal's metadata and therefore part
+// of the identity hash. internal/core/p3_identity_test.go pins that.
 func TestM5Characterization_CycleMarkerDefeatsProposalIdentity(t *testing.T) {
 	a, dm, _ := m5NewAudit(t)
 
@@ -281,19 +290,27 @@ func TestM5Characterization_CycleMarkerDefeatsProposalIdentity(t *testing.T) {
 	firstTags, _ := first[0].Payload["tags"].([]string)
 	secondTags, _ := second[0].Payload["tags"].([]string)
 
-	// CURRENT BEHAVIOUR: the two findings differ ONLY in the cycle marker.
-	if m5TagsContain(firstTags, "cycle_5") != true {
-		t.Errorf("expected the cycle-5 finding to carry the cycle_5 tag, got %v",
-			firstTags)
+	// CURRENT BEHAVIOUR (after P3): the cycle marker is GONE, so the two
+	// cycles produce the SAME proposal for the same target.
+	for _, tag := range firstTags {
+		if m5TagsContain([]string{tag}, "cycle_5") {
+			t.Errorf("expected the cycle-5 finding NOT to carry a cycle marker, got %v",
+				firstTags)
+		}
 	}
-	if !m5TagsContain(secondTags, "cycle_10") {
-		t.Errorf("expected the cycle-10 finding to carry the cycle_10 tag, got %v",
+	if m5TagsContain(secondTags, "cycle_10") {
+		t.Errorf("expected the cycle-10 finding NOT to carry a cycle marker, got %v",
 			secondTags)
 	}
 	if m5TagsWithout(firstTags, "cycle_5") != m5TagsWithout(secondTags, "cycle_10") {
-		t.Errorf("expected the two findings to differ ONLY in the cycle marker "+
-			"(so that the cycle marker alone defeats the proposal identity), got "+
-			"%v vs %v", firstTags, secondTags)
+		t.Errorf("expected the two findings to be identical once the cycle "+
+			"marker is gone, got %v vs %v", firstTags, secondTags)
+	}
+	firstHyp, _ := first[0].Payload["hypothesis"].(string)
+	secondHyp, _ := second[0].Payload["hypothesis"].(string)
+	if firstHyp != secondHyp {
+		t.Errorf("expected the two findings to carry the same hypothesis once "+
+			"the cycle marker is gone, got %q vs %q", firstHyp, secondHyp)
 	}
 }
 

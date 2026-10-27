@@ -291,6 +291,13 @@ func New(db *sql.DB, log *slog.Logger) (*Audit, error) {
 			&SurvivalAsymmetryHunt{},
 			&StaleMemoryHunt{MaxAge: 30 * 24 * time.Hour},
 			&WeakTheoryHunt{MaxConfidence: 0.6},
+			// The missed-opportunity hunt is the only hunt that looks at
+			// ABSENT knowledge: it compares agent activity against
+			// recorded artifacts and reports sessions that did MPM work
+			// without recording anything. It emits PENDING proposals
+			// with typed citations — never a trusted lesson, never a
+			// promotion. See internal/critic/missed_opportunity.go.
+			&MissedOpportunityHunt{},
 		},
 	}
 	return a, nil
@@ -355,6 +362,18 @@ func (a *Audit) Run(ctx context.Context) error {
 				"err", err)
 			continue
 		}
+		// The Reason carries the information that must NOT be part of
+		// the finding's payload — most importantly the critic cycle
+		// number, which is deliberately kept out of the hypothesis, the
+		// tags and the validation criteria because those three ARE the
+		// proposal's identity (a cycle-varying value in any of them is a
+		// new proposal every cycle). Logging it here is what keeps the
+		// cycle observable without making it identity-bearing.
+		a.log.Info("emitted finding",
+			"tool", f.Tool,
+			"action", f.Action,
+			"reason", f.Reason,
+			"cycle", a.cycle)
 		emitted++
 	}
 

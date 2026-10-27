@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -437,8 +438,77 @@ func TestPoisonPillHunt_PicksHighestConfidenceMemory(t *testing.T) {
 	if !ok || !contains(hyp, "high-1") {
 		t.Errorf("expected hypothesis to target high-1 (highest conf), got %q", hyp)
 	}
-	if !contains(hyp, "POISON PILL cycle 5") {
-		t.Errorf("expected hypothesis to tag cycle 5, got %q", hyp)
+	// D4 (Session B's P3): the cycle number is NOT in the hypothesis.
+	// It is in the Reason, which is logged and never persisted, because
+	// the hypothesis is part of the proposal's identity hash — a
+	// cycle-varying hypothesis is a NEW proposal every cycle.
+	if contains(hyp, "cycle") {
+		t.Errorf("expected the hypothesis to carry NO cycle marker, got %q", hyp)
+	}
+	// The cycle number belongs in the Reason.
+	if !contains(findings[0].Reason, "cycle 5") {
+		t.Errorf("expected the Reason to carry the cycle number, got %q", findings[0].Reason)
+	}
+	// The counter-claim rests on the target's existence, so the target
+	// is cited with the typed path.
+	sourceIDs, ok := findings[0].Payload["source_ids"].([]string)
+	if !ok || len(sourceIDs) != 1 || sourceIDs[0] != "high-1" {
+		t.Errorf("expected source_ids to cite the target memory, got %v", findings[0].Payload["source_ids"])
+	}
+	if findings[0].Payload["source_type"] != "memory" {
+		t.Errorf("expected source_type %q, got %v", "memory", findings[0].Payload["source_type"])
+	}
+}
+
+// TestPoisonPillHunt_HasNoCycleTag pins the D4 fix directly: the tags
+// carry no cycle marker, so the same target produces the SAME proposal on
+// every cycle.
+//
+// The cycle number used to be a `cycle_<n>` tag, and the tags are part of
+// the proposal's identity hash — so every cycle produced a distinct
+// proposal for the same target. That is the D4 defect: it floods the
+// substrate with indistinguishable pending theories.
+func TestPoisonPillHunt_HasNoCycleTag(t *testing.T) {
+	a, _ := newTestAudit(t)
+	ctx := context.Background()
+
+	seedMemory(t, a, "high-1", "memories", "high A", "", 0.95, "", time.Now())
+
+	var firstHyp string
+	var firstTags []string
+	for _, cycle := range []int{5, 10, 15} {
+		findings, err := (&PoisonPillHunt{Cycle: cycle}).Run(ctx, a)
+		if err != nil {
+			t.Fatalf("Run(cycle=%d): %v", cycle, err)
+		}
+		if len(findings) != 1 {
+			t.Fatalf("expected 1 poison pill at cycle %d, got %d", cycle, len(findings))
+		}
+		tags, ok := findings[0].Payload["tags"].([]string)
+		if !ok {
+			t.Fatalf("expected tags at cycle %d, got %v", cycle, findings[0].Payload["tags"])
+		}
+		for _, tag := range tags {
+			if strings.HasPrefix(tag, "cycle_") {
+				t.Errorf("expected NO cycle_* tag at cycle %d, got %v", cycle, tags)
+			}
+		}
+		// The hypothesis and the tags together are the proposal's
+		// identity, so they must be identical across cycles for the
+		// same target.
+		hyp, _ := findings[0].Payload["hypothesis"].(string)
+		if cycle == 5 {
+			firstHyp, firstTags = hyp, tags
+			continue
+		}
+		if hyp != firstHyp {
+			t.Errorf("expected the hypothesis to be identical across cycles, "+
+				"cycle %d: %q vs cycle 5: %q", cycle, hyp, firstHyp)
+		}
+		if strings.Join(tags, ",") != strings.Join(firstTags, ",") {
+			t.Errorf("expected the tags to be identical across cycles, cycle %d: %v vs cycle 5: %v",
+				cycle, tags, firstTags)
+		}
 	}
 }
 
