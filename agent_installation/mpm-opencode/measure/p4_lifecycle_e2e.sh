@@ -11,8 +11,12 @@
 #   3. NO tool input/output, assistant text or compaction summary appears in
 #      any envelope — the dump is scanned for the probe's own strings;
 #   4. the counters line reports zero invalid envelopes;
-#   5. with MPM_EVENT_INGEST=mpm_system the absent P5 endpoint degrades to
-#      `unavailable`, never to a fabricated delivery.
+#   5. the delivery ACCOUNTING closes at every reading: every enqueued
+#      envelope is in exactly one bucket — delivered, failed, evicted,
+#      abandoned, queued, or in flight;
+#   6. with MPM_EVENT_INGEST=mpm_system the ingest endpoint accepts the
+#      envelopes (it is no longer absent: P5 shipped it), so the run
+#      delivers rather than degrading to `unavailable`.
 #
 # Usage:
 #   MPM_WORKSPACE=… MPM_DB_PATH=… MPM_BINARY=… measure/p4_lifecycle_e2e.sh
@@ -92,6 +96,24 @@ text = open(path, encoding="utf-8").read()
 for needle in ("p4-e2e-marker", "echo p4-e2e-marker"):
     check(needle not in text, f"content leaked into the dump: {needle}")
 
+# The delivery accounting must close at EVERY reading — the teardown one
+# (written synchronously, so it is the one that survives a host exit) and
+# the final one. An envelope that is in flight is named as in flight; it
+# is never simply absent from the totals.
+def balanced(row):
+    c = row["counters"]
+    st = row.get("state") or {"queued": 0, "in_flight": 0}
+    accounted = (c["delivered"] + c["unavailable"] + c["rejected"]
+                 + c["malformed_receipt"] + c.get("delivery_failed", 0)
+                 + c["dropped_overflow"] + c.get("abandoned", 0)
+                 + st["queued"] + st["in_flight"])
+    return accounted, c["enqueued"]
+
+for row in counters:
+    accounted, enqueued = balanced(row)
+    check(accounted == enqueued,
+          f"the {row.get('phase')} reading does not balance: {accounted} != {enqueued}")
+
 final = [c for c in counters if c.get("phase") == "final"] or counters
 c = final[-1]["counters"] if final else {}
 check(c.get("invalid_envelope", 0) == 0, "an envelope failed validation")
@@ -103,7 +125,18 @@ sys.exit(0 if ok else 1)
 PY
 [ $? -ne 0 ] && fail "default run"
 
-# ── 2. ingest enabled: the P5 endpoint does not exist yet ──────────────────
+# ── 2. ingest enabled: the P5 ingest endpoint accepts the envelopes ───────
+#
+# NOTE: this run's expectation CHANGED with P5. The endpoint used to be
+# absent, and the assertion was that it degraded to `unavailable`. P5
+# shipped `event_ingest`, so the endpoint is present and the envelopes are
+# DELIVERED. The stale assertion failed on the pre-correction code too
+# (verified 2026-10-27 against origin/main) — it was a stale harness, not
+# a regression.
+#
+# What is asserted now is stronger and is the point of the run: the
+# endpoint's receipt is VALID (no malformed receipt, no rejection), at
+# least one envelope was really delivered, and the accounting closes.
 export MPM_EVENT_INGEST=mpm_system
 run_host p4-ingest "Use the shell tool to run: echo p4-e2e-ingest. Then reply DONE."
 unset MPM_EVENT_INGEST
@@ -113,14 +146,49 @@ import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1])]
 snaps = [r for r in rows if r.get("kind") == "observer.counters"]
 env = [r for r in rows if "event_id" in r]
+deliveries = [r for r in rows if r.get("kind") == "observer.delivery"]
 c = (snaps[-1]["counters"] if snaps else {})
 print("ingest-enabled counters:", json.dumps({k: c.get(k) for k in
-      ("envelopes_built","delivered","unavailable","rejected","malformed_receipt")}))
-ok = (c.get("delivered", 0) == 0 and c.get("malformed_receipt", 0) == 0
-      and c.get("unavailable", 0) > 0 and len(env) > 0)
+      ("envelopes_built","enqueued","delivered","duplicates","unavailable",
+       "rejected","malformed_receipt","delivery_attempts","abandoned")}))
+
+ok = True
+def check(cond, msg):
+    global ok
+    if not cond:
+        ok = False
+        print("FAIL:", msg, file=sys.stderr)
+
+check(len(env) > 0, "no envelopes were produced")
+check(c.get("delivered", 0) > 0, "the ingest endpoint accepted no envelope")
+check(c.get("malformed_receipt", 0) == 0, "the endpoint's receipt was malformed")
+check(c.get("rejected", 0) == 0, "the endpoint rejected a valid envelope")
+
+# Every reading must balance: delivered + failed + evicted + abandoned
+# + queued + in_flight == enqueued.
+for row in snaps:
+    cc = row["counters"]
+    st = row.get("state") or {"queued": 0, "in_flight": 0}
+    accounted = (cc["delivered"] + cc["unavailable"] + cc["rejected"]
+                 + cc["malformed_receipt"] + cc.get("delivery_failed", 0)
+                 + cc["dropped_overflow"] + cc.get("abandoned", 0)
+                 + st["queued"] + st["in_flight"])
+    check(accounted == cc["enqueued"],
+          f"the {row.get('phase')} reading does not balance: {accounted} != {cc['enqueued']}")
+
+# Every acknowledged delivery is on record, so it survives even if the
+# final reading is lost to an interrupted teardown. The direction is ">=":
+# a delivery that completes after the last reading adds a record without
+# moving the counter that reading carries.
+acked = [d for d in deliveries if d.get("outcome") == "delivered"]
+check(len(acked) >= c.get("delivered", 0),
+      f"the dump carries {len(acked)} acknowledgements but the counter claims {c.get('delivered')}")
+check(all("event_id" not in d for d in deliveries),
+      "a delivery row must not carry `event_id` — the dump is also the envelope dump")
+
 sys.exit(0 if ok else 1)
 PY
-[ $? -ne 0 ] && fail "ingest-degradation run"
+[ $? -ne 0 ] && fail "ingest run"
 
 echo
 if [ $verdict -eq 0 ]; then
