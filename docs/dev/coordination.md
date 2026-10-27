@@ -175,6 +175,7 @@ against it simultaneously.
 | `integration/pre-release-12` | A | `a8c3b60` | **validation checkpoint — evidence only, not a baseline**, no worktree |
 | `chore/mpm-core-gomod-uuid-direct` | A | `1a16e90` | **the one piece of unmerged work found in the whole repository**, preserved onto a branch before its worktree was removed |
 | `dev/session-b-core` | B | `dev/session-b-core` (audit commit, on top of `70deac2`) | Session B audit deliverable — **not merged**. `docs/dev/session-b-audit.md`: M1–M7 acknowledged with no blocking objection (recorded in `~/.mpm-dogfood` as decision `3a987eca2c708fac`); capability audit; minimal-change recommendation; **no schema change requested**. |
+| `dev/session-b-core` | B | `dev/session-b-core` (regression commit, on top of the audit commit) | Session B M5 trust-defect regression coverage — **not merged, no production code changed**. `docs/dev/session-b-m5-trust-regression.md`. Six green characterization tests pin the CURRENT behaviour of defects D1–D5; six contract tests assert the M5-COMPLIANT behaviour and **fail today by design** behind the `m5contract` build tag; `internal/core/m5_trust_gate_test.go` (always green) mechanically proves the contract suite can never enter a green gate, and its non-vacuity was proven against three deliberate violations. **Decisions required from A: A-1 (the M5 trust tension), A-2 (the D1/D5 observation-identity mechanism — schema), A-3 (the D3 registry parameter), A-4 (the D4 mechanism), A-5 (gate acknowledgement).** |
 
 ### Post-merge cleanup record — 2026-10-26
 
