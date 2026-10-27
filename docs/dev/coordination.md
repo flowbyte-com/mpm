@@ -472,6 +472,80 @@ OpenCode v2.1.4 host** (`scripts/dev_host.sh run`, disposable workspaces
 `g3df72315`, checkout `3df7231`, MainPID 2804, `NRestarts=0`, and no
 `lifecycle_events` table in the live database.
 
+### P3b integration addendum — 2026-10-27 (Session A)
+
+**#127 (P3b) was already merged** as `c733288` (head `dd8f416`, squash).
+Re-verified against the merged tree rather than re-reviewed. The five named
+concerns are each pinned by a test in
+`internal/critic/p3b_trust_boundary_test.go` (15 tests):
+
+| Concern | Pinned by |
+|---|---|
+| typed citation resolution | `..._SurvivalAsymmetry_CitationsResolveAsMemories`, `..._WeakTheory_CitationsResolveAsTheories`, `..._InvalidCitationRejectsTheProposalAtomically` |
+| stable proposal identities | `..._RepeatingTheHuntDoesNotCreateAnotherProposal`, `..._ChangedObservationCreatesADistinctProposal`, `..._RatioBandIsStableUnderDrift`, `..._SurvivalProposalIsStableUnderObservationDrift`, `..._SurvivalCitationSetIsStableAsTheCohortGrows` |
+| pending status in wake context | `..._PendingProposalIsMarkedPendingInWakeContext` |
+| survival-cohort filtering correction | `..._SurvivalCohortIsScopedToTheMemoriesCollection` |
+| no hunt on the trusted surface | `..._NoHuntTargetsTheTrustedLessonSurface`, `..._CriticFindingIsNotTrustedWithoutReview` |
+
+**The isolated end-to-end critic evaluation** (disposable workspace, seeded so
+every hunt fires; `/tmp/opencode/critic_e2e.sh`):
+
+| Path | Emitted | Surface |
+|---|---|---|
+| `survival_asymmetry` | `mpm_theories propose` (cites 11 memories) | pending |
+| `stale_memory` | `mpm_memory challenge` | pending (challenge theory) |
+| `weak_theory` | `mpm_theories propose` (cites `th_weak_001`) | pending |
+| `missed_opportunity` | `mpm_theories propose` (cites 6 tool_invocations) | pending |
+| `poison_pill` (cycle 5) | `mpm_theories propose` (cites `mem_call_012`) | pending |
+
+```
+lessons_base rows             : 0        tool_invocations mpm_theories : 4
+lessons_fts rows              : 0        pending theories                : 5
+tool_invocations mpm_lessons  : 0        citations, all resolving        : 18
+wake context: recent_theories → 5 entries, every one "status": "pending"
+```
+
+The control theory (`th_strong_001`, resolved, confidence 0.95) was neither
+cited nor claimed.
+
+**The telemetry-hunt ruling (#138, issue #139).** The last M5 trust-boundary
+exception is **closed**: `cmd/mpm-critic --telemetry-hunt` is now a read-only
+diagnostic. It reports the observation and writes nothing.
+
+Three measured facts decided it:
+
+1. **No resolvable evidence source.** P2's citation vocabulary resolves only
+   inside `mpm.db`; the observation's own evidence (token counts) lives in
+   `telemetry.db`, which no citation type can address. And the observation is
+   about an **absence** — a session that recorded nothing — so there is nothing
+   to cite. Citing anything else would be inventing a citation.
+2. **The path was broken.** Its count called `mpm call mpm_provenance`, a tool
+   that **does not exist** in the registry and never did. The hunt failed on
+   every qualifying session and `mpm-critic --telemetry-hunt` exited **1** —
+   which is what kept the trust exception latent. **The ordering rule this
+   establishes: close the trust boundary FIRST.** Repairing the count against a
+   substrate that still accepted a trusted-lesson write would *arm* the write.
+3. **The previous tests could not have caught it.** They used a **fake `mpm`**
+   that answered `mpm_provenance` with `{"count":0}`, so they asserted *which
+   binary* was called and never *whether the call would work*.
+
+The count is now computed in-process (`critic.SessionArtifactCount`, the same
+attribution rule the missed-opportunity hunt applies). Non-vacuity of the new
+regression is demonstrated: one `INSERT INTO lessons_base` back into the hunt
+fails it.
+
+**Outstanding trust blockers, exactly:**
+
+| # | Blocker | State |
+|---|---|---|
+| 1 | **D1 / D5** — evidence duplication and confidence inflation | **CLOSED** by `#130` (`3584190`), verified: the assertions were promoted into `internal/core/evidence_identity_test.go`, which runs in every green gate. **Not** a blocker. |
+| 2 | **D3 ×2** — the legacy untyped citation path | **Accepted exception** under A19 (backward compatibility). Not a blocker for the release; it is a known limitation. |
+| 3 | **D4** — the substrate identity hash | **Open.** B's. |
+| 4 | **`mpm-telemetry observe`** — the same trusted-lesson exception, plus the same missing tool, plus a store-path disagreement with the spec (`src/db/telemetry.db` vs the spec'd `<workspace>/telemetry.db`) | **Open** — issue #139. Ruling: read-only until a resolvable evidence source exists; the store path must be settled first. |
+| 5 | **Automatic critic scheduling** | **Still barred.** The P2b arming gate (`internal/core/wake_tools.go`: `critic_audit` is refused by `ScheduleWake`) and the dispatch gate (`internal/scheduler/scheduler.go`: `executeOne` refuses a blocked kind) are both intact and both tested. |
+
+**No deployment.** The live runtime is untouched.
+
 ## 6. Cross-session communication protocol
 
 1. **The ledger is the channel of record.** A session updates its own rows in

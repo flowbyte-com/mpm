@@ -1,13 +1,14 @@
 // mpm-critic: standalone runner for one Critic audit cycle.
 //
 // Invoked by mpm-scheduler as a payload handler (kind=critic_audit).
-// Opens the MPM database, runs the audit cycle (3 hunts + poison pill
+// Opens the MPM database, runs the audit cycle (4 hunts + poison pill
 // on cycle % 5), emits findings via mpm call, then exits.
 //
 // With --telemetry-hunt, also runs the HighTokenNoArtifactHunt from
-// telemetry store against the same audit cycle. This integrates the
-// telemetry pipeline into the critic's daily cadence so findings land
-// in mpm_lessons automatically rather than requiring a separate cron.
+// the telemetry store against the same audit cycle. That hunt is a
+// READ-ONLY DIAGNOSTIC: it computes the observation and REPORTS it,
+// and it writes nothing to the substrate. See runTelemetryHunt for
+// the adjudication that made it read-only.
 //
 // Kept as a separate binary so the scheduler stays a thin dispatcher.
 // The critic's audit logic evolves independently of the scheduler.
@@ -15,17 +16,14 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -36,7 +34,6 @@ import (
 	"github.com/flowbyte-com/mpm-core/mpmcli"
 	"github.com/flowbyte-com/mpm/internal/buildinfo"
 	"github.com/flowbyte-com/mpm/internal/critic"
-	"github.com/flowbyte-com/mpm/internal/runtimebin"
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
 
@@ -111,79 +108,90 @@ func main() {
 	}
 	logger.Info("mpm-critic critic hunts complete")
 
-	// Optionally run the telemetry HighTokenNoArtifactHunt in the same cycle.
+	// Optionally run the telemetry HighTokenNoArtifactHunt in the same
+	// cycle. It is READ-ONLY: it reports the observation and writes
+	// nothing.
 	if *telemetryHunt {
-		if err := runTelemetryHunt(ctx, logger, projectRoot, a.Cycle()); err != nil {
+		findings, err := runTelemetryHunt(ctx, logger, projectRoot, dm.SQLDB(), a.Cycle())
+		if err != nil {
 			logger.Error("telemetry hunt failed", "err", err)
 			os.Exit(1)
 		}
-		logger.Info("mpm-critic telemetry hunt complete")
+		logger.Info("mpm-critic telemetry hunt complete", "observations", len(findings))
 	}
 
 	logger.Info("mpm-critic complete")
 }
 
-// runTelemetryHunt opens the telemetry store and runs the HighTokenNoArtifactHunt
-// within the same audit cycle as the critic hunts. Findings are emitted as
-// mpm_lessons (type=observation) via mpm call, consistent with how the
-// critic emits its own findings.
-func runTelemetryHunt(ctx context.Context, log *slog.Logger, projectRoot string, cycle int) error {
+// runTelemetryHunt runs the HighTokenNoArtifactHunt and REPORTS it.
+//
+// IT IS READ-ONLY AGAINST THE SUBSTRATE. It writes nothing — not a
+// lesson, not a theory, not an artifact, not a wake.
+//
+// WHY (Session A adjudication, 2026-10-27 — issue #138).
+//
+// This path used to end in `mpm call mpm_lessons --payload {...}`, which
+// writes a TRUSTED lesson: `lessons_base` has no status column, so a row
+// there is trusted on arrival. That is exactly the M5 trust boundary the
+// rest of the critic now respects — after P3b, every hunt that asserts
+// something emits a PENDING proposal with typed, resolvable citations,
+// and no hunt targets the trusted lesson surface.
+//
+// The telemetry hunt cannot make that move, and the reason is structural
+// rather than a matter of effort:
+//
+//   1. THERE IS NO RESOLVABLE EVIDENCE SOURCE. P2's citation vocabulary
+//      is memory / theory / decision / lesson / work / tool_invocation,
+//      and every one of them resolves INSIDE mpm.db. The observation's
+//      own evidence — the token counts — lives in telemetry.db, a
+//      separate database with no foreign keys and no cross-DB
+//      reference. There is no citation type that can address it.
+//   2. THE OBSERVATION IS ABOUT AN ABSENCE. The hunt fires when a
+//      session burned many tokens and recorded NO artifacts. So the
+//      artifact the observation is about does not exist, and there is
+//      nothing in mpm.db to cite. Citing an unrelated artifact would be
+//      inventing a citation; citing one of the session's tool_invocations
+//      would cite a row that carries none of the token counts, and so
+//      would change the claim from "this session produced nothing" to
+//      "this session did something".
+//
+// So the observation is reported and not stored. When a resolvable
+// evidence source exists — a citation type that can address a
+// telemetry-ledger row, or a hunt observation that names an mpm.db
+// artifact that actually carries the claim — the write path can be
+// reconsidered. Until then there is none.
+//
+// ONE MORE THING THIS FIXES. The count used to come from
+// `mpm call mpm_provenance --payload {"action":"count_by_session"}`.
+// **No such tool exists** — it is not in the registry, and never was.
+// So the hunt failed on every qualifying session and
+// `mpm-critic --telemetry-hunt` exited 1. The count is now computed
+// IN-PROCESS from the substrate's own attribution (the same rule the
+// missed-opportunity hunt applies), so no subprocess is involved at
+// all — and with no subprocess, this path has no way to write.
+//
+// ORDERING, for whoever repairs the count next: the trust boundary is
+// closed FIRST. Repairing the count against a substrate that still
+// accepted a trusted-lesson write would ARM the write, not fix it.
+func runTelemetryHunt(
+	ctx context.Context,
+	log *slog.Logger,
+	projectRoot string,
+	db *sql.DB,
+	cycle int,
+) ([]telemetry.Finding, error) {
 	telemetryDB := filepath.Join(projectRoot, "telemetry.db")
 	store, err := telemetry.Open(telemetryDB)
 	if err != nil {
-		return fmt.Errorf("open telemetry store: %w", err)
+		return nil, fmt.Errorf("open telemetry store: %w", err)
 	}
 	defer store.Close()
 
-	// Both hunt subprocesses must run the SAME binary identity. Resolve
-	// once here rather than per call: two calls in one cycle that
-	// resolved differently would mean an artifact count taken from one
-	// substrate and a lesson written to another.
-	//
-	// This used to pass a bare "mpm" and let PATH decide, which under
-	// the scheduler's unit PATH meant whichever mpm came first there.
-	mpmBin, err := runtimebin.Resolve()
-	if err != nil {
-		return fmt.Errorf("resolve mpm binary for telemetry hunt: %w", err)
-	}
-
-	// Artifact count: shell out to mpm call mpm_provenance (cross-DB join).
+	// The artifact count, computed in-process against the substrate the
+	// critic already holds. This is the same attribution rule the
+	// missed-opportunity hunt applies, so the two cannot drift.
 	countFn := func(ctx context.Context, sessionID string) (int, error) {
-		cmd := exec.CommandContext(ctx, mpmBin, "call", "mpm_provenance",
-			"--payload", fmt.Sprintf(`{"action":"count_by_session","params":{"session_id":"%s"}}`, sessionID))
-		cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+projectRoot)
-		out, err := cmd.Output()
-		if err != nil {
-			return 0, fmt.Errorf("mpm_provenance: %w", err)
-		}
-		// Parse {"count": N} from stdout.
-		out = bytes.TrimSpace(out)
-		if len(out) == 0 {
-			return 0, nil
-		}
-		// Find "count" field.
-		var parsed struct {
-			Count int `json:"count"`
-		}
-		if err := json.Unmarshal(out, &parsed); err != nil {
-			return 0, fmt.Errorf("parse mpm_provenance output: %w", err)
-		}
-		return parsed.Count, nil
-	}
-
-	// Lesson save: shell out to mpm call mpm_lessons.
-	lessonFn := func(ctx context.Context, payload map[string]any) error {
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return err
-		}
-		cmd := exec.CommandContext(ctx, mpmBin, "call", "mpm_lessons", "--payload", string(b))
-		cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+projectRoot)
-		out, err := cmd.Output()
-		if err != nil {
-			return fmt.Errorf("mpm_lessons: %s: %w", strings.TrimSpace(string(out)), err)
-		}
-		return nil
+		return critic.SessionArtifactCount(ctx, db, sessionID)
 	}
 
 	sevenDaysAgo := telemetry.HuntConfig{
@@ -194,25 +202,27 @@ func runTelemetryHunt(ctx context.Context, log *slog.Logger, projectRoot string,
 
 	findings, err := telemetry.Hunt(ctx, store, sevenDaysAgo, countFn)
 	if err != nil {
-		return fmt.Errorf("telemetry Hunt: %w", err)
+		return nil, fmt.Errorf("telemetry Hunt: %w", err)
 	}
 
-	// The telemetry hunt runs in the same process immediately after the
-	// critic hunts, so it genuinely belongs to the cycle that was just
-	// claimed from durable state. Tagging it with that cycle makes the
-	// telemetry findings correlatable with the critic's own cycle_N
-	// tags. It is NOT wall-clock derived and never was - the previous
-	// hardcoded 0 made every telemetry lesson share one bogus tag.
+	// REPORT, do not store.
+	//
+	// The cycle tag is kept in the report so an operator can correlate
+	// an observation with the critic cycle that saw it — the same
+	// correlation the old lesson tag provided, without the write.
 	cycleTag := fmt.Sprintf("critic_cycle_%d", cycle)
 	for _, f := range findings {
-		payload := telemetry.FindingLessonPayload(f, cycleTag)
-		if err := lessonFn(ctx, payload); err != nil {
-			log.Error("telemetry lesson save failed", "session", f.SessionID, "err", err)
-			continue
-		}
-		log.Info("telemetry finding saved", "session", f.SessionID, "tokens", f.TotalInputTokens+f.TotalOutputTokens)
+		log.Info("telemetry observation (read-only diagnostic; nothing written)",
+			"session", f.SessionID,
+			"invocations", f.InvocationCount,
+			"input_tokens", f.TotalInputTokens,
+			"output_tokens", f.TotalOutputTokens,
+			"tokens", f.TotalInputTokens+f.TotalOutputTokens,
+			"cycle_tag", cycleTag,
+			"reason", f.Reason,
+		)
 	}
-	return nil
+	return findings, nil
 }
 
 func parseLevel(s string) slog.Level {
