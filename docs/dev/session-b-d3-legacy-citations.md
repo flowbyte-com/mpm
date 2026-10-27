@@ -251,6 +251,47 @@ The change is only safe if nothing depends on the *wrong* value. Every reader wa
 **Nothing branches on the value.** The column is descriptive, and the correction makes the
 description true.
 
+### 5.2 The compatibility guarantee this correction amends — **Session A must see this**
+
+Two P2 tests pin the legacy path's auto-resolved value **for a tool invocation**:
+
+| Test | Pinned value |
+|---|---|
+| `internal/core/tools/p2_citation_tool_test.go` — `TestP2Tool_HandleProposeWithoutSourceTypeIsLegacy` | `source_type = "memory"` |
+| `cmd/mpm-mcp/p2_citation_mcp_test.go` — `TestP2MCP_LegacyCitationIsUnchangedOverMCP` | `source_type = "memory"` |
+
+Both say, in their own words, that *callers that do not supply `source_type` must be
+unaffected*. **The correction changes that recorded value**, and the two tests are
+amended in this PR.
+
+**The conflict is direct and unavoidable.** The M5 contract suite says the citation must
+preserve `tool_invocation`; the P2 suite says the same citation must record `memory`.
+Both cannot hold. The M5 contract test is the red suite that *defines the defect*; the P2
+test pins the *current* behaviour, which is the behaviour the defect produced.
+
+**What the amendment preserves — and strengthens.** Each amended test now asserts the
+legacy path's actual fingerprint, which is the **`event_id`**: on the legacy path it is
+the **downstream** id, on the typed path it is the **cited** id. So:
+
+* the test still proves the **legacy** path ran (a handler that routed the call to the
+  typed path would record a different `event_id` and fail);
+* it still proves the call **succeeded** and the citation was **recorded** — the
+  caller's experience is unchanged;
+* it no longer asserts a value that is **wrong**; and
+* the typed-path test's non-vacuity is preserved through the same `event_id` assertion —
+  its own comment, which said the `source_type` value was what discriminated the two
+  paths, is corrected, because after D3 it is the `event_id` that does.
+
+**Nothing is rejected, no interface changed, and no historical row is rewritten.** What
+changed is one recorded *value*, from a mislabel to the truth, for two of the six canonical
+types.
+
+**If Session A prefers the P2 guarantee over the M5 contract on this point**, the
+correction must be dropped and D3-b re-classified as an accepted residual. That is a
+one-line revert of `internal/core/cascade_provenance.go`'s legacy branch plus the two
+test amendments; §6.3's step 1 (make the typed path the default) would then be the only
+way to reach the correct type, and it needs the same ruling.
+
 ---
 
 ## 6. D3-a: the open half, and the retirement proposal
@@ -437,3 +478,5 @@ Files changed:
 |---|---|
 | `internal/core/cascade_provenance.go` | the legacy branch resolves through `resolveLegacySourceType`; the new resolver, the extra-type list and the fallback constant |
 | `internal/core/d3_legacy_citation_test.go` | **new** — 4 regression tests |
+| `internal/core/tools/p2_citation_tool_test.go` | **amended** — the legacy-path test now asserts the legacy `event_id` fingerprint and the corrected `source_type` (§5.2) |
+| `cmd/mpm-mcp/p2_citation_mcp_test.go` | **amended** — the same, over MCP; plus a corrected comment on the typed-path test |
