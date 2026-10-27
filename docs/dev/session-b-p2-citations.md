@@ -330,6 +330,31 @@ time to it.
 
 ---
 
+## 7b. How A's re-examined A-11 (#121) bears on this PR
+
+Session A re-examined A-11 after the adjudication and amended it: the
+critic **can** emit an existing untrusted proposal — `mpm_theories propose` —
+without any schema change, because that surface is already pending and
+already evidence-bearing. The limitation A records is that the switch must
+wait for **P2 and P3**, and that switching alone fixes none of D2–D5.
+
+That places this PR exactly where A says it belongs: **P2 is a prerequisite
+of the critic's surface switch, not a follow-up.** Two of A's stated
+limitations are addressed directly by what is here:
+
+* A's limitation 3 — *"the `source_type` fallback mislabels citations on the
+  propose path exactly as it does on the lesson path (D3)"* — is precisely
+  the defect the **typed** path fixes. The fallback still mislabels on the
+  legacy path (D3-b), which is why the typed path has to exist before the
+  critic can use it.
+* A's limitation 3 — *"`cycle_<n>` tags defeat idempotency regardless of the
+  target surface (D4)"* — is unaffected by the target surface and is
+  P3's work, not this PR's.
+
+The P2b gate (merged as #118) keeps the automatic path off until P2 and P3
+land, which is strictly safer than switching the surface while D3 and D4 are
+still live.
+
 ## 8. For Session A
 
 | # | Item | What B needs |
@@ -337,5 +362,5 @@ time to it.
 | **A-4 (approved)** | the registry change | **Action:** merge PR-1 after review. One optional parameter on `mpm_theories` propose, plus the A-9 `artifact_type='skill'` correction in the same registry surface, as the ledger's P2 row directs. |
 | **A-3 (approved)** | no new tool, no schema | **Action:** confirm the implementation matches — no `mpm_provenance` resurrection, no table, no new tool. It does. |
 | **A-new-1** | the `source_type` limitation | **Decision:** accept the single-type limitation for this sprint (one type per call), or ask for a per-citation `citations` array now. **B's recommendation:** accept it — the P3 use case needs one type, and the core primitive already supports a mixed list, so a later extension is one parameter, not a new mechanism. |
-| **A-new-2** | **D3-b** — the legacy `source_ids` path | **Decision:** whether the legacy path should also validate and reject. It changes behaviour for the cascade materializer and `mpm_self_heal`, so it needs its own ruling. **B's recommendation:** leave it unchanged this sprint and record it as a known gap — tightening a legacy path in the same PR that adds the typed one doubles the blast radius of both. The M5 contract suite already pins it, so it cannot be forgotten. |
+| **A-new-2** | **D3-b** — the legacy `source_ids` path | **Decision:** whether the legacy path should also validate and reject. It changes behaviour for the cascade materializer and `mpm_self_heal`, so it needs its own ruling. **B's recommendation:** leave it unchanged this sprint and record it as a known gap — tightening a legacy path in the same PR that adds the typed one doubles the blast radius of both. The M5 contract suite already pins it, so it cannot be forgotten. **Note (2026-10-27):** A's re-examination of A-11 (#121) establishes that switching the critic's output surface to `mpm_theories propose` **requires** the typed path — so D3-b stops mattering for the critic specifically once P3 lands, while remaining a general defect for other callers. That strengthens the case for leaving it unchanged here and ruling on it separately. |
 | **A-new-3** | the `git ls-files` staging constraint | **Awareness:** a new source file must be `git add`-ed before `make test-scripts` passes. Not a defect — but it will bite the next session that adds a file. |
