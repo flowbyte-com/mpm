@@ -225,17 +225,26 @@ Neither was product work.
 | # | PR | Owner | Depends on the contract? | Schema? | Registry? |
 |---|---|---|---|---|---|
 | **P1** | `fix(opencode): deliver the wake context` — extraction (`content`, type-checked, never coerced), per-session cache, concurrent-build suppression, retry-on-empty, session attribution on the fetch | **C** | No | No | No |
-| **P2** | `feat(critic): typed, validated, idempotent evidence citations on proposals` — optional `source_type` beside `source_ids`, validated before insert; plus the one-line `artifact_type='skill'` registry correction (A-9) | **B** | No | **No** | Yes (one optional parameter) |
-| **P2b** | **gate the `critic_audit` wake kind at the wake-creation path** until the trust boundary is enforced | **B** (or A) | No | No | No |
+| **P2** | `feat(theory): typed, validated, idempotent evidence citations on proposals` — optional `source_type` beside `source_ids`, validated before insert; plus the one-line `artifact_type='skill'` registry correction (A-9) | **B** | No | **No** | Yes (one optional parameter) | 🔄 PR #120 open |
+| **P2b** | **gate the `critic_audit` wake kind at the arming AND dispatch boundaries** until the trust boundary is enforced | **A** | No | No | No | ✅ **merged** (#118) |
 | **P3** | `feat(critic): a retrospective missed-opportunity hunt` over the existing `tool_invocations` × `artifact_provenance` join | **B** | No | No | No |
-| **P4** | `feat(opencode): observe lifecycle events` — subscribe, consume off the hot path, map an explicit allowlist, emit `session.observed` / `session.started` (when actually seen) / `tool.outcome` / `compaction.*` | **C** | Yes (M2, now agreed) | No | No |
+| **P4** | `feat(opencode): observe lifecycle events` — subscribe, consume off the hot path, map an explicit allowlist, emit `session.observed` / `session.started` (when actually seen) / `tool.outcome` / `compaction.*` | **C** | Yes (M2, now agreed) | No | No | 🔄 PR #119 open |
 | **P5** | The ingest entry point, receipt, `mpm_system action=event_counters`, and the storage decision | **A** | Yes | only if §6.1 later authorises it | Yes (one action) |
 
 * **P1 and P2 are independent and may proceed in parallel.** P3 depends on
   P2. P4 depends on the contract and on P1's plumbing. P5 is A's and is
   explicitly last.
-* **P2b is independent of everything** and can land immediately: a narrow
-  rejection at one call site, no schema and no tool-surface change.
+* **P2b is merged** (#118): a narrow rejection at the producer and at the
+  dispatch boundary, no schema and no tool-surface change. The critic's
+  automatic path is now refused **twice over** — a wake cannot be armed,
+  and a wake that already exists is not executed.
+* **A-11 is AMENDED, not merely deferred** (see
+  `session-a-adjudication.md` §6c). The critic **can** emit an existing
+  untrusted proposal — `mpm_theories propose`, a `pending` hypothesis with
+  the same citation mechanism — **without any schema change**. It should,
+  but only after P2 and P3 land; until then the P2b gate keeps the
+  automatic path off entirely, which is strictly safer than switching
+  surfaces while D3 and D4 are live.
   **Automated critic scheduling is not enabled** while the duplicate-
   evidence, proposal-idempotency and trust-promotion risks are unresolved.
   The critic's automatic path is **wired but not armed** — the live

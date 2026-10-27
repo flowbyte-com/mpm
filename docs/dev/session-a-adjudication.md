@@ -569,6 +569,79 @@ reported rather than silently accepted:
 
 ---
 
+## 6c. A-11 re-examined — can the critic emit an existing UNTRUSTED proposal?
+
+> **Re-examined 2026-10-27 at Session A's request.** A-11 originally ruled
+> that amending M5 "would require a status column on `lessons_base` — a
+> schema change this sprint does not take". That was **true for the lesson
+> surface** and **false in general**. There is an existing untrusted
+> proposal surface, and reaching it needs **no schema change**.
+
+### 6c.1 What exists
+
+| Surface | Untrusted? | Carries evidence? | Verdict |
+|---|---|---|---|
+| `mpm_lessons save` | **No** — writes straight to `lessons_base` | **No** parameter at all | The critic's current target. **There is no pending/untrusted lesson variant**: the tool's actions are `save\|search\|list\|delete\|restore`, full stop. |
+| **`mpm_theories propose`** | **Yes** — writes `collection='theories'` with `metadata.status='pending'`, and becomes terminal only through an explicit, idempotent resolve to `proven`/`disproven` (`theory_resolve_hook.go`, whose WHERE clause filters `status='pending'`) | **Yes** — `source_ids` → `epistemic_provenance` | **The existing untrusted proposal surface.** |
+| `audit_cluster_proposals` | Has a `status` CHECK ('active','snoozed','resolved') | No — it stores `message_hash` + `count`, no content | A *cluster* surface, keyed by `cluster_key`. Not usable as a finding store. |
+| `mpm_decisions` / `mpm_memory` / `mpm_skills` | No — trusted on write | — | Not proposals. |
+
+### 6c.2 The answer, with its limitations
+
+> **Yes.** The critic **can** emit an existing untrusted proposal instead of
+> writing directly to `lessons_base`, **without any schema change**:
+> `mpm_theories propose` is the surface. It is already untrusted (pending),
+> already evidence-bearing, and already idempotent through
+> `epistemic_provenance`.
+
+**The limitations, stated precisely:**
+
+1. **Semantic stretch.** A theory is a *hypothesis with validation
+   criteria*; a lesson is *something learned*. The critic's findings —
+   *"Survival-rate asymmetry: direct=0.62 vs call=0.44 … Investigate the
+   decay/auto-archive path"* — read as an investigation prompt, which maps
+   to a hypothesis, but the wording and the `validation_criteria` field
+   would have to change.
+2. **Untrusted but VISIBLE.** The wake context surfaces recent theories
+   **regardless of status** (`fetchRecentMemoriesByCollection(dm,
+   "theories", 5)`), so a proposal would reach the agent's context
+   immediately — labelled pending, not promoted. That is the right shape for
+   a proposal, but it is **not** the same as a lesson that does not exist
+   until reviewed.
+3. **Switching the surface alone fixes NONE of D2–D5.** The hunts carry
+   **no source ids at all** (their payload is `fact`/`type`/`tags`); the
+   `source_type` fallback mislabels citations on the *propose* path exactly
+   as it does on the lesson path (D3); and `cycle_<n>` tags defeat
+   idempotency regardless of the target surface (D4). **P2 (typed
+   citations) and P3 (hunts that cite resolvable sources and stop using
+   cycle tags) are PREREQUISITES, not follow-ups.**
+4. **A proposal is not a lesson.** Nothing would promote a pending theory
+   into a lesson; the lesson would simply never be created. That is a
+   **behaviour change** for the critic — its output becomes a queue item
+   rather than a durable lesson. Whether that is acceptable is a product
+   decision, not an engineering one.
+5. **No schema change is needed for any of this** — which is the
+   substantive correction to A-11's framing. A-11 said amending M5
+   "would require a status column on `lessons_base`"; that is true **if
+   the critic keeps writing lessons**, and false if it stops.
+
+### 6c.3 A's ruling
+
+> **Adopt `mpm_theories propose` as the critic's target — it is the only
+> existing untrusted proposal surface — but only AFTER P2 and P3 land.**
+>
+> Until then the **P2b gate** keeps the automatic path off entirely, which
+> is **strictly safer** than switching surfaces while D3 and D4 are still
+> live: with the gate, the critic does not run; without it and with a
+> switched surface, it would run and still produce mislabelled,
+> non-idempotent citations.
+>
+> **A-11 is therefore amended, not merely deferred.** The schema change it
+> contemplated is **not needed**; what is needed is P2 (merged-capable
+> today, PR #120), P3, and a product decision on limitation 4.
+
+---
+
 ## 7. Open items requiring the operator
 
 | # | Item | Why it is the operator's |
