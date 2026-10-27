@@ -255,23 +255,36 @@ Neither was product work.
 
   | Defect | Status | Where it bites |
   |---|---|---|
-  | **D1** — duplicate evidence inflates confidence | **live** | two identical evidence submissions create two rows; confidence 0.622 → 0.731 |
+  | **D1** — duplicate evidence inflates confidence | **CLOSED** (#130) | the evidence row's id is now the observation's identity and the PRIMARY KEY enforces "at most one stored row per observation per artifact"; the contract assertion was PROMOTED into `internal/core/evidence_identity_test.go` |
   | **D3** — unresolvable citation accepted | **live on the LEGACY path only** | the typed path is fixed (P2); the legacy untyped path is a preserved exception (A19) |
   | **D3** — citation does not preserve its type | **live on the LEGACY path only** | same |
   | **D4** — a cycle-varying tag creates a second proposal | **live (substrate half)** | the emission side is fixed (P3); the identity hash is shared dedup semantics and needs its own arbitration |
-  | **D5** — repeated delivery counts as independent corroboration | **live** | two *distinct* observations score the same as one delivered twice |
+  | **D5** — repeated delivery counts as independent corroboration | **CLOSED** (#130) | same mechanism as D1; `TestEvidenceIdentity_RepeatedDeliveryDoesNotInflateConfidence` |
   | **D2** — the critic writes trusted lessons | **CLOSED on the critic side** (P3b); the core half (no pending state on `lessons_base`) remains | the critic now writes no trusted lesson anywhere; `TestP3b_NoHuntTargetsTheTrustedLessonSurface` guards it |
   | **D6** — `artifact_provenance.invocation_id` is populated only by `mpm_memory save` | **live, tracked separately** | 0 of 26 live decision rows join; P3's hunt works around it with a two-signal design |
 
-  **D1 and D5 are the two that still block the P2b gate.** They break exactly
-  the property a critic-authored proposal needs — *"a theory's confidence is
-  observation, not verdict"* — because they let duplicate evidence inflate a
-  confidence. The critic's proposals now arrive with citations on every cycle,
-  so this is where it matters most. The gate stays on until D1 and D5 are
-  closed (or the proposal surface is given its own confidence rule).
-* **The P2b gate's precondition is now MET on the EMISSION side.** What still
-  blocks it is the substrate's **confidence arithmetic** (D1, D5), not the
-  critic's surface. Automated critic scheduling stays **off** regardless.
+  **The live signal is now 3 core M5 contract failures** (down from 6):
+  D3 ×2 (the legacy path) and D4 (the substrate identity hash).
+
+  **D1 and D5 are closed**, so the two preconditions for the P2b gate are
+  both met: the **emission** side (P3b — the critic writes no trusted lesson
+  anywhere) and the **corroboration** side (#130 — a repeated delivery no
+  longer raises a confidence). What remains is D3 on a path the critic does
+  **not** use and D4's shared dedup semantics.
+
+  **So lifting the gate is no longer blocked by a defect — it is a POLICY
+  DECISION about enabling scheduled critic execution**, and it should be made
+  deliberately rather than by accident. The brief for this round says to keep
+  the gate active, and it stays active. Automated critic scheduling stays
+  **off**.
+
+* **A capability gap worth closing (not a defect).** The observation key is
+  not exposed on the `mpm_evidence` tool surface, so every tool-mediated
+  caller — including the critic — is in `best_effort` mode and cannot
+  distinguish *"two independent observations that happen to read the same"*
+  from *"one observation delivered twice"*. That is a **capability** gap, not
+  a correctness gap: the D1/D5 scenario is the fingerprint's case and is
+  covered.
   **Automated critic scheduling is not enabled** while the duplicate-
   evidence, proposal-idempotency and trust-promotion risks are unresolved.
   The critic's automatic path is **wired but not armed** — the live
