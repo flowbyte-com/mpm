@@ -891,7 +891,11 @@ about storage is required for agreement.
   inferred from timestamps.
 - [ ] **M5 — Trust** (§3.7). Observation-only; no automatic promotion;
   proposals must cite resolvable evidence; promotion follows the existing
-  review and authority rules.
+  review and authority rules. **AMENDED (A19, 2026-10-27):** "proposals must
+  cite resolvable evidence" is enforced on the **typed** citation path
+  (`source_type` declared). The **legacy** untyped path is a preserved
+  backward-compatibility exception and does **not** enforce it — see the
+  amendment table.
 - [ ] **M6 — Ingest contract** (§3.10). Validate → classify → dedup → stamp →
   store → receipt, with a required observable rejection-counter surface. *The
   storage is not part of this agreement.*
@@ -1061,7 +1065,7 @@ Session C — name: Session C (OpenCode adapter & behavioural evaluation)  contr
             docs/dev/session-c-host-findings.md §1.1-§1.2 and §4.1.1).
 ```
 
-**Amendments A1–A15, applied by Session A on 2026-10-26. A16 applied 2026-10-27 (P5).:**
+**Amendments A1–A15, applied by Session A on 2026-10-26. A16–A18 applied 2026-10-27 (P5). A19 applied 2026-10-27 (P3b review).:**
 
 | # | Amendment |
 |---|---|
@@ -1083,3 +1087,4 @@ Session C — name: Session C (OpenCode adapter & behavioural evaluation)  contr
 | **A16** | §3.1 / §3.9 rule 9 / §3.10 step 1 — **the ingest endpoint REJECTS an unrecognised `schema_version` (reason `unknown_version`); it does not ignore it.** "Ignore and count" binds a *consumer* — the adapter — that meets a version it does not recognise. The endpoint is the **version authority**, and the receipt is the only success signal in the ingest protocol, so returning success for an event that was not stored would be exactly the silent drop §3.10 step 8 exists to prevent. | The rule was written for a consumer and read as binding every reader. The distinction matters operationally: an ignore is invisible at the call site, while a rejection is a typed, countable `rejected` at the caller **and** a counter. |
 | **A17** | §6.1 — **decided: one narrow, core-owned `lifecycle_events` table.** The deferral condition ("revisit only against a **measured** gap") is met: P4 produces real envelopes and there is nowhere for them to go. Every existing candidate was checked and none fits without distortion. The DDL, index plan, rollback and regression plan are in `session-a-p5-lifecycle-ingest.md`. | The measured gap arrived. The table's primary key IS the dedup mechanism; `event_type`, `outcome_class` and `observation` deliberately carry **no** SQL CHECK, because each of those vocabularies widens on a version bump and a CHECK would make a minor bump require a table rebuild. |
 | **A18** | §3.7 — **the lifecycle store's `result_status` stores the envelope's value verbatim**, including `unknown`. The draft suggested the store's column be nullable with NULL meaning "no operation outcome". The store instead keeps the envelope's own value, and `operation = 'absent'` is the authoritative signal for "no operation outcome". | Losslessness: the stored row IS the envelope. A NULL would be ambiguous between "the envelope said unknown" and "not recorded", and the envelope always records a `result_status`. What the draft wanted — no CHECK inherited from `tool_invocations` — is achieved: the column's vocabulary is `success｜error｜unknown`. |
+| **A19** | §3.7 / M5 — **the legacy untyped citation path is a PRESERVED backward-compatibility exception; the typed path is the enforced one.** P2 added a typed `source_type` beside `source_ids` and enforced it: a typed citation that does not resolve, is wrongly typed, or points at a soft-deleted row is **rejected**, atomically. The **legacy** path — a proposal with `source_ids` and no declared type — was deliberately left **unchanged**: it still auto-resolves the type and still accepts an unresolvable id. That is defect **D3**, and it is **live on that path**. | The legacy path is public surface: a caller that has been passing `source_ids` since before the typed path existed must keep working, and a change to it would be a **breaking** change to a shipped contract. So the divergence is recorded rather than removed. The consequence must be stated plainly: **the M5 citation rules are enforced only for callers that use the typed path.** Two of the five live core M5 contract failures (`UnresolvableCitationIsRejected`, `CitationPreservesItsType`) exercise the *legacy* path and are therefore expected to keep failing until D3 is closed; the typed path's equivalent behaviour is fixed and is what the critic's hunts now use. |
