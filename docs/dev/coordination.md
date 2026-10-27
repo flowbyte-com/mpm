@@ -534,7 +534,9 @@ attribution rule the missed-opportunity hunt applies). Non-vacuity of the new
 regression is demonstrated: one `INSERT INTO lessons_base` back into the hunt
 fails it.
 
-**Outstanding trust blockers, exactly:**
+**Outstanding trust blockers, exactly** (the table below is the state as of
+#138; the current list, after #132, #135, #140, #141 and #143, is in
+§"the trust-blocker table, restated" at the end of this section):
 
 | # | Blocker | State |
 |---|---|---|
@@ -604,6 +606,62 @@ adapter directories (`mpm-claude-code`, `mpm-hermes`, `mpm-memory-openclaw`,
 `test_agent_adapters_python_list_matches_the_adapters_on_disk` fail locally.
 A clean CI checkout never saw them, so this was never a CI failure; the
 leftovers are gone.
+
+### Session B's remaining PRs, merged — 2026-10-27 (Session A)
+
+Four of B's PRs were reviewed and merged on top of #143. Each was verified
+against the CURRENT main (not its own stale base) before merging.
+
+| PR | What it is | Merge | Session A's note |
+|---|---|---|---|
+| **#135** | **D7** — a Go-native `[]string` vanished at the parse boundary | `8ff4e7a` | A real trust hole: a citation list that silently lost elements meant *a proposal resting on less than its author declared, and the author was told it succeeded*. Now a citation list is accepted **whole or not at all**. |
+| **#132** | **D6** — the invocation identity was carried on 1 of 6 recording paths | `3de18a4` | Repairs the substrate defect that forced the critic's missed-opportunity hunt to use two signals. The trust surface is untouched: the diff reaches neither `epistemic_provenance` nor `lessons_base`. |
+| **#141** | **D3-b** — a legacy citation recorded the wrong type | `434e47e` | A work item or a tool invocation cited without a declared type was recorded as `source_type="memory"` — a **false record**. Now it records what it actually cites. |
+| **#140** | **D4**'s production-path proof + the independent M5 release assessment | `a4e3da9` | Test-only plus documentation. It names two residuals that were not on A's list before: **F2** and **D2-core**. |
+
+**Session A's ruling on D3-a** (the half of D3 that remains open), adjudicating
+Session B's three-step retirement proposal:
+
+* **Step 1 — APPROVED as the next change.** When `source_type` is omitted and
+  every cited id resolves unambiguously to exactly one canonical type, the
+  substrate uses that resolved type, so the citation is validated without the
+  caller changing anything. The decisive property: it **cannot reject
+  anything that is accepted today**, because the type is derived FROM the
+  resolution. An unresolvable id still falls back, so both the shredding case
+  and the never-existed case keep working. It tightens nothing.
+* **Step 2 — APPROVED IN PRINCIPLE, as its own shared-interface PR.**
+  `mpm_decisions record` / `supersede` have **no `source_type` parameter at
+  all**, so a decision's citations can never be typed and therefore can never
+  be validated. Adding the parameter mirrors `mpm_theories.propose` exactly.
+  It touches the shared registry, so it follows the shared-interface change
+  procedure rather than riding along here.
+* **Step 3 — DEFERRED, not approved.** Rejecting a legacy citation of an id
+  that never existed turns today's successes into errors, and the substrate
+  cannot currently tell a shredded id from a never-existing one. If it is ever
+  approved it needs the sunset: one release of deprecation notice, then
+  rejection, then removal of the path with `source_type` required.
+
+**Session A's position on the P2b gate.** Session B's assessment argues the
+gate's removal condition is met. **The gate stays CLOSED.** Beyond the
+standing instruction, the residuals give a reason: **F2** means the critic can
+*silently* lose a finding under contention (its emission failure is logged and
+the cycle continues), and **D2-core** means the lesson surface still publishes
+trusted knowledge directly. The gate can be re-considered when F2 is fixed and
+D2-core's pending state exists.
+
+### The trust-blocker table, restated — 2026-10-27 (after #132, #135, #140, #141, #143)
+
+| # | Item | State |
+|---|---|---|
+| 1 | **D1 / D5** — evidence duplication and confidence inflation | **CLOSED** by `#130`; the assertions live in `internal/core/evidence_identity_test.go`, which runs in every green gate. **Not** a blocker. |
+| 2 | **D2** — the critic created trusted lessons with no review | **CLOSED** for every critic path: P3b moved the last two lesson-emitting hunts to pending proposals, and `#138` made the opt-in telemetry hunt read-only. |
+| 3 | **D2-core** — the lesson surface itself has no pending state | **OPEN.** A property of the SURFACE, not of any writer: `lessons_base` has no status column, so a row there is trusted on arrival. Implementing a pending state is a **schema change** (A's authority). Must be written into the release notes: treat the lesson surface as operator-only until it exists. |
+| 4 | **D3-b** — a citation recorded the wrong type | **CLOSED** by `#141`. |
+| 5 | **D3-a** — the legacy citation path accepts an unresolvable id | **OPEN, accepted as a documented limitation.** Ruling above: step 1 approved as the next change, step 2 approved as a separate shared-interface PR, step 3 deferred behind a deprecation period. Not blocking safe manual or automatic critic use — the critic uses the typed path on every hunt. |
+| 6 | **D4** — an incidental tag difference still splits a proposal | **CLOSED in production** (the critic's emission fix), with a substrate residual open. The `m5contract` D4 test stays red until A rules on whether an incidental difference should split a proposal. Not blocking. The extra finding **F1** — the identity treats the tag SET as a sequence, so `["critic","alpha"]` and `["alpha","critic"]` are two proposals — is cosmetic and rides with the same decision. |
+| 7 | **F2** — concurrent proposals are lost to `SQLITE_BUSY` | **OPEN. The most consequential residual.** Measured: 2–4 of 8 concurrent proposals lost; reproduced under `make test-race` (~1 run in 6). The critic's emission failure is *logged and the cycle continues*, so under contention it can **silently lose a finding**. Candidate fix validated: `BEGIN IMMEDIATE` (measured 4/8 lost → 0/8). It deserves its own PR, **before** the P2b gate is lifted. |
+| 8 | **`mpm-telemetry observe`** — the same trusted-lesson exception, plus the same missing tool, plus a store-path disagreement with the spec (`src/db/telemetry.db` vs the spec'd `<workspace>/telemetry.db`) | **OPEN** — issue #139. The command is currently **inert** (it calls a tool that is not in the registry, then calls `mpm_lessons` with a flat payload the params-envelope check rejects), so it cannot write — but it is an advertised command, and repairing its count the way #138 repaired the critic's would **arm** a trusted-lesson write. Ruling: read-only until a resolvable evidence source exists; the store path must be settled first. |
+| 9 | **Automatic critic scheduling** | **Still barred.** The P2b arming gate (`internal/core/wake_tools.go`: `critic_audit` is refused by `ScheduleWake`) and the dispatch gate (`internal/scheduler/scheduler.go`: `executeOne` refuses a blocked kind) are both intact and both tested. Re-consider when #3 and #7 are closed. |
 
 ## 6. Cross-session communication protocol
 
