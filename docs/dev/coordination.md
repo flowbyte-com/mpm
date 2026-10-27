@@ -663,6 +663,123 @@ D2-core's pending state exists.
 | 8 | **`mpm-telemetry observe`** — the same trusted-lesson exception, plus the same missing tool, plus a store-path disagreement with the spec (`src/db/telemetry.db` vs the spec'd `<workspace>/telemetry.db`) | **OPEN** — issue #139. The command is currently **inert** (it calls a tool that is not in the registry, then calls `mpm_lessons` with a flat payload the params-envelope check rejects), so it cannot write — but it is an advertised command, and repairing its count the way #138 repaired the critic's would **arm** a trusted-lesson write. Ruling: read-only until a resolvable evidence source exists; the store path must be settled first. |
 | 9 | **Automatic critic scheduling** | **Still barred.** The P2b arming gate (`internal/core/wake_tools.go`: `critic_audit` is refused by `ScheduleWake`) and the dispatch gate (`internal/scheduler/scheduler.go`: `executeOne` refuses a blocked kind) are both intact and both tested. Re-consider when #3 and #7 are closed. |
 
+### The release-candidate acceptance — 2026-10-27 (Session A)
+
+**Integrated main SHA: `4111c46dbe30de44e9ed8f7a715fff9e8c3e469e`** ("fix(opencode):
+the lifecycle observer's delivery accounting must close (P4)"), the squash of
+**#142**. #142's branch predated #143, so the import-block conflict in
+`tests/test_lifecycle_events.test.ts` was resolved by keeping **both** halves:
+#143's rule (the `before` hook does **not** build `dist/`; the gate builds the
+payload once, before any test file runs) and #142's `mkdtempSync`/`rmSync`/
+`tmpdir` additions (per-test **unique** temp directories). `spawnSync` was
+**not** reintroduced — it was used only by the self-build, which no longer
+exists. The pin that keeps this honest is
+`scripts/tests/test_makefile_typescript_test_wiring.py` (18 tests): no
+`*.test.ts` may invoke a TypeScript compiler.
+
+The full report is `docs/dev/release-candidate-2026-10-30.md`. The four
+acceptance phases, all against disposable workspaces, with the live tree
+proved untouched by **three** independent detectors (a snapshot, a `strace -f`
+of the whole process tree, and a systemd shim that records the requests it
+refuses to act on):
+
+| Phase | Harness | Result |
+|---|---|---|
+| 2 — the reproducible release candidate | `/tmp/opencode/rc/01_install.sh` | **21 / 21** |
+| 3 — the cross-session learning acceptance | `/tmp/opencode/rc/02_sessions.sh` | **27 / 27** |
+| 4 — the critic acceptance | `/tmp/opencode/rc/03_critic.sh` | **36 / 36** + **5 / 5** (the P2b gates) |
+| 5 — the failure injection | `/tmp/opencode/rc/04_failure.sh` | **38 / 38** |
+
+**Three measurements that change how a future session must assert.**
+
+1. **The critic's no-duplicates contract is PER OBSERVATION, not per total.**
+   The pending-theory count over five cycles was **6 → 11 → 15 → 15 → 15**: it
+   climbs and then **converges**, because the weak-theory hunt legitimately
+   observes the critic's **own** new proposals (each is a *different*
+   observation). A total-count duplicate assertion fails for the right
+   behaviour. The right assertions are per-observation (exactly one proposal
+   cites `th_weak_001`, `ti_quiet_0`, `mem_direct_001` — each stayed at 1
+   across every cycle) plus convergence (identical across the last two
+   evaluations) plus boundedness. **A measurement that says "duplicates are
+   possible" was measuring the wrong thing.**
+2. **A critic finding cannot corroborate what it criticises**, because the
+   evidence source group **`auto_capture` is excluded from confidence
+   scoring** (`scoringEvidenceClause`, `internal/core/evidence_store.go`). A
+   theory cited at confidence 0.2 stayed at exactly 0.2 after five critic runs.
+3. **A plugin that refuses to boot does not write to the host's stderr.**
+   OpenCode captures a plugin's `console.warn` in **its own** log, at
+   `$XDG_DATA_HOME/opencode/log/opencode.log`, as `failed to load plugin …
+   cause="…db_path invariant violated"`. An acceptance assertion about a
+   boot refusal must read the host log.
+
+**The non-vacuity control, and the design mistake the first run exposed.**
+The first control pointed at an *empty* workspace — and the control agent
+**routed around it**, found the seeded workspace on disk and retrieved the
+fact with the MPM CLI. It invented nothing; it simply had another route to
+the data. A control the agent can route around proves nothing. The corrected
+control runs the Session 2 prompt in a **bubblewrap mount namespace** with the
+seeded root masked by a `--tmpfs`, and the witness probe was moved **outside**
+the masked root — otherwise the control observes nothing and becomes vacuous
+in the other direction. Measured: the control's system prompt was observed (82
+parts), the marker is absent from it, and the control could not answer.
+
+**#142 was merged; #134 is closed.** The P4 delivery-counter discrepancy was
+a **diagnostic** defect, not a data-loss defect, and #142 closes it: the
+counters are split into **cumulative** and **instantaneous**, and the
+accounting closes at every reading —
+`enqueued = delivered + failed + dropped_overflow + abandoned + queued + in_flight`.
+Measured on a real store: the teardown reading is `enqueued=10 delivered=9
+in_flight=1` (the tenth delivery was **outstanding**, not lost) and the final
+reading is `delivered=10 balanced=true`, with all 10 stored in the core. The
+ambiguity between "outstanding" and "lost" — the whole content of #134 — is
+gone.
+
+**#126 is closed as approved.** The legacy-adapter-removal proposal's five
+open questions are answered by #137's implementation record
+(`docs/dev/opencode-only-adapter-removal-implementation.md`): the telemetry
+adapter was **relocated** to `agent_installation/lib/telemetry_adapter.py`; the
+`created_by` rename is **deferred as a data migration**; the OpenClaw
+refresh-safety guarantee was **retargeted** via #133; the JS gate keeps an
+**explicit empty state with no floor** (a `0` floor is a silent pass wearing a
+number's clothing); and every floor was **measured after** the removal.
+
+**The one open product decision — the lifecycle transport is OFF by default.**
+With `MPM_EVENT_INGEST` unset — the state of every installation, because
+nothing in the repository, the installer, the runtime package or the SPEC sets
+it — the observer builds the envelopes and drops every one
+(`dropped_unconfigured == envelopes_built`, `delivered == 0`), so
+`lifecycle_events` stays empty; with `MPM_EVENT_INGEST=mpm_system` the same
+run stores 4–10 rows. **It is not a defect and it is not A's to close
+unilaterally**: the adapter's own harness *pins* the default as a contract,
+and enabling ingestion by default changes what a default installation
+**writes**. It is also **not a trust risk**: `event_ingest` writes only
+`lifecycle_events` plus an audit row, creates no memory/theory/decision/
+lesson, and cannot arm the critic. Three options were put to the owner on
+#142 — (1) the adapter installer sets the transport, (2) flip the default and
+update the pinned expectation in `measure/p4_lifecycle_e2e.sh`, (3) document
+it as an operator step. **Option 3's operator step was applied for the
+acceptance run**, and the full cross-session acceptance passes on that path.
+
+### The trust-blocker table after the release-candidate acceptance — 2026-10-27 (after #142)
+
+| # | Item | State | Blocks the RC? |
+|---|---|---|---|
+| 1 | **D1 / D5** | **CLOSED** by `#130`. | No |
+| 2 | **D2** | **CLOSED** for every critic path. | No |
+| 3 | **D2-core** — the lesson surface has no pending state | **OPEN.** A schema change (A's authority). **Must be in the release notes: the lesson surface is operator-only.** | No |
+| 4 | **D3-b** | **CLOSED** by `#141`. | No |
+| 5 | **D3-a** | **OPEN**, accepted as a documented limitation; the ruling stands (step 1 approved as the next change, step 2 as a separate shared-interface PR, step 3 deferred). | No |
+| 6 | **D4** / **F1** | **CLOSED in production**; the tag-ordering residual is cosmetic. | No |
+| 7 | **F2** — the critic can silently lose a finding under contention | **OPEN.** The most consequential residual. The candidate fix is validated (`BEGIN IMMEDIATE`: 4/8 lost → 0/8). Its own PR, **before** the P2b gate is lifted. | No for the RC; **yes** for lifting the gate |
+| 8 | **`mpm-telemetry observe`** | **OPEN** — issue #139. Inert, so it cannot write. Read-only until a resolvable evidence source exists; the store path must be settled first. **Repairing its count would ARM a trusted-lesson write.** | No |
+| 9 | **Automatic critic scheduling** | **Still barred.** Both gates intact and now **exercised end to end**: the producer refused to arm a `critic_audit` wake, and the **consumer** refused to execute one that was seeded directly by SQL — recorded as processed-and-refused, handler never invoked. | n/a |
+| 10 | **The lifecycle transport's default** | **OPEN product decision** (§ above). Three options with the owner. Not a defect; not a trust risk. | No, with a documented operator step |
+
+**The recommendation for Friday 30 October is CONDITIONAL GO.** The two
+conditions are documentation: the release notes must state the
+`MPM_EVENT_INGEST=mpm_system` operator step, and must state that the lesson
+surface is operator-only until a pending state exists.
+
 ## 6. Cross-session communication protocol
 
 1. **The ledger is the channel of record.** A session updates its own rows in
