@@ -374,7 +374,12 @@ func TestTick_AccruesBeforeDispatchingWakes(t *testing.T) {
 		sawActive   int64
 		sawBaseline sql.NullInt64
 	)
-	s.Register("critic_audit", func(context.Context, Wake) error {
+	// The kind is incidental to this test: what it pins is that the
+	// accrual phase runs BEFORE any wake is dispatched.  It uses a
+	// system kind that is NOT blocked by the P2b gate
+	// (internal/core/wake_tools.go refuses `critic_audit`), so that the
+	// handler below actually runs.
+	s.Register("snapshot", func(context.Context, Wake) error {
 		sawActive, _ = core.ReadActiveUptime(ctx, db)
 		return db.QueryRowContext(ctx,
 			`SELECT baseline_active_seconds FROM memory_settling_baselines WHERE memory_id = 'observed'`).
@@ -384,7 +389,7 @@ func TestTick_AccruesBeforeDispatchingWakes(t *testing.T) {
 	due := time.Now().Unix()
 	if _, err := db.ExecContext(ctx,
 		`INSERT INTO scheduled_wakes (id, reason, target_time, fired, created_by, metadata)
-		 VALUES ('w1','test',?,0,'test','{"kind":"critic_audit"}')`, due); err != nil {
+		 VALUES ('w1','test',?,0,'test','{"kind":"snapshot"}')`, due); err != nil {
 		t.Fatalf("seed wake: %v", err)
 	}
 
@@ -418,13 +423,15 @@ func TestTick_AccrualFailureDoesNotBlockWakes(t *testing.T) {
 	s.activeUptime = newActiveUptimeAccruer(clk)
 
 	var handled bool
-	s.Register("critic_audit", func(context.Context, Wake) error {
+	// As above: an unblocked system kind, so that a failed accrual is
+	// still followed by a dispatch.
+	s.Register("snapshot", func(context.Context, Wake) error {
 		handled = true
 		return nil
 	})
 	if _, err := db.ExecContext(ctx,
 		`INSERT INTO scheduled_wakes (id, reason, target_time, fired, created_by, metadata)
-		 VALUES ('w2','test',?,0,'test','{"kind":"critic_audit"}')`,
+		 VALUES ('w2','test',?,0,'test','{"kind":"snapshot"}')`,
 		time.Now().Unix()); err != nil {
 		t.Fatalf("seed wake: %v", err)
 	}

@@ -182,6 +182,81 @@ func (dm *DatabaseManager) LastCascadeSummaryMetrics(ctx context.Context) (mater
 // `mpm tasks upsert`) for recurring workflows; the daemon's 60s
 // tick polls scheduled_tasks and injects a standard scheduled_wakes
 // row for each due task.
+// BlockedWakeKindCriticAudit is a wake kind that must not be ARMED and must
+// not be DISPATCHED, for as long as the critic's automatic trust behaviour
+// is unsafe.
+//
+// WHY
+// ---
+// The critic's hunts emit `mpm_lessons save` findings: they write TRUSTED
+// lessons directly, with no evidence citation, no review, and no pending
+// state, and they tag each finding with `cycle_<n>` so a repeated finding is
+// never recognised as the same one. Meanwhile duplicate evidence inflates
+// confidence. That combination makes an automatically-scheduled critic
+// unsound: it would manufacture corroborated-looking knowledge from
+// uncorroborated observations.
+//
+// The critic's automatic path is a HANDLER, not a scheduler: the scheduler
+// fires any due wake whose kind has a registered handler. The handler for
+// `critic_audit` exists (internal/scheduler/scheduler.go), the wake kind is
+// caller-supplied and was not validated at the producer (ScheduleWake only
+// DEFAULTS an absent kind to "notification"), and the public `mpm` scheduling
+// tool reaches that producer. So arming the critic was one API call away.
+//
+// THE TWO GATES
+// -------------
+//  1. ARMING (producer side, here): ScheduleWake refuses the kind. Every
+//     producer is covered - the public handler, the cascade materializer,
+//     the wake reconcile loop, and any future internal producer - because
+//     the fix lives in the DB-layer producer rather than in one caller.
+//  2. DISPATCH (consumer side, internal/scheduler): a wake that is ALREADY
+//     PERSISTED - created before this gate existed, or by an older binary,
+//     or by direct SQL - is refused at dispatch time rather than executed.
+//
+// The two gates are deliberately both present. The producer gate cannot
+// speak for rows that already exist, and the consumer gate cannot speak for
+// producers that have not been taught.
+//
+// A refused wake is recorded, not swallowed: the dispatch gate returns an
+// error, and the scheduler marks the wake fired with the refusal reason in
+// `last_error`. A blocked wake therefore does NOT retry forever, and the
+// refusal is observable rather than silent.
+//
+// REMOVING THIS GATE
+// ------------------
+// It is removed when the trust boundary is actually enforced - the critic
+// emits a proposal on an existing untrusted surface with typed, validated,
+// resolvable citations, and no longer writes trusted lessons directly. That
+// is Session B's work (docs/dev/session-a-adjudication.md §4.2, P2 and P3);
+// this gate is what makes the interim state safe rather than merely
+// documented.
+const BlockedWakeKindCriticAudit = "critic_audit"
+
+// WakeKindBlocked reports whether a wake kind is currently barred from being
+// armed and from being dispatched.
+//
+// The predicate lives in the core module because BOTH sides of the gate need
+// it: the producer (ScheduleWake, in this package) and the dispatcher
+// (internal/scheduler, in the root module, which imports this one). Two
+// copies of the constant would be two chances to drift.
+func WakeKindBlocked(kind string) bool {
+	return kind == BlockedWakeKindCriticAudit
+}
+
+// BlockedWakeKindError is the message a refused wake carries. It names the
+// kind and says why, so the refusal is self-explanatory in a log or in a
+// wake's `last_error` column - an operator reading it must not have to go
+// and find this file to learn what happened.
+func BlockedWakeKindError(kind string) error {
+	return fmt.Errorf(
+		"wake kind %q is blocked: the critic's automatic trust behaviour is not yet safe "+
+			"(it writes trusted lessons with no evidence, no review, and no pending state). "+
+			"This wake was NOT executed. See internal/core/wake_tools.go and "+
+			"docs/dev/session-a-adjudication.md (P2b).",
+		kind,
+	)
+}
+
 func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, createdBy string, metadata map[string]interface{}) (map[string]interface{}, error) {
 	if reason == "" {
 		return nil, fmt.Errorf("reason is required")
@@ -215,6 +290,13 @@ func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, createdBy 
 	}
 	if _, hasKind := metadata["kind"]; !hasKind {
 		metadata["kind"] = "notification"
+	}
+	// ARMING GATE. Refuse a blocked kind here, at the DB-layer producer,
+	// so that EVERY producer is covered by one check rather than by each
+	// caller's own diligence. The kind is read defensively: metadata is
+	// caller-supplied and its "kind" value need not be a string.
+	if kind, _ := metadata["kind"].(string); WakeKindBlocked(kind) {
+		return nil, BlockedWakeKindError(kind)
 	}
 	var metaJSON string
 	b, err := json.Marshal(metadata)
