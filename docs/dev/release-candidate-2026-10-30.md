@@ -57,12 +57,12 @@ for evidence), #133 (the installation-preservation carrier), #131, #136, #129.
 
 | Gate | Result |
 |---|---|
-| `make test-race` (the canonical pre-merge validation) | **PASS** — see §3 |
-| `make test-scripts` | **PASS** |
-| `make test-agent-adapters` | **PASS** — Python 119 (floor 100), TypeScript 108 (floor 15), JavaScript an explicit declared-empty state |
-| `mpm-lint --gate` | **PASS** |
+| `make test-race` (the canonical pre-merge validation) | **PASS** — 0 failures across the root module and both sub-modules |
+| `make test-scripts` | **PASS** — **543 tests**, `OK (skipped=1)` |
+| `make test-agent-adapters` | **PASS** — Python **119** (floor 100), TypeScript **108** (floor 15), JavaScript an **explicit declared-empty state** (not a skipped gate) |
+| `mpm-lint --gate` | **PASS** — mutex, SQL, fd and import thresholds all within their bounds |
 | `python3 -m unittest scripts.tests.test_makefile_typescript_test_wiring` | **PASS** — 18 tests |
-| Main CI `40599592681` (Full test suite / Build + core tests / Release gate) | **see §3** |
+| Main CI `40599592681` (Full test suite / Build + core tests / Release gate) | **all three green** |
 
 ### 2.1 The release gate's own history in this sprint
 
@@ -154,6 +154,11 @@ data file, then **re-runs the installer** (a full upgrade) and re-runs the
 adapter installer, and then asserts that the user's line, the user's file and
 the managed block are all still there. This is the property #133's carrier
 was written to protect, now confirmed end to end in an isolated install.
+
+**All four phases were re-run against the merged tree** after `#142` was
+squashed onto `main`, and all four reproduced: **21 / 21**, **27 / 27**,
+**36 / 36 + 5 / 5**, **38 / 38**. The acceptance is reproducible, not a
+one-off.
 
 **What the systemd shim recorded** — the installer asked for exactly this and
 **none of it happened**:
