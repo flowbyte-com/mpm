@@ -97,8 +97,22 @@ OBSOLETE_ADAPTER_DIR_NAMES = {
 
 # Paths that are allowed to retain old names. They are explicitly
 # historical record and are not active code.
+#
+# `docs/library/` replaced `docs/archive/` on 2026-10-28. It holds the
+# same kind of material — designs, audits and incident records — with a
+# status label on every entry saying whether it describes today or the
+# past. A historical design document that names the adapter which existed
+# when it was written is correct; rewriting it to use today's vocabulary
+# would falsify the record and hide which adapter the design was about.
+#
+# `scripts/docs_check/` is the freshness gate. It carries the retired
+# adapter names as the *pattern list* it searches for, so a current
+# document that reintroduces one fails. That is the opposite of a stale
+# reference: it is the rule that keeps them out.
 HISTORICAL_ALLOWLIST_DIRS = (
     REPO_ROOT / "docs" / "archive",
+    REPO_ROOT / "docs" / "library",
+    REPO_ROOT / "scripts" / "docs_check",
 )
 HISTORICAL_ALLOWLIST_FILES = (
     REPO_ROOT / "changelog.md",
