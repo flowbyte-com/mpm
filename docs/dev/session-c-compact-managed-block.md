@@ -1030,9 +1030,8 @@ branch's own PR is **#153**.
 | `agent_installation/tests/test_naming_invariants.py` | `measure/` in the canonical layout. |
 | `agent_installation/tests/test_installed_block_drift.py` | One-line anchor assertion. |
 | `agent_installation/tests/test_operator_only_action_advertisement.py` | The behavioural-comparison fixtures exempted as **historical snapshots**, scoped to the `measure/fixtures/` directory so it is not a general hole. |
-| `agent_installation/mpm-opencode/tests/test_opencode_doc_conformance.py` | New `LegacyPluginSourceAgrees` class — D8's detection gap closed (see §11.1). |
 | `agent_installation/mpm-opencode/tests/test_opencode_instructions_installer.py` | Wake phrasings extended; recovery-path assertion added. |
-| `agent_installation/mpm-opencode/tests/test_opencode_doc_conformance.py` | Two new classes: `LegacyPluginSourceAgrees` (D8's detection gap) and `PluginDescriptionsCoverTheRegistry` (D9, D10, D11). |
-| `agent_installation/mpm-opencode/tests/test_opencode_doc_conformance.py` | New `LegacyPluginSourceAgrees` class — pins the loaded entry point, the shared tool set, and the **byte-identical descriptions** across `src/index.ts` and `src/index.v2.ts` (D8's detection gap). |
+| `agent_installation/mpm-opencode/tests/test_opencode_doc_conformance.py` | Two new classes: `LegacyPluginSourceAgrees` (pins the loaded entry point, the shared tool set, and the **byte-identical descriptions** across `src/index.ts` and `src/index.v2.ts` — D8's detection gap) and `PluginDescriptionsCoverTheRegistry` (every registry action declared as an action line — D9, D10, D11). |
+| `docs/dev/README.md` | The dev index's deliverables table gains row J for this report. |
 | `docs/dev/session-c-compact-managed-block.md` | **New** — this report. |
 | `docs/dev/session-c-handoff-2026-10-29.md` | **New** — the inherited handover, retained with a **status note** at its head recording which items were actioned and three corrections to the handover itself. |
