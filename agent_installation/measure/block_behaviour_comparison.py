@@ -124,27 +124,24 @@ MODEL = os.environ.get(
 # transcript too. A bare-filename marker would flag every cell — including
 # the ones that read exactly what they were told to read.
 #
-# So the markers here are the harness's own artefacts BY ABSOLUTE PATH. The
-# cell's HOME is a temporary directory, so an absolute path under the real
-# repository means the agent reached outside its cell.
+# The rule is therefore: **an absolute path under the real repository is
+# blocking**, plus a short list of the harness's own artefacts by name.
+# The cell's HOME, its project, its shadow repository and its staged
+# plugin all live under a temporary directory, so any absolute path under
+# the real repository means the agent reached outside its cell.
 BLOCKING_MARKERS = (
-    str(REPO_ROOT / "agent_installation" / "MPM_AGENT_INTEGRATION_SNIPPETS.md"),
-    str(REPO_ROOT / "agent_installation" / "mpm-agent-protocol.md"),
-    str(REPO_ROOT / "README.md"),
-    str(REPO_ROOT / "agent_installation" / "measure" / "block_behaviour_comparison.py"),
-    str(REPO_ROOT / "agent_installation" / "measure" / "mutation_probe.py"),
-    str(REPO_ROOT / "agent_installation" / "measure" / "installer_regression.py"),
-    str(REPO_ROOT / "agent_installation" / "measure" / "fixtures"),
+    str(REPO_ROOT / "agent_installation" / "measure"),
     str(REPO_ROOT / "agent_installation" / "tests"),
     str(REPO_ROOT / "agent_installation" / "scripts"),
     str(REPO_ROOT / "docs" / "dev"),
 )
 
-# The harness's own directories. The OpenCode adapter directory is
-# deliberately NOT here: the host legitimately references the plugin
-# path (it is registered in the cell's own config), so a path under
-# it proves nothing.
-BLOCKING_PREFIXES = ()
+# The harness's own repository root. The OpenCode adapter directory is
+# deliberately NOT blocked: the host legitimately references the plugin
+# path, so a path under it proves nothing.
+BLOCKING_PREFIXES = (
+    str(REPO_ROOT),
+)
 
 
 # Absolute paths, for the outside-the-cell detector.
@@ -220,12 +217,23 @@ def _reference_stack(variant: str, stage: Path) -> dict[str, str]:
     }
 
 
-def _mpm_binary() -> str:
-    candidates = [
+def _mpm_binary(stage: Path | None = None) -> str:
+    """The binary under test — the STAGED copy, if there is one.
+
+    The staged copy matters: the binary under test lives inside the
+    harness's repository, and the cell's PATH points at it. An agent
+    that runs `which mpm` would therefore see the real repository's
+    absolute path in its transcript, and the contamination detector
+    would flag the cell for reading a path it merely printed.
+    """
+    candidates = []
+    if stage is not None:
+        candidates.append(str(stage / "bin" / "mpm"))
+    candidates.extend([
         os.environ.get("MPM_BINARY"),
         str(REPO_ROOT / ".build/bin/mpm"),
         str(Path.home() / "src/mpm-opencode/.build/bin/mpm"),
-    ]
+    ])
     for c in candidates:
         if c and Path(c).is_file() and os.access(c, os.X_OK):
             return c
@@ -416,6 +424,19 @@ def _stage_inputs(stage: Path) -> None:
     for name in ("block-3.0.0.md", "protocol-3.0.0.md", "snippets-3.0.0.md"):
         shutil.copy2(FIXTURES / name, fixtures_stage / name)
 
+    # The binary under test, staged, so the cell's PATH names no
+    # repository path.
+    for candidate in (
+        os.environ.get("MPM_BINARY"),
+        REPO_ROOT / ".build" / "bin" / "mpm",
+    ):
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            bin_stage = stage / "bin"
+            bin_stage.mkdir(exist_ok=True)
+            shutil.copy2(candidate, bin_stage / "mpm")
+            (bin_stage / "mpm").chmod(0o755)
+            break
+
     # The plugin payload: exactly what OpenCode loads, and nothing else.
     # `templates/AGENTS.md.snippet` is deliberately NOT copied — it
     # carries the managed block, and the cell must not be able to read
@@ -466,9 +487,18 @@ def _stage_inputs(stage: Path) -> None:
 #      * `git reset --hard` and `git clean` appear nowhere in this file.
 # ---------------------------------------------------------------------------
 
+# The shadow repository excludes:
+#   * build and dependency directories — they are large and irrelevant;
+#   * `measure/` — the HARNESS ITSELF. Its source comments name the real
+#     repository's absolute paths (the contamination markers, the launch
+#     commands it documents), so a cell that read the shadow's copy of
+#     the harness would carry those literals into its transcript and be
+#     flagged for having read the real repository, which it did not.
+#     A cell must not be able to read the instrument that is measuring
+#     it, even by accident.
 _SHADOW_IGNORE = shutil.ignore_patterns(
     ".git", "node_modules", "__pycache__", "*.pyc", ".build",
-    "dist", "*.log", ".pytest_cache",
+    "dist", "*.log", ".pytest_cache", "measure",
 )
 
 
@@ -613,11 +643,23 @@ def _strip_legitimate(transcript: str, variant: str, block: str,
     """
     out = transcript
     stack = _reference_stack(variant, stage)
-    for body in (
+    bodies = [
         block,
         stack.get("mpm-agent-protocol.md", ""),
         stack.get("MPM_AGENT_INTEGRATION_SNIPPETS.md", ""),
-    ):
+    ]
+    # The arm's own documents in the shadow repository. They are the
+    # arm's world — the new arm's report and handover legitimately name
+    # the real worktree — so their text is stripped before the detector
+    # runs, exactly as the block and the protocol are.
+    shadow_docs = stage / "repo" / "docs" / "dev"
+    if shadow_docs.is_dir():
+        for doc in sorted(shadow_docs.glob("session-c-*.md")):
+            try:
+                bodies.append(doc.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+    for body in bodies:
         if not body:
             continue
         for needle in (
@@ -729,6 +771,18 @@ def _run_one(variant: str, block: str, scenario: str, prompt: str,
                 for doc in dev_docs.glob("session-c-*"):
                     if doc.is_file():
                         doc.unlink()
+            # The new contract's own tests encode the 4.0.0 matrix
+            # verbatim. An old-arm cell that read them would learn the
+            # contract it is being compared against.
+            for stray in (
+                "test_managed_block_behaviour_matrix.py",
+                "test_cross_agent_discoverability.py",
+            ):
+                victim = (
+                    shadow / "agent_installation" / "tests" / stray
+                )
+                if victim.is_file():
+                    victim.unlink()
 
         # The user-scope instruction file. XDG_CONFIG_HOME is
         # redirected, so this is the ONLY managed block the host can
@@ -918,7 +972,6 @@ def main() -> int:
         Path(args.transcripts) if args.transcripts else None
     )
 
-    mpm_binary = _mpm_binary()
     # A CLEAN TREE IS A PRECONDITION, NOT A WISH.
     #
     # The harness restores any tracked file a cell modifies, so it must
@@ -942,6 +995,7 @@ def main() -> int:
     stage = Path(tempfile.mkdtemp(prefix="mpm-behav-stage-"))
     _stage_inputs(stage)
     _stage_repository(stage)
+    mpm_binary = _mpm_binary(stage)
     variants = _variants(stage)
     scenarios = args.scenarios or list(SCENARIOS)
     which = args.variants or list(variants)
