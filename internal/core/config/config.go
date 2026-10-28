@@ -165,6 +165,54 @@ func LoadConfig() (*Config, error) {
 	return &config, nil
 }
 
+// ValidateConfig reports whether the operator's configuration file is
+// READABLE AND WELL-FORMED.
+//
+// WHY THIS EXISTS
+//
+// A malformed mpm_config.json used to be a SEGMENTATION FAULT rather
+// than an error. config.LoadConfig() returns (nil, err) when the file
+// does not unmarshal, and internal/core/memory.go's DefaultMemoryPaths()
+// ignored that error and dereferenced the nil config:
+//
+//	cfg, _ := config.LoadConfig()
+//	memoryPath := config.ResolveEnvPath(cfg.MemoryDir)   // nil dereference
+//
+// So a single typo in a component binding — `components` maps a
+// component name to a PROFILE NAME, so its values must be strings, not
+// booleans — turned `mpm memory save` into a SIGSEGV with a stack
+// trace, and every other command that consults the configuration with
+// it.
+//
+// The error this returns is deliberately ACTIONABLE. It names the file,
+// the reason the file is not valid, and the fact that the configuration
+// is what is wrong — because the operator's next action is to fix that
+// file, and an error that says only "invalid character" sends them
+// looking for the bug somewhere else.
+//
+// A MISSING configuration file is NOT an error: an install with no
+// configuration yet is a normal state, and LoadConfig already models
+// that as an empty configuration.
+func ValidateConfig() error {
+	path := ConfigPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // no configuration yet is a normal state
+		}
+		return fmt.Errorf("cannot read the configuration file %s: %w", path, err)
+	}
+	var probe Config
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return fmt.Errorf(
+			"the configuration file %s is not valid JSON: %w\n"+
+				"  MPM cannot start with a malformed configuration.\n"+
+				"  Fix the file, or run `mpm config set` to rewrite it.",
+			path, err)
+	}
+	return nil
+}
+
 // SaveConfig persists the MPM configuration to disk. Atomic write:
 // the new content goes to a temp file in the same directory, then
 // is renamed over the destination. This guarantees a partial write

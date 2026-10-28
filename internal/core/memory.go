@@ -157,8 +157,25 @@ func DefaultMemoryPaths() MemoryPaths {
 	internalDBPath := filepath.Join(mpmDir, "src", "db")
 	sqliteDBPath := filepath.Join(internalDBPath, "mpm.db")
 
-	// Load config for external cascade ingest sources
-	cfg, _ := config.LoadConfig()
+	// Load config for external cascade ingest sources.
+	//
+	// A MALFORMED CONFIG MUST NOT BE A NIL DEREFERENCE.
+	//
+	// LoadConfig() returns (nil, err) when mpm_config.json does not
+	// unmarshal. The error used to be discarded with `_`, and the nil
+	// config was dereferenced on the next line — so a single typo in a
+	// component binding turned `mpm memory save` into a SIGSEGV with a
+	// stack trace instead of an error naming the file that is wrong.
+	//
+	// The malformed file is now reported by config.ValidateConfig(),
+	// which the CLI and the MCP server call before dispatching a
+	// command. This function is the defence in depth behind that gate:
+	// even if a caller reaches it first, it resolves the canonical
+	// paths rather than crashing.
+	cfg, err := config.LoadConfig()
+	if err != nil || cfg == nil {
+		cfg = &config.Config{}
+	}
 	memoryPath := config.ResolveEnvPath(cfg.MemoryDir)
 	sessionsPath := config.ResolveEnvPath(cfg.SessionsDir)
 
