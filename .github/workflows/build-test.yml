@@ -3,8 +3,21 @@ name: build-and-test
 on:
   push:
     branches: [main]
+  # Every pull request, whatever its base branch.
+  #
+  # This used to be `branches: [main]`. The effect was that a *stacked* PR —
+  # one whose base is another feature branch rather than main — never ran CI
+  # at all. It reported no checks, which reads as "nothing to see here" rather
+  # than "not evaluated", and the intermediate steps of a stack are exactly
+  # where a reviewer needs the evidence. Two open PRs in this repository were
+  # in that state when this was noticed (#152 and #156, both targeting feature
+  # branches).
+  #
+  # Widening this is safe: `pull_request` (not `pull_request_target`) runs with
+  # the PR's own token and no secrets from the base repo, and the `concurrency`
+  # group below already cancels a superseded run per ref, so the extra runs do
+  # not accumulate.
   pull_request:
-    branches: [main]
 
 # Superseded-run cancellation.
 #
