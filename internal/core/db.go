@@ -27,7 +27,7 @@ import (
 	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/seed"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
 func isDuplicateColumnError(err error) bool {
@@ -117,12 +117,21 @@ func logRotateThresholdBytes() int64 {
 //
 // D-003 (alpha-4.1.2): busy_timeout was previously applied via a single
 // `db.Exec("PRAGMA busy_timeout = 5000")` after sql.Open, which only
-// affects the FIRST pooled connection. Subsequent connections opened
-// from the pool ran with the SQLite default of 0 (no waiting), so
-// parallel AppendWorkEvent callers contended on table locks and the
-// retry path in WithTx / ExecTracked always lost the race. By moving
-// _busy_timeout into the DSN — the same channel _foreign_keys uses —
-// every connection inherits the setting at open time.
+// affects the FIRST pooled connection. By moving _busy_timeout into the
+// DSN — the same channel _foreign_keys uses — every connection inherits
+// the setting at open time.
+//
+// CORRECTION (2026-10-28, issue #158): the original text here said that
+// subsequent pooled connections "ran with the SQLite default of 0 (no
+// waiting)". That was wrong: mattn/go-sqlite3 v1.14.37 parses
+// `_busy_timeout` in SQLiteDriver.Open (sqlite3.go:1200) and applies
+// `PRAGMA busy_timeout` inside the per-connection open path
+// (sqlite3.go:1491), and the driver's own default is 5000
+// (sqlite3.go:1098) even when the parameter is absent. The DSN change is
+// still the right shape — it makes the value explicit and pinned — but
+// the pool was never running with a zero timeout, and the stale claim
+// obscured the real cause of the SQLITE_BUSY_SNAPSHOT failures fixed in
+// this PR.
 //
 // Exported so callers outside this package (cmd/mpm, tests) can construct
 // the same DSN shape without drifting from the load-bearing guarantee here.
@@ -1038,7 +1047,30 @@ func (t *txNode) ExecTracked(query string, retries int, args ...interface{}) (sq
 		attempts++
 		result, err := t.tx.Exec(query, args...)
 		elapsed := time.Since(start)
+
+		// SQLITE_BUSY_SNAPSHOT (2026-10-28, issue #158): this
+		// transaction's read snapshot is stale — another connection
+		// committed after the snapshot was taken, so the write cannot
+		// upgrade. Retrying the statement IN PLACE cannot succeed: the
+		// snapshot belongs to the TRANSACTION, and the transaction's
+		// snapshot does not change between attempts. It also returns in
+		// microseconds rather than waiting out busy_timeout, because
+		// SQLite does not invoke the busy handler for a snapshot
+		// conflict — so there is nothing to wait for.
+		//
+		// Retrying here therefore only burned the backoff budget (3.1 s
+		// for the standard 5 retries) before failing with the same
+		// error. Return it to the caller so the ENCLOSING transaction
+		// can be restarted with a fresh snapshot — WithTx does exactly
+		// that (see WithTx's SQLITE_BUSY_SNAPSHOT branch).
+		if err != nil && IsBusySnapshotError(err) {
+			t.dm.busyRetries.Add(1) // instrument: SQLITE_BUSY retry counter
+			t.dm.logBusySnapshotOutcome(watchdogOpExec, query, elapsed, err)
+			return result, err
+		}
+
 		if err != nil && isBusyError(err) && attempts <= retries {
+			t.dm.busyRetries.Add(1) // instrument: SQLITE_BUSY retry counter
 			time.Sleep(backoff)
 			if backoff < maxBackoff {
 				backoff *= 2
@@ -1106,64 +1138,126 @@ func (t *txNode) DM() *DatabaseManager {
 // that delegates to the active transaction; passing it to RecomputeConfidence
 // (or any DBNode-accepting function) makes the multi-statement operation
 // atomic — a failure in any statement rolls back every preceding statement.
+//
+// TRANSACTION RESTART ON A STALE SNAPSHOT (2026-10-28, issue #158)
+// ------------------------------------------------------------------
+// WithTx opens a DEFERRED transaction, so the transaction takes a READ
+// snapshot at its first read and acquires the write lock at its first write.
+// If another connection commits between those two points, the write cannot
+// upgrade: SQLite returns SQLITE_BUSY_SNAPSHOT, which does NOT invoke the
+// busy handler (so busy_timeout never waits on it) and cannot be cleared by
+// waiting.
+//
+// The statement-level retry in txNode.ExecTracked cannot clear it — the
+// snapshot belongs to the transaction, and the transaction's snapshot does not
+// change between attempts. So WithTx restarts the whole transaction: the
+// abandoned transaction is rolled back (undoing every write it made) and the
+// callback is re-run against a FRESH transaction, which takes a fresh
+// snapshot. The restart is bounded, and it never fires for a cancelled or
+// deadline-exceeded callback.
+//
+// Re-running the callback is the same pattern internal/capability already
+// uses — its withRetry wraps the ENTIRE WithTx and re-runs it on a busy
+// error — applied here more narrowly, to the one busy class that WithTx's
+// own machinery could not previously clear.
 func (dm *DatabaseManager) WithTx(fn func(DBNode) error) (err error) {
 	// D-003 (alpha-4.1.2): retry Begin() on SQLITE_BUSY / SQLITE_LOCKED.
 	//
-	// We intentionally do NOT retry the callback itself on busy. Callers
-	// that need callback-level retry (e.g. capability.Store.RecordInvocation
-	// has its own withRetry primitive at the Store layer) wrap WithTx in
-	// their own retry loop, and a nested retry inside WithTx would
-	// multiply their per-attempt budget. The AppendWorkEvent SELECT that
-	// motivated this comment originally ran into busy at Begin() time
-	// because 8+ goroutines raced on the same table — retrying Begin
-	// alone closes that hole. Mid-transaction busy is handled by
-	// ExecTracked's per-statement retry (which already retries 5 times
-	// per statement).
-	const maxAttempts = 5
+	// Begin-time busy is a genuine lock WAIT, so retrying Begin is the
+	// right remedy and needs no callback replay — the transaction never
+	// started, so there is nothing to undo. The AppendWorkEvent SELECT
+	// that motivated this comment originally ran into busy at Begin() time
+	// because 8+ goroutines raced on the same table; retrying Begin alone
+	// closes that hole.
+	//
+	// Mid-transaction busy is a different animal (see the function's doc
+	// comment): a snapshot conflict cannot be cleared by retrying the
+	// statement, so it is handled by restarting the transaction below
+	// rather than by the statement-level retry.
+	const beginMaxAttempts = 5
 	backoff := 100 * time.Millisecond
 	maxBackoff := 5 * time.Second
 
-	var tx *sql.Tx
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		tx, err = dm.db.Begin()
-		if err != nil {
-			if !IsBusyError(err) || attempt == maxAttempts {
-				return fmt.Errorf("begin transaction: %w", err)
+	for snapshotAttempt := 1; snapshotAttempt <= txSnapshotMaxAttempts; snapshotAttempt++ {
+		var tx *sql.Tx
+		for attempt := 1; attempt <= beginMaxAttempts; attempt++ {
+			tx, err = dm.db.Begin()
+			if err != nil {
+				if !IsBusyError(err) || attempt == beginMaxAttempts {
+					return fmt.Errorf("begin transaction: %w", err)
+				}
+				dm.busyRetries.Add(1)
+				time.Sleep(backoff)
+				if backoff < maxBackoff {
+					backoff *= 2
+				}
+				continue
 			}
-			dm.busyRetries.Add(1)
+			break
+		}
+		if tx == nil {
+			// Begin failed on every retry; loop terminated without a break.
+			// The last error is already set; return it.
+			return fmt.Errorf("begin transaction: exhausted %d retries: %w", beginMaxAttempts, err)
+		}
+
+		// Canonical pattern: covering defer, in covering position relative
+		// to the Begin statement. The lint gate (internal/audit/tx.go)
+		// classifies a tx as `tx-defer-rollback` when a `defer
+		// tx.Rollback()` lives in covering position; the covering defer
+		// here satisfies that rule and covers panic + non-commit error
+		// returns in a single construct.
+		//
+		// `tx` is declared inside the loop body, so each attempt's defer
+		// captures its OWN transaction: an abandoned attempt's defer can
+		// never roll back a later attempt's transaction.
+		defer func() {
+			if p := recover(); p != nil {
+				_ = tx.Rollback()
+				panic(p)
+			}
+			if err != nil {
+				_ = tx.Rollback()
+			}
+		}()
+
+		cbErr := fn(&txNode{tx: tx, dm: dm})
+		if cbErr == nil {
+			// A commit failure is NOT retried here. "cannot commit —
+			// SQLITE_BUSY" is ambiguous about whether the write landed, so
+			// re-running the callback could double-write. The error is
+			// returned to the caller instead, which is the pre-existing
+			// behaviour.
+			err = tx.Commit()
+			return err
+		}
+
+		// SQLITE_BUSY_SNAPSHOT: the transaction's read snapshot went stale
+		// because another connection committed after the snapshot was
+		// taken. No amount of statement-level retrying clears this — the
+		// snapshot is a property of the transaction. The remedy is to
+		// abandon this transaction and re-run the callback against a
+		// fresh one.
+		//
+		// The abandoned transaction is rolled back FIRST, so every write it
+		// made is undone and the retry starts from the same logical state.
+		// A cancelled or deadline-exceeded callback is never retried:
+		// re-running it would ignore the caller's cancellation.
+		if IsBusySnapshotError(cbErr) && snapshotAttempt < txSnapshotMaxAttempts &&
+			!errors.Is(cbErr, context.Canceled) && !errors.Is(cbErr, context.DeadlineExceeded) {
+			_ = tx.Rollback()
+			err = nil             // the abandoned transaction is already rolled back
+			dm.busyRetries.Add(1) // instrument: SQLITE_BUSY retry counter
 			time.Sleep(backoff)
 			if backoff < maxBackoff {
 				backoff *= 2
 			}
 			continue
 		}
-		break
-	}
-	if tx == nil {
-		// Begin failed on every retry; loop terminated without a break.
-		// The last error is already set; return it.
-		return fmt.Errorf("begin transaction: exhausted %d retries: %w", maxAttempts, err)
-	}
 
-	// Canonical pattern: covering defer at function scope. The lint
-	// gate (internal/audit/tx.go) classifies a tx as `tx-defer-rollback`
-	// when a `defer tx.Rollback()` lives in covering position relative to
-	// the Begin statement; the covering defer here satisfies that rule
-	// and covers panic + non-commit error returns in a single construct.
-	defer func() {
-		if p := recover(); p != nil {
-			_ = tx.Rollback()
-			panic(p)
-		}
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if err = fn(&txNode{tx: tx, dm: dm}); err != nil {
+		err = cbErr
 		return err
 	}
-	err = tx.Commit()
 	return err
 }
 
@@ -1280,6 +1374,23 @@ func isBusyError(err error) bool {
 // WithTx retry loops effective. Before this, parallel work-note
 // callers (8 simultaneous AppendWorkEvent transactions) lost ~7
 // of 8 events with the table-locked error falling through.
+//
+// SCOPE (2026-10-28, issue #158): this matcher is deliberately BROAD — it
+// answers "is this a busy error?", and it answers yes for
+// SQLITE_BUSY_SNAPSHOT as well, because that error IS a SQLITE_BUSY.
+//
+// It is NOT the place to decide what to DO about a busy error. One busy
+// class does not wait: SQLITE_BUSY_SNAPSHOT (a deferred transaction whose
+// read snapshot went stale) does not invoke the busy handler, so
+// busy_timeout never applies to it and no amount of waiting clears it.
+// Use IsBusySnapshotError to detect that class, and restart the transaction
+// rather than retrying the statement. The rest of the busy classes are
+// waits, and the statement-level retry is the right remedy for them.
+//
+// The two answers are complementary, and neither subsumes the other: a
+// message-matching classifier cannot tell the snapshot class apart (it
+// shares the message AND the primary code), and the extended-code check
+// cannot be used as a general "is this busy" test.
 func IsBusyError(err error) bool {
 	if err == nil {
 		return false
@@ -1290,6 +1401,62 @@ func IsBusyError(err error) bool {
 		strings.Contains(msg, "SQLITE_BUSY") ||
 		strings.Contains(msg, "SQLITE_LOCKED") ||
 		strings.Contains(msg, "cannot commit") && strings.Contains(msg, "locked")
+}
+
+// txSnapshotMaxAttempts is the number of times WithTx will restart a
+// transaction whose read snapshot went stale (SQLITE_BUSY_SNAPSHOT).
+//
+// The budget is deliberately small. A restart is not free — the abandoned
+// transaction's work is redone — and the conflict is a contention event, not
+// a fault: three attempts is enough for the overwhelmingly common case (one
+// competing writer committed between this transaction's read and its write),
+// and a writer that cannot get through in three attempts should surface the
+// contention to its caller rather than spin.
+const txSnapshotMaxAttempts = 3
+
+// IsBusySnapshotError reports whether err is SQLite's SQLITE_BUSY_SNAPSHOT
+// (primary code SQLITE_BUSY, extended code 517) — the failure a DEFERRED
+// transaction hits when it tries to turn a stale read snapshot into a write.
+//
+// WHY THIS IS NOT PART OF IsBusyError's MATCH
+// -------------------------------------------
+// SQLITE_BUSY_SNAPSHOT and ordinary SQLITE_BUSY share the primary code
+// (SQLITE_BUSY) AND the same message text ("database is locked"). A
+// message-matching classifier therefore cannot tell them apart — and the
+// distinction is load-bearing:
+//
+//   - Ordinary SQLITE_BUSY is a lock WAIT. The busy handler runs, so
+//     busy_timeout waits for the holder to finish, and the statement
+//     succeeds on its own once the lock clears. Retrying it in place is
+//     meaningful.
+//   - SQLITE_BUSY_SNAPSHOT is NOT a wait. SQLite does not invoke the busy
+//     handler for it, so busy_timeout is never consulted: the call returns
+//     in microseconds. It means "another connection committed after this
+//     transaction took its read snapshot, so this transaction can no longer
+//     upgrade to a write". Waiting cannot help — the snapshot is stale by
+//     definition. The ONLY remedies are to abandon the transaction and
+//     re-take it (fresh snapshot), or to take the write lock up front.
+//
+// The 2026-10-28 live-runtime audit (issue #158) observed exactly this:
+// `mpm_decisions record` failed with "database is locked" after burning
+// 3104 ms — the retry backoff sum (100+200+400+800+1600 = 3100 ms) — so
+// every attempt had returned instantly, which is the BUSY_SNAPSHOT
+// signature. The old code classified it as ordinary busy and retried the
+// statement inside the stale transaction five times, which could never
+// succeed.
+//
+// Exported so sibling packages (notably internal/capability, which has its
+// own retry loop) can classify it the same way DatabaseManager does
+// internally — the same single-source-of-truth contract IsBusyError has.
+func IsBusySnapshotError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se sqlite3.Error
+	if errors.As(err, &se) {
+		return se.ExtendedCode == sqlite3.ErrBusySnapshot
+	}
+	return false
 }
 
 // truncateQuery keeps only the first 120 characters of a query for watchdog
@@ -1433,19 +1600,28 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 	db.Exec("PRAGMA foreign_keys = ON")
 	db.Exec("PRAGMA journal_mode = WAL")
 	// busy_timeout is the per-connection SQLite lock-wait window. The DSN
-	// suffix `_busy_timeout=5000` (see sqliteWriteDSN) is supposed to set
-	// this at connection-open time, but mattn/go-sqlite3's lazy-connection
-	// pool can open subsequent pooled connections without honoring it,
-	// leaving busy_timeout at the SQLite default of 0 (no waiting).
-	// Combined with go-sqlite3 v1.14.37's silent swallow of SQLITE_BUSY in
-	// (*SQLiteRows).nextSyncLocked (sqlite3.go:2236-2245), a transient
-	// BUSY response becomes an unbounded retry loop burning a full core —
-	// see scheduler.go:572 / dispatch.go:90 (dispatchClaimNextAdHocWake)
-	// for the canonical repro. Setting busy_timeout explicitly here closes
-	// the gap structurally; database/sql re-runs the Exec on the first
-	// connection of every newly pooled handle, so this complements rather
-	// than duplicates the DSN path. (D-003 alpha-4.1.2 fix in the DSN
-	// layer; this is the belt-and-suspenders Exec at construction time.)
+	// suffix `_busy_timeout=5000` (see sqliteWriteDSN) sets this at
+	// connection-open time, and mattn/go-sqlite3 v1.14.37 honours it PER
+	// CONNECTION: the driver parses `_busy_timeout` in SQLiteDriver.Open
+	// (sqlite3.go:1200) and applies `PRAGMA busy_timeout` inside the same
+	// per-connection open path (sqlite3.go:1491). The driver's own default
+	// is also 5000 (sqlite3.go:1098), so a connection opened WITHOUT the
+	// DSN parameter still gets a 5-second wait window.
+	//
+	// CORRECTION (2026-10-28, issue #158): the previous text here claimed
+	// that "mattn/go-sqlite3's lazy-connection pool can open subsequent
+	// pooled connections without honoring it, leaving busy_timeout at the
+	// SQLite default of 0 (no waiting)". That is wrong on both counts —
+	// the parameter IS honoured per connection, and the driver's default
+	// is 5000, not 0. The stale claim mattered: it invited the conclusion
+	// that the busy timeout was absent, which is exactly the wrong
+	// conclusion for the SQLITE_BUSY_SNAPSHOT failure this PR fixes. That
+	// failure returns in microseconds because SQLite does not invoke the
+	// busy handler for a stale snapshot at all — a different mechanism
+	// entirely, not a missing timeout.
+	//
+	// The Exec below is belt-and-suspenders: it runs on whichever
+	// connection the pool hands out at construction time.
 	db.Exec("PRAGMA busy_timeout = 5000")
 	db.Exec("PRAGMA synchronous = NORMAL")
 	db.Exec("PRAGMA cache_size = -64000")
