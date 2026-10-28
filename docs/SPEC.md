@@ -2,7 +2,7 @@
 
 > **License:** [AGPL-3.0](../LICENSE) — copyleft with network-use clause. See [LICENSE](../LICENSE) for the full text.
 
-> **Looking to install?** See [`agent_installation/INSTALL.md`](../agent_installation/INSTALL.md) for per-agent wiring (Claude Code, OpenCode, Pi, Hermes, OpenClaw), or jump to [§5 Quick Start](#5-quick-start) for MPM-only install.
+> **Looking to install?** See [`agent_installation/INSTALL.md`](../agent_installation/INSTALL.md) for OpenCode wiring — the only supported agent host in this release — or jump to [§5 Quick Start](#5-quick-start) for MPM-only install.
 
 MPM is an observable substrate for long-lived autonomous systems. Persistent memory is just one capability. Work, provenance, decisions, theories, and execution telemetry are all governed by the same self-observing foundation. The substrate is closed under observation: every operation on MPM is itself observable through MPM's own tools.
 
@@ -280,7 +280,7 @@ Procedural memory: "how to act." A skill is a markdown document with YAML frontm
 
 Information that supports or challenges another artifact. Evidence is the substrate from which confidence is derived, never an artifact-level assertion of truth.
 
-**Calling-framework provenance.** When a non-MPM caller (Claude Code, OpenCode, a custom agent) invokes `mpm call`, MPM reads the following environment variables to record the calling framework's identity in its audit trail:
+**Calling-framework provenance.** When a non-MPM caller (an MCP host such as OpenCode, or a custom agent) invokes `mpm call`, MPM reads the following environment variables to record the calling framework's identity in its audit trail:
 
 | Env var | Purpose | Default |
 |---------|---------|---------|
@@ -683,7 +683,7 @@ mpm kb hint "discussing the CSS injection approach for the widget system"
 #    RATIONALE: WordPress strips <style> blocks from post content...
 ```
 
-FTS5 keyword extraction detects semantic overlap with the current context and pushes a low-latency recall hint — with STATUS and RATIONALE displayed directly, not just the content. The `mpm_context action=proactive_recall_hint` tool is wired into the OpenClaw agent loop and surfaces the most relevant epistemology memory automatically after context shifts.
+FTS5 keyword extraction detects semantic overlap with the current context and pushes a low-latency recall hint — with STATUS and RATIONALE displayed directly, not just the content. The `mpm_context action=proactive_recall_hint` tool surfaces the most relevant epistemology memory after a context shift. It is *advisory*: the agent decides whether to act on the hint, and no host adapter is required to call it.
 
 ### 4.7 What happens when MPM is wrong?
 
@@ -789,13 +789,13 @@ make build           # produces .build/bin/{mpm,mpm-mcp,mpm-scheduler,mpm-critic
 
 The single binary lives at `.build/bin/mpm` after `make build`. Build output is
 checkout-local and disposable; it is never installed and never executed by a
-service. Try it without installing anything — no daemon setup, no service registration, no config files. (`make install` is the explicit promotion step; it copies all five binaries from `.build/bin/` to `$HOME/.mpm/bin` — the canonical install prefix, and the only thing that writes it. For a full systemd + OpenClaw install, run `./install.sh` — the canonical path. The companion daemons `mpm-mcp` and `mpm-scheduler` install together when you want autonomous operation — see §5.2.)
+service. Try it without installing anything — no daemon setup, no service registration, no config files. (`make install` is the explicit promotion step; it copies all five binaries from `.build/bin/` to `$HOME/.mpm/bin` — the canonical install prefix, and the only thing that writes it. For a full systemd install, run `./install.sh` — the canonical path. The companion daemons `mpm-mcp` and `mpm-scheduler` install together when you want autonomous operation — see §5.2.)
 
 ### 5.2 Run it as a daemon
 
-This section shows the daemon + systemd setup manually, for transparency and for operators who want to customize individual steps. If you don't need that control, run `./install.sh` instead — it does most of the below (build, install to `~/.mpm/bin`, `make service-scheduler`, `systemctl --user enable --now`, the eCryptfs autostart workaround, and OpenClaw wiring) in one idempotent step. `mpm ops init directives` (see the "Seed the baseline cognitive directives" step in [§5.2](#52-run-it-as-a-daemon)) is **not** part of `install.sh`: the baseline is seeded automatically when the database is created, so the command is a re-run / recovery path rather than a required install step. `make service-telemetry` likewise is a separate manual step. Use the manual steps below when you need to pin a specific version, point a unit at a non-canonical install path, or otherwise deviate from the canonical layout.
+This section shows the daemon + systemd setup manually, for transparency and for operators who want to customize individual steps. If you don't need that control, run `./install.sh` instead — it does most of the below (build, install to `~/.mpm/bin`, `make service-scheduler`, `systemctl --user enable --now`, and the eCryptfs autostart workaround) in one idempotent step. `mpm ops init directives` (see the "Seed the baseline cognitive directives" step in [§5.2](#52-run-it-as-a-daemon)) is **not** part of `install.sh`: the baseline is seeded automatically when the database is created, so the command is a re-run / recovery path rather than a required install step. `make service-telemetry` likewise is a separate manual step. Use the manual steps below when you need to pin a specific version, point a unit at a non-canonical install path, or otherwise deviate from the canonical layout.
 
-For autonomous operation — the scheduler dispatches system-kind wakes (critic audits, snapshots, GC, broadcasts) on a 60s ticker, and `mpm-mcp` exposes MPM to MCP hosts (Claude Code, OpenClaw) over stdio:
+For autonomous operation — the scheduler dispatches system-kind wakes (critic audits, snapshots, GC, broadcasts) on a 60s ticker, and `mpm-mcp` exposes MPM to any MCP host over stdio:
 
 ```bash
 git clone https://github.com/flowbyte-com/mpm ~/src/mpm
@@ -921,7 +921,7 @@ MPM provides advanced cognitive machinery — wake-context surfacing, audit-clus
 
 The baseline is applied **automatically** when the database is created, so a fresh install already carries the five reference directives. The command above re-runs the same idempotent seed — useful after an accidental shred, or to seed the shared database of a multi-agent workspace. On a fresh install it reports `0 created, 5 skipped`, because the rows are already there. Idempotent — safe to re-run; local edits are preserved.
 
-**Wire up the MCP host** (Claude Code, OpenClaw, etc.). `mpm-mcp` is spawned by the host as a stdio child process — no separate service to manage. Example `.mcp.json`:
+**Wire up an MCP host** (if you are not using the OpenCode plugin). `mpm-mcp` is spawned by the host as a stdio child process — no separate service to manage. Example `.mcp.json`:
 
 ```json
 {
@@ -979,50 +979,46 @@ mpm config profile set router model meta-llama/llama-3.3-70b-instruct:free
 
 Done. That's the cognitive loop: observe, decide, theorize, challenge, and (with the bootstrap) keep reasoning alive across sessions and vacations. The rest of this document explains how each piece works and how to operate the system at scale.
 
-### 5.4 Customize your agent's core files
+### 5.4 Customize your agent's persistent instructions
 
-The cognitive machinery in §5.2 runs without customization. But the agent
-that runs it is generic — it doesn't know who you are, what you prefer, or
-how you like to work. The workspace files at `~/.openclaw/workspace/` turn
-a generic assistant into one that's yours.
+The cognitive machinery in §5.2 runs without customization. But the agent that
+runs it is generic — it does not know who you are, what you prefer, or how you
+like to work. On OpenCode, the persistent instruction surfaces are:
 
-| File | What it shapes | When to edit |
+| Surface | What it shapes | When to edit |
 |---|---|---|
-| `IDENTITY.md` | Name, sigil, color, emoji — who the agent _is_ | During bootstrap; revisit when the persona evolves |
-| `SOUL.md` | Persona, tone, boundaries, vibe — how the agent _behaves_ | During bootstrap; refine as patterns emerge |
-| `AGENTS.md` | Operating instructions, memory workflow, red lines | As the workflow stabilizes — this is the agent's operating manual |
-| `USER.md` | Who you are, how to address you, your preferences | Once you know what the agent should remember about you |
-| `TOOLS.md` | Local tool conventions (cameras, SSH hosts, TTS voices, etc.) | When you start using tools the agent doesn't know about |
-| `HEARTBEAT.md` | Periodic check tasks (or empty to skip heartbeats) | When you want scheduled checks |
-| `MEMORY.md` | Curated long-term memory — durable facts, preferences, decisions | Continuously, as the agent learns things worth keeping |
-| `memory/YYYY-MM-DD.md` | Daily logs of what happened | Daily, raw session notes |
+| `~/.config/opencode/AGENTS.md` (user scope) | Behaviour for every project on this machine, including the MPM managed block | Written by the MPM installer. Edit only **outside** the managed-block markers |
+| `<project>/AGENTS.md` (project scope) | Project conventions, commands and red lines | As the project's workflow stabilises |
+| `~/.config/opencode/opencode.jsonc` | Which plugins load (including `mpm-opencode`) | When changing the integration; the installer owns the MPM entry |
 
-**Start simple. Iterate as the agent does work.** You don't need to fill
-these in upfront — they co-evolve with the agent over sessions:
+The MPM managed block inside `AGENTS.md` is **generated** from a canonical
+source — do not hand-edit it. See
+[`agent_installation/README.md`](../agent_installation/README.md) for the
+reconciliation rules, and
+[`agent_installation/INSTALL.md`](../agent_installation/INSTALL.md) for the
+install and uninstall procedures.
 
-1. Run the agent for a week on default files.
+**Start simple. Iterate as the agent does work.** You do not need to fill these
+in upfront — they co-evolve with the agent over sessions:
+
+1. Run the agent for a week on the defaults.
 2. Notice where it's _generic_ (no opinions, no preferences, no knowledge of you).
 3. Edit the relevant file to capture the gap.
 4. Repeat.
 
-**SOUL.md is the highest-leverage file.** Loaded every session, sets the tone.
-See the [SOUL.md personality guide](https://docs.openclaw.ai/concepts/soul)
-for what good ones look like. Defaults are friendly-but-generic; an
-opinionated SOUL.md (with stance, no preamble, sharp entrances) is the
-difference between a chatbot and an assistant that feels like a colleague.
+**Three memory layers, three different jobs.**
 
-**Three memory layers, three different jobs.** The full agent stack has:
-
-- **Workspace files** — who the agent _is_ (OpenClaw-side, markdown in
-  `~/.openclaw/workspace/`)
-- **MPM prime directives** — how MPM's machinery hooks in (DB-side, rows in
-  the `directives` table, seeded automatically when the database is created)
+- **Persistent instructions** — how the agent should behave
+  (`AGENTS.md`, plus the MPM managed block).
+- **MPM prime directives** — how MPM's machinery hooks in (DB-side, rows in the
+  `directives` table, seeded automatically when the database is created).
 - **MPM memories** — what the agent _believes_ (DB-side,
-  `mpm_memory action=save` / `mpm_memory action=query`, scales to thousands of rows)
+  `mpm_memory action=save` / `mpm_memory action=query`, scales to thousands of
+  rows).
 
-Use `MEMORY.md` for "who am I and what do I know about my user". Use MPM
-directives for "how does MPM's machinery actually fire". Use MPM memories
-for "what does the agent believe, why, and with what evidence". All three
+Use persistent instructions for "how should this agent behave". Use MPM
+directives for "how does MPM's machinery actually fire". Use MPM memories for
+"what does the agent believe, why, and with what evidence". All three are
 required for the closed cognitive loop.
 
 ---
@@ -1120,7 +1116,7 @@ Initial confidence is also fixed by artifact type:
 
 #### Source of truth + cache
 
-The stored `confidence` column is a performance cache. The evidence ledger is the source of truth. If they disagree, the cache is wrong. `mpm ops confidence recompute` triggers a manual recompute; `mpm_confidence action=query_history` derives its view from evidence, not the cached column.
+The stored `confidence` column is a performance cache. The evidence ledger is the source of truth. If they disagree, the cache is wrong. `mpm ops confidence recompute` triggers a manual recompute; `mpm_confidence action=history` derives its view from evidence, not the cached column.
 
 **Time decay is maintained, not implied.** The formula subtracts `λ · days` of elapsed time, but a cache does not change by itself. A bounded maintenance pass keeps it honest: `mpm ops confidence decay` (also run automatically by the `confidence_decay` scheduler task, cadence-gated) recomputes at most `confidence.decay.limit` due artifacts per invocation, and only those not checked within `confidence.decay.min_age_hours`. Each artifact is recomputed and its `confidence_checked_at` watermark advanced in one transaction, so a failure retries exactly that artifact and a completed pass is a no-op until the minimum age elapses. An unchanged result advances the watermark but appends no `confidence_history` row; a changed result goes through the same authoritative path as an evidence event, including cascade crossings. Participants are memory, theory and decision rows (the `memories` table). Lessons (`lessons_base`) are not part of this pass: their cached confidence is not consulted by any gate, and adding a second watermark surface is a follow-up rather than a silent omission.
 
@@ -1147,7 +1143,7 @@ with `vector_weight = 0.5` by default. Use `--semantic` to drop BM25 and search 
 
 > **If you want a memory to surface higher, write better content.** Lexical match and semantic similarity respond to the words you put in. `mpm reinforce` increases the displayed `reinforcement_count` but does not change retrieval order.
 
-> **FTS5 tokenization contract.** The `lessons_fts` and `memories_fts` indexes use SQLite's FTS5 with the `porter unicode61` tokenizer (English stemming, ASCII case-folding). Hyphens, underscores, and dots are SPLIT — `"lazy-start"` becomes two tokens `lazy` and `start`. Queries are auto-expanded with prefix wildcards per token (`lazy* AND start*`), so the FTS5 contract is implicit-AND across all tokens. FTS5 special characters (`"`, `(`, `)`, `*`, `+`, `-`, `:`) are stripped from query input; agents querying MPM should pass natural-language query strings rather than raw FTS5 syntax. The contract is enforced in `internal/core/fts5_query.go::BuildFTS5Query` and taught in the `mpm_lessons action=query` / `mpm_memory action=query` tool descriptions so the agent doesn't have to memorise the tokenizer's quirks.
+> **FTS5 tokenization contract.** The `lessons_fts` and `memories_fts` indexes use SQLite's FTS5 with the `porter unicode61` tokenizer (English stemming, ASCII case-folding). Hyphens, underscores, and dots are SPLIT — `"lazy-start"` becomes two tokens `lazy` and `start`. Queries are auto-expanded with prefix wildcards per token (`lazy* AND start*`), so the FTS5 contract is implicit-AND across all tokens. FTS5 special characters (`"`, `(`, `)`, `*`, `+`, `-`, `:`) are stripped from query input; agents querying MPM should pass natural-language query strings rather than raw FTS5 syntax. The contract is enforced in `internal/core/fts5_query.go::BuildFTS5Query` and taught in the `mpm_lessons action=search` / `mpm_memory action=query` tool descriptions so the agent doesn't have to memorise the tokenizer's quirks.
 
 > **Implementation note:** The hybrid scoring function lives in `internal/core/hybrid_search.go`. The default embedding model is `nomic-embed-text` (768-dim), served by a **locally running Ollama instance** as the supported embedding inference provider. Ollama performs inference and returns vectors to MPM — the vectors are then persisted in the same SQLite database (alongside the memories they describe), partitioned into Voronoi cells by the shared IVF index (§6.5 Layer 1). Ollama is an inference dependency, not a separate persistence substrate or vector database; the configured embedding component can also be set to `"disabled"` (NullProvider) when semantic recall is not required.
 
@@ -1222,17 +1218,24 @@ When a drifting memory triggers this signature, the engine quarantines the memor
 
 *Bridges JSON-RPC from any MCP-aware host to the CoreDB contract — agents see tools, not SQL.*
 
-MPM integrates directly with AI agents as a **single MCP server**. The Go binary (`mpm-mcp`) is the only substrate; agents connect to it via MCP and receive the full MPM tool surface as native function calls. No plugin layer, no Node/TypeScript wrapper, no Python shim — one binary speaking MCP.
+MPM offers **two** host-facing transports over one substrate, and the distinction matters because they are not interchangeable:
 
-The migration from the legacy plugin model (per-agent TypeScript wrappers calling the CLI binary via `child_process`) to the current MCP server model happened in 2026-06-23. The deleted plugin folders and their associated TypeScript sources are gone. The MCP server is the only integration surface for MCP-aware clients.
+| Transport | Binary / package | What the host gets | Status |
+|---|---|---|---|
+| **MCP over stdio** | `mpm-mcp` (Go) | The full registry as native tools, filtered by default to the compact 3-tool surface; `MPM_EXPOSE_ALL_TOOLS=1` restores the full set | Supported, host-agnostic |
+| **OpenCode plugin** | `agent_installation/mpm-opencode` (TypeScript) | 17 typed tools registered directly in the host, with `mpm call` as the CLI fallback for the rest | Supported — this is what the OpenCode installer sets up |
 
-For a step-by-step recipe for connecting OpenCode to MPM — including the plugin registration, the `MPM_PROVENANCE_*` environment variables, and the `read_wake_context --format=system-prompt` injection path — see `agent_installation/mpm-opencode/README.md`.
+The Go binary is the substrate for both: the plugin is a thin transport shim that stringifies its payload and spawns `mpm call <tool> --payload '<json>'`. It carries no domain logic, no LLM prompts and no caching.
+
+Historical note: the 2026-06-23 migration replaced an earlier *per-agent* plugin model (one TypeScript wrapper per host, each calling the CLI via `child_process`) with the MCP server, and for a time `mpm-mcp` was the only integration surface. The 2026-10-16 OpenCode port reintroduced a single host-specific plugin — for one host, on purpose — after the MCP-only surface proved too small for daily use on that host. The two-transport model described above is the current contract.
+
+For a step-by-step recipe for connecting OpenCode — including the plugin registration, the `MPM_PROVENANCE_*` environment variables, and the wake-context injection path — see [`agent_installation/mpm-opencode/README.md`](../agent_installation/mpm-opencode/README.md).
 
 #### MCP tool surface
 
 The MCP server exposes the full MPM substrate as native function calls. Adding a new tool is a single Go function — no plugin path, no shell wrapper, no parallel documentation.
 
-The **default model-facing surface** is the compact 3-tool set: `mpm_memory`, `mpm_context`, `mpm_help` — **intentionally fixed**, not derived. Hosts receive this on session start; the model sees a small, stable surface that covers the daily cognitive workflow (memorise / recall / skill lookup / wake refresh / handoff / scratchpad / directive management). The block below lists the **Registry entries** — the internal substrate; the count is derived dynamically from the live Registry and grows or shrinks as tools are added or removed. The full registered MCP surface includes those Registry entries plus the `mpm_help` discovery closure (registered at server init by `cmd/mpm-mcp`); the on-wire tool count is `len(Registry) + 1` and is **not** pinned in prose. The agent discovers specialist tools on demand via `mpm_help`'s `list`/`show` actions; those same actions are reachable over the CLI fallback (`mpm call mpm_help --payload '{"action":"list"}'`), so a host with no native tool surface can still enumerate the surface instead of consulting a hard-coded tool list. Tools filtered out of the default `tools/list` are NOT directly callable over the compact MCP transport; reach them through `mpm call <tool> --payload '...'` (CLI fallback, every host) or by setting `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block to restore the full registered MCP surface natively.
+The **default model-facing surface** is the compact 3-tool set: `mpm_memory`, `mpm_context`, `mpm_help` — **intentionally fixed**, not derived. Hosts receive this on session start; the model sees a small, stable surface covering the core loop: memorise and recall (`mpm_memory`), wake refresh, directives, routing and the activity feed (`mpm_context`), plus handoff through `mpm_context` action `write_handoff` (see the handoff table below), and capability discovery (`mpm_help`). It does **not** cover skills, work items, topics, references or the scratchpad — those need `MPM_EXPOSE_ALL_TOOLS=1` or the `mpm call` fallback. The OpenCode plugin is the exception: it registers 17 typed tools directly, so every one of them is native there. The block below lists the **Registry entries** — the internal substrate; the count is derived dynamically from the live Registry and grows or shrinks as tools are added or removed. The full registered MCP surface includes those Registry entries plus the `mpm_help` discovery closure (registered at server init by `cmd/mpm-mcp`); the on-wire tool count is `len(Registry) + 1` and is **not** pinned in prose. The agent discovers specialist tools on demand via `mpm_help`'s `list`/`show` actions; those same actions are reachable over the CLI fallback (`mpm call mpm_help --payload '{"action":"list"}'`), so a host with no native tool surface can still enumerate the surface instead of consulting a hard-coded tool list. Tools filtered out of the default `tools/list` are NOT directly callable over the compact MCP transport; reach them through `mpm call <tool> --payload '...'` (CLI fallback, every host) or by setting `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block to restore the full registered MCP surface natively.
 
 ```
 <!-- tools:begin — auto-generated by `go generate ./internal/tools/`. Do not edit by hand. -->
@@ -1246,21 +1249,50 @@ mpm_blob_read            mpm_blob_search          mpm_work
 <!-- tools:end — auto-generated by `go generate ./internal/tools/`. Do not edit by hand. -->
 ```
 
-Wiring a new agent: add `mpm-mcp` to its MCP server config (OpenClaw: `mcp.servers.mpm` in `openclaw.json`; Claude Code: `.mcp.json`; any other MCP-aware client). The installed server binary is at `~/.mpm/bin/mpm-mcp`; a developer build lands in `.build/bin/mpm-mcp` and must be promoted with `make install` before it is used to serve an agent.
+Wiring an unsupported host: add `mpm-mcp` to that host's MCP server config. The installed server binary is at `~/.mpm/bin/mpm-mcp`; a developer build lands in `.build/bin/mpm-mcp` and must be promoted with `make install` before it is used to serve an agent.
 
 #### Supported integrations at a glance
 
-MPM ships first-party integration adapters for five agent hosts. Each one delivers MPM wake context before the first model turn — using whatever lifecycle mechanism the host exposes — except where noted:
+**OpenCode is the only supported agent host in this release.** The Claude Code,
+Pi, Hermes and OpenClaw adapters were retired on 2026-10-27; their directories
+are gone from the tree. Retiring an adapter stops MPM from *configuring* that
+host. It does not touch an integration an operator already has, and the
+diagnostic no longer reports it.
 
 | Host | Mechanism | Wake delivery |
 |---|---|---|
-| **Claude Code** | MCP server + SessionStart hook | Automatic (host invokes `mpm_context` action `read_wake_context` and injects the result as `hookSpecificOutput.additionalContext`) |
-| **OpenClaw** | MCP server + typed `session_start` → `agent_turn_prepare` plugin | Automatic (`prependContext` on the first turn) |
-| **OpenCode** | TypeScript plugin (typed tools) + `experimental.chat.system.transform` | Automatic (push into the system prompt before the first model call) |
-| **Pi** | TypeScript extension (typed tools) + `pi.on("session_start")` → `pi.on("before_agent_start")` | Automatic (concatenated onto the system prompt once per session) |
-| **Hermes** | MCP server (no host plugin layer) | **Manual** — Hermes has no session-start hook; the agent calls `mcp__mpm__mpm_context` action `read_wake_context` once at the start of its first turn |
+| **OpenCode** | TypeScript plugin (17 typed tools + `mpm call` CLI fallback to the full registry) + the `AGENTS.md` managed block | Automatic (push into the system prompt before the first model call) |
 
-The mechanism details, installation steps, and host-specific constraints live in each adapter's directory under `agent_installation/`. Compact handoff uses `mpm_context` action `write_handoff` on every host; the substrate `mpm_handoff` tool remains reachable via `mpm call mpm_handoff --payload '…'` when the MCP transport is unavailable or `MPM_EXPOSE_ALL_TOOLS=1` is set.
+The mechanism details, installation steps and host-specific constraints live in
+[`agent_installation/`](../agent_installation/README.md); the procedural manual
+is [`agent_installation/INSTALL.md`](../agent_installation/INSTALL.md).
+
+**Unsupported hosts.** The substrate is host-independent: `mpm`,
+`mpm call <tool> --payload '<json>'` and the `mpm-mcp` stdio server work from any
+host. What an unsupported host lacks is the managed behavioural block and
+host-native wake-context delivery. Wiring one is a manual job — add `mpm-mcp` to
+that host's MCP server configuration — and MPM neither ships nor supports an
+adapter for it.
+
+**Handoff, and why it has three spellings.** The record is `mpm_handoff`
+(action `write`). How you reach it depends on which surface you are standing on,
+and the three surfaces are genuinely different — not aliases of each other:
+
+| Surface | Handoff call |
+|---|---|
+| OpenCode plugin | `mpm_handoff` — a native tool |
+| Compact MCP surface (`mpm_memory`, `mpm_context`, `mpm_help`) | `mpm_context` action **`write_handoff`** / **`read_handoff`** — the MCP adapter routes them to the `mpm_handoff` handler |
+| Registry / CLI (`mpm call <tool>`, `mpm_help`) | `mpm call mpm_handoff --payload '{"action":"write","params":{…}}'` |
+
+The asymmetry is deliberate and it is the one thing to get right: the compact
+MCP wrapper publishes a *shorter, different* action vocabulary than the
+registered `mpm_context` entry. `mpm call mpm_context --payload
+'{"action":"write_handoff"}'` therefore **fails** with `unknown action`,
+because the CLI enforces the registered enum — use `mpm_handoff` there. The
+MCP wrapper's vocabulary is documented at
+`cmd/mpm-mcp/tools.go` (`CompactMpmContextActionVocabulary`), and
+`internal/core/tools/compact_surface_filter_test.go` pins that the default
+surface is exactly three tools.
 
 #### Single source of truth: `internal/core/tools/registry.go`
 
@@ -1378,14 +1410,14 @@ Multiple agents on a single workstation can share a single source of truth for h
 
 These two databases solve different problems. Conflating them is the most common misread of the architecture.
 
-- **`mpm.db`** is **host-shared** — one DB per host (`~/.mpm/src/db/mpm.db` by default, override via `MPM_WORKSPACE`). Every local agent on that host (OpenClaw, OpenCode, Claude Code, Pi, Hermes, the MCP server, the scheduler, the critic) opens the same file. There is **no inter-agent federation required**; SQLite's single-writer WAL + `busy_timeout=5s` serialises writes without coordination.
+- **`mpm.db`** is **host-shared** — one DB per host (`~/.mpm/src/db/mpm.db` by default, override via `MPM_WORKSPACE`). Every local MPM-aware client on that host (the OpenCode plugin, the `mpm-mcp` server, the scheduler, the critic, the `mpm` CLI) opens the same file. There is **no inter-agent federation required**; SQLite's single-writer WAL + `busy_timeout=5s` serialises writes without coordination.
 - **`shared.db`** is **project- or organisation-shared** — a *separate* file that crosses host and team boundaries. It is what a repo's `.mpm/shared.db` looks like when committed to git, or what a CI cluster mounts as a shared volume. It is **not** the same thing as `mpm.db`, and it is **not** auto-created.
 
 ```
 ┌─────────────────── Single host ───────────────────┐
-│  OpenClaw   OpenCode   Claude Code   Pi          │
-│       \       |       /       \      |          │
-│        \      |      /         \     |          │
+│   OpenCode    mpm-mcp    mpm CLI    scheduler   │
+│       \          |         |          /         │
+│        \         |         |         /          │
 │         ────── mpm.db (host-local) ──────        │
 └──────────────────────────────────────────────────┘
 
@@ -1678,7 +1710,9 @@ mpm-telemetry observe [--since] [--threshold] [--min-invocations]
                                          # (observation, NOT ROI metric; human arbitrates)
 ```
 
-`observe` is the cross-DB anomaly detector. It aggregates token burn per session via the telemetry ledger, then asks MPM (via `mpm call mpm_provenance --payload '{"action":"count_by_session",...}'`) how many artifacts the session produced. Sessions with high token burn and zero new artifacts surface as `type: "observation"` lessons — descriptive, not prescriptive. The cross-DB call is parameterized so the test suite injects a stub; the production shell-out is in `cmd/mpm-telemetry/observe.go`.
+`observe` is the cross-DB anomaly detector. It aggregates token burn per session via the telemetry ledger, then counts how many artifacts the session produced. Sessions with high token burn and zero new artifacts surface as `type: "observation"` lessons — descriptive, not prescriptive.
+
+**There is no `mpm_provenance` tool.** An earlier revision of this section named one (`mpm call mpm_provenance --payload '{"action":"count_by_session"}'`), and the critic and telemetry sidecar both shelled out to it; the registry publishes 21 tools and none of them is `mpm_provenance`, so those calls failed on every qualifying session. The count is a substrate query, not a tool call: `internal/critic.SessionArtifactCount` applies the same attribution rule the missed-opportunity hunt uses (`artifact_provenance.invocation_id` → invocation → framework session) against the critic's own connection. Do not reintroduce the shell-out.
 
 **Verification.** `scripts/smoke_telemetry.sh` is a hermetic end-to-end test: boots the collector in a temp dir, sends 3 synthetic frames + an idempotent retry + a conflicting duplicate + a bad-schema frame, runs `query` / `cost` / `observe --dry-run`, asserts the row count via sqlite. Exits 0 on success.
 
@@ -2474,7 +2508,7 @@ CLI commands enforce byte and char caps on input payloads and rendered output, p
 | `mpm add --file` payload cap | 100 MiB | `cmd/mpm/handlers_memory.go:23` (`memoryMaxFileBytes`) | Hard cap on the size of `--file` payload accepted by `mpm add`. A file larger than this is rejected with an explicit error rather than silently truncated. | not user-overridable |
 | `mpm add` inline content cap | 1 MiB | `cmd/mpm/simple_cmds.go:97` (`maxAddBytes`) | Cap on the inline content string passed to `mpm add` (the positional/argv form, distinct from `--file`). Larger content must use `--file` instead. | not user-overridable |
 | Reference attachment cap | 100 MiB | `cmd/mpm/simple_cmds.go:921` (`maxRefBytes`) | Cap on reference attachment size accepted by `mpm kb reference admit` and related subcommands. | not user-overridable |
-| Route-render body cap | 9 500 chars | `cmd/mpm/route_render.go:179` (`routeOutputCap`) | Total rendered body size for `mpm ops stance` output, deliberately under Claude Code's 10 000-char hook stdout limit so the directive isn't truncated mid-injection. | not user-overridable |
+| Route-render body cap | 9 500 chars | `cmd/mpm/route_render.go:179` (`routeOutputCap`) | Total rendered body size for `mpm ops stance` output, deliberately under the 10 000-character stdout cap several agent hosts impose on hook output, so the directive isn't truncated mid-injection. | not user-overridable |
 | Route-render mode hard cap | 9 000 chars | `cmd/mpm/route_render.go:180` (`routeModeHardCap`) | Hard ceiling on the mode portion of a rendered route — preserves room for persona content under the 9 500-char body cap when both are present. | not user-overridable |
 | `mpm ops resolve-contradictions` default `--limit` | 100 | `cmd/mpm/ops_resolve_contradictions.go:40` (`defaultResolveLimit`) | Default row count for `mpm ops resolve-contradictions --limit`. Capped at 10× the default (1 000) regardless of caller-supplied limit. | caller-controlled (capped at 1 000) |
 | `mpm ops resolve-contradictions --propose` scan limit | 100 per source | `cmd/mpm/ops_resolve_contradictions.go` (`defaultProposeScanLimit`) | How many memories each side of the corpus (local, shared) contributes to the proposal comparison window. Duplicated IDs are removed before any comparison. Raising it never bypasses the comparison, candidate or write budgets. | `--propose-limit=N` (1..2000; `all` is rejected) |
@@ -2545,7 +2579,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`restore-db`** — Restore database from SQL dump
 - **`review`** — Start spaced-repetition review
 - **`rm`** — Delete memory
-- **`route`** — Route prompt to mode/persona (Claude Code hook input)
+- **`route`** — Route a prompt to a mode/persona; returns the directive to inject
 - **`save-skill`** — Save skill from markdown file (--file, --name, --version, --force)
 - **`session`** — Manage sessions
 - **`set-weight`** — Set stored weight 0–100 (decay/LTM/provenance; does not affect current retrieval ranking — see §6.3)
@@ -2796,7 +2830,7 @@ The `Exit Criteria` line is the discipline that prevents context crunch: without
 
 The `retrieval_metadata` table is a 1:1 mapping with any cognitive node (Memory, Lesson, Decision, Theory, Skill). It tracks two signals: how often a node was surfaced into agent working memory (`reuse_count`, `last_retrieved_at`), and how often it actively helped produce durable knowledge (`success_count`). The schema is observability only — search ranking, FTS sorting, and cognitive-object schemas are unchanged. Future rankers can consult `retrieval_metadata` to blend a reuse-adjusted score; today `DefaultRanker` returns the FTS score unchanged.
 
-**Automatic instrumentation.** The agent never manages these stats explicitly. Every `mpm_context action=read_wake_context` boot, every `mpm_memory action=query` result, every `mpm_lessons action=query` result, and every `mpm_skills action=read` call increments `reuse_count` and updates `last_retrieved_at` via `RecordRetrieval` — fire-and-forget, errors swallowed so telemetry never blocks the user-facing path.
+**Automatic instrumentation.** The agent never manages these stats explicitly. Every `mpm_context action=read_wake_context` boot, every `mpm_memory action=query` result, every `mpm_lessons action=search` result, and every `mpm_skills action=read` call increments `reuse_count` and updates `last_retrieved_at` via `RecordRetrieval` — fire-and-forget, errors swallowed so telemetry never blocks the user-facing path.
 
 **Provenance Proxy via `mpm_lessons action=save`.** When the agent distils a lesson, the optional `source_ids` array credits each cited node with a `success_count` increment via `IncrementSuccess` (INSERT-or-UPDATE). A node that was already retrieved has its `success_count` bumped; a node cited from prior-session memory but not surfaced this turn gets a fresh row with `success_count=1, reuse_count=0`. The "Provenance Proxy" name reflects the design intent: from any successful lesson, the system can trace back to the cognitive nodes that informed it, even when those nodes were never re-read in the session where the lesson was synthesized.
 
@@ -2816,9 +2850,9 @@ The handler infers `node_type` from the id prefix (`skill:`, `lesson:` / `les-`,
 **Why observability first, ranking later.** The system records retrieval patterns for a month before any ranker consults them. Today, `reuse_count` and `success_count` are facts the operator can read; tomorrow, a future ranker can use the same data to promote frequently-cited memories and demote never-reused ones. The schema, the instrumentation, and the UPSERT path are the durable substrate; the ranker is the consumer that hasn't shipped yet.
 #### XITL Stance Hot-Swap
 
-*Runtime mode/persona switching without restart — the directive prints to stdout, OpenClaw injects, the agent adopts on next turn.*
+*Runtime mode/persona switching without restart — the directive prints to stdout, the host injects it, the agent adopts it on the next turn.*
 
-`mpm ops stance assume <mode> <persona> <rationale>` switches mode/persona at runtime with no restart. The new directive prints to stdout — OpenClaw captures it and injects into session chat history, so the agent reads and adopts it on the very next turn. `mpm ops stance synthesize <name>` generates a JIT ephemeral persona from a prompt; `mpm ops stance promote` flushes it to a permanent `.md` file.
+`mpm ops stance assume <mode> <persona> <rationale>` switches mode/persona at runtime with no restart. The new directive prints to stdout; the host captures it and injects it into the session, so the agent reads and adopts it on the very next turn. `mpm ops stance synthesize <name>` generates a JIT ephemeral persona from a prompt; `mpm ops stance promote` flushes it to a permanent `.md` file.
 #### Security Scanning
 
 *19 regex patterns gate every memory write — blocked content goes to the mirror log but never reaches the database.*
@@ -2864,7 +2898,7 @@ scope = "global" | "framework:<id>"
 ```
 
 - `"global"` — every agent framework receives this directive
-- `"framework:<id>"` — only the named framework receives it. Standard ids: `openclaw`, `opencode`, `pi`, `claude-code`, `hermes`
+- `"framework:<id>"` — only the named framework receives it. The id is an arbitrary string recorded from `MPM_PROVENANCE_FRAMEWORK`; `opencode` is the id the supported adapter sets. Ids of retired adapters (`pi`, `claude-code`, `hermes`, `openclaw`) remain valid vocabulary for existing rows.
 - empty / unset — treated as `"global"` at materialisation time (legacy-row backward compat — rows seeded before scope existed match the same predicate)
 
 How a framework identifies itself: the MCP host exports `MPM_PROVENANCE_FRAMEWORK=<id>` on the `mpm-mcp` child process env (the canonical name, same pattern as `MPM_ACTIVE_MODE`/`MPM_ACTIVE_PERSONA`). `mpmcli.ActiveContextFromEnv` reads `MPM_PROVENANCE_FRAMEWORK` first and falls back to the legacy alias `MPM_FRAMEWORK` (used by all five `agent_installation/` adapters for backward compatibility), populating `ActiveContext.FrameworkName` in either case. The MCP `handleReadDirectives` uses that to filter via `ReadDirectivesForFramework(fw)`. When both env vars are unset, `FrameworkName` defaults to `"mcp"` — existing single-MCP callers see no behaviour change.
@@ -2877,33 +2911,33 @@ Active Directives = Global(Directives) ∪ MatchingScoped(Directives, fw)
 
 Global directives always apply. Framework-scoped directives are added on top — they never replace global invariants, so a `framework:opencode` row can never accidentally swallow `mpm-seed-read-wake-context`. Within the active set, deterministic ordering by `StableID` ASC keeps the agent's wake context byte-stable across runs.
 
-Operational example (OpenClaw):
+Operational example:
 
 ```bash
-# 1. Tag the agent framework at the MCP layer
-openclaw config set mcp.servers.mpm.env.MPM_FRAMEWORK openclaw
+# 1. Tag the agent framework (the OpenCode adapter sets this for you)
+export MPM_PROVENANCE_FRAMEWORK=opencode
 
-# 2. Seed a framework-specific directive when OpenClaw tool conventions diverge
+# 2. Seed a framework-specific directive when that host's tool conventions diverge
 mpm call mpm_memory --payload '{
   "action":"save",
   "params":{
-    "fact":"OpenClaw-specific behavioural rule",
+    "fact":"OpenCode-specific behavioural rule",
     "collection":"directives",
-    "tags":["prime_directive","openclaw"],
+    "tags":["prime_directive","opencode"],
     "metadata":{
-      "scope":"framework:openclaw",
-      "stable_id":"openclaw-tool-conventions-v1"
+      "scope":"framework:opencode",
+      "stable_id":"opencode-tool-conventions-v1"
     }
   }
 }'
 
-# 3. Verify the wiring — admin view shows every directive regardless of scope
+# 3. Verify the wiring — the admin view shows every directive regardless of scope
 mpm directives
 
 # 4. Runtime agent wake context reflects only the applicable subset,
 #    and the response envelope reports which scope was applied
 mpm call mpm_context --payload '{"action":"read_directives","params":{}}'
-# → response: { "success":true, "directives":[...], "count":N, "framework":"openclaw" }
+# → response: { "success":true, "directives":[...], "count":N, "framework":"opencode" }
 ```
 
 ##### Precedence and conflicts
@@ -3175,7 +3209,7 @@ Fresh installs get four read-only primitives (`list_capabilities`, `get_capabili
 mpm capability seed
 ```
 
-Idempotent. The seed engine (`internal/core/seed/engine_capabilities.go`) uses deterministic stable IDs (`cap.<name>`) so re-runs are clean no-ops against rows whose `source_code` still matches the bundle. Operator edits to a seeded primitive surface in the `Drifted` bucket and are never silently overwritten. A custom bundle can be merged in via `--sidecar <path>`, overriding shipped entries or adding new ones — the loader at `internal/core/seed/capabilities_loader.go` merges the sidecar into the compiled registry before the apply phase. After seeding, primitives live in `state='validated'`; the forge tick promotes them to `probation` on first invocation, then `probation` → `active` is earned by hitting the success threshold stamped at proposal time.
+Idempotent. The seed engine (`internal/core/seed/capabilities.go`, driven by `engine.go`) uses deterministic stable IDs (`cap.<name>`) so re-runs are clean no-ops against rows whose `source_code` still matches the bundle. Operator edits to a seeded primitive surface in the `Drifted` bucket and are never silently overwritten. A custom bundle can be merged in via `--sidecar <path>`, overriding shipped entries or adding new ones — the loader at `internal/core/seed/capabilities_loader.go` merges the sidecar into the compiled registry before the apply phase. After seeding, primitives live in `state='validated'`; the forge tick promotes them to `probation` on first invocation, then `probation` → `active` is earned by hitting the success threshold stamped at proposal time.
 
 ##### Operator-domain approval
 
@@ -4266,7 +4300,7 @@ How this is enforced:
 
 - `mpm_evidence action=add` recomputes confidence in the same transaction as the evidence INSERT. If recompute fails (e.g., CHECK constraint on `confidence_history.trigger`), the entire transaction rolls back — no orphan evidence rows, no stale confidence.
 - `mpm_confidence action=recompute` triggers a manual recompute from the evidence ledger.
-- `mpm_confidence action=query_history` derives its view from evidence, not the cached column.
+- `mpm_confidence action=history` derives its view from evidence, not the cached column.
 
 **The invariant:** `confidence = f(evidence, decay) at most-recent recompute`.
 
@@ -4282,7 +4316,7 @@ How this is enforced:
 - Decay never increases confidence.
 - Cached confidence always matches `f(evidence, decay)` at most-recent recompute.
 - `mpm ops gc` never shreds a memory with `weight >= 0` (regardless of the threshold).
-- The decision ledger is append-only (no UPDATE on `mpm_decisions action=save` rows after insert).
+- The decision ledger is append-only (no UPDATE on `mpm_decisions action=record` rows after insert).
 
 The confidence properties are pinned in `internal/core/confidence_test.go`. When the formula changes, the tests stay green and the meaning survives.
 

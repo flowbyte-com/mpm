@@ -2,10 +2,29 @@
 
 Headless SQLite substrate for long-lived autonomous systems. Single-process, single-database, no socket IPC, no HTTP server in `mpm` proper.
 
+**Supported agent host: OpenCode only.** The Claude Code, Pi, Hermes and
+OpenClaw adapters were retired on 2026-10-27; their directories are gone. Do
+not re-introduce them, and do not follow a document that assumes they exist
+(see §6).
+
+**Read before changing a public surface:**
+
+| Document | What it settles |
+|---|---|
+| [`CLI_AGENT_RULES.md`](CLI_AGENT_RULES.md) | Normative CLI conventions — output shape, help, exit codes, byte caps |
+| [`docs/SPEC.md`](docs/SPEC.md) | The product contract: behaviour, commands, semantics |
+| [`docs/library/tool-behavioral-contract.md`](docs/library/tool-behavioral-contract.md) | Tool semantics that are project-wide, not per-tool: not-found rules, id-parameter naming, silent-coercion policy, idempotency classes |
+| [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) | Gates and contribution expectations |
+
+**Live state is production state.** Do not run `./install.sh`,
+`./uninstall.sh`, `./scripts/deploy.sh`, or restart systemd units without
+explicit authorisation. See `CLAUDE.md` §3.
+
 ## 1. Commands & Build Flags
 
 ```bash
-make build                          # bin/{mpm, mpm-mcp, mpm-scheduler, mpm-critic, mpm-telemetry}
+make build                          # .build/bin/{mpm, mpm-mcp, mpm-scheduler, mpm-critic, mpm-telemetry}
+                                    # (disposable; only `make install` writes ~/.mpm/bin/)
 make test                           # all Go tests (FTS5 build flags, no race detector)
 make test-race                      # all Go tests WITH the race detector (canonical CI gate)
 ./install.sh                        # canonical user-space install (build + systemd + PATH symlinks)
@@ -117,3 +136,38 @@ delivery        (Stage 2E.3 — read_wake_context)
 ```
 
 Each stage is observational (no persistent mutation). The focus projection built in Stage 2E.3 is attached to `WakeContextData` as the additive `contextual_focus` field; agents receive it on every normal wake-context read. Selected cardinality is preserved exactly (1 selected == 1 focus item); selection order is preserved exactly. Missing / pointer-only / unsupported / error items keep their pointer and `why_now` so the agent can still follow them.
+
+## 6. Documentation
+
+**A stale document is a defect, not a cosmetic issue.** An agent that follows
+an obsolete instruction will call a tool that does not exist, configure a host
+that was retired, or believe a planned feature is deployed. Treat a wrong
+document with the same severity as a wrong test.
+
+| Where | What it is | If you change... |
+|---|---|---|
+| `README.md` | Orientation for new readers. The managed block is generated — do not hand-edit it. | the pitch, entry points |
+| `docs/SPEC.md` | Canonical product contract | any public behaviour |
+| `AGENTS.md` (this file) | Repository-working rules, invariants, build flags | an invariant or build flag |
+| `CLAUDE.md` | Contributor safety rules for Claude Code | a contributor safety boundary |
+| `CLI_AGENT_RULES.md` | Normative CLI conventions | a CLI surface |
+| `agent_installation/` | Managed-block source, protocol, installer manual | how agents are instructed |
+| `docs/library/` | Curated reference: design rationale, research, historical constraints. **Not** a description of current behaviour unless the entry says so. | never — it is reference |
+| `docs/dev/` | Coordination and session records, owned by their authors | nothing; append your own |
+
+Rules:
+
+1. **Do not describe a proposal as implemented.** If it is not merged and
+   deployed, say so, and say where the plan lives.
+2. **Update the document that owns the fact**, then delete the duplicate
+   rather than updating both. Several descriptions of one contract is how
+   drift starts.
+3. **Historical material with lasting value goes to `docs/library/`** with a
+   status label saying whether it is current, superseded or historical.
+   Everything else lives in git history — do not keep it in the tree as a
+   tombstone.
+4. **Never hand-edit a generated block.** The README's managed-block example
+   and `agent_installation/mpm-opencode/templates/AGENTS.md.snippet` are
+   rendered from `agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md`;
+   `python3 agent_installation/scripts/render_managed_blocks.py --check`
+   proves parity.

@@ -13,7 +13,7 @@
 // mpm_skills.delete is a SOFT delete (the row stays in the DB with
 // deleted_at set; recoverable for forensics), and it now matches
 // the project-wide soft-delete policy in
-// docs/tool-behavioral-contract.md "Not-found semantics for soft
+// docs/library/tool-behavioral-contract.md "Not-found semantics for soft
 // deletes". A stale-id race against another agent's earlier delete
 // is a benign collision, not a user-facing error.
 //
@@ -86,7 +86,7 @@ func TestSkillsDelete_LiveSkillSucceeds(t *testing.T) {
 // TestSkillsDelete_NeverExistedIsSilentNoOp pins the project-wide
 // soft-delete policy: a delete against an id that has no live row
 // returns success (matching mpm_handoff.shred's structured no-op
-// envelope). See docs/tool-behavioral-contract.md and the precedent
+// envelope). See docs/library/tool-behavioral-contract.md and the precedent
 // at TestHandoff_DeleteHandoff_Idempotent (handoff_test.go:230).
 func TestSkillsDelete_NeverExistedIsSilentNoOp(t *testing.T) {
 	dm := newTestSharedDM(t)
@@ -155,7 +155,7 @@ func TestSkillsDelete_AlreadySoftDeletedIsSilentNoOp(t *testing.T) {
 // TestSkillsDelete_EmptySkillIDRejected pins the existing
 // pre-check: an empty/missing skill_id errors before any DB call.
 // This is the only error path on the soft-delete boundary — see
-// docs/tool-behavioral-contract.md.
+// docs/library/tool-behavioral-contract.md.
 func TestSkillsDelete_EmptySkillIDRejected(t *testing.T) {
 	dm := newTestSharedDM(t)
 

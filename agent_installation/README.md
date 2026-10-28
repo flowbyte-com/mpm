@@ -1,8 +1,9 @@
 # `~/.mpm/agent_installation/` — Agent Integration Surfaces
 
 This directory holds the canonical agent-facing integration code for MPM.
-Each supported agent (framework / CLI / harness / IDE) gets one subdirectory
-here.
+Each supported host gets one subdirectory here. **OpenCode is the only
+supported host in this release** — `mpm-opencode/` is the only adapter
+directory, and `lib/`, `scripts/` and `tests/` are host-independent.
 
 > **Invariant:** Any new integration code, scripts, manifests, skills,
 > extensions, plugins, adapters, or onboarding helpers for an MPM-aware
@@ -82,8 +83,10 @@ and MCP-bundle wiring.
 is the canonical source for the **exact wording** that adapters render
 into each host's managed section. It contains the canonical managed
 block (between `<!-- BEGIN MPM MANAGED BLOCK -->` and
-`<!-- END MPM MANAGED BLOCK -->` markers) with `{TOOL_PREFIX}`
-placeholders for each host's transport namespace.
+`<!-- END MPM MANAGED BLOCK -->` markers). The block uses **bare canonical
+tool names** — `mpm_memory`, `mpm_handoff`, and so on. It carries no
+placeholder syntax; the renderer applies a host's transport namespace
+afterwards, if that host needs one.
 
 The file-based adapter snippets
 (`mpm-opencode/templates/AGENTS.md.snippet`) are **generated**, not
@@ -92,8 +95,11 @@ hand-edited. The render script
 
 1. Reads the canonical source.
 2. Extracts the canonical managed block.
-3. Substitutes each adapter's `{TOOL_PREFIX}` (empty for OpenCode —
-   see the capability-name note below).
+3. Applies the adapter's tool-namespace prefix by word-boundary
+   substitution on the leading `mpm_` of each tool name. OpenCode's prefix
+   is **empty** — it registers the bare canonical names (see the
+   capability-name note below), so the render is byte-identical to the
+   canonical block.
 4. Composes each adapter's full snippet (header + rendered block +
    host-specific notes).
 5. Writes the snippet to the adapter's `templates/` directory.

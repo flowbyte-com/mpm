@@ -82,17 +82,23 @@ is built on. Violations will be rejected in review even when the code
 Before adding or modifying a tool/action entry in
 `internal/core/tools/registry_list.go` (or any handler in
 `internal/core/tools/handlers.go` / `internal/core/tools/work_handlers.go`),
-read **[`docs/tool-behavioral-contract.md`](tool-behavioral-contract.md)**.
+read **[`docs/library/tool-behavioral-contract.md`](library/tool-behavioral-contract.md)**.
 It codifies the project-wide rules for not-found semantics (per-verb
 class, not per-tool), id-parameter naming (canonical `<resource>_id` +
 optional D-8.1 `id` alias), silent coercion vs explicit error (no
 silent coercion of malformed input), and idempotency (declare the
 class explicitly). Adding a tool without consulting it is how
-inconsistencies like C.9 / C.15 / C.20 of the 2026-09-05 audit
-(
-[`docs/full-tool-behavioural-audit-2026-09-05.md`](full-tool-behavioural-audit-2026-09-05.md)
-) crept in — one per-tool decision that should have been a project-wide
-policy. The contract document is the canonical answer.
+inconsistencies like C.9 / C.15 / C.20 of the 2026-09-05 audit crept in
+— one per-tool decision that should have been a project-wide policy. The
+contract document is the canonical answer.
+
+That document is a **library** entry: its rules are current, but its
+per-action audit tables were taken at the 2026-09-05 baseline and some
+rows have since been superseded (the file's own header lists the known
+ones). Re-derive a row against `internal/core/tools/registry_list.go`
+before relying on it. The companion 2026-09-05 defect audit is **not**
+in the tree — it was a snapshot of a closed defect list; use git history
+if you need it.
 
 If your new action appears to need behaviour that doesn't fit the
 documented rules, **update the contract document first** and then
