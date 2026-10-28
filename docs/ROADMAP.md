@@ -1,5 +1,15 @@
 # MPM Roadmap
 
+> **Status: directional, not a status report.** This document records where the
+> project intended to go after alpha. It is written in the future tense
+> throughout, and **some of it has since shipped** — most obviously §1, the
+> telemetry binary and sidecar database, which is implemented and documented as
+> current behaviour in [`SPEC.md` §6.6](./SPEC.md#66-telemetry-sidecar-mpm-telemetry).
+>
+> Read this for *direction and reasoning*, not for *what exists*. For what
+> exists, the authorities are [`SPEC.md`](./SPEC.md) and the code. If a
+> statement here and the spec disagree about the present, the spec wins.
+>
 > Post-alpha roadmap for MPM, the persistent cognitive substrate for long-lived AI agents.
 
 MPM's alpha release establishes the core substrate, agent integrations, persistence model, provenance, wake/context loop, evidence model, and CLI/tool surfaces.
