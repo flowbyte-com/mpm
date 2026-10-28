@@ -100,19 +100,56 @@ echo "   producer assertion: commit=$COMMIT dirty=$MPM_BUILD_DIRTY"
 
 echo "── 3. the plugin payload ──────────────────────────────────────────"
 # The OpenCode payload's compiled artefacts are not in the archive (they
-# are build output). They are copied in and compiled with the real
-# toolchain so the bundle carries a payload that actually loads.
-if [ -d "$REPO/agent_installation/mpm-opencode/node_modules" ]; then
-  mkdir -p "$SRC/agent_installation/mpm-opencode"
-  cp -a "$REPO/agent_installation/mpm-opencode/node_modules" \
-        "$SRC/agent_installation/mpm-opencode/node_modules" 2>/dev/null || true
-  ( cd "$SRC/agent_installation/mpm-opencode" && ./node_modules/.bin/tsc ) || {
+# are build output). They are compiled here with the adapter's OWN
+# pinned toolchain, so the bundle carries a payload that actually loads
+# rather than a manifest that names files nobody produced.
+#
+# A MISSING LOCAL COMPILER IS A REFUSAL, NOT A SKIP.
+#
+# The old form guarded the whole step with `if node_modules exists`. On
+# a fresh checkout node_modules does not exist, so the payload was
+# silently NOT compiled — and the rehearsal failed much later, in the
+# bundle assembly, with "manifest entry not found in source:
+# dist/index.v2.js". That message names a missing artefact. The actual
+# missing thing was a prerequisite, and the fix for it was three steps
+# away from the message.
+#
+# The repository's convention is the same one `make test-agent-adapters`
+# follows: a missing local TypeScript compiler is a hard refusal that
+# names the canonical `npm ci` step, never a fallback to a globally
+# installed compiler. An unpinned global compiler would couple the
+# payload to whatever the host happens to ship, and the payload is the
+# thing the rehearsal is supposed to be exercising.
+ADAPTER_SRC="$REPO/agent_installation/mpm-opencode"
+TSC="$ADAPTER_SRC/node_modules/.bin/tsc"
+if [ ! -x "$TSC" ]; then
+    echo "setup.sh: FATAL: the OpenCode payload cannot be compiled." >&2
+    echo "          $TSC is absent." >&2
+    echo "          Run 'npm ci' inside agent_installation/mpm-opencode first." >&2
+    echo "          The rehearsal deliberately does not fall back to a global tsc:" >&2
+    echo "          an unpinned compiler would couple the payload to whatever the" >&2
+    echo "          host happens to ship, and the payload is the thing under test." >&2
+    exit 1
+fi
+
+# The dependencies are LINKED, not copied: they are 89 MB of
+# third-party packages, and the rehearsal only needs the compiler.
+# A symlink is resolved by the compiler's own module resolution, and the
+# compiled OUTPUT lands in the rehearsal's own source tree because that
+# is the tree tsc is invoked from.
+mkdir -p "$SRC/agent_installation/mpm-opencode"
+ln -sfn "$ADAPTER_SRC/node_modules" "$SRC/agent_installation/mpm-opencode/node_modules"
+if [ ! -x "$SRC/agent_installation/mpm-opencode/node_modules/.bin/tsc" ]; then
+    echo "setup.sh: FATAL: the adapter's compiler did not survive being linked" >&2
+    echo "          into the rehearsal's source tree." >&2
+    exit 1
+fi
+( cd "$SRC/agent_installation/mpm-opencode" && ./node_modules/.bin/tsc ) || {
     echo "setup.sh: the TypeScript payload did not compile — the bundle would" >&2
     echo "          carry an unloadable adapter. Install the plugin's" >&2
     echo "          dependencies first." >&2
     exit 1
-  }
-fi
+}
 
 echo "── 4. the bundle ──────────────────────────────────────────────────"
 bash "$REH_DIR/build-bundle.sh" "$SRC" "$REH_WORK/bundle-$REV" "$REV" "$COMMIT" \

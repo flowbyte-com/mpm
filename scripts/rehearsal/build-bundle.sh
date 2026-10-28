@@ -35,18 +35,6 @@ REV="${3:?revision}"
 COMMIT="${4:?commit}"
 EPOCH="${5:?build epoch}"
 
-MANIFEST=(
-    server.js
-    dist/index.v2.js
-    dist/wake-context.js
-    dist/event-envelope.js
-    dist/event-mapper.js
-    dist/event-subscriber.js
-    dist/workspace.js
-    dist/resolve-mpm-binary.js
-    package.json
-)
-
 rm -rf "$DEST"
 mkdir -p "$DEST/bin"
 
@@ -64,17 +52,67 @@ python3 "$SRC/scripts/install_runtime_assets.py" \
   --source-root "$SRC" --runtime-root "$DEST" --groups host-assets \
   | sed 's/^/  [assets] /'
 
-# ── the OpenCode payload, staged through the real allowlist ──────────────
+# ── the runtime package payloads, staged through the real allowlist ───────
+# The allowlist comes from the SAME data manifest the installer uses
+# (scripts/runtime_payloads.json).
+#
+# It used to be a THIRD hard-coded copy — the adapter's own
+# OPENCODE_RUNTIME_MANIFEST, the installer's RB_OPENCODE_MANIFEST, and
+# this one. Two of them are guarded by a contract test; this one was
+# not, and it was already stale the moment the data manifest was
+# introduced. A copy that nothing checks is a copy that drifts.
+#
+# The staging CALL stays the rehearsal's own. The rehearsal must
+# exercise the staging path independently of the installer's own
+# wrapper, or a bug in that wrapper would be invisible to it.
 # shellcheck source=/dev/null
 . "$SRC/agent_installation/scripts/stage_runtime_package.sh"
-staged="$(MPM_RUNTIME_PACKAGE_VALIDATOR=mpm_validate_runtime_package_opencode \
-  stage_runtime_package "$SRC/agent_installation/mpm-opencode" "$DEST" \
-  "mpm-opencode" "${MANIFEST[@]}")"
-echo "  [stage] payload at $staged"
 
-# The payload's provenance sidecar names the revision it was built from.
-printf '{"commit":"%s","built":"%s"}\n' "$COMMIT" "$EPOCH" \
-  > "$DEST/agent_installation/mpm-opencode/dist/mpm-build-provenance.json"
+MANIFEST_FILE="$SRC/scripts/runtime_payloads.json"
+if [ ! -f "$MANIFEST_FILE" ]; then
+  echo "build-bundle: the runtime payload manifest is missing at $MANIFEST_FILE" >&2
+  exit 1
+fi
+
+# rb_payload_records emits one record per declared payload:
+#   <adapter>|<plugin id>|<validator>|<file> <file> ...
+# shellcheck source=/dev/null
+. "$SRC/scripts/lib/runtime_bundle.sh"
+
+records="$(rb_payload_records "$MANIFEST_FILE")" || {
+  echo "build-bundle: the runtime payload manifest could not be read" >&2
+  exit 1
+}
+
+staged_count=0
+while IFS='|' read -r adapter plugin_id validator files; do
+  [ -n "$adapter" ] || continue
+  staged_count=$((staged_count + 1))
+  src_dir="$SRC/agent_installation/$adapter"
+  if [ ! -d "$src_dir" ]; then
+    echo "build-bundle: the release declares a payload for '$adapter' but $src_dir does not exist" >&2
+    exit 1
+  fi
+  IFS=' ' read -r -a file_list <<< "$files"
+  if [ "${#file_list[@]}" -eq 0 ]; then
+    echo "build-bundle: the payload for '$adapter' lists no files" >&2
+    exit 1
+  fi
+  staged="$(MPM_RUNTIME_PACKAGE_VALIDATOR="$validator" \
+    stage_runtime_package "$src_dir" "$DEST" "$plugin_id" "${file_list[@]}")"
+  echo "  [stage] $adapter payload at $staged"
+
+  # The payload's provenance sidecar names the revision it was built from.
+  printf '{"commit":"%s","built":"%s"}\n' "$COMMIT" "$EPOCH" \
+    > "$DEST/agent_installation/$adapter/dist/mpm-build-provenance.json"
+done <<EOF
+$records
+EOF
+
+if [ "$staged_count" -eq 0 ]; then
+  echo "build-bundle: the release declares no runtime package payload" >&2
+  exit 1
+fi
 
 # ── the build identity ────────────────────────────────────────────────────
 cat > "$DEST/RELEASE.json" <<EOF

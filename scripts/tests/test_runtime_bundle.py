@@ -395,6 +395,78 @@ class TestOpenCodeManifestSync(unittest.TestCase):
         self.assertNotIn("mpm-opencode", install)
         self.assertNotIn("runtime_payloads", install)
 
+    def test_the_rehearsal_reads_the_same_manifest(self):
+        # The rehearsal used to carry a THIRD hard-coded copy of the
+        # payload allowlist — the adapter's own, the installer's, and
+        # the rehearsal's. Two were guarded by a contract test; the
+        # third was not, and it went stale the moment the data manifest
+        # was introduced. A copy that nothing checks is a copy that
+        # drifts.
+        #
+        # The rehearsal must READ the manifest, and must not name a
+        # payload file of its own.
+        build_bundle = (REPO_ROOT / "scripts" / "rehearsal" / "build-bundle.sh").read_text()
+        self.assertIn(
+            "runtime_payloads.json",
+            build_bundle,
+            "the rehearsal must read the runtime payload manifest, not carry its own copy",
+        )
+        self.assertIn("rb_payload_records", build_bundle)
+
+        # No hard-coded payload allowlist: the dist/ file list belongs
+        # to the manifest alone.
+        self.assertNotIn(
+            "dist/index.v2.js",
+            build_bundle,
+            "the rehearsal hard-codes a payload file list; it must read the manifest",
+        )
+
+
+class TestRehearsalPrerequisites(unittest.TestCase):
+    """The rehearsal must refuse a missing prerequisite, not skip it.
+
+    The payload's compiled artefacts are build output, and they are not
+    in a Git archive. The rehearsal compiles them with the adapter's
+    OWN pinned toolchain.
+
+    The old form guarded the whole step with "if node_modules exists".
+    On a fresh checkout that directory does not exist, so the payload
+    was silently NOT compiled — and the rehearsal failed much later,
+    in the bundle assembly, with "manifest entry not found in source:
+    dist/index.v2.js". That message names a missing artefact; the
+    actual missing thing was a prerequisite three steps away.
+    """
+
+    SETUP = REPO_ROOT / "scripts" / "rehearsal" / "setup.sh"
+
+    def test_a_missing_compiler_is_a_refusal(self):
+        text = self.SETUP.read_text()
+        self.assertIn(
+            "node_modules/.bin/tsc",
+            text,
+            "the rehearsal must check for the adapter's own pinned compiler",
+        )
+        self.assertIn(
+            "npm ci",
+            text,
+            "the refusal must name the canonical remedy",
+        )
+
+    def test_the_payload_step_is_not_conditional(self):
+        text = self.SETUP.read_text()
+        # The old guard: the whole step skipped when node_modules was
+        # absent.
+        self.assertNotIn(
+            'if [ -d "$REPO/agent_installation/mpm-opencode/node_modules" ]',
+            text,
+            "the payload step must not be skipped when the dependencies are absent",
+        )
+        # And the dependencies are LINKED, not copied: 89 MB of
+        # third-party packages, of which the rehearsal needs only the
+        # compiler.
+        self.assertIn("ln -sfn", text)
+        self.assertNotIn("cp -a \"$REPO/agent_installation/mpm-opencode/node_modules\"", text)
+
 
 if __name__ == "__main__":
     unittest.main()
