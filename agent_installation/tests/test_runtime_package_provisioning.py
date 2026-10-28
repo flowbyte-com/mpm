@@ -201,9 +201,18 @@ class TestRuntimeRootDerivation(StagingHarness):
     """
 
     def _root_from(self, bin_path: str) -> str:
+        return self._call("mpm_runtime_root_from_bin", bin_path)
+
+    def _bundle_from(self, bin_path: str) -> str:
+        return self._call("mpm_bundle_root_from_bin", bin_path)
+
+    def _data_from(self, bin_path: str) -> str:
+        return self._call("mpm_data_root_from_bin", bin_path)
+
+    def _call(self, fn: str, bin_path: str) -> str:
         cmd = [
             "bash", "-c",
-            'set -euo pipefail; . "$1"; mpm_runtime_root_from_bin "$2"',
+            f'set -euo pipefail; . "$1"; {fn} "$2"',
             "bash", str(STAGE_LIB), bin_path,
         ]
         return subprocess.run(
@@ -231,6 +240,80 @@ class TestRuntimeRootDerivation(StagingHarness):
         out = self._root_from("")
         self.assertNotEqual(out, "/")
         self.assertEqual(out, "")
+
+
+class TestBundleAndDataRoots(StagingHarness):
+    """The BUNDLE root and the DATA root are different things.
+
+    The versioned-bundle layout puts a release at
+    <data-root>/releases/<rev>/, so the binary resolves to
+    <data-root>/releases/<rev>/bin/mpm. The release-scoped assets belong
+    in the BUNDLE and roll back with the release; the persistent state
+    belongs in the DATA ROOT and outlives every release.
+
+    Conflating them is how an operator's definition ends up replaced on
+    every version switch, or how a release-scoped asset survives one.
+    """
+
+    def _call(self, fn: str, bin_path: str) -> str:
+        cmd = [
+            "bash", "-c",
+            f'set -euo pipefail; . "$1"; {fn} "$2"',
+            "bash", str(STAGE_LIB), bin_path,
+        ]
+        return subprocess.run(
+            cmd, capture_output=True, text=True,
+            env={**os.environ, "HOME": str(self.tmp)},
+        ).stdout.strip()
+
+    def test_legacy_layout_the_two_roots_are_the_same(self) -> None:
+        # <data-root>/bin/mpm — the pre-bundle layout. Nothing changes for
+        # an existing install.
+        self.assertEqual(self._call("mpm_bundle_root_from_bin", "/opt/elsewhere/bin/mpm"),
+                         "/opt/elsewhere")
+        self.assertEqual(self._call("mpm_data_root_from_bin", "/opt/elsewhere/bin/mpm"),
+                         "/opt/elsewhere")
+
+    def test_versioned_bundle_the_roots_differ(self) -> None:
+        # <data-root>/releases/<rev>/bin/mpm
+        self.assertEqual(
+            self._call("mpm_bundle_root_from_bin", "/srv/mpm/releases/4111c46/bin/mpm"),
+            "/srv/mpm/releases/4111c46")
+        self.assertEqual(
+            self._call("mpm_data_root_from_bin", "/srv/mpm/releases/4111c46/bin/mpm"),
+            "/srv/mpm")
+
+    def test_a_symlinked_binary_resolves_through_the_bundle(self) -> None:
+        # ~/.mpm/bin is a symlink into current/, which is a symlink into
+        # the active release. The resolved path is the BUNDLE, and the
+        # data root is its grandparent.
+        data = self.tmp / "mpm"
+        release = data / "releases" / "4111c46" / "bin"
+        release.mkdir(parents=True)
+        real = release / "mpm"
+        real.write_text("#!/bin/sh\n")
+        real.chmod(0o755)
+        link = self.tmp / "link" / "bin" / "mpm"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(real)
+        self.assertEqual(self._call("mpm_bundle_root_from_bin", str(link)),
+                         str(data / "releases" / "4111c46"))
+        self.assertEqual(self._call("mpm_data_root_from_bin", str(link)), str(data))
+
+    def test_a_parent_named_releases_always_means_the_versioned_layout(self) -> None:
+        # The discriminator is the parent's NAME, so a bundle root whose
+        # parent is named "releases" is always treated as being in the
+        # versioned layout, whatever else is true about it.
+        #
+        # That is deliberate: the name is the layout's own convention,
+        # and a DATA ROOT is never named "releases" in any supported
+        # layout. The alternative — looking for src/db or a releases/
+        # directory — would make the resolver depend on the database
+        # existing, and it would therefore fail exactly when it is first
+        # needed, on a fresh install.
+        self.assertEqual(
+            self._call("mpm_data_root_from_bin", "/srv/releases/4111c46/bin/mpm"),
+            "/srv")
 
 
 class TestPostSplitWorld(StagingHarness):

@@ -66,12 +66,18 @@
 #
 # Usage:
 #     . "$(dirname "$0")/../scripts/stage_runtime_package.sh"
-#     RUNTIME_ROOT="$(mpm_runtime_root_from_bin "$MPM_BIN")"
+#     BUNDLE_ROOT="$(mpm_bundle_root_from_bin "$MPM_BIN")"
+#     DATA_ROOT="$(mpm_data_root_from_bin "$MPM_BIN")"
 #
 #     MPM_RUNTIME_PACKAGE_VALIDATOR=mpm_validate_runtime_package_opencode \
-#     stage_runtime_package "$SCRIPT_DIR" "$RUNTIME_ROOT" "mpm-opencode" \
+#     stage_runtime_package "$SCRIPT_DIR" "$BUNDLE_ROOT" "mpm-opencode" \
 #         server.js dist/index.v2.js dist/workspace.js \
 #         dist/resolve-mpm-binary.js package.json
+#
+# The two roots are DIFFERENT in the versioned-bundle layout: the
+# release-scoped payload belongs in the BUNDLE, and the persistent state
+# belongs in the DATA ROOT. Under the legacy layout they are the same
+# directory, so an existing install is unaffected.
 #
 # Library contract: safe to source under `set -euo pipefail`. Defines
 # functions only; sourcing has no side effects.
@@ -83,30 +89,88 @@ fi
 MPM_STAGE_RUNTIME_PACKAGE_SOURCED=1
 
 # --------------------------------------------------------------------------
-# mpm_runtime_root_from_bin <absolute-path-to-mpm-binary>
+# mpm_bundle_root_from_bin <absolute-path-to-mpm-binary>
 # --------------------------------------------------------------------------
 #
-# The runtime root is the parent of the bin/ directory holding the mpm
-# binary. Deriving it from the binary we already resolved — rather than
-# assuming $HOME/.mpm — is what makes this work for custom prefixes: a
-# hermetic or relocated install stages into its own tree and never touches
-# the operator's real one.
+# The BUNDLE root is the directory that holds the release's bin/.
+#
+# Deriving it from the binary we already resolved — rather than assuming
+# $HOME/.mpm — is what makes this work for custom prefixes: a hermetic
+# or relocated install stages into its own tree and never touches the
+# operator's real one.
 #
 # Symlinks are resolved first, so ~/.local/bin/mpm -> ~/.mpm/bin/mpm
 # yields ~/.mpm rather than ~/.local.
-mpm_runtime_root_from_bin() {
+mpm_bundle_root_from_bin() {
   local bin="$1" real parent
   [ -n "$bin" ] || return 1
   real="$(readlink -f "$bin" 2>/dev/null || printf '%s' "$bin")"
   [ -n "$real" ] || return 1
   parent="$(dirname "$real")"
   [ -n "$parent" ] || return 1
-  # Strip the trailing /bin component to reach the root.
-  case "$(basename "$parent")" in
-    bin) dirname "$parent" ;;
-    *)   dirname "$parent" ;;
-  esac
+  dirname "$parent"
 }
+
+# --------------------------------------------------------------------------
+# mpm_data_root_from_bin <absolute-path-to-mpm-binary>
+# --------------------------------------------------------------------------
+#
+# The DATA root is the directory that holds the PERSISTENT state:
+# src/db/mpm.db, mpm_config.json, mode/, persona/, backups/.
+#
+# WHY IT IS NOT THE SAME AS THE BUNDLE ROOT
+#
+# The two layouts differ, and conflating them is how a release-scoped
+# asset ends up in the data root (and survives every version switch) or
+# an operator's definition ends up in a bundle (and is replaced on
+# every version switch):
+#
+#   legacy            <data-root>/bin/mpm
+#                     the bundle root and the data root are the SAME
+#                     directory.
+#
+#   versioned bundle  <data-root>/releases/<rev>/bin/mpm
+#                     the bundle root is <data-root>/releases/<rev> and
+#                     the data root is <data-root>.
+#
+# The discriminator is the DIRECTORY NAME: a bundle root whose parent is
+# named "releases" lives inside the versioned layout, and the data root
+# is its grandparent.
+#
+# The ancestor is identified by NAME rather than by looking for
+# src/db, because the data root's database does not exist yet on a
+# fresh install — and a resolver that depends on the database's
+# existence is a resolver that fails exactly when it is first needed.
+mpm_data_root_from_bin() {
+  local bundle parent
+  bundle="$(mpm_bundle_root_from_bin "$1")" || return 1
+  [ -n "$bundle" ] || return 1
+  parent="$(dirname "$bundle")"
+  [ -n "$parent" ] || return 1
+  if [ "$(basename "$parent")" = "releases" ]; then
+    dirname "$parent"
+    return 0
+  fi
+  printf '%s\n' "$bundle"
+}
+
+# --------------------------------------------------------------------------
+# mpm_runtime_root_from_bin <absolute-path-to-mpm-binary>
+# --------------------------------------------------------------------------
+#
+# The historical name for the release-scoped staging root. It now
+# delegates to mpm_bundle_root_from_bin, which is what it has always
+# meant in practice — the directory the release's own assets are staged
+# into.
+#
+# Under the legacy layout the bundle root and the data root are the same
+# directory, so this is unchanged for every existing install. Under the
+# versioned-bundle layout they differ, and a caller that needs the
+# persistent state must ask for mpm_data_root_from_bin explicitly.
+mpm_runtime_root_from_bin() {
+  mpm_bundle_root_from_bin "$@"
+}
+
 
 # --------------------------------------------------------------------------
 # mpm_residue_paths <dir>
