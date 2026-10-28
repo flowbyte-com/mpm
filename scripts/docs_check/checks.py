@@ -687,30 +687,57 @@ def _git_changed(root: Path, base: str) -> tuple[set[str], str]:
     return set(out.split()), log
 
 
+_TRAILER_RE = re.compile(r"^Docs-Impact:\s*(.+)$", re.I)
+
+
 def _impact_justification(commit_log: str) -> tuple[str, str] | None:
     """Read a `Docs-Impact:` trailer from the commit range.
 
-    Accepted forms:
+    Accepted forms, as the FINAL paragraph of a commit message:
 
         Docs-Impact: none — <reason>
         Docs-Impact: docs/SPEC.md, README.md
 
+    Two constraints, and both exist because the loose version was wrong:
+
+    * **Final paragraph only.** Git trailers live at the end of a message.
+      Scanning every line anywhere in the body accepted a trailer-shaped
+      sentence in the middle of prose, which is not a declaration by the
+      author that they considered the documentation impact — it is usually
+      a description of something else.
+
+    * **Not inside a fenced block, and not indented.** The first version of
+      this function was defeated by this repository's own commit message: it
+      documented the trailer syntax in a code fence, and the gate read that
+      documentation as a waiver and suppressed a real finding. A gate that
+      can be waived by quoting its own rules is not a gate.
+
     The reason after ``none`` is mandatory. An empty justification is not a
     justification, and the gate says so rather than accepting the token.
     """
-    for line in commit_log.splitlines():
-        stripped = line.strip()
-        if not stripped.lower().startswith("docs-impact:"):
+    for message in commit_log.split("===COMMIT==="):
+        paragraphs = [p for p in re.split(r"\n\s*\n", message.strip()) if p.strip()]
+        if not paragraphs:
             continue
-        value = stripped.split(":", 1)[1].strip()
-        if not value:
+        tail = paragraphs[-1]
+        if "```" in tail:
+            # A fenced example is documentation, not a trailer.
             continue
-        if value.lower().startswith("none"):
-            reason = re.sub(r"^none\s*[—:-]*\s*", "", value, flags=re.I).strip()
-            if reason:
-                return ("none", reason)
-            continue
-        return ("paths", value)
+        for line in tail.splitlines():
+            # No leading whitespace: a trailer is flush-left in the trailer
+            # block, an indented line is quoted prose.
+            match = _TRAILER_RE.match(line)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if not value:
+                continue
+            if value.lower().startswith("none"):
+                reason = re.sub(r"^none\s*[—:-]*\s*", "", value, flags=re.I).strip()
+                if reason:
+                    return ("none", reason)
+                continue
+            return ("paths", value)
     return None
 
 

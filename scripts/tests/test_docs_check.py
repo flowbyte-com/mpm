@@ -482,6 +482,50 @@ class TestDocsImpact(GateTestCase):
         self.assertEqual([f for f in report.reviews if f.check == "docs-impact"], [])
         self.assertTrue(any("waived" in n for n in report.notes))
 
+    def test_trailer_quoted_in_a_fenced_example_does_not_waive(self):
+        """The gate must not be waivable by documenting the waiver syntax.
+
+        This repository's own commit message for the gate quotes the trailer
+        format inside a code fence. The first implementation scanned every
+        line of every message and read that documentation as a waiver,
+        suppressing a real finding — a gate that can be waived by quoting its
+        own rules is not a gate.
+        """
+        commit_log = (
+            "change the registry\n\n"
+            "A finding is discharged by a commit trailer:\n\n"
+            "```\n"
+            "Docs-Impact: none — the registry entry is a rename of an untouched action\n"
+            "```\n"
+            "\n===COMMIT===\n"
+        )
+        self.assertIsNone(checks._impact_justification(commit_log))
+
+    def test_trailer_in_the_middle_of_the_body_does_not_waive(self):
+        commit_log = (
+            "change the registry\n\n"
+            "Docs-Impact: none — I thought about it\n\n"
+            "Then a long explanation follows, which means the line above was "
+            "prose and not a trailer block.\n"
+            "\n===COMMIT===\n"
+        )
+        self.assertIsNone(checks._impact_justification(commit_log))
+
+    def test_indented_trailer_does_not_waive(self):
+        commit_log = "change\n\n    Docs-Impact: none — quoted\n\n===COMMIT===\n"
+        self.assertIsNone(checks._impact_justification(commit_log))
+
+    def test_real_final_paragraph_trailer_waives(self):
+        commit_log = (
+            "change the registry\n\nLong body.\n\n"
+            "Docs-Impact: none — rename of an untouched action\n"
+            "\n===COMMIT===\n"
+        )
+        self.assertEqual(
+            checks._impact_justification(commit_log),
+            ("none", "rename of an untouched action"),
+        )
+
     def test_bare_none_without_reason_is_not_a_waiver(self):
         self._repo(doc_changed=False, trailer="Docs-Impact: none")
         report = self.fx.run({"docs-impact"}, base="HEAD~1")
