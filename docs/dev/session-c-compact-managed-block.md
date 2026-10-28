@@ -956,19 +956,41 @@ are worth their own fix.
 conditions:
 
 1. **This branch is reviewed and approved first.** It is not merged here.
-2. **D1, D2 and D7 are fixed in this branch — confirm they shipped.**
-   They were plugin *descriptions* that teach an agent to write a field
-   the substrate silently drops, and a `type` value that does not exist.
-   Leaving them would mean the new block and the plugin's own
-   description disagree **in the same session**, which is the exact
-   failure mode the compact block was designed to remove. D8 (the
-   duplicated description source) is **reported, not fixed**: any future
-   edit to a tool description must be applied to *both* `src/index.ts`
-   and `src/index.v2.ts` until that duplication is collapsed.
+2. **D1, D2, D7, D9, D10 and D11 are fixed in this branch — confirm they
+   shipped.** They were plugin *descriptions* that teach an agent to write
+   a field the substrate silently drops, a `type` value that does not
+   exist, an action that is refused on every agent transport, and
+   **thirty-one actions the agent could not discover at all**. Leaving them
+   would mean the new block and the plugin's own description disagree
+   **in the same session**, which is the exact failure mode the compact
+   block was designed to remove. D8 (the duplicated description source) is
+   **reported, not fixed**: any future edit to a tool description must be
+   applied to *both* `src/index.ts` and `src/index.v2.ts` until that
+   duplication is collapsed.
 3. **L3 is understood by the operator.** `mpm_work` reaches OpenCode through
    the CLI fallback, and the block says so.
 4. **The accepted RC baseline is preserved.** `4111c46` is untouched; this
    branch is additive on top of `origin/main` @ `f818bfe`.
+
+**What the recommendation does NOT rest on.** §10.3 does **not** show that
+the compact block makes agents persist more. In the one scenario where
+both arms are clean and the task produces durable knowledge, the compact
+arm wrote **two** shared records against the old arm's **three**. The
+recommendation rests on three things the evidence does support:
+
+* the block is **70.5% smaller** on a surface every agent pays for on every
+  turn, with every commitment a test pins retained;
+* the block and the plugin's descriptions now **agree** — the destination
+  vocabulary, the handoff field names, the uncertainty rule, and every
+  action a tool offers;
+* the **negative controls hold**: no writes on routine work, no handoff
+  for an acknowledgement, and an uncertain claim recorded as pending in
+  both arms.
+
+The behavioural difference the block was designed to produce remains
+**unproven**, and the theory that proposes it stays **pending** with its
+repetition protocol intact (§10.3). That is a reason to adopt the smaller
+block, not a reason to believe it changes behaviour.
 
 **The two open prior-session deliverables are not affected** and remain
 awaiting Session A: PR #148 (`fe767f2`, session-lifecycle observations) and
