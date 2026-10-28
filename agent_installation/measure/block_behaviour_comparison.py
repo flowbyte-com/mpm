@@ -113,27 +113,39 @@ MODEL = os.environ.get(
 # ---------------------------------------------------------------------------
 
 # Artefacts whose CONTENT would change the agent's behaviour.
+#
+# MATCHED ON ABSOLUTE PATHS, NOT ON BARE FILENAMES.
+#
+# The managed block names `agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md`
+# (in its provenance comment) and
+# `~/.mpm/agent_installation/mpm-agent-protocol.md` (in its last line). Both
+# strings are therefore in EVERY cell's system prompt, and the agent's own
+# legitimate `cat` of the served protocol puts the bare filename in the
+# transcript too. A bare-filename marker would flag every cell — including
+# the ones that read exactly what they were told to read.
+#
+# So the markers here are the harness's own artefacts BY ABSOLUTE PATH. The
+# cell's HOME is a temporary directory, so an absolute path under the real
+# repository means the agent reached outside its cell.
 BLOCKING_MARKERS = (
-    "block_behaviour_comparison.py",
-    "mutation_probe.py",
-    "installer_regression.py",
-    "block-3.0.0.md",
-    "protocol-3.0.0.md",
-    "snippets-3.0.0.md",
-    "fixtures/README.md",
-    "canonical_block.md",
-    "final_block.md",
-    "measure/README.md",
-    "MPM_AGENT_INTEGRATION_SNIPPETS.md",
-    "mpm-agent-protocol.md",
+    str(REPO_ROOT / "agent_installation" / "MPM_AGENT_INTEGRATION_SNIPPETS.md"),
+    str(REPO_ROOT / "agent_installation" / "mpm-agent-protocol.md"),
+    str(REPO_ROOT / "README.md"),
+    str(REPO_ROOT / "agent_installation" / "measure" / "block_behaviour_comparison.py"),
+    str(REPO_ROOT / "agent_installation" / "measure" / "mutation_probe.py"),
+    str(REPO_ROOT / "agent_installation" / "measure" / "installer_regression.py"),
+    str(REPO_ROOT / "agent_installation" / "measure" / "fixtures"),
+    str(REPO_ROOT / "agent_installation" / "tests"),
+    str(REPO_ROOT / "agent_installation" / "scripts"),
+    str(REPO_ROOT / "docs" / "dev"),
 )
 
-# The harness's own repository. The agent reading anything under it
-# is reading the harness.
-BLOCKING_PREFIXES = (
-    str(REPO_ROOT),
-    str(FIXTURES),
-)
+# The harness's own directories. The OpenCode adapter directory is
+# deliberately NOT here: the host legitimately references the plugin
+# path (it is registered in the cell's own config), so a path under
+# it proves nothing.
+BLOCKING_PREFIXES = ()
+
 
 # Absolute paths, for the outside-the-cell detector.
 _ABSOLUTE_PATH_RE = re.compile(r"/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]+")
@@ -187,23 +199,23 @@ def _isolated_path(tmp: Path, mpm_binary: str) -> str:
     return os.pathsep.join([str(bindir), *kept])
 
 
-def _reference_stack(variant: str) -> dict[str, str]:
+def _reference_stack(variant: str, stage: Path) -> dict[str, str]:
     """The files that arm's `~/.mpm/agent_installation/` must contain."""
     if variant == "old":
         return {
             "mpm-agent-protocol.md": (
-                FIXTURES / "protocol-3.0.0.md"
+                stage / "fixtures" / "protocol-3.0.0.md"
             ).read_text(encoding="utf-8"),
             "MPM_AGENT_INTEGRATION_SNIPPETS.md": (
-                FIXTURES / "snippets-3.0.0.md"
+                stage / "fixtures" / "snippets-3.0.0.md"
             ).read_text(encoding="utf-8"),
         }
     return {
         "mpm-agent-protocol.md": (
-            AGENT_INSTALLATION / "mpm-agent-protocol.md"
+            stage / "mpm-agent-protocol.md"
         ).read_text(encoding="utf-8"),
         "MPM_AGENT_INTEGRATION_SNIPPETS.md": (
-            CANONICAL_SOURCE
+            stage / CANONICAL_SOURCE.name
         ).read_text(encoding="utf-8"),
     }
 
@@ -267,16 +279,49 @@ This block is a placeholder for the renderer's fixture.
 <!-- END MPM MANAGED BLOCK -->
 """
 
+CANONICAL_MD = """\
+# Canonical managed-block source (fixture)
+
+This is the document `block.md` was extracted from. It holds one
+managed block, between the `<!-- BEGIN MPM MANAGED BLOCK -->` and
+`<!-- END MPM MANAGED BLOCK -->` markers, and the renderer requires
+the END marker to be followed immediately by a newline.
+
+<!-- BEGIN MPM MANAGED BLOCK -->
+<!-- source: canonical.md -->
+# Example managed block
+
+This block is a placeholder for the renderer's fixture.
+<!-- END MPM MANAGED BLOCK -->
+"""
+
+
 NOTES_TXT = "\n".join(f"note line {i:03d}" for i in range(1, 41)) + "\n"
 
+# THE FIXTURE MUST ANSWER EVERY QUESTION IT RAISES.
+#
+# `block.md`'s provenance comment names `canonical.md`. If that file is
+# not in the fixture, the agent looks for it — and the only `canonical.md`
+# on this machine is inside the harness's own repository, so it finds
+# the production tree, reads the canonical source, the scripts and the
+# tests, and the cell becomes a measurement of the harness.
+#
+# That happened, and it was measured: the new arm's `reusable-discovery`
+# cell came back with the harness's own repository in its transcript.
+#
+# So `canonical.md` IS in the fixture, and it is a plausible document
+# rather than a stub. Every name the fixture mentions resolves inside
+# the fixture, and the agent has no reason to leave it.
 PROJECT_FILES = {
     "renderer.py": RENDERER,
     "block.md": BLOCK_MD,
+    "canonical.md": CANONICAL_MD,
     "notes.txt": NOTES_TXT,
     "README.md": (
         "# Fixture project\n\n"
         "`renderer.py` extracts the managed block from `block.md` and\n"
-        "checks it. Run it with `python3 renderer.py block.md`.\n"
+        "checks it. Run it with `python3 renderer.py block.md`.\n\n"
+        "`canonical.md` is the document `block.md` was extracted from.\n"
     ),
 }
 
@@ -320,9 +365,76 @@ def _extract_last_block(text: str) -> str:
     return matches[-1].group(0)
 
 
-def _variants() -> dict[str, str]:
-    old = (FIXTURES / "block-3.0.0.md").read_text(encoding="utf-8")
-    new = _extract_last_block(CANONICAL_SOURCE.read_text(encoding="utf-8"))
+# ---------------------------------------------------------------------------
+# THE STAGE.
+#
+# EVERY INPUT THE HARNESS USES IS COPIED INTO A PRIVATE STAGING DIRECTORY
+# BEFORE THE RUN, AND THE CELLS SEE ONLY THE STAGE.
+#
+# WHY. The harness lives inside a git worktree, and the worktree lives
+# under a directory the agent can explore. A cell's `opencode.jsonc`
+# names the plugin directory by ABSOLUTE PATH — so the agent could read
+# its own configuration, learn the repository's location, and walk into
+# it. That happened: a measured cell ran
+#
+#     cd /tmp/opencode/managed-block/agent_installation/scripts && \
+#         grep -n "BEGIN MPM MANAGED" render_managed_blocks.py
+#
+# which is the production renderer, read out of the harness's own
+# repository. The cell was measuring the harness.
+#
+# The stage fixes the pointer: the cell's plugin payload is a COPY of
+# the adapter's runtime files (package.json, server.js, dist/) in a
+# temporary directory, so the configuration names a path with no
+# repository behind it. The canonical source, the protocol and the 3.0.0
+# fixtures are copied in too, so the run is reproducible even if the
+# working tree changes under it.
+#
+# A blind filesystem-wide search can still find the real tree. The
+# contamination detector catches that, and the report reports the
+# cell as contaminated rather than counting it. What the stage removes
+# is the POINTER, which is what turned a local task into a repository
+# excavation.
+# ---------------------------------------------------------------------------
+
+
+def _stage_inputs(stage: Path) -> None:
+    """Copy every harness input into the private stage."""
+    stage.mkdir(parents=True, exist_ok=True)
+
+    # The canonical source and the protocol: the new arm's reference
+    # stack, and the new arm's block.
+    shutil.copy2(CANONICAL_SOURCE, stage / CANONICAL_SOURCE.name)
+    shutil.copy2(
+        AGENT_INSTALLATION / "mpm-agent-protocol.md",
+        stage / "mpm-agent-protocol.md",
+    )
+
+    # The 3.0.0 fixtures: the old arm's reference stack and its block.
+    fixtures_stage = stage / "fixtures"
+    fixtures_stage.mkdir(exist_ok=True)
+    for name in ("block-3.0.0.md", "protocol-3.0.0.md", "snippets-3.0.0.md"):
+        shutil.copy2(FIXTURES / name, fixtures_stage / name)
+
+    # The plugin payload: exactly what OpenCode loads, and nothing else.
+    # `templates/AGENTS.md.snippet` is deliberately NOT copied — it
+    # carries the managed block, and the cell must not be able to read
+    # the block from the adapter's directory.
+    plugin_stage = stage / "plugin"
+    plugin_stage.mkdir(exist_ok=True)
+    shutil.copy2(ADAPTER_DIR / "package.json", plugin_stage / "package.json")
+    shutil.copy2(ADAPTER_DIR / "server.js", plugin_stage / "server.js")
+    if (ADAPTER_DIR / "dist").is_dir():
+        shutil.copytree(
+            ADAPTER_DIR / "dist", plugin_stage / "dist", dirs_exist_ok=True,
+        )
+
+
+def _variants(stage: Path) -> dict[str, str]:
+    old = (stage / "fixtures" / "block-3.0.0.md").read_text(encoding="utf-8")
+    new = _extract_last_block(
+        (stage / CANONICAL_SOURCE.name).read_text(encoding="utf-8")
+    )
     return {"old": old, "new": new}
 
 
@@ -390,8 +502,80 @@ def _measure(db_path: Path) -> dict:
         conn.close()
 
 
+def _strip_legitimate(transcript: str, variant: str, block: str,
+                      stage: Path) -> str:
+    """Remove the arm's OWN reading from the transcript.
+
+    The agent is EXPECTED to read the block it was given and the
+    protocol that block points at. Those reads are the contract
+    working, not contamination — and the block names both files, so
+    their names appear in every cell's system prompt.
+
+    The removal has to survive the transcript's encoding: OpenCode
+    stores messages as JSON, so a document's newlines appear as the
+    two-character sequence `\n`. Each legitimate body is therefore
+    stripped in three forms — verbatim, JSON-escaped, and with all
+    whitespace removed — because the compact form matches regardless
+    of how the store chose to encode it.
+    """
+    out = transcript
+    stack = _reference_stack(variant, stage)
+    for body in (
+        block,
+        stack.get("mpm-agent-protocol.md", ""),
+        stack.get("MPM_AGENT_INTEGRATION_SNIPPETS.md", ""),
+    ):
+        if not body:
+            continue
+        for needle in (
+            body,
+            body.replace("\n", "\\n"),
+            re.sub(r"\s+", "", body),
+        ):
+            if needle:
+                out = out.replace(needle, " ")
+    return out
+
+
+def _scan_transcript(tmp: Path) -> str:
+    """The agent's FULL transcript, not just the host's stdout.
+
+    The host's stdout contains the agent's final message and the
+    host's own narration. It does NOT contain the agent's tool calls
+    and their outputs — and an agent that reads a harness artefact
+    through a shell command sees it only in that tool output.
+
+    So a contamination detector that scans stdout alone has a blind
+    spot: it reports a cell that NARRATED an artefact and misses a
+    cell that READ one. That asymmetry makes a `contaminated: false`
+    flag no evidence at all.
+
+    The cell's own OpenCode data directory holds the session store:
+    every message and every tool-call part. This walks it and
+    concatenates the text, so the detector sees what the agent
+    actually saw.
+    """
+    data = tmp / "data" / "opencode"
+    if not data.is_dir():
+        return ""
+    chunks: list[str] = []
+    for path in sorted(data.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_size > 8 * 1024 * 1024:
+                continue
+            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return "\n".join(chunks)
+
+
 def _run_one(variant: str, block: str, scenario: str, prompt: str,
-              mpm_binary: str, timeout: int = 600) -> dict:
+              mpm_binary: str, timeout: int = 600,
+              transcript_dir: Path | None = None,
+              stage: Path | None = None) -> dict:
+    assert stage is not None, "the harness must run against a staged copy"
     tmp = Path(tempfile.mkdtemp(prefix=f"mpm-behav-{variant}-{scenario}-"))
     try:
         project = tmp / "project"
@@ -403,15 +587,24 @@ def _run_one(variant: str, block: str, scenario: str, prompt: str,
         (workspace / "src" / "db").mkdir(parents=True)
         db_path = workspace / "src" / "db" / "mpm.db"
 
-        # The arm's reference stack, at the path the block names.
+        # The arm's reference stack, AT THE PATH THE BLOCK NAMES.
+        #
         # `~/.mpm` in a real installation IS the MPM checkout, so the
         # pointer `~/.mpm/agent_installation/mpm-agent-protocol.md`
         # resolves. Here it resolves to this arm's protocol — and to
         # nothing else, so the agent cannot wander into the real
         # repository and read the other arm's contract.
-        mpm_home = tmp / "home" / ".mpm" / "agent_installation"
+        #
+        # HOME IS `tmp`, so `~` IS `tmp` and the served path is
+        # `tmp/.mpm/agent_installation/`. An earlier revision served it
+        # under `tmp/home/.mpm/…`, which is NOT where `~` pointed: the
+        # pointer did not resolve, the agent went looking for it, found
+        # the real repository, and read the other arm's contract. A
+        # harness that does not resolve the pointer it is testing is
+        # measuring a filesystem search, not a contract.
+        mpm_home = tmp / ".mpm" / "agent_installation"
         mpm_home.mkdir(parents=True, exist_ok=True)
-        for name, body in _reference_stack(variant).items():
+        for name, body in _reference_stack(variant, stage).items():
             (mpm_home / name).write_text(body, encoding="utf-8")
 
         # The user-scope instruction file. XDG_CONFIG_HOME is
@@ -423,10 +616,14 @@ def _run_one(variant: str, block: str, scenario: str, prompt: str,
 
         # Register THIS repository's plugin, so the agent has the
         # MPM tools.
+        # The plugin is the STAGED copy. The cell's configuration must
+        # not name a path with a repository behind it: the agent can
+        # read its own configuration, and a repository path in it is an
+        # invitation to go and read that repository.
         (config / "opencode.jsonc").write_text(
             "{\n"
             '  "$schema": "https://opencode.ai/config.json",\n'
-            f'  "plugins": ["file://{ADAPTER_DIR}"]\n'
+            f'  "plugins": ["file://{stage / "plugin"}"]\n'
             "}\n",
             encoding="utf-8",
         )
@@ -516,7 +713,29 @@ def _run_one(variant: str, block: str, scenario: str, prompt: str,
         measured["returncode"] = proc.returncode
         measured["stderr_tail"] = proc.stderr.strip()[-600:]
         # CONTAMINATION DETECTOR — see the two-bucket note above.
-        transcript = proc.stdout + proc.stderr
+        #
+        # The scan covers the HOST's output AND the agent's full
+        # transcript (its tool calls and their outputs). Scanning only
+        # the host's output has a blind spot: an agent that READS a
+        # harness artefact through a shell command never mentions it
+        # in its final message, so it would not be flagged. A
+        # `contaminated: false` flag is only as good as this scan.
+        transcript = _strip_legitimate(
+            proc.stdout + proc.stderr + _scan_transcript(tmp),
+            variant, block, stage,
+        )
+        # KEEP THE EVIDENCE.
+        #
+        # The contamination detector is only as good as the scan, and a
+        # scan nobody can inspect is a scan nobody can trust. The
+        # transcript of every cell is written next to the JSON
+        # envelope so a reviewer can check the verdict by hand — and so
+        # a wrong verdict can be diagnosed instead of re-run.
+        if transcript_dir is not None:
+            transcript_dir.mkdir(parents=True, exist_ok=True)
+            (transcript_dir / f"{variant}-{scenario}.txt").write_text(
+                transcript, encoding="utf-8", errors="replace",
+            )
         blocking = [
             needle for needle in BLOCKING_MARKERS
             if needle in transcript
@@ -547,14 +766,43 @@ def main() -> int:
         "--timeout", type=int, default=420,
         help="per-cell wall-clock budget in seconds (default 420)",
     )
+    ap.add_argument(
+        "--transcripts", default=None,
+        help="directory to write each cell's transcript into, so the "
+             "contamination verdict can be checked by hand",
+    )
     args = ap.parse_args()
 
+    transcript_dir = (
+        Path(args.transcripts) if args.transcripts else None
+    )
+
     mpm_binary = _mpm_binary()
-    variants = _variants()
+    stage = Path(tempfile.mkdtemp(prefix="mpm-behav-stage-"))
+    _stage_inputs(stage)
+    variants = _variants(stage)
     scenarios = args.scenarios or list(SCENARIOS)
     which = args.variants or list(variants)
 
-    results = []
+    # MERGE, DO NOT OVERWRITE.
+    #
+    # A resumed run must not destroy the cells it already completed.
+    # The previous shape rewrote the whole file from this
+    # invocation's in-memory list, so resuming with a subset of the
+    # scenarios silently threw the other cells away — a data-loss
+    # trap in a harness whose whole purpose is to produce a table.
+    #
+    # The merge is keyed on (variant, scenario): a re-run of a cell
+    # replaces it; cells this invocation did not touch are kept.
+    results: list[dict] = []
+    if args.json and Path(args.json).is_file():
+        try:
+            existing = json.loads(Path(args.json).read_text(encoding="utf-8"))
+            if isinstance(existing, list):
+                results = [r for r in existing if isinstance(r, dict)]
+        except (OSError, ValueError):
+            results = []
+
     # The scenarios are the OUTER loop and the variants the inner one.
     # Running the two arms of a scenario back to back means a transient
     # provider slowdown, a rate limit or a cold cache lands on BOTH
@@ -567,6 +815,7 @@ def main() -> int:
             measured = _run_one(
                 variant, variants[variant], scenario,
                 SCENARIOS[scenario], mpm_binary, timeout=args.timeout,
+                transcript_dir=transcript_dir, stage=stage,
             )
             row = {
                 "variant": variant,
@@ -586,6 +835,12 @@ def main() -> int:
                 "contamination_hits": measured.get("contamination_hits", []),
                 "environment_reach": measured.get("environment_reach", []),
             }
+            # Upsert: a re-run of a cell replaces the earlier one.
+            results = [
+                r for r in results
+                if not (r.get("variant") == row["variant"]
+                        and r.get("scenario") == row["scenario"])
+            ]
             results.append(row)
             print(
                 f"    memories={row['memories']} decisions={row['decisions']} "

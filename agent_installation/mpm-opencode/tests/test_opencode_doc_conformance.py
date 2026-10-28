@@ -58,6 +58,7 @@ AGENT_INSTALLATION = SCRIPT_DIR.parent
 REPO_ROOT = AGENT_INSTALLATION.parent
 
 PLUGIN_SOURCE = SCRIPT_DIR / "src" / "index.v2.ts"
+LEGACY_PLUGIN_SOURCE = SCRIPT_DIR / "src" / "index.ts"
 RESOLVER_SOURCE = SCRIPT_DIR / "src" / "resolve-mpm-binary.ts"
 WORKSPACE_SOURCE = SCRIPT_DIR / "src" / "workspace.ts"
 PACKAGE_JSON = SCRIPT_DIR / "package.json"
@@ -152,6 +153,125 @@ class ToolSurfaceFacts(unittest.TestCase):
             "the OpenCode tool prefix changed; the plugin and the managed "
             "block must be updated together",
         )
+
+
+def _tool_descriptions(path: Path) -> dict[str, str]:
+    """Map every registered tool to its description literal.
+
+    The two plugin sources declare their tools in DIFFERENT shapes:
+
+      * `src/index.v2.ts` — a `DOMAIN_TOOLS` / `STANDALONE_TOOLS`
+        array of `{ name: "mpm_x", description: ... }` objects. The
+        domain descriptions are template literals; the standalone ones
+        are double-quoted strings.
+      * `src/index.ts` — 14 `registerDomainTool(bin, tools, { name:
+        "mpm_x", description: ... })` calls plus 3
+        `tools.mpm_x = tool({ description: ... })` assignments.
+
+    So the parser looks for a tool NAME, then takes the FIRST
+    `description:` literal after it. That covers all four shapes
+    without hard-coding any of them.
+    """
+    text = path.read_text()
+    out: dict[str, str] = {}
+    for match in re.finditer(
+        r'(?:name:\s*"|tools\.)(mpm_[a-z_]+)"?', text
+    ):
+        name = match.group(1)
+        if name in out:
+            continue
+        rest = text[match.end() :]
+        desc = re.search(
+            r'description:\s*(?:`([^`]*)`|"((?:[^"\\]|\\.)*)")',
+            rest,
+            re.S,
+        )
+        if desc:
+            out[name] = desc.group(1) if desc.group(1) is not None else desc.group(2)
+    return out
+
+
+class LegacyPluginSourceAgrees(unittest.TestCase):
+    """The legacy plugin source must not teach a different tool surface.
+
+    WHY THIS EXISTS
+    ---------------
+    The adapter carries TWO implementations of the plugin's tool
+    surface:
+
+      * `src/index.v2.ts` — the 2026-10-16 port to the OpenCode 2
+        plugin API. This is the module OpenCode loads: `package.json`'s
+        `main` is `./dist/index.v2.js`, and the root `server.js`
+        re-exports it.
+      * `src/index.ts` — the earlier implementation, in a different
+        shape (14 `registerDomainTool` calls plus 3 `tools.mpm_x =
+        tool({...})` assignments). It compiles to `dist/index.js`,
+        which **nothing in the default installation loads**.
+
+    Both register all 17 tools, and today every description is
+    identical — but nothing ENFORCES that. So it is a trap: it is the
+    file a maintainer is most likely to edit by mistake (it sorts
+    first, and it carries the older layout), and a correction applied
+    ONLY to it compiles cleanly, passes every test in this repository,
+    and **never reaches the agent**.
+
+    The 2026-10-28 session-C work hit exactly that: a `mpm_handoff`
+    description correction was applied to `src/index.ts` first, and
+    the built `dist/index.v2.js` — the file OpenCode actually loads —
+    still carried the wrong text.
+
+    WHAT THIS PINS
+    --------------
+    For every tool both files register, the description text is
+    identical. A correction must be applied to both, and this test is
+    what says so.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.loaded = _tool_descriptions(PLUGIN_SOURCE)
+        cls.legacy = _tool_descriptions(LEGACY_PLUGIN_SOURCE)
+
+    def test_the_legacy_source_is_not_the_loaded_entry_point(self) -> None:
+        # The premise of this class. If the loaded entry point ever
+        # changes, the premise changes and the class must be revisited
+        # rather than silently asserting the wrong thing.
+        package = json.loads(PACKAGE_JSON.read_text())
+        self.assertEqual(
+            package.get("main"), "./dist/index.v2.js",
+            "the loaded plugin entry point changed; this test's premise "
+            "must be re-derived",
+        )
+        server = (SCRIPT_DIR / "server.js").read_text()
+        self.assertIn("./dist/index.v2.js", server)
+
+    def test_both_sources_register_the_same_tools(self) -> None:
+        self.assertEqual(
+            sorted(self.legacy),
+            sorted(self.loaded),
+            "the two plugin sources register different tool sets",
+        )
+        self.assertEqual(
+            len(self.loaded), 17,
+            "the loaded plugin's tool count changed",
+        )
+
+    def test_the_shared_tool_descriptions_are_identical(self) -> None:
+        shared = sorted(set(self.loaded) & set(self.legacy))
+        self.assertTrue(
+            shared,
+            "no tool is registered by both sources; the parsers or the "
+            "sources changed shape",
+        )
+        for name in shared:
+            self.assertEqual(
+                self.loaded[name],
+                self.legacy[name],
+                f"{name}: the loaded plugin (src/index.v2.ts) and the "
+                f"legacy plugin (src/index.ts) describe it differently. "
+                f"A correction applied to only one of them compiles "
+                f"cleanly and never reaches the agent.",
+            )
 
 
 class DocumentationAgreesWithSource(unittest.TestCase):

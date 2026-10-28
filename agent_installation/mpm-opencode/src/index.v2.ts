@@ -468,7 +468,7 @@ const DOMAIN_TOOLS: DomainToolSpec[] = [
         name: "mpm_theories",
         description: `Theory lifecycle. Literal actions:
   propose — Required params.hypothesis. Optional: params.validation_criteria, params.tags, params.dependencies, params.source_ids.
-  resolve — Resolve a pending theory. Required params.theory_id, params.conclusion ("confirmed"|"disproven"), params.new_status ("proven"|"disproven"). Optional: params.winner_id.`,
+  resolve — Resolve a pending theory. Required params.theoryId, params.conclusion ("confirmed"|"disproven"). Optional: params.newStatus ("proven"|"disproven"), params.winner_id.`,
     },
     {
         name: "mpm_decisions",
@@ -548,7 +548,7 @@ const DOMAIN_TOOLS: DomainToolSpec[] = [
     {
         name: "mpm_handoff",
         description: `Inter-session communication: write, read, and audit handoff records. Literal actions:
-  write — Write a handoff for the next session. Required params.session_id, params.summary. Optional: params.state ("clean"|"crashed"|"interrupted"|"force_end"), params.commitments, params.open_questions, params.note.
+  write — Write a handoff for the next session. Required params.summary. Optional: params.session_id, params.state ("clean"|"crashed"|"interrupted"|"force_end"), params.commitments, params.open_questions. There is NO params.note: the write surface persists only summary, session_id, state, commitments and open_questions, and any other params key is accepted and SILENTLY DROPPED — so put the next actions in params.commitments and the blockers in params.open_questions.
   read — Read a specific handoff. Required params.handoff_id. Optional: params.mark_read.
   list — List handoffs. Optional: params.session_id, params.unread, params.limit (default 10).
   shred — Hard-delete a handoff. Required params.handoff_id. Optional: params.confirm (true).`,
