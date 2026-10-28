@@ -95,7 +95,7 @@ learned.**
 | Insight, warning, or practice worth repeating | `mpm_lessons` action `save` |
 | Supporting or contradicting observation | `mpm_evidence` action `add` |
 | Unverified hypothesis — never a fact or lesson | `mpm_theories` action `propose` |
-| Objective spanning sessions | `mpm_work` action `create` |
+| Objective spanning sessions | `mpm_work` action `create` — reach it with `mpm call` |
 | Procedure that has proved itself | `mpm_skills` action `save` |
 | External document to ingest for later consultation | `mpm_references` action `add` |
 | Unfinished work or session transition | `mpm_handoff` action `write` |
@@ -119,7 +119,9 @@ Wake context arrives at session start (recover it through `mpm_context` using
 `read_wake_context` if not); follow its pointers — they point into durable
 knowledge, not a complete or unquestionable account, and stored state may be
 outdated or superseded. Discover unfamiliar operations with `mpm_help` action
-`show`; `mpm call <tool>` reaches what the host does not expose.
+`show` — `mpm_help` and `mpm_work` are reached with `mpm call <tool>`, not as
+native tools on this host; the same path reaches whatever else it does not
+expose.
 References are a distinct corpus, not memories: read the underlying source rather than relying solely on a search-result summary.
 Check its version and freshness. Full contract:
 `~/.mpm/agent_installation/mpm-agent-protocol.md`.
