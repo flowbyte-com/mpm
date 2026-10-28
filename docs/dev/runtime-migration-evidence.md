@@ -470,7 +470,19 @@ REHEARSAL PASSED — 135 assertions, 0 failures
 - The harness's own contents are fingerprinted before the first test and
   checked after every one.
 
-### 7.3 The live installation, afterwards
+### 7.3 The release gate
+
+At the head of this work, on `feat/runtime-migration-design`:
+
+| Gate | Result |
+|---|---|
+| `make test` (the full suite: root + internal/core + scheduler + critic + tools + scripts + agent_installation) | **green** |
+| `make rehearsal REHEARSAL_REV=HEAD` | **135 assertions, 0 failures** |
+| `go test -race` on every changed package (`internal/core`, `internal/core/config`, `internal/scheduler`, `cmd/mpm`, `cmd/mpm-scheduler`, `cmd/mpm-critic`) | **green** |
+| `mpm-lint --gate` | **PASS** on every class |
+| `scripts/tests/` (559 tests) and `agent_installation/tests/` (456 tests) | **green** |
+
+### 7.4 The live installation, afterwards
 
 ```
 $ systemctl --user show mpm-scheduler -p NRestarts -p MainPID
