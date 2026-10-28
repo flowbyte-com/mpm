@@ -109,6 +109,34 @@ ASSET_DIRS = {
     "drills": ".yaml",
 }
 
+# ASSET_GROUPS partitions the assets by OWNERSHIP LIFETIME.
+#
+# A versioned runtime bundle and a persistent data root have different
+# lifetimes, so the assets they hold must not be provisioned together:
+#
+#   definitions   mode/, persona/, drills/ -- the operator may edit these.
+#                 The reconciler refuses to overwrite an operator's edit, so
+#                 they are OPERATOR-OWNED and belong in the data root, where
+#                 they survive every upgrade.
+#
+#   host-assets   agent_installation/** -- the per-host adapters, their
+#                 reconcilers and the shared behavioural protocol. These are
+#                 RELEASE-SCOPED: they change with the release and must roll
+#                 back with it, so they belong in the bundle.
+#
+# WHY THE SPLIT IS NOT OPTIONAL. A version switch replaces a bundle
+# wholesale. If the operator's definitions lived in the bundle, the switch
+# would replace them -- and the reconciler's refusal to overwrite an
+# operator's edit (CASE C and CASE E) would turn every upgrade into a
+# conflict report for files the operator had deliberately customised.
+#
+# The default (no --groups) provisions everything into one root, which is
+# exactly the pre-split behaviour.
+ASSET_GROUPS = {
+    "definitions": ("mode/", "persona/", "drills/"),
+    "host-assets": ("agent_installation/",),
+}
+
 # Explicit, enumerated assets. ASSET_DIRS cannot express these because it is
 # a (directory, suffix) pair and onboarding needs files that share a
 # directory with different suffixes plus per-adapter manifests.
@@ -466,7 +494,8 @@ def _same_file(a: Path, b: Path) -> bool:
             return False
 
 
-def reconcile(source_root: Path, runtime_root: Path, dry_run: bool = False) -> Result:
+def reconcile(source_root: Path, runtime_root: Path, dry_run: bool = False,
+              groups: list[str] | None = None) -> Result:
     """Reconcile source-managed assets into the runtime root.
 
     Implements the ownership cases:
@@ -497,6 +526,17 @@ def reconcile(source_root: Path, runtime_root: Path, dry_run: bool = False) -> R
     records: dict[str, dict] = manifest["assets"]
 
     source_assets = discover_source_assets(source_root)
+    scope_prefixes: tuple[str, ...] | None = None
+    if groups:
+        # Restrict the source set to the requested ownership groups.
+        #
+        # The filter is by PATH PREFIX, so an asset that belongs to
+        # neither group is simply not provisioned into either root --
+        # which is correct: the two roots together must cover the whole
+        # asset set, and an asset in neither group is one this installer
+        # does not manage.
+        scope_prefixes = tuple(p for g in groups for p in ASSET_GROUPS[g])
+        source_assets = [a for a in source_assets if a.startswith(scope_prefixes)]
     source_set = set(source_assets)
 
     if not dry_run and not runtime_root.exists():
@@ -594,7 +634,18 @@ def reconcile(source_root: Path, runtime_root: Path, dry_run: bool = False) -> R
         )
 
     # CASE F — a managed file the source tree no longer ships.
-    for rel in sorted(set(records) - source_set):
+    #
+    # The sweep is SCOPED to the groups this run owns. A group-scoped
+    # reconcile must not release ownership of assets outside its groups:
+    # the data root and the bundle are separate roots in the real
+    # deployment, and a reconcile of one into the other root must leave
+    # the other root's records untouched.
+    stale_candidates = set(records) - source_set
+    if scope_prefixes is not None:
+        stale_candidates = {
+            rel for rel in stale_candidates if rel.startswith(scope_prefixes)
+        }
+    for rel in sorted(stale_candidates):
         dst = runtime_root / rel
         if not dst.exists():
             # Case G territory: operator removed it. Drop the record —
@@ -713,6 +764,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Report intended operations without writing anything.",
     )
+    parser.add_argument(
+        "--groups",
+        nargs="+",
+        choices=sorted(ASSET_GROUPS),
+        default=None,
+        help=(
+            "Provision only these asset groups (default: all). "
+            "'definitions' is operator-owned and survives upgrades; "
+            "'host-assets' is release-scoped and belongs in a bundle."
+        ),
+    )
     args = parser.parse_args(argv)
 
     source_root = args.source_root.expanduser().resolve()
@@ -727,7 +789,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        result = reconcile(source_root, runtime_root, dry_run=args.dry_run)
+        result = reconcile(source_root, runtime_root, dry_run=args.dry_run,
+                           groups=args.groups)
     except ManifestError as exc:
         print(f"[runtime-assets] FAIL: {exc}", file=sys.stderr)
         return 2
