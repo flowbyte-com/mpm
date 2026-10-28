@@ -125,6 +125,35 @@ func main() {
 	// open, log setup, or tool registration that may write to disk.
 	config.EnforcePrivateUmask()
 
+	// Configuration gate (2026-10-28).
+	//
+	// A malformed mpm_config.json used to be a SEGMENTATION FAULT: the
+	// configuration load's error was discarded and the nil config was
+	// dereferenced while resolving the storage paths. The MCP server has
+	// no configuration-repair command, so there is nothing to exempt —
+	// the gate refuses to boot, naming the file that is wrong, rather
+	// than serving a substrate whose configuration it cannot read.
+	//
+	// It runs AFTER the version surface, which must answer even when
+	// everything else is broken.
+	if err := config.ValidateConfig(); err != nil {
+		fmt.Fprintln(os.Stderr, "fatal:", err)
+		os.Exit(1)
+	}
+
+	// Database-target gate (D4, 2026-10-28).
+	//
+	// MPM_DB_PATH may only RESTATE the workspace's own database. The
+	// MCP server has no --db flag, so it always opens
+	// <workspace>/src/db/mpm.db; an MPM_DB_PATH that names another
+	// database is a conflict between two selectors, and the server
+	// refuses to boot rather than serving a substrate whose writes go
+	// somewhere the environment says they do not.
+	if _, _, err := config.ResolveTarget(""); err != nil {
+		fmt.Fprintln(os.Stderr, "fatal:", err)
+		os.Exit(1)
+	}
+
 	// Alpha-4 D-004/W-004: mpm-mcp is a stdio MCP server — its
 	// stdout/stderr stream is the protocol boundary. Discard operational
 	// INFO by default so the protocol stays parseable. Operators can

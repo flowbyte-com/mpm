@@ -145,6 +145,7 @@ var testDBSafetyWhitelist = map[string]string{
 	"cmd/mpm/work_integration_test.go":                  "newWorkTestDM and its callers set MPM_WORKSPACE to t.TempDir() before NewDatabaseManager(\"\"); the test deliberately reopens the same file in a second DM to prove cross-session persistence",
 	"release_acceptance/cross_agent_continuity_test.go": "every test calls makeAcceptanceWorkspace(t), which sets MPM_WORKSPACE to a t.TempDir() root before NewDatabaseManager(\"\"); the scenario is built to reopen one SQLite file in a second DM to simulate a separate agent process, which is the property under test",
 	"release_acceptance/supersession_trace_test.go":     "same makeAcceptanceWorkspace(t) isolation; the second NewDatabaseManager(\"\") is the deliberate process-restart reopen that the supersession trace asserts across",
+	"internal/core/memory_malformed_config_test.go":      "sets MPM_WORKSPACE to t.TempDir() before NewMemoryStore(\"\"); the store's argument is discarded, so the only isolation is the MPM_WORKSPACE redirection — and the property under test is precisely that a MALFORMED configuration cannot crash the constructor, which needs the production path",
 }
 
 // dbSafetySkipDirs are directory names never descended into. testdata

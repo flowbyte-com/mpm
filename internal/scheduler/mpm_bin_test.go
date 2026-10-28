@@ -285,11 +285,28 @@ func TestDefaultDBPath_IsWorkspaceRelativeNotCwd(t *testing.T) {
 	}
 }
 
-func TestDefaultDBPath_ExplicitEnvWins(t *testing.T) {
-	t.Setenv("MPM_WORKSPACE", t.TempDir())
+// TestDefaultDBPath_EnvOverrideIsNotForwardedRaw pins the D4 change.
+//
+// The old contract was "MPM_DB_PATH wins". It was wrong, because the
+// value was forwarded VERBATIM to the critic subprocess — and the
+// critic then derived a workspace from it with Dir(Dir(Dir(path))),
+// which ASSUMED the path had the canonical <root>/src/db/mpm.db shape
+// and never checked it. So MPM_DB_PATH=/tmp/explicit-mpm.db came to
+// mean "the critic audits /src/db/mpm.db", a database nobody named.
+//
+// The value the scheduler hands a child is now the CANONICAL database
+// of the resolved workspace. The environment's MPM_DB_PATH is still
+// HONOURED — as a restatement of the workspace's own database, and
+// validated as such by config.ResolveTarget at startup — but it is
+// never forwarded raw.
+func TestDefaultDBPath_EnvOverrideIsNotForwardedRaw(t *testing.T) {
+	ws := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", ws)
 	t.Setenv("MPM_DB_PATH", "/tmp/explicit-mpm.db")
 
-	if got := defaultDBPath(); got != "/tmp/explicit-mpm.db" {
-		t.Fatalf("defaultDBPath() = %q, want the explicit MPM_DB_PATH", got)
+	got := defaultDBPath()
+	want := filepath.Join(ws, "src", "db", "mpm.db")
+	if got != want {
+		t.Fatalf("defaultDBPath() = %q, want the workspace's canonical database %q", got, want)
 	}
 }

@@ -933,18 +933,52 @@ func sanitizeSnapshotLabel(s string) string {
 // (replaces the prior internal 5-minute timeout ctx that masked the
 // scheduler's cancel signal — pre-fix, on SIGTERM the subprocess kept
 // running for up to 5 minutes past daemon exit).
+//
+// D4 (2026-10-28): the critic MUST audit the same substrate the
+// scheduler is running against.
+//
+// The handler used to pass MPM_DB_PATH=defaultDBPath() and nothing
+// else, so the critic resolved ITS workspace from the inherited
+// MPM_WORKSPACE — which is the scheduler's ENVIRONMENT workspace, not
+// necessarily the workspace the scheduler actually opened. When the
+// scheduler was pointed at another workspace with --db, the critic
+// audited a different database than the scheduler dispatched.
+//
+// The handler now receives the RESOLVED workspace and database path and
+// passes BOTH to the subprocess, so the critic cannot resolve anything
+// else.
 func CriticAuditHandler(ctx context.Context, w Wake) error {
-	bin := os.Getenv("MPM_CRITIC_BIN")
-	if bin == "" {
-		bin = "mpm-critic"
+	return NewCriticAuditHandler(defaultWorkspace(), defaultDBPath())(ctx, w)
+}
+
+// NewCriticAuditHandler returns the critic-audit handler bound to a
+// specific workspace and database.
+//
+// The workspace and the database path are captured at construction —
+// the scheduler resolves them once, at startup, and every audit cycle
+// then uses exactly those.
+func NewCriticAuditHandler(workspace, dbPath string) HandlerFunc {
+	return func(ctx context.Context, w Wake) error {
+		bin := os.Getenv("MPM_CRITIC_BIN")
+		if bin == "" {
+			bin = "mpm-critic"
+		}
+		cmd := exec.CommandContext(ctx, bin)
+		// The workspace AND the database are both pinned for the
+		// child: MPM_WORKSPACE selects the workspace, MPM_DB_PATH
+		// restates the workspace's own database. The critic's
+		// resolver requires the two to agree, so a child that
+		// somehow resolved a different workspace would refuse to
+		// start rather than audit the wrong substrate.
+		cmd.Env = append(os.Environ(),
+			"MPM_WORKSPACE="+workspace,
+			"MPM_DB_PATH="+dbPath)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("mpm-critic: %s: %w", strings.TrimSpace(string(out)), err)
+		}
+		return nil
 	}
-	cmd := exec.CommandContext(ctx, bin)
-	cmd.Env = append(os.Environ(), "MPM_DB_PATH="+defaultDBPath())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("mpm-critic: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
 }
 
 // GCHandler triggers the existing gc_run sweep. Reads dry_run and aggressive
@@ -999,10 +1033,32 @@ func BroadcastHandler(ctx context.Context, w Wake) error {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+// defaultWorkspace is the workspace this scheduler process is serving.
+//
+// It is the ENVIRONMENT's workspace — the one the CLI, the MCP server
+// and the scheduler all agree on. The scheduler's own --db flag can
+// select a different one; when it does, the resolved workspace is
+// threaded through the handlers explicitly rather than re-derived here.
+func defaultWorkspace() string {
+	return mpmcli.ResolveWorkspace()
+}
+
+// defaultDBPath is the canonical database of the workspace this process
+// is serving.
+//
+// D4 (2026-10-28): MPM_DB_PATH is NO LONGER read here.
+//
+// It used to be, and the value it returned was passed to the critic
+// subprocess as MPM_DB_PATH. That was how the critic could end up
+// auditing a different substrate than the scheduler dispatched against:
+// the raw env value was forwarded verbatim, unvalidated, and the
+// critic's own Dir(Dir(Dir(path))) derivation then decided what it
+// really meant.
+//
+// The value passed to a child is now the CANONICAL database of the
+// RESOLVED workspace — computed once, by config.ResolveTarget, and
+// pinned for the child's environment.
 func defaultDBPath() string {
-	if env := os.Getenv("MPM_DB_PATH"); env != "" {
-		return env
-	}
 	// Workspace-relative, never cwd-relative.
 	//
 	// This used to probe the current directory for src/db/mpm.db and use it
@@ -1013,7 +1069,7 @@ func defaultDBPath() string {
 	// hand from a source checkout and it resolved to the checkout's DB
 	// instead, so the critic audited a different substrate than the one the
 	// scheduler was running against.
-	return filepath.Join(mpmcli.ResolveWorkspace(), "src", "db", "mpm.db")
+	return filepath.Join(defaultWorkspace(), "src", "db", "mpm.db")
 }
 
 // rotateSnapshots keeps the most recent N snapshots in dir and deletes
