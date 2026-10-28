@@ -1447,3 +1447,170 @@ test("61: the operator summary carries the state, not just the totals", async ()
   assert.ok(line.includes("in_flight=1"), `the summary must show the in-flight delivery: ${line}`);
   gates[0]({});
 });
+
+// ---------------------------------------------------------------------------
+// Session-lifecycle events (the 2026-10-28 session-end investigation)
+// ---------------------------------------------------------------------------
+//
+// WHY THESE TESTS EXIST.
+//
+// The isolated-host investigation (measure/session_end_scenarios.py) found
+// that the host DOES publish session-lifecycle events — `session.archived`,
+// `session.unarchived`, `session.deleted` — and that the adapter SWALLOWED
+// every one of them.
+//
+// The mechanism: those events carry a session id, so they used to fall into
+// the activity fallback, which emits AT MOST ONE `session.observed` per
+// session. By the time the host archives or deletes a session, that single
+// observation has long since been emitted, so the event was seen and then
+// dropped. Measured on the real host: 27 host events observed, and the
+// archive recorded NOTHING.
+//
+// These tests pin the correction: a session-lifecycle event is a DURABLE
+// observation, and it asserts nothing beyond "the adapter saw it".
+//
+// WHAT IS DELIBERATELY NOT ASSERTED.
+//
+// An archive is NOT a session end. It is reversible (`session.unarchived`
+// exists), and a delete is a user action, not an agent conclusion. No
+// envelope here claims a session ended, and nothing infers an end from the
+// absence of later events (§3.4 forbids it, and §4 excludes
+// `session.resumed` for exactly that reason).
+
+test("62: session.archived is a durable observation, not swallowed by the once-per-session dedup", () => {
+  const observer = sub.createLifecycleObserver({
+    subscribe: () => ({ async *[Symbol.asyncIterator]() {} }),
+    transport: sub.createUnconfiguredTransport(),
+    mapping: mappingCtx(),
+  });
+  // The session is seen first — which is what used to swallow the archive.
+  observer.observe(hostEvent("session.text.delta", { sessionID: "ses_arch", delta: "SECRET" }, "evt_a1"));
+  assert.equal(observer.counters().session_observed, 1, "the activity observation");
+
+  observer.observe(hostEvent("session.archived", { sessionID: "ses_arch" }, "evt_a2"));
+  assert.equal(
+    observer.counters().session_observed,
+    2,
+    "the archive must be recorded as its own observation — not deduplicated away",
+  );
+  assert.equal(observer.counters().ignored, 0, "the archive is not an ignored event");
+  assert.equal(observer.counters().unsupported, 0, "the archive is not unsupported");
+});
+
+test("63: session.deleted and session.unarchived are recorded the same way", () => {
+  for (const type of ["session.deleted", "session.unarchived"]) {
+    const observer = sub.createLifecycleObserver({
+      subscribe: () => ({ async *[Symbol.asyncIterator]() {} }),
+      transport: sub.createUnconfiguredTransport(),
+      mapping: mappingCtx(),
+    });
+    observer.observe(hostEvent("session.text.delta", { sessionID: "ses_x", delta: "SECRET" }, "evt_d1"));
+    observer.observe(hostEvent(type, { sessionID: "ses_x" }, "evt_d2"));
+    assert.equal(
+      observer.counters().session_observed,
+      2,
+      `${type} must be recorded, not swallowed`,
+    );
+  }
+});
+
+test("64: a session-lifecycle observation asserts NOTHING about the session ending", () => {
+  const mapped = mapper.mapHostEvent(
+    hostEvent("session.archived", { sessionID: "ses_life" }, "evt_l1"),
+    mappingCtx(),
+  );
+  assert.equal(mapped.kind, "envelope");
+  const e = mapped.envelope;
+  assert.equal(e.event_type, "session.observed");
+  // The contract's neutral base type: the adapter saw an event for this
+  // session. Nothing more.
+  assert.equal(e.observation, "observed", "an observation, never an inference");
+  assert.equal(e.trust, "observation");
+  assert.equal(e.operation, "absent", "not an MPM operation");
+  assert.equal(e.result_status, "unknown", "the host states no result for an archive");
+  assert.equal(e.outcome_class, undefined, "no outcome is asserted");
+  assert.equal(e.framework_session_id, "ses_life");
+  assert.equal(e.meta.host_event_type, "session.archived", "the host's own event type is the fact");
+  // No new meta key: the allowlist is closed.
+  for (const k of Object.keys(e.meta)) {
+    assert.ok(
+      k === "host_event_type" || k in env.META_STRING_BOUNDS,
+      `meta key ${k} is not on the allowlist`,
+    );
+  }
+  assert.deepEqual(env.validateEnvelope(e), { ok: true }, "the envelope must validate");
+});
+
+test("65: a session-lifecycle event with NO session id is not fabricated into one", () => {
+  const mapped = mapper.mapHostEvent(
+    { id: "evt_l2", created: 1793047203717, type: "session.archived", location: { directory: "/tmp/x" }, data: {} },
+    mappingCtx(),
+  );
+  // No session id and no vocabulary type: ignored, never given a
+  // synthesised session.
+  assert.equal(mapped.kind, "ignored");
+});
+
+test("66: the once-per-session ACTIVITY dedup is unchanged by the fix", () => {
+  const observer = sub.createLifecycleObserver({
+    subscribe: () => ({ async *[Symbol.asyncIterator]() {} }),
+    transport: sub.createUnconfiguredTransport(),
+    mapping: mappingCtx(),
+  });
+  const ev = hostEvent("session.text.delta", { sessionID: "ses_act", delta: "SECRET" });
+  for (let i = 0; i < 10; i++) observer.observe(ev);
+  assert.equal(
+    observer.counters().session_observed,
+    1,
+    "the fix must not widen the activity fallback into a per-event stream",
+  );
+  assert.equal(observer.counters().host_events_seen, 10);
+});
+
+test("67: location.shutdown carries no session id, so it stays COUNTED and not recorded", () => {
+  // The host publishes `location.shutdown` on a graceful stop. It has no
+  // session id, and `session.observed`'s capability is "any host event
+  // that carries a session id" — so there is NO conformant mpm-event/0.1
+  // type for it. It is counted as ignored.
+  //
+  // This test pins the STATUS QUO deliberately: giving it a type would be
+  // a schema change (mpm-event/0.2) and needs Session A's ruling, not a
+  // quiet mapper edit.
+  const observer = sub.createLifecycleObserver({
+    subscribe: () => ({ async *[Symbol.asyncIterator]() {} }),
+    transport: sub.createUnconfiguredTransport(),
+    mapping: mappingCtx(),
+  });
+  observer.observe({
+    id: "evt_shutdown",
+    created: 1793047203717,
+    type: "location.shutdown",
+    location: { directory: "/tmp/x" },
+    data: {},
+  });
+  assert.equal(observer.counters().ignored, 1, "a session-less host event is counted");
+  assert.equal(observer.counters().session_observed, 0, "and it is not recorded as a session observation");
+  assert.equal(observer.counters().enqueued, 0);
+});
+
+test("68: the archive observation carries no content — only the host's event type", async () => {
+  const observer = sub.createLifecycleObserver({
+    subscribe: () => ({ async *[Symbol.asyncIterator]() {} }),
+    transport: countingTransport((e: any) => ({
+      ok: true,
+      receipt: { event_id: e.event_id, ingested_at_ms: 1, duplicate: false },
+    })),
+    mapping: mappingCtx(),
+  });
+  observer.observe(hostEvent("session.archived", { sessionID: "ses_safe", title: "SECRET TITLE" }, "evt_s1"));
+  await observer.drainOnce();
+  const sent = observer.counters();
+  assert.equal(sent.delivered, 1);
+  // The envelope is built by the mapper, not from the host's data, so the
+  // title cannot leak.
+  const mapped = mapper.mapHostEvent(
+    hostEvent("session.archived", { sessionID: "ses_safe", title: "SECRET TITLE" }, "evt_s1"),
+    mappingCtx(),
+  );
+  assert.ok(!JSON.stringify(mapped.envelope).includes("SECRET TITLE"), "no host content in the envelope");
+});
