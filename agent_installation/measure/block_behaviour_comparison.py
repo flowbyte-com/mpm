@@ -581,19 +581,40 @@ def _measure(db_path: Path) -> dict:
             except sqlite3.Error:
                 return 0
 
+        # THE HEADLINE METRIC IS "SHARED RECORDS", NOT "MEMORIES".
+        #
+        # A durable knowledge write is not always in the `memories`
+        # collection. The `memories` TABLE carries a `collection`
+        # column, and the substrate's vocabulary includes `knowledge`,
+        # `changelog`, `mpm-projects` and others alongside `memories`,
+        # `decisions` and `theories`. An earlier revision of this
+        # harness counted only the three it knew about — so a cell
+        # whose agent wrote a `knowledge` row reported ZERO. That is
+        # an under-count of the very behaviour the comparison exists
+        # to measure, and it was caught by reading an excerpt whose
+        # collection was `[knowledge]`.
+        #
+        # So: `shared_records` counts every row the agent created,
+        # broken down by collection, with the substrate's own seeded
+        # `directives` counted separately (they are a confound — they
+        # are identical in both arms — but they are counted so the
+        # confound is visible rather than implicit).
+        by_collection = {}
+        for (collection,) in conn.execute(
+            "SELECT collection FROM memories WHERE collection != 'directives'"
+        ):
+            by_collection[collection] = by_collection.get(collection, 0) + 1
         out = {
+            "shared_records": count(
+                "memories", "WHERE collection != 'directives'",
+            ),
+            "by_collection": by_collection,
             "memories": count("memories", "WHERE collection='memories'"),
             "decisions": count("memories", "WHERE collection='decisions'"),
             "theories": count("memories", "WHERE collection='theories'"),
             "lessons": count("lessons"),
             "handoffs": count("session_handoffs"),
             "works": count("works"),
-            # The substrate seeds its own prime directives on first
-            # use. They are agent-facing behaviour instructions, so
-            # they are a CONFOUND for a behavioural comparison — but
-            # they are identical in both variants, so the comparison
-            # stays controlled. They are counted so the report can
-            # say so rather than leave it implicit.
             "directives": count("memories", "WHERE collection='directives'"),
             "excerpts": [],
         }
@@ -1037,6 +1058,8 @@ def main() -> int:
             row = {
                 "variant": variant,
                 "scenario": scenario,
+                "shared_records": measured.get("shared_records", 0),
+                "by_collection": measured.get("by_collection", {}),
                 "memories": measured["memories"],
                 "decisions": measured["decisions"],
                 "theories": measured["theories"],
@@ -1062,8 +1085,9 @@ def main() -> int:
             ]
             results.append(row)
             print(
-                f"    memories={row['memories']} decisions={row['decisions']} "
-                f"theories={row['theories']} lessons={row['lessons']} "
+                f"    shared={row['shared_records']} "
+                f"{row['by_collection']} "
+                f"lessons={row['lessons']} "
                 f"handoffs={row['handoffs']} works={row['works']} "
                 f"(directives={row['directives']})"
                 + ("  **CONTAMINATED**" if row["contaminated"] else "")
