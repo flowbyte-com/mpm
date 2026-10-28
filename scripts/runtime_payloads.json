@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "_comment": [
+    "The runtime package payloads this release ships.",
+    "",
+    "A bundle is the replaceable half of an installation, and a host's",
+    "runtime package (the compiled plugin a host loads) is release-scoped:",
+    "it must roll back with the release. So the bundle carries it.",
+    "",
+    "This file is DATA, not code. The staging code iterates over whatever",
+    "is declared here and names no adapter itself, so adding an adapter is",
+    "a data change rather than a code change — and the root installer stays",
+    "host-agnostic, which is a boundary the repository enforces.",
+    "",
+    "  adapter    the directory under agent_installation/ that owns the",
+    "             package's source",
+    "  plugin_id  the id the package is registered under",
+    "  validator  the stage_runtime_package.sh validator that proves the",
+    "             staged package is loadable (a missing payload must fail",
+    "             the promotion, not warn)",
+    "  files      the EXPLICIT allowlist of files the package contains",
+    "",
+    "The allowlist must agree with the adapter's own manifest",
+    "(OPENCODE_RUNTIME_MANIFEST in agent_installation/mpm-opencode/install.sh).",
+    "scripts/tests/test_runtime_bundle.py fails if the two drift apart: a",
+    "payload the adapter installs but the bundle omits is a bundle that",
+    "registers a plugin which loads NOTHING."
+  ],
+  "payloads": [
+    {
+      "adapter": "mpm-opencode",
+      "plugin_id": "mpm-opencode",
+      "validator": "mpm_validate_runtime_package_opencode",
+      "files": [
+        "server.js",
+        "dist/index.v2.js",
+        "dist/wake-context.js",
+        "dist/event-envelope.js",
+        "dist/event-mapper.js",
+        "dist/event-subscriber.js",
+        "dist/workspace.js",
+        "dist/resolve-mpm-binary.js",
+        "package.json"
+      ]
+    }
+  ]
+}

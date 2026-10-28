@@ -503,13 +503,17 @@ class TestServiceOrdering(TransactionBase):
 
     def test_install_sh_restarts_service_only_after_binary_phase(self):
         install = (REPO_ROOT / "install.sh").read_text()
-        binaries_at = install.index("\n    phase_binaries\n")
         service_at = install.index("\n    phase_service\n")
-        self.assertLess(
-            binaries_at, service_at,
-            "phase_service must run after phase_binaries; a restart onto a "
-            "rolled-back or mixed release is exactly what this prevents",
-        )
+        # The binary promotion has two forms: the checkout-style
+        # phase_binaries, and the versioned-bundle phase_bundle. Both must
+        # precede the service phase: a restart onto a rolled-back or mixed
+        # release is exactly what this prevents.
+        for marker in ("\n        phase_binaries\n", "\n        phase_bundle\n"):
+            self.assertLess(
+                install.index(marker), service_at,
+                f"{marker.strip()} must run before phase_service; a restart "
+                "onto a rolled-back or mixed release is exactly what this prevents",
+            )
 
     def test_transaction_library_contains_no_systemctl(self):
         self.assertNotIn(

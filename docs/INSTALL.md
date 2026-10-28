@@ -172,6 +172,8 @@ row is not a failure.
 | `--dry-run` | Print intended actions, no changes |
 | `--validate` | Post-install validation (read-only) |
 | `--uninstall` | Remove installed artifacts. Data at `$HOME/.mpm/` is preserved |
+| `--bundle` | Install into the versioned runtime-bundle layout — see §1g |
+| `--rev <label>` | The release label for `--bundle` (default: the build's commit SHA) |
 | `--prefix <path>` | Override install prefix (default `$HOME/.mpm`) |
 | `--data-root <path>` | Override data root (default `$HOME/.mpm`) |
 | `--user <name>` | Override target user (default: current user) |
@@ -187,6 +189,80 @@ row is not a failure.
 > is user-space only as of this release. A legacy `/etc/systemd/system/
 > mpm-scheduler.service` left over from a previous install must be
 > disabled manually with `sudo`; the installer will not touch it.
+
+### 1g. The versioned runtime bundle layout (opt-in)
+
+> **Why this is opt-in:** the default install path is unchanged. Converting
+> an existing installation to the versioned layout is a **migration**, and
+> it is a separately authorised operation — not something `git pull &&
+> ./install.sh` should ever do behind your back.
+
+`./install.sh --bundle` installs into a layout where the runtime and the
+state are separate:
+
+```text
+~/.mpm/                          ← the DATA ROOT: unchanged, forever
+├── bin/                         → symlink into the active bundle
+├── agent_installation/          → symlink into the active bundle
+├── current                      → symlink to releases/<rev>   (THE POINTER)
+├── releases/
+│   └── <rev>/                   ← a versioned, Git-free bundle
+│       ├── bin/                 (the five binaries)
+│       ├── agent_installation/  (the host assets and the plugin payload)
+│       ├── RELEASE.json         (the build identity — readable without Git)
+│       └── schema/              (the substrate's own DDL, for the preflight)
+├── src/db/mpm.db                ← the persistent state: never copied, never moved
+├── backups/
+├── mpm_config.json              ← operator-owned: never in a bundle
+├── mode/, persona/, drills/     ← operator-owned: never in a bundle
+└── staging/                     ← where the candidate bundle is assembled
+```
+
+**What the split buys you.** A version switch replaces the *bundle*
+wholesale. The database, the backups, your configuration and your
+definitions live in the data root, where a version switch cannot reach
+them. The installer refuses to promote a bundle that carries any of them.
+
+**What happens during the install.** The candidate bundle is assembled in
+`staging/`, the five binaries are promoted into it as one transaction, the
+bundle is validated (five executable binaries, no `.git`, no state, and an
+identity that matches the binaries inside), and only then is it renamed
+into `releases/<rev>` and the `current` pointer swapped. The swap is a
+`rename(2)`, so `current` never dangles and never names a half-installed
+release.
+
+**The first conversion.** A checkout-style installation has real `bin/`
+and `agent_installation/` directories. The conversion turns them into
+symlinks into the active bundle and **moves the originals aside** rather
+than deleting them — they are the rollback material, and their locations
+are recorded in `~/.mpm/.legacy-layout-paths`.
+
+**A failed promotion rolls back.** If anything fails after the pointer was
+swapped, the previous pointer is restored and the layout conversion is
+undone. That is a **filesystem** rollback: it restores which files are
+where. It is **not** a data rollback — a migration the new binary applied
+to the database is not undone by it. See
+[the migration plan](dev/runtime-migration-plan.md) §4.5.
+
+**The schema preflight runs on every install.** Before the build and
+before any promotion, the installer compares the live database's table
+shapes against the substrate's own DDL and refuses a collision — a table
+named `lifecycle_events` that is not the substrate's. SQLite's
+`CREATE TABLE IF NOT EXISTS` would silently keep such a table and never
+apply the substrate's schema, so the install stops instead. The live
+database is read only through SQLite's online backup API; no MPM binary
+is run against it.
+
+**Rollback to the previous release:**
+
+```bash
+ln -sfn "releases/<previous-rev>" ~/.mpm/current.new
+mv -T ~/.mpm/current.new ~/.mpm/current
+systemctl --user restart mpm-scheduler
+```
+
+The design, the rehearsal that validated it and the operator checklist are
+in [the runtime migration plan](dev/runtime-migration-plan.md).
 
 ---
 
@@ -468,6 +544,15 @@ and `~/.local/bin/mpm-mcp` symlinks, and
 **Preserves:** your data (`~/.mpm/src/db/`, `~/.mpm/backups/`,
 `~/.mpm/blobs/`, `~/.mpm/active.json`) and your Git checkout.
 
+> **In the versioned bundle layout** (§1g) the runtime-only uninstall
+> removes the release-scoped material — the `current` pointer, the
+> `releases/` tree, the `staging/` area and the `bin/` and
+> `agent_installation/` symlinks — as a whole. It never follows a symlink
+> into a release to delete a file there. Your database, backups,
+> configuration and definitions are preserved, and so are the operator's
+> own directories that the layout conversion moved aside (their locations
+> stay recorded in `~/.mpm/.legacy-layout-paths`).
+
 > **Your source checkout is not the runtime root.** `--uninstall` removes
 > binaries and services, not your source. Do **not** run `rm -rf ~/.mpm` to
 > clear data unless your checkout is colocated there — on a host that has
@@ -518,6 +603,15 @@ user-owned; no `/usr/local` or `/var/lib/mpm` exists.
 | `~/.mpm/run/` | $USER | Scheduler state, pid/lock files |
 | `~/.mpm/active.json` | $USER | Active mode selection |
 | `~/.mpm/scheduler.lock` | $USER | flock singleton lock |
+
+In the versioned bundle layout (§1g) these four paths join the table:
+
+| Path | Owner | Purpose |
+|------|-------|---------|
+| `~/.mpm/current` | $USER | The active-runtime pointer: a symlink to `releases/<rev>` |
+| `~/.mpm/releases/<rev>/` | $USER | A versioned, Git-free runtime bundle |
+| `~/.mpm/releases/<rev>/RELEASE.json` | $USER | The build identity — readable without Git |
+| `~/.mpm/staging/` | $USER | Where the candidate bundle is assembled; disposable |
 
 ### The canonical layout
 

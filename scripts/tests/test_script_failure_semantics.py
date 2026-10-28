@@ -99,6 +99,7 @@ evidence of anything after it).
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -129,6 +130,33 @@ def _is_comment(line: str) -> bool:
     return line.strip().startswith("#")
 
 
+def _names_a_shim_path(line: str) -> bool:
+    """True when the line names a FILE called systemctl, not the command.
+
+    A harness that intercepts systemctl puts a stand-in named
+    `systemctl` on the PATH and lets the code under test call it. The
+    lines that create and enable that stand-in name systemctl — but
+    nothing is invoked, and the manager-scope question does not apply to
+    a file.
+
+    The discriminator is the PATH: a quoted path whose last component is
+    `systemctl`. A real invocation calls the bare command
+    `systemctl`, so it never has one.
+    """
+    return bool(re.search(r"""["'][^"']*/systemctl["']""", line))
+
+
+def _all_systemctl_mentions_are_paths(line: str) -> bool:
+    """True when EVERY mention of systemctl in the line is a quoted path.
+
+    The shim exemption must not become a loophole. A line that names a
+    stand-in's path AND calls the command still calls the command, and
+    still has to declare its manager scope.
+    """
+    remainder = re.sub(r"""["'][^"']*/systemctl["']""", "", line)
+    return "systemctl" not in remainder
+
+
 def _invokes_systemctl(line: str) -> bool:
     """True when a line runs systemctl, as opposed to probing or printing it.
 
@@ -139,7 +167,11 @@ def _invokes_systemctl(line: str) -> bool:
         return False
     if "command -v systemctl" in line:
         return False
-    return not any(line.strip().startswith(v) for v in _MESSAGE_VERBS)
+    if any(line.strip().startswith(v) for v in _MESSAGE_VERBS):
+        return False
+    if _names_a_shim_path(line) and _all_systemctl_mentions_are_paths(line):
+        return False
+    return True
 
 
 def _is_capture(line: str, needle: str) -> bool:
@@ -560,6 +592,39 @@ class SchedulerScopeAndLiveness(unittest.TestCase):
     def test_install_sh_and_deploy_sh_are_among_them(self):
         for expected in ("install.sh", "uninstall.sh", "scripts/deploy.sh"):
             self.assertIn(expected, self.files, f"{expected} not audited")
+
+    # -- the shim exemption is narrow -------------------------------
+
+    def test_a_bare_systemctl_call_is_still_a_violation(self):
+        # The exemption is for a line that names a FILE called systemctl.
+        # A real invocation calls the bare command, and must still fail.
+        self.assertTrue(
+            _invokes_systemctl("systemctl restart mpm-scheduler"),
+            "a bare systemctl call must still be recognised as an invocation",
+        )
+
+    def test_a_shim_path_line_is_not_an_invocation(self):
+        # A harness that intercepts systemctl creates a stand-in with that
+        # name. The line names a FILE; nothing is invoked.
+        self.assertFalse(
+            _invokes_systemctl('cat > "$dir/systemctl" <<\'SHIM\''),
+            "creating a stand-in named systemctl is not a systemctl call",
+        )
+        self.assertFalse(
+            _invokes_systemctl('chmod +x "$dir/systemctl" "$dir/loginctl"'),
+            "enabling a stand-in named systemctl is not a systemctl call",
+        )
+
+    def test_a_shim_path_line_that_also_invokes_systemctl_is_still_flagged(self):
+        # The exemption must not become a loophole: a line that both
+        # names a shim path AND invokes systemctl still has to be
+        # checked for its manager scope.
+        line = 'systemctl restart mpm-scheduler && echo "$dir/systemctl"'
+        self.assertTrue(
+            _invokes_systemctl(line),
+            "a line that invokes systemctl must be checked even when it also names a shim path",
+        )
+        self.assertNotEqual([], _scope_violations({"x.sh": [line]}))
 
     # -- scope -------------------------------------------------------
 

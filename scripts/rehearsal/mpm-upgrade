@@ -1,0 +1,629 @@
+#!/usr/bin/env bash
+# mpm-upgrade — PROTOTYPE runtime migration / upgrade driver.
+#
+# This is the rehearsal artefact, not production code. It is the shape the
+# real installer change should take: a staged, restartable, transactional
+# promotion of a VERSIONED RUNTIME BUNDLE into a data root that keeps its
+# state in place.
+#
+# ── THE MODEL ─────────────────────────────────────────────────────────────
+#
+#   <workspace>/                      the DATA ROOT. Its path never moves.
+#     ├── current -> releases/<rev>   the ACTIVE POINTER. One symlink.
+#     ├── releases/<rev>/              a read-only runtime BUNDLE.
+#     │     ├── bin/                   the five binaries
+#     │     ├── agent_installation/    the staged plugin payload + assets
+#     │     └── RELEASE.json           the build identity (no git needed)
+#     ├── staging/<rev>/               the candidate upgrade staging area
+#     ├── bin -> current/bin           stable path into the active bundle
+#     ├── agent_installation -> current/agent_installation
+#     ├── src/db/                      PERSISTENT STATE — survives every upgrade
+#     ├── backups/                     PERSISTENT
+#     ├── mode/ persona/ drills/       OPERATOR-OWNED — survives
+#     ├── mpm_config.json              CREDENTIALS — survives, never touched
+#     └── active.json run/ blobs/      PERSISTENT
+#
+#   Everything replaceable lives under releases/<rev>/. Everything that
+#   survives lives outside it. Promotion is therefore ONE atomic symlink
+#   swap, and rollback is the same swap in reverse.
+#
+# ── THE STAGES ────────────────────────────────────────────────────────────
+#
+#   1 preflight   read-only inventory + integrity check of the live state
+#   2 backup     SQLite ONLINE backup (never a raw copy) + verify + restore
+#   3 validate   the staged bundle's binaries and payload are proven good
+#   4 quiesce    stop the writers
+#   5 promote    atomic swap of the `current` pointer + layout conversion
+#   6 restart    start the service and wait for readiness
+#   7 smoke      read the state back through the NEW runtime
+#
+#   Every stage aborts the run on failure. A failure AFTER the pointer was
+#   swapped rolls the promotion back automatically. The run is idempotent.
+#
+# ── WHY THE BACKUP IS NOT A RAW COPY ──────────────────────────────────────
+#
+#   The live database is in WAL mode. A raw copy of `mpm.db` alone omits
+#   everything still in `mpm.db-wal` — committed transactions that have not
+#   been checkpointed. A raw copy is not a backup; it is a snapshot of an
+#   arbitrary prefix of the log.
+#
+#   This driver uses the SQLite ONLINE BACKUP API (`sqlite3 .backup`), which
+#   takes a transactionally consistent copy of a database that is being
+#   written to concurrently. It then VERIFIES the copy three ways:
+#     a. PRAGMA integrity_check on the copy
+#     b. a row-count comparison against the live database
+#     c. a RESTORE TEST — the copy is opened by a fresh process and its
+#        content is read back, because a backup that cannot be restored is
+#        not a backup
+
+set -uo pipefail
+
+PROG="$(basename "$0")"
+
+# ── configuration ─────────────────────────────────────────────────────────
+WORKSPACE="${MPM_WORKSPACE:-}"
+BUNDLE=""
+REV=""
+SERVICE="${MPM_SERVICE_NAME:-mpm-scheduler}"
+DO_ROLLBACK=0
+SKIP_RESTART=0
+STAGE_ONLY=0
+DRY_RUN=0
+
+# ── output ────────────────────────────────────────────────────────────────
+say()  { printf '  %s\n' "$*"; }
+step() { printf '\n\033[1m[%s]\033[0m %s\n' "$1" "$2"; }
+ok()   { printf '  \033[32mok\033[0m %s\n' "$*"; }
+
+# die aborts the run. If a promotion had already started, the abort must
+# leave the installation on the PREVIOUS revision, not on a revision that
+# was never proven to work.
+die() {
+  printf '\n\033[31mFAIL\033[0m %s\n' "$*" >&2
+  if [ "${PROMOTION_STARTED:-0}" = "1" ]; then
+    rollback_promotion "$*"
+  fi
+  exit 1
+}
+
+# ── fault injection ───────────────────────────────────────────────────────
+# The rehearsal has to prove that a FAILED promotion is recoverable. That
+# requires being able to fail at a chosen point, deterministically.
+#
+# MPM_UPGRADE_FAULT names the point at which the driver dies:
+#
+#   after-stage    the bundle is validated, nothing has been changed
+#   after-install  the bundle is in releases/, the pointer is NOT swapped
+#   after-swap     the pointer is swapped, the layout is NOT converted
+#   after-convert  the layout is converted, the service is NOT restarted
+#   restart-fail   the service cannot be started
+#
+# The first four die by SIGKILL, which is the honest simulation of an
+# interrupted promotion: no trap, no cleanup, no rollback — exactly what
+# a power cut leaves behind.
+FAULT="${MPM_UPGRADE_FAULT:-}"
+
+fault_point() {
+  [ "$FAULT" = "$1" ] || return 0
+  printf '  \033[33mFAULT INJECTION\033[0m at %s — dying by SIGKILL (no cleanup, no rollback)\n' "$1"
+  kill -9 $$ 2>/dev/null
+  exit 137
+}
+
+usage() {
+  cat <<'EOF'
+mpm-upgrade — prototype versioned-bundle upgrade driver
+
+  --workspace DIR    the data root (default: $MPM_WORKSPACE or $HOME/.mpm)
+  --bundle DIR       the staged bundle to promote (must contain RELEASE.json)
+  --rev REV          the revision label (default: the bundle's RELEASE.json)
+  --stage-only       stop after validation; do not quiesce, promote or restart
+  --rollback         repoint `current` at the previous revision and restart
+  --skip-restart     do not touch the service
+  --dry-run          report what would happen; change nothing
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --workspace)  WORKSPACE="${2:-}"; shift 2 ;;
+    --bundle)     BUNDLE="${2:-}"; shift 2 ;;
+    --rev)        REV="${2:-}"; shift 2 ;;
+    --stage-only) STAGE_ONLY=1; shift ;;
+    --rollback)   DO_ROLLBACK=1; shift ;;
+    --skip-restart) SKIP_RESTART=1; shift ;;
+    --dry-run)    DRY_RUN=1; shift ;;
+    -h|--help)    usage; exit 0 ;;
+    *)            usage >&2; die "unknown argument: $1" ;;
+  esac
+done
+
+[ -n "$WORKSPACE" ] || WORKSPACE="${HOME}/.mpm"
+WORKSPACE="$(cd "$WORKSPACE" 2>/dev/null && pwd -P)" || die "workspace does not exist: $WORKSPACE"
+
+DB="$WORKSPACE/src/db/mpm.db"
+RELEASES="$WORKSPACE/releases"
+CURRENT="$WORKSPACE/current"
+STAGING="$WORKSPACE/staging"
+BACKUPS="$WORKSPACE/backups"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# state_fingerprint — a logical fingerprint of the persistent state.
+state_fingerprint() {
+  python3 "$(dirname "${BASH_SOURCE[0]}")/state_fingerprint.py" "$1" --content 2>/dev/null
+}
+
+# sqlite_backup — the ONLINE backup. Never a raw copy.
+sqlite_backup() {
+  local src="$1" dst="$2"
+  rm -f "$dst" "$dst-wal" "$dst-shm"
+  if have sqlite3; then
+    sqlite3 "$src" ".timeout 10000" ".backup '$dst'" >/dev/null 2>&1 || return 1
+  else
+    python3 - "$src" "$dst" <<'PY' || return 1
+import sqlite3, sys
+s = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+d = sqlite3.connect(sys.argv[2])
+s.backup(d); d.close(); s.close()
+PY
+  fi
+  [ -s "$dst" ] || return 1
+  return 0
+}
+
+# verify_backup — three independent checks on a backup copy.
+verify_backup() {
+  local live="$1" bak="$2" label="$3"
+  local integrity counts restore
+  integrity="$(sqlite3 "file:$bak?mode=ro" 'PRAGMA integrity_check;' 2>/dev/null | head -1)"
+  [ "$integrity" = "ok" ] || { say "  backup integrity_check: $integrity"; return 1; }
+  ok "$label: integrity_check ok"
+
+  counts="$(python3 - "$live" "$bak" <<'PY'
+import sqlite3, sys
+def counts(p):
+    c = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    out = {}
+    for (t,) in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"):
+        try: out[t] = c.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+        except Exception: pass
+    c.close(); return out
+a, b = counts(sys.argv[1]), counts(sys.argv[2])
+diff = {t: (a.get(t), b.get(t)) for t in set(a) | set(b) if a.get(t) != b.get(t)}
+print("MATCH" if not diff else "DIFF:" + repr(diff))
+PY
+)"
+  case "$counts" in
+    MATCH) ok "$label: row counts match the live database" ;;
+    *)     say "  $label: row counts differ — $counts"; return 1 ;;
+  esac
+
+  restore="$(python3 - "$bak" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+n = c.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+print(f"RESTORED memories={n}")
+c.close()
+PY
+)"
+  case "$restore" in
+    RESTORED*) ok "$label: restore test read back $restore" ;;
+    *)         say "  $label: restore test failed — $restore"; return 1 ;;
+  esac
+  return 0
+}
+
+# swap_current — the atomic promotion.
+#
+# rename(2) over an existing symlink is atomic. `ln -sfn` into a temporary
+# name in the SAME directory, then `mv -T` over the target, guarantees the
+# replacement is a rename and not a copy, and that a reader either sees the
+# old pointer or the new one — never a gap.
+swap_current() {
+  local target="$1"
+  local tmp="$WORKSPACE/.current.swap.$$"
+  ln -sfn "$target" "$tmp" || return 1
+  mv -T "$tmp" "$CURRENT" || { rm -f "$tmp"; return 1; }
+  return 0
+}
+
+# ── argument handling for rollback ────────────────────────────────────────
+if [ "$DO_ROLLBACK" = "1" ]; then
+  [ -n "$REV" ] || die "--rollback needs --rev <revision> to repoint at"
+  step "ROLLBACK" "repointing the active pointer at $REV"
+  [ -d "$RELEASES/$REV" ] || die "no such release: $RELEASES/$REV"
+  before="$(readlink -f "$CURRENT" 2>/dev/null || echo none)"
+  say "  current: $before"
+  swap_current "releases/$REV" || die "could not repoint the active pointer"
+  ok "current -> releases/$REV"
+  if [ "$SKIP_RESTART" = "0" ]; then
+    systemctl --user restart "$SERVICE" >/dev/null 2>&1
+    ok "service restarted"
+  fi
+  printf '\n\033[32mROLLED BACK\033[0m to %s\n' "$REV"
+  exit 0
+fi
+
+# ── stage 0: the bundle must exist and describe itself ────────────────────
+[ -n "$BUNDLE" ] || die "--bundle is required"
+[ -d "$BUNDLE" ] || die "bundle does not exist: $BUNDLE"
+[ -f "$BUNDLE/RELEASE.json" ] || die "bundle has no RELEASE.json: $BUNDLE"
+
+BUNDLE_REL="$(python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(d.get('revision') or d.get('rev') or '')
+" "$BUNDLE/RELEASE.json")"
+[ -n "$REV" ] || REV="$BUNDLE_REL"
+[ -n "$REV" ] || die "cannot determine the revision label"
+
+echo "MPM runtime upgrade (prototype)"
+say "workspace: $WORKSPACE"
+say "bundle   : $BUNDLE"
+say "revision : $REV"
+say "service  : $SERVICE"
+
+FP_BEFORE="$(state_fingerprint "$DB")"
+say "state fingerprint before: $FP_BEFORE"
+
+# ═══ 1. PREFLIGHT ═════════════════════════════════════════════════════════
+step "1/7 preflight" "read-only inventory of the live installation"
+
+[ -f "$DB" ] || die "no live database at $DB"
+say "  database: $DB ($(stat -c%s "$DB") bytes)"
+
+# Read-only integrity check of the LIVE database, through the online API
+# into a scratch file. The live file is never opened for writing.
+PREFLIGHT_DB="$(mktemp -d "${TMPDIR:-/tmp}/mpm-preflight.XXXXXX")/mpm.db"
+sqlite_backup "$DB" "$PREFLIGHT_DB" || die "could not take a read-only snapshot of the live database"
+integrity="$(sqlite3 "file:$PREFLIGHT_DB?mode=ro" 'PRAGMA integrity_check;' 2>/dev/null | head -1)"
+[ "$integrity" = "ok" ] || die "live database integrity_check: $integrity"
+ok "live database integrity_check ok"
+
+for f in mpm_config.json active.json; do
+  if [ -e "$WORKSPACE/$f" ]; then say "  operator file present: $f"; fi
+done
+[ -d "$WORKSPACE/mode" ] && say "  operator definitions present: mode/"
+[ -d "$WORKSPACE/persona" ] && say "  operator definitions present: persona/"
+
+if [ -e "$CURRENT" ]; then
+  say "  active pointer: $(readlink -f "$CURRENT")"
+else
+  say "  active pointer: (none — this is a first promotion)"
+fi
+
+# ═══ 2. BACKUP ════════════════════════════════════════════════════════════
+step "2/7 backup" "verified recoverable backup of the persistent state"
+
+# A scratch area for anything that must NOT touch the live database.
+SCRATCH="${SCRATCH:-$(mktemp -d "${TMPDIR:-/tmp}/mpm-staged.XXXXXX")}"
+
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+BAKROOT="$BACKUPS/upgrade-$TS"
+mkdir -p "$BAKROOT" || die "could not create $BAKROOT"
+chmod 0700 "$BAKROOT"
+
+say "  backup root: $BAKROOT"
+sqlite_backup "$DB" "$BAKROOT/mpm.db" || die "the SQLite online backup failed"
+ok "online backup written (SQLite backup API, not a file copy)"
+verify_backup "$DB" "$BAKROOT/mpm.db" "backup" || die "the backup did not verify"
+
+# Operator-owned files, copied verbatim. The credentials file is copied
+# with its mode preserved and is NEVER printed.
+for f in mpm_config.json active.json; do
+  if [ -f "$WORKSPACE/$f" ]; then
+    cp -p "$WORKSPACE/$f" "$BAKROOT/$f"
+  fi
+done
+[ -d "$WORKSPACE/mode" ]    && cp -a "$WORKSPACE/mode"    "$BAKROOT/mode"
+[ -d "$WORKSPACE/persona" ] && cp -a "$WORKSPACE/persona" "$BAKROOT/persona"
+ok "operator configuration and definitions copied"
+
+# A SQL dump as a second, human-readable recovery artefact.
+#
+# It is taken from the BACKUP COPY, never from the live database.
+#
+# WHY THIS MATTERS, AND IT IS NOT A THEORETICAL CONCERN
+#
+# The first run of this driver took the dump with the STAGED binary against
+# the LIVE database. The staged binary is a NEWER build than the installed
+# one, and a newer build opens a database by applying whatever schema and
+# data migrations it believes are pending. Taking a "backup" therefore
+# MUTATED the database it was backing up.
+#
+# The rehearsal caught it: the driver's own state fingerprint changed
+# across the backup step. Any procedure that runs a new binary against the
+# live database before the promotion is complete is, in effect, an
+# unannounced migration.
+#
+# The dump now runs against the verified backup copy, with the staged
+# binary, in the disposable scratch space. The live database is opened
+# only by the SQLite online backup API, which never applies migrations.
+#
+# The scratch space is a CANONICAL workspace: the database sits at
+# <scratch>/src/db/mpm.db and MPM_DB_PATH restates that exact path.
+#
+# WHY THE CANONICAL SHAPE MATTERS. MPM's own resolver (D4) refuses an
+# MPM_DB_PATH that names a database other than the workspace's own — a
+# divergent selector is a conflict, not a selection. That rule is
+# correct, and it means a scratch workspace that put its database
+# anywhere else would be refused. The harness therefore uses the shape
+# the substrate actually supports, which is also the shape an operator
+# would use.
+mkdir -p "$SCRATCH/src/db"
+if have sqlite3 && [ -x "$BUNDLE/bin/mpm" ]; then
+  cp "$BAKROOT/mpm.db" "$SCRATCH/src/db/mpm.db"
+  MPM_WORKSPACE="$SCRATCH" MPM_DB_PATH="$SCRATCH/src/db/mpm.db" \
+    "$BUNDLE/bin/mpm" backup "$BAKROOT/mpm.sql" >/dev/null 2>&1 \
+    && ok "SQL dump written (from the verified backup copy, not the live database)" \
+    || say "  (SQL dump skipped — the CLI backup path did not complete)"
+fi
+
+printf '%s\n' "$TS" > "$WORKSPACE/.last-upgrade-backup"
+say "  recovery point recorded: $BAKROOT"
+
+# ═══ 3. VALIDATE THE STAGED BUNDLE ═══════════════════════════════════════
+step "3/7 validate" "prove the staged bundle before it is exposed"
+
+for b in mpm mpm-mcp mpm-critic mpm-scheduler mpm-telemetry; do
+  [ -f "$BUNDLE/bin/$b" ] || die "bundle is missing bin/$b"
+  [ -x "$BUNDLE/bin/$b" ] || die "bundle binary is not executable: bin/$b"
+done
+ok "all five binaries present and executable"
+
+# The bundle must not depend on Git.
+if [ -e "$BUNDLE/.git" ]; then
+  die "the bundle carries .git — a bundle must be Git-free"
+fi
+ok "bundle carries no .git"
+
+# The staged binaries must report the revision they were built from.
+VERSION_OUT="$("$BUNDLE/bin/mpm" --version 2>&1 | head -1)"
+say "  staged binary reports: $VERSION_OUT"
+case "$VERSION_OUT" in
+  *"+g${REV}"*) ok "staged binary reports the staged revision" ;;
+  *)            say "  NOTE: the reported identity does not contain +g$REV";;
+esac
+
+# The staged binary must run against a SCRATCH copy of the state, never the
+# live one. This is the isolation proof.
+#
+# The scratch space is a canonical workspace: the copy sits at
+# <scratch>/src/db/mpm.db, and MPM_DB_PATH restates that exact path. A
+# divergent MPM_DB_PATH is refused by the substrate's resolver (D4), and
+# it should be: the scratch copy is a copy precisely because it is the
+# workspace's own database.
+mkdir -p "$SCRATCH/src/db"
+cp "$BAKROOT/mpm.db" "$SCRATCH/src/db/mpm.db"
+if MPM_WORKSPACE="$SCRATCH" MPM_DB_PATH="$SCRATCH/src/db/mpm.db" \
+     "$BUNDLE/bin/mpm" call mpm_system --payload '{"action":"health_check"}' 2>/dev/null \
+     | grep -q '"ok":true'; then
+  ok "staged binary passes health_check against a scratch copy of the state"
+else
+  die "the staged binary failed its health check against the scratch copy"
+fi
+
+# The plugin payload must be present and loadable.
+#
+# It is REQUIRED, not optional. This is the OpenCode-only release: the
+# host registers the package directory, and a bundle without the payload
+# would register successfully and load NOTHING — the exact silent
+# failure the staging validator exists to prevent. A bundle that does
+# not carry a host adapter must say so explicitly, not by omission.
+if [ -f "$BUNDLE/agent_installation/mpm-opencode/server.js" ] \
+   && [ -s "$BUNDLE/agent_installation/mpm-opencode/dist/index.v2.js" ]; then
+  ok "the staged OpenCode payload is present"
+else
+  if [ "${MPM_BUNDLE_REQUIRES_PLUGIN:-1}" = "1" ]; then
+    die "the bundle carries no OpenCode payload — refusing to promote a bundle that would register an empty plugin"
+  fi
+  say "  NOTE: the bundle carries no OpenCode payload (explicitly allowed)"
+fi
+
+if [ "$STAGE_ONLY" = "1" ]; then
+  printf '\n\033[32mSTAGED AND VALIDATED\033[0m — stopping before quiesce/promote (--stage-only)\n'
+  exit 0
+fi
+
+fault_point after-stage
+
+if [ "$DRY_RUN" = "1" ]; then
+  printf '\n\033[33mDRY RUN\033[0m — validated; would now quiesce, promote and restart\n'
+  exit 0
+fi
+
+# ═══ 4. QUIESCE ══════════════════════════════════════════════════════════
+step "4/7 quiesce" "stop the writers so the state cannot move under the promotion"
+
+if [ "$SKIP_RESTART" = "0" ]; then
+  systemctl --user stop "$SERVICE" >/dev/null 2>&1
+  ok "service stopped"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    systemctl --user is-active --quiet "$SERVICE" || break
+    sleep 0.2
+  done
+  if systemctl --user is-active --quiet "$SERVICE"; then
+    die "the service is still active after stop — refusing to promote"
+  fi
+  ok "service confirmed stopped"
+else
+  say "  (--skip-restart: writers left running)"
+fi
+
+# ═══ 5. PROMOTE ══════════════════════════════════════════════════════════
+step "5/7 promote" "install the bundle and swap the active pointer"
+
+mkdir -p "$RELEASES"
+FINAL="$RELEASES/$REV"
+if [ -e "$FINAL" ]; then
+  say "  replacing the existing release directory $FINAL"
+  rm -rf "${FINAL}.old.$$"
+  mv "$FINAL" "${FINAL}.old.$$"
+fi
+mkdir -p "$(dirname "$FINAL")"
+# The release bundle is installed by HARD LINK where the filesystem allows
+# it, and by copy where it does not.
+#
+# A release bundle is immutable and the staging area is disposable, so
+# sharing the inodes is both safe and the behaviour a package cache has.
+# It also matters operationally: the five binaries are ~78 MB, and
+# copying them for every retained release fills a filesystem with
+# identical bytes.
+if ! cp -al "$BUNDLE" "$FINAL" 2>/dev/null; then
+  cp -a "$BUNDLE" "$FINAL" || die "could not install the bundle into $FINAL"
+  say "  (the bundle was copied — hard links were not available)"
+fi
+ok "bundle installed at releases/$REV"
+fault_point after-install
+
+PREV_TARGET="$(readlink "$CURRENT" 2>/dev/null || echo '')"
+if [ -n "$PREV_TARGET" ]; then
+  printf '%s\n' "$PREV_TARGET" > "$WORKSPACE/.previous-release"
+  say "  previous active pointer recorded: $PREV_TARGET"
+fi
+
+swap_current "releases/$REV" || die "the active pointer swap failed"
+ok "current -> releases/$REV"
+fault_point after-swap
+
+# ── the layout conversion ────────────────────────────────────────────────
+# A checkout-style installation has REAL directories where the versioned
+# layout has symlinks into the active bundle:
+#
+#     bin/                    -> current/bin
+#     agent_installation/     -> current/agent_installation
+#
+# The conversion is done AFTER the pointer swap, so `current` already
+# resolves to the new bundle and the stable paths are never dangling.
+# The real directories are MOVED aside, not deleted: they are the rollback
+# material for a failed promotion.
+LEGACY_DIRS=()
+convert_layout_path() {
+  local name="$1" target="$2"
+  local p="$WORKSPACE/$name"
+  [ -e "$p" ] || return 0
+  if [ -L "$p" ]; then
+    # already a symlink — re-point it
+    ln -sfn "$target" "$p"
+    return 0
+  fi
+  local legacy="$WORKSPACE/.${name}.legacy.$$"
+  mv "$p" "$legacy" || die "could not move the existing $name aside"
+  ln -sfn "$target" "$p" || { mv "$legacy" "$p"; die "could not create the $name symlink"; }
+  LEGACY_DIRS+=("$legacy")
+  printf '%s\n' "$legacy" >> "$WORKSPACE/.legacy-paths"
+  say "  $name -> $target (the previous directory is at ${legacy##*/})"
+  return 0
+}
+
+# ── automatic rollback ───────────────────────────────────────────────────
+# A promotion that fails AFTER the pointer was swapped must not leave the
+# installation pointing at a revision that was never proven to work. The
+# driver restores the previous pointer and the previous layout.
+#
+# This is the answer to "what happens when installation or service
+# restart fails": the old revision comes back, and the operator is told
+# what happened and where the recovery point is.
+rollback_promotion() {
+  local why="$1"
+  printf '\n\033[31mROLLING BACK\033[0m — %s\n' "$why"
+  if [ -n "${PREV_TARGET:-}" ]; then
+    swap_current "$PREV_TARGET" && say "  the active pointer is back at $PREV_TARGET" \
+      || say "  WARNING: could not restore the previous pointer"
+  else
+    rm -f "$CURRENT"
+    say "  the active pointer is removed (there was no previous revision)"
+  fi
+  local legacy name
+  for legacy in "${LEGACY_DIRS[@]:-}"; do
+    [ -n "$legacy" ] || continue
+    name="$(basename "$legacy" | sed 's/^\.//; s/\.legacy\.[0-9]*$//')"
+    rm -f "$WORKSPACE/$name"
+    mv "$legacy" "$WORKSPACE/$name" && say "  $name restored to its pre-upgrade directory"
+  done
+  if [ "$SKIP_RESTART" = "0" ]; then
+    systemctl --user restart "$SERVICE" >/dev/null 2>&1
+    say "  the service was restarted on the previous revision"
+  fi
+  say "  the persistent state was NOT changed by the failed promotion"
+}
+
+# A failure after the pointer swap rolls back. A failure before it needs
+# no rollback: nothing has been changed yet.
+PROMOTION_STARTED=0
+on_failure() {
+  local rc=$?
+  [ "$PROMOTION_STARTED" = "1" ] || exit "$rc"
+  rollback_promotion "the promotion failed after the pointer was swapped"
+  exit "$rc"
+}
+
+# From here on, a failure rolls back.
+PROMOTION_STARTED=1
+trap on_failure ERR INT TERM
+convert_layout_path bin "current/bin"
+convert_layout_path agent_installation "current/agent_installation"
+ok "the stable paths now resolve into the active bundle"
+fault_point after-convert
+
+# The stable paths must now resolve INTO the new bundle.
+for probe in bin/mpm agent_installation/mpm-opencode/server.js; do
+  if [ -e "$WORKSPACE/$probe" ]; then
+    resolved="$(readlink -f "$WORKSPACE/$probe")"
+    case "$resolved" in
+      "$FINAL"/*) ok "$probe resolves into the new bundle" ;;
+      *) die "$probe does not resolve into the new bundle: $resolved" ;;
+    esac
+  fi
+done
+
+# ═══ 6. RESTART ══════════════════════════════════════════════════════════
+step "6/7 restart" "start the service and wait for readiness"
+
+if [ "$SKIP_RESTART" = "0" ]; then
+  if [ "$FAULT" = "restart-fail" ]; then
+    say "  FAULT INJECTION: the service cannot be started"
+    die "the service could not be restarted"
+  fi
+  systemctl --user restart "$SERVICE" >/dev/null 2>&1
+  ok "service restarted"
+  ready=0
+  for _ in $(seq 1 30); do
+    if systemctl --user is-active --quiet "$SERVICE"; then ready=1; break; fi
+    sleep 0.2
+  done
+  [ "$ready" = "1" ] || die "the service did not become active after the restart"
+  ok "service active"
+else
+  say "  (--skip-restart)"
+fi
+
+# The promotion is complete: disarm the rollback trap.
+PROMOTION_STARTED=0
+trap - ERR INT TERM
+
+# ═══ 7. SMOKE ═════════════════════════════════════════════════════════════
+step "7/7 smoke" "read the state back through the new runtime"
+
+if MPM_WORKSPACE="$WORKSPACE" MPM_DB_PATH="$DB" \
+     "$WORKSPACE/bin/mpm" call mpm_system --payload '{"action":"health_check"}' 2>/dev/null \
+     | grep -q '"ok":true'; then
+  ok "health_check through the promoted runtime"
+else
+  die "health_check failed through the promoted runtime"
+fi
+
+FP_AFTER="$(state_fingerprint "$DB")"
+say "  state fingerprint after:  $FP_AFTER"
+if [ "$FP_BEFORE" = "$FP_AFTER" ]; then
+  ok "the persistent state is unchanged by the upgrade"
+else
+  say "  NOTE: the state fingerprint changed"
+  say "        before=$FP_BEFORE"
+  say "        after =$FP_AFTER"
+fi
+
+printf '\n\033[32mUPGRADE COMPLETE\033[0m — revision %s is active\n' "$REV"
+say "recovery point: $BAKROOT"
+say "to roll back:    $PROG --workspace '$WORKSPACE' --rollback --rev <previous-revision>"

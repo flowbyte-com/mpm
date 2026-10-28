@@ -815,6 +815,60 @@ test-scripts: build
 	  echo "[test-scripts] collected $$n tests (floor $(SCRIPTS_TEST_MIN_TESTS))"; \
 	  exit $$status
 
+# The runtime-migration rehearsal.
+#
+# WHAT THIS IS
+#
+# The rehearsal for the migration from a Git checkout to versioned,
+# Git-free runtime bundles. It builds a Git-free source export, assembles
+# a bundle from it, runs the migration against an isolated simulated
+# home, and asserts the properties the migration must have: the state is
+# unchanged, the bundle carries no .git, the rollback works, and the live
+# installation is never touched.
+#
+# WHY IT IS A MAKE TARGET AND NOT A LOCAL SCRIPT
+#
+# The rehearsal was first run as a local one-off under ~/.cache. That
+# made its evidence unreproducible: nobody else could re-run it, and the
+# plan that cited it lived in the same cache directory. The harness now
+# lives in the repository, so `make rehearsal` is the way to reproduce
+# every number the plan quotes.
+#
+# WHAT IT TOUCHES
+#
+# Nothing live. The harness has three independent detectors for that:
+# a snapshot of the live tree, a strace of every syscall in the test's
+# process tree, and a shim that neutralises the systemd user-manager
+# operations. Starting or restarting the operator's unit IS a deployment,
+# so the shim records the request instead of acting on it.
+#
+# The work products (the source export, the bundle, the simulated home,
+# the traces) land OUTSIDE the repository, in the conventional cache
+# location. That is not a matter of taste: they include a COPY of the
+# source tree, and this repository has repo-wide scanners that walk
+# every file under the root. The harness refuses an in-repository work
+# directory (scripts/rehearsal/lib.sh).
+#
+# REHEARSAL_REV selects the revision. The default is the revision the
+# harness was last validated against; the operator checklist requires
+# re-running it against the EXACT target revision before the migration.
+REHEARSAL_REV ?= 4111c46
+REHEARSAL_WORK ?= $(HOME)/.cache/mpm-rehearsal
+
+.PHONY: rehearsal rehearsal-setup
+rehearsal: build
+	@echo "[rehearsal] revision $(REHEARSAL_REV)"
+	@REH_REV=$(REHEARSAL_REV) REH_WORK=$(REHEARSAL_WORK) \
+	  bash scripts/rehearsal/run.sh
+
+# The build half on its own: a Git-free source export and a bundle.
+# Useful when the bundle is the thing under inspection.
+.PHONY: rehearsal-setup
+rehearsal-setup: build
+	@full=$$(git rev-parse $(REHEARSAL_REV)); \
+	REH_REV=$(REHEARSAL_REV) REH_WORK=$(REHEARSAL_WORK) \
+	  bash scripts/rehearsal/setup.sh "$(REHEARSAL_REV)" "$$full"
+
 # Validation gate for the Python test suites under bench/tests/ (the
 # embedding benchmark harness for Issue #16).
 #
