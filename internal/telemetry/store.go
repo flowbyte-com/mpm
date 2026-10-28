@@ -11,7 +11,11 @@ package telemetry
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -66,6 +70,67 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("apply ddl: %w", err)
 	}
 	return &Store{db: db, path: path}, nil
+}
+
+// ErrStoreNotFound reports that a telemetry store does not exist at the
+// requested path. Callers distinguish it from other open failures so a
+// missing store can be handled as "no observations" rather than as a
+// hard error.
+var ErrStoreNotFound = errors.New("telemetry store not found")
+
+// OpenReadOnly opens an EXISTING telemetry store for reading only.
+//
+// WHY THIS EXISTS. `Open` applies the DDL, which CREATES the database
+// file when it is missing and can write to it otherwise. A read-only
+// diagnostic must not materialise a store:
+//
+//   - `mpm-telemetry observe --dry-run` used to call `Open`, so a
+//     "dry run" on a machine with no telemetry yet CREATED an empty
+//     telemetry.db. A dry run that writes is not a dry run.
+//   - `mpm-critic --telemetry-hunt` (#138) is documented as a READ-ONLY
+//     diagnostic, but it also called `Open` — so every critic cycle
+//     created a telemetry.db at the path it was looking for.
+//
+// The handle is opened with SQLite's `mode=ro`, so the file can be
+// neither created nor modified, and a missing store is reported as
+// ErrStoreNotFound instead of being materialised.
+func OpenReadOnly(path string) (*Store, error) {
+	clean := filepath.Clean(path)
+
+	info, err := os.Stat(clean)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", ErrStoreNotFound, clean)
+		}
+		return nil, fmt.Errorf("stat telemetry store %s: %w", clean, err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("telemetry store %s is a directory, not a database", clean)
+	}
+
+	abs, err := filepath.Abs(clean)
+	if err != nil {
+		return nil, fmt.Errorf("resolve telemetry store %s: %w", clean, err)
+	}
+	uri := (&url.URL{
+		Scheme:   "file",
+		Path:     abs,
+		RawQuery: "mode=ro&_busy_timeout=5000",
+	}).String()
+
+	db, err := sql.Open("sqlite3", uri)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite read-only: %w", err)
+	}
+	// Force the connection open and prove the schema is present. A
+	// store whose ledger table is missing is a clear error here rather
+	// than a confusing "no such table" from the middle of the hunt.
+	var rows int
+	if err := db.QueryRow("SELECT COUNT(*) FROM telemetry_invocation").Scan(&rows); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("read telemetry store %s: %w", clean, err)
+	}
+	return &Store{db: db, path: clean}, nil
 }
 
 func (s *Store) DB() *sql.DB     { return s.db }

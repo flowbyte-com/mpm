@@ -38,11 +38,12 @@ func runServe(args []string) error {
 		return fmt.Errorf("could not derive telemetry socket path (set MPM_TELEMETRY_SOCKET or MPM_WORKSPACE)")
 	}
 	socketPath = filepath.Clean(socketPath)
-	dbPath := os.Getenv("MPM_TELEMETRY_DB")
-	if dbPath == "" {
-		dbPath = filepath.Join(workspace, "src", "db", "telemetry.db")
-	} else {
-		dbPath = filepath.Clean(dbPath)
+	// The canonical store path, resolved by the ONE resolver the
+	// collector, the readers and the critic all use. The collector's
+	// path is the authoritative one — it is where the frames land.
+	dbPath, err := telemetry.ResolveStorePath(workspace)
+	if err != nil {
+		return err
 	}
 
 	store, err := telemetry.Open(dbPath)
