@@ -12,7 +12,7 @@
 // public surface; the previously-documented diagnostic probe
 // path has been retired from the public CLI.
 //
-// See docs/superpowers/specs/2026-09-03-mpm-embedding-provider-design.md
+// See docs/library/2026-09-03-mpm-embedding-provider-design.md
 // for the full design.
 package internal
 

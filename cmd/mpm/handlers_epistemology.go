@@ -1021,7 +1021,7 @@ func handleDecisions(args []string) int {
 		return respond(out.String(), "", 0)
 	}
 
-	// Pointer-indirection sweep F-S-2 (docs/pointer-indirection-sweep-2026-09-05.md):
+	// Pointer-indirection sweep F-S-2 (docs/library/pointer-indirection-sweep-2026-09-05.md):
 	// cap the legacy no-args listing so output scales linearly with
 	// displayed rows, not with the user's accumulated decisions. This
 	// path was unbounded — today 139 rows × ~250 B = ~35 KB on the

@@ -93,13 +93,13 @@ type ProvenanceCitation struct {
 // pattern (see arbitration.go's applyArbitrationResolution).
 //
 // polarity is the explicit-only opt-in for the positive-direction
-// (constructive) cascade feature, per docs/constructive-cascade-design.md.
+// (constructive) cascade feature, per docs/library/constructive-cascade-design.md.
 // Empty string → NULL polarity; the discovery path ignores NULL and
 // no positive cascade can fire from such a citation. Pass
 // PolarityAssumesFalse to opt in. The polarity is NEVER inferred
 // from content (no keyword matching, no semantic similarity) —
 // explicit-only matches the design's stance on confirmation/contradiction
-// (see docs/epistemic-confirmation.md).
+// (see docs/library/epistemic-confirmation.md).
 func (dm *DatabaseManager) RecordProvenance(sourceID, sourceType, downstreamID, downstreamType, eventID, polarity string) error {
 	return dm.WithTx(func(node DBNode) error {
 		return dm.recordProvenanceNode(node, sourceID, sourceType, downstreamID, downstreamType, eventID, polarity)

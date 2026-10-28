@@ -19,7 +19,7 @@
 //   - internal/core/handoff.go, internal/core/tools/handlers.go,
 //     internal/core/tools/f1_f4_f5_machine_interface_regression_test.go:
 //     code / test comments that name the legacy tool for traceability.
-//   - changelog.md, docs/archive/**,
+//   - changelog.md, docs/library/**, docs/archive/**,
 //     agent_installation/mpm-opencode/VALIDATION-2026-08-19.md:
 //     historical record.
 package main
@@ -48,8 +48,10 @@ var whitelistPrefixes = []string{
 	"internal/core/tools/handlers.go",
 	"internal/core/tools/f1_f4_f5_machine_interface_regression_test.go",
 
-	// Historical record — changelog, archive, validation logs.
+	// Historical record — changelog, curated library, legacy archive
+	// path (retired 2026-10-28, kept for safety), validation logs.
 	"changelog.md",
+	"docs/library/",
 	"docs/archive/",
 	"agent_installation/mpm-opencode/VALIDATION-2026-08-19.md",
 

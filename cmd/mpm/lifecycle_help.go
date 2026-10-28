@@ -4,7 +4,7 @@
 // every artifact family. Several families intentionally omit them
 // to preserve audit history. This handler renders those asymmetries
 // as concise human-facing explanations so users do not have to read
-// docs/final-pass-lifecycle-matrix.md to learn why an expected verb
+// docs/library/final-pass-lifecycle-matrix.md to learn why an expected verb
 // does not exist.
 //
 // Usage:

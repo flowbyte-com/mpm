@@ -119,7 +119,7 @@ session ended != work completed != work verified
   `restore_challenge`). Same handler, identical wire contract, drop
   the parallel surface to avoid the dual-path confusion for both the
   model and future contributors. See
-  `docs/onboarding-mcp-native-audit-2026-09-05.md` Part C.
+  `docs/library/onboarding-mcp-native-audit-2026-09-05.md` Part C.
 
 These are NOT interchangeable. Treating a theory as a fact, or a
 decision as immutable truth, silently corrupts downstream work.

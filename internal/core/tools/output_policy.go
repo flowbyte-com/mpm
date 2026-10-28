@@ -30,7 +30,7 @@ type defaultOutputPolicy struct {
 // MPM_MCP_MAX_RESULT_BYTES (parsed as base-10 int). Values <= 0 trigger a
 // warning and fall back to the new default of 20480. The default was
 // raised from 10240 → 20480 after the pointer-indirection audit
-// (docs/pointer-indirection-audit-2026-09-05.md Item 3b) showed that
+// (docs/library/pointer-indirection-audit-2026-09-05.md Item 3b) showed that
 // 73 % of historical spills landed within 2× the 10240 boundary: the
 // old default was forcing a round-trip-and-resolve on response payloads
 // that fit comfortably in one inline return.

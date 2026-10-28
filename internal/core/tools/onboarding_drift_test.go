@@ -1,7 +1,7 @@
 // onboarding_drift_test.go — drift detection for the seven
 // tool-description / schema facts identified by the
 // onboarding-mcp-native audit
-// (docs/onboarding-mcp-native-audit-2026-09-05.md Part B) as gaps
+// (docs/library/onboarding-mcp-native-audit-2026-09-05.md Part B) as gaps
 // currently living only in the managed block.
 //
 // The audit's Part D recommendation was: "Move operational constraints

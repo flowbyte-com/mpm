@@ -1,7 +1,7 @@
 // epistemic_contradiction_test.go — Regression tests for the
 // negative-direction counterpart of LogChangelogEntryWithConfirmations.
 //
-// Per docs/epistemic-confirmation.md §"Cascade cross-fire asymmetry",
+// Per docs/library/epistemic-confirmation.md §"Cascade cross-fire asymmetry",
 // the confirmation path and the contradiction path are deliberately
 // NOT symmetric at the cascade-invalidation hook:
 //
@@ -153,7 +153,7 @@ func TestEpistemicContradiction_TriggersCascadeWhenCrossingThreshold(t *testing.
 	// Seed a downstream theory that cites the lesson via
 	// `dependencies`. Without a downstream target, the cascade
 	// machinery correctly writes zero outbox rows — see
-	// docs/archive/epistemic-cascades.md §"Dependency discovery".
+	// docs/library/epistemic-cascades.md §"Dependency discovery".
 	// We need at least one dependent so the cascade enqueue has
 	// somewhere to land.
 	const theoryContent = "theory depending on the contradicted lesson"
@@ -216,7 +216,7 @@ func TestEpistemicContradiction_TriggersCascadeWhenCrossingThreshold(t *testing.
 
 // TestEpistemicContradiction_DoesNotTriggerCascadeWhenStayingAboveThreshold
 // confirms ordinary contradictions that don't cross the line behave
-// like ordinary confidence decreases — per docs/archive/epistemic-cascades.md,
+// like ordinary confidence decreases — per docs/library/epistemic-cascades.md,
 // only threshold crossings trigger cascades.
 //
 // This test is also the symmetric counterpart of the confirmation

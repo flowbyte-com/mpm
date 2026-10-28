@@ -691,7 +691,7 @@ func TestSchemaGuard_MpmSkillsList(t *testing.T) {
 // Both directions of drift the existing parity machinery covers —
 // (a) schema drops a declaration, (b) handler drops a read — are now
 // pinned here. The 6 keys are tied to the 2026-09-05 epistemic-
-// confirmation/contradiction feature (docs/epistemic-confirmation.md)
+// confirmation/contradiction feature (docs/library/epistemic-confirmation.md)
 // and the schema/handler contract is the public surface for that
 // feature, so this test is the narrowest possible closure.
 func TestSchemaGuard_LogToChangelogAssertions(t *testing.T) {
@@ -733,7 +733,7 @@ func TestSchemaGuard_LogToChangelogAssertions(t *testing.T) {
 		}
 		// Each param accepts string OR []string (per the handler's
 		// collectConfirmationSpecs / collectContradictionSpecs helpers,
-		// mirrored in docs/epistemic-confirmation.md §"CLI surface").
+		// mirrored in docs/library/epistemic-confirmation.md §"CLI surface").
 		// A future regression that narrows the type would be a
 		// contract drift — pin the shape here.
 		if _, hasOneOf := prop["oneOf"]; !hasOneOf {

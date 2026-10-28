@@ -365,7 +365,7 @@ var BaseTables = []string{
 	// without an explicit `dependencies` declaration.
 	//
 	// Outbox fields follow the design spec
-	// (docs/archive/2026-08-04-epistemic-cascades-design.md):
+	// (docs/library/2026-08-04-epistemic-cascades-design.md):
 	//   id, invalidation_event_id, dead_artifact_id, dead_artifact_type,
 	//   downstream_artifact_id, downstream_artifact_type,
 	//   trigger_evidence_id (nullable), cascade_depth, reason,
@@ -432,7 +432,7 @@ var BaseTables = []string{
 	// so re-recording the same citation is a no-op.
 	//
 	// polarity is the positive-direction (constructive) cascade opt-in
-	// per docs/constructive-cascade-design.md. NULL means "no polarity
+	// per docs/library/constructive-cascade-design.md. NULL means "no polarity
 	// declared" — the safe default, never fires positive cascade.
 	// 'assumes_false' means "this downstream assumes the source is
 	// false" — when the source is proven true, the dependent may
@@ -468,7 +468,7 @@ var BaseTables = []string{
 	// boundary. A second hook that records provenance for the same
 	// artifact fails with a UNIQUE violation, not a silent duplicate.
 	//
-	// Spec: docs/archive/2026-08-08-artifact-provenance-design.md
+	// Spec: docs/library/2026-08-08-artifact-provenance-design.md
 	//
 	// schema_version is semantic (not additive). Additive nullable
 	// fields do not require a version bump; a version bump is reserved
@@ -561,7 +561,7 @@ var BaseTables = []string{
 	// "Challenged" is defined as: metadata->>'$.status' = 'challenged'
 	// (the challenge system stores status in metadata, not a column).
 	//
-	// Spec: docs/archive/2026-08-08-artifact-provenance-design.md
+	// Spec: docs/library/2026-08-08-artifact-provenance-design.md
 	// (see "Analytics views" section). The CLI surface consumes
 	// v_model_memory_yield as `mpm provenance model-yield`. The
 	// v_model_theory_utility view is reachable via `mpm exec-sql`.
@@ -599,7 +599,7 @@ var BaseTables = []string{
 	// ── Capability Lifecycle (2026-08-05) ─────────────────────────────
 	//
 	// Four-table substrate for the capability lifecycle subsystem.
-	// Spec: docs/archive/capability-lifecycle.md
+	// Spec: docs/library/capability-lifecycle.md
 	//
 	//   capabilities:           stateful artifact ledger. State machine
 	//                           CHECK enforced at storage boundary;
@@ -1051,7 +1051,7 @@ var WorkTables = []string{
 	//
 	// `reason_code` has no 'privacy' member: v1 purge is logical
 	// removal, not forensic or privacy-grade erasure (see
-	// docs/archive/2026-09-30-work-archive-and-purge.md §5.2, §5.6).
+	// docs/library/2026-09-30-work-archive-and-purge.md §5.2, §5.6).
 	`CREATE TABLE IF NOT EXISTS work_purge_audit (
 	  id          TEXT PRIMARY KEY,
 	  work_id     TEXT NOT NULL,
@@ -1678,7 +1678,7 @@ var SafeMigrations = [][3]string{
 	// Archive lifecycle (2026-09-30): works.archived_at is the derived
 	// projection of the archived/unarchived event pair. NULL = active.
 	// Independent of status — archiving never implies completion.
-	// Design: docs/archive/2026-09-30-work-archive-and-purge.md §1
+	// Design: docs/library/2026-09-30-work-archive-and-purge.md §1
 	{"works", "archived_at", "INTEGER"},
 
 	// F-D1: runtime-clock decay contract. Decay must advance according to

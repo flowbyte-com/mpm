@@ -305,7 +305,7 @@ type DatabaseManager struct {
 
 	// sharedPath is the path of the attached shared DB, or "" if not attached.
 	// Set by attachShared() when MPM_SHARED_DB is configured and ATTACH succeeds.
-	// See docs/archive/shared-epistemology.md "Multi-Agent Shared Epistemology" for the design.
+	// See docs/library/shared-epistemology.md "Multi-Agent Shared Epistemology" for the design.
 	sharedPath     string
 	sharedAttached bool
 
@@ -1527,7 +1527,7 @@ func NewDatabaseManager(projectRoot string) (*DatabaseManager, error) {
 		}
 	}
 
-	// Phase 1 of the multi-agent shared-epistemology arc (docs/archive/shared-epistemology.md):
+	// Phase 1 of the multi-agent shared-epistemology arc (docs/library/shared-epistemology.md):
 	// if MPM_SHARED_DB is set, ATTACH the shared SQLite database. Failure
 	// to attach is non-fatal — mpm continues in local-only mode. This
 	// keeps single-instance use cases unaffected while making the
@@ -1826,7 +1826,7 @@ func (dm *DatabaseManager) NewSession() (CoreDB, error) {
 
 // attachShared ATTACHes sharedPath as the `shared` schema in the current
 // connection and runs SafeMigrations + index creation against it. The
-// shared DB uses the same schema as the local DB (see docs/archive/shared-epistemology.md
+// shared DB uses the same schema as the local DB (see docs/library/shared-epistemology.md
 // Schema overlap section) so SQL is identical, just prefixed `shared.`.
 //
 // Idempotent: SafeMigrations uses ALTER TABLE ADD COLUMN, which is a
@@ -2264,7 +2264,7 @@ func (dm *DatabaseManager) QueryGlobalRules(query string, limit int, includeReti
 	// schema would mean cross-schema INSERT triggers, which SQLite
 	// supports but requires careful handling. Backfilling on the
 	// first read is simpler and bounded — the shared DB is
-	// append-mostly per the docs/archive/shared-epistemology.md concurrency model.
+	// append-mostly per the docs/library/shared-epistemology.md concurrency model.
 	if err := dm.backfillSharedFTSIfEmpty(); err != nil {
 		// Non-fatal — fall back to LIKE if backfill or FTS query fails.
 		slog.Warn("shared FTS backfill failed; falling back to LIKE", "error", err.Error())
@@ -2382,7 +2382,7 @@ func (dm *DatabaseManager) scanGlobalRuleRows(rows *sql.Rows) ([]map[string]inte
 // backfill on the first query.
 //
 // This is O(N) on the number of is_global rows. The shared DB is
-// append-mostly per docs/archive/shared-epistemology.md so the cost amortizes to zero on
+// append-mostly per docs/library/shared-epistemology.md so the cost amortizes to zero on
 // subsequent queries.
 func (dm *DatabaseManager) backfillSharedFTSIfEmpty() error {
 	if !dm.sharedAttached {
@@ -2894,7 +2894,7 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// silently no-ops against an existing definition. Idempotent via
 	// the epistemic_pressure_deferral_v1 sentinel plus a column probe.
 	// See migration_epistemic_pressure_deferral.go and
-	// docs/archive/2026-09-30-compact-refusal-lifecycle.md §4.
+	// docs/library/2026-09-30-compact-refusal-lifecycle.md §4.
 	if err := MigrateEpistemicPressureDeferral(tx); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("epistemic_pressure deferral migration failed: %w", err)
@@ -6632,7 +6632,7 @@ func (dm *DatabaseManager) ListWorksByStatus(status string) ([]*Work, error) {
 // `status` and `visibility` are validated independently and neither is
 // derived from the other (see WorkVisibility).
 //
-// Design: docs/archive/2026-09-30-work-archive-and-purge.md §2
+// Design: docs/library/2026-09-30-work-archive-and-purge.md §2
 func (dm *DatabaseManager) ListWorksByStatusAndVisibility(status string, visibility string) ([]*Work, error) {
 	switch WorkStatus(status) {
 	case WorkStatusOpen, WorkStatusDone, WorkStatusCancelled:
@@ -7043,7 +7043,7 @@ func (dm *DatabaseManager) CancelWorkWithContext(workID, note string, ac ActiveC
 // Archive is orthogonal to status: works.status is never written here.
 // Unarchiving a `cancelled` item restores it to `cancelled`, not open.
 //
-// Design: docs/archive/2026-09-30-work-archive-and-purge.md §1
+// Design: docs/library/2026-09-30-work-archive-and-purge.md §1
 func (dm *DatabaseManager) ArchiveWorkWithContext(workID, note string, ac ActiveContext) (work *Work, alreadyArchived bool, err error) {
 	if workID == "" {
 		return nil, false, fmt.Errorf("work_id is required for archive")
@@ -7091,7 +7091,7 @@ func (dm *DatabaseManager) ArchiveWorkWithContext(workID, note string, ac Active
 // Unarchiving a non-archived item is an error (ErrWorkNotArchived) with
 // no writes, not a silent success.
 //
-// Design: docs/archive/2026-09-30-work-archive-and-purge.md §1.4
+// Design: docs/library/2026-09-30-work-archive-and-purge.md §1.4
 func (dm *DatabaseManager) UnarchiveWorkWithContext(workID, note string, ac ActiveContext) (*Work, error) {
 	if workID == "" {
 		return nil, fmt.Errorf("work_id is required for unarchive")
@@ -7727,9 +7727,9 @@ func ProvenancePreamble(metadataJSON string) string {
 //
 // The row is written with collection="rules" by default — the shared
 // DB's home for cross-agent conventions. Other collections are
-// allowed but `rules` is the canonical home per docs/archive/shared-epistemology.md.
+// allowed but `rules` is the canonical home per docs/library/shared-epistemology.md.
 //
-// Phase 3 of docs/archive/shared-epistemology.md: operator-only. No agent should be writing
+// Phase 3 of docs/library/shared-epistemology.md: operator-only. No agent should be writing
 // house rules autonomously. CLI and MCP both gate on confirm=true.
 func (dm *DatabaseManager) RecordGlobalRule(content string, tags []string, weight float64, provenance string) (string, error) {
 	if !dm.sharedAttached {
@@ -7766,12 +7766,12 @@ func (dm *DatabaseManager) RecordGlobalRule(content string, tags []string, weigh
 }
 
 // PromoteToGlobal copies a local memory to the shared DB. The
-// original local row stays in the local DB (per docs/archive/shared-epistemology.md: "Source
+// original local row stays in the local DB (per docs/library/shared-epistemology.md: "Source
 // row stays in local DB"). The shared copy is marked is_global=1
 // with collection="rules" and a metadata.derived_from_local_id
 // field linking back to the original.
 //
-// Phase 3 of docs/archive/shared-epistemology.md: operator-only. Requires confirm: true at
+// Phase 3 of docs/library/shared-epistemology.md: operator-only. Requires confirm: true at
 // the tool boundary.
 func (dm *DatabaseManager) PromoteToGlobal(localID string) (string, error) {
 	if !dm.sharedAttached {

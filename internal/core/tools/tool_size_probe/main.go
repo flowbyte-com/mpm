@@ -9,7 +9,7 @@
 //
 // The probe also computes the filtered "default core" surface that
 // mpm-mcp exposes when MPM_EXPOSE_ALL_TOOLS is unset (see
-// docs/CONTEXT_EXPOSURE.md). The mpm_help discovery tool lives in
+// docs/library/CONTEXT_EXPOSURE.md). The mpm_help discovery tool lives in
 // cmd/mpm-mcp rather than tools.Registry (avoiding an init cycle),
 // so its description and schema are hardcoded here for measurement.
 

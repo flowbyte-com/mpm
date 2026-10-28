@@ -80,7 +80,7 @@ type SeedDirective struct {
 	//
 	// Evaluated centrally by the substrate at wake-projection time
 	// (ReadDirectivesForFramework), not by individual agent plugins.
-	// See docs/archive/directives.md for the full contract.
+	// See docs/library/directives.md for the full contract.
 	Scope string
 }
 

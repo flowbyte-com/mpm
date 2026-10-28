@@ -8,7 +8,7 @@
 //     → resolve that pointer via the production filesystem backend
 //     → assert returned bytes equal original jsonBytes
 //
-// This is the test the audit (`docs/pointer-indirection-audit-2026-09-05.md`)
+// This is the test the audit (`docs/library/pointer-indirection-audit-2026-09-05.md`)
 // called out as missing. Before this test, the only spill tests
 // asserted envelope structure or envelope size; none verified that
 // resolving the pointer recovers byte-for-byte equivalent content.

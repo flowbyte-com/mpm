@@ -440,7 +440,7 @@ func RegisterAllTools(s *server.MCPServer, dm *core.DatabaseManager, ac core.Act
 	// exposes the compact versions. WithToolFilter (set in main.go)
 	// keeps only these from the registered set, so specialists from
 	// the Registry above are filtered out of tools/list and
-	// tools/call entirely. See docs/CONTEXT_EXPOSURE.md.
+	// tools/call entirely. See docs/library/CONTEXT_EXPOSURE.md.
 
 	// mpm_help: capability discovery. Registered as a closure
 	// (not in tools.Registry) to avoid the init-order cycle that

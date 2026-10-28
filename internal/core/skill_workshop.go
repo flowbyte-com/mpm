@@ -2,7 +2,7 @@
 //
 // The workshop is a structured skill-formation and validation workflow
 // that lives above the existing skill persistence and validation
-// architecture. See docs/archive/2026-08-28-mpm-skill-workshop-design.md
+// architecture. See docs/library/2026-08-28-mpm-skill-workshop-design.md
 // for the full contract.
 //
 // This file holds:

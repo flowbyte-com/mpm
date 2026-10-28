@@ -1,6 +1,6 @@
 # Tool Behavioral Contract
 
-> **Status: current rules, historical audit.** The four rules in §1–§4 are the
+> **Library status: Current rules, historical audit.** The four rules in §1–§4 are the
 > project-wide answers and are still the authority for how a tool/action surface
 > behaves. The **per-action audit tables** in each section were taken at the
 > 2026-09-05 baseline and are **historical**: individual rows have since been
@@ -16,15 +16,16 @@
 > | `mpm_decisions` | Gained `supersede`, `invalidate`, `show`, `list`, `query`. |
 > | `mpm_theories` | Gained `show`, `list`, `query`. |
 >
-> **Moved here from `docs/archive/` on 2026-10-28.** It was cited as the
+> **Moved to `docs/library/` on 2026-10-28** from `docs/archive/`, when
+> `docs/archive/` was retired. It was cited as the
 > canonical contract by `docs/CONTRIBUTING.md`, `internal/core/db.go`,
 > `internal/core/schema.go` and several tests, but the file had been deleted.
 > Restoring it at a labelled path is a correctness fix, not nostalgia.
 >
-> **The companion audit it references
-> (`docs/full-tool-behavioural-audit-2026-09-05.md`) is not restored** — it was
-> a snapshot of a specific defect list, most of which is now closed. Use git
-> history if you need it.
+> **The companion audit it references is restored alongside it**
+> ([`full-tool-behavioural-audit-2026-09-05.md`](full-tool-behavioural-audit-2026-09-05.md)),
+> because that audit is the evidence base for the four rules below. Its defect
+> list is closed — read it for the *reasoning*, not for a backlog.
 
 ---
 
@@ -32,7 +33,7 @@
 
 **Audience:** anyone designing, modifying, or reviewing an MPM tool/action surface. New-tool authors must read this before adding a registry entry; reviewers should reference it during the schema-guard gate and registry-dispatcher parity checks.
 
-**Purpose:** the 2026-09-05 behavioural audit (see `docs/full-tool-behavioural-audit-2026-09-05.md`) surfaced four recurring categories of inconsistency, each decided per-tool or per-action, sometimes by inference, sometimes inconsistently with siblings. C.9 (silent-no-op vs error on missing), C.20 (id-key vocabulary), and the broader G.2 family (silent coercion/defaults vs explicit errors) all hit the same shape: a question that should have had a single project-wide answer, instead got one answer per occurrence. This document is the canonical answer for each.
+**Purpose:** the 2026-09-05 behavioural audit (see `docs/library/full-tool-behavioural-audit-2026-09-05.md`) surfaced four recurring categories of inconsistency, each decided per-tool or per-action, sometimes by inference, sometimes inconsistently with siblings. C.9 (silent-no-op vs error on missing), C.20 (id-key vocabulary), and the broader G.2 family (silent coercion/defaults vs explicit errors) all hit the same shape: a question that should have had a single project-wide answer, instead got one answer per occurrence. This document is the canonical answer for each.
 
 The four sections below state a rule, audit every current tool/action against it, and call out backlog items that don't yet comply. The catalog is the reference for future remediation passes — do not re-derive these decisions from first principles each time.
 
@@ -128,7 +129,7 @@ The C.20 fix (`c8b0da1`) unified the `mpm_skills` vocabulary via the `resolveSki
 
 ### Backlog (id-key vocabulary inconsistencies)
 
-1. **`mpm_decisions.supersede` uses `original_id`; `mpm_decisions.invalidate` uses `decision_id`** — same tool, different canonical id names for the same target. The audit's `mpm_decisions supersede` reproduction (`docs/full-tool-behavioural-audit-2026-09-05.md` §C.1) used `original_id`; a parallel `invalidate` reproduction revealed `decision_id` is required. Pre-fix consistency check: `handleShowDecision` reads `p["id"]` per D-8.1, so `show` and `list` are consistent with each other but `supersede`/`invalidate` are inconsistent with `show`/`list` *and* with each other. **Recommended fix:** standardise all four on `decision_id` (canonical) and accept `id` as D-8.1 alias; document the historical `original_id` as a deprecated alias with deprecation note in the schema.
+1. **`mpm_decisions.supersede` uses `original_id`; `mpm_decisions.invalidate` uses `decision_id`** — same tool, different canonical id names for the same target. The audit's `mpm_decisions supersede` reproduction (`docs/library/full-tool-behavioural-audit-2026-09-05.md` §C.1) used `original_id`; a parallel `invalidate` reproduction revealed `decision_id` is required. Pre-fix consistency check: `handleShowDecision` reads `p["id"]` per D-8.1, so `show` and `list` are consistent with each other but `supersede`/`invalidate` are inconsistent with `show`/`list` *and* with each other. **Recommended fix:** standardise all four on `decision_id` (canonical) and accept `id` as D-8.1 alias; document the historical `original_id` as a deprecated alias with deprecation note in the schema.
 
 2. **`mpm_skills` `delete` / `promote_to_global` accept `skill_id` or `name`+`version`; `read` accepts `name` alone (latest-version lookup)** — this is intentional per the C.20 fix but the asymmetry ("read allows name-only, delete requires version if you use the name alias") is worth documenting in the registry description so callers know to pass both. The `resolveSkillID(p, requireVersion)` helper already encodes the rule; the schema description is what needs the cross-reference.
 
@@ -209,7 +210,7 @@ If a new action appears to need behaviour that doesn't fit the rules above, **up
 
 ## Cross-references
 
-- `docs/full-tool-behavioural-audit-2026-09-05.md` §C (defects), §K (audit verdict), §M (revised §I backlog), §N (final alpha-readiness verdict)
+- `docs/library/full-tool-behavioural-audit-2026-09-05.md` §C (defects), §K (audit verdict), §M (revised §I backlog), §N (final alpha-readiness verdict)
 - `internal/core/tools/registry_list.go` — authoritative tool inventory
 - `internal/core/tools/registry_dispatcher_parity_test.go` — registry/dispatcher parity gate
 - `internal/core/tools/schema_guard_test.go` — schema/handler parity gate

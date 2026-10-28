@@ -3226,7 +3226,7 @@ func fetchRecentLessonsForWake(dm mpminternal.CoreDB, limit int) []map[string]in
 // framework. Scope resolution lives in the substrate, not in the agent
 // plugin — MPM_FRAMEWORK env (read by mpmcli.ActiveContextFromEnv at
 // mpm-mcp boot) populates ac.FrameworkName here. See
-// docs/archive/directives.md §4-§5.
+// docs/library/directives.md §4-§5.
 func handleReadDirectives(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, _ map[string]interface{}) (interface{}, error) {
 
 	directives, err := dm.ReadDirectivesForFramework(ac.FrameworkName)
@@ -3451,7 +3451,7 @@ func handleMpmLogToChangelog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 	}
 
 	// Parse the confirmation + contradiction params (opt-in,
-	// explicit-only — see docs/epistemic-confirmation.md). Each can be
+	// explicit-only — see docs/library/epistemic-confirmation.md). Each can be
 	// a single string OR a []string. An empty/missing param is
 	// treated as no-op for that array; the other arrays still process.
 	// Per the design doc, a confirmation OR contradiction is an
@@ -4584,7 +4584,7 @@ func handleRetireGlobalRule(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 }
 
 // handleRecordGlobalRule writes a memory to the shared DB with
-// is_global=1. Phase 3 of docs/archive/shared-epistemology.md: operator-only. The caller must
+// is_global=1. Phase 3 of docs/library/shared-epistemology.md: operator-only. The caller must
 // pass confirm=true — without it the call is rejected. This is
 // defense-in-depth against agents writing house rules autonomously.
 //
@@ -4679,7 +4679,7 @@ func handlePromoteToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		return nil, err
 	}
 	// Forensic log — local→shared promotion. The local copy stays
-	// (per docs/archive/shared-epistemology.md Phase 3); this row records the lineage edge
+	// (per docs/library/shared-epistemology.md Phase 3); this row records the lineage edge
 	// so other agents can see which local IDs have been elevated.
 	dm.LogAudit(
 		mpminternal.AuditInfo, "shared_db",
@@ -4700,7 +4700,7 @@ func handlePromoteToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 
 // handleWorkshopSkill runs the Skill Workshop pipeline (form or
 // refine mode). The full contract is in
-// docs/archive/2026-08-28-mpm-skill-workshop-design.md §4 and
+// docs/library/2026-08-28-mpm-skill-workshop-design.md §4 and
 // §5. The handler is a thin shim: parse the payload map into
 // internal.WorkshopRequest and call internal.RunWorkshop.
 func handleWorkshopSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
@@ -4737,7 +4737,7 @@ func handleWorkshopSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 						return nil, fmt.Errorf(
 							"workshop: decision_model.%s must be an integer from 0 to 5 (got %T: %v) — "+
 								"the decision-model contract is a 4-axis integer score; "+
-								"see docs/archive/2026-08-28-mpm-skill-workshop-design.md §6",
+								"see docs/library/2026-08-28-mpm-skill-workshop-design.md §6",
 							axis, v, v,
 						)
 					}
@@ -7409,7 +7409,7 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 			// resolveMetadataFor strips the unbounded `content` field so
 			// the bounded top-level content is the only place the full
 			// payload can appear in the response. See the launch-block
-			// fix in docs/CONTEXT_ECONOMICS.md (Sept 2026 launch).
+			// fix in docs/library/CONTEXT_ECONOMICS.md (Sept 2026 launch).
 			if mem != nil {
 				resp["metadata"] = resolveMetadataFor(mem)
 			}
@@ -7550,7 +7550,7 @@ func handleMpmResolve(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 	// resolveMetadataFor strips the unbounded `content` field so the
 	// bounded top-level content is the only place the full payload can
 	// appear in the response. See the launch-block fix in
-	// docs/CONTEXT_ECONOMICS.md (Sept 2026 launch).
+	// docs/library/CONTEXT_ECONOMICS.md (Sept 2026 launch).
 	if result.Metadata != nil {
 		resp["metadata"] = resolveMetadataFor(result.Metadata)
 	}

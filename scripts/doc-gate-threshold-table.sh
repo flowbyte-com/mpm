@@ -12,7 +12,7 @@
 # constants. Three subsequent passes each independently re-flagged the
 # mpm_blob_search row as missing — not because the row had been dropped,
 # but because the table had never included it (F-S-3 in
-# docs/archive/pointer-indirection-sweep-2026-09-05.md explicitly classified
+# docs/library/pointer-indirection-sweep-2026-09-05.md explicitly classified
 # those limits as a scan window, not a response-size cap; that classification
 # was correct, but the reasoning was not visible to readers of the table
 # alone).

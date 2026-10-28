@@ -40,7 +40,7 @@ The OpenCode drift scenario (root cause of the audit):
     - mpm_decisions / mpm_lessons / mpm_theories (epistemic surfaces)
     - mpm_evidence / mpm_confidence / mpm_memory action=challenge (truth surfaces — note: the
       standalone mpm_challenge tool was retired 2026-09-05, see
-      docs/onboarding-mcp-native-audit-2026-09-05.md Part C)
+      docs/library/onboarding-mcp-native-audit-2026-09-05.md Part C)
     - mpm_references (and its freshness state — §8)
     - skill formation (workshop) vs skill discovery (proactive_recall_hint)
     - projection default (summary) vs full content

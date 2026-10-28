@@ -691,7 +691,7 @@ func firstActiveContext(acs []ActiveContext) ActiveContext {
 // The legacy metadata.provenance.* JSON block is left in existing rows
 // for forensic history but is no longer written to new rows.
 //
-// Spec: docs/archive/2026-08-08-artifact-provenance-design.md
+// Spec: docs/library/2026-08-08-artifact-provenance-design.md
 // (see "Migration plan > Legacy metadata.provenance.* JSON").
 func (ac ActiveContext) provenanceMeta() map[string]interface{} {
 	return map[string]interface{}{}

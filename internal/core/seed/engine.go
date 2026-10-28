@@ -198,7 +198,7 @@ func reviveSeedRow(db *sql.DB, sd SeedDirective, existingContent, existingTags s
 // to "global" at write time so legacy seeded rows (no scope in metadata)
 // match the same predicate in ReadDirectivesForFramework via the
 // json_extract(metadata, '$.scope') IS NULL branch. See
-// docs/archive/directives.md §3.
+// docs/library/directives.md §3.
 func insertSeedRow(db *sql.DB, sd SeedDirective) error {
 	tagsJSON := "[" + strings.Join(quoteStrings(sd.Tags), ",") + "]"
 	scope := sd.Scope

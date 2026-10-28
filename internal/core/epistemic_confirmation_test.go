@@ -1,5 +1,5 @@
 // epistemic_confirmation_test.go — Regression tests for the
-// LogChangelogEntryWithConfirmations flow (docs/epistemic-confirmation.md).
+// LogChangelogEntryWithConfirmations flow (docs/library/epistemic-confirmation.md).
 //
 // Three properties pin the contract:
 //
@@ -9,7 +9,7 @@
 //
 //	(b) confirmation does NOT accidentally cross-fire with the
 //	    invalidation-cascade path (the assertion in
-//	    docs/epistemic-confirmation.md that "positive-strength evidence
+//	    docs/library/epistemic-confirmation.md that "positive-strength evidence
 //	    on a confidence=0.7-default lesson can never drop below the
 //	    cascade threshold"; this test pins it from both sides — the
 //	    epistemic_cascade_outbox stays empty after a confirmation, and
@@ -114,7 +114,7 @@ func TestEpistemicConfirmation_RaisesConfidence(t *testing.T) {
 
 // TestEpistemicConfirmation_DoesNotTriggerCascade proves (b):
 // confirmation must not enqueue any cascade invalidation intent.
-// docs/epistemic-confirmation.md explicitly states this is the
+// docs/library/epistemic-confirmation.md explicitly states this is the
 // expected behavior (positive-strength evidence on a 0.7-default
 // lesson cannot cross the 0.3 cascade threshold), and this test pins
 // it from the storage side — the cascade outbox must stay empty.
@@ -276,7 +276,7 @@ func TestEpistemicConfirmation_RequiresExplicitAssertion(t *testing.T) {
 // TestEpistemicConfirmation_AtomicityRollback proves that a
 // confirmation targeting a non-existent artifact rolls back the
 // entire transaction (changelog memory AND any prior confirmations
-// in the same call). Per docs/epistemic-confirmation.md §"Failure
+// in the same call). Per docs/library/epistemic-confirmation.md §"Failure
 // handling", invalid input rolls back the entire transaction; this
 // test pins atomicity from the storage side.
 func TestEpistemicConfirmation_AtomicityRollback(t *testing.T) {

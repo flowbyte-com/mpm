@@ -2,7 +2,7 @@
 // mpm_challenge tool.
 //
 // The onboarding-mcp-native audit
-// (docs/onboarding-mcp-native-audit-2026-09-05.md Part C) found
+// (docs/library/onboarding-mcp-native-audit-2026-09-05.md Part C) found
 // `mpm_challenge` and `mpm_memory.challenge` calling identical code
 // paths with identical wire contracts. Per the follow-up, the
 // standalone tool was retired 2026-09-05; the canonical challenge
@@ -29,7 +29,7 @@ func TestRegistry_mpm_challenge_Retired(t *testing.T) {
 		if tool.Name == "mpm_challenge" {
 			t.Errorf("Registry must not contain the retired mpm_challenge tool " +
 				"(duplicates mpm_memory action=challenge with identical wire contract " +
-				"— see docs/onboarding-mcp-native-audit-2026-09-05.md Part C)")
+				"— see docs/library/onboarding-mcp-native-audit-2026-09-05.md Part C)")
 		}
 	}
 }

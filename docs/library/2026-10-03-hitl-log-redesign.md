@@ -1,5 +1,17 @@
 # HITL Log Redesign: mirror.jsonl and watchdog.jsonl
 
+> **Library status: Historical — design.**
+>
+> The human-in-the-loop log redesign. Retained for the reasoning behind the log's shape; check the current code before relying on a field name.
+>
+> **Moved to `docs/library/` on 2026-10-28** from `docs/library/2026-10-03-hitl-log-redesign.md`, when
+> `docs/archive/` was retired.
+>
+> **This document does not describe current product behaviour.** For that,
+> read [`docs/SPEC.md`](../SPEC.md). Trust this one for *why*, not for *what*.
+
+---
+
 Status: **IMPLEMENTED (2026-10-04).** Phases A–E landed in commit
 sequence (see *Implementation phases* below). This document is the
 normative contract; the canonical current behavior lives in
