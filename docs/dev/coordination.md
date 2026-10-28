@@ -780,6 +780,74 @@ conditions are documentation: the release notes must state the
 `MPM_EVENT_INGEST=mpm_system` operator step, and must state that the lesson
 surface is operator-only until a pending state exists.
 
+### Issue-shaped note — the runtime migration's shared-interface changes (2026-10-28, Session A)
+
+> §4 step 1: the proposing session opens an issue-shaped note in the ledger
+> stating the interface, the proposed change, the consumers affected, the
+> compatibility story, and the contract tests that must change.
+
+**The interface:** `internal/core/config/` — the substrate's shared
+configuration and path-resolution package. It is Session A's to change
+(§2), and it is consumed by every binary and by `internal/core` itself.
+
+**The proposed changes**, all landed on `feat/runtime-migration-design`:
+
+| Change | Interface | Consumers affected |
+|---|---|---|
+| `config.ValidateConfig()` — a new exported function | additive | the CLI and the MCP server's startup gates |
+| `config.ResolveTarget(explicitDB)` / `config.ResolveDBPath(workspace)` / `config.CanonicalDBPath(workspace)` / `config.HasCanonicalDBShape(p)` / `config.WorkspaceRootForDBPath(p)` / `config.IsDBPathConflict(err)` / `config.DBPathConflictError` | additive | all four binaries; `internal/scheduler` |
+| `config.DefaultMemoryPaths()` — no longer dereferences a nil config | behavioural, not signature | `internal/core`'s memory store |
+
+**The compatibility story:** every addition is **additive** — no
+existing signature changed and no existing behaviour was removed. The
+one behavioural change is the **refusal** of a divergent database
+selector, and it is a refusal that used to be a silent redirection:
+
+- `MPM_DB_PATH` naming a database other than the workspace's own was
+  **silently ignored** by the CLI and the MCP server, and **silently
+  rewritten** into a different database by the scheduler and the critic.
+- It is now an explicit conflict error everywhere.
+
+The environment the live installation actually runs under is
+**consistent** (`MPM_WORKSPACE=/home/v/.mpm`,
+`MPM_DB_PATH=/home/v/.mpm/src/db/mpm.db`), so the live scheduler and
+critic are unaffected. The refusal only fires on a divergence that was
+previously invisible.
+
+**The contract tests that changed:**
+
+| Test | Package |
+|---|---|
+| `internal/core/config/config_malformed_test.go` (new) | `mpm-core/config` |
+| `internal/core/config/dbpath_test.go` (new) | `mpm-core/config` |
+| `internal/core/memory_malformed_config_test.go` (new) | `mpm-core` |
+| `cmd/mpm/db_path_resolution_test.go` (new) | `mpm` |
+| `cmd/mpm-scheduler/db_path_resolution_test.go` (new) | `mpm-scheduler` |
+| `cmd/mpm-critic/db_path_resolution_test.go` (new) | `mpm-critic` |
+| `internal/scheduler/critic_handler_env_test.go` (new) | `mpm/scheduler` |
+| `internal/scheduler/mpm_bin_test.go` — `TestDefaultDBPath_ExplicitEnvWins` → `TestDefaultDBPath_EnvOverrideIsNotForwardedRaw` | `mpm/scheduler` |
+| `internal/core/test_db_safety_test.go` — one whitelist entry, with its justification | `mpm-core` |
+| `release_acceptance/gitfree_build_identity_test.go` (new) | `release_acceptance` |
+| `scripts/tests/test_build_provenance.py` — the producer assertions | scripts |
+
+**Who must rebase:** nobody. No session depends on the changed
+behaviour, and `internal/core/config/` is A's. Session B's
+`feat/session-b-139-telemetry-observe` and Session C's
+`feat/lifecycle-subscriber-delivery-accounting` are untouched by it —
+**with one exception to check**: Session B's critic tests set
+`MPM_DB_PATH` to the canonical path of their disposable workspace, which
+the new rule accepts. Session C's adapter does not read `MPM_DB_PATH`.
+
+**The design and its evidence:**
+[`runtime-migration-plan.md`](runtime-migration-plan.md) and
+[`runtime-migration-evidence.md`](runtime-migration-evidence.md).
+
+**Note for §3 (branch ownership):** §3 still names `dev/session-b-core`,
+which no longer exists — the worktrees sit on feature branches. That
+drift is pre-existing and is a separate documentation PR, not a change
+this note makes.
+
+
 ## 6. Cross-session communication protocol
 
 1. **The ledger is the channel of record.** A session updates its own rows in

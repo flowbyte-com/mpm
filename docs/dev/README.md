@@ -21,6 +21,8 @@
 | G | Tool-surface evaluation baseline | [`tool-surface-baseline.md`](tool-surface-baseline.md) | Baseline complete; measurement assigned to Session C |
 | H | Foundation readiness report | this file | Complete |
 | I | **Parallel launch gate and B/C handoff** | [`launch-gate.md`](launch-gate.md) | **Complete — launch conditions met** |
+| J | **Runtime migration — the plan** | [`runtime-migration-plan.md`](runtime-migration-plan.md) | **Complete — design accepted (D1–D7); the live migration is a separate approval gate** |
+| K | **Runtime migration — the evidence** | [`runtime-migration-evidence.md`](runtime-migration-evidence.md) | **Complete — 135 rehearsal assertions, 0 failures, reproducible with `make rehearsal`** |
 
 ---
 
@@ -215,6 +217,27 @@ pre-existing untracked file, `cmd/dbg_main.go.tmp` (579 B, 2026-10-17) —
 | 3 | **The release candidate is not assembled** — the B/C work is not started | B + C | The 30 October target |
 | 4 | **Nothing has been deployed** to `~/.mpm` (still at `3df72315`, which predates all fifteen corrective PRs) | A | The release candidate — deliberately, per the deployment gate |
 | 5 | `idx_memories_confidence_checked` does not accelerate the decay query it was added for | A | Nothing — a performance claim defect, recorded, not fixed this round |
+| 6 | **The runtime migration's remaining implementation** — the `install.sh` bundle phase, the pointer swap, the transactional promotion retargeted at `$BUNDLE/bin`, and the runtime-only uninstall | A | The migration itself — which is a separate approval gate (J) |
+| 7 | **The `lifecycle_events` name collision** — a database already carrying an unrelated table of that name silently does not receive the substrate's schema for it | A | Nothing yet; it is a preflight refusal that should be implemented before the migration (J, risk R5) |
+
+### 5.1 The runtime migration — where it stands (2026-10-28)
+
+The design is **accepted** (decisions D1–D7 in
+[`runtime-migration-plan.md`](runtime-migration-plan.md) §0). The safety
+prerequisites that must land **before** any migration are landed:
+
+| Prerequisite | State |
+|---|---|
+| A malformed configuration is a controlled validation error, not a panic (F3) | ✅ landed |
+| One resolver for the database path; a divergent selector fails explicitly (D4) | ✅ landed |
+| Every installed executable reports a trustworthy embedded identity without `.git` (D5) | ✅ landed |
+| The rehearsal is reproducible source, not a local one-off | ✅ landed — `make rehearsal`, 135 assertions, 0 failures |
+| The design and its evidence are in version-controlled documentation | ✅ landed — this directory |
+
+**The live migration has NOT been performed**, and no pull request
+performs it. It is a separate approval gate with its own operator
+checklist (J §9).
+
 
 ---
 
