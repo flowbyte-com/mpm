@@ -23,17 +23,27 @@
 ## 0. Executive summary
 
 The managed instruction block that OpenCode loads on every turn was **11,225
-bytes / 2,009 tokens** of prose. It is replaced here by a **2,547-byte /
+bytes / 2,009 tokens** of prose. It is replaced here by a **2,561-byte /
 593-token behaviour matrix** — a **70.5% token reduction** — that carries the
 operational core of the contract and points at the canonical protocol for the
 elaboration.
 
 | | Old (contract 3.0.0) | New (contract 4.0.0) | Δ |
 |---|---|---|---|
-| bytes | 11,225 | 2,547 | **−77.3%** |
+| bytes | 11,225 | 2,561 | **−77.2%** |
 | words | 1,564 | 376 | −76.0% |
 | tokens (`cl100k_base`) | 2,009 | **593** | **−70.5%** |
 | tokens (`o200k_base`) | 2,002 | 596 | −70.2% |
+
+**How the bytes are counted**, because a reviewer will count differently
+and get a different number. 2,561 is the **renderer's output**: the block
+from `<!-- BEGIN MPM MANAGED BLOCK -->` through the newline that follows
+`<!-- END MPM MANAGED BLOCK -->`. The block region *alone* — BEGIN through
+the END marker, exclusive of that trailing newline — is **2,560** bytes. The
+token figures are unaffected: the trailing newline is inside the measured
+string either way. Both numbers are given here because an independent audit
+of this branch reported the 2,560 figure (§10.4), and a reviewer comparing
+against it should not have to guess which convention was used.
 
 The old block was a **good contract and a bad always-on surface**: it was
 paid for on every turn, by every agent, forever, and it spent most of that
@@ -525,10 +535,10 @@ the agent persists**.
 | **Isolation** | `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` are all redirected into a temporary directory that is removed afterwards. The live installation, the live database and the live OpenCode configuration are never read for mutation and never written. |
 | **Order** | Scenarios are the outer loop and the arms the inner loop, so a transient provider slowdown lands on **both** arms of the same scenario rather than on every cell of one arm. |
 
-### 10.2 Five measurement defects the harness found — and fixed
+### 10.2 Six measurement defects the harness found — and fixed
 
-All five were found by the harness failing to produce a usable answer, and
-all five are recorded because they are the shape this class of mistake
+All six were found by the harness failing to produce a usable answer, and
+all six are recorded because they are the shape this class of mistake
 takes: **each one made a contaminated run look like a behavioural result.**
 The last two were only findable because the harness now keeps the evidence:
 every cell's transcript is written next to the JSON envelope, so a verdict
@@ -632,6 +642,39 @@ contamination detector catches that, and such a cell is reported as
 contaminated rather than counted. What the stage removes is the **pointer**,
 which is what turned a local task into a repository excavation.
 
+#### Defect 6 — a cell wrote into the harness's own worktree
+
+The `transfer` scenario asks the agent to write up "the state of this
+project". The cell's project is four files with no history, so the agent
+went looking for a project with history — found the harness's own
+worktree — and **authored two documents and made three commits in it**.
+
+That is not a measurement result; it is damage. It was caught because the
+three commits appeared in the branch's own log.
+
+*Fix, in three parts:*
+
+1. **The cell gets a disposable copy of the working tree**, one `ls` away
+   from its project directory, with the **arm's** reference stack overlaid
+   on it — so a cell that goes looking for "the project" finds a plausible
+   repository, and any write it makes lands there and is discarded with the
+   cell. (The old arm's copy has the 4.0.0 documents removed, so it cannot
+   read the contract it is being compared against.)
+2. **The harness never mutates the tree with git.** The first version of
+   this guard restored a modified tree with `git reset --hard` and
+   `git clean -fd`. **That was a mistake, and it cost real work**: the
+   `reset --hard` reverted every uncommitted change in the tree, and the
+   `clean -fd` deletes untracked files. A measurement harness that can
+   destroy the operator's work is worse than one that reports damage. The
+   rules now are: the harness **requires a clean tree to start** and
+   refuses to run otherwise; a modified tree is restored by
+   `git checkout -- <paths>` on the **specific tracked files** the cell
+   touched — no HEAD movement, no untracked file ever deleted — and the
+   cell is flagged `TREE-MODIFIED`; and `git reset --hard` and
+   `git clean` appear nowhere in the harness.
+3. **The transcript is kept**, so a wrong verdict can be diagnosed instead
+   of re-run.
+
 The detector is now **two-bucket**:
 
 | Bucket | What it catches | What it means |
@@ -642,6 +685,41 @@ The detector is now **two-bucket**:
 ### 10.3 Results
 
 *(filled in below)*
+
+### 10.4 An independent audit, produced by a contaminated cell
+
+One of the contaminated cells — the `transfer` scenario, whose prompt asks
+the agent to write up "the state of this project" — did something the
+harness did not expect: **it audited the branch**.
+
+Having found the harness's worktree, the agent treated it as the project it
+was asked to describe, and produced a state-of-play document that re-measured
+the branch's claims against the artefacts and reported **five corrections**.
+It then wrote a second, "verified" document superseding the first.
+
+The documents are **not** committed to this branch — they were authored by a
+measurement cell into the harness's tree, and §10.2's Defect 6 explains why
+that happened and how it is now prevented. They are preserved as evidence at
+`/tmp/opencode/agent-authored/`. What matters is what they found:
+
+| # | The agent's correction | Verdict |
+|---|---|---|
+| **C1** | "The block is 2,547 bytes; it is really **2,560**." | **CORRECT, and it caught a real error in this report.** The 2,547 figure was measured *before* the D7 lessons-row edit and was never re-measured; the edit added 14 bytes. This report now says 2,561 (the renderer's output) and states the 2,560 convention explicitly (§0). |
+| **C2** | "The comparison is an 8-cell table; the harness defines four scenarios." | **NOT CORRECT — an artefact of a killed run.** The harness defines **five** scenarios (`acknowledgement` is the fifth); the log the agent read had been truncated by the kill before the last two cells, so it counted the headers that existed. |
+| **C3** | "D6 is already applied in the registry; the residual gap is in the **plugin's** copy of the `mpm_references` description, which names neither `url` nor the `reference_url` redirect." | **CORRECT, and it found a defect this branch had missed.** It is now **D9** in §11.1, and it was fixed. |
+| **C4** | "A case-insensitive substring search for `detached` hits one live memory about git's DETACHED maintenance — a false positive for a future search." | **A useful caveat, not a defect.** It is a caution about how to search the live store. |
+| **C5** | "The Python suite is 467 passed / 2 skipped under pytest, not 469 OK / 1 skipped." | **COSMETIC — a counting-convention difference**, not a discrepancy: `unittest` and `pytest` count subtests differently. Nothing fails either way. |
+
+The audit also produced a **lesson the branch had already learned but had
+not written down**: *"A successor session's CORRECTION can carry the error
+it is correcting — so a correction is not self-validating."* That is now
+recorded as a durable lesson in the substrate.
+
+**Why this is in the report at all.** A contaminated cell is not a
+measurement, and nothing in §10.3 is based on it. But it produced an
+independent check of this branch's own arithmetic, and it found a real error
+that four hundred lines of this report had carried. That is worth more than
+the cell it contaminated.
 
 ---
 
@@ -660,6 +738,41 @@ mode the compact block was designed to remove.
 | **D1** | `agent_installation/mpm-opencode/src/index.ts` and `src/index.v2.ts` — the `mpm_handoff` tool description | Advertised "Required params.session_id, params.summary" and "Optional: … params.note". The registered schema requires **only** `summary`; `session_id` is optional; and **`note` is silently dropped** — it is not a persisted field. | Now: "Required params.summary. Optional: params.session_id, params.state, params.commitments, params.open_questions. There is NO params.note: the write surface persists only summary, session_id, state, commitments and open_questions, and any other params key is accepted and SILENTLY DROPPED — so put the next actions in params.commitments and the blockers in params.open_questions." |
 | **D2** | `agent_installation/mpm-opencode/src/index.ts` and `src/index.v2.ts` — the `mpm_theories` resolve description | Advertised "Required params.theory_id, params.conclusion, params.new_status". The registered schema uses **`theoryId`** (not `theory_id`), requires only `theoryId` + `conclusion`, and treats `newStatus` (`proven`\|`disproven`) as optional. | Now: "Required params.theoryId, params.conclusion ("confirmed"\|"disproven"). Optional: params.newStatus ("proven"\|"disproven"), params.winner_id." |
 | **D7** | This report's §3, and the matrix row in the canonical source | The lessons row named a `type` vocabulary that does not exist: `warning` / `correction` / `technique`. The registry's enum is **`insight`, `warning`, `practice`**; a live call with `type: "correction"` is **refused** with `invalid lesson type "correction": must be one of warning, practice, or insight`. | The matrix row now reads "Insight, warning, or practice worth repeating" — the three real values verbatim — so an agent cannot map the situation onto a type that does not exist. |
+| **D9** | `agent_installation/mpm-opencode/src/index.ts` and `src/index.v2.ts` — the `mpm_references` description | Said only "add — Ingest a reference file. Required params.filepath. Optional: params.title." It omitted the **`url`** form the registry supports, the **`import`** (corpus) action, and the **`read`** action — and the managed block *instructs* the agent to "read the underlying source rather than relying solely on a search-result summary". The block promised an action the tool description did not offer. It also omitted the redirect for recording a URL without fetching it. | The description now names all five actions with their params, states that `add` takes **either** `filepath` **or** `url`, says "read — Read the ingested document itself. Required params.id. Read the source, not the search summary.", and carries the redirect: "To record a URL for later WITHOUT fetching it, use `mpm_evidence` action `add` with `params.reference_url`." |
+| **D10** | The same two files — **every** tool description | **Thirty-one registry actions were declared nowhere in the plugin's descriptions**, across eleven of the seventeen tools. The host shows the agent a free-form `params: {type: object}` envelope, so an action the description does not declare is an action the agent **cannot discover**. The gaps that mattered most: `mpm_decisions` declared neither `supersede` nor `invalidate` — while the block says "supersede or flag the affected record" — and `mpm_memory` declared neither `show` nor `delete`/`restore`. Also: `mpm_decisions record` said "Required params.context, params.choice, params.rationale", but the registry requires **only** `choice`, and a live call with `choice` alone succeeds. | Every action in every registered tool's registry enum is now declared in that tool's description, with its required params. The enumeration is pinned by a new test (below), so the gap cannot reopen. |
+| **D11** | The same two files — the `mpm_memory` description | Advertised **`shred`** — "shred — Soft-delete a memory / hard-delete a lesson. Required params.memory_id." `mpm_memory action=shred` is **operator-only** and is refused on every agent transport: *"mpm_memory action=shred is operator-only … Nothing was deleted. No payload field — including confirm=true — authorizes it"*. The description taught a dead end. | `shred` is removed and replaced with the reversible pair: "delete — Reversible soft-delete. Required params.memory_id. Undo it with action=restore." / "restore — Undo a soft-delete. Required params.memory_id." The description ends with: "There is NO params.shred: permanent shredding is operator-only and is refused on every agent transport. Use action=delete for a reversible removal." |
+
+**The guard that keeps D9, D10 and D11 closed.** A new test class,
+`PluginDescriptionsCoverTheRegistry`, in
+`agent_installation/mpm-opencode/tests/test_opencode_doc_conformance.py`:
+
+1. it parses `internal/core/tools/registry_list.go` and extracts each
+   tool's **action enum** — so the authority is the live registry, not a
+   remembered list;
+2. it asserts that every action in that enum is **declared as an action
+   line** in the plugin's description for that tool;
+3. it asserts that the `mpm_memory` description does not advertise
+   `shred`, and that it says `shred` is operator-only.
+
+The test parses the registry itself, so it fails loudly if the registry's
+shape changes rather than passing vacuously. It has already caught real
+gaps: it is what surfaced D9, D10 and D11 in the first place.
+
+**The check is against the declared action lines, not a bare substring**,
+and that distinction was worth having. A substring check is a weaker guard
+than it looks — `delete` occurs inside "Soft-delete a memory", so a
+description that never declared a `delete` action still passed it. It also
+caught a real formatting defect: an appended action line had merged onto
+the previous one, so the action was present as *text* but not as a *line*
+an agent would read as an action. The measured result:
+
+```
+BEFORE: 31 undeclared actions across 11 tools
+  mpm_context 5, mpm_decisions 5, mpm_system 4, mpm_memory 4,
+  mpm_theories 3, mpm_topics 3, mpm_lessons 2, mpm_references 2,
+  mpm_evidence 1, mpm_skills 1, mpm_wakes 1
+AFTER:  0 undeclared actions across 0 tools
+```
 
 **D8 was found while fixing D1 and D2 — and it is the reason the fix needed
 two files.** The adapter carries **two complete implementations** of the
@@ -705,12 +818,13 @@ are worth their own fix.
 | **L1** | **The block is 593 tokens, not 200–300.** §2.1 explains why and prices the alternatives. Every commitment a test pins is retained. |
 | **L2** | **One line of the block is not hard-wrapped.** The reference-discovery sentence is written on one line because `test_installed_block_drift.py` strips that line to build a stale-block fixture, and it can only do that if the phrase is unbroken. The drift test now asserts this, so the constraint is documented rather than accidental. |
 | **L3** | **`mpm_work` is not a native OpenCode tool.** It is a registry tool reachable through the `mpm call <tool>` CLI fallback. The matrix names it because it is the correct destination; the CLI clause in the block is what makes the name actionable here. A future host that exposes `mpm_work` natively needs no change. |
-| **L4** | **The behavioural comparison is one observation per cell, not a statistical result.** §10.3 reports the misses and the contaminated cells alongside the hits. Model behaviour varies between runs, so a single cell cannot separate a real shift from variance. The pending theory in §10.4 states the repetition protocol that would be needed. |
+| **L4** | **The behavioural comparison is one observation per cell, not a statistical result.** §10.3 reports the misses and the contaminated cells alongside the hits. Model behaviour varies between runs, so a single cell cannot separate a real shift from variance. The pending theory in §10.3 states the repetition protocol that would be needed. |
 | **L5** | **The behavioural comparison is confounded by the substrate's own prime directives.** The substrate seeds five `directives`-collection rows on first use — including "On every session start, call read_wake_context before responding to the user" and "Before session_end: call list_active_clusters". They are **identical in both arms**, so the comparison stays controlled, but they are an additional instruction surface that this work did not author. The harness counts them so the confound is visible rather than implicit. |
 | **L6** | **The compact block teaches the wake/recovery path but cannot guarantee the wake arrives.** The plugin's `experimental.chat.system.transform` hook owns delivery. This branch changed the instruction text, not the hook. |
 | **L7** | **`mpm_handoff`'s `state` enum is not taught.** The block names `summary`, `commitments` and `open_questions` — the three that carry the continuation content. `state` (`clean`/`crashed`/`interrupted`/`force_end`) is operationally useful but not behavioural; it stays in the tool-reference table. |
 | **L8** | **Nothing here is deployed.** The live `~/.mpm` is still at `3df7231` and `~/.config/opencode/AGENTS.md` is byte-unchanged (`md5 cb00135ea4a0c42729232f10aee36805`). The change reaches operators only when they run `make refresh-installed` or `./install.sh` after this branch merges. |
 | **L9** | **The behavioural comparison is a two-arm, one-observation-per-cell measurement on one model.** It is evidence, not proof. §10.3 reports the misses and the contaminated cells alongside the hits, and §10.1 states the design's limits. |
+| **L11** | **The behavioural harness requires a clean working tree.** It refuses to run otherwise, because it restores tracked files a cell modifies and must know the tree's starting state. That is the right trade — the alternative (`git reset --hard` plus `git clean -fd`) destroys uncommitted work, and did, once — but it means the harness cannot be run in the middle of an edit session. |
 | **L10** | **The comparison's isolation depends on the harness, not on the host.** `opencode run --standalone` does not reliably keep the agent inside the directory it was launched from (§10.2, Defect 1). Any future behavioural harness for this host needs the same explicit `cd` and the same contamination detector; this is a property of the *host*, not of the managed block. |
 
 ---
@@ -747,7 +861,7 @@ PR #149 (`89afaed`, the session-end investigation that F2 rests on).
 |---|---|
 | `agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md` | The canonical block replaced (the compact matrix); contract version 3.0.0 → 4.0.0; the budget policy rewritten around the three-layer model; the header corrected (matrix, 17-tool OpenCode surface, one adapter). |
 | `agent_installation/mpm-agent-protocol.md` | New **THE BEHAVIOURAL COMMITMENTS** section (C1–C12); a layering note in the preamble. |
-| `agent_installation/mpm-opencode/src/index.ts`, `src/index.v2.ts` | **D1 + D2** — the `mpm_handoff` write description and the `mpm_theories` resolve description corrected in **both** files (see §11.1). |
+| `agent_installation/mpm-opencode/src/index.ts`, `src/index.v2.ts` | **D1, D2, D9, D10, D11** — the `mpm_handoff` write description, the `mpm_theories` resolve description, and **every** tool description's action list corrected in **both** files (see §11.1). |
 | `agent_installation/mpm-opencode/templates/AGENTS.md.snippet` | Regenerated. |
 | `README.md` | The generated managed-block example only. Hand-authored prose untouched. |
 | `agent_installation/tests/test_managed_block_behaviour_matrix.py` | **New** — 11 tests. |
@@ -755,7 +869,7 @@ PR #149 (`89afaed`, the session-end investigation that F2 rests on).
 | `agent_installation/measure/README.md` | **New** — what the three harnesses are, and that none of them is a CI gate. |
 | `agent_installation/measure/mutation_probe.py` | **New** — 9-mutation non-vacuity probe. |
 | `agent_installation/measure/installer_regression.py` | **New** — 26-check disposable-HOME regression. |
-| `agent_installation/measure/block_behaviour_comparison.py` | **New** — the real-host old-vs-new harness, with the two-bucket contamination detector, the per-arm reference stack, the full-transcript scan and the merge-on-resume JSON writer. |
+| `agent_installation/measure/block_behaviour_comparison.py` | **New** — the real-host old-vs-new harness, with the two-bucket contamination detector, the per-arm reference stack, the full-transcript scan, the merge-on-resume JSON writer, the staged plugin payload, the disposable shadow repository, and the tree-integrity guard. |
 | `agent_installation/measure/fixtures/block-3.0.0.md` | **New** — the verbatim 3.0.0 block (the comparison baseline). |
 | `agent_installation/measure/fixtures/protocol-3.0.0.md` | **New** — the verbatim 3.0.0 protocol, served to the old arm. |
 | `agent_installation/measure/fixtures/snippets-3.0.0.md` | **New** — the verbatim 3.0.0 canonical source, served to the old arm. |
@@ -770,6 +884,7 @@ PR #149 (`89afaed`, the session-end investigation that F2 rests on).
 | `agent_installation/tests/test_operator_only_action_advertisement.py` | The behavioural-comparison fixtures exempted as **historical snapshots**, scoped to the `measure/fixtures/` directory so it is not a general hole. |
 | `agent_installation/mpm-opencode/tests/test_opencode_doc_conformance.py` | New `LegacyPluginSourceAgrees` class — D8's detection gap closed (see §11.1). |
 | `agent_installation/mpm-opencode/tests/test_opencode_instructions_installer.py` | Wake phrasings extended; recovery-path assertion added. |
+| `agent_installation/mpm-opencode/tests/test_opencode_doc_conformance.py` | Two new classes: `LegacyPluginSourceAgrees` (D8's detection gap) and `PluginDescriptionsCoverTheRegistry` (D9, D10, D11). |
 | `agent_installation/mpm-opencode/tests/test_opencode_doc_conformance.py` | New `LegacyPluginSourceAgrees` class — pins the loaded entry point, the shared tool set, and the **byte-identical descriptions** across `src/index.ts` and `src/index.v2.ts` (D8's detection gap). |
 | `docs/dev/session-c-compact-managed-block.md` | **New** — this report. |
 | `docs/dev/session-c-handoff-2026-10-29.md` | **New** — the inherited handover, retained with a **status note** at its head recording which items were actioned and three corrections to the handover itself. |

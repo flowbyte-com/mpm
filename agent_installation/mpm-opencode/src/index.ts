@@ -492,7 +492,9 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 		description: `Memory CRUD and lifecycle. Literal actions:
   save — Required params.fact. Optional: params.collection, params.tags, params.weight, params.ttl.
   query — Search memories (FTS5 + semantic). Required params.query. Optional: params.limit, params.collection, params.scope ("all"|"local"|"shared").
-  shred — Soft-delete a memory / hard-delete a lesson. Required params.memory_id.
+  show — Fetch ONE memory by id. Required params.memory_id (the legacy camelCase alias memoryId is still accepted). Use this instead of a search when you already know the id.
+  delete — Reversible soft-delete. Required params.memory_id. Undo it with action=restore.
+  restore — Undo a soft-delete. Required params.memory_id.
   reinforce — Bump weight. Required params.memory_id. Optional: params.delta (default 1).
   weaken — Reduce weight. Required params.memory_id. Optional: params.delta (default 1).
   snooze — Suppress from retrieval for N days. Required params.memory_id. Optional: params.days (default 1).
@@ -502,20 +504,30 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
   review — List memories due for spaced repetition. Optional: params.days (default 30), params.limit (default 20).
   synthesize — LLM dedup/merge. Required params.memory_id.
   challenge — Weaken + create theory from contradiction. Required params.memory_id, params.evidence.
-  commit_milestone — Narrative milestone. Required params.summary (>=50 chars). Optional: params.flavor, params.tags.`,
+  restore_challenge — Undo a challenge. Required params.memory_id.
+  commit_milestone — Narrative milestone. Required params.summary (>=50 chars). Optional: params.flavor, params.tags.
+There is NO params.shred: permanent shredding is operator-only and is refused on every agent transport. Use action=delete for a reversible removal.`,
 	});
 
 	registerDomainTool(bin, tools, {
 		name: "mpm_theories",
 		description: `Theory lifecycle. Literal actions:
   propose — Required params.hypothesis. Optional: params.validation_criteria, params.tags, params.dependencies, params.source_ids.
-  resolve — Resolve a pending theory. Required params.theoryId, params.conclusion ("confirmed"|"disproven"). Optional: params.newStatus ("proven"|"disproven"), params.winner_id.`,
+  resolve — Resolve a pending theory. Required params.theoryId, params.conclusion ("confirmed"|"disproven"). Optional: params.newStatus ("proven"|"disproven"), params.winner_id.
+  show — Fetch one theory by id. Required params.id.
+  list — List theories. Optional: params.status ("pending"|"all"|"proven"|"disproven"|"resolved"; default "pending"), params.tags, params.limit (default 50).
+  query — Search theories. Required params.query. Optional: params.limit (default 50).`,
 	});
 
 	registerDomainTool(bin, tools, {
 		name: "mpm_decisions",
-		description: `Decision recording. Literal actions:
-  record — Record an architectural decision. Required params.context, params.choice, params.rationale. Optional: params.outcome, params.tags, params.source_ids.`,
+		description: `Decision recording and lifecycle. Literal actions:
+  record — Record a decision. Required params.choice. Optional: params.context, params.rationale, params.outcome, params.tags, params.source_ids.
+  supersede — Replace a decision, preserving the original's history. Required params.id (the decision being superseded) and params.choice (the replacement decision). Optional: params.context, params.rationale, params.outcome, params.tags, params.source_ids.
+  invalidate — Retire a decision as invalid. Required params.id. Optional: params.reason.
+  show — Fetch one decision by id. Required params.id.
+  list — List decisions. Optional: params.status, params.tags, params.limit (default 50).
+  query — Search decisions. Required params.query. Optional: params.limit (default 50).`,
 	});
 
 	registerDomainTool(bin, tools, {
@@ -523,7 +535,9 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 		description: `Lesson lifecycle. Literal actions:
   save — Required params.fact. Optional: params.type ("warning"|"practice"|"insight"), params.tags, params.source_ids.
   search — Search lessons by FTS5. Required params.query.
-  list — List lessons. Optional: params.type.`,
+  list — List lessons. Optional: params.type.
+  delete — Reversible soft-delete of a lesson. Required params.id (the alias lesson_id is also accepted).
+  restore — Undo a soft-delete. Required params.id (the alias lesson_id is also accepted).`,
 	});
 
 	registerDomainTool(bin, tools, {
@@ -531,22 +545,29 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
 		description: `Topic clustering. Literal actions:
   create — Required params.name. Optional: params.description.
   search — Required params.query. Optional: params.limit (default 20).
-  link — Link a memory to a topic. Required params.memory_id, params.topic_id. Optional: params.relevance (0-1).`,
+  link — Link a memory to a topic. Required params.memory_id, params.topic_id. Optional: params.relevance (0-1).
+  unlink — Unlink a memory from a topic. Required params.memory_id, params.topic_id.
+  list — List topics. Optional: params.limit (default 20).
+  show — Fetch one topic by id. Required params.id.`,
 	});
 
 	registerDomainTool(bin, tools, {
 		name: "mpm_references",
-		description: `Reference document management. Literal actions:
-  add — Ingest a reference file. Required params.filepath. Optional: params.title.
-  search — Search references by content. Required params.query. Optional: params.limit.
-  list — List ingested references. Optional: params.limit (default 50), params.offset (default 0).`,
+		description: `Reference document management — a SEPARATE corpus from memories, so an empty memory search says nothing about it. Literal actions:
+  add — Ingest ONE external document. Required EITHER params.filepath (a local .md/.txt/.html/.pdf/.epub) OR params.url (an http(s) page MPM fetches); supplying both is an error. Optional: params.title, params.tags, params.reason, params.chunk_size.
+  import — Ingest a CORPUS. Required EITHER params.documents (inline list of {path|url, tags, reason, title, chunk_size}) OR params.manifest (a path to a JSON manifest). Optional: params.tags, params.reason, params.chunk_size.
+  read — Read the ingested document itself. Required params.id. Read the source, not the search summary.
+  search — Search ingested references by content. Required params.query. Optional: params.limit (default 20), params.offset, params.vector_weight.
+  list — Enumerate the ingested corpus. Optional: params.limit (default 50), params.offset.
+To record a URL for later WITHOUT fetching it, use mpm_evidence action=add with params.reference_url.`,
 	});
 
 	registerDomainTool(bin, tools, {
 		name: "mpm_evidence",
 		description: `Evidence management. Literal actions:
   add — Attach evidence to an artifact. Required params.artifact_id, params.type ("observation"|"test"|"reproduction"|"challenge"|"decision_outcome"|"external_reference"), params.source_group, params.created_by. Optional: params.artifact_type, params.notes, params.strength (-1..1), params.independence_factor.
-  list — List evidence for an artifact. Required params.artifact_id. Optional: params.artifact_type.`,
+  list — List evidence for an artifact. Required params.artifact_id. Optional: params.artifact_type.
+  source_groups — Enumerate the accepted source_group vocabulary. No params.`,
 	});
 
 	registerDomainTool(bin, tools, {
@@ -570,7 +591,12 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
   query_global_rules — Query shared rules. Optional: params.query, params.limit.
   record_global_rule — Write a shared rule. Required params.fact, params.confirm (true). Optional: params.tags, params.weight, params.provenance.
   promote_to_global — Copy local memory to shared DB. Required params.memory_id, params.confirm (true).
-  route — Evaluate mode/persona routing. Required params.prompt.`,
+  route — Evaluate mode/persona routing. Required params.prompt.
+  retire_global_rule — Retire a shared rule. Required params.rule_id, params.confirm (true). Optional: params.reason.
+  recent_activity — The factual semantic-activity feed: newest successful mutating actions across the mpm tools. Optional: params.limit, params.since (unix seconds), params.actor_kind ("agent"|"human"|"unknown"|"all"), params.framework_name, params.session_id, params.artifact_type, params.result_status, params.include_system.
+  contextual_candidates — The bounded, pointer-first candidate set: "what artifacts might matter to me right now, and why?". Optional: params.artifact_ids, params.work_ids, params.topic_ids, params.query_text, params.limits.
+  contextual_selection — The deterministic, bounded pointer projection of the candidate set. Optional: params.artifact_ids, params.work_ids, params.topic_ids, params.selection_limits.
+  contextual_materialization — The bounded detail envelope for a selection. Optional: params.artifact_ids, params.work_ids, params.topic_ids, params.materialization_limits.`,
 	});
 
 	registerDomainTool(bin, tools, {
@@ -580,7 +606,8 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
   read — Fetch skill by name. Required params.name. Optional: params.version.
   list — List skills. Optional: params.scope ("local"|"shared"|"all").
   delete — Soft-delete a skill. Required params.skill_id.
-  promote_to_global — Share a skill globally. Required params.skill_id, params.confirm (true).`,
+  promote_to_global — Share a skill globally. Required params.skill_id, params.confirm (true).
+  workshop — Run the skill-improvement workshop over a skill. Optional: params.skill_id, params.mode, params.intent, params.change_type, params.proposal, params.task_context, params.workflow_description, params.failure_recovery, params.recent_actions, params.evidence, params.workshop_key.`,
 	});
 
 	registerDomainTool(bin, tools, {
@@ -593,7 +620,8 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
   digest — Compact overdue wake summary. Optional: params.top_n (default 5).
   upsert_task — Create/update a cron task. Required params.id, params.name, params.cron_expr, params.directive_id, params.status.
   list_tasks — List all scheduled tasks. No params.
-  delete_task — Hard-delete a task. Required params.id.`,
+  delete_task — Hard-delete a task. Required params.id.
+  resolve — Resolve a fired wake. Required params.wake_id (id / wakeId are also accepted) and params.reason ("reconciled"|"obsolete"|"superseded"|"already_satisfied"). Optional: params.result_reference.`,
 	});
 
 	registerDomainTool(bin, tools, {
@@ -625,7 +653,11 @@ const OpenCodeMpmPlugin: Plugin = async (_ctx: PluginInput) => {
   list_clusters — List active audit clusters. No params.
   snooze_cluster — Temporarily hide a cluster. Required params.cluster_key, params.snooze_until. Optional: params.reason.
   resolve_cluster — Permanently dismiss a cluster. Required params.cluster_key. Optional: params.reason.
-  annotate_cluster — Append forensic annotation. Required params.cluster_key, params.annotation. Optional: params.reason.`,
+  annotate_cluster — Append forensic annotation. Required params.cluster_key, params.annotation. Optional: params.reason.
+  unsnooze_cluster — Undo a cluster snooze. Required params.cluster_key. Optional: params.reason.
+  critic_findings — The critic's recorded findings. Optional: params.limit (default 50).
+  event_ingest — Ingest one host event. Required params.event (an object), params.schema_version.
+  event_counters — The observable rejection/stored counters. No params.`,
 	});
 
 	// ---------- 3 Standalone Tools ----------------------------------------

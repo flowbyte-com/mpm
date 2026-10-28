@@ -430,6 +430,99 @@ def _stage_inputs(stage: Path) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# THE TREE, AND WHAT THE HARNESS MAY DO TO IT.
+#
+# A cell runs a real agent with the operator's own credentials, on the
+# operator's own filesystem. It can therefore WRITE to the working tree,
+# and one measured cell did: it authored two documents and made three
+# commits in the harness's own worktree.
+#
+# So the harness takes two precautions, and the second one is the one
+# that matters.
+#
+# 1. THE CELL GETS A DISPOSABLE COPY. A copy of the working tree is
+#    placed one directory listing away from the cell's project, with
+#    the ARM's reference stack overlaid on it, so a cell that goes
+#    looking for "the project" finds a plausible repository and any
+#    write it makes lands in the copy.
+#
+# 2. THE HARNESS NEVER MUTATES THE TREE WITH GIT.
+#
+#    The first version of this guard restored a modified tree with
+#    `git reset --hard` and `git clean -fd`. That is a MISTAKE, and it
+#    cost real work: `git reset --hard` reverted every uncommitted
+#    change in the tree, and `git clean -fd` deletes untracked files.
+#    A measurement harness that can destroy the operator's work is
+#    worse than one that reports damage.
+#
+#    The rules are now:
+#      * the harness REQUIRES a clean tree to start, and refuses to run
+#        otherwise — so "what changed" is never ambiguous, and the
+#        operator's uncommitted work is never at risk;
+#      * a modified tree is restored by `git checkout -- <paths>` on the
+#        SPECIFIC files the cell touched — tracked files only, no HEAD
+#        movement, no untracked file is ever deleted;
+#      * `git reset --hard` and `git clean` appear nowhere in this file.
+# ---------------------------------------------------------------------------
+
+_SHADOW_IGNORE = shutil.ignore_patterns(
+    ".git", "node_modules", "__pycache__", "*.pyc", ".build",
+    "dist", "*.log", ".pytest_cache",
+)
+
+
+def _git(*args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(REPO_ROOT), *args],
+        capture_output=True, text=True,
+    ).stdout
+
+
+def _tree_status() -> str:
+    """The working tree's porcelain status. Empty means clean."""
+    return _git("status", "--porcelain")
+
+
+def _changed_tracked_paths(status: str) -> list[str]:
+    """The tracked paths a porcelain status reports as modified."""
+    out = []
+    for line in status.splitlines():
+        if not line.strip():
+            continue
+        # "XY path" — the two status columns, then the path.
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip('"')
+        if path:
+            out.append(path)
+    return out
+
+
+def _restore_tracked(paths: list[str]) -> None:
+    """Restore the SPECIFIC tracked files a cell touched.
+
+    `git checkout -- <paths>` rewrites those files from the index. It
+    does not move HEAD, it does not touch the index, and it does not
+    delete an untracked file. It is the only restore this harness is
+    allowed to perform.
+    """
+    if not paths:
+        return
+    subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "checkout", "--", *paths],
+        capture_output=True, text=True,
+    )
+
+
+def _stage_repository(stage: Path) -> Path:
+    """A disposable copy of the working tree, for a cell to explore."""
+    repo = stage / "repo"
+    shutil.copytree(REPO_ROOT, repo, ignore=_SHADOW_IGNORE, symlinks=True)
+    return repo
+
+
 def _variants(stage: Path) -> dict[str, str]:
     old = (stage / "fixtures" / "block-3.0.0.md").read_text(encoding="utf-8")
     new = _extract_last_block(
@@ -574,8 +667,10 @@ def _scan_transcript(tmp: Path) -> str:
 def _run_one(variant: str, block: str, scenario: str, prompt: str,
               mpm_binary: str, timeout: int = 600,
               transcript_dir: Path | None = None,
-              stage: Path | None = None) -> dict:
+              stage: Path | None = None,
+              tree_before: str | None = None) -> dict:
     assert stage is not None, "the harness must run against a staged copy"
+    assert tree_before is not None, "the harness must know the tree's state"
     tmp = Path(tempfile.mkdtemp(prefix=f"mpm-behav-{variant}-{scenario}-"))
     try:
         project = tmp / "project"
@@ -606,6 +701,34 @@ def _run_one(variant: str, block: str, scenario: str, prompt: str,
         mpm_home.mkdir(parents=True, exist_ok=True)
         for name, body in _reference_stack(variant, stage).items():
             (mpm_home / name).write_text(body, encoding="utf-8")
+
+        # A disposable copy of the working tree, one `ls` away from the
+        # project. A cell that goes looking for "the project" finds this
+        # one, and any write it makes lands here — not in the harness's
+        # own worktree.
+        shadow = tmp / "repo"
+        shutil.copytree(
+            stage / "repo", shadow, symlinks=True,
+            ignore=_SHADOW_IGNORE,
+        )
+        # THE SHADOW IS THE ARM'S WORLD, NOT THE NEW ONE.
+        #
+        # The working tree carries contract 4.0.0. An old-arm cell that
+        # found the shadow would read the 4.0.0 canonical source and the
+        # 4.0.0 report — the very content it is being compared against.
+        # So the shadow is overlaid with the ARM's reference stack, and
+        # the documents that describe the 4.0.0 contract are removed
+        # from the old arm's shadow.
+        for name, body in _reference_stack(variant, stage).items():
+            (shadow / "agent_installation" / name).write_text(
+                body, encoding="utf-8",
+            )
+        if variant == "old":
+            dev_docs = shadow / "docs" / "dev"
+            if dev_docs.is_dir():
+                for doc in dev_docs.glob("session-c-*"):
+                    if doc.is_file():
+                        doc.unlink()
 
         # The user-scope instruction file. XDG_CONFIG_HOME is
         # redirected, so this is the ONLY managed block the host can
@@ -707,6 +830,8 @@ def _run_one(variant: str, block: str, scenario: str, prompt: str,
             measured["contaminated"] = False
             measured["contamination_hits"] = []
             measured["environment_reach"] = []
+            measured["tree_modified"] = False
+            measured["tree_modified_paths"] = []
             return measured
         measured = _measure(db_path)
         measured["stdout_tail"] = proc.stdout.strip()[-600:]
@@ -749,6 +874,22 @@ def _run_one(variant: str, block: str, scenario: str, prompt: str,
             path for path in _ABSOLUTE_PATH_RE.findall(transcript)
             if path.startswith(real_home)
         })
+        # TREE INTEGRITY. The cell ran on the same filesystem as the
+        # harness's own working tree, with the same credentials, so it
+        # COULD write there. If it did, the changed TRACKED files are
+        # restored — file by file, never with `git reset --hard` and
+        # never with `git clean` — and the cell is flagged.
+        status_after = _tree_status()
+        if status_after != tree_before:
+            changed = _changed_tracked_paths(status_after)
+            measured["tree_modified"] = True
+            measured["tree_modified_paths"] = changed[:20]
+            blocking.append("TREE-MODIFIED")
+            _restore_tracked(changed)
+        else:
+            measured["tree_modified"] = False
+            measured["tree_modified_paths"] = []
+
         measured["contaminated"] = bool(blocking)
         measured["contamination_hits"] = sorted(set(blocking))
         measured["environment_reach"] = reach[:12]
@@ -778,8 +919,29 @@ def main() -> int:
     )
 
     mpm_binary = _mpm_binary()
+    # A CLEAN TREE IS A PRECONDITION, NOT A WISH.
+    #
+    # The harness restores any tracked file a cell modifies, so it must
+    # know which files the operator had already changed — otherwise the
+    # restore would destroy the operator's work. Rather than track that,
+    # the harness refuses to start on a dirty tree.
+    tree_before = _tree_status()
+    if tree_before.strip():
+        print(
+            "the working tree is not clean; refusing to run\n"
+            "  (the harness restores tracked files a cell modifies, so it "
+            "must know the tree's starting state)\n"
+            "  commit, stash or discard the changes first, then re-run:\n"
+            + "".join(
+                f"    {line}\n" for line in tree_before.splitlines()
+            ),
+            file=sys.stderr,
+        )
+        return 2
+
     stage = Path(tempfile.mkdtemp(prefix="mpm-behav-stage-"))
     _stage_inputs(stage)
+    _stage_repository(stage)
     variants = _variants(stage)
     scenarios = args.scenarios or list(SCENARIOS)
     which = args.variants or list(variants)
@@ -816,6 +978,7 @@ def main() -> int:
                 variant, variants[variant], scenario,
                 SCENARIOS[scenario], mpm_binary, timeout=args.timeout,
                 transcript_dir=transcript_dir, stage=stage,
+                tree_before=tree_before,
             )
             row = {
                 "variant": variant,
@@ -834,6 +997,8 @@ def main() -> int:
                 "contaminated": measured.get("contaminated", False),
                 "contamination_hits": measured.get("contamination_hits", []),
                 "environment_reach": measured.get("environment_reach", []),
+                "tree_modified": measured.get("tree_modified", False),
+                "tree_modified_paths": measured.get("tree_modified_paths", []),
             }
             # Upsert: a re-run of a cell replaces the earlier one.
             results = [
@@ -866,6 +1031,7 @@ def main() -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(results, indent=2), encoding="utf-8")
         print(f"\nartifacts: {args.json}")
+    shutil.rmtree(stage, ignore_errors=True)
     return 0
 
 
