@@ -295,17 +295,26 @@ before anything is stamped: a malformed SHA is refused, and an assertion
 that contradicts the checkout is refused. See
 [`runtime-migration-evidence.md`](runtime-migration-evidence.md) §4.
 
-### 5.2 `scripts/install_runtime_assets.py` — split by ownership lifetime ⬜ pending
+### 5.2 `scripts/install_runtime_assets.py` — split by ownership lifetime ✅ landed
 
-The asset installer currently copies every runtime asset into one
-directory. It needs a `--groups` switch so that:
+The asset installer now takes a `--groups` switch:
 
-- `definitions` (mode/, persona/ — operator-owned) go to the **data
-  root**, and
-- `host-assets` (the plugin payload — release-scoped) go into the
-  **bundle**.
+```
+--groups definitions   mode/, persona/, drills/ — operator-owned. The
+                       DATA ROOT, where they survive every upgrade.
+--groups host-assets   agent_installation/** — release-scoped. The
+                       BUNDLE, so they roll back with the release.
+```
 
-Without this split, a version switch would overwrite operator definitions.
+Without the split, a version switch would replace the operator's
+definitions with the upstream copies — and the reconciler's refusal to
+overwrite an operator's edit would turn every upgrade into a conflict
+report for files the operator had deliberately customised.
+
+One subtlety the split needed: the stale-asset sweep is now **scoped** to
+the groups a run owns. A group-scoped reconcile must not release
+ownership of assets outside its groups, or provisioning one group into a
+root would silently un-manage the other group's files in it.
 
 ### 5.3 `install.sh` — a bundle phase and a pointer swap ⬜ pending
 
@@ -320,11 +329,17 @@ The transactional promotion library currently promotes into the live
 `bin/`. It must be retargeted at `$BUNDLE/bin`, so a failed promotion
 cannot leave the live installation half-updated.
 
-### 5.5 `agent_installation/scripts/stage_runtime_package.sh` — name the roots ⬜ pending
+### 5.5 `agent_installation/scripts/stage_runtime_package.sh` — name the roots ✅ landed
 
-`mpm_runtime_root_from_bin` conflates the **bundle root** (where the
-release lives) with the **data root** (where the persistent state lives).
-They become two explicit helpers.
+`mpm_runtime_root_from_bin` conflated the **bundle root** (where the
+release lives) with the **data root** (where the persistent state
+lives). They are now two explicit resolvers — `mpm_bundle_root_from_bin`
+and `mpm_data_root_from_bin` — and the historical name delegates to the
+bundle one, so every existing install is unaffected.
+
+The discriminator is the parent's **name** (`releases`), not the presence
+of `src/db`: a resolver that depends on the database existing is a
+resolver that fails exactly when it is first needed, on a fresh install.
 
 ### 5.6 Fail closed on a missing plugin payload ⬜ pending
 
@@ -343,7 +358,19 @@ The runtime-only uninstall removes `releases/`, `current/`, `bin/` and
 The format is unchanged. The fix was to ensure the **telemetry sidecar**
 carries the same identity as the other four — it already did; an earlier
 finding that it did not was an artefact of probing with `head -1` and is
-**withdrawn** (evidence §3.2).
+**withdrawn** (evidence §4.2).
+
+What was genuinely missing was the other half: a bundle built from a
+**Git-free source export** had no history to report, so it reported
+commit `unknown`. That is closed by D5's producer assertions (§5.9).
+
+### 5.9 `scripts/build-provenance.sh` — the producer assertions ✅ landed
+
+`MPM_BUILD_COMMIT` and `MPM_BUILD_DIRTY` let a Git-free source export
+carry the revision it was exported from. The assertions are **validated**
+before anything is stamped: a malformed SHA is refused, and an assertion
+that contradicts the checkout is refused. See
+[`runtime-migration-evidence.md`](runtime-migration-evidence.md) §4.4.
 
 ---
 
@@ -362,7 +389,12 @@ never touched the live installation.
 
 The harness is now **in the repository** at `scripts/rehearsal/`, with a
 Makefile target, so the evidence is reproducible rather than a local
-one-off (requirement 6).
+one-off (requirement 6). The work products — the source export, the
+bundle, the simulated home, the traces — land **outside** the
+repository, in `$XDG_CACHE_HOME/mpm-rehearsal`; the harness refuses an
+in-repository work directory, because the work products include a copy
+of the source tree and this repository's repo-wide scanners would find
+that copy and fail on it.
 
 ### 6.1 What the rehearsal proved
 
@@ -465,16 +497,17 @@ refuse, rather than proceed.
 Four PRs, in order. Each is independently reviewable and independently
 mergeable; the live migration is not among them.
 
-### PR 1 — packaging: the bundle primitives ✅ landed (partly)
+### PR 1 — packaging: the bundle primitives
 
 | Change | File | State |
 |---|---|---|
 | The producer assertions for a Git-free build | `scripts/build-provenance.sh` | ✅ landed |
 | The assertion contract tests | `scripts/tests/test_build_provenance.py` | ✅ landed |
 | The release-gate proof that all five binaries carry the identity | `release_acceptance/gitfree_build_identity_test.go` | ✅ landed |
-| The asset split by ownership lifetime | `scripts/install_runtime_assets.py` | ⬜ pending |
+| The asset split by ownership lifetime | `scripts/install_runtime_assets.py` | ✅ landed |
+| The asset-split contract tests | `scripts/tests/test_runtime_asset_groups.py` | ✅ landed |
+| The bundle root and the data root as separate resolvers | `agent_installation/scripts/stage_runtime_package.sh` | ✅ landed |
 | The transactional promotion retargeted at the bundle | `scripts/lib/binary_transaction.sh` | ⬜ pending |
-| The bundle root and the data root as separate helpers | `agent_installation/scripts/stage_runtime_package.sh` | ⬜ pending |
 
 ### PR 2 — the database-path safeguards ✅ landed
 
@@ -490,7 +523,7 @@ mergeable; the live migration is not among them.
 
 | Change | File | State |
 |---|---|---|
-| The rehearsal harness, in-repo and reproducible | `scripts/rehearsal/` + a Makefile target | ⬜ pending |
+| The rehearsal harness, in-repo and reproducible | `scripts/rehearsal/` + a Makefile target | ✅ landed |
 | The `lifecycle_events` collision detection | `install.sh` preflight | ⬜ pending |
 | The bundle phase and the pointer swap | `install.sh` | ⬜ pending |
 | The runtime-only uninstall keeps the data | `uninstall.sh` | ⬜ pending |
@@ -508,7 +541,7 @@ the migration; the migration itself is an operation, not a pull request.
 ### 9.1 Before the migration
 
 - [ ] The rehearsal has been re-run against the **exact** target
-      revision, in-repo: `make rehearsal` — **135 assertions, 0 failures**.
+      revision, in-repo: `make rehearsal REHEARSAL_REV=<rev>` — **135 assertions, 0 failures**.
 - [ ] The rollback has been rehearsed against the **real** revision, with
       the fault injection enabled.
 - [ ] The live state has been inventoried and **frozen**: revision,
@@ -570,7 +603,7 @@ the migration; the migration itself is an operation, not a pull request.
 |---|---|
 | This plan | `docs/dev/runtime-migration-plan.md` |
 | The evidence appendix | `docs/dev/runtime-migration-evidence.md` |
-| The rehearsal harness | `scripts/rehearsal/` (`make rehearsal`) |
+| The rehearsal harness | `scripts/rehearsal/` (`make rehearsal REHEARSAL_REV=<rev>`) |
 | The migration driver (the model for `install.sh`'s bundle phase) | `scripts/rehearsal/mpm-upgrade` |
 | The provenance assertions | `scripts/build-provenance.sh` |
 | The database-path resolver | `internal/core/config/dbpath.go` |
