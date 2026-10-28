@@ -75,9 +75,21 @@ directly: a write-first transaction holds the lock, a competing connection's wri
 is **refused** (`database is locked`), so the WAL cannot advance, so no snapshot
 can be invalidated.
 
+**The "first statement" must be the transaction's first statement.** A read issued
+on the **bare pool** (`dm.db.QueryRow`) inside a callback does *not* take the
+transaction's snapshot — it runs on a different connection, and the transaction
+itself has still issued nothing. One callback makes this distinction visible:
+`RecordProvenance` (`cascade_provenance.go:104`) resolves a legacy citation's
+source type through the bare pool when the caller omits `source_type`, and then
+`INSERT`s through the transaction. The bare-pool read looks like a read-first
+callback, but the *transaction's* first statement is the `INSERT` — so the
+transaction takes the write lock immediately and is **immune**. Classifying it as
+replayable would have overstated the risk; classifying it correctly is what the
+inventory below does.
+
 The 26 `WithTx` call sites divide as follows.
 
-### Replayable — the callback reads before it writes (13 of 26)
+### Replayable — the transaction reads before it writes (13 of 26)
 
 | Site | What the callback does |
 |---|---|
@@ -86,14 +98,15 @@ The 26 `WithTx` call sites divide as follows.
 | `internal/core/epistemology_tools.go:490` | `record decision`: dedup probe → `INSERT` the decision |
 | `internal/core/changelog_mcp.go:287` | changelog entry: dedup probe → `INSERT` the memory + one evidence row per confirmation/contradiction |
 | `internal/core/confidence_maintenance.go:249` | confidence decay: `artifactExists` → recompute → `UPDATE` the watermark |
-| `internal/core/cascade_provenance.go:104` | citation: (only when `source_type` is empty) a bare-pool type-resolution read → `INSERT` the citation |
+| `internal/core/work_purge.go:485` | work purge: `discoverWorkPurgeReferrers` (inbound-dependency scan) → the delete set |
 | `internal/core/db.go:7153, 7181, 7241, 7284, 7615, 7635, 7803` | work transitions: `SELECT MAX(event_index)` → `INSERT` the work event → `UPDATE` the works projection |
 
-### Structurally immune — the callback writes first (13 of 26)
+### Structurally immune — the transaction writes first (13 of 26)
 
-`internal/core/reference_db.go:83, 205` · `internal/core/epistemology_tools.go:334,
-573, 668` · `internal/core/work_purge.go:485` · `internal/core/evidence_store.go:479`
-· `internal/core/gc_tools.go:375` · `internal/core/db.go:3759, 7110` ·
+`internal/core/reference_db.go:83, 205` · `internal/core/cascade_provenance.go:104`
+· `internal/core/epistemology_tools.go:334, 573, 668` ·
+`internal/core/evidence_store.go:479` · `internal/core/gc_tools.go:375` ·
+`internal/core/db.go:3759, 7110` ·
 `internal/core/capability/store.go:64` (the wrapper; both of its callbacks write
 first) · `internal/scheduler/drill_handler.go:84, 126`
 
@@ -151,6 +164,41 @@ the property: `system_audit_log` is written through the **bare pool**, so its ro
 are never rolled back with a transaction. It is the one sink where a duplicated
 side effect would be invisible everywhere else. Its row count after a forced
 restart is **identical** to the control's.
+
+### 4.2.1 What the empirical diff covers, and what it does not
+
+The diff covers **4 of the 13** replayable call sites. The remaining **9** are
+covered by §4.1 — the static scan, which is *exhaustive* over the callback
+bodies rather than sampled: every callback body was checked for bare-pool writes,
+bare-pool reads, audit emissions, `append`, goroutine spawns and filesystem
+writes, and the counts are zero for everything that would survive a rollback.
+
+That division is stated rather than blurred, because a reader should be able to
+tell which claim rests on which evidence:
+
+| Evidence | Covers | Does not cover |
+|---|---|---|
+| the forced-restart diff | decision, theory, changelog, work event | the other 9 replayable sites |
+| the static scan | **all 26** call sites, exhaustively | — |
+| the write-first proof | the 13 immune sites, structurally | — |
+
+**One replayable site could not be forced on `main`, and the reason is itself a
+finding.** The work purge (`work_purge.go:485`) opens its transaction with
+`discoverWorkPurgeReferrers(tx, ...)` — a read *through* the transaction — so it
+is replayable. But its delete set carries `retries=0`, which disables the
+statement-level retry entirely. The consequence is that under contention the
+purge's first delete fails **immediately** with `SQLITE_BUSY` and the callback
+returns before a stale snapshot can ever arise: the failure mode is a lost
+purge, not a replay.
+
+That is issue [#164](https://github.com/flowbyte-com/mpm/issues/164)'s defect
+class, and [#169](https://github.com/flowbyte-com/mpm/pull/169) corrects it. The
+forced-restart recipe needs a statement-level retry budget to have a window to
+release the lock in, so on `main` the purge's replay-safety can only be argued
+statically — and the static argument is short: the purge's audit id and
+timestamp are minted **outside** the transaction, so a replay reuses the same
+primary key, and the abandoned attempt's row rolls back with its transaction.
+
 
 ### 4.3 The one sharp edge — and why it is self-limiting
 
