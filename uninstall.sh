@@ -347,12 +347,69 @@ build_plan() {
     done
 
     # 4. Installed binaries.
-    for bin in "${ALL_BINARIES[@]}"; do
-        local p="$PREFIX/bin/$bin"
-        if [ -f "$p" ] || [ -L "$p" ]; then
-            PLAN_RUNTIME_BINARIES+=("$p")
-        fi
-    done
+    #
+    # THE BUNDLE LAYOUT IS A DIFFERENT SHAPE. In the versioned-bundle
+    # layout the five binaries live INSIDE a release directory, reached
+    # through $PREFIX/bin -> current/bin. Removing "$PREFIX/bin/mpm"
+    # there would delete a file INSIDE the release and leave a broken
+    # bundle behind — a partial uninstall that looks like a complete
+    # one.
+    #
+    # So the runtime-only uninstall removes the release-scoped material
+    # WHOLESALE instead: the active pointer, the releases, the staging
+    # area, and the symlinks that point into them. The symlinks are
+    # removed as LINKS (rm never follows a symlink into its target), so
+    # the releases are removed by the releases step, not by accident.
+    #
+    # The STATE is untouched: src/db, backups, mpm_config.json, mode/,
+    # persona/, drills/ and .git all survive a runtime-only uninstall in
+    # both layouts.
+    BUNDLE_LAYOUT=0
+    if [ -L "$DATA_ROOT/current" ] || [ -d "$DATA_ROOT/releases" ]; then
+        BUNDLE_LAYOUT=1
+    fi
+
+    if [ "$BUNDLE_LAYOUT" = "1" ]; then
+        for p in "$PREFIX/bin" "$PREFIX/agent_installation"; do
+            if [ -L "$p" ]; then
+                PLAN_RUNTIME_BINARIES+=("$p")
+            fi
+        done
+        # The active pointer, the releases and the staging area are
+        # release-scoped RUNTIME: they are replaced on every upgrade and
+        # carry no operator data.
+        #
+        # Safety: each path must be genuinely INSIDE the data root. A
+        # mis-set MPM_DATA_ROOT must not turn "remove the releases" into
+        # "remove something else entirely".
+        local bundle_runtime
+        case "$DATA_ROOT" in
+            ""|"/"|"$HOME")
+                warn "refusing to remove release-scoped paths: the data root '$DATA_ROOT' is not a usable root"
+                ;;
+            *)
+                for bundle_runtime in "$DATA_ROOT/current" "$DATA_ROOT/releases" "$DATA_ROOT/staging"; do
+                    case "$bundle_runtime" in
+                        "$DATA_ROOT"/*) ;;
+                        *)
+                            warn "skipping $bundle_runtime — outside the data root"
+                            continue
+                            ;;
+                    esac
+                    if [ -e "$bundle_runtime" ] || [ -L "$bundle_runtime" ]; then
+                        PLAN_RUNTIME_LOCKS+=("$bundle_runtime")
+                    fi
+                done
+                ;;
+        esac
+    else
+        for bin in "${ALL_BINARIES[@]}"; do
+            local p="$PREFIX/bin/$bin"
+            if [ -f "$p" ] || [ -L "$p" ]; then
+                PLAN_RUNTIME_BINARIES+=("$p")
+            fi
+        done
+    fi
 
     # 4b. Legacy artefacts from the old wrapper + mpm.real layout.
     # Removed unconditionally on uninstall so a subsequent ./install.sh
@@ -529,6 +586,18 @@ print_plan() {
     log "  $DATA_ROOT/persona"
     log "  $DATA_ROOT/migrations"
     log "  $ENV_DIR/mpm.env (if present)"
+    if [ "${BUNDLE_LAYOUT:-0}" = "1" ]; then
+        log ""
+        log "bundle layout: the releases are RELEASE-SCOPED runtime, so the"
+        log "runtime-only uninstall removes them. The state above is preserved,"
+        log "and so is the operator's own source tree, which the layout"
+        log "conversion moved aside rather than deleted:"
+        if [ -f "$DATA_ROOT/.legacy-layout-paths" ]; then
+            while IFS= read -r legacy_path; do
+                [ -n "$legacy_path" ] && log "  $legacy_path"
+            done < "$DATA_ROOT/.legacy-layout-paths"
+        fi
+    fi
 }
 
 # Probe shred availability; fail loudly if destructive --shred was
