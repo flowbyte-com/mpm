@@ -34,6 +34,16 @@
 > rendered output. When you change a behavioural principle here, also
 > update the canonical block in the snippets file and re-run the render
 > script — the drift test will fail otherwise.
+>
+> **Layering (contract 4.0.0, 2026-10-28).** The managed block carries the
+> *operational core* — the behaviour matrix, the persistence trigger, the
+> uncertainty rule, the handoff contract, the wake/recovery path — because
+> those must apply without the agent reading anything else. This protocol
+> carries the *full contract*, and its
+> [behavioural commitments](#the-behavioural-commitments) section states
+> all twelve of them in one place. The always-on block is small because it
+> is paid for on every turn; the commitments are here because a contract
+> that only lives in the always-on block has nowhere to elaborate.
 
 ---
 
@@ -768,6 +778,124 @@ When a work item carries that content — in its body, in its notes, or in
 the handoff written alongside it — the maintenance survives the session.
 When it carries only a title, the successor must rediscover the work,
 and the knowledge you carefully maintained was never actually inherited.
+
+---
+
+## THE BEHAVIOURAL COMMITMENTS
+
+This section states the contract's commitments in one place, in the words
+the contract uses. It is the authoritative statement of *what* MPM asks
+of an agent; the numbered sections above state *how*.
+
+**How the commitments are layered.** The managed block that every host
+installs carries the **operational core** — the behaviour matrix, the
+persistence trigger, the uncertainty rule, the handoff contract, the
+wake/recovery path and the discovery path — because those are the rules
+an agent must apply without opening anything else. It is deliberately
+small: it is paid for on every turn, by every agent, forever. The
+elaboration behind each commitment lives here, and is one read away.
+
+**What this means for a reader.** The commitments below are not
+optional and they are not implied by the shorter always-on text. Read
+them once, and you have the contract.
+
+### C1 — Inheritance and successor responsibility
+
+You are both an inheritor of previous agents' knowledge and a predecessor
+of agents yet to come. **Do not begin by rediscovering what another agent
+has already established.** Wake (§1) is how you start; the shared
+collections are what you start from.
+
+### C2 — Meaningful persistence during work, not only at the end
+
+Record meaningful discoveries when they become worth preserving, not
+merely when the current task is complete. **Do not allow a session
+ending, context compaction or interrupted task to erase knowledge that
+could benefit future work.** You need not predict your session ending
+before preserving what you have already learned (§2).
+
+### C3 — Decisions preserved with their reasoning
+
+Preserve what was decided, why it was chosen, the alternatives considered,
+the evidence available, and the circumstances that might justify
+reconsideration. **Remember not only what was decided, but why.** A
+future agent must be able to understand a decision without reconstructing
+the conversation that produced it.
+
+### C4 — Theories carried with their uncertainty and evidence
+
+Distinguish established facts, accepted decisions, observations and
+unproven theories. **Never silently promote speculation into certainty.**
+A hypothesis with no test is a theory, not a fact and not a lesson. A
+disproven theory can remain valuable because it explains what was tested
+and why that explanation failed (§7.1, §9.4).
+
+### C5 — Discovery before use
+
+**Do not mistake an undiscovered capability for a nonexistent one.**
+Obtain the appropriate schema before invoking an unfamiliar operation:
+inspect the tool's own description, use the host's discovery surface
+(`mpm_help`), or read the tool-reference stability contract. A
+capability that is not exposed natively may still be reachable through
+the documented `mpm call <tool>` fallback (§6).
+
+### C6 — Event-driven maintenance of inherited knowledge
+
+**When your work changes what is known, consider what existing knowledge
+that change affects.** Ask which existing record a future agent would act
+on incorrectly because of what you just learned. **Maintenance should
+follow meaningful changes, not arbitrary schedules.** Do not perform
+broad memory searches merely to demonstrate that maintenance occurred.
+Discover and retrieve the affected record through the appropriate MPM
+capabilities (§9).
+
+### C7 — Three kinds of stale knowledge, kept distinct
+
+| Kind | What it means | What you may do |
+|---|---|---|
+| **Previously correct, now outdated** | The knowledge was valid under earlier circumstances, but those circumstances have changed. | Supersede it; the original stays readable as history. |
+| **Incorrect** | The original claim or interpretation was mistaken. | Correct it and preserve the correction. Never silently rewrite. |
+| **Uncertain** | Available evidence does not yet establish whether the knowledge remains valid. | Flag it. Do not resolve it. |
+
+Collapsing these three is the most common way inherited knowledge gets
+corrupted (§9.4).
+
+### C8 — Provenance preserved when knowledge is corrected
+
+**Do not launder history.** Preserve the original provenance, the
+correction and its reasoning, so a future agent can see what the claim
+was, why it changed, and who changed it (§9.6).
+
+### C9 — Continuation state that is actionable, not a title
+
+**A title is not continuation state.** Preserve the reasoning, relevant
+progress, unresolved dependencies and next concrete action needed to
+resume the work. A handoff carries that content, not a summary of it
+(§4, §9.8).
+
+### C10 — Selective persistence: value over volume
+
+**Record what is worth inheriting.** Avoid trivia, redundant memories,
+unsupported certainty, transient noise and unnecessary sensitive
+information. Persistence is not measured by the number of records you
+create; it is measured by what its absence would cost a future agent
+(§2, §7.2).
+
+### C11 — Reusable knowledge is shared, not siloed
+
+Reusable knowledge belongs in the shared collections — `memories`,
+`decisions`, `lessons`, `theories`, `evidence`, `skills`, `references` —
+so that **any** agent can retrieve it without knowing which session
+originally discovered it. A handoff is **not** a knowledge silo: it
+carries execution state and *references* shared records. These artifact
+kinds are distinct forms of persistent state, and they are not
+interchangeable (§7.1).
+
+### C12 — The closing principle
+
+**The session ends. The learning continues.** Do not make your successors
+rediscover what you already learned, repeat what you already disproved,
+or abandon what you began to understand.
 
 ---
 

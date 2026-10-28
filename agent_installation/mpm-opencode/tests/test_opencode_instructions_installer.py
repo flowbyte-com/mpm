@@ -294,26 +294,42 @@ class StaleVsCurrentBody(unittest.TestCase):
         self.assertNotIn("stale-persist", result)
         self.assertNotIn("stale-handoff", result)
         # Current contract is in. The canonical managed block in
-        # agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md (the
-        # opencode-instructions block) states the wake contract as
-        # "Wake context may arrive automatically. If it does not,
-        # recover it through `mpm_context` using `read_wake_context`"
-        # — the "Inherit before you begin" responsibility. The intent
-        # — wake arrives on its own, and there is an explicit recovery
-        # path when it does not — is what this test pins. The anchors
-        # are matched by meaning rather than by one exact sentence, so
-        # a re-wording of the contract cannot silently turn a present
-        # commitment into an absent one, while dropping the wake
-        # promise or the recovery hint still fails here.
+        # agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md states
+        # the wake contract as "Wake context may arrive automatically.
+        # If it does not, recover it through `mpm_context` using
+        # `read_wake_context`".
+        #
+        # Contract 4.0.0 (2026-10-28) rewrote the block as a
+        # behaviour matrix and said it as "Wake context arrives at
+        # session start (recover it through `mpm_context` using
+        # `read_wake_context` if not)".
+        #
+        # The INTENT — wake arrives on its own, and there is an
+        # explicit recovery path when it does not — is what this test
+        # pins. The anchors are matched by meaning rather than by one
+        # exact sentence, so a re-wording of the contract cannot
+        # silently turn a present commitment into an absent one, while
+        # dropping the wake promise or the recovery hint still fails
+        # here.
         self.assertTrue(
             any(p in result for p in (
                 "Wake context may arrive automatically",
                 "wake context normally arrives",
+                "Wake context arrives at session start",
             )),
             "the installed block must tell the agent that wake context "
             "arrives on its own",
         )
         self.assertIn("read_wake_context", result)
+        self.assertTrue(
+            any(p in result for p in (
+                "recover it through",
+                "recovery path",
+                "recovers it",
+            )),
+            "the installed block must name read_wake_context as the "
+            "recovery path when wake context does not arrive",
+        )
         self.assertEqual(result.count(MANAGED_BEGIN), 1)
 
     def test_current_body_is_noop_no_backup(self):

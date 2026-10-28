@@ -66,35 +66,44 @@ def _load_render_module():
 _render = _load_render_module()
 
 
-# The behavioural-responsibility headings the canonical block must
-# teach. Substring match — the heading text under each `###` marker is
-# enough. Order is the order they appear in the canonical block.
+def _matrix_rows(block: str) -> list[tuple[str, str]]:
+    """Return the behaviour matrix's (situation, destination) rows.
+
+    The header row and the markdown separator row are excluded; every
+    other table row is a behaviour row."""
+    rows: list[tuple[str, str]] = []
+    for line in block.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        m = _MATRIX_ROW_RE.match(stripped)
+        if not m:
+            continue
+        rows.append((m.group(1), m.group(2)))
+    return rows
+
+
+# The behavioural destinations the matrix must teach. The set is the
+# substrate's write surfaces: a fact, a decision, a lesson, evidence, a
+# theory, work state, a skill, a reference, and a handoff — plus the
+# explicit "no write" row that keeps the block from turning persistence
+# into a reflex.
 #
-# The list reflects the approved inheritance-oriented behavioural
-# contract (protocol version 3.0.0, "The Principle of Inherited
-# Intelligence"). It replaced the numbered-rule list that preceded it;
-# the responsibilities are:
-#   1. inherit before you begin
-#   2. discover MPM rather than assuming its limits
-#   3. preserve discoveries as they happen
-#   4. decisions deserve their reasoning
-#   5. theories are an inheritance too
-#   6. maintain project continuity
-#   7. reuse, challenge and improve inherited knowledge
-#   8. maintain what you inherit
-#   9. pass on what matters
-#   10. value knowledge, not volume
-RESPONSIBILITY_HEADINGS = (
-    "Inherit before you begin",
-    "Discover MPM rather than assuming its limits",
-    "Preserve discoveries as they happen",
-    "Decisions deserve their reasoning",
-    "Theories are an inheritance too",
-    "Maintain project continuity",
-    "Reuse, challenge and improve inherited knowledge",
-    "Maintain what you inherit",
-    "Pass on what matters",
-    "Value knowledge, not volume",
+# Each entry is (tool, action, situation-keyword). The action is the
+# live registry's action for that tool; the tool-reference stability
+# table in the canonical source carries the same vocabulary, and
+# `test_managed_block_behaviour_matrix.py` checks both against the
+# registry itself.
+REQUIRED_MATRIX_DESTINATIONS = (
+    ("mpm_memory", "save"),
+    ("mpm_decisions", "record"),
+    ("mpm_lessons", "save"),
+    ("mpm_evidence", "add"),
+    ("mpm_theories", "propose"),
+    ("mpm_work", "create"),
+    ("mpm_skills", "save"),
+    ("mpm_references", "add"),
+    ("mpm_handoff", "write"),
 )
 
 
@@ -107,6 +116,21 @@ def _flat(text: str) -> str:
     makes them independent of where the source happens to wrap.
     """
     return re.sub(r"\s+", " ", text)
+
+
+# The behaviour matrix's row shape, and the destinations it must carry.
+#
+# Contract 4.0.0 (2026-10-28) replaced the block's ten numbered prose
+# responsibilities with a behaviour matrix: a two-column markdown table
+# whose left column names the SITUATION and whose right column names the
+# MPM destination that situation belongs in.
+#
+# The destination vocabulary is not a stylistic choice. It is the set of
+# write surfaces the substrate actually exposes, and each row's tool and
+# action are verified against the live registry by
+# `test_matrix_destinations_are_live_tool_actions` in
+# `test_managed_block_behaviour_matrix.py`.
+_MATRIX_ROW_RE = re.compile(r"^\|\s*(?!-{2,})(?!Situation)(.+?)\s*\|\s*(.+?)\s*\|\s*$")
 
 
 class CanonicalSourceExists(unittest.TestCase):
@@ -177,18 +201,66 @@ class CanonicalBlockExtraction(unittest.TestCase):
                 f"host-specific prefix {prefix!r} leaked into canonical source",
             )
 
-    def test_block_teaches_all_behavioural_responsibilities(self):
-        """The canonical block must name every behavioural responsibility
-        by its stable heading text.
+    def test_block_teaches_the_behaviour_matrix(self):
+        """The canonical block must name every write destination the
+        substrate exposes, with the action that writes it.
 
-        The headings are the contract's structure. They are matched as
-        substrings rather than by position, so adding, removing or
-        reordering a responsibility is a deliberate edit to this list
-        rather than a silent drift in the source."""
-        for heading in RESPONSIBILITY_HEADINGS:
+        Contract 4.0.0 replaced the ten prose responsibilities with a
+        behaviour matrix. The set below is the substrate's write
+        surfaces — a fact, a decision, a lesson, evidence, a theory, work
+        state, a skill, a reference, and a handoff — and the block's
+        matrix must teach each one, plus the explicit "no write" row
+        that stops persistence from becoming a reflex.
+
+        The list is asserted as a subset rather than as an exhaustive
+        set, so a future destination can be added without editing this
+        test; but nothing may be REMOVED without editing it, which is
+        the point."""
+        rows = _matrix_rows(self.block)
+        self.assertTrue(rows, "the managed block must carry a behaviour matrix")
+        destinations = {d for _, d in rows}
+        for tool, action in REQUIRED_MATRIX_DESTINATIONS:
+            self.assertTrue(
+                any(
+                    f"`{tool}`" in d and f"`{action}`" in d
+                    for d in destinations
+                ),
+                f"the behaviour matrix must teach {tool} action {action}; "
+                f"the matrix teaches {sorted(destinations)}",
+            )
+        # The negative control: a row that says to write nothing.
+        self.assertTrue(
+            any(d.strip().lower() == "nothing" for d in destinations),
+            "the behaviour matrix must carry a 'no write' row; without it "
+            "the matrix reads as 'always persist something'",
+        )
+
+    def test_matrix_rows_use_the_invocation_form(self):
+        """Every matrix destination must name its action with the word
+        `action` between the tool and the action.
+
+        The renderer decides whether a backticked tool name is an
+        *invocation* reference (and therefore receives a host's
+        transport prefix) or a *prose* mention (and therefore does not).
+        The signal is the `action` keyword in the same sentence — or a
+        backticked, snake_case action identifier attached by a connector
+        such as `using`.
+
+        A single-word action (`save`, `record`, `add`) is NOT
+        snake_case, so without the `action` keyword the renderer would
+        treat the tool as prose and a future host with a namespaced
+        transport would ship a broken tool name. This is the mechanism
+        that keeps the matrix renderable for any host, and it is worth
+        a test."""
+        for situation, destination in _matrix_rows(self.block):
+            if "`mpm_" not in destination:
+                continue
             self.assertIn(
-                heading, self.block,
-                f"canonical block missing responsibility: {heading!r}",
+                "action", destination,
+                f"matrix row {situation!r} names a tool without the "
+                f"`action` keyword: {destination!r}. The renderer would "
+                f"treat that tool as a prose mention and would not "
+                f"prefix it for a namespaced host.",
             )
 
     def test_block_uses_stable_non_negotiable_wording(self):
@@ -947,85 +1019,99 @@ class CanonicalVersionMarker(unittest.TestCase):
 # inheritance-oriented contract (protocol version 3.0.0); each anchor
 # is unique to its commitment.
 #
-# Anchors are matched against the whitespace-collapsed block (see
+# Anchors are matched against the whitespace-collapsed text (see
 # `_flat`), so the canonical source's hard wrapping cannot break a
 # match. Each anchor is a phrase that would only survive a rewrite
 # that changed the commitment itself — not one that merely renames a
 # heading.
+#
+# WHERE AN ANCHOR IS LOOKED FOR.
+#
+# Contract 4.0.0 (2026-10-28) made the reference stack explicitly
+# layered: the always-on managed block carries the operational core
+# (the behaviour matrix, the persistence trigger, the uncertainty rule,
+# the handoff contract, the wake/recovery path, the discovery path),
+# and the canonical protocol carries the full behavioural contract.
+#
+# So a commitment is satisfied when its anchor appears in EITHER the
+# managed block OR the canonical protocol — and the protocol's
+# "behavioural commitments" section states all twelve in one place,
+# which is where most of them now live. What the stack must never do
+# is LOSE a commitment: that is what this test exists to prevent, and
+# it is why the union is the right assertion rather than the block
+# alone.
+#
+# Each entry is (block_anchor, protocol_anchor): the first is what the
+# always-on surface must carry, the second is what the deeper layer
+# must carry. Either may be None when the layer legitimately does not
+# need to name it.
 COMMITMENT_ANCHORS = {
     # 1. Inheritance and successor responsibility.
     "inheritance": (
+        "Your session ends; your knowledge need not.",
         "You are both an inheritor of previous agents' knowledge and a "
         "predecessor of agents yet to come.",
-        "Do not begin by rediscovering what another agent has already "
-        "established.",
     ),
     # 2. Meaningful persistence during work, not only at the end.
     "persistence_during_work": (
-        "Record meaningful discoveries when they become worth preserving, "
-        "not merely when the current task is complete.",
+        "Persist as soon as it becomes useful",
         "Do not allow a session ending, context compaction or interrupted "
         "task to erase knowledge that could benefit future work.",
     ),
     # 3. Decisions preserved with their reasoning.
     "decisions_with_reasoning": (
+        "Choice and rationale",
         "Preserve what was decided, why it was chosen, the alternatives "
         "considered",
-        "Remember not only what was decided, but why.",
     ),
     # 4. Theories carried with their uncertainty and evidence.
     "theories_with_uncertainty": (
+        "Unverified hypothesis — never a fact or lesson",
         "Never silently promote speculation into certainty.",
-        "A disproven theory can remain valuable because it explains what "
-        "was tested and why that explanation failed.",
     ),
     # 5. Discovery before use.
     "discovery_first": (
-        "obtain the appropriate schema before invoking an unfamiliar "
-        "operation",
+        "Discover unfamiliar operations with `mpm_help` action",
         "Do not mistake an undiscovered capability for a nonexistent one.",
     ),
     # 6. Event-driven maintenance of inherited knowledge.
     "event_driven_maintenance": (
-        "When your work changes what is known, consider what existing "
-        "knowledge that change affects.",
+        "When your work changes what is known",
         "Maintenance should follow meaningful changes, not arbitrary "
         "schedules.",
     ),
     # 7. Targeted retrieval rather than ceremonial searching.
     "targeted_retrieval": (
+        "follow its pointers",
         "Do not perform broad memory searches merely to demonstrate that "
         "maintenance occurred.",
-        "discover and retrieve it through the appropriate MPM capabilities",
     ),
     # 8. Outdated, incorrect and uncertain records kept distinct.
     "outdated_incorrect_uncertain": (
-        "The knowledge was valid under earlier circumstances, but those "
-        "circumstances have changed.",
-        "The original claim or interpretation was mistaken.",
+        "stored state may be outdated or superseded",
         "Available evidence does not yet establish whether the knowledge "
         "remains valid.",
     ),
     # 9. Provenance preserved when knowledge is corrected.
     "preserved_provenance": (
+        "do not rewrite history",
         "Do not launder history.",
-        "Preserve the original provenance, the correction and its reasoning.",
     ),
     # 10. Continuation state that is actionable, not a title.
     "actionable_continuation": (
-        "A title is not continuation state.",
+        "a title is not continuation state",
         "Preserve the reasoning, relevant progress, unresolved dependencies "
         "and next concrete action needed to resume the work.",
     ),
     # 11. Selective persistence — value over volume.
     "selective_persistence": (
-        "Record what is worth inheriting.",
+        "Routine or transient information",
         "Avoid trivia, redundant memories, unsupported certainty, transient "
         "noise and unnecessary sensitive information.",
     ),
     # 12. The closing principle.
     "closing_principle": (
-        "The session ends. The learning continues.",
+        "Do not make your successors rediscover what you already learned.",
         "Do not make your successors rediscover what you already learned, "
         "repeat what you already disproved, or abandon what you began to "
         "understand.",
@@ -1041,15 +1127,20 @@ COMMITMENT_ANCHORS = {
 #
 # The approved inheritance-oriented contract (protocol version 3.0.0)
 # replaced that block wholesale at 11224 bytes / 1564 words. The
-# ceiling is raised to 14000 bytes / 2000 words to match: the contract
+# ceiling was raised to 14000 bytes / 2000 words to match: the contract
 # is deliberately behavioural rather than enumerative, and compressing
 # it back toward the old ceiling would undo the approved wording.
+#
+# Contract 4.0.0 (2026-10-28) replaced THAT block with the compact
+# behaviour matrix: 2544 bytes / 375 words. The ceiling is now 3100
+# bytes / 460 words — about 22% headroom, the same shape of margin the
+# 3.0.0 ceiling carried.
 #
 # The ceiling remains a backstop against runaway growth. If a future
 # genuinely essential instruction would exceed it, raise the ceiling
 # rather than mutilating the instruction.
-COMPACT_BLOCK_BYTE_CEILING = 14000
-COMPACT_BLOCK_WORD_CEILING = 2000
+COMPACT_BLOCK_BYTE_CEILING = 3100
+COMPACT_BLOCK_WORD_CEILING = 460
 
 
 class CompactBlockSizeCeiling(unittest.TestCase):
@@ -1161,25 +1252,34 @@ class ManagedBlockDuplicationGuard(unittest.TestCase):
             f"{dupes}. Duplicated instruction is pure bloat — it costs "
             f"agent context and signals an unfinished edit.")
 
-    def test_no_responsibility_repeats_another_responsibility_title(self):
-        """Each numbered responsibility should say something the others
-        do not. Catches a copy-paste edit that clones a responsibility
-        heading or body.
+    def test_no_matrix_row_repeats_another_matrix_row(self):
+        """Each matrix row should say something the others do not.
 
-        The heading shape is `### N. Title`. The title is captured
-        without the number so a duplicated title is detected even if
-        the ordinals were renumbered."""
-        headings = re.findall(
-            r"^\s*#{2,4}\s*\d+\.\s+(.+?)\s*$", self.block, re.MULTILINE,
-        )
+        Catches a copy-paste edit that clones a row's situation text or
+        its destination.
+
+        Contract 4.0.0 replaced the block's ten numbered prose
+        responsibilities with a behaviour matrix, so the shape this
+        guard watches changed with it: the matrix is the block's
+        structure now. The old heading regex found nothing here, which
+        made this test vacuously true — a rename that emptied the
+        structure would have passed. It is now a real assertion about
+        the structure that ships."""
+        rows = _matrix_rows(self.block)
         self.assertGreaterEqual(
-            len(headings), 10,
-            "expected at least 10 numbered responsibilities in the block",
+            len(rows), 8,
+            "expected the behaviour matrix to carry at least 8 rows; "
+            f"found {len(rows)}",
         )
-        norm = [re.sub(r"\s+", " ", h).strip().lower() for h in headings]
+        situations = [re.sub(r"\s+", " ", s).strip().lower() for s, _ in rows]
         self.assertEqual(
-            len(norm), len(set(norm)),
-            f"duplicate responsibility titles: {norm}",
+            len(situations), len(set(situations)),
+            f"duplicate matrix situations: {situations}",
+        )
+        destinations = [d.strip().lower() for _, d in rows]
+        self.assertEqual(
+            len(destinations), len(set(destinations)),
+            f"duplicate matrix destinations: {destinations}",
         )
 
     def test_instruction_budget_policy_is_stated_in_canonical_source(self):
@@ -1208,17 +1308,35 @@ class ManagedBlockDuplicationGuard(unittest.TestCase):
 
 
 class InheritedIntelligenceCommitmentCoverage(unittest.TestCase):
-    """Pin the behavioural commitments of the canonical managed block.
+    """Pin the behavioural commitments of the MPM reference stack.
 
     Each commitment has anchoring phrases that capture its behavioural
     load. The test fails if any commitment's anchor is missing,
     regardless of how the rest of the prose is worded.
 
-    The anchors are matched against the whitespace-collapsed block, so a
+    The anchors are matched against the whitespace-collapsed text, so a
     hard-wrap in the canonical source cannot make a present commitment
     look absent. They are also matched by meaning, not by position: no
-    anchor names a section number, so re-ordering the responsibilities
-    does not break the coverage.
+    anchor names a section number, so re-ordering the commitments does
+    not break the coverage.
+
+    SINCE CONTRACT 4.0.0 — THE STACK, NOT THE BLOCK ALONE.
+
+    The reference stack is layered: the always-on managed block carries
+    the operational core and the canonical protocol carries the full
+    behavioural contract. Every commitment must therefore appear in the
+    UNION, and the two layers are asserted separately: the block anchor
+    must be in the managed block (it is the always-on surface, so a
+    commitment that only exists in the protocol is a commitment the
+    agent may never meet), and the protocol anchor must be in the
+    protocol (it is the contract, so a commitment that only exists in
+    the block has nowhere to elaborate).
+
+    The previous form of this test asserted the old anchors against the
+    block alone. That was correct when the block carried all twelve
+    commitments in prose. It is not correct now, and keeping it would
+    have forced either a lie (a block that re-grew to 2,000 tokens) or
+    a silent deletion (a commitment quietly dropped from the contract).
     """
 
     def setUp(self):
@@ -1226,13 +1344,24 @@ class InheritedIntelligenceCommitmentCoverage(unittest.TestCase):
             CANONICAL_SOURCE.read_text(encoding="utf-8"),
         )
         self.flat = _flat(self.block)
+        self.protocol_flat = _flat(
+            (AGENT_INSTALLATION / "mpm-agent-protocol.md").read_text(
+                encoding="utf-8",
+            )
+        )
 
     def _assert_commitment(self, key: str) -> None:
-        for anchor in COMMITMENT_ANCHORS[key]:
-            self.assertIn(
-                anchor, self.flat,
-                f"commitment {key!r} missing anchor {anchor!r}",
-            )
+        block_anchor, protocol_anchor = COMMITMENT_ANCHORS[key]
+        self.assertIn(
+            block_anchor, self.flat,
+            f"commitment {key!r} is missing its always-on anchor "
+            f"{block_anchor!r} from the managed block",
+        )
+        self.assertIn(
+            protocol_anchor, self.protocol_flat,
+            f"commitment {key!r} is missing its contract anchor "
+            f"{protocol_anchor!r} from the canonical protocol",
+        )
 
     def test_inheritance_and_successor_responsibility(self):
         self._assert_commitment("inheritance")
