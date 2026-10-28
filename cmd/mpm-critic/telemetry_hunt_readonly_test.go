@@ -14,7 +14,7 @@ import (
 
 	mpmcore "github.com/flowbyte-com/mpm-core"
 
-	"github.com/flowbyte-com/mpm/internal/critic"
+	"github.com/flowbyte-com/mpm/internal/attribution"
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
 
@@ -103,6 +103,9 @@ func huntWorkspace(t *testing.T) (string, *mpmcore.DatabaseManager) {
 	ws := t.TempDir()
 	t.Setenv("MPM_WORKSPACE", ws)
 	t.Setenv("MPM_DB_PATH", filepath.Join(ws, "src", "db", "mpm.db"))
+	// The override is deliberately unset: the canonical resolution is
+	// what this test exercises.
+	t.Setenv("MPM_TELEMETRY_DB", "")
 
 	dm, err := mpmcore.NewDatabaseManager(ws)
 	if err != nil {
@@ -245,7 +248,7 @@ func TestSessionArtifactCount_UsesTheSubstratesOwnAttribution(t *testing.T) {
 	_, dm := huntWorkspace(t)
 	ctx := context.Background()
 
-	if n, err := critic.SessionArtifactCount(ctx, dm.SQLDB(), huntSessionID); err != nil || n != 0 {
+	if n, err := attribution.SessionArtifactCount(ctx, dm.SQLDB(), huntSessionID); err != nil || n != 0 {
 		t.Fatalf("count for an unattributed session = %d (err %v), want 0", n, err)
 	}
 
@@ -272,15 +275,15 @@ func TestSessionArtifactCount_UsesTheSubstratesOwnAttribution(t *testing.T) {
 		t.Fatalf("seed artifact_provenance: %v", err)
 	}
 
-	if n, err := critic.SessionArtifactCount(ctx, dm.SQLDB(), session); err != nil || n != 1 {
+	if n, err := attribution.SessionArtifactCount(ctx, dm.SQLDB(), session); err != nil || n != 1 {
 		t.Fatalf("count for a session with one attributed artifact = %d (err %v), want 1", n, err)
 	}
 	// A different session must not see it.
-	if n, err := critic.SessionArtifactCount(ctx, dm.SQLDB(), "ses-other"); err != nil || n != 0 {
+	if n, err := attribution.SessionArtifactCount(ctx, dm.SQLDB(), "ses-other"); err != nil || n != 0 {
 		t.Fatalf("count for an unrelated session = %d (err %v), want 0", n, err)
 	}
 	// An empty session id is zero, not an error.
-	if n, err := critic.SessionArtifactCount(ctx, dm.SQLDB(), ""); err != nil || n != 0 {
+	if n, err := attribution.SessionArtifactCount(ctx, dm.SQLDB(), ""); err != nil || n != 0 {
 		t.Fatalf("count for an empty session = %d (err %v), want 0", n, err)
 	}
 }
