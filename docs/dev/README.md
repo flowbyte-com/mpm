@@ -27,7 +27,7 @@
 
 **Row L is a Session C proposal, not a Session A deliverable.** It replaces
 the always-on managed instruction block (11,225 bytes / 2,009 tokens) with a
-2,561-byte / 593-token behaviour matrix, and moves the twelve behavioural
+2,688-byte / 632-token behaviour matrix, and moves the twelve behavioural
 commitments into a new section of the canonical protocol. Its inherited
 handover is [`session-c-handoff-2026-10-29.md`](session-c-handoff-2026-10-29.md);
 that document carries a status note at its head recording which items were
