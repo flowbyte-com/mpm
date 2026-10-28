@@ -29,6 +29,16 @@
 > | **§3.6** — D7, the wrong `mpm_lessons` type enum | **DONE, and the handover under-called it.** See the correction below. |
 > | **§3.7** — the Go suite was terminated, not passed | **DONE.** The Go suite is run to completion on this branch; the result is recorded in the companion report's §6.3 ("Suite results"). |
 >
+> ### A fourth correction: the handover's own figures are stale
+>
+> The handover's body (§2's scope table) states **"2,526 B / 590-tok"**.
+> That figure was measured before the D7 edit to the `mpm_lessons` matrix
+> row and was never re-measured. The correct figures, re-measured at the
+> branch head, are **2,561 bytes / 376 words / 593 tokens (cl100k_base) /
+> 596 tokens (o200k_base)** — a 70.5% token reduction against the old
+> block's 11,225 bytes / 2,009 tokens. The body is left unchanged because
+> it is a dated record; this note is where the correction lives.
+>
 > ### Three corrections to the handover itself
 >
 > These matter more than the items above, because each one is a place where

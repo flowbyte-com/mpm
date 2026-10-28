@@ -293,7 +293,7 @@ stored.
 delivered into *every* system prompt, so its cost is paid on every
 turn, by every agent, forever. That is the constraint that made
 contract `4.0.0` (2026-10-28) replace the 11,225-byte prose contract
-with a 2,526-byte behaviour matrix: the ten prose responsibilities
+with a 2,561-byte behaviour matrix: the ten prose responsibilities
 were a good contract and a bad *always-on* surface.
 
 **What the always-on surface does not owe.** The elaboration behind
