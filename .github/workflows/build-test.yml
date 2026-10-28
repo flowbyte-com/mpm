@@ -95,7 +95,22 @@ jobs:
     name: Build + core tests
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 — full history, for one step only.
+      #
+      # The documentation freshness gate reviews whether a contract-bearing
+      # code change was accompanied by a documentation change. That question
+      # needs `git diff <merge-base>...HEAD`, and a shallow clone has no
+      # merge-base: the gate would degrade to "could not diff", print a note,
+      # and silently stop asking. A review check that quietly never runs is
+      # worse than no check, because the green build implies it passed.
+      #
+      # The cost is one full fetch on this job; the full-suite and
+      # release-gate jobs stay shallow. Measured against this repository's
+      # history it is a few seconds, which is small next to the build and the
+      # race-detector sweep this job already runs.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v7
         with:
@@ -205,6 +220,74 @@ jobs:
       # simulated one-character drift; restored on revert.
       - name: Renderer parity (managed-block byte-for-byte)
         run: cd agent_installation && python3 -m unittest discover tests
+
+      # Documentation freshness gate.
+      #
+      # Answers: does the documentation still agree with the repository?
+      # Hard-fails only on objective, mechanically demonstrated defects —
+      # dangling relative links and anchors, missing file references, unknown
+      # tool names or actions (checked against
+      # internal/core/tools/registry_list.go, which is the authority), unknown
+      # `make` targets, wrong build paths, a drifted managed block, an
+      # unlabelled docs/library/ entry, or a path into a retired adapter.
+      #
+      # Semantic concerns — "this sentence is probably stale", "a contract
+      # changed and no doc did" — are emitted as ::warning annotations, not
+      # failures. A gate that fails on judgement calls gets disabled, and a
+      # disabled gate protects nothing.
+      #
+      # DOCS_CHECK_BASE: the PR's exact base SHA on pull_request events (the
+      # base branch may have moved since the branch diverged, and `...` diffs
+      # against the merge-base of the two — "what did this PR change"), and
+      # origin/main on pushes.
+      #
+      # The gate reads files plus `git diff`/`git log` only. It does not open a
+      # database, read MPM state, contact a service or use credentials, so it
+      # needs no build, no DB and no secrets — which is why it sits before the
+      # heavier steps.
+      #
+      # Non-vacuity is proven by scripts/tests/test_docs_check.py: every check
+      # is driven against a deliberately broken fixture and asserted to fail.
+      # Those tests are also collected by the `make test-scripts` step below,
+      # so a check that silently stopped seeing anything would itself be
+      # caught.
+      - name: Documentation freshness (make docs-check)
+        shell: bash
+        env:
+          # Prefer the PR's exact base SHA: the base branch may have moved
+          # since the branch diverged, and `...` diffs against the merge-base
+          # of the two, which is what "what did this PR change" means. Fall
+          # back to main on push events.
+          DOCS_CHECK_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: |
+          # One run, two renderings: JSON drives the ::error/::warning
+          # annotations so a finding lands on its own line in the PR
+          # "Files changed" view, and the plain run is what a human reading
+          # the raw log sees. Exit status is taken from the plain run, which is
+          # the gate; the annotation pass never decides anything.
+          python3 scripts/docs_check --base "$DOCS_CHECK_BASE" --json > /tmp/docs-check.json
+
+          python3 - <<'EOF'
+          import json
+          report = json.load(open("/tmp/docs-check.json"))
+          for finding in report["findings"]:
+              level = "error" if finding["severity"] == "error" else "warning"
+              loc = ""
+              if finding["path"]:
+                  loc = f"file={finding['path']}"
+                  if finding["line"]:
+                      loc += f",line={finding['line']}"
+                  loc += "::"
+              print(f"::{level} {loc}{finding['check']}: {finding['message']}")
+          print(
+              f"docs-check: {report['checks_run']} checks, "
+              f"{report['error_count']} error(s), "
+              f"{report['review_count']} review item(s)"
+          )
+          EOF
+
+          # The gate itself. Non-zero here fails the job.
+          python3 scripts/docs_check --base "$DOCS_CHECK_BASE"
 
       # scripts/tests/ (24 files, ~139 cases) pins the installer contract
       # (binary transaction ordering, systemd umask, deploy path resolution,

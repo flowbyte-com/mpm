@@ -154,6 +154,7 @@ document with the same severity as a wrong test.
 | `agent_installation/` | Managed-block source, protocol, installer manual | how agents are instructed |
 | `docs/library/` | Curated reference: design rationale, research, historical constraints. **Not** a description of current behaviour unless the entry says so. | never — it is reference |
 | `docs/dev/` | Coordination and session records, owned by their authors | nothing; append your own |
+| `docs/DOCUMENTATION-MAP.md` | Which document owns which fact, what `make docs-check` verifies, and the code→docs dependency map | a document is added, moved or deleted |
 
 Rules:
 
@@ -171,3 +172,9 @@ Rules:
    rendered from `agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md`;
    `python3 agent_installation/scripts/render_managed_blocks.py --check`
    proves parity.
+5. **Run `make docs-check` before proposing a docs change.** It fails on
+   objective defects only — dangling links and anchors, missing file
+   references, tool names and actions absent from `registry_list.go`, unknown
+   `make` targets, wrong build paths, a drifted managed block, an unlabelled
+   library entry. Anything that requires judgement is reported for review, and
+   `docs/DOCUMENTATION-MAP.md` says how to discharge it.
