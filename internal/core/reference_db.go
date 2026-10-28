@@ -203,16 +203,23 @@ func (dm *DatabaseManager) DeleteReference(id string) error {
 		return fmt.Errorf("DeleteReference: database not initialized")
 	}
 	return dm.WithTx(func(node DBNode) error {
-		if _, err := node.ExecTracked(`DELETE FROM reference_chunks WHERE doc_id = ?`, 0, id); err != nil {
+		// retries=5, not 0 (issue #164). A DELETE is a write, and a
+		// write can be contended like any other. With retries=0 the
+		// statement-level retry was disabled, so ordinary lock
+		// contention aborted the whole delete — the document survived
+		// with some of its rows already gone from the caller's point
+		// of view. The transaction rolls back on failure, so the
+		// retried attempt is the only one that lands.
+		if _, err := node.ExecTracked(`DELETE FROM reference_chunks WHERE doc_id = ?`, 5, id); err != nil {
 			return fmt.Errorf("delete reference chunks: %w", err)
 		}
-		if _, err := node.ExecTracked(`DELETE FROM reference_interactions WHERE doc_id = ?`, 0, id); err != nil {
+		if _, err := node.ExecTracked(`DELETE FROM reference_interactions WHERE doc_id = ?`, 5, id); err != nil {
 			return fmt.Errorf("delete reference interactions: %w", err)
 		}
-		if _, err := node.ExecTracked(`DELETE FROM admission_log WHERE doc_id = ?`, 0, id); err != nil {
+		if _, err := node.ExecTracked(`DELETE FROM admission_log WHERE doc_id = ?`, 5, id); err != nil {
 			return fmt.Errorf("delete admission log: %w", err)
 		}
-		if _, err := node.ExecTracked(`DELETE FROM reference_docs WHERE id = ?`, 0, id); err != nil {
+		if _, err := node.ExecTracked(`DELETE FROM reference_docs WHERE id = ?`, 5, id); err != nil {
 			return fmt.Errorf("delete reference doc: %w", err)
 		}
 		return nil

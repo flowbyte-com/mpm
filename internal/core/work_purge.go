@@ -509,7 +509,10 @@ func (dm *DatabaseManager) PurgeWork(req WorkPurgeRequest) (*WorkPurgeReport, er
 			{&counts.EpistemicProvenance, `DELETE FROM epistemic_provenance WHERE downstream_id = ?`},
 		}
 		for _, d := range deletes {
-			res, err := tx.ExecTracked(d.sql, 0, req.WorkID)
+			// retries=5, not 0 (issue #164): a DELETE is a write, and
+			// an unretried write loses the artifact to ordinary lock
+			// contention.
+			res, err := tx.ExecTracked(d.sql, 5, req.WorkID)
 			if err != nil {
 				return fmt.Errorf("purge: delete: %w", err)
 			}
@@ -520,7 +523,7 @@ func (dm *DatabaseManager) PurgeWork(req WorkPurgeRequest) (*WorkPurgeReport, er
 			*d.dest = int(n)
 		}
 
-		res, err := tx.ExecTracked(`DELETE FROM works WHERE id = ?`, 0, req.WorkID)
+		res, err := tx.ExecTracked(`DELETE FROM works WHERE id = ?`, 5, req.WorkID)
 		if err != nil {
 			return fmt.Errorf("purge: delete works row: %w", err)
 		}

@@ -1178,7 +1178,7 @@ func (dm *DatabaseManager) WithTx(fn func(DBNode) error) (err error) {
 	backoff := 100 * time.Millisecond
 	maxBackoff := 5 * time.Second
 
-	for snapshotAttempt := 1; snapshotAttempt <= txSnapshotMaxAttempts; snapshotAttempt++ {
+	for snapshotAttempt := 1; snapshotAttempt <= TxSnapshotMaxAttempts; snapshotAttempt++ {
 		var tx *sql.Tx
 		for attempt := 1; attempt <= beginMaxAttempts; attempt++ {
 			tx, err = dm.db.Begin()
@@ -1228,7 +1228,17 @@ func (dm *DatabaseManager) WithTx(fn func(DBNode) error) (err error) {
 			// re-running the callback could double-write. The error is
 			// returned to the caller instead, which is the pre-existing
 			// behaviour.
-			err = tx.Commit()
+			//
+			// The error is MARKED (ErrTxCommitAmbiguous) so that a caller
+			// wrapping WithTx in its own retry loop can recognise the
+			// ambiguity and refuse to re-drive the callback. Without the
+			// marker, an outer loop that retries busy errors would
+			// re-run a callback whose write may already be durable.
+			if commitErr := tx.Commit(); commitErr != nil {
+				err = fmt.Errorf("%w: %w", ErrTxCommitAmbiguous, commitErr)
+			} else {
+				err = nil
+			}
 			return err
 		}
 
@@ -1243,7 +1253,7 @@ func (dm *DatabaseManager) WithTx(fn func(DBNode) error) (err error) {
 		// made is undone and the retry starts from the same logical state.
 		// A cancelled or deadline-exceeded callback is never retried:
 		// re-running it would ignore the caller's cancellation.
-		if IsBusySnapshotError(cbErr) && snapshotAttempt < txSnapshotMaxAttempts &&
+		if IsBusySnapshotError(cbErr) && snapshotAttempt < TxSnapshotMaxAttempts &&
 			!errors.Is(cbErr, context.Canceled) && !errors.Is(cbErr, context.DeadlineExceeded) {
 			_ = tx.Rollback()
 			err = nil             // the abandoned transaction is already rolled back
@@ -1403,7 +1413,7 @@ func IsBusyError(err error) bool {
 		strings.Contains(msg, "cannot commit") && strings.Contains(msg, "locked")
 }
 
-// txSnapshotMaxAttempts is the number of times WithTx will restart a
+// TxSnapshotMaxAttempts is the number of times WithTx will restart a
 // transaction whose read snapshot went stale (SQLITE_BUSY_SNAPSHOT).
 //
 // The budget is deliberately small. A restart is not free — the abandoned
@@ -1412,7 +1422,33 @@ func IsBusyError(err error) bool {
 // competing writer committed between this transaction's read and its write),
 // and a writer that cannot get through in three attempts should surface the
 // contention to its caller rather than spin.
-const txSnapshotMaxAttempts = 3
+const TxSnapshotMaxAttempts = 3
+
+// ErrTxCommitAmbiguous marks a transaction whose COMMIT failed.
+//
+// WHY IT EXISTS
+// -------------
+// A failed COMMIT does not say whether the write landed. SQLite can
+// report SQLITE_BUSY from a commit when the commit's checkpoint cannot
+// complete (another connection is still reading the write-ahead log),
+// and the transaction's rows may or may not be durable.
+//
+// That ambiguity is the reason WithTx does not retry a commit failure
+// itself: re-running the callback could double-write. But the callers
+// that wrap WithTx in their own retry loop need to know that too —
+// otherwise an outer loop re-drives a callback whose write already
+// landed. For the capability Store that means a second
+// capability_invocations row (the id is a fresh UUID, so it is not a
+// primary-key collision) and a double-incremented probation counter,
+// silently.
+//
+// Marking the error here — at the layer that knows the commit failed —
+// lets those callers recognise the case with errors.Is and refuse to
+// re-drive it.
+//
+// Exported so sibling packages (internal/capability) can recognise it the
+// same way DatabaseManager does internally.
+var ErrTxCommitAmbiguous = errors.New("transaction commit failed; the write may or may not have landed")
 
 // IsBusySnapshotError reports whether err is SQLite's SQLITE_BUSY_SNAPSHOT
 // (primary code SQLITE_BUSY, extended code 517) — the failure a DEFERRED
@@ -5692,52 +5728,97 @@ func (dm *DatabaseManager) AddLesson(content string, lessonType LessonType, tags
 
 	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 
-	// Check for existing lesson with same content
-	var existingID string
-	err := dm.db.QueryRow(`SELECT id FROM lessons WHERE content_hash = ?`, contentHash).Scan(&existingID)
-	if err == nil {
-		// Reinforce existing lesson
-		_, err = dm.db.Exec(`UPDATE lessons SET reinforcement_count = reinforcement_count + 1 WHERE id = ?`, existingID)
-		if err != nil {
-			return nil, err
-		}
-		return dm.GetLesson(existingID)
-	}
-	if err != sql.ErrNoRows {
-		return nil, err
-	}
-
-	// Create new lesson
-	id := GenerateID()
 	tagsJSON, _ := MarshalJSON(tags)
 	now := time.Now().Format(time.RFC3339)
 
-	res, err := dm.db.Exec(`
-		INSERT INTO lessons (id, type, content, tags, reinforcement_count, source_session_id, created, content_hash, retrieval_priority, importance, confidence)
-		VALUES (?, ?, ?, ?, 1, ?, ?, ?, 0.5, 0.5, ?)
-	`, id, lessonType, content, tagsJSON, sourceSessionIDOrNil(sourceSessionID), now, contentHash, InitialConfidence("lesson"))
+	// The dedup probe and the write that follows it are ONE logical
+	// operation: read-modify-write. Issue #164 found them running as
+	// three bare pool statements — a SELECT, an UPDATE and an INSERT —
+	// with no transaction and no retry budget. Under ordinary lock
+	// contention the write was simply lost: `database is locked`, and
+	// the lesson was never recorded.
+	//
+	// They are now one transaction. The consequences:
+	//
+	//   - the probe and the write see the same snapshot, so a lesson
+	//     cannot be created between the probe and the INSERT;
+	//   - the reinforce branch's `reinforcement_count + 1` is applied
+	//     exactly once, even if the transaction is restarted: an
+	//     abandoned attempt's increment rolls back with it;
+	//   - the write rides the statement-level retry budget, so ordinary
+	//     contention no longer loses the artifact.
+	//
+	// The callback READS before it WRITES, which makes it replayable by
+	// the stale-snapshot restart (see WithTx). It is replay-safe: the id
+	// is generated INSIDE the callback, so a restart mints a fresh id and
+	// the abandoned attempt's row rolls back with its transaction.
+	var lessonID string
+	var created bool
+	err := dm.WithTx(func(node DBNode) error {
+		// Check for existing lesson with same content.
+		var existingID string
+		qErr := node.QueryRowTracked(`SELECT id FROM lessons WHERE content_hash = ?`, contentHash).Scan(&existingID)
+		if qErr == nil {
+			// Reinforce existing lesson.
+			if _, uErr := node.ExecTracked(
+				`UPDATE lessons SET reinforcement_count = reinforcement_count + 1 WHERE id = ?`,
+				5, existingID,
+			); uErr != nil {
+				return uErr
+			}
+			lessonID = existingID
+			return nil
+		}
+		if qErr != sql.ErrNoRows {
+			return qErr
+		}
+
+		// Create new lesson.
+		newID := GenerateID()
+		res, iErr := node.ExecTracked(`
+			INSERT INTO lessons (id, type, content, tags, reinforcement_count, source_session_id, created, content_hash, retrieval_priority, importance, confidence)
+			VALUES (?, ?, ?, ?, 1, ?, ?, ?, 0.5, 0.5, ?)
+		`, 5, newID, lessonType, content, tagsJSON, sourceSessionIDOrNil(sourceSessionID), now, contentHash, InitialConfidence("lesson"))
+		if iErr != nil {
+			return iErr
+		}
+
+		// 2026-08-13 hardening: never let a silent-promotion slip past
+		// the write. RowsAffected on a view routed through an INSTEAD OF
+		// trigger can legitimately report 0 even when the underlying
+		// base-table INSERT succeeded — sqlite counts the row through the
+		// trigger's own INSERT, not the outer statement. Trust the
+		// read-back instead: if GetLesson returns the row we just wrote,
+		// the commit landed; if it returns ErrNoRows, the trigger
+		// swallowed it (or some other constraint silently dropped the
+		// row) and the caller needs to know. We still surface
+		// RowsAffected errors as a loud failure for non-view INSERTs that
+		// happen to go through this path in the future.
+		if _, aErr := res.RowsAffected(); aErr != nil {
+			// Only surface this for direct table INSERTs; in the trigger
+			// path it's noisy-but-correct to ignore the count.
+			if !dm.lessonsIsView() {
+				return fmt.Errorf("lesson insert rows-affected: %w", aErr)
+			}
+		}
+		lessonID = newID
+		created = true
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	// 2026-08-13 hardening: never let a silent-promotion slip past the
-	// write. RowsAffected on a view routed through an INSTEAD OF trigger
-	// can legitimately report 0 even when the underlying base-table
-	// INSERT succeeded — sqlite counts the row through the trigger's
-	// own INSERT, not the outer statement. Trust the read-back instead:
-	// if GetLesson returns the row we just wrote, the commit landed;
-	// if it returns ErrNoRows, the trigger swallowed it (or some other
-	// constraint silently dropped the row) and the caller needs to
-	// know. We still surface RowsAffected errors as a loud failure
-	// for non-view INSERTs that happen to go through this path in
-	// the future.
-	if _, err := res.RowsAffected(); err != nil {
-		// Only surface this for direct table INSERTs; in the trigger path
-		// it's noisy-but-correct to ignore the count.
-		if !dm.lessonsIsView() {
-			return nil, fmt.Errorf("lesson insert rows-affected: %w", err)
-		}
+	if !created {
+		// The reinforce branch returns the stored lesson, exactly as it
+		// did before the transaction was introduced.
+		return dm.GetLesson(lessonID)
 	}
+
+	// The read-back assertion happens AFTER the commit, on purpose: a
+	// read inside the transaction would see the transaction's own
+	// uncommitted row and would pass even if the commit never landed.
+	id := lessonID
 	if _, err := dm.GetLesson(id); err != nil {
 		return nil, fmt.Errorf("lesson insert read-back failed (commit did not persist): %w", err)
 	}
@@ -8535,13 +8616,17 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 			directiveIDsJSON,
 		)
 	} else {
-		_, execErr = dm.db.Exec(`
+		// retries=5, not none (issue #164). The standalone branch used a
+		// bare `dm.db.Exec`, which has no retry at all: an ordinary
+		// lock contention lost the work event outright. ExecTracked is
+		// the same statement with the statement-level busy backoff.
+		_, execErr = dm.ExecTracked(`
 			INSERT INTO work_events (
 				id, work_id, event_index, event_type, created_at,
 				invocation_id, parent_invocation_id,
 				note, title, content, directive_ids
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`,
+		`, 5,
 			id, workID, eventIndex, string(event.EventType), now,
 			nullString(invocationID), nullString(parentInvocationID),
 			nullString(note), nullString(title), nullString(content),
@@ -8559,21 +8644,21 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 	if newTitle != nil || newContent != nil {
 		if newTitle != nil && newContent != nil {
 			if node != nil {
-				_, err = node.ExecTracked(`UPDATE works SET title = ?, content = ?, updated_at = ? WHERE id = ?`, 0, *newTitle, *newContent, now, workID)
+				_, err = node.ExecTracked(`UPDATE works SET title = ?, content = ?, updated_at = ? WHERE id = ?`, 5, *newTitle, *newContent, now, workID)
 			} else {
-				_, err = dm.db.Exec(`UPDATE works SET title = ?, content = ?, updated_at = ? WHERE id = ?`, *newTitle, *newContent, now, workID)
+				_, err = dm.ExecTracked(`UPDATE works SET title = ?, content = ?, updated_at = ? WHERE id = ?`, 5, *newTitle, *newContent, now, workID)
 			}
 		} else if newTitle != nil {
 			if node != nil {
-				_, err = node.ExecTracked(`UPDATE works SET title = ?, updated_at = ? WHERE id = ?`, 0, *newTitle, now, workID)
+				_, err = node.ExecTracked(`UPDATE works SET title = ?, updated_at = ? WHERE id = ?`, 5, *newTitle, now, workID)
 			} else {
-				_, err = dm.db.Exec(`UPDATE works SET title = ?, updated_at = ? WHERE id = ?`, *newTitle, now, workID)
+				_, err = dm.ExecTracked(`UPDATE works SET title = ?, updated_at = ? WHERE id = ?`, 5, *newTitle, now, workID)
 			}
 		} else {
 			if node != nil {
-				_, err = node.ExecTracked(`UPDATE works SET content = ?, updated_at = ? WHERE id = ?`, 0, *newContent, now, workID)
+				_, err = node.ExecTracked(`UPDATE works SET content = ?, updated_at = ? WHERE id = ?`, 5, *newContent, now, workID)
 			} else {
-				_, err = dm.db.Exec(`UPDATE works SET content = ?, updated_at = ? WHERE id = ?`, *newContent, now, workID)
+				_, err = dm.ExecTracked(`UPDATE works SET content = ?, updated_at = ? WHERE id = ?`, 5, *newContent, now, workID)
 			}
 		}
 	} else if newArchivedAt != nil {
@@ -8581,54 +8666,54 @@ func (dm *DatabaseManager) AppendWorkEvent(workID string, event WorkEvent, ep *E
 		// deliberately not in the SET list, so terminal state is preserved
 		// exactly and unarchive can restore it unchanged.
 		if node != nil {
-			_, err = node.ExecTracked(`UPDATE works SET archived_at = ?, updated_at = ? WHERE id = ?`, 0, *newArchivedAt, now, workID)
+			_, err = node.ExecTracked(`UPDATE works SET archived_at = ?, updated_at = ? WHERE id = ?`, 5, *newArchivedAt, now, workID)
 		} else {
-			_, err = dm.db.Exec(`UPDATE works SET archived_at = ?, updated_at = ? WHERE id = ?`, *newArchivedAt, now, workID)
+			_, err = dm.ExecTracked(`UPDATE works SET archived_at = ?, updated_at = ? WHERE id = ?`, 5, *newArchivedAt, now, workID)
 		}
 	} else if clearArchived {
 		if node != nil {
-			_, err = node.ExecTracked(`UPDATE works SET archived_at = NULL, updated_at = ? WHERE id = ?`, 0, now, workID)
+			_, err = node.ExecTracked(`UPDATE works SET archived_at = NULL, updated_at = ? WHERE id = ?`, 5, now, workID)
 		} else {
-			_, err = dm.db.Exec(`UPDATE works SET archived_at = NULL, updated_at = ? WHERE id = ?`, now, workID)
+			_, err = dm.ExecTracked(`UPDATE works SET archived_at = NULL, updated_at = ? WHERE id = ?`, 5, now, workID)
 		}
 	} else if newStatus != "" {
 		if newCompletedAt != nil {
 			if node != nil {
 				_, err = node.ExecTracked(`
 					UPDATE works SET status = ?, updated_at = ?, completed_at = ?
-					WHERE id = ?`, 0, newStatus, now, *newCompletedAt, workID)
+					WHERE id = ?`, 5, newStatus, now, *newCompletedAt, workID)
 			} else {
-				_, err = dm.db.Exec(`
+				_, err = dm.ExecTracked(`
 					UPDATE works SET status = ?, updated_at = ?, completed_at = ?
-					WHERE id = ?`, newStatus, now, *newCompletedAt, workID)
+					WHERE id = ?`, 5, newStatus, now, *newCompletedAt, workID)
 			}
 		} else if event.EventType == WorkEventTypeReopened {
 			if node != nil {
 				_, err = node.ExecTracked(`
 					UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
-					WHERE id = ?`, 0, newStatus, now, workID)
+					WHERE id = ?`, 5, newStatus, now, workID)
 			} else {
-				_, err = dm.db.Exec(`
+				_, err = dm.ExecTracked(`
 					UPDATE works SET status = ?, updated_at = ?, completed_at = NULL
-					WHERE id = ?`, newStatus, now, workID)
+					WHERE id = ?`, 5, newStatus, now, workID)
 			}
 		} else {
 			if node != nil {
 				_, err = node.ExecTracked(`
 					UPDATE works SET status = ?, updated_at = ?
-					WHERE id = ?`, 0, newStatus, now, workID)
+					WHERE id = ?`, 5, newStatus, now, workID)
 			} else {
-				_, err = dm.db.Exec(`
+				_, err = dm.ExecTracked(`
 					UPDATE works SET status = ?, updated_at = ?
-					WHERE id = ?`, newStatus, now, workID)
+					WHERE id = ?`, 5, newStatus, now, workID)
 			}
 		}
 	} else {
 		// Note or other event that doesn't affect works projection — just bump updated_at.
 		if node != nil {
-			_, err = node.ExecTracked(`UPDATE works SET updated_at = ? WHERE id = ?`, 0, now, workID)
+			_, err = node.ExecTracked(`UPDATE works SET updated_at = ? WHERE id = ?`, 5, now, workID)
 		} else {
-			_, err = dm.db.Exec(`UPDATE works SET updated_at = ? WHERE id = ?`, now, workID)
+			_, err = dm.ExecTracked(`UPDATE works SET updated_at = ? WHERE id = ?`, 5, now, workID)
 		}
 	}
 	if err != nil {

@@ -83,13 +83,18 @@ func addEvidenceInTx(node DBNode, in EvidenceInput, expiresAt *int64) (EvidenceO
 		in.CreatedAt = time.Now()
 	}
 
+	// retries=5, not 0 (issue #164): with retries=0 the statement-level
+	// retry was disabled, so an ordinary lock contention lost the evidence
+	// row outright — "insert evidence: database is locked". The evidence
+	// is a durable observation; losing it silently weakens every
+	// confidence computation that depends on it.
 	res, err := node.ExecTracked(`
 		INSERT INTO evidence (id, artifact_id, artifact_type, type, source_group,
 		                     strength, independence_factor, created_by, created_at, expires_at, notes,
 		                     reference_url)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO NOTHING
-	`, 0, identity.RowID, in.ArtifactID, in.ArtifactType, in.Type, in.SourceGroup,
+	`, 5, identity.RowID, in.ArtifactID, in.ArtifactType, in.Type, in.SourceGroup,
 		in.Strength, in.IndependenceFactor, in.CreatedBy, in.CreatedAt.Unix(), expiresAt, in.Notes,
 		// Absent persists as SQL NULL rather than ''. ValidateReferenceURL
 		// guarantees a non-empty string always means "a reference was
