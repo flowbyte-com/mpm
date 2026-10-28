@@ -10,7 +10,7 @@
 > **Status:** implementation in a focused branch, **not merged, not deployed**.
 > Awaiting Session A's review and operator approval.
 > **PR:** [#153](https://github.com/flowbyte-com/mpm/pull/153) — open, mergeable,
-> not merged.
+> not merged. **CI: green** — all three jobs pass (run `40689998014`).
 >
 > **Scope discipline:** this work touches the canonical managed-block source,
 > the canonical behavioural protocol, the OpenCode delivery artefacts and the
@@ -449,6 +449,23 @@ ok  github.com/flowbyte-com/mpm/internal/critic     2.892s
 
 `make test-race` is the canonical pre-merge gate, and it passes on this
 branch with the **race detector** on.
+
+### 6.4 CI on the PR
+
+The branch's CI is **green**. Run `40689998014` on PR #153, at head
+`a61df72`:
+
+```
+Build + core tests                                        pass   18m17s
+Full test suite                                           pass   12m34s
+Release gate (cross-agent continuity + public-CLI suite)  pass   23m33s
+```
+
+All three jobs passed on the first attempt at this head. (Two earlier runs
+were **cancelled**, not failed: the workflow's `concurrency:
+cancel-in-progress` cancels a run when the branch is pushed to. Nothing in
+the cancellation was a test failure, and the cancelled runs' `Full test
+suite` job had already completed **success**.)
 
 ---
 
@@ -959,7 +976,8 @@ conditions:
 
 1. **This branch is reviewed and approved first.** It is not merged here. The
    focused PR is [#153](https://github.com/flowbyte-com/mpm/pull/153) — open,
-   mergeable, **not merged**.
+   mergeable, **not merged**, and **CI green** (all three jobs pass, run
+   `40689998014`).
 2. **D1, D2, D7, D9, D10 and D11 are fixed in this branch — confirm they
    shipped.** They were plugin *descriptions* that teach an agent to write
    a field the substrate silently drops, a `type` value that does not
