@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -173,6 +174,23 @@ func main() {
 // ORDERING, for whoever repairs the count next: the trust boundary is
 // closed FIRST. Repairing the count against a substrate that still
 // accepted a trusted-lesson write would ARM the write, not fix it.
+//
+// ONE MORE DEFECT THIS FIXES. The hunt looked for the telemetry store
+// at "<projectRoot>/telemetry.db" — the path docs/SPEC.md §6.6 names.
+// The COLLECTOR has never written there: it writes to
+// "<workspace>/src/db/telemetry.db" (the same "src/db/" layout as
+// mpm.db). So the hunt was reading a path nothing writes to.
+//
+// It did not fail loudly, because `telemetry.Open` applies the DDL and
+// therefore CREATES an empty store at the wrong path — the hunt then
+// found nothing and reported zero observations, every cycle, forever.
+// A diagnostic that can never fire is worse than no diagnostic: it
+// looks like a clean bill of health.
+//
+// The path now comes from the shared resolver (internal/telemetry),
+// the store is opened READ-ONLY so the hunt cannot materialise a
+// store, and a missing store is "no observations" rather than a
+// failure.
 func runTelemetryHunt(
 	ctx context.Context,
 	log *slog.Logger,
@@ -180,9 +198,19 @@ func runTelemetryHunt(
 	db *sql.DB,
 	cycle int,
 ) ([]telemetry.Finding, error) {
-	telemetryDB := filepath.Join(projectRoot, "telemetry.db")
-	store, err := telemetry.Open(telemetryDB)
+	telemetryDB, err := telemetry.ResolveStorePath(projectRoot)
 	if err != nil {
+		return nil, fmt.Errorf("resolve telemetry store path: %w", err)
+	}
+	store, err := telemetry.OpenReadOnly(telemetryDB)
+	if err != nil {
+		if errors.Is(err, telemetry.ErrStoreNotFound) {
+			// No ledger yet: no observations. Not a failure — a fresh
+			// workspace has not collected anything.
+			log.Info("no telemetry store; the telemetry hunt found no observations",
+				"path", telemetryDB)
+			return nil, nil
+		}
 		return nil, fmt.Errorf("open telemetry store: %w", err)
 	}
 	defer store.Close()
