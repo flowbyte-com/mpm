@@ -21,7 +21,7 @@
 >
 > | Hand-over item | State now |
 > |---|---|
-> | **§1** — the work was on a detached HEAD, uncommitted, on no branch | **DONE.** Branch `feat/compact-managed-block` created from `f818bfe`; the work is committed as `a50685f`. `git checkout -b` from the detached HEAD preserved the tree exactly — nothing was lost. |
+> | **§1** — the work was on a detached HEAD, uncommitted, on no branch | **DONE.** Branch `feat/compact-managed-block` created from `f818bfe`; the work is committed and pushed, and the focused PR is **[#153](https://github.com/flowbyte-com/mpm/pull/153)** — open, mergeable, **not merged**. `git checkout -b` from the detached HEAD preserved the tree exactly — nothing was lost. |
 > | **§3.1** — §10.3 of the companion report is empty | **DONE.** §10.3 is written, with the per-cell table, the timeouts as timeouts, the contaminated cells as contaminated, and the negative control as the strongest uncontaminated result. |
 > | **§3.2 / §3.2.1** — the comparison cannot support the claim it was built for; the detector has a blind spot | **DONE.** The detector now scans the agent's **full transcript** (its tool calls and their outputs) as well as the host's output, with the arm's own legitimate reading stripped first. And the arm is now a whole **world** — block + protocol + canonical source — served per arm from a disposable `~/.mpm`, so the old arm can no longer read the 4.0.0 commitments it was being compared against. |
 > | **§3.3** — the resume path overwrites the JSON | **DONE.** The writer now **merges**, keyed on `(variant, scenario)`. A resumed run replaces the cells it re-runs and keeps the rest. |

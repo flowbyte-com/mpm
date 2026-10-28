@@ -9,6 +9,8 @@
 > OpenCode v2.1.4.
 > **Status:** implementation in a focused branch, **not merged, not deployed**.
 > Awaiting Session A's review and operator approval.
+> **PR:** [#153](https://github.com/flowbyte-com/mpm/pull/153) — open, mergeable,
+> not merged.
 >
 > **Scope discipline:** this work touches the canonical managed-block source,
 > the canonical behavioural protocol, the OpenCode delivery artefacts and the
@@ -955,7 +957,9 @@ are worth their own fix.
 **Include the compact managed block in the 30 October RC**, with these
 conditions:
 
-1. **This branch is reviewed and approved first.** It is not merged here.
+1. **This branch is reviewed and approved first.** It is not merged here. The
+   focused PR is [#153](https://github.com/flowbyte-com/mpm/pull/153) — open,
+   mergeable, **not merged**.
 2. **D1, D2, D7, D9, D10 and D11 are fixed in this branch — confirm they
    shipped.** They were plugin *descriptions* that teach an agent to write
    a field the substrate silently drops, a `type` value that does not
@@ -994,7 +998,8 @@ block, not a reason to believe it changes behaviour.
 
 **The two open prior-session deliverables are not affected** and remain
 awaiting Session A: PR #148 (`fe767f2`, session-lifecycle observations) and
-PR #149 (`89afaed`, the session-end investigation that F2 rests on).
+PR #149 (`89afaed`, the session-end investigation that F2 rests on). This
+branch's own PR is **#153**.
 
 ---
 
