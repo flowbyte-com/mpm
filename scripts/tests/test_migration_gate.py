@@ -155,6 +155,10 @@ class GateFixture(unittest.TestCase):
             self.project / "scripts" / "install_runtime_assets.py",
         )
         shutil.copy(
+            REPO_ROOT / "scripts" / "runtime_payloads.json",
+            self.project / "scripts" / "runtime_payloads.json",
+        )
+        shutil.copy(
             REPO_ROOT / "scripts" / "build-provenance.sh",
             self.project / "scripts" / "build-provenance.sh",
         )
@@ -598,7 +602,8 @@ class Proof6_RuntimeSwitchCannotReplaceUserData(GateFixture):
 
         r = self.drive("phase_bundle")
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("OpenCode", r.stderr)
+        self.assertIn("runtime payload", r.stderr)
+        self.assertIn("Nothing was activated", r.stderr)
         self.assertFalse((self.data / "current").is_symlink(),
                          "a bundle without a validated payload was activated")
 

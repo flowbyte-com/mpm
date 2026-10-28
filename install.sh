@@ -851,46 +851,27 @@ phase_bundle() {
         die "the candidate bundle was discarded. Nothing was changed." 3
     }
 
-    # ---- the OpenCode payload ----
+    # ---- the host runtime payloads ----
     #
-    # The payload is staged through its explicit manifest allowlist and
-    # validated before it is exposed, exactly as the adapter's own
-    # installer stages it.
+    # A host's runtime package (the compiled plugin it loads) is
+    # RELEASE-SCOPED: it must roll back with the release, so it belongs
+    # in the bundle.
     #
-    # FAIL CLOSED. The OpenCode registration points into the bundle; a
-    # bundle without the payload breaks every agent session on the host,
-    # silently, because the plugin registry stays empty. So if this build
-    # SHIPS the adapter, the payload must be staged and validated or the
-    # promotion is refused.
+    # The staging is DATA-DRIVEN and host-agnostic: the release's
+    # payload manifest names the adapters, and the staging code
+    # iterates over whatever it declares. The root installer names no
+    # adapter — that is a boundary the repository enforces, because the
+    # substrate installer must not know about agent hosts.
     #
-    # The one exception is a build that genuinely has no OpenCode adapter
-    # at all — then there is nothing to stage, and the bundle says so
-    # rather than pretending.
-    local stage_lib="$PROJECT_ROOT/agent_installation/scripts/stage_runtime_package.sh"
-    local adapter_src="$PROJECT_ROOT/agent_installation/mpm-opencode"
-    if [ -d "$adapter_src" ]; then
-        if [ ! -f "$stage_lib" ]; then
-            rm -rf "$candidate"
-            die "the OpenCode staging library is missing at $stage_lib
-This build ships the OpenCode adapter, so the payload cannot be staged or
-validated. A bundle without a validated payload would register a plugin
-that loads nothing. Nothing was activated." 3
-        fi
-        # shellcheck source=/dev/null
-        . "$stage_lib"
-        local staged rc_stage=0
-        staged="$(MPM_RUNTIME_PACKAGE_VALIDATOR=mpm_validate_runtime_package_opencode \
-            stage_runtime_package "$adapter_src" \
-            "$candidate" "mpm-opencode" $RB_OPENCODE_MANIFEST)" || rc_stage=$?
-        if [ "$rc_stage" -ne 0 ]; then
-            rm -rf "$candidate"
-            die "the OpenCode runtime payload could not be staged into the candidate bundle
+    # FAIL CLOSED. The registration points into the bundle; a bundle
+    # without a validated payload registers a plugin that loads
+    # NOTHING — silently, because the plugin registry stays empty. So a
+    # payload that cannot be staged refuses the promotion.
+    if ! rb_stage_payloads "$PROJECT_ROOT" "$candidate"; then
+        rm -rf "$candidate"
+        die "a host runtime payload could not be staged into the candidate bundle.
 A bundle without a validated payload would register a plugin that loads
 nothing. Nothing was activated." 3
-        fi
-        log "  OpenCode payload staged: $staged"
-    else
-        warn "  this build ships no OpenCode adapter — the candidate bundle carries no payload"
     fi
     _bundle_fail_at payload || {
         rm -rf "$candidate"
@@ -1716,7 +1697,7 @@ mode_dry_run() {
         log "  # the bundle layout replaces the in-place binary promotion above:"
         log "  #   1. assemble a candidate bundle under $DATA_ROOT/staging/<rev>.<pid>/:"
         log "  #      bin/ (the five binaries), agent_installation/ (the release-scoped"
-        log "  #      host assets and the validated OpenCode payload), RELEASE.json"
+        log "  #      host assets and the validated host runtime payload), RELEASE.json"
         log "  #      (the build identity) and schema/lifecycle_events.sql"
         log "  #   2. promote the five binaries into the candidate as ONE TRANSACTION"
         log "  #      (scripts/lib/binary_transaction.sh) — a failure leaves no mixture"

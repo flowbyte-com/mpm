@@ -87,7 +87,15 @@ RB_BINARIES="mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry"
 #
 # dist/index.js is deliberately absent: it is the legacy V1 emit, and
 # staging it would re-couple the package to the V1 surface shape.
-RB_OPENCODE_MANIFEST="server.js dist/index.v2.js dist/wake-context.js dist/event-envelope.js dist/event-mapper.js dist/event-subscriber.js dist/workspace.js dist/resolve-mpm-binary.js package.json"
+#
+# The manifest itself lives in scripts/runtime_payloads.json — DATA, not
+# code — so that the staging code below names no adapter and the root
+# installer stays host-agnostic.
+RB_PAYLOAD_MANIFEST_RELPATH="scripts/runtime_payloads.json"
+
+# The name of the file the payloads are declared in, relative to the
+# repository root.
+RB_PAYLOAD_MANIFEST="runtime_payloads.json"
 
 # Paths a bundle must NEVER carry. These are the state half of the
 # installation; a bundle that carried them would let a version switch
@@ -158,6 +166,107 @@ PY
             return 1
             ;;
     esac
+}
+
+# ---------- the runtime package payloads ----------
+
+# rb_payload_records <manifest>
+#
+# Emit one record per declared payload, in a form the shell can read:
+#
+#     <adapter>|<plugin id>|<validator>|<file> <file> ...
+#
+# The records come from a DATA file, so this function names no adapter:
+# adding a host adapter is a data change, not a code change, and the
+# root installer stays host-agnostic.
+rb_payload_records() {
+    python3 - "$1" <<'PY' 2>&1
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        doc = json.load(fh)
+except Exception as exc:
+    sys.exit(f"the runtime payload manifest could not be read: {exc}")
+if not isinstance(doc, dict) or not isinstance(doc.get("payloads"), list):
+    sys.exit("the runtime payload manifest has no 'payloads' list")
+for entry in doc["payloads"]:
+    for key in ("adapter", "plugin_id", "validator", "files"):
+        if key not in entry:
+            sys.exit(f"a runtime payload manifest entry is missing {key!r}: {entry!r}")
+    if not entry["files"]:
+        sys.exit(f"the runtime payload for {entry['adapter']!r} lists no files")
+    print("|".join([
+        str(entry["adapter"]),
+        str(entry["plugin_id"]),
+        str(entry["validator"]),
+        " ".join(str(f) for f in entry["files"]),
+    ]))
+PY
+}
+
+# rb_stage_payloads <source_root> <bundle_dir>
+#
+# Stage every runtime package payload this release ships into the
+# bundle, through the host-agnostic staging library and its explicit
+# file allowlist.
+#
+# FAIL CLOSED. A host's registration points into the bundle. A bundle
+# without a validated payload registers a plugin that loads NOTHING —
+# silently, because the plugin registry stays empty. So a payload that
+# cannot be staged, or a payload the release declares but does not
+# ship, REFUSES the promotion.
+#
+# A release that ships NO payload at all is fine: the manifest declares
+# none, and there is nothing to stage.
+rb_stage_payloads() {
+    local source_root="$1" bundle_dir="$2"
+    local manifest="$source_root/$RB_PAYLOAD_MANIFEST_RELPATH"
+    local stage_lib="$source_root/agent_installation/scripts/stage_runtime_package.sh"
+
+    if [ ! -f "$manifest" ]; then
+        rb_err "the runtime payload manifest is missing at $manifest"
+        return 1
+    fi
+    if [ ! -f "$stage_lib" ]; then
+        rb_err "the runtime package staging library is missing at $stage_lib"
+        return 1
+    fi
+
+    local records
+    records="$(rb_payload_records "$manifest")" || {
+        rb_err "$records"
+        return 1
+    }
+    if [ -z "$records" ]; then
+        rb_log "  this release ships no runtime package payload"
+        return 0
+    fi
+
+    # shellcheck source=/dev/null
+    . "$stage_lib"
+
+    local adapter plugin_id validator files src staged count=0
+    local -a file_list
+    while IFS='|' read -r adapter plugin_id validator files; do
+        [ -n "$adapter" ] || continue
+        count=$((count + 1))
+        src="$source_root/agent_installation/$adapter"
+        if [ ! -d "$src" ]; then
+            rb_err "the release declares a runtime payload for '$adapter' but $src does not exist"
+            return 1
+        fi
+        IFS=' ' read -r -a file_list <<< "$files"
+        if ! staged="$(MPM_RUNTIME_PACKAGE_VALIDATOR="$validator" \
+                stage_runtime_package "$src" "$bundle_dir" "$plugin_id" \
+                "${file_list[@]}")"; then
+            rb_err "the runtime payload for '$adapter' could not be staged and validated"
+            return 1
+        fi
+        rb_log "  runtime payload staged: $staged"
+    done <<< "$records"
+
+    rb_log "  staged $count runtime package payload(s)"
+    return 0
 }
 
 # ---------- the build identity ----------

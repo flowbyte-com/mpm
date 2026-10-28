@@ -376,15 +376,22 @@ resolver that fails exactly when it is first needed, on a fresh install.
 
 ### 5.6 Fail closed on a missing plugin payload ✅ landed
 
-If the staged OpenCode payload is absent, the promotion must **refuse**,
-not warn. The OpenCode registration points into the bundle; a bundle
-without the payload breaks every agent session on the host — silently,
-because the plugin registry stays empty.
+If the staged host runtime payload is absent, the promotion must
+**refuse**, not warn. The host's registration points into the bundle; a
+bundle without the payload breaks every agent session on the host —
+silently, because the plugin registry stays empty.
 
-A build that **ships** the adapter therefore cannot be promoted without a
-validated payload: a missing staging library, a missing manifest entry or
-a failing validator all refuse. A build that genuinely has **no** OpenCode
-adapter says so rather than pretending.
+So a payload that cannot be staged, or a payload the release **declares
+but does not ship**, refuses the promotion. A release that declares no
+payload at all is fine: there is nothing to stage.
+
+The staging is **data-driven and host-agnostic**. The release's payload
+manifest (`scripts/runtime_payloads.json`) names the adapters, their
+plugin ids, their validators and their explicit file allowlists; the
+staging code iterates over whatever the manifest declares and names no
+adapter itself. The root installer therefore stays host-agnostic —
+adding an adapter is a data change, not a code change — and the
+repository's own boundary test keeps it that way.
 
 ### 5.6a Refuse a schema collision before a new binary reaches the database ✅ landed
 

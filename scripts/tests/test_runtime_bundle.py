@@ -349,7 +349,19 @@ class TestOpenCodeManifestSync(unittest.TestCase):
     staging validator exists to prevent.
     """
 
+    MANIFEST = REPO_ROOT / "scripts" / "runtime_payloads.json"
+
+    def test_the_manifest_exists_and_declares_the_adapter(self):
+        import json
+
+        doc = json.loads(self.MANIFEST.read_text())
+        self.assertIn("payloads", doc)
+        adapters = [p["adapter"] for p in doc["payloads"]]
+        self.assertIn("mpm-opencode", adapters)
+
     def test_the_two_manifests_agree(self):
+        import json
+
         adapter = REPO_ROOT / "agent_installation" / "mpm-opencode" / "install.sh"
         text = adapter.read_text()
         m = re.search(
@@ -359,19 +371,29 @@ class TestOpenCodeManifestSync(unittest.TestCase):
         adapter_manifest = tuple(
             line.strip() for line in m.group(1).split() if line.strip()
         )
+        doc = json.loads(self.MANIFEST.read_text())
+        entry = next(p for p in doc["payloads"] if p["adapter"] == "mpm-opencode")
         self.assertEqual(
+            set(entry["files"]),
             set(adapter_manifest),
-            set(OPENCODE_MANIFEST),
-            "the bundle's OpenCode payload manifest has drifted from the "
+            "the bundle's runtime payload manifest has drifted from the "
             "adapter's; a bundle missing a file the adapter installs would "
             "register a plugin that loads nothing",
         )
 
-    def test_the_library_carries_the_manifest(self):
-        lib = LIB.read_text()
-        m = re.search(r'RB_OPENCODE_MANIFEST="([^"]*)"', lib)
-        self.assertIsNotNone(m)
-        self.assertEqual(tuple(m.group(1).split()), OPENCODE_MANIFEST)
+    def test_the_library_manifest_matches_the_data_file(self):
+        import json
+
+        doc = json.loads(self.MANIFEST.read_text())
+        entry = next(p for p in doc["payloads"] if p["adapter"] == "mpm-opencode")
+        self.assertEqual(tuple(entry["files"]), OPENCODE_MANIFEST)
+
+    def test_the_root_installer_names_no_adapter(self):
+        # The substrate installer is host-agnostic: it must not know
+        # about agent hosts. The payload knowledge is DATA.
+        install = (REPO_ROOT / "install.sh").read_text()
+        self.assertNotIn("mpm-opencode", install)
+        self.assertNotIn("runtime_payloads", install)
 
 
 if __name__ == "__main__":
