@@ -17,8 +17,9 @@ NRestarts 0, binary mtime 24 October.
 | Item | Value |
 |---|---|
 | **Integrated main SHA** | **`4111c46dbe30de44e9ed8f7a715fff9e8c3e469e`** (`4111c46`, "fix(opencode): the lifecycle observer's delivery accounting must close (P4)") |
-| Branch | `release/rc-4111c46`, tracking `origin/main` |
 | Base of this sprint | `a8320fb` |
+| Where this report sits | **on top of it, as a documentation-only commit** (`a1ba8f0`). It carries **no code**, so the accepted code SHA is and remains `4111c46`. `git diff 4111c46 a1ba8f0` touches only `docs/`. |
+| Branch used for the acceptance | `release/rc-4111c46`, tracking `origin/main` |
 | Main CI run on that SHA | `40599592681` |
 | Release-gate evidence | see §3 |
 | Substrate binaries built from that SHA | `mpm`, `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry` — all five carry a build identity. The isolated install was verified against the exact **tree** `4111c46` contains: `git diff d04d390 4111c46` is **empty**, and the binary's embedded identity is `Commit=d04d3900…` |
