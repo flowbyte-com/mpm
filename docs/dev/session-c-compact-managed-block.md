@@ -10,7 +10,8 @@
 > **Status:** implementation in a focused branch, **not merged, not deployed**.
 > Awaiting Session A's review and operator approval.
 > **PR:** [#153](https://github.com/flowbyte-com/mpm/pull/153) — open, mergeable,
-> not merged. **CI: green** — all three jobs pass (run `40689998014`).
+> not merged. **CI: green** — all three jobs pass. (The workflow cancels a
+> run in flight on every push; read the *job* conclusions, not the run's.)
 >
 > **Scope discipline:** this work touches the canonical managed-block source,
 > the canonical behavioural protocol, the OpenCode delivery artefacts and the
@@ -452,20 +453,30 @@ branch with the **race detector** on.
 
 ### 6.4 CI on the PR
 
-The branch's CI is **green**. Run `40689998014` on PR #153, at head
-`a61df72`:
+The branch's CI is **green**, and has been green at every head that was
+allowed to finish. Two complete runs on PR #153:
 
 ```
-Build + core tests                                        pass   18m17s
-Full test suite                                           pass   12m34s
-Release gate (cross-agent continuity + public-CLI suite)  pass   23m33s
+run 40689998014   head a61df72
+  Build + core tests                                        pass   18m17s
+  Full test suite                                           pass   12m34s
+  Release gate (cross-agent continuity + public-CLI suite)  pass   23m33s
+
+run 40693583431   head ca6a017
+  Build + core tests                                        pass
+  Full test suite                                           pass
+  Release gate (cross-agent continuity + public-CLI suite)  pass
 ```
 
-All three jobs passed on the first attempt at this head. (Two earlier runs
-were **cancelled**, not failed: the workflow's `concurrency:
-cancel-in-progress` cancels a run when the branch is pushed to. Nothing in
-the cancellation was a test failure, and the cancelled runs' `Full test
-suite` job had already completed **success**.)
+**Reading a red run on this PR.** The workflow declares
+`concurrency: {cancel-in-progress: true}` per ref, so **every push cancels
+the run in flight**. Three runs on this branch ended **cancelled** rather
+than failed, and in each the `Full test suite` job had already completed
+**success** before the cancellation. A cancelled run is not a failing run:
+read the job conclusions, not the run conclusion.
+
+The authoritative check is therefore **the most recent run on the branch**,
+not any particular run ID — because any push supersedes the one before it.
 
 ---
 
@@ -976,8 +987,9 @@ conditions:
 
 1. **This branch is reviewed and approved first.** It is not merged here. The
    focused PR is [#153](https://github.com/flowbyte-com/mpm/pull/153) — open,
-   mergeable, **not merged**, and **CI green** (all three jobs pass, run
-   `40689998014`).
+   mergeable, **not merged**, and **CI green** (all three jobs pass; read
+   the *job* conclusions, since the workflow cancels a run in flight on
+   every push).
 2. **D1, D2, D7, D9, D10 and D11 are fixed in this branch — confirm they
    shipped.** They were plugin *descriptions* that teach an agent to write
    a field the substrate silently drops, a `type` value that does not
