@@ -540,6 +540,9 @@ the migration; the migration itself is an operation, not a pull request.
 
 ### 9.1 Before the migration
 
+- [ ] The safety prerequisites are **landed**: F3 (a malformed
+      configuration is a validation error), D4 (one resolver for the
+      database path), D5 (a Git-free build carries a real commit).
 - [ ] The rehearsal has been re-run against the **exact** target
       revision, in-repo: `make rehearsal REHEARSAL_REV=<rev>` — **135 assertions, 0 failures**.
 - [ ] The rollback has been rehearsed against the **real** revision, with
@@ -560,6 +563,11 @@ the migration; the migration itself is an operation, not a pull request.
       stays, and when the `.git` removal is authorised.
 - [ ] The `lifecycle_events` collision check has run against the live
       schema.
+- [ ] The database selectors **agree**: `MPM_WORKSPACE` and
+      `MPM_DB_PATH` name the same workspace, or `MPM_DB_PATH` is unset.
+      A divergence is now a hard error at startup — which is correct,
+      and it means a divergent value must be resolved *before* the
+      migration, not during it.
 - [ ] The boundaries were respected: the live installation, the systemd
       service, the OpenCode configuration, the real database and the Git
       metadata are untouched by the rehearsal.
@@ -589,7 +597,35 @@ the migration; the migration itself is an operation, not a pull request.
       session round-trips.
 - [ ] `ls ~/.mpm/releases/` — the previous release is still there.
 
-### 9.4 The explicit authorisation
+### 9.4 The rollback
+
+The runtime rollback is **always safe**; the data rollback is **not part
+of it**.
+
+- [ ] Re-point the active pointer at the previous revision:
+
+  ```bash
+  ln -sfn "releases/<previous-rev>" ~/.mpm/current.new
+  mv -T ~/.mpm/current.new ~/.mpm/current
+  ```
+
+- [ ] `~/.mpm/bin/mpm --version` reports `<previous-rev>`.
+- [ ] `systemctl --user restart mpm-scheduler` and
+      `systemctl --user is-active mpm-scheduler` → `active`.
+- [ ] The state fingerprint is compared with the pre-migration one.
+- [ ] **Only if the data is suspect** — a failed or damaging migration —
+      restore the verified backup from the recovery point:
+
+  ```bash
+  mpm ops restore-db --from ~/.mpm/backups/upgrade-<UTC>/mpm.db.backup
+  ```
+
+  This step is **not** part of a routine rollback. It is required
+  exactly when the migration was **not** backward-compatible with the
+  binary being rolled back to (§4.5), and it is a separate, deliberate
+  data operation.
+
+### 9.5 The explicit authorisation
 
 - [ ] **The operator has authorised the live migration.** It is a
       separate gate from every PR above, and no PR in this sequence
