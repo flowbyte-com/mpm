@@ -272,3 +272,82 @@ That is the approved change, and it is the only one.
   outside this issue.
 - **No `mpm-telemetry query` behaviour change beyond #151's** — it is
   not this PR's subject.
+
+---
+
+## 8. A note on the CI trigger for a stacked pull request
+
+The repository's workflow filtered its `pull_request` trigger to
+`branches: [main]`. A pull request whose base is a **feature** branch
+therefore produces **no checks at all** — the event never matches, so
+the workflow never runs.
+
+That is invisible until you stack, and this delivery stacks: PR #152's
+base is `feat/session-b-139-telemetry-observe`, and it had **zero**
+checks. A pull request with no checks cannot be reviewed on its
+evidence, and splitting one change into independently reviewable pieces
+is pointless if the pieces arrive without the evidence.
+
+The fix is a **single commit, `e0183cb`**, on the branch in the
+**middle** of the stack (#150). The placement is not arbitrary:
+
+- The trigger is evaluated against the pull request's **merge ref**,
+  not against `main` — confirmed empirically: #150's base is
+  `fix/telemetry-canonical-store-path`, and after the commit landed
+  there the workflow ran for it, which a `branches: [main]` filter
+  alone would never have permitted.
+- So the commit has to be present in **both** #150's merge ref and
+  #152's merge ref. #150's branch is an ancestor of #152's, so one
+  copy there reaches both.
+- Putting it in the **bottom** pull request (#151) would *not* have
+  worked: #150's branch diverged from #151's at `6219345`, so #151's
+  head is not an ancestor of #150's, and #152's merge ref never
+  carried it. That was the first attempt, and it produced no run —
+  which is how the mechanism was identified.
+
+Two consequences worth stating plainly:
+
+- Once #150 merges, `main` carries the widened trigger and every
+  future stacked pull request is covered without a further change.
+- It is the one commit in the stack that is **independent of the
+  telemetry work**. A reviewer who objects to it can drop it without
+  touching anything else.
+
+
+---
+
+## 9. Correction — the trigger landed by a different, broader commit
+
+*Appended by Session A during the release-freeze integration, 2026-10-28.
+The section above is left unchanged as the dated record of what was known
+when it was written.*
+
+§8 says the fix is "a single commit, `e0183cb`, on the branch in the middle
+of the stack". That was true of this stack at the time. It is not what
+`main` carries today.
+
+While the release candidate was being assembled, the **documentation stack**
+(#160 → #161 → #162) independently widened the same trigger, and it widened
+it **without a `branches:` filter at all** — every pull request runs the
+checks, whatever its base. #160 landed first, so `main` carries the
+unfiltered form.
+
+`e0183cb`'s narrower form (`branches: [main, 'fix/**', 'feat/**']`) was
+**not** used, for a reason this section's own diagnosis points at: it
+excludes the `docs/**` bases this repository actually stacks in. The
+documentation stack bases #161 on `docs/correctness` and #162 on
+`docs/library`, so a `fix/**`+`feat/**` filter would have left both of them
+reporting **no checks** — re-opening the very gap §8 identifies.
+
+The commit `e0183cb` was therefore dropped in the integration, and its
+rationale is preserved in the comment above `pull_request:` in
+`.github/workflows/build-test.yml`. The runner-minutes concern it raised is
+real, and is already bounded by the workflow's `concurrency` group, which
+cancels a superseded run per ref.
+
+The mechanism §8 describes is unchanged and still true: the trigger is
+evaluated against the pull request's **merge ref**, so a commit must be
+present in the merge ref of every pull request in the stack for all of them
+to be covered. With the unfiltered form, that constraint disappears — which
+is why the documentation stack's own pull requests now report checks where
+they previously reported none.
