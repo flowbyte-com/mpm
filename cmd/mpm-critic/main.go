@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -32,6 +31,7 @@ import (
 
 	"github.com/flowbyte-com/mpm-core/config"
 
+	"github.com/flowbyte-com/mpm/internal/attribution"
 	"github.com/flowbyte-com/mpm/internal/buildinfo"
 	"github.com/flowbyte-com/mpm/internal/critic"
 	"github.com/flowbyte-com/mpm/internal/telemetry"
@@ -193,14 +193,11 @@ func main() {
 // ONE MORE DEFECT THIS FIXES. The hunt looked for the telemetry store
 // at "<projectRoot>/telemetry.db" — the path docs/SPEC.md §6.6 names.
 // The COLLECTOR has never written there: it writes to
-// "<workspace>/src/db/telemetry.db" (the same "src/db/" layout as
-// mpm.db). So the hunt was reading a path nothing writes to.
-//
-// It did not fail loudly, because `telemetry.Open` applies the DDL and
+// "<projectRoot>/src/db/telemetry.db" (the same "src/db/" layout as
+// mpm.db). So the hunt was reading a path nothing writes to. It did
+// not fail loudly, because `telemetry.Open` applies the DDL and
 // therefore CREATES an empty store at the wrong path — the hunt then
 // found nothing and reported zero observations, every cycle, forever.
-// A diagnostic that can never fire is worse than no diagnostic: it
-// looks like a clean bill of health.
 //
 // The path now comes from the shared resolver (internal/telemetry),
 // the store is opened READ-ONLY so the hunt cannot materialise a
@@ -234,7 +231,7 @@ func runTelemetryHunt(
 	// critic already holds. This is the same attribution rule the
 	// missed-opportunity hunt applies, so the two cannot drift.
 	countFn := func(ctx context.Context, sessionID string) (int, error) {
-		return critic.SessionArtifactCount(ctx, db, sessionID)
+		return attribution.SessionArtifactCount(ctx, db, sessionID)
 	}
 
 	sevenDaysAgo := telemetry.HuntConfig{

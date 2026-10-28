@@ -136,14 +136,40 @@ COST=$("$BIN" cost --pricing "$REPO_ROOT/internal/telemetry/testdata/one-model.j
 echo "$COST"
 [[ "$COST" == *'"total"'* ]] || { echo "cost missing total" >&2; exit 1; }
 
-# F2 fix: use --threshold 999999999 to avoid cross-DB shell-out.
+# The observe hunt now resolves the count IN-PROCESS, read-only: it
+# opens the telemetry ledger and the substrate itself. There is no
+# cross-DB shell-out to avoid any more, so the smoke test exercises the
+# REAL path.
+#
 # inv_smoke_1 + inv_smoke_2 have session_id=sess_smoke with combined
-# input 200 + output 100 = 300 tokens. With --threshold 999999999,
-# 300 < 999999999 → Hunt produces zero findings → dry-run exits 0 cleanly
-# without shelling out to mpm for countFn.
+# input 200 + output 100 = 300 tokens. The frames' started_at is
+# 1756000000, so --since must be below that (--since 0 means "now - 7d",
+# which would filter every frame out) and --threshold must be at or
+# below 300 for the session to qualify.
+#
+# There is no substrate in this workspace, so every session counts as
+# zero-artifact: the observation is REPORTED and nothing is written.
 echo "==> smoke_telemetry: observe (dry-run)"
-OBS=$("$BIN" observe --dry-run --since 0 --threshold 999999999)
+OBS=$("$BIN" observe --dry-run --since 1700000000 --threshold 300)
 echo "$OBS"
+[[ "$OBS" == *'"session_id": "sess_smoke"'* ]] || {
+  echo "observe did not report the qualifying session" >&2; exit 1; }
+[[ "$OBS" == *'"status": "unverified-observation"'* ]] || {
+  echo "observe did not declare the observation's standing" >&2; exit 1; }
+# The observation is a diagnostic, not a lesson write.
+[[ "$OBS" != *'"action"'* ]] || {
+  echo "the observation is shaped like a lesson write" >&2; exit 1; }
+
+# The default mode must refuse to write a trusted lesson, and must say
+# so. It is the behaviour the trust boundary requires until the spec
+# amendment is approved.
+echo "==> smoke_telemetry: observe (default mode refuses)"
+if "$BIN" observe --since 1700000000 --threshold 300 >/dev/null 2>"$TMP/observe-default.err"; then
+  echo "the default observe mode succeeded; it must refuse to write" >&2
+  exit 1
+fi
+grep -q "nothing was written" "$TMP/observe-default.err" || {
+  echo "the refusal did not say that nothing was written" >&2; exit 1; }
 
 # Belt-and-suspenders: verify row count via sqlite3 if available.
 if command -v sqlite3 >/dev/null 2>&1; then
