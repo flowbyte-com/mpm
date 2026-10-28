@@ -59,7 +59,13 @@ export type MappedEvent =
   | {
       kind: "envelope";
       /** what was observed, for counters and tests */
-      observation: "started" | "session.outcome" | "tool" | "compaction.started" | "compaction.completed";
+      observation:
+        | "started"
+        | "session.outcome"
+        | "session.lifecycle"
+        | "tool"
+        | "compaction.started"
+        | "compaction.completed";
       envelope: EventEnvelope;
       sessionID: string | null;
     }
@@ -213,6 +219,63 @@ export function mapHostEvent(ev: HostEvent, ctx: MappingContext): MappedEvent {
         meta: { host_result: hostResult },
       });
       return { kind: "envelope", observation: "session.outcome", envelope, sessionID };
+    }
+
+    case "session.archived":
+    case "session.unarchived":
+    case "session.deleted": {
+      // The host's SESSION-LIFECYCLE events (measured on opencode
+      // v2.1.4 — see measure/session_end_scenarios.py).
+      //
+      // WHY THEY NEED AN EXPLICIT CASE.
+      //
+      // They carry a session id, so without one they fall into the
+      // activity fallback below — and the fallback emits AT MOST ONE
+      // `session.observed` per session. By the time the host archives or
+      // deletes a session, that one observation has long since been
+      // emitted, so the event was SWALLOWED: the adapter saw it and
+      // recorded nothing at all. Measured on the isolated host: 27 host
+      // events seen, and ZERO of them recorded the archive.
+      //
+      // WHY `session.observed` IS THE RIGHT TYPE.
+      //
+      // §4's table: "`session.observed` | any host event that carries a
+      // session id | the adapter saw an event for this session". That is
+      // precisely what an archive is, and it is the contract's own
+      // NEUTRAL base type — not a neighbour-mapping (§3.4 forbids
+      // mapping an event onto a type that ASSERTS something else).
+      //
+      // WHAT IT DOES NOT ASSERT.
+      //
+      // It does NOT assert that the session ENDED. An archive is
+      // reversible (`session.unarchived` exists, and the host's own
+      // `Session.Info.time.archived` is a timestamp, not a tombstone); a
+      // delete is a user action, not an agent conclusion. The envelope
+      // says "the adapter saw this event for this session" and carries
+      // the host's own event type in `meta.host_event_type` — nothing
+      // more. No new meta key is introduced: the allowlist (§3.8) is
+      // closed and `host_event_type` is already on it.
+      //
+      // WITHOUT a session id there is no session to have observed, and
+      // `session.observed`'s whole meaning depends on it — so the event
+      // is COUNTED, exactly as the fallback branch below would count it.
+      // A session id is never fabricated.
+      if (!sessionID) {
+        return {
+          kind: "ignored",
+          hostEventType: type,
+          reason: "no session id and no vocabulary type",
+        };
+      }
+      const envelope = buildEnvelope(ctx, ev, {
+        eventType: "session.observed",
+        hostType: type,
+        sessionID,
+        operation: "absent",
+        resultStatus: "unknown",
+        meta: {},
+      });
+      return { kind: "envelope", observation: "session.lifecycle", envelope, sessionID };
     }
 
     case "session.tool.success":
