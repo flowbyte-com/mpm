@@ -242,10 +242,3 @@ src/db/watchdog.jsonl.pre-*
 # `git add -A`. The pattern is retained for clarity about what lives here.
 /migrations/
 embeddings-*.db.bak
-
-# The runtime-migration rehearsal's work products: the Git-free source
-# export, the built bundle, the simulated home, the traces and the logs.
-# They are build output and evidence, not source — the HARNESS is in
-# scripts/rehearsal/, and the evidence it produces is reproducible with
-# `make rehearsal`.
-scripts/rehearsal/.work/

@@ -40,10 +40,40 @@ REH_ROOT="${REH_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)}"
 # guard (20_negative.sh) fingerprints the HARNESS — the scripts and
 # the helpers — rather than the output it produces.
 #
-# It lives inside the repository so the evidence is inspectable and
-# survives a reboot, and it is gitignored because it is build
-# output, not source.
-REH_WORK="${REH_WORK:-$REH_ROOT/.work}"
+# IT IS OUTSIDE THE REPOSITORY, AND THAT IS NOT A MATTER OF TASTE.
+#
+# The work products include a COPY of the source tree, and this
+# repository has repo-wide scanners that walk every file under the
+# root: the DB-safety guard (which fails on a test file that calls a
+# production-path constructor) and the deferral guard (which fails on
+# a non-test file that names RequeueDeferred). Both of them found the
+# COPY, and both failed, because the copy contains the very files they
+# are looking for. A copy of the repository inside the repository is
+# incompatible with scanning the repository.
+#
+# The default is the conventional cache location, which is also where
+# the harness lived before it was vendored — and which survived a
+# reboot, unlike /tmp.
+REH_WORK="${REH_WORK:-${XDG_CACHE_HOME:-$HOME/.cache}/mpm-rehearsal}"
+
+# The repository root, for the in-repository check below.
+REH_REPO_ROOT="$(cd "$REH_DIR/../.." && pwd -P)"
+
+# Refuse a work directory inside the repository.
+#
+# The check is fail-closed: the harness stops with a clear message
+# rather than writing a copy of the source tree into a directory whose
+# repo-wide scanners will then fail on it.
+case "$REH_WORK" in
+  "$REH_REPO_ROOT"/*)
+    echo "lib.sh: REFUSING to use a work directory inside the repository:" >&2
+    echo "  $REH_WORK" >&2
+    echo "  The work products include a COPY of the source tree, and the" >&2
+    echo "  repository's repo-wide scanners walk every file under the root." >&2
+    echo "  Use a directory outside it (the default is \$XDG_CACHE_HOME/mpm-rehearsal)." >&2
+    exit 2
+    ;;
+esac
 
 # REH_REV is the revision the harness builds and rehearses against.
 # It is a variable so the rehearsal can be re-run against a
@@ -69,14 +99,19 @@ fi
 # identity the binaries carry must SAY so.
 EXPECT_DIRTY="${EXPECT_DIRTY:-false}"
 
-# safe_rm <path>... — remove only inside the rehearsal root.
+# safe_rm <path>... — remove only inside the rehearsal root or the work
+# directory.
+#
+# BOTH are in scope: the harness's own files live in REH_ROOT, and the
+# work products live in REH_WORK. The guard is what makes the rest of
+# the harness safe to run unattended.
 safe_rm() {
   local p
   for p in "$@"; do
     [ -e "$p" ] || [ -L "$p" ] || continue
     case "$p" in
-      "$REH_ROOT"/*) : ;;
-      *) echo "safe_rm: REFUSING to remove $p (outside $REH_ROOT)" >&2; return 1 ;;
+      "$REH_ROOT"/*|"$REH_WORK"/*) : ;;
+      *) echo "safe_rm: REFUSING to remove $p (outside REH_ROOT and REH_WORK)" >&2; return 1 ;;
     esac
     # A path that resolves to the rehearsal root itself is refused too.
     if [ "$(readlink -f "$p" 2>/dev/null || echo "$p")" = "$REH_ROOT" ]; then

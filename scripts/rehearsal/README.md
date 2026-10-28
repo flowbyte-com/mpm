@@ -125,8 +125,16 @@ scripts/rehearsal/
 ```
 
 The work products (the source export, the bundle, the simulated home,
-the traces, the logs) land in `.work/`, which is **gitignored**. The
+the traces, the logs) land in `$XDG_CACHE_HOME/mpm-rehearsal` (or
+`~/.cache/mpm-rehearsal`), which is **outside the repository**. The
 harness is source; its output is not.
+
+**The work directory must be outside the repository**, and the harness
+refuses an in-repository one. The work products include a **copy of the
+source tree**, and this repository has repo-wide scanners that walk
+every file under the root — the DB-safety guard and the deferral guard
+both found the copy and both failed on it. A copy of the repository
+inside the repository is incompatible with scanning the repository.
 
 ---
 
@@ -135,7 +143,7 @@ harness is source; its output is not.
 | Variable | Meaning |
 |---|---|
 | `REH_REV` | The revision to rehearse against. Defaults to the value `setup.sh` resolved. |
-| `REH_WORK` | Where the work products go. Defaults to `scripts/rehearsal/.work`. |
+| `REH_WORK` | Where the work products go. Defaults to `$XDG_CACHE_HOME/mpm-rehearsal`. **Must be outside the repository.** |
 | `REH_ARCHIVE_COMMIT` | Rehearse a **committed** revision instead of the working tree. |
 | `REH_SKIP_SETUP` | Reuse an existing bundle instead of rebuilding it. |
 | `MPM_SOURCE_REPO` | The checkout to export from. Defaults to this repository. |

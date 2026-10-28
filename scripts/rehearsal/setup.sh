@@ -76,12 +76,14 @@ else
   # A copy rather than an archive: the point is to rehearse the code as
   # it stands, including the changes that are not committed yet.
   #
-  # The work directory is EXCLUDED: it is inside the tree being copied,
-  # and tar would otherwise read the very files it is writing.
-  workrel="./${REH_WORK#"$REPO"/}"
-  tar --exclude=.git --exclude=.build --exclude=node_modules \
-      --exclude="$workrel" \
-      -C "$REPO" -cf - . | tar -C "$SRC" -xf -
+  # The work directory is excluded when it happens to be inside the tree
+  # (lib.sh refuses that case, so this is belt and braces): tar would
+  # otherwise read the very files it is writing.
+  tar_args=(--exclude=.git --exclude=.build --exclude=node_modules)
+  case "$REH_WORK" in
+    "$REPO"/*) tar_args+=(--exclude="./${REH_WORK#"$REPO"/}") ;;
+  esac
+  tar "${tar_args[@]}" -C "$REPO" -cf - . | tar -C "$SRC" -xf -
   [ -e "$SRC/.git" ] && { echo "the copy carries .git — that is wrong" >&2; exit 1; }
   echo "   copied the working tree with no .git (HEAD=$COMMIT)"
 fi

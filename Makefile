@@ -843,18 +843,22 @@ test-scripts: build
 # so the shim records the request instead of acting on it.
 #
 # The work products (the source export, the bundle, the simulated home,
-# the traces) land in scripts/rehearsal/.work/, which is gitignored.
+# the traces) land OUTSIDE the repository, in the conventional cache
+# location. That is not a matter of taste: they include a COPY of the
+# source tree, and this repository has repo-wide scanners that walk
+# every file under the root. The harness refuses an in-repository work
+# directory (scripts/rehearsal/lib.sh).
 #
 # REHEARSAL_REV selects the revision. The default is the revision the
 # harness was last validated against; the operator checklist requires
 # re-running it against the EXACT target revision before the migration.
 REHEARSAL_REV ?= 4111c46
-REHEARSAL_WORK ?= scripts/rehearsal/.work
+REHEARSAL_WORK ?= $(HOME)/.cache/mpm-rehearsal
 
 .PHONY: rehearsal rehearsal-setup
 rehearsal: build
 	@echo "[rehearsal] revision $(REHEARSAL_REV)"
-	@REH_REV=$(REHEARSAL_REV) REH_WORK=$(abspath $(REHEARSAL_WORK)) \
+	@REH_REV=$(REHEARSAL_REV) REH_WORK=$(REHEARSAL_WORK) \
 	  bash scripts/rehearsal/run.sh
 
 # The build half on its own: a Git-free source export and a bundle.
@@ -862,7 +866,7 @@ rehearsal: build
 .PHONY: rehearsal-setup
 rehearsal-setup: build
 	@full=$$(git rev-parse $(REHEARSAL_REV)); \
-	REH_REV=$(REHEARSAL_REV) REH_WORK=$(abspath $(REHEARSAL_WORK)) \
+	REH_REV=$(REHEARSAL_REV) REH_WORK=$(REHEARSAL_WORK) \
 	  bash scripts/rehearsal/setup.sh "$(REHEARSAL_REV)" "$$full"
 
 # Validation gate for the Python test suites under bench/tests/ (the
