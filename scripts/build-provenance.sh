@@ -39,6 +39,35 @@
 #            reproducible-builds convention — so two builds of the same
 #            source produce the same identity.
 #
+# THE OVERRIDES: MPM_BUILD_COMMIT AND MPM_BUILD_DIRTY
+#
+# A Git-free source tree cannot report a commit, because it has no
+# history to report — so an exported tree's binaries say "unknown",
+# which is honest but not useful. A release archive is not an unknown
+# commit: the builder knows exactly which revision it exported, and
+# that fact has to survive into the shipped binary.
+#
+# So the builder states it:
+#
+#   MPM_BUILD_COMMIT=<full sha>   the revision this source was exported
+#                                  from. Stamped verbatim.
+#   MPM_BUILD_DIRTY=true|false     the source state of that export.
+#                                  "unknown" is also accepted.
+#
+# The overrides are ASSERTIONS by the producer, never guesses. They are
+# validated before anything is stamped:
+#
+#   - MPM_BUILD_COMMIT must be a full lowercase hex SHA (40 characters,
+#     or 64 for a SHA-256 repository). Anything else is refused, because
+#     a typo must not become a commit that no operator can verify.
+#   - MPM_BUILD_DIRTY must be exactly "true", "false" or "unknown".
+#   - When the tree IS an MPM Git checkout, the override must AGREE
+#     with the checkout. An override that contradicts the tree is a
+#     builder mistake, and it is refused rather than believed.
+#
+# With neither variable set, the behaviour is exactly what it always
+# was.
+#
 # WHEN THE VALUES ARE NOT ESTABLISHED, THEY ARE "unknown"
 #
 # An exported tarball, a vendored copy, a source tree nested inside an
@@ -103,6 +132,58 @@ git_root() {
     printf '%s\n' "$REPO_ROOT"
 }
 
+# validate_overrides checks the producer's provenance assertions BEFORE
+# anything is stamped, and refuses the build when they are wrong.
+#
+# It runs once, at dispatch, so a failure aborts the script with a
+# non-zero status instead of producing a binary that claims an identity
+# it does not have.
+validate_overrides() {
+    local c="${MPM_BUILD_COMMIT:-}"
+    if [ -n "$c" ]; then
+        if ! [[ "$c" =~ ^[0-9a-f]{40}$ ]] && ! [[ "$c" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "build-provenance.sh: MPM_BUILD_COMMIT must be a full lowercase hex commit SHA (40 characters, or 64 for a SHA-256 repository); got '$c'" >&2
+            exit 2
+        fi
+        # When the tree IS an MPM checkout, the assertion must agree
+        # with the checkout. A contradiction means the builder
+        # exported one revision and stamped another.
+        local root head
+        root="$(git_root)"
+        if [ -n "$root" ]; then
+            head="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
+            if [ -n "$head" ] && [ "$head" != "$c" ]; then
+                echo "build-provenance.sh: MPM_BUILD_COMMIT ('$c') contradicts HEAD ('$head') in $root; refusing to stamp a revision the tree does not have" >&2
+                exit 2
+            fi
+        fi
+    fi
+
+    local d="${MPM_BUILD_DIRTY:-}"
+    if [ -n "$d" ]; then
+        case "$d" in
+            true|false|unknown) : ;;
+            *)
+                echo "build-provenance.sh: MPM_BUILD_DIRTY must be exactly 'true', 'false' or 'unknown'; got '$d'" >&2
+                exit 2
+                ;;
+        esac
+        # Same rule for the source state: an override that contradicts
+        # the tree is refused, not believed.
+        if [ "$d" != "unknown" ]; then
+            local root actual
+            root="$(git_root)"
+            if [ -n "$root" ]; then
+                actual="$(dirty_from_checkout)"
+                if [ "$actual" != "$d" ]; then
+                    echo "build-provenance.sh: MPM_BUILD_DIRTY ('$d') contradicts the checkout's actual state ('$actual') in $root; refusing to stamp a source state the tree does not have" >&2
+                    exit 2
+                fi
+            fi
+        fi
+    fi
+}
+
 # version reads the authoritative product version from the VERSION file.
 version() {
     if [ -f VERSION ]; then
@@ -113,7 +194,14 @@ version() {
 }
 
 # commit reports the full source commit SHA, or "unknown".
+#
+# The producer's MPM_BUILD_COMMIT assertion wins over the checkout: it
+# exists precisely for the case where there is no checkout to ask.
 commit() {
+    if [ -n "${MPM_BUILD_COMMIT:-}" ]; then
+        printf '%s\n' "$MPM_BUILD_COMMIT"
+        return
+    fi
     local root
     root="$(git_root)"
     if [ -n "$root" ]; then
@@ -126,6 +214,10 @@ commit() {
 # short_commit reports the abbreviated source commit SHA (8 characters,
 # matching `git rev-parse --short=8`), or "unknown".
 short_commit() {
+    if [ -n "${MPM_BUILD_COMMIT:-}" ]; then
+        printf '%s\n' "$(shorten_commit "$MPM_BUILD_COMMIT")"
+        return
+    fi
     local root
     root="$(git_root)"
     if [ -n "$root" ]; then
@@ -133,6 +225,12 @@ short_commit() {
     else
         echo "unknown"
     fi
+}
+
+# shorten_commit abbreviates a full commit SHA to the canonical eight
+# characters.
+shorten_commit() {
+    printf '%s' "${1:0:8}"
 }
 
 # dirty reports whether the built source differed from the commit.
@@ -150,7 +248,25 @@ short_commit() {
 # The answer is "unknown" when there is no MPM checkout to compare
 # against: an exported source tree has no baseline, and reporting it as
 # clean would claim a certainty nobody has.
+#
+# The producer's MPM_BUILD_DIRTY assertion wins over the checkout, for
+# the same reason MPM_BUILD_COMMIT does: an exported tree has no
+# baseline to compare against, and the builder knows what it exported.
 dirty() {
+    if [ -n "${MPM_BUILD_DIRTY:-}" ]; then
+        printf '%s\n' "$MPM_BUILD_DIRTY"
+        return
+    fi
+    dirty_from_checkout
+}
+
+# dirty_from_checkout is dirty() WITHOUT the producer's assertion: the
+# state of the checkout itself, or "unknown" when there is no checkout.
+#
+# It is separate because validate_overrides() needs the checkout's own
+# answer in order to CHECK the assertion against it — asking the
+# assertion about itself would be circular.
+dirty_from_checkout() {
     local root
     root="$(git_root)"
     if [ -z "$root" ]; then
@@ -276,6 +392,11 @@ all_fields() {
     printf 'build_epoch=%s\n' "$(build_epoch)"
     printf 'ldflags=%s\n' "$(ldflags)"
 }
+
+# The producer's assertions are validated BEFORE anything is stamped.
+# A malformed or contradictory assertion aborts the script here, so no
+# binary is ever produced that claims an identity it does not have.
+validate_overrides
 
 case "${1:-all}" in
     version) version ;;
