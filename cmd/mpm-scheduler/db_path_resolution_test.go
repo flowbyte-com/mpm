@@ -53,6 +53,38 @@ func buildScheduler(t *testing.T) string {
 	return bin
 }
 
+// runBounded runs the scheduler and waits for it to exit — but not
+// forever.
+//
+// The scheduler is a DAEMON. Without the gate it would start its loop
+// and run until something killed it, so a test that waits for the
+// process to exit would hang until the whole package's test timeout:
+// ten minutes, and a panic that reads like an infrastructure problem
+// rather than a missing refusal.
+//
+// So the wait is BOUNDED. A process that is still alive when the bound
+// expires is killed, and the caller is told it did not exit — which is
+// what "the gate did not fire" actually looks like from the outside.
+func runBounded(t *testing.T, cmd *exec.Cmd, limit time.Duration) (string, error, bool) {
+	t.Helper()
+	var buf syncBuffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start mpm-scheduler: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return buf.String(), err, true
+	case <-time.After(limit):
+		_ = cmd.Process.Kill()
+		<-done
+		return buf.String(), nil, false
+	}
+}
+
 // TestD4_ExplicitNonCanonicalDBPathIsRefused pins the headline case:
 // `--db <path>` without the canonical shape must fail, loudly, and must
 // not create anything.
@@ -66,8 +98,11 @@ func TestD4_ExplicitNonCanonicalDBPathIsRefused(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"MPM_WORKSPACE="+ws,
 		"MPM_DB_PATH=")
-	out, err := cmd.CombinedOutput()
+	out, err, exited := runBounded(t, cmd, 60*time.Second)
 
+	if !exited {
+		t.Fatalf("the scheduler did not refuse: it kept running, so the gate is missing\n%s", out)
+	}
 	if err == nil {
 		t.Fatalf("a --db without the canonical shape must fail; it exited 0:\n%s", out)
 	}
@@ -107,8 +142,11 @@ func TestD4_DivergentEnvOverrideIsRefused(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"MPM_WORKSPACE="+ws,
 		"MPM_DB_PATH="+bad)
-	out, err := cmd.CombinedOutput()
+	out, err, exited := runBounded(t, cmd, 60*time.Second)
 
+	if !exited {
+		t.Fatalf("the scheduler did not refuse: it kept running, so the gate is missing\n%s", out)
+	}
 	if err == nil {
 		t.Fatalf("a divergent MPM_DB_PATH must fail; it exited 0:\n%s", out)
 	}
