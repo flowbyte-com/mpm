@@ -102,6 +102,19 @@ const (
 	watchdogReasonError     = "sql_error"
 	watchdogReasonBusyRetry = "busy_retry"
 	watchdogReasonSlow      = "slow"
+	// watchdogReasonBusySnapshot is the reason recorded when a statement
+	// inside a DEFERRED transaction hit SQLITE_BUSY_SNAPSHOT — the
+	// transaction's read snapshot went stale because another connection
+	// committed after the snapshot was taken (issue #158).
+	//
+	// It is its own reason, and it is WARN rather than ERROR, because it
+	// is a contention event rather than a fault: the enclosing WithTx
+	// abandons the stale transaction and re-runs it against a fresh one.
+	// Before the fix, these were recorded as `sql_error` at ERROR level
+	// with a duration equal to the whole retry backoff — which is exactly
+	// what made them look like substrate faults in the live-runtime audit
+	// (two `database is locked` errors in six days, both 3.1 s long).
+	watchdogReasonBusySnapshot = "busy_snapshot"
 )
 
 // watchdogEvent is one v2 watchdog record.
@@ -222,6 +235,39 @@ func (dm *DatabaseManager) logSQLOutcome(op, query string, elapsed time.Duration
 	dm.logWatchdogEvent(ev)
 }
 
+// logBusySnapshotOutcome records a statement that hit SQLITE_BUSY_SNAPSHOT.
+//
+// It is a separate call site from logSQLOutcome because the classification
+// differs: logSQLOutcome's precedence rule puts any error at ERROR level, but
+// a snapshot conflict is a contention event that the enclosing transaction
+// recovers from by restarting (see WithTx). Recording it as `sql_error` at
+// ERROR level would report a recovered contention event as a substrate fault —
+// which is exactly how the two live-runtime `database is locked` records were
+// misread as defects in the 2026-10-28 audit.
+//
+// The record keeps the same shape as every other watchdog line: the statement
+// text is normalised to a shape, never logged as text.
+func (dm *DatabaseManager) logBusySnapshotOutcome(op, query string, elapsed time.Duration, err error) {
+	ms := elapsed.Milliseconds()
+	ev := watchdogEvent{
+		V:          watchdogFormatVersion,
+		Ts:         time.Now().UTC().Format(time.RFC3339Nano),
+		Level:      watchdogLevelWarn,
+		Op:         op,
+		Reason:     watchdogReasonBusySnapshot,
+		DurationMs: &ms,
+		SQLShape:   normalizeSQLShape(query),
+		Detail:     sqlOutcomeDetail(op, watchdogReasonBusySnapshot),
+	}
+	if err != nil {
+		// The error string is driver text and may, in principle, echo a
+		// value. Redaction is defence in depth behind the shape
+		// normaliser, not a substitute for it.
+		ev.Error = redactSensitiveText(truncatePreview(err.Error(), watchdogDetailMax))
+	}
+	dm.logWatchdogEvent(ev)
+}
+
 // sqlOutcomeDetail is the fixed human sentence for a retained SQL record.
 // Fixed strings rather than interpolated ones: the shape is already in
 // sql_shape, and a template that grew a slot for the statement text would
@@ -232,6 +278,8 @@ func sqlOutcomeDetail(op, reason string) string {
 		return op + " failed"
 	case watchdogReasonBusyRetry:
 		return op + " completed after SQLITE_BUSY retries"
+	case watchdogReasonBusySnapshot:
+		return op + " hit a stale snapshot; the transaction is restarted"
 	case watchdogReasonSlow:
 		return "slow " + op
 	default:
