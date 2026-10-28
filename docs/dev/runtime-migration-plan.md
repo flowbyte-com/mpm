@@ -316,18 +316,51 @@ the groups a run owns. A group-scoped reconcile must not release
 ownership of assets outside its groups, or provisioning one group into a
 root would silently un-manage the other group's files in it.
 
-### 5.3 `install.sh` — a bundle phase and a pointer swap ⬜ pending
+### 5.3 `install.sh` — a bundle phase and a pointer swap ✅ landed
 
-The installer gains a bundle phase that stages `releases/<rev>/`,
-validates it, and swaps `current`. The existing installation path stays
-as the fallback until the first conversion has been rehearsed against the
-real revision.
+The installer gains `--bundle`, which installs into the versioned
+runtime-bundle layout. The default install path is **unchanged**: the live
+installation's cutover is a separately authorised operation and must not be
+a side effect of `git pull && ./install.sh`.
 
-### 5.4 `scripts/lib/binary_transaction.sh` — retarget the promotion ⬜ pending
+`phase_bundle` replaces `phase_binaries` in the bundle layout, and the
+order is the whole point:
 
-The transactional promotion library currently promotes into the live
-`bin/`. It must be retargeted at `$BUNDLE/bin`, so a failed promotion
-cannot leave the live installation half-updated.
+| # | Step | What it does | If it fails |
+|---|---|---|---|
+| 1 | **Assemble** | the candidate under `<data root>/staging/<rev>.<pid>/` | nothing was touched |
+| 2 | **Promote** | the five binaries into the candidate's `bin/` as one transaction | nothing was touched |
+| 3 | **Validate** | the candidate | nothing was touched |
+| 4 | **Install** | the candidate at `releases/<rev>` with a `rename(2)` | the previous runtime is still active |
+| 5 | **Activate** | swap `current` with a `rename(2)` | the previous pointer is restored |
+| 6 | **Convert** | `bin/` and `agent_installation/` become symlinks into the active bundle | the previous pointer is restored and the conversion is undone |
+
+Steps 1–3 are reversible with **no effect at all** on the running
+installation. Steps 4–6 change what is running, so a failure after the
+pointer was swapped **rolls back**: the previous pointer is restored and
+the layout conversion is undone.
+
+Two properties the phase holds:
+
+- **The revision label comes from the binary being installed**, not from
+  Git. That is what makes it trustworthy in a Git-free source tree, and
+  it cannot disagree with the binary's own reported identity.
+- **A release is immutable.** An existing release is validated and
+  activated as it stands rather than replaced — which is also the
+  recovery path after a promotion that failed between installing the
+  release and activating it.
+
+A new phase, `phase_schema_preflight`, runs on **every** install and
+refuses a schema collision (§5.6) before the build and before any
+promotion.
+
+### 5.4 `scripts/lib/binary_transaction.sh` — retarget the promotion ✅ landed
+
+The promotion library was already parameterised by destination directory,
+so it needed no change: the installer now targets the **candidate
+bundle's** `bin/` instead of the live `bin/`. A failed promotion cannot
+leave the live installation half-updated, and the candidate — which is
+disposable — is discarded whole.
 
 ### 5.5 `agent_installation/scripts/stage_runtime_package.sh` — name the roots ✅ landed
 
@@ -341,17 +374,44 @@ The discriminator is the parent's **name** (`releases`), not the presence
 of `src/db`: a resolver that depends on the database existing is a
 resolver that fails exactly when it is first needed, on a fresh install.
 
-### 5.6 Fail closed on a missing plugin payload ⬜ pending
+### 5.6 Fail closed on a missing plugin payload ✅ landed
 
 If the staged OpenCode payload is absent, the promotion must **refuse**,
 not warn. The OpenCode registration points into the bundle; a bundle
-without the payload breaks every agent session on the host.
+without the payload breaks every agent session on the host — silently,
+because the plugin registry stays empty.
 
-### 5.7 `uninstall.sh` — remove the bundle, keep the data ⬜ pending
+A build that **ships** the adapter therefore cannot be promoted without a
+validated payload: a missing staging library, a missing manifest entry or
+a failing validator all refuse. A build that genuinely has **no** OpenCode
+adapter says so rather than pretending.
 
-The runtime-only uninstall removes `releases/`, `current/`, `bin/` and
-`agent_installation/`, and keeps `src/db/`, `backups/`, `mpm_config.json`,
-`mode/` and `persona/`. `--purge` removes the data as well.
+### 5.6a Refuse a schema collision before a new binary reaches the database ✅ landed
+
+`CREATE TABLE IF NOT EXISTS` does not repair an unrelated table of the
+same name (§6.3, case S5). The installer's preflight compares the live
+table's shape against the shape the substrate **itself** would create —
+by extracting the substrate's own DDL from `internal/core/schema.go`,
+applying it to an empty scratch database, and comparing the two — and
+**refuses** when they differ, naming every difference.
+
+The live database is read through SQLite's online backup API into a
+scratch file. A newer MPM binary applies pending migrations the moment
+it opens a database, so the check never runs one against the live
+database (§4.4).
+
+### 5.7 `uninstall.sh` — remove the bundle, keep the data ✅ landed
+
+The runtime-only uninstall removes `releases/`, `current/`, `staging/`,
+and the `bin/` and `agent_installation/` **symlinks**, and keeps
+`src/db/`, `backups/`, `mpm_config.json`, `mode/`, `persona/` and
+`drills/`. `--purge` removes the data as well.
+
+The symlinks are removed as links — `rm` never follows a symlink into its
+target — so a release is removed by the releases step, not by deleting
+five files out of it. The operator's own directories that the layout
+conversion moved aside are preserved, and the record of where they went
+(`<data root>/.legacy-layout-paths`) is preserved with them.
 
 ### 5.8 Version reporting — no change to the format ✅ landed
 
@@ -452,7 +512,7 @@ refuse, rather than proceed.
 | R2 | The conversion leaves the installation in an **intermediate state** that the operator cannot recognise. | Medium | §4.3 lists every intermediate state and its undo. The driver fails each stage in turn and asserts the rollback. |
 | R3 | A version switch **overwrites operator-owned files** (mode/, persona/, `mpm_config.json`). | Medium | §2.2's ownership split, implemented by §5.2's `--groups` switch. |
 | R4 | The promotion leaves `current` dangling or pointing at a removed release. | Medium | The swap is a single `rename(2)`; `uninstall.sh` refuses to remove a release that `current` points at. |
-| R5 | The `lifecycle_events` name collision (S5) is encountered in the wild and the substrate's schema is silently not applied. | Medium | Detect and refuse during preflight. Not yet implemented. |
+| R5 | The `lifecycle_events` name collision (S5) is encountered in the wild and the substrate's schema is silently not applied. | **Medium — now closed** | §5.6a: the installer's preflight compares the live table's shape against the substrate's own DDL and refuses a collision, before the build and before any promotion. |
 | R6 | The `.git` removal (D2's follow-up) is irreversible without a network fetch. | Medium | It is a separate, explicitly authorised operation with its own backup procedure. |
 | R7 | A divergent `MPM_DB_PATH` silently opens a different database. | **High — now closed** | D4: one resolver, explicit conflict errors. Executable-level tests. |
 | R8 | A malformed `mpm_config.json` crashes the CLI with a stack trace. | **High — now closed** | F3: a controlled validation error naming the file. |
@@ -507,7 +567,7 @@ mergeable; the live migration is not among them.
 | The asset split by ownership lifetime | `scripts/install_runtime_assets.py` | ✅ landed |
 | The asset-split contract tests | `scripts/tests/test_runtime_asset_groups.py` | ✅ landed |
 | The bundle root and the data root as separate resolvers | `agent_installation/scripts/stage_runtime_package.sh` | ✅ landed |
-| The transactional promotion retargeted at the bundle | `scripts/lib/binary_transaction.sh` | ⬜ pending |
+| The transactional promotion retargeted at the bundle | `scripts/lib/binary_transaction.sh` (unchanged; the installer targets the candidate's `bin/`) | ✅ landed |
 
 ### PR 2 — the database-path safeguards ✅ landed
 
@@ -524,9 +584,14 @@ mergeable; the live migration is not among them.
 | Change | File | State |
 |---|---|---|
 | The rehearsal harness, in-repo and reproducible | `scripts/rehearsal/` + a Makefile target | ✅ landed |
-| The `lifecycle_events` collision detection | `install.sh` preflight | ⬜ pending |
-| The bundle phase and the pointer swap | `install.sh` | ⬜ pending |
-| The runtime-only uninstall keeps the data | `uninstall.sh` | ⬜ pending |
+| The bundle library: staging, validation, the active pointer, the layout conversion | `scripts/lib/runtime_bundle.sh` | ✅ landed |
+| The bundle library's contract tests | `scripts/tests/test_runtime_bundle.py` | ✅ landed |
+| The `lifecycle_events` collision detection | `scripts/lib/schema_preflight.py` + `install.sh`'s preflight | ✅ landed |
+| The collision detection's contract tests | `scripts/tests/test_schema_preflight.py` | ✅ landed |
+| The bundle phase and the pointer swap | `install.sh` (`--bundle`) | ✅ landed |
+| The runtime-only uninstall keeps the data | `uninstall.sh` | ✅ landed |
+| The uninstall's contract tests | `scripts/tests/test_uninstall_bundle.py` | ✅ landed |
+| The seven proofs of the migration gate | `scripts/tests/test_migration_gate.py` | ✅ landed |
 
 ### PR 4 — the live migration ⬜ NOT AUTHORISED
 
@@ -582,6 +647,14 @@ the migration; the migration itself is an operation, not a pull request.
       scratch copy.
 - [ ] Stage 5 — writers quiesced, service confirmed stopped.
 - [ ] Stage 6 — promoted; `current` swapped; the stable paths repointed.
+
+  The installer's own `--bundle` mode performs stages 3–6 in that order
+  (`./install.sh --bundle`), with the schema-collision preflight running
+  before the build. The conversion moves the previous `bin/` and
+  `agent_installation/` **aside** rather than deleting them; their
+  locations are listed in `~/.mpm/.legacy-layout-paths`, and they are the
+  rollback material for the conversion itself.
+
 - [ ] Stage 7 — restarted, readiness confirmed, the state fingerprint
       compared with the pre-migration one.
 

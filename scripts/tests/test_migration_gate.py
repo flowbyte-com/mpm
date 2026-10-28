@@ -587,6 +587,21 @@ class Proof6_RuntimeSwitchCannotReplaceUserData(GateFixture):
         for name in ("src/db", "mpm_config.json", "mode", "persona"):
             self.assertIn(name, lib)
 
+    def test_the_promotion_fails_closed_when_the_payload_cannot_be_staged(self):
+        # The OpenCode registration points into the bundle. A bundle
+        # without a validated payload registers a plugin that loads
+        # NOTHING — silently, because the plugin registry stays empty.
+        # So a build that SHIPS the adapter must refuse to promote
+        # without a validated payload.
+        staging_lib = self.project / "agent_installation" / "scripts" / "stage_runtime_package.sh"
+        staging_lib.unlink()
+
+        r = self.drive("phase_bundle")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("OpenCode", r.stderr)
+        self.assertFalse((self.data / "current").is_symlink(),
+                         "a bundle without a validated payload was activated")
+
 
 # ===========================================================================
 # PROOF 7 — the tests cannot default to the live workspace

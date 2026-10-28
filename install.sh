@@ -855,15 +855,32 @@ phase_bundle() {
     #
     # The payload is staged through its explicit manifest allowlist and
     # validated before it is exposed, exactly as the adapter's own
-    # installer stages it. A bundle without the payload would register a
-    # plugin that loads NOTHING.
+    # installer stages it.
+    #
+    # FAIL CLOSED. The OpenCode registration points into the bundle; a
+    # bundle without the payload breaks every agent session on the host,
+    # silently, because the plugin registry stays empty. So if this build
+    # SHIPS the adapter, the payload must be staged and validated or the
+    # promotion is refused.
+    #
+    # The one exception is a build that genuinely has no OpenCode adapter
+    # at all — then there is nothing to stage, and the bundle says so
+    # rather than pretending.
     local stage_lib="$PROJECT_ROOT/agent_installation/scripts/stage_runtime_package.sh"
-    if [ -f "$stage_lib" ] && [ -d "$PROJECT_ROOT/agent_installation/mpm-opencode" ]; then
+    local adapter_src="$PROJECT_ROOT/agent_installation/mpm-opencode"
+    if [ -d "$adapter_src" ]; then
+        if [ ! -f "$stage_lib" ]; then
+            rm -rf "$candidate"
+            die "the OpenCode staging library is missing at $stage_lib
+This build ships the OpenCode adapter, so the payload cannot be staged or
+validated. A bundle without a validated payload would register a plugin
+that loads nothing. Nothing was activated." 3
+        fi
         # shellcheck source=/dev/null
         . "$stage_lib"
         local staged rc_stage=0
         staged="$(MPM_RUNTIME_PACKAGE_VALIDATOR=mpm_validate_runtime_package_opencode \
-            stage_runtime_package "$PROJECT_ROOT/agent_installation/mpm-opencode" \
+            stage_runtime_package "$adapter_src" \
             "$candidate" "mpm-opencode" $RB_OPENCODE_MANIFEST)" || rc_stage=$?
         if [ "$rc_stage" -ne 0 ]; then
             rm -rf "$candidate"
@@ -873,8 +890,7 @@ nothing. Nothing was activated." 3
         fi
         log "  OpenCode payload staged: $staged"
     else
-        warn "  the OpenCode staging library or the adapter source is missing"
-        warn "  (the candidate bundle will carry no OpenCode payload)"
+        warn "  this build ships no OpenCode adapter — the candidate bundle carries no payload"
     fi
     _bundle_fail_at payload || {
         rm -rf "$candidate"

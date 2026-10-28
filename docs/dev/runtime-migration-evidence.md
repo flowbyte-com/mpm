@@ -504,10 +504,76 @@ for writing.
 
 | Item | Why it is still open |
 |---|---|
-| The `lifecycle_events` collision detection | The hazard is proven (S5); the refusal is not implemented. |
-| The `install.sh` bundle phase and the pointer swap | PR 3 of the sequence. |
-| The transactional promotion retargeted at `$BUNDLE/bin` | PR 1 of the sequence. |
-| `agent_installation/scripts/stage_runtime_package.sh`: the bundle root and the data root as separate helpers | PR 1 of the sequence. |
-| The `uninstall.sh` runtime-only path | PR 3 of the sequence. |
 | `MPM_EVENT_INGEST`'s default | Session C's call, on #142. |
 | The telemetry store path | `mpm-telemetry observe` (#139) needs `<workspace>/telemetry.db` against `<workspace>/src/db/telemetry.db` settled. |
+
+---
+
+## 9. The migration gate — the seven proofs
+
+The cutover preparation landed as three reviewable branches. The gate
+that guards them names what it proves, and each item is a test in
+`scripts/tests/test_migration_gate.py`.
+
+| # | The proof | Where |
+|---|---|---|
+| 1 | Incompatible schemas fail the preflight | `phase_schema_preflight` refuses a `lifecycle_events` table whose shape is not the substrate's, before the build and before any promotion |
+| 2 | A failed initial conversion is recoverable at each intermediate step | the recovery matrix: nine injection points, each leaving the state byte-identical, the pointer consistent, a runnable binary behind, and no stale candidate |
+| 3 | A failed subsequent promotion restores the previous pointer | a second promotion under a new release label, failing after the pointer was swapped, restores the previous pointer and keeps the previous release |
+| 4 | No new binary opens the live database before the backup | the new binary was never invoked with the live database in its argv or its environment; the database is byte-identical afterwards; every open of it during the install was read-only |
+| 5 | Version reporting works without `.git` | the installed binary reports its identity from a directory with no `.git`; the Go build-half proof is `release_acceptance/gitfree_build_identity_test.go` |
+| 6 | A runtime switch cannot replace the operator's data or definitions | the state fingerprint is unchanged across a switch; the bundle carries no state; a bundle that does is refused; a build that ships the adapter cannot promote without a validated payload |
+| 7 | The tests cannot default to the live workspace | the repository-wide DB-safety scanner, the subprocess isolation scanner, and the rehearsal's refusal of an in-repository work directory all exist and are reachable |
+
+### 9.1 The schema-collision check, measured
+
+The check compares the live table's shape against the shape the substrate
+itself would create, by extracting the substrate's own DDL from
+`internal/core/schema.go` and applying it to an empty scratch database.
+
+Against the **live** database (read-only, through the online backup API):
+
+```
+$ python3 scripts/lib/schema_preflight.py check \
+    --db ~/.mpm/src/db/mpm.db --ddl lifecycle_events.sql --json
+{
+  "detail": "the live table's shape matches the substrate's own DDL",
+  "status": "compatible",
+  "table": "lifecycle_events"
+}
+```
+
+Against a database carrying an **unrelated** table of the same name —
+the rehearsal's case S5 — the differences are named:
+
+```
+SCHEMA COLLISION on table 'lifecycle_events'
+  the live database carries a table named lifecycle_events whose shape is
+  NOT the substrate's lifecycle_events
+    - columns the substrate expects but the table does not have: ['event_id',
+      'idempotency', 'schema_version', 'event_type', 'observation', 'trust',
+      'observed_at_ms', 'ingested_at_ms', 'host_seq', 'host', 'host_version',
+      'source', 'adapter_version', 'project_id', 'project_id_source',
+      'framework_name', 'framework_session_id', 'mpm_session_id',
+      'invocation_id', 'task_id', 'parent_event_id', 'operation',
+      'result_status', 'outcome_class', 'outcome_code', 'meta']
+    - columns the table has that the substrate does not know: ['id', 'note']
+    - CHECK constraint the substrate requires but the table does not have:
+      CHECK (idempotency IN ('strict','best_effort'))
+    - ... (three more)
+```
+
+26 missing columns and 4 missing CHECK constraints — the shape of the
+hazard, stated exactly.
+
+### 9.2 Filesystem rollback is not operational rollback
+
+The installer's rollback restores **which files are where**: the previous
+pointer, and the layout conversion. It does **not** restore the database
+and it does **not** undo a migration the new binary applied to it.
+
+That is why the migration procedure takes a verified online backup
+*before* any new binary can reach the database (§4.4 of the plan), and
+why the preflight reads the live database only through SQLite's online
+backup API. The two rollbacks are different operations and the checklist
+keeps them separate (§4.5 of the plan).
