@@ -55,7 +55,16 @@ func str(v string) *string { return &v }
 // count, produces a finding.
 func seedQualifyingSession(t *testing.T, projectRoot string) {
 	t.Helper()
-	store, err := telemetry.Open(filepath.Join(projectRoot, "telemetry.db"))
+	// The CANONICAL path — <workspace>/src/db/telemetry.db — which is
+	// where the collector writes and where the hunt now looks.
+	//
+	// The hunt used to look in "<projectRoot>/telemetry.db", the path
+	// docs/SPEC.md §6.6 names, and telemetry.Open CREATES the store it
+	// is given, so the hunt silently created an empty ledger at a path
+	// nothing ever wrote to and reported zero observations forever.
+	// Seeding the canonical path is what makes this test represent the
+	// real deployment.
+	store, err := telemetry.Open(telemetry.StorePath(projectRoot))
 	if err != nil {
 		t.Fatalf("open telemetry store: %v", err)
 	}
