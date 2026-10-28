@@ -217,8 +217,8 @@ pre-existing untracked file, `cmd/dbg_main.go.tmp` (579 B, 2026-10-17) —
 | 3 | **The release candidate is not assembled** — the B/C work is not started | B + C | The 30 October target |
 | 4 | **Nothing has been deployed** to `~/.mpm` (still at `3df72315`, which predates all fifteen corrective PRs) | A | The release candidate — deliberately, per the deployment gate |
 | 5 | `idx_memories_confidence_checked` does not accelerate the decay query it was added for | A | Nothing — a performance claim defect, recorded, not fixed this round |
-| 6 | **The runtime migration's remaining implementation** — the `install.sh` bundle phase, the pointer swap, the transactional promotion retargeted at `$BUNDLE/bin`, and the runtime-only uninstall | A | The migration itself — which is a separate approval gate (J) |
-| 7 | **The `lifecycle_events` name collision** — a database already carrying an unrelated table of that name silently does not receive the substrate's schema for it | A | Nothing yet; it is a preflight refusal that should be implemented before the migration (J, risk R5) |
+| 6 | **The runtime migration's remaining implementation** — the `install.sh` bundle phase, the pointer swap, the transactional promotion retargeted at `$BUNDLE/bin`, and the runtime-only uninstall | A | **Closed by this PR** (#156) — the implementation is landed. The **live migration** remains a separate approval gate (J) |
+| 7 | **The `lifecycle_events` name collision** — a database already carrying an unrelated table of that name silently does not receive the substrate's schema for it | A | **Closed by this PR** (#156) — the installer's preflight compares the live table's shape against the substrate's own DDL and **refuses** a collision, before the build and before any promotion. SQLite's behaviour is unchanged; what changed is that the collision can no longer reach a binary |
 
 ### 5.1 The runtime migration — where it stands (2026-10-28)
 

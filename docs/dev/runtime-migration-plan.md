@@ -564,7 +564,22 @@ refuse, rather than proceed.
 Four PRs, in order. Each is independently reviewable and independently
 mergeable; the live migration is not among them.
 
-### PR 1 — packaging: the bundle primitives
+The first three are **open** and carry the branch names the pull
+requests use:
+
+| # | Branch | Pull request | Base | Depends on |
+|---|---|---|---|---|
+| 1 | `feat/runtime-migration-packaging` | [#154](https://github.com/flowbyte-com/mpm/pull/154) | `main` | — |
+| 2 | `feat/runtime-migration-safeguards` | [#155](https://github.com/flowbyte-com/mpm/pull/155) | `main` | — |
+| 3 | `feat/runtime-migration-cutover` | [#156](https://github.com/flowbyte-com/mpm/pull/156) | `feat/runtime-migration-safeguards` | PR 1 **and** PR 2 |
+| 4 | — | — | — | **not authorised** |
+
+PRs 1 and 2 are independent of each other — merge them in either order.
+PR 3 is stacked on both: it carries their commits because the cutover
+genuinely needs the `--groups` switch from PR 1 and the canonical-scratch
+resolver from PR 2, so **merge it last**.
+
+### PR 1 — packaging: the bundle primitives ✅ landed
 
 | Change | File | State |
 |---|---|---|
@@ -584,13 +599,16 @@ mergeable; the live migration is not among them.
 | The resolver's contract tests | `internal/core/config/dbpath_test.go` | ✅ landed |
 | The startup gates in all four binaries | `cmd/mpm/main.go`, `cmd/mpm-mcp/main.go`, `cmd/mpm-scheduler/main.go`, `cmd/mpm-critic/main.go` | ✅ landed |
 | The executable-level proofs | `cmd/mpm/db_path_resolution_test.go` and its siblings | ✅ landed |
+| The MCP server's proof, and the bounded wait that makes a missing refusal fail instead of hang | `cmd/mpm-mcp/db_path_resolution_test.go`, `cmd/mpm-scheduler/db_path_resolution_test.go` | ✅ landed |
 | A malformed configuration is a validation error, not a panic | `internal/core/config/config.go`, `internal/core/memory.go` | ✅ landed |
 
-### PR 3 — cutover preparation
+### PR 3 — cutover preparation ✅ landed
 
 | Change | File | State |
 |---|---|---|
 | The rehearsal harness, in-repo and reproducible | `scripts/rehearsal/` + a Makefile target | ✅ landed |
+| The rehearsal refuses a missing prerequisite instead of skipping it, and reads the same payload manifest the installer reads | `scripts/rehearsal/setup.sh`, `scripts/rehearsal/build-bundle.sh` | ✅ landed |
+| The runtime payload manifest (data, not code) | `scripts/runtime_payloads.json` | ✅ landed |
 | The bundle library: staging, validation, the active pointer, the layout conversion | `scripts/lib/runtime_bundle.sh` | ✅ landed |
 | The bundle library's contract tests | `scripts/tests/test_runtime_bundle.py` | ✅ landed |
 | The `lifecycle_events` collision detection | `scripts/lib/schema_preflight.py` + `install.sh`'s preflight | ✅ landed |
