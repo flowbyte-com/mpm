@@ -100,16 +100,26 @@ func buildFromGitFreeTree(t *testing.T, tree string, commit, dirty string) strin
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", binDir, err)
 	}
+	// A disposable HOME for every child this function starts. The
+	// subprocess-isolation guard requires it: a child that inherits the
+	// ambient environment could reach the operator's live installation.
+	pin := t.TempDir()
 
 	// The provenance payload comes from the SAME script the canonical
 	// build uses, so the test exercises the real convention rather
 	// than a hand-written -ldflags string.
+	//
+	// The child is PINNED: HOME and MPM_WORKSPACE point at a disposable
+	// directory, so nothing it does can reach the operator's live
+	// installation.
 	prov := exec.Command(filepath.Join(tree, "scripts", "build-provenance.sh"), "ldflags")
 	prov.Dir = tree
 	prov.Env = append(os.Environ(),
 		"MPM_BUILD_COMMIT="+commit,
 		"MPM_BUILD_DIRTY="+dirty,
 		"SOURCE_DATE_EPOCH=1700000000",
+		"MPM_WORKSPACE="+pin,
+		"HOME="+pin,
 	)
 	ldflags, err := prov.Output()
 	if err != nil {
@@ -147,7 +157,17 @@ func buildFromGitFreeTree(t *testing.T, tree string, commit, dirty string) strin
 // form.
 func identityOf(t *testing.T, bin string) (version, commit, dirty string) {
 	t.Helper()
-	out, err := exec.Command(bin, "--version").CombinedOutput()
+	// The child is PINNED to a disposable HOME and workspace: the
+	// subprocess-isolation guard requires it, and a `--version` that
+	// inherited the ambient environment could resolve the operator's
+	// live installation.
+	pin := t.TempDir()
+	cmd := exec.Command(bin, "--version")
+	cmd.Env = append(os.Environ(),
+		"MPM_WORKSPACE="+pin,
+		"HOME="+pin,
+	)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s --version: %v\n%s", bin, err, out)
 	}
@@ -220,8 +240,13 @@ func TestD5_GitFreeBuildWithoutTheAssertionIsUnknown(t *testing.T) {
 	gitFreeCopy(t, tree)
 
 	// No MPM_BUILD_COMMIT: the tree has no history.
+	pin := t.TempDir()
 	prov := exec.Command(filepath.Join(tree, "scripts", "build-provenance.sh"), "commit")
 	prov.Dir = tree
+	prov.Env = append(os.Environ(),
+		"MPM_WORKSPACE="+pin,
+		"HOME="+pin,
+	)
 	out, err := prov.Output()
 	if err != nil {
 		t.Fatalf("build-provenance.sh: %v", err)
