@@ -388,6 +388,7 @@ CLI-only path, manual service setup, and first cognitive commands.
 | [CLI agent rules](CLI_AGENT_RULES.md) | Normative contract for any change to a command-line surface |
 | [Integration check](mpm_integration_check.md) | Host-agnostic procedure for verifying that MPM is genuinely usable by an agent |
 | [Reference library](docs/library/README.md) | Curated design rationale, research and historical constraints — labelled, and **not** a description of current behaviour |
+| [Documentation map](docs/DOCUMENTATION-MAP.md) | Which document owns which fact, what `make docs-check` verifies, and which docs a given code change obliges you to review |
 | [Work tracking](docs/ISSUES.md) | Where work is tracked, how findings are classified, how to report an issue |
 | [Security policy](docs/SECURITY.md) | Private vulnerability reporting and credential-handling rules |
 
@@ -396,6 +397,7 @@ CLI-only path, manual service setup, and first cognitive commands.
 ```bash
 make build
 make test-race
+make docs-check     # documentation freshness: links, anchors, tool names, install paths, managed-block parity
 ```
 
 `make test-race` is the canonical pre-merge validation gate and includes the

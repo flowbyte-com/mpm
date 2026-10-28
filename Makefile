@@ -259,7 +259,7 @@ AGENT_ADAPTER_TEST_MIN_JS_TESTS :=
 # AGENT_ADAPTERS — the TS gate runs ONLY the TypeScript suite.
 AGENT_ADAPTERS_TS := mpm-opencode
 
-.PHONY: all assert-build-dir-safe print-build-dir print-build-provenance build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-bench test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit test-scripts test-agent-installation test-agent-adapters lint help clean refresh-installed check-installed-drift check-installed
+.PHONY: all assert-build-dir-safe print-build-dir print-build-provenance build install install-hooks service-scheduler service-telemetry service uninstall-service gen-cli test test-bench test-release test-race release-gate test-core-precommit test-tools test-tools-race test-tools-precommit test-testenv test-testenv-race test-testenv-precommit test-scripts test-agent-installation test-agent-adapters lint help clean refresh-installed check-installed-drift check-installed docs-check test-docs-check
 
 all: build
 
@@ -1476,6 +1476,55 @@ check-installed-drift:
 # report presence separately).
 check-installed:
 	@python3 $(AGENT_INSTALL_DIR)/scripts/check_installed_managed_blocks.py
+
+# ---------------------------------------------------------------------------
+# Documentation freshness gate
+# ---------------------------------------------------------------------------
+# Answers one question: does the documentation still agree with the
+# repository?
+#
+# Hard-fails ONLY on objective, mechanically demonstrated defects:
+#
+#   links                relative Markdown links that resolve to nothing
+#   anchors              `#fragment` targets that do not exist
+#   missing-paths        backticked repo paths that no longer exist
+#   tool-names           `mpm call <tool>` naming a tool not in the registry
+#   tool-actions         `<tool> action=<verb>` outside the registered enum
+#   make-targets         `make <target>` naming a target the Makefile lacks
+#   build-paths          `bin/mpm` where the real path is .build/bin or ~/.mpm/bin
+#   managed-block        rendered managed block drifted from canonical source
+#   library-status       a docs/library/ entry with no status label or no index row
+#   retired-adapter-paths  a path into a retired adapter directory
+#
+# Reports WITHOUT failing:
+#
+#   retired-host-mentions  brand mentions in the documents that speak for today
+#   stale-status           "awaiting approval" / "pending implementation" etc.
+#   docs-impact            a contract-bearing code change with no doc change
+#
+# The split is deliberate. A gate that fails on judgement calls gets switched
+# off, and a switched-off gate protects nothing.
+#
+# The gate reads files and `git diff`/`git log` only. It never opens a
+# database, reads MPM state, contacts a service or uses credentials, so it is
+# safe to run on a clean checkout and in CI.
+#
+# DOCS_CHECK_BASE selects the ref the docs-impact review diffs against. In CI
+# it is set to the pull request's base SHA; locally it falls back to
+# origin/main.
+#
+# See docs/DOCUMENTATION-MAP.md for which document owns which fact, and why
+# each row of the dependency map exists.
+DOCS_CHECK_BASE ?= origin/main
+
+docs-check:
+	@python3 scripts/docs_check --base "$(DOCS_CHECK_BASE)"
+
+# The gate's own tests. These are also reached by `make test-scripts`
+# (scripts/tests/ is discovered wholesale), so this target exists for the
+# fast local loop rather than for CI.
+test-docs-check:
+	@cd scripts && python3 -m unittest tests.test_docs_check
 
 # Show help
 help:
