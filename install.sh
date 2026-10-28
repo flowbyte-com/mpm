@@ -157,10 +157,45 @@ load_promotion_lib() {
     return 0
 }
 
+# Versioned runtime bundles (2026-10-28).
+#
+# The bundle library owns the versioned-release layout: staging a
+# candidate, validating it, installing it under releases/<rev>, and
+# swapping the `current` pointer that names the active runtime.
+#
+# Loaded LAZILY for the same reason the promotion library is: the
+# installer test harnesses source a stripped copy of this script with
+# the `readonly PROJECT_ROOT=` assignment removed, and under `set -u` a
+# top-level expansion of an unset PROJECT_ROOT aborts before any phase
+# can run.
+BUNDLE_LIB=""
+
+load_bundle_lib() {
+    [ -n "$BUNDLE_LIB" ] && return 0
+    local lib="${PROJECT_ROOT:-$SCRIPT_DIR}/scripts/lib/runtime_bundle.sh"
+    if [ ! -r "$lib" ]; then
+        printf '[mpm-install] ERROR: missing %s\n' "$lib" >&2
+        printf '[mpm-install] The installer requires the runtime bundle library.\n' >&2
+        return 1
+    fi
+    # shellcheck source=scripts/lib/runtime_bundle.sh
+    . "$lib"
+    BUNDLE_LIB="$lib"
+    return 0
+}
+
 # ---------- mutable state (set by parse_args / preflight) ----------
 MODE="install"
 ASSUME_YES=0
 USER_NAME="${SUDO_USER:-${USER:-$(id -un)}}"
+# USE_BUNDLE selects the versioned runtime-bundle layout (D1). It is
+# OPT-IN: the default install path is unchanged, because the live
+# installation's cutover is a separately authorised operation and must
+# not be a side effect of `git pull && ./install.sh`.
+USE_BUNDLE=0
+# BUNDLE_REV is the release label for the bundle. Empty means "derive it
+# from the build".
+BUNDLE_REV=""
 
 # ---------- paths (always user-space; resolved by resolve_paths) ----------
 PREFIX=""
@@ -578,6 +613,430 @@ installer report a deployment that did not happen." 2
             ;;
     esac
 }
+
+# ---------------------------------------------------------------------------
+# phase_schema_preflight
+# ---------------------------------------------------------------------------
+#
+# Refuse a SCHEMA COLLISION before any new binary can reach the live
+# database.
+#
+# THE HAZARD. The substrate creates its tables with `CREATE TABLE IF NOT
+# EXISTS`, and SQLite's rule for that statement is not "create it if it
+# is missing" — it is "create it if it is missing, and otherwise leave
+# whatever is there ALONE". So a database that already carries a table
+# named `lifecycle_events` which is NOT the substrate's keeps that
+# unrelated table forever: the substrate's own schema is never applied,
+# and the substrate then fails at some later, unrelated moment with an
+# error that names a column rather than the collision that caused it.
+#
+# The runtime-migration rehearsal reproduced exactly this (case S5): an
+# unrelated table named `lifecycle_events` survives the upgrade, and
+# the upgrade reports success.
+#
+# WHAT THIS CHECK DOES. It compares the live table's shape against the
+# shape the substrate ITSELF would create, by applying the substrate's
+# own DDL to an empty scratch database and comparing the two. A table
+# that is absent is fine — the substrate will create it. A table whose
+# shape matches is fine — it is the substrate's own table. A table whose
+# shape DIFFERS is a collision, and the install stops.
+#
+# WHAT THIS CHECK DOES NOT DO. It never opens the live database with an
+# MPM binary. A newer binary applies pending migrations the moment it
+# opens a database, so "inspect the live database" must never mean "run
+# the new binary against it". The live database is read through
+# SQLite's online backup API into a scratch file, and the comparison is
+# made against that copy.
+#
+# The reference DDL is extracted from the substrate's Go schema source,
+# which is the authority — there is no second copy of the shape to drift
+# out of date.
+phase_schema_preflight() {
+    note "SCHEMA PREFLIGHT"
+
+    local db="$DATA_ROOT/src/db/mpm.db"
+    if [ ! -f "$db" ]; then
+        log "  no live database at $db — nothing to check"
+        return 0
+    fi
+
+    local helper="${PROJECT_ROOT:-$SCRIPT_DIR}/scripts/lib/schema_preflight.py"
+    local schema_go="$PROJECT_ROOT/internal/core/schema.go"
+
+    if [ ! -r "$helper" ] || [ ! -r "$schema_go" ]; then
+        # The bundle layout is the MIGRATION path: it refuses to proceed
+        # without the check, because a collision caught after the cutover
+        # is a collision the operator has to undo by hand.
+        if [ "$USE_BUNDLE" = "1" ]; then
+            die "the schema-collision preflight could not run
+  helper:     $helper
+  schema:     $schema_go
+The bundle layout refuses to install without it: a schema collision must be
+caught BEFORE a new binary reaches the live database, not afterwards." 3
+        fi
+        warn "  the schema-collision preflight could not run (helper or schema source missing)"
+        warn "  the live database's table shapes were NOT checked against this revision's schema"
+        return 0
+    fi
+
+    local ddl rc=0
+    ddl="$(mktemp "${TMPDIR:-/tmp}/mpm-schema-preflight.XXXXXX.sql")" || {
+        die "could not create a temporary file for the reference schema" 3
+    }
+    if ! python3 "$helper" extract --go "$schema_go" --table lifecycle_events --out "$ddl"; then
+        rm -f "$ddl"
+        die "could not extract the substrate's lifecycle_events DDL from $schema_go
+The schema-collision preflight cannot run without it." 3
+    fi
+
+    python3 "$helper" check --db "$db" --ddl "$ddl" || rc=$?
+    rm -f "$ddl"
+
+    case "$rc" in
+        0)
+            log "  the live database's table shapes are compatible with this revision"
+            ;;
+        1)
+            die "SCHEMA COLLISION in the live database
+The live database carries a table named 'lifecycle_events' that is NOT the
+substrate's own. SQLite's CREATE TABLE IF NOT EXISTS would leave that
+unrelated table in place and never apply the substrate's schema, so the
+install is REFUSED. The differences are printed above.
+Rename or drop the unrelated table, or migrate it into the substrate's
+shape, and run the install again." 3
+            ;;
+        *)
+            die "the schema-collision preflight failed (exit $rc)" 3
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# phase_bundle
+# ---------------------------------------------------------------------------
+#
+# Install a VERSIONED RUNTIME BUNDLE and make it the active runtime.
+#
+# THE LAYOUT
+#
+#     <data root>/
+#       releases/<rev>/     a versioned, Git-free bundle
+#       current -> releases/<rev>      THE ACTIVE POINTER
+#       staging/            where the candidate is assembled
+#       src/db/ backups/ mpm_config.json mode/ persona/   the STATE
+#
+# THE ORDER, AND WHY IT IS THIS ORDER
+#
+#   1. assemble   the candidate under <data root>/staging/. Nothing
+#                 outside the staging area is touched.
+#   2. promote    the five binaries into the candidate's bin/ as ONE
+#                 transaction (scripts/lib/binary_transaction.sh), so a
+#                 failure partway through leaves no mixture.
+#   3. validate   the candidate. A bundle that fails validation is
+#                 deleted, and the active runtime is not touched.
+#   4. install    the candidate at releases/<rev> with a rename(2) — the
+#                 release directory is either absent or complete, never
+#                 half-populated.
+#   5. activate   swap `current` with a rename(2). The pointer never
+#                 dangles and never names a half-installed release.
+#   6. convert    turn the checkout-style bin/ and agent_installation/
+#                 directories into symlinks into the active bundle. The
+#                 real directories are MOVED ASIDE, not deleted: they are
+#                 the rollback material.
+#
+# Steps 1-3 are reversible with no effect at all on the running
+# installation. Steps 4-6 change what is running, so each of them is
+# individually recoverable: the previous pointer is recorded, and the
+# moved-aside directories are listed in <data root>/.legacy-layout-paths.
+phase_bundle() {
+    note "RUNTIME BUNDLE"
+
+    load_promotion_lib || die "the transactional promotion library could not be loaded" 3
+    load_bundle_lib || die "the runtime bundle library could not be loaded" 3
+
+    # ---- the release identity ----
+    #
+    # The revision label comes from the BINARY being installed, not from
+    # Git. That is what makes the label trustworthy in a Git-free source
+    # tree, and it guarantees that the label and the binary's own
+    # reported identity cannot disagree.
+    local commit version epoch
+    commit="$("$(build_dir)/mpm" --version 2>/dev/null | awk '/commit:/{print $2; exit}')"
+    [ -n "$commit" ] || commit="$(bash "$PROJECT_ROOT/scripts/build-provenance.sh" commit 2>/dev/null || printf 'unknown')"
+    version="$(bash "$PROJECT_ROOT/scripts/build-provenance.sh" version 2>/dev/null || printf 'unknown')"
+    epoch="$(bash "$PROJECT_ROOT/scripts/build-provenance.sh" build-epoch 2>/dev/null || printf '0')"
+    # The epoch goes into RELEASE.json as a NUMBER. A build that cannot
+    # report one must not write a JSON document that cannot be parsed.
+    case "$epoch" in
+        ''|*[!0-9]*) epoch=0 ;;
+    esac
+
+    local rev="$BUNDLE_REV"
+    if [ -z "$rev" ]; then
+        rev="$commit"
+        if [ -z "$rev" ] || [ "$rev" = "unknown" ]; then
+            rev="unknown-$(date -u +%Y%m%dT%H%M%SZ)"
+        fi
+    fi
+    log "  revision:  $rev"
+    log "  commit:    $commit"
+
+    # ---- serialise against a concurrent installer ----
+    #
+    # The promotion library locks the directory it promotes into, which
+    # for a candidate bundle is the staging area — a per-run directory
+    # that no other process shares. The thing two installers actually
+    # contend for is the DATA ROOT, so that is what is locked here.
+    local lockfile="$DATA_ROOT/.mpm-bundle.lock"
+    install -d -m 0700 "$DATA_ROOT"
+    exec 8>"$lockfile" || die "could not open the bundle lock $lockfile" 3
+    if ! flock -n 8; then
+        die "another installer holds the bundle lock $lockfile; refusing to run concurrently" 3
+    fi
+
+    # ---- 1. assemble the candidate ----
+    local staging_root candidate
+    staging_root="$(rb_staging_dir "$DATA_ROOT")"
+    candidate="$staging_root/$rev.$$"
+    rm -rf "$candidate"
+    install -d -m 0755 "$staging_root"
+    install -d -m 0755 "$candidate"
+    install -d -m 0755 "$candidate/bin"
+    _bundle_fail_at assemble || {
+        rm -rf "$candidate"
+        die "the candidate bundle could not be assembled. Nothing was changed." 3
+    }
+
+    # ---- 2. promote the five binaries into the candidate ----
+    local trc=0
+    mpm_promote_binaries "$(build_dir)" "$candidate/bin" $BT_BINARIES || trc=$?
+    # The promotion library's lock file lives beside the directory it
+    # promoted into. Inside a candidate bundle it is residue, and the
+    # bundle must contain nothing but the runtime.
+    rm -f "$candidate/.mpm-install.lock"
+    case "$trc" in
+        0) log "  promoted ${BT_BINARIES} into the candidate bundle" ;;
+        10) rm -rf "$candidate"; die "binary promotion failed; the candidate bundle was discarded and nothing was changed" 3 ;;
+        11) die "binary promotion failed and the rollback was INCOMPLETE. The rollback material named above is your only recoverable copy — do NOT delete it. Nothing was activated." 3 ;;
+        12) rm -rf "$candidate"; die "binary promotion refused before modifying anything (see the error above)" 3 ;;
+        *)  rm -rf "$candidate"; die "binary promotion failed unexpectedly (exit $trc)" 3 ;;
+    esac
+    _bundle_fail_at promote || {
+        rm -rf "$candidate"
+        die "the candidate bundle was discarded. Nothing was changed." 3
+    }
+
+    # ---- the release-scoped host assets ----
+    #
+    # mode/, persona/ and drills/ are OPERATOR-owned and belong to the
+    # data root, where a version switch cannot reach them.
+    # agent_installation/** is RELEASE-scoped and belongs in the bundle,
+    # so it rolls back with the release.
+    local assets_script="$PROJECT_ROOT/scripts/install_runtime_assets.py"
+    if [ -f "$assets_script" ]; then
+        if ! python3 "$assets_script" \
+                --source-root "$PROJECT_ROOT" \
+                --runtime-root "$candidate" \
+                --groups host-assets; then
+            rm -rf "$candidate"
+            die "the release-scoped host assets could not be provisioned into the candidate bundle" 3
+        fi
+        log "  release-scoped host assets provisioned into the candidate"
+    else
+        warn "  install_runtime_assets.py missing at $assets_script"
+        warn "  (the candidate bundle will carry no host assets)"
+    fi
+    _bundle_fail_at assets || {
+        rm -rf "$candidate"
+        die "the candidate bundle was discarded. Nothing was changed." 3
+    }
+
+    # ---- the OpenCode payload ----
+    #
+    # The payload is staged through its explicit manifest allowlist and
+    # validated before it is exposed, exactly as the adapter's own
+    # installer stages it. A bundle without the payload would register a
+    # plugin that loads NOTHING.
+    local stage_lib="$PROJECT_ROOT/agent_installation/scripts/stage_runtime_package.sh"
+    if [ -f "$stage_lib" ] && [ -d "$PROJECT_ROOT/agent_installation/mpm-opencode" ]; then
+        # shellcheck source=/dev/null
+        . "$stage_lib"
+        local staged rc_stage=0
+        staged="$(MPM_RUNTIME_PACKAGE_VALIDATOR=mpm_validate_runtime_package_opencode \
+            stage_runtime_package "$PROJECT_ROOT/agent_installation/mpm-opencode" \
+            "$candidate" "mpm-opencode" $RB_OPENCODE_MANIFEST)" || rc_stage=$?
+        if [ "$rc_stage" -ne 0 ]; then
+            rm -rf "$candidate"
+            die "the OpenCode runtime payload could not be staged into the candidate bundle
+A bundle without a validated payload would register a plugin that loads
+nothing. Nothing was activated." 3
+        fi
+        log "  OpenCode payload staged: $staged"
+    else
+        warn "  the OpenCode staging library or the adapter source is missing"
+        warn "  (the candidate bundle will carry no OpenCode payload)"
+    fi
+    _bundle_fail_at payload || {
+        rm -rf "$candidate"
+        die "the candidate bundle was discarded. Nothing was changed." 3
+    }
+
+    # ---- the build identity ----
+    rb_write_release "$candidate" "$rev" "$commit" "$epoch" "$version"
+
+    # ---- the substrate's own schema, so the preflight can travel ----
+    #
+    # The collision check compares the live table against the DDL the
+    # substrate itself would apply. Carrying that DDL in the bundle
+    # means the check does not need a source checkout at install time.
+    local helper="$PROJECT_ROOT/scripts/lib/schema_preflight.py"
+    local schema_go="$PROJECT_ROOT/internal/core/schema.go"
+    if [ -r "$helper" ] && [ -r "$schema_go" ]; then
+        install -d -m 0755 "$candidate/schema"
+        if ! python3 "$helper" extract --go "$schema_go" --table lifecycle_events \
+                --out "$candidate/schema/lifecycle_events.sql"; then
+            rm -rf "$candidate"
+            die "could not extract the substrate's lifecycle_events DDL into the candidate bundle" 3
+        fi
+    fi
+    _bundle_fail_at identity || {
+        rm -rf "$candidate"
+        die "the candidate bundle was discarded. Nothing was changed." 3
+    }
+
+    # ---- 3. validate the candidate ----
+    #
+    # Nothing outside the staging area has been touched, so a refusal
+    # here costs nothing: the running installation is exactly as it was.
+    if ! rb_validate_bundle "$candidate" "$rev"; then
+        rm -rf "$candidate"
+        die "the candidate bundle failed validation and was discarded. Nothing was changed." 3
+    fi
+    log "  candidate bundle validated"
+    _bundle_fail_at validate || {
+        rm -rf "$candidate"
+        die "the candidate bundle was discarded. Nothing was changed." 3
+    }
+
+    # ---- 4. install the release ----
+    local prev_target final
+    prev_target="$(rb_current_target "$DATA_ROOT" || true)"
+    final="$DATA_ROOT/releases/$rev"
+    if [ -n "$prev_target" ]; then
+        printf '%s\n' "$prev_target" > "$DATA_ROOT/.previous-release"
+        log "  previous active pointer recorded: $prev_target"
+    fi
+
+    if [ -e "$final" ]; then
+        # The release is already there — the recovery case after a
+        # promotion that failed between installing the release and
+        # activating it. A release is immutable, so it is NOT replaced;
+        # it is validated and activated as it stands.
+        if rb_validate_bundle "$final" "$rev"; then
+            log "  release $rev is already installed and valid — activating it as it stands"
+            rm -rf "$candidate"
+        else
+            rm -rf "$candidate"
+            die "release $rev already exists at $final and does not validate.
+A release is immutable, so it will not be replaced. Remove it by hand if you
+want a fresh build of that label, or install under a different --rev.
+Nothing was activated." 3
+        fi
+    else
+        if ! rb_install_release "$candidate" "$DATA_ROOT" "$rev"; then
+            rm -rf "$candidate"
+            die "the release could not be installed. Nothing was activated." 3
+        fi
+    fi
+    _bundle_fail_at install || die "the release was installed but the promotion was abandoned.
+The active pointer was NOT moved, so the previous runtime is still active.
+Remove $final if you want to retry from scratch." 3
+
+    # ---- the rollback ----
+    #
+    # A promotion that fails AFTER the pointer was swapped must not leave
+    # the installation pointing at a revision whose promotion did not
+    # complete. The previous pointer is restored and the layout
+    # conversion is undone, so the installation is exactly as it was.
+    #
+    # NOTE THE DISTINCTION. This is a FILESYSTEM rollback: it restores
+    # which files are where. It is NOT an operational rollback — the
+    # database is not restored, and a migration the new binary applied
+    # to it is not undone. The rehearsal's migration procedure takes an
+    # online backup BEFORE any new binary can reach the database for
+    # exactly that reason; this function is the recovery path for the
+    # half of the upgrade that happens after the backup.
+    rollback_promotion() {
+        local why="$1"
+        err "rolling back the promotion: $why"
+        if [ -n "$prev_target" ]; then
+            if rb_restore_pointer "$DATA_ROOT" "$prev_target"; then
+                log "  the active pointer is back at $prev_target"
+            else
+                err "  the active pointer could NOT be restored — it still points at releases/$rev"
+                err "  fix it by hand:  ln -s $prev_target $DATA_ROOT/current.swap && mv -T $DATA_ROOT/current.swap $DATA_ROOT/current"
+            fi
+        else
+            rm -f "$DATA_ROOT/current" 2>/dev/null || true
+            log "  the active pointer is removed (there was no previous revision)"
+        fi
+        if ! rb_revert_layout "$DATA_ROOT" "$PREFIX"; then
+            err "  the layout conversion could not be fully undone — see $DATA_ROOT/.legacy-layout-paths"
+        fi
+    }
+
+    # ---- 5. activate ----
+    if ! rb_activate "$DATA_ROOT" "$rev"; then
+        die "the release $rev is installed at releases/$rev, but the active pointer could not be
+swapped. The previous revision is still active. To finish the cutover by hand:
+  ln -s releases/$rev $DATA_ROOT/current.swap && mv -T $DATA_ROOT/current.swap $DATA_ROOT/current" 3
+    fi
+    _bundle_fail_at activate || {
+        rollback_promotion "the promotion was abandoned after the pointer was swapped"
+        die "the promotion was rolled back. The previous runtime is active again." 3
+    }
+
+    # ---- 6. convert the layout ----
+    #
+    # The stable paths become symlinks into the active bundle, so every
+    # registration that names ~/.mpm keeps naming the same place — and
+    # now resolves into the versioned runtime.
+    if ! rb_convert_layout "$DATA_ROOT" "$PREFIX" "releases/$rev"; then
+        rollback_promotion "the layout conversion did not complete"
+        die "the release $rev is installed, but the stable paths could not be converted
+into symlinks, so the promotion was rolled back. The previous runtime is
+active again." 3
+    fi
+    _bundle_fail_at convert || {
+        rollback_promotion "the promotion was abandoned after the layout conversion"
+        die "the promotion was rolled back. The previous runtime is active again." 3
+    }
+
+    log "  active runtime: releases/$rev"
+    log "  stable paths:   $PREFIX/bin -> current/bin, $PREFIX/agent_installation -> current/agent_installation"
+}
+
+# _bundle_fail_at <step>
+#
+# TEST-ONLY FAILURE SEAM.
+#
+#   MPM_INSTALL_TEST_FAIL_AT=<step>   fail immediately AFTER <step>
+#                                     completed. The step names are
+#                                     assemble, promote, assets, payload,
+#                                     identity, validate, install,
+#                                     activate, convert.
+#
+# Used to pin the RECOVERY MATRIX of the conversion: a failure at each
+# intermediate step must leave the installation recoverable, and the
+# step that fails determines what "recoverable" means. Never set in
+# production; the name is deliberately conspicuous so it cannot be
+# enabled by accident, and it is ignored unless the value names a step.
+_bundle_fail_at() {
+    [ "${MPM_INSTALL_TEST_FAIL_AT-}" = "$1" ] || return 0
+    err "MPM_INSTALL_TEST_FAIL_AT=$MPM_INSTALL_TEST_FAIL_AT: injected failure after '$1'"
+    return 1
+}
+
 
 # Symlink mpm + mpm-mcp into ~/.local/bin so subprocesses that inherit
 # the user PATH can resolve them by name.
@@ -1059,14 +1518,26 @@ phase_runtime_assets() {
     # `make install` calls, so the two install surfaces cannot drift
     # into different ownership semantics.
     #
+    # In the BUNDLE layout the ownership split is explicit: the
+    # operator's definitions live in the DATA ROOT, where a version
+    # switch cannot reach them, and the release-scoped host assets live
+    # in the BUNDLE, so they roll back with the release. The bundle
+    # phase already provisioned the host assets; this phase provisions
+    # the definitions, and only the definitions.
+    #
     # Non-zero is FATAL here, unlike phase_agent_reconcile. A host whose
     # runtime root has no mode/persona definitions routes nothing and
     # injects no persona, which looks like a working install that is
     # silently inert. Failing loudly is the correct outcome; the
     # reconciler's own output names the specific conflicting files.
+    local groups_arg=()
+    if [ "$USE_BUNDLE" = "1" ]; then
+        groups_arg=(--groups definitions)
+    fi
     if python3 "$assets_script" \
             --source-root "$PROJECT_ROOT" \
-            --runtime-root "$DATA_ROOT"; then
+            --runtime-root "$DATA_ROOT" \
+            ${groups_arg[@]+"${groups_arg[@]}"}; then
         log "  runtime definitions reconciled"
     else
         err "  runtime-asset reconciliation failed (see above)"
@@ -1131,8 +1602,20 @@ phase_validate() {
 # ---------- modes ----------
 mode_install() {
     preflight
+    # The schema-collision preflight runs BEFORE anything is built or
+    # promoted. It is read-only, and it is the last point at which a
+    # collision can be reported without the operator having to undo a
+    # half-finished install.
+    phase_schema_preflight
     phase_build
-    phase_binaries
+    if [ "$USE_BUNDLE" = "1" ]; then
+        # The bundle layout replaces phase_binaries: the five binaries
+        # are promoted into a VERSIONED BUNDLE, not over the top of the
+        # directory that also holds the state.
+        phase_bundle
+    else
+        phase_binaries
+    fi
     phase_symlinks
     phase_data_dir
     phase_runtime_assets
@@ -1212,6 +1695,27 @@ mode_dry_run() {
     log "  #   promoted, in order: $(load_promotion_lib >/dev/null 2>&1 && printf '%s' "$BT_BINARIES" || printf 'mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry')"
     log "  #   a failed promotion leaves $PREFIX/bin/ exactly as it was"
     log "  (legacy cleanup: rm -f $PREFIX/bin/mpm.real $PREFIX/bin/mpm.pre-wrapper.* from older installs)"
+    if [ "$USE_BUNDLE" = "1" ]; then
+        log "  # --- VERSIONED RUNTIME BUNDLE (--bundle) ---"
+        log "  # the bundle layout replaces the in-place binary promotion above:"
+        log "  #   1. assemble a candidate bundle under $DATA_ROOT/staging/<rev>.<pid>/:"
+        log "  #      bin/ (the five binaries), agent_installation/ (the release-scoped"
+        log "  #      host assets and the validated OpenCode payload), RELEASE.json"
+        log "  #      (the build identity) and schema/lifecycle_events.sql"
+        log "  #   2. promote the five binaries into the candidate as ONE TRANSACTION"
+        log "  #      (scripts/lib/binary_transaction.sh) — a failure leaves no mixture"
+        log "  #   3. VALIDATE the candidate: five executable binaries, no .git, NO STATE"
+        log "  #      (src/db, backups, mpm_config.json, mode/, persona/ are refused),"
+        log "  #      and an identity that matches the binaries inside"
+        log "  #   4. install it at $DATA_ROOT/releases/<rev> with a rename(2)"
+        log "  #   5. ACTIVATE: swap $DATA_ROOT/current with a rename(2)"
+        log "  #   6. convert the layout: $PREFIX/bin and $PREFIX/agent_installation"
+        log "  #      become symlinks into current/; the previous real directories are"
+        log "  #      MOVED ASIDE (never deleted) and listed in"
+        log "  #      $DATA_ROOT/.legacy-layout-paths"
+        log "  # the state (src/db, backups, mpm_config.json, mode/, persona/) is NEVER"
+        log "  #   moved, copied, or replaced by any of the above"
+    fi
     log "  symlink $PREFIX/bin/mpm     -> $LOCAL_BIN/mpm"
     log "  symlink $PREFIX/bin/mpm-mcp -> $LOCAL_BIN/mpm-mcp"
     log "  install -d -m 0700 $DATA_ROOT/src/db $DATA_ROOT/backups/critic-pre  (and chmod 0700 to harden pre-existing dirs)"
@@ -1329,6 +1833,14 @@ Options:
   --prefix <path>      Install prefix (default: \$HOME/.mpm)
   --data-root <path>   Runtime data root (default: \$HOME/.mpm)
   --user <name>        Target user (default: current user)
+  --bundle             Install into the VERSIONED RUNTIME BUNDLE layout:
+                        releases/<rev>/ holds the runtime, and
+                        \$DATA_ROOT/current is the active pointer.
+                        The state (database, backups, mpm_config.json,
+                        mode/, persona/) stays where it is and is never
+                        touched by a version switch.
+  --rev <label>        The release label for --bundle (default: the
+                        build's own commit SHA).
   --yes                Skip confirmation prompts
   -h, --help           Show this help
 
@@ -1339,6 +1851,7 @@ Examples:
   $SCRIPT_NAME --validate       # verify install
   $SCRIPT_NAME --reconcile      # reconcile host managed blocks only
   $SCRIPT_NAME --uninstall      # remove install (data preserved)
+  $SCRIPT_NAME --bundle         # install into the versioned bundle layout
 
 Exit codes:
   0  success
@@ -1371,6 +1884,8 @@ parse_args() {
             --prefix)       PREFIX="$2"; shift 2 ;;
             --data-root)    DATA_ROOT="$2"; shift 2 ;;
             --user)         USER_NAME="$2"; shift 2 ;;
+            --bundle)       USE_BUNDLE=1; shift ;;
+            --rev)          BUNDLE_REV="$2"; USE_BUNDLE=1; shift 2 ;;
             --yes)          ASSUME_YES=1; shift ;;
             -h|--help)      usage; exit 0 ;;
             *)              err "unknown option: $1"; usage; exit 1 ;;
