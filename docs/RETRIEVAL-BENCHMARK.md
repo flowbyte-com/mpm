@@ -75,7 +75,7 @@ source-bucket policy is preserved exactly.
 reinforcement=N (×2 = X)  weight=N (×1.5 = Y)  recency=Z
 ```
 
-with a comment attributing it to `internal/hybrid_search.go`. No
+with a comment attributing it to `internal/core/hybrid_search.go`. No
 comparator in the recall path reads either field. The arithmetic lived
 only in `computeScore`, a 0–1 display value for the JSON payload.
 

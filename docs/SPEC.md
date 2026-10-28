@@ -1116,7 +1116,7 @@ Initial confidence is also fixed by artifact type:
 
 #### Source of truth + cache
 
-The stored `confidence` column is a performance cache. The evidence ledger is the source of truth. If they disagree, the cache is wrong. `mpm ops confidence recompute` triggers a manual recompute; `mpm_confidence action=query_history` derives its view from evidence, not the cached column.
+The stored `confidence` column is a performance cache. The evidence ledger is the source of truth. If they disagree, the cache is wrong. `mpm ops confidence recompute` triggers a manual recompute; `mpm_confidence action=history` derives its view from evidence, not the cached column.
 
 **Time decay is maintained, not implied.** The formula subtracts `λ · days` of elapsed time, but a cache does not change by itself. A bounded maintenance pass keeps it honest: `mpm ops confidence decay` (also run automatically by the `confidence_decay` scheduler task, cadence-gated) recomputes at most `confidence.decay.limit` due artifacts per invocation, and only those not checked within `confidence.decay.min_age_hours`. Each artifact is recomputed and its `confidence_checked_at` watermark advanced in one transaction, so a failure retries exactly that artifact and a completed pass is a no-op until the minimum age elapses. An unchanged result advances the watermark but appends no `confidence_history` row; a changed result goes through the same authoritative path as an evidence event, including cascade crossings. Participants are memory, theory and decision rows (the `memories` table). Lessons (`lessons_base`) are not part of this pass: their cached confidence is not consulted by any gate, and adding a second watermark surface is a follow-up rather than a silent omission.
 
@@ -1143,7 +1143,7 @@ with `vector_weight = 0.5` by default. Use `--semantic` to drop BM25 and search 
 
 > **If you want a memory to surface higher, write better content.** Lexical match and semantic similarity respond to the words you put in. `mpm reinforce` increases the displayed `reinforcement_count` but does not change retrieval order.
 
-> **FTS5 tokenization contract.** The `lessons_fts` and `memories_fts` indexes use SQLite's FTS5 with the `porter unicode61` tokenizer (English stemming, ASCII case-folding). Hyphens, underscores, and dots are SPLIT — `"lazy-start"` becomes two tokens `lazy` and `start`. Queries are auto-expanded with prefix wildcards per token (`lazy* AND start*`), so the FTS5 contract is implicit-AND across all tokens. FTS5 special characters (`"`, `(`, `)`, `*`, `+`, `-`, `:`) are stripped from query input; agents querying MPM should pass natural-language query strings rather than raw FTS5 syntax. The contract is enforced in `internal/core/fts5_query.go::BuildFTS5Query` and taught in the `mpm_lessons action=query` / `mpm_memory action=query` tool descriptions so the agent doesn't have to memorise the tokenizer's quirks.
+> **FTS5 tokenization contract.** The `lessons_fts` and `memories_fts` indexes use SQLite's FTS5 with the `porter unicode61` tokenizer (English stemming, ASCII case-folding). Hyphens, underscores, and dots are SPLIT — `"lazy-start"` becomes two tokens `lazy` and `start`. Queries are auto-expanded with prefix wildcards per token (`lazy* AND start*`), so the FTS5 contract is implicit-AND across all tokens. FTS5 special characters (`"`, `(`, `)`, `*`, `+`, `-`, `:`) are stripped from query input; agents querying MPM should pass natural-language query strings rather than raw FTS5 syntax. The contract is enforced in `internal/core/fts5_query.go::BuildFTS5Query` and taught in the `mpm_lessons action=search` / `mpm_memory action=query` tool descriptions so the agent doesn't have to memorise the tokenizer's quirks.
 
 > **Implementation note:** The hybrid scoring function lives in `internal/core/hybrid_search.go`. The default embedding model is `nomic-embed-text` (768-dim), served by a **locally running Ollama instance** as the supported embedding inference provider. Ollama performs inference and returns vectors to MPM — the vectors are then persisted in the same SQLite database (alongside the memories they describe), partitioned into Voronoi cells by the shared IVF index (§6.5 Layer 1). Ollama is an inference dependency, not a separate persistence substrate or vector database; the configured embedding component can also be set to `"disabled"` (NullProvider) when semantic recall is not required.
 
@@ -1710,7 +1710,9 @@ mpm-telemetry observe [--since] [--threshold] [--min-invocations]
                                          # (observation, NOT ROI metric; human arbitrates)
 ```
 
-`observe` is the cross-DB anomaly detector. It aggregates token burn per session via the telemetry ledger, then asks MPM (via `mpm call mpm_provenance --payload '{"action":"count_by_session",...}'`) how many artifacts the session produced. Sessions with high token burn and zero new artifacts surface as `type: "observation"` lessons — descriptive, not prescriptive. The cross-DB call is parameterized so the test suite injects a stub; the production shell-out is in `cmd/mpm-telemetry/observe.go`.
+`observe` is the cross-DB anomaly detector. It aggregates token burn per session via the telemetry ledger, then counts how many artifacts the session produced. Sessions with high token burn and zero new artifacts surface as `type: "observation"` lessons — descriptive, not prescriptive.
+
+**There is no `mpm_provenance` tool.** An earlier revision of this section named one (`mpm call mpm_provenance --payload '{"action":"count_by_session"}'`), and the critic and telemetry sidecar both shelled out to it; the registry publishes 21 tools and none of them is `mpm_provenance`, so those calls failed on every qualifying session. The count is a substrate query, not a tool call: `internal/critic.SessionArtifactCount` applies the same attribution rule the missed-opportunity hunt uses (`artifact_provenance.invocation_id` → invocation → framework session) against the critic's own connection. Do not reintroduce the shell-out.
 
 **Verification.** `scripts/smoke_telemetry.sh` is a hermetic end-to-end test: boots the collector in a temp dir, sends 3 synthetic frames + an idempotent retry + a conflicting duplicate + a bad-schema frame, runs `query` / `cost` / `observe --dry-run`, asserts the row count via sqlite. Exits 0 on success.
 
@@ -2828,7 +2830,7 @@ The `Exit Criteria` line is the discipline that prevents context crunch: without
 
 The `retrieval_metadata` table is a 1:1 mapping with any cognitive node (Memory, Lesson, Decision, Theory, Skill). It tracks two signals: how often a node was surfaced into agent working memory (`reuse_count`, `last_retrieved_at`), and how often it actively helped produce durable knowledge (`success_count`). The schema is observability only — search ranking, FTS sorting, and cognitive-object schemas are unchanged. Future rankers can consult `retrieval_metadata` to blend a reuse-adjusted score; today `DefaultRanker` returns the FTS score unchanged.
 
-**Automatic instrumentation.** The agent never manages these stats explicitly. Every `mpm_context action=read_wake_context` boot, every `mpm_memory action=query` result, every `mpm_lessons action=query` result, and every `mpm_skills action=read` call increments `reuse_count` and updates `last_retrieved_at` via `RecordRetrieval` — fire-and-forget, errors swallowed so telemetry never blocks the user-facing path.
+**Automatic instrumentation.** The agent never manages these stats explicitly. Every `mpm_context action=read_wake_context` boot, every `mpm_memory action=query` result, every `mpm_lessons action=search` result, and every `mpm_skills action=read` call increments `reuse_count` and updates `last_retrieved_at` via `RecordRetrieval` — fire-and-forget, errors swallowed so telemetry never blocks the user-facing path.
 
 **Provenance Proxy via `mpm_lessons action=save`.** When the agent distils a lesson, the optional `source_ids` array credits each cited node with a `success_count` increment via `IncrementSuccess` (INSERT-or-UPDATE). A node that was already retrieved has its `success_count` bumped; a node cited from prior-session memory but not surfaced this turn gets a fresh row with `success_count=1, reuse_count=0`. The "Provenance Proxy" name reflects the design intent: from any successful lesson, the system can trace back to the cognitive nodes that informed it, even when those nodes were never re-read in the session where the lesson was synthesized.
 
@@ -3207,7 +3209,7 @@ Fresh installs get four read-only primitives (`list_capabilities`, `get_capabili
 mpm capability seed
 ```
 
-Idempotent. The seed engine (`internal/core/seed/engine_capabilities.go`) uses deterministic stable IDs (`cap.<name>`) so re-runs are clean no-ops against rows whose `source_code` still matches the bundle. Operator edits to a seeded primitive surface in the `Drifted` bucket and are never silently overwritten. A custom bundle can be merged in via `--sidecar <path>`, overriding shipped entries or adding new ones — the loader at `internal/core/seed/capabilities_loader.go` merges the sidecar into the compiled registry before the apply phase. After seeding, primitives live in `state='validated'`; the forge tick promotes them to `probation` on first invocation, then `probation` → `active` is earned by hitting the success threshold stamped at proposal time.
+Idempotent. The seed engine (`internal/core/seed/capabilities.go`, driven by `engine.go`) uses deterministic stable IDs (`cap.<name>`) so re-runs are clean no-ops against rows whose `source_code` still matches the bundle. Operator edits to a seeded primitive surface in the `Drifted` bucket and are never silently overwritten. A custom bundle can be merged in via `--sidecar <path>`, overriding shipped entries or adding new ones — the loader at `internal/core/seed/capabilities_loader.go` merges the sidecar into the compiled registry before the apply phase. After seeding, primitives live in `state='validated'`; the forge tick promotes them to `probation` on first invocation, then `probation` → `active` is earned by hitting the success threshold stamped at proposal time.
 
 ##### Operator-domain approval
 
@@ -4298,7 +4300,7 @@ How this is enforced:
 
 - `mpm_evidence action=add` recomputes confidence in the same transaction as the evidence INSERT. If recompute fails (e.g., CHECK constraint on `confidence_history.trigger`), the entire transaction rolls back — no orphan evidence rows, no stale confidence.
 - `mpm_confidence action=recompute` triggers a manual recompute from the evidence ledger.
-- `mpm_confidence action=query_history` derives its view from evidence, not the cached column.
+- `mpm_confidence action=history` derives its view from evidence, not the cached column.
 
 **The invariant:** `confidence = f(evidence, decay) at most-recent recompute`.
 
@@ -4314,7 +4316,7 @@ How this is enforced:
 - Decay never increases confidence.
 - Cached confidence always matches `f(evidence, decay)` at most-recent recompute.
 - `mpm ops gc` never shreds a memory with `weight >= 0` (regardless of the threshold).
-- The decision ledger is append-only (no UPDATE on `mpm_decisions action=save` rows after insert).
+- The decision ledger is append-only (no UPDATE on `mpm_decisions action=record` rows after insert).
 
 The confidence properties are pinned in `internal/core/confidence_test.go`. When the formula changes, the tests stay green and the meaning survives.
 
