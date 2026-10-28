@@ -58,6 +58,8 @@ AGENT_INSTALLATION = SCRIPT_DIR.parent
 REPO_ROOT = AGENT_INSTALLATION.parent
 
 PLUGIN_SOURCE = SCRIPT_DIR / "src" / "index.v2.ts"
+REGISTRY_SOURCE = REPO_ROOT / "internal" / "core" / "tools" / "registry_list.go"
+LEGACY_PLUGIN_SOURCE = SCRIPT_DIR / "src" / "index.ts"
 RESOLVER_SOURCE = SCRIPT_DIR / "src" / "resolve-mpm-binary.ts"
 WORKSPACE_SOURCE = SCRIPT_DIR / "src" / "workspace.ts"
 PACKAGE_JSON = SCRIPT_DIR / "package.json"
@@ -151,6 +153,235 @@ class ToolSurfaceFacts(unittest.TestCase):
             "",
             "the OpenCode tool prefix changed; the plugin and the managed "
             "block must be updated together",
+        )
+
+
+def _tool_descriptions(path: Path) -> dict[str, str]:
+    """Map every registered tool to its description literal.
+
+    The two plugin sources declare their tools in DIFFERENT shapes:
+
+      * `src/index.v2.ts` — a `DOMAIN_TOOLS` / `STANDALONE_TOOLS`
+        array of `{ name: "mpm_x", description: ... }` objects. The
+        domain descriptions are template literals; the standalone ones
+        are double-quoted strings.
+      * `src/index.ts` — 14 `registerDomainTool(bin, tools, { name:
+        "mpm_x", description: ... })` calls plus 3
+        `tools.mpm_x = tool({ description: ... })` assignments.
+
+    So the parser looks for a tool NAME, then takes the FIRST
+    `description:` literal after it. That covers all four shapes
+    without hard-coding any of them.
+    """
+    text = path.read_text()
+    out: dict[str, str] = {}
+    for match in re.finditer(
+        r'(?:name:\s*"|tools\.)(mpm_[a-z_]+)"?', text
+    ):
+        name = match.group(1)
+        if name in out:
+            continue
+        rest = text[match.end() :]
+        desc = re.search(
+            r'description:\s*(?:`([^`]*)`|"((?:[^"\\]|\\.)*)")',
+            rest,
+            re.S,
+        )
+        if desc:
+            out[name] = desc.group(1) if desc.group(1) is not None else desc.group(2)
+    return out
+
+
+class LegacyPluginSourceAgrees(unittest.TestCase):
+    """The legacy plugin source must not teach a different tool surface.
+
+    WHY THIS EXISTS
+    ---------------
+    The adapter carries TWO implementations of the plugin's tool
+    surface:
+
+      * `src/index.v2.ts` — the 2026-10-16 port to the OpenCode 2
+        plugin API. This is the module OpenCode loads: `package.json`'s
+        `main` is `./dist/index.v2.js`, and the root `server.js`
+        re-exports it.
+      * `src/index.ts` — the earlier implementation, in a different
+        shape (14 `registerDomainTool` calls plus 3 `tools.mpm_x =
+        tool({...})` assignments). It compiles to `dist/index.js`,
+        which **nothing in the default installation loads**.
+
+    Both register all 17 tools, and today every description is
+    identical — but nothing ENFORCES that. So it is a trap: it is the
+    file a maintainer is most likely to edit by mistake (it sorts
+    first, and it carries the older layout), and a correction applied
+    ONLY to it compiles cleanly, passes every test in this repository,
+    and **never reaches the agent**.
+
+    The 2026-10-28 session-C work hit exactly that: a `mpm_handoff`
+    description correction was applied to `src/index.ts` first, and
+    the built `dist/index.v2.js` — the file OpenCode actually loads —
+    still carried the wrong text.
+
+    WHAT THIS PINS
+    --------------
+    For every tool both files register, the description text is
+    identical. A correction must be applied to both, and this test is
+    what says so.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.loaded = _tool_descriptions(PLUGIN_SOURCE)
+        cls.legacy = _tool_descriptions(LEGACY_PLUGIN_SOURCE)
+
+    def test_the_legacy_source_is_not_the_loaded_entry_point(self) -> None:
+        # The premise of this class. If the loaded entry point ever
+        # changes, the premise changes and the class must be revisited
+        # rather than silently asserting the wrong thing.
+        package = json.loads(PACKAGE_JSON.read_text())
+        self.assertEqual(
+            package.get("main"), "./dist/index.v2.js",
+            "the loaded plugin entry point changed; this test's premise "
+            "must be re-derived",
+        )
+        server = (SCRIPT_DIR / "server.js").read_text()
+        self.assertIn("./dist/index.v2.js", server)
+
+    def test_both_sources_register_the_same_tools(self) -> None:
+        self.assertEqual(
+            sorted(self.legacy),
+            sorted(self.loaded),
+            "the two plugin sources register different tool sets",
+        )
+        self.assertEqual(
+            len(self.loaded), 17,
+            "the loaded plugin's tool count changed",
+        )
+
+    def test_the_shared_tool_descriptions_are_identical(self) -> None:
+        shared = sorted(set(self.loaded) & set(self.legacy))
+        self.assertTrue(
+            shared,
+            "no tool is registered by both sources; the parsers or the "
+            "sources changed shape",
+        )
+        for name in shared:
+            self.assertEqual(
+                self.loaded[name],
+                self.legacy[name],
+                f"{name}: the loaded plugin (src/index.v2.ts) and the "
+                f"legacy plugin (src/index.ts) describe it differently. "
+                f"A correction applied to only one of them compiles "
+                f"cleanly and never reaches the agent.",
+            )
+
+
+class PluginDescriptionsCoverTheRegistry(unittest.TestCase):
+    """Every action the registry offers must be declared in the plugin's
+    description for that tool.
+
+    WHY THIS EXISTS
+    ---------------
+    The plugin's tool descriptions are the only place an OpenCode agent
+    learns what a tool can do — the schema the host shows is
+    `params: {type: object, ...}`, a free-form envelope. So an action
+    the description does not mention is an action the agent cannot
+    discover, and one it cannot discover is one it will never use.
+
+    The 2026-10-28 session-C work found thirty-one registry actions,
+    across eleven of the seventeen tools, declared nowhere:
+
+      * `mpm_references` did not declare `read` — while the managed
+        block instructs the agent to "read the underlying source rather
+        than relying solely on a search-result summary". The block
+        promised an action the tool description did not offer.
+      * `mpm_references add` said "Required params.filepath", omitting
+        the `url` form the registry supports.
+      * `mpm_decisions` did not declare `supersede` — while the block
+        says "supersede or flag the affected record".
+      * `mpm_decisions record` said "Required params.context,
+        params.choice, params.rationale"; the registry requires only
+        `choice`, and a live call with `choice` alone succeeds.
+      * `mpm_memory` advertised `shred`, which is OPERATOR-ONLY and is
+        refused on every agent transport.
+
+    WHAT THIS PINS
+    --------------
+    For every tool the plugin registers, every action in that tool's
+    registry action enum is DECLARED AS AN ACTION LINE in the plugin's
+    description, and no description advertises an operator-only action.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        registry = REGISTRY_SOURCE.read_text()
+        cls.actions: dict[str, list[str]] = {}
+        parts = re.split(r'\n\t\tName:\s*"(mpm_[a-z_]+)"', registry)
+        for i in range(1, len(parts), 2):
+            name = parts[i]
+            body = parts[i + 1]
+            enum = re.search(
+                r'"action":\s*\{[^}]*?"enum":\s*\[([^\]]*)\]', body, re.S
+            )
+            if enum:
+                cls.actions[name] = re.findall(r'"([a-z_]+)"', enum.group(1))
+        cls.descriptions = _tool_descriptions(PLUGIN_SOURCE)
+
+    def test_the_registry_was_parsed(self) -> None:
+        self.assertGreater(
+            len(self.actions), 10,
+            "the registry's action enums were not parsed; the guard "
+            "would pass without checking anything",
+        )
+
+    def test_every_registered_action_is_declared_in_the_description(self) -> None:
+        # The check is against the DECLARED ACTION LINES — the
+        # "  <action> — ..." convention every description uses — and not
+        # a bare substring.
+        #
+        # A substring check is a weaker guard than it looks: `delete`
+        # occurs inside "Soft-delete a memory", so a description that
+        # never declared a `delete` action still passed. It also missed
+        # a real formatting defect — an appended action line merged onto
+        # the previous one, so the action was present as text but not
+        # as a line an agent would read as an action.
+        for name, actions in sorted(self.actions.items()):
+            description = self.descriptions.get(name)
+            if description is None:
+                # The plugin does not register this tool (mpm_work and
+                # friends are CLI-only). That is a deliberate choice,
+                # and the managed block names the CLI fallback for them.
+                continue
+            declared = set(
+                re.findall(r"^\s{2}([a-z_]+)\s+—", description, re.M)
+            )
+            for action in actions:
+                self.assertIn(
+                    action,
+                    declared,
+                    f"{name}: the registry offers action `{action}`, but "
+                    f"the plugin's description never declares it as an "
+                    f"action line. An agent cannot discover an action it "
+                    f"is never told about.",
+                )
+
+    def test_no_description_advertises_an_operator_only_action(self) -> None:
+        # `mpm_memory action=shred` is refused on every agent transport
+        # (`internal/core/tools/handlers.go`, operatorOnlyShredError), so
+        # advertising it is a dead end. `mpm_handoff action=shred` is a
+        # DIFFERENT action and IS agent-accessible — the guard is scoped
+        # to the one that is actually refused.
+        memory = self.descriptions.get("mpm_memory", "")
+        self.assertNotIn(
+            "  shred — ",
+            memory,
+            "mpm_memory advertises a `shred` action, which is "
+            "operator-only and refused on every agent transport",
+        )
+        self.assertIn(
+            "operator-only",
+            memory,
+            "mpm_memory should say that shred is operator-only and point "
+            "at action=delete instead",
         )
 
 

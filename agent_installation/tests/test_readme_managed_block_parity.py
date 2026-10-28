@@ -63,6 +63,24 @@ def _run_renderer(*args: str, repo_root: Path | None = None) -> subprocess.Compl
     )
 
 
+def _canonical_block_heading() -> str:
+    """The canonical block's own top-level heading.
+
+    LOCATED, not hardcoded. The heading changed with contract 4.0.0
+    (2026-10-28), when the managed block was rewritten as a behaviour
+    matrix; a hardcoded string that no longer appears would turn the
+    restoration assertion into a no-op that passes for the wrong
+    reason.
+    """
+    block = _render.extract_canonical_block(
+        CANONICAL_SOURCE.read_text(encoding="utf-8"),
+    )
+    for line in block.splitlines():
+        if line.startswith("# "):
+            return line
+    raise AssertionError("the canonical managed block has no top-level heading")
+
+
 def _tamper_block_heading(block: str, new_heading: str) -> str:
     """Rewrite the managed block's top-level heading.
 
@@ -347,7 +365,7 @@ class ReadmeManagedBlockParity(unittest.TestCase):
             "content below the managed section must survive regeneration",
         )
         self.assertIn(
-            "# MPM: Your persistent memory", result,
+            _canonical_block_heading(), result,
             "the block itself must be restored to canonical",
         )
         self.assertNotIn("MPM stale heading", result)

@@ -307,6 +307,13 @@ class AdapterContractMixin:
         # The approved contract states the distinction in the
         # "Maintain project continuity" responsibility; the anchor is
         # matched semantically rather than against one exact wording.
+        #
+        # Contract 4.0.0 (2026-10-28) rewrote the block as a behaviour
+        # matrix, so the paragraph moved. The always-on block now says
+        # "**No signal reliably marks a session end**" and the protocol
+        # carries the full three-surface distinction (§4.1). The accepted
+        # phrasings were extended rather than the behaviour being allowed
+        # to drift.
         normalized = re.sub(r"\s+", " ", self.text)
         self.assertTrue(
             any(p in normalized for p in (
@@ -314,6 +321,7 @@ class AdapterContractMixin:
                 "succeeded, and implementation from verification",
                 "Do not claim an objective is complete merely because a "
                 "session has ended",
+                "No signal reliably marks a session end",
             )),
             f"{self.snippet_path.name}: must teach that work attempted, work "
             f"succeeded and verification are separate, and that a session "
@@ -327,12 +335,16 @@ class AdapterContractMixin:
         # and to the live registry schema. The managed block carries the
         # BEHAVIOURAL decision — keep durable work state for substantial
         # work, and keep it current — which is what this asserts.
+        #
+        # Contract 4.0.0 moved that decision into the behaviour matrix:
+        # "Objective spanning sessions" → `mpm_work` action `create`.
         normalized = re.sub(r"\s+", " ", self.text)
         self.assertTrue(
             any(p in normalized for p in (
                 "Durable work state preserves progress",
                 "maintain an accurate record of objectives, completed "
                 "steps",
+                "Objective spanning sessions",
             )),
             f"{self.snippet_path.name}: must teach durable work tracking "
             f"for substantial continuing work",
@@ -346,18 +358,25 @@ class AdapterContractMixin:
         # leave useful continuation state at genuine session closure, and
         # make it actionable rather than a title — which is what this
         # asserts.
+        #
+        # Contract 4.0.0 said it in the matrix row and the handoff
+        # paragraph: "Unfinished work or session transition" →
+        # `mpm_handoff` action `write`, and "a title is not continuation
+        # state".
         normalized = re.sub(r"\s+", " ", self.text)
         self.assertTrue(
             any(p in normalized for p in (
                 "At genuine session closure, preserve meaningful "
                 "continuation state",
                 "preserve meaningful continuation state",
+                "Unfinished work or session transition",
             )),
             f"{self.snippet_path.name}: must teach leaving continuation "
             f"state at session closure",
         )
         self.assertIn(
-            "A title is not continuation state", normalized,
+            "a title is not continuation state",
+            normalized.lower(),
             f"{self.snippet_path.name}: continuation state must be taught "
             f"as actionable content, not as a task title",
         )
@@ -384,6 +403,10 @@ class AdapterContractMixin:
         # managed block is the BEHAVIOURAL rule: record meaningful
         # discoveries as they become worth preserving rather than at the
         # end of the task, and do not record trivia.
+        #
+        # Contract 4.0.0 said it as "**Persist as soon as it becomes
+        # useful**, not at session end" plus the matrix's "Routine or
+        # transient information | nothing" row.
         normalized = re.sub(r"\s+", " ", self.text)
         self.assertTrue(
             any(p in normalized for p in (
@@ -391,13 +414,15 @@ class AdapterContractMixin:
                 "preserving, not merely when the current task is complete",
                 "Record meaningful discoveries when they become worth "
                 "preserving",
+                "Persist as soon as it becomes useful",
             )),
             f"{self.snippet_path.name}: must teach persisting during work, "
             f"not only at the end",
         )
         self.assertTrue(
             "Avoid trivia, redundant memories" in normalized
-            or "one-off noise" in normalized,
+            or "one-off noise" in normalized
+            or "Routine or transient information" in normalized,
             f"{self.snippet_path.name}: persist-during-work rule must "
             f"carry the restraint clause (do not store trivia/one-off noise)",
         )

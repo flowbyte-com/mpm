@@ -241,10 +241,18 @@ class TestNamingInvariants(unittest.TestCase):
         installation (the telemetry adapter lives there, so retiring a
         host cannot take it with it). It is part of the canonical
         layout, not a compatibility alias.
+
+        `measure/` holds the verification harnesses that are not part of
+        the installation machinery — the mutation probe that proves the
+        managed-block tests are non-vacuous, and the installer
+        regression driver. It is canonical too: a harness that MUTATES
+        the canonical source needs its own home rather than living
+        beside the scripts it mutates.
         """
         siblings = sorted(p.name for p in AGENT_INSTALLATION.iterdir() if p.is_dir())
-        # The canonical adapters + scripts + tests + the host-independent lib
-        expected_dirs = {"scripts", "tests", "lib"} | CANONICAL_ADAPTERS
+        # The canonical adapters + scripts + tests + measure + the
+        # host-independent lib
+        expected_dirs = {"scripts", "tests", "lib", "measure"} | CANONICAL_ADAPTERS
         self.assertEqual(
             set(siblings),
             expected_dirs,

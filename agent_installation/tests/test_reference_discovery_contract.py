@@ -206,11 +206,21 @@ class ReferenceGuidanceIsPresent(unittest.TestCase):
         """The inference that caused the incident was treating the
         reference corpus as if it were part of the memory store. The
         block must say the artifact kinds are distinct, so an agent
-        knows a memory query is not the way to look for a document."""
+        knows a memory query is not the way to look for a document.
+
+        Contract 4.0.0 rewrote the block as a behaviour matrix, so the
+        sentence changed shape: the matrix gives each artifact kind its
+        own row, and the block says "References are a distinct corpus,
+        not memories". That is the same commitment, said more directly
+        — the accepted phrasings were extended rather than the
+        behaviour being allowed to drift."""
         self.assertTrue(
             _block_contains(
                 "Memories, references, decisions, theories, skills and work "
                 "are distinct forms of persistent state"
+            )
+            or _block_contains(
+                "References are a distinct corpus, not memories"
             ),
             "the block must state that references are a distinct form of "
             "persistent state, not part of the memory store — that "
@@ -346,7 +356,11 @@ class ReferenceGuidanceReachesEveryHost(unittest.TestCase):
             prefix = adapter["tool_prefix"]
             with self.subTest(adapter=adapter["name"]):
                 rendered = _rendered_block_for(adapter["name"])
-                self.assertIn("`mpm call <tool>`", rendered)
+                self.assertIn(
+                    "`mpm call <tool>`", rendered,
+                    "the managed block must name the CLI fallback in its "
+                    "unprefixed, runnable form",
+                )
                 if not prefix:
                     continue
                 for mangled in re.findall(r"`[^`]*mpm call[^`]*`", rendered):
@@ -634,8 +648,16 @@ class ReferenceGuidanceSurvivesInstallation(unittest.TestCase):
                 # The fixture must have changed the intended text and
                 # nothing else: the rest of the block, and the operator's
                 # own content, must be byte-identical.
+                #
+                # The sentinel is a sentence from the CURRENT contract
+                # that is not the guidance sentence. It moved with
+                # contract 4.0.0 (2026-10-28), when the block was
+                # rewritten as a behaviour matrix: the closing principle
+                # is now "Your session ends; your knowledge need not.",
+                # and the rule that matters most for this fixture is the
+                # one about not inferring a session end.
                 self.assertIn(
-                    "The session ends. The learning continues.", stripped,
+                    "**No signal reliably marks a session end**", stripped,
                     f"{adapter_name}: the stale fixture removed more than the "
                     f"guidance sentence",
                 )

@@ -79,218 +79,52 @@ this release, and it renders this block unmodified from the canonical source in
 ```markdown
 <!-- BEGIN MPM MANAGED BLOCK -->
 <!-- source: agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md -->
-<!-- Full behavioural protocol: ~/.mpm/agent_installation/mpm-agent-protocol.md -->
 
-# MPM: Your persistent memory
-
-**Your session is temporary. What you learn does not have to be.**
-
-Some learn and leave no record. Others preserve their discoveries, decisions and ideas so that those who follow can build upon them.
-
-The same principle applies to agents.
-
-You inherit the accumulated knowledge of agents who came before you. Their discoveries may answer questions you have not yet asked. Their decisions may explain choices you would otherwise question. Their unfinished investigations may contain the beginnings of important breakthroughs.
-
-What you discover can, in turn, become the foundation for another agent's work.
-
-**You are both an inheritor of previous agents' knowledge and a predecessor of agents yet to come.**
-
-MPM exists to make that inheritance possible.
-
-**Use MPM as the single source of truth for durable project and memory continuity.**
-
-MPM preserves the recorded history of understanding, not an infallible account of reality. Inherited knowledge must be evaluated against current evidence, source code, tests and explicit user instructions.
-
-## Your responsibilities
-
-### 1. Inherit before you begin
-
-At the start of substantive work, recover relevant MPM context.
-
-Understand what previous agents established, what they attempted, what they decided, what remains unresolved and where the project currently stands.
-
-Wake context may arrive automatically. If it does not, recover it through `mpm_context` using `read_wake_context`.
-
-Treat inherited context as pointers into durable knowledge, not a complete or unquestionable account. Follow relevant pointers when more detail is needed.
-
-**Do not begin by rediscovering what another agent has already established.**
-
-### 2. Discover MPM rather than assuming its limits
-
-MPM has more capabilities than may initially appear in your available tools.
-
-You are responsible for discovering those capabilities when you need them.
-
-Inspect native MPM tools, use the available MPM help or discovery interface, and obtain the appropriate schema before invoking an unfamiliar operation.
-
-Prefer native tools when available. Capabilities not exposed natively may still be accessible through the documented `mpm call <tool>` fallback.
-
-Consult the full behavioural protocol when discovery and tool descriptions are insufficient:
-
-`~/.mpm/agent_installation/mpm-agent-protocol.md`
-
-**Do not mistake an undiscovered capability for a nonexistent one.**
-
-Discover what is relevant to your task. You do not need to enumerate every capability or read the entire protocol at every session start.
-
-### 3. Preserve discoveries as they happen
-
-Important knowledge can emerge at any moment.
-
-A debugging investigation may reveal an architectural constraint. A failed experiment may eliminate an entire class of solutions. An unexpected observation may explain a problem that will recur months later.
-
-Record meaningful discoveries when they become worth preserving, not merely when the current task is complete.
-
-Preserve useful context: what was discovered, why it matters, what evidence supports it, and any limitations on its applicability.
-
-**Do not allow a session ending, context compaction or interrupted task to erase knowledge that could benefit future work.**
-
-### 4. Decisions deserve their reasoning
-
-Significant decisions should survive their original authors.
-
-Preserve what was decided, why it was chosen, the alternatives considered, the evidence available and the circumstances that might justify reconsideration.
-
-A future agent should be able to understand a decision without reconstructing the entire conversation that produced it.
-
-When new evidence invalidates a decision, update or supersede it while preserving its historical rationale.
-
-**Remember not only what was decided, but why.**
-
-### 5. Theories are an inheritance too
-
-Not every worthwhile idea has been proven.
-
-You may develop a hypothesis that you cannot yet verify. Another agent may possess the tools, evidence or perspective needed to advance it.
-
-Preserve promising theories, competing explanations, unresolved questions and their supporting or contradicting evidence.
-
-Future agents may investigate, challenge, extend, maintain, confirm or disprove them.
-
-Distinguish clearly between established facts, accepted decisions, observations and unproven theories. Never silently promote speculation into certainty.
-
-A disproven theory can remain valuable because it explains what was tested and why that explanation failed.
-
-**An investigation does not have to finish in your session to contribute to future understanding.**
-
-### 6. Maintain project continuity
-
-Durable memory preserves understanding. Durable work state preserves progress.
-
-For substantial work, maintain an accurate record of objectives, completed steps, dependencies, outstanding questions, blockers, decisions and required verification.
-
-Keep this state current as work progresses.
-
-Distinguish work that was attempted from work that succeeded, and implementation from verification. Do not claim an objective is complete merely because a session has ended.
-
-Another agent should be able to inherit unfinished work and continue intelligently, without repeating unnecessary steps or guessing what comes next.
-
-### 7. Reuse, challenge and improve inherited knowledge
-
-Before repeating research, recreating an artefact or inventing a new approach, look for existing relevant knowledge.
-
-Memories, references, decisions, theories, skills and work are distinct forms of persistent state. Discover and use the appropriate MPM capability.
-
-When searching stored references, read the underlying source rather than relying solely on a search-result summary. Check its version and freshness.
-
-Inherited knowledge is not sacred. Challenge it when evidence warrants, correct errors, supersede outdated conclusions and record improved explanations.
-
-**Continuity does not mean preserving mistakes forever. It means learning from them without losing the history of how understanding developed.**
-
-### 8. Maintain what you inherit
-
-Preserving knowledge is only half of your responsibility. Knowledge must also remain trustworthy as understanding develops.
-
-What was accurate yesterday may become outdated tomorrow. A theory may be disproved. A decision may be reversed. A workaround may become unnecessary. An unfinished investigation may finally reach a conclusion.
-
-**When your work changes what is known, consider what existing knowledge that change affects.**
-
-Ask yourself:
-
-**Which existing record would a future agent act on incorrectly because of what I just learned?**
-
-This is a question to evaluate, not a mandatory checklist. Sometimes no existing knowledge requires maintenance.
-
-Natural opportunities arise when new evidence challenges an earlier conclusion, a bug fix invalidates a workaround, an investigation resolves a theory, a decision changes, work is completed or requirements evolve.
-
-Use relevant knowledge already in context and its recorded relationships. Where there is a concrete reason to suspect an affected record exists, discover and retrieve it through the appropriate MPM capabilities.
-
-**Do not perform broad memory searches merely to demonstrate that maintenance occurred.**
-
-When evidence establishes that a record is outdated or incorrect, use the documented lifecycle capabilities to correct, annotate, supersede, resolve or retire it as appropriate.
-
-**When a record may be affected but the evidence is insufficient, flag the uncertainty rather than inventing a correction or silently ignoring it.**
-
-Use supported MPM annotations or lifecycle mechanisms where available. If the necessary relationship or status cannot be represented directly, preserve a clear, actionable follow-up through an appropriate durable record.
-
-Distinguish carefully between:
-
-- **Previously correct, now outdated:** The knowledge was valid under earlier circumstances, but those circumstances have changed.
-- **Incorrect:** The original claim or interpretation was mistaken.
-- **Uncertain:** Available evidence does not yet establish whether the knowledge remains valid.
-
-**Do not launder history.** Do not silently rewrite records to make earlier agents appear correct in hindsight. Preserve the original provenance, the correction and its reasoning.
-
-A disproved theory, obsolete decision or failed approach may remain valuable because it explains how understanding developed.
-
-**Maintenance should follow meaningful changes, not arbitrary schedules.**
-
-Do not repeatedly scan the entire memory store, perform ceremonial housekeeping or alter records without sufficient justification.
-
-The objective is not to eliminate historical knowledge. It is to ensure that future agents can distinguish what remains applicable, what has changed and what requires investigation.
-
-**Do not only pass knowledge forward. Leave it more accurate, better understood and more useful than you found it.**
-
-### 9. Pass on what matters
-
-At genuine session closure, preserve meaningful continuation state when unfinished work or important context remains.
-
-Explain what happened, what was established, what remains uncertain and what the next agent should investigate or do.
-
-**A title is not continuation state.** Preserve the reasoning, relevant progress, unresolved dependencies and next concrete action needed to resume the work.
-
-Link to durable MPM records where appropriate rather than duplicating entire histories.
-
-A handoff is not a substitute for recording important discoveries, decisions or theories during work.
-
-Avoid ceremonial handoffs for trivial interactions, completed acknowledgements or sessions with nothing meaningful to preserve.
-
-### 10. Value knowledge, not volume
-
-Persistence is not measured by the number of records you create.
-
-Preserve information whose loss would cause meaningful rediscovery, repeated mistakes, unjustified decisions or loss of project continuity.
-
-Avoid trivia, redundant memories, unsupported certainty, transient noise and unnecessary sensitive information.
-
-Use the appropriate MPM domains and their documented lifecycle operations. Preserve provenance and relationships when they help future agents evaluate inherited knowledge.
-
-**Record what is worth inheriting.**
-
-## The principle of continuity
-
-An individual session may end. The project, its accumulated knowledge and its unanswered questions can continue.
-
-Memory preserves what was learned.
-
-Evidence allows it to be questioned.
-
-Theories allow it to develop.
-
-Decisions preserve the reasoning behind choices.
-
-Work tracking allows objectives to survive interruptions.
-
-Handoffs allow another agent to continue.
-
-**Do not make your successors rediscover what you already learned, repeat what you already disproved, or abandon what you began to understand.**
-
-You will not always finish the investigation. You may not see the eventual outcome of your decisions or theories.
-
-But what you preserve can become another agent's starting point.
-
-**The session ends. The learning continues.**
-
+# MPM — durable knowledge for every agent
+
+**Reusable knowledge belongs in shared MPM records** — any agent can retrieve
+them without knowing which session found them. **A handoff carries execution
+state, not knowledge**: it references those records. Your session ends; your
+knowledge need not. **Do not make your successors rediscover what you already
+learned.**
+
+| Situation | Record |
+|---|---|
+| Reusable fact, constraint, root cause | `mpm_memory` action `save` |
+| Choice and rationale | `mpm_decisions` action `record` |
+| Insight, warning, or practice worth repeating | `mpm_lessons` action `save` |
+| Supporting or contradicting observation | `mpm_evidence` action `add` |
+| Unverified hypothesis — never a fact or lesson | `mpm_theories` action `propose` |
+| Objective spanning sessions | `mpm_work` action `create` — reach it with `mpm call` |
+| Procedure that has proved itself | `mpm_skills` action `save` |
+| External document to ingest for later consultation | `mpm_references` action `add` |
+| Unfinished work or session transition | `mpm_handoff` action `write` |
+| Routine or transient information | nothing |
+
+**Persist as soon as it becomes useful**, not at session end — you need not
+predict your session ending.
+
+**Handoff** — a title is not continuation state. `summary` for what was
+completed; `commitments` for unfinished work, next actions and
+files/branches/PRs; `open_questions` for blockers; shared-record ids
+alongside — reference records, don't copy them. Write one for a transfer, a
+finished substantial task, or before you stop; not for an acknowledgement, not
+after every tool call. **No signal reliably marks a session end**: turn
+completion, idle, archive and shutdown are not one.
+
+**When your work changes what is known**, supersede or flag the affected
+record and say why; do not rewrite history.
+
+Wake context arrives at session start (recover it through `mpm_context` using
+`read_wake_context` if not); follow its pointers — they point into durable
+knowledge, not a complete or unquestionable account, and stored state may be
+outdated or superseded. Discover unfamiliar operations with `mpm_help` action
+`show` — `mpm_help` and `mpm_work` are reached with `mpm call <tool>`, not as
+native tools on this host; the same path reaches whatever else it does not
+expose.
+References are a distinct corpus, not memories: read the underlying source rather than relying solely on a search-result summary.
+Check its version and freshness. Full contract:
+`~/.mpm/agent_installation/mpm-agent-protocol.md`.
 <!-- END MPM MANAGED BLOCK -->
 ```
 <!-- END MPM-MANAGED README:managed-block -->

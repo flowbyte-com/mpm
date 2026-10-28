@@ -23,6 +23,19 @@
 | I | **Parallel launch gate and B/C handoff** | [`launch-gate.md`](launch-gate.md) | **Complete — launch conditions met** |
 | J | **Runtime migration — the plan** | [`runtime-migration-plan.md`](runtime-migration-plan.md) | **Complete — design accepted (D1–D7); the live migration is a separate approval gate** |
 | K | **Runtime migration — the evidence** | [`runtime-migration-evidence.md`](runtime-migration-evidence.md) | **Complete — 135 rehearsal assertions, 0 failures, reproducible with `make rehearsal`** |
+| L | **Compact managed instruction block (contract 4.0.0)** | [`session-c-compact-managed-block.md`](session-c-compact-managed-block.md) | **Reviewed — MERGE WITH CORRECTIONS; corrections applied, not merged, not deployed** |
+
+**Row L is a Session C proposal, not a Session A deliverable.** Session A
+reviewed it on 2026-10-28 and recommended merging with one non-blocking
+annotation — that `mpm_work` and `mpm_help` are reached with `mpm call`, not
+as native OpenCode tools — which is applied at both points of use in the
+block. It replaces the always-on managed instruction block (11,225 bytes /
+2,009 tokens) with a 2,688-byte / 632-token behaviour matrix, and moves the
+twelve behavioural commitments into a new section of the canonical protocol.
+Its inherited handover is
+[`session-c-handoff-2026-10-29.md`](session-c-handoff-2026-10-29.md); that
+document carries a status note at its head recording which items were actioned
+and three corrections to the handover itself.
 
 ---
 

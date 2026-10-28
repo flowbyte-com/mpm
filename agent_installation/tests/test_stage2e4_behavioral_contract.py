@@ -176,6 +176,14 @@ class ContinuityContract(unittest.TestCase):
         "Inherit before you begin" responsibility: wake context may
         arrive automatically, and when it does not, the agent recovers it
         explicitly. This asserts the behaviour, not one wording of it.
+
+        The accepted phrasings grew with contract 4.0.0 (2026-10-28),
+        which rewrote the block as a behaviour matrix: the compact block
+        says "Wake context arrives at session start" and "recover it
+        through `mpm_context` using `read_wake_context`". The BEHAVIOUR
+        is unchanged — wake arrives without the agent fetching it, and
+        the recovery path is named — so the list below was extended
+        rather than the behaviour being allowed to drift.
         """
         for host, block in self.blocks:
             with self.subTest(host=host):
@@ -192,6 +200,7 @@ class ContinuityContract(unittest.TestCase):
                         "Wake context may arrive automatically",
                         "Wake is auto-injected on session start",
                         "wake context normally arrives at session start",
+                        "Wake context arrives at session start",
                     )),
                     f"{host}: managed block must teach that wake context "
                     f"arrives without the agent having to fetch it",
@@ -202,6 +211,7 @@ class ContinuityContract(unittest.TestCase):
                     any(p in normalized for p in (
                         "recover it through",
                         "recovery path",
+                        "recovers it",
                     )),
                     f"{host}: managed block must frame read_wake_context as "
                     f"the recovery path when wake context does not arrive",
@@ -225,7 +235,8 @@ class ContinuityContract(unittest.TestCase):
                     "Treat inherited context as pointers into durable "
                     "knowledge" in normalized
                     or "inherited awareness" in normalized
-                    or "inherited working awareness" in normalized,
+                    or "inherited working awareness" in normalized
+                    or "they point into durable knowledge" in normalized,
                     f"{host}: managed block must teach that inherited "
                     f"context points into durable knowledge rather than "
                     f"being self-sufficient",

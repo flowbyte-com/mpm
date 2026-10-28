@@ -39,6 +39,11 @@ What is deliberately NOT a violation
   what a run observed on a specific date; rewriting them would falsify
   history rather than fix a defect. The live operational documents are
   the ones that teach a host today.
+* The behavioural-comparison fixtures under `measure/fixtures/`. Same
+  reason: they are verbatim snapshots of an earlier contract, kept so
+  that a comparison against them measures what it claims to measure.
+  Editing a snapshot to satisfy this rule would make the baseline a
+  fabrication.
 """
 
 from __future__ import annotations
@@ -73,11 +78,42 @@ def _is_dated_validation_report(path: Path) -> bool:
     return path.name.startswith("VALIDATION-")
 
 
+def _is_historical_snapshot(path: Path) -> bool:
+    """True for a verbatim snapshot of a PAST contract.
+
+    Two kinds of document qualify, and they qualify for the same
+    reason:
+
+    * **Dated `VALIDATION-<date>.md` reports** — point-in-time
+      records of what a run observed on a specific date.
+    * **The behavioural-comparison fixtures** under
+      `agent_installation/measure/fixtures/` — verbatim snapshots of
+      an earlier managed-instruction contract, kept so that a
+      comparison against it measures what it claims to measure.
+
+    A snapshot is exempt because **rewriting it would falsify
+    history** rather than fix a defect. The 3.0.0 contract really did
+    advertise `mpm_memory action=shred`; that is precisely why it is
+    worth keeping verbatim, and precisely why the comparison against
+    it is informative. Editing it to satisfy this rule would make the
+    baseline a fabrication and the comparison a lie.
+
+    The exemption is scoped to the fixtures DIRECTORY. It is not a
+    general "under measure/ is fine" hole: a new document placed
+    there would be a live operational document and must obey the rule
+    like any other.
+    """
+    if _is_dated_validation_report(path):
+        return True
+    parts = path.parts
+    return "measure" in parts and "fixtures" in parts
+
+
 def _markdown_documents():
     for path in sorted(AGENT_INSTALLATION.rglob("*.md")):
         if "node_modules" in path.parts:
             continue
-        if _is_dated_validation_report(path):
+        if _is_historical_snapshot(path):
             continue
         yield path
 

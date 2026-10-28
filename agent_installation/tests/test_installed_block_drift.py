@@ -485,6 +485,17 @@ class InstalledBlockDriftHermetic(unittest.TestCase):
             # commitment, not on the number of the responsibility it
             # sits under: a numbered anchor would silently stop
             # mutating once the contract was renumbered.
+            #
+            # THE ANCHOR MUST SIT ON ONE LINE IN THE CANONICAL SOURCE.
+            # The fixture strips the guidance line to build a stale
+            # block, and it can only do that if a single line contains
+            # the whole phrase. The canonical block therefore writes
+            # that one sentence unwrapped, even though the rest of the
+            # block is hard-wrapped. If the phrase is ever split across
+            # a wrap point, this fixture stops mutating anything and
+            # the drift detector is exercised against an unchanged
+            # file — the exact vacuous-pass shape this suite exists to
+            # prevent. The assertion below catches that.
             stale = text.replace(
                 "read the underlying source rather than relying solely on "
                 "a search-result summary",
@@ -495,6 +506,17 @@ class InstalledBlockDriftHermetic(unittest.TestCase):
                 text, stale,
                 "fixture failed to make the block stale, so this test "
                 "would pass without exercising the failure path",
+            )
+            self.assertIn(
+                "read the underlying source rather than relying solely on "
+                "a search-result summary",
+                "\n".join(
+                    line for line in text.splitlines()
+                    if "read the underlying source" in line
+                ),
+                "the reference-discovery anchor must sit on ONE line in "
+                "the canonical block; splitting it across a wrap point "
+                "makes the drift fixture a no-op",
             )
             self._write_installed(entry, stale)
             mutated.append(entry["host"])
