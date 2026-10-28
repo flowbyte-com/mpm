@@ -472,5 +472,150 @@ class TestNoGitCheckout(unittest.TestCase):
         self.assertEqual(run_script(script, "build-type"), "development")
 
 
+def run_script_env(script_path, *args, env=None, cwd=None):
+    """Run the provenance script with extra environment variables.
+
+    Returns the CompletedProcess so a test can assert on the exit code
+    and the stderr — the producer's assertions are REFUSED with a
+    non-zero exit, and that refusal is the behaviour under test.
+    """
+    full = dict(os.environ)
+    for key, value in (env or {}).items():
+        if value is None:
+            full.pop(key, None)
+        else:
+            full[key] = value
+    return subprocess.run(
+        [script_path, *args],
+        cwd=cwd,
+        env=full,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+
+
+class TestProducerAssertions(unittest.TestCase):
+    """The producer's MPM_BUILD_COMMIT / MPM_BUILD_DIRTY assertions.
+
+    MPM is migrating from a Git checkout to versioned, Git-free runtime
+    bundles. A source export has no history to ask, so its binaries used
+    to report commit "unknown" — honest, but useless: an operator could
+    not tell which build they were running, and a rollback target could
+    not be named.
+
+    The producer therefore STATES the revision it exported. The
+    statement is an ASSERTION, so it is validated: a malformed one and a
+    contradictory one are both refused, because a build that claims an
+    identity it does not have is worse than one that claims none.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="mpm-provenance-assert-")
+        self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
+        self.export = make_mpm_export(self.root)
+        self.script = os.path.join(self.export, SCRIPT_REL)
+
+    def test_the_asserted_commit_is_reported(self):
+        sha = "4111c46dbe30de44e9ed8f7a715fff9e8c3e469e"
+        proc = run_script_env(
+            self.script, "commit", env={"MPM_BUILD_COMMIT": sha}
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), sha)
+
+    def test_the_asserted_short_commit_is_derived_from_it(self):
+        sha = "4111c46dbe30de44e9ed8f7a715fff9e8c3e469e"
+        proc = run_script_env(
+            self.script, "short-commit", env={"MPM_BUILD_COMMIT": sha}
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), sha[:8])
+
+    def test_the_asserted_dirty_state_is_reported(self):
+        for state in ("true", "false", "unknown"):
+            with self.subTest(state=state):
+                proc = run_script_env(
+                    self.script, "dirty", env={"MPM_BUILD_DIRTY": state}
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stdout.strip(), state)
+
+    def test_the_ldflags_payload_carries_the_assertion(self):
+        sha = "4111c46dbe30de44e9ed8f7a715fff9e8c3e469e"
+        proc = run_script_env(
+            self.script,
+            "ldflags",
+            env={"MPM_BUILD_COMMIT": sha, "MPM_BUILD_DIRTY": "false"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        ldflags = proc.stdout
+        self.assertIn("-X %s.Commit=%s" % (BUILDINFO_PKG, sha), ldflags)
+        self.assertIn("-X %s.ShortCommit=%s" % (BUILDINFO_PKG, sha[:8]), ldflags)
+        self.assertIn("-X %s.Dirty=false" % BUILDINFO_PKG, ldflags)
+
+    def test_a_malformed_commit_assertion_is_refused(self):
+        for bad in ("notasha", "4111c46", "4111c46dbe30de44e9ed8f7a715fff9e8c3e469", "ZZZZ"):
+            with self.subTest(value=bad):
+                proc = run_script_env(
+                    self.script, "commit", env={"MPM_BUILD_COMMIT": bad}
+                )
+                self.assertNotEqual(
+                    proc.returncode,
+                    0,
+                    "a malformed MPM_BUILD_COMMIT must be refused, not stamped",
+                )
+                self.assertIn("MPM_BUILD_COMMIT", proc.stderr)
+
+    def test_a_malformed_dirty_assertion_is_refused(self):
+        proc = run_script_env(
+            self.script, "dirty", env={"MPM_BUILD_DIRTY": "maybe"}
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("MPM_BUILD_DIRTY", proc.stderr)
+
+    def test_without_the_assertion_the_export_still_reports_unknown(self):
+        # The control: the assertion is what makes the identity
+        # trustworthy. Without it, the export has no history to report.
+        self.assertEqual(run_script(self.script, "commit"), "unknown")
+        self.assertEqual(run_script(self.script, "dirty"), "unknown")
+
+    def test_an_assertion_that_contradicts_the_checkout_is_refused(self):
+        # A checkout whose HEAD is a DIFFERENT commit than the one the
+        # producer asserts: the builder exported one revision and
+        # stamped another. The build is refused rather than believed.
+        prov = ProvenanceRepo(version="1.2.3")
+        self.addCleanup(prov.cleanup)
+        wrong = "0" * 40
+        proc = run_script_env(
+            prov.script, "commit", env={"MPM_BUILD_COMMIT": wrong}
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("contradicts", proc.stderr)
+
+    def test_an_assertion_that_agrees_with_the_checkout_is_accepted(self):
+        prov = ProvenanceRepo(version="1.2.3")
+        self.addCleanup(prov.cleanup)
+        head = prov.head_sha()
+        proc = run_script_env(
+            prov.script, "commit", env={"MPM_BUILD_COMMIT": head}
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), head)
+
+    def test_a_dirty_assertion_that_contradicts_the_checkout_is_refused(self):
+        prov = ProvenanceRepo(version="1.2.3")
+        self.addCleanup(prov.cleanup)
+        # A modified tracked file makes the checkout dirty; asserting
+        # otherwise is a contradiction.
+        prov.write("main.go", "package main\n\n// changed\n")
+        proc = run_script_env(
+            prov.script, "dirty", env={"MPM_BUILD_DIRTY": "false"}
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("contradicts", proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
