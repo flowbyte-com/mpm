@@ -1,5 +1,5 @@
 // directive_tools_test.go — pins the scope-filtering contract for
-// ReadDirectivesForFramework. See docs/archive/directives.md §4.
+// ReadDirectivesForFramework. See docs/library/directives.md §4.
 package internal
 
 import (

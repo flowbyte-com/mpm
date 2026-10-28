@@ -1,5 +1,17 @@
 # Compact Refusal Lifecycle — Design Specification
 
+> **Library status: Current — implemented.**
+>
+> The compact refusal lifecycle (how a refused compaction is recorded and recovered). Implemented and cited by the compaction handlers and tests.
+>
+> **Moved to `docs/library/` on 2026-10-28** from `docs/library/2026-09-30-compact-refusal-lifecycle.md`, when
+> `docs/archive/` was retired.
+>
+> **This document does not describe current product behaviour.** For that,
+> read [`docs/SPEC.md`](../SPEC.md). Trust this one for *why*, not for *what*.
+
+---
+
 > **Status:** **Implemented** (2026-10-01). All 16 claims in §10 are
 > pinned by `internal/core/compact_design_matrix_test.go`. Two
 > deliberate deviations from the text below are recorded in §11.

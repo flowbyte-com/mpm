@@ -3,7 +3,7 @@ package capability
 import "fmt"
 
 // CapabilityState is the lifecycle state of a capability. See §1.2 of
-// docs/archive/capability-lifecycle.md for semantics.
+// docs/library/capability-lifecycle.md for semantics.
 //
 // Storage-layer constraint: the `state` column in the capabilities
 // table has a CHECK constraint that lists every state in

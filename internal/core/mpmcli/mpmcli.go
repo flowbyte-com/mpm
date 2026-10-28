@@ -61,9 +61,9 @@ func ResolveWorkspace() string {
 // Precedence: MPM_PROVENANCE_FRAMEWORK (canonical) is consulted
 // before MPM_FRAMEWORK (legacy fallback). Mirrors the precedence used
 // by internal/core/provenance.go (artifact-write channel) and
-// cmd/mpm/call.go (call-handler channel). See docs/provenance-env.md.
+// cmd/mpm/call.go (call-handler channel). See docs/library/provenance-env.md.
 //
-// See docs/archive/directives.md §5 for the runtime transport
+// See docs/library/directives.md §5 for the runtime transport
 // contract.
 func ActiveContextFromEnv() internal.ActiveContext {
 	framework := os.Getenv("MPM_PROVENANCE_FRAMEWORK")

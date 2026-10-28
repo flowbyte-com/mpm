@@ -730,7 +730,7 @@ Per-action semantics:
 		Description: `Self-report agent work as a structured changelog entry tied to a git commit SHA.
 Use when: you have completed a meaningful unit of work (a fix, a feature, a refactor) and want to record it in the project changelog with a reference to the commit that shipped it. The changelog entry is permanent and queryable.
 
-Optional assertion params (epistemic confirmation / contradiction, see docs/epistemic-confirmation.md):
+Optional assertion params (epistemic confirmation / contradiction, see docs/library/epistemic-confirmation.md):
   - confirms_lesson_id / confirms_decision_id / confirms_theory_id (string or array of strings): the named artifacts this commit explicitly validates; each produces an evidence row of type 'reproduction' (+0.85) and a confidence recompute against the asserted artifact.
   - contradicts_lesson_id / contradicts_decision_id / contradicts_theory_id (string or array of strings): the named artifacts this commit explicitly shows to be wrong; each produces an evidence row of type 'challenge' (-0.6) and a confidence recompute. A contradiction strong enough to cross confidence below 0.3 triggers the existing cascade invalidation machinery.
 
@@ -761,7 +761,7 @@ max_bytes applies a soft materialization ceiling for large results. full=true by
 	// (challenge / restore_challenge live as actions under mpm_memory —
 	//  the standalone mpm_challenge tool was retired on 2026-09-05
 	//  because it duplicated mpm_memory.challenge with the same wire
-	//  contract; see docs/onboarding-mcp-native-audit-2026-09-05.md
+	//  contract; see docs/library/onboarding-mcp-native-audit-2026-09-05.md
 	//  Part C / follow-up commit log.)
 
 	{

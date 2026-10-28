@@ -1,5 +1,5 @@
 // cascade_positive_test.go — coverage for the positive-direction
-// (constructive) cascade feature, per docs/constructive-cascade-design.md.
+// (constructive) cascade feature, per docs/library/constructive-cascade-design.md.
 //
 // The negative cascade invalidates downstream when a foundation is
 // contradicted. The positive cascade is the symmetric feature — it

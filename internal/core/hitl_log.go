@@ -1,7 +1,7 @@
 // hitl_log.go — the single append + retention path shared by every writer of
 // the two human-in-the-loop JSONL files (`mirror.jsonl`, `watchdog.jsonl`).
 //
-// The HITL design (docs/archive/2026-10-03-hitl-log-redesign.md §12B) makes
+// The HITL design (docs/library/2026-10-03-hitl-log-redesign.md §12B) makes
 // this file load-bearing rather than tidy-up: BEFORE it, rotation was
 // fragmented — `ChallengeMemoryAsync` owned an inline rotate-and-append under
 // the shared watchdog mutex, `appendToMirror`/`appendBlockedAttempt` never

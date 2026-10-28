@@ -62,7 +62,7 @@ import (
 //     from SourceLanguage.Interpreter(), which is a host
 //     prerequisite not a driver prerequisite).
 //
-// Spec: docs/archive/capability-lifecycle.md §4.1 (trusted +
+// Spec: docs/library/capability-lifecycle.md §4.1 (trusted +
 //      operator arg shape).
 // =============================================================================
 

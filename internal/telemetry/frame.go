@@ -1,6 +1,6 @@
 // internal/telemetry/frame.go — wire-format Frame struct + validation.
 //
-// Mirrors the v1 schema in docs/archive/2026-08-21-telemetry-binary-design.md §3.
+// Mirrors the v1 schema in docs/library/2026-08-21-telemetry-binary-design.md §3.
 
 package telemetry
 

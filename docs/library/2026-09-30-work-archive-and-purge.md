@@ -1,5 +1,17 @@
 # Work Archive and Logical Purge — Design Specification
 
+> **Library status: Current — implemented.**
+>
+> The work-archive and purge design. Implemented; cited by the work handlers and their tests for the retention and purge semantics.
+>
+> **Moved to `docs/library/` on 2026-10-28** from `docs/library/2026-09-30-work-archive-and-purge.md`, when
+> `docs/archive/` was retired.
+>
+> **This document does not describe current product behaviour.** For that,
+> read [`docs/SPEC.md`](../SPEC.md). Trust this one for *why*, not for *what*.
+
+---
+
 > **Status:** **Implemented**. Landed across `aaca517` (archive and
 > visibility lifecycle), `968f3d5` (CLI logical purge), and `3d9a866`
 > (corrected `epistemic_provenance` direction — §5.5.1). The normative

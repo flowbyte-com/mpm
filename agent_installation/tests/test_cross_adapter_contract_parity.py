@@ -686,7 +686,7 @@ class ToolReferenceStabilityContract(unittest.TestCase):
     def test_mpm_memory_action_challenge_documented(self):
         # The challenge surface is reachable via mpm_memory action=challenge
         # (the standalone mpm_challenge tool was retired 2026-09-05; see
-        # docs/onboarding-mcp-native-audit-2026-09-05.md Part C). The
+        # docs/library/onboarding-mcp-native-audit-2026-09-05.md Part C). The
         # tool-reference table must document the action surface where
         # agents will look for it.
         self.assertIn("action=`challenge`", self.table,

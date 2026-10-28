@@ -1,5 +1,5 @@
 // f_s2_decisions_bound_test.go — regression for pointer-indirection sweep
-// finding F-S-2 (docs/pointer-indirection-sweep-2026-09-05.md).
+// finding F-S-2 (docs/library/pointer-indirection-sweep-2026-09-05.md).
 //
 // `mpm decisions` (no-args legacy listing) used to iterate every
 // decision in the collection unbounded — output scaled linearly with

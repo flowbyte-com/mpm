@@ -327,7 +327,7 @@ func mapToWorkshopRequest(src interface{}, dst *internal.WorkshopRequest) error 
 // only this page should have enough information to invoke the
 // workshop without consulting the substrate source.
 //
-// Source of truth: docs/archive/2026-08-28-mpm-skill-workshop-design.md
+// Source of truth: docs/library/2026-08-28-mpm-skill-workshop-design.md
 // and agent_installation/mpm-agent-protocol.md §3.1.
 func printSkillWorkshopHelp() {
 	fmt.Println(`mpm skill workshop — Skills Workshop (form | refine)

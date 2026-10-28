@@ -323,7 +323,7 @@ func buildMCPServerCore() *server.MCPServer {
 		// tools/list time. Specialists are reachable via the
 		// mpm_help discovery tool + `mpm call <tool>` escape hatch.
 		// MPM_EXPOSE_ALL_TOOLS=1 reverts to the legacy full surface.
-		// See docs/CONTEXT_EXPOSURE.md for the architecture.
+		// See docs/library/CONTEXT_EXPOSURE.md for the architecture.
 		//
 		// MCP initialize.instructions: deliberately NOT set. The
 		// behavioural contract lives in the per-host managed

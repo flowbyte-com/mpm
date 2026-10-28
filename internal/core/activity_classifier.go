@@ -30,7 +30,7 @@ const (
 
 // Known host-agent frameworks. These are the canonical wire strings
 // set via MPM_PROVENANCE_FRAMEWORK / MPM_FRAMEWORK env vars by each
-// adapter. Keep this list in lockstep with docs/provenance-env.md.
+// adapter. Keep this list in lockstep with docs/library/provenance-env.md.
 //
 // An invocation from one of these frameworks is an agent, NOT a
 // human, regardless of what the CLI default audit_hook wrote before

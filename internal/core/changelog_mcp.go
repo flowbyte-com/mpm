@@ -145,7 +145,7 @@ func (dm *DatabaseManager) LogChangelogEntry(fact, commitHash string, extraTags 
 // asserts is validated by a changelog commit. Used by
 // LogChangelogEntryWithConfirmations; the artifact_type must be one of
 // lesson / decision / theory (the canonical artifact types that
-// participate in the confirmation flow per docs/epistemic-confirmation.md).
+// participate in the confirmation flow per docs/library/epistemic-confirmation.md).
 //
 // Confirmation is explicit-only: no inference, no keyword matching. The
 // caller asserts the relationship by naming the id; the substrate
@@ -173,12 +173,12 @@ type ConfirmationSpec struct {
 // confidence toward the floor; a strong contradiction (multiple
 // challenge rows, or an override-strength challenge) can cross the
 // floor and legitimately enqueue cascade intents for downstream
-// dependents. Per docs/archive/epistemic-cascades.md, threshold
+// dependents. Per docs/library/epistemic-cascades.md, threshold
 // crossing is one of three legitimate cascade triggers. The
 // contradiction path does NOT suppress this — doing so would silently
 // hide the user's intent when they assert "this artifact is wrong."
 //
-// Per docs/epistemic-confirmation.md §"Cascade cross-fire
+// Per docs/library/epistemic-confirmation.md §"Cascade cross-fire
 // asymmetry", this is the deliberate, documented divergence between
 // the two directions.
 type ContradictionSpec struct {
@@ -191,7 +191,7 @@ type ContradictionSpec struct {
 // contradictions, atomically inside a single transaction.
 //
 // This is the single source of truth for "explicit assertion" wired
-// through mpm_log_to_changelog. Per docs/epistemic-confirmation.md, the
+// through mpm_log_to_changelog. Per docs/library/epistemic-confirmation.md, the
 // mechanism has two directions:
 //
 //   - Confirmation (positive evidence, type='reproduction', default
@@ -207,7 +207,7 @@ type ContradictionSpec struct {
 //
 // Atomicity contract: either the changelog memory AND every assertion
 // evidence row (confirmations + contradictions) land, or none do.
-// Per docs/epistemic-confirmation.md §"Failure handling".
+// Per docs/library/epistemic-confirmation.md §"Failure handling".
 //
 // Both directions reuse the same INSERT + RecomputeConfidence path
 // (via addEvidenceInTx) so the two surfaces never drift; the only
@@ -236,7 +236,7 @@ func (dm *DatabaseManager) LogChangelogEntryWithAssertions(
 	}
 
 	// Validate every assertion BEFORE any write so a partial-state
-	// batch never lands. Per docs/epistemic-confirmation.md §"Failure
+	// batch never lands. Per docs/library/epistemic-confirmation.md §"Failure
 	// handling", invalid input rolls back the entire transaction.
 	for i, conf := range confirmations {
 		switch conf.ArtifactType {
@@ -382,7 +382,7 @@ func changelogProvenanceContext(ac []ActiveContext) ActiveContext {
 // confidence crossing detector (evidence_store.go:328-340). This is
 // the intended behavior — a strong contradiction legitimately
 // invalidates the artifact and its downstream dependents. Per
-// docs/epistemic-confirmation.md §"Cascade cross-fire asymmetry",
+// docs/library/epistemic-confirmation.md §"Cascade cross-fire asymmetry",
 // we do not gate this path.
 //
 // IDENTITY. The row carries an explicit observation key (see
@@ -425,7 +425,7 @@ func writeContradictionInTx(node DBNode, spec ContradictionSpec, commitHash stri
 // The artifact-existence check is performed here (rather than inside
 // addEvidenceInTx) so we surface the "named artifact does not exist"
 // error with the specific (artifact_type, artifact_id) pair in the
-// message — this is what docs/epistemic-confirmation.md §"Failure
+// message — this is what docs/library/epistemic-confirmation.md §"Failure
 // handling" promises, and it's why the validation happens BEFORE the
 // INSERT (no orphan evidence row, no orphan history row, no orphan
 // cascade intent).

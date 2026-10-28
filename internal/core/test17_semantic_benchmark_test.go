@@ -616,11 +616,11 @@ func TestSemanticBenchmark_DebugSanityCheck(t *testing.T) {
 //
 // This is the only test that touches the authored vocabulary files. If
 // the vocab files are missing (e.g. the test is running on a checkout
-// without docs/archive/), the test is skipped.
+// without docs/library/), the test is skipped.
 func TestSemanticBenchmark_VocabularyEffect(t *testing.T) {
-	vocabDir := findRepoDocsDir(t, "archive")
+	vocabDir := findRepoDocsDir(t, "library")
 	if vocabDir == "" {
-		t.Skip("docs/archive/ not found — vocabulary-effect scenario skipped")
+		t.Skip("docs/library/ not found — vocabulary-effect scenario skipped")
 	}
 
 	dm := newTestDM(t)
@@ -632,9 +632,9 @@ func TestSemanticBenchmark_VocabularyEffect(t *testing.T) {
 	// Augment with concept-vocabulary content extracted from the docs.
 	// These represent the "improved authoring" scenario — vocabulary
 	// tokens would help if they were indexed as additional content.
-	// Concept vocabularies live at the root of docs/archive/ (flat
-	// layout); they're historical artifacts authored per
-	// docs/concept-vocabulary-authoring.md.
+	// Concept vocabularies live at the root of docs/library/ (flat
+	// layout); they're artifacts authored per
+	// docs/library/concept-vocabulary-authoring.md.
 	for _, slug := range []string{"f71-challenge-restoration.md", "f81-cancel-verification.md"} {
 		path := filepath.Join(vocabDir, slug)
 		raw, err := os.ReadFile(path)

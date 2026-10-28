@@ -25,9 +25,11 @@ Architectural contract:
   Adapter-local install.sh files (e.g. agent_installation/mpm-*/install.sh)
   are NOT subject to this invariant — they are their own installer.
 
-  Historical dated documents (docs/archive/**, changelog.md, dated
+  Historical dated documents (docs/library/**, changelog.md, dated
   validation snapshots) are explicitly excluded — rewriting past reality
-  would falsify history.
+  would falsify history. `docs/archive/` was retired on 2026-10-28; its
+  surviving entries moved to `docs/library/`, so the prefix stays in the
+  exclusion list alongside its successor.
 """
 
 from __future__ import annotations
@@ -55,7 +57,8 @@ HISTORICAL_FILES_ALLOWLIST = {
 
 # Directories explicitly out of scope.
 EXCLUDED_PATH_PREFIXES = (
-    "docs/archive/",
+    "docs/library/",            # curated reference; may quote historical paths
+    "docs/archive/",            # retired 2026-10-28; kept for safety
     "docs/superpowers/plans/",  # plans describe intent; may quote past
 )
 
@@ -177,7 +180,7 @@ class TestCanonicalRepositoryRoot(unittest.TestCase):
       * mentions of an alternate checkout where it is framed as the
         supported advanced/alternate layout;
       * migration guidance naming older paths;
-      * anything under docs/archive/ (historical record);
+      * anything under docs/library/ or docs/archive/ (historical record);
       * host-specific paths in validation snapshots and test fixtures.
 
     What it forbids is a *clone instruction* aimed at the runtime root, in a

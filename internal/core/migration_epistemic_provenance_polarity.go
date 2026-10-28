@@ -6,7 +6,7 @@
 // 'assumes_false'. The NULL default is load-bearing for the
 // back-compat invariant: existing rows (none of which carry polarity)
 // must never trigger a positive-direction cascade. See
-// docs/constructive-cascade-design.md for the rationale.
+// docs/library/constructive-cascade-design.md for the rationale.
 //
 // Why a separate migration rather than adding to SafeMigrations:
 // SafeMigrations is `ALTER TABLE ADD COLUMN column TYPE` (column-ADD

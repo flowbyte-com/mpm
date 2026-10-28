@@ -15,7 +15,7 @@
 //      verification promotion).
 //
 // The parallel top-level `mpm_challenge` surface (commit e9e8faf, F9)
-// was retired on 2026-09-05; see docs/onboarding-mcp-native-audit-2026-09-05.md
+// was retired on 2026-09-05; see docs/library/onboarding-mcp-native-audit-2026-09-05.md
 // Part C. The substantive F7-1 invariant is preserved by exercising the
 // action under mpm_memory; the test no longer depends on a top-level
 // surface that no longer exists.

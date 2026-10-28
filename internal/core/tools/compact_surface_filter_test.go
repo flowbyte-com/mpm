@@ -39,7 +39,7 @@ var defaultCoreTools = map[string]bool{
 // TestCompactSurface_DefaultCoreHasThreeTools pins the default
 // initial surface to exactly the 3-tool canonical set. If a tool
 // is added to or removed from defaultCoreTools without updating
-// the docs/CONTEXT_EXPOSURE.md measurements, this test fires.
+// the docs/library/CONTEXT_EXPOSURE.md measurements, this test fires.
 func TestCompactSurface_DefaultCoreHasThreeTools(t *testing.T) {
 	expected := []string{
 		"mpm_memory",
