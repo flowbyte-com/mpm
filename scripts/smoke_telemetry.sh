@@ -147,10 +147,14 @@ echo "$COST"
 # which would filter every frame out) and --threshold must be at or
 # below 300 for the session to qualify.
 #
+# The default mode is a READ-ONLY DIAGNOSTIC: it reports the same
+# observations and writes nothing. --dry-run is retained as a
+# compatibility alias and means exactly what the default means.
+#
 # There is no substrate in this workspace, so every session counts as
 # zero-artifact: the observation is REPORTED and nothing is written.
-echo "==> smoke_telemetry: observe (dry-run)"
-OBS=$("$BIN" observe --dry-run --since 1700000000 --threshold 300)
+echo "==> smoke_telemetry: observe (default: read-only diagnostic)"
+OBS=$("$BIN" observe --since 1700000000 --threshold 300)
 echo "$OBS"
 [[ "$OBS" == *'"session_id": "sess_smoke"'* ]] || {
   echo "observe did not report the qualifying session" >&2; exit 1; }
@@ -159,17 +163,20 @@ echo "$OBS"
 # The observation is a diagnostic, not a lesson write.
 [[ "$OBS" != *'"action"'* ]] || {
   echo "the observation is shaped like a lesson write" >&2; exit 1; }
+[[ "$OBS" != *'"type"'* ]] || {
+  echo "the observation claims a lesson type" >&2; exit 1; }
 
-# The default mode must refuse to write a trusted lesson, and must say
-# so. It is the behaviour the trust boundary requires until the spec
-# amendment is approved.
-echo "==> smoke_telemetry: observe (default mode refuses)"
-if "$BIN" observe --since 1700000000 --threshold 300 >/dev/null 2>"$TMP/observe-default.err"; then
-  echo "the default observe mode succeeded; it must refuse to write" >&2
-  exit 1
-fi
-grep -q "nothing was written" "$TMP/observe-default.err" || {
-  echo "the refusal did not say that nothing was written" >&2; exit 1; }
+echo "==> smoke_telemetry: observe (--dry-run compatibility alias)"
+OBS_ALIAS=$("$BIN" observe --dry-run --since 1700000000 --threshold 300)
+[[ "$OBS_ALIAS" == "$OBS" ]] || {
+  echo "--dry-run and the default mode disagree" >&2; exit 1; }
+
+# The deprecated --mpm flag must WARN, not be silently ignored.
+echo "==> smoke_telemetry: observe (--mpm deprecation warning)"
+"$BIN" observe --since 1700000000 --threshold 300 --mpm /nonexistent/mpm \
+  >/dev/null 2>"$TMP/observe-mpm.err"
+grep -q "DEPRECATED" "$TMP/observe-mpm.err" || {
+  echo "--mpm did not warn that it is deprecated" >&2; exit 1; }
 
 # Belt-and-suspenders: verify row count via sqlite3 if available.
 if command -v sqlite3 >/dev/null 2>&1; then

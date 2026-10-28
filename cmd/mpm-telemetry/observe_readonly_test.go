@@ -149,6 +149,15 @@ func substrateCounts(t *testing.T, db *sql.DB) map[string]int {
 		}
 		out[table] = n
 	}
+	// Pending theories are memories with collection='theories' — the
+	// substrate's own vocabulary for an unproven, unresolved claim.
+	// A telemetry observation must never produce one.
+	var theories int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM memories WHERE collection = 'theories'").Scan(&theories); err != nil {
+		t.Fatalf("count theories: %v", err)
+	}
+	out["theories"] = theories
 	return out
 }
 
@@ -313,13 +322,17 @@ func TestObserve_DryRunDoesNotCreateEitherStore(t *testing.T) {
 	}
 }
 
-// TestObserve_DefaultRefusesAndWritesNothing pins the default mode.
+// TestObserve_DefaultReportsAndWritesNothing pins the default mode.
 //
-// The documented default was "write a lesson". That write is the trust
-// boundary this issue is about, so the default's semantics are an
-// operator decision — until it is made, the default refuses loudly,
-// writes nothing, and prints nothing on stdout.
-func TestObserve_DefaultRefusesAndWritesNothing(t *testing.T) {
+// The documented default used to be "write a lesson". That write was
+// the trust boundary this issue is about, and the approved policy
+// (2026-10-28) makes the default a READ-ONLY DIAGNOSTIC: it REPORTS
+// the observation and writes nothing.
+//
+// This is the assertion that matters most in the whole file: a
+// qualifying session, reported on stdout, with EVERY trusted surface
+// untouched — no lesson, no theory, no artifact, no tool invocation.
+func TestObserve_DefaultReportsAndWritesNothing(t *testing.T) {
 	env := newObserveEnv(t)
 	dm := seedSubstrate(t, env.workspace)
 	seedTelemetrySession(t, env.telemetryDB, "ses-qualify", 120000, 120000)
@@ -329,30 +342,42 @@ func TestObserve_DefaultRefusesAndWritesNothing(t *testing.T) {
 	stdout, err := captureStdout(t, func() error {
 		return runObserve([]string{"--since", "1"})
 	})
-	if err == nil {
-		t.Fatal("the default mode succeeded; it must refuse to write a trusted lesson")
+	if err != nil {
+		t.Fatalf("runObserve = %v; the default mode is a read-only diagnostic and must succeed", err)
 	}
-	if stdout != "" {
-		t.Errorf("the refusal printed to stdout: %q", stdout)
+
+	// The observation must be REPORTED.
+	if !strings.Contains(stdout, "ses-qualify") {
+		t.Fatalf("the observation was not reported:\n%s", stdout)
 	}
-	// The refusal must be legible: it says what it did not do, why,
-	// and what to run instead.
-	for _, want := range []string{"nothing was written", "--dry-run", "TRUSTED"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the refusal does not mention %q:\n%v", want, err)
+	// And it must be labelled as an unverified diagnostic.
+	if !strings.Contains(stdout, `"status": "unverified-observation"`) {
+		t.Errorf("the observation does not declare its standing:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, `"wrote": "nothing"`) {
+		t.Errorf("the observation does not say that nothing was written:\n%s", stdout)
+	}
+	// And it must NOT be shaped like a lesson write.
+	for _, banned := range []string{`"action"`, `"type"`, `"fact"`} {
+		if strings.Contains(stdout, banned) {
+			t.Errorf("the observation is shaped like a lesson write (%s):\n%s", banned, stdout)
 		}
 	}
 
 	after := substrateCounts(t, dm.SQLDB())
 	for table, n := range before {
 		if after[table] != n {
-			t.Errorf("%s went from %d to %d row(s); the refusal must write nothing",
+			t.Errorf("%s went from %d to %d row(s); the default mode must write nothing",
 				table, n, after[table])
 		}
 	}
 	if after["lessons_base"] != 0 {
 		t.Errorf("lessons_base has %d row(s); the default mode must not create a trusted lesson",
 			after["lessons_base"])
+	}
+	if after["theories"] != 0 {
+		t.Errorf("theories has %d row(s); the default mode must not create a pending theory",
+			after["theories"])
 	}
 }
 
@@ -417,7 +442,9 @@ func TestObserve_CountIsTheSubstratesOwnAttribution(t *testing.T) {
 //
 // The `--mpm` flag used to select that binary. It is still accepted (so
 // an operator's existing invocation does not break on an unknown flag)
-// but it is ignored, and it says so.
+// but it is IGNORED — and it WARNS, loudly, because silently accepting a
+// flag that does nothing is how an operator keeps believing the command
+// writes.
 func TestObserve_SpawnsNoProcessAndIgnoresTheMpmFlag(t *testing.T) {
 	env := newObserveEnv(t)
 	seedSubstrate(t, env.workspace)
@@ -434,20 +461,27 @@ func TestObserve_SpawnsNoProcessAndIgnoresTheMpmFlag(t *testing.T) {
 	t.Setenv("MPM_BIN", "")
 	t.Setenv("MPM_BINARY", "")
 
-	stdout, err := captureStdout(t, func() error {
+	captured := captureStreams(t, func() error {
 		// A --mpm path that does not exist: if it were honoured, the
 		// run would fail.
 		return runObserve([]string{"--dry-run", "--since", "1", "--mpm",
 			filepath.Join(hostileDir, "not-installed-mpm")})
 	})
-	if err != nil {
-		t.Fatalf("runObserve --dry-run = %v; the hunt must not need an mpm binary", err)
+	if captured.err != nil {
+		t.Fatalf("runObserve --dry-run = %v; the hunt must not need an mpm binary", captured.err)
 	}
-	if !strings.Contains(stdout, "ses-qualify") {
-		t.Errorf("the observation was not reported:\n%s", stdout)
+	if !strings.Contains(captured.stdout, "ses-qualify") {
+		t.Errorf("the observation was not reported:\n%s", captured.stdout)
 	}
 	if b, readErr := os.ReadFile(hostileLog); readErr == nil && len(b) > 0 {
 		t.Errorf("a subprocess was spawned; the hunt must run entirely in-process: %q", b)
+	}
+	// The deprecated flag must WARN, not be silently ignored.
+	if !strings.Contains(captured.stderr, "DEPRECATED") {
+		t.Errorf("--mpm did not warn that it is deprecated:\n%s", captured.stderr)
+	}
+	if !strings.Contains(captured.stderr, "--mpm") {
+		t.Errorf("the warning does not name the flag:\n%s", captured.stderr)
 	}
 }
 

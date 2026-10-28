@@ -57,11 +57,40 @@
 // boundary this issue is about, so changing the default's semantics is
 // an operator decision, not a code fix. Until that decision is made,
 // the default mode refuses loudly — preserving the behaviour the
-// command has always had in practice (it failed, and wrote nothing)
-// while making the failure legible.
+// WHAT THE DEFAULT MODE DOES. It REPORTS, and writes nothing.
 //
-// The exact spec amendment is proposed in
-// docs/dev/session-b-139-telemetry-observe.md.
+// This is the approved policy (2026-10-28): `mpm-telemetry observe` is a
+// read-only diagnostic by default. It used to promise a write — a
+// `type: "observation"` lesson in the substrate — and that promise was
+// the trust-boundary exception this issue is about.
+//
+// The write is gone, and it is gone for a reason that does not depend
+// on anyone's discretion at run time:
+//
+//   - A telemetry observation is NOT evidence that a lesson exists. The
+//     token counts live in telemetry.db, which no citation type can
+//     address, and the observation is about an ABSENCE — a session that
+//     recorded nothing — so there is nothing in mpm.db to cite.
+//   - A trusted lesson (lessons_base has no status column, so a row
+//     there is trusted on arrival) would therefore be an UNSUPPORTED
+//     claim, and a pending theory would be an unresolvable one.
+//
+// So the observation is reported, explicitly labelled as an unverified
+// diagnostic, and nothing is written: not a trusted lesson, not a
+// pending theory, not a row of any kind. Arbitration is a human act.
+//
+// `--dry-run` is kept as a compatibility option: it used to be the
+// "do not write" mode, and it now means exactly what the default
+// already means.
+//
+// `--mpm` is DEPRECATED. It selected the binary the old cross-DB
+// lookup shelled out to; there is no subprocess any more, so the flag
+// has nothing to select. It is still accepted — an operator's existing
+// invocation must not break on an unknown flag — but it is IGNORED, and
+// it says so, loudly, on stderr. Silently accepting a flag that does
+// nothing is how an operator keeps believing the command writes.
+//
+// The exact specification amendment is in docs/SPEC.md §6.6.
 
 package main
 
@@ -79,13 +108,21 @@ import (
 	"github.com/flowbyte-com/mpm/internal/telemetry"
 )
 
-// writeRefusal is the message the default (write) mode prints. It names
-// the reason, the alternative, and the fact that nothing was written.
-const writeRefusal = `mpm-telemetry observe: the default mode no longer writes an observation, and nothing was written.
+// mpmFlagDeprecation is the warning printed when --mpm is supplied.
+//
+// It is a WARNING, not a note, and it is not suppressible: a flag that
+// no longer does anything must say so on every run that passes it,
+// because the operator who still passes it is the one still believing
+// the command shells out to `mpm` — and therefore, possibly, still
+// believing it writes.
+const mpmFlagDeprecation = `warning: --mpm is DEPRECATED and has no effect.
 
-A telemetry observation is not evidence that a lesson exists. The token counts live in telemetry.db, which no citation type can address, and the observation is about an ABSENCE — a session that recorded nothing — so there is nothing in mpm.db to cite. Writing it would create a TRUSTED lesson (lessons_base has no status column, so a row there is trusted on arrival), which is the trust boundary this command must not cross.
+mpm-telemetry observe no longer shells out to mpm. The artifact count is
+computed IN-PROCESS, read-only, from the substrate's own attribution
+rule — so this flag has nothing to select, and the binary it names is
+never executed.
 
-Use --dry-run for the read-only diagnostic report. The change to the default's documented semantics is proposed in docs/SPEC.md §6.6 and docs/dev/session-b-139-telemetry-observe.md.`
+--mpm will be removed in the next release.`
 
 func runObserve(args []string) error {
 	// 2026-09-14 release-pass: help flags exit 0 BEFORE flag
@@ -103,11 +140,13 @@ func runObserve(args []string) error {
 	// lookup is now in-process, so the flag has nothing to select.
 	//
 	// It is still ACCEPTED, so an operator's existing invocation does
-	// not break on an unknown flag, but it is ignored and it says so.
-	// The removal is proposed with the rest of the CLI amendment in
-	// docs/dev/session-b-139-telemetry-observe.md.
-	mpmPath := fs.String("mpm", "", "deprecated and ignored: the artifact count is computed in-process")
-	dryRun := fs.Bool("dry-run", false, "read-only diagnostic: report the observations, write nothing")
+	// not break on an unknown flag, but it is IGNORED and it WARNS.
+	// It will be removed in the next release.
+	mpmPath := fs.String("mpm", "", "DEPRECATED and ignored: the artifact count is computed in-process")
+	// --dry-run is kept as a COMPATIBILITY option. It used to be the
+	// "do not write" mode; the default is now read-only too, so the
+	// flag means exactly what the default already means.
+	dryRun := fs.Bool("dry-run", false, "compatibility alias: observe is already read-only")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -115,8 +154,7 @@ func runObserve(args []string) error {
 		*since = time.Now().Add(-7 * 24 * time.Hour).Unix()
 	}
 	if strings.TrimSpace(*mpmPath) != "" {
-		fmt.Fprintln(os.Stderr, "mpm-telemetry observe: --mpm is deprecated and ignored; "+
-			"the artifact count is computed in-process from the substrate, read-only")
+		fmt.Fprintln(os.Stderr, mpmFlagDeprecation)
 	}
 
 	workspace := strings.TrimSpace(os.Getenv("MPM_WORKSPACE"))
@@ -172,24 +210,23 @@ func runObserve(args []string) error {
 		return err
 	}
 
-	if *dryRun {
-		for _, f := range findings {
-			out, err := json.MarshalIndent(telemetry.RenderObservation(f), "", "  ")
-			if err != nil {
-				return fmt.Errorf("render observation: %w", err)
-			}
-			fmt.Println(string(out))
+	// REPORT. The default mode and --dry-run do the SAME thing: the
+	// command is a read-only diagnostic, so there is no "write" mode
+	// left to opt out of.
+	//
+	// --dry-run is accepted for compatibility and means exactly what
+	// the default already means; it is referenced here so that the
+	// intent is explicit rather than an unused variable.
+	_ = *dryRun
+	//
+	// A quiet store produces no output and exit 0 — there is nothing
+	// to report, which is not a failure.
+	for _, f := range findings {
+		out, err := json.MarshalIndent(telemetry.RenderObservation(f), "", "  ")
+		if err != nil {
+			return fmt.Errorf("render observation: %w", err)
 		}
-		return nil
+		fmt.Println(string(out))
 	}
-
-	if len(findings) == 0 {
-		// Nothing was found, so nothing could have been written. This
-		// preserves the command's behaviour on a quiet store: exit 0,
-		// no output, no writes.
-		return nil
-	}
-
-	return fmt.Errorf("%s\n\n(%d observation(s) found; nothing was written)",
-		writeRefusal, len(findings))
+	return nil
 }
