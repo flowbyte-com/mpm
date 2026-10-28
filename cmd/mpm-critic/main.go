@@ -31,7 +31,6 @@ import (
 
 	"github.com/flowbyte-com/mpm-core/config"
 
-	"github.com/flowbyte-com/mpm-core/mpmcli"
 	"github.com/flowbyte-com/mpm/internal/buildinfo"
 	"github.com/flowbyte-com/mpm/internal/critic"
 	"github.com/flowbyte-com/mpm/internal/telemetry"
@@ -51,8 +50,11 @@ func main() {
 	config.EnforcePrivateUmask()
 
 	var (
-		dbPath = flag.String("db", os.Getenv("MPM_DB_PATH"),
-			"Path to mpm.db (default: $MPM_DB_PATH or src/db/mpm.db via DatabaseManager)")
+		dbPath = flag.String("db", "",
+			"Path to mpm.db. It must have the canonical <workspace>/src/db/mpm.db shape; "+
+				"the workspace is derived from it, and a path without that shape is "+
+				"refused rather than silently rewritten into another database. "+
+				"Default: $MPM_WORKSPACE/src/db/mpm.db")
 		logLevel = flag.String("log-level", "info",
 			"Log level: debug, info, warn, error")
 		telemetryHunt = flag.Bool("telemetry-hunt", false,
@@ -69,18 +71,31 @@ func main() {
 	defer cancel()
 
 	// Open the MPM database via the canonical DatabaseManager (F-007).
+	//
 	// D-001 (alpha-4.1.1): honor MPM_WORKSPACE so a disposable test
-	// workspace cannot accidentally target production. Explicit -db
-	// still wins — an explicit DB path overrides MPM_WORKSPACE so
-	// operator overrides (e.g. running the critic against a recovered
-	// DB at a non-standard location) keep working.
-	projectRoot := mpmcli.ResolveWorkspace()
-	if *dbPath != "" {
-		projectRoot = filepath.Dir(filepath.Dir(filepath.Dir(*dbPath)))
-	}
-	dm, err := mpmcore.NewDatabaseManager(projectRoot)
+	// workspace cannot accidentally target production.
+	//
+	// D4 (2026-10-28): the workspace and the database come from ONE
+	// resolver — config.ResolveTarget. The old code derived the
+	// workspace from an explicit -db with Dir(Dir(Dir(path))), which
+	// ASSUMED the path had the canonical <root>/src/db/mpm.db shape
+	// and never checked it: `-db /tmp/other.db` silently became "open
+	// /src/db/mpm.db" — a different database, with nothing said at
+	// startup or ever afterwards.
+	//
+	// The operator's documented way to point the critic at a recovered
+	// database outside the canonical layout is a canonical workspace
+	// whose src/db/mpm.db is a symlink to it; the resolver recognises
+	// that by inode and accepts it.
+	workspace, resolvedDB, err := config.ResolveTarget(*dbPath)
 	if err != nil {
-		logger.Error("database open failed", "project_root", projectRoot, "err", err)
+		logger.Error("database path resolution failed", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("mpm-critic target resolved", "workspace", workspace, "db", resolvedDB)
+	dm, err := mpmcore.NewDatabaseManager(workspace)
+	if err != nil {
+		logger.Error("database open failed", "project_root", workspace, "err", err)
 		os.Exit(1)
 	}
 	defer func() {
@@ -112,7 +127,7 @@ func main() {
 	// cycle. It is READ-ONLY: it reports the observation and writes
 	// nothing.
 	if *telemetryHunt {
-		findings, err := runTelemetryHunt(ctx, logger, projectRoot, dm.SQLDB(), a.Cycle())
+		findings, err := runTelemetryHunt(ctx, logger, workspace, dm.SQLDB(), a.Cycle())
 		if err != nil {
 			logger.Error("telemetry hunt failed", "err", err)
 			os.Exit(1)

@@ -26,7 +26,6 @@ import (
 	mpmcore "github.com/flowbyte-com/mpm-core"
 	mpmcore_config "github.com/flowbyte-com/mpm-core/config"
 
-	"github.com/flowbyte-com/mpm-core/mpmcli"
 	"github.com/flowbyte-com/mpm/internal/buildinfo"
 	"github.com/flowbyte-com/mpm/internal/scheduler"
 )
@@ -48,8 +47,11 @@ func main() {
 	var (
 		interval = flag.Duration("interval", 60*time.Second,
 			"System-maintenance cadence (default 60s). Bounds the cross-process wake-dispatch latency to min(interval, time_to_next_deadline). Min 1s.")
-		dbPath = flag.String("db", os.Getenv("MPM_DB_PATH"),
-			"Path to mpm.db (default: $MPM_DB_PATH or src/db/mpm.db via DatabaseManager)")
+		dbPath = flag.String("db", "",
+			"Path to mpm.db. It must have the canonical <workspace>/src/db/mpm.db shape; "+
+				"the workspace is derived from it, and a path without that shape is "+
+				"refused rather than silently rewritten into another database. "+
+				"Default: $MPM_WORKSPACE/src/db/mpm.db")
 		lockPath = flag.String("lock", defaultLockPath(),
 			"flock path for singleton enforcement (default $MPM_WORKSPACE/scheduler.lock)")
 		logLevel = flag.String("log-level", "info",
@@ -65,24 +67,57 @@ func main() {
 		Level: parseLevel(*logLevel),
 	}))
 
+	// D4 (2026-10-28): resolve the workspace and the database BEFORE
+	// anything touches the filesystem.
+	//
+	// Every path below hangs off the workspace — the perms gate, the
+	// singleton lock, the database itself — so they must all agree on
+	// which workspace this process is serving. The old code derived the
+	// workspace from an explicit --db with Dir(Dir(Dir(path))), which
+	// ASSUMED the path had the canonical <root>/src/db/mpm.db shape and
+	// never checked it: `--db /tmp/other.db` silently became "open
+	// /src/db/mpm.db", a different database, with nothing said at
+	// startup or ever afterwards.
+	//
+	// config.ResolveTarget is THE resolver: one place, one set of rules.
+	// A path without the canonical shape is refused, and an MPM_DB_PATH
+	// that disagrees with the workspace is a conflict, not a selection.
+	workspace, resolvedDB, err := mpmcore_config.ResolveTarget(*dbPath)
+	if err != nil {
+		logger.Error("database path resolution failed", "err", err)
+		os.Exit(1)
+	}
+
 	// Security gate: auto-heal or refuse to start if the runtime dir
 	// perms are wider than 0700. Runs before any DB connection.
-	if err := mpmcore_config.AssertUserDirPerms0700(mpmcore_config.GetMPMDir()); err != nil {
+	if err := mpmcore_config.AssertUserDirPerms0700(workspace); err != nil {
 		logger.Error("security gate failed", "err", err)
 		os.Exit(1)
 	}
 
 	// File-perms sweep: tighten existing data-plane files to 0600.
 	// Non-fatal — failures are logged via the configured slog handler.
-	if _, err := mpmcore_config.TightenFilePerms0600(mpmcore_config.GetMPMDir()); err != nil {
+	if _, err := mpmcore_config.TightenFilePerms0600(workspace); err != nil {
 		logger.Warn("file perms sweep failed to start", "err", err)
 	}
 
 	// Singleton enforcement. Two scheduler instances must not race on the
 	// same wake batch — flock prevents that at the kernel level.
-	lockFile, err := scheduler.AcquireLock(*lockPath)
+	//
+	// The lock must live with the workspace it protects. The --lock
+	// default is resolved from MPM_WORKSPACE, but an explicit --db can
+	// select a different workspace; when it does and the operator named
+	// no lock, the lock follows the RESOLVED workspace. Otherwise a
+	// scheduler pointed at a disposable workspace would take the live
+	// installation's singleton lock — and the live daemon would refuse
+	// to start beside it.
+	lockFilePath := *lockPath
+	if *dbPath != "" && !flagWasSet("lock") {
+		lockFilePath = filepath.Join(workspace, "scheduler.lock")
+	}
+	lockFile, err := scheduler.AcquireLock(lockFilePath)
 	if err != nil {
-		logger.Error("lock acquire failed", "path", *lockPath, "err", err)
+		logger.Error("lock acquire failed", "path", lockFilePath, "err", err)
 		os.Exit(1)
 	}
 	defer func() {
@@ -90,25 +125,19 @@ func main() {
 			logger.Error("lock release failed", "err", err)
 		}
 	}()
-	logger.Info("singleton lock acquired", "path", *lockPath)
+	logger.Info("singleton lock acquired", "path", lockFilePath)
 
 	// Open the MPM database via the canonical DatabaseManager. F-007
 	// fix: the scheduler does NOT own the *sql.DB handle. Construction
 	// site enforces the singleton invariant; sqlopen_owner_test will
 	// fail if any future code introduces a separate handle.
 	//
-	// D-001 (alpha-4.1.1): honor MPM_WORKSPACE. Without this, a
-	// scheduler launched against a disposable workspace would
-	// silently target the production DB — exactly the failure mode
-	// the canonical mpmcli.ResolveWorkspace helper exists to prevent.
-	// Explicit -db still wins for operator overrides.
-	projectRoot := mpmcli.ResolveWorkspace()
-	if *dbPath != "" {
-		projectRoot = filepath.Dir(filepath.Dir(filepath.Dir(*dbPath)))
-	}
-	dm, err := mpmcore.NewDatabaseManager(projectRoot)
+	// The workspace was resolved above by config.ResolveTarget, so the
+	// database this opens is exactly the one that was resolved — not a
+	// re-derivation of it.
+	dm, err := mpmcore.NewDatabaseManager(workspace)
 	if err != nil {
-		logger.Error("database open failed", "project_root", projectRoot, "err", err)
+		logger.Error("database open failed", "project_root", workspace, "err", err)
 		os.Exit(1)
 	}
 	defer func() {
@@ -156,7 +185,11 @@ func main() {
 	//                    refuse) — see internal/scheduler/ingest.go.
 	// (anything else)  → notification kind, passes through to opportunistic fold
 	s.Register("snapshot", scheduler.SnapshotHandler)
-	s.Register("critic_audit", scheduler.CriticAuditHandler)
+	// The critic-audit handler is bound to the RESOLVED workspace and
+	// database, so the critic audits the same substrate this scheduler
+	// dispatches against — even when --db selected a workspace other
+	// than the environment's.
+	s.Register("critic_audit", scheduler.NewCriticAuditHandler(workspace, resolvedDB))
 	s.Register("gc", scheduler.GCHandler)
 	s.Register("broadcast", scheduler.BroadcastHandler)
 	s.Register("cascade_summary", scheduler.NewCascadeSummaryHandler(logger))
@@ -193,7 +226,8 @@ func main() {
 
 	logger.Info("mpm-scheduler starting",
 		"interval", interval.String(),
-		"db", *dbPath,
+		"workspace", workspace,
+		"db", resolvedDB,
 		"pid", os.Getpid())
 
 	if err := s.Run(ctx, *interval); err != nil {
@@ -201,6 +235,22 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("mpm-scheduler stopped cleanly")
+}
+
+// flagWasSet reports whether the operator named the flag explicitly on
+// the command line.
+//
+// It matters for the singleton lock: the flag's DEFAULT is a path, so
+// "the operator named it" and "the default was used" are different
+// situations, and only the first one may override the default.
+func flagWasSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
 }
 
 func parseLevel(s string) slog.Level {

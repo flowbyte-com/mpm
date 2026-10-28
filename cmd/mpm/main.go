@@ -294,6 +294,44 @@ type PreFlightCheck struct {
 	DurationMs int64    // Time for this specific check
 }
 
+// configExemptCommands are the command families that must keep working
+// when the configuration file is malformed. They are how an operator
+// REPAIRS it, so gating them on the configuration's own validity would
+// lock the operator out of the only tool that fixes it.
+var configExemptCommands = map[string]bool{
+	"config": true,
+}
+
+// firstCommandArg returns the first non-flag argument, which is the
+// command name the router will dispatch. It is a deliberately shallow
+// scan: the gate only needs to know whether the command is exempt, and a
+// command name that is mis-detected merely changes WHICH commands are
+// gated, never whether a malformed configuration is reported.
+func firstCommandArg(args []string) string {
+	for _, a := range args {
+		if a == "" || strings.HasPrefix(a, "-") {
+			continue
+		}
+		return a
+	}
+	return ""
+}
+
+// validateDatabaseTarget checks that the environment's database selectors
+// agree, before any command dispatches.
+//
+// D4 (2026-10-28). The CLI has no --db flag: it always opens the
+// workspace's own database, <workspace>/src/db/mpm.db. MPM_DB_PATH may
+// only RESTATE that path. When it names something else, the two
+// selectors disagree, and the CLI says so rather than quietly opening
+// the workspace's database while the environment claims another one —
+// because an operator who set MPM_DB_PATH and then saw the CLI ignore
+// it has learned nothing about which database their writes are in.
+func validateDatabaseTarget() error {
+	_, _, err := config.ResolveTarget("")
+	return err
+}
+
 func main() {
 	// 2026-09-18 hardening pass: process umask 0077 BEFORE the dir-
 	// perms check, BEFORE any DB open, BEFORE any goroutine that may
@@ -307,6 +345,44 @@ func main() {
 	// database or the network.
 	if code, handled := runVersionCommand(os.Args[1:]); handled {
 		os.Exit(code)
+	}
+
+	// Configuration gate (2026-10-28).
+	//
+	// A malformed mpm_config.json used to be a SEGMENTATION FAULT rather
+	// than an error: config.LoadConfig() returns (nil, err) when the file
+	// does not unmarshal, and internal/core/memory.go's DefaultMemoryPaths()
+	// discarded that error and dereferenced the nil config. One typo in a
+	// component binding — `components` maps a component name to a PROFILE
+	// NAME, so its values must be strings — turned `mpm memory save` into a
+	// SIGSEGV with a stack trace, and every other command that consults
+	// the configuration with it.
+	//
+	// The gate turns that into a controlled validation error that names
+	// the file and the reason, before any command dispatches. It runs
+	// AFTER the version interception, because the version surface is
+	// contractually free of configuration access: `mpm --version` must
+	// answer when everything else is broken, including the configuration.
+	//
+	// The `config` command family is EXEMPT: it is how an operator
+	// REPAIRS a malformed configuration, so it must keep working when the
+	// configuration is malformed.
+	//
+	// The same gate resolves the database target (D4): MPM_DB_PATH may
+	// only RESTATE the workspace's own database. A divergent MPM_DB_PATH
+	// used to be either ignored (as the CLI did) or silently rewritten
+	// into a different database (as the scheduler and the critic did) —
+	// and this CLI must not be the one binary that opens a database the
+	// operator did not name while saying nothing about it.
+	if cmd := firstCommandArg(os.Args[1:]); cmd != "" && !configExemptCommands[cmd] {
+		if err := config.ValidateConfig(); err != nil {
+			fmt.Fprintln(os.Stderr, "fatal:", err)
+			os.Exit(1)
+		}
+		if err := validateDatabaseTarget(); err != nil {
+			fmt.Fprintln(os.Stderr, "fatal:", err)
+			os.Exit(1)
+		}
 	}
 
 	// Initialize global mode manager
