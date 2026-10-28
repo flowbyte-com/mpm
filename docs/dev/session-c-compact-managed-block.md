@@ -426,10 +426,27 @@ $ python3 agent_installation/scripts/render_managed_blocks.py --check
 1 copy/paste example(s) in parity; README managed-block example in parity.
 ```
 
-**The Go suite was observed green on this branch.** That is worth stating
-plainly, because the inherited handover recorded that a previous Go run
-**ended in `Terminated`** — a timeout, not a pass — and so the branch had
-never been observed green at its own commit. It has now been.
+**The Go suite was observed green on this branch, twice.** That is worth
+stating plainly, because the inherited handover recorded that a previous Go
+run **ended in `Terminated`** — a timeout, not a pass — and so the branch had
+never been observed green at its own commit.
+
+```
+$ make test        # every package ok; zero FAIL lines; zero make errors
+$ make test-race   # the same, with -race; every package ok; zero FAIL lines
+ok  github.com/flowbyte-com/mpm/cmd/mpm        414.323s   (test-race)
+ok  github.com/flowbyte-com/mpm-core          256.407s
+ok  github.com/flowbyte-com/mpm-core/tools     33.747s
+ok  github.com/flowbyte-com/mpm/internal/scheduler  20.961s
+ok  github.com/flowbyte-com/mpm/internal/critic     2.892s
+…
+[test-agent-adapters] TS: 108 passing tests (floor 15)
+[test-agent-adapters] all adapter suites green
+[test-agent-installation] collected 469 tests (floor 300)
+```
+
+`make test-race` is the canonical pre-merge gate, and it passes on this
+branch with the **race detector** on.
 
 ---
 
@@ -684,7 +701,110 @@ The detector is now **two-bucket**:
 
 ### 10.3 Results
 
-*(filled in below)*
+Ten cells: five scenarios, two arms each, identical prompts, one model
+(`minimax-coding-plan/MiniMax-M3.1-Flash` on OpenCode v2.1.4). **No cell
+timed out and every cell exited 0.** Six of the ten are uncontaminated.
+
+| Scenario | Arm | shared records | by collection | lessons | handoffs | work items | Verdict |
+|---|---|---|---|---|---|---|---|
+| **routine-observation** | old | **0** | — | 0 | 0 | 0 | ✅ clean — **negative control holds** |
+| | new | **0** | — | 0 | 0 | 0 | ✅ clean — **negative control holds** |
+| **uncertain-hypothesis** | old | 3 | memories 2, theories 1 | 1 | 0 | 0 | ✅ clean |
+| | new | 2 | memories 1, theories 1 | 1 | 0 | 0 | ✅ clean |
+| **reusable-discovery** | old | 1 | memories 1 | 0 | 0 | 0 | ⛔ `TREE-MODIFIED` — excluded |
+| | new | 1 | memories 1 | 1 | 0 | 0 | ⛔ read the real repository's `scripts/` — excluded |
+| **acknowledgement** | old | 0 | — | 0 | 0 | 0 | ✅ clean |
+| | new | 1 | memories 1 | 0 | 0 | 0 | ✅ clean |
+| **transfer** | old | 10 | knowledge 5, decisions 4, changelog 1 | 1 | **1** | 5 | ⛔ read the real repository — excluded |
+| | new | 15 | memories 7, decisions 5, theories 2, changelog 1 | 5 | **1** | 8 | ⛔ read the real repository and the harness's own source — excluded |
+
+`shared records` = every durable row the agent created, counted across
+**all** collections (`memories`, `knowledge`, `decisions`, `theories`,
+`changelog`, …). An earlier revision of the harness counted only three
+collections and reported a cell that wrote a `knowledge` row as **zero**;
+the metric was corrected before this run, and §10.2 records why.
+
+#### What the clean cells show
+
+**1. The negative control holds, in both arms — and that is the strongest
+uncontaminated result in this section.** `routine-observation` asks "How
+many lines does `notes.txt` have?" Both arms wrote **nothing**: no shared
+record, no lesson, no handoff, no work item. The compact block's "nothing"
+row and its "not after every tool call" exclusion did not turn persistence
+into a reflex.
+
+**2. The compact block did NOT increase persistence.** In the only scenario
+where both arms are clean and the task produces durable knowledge
+(`uncertain-hypothesis`), the old arm wrote **3** shared records and the new
+arm **2**; both wrote one lesson. The direction is, if anything, the other
+way round. **The claim that the compact block makes agents persist more is
+not supported by this measurement, and this report does not make it.**
+
+**3. The uncertainty rule was honoured in both arms.** In
+`uncertain-hypothesis` — where the agent is asked for an estimate it
+cannot make exactly — **both** arms put the uncertain claim in `theories`
+(a pending record), not in a trusted collection. One is a pending theory
+each; neither arm wrote an unverified claim as a fact or a lesson.
+
+**4. The handoff trigger fired where it should, in both arms, and only
+there.** In `transfer` — the only scenario whose prompt asks for a
+handover — **each arm wrote exactly one handoff**, and **neither** arm
+wrote one in any other scenario, including `acknowledgement`, whose prompt
+is the single word "ok". The negative control for handoffs therefore holds
+in both arms. (Both `transfer` cells are contaminated for other reasons,
+so this is an observation about the *pattern*, not a counted result.)
+
+**5. One asymmetry worth recording.** In `acknowledgement` — prompt "ok" —
+the new arm wrote one shared record: an invariant it noticed in the
+fixture project. The old arm wrote nothing. That is the compact block's
+"persist as soon as it becomes useful" doing what it says, and it is also
+the closest thing to over-persistence in the whole table. It is one cell,
+one observation, and it is the reason the pending theory below stays
+pending.
+
+#### The contaminated cells, and why they are excluded
+
+| Cell | What the agent did | Verdict |
+|---|---|---|
+| old / reusable-discovery | **Edited `docs/dev/session-c-compact-managed-block.md` in the harness's own worktree.** The harness detected the change (`TREE-MODIFIED`), restored the file, and flagged the cell. | Excluded. The cell's *writes* went to the disposable store, but the agent had read the branch, so its behaviour is not a measurement of the block. |
+| new / reusable-discovery | Ran `grep` against `/tmp/opencode/managed-block/agent_installation/scripts` — the **real** repository. | Excluded. |
+| old / transfer | Reached the real repository; wrote a state-of-play document about the branch. | Excluded. |
+| new / transfer | Reached the real repository **and** the harness's own source. | Excluded. |
+
+**The pattern is structural, not incidental.** A cell whose task is "find
+the root cause by reading the code", or "write up what another engineer
+needs", is *invited* to look for the real project — and on this host the
+real project is one directory listing away. The staging (§10.2, Defect 5)
+removes the pointer; it does not remove the invitation. The scenario
+`reusable-discovery` is therefore **structurally contamination-prone on
+this host**, and so is `transfer`. The `routine-observation`,
+`acknowledgement` and `uncertain-hypothesis` scenarios are not, and they
+are the three that produced the six clean cells.
+
+#### An independent corroboration, from inside a cell
+
+The new arm's `uncertain-hypothesis` cell wrote this, unprompted, after
+measuring for itself:
+
+> "Always-on managed block in config/opencode/AGENTS.md (2561 bytes): 593
+> tokens under cl100k_base, 596 under o200k_base …"
+
+A real agent, with no access to this report, independently measured the
+block at **2,561 bytes / 593 tokens** — the corrected figures in §0, and
+the ones an audit had caught this branch getting wrong (§10.4).
+
+#### The pending theory, restated against these results
+
+The theory recorded in the substrate (`29a2b6959d2d999f`) proposes that
+the compact block increases knowledge capture and decreases incidental
+handoff volume. **These results do not support it.** The clean cells show
+equal-or-fewer shared records under the compact block and identical handoff
+behaviour. The theory stays **pending**, its validation criteria are
+unchanged (at least five repetitions per cell, reporting a distribution),
+and it must not be cited as a fact. What the comparison *does* support is
+narrower and worth stating: **the compact block does not reduce
+persistence, does not create handoff noise, and does not make agents write
+on routine work.**
 
 ### 10.4 An independent audit, produced by a contaminated cell
 
@@ -819,12 +939,13 @@ are worth their own fix.
 | **L2** | **One line of the block is not hard-wrapped.** The reference-discovery sentence is written on one line because `test_installed_block_drift.py` strips that line to build a stale-block fixture, and it can only do that if the phrase is unbroken. The drift test now asserts this, so the constraint is documented rather than accidental. |
 | **L3** | **`mpm_work` is not a native OpenCode tool.** It is a registry tool reachable through the `mpm call <tool>` CLI fallback. The matrix names it because it is the correct destination; the CLI clause in the block is what makes the name actionable here. A future host that exposes `mpm_work` natively needs no change. |
 | **L4** | **The behavioural comparison is one observation per cell, not a statistical result.** §10.3 reports the misses and the contaminated cells alongside the hits. Model behaviour varies between runs, so a single cell cannot separate a real shift from variance. The pending theory in §10.3 states the repetition protocol that would be needed. |
+| **L4a** | **Six of the ten cells are uncontaminated, and two scenarios are structurally contamination-prone on this host.** `reusable-discovery` and `transfer` invite the agent to look for the real project, and on this host the real project is one directory listing away (§10.3). The comparison's coverage is therefore three scenarios, not five. |
 | **L5** | **The behavioural comparison is confounded by the substrate's own prime directives.** The substrate seeds five `directives`-collection rows on first use — including "On every session start, call read_wake_context before responding to the user" and "Before session_end: call list_active_clusters". They are **identical in both arms**, so the comparison stays controlled, but they are an additional instruction surface that this work did not author. The harness counts them so the confound is visible rather than implicit. |
 | **L6** | **The compact block teaches the wake/recovery path but cannot guarantee the wake arrives.** The plugin's `experimental.chat.system.transform` hook owns delivery. This branch changed the instruction text, not the hook. |
 | **L7** | **`mpm_handoff`'s `state` enum is not taught.** The block names `summary`, `commitments` and `open_questions` — the three that carry the continuation content. `state` (`clean`/`crashed`/`interrupted`/`force_end`) is operationally useful but not behavioural; it stays in the tool-reference table. |
 | **L8** | **Nothing here is deployed.** The live `~/.mpm` is still at `3df7231` and `~/.config/opencode/AGENTS.md` is byte-unchanged (`md5 cb00135ea4a0c42729232f10aee36805`). The change reaches operators only when they run `make refresh-installed` or `./install.sh` after this branch merges. |
 | **L9** | **The behavioural comparison is a two-arm, one-observation-per-cell measurement on one model.** It is evidence, not proof. §10.3 reports the misses and the contaminated cells alongside the hits, and §10.1 states the design's limits. |
-| **L11** | **The behavioural harness requires a clean working tree.** It refuses to run otherwise, because it restores tracked files a cell modifies and must know the tree's starting state. That is the right trade — the alternative (`git reset --hard` plus `git clean -fd`) destroys uncommitted work, and did, once — but it means the harness cannot be run in the middle of an edit session. |
+| **L11** | **The behavioural harness requires a clean working tree, and must not be run while the operator is editing it.** It refuses to run on a dirty tree, because it restores tracked files a cell modifies and must know the tree's starting state. That is the right trade — the alternative (`git reset --hard` plus `git clean -fd`) destroys uncommitted work, and did, once. But a restore is not loseless: if the operator edits a file during a run and a cell touches the same file, the operator's edit goes with the cell's. It happened once during this work, and the harness now copies a modified file's content into a recovery directory before restoring it, so nothing is silently lost. |
 | **L10** | **The comparison's isolation depends on the harness, not on the host.** `opencode run --standalone` does not reliably keep the agent inside the directory it was launched from (§10.2, Defect 1). Any future behavioural harness for this host needs the same explicit `cd` and the same contamination detector; this is a property of the *host*, not of the managed block. |
 
 ---

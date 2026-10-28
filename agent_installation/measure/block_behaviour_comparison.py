@@ -530,20 +530,42 @@ def _changed_tracked_paths(status: str) -> list[str]:
     return out
 
 
-def _restore_tracked(paths: list[str]) -> None:
-    """Restore the SPECIFIC tracked files a cell touched.
+def _recover_and_restore(paths: list[str], recovery: Path) -> list[str]:
+    """Preserve a modified file's content, then restore it.
 
     `git checkout -- <paths>` rewrites those files from the index. It
     does not move HEAD, it does not touch the index, and it does not
     delete an untracked file. It is the only restore this harness is
     allowed to perform.
+
+    BUT IT IS NOT LOSSLESS. If the operator edited a file during the
+    run and a cell touched the SAME file, the operator's edit is
+    discarded with the cell's. That happened once — a cell edited this
+    report, and the operator's uncommitted edit to it went with it.
+
+    So the modified content is copied into a recovery directory BEFORE
+    the restore. Nothing is ever silently lost: the cell's version is
+    preserved and the operator's is recoverable.
     """
     if not paths:
-        return
+        return []
+    saved = []
+    for rel in paths:
+        victim = REPO_ROOT / rel
+        if not victim.is_file():
+            continue
+        target = recovery / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(victim, target)
+            saved.append(rel)
+        except OSError:
+            continue
     subprocess.run(
         ["git", "-C", str(REPO_ROOT), "checkout", "--", *paths],
         capture_output=True, text=True,
     )
+    return saved
 
 
 def _stage_repository(stage: Path) -> Path:
@@ -907,6 +929,7 @@ def _run_one(variant: str, block: str, scenario: str, prompt: str,
             measured["environment_reach"] = []
             measured["tree_modified"] = False
             measured["tree_modified_paths"] = []
+            measured["recovered_paths"] = []
             return measured
         measured = _measure(db_path)
         measured["stdout_tail"] = proc.stdout.strip()[-600:]
@@ -960,7 +983,8 @@ def _run_one(variant: str, block: str, scenario: str, prompt: str,
             measured["tree_modified"] = True
             measured["tree_modified_paths"] = changed[:20]
             blocking.append("TREE-MODIFIED")
-            _restore_tracked(changed)
+            saved = _recover_and_restore(changed, stage / "recovered")
+            measured["recovered_paths"] = saved[:20]
         else:
             measured["tree_modified"] = False
             measured["tree_modified_paths"] = []
@@ -1076,6 +1100,7 @@ def main() -> int:
                 "environment_reach": measured.get("environment_reach", []),
                 "tree_modified": measured.get("tree_modified", False),
                 "tree_modified_paths": measured.get("tree_modified_paths", []),
+                "recovered_paths": measured.get("recovered_paths", []),
             }
             # Upsert: a re-run of a cell replaces the earlier one.
             results = [
