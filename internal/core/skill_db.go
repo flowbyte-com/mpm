@@ -847,7 +847,7 @@ func (dm *DatabaseManager) PromoteSkillToGlobal(skillID string, confirm bool) er
 // in the §N verdict cycle once the deliberate-design precedent was
 // surfaced (commit 0583bea explicitly verified the idempotent
 // contract for handoff shreds, and skills matched that pattern from
-// the start). See docs/tool-behavioral-contract.md for the
+// the start). See docs/library/tool-behavioral-contract.md for the
 // project-wide not-found semantics policy.
 func (dm *DatabaseManager) ShredSkill(skillID string) error {
 	db := dm.SQLDB()
@@ -913,7 +913,7 @@ func (dm *DatabaseManager) PermanentlyShredSkill(skillID string) error {
 }
 
 // (ErrSkillNotFound removed in C.9 revert — see ShredSkill doc
-// above and docs/tool-behavioral-contract.md for the project-wide
+// above and docs/library/tool-behavioral-contract.md for the project-wide
 // not-found semantics policy that now governs this path.)
 // is none to delete at this id.
 var ErrSkillNotFound = fmt.Errorf("skill: not found")

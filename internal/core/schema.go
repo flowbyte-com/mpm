@@ -1718,7 +1718,7 @@ var SafeMigrations = [][3]string{
 
 	// Part 1 — global rule retire surface. NULL = active, non-NULL = retired
 	// timestamp. Soft state transition that preserves the audit row for
-	// forensics (see docs/tool-behavioral-contract.md soft-delete class).
+	// forensics (see docs/library/tool-behavioral-contract.md soft-delete class).
 	// QueryGlobalRules filters retired rows out by default; query_global_rules
 	// with include_retired=true opts in. Auto-applied to shared.memories
 	// via the SafeMigrations loop in attachShared (db.go:1461).

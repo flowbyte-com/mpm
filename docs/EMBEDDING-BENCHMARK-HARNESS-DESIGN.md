@@ -1,11 +1,14 @@
 # Issue #16 — Embedding Benchmark Harness (revised design)
 
-> **Status:** design draft v3, awaiting HAL approval.
+> **Status:** **implemented.** This is the design record for the harness that
+> shipped; it is retained for its rationale and review history, not as a
+> pending proposal. The harness lives in `bench/` and its user-facing
+> documentation is
+> [`EMBEDDING-BENCHMARK-HARNESS.md`](./EMBEDDING-BENCHMARK-HARNESS.md).
+> Read "until HAL approves" statements below as historical — v3 was approved
+> and the implementation landed (see "v2 review follow-ups (HAL 2026-10-19)").
 > **Supersedes:** v1 sketch (rejected 2026-10-18, 7 corrections) and
 > v2 (rejected 2026-10-18, 4 final corrections).
-> **Hard scope boundary:** no implementation, no commit, no push, no
-> live benchmark, no production-data change, no install modification
-> until HAL approves this document.
 
 ## 0. Why this design exists
 

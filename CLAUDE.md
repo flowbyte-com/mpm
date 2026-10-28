@@ -390,6 +390,13 @@ Do not:
 * add persistence because it is convenient;
 * add background services for read-time problems;
 * invent compatibility requirements from old projects.
+* re-introduce a retired agent adapter. OpenCode is the only supported host
+  in this release; the Claude Code, Pi, Hermes and OpenClaw adapters were
+  retired on 2026-10-27 and their directories are gone. A retired adapter is
+  not a compatibility requirement — restoring one is a new product decision,
+  not a documentation fix.
+* describe a proposed feature as implemented. If it is not merged and
+  deployed, say so, and say where the plan lives.
 
 When an old commit contains a useful fix, inspect it and reapply the minimal current semantic change rather than blindly cherry-picking unrelated history.
 

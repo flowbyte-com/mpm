@@ -1,9 +1,17 @@
 # MPM Agent Protocol — Host-Independent Canonical Reference
 
 > **Status:** canonical. This document is the **single source of truth** for
-> the MPM behavioral contract. Host-specific adapters (OpenClaw SOUL.md,
-> Claude Code CLAUDE.md, OpenCode AGENTS.md, etc.) are **derived** from
-> this file; they MUST NOT diverge from it on the principles below.
+> the MPM behavioral contract. The OpenCode adapter (the `AGENTS.md` managed
+> block, rendered from
+> [`MPM_AGENT_INTEGRATION_SNIPPETS.md`](./MPM_AGENT_INTEGRATION_SNIPPETS.md))
+> is **derived** from this file and MUST NOT diverge from it on the
+> principles below.
+>
+> **OpenCode is the only supported host in this release.** The Claude Code,
+> Pi, Hermes and OpenClaw adapters were retired on 2026-10-27 and their
+> directories are gone. The principles in this file are host-independent and
+> remain the correct contract for any host that speaks MPM's machine
+> interface, but MPM ships and supports no adapter for those hosts.
 >
 > **Do not duplicate large blocks of text in host adapters.** Reference
 > this canonical file by path or by link, or copy a clearly-marked
@@ -309,13 +317,15 @@ work verified
 
 - **Session closure** ends the conversational loop. It emits a handoff
   via `mpm_context` action `write_handoff` on the default compact MCP
-  surface (the surface exposed by `mpm-mcp` to Claude Code, OpenCode, Pi,
-  Hermes, OpenClaw — see `docs/CONTEXT_EXPOSURE.md`). On the substrate
-  the same record is reached as `mpm_handoff` (action `write`) via the
-  `mpm call mpm_handoff` CLI escape hatch; this is for hosts that have
-  not opted into the compact surface (`MPM_EXPOSE_ALL_TOOLS=1` or
-  CLI-only invocation). A handoff is **observation**, not a claim of
-  completion.
+  surface (the surface exposed by `mpm-mcp`; see
+  `cmd/mpm-mcp/tools.go`, and `internal/core/tools/compact_surface_filter_test.go`
+  for the three-tool pin — the older `cmd/mpm-mcp/tools.go` reference
+  is gone from the tree). On the OpenCode plugin, `mpm_handoff` is a
+  native tool. On the substrate, the same record is reached as
+  `mpm_handoff` (action `write`) via the `mpm call mpm_handoff` CLI
+  escape hatch — note that `mpm call mpm_context` does **not** accept
+  `write_handoff`, because the CLI enforces the registered action enum.
+  A handoff is **observation**, not a claim of completion.
 - **Work completion** is an explicit agent action via `mpm_work` (action
   `complete`) for a specific `work_id`. The agent decides when work is
   done — the host runtime terminating the session does **not** decide
@@ -764,11 +774,11 @@ and the knowledge you carefully maintained was never actually inherited.
 ## What this protocol does NOT claim
 
 - It does **not** claim MPM wakes the agent by itself. The host
-  runtime owns wake-context delivery — each adapter ships its own
-  lifecycle integration (ClaudeCode `SessionStart` hook, OpenClaw
-  `session_start` → `agent_turn_prepare` chain, OpenCode chat-hook,
-  Pi extension hook pair). **Hermes has no session-start wake hook**
-  — the agent must call `mcp__mpm__mpm_context` action
+  runtime owns wake-context delivery. The OpenCode adapter ships the only
+  supported lifecycle integration: the `mpm-opencode` plugin registers a
+  `ctx.session.hook("context")` hook and pushes wake context into the
+  system prompt before the first model call. On an unsupported host with
+  no plugin layer, the agent must call `mpm_context` action
   `read_wake_context` itself at the start of its first turn.
 - It does **not** claim MPM provides any specific behavior beyond
   durability, retrieval, and write-shape contracts. Capabilities outside

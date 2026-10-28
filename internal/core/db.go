@@ -5303,7 +5303,7 @@ func (dm *DatabaseManager) hasColumn(table, column string) bool {
 // RemoveMemoryFromTopic removes a memory from a topic. Returns (true, nil)
 // when a membership row was actually deleted, (false, nil) when no such
 // membership existed (idempotent silent success — matches the soft-delete
-// contract in docs/tool-behavioral-contract.md §1; the row is already in
+// contract in docs/library/tool-behavioral-contract.md §1; the row is already in
 // the desired terminal state).
 //
 // Part 2A (2026-09-06): widened signature to return a bool so the
@@ -7834,7 +7834,7 @@ func (dm *DatabaseManager) PromoteToGlobal(localID string) (string, error) {
 //     state enum, schema.go:530), so the column name matches operator
 //     vocabulary without inventing a new word.
 //
-// Idempotency class (per docs/tool-behavioral-contract.md §1, §4):
+// Idempotency class (per docs/library/tool-behavioral-contract.md §1, §4):
 //   - Already-retired: silent success with already_retired=true in the
 //     response. No second audit row. Matches soft-delete idempotency
 //     (mpm_skills.delete, mpm_handoff.shred).

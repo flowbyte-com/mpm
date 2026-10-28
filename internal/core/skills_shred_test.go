@@ -37,7 +37,7 @@ func TestShredSkill_HappyPath(t *testing.T) {
 // TestShredSkill_UnknownIdIsSilentNoOp pins the contract that
 // shredding an id that has no live row is a successful no-op
 // (matching the project-wide soft-delete idempotency policy; see
-// docs/tool-behavioral-contract.md "Not-found semantics for soft
+// docs/library/tool-behavioral-contract.md "Not-found semantics for soft
 // deletes" and the precedent at mpm_handoff.shred —
 // TestHandoff_DeleteHandoff_Idempotent at handoff_test.go:230).
 // The §I-C.9 fix that flipped this to error-on-unknown was reverted

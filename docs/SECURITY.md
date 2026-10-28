@@ -79,7 +79,9 @@ you depend on a specific shape; pin a tag if you want stable behaviour.
 - `mpm-mcp` (MCP server surface)
 - `mpm-scheduler` (universal wake executor)
 - `mpm-telemetry` (telemetry sidecar) and `mpm-critic` (standalone audit runner)
-- Agent plugins under `agent_installation/` (hermes, openclaw, opencode)
+- The agent adapters under `agent_installation/` — in this release that is
+  the OpenCode plugin (`agent_installation/mpm-opencode/`) and the
+  host-independent library under `agent_installation/lib/`
 - The SQLite data plane (`src/db/mpm.db`, FTS5 indexes, triggers)
 - The **shared database** (`shared.memories`, `shared.memories_fts`,
   trigger-based sync, federated `scope=all` path)
@@ -89,8 +91,7 @@ you depend on a specific shape; pin a tag if you want stable behaviour.
 - File ingestion surface (`mpm cascade materialize`); the legacy
   fsnotify-based watch daemon is no longer compiled into `mpm` and is
   not reachable as an attack surface
-- Pre-commit hooks and CI workflows (`.github/workflows/`,
-  `.superpowers/`)
+- Pre-commit hooks and CI workflows (`.github/workflows/`, `scripts/pre-commit`)
 - **Dependencies used directly by MPM.** Vulnerabilities in a Go
   module that MPM imports, or a binary MPM invokes, are in scope
   when the vulnerability materially affects MPM users. Report upstream
@@ -110,8 +111,8 @@ you depend on a specific shape; pin a tag if you want stable behaviour.
 - Vulnerabilities in third-party LLM providers or embedding services
   (Ollama, OpenAI, etc.) — file with the provider
 - Vulnerabilities in SQLite itself — file upstream
-- Vulnerabilities in the agent frameworks that *consume* MPM (OpenClaw,
-  Hermes, OpenCode) — file with those projects
+- Vulnerabilities in the agent frameworks that *consume* MPM (OpenCode,
+  and any unsupported host you wire up by hand) — file with those projects
 - MPM itself behaving correctly when given malicious *content* (a
   poisoned memory). The 19-pattern scanner in `SaveMemoryNode` exists;
   bypasses of that scanner are in scope; behaviour with adversarial

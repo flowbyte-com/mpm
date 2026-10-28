@@ -2244,7 +2244,7 @@ func handleLinkTopic(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 }
 
 // handleUnlinkTopic removes the membership row linking a memory to a topic.
-// Inverse of handleLinkTopic. Per docs/tool-behavioral-contract.md §1
+// Inverse of handleLinkTopic. Per docs/library/tool-behavioral-contract.md §1
 // (soft-delete idempotency) and §4 (idempotent membership unlink):
 //
 //   - Missing memory_id / topic_id: error at the boundary.
@@ -4070,7 +4070,7 @@ func handleSnoozeCluster(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 //     diagnostic).
 //   - Already-active cluster: silent success with status="active" — the
 //     cluster is already in the desired terminal state. Matches the
-//     soft-delete idempotency class in docs/tool-behavioral-contract.md §1.
+//     soft-delete idempotency class in docs/library/tool-behavioral-contract.md §1.
 //   - Snoozed cluster: reactivates, status="active", snooze_until=null,
 //     audit row written.
 //   - Resolved cluster: rejected — resolved is terminal; the existing
@@ -4842,7 +4842,7 @@ func handlePromoteSkillToGlobal(dm mpminternal.CoreDB, ac mpminternal.ActiveCont
 // explicitly stated "matches ShredSkill's silent-on-missing
 // contract"). Reverting restores consistency with the handoff shred
 // and the project-wide soft-delete policy — see
-// docs/tool-behavioral-contract.md "Not-found semantics for soft
+// docs/library/tool-behavioral-contract.md "Not-found semantics for soft
 // deletes".
 //
 // Args:
