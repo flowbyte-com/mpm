@@ -161,10 +161,19 @@ func TestObserve_NoResolvableBinaryFailsRatherThanUsingPath(t *testing.T) {
 // TestObserve_DryRunDoesNotRequireABinary pins the §9 dry-run requirement:
 // resolution is deferred, so an observe run that never shells out must not
 // fail merely because no mpm binary could be resolved.
+//
+// The telemetry store is SEEDED first. The read surfaces no longer create
+// the store they read (that was the write-capable open this branch
+// corrects), so a run against a missing store now fails clearly — which
+// is a different question from the one this test asks. Seeding an EMPTY
+// store keeps the question intact: the hunt finds no qualifying session,
+// so it never reaches the count, so nothing is ever resolved or spawned.
 func TestObserve_DryRunDoesNotRequireABinary(t *testing.T) {
 	ws := t.TempDir()
+	storePath := filepath.Join(ws, "telemetry.db")
 	t.Setenv("MPM_WORKSPACE", ws)
-	t.Setenv("MPM_TELEMETRY_DB", filepath.Join(ws, "telemetry.db"))
+	t.Setenv("MPM_TELEMETRY_DB", storePath)
+	seedStore(t, storePath, "inv-quiet", "ses-quiet")
 
 	hostileDir := t.TempDir()
 	hostileLog := filepath.Join(hostileDir, "hostile.log")
