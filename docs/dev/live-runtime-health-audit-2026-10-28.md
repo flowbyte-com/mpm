@@ -614,6 +614,8 @@ journal and no MCP-sourced rows in the audit trail. Nothing to report.
 
 ### 7.1 F1 — Mid-transaction busy retry cannot succeed (Medium)
 
+> **Tracked as issue [#158](https://github.com/flowbyte-com/mpm/issues/158).**
+
 | | |
 |---|---|
 | **Severity** | **Medium** |
@@ -655,6 +657,8 @@ journal and no MCP-sourced rows in the audit trail. Nothing to report.
 | **Release impact** | None for Friday. A long-horizon capacity concern |
 
 ### 7.4 F4 — Payload-shape errors are classified as system faults (Low)
+
+> **Tracked as issue [#159](https://github.com/flowbyte-com/mpm/issues/159).**
 
 | | |
 |---|---|
