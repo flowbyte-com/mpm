@@ -388,21 +388,25 @@ func (s *Scheduler) QueryDueWakes(now time.Time) ([]Wake, error) {
 }
 
 // MarkFired records the wake as dispatched. lastError may be empty.
+//
+// The settlement is delegated to core.MarkWakeFired, which applies the
+// substrate's statement-level retry budget.
+//
+// WHY THE BUDGET MATTERS HERE MORE THAN MOST PLACES
+// --------------------------------------------------
+// The settlement is the only record that the wake was DELIVERED. It used
+// to be a bare pool write, so an ordinary lock contention lost it — and
+// a lost settlement is not a lost artifact: the wake stays `fired = 0`,
+// the due-wake query selects it again, and the handler runs a SECOND
+// time. A broadcast fans out to other agents; a drill spawns a harness.
+// Those side effects cannot be un-done.
+//
+// This does NOT make delivery exactly-once. A crash between the handler
+// completing and this settlement landing still re-executes the wake;
+// closing that window needs a delivery-state redesign, not a retry
+// budget. See docs/dev/issue-178-corrections-phase-1-2026-10-29.md.
 func (s *Scheduler) MarkFired(id string, lastError string) error {
-	if lastError == "" {
-		_, err := s.db.Exec(
-			`UPDATE scheduled_wakes SET fired = 1, fired_at = ?, metadata = json_set(COALESCE(metadata,'{}'), '$.last_error', NULL) WHERE id = ?`,
-			time.Now().Unix(), id,
-		)
-		return err
-	}
-	_, err := s.db.Exec(
-		`UPDATE scheduled_wakes SET fired = 1, fired_at = ?,
-		  metadata = json_set(COALESCE(metadata,'{}'), '$.last_error', ?)
-		 WHERE id = ?`,
-		time.Now().Unix(), lastError, id,
-	)
-	return err
+	return core.MarkWakeFired(s.db, id, lastError)
 }
 
 // Tick runs one scheduler iteration. Pulls due wakes, dispatches each
@@ -470,6 +474,12 @@ func (s *Scheduler) Tick(ctx context.Context) (int, error) {
 	var wg sync.WaitGroup
 	executed := 0
 	var mu sync.Mutex
+	// A settlement that fails leaves the wake pending, so the next tick
+	// executes its handler AGAIN. That is not a silent condition and it
+	// is not the scheduler's normal state: it is collected here and
+	// reported by Tick, so the operator sees it in the same place every
+	// other tick failure is seen.
+	var settlementFailures []error
 	for _, w := range systemWakes {
 		w := w
 		wg.Add(1)
@@ -479,13 +489,22 @@ func (s *Scheduler) Tick(ctx context.Context) (int, error) {
 				s.log.Error("wake handler failed",
 					"wake_id", w.ID, "kind", w.Kind(), "err", err)
 				if mErr := s.MarkFired(w.ID, err.Error()); mErr != nil {
-					s.log.Error("mark fired failed",
-						"wake_id", w.ID, "err", mErr)
+					s.log.Error("wake settlement failed — this wake will be EXECUTED AGAIN on the next tick",
+						"wake_id", w.ID, "kind", w.Kind(), "err", mErr)
+					mu.Lock()
+					settlementFailures = append(settlementFailures,
+						fmt.Errorf("settle wake %s: %w", w.ID, mErr))
+					mu.Unlock()
 				}
 				return
 			}
 			if mErr := s.MarkFired(w.ID, ""); mErr != nil {
-				s.log.Error("mark fired failed", "wake_id", w.ID, "err", mErr)
+				s.log.Error("wake settlement failed — this wake will be EXECUTED AGAIN on the next tick",
+					"wake_id", w.ID, "kind", w.Kind(), "err", mErr)
+				mu.Lock()
+				settlementFailures = append(settlementFailures,
+					fmt.Errorf("settle wake %s: %w", w.ID, mErr))
+				mu.Unlock()
 				return
 			}
 			mu.Lock()
@@ -494,6 +513,11 @@ func (s *Scheduler) Tick(ctx context.Context) (int, error) {
 		}()
 	}
 	wg.Wait()
+	if len(settlementFailures) > 0 {
+		return executed, fmt.Errorf("tick: %d wake settlement(s) failed; those wakes are still "+
+			"pending and their handlers will run again: %w",
+			len(settlementFailures), errors.Join(settlementFailures...))
+	}
 	return executed, nil
 }
 
