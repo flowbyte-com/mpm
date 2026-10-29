@@ -124,6 +124,14 @@ func (s *WorkingContextStore) Save(wc *WorkingContext) error {
 	if expiresAt == 0 {
 		expiresAt = time.Now().UTC().Add(24 * time.Hour).Unix()
 	}
+	// retries=5, not 0 (issue #178). The previous shape read 0 as "one
+	// attempt, no backoff loop", which is the #164 defect class: this is
+	// the SAME table the tool-surface scratchpad flush writes
+	// (internal/core/tools/handlers.go, budget 5), so an ordinary lock
+	// contention here loses the working context exactly as it loses the
+	// scratchpad. The #176 guard could not see this file because it
+	// walked internal/core only; the guard now covers the whole
+	// runtime.
 	_, err := s.dm.ExecTracked(`
 		INSERT INTO ephemeral_scratchpad (session_id, thesis, supporting, decay_at)
 		VALUES (?, ?, ?, ?)
@@ -132,7 +140,7 @@ func (s *WorkingContextStore) Save(wc *WorkingContext) error {
 			supporting = excluded.supporting,
 			updated_at = CAST(strftime('%s','now') AS INTEGER),
 			decay_at = excluded.decay_at;`,
-		0, // retries=0 → standard single attempt, no backoff loop
+		5,
 		wc.SessionID, wc.Thesis, wc.Supporting,
 		expiresAt)
 	if err != nil {
@@ -147,9 +155,12 @@ func (s *WorkingContextStore) Delete(sessionID string) error {
 	if sessionID == "" {
 		return mpminternal.ErrSessionIDRequired()
 	}
+	// retries=5, not 0 (issue #178) — the same reasoning as the upsert
+	// above. The delete is idempotent (a row that is already gone is
+	// still gone), so the retry is a clean re-attempt.
 	_, err := s.dm.ExecTracked(
 		`DELETE FROM ephemeral_scratchpad WHERE session_id = ?`,
-		0,
+		5,
 		sessionID,
 	)
 	if err != nil {
