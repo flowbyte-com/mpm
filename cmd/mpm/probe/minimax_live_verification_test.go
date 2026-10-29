@@ -35,7 +35,13 @@ package probe
 //
 // So the ordinary gates are hermetic by default on EVERY host, and the live
 // verification runs only when an operator asks for it:
-// `MPM_TEST_LIVE_PROVIDER=1 go test ./cmd/mpm/probe/ -run TestLive_...`
+//
+//	MPM_TEST_LIVE_PROVIDER=1 \
+//	  CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 CGO_LDFLAGS=-lm \
+//	  go test -tags fts5 -v ./cmd/mpm/probe/ -run TestLive_...
+//
+// (The FTS5 settings are required by every `go test` invocation in this
+// repository — see docs/CONTRIBUTING.md.)
 //
 // THE CREDENTIAL IS NEVER TOUCHED BY THIS TEST
 // --------------------------------------------

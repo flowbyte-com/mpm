@@ -215,9 +215,12 @@ registry/dispatcher drift is caught.
   — the credential's presence is a property of the operator's environment,
   not a decision about the run, so a host that had a key exported would
   silently make a real, paid request during `make test`. To run the live
-  verifications deliberately:
+  verifications deliberately (the FTS5 settings are required here too —
+  they are part of every `go test` invocation in this repository):
   ```bash
-  MPM_TEST_LIVE_PROVIDER=1 go test ./cmd/mpm/probe/ -run TestLive_...
+  MPM_TEST_LIVE_PROVIDER=1 \
+    CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 CGO_LDFLAGS=-lm \
+    go test -tags fts5 -v ./cmd/mpm/probe/ -run TestLive_...
   ```
   A guard (`internal/testenv/liveprovider_guard_test.go`) keeps every
   provider-reaching test behind that gate, so a new one cannot reintroduce
