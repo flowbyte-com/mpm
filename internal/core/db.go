@@ -6600,10 +6600,14 @@ func (dm *DatabaseManager) addWorkTx(node DBNode, title, content, sessionID stri
 		sessionIDArg = sessionID
 	}
 
+	// retries=5 (issue #164): the documented ExecTracked write budget.
+	// This is the transaction's first write, so it is the statement that can
+	// meet another writer's lock. The id is generated before the call, so a
+	// retry re-uses it rather than inserting a second work item.
 	_, err := node.ExecTracked(`
 		INSERT INTO works (id, title, content, status, created_at, updated_at, session_id, migrated_at)
 		VALUES (?, ?, ?, 'open', ?, ?, ?, ?)
-	`, 0, id, title, content, now, now, sessionIDArg, now)
+	`, 5, id, title, content, now, now, sessionIDArg, now)
 	if err != nil {
 		return "", fmt.Errorf("insert work: %w", err)
 	}
