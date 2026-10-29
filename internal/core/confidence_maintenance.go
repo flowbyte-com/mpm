@@ -214,6 +214,30 @@ type confidenceDecayCandidate struct {
 // "malformed JSON" on a non-JSON metadata value, which would abort the
 // whole participant query. The trigger that writes metadata uses the
 // same guard (internal/core/db.go).
+//
+// # The directive exclusion is the canonical one
+//
+// A directive is standing policy, not a memory awaiting reinforcement,
+// so it is not a participant. That exclusion used to be written inline
+// here, as `COALESCE(is_prime_directive, 0) = 0`, and it happened to be
+// correct — but only by coincidence. A row with collection='directives'
+// and is_prime_directive=0 was excluded by the COLLECTION ALLOW-LIST
+// below, not by the directive predicate, so the two surfaces that must
+// agree (this one and every retention sweep's) were agreeing by
+// accident rather than by construction.
+//
+// DirectiveExclusionClause is the canonical spelling, and its own
+// comment says to prefer it over writing the predicate inline so that
+// the surfaces which must agree cannot drift apart. It recognises BOTH
+// directive identifiers — collection='directives' and
+// is_prime_directive=1 — so using it here means a third identifier, if
+// one is ever added, cannot leave this pass quietly decaying standing
+// policy.
+//
+// (memories.collection is declared NOT NULL, so the clause's NULL
+// handling cannot drop a legacy row here: `collection = 'directives'`
+// is never NULL, and the OR with COALESCE(is_prime_directive, 0) = 1
+// is therefore never NULL either.)
 const confidenceDecayDueSelect = `
 SELECT id, collection, last_check FROM (
 	SELECT id, collection,
@@ -225,7 +249,7 @@ SELECT id, collection, last_check FROM (
 	FROM memories
 	WHERE deleted_at IS NULL
 	  AND retired_at IS NULL
-	  AND COALESCE(is_prime_directive, 0) = 0
+	  AND ` + DirectiveExclusionClause + `
 	  AND COALESCE(collection, '') IN ('', 'memories', 'theories', 'decisions')
 	  AND confidence IS NOT NULL
 	  AND COALESCE(
