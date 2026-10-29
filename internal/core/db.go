@@ -1282,6 +1282,46 @@ func (dm *DatabaseManager) Begin() (*sql.Tx, error) {
 // If retries > 0 the query is re-attempted on SQLITE_BUSY with exponential
 // backoff (100ms, 200ms, 400ms, … capped at 5s).
 func (dm *DatabaseManager) ExecTracked(query string, retries int, args ...interface{}) (sql.Result, error) {
+	out := execTracked(dm.db, query, retries, func() {
+		dm.busyRetries.Add(1) // instrument: SQLITE_BUSY retry counter
+	}, args...)
+	dm.logSQLOutcome(watchdogOpExec, query, out.Elapsed, out.Err, out.Retries)
+	return out.Result, out.Err
+}
+
+// execOutcome is the result of a statement executed under the substrate's
+// statement-level retry policy.
+type execOutcome struct {
+	// Result is the driver's result, or nil when the statement failed.
+	Result sql.Result
+	// Err is the error, or nil when the statement succeeded.
+	Err error
+	// Elapsed is the wall time the statement (and its retries) took.
+	Elapsed time.Duration
+	// Retries is the number of RETRIES performed — zero when the first
+	// attempt succeeded.
+	Retries int
+}
+
+// execTracked runs a statement with the substrate's statement-level retry
+// policy: an ordinary SQLITE_BUSY is a WAIT and is clearable by retrying
+// the statement, so the budget decides how long the substrate waits it
+// out.
+//
+// This is the ONE implementation of that policy at the pool level.
+// DatabaseManager.ExecTracked wraps it with the watchdog instrumentation;
+// the pool-level callers that hold a *sql.DB rather than a manager (the
+// wake settlement, MarkWakeFired) use it directly, so there is no second
+// retry loop to drift.
+//
+// The transaction-level policy lives in txNode.ExecTracked, which is
+// deliberately different: a transaction can meet SQLITE_BUSY_SNAPSHOT,
+// and that class belongs to the TRANSACTION (WithTx restarts it with a
+// fresh snapshot) rather than to the statement.
+//
+// onRetry is called once per retry, after the failed attempt, so a caller
+// can count the contention it absorbed. It may be nil.
+func execTracked(db *sql.DB, query string, retries int, onRetry func(), args ...interface{}) execOutcome {
 	start := time.Now()
 	attempts := 0
 	backoff := 100 * time.Millisecond
@@ -1289,11 +1329,13 @@ func (dm *DatabaseManager) ExecTracked(query string, retries int, args ...interf
 
 	for {
 		attempts++
-		result, err := dm.db.Exec(query, args...)
+		result, err := db.Exec(query, args...)
 		elapsed := time.Since(start)
 
 		if err != nil && isBusyError(err) && attempts <= retries {
-			dm.busyRetries.Add(1) // instrument: SQLITE_BUSY retry counter
+			if onRetry != nil {
+				onRetry()
+			}
 			time.Sleep(backoff)
 			if backoff < maxBackoff {
 				backoff *= 2
@@ -1301,9 +1343,12 @@ func (dm *DatabaseManager) ExecTracked(query string, retries int, args ...interf
 			continue
 		}
 
-		dm.logSQLOutcome(watchdogOpExec, query, elapsed, err, attempts-1)
-
-		return result, err
+		return execOutcome{
+			Result:  result,
+			Err:     err,
+			Elapsed: elapsed,
+			Retries: attempts - 1,
+		}
 	}
 }
 
