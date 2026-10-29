@@ -29,12 +29,60 @@
 //     cascade crossings keep their existing semantics: a decay that
 //     crosses HardConfidenceInvalidationThreshold enqueues the same
 //     confidence_floor intent an evidence-driven recompute would.
-//   - Concurrency: DatabaseManager runs in WAL mode. A per-artifact
-//     deferred transaction that reads evidence and then writes takes a
-//     read snapshot; if an ordinary evidence write commits in between,
-//     the write upgrade fails with SQLITE_BUSY (snapshot) instead of
-//     overwriting the newer evidence-derived value. That artifact is
-//     reported as failed and retried on the next pass.
+//   - The pass observes cancellation at the artifact boundary. The
+//     artifact in flight completes; the ones not reached keep their
+//     watermark and stay due.
+//
+// # The trust boundary
+//
+// Decay is not evidence. The pass may move a confidence value DOWN; it
+// may not promote an artifact on the strength of the passage of time.
+//
+// The guard in recomputeConfidenceAt is what makes that structural:
+//
+//   - the pass may not promote an artifact that has NO LIVE EVIDENCE.
+//     The formula's value for such an artifact is the
+//     absence-of-evidence baseline (the per-type initial confidence,
+//     decayed from the artifact's creation) rather than a statement
+//     about support;
+//   - no recompute except an evidence event may UNDO A TRUST DEMOTION —
+//     a challenge, a restore from a challenge, a supersede, an
+//     invalidate. Their evidence ledger is empty or neutralised, so the
+//     formula would derive the INITIAL confidence and the pass would
+//     promote it;
+//   - the pass may never trigger the upward "foundation proven"
+//     crossing. Maintenance creates no evidence, so it cannot declare a
+//     theory proven.
+//
+// The guard is deliberately asymmetric: a raise is clamped, a decay is
+// still applied. An evidence event is exempt, because fresh evidence is
+// what re-elevates a demoted artifact.
+//
+// In practice the pass only ever lowers: the stored value was written by
+// the last recompute, and the formula's value only decreases as time
+// passes. The guard exists for the states where that is not true — a
+// demotion, an evidence set that changed without a recompute — because
+// "the pass did not promote anything" must be a property of the CODE,
+// not of the data it happens to meet.
+//
+// Two consequences worth stating plainly:
+//
+//   - the pass may still DECAY a value across the invalidation
+//     threshold, which enqueues the same confidence_floor intent an
+//     evidence-driven recompute would. That is the documented,
+//     conservative direction;
+//   - the pass may reconcile a cached value that its live evidence
+//     supports. That is a repair, not a promotion: the evidence already
+//     existed.
+//
+// # Concurrency
+//
+// DatabaseManager runs in WAL mode. A per-artifact deferred transaction
+// that reads evidence and then writes takes a read snapshot; if an
+// ordinary evidence write commits in between, the write upgrade fails
+// with SQLITE_BUSY (snapshot) instead of overwriting the newer
+// evidence-derived value. That artifact is reported as failed and retried
+// on the next pass.
 //
 // # Scope
 //
@@ -50,12 +98,40 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"time"
 )
 
 const (
+	// THE APPROVED SCHEDULING POLICY (issue #92).
+	//
+	// These four numbers are the operator's decision, and they live here
+	// — in the core that owns the pass — so the scheduler cannot drift
+	// from the documentation and the documentation cannot drift from the
+	// code. The scheduler reads every one of them from here.
+	//
+	// DefaultConfidenceDecayEnabled is OFF. That is the whole point of
+	// the decision: a substrate that decays confidence unattended changes
+	// the value a retrieval ranking sees, without anyone asking. The pass
+	// exists (it is #92's mechanism) but it runs only when an operator
+	// says so.
+	//
+	// The value is deliberately 0 and not a bool, because the
+	// configuration surface is an integer key: `GetConfigInt` falls back
+	// to this constant when the key is ABSENT from system_config, and
+	// returns the operator's own value when it is present. That is what
+	// makes an upgrade non-destructive — see the operator note in
+	// internal/scheduler/confidence_decay.go.
+	DefaultConfidenceDecayEnabled = 0
+
+	// DefaultConfidenceDecayInterval is the minimum time between two
+	// passes. Six hours means a stored confidence can be up to six hours
+	// stale; a shorter interval costs proportionally more passes for a
+	// smaller staleness window.
+	DefaultConfidenceDecayInterval = 6 * time.Hour
+
 	// DefaultConfidenceDecayLimit bounds the artifacts recomputed by one
 	// invocation.
 	DefaultConfidenceDecayLimit = 100
@@ -81,17 +157,29 @@ type ConfidenceDecayOptions struct {
 	Limit  int
 	MinAge time.Duration
 	DryRun bool
+	// Ctx cancels the pass. Cancellation is observed at the ARTIFACT
+	// BOUNDARY: the artifact in flight completes, and the pass stops
+	// before starting the next one. A cancelled pass is resumable —
+	// every artifact it finished has its watermark, and every artifact it
+	// did not reach is still due.
+	//
+	// A nil Ctx means "never cancel".
+	Ctx context.Context
 }
 
 // ConfidenceDecayResult is the machine-readable report of one pass.
 type ConfidenceDecayResult struct {
-	DryRun    bool     `json:"dry_run"`
-	Due       int      `json:"due"`
-	Scanned   int      `json:"scanned"`
-	Changed   int      `json:"changed"`
-	Unchanged int      `json:"unchanged"`
-	Failed    int      `json:"failed"`
-	Deferred  int      `json:"deferred"`
+	DryRun    bool `json:"dry_run"`
+	Due       int  `json:"due"`
+	Scanned   int  `json:"scanned"`
+	Changed   int  `json:"changed"`
+	Unchanged int  `json:"unchanged"`
+	Failed    int  `json:"failed"`
+	Deferred  int  `json:"deferred"`
+	// Cancelled reports that the pass stopped early because its
+	// context was cancelled. The artifacts it did not reach are still
+	// due, so the next pass resumes them.
+	Cancelled bool     `json:"cancelled,omitempty"`
 	Failures  []string `json:"failures,omitempty"`
 }
 
@@ -126,6 +214,30 @@ type confidenceDecayCandidate struct {
 // "malformed JSON" on a non-JSON metadata value, which would abort the
 // whole participant query. The trigger that writes metadata uses the
 // same guard (internal/core/db.go).
+//
+// # The directive exclusion is the canonical one
+//
+// A directive is standing policy, not a memory awaiting reinforcement,
+// so it is not a participant. That exclusion used to be written inline
+// here, as `COALESCE(is_prime_directive, 0) = 0`, and it happened to be
+// correct — but only by coincidence. A row with collection='directives'
+// and is_prime_directive=0 was excluded by the COLLECTION ALLOW-LIST
+// below, not by the directive predicate, so the two surfaces that must
+// agree (this one and every retention sweep's) were agreeing by
+// accident rather than by construction.
+//
+// DirectiveExclusionClause is the canonical spelling, and its own
+// comment says to prefer it over writing the predicate inline so that
+// the surfaces which must agree cannot drift apart. It recognises BOTH
+// directive identifiers — collection='directives' and
+// is_prime_directive=1 — so using it here means a third identifier, if
+// one is ever added, cannot leave this pass quietly decaying standing
+// policy.
+//
+// (memories.collection is declared NOT NULL, so the clause's NULL
+// handling cannot drop a legacy row here: `collection = 'directives'`
+// is never NULL, and the OR with COALESCE(is_prime_directive, 0) = 1
+// is therefore never NULL either.)
 const confidenceDecayDueSelect = `
 SELECT id, collection, last_check FROM (
 	SELECT id, collection,
@@ -137,7 +249,7 @@ SELECT id, collection, last_check FROM (
 	FROM memories
 	WHERE deleted_at IS NULL
 	  AND retired_at IS NULL
-	  AND COALESCE(is_prime_directive, 0) = 0
+	  AND ` + DirectiveExclusionClause + `
 	  AND COALESCE(collection, '') IN ('', 'memories', 'theories', 'decisions')
 	  AND confidence IS NOT NULL
 	  AND COALESCE(
@@ -171,6 +283,11 @@ func (dm *DatabaseManager) RunConfidenceDecay(opts ConfidenceDecayOptions) (Conf
 	}
 	cutoff := now.Add(-minAge).Unix()
 
+	ctx := opts.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	res := ConfidenceDecayResult{DryRun: opts.DryRun}
 
 	if err := dm.db.QueryRow(
@@ -184,12 +301,21 @@ func (dm *DatabaseManager) RunConfidenceDecay(opts ConfidenceDecayOptions) (Conf
 	if err != nil {
 		return res, err
 	}
-	res.Scanned = len(candidates)
-	if res.Due > res.Scanned {
-		res.Deferred = res.Due - res.Scanned
-	}
 
 	for _, c := range candidates {
+		// Cancellation is observed at the artifact boundary. The
+		// artifact in flight always completes, so a cancelled pass
+		// never leaves a half-written artifact behind; the ones it did
+		// not reach keep their old watermark and stay due.
+		if err := ctx.Err(); err != nil {
+			res.Cancelled = true
+			break
+		}
+		// Scanned counts the artifacts the pass actually EXAMINED, not
+		// the ones it loaded. A pass that stops early — because it was
+		// cancelled, or because it hit its limit — must not report the
+		// artifacts it never looked at as scanned.
+		res.Scanned++
 		var changed bool
 		if opts.DryRun {
 			changed, err = dm.confidenceDecayWouldChange(c, now)
@@ -208,6 +334,14 @@ func (dm *DatabaseManager) RunConfidenceDecay(opts ConfidenceDecayOptions) (Conf
 		} else {
 			res.Unchanged++
 		}
+	}
+
+	// Deferred is the part of the backlog this pass did not reach: it
+	// was larger than the limit, or the pass stopped early. It is
+	// reported so an operator can see the backlog instead of a partial
+	// pass silently looking complete.
+	if res.Due > res.Scanned {
+		res.Deferred = res.Due - res.Scanned
 	}
 	return res, nil
 }
@@ -274,8 +408,13 @@ func (dm *DatabaseManager) applyConfidenceDecay(c confidenceDecayCandidate, now 
 
 // confidenceDecayWouldChange reports whether a pass at `now` would move
 // the stored value, without writing anything. It mirrors the real
-// computation (same evidence loader, same formula, same clock) instead
-// of calling ExplainConfidence, whose internal clock is wall time.
+// computation (same evidence loader, same formula, same clock, same
+// trust-boundary guard) instead of calling ExplainConfidence, whose
+// internal clock is wall time.
+//
+// The guard matters here: a dry run that reported "changed" for an artifact
+// the real pass would leave alone would misreport the backlog, and an
+// operator would be told a pass would move values that it cannot move.
 func (dm *DatabaseManager) confidenceDecayWouldChange(c confidenceDecayCandidate, now time.Time) (bool, error) {
 	ev, lastPositiveAt, err := loadEvidenceForRecompute(dm, c.id, c.artifactType, now)
 	if err != nil {
@@ -285,6 +424,10 @@ func (dm *DatabaseManager) confidenceDecayWouldChange(c confidenceDecayCandidate
 	stored, ok := readArtifactConfidence(dm, c.id, c.artifactType)
 	if !ok {
 		return false, fmt.Errorf("no stored confidence")
+	}
+	derived, err = guardConfidenceRaise(dm, c.id, c.artifactType, ConfidenceDecayHistoryTrigger, stored, true, len(ev), derived)
+	if err != nil {
+		return false, err
 	}
 	return math.Abs(derived-stored) >= 1e-6, nil
 }

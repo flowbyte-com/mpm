@@ -368,6 +368,89 @@ func TestConfidenceDecay_SkipsNonArtifactRows(t *testing.T) {
 	}
 }
 
+// TestConfidenceDecay_DirectivesAreExcludedByTheCanonicalPredicate pins
+// the participant set against the CANONICAL directive predicate.
+//
+// A row is a directive when EITHER identifier is set:
+// collection='directives' (the canonical path) or is_prime_directive=1
+// (the legacy column-based path). The participant query used to spell
+// that exclusion inline, and it happened to be correct — but only by
+// coincidence: a row with collection='directives' and
+// is_prime_directive=0 was excluded by the COLLECTION ALLOW-LIST, not
+// by the directive predicate.
+//
+// This test exercises all four combinations:
+//
+//	collection='directives', is_prime_directive=0  -> excluded
+//	collection='directives', is_prime_directive=1  -> excluded
+//	collection='memories',    is_prime_directive=1  -> excluded
+//	collection='memories',    is_prime_directive=0  -> A PARTICIPANT
+//
+// The last row is the control: it is the same shape as the third, with
+// the directive marker removed, and it MUST be selected. Without it,
+// "the directive rows were excluded" could be true because nothing was
+// selected at all.
+//
+// # WHAT THIS TEST DOES AND DOES NOT PROVE
+//
+// It pins the BEHAVIOUR: every directive shape is excluded and the
+// non-directive row is not. The previous coverage marked a directive
+// with BOTH identifiers, so neither identifier was exercised on its
+// own.
+//
+// It does NOT distinguish the canonical clause from an equivalent
+// inline copy — and it could not. The two are semantically identical
+// today, and that is the point: the change from the inline copy to
+// DirectiveExclusionClause buys the absence of a DRIFT RISK, not a
+// behaviour difference. No behavioural test can prove the absence of a
+// drift risk; what it can do is pin today's behaviour, so that if the
+// two ever stop agreeing, this test says so.
+func TestConfidenceDecay_DirectivesAreExcludedByTheCanonicalPredicate(t *testing.T) {
+	dm := NewTestDM(t)
+	old := decayFixtureNow.Add(-200 * 24 * time.Hour)
+
+	cases := []struct {
+		id           string
+		collection   string
+		primeFlag    int
+		wantSelected bool
+	}{
+		{"mem-dir-canonical-only", "directives", 0, false},
+		{"mem-dir-both", "directives", 1, false},
+		{"mem-dir-legacy-only", "memories", 1, false},
+		{"mem-not-a-directive", "memories", 0, true},
+	}
+	for _, tc := range cases {
+		insertDecayMemory(t, dm, tc.id, tc.collection, old, InitialConfidence("memory"))
+		if _, err := dm.SQLDB().Exec(
+			`UPDATE memories SET is_prime_directive = ? WHERE id = ?`, tc.primeFlag, tc.id); err != nil {
+			t.Fatalf("mark %s: %v", tc.id, err)
+		}
+	}
+
+	res, err := dm.RunConfidenceDecay(ConfidenceDecayOptions{Now: decayFixtureNow, Limit: 10})
+	if err != nil {
+		t.Fatalf("run decay: %v", err)
+	}
+
+	if res.Due != 1 || res.Scanned != 1 {
+		t.Fatalf("participant set = %d due / %d scanned, want 1 / 1 — exactly the "+
+			"one row that is not a directive (result %+v)", res.Due, res.Scanned, res)
+	}
+
+	// And the control row is the one that was touched.
+	var checked int
+	if err := dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM memories WHERE id LIKE 'mem-%' AND confidence_checked_at IS NOT NULL`,
+	).Scan(&checked); err != nil {
+		t.Fatalf("count checked: %v", err)
+	}
+	if checked != 1 {
+		t.Errorf("checked %d row(s), want 1 — the three directive rows must not be "+
+			"recomputed, and the control row must be", checked)
+	}
+}
+
 // TestConfidenceDecay_BacklogMatchesDue pins the diagnostics helper.
 func TestConfidenceDecay_BacklogMatchesDue(t *testing.T) {
 	dm := NewTestDM(t)
