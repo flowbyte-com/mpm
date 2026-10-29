@@ -1779,11 +1779,20 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 	totalPruned := 0
 
 	// Prune expired
+	//
+	// Directives are exempt (issue #59, Option B). Nothing in the
+	// substrate sets expires_at on a directive row, so this rule was
+	// dormant for the baseline — but "dormant" is not "protected": an
+	// operator who set a TTL on a directive row (via a metadata patch)
+	// would have had standing policy hard-deleted by the next
+	// maintenance cycle. A directive is policy, not a memory awaiting
+	// expiry, and MPM does not reclaim directives automatically — see
+	// the retention policy in docs/SPEC.md.
 	if cfg.ExpiredEnabled {
 		result, err := s.execTracked(`
 			DELETE FROM memories
 		WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')
-	`, 0)
+		  AND `+DirectiveExclusionClause, 0)
 		if err == nil {
 			if rows, _ := result.RowsAffected(); rows > 0 {
 				totalPruned += int(rows)
@@ -1860,10 +1869,26 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 	if s.DM != nil {
 		consolidationLimit = s.DM.GetConfigInt("consolidation.max_memories", 500)
 	}
+	// Directives are exempt (issue #59, Option B).
+	//
+	// This exclusion was MISSING, and its absence was accidental rather
+	// than deliberate: a seeded directive carries weight=10, so it
+	// satisfies `weight > 1` and was selected by this query. It survived
+	// only because directives hold no vector by design, and clustering
+	// requires two vectors to compare — so an embedding backfill (or a
+	// directive that arrived with one) would have made standing policy
+	// eligible for cluster consolidation, and a cluster of more than
+	// maxPerTopic would have soft-deleted the lowest-weight members.
+	//
+	// The policy states that a directive's retention follows registry
+	// membership, NOT age, access frequency OR EMBEDDING STATUS. Leaving
+	// the protection resting on "directives have no vector" is exactly
+	// the dependency the policy forbids.
 	rows, err := s.DB.Query(`
 		SELECT id, collection, content, tags, embedding, created_at, weight, reinforcement_count
 		FROM memories
 		WHERE deleted_at IS NULL
+		  AND `+DirectiveExclusionClause+`
 		  AND (is_long_term = 1 OR reinforcement_count > 0 OR weight > 1)
 		ORDER BY collection, created_at DESC
 		LIMIT ?
@@ -3440,8 +3465,11 @@ func (s *MemoryStore) PruneExpired() (int, error) {
 		}
 	}
 
+	// Directives are exempt (issue #59, Option B) — a directive is
+	// standing policy, not a memory awaiting expiry, and MPM does not
+	// reclaim directives automatically.
 	result, err := s.DB.Exec(`
-		UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')
+		UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now') AND ` + DirectiveExclusionClause + `
 	`)
 	if err != nil {
 		return 0, fmt.Errorf("prune expired failed: %w", err)

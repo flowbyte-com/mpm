@@ -175,7 +175,7 @@ func reviveSeedRow(db *sql.DB, sd SeedDirective, existingContent, existingTags s
 	if scope == "" {
 		scope = "global"
 	}
-	meta := fmt.Sprintf(`{"is_prime_directive":1,"scope":%q,"provenance":{"agent":"mpm_ops_init","compute":"absolute","model":"direct","persona":"operator","source":"baseline_cognitive_bootstrap"}}`, scope)
+	meta := seedRowMetadata(scope)
 	_, err := db.Exec(`
 		UPDATE memories
 		SET deleted_at = NULL, content = ?, tags = ?, metadata = ?,
@@ -186,6 +186,25 @@ func reviveSeedRow(db *sql.DB, sd SeedDirective, existingContent, existingTags s
 		return false, err
 	}
 	return drifted, nil
+}
+
+// seedRowMetadata builds the metadata JSON a seeded directive row carries.
+//
+// It is the SINGLE writer of that metadata, and it uses the
+// DirectiveProvenanceSource constant rather than a literal, so the writer
+// and the reader (OrphanedDirectives, which looks for the marker) cannot
+// drift apart.
+//
+// The metadata carries three things:
+//   - is_prime_directive: the legacy column-marker, so the web/CLI read
+//     paths that predate the collection column still find the row;
+//   - scope: the seed's scope, which is seed-owned by contract;
+//   - provenance: where the row came from. `source` is what distinguishes
+//     a row the baseline seeder wrote from an operator-authored directive —
+//     see IsRegistryBackedDirective.
+func seedRowMetadata(scope string) string {
+	return fmt.Sprintf(`{"is_prime_directive":1,"scope":%q,"provenance":{"agent":"mpm_ops_init","compute":"absolute","model":"direct","persona":"operator","source":%q}}`,
+		scope, DirectiveProvenanceSource)
 }
 
 // insertSeedRow writes one seed row. Uses INSERT OR IGNORE on the
@@ -205,7 +224,7 @@ func insertSeedRow(db *sql.DB, sd SeedDirective) error {
 	if scope == "" {
 		scope = "global"
 	}
-	meta := fmt.Sprintf(`{"is_prime_directive":1,"scope":%q,"provenance":{"agent":"mpm_ops_init","compute":"absolute","model":"direct","persona":"operator","source":"baseline_cognitive_bootstrap"}}`, scope)
+	meta := seedRowMetadata(scope)
 	// created_at / updated_at are provided explicitly so the row
 	// invariant (non-NULL created_at) holds on databases whose
 	// `memories.created_at` column lacks the canonical DEFAULT
