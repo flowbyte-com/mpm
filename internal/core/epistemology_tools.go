@@ -206,9 +206,12 @@ func (dm *DatabaseManager) proposeTheory(hypothesis, validationCriteria string, 
 		// doesn't accept a column-list, so we patch via the SQL
 		// interface directly inside the same transaction.
 		if depsJSON != "" {
+			// retries=5 (issue #164): the documented ExecTracked write budget.
+			// The dependency column is what the cascade materializer reads;
+			// losing it to a lock would silently drop the edges.
 			if _, err := node.ExecTracked(
 				`UPDATE memories SET dependencies = ? WHERE id = ? AND collection = 'theories'`,
-				0, depsJSON, id,
+				5, depsJSON, id,
 			); err != nil {
 				return fmt.Errorf("persist dependencies: %w", err)
 			}
@@ -353,6 +356,8 @@ func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string)
 		// The +1 reinforcement is folded into the same UPDATE so it
 		// participates in the transition filter (no reinforcement
 		// on a no-op resolve).
+		// retries=5 (issue #164): the documented ExecTracked write budget.
+		// A theory that is resolved but not written stays pending forever.
 		res, err := node.ExecTracked(`
 			UPDATE memories
 			SET metadata = json_patch(COALESCE(metadata, '{}'), ?),
@@ -360,7 +365,7 @@ func (dm *DatabaseManager) ResolveTheory(theoryID, conclusion, newStatus string)
 			    last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id = ? AND collection = 'theories' AND deleted_at IS NULL
 			  AND json_extract(metadata, '$.status') = 'pending'
-		`, 0, string(patchJSON), theoryID)
+		`, 5, string(patchJSON), theoryID)
 		if err != nil {
 			return fmt.Errorf("resolve theory: %w", err)
 		}
@@ -571,9 +576,12 @@ func (dm *DatabaseManager) SupersedeDecision(originalID, contextText, choice, ra
 
 	// Mark the original inside one transaction: metadata patch + tags.
 	err = dm.WithTx(func(node DBNode) error {
+		// retries=5 (issue #164): the documented ExecTracked write budget.
+		// The superseded marker is what makes the original stop being
+		// presented as live; losing it leaves two live decisions.
 		if _, err := node.ExecTracked(
 			`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ? AND deleted_at IS NULL`,
-			0, string(patchJSON), originalID); err != nil {
+			5, string(patchJSON), originalID); err != nil {
 			return fmt.Errorf("mark superseded: %w", err)
 		}
 		if _, err := node.ExecTracked(
@@ -602,7 +610,10 @@ func (dm *DatabaseManager) SupersedeDecision(originalID, contextText, choice, ra
 					'$[' || (json_array_length(tags) + 1) || ']', ?
 				)
 			END WHERE id = ? AND deleted_at IS NULL`,
-			0, "superseded", "superseded-by:"+newID,
+			// retries=5 (issue #164): the documented ExecTracked write
+			// budget. The superseded tag is what stops the original from
+			// being surfaced as live.
+			5, "superseded", "superseded-by:"+newID,
 			"superseded", "superseded-by:"+newID,
 			originalID); err != nil {
 			return fmt.Errorf("tag superseded: %w", err)
@@ -615,15 +626,20 @@ func (dm *DatabaseManager) SupersedeDecision(originalID, contextText, choice, ra
 		// silently disagree. The recompute path can re-elevate the value
 		// if fresh corroborating evidence arrives (just like the F7.1
 		// challenged-memory path).
+		// retries=5 (issue #164): the documented ExecTracked write budget.
+		// The confidence drop is what keeps the two decision views in
+		// agreement; losing it leaves the ranking and the live view apart.
 		if _, err := node.ExecTracked(
 			`UPDATE memories SET confidence = ? WHERE id = ? AND deleted_at IS NULL`,
-			0, DecisionInitialConfidence, originalID); err != nil {
+			5, DecisionInitialConfidence, originalID); err != nil {
 			return fmt.Errorf("drop superseded confidence: %w", err)
 		}
+		// retries=5 (issue #164): the documented ExecTracked write budget.
+		// The history row is the audit trail of the confidence drop.
 		if _, err := node.ExecTracked(`
 			INSERT INTO confidence_history (id, artifact_id, artifact_type, confidence, computed_at, evidence_count, trigger)
 			VALUES (?, ?, 'decision', ?, ?, 0, 'supersede')
-		`, 0, GenerateID(), originalID, DecisionInitialConfidence, time.Now().Unix()); err != nil {
+		`, 5, GenerateID(), originalID, DecisionInitialConfidence, time.Now().Unix()); err != nil {
 			return fmt.Errorf("supersede confidence history: %w", err)
 		}
 		return nil
@@ -666,9 +682,12 @@ func (dm *DatabaseManager) InvalidateDecision(decisionID, reason string) (map[st
 		"invalid_reason":  reason,
 	})
 	err = dm.WithTx(func(node DBNode) error {
+		// retries=5 (issue #164): the documented ExecTracked write budget.
+		// The invalidated marker is what makes the decision stop being
+		// presented as live; losing it leaves a withdrawn decision live.
 		if _, err := node.ExecTracked(
 			`UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ? AND deleted_at IS NULL`,
-			0, string(patchJSON), decisionID); err != nil {
+			5, string(patchJSON), decisionID); err != nil {
 			return fmt.Errorf("mark invalidated: %w", err)
 		}
 		if _, err := node.ExecTracked(
@@ -686,21 +705,29 @@ func (dm *DatabaseManager) InvalidateDecision(decisionID, reason string) (map[st
 				WHEN tags IS NULL OR tags = '' OR tags = '[]' OR tags = 'null' OR NOT json_valid(tags) THEN json_array('invalidated')
 				ELSE json_insert(tags, '$[' || json_array_length(tags) || ']', 'invalidated')
 			END WHERE id = ? AND deleted_at IS NULL AND (tags IS NULL OR tags NOT LIKE '%invalidated%')`,
-			0, decisionID); err != nil {
+			// retries=5 (issue #164): the documented ExecTracked write
+			// budget. The invalidated tag is what stops the withdrawn
+			// decision from being surfaced as live.
+			5, decisionID); err != nil {
 			return fmt.Errorf("tag invalidated: %w", err)
 		}
 		// F5-2 (alpha-final): mirror SupersedeDecision's confidence drop.
 		// An invalidated decision is "no evidence"; the live confidence
 		// column must reflect that, not the pre-invalidation value.
+		// retries=5 (issue #164): the documented ExecTracked write budget.
+		// An invalidated decision is "no evidence"; the live confidence
+		// column must reflect that.
 		if _, err := node.ExecTracked(
 			`UPDATE memories SET confidence = ? WHERE id = ? AND deleted_at IS NULL`,
-			0, DecisionInitialConfidence, decisionID); err != nil {
+			5, DecisionInitialConfidence, decisionID); err != nil {
 			return fmt.Errorf("drop invalidated confidence: %w", err)
 		}
+		// retries=5 (issue #164): the documented ExecTracked write budget.
+		// The history row is the audit trail of the confidence drop.
 		if _, err := node.ExecTracked(`
 			INSERT INTO confidence_history (id, artifact_id, artifact_type, confidence, computed_at, evidence_count, trigger)
 			VALUES (?, ?, 'decision', ?, ?, 0, 'invalidate')
-		`, 0, GenerateID(), decisionID, DecisionInitialConfidence, time.Now().Unix()); err != nil {
+		`, 5, GenerateID(), decisionID, DecisionInitialConfidence, time.Now().Unix()); err != nil {
 			return fmt.Errorf("invalidate confidence history: %w", err)
 		}
 		return nil

@@ -549,11 +549,14 @@ func (dm *DatabaseManager) PurgeWork(req WorkPurgeRequest) (*WorkPurgeReport, er
 		if err != nil {
 			return fmt.Errorf("purge: encode counts: %w", err)
 		}
+		// retries=5 (issue #164): the documented ExecTracked write budget.
+		// The audit row is the record that the purge happened; losing it to
+		// a lock would make a completed purge invisible.
 		if _, err := tx.ExecTracked(`
 			INSERT INTO work_purge_audit
 				(id, work_id, purged_at, reason_code, note, operator, counts)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, 0, auditID, req.WorkID, purgedAt, req.ReasonCode,
+		`, 5, auditID, req.WorkID, purgedAt, req.ReasonCode,
 			nullableOrNil(req.Note), nullableOrNil(req.Operator), string(countsJSON)); err != nil {
 			return fmt.Errorf("purge: write audit row: %w", err)
 		}
