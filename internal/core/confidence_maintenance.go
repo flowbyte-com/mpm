@@ -29,12 +29,60 @@
 //     cascade crossings keep their existing semantics: a decay that
 //     crosses HardConfidenceInvalidationThreshold enqueues the same
 //     confidence_floor intent an evidence-driven recompute would.
-//   - Concurrency: DatabaseManager runs in WAL mode. A per-artifact
-//     deferred transaction that reads evidence and then writes takes a
-//     read snapshot; if an ordinary evidence write commits in between,
-//     the write upgrade fails with SQLITE_BUSY (snapshot) instead of
-//     overwriting the newer evidence-derived value. That artifact is
-//     reported as failed and retried on the next pass.
+//   - The pass observes cancellation at the artifact boundary. The
+//     artifact in flight completes; the ones not reached keep their
+//     watermark and stay due.
+//
+// # The trust boundary
+//
+// Decay is not evidence. The pass may move a confidence value DOWN; it
+// may not promote an artifact on the strength of the passage of time.
+//
+// The guard in recomputeConfidenceAt is what makes that structural:
+//
+//   - the pass may not promote an artifact that has NO LIVE EVIDENCE.
+//     The formula's value for such an artifact is the
+//     absence-of-evidence baseline (the per-type initial confidence,
+//     decayed from the artifact's creation) rather than a statement
+//     about support;
+//   - no recompute except an evidence event may UNDO A TRUST DEMOTION —
+//     a challenge, a restore from a challenge, a supersede, an
+//     invalidate. Their evidence ledger is empty or neutralised, so the
+//     formula would derive the INITIAL confidence and the pass would
+//     promote it;
+//   - the pass may never trigger the upward "foundation proven"
+//     crossing. Maintenance creates no evidence, so it cannot declare a
+//     theory proven.
+//
+// The guard is deliberately asymmetric: a raise is clamped, a decay is
+// still applied. An evidence event is exempt, because fresh evidence is
+// what re-elevates a demoted artifact.
+//
+// In practice the pass only ever lowers: the stored value was written by
+// the last recompute, and the formula's value only decreases as time
+// passes. The guard exists for the states where that is not true — a
+// demotion, an evidence set that changed without a recompute — because
+// "the pass did not promote anything" must be a property of the CODE,
+// not of the data it happens to meet.
+//
+// Two consequences worth stating plainly:
+//
+//   - the pass may still DECAY a value across the invalidation
+//     threshold, which enqueues the same confidence_floor intent an
+//     evidence-driven recompute would. That is the documented,
+//     conservative direction;
+//   - the pass may reconcile a cached value that its live evidence
+//     supports. That is a repair, not a promotion: the evidence already
+//     existed.
+//
+// # Concurrency
+//
+// DatabaseManager runs in WAL mode. A per-artifact deferred transaction
+// that reads evidence and then writes takes a read snapshot; if an
+// ordinary evidence write commits in between, the write upgrade fails
+// with SQLITE_BUSY (snapshot) instead of overwriting the newer
+// evidence-derived value. That artifact is reported as failed and retried
+// on the next pass.
 //
 // # Scope
 //
@@ -309,9 +357,9 @@ func (dm *DatabaseManager) applyConfidenceDecay(c confidenceDecayCandidate, now 
 
 // confidenceDecayWouldChange reports whether a pass at `now` would move
 // the stored value, without writing anything. It mirrors the real
-// computation (same evidence loader, same formula, same clock, same F7.1
-// floor guard) instead of calling ExplainConfidence, whose internal clock
-// is wall time.
+// computation (same evidence loader, same formula, same clock, same
+// trust-boundary guard) instead of calling ExplainConfidence, whose
+// internal clock is wall time.
 //
 // The guard matters here: a dry run that reported "changed" for an artifact
 // the real pass would leave alone would misreport the backlog, and an
@@ -326,7 +374,7 @@ func (dm *DatabaseManager) confidenceDecayWouldChange(c confidenceDecayCandidate
 	if !ok {
 		return false, fmt.Errorf("no stored confidence")
 	}
-	derived, err = guardConfidenceRaise(dm, c.id, c.artifactType, ConfidenceDecayHistoryTrigger, stored, true, derived)
+	derived, err = guardConfidenceRaise(dm, c.id, c.artifactType, ConfidenceDecayHistoryTrigger, stored, true, len(ev), derived)
 	if err != nil {
 		return false, err
 	}

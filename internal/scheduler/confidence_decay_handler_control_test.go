@@ -24,6 +24,13 @@ import (
 // shutting down must not keep writing to the database. The pass
 // observes the cancellation at the artifact boundary, so the artifacts
 // it already finished keep their watermark and the rest stay due.
+//
+// The cancellation is deliberately NOT an error: the scheduler cancels
+// the tick context when it stops, and reporting that as a failed tick
+// would put an error line in the journal on every restart. The
+// scheduler's other long-running tick handler (cascade drain) returns
+// nil on a cancelled context for the same reason. What matters here is
+// the STATE, and that is what this test asserts.
 func TestConfidenceDecayHandler_CancelledTickDoesNotRunThePass(t *testing.T) {
 	dm := core.NewTestDM(t)
 	now := decayFixtureClock()
@@ -39,10 +46,8 @@ func TestConfidenceDecayHandler_CancelledTickDoesNotRunThePass(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	// A cancelled tick reports the cancellation as an error rather than
-	// pretending the pass ran.
-	if err := tick(ctx); err == nil {
-		t.Error("a cancelled tick reported success")
+	if err := tick(ctx); err != nil {
+		t.Errorf("a cancelled tick reported an error: %v; a shutdown is not a failure", err)
 	}
 
 	var checked *int64
@@ -78,8 +83,8 @@ func TestConfidenceDecayHandler_CancelledPassDoesNotGateTheNextTick(t *testing.T
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := tick(ctx); err == nil {
-		t.Fatal("a cancelled tick reported success")
+	if err := tick(ctx); err != nil {
+		t.Fatalf("cancelled tick: %v", err)
 	}
 
 	// The marker must NOT have been written, so the next tick is free to

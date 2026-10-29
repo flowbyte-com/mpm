@@ -124,8 +124,15 @@ func (h *ConfidenceDecayHandler) TickHandler() func(ctx context.Context) error {
 			)
 		}
 		if res.Cancelled {
-			return fmt.Errorf("confidence decay: pass cancelled after %d of %d artifact(s); "+
-				"the rest remain due", res.Scanned, res.Due)
+			// A cancelled pass is NOT an error. The scheduler cancels
+			// the tick context when it shuts down, and this handler is
+			// the only one that could be mid-pass at that moment;
+			// logging it as a failed tick would put a red line in the
+			// journal on every restart. The cancellation is reported in
+			// the Info line above, and the state is what matters: the
+			// artifacts it did not reach are still due, and the next
+			// tick resumes them.
+			return nil
 		}
 		if res.Failed > 0 {
 			return fmt.Errorf("confidence decay: %d of %d artifact(s) failed; they remain due",

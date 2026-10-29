@@ -562,12 +562,12 @@ func RecomputeConfidence(node DBNode, artifactID, artifactType string, reason Re
 // recomputeReasonIsEvidenceEvent reports whether the recompute was caused
 // by an evidence change.
 //
-// It is the discriminator for the F7.1 floor guard below: an evidence
-// event is the ONE thing allowed to re-elevate a challenge-pinned
-// artifact, because F7.1 says "fresh evidence is required to re-elevate
-// the memory's confidence above this floor". Everything else — the
-// maintenance decay pass, an operator's manual recompute — must leave the
-// floor in place.
+// It is the discriminator for the trust-boundary guard below: an evidence
+// event is the ONE thing allowed to raise a confidence value, because
+// F7.1 says "fresh evidence is required to re-elevate the memory's
+// confidence above this floor". Everything else — the maintenance decay
+// pass, an operator's manual recompute — must leave a demoted artifact
+// where the demotion put it.
 func recomputeReasonIsEvidenceEvent(reason RecomputeReason) bool {
 	switch reason {
 	case RecomputeReasonEvidenceAdded,
@@ -580,39 +580,47 @@ func recomputeReasonIsEvidenceEvent(reason RecomputeReason) bool {
 	}
 }
 
-// artifactConfidenceFloorPinned reports whether the artifact's stored
-// confidence is pinned at the challenge floor by a trust-boundary action.
+// artifactTrustDemoted reports whether the artifact's stored confidence
+// was set by a TRUST-DEMOTING action rather than by the confidence
+// formula.
 //
-// Two states pin it:
+// The substrate has four such actions, and they all share one contract:
+// the artifact's confidence is the "no evidence" value, and FRESH
+// EVIDENCE is what re-elevates it.
 //
-//   - metadata.status = 'challenged' — the challenge dropped the
-//     confidence to ChallengedMemoryConfidenceFloor and expired every
-//     evidence row, so that fresh evidence is the only thing that can
-//     re-elevate it (F7.1).
-//   - metadata.restored_from_challenge — the restore CLEARED the
-//     challenged status (so the memory can be worked with again) but
-//     deliberately left the confidence at the floor.
+//   - F7.1 challenge — metadata.status = 'challenged'. The challenge
+//     dropped the confidence to ChallengedMemoryConfidenceFloor and
+//     expired every evidence row.
+//   - F7.1 restore — metadata.restored_from_challenge. The restore
+//     CLEARED the challenged status (so the memory can be worked with
+//     again) but deliberately left the confidence at the floor.
+//   - F5-2 supersede — metadata.superseded. A decision that has been
+//     replaced falls back to DecisionInitialConfidence.
+//   - F5-2 invalidate — metadata.invalidated. An invalidated decision
+//     falls back to DecisionInitialConfidence.
 //
-// The second state is the one that is easy to miss. A restored memory is
-// no longer 'challenged', so a participant query that excludes the
+// The restore is the state that is easy to miss. A restored memory is no
+// longer 'challenged', so a participant query that excludes the
 // challenged status does not exclude it — and the decay pass recomputes
 // it from its empty (all-expired) evidence set. The formula then derives
 // the INITIAL confidence, which is HIGHER than the floor, so the pass
 // would promote an artifact that has no valid evidence at all.
 //
-// Only the memories table carries metadata; lessons have none, and the
-// challenge machinery does not apply to them.
-func artifactConfidenceFloorPinned(node DBNode, artifactID, artifactType string) (bool, error) {
+// Only the memories table carries metadata; lessons have none, and none
+// of the four demotions applies to them.
+func artifactTrustDemoted(node DBNode, artifactID, artifactType string) (bool, error) {
 	if artifactType == "lesson" {
 		return false, nil
 	}
 	var status string
-	var restored interface{}
+	var restored, superseded, invalidated interface{}
 	err := node.QueryRowTracked(`
 		SELECT COALESCE(CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.status') END, ''),
-		       COALESCE(CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.restored_from_challenge') END, 0)
+		       COALESCE(CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.restored_from_challenge') END, 0),
+		       COALESCE(CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.superseded') END, 0),
+		       COALESCE(CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.invalidated') END, 0)
 		FROM memories WHERE id = ?
-	`, artifactID).Scan(&status, &restored)
+	`, artifactID).Scan(&status, &restored, &superseded, &invalidated)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -622,7 +630,7 @@ func artifactConfidenceFloorPinned(node DBNode, artifactID, artifactType string)
 	if status == "challenged" {
 		return true, nil
 	}
-	return jsonTruthy(restored), nil
+	return jsonTruthy(restored) || jsonTruthy(superseded) || jsonTruthy(invalidated), nil
 }
 
 // jsonTruthy reports whether a value read out of a JSON document by
@@ -647,14 +655,38 @@ func jsonTruthy(v interface{}) bool {
 	}
 }
 
-// guardConfidenceRaise applies the F7.1 floor guard to a derived
+// guardConfidenceRaise applies the trust-boundary guard to a derived
 // confidence value and returns the value that may actually be stored.
 //
 // THE RULE
 // --------
-// An artifact whose confidence is pinned at the challenge floor may not
-// have that confidence RAISED by anything except an evidence event. The
-// guard therefore clamps the derived value to the stored one.
+// A recompute may not RAISE a confidence value unless the raise is
+// justified. Two clauses, with different scopes, because the two callers
+// are different things:
+//
+//  1. NO RECOMPUTE EXCEPT AN EVIDENCE EVENT MAY UNDO A TRUST DEMOTION.
+//     An artifact whose confidence was set by a trust-boundary action
+//     (a challenge, a restore from a challenge, a supersede, an
+//     invalidate) rather than by the formula keeps the value the
+//     demotion set. A demotion is undone by fresh evidence, not by a
+//     re-derivation.
+//
+//  2. THE MAINTENANCE PASS MAY NOT PROMOTE AN ARTIFACT THAT HAS NO
+//     LIVE EVIDENCE. The formula's value for such an artifact is the
+//     ABSENCE-of-evidence baseline (the per-type initial confidence,
+//     decayed from the artifact's creation) rather than a statement
+//     about support. Maintenance is unattended and creates no evidence,
+//     so it may not write that value over a stored one.
+//
+// The operator's manual recompute is a REPAIR tool and is deliberately
+// not covered by clause 2: an artifact whose cached value disagrees with
+// what the formula derives is exactly what the operator is trying to
+// fix. It is still covered by clause 1 — an operator's recompute is a
+// re-derivation from evidence, not an un-challenge.
+//
+// An evidence event is exempt from both: fresh evidence is precisely
+// what re-elevates a demoted artifact (F7.1, F5-2), and it is the only
+// thing that may raise a confidence value on its own account.
 //
 // WHY IT EXISTS
 // -------------
@@ -672,33 +704,41 @@ func jsonTruthy(v interface{}) bool {
 // challenge-restored artifact has none. Raising its confidence back is
 // not a recomputation — it is the promotion of an uncertain finding.
 //
+// The same rule covers the F5-2 demotions (a superseded or invalidated
+// decision falls back to DecisionInitialConfidence) and any future
+// demotion, without a per-demotion list to keep in step.
+//
 // Note the asymmetry, which is deliberate: the guard clamps RAISES only.
 // A decay that moves the value DOWN is still allowed, because lower
 // confidence is the conservative direction and the formula's whole point
 // is to move it down.
 //
 // The fast path costs nothing: a raise is only possible when the derived
-// value exceeds the stored one, and the floor pre-filter rejects
-// everything that is not sitting exactly at the floor. The metadata read
-// happens only for an artifact at the floor, which is rare.
-func guardConfidenceRaise(node DBNode, artifactID, artifactType string, reason RecomputeReason, stored float64, hasStored bool, derived float64) (float64, error) {
+// value exceeds the stored one, and clause 2 is decided from the
+// evidence set the recompute has already loaded. The metadata read
+// happens only for the rare artifact that survives both fast paths.
+func guardConfidenceRaise(node DBNode, artifactID, artifactType string, reason RecomputeReason, stored float64, hasStored bool, liveEvidence int, derived float64) (float64, error) {
 	if !hasStored || derived <= stored {
 		return derived, nil
 	}
 	if recomputeReasonIsEvidenceEvent(reason) {
 		// Fresh evidence is the one thing that may re-elevate a
-		// challenge-pinned artifact.
+		// demoted artifact — and the only thing that may raise a
+		// confidence value on its own account.
 		return derived, nil
 	}
-	if math.Abs(stored-ChallengedMemoryConfidenceFloor) > 1e-9 {
-		// Not sitting at the floor: nothing is pinned.
-		return derived, nil
+	if reason == ConfidenceDecayHistoryTrigger && liveEvidence == 0 {
+		// Clause 2: the derived value is the absence-of-evidence
+		// baseline, not a statement about support, and maintenance
+		// may not promote.
+		return stored, nil
 	}
-	pinned, err := artifactConfidenceFloorPinned(node, artifactID, artifactType)
+	// Clause 1: a demoted artifact keeps the value the demotion set.
+	demoted, err := artifactTrustDemoted(node, artifactID, artifactType)
 	if err != nil {
 		return derived, err
 	}
-	if !pinned {
+	if !demoted {
 		return derived, nil
 	}
 	return stored, nil
@@ -751,12 +791,12 @@ func recomputeConfidenceAt(node DBNode, artifactID, artifactType string, reason 
 	// Run the math.
 	conf := computeConfidence(artifactType, ev, now, lastPositiveAt, 0.005)
 
-	// F7.1 floor guard. A challenge-pinned artifact's confidence may not
-	// be raised by anything except an evidence event — see
-	// guardConfidenceRaise for the rule and the two paths it protects.
-	conf, err = guardConfidenceRaise(node, artifactID, artifactType, reason, oldConf, hasOldConf, conf)
+	// Trust-boundary guard. A recompute may not RAISE a confidence value
+	// unless live evidence supports the raise — see guardConfidenceRaise
+	// for the two clauses and the paths they protect.
+	conf, err = guardConfidenceRaise(node, artifactID, artifactType, reason, oldConf, hasOldConf, len(ev), conf)
 	if err != nil {
-		return false, fmt.Errorf("confidence floor guard: %w", err)
+		return false, fmt.Errorf("confidence trust-boundary guard: %w", err)
 	}
 
 	// Maintenance no-op: nothing to record. The tolerance is far below
@@ -811,9 +851,20 @@ func recomputeConfidenceAt(node DBNode, artifactID, artifactType string, reason 
 		// are surfaced to the materializer so a reviewer can decide
 		// whether their conclusions still hold given the foundation
 		// is now solid.
+		//
+		// The MAINTENANCE PASS NEVER TRIGGERS THIS CROSSING. "This
+		// foundation is now solid" is a statement about EVIDENCE, and
+		// the maintenance pass creates none: it only notices that the
+		// cached value moved. Letting the pass emit this event would
+		// let unattended maintenance declare a theory proven — the
+		// approval of an uncertain finding by a background job, and a
+		// coupling to the critic-arming surface that maintenance has no
+		// business with. The downward crossing above is inherited
+		// unchanged: invalidation is the conservative direction, and it
+		// is the documented behaviour of the decay path.
 		ceilingCrossed := (!hasOldConf || oldConf < HardConfidenceProvenThreshold) &&
 			conf >= HardConfidenceProvenThreshold
-		if ceilingCrossed {
+		if ceilingCrossed && reason != ConfidenceDecayHistoryTrigger {
 			if _, err := node.DM().EnqueueCascadeFoundationProven(
 				tx,
 				artifactID, artifactType,
