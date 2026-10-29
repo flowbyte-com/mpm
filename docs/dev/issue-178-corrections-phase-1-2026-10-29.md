@@ -526,13 +526,41 @@ Run on the combined tree (PR 1 → PR 2 → PR 3), against `origin/main` at
 
 | Gate | Result |
 |---|---|
-| `make test` (root + `internal/core` + tools + scripts + bench + agent-installation) | see §7.1 |
-| `make test-race` (the canonical CI gate) | see §7.1 |
+| `make test` (root + `internal/core` + tools + testenv + scripts + bench + agent-installation) | **PASS.** Every Go package `ok`; `test-scripts` 682 tests OK; `test-bench` 217 tests; `test-agent-installation` 473 tests OK. |
+| `make test-race` (the canonical CI gate) | **PASS** — exit 0, 139 packages `ok`, **0 failures**, **no `DATA RACE`**. |
+| `make test-release` | **PASS** — 36 tests collected (floor 20), `ok`, exit 0. |
+| `make release-gate` (`test-race` + `test-release`) | **PASS.** |
 | `mpm-lint --gate` | **PASS** — all classes. `ctx-plain-missing` improved 820 → 817; `ctx-in-scope-missing` stays 0. |
-| `make docs-check` | see §7.1 |
-| `make release-gate` | see §7.1 |
+| `make docs-check` | **PASS** — 13 checks, 3 review items (discharged below), **0 errors**. |
+| CI (`build-and-test`, four PRs) | **PASS** — all four runs green. |
 
-### 7.1 Documentation impact assessment
+### 7.1 The CI runs
+
+| PR | Branch | Run | Result |
+|---|---|---|---|
+| #179 | `fix/issue-178-guard-scope` | [`40896414707`](https://github.com/flowbyte-com/mpm/actions/runs/40896414707) | **success** (29m13s) |
+| #180 | `fix/issue-178-scheduler-markfired` | [`40896454459`](https://github.com/flowbyte-com/mpm/actions/runs/40896454459) | **success** (20m18s) |
+| #181 | `fix/issue-178-synthesis-cooldown` | [`40896491859`](https://github.com/flowbyte-com/mpm/actions/runs/40896491859) | **success** (28m59s) |
+| #182 | `docs/issue-178-phase-1-record` | [`40896538473`](https://github.com/flowbyte-com/mpm/actions/runs/40896538473) | **success** (21m08s) |
+
+### 7.2 One environmental failure, and why it is not one of ours
+
+The first local `make test-race` run failed on
+`cmd/mpm/probe` — `TestLive_MiniMaxAnthropicSurfaceAuthenticatesWithBearer`.
+That test calls the **live MiniMax API** and is gated on `MINIMAX_API_KEY`
+being present. On this host the key **is** present, so the test ran against the
+real provider and the provider returned a thinking-only response.
+
+It is **not** caused by these changes, and the proof is direct: the same test
+fails on **pristine `origin/main`** (`a0c3521a`, extracted to a separate tree)
+with a different failure mode — a 12-second transport timeout against
+`api.minimax.io`. In CI the key is absent, so the test skips; all four CI runs
+above are green.
+
+The race gate was re-run with `MINIMAX_API_KEY` and `OPENAI_API_KEY` unset —
+reproducing CI's environment exactly — and passed with **exit 0**.
+
+### 7.3 Documentation impact assessment
 
 `make docs-check` reports **0 errors** and **3 review items**. Each is
 discharged here, and each commit carries the matching `Docs-Impact:` trailer.
@@ -556,9 +584,19 @@ line, as it does in #169 and #176).
 `docs/dev/` coordination record, which `docs/DOCUMENTATION-MAP.md` assigns to
 its authors, so the documentation map does not need an entry for it.
 
-### 7.2 The release gate
+### 7.4 What was NOT verified, and why
 
-*(filled in from the final run — see the table below.)*
+- **The live `~/.mpm` installation was not exercised.** The assignment
+  forbids modifying it, and no scheduler or critic activity was triggered.
+  Every test ran against a disposable, file-backed WAL database.
+- **The `internal/core/tools` module and the `release_acceptance` module were
+  run as part of the gates** (`test-tools`, `test-tools-race`, `test-release`)
+  and pass unchanged; neither is touched by these three corrections.
+- **No multi-process scheduler test.** The delivery-state analysis rests on
+  the singleton invariant (flock on a PID file), which is asserted by
+  `TestWakeDelivery_TheSchedulerIsStillASingleton`. A two-scheduler test would
+  require two live schedulers against one database, which the assignment
+  forbids.
 
 ---
 
