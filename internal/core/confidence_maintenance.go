@@ -105,6 +105,33 @@ import (
 )
 
 const (
+	// THE APPROVED SCHEDULING POLICY (issue #92).
+	//
+	// These four numbers are the operator's decision, and they live here
+	// — in the core that owns the pass — so the scheduler cannot drift
+	// from the documentation and the documentation cannot drift from the
+	// code. The scheduler reads every one of them from here.
+	//
+	// DefaultConfidenceDecayEnabled is OFF. That is the whole point of
+	// the decision: a substrate that decays confidence unattended changes
+	// the value a retrieval ranking sees, without anyone asking. The pass
+	// exists (it is #92's mechanism) but it runs only when an operator
+	// says so.
+	//
+	// The value is deliberately 0 and not a bool, because the
+	// configuration surface is an integer key: `GetConfigInt` falls back
+	// to this constant when the key is ABSENT from system_config, and
+	// returns the operator's own value when it is present. That is what
+	// makes an upgrade non-destructive — see the operator note in
+	// internal/scheduler/confidence_decay.go.
+	DefaultConfidenceDecayEnabled = 0
+
+	// DefaultConfidenceDecayInterval is the minimum time between two
+	// passes. Six hours means a stored confidence can be up to six hours
+	// stale; a shorter interval costs proportionally more passes for a
+	// smaller staleness window.
+	DefaultConfidenceDecayInterval = 6 * time.Hour
+
 	// DefaultConfidenceDecayLimit bounds the artifacts recomputed by one
 	// invocation.
 	DefaultConfidenceDecayLimit = 100

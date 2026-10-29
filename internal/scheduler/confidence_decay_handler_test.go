@@ -30,6 +30,22 @@ func decayFixtureClock() time.Time {
 	return time.Unix(2_000_000_000, 0).UTC()
 }
 
+// enableConfidenceDecay turns the scheduled pass ON for the duration of a
+// test.
+//
+// The pass is OFF by default (issue #92's approved policy), so a test
+// that expects the pass to run has to say so. Relying on the default
+// would be a trap in both directions: the test would fail when the
+// default is right, and — worse — a test that expects the pass NOT to
+// run would pass for the wrong reason (because the handler is disabled
+// entirely, rather than because of the condition it is testing).
+func enableConfidenceDecay(t *testing.T, dm *core.DatabaseManager) {
+	t.Helper()
+	if _, err := dm.SaveSystemConfig(confidenceDecayEnabledKey, "1", "1", ""); err != nil {
+		t.Fatalf("enable confidence decay: %v", err)
+	}
+}
+
 // TestConfidenceDecayHandler_RunsThenGatesByInterval pins the cadence:
 // the first tick runs the pass, the next tick inside interval_hours is a
 // no-op, and a tick after the interval runs again.
@@ -37,6 +53,9 @@ func TestConfidenceDecayHandler_RunsThenGatesByInterval(t *testing.T) {
 	dm := core.NewTestDM(t)
 	now := decayFixtureClock()
 	insertStaleArtifact(t, dm, "mem-cadence", now)
+	// The pass is off by default; this test is about the cadence gate,
+	// so it opts in explicitly.
+	enableConfidenceDecay(t, dm)
 	// Make the artifact due after a few hours, so the test measures the
 	// cadence gate rather than the artifact-age gate.
 	if _, err := dm.SaveSystemConfig(confidenceDecayMinAgeKey, "1", "1", ""); err != nil {
@@ -125,6 +144,7 @@ func TestConfidenceDecayHandler_PartialFailureIsReportedAndThrottled(t *testing.
 	dm := core.NewTestDM(t)
 	now := decayFixtureClock()
 	insertStaleArtifact(t, dm, "mem-fail", now)
+	enableConfidenceDecay(t, dm)
 	if _, err := dm.SQLDB().Exec(`
 		CREATE TRIGGER inject_handler_decay_failure
 		BEFORE UPDATE OF confidence ON memories

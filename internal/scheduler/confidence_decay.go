@@ -9,14 +9,66 @@
 // handler, its own cadence gate in system_config, and no new scheduler
 // machinery.
 //
-// Cadence keys (all configurable through system_config, env override
-// MPM_CONFIDENCE_DECAY_*):
+// Cadence keys (all configurable through system_config, env fallback
+// MPM_CONFIDENCE_DECAY_* — see the precedence note below):
 //
-//	confidence.decay.enabled         1 = on (default), 0 = off
+//	confidence.decay.enabled         0 = off (DEFAULT), 1 = on
 //	confidence.decay.interval_hours  6   minimum time between passes
 //	confidence.decay.limit           100 artifacts per pass
 //	confidence.decay.min_age_hours   24  artifacts younger than this
 //	                                     (or checked more recently) are skipped
+//
+// THE APPROVED POLICY (issue #92, operator decision 2026-10-29)
+//
+// The pass is OFF by default and runs only on an explicit opt-in. A
+// substrate that decays confidence unattended changes the value a
+// retrieval ranking sees, without anyone asking — and the defaults that
+// made it run were selected silently, with no operator decision recorded
+// anywhere. The four numbers above are the operator's decision, and they
+// live in internal/core (DefaultConfidenceDecayEnabled,
+// DefaultConfidenceDecayInterval, DefaultConfidenceDecayLimit,
+// DefaultConfidenceDecayMinAge) so that the scheduler, the documentation
+// and the tests cannot drift apart.
+//
+// HOW TO ENABLE IT
+//
+//  1. mpm ops confidence decay --dry-run
+//     See what a pass would do before letting one run unattended.
+//
+//  2. Set confidence.decay.enabled = 1 in system_config.
+//
+//     Step 2 can be skipped when the key is absent from system_config and
+//     the scheduler's environment carries MPM_CONFIDENCE_DECAY_ENABLED=1
+//     instead. The environment is the weaker of the two: it is consulted
+//     only when the key is absent.
+//
+// HOW TO DISABLE IT
+//
+//	Set confidence.decay.enabled = 0 in system_config, or unset the
+//	environment variable. An explicit 0 in system_config WINS over the
+//	environment variable — see the precedence note below.
+//
+// CONFIGURATION PRECEDENCE (and why it is the way it is)
+//
+//	DatabaseManager.GetConfigInt reads system_config FIRST, then the
+//	environment, then the built-in default. So an ABSENT key means "the
+//	operator never chose" and takes the default (off); an EXPLICIT value
+//	in system_config always wins, including an explicit 0, so the
+//	operator's setting survives an upgrade; and the environment variable
+//	is consulted only when the key is absent, so it is a FALLBACK, not an
+//	override. (The comment above used to call it an override, which was
+//	wrong: an operator who exported MPM_CONFIDENCE_DECAY_ENABLED=1
+//	against an install that already had confidence.decay.enabled = 0
+//	would have been ignored, silently.)
+//
+// WHAT AN UPGRADE CHANGES
+//
+//	Nothing is written to system_config by the upgrade, so nothing can be
+//	clobbered. An install that never chose a value had NO row for
+//	confidence.decay.enabled, and therefore starts OFF after the upgrade.
+//	That is the intended consequence of the decision: the old default was
+//	selected silently, so there is no operator intent to preserve. An
+//	install that DID choose — enabled=1 or enabled=0 — keeps its choice.
 //
 // The tick fires every scheduler interval (60s by default); the gate
 // makes the pass run at most once per interval_hours. The last-run
@@ -36,11 +88,10 @@ import (
 )
 
 const (
-	confidenceDecayEnabledKey    = "confidence.decay.enabled"
-	confidenceDecayIntervalKey   = "confidence.decay.interval_hours"
-	confidenceDecayLimitKey      = "confidence.decay.limit"
-	confidenceDecayMinAgeKey     = "confidence.decay.min_age_hours"
-	defaultConfidenceDecayRepeat = 6 // hours
+	confidenceDecayEnabledKey  = "confidence.decay.enabled"
+	confidenceDecayIntervalKey = "confidence.decay.interval_hours"
+	confidenceDecayLimitKey    = "confidence.decay.limit"
+	confidenceDecayMinAgeKey   = "confidence.decay.min_age_hours"
 )
 
 // ConfidenceDecayHandler runs the bounded decay pass on a cadence.
@@ -62,14 +113,19 @@ func (h *ConfidenceDecayHandler) TickHandler() func(ctx context.Context) error {
 		if h == nil || h.dm == nil {
 			return nil
 		}
-		if h.dm.GetConfigInt(confidenceDecayEnabledKey, 1) == 0 {
+		// The pass is OFF unless the operator has said otherwise. The
+		// key is consulted first and only falls back to the approved
+		// default when it is ABSENT, so an explicit 0 (an operator who
+		// turned it off) is preserved across an upgrade just as an
+		// explicit 1 is.
+		if h.dm.GetConfigInt(confidenceDecayEnabledKey, core.DefaultConfidenceDecayEnabled) == 0 {
 			return nil
 		}
 		now := h.now()
 
-		intervalHours := h.dm.GetConfigInt(confidenceDecayIntervalKey, defaultConfidenceDecayRepeat)
+		intervalHours := h.dm.GetConfigInt(confidenceDecayIntervalKey, int(core.DefaultConfidenceDecayInterval/time.Hour))
 		if intervalHours <= 0 {
-			intervalHours = defaultConfidenceDecayRepeat
+			intervalHours = int(core.DefaultConfidenceDecayInterval / time.Hour)
 		}
 		if last, ok := h.lastRun(); ok && now.Sub(last) < time.Duration(intervalHours)*time.Hour {
 			return nil

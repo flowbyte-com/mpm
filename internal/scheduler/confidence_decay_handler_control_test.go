@@ -35,6 +35,11 @@ func TestConfidenceDecayHandler_CancelledTickDoesNotRunThePass(t *testing.T) {
 	dm := core.NewTestDM(t)
 	now := decayFixtureClock()
 	insertStaleArtifact(t, dm, "mem-cancelled-tick", now)
+	// The pass is off by default. This test is about CANCELLATION, so it
+	// opts in: without the opt-in the handler would return before it ever
+	// looked at the context, and the assertion below would hold for the
+	// wrong reason.
+	enableConfidenceDecay(t, dm)
 	if _, err := dm.SaveSystemConfig(confidenceDecayMinAgeKey, "1", "1", ""); err != nil {
 		t.Fatalf("min age: %v", err)
 	}
@@ -73,6 +78,7 @@ func TestConfidenceDecayHandler_CancelledPassDoesNotGateTheNextTick(t *testing.T
 	dm := core.NewTestDM(t)
 	now := decayFixtureClock()
 	insertStaleArtifact(t, dm, "mem-resume-tick", now)
+	enableConfidenceDecay(t, dm)
 	if _, err := dm.SaveSystemConfig(confidenceDecayMinAgeKey, "1", "1", ""); err != nil {
 		t.Fatalf("min age: %v", err)
 	}
@@ -123,6 +129,7 @@ func TestConfidenceDecayHandler_LimitIsConfigurable(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		insertStaleArtifact(t, dm, "mem-limit-"+string(rune('a'+i)), now)
 	}
+	enableConfidenceDecay(t, dm)
 	if _, err := dm.SaveSystemConfig(confidenceDecayMinAgeKey, "1", "1", ""); err != nil {
 		t.Fatalf("min age: %v", err)
 	}
