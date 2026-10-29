@@ -502,6 +502,190 @@ func TestConfidenceDecay_ManualRecomputeDoesNotRaiseASupersededDecision(t *testi
 	}
 }
 
+// invalidatedDecisionFixture builds the state the F5-2 invalidate path
+// produces: a decision whose confidence was dropped to
+// DecisionInitialConfidence, whose metadata carries the invalidation
+// marker, and whose evidence ledger is empty.
+//
+// It drives the REAL path — dm.InvalidateDecision — so the fixture
+// cannot drift from what production writes.
+func invalidatedDecisionFixture(t *testing.T, dm *DatabaseManager, id string, createdAt time.Time) {
+	t.Helper()
+
+	insertDecayMemoryEpoch(t, dm, id, "decisions", createdAt, InitialConfidence("decision"))
+
+	if _, err := dm.InvalidateDecision(id, "the premise no longer holds"); err != nil {
+		t.Fatalf("invalidate: %v", err)
+	}
+}
+
+// invalidatedDecisionWithLiveEvidenceFixture builds the same state, but
+// with the decision's evidence still LIVE.
+//
+// THIS IS THE SHARP SHAPE, and it is the one the invalidate demotion is
+// UNIQUE in.
+//
+//   - A CHALLENGE neutralises the memory's evidence rows (expires_at =
+//     now), so a challenged or restored memory has no live evidence.
+//     Clause 2 therefore already refuses to promote it, and clause 1 is
+//     not what is being tested.
+//   - An INVALIDATION does NOT touch the evidence table. The ledger rows
+//     stay live.
+//
+// So an invalidated decision is the one demoted artifact where the
+// absence-of-evidence clause cannot protect it: the derived value is
+// justified by real evidence, so only the DEMOTION MARKER itself can
+// hold the value down. That makes this the fixture in which clause 1 —
+// "no recompute except an evidence event may undo a trust demotion" —
+// is the only thing standing between the demotion and a silent
+// re-elevation.
+func invalidatedDecisionWithLiveEvidenceFixture(t *testing.T, dm *DatabaseManager, id string, createdAt time.Time) {
+	t.Helper()
+
+	insertDecayMemoryEpoch(t, dm, id, "decisions", createdAt, InitialConfidence("decision"))
+
+	// Live evidence, added BEFORE the invalidation. The decision is
+	// invalidated after, so its ledger is neutralised by nothing.
+	if err := AddEvidence(dm, EvidenceInput{
+		ArtifactID:         id,
+		ArtifactType:       "decision",
+		Type:               "observation",
+		SourceGroup:        "manual_review",
+		Strength:           1.0,
+		IndependenceFactor: 1.0,
+		CreatedBy:          "reviewer",
+		CreatedAt:          decayFixtureNow.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("add evidence: %v", err)
+	}
+
+	if _, err := dm.InvalidateDecision(id, "the premise no longer holds"); err != nil {
+		t.Fatalf("invalidate: %v", err)
+	}
+
+	// The precondition that makes this fixture the sharp one: the
+	// evidence is still LIVE after the invalidation.
+	var live int
+	if err := dm.SQLDB().QueryRow(
+		`SELECT COUNT(*) FROM evidence WHERE artifact_id = ? AND (expires_at IS NULL OR expires_at > ?)`,
+		id, decayFixtureNow.Unix(),
+	).Scan(&live); err != nil {
+		t.Fatalf("count live evidence: %v", err)
+	}
+	if live == 0 {
+		t.Fatalf("precondition: the invalidated decision has no live evidence — " +
+			"the absence-of-evidence clause would protect it, and this fixture would " +
+			"not be testing the demotion marker at all")
+	}
+}
+
+// // TestConfidenceDecay_DecayPassDoesNotPromoteAnInvalidatedDecision
+// pins the FOURTH trust demotion.
+//
+// The guard names four demotions — challenge, restore-from-challenge,
+// supersede and invalidate — and the other three each had a test. The
+// invalidate demotion is the one that did not, which left the "four
+// demotions" claim untested for a quarter of its scope.
+//
+// An invalidated decision falls back to DecisionInitialConfidence under
+// the same contract as the supersede: "the artifact is at 'no evidence'
+// until fresh evidence arrives". The formula derives ~0.6 for it (the
+// per-type initial confidence, barely decayed), so a maintenance pass
+// applying the formula verbatim would RAISE the demoted decision back
+// to 0.6 — undoing a recorded invalidation, with no evidence added,
+// within one cadence window of a deploy.
+func TestConfidenceDecay_DecayPassDoesNotPromoteAnInvalidatedDecision(t *testing.T) {
+	dm := NewTestDM(t)
+	created := decayFixtureNow.Add(-2 * 24 * time.Hour)
+	invalidatedDecisionFixture(t, dm, "dec-invalidated-1", created)
+
+	before, _ := storedDecayConfidence(t, dm, "dec-invalidated-1")
+	if math.Abs(before-DecisionInitialConfidence) > 1e-9 {
+		t.Fatalf("precondition: invalidated confidence = %v, want the demotion value %v",
+			before, DecisionInitialConfidence)
+	}
+
+	res, err := dm.RunConfidenceDecay(ConfidenceDecayOptions{Now: decayFixtureNow, Limit: 10})
+	if err != nil {
+		t.Fatalf("run decay: %v", err)
+	}
+
+	after, _ := storedDecayConfidence(t, dm, "dec-invalidated-1")
+	if after > before+1e-9 {
+		t.Errorf("invalidated decision confidence = %.12f after the decay pass, want it "+
+			"unchanged at the demotion value %.12f; the pass must not re-elevate an "+
+			"invalidated decision, and no evidence was added (decay result %+v)",
+			after, before, res)
+	}
+}
+
+// TestConfidenceDecay_DecayPassDoesNotPromoteAnInvalidatedDecisionWithLiveEvidence
+// is the same invariant in the shape where ONLY the demotion marker can
+// hold the value down.
+//
+// With live evidence, the derived value is justified by real support,
+// so the absence-of-evidence clause does not apply. What stops the
+// re-elevation is clause 1 — the demotion marker itself.
+//
+// This is the test that makes "four demotions" true for the PASS path
+// rather than for the manual-recompute path only. The other three
+// demotions are all protected in the pass path by the absence of live
+// evidence, because a challenge neutralises the ledger; the invalidate
+// demotion is the one that can carry live evidence, so it is the one
+// where clause 1 is load-bearing here.
+func TestConfidenceDecay_DecayPassDoesNotPromoteAnInvalidatedDecisionWithLiveEvidence(t *testing.T) {
+	dm := NewTestDM(t)
+	created := decayFixtureNow.Add(-2 * 24 * time.Hour)
+	id := "dec-invalidated-live-evidence"
+	invalidatedDecisionWithLiveEvidenceFixture(t, dm, id, created)
+
+	before, _ := storedDecayConfidence(t, dm, id)
+	if math.Abs(before-DecisionInitialConfidence) > 1e-9 {
+		t.Fatalf("precondition: invalidated confidence = %v, want the demotion value %v",
+			before, DecisionInitialConfidence)
+	}
+
+	res, err := dm.RunConfidenceDecay(ConfidenceDecayOptions{Now: decayFixtureNow, Limit: 10})
+	if err != nil {
+		t.Fatalf("run decay: %v", err)
+	}
+
+	after, _ := storedDecayConfidence(t, dm, id)
+	if after > before+1e-9 {
+		t.Errorf("invalidated decision confidence = %.12f after the decay pass, want it "+
+			"unchanged at the demotion value %.12f; the demotion marker must hold the "+
+			"value down even when live evidence would justify a raise (decay result %+v)",
+			after, before, res)
+	}
+}
+
+// TestConfidenceDecay_ManualRecomputeDoesNotRaiseAnInvalidatedDecision
+// pins the same invariant on the operator's manual recompute.
+//
+// `mpm ops confidence recompute` is a re-derivation from evidence. On
+// an invalidated decision with an empty ledger it derives the initial
+// confidence and undoes the invalidation. Fresh evidence is what should
+// undo it — and an evidence event is exempt from the guard, so that path
+// still works.
+func TestConfidenceDecay_ManualRecomputeDoesNotRaiseAnInvalidatedDecision(t *testing.T) {
+	dm := NewTestDM(t)
+	created := decayFixtureNow.Add(-2 * 24 * time.Hour)
+	invalidatedDecisionFixture(t, dm, "dec-invalidated-2", created)
+
+	before, _ := storedDecayConfidence(t, dm, "dec-invalidated-2")
+
+	if err := RecomputeConfidence(dm, "dec-invalidated-2", "decision", RecomputeReasonManual); err != nil {
+		t.Fatalf("manual recompute: %v", err)
+	}
+
+	after, _ := storedDecayConfidence(t, dm, "dec-invalidated-2")
+	if after > before+1e-9 {
+		t.Errorf("invalidated decision confidence = %.12f after a manual recompute, want it "+
+			"unchanged at the demotion value %.12f — a recompute is a re-derivation from "+
+			"evidence, not an un-invalidation", after, before)
+	}
+}
+
 // TestConfidenceDecay_ManualRecomputeMayRaiseANonDemotedArtifact pins
 // the OTHER side of the guard: it must not become a blanket freeze.
 //
