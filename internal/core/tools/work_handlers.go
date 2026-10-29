@@ -112,9 +112,12 @@ func handleListWorks(dm mpminternal.CoreDB, p map[string]interface{}) (interface
 	// like "openx" silently fell through to ListWorksByStatus which
 	// returned zero rows — indistinguishable from "no items exist".
 	if !isValidWorkStatus(status) {
-		return nil, fmt.Errorf(
-			"field `status` must be one of [%s], got %q",
-			strings.Join(validWorkStatuses, ", "), status,
+		return nil, mpminternal.NewPayloadShapeError(
+			mpminternal.PayloadShapeEnum, "status",
+			fmt.Sprintf(
+				"field `status` must be one of [%s], got %q",
+				strings.Join(validWorkStatuses, ", "), status,
+			),
 		)
 	}
 	// visibility is the SECOND, independent axis (2026-09-30). It is not
@@ -125,9 +128,12 @@ func handleListWorks(dm mpminternal.CoreDB, p map[string]interface{}) (interface
 		visibility = string(mpminternal.WorkVisibilityActive)
 	}
 	if !isValidWorkVisibility(visibility) {
-		return nil, fmt.Errorf(
-			"field `visibility` must be one of [%s], got %q",
-			strings.Join(validWorkVisibilities, ", "), visibility,
+		return nil, mpminternal.NewPayloadShapeError(
+			mpminternal.PayloadShapeEnum, "visibility",
+			fmt.Sprintf(
+				"field `visibility` must be one of [%s], got %q",
+				strings.Join(validWorkVisibilities, ", "), visibility,
+			),
 		)
 	}
 	// Optional limit param.

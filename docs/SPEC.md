@@ -2918,9 +2918,27 @@ They are seeded **automatically** when the database is first created — every p
 
 Because the seed is automatic, a fresh install reports `0 created, 5 skipped` — the rows are already there. A skipped row is not a failure.
 
-**Retention (policy, issue #59).** Directive rows are exempt from access-based retention: the never-accessed and low-weight rules in `AutoPrunePolicy`, and the legacy `PruneNeverAccessed` path, all apply the canonical `DirectiveExclusionClause`. A directive is standing policy, not a memory awaiting reinforcement — its read path never writes `last_accessed_at`, so an access-based rule selects it forever and relies on boot-time revival to undo itself. The exemption recognises both identifiers (`collection='directives'` and `is_prime_directive=1`), so operator-edited and legacy directive rows are covered alike; explicit lifecycle operations (`delete`/`restore`, and the operator-only shred) are unaffected. Two limitations are deliberate: removing a directive from `SeedDirectives` does **not** delete existing rows (registry membership is a seeding decision, not a retention event), and an orphaned directive row therefore persists until an explicit operator action removes it.
+**Retention (policy, issue #59 — Option B).** **An active registry-backed bootstrap directive is standing system policy, not an ordinary memory. Its retention follows registry membership rather than age, access frequency or embedding status.**
 
-> **Implementation note:** The reference directives live in `internal/core/seed/directives.go`. The bootstrap command detects existing directives by stable ID and skips them; local edits to a seeded directive are preserved, never silently overwritten.
+Four rules, and the fourth is the one that is easy to get wrong.
+
+**1. Active registry directives are protected from generic pruning.** Every automatic reclamation path in the substrate excludes directive rows through the canonical `DirectiveExclusionClause` — the never-accessed and low-weight rules in `AutoPrunePolicy`, the age-based `PruneOlderThan`, the legacy `PruneNeverAccessed`, the expiry-based rules in `AutoPrunePolicy` / `PruneExpired`, the cluster consolidation in `ConsolidateMemories`, and the `gc --purge` sweep. The exemption recognises both identifiers (`collection='directives'` and `is_prime_directive=1`), so operator-edited and legacy directive rows are covered alike.
+
+The consolidation exclusion is load-bearing rather than decorative. A seeded directive carries `weight=10`, so it satisfies the consolidation query's `weight > 1`; it survived only because directives hold no vector by design and clustering compares two vectors. A protection that rests on "directives have no vector" is a protection that rests on embedding status — which this policy explicitly rejects. An embedding backfill, or a directive that arrived with one, would have made standing policy eligible for cluster consolidation.
+
+**2. Never-accessed directives never become automatic deletion candidates.** The directive read path does not write `last_accessed_at`, so every directive is permanently "never accessed". An access-based rule would therefore select all of them, forever, and depend on boot-time revival to undo its own damage. Standing policy does not need reinforcement and is not a candidate for it.
+
+**3. A directive removed from the registry becomes eligible for explicit, auditable cleanup.** Removing an entry from `SeedDirectives` is a code change, not a runtime event, so the substrate cannot observe the moment of de-registration — by the time the new build runs, the row is simply there and the registry no longer mentions it. What it *can* observe is the marker the seeder wrote: `metadata.provenance.source = 'baseline_cognitive_bootstrap'` distinguishes a row the baseline wrote from an operator-authored directive. `mpm ops init directives` reports the rows whose stable ID is no longer in the registry, so the operator can choose.
+
+**The report carries no directive text by default.** The report is a log: it is printed to stdout, so it lands in a terminal scrollback and in CI output, and the directive text is the operator's own policy. The default line therefore names the candidate, its age, and any seeded task that still points at it — and nothing more. The content is one explicit flag away: `mpm ops init directives --show-content` includes a preview of each candidate's text. That split matters because a de-registered directive **cannot be distinguished from a customised one** — removing a registry entry is a code change, so there is no registry text left to compare the row against, and "pristine" and "customised" are unknowable after the fact. The operator can only tell by reading, so the reading must be *available*; and because it is the operator's own policy text, the reading must also be a deliberate act rather than a side effect of running a maintenance command.
+
+**4. Eligibility is not authorisation.** This is the distinction the policy turns on. *Eligible* means the substrate can tell you that a row is former standing policy and you may act on that. *Authorised* means something actually deletes it. **MPM never conflates the two, and it never reclaims a directive automatically — whatever the registry status.** A de-registered directive is not reclaimed by age, by access, by expiry, by consolidation, or by any future sweep. It stays until an operator acts, through the explicit routes that already exist and are unaffected by registry membership: `mpm call mpm_memory action=delete` (reversible) and the operator-only shred (irreversible). There is deliberately no `--prune` flag: adding one would be introducing an automatic cleanup mechanism to close a policy question, which the question explicitly forbids.
+
+**User-authored and customised directives are never at risk from a registry change.** The orphan report only selects rows that carry the seeder's provenance marker. A directive the operator wrote is policy the operator wants; registry membership says nothing about it, because it was never in the registry, so it is never reported as an orphan and never becomes eligible for cleanup. The same holds for a *customised* seeded directive that is still in the registry: it is protected as an active registry member, and the seeder preserves the operator's edit rather than overwriting it.
+
+**The bootstrap and reseeding guarantees are unchanged.** The registry is still applied at every boot, still idempotent by stable ID, and still preserves operator edits — a drifted row is flagged, never overwritten, and a soft-deleted row is revived with the operator's content intact. Retention is a separate question from seeding, and the two do not interfere: registry membership decides *eligibility for the operator's explicit cleanup*, and nothing else.
+
+> **Implementation note:** The reference directives live in `internal/core/seed/directives.go`. The bootstrap command detects existing directives by stable ID and skips them; local edits to a seeded directive are preserved, never silently overwritten. The registry-membership model — `RegistryDirectiveIDs`, `IsRegistryBackedDirective`, `OrphanedDirectives` — lives in `internal/core/seed/retention.go`, and the marker it reads is written by the single metadata builder in `internal/core/seed/engine.go`, so the writer and the reader cannot drift apart.
 
 #### Multi-Framework Scope
 
@@ -3847,6 +3865,82 @@ mpm call read_wake_context
 # → "Audit Summary (Last 7 Days):\n- N errors, M warnings logged.\n
 #    - Active Clusters (Unknown):\n  * [security] 4 events since 2026-07-02 (ID: security:...)"
 ```
+
+### Dispatch outcome classification
+
+Every tool dispatch writes a row to `tool_invocations`. Alongside
+`result_status` (`success` | `error`), the row carries two classification
+fields:
+
+| field | vocabulary | meaning |
+|---|---|---|
+| `outcome_class` | a closed set of nine categories (`ok`, `validation`, `not_found`, `conflict`, `degraded`, `substrate`, `integration`, `timeout`, `internal`) | the general category of the outcome |
+| `outcome_code` | a bounded lowercase identifier within the class | the diagnostically meaningful subtype |
+
+The class `internal` means **"MPM could not attribute this"**. It is the
+fallback of last resort, and the code that accompanies it is
+`unclassified`. A caller mistake must never land there: an operator
+filtering on `outcome_class='internal'` is looking for a substrate fault,
+and a class that also carries agent noise hides it.
+
+#### The payload-shape family
+
+A caller that sends the wrong JSON type for a field, puts a parameter
+outside the `params` envelope, or sends a value outside a closed
+enumeration has made a mistake, and the substrate is working exactly as
+specified. Those errors are classified `validation` with a code that names
+the shape that was violated:
+
+| `outcome_code` | the violation |
+|---|---|
+| `invalid_array_shape` | a field declared as an array of strings received something else, or an element of it was not a string |
+| `invalid_object_shape` | a field declared as a JSON object received a scalar, an array, or null |
+| `invalid_numeric_field` | a field declared as a number received a non-numeric value |
+| `invalid_params_envelope` | the top-level `{action, params}` contract was violated — a null payload, a field outside the envelope, a missing or non-string `action`, a non-object `params` |
+| `invalid_type` | a field declared as a scalar (string, boolean) received a different JSON type |
+| `invalid_enum_value` | a field declared as an enumeration received a value outside the closed set |
+
+`invalid_params_envelope` is its own code because it is a different class
+of mistake from a wrong field type: the host adapter put the parameters at
+the wrong nesting level. An operator debugging that needs to see it counted
+separately from "the value of `limit` was a string".
+
+#### How the classification is decided
+
+The classification is **typed, not textual**. A payload-shape rejection
+carries a `*PayloadShapeError`, and the classifier recognises it by type.
+The classifier's own contract forbids matching message bodies wholesale,
+and the reason is operational: a substring rule over "must be a" would
+also swallow a substrate error that happens to describe a shape, and it
+could not tell "the caller sent the wrong JSON type" from "the substrate
+mentioned a missing artifact in a sentence that has nothing to do with
+one".
+
+The caller-facing **message is unchanged** by this classification. Agents
+that match on error text keep working; what moved is which class the
+dispatch audit records.
+
+#### The one CHECK-constraint exception
+
+A SQL `CHECK constraint failed` is a system fault by default — it can mean
+a schema defect or a broken internal invariant. Exactly one such failure
+is a caller mistake, and it is handled at the boundary instead: the handoff
+`ended_state` enumeration is validated before the write, naming its four
+permitted values (`clean`, `crashed`, `interrupted`, `force_end`). The
+table's `CHECK` constraint is the backstop for a write that bypassed the
+validated path, and the classifier treats that one column's rejection as
+`validation`/`invalid_enum_value`. Every other `CHECK` failure keeps its
+system-fault classification.
+
+#### Historical rows
+
+The classification is computed **at write time** and nothing backfills
+it. Rows written before the payload-shape family existed keep the
+classification they were written with; the change applies to new
+invocations only. Doctor reports the pre-existing rows under
+`historical/unclassified` rather than reclassifying them, precisely
+because it does not parse `error_message` to backfill a classification it
+cannot verify.
 
 ### Supply-Chain Identity (Commit Signing)
 

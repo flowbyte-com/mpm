@@ -774,8 +774,11 @@ func (dm *DatabaseManager) SetMemoryTTL(id string, expiresAt time.Time) error {
 
 // PruneExpired removes memories that have passed their expires_at time.
 func (dm *DatabaseManager) PruneExpired() (int, error) {
+	// Directives are exempt (issue #59, Option B), exactly as they are in
+	// PruneOlderThan and PruneNeverAccessed. A directive is standing
+	// policy; MPM does not reclaim directives automatically.
 	result, err := dm.db.Exec(`
-		DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')
+		DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now') AND ` + DirectiveExclusionClause + `
 	`)
 	if err != nil {
 		return 0, err

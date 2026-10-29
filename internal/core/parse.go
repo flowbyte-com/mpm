@@ -146,7 +146,8 @@ func ParseStringSliceStrict(field string, v interface{}) ([]string, error) {
 		for i, x := range t {
 			s, ok := x.(string)
 			if !ok {
-				return nil, fmt.Errorf("%s[%d] must be a string, got %T", field, i, x)
+				return nil, NewPayloadShapeError(PayloadShapeArray, field,
+					fmt.Sprintf("%s[%d] must be a string, got %T", field, i, x))
 			}
 			out = append(out, s)
 		}
@@ -166,7 +167,8 @@ func ParseStringSliceStrict(field string, v interface{}) ([]string, error) {
 		}
 		return strings.Split(t, ","), nil
 	}
-	return nil, fmt.Errorf("%s must be a string array (or a comma-separated string), got %T", field, v)
+	return nil, NewPayloadShapeError(PayloadShapeArray, field,
+		fmt.Sprintf("%s must be a string array (or a comma-separated string), got %T", field, v))
 }
 
 // ParseStringSliceArrayOnly parses a string-list parameter under the
@@ -194,13 +196,15 @@ func ParseStringSliceArrayOnly(field string, v interface{}) ([]string, error) {
 		for i, x := range t {
 			s, ok := x.(string)
 			if !ok {
-				return nil, fmt.Errorf("%s[%d] must be a string, got %T", field, i, x)
+				return nil, NewPayloadShapeError(PayloadShapeArray, field,
+					fmt.Sprintf("%s[%d] must be a string, got %T", field, i, x))
 			}
 			out = append(out, s)
 		}
 		return out, nil
 	}
-	return nil, fmt.Errorf("%s must be an array of strings, got %T", field, v)
+	return nil, NewPayloadShapeError(PayloadShapeArray, field,
+		fmt.Sprintf("%s must be an array of strings, got %T", field, v))
 }
 
 // ── Exported aliases (cmd/mpm and cmd/mpm-mcp packages can't see

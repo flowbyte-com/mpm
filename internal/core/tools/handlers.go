@@ -291,7 +291,8 @@ func handleCommitMilestone(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	case "shipped", "insight":
 		// valid
 	default:
-		return nil, fmt.Errorf("flavor must be 'shipped' or 'insight' (got %q)", flavor)
+		return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeEnum, "flavor",
+			fmt.Sprintf("flavor must be 'shipped' or 'insight' (got %q)", flavor))
 	}
 
 	typeTag := "type:milestone-" + flavor
@@ -1216,7 +1217,8 @@ func handleResolveTheory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 		return nil, fmt.Errorf("resolve theory: conflicting status=%q and new_status=%q — supply only one", status, newStatusSnake)
 	}
 	if status != "proven" && status != "disproven" {
-		return nil, fmt.Errorf("resolve theory: status %q is invalid — must be 'proven' or 'disproven'", status)
+		return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeEnum, "status",
+			fmt.Sprintf("resolve theory: status %q is invalid — must be 'proven' or 'disproven'", status))
 	}
 	// At this point `status` is the validated canonical value.
 	// Re-bind into `newStatus` so the downstream dm.ResolveTheory call
@@ -1594,11 +1596,13 @@ func handlePatchMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 	// and must be rejected before persistence.
 	raw, ok := p["patch"]
 	if !ok || raw == nil {
-		return nil, fmt.Errorf("patch: must be a JSON object (got null/absent)")
+		return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeObject, "patch",
+			"patch: must be a JSON object (got null/absent)")
 	}
 	patch, ok := raw.(map[string]interface{})
 	if !ok {
-		return nil, fmt.Errorf("patch: must be a JSON object (got %T, not map[string]interface{})", raw)
+		return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeObject, "patch",
+			fmt.Sprintf("patch: must be a JSON object (got %T, not map[string]interface{})", raw))
 	}
 	patchJSON, err := json.Marshal(patch)
 	if err != nil {
@@ -2647,7 +2651,8 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	if rawProjection, present := params["projection"]; present && rawProjection != nil {
 		projection, ok := rawProjection.(string)
 		if !ok {
-			return nil, fmt.Errorf("projection must be a string, got %T", rawProjection)
+			return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeType, "projection",
+				fmt.Sprintf("projection must be a string, got %T", rawProjection))
 		}
 		switch projection {
 		case "":
@@ -2682,7 +2687,8 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	if rawFormat, present := params["format"]; present && rawFormat != nil {
 		format, ok := rawFormat.(string)
 		if !ok {
-			return nil, fmt.Errorf("format must be a string, got %T", rawFormat)
+			return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeType, "format",
+				fmt.Sprintf("format must be a string, got %T", rawFormat))
 		}
 		switch format {
 		case "":
@@ -2694,7 +2700,8 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 			}
 			return map[string]interface{}{"success": true, "format": "system-prompt", "content": text}, nil
 		default:
-			return nil, fmt.Errorf("format must be one of [system-prompt], got %q", format)
+			return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeEnum, "format",
+				fmt.Sprintf("format must be one of [system-prompt], got %q", format))
 		}
 	}
 
@@ -3634,7 +3641,8 @@ func handleSaveSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	if rawMode, present := p["mode"]; present {
 		mode, _ := rawMode.(string)
 		if mode != "" && mode != "form" && mode != "refine" {
-			return nil, fmt.Errorf("mode must be one of [form, refine], got %q", mode)
+			return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeEnum, "mode",
+				fmt.Sprintf("mode must be one of [form, refine], got %q", mode))
 		}
 	}
 
@@ -3769,7 +3777,8 @@ func resolveSkillID(p map[string]interface{}, requireVersion bool) (string, erro
 	if hasID && rawID != nil {
 		id, ok := rawID.(string)
 		if !ok {
-			return "", fmt.Errorf("skill_id must be a string, got %T", rawID)
+			return "", mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeType, "skill_id",
+				fmt.Sprintf("skill_id must be a string, got %T", rawID))
 		}
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -3791,7 +3800,8 @@ func resolveSkillID(p map[string]interface{}, requireVersion bool) (string, erro
 	}
 	name, ok := rawName.(string)
 	if !ok {
-		return "", fmt.Errorf("name must be a string, got %T", rawName)
+		return "", mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeType, "name",
+			fmt.Sprintf("name must be a string, got %T", rawName))
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -3829,7 +3839,8 @@ func handleListSkills(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	if present && rawScope != nil {
 		s, ok := rawScope.(string)
 		if !ok {
-			return nil, fmt.Errorf("scope must be a string, got %T", rawScope)
+			return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeType, "scope",
+				fmt.Sprintf("scope must be a string, got %T", rawScope))
 		}
 		scope = s
 	}
@@ -3840,7 +3851,8 @@ func handleListSkills(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 	case "all", "local", "shared":
 		// ok
 	default:
-		return nil, fmt.Errorf("scope must be one of [all, local, shared], got %q", scope)
+		return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeEnum, "scope",
+			fmt.Sprintf("scope must be one of [all, local, shared], got %q", scope))
 	}
 	skills, err := dm.ListSkills(scope)
 	if err != nil {
@@ -3917,7 +3929,8 @@ func handleQueryAuditLog(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 		case int64:
 			sinceSec = t
 		default:
-			return nil, fmt.Errorf("since must be a number (epoch seconds), got %T", rawSince)
+			return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, "since",
+				fmt.Sprintf("since must be a number (epoch seconds), got %T", rawSince))
 		}
 		if sinceSec <= 0 {
 			return nil, fmt.Errorf("since must be > 0 (epoch seconds), got %d", sinceSec)
@@ -4258,6 +4271,15 @@ func handleHandoffWrite(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	if state == "" {
 		state = internal.HandoffClean
 	}
+	// The tool boundary validates the closed enumeration (issue #159).
+	// The tool schema advertises exactly four permitted values; a caller
+	// that sends anything else is told which four, as a typed validation
+	// error, before the write is attempted. Previously the rejection came
+	// from the table's CHECK constraint and was recorded in the dispatch
+	// audit as internal/unclassified — the class that means "system fault".
+	if err := internal.ValidateHandoffEndedState(state); err != nil {
+		return nil, err
+	}
 
 	// F13: commitments/open_questions are PERSISTED, not dropped. The
 	// previous "Option B" silently ignored them on this surface while the
@@ -4539,7 +4561,8 @@ func handleQueryGlobalRules(dm mpminternal.CoreDB, ac mpminternal.ActiveContext,
 		case int:
 			includeRetired = t != 0
 		default:
-			return nil, fmt.Errorf("include_retired must be a boolean (got %T)", v)
+			return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeType, "include_retired",
+				fmt.Sprintf("include_retired must be a boolean (got %T)", v))
 		}
 	}
 
@@ -4734,25 +4757,34 @@ func handleWorkshopSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p 
 					// and reject strings / bools / null with a field-
 					// specific message.
 					if _, isNum := v.(float64); !isNum {
-						return nil, fmt.Errorf(
-							"workshop: decision_model.%s must be an integer from 0 to 5 (got %T: %v) — "+
-								"the decision-model contract is a 4-axis integer score; "+
-								"see docs/library/2026-08-28-mpm-skill-workshop-design.md §6",
-							axis, v, v,
+						return nil, mpminternal.NewPayloadShapeError(
+							mpminternal.PayloadShapeNumeric, "decision_model."+axis,
+							fmt.Sprintf(
+								"workshop: decision_model.%s must be an integer from 0 to 5 (got %T: %v) — "+
+									"the decision-model contract is a 4-axis integer score; "+
+									"see docs/library/2026-08-28-mpm-skill-workshop-design.md §6",
+								axis, v, v,
+							),
 						)
 					}
 				}
 			}
 			if v, present := dmMap["boundary"]; present {
 				if s, ok := v.(string); !ok {
-					return nil, fmt.Errorf(
-						"workshop: decision_model.boundary must be a string from {procedure, judgment, knowledge} "+
-							"(got %T: %v)", v, v,
+					return nil, mpminternal.NewPayloadShapeError(
+						mpminternal.PayloadShapeType, "decision_model.boundary",
+						fmt.Sprintf(
+							"workshop: decision_model.boundary must be a string from {procedure, judgment, knowledge} "+
+								"(got %T: %v)", v, v,
+						),
 					)
 				} else if s != "procedure" && s != "judgment" && s != "knowledge" {
-					return nil, fmt.Errorf(
-						"workshop: decision_model.boundary must be one of {procedure, judgment, knowledge}, got %q",
-						s,
+					return nil, mpminternal.NewPayloadShapeError(
+						mpminternal.PayloadShapeEnum, "decision_model.boundary",
+						fmt.Sprintf(
+							"workshop: decision_model.boundary must be one of {procedure, judgment, knowledge}, got %q",
+							s,
+						),
 					)
 				}
 			}
@@ -5179,8 +5211,9 @@ func handleUpsertScheduledTask(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 		return nil, fmt.Errorf("id, name, cron_expr, directive_id are all required")
 	}
 	if status != internal.ScheduledTaskActive && status != internal.ScheduledTaskPaused {
-		return nil, fmt.Errorf("invalid status %q: must be %q or %q",
-			status, internal.ScheduledTaskActive, internal.ScheduledTaskPaused)
+		return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeEnum, "status",
+			fmt.Sprintf("invalid status %q: must be %q or %q",
+				status, internal.ScheduledTaskActive, internal.ScheduledTaskPaused))
 	}
 
 	// Fail-fast: confirm directive_id actually exists in the
@@ -6160,7 +6193,8 @@ func normalizeCamelCaseKeys(params map[string]interface{}, renames map[string]st
 
 func extractParamsOrFail(toolName string, payload map[string]interface{}) (map[string]interface{}, error) {
 	if payload == nil {
-		return nil, fmt.Errorf("%s: missing payload — expected JSON object with top-level fields {action:string, params:object}; got null", toolName)
+		return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeEnvelope, toolName,
+			fmt.Sprintf("%s: missing payload — expected JSON object with top-level fields {action:string, params:object}; got null", toolName))
 	}
 
 	// Reject top-level fields that aren't `action` or `params`. Their
@@ -6174,12 +6208,13 @@ func extractParamsOrFail(toolName string, payload map[string]interface{}) (map[s
 		}
 	}
 	if len(unexpected) > 0 {
-		return nil, fmt.Errorf(
-			"%s: payload has top-level field(s) %v outside the params envelope — "+
-				"expected shape {\"action\":\"<op>\",\"params\":{...}}. "+
-				"Move these into params.<key> and retry.",
-			toolName, unexpected,
-		)
+		return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeEnvelope, toolName,
+			fmt.Sprintf(
+				"%s: payload has top-level field(s) %v outside the params envelope — "+
+					"expected shape {\"action\":\"<op>\",\"params\":{...}}. "+
+					"Move these into params.<key> and retry.",
+				toolName, unexpected,
+			))
 	}
 
 	// `action` must be present and string-typed. The switch in the
@@ -6187,10 +6222,12 @@ func extractParamsOrFail(toolName string, payload map[string]interface{}) (map[s
 	// check is purely about rejecting NON-string `action` shapes (number,
 	// bool, null) which would silently dispatch to the default branch.
 	if _, ok := payload["action"]; !ok {
-		return nil, fmt.Errorf("%s: missing required field `action` (string) — expected shape {\"action\":\"<op>\",\"params\":{...}}", toolName)
+		return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeEnvelope, toolName,
+			fmt.Sprintf("%s: missing required field `action` (string) — expected shape {\"action\":\"<op>\",\"params\":{...}}", toolName))
 	}
 	if _, ok := payload["action"].(string); !ok {
-		return nil, fmt.Errorf("%s: field `action` must be a string — got %T; expected shape {\"action\":\"<op>\",\"params\":{...}}", toolName, payload["action"])
+		return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeEnvelope, toolName,
+			fmt.Sprintf("%s: field `action` must be a string — got %T; expected shape {\"action\":\"<op>\",\"params\":{...}}", toolName, payload["action"]))
 	}
 
 	// `params` is OPTIONAL. If absent, return an empty map so actions
@@ -6206,10 +6243,12 @@ func extractParamsOrFail(toolName string, payload map[string]interface{}) (map[s
 	}
 	params, ok := payload["params"].(map[string]interface{})
 	if !ok {
-		return nil, fmt.Errorf(
-			"%s: field `params` must be an object — got %T; expected shape "+
-				"{\"action\":\"<op>\",\"params\":{...}}",
-			toolName, payload["params"],
+		return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeEnvelope, toolName,
+			fmt.Sprintf(
+				"%s: field `params` must be an object — got %T; expected shape "+
+					"{\"action\":\"<op>\",\"params\":{...}}",
+				toolName, payload["params"],
+			),
 		)
 	}
 
@@ -6996,7 +7035,8 @@ func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		case int:
 			limit = n
 		default:
-			return nil, fmt.Errorf("recent_activity: limit must be int, got %T", v)
+			return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, "limit",
+				fmt.Sprintf("recent_activity: limit must be int, got %T", v))
 		}
 	}
 
@@ -7010,7 +7050,8 @@ func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		case int:
 			since = int64(n)
 		default:
-			return nil, fmt.Errorf("recent_activity: since must be int, got %T", v)
+			return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, "since",
+				fmt.Sprintf("recent_activity: since must be int, got %T", v))
 		}
 	}
 
@@ -7037,7 +7078,8 @@ func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 	if v, present := p["result_status"]; present && v != nil {
 		s, ok := v.(string)
 		if !ok {
-			return nil, fmt.Errorf("recent_activity: result_status must be string, got %T", v)
+			return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeType, "result_status",
+				fmt.Sprintf("recent_activity: result_status must be string, got %T", v))
 		}
 		resultStatus = s
 	}
@@ -7068,7 +7110,8 @@ func handleRecentActivity(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p
 		case bool:
 			includeSystem = b
 		default:
-			return nil, fmt.Errorf("recent_activity: include_system must be bool, got %T", v)
+			return nil, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeType, "include_system",
+				fmt.Sprintf("recent_activity: include_system must be bool, got %T", v))
 		}
 	}
 
@@ -7872,7 +7915,8 @@ func parseWeightStrict(v interface{}, def float64) (float64, error) {
 	case int64:
 		return float64(n), nil
 	}
-	return 0, fmt.Errorf("field `weight` must be a number (float64/int), got %T", v)
+	return 0, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, "weight",
+		fmt.Sprintf("field `weight` must be a number (float64/int), got %T", v))
 }
 
 // parseFloatStrictOr is the named-field counterpart to parseWeightStrict.
@@ -7895,7 +7939,8 @@ func parseFloatStrictOr(v interface{}, def float64, fieldName string) (float64, 
 	case int64:
 		return float64(n), nil
 	}
-	return 0, fmt.Errorf("field `%s` must be a number (float64/int), got %T", fieldName, v)
+	return 0, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, fieldName,
+		fmt.Sprintf("field `%s` must be a number (float64/int), got %T", fieldName, v))
 }
 
 // maxQueryLimit caps the per-call result ceiling so a runaway `limit`
@@ -7925,12 +7970,14 @@ func parseLimitStrict(v interface{}, def int) (int, error) {
 	case float64:
 		// JSON numbers parse to float64 by default; reject fractional limits.
 		if x != float64(int(x)) {
-			return 0, fmt.Errorf("field `limit` must be an integer, got %v", x)
+			return 0, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, "limit",
+				fmt.Sprintf("field `limit` must be an integer, got %v", x))
 		}
 		n = int(x)
 	case float32:
 		if x != float32(int(x)) {
-			return 0, fmt.Errorf("field `limit` must be an integer, got %v", x)
+			return 0, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, "limit",
+				fmt.Sprintf("field `limit` must be an integer, got %v", x))
 		}
 		n = int(x)
 	case int:
@@ -7938,10 +7985,12 @@ func parseLimitStrict(v interface{}, def int) (int, error) {
 	case int64:
 		n = int(x)
 	default:
-		return 0, fmt.Errorf("field `limit` must be a number (float64/int), got %T", v)
+		return 0, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, "limit",
+			fmt.Sprintf("field `limit` must be a number (float64/int), got %T", v))
 	}
 	if n < 0 {
-		return 0, fmt.Errorf("field `limit` must be >= 0, got %d", n)
+		return 0, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, "limit",
+			fmt.Sprintf("field `limit` must be >= 0, got %d", n))
 	}
 	if n > maxQueryLimit {
 		n = maxQueryLimit
@@ -7988,10 +8037,12 @@ func parseFloatStrict(v interface{}, def float64, name string, min float64) (flo
 	case int64:
 		f = float64(x)
 	default:
-		return 0, fmt.Errorf("field `%s` must be a number (float64/int), got %T", name, v)
+		return 0, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, name,
+			fmt.Sprintf("field `%s` must be a number (float64/int), got %T", name, v))
 	}
 	if min != 0 && f < min {
-		return 0, fmt.Errorf("field `%s` must be >= %v, got %v", name, min, f)
+		return 0, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, name,
+			fmt.Sprintf("field `%s` must be >= %v, got %v", name, min, f))
 	}
 	return f, nil
 }
@@ -8035,13 +8086,16 @@ func parseBlobOffset(v interface{}) (int64, error) {
 	case int64:
 		f = float64(x)
 	default:
-		return 0, fmt.Errorf("offset must be an integer, got %T", v)
+		return 0, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, "offset",
+			fmt.Sprintf("offset must be an integer, got %T", v))
 	}
 	if f != float64(int64(f)) {
-		return 0, fmt.Errorf("offset must be an integer, got %v", f)
+		return 0, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, "offset",
+			fmt.Sprintf("offset must be an integer, got %v", f))
 	}
 	if f < 0 {
-		return 0, fmt.Errorf("offset must be non-negative, got %v", f)
+		return 0, mpminternal.NewPayloadShapeError(mpminternal.PayloadShapeNumeric, "offset",
+			fmt.Sprintf("offset must be non-negative, got %v", f))
 	}
 	return int64(f), nil
 }
