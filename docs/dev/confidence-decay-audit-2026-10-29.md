@@ -10,7 +10,10 @@
 > database was inspected through an explicitly read-only connection.
 >
 > **Author:** Session B. **Date:** 2026-10-29.
-> **Base revision:** `origin/main` at `e493dc07`.
+> **Base revision:** `origin/main`. The branch was written against `e493dc07`
+> and rebased onto `2ae3339a` (which merged PR #169, the issue-#164 write-path
+> fix) after #169 landed during the work; the rebase was clean and the diff
+> against main is unchanged in substance.
 
 ---
 
