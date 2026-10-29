@@ -146,6 +146,8 @@ func resolveTheoryOnNode(node DBNode, theoryID, conclusion, newStatus string) er
 		return fmt.Errorf("marshal patch: %w", err)
 	}
 
+	// retries=5 (issue #164): the documented ExecTracked write budget.
+	// A theory that is resolved but not written stays pending forever.
 	result, err := node.ExecTracked(`
 		UPDATE memories
 		SET metadata = json_patch(COALESCE(metadata, '{}'), ?),
@@ -153,7 +155,7 @@ func resolveTheoryOnNode(node DBNode, theoryID, conclusion, newStatus string) er
 		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND collection = 'theories' AND deleted_at IS NULL
 		  AND json_extract(metadata, '$.status') = 'pending'
-	`, 0, string(patchJSON), theoryID)
+	`, 5, string(patchJSON), theoryID)
 	if err != nil {
 		return fmt.Errorf("resolve theory: %w", err)
 	}

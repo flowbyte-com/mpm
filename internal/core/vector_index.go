@@ -346,8 +346,11 @@ func AssignToClusterNode(node DBNode, dm *DatabaseManager, memoryID string, vec 
 	clusterID := nearestClusterID(vec, clusters)
 
 	assignTable := schemaPrefix + "vector_assignments"
+	// retries=5 (issue #164): the documented ExecTracked write budget.
+	// INSERT OR REPLACE is idempotent on (memory_id, cluster_id), so a
+	// retry after a lost race is harmless.
 	_, err = node.ExecTracked(`INSERT OR REPLACE INTO `+assignTable+` (memory_id, cluster_id, updated_at)
-		VALUES (?, ?, CURRENT_TIMESTAMP)`, 0, memoryID, clusterID)
+		VALUES (?, ?, CURRENT_TIMESTAMP)`, 5, memoryID, clusterID)
 	if err != nil {
 		return 0, fmt.Errorf("assign to cluster (node): %w", err)
 	}

@@ -509,7 +509,10 @@ func (dm *DatabaseManager) PurgeWork(req WorkPurgeRequest) (*WorkPurgeReport, er
 			{&counts.EpistemicProvenance, `DELETE FROM epistemic_provenance WHERE downstream_id = ?`},
 		}
 		for _, d := range deletes {
-			res, err := tx.ExecTracked(d.sql, 0, req.WorkID)
+			// retries=5, not 0 (issue #164): a DELETE is a write, and
+			// an unretried write loses the artifact to ordinary lock
+			// contention.
+			res, err := tx.ExecTracked(d.sql, 5, req.WorkID)
 			if err != nil {
 				return fmt.Errorf("purge: delete: %w", err)
 			}
@@ -520,7 +523,7 @@ func (dm *DatabaseManager) PurgeWork(req WorkPurgeRequest) (*WorkPurgeReport, er
 			*d.dest = int(n)
 		}
 
-		res, err := tx.ExecTracked(`DELETE FROM works WHERE id = ?`, 0, req.WorkID)
+		res, err := tx.ExecTracked(`DELETE FROM works WHERE id = ?`, 5, req.WorkID)
 		if err != nil {
 			return fmt.Errorf("purge: delete works row: %w", err)
 		}
@@ -546,11 +549,14 @@ func (dm *DatabaseManager) PurgeWork(req WorkPurgeRequest) (*WorkPurgeReport, er
 		if err != nil {
 			return fmt.Errorf("purge: encode counts: %w", err)
 		}
+		// retries=5 (issue #164): the documented ExecTracked write budget.
+		// The audit row is the record that the purge happened; losing it to
+		// a lock would make a completed purge invisible.
 		if _, err := tx.ExecTracked(`
 			INSERT INTO work_purge_audit
 				(id, work_id, purged_at, reason_code, note, operator, counts)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, 0, auditID, req.WorkID, purgedAt, req.ReasonCode,
+		`, 5, auditID, req.WorkID, purgedAt, req.ReasonCode,
 			nullableOrNil(req.Note), nullableOrNil(req.Operator), string(countsJSON)); err != nil {
 			return fmt.Errorf("purge: write audit row: %w", err)
 		}

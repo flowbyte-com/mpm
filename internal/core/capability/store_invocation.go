@@ -237,6 +237,36 @@ func (s *Store) withRetry(ctx context.Context, fn func() error) error {
 			return err
 		}
 
+		// A STALE SNAPSHOT is owned by the transaction layer, not by
+		// this loop (issue #164).
+		//
+		// internal.WithTx restarts a transaction whose read snapshot
+		// went stale, up to its own budget — and each restart takes a
+		// FRESH snapshot. So by the time the error reaches us, the
+		// transaction layer has already spent its whole budget on this
+		// class. Re-driving it here multiplies the two budgets: 4 outer
+		// attempts × 3 inner attempts = 12 transactions, where the
+		// Store's own budget says 4.
+		//
+		// The extra attempts bought no additional resilience that the
+		// inner layer had not already tried, so this loop stops here
+		// and the contention is reported to the caller.
+		if internal.IsBusySnapshotError(err) {
+			return err
+		}
+
+		// An AMBIGUOUS COMMIT must never be re-driven (issue #164).
+		//
+		// A failed COMMIT does not say whether the write landed. If it
+		// did, re-running the callback writes a SECOND
+		// capability_invocations row — with a fresh UUID, so it is not
+		// a primary-key collision — and increments the capability's
+		// probation counter a second time. The corruption is silent:
+		// both writes look successful.
+		if errors.Is(err, internal.ErrTxCommitAmbiguous) {
+			return err
+		}
+
 		// Don't sleep after the last attempt — there's
 		// no next attempt to wait for.
 		if attempt == invocationRetryMaxAttempts {

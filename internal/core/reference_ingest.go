@@ -31,6 +31,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -244,11 +245,24 @@ func (dm *DatabaseManager) IngestReference(ctx context.Context, req ReferenceIng
 	// The write phase can lose a race with a concurrent ingest of the same
 	// source: both resolve to "no existing document", both build the same
 	// deterministic id, and one of them then fails with SQLITE_BUSY /
-	// SQLITE_BUSY_SNAPSHOT. WithTx deliberately does not retry callbacks
-	// (see its contract), and its per-statement retry cannot help once a
-	// read snapshot is stale, so the retry lives here — re-resolving the
-	// identity each attempt so the loser of the race sees the winner's row
-	// and applies an update to it instead of failing.
+	// SQLITE_BUSY_SNAPSHOT.
+	//
+	// The retry lives here — re-resolving the identity each attempt so the
+	// loser of the race sees the winner's row and applies an update to it
+	// instead of failing.
+	//
+	// UPDATE (issue #164): the original rationale for this loop said
+	// "WithTx deliberately does not retry callbacks, and its per-statement
+	// retry cannot help once a read snapshot is stale, so the retry lives
+	// here". Both halves of that are now false. WithTx DOES restart a
+	// stale-snapshot transaction, and each restart takes a FRESH snapshot,
+	// so the transaction layer has already spent its own budget on this
+	// class by the time the error reaches here. Continuing to re-drive it
+	// would multiply the two budgets — 5 × 3 = 15 transactions, where
+	// this loop's own budget says 5 — for no additional resilience.
+	//
+	// The loop keeps its budget for the class it was written for:
+	// ordinary contention that the statement-level retry could not clear.
 	const attempts = 5
 	backoff := 20 * time.Millisecond
 	var lastErr error
@@ -264,6 +278,17 @@ func (dm *DatabaseManager) IngestReference(ctx context.Context, req ReferenceIng
 			return res, nil
 		}
 		if !IsBusyError(err) {
+			return nil, err
+		}
+		// A stale snapshot is owned by WithTx (issue #164) — see the
+		// comment above. Do not multiply the budgets.
+		if IsBusySnapshotError(err) {
+			return nil, err
+		}
+		// An ambiguous commit must never be re-driven: the write may
+		// already have landed, and re-running the callback would write
+		// it twice.
+		if errors.Is(err, ErrTxCommitAmbiguous) {
 			return nil, err
 		}
 		lastErr = err

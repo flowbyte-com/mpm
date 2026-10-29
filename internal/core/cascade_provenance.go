@@ -171,12 +171,24 @@ func (dm *DatabaseManager) recordProvenanceNode(node DBNode, sourceID, sourceTyp
 
 	// Local write. Always executes — the local table is the
 	// always-on substrate.
+	// retries=5 (issue #164): the documented ExecTracked write budget.
+	//
+	// The ATTACHED database carries its own write lock, independent of the
+	// local one the statement above already took, so this write can still
+	// collide even though the transaction holds the local write lock.
+	// retries=5 (issue #164): the documented ExecTracked write budget.
+	//
+	// This is the transaction's FIRST write, so it is the statement that can
+	// meet another writer's lock. `retries=0` disabled the statement-level
+	// retry, so the collision surfaced as "database is locked" and the
+	// citation was never recorded. The row is keyed by a fresh id and the
+	// insert is ON CONFLICT DO NOTHING, so a retry is harmless.
 	if _, err := node.ExecTracked(`
 		INSERT INTO epistemic_provenance
 			(id, source_id, source_type, downstream_id, downstream_type, event_id, polarity)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source_id, downstream_id, event_id) DO NOTHING
-	`, 0, GenerateID(), sourceID, sourceType, downstreamID, downstreamType, eventID, polarityArg); err != nil {
+	`, 5, GenerateID(), sourceID, sourceType, downstreamID, downstreamType, eventID, polarityArg); err != nil {
 		return fmt.Errorf("RecordProvenance local write: %w", err)
 	}
 
@@ -202,7 +214,7 @@ func (dm *DatabaseManager) recordProvenanceNode(node DBNode, sourceID, sourceTyp
 				(id, source_id, source_type, downstream_id, downstream_type, event_id, polarity)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(source_id, downstream_id, event_id) DO NOTHING
-		`, 0, GenerateID(), sourceID, sourceType, downstreamID, downstreamType, eventID, polarityArg); err != nil {
+		`, 5, GenerateID(), sourceID, sourceType, downstreamID, downstreamType, eventID, polarityArg); err != nil {
 			return fmt.Errorf("RecordProvenance shared write: %w", err)
 		}
 	}
