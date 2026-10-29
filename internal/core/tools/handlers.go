@@ -5489,7 +5489,16 @@ func handleFlushScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 			updated_at = CAST(strftime('%s','now') AS INTEGER),
 			decay_at = excluded.decay_at;`
 
-	if _, err := dm.ExecTracked(query, 0, sessionID, thesis, supporting); err != nil {
+	// retries=5 (issue #164): the documented ExecTracked write budget.
+	//
+	// `retries=0` disables the statement-level retry entirely, so an
+	// ordinary lock contention — the OTHER busy class, which IS a wait
+	// and IS clearable by retrying the statement — surfaced to the
+	// caller as "database is locked" and the scratchpad row was never
+	// written. The scratchpad is a volatile working thesis, but it is
+	// still a write against the substrate's database, and nothing about
+	// this statement makes it uncontendable.
+	if _, err := dm.ExecTracked(query, 5, sessionID, thesis, supporting); err != nil {
 		return nil, fmt.Errorf("flush scratchpad: %w", err)
 	}
 	return map[string]string{"status": "flushed", "session_id": sessionID}, nil
@@ -5532,7 +5541,9 @@ func handleDiscardScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 		return nil, internal.ErrSessionIDRequired()
 	}
 
-	if _, err := dm.ExecTracked(`DELETE FROM ephemeral_scratchpad WHERE session_id = ?`, 0, sessionID); err != nil {
+	// retries=5 (issue #164): the documented ExecTracked write budget.
+	// See handleFlushScratchpad for why a zero budget loses the row.
+	if _, err := dm.ExecTracked(`DELETE FROM ephemeral_scratchpad WHERE session_id = ?`, 5, sessionID); err != nil {
 		return nil, fmt.Errorf("discard scratchpad: %w", err)
 	}
 	return map[string]string{"status": "discarded", "session_id": sessionID}, nil
@@ -5602,7 +5613,7 @@ func handlePromoteScratchpad(dm mpminternal.CoreDB, ac mpminternal.ActiveContext
 		// reach this line — WithTx's deferred rollback catches it.
 		if _, err := node.ExecTracked(
 			`DELETE FROM ephemeral_scratchpad WHERE session_id = ?`,
-			0, sessionID,
+			5, sessionID,
 		); err != nil {
 			return fmt.Errorf("delete scratchpad after promote: %w", err)
 		}

@@ -255,8 +255,12 @@ func (dm *DatabaseManager) applyConfidenceDecay(c confidenceDecayCandidate, now 
 		// The watermark advances even when the value did not change: that
 		// is what keeps the next pass from re-selecting this artifact. It
 		// is a maintenance fact ("checked at T"), not a derived value.
+		// retries=5 (issue #164): the documented ExecTracked write budget.
+		// The recompute above does not write when the confidence did not
+		// change, so this watermark advance is sometimes the transaction's
+		// first write — and therefore sometimes the statement that collides.
 		if _, err := node.ExecTracked(
-			`UPDATE memories SET confidence_checked_at = ? WHERE id = ?`, 0, now.Unix(), c.id,
+			`UPDATE memories SET confidence_checked_at = ? WHERE id = ?`, 5, now.Unix(), c.id,
 		); err != nil {
 			return fmt.Errorf("advance watermark: %w", err)
 		}

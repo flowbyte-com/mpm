@@ -92,6 +92,17 @@ func (dm *DatabaseManager) applyReference(doc *ReferenceDoc, chunks []ReferenceC
 		// re-ingest from erasing fetch provenance when the caller did not
 		// supply it (a local re-import of a URL-sourced row is not a
 		// thing, but a metadata-only refresh is).
+		//
+		// retries=0 is DELIBERATE (issue #164's audit). An OUTER layer
+		// owns the ordinary busy class for this path: `IngestReference`
+		// re-drives the whole operation (attempts = 5) on an ordinary
+		// busy error, re-resolving the identity each attempt so the
+		// loser of a concurrent ingest applies an update instead of
+		// failing (see reference_ingest.go). A statement-level budget
+		// here would multiply the two budgets — 5 × 6 = 30 transactions,
+		// where the outer budget says 5 — for no additional resilience.
+		// That is the multiplication trap AGENTS.md §3 names: the layer
+		// that owns a busy class owns its budget.
 		_, err := node.ExecTracked(`
 			INSERT INTO reference_docs
 			(id, title, file_path, source_type, tags, content, content_hash,
@@ -136,6 +147,8 @@ func (dm *DatabaseManager) applyReference(doc *ReferenceDoc, chunks []ReferenceC
 		applied = diff
 
 		for _, c := range diff.Inserted {
+			// retries=0 is DELIBERATE — see the note on the doc-row
+			// upsert above: the outer ingest loop owns this busy class.
 			if _, err := node.ExecTracked(`
 				INSERT INTO reference_chunks
 				(id, doc_id, chunk_index, section, content, source_path, content_hash)
@@ -157,6 +170,8 @@ func (dm *DatabaseManager) applyReference(doc *ReferenceDoc, chunks []ReferenceC
 		// vector for new content and the diff-based embedding bypass
 		// would silently misroute searches.
 		for _, c := range diff.Updated {
+			// retries=0 is DELIBERATE — see the note on the doc-row
+			// upsert above: the outer ingest loop owns this busy class.
 			if _, err := node.ExecTracked(`
 				INSERT INTO reference_chunks
 				(id, doc_id, chunk_index, section, content, source_path, content_hash)
@@ -178,6 +193,8 @@ func (dm *DatabaseManager) applyReference(doc *ReferenceDoc, chunks []ReferenceC
 		// Unchanged: skip entirely — the existing row is the truth.
 		// Deleted: drop orphans whose content_hash is not in the new set.
 		for _, orphanID := range diff.Deleted {
+			// retries=0 is DELIBERATE — see the note on the doc-row
+			// upsert above: the outer ingest loop owns this busy class.
 			if _, err := node.ExecTracked(
 				`DELETE FROM reference_chunks WHERE id = ?`, 0, orphanID,
 			); err != nil {
@@ -203,16 +220,23 @@ func (dm *DatabaseManager) DeleteReference(id string) error {
 		return fmt.Errorf("DeleteReference: database not initialized")
 	}
 	return dm.WithTx(func(node DBNode) error {
-		if _, err := node.ExecTracked(`DELETE FROM reference_chunks WHERE doc_id = ?`, 0, id); err != nil {
+		// retries=5, not 0 (issue #164). A DELETE is a write, and a
+		// write can be contended like any other. With retries=0 the
+		// statement-level retry was disabled, so ordinary lock
+		// contention aborted the whole delete — the document survived
+		// with some of its rows already gone from the caller's point
+		// of view. The transaction rolls back on failure, so the
+		// retried attempt is the only one that lands.
+		if _, err := node.ExecTracked(`DELETE FROM reference_chunks WHERE doc_id = ?`, 5, id); err != nil {
 			return fmt.Errorf("delete reference chunks: %w", err)
 		}
-		if _, err := node.ExecTracked(`DELETE FROM reference_interactions WHERE doc_id = ?`, 0, id); err != nil {
+		if _, err := node.ExecTracked(`DELETE FROM reference_interactions WHERE doc_id = ?`, 5, id); err != nil {
 			return fmt.Errorf("delete reference interactions: %w", err)
 		}
-		if _, err := node.ExecTracked(`DELETE FROM admission_log WHERE doc_id = ?`, 0, id); err != nil {
+		if _, err := node.ExecTracked(`DELETE FROM admission_log WHERE doc_id = ?`, 5, id); err != nil {
 			return fmt.Errorf("delete admission log: %w", err)
 		}
-		if _, err := node.ExecTracked(`DELETE FROM reference_docs WHERE id = ?`, 0, id); err != nil {
+		if _, err := node.ExecTracked(`DELETE FROM reference_docs WHERE id = ?`, 5, id); err != nil {
 			return fmt.Errorf("delete reference doc: %w", err)
 		}
 		return nil

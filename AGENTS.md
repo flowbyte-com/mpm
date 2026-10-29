@@ -70,9 +70,13 @@ is exactly how the `-lm` omission reached CI. The flag sets are pinned by
 
 **No HTTP in `mpm`.** The binary is CLI-only; HTTP/MCP surfaces belong to consumer binaries (`mpm-agent`, `mpm-mcp`) which implement their own auth at the protocol boundary.
 
-**Path resolution:** `MPM_WORKSPACE` env → `$HOME/.mpm` → CWD fallback. The
-canonical root `~/.mpm` is both the Git checkout and the runtime root
-(`git clone https://github.com/flowbyte-com/mpm ~/.mpm`). See
+**Path resolution:** `MPM_WORKSPACE` env → `$HOME/.mpm` → CWD fallback. By
+default the canonical root `~/.mpm` is both the Git checkout and the runtime
+root (`git clone https://github.com/flowbyte-com/mpm ~/.mpm`). The opt-in
+versioned bundle layout (`docs/INSTALL.md` §1g) keeps `~/.mpm` as the **data
+root** and splits the runtime into `releases/<rev>` behind the `current`
+symlink, so the checkout and the runtime root no longer coincide.
+`config.GetMPMDir()` still resolves `~/.mpm` in both layouts. See
 `config.GetMPMDir()` / `config.GetWorkspace()` in
 `internal/core/config/config.go`.
 
@@ -102,6 +106,19 @@ Don't reach for a different shape; extend `mpm-lint --gate` instead. Code violat
 ### Single-connection discipline (the deadlock trap)
 
 **Do not call `db.SetMaxOpenConns(1)`.** It looks like the cleanest enforcement of SQLite's single-writer guarantee but creates textbook deadlocks: a transaction holds the only connection, a helper runs a bare-`db` lookup inside, that lookup blocks forever waiting for the connection the transaction holds. The codebase uses `*sql.Tx` discipline — thread transactions through helpers, don't bare-`db` inside enclosing transactions. MPM relies on WAL + `busy_timeout=5000` + tx discipline, not a runtime choke-point. Static whitelist: `internal/core/sqlopen_owner_test.go`.
+
+### Retry-budget discipline (the multiplication trap)
+
+Two busy classes, and they are not the same thing. **Ordinary contention** (`SQLITE_BUSY`) is a wait and is clearable by retrying the statement. **A stale snapshot** (`SQLITE_BUSY_SNAPSHOT`) is not: it belongs to the transaction, and the busy handler is never invoked for it, so no amount of waiting clears it.
+
+`WithTx` therefore **restarts** a stale-snapshot transaction, up to `internal.TxSnapshotMaxAttempts` (3), and a restart **re-runs the callback**. A callback that is re-run must be replay-safe: every side effect it produces has to live inside the transaction (so the abandoned attempt's copy rolls back) or be idempotent. `internal/core/tx_replay_safety_test.go` is the standing proof that every `WithTx` callback satisfies this.
+
+**A failed COMMIT is a third thing, and it is not a retry.** SQLite can report `SQLITE_BUSY` from a commit when its checkpoint cannot complete; the rows may or may not be durable. `WithTx` does not retry that case and marks it `internal.ErrTxCommitAmbiguous`, so the caller is told the outcome is *unknown* rather than told a rollback happened. Two rules follow:
+
+- **A caller that wraps `WithTx` in its own retry loop must not re-drive a stale snapshot** — the transaction layer already spent its whole budget on that class, so re-driving it multiplies two budgets for no extra resilience (4 × 3 = 12 transactions, where the outer budget says 4).
+- **A caller that wraps `WithTx` in its own retry loop must not re-drive an ambiguous commit** — the write may already be durable, so a second run writes it twice, silently. Canonical example: `internal/core/capability/store_invocation.go:withRetry`.
+
+The layer that owns a busy class owns its budget. Corollary for statement-level writes: **give `ExecTracked` a budget**. `retries=0` disables the statement-level retry entirely, so an ordinary contention loses the artifact outright rather than waiting it out.
 
 ## 4. Current CLI/API Interface Notes
 

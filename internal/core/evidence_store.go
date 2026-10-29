@@ -83,13 +83,18 @@ func addEvidenceInTx(node DBNode, in EvidenceInput, expiresAt *int64) (EvidenceO
 		in.CreatedAt = time.Now()
 	}
 
+	// retries=5, not 0 (issue #164): with retries=0 the statement-level
+	// retry was disabled, so an ordinary lock contention lost the evidence
+	// row outright — "insert evidence: database is locked". The evidence
+	// is a durable observation; losing it silently weakens every
+	// confidence computation that depends on it.
 	res, err := node.ExecTracked(`
 		INSERT INTO evidence (id, artifact_id, artifact_type, type, source_group,
 		                     strength, independence_factor, created_by, created_at, expires_at, notes,
 		                     reference_url)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO NOTHING
-	`, 0, identity.RowID, in.ArtifactID, in.ArtifactType, in.Type, in.SourceGroup,
+	`, 5, identity.RowID, in.ArtifactID, in.ArtifactType, in.Type, in.SourceGroup,
 		in.Strength, in.IndependenceFactor, in.CreatedBy, in.CreatedAt.Unix(), expiresAt, in.Notes,
 		// Absent persists as SQL NULL rather than ''. ValidateReferenceURL
 		// guarantees a non-empty string always means "a reference was
@@ -206,9 +211,12 @@ func reconcileReplayedObservation(node DBNode, identity observationIdentity, in 
 	// The URL is provably confidence-neutral (evidence_reference_url.go), and
 	// dropping caller-supplied provenance would lose data.
 	if in.ReferenceURL != "" && !storedReferenceURL.Valid {
+		// retries=5 (issue #164): the documented ExecTracked write budget.
+		// The reference URL is durable provenance; losing it to a lock would
+		// drop the citation the caller recorded.
 		if _, err := node.ExecTracked(
 			`UPDATE evidence SET reference_url = ? WHERE id = ? AND reference_url IS NULL`,
-			0, in.ReferenceURL, identity.RowID,
+			5, in.ReferenceURL, identity.RowID,
 		); err != nil {
 			return fmt.Errorf("record reference_url on evidence row %s: %w", identity.RowID, err)
 		}
@@ -611,10 +619,13 @@ func recomputeConfidenceAt(node DBNode, artifactID, artifactType string, reason 
 
 	// Append the history row.
 	historyID := GenerateID()
+	// retries=5 (issue #164): the documented ExecTracked write budget.
+	// The history row is what every later recompute reads; losing it to a
+	// lock would leave the confidence column without its own audit trail.
 	_, err = node.ExecTracked(`
 		INSERT INTO confidence_history (id, artifact_id, artifact_type, confidence, computed_at, evidence_count, trigger)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, 0, historyID, artifactID, artifactType, conf, now.Unix(), len(ev), string(reason))
+	`, 5, historyID, artifactID, artifactType, conf, now.Unix(), len(ev), string(reason))
 	if err != nil {
 		return false, fmt.Errorf("insert history row: %w", err)
 	}
@@ -841,9 +852,11 @@ func writeArtifactConfidence(node DBNode, artifactID, artifactType string, conf 
 	default:
 		table = "memories"
 	}
+	// retries=5 (issue #164): the documented ExecTracked write budget.
+	// The confidence column is the derived value every consumer reads.
 	_, err := node.ExecTracked(
 		fmt.Sprintf(`UPDATE %s SET confidence = ? WHERE id = ?`, table),
-		0, conf, artifactID,
+		5, conf, artifactID,
 	)
 	return err
 }

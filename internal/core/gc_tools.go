@@ -373,6 +373,9 @@ func (dm *DatabaseManager) resolveStaleTheory(theoryID string) (bool, error) {
 
 	var transitioned bool
 	err = dm.WithTx(func(node DBNode) error {
+		// retries=5 (issue #164): the documented ExecTracked write budget.
+		// A theory that is resolved but not written stays pending forever —
+		// the gc pass would keep selecting it.
 		res, err := node.ExecTracked(`
 			UPDATE memories
 			SET expires_at = NULL,
@@ -380,7 +383,7 @@ func (dm *DatabaseManager) resolveStaleTheory(theoryID string) (bool, error) {
 			    last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id = ? AND collection = 'theories' AND deleted_at IS NULL
 			  AND json_extract(metadata, '$.status') = 'pending'
-		`, 0, string(patch), theoryID)
+		`, 5, string(patch), theoryID)
 		if err != nil {
 			return fmt.Errorf("resolve stale theory: %w", err)
 		}

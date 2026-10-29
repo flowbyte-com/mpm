@@ -160,6 +160,13 @@ its own `telemetry.db`, separate from the cognitive substrate.
 MPM installs to `~/.mpm`, which is both the Git checkout and the runtime
 root — one directory holds the source, the compiled binaries, and your data.
 
+`install.sh --bundle` can separate the two: the runtime becomes a versioned
+bundle under `~/.mpm/releases/<rev>` and `~/.mpm/current` points at the active
+one, while the data root stays exactly where it is. That layout is opt-in, and
+converting an existing installation to it is a separate, authorised
+migration — see
+[§1g of the runtime installation reference](docs/INSTALL.md#1g-the-versioned-runtime-bundle-layout-opt-in).
+
 Building requires Go 1.26.6 or newer, Make, and a C toolchain for SQLite/CGO.
 The Makefile supplies the required FTS5 build flags.
 
