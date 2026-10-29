@@ -205,6 +205,26 @@ registry/dispatcher drift is caught.
   ``undefined reference to `log` `` from `sqlite3-binding.c`.
   If you add a test that needs an environment variable, document it
   in the test and in the PR description.
+- **The ordinary gates are hermetic. A test that reaches a REAL provider
+  is not, and must say so.** The gates never reach the network unless a
+  test asks for it, and a test asks for it by calling
+  `testenv.LiveProviderEnabled(t)` (`internal/testenv/liveprovider.go`),
+  which requires the explicit opt-in `MPM_TEST_LIVE_PROVIDER` **and** a
+  provider credential in the environment. A credential's presence alone is
+  **not** sufficient: that was the defect issue #178's phase-1 work found
+  — the credential's presence is a property of the operator's environment,
+  not a decision about the run, so a host that had a key exported would
+  silently make a real, paid request during `make test`. To run the live
+  verifications deliberately (the FTS5 settings are required here too —
+  they are part of every `go test` invocation in this repository):
+  ```bash
+  MPM_TEST_LIVE_PROVIDER=1 \
+    CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 CGO_LDFLAGS=-lm \
+    go test -tags fts5 -v ./cmd/mpm/probe/ -run TestLive_...
+  ```
+  A guard (`internal/testenv/liveprovider_guard_test.go`) keeps every
+  provider-reaching test behind that gate, so a new one cannot reintroduce
+  the defect.
 
 ## Database / schema
 

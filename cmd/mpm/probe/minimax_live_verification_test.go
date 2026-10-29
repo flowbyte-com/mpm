@@ -12,9 +12,36 @@ package probe
 // endpoint with the operator's own credential.
 //
 // This file is that verification, in the form the next operator can
-// re-run. It is opt-in: it SKIPS unless MINIMAX_API_KEY is present in
-// the environment, so it is inert in CI and inert on any host that does
-// not deliberately opt in.
+// re-run.
+//
+// IT IS EXPLICITLY OPT-IN — issue #178's test-hygiene correction.
+//
+// It was previously gated on `MINIMAX_API_KEY` being present, which is NOT
+// an opt-in: the presence of a credential is a property of the operator's
+// ENVIRONMENT, not a decision anyone made about this test run. On any host
+// where the credential happens to be exported — the normal state of a
+// machine that uses the provider — the ordinary `make test` / `make
+// test-race` gates silently reached api.minimax.io and made a real,
+// authenticated, paid request. That was observed: the provider returned a
+// thinking-only response and the test failed for a reason that had nothing
+// to do with the code under test.
+//
+// It now requires BOTH:
+//   - the explicit opt-in `MPM_TEST_LIVE_PROVIDER` (see
+//     internal/testenv.LiveProviderEnabled), which is a decision about the
+//     RUN; and
+//   - a provider credential in the environment, without which there is
+//     nothing to verify.
+//
+// So the ordinary gates are hermetic by default on EVERY host, and the live
+// verification runs only when an operator asks for it:
+//
+//	MPM_TEST_LIVE_PROVIDER=1 \
+//	  CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 CGO_LDFLAGS=-lm \
+//	  go test -tags fts5 -v ./cmd/mpm/probe/ -run TestLive_...
+//
+// (The FTS5 settings are required by every `go test` invocation in this
+// repository — see docs/CONTRIBUTING.md.)
 //
 // THE CREDENTIAL IS NEVER TOUCHED BY THIS TEST
 // --------------------------------------------
@@ -59,7 +86,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,6 +94,7 @@ import (
 
 	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/synth"
+	"github.com/flowbyte-com/mpm/internal/testenv"
 )
 
 // liveMiniMaxBaseURL is the Anthropic-compatible surface MiniMax
@@ -173,10 +200,13 @@ func withRecordingTransport(t *testing.T) *recordingTransport {
 //     as `X-Api-Key`;
 //   - exactly ONE request was made — no retry, no renegotiation.
 //
-// It skips when MINIMAX_API_KEY is absent, so it is inert by default.
+// It skips unless the operator has EXPLICITLY opted in
+// (MPM_TEST_LIVE_PROVIDER) AND a credential is present, so the ordinary
+// test gates never reach the network — see the file header.
 func TestLive_MiniMaxAnthropicSurfaceAuthenticatesWithBearer(t *testing.T) {
-	if os.Getenv("MINIMAX_API_KEY") == "" {
-		t.Skip("MINIMAX_API_KEY is not set; the live provider verification is opt-in")
+	if !testenv.LiveProviderEnabledForKeys(t, "MINIMAX_API_KEY") {
+		t.Skip("the live provider verification is not enabled for this run: " +
+			"set MPM_TEST_LIVE_PROVIDER=1 and provide MINIMAX_API_KEY to run it")
 	}
 
 	rt := withRecordingTransport(t)
