@@ -32,7 +32,7 @@ re-elevated a challenge-restored memory from the F7.1 floor of 0.5 to
 0.5 to 0.5996 — in both cases with **no evidence added**, no operator
 action, and no cascade. The same hole was in the operator's manual
 recompute (`mpm ops confidence recompute`), which raised a *challenged*
-memory from 0.5 to 0.879350543202. A maintenance pass that reverses a
+memory from 0.5 to 0.800000000000. A maintenance pass that reverses a
 recorded challenge is worse than no maintenance pass at all, so the
 defect is fixed here before the feature is scheduled.
 
@@ -228,11 +228,22 @@ The same hole was in the **operator's manual recompute**, which is worse
 because it is the tool an operator reaches for:
 
 ```
-challenged memory confidence = 0.879350543202 after a manual recompute,
+challenged memory confidence = 0.800000000000 after a manual recompute,
 want it unchanged at the floor 0.500000000000
 ```
 
-That silently reversed a recorded challenge.
+That silently reversed a recorded challenge — and the value it wrote is
+the *initial* confidence, derived from the memory's now-empty ledger,
+which is exactly the value F7.1 exists to withhold.
+
+(The measured digits depend on one subtlety worth recording: the
+challenge neutralises evidence by setting `expires_at = now` at
+one-second granularity, and the loader treats a row as expired only once
+`expires_at < now`. A recompute in the *same second* as the challenge
+therefore still sees the neutralised evidence and derives the
+pre-challenge value — 0.879350543202 in the first measurement — instead
+of the initial one. The regression test pins the expiry into the past so
+the number it reports is the same on every run.)
 
 A second, different demotion had the same shape. F5-2 drops a superseded
 or invalidated decision to `DecisionInitialConfidence` (0.5) with the
@@ -302,7 +313,7 @@ load-bearing by disabling it and observing the failure:
 
 | Mutation | Test that fails |
 |---|---|
-| whole guard disabled | `RestoredMemoryKeepsItsFloor` (0.783519310948), `DryRunAgreesWithThePassOnAPinnedArtifact`, `ManualRecomputeDoesNotRaiseAChallengedMemory` (0.879350543202), `DecayPassDoesNotPromoteASupersededDecision` (0.599519904141), `ManualRecomputeDoesNotRaiseASupersededDecision` (0.600000000000), `PassDoesNotPromoteAnArtifactWithNoLiveEvidence` |
+| whole guard disabled | `RestoredMemoryKeepsItsFloor` (0.783519310948), `DryRunAgreesWithThePassOnAPinnedArtifact`, `ManualRecomputeDoesNotRaiseAChallengedMemory` (0.800000000000), `DecayPassDoesNotPromoteASupersededDecision` (0.599519904141), `ManualRecomputeDoesNotRaiseASupersededDecision` (0.600000000000), `PassDoesNotPromoteAnArtifactWithNoLiveEvidence` |
 | rule 1 disabled | `ManualRecomputeDoesNotRaiseAChallengedMemory`, `ManualRecomputeDoesNotRaiseASupersededDecision` |
 | rule 2 disabled | `PassDoesNotPromoteAnArtifactWithNoLiveEvidence` |
 | rule 3 disabled | `PassNeverDeclaresAFoundationProven` |

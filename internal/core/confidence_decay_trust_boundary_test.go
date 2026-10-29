@@ -390,6 +390,20 @@ func TestConfidenceDecay_ManualRecomputeDoesNotRaiseAChallengedMemory(t *testing
 	if err := dm.ChallengeMemory("mem-manual-challenged", 1, "theory-under-test"); err != nil {
 		t.Fatalf("challenge: %v", err)
 	}
+
+	// The challenge neutralises the evidence by setting expires_at to
+	// NOW, at one-second granularity, and the loader treats a row as
+	// expired only once expires_at < now. A recompute in the SAME
+	// second as the challenge therefore still sees the neutralised
+	// evidence, and the derived value depends on the sub-second gap
+	// between the two. Pin the expiry into the past so the fixture
+	// states one thing: the ledger is empty, and the formula derives
+	// the INITIAL confidence from it.
+	if _, err := dm.SQLDB().Exec(
+		`UPDATE evidence SET expires_at = 1 WHERE artifact_id = 'mem-manual-challenged'`); err != nil {
+		t.Fatalf("pin the evidence expiry: %v", err)
+	}
+
 	floor, _ := storedDecayConfidence(t, dm, "mem-manual-challenged")
 
 	if err := RecomputeConfidence(dm, "mem-manual-challenged", "memory", RecomputeReasonManual); err != nil {
