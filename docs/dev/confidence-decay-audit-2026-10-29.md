@@ -314,10 +314,50 @@ load-bearing by disabling it and observing the failure:
 | Mutation | Test that fails |
 |---|---|
 | whole guard disabled | `RestoredMemoryKeepsItsFloor` (0.783519310948), `DryRunAgreesWithThePassOnAPinnedArtifact`, `ManualRecomputeDoesNotRaiseAChallengedMemory` (0.800000000000), `DecayPassDoesNotPromoteASupersededDecision` (0.599519904141), `ManualRecomputeDoesNotRaiseASupersededDecision` (0.600000000000), `PassDoesNotPromoteAnArtifactWithNoLiveEvidence` |
-| rule 1 disabled | `ManualRecomputeDoesNotRaiseAChallengedMemory`, `ManualRecomputeDoesNotRaiseASupersededDecision` |
+| rule 1 disabled | `ManualRecomputeDoesNotRaiseAChallengedMemory`, `ManualRecomputeDoesNotRaiseASupersededDecision`, `ManualRecomputeDoesNotRaiseAnInvalidatedDecision`, `DecayPassDoesNotPromoteAnInvalidatedDecisionWithLiveEvidence` |
 | rule 2 disabled | `PassDoesNotPromoteAnArtifactWithNoLiveEvidence` |
 | rule 3 disabled | `PassNeverDeclaresAFoundationProven` |
 | evidence-event exemption disabled | `RestoredMemoryIsNotDeclaredProven`, `FreshEvidenceReElevatesAChallengedMemory` |
+| the dry-run preview stops applying the guard | `DryRunAgreesWithThePassOnAPinnedArtifact` |
+
+The whole table was re-run independently on the merged tree (main at
+`f38a36ea`) by Session A on 2026-10-29, and every row reproduced
+exactly: each mutation broke exactly the named tests and nothing else.
+The last row — the dry-run preview — was added by that re-run, because
+the dry run applies the guard on a separate code path
+(`confidenceDecayWouldChange`) from the pass itself
+(`recomputeConfidenceAt`). A preview that reported "changed" for an
+artifact the real pass would leave alone would misreport the backlog.
+
+### 6.3.1 The fourth demotion was untested, and the shape that exposed it
+
+The guard names **four** trust demotions — challenge,
+restore-from-challenge, supersede and invalidate — and this table
+originally exercised only three. The invalidate demotion had no test at
+all, which left a quarter of the "four demotions" claim unproven.
+
+Adding the missing test then exposed a subtlety worth recording,
+because it is the difference between a demotion being protected by its
+MARKER and being protected by an accident:
+
+* A **challenge** neutralises the memory's evidence rows (`expires_at =
+  now`). A challenged or restored memory therefore has **no live
+  evidence**, and the *absence-of-evidence* rule (rule 2) already
+  refuses to promote it.
+* An **invalidation** does **not** touch the evidence table. The ledger
+  rows stay **live**.
+
+So an invalidated decision is the one demoted artifact where rule 2
+cannot protect it: the derived value is justified by real evidence, so
+only the demotion marker itself can hold the value down. Two tests now
+cover it — one with an empty ledger (protected by rule 2) and one with
+live evidence (protected by rule 1 alone, and failing when rule 1 is
+disabled).
+
+The generalisation: **for the pass path, the challenge-family demotions
+are protected twice over, and the invalidate demotion only once.** A
+future demotion that leaves its evidence live would need rule 1 to be
+load-bearing, and rule 1 is exactly the clause that had no test.
 
 The two cascade assertions carry their own **negative controls**: a
 fixture that registers a downstream `assumes_false` citation and then
@@ -363,30 +403,61 @@ by a test, because they live in two packages and can drift.
 
 ---
 
-## 8. The operator policy question (not decided here)
+## 8. The operator policy question — ANSWERED
 
 **PR #95 selected these defaults silently.** `enabled=1`,
 `interval_hours=6`, `limit=100`, `min_age_hours=24` were written into the
 handler without an operator decision recorded anywhere. That is a policy
 choice presented as a default, and it deserves an explicit owner.
 
-Three questions are open, and none of them is a mechanism question:
+**The operator answered (2026-10-29).** The approved policy is:
 
-1. **Should the recurring operation be enabled by default at all?** A
-   substrate that decays confidence unattended changes the value a
-   retrieval ranking sees, without anyone asking. The `enabled=0` default
-   with an explicit opt-in is the more conservative choice, and it is the
-   one this change would recommend.
-2. **What interval?** Six hours means a stored confidence can be up to
-   six hours stale; one hour costs six times the passes for a smaller
-   staleness window.
-3. **What `min_age_hours`?** 24 hours keeps freshly written artifacts out
+| key | value |
+|---|---|
+| `confidence.decay.enabled` | **0** — off by default, explicit opt-in only |
+| `confidence.decay.interval_hours` | **6** |
+| `confidence.decay.limit` | **100** |
+| `confidence.decay.min_age_hours` | **24** |
+
+The reasoning behind each of the three questions that were open:
+
+1. **Enabled by default?** **No.** A substrate that decays confidence
+   unattended changes the value a retrieval ranking sees, without anyone
+   asking. The `enabled=0` default with an explicit opt-in is the
+   conservative choice, and it is now the shipped behaviour.
+2. **Interval?** **Six hours.** A stored confidence can be up to six hours
+   stale; a shorter interval costs proportionally more passes for a
+   smaller staleness window.
+3. **`min_age_hours`?** **24 hours.** Freshly written artifacts stay out
    of the pass, on the grounds that evidence may legitimately arrive
    minutes after the save. A shorter window starts decaying artifacts
    before their evidence has settled.
 
-Until those are answered, the operation stays **off** in the live
-installation — which it already is (§9).
+**What this changed in the code.** The `enabled` fallback flipped from
+`1` to `0`; the other three numbers were already the approved values.
+The four now live in `internal/core` as
+`DefaultConfidenceDecayEnabled` / `DefaultConfidenceDecayInterval` /
+`DefaultConfidenceDecayLimit` / `DefaultConfidenceDecayMinAge`, and the
+scheduler reads them from there — so the code, the SPEC and the tests
+cannot drift apart.
+
+**What an upgrade changes, precisely.** Nothing is written to
+`system_config` by the upgrade, so nothing can be clobbered:
+
+- an install with **no** `confidence.decay.enabled` row never chose a
+  value, and therefore starts **off** after the upgrade. That is the
+  intended consequence — the old default was selected silently, so there
+  is no operator intent to preserve;
+- an install with an **explicit** `1` keeps running the pass;
+- an install with an **explicit** `0` keeps not running it.
+
+The live installation falls in the first case: its `system_config` has
+**no `confidence.*` keys** (§9). So the upgrade leaves it exactly as it
+is — off, and with no decay handler in the live binary at all.
+
+The operation stays **off** in the live installation — which it already
+is (§9), and which the new default makes the *shipped* behaviour rather
+than an accident of an old binary predating the wiring.
 
 ---
 
@@ -423,8 +494,8 @@ guard, one decision would have been promoted.
 
 ## 10. Does this close #92?
 
-**The implementation gap is closed; the issue should stay open until the
-scheduling decision is made.**
+**The implementation gap is closed, and the scheduling decision has now
+been made (2026-10-29). Both conditions for closure are therefore met.**
 
 *Why the implementation gap is closed.* The stored confidence now moves
 on a schedule, through the authoritative recompute path, in a bounded,
@@ -454,6 +525,35 @@ with the pass available as an explicit operator action
 substrate whose cached confidence decays unattended changes what
 retrieval sees, and that is a product decision rather than a bug fix.
 
+### 10.1 The conditions are now met
+
+**Condition 1 — the operator has chosen.** The policy is decided and
+recorded in §8 and in SPEC §6.2: `enabled=0`, `interval_hours=6`,
+`limit=100`, `min_age_hours=24`. The `enabled` fallback was flipped
+from `1` to `0`, the four numbers moved into `internal/core` so the
+code, the documentation and the tests cannot drift, and the scheduler
+now reads them from there.
+
+**Condition 2 — the substrate will not run it unattended.** The
+operator's decision is `enabled=0`, so the substrate will not run it
+unattended. The live installation is unchanged and stays off: its
+`system_config` has no `confidence.*` keys, and its scheduler binary
+predates the wiring entirely (§9).
+
+*What the upgrade does to a live install.* Nothing is written to
+`system_config`, so nothing can be clobbered. An install with no
+`confidence.decay.enabled` row starts off; an install with an explicit
+`1` keeps running; an install with an explicit `0` keeps not running.
+The live installation is in the first case, so the upgrade changes
+nothing there.
+
+*Installed-runtime verification is a separate activity.* The live
+binaries still predate both the pass and this correction. Verifying the
+corrected behaviour against the installed runtime is a release activity
+with its own operator checklist, and it is **not** part of closing
+#92: the issue asks whether the mechanism exists and whether the
+scheduling is decided, and both now have answers in code.
+
 ---
 
 ## 11. Release risk
@@ -468,10 +568,13 @@ retrieval sees, and that is a product decision rather than a bug fix.
 | The history ledger grows without bound | **none** | unchanged artifacts write no history row; one row per changed artifact |
 | The operator's manual recompute becomes less capable | **low, deliberate** | it can no longer undo a recorded demotion; it can still repair a stale cache, including one with no live evidence |
 | The operator's manual recompute loses the cascade hooks | **pre-existing** | it was never transactional, so it never fired them; unchanged by this work |
+| The `enabled` default flips to 0, so an install that was running the pass silently stops | **intended** | the old default was selected silently, with no operator decision recorded; an install that *chose* a value keeps it (§8) |
+| An install loses a setting during the upgrade | **none** | the upgrade writes nothing to `system_config`; it reads a key, it does not seed it |
 
 **Live risk of this change: none.** The change is inert until a binary
-containing it is deployed, and deploying it does not enable the
-recurring operation by itself unless the operator also chooses to.
+containing it is deployed, and — with the approved policy — deploying it
+does not enable the recurring operation at all. The pass is off by
+default; the operator opts in explicitly.
 
 ---
 
