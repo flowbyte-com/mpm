@@ -72,8 +72,11 @@
 //     policy issue, which the issue explicitly forbids.
 //   - No judgement about whether a de-registered row was CUSTOMISED. After
 //     removal there is no registry text left to compare against, so
-//     "pristine" and "customised" are indistinguishable. The report shows
-//     the content so the operator can tell.
+//     "pristine" and "customised" are indistinguishable. The operator can
+//     only tell by reading the row, so the reading is available —
+//     EXPLICITLY, through FormatOrphanedDirectiveWithContent. The default
+//     report does not print the content, because a report is a log and the
+//     policy text should not land in one the operator did not ask for.
 
 package seed
 
@@ -83,6 +86,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // DirectiveProvenanceSource is the provenance marker the canonical seeder
@@ -267,11 +271,55 @@ func OrphanedDirectives(dm interface {
 
 // FormatOrphanedDirective renders one orphan for the operator report.
 //
-// It shows the stable ID and a SHORT preview of the content. The content
-// is the operator's own policy text, and the report is read by the same
-// operator who wrote it — but a report is also a log, and a log should
-// carry a preview rather than a whole document.
+// IT DOES NOT SHOW THE CONTENT.
+//
+// A cleanup report is a LOG. It is printed to stdout, so it lands in a
+// terminal scrollback, in a CI log, and in whatever the operator pipes
+// it into. The default report therefore carries only what an operator
+// needs to DECIDE THAT THEY WANT TO LOOK — the row's stable ID, its age,
+// and any seeded task that still points at it — and not the directive
+// text itself.
+//
+// The content is available, explicitly, through
+// FormatOrphanedDirectiveWithContent. Inspecting a candidate is a
+// deliberate act by the operator, not a side effect of running a
+// maintenance command.
+//
+// WHY THE CONTENT IS NOT IN THE DEFAULT LINE
+// ------------------------------------------
+// The operator cannot be told "this row is eligible for cleanup" and be
+// left to work out whether it is their own customised policy. They have
+// to read it — but reading it has to be a choice, because the read is
+// what puts the policy text into a log the operator did not ask for.
 func FormatOrphanedDirective(o OrphanedDirective) string {
+	line := o.ID
+	if o.CreatedAt > 0 {
+		line += fmt.Sprintf(" (seeded %s)", time.Unix(o.CreatedAt, 0).UTC().Format("2006-01-02"))
+	}
+	if len(o.ReferencedBy) > 0 {
+		line += fmt.Sprintf(" [still referenced by: %s]", strings.Join(o.ReferencedBy, ", "))
+	}
+	return line
+}
+
+// FormatOrphanedDirectiveWithContent renders one orphan INCLUDING a
+// preview of its content.
+//
+// This is the EXPLICIT INSPECTION path: the operator asked to see the
+// text, so the text is shown. The preview is still truncated, because a
+// report line should carry a preview rather than a whole document — but
+// the truncation is a courtesy, not the privacy control. The privacy
+// control is that this function is not the default.
+//
+// It exists for a second reason, and the reason is why the default
+// report points at it. A de-registered directive cannot be
+// distinguished from a CUSTOMISED one: removing an entry from the
+// registry is a code change, so there is no registry text left to
+// compare the row against, and "pristine" and "customised" are
+// unknowable after the fact. The operator can only tell by reading. So
+// the reading must be available — and the fact that it is available is
+// what makes "eligible" safe to report at all.
+func FormatOrphanedDirectiveWithContent(o OrphanedDirective) string {
 	preview := strings.TrimSpace(o.Content)
 	if len(preview) > 96 {
 		preview = preview[:96] + "…"

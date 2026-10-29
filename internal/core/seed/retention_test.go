@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	internal "github.com/flowbyte-com/mpm-core"
@@ -299,22 +300,70 @@ func snapshotMemories(t *testing.T, db *sql.DB) map[string]string {
 	return out
 }
 
-// TestFormatOrphanedDirective_ShowsTheIDAndAPreview — the report shows the
-// operator what they would be acting on, and a report is a log, so it
-// carries a preview rather than a whole document.
-func TestFormatOrphanedDirective_ShowsTheIDAndAPreview(t *testing.T) {
+// TestFormatOrphanedDirective_DoesNotShowTheContent — the DEFAULT
+// rendering carries no directive text.
+//
+// A cleanup report is a LOG. It is printed to stdout, so it ends up in a
+// terminal scrollback and in CI output, and the directive text is the
+// operator's own policy. The default rendering therefore names the row
+// and its dependencies, and nothing else.
+//
+// The explicit rendering is the counterpart: same row, content shown,
+// because the operator asked.
+func TestFormatOrphanedDirective_DoesNotShowTheContent(t *testing.T) {
 	long := ""
 	for i := 0; i < 50; i++ {
 		long += "a very long directive body. "
 	}
+
 	out := seed.FormatOrphanedDirective(seed.OrphanedDirective{
 		ID: "mpm-seed-removed", Content: long,
 	})
 	if out == "" {
 		t.Fatal("empty rendering")
 	}
+	if !strings.Contains(out, "mpm-seed-removed") {
+		t.Errorf("the rendering does not name the row: %q", out)
+	}
+	if strings.Contains(out, "a very long directive body") {
+		t.Errorf("the DEFAULT rendering leaked the directive content: %q", out)
+	}
+	if strings.Contains(out, long) {
+		t.Errorf("the DEFAULT rendering carried the whole content: %q", out)
+	}
 	if len(out) > 200 {
-		t.Errorf("rendering is %d bytes — a report line should carry a preview", len(out))
+		t.Errorf("rendering is %d bytes — a report line should stay short", len(out))
+	}
+
+	// The explicit rendering DOES show it, truncated to a preview.
+	explicit := seed.FormatOrphanedDirectiveWithContent(seed.OrphanedDirective{
+		ID: "mpm-seed-removed", Content: long,
+	})
+	if !strings.Contains(explicit, "a very long directive body") {
+		t.Errorf("the EXPLICIT rendering did not show the content: %q", explicit)
+	}
+	if len(explicit) > 200 {
+		t.Errorf("the explicit rendering is %d bytes — a report line should carry a preview", len(explicit))
+	}
+}
+
+// TestFormatOrphanedDirective_ReportsCrossReferencesWithoutContent — the
+// dependency report survives the correction.
+//
+// The seeded-task cross-reference is what makes an orphan's removal a
+// decision rather than a cleanup, so it must be in the DEFAULT line.
+// Losing it would trade one omission for a worse one.
+func TestFormatOrphanedDirective_ReportsCrossReferencesWithoutContent(t *testing.T) {
+	out := seed.FormatOrphanedDirective(seed.OrphanedDirective{
+		ID:           "mpm-seed-removed",
+		Content:      "the policy text",
+		ReferencedBy: []string{"mpm-seed-nightly-compaction"},
+	})
+	if !strings.Contains(out, "mpm-seed-nightly-compaction") {
+		t.Errorf("the default rendering lost the cross-reference: %q", out)
+	}
+	if strings.Contains(out, "the policy text") {
+		t.Errorf("the default rendering leaked the directive content: %q", out)
 	}
 }
 

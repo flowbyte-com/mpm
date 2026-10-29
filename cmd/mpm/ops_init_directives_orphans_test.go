@@ -5,9 +5,10 @@
 // --------------
 //   1. A fresh install reports NO orphans. Registry membership and the
 //      rows on disk agree, so there is nothing for the operator to decide.
-//   2. A row that has left the registry IS reported, with its ID and a
-//      preview of its content, so the operator can see what they would be
-//      acting on.
+//   2. A row that has left the registry IS reported, with its ID and its
+//      dependencies — and WITHOUT its content, because a cleanup report is
+//      a log and the directive text is the operator's own policy. The
+//      content is available through the explicit --show-content path.
 //   3. The report NEVER names a user-authored directive. A directive the
 //      operator wrote was never in the registry, so registry membership
 //      says nothing about it and it is never a candidate.
@@ -55,18 +56,30 @@ func insertSeededDirectiveRow(t *testing.T, dm *internal.DatabaseManager, id, co
 
 // TestPrintOrphanedDirectives_ReportsDeRegisteredRows is the report's
 // whole job: making the candidate visible.
+//
+// It makes it visible WITHOUT the directive text. A cleanup report is a
+// log — it lands in a terminal scrollback and in CI output — and the
+// directive text is the operator's own policy, so printing it by default
+// would put policy text into logs the operator did not ask for. What the
+// default line carries is the row's identity and its dependencies; the
+// CONTENT is one explicit flag away.
 func TestPrintOrphanedDirectives_ReportsDeRegisteredRows(t *testing.T) {
 	out := captureStdout(t, func() {
 		printOrphanedDirectives([]seed.OrphanedDirective{
 			{ID: "mpm-seed-removed-from-registry", Content: "the de-registered policy"},
-		})
+		}, false)
 	})
 
 	if !strings.Contains(out, "mpm-seed-removed-from-registry") {
 		t.Errorf("the report does not name the orphan:\n%s", out)
 	}
-	if !strings.Contains(out, "the de-registered policy") {
-		t.Errorf("the report does not show the content:\n%s", out)
+	// The DEFAULT report must not carry the directive text.
+	if strings.Contains(out, "the de-registered policy") {
+		t.Errorf("the default report printed the directive content:\n%s", out)
+	}
+	// It must say how to get it, explicitly.
+	if !strings.Contains(out, "--show-content") {
+		t.Errorf("the default report does not tell the operator how to inspect a candidate:\n%s", out)
 	}
 	// The wording must not promise a deletion, and must not claim the
 	// rows are broken.
@@ -80,12 +93,48 @@ func TestPrintOrphanedDirectives_ReportsDeRegisteredRows(t *testing.T) {
 	}
 }
 
+// TestPrintOrphanedDirectives_ShowsContentOnlyWhenAsked is the explicit
+// inspection path.
+//
+// The operator needs to READ a candidate to decide whether it is their own
+// customised policy — a de-registered directive cannot be distinguished
+// from a customised one, because removing a registry entry is a code
+// change and leaves no text to compare against. So the reading must be
+// available, and it must be a deliberate act.
+func TestPrintOrphanedDirectives_ShowsContentOnlyWhenAsked(t *testing.T) {
+	orphans := []seed.OrphanedDirective{
+		{ID: "mpm-seed-removed-from-registry", Content: "the de-registered policy"},
+	}
+
+	explicit := captureStdout(t, func() {
+		printOrphanedDirectives(orphans, true)
+	})
+	if !strings.Contains(explicit, "the de-registered policy") {
+		t.Errorf("the explicit report did not show the content:\n%s", explicit)
+	}
+	if !strings.Contains(explicit, "mpm-seed-removed-from-registry") {
+		t.Errorf("the explicit report does not name the orphan:\n%s", explicit)
+	}
+
+	// The flag changes WHAT IS SHOWN, never WHICH ROWS. Both renderings
+	// name the same candidate, and the quiet one carries no text.
+	quiet := captureStdout(t, func() {
+		printOrphanedDirectives(orphans, false)
+	})
+	if !strings.Contains(quiet, "mpm-seed-removed-from-registry") {
+		t.Errorf("the quiet report does not name the orphan:\n%s", quiet)
+	}
+	if strings.Contains(quiet, "the de-registered policy") {
+		t.Errorf("the quiet report printed the directive content:\n%s", quiet)
+	}
+}
+
 // TestPrintOrphanedDirectives_SilentWhenThereAreNone — a fresh install
 // produces no orphan section at all. A report that always prints a section
 // trains the operator to ignore it.
 func TestPrintOrphanedDirectives_SilentWhenThereAreNone(t *testing.T) {
 	out := captureStdout(t, func() {
-		printOrphanedDirectives(nil)
+		printOrphanedDirectives(nil, false)
 	})
 	if strings.TrimSpace(out) != "" {
 		t.Errorf("the report printed something with no orphans:\n%s", out)
@@ -127,7 +176,7 @@ func TestOrphanReport_NeverNamesUserAuthoredDirectives(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		printOrphanedDirectives(orphans)
+		printOrphanedDirectives(orphans, false)
 	})
 	if strings.Contains(out, "operator-authored") {
 		t.Errorf("the report names an operator-authored directive:\n%s", out)
@@ -148,7 +197,7 @@ func TestOrphanReport_DeletesNothing(t *testing.T) {
 		if err != nil {
 			t.Fatalf("orphaned directives: %v", err)
 		}
-		printOrphanedDirectives(orphans)
+		printOrphanedDirectives(orphans, false)
 	})
 	after := countLiveRows(t, dm)
 

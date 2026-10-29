@@ -29,15 +29,45 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/flowbyte-com/mpm-core/seed"
 )
 
 func handleOpsInitDirectives(args []string) int {
-	// Parse flags. The command currently takes no required args; future
-	// could add --dry-run, --force, --prune (remove directives no
-	// longer in the registry). For now: bare command, prints summary.
+	// Parse flags.
+	//
+	// There is exactly one, and it exists to make the content of a
+	// candidate EXPLICIT (issue #59, operator constraint 4). A cleanup
+	// report is a log: it lands in a terminal scrollback and in CI
+	// output, and the directive text is the operator's own policy.
+	// Printing it by default would put policy text into logs the
+	// operator did not ask for.
+	//
+	// There is deliberately still no --prune flag. Adding one would be
+	// introducing an automatic cleanup mechanism to close a policy
+	// question, which the question explicitly forbids.
+	showContent := false
+	for _, arg := range args {
+		switch arg {
+		case "--show-content":
+			showContent = true
+		case "--help", "-h":
+			fmt.Println("Usage: mpm ops init directives [--show-content]")
+			fmt.Println()
+			fmt.Println("  --show-content  Include a preview of each orphaned directive's")
+			fmt.Println("                  content. The default report does NOT print content:")
+			fmt.Println("                  a report is a log, and the directive text is the")
+			fmt.Println("                  operator's own policy.")
+			return 0
+		default:
+			fmt.Fprintf(os.Stderr, "unknown flag: %s\n", arg)
+			fmt.Fprintln(os.Stderr, "Usage: mpm ops init directives [--show-content]")
+			return 1
+		}
+	}
+
 	dm := getDB()
 	if dm == nil {
 		return 1
@@ -64,7 +94,7 @@ func handleOpsInitDirectives(args []string) int {
 		printError("read orphaned directives: %v", err)
 		return 1
 	}
-	printOrphanedDirectives(orphans)
+	printOrphanedDirectives(orphans, showContent)
 
 	return 0
 }
@@ -75,17 +105,30 @@ func handleOpsInitDirectives(args []string) int {
 // (nothing removes them) and must not read as "these are broken" (they are
 // not). They are rows that used to be standing policy and no longer are,
 // and the operator decides what happens to them.
-func printOrphanedDirectives(orphans []seed.OrphanedDirective) {
+//
+// The CONTENT is not printed unless the operator asked for it with
+// --show-content. The report is a log, and the directive text is the
+// operator's own policy — so the default line carries what is needed to
+// decide WHETHER TO LOOK, and the looking is a separate, explicit act.
+func printOrphanedDirectives(orphans []seed.OrphanedDirective, showContent bool) {
 	if len(orphans) == 0 {
 		return
 	}
 	fmt.Printf("\n  ⚠ Orphaned directives (%d) — in the baseline once, no longer in the registry:\n", len(orphans))
 	for _, o := range orphans {
+		if showContent {
+			fmt.Printf("    ! %s\n", seed.FormatOrphanedDirectiveWithContent(o))
+			continue
+		}
 		fmt.Printf("    ! %s\n", seed.FormatOrphanedDirective(o))
 	}
 	fmt.Println("    (These rows were written by the baseline seeder but their registry")
 	fmt.Println("     entry has since been removed, so they are no longer standing policy.")
 	fmt.Println("     They are ELIGIBLE for cleanup — nothing deletes them for you.")
+	if !showContent {
+		fmt.Println("     Their content is NOT shown here; run with --show-content to inspect")
+		fmt.Println("     a candidate's text before deciding what to do with it.")
+	}
 	fmt.Println("     To remove one, delete the row explicitly; to keep it, leave it alone.)")
 }
 
