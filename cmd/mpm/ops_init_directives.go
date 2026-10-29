@@ -29,10 +29,10 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/flowbyte-com/mpm-core/seed"
+	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
 func handleOpsInitDirectives(args []string) int {
@@ -62,9 +62,11 @@ func handleOpsInitDirectives(args []string) int {
 			fmt.Println("                  operator's own policy.")
 			return 0
 		default:
-			fmt.Fprintf(os.Stderr, "unknown flag: %s\n", arg)
-			fmt.Fprintln(os.Stderr, "Usage: mpm ops init directives [--show-content]")
-			return 1
+			// The usererror helper, not a direct stderr write: cmd/mpm
+			// routes every user-facing message through it, and
+			// TestNoNewDirectStderrWrites enforces that.
+			usererror.Usage("Usage: mpm ops init directives [--show-content]")
+			return usererror.Error("unknown flag: %s", arg)
 		}
 	}
 
