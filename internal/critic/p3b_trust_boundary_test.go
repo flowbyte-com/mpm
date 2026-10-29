@@ -1240,10 +1240,20 @@ func TestP3b_SurvivalCohortIsScopedToTheMemoriesCollection(t *testing.T) {
 // test failing. The guard is what keeps the transition complete as more
 // hunts are added.
 //
-// The EXCEPTION is documented, not hidden: the `--telemetry-hunt` path in
-// cmd/mpm-critic writes lessons through the mpm repository's telemetry
-// package. It is opt-in, it is NOT part of this repertoire, and it is
-// reported to Session A rather than fixed here.
+// There is NO LONGER an EXCEPTION here.
+//
+// The `--telemetry-hunt` path in cmd/mpm-critic used to write lessons
+// through the mpm repository's telemetry package. It no longer does: it is
+// a read-only diagnostic that reports the observation and writes nothing
+// (#138, and #150 for the count), and it is outside this repertoire
+// either way — the guard above covers the hunts in the critic's default
+// repertoire.
+//
+// This comment used to record that exception as live. It was left
+// standing after the exception was closed, which is how a reader comes to
+// believe a trust-boundary hole is still open. The guard now covers the
+// whole surface, and a hunt that emits `mpm_lessons save` again fails
+// this test.
 func TestP3b_NoHuntTargetsTheTrustedLessonSurface(t *testing.T) {
 	a, dm := p3bRealAudit(t)
 	ctx := context.Background()
