@@ -423,8 +423,8 @@ func TestWithTx_SnapshotRestartIsBounded(t *testing.T) {
 	if !IsBusySnapshotError(err) {
 		t.Fatalf("expected the snapshot conflict to surface, got %s", describeSQLErr(err))
 	}
-	if attempts != txSnapshotMaxAttempts {
-		t.Fatalf("expected the restart budget to be %d attempts, got %d", txSnapshotMaxAttempts, attempts)
+	if attempts != TxSnapshotMaxAttempts {
+		t.Fatalf("expected the restart budget to be %d attempts, got %d", TxSnapshotMaxAttempts, attempts)
 	}
 
 	// Every abandoned attempt rolled back: no 'writer' row was persisted.
