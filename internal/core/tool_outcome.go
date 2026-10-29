@@ -54,7 +54,15 @@ const (
 	// OutcomeClassValidation — caller-supplied input failed schema or
 	// business validation. Agent's fault, not MPM's. Subcodes:
 	// "missing_required_field", "unknown_action", "invalid_type",
-	// "invalid_enum_value", "missing_param".
+	// "invalid_enum_value", "missing_param", and the payload-shape
+	// family (see PayloadShapeKind.OutcomeCode):
+	// "invalid_array_shape", "invalid_object_shape",
+	// "invalid_numeric_field", "invalid_params_envelope".
+	//
+	// The payload-shape family was added 2026-10-29 (issue #159): a
+	// caller that sent `tags: "not-an-array"` used to be recorded as
+	// internal/unclassified, which made the class that means "system
+	// fault" 43 % agent noise in the live audit trail.
 	OutcomeClassValidation ToolOutcomeClass = "validation"
 
 	// OutcomeClassNotFound — well-formed request, target absent.
@@ -244,6 +252,18 @@ func ClassifyError(err error) (ToolOutcomeClass, string) {
 		}
 		return OutcomeClassValidation, "lifecycle_event_rejected"
 	}
+	// Payload-shape rejections (issue #159). A caller that sent the wrong
+	// JSON type for a field, put parameters outside the params envelope,
+	// or sent a value outside a closed enumeration has made a mistake —
+	// MPM's substrate is working exactly as specified. These are
+	// recognised by TYPE, not by message text: the classifier's own
+	// contract forbids wholesale message matching, and a substring rule
+	// over "must be a" would also swallow substrate errors that happen
+	// to describe a shape.
+	var shapeErr *PayloadShapeError
+	if errors.As(err, &shapeErr) {
+		return OutcomeClassValidation, shapeErr.OutcomeCode()
+	}
 	msg := err.Error()
 	// Bound checks — only inspect the head so we don't speculate on
 	// the variable tail of a stack trace. Each check is intentionally
@@ -268,6 +288,22 @@ func ClassifyError(err error) (ToolOutcomeClass, string) {
 		// Capturing it here keeps unclassified noise down without
 		// depending on per-tool override registration.
 		return OutcomeClassValidation, "missing_required_field"
+	case strings.Contains(msg, "CHECK constraint failed: ended_state"):
+		// NARROW BY CONSTRUCTION (issue #159). The handoff
+		// `ended_state` CHECK is a known, verified tool-boundary
+		// validation case: the tool's schema documents four permitted
+		// values and the table's CHECK caught the rest. The write path
+		// now rejects an out-of-enum value before it reaches SQL
+		// (see ValidateHandoffEndedState), so this is a BACKSTOP for
+		// any path that writes session_handoffs outside the validated
+		// one — not a general rule about CHECK constraints.
+		//
+		// It is deliberately NOT "any CHECK constraint failed". A CHECK
+		// failure can equally mean a schema defect or an internal
+		// invariant break, and reclassifying all of them would report
+		// a broken substrate as a caller's mistake. The column name is
+		// part of the match so that only this one known case moves.
+		return OutcomeClassValidation, "invalid_enum_value"
 	case strings.Contains(msg, "not found"), strings.HasSuffix(msg, "does not exist"):
 		return OutcomeClassNotFound, "artifact_not_found"
 	case strings.Contains(msg, "SQLITE_BUSY"), strings.Contains(msg, "database is locked"):
