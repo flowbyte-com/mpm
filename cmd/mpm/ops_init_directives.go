@@ -50,7 +50,43 @@ func handleOpsInitDirectives(args []string) int {
 	}
 
 	printSeedSummary(summary)
+
+	// Registry-membership report (issue #59, Option B). A directive that
+	// has LEFT the registry is eligible for explicit cleanup — and MPM
+	// never deletes it on its own. Reporting the candidates here is what
+	// makes the eligibility real rather than theoretical.
+	//
+	// This runs only when the operator asks for it, not at boot: detection
+	// is cheap and harmless, but a boot-time report nobody asked for is
+	// noise, and the policy is that cleanup is an EXPLICIT act.
+	orphans, err := seed.OrphanedDirectives(dm)
+	if err != nil {
+		printError("read orphaned directives: %v", err)
+		return 1
+	}
+	printOrphanedDirectives(orphans)
+
 	return 0
+}
+
+// printOrphanedDirectives renders the registry-orphaned directive report.
+//
+// The wording is load-bearing. It must not read as "these will be removed"
+// (nothing removes them) and must not read as "these are broken" (they are
+// not). They are rows that used to be standing policy and no longer are,
+// and the operator decides what happens to them.
+func printOrphanedDirectives(orphans []seed.OrphanedDirective) {
+	if len(orphans) == 0 {
+		return
+	}
+	fmt.Printf("\n  ⚠ Orphaned directives (%d) — in the baseline once, no longer in the registry:\n", len(orphans))
+	for _, o := range orphans {
+		fmt.Printf("    ! %s\n", seed.FormatOrphanedDirective(o))
+	}
+	fmt.Println("    (These rows were written by the baseline seeder but their registry")
+	fmt.Println("     entry has since been removed, so they are no longer standing policy.")
+	fmt.Println("     They are ELIGIBLE for cleanup — nothing deletes them for you.")
+	fmt.Println("     To remove one, delete the row explicitly; to keep it, leave it alone.)")
 }
 
 // printSeedSummary is the directives-flavoured back-compat wrapper.
