@@ -13,6 +13,7 @@ package internal
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -187,6 +188,28 @@ func synthHasContentHash(dm CoreDB, contentHash string) (bool, int) {
 	return true, runCount
 }
 
+// synthExecNode is the write surface the synthesis ledger and
+// cooldown helpers need: a statement with a statement-level retry
+// budget.
+//
+// It is satisfied by a transaction node (DBNode), by a
+// DatabaseManager, and by the CoreDB interface — so the SAME helper
+// serves both the transactional path (inside the merge) and the
+// standalone path, and there is no second SQL spelling to drift.
+type synthExecNode interface {
+	ExecTracked(query string, retries int, args ...interface{}) (sql.Result, error)
+}
+
+// synthWriteBudget is the statement-level retry budget for the
+// synthesis writes.
+//
+// It is the documented budget (5) every other write in the substrate
+// carries. Inside the merge transaction it is the ORDINARY busy class
+// the statement layer owns; the transaction layer owns the
+// stale-snapshot class. The two are different classes, so neither
+// budget is multiplied.
+const synthWriteBudget = 5
+
 // recordSynthRun upserts a synth_runs row. On first synthesis
 // for this content_hash: insert with run_count=1. On re-sights
 // (shouldn't normally happen given the fast-skip, but defensive):
@@ -195,18 +218,23 @@ func synthHasContentHash(dm CoreDB, contentHash string) (bool, int) {
 //
 // resultMemoryID is the id of the synthesized memory written
 // from this content; surfaced for forensic trails.
-func recordSynthRun(dm CoreDB, contentHash, resultMemoryID string) {
-	if dm == nil {
-		return
+//
+// It RETURNS its error (issue #178). The previous version discarded
+// it, and a discarded ledger write is one half of the state that
+// stops the same content from being synthesized twice.
+func recordSynthRun(node synthExecNode, contentHash, resultMemoryID string) error {
+	if node == nil {
+		return nil
 	}
 	now := time.Now().Unix()
-	dm.SQLDB().Exec(`
+	_, err := node.ExecTracked(`
 		INSERT INTO synth_runs (content_hash, first_run_at, last_run_at, run_count, result_memory_id)
 		VALUES (?, ?, ?, 1, ?)
 		ON CONFLICT(content_hash) DO UPDATE SET
 			last_run_at = excluded.last_run_at,
 			run_count = run_count + 1
-	`, contentHash, now, now, resultMemoryID)
+	`, synthWriteBudget, contentHash, now, now, resultMemoryID)
+	return err
 }
 
 // bumpSynthDedupCounter increments run_count and refreshes
@@ -216,16 +244,21 @@ func recordSynthRun(dm CoreDB, contentHash, resultMemoryID string) {
 // signal that the same content was re-sighted. run_count is the
 // cumulative number of times this content was seen across the
 // lifetime of the ledger.
-func bumpSynthDedupCounter(dm CoreDB, contentHash string) {
-	if dm == nil {
-		return
+//
+// It returns its error (issue #178): a lost counter increment is a
+// lost observation, and the caller reports it rather than pretending
+// the re-sight was recorded.
+func bumpSynthDedupCounter(node synthExecNode, contentHash string) error {
+	if node == nil {
+		return nil
 	}
 	now := time.Now().Unix()
-	dm.SQLDB().Exec(`
+	_, err := node.ExecTracked(`
 		UPDATE synth_runs
 		SET last_run_at = ?, run_count = run_count + 1
 		WHERE content_hash = ?
-	`, now, contentHash)
+	`, synthWriteBudget, now, contentHash)
+	return err
 }
 
 // markMemorySynthCooldown stamps last_synthesized_at on a
@@ -238,14 +271,26 @@ func bumpSynthDedupCounter(dm CoreDB, contentHash string) {
 // Originals (newID + soft-deleted candidates) are NOT
 // stamped — they're being deleted; their last_synthesized_at
 // would be moot.
-func markMemorySynthCooldown(dm CoreDB, memoryID string) {
-	if dm == nil || memoryID == "" {
-		return
+//
+// It RETURNS its error (issue #178). This is the write whose loss
+// made already-processed knowledge eligible for repeated synthesis:
+// with no stamp, DetectNearMiss picks the merged memory again as a
+// near-miss candidate, and the merge runs a second time — duplicated
+// evidence and a second artifact asserting a conclusion the first one
+// already asserted.
+//
+// The caller passes the node of the merge transaction, so the stamp
+// and the artifact it describes have the SAME FATE: they commit
+// together or neither commits.
+func markMemorySynthCooldown(node synthExecNode, memoryID string) error {
+	if node == nil || memoryID == "" {
+		return nil
 	}
-	dm.SQLDB().Exec(
+	_, err := node.ExecTracked(
 		`UPDATE memories SET last_synthesized_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?`,
-		memoryID,
+		synthWriteBudget, memoryID,
 	)
+	return err
 }
 
 // DetectNearMiss uses FTS5 bm25 to find memories whose content overlaps
@@ -404,7 +449,17 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 	// the same memory because the user hit cmd-s twice).
 	contentHash := synthHashContent(content)
 	if hit, runCount := synthHasContentHash(dm, contentHash); hit {
-		bumpSynthDedupCounter(dm, contentHash)
+		// The counter bump is an OBSERVATION, not the dedup decision:
+		// the decision was the ledger row's existence, which is
+		// already durable. A failed bump loses a count, so it is
+		// REPORTED rather than discarded (issue #178) — but it does
+		// not fail the skip, because the skip itself is still
+		// correct.
+		if err := bumpSynthDedupCounter(dm, contentHash); err != nil {
+			dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf(
+				"AutoSynthesize: the synthesis re-sight counter could not be incremented (content_hash=%s): %v",
+				contentHash, err), "", AuditContext{})
+		}
 		logSynthesizeEvent(dm, "synthesize_skip", map[string]interface{}{
 			"reason":       "content_hash already synthesized",
 			"content_hash": contentHash,
@@ -547,62 +602,34 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 		applyEmbeddingFailureToMetadata(dm, metadata, embedErr)
 	}
 
-	// 8. Save the synthesized LTM
-	newSynthID, err := dm.SaveMemory("memories", result.Content, "", allTags, metadata, embedding, true, 10)
+	// 8-12. The durable outcome of the synthesis, written in ONE
+	// transaction. See commitSynthesisMerge for why the writes have to
+	// share a transaction — and what they cost each other when they
+	// do not.
+	newSynthID, err := commitSynthesisMerge(dm, ctx, synthesisMerge{
+		Content:         result.Content,
+		Tags:            allTags,
+		Metadata:        metadata,
+		Embedding:       embedding,
+		SourceIDs:       allIDs,
+		OldestCreatedAt: oldestCreatedAt,
+		ContentHash:     contentHash,
+	})
 	if err != nil {
-		// No content excerpt here either — see the LLM-failure path above.
+		// NOTHING was written: the transaction rolled back. The
+		// originals are still live and the merge is still pending, so
+		// the next ingest can try again — with no duplicated evidence,
+		// no half-applied merge to clean up, and no inflated
+		// confidence. The failure is reported, not swallowed.
 		logSynthesizeEvent(dm, "synthesize_failed", map[string]interface{}{
-			"error": fmt.Sprintf("save failed: %v", err),
+			"error":        fmt.Sprintf("the merge transaction failed and was rolled back: %v", err),
+			"content_hash": contentHash,
 		})
+		dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf(
+			"AutoSynthesize: the merge transaction failed and was rolled back; no memory was written (content_hash=%s): %v",
+			contentHash, err), "", AuditContext{})
 		return
 	}
-
-	// 9. Preserve oldest created_at from the source fragments — canonical INTEGER
-	if oldestCreatedAt != nil && *oldestCreatedAt != "" {
-		if _, err := dm.SQLDB().ExecContext(ctx, "UPDATE memories SET created_at = CAST(? AS INTEGER) WHERE id = ?", *oldestCreatedAt, newSynthID); err != nil {
-			dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("AutoSynthesize: created_at preservation UPDATE failed (synth=%s): %v", newSynthID, err), "", AuditContext{})
-		}
-	}
-
-	// 10. Transfer topic_memberships from all source IDs to the new synthetic memory
-	topicArgs := make([]interface{}, len(allIDs)+1)
-	topicArgs[0] = newSynthID
-	for i, id := range allIDs {
-		topicArgs[i+1] = id
-	}
-	topicPlaceholders := make([]string, len(allIDs))
-	for i := range allIDs {
-		topicPlaceholders[i] = "?"
-	}
-	if _, err := dm.SQLDB().ExecContext(ctx,
-		`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, role, created_at)
-		 SELECT ?, topic_id, role, created_at
-		 FROM topic_memberships
-		 WHERE memory_id IN (`+strings.Join(topicPlaceholders, ",")+`)`,
-		topicArgs...,
-	); err != nil {
-		dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("AutoSynthesize: topic_memberships transfer failed (synth=%s): %v", newSynthID, err), "", AuditContext{})
-	}
-
-	// 11. Soft-delete originals (candidates + triggering memory)
-	for _, c := range toMerge {
-		if _, err := dm.SQLDB().ExecContext(ctx, "UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?", c.ID); err != nil {
-			dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("AutoSynthesize: soft-delete UPDATE failed (orig=%s): %v", c.ID, err), "", AuditContext{})
-		}
-	}
-	if _, err := dm.SQLDB().ExecContext(ctx, "UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?", newID); err != nil {
-		dm.LogAudit(AuditWarn, "synthesis", fmt.Sprintf("AutoSynthesize: soft-delete UPDATE failed (orig=%s): %v", newID, err), "", AuditContext{})
-	}
-
-	// 12. Persist the synth_runs ledger entry + stamp cooldown on R.
-	// recordSynthRun: content_hash → first/last_run_at + run_count.
-	// markMemorySynthCooldown: stamps R.last_synthesized_at so the
-	// next FTS5 query won't re-pick R as a candidate within the
-	// cooldown window. Originals (newID + toMerge) are NOT stamped:
-	// their last_synthesized_at would be moot (they're being
-	// soft-deleted on the next step).
-	recordSynthRun(dm, contentHash, newSynthID)
-	markMemorySynthCooldown(dm, newSynthID)
 
 	// 13. Log success to watchdog
 	logSynthesizeEvent(dm, "synthesize", map[string]interface{}{
@@ -612,6 +639,202 @@ func AutoSynthesize(ctx context.Context, dm CoreDB, client *synth.SynthClient, n
 		"cooldown_s":   cooldown,
 		"timestamp":    time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+// synthesisMerge is the durable OUTCOME of one synthesis: what the
+// merged memory is, which memories it replaces, and the content hash
+// that identifies this synthesis in the ledger.
+//
+// It exists so the durable write can be exercised on its own. The
+// synthesis path reaches this write through an LLM call, which a unit
+// test cannot make; the WRITE is where the reliability properties
+// live, so it is a named, callable unit.
+type synthesisMerge struct {
+	// Content is the merged memory's content.
+	Content string
+	// Tags are the merged memory's tags.
+	Tags []string
+	// Metadata is the merged memory's metadata.
+	Metadata map[string]interface{}
+	// Embedding is the merged memory's embedding. It may be nil.
+	Embedding []float32
+	// SourceIDs are the memories this merge replaces: the near-miss
+	// candidates plus the memory that triggered the synthesis. They
+	// are soft-deleted, not destroyed.
+	SourceIDs []string
+	// OldestCreatedAt preserves the oldest source created_at on the
+	// merged memory. It may be nil or empty.
+	OldestCreatedAt *string
+	// ContentHash identifies this synthesis in the synth_runs ledger.
+	ContentHash string
+}
+
+// commitSynthesisMerge writes the durable outcome of one synthesis, and
+// returns the id of the merged memory.
+//
+// WHY ONE TRANSACTION (issue #178)
+// ---------------------------------
+// The writes are not independent. They are one FACT: "these memories
+// were merged into that one, and that one must not be merged again for
+// the next hour". Split across separate transactions, the substrate can
+// reach states in which the fact is half-true:
+//
+//   - the merged memory exists but the ledger row does not → the
+//     content_hash fast-skip misses, so the same content is synthesized
+//     again;
+//   - the merged memory exists but the cooldown stamp does not →
+//     DetectNearMiss picks it as a candidate again, so it is merged a
+//     SECOND time: duplicated evidence, and a second artifact asserting
+//     a conclusion the first one already asserted;
+//   - the merged memory exists but the originals were not soft-deleted →
+//     the evidence is duplicated in the corpus, and the next ingest sees
+//     both the originals and their own replacement.
+//
+// The previous implementation DISCARDED the error of the last two
+// writes, so those states were not even observable, let alone
+// prevented.
+//
+// In one transaction the fact is atomic: either the merge and its dedup
+// state both land, or neither does.
+//
+//   - A CRASH before the commit leaves nothing behind. The originals
+//     are still live and the merge is still pending, so the next ingest
+//     redoes the whole merge cleanly.
+//   - An AMBIGUOUS COMMIT leaves the artifact and its cooldown in the
+//     same fate: if the merged memory is there, it is stamped, so it is
+//     not merged again; if it is not there, nothing happened. Either
+//     way there is no duplicated evidence and no inflated confidence.
+//
+// WHY THE FIRST STATEMENT IN THE TRANSACTION IS A WRITE
+// ------------------------------------------------------
+// This is not a style preference; it is what makes the transaction
+// survive contention.
+//
+// SQLite does not invoke the busy handler when a connection that
+// already holds a READ lock tries to take the WRITE lock: the busy
+// handler is skipped to avoid a deadlock between two connections that
+// each wait for the other. Measured on this substrate's connection
+// settings (WAL, `_busy_timeout=5000`):
+//
+//	pool write, no transaction      → waits 5.005s, then SQLITE_BUSY
+//	transaction, first stmt a write → waits 5.005s, then SQLITE_BUSY
+//	transaction, read then write     → returns IMMEDIATELY, SQLITE_BUSY
+//
+// So a transaction that READS before it WRITES turns ordinary
+// contention from a WAIT into an immediate failure, and the
+// statement-level retry cannot clear it (re-running the statement in
+// place cannot succeed, because the transaction's read lock is what
+// blocks the upgrade). The old implementation was immune because every
+// one of its writes went to the POOL, where the busy handler is always
+// invoked.
+//
+// The merge's first statement is therefore the soft-delete of the
+// sources — a write, which takes the write lock at the transaction's
+// first statement, where the busy handler IS invoked. Every statement
+// after it runs uncontended, because the transaction already holds the
+// write lock.
+//
+// The merged memory's own creation reads first (the substrate's F19
+// identity probe), so it CANNOT be the transaction's first statement.
+// That is why the soft-delete leads.
+//
+// CALLERS MUST NOT WRITE TO THE POOL INSIDE THE CLOSURE. A pool write
+// inside a transaction that holds the write lock waits out the busy
+// timeout against itself. The audit rows and the watchdog event belong
+// outside it.
+//
+// CANCELLATION: the DBNode seam has no context-aware write (the
+// established in-transaction pattern throughout the substrate is
+// node.ExecTracked), so the context is honoured by CHECKING it before
+// the closure's first write; a cancelled context aborts the
+// transaction through its error, and the transaction rolls back.
+func commitSynthesisMerge(dm CoreDB, ctx context.Context, m synthesisMerge) (string, error) {
+	if dm == nil {
+		return "", fmt.Errorf("commit synthesis merge: no database")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(m.SourceIDs) == 0 {
+		return "", fmt.Errorf("commit synthesis merge: a merge with no source memories is not a merge")
+	}
+
+	// The topic_memberships transfer arguments are built BEFORE the
+	// transaction: the SQL is assembled from the source id list, and
+	// the list does not change inside the transaction.
+	topicArgs := make([]interface{}, len(m.SourceIDs)+1)
+	topicPlaceholders := make([]string, len(m.SourceIDs))
+	for i, id := range m.SourceIDs {
+		topicArgs[i+1] = id
+		topicPlaceholders[i] = "?"
+	}
+
+	var newSynthID string
+	err := dm.WithTx(func(node DBNode) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("the synthesis was cancelled before it was written: %w", ctxErr)
+		}
+
+		// 1. Soft-delete the originals (candidates + triggering memory).
+		//
+		//    FIRST, and it is a WRITE, on purpose: see the note above
+		//    on SQLite's busy handler and a transaction that reads
+		//    before it writes. The order inside the transaction is not
+		//    observable to any other connection — the whole merge
+		//    commits or none of it does.
+		for _, id := range m.SourceIDs {
+			if _, err := node.ExecTracked(
+				"UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?",
+				synthWriteBudget, id,
+			); err != nil {
+				return fmt.Errorf("soft-delete the merged original %s: %w", id, err)
+			}
+		}
+
+		// 2. The merged memory itself.
+		id, err := dm.SaveMemoryNode(node, "memories", m.Content, "", m.Tags, m.Metadata, m.Embedding, true, 10, "", "0.5", "0.5", "")
+		if err != nil {
+			return fmt.Errorf("save the synthesized memory: %w", err)
+		}
+		newSynthID = id
+
+		// 3. Preserve oldest created_at from the source fragments — canonical INTEGER
+		if m.OldestCreatedAt != nil && *m.OldestCreatedAt != "" {
+			if _, err := node.ExecTracked(
+				"UPDATE memories SET created_at = CAST(? AS INTEGER) WHERE id = ?",
+				synthWriteBudget, *m.OldestCreatedAt, newSynthID,
+			); err != nil {
+				return fmt.Errorf("preserve the merged memory's created_at: %w", err)
+			}
+		}
+
+		// 4. Transfer topic_memberships from all source IDs to the merged memory
+		topicArgs[0] = newSynthID
+		if _, err := node.ExecTracked(
+			`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, role, created_at)
+			 SELECT ?, topic_id, role, created_at
+			 FROM topic_memberships
+			 WHERE memory_id IN (`+strings.Join(topicPlaceholders, ",")+`)`,
+			synthWriteBudget, topicArgs...,
+		); err != nil {
+			return fmt.Errorf("transfer topic memberships to the merged memory: %w", err)
+		}
+
+		// 5. The ledger and the cooldown, in the SAME transaction as
+		// the artifact they describe. This is the pair that used to be
+		// able to disagree with the artifact.
+		if err := recordSynthRun(node, m.ContentHash, newSynthID); err != nil {
+			return fmt.Errorf("record the synthesis ledger row: %w", err)
+		}
+		if err := markMemorySynthCooldown(node, newSynthID); err != nil {
+			return fmt.Errorf("stamp the synthesis cooldown: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return newSynthID, nil
 }
 
 // applyEmbeddingFailureToMetadata records a synthesis-time embedding
