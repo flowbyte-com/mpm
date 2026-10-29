@@ -81,12 +81,21 @@ func DrillHandler(ctx context.Context, w Wake) error {
 	// WithTx for the single-statement write per CLAUDE.md single-conn
 	// discipline (the canonical pattern is WithTx for any bare Exec
 	// path; ExecTracked wraps the bare *sql.DB call).
+	//
+	// retries=5, not 0 (issue #178). WithTx owns the STALE-SNAPSHOT
+	// class — it restarts the transaction with a fresh snapshot — but it
+	// does NOT own the ORDINARY busy class: a busy error from the
+	// callback is returned to the caller, not retried. This is the
+	// transaction's FIRST write, so it is exactly the statement that
+	// meets an ordinary busy when another writer holds the WAL write
+	// lock. The statement layer owns that class, so the statement layer
+	// carries the budget.
 	if err := dm.WithTx(func(node core.DBNode) error {
 		_, err := node.ExecTracked(`
 			INSERT INTO drill_runs
 			    (id, drill_id, framework, session_id, status, started_at)
 			VALUES (?, ?, ?, ?, 'running', ?)`,
-			0,
+			5,
 			runID, drill.ID, drill.Framework, sessionID, startedAt,
 		)
 		if err != nil {
@@ -128,7 +137,7 @@ func DrillHandler(ctx context.Context, w Wake) error {
 			UPDATE drill_runs
 			SET status = ?, verdict = ?, completed_at = ?, duration_ms = ?
 			WHERE id = ?`,
-			0,
+			5,
 			status, string(verdictJSON), completedAt, durationMs, runID,
 		)
 		if err != nil {
