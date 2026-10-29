@@ -308,26 +308,47 @@ statement-level budget of 5, and every call site checks them.
 **The merge transaction's first statement must be a write.** This is not a
 style preference; it is what makes the transaction survive contention.
 
-SQLite does **not** invoke the busy handler when a connection that already
-holds a **read** lock tries to take the **write** lock — the handler is skipped
-to avoid a deadlock between two connections that each wait for the other.
-Measured on this substrate's connection settings (WAL, `_busy_timeout=5000`):
+**And it is a THIRD case, distinct from the one the substrate already knows.**
+The substrate already records that a DEFERRED transaction that reads before it
+writes can fail with `SQLITE_BUSY_SNAPSHOT` — the snapshot class, which
+`WithTx` restarts with a fresh transaction. That is **not** the case measured
+here. Measured on this substrate's connection settings (WAL,
+`_busy_timeout=5000`), with a competitor holding the WAL write lock:
 
-| Shape | Elapsed | Result |
-|---|---|---|
-| pool write, no transaction | 5.005s | `SQLITE_BUSY` (extended 5) |
-| transaction, first statement a write | 5.005s | `SQLITE_BUSY` (extended 5) |
-| transaction, read then write | **0s** | `SQLITE_BUSY` (extended 5) |
+| Case | Shape | Elapsed | Extended code |
+|---|---|---|---|
+| A | pool write, no transaction | 5.005s | 5 — ordinary `SQLITE_BUSY` |
+| B | transaction, **first statement a write** | 5.005s | 5 — ordinary `SQLITE_BUSY` |
+| C | transaction, **read then write** | **0s** | **5 — ordinary `SQLITE_BUSY`** |
+| D | transaction, first statement a *no-op* write | 5.005s | 5 — ordinary `SQLITE_BUSY` |
+| E | transaction, read then write, competitor **committed** after our snapshot | 1ms | **517 — `SQLITE_BUSY_SNAPSHOT`** |
 
-So a transaction that reads before it writes turns ordinary contention from a
-**wait** into an **immediate failure**, and the statement-level retry cannot
-clear it: re-running the statement in place cannot succeed, because the
-transaction's read lock is what blocks the upgrade.
+Case **E** is the substrate's known class: the competitor committed, our
+snapshot went stale, and `WithTx` restarts the transaction. Case **C** is
+different in two ways that matter:
+
+- the competitor still holds the write lock **uncommitted**, so this is the
+  **ordinary busy** class, not the snapshot class; and
+- it comes back as extended code **5**, not 517, in **zero** milliseconds —
+  the busy handler is not invoked at all, because the connection already holds
+  a read lock and waiting could deadlock against the other connection.
+
+So the substrate's model — *"ordinary `SQLITE_BUSY` is a wait and is clearable
+by retrying the statement"* — is **true at the pool level (A) and true for a
+write-first transaction (B, D), and false for a transaction that reads first
+(C)**. And because case C is plain `SQLITE_BUSY`, `WithTx` does **not** restart
+it either: it only restarts on `SQLITE_BUSY_SNAPSHOT`.
+
+The consequence for the merge is the same as the consequence for any
+transaction that reads before it writes: the statement-level retry cannot clear
+it — re-running the statement in place cannot succeed, because the
+transaction's read lock is what blocks the upgrade — and neither can the
+transaction restart.
 
 The old implementation was immune because every one of its writes went to the
-**pool**, where the busy handler is always invoked. A naive "wrap it in a
-transaction" would have been a **regression** — the merge would have become
-*less* resilient to contention than the code it replaced.
+**pool** (case A), where the busy handler is always invoked. A naive "wrap it
+in a transaction" would have been a **regression** — the merge would have
+become *less* resilient to contention than the code it replaced.
 
 The merged memory's own creation reads first (the substrate's F19 identity
 probe), so it **cannot** be the transaction's first statement. The
@@ -339,6 +360,16 @@ uncontended.
 > same shape exists anywhere a transaction reads before it writes. It is
 > recorded here because phase 1 found it; it is **not** corrected at the
 > substrate level in phase 1 (see §5).
+>
+> **It is also a refinement of a lesson the substrate already holds.** The
+> substrate already knows the *snapshot* sibling of this case (case E in the
+> table above): a DEFERRED transaction that reads before it writes can fail
+> with `SQLITE_BUSY_SNAPSHOT`, and the remedy is to abandon the transaction and
+> re-take it, never to retry the statement in place. That case is handled
+> (`WithTx` restarts on it, and `internal/core/tx_busy_snapshot_test.go`
+> covers it). **Case C is the ordinary-busy sibling**, and it is *not* handled:
+> it returns plain `SQLITE_BUSY` in zero milliseconds, so the statement-level
+> budget cannot clear it and the transaction restart does not fire.
 
 ### Tests — 12, all non-vacuous
 
@@ -452,13 +483,20 @@ counted among the transaction-owned sites and is **not** corrected in phase 1.
 
 ### Two exposures phase 1 did not touch, on purpose
 
-1. **A transaction that reads before it writes turns contention into an
-   immediate failure** (§4). Phase 1 works around it *inside the merge*, by
-   ordering the merge's writes. The substrate-level form — `WithTx` does not
-   restart a transaction on an ordinary busy error, only on a stale snapshot —
-   is **not** corrected, because `WithTx` is used by everything and changing
-   it is a substrate-wide semantic change, not a phase-1 correction. The
-   finding is recorded here so the next assignment can size it.
+1. **A transaction that reads before it writes turns ordinary contention into
+   an immediate failure** (§4, case C). Phase 1 works around it *inside the
+   merge*, by ordering the merge's writes. The substrate-level form — `WithTx`
+   restarts a transaction on a stale snapshot but **not** on an ordinary busy
+   error, so a transaction that read first has no remedy — is **not**
+   corrected, because `WithTx` is used by everything and changing it is a
+   substrate-wide semantic change, not a phase-1 correction. The finding is
+   recorded here so the next assignment can size it.
+
+   It is a **refinement** of a lesson the substrate already holds (the
+   *snapshot* sibling, case E), not a contradiction of it. The new part is
+   that the ordinary-busy sibling returns plain `SQLITE_BUSY` in zero
+   milliseconds, so neither the statement-level budget nor the transaction
+   restart clears it.
 
 2. **The handoff write (audit F2)** — `internal/core/handoff.go` — can lose the
    session-continuity record to a five-second contention window. It is a
