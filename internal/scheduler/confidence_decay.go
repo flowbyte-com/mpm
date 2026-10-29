@@ -82,6 +82,11 @@ func (h *ConfidenceDecayHandler) TickHandler() func(ctx context.Context) error {
 			Now:    now,
 			Limit:  limit,
 			MinAge: time.Duration(minAgeHours) * time.Hour,
+			// The tick's context is threaded in so a shutdown during a
+			// pass stops it at the next artifact boundary. The artifacts
+			// already processed keep their watermark and the rest stay
+			// due, so the next scheduled pass resumes them.
+			Ctx: ctx,
 		})
 		if err != nil {
 			return fmt.Errorf("confidence decay pass: %w", err)
@@ -90,16 +95,24 @@ func (h *ConfidenceDecayHandler) TickHandler() func(ctx context.Context) error {
 		// Advance the cadence marker even on a partial pass: the failed
 		// artifacts stay due (their watermark was rolled back) and are
 		// retried at the next scheduled run, not on every tick.
-		if _, err := h.dm.SaveSystemConfig(
-			core.ConfidenceDecayLastRunKey,
-			strconv.FormatInt(now.Unix(), 10),
-			strconv.FormatInt(now.Unix(), 10),
-			"",
-		); err != nil && h.logger != nil {
-			h.logger.Warn("confidence decay: could not persist last-run marker", "err", err)
+		//
+		// A CANCELLED pass is the exception: it was interrupted, not
+		// completed, so the marker is not advanced and the next tick may
+		// resume the artifacts it did not reach. Leaving the marker
+		// behind would hide the unfinished backlog behind a 6-hour
+		// cadence gate for no reason.
+		if !res.Cancelled {
+			if _, err := h.dm.SaveSystemConfig(
+				core.ConfidenceDecayLastRunKey,
+				strconv.FormatInt(now.Unix(), 10),
+				strconv.FormatInt(now.Unix(), 10),
+				"",
+			); err != nil && h.logger != nil {
+				h.logger.Warn("confidence decay: could not persist last-run marker", "err", err)
+			}
 		}
 
-		if h.logger != nil && (res.Changed > 0 || res.Failed > 0 || res.Deferred > 0) {
+		if h.logger != nil && (res.Changed > 0 || res.Failed > 0 || res.Deferred > 0 || res.Cancelled) {
 			h.logger.Info("confidence decay pass",
 				"due", res.Due,
 				"scanned", res.Scanned,
@@ -107,7 +120,12 @@ func (h *ConfidenceDecayHandler) TickHandler() func(ctx context.Context) error {
 				"unchanged", res.Unchanged,
 				"failed", res.Failed,
 				"deferred", res.Deferred,
+				"cancelled", res.Cancelled,
 			)
+		}
+		if res.Cancelled {
+			return fmt.Errorf("confidence decay: pass cancelled after %d of %d artifact(s); "+
+				"the rest remain due", res.Scanned, res.Due)
 		}
 		if res.Failed > 0 {
 			return fmt.Errorf("confidence decay: %d of %d artifact(s) failed; they remain due",

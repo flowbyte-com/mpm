@@ -50,6 +50,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"time"
@@ -81,17 +82,29 @@ type ConfidenceDecayOptions struct {
 	Limit  int
 	MinAge time.Duration
 	DryRun bool
+	// Ctx cancels the pass. Cancellation is observed at the ARTIFACT
+	// BOUNDARY: the artifact in flight completes, and the pass stops
+	// before starting the next one. A cancelled pass is resumable —
+	// every artifact it finished has its watermark, and every artifact it
+	// did not reach is still due.
+	//
+	// A nil Ctx means "never cancel".
+	Ctx context.Context
 }
 
 // ConfidenceDecayResult is the machine-readable report of one pass.
 type ConfidenceDecayResult struct {
-	DryRun    bool     `json:"dry_run"`
-	Due       int      `json:"due"`
-	Scanned   int      `json:"scanned"`
-	Changed   int      `json:"changed"`
-	Unchanged int      `json:"unchanged"`
-	Failed    int      `json:"failed"`
-	Deferred  int      `json:"deferred"`
+	DryRun    bool `json:"dry_run"`
+	Due       int  `json:"due"`
+	Scanned   int  `json:"scanned"`
+	Changed   int  `json:"changed"`
+	Unchanged int  `json:"unchanged"`
+	Failed    int  `json:"failed"`
+	Deferred  int  `json:"deferred"`
+	// Cancelled reports that the pass stopped early because its
+	// context was cancelled. The artifacts it did not reach are still
+	// due, so the next pass resumes them.
+	Cancelled bool     `json:"cancelled,omitempty"`
 	Failures  []string `json:"failures,omitempty"`
 }
 
@@ -171,6 +184,11 @@ func (dm *DatabaseManager) RunConfidenceDecay(opts ConfidenceDecayOptions) (Conf
 	}
 	cutoff := now.Add(-minAge).Unix()
 
+	ctx := opts.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	res := ConfidenceDecayResult{DryRun: opts.DryRun}
 
 	if err := dm.db.QueryRow(
@@ -184,12 +202,21 @@ func (dm *DatabaseManager) RunConfidenceDecay(opts ConfidenceDecayOptions) (Conf
 	if err != nil {
 		return res, err
 	}
-	res.Scanned = len(candidates)
-	if res.Due > res.Scanned {
-		res.Deferred = res.Due - res.Scanned
-	}
 
 	for _, c := range candidates {
+		// Cancellation is observed at the artifact boundary. The
+		// artifact in flight always completes, so a cancelled pass
+		// never leaves a half-written artifact behind; the ones it did
+		// not reach keep their old watermark and stay due.
+		if err := ctx.Err(); err != nil {
+			res.Cancelled = true
+			break
+		}
+		// Scanned counts the artifacts the pass actually EXAMINED, not
+		// the ones it loaded. A pass that stops early — because it was
+		// cancelled, or because it hit its limit — must not report the
+		// artifacts it never looked at as scanned.
+		res.Scanned++
 		var changed bool
 		if opts.DryRun {
 			changed, err = dm.confidenceDecayWouldChange(c, now)
@@ -208,6 +235,14 @@ func (dm *DatabaseManager) RunConfidenceDecay(opts ConfidenceDecayOptions) (Conf
 		} else {
 			res.Unchanged++
 		}
+	}
+
+	// Deferred is the part of the backlog this pass did not reach: it
+	// was larger than the limit, or the pass stopped early. It is
+	// reported so an operator can see the backlog instead of a partial
+	// pass silently looking complete.
+	if res.Due > res.Scanned {
+		res.Deferred = res.Due - res.Scanned
 	}
 	return res, nil
 }
@@ -274,8 +309,13 @@ func (dm *DatabaseManager) applyConfidenceDecay(c confidenceDecayCandidate, now 
 
 // confidenceDecayWouldChange reports whether a pass at `now` would move
 // the stored value, without writing anything. It mirrors the real
-// computation (same evidence loader, same formula, same clock) instead
-// of calling ExplainConfidence, whose internal clock is wall time.
+// computation (same evidence loader, same formula, same clock, same F7.1
+// floor guard) instead of calling ExplainConfidence, whose internal clock
+// is wall time.
+//
+// The guard matters here: a dry run that reported "changed" for an artifact
+// the real pass would leave alone would misreport the backlog, and an
+// operator would be told a pass would move values that it cannot move.
 func (dm *DatabaseManager) confidenceDecayWouldChange(c confidenceDecayCandidate, now time.Time) (bool, error) {
 	ev, lastPositiveAt, err := loadEvidenceForRecompute(dm, c.id, c.artifactType, now)
 	if err != nil {
@@ -285,6 +325,10 @@ func (dm *DatabaseManager) confidenceDecayWouldChange(c confidenceDecayCandidate
 	stored, ok := readArtifactConfidence(dm, c.id, c.artifactType)
 	if !ok {
 		return false, fmt.Errorf("no stored confidence")
+	}
+	derived, err = guardConfidenceRaise(dm, c.id, c.artifactType, ConfidenceDecayHistoryTrigger, stored, true, derived)
+	if err != nil {
+		return false, err
 	}
 	return math.Abs(derived-stored) >= 1e-6, nil
 }
