@@ -317,7 +317,9 @@ func TestSynthHasContentHash_HitAndBump(t *testing.T) {
 	defer dm.Close()
 
 	const hash = "abc123"
-	recordSynthRun(dm, hash, "result-mem-1")
+	if err := recordSynthRun(dm, hash, "result-mem-1"); err != nil {
+		t.Fatalf("recordSynthRun: %v", err)
+	}
 
 	hit, runCount := synthHasContentHash(dm, hash)
 	if !hit {
@@ -327,7 +329,9 @@ func TestSynthHasContentHash_HitAndBump(t *testing.T) {
 		t.Errorf("runCount after first insert = %d; want 1", runCount)
 	}
 
-	bumpSynthDedupCounter(dm, hash)
+	if err := bumpSynthDedupCounter(dm, hash); err != nil {
+		t.Fatalf("bumpSynthDedupCounter: %v", err)
+	}
 	_, runCount = synthHasContentHash(dm, hash)
 	if runCount != 2 {
 		t.Errorf("runCount after dedup bump = %d; want 2", runCount)
@@ -348,7 +352,9 @@ func TestRecordSynthRun_FirstRun(t *testing.T) {
 
 	const hash = "first-run-hash"
 	const resultID = "mem-result-1"
-	recordSynthRun(dm, hash, resultID)
+	if err := recordSynthRun(dm, hash, resultID); err != nil {
+		t.Fatalf("recordSynthRun: %v", err)
+	}
 
 	var storedResult string
 	err = dm.db.QueryRow(
@@ -456,7 +462,9 @@ func TestMarkMemorySynthCooldown(t *testing.T) {
 		t.Fatalf("INSERT: %v", err)
 	}
 
-	markMemorySynthCooldown(dm, memID)
+	if err := markMemorySynthCooldown(dm, memID); err != nil {
+		t.Fatalf("markMemorySynthCooldown: %v", err)
+	}
 
 	var stamped *int64
 	err = dm.db.QueryRow(
@@ -484,9 +492,13 @@ func TestMarkMemorySynthCooldown_NilAndEmpty(t *testing.T) {
 	defer dm.Close()
 
 	// nil dm → no-op.
-	markMemorySynthCooldown(nil, "any-id")
+	if err := markMemorySynthCooldown(nil, "any-id"); err != nil {
+		t.Fatalf("markMemorySynthCooldown(nil): %v", err)
+	}
 	// empty id → no-op.
-	markMemorySynthCooldown(dm, "")
+	if err := markMemorySynthCooldown(dm, ""); err != nil {
+		t.Fatalf("markMemorySynthCooldown(dm, \"\"): %v", err)
+	}
 	// Both must not have created any rows (the empty dm might, but
 	// nil must not). Directives are excluded — the boot path seeds
 	// the constitutional baseline into any file-backed DM.
