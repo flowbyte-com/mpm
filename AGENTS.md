@@ -70,9 +70,13 @@ is exactly how the `-lm` omission reached CI. The flag sets are pinned by
 
 **No HTTP in `mpm`.** The binary is CLI-only; HTTP/MCP surfaces belong to consumer binaries (`mpm-agent`, `mpm-mcp`) which implement their own auth at the protocol boundary.
 
-**Path resolution:** `MPM_WORKSPACE` env → `$HOME/.mpm` → CWD fallback. The
-canonical root `~/.mpm` is both the Git checkout and the runtime root
-(`git clone https://github.com/flowbyte-com/mpm ~/.mpm`). See
+**Path resolution:** `MPM_WORKSPACE` env → `$HOME/.mpm` → CWD fallback. By
+default the canonical root `~/.mpm` is both the Git checkout and the runtime
+root (`git clone https://github.com/flowbyte-com/mpm ~/.mpm`). The opt-in
+versioned bundle layout (`docs/INSTALL.md` §1g) keeps `~/.mpm` as the **data
+root** and splits the runtime into `releases/<rev>` behind the `current`
+symlink, so the checkout and the runtime root no longer coincide.
+`config.GetMPMDir()` still resolves `~/.mpm` in both layouts. See
 `config.GetMPMDir()` / `config.GetWorkspace()` in
 `internal/core/config/config.go`.
 
