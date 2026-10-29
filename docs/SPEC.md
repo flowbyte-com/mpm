@@ -3854,6 +3854,82 @@ mpm call read_wake_context
 #    - Active Clusters (Unknown):\n  * [security] 4 events since 2026-07-02 (ID: security:...)"
 ```
 
+### Dispatch outcome classification
+
+Every tool dispatch writes a row to `tool_invocations`. Alongside
+`result_status` (`success` | `error`), the row carries two classification
+fields:
+
+| field | vocabulary | meaning |
+|---|---|---|
+| `outcome_class` | a closed set of nine categories (`ok`, `validation`, `not_found`, `conflict`, `degraded`, `substrate`, `integration`, `timeout`, `internal`) | the general category of the outcome |
+| `outcome_code` | a bounded lowercase identifier within the class | the diagnostically meaningful subtype |
+
+The class `internal` means **"MPM could not attribute this"**. It is the
+fallback of last resort, and the code that accompanies it is
+`unclassified`. A caller mistake must never land there: an operator
+filtering on `outcome_class='internal'` is looking for a substrate fault,
+and a class that also carries agent noise hides it.
+
+#### The payload-shape family
+
+A caller that sends the wrong JSON type for a field, puts a parameter
+outside the `params` envelope, or sends a value outside a closed
+enumeration has made a mistake, and the substrate is working exactly as
+specified. Those errors are classified `validation` with a code that names
+the shape that was violated:
+
+| `outcome_code` | the violation |
+|---|---|
+| `invalid_array_shape` | a field declared as an array of strings received something else, or an element of it was not a string |
+| `invalid_object_shape` | a field declared as a JSON object received a scalar, an array, or null |
+| `invalid_numeric_field` | a field declared as a number received a non-numeric value |
+| `invalid_params_envelope` | the top-level `{action, params}` contract was violated — a null payload, a field outside the envelope, a missing or non-string `action`, a non-object `params` |
+| `invalid_type` | a field declared as a scalar (string, boolean) received a different JSON type |
+| `invalid_enum_value` | a field declared as an enumeration received a value outside the closed set |
+
+`invalid_params_envelope` is its own code because it is a different class
+of mistake from a wrong field type: the host adapter put the parameters at
+the wrong nesting level. An operator debugging that needs to see it counted
+separately from "the value of `limit` was a string".
+
+#### How the classification is decided
+
+The classification is **typed, not textual**. A payload-shape rejection
+carries a `*PayloadShapeError`, and the classifier recognises it by type.
+The classifier's own contract forbids matching message bodies wholesale,
+and the reason is operational: a substring rule over "must be a" would
+also swallow a substrate error that happens to describe a shape, and it
+could not tell "the caller sent the wrong JSON type" from "the substrate
+mentioned a missing artifact in a sentence that has nothing to do with
+one".
+
+The caller-facing **message is unchanged** by this classification. Agents
+that match on error text keep working; what moved is which class the
+dispatch audit records.
+
+#### The one CHECK-constraint exception
+
+A SQL `CHECK constraint failed` is a system fault by default — it can mean
+a schema defect or a broken internal invariant. Exactly one such failure
+is a caller mistake, and it is handled at the boundary instead: the handoff
+`ended_state` enumeration is validated before the write, naming its four
+permitted values (`clean`, `crashed`, `interrupted`, `force_end`). The
+table's `CHECK` constraint is the backstop for a write that bypassed the
+validated path, and the classifier treats that one column's rejection as
+`validation`/`invalid_enum_value`. Every other `CHECK` failure keeps its
+system-fault classification.
+
+#### Historical rows
+
+The classification is computed **at write time** and nothing backfills
+it. Rows written before the payload-shape family existed keep the
+classification they were written with; the change applies to new
+invocations only. Doctor reports the pre-existing rows under
+`historical/unclassified` rather than reclassifying them, precisely
+because it does not parse `error_message` to backfill a classification it
+cannot verify.
+
 ### Supply-Chain Identity (Commit Signing)
 
 Every commit to the MPM repo ships GPG-signed by default (`commit.gpgsign=true` is configured in `.git/config`). The signing key identity is the substrate's cryptographic commit author — not just a "developer" label. Without commit signatures, supply-chain attacks (compromised dev box, replayed commits) are undetectable at the substrate level.

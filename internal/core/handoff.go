@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -39,6 +40,57 @@ const (
 	HandoffInterrupted = "interrupted" // user closed session
 	HandoffForceEnd    = "force_end"   // agent explicitly force-quit
 )
+
+// HandoffEndedStates is the closed enumeration of permitted `ended_state`
+// values, in the order the tool schema lists them.
+//
+// It is the single source of truth for BOTH the schema's CHECK constraint
+// (schema.go) and the boundary validation (ValidateHandoffEndedState), so
+// the two cannot drift.
+var HandoffEndedStates = []string{
+	HandoffClean,
+	HandoffCrashed,
+	HandoffInterrupted,
+	HandoffForceEnd,
+}
+
+// ValidateHandoffEndedState rejects an `ended_state` outside the closed
+// enumeration, naming the four permitted values.
+//
+// WHY THIS IS VALIDATED AT THE BOUNDARY (issue #159)
+// The session_handoffs table declares
+//
+//	ended_state TEXT NOT NULL CHECK (ended_state IN ('clean','crashed','interrupted','force_end'))
+//
+// so an out-of-enum value WAS rejected — by the database, after the write
+// had been attempted. The rejection surfaced as
+//
+//	EndSessionV2: insert: CHECK constraint failed: ended_state
+//
+// which the dispatch audit classified as internal/unclassified: the class
+// that means "a system fault", carrying what was in fact a caller mistake.
+// The live audit trail contains exactly one such row.
+//
+// Validating before the write means the caller is told what the four
+// permitted values are, at the boundary, as a typed validation error — and
+// the CHECK constraint goes back to being the last line of defence rather
+// than the first line of detection.
+//
+// The error is a *PayloadShapeError, so ClassifyError records it as
+// validation/invalid_enum_value rather than internal/unclassified.
+func ValidateHandoffEndedState(state string) error {
+	for _, allowed := range HandoffEndedStates {
+		if state == allowed {
+			return nil
+		}
+	}
+	return NewPayloadShapeError(
+		PayloadShapeEnum,
+		"state",
+		fmt.Sprintf("field `state` must be one of [%s], got %q",
+			strings.Join(HandoffEndedStates, ", "), state),
+	)
+}
 
 // EndSession writes a handoff for the just-ended session. Safe to call
 // after the agent has done its work. session_id is OPTIONAL — callers
@@ -113,6 +165,13 @@ func (dm *DatabaseManager) EndSessionV2(sessionID, frameworkSessionID, explicitM
 	}
 	if endedState == "" {
 		endedState = HandoffClean
+	}
+	// Boundary validation of the closed enumeration (issue #159). The
+	// table's CHECK constraint is the backstop; this is the front door,
+	// so the caller is told the four permitted values instead of
+	// receiving a constraint failure from the write.
+	if err := ValidateHandoffEndedState(endedState); err != nil {
+		return nil, err
 	}
 
 	// Normalize: ensure non-nil slices so JSON encoding produces "[]" not "null".
