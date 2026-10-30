@@ -236,6 +236,40 @@ production scheduler **active**:
 | `make rehearsal` | **the executable proof of the migration procedure**, against the live installation with the production scheduler active |
 | the tree diff vs `3d63244e` | §4 — that the merge introduces no deployment drift |
 
+### 5.2 The validation RESULTS — run against the reconciled tree
+
+The reconciled tree is the merge of all six heads onto `origin/main`
+(`85dd9542`), with the production scheduler **active** and the live
+installation untouched.
+
+| Gate | Result |
+|---|---|
+| `make build` | **OK** — all five binaries |
+| `make test-scripts` | **OK** — **758 tests** (1 skipped) |
+| `make test-race` | **OK** — the canonical Go gate, with the race detector |
+| `make docs-check` | **OK** — 13 checks, 0 review items, 0 errors |
+| renderer parity (`agent_installation/`) | **OK** — **473 tests** (1 skipped) |
+| `mpm-lint --gate` | **PASS** |
+| the rehearsal, production scheduler **active** | **PASSED** — **135 assertions, 0 failures, 0 suites failed** |
+| the tree diff vs `3d63244e` | **9 files differ**, all of them the rehearsal harness, its tests and documentation; 0 in every runtime area (§4) |
+| the compiled plugin payload vs the deployed one | **✔ BYTE-IDENTICAL** (`dist/index.v2.js`) |
+
+**CI on the three PRs opened or changed this session:** #190 **green**
+(Build + core tests, Full test suite, Release gate), #192 **green** (all
+three), #193 **green** (all three).
+
+### 5.3 One thing the validation caught, and fixed
+
+The reconciled tree's script suite failed with **exactly one** failure:
+the repository's own guard, `scripts/tests/test_no_obsolete_paths.py`,
+flagged the reconciliation record for naming `scripts/install.sh` and
+`scripts/uninstall.sh` — paths that do not exist (the canonical installer
+lives at the repository root), and that the guard forbids naming at all.
+The record's area table now names the paths that exist. Re-verified:
+**758 tests OK**.
+
+A guard catching its own repository's documentation is the guard working.
+
 ---
 
 ## 6. Merge-readiness verdicts
