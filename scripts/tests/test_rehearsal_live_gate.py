@@ -57,6 +57,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 REHEARSAL = REPO_ROOT / "scripts" / "rehearsal"
 GATE = REHEARSAL / "live_gate.py"
+FINGERPRINT = REHEARSAL / "state_fingerprint.py"
 LIB = REHEARSAL / "lib.sh"
 
 SCHEMA = """
@@ -545,6 +546,67 @@ class TestTheRehearsalWiring(LiveGateFixture):
                              f"{suite} must use the classified gate")
             self.assertIn("live_gate_compare", text,
                           f"{suite} must use the classified gate")
+
+
+class TestTheDomainIsMeasuredByTheSameInstrument(LiveGateFixture):
+    """The live database and the simulated one must be measured alike.
+
+    The rehearsal proves that a migration left the SIMULATED state
+    unchanged with `state_fingerprint.py --content`.  The gate proves
+    that the LIVE state is unchanged.  Those two claims are only
+    comparable if both are measured by the SAME instrument — so the
+    gate's domain definition must not drift away from the fingerprint's.
+
+    If someone changes the fingerprint's definition, this test fails and
+    says why: the live database and the simulated database would then be
+    measured by two different rulers, and "unchanged" would mean two
+    different things.
+    """
+
+    def _load(self, name, path):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_the_volatile_column_sets_are_identical(self):
+        sf = self._load("sf", FINGERPRINT)
+        lg = self._load("lg", GATE)
+        self.assertEqual(
+            set(sf.VOLATILE), set(lg.VOLATILE_COLUMNS),
+            "the gate must exclude exactly the columns the substrate's "
+            "own fingerprint excludes",
+        )
+
+    def test_the_domain_tables_are_the_fingerprint_s_content_tables(self):
+        sf = self._load("sf", FINGERPRINT)
+        lg = self._load("lg", GATE)
+        self.assertEqual(
+            tuple(sf.CONTENT_TABLES), tuple(lg.DOMAIN_TABLES),
+            "the gate's domain tables must be the fingerprint's content "
+            "tables",
+        )
+
+    def test_the_per_table_hash_is_byte_identical(self):
+        # The same table, hashed by the fingerprint and by the gate, must
+        # produce the SAME digest.  This is the "same instrument" claim,
+        # measured rather than asserted.
+        sf = self._load("sf", FINGERPRINT)
+        lg = self._load("lg", GATE)
+        c = sqlite3.connect(f"file:{self.db}?mode=ro", uri=True)
+        try:
+            for table in lg.DOMAIN_TABLES:
+                expected = sf.fingerprint(c, table, True)
+                got = lg.table_fingerprint(c, table, drop_volatile=True)
+                if expected is None or got is None:
+                    continue
+                self.assertEqual(
+                    expected.hexdigest(), got[0],
+                    f"the gate and the fingerprint must hash {table} alike",
+                )
+        finally:
+            c.close()
 
 
 class TestTheSuitesFailClosed(LiveGateFixture):
