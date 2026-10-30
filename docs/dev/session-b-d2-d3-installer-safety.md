@@ -392,6 +392,17 @@ low so ordinary test removal does not trip it.
 `scripts/tests/test_runtime_bundle.py` grew from 24 tests to 46, and the new
 `scripts/tests/test_install_bundle_paths.py` adds 5.
 
+### 7.2 CI
+
+PR #188, run [41037647439](https://github.com/flowbyte-com/mpm/actions/runs/41037647439)
+at the branch head — **all three jobs green**:
+
+| Job | Result | Duration |
+|---|---|---|
+| Build + core tests | **pass** | 16m 4s |
+| Full test suite | **pass** | 13m 15s |
+| Release gate (cross-agent continuity + public-CLI subprocess suite) | **pass** | 28m 20s |
+
 ---
 
 ## 8. Does this change Session A's upgrade runbook?
