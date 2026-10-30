@@ -171,7 +171,7 @@ By area — and this is the question that matters:
 | `internal/core/schema.go` | the schema | **0** |
 | `agent_installation/` | the plugin payload and the managed instructions | **0** |
 | `install.sh`, `uninstall.sh` | the installer | **0** |
-| `scripts/lib/`, `scripts/install.sh`, `scripts/uninstall.sh`, `scripts/build-provenance.sh` | the installer | **0** |
+| `scripts/lib/`, `scripts/build-provenance.sh` | the installer's library and build provenance | **0** |
 | `Makefile` | the build | **0** |
 | `docs/SPEC.md` | the behavioural contract | **0** |
 | `scripts/rehearsal/`, `scripts/tests/` | the rehearsal harness | 6 (additions and the gate) |
