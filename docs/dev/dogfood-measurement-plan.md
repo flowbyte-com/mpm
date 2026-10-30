@@ -853,9 +853,10 @@ These are the reasons the daily report says "unconfirmable" rather than
 - **The attempted-write count is a lower bound.** Writes made by the CLI
   (`mpm memory add`, `mpm lesson add`, `mpm record_decision`) and by
   internal paths are not in `tool_invocations`. The live database proves
-  this: 46 `decision` provenance rows exist, and **not one** of them has an
-  `invocation_id` — they were written without a tool call. A week of
-  measured attempts undercounts real attempts by an unknown amount.
+  this: of 51 `decision` provenance rows, **46 have no `invocation_id` at
+  all** — they were written without a tool call. (The 5 that do have one
+  were written after the upgrade, which began recording the link.) A week
+  of measured attempts undercounts real attempts by an unknown amount.
 - **Per-write durability is confirmable for exactly one surface.** Only
   `mpm_memory save` carries a sound invocation→artifact link. Every other
   write surface is **aggregate-only**: the write and the artifact cannot be

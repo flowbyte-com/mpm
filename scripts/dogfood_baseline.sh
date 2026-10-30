@@ -541,20 +541,17 @@ else
 	echo "      (no write invocations in the window)"
 fi
 echo "    'internal' does NOT mean the substrate failed a well-formed"
-echo "    request: it is dominated by misclassified payload-shape errors"
-echo "    (a caller sent the wrong shape) and by policy refusals. The"
-echo "    breakdown below is the honest reading of that class."
+echo "    request: it is mostly misclassified payload-shape errors and"
+echo "    policy refusals. 7b is the honest reading of that class."
 
 echo
 echo "  7b. the 'internal' class, broken down by cause (window):"
-INT_ROWS="$(gq "SELECT substr(COALESCE(error_message,'(none)'),1,72), COUNT(*) FROM tool_invocations WHERE ${WRITE_PRED} AND started_at >= ${SINCE_UNIX} AND outcome_class='internal' GROUP BY 1 ORDER BY 2 DESC LIMIT 6;")"
+INT_ROWS="$(gq "SELECT substr(COALESCE(error_message,'(none)'),1,72), COUNT(*) FROM tool_invocations WHERE ${WRITE_PRED} AND started_at >= ${SINCE_UNIX} AND outcome_class='internal' GROUP BY 1 ORDER BY 2 DESC LIMIT 3;")"
 if [[ -n "$INT_ROWS" ]]; then
 	while IFS=$'\t' read -r msg n; do
 		[[ -z "$msg" ]] && continue
 		printf '      %4s  %s\n' "$n" "$msg"
 	done <<<"$INT_ROWS"
-else
-	echo "      (none in the window)"
 fi
 
 echo
@@ -591,7 +588,7 @@ LEFT JOIN lessons_base lb ON lb.id = ap.artifact_id AND ap.artifact_type='lesson
 LEFT JOIN works wk ON wk.id = ap.artifact_id AND ap.artifact_type='work'
 LEFT JOIN session_handoffs ho ON ho.id = ap.artifact_id AND ap.artifact_type='handoff'
 WHERE ${WRITE_PRED} AND ti.result_status='success'
-GROUP BY 1 ORDER BY 2 DESC;"
+GROUP BY 1 ORDER BY 2 DESC LIMIT 8;"
 GAP_BEFORE="$(wc -l <"$GAP_FILE" 2>/dev/null | tr -d ' ')"
 CONFIRM_ROWS="$(q "$CONFIRM_SQL")"
 GAP_AFTER="$(wc -l <"$GAP_FILE" 2>/dev/null | tr -d ' ')"
@@ -607,14 +604,18 @@ if [[ -n "$CONFIRM_ROWS" ]]; then
 		fi
 		printf '      %-26s %8s %8s %10s %s\n' "$surface" "$ok" "$sound" "$confirmed" "$verdict"
 	done <<<"$CONFIRM_ROWS"
+	SURF_TOTAL_N="$(q1 "SELECT COUNT(DISTINCT tool_name||' '||action) FROM tool_invocations WHERE ${WRITE_PRED} AND result_status='success';")"
+	SURF_SHOWN="$(printf '%s\n' "$CONFIRM_ROWS" | grep -c .)"
+	if [[ "${SURF_TOTAL_N:-0}" -gt "${SURF_SHOWN:-0}" ]]; then
+		echo "      (+$((SURF_TOTAL_N - SURF_SHOWN)) further write surfaces, all unconfirmable per write)"
+	fi
 elif [[ "${GAP_AFTER:-0}" -gt "${GAP_BEFORE:-0}" ]]; then
 	echo "      UNAVAILABLE — the confirmation query could not run (see MEASUREMENT GAPS)"
 else
 	echo "      (no successful write invocations to confirm)"
 fi
-echo "    Only the surfaces with a non-zero 'sound' column can be confirmed"
-echo "    PER WRITE. Every other surface is AGGREGATE-ONLY: the write and"
-echo "    the artifact cannot be paired, so its durability is unmeasured."
+echo "    A non-zero 'sound' column means the surface can be confirmed PER"
+echo "    WRITE. Every other surface is AGGREGATE-ONLY — unmeasured."
 echo
 
 # Aggregate cross-check: rows that exist against rows the ledger reports.
@@ -632,11 +633,9 @@ printf '      %-34s %8s %8s %s\n' "mpm_memory save" "${MEM_OK:-?}" "${MEM_PROV:-
 printf '      %-34s %8s %8s %s\n' "mpm_decisions record" "${DEC_OK:-?}" "${DEC_ROWS:-?}" "decisions collection rows"
 printf '      %-34s %8s %8s %s\n' "mpm_lessons save" "${LES_OK:-?}" "${LES_ROWS:-?}" "trusted lesson rows"
 printf '      %-34s %8s %8s %s\n' "mpm_handoff write" "${HO_OK:-?}" "${HO_ROWS:-?}" "session_handoffs rows (upsert on session_id)"
-echo "    These are NOT per-write comparisons, and the arithmetic does not"
-echo "    isolate loss in either direction. A handoff upsert on an existing"
-echo "    session_id REPLACES a row instead of adding one, so a lower row"
-echo "    count is expected. The row counts also include CLI and internal"
-echo "    writes that were never tool calls."
+echo "    NOT per-write comparisons, and they do not isolate loss either"
+echo "    way: a handoff upsert REPLACES a row, and the row counts include"
+echo "    CLI and internal writes that were never tool calls."
 
 echo
 echo "  7e. writes with an UNKNOWN outcome:"
@@ -647,10 +646,9 @@ if [[ -n "$LINK_SPLIT" ]]; then
 		printf '      %4s  mpm_memory save: %s\n' "$n" "$k"
 	done <<<"$LINK_SPLIT"
 fi
-echo "    A reported success with no provenance row and no returned artifact"
-echo "    id has an UNKNOWN outcome: neither confirmed nor lost, unmeasured."
-echo "    A shared invocation_id makes the link ambiguous, which is a"
-echo "    measurement blind spot rather than a lost write."
+echo "    No provenance row and no returned artifact id = an UNKNOWN"
+echo "    outcome (unmeasured, not lost). A shared invocation_id makes the"
+echo "    link ambiguous — a blind spot, not a lost write."
 
 echo
 echo "  7f. SQLite busy/locked (the #178 failure mode):"
@@ -666,9 +664,8 @@ if [[ -n "$BUSY_ROWS" ]]; then
 		printf '      %s  %-22s %s\n' "$at" "$k" "$msg"
 	done <<<"$BUSY_ROWS"
 fi
-echo "    NOTE: system_audit_log.created_at is a TEXT timestamp stored in"
-echo "    an INTEGER-declared column, so an epoch comparison against it"
-echo "    matches EVERY row. This script converts with strftime('%s',…)."
+echo "    NOTE: system_audit_log.created_at is TEXT in an INTEGER column, so"
+echo "    an epoch comparison matches EVERY row. This script uses strftime."
 
 echo
 echo "  7g. handoff persistence failures (audit log):"
@@ -687,10 +684,9 @@ if [[ -n "$HO_FAIL_ROWS" ]]; then
 		printf '      %s  %-60s -> %s\n' "$at" "$msg" "$NEAR"
 	done <<<"$HO_FAIL_ROWS"
 fi
-echo "    A handoff write that reaches the table and violates a CHECK is a"
-echo "    REPORTED failure, not a silent loss. The post-upgrade runtime"
-echo "    validates the enumeration BEFORE the write, so this failure mode"
-echo "    is expected to stop appearing — watch for it, do not assume it."
+echo "    A handoff write that violates a CHECK is a REPORTED failure, not"
+echo "    a silent loss. The upgraded runtime validates BEFORE the write, so"
+echo "    this is expected to stop — watch it, do not assume it."
 
 echo
 echo "  7h. provenance integrity (the link itself):"
@@ -698,9 +694,8 @@ ORPHAN="$(q1 "SELECT COUNT(*) FROM artifact_provenance ap WHERE (ap.artifact_typ
 NOINV="$(q1 "SELECT COUNT(*) FROM artifact_provenance ap WHERE ap.invocation_id IS NOT NULL AND ap.invocation_id != '' AND NOT EXISTS (SELECT 1 FROM tool_invocations ti WHERE ti.invocation_id = ap.invocation_id);")"
 echo "    provenance rows whose artifact is NOT in the table its type names : ${ORPHAN:-UNAVAILABLE}"
 echo "    provenance rows citing an invocation the ledger does not contain  : ${NOINV:-UNAVAILABLE}"
-echo "    The first count is normally 1, not 0: the artifact-type namespace"
-echo "    collides. A MEMORY saved into the 'lessons' collection is recorded"
-echo "    with artifact_type='lesson' while the id belongs to a memory row."
+echo "    The first count is normally 1, not 0: a MEMORY saved into the"
+echo "    'lessons' collection is typed 'lesson' while the id is a memory."
 
 echo
 echo "  7i. scheduler correlation (busy/locked vs scheduler ticks):"
