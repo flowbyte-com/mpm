@@ -499,7 +499,7 @@ precisely the condition under which the combined verification runs.
 * **No scheduler stop.** The production scheduler ran throughout every
   rehearsal run in this record.
 * No deployment. No service restart. No unit edited.
-* No database modification — the live database was only ever opened
+* No modification of the **live** database — it was only ever opened
   read-only, and the negative control's unauthorised change is made in a
   **disposable stand-in**.
 * No change to the rehearsal's assertions other than the isolation
@@ -509,3 +509,12 @@ precisely the condition under which the combined verification runs.
 * No change to `docs/dev/release-candidate-2026-10-30.md` or to any
   other session's record.
 * No merge.
+
+**The one write outside the repository** was to the shared **dogfooding**
+workspace (`~/.mpm-dogfood`), which `docs/dev/coordination.md` §6.2
+names as the reasoning channel — a memory, a lesson, a decision and a
+handoff, carrying the measurement, the design and the reasoning. That
+workspace is the shared one, not the live installation, and the writes
+were made through the canonical `MPM_WORKSPACE` / `MPM_DB_PATH` pair so
+that they could not land in the live database. Verified afterwards: the
+live `tool_invocations` carries **0** rows matching this work.
