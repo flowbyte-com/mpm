@@ -1431,6 +1431,45 @@ func operatorOnlyShredError(toolName, action, subject, operatorVerb string) erro
 	)
 }
 
+// operatorOnlyLessonSaveError is the refusal returned by the agent-
+// reachable lesson-write action.
+//
+// WHY A LESSON IS DIFFERENT FROM A MEMORY
+// ---------------------------------------
+// A memory is written with a confidence value and carries a review
+// lifecycle (reinforce, weaken, challenge, review). A LESSON is
+// TRUSTED ON ARRIVAL: `lessons_base` has no status column, so a row
+// there is immediately inside the trusted retrieval set — the FTS
+// index, `mpm lesson search`, `mpm lesson list`, and the wake context's
+// recent_lessons. There is no "pending" state on that surface, and
+// adding one would mean every trusted read path has to remember to
+// filter on it.
+//
+// So the trust boundary is enforced at the execution point instead: the
+// agent tool surface cannot write a trusted lesson at all. The agent
+// can PROPOSE one, and an operator decides.
+//
+// WHY NO PAYLOAD FIELD UNLOCKS IT
+// -------------------------------
+// A boolean the caller supplies is not evidence of operator intent: an
+// agent that can call the tool can also set the field. This refusal is
+// the same fail-closed shape as operatorOnlyShredError, and for the
+// same reason — there is no field an agent can set that would make it
+// an operator.
+func operatorOnlyLessonSaveError() error {
+	return fmt.Errorf(
+		"mpm_lessons action=save is operator-only: a lesson is trusted on arrival " +
+			"(the lesson surface has no pending state), so it is not reachable from the " +
+			"agent tool surface (MCP, `mpm call`, adapters). Nothing was written. " +
+			"No payload field — including operator=true, confirm=true or review=true — " +
+			"authorizes it: a value the caller supplies is not operator intent. " +
+			"To record the experience, use action=propose, which records a PENDING " +
+			"proposal that an operator reviews; the operator promotes it with " +
+			"`mpm lesson promote <id>`. An operator can write a trusted lesson directly " +
+			"from a terminal with: mpm lesson add <content>",
+	)
+}
+
 func handleShredMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	id, err := requireMemoryID(p)
 	if err != nil {
@@ -1932,49 +1971,74 @@ func inferNodeType(id string) string {
 	}
 }
 
-// callSaveLesson persists a lesson to MPM.
+// handleSaveLesson is the REFUSAL for the agent-reachable lesson write.
+//
+// A lesson row is trusted on arrival, so the agent tool surface cannot
+// create one. The refusal is unconditional and takes no payload path
+// around it: there is no field an agent can supply that would make it
+// an operator.
+//
+// The operator's path is `mpm lesson add <content>` from a terminal,
+// which calls the store directly and never reaches this handler. The
+// agent's path is action=propose, which records a PENDING proposal for
+// an operator to review.
+//
+// The function keeps its name and its position in the dispatch so that
+// the refusal is the thing an agent meets, not a missing action.
 func handleSaveLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
+	return nil, operatorOnlyLessonSaveError()
+}
+
+// handleProposeLesson records a lesson PROPOSAL — a candidate lesson
+// that an operator has not yet accepted.
+//
+// This is the agent's replacement for action=save. The proposal lands
+// in `lesson_proposals`, which is outside every trusted retrieval path:
+// it is not in lessons_fts, not in `mpm lesson search`, not in
+// `mpm lesson list`, and not in the wake context. An operator promotes
+// it with `mpm lesson promote <id>`, and only then does it become a
+// lesson.
+//
+// The proposal carries the proposer's identity (session, framework,
+// model) so the operator can see WHO proposed it, and the promotion
+// records WHICH lesson it became.
+//
+// Required params: fact. Optional: type, tags.
+func handleProposeLesson(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
 	fact, _ := p["fact"].(string)
 	if fact == "" {
 		return nil, fmt.Errorf("fact is required")
 	}
 	lessonType := internal.ParseStringOr(p["type"], "insight")
 	tags := internal.ParseStringSliceOr(p["tags"])
+	// The Provenance Proxy's citations. They are recorded on the
+	// proposal and credited when an operator PROMOTES it — that is the
+	// moment the lesson becomes durable knowledge.
+	sourceIDs := internal.ParseStringSliceOr(p["source_ids"])
 
-	// D6: the caller's context carries the invocation identity, so the
-	// lesson's provenance row joins to the tool_invocations row of the
-	// call that recorded it.
-	out, _, err := dm.SaveLesson(fact, lessonType, tags, ac)
+	proposal, err := dm.AddLessonProposal(fact, lessonType, tags, sourceIDs, ac)
 	if err != nil {
 		return nil, err
 	}
 
-	// Provenance Proxy: if the agent lists the node IDs this lesson
-	// was distilled from, credit each in the retrieval observability
-	// layer via IncrementSuccess. INSERT-or-UPDATE semantic: a node
-	// that was never retrieved this turn can still receive a credit
-	// when the agent cites it from prior-session memory. Telemetry
-	// must not block the user's lesson-save path; errors are
-	// swallowed.
-	credited := 0
-	if raw, ok := p["source_ids"].([]interface{}); ok && len(raw) > 0 {
-		for _, v := range raw {
-			id, _ := v.(string)
-			if id == "" {
-				continue
-			}
-			if err := dm.IncrementSuccess(id, inferNodeType(id)); err == nil {
-				credited++
-			}
-			// err != nil: log via audit, don't surface — the lesson
-			// is already saved and the user-facing path succeeded.
-		}
-	}
-
-	// Augment the SaveLesson response with a credit count so the
-	// agent can verify the provenance was wired.
-	out["credited_sources"] = credited
-	return out, nil
+	return map[string]interface{}{
+		"success": true,
+		"id":      proposal.ID,
+		"type":    proposal.Type,
+		// The status is reported explicitly because the proposal is NOT
+		// a lesson: it is untrusted until an operator accepts it. A
+		// caller that reads "success" and assumes "trusted knowledge"
+		// is the exact mistake this surface exists to prevent.
+		"status":           proposal.Status,
+		"trusted":          false,
+		"promotion_pending": true,
+		"operator_command": "mpm lesson promote " + proposal.ID,
+		"review_command":   "mpm lesson proposals",
+		"cited_sources":    len(proposal.SourceIDs),
+		"note": "The proposal is pending operator review. It is NOT in the trusted " +
+			"lesson surface yet and will not appear in lesson search or the wake " +
+			"context until an operator promotes it.",
+	}, nil
 }
 
 // callSearchLessons searches lesson content.
@@ -5368,7 +5432,7 @@ func handleCompactEpistemology(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 	force := parseBoolDefault(p["force"], false)
 	maxBatches := parseIntDefault(p["max_batches"], 0)
 
-	result, err := dm.CompactEpistemologyDrain(context.Background(), force, maxBatches)
+	result, err := dm.CompactEpistemologyDrain(context.Background(), force, maxBatches, ac)
 	if err != nil {
 		// Mid-drain failure — return the partial aggregate AND the
 		// error. Earlier successful batches are durable; the agent
@@ -5396,6 +5460,7 @@ func compactDrainEnvelope(result *mpminternal.CompactEpistemologyDrainResult) ma
 		"batches_processed":     result.BatchesProcessed,
 		"raw_processed":         result.RawProcessed,
 		"lessons_created":       result.LessonsCreated,
+		"proposals_created":     result.ProposalsCreated,
 		"raw_remaining":         result.RawRemaining,
 		"actionable_pending":    result.ActionablePending,
 		"semantic_stages_spent": result.StagesSpent,
@@ -5405,6 +5470,9 @@ func compactDrainEnvelope(result *mpminternal.CompactEpistemologyDrainResult) ma
 	}
 	if result.SkippedReason != "" {
 		out["skipped_reason"] = result.SkippedReason
+	}
+	if len(result.ProposalIDs) > 0 {
+		out["proposal_ids"] = result.ProposalIDs
 	}
 	if len(result.LessonIDs) > 0 {
 		out["lesson_ids"] = result.LessonIDs
@@ -6627,7 +6695,15 @@ func handleMpmLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 	action, _ := payload["action"].(string)
 	switch action {
 	case "save":
+		// Operator-only: a lesson is trusted on arrival, so the agent
+		// tool surface cannot create one. The agent's path is
+		// action=propose, which records a pending proposal for an
+		// operator to review. See handleSaveLesson.
 		return handleSaveLesson(dm, ac, params)
+	case "propose":
+		// Records a PENDING lesson proposal. Outside every trusted
+		// retrieval path until an operator promotes it.
+		return handleProposeLesson(dm, ac, params)
 	case "search":
 		return handleSearchLessons(dm, ac, params)
 	case "list":
@@ -6646,7 +6722,7 @@ func handleMpmLessons(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, paylo
 		// `mpm lesson shred <id>`. See operatorOnlyShredError.
 		return handleShredLesson(dm, ac, params)
 	default:
-		return nil, fmt.Errorf("unknown action %q for mpm_lessons. Valid actions include save, search, list, delete, restore", action)
+		return nil, fmt.Errorf("unknown action %q for mpm_lessons. Valid actions include propose, search, list, delete, restore", action)
 	}
 }
 

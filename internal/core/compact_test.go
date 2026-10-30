@@ -338,20 +338,20 @@ func TestCompactEpistemology_HappyPath(t *testing.T) {
 	if res.Compacted != seedCount {
 		t.Errorf("Compacted: got %d, want %d", res.Compacted, seedCount)
 	}
-	if res.LessonsCreated != 1 {
-		t.Errorf("LessonsCreated: got %d, want 1", res.LessonsCreated)
+	if res.ProposalsCreated != 1 {
+		t.Errorf("ProposalsCreated: got %d, want 1", res.ProposalsCreated)
+	}
+	if res.LessonsCreated != 0 {
+		t.Errorf("LessonsCreated: got %d, want 0 — the compaction records a PENDING proposal, it does not write a trusted lesson", res.LessonsCreated)
 	}
 	if res.RawMarked != seedCount {
 		t.Errorf("RawMarked: got %d, want %d", res.RawMarked, seedCount)
 	}
-	if res.LessonID == "" {
-		t.Error("LessonID empty; expected les-* id")
-	}
-	if !strings.HasPrefix(res.LessonID, "les-") {
-		t.Errorf("LessonID prefix: got %q, want les- prefix", res.LessonID)
+	if res.ProposalID == "" {
+		t.Error("ProposalID empty; expected the pending proposal's id")
 	}
 
-	// Verify all 10 raw memories have compacted_into = lesson_id.
+	// Verify all 10 raw memories have compacted_into = proposal_id.
 	for _, id := range seededIDs {
 		var compactedInto string
 		err := dm.SQLDB().QueryRow(`
@@ -361,17 +361,21 @@ func TestCompactEpistemology_HappyPath(t *testing.T) {
 			t.Errorf("read %s: %v", id, err)
 			continue
 		}
-		if compactedInto != res.LessonID {
-			t.Errorf("memory %s: compacted_into=%q, want %q", id, compactedInto, res.LessonID)
+		if compactedInto != res.ProposalID {
+			t.Errorf("memory %s: compacted_into=%q, want %q", id, compactedInto, res.ProposalID)
 		}
 	}
 
-	// Verify lesson table has exactly one row with the right content.
+	// The derivation lives in the PROPOSAL table, not in the trusted
+	// lesson table. Nothing here may be retrievable as a lesson before
+	// an operator promotes it.
 	var content string
-	var contentHash string
-	err = dm.SQLDB().QueryRow(`SELECT content, content_hash FROM lessons WHERE id = ?`, res.LessonID).Scan(&content, &contentHash)
+	err = dm.SQLDB().QueryRow(`SELECT content FROM lesson_proposals WHERE id = ?`, res.ProposalID).Scan(&content)
 	if err != nil {
-		t.Fatalf("read lesson: %v", err)
+		t.Fatalf("read the proposal: %v", err)
+	}
+	if n := countLessons(t, dm); n != 0 {
+		t.Errorf("%d trusted lesson row(s) exist — the compaction must not write trusted lessons", n)
 	}
 	// Content is the JSON envelope {title, body}. Verify the round-trip.
 	var env struct {
@@ -505,8 +509,8 @@ func TestCompactEpistemology_RecordsLastCompactedEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompactEpistemology: %v", err)
 	}
-	if res.LessonID == "" {
-		t.Fatal("LessonID empty after commit")
+	if res.ProposalID == "" {
+		t.Fatal("ProposalID empty after commit")
 	}
 
 	post := dm.gatherEpistemicPressure()

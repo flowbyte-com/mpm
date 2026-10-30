@@ -94,20 +94,37 @@ func TestD6_ToolHandlersThreadTheInvocationContext(t *testing.T) {
 	}
 	assertD6Provenance(t, dm, decID, "decision", "inv_handler_1")
 
-	// mpm_lessons.save
-	res, err = handleSaveLesson(dm, ac, map[string]interface{}{
+	// mpm_lessons.propose → the operator's promotion.
+	//
+	// The agent-reachable lesson WRITE is refused (a lesson is trusted
+	// on arrival), so the lesson artifact is now created by the
+	// promotion. The D6 bridge for a lesson is exercised through that
+	// path: the proposal records the caller, and the promoted lesson's
+	// artifact_provenance row carries the invocation id.
+	res, err = handleProposeLesson(dm, ac, map[string]interface{}{
 		"fact": "a lesson recorded through the tool surface",
 		"type": "insight",
 	})
 	if err != nil {
-		t.Fatalf("handleSaveLesson: %v", err)
+		t.Fatalf("handleProposeLesson: %v", err)
 	}
 	env = res.(map[string]interface{})
-	lessonID, _ := env["id"].(string)
-	if lessonID == "" {
-		t.Fatalf("no lesson id: %+v", env)
+	proposalID, _ := env["id"].(string)
+	if proposalID == "" {
+		t.Fatalf("no proposal id: %+v", env)
 	}
-	assertD6Provenance(t, dm, lessonID, "lesson", "inv_handler_1")
+	proposal, err := dm.GetLessonProposal(proposalID)
+	if err != nil {
+		t.Fatalf("GetLessonProposal: %v", err)
+	}
+	if proposal.FrameworkName != "opencode" {
+		t.Errorf("the proposal did not record the caller's framework: %+v", proposal)
+	}
+	lesson, _, _, err := dm.PromoteLessonProposal(proposalID, ac)
+	if err != nil {
+		t.Fatalf("PromoteLessonProposal: %v", err)
+	}
+	assertD6Provenance(t, dm, lesson.ID, "lesson", "inv_handler_1")
 
 	// mpm_theories.propose
 	res, err = handleProposeTheory(dm, ac, map[string]interface{}{

@@ -124,7 +124,7 @@ var recordingActions = map[string]map[string]bool{
 	"mpm_memory":    {"save": true},
 	"mpm_theories":  {"propose": true},
 	"mpm_decisions": {"record": true},
-	"mpm_lessons":   {"save": true},
+	"mpm_lessons":   {"propose": true},
 	"mpm_work":      {"create": true, "note": true},
 	"mpm_skills":    {"save": true},
 

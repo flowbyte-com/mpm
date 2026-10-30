@@ -114,6 +114,49 @@ var BaseTables = []string{
 		content_hash TEXT
 	);`,
 
+	// Lesson proposals (2026-10-30) — the PENDING surface for a lesson an
+	// agent has proposed and an operator has not yet accepted.
+	//
+	// WHY A SEPARATE TABLE, AND NOT A STATUS COLUMN ON `lessons`
+	// -------------------------------------------------------
+	// A lesson row is TRUSTED ON ARRIVAL. `lessons_base` has no status
+	// column, so a row there is already inside the trusted retrieval
+	// set: lessons_fts, `mpm lesson search`, `mpm lesson list`, and the
+	// wake context's recent_lessons all read it. Giving that table a
+	// "pending" status would mean every one of those read paths must
+	// filter on it — and a read path that forgets is a pending lesson
+	// silently promoted into trusted knowledge.
+	//
+	// A separate table makes the isolation STRUCTURAL: no trusted read
+	// path queries this table, so there is no filter to forget and no
+	// index to keep in sync. A proposal is invisible to the substrate's
+	// retrieval machinery — FTS, vectors, synthesis, the wake context —
+	// until an operator promotes it.
+	//
+	// THE TABLE IS ADDITIVE.
+	//   - No existing row is read, rewritten or moved.
+	//   - No existing table is altered.
+	//   - An older binary ignores the table entirely.
+	//   - A rollback leaves the table orphaned with its content intact,
+	//     and every lesson already promoted out of it survives in
+	//     `lessons_base`.
+	`CREATE TABLE IF NOT EXISTS lesson_proposals (
+		id TEXT PRIMARY KEY,
+		type TEXT NOT NULL DEFAULT 'insight',
+		content TEXT NOT NULL,
+		tags JSON,
+		created TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','promoted','rejected')),
+		source_session_id TEXT,
+		framework_name TEXT,
+		model_name TEXT,
+		source_ids TEXT,
+		promoted_lesson_id TEXT,
+		reviewed_at INTEGER
+	);`,
+
+	`CREATE INDEX IF NOT EXISTS idx_lesson_proposals_status ON lesson_proposals(status, created);`,
+
 	// Retrieval metadata — Observability Layer for "Adaptive Retrieval"
 	// (2026-07-26). 1:1 mapping with any cognitive node (Memory,
 	// Lesson, Decision, Theory, Skill). Tracks how often each node is

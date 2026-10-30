@@ -168,16 +168,13 @@ func TestProjection_MemoryQuery_ExplicitSummaryMatchesDefault(t *testing.T) {
 
 func TestProjection_LessonSearch_DefaultsToSummary(t *testing.T) {
 	dm := newTestIsolatedDM(t)
-	// Seed a lesson via the lessons tool.
+	// Seed a lesson through the OPERATOR path (the same store primitive
+	// `mpm lesson add` uses). The agent-reachable lesson write is
+	// refused — a lesson is trusted on arrival — so this test, which is
+	// about the PROJECTION of a lesson that exists, seeds it the way an
+	// operator would.
 	big := strings.Repeat("L", 4096)
-	if _, err := handleMpmLessons(dm, mpminternal.ActiveContext{}, map[string]interface{}{
-		"action": "save",
-		"params": map[string]interface{}{
-			"fact":  big,
-			"type":  "practice",
-			"tags":  []interface{}{"proj-lesson"},
-		},
-	}); err != nil {
+	if _, err := dm.AddLesson(big, mpminternal.LessonType("practice"), []string{"proj-lesson"}, ""); err != nil {
 		t.Fatalf("seed lesson: %v", err)
 	}
 
@@ -218,11 +215,9 @@ func TestProjection_LessonSearch_DefaultsToSummary(t *testing.T) {
 
 func TestProjection_LessonList_FullReturnsUnbounded(t *testing.T) {
 	dm := newTestIsolatedDM(t)
+	// The operator path — see the note above.
 	big := strings.Repeat("M", 4096)
-	if _, err := handleMpmLessons(dm, mpminternal.ActiveContext{}, map[string]interface{}{
-		"action": "save",
-		"params": map[string]interface{}{"fact": big, "type": "insight"},
-	}); err != nil {
+	if _, err := dm.AddLesson(big, mpminternal.LessonType("insight"), nil, ""); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
