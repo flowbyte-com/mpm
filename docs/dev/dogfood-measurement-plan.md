@@ -560,12 +560,24 @@ SELECT ti.tool_name || ' ' || ti.action                        AS surface,
 
 -- a miss is classified further: a TYPE MISMATCH (the artifact is present,
 -- but under another type/table) is not a lost artifact; only an ABSENT
--- artifact (in no artifact table at all) is.
+-- artifact (in no artifact table at all) is. Rows of an artifact_type
+-- this query cannot look up are EXCLUDED — a report must not claim a loss
+-- it cannot look up.
 SELECT ap.artifact_id, ap.artifact_type,
-       CASE WHEN <present in any artifact table>
+       CASE WHEN EXISTS (SELECT 1 FROM memories m WHERE m.id = ap.artifact_id)
+             OR EXISTS (SELECT 1 FROM lessons_base l WHERE l.id = ap.artifact_id)
+             OR EXISTS (SELECT 1 FROM works w WHERE w.id = ap.artifact_id)
+             OR EXISTS (SELECT 1 FROM session_handoffs h WHERE h.id = ap.artifact_id)
             THEN 'type-mismatch' ELSE 'absent' END AS verdict
   FROM artifact_provenance ap
- WHERE NOT (<present in the table ap.artifact_type names>);
+ WHERE ap.artifact_type IN ('memory','decision','theory','lesson','work','handoff')
+   AND NOT (
+        (ap.artifact_type = 'memory'   AND EXISTS (SELECT 1 FROM memories m WHERE m.id = ap.artifact_id))
+     OR (ap.artifact_type = 'decision' AND EXISTS (SELECT 1 FROM memories m WHERE m.id = ap.artifact_id AND m.collection = 'decisions'))
+     OR (ap.artifact_type = 'theory'   AND EXISTS (SELECT 1 FROM memories m WHERE m.id = ap.artifact_id AND m.collection = 'theories'))
+     OR (ap.artifact_type = 'lesson'   AND EXISTS (SELECT 1 FROM lessons_base l WHERE l.id = ap.artifact_id))
+     OR (ap.artifact_type = 'work'     AND EXISTS (SELECT 1 FROM works w WHERE w.id = ap.artifact_id))
+     OR (ap.artifact_type = 'handoff'  AND EXISTS (SELECT 1 FROM session_handoffs h WHERE h.id = ap.artifact_id)));
 
 -- the busy/locked failure mode (issue #178)
 SELECT datetime(started_at,'unixepoch'), tool_name, action, error_message
@@ -922,6 +934,14 @@ because the two cases mean different things:
 | **type mismatch** | not in the table its `artifact_type` names, but **present in another artifact table** | **no** — a metadata defect in the provenance row |
 | **absent** | in **no** artifact table at all | yes, or the artifact was deleted/shredded — a candidate loss |
 
+A third case is counted but **not classified**: a provenance row whose
+`artifact_type` this report does not know how to look up. The report
+counts those separately and **never** calls them lost — it will not claim
+a write was lost because it did not know which table to open. (At
+`3d63244e` the type set is closed: `memory`, `decision`, `theory`,
+`lesson`, `work`, `handoff`. A skill's provenance row is typed `memory`
+and its artifact lives in `memories`, so it is looked up correctly.)
+
 **The `artifact_type` namespace collides.** The provenance type is derived
 from the *collection*, not from the table the artifact lives in: a
 **memory** saved into the `lessons` collection is recorded with
@@ -951,7 +971,7 @@ and there are **zero** absent artifacts.
 | W6 | ambiguous link | invocation id shared by several ledger rows | 5 on `mpm_memory save` |
 | W7 | SQLite busy/locked | `outcome_code='wal_busy_timeout'` | **2**, both `mpm_decisions record`, 2026-10-24/25 |
 | W8 | handoff persistence failures | `system_audit_log` `component='handoff'` | **2**, both `EndSessionV2 … CHECK constraint failed: ended_state` |
-| W9 | provenance integrity | artifact vs the table its type names; invocation vs the ledger | **type mismatch 1** (artifact present, row mis-typed — §M5.2.1), **absent 0**, **12** uncited invocations |
+| W9 | provenance integrity | artifact vs the table its type names; invocation vs the ledger | **type mismatch 1** (artifact present, row mis-typed — §M5.2.1), **absent 0**, **0 of an unknown type**, **12** uncited invocations |
 | W10 | scheduler correlation | busy/locked events vs scheduler ticks (journal) | 1 of 2 busy events within 60 s of a tick |
 
 **W3 is a per-surface measurement, not a global verdict.** The counts are
@@ -1021,6 +1041,10 @@ These are the reasons the daily report says "unconfirmable" rather than
   mismatch of 1 and not 0 (§M5.2.1). A provenance row is therefore **not**
   by itself proof that an artifact of that type exists; and a type-aware
   miss is **not** by itself proof that the artifact was lost.
+- **A miss of an unknown type is not a miss.** The daily block classifies
+  only the artifact types it knows how to look up. A row of any other
+  type is counted and reported separately, never as a lost artifact
+  (§M5.2.1).
 - **Nothing here is instrumented to detect a write that was never
   attempted at all** — a caller that silently skipped a write leaves no
   trace in any of these tables.
@@ -2100,10 +2124,11 @@ column.
 a read. The live database was snapshotted with `.backup` (the source is
 opened read-only), and the script's own run takes its own snapshot before
 it queries anything. `scripts/tests/test_dogfood_baseline.py` now asserts
-the two properties that were previously only prose: that a surface
+the three properties that were previously only prose: that a surface
 outside the display is reported as **examined** rather than assumed
-unconfirmable, and that a type-mismatch artifact is never counted as a
-lost artifact — 19 tests, 0 failures.
+unconfirmable; that a type-mismatch artifact is never counted as a lost
+artifact; and that a provenance row of an artifact type the report cannot
+look up is never counted as a loss either — 20 tests, 0 failures.
 
 ### 12.3 The scheduler was restarted during this preparation — the record
 
@@ -2134,6 +2159,16 @@ scheduler.
 restarted the scheduler at 2026-10-30 16:32:42, replacing pid 3709217 with
 pid 3890452. That restart is the upgrade's, not this plan's, and it is the
 reason the `tick_count` series restarts from a low value.
+
+**A fourth restart is a host event, not an agent's.** The desktop session
+was torn down and restarted at 2026-10-30 19:26:52 → 19:27:22, and systemd
+brought the user unit back with it — pid 3890452 → pid 2783. No agent
+issued it: this plan contains no `systemctl` command, and
+`scripts/tests/test_dogfood_baseline.py` asserts that it does not. The
+lesson is the one the restart record exists to carry, and it is worth
+stating on its own: **`tick_count` is not a stable series.** It resets on
+every service restart, including the ones the host performs on its own, so
+the week must compare tick counts only within a single service lifetime.
 
 ### 12.4 The safety findings from the incident, and what changed
 
@@ -2188,7 +2223,7 @@ are reproduced by the day-zero run of `scripts/dogfood_baseline.sh`.
 | cascade outbox | 0 |
 | retrieval metadata | 96 tracked nodes, `success_count` 0 on every row |
 | live memories never surfaced | 60 |
-| scheduler | pid 3890452, `tick_count` 17, `last_status` `ok`, last tick 6 s before the check |
+| scheduler | pid 2783, started 2026-10-30 19:27:22Z — after the **host's** session restart, not this plan's (§12.3); `tick_count` restarting from a low value, `last_status` `ok` |
 
 **Activity (last 7 days)**
 
@@ -2215,7 +2250,7 @@ are reproduced by the day-zero run of `scripts/dogfood_baseline.sh`.
 | sound links in total | **85 → 84 confirmed, 1 type-mismatch, 0 absent** |
 | unknown outcomes (`mpm_memory save`) | 2 (no provenance row at all) |
 | ambiguous links (`mpm_memory save`) | 5 (invocation id shared by several ledger rows) |
-| provenance rows in total | **200** — 199 found in the table their type names, **1 type mismatch**, **0 absent** |
+| provenance rows in total | **200** — 199 found in the table their type names, **1 type mismatch**, **0 absent**, **0 of an unknown type** |
 | the one type mismatch | **`b665b3a95ee70410`** — declared `lesson`, actually in `memories` (`collection='lessons'`), created 2026-10-25 17:08:49 by an `mpm_memory save` that reported success. **The artifact is present**; only the provenance row is mis-typed |
 | provenance rows citing an invocation the ledger does not contain | 12 |
 | busy/locked within 60 s of a scheduler tick | 1 of 2 |

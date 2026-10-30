@@ -557,6 +557,11 @@ fi
 echo
 echo "  7c. reported success vs CONFIRMED durability, per surface:"
 printf '      %-26s %8s %8s %10s %s\n' "surface" "ok" "sound" "confirmed" "verdict"
+# The artifact types this report knows how to look up. A row with any OTHER
+# artifact_type is counted separately and NOT classified as a lost artifact
+# — this report must never claim a write was lost because it did not know
+# where to look.
+KNOWN_TYPES="'memory','decision','theory','lesson','work','handoff'"
 # A link is only USED when it is SOUND:
 #   * tool_invocations.invocation_id is NOT unique (one id can carry rows
 #     from several tools), and
@@ -585,7 +590,7 @@ CONFIRM_SQL="SELECT
 		(ap.artifact_type='lesson'   AND lb.id IS NOT NULL) OR
 		(ap.artifact_type='work'     AND wk.id IS NOT NULL) OR
 		(ap.artifact_type='handoff'  AND ho.id IS NOT NULL)) THEN 1 ELSE 0 END) AS confirmed,
-	SUM(CASE WHEN ti.result_status='success' AND lk.n=1 AND pv.n=1 AND NOT (
+	SUM(CASE WHEN ti.result_status='success' AND lk.n=1 AND pv.n=1 AND ap.artifact_type IN (${KNOWN_TYPES}) AND NOT (
 		(ap.artifact_type='memory'  AND m.id IS NOT NULL) OR
 		(ap.artifact_type='decision' AND md.id IS NOT NULL) OR
 		(ap.artifact_type='theory'   AND mt.id IS NOT NULL) OR
@@ -593,7 +598,7 @@ CONFIRM_SQL="SELECT
 		(ap.artifact_type='work'     AND wk.id IS NOT NULL) OR
 		(ap.artifact_type='handoff'  AND ho.id IS NOT NULL)) AND (
 		am.id IS NOT NULL OR al.id IS NOT NULL OR aw.id IS NOT NULL OR ah.id IS NOT NULL) THEN 1 ELSE 0 END) AS mismatch,
-	SUM(CASE WHEN ti.result_status='success' AND lk.n=1 AND pv.n=1 AND NOT (
+	SUM(CASE WHEN ti.result_status='success' AND lk.n=1 AND pv.n=1 AND ap.artifact_type IN (${KNOWN_TYPES}) AND NOT (
 		(ap.artifact_type='memory'  AND m.id IS NOT NULL) OR
 		(ap.artifact_type='decision' AND md.id IS NOT NULL) OR
 		(ap.artifact_type='theory'   AND mt.id IS NOT NULL) OR
@@ -644,7 +649,7 @@ if [[ -n "$CONFIRM_ROWS" ]]; then
 	SURF_STATS="$(printf '%s\n' "$CONFIRM_ROWS" | awk -F'\t' '
 		{ n++
 		  if ($3+0 > 0) { s++; sound+=$3; conf+=$4; mism+=$5; abs+=$6 } else { ns++ }
-		  if (n > 8) { om++; if ($3+0 > 0) { oms++; names = names " " $1 } else { omn++ } } }
+		  if (n > 8) { om++; if ($3+0 > 0) { oms++; names = names " " $1 } } }
 		END { printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s", n+0, s+0, ns+0, sound+0, conf+0, mism+0, abs+0, om+0, oms+0, names }')"
 	IFS=$'\t' read -r SURF_N SURF_WITH_SOUND SURF_NO_SOUND SURF_SOUND_TOT SURF_CONF_TOT SURF_MISM_TOT SURF_ABS_TOT SURF_OM SURF_OM_SOUND SURF_OM_NAMES <<<"$SURF_STATS"
 	echo "      ${SURF_N} write surfaces examined: ${SURF_WITH_SOUND} with a sound link, ${SURF_NO_SOUND} with none."
@@ -754,17 +759,21 @@ PRESENT_SQL="EXISTS(SELECT 1 FROM memories m WHERE m.id=ap.artifact_id) OR
 	EXISTS(SELECT 1 FROM session_handoffs h WHERE h.id=ap.artifact_id)"
 PROV_TOT="$(q1 "SELECT COUNT(*) FROM artifact_provenance;")"
 PROV_NAMED="$(q1 "SELECT COUNT(*) FROM artifact_provenance ap WHERE ${NAMED_SQL};")"
-PROV_MISMATCH="$(q1 "SELECT COUNT(*) FROM artifact_provenance ap WHERE NOT (${NAMED_SQL}) AND (${PRESENT_SQL});")"
-PROV_ABSENT="$(q1 "SELECT COUNT(*) FROM artifact_provenance ap WHERE NOT (${NAMED_SQL}) AND NOT (${PRESENT_SQL});")"
+PROV_MISMATCH="$(q1 "SELECT COUNT(*) FROM artifact_provenance ap WHERE ap.artifact_type IN (${KNOWN_TYPES}) AND NOT (${NAMED_SQL}) AND (${PRESENT_SQL});")"
+PROV_ABSENT="$(q1 "SELECT COUNT(*) FROM artifact_provenance ap WHERE ap.artifact_type IN (${KNOWN_TYPES}) AND NOT (${NAMED_SQL}) AND NOT (${PRESENT_SQL});")"
+PROV_UNKNOWN="$(q1 "SELECT COUNT(*) FROM artifact_provenance WHERE artifact_type NOT IN (${KNOWN_TYPES});")"
 NOINV="$(q1 "SELECT COUNT(*) FROM artifact_provenance ap WHERE ap.invocation_id IS NOT NULL AND ap.invocation_id != '' AND NOT EXISTS (SELECT 1 FROM tool_invocations ti WHERE ti.invocation_id = ap.invocation_id);")"
 echo "    provenance rows in total                                : ${PROV_TOT:-UNAVAILABLE}"
 echo "    artifact FOUND in the table its artifact_type names    : ${PROV_NAMED:-UNAVAILABLE}"
 echo "    TYPE MISMATCH — not there, but present in another table : ${PROV_MISMATCH:-UNAVAILABLE}"
 echo "    ABSENT — in no artifact table at all                    : ${PROV_ABSENT:-UNAVAILABLE}"
+echo "    of an artifact_type this report cannot look up          : ${PROV_UNKNOWN:-UNAVAILABLE}"
 echo "    provenance rows citing an invocation the ledger lacks  : ${NOINV:-UNAVAILABLE}"
 echo "    A TYPE MISMATCH is a metadata defect in the provenance"
 echo "    row, NOT a lost artifact: the artifact itself is present."
-PROV_BAD="$(gq "SELECT ap.artifact_id, ap.artifact_type, COALESCE((SELECT 'memories:'||m.collection FROM memories m WHERE m.id=ap.artifact_id),(SELECT 'lessons_base' FROM lessons_base l WHERE l.id=ap.artifact_id),(SELECT 'works' FROM works w WHERE w.id=ap.artifact_id),(SELECT 'session_handoffs' FROM session_handoffs h WHERE h.id=ap.artifact_id),'(no artifact table)'), datetime(ap.created_at,'unixepoch') FROM artifact_provenance ap WHERE NOT (${NAMED_SQL}) ORDER BY ap.created_at LIMIT 5;")"
+echo "    Rows of an unknown artifact_type are NOT classified: this"
+echo "    report does not claim a loss it cannot look up."
+PROV_BAD="$(gq "SELECT ap.artifact_id, ap.artifact_type, COALESCE((SELECT 'memories:'||m.collection FROM memories m WHERE m.id=ap.artifact_id),(SELECT 'lessons_base' FROM lessons_base l WHERE l.id=ap.artifact_id),(SELECT 'works' FROM works w WHERE w.id=ap.artifact_id),(SELECT 'session_handoffs' FROM session_handoffs h WHERE h.id=ap.artifact_id),'(no artifact table)'), datetime(ap.created_at,'unixepoch') FROM artifact_provenance ap WHERE ap.artifact_type IN (${KNOWN_TYPES}) AND NOT (${NAMED_SQL}) ORDER BY ap.created_at LIMIT 5;")"
 if [[ -n "$PROV_BAD" ]]; then
 	while IFS=$'\t' read -r aid atype where at; do
 		[[ -z "$aid" ]] && continue

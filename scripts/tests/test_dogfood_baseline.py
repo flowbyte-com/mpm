@@ -564,6 +564,30 @@ class TestDurabilityLinkAccounting(unittest.TestCase):
         self.assertIn("ABSENT — in no artifact table at all                    : 1", proc.stdout)
         self.assertIn("nowhere", proc.stdout)
 
+    def test_an_unknown_artifact_type_is_not_reported_as_a_loss(self) -> None:
+        """A type the report cannot look up must not become an ABSENT row.
+
+        The report must never claim a write was lost because it did not
+        know which table the artifact lives in.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db = build_fixture(Path(tmp) / "mpm.db", proposals=True)
+            con = sqlite3.connect(db)
+            try:
+                con.execute(
+                    "INSERT INTO artifact_provenance VALUES "
+                    "('p4','some-new-kind','widget',1000,'v1','agent','mpm_cli',"
+                    "'opencode','sess','inv-1')"
+                )
+                con.commit()
+            finally:
+                con.close()
+            proc = run_script(db)
+        self.assertEqual(proc.returncode, 0, proc.stdout[-3000:])
+        self.assertIn("of an artifact_type this report cannot look up          : 1", proc.stdout)
+        self.assertIn("ABSENT — in no artifact table at all                    : 0", proc.stdout)
+        self.assertIn("does not claim a loss it cannot look up", proc.stdout)
+
 
 class TestNoProductionChangingCommands(unittest.TestCase):
     """The script must never be able to change the live installation.
