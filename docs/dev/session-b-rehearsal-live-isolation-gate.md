@@ -169,7 +169,7 @@ the domain state, which did not change.
 | `scripts/rehearsal/lib.sh` | `live_snapshot` (the invalid size/mtime rule) **removed**; `live_gate_snapshot` / `live_gate_compare` added |
 | `scripts/rehearsal/10_obligations.sh` | the classified gate replaces *"the live tree's snapshot is unchanged"* |
 | `scripts/rehearsal/20_negative.sh` | the same — and the BEFORE snapshot moved to the **start** of the suite, so the comparison spans the whole suite instead of two adjacent instants |
-| `scripts/tests/test_rehearsal_live_gate.py` | **new** — 27 tests: the negative control, the non-vacuity proofs, the fail-closed cases, the "same instrument" proofs |
+| `scripts/tests/test_rehearsal_live_gate.py` | **new** — 28 tests: the negative control, the non-vacuity proofs, the fail-closed cases, the "same instrument" proofs |
 | `scripts/rehearsal/README.md` | the detectors section rewritten to describe the classification |
 
 ---
@@ -255,6 +255,20 @@ that size and mtime are identical — so the old rule would have reported
 (exit 2), and `test_a_missing_live_installation_is_not_a_measurement_failure`
 — nothing installed means nothing to protect, which is a clean
 measurement, not a failure to measure.
+
+**And a table the gate cannot READ is a measurement failure.** The gate
+hashes every table in the live database; when the `SELECT` failed, it
+returned "no fingerprint" and the table was **silently excluded** from
+the comparison. A table the gate cannot read is a table the gate cannot
+measure, and *"could not measure"* reported as *"nothing changed"* is the
+exact failure shape this change exists to remove. `table_fingerprint`
+now raises `MeasurementError` in that case, the gate exits 2, and the
+mutation — replacing the exception with a silent skip — is pinned by
+`test_a_table_that_exists_but_cannot_be_read_is_not_skipped`.
+
+Measured on the live database at the time of writing: **91 tables and
+views, 0 unreadable** — so this is a latent hole closed, not a live
+failure.
 
 ### 6.5 And the SUITES fail closed
 
@@ -372,12 +386,12 @@ moved only by the scheduler's doing, and the syscall detector reports
 
 | Gate | Result |
 |---|---|
-| `make test-scripts` | **OK** — the script suite green, with the gate's own 27 tests included |
+| `make test-scripts` | **OK** — **710 tests** green (682 baseline + 28 new) |
 | `make docs-check` | **OK** — 13 checks, 0 review items, 0 errors |
 | `mpm-lint --gate` | **PASS** |
 | `shellcheck -S warning` on the three changed shell files | **53 findings**, against 56 before the change — three fewer (the removed helpers took their findings with them) and **none new** |
 
-The gate's own suite, on its own: **27 passed**.
+The gate's own suite, on its own: **28 passed**.
 
 ---
 

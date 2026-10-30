@@ -891,7 +891,7 @@ than two adjacent instants. The gate **fails closed**: an unreadable
 live database means *could not measure* (exit 2), not *nothing changed*.
 
 **The contract tests that changed:** `scripts/tests/test_rehearsal_live_gate.py`
-(new, **27 tests**) — the negative control (a modified configuration, a
+(new, **28 tests**) — the negative control (a modified configuration, a
 modified managed instruction, an executable changed / added / removed, a
 host asset, the systemd unit, **a memory written**, a modified lesson, a
 new table in the live database), the ordinary-activity cases (the audit
