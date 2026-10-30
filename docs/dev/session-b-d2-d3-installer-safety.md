@@ -394,14 +394,15 @@ low so ordinary test removal does not trip it.
 
 ### 7.2 CI
 
-PR #188, run [41037647439](https://github.com/flowbyte-com/mpm/actions/runs/41037647439)
-at the branch head — **all three jobs green**:
+PR #188 — two full runs, **all three jobs green in each**:
 
-| Job | Result | Duration |
+| Run | Head | Result |
 |---|---|---|
-| Build + core tests | **pass** | 16m 4s |
-| Full test suite | **pass** | 13m 15s |
-| Release gate (cross-agent continuity + public-CLI subprocess suite) | **pass** | 28m 20s |
+| [41037647439](https://github.com/flowbyte-com/mpm/actions/runs/41037647439) | the code head — the fix, the `docs/INSTALL.md` change, and this record up to §6 | *Build + core tests* 16m 4s, *Full test suite* 13m 15s, *Release gate* 28m 20s — **all pass** |
+| [41041825145](https://github.com/flowbyte-com/mpm/actions/runs/41041825145) | the head that adds this section | *Build + core tests* 15m 10s, *Full test suite* 13m 7s, *Release gate* 30m 14s — **all pass** |
+
+The only commit after the second run is the one that adds this section, and it
+changes one Markdown file — it cannot change what the build sees.
 
 ---
 
