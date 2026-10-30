@@ -190,6 +190,39 @@ def build_fixture(path: Path, *, proposals: bool, seed: bool = True) -> Path:
     return path
 
 
+HOST_FIXTURE_DDL = """
+CREATE TABLE session_v2 (
+    id TEXT PRIMARY KEY, directory TEXT, project_id TEXT, cost REAL,
+    tokens_input INTEGER, tokens_cache_read INTEGER, tokens_output INTEGER,
+    tokens_reasoning INTEGER, tokens_cache_write INTEGER,
+    time_created INTEGER);
+CREATE TABLE session_message (
+    id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+INSERT INTO session_v2 VALUES
+  ('s1','/home/v/projects/themailroom',NULL,0.0,10,20,30,40,0,1000);
+INSERT INTO session_message VALUES
+  ('m1','s1','{"model":{"providerID":"minimax-coding-plan"},"cost":0}');
+"""
+
+
+def build_host_fixture(path: Path) -> Path:
+    """A disposable host session database.
+
+    The script treats an unreadable host database as a MEASUREMENT GAP
+    (the token accounting is a required measurement), so a test that
+    relied on the operator's real OpenCode database would fail on a
+    machine that has none. The fixture makes the test hermetic.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(HOST_FIXTURE_DDL)
+        con.commit()
+    finally:
+        con.close()
+    return path
+
+
 def run_script(db: Path, *extra: str) -> subprocess.CompletedProcess:
     """Run the script against a fixture, with a scratch MPM workspace.
 
@@ -198,8 +231,9 @@ def run_script(db: Path, *extra: str) -> subprocess.CompletedProcess:
     and the run exercises the healthy path rather than the stop path.
     """
     env = dict(os.environ)
-    with tempfile.TemporaryDirectory() as ws:
-        run_dir = Path(ws) / "run"
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp) / "workspace"
+        run_dir = ws / "run"
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "scheduler.state").write_text(
             json.dumps(
@@ -213,13 +247,16 @@ def run_script(db: Path, *extra: str) -> subprocess.CompletedProcess:
                 }
             )
         )
-        env["MPM_WORKSPACE"] = ws
+        host_db = build_host_fixture(Path(tmp) / "host" / "opencode.db")
+        env["MPM_WORKSPACE"] = str(ws)
         return subprocess.run(
             [
                 "bash",
                 str(SCRIPT),
                 "--db",
                 str(db),
+                "--host-db",
+                str(host_db),
                 "--no-wake",
                 *extra,
             ],
@@ -265,6 +302,52 @@ class TestFailClosed(unittest.TestCase):
             con.close()
             proc = run_script(db)
         self.assertIn("UNAVAIL", proc.stdout)
+
+    def test_missing_host_database_is_a_gap_not_a_zero(self) -> None:
+        """The token accounting is a REQUIRED measurement.
+
+        A host without the OpenCode session database therefore produces an
+        INCOMPLETE report, not a report that says "0 tokens". This is the
+        behaviour that failed on CI when the test relied on the operator's
+        real session database; the fixture above makes the test hermetic.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db = build_fixture(Path(tmp) / "mpm.db", proposals=True)
+            env = dict(os.environ)
+            with tempfile.TemporaryDirectory() as ws:
+                run_dir = Path(ws) / "run"
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "scheduler.state").write_text(
+                    json.dumps(
+                        {
+                            "last_tick_unix": int(time.time()),
+                            "process_started_unix": int(time.time()) - 60,
+                            "tick_count": 7,
+                            "pid": os.getpid(),
+                            "last_status": "ok",
+                            "last_error": "",
+                        }
+                    )
+                )
+                env["MPM_WORKSPACE"] = ws
+                proc = subprocess.run(
+                    [
+                        "bash",
+                        str(SCRIPT),
+                        "--db",
+                        str(db),
+                        "--host-db",
+                        str(Path(tmp) / "no-such-host.db"),
+                        "--no-wake",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=300,
+                )
+        self.assertEqual(proc.returncode, 2, proc.stdout[-3000:])
+        self.assertIn("host session database not readable", proc.stdout)
+        self.assertIn("token accounting is unavailable", proc.stdout)
 
     def test_a_complete_run_reports_no_gaps(self) -> None:
         """The positive control: a healthy fixture is clean and exits 0."""
