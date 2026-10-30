@@ -507,6 +507,30 @@ class TestTheGateFailsClosed(LiveGateFixture):
         r = self.compare(before, after)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
+    def test_a_table_that_exists_but_cannot_be_read_is_not_skipped(self):
+        # A table whose SCHEMA is readable but whose ROWS are not — a
+        # corrupt b-tree page, say.  The gate must NOT silently exclude
+        # it from the comparison: a table it cannot read is a table it
+        # cannot measure, and "could not measure" reported as "nothing
+        # changed" is the exact failure this gate exists to remove.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("lg", GATE)
+        lg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lg)
+
+        class _UnreadableTable:
+            """A connection whose PRAGMA works and whose SELECT does not."""
+
+            def execute(self, sql):
+                if sql.strip().upper().startswith("PRAGMA"):
+                    # PRAGMA table_info returns (cid, name, type, ...).
+                    return [(0, "id"), (1, "v")]
+                raise sqlite3.OperationalError("database disk image is malformed")
+
+        with self.assertRaises(lg.MeasurementError) as caught:
+            lg.table_fingerprint(_UnreadableTable(), "bad", drop_volatile=False)
+        self.assertIn("cannot read the live table bad", str(caught.exception))
+
 
 class TestTheRehearsalWiring(LiveGateFixture):
     """The rehearsal's own code path must drive the gate."""

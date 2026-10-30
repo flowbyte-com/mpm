@@ -221,7 +221,13 @@ def protected_inventory(live_mpm: str, oc_config: str, systemd_user: str) -> dic
 
 
 def table_fingerprint(c: sqlite3.Connection, table: str, drop_volatile: bool):
-    """(sha256, row count) for one table, or None when it does not exist."""
+    """(sha256, row count) for one table, or None when it does not exist.
+
+    A table that EXISTS but cannot be read is NOT None: it raises
+    MeasurementError.  Silently skipping it would be a "could not
+    measure" reported as "nothing changed" — the exact failure shape
+    this gate exists to remove.
+    """
     try:
         cols = [r[1] for r in c.execute(f'PRAGMA table_info("{table}")')]
     except Exception:
@@ -235,8 +241,10 @@ def table_fingerprint(c: sqlite3.Connection, table: str, drop_volatile: bool):
     sel = ", ".join(f'"{x}"' for x in cols)
     try:
         rows = c.execute(f'SELECT {sel} FROM "{table}"').fetchall()
-    except Exception:
-        return None
+    except Exception as e:
+        raise MeasurementError(
+            f"cannot read the live table {table}: {e}"
+        ) from e
     h = hashlib.sha256()
     h.update(f"{table}:{len(rows)}\n".encode())
     for r in sorted(repr(x) for x in rows):
