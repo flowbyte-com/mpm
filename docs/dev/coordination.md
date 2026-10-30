@@ -848,6 +848,88 @@ drift is pre-existing and is a separate documentation PR, not a change
 this note makes.
 
 
+### Issue-shaped note — the rehearsal's live-installation isolation gate (2026-10-30, Session B)
+
+> §4 step 1: the proposing session opens an issue-shaped note in the ledger
+> stating the interface, the proposed change, the consumers affected, the
+> compatibility story, and the contract tests that must change.
+
+**Reported by:** Session A, from the 30 October upgrade rehearsal.
+
+**The defect.** The rehearsal asserted that the live installation was
+untouched by hashing `(path, size, mtime)` over a list of live paths,
+**including the live database file**. That assertion was invalid: the
+live scheduler records health checks and SQLite checkpoints the WAL, so
+the live database's size and mtime move on their own. Measured, with the
+production scheduler active and nothing else running — the file grew by
+**86 KB** over four minutes while the operator's knowledge did not change
+by one bit, and the old rule taken twice ninety seconds apart reported
+`CHANGED` on that untouched tree.
+
+**The proposed change** — `scripts/rehearsal/live_gate.py` (new) and the
+rehearsal's two suites. The gate becomes **classified** instead of one
+hash:
+
+| Class | What it is | The rule |
+|---|---|---|
+| **PROTECTED** | the installed binaries, the host assets, the systemd unit, `opencode.jsonc`, `AGENTS.md` | **byte identity** — the path set, the mode, the sha256. The *mtime* is not part of it: an mtime records when a file was written, not what it contains |
+| **DOMAIN** | the operator's knowledge inside the live database — `memories`, `lessons`, `evidence`, volatile columns excluded | **must not change** — the substrate's own definition (`state_fingerprint.py --content`) |
+| **OPERATIONAL** | `tool_invocations`, `system_config` — the two tables the live scheduler actually moves | **may change**; the movement is **reported with the delta** |
+
+**The consumers affected:** the rehearsal harness only. The live
+installation, its configuration, its database and its scheduler are
+**not** touched — the live database is opened read-only, through
+`file:…?mode=ro`.
+
+**The compatibility story:** the rehearsal's assertion count is unchanged
+(**135**). The rehearsal's other two detectors — the `strace` of the
+whole process tree, and the systemd path shim — are **untouched**; the
+gate replaces the *file-state* detector and does not weaken the causal
+one. The installation and rollback assertions are unchanged. The
+negative suite's BEFORE snapshot now spans the **whole suite** rather
+than two adjacent instants. The gate **fails closed**: an unreadable
+live database means *could not measure* (exit 2), not *nothing changed*.
+
+**The contract tests that changed:** `scripts/tests/test_rehearsal_live_gate.py`
+(new, **22 tests**) — the negative control (a modified configuration, a
+modified managed instruction, an executable changed / added / removed, a
+host asset, the systemd unit, **a memory written**, a modified lesson, a
+new table in the live database), the ordinary-activity cases (the audit
+trail growing, the liveness counter being rewritten, a read bumping the
+volatile columns, the database file growing), the fail-closed cases, and
+the **A/B non-vacuity**: the old rule, reproduced verbatim, sees a change
+where the gate passes — and a same-size, mtime-restored content change is
+invisible to the old rule and caught by the gate.
+
+**Who must rebase:** nobody. No session depends on the changed behaviour.
+
+**What Session A must carry into the final combined-candidate
+verification.** The corrected gate is the **file-state detector** and it
+must be in the candidate. It is the detector that fails when the
+production scheduler is busy — which is precisely the condition under
+which the combined verification runs.
+
+**One row of A's own record rests on the invalid method.**
+`docs/dev/release-candidate-2026-10-30.md` row 10 reads *"The live tree
+snapshot is unchanged | PASS"*, and its "three independent detectors"
+section describes that snapshot as including **the live database**. That
+check passed on the day it was run — the scheduler happened not to write
+inside the window — but the **method could not support the claim**: it
+would have failed on a tree the rehearsal never touched, and it could
+not see a content change that preserved a file's size. **The correction
+replaces the method; it does not contradict the result.** A's record is
+**not edited** by Session B — it is A's document, and its other two
+detectors (the `strace`, 0 hits; the systemd shim) are independent of
+the file-state rule and remain exactly as recorded.
+
+| Branch | PR | Session | Status |
+|---|---|---|---|
+| `fix/rehearsal-live-isolation-gate` | [#190](https://github.com/flowbyte-com/mpm/pull/190) | B | 🟡 open — awaiting A's merge; **the corrected gate must be in the combined candidate** |
+
+Full record: [`session-b-rehearsal-live-isolation-gate.md`](session-b-rehearsal-live-isolation-gate.md).
+The rehearsal's own documentation: [`scripts/rehearsal/README.md`](../../scripts/rehearsal/README.md).
+
+
 ## 6. Cross-session communication protocol
 
 1. **The ledger is the channel of record.** A session updates its own rows in
