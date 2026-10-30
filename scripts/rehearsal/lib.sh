@@ -11,8 +11,11 @@
 #
 # Three independent detectors, because one is not enough:
 #
-#   1. A SNAPSHOT of the live tree (path, size, mtime), before and after.
-#      Any difference is a failure.
+#   1. A CLASSIFIED SNAPSHOT of the live tree, before and after.  The
+#      protected artifacts are compared BY BYTES; the live database is
+#      compared BY CLASS, because the live scheduler legitimately writes
+#      to it and a blanket size/mtime comparison is a false positive.
+#      See live_gate.py.
 #   2. A STRACE of every open/stat/access in the test's process tree,
 #      grepped for the live paths. This catches a READ that a snapshot
 #      cannot see.
@@ -124,43 +127,43 @@ safe_rm() {
   return 0
 }
 
-# ── the live-tree snapshot ────────────────────────────────────────────────
-live_snapshot_paths() {
-  printf '%s\n' \
-    "$LIVE_MPM/bin" \
-    "$LIVE_MPM/src/db/mpm.db" \
-    "$LIVE_MPM/agent_installation" \
-    "$LIVE_SYSTEMD_USER/mpm-scheduler.service" \
-    "$LIVE_OC_CONFIG/opencode.jsonc" \
-    "$LIVE_OC_CONFIG/AGENTS.md"
+# ── the live-tree isolation gate ───────────────────────────────────────────
+#
+# The gate is a Python helper, because it has to read the live database
+# and hash trees, and because it must be testable on its own: the
+# negative control in scripts/tests/test_rehearsal_live_gate.py drives
+# it against a DISPOSABLE stand-in for the live tree, so the gate's own
+# behaviour is proven without touching production.
+#
+# live_gate_snapshot <out-file>   — write a classified snapshot
+# live_gate_compare <before> <after> — compare two snapshots
+#                                    0 = clean, 1 = unauthorised change,
+#                                    2 = could not measure
+#
+# The old live_snapshot() — a hash of (path, size, mtime) over a list of
+# live paths, INCLUDING the live database file — was removed. It was
+# invalid: the live scheduler records health checks and SQLite
+# checkpoints the WAL, so the database's size and mtime move for reasons
+# that have nothing to do with the rehearsal, and the suite reported a
+# failure that had no cause. A false positive in an isolation gate is
+# worse than no gate, because it teaches the operator to ignore it.
+
+live_gate_snapshot() { # live_gate_snapshot <out-file>
+  python3 "$REH_DIR/live_gate.py" snapshot \
+    --live-mpm "$LIVE_MPM" \
+    --oc-config "$LIVE_OC_CONFIG" \
+    --systemd-user "$LIVE_SYSTEMD_USER" \
+    --out "$1"
 }
 
-live_snapshot() {
-  { for p in $(live_snapshot_paths); do
-      if [ -e "$p" ]; then
-        if [ -d "$p" ]; then
-          find "$p" -printf '%p %s %T@\n' 2>/dev/null | sort
-        else
-          printf '%s %s %s\n' "$p" "$(stat -c%s "$p" 2>/dev/null || echo -)" "$(stat -c%Y "$p" 2>/dev/null || echo -)"
-        fi
-      else
-        printf '%s ABSENT\n' "$p"
-      fi
-    done; } | sha256sum | cut -d' ' -f1
+live_gate_compare() { # live_gate_compare <before> <after>
+  python3 "$REH_DIR/live_gate.py" compare "$1" "$2"
 }
 
-live_snapshot_detail() {
-  { for p in $(live_snapshot_paths); do
-      if [ -e "$p" ]; then
-        if [ -d "$p" ]; then
-          find "$p" -printf '%p %s %T@\n' 2>/dev/null | sort
-        else
-          printf '%s %s %s\n' "$p" "$(stat -c%s "$p" 2>/dev/null || echo -)" "$(stat -c%Y "$p" 2>/dev/null || echo -)"
-        fi
-      else
-        printf '%s ABSENT\n' "$p"
-      fi
-    done; }
+# The live database the gate measures.  It is the live workspace's own
+# database; the gate never opens it for writing.
+live_db_path() {
+  printf '%s\n' "$LIVE_MPM/src/db/mpm.db"
 }
 
 # ── the strace detector ───────────────────────────────────────────────────
