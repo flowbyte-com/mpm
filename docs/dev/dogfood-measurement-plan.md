@@ -1,12 +1,21 @@
 # OpenCode + MPM dogfood — day-zero readiness and seven-day measurement plan
 
 > **Prepared:** 2026-10-30. **Scope:** Session C — behavioural evaluation.
-> **Status:** the plan is ready; **the evaluation has NOT been started** and
-> the deployed installation has **not** been modified.
+> **Revised:** 2026-10-30, after Session A's runtime upgrade landed.
+> **Status:** the plan is ready; **the evaluation has NOT been started**.
 >
 > Every number in this document was measured on the live substrate on
 > 2026-10-30 and can be reproduced with the commands shown. Nothing here is
 > estimated unless it says so.
+>
+> **Two runtimes are in play in this document.** The plan was originally
+> written against the deployed binary `g3df72315` (revision `3df72315`). A
+> controlled runtime upgrade replaced it **during the preparation of this
+> plan**, at 2026-10-30T16:32:42Z, with revision `3d63244e`. Measurements
+> taken before the upgrade are kept as a **historical baseline** and are
+> labelled as such wherever they appear. §0.4 states exactly which is which,
+> and every version-specific claim in this document was checked against the
+> source at the named revision rather than inferred.
 
 ---
 
@@ -32,16 +41,24 @@ The question is not "is MPM fast" or "is MPM correct". It is:
 
 - **The evaluation is not started.** This document is the checklist and the
   plan, not a report.
-- **The deployed installation is not modified.** `~/.mpm` remains at
-  `3df7231`, clean, with its configuration untouched. The day-zero
-  verification in §1 is the evidence.
+- **The deployed installation is not modified by this plan.** The live
+  install is now `3d63244e` (Session A's upgrade), with its configuration
+  untouched by this plan. The day-zero verification in §1 is the evidence.
 - **All measurement is read-only.** §3's queries run against a **snapshot**
   of the substrate database, produced with `sqlite3 -readonly … .backup`.
   The snapshot is the only thing queried, and the live database is never
   opened for writing at any point.
 - **The operator actions in §10 are documented, not performed.** They are
   configuration and deployment changes to the live install, and they are the
-  operator's to make.
+  operator's to make. §10 is a **marked operator-only procedure**: nothing in
+  it is executed by this plan, by the script, or by any check that reads
+  this document.
+- **The measurement uses the live `~/.mpm` database.** This is the
+  operator's decision (§10, action 1) and it is deliberate: the experiment
+  is meant to observe real cross-session recall, real scheduler behaviour,
+  real persistence and real SQLite contention — including the unresolved
+  reliability questions in issue #178 — which a disposable workspace cannot
+  reproduce.
 
 ### 0.3 What this document is not
 
@@ -57,6 +74,47 @@ Everything is either:
 The one new artefact is `scripts/dogfood_baseline.sh`, which prints all of
 it in one fixed format. It is a **read-only query runner**, not a system.
 
+### 0.4 The two runtimes — which measurements belong to which
+
+**This is the single most important correction in this revision.** The
+original plan described one system; there are now two, and a reader who
+conflates them will draw false conclusions.
+
+| | **historical baseline** | **the system under test** |
+|---|---|---|
+| installed revision | `3df723156d7649517508212453de72d347759f43` | `3d63244e1e64955db2db243e70e279d370ebf1d6` |
+| short | `3df72315` | `3d63244e` |
+| version string | `0.1.0-dev+g3df72315.t1792851233` | `0.1.0-dev+g3d63244e.t1793377957` |
+| built | 2026-10-24T14:13:53Z | 2026-10-30T16:32:37Z |
+| installed | 2026-10-24 15:14 | **2026-10-30 16:32:42Z** |
+| release record | — | `~/.mpm/releases/3d63244e…/RELEASE.json` |
+| `lesson_proposals` table | **absent** | **present** |
+| `mpm_lessons action=propose` | absent | present |
+| agent-facing `mpm_lessons action=save` | permitted | **refused — operator-only** |
+| compaction writes | a trusted lesson | a **pending proposal** |
+| confidence-decay handler | **not registered at all** | registered, **default OFF** |
+| managed-instruction protocol | 4.x | **5.0.0** |
+
+**How the installed revision was verified** (not assumed from the checkout):
+
+```bash
+~/.mpm/bin/mpm version            # → commit 3d63244e…, dirty: no
+cat ~/.mpm/releases/3d63244e…/RELEASE.json
+md5sum ~/.mpm/bin/mpm ~/.mpm/releases/3d63244e…/bin/mpm   # identical
+readlink /proc/<scheduler pid>/exe                         # → the release binary
+```
+
+The checkout at `~/.mpm` is at `3d63244e` with 119 dirty entries left by the
+upgrade's own installation step. The running scheduler (pid 3890452, started
+2026-10-30 16:32:42) executes the released `3d63244e` binary — verified by
+`/proc/<pid>/exe`, not by the checkout.
+
+**Rule for reading this document.** Every number carries the runtime it was
+measured on. The *baseline* numbers are historical evidence and are used for
+contrast. The *day-zero* numbers for the week are re-measured on
+`3d63244e` by the day-zero run of `scripts/dogfood_baseline.sh`; §1 and
+Appendix A state which is which for each figure.
+
 ---
 
 ## 1. Day-zero readiness checklist
@@ -71,14 +129,49 @@ recorded and carried into the week.
 | # | condition | measured | status |
 |---|---|---|---|
 | B1 | Substrate integrity | `PRAGMA integrity_check` → `ok` on `~/.mpm/src/db/mpm.db` (22.6 MB, WAL 4.0 MB) | ✅ pass |
-| B2 | The scheduler is alive | pid 3709217, `--interval 60s`, `last_status` `ok`, last tick 22 s before the check. The `tick_count` series starts from 1 because the service was restarted during this preparation (§12.2) | ✅ pass |
+| B2 | The scheduler is alive | pid 3890452 (started 2026-10-30 16:32:42), `--interval 60s`, `last_status` `ok`, exe verified as the released `3d63244e` binary. The `tick_count` series starts from a low number because the service was restarted by the runtime upgrade (§12.3) | ✅ pass |
 | B3 | The substrate is the one the agent uses | the OpenCode plugin's `resolveWorkspace()` falls back to `$HOME/.mpm`; the running OpenCode processes have **no** `MPM_WORKSPACE`, so the live install **is** the substrate | ✅ pass (with the consequence in B4) |
-| B4 | The workspace choice is deliberate | **not decided.** `~/.mpm-dogfood` exists and was used by a session on 2026-10-29 (443 `opencode` invocations, last at 15:31); the live install had 363 at the time of the check, last at 2026-10-30 12:06 | ⛔ **operator decision required — §10, action 1** |
+| B4 | The workspace choice is deliberate | **decided: the live `~/.mpm` database**, after Session A's controlled runtime upgrade. Chosen deliberately so the week observes real cross-session recall, real scheduler behaviour, real persistence and real SQLite contention, including issue #178. `~/.mpm-dogfood` exists but is **not** used | ✅ pass (operator decision, recorded) |
 | B5 | The credential is visible to the runtime process | `MINIMAX_API_KEY` is defined in `~/.config/mpm/mpm.env`, which the scheduler unit reads via `EnvironmentFile=-%h/.config/mpm/mpm.env`. It is in **no** shell profile (`~/.bashrc`, `~/.profile`: 0 hits) and **not** in the systemd user environment | ⛔ **partial — §10, action 2** |
 | B6 | The deployed credential is not a placeholder | the deployed `ResolveAPIKey` returns the configured value **verbatim**, so `"api_key": "$MINIMAX_API_KEY"` is sent to the provider as a literal bearer token | ⛔ **§10, action 3** |
 | B7 | The request timeout can carry a real generation | the live profile has `"timeout_seconds": 3`, and the provider's own median latency is 560–1007 ms with a tail to 4761 ms | ⛔ **§10, action 4** |
-| B8 | Confidence decay is off | `system_config` has **no** `confidence.decay.enabled` key, and the substrate's documented default for an absent key is `1` = **on** (`GetConfigInt(key, 1)`) | ⛔ **discrepancy — §10, action 5** |
+| B8 | Confidence decay is off | **verified per revision — see the note below** | ✅ pass (no action required) |
 | B9 | The autonomous critic is gated off | `mpm-critic` is installed and the scheduler registers a `critic_audit` wake kind, but `scheduled_wakes` holds 8 rows — all `fired=1`, all `cascade tick summary` or `cron:epistemic-compaction`. **No `critic_audit` wake exists**, so the critic does not run | ✅ pass (keep it that way — §10, action 6) |
+
+### 1.1.1 B8 — confidence decay, resolved per revision
+
+The original plan asserted that "the old deployed scheduler runs confidence
+decay with an absent configuration key" and recommended editing `mpm.env`
+and restarting the scheduler to disable it. **That was wrong on both
+counts, and the recommendation is withdrawn** (the former §10 action 5 is
+gone; see §10).
+
+The behaviour is **revision-specific**, and both revisions were checked in
+the source rather than inferred from configuration:
+
+| | old runtime `3df72315` | upgraded runtime `3d63244e` |
+|---|---|---|
+| the decay handler's source file | `internal/scheduler/confidence_decay.go` **does not exist** at this revision | exists |
+| is the handler registered? | **no** — `cmd/mpm-scheduler/main.go` registers exactly three tick handlers: `cascade_drain`, `openclaw_ingest`, `cascade_wake_reconcile` | yes |
+| the default when the key is absent | *not applicable — the handler does not run* | `core.DefaultConfidenceDecayEnabled = 0` → **OFF** |
+| the gate | — | `dm.GetConfigInt("confidence.decay.enabled", core.DefaultConfidenceDecayEnabled)` — an absent key falls back to the constant, so **absent ⇒ OFF** |
+
+Two independent facts, each checked at the named revision:
+
+- the **old** runtime could not run confidence decay at all, because the
+  handler was never registered — the "absent key runs decay enabled"
+  claim does not describe it;
+- the **new** runtime registers the handler but **defaults it OFF**, by an
+  explicit design decision recorded at `internal/core/confidence_maintenance.go`
+  ("The pass is OFF by default and runs only on an explicit opt-in"), so an
+  absent key means *off* there too.
+
+`system_config` holds no `confidence.decay.enabled` key on the live
+database, so the upgraded runtime's decay is **off** and **stays off**
+without any configuration change. **No `mpm.env` edit. No scheduler
+restart. No operator action.** The live scheduler was not restarted for this
+plan, and the day's `tick_count` series continues from the upgrade's own
+restart (pid 3890452, started 16:32:42).
 
 ### 1.2 Advisory
 
@@ -86,12 +179,14 @@ recorded and carried into the week.
 |---|---|---|---|
 | A1 | The telemetry collector is running | **it is not.** no `mpm-telemetry.service` in `~/.config/systemd/user/`, no socket at `~/.mpm/runtime/mpm-telemetry.sock`, no `~/.mpm/src/db/telemetry.db`; `mpm-telemetry ping` → `no such file or directory` | provider-reported usage through MPM's own telemetry is therefore unavailable. §5.4 uses the host's counters instead, which are available |
 | A2 | A stale scheduler state file exists | `~/.mpm/run/scheduler [conflicted].state` — `tick_count` 414, pid 7575, last tick 2026-10-28 23:44 | a leftover from a merged state swap. Harmless today; it is the shape a **stale-state adoption** bug would take, so it is checked daily (§7.1) |
-| A3 | Recurring `mpm_handoff write` failures | 18 `internal` errors in the last 7 days, matching 4 `warn handoff — EndSessionV2 upsert failed: CHECK constraint failed: ended_state IN (...)` audit rows | a real defect the week will keep hitting; it degrades handoff continuity, which is exactly what M1 measures |
-| A4 | `mpm_memory query` internal errors | 4 in the last 7 days | small; watch |
-| A5 | Recurring `health_check` substrate errors | 6 in the last 7 days | watch |
-| A6 | No lesson has ever been reinforced | `lessons.reinforcement_count` is `1` for all 36 rows | see §6 — this is the finding, not a blocker |
-| A7 | No lesson has any evidence | 0 of 36 lessons have an `evidence` row | §6 |
+| A3 | Recurring `mpm_handoff write` failures | **18 `internal` errors in the last 7 days on the old runtime** (`3df72315`), matching 4 `warn handoff — EndSessionV2 upsert failed: CHECK constraint failed: ended_state IN (...)` audit rows | a real defect the week will keep hitting; it degrades handoff continuity, which is exactly what M1 measures. **The upgraded runtime validates the enumeration before the write** (`ValidateHandoffEndedState`), so this specific failure mode is expected to stop; the daily block counts it so the change is *observed*, not assumed (§7.3) |
+| A4 | `mpm_memory query` internal errors | 4 in the last 7 days (old runtime) | small; watch |
+| A5 | Recurring `health_check` substrate errors | 6 in the last 7 days (old runtime) | watch |
+| A6 | No lesson has ever been reinforced | `lessons.reinforcement_count` is `1` for every row | see §6 — this is the finding, not a blocker |
+| A7 | No lesson has a **directly linked** evidence row | 0 of 36 lessons (old runtime) have an `evidence` row with `artifact_type='lesson'` | **Corrected reading — see §6.3.** Zero *directly linked* evidence rows means that particular linkage is absent. It is **not** a claim that the lesson is false, and **not** a claim that the lesson has no other provenance |
 | A8 | Same-UID separation is not a security boundary | every workspace in this topology is under `$HOME` and runs as the same UID | documented in §10, action 7 |
+| A9 | The `internal` outcome class is over-used | on the old runtime, 36 `internal` rows in 7 days, of which **26 were misclassified payload-shape errors** ("commitments must be an array of strings…", "tags must be an array of strings…") | `internal` does **not** mean "the substrate failed a well-formed request". Read it with the §7.3 breakdown, never as a fault rate |
+| A10 | The upgraded runtime refuses agent-facing lesson writes | `mpm_lessons action=save` is now refused at the execution point; the refusal is classified `internal\|unclassified` | **A policy refusal misclassified as a system fault.** It is a correct refusal that wrote nothing, but it will pollute the `internal` class for the whole week (§7.3) |
 
 ### 1.3 The day-zero command
 
@@ -99,15 +194,44 @@ recorded and carried into the week.
 scripts/dogfood_baseline.sh
 ```
 
-One command, ~90 lines of fixed-format output, exit 1 if any stop condition
-is breached. It is read-only by construction (§0.2). The day-zero run's
-output is the reference against which day 1 is compared.
+One command, ~150 lines of fixed-format output. It is read-only by
+construction (§0.2). The day-zero run's output is the reference against
+which day 1 is compared.
+
+**Exit status is part of the measurement, not an afterthought:**
+
+| code | meaning | what the operator does |
+|---|---|---|
+| `0` | the report is **complete** and no stop condition is breached | proceed |
+| `1` | the report is complete and **a stop condition is breached** | §9 — the experiment ends or pauses |
+| `2` | the report is **INCOMPLETE**: a required measurement was missing or unreadable | **do not treat the report as a result.** A missing measurement is never reported as a measurement of zero |
+
+The script **fails closed**. Every query that cannot run — a missing table,
+a renamed column, an unreadable database — is recorded as a *measurement
+gap*, printed in its own section with the underlying error, and forces exit
+`2`. A partially-measured day is an incomplete day, and the week's series
+would otherwise silently acquire a zero.
+
+A **schema version difference** is not a gap. The pre-upgrade schema (no
+`lesson_proposals` table) is a supported state; the script reports it as a
+**version difference** in §4b and explicitly says the lesson-proposal
+lifecycle is *unavailable by version* — never that the proposal queue is
+empty.
 
 ---
 
 ## 2. The project-to-collection mapping
 
 ### 2.1 What the live substrate actually holds
+
+> **These counts are the historical baseline** (`3df72315`, before the
+> upgrade) and are preserved unchanged, because they are the evidence for
+> a **structural** finding — the `collection` column carries three
+> different kinds of thing — and a structural finding does not decay. The
+> day-zero run re-measures the counts on `3d63244e`; §2.2's table is
+> reproduced in Appendix A.1 with the upgraded numbers for comparison.
+> The one substantive movement is that UNACCOUNTED now carries **1** tagged
+> row where it carried **0**; the structural gap is otherwise unchanged.
 
 `memories.collection` is not a single dimension. Measured live
 (`deleted_at IS NULL`):
@@ -284,10 +408,93 @@ SELECT collection, COUNT(*) FROM memories
 SELECT collection, COUNT(*), SUM(created_at >= :since)
   FROM memories WHERE deleted_at IS NULL GROUP BY collection;
 
-SELECT COUNT(*) FROM lessons;
+-- `lessons` is a VIEW over `lessons_base`; the view does not expose the
+-- `deleted_at` tombstone, so a "live lessons" count must go to the base
+-- table. `lessons.created` is TEXT (RFC3339), NOT an epoch column.
+SELECT COUNT(*) FROM lessons_base WHERE deleted_at IS NULL;
+
 SELECT COUNT(*) FROM evidence;
 SELECT COUNT(*), SUM(read_at IS NOT NULL) FROM session_handoffs;
 SELECT COUNT(*), SUM(fired) FROM scheduled_wakes;
+```
+
+**Lesson-proposal lifecycle** (§6 — post-upgrade only; the table's absence
+is a *version difference*, not an empty queue)
+
+```sql
+-- presence, not `schema_migrations`: the table is created by the base
+-- DDL of the post-upgrade runtime and has NO migration id of its own.
+SELECT COUNT(*) FROM sqlite_master
+  WHERE type='table' AND name='lesson_proposals';
+
+SELECT status, COUNT(*) FROM lesson_proposals GROUP BY status;
+
+-- compaction-origin: the compaction path stores a {"title","body"}
+-- envelope as the content; the agent path stores the raw fact text.
+-- A non-empty `source_ids` is a SECONDARY signal (cited sources) and
+-- does NOT by itself identify compaction.
+SELECT COUNT(*) FROM lesson_proposals
+  WHERE json_valid(content) AND json_extract(content,'$.title') IS NOT NULL;
+
+SELECT id, created, status,
+       CASE WHEN json_valid(content) AND json_extract(content,'$.title') IS NOT NULL
+            THEN 'compaction' ELSE 'agent' END AS origin,
+       CASE WHEN source_ids IS NOT NULL AND source_ids NOT IN ('null','','[]')
+            THEN json_array_length(source_ids) ELSE 0 END AS cited_sources,
+       source_session_id, framework_name, model_name,
+       promoted_lesson_id, reviewed_at
+  FROM lesson_proposals ORDER BY created;
+```
+
+**Write reliability** (§M5)
+
+```sql
+-- the attempted-write ledger. `tool_invocations.invocation_id` is NOT
+-- unique: one id can carry rows from several tools. Any join on it must
+-- therefore be guarded, or it multiplies rows and manufactures
+-- confirmations that did not happen.
+SELECT invocation_id, COUNT(*) n FROM tool_invocations
+  GROUP BY invocation_id HAVING n > 1;
+
+-- confirmed durability, only where the link is SOUND: the invocation_id
+-- maps to exactly one ledger row AND exactly one provenance row, and the
+-- artifact named by that provenance row is FOUND in the table its
+-- artifact_type names.
+SELECT ti.tool_name || ' ' || ti.action                        AS surface,
+       SUM(ti.result_status = 'success')                       AS reported_ok,
+       SUM(ti.result_status = 'success' AND lk.n = 1
+           AND pv.n = 1)                                       AS sound_link,
+       SUM(ti.result_status = 'success' AND lk.n = 1
+           AND pv.n = 1 AND (
+               (ap.artifact_type = 'memory'   AND m.id  IS NOT NULL) OR
+               (ap.artifact_type = 'decision' AND md.id IS NOT NULL) OR
+               (ap.artifact_type = 'theory'   AND mt.id IS NOT NULL) OR
+               (ap.artifact_type = 'lesson'   AND lb.id IS NOT NULL) OR
+               (ap.artifact_type = 'work'     AND wk.id IS NOT NULL) OR
+               (ap.artifact_type = 'handoff'  AND ho.id IS NOT NULL)))
+                                                           AS confirmed
+  FROM tool_invocations ti
+  LEFT JOIN (SELECT invocation_id, COUNT(*) n FROM tool_invocations
+              GROUP BY invocation_id) lk
+         ON lk.invocation_id = ti.invocation_id
+  LEFT JOIN (SELECT invocation_id, COUNT(*) n FROM artifact_provenance
+              WHERE invocation_id IS NOT NULL AND invocation_id != ''
+              GROUP BY invocation_id) pv
+         ON pv.invocation_id = ti.invocation_id
+  LEFT JOIN artifact_provenance ap
+         ON ap.invocation_id = ti.invocation_id AND pv.n = 1 AND lk.n = 1
+  LEFT JOIN memories m          ON m.id  = ap.artifact_id AND ap.artifact_type = 'memory'
+  LEFT JOIN memories md         ON md.id = ap.artifact_id AND ap.artifact_type = 'decision'
+  LEFT JOIN memories mt         ON mt.id = ap.artifact_id AND ap.artifact_type = 'theory'
+  LEFT JOIN lessons_base lb     ON lb.id = ap.artifact_id AND ap.artifact_type = 'lesson'
+  LEFT JOIN works wk            ON wk.id = ap.artifact_id AND ap.artifact_type = 'work'
+  LEFT JOIN session_handoffs ho ON ho.id = ap.artifact_id AND ap.artifact_type = 'handoff'
+ WHERE ti.result_status = 'success'
+ GROUP BY 1 ORDER BY 2 DESC;
+
+-- the busy/locked failure mode (issue #178)
+SELECT datetime(started_at,'unixepoch'), tool_name, action, error_message
+  FROM tool_invocations WHERE outcome_code='wal_busy_timeout';
 ```
 
 **Evidence linkage** (the supported/unsupported boundary, §6)
@@ -346,10 +553,16 @@ SELECT COALESCE(outcome_class,'(unclassified)'), result_status, COUNT(*)
 **Runtime errors**
 
 ```sql
-SELECT datetime(created_at,'unixepoch'), level, component, message
+-- `system_audit_log.created_at` is declared INTEGER but the stored
+-- values are TEXT timestamps ('2026-10-30 16:33:36'). In SQLite a TEXT
+-- value compares GREATER than every INTEGER, so `created_at >= :since`
+-- matches EVERY row and silently reports the whole history as "in the
+-- window". The window must be computed with strftime('%s', created_at).
+SELECT created_at, level, component, message
   FROM system_audit_log
-  WHERE created_at >= :since AND level IN ('warn','error','fatal','critical')
-  ORDER BY created_at DESC;
+  WHERE CAST(strftime('%s', created_at) AS INTEGER) >= :since
+    AND level IN ('warn','error','fatal','critical')
+  ORDER BY created_at;
 ```
 
 The substrate also exposes this through its own tool surface — `mpm_system`
@@ -364,8 +577,8 @@ audit log is the right one for faults.)
 
 ```bash
 cat ~/.mpm/run/scheduler.state
-# {"last_tick_unix":…,"process_started_unix":…,"tick_count":1,"pid":3709217,
-#  "last_status":"ok","last_error":""}
+# {"last_tick_unix":1793378263,"process_started_unix":1793377963,"tick_count":17,
+#  "pid":3890452,"last_status":"ok","last_error":""}
 ```
 
 ### 3.3 The host-side baseline
@@ -397,10 +610,15 @@ Day-zero measured totals across all 22 sessions:
 
 ---
 
-## 4. The four measurements
+## 4. The five measurements
 
 Each measurement states the question, the instrument, the numerator and the
 denominator, **what it does not measure**, and how it is reported.
+
+M1–M4 are the behavioural measurements. **M5 is an operational one**, added
+for this revision: it measures whether the substrate's writes are actually
+durable, which is the substrate of every other measurement — a knowledge
+base that silently loses writes cannot be evaluated for recall.
 
 ### M1 — cross-session recall
 
@@ -555,6 +773,135 @@ operator's attention missed.
 contaminations per day (operator). The confirmed count is the metric; the
 candidate count is a workload measure.
 
+### M5 — write reliability: reported success versus confirmed durability
+
+> *When the substrate says a write succeeded, did the artifact actually
+> end up on disk and can it still be found?*
+
+**Why this is a measurement and not a health check.** Issue #178 remains
+open and covers writes lost under ordinary SQLite contention. The daily
+block already surfaces `wal_busy_timeout` errors; what it did **not** do is
+distinguish *the tool said yes* from *the artifact is there*. M5 measures
+that gap on the live database, using only instruments that already exist.
+
+**The methodology, in one sentence.** A write is **attempted** when it
+appears in `tool_invocations`; it is **reported successful** when that row
+says `result_status='success'`; it is **confirmed durable** only when a
+*sound* link ties that invocation to a provenance row whose artifact is
+then **found** in the table its `artifact_type` names. The three are
+different claims and the report keeps them apart.
+
+#### M5.1 The instruments, and what each one can and cannot see
+
+| instrument | what it holds | what it cannot see |
+|---|---|---|
+| `tool_invocations` | the tool-surface ledger: tool, action, `result_status`, `outcome_class`, `outcome_code`, `error_message`, `invocation_id` | **not every write.** The CLI and the internal paths write without a tool invocation. It is a **lower bound** on attempts |
+| `artifact_provenance` | one row per artifact, with `artifact_id`, `artifact_type`, and `invocation_id` | the link is **absent** for most surfaces, and `invocation_id` is **not unique** in the ledger |
+| `system_audit_log` | the substrate's own fault record — including failures on paths that never became tool calls | sparse: 17 rows over the whole corpus |
+| the target tables | `memories`, `lessons_base`, `lesson_proposals`, `session_handoffs` | they hold the artifact, not the *report* of the write |
+
+#### M5.2 The three link states — why the naive join is wrong
+
+The obvious way to confirm durability is
+
+```sql
+-- WRONG. Do not use this.
+SELECT COUNT(*) FROM tool_invocations ti
+  JOIN artifact_provenance ap ON ap.invocation_id = ti.invocation_id
+  JOIN memories m ON m.id = ap.artifact_id;
+```
+
+It is wrong for **two independent reasons**, both measured on the live
+database:
+
+1. **`tool_invocations.invocation_id` is not unique.** 23 800 ledger rows
+   carry 23 749 distinct invocation ids, and the worst offender
+   (`inv_d6d08b3e-…`) carries **24 rows across 7 different tools** — a
+   `mpm_memory save`, several `mpm_decisions record`, `mpm_lessons
+   propose`, `mpm_theories propose`, `mpm_work note` and `mpm_work create`
+   all share it. Joining on it **multiplies rows** and manufactures a
+   "confirmed" write for every one of them.
+2. **`artifact_provenance` can hold several rows for one invocation id**
+   (8 in the worst case), so even a unique invocation id does not
+   guarantee a unique artifact.
+
+So M5 counts a link only when it is **sound**: the invocation id maps to
+exactly one ledger row **and** exactly one provenance row. A link that
+fails that test is reported as **ambiguous**, which is a measurement blind
+spot — *not* a lost write.
+
+#### M5.3 What is measured, and the measured result
+
+| # | quantity | how | day-zero result (live, `3d63244e`) |
+|---|---|---|---|
+| W1 | attempted writes (observable lower bound) | write-classified rows in `tool_invocations` | ~393 all time |
+| W2 | reported successes / failures | `result_status` by `outcome_class` | 265 / 95 in the window |
+| W3 | **confirmed durable** (per write) | sound link + artifact found | **only `mpm_memory save` has a sound link: 78 of 79 confirmed** |
+| W4 | **unconfirmable per write** (aggregate only) | surfaces with no sound link | decisions, handoffs, lessons, changelog, theories, evidence, work — **all of them** |
+| W5 | unknown outcome | reported success, no provenance row, no returned artifact id | 2 on `mpm_memory save` |
+| W6 | ambiguous link | invocation id shared by several ledger rows | 5 on `mpm_memory save` |
+| W7 | SQLite busy/locked | `outcome_code='wal_busy_timeout'` | **2**, both `mpm_decisions record`, 2026-10-24/25 |
+| W8 | handoff persistence failures | `system_audit_log` `component='handoff'` | **2**, both `EndSessionV2 … CHECK constraint failed: ended_state` |
+| W9 | provenance integrity | artifact absent from the table its type names; invocation absent from the ledger | **1** and **12** respectively |
+| W10 | scheduler correlation | busy/locked events vs scheduler ticks (journal) | 1 of 2 busy events within 60 s of a tick |
+
+#### M5.4 What M5 does NOT measure — the blind spots, stated
+
+These are the reasons the daily report says "unconfirmable" rather than
+"lost". They are the substance of the finding, not caveats around it.
+
+- **The attempted-write count is a lower bound.** Writes made by the CLI
+  (`mpm memory add`, `mpm lesson add`, `mpm record_decision`) and by
+  internal paths are not in `tool_invocations`. The live database proves
+  this: 46 `decision` provenance rows exist, and **not one** of them has an
+  `invocation_id` — they were written without a tool call. A week of
+  measured attempts undercounts real attempts by an unknown amount.
+- **Per-write durability is confirmable for exactly one surface.** Only
+  `mpm_memory save` carries a sound invocation→artifact link. Every other
+  write surface is **aggregate-only**: the write and the artifact cannot be
+  paired, so "was this one durable?" is **unanswerable** for decisions,
+  handoffs, lessons, changelog entries, theories, evidence and work items.
+  The aggregate row counts are reported in §7d of the daily block and are
+  **not** a loss measurement: a handoff upsert on an existing `session_id`
+  *replaces* a row instead of adding one, so a lower row count is expected.
+- **A zero-hit handoff audit row is not a lost handoff.** The two
+  `EndSessionV2 … CHECK constraint failed` rows **do** have a nearby
+  `mpm_handoff write` tool call that reported `error`. They are *reported*
+  failures, not silent losses. (The original plan asserted these had no
+  nearby tool call; that was wrong, and the cause was a real defect in the
+  correlation itself — see §7.3.)
+- **The `internal` class cannot be read as a fault rate.** It is dominated
+  by misclassified payload-shape errors and by policy refusals (§7.3).
+- **The `artifact_type` namespace collides.** A **memory** saved into the
+  `lessons` *collection* is recorded with `artifact_type='lesson'` while its
+  id belongs to a memory row. One such row exists live, and it is why W9
+  reads **1** and not 0. A provenance row is therefore **not** by itself
+  proof that an artifact of that type exists.
+- **Nothing here is instrumented to detect a write that was never
+  attempted at all** — a caller that silently skipped a write leaves no
+  trace in any of these tables.
+- **The week does not create contention.** No artificial write load, no
+  lock, no stress. The natural workload of four real projects provides the
+  contention, and the busy/locked count is therefore a *sample* of
+  ordinary operation, not a controlled experiment.
+
+#### M5.5 The daily reporting form
+
+The daily block's §7 prints, in this order: attempted writes (all time and
+in the window), reported success/failure, the outcome-class breakdown, the
+`internal`-class breakdown by cause, the per-surface
+reported-vs-confirmed table, the aggregate cross-checks, the unknown-outcome
+and ambiguous-link breakdown, the busy/locked rows, the handoff persistence
+failures with their nearest tool outcome, the provenance integrity counts,
+and the scheduler correlation. The daily answer the operator adds is one
+line:
+
+> **Did anything you wrote in the last day turn out not to be there?** — and
+> if so, which surface.
+
+A single confirmed instance of a reported success that cannot be found is
+worth more than the seven-day rate, and is recorded verbatim.
+
 ---
 
 ## 5. Token accounting
@@ -638,51 +985,183 @@ instrument. No second subsystem is built.
 
 ---
 
-## 6. The proposal queues, and the supported/unsupported boundary
+## 6. The lesson-proposal lifecycle, and the supported/unsupported boundary
 
-### 6.1 There is no lesson-proposal queue — and that is the finding
+### 6.1 The lifecycle exists now — the old finding is withdrawn
 
-The brief asks how to inspect the lesson-proposal queue. The honest answer:
+The original plan's §6.1 read:
 
-> **There isn't one. A lesson is written straight into the durable store
-> with no review gate.**
+> *There isn't one. A lesson is written straight into the durable store with
+> no review gate.*
 
-`mpm_lessons` has six actions — `save`, `search`, `list`, `delete`,
-`restore`, `shred` — and **no** `propose`, `review` or `promote`. `save`
-calls `dm.AddLesson` and the row is live immediately. There is no pending
-state, no reviewer, and no queue.
+**That was true of the old runtime `3df72315`, and it is no longer true.**
+The upgraded runtime `3d63244e` introduces a real review gate, and the plan
+is corrected accordingly. Both revisions are recorded, because the contrast
+*is* the finding:
 
-That makes the brief's real question sharper, not moot: **with no review
-gate, every lesson is trusted on write, so the question is whether the
-substrate can tell a supported lesson from an unsupported one after the
-fact.** It can, partially — and the day-zero numbers are stark:
+| | old runtime `3df72315` | upgraded runtime `3d63244e` |
+|---|---|---|
+| lesson-proposal queue | **did not exist** | **`lesson_proposals` table** |
+| `mpm_lessons` actions | `save`, `search`, `list`, `delete`, `restore`, `shred` | `save` **(operator-only)**, `propose`, `search`, `list`, `delete`, `restore`, `shred` |
+| agent-facing `action=save` | permitted — a lesson was live the instant it was written | **refused at the execution point**; nothing is written |
+| how an agent records an experience | `mpm_lessons action=save` | `mpm_lessons action=propose` → a **pending** proposal |
+| what compaction writes | a trusted lesson | a **pending** proposal (`ProposalsCreated`, never a trusted lesson) |
+| CLI review surface | none | `mpm lesson proposals`, `mpm lesson promote <id>`, `mpm lesson reject <id>`, `mpm lesson stats` |
 
-| fact | measured |
-|---|---|
-| lessons in the corpus | **36** |
-| lessons with **any** evidence row | **0** |
-| lessons with `reinforcement_count > 1` | **0** (all are exactly 1) |
-| evidence rows overall | 101 — 98 for `memory`, 3 for `theory`, **0** for `lesson`**, 0 for `decision`** |
-| distinct `created_by` across all 101 evidence rows | **4** |
-| `independence_factor` across all evidence rows | **1.0 for every row** |
+The refusal is **structural**, not advisory. The error text says it
+explicitly: *"a lesson is trusted on arrival … No payload field — including
+`operator=true`, `confirm=true` or `review=true` — authorizes it: a value
+the caller supplies is not operator intent."* The lesson surface has no
+pending state, so a row there is immediately in the trusted retrieval set;
+that is exactly why creating one is the operator's decision and not the
+agent's.
 
-**Every lesson in the corpus is, by the substrate's own evidence model, an
-unsupported assertion.** Not one has been corroborated, and not one has
-been re-asserted.
+#### 6.1.1 The proposal states
 
-### 6.2 The three queues that do exist
+`lesson_proposals.status` is a closed enum: `pending`, `promoted`,
+`rejected`.
 
-| queue | where | day-zero | action |
+| state | meaning | what carries it |
+|---|---|---|
+| **pending** | proposed, **not** trusted | invisible to lesson search, lesson list and the wake context |
+| **promoted** | an operator accepted it | `promoted_lesson_id` points at the durable lesson; `reviewed_at` is set |
+| **rejected** | an operator declined it | `reviewed_at` is set; `promoted_lesson_id` is null |
+
+The transition is **one-way and operator-driven**: `PromoteLessonProposal`
+moves `pending → promoted` and creates the lesson; `RejectLessonProposal`
+moves `pending → rejected`. Both write `reviewed_at`. An agent cannot
+reach either.
+
+#### 6.1.2 Telling a compaction proposal from an agent proposal
+
+This matters for the week, because the two have different trust
+implications and only one of them is *derived* from evidence already in
+the substrate.
+
+| | agent proposal | compaction proposal |
+|---|---|---|
+| `content` | the raw `fact` text the caller supplied | a JSON **envelope**: `{"title": …, "body": …}` |
+| `source_ids` | the caller's cited sources; **may be empty** | the **raw memory ids** of the synthesised batch — never empty |
+| `model_name` | usually empty on this host | usually empty on this host |
+| detection | — | `json_valid(content) AND json_extract(content,'$.title') IS NOT NULL` |
+
+The daily block reports both signals, and labels the content test as the
+**primary** one:
+
+> *compaction-origin proposals* — content carries a `{"title":…}` envelope
+> *proposals carrying cited sources* — `source_ids` is non-empty
+
+**`source_ids` non-empty does NOT by itself mean compaction**, because the
+agent-facing `action=propose` accepts `source_ids` from its payload
+("the Provenance Proxy's citations"). A proposal with cited sources and no
+envelope is an agent proposal that cited something.
+
+#### 6.1.3 The provenance a proposal carries
+
+`lesson_proposals` records: `source_session_id`, `framework_name`,
+`model_name`, `source_ids`, `promoted_lesson_id`, `reviewed_at`. The daily
+block reports how many proposals have each field populated. On the live
+database at the time of writing, `source_session_id` and `framework_name`
+were populated for every proposal and `model_name` for none — the host
+reports no model name on this path. A proposal with no `model_name` is not
+damaged; it means the host did not supply one.
+
+#### 6.1.4 The version difference, handled explicitly
+
+The pre-upgrade schema has **no `lesson_proposals` table**. That is a
+**version difference**, and the script reports it as one:
+
+```
+── 4b. LESSON PROPOSALS (the trust gate) ───────────────────────────
+  VERSION DIFFERENCE — this snapshot predates the lesson-proposal lifecycle.
+  The `lesson_proposals` table does not exist. That is NOT an empty queue:
+  the concept did not exist yet at this revision. The lesson-proposal
+  lifecycle below is therefore UNAVAILABLE for this snapshot, by version.
+```
+
+**Detection is by table presence, not by migration id.** `lesson_proposals`
+is created by the **base DDL** of the post-upgrade runtime and has **no row
+in `schema_migrations`** — the latest migration is `lessons_fts_resync_v1`
+(2026-10-23), unchanged by the upgrade. A version check that consulted
+`schema_migrations` would report "up to date" on a pre-upgrade database.
+
+This is exercised in the validation (§7 of the script's own test matrix, and
+Task 7 of this revision): the script is run against a disposable database
+initialised by the **old** binary and must report the version difference,
+not an empty queue, and must exit `0` with no measurement gaps.
+
+### 6.2 The other three queues that exist
+
+The lesson-proposal queue is new; these three were already there and are
+still measured daily.
+
+| queue | where | day-zero (old runtime) | action |
 |---|---|---|---|
 | **theories awaiting a resolution decision** | `mpm_theories list status=pending` (CLI: `mpm theory pending`) — `memories.collection='theories'` with `metadata.status='pending'` | **1** pending | `mpm_theories resolve` (CLI: `mpm theory resolve`) |
 | **operator review queue** | `audit_cluster_proposals` where `status='active'` | **5 rows** — security (occurrence count 3), handoff (2, 1, 1), web_db (1) | `mpm_system` actions `list_clusters` / `snooze_cluster` / `unsnooze_cluster` / `resolve_cluster` / `annotate_cluster` |
 | **pending invalidation obligations** | `epistemic_cascade_outbox` where `status='pending'` | **0** | automatic |
 
-The theory queue is the closest analogue to the "lesson-proposal queue" the
-brief names, and it is a **better** model: a theory is explicitly a
-hypothesis awaiting evidence, with a resolution action. A lesson is not.
+A theory is explicitly a hypothesis awaiting evidence, with a resolution
+action. A **pending lesson proposal** is now the same shape of thing for
+lessons — a claim awaiting a decision — and the week measures both.
 
-### 6.3 Useful knowledge vs unsupported assertion — the criteria
+### 6.3 The supported/unsupported boundary — the corrected claim
+
+The original plan concluded:
+
+> *Every lesson in the corpus is, by the substrate's own evidence model, an
+> unsupported assertion.*
+
+**That over-claims, and it is withdrawn.** What was measured is:
+
+| fact | measured (old runtime, 36 lessons) |
+|---|---|
+| lessons in the corpus | 36 |
+| lessons with a **directly linked** evidence row (`evidence.artifact_type='lesson'`) | **0** |
+| lessons with `reinforcement_count > 1` | 0 (all are exactly 1) |
+| evidence rows overall | 101 — 98 `memory`, 3 `theory`, **0 `lesson`**, **0 `decision`** |
+| distinct `created_by` across all 101 evidence rows | 4 |
+| `independence_factor` across all evidence rows | 1.0 for every row |
+
+**What that does support:** no lesson in the corpus is linked to an evidence
+row *in the `evidence` table*. The `evidence` linkage — one particular
+provenance path — is absent for lessons.
+
+**What that does NOT support:**
+
+- it does **not** establish that any lesson is **false**;
+- it does **not** establish that a lesson is **unsupported by every other
+  provenance path**. A lesson can carry, and does carry, other provenance:
+  `source_session_id`, `artifact_provenance` rows, `retrieval_metadata`
+  surfacing history, and — from the upgraded runtime onward — the review
+  trail of the proposal it was promoted from. Absence from one table is
+  not absence of support.
+- it does **not** mean the corpus contains no supported knowledge. The
+  98 memory-linked and 3 theory-linked evidence rows *are* directly
+  linked; the finding is specific to the `lesson` artifact type.
+
+The honest phrasing, and the one the daily block now uses:
+
+> **Lessons with no directly linked evidence row: 0 of N.** Zero
+> *directly linked* evidence rows means that particular linkage is absent.
+> It is **not** a claim that the lesson is false, and **not** a claim that
+> the lesson has no other provenance (provenance rows, source sessions,
+> surfacing history and review history are separate evidence paths).
+
+**Why the distinction matters for the week.** "Every lesson is unsupported"
+would mean the substrate has a trust problem: it would have admitted false
+knowledge and the week would measure how bad that is. The true statement is
+narrower and more actionable: **the substrate's evidence table is not
+populated for lessons at all** — 0 of 36 — which is a *gap in the
+instrument*, not a verdict on the knowledge. A week that measured the
+instrument's gap would produce a finding about instrumentation. A week that
+assumed the knowledge was bad would produce a finding about the knowledge.
+The measurement must be able to tell them apart, which is why the daily
+block now reports **direct evidence linkage** as a named quantity with its
+denominator, and the §6.3 criteria are read *by category* rather than as a
+single verdict.
+
+### 6.4 The criteria, and how the classification changes
 
 The substrate's own signals, in the order they are worth trusting:
 
@@ -695,18 +1174,28 @@ The substrate's own signals, in the order they are worth trusting:
 | 5 | **Reinforcement** | `reinforcement_count > 1` | weak, and **not** independent: the substrate documents that reinforcement does not affect retrieval ranking. It records re-assertion, not support |
 | 6 | **Confidence** | `confidence` vs the evidence count | **not** independent — confidence is *computed from* the evidence. A high confidence with zero evidence rows means the evidence was not recorded, not that the claim is supported |
 | 7 | **Decay** | ∃ a `decay_tick` trigger in `confidence_history` for the artifact | confidence moved with no new evidence; the artifact's confidence is drifting down unattended |
+| 8 | **Review provenance** *(new in the upgraded runtime)* | the lesson was promoted from a `lesson_proposals` row that carries `source_ids`, `source_session_id` and `reviewed_at` | a reviewed proposal is the one path by which a lesson acquires a **human-checked** origin. It is not evidence, and it does not satisfy criteria 1–4; it is a *separate* class of support |
+| 9 | **Proposal origin** *(new)* | the proposal was compaction-origin | a compaction proposal is *derived* from material already in the substrate, so it inherits citations — but it is still untrusted until promoted |
 
-**The classification an item gets:**
+**The classification an item gets.** The original table collapsed every
+lesson into one class. It is restated here with the **categories kept
+distinct**, and with the "unsupported" class renamed to what it actually
+measures:
 
-| class | test | day-zero count (lessons) |
+| class | test | day-zero count (lessons, old runtime) |
 |---|---|---|
 | **supported** | ≥ 1 evidence row, `strength > 0`, `created_by` ≠ the asserting session | 0 of 36 |
 | **corroborated** | ≥ 2 evidence rows from different `created_by` | 0 of 36 |
 | **self-asserted** | evidence exists but `created_by` = the asserting session | 0 of 36 |
 | **contradicted** | an evidence row with `strength < 0`, or a `supersede` trigger | 0 of 36 |
-| **unsupported** | no evidence row | **36 of 36** |
+| **not evidence-linked** | **no `evidence` row of the matching `artifact_type`** — the *measured* fact | **36 of 36** |
+| **reviewed** *(new)* | promoted from a proposal with a `reviewed_at` | 0 of 36 (the lifecycle did not exist) |
 
-### 6.4 The operator's per-item surface
+**"not evidence-linked" is not "unsupported".** It says the `evidence`
+table has no row for this artifact. It is the honest name for the
+measurement, and it leaves the judgement open rather than closing it.
+
+### 6.5 The operator's per-item surface
 
 ```bash
 mpm why <id>      # evidence + confidence + retrieval provenance in one view
@@ -715,18 +1204,44 @@ mpm why <id>      # evidence + confidence + retrieval provenance in one view
 That is the surface the daily review uses when an item is flagged. It is a
 read; it changes nothing.
 
-### 6.5 What this means for the week
+For a proposal, the review surface is:
 
-The corpus as it stands would fail a strict support test almost entirely.
-**That is not a blocker — it is the baseline.** The week's question is
-whether the *rate* changes: does knowledge written during ordinary
-development accumulate support, or does it accumulate as bare assertions?
+```bash
+mpm lesson proposals        # the pending queue
+mpm lesson promote <id>     # operator-only: accept
+mpm lesson reject <id>      # operator-only: decline
+```
 
-The daily block reports `lessons without evidence: N of M` every day. The
-number to watch is the **new** lessons written each day and how many of them
-gain evidence later. A lesson written on day 1 that still has zero evidence
-on day 7 is a **stale assertion** — and that is the sharpest finding the
-week can produce.
+**Promoting and rejecting are operator actions, and they are recorded in
+the daily block as counts, not performed by it.** The week measures how
+many proposals accumulate, how many are promoted, how many are rejected,
+and how many of each origin — the *behaviour* of the gate under real
+workload.
+
+### 6.6 What this means for the week
+
+Two questions, and they are different questions:
+
+1. **Does the trust gate work?** (the new runtime) Does a lesson enter the
+   trusted set only after review? Are proposals promoted at all, or does
+   the queue simply grow? The daily block reports pending / promoted /
+   rejected, split by origin.
+2. **Does knowledge accumulate support?** (unchanged) Does knowledge
+   written during ordinary development acquire evidence, or does it
+   accumulate as bare assertions? The daily block reports
+   *lessons with no directly linked evidence* as a count with its
+   denominator, and the daily block reports **new** lessons written each
+   day and how many of them gain evidence later.
+
+The number to watch for (2) is unchanged: a lesson written on day 1 that
+still has zero directly linked evidence on day 7 is a **stale assertion**.
+But the label is now "not evidence-linked", and the read-out states it as a
+gap in the evidence instrument as well as a property of the knowledge.
+
+For (1), the sharpest week-1 finding would be a **growing pending queue**:
+proposals created faster than an operator can review them. That is a real
+operational finding about the trust gate, and the daily block is built to
+surface it.
 
 ---
 
@@ -742,8 +1257,8 @@ and it is a **file**, not a query:
 
 ```bash
 cat ~/.mpm/run/scheduler.state
-# {"last_tick_unix":1793375308,"process_started_unix":1793375248,
-#  "tick_count":1,"pid":3709217,"last_status":"ok","last_error":""}
+# {"last_tick_unix":1793378263,"process_started_unix":1793377963,"tick_count":17,
+#  "pid":3890452,"last_status":"ok","last_error":""}
 ```
 
 | check | threshold | what a failure means |
@@ -782,13 +1297,25 @@ Two surfaces, and they answer different questions.
 **`system_audit_log`** — the substrate's own record of faults:
 
 ```sql
-SELECT datetime(created_at,'unixepoch'), level, component, message
+-- `created_at` is declared INTEGER but holds TEXT ('2026-10-30 16:33:36').
+-- A TEXT value compares GREATER than every INTEGER in SQLite, so
+-- `created_at >= :since` matches EVERY row. Use strftime('%s', …).
+SELECT created_at, level, component, message
   FROM system_audit_log
-  WHERE created_at >= :since AND level IN ('warn','error','fatal','critical')
-  ORDER BY created_at DESC;
+  WHERE CAST(strftime('%s', created_at) AS INTEGER) >= :since
+    AND level IN ('warn','error','fatal','critical')
+  ORDER BY created_at;
 ```
 
-The day-zero corpus is 16 rows and reads as a small, specific list:
+> **This is a measurement defect that was in the original plan and is now
+> fixed.** The plan's own audit-log query used `created_at >= :since`,
+> which on the live database matched all 17 rows rather than the 1 row
+> actually in the window — every row is "in the window" because its
+> timestamp is TEXT. The daily block now converts with `strftime('%s', …)`
+> and the audit-log section of the report is a real window.
+
+The day-zero corpus (old runtime) is 16 rows and reads as a small, specific
+list:
 
 | level | component | count | what |
 |---|---|---|---|
@@ -798,20 +1325,89 @@ The day-zero corpus is 16 rows and reads as a small, specific list:
 | info | `epistemology` | 8 | `supersede_decision` ×3, `propose_theory` ×2, `shred_memory` ×3 — normal operations, not faults |
 
 **`tool_invocations`** — the agent-facing error rate, which is a different
-number and a different question. Day zero, last 7 days: **127 errors in
-22 901 invocations (0.55 %)**, and every one carries an `outcome_class`:
+number and a different question. Day zero, last 7 days (old runtime):
+**127 errors in 22 901 invocations (0.55 %)**, and every one carries an
+`outcome_class`:
 
 | outcome class | count | reading |
 |---|---|---|
 | `ok` | 22 798 | — |
 | `validation` | 78 | the call was refused because the **request** was wrong (a malformed parameter, an invalid type). The agent's error, not the substrate's |
-| `internal` | 36 | the substrate failed on a well-formed request. **The substrate's error** — dominated by `mpm_handoff write` (18) and `mpm_decisions record` (10) |
+| `internal` | 36 | **not** "the substrate failed a well-formed request" — see below |
 | `substrate` | 8 | `mpm_system health_check` (6) and others |
 | `not_found` | 5 | `mpm_memory show` for an id that does not exist — a **correct** refusal |
 
-The `internal` class is the one that matters operationally: it is the
-substrate failing a request the agent made correctly. At day zero it is
-**36 per week**, and 18 of them are one recurring handoff defect (§A3).
+#### 7.3.1 The `internal` class is not a fault rate — the correction
+
+The original plan wrote: *"The `internal` class is the one that matters
+operationally: it is the substrate failing a request the agent made
+correctly."* **That is wrong, and reading it that way would corrupt the
+week's most important operational number.**
+
+Measured breakdown of the 36 `internal` rows (old runtime):
+
+| cause | count | whose fault |
+|---|---|---|
+| `commitments must be an array of strings, got map[string]interface {}` | 23 | the **caller's** payload shape — a validation error misfiled as `internal` |
+| `tags must be an array of strings, got string` | 8 | the **caller's** payload shape |
+| `tags must be an array of strings, got map[string]interface {}` | 4 | the **caller's** payload shape |
+| `field \`limit\` must be a number (float64/int), got string` | 4 | the **caller's** payload shape |
+| `commitments must be an array of strings, got string` | 3 | the **caller's** payload shape |
+| `mpm_handoff write` → `EndSessionV2 … CHECK constraint failed: ended_state` | 2 | a real substrate defect (pre-upgrade; see below) |
+| others | small | mixed |
+
+**26 of 36 were misclassified payload-shape errors.** A caller sent the
+wrong shape; the substrate refused it correctly; the refusal was filed
+under the class that means "system fault". Reading `internal` as a fault
+rate would have produced a week-long false alarm.
+
+**Two more reasons the class cannot be read as a fault rate, both
+version-specific:**
+
+1. **The upgraded runtime's operator-only refusal is filed as
+   `internal|unclassified`.** `mpm_lessons action=save` is refused at the
+   execution point (§6.1). The refusal is *correct* and writes nothing, but
+   the error is a plain `fmt.Errorf`, so the classifier falls through every
+   validation rule and lands in `internal`. **A policy refusal, classified
+   as a system fault.** It will appear once per agent that tries to save a
+   lesson, and it will pollute this class for the whole week.
+2. **The old handoff defect is expected to disappear.** The two
+   `EndSessionV2 … CHECK constraint failed: ended_state` rows are **both
+   pre-upgrade** (2026-10-27 18:21:56 and 2026-10-30 12:06:13 — the second
+   is 4½ hours before the 16:32:42 upgrade). The upgraded runtime validates
+   the enumeration **before** the write (`ValidateHandoffEndedState`), so
+   the same input now produces a typed validation refusal instead of a
+   failed `INSERT`. The daily block counts these rows so the change is
+   **observed**, not assumed.
+
+**The rule for the week:** `internal` is a *bucket*, not a verdict. Read it
+only together with the §7b breakdown of the daily block, which groups the
+class by cause. The daily block prints that breakdown for exactly this
+reason.
+
+#### 7.3.2 The handoff failures are reported failures, not silent losses
+
+The original plan treated the `EndSessionV2 … failed` audit rows as
+"recurring `mpm_handoff write` failures" without saying whether the
+handoff was lost. The correlation has now been done properly, and it
+changes the reading:
+
+> Each of the two audit rows **does** have a nearby `mpm_handoff write`
+> tool invocation, and that invocation reported **`error`** —
+> `error/internal/unclassified`.
+
+(The original plan asserted these rows had **no** nearby tool call. That
+was wrong, and the cause is instructive: the correlation was attempted with
+`CAST(created_at AS INTEGER)`, which on a TEXT timestamp `'2026-10-27
+18:21:56'` yields the integer **2026** — so the ±30-second window was
+centred on 1970 and matched nothing. The same TEXT-in-INTEGER-column trap
+that broke the audit-log window query (§7.3) breaks the correlation. Both
+are fixed with `strftime('%s', created_at)`.)
+
+So the handoff write was **reported as failed to the caller**. It was not a
+silent loss. It is still a real defect — it degrades handoff continuity,
+which is what M1 measures — but it belongs in the *reported-failure* class,
+not the *lost-write* class, and M5 must not double-count it.
 
 ---
 
@@ -830,10 +1426,17 @@ report to write.
 scripts/dogfood_baseline.sh
 ```
 
-Ten fixed sections: substrate identity, project coverage, knowledge
-inventory, proposal queues, retrieval, tool activity, tokens, operational,
-the reconstructed wake context, and the stop conditions. Exit 1 if a stop
-condition is breached.
+Twelve fixed sections: substrate identity (with the schema version),
+project coverage, knowledge inventory, proposal queues, **lesson proposals
+(the trust gate)**, retrieval, tool activity, **write reliability (M5)**,
+tokens, operational, the reconstructed wake context, the review, and the
+measurement gaps and stop conditions.
+
+Exit `1` if a stop condition is breached, `2` if a measurement was missing
+or unreadable (§1.3). The report is designed to be read top to bottom in
+one screen, and the two sections that need a decision — the measurement
+gaps and the stop conditions — are at the bottom, so an incomplete day
+cannot be mistaken for a clean one.
 
 ### 8.3 The five answers
 
@@ -889,7 +1492,8 @@ measurement means anything.
 | # | condition | why |
 |---|---|---|
 | C1 | confirmed cross-project contamination on **two consecutive days** | the project dimension is not doing its job; the week can no longer distinguish recall from contamination |
-| C2 | the `internal` error rate in `tool_invocations` exceeds **5 %** for a day | the substrate is failing well-formed requests at a rate that swamps the behaviour being measured |
+| C2 | the **substrate-attributable** error rate in `tool_invocations` exceeds **5 %** for a day | the substrate is failing well-formed requests at a rate that swamps the behaviour being measured. **The `internal` class does not count as-is** — it is dominated by misclassified payload-shape errors and policy refusals (§7.3.1). The stop condition is on the *classified* breakdown: a day where `internal` rows are dominated by messages other than payload-shape refusals and the operator-only refusal |
+| C2b | **a confirmed instance of a reported-successful write that cannot be found** | a single confirmed lost write is enough. It invalidates every other count in the week, because a knowledge base that loses writes cannot be evaluated for recall (M5) |
 | C3 | the request-timeout condition (B7) is still unfixed on day 2 | every synthesis-class operation will time out at 3 s; from day 2 on, the week measures a substrate with no synthesis, and M1/M2 become meaningless for that class |
 | C4 | the credential condition (B5/B6) is still unfixed on day 2 | same, for the same reason: the substrate's LLM path is dead, and the week's central claim is about what the substrate contributes to an agent's work |
 | C5 | the WAL grows past **256 MB** | a pinning reader or a failing checkpoint; the substrate is degrading underneath the measurement |
@@ -905,35 +1509,57 @@ useful artefact** than a week that runs to day 7 over a broken substrate.
 
 ---
 
-## 10. Operator actions — documented, **not performed**
+## 10. OPERATOR-ONLY PROCEDURE — documented, **not performed**, **not executed by this plan**
 
-These are the actions §1 identifies. **None has been performed.** Each is
-written so it can be executed without re-deriving anything.
+> ## ⚠ OPERATOR-ONLY — READ BEFORE RUNNING ANYTHING BELOW
+>
+> **Everything in §10 changes the live installation.** It is not part of the
+> measurement. Nothing in §10 was executed while this document was written
+> or tested, and nothing in §10 is executed by `scripts/dogfood_baseline.sh`,
+> by any check that reads this document, or by the CI.
+>
+> **The commands are deliberately NOT presented as a runnable script.**
+> They appear as `$`-prefixed console transcripts, so that pasting a block
+> into a shell fails on the prompt rather than executing, and they are
+> numbered as individual steps so that they can be run one at a time and
+> each verified before the next.
+>
+> **Run them one at a time, read each one, and stop if the output does not
+> match what the step says it will produce.**
+>
+> **Why this section exists in this shape.** During the preparation of this
+> plan, a shell that was meant to be *editing this document* executed the
+> §10 examples verbatim: it appended a stray line to
+> `~/.config/mpm/mpm.env` and restarted the live scheduler. The file was
+> restored byte-exactly and the stray value was inert, but the service
+> interruption was real. The incident record is §12.3 and it is preserved
+> there in full. The structural fix is this banner and this formatting:
+> **copy-pasteable example commands in a document about a live system are
+> themselves a hazard.**
 
-### Action 1 — decide the workspace under test *(blocking)*
+These are the actions §1 identifies. **None has been performed by this
+plan.**
 
-Two candidates, both live:
+### Action 1 — the workspace under test *(decided; no command required)*
 
-| | live install | shared dogfood workspace |
+**Decided: the live `~/.mpm` database**, after Session A's controlled
+runtime upgrade. This is deliberate: the week must observe real
+cross-session recall, real scheduler behaviour, real persistence and real
+SQLite contention — including issue #178 — and a disposable workspace
+cannot reproduce any of them.
+
+**No command is required.** The OpenCode plugin's `resolveWorkspace()`
+already defaults to `$HOME/.mpm`, so the live install is what the agent
+already uses. `~/.mpm-dogfood` exists and is **not** used by the week; it
+is left alone.
+
+| | live install (**the system under test**) | `~/.mpm-dogfood` (**not used**) |
 |---|---|---|
 | path | `~/.mpm` | `~/.mpm-dogfood` |
-| scheduler | running (pid 3709217) | **none** |
+| scheduler | running (pid 3890452) | none |
 | credential | `~/.config/mpm/mpm.env` → the scheduler unit | none |
-| telemetry | collector absent | absent |
-| `opencode` invocations | 363, last 2026-10-30 12:06 | 443, last 2026-10-29 15:31 |
-| knowledge | memories 59 · decisions 45 · agentshell 10 · … | memories 59 · decisions 38 · changelog 23 · … |
-
-**Recommendation: the live install (`~/.mpm`).** Three reasons: the brief's
-configuration conditions (§B5–B8) are live-install conditions; the
-scheduler, the credential and the telemetry all live there, and **M1's
-continuity mechanism does not exist without a scheduler**; and the
-same-UID separation buys less than it costs (action 7).
-
-The plugin's `resolveWorkspace()` already defaults to `$HOME/.mpm`, so
-**choosing the live install requires no change at all** — the current
-wiring already does it. Choosing the dogfood workspace means exporting
-`MPM_WORKSPACE=~/.mpm-dogfood` for every agent session, and accepting that
-no scheduler runs there.
+| installed revision | `3d63244e` | — |
+| `lesson_proposals` | present | — |
 
 ### Action 2 — make the credential visible to the runtime process
 
@@ -943,33 +1569,51 @@ scheduler has it. **But no shell profile does** — `~/.bashrc` and
 `~/.profile` contain zero occurrences — and the systemd *user* environment
 does not either.
 
-So a **fresh terminal, a freshly launched OpenCode, or a scheduler restart
-outside the unit's env-file path loses the key.**
+So a **fresh terminal, or a freshly launched OpenCode, loses the key.**
 
-The file already exists, is mode 600, and defines the variable once.
-**Check it; do not rewrite it** — `install -m 600 /dev/null <file>` would
-truncate the key away:
+> **Correction to the original recommendation: do NOT source the secret
+> into interactive shells.** The first draft of this plan recommended
+> appending a `. "$HOME/.config/mpm/mpm.env"` line to `~/.profile`. That is
+> **withdrawn**. Sourcing a credential file into every interactive shell
+> exports the secret to every child process — every editor, every build
+> tool, every `ps` — for no benefit that a scoped environment does not give
+> more safely.
 
-```bash
-# the check (read-only)
-stat -c '%a %U %n' ~/.config/mpm/mpm.env                # expect: 600 v ...
-grep -c '^MINIMAX_API_KEY=' ~/.config/mpm/mpm.env        # expect: 1
+**Prefer a deliberately scoped process environment.** The credential should
+be visible to the process that needs it, and to nothing else:
 
-# the addition, if it is not already sourced by interactive shells
-grep -q 'mpm.env' ~/.profile || printf '\n[ -f "$HOME/.config/mpm/mpm.env" ] && . "$HOME/.config/mpm/mpm.env"\n' >> ~/.profile
+```console
+$ # ONE command, with the secret in that command's environment only.
+$ env $(grep -v '^#' ~/.config/mpm/mpm.env | xargs) opencode
 ```
 
-Verify without printing the secret:
+For a shell session that genuinely needs it, scope it to the session rather
+than to the profile:
 
-```bash
-bash -lc 'echo "MINIMAX_API_KEY len=${#MINIMAX_API_KEY}"'
-# expect: MINIMAX_API_KEY len=125
+```console
+$ # scoped to THIS shell, not to every future shell.
+$ set -a; . ~/.config/mpm/mpm.env; set +a
 ```
+
+For the **scheduler**, the unit's `EnvironmentFile=-` already provides it —
+no change is needed, and the scheduler must **not** be restarted for this.
+
+**Check it without printing the secret:**
+
+```console
+$ # read-only check; prints the length, never the value.
+$ stat -c '%a %U %n' ~/.config/mpm/mpm.env                # expect: 600 v …
+$ grep -c '^MINIMAX_API_KEY=' ~/.config/mpm/mpm.env        # expect: 1
+$ bash -lc 'echo "MINIMAX_API_KEY len=${#MINIMAX_API_KEY}"'
+```
+
+> **Do not run `install -m 600 /dev/null <file>` against the credential
+> file.** That truncates it and destroys the key. If the file ever needs
+> its mode fixed, use `chmod 600 <file>`.
 
 ### Action 3 — the deployed credential is a literal placeholder
 
-The deployed `ResolveAPIKey` (at `3df7231`) returns the configured value
-**verbatim**:
+The deployed `ResolveAPIKey` returns the configured value **verbatim**:
 
 ```go
 func ResolveAPIKey(configuredKey, baseURL string) string {
@@ -988,23 +1632,30 @@ Two ways to fix it, and they are not equivalent:
 | | action | effect |
 |---|---|---|
 | **A** | **unset the profile's `api_key`** in `~/.mpm/mpm_config.json` | the environment fallback applies immediately; no code change; reversible |
-| **B** | merge and deploy PR #187 (`fix/onboarding-timeout-default`), which resolves a reference-shaped value as a reference | fixes the class of defect, not this instance |
+| **B** | merge and deploy the upstream fix that resolves a reference-shaped value as a reference | fixes the class of defect, not this instance |
 
 **Recommendation: A now, B when it merges.** A is one line and works on the
 deployed binary. B is the durable fix and should not be waited for — but it
 is a deployment, and deployments are out of scope for this assignment.
 
+> **Version note.** The upgraded runtime `3d63244e` carries the improved
+> MiniMax credential-reference handling, so the class of defect behind
+> action 3 is addressed at the source there. The live profile still carries
+> `"api_key": "$MINIMAX_API_KEY"`, so **action 3 remains worth doing** on
+> the deployed binary — but the operator should first confirm whether the
+> deployed runtime is already `3d63244e` (§0.4) and, if so, whether the
+> reference is now resolved as a reference. Verify; do not assume.
+
 Verify after A — **without printing the key**:
 
-```bash
-python3 - <<'PYEOF'
+```console
+$ python3 - <<'PYEOF'
 import json, os
 c = json.load(open(os.path.expanduser('~/.mpm/mpm_config.json')))
 p = c['profiles']['default']
 print('api_key present:', bool(p.get('api_key')))
 print('timeout_seconds:', p.get('timeout_seconds'))
 PYEOF
-# expect: api_key present: False
 ```
 
 (`mpm config get api_key` returns the **full** key for the operator's own
@@ -1025,57 +1676,56 @@ latency through the canonical probe path (7 requests per model, three runs):
 both**. It is a live fault: it fails requests against a profile the operator
 is paying for.
 
-```bash
-# the substrate default is 300s (config.DefaultTimeoutSeconds)
-~/.mpm/bin/mpm config profile set default timeout_seconds 300
+> **Version note.** The upgraded runtime carries **centralized timeout
+> defaults**, so the substrate default is now applied consistently rather
+> than per call site. The *live profile* still says `3`, and the profile
+> value wins over the default. The operator should confirm the deployed
+> runtime's default before changing the profile — but the profile value of
+> 3 s is too small either way, and action 4 stands.
+
+```console
+$ # the substrate default is 300s (config.DefaultTimeoutSeconds)
+$ ~/.mpm/bin/mpm config profile set default timeout_seconds 300
 ```
 
 `timeout_seconds` stays manually editable — it is an advanced setting, not
 an onboarding question, and this assignment does not change that.
 
-### Action 5 — confidence decay is **not** currently disabled
+### Action 5 — confidence decay — **WITHDRAWN, no action required**
 
-The brief states decay remains disabled. The measurement says otherwise:
-`system_config` holds **no** `confidence.decay.enabled` key, and
-`GetConfigInt(key, 1)` returns the **default of 1 = on** for an absent key
-(`internal/core/db.go:4507`). The scheduler registers the decay tick
-handler (`internal/scheduler/confidence_decay.go`), so with the key absent
-the pass is *enabled* and is gated only by its own 6-hour cadence and the
-24-hour minimum age.
-
-`confidence_history` currently holds no `decay_tick` rows — only
-`evidence_added` (3) and `supersede` (3) — so nothing has been recomputed
-by decay **yet**. That is a reason to fix it now, not to assume it is off.
-
-Two ways, and the environment one is preferred because it needs no database
-write:
-
-```bash
-# preferred — the scheduler reads MPM_<SECTION>_<SETTING> (db.go:4523)
-grep -q '^MPM_CONFIDENCE_DECAY_ENABLED=' ~/.config/mpm/mpm.env || \
-  printf 'MPM_CONFIDENCE_DECAY_ENABLED=0\n' >> ~/.config/mpm/mpm.env
-
-# the environment is read at process start, so the wake executor must be
-# restarted for the change to take effect
-systemctl --user restart mpm-scheduler
-```
-
-(The restart is a service action, not a data write. It interrupts wake
-dispatch for the duration of the restart, which is why it belongs on day 0
-rather than mid-week.)
-
-There is **no CLI for this key**: `mpm config set` covers `model`,
-`base_url`, `timeout_seconds` and `synthesis_enabled` only, and
-`confidence.decay.enabled` is a `system_config` row, not a profile field.
-The environment override is the practical route precisely because it needs
-no database write. The alternative is a `system_config` write through the
-substrate's own API, which is a **production data write** and is therefore
-outside this assignment's boundaries.
-
-The env override is read by `getConfigIntFromEnv` (`db.go:4523`), which
-consults `MPM_<SECTION>_<SETTING>` **only when the `system_config` row is
-absent** — so the env route works today, and the `system_config` row
-remains the fallback if the env var is ever removed.
+> ### Withdrawn
+>
+> **The original action 5 said:** `system_config` holds no
+> `confidence.decay.enabled` key, the substrate's default for an absent key
+> is `1` = on, the scheduler registers the decay tick handler, and
+> therefore decay is running — so add `MPM_CONFIDENCE_DECAY_ENABLED=0` to
+> `~/.config/mpm/mpm.env` and restart the scheduler.
+>
+> **Every clause of that was wrong for the deployed revision, and the
+> recommendation is withdrawn.** See §1.1.1 for the full version-by-version
+> analysis, verified in the source at both revisions:
+>
+> - the **old** runtime `3df72315` **does not register the decay handler
+>   at all** — `internal/scheduler/confidence_decay.go` does not exist at
+>   that revision, and `cmd/mpm-scheduler/main.go` registers exactly three
+>   tick handlers, none of them the decay pass. It could not have been
+>   running decay;
+> - the **new** runtime `3d63244e` registers the handler but
+>   **defaults it OFF** (`core.DefaultConfidenceDecayEnabled = 0`), and an
+>   absent key falls back to that constant. The decay pass is therefore
+>   **off** on the upgraded runtime, by an explicit design decision.
+>
+> **So: no `mpm.env` edit. No scheduler restart. No operator action.**
+> The live scheduler was not restarted for this plan, and the week's
+> `tick_count` series continues from the upgrade's own restart.
+>
+> **The lesson from the withdrawal** is the one that matters for the
+> safety of §10: a recommendation that names a *production-changing
+> command* has to be verified at the **deployed revision**, not at a
+> revision that merely looks similar in the source tree. The original
+> action 5 was derived from a newer source than the binary that was
+> actually running, and that gap was invisible until the two were
+> compared side by side.
 
 ### Action 6 — keep the autonomous critic gated off
 
@@ -1088,7 +1738,7 @@ all `fired=1`, all `cascade tick summary` or `cron:epistemic-compaction`.
 Keep it that way. The check is in the daily block: a `critic_audit` row in
 `scheduled_wakes` is a **stop condition** (the critic's assertions would
 start appearing as `audit_cluster_proposals` rows and would contaminate the
-proposal-queue measurement in §6.2).
+proposal-queue measurement in §6).
 
 ### Action 7 — same-UID workspace separation is not a security boundary
 
@@ -1116,17 +1766,47 @@ is procedural, not structural, and this document says so.
 Only if MPM-internal provider usage is wanted. It does not affect the
 agent-side measurement (§5.4).
 
-```bash
-install -m 644 ~/.mpm/contrib/systemd/mpm-telemetry.service.user \
+```console
+$ install -m 644 ~/.mpm/contrib/systemd/mpm-telemetry.service.user \
              ~/.config/systemd/user/mpm-telemetry.service
-systemctl --user daemon-reload
-systemctl --user enable --now mpm-telemetry.service
-~/.mpm/bin/mpm-telemetry ping
+$ systemctl --user daemon-reload
+$ systemctl --user enable --now mpm-telemetry.service
+$ ~/.mpm/bin/mpm-telemetry ping
 ```
 
 Note that the OpenCode adapter does not emit frames (§5.4), so this would
 capture the **Claude Code** adapter's traffic and MPM's internal calls —
 neither of which is the agent-side usage the evaluation measures.
+
+### Action 9 — the lesson-proposal review *(daily, and a production write)*
+
+**This is new in the upgraded runtime**, and it is the one §10 action that
+is repeated every day rather than performed once. Promoting or rejecting a
+proposal **writes to the live database** — it creates a trusted lesson, or
+records a refusal. It is therefore an operator action, and it is never
+performed by the daily block.
+
+```console
+$ # read-only: what is waiting?
+$ mpm lesson proposals
+$ mpm lesson stats
+```
+
+```console
+$ # WRITES to the live database — one at a time, after reading the proposal.
+$ mpm lesson promote <proposal-id>
+$ mpm lesson reject  <proposal-id>
+```
+
+**Why it is here and not in the daily review:** the daily block *measures*
+the queue (§4b) and never touches it. A measurement that promotes as it
+observes would change the thing it is measuring, and the count of pending
+proposals would be an artefact of the observer.
+
+**What the operator should watch:** whether the pending queue grows faster
+than it is reviewed. A queue that accumulates is the sharpest operational
+finding the new trust gate can produce, and it is visible in the daily
+block without any write.
 
 ---
 
@@ -1139,14 +1819,14 @@ stated in the read-out rather than smoothed over.
 
 | day | what happens | what it produces |
 |---|---|---|
-| **0** | the blocking conditions in §1.1 are resolved by the operator; `scripts/dogfood_baseline.sh` runs | the baseline file; the confirmed workspace and the confirmed code version are recorded |
-| **1** | ordinary work on all active projects; the five answers are answered at the end of the day | `day-1.txt`; the first contamination candidates and the first missed-retrieval verdicts |
+| **0** | the operator completes the §10 actions that are still outstanding; `scripts/dogfood_baseline.sh` runs on `3d63244e` | the baseline file; the installed revision, the schema version and the workspace are recorded |
+| **1** | ordinary work on all active projects; the five answers are answered at the end of the day; **the lesson-proposal queue is reviewed** (operator-only, §10 action 9) | `day-1.txt`; the first contamination candidates and the first missed-retrieval verdicts; the first proposal promoted or rejected |
 | **2** | ordinary work; **the M3 adjudication loop starts** — each detected zero-hit is re-run against the snapshot | `day-2.txt`; the first real miss/no-miss split |
-| **3** | ordinary work | `day-3.txt`; the first M1 recall ratios per project |
+| **3** | ordinary work; **the M5 write-reliability series is read**: confirmed-durable vs reported-success, per surface | `day-3.txt`; the first M1 recall ratios per project; the first write-reliability reading |
 | **4** | ordinary work; **UNACCOUNTED gets a dedicated session** if it has not had one — it has zero MPM footprint, which is a finding in itself | `day-4.txt`; whether a project with no prior substrate footprint gets one |
-| **5** | ordinary work; **DeepClaw joins** if its development has begun | `day-5.txt`; a second project series begins |
+| **5** | ordinary work; **DeepClaw joins** if its development has begun; the proposal queue is re-read for a growing backlog | `day-5.txt`; a second project series begins; the backlog trend |
 | **6** | ordinary work; the last review; the proposal queues are re-checked so a lesson written on day 1 that gained evidence is visible | `day-6.txt`; the support-rate trajectory |
-| **7** | read-out | the week record: the four measurements, the token accounting, the operational series, the stop-condition log, and the findings |
+| **7** | read-out | the week record: the five measurements, the token accounting, the operational series, the stop-condition log, and the findings |
 
 ### 11.1 The read-out
 
@@ -1160,50 +1840,118 @@ One document, answering:
 4. **Did it leak across projects?** — M4, candidates and confirmations.
 5. **What did it cost?** — §5, the four quantities distinct, the estimate
    labelled.
-6. **What is trusted but unsupported?** — §6, the support-rate trajectory.
-7. **Was it operational?** — §7, the series.
-8. **What would have to change for the answer to be different?** — the
-   findings, with the remediation each implies and an explicit statement of
-   which remediations are substrate changes (separate PRs) and which are
-   configuration (the operator's).
+6. **What is trusted but unsupported?** — §6, the support-rate trajectory,
+   with "not evidence-linked" as the measured name and the withdrawn
+   "every lesson is unsupported" claim stated as withdrawn.
+7. **Did the trust gate work?** — §6, pending / promoted / rejected by
+   origin. Did proposals accumulate faster than they were reviewed?
+8. **Were the writes durable?** — M5, reported success vs confirmed
+   durability, per surface, with the blind spots named. Was there a
+   confirmed lost write, and if so which surface?
+9. **Was it operational?** — §7, the series, with the `internal` class read
+   through its breakdown rather than as a fault rate.
+10. **What would have to change for the answer to be different?** — the
+    findings, with the remediation each implies and an explicit statement of
+    which remediations are substrate changes (separate PRs) and which are
+    configuration (the operator's).
 
 ---
 
 ## 12. Reproducibility record
 
+### 12.1 The system under test
+
 | item | value |
 |---|---|
-| live install | `~/.mpm` @ `3df7231`, `git status --porcelain` → 0 entries |
-| live config | `"timeout_seconds": 3`, `"api_key": "$MINIMAX_API_KEY"` — **both unchanged** |
-| live database | `~/.mpm/src/db/mpm.db`, WAL mode, 22.6 MB + 4.0 MB WAL, `PRAGMA integrity_check` → `ok` |
-| scheduler | pid 3709217, `--interval 60s`, `last_status` `ok`; the `tick_count` series starts at 1 (§12.2) |
-| credential source | `~/.config/mpm/mpm.env`, read by the unit via `EnvironmentFile=-%h/.config/mpm/mpm.env` |
+| live install | `~/.mpm` @ **`3d63244e1e64955db2db243e70e279d370ebf1d6`**, installed 2026-10-30T16:32:42Z from `~/.mpm/releases/3d63244e…/` (`RELEASE.json`) |
+| installed binary | `0.1.0-dev+g3d63244e.t1793377957`, built 2026-10-30T16:32:37Z, `dirty: no`; `~/.mpm/bin/*` is byte-identical to the release binaries (md5 `e127c2c4…` for `mpm`) |
+| checkout | `~/.mpm` @ `3d63244e`, **119 dirty entries** left by the upgrade's own installation step |
+| running scheduler | pid 3890452, started 2026-10-30 16:32:42, `--interval 60s`, `last_status ok`; `exe` verified as the released `3d63244e` binary |
+| live config | `"timeout_seconds": 3`, `"api_key": "$MINIMAX_API_KEY"` — **both unchanged by this plan** |
+| live database | `~/.mpm/src/db/mpm.db`, WAL mode, `PRAGMA integrity_check` → `ok`, **`lesson_proposals` present** |
+| managed-instruction protocol | `5.0.0` — `~/.config/opencode/AGENTS.md` managed block carries `commit=3d63244e… protocol=5.0.0 applied=2026-10-30T16:32:45Z` |
+| credential source | `~/.config/mpm/mpm.env` (142 bytes, mode 600, one variable), read by the unit via `EnvironmentFile=-%h/.config/mpm/mpm.env` |
 | telemetry | **not installed, not running**, no `telemetry.db`, `mpm-telemetry ping` → `no such file or directory` |
 | host session database | `~/.local/share/opencode/opencode.db` (read-only) |
-| day-zero block | `scripts/dogfood_baseline.sh`, exit 0, no stop condition breached |
-| live database after the day-zero run | `tool_invocations` unchanged by the script; the live install's own plugin polling is the only writer |
+| day-zero block | `scripts/dogfood_baseline.sh`, exit 0, no stop condition breached, **no measurement gaps** |
+| live database after the day-zero run | unchanged by the script; the live install's own plugin polling is the only writer |
 
-### 12.1 What was verified non-destructively
+### 12.1.1 The historical baseline
+
+Everything in this table was measured on the **old** runtime `3df72315`,
+before the upgrade. It is kept as **historical baseline evidence** and is
+used for contrast, not as the week-0 baseline. The week-0 baseline is
+re-measured on `3d63244e` by the day-zero run.
+
+| item | value at `3df72315` |
+|---|---|
+| installed binary | `0.1.0-dev+g3df72315.t1792851233`, built 2026-10-24T14:13:53Z |
+| scheduler | pid 3709217 at the time of the original measurement |
+| lesson-proposal queue | **did not exist** |
+| memory rows | 141 |
+| lessons | 36 (0 with a directly linked evidence row, 0 reinforced) |
+| evidence | 101 rows (memory 98, theory 3), all `strength > 0`, all `independence_factor` 1.0, 4 distinct `created_by` |
+| invocations (7 days) | 22 901, 127 errors (0.55 %) |
+| outcome classes | ok 22 798 · validation 78 · internal 36 · substrate 8 · not_found 5 |
+| `wal_busy_timeout` | 2 (2026-10-24, 2026-10-25) — both `mpm_decisions record` |
+
+### 12.2 What was verified non-destructively
 
 - the live database's size and mtime are unchanged by a full run of the
   script, apart from the live plugin's own polling;
 - the snapshot's `tool_invocations` count is unchanged by the reconstructed
   wake context (the CLI path records no invocation row);
 - `mpm wake --compact` against a snapshot workspace returns a faithful
-  wake context (7 artifact ids, the last handoff summary, the audit
-  summary) with zero production writes;
-- the live install, its configuration and `~/.config/opencode/AGENTS.md`
-  are byte-for-byte unchanged.
+  wake context with zero production writes;
+- the script was run against **three disposable databases**: the live
+  snapshot (post-upgrade schema), a database initialised by the **old**
+  binary (pre-upgrade schema), and a database with tables removed. The
+  first exits 0, the second exits 0 with a **version difference** and no
+  gaps, the third exits **2** with the missing measurements named;
+- `scripts/tests/test_dogfood_baseline.py` asserts all of the above
+  automatically, including that a full run leaves every byte of a
+  populated fake `$HOME` unchanged, and that the script contains no
+  production-changing command;
+- `make rehearsal` passes: **135 assertions, 0 failures**.
 
----
+### 12.2.1 One rehearsal correction, and why it is in this PR
 
-### 12.2 The scheduler was restarted during this preparation — the record
+`make rehearsal` **failed** after the runtime upgrade, on one assertion:
+*"the synthetic lesson survived (0 rows)"*.
+
+The cause is not this plan. The rehearsal copies the **live** binaries
+into its simulated workspace, so it exercises whatever runtime is
+installed; and it seeded its synthetic lesson through the **agent** tool
+surface:
+
+```
+mpm call mpm_lessons --payload '{"action":"save", …}'
+```
+
+The upgraded runtime **refuses** that at the execution point — *"a lesson
+is trusted on arrival … it is not reachable from the agent tool surface
+(MCP, `mpm call`, adapters). Nothing was written."* — so no lesson was
+created and the assertion failed.
+
+The correction is one line: the rehearsal now seeds the lesson through the
+**operator CLI** (`mpm lesson add`), which is the path the refusal itself
+points to, which exists on **both** sides of the change, and which creates
+the same trusted lesson row. The rehearsal's intent — a synthetic corpus
+that a migration must preserve — is unchanged.
+
+**Why it is in this PR.** The plan's reproducibility record claims the
+gate passes. Leaving it failing would make that claim false, and the
+rehearsal is not run by CI, so nothing else would have caught it. The
+change is a consequence of the upgrade this PR is being revised for, and
+it is the smallest change that restores the gate's meaning.
+
+### 12.3 The scheduler was restarted during this preparation — the record
 
 **The scheduler was restarted twice on 2026-10-30 while this plan was being
 written.** Neither restart was part of the measurement and neither changed
 any configuration, but the day-zero `tick_count` series therefore starts at
-**1** rather than at the several-hundred value the service had accumulated,
-and a reader comparing the two needs to know why.
+a low value rather than at the several-hundred value the service had
+accumulated, and a reader comparing the two needs to know why.
 
 | | |
 |---|---|
@@ -1211,72 +1959,161 @@ and a reader comparing the two needs to know why.
 | `~/.config/mpm/mpm.env` | **restored byte-exactly** — 142 bytes, mode 600, one variable. The restored key value was verified character-for-character against both the running daemon's environment and the operator's |
 | the daemon's environment | it briefly carried a malformed `MPM_CONFIDENCE_DECAY_ENABLED` value (`0nMPM_CONFIDENCE_DECAY_ENABLED=0n`). `strconv.Atoi` rejects it, so it fell back to the default and had **no functional effect**; the service was restarted to clear it, and the daemon now holds exactly the five `MPM_*` variables the unit declares plus `MINIMAX_API_KEY` |
 | `~/.mpm/mpm_config.json` | **untouched** — `timeout_seconds: 3` and `$MINIMAX_API_KEY` both intact |
-| the installed checkout | **untouched** — `3df7231`, 0 dirty entries |
+| the installed checkout | **untouched by this plan** — now `3d63244e`, with the upgrade's own 119 dirty entries |
 | the database | **untouched** — the only writers are the plugin's own polls and the scheduler's normal ticks |
 
 The lesson is recorded because the §10 examples are **copy-pasteable, and a
-reader will run them**: every command in §10 must be read in context and run
-individually, and §10's commands are the operator's to run, not the plan's.
+reader will run them**. The structural fix in this revision is the
+**operator-only banner** and the `$`-prefixed console formatting in §10,
+so that a pasted block fails on the prompt instead of executing. The
+substantive fix is the **withdrawal of action 5** (§10), which removed the
+one command that both edited the credential file *and* restarted the
+scheduler.
+
+**A third restart is now part of the record:** Session A's runtime upgrade
+restarted the scheduler at 2026-10-30 16:32:42, replacing pid 3709217 with
+pid 3890452. That restart is the upgrade's, not this plan's, and it is the
+reason the `tick_count` series restarts from a low value.
+
+### 12.4 The safety findings from the incident, and what changed
+
+The incident is preserved above in full. These are the findings that
+changed the document and the script because of it.
+
+| # | finding | what changed |
+|---|---|---|
+| S1 | **A document about a live system contained copy-pasteable production-changing commands, in a fenced `bash` block, with no warning.** A shell editing the file executed them. | §10 is now a marked **operator-only procedure** with a banner, `$`-prefixed **console** fences (a pasted block fails on the prompt), and numbered steps that must be run and verified individually |
+| S2 | **The recommendation that caused the worst of it was wrong on revision-specific grounds** — it named a source file and a default that did not exist at the deployed revision, so the "fix" would have edited a credential file and restarted a service to disable a handler that was never registered | §10 action 5 is **withdrawn**; §1.1.1 records the version-by-version analysis; and the rule is now stated: *a recommendation that names a production-changing command must be verified at the deployed revision, not at a merely similar one* |
+| S3 | **The plan recommended sourcing a secret into every interactive shell.** That exports the credential to every child process, for no benefit a scoped environment does not give more safely | §10 action 2 now recommends a **deliberately scoped process environment** and explicitly withdraws the `~/.profile` sourcing line |
+| S4 | **The plan's own measurement queries had two silent-failure defects** — a TEXT-in-INTEGER timestamp that made every audit row match the window, and a `CAST(created_at AS INTEGER)` that centred a correlation window on 1970 | both fixed (`strftime('%s', …)`) and both **documented** in §3.2 and §7.3, because a silent measurement defect is the same class of hazard as a silent command |
+| S5 | **The daily script could report an empty measurement as a successful one.** A query that failed was indistinguishable from a query that returned nothing | the script now **fails closed**: every failed query is a recorded *measurement gap*, printed with its error, and forces exit `2`; a schema version difference is reported separately and is not a gap |
+| S6 | **The proposal-review surface writes to the live database.** Promoting a lesson is a production write, and it is tempting to fold it into the daily loop | it is §10 action 9 — an operator action, never performed by the measurement, so the count of pending proposals is not an artefact of the observer |
+
+**The generalisation.** The incident was not really about `mpm.env`. It was
+about a document that mixed three different kinds of statement — *measured
+fact*, *recommendation*, and *command* — in one undifferentiated surface,
+where a reader (or a shell) could not tell which was which. The revision
+separates them: measured facts are stated as findings with their revision;
+recommendations are labelled as recommendations with their evidence; and
+every command lives in one marked, operator-only section in a format that
+does not paste-run.
 
 ## Appendix A — the day-zero numbers, in one place
+
+### A.1 The system under test — `3d63244e`, measured 2026-10-30T16:49Z
+
+**The substrate is live and moving.** Session A is working in it while this
+document is written, so these figures are a snapshot, not a constant. They
+are reproduced by the day-zero run of `scripts/dogfood_baseline.sh`.
 
 **Substrate**
 
 | | |
 |---|---|
-| memory rows (all collections, live) | 141 |
-| by collection | memories 59 · decisions 45 · changelog 11 · **agentshell 10** · project 6 · directives 5 · theories 3 · mpm-opencode 1 · lessons 1 |
-| lessons | 36 (0 with evidence, 0 reinforced) |
-| evidence | 101 rows (memory 98, theory 3), all `strength > 0`, all `independence_factor` 1.0, 4 distinct `created_by` |
-| handoffs | 36, all `clean`, all read |
-| scheduled wakes | 8, all fired (daily `cron:epistemic-compaction` at 03:00 + one `cascade tick summary`) |
-| theories pending | 1 |
+| installed revision | `3d63244e` (release installed 2026-10-30 16:32:42Z) |
+| schema | **post-upgrade** — `lesson_proposals` present |
+| memory rows (all collections) | 155 |
+| by collection | memories 63 · decisions 51 · changelog 11 · **agentshell 10** · theories 7 · project 6 · directives 5 · mpm-opencode 1 · lessons 1 |
+| **trusted lessons** | **39** (0 with a directly linked evidence row, 0 reinforced) |
+| **lesson proposals** | **10 total — 5 pending, 0 promoted, 5 rejected** |
+| compaction-origin proposals | 1 of 10 (content carries a `{"title":…}` envelope) |
+| proposals with cited sources | 1 of 10 (`source_ids` non-empty) |
+| proposal provenance | session 10/10, framework 10/10, **model 0/10** |
+| evidence | 111 rows — 105 `memory`, 1 `theory`, **0 `lesson`**, **0 `decision`** |
+| handoffs | 38 |
+| scheduled wakes | 8, all fired |
+| theories pending | 5 |
 | audit clusters active | 5 rows — security (count 3), handoff (2, 1, 1), web_db (1) |
 | cascade outbox | 0 |
-| retrieval metadata | 86 tracked nodes, 275 reuses, `success_count` 0 on every row |
-| live memories never surfaced | 57 |
+| retrieval metadata | 96 tracked nodes, `success_count` 0 on every row |
+| live memories never surfaced | 60 |
+| scheduler | pid 3890452, `tick_count` 17, `last_status` `ok`, last tick 6 s before the check |
 
 **Activity (last 7 days)**
 
 | | |
 |---|---|
-| invocations | 22 901 |
-| errors | 127 (0.55 %) |
-| outcome classes | ok 22 798 · validation 78 · internal 36 · substrate 8 · not_found 5 |
-| dominant call | `mpm_context read_wake_context` — 22 165 |
-| next | `mpm_system health_check` 271 · `mpm_memory save` 90 · `mpm_decisions record` 64 · `mpm_handoff write` 54 · `mpm_lessons save` 42 · `mpm_memory query` 35 · `mpm_memory show` 22 |
-| top recurring defect | `mpm_handoff write` → `internal`, 18 — `EndSessionV2 upsert failed: CHECK constraint failed: ended_state IN (...)` |
+| invocations | ~23 800 |
+| dominant call | `mpm_context read_wake_context` — ~22 940 |
+| next | `mpm_system health_check` ~288 · `mpm_memory save` ~94 · `mpm_decisions record` ~68 · `mpm_handoff write` ~54 · `mpm_lessons save` ~43 |
+| `wal_busy_timeout` | **2** (2026-10-24 19:04:41, 2026-10-25 08:37:52), both `mpm_decisions record`, "database is locked" |
+| `EndSessionV2 … failed` audit rows | **2**, both pre-upgrade, both with a nearby `mpm_handoff write` that reported `error` |
+| `internal` class | dominated by misclassified payload-shape errors; includes the new operator-only lesson-save refusal |
+
+**Write reliability (M5)**
+
+| | |
+|---|---|
+| attempted writes observed (lower bound) | ~395 all time, ~362 in the window |
+| reported success / failure in the window | ~267 / ~95 |
+| per-write durability, `mpm_memory save` | 86 reported successes → **79 sound links → 78 confirmed** |
+| per-write durability, `mpm_work create` | 6 → 3 → 3 |
+| per-write durability, `mpm_decisions record` / `mpm_handoff write` | 50 / 42 → **1 sound link each** — the upgraded runtime began writing invocation-linked provenance for these surfaces |
+| every other surface | **0 sound links — unconfirmable per write** |
+| unknown outcomes (`mpm_memory save`) | 2 (no provenance row at all) |
+| ambiguous links (`mpm_memory save`) | 5 (invocation id shared by several ledger rows) |
+| provenance rows whose artifact is absent from the table its type names | **1** (the `lessons`-collection memory typed as `lesson`) |
+| provenance rows citing an invocation the ledger does not contain | 12 |
+| busy/locked within 60 s of a scheduler tick | 1 of 2 |
 
 **Tokens (host-side, provider-reported)**
 
 | | |
 |---|---|
-| uncached input | 78 512 146 |
+| uncached input | 78 512 146 (all-time corpus) |
 | cached input | 4 212 214 175 |
 | output | 6 715 166 |
 | reasoning | 5 588 937 |
 | cache write | 0 |
-| provider-reported cost | 35.84 (of which `minimax-coding-plan` reports **0** for 6 531 messages) |
+| provider-reported cost | 35.84 (of which `minimax-coding-plan` reports **0** for ~7 400 messages) |
 
 **Projects**
 
 | project | tagged rows | in a project collection | host sessions |
 |---|---|---|---|
-| themailroom | 9 | 0 | 3 |
-| agentshell | 28 | 10 | 4 |
-| unaccounted | **0** | 0 | 1 |
-| deepclaw | 2 | 0 | 1 |
+| themailroom | 10 | 0 | 3 |
+| agentshell | 29 | 10 | 4 |
+| unaccounted | 1 | 0 | 1 |
+| deepclaw | 3 | 0 | 1 |
+
+### A.2 The historical baseline — `3df72315`, measured before the upgrade
+
+**Kept as historical baseline evidence.** These are the numbers the
+original plan was written against. They are *not* the week-0 baseline: the
+week's baseline is re-measured on `3d63244e` by the day-zero run.
+
+| | |
+|---|---|
+| memory rows | 141 |
+| by collection | memories 59 · decisions 45 · changelog 11 · **agentshell 10** · project 6 · directives 5 · theories 3 · mpm-opencode 1 · lessons 1 |
+| lessons | 36 (0 with a directly linked evidence row, 0 reinforced) |
+| **lesson proposals** | **the queue did not exist** |
+| evidence | 101 rows (memory 98, theory 3), all `strength > 0`, all `independence_factor` 1.0, 4 distinct `created_by` |
+| handoffs | 36, all `clean`, all read |
+| scheduled wakes | 8, all fired |
+| theories pending | 1 |
+| audit clusters active | 5 rows — security (3), handoff (2, 1, 1), web_db (1) |
+| cascade outbox | 0 |
+| retrieval metadata | 86 tracked nodes, 275 reuses, `success_count` 0 on every row |
+| live memories never surfaced | 57 |
+| invocations (7 days) | 22 901 |
+| errors | 127 (0.55 %) |
+| outcome classes | ok 22 798 · validation 78 · internal 36 · substrate 8 · not_found 5 |
+| dominant call | `mpm_context read_wake_context` — 22 165 |
+| next | `mpm_system health_check` 271 · `mpm_memory save` 90 · `mpm_decisions record` 64 · `mpm_handoff write` 54 · `mpm_lessons save` 42 · `mpm_memory query` 35 · `mpm_memory show` 22 |
+| top recurring defect | `mpm_handoff write` → `internal`, 18 — `EndSessionV2 upsert failed: CHECK constraint failed: ended_state IN (…)` |
+| `wal_busy_timeout` | 2 (2026-10-24, 2026-10-25) |
 
 ---
 
-## Appendix B — the four measurements in one table
+## Appendix B — the five measurements in one table
 
-| | M1 cross-session recall | M2 retrieval relevance | M3 missed retrievals | M4 cross-project contamination |
-|---|---|---|---|---|
-| **question** | did a later session get what an earlier one wrote? | of what was surfaced, how much was relevant? | did a zero-hit have anything to find? | did a session get another project's knowledge? |
-| **instrument** | `retrieval_metadata` × `tool_invocations` × `session_v2` | operator-labelled stratified sample | the substrate's zero-hit hint → re-run against the snapshot | tag pass + lexical pass, on the surfaced set |
-| **numerator** | artifacts from *S₁* surfaced during *S₂* | items labelled `relevant` | zero-hits adjudicated as over-constrained or unindexed | surfaced artifacts belonging to *Q* ≠ *P* |
-| **denominator** | artifacts from *S₁* still live at *S₂*'s start | items labelled | zero-hits detected | surfaced artifacts |
-| **reported as** | a rate per project per day | a weekly rate with *n* and the interval | a count by cause, with the verbatim query | candidates per day; confirmed per day |
-| **limitation** | **query path only** — the wake path records no per-node trace; it is a **lower bound** | small *n*; directional, not a metric | detection is operator-read; the response is not persisted | the tag dimension is incomplete; UNACCOUNTED has 0 tagged rows |
-| **operator input** | answer #4 | the labels | answer #1 | answer #2 |
+| | M1 cross-session recall | M2 retrieval relevance | M3 missed retrievals | M4 cross-project contamination | M5 write reliability |
+|---|---|---|---|---|---|
+| **question** | did a later session get what an earlier one wrote? | of what was surfaced, how much was relevant? | did a zero-hit have anything to find? | did a session get another project's knowledge? | when the substrate said "written", was it there? |
+| **instrument** | `retrieval_metadata` × `tool_invocations` × `session_v2` | operator-labelled stratified sample | the substrate's zero-hit hint → re-run against the snapshot | tag pass + lexical pass, on the surfaced set | `tool_invocations` × `artifact_provenance` × the target tables, plus `system_audit_log` |
+| **numerator** | artifacts from *S₁* surfaced during *S₂* | items labelled `relevant` | zero-hits adjudicated as over-constrained or unindexed | surfaced artifacts belonging to *Q* ≠ *P* | reported successes whose artifact is **found**, over a **sound** invocation→artifact link |
+| **denominator** | artifacts from *S₁* still live at *S₂*'s start | items labelled | zero-hits detected | surfaced artifacts | reported successes per surface |
+| **reported as** | a rate per project per day | a weekly rate with *n* and the interval | a count by cause, with the verbatim query | candidates per day; confirmed per day | confirmed / reported per surface; unknown outcomes; ambiguous links; busy/locked; scheduler correlation |
+| **limitation** | **query path only** — the wake path records no per-node trace; it is a **lower bound** | small *n*; directional, not a metric | detection is operator-read; the response is not persisted | the tag dimension is incomplete; UNACCOUNTED had 0 tagged rows | **the attempted-write count is a lower bound** (CLI and internal writes are not in the ledger); per-write durability is confirmable for **one** surface only; a write never attempted leaves no trace |
+| **operator input** | answer #4 | the labels | answer #1 | answer #2 | one line: did anything you wrote turn out not to be there? |

@@ -138,7 +138,24 @@ save '{"action":"save","params":{"fact":"REHEARSAL FACT TWO: promotion is an ato
 save '{"action":"save","params":{"fact":"REHEARSAL FACT THREE: the backup must be an online SQLite backup, because a raw copy of a WAL database omits everything still in the log.","collection":"memories","tags":["rehearsal","backup"]}}'
 save '{"action":"save","params":{"fact":"REHEARSAL EVIDENCE: the rehearsal recorded a synthetic corpus so the live database was never read into a fixture.","collection":"evidence","tags":["rehearsal"]}}'
 
-"$SIM_WS/bin/mpm" call mpm_lessons --payload '{"action":"save","params":{"fact":"REHEARSAL LESSON: a migration that cannot be rolled back must be preceded by a backup that has been verified by restoring it.","type":"warning","tags":["rehearsal"]}}' >/dev/null 2>&1
+# The synthetic LESSON.
+#
+# It is written through the OPERATOR CLI, not through the agent tool
+# surface, and that is a version-specific requirement rather than a
+# preference. The rehearsal copies the LIVE binaries into the simulated
+# workspace, so it exercises whatever runtime is installed. From the
+# runtime that introduced the lesson trust gate
+# (fix(lessons): an agent cannot write a TRUSTED lesson; it proposes one),
+# `mpm_lessons action=save` is refused at the execution point on the
+# agent surface — nothing is written — so a rehearsal that seeded its
+# lesson through `mpm call` produced an empty `lessons` table and the
+# "the synthetic lesson survived" assertion failed.
+#
+# `mpm lesson add` is the operator path the refusal itself points to. It
+# exists on both sides of that change, it creates the same trusted lesson
+# row, and it keeps the rehearsal's intent: a synthetic corpus that the
+# migration must preserve.
+"$SIM_WS/bin/mpm" lesson add "REHEARSAL LESSON: a migration that cannot be rolled back must be preceded by a backup that has been verified by restoring it." --type warning --tags rehearsal >/dev/null 2>&1
 
 "$SIM_WS/bin/mpm" call mpm_decisions --payload '{"action":"record","params":{"choice":"REHEARSAL DECISION: keep the data root at ~/.mpm so no host configuration changes.","context":"Runtime layout migration","rationale":"The database path, the systemd unit, the PATH symlink and the MCP client wiring all name that path already.","outcome":"accepted for the rehearsal","tags":["rehearsal"]}}' >/dev/null 2>&1
 
