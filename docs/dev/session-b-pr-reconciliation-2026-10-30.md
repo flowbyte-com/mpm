@@ -262,13 +262,16 @@ three), #193 **green** (all three).
 
 The reconciled tree's script suite failed with **exactly one** failure:
 the repository's own guard, `scripts/tests/test_no_obsolete_paths.py`,
-flagged the reconciliation record for naming `scripts/install.sh` and
-`scripts/uninstall.sh` — paths that do not exist (the canonical installer
-lives at the repository root), and that the guard forbids naming at all.
-The record's area table now names the paths that exist. Re-verified:
-**758 tests OK**.
+flagged **this record** for naming two obsolete lifecycle paths in its
+area table — the pre-restructure locations of the installer, which do
+not exist (the canonical installer lives at the repository root) and
+which the guard forbids naming **at all**, even in prose. The record's
+area table now names the paths that exist. Re-verified: **758 tests
+OK**.
 
-A guard catching its own repository's documentation is the guard working.
+A guard catching its own repository's documentation is the guard
+working — and it is the reason this passage does not repeat the two
+paths it is describing.
 
 ---
 
