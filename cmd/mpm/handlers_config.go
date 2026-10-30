@@ -935,18 +935,48 @@ func handleConfigInteractive(c *config.Config) (int, bool) {
 		}
 	}
 
-	// Timeout (rarely customised, default-only). 2026-09-14
-	// final-simplification: Max tokens is NOT user-configurable;
-	// the substrate supplies its own internal value at wire time.
-	// The wizard does not prompt for it and the profile value is
-	// never honoured.
-	timeout := promptString(rwFromStdin(), "Timeout seconds", intToStr(prof.TimeoutSecs))
-	if timeout != "" {
-		if n, err := strconvAtoi(timeout); err == nil && n > 0 {
-			prof.TimeoutSecs = n
-		}
-	} else if existing.TimeoutSecs > 0 {
+	// Timeout — NOT an onboarding question.
+	//
+	// The request timeout is an ADVANCED setting. A number that only
+	// matters when a provider is slow is not a decision an operator
+	// can make before they have watched a slow provider; asking for it
+	// during setup put a meaningless default in front of every user
+	// and let a typo (`3` instead of `30`) become a live fault.
+	//
+	// The operator can still set it, two ways:
+	//
+	//   - by hand in mpm_config.json:
+	//       "timeout_seconds": 300
+	//   - from a terminal:
+	//       mpm config profile set default timeout_seconds 300
+	//
+	// What onboarding DOES do is make the value explicit and correct:
+	//
+	//   - a fresh profile is written with the substrate default, so the
+	//     configuration says what will actually be used;
+	//   - an existing profile KEEPS whatever the operator already set —
+	//     an upgrade never silently replaces a configured value;
+	//   - an INVALID existing value (zero or negative) is replaced by
+	//     the default, and the replacement is REPORTED. Silently
+	//     rewriting the operator's setting would be the same class of
+	//     surprise this change exists to remove.
+	//
+	// The default and the validation policy live in
+	// internal/core/config/timeout.go, so the number written here, the
+	// number the runtime uses and the number the example configuration
+	// documents cannot disagree.
+	switch {
+	case config.TimeoutSecondsIsValid(existing.TimeoutSecs):
 		prof.TimeoutSecs = existing.TimeoutSecs
+	case existing.TimeoutSecs == 0:
+		// Not configured at all: write the default explicitly.
+		prof.TimeoutSecs = config.DefaultTimeoutSeconds
+	default:
+		fmt.Println()
+		fmt.Printf("  Note: the configured timeout_seconds (%d) is not a valid request timeout; using %d instead.",
+			existing.TimeoutSecs, config.DefaultTimeoutSeconds)
+		fmt.Println()
+		prof.TimeoutSecs = config.DefaultTimeoutSeconds
 	}
 
 	// Refuse to save when the wizard collected no usable profile
@@ -1514,7 +1544,12 @@ func configLookup(c *config.Config, key string) (string, error) {
 		case "max_tokens":
 			return "(removed)", nil
 		case "timeout_seconds":
-			return intToStr(prof.TimeoutSecs), nil
+			// The EFFECTIVE value, not the raw one. The runtime
+			// resolves an unset or invalid value to the substrate
+			// default (config.EffectiveTimeoutSeconds), so reporting
+			// the raw value here would let the CLI and the runtime
+			// disagree about the timeout that will actually be used.
+			return strconv.Itoa(config.EffectiveTimeoutSeconds(prof.TimeoutSecs)), nil
 		}
 	}
 	// Legacy fallback — Synth block when Profiles["default"] is missing.
@@ -1529,7 +1564,8 @@ func configLookup(c *config.Config, key string) (string, error) {
 		case "max_tokens":
 			return "(removed)", nil
 		case "timeout_seconds":
-			return intToStr(c.Synth.TimeoutSecs), nil
+			// Same effective-value rule as the profile branch above.
+			return strconv.Itoa(config.EffectiveTimeoutSeconds(c.Synth.TimeoutSecs)), nil
 		}
 	}
 	return "", fmt.Errorf("mpm config get: unknown key %q (valid keys: model, api_key, base_url, timeout_seconds, synthesis_enabled)", key)
@@ -1861,15 +1897,6 @@ func confirmPrompt(rw *bufio.Reader, label string) bool {
 // ---------------------------------------------------------------------------
 // Small helpers (kept package-private to avoid touching stdlib imports)
 // ---------------------------------------------------------------------------
-
-// intToStr formats an int as a string, returning "" for 0. Used to
-// surface a default placeholder only.
-func intToStr(n int) string {
-	if n == 0 {
-		return ""
-	}
-	return fmt.Sprintf("%d", n)
-}
 
 // strconvAtoi wraps strconv.Atoi to keep imports slim. The wizard
 // uses this only for the two int fields.

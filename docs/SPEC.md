@@ -1969,6 +1969,31 @@ written:
   stays legal: the providers normalise it to their own default
   endpoint.
 
+The wizard does **not** ask for the model request timeout
+(`timeout_seconds`). That is an advanced setting: it only matters in a
+failure mode most operators never see, and it cannot be chosen
+sensibly before they have watched a slow provider. What the wizard
+does instead is make the value explicit and correct — a fresh profile
+is written with the substrate default (300s), an existing configured
+value is preserved unchanged, and an invalid existing value (zero or
+negative) is replaced by the default with the replacement reported.
+`timeout_seconds` remains a manually editable field in
+`mpm_config.json` and remains settable from a terminal with
+`mpm config profile set <name> timeout_seconds <value>`.
+
+The default and the validation policy live in one place — see
+`internal/core/config/timeout.go` — and the wizard, the generated
+configuration and the runtime all resolve through it, so they cannot
+disagree. Only a positive value is valid: Go's `http.Client` treats a
+non-positive `Timeout` as unlimited, so a negative value would mean
+"no timeout at all" rather than "not configured".
+
+The CONNECTION-VERIFICATION timeout is a separate thing and is never
+inherited from the profile: the probe uses its own bound (12s for a
+Doctor probe, 1.5s for a post-save probe). A provider that does not
+answer in time is reported as a **timeout**, never as an invalid
+credential.
+
 #### How a component resolves to a profile, and what Doctor reports
 
 A generative component (memory, critic, …) resolves to a profile

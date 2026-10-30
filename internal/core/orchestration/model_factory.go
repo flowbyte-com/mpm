@@ -64,10 +64,7 @@ func DefaultModelFactory() ModelFactory {
 					"set api_key on the profile or export %s",
 				profile.Name, profile.Provider, synth.PrimaryAPIKeyEnvVar(profile.BaseURL))
 		}
-		timeout := time.Duration(profile.TimeoutSecs) * time.Second
-		if timeout <= 0 {
-			timeout = 300 * time.Second // substrate default
-		}
+		timeout := time.Duration(config.EffectiveTimeoutSeconds(profile.TimeoutSecs)) * time.Second
 		// The client is built through the substrate's single
 		// construction point so the protocol, the credential and the
 		// authentication scheme are resolved exactly as they are for

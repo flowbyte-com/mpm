@@ -47,6 +47,65 @@ explicit binding (and is not a capability alias) resolves through `default`.
 Naming convention: short lowercase names (`default`, `fast`, `critic`,
 `local-ollama`, `embedding`).
 
+### `timeout_seconds` (advanced)
+
+`timeout_seconds` is how long the substrate waits for a **model request** —
+the call that generates text. It is an advanced setting, not an onboarding
+decision: the interactive wizard does not ask for it, and a freshly-written
+profile carries the substrate default.
+
+```json
+{
+  "profiles": {
+    "default": {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "timeout_seconds": 300
+    }
+  }
+}
+```
+
+**Default:** `300` seconds. The default lives in one place —
+`config.DefaultTimeoutSeconds` in `internal/core/config/timeout.go` — and
+every reader (the wizard, the generated configuration, the synthesis client,
+the model factory) resolves the effective value through the same policy
+(`config.EffectiveTimeoutSeconds`). The CLI cannot disagree with the runtime:
+`mpm config get timeout_seconds` reports the **effective** value, not the raw
+value in the file.
+
+**Validation policy.** Only a positive value is valid:
+
+| Configured value | Effective timeout | Notes |
+|---|---|---|
+| `300` (or any positive) | that value | used exactly as configured |
+| absent / `0` | `300` | `timeout_seconds` is `omitempty`, so absent and `0` are indistinguishable once parsed |
+| negative (e.g. `-5`) | `300` | **invalid** — see below |
+
+A negative value is invalid rather than honoured because Go's `http.Client`
+treats a non-positive `Timeout` as **unlimited**. Passing `-5` through
+unchanged would silently turn a bounded request into an unbounded one instead
+of producing the error the operator expected.
+
+The entry points reject a non-positive value at the point of entry
+(`mpm config set timeout_seconds <value>` and `mpm config profile set <name>
+timeout_seconds <value>`), so the fallback above only ever applies to a
+hand-edited `mpm_config.json`.
+
+**Upgrades preserve explicit values.** Re-running the wizard — or upgrading
+MPM — never silently replaces a timeout the operator already configured. An
+existing valid value is kept verbatim; an existing invalid value is replaced
+by the default **and the replacement is reported**.
+
+**Connection verification is a different timeout.** `timeout_seconds` bounds a
+*model request*. The probe that verifies a provider's credentials uses its own
+much shorter bounds (12 seconds for a Doctor probe, 1.5 seconds for a
+post-save probe), because a verification is a tiny connectivity question, not
+a generation. The two never share a value or a code path: a provider that
+does not answer in time is reported as a **timeout**, never as an invalid
+credential. A slow provider and a wrong credential are different faults and
+are reported differently.
+
 ## Components
 
 Optional substrate-component → profile bindings. The substrate has three
@@ -146,6 +205,7 @@ mpm config set synthesis_enabled false
 |---|---|
 | Set up a default model | `mpm config` (interactive wizard) |
 | Change the default model | `mpm config set model <model>` |
+| Set the model request timeout (advanced) | `mpm config profile set default timeout_seconds 300` |
 | Bind a different model to a component | `mpm config profile add <name>` then `mpm config component set <component> <profile>` |
 | Configure embedding | `mpm config detect-embedding --apply local-ollama` |
 | Override a capability mapping | `mpm config capability set <cap> <component>` |

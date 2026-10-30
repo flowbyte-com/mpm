@@ -86,7 +86,7 @@ type SynthClient struct {
 // never operator-configurable.
 func NewClientForProfile(p config.Profile, timeout time.Duration, maxTokens int) *SynthClient {
 	if timeout <= 0 {
-		timeout = 300 * time.Second
+		timeout = time.Duration(config.DefaultTimeoutSeconds) * time.Second
 	}
 	if maxTokens <= 0 {
 		maxTokens = synthInternalMaxTokens
@@ -141,7 +141,7 @@ func NewSynthClient() *SynthClient {
 		Model:     "MiniMax-M2.7",
 		BaseURL:   "https://api.minimax.io/anthropic/v1",
 		MaxTokens: synthInternalMaxTokens, // substrate-supplied default; never user-configurable
-		Timeout:   300 * time.Second,
+		Timeout:   time.Duration(config.DefaultTimeoutSeconds) * time.Second,
 	}
 	// 1. Legacy Synth block first — sets the baseline. Modern profiles
 	// below override the legacy fields. MaxTokens is intentionally
@@ -154,9 +154,12 @@ func NewSynthClient() *SynthClient {
 			sc.BaseURL = cfg.Synth.BaseURL
 		}
 		// MaxTokens: ignored. Substrate default applies.
-		if cfg.Synth.TimeoutSecs > 0 {
-			sc.Timeout = time.Duration(cfg.Synth.TimeoutSecs) * time.Second
-		}
+		//
+		// The timeout is resolved through the substrate's ONE policy
+		// (config.EffectiveTimeoutSeconds), with no local test of the
+		// raw value: a second place that decides what "unset" means is
+		// a second place that can disagree with the first.
+		sc.Timeout = time.Duration(config.EffectiveTimeoutSeconds(cfg.Synth.TimeoutSecs)) * time.Second
 		if cfg.Synth.APIKey != "" {
 			sc.APIKey = cfg.Synth.APIKey
 		}
@@ -173,9 +176,9 @@ func NewSynthClient() *SynthClient {
 				sc.BaseURL = prof.BaseURL
 			}
 			// MaxTokens: ignored. Substrate default applies.
-			if prof.TimeoutSecs > 0 {
-				sc.Timeout = time.Duration(prof.TimeoutSecs) * time.Second
-			}
+			//
+			// Same single policy as the legacy branch above.
+			sc.Timeout = time.Duration(config.EffectiveTimeoutSeconds(prof.TimeoutSecs)) * time.Second
 			if prof.APIKey != "" {
 				sc.APIKey = prof.APIKey
 			}
