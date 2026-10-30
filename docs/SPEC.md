@@ -1969,6 +1969,57 @@ written:
   stays legal: the providers normalise it to their own default
   endpoint.
 
+The wizard does **not** ask for the model request timeout
+(`timeout_seconds`). That is an advanced setting: it only matters in a
+failure mode most operators never see, and it cannot be chosen
+sensibly before they have watched a slow provider. What the wizard
+does instead is make the value explicit and correct — a fresh profile
+is written with the substrate default (300s), an existing configured
+value is preserved unchanged, and an invalid existing value (zero or
+negative) is replaced by the default with the replacement reported.
+`timeout_seconds` remains a manually editable field in
+`mpm_config.json` and remains settable from a terminal with
+`mpm config profile set <name> timeout_seconds <value>`.
+
+The default and the validation policy live in one place — see
+`internal/core/config/timeout.go` — and the wizard, the generated
+configuration and the runtime all resolve through it, so they cannot
+disagree. Only a positive value is valid: Go's `http.Client` treats a
+non-positive `Timeout` as unlimited, so a negative value would mean
+"no timeout at all" rather than "not configured".
+
+The CONNECTION-VERIFICATION timeout is a separate thing and is never
+inherited from the profile: the probe uses its own bound, ONE number
+for every verification surface — 15 seconds — and the whole
+verification is bounded by a larger budget (40 seconds) that covers
+the first attempt and the one bounded recovery attempt it may make.
+A provider that does not answer in time is reported as a **timeout**,
+never as an invalid credential.
+
+The bound is a measurement, not a preference. Against the live MiniMax
+Anthropic-compatible surface, the canonical probe path measured a
+median of 560–700ms (`MiniMax-M3`) and 603–1007ms (`MiniMax-M2.7`), with a
+slowest observed call of 4761ms. The bound this replaced was 1.5
+seconds — below the slowest healthy call — so a valid credential was
+reported as a timeout. A verification bound shorter than the
+provider's own latency turns a working credential into a reported
+failure, and on a credential surface an operator reads a timeout as
+"my key is wrong".
+
+A profile's `api_key` is a **literal secret**: it is presented to the
+provider exactly as written and is never expanded. A value shaped like
+an environment variable (`"$NAME"` / `"${NAME}"`) is the one
+exception and is resolved as a **reference** — which is what stops a
+placeholder like `"$MINIMAX_API_KEY"` from shadowing a perfectly good
+environment credential and being reported as an invalid key. The
+expansion is **closed** over the substrate's own table: a reference
+resolves only when it names a credential variable the endpoint itself
+declares, and a reference to anything else is refused rather than
+expanded. MPM does not perform arbitrary environment expansion, and no
+secret — the configured value, the resolved value, or a name the
+operator typed — ever appears in a message. Every prompt that asks
+for a credential states the distinction before it asks.
+
 #### How a component resolves to a profile, and what Doctor reports
 
 A generative component (memory, critic, …) resolves to a profile
