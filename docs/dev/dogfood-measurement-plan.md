@@ -524,6 +524,8 @@ SELECT invocation_id, COUNT(*) n FROM tool_invocations
 -- maps to exactly one ledger row AND exactly one provenance row, and the
 -- artifact named by that provenance row is FOUND in the table its
 -- artifact_type names.
+-- No LIMIT: the query runs over EVERY write surface. A surface that a
+-- report does not display is still queried and still counted.
 SELECT ti.tool_name || ' ' || ti.action                        AS surface,
        SUM(ti.result_status = 'success')                       AS reported_ok,
        SUM(ti.result_status = 'success' AND lk.n = 1
@@ -554,7 +556,16 @@ SELECT ti.tool_name || ' ' || ti.action                        AS surface,
   LEFT JOIN works wk            ON wk.id = ap.artifact_id AND ap.artifact_type = 'work'
   LEFT JOIN session_handoffs ho ON ho.id = ap.artifact_id AND ap.artifact_type = 'handoff'
  WHERE ti.result_status = 'success'
- GROUP BY 1 ORDER BY 2 DESC;
+ GROUP BY 1 ORDER BY 3 DESC, 2 DESC, 1;
+
+-- a miss is classified further: a TYPE MISMATCH (the artifact is present,
+-- but under another type/table) is not a lost artifact; only an ABSENT
+-- artifact (in no artifact table at all) is.
+SELECT ap.artifact_id, ap.artifact_type,
+       CASE WHEN <present in any artifact table>
+            THEN 'type-mismatch' ELSE 'absent' END AS verdict
+  FROM artifact_provenance ap
+ WHERE NOT (<present in the table ap.artifact_type names>);
 
 -- the busy/locked failure mode (issue #178)
 SELECT datetime(started_at,'unixepoch'), tool_name, action, error_message
@@ -894,20 +905,65 @@ exactly one ledger row **and** exactly one provenance row. A link that
 fails that test is reported as **ambiguous**, which is a measurement blind
 spot — *not* a lost write.
 
+#### M5.2.1 The finding test is type-aware — and a miss is not automatically a loss
+
+A sound link names an `artifact_id` **and** an `artifact_type`. The
+artifact counts as confirmed when it is found **in the table that type
+names** (`memory` → `memories`, `decision` → `memories` with
+`collection='decisions'`, `lesson` → `lessons_base`, `work` → `works`,
+`handoff` → `session_handoffs`, `theory` → `memories` with
+`collection='theories'`).
+
+When the artifact is **not** found there, the miss is classified further,
+because the two cases mean different things:
+
+| class | meaning | is it a lost write? |
+|---|---|---|
+| **type mismatch** | not in the table its `artifact_type` names, but **present in another artifact table** | **no** — a metadata defect in the provenance row |
+| **absent** | in **no** artifact table at all | yes, or the artifact was deleted/shredded — a candidate loss |
+
+**The `artifact_type` namespace collides.** The provenance type is derived
+from the *collection*, not from the table the artifact lives in: a
+**memory** saved into the `lessons` collection is recorded with
+`artifact_type='lesson'` while its id is a `memories` row. A type-aware
+lookup therefore cannot find it in `lessons_base` — and a report that
+stops at "not found there" would call a durable write a lost one.
+
+**The one live instance, verified by identity.** Provenance row
+`b665b3a95ee70410` declares `artifact_type='lesson'`; the artifact id
+`b665b3a95ee70410` **is present** in `memories`, with
+`collection='lessons'`, created **2026-10-25 17:08:49**, by an
+`mpm_memory save` that reported `success` (invocation
+`inv_c4c3a3a7-…`, the only ledger row for that invocation). So the write
+**is** durable; only its provenance row is mis-typed. Across the whole
+live corpus — 200 provenance rows — this is the **only** type mismatch,
+and there are **zero** absent artifacts.
+
 #### M5.3 What is measured, and the measured result
 
-| # | quantity | how | day-zero result (live, `3d63244e`) |
+| # | quantity | how | day-zero result (live, `3d63244e`, measured 2026-10-30T19:41Z) |
 |---|---|---|---|
-| W1 | attempted writes (observable lower bound) | write-classified rows in `tool_invocations` | ~393 all time |
-| W2 | reported successes / failures | `result_status` by `outcome_class` | 265 / 95 in the window |
-| W3 | **confirmed durable** (per write) | sound link + artifact found | **only `mpm_memory save` has a sound link: 78 of 79 confirmed** |
-| W4 | **unconfirmable per write** (aggregate only) | surfaces with no sound link | decisions, handoffs, lessons, changelog, theories, evidence, work — **all of them** |
+| W1 | attempted writes (observable lower bound) | write-classified rows in `tool_invocations` | 398 all time, 347 in the window |
+| W2 | reported successes / failures | `result_status` by `outcome_class` | 251 / 96 in the window |
+| W3 | **confirmed durable** (per write) | sound link + artifact found | **four surfaces carry a sound link**: `mpm_memory save` 79 of 80 · `mpm_work create` 3 of 3 · `mpm_decisions record` 1 of 1 · `mpm_handoff write` 1 of 1 |
+| W4 | **no sound link** (aggregate only) | surfaces examined that carry none | **16 of the 20 write surfaces** — lessons save and propose · changelog · theories propose · work note and complete · evidence add · context write_handoff · system compact · scratchpad flush · and the delete/shred/patch/reinforce verbs |
 | W5 | unknown outcome | reported success, no provenance row, no returned artifact id | 2 on `mpm_memory save` |
 | W6 | ambiguous link | invocation id shared by several ledger rows | 5 on `mpm_memory save` |
 | W7 | SQLite busy/locked | `outcome_code='wal_busy_timeout'` | **2**, both `mpm_decisions record`, 2026-10-24/25 |
 | W8 | handoff persistence failures | `system_audit_log` `component='handoff'` | **2**, both `EndSessionV2 … CHECK constraint failed: ended_state` |
-| W9 | provenance integrity | artifact absent from the table its type names; invocation absent from the ledger | **1** and **12** respectively |
+| W9 | provenance integrity | artifact vs the table its type names; invocation vs the ledger | **type mismatch 1** (artifact present, row mis-typed — §M5.2.1), **absent 0**, **12** uncited invocations |
 | W10 | scheduler correlation | busy/locked events vs scheduler ticks (journal) | 1 of 2 busy events within 60 s of a tick |
+
+**W3 is a per-surface measurement, not a global verdict.** The counts are
+a snapshot of a corpus that is still moving, and they move **upward** for
+the surfaces that only began writing invocation-linked provenance in the
+upgraded runtime. The stable statement is the **capability**: a surface
+carries a sound link exactly when its write records an
+`artifact_provenance` row carrying the caller's invocation id, and that
+id maps 1:1 in both tables. Four surfaces meet that today
+(`mpm_memory save`, `mpm_work create`, `mpm_decisions record`,
+`mpm_handoff write`); the other sixteen write an artifact without one.
+The daily block re-measures this every morning, over **all** surfaces.
 
 #### M5.4 What M5 does NOT measure — the blind spots, stated
 
@@ -921,14 +977,35 @@ These are the reasons the daily report says "unconfirmable" rather than
   all** — they were written without a tool call. (The 5 that do have one
   were written after the upgrade, which began recording the link.) A week
   of measured attempts undercounts real attempts by an unknown amount.
-- **Per-write durability is confirmable for exactly one surface.** Only
-  `mpm_memory save` carries a sound invocation→artifact link. Every other
-  write surface is **aggregate-only**: the write and the artifact cannot be
-  paired, so "was this one durable?" is **unanswerable** for decisions,
-  handoffs, lessons, changelog entries, theories, evidence and work items.
-  The aggregate row counts are reported in §7d of the daily block and are
-  **not** a loss measurement: a handoff upsert on an existing `session_id`
-  *replaces* a row instead of adding one, so a lower row count is expected.
+- **Per-write durability is confirmable on four surfaces, not one.** The
+  earlier draft of this plan said "exactly one surface" — that was wrong,
+  and Appendix A already contradicted it. `mpm_memory save`,
+  `mpm_work create`, `mpm_decisions record` and `mpm_handoff write` each
+  carry a sound invocation→artifact link (80 / 3 / 1 / 1 at the
+  2026-10-30T19:41Z measurement). The other **sixteen** surfaces are
+  **aggregate-only**: the write and the artifact cannot be paired, so
+  "was this one durable?" is **unanswerable** for lessons, changelog
+  entries, theories, evidence, work notes, handoff-by-context, and the
+  delete/shred/patch/reinforce verbs. The aggregate row counts are
+  reported in §7d of the daily block and are **not** a loss measurement:
+  a handoff upsert on an existing `session_id` *replaces* a row instead
+  of adding one, so a lower row count is expected.
+- **The sound-link counts move, and the direction is known.** A surface's
+  count depends on **when** its writes happened relative to the runtime
+  that records the link. `mpm_decisions record` and `mpm_handoff write`
+  produced **no** invocation-linked provenance before the upgrade — of 51
+  decision provenance rows, 46 carry no `invocation_id` at all — so their
+  counts are a post-upgrade accumulation, not a constant.
+  `mpm_work create` is the exception: it already carried invocation-linked
+  provenance before the upgrade (3 sound links dated 2026-10-23). This is
+  why the plan states a **capability** and a **timestamped measurement**
+  instead of a fixed number.
+- **"No sound link" is an examined result, not an assumption.** The daily
+  block queries **every** write surface and aggregates over all of them;
+  the table displays eight rows and says so, and the aggregate reports
+  how many of the surfaces it did not display were examined and what they
+  carried. An earlier draft asserted that every surface outside the
+  display was unconfirmable without having looked at it. It now looks.
 - **A zero-hit handoff audit row is not a lost handoff.** The two
   `EndSessionV2 … CHECK constraint failed` rows **do** have a nearby
   `mpm_handoff write` tool call that reported `error`. They are *reported*
@@ -939,9 +1016,11 @@ These are the reasons the daily report says "unconfirmable" rather than
   by misclassified payload-shape errors and by policy refusals (§7.3).
 - **The `artifact_type` namespace collides.** A **memory** saved into the
   `lessons` *collection* is recorded with `artifact_type='lesson'` while its
-  id belongs to a memory row. One such row exists live, and it is why W9
-  reads **1** and not 0. A provenance row is therefore **not** by itself
-  proof that an artifact of that type exists.
+  id belongs to a memory row. One such row exists live — `b665b3a95ee70410`,
+  the artifact **present** in `memories` — and it is why W9 reads a type
+  mismatch of 1 and not 0 (§M5.2.1). A provenance row is therefore **not**
+  by itself proof that an artifact of that type exists; and a type-aware
+  miss is **not** by itself proof that the artifact was lost.
 - **Nothing here is instrumented to detect a write that was never
   attempted at all** — a caller that silently skipped a write leaves no
   trace in any of these tables.
@@ -958,8 +1037,12 @@ in the window), reported success/failure, the outcome-class breakdown, the
 reported-vs-confirmed table, the aggregate cross-checks, the unknown-outcome
 and ambiguous-link breakdown, the busy/locked rows, the handoff persistence
 failures with their nearest tool outcome, the provenance integrity counts,
-and the scheduler correlation. The daily answer the operator adds is one
-line:
+and the scheduler correlation. The per-surface table **displays** eight
+rows and **queries** every write surface; the aggregate beneath it reports
+how many surfaces were examined, how many carry a sound link, and how many
+of the undisplayed ones were examined and what they carried — so a surface
+is never described as unconfirmable without having been examined. The
+daily answer the operator adds is one line:
 
 > **Did anything you wrote in the last day turn out not to be there?** — and
 > if so, which surface.
@@ -1990,6 +2073,38 @@ rehearsal is not run by CI, so nothing else would have caught it. The
 change is a consequence of the upgrade this PR is being revised for, and
 it is the smallest change that restores the gate's meaning.
 
+### 12.2.2 Three consistency corrections to M5 — and what they were
+
+The final review of this plan found that §M5.3/§M5.4, Appendix A.1 and
+the baseline script did not agree with each other, and that one of the
+three ways they disagreed was a **measurement** error rather than a
+wording error. All three are corrected here.
+
+| the claim | what it was | what it is |
+|---|---|---|
+| "per-write durability is confirmable for **exactly one surface**" (§M5.3 W3, §M5.4) | contradicted by Appendix A.1, which already recorded sound links for `mpm_work create`, `mpm_decisions record` and `mpm_handoff write` | **four** surfaces carry a sound link; the other **sixteen** are aggregate-only. The plan now states a **capability** plus a timestamped measurement, because the counts move upward as the upgraded runtime writes |
+| the one unconfirmed `mpm_memory save` record (78 of 79) | reported as an artifact that could not be found | **a provenance-type mismatch, not a missing artifact.** The identity is `b665b3a95ee70410`: declared `lesson`, **present** in `memories` with `collection='lessons'`, created 2026-10-25 17:08:49 by an `mpm_memory save` that reported success. The corpus has **0** genuinely absent artifacts (§M5.2.1) |
+| "(+N further write surfaces, **all unconfirmable per write**)" (the script) | asserted a property of surfaces the script had **not looked at** — its query carried `LIMIT 8` | the query now runs over **every** write surface; the **display** is capped at 8 and the aggregate reports how many were examined, how many carry a sound link, and how many of the undisplayed ones were examined and what they carried |
+
+**What was verified, and how.** The measurements were taken read-only,
+against a `.backup` snapshot of the live database
+(`sqlite3 -readonly "file:…?mode=ro" ".backup …"`), and cross-checked
+with three independent queries: per-surface sound links by originating
+ledger row; every provenance row with an invocation id, with its ledger
+and provenance cardinality; and every provenance row classified against
+the table its `artifact_type` names and against every artifact table.
+The one type-mismatch row was then opened individually and read column by
+column.
+
+**No production data was changed.** Every command in this correction was
+a read. The live database was snapshotted with `.backup` (the source is
+opened read-only), and the script's own run takes its own snapshot before
+it queries anything. `scripts/tests/test_dogfood_baseline.py` now asserts
+the two properties that were previously only prose: that a surface
+outside the display is reported as **examined** rather than assumed
+unconfirmable, and that a type-mismatch artifact is never counted as a
+lost artifact — 19 tests, 0 failures.
+
 ### 12.3 The scheduler was restarted during this preparation — the record
 
 **The scheduler was restarted twice on 2026-10-30 while this plan was being
@@ -2086,19 +2201,22 @@ are reproduced by the day-zero run of `scripts/dogfood_baseline.sh`.
 | `EndSessionV2 … failed` audit rows | **2**, both pre-upgrade, both with a nearby `mpm_handoff write` that reported `error` |
 | `internal` class | dominated by misclassified payload-shape errors; includes the new operator-only lesson-save refusal |
 
-**Write reliability (M5)**
+**Write reliability (M5)** — re-measured 2026-10-30T19:41Z
 
 | | |
 |---|---|
-| attempted writes observed (lower bound) | ~395 all time, ~362 in the window |
-| reported success / failure in the window | ~267 / ~95 |
-| per-write durability, `mpm_memory save` | 86 reported successes → **79 sound links → 78 confirmed** |
+| attempted writes observed (lower bound) | 398 all time, 347 in the window |
+| reported success / failure in the window | 251 / 96 |
+| **write surfaces examined** | **20 — 4 with a sound link, 16 with none** |
+| per-write durability, `mpm_memory save` | 87 reported successes → **80 sound links → 79 confirmed, 1 type-mismatch, 0 absent** |
 | per-write durability, `mpm_work create` | 6 → 3 → 3 |
 | per-write durability, `mpm_decisions record` / `mpm_handoff write` | 50 / 42 → **1 sound link each** — the upgraded runtime began writing invocation-linked provenance for these surfaces |
-| every other surface | **0 sound links — unconfirmable per write** |
+| every other surface | **0 sound links — aggregate-only** (all 16 were examined, not assumed) |
+| sound links in total | **85 → 84 confirmed, 1 type-mismatch, 0 absent** |
 | unknown outcomes (`mpm_memory save`) | 2 (no provenance row at all) |
 | ambiguous links (`mpm_memory save`) | 5 (invocation id shared by several ledger rows) |
-| provenance rows whose artifact is absent from the table its type names | **1** (the `lessons`-collection memory typed as `lesson`) |
+| provenance rows in total | **200** — 199 found in the table their type names, **1 type mismatch**, **0 absent** |
+| the one type mismatch | **`b665b3a95ee70410`** — declared `lesson`, actually in `memories` (`collection='lessons'`), created 2026-10-25 17:08:49 by an `mpm_memory save` that reported success. **The artifact is present**; only the provenance row is mis-typed |
 | provenance rows citing an invocation the ledger does not contain | 12 |
 | busy/locked within 60 s of a scheduler tick | 1 of 2 |
 
@@ -2161,5 +2279,5 @@ week's baseline is re-measured on `3d63244e` by the day-zero run.
 | **numerator** | artifacts from *S₁* surfaced during *S₂* | items labelled `relevant` | zero-hits adjudicated as over-constrained or unindexed | surfaced artifacts belonging to *Q* ≠ *P* | reported successes whose artifact is **found**, over a **sound** invocation→artifact link |
 | **denominator** | artifacts from *S₁* still live at *S₂*'s start | items labelled | zero-hits detected | surfaced artifacts | reported successes per surface |
 | **reported as** | a rate per project per day | a weekly rate with *n* and the interval | a count by cause, with the verbatim query | candidates per day; confirmed per day | confirmed / reported per surface; unknown outcomes; ambiguous links; busy/locked; scheduler correlation |
-| **limitation** | **query path only** — the wake path records no per-node trace; it is a **lower bound** | small *n*; directional, not a metric | detection is operator-read; the response is not persisted | the tag dimension is incomplete; UNACCOUNTED had 0 tagged rows | **the attempted-write count is a lower bound** (CLI and internal writes are not in the ledger); per-write durability is confirmable for **one** surface only; a write never attempted leaves no trace |
+| **limitation** | **query path only** — the wake path records no per-node trace; it is a **lower bound** | small *n*; directional, not a metric | detection is operator-read; the response is not persisted | the tag dimension is incomplete; UNACCOUNTED had 0 tagged rows | **the attempted-write count is a lower bound** (CLI and internal writes are not in the ledger); per-write durability is confirmable on **four** surfaces only, the other sixteen are aggregate-only; a type-aware miss is a mis-typed provenance row unless the artifact is in no table at all; a write never attempted leaves no trace |
 | **operator input** | answer #4 | the labels | answer #1 | answer #2 | one line: did anything you wrote turn out not to be there? |

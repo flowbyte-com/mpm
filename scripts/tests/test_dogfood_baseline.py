@@ -424,6 +424,147 @@ class TestLessonSupportClaim(unittest.TestCase):
         self.assertNotIn("unsupported-assertion watch list", proc.stdout)
 
 
+class TestDurabilityLinkAccounting(unittest.TestCase):
+    """The §7c/§7h contract: every surface is examined, and a mis-typed
+    provenance row is never reported as a lost artifact.
+
+    The two defects this guards against were both in the report's own
+    wording:
+
+    * the daily table displayed eight surfaces and then asserted that
+      *every* surface it had not displayed was unconfirmable — an
+      assertion about surfaces it had never looked at;
+    * a provenance row whose `artifact_type` disagrees with the table its
+      artifact actually lives in was counted as an artifact that could not
+      be found, which reads as a lost write when the write is on disk.
+    """
+
+    # Twelve write surfaces — more than the eight the table displays.
+    SURFACES = (
+        ("mpm_memory", "save"),
+        ("mpm_decisions", "record"),
+        ("mpm_lessons", "save"),
+        ("mpm_handoff", "write"),
+        ("mpm_context", "write_handoff"),
+        ("mpm_log_to_changelog", "record"),
+        ("mpm_theories", "propose"),
+        ("mpm_work", "create"),
+        ("mpm_skills", "save"),
+        ("mpm_evidence", "add"),
+        ("mpm_system", "compact"),
+        ("mpm_scratchpad", "flush"),
+    )
+
+    def _fixture_with_surfaces(self, tmp: str) -> Path:
+        db = build_fixture(Path(tmp) / "mpm.db", proposals=True)
+        con = sqlite3.connect(db)
+        try:
+            rows = []
+            for i, (tool, action) in enumerate(self.SURFACES):
+                rows.append(
+                    (
+                        f"x{i}",
+                        "sess",
+                        tool,
+                        action,
+                        f"inv-x{i}",
+                        "agent",
+                        "opencode",
+                        "sha256:x",
+                        "success",
+                        1000 + i,
+                        1001 + i,
+                        1,
+                        None,
+                        "mpm-sess",
+                        None,
+                        "ok",
+                        "",
+                    )
+                )
+            con.executemany(
+                "INSERT INTO tool_invocations VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
+            # One of them (mpm_work create) carries a sound link.
+            con.execute(
+                "INSERT INTO artifact_provenance VALUES "
+                "('px','w1','work',1000,'v1','agent','mpm_cli','opencode',"
+                "'sess','inv-x7')"
+            )
+            con.commit()
+        finally:
+            con.close()
+        return db
+
+    def test_every_write_surface_is_examined_not_assumed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = self._fixture_with_surfaces(tmp)
+            proc = run_script(db)
+        self.assertEqual(proc.returncode, 0, proc.stdout[-3000:])
+        # Twelve distinct surfaces: the twelve seeded here, plus the
+        # fixture's own `mpm_memory save`, which shares a surface with the
+        # seeded one and also carries a sound link.
+        self.assertIn(
+            "12 write surfaces examined: 2 with a sound link, 10 with none.",
+            proc.stdout,
+        )
+        self.assertIn("(+4 further surfaces are not displayed", proc.stdout)
+        self.assertIn("all 4 were examined: 0 with a sound link, 4 with none.", proc.stdout)
+        # The old wording asserted a property of surfaces it had not looked
+        # at. It must be gone.
+        self.assertNotIn("all unconfirmable per write", proc.stdout)
+
+    def test_a_type_mismatch_is_not_counted_as_a_lost_artifact(self) -> None:
+        """A memory typed as 'lesson' is a metadata defect, not a loss."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = build_fixture(Path(tmp) / "mpm.db", proposals=True)
+            con = sqlite3.connect(db)
+            try:
+                # 'm2' lives in `memories`; the provenance row types it
+                # 'lesson', so a type-aware lookup finds nothing there.
+                con.execute(
+                    "INSERT INTO memories VALUES "
+                    "('m2','lessons','a memory in the lessons collection',"
+                    "'[]','{}',1000,NULL)"
+                )
+                con.execute(
+                    "INSERT INTO artifact_provenance VALUES "
+                    "('p2','m2','lesson',1000,'v1','agent','mpm_cli','opencode',"
+                    "'sess','inv-1')"
+                )
+                con.commit()
+            finally:
+                con.close()
+            proc = run_script(db)
+        self.assertEqual(proc.returncode, 0, proc.stdout[-3000:])
+        self.assertIn("TYPE MISMATCH — not there, but present in another table : 1", proc.stdout)
+        self.assertIn("ABSENT — in no artifact table at all                    : 0", proc.stdout)
+        self.assertIn("m2", proc.stdout)
+        self.assertIn("NOT a lost artifact", proc.stdout)
+
+    def test_a_genuinely_absent_artifact_is_reported_as_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = build_fixture(Path(tmp) / "mpm.db", proposals=True)
+            con = sqlite3.connect(db)
+            try:
+                # 'nowhere' is in no artifact table at all.
+                con.execute(
+                    "INSERT INTO artifact_provenance VALUES "
+                    "('p3','nowhere','memory',1000,'v1','agent','mpm_cli',"
+                    "'opencode','sess','inv-1')"
+                )
+                con.commit()
+            finally:
+                con.close()
+            proc = run_script(db)
+        self.assertEqual(proc.returncode, 0, proc.stdout[-3000:])
+        self.assertIn("TYPE MISMATCH — not there, but present in another table : 0", proc.stdout)
+        self.assertIn("ABSENT — in no artifact table at all                    : 1", proc.stdout)
+        self.assertIn("nowhere", proc.stdout)
+
+
 class TestNoProductionChangingCommands(unittest.TestCase):
     """The script must never be able to change the live installation.
 

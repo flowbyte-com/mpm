@@ -566,6 +566,14 @@ printf '      %-26s %8s %8s %10s %s\n' "surface" "ok" "sound" "confirmed" "verdi
 # maps to exactly one ledger row AND exactly one provenance row.
 # 'confirmed' then means the artifact named by that provenance row is
 # FOUND in the table its artifact_type names.
+# 'mismatch' means the sound link resolved, but the artifact is NOT in the
+# table its artifact_type names while it IS in another artifact table: a
+# provenance-TYPE defect, not a lost artifact.
+# 'absent' means the sound link resolved and the artifact is in NO artifact
+# table at all: the only class that is a genuinely missing artifact.
+# The query runs over EVERY write surface — no LIMIT — so no surface is
+# ever assumed to be unconfirmable without having been examined. The
+# display below is capped, the aggregate is not.
 CONFIRM_SQL="SELECT
 	ti.tool_name||' '||ti.action AS surface,
 	SUM(CASE WHEN ti.result_status='success' THEN 1 ELSE 0 END) AS ok,
@@ -576,7 +584,23 @@ CONFIRM_SQL="SELECT
 		(ap.artifact_type='theory'   AND mt.id IS NOT NULL) OR
 		(ap.artifact_type='lesson'   AND lb.id IS NOT NULL) OR
 		(ap.artifact_type='work'     AND wk.id IS NOT NULL) OR
-		(ap.artifact_type='handoff'  AND ho.id IS NOT NULL)) THEN 1 ELSE 0 END) AS confirmed
+		(ap.artifact_type='handoff'  AND ho.id IS NOT NULL)) THEN 1 ELSE 0 END) AS confirmed,
+	SUM(CASE WHEN ti.result_status='success' AND lk.n=1 AND pv.n=1 AND NOT (
+		(ap.artifact_type='memory'  AND m.id IS NOT NULL) OR
+		(ap.artifact_type='decision' AND md.id IS NOT NULL) OR
+		(ap.artifact_type='theory'   AND mt.id IS NOT NULL) OR
+		(ap.artifact_type='lesson'   AND lb.id IS NOT NULL) OR
+		(ap.artifact_type='work'     AND wk.id IS NOT NULL) OR
+		(ap.artifact_type='handoff'  AND ho.id IS NOT NULL)) AND (
+		am.id IS NOT NULL OR al.id IS NOT NULL OR aw.id IS NOT NULL OR ah.id IS NOT NULL) THEN 1 ELSE 0 END) AS mismatch,
+	SUM(CASE WHEN ti.result_status='success' AND lk.n=1 AND pv.n=1 AND NOT (
+		(ap.artifact_type='memory'  AND m.id IS NOT NULL) OR
+		(ap.artifact_type='decision' AND md.id IS NOT NULL) OR
+		(ap.artifact_type='theory'   AND mt.id IS NOT NULL) OR
+		(ap.artifact_type='lesson'   AND lb.id IS NOT NULL) OR
+		(ap.artifact_type='work'     AND wk.id IS NOT NULL) OR
+		(ap.artifact_type='handoff'  AND ho.id IS NOT NULL)) AND (
+		am.id IS NULL AND al.id IS NULL AND aw.id IS NULL AND ah.id IS NULL) THEN 1 ELSE 0 END) AS absent
 FROM tool_invocations ti
 LEFT JOIN (SELECT invocation_id, COUNT(*) n FROM tool_invocations GROUP BY invocation_id) lk ON lk.invocation_id = ti.invocation_id
 LEFT JOIN (SELECT invocation_id, COUNT(*) n FROM artifact_provenance WHERE invocation_id IS NOT NULL AND invocation_id != '' GROUP BY invocation_id) pv ON pv.invocation_id = ti.invocation_id
@@ -587,27 +611,48 @@ LEFT JOIN memories mt ON mt.id = ap.artifact_id AND ap.artifact_type='theory'
 LEFT JOIN lessons_base lb ON lb.id = ap.artifact_id AND ap.artifact_type='lesson'
 LEFT JOIN works wk ON wk.id = ap.artifact_id AND ap.artifact_type='work'
 LEFT JOIN session_handoffs ho ON ho.id = ap.artifact_id AND ap.artifact_type='handoff'
+LEFT JOIN memories am ON am.id = ap.artifact_id
+LEFT JOIN lessons_base al ON al.id = ap.artifact_id
+LEFT JOIN works aw ON aw.id = ap.artifact_id
+LEFT JOIN session_handoffs ah ON ah.id = ap.artifact_id
 WHERE ${WRITE_PRED} AND ti.result_status='success'
-GROUP BY 1 ORDER BY 2 DESC LIMIT 8;"
+GROUP BY 1 ORDER BY 3 DESC, 2 DESC, 1;"
 GAP_BEFORE="$(wc -l <"$GAP_FILE" 2>/dev/null | tr -d ' ')"
 CONFIRM_ROWS="$(q "$CONFIRM_SQL")"
 GAP_AFTER="$(wc -l <"$GAP_FILE" 2>/dev/null | tr -d ' ')"
 if [[ -n "$CONFIRM_ROWS" ]]; then
-	while IFS=$'\t' read -r surface ok sound confirmed; do
+	# The DISPLAY is capped at 8 rows; the QUERY was not. The rows are
+	# ordered so the surfaces that carry a sound link come first, and the
+	# aggregate below is computed from the FULL result set — a surface
+	# that is not displayed is still COUNTED, and is never described as
+	# unconfirmable without having been examined.
+	# `awk 'NR<=8'` rather than `head -8`: awk reads the whole stream, so
+	# the upstream `printf` never takes a broken pipe.
+	printf '%s\n' "$CONFIRM_ROWS" | awk 'NR<=8' | while IFS=$'\t' read -r surface ok sound confirmed mismatch absent; do
 		[[ -z "$surface" ]] && continue
 		if [[ "${sound:-0}" -gt 0 && "${confirmed:-0}" == "${sound}" ]]; then
 			verdict="CONFIRMED per write"
 		elif [[ "${sound:-0}" -gt 0 ]]; then
 			verdict="PARTIAL: ${confirmed:-0} of ${sound} confirmed"
+			[[ "${mismatch:-0}" -gt 0 ]] && verdict="$verdict, ${mismatch} type-mismatch"
+			[[ "${absent:-0}" -gt 0 ]] && verdict="$verdict, ${absent} absent"
 		else
-			verdict="UNCONFIRMABLE per write (no sound link)"
+			verdict="no sound link — per-write unconfirmable"
 		fi
 		printf '      %-26s %8s %8s %10s %s\n' "$surface" "$ok" "$sound" "$confirmed" "$verdict"
-	done <<<"$CONFIRM_ROWS"
-	SURF_TOTAL_N="$(q1 "SELECT COUNT(DISTINCT tool_name||' '||action) FROM tool_invocations WHERE ${WRITE_PRED} AND result_status='success';")"
-	SURF_SHOWN="$(printf '%s\n' "$CONFIRM_ROWS" | grep -c .)"
-	if [[ "${SURF_TOTAL_N:-0}" -gt "${SURF_SHOWN:-0}" ]]; then
-		echo "      (+$((SURF_TOTAL_N - SURF_SHOWN)) further write surfaces, all unconfirmable per write)"
+	done
+	SURF_STATS="$(printf '%s\n' "$CONFIRM_ROWS" | awk -F'\t' '
+		{ n++
+		  if ($3+0 > 0) { s++; sound+=$3; conf+=$4; mism+=$5; abs+=$6 } else { ns++ }
+		  if (n > 8) { om++; if ($3+0 > 0) { oms++; names = names " " $1 } else { omn++ } } }
+		END { printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s", n+0, s+0, ns+0, sound+0, conf+0, mism+0, abs+0, om+0, oms+0, names }')"
+	IFS=$'\t' read -r SURF_N SURF_WITH_SOUND SURF_NO_SOUND SURF_SOUND_TOT SURF_CONF_TOT SURF_MISM_TOT SURF_ABS_TOT SURF_OM SURF_OM_SOUND SURF_OM_NAMES <<<"$SURF_STATS"
+	echo "      ${SURF_N} write surfaces examined: ${SURF_WITH_SOUND} with a sound link, ${SURF_NO_SOUND} with none."
+	echo "      sound links ${SURF_SOUND_TOT} · confirmed ${SURF_CONF_TOT} · type-mismatch ${SURF_MISM_TOT} · absent ${SURF_ABS_TOT}"
+	if [[ "${SURF_OM:-0}" -gt 0 ]]; then
+		echo "      (+${SURF_OM} further surfaces are not displayed — the table is capped at 8 rows;"
+		echo "       all ${SURF_OM} were examined: ${SURF_OM_SOUND} with a sound link, $((SURF_OM - SURF_OM_SOUND)) with none.)"
+		[[ -n "${SURF_OM_NAMES:-}" ]] && echo "       not displayed, but carrying a sound link:${SURF_OM_NAMES}"
 	fi
 elif [[ "${GAP_AFTER:-0}" -gt "${GAP_BEFORE:-0}" ]]; then
 	echo "      UNAVAILABLE — the confirmation query could not run (see MEASUREMENT GAPS)"
@@ -615,7 +660,9 @@ else
 	echo "      (no successful write invocations to confirm)"
 fi
 echo "    A non-zero 'sound' column means the surface can be confirmed PER"
-echo "    WRITE. Every other surface is AGGREGATE-ONLY — unmeasured."
+echo "    WRITE. Every other surface was EXAMINED and carries no sound link:"
+echo "    its per-write durability is AGGREGATE-ONLY — not measured."
+echo "    'type-mismatch' = a mis-typed provenance row, not a lost artifact."
 echo
 
 # Aggregate cross-check: rows that exist against rows the ledger reports.
@@ -690,12 +737,40 @@ echo "    this is expected to stop — watch it, do not assume it."
 
 echo
 echo "  7h. provenance integrity (the link itself):"
-ORPHAN="$(q1 "SELECT COUNT(*) FROM artifact_provenance ap WHERE (ap.artifact_type='memory' AND ap.artifact_id NOT IN (SELECT id FROM memories)) OR (ap.artifact_type='lesson' AND ap.artifact_id NOT IN (SELECT id FROM lessons_base)) OR (ap.artifact_type='decision' AND ap.artifact_id NOT IN (SELECT id FROM memories WHERE collection='decisions')) OR (ap.artifact_type='theory' AND ap.artifact_id NOT IN (SELECT id FROM memories WHERE collection='theories'));")"
+# A provenance row that names an artifact_type is checked against the table
+# that type names. When the artifact is NOT there, the row is classified
+# further: TYPE MISMATCH (the artifact exists, under another type/table)
+# versus ABSENT (the artifact is in no artifact table at all). Only the
+# second class is a genuinely missing artifact.
+NAMED_SQL="(ap.artifact_type='memory'   AND EXISTS(SELECT 1 FROM memories m WHERE m.id=ap.artifact_id)) OR
+	(ap.artifact_type='decision' AND EXISTS(SELECT 1 FROM memories m WHERE m.id=ap.artifact_id AND m.collection='decisions')) OR
+	(ap.artifact_type='theory'   AND EXISTS(SELECT 1 FROM memories m WHERE m.id=ap.artifact_id AND m.collection='theories')) OR
+	(ap.artifact_type='lesson'   AND EXISTS(SELECT 1 FROM lessons_base l WHERE l.id=ap.artifact_id)) OR
+	(ap.artifact_type='work'     AND EXISTS(SELECT 1 FROM works w WHERE w.id=ap.artifact_id)) OR
+	(ap.artifact_type='handoff'  AND EXISTS(SELECT 1 FROM session_handoffs h WHERE h.id=ap.artifact_id))"
+PRESENT_SQL="EXISTS(SELECT 1 FROM memories m WHERE m.id=ap.artifact_id) OR
+	EXISTS(SELECT 1 FROM lessons_base l WHERE l.id=ap.artifact_id) OR
+	EXISTS(SELECT 1 FROM works w WHERE w.id=ap.artifact_id) OR
+	EXISTS(SELECT 1 FROM session_handoffs h WHERE h.id=ap.artifact_id)"
+PROV_TOT="$(q1 "SELECT COUNT(*) FROM artifact_provenance;")"
+PROV_NAMED="$(q1 "SELECT COUNT(*) FROM artifact_provenance ap WHERE ${NAMED_SQL};")"
+PROV_MISMATCH="$(q1 "SELECT COUNT(*) FROM artifact_provenance ap WHERE NOT (${NAMED_SQL}) AND (${PRESENT_SQL});")"
+PROV_ABSENT="$(q1 "SELECT COUNT(*) FROM artifact_provenance ap WHERE NOT (${NAMED_SQL}) AND NOT (${PRESENT_SQL});")"
 NOINV="$(q1 "SELECT COUNT(*) FROM artifact_provenance ap WHERE ap.invocation_id IS NOT NULL AND ap.invocation_id != '' AND NOT EXISTS (SELECT 1 FROM tool_invocations ti WHERE ti.invocation_id = ap.invocation_id);")"
-echo "    provenance rows whose artifact is NOT in the table its type names : ${ORPHAN:-UNAVAILABLE}"
-echo "    provenance rows citing an invocation the ledger does not contain  : ${NOINV:-UNAVAILABLE}"
-echo "    The first count is normally 1, not 0: a MEMORY saved into the"
-echo "    'lessons' collection is typed 'lesson' while the id is a memory."
+echo "    provenance rows in total                                : ${PROV_TOT:-UNAVAILABLE}"
+echo "    artifact FOUND in the table its artifact_type names    : ${PROV_NAMED:-UNAVAILABLE}"
+echo "    TYPE MISMATCH — not there, but present in another table : ${PROV_MISMATCH:-UNAVAILABLE}"
+echo "    ABSENT — in no artifact table at all                    : ${PROV_ABSENT:-UNAVAILABLE}"
+echo "    provenance rows citing an invocation the ledger lacks  : ${NOINV:-UNAVAILABLE}"
+echo "    A TYPE MISMATCH is a metadata defect in the provenance"
+echo "    row, NOT a lost artifact: the artifact itself is present."
+PROV_BAD="$(gq "SELECT ap.artifact_id, ap.artifact_type, COALESCE((SELECT 'memories:'||m.collection FROM memories m WHERE m.id=ap.artifact_id),(SELECT 'lessons_base' FROM lessons_base l WHERE l.id=ap.artifact_id),(SELECT 'works' FROM works w WHERE w.id=ap.artifact_id),(SELECT 'session_handoffs' FROM session_handoffs h WHERE h.id=ap.artifact_id),'(no artifact table)'), datetime(ap.created_at,'unixepoch') FROM artifact_provenance ap WHERE NOT (${NAMED_SQL}) ORDER BY ap.created_at LIMIT 5;")"
+if [[ -n "$PROV_BAD" ]]; then
+	while IFS=$'\t' read -r aid atype where at; do
+		[[ -z "$aid" ]] && continue
+		printf '      %-18s declared %-8s actually in %-18s %s\n' "$aid" "$atype" "$where" "$at"
+	done <<<"$PROV_BAD"
+fi
 
 echo
 echo "  7i. scheduler correlation (busy/locked vs scheduler ticks):"
