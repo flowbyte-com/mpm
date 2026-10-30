@@ -21,6 +21,7 @@
 | G | Tool-surface evaluation baseline | [`tool-surface-baseline.md`](tool-surface-baseline.md) | Baseline complete; measurement assigned to Session C |
 | H | Foundation readiness report | this file | Complete |
 | I | **Parallel launch gate and B/C handoff** | [`launch-gate.md`](launch-gate.md) | **Complete — launch conditions met** |
+| J | **Seven-day OpenCode + MPM dogfood — day-zero readiness and measurement plan** (Session C) | [`dogfood-measurement-plan.md`](dogfood-measurement-plan.md) | **Plan ready; the evaluation is NOT started** |
 | J | **Runtime migration — the plan** | [`runtime-migration-plan.md`](runtime-migration-plan.md) | **Complete — design accepted (D1–D7); the live migration is a separate approval gate** |
 | K | **Runtime migration — the evidence** | [`runtime-migration-evidence.md`](runtime-migration-evidence.md) | **Complete — 135 rehearsal assertions, 0 failures, reproducible with `make rehearsal`** |
 | L | **Compact managed instruction block (contract 4.0.0)** | [`session-c-compact-managed-block.md`](session-c-compact-managed-block.md) | **Reviewed — MERGE WITH CORRECTIONS; corrections applied, not merged, not deployed** |
@@ -311,3 +312,44 @@ implementation waits on the contract being acknowledged — that is a gate on
 > **Session A does not launch B and C.** The launch is the operator's call.
 > The requirements each session must satisfy on its first hour are in
 > [`launch-gate.md`](launch-gate.md).
+
+---
+
+## 9. Added after this report was written — Session C, the dogfood measurement plan
+
+Row **J** above is not part of Session A's round. It was added on
+2026-10-30 and is a **separate assignment**: prepare a repeatable way to
+assess MPM during ordinary development, on four real projects (TheMailroom,
+AgentShell, UNACCOUNTED, DeepClaw).
+
+[`dogfood-measurement-plan.md`](dogfood-measurement-plan.md) delivers:
+
+- a **day-zero readiness checklist**, every line of it measured against the
+  live installation on 2026-10-30;
+- the **project-to-collection mapping**, with the finding that the project
+  dimension was placed in `collection` for one project only while
+  `collection` was already occupied by artifact type — and that the missing
+  `themailroom` / `unaccounted` / `deepclaw` collections are a symptom of
+  that, not the disease;
+- the **four measurements** — cross-session recall, retrieval relevance,
+  missed retrievals, cross-project contamination — each with its instrument,
+  its numerator and denominator, and **what it does not measure**;
+- **token accounting** that keeps cached input, uncached input, output and
+  local estimates distinct, and says plainly which provider reports cost and
+  which does not;
+- the finding that **there is no lesson-proposal queue** — a lesson is
+  written straight into the durable store with no review gate — and the
+  criteria that separate supported knowledge from an unsupported assertion
+  (all 36 lessons in the corpus currently fail the support test);
+- **operational checks**, a **daily review format** of one command and five
+  answers, and **explicit failure conditions that stop the experiment**;
+- the **operator actions**, documented and **not performed**.
+
+The measurement is read-only by construction: every query runs against a
+`.backup` snapshot of the substrate database, and the one command that would
+otherwise write — `mpm wake` — is run against a scratch workspace whose
+database *is* the snapshot.
+
+The companion script is [`scripts/dogfood_baseline.sh`](../../scripts/dogfood_baseline.sh)
+— a read-only query runner that prints the daily review block, not a second
+analytics subsystem.
