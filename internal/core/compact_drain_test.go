@@ -52,6 +52,11 @@ func resetSubstate(t *testing.T, dm *DatabaseManager) {
 	if _, err := dm.SQLDB().Exec(`DELETE FROM lessons_base`); err != nil {
 		t.Fatalf("clear lessons_base: %v", err)
 	}
+	// The compaction records its synthesis as a PENDING proposal, so the
+	// review queue is part of the substrate this helper resets.
+	if _, err := dm.SQLDB().Exec(`DELETE FROM lesson_proposals`); err != nil {
+		t.Fatalf("clear lesson_proposals: %v", err)
+	}
 	// Reset any stale compaction config from prior tests.
 	if _, err := dm.SQLDB().Exec(`DELETE FROM system_config WHERE key IN ('compaction','compaction.last_run')`); err != nil {
 		t.Fatalf("clear compaction config: %v", err)

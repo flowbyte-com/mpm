@@ -448,6 +448,43 @@ func handleLessonShred(args []string) int {
 // The proposals are the UNTRUSTED surface: a proposal is not a lesson,
 // and it is not in the lesson search, the lesson list or the wake
 // context. It becomes a lesson only through `mpm lesson promote`.
+// proposalDisplayContent renders a proposal's content for the operator's
+// review.
+//
+// A proposal made by the COMPACTION carries the synthesis as a JSON
+// envelope {title, body} — the same shape a promoted lesson holds, so a
+// promoted derivation is byte-identical to what the compaction wrote
+// before the trust correction. Printed raw, that envelope is one long
+// JSON line, and the operator is being asked to decide whether it
+// becomes trusted knowledge.
+//
+// The envelope is therefore rendered as "title — body" for DISPLAY only.
+// The stored content, and the `content` field of the JSON output, are
+// unchanged: this is a rendering, never a transformation of the record.
+//
+// A proposal that is not an envelope — the ordinary agent-proposed fact
+// — is printed exactly as it was submitted.
+func proposalDisplayContent(content string) string {
+	var env struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(content), &env); err != nil {
+		return content
+	}
+	if env.Title == "" && env.Body == "" {
+		return content
+	}
+	switch {
+	case env.Title == "":
+		return env.Body
+	case env.Body == "":
+		return env.Title
+	default:
+		return env.Title + " — " + env.Body
+	}
+}
+
 func handleLessonProposals(args []string) int {
 	jsonOutput, args := ExtractJSONFlag(args)
 	status := "pending"
@@ -532,7 +569,7 @@ func handleLessonProposals(args []string) int {
 		}
 		render.Plain(os.Stdout, fmt.Sprintf(
 			"  %s  [%s]  %s\n      %s\n      proposed by %s at %s",
-			p.ID, p.Status, p.Type, p.Content, origin, p.Created))
+			p.ID, p.Status, p.Type, proposalDisplayContent(p.Content), origin, p.Created))
 	}
 	render.Plain(os.Stdout, "")
 	render.Plain(os.Stdout, "  Accept one with:  mpm lesson promote <id>")
