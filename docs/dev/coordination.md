@@ -891,7 +891,7 @@ than two adjacent instants. The gate **fails closed**: an unreadable
 live database means *could not measure* (exit 2), not *nothing changed*.
 
 **The contract tests that changed:** `scripts/tests/test_rehearsal_live_gate.py`
-(new, **24 tests**) — the negative control (a modified configuration, a
+(new, **27 tests**) — the negative control (a modified configuration, a
 modified managed instruction, an executable changed / added / removed, a
 host asset, the systemd unit, **a memory written**, a modified lesson, a
 new table in the live database), the ordinary-activity cases (the audit
@@ -906,6 +906,13 @@ unreadable stand-in and pin that a suite whose gate cannot measure
 **FAILS** rather than reaching a vacuous isolation assertion. Their
 non-vacuity was **demonstrated**: the guard was removed from both suites
 and the two tests failed.
+
+Three more pin that the live database and the **simulated** one are
+measured by the **same instrument** — the gate's domain definition must
+not drift away from `state_fingerprint.py --content`. The last of them
+**measures** it: the same table, hashed by both, yields the same digest.
+Its non-vacuity was demonstrated: a volatile column added to the
+fingerprint made the test fail, naming the column.
 
 **Who must rebase:** nobody. No session depends on the changed behaviour.
 

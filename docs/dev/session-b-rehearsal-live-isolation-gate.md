@@ -169,7 +169,7 @@ the domain state, which did not change.
 | `scripts/rehearsal/lib.sh` | `live_snapshot` (the invalid size/mtime rule) **removed**; `live_gate_snapshot` / `live_gate_compare` added |
 | `scripts/rehearsal/10_obligations.sh` | the classified gate replaces *"the live tree's snapshot is unchanged"* |
 | `scripts/rehearsal/20_negative.sh` | the same — and the BEFORE snapshot moved to the **start** of the suite, so the comparison spans the whole suite instead of two adjacent instants |
-| `scripts/tests/test_rehearsal_live_gate.py` | **new** — 24 tests: the negative control, the non-vacuity proofs, the fail-closed cases |
+| `scripts/tests/test_rehearsal_live_gate.py` | **new** — 27 tests: the negative control, the non-vacuity proofs, the fail-closed cases, the "same instrument" proofs |
 | `scripts/rehearsal/README.md` | the detectors section rewritten to describe the classification |
 
 ---
@@ -304,6 +304,46 @@ rc=1
 
 Both suites behave the same way.
 
+### 6.6 The live database and the simulated one are measured alike
+
+The rehearsal proves that a migration left the **simulated** state
+unchanged with `state_fingerprint.py --content`. The gate proves that
+the **live** state is unchanged. Those two claims are only comparable
+if both are measured by the **same instrument** — so the gate's domain
+definition must not drift away from the fingerprint's.
+
+Three tests pin that, and the third **measures** it: the same table,
+hashed by the fingerprint and by the gate, must produce the **same
+digest**.
+
+| Test | Pins |
+|---|---|
+| `test_the_volatile_column_sets_are_identical` | the gate excludes exactly the columns the fingerprint excludes |
+| `test_the_domain_tables_are_the_fingerprint_s_content_tables` | the gate's domain tables are the fingerprint's content tables |
+| `test_the_per_table_hash_is_byte_identical` | the same table, hashed by both, yields the same digest |
+
+Measured on this host, at the moment of writing:
+
+```
+state_fingerprint hex: e168d85910cd84cadd053d14005a3e569da16dd0b6673488f9aa5178d0c43085
+live_gate        hex: e168d85910cd84cadd053d14005a3e569da16dd0b6673488f9aa5178d0c43085
+IDENTICAL: True
+```
+
+**The non-vacuity is demonstrated.** A volatile column added to
+`state_fingerprint.py` made the first test fail, naming the column:
+
+```
+AssertionError: Items in the first set but not the second:
+'a_new_volatile_column' : the gate must exclude exactly the columns the
+substrate's own fingerprint excludes
+```
+
+If someone changes the fingerprint's definition and this test is not
+there, the live database and the simulated database would be measured
+by two different rulers — and *"unchanged"* would mean two different
+things.
+
 ---
 
 ## 7. The rehearsal, run with the production scheduler live
@@ -327,6 +367,17 @@ The live installation was not modified: the protected artifacts are
 byte-identical, the domain state is identical, the database's own file
 moved only by the scheduler's doing, and the syscall detector reports
 **0** hits on the live paths.
+
+### 7.1 The other gates
+
+| Gate | Result |
+|---|---|
+| `make test-scripts` | **OK** — the script suite green, with the gate's own 27 tests included |
+| `make docs-check` | **OK** — 13 checks, 0 review items, 0 errors |
+| `mpm-lint --gate` | **PASS** |
+| `shellcheck -S warning` on the three changed shell files | **53 findings**, against 56 before the change — three fewer (the removed helpers took their findings with them) and **none new** |
+
+The gate's own suite, on its own: **27 passed**.
 
 ---
 
