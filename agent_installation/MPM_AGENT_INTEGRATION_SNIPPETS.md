@@ -263,7 +263,7 @@ in this file's git log.
 | `mpm_blob_search` | (no `action`) | `id`, `query` |
 | `mpm_memory` action=`challenge` | `memory_id`, `evidence` | Weaken a memory; creates a pending theory contesting it. Companion: `restore_challenge` action undoes. |
 | `mpm_retrieval_diagnose` | (no `action`) | `query`, `limit`, `collection`, `scope`, `trace` |
-| `mpm_system` | `gc_run`, `compact`, `health_check`, `migrate`, `query_audit_log`, `list_clusters`, `snooze_cluster`, `resolve_cluster`, `annotate_cluster`, `critic_findings` | — |
+| `mpm_system` | `gc_run`, `compact`, `health_check`, `migrate`, `query_audit_log`, `list_clusters`, `snooze_cluster`, `resolve_cluster`, `annotate_cluster`, `critic_findings` | `compact` drains raw memories into LESSON PROPOSALS, not into trusted lessons: the memories it reads are agent-writable, so a derivation needs operator review. `lessons_created` is always 0 — read `proposals_created` and `proposal_ids`. An operator promotes a derived lesson with `mpm lesson promote <id>`. |
 
 Companion standalones (transport-namespace may differ per host):
 
