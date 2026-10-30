@@ -104,7 +104,12 @@ byte-identical.
 
 ## 3. The correction
 
-### 3.1 The gate
+> **§3 is the FIRST cut.** Two targeted review points were raised after
+> this gate went CI-green, and both changed the design. They are in
+> **§3A**, and **§3A supersedes §3** where they differ. The measurement
+> in §2 still holds.
+
+### 3.1 The gate (first cut)
 
 `scripts/rehearsal/live_gate.py` takes a **classified** snapshot before
 and after, and compares the two.
@@ -161,6 +166,95 @@ the domain state, which did not change.
 
 ---
 
+## 3A. The two targeted review points — this supersedes §3
+
+Two concerns were raised after the first cut went CI-green. Both
+changed the design, and both were forced by **measurement against the
+deployed candidate**, not by taste.
+
+### 3A.1 The operational exceptions were too broad
+
+`system_config` was classified as operational **in its entirety**, so
+any change to any key passed. That is too broad: configuration is
+written by the installer and by deliberate operator action, never by
+ordinary activity.
+
+And the measurement said something more uncomfortable. With the
+deployed candidate running — the scheduler, the host's other agent
+sessions and the operator all writing — **the operator's own knowledge
+tables GREW**:
+
+```
+memories          +8   +1   the host's agent sessions record decisions
+evidence          +1         and theories continuously
+lesson_proposals  +4         the compaction drain's proposals
+memory_revisions  +8   +2   every write carries a revision
+tool_invocations  +26  +10  the audit trail of those writes
+system_config     +1   +1   the run markers, rewritten in place
+```
+
+`memories` and `evidence` **are** the knowledge tables. A gate that
+failed on any knowledge change would fail on an idle live system — the
+very defect this gate exists to remove. The first cut's DOMAIN rule was
+a false-positive machine.
+
+**The classes now, and only these:**
+
+| Class | What it is | The rule |
+|---|---|---|
+| **PROTECTED** | the runtime payload, the host assets, the systemd unit, the OpenCode configuration, the managed instructions | **byte identity** — path set, mode, sha256 |
+| **POINTER** | `current`, `bin`, `agent_installation` — the release pointer — and the active release's `RELEASE.json` | the **literal link target** must not change |
+| **CONFIGURATION** | `system_config` | must not change, with one narrow, **measured** exception: the run-marker keys (`scheduler_active_uptime`, `compaction.last_run`), and only in `raw_json`/`updated_at` |
+| **AUDIT** | `tool_invocations`, `system_audit_log` | **append-only** — a modified or removed row is a failure |
+| **KNOWLEDGE** | `memories`, `lessons`, `evidence`, volatile columns excluded | permitted only while the audit trail accounts for it |
+| **BOOKKEEPING** | everything else | permitted only while the audit trail accounts for it |
+
+**THE ACCOUNTING RULE.** Every write the live system makes goes through
+MPM, and MPM records the invocation in its audit trail. So a change to
+the live database that the audit trail does **not** account for is
+**unattributed** — and the rehearsal's own writes would be unattributed
+too. **An unattributed change is a failure.** The rule is narrow,
+explicit and fail-closed, and every permitted movement is reported with
+its delta and with the accounting that permitted it.
+
+### 3A.2 The release pointer was not protected
+
+A's cutover put the runtime behind a symlink:
+
+```
+<data root>/current -> releases/<rev>
+<data root>/bin -> current/bin
+<data root>/agent_installation -> current/agent_installation
+```
+
+Hashing the resolved files **cannot** see the pointer move: the same
+bytes behind a different pointer are a *different installation*. The
+gate now records each path's **literal link target**, plus the active
+release's `RELEASE.json`.
+
+The negative control uses a stand-in whose two releases hold
+**identical content**, so the pointer is the only thing that differs —
+precisely the case a content hash cannot see.
+
+### 3A.3 What else the measurement closed
+
+* A table that exists but **cannot be read** was silently skipped,
+  which would have let the gate report *"nothing changed"* about a table
+  it had never read. It is a measurement failure now.
+* The gate's protected set **silently changed shape** with the layout:
+  436 artifacts before the cutover (the operator's source tree), **31**
+  after (the release payload: 5 binaries + 22 payload files + 4 host
+  files). The reduction is *correct* — the runtime is the bundle — but
+  it had to be noticed rather than assumed.
+
+**45 tests** now (28 + 17). Every new test's non-vacuity was
+**demonstrated** against a deliberate mutation: the configuration
+narrowing relaxed, the pointer inventory removed, the accounting rule
+removed, the audit append-only rule removed. Each mutation made the
+corresponding test fail.
+
+---
+
 ## 4. Where the change lands
 
 | File | Change |
@@ -169,7 +263,7 @@ the domain state, which did not change.
 | `scripts/rehearsal/lib.sh` | `live_snapshot` (the invalid size/mtime rule) **removed**; `live_gate_snapshot` / `live_gate_compare` added |
 | `scripts/rehearsal/10_obligations.sh` | the classified gate replaces *"the live tree's snapshot is unchanged"* |
 | `scripts/rehearsal/20_negative.sh` | the same — and the BEFORE snapshot moved to the **start** of the suite, so the comparison spans the whole suite instead of two adjacent instants |
-| `scripts/tests/test_rehearsal_live_gate.py` | **new** — 28 tests: the negative control, the non-vacuity proofs, the fail-closed cases, the "same instrument" proofs |
+| `scripts/tests/test_rehearsal_live_gate.py` | **new** — 45 tests: the negative control, the non-vacuity proofs, the fail-closed cases, the "same instrument" proofs, the configuration narrowing, the accounting rule, the release pointer |
 | `scripts/rehearsal/README.md` | the detectors section rewritten to describe the classification |
 
 ---
