@@ -160,12 +160,6 @@ live_gate_compare() { # live_gate_compare <before> <after>
   python3 "$REH_DIR/live_gate.py" compare "$1" "$2"
 }
 
-# The live database the gate measures.  It is the live workspace's own
-# database; the gate never opens it for writing.
-live_db_path() {
-  printf '%s\n' "$LIVE_MPM/src/db/mpm.db"
-}
-
 # ── the strace detector ───────────────────────────────────────────────────
 strace_live_hits() {
   local trace="$1"
