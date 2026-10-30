@@ -53,8 +53,9 @@ has proved nothing.
 
 One detector is not enough, so there are three, and they are independent:
 
-1. **A snapshot** of the live tree (path, size, mtime) before and after.
-   Any difference is a failure.
+1. **A classified snapshot** of the live tree, before and after. The
+   protected artifacts are compared **by content**; the live database is
+   compared **by class**. See below.
 2. **A `strace`** of every `open`/`stat`/`access`/`execve` in the test's
    process tree, grepped for the live paths. This catches a *read* that a
    snapshot cannot see.
@@ -69,6 +70,47 @@ $HOME/.mpm                  the live workspace
 $HOME/.config/opencode      the live OpenCode configuration
 $HOME/.config/systemd/user  the live systemd user units
 ```
+
+### Why the snapshot is classified, and not one hash
+
+The gate this replaces hashed `(path, size, mtime)` over a list of live
+paths, **including the live database file**. That assertion was invalid.
+The live scheduler records health checks and SQLite checkpoints the WAL,
+so the live database's size and mtime move on their own:
+
+```
+t=0    content-fingerprint=5882dd04…  size=22536192
+t=60   content-fingerprint=5882dd04…  size=22556672
+t=240  content-fingerprint=5882dd04…  size=22622208
+```
+
+The database grew by 86 KB over four minutes while the operator's
+knowledge did not change by one bit, and the suite reported *"the live
+tree's snapshot is unchanged"* **FAILED**. A false positive in an
+isolation gate is worse than no gate: it teaches the operator to ignore
+the check, and that is exactly how a real change gets missed.
+
+So the gate classifies:
+
+| Class | What it is | The rule |
+|---|---|---|
+| **PROTECTED** | the installed binaries, the host assets, the systemd unit, the OpenCode configuration, the managed instructions | **byte identity** — the path set, the mode, and the sha256. Their *mtime* is not part of it: mtime records when a file was written, not what it contains |
+| **DOMAIN** | the operator's knowledge inside the live database — `memories`, `lessons`, `evidence`, with the volatile bookkeeping columns excluded | **must not change**. This is the substrate's own established definition of "the operator's knowledge" (`state_fingerprint.py --content`), so the live database is measured by exactly the same instrument as the simulated one |
+| **OPERATIONAL** | `tool_invocations` and `system_config` — the two tables the live scheduler actually moves | **may change**, and the movement is **reported with the delta**. That report is the evidence that separates "the scheduler was busy" from "something wrote the operator's knowledge" |
+
+Everything else the live database does is **reported as evidence, not
+asserted**: the rehearsal's own process tree is separately proven not to
+have opened the live database at all (detector 2), and the live binary
+may legitimately migrate the live database while the rehearsal runs.
+
+The gate **fails closed**. If the live database cannot be read, the gate
+says it could not measure; it never reports "nothing changed".
+
+The gate's own behaviour is proved in
+[`scripts/tests/test_rehearsal_live_gate.py`](../../scripts/tests/test_rehearsal_live_gate.py),
+which drives it against a **disposable stand-in** for the live tree — so
+the negative control introduces an unauthorised change without touching
+production.
 
 ---
 
@@ -120,6 +162,7 @@ scripts/rehearsal/
 ├── 20_negative.sh      the negative suite and the harness-integrity guards
 ├── 30_schemas.sh       the representative-schema upgrade tests
 ├── state_fingerprint.py  the state fingerprint used to prove "unchanged"
+├── live_gate.py           the live-installation isolation gate (classified)
 ├── read_jsonc.py         reads a value out of the host's JSONC configuration
 └── schema_shape.py       a table's canonical shape, for schema comparison
 ```
