@@ -94,17 +94,67 @@ So the gate classifies:
 
 | Class | What it is | The rule |
 |---|---|---|
-| **PROTECTED** | the installed binaries, the host assets, the systemd unit, the OpenCode configuration, the managed instructions | **byte identity** — the path set, the mode, and the sha256. Their *mtime* is not part of it: mtime records when a file was written, not what it contains |
-| **DOMAIN** | the operator's knowledge inside the live database — `memories`, `lessons`, `evidence`, with the volatile bookkeeping columns excluded | **must not change**. This is the substrate's own established definition of "the operator's knowledge" (`state_fingerprint.py --content`), so the live database is measured by exactly the same instrument as the simulated one |
-| **OPERATIONAL** | `tool_invocations` and `system_config` — the two tables the live scheduler actually moves | **may change**, and the movement is **reported with the delta**. That report is the evidence that separates "the scheduler was busy" from "something wrote the operator's knowledge" |
+| **PROTECTED** | the installed runtime payload, the host assets, the systemd unit, the OpenCode configuration, the managed instructions | **byte identity** — the path set, the mode, and the sha256. Their *mtime* is not part of it: mtime records when a file was written, not what it contains |
+| **POINTER** | the release pointer — `current`, `bin`, `agent_installation` — and the active release's `RELEASE.json` | **the literal link target must not change.** The same bytes behind a different pointer are a *different installation*, and a content hash cannot see it |
+| **CONFIGURATION** | `system_config` | **must not change**, with one narrow, measured exception: the run-marker keys (`scheduler_active_uptime`, `compaction.last_run`), and only in their `raw_json`/`updated_at`. Every other key is a failure |
+| **AUDIT** | `tool_invocations`, `system_audit_log` | **append-only.** Rows may be added; a row that is modified or removed is a failure |
+| **KNOWLEDGE** | `memories`, `lessons`, `evidence`, with the volatile bookkeeping columns excluded | the substrate's own definition of "the operator's knowledge" (`state_fingerprint.py --content`) — the same instrument the simulated database is measured with |
+| **BOOKKEEPING** | everything else — the live system's counters, its model-utility views, its work records | the live system's own state |
 
-Everything else the live database does is **reported as evidence, not
-asserted**: the rehearsal's own process tree is separately proven not to
-have opened the live database at all (detector 2), and the live binary
-may legitimately migrate the live database while the rehearsal runs.
+### The accounting rule — why KNOWLEDGE and BOOKKEEPING are not hard failures
 
-The gate **fails closed**. If the live database cannot be read, the gate
-says it could not measure; it never reports "nothing changed".
+The live database has **legitimate, continuous writers**: the scheduler,
+the host's other agent sessions, the operator. Measured over four
+45-second windows against the deployed candidate:
+
+```
+memories             +8   +1      the agent sessions record decisions and theories
+evidence             +1            continuously
+lesson_proposals     +4            the compaction drain's proposals
+memory_revisions     +8   +2      every write carries a revision
+tool_invocations    +26  +10      the audit trail of those writes
+system_config        +1   +1      the run markers, rewritten in place
+```
+
+`memories` and `evidence` **are** the knowledge tables, and they grew.
+A gate that failed on any knowledge change would fail on an idle live
+system — the very defect this gate exists to remove.
+
+So the gate asks a question that **can** be answered:
+
+> **THE ACCOUNTING RULE.** Every write the live system makes goes
+> through MPM, and MPM records the invocation in its audit trail. So a
+> change to the live database that the audit trail does **not** account
+> for is **unattributed** — and the rehearsal's own writes would be
+> unattributed too. **An unattributed change is a failure.**
+
+The rule is narrow, explicit and fail-closed. Knowledge and bookkeeping
+movement is permitted only while the audit trail recorded something in
+the same window, and the report says so, with the delta, every time.
+
+### The release pointer
+
+The versioned layout resolves the runtime through symlinks:
+
+```
+$HOME/.mpm/current -> releases/<rev>
+$HOME/.mpm/bin -> current/bin
+$HOME/.mpm/agent_installation -> current/agent_installation
+```
+
+Hashing the resolved files alone cannot see the pointer move. The gate
+records each path's **literal link target** and the active release's
+`RELEASE.json`, so repointing the active revision is a failure even
+when the content behind it is byte-identical — which is exactly the
+case a content hash cannot see.
+
+### The gate fails closed
+
+If the live database cannot be read, the gate says it could not measure;
+it never reports "nothing changed". A table that exists but cannot be
+read is also a measurement failure: it used to be skipped silently,
+which would have let the gate report "nothing changed" about a table it
+had never actually read.
 
 The gate's own behaviour is proved in
 [`scripts/tests/test_rehearsal_live_gate.py`](../../scripts/tests/test_rehearsal_live_gate.py),

@@ -96,7 +96,9 @@ CREATE TABLE tool_invocations (
 CREATE TABLE system_config (
   key TEXT PRIMARY KEY,
   raw_json TEXT,
-  updated_at INTEGER
+  content_hash TEXT,
+  updated_at INTEGER,
+  config_snapshot JSON
 );
 """
 
@@ -148,6 +150,8 @@ class LiveGateFixture(unittest.TestCase):
             ("t1", "mpm_context", "human", "mpm-cli", 1))
         c.execute("INSERT INTO system_config (key, raw_json, updated_at) VALUES (?,?,?)",
                   ("scheduler_active_uptime", '{"active_seconds":10}', 1))
+        c.execute("INSERT INTO system_config (key, raw_json, updated_at) VALUES (?,?,?)",
+                  ("compaction.last_run", '{"last_run_at":"2026-10-30T00:00:00Z"}', 1))
         c.commit()
         c.close()
 
@@ -217,13 +221,30 @@ class TestOrdinaryActivityDoesNotFail(LiveGateFixture):
     def test_the_scheduler_liveness_counter_being_rewritten_is_not_a_failure(self):
         before = self.snapshot("before")
         c = sqlite3.connect(self.db)
-        c.execute("UPDATE system_config SET raw_json = ?, updated_at = ?",
+        c.execute("UPDATE system_config SET raw_json = ?, updated_at = ?"
+                  " WHERE key = 'scheduler_active_uptime'",
                   ('{"active_seconds":20}', 2))
         c.commit()
         c.close()
         after = self.snapshot("after")
         r = self.assert_clean(before, after)
-        self.assertIn("system_config", r.stdout)
+        self.assertIn("scheduler_active_uptime", r.stdout,
+                      "the run marker's movement must be REPORTED as evidence")
+
+    def test_the_compaction_run_marker_being_rewritten_is_not_a_failure(self):
+        # The second measured run marker: the compaction drain's
+        # last-run record.  It is a run marker too, so it is permitted
+        # — but ONLY because it is named.
+        before = self.snapshot("before")
+        c = sqlite3.connect(self.db)
+        c.execute("UPDATE system_config SET raw_json = ?, updated_at = ?"
+                  " WHERE key = 'compaction.last_run'",
+                  ('{"last_run_at":"2026-10-30T16:34:03Z"}', 2))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        r = self.assert_clean(before, after)
+        self.assertIn("compaction.last_run", r.stdout)
 
     def test_a_read_that_bumps_the_volatile_columns_is_not_a_failure(self):
         # Reading a memory updates last_accessed_at and the decay adjusts
@@ -254,6 +275,254 @@ class TestOrdinaryActivityDoesNotFail(LiveGateFixture):
         r = self.assert_clean(before, after)
         self.assertIn("live database FILE changed", r.stdout,
                       "the file movement must be REPORTED, as evidence, not asserted")
+
+
+class TestTheConfigurationExceptionsAreNarrow(LiveGateFixture):
+    """`system_config` is CONFIGURATION — with narrow, named exceptions.
+
+    The gate used to classify the whole table as "operational", so any
+    change to any key passed.  That is too broad: configuration is
+    written by the installer and by deliberate operator action, never
+    by ordinary activity.  The exception is now key-scoped: only the
+    measured run markers may move, and only in the measured columns.
+    """
+
+    def test_a_change_to_a_configuration_key_that_is_not_a_run_marker_is_detected(self):
+        before = self.snapshot("before")
+        c = sqlite3.connect(self.db)
+        c.execute("INSERT INTO system_config (key, raw_json, updated_at)"
+                  " VALUES (?,?,?)", ("model.default", '{"model":"x"}', 2))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        self.assert_detected(before, after, "model.default")
+
+    def test_a_change_to_an_existing_configuration_value_is_detected(self):
+        c = sqlite3.connect(self.db)
+        c.execute("INSERT INTO system_config (key, raw_json, updated_at)"
+                  " VALUES (?,?,?)", ("model.default", '{"model":"x"}', 1))
+        c.commit()
+        c.close()
+        before = self.snapshot("before")
+        c = sqlite3.connect(self.db)
+        c.execute("UPDATE system_config SET raw_json = ? WHERE key = ?",
+                  ('{"changed":true}', "model.default"))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        self.assert_detected(before, after, "model.default")
+
+    def test_a_removed_configuration_key_is_detected(self):
+        before = self.snapshot("before")
+        c = sqlite3.connect(self.db)
+        c.execute("INSERT INTO system_config (key, raw_json, updated_at)"
+                  " VALUES (?,?,?)", ("model.default", '{"model":"x"}', 2))
+        c.commit()
+        c.close()
+        mid = self.snapshot("mid")
+        c = sqlite3.connect(self.db)
+        c.execute("DELETE FROM system_config WHERE key = ?", ("model.default",))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        self.assert_detected(mid, after, "model.default")
+
+    def test_a_run_marker_changing_in_a_column_it_may_not_change_is_detected(self):
+        # The exception is narrow in the COLUMN as well as in the key:
+        # a run marker may record WHEN it last ran, not anything else.
+        before = self.snapshot("before")
+        c = sqlite3.connect(self.db)
+        c.execute("UPDATE system_config SET content_hash = ?"
+                  " WHERE key = 'scheduler_active_uptime'", ("abc123",))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        self.assert_detected(before, after, "scheduler_active_uptime")
+
+    def test_a_new_configuration_key_appearing_is_detected(self):
+        before = self.snapshot("before")
+        c = sqlite3.connect(self.db)
+        c.execute("INSERT INTO system_config (key, raw_json, updated_at)"
+                  " VALUES (?,?,?)", ("model.default", '{"model":"x"}', 2))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        self.assert_detected(before, after, "model.default")
+
+
+class TestTheAuditTrailIsAppendOnly(LiveGateFixture):
+    """The audit trail may grow; it may not be rewritten."""
+
+    def test_a_modified_audit_row_is_detected(self):
+        before = self.snapshot("before")
+        c = sqlite3.connect(self.db)
+        c.execute("UPDATE tool_invocations SET tool_name = ? WHERE id = ?",
+                  ("mpm_something_else", "t1"))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        self.assert_detected(before, after, "tool_invocations")
+
+    def test_a_removed_audit_row_is_detected(self):
+        before = self.snapshot("before")
+        c = sqlite3.connect(self.db)
+        c.execute("DELETE FROM tool_invocations WHERE id = ?", ("t1",))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        self.assert_detected(before, after, "tool_invocations")
+
+
+class TestTheAccountingRule(LiveGateFixture):
+    """The live database has legitimate writers.  The gate must tell
+    their writes apart from an unattributed one — and fail closed.
+
+    THE MEASUREMENT that forces this rule: over four 45-second windows
+    with the live system running, the operator's own knowledge tables
+    GREW (`memories` +8, `evidence` +1, `lesson_proposals` +4) because
+    the host's agent sessions were recording decisions and theories.  A
+    gate that failed on any knowledge change would fail on an idle live
+    system — the same defect this gate exists to remove.
+
+    So the gate does not ask "did the knowledge change?".  It asks a
+    question that CAN be answered: does the live system's own audit
+    trail account for the change?
+    """
+
+    def _add_audit_row(self, n="t2"):
+        c = sqlite3.connect(self.db)
+        c.execute(
+            "INSERT INTO tool_invocations (id, tool_name, actor_kind, framework_name,"
+            " started_at) VALUES (?,?,?,?,?)",
+            (n, "mpm_memory", "agent", "opencode", 2))
+        c.commit()
+        c.close()
+
+    def test_a_knowledge_change_accounted_for_by_the_audit_trail_is_not_a_failure(self):
+        before = self.snapshot("before")
+        c = sqlite3.connect(self.db)
+        c.execute(
+            "INSERT INTO memories (id, collection, content, created_at) VALUES (?,?,?,?)",
+            ("m2", "memories", "a decision the agent recorded", 2))
+        c.commit()
+        c.close()
+        self._add_audit_row()
+        after = self.snapshot("after")
+        r = self.assert_clean(before, after)
+        self.assertIn("ACCOUNTED FOR", r.stdout,
+                      "the accounting must be REPORTED, so a reader can see "
+                      "why the change was permitted")
+
+    def test_an_unattributed_knowledge_change_is_a_failure(self):
+        # The same knowledge change, with NOTHING in the audit trail to
+        # account for it.  This is the shape a rehearsal-induced write
+        # would have, and it must fail.
+        before = self.snapshot("before")
+        c = sqlite3.connect(self.db)
+        c.execute(
+            "INSERT INTO memories (id, collection, content, created_at) VALUES (?,?,?,?)",
+            ("m2", "memories", "an unattributed memory", 2))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        self.assert_detected(before, after, "memories")
+
+    def test_an_unattributed_bookkeeping_change_is_a_failure(self):
+        before = self.snapshot("before")
+        c = sqlite3.connect(self.db)
+        c.execute("CREATE TABLE topics (id TEXT PRIMARY KEY, name TEXT)")
+        c.commit()
+        c.close()
+        mid = self.snapshot("mid")
+        c = sqlite3.connect(self.db)
+        c.execute("INSERT INTO topics (id, name) VALUES (?,?)", ("t1", "a topic"))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        self.assert_detected(mid, after, "topics")
+
+
+class TestTheReleasePointer(LiveGateFixture):
+    """The active revision, and the symlinks that resolve into it.
+
+    The versioned layout puts the runtime behind a symlink:
+
+        <data root>/current -> releases/<rev>
+        <data root>/bin -> current/bin
+
+    Hashing the resolved files alone CANNOT see the pointer change: the
+    same bytes behind a different pointer are a different installation.
+    These tests use a stand-in whose two releases hold IDENTICAL
+    content, so the pointer is the ONLY thing that differs — which is
+    precisely the case a content hash cannot see.
+    """
+
+    def _build_versioned_layout(self):
+        """Replace the stand-in's flat layout with the versioned one."""
+        releases = self.live_mpm / "releases"
+        for rev in ("revA", "revB"):
+            (releases / rev / "bin").mkdir(parents=True)
+            (releases / rev / "bin" / "mpm").write_text("#!/bin/sh\necho mpm\n")
+            (releases / rev / "RELEASE.json").write_text('{"revision": "%s"}\n' % rev)
+            (releases / rev / "agent_installation").mkdir(parents=True)
+            (releases / rev / "agent_installation" / "server.js").write_text(
+                "export default async function () { return { name: 'mpm' }; }\n")
+        # The old flat directories become the symlinks.
+        for name in ("bin", "agent_installation"):
+            d = self.live_mpm / name
+            if d.is_dir() and not d.is_symlink():
+                shutil.rmtree(d)
+        os.symlink("releases/revA", self.live_mpm / "current")
+        os.symlink("current/bin", self.live_mpm / "bin")
+        os.symlink("current/agent_installation", self.live_mpm / "agent_installation")
+
+    def test_repointing_the_active_revision_is_detected(self):
+        self._build_versioned_layout()
+        before = self.snapshot("before")
+        # Repoint the active revision.  The content behind it is
+        # IDENTICAL, so only the pointer differs.
+        os.remove(self.live_mpm / "current")
+        os.symlink("releases/revB", self.live_mpm / "current")
+        after = self.snapshot("after")
+        self.assert_detected(before, after, "the release pointer moved")
+
+    def test_repointing_the_bin_symlink_is_detected(self):
+        self._build_versioned_layout()
+        before = self.snapshot("before")
+        os.remove(self.live_mpm / "bin")
+        os.symlink("current/agent_installation", self.live_mpm / "bin")
+        after = self.snapshot("after")
+        self.assert_detected(before, after, "the release pointer moved")
+
+    def test_the_release_pointer_disappearing_is_detected(self):
+        self._build_versioned_layout()
+        before = self.snapshot("before")
+        os.remove(self.live_mpm / "current")
+        after = self.snapshot("after")
+        self.assert_detected(before, after, "DISAPPEARED")
+
+    def test_the_release_identity_record_is_detected(self):
+        self._build_versioned_layout()
+        before = self.snapshot("before")
+        (self.live_mpm / "current" / "RELEASE.json").write_text(
+            '{"revision": "revB"}\n')
+        after = self.snapshot("after")
+        self.assert_detected(before, after, "RELEASE.json")
+
+    def test_the_content_behind_the_pointer_is_still_hashed(self):
+        # The pointer check must not REPLACE the content check: the
+        # binaries behind the pointer are still protected.
+        self._build_versioned_layout()
+        before = self.snapshot("before")
+        (self.live_mpm / "current" / "bin" / "mpm").write_text("#!/bin/sh\necho pwned\n")
+        after = self.snapshot("after")
+        self.assert_detected(before, after, "mpm")
+
+    def test_an_unchanged_versioned_layout_passes(self):
+        self._build_versioned_layout()
+        before = self.snapshot("before")
+        after = self.snapshot("after")
+        self.assert_clean(before, after)
 
 
 class TestUnauthorisedChangesAreDetected(LiveGateFixture):
