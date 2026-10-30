@@ -67,6 +67,19 @@ type SynthClient struct {
 	// probe). Normal synthesis never negotiates: a synthesis run must
 	// not spend an extra provider call guessing at an auth header.
 	AllowAuthNegotiation bool
+	// CredentialError carries a credential that could not be RESOLVED —
+	// a configured api_key that names an environment variable this
+	// endpoint does not declare, or declares but does not have set.
+	//
+	// It is set at construction, and it is surfaced at the wire rather
+	// than swallowed, because the alternative is worse: the provider
+	// receives a literal placeholder as a bearer token, refuses it, and
+	// the operator is told their credential is invalid. The
+	// configuration was the problem, and the configuration's problem has
+	// a precise, printable explanation.
+	//
+	// The error carries no secret.
+	CredentialError error
 }
 
 // NewClientForProfile builds a *SynthClient from a resolved profile using
@@ -91,14 +104,21 @@ func NewClientForProfile(p config.Profile, timeout time.Duration, maxTokens int)
 	if maxTokens <= 0 {
 		maxTokens = synthInternalMaxTokens
 	}
+	// The credential is resolved through the substrate's ONE rule, and
+	// the reason it could not be resolved is kept so the operator can
+	// be told what is actually wrong. A configured api_key that names
+	// an environment variable is resolved AS one; one that does not is
+	// still a literal secret. See credential_reference.go.
+	apiKey, credentialErr := ResolveCredential(p.APIKey, p.BaseURL)
 	return &SynthClient{
-		Model:        p.Model,
-		BaseURL:      p.BaseURL,
-		APIKey:       ResolveAPIKey(p.APIKey, p.BaseURL),
-		Timeout:      timeout,
-		MaxTokens:    maxTokens,
-		Wire:         inferWire(p.BaseURL),
-		AuthOverride: p.AuthScheme,
+		Model:           p.Model,
+		BaseURL:         p.BaseURL,
+		APIKey:          apiKey,
+		CredentialError: credentialErr,
+		Timeout:         timeout,
+		MaxTokens:       maxTokens,
+		Wire:            inferWire(p.BaseURL),
+		AuthOverride:    p.AuthScheme,
 	}
 }
 
@@ -196,7 +216,11 @@ func NewSynthClient() *SynthClient {
 	// model factory and the generative probe can never disagree about
 	// which protocol, credential or scheme applies.
 	sc.Wire = inferWire(sc.BaseURL)
-	sc.APIKey = ResolveAPIKey(sc.APIKey, sc.BaseURL)
+	// The credential is resolved through the substrate's ONE rule, and
+	// the reason it could not be resolved is kept. A configured api_key
+	// that names an environment variable is resolved AS one; one that
+	// does not is still a literal secret. See credential_reference.go.
+	sc.APIKey, sc.CredentialError = ResolveCredential(sc.APIKey, sc.BaseURL)
 	// 2026-09-10 cleanup: synthesis is OPTIONAL — a successful memory
 	// save must not be reported as ERROR-level failure just because the
 	// operator hasn't configured an LLM provider. Distinguish:
@@ -206,7 +230,17 @@ func NewSynthClient() *SynthClient {
 	// memory add` look broken even when the save itself succeeded.
 	// The same structural info is preserved (every surface exhausted,
 	// remediation hint) but at a severity that matches the situation.
-	if sc.APIKey == "" {
+	//
+	// A credential that could not be RESOLVED is a different situation
+	// again: there IS a credential configured, and the operator is told
+	// exactly what is wrong with it rather than being told that no
+	// credential exists.
+	if sc.CredentialError != nil {
+		slog.Warn("synth: the configured credential could not be resolved — synthesis is optional and will be skipped; memory save itself is unaffected",
+			"component", "synth",
+			"reason", sc.CredentialError.Error(),
+			"remediation", "the profile's api_key names an environment variable; export the variable, or unset api_key so the provider's own environment variable is used")
+	} else if sc.APIKey == "" {
 		slog.Warn("synth: no API key configured — synthesis is optional and will be skipped; memory save itself is unaffected",
 			"component", "synth",
 			"surface_exhausted", []string{

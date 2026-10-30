@@ -12,13 +12,19 @@ package probe
 //
 // They must not be the same knob:
 //
-//   - the probe's timeout is a property of the PROBE (12s for a Doctor
-//     probe, 1.5s for a post-save probe), not of the provider, and it
-//     must not be inherited from the profile — otherwise an operator
-//     who set `timeout_seconds: 3` for a long generation would also
-//     make every verification fail, and would be told their CREDENTIAL
-//     was invalid;
+//   - the probe's timeout is a property of the PROBE (15s for every
+//     connection verification), not of the provider, and it must not be
+//     inherited from the profile — otherwise an operator who set
+//     `timeout_seconds: 3` for a long generation would also make every
+//     verification fail, and would be told their CREDENTIAL was
+//     invalid;
 //   - the request timeout must not be narrowed by the probe.
+//
+// The 12s bound is ONE number for every verification surface. It used to
+// be two: 12s for Doctor, 1.5s for the post-save verification. The
+// 1.5s bound was shorter than the provider's own median latency, so a
+// VALID credential was reported as a timeout — see
+// TestVerificationBoundExceedsTheMeasuredProviderLatency.
 //
 // WHY THE CLASSIFICATION MATTERS
 // ------------------------------
@@ -158,23 +164,95 @@ func TestProbe_AnAuthFailureIsNotClassifiedAsATimeout(t *testing.T) {
 // the probe's bounds are the probe's own.
 //
 // The request timeout lives in internal/core/config/timeout.go and
-// defaults to 300 seconds. The probe's bounds are 12 seconds and 1.5
-// seconds. If the probe ever started using the request timeout, a
-// verification would hang for five minutes.
+// defaults to 300 seconds. The verification bound is 15 seconds. If the
+// probe ever started using the request timeout, a verification would
+// hang for five minutes.
+//
+// It also pins the ONE-bound rule: there is a single verification
+// timeout, shared by every connection-verification surface. Two
+// surfaces with two bounds is how the post-save probe came to carry a
+// 1.5s bound — shorter than the provider's own median latency, so a
+// VALID credential was reported as a timeout.
 func TestProbeTimeoutConstantsAreSeparateFromTheRequestTimeout(t *testing.T) {
-	if ProbeTimeoutForDoctor != 12*time.Second {
-		t.Errorf("ProbeTimeoutForDoctor = %v, want 12s", ProbeTimeoutForDoctor)
+	if ProbeTimeoutForVerification != 15*time.Second {
+		t.Errorf("ProbeTimeoutForVerification = %v, want 15s", ProbeTimeoutForVerification)
 	}
-	if ProbeTimeoutForConfigSave != 1500*time.Millisecond {
-		t.Errorf("ProbeTimeoutForConfigSave = %v, want 1.5s", ProbeTimeoutForConfigSave)
-	}
-	if ProbeTimeoutForDoctor >= time.Duration(config.DefaultTimeoutSeconds)*time.Second {
-		t.Errorf("the Doctor probe's timeout (%v) must be well inside the model request timeout (%ds) — "+
+	if ProbeTimeoutForVerification >= time.Duration(config.DefaultTimeoutSeconds)*time.Second {
+		t.Errorf("the verification timeout (%v) must be well inside the model request timeout (%ds) — "+
 			"a verification must never wait as long as a generation",
-			ProbeTimeoutForDoctor, config.DefaultTimeoutSeconds)
+			ProbeTimeoutForVerification, config.DefaultTimeoutSeconds)
 	}
 	// The names must not drift into a shared value.
-	if strings.Contains(ProbeTimeoutForDoctor.String(), "request") {
+	if strings.Contains(ProbeTimeoutForVerification.String(), "request") {
 		t.Error("the probe's timeout must not be described as a request timeout")
+	}
+}
+
+// TestVerificationBudgetExceedsThePerRequestBound is the structural
+// guard for the relationship between the two bounds.
+//
+// The per-request bound is what a single request is allowed to take. The
+// total budget is the ceiling on the WHOLE verification, across the
+// first attempt and the one bounded recovery attempt it may make.
+//
+// The budget MUST exceed the per-request bound, and it must be the OUTER
+// deadline. If it were shorter, the outer deadline would fire first and
+// the probe would report a bare context deadline instead of the
+// provider's own client timeout — the same failure wearing a different
+// message, and indistinguishable from it where it is rendered.
+func TestVerificationBudgetExceedsThePerRequestBound(t *testing.T) {
+	if ProbeTotalBudget <= ProbeTimeoutForVerification {
+		t.Fatalf("ProbeTotalBudget (%v) must exceed ProbeTimeoutForVerification (%v) — "+
+			"the outer deadline must never fire before the per-request bound",
+			ProbeTotalBudget, ProbeTimeoutForVerification)
+	}
+	// Two attempts, plus the backoff between them, must fit inside the
+	// budget. If they did not, the budget would truncate the recovery
+	// attempt and the probe would report a context deadline in place of
+	// whatever the provider actually said.
+	const attempts = 2
+	if ProbeTotalBudget < attempts*ProbeTimeoutForVerification {
+		t.Errorf("ProbeTotalBudget (%v) must cover %d attempts of %v",
+			ProbeTotalBudget, attempts, ProbeTimeoutForVerification)
+	}
+}
+
+// TestVerificationBoundExceedsTheMeasuredProviderLatency is the
+// regression guard for the defect this bound was chosen to close.
+//
+// The live MiniMax Anthropic-compatible surface was measured through
+// this canonical probe path (7 requests per model, three separate runs):
+//
+//	MiniMax-M3     min  415ms   median 560-700ms   max 4761ms
+//	MiniMax-M2.7   min  444ms   median 603-1007ms  max 2220ms
+//
+// The post-save verification's bound used to be 1500ms — a THIRD of the
+// slowest observed call. A valid credential was therefore reported as
+// a timeout, which is what an operator reads as "my credential is
+// wrong".
+//
+// The bound must clear the worst observed call with room to spare. This
+// is a constant assertion with the measurement in the comment: it cannot
+// detect a provider that gets slower, and it does not pretend to. What
+// it CAN do is stop a future edit from quietly lowering the bound back
+// under the latency it was measured against.
+//
+// The live measurement that produced these numbers is
+// TestLive_VerificationLatency, in verification_latency_live_test.go —
+// re-run it before changing this bound.
+func TestVerificationBoundExceedsTheMeasuredProviderLatency(t *testing.T) {
+	const worstObservedLatency = 4761 * time.Millisecond
+	if ProbeTimeoutForVerification <= worstObservedLatency {
+		t.Errorf("ProbeTimeoutForVerification = %v, want it well above the worst observed latency "+
+			"(%v) — a valid credential must not be reported as a timeout",
+			ProbeTimeoutForVerification, worstObservedLatency)
+	}
+	// And with room to spare, not merely above it: a bound that clears
+	// the observed maximum by a hair is one provider hiccup away from
+	// producing a false failure again.
+	if ProbeTimeoutForVerification < 2*worstObservedLatency {
+		t.Errorf("ProbeTimeoutForVerification = %v clears the worst observed latency (%v) by less than "+
+			"2x; the margin is too thin to survive a slower day",
+			ProbeTimeoutForVerification, worstObservedLatency)
 	}
 }

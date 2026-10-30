@@ -48,11 +48,20 @@ func DefaultModelFactory() ModelFactory {
 	return func(profile config.Profile) (ModelClient, error) {
 		// Credential resolution is the substrate's single rule: an
 		// explicit profile api_key wins, otherwise the provider's own
-		// environment variable is consulted (synth.ResolveAPIKey).
+		// environment variable is consulted (synth.ResolveCredential).
 		// Resolving here rather than reading profile.APIKey directly is
 		// what lets an environment-only credential drive review and
 		// critic requests, the same way it already drives synthesis.
-		apiKey := synth.ResolveAPIKey(profile.APIKey, profile.BaseURL)
+		//
+		// A configured api_key that names an environment variable is
+		// resolved AS one, and a reference that cannot be resolved is
+		// reported as such — with the reason — rather than being sent
+		// to the provider as a literal placeholder and refused as an
+		// invalid credential.
+		apiKey, credentialErr := synth.ResolveCredential(profile.APIKey, profile.BaseURL)
+		if credentialErr != nil {
+			return nil, fmt.Errorf("model factory: profile %q: %w", profile.Name, credentialErr)
+		}
 
 		// Provider-side validation. Ollama + other local servers run
 		// without auth; everything else needs a credential from one of

@@ -437,6 +437,48 @@ inherited from the profile. A provider that does not answer a
 verification in time MUST be reported as a timeout, never as an
 invalid credential.
 
+That verification bound is ONE number for every verification surface —
+`probe.ProbeTimeoutForVerification`, 15 seconds — and it is bounded:
+an endpoint that does not answer is reported as a timeout after 12
+seconds. It MUST NOT be shortened below the provider's own observed
+latency: the bound this replaced was 1.5 seconds, while the live
+MiniMax surface's slowest observed call was 4761ms, so a **valid**
+credential was reported as a timeout and the operator was sent to
+rotate a working key. The whole verification is additionally bounded
+by `probe.ProbeTotalBudget` (40 seconds), which MUST exceed the
+per-request bound.
+
+### A credential is a literal secret, and a reference is a reference
+
+A profile's `api_key` is a **literal secret**. It is presented to the
+provider exactly as written. It is NOT a template.
+
+A value shaped like an environment variable — `"$NAME"` or `"${NAME}"` —
+is the one exception, and it is resolved as a **reference**. This
+distinction MUST be communicated: a prompt that asks for "API key"
+without saying what the answers mean leaves the operator to guess
+whether a value will be stored as a secret or read from the
+environment.
+
+Every prompt that asks for a credential MUST print, before it asks:
+
+- an EMPTY answer uses the endpoint's declared environment variable,
+  and the variable is NAMED — an operator cannot act on "the
+  environment variable" without knowing which one it is;
+- a TYPED value is stored as a literal secret and is never expanded;
+- the variable's NAME is a reference to that variable, not a secret.
+
+The expansion is CLOSED over the substrate's own table
+(`synth.APIKeyEnvVars`): a reference resolves only when it names a
+credential variable the endpoint itself declares, and a reference to
+anything else is REFUSED rather than expanded. MPM MUST NOT implement
+arbitrary environment expansion — that would let a configuration file
+name any environment variable and cause its value to be sent to a
+provider.
+
+No secret may appear in a message: not the configured value, not the
+resolved value, and not a name the operator typed.
+
 ### Existing profile compatibility
 
 Existing profiles with branded provider IDs (`provider=openai`,

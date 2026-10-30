@@ -28,8 +28,26 @@ import (
 // rendering; the on-disk error is logged in Status / ErrorClass for
 // later Doctor inspection.
 //
-// contextTimeoutMs caps the per-probe lifetime (default 6s — caller
-// passes 6s from the post-save path).
+// THE DEADLINE
+// ------------
+// A verification is bounded by TWO numbers, both owned by this package:
+//
+//   - ProbeTimeoutForVerification bounds ONE request;
+//   - ProbeTotalBudget bounds the WHOLE verification, across the first
+//     attempt and the one bounded recovery attempt it may make.
+//
+// When the caller supplies NO deadline, this function applies the total
+// budget itself, so the two numbers cannot drift apart at the call site.
+// When the caller DOES supply a deadline, that deadline wins — it is an
+// explicit choice by the caller — but it must not be shorter than
+// ProbeTimeoutForVerification, or the verification is truncated below
+// the bound it is supposed to be measured against.
+//
+// The total budget is deliberately LARGER than the per-request bound.
+// If the outer deadline were shorter, the outer one would fire first and
+// the probe would report a bare context deadline instead of the
+// provider's own client timeout — the same failure in a different
+// message.
 func ProbeSingle(ctx context.Context, dm *mpminternal.DatabaseManager, p *config.Profile) (ProbeResult, error) {
 	if !CanProbe(p) {
 		return ProbeResult{
@@ -45,15 +63,15 @@ func ProbeSingle(ctx context.Context, dm *mpminternal.DatabaseManager, p *config
 	}
 	var cancel context.CancelFunc
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		ctx, cancel = context.WithTimeout(ctx, 2*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, ProbeTotalBudget)
 		defer cancel()
 	}
-	// Run the generative probe directly with a tight per-probe HTTP
-	// client timeout so the operator's CLI returns within ~2s on
-	// unreachable endpoints. The outer ctx deadline above also bounds
-	// the operation. Doctor's longer 12s deadline is reserved for the
-	// authoritative `mpm doctor` active-probe path.
-	result := probeGenerativeWithTimeout(ctx, p, ProbeKindGenerative, ProbeTimeoutForConfigSave)
+	// The per-request bound is the PROBE's own, never the profile's
+	// `timeout_seconds`: an operator who tuned the request timeout for
+	// a long generation must not thereby make every verification fail,
+	// and must never be told their credential was invalid when the
+	// endpoint simply answered late.
+	result := probeGenerativeWithTimeout(ctx, p, ProbeKindGenerative, ProbeTimeoutForVerification)
 	if dm != nil {
 		existing, _ := LoadCache(dm)
 		current := map[string]struct{}{result.Fingerprint: {}}
