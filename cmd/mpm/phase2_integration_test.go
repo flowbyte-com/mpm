@@ -61,16 +61,16 @@ func TestPhase2_ProjectionPointerResolveChain(t *testing.T) {
 	memID := memResult.(map[string]interface{})["id"].(string)
 	require.NotEmpty(t, memID)
 
-	lessonResult, err := runHandler(dm, "mpm_lessons", map[string]interface{}{
-		"action": "save",
-		"params": map[string]interface{}{
-			"fact": "Always quote shell variables to avoid word splitting",
-			"type": "warning",
-			"tags": []string{"shell", "safety"},
-		},
-	})
+	// The lesson is seeded through the OPERATOR path (the same store
+	// primitive `mpm lesson add` uses). The agent-reachable lesson
+	// write is refused: a lesson is trusted on arrival, so only an
+	// operator may create one. This test is about the projection /
+	// pointer / resolve chain, so it needs a lesson that EXISTS — it
+	// does not need to create one through the agent surface.
+	seededLesson, err := dm.AddLesson("Always quote shell variables to avoid word splitting",
+		mpmcore.LessonType("warning"), []string{"shell", "safety"}, "")
 	require.NoError(t, err)
-	lessonID := lessonResult.(map[string]interface{})["id"].(string)
+	lessonID := seededLesson.ID
 	require.NotEmpty(t, lessonID)
 
 	// ── Path A1: mpm_memory query projection=true ─────────────────────────
@@ -483,15 +483,11 @@ func TestPhase2_ProductionResolverWiring(t *testing.T) {
 	require.NoError(t, err)
 	memID := memResult.(map[string]interface{})["id"].(string)
 
-	lessonResult, err := runHandler(dm, "mpm_lessons", map[string]interface{}{
-		"action": "save",
-		"params": map[string]interface{}{
-			"fact": "Never use word splitting on shell variables",
-			"type": "warning",
-		},
-	})
+	// The operator path — see the note above.
+	seededLesson, err := dm.AddLesson("Never use word splitting on shell variables",
+		mpmcore.LessonType("warning"), nil, "")
 	require.NoError(t, err)
-	lessonID := lessonResult.(map[string]interface{})["id"].(string)
+	lessonID := seededLesson.ID
 
 	// ── Memory resolve via production adapter ─────────────────────────────────
 	memPtr := "mpm://memory/" + memID

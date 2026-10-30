@@ -97,3 +97,38 @@ func (s *LessonStore) GetLessonStats() (map[string]interface{}, error) {
 	}
 	return s.dm.GetLessonStats()
 }
+
+// ListLessonProposals delegates to DatabaseManager.ListLessonProposals.
+// An empty status lists every status; "pending" lists the review queue.
+func (s *LessonStore) ListLessonProposals(status string, limit int) ([]*LessonProposal, error) {
+	if s.dm == nil {
+		return nil, fmt.Errorf("lesson store: database not initialized")
+	}
+	return s.dm.ListLessonProposals(status, limit)
+}
+
+// GetLessonProposal delegates to DatabaseManager.GetLessonProposal
+func (s *LessonStore) GetLessonProposal(id string) (*LessonProposal, error) {
+	if s.dm == nil {
+		return nil, fmt.Errorf("lesson store: database not initialized")
+	}
+	return s.dm.GetLessonProposal(id)
+}
+
+// PromoteLessonProposal delegates to DatabaseManager.PromoteLessonProposal.
+// This is the OPERATOR path from a pending proposal to a trusted lesson.
+// The third return value is the number of cited source nodes credited.
+func (s *LessonStore) PromoteLessonProposal(id string) (*Lesson, *LessonProposal, int, error) {
+	if s.dm == nil {
+		return nil, nil, 0, fmt.Errorf("lesson store: database not initialized")
+	}
+	return s.dm.PromoteLessonProposal(id)
+}
+
+// RejectLessonProposal delegates to DatabaseManager.RejectLessonProposal.
+func (s *LessonStore) RejectLessonProposal(id string) (*LessonProposal, error) {
+	if s.dm == nil {
+		return nil, fmt.Errorf("lesson store: database not initialized")
+	}
+	return s.dm.RejectLessonProposal(id)
+}

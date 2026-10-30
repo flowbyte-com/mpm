@@ -137,15 +137,16 @@ Do not use when: the choice is trivial or easily reversible; you just want to st
 Use when: something failed and you want to make sure the system never repeats the same mistake; you encounter an unexpected success and want to record why it worked; you want to tag a memory as a "warning" or "practice" so it surfaces in future relevant contexts.
 Do not use when: you are documenting a decision (mpm_decisions) or forming a testable hypothesis (mpm_theories).
 For broad queries, projection defaults to 'summary' to keep context bounded. Use projection='full' or mpm_resolve ONLY when reading the complete unabridged content of a specific pointer.
+TRUST ASYMMETRY: a lesson is TRUSTED ON ARRIVAL — the lesson surface has no pending state, so a row there is immediately in the trusted retrieval set. Creating one is therefore OPERATOR-ONLY and is refused at the execution point for MCP and 'mpm call'; no payload field unlocks it. An agent records the experience with action=propose, which writes a PENDING proposal that an operator reviews and promotes with 'mpm lesson promote <id>'. A proposal is NOT a lesson: it does not appear in lesson search, lesson list, or the wake context until it is promoted.
 Lifecycle asymmetry: delete is soft and reversible via action=restore. Permanent shredding (hard delete of the row and its FTS entry) is operator-only and is NOT an agent action: it is refused at the execution point for MCP and 'mpm call', and no payload field unlocks it. An operator can shred permanently with 'mpm lesson shred <id>'.`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"action": {"type": "string", "enum": ["save","search","list","delete","restore"]},
+				"action": {"type": "string", "enum": ["propose","search","list","delete","restore"]},
 				"params": {
 					"type": "object",
 					"properties": {
-						"fact":       {"type": "string"},
+						"fact":       {"type": "string", "description": "The lesson text. Required by action=propose."},
 						"type":      {"type": "string", "enum": ["insight","warning","practice"]},
 						"tags":      {"type": "array", "items": {"type": "string"}},
 						"query":     {"type": "string"},

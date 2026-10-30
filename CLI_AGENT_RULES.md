@@ -1035,7 +1035,46 @@ If any answer is unclear, investigate before editing.
 
 ---
 
-## 25. Final rule
+## 25. The lesson surface is operator-created
+
+A **lesson** is trusted on arrival. `lessons_base` has no status column,
+so a row there is immediately inside the trusted retrieval set — the FTS
+index, `mpm lesson search`, `mpm lesson list`, and the wake context's
+`recent_lessons`.
+
+Therefore:
+
+- **Creating a trusted lesson is an OPERATOR action.** `mpm lesson add`
+  (and its alias `mpm learn`) from a terminal. Nothing on the agent tool
+  surface (MCP, `mpm call`, the OpenCode plugin) may create one.
+- **The agent-reachable lesson write MUST be refused at the execution
+  point**, not merely absent from a tool description. The refusal MUST be
+  unconditional: **no payload field unlocks it** — `operator=true`,
+  `confirm=true`, `review=true`, `trusted=true`, `force=true`,
+  `as_operator=true` and every other spelling are refused identically.
+  A value the caller supplies is not operator intent.
+- **The agent records a PROPOSAL**, via `mpm_lessons action=propose`. A
+  proposal is not a lesson: it is untrusted until an operator acts on it.
+  An operator reviews it with `mpm lesson proposals` and accepts it with
+  `mpm lesson promote <id>` (or declines it with `mpm lesson reject <id>`).
+- **A proposal MUST NOT be retrievable as a lesson.** It lives in its own
+  table, and no trusted read path queries that table. A status column on
+  the lesson table would require EVERY trusted read path to filter on it,
+  and one that forgets would silently promote a pending proposal into
+  trusted knowledge.
+- **A proposal MUST record who proposed it** — session, framework and
+  model — and a promotion MUST record when it was reviewed and which
+  lesson it became. The chain *proposal → operator decision → lesson* is
+  the provenance record.
+
+The reasoning: an agent that can write trusted knowledge can convert
+speculation into the substrate's knowledge with no review step. MPM must
+still be able to CAPTURE experience — so the agent proposes and the
+operator decides. Capture is not trust.
+
+---
+
+## 26. Final rule
 
 Prefer consistency over invention.
 

@@ -204,6 +204,23 @@ type CoreDB interface {
 	SearchLessonsLimited(query string) ([]map[string]interface{}, error)
 	ListLessonsFiltered(lessonType string) ([]map[string]interface{}, error)
 
+	// ─── Lesson proposals ───────────────────────────────────────────
+	// The PENDING surface for a lesson an agent has proposed and an
+	// operator has not yet accepted. A proposal is NOT a lesson: it
+	// lives in its own table, so it is outside every trusted retrieval
+	// path until an operator promotes it. See lesson_proposals.go.
+	//
+	// AddLessonProposal creates a pending proposal; PromoteLessonProposal
+	// and RejectLessonProposal are the OPERATOR transitions. They are
+	// not reachable from the agent tool surface.
+	AddLessonProposal(content string, lessonType string, tags []string, sourceIDs []string, ac ...ActiveContext) (*LessonProposal, error)
+	GetLessonProposal(id string) (*LessonProposal, error)
+	ListLessonProposals(status string, limit int) ([]*LessonProposal, error)
+	// PromoteLessonProposal returns the lesson, the updated proposal and
+	// the number of cited source nodes that were credited.
+	PromoteLessonProposal(id string, ac ...ActiveContext) (*Lesson, *LessonProposal, int, error)
+	RejectLessonProposal(id string) (*LessonProposal, error)
+
 	// ─── Sessions ────────────────────────────────────────────────────
 	GetLastSession() (map[string]interface{}, error)
 	GetSessionMemories(sessionID string, limit int) ([]map[string]interface{}, error)

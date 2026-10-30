@@ -63,7 +63,7 @@ At the beginning of a new agent session, **before any substantive work**:
   session start.
 - When the wake payload points you at a specific artifact, follow
   the pointer with the appropriate domain tool (`mpm_decisions
-  show`, `mpm_lessons read`, `mpm_memory show`, `mpm_work show`,
+  show`, `mpm_lessons search`, `mpm_memory show`, `mpm_work show`,
   `mpm_resolve`, or whatever the artifact class warrants). Bulk
   listing every substrate category at session start is not the
   contract.
@@ -179,6 +179,35 @@ Fall back to the documented `mpm call <tool> --payload '{...}'` CLI path
 when native integration is unavailable. Do not invent new commands or
 bypass the substrate.
 
+### 2.1 A lesson is proposed, not asserted
+
+A **lesson** is trusted on arrival: the lesson surface has no pending
+state, so a lesson row is immediately inside the trusted retrieval set —
+the FTS index, lesson search, lesson list, and the wake context. An
+agent therefore cannot write one, and the substrate refuses the attempt
+at the execution point. No payload field changes that.
+
+To record a lesson, an agent **proposes** it:
+
+```text
+mpm_lessons(action="propose", params={"fact": "...", "type": "warning"})
+```
+
+The proposal is pending operator review. It is **not** a lesson yet: it
+does not appear in lesson search, lesson list, or the wake context, and
+it must not be presented to a later session as established knowledge. An
+operator accepts it with `mpm lesson promote <id>` (or declines it with
+`mpm lesson reject <id>`).
+
+**Capture is not trust.** The agent still records what it learned; the
+operator decides whether it becomes knowledge. A proposal that is
+never promoted is not a loss — the record is kept, and it can be
+reviewed later.
+
+If the agent needs a fact to be *available now* rather than *trusted*,
+write a **memory** (`mpm_memory` action `save`), which carries its own
+confidence and review lifecycle.
+
 ---
 
 ## 3. SKILL DISCOVERY
@@ -273,7 +302,7 @@ shape the validator enforces.
 - `candidate` — proposal generated, not published. Inspect `decision_model`,
   `duplicate_check`, `validation`, `proposal`. Accept by dispatching the
   `save_payload` back via `mpm_skills(action="save", ...)`.
-- `rejected` — not skill-worthy. Optionally save a memory or lesson.
+- `rejected` — not skill-worthy. Optionally save a memory, or propose a lesson.
 
 **Prefer refinement over creation.** When `duplicate_check.close_matches`
 is non-empty (combined score > 0.6), dispatch `mode: "refine"` with the

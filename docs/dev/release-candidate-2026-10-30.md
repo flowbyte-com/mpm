@@ -12,6 +12,37 @@ NRestarts 0, binary mtime 24 October.
 
 ---
 
+> ### ⚠ CORRECTION (2026-10-30) — one claim in this report was wrong
+>
+> This report stated: *"No critic path and no agent path writes the lesson
+> surface in this release."* **That was false**, and the false half was the
+> **agent** half.
+>
+> At the report's own accepted code SHA (`4111c46`), and still at `4f81690f`,
+> `mpm_lessons action=save` — reachable over MCP, over `mpm call`, and through
+> the OpenCode plugin, which forwards the action verbatim — wrote a
+> **trusted** lesson from agent-supplied text. That lesson was immediately
+> inside the trusted retrieval set: `lessons_fts`, `mpm lesson search`,
+> `mpm lesson list`, and the wake context's `recent_lessons`.
+>
+> The claim was not wrong about the critic — the critic's hunts emit
+> `mpm_theories propose`, and `lessons_base` = 0 after one run and after
+> three (§6.1, group 3). It was wrong about the **agent**.
+>
+> **The boundary is now enforced in code**, not asserted in prose: the
+> agent-reachable lesson write is refused at the execution point, the
+> agent's replacement is a **pending proposal** in its own table that no
+> trusted retrieval path reads, and only an operator's promotion creates a
+> lesson. See **§8.1** for the corrected contract, **§8.2** for what the
+> correction does and does not change, and **§9** for the effect on the
+> recommendation.
+>
+> The correction was verified against `4f81690f` (the revision it was
+> measured on) and against the correction's own revision. Nothing was
+> deployed, and the live installation remains untouched.
+
+---
+
 ## 1. The exact integrated state
 
 | Item | Value |
@@ -417,32 +448,161 @@ by default**.
 
 | # | Item | Severity | Blocks the RC? | Why |
 |---|---|---|---|---|
-| 1 | **D2-core** — the lesson surface has no pending state. `lessons_base` has no status column, so a row there is **trusted on arrival**. | Surface property, not a writer defect | **No** | No critic path and no agent path writes the lesson surface in this release. But it **must be in the release notes**: treat the lesson surface as **operator-only** until a pending state exists. Implementing it is a **schema change**. |
+| 1 | **D2-core** — the lesson surface has no pending state. `lessons_base` has no status column, so a row there is **trusted on arrival**. | Surface property, not a writer defect | **No** — **after the correction below** | **CORRECTED (2026-10-30).** This row previously read "No critic path and no agent path writes the lesson surface in this release." **That claim was false at `4f81690f`** and is withdrawn. The critic half was true — the critic's hunts emit `mpm_theories propose`, and `lessons_base` = 0 after one run and after three (§6.1, group 3). The **agent** half was false: `mpm_lessons action=save` — reachable over MCP, over `mpm call`, and through the OpenCode plugin, which forwards the action verbatim — wrote a **trusted** lesson from agent-supplied text, and that lesson was immediately in `lessons_fts`, in `mpm lesson search`, and in the wake context's `recent_lessons`. The boundary is now **enforced**: the agent-reachable lesson write is refused at the execution point (no payload field unlocks it), and the agent's replacement — `mpm_lessons action=propose` — records a **pending proposal in its own table**, outside every trusted retrieval path until an operator promotes it. The lesson surface is therefore operator-only **in fact**, not by documentation. |
 | 2 | **D3-a** — the legacy untyped citation path accepts an unresolvable id. | Accepted limitation | **No** | The critic uses the **typed** path on every hunt, and the typed path is verified to reject an unresolvable citation **atomically**. Ruling already in hand: step 1 (infer the type from an unambiguous resolution) approved as the next change — it cannot reject anything accepted today; step 2 (`mpm_decisions` gains `source_type`) approved in principle as its own shared-interface PR; step 3 (rejecting legacy ids) deferred behind a deprecation period. |
 | 3 | **F2** — under contention the critic can **silently lose a finding** to `SQLITE_BUSY` (measured 2–4 of 8 concurrent proposals lost; reproduced under `make test-race`). | The most consequential residual | **No** for the RC; **Yes** for lifting the P2b gate | The critic is **gated**: the automatic path is refused at both the producer and the dispatch gate, and the manual path runs one agent at a time. But this is precisely why the P2b gate stays closed. The candidate fix is validated (`BEGIN IMMEDIATE`: 4/8 lost → 0/8) and deserves its own PR **before** the gate is lifted. |
 | 4 | **D4 residual / F1** — the proposal identity treats the tag set as a **sequence**, so `["critic","alpha"]` and `["alpha","critic"]` are two proposals; the `m5contract` D4 test stays red pending a ruling. | Cosmetic | **No** | The production-path defect (a cycle-varying tag splitting every cycle's proposal) is **closed** — that was D4, and it is what makes the per-observation idempotency hold. What remains is a tag-ordering cosmetic. |
-| 5 | **`mpm-telemetry observe`** (issue #139) — the same trusted-lesson exception, the same missing tool, and a store-path disagreement with the spec (`src/db/telemetry.db` vs the spec'd `<workspace>/telemetry.db`). | Advertised but inert | **No** | The command is currently **inert** — it calls `mpm call mpm_provenance`, a tool that **does not exist** in the registry, then calls `mpm_lessons` with a flat payload the params-envelope check rejects. It cannot write. **The ruling stands: read-only until a resolvable evidence source exists, and the store path must be settled first.** Repairing its count the way #138 repaired the critic's would **arm** a trusted-lesson write — the ordering rule that governs this release candidate. |
+| 5 | **`mpm-telemetry observe`** (issue #139) — a store-path disagreement with the spec (`src/db/telemetry.db` vs the spec'd `<workspace>/telemetry.db`). | Advertised, and now genuinely read-only | **No** | **CORRECTED (2026-10-30).** This row described the command as *inert* because it shelled out to `mpm call mpm_provenance` (a tool that does not exist) and then to `mpm_lessons` with a payload the envelope check rejects. That was accurate **when this report was written (2026-10-27)**, but it no longer describes the code: **#152 (2026-10-28) made `observe` a read-only diagnostic by default** — the artifact count is computed in-process, the substrate is opened READ-ONLY, and the output is a rendered *observation*, not a lesson payload. The command no longer calls `mpm` at all, so it cannot write a lesson for any reason. **The ruling stands and is now stronger: read-only until a resolvable evidence source exists, and the store path must be settled first.** |
 | 6 | **The lifecycle transport is off by default** (§7.2). | Product decision | **No** — with a documented operator step | It is not a defect: the feature is verified working, the default is pinned by the adapter's own harness, and the change is a coordinated product decision. **The release notes must state the operator step.** |
 | 7 | The OpenClaw `created_by` literal (`"mpm-memory-openclaw-ingest"`) names a host MPM no longer supports, and the ingest handler now has no producer. | Deferred debt | **No** | Deliberately unchanged: the value is operator-visible data on `scheduled_wakes` rows, and renaming it must be **a data migration with its own decision**. |
 
 **Nothing on this list is a trust-boundary violation, and none of them can
 create a trusted lesson, a false citation, or a misattributed artifact.**
 
+**One claim in this report was wrong and is withdrawn.** §8 row 1 said "No
+critic path and no agent path writes the lesson surface in this release". The
+critic half was true; the **agent** half was false — `mpm_lessons
+action=save` created trusted lessons from agent-supplied text. It was
+corrected by enforcement, not by documentation: the agent-reachable write is
+now refused, the agent's replacement is a **pending proposal** in its own
+table, and only an operator's promotion creates a lesson. The
+release-candidate claim "the lesson surface is operator-only" is now true in
+fact. See §8.1 for the corrected contract, and §8.2 for what the correction
+does and does not change.
+
 ---
+
+## 8.1 The corrected lesson trust contract
+
+**What was claimed, and what is true.** This report claimed that no agent
+path writes the lesson surface. The claim was **false at `4f81690f`**. The
+corrected contract is stated here in full, because a reader of the release
+notes needs to know exactly which path writes trusted knowledge and which
+does not.
+
+### The production entry points that can create a lesson
+
+| Path | Reachable by an agent? | What it creates | Trust |
+|---|---|---|---|
+| `mpm_lessons action=save` (MCP, `mpm call`, the OpenCode plugin) | **Was yes. Now NO — refused at the execution point.** | *Before:* a trusted lesson. *Now:* nothing. | — |
+| `mpm_lessons action=propose` (MCP, `mpm call`, the OpenCode plugin) | Yes | A **pending proposal** in `lesson_proposals` | **Untrusted** until an operator promotes it |
+| `mpm lesson add <content>` (terminal) | No — the operator's own command | A trusted lesson | **Operator-authored** |
+| `mpm learn <content>` (terminal) | No — an alias for `mpm lesson add` | A trusted lesson | **Operator-authored** |
+| `mpm lesson promote <id>` (terminal) | No — the operator's decision | A trusted lesson, from a proposal | **Operator-accepted** |
+| `mpm_memory action=compact` | Yes | A lesson **derived** from existing `collection='memories'` rows by the synthesis LLM | A derivation of already-retrievable content — see §8.2 |
+| The critic's hunts | The automatic path is gated off | `mpm_theories propose` — a **pending theory** | Untrusted until resolved |
+| `mpm-telemetry observe` | Yes, but it writes nothing | A rendered **observation** | Read-only |
+
+### The boundary, stated exactly
+
+* **The agent tool surface cannot create a trusted lesson.** The refusal is
+  at the execution point (`handleSaveLesson`), not in a tool description and
+  not in a documentation note. It is unconditional: **no payload field
+  unlocks it** — `operator=true`, `confirm=true`, `review=true`, `trusted=true`,
+  `force=true`, `as_operator=true` and every other spelling are refused
+  identically, because a value the caller supplies is not operator intent.
+  This is the same fail-closed shape the repo already uses for the
+  operator-only shred (`operatorOnlyShredError`).
+* **The operator's path is genuinely separate.** `mpm lesson add` calls the
+  store directly (`LessonStore.AddLesson` → `DatabaseManager.AddLesson`) and
+  never reaches the tool handler. So does `mpm learn`. Neither is reachable
+  from MCP or `mpm call`.
+* **A proposal is not a lesson, and the isolation is structural.** The
+  proposal lives in its own table (`lesson_proposals`), which **no trusted
+  read path queries** — not `lessons_fts`, not `mpm lesson search`, not
+  `mpm lesson list`, not the wake context, not the vector index, not the
+  synthesis drain. There is therefore no status filter for a future read
+  path to forget. (The alternative — a `status` column on `lessons_base` —
+  would have required **every** trusted read path to filter on it, and one
+  that forgot would silently promote a pending lesson into trusted
+  knowledge.)
+* **The proposal carries its provenance.** It records the proposing session,
+  the framework and the model, so the operator can see **who** proposed it.
+  A promotion records when it was reviewed and which lesson it became. The
+  chain *proposal → operator decision → lesson* is complete and auditable.
+* **Nothing that already existed is touched.** No existing lesson is
+  rewritten, re-indexed, purged or re-scored. The change is additive: one
+  table and one index.
+
+### What the agent can still do
+
+MPM keeps the ability to capture experience. The agent records what it
+learned; the operator decides whether it becomes knowledge. That is the
+difference between "capture" and "trust", and it is the whole point.
+
+## 8.2 What the correction does and does not change
+
+**It does change:**
+
+* the agent's lesson-recording action is now `action=propose`, not
+  `action=save`;
+* the managed instructions and the OpenCode plugin's tool description were
+  changed to match, and the rendered managed-block artifacts were
+  regenerated;
+* the substrate gained one table (`lesson_proposals`) and one index.
+
+**It does not change:**
+
+* **the lesson surface's own shape.** `lessons_base` still has no status
+  column, so a row there is still trusted on arrival. That is now a
+  property of an **operator-only** surface rather than a property of a
+  surface an agent can reach. A future change that gives the lesson table
+  its own pending state is still available and still optional.
+* **the compaction path.** `mpm_memory action=compact` still writes a
+  lesson, directly, from an LLM synthesis of existing memories. Its trust
+  profile is different from an agent's freetext: the content is a
+  **derivation** of rows that are already inside the agent's retrieval
+  surface (`collection='memories'`), so the synthesis does not introduce
+  content that was not already retrievable. It was deliberately **not**
+  gated by this change, and it is recorded here so the distinction is
+  explicit rather than accidental.
+* **the critic.** Its hunts already emitted pending theory proposals; this
+  change does not touch them.
+* **the live installation.** Nothing was deployed. The binary, the
+  configuration, the database and the scheduler are untouched.
+
+**Compatibility and rollback.** The schema delta is **one empty table and
+one index**. No existing table is altered, no existing row is read, rewritten
+or moved, and an older binary ignores the table entirely. A rollback leaves
+the table orphaned with its content intact, and every lesson already
+promoted out of it survives in `lessons_base`. The upgrade rehearsal was
+re-run against the change: **135 assertions, 0 failures**, with the schema
+delta reported as exactly `+ lesson_proposals=0` and
+`+ idx:idx_lesson_proposals_status` — no pre-existing table lost, and no
+pre-existing table's row count changed.
+
+**The one thing an operator loses.** An operator's script that used
+`mpm call mpm_lessons --payload '{"action":"save",...}'` to write a trusted
+lesson is refused. The refusal names the replacement (`action=propose`) and
+the operator's own command (`mpm lesson add <content>`). This is the same
+trade the operator-only shred already makes, and it is made for the same
+reason: `mpm call` is an agent-reachable interface, so it cannot be the
+operator boundary.
 
 ## 9. The recommendation
 
 ### **CONDITIONAL GO**
 
-**The conditions are both documentation, and both are one line each.**
+**One condition remains, and it is documentation, and it is one line.**
 
 1. **The release notes must state the operator step:** lifecycle-event
    ingestion requires `MPM_EVENT_INGEST=mpm_system` in the OpenCode host's
    environment. (Decision pending with the owner; option 3 is the safe
    default because it changes nothing about what an installation writes.)
-2. **The release notes must state that the lesson surface is operator-only**
-   until a pending state exists (D2-core), and that the legacy untyped
-   citation path remains a documented limitation (D3-a).
+
+**The second condition has been discharged by enforcement, not by
+documentation.** It used to read: *"the release notes must state that the
+lesson surface is operator-only until a pending state exists (D2-core)"*,
+because at `4f81690f` the agent path could write a trusted lesson and no
+pending state existed. The agent-reachable write is now **refused**, and the
+agent's replacement is a **pending proposal** in its own table, so the
+release note is no longer the thing standing between an agent and trusted
+knowledge — the code is. The lesson surface **is** operator-only now, and
+the residual question ("should the lesson table carry its own pending
+state?") is a design question for a later change, not a release condition.
+
+The legacy untyped citation path remains a documented limitation (D3-a) —
+unchanged, and unrelated to the lesson boundary.
 
 **Why not an unconditional GO.** Two things are not the integrator's to close,
 and one of them is a behaviour an operator would otherwise discover by
@@ -450,12 +610,17 @@ surprise:
 
 * the lifecycle transport's default is an open **product** decision that
   changes what a default installation writes;
-* the lesson surface still publishes trusted knowledge directly.
+* ~~the lesson surface still publishes trusted knowledge directly~~ —
+  **this no longer holds.** The agent-reachable lesson write is refused, and
+  the agent's replacement is a pending proposal that no trusted retrieval
+  path reads. The lesson surface publishes trusted knowledge only on an
+  operator's action.
 
-Neither is a defect, and neither is a trust violation. But an unconditional
-GO would mean shipping without telling the operator that a documented feature
-is off by default, and that is exactly the kind of surprise a release should
-not contain.
+The first is a defect-free product decision that a release note must carry.
+The second was a trust-boundary gap, and it has been closed in the code
+(§8.1). An unconditional GO would still mean shipping without telling the
+operator that a documented feature is off by default, and that is exactly
+the kind of surprise a release should not contain.
 
 **Why not a NO-GO.** The primary objective is met and met on real host
 behaviour:
@@ -480,7 +645,7 @@ behaviour:
 | Decision | Owner | Options | Effect on the recommendation |
 |---|---|---|---|
 | The lifecycle transport default | the adapter's owner (Session C), adjudicated by A | 1 · 2 · 3 (§7.2) | Option 1 or 2 removes condition 1. Option 3 keeps it as a release-note line. |
-| The lesson surface's pending state | A (schema change) | defer, or implement before the release | Implementing it removes the second release-note line. |
+| The lesson surface's **own** pending state (a `status` column on `lessons_base`) | A (schema change) | defer — it is now optional, not a condition | The agent boundary is **already enforced** (§8.1), so this is a design improvement, not a release blocker. It would let an agent write a lesson-shaped row that is pending, without an operator running a promotion command — at the cost of every trusted read path having to filter on the status. |
 | Lifting the P2b gate | A, after F2 and D2-core | **not now** | The gate stays closed. Automatic critic scheduling is **not** part of this release candidate. |
 
 **Nothing was deployed, tagged or published. No release was cut. The live

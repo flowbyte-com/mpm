@@ -99,7 +99,7 @@ learned.**
 |---|---|
 | Reusable fact, constraint, root cause | `mpm_memory` action `save` |
 | Choice and rationale | `mpm_decisions` action `record` |
-| Insight, warning, or practice worth repeating | `mpm_lessons` action `save` |
+| Insight, warning, or practice worth repeating | `mpm_lessons` action `propose` — a proposal, pending operator review |
 | Supporting or contradicting observation | `mpm_evidence` action `add` |
 | Unverified hypothesis — never a fact or lesson | `mpm_theories` action `propose` |
 | Objective spanning sessions | `mpm_work` action `create` — reach it with `mpm call` |
@@ -182,7 +182,7 @@ learned.**
 |---|---|
 | Reusable fact, constraint, root cause | `mpm_memory` action `save` |
 | Choice and rationale | `mpm_decisions` action `record` |
-| Insight, warning, or practice worth repeating | `mpm_lessons` action `save` |
+| Insight, warning, or practice worth repeating | `mpm_lessons` action `propose` — a proposal, pending operator review |
 | Supporting or contradicting observation | `mpm_evidence` action `add` |
 | Unverified hypothesis — never a fact or lesson | `mpm_theories` action `propose` |
 | Objective spanning sessions | `mpm_work` action `create` — reach it with `mpm call` |
@@ -251,7 +251,7 @@ in this file's git log.
 | `mpm_scratchpad` | `flush`, `read`, `discard`, `promote` | — |
 | `mpm_memory` | `save`, `query`, `show`, `delete`, `restore`, `reinforce`, `weaken`, `snooze`, `set_weight`, `patch`, `promote`, `review`, `synthesize`, `challenge`, `restore_challenge`, `commit_milestone` | `query` defaults `projection: "summary"`; full via `projection: "full"`. `delete` is a reversible soft delete; `restore` clears the tombstone. Permanent shredding is operator-only (`mpm memory shred <id>` from a terminal) and is refused on every agent surface — no payload field, including `confirm=true`, unlocks it. |
 | `mpm_decisions` | `record`, `supersede`, `invalidate` | — |
-| `mpm_lessons` | `save`, `search`, `list`, `delete`, `restore` | `save` defaults `type` to `"insight"` if absent; valid values: `"insight"`, `"warning"`, `"practice"`; lifecycle: `delete` is reversible soft delete (sets tombstone), `restore` clears the tombstone. Permanent shredding is operator-only (`mpm lesson shred <id>`) and is refused on every agent surface. All lifecycle actions accept canonical `id` (alias: `lesson_id`). |
+| `mpm_lessons` | `propose`, `search`, `list`, `delete`, `restore` | **Creating a trusted lesson is operator-only.** A lesson is trusted on arrival — the lesson surface has no pending state — so `save` is refused at the execution point on every agent surface, and no payload field unlocks it. Use `propose`: it records a PENDING proposal that an operator reviews and promotes with `mpm lesson promote <id>`. A proposal is NOT a lesson and does not appear in lesson search, lesson list, or the wake context until it is promoted. `propose` requires `params.fact`; optional `params.type` (valid: `"insight"`, `"warning"`, `"practice"`; defaults to `"insight"`), `params.tags`. Lifecycle: `delete` is reversible soft delete (sets tombstone), `restore` clears the tombstone. Permanent shredding is operator-only (`mpm lesson shred <id>`) and is refused on every agent surface. All lifecycle actions accept canonical `id` (alias: `lesson_id`). |
 | `mpm_topics` | `create`, `search`, `link` | — |
 | `mpm_references` | `add`, `read`, `search`, `list` | freshness surfaced as `current` `stale` `version-bound` `historical` `unknown` |
 | `mpm_context` | `read_wake_context`, `read_directives`, `proactive_recall_hint`, `query_global_rules`, `record_global_rule`, `promote_to_global`, `route` | `read_wake_context` accepts `params.projection: "compact"` |

@@ -97,7 +97,7 @@ def _matrix_rows(block: str) -> list[tuple[str, str]]:
 REQUIRED_MATRIX_DESTINATIONS = (
     ("mpm_memory", "save"),
     ("mpm_decisions", "record"),
-    ("mpm_lessons", "save"),
+    ("mpm_lessons", "propose"),
     ("mpm_evidence", "add"),
     ("mpm_theories", "propose"),
     ("mpm_work", "create"),

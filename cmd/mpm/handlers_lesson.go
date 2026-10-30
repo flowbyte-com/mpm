@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/flowbyte-com/mpm-core"
@@ -39,6 +40,17 @@ func handleLesson(args []string) int {
 		return handleLessonRestore(args[1:])
 	case "shred":
 		return handleLessonShred(args[1:])
+	case "proposals":
+		// The review queue: lesson proposals an agent has submitted and
+		// an operator has not yet acted on.
+		return handleLessonProposals(args[1:])
+	case "promote":
+		// The operator's acceptance of a pending proposal. This is the
+		// ONLY path from a proposal to a trusted lesson.
+		return handleLessonPromote(args[1:])
+	case "reject":
+		// The operator's decline of a pending proposal.
+		return handleLessonReject(args[1:])
 	case "stats":
 		return handleLessonStats()
 	default:
@@ -57,6 +69,9 @@ Usage:
   mpm lesson delete <id>     Soft-delete (reversible via restore)
   mpm lesson restore <id>    Restore a soft-deleted lesson
   mpm lesson shred <id>      Permanent hard delete (irreversible)
+  mpm lesson proposals [--status pending|promoted|rejected|all]
+  mpm lesson promote <id>    Accept a pending proposal → becomes a trusted lesson
+  mpm lesson reject <id>     Decline a pending proposal
   mpm lesson stats
 
 Lifecycle:
@@ -66,6 +81,20 @@ Lifecycle:
             normal queries. Idempotent on an already-visible lesson.
   shred   → permanent/irreversible — row removed from lessons_base
             + lessons_fts; no restore path.
+
+Trust boundary:
+  A lesson is TRUSTED ON ARRIVAL — the lesson surface has no pending
+  state, so a lesson row is immediately inside the trusted retrieval set
+  (search, list, the wake context). Creating one is therefore an
+  OPERATOR action: 'mpm lesson add' from a terminal.
+
+  Agents cannot write a trusted lesson. An agent records the experience
+  as a PROPOSAL ('mpm_lessons action=propose' over MCP or 'mpm call'),
+  which is pending until an operator acts on it:
+
+    mpm lesson proposals          list what is waiting for review
+    mpm lesson promote <id>       accept it — it becomes a trusted lesson
+    mpm lesson reject <id>        decline it (the record is kept)
 
 Examples:
   mpm lesson add "Check file extensions before executing" --type warning --tags safety,files
@@ -408,6 +437,181 @@ func handleLessonShred(args []string) int {
 	}
 
 	return respond(fmt.Sprintf("Lesson shredded (permanent): %s\n", id), "", 0)
+}
+
+// handleLessonProposals lists the lesson proposals waiting for review.
+//
+// The default status is "pending": the operator's question is "what is
+// waiting for me?", and a proposal they already acted on is not
+// waiting. "--status all" shows the whole history.
+//
+// The proposals are the UNTRUSTED surface: a proposal is not a lesson,
+// and it is not in the lesson search, the lesson list or the wake
+// context. It becomes a lesson only through `mpm lesson promote`.
+func handleLessonProposals(args []string) int {
+	jsonOutput, args := ExtractJSONFlag(args)
+	status := "pending"
+	limit := 0
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--status":
+			if i+1 < len(args) {
+				status = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(arg, "--status="):
+			status = strings.TrimPrefix(arg, "--status=")
+		case strings.HasPrefix(arg, "--limit="):
+			if n, err := strconv.Atoi(strings.TrimPrefix(arg, "--limit=")); err == nil {
+				limit = n
+			}
+		}
+	}
+	if status == "all" {
+		status = ""
+	}
+
+	lessonStore := internal.NewLessonStoreForDM(getDBConcrete())
+	if lessonStore == nil {
+		return respond("", "Failed to initialize lesson store: database not available", 1)
+	}
+	proposals, err := lessonStore.ListLessonProposals(status, limit)
+	if err != nil {
+		return respond("", fmt.Sprintf("Failed to list lesson proposals: %v", err), 1)
+	}
+
+	if jsonOutput {
+		type proposalEntry struct {
+			ID           string   `json:"id"`
+			Type         string   `json:"type"`
+			Content      string   `json:"content"`
+			Tags         []string `json:"tags"`
+			Created      string   `json:"created"`
+			Status       string   `json:"status"`
+			ProposedBy   string   `json:"proposed_by_framework"`
+			ProposedModel string  `json:"proposed_by_model"`
+			SessionID    string   `json:"source_session_id"`
+			PromotedID   string   `json:"promoted_lesson_id"`
+		}
+		entries := make([]proposalEntry, 0, len(proposals))
+		for _, p := range proposals {
+			entries = append(entries, proposalEntry{
+				ID:            p.ID,
+				Type:          p.Type,
+				Content:       p.Content,
+				Tags:          p.Tags,
+				Created:       p.Created,
+				Status:        p.Status,
+				ProposedBy:    p.FrameworkName,
+				ProposedModel: p.ModelName,
+				SessionID:     p.SourceSessionID,
+				PromotedID:    p.PromotedLessonID,
+			})
+		}
+		data, _ := json.Marshal(map[string]interface{}{
+			"success":   true,
+			"count":     len(entries),
+			"proposals": entries,
+		})
+		fmt.Println(string(data))
+		return 0
+	}
+
+	if len(proposals) == 0 {
+		render.Heading(os.Stdout, "Lesson proposals")
+		render.Plain(os.Stdout, "No lesson proposals are waiting for review.")
+		return 0
+	}
+
+	render.Heading(os.Stdout, "Lesson proposals")
+	for _, p := range proposals {
+		origin := p.FrameworkName
+		if origin == "" {
+			origin = "unknown"
+		}
+		render.Plain(os.Stdout, fmt.Sprintf(
+			"  %s  [%s]  %s\n      %s\n      proposed by %s at %s",
+			p.ID, p.Status, p.Type, p.Content, origin, p.Created))
+	}
+	render.Plain(os.Stdout, "")
+	render.Plain(os.Stdout, "  Accept one with:  mpm lesson promote <id>")
+	render.Plain(os.Stdout, "  Decline one with: mpm lesson reject <id>")
+	return 0
+}
+
+// handleLessonPromote accepts a pending proposal and turns it into a
+// TRUSTED lesson.
+//
+// This is the operator's decision, and it is the only path from a
+// proposal to a lesson. The lesson is written through the same store
+// path `mpm lesson add` uses, so it gets the same scanning, dedup and
+// provenance treatment as any other lesson.
+func handleLessonPromote(args []string) int {
+	jsonOutput, args := ExtractJSONFlag(args)
+	if len(args) == 0 {
+		return respond("", "Usage: mpm lesson promote <id>", 1)
+	}
+	id := args[0]
+
+	lessonStore := internal.NewLessonStoreForDM(getDBConcrete())
+	if lessonStore == nil {
+		return respond("", "Failed to initialize lesson store: database not available", 1)
+	}
+	lesson, proposal, credited, err := lessonStore.PromoteLessonProposal(id)
+	if err != nil {
+		return respond("", fmt.Sprintf("Failed to promote lesson proposal: %v", err), 1)
+	}
+
+	if jsonOutput {
+		data, _ := json.Marshal(map[string]interface{}{
+			"success":          true,
+			"proposal_id":      proposal.ID,
+			"lesson_id":        lesson.ID,
+			"type":             string(lesson.Type),
+			"reinforcement":    lesson.ReinforcementCount,
+			"status":           proposal.Status,
+			"credited_sources": credited,
+		})
+		fmt.Println(string(data))
+		return 0
+	}
+	return respond(fmt.Sprintf(
+		"Lesson proposal %s promoted. Lesson ID: %s (type: %s, reinforcement: %d, credited sources: %d)\n",
+		proposal.ID, lesson.ID, lesson.Type, lesson.ReinforcementCount, credited), "", 0)
+}
+
+// handleLessonReject declines a pending proposal.
+//
+// The proposal's content is kept — a declined proposal records what the
+// agent thought — but it leaves the review queue.
+func handleLessonReject(args []string) int {
+	jsonOutput, args := ExtractJSONFlag(args)
+	if len(args) == 0 {
+		return respond("", "Usage: mpm lesson reject <id>", 1)
+	}
+	id := args[0]
+
+	lessonStore := internal.NewLessonStoreForDM(getDBConcrete())
+	if lessonStore == nil {
+		return respond("", "Failed to initialize lesson store: database not available", 1)
+	}
+	proposal, err := lessonStore.RejectLessonProposal(id)
+	if err != nil {
+		return respond("", fmt.Sprintf("Failed to reject lesson proposal: %v", err), 1)
+	}
+
+	if jsonOutput {
+		data, _ := json.Marshal(map[string]interface{}{
+			"success":     true,
+			"proposal_id": proposal.ID,
+			"status":      proposal.Status,
+		})
+		fmt.Println(string(data))
+		return 0
+	}
+	return respond(fmt.Sprintf("Lesson proposal %s rejected (the record is kept, and it is no longer pending).\n",
+		proposal.ID), "", 0)
 }
 
 func handleLessonStats() int {

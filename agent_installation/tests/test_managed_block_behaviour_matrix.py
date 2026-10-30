@@ -323,7 +323,7 @@ class BehaviourMatrixContract(unittest.TestCase):
         for tool, action in (
             ("mpm_memory", "save"),
             ("mpm_decisions", "record"),
-            ("mpm_lessons", "save"),
+            ("mpm_lessons", "propose"),
             ("mpm_evidence", "add"),
             ("mpm_theories", "propose"),
             ("mpm_work", "create"),
@@ -351,7 +351,7 @@ class BehaviourMatrixContract(unittest.TestCase):
         allowed = {t for t, _ in (
             ("mpm_memory", "save"),
             ("mpm_decisions", "record"),
-            ("mpm_lessons", "save"),
+            ("mpm_lessons", "propose"),
             ("mpm_evidence", "add"),
             ("mpm_theories", "propose"),
             ("mpm_work", "create"),

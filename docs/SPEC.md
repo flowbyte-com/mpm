@@ -2869,7 +2869,7 @@ Relevant Context: [IDs of memories/skills in use]
 Exit Criteria: [What constitutes completion? When do we wipe this?]
 ```
 
-The `Exit Criteria` line is the discipline that prevents context crunch: without an explicit completion definition, agents keep working past the goal and accrue context needlessly. When the Exit Criteria is met, **wipe the scratchpad clean by passing an empty string** to `flush_scratchpad`. If you learned something durable during the task, `mpm_lessons action=save` before wiping.
+The `Exit Criteria` line is the discipline that prevents context crunch: without an explicit completion definition, agents keep working past the goal and accrue context needlessly. When the Exit Criteria is met, **wipe the scratchpad clean by passing an empty string** to `flush_scratchpad`. If you learned something durable during the task, `mpm_lessons action=propose` before wiping.
 
 **The atomic rollback is the entire point.** `promote_scratchpad` runs the security scanner against the synthesized memory *inside* the same transaction as the memory INSERT and the scratchpad DELETE. If the scanner rejects (poison-phrase match, sensitive content, etc.), the entire transaction aborts: the scratchpad row survives for the agent to amend, and no memory row is created. A thought that fails the scanner is **not lost** — it is preserved for revision.
 
@@ -2886,7 +2886,9 @@ The `retrieval_metadata` table is a 1:1 mapping with any cognitive node (Memory,
 
 **Automatic instrumentation.** The agent never manages these stats explicitly. Every `mpm_context action=read_wake_context` boot, every `mpm_memory action=query` result, every `mpm_lessons action=search` result, and every `mpm_skills action=read` call increments `reuse_count` and updates `last_retrieved_at` via `RecordRetrieval` — fire-and-forget, errors swallowed so telemetry never blocks the user-facing path.
 
-**Provenance Proxy via `mpm_lessons action=save`.** When the agent distils a lesson, the optional `source_ids` array credits each cited node with a `success_count` increment via `IncrementSuccess` (INSERT-or-UPDATE). A node that was already retrieved has its `success_count` bumped; a node cited from prior-session memory but not surfaced this turn gets a fresh row with `success_count=1, reuse_count=0`. The "Provenance Proxy" name reflects the design intent: from any successful lesson, the system can trace back to the cognitive nodes that informed it, even when those nodes were never re-read in the session where the lesson was synthesized.
+**Provenance Proxy via `mpm_lessons action=propose`.** When the agent distils a lesson, the optional `source_ids` array records each cited node on the proposal, and the promotion credits each cited node with a `success_count` increment via `IncrementSuccess` (INSERT-or-UPDATE). A node that was already retrieved has its `success_count` bumped; a node cited from prior-session memory but not surfaced this turn gets a fresh row with `success_count=1, reuse_count=0`. The "Provenance Proxy" name reflects the design intent: from any successful lesson, the system can trace back to the cognitive nodes that informed it, even when those nodes were never re-read in the session where the lesson was synthesized.
+
+The credit lands at the **promotion**, not at the proposal. `success_count` means "this node helped produce durable knowledge", and a pending proposal is not durable knowledge — so a proposal that is never promoted must not inflate the retrieval signal of the nodes it drew on.
 
 ```json
 {
@@ -2897,7 +2899,7 @@ The `retrieval_metadata` table is a 1:1 mapping with any cognitive node (Memory,
 }
 ```
 
-The handler infers `node_type` from the id prefix (`skill:`, `lesson:` / `les-`, `memory:`, `dec-`, `theory:` / `the-`) and falls back to `memory` for unknown formats. The response includes a `credited_sources` count so the agent can verify the provenance was wired.
+The promotion resolves each cited id's `node_type` against the database (the artifact's own collection, or the lessons table) and falls back to `memory` for an id that names no known artifact. The promotion's response includes a `credited_sources` count so the operator can verify the provenance was wired.
 
 **Diagnose with `explain_retrieval`.** The MCP tool `mpm call explain_retrieval --payload '{"query":"..."}'` runs a standard FTS search and returns a per-node diagnostic markdown block: Base FTS Match score, Reuse Count, Last Retrieved timestamp, Success Count. The retrieval ordering is identical to `mpm_memory action=query` — the `bm25()` rank is preserved. `explain_retrieval` layers observability on top; it does not alter ranking.
 
