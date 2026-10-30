@@ -1338,7 +1338,7 @@ Adding a new tool: write `handleFoo` in `internal/core/tools/handlers.go` (one f
 
 #### Partial results on the error path
 
-A handler may return **both** a structured result and a non-nil error. `mpm_system action=compact` does this on a mid-drain batch failure, returning the full drain result — `batches_processed`, `raw_processed`, `lessons_created`, `raw_remaining`, `actionable_pending`, `semantic_stages_spent`, `rows_deferred`, `stop_reason`, `failed_batch`, `failure_reason` — alongside the error. That result is the only way a caller learns *which* batch failed and *how much* work already committed; earlier batches are durable and must not be re-attempted. The same projection is used on the success path and the failure path, so a field is never missing precisely when a caller most needs it.
+A handler may return **both** a structured result and a non-nil error. `mpm_system action=compact` does this on a mid-drain batch failure, returning the full drain result — `batches_processed`, `raw_processed`, `lessons_created` (always 0 — the drain records pending proposals, not trusted lessons), `proposals_created`, `proposal_ids`, `raw_remaining`, `actionable_pending`, `semantic_stages_spent`, `rows_deferred`, `stop_reason`, `failed_batch`, `failure_reason` — alongside the error. That result is the only way a caller learns *which* batch failed and *how much* work already committed; earlier batches are durable and must not be re-attempted. The same projection is used on the success path and the failure path, so a field is never missing precisely when a caller most needs it.
 
 Both transports preserve it:
 

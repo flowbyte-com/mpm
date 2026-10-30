@@ -218,8 +218,8 @@ func TestDrain_SplitRecoversACoherentHalf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("drain: %v", err)
 	}
-	if res.LessonsCreated != 1 {
-		t.Errorf("LessonsCreated = %d, want 1 — the coherent half should still compact", res.LessonsCreated)
+	if res.ProposalsCreated != 1 {
+		t.Errorf("ProposalsCreated = %d, want 1 — the coherent half should still compact", res.ProposalsCreated)
 	}
 	if res.RawProcessed != 25 {
 		t.Errorf("RawProcessed = %d, want 25", res.RawProcessed)
@@ -543,8 +543,8 @@ func TestProgressInvariant_RefusalDoesNotBlockLaterRows(t *testing.T) {
 	}
 	// The refused batch cost 3 stages; the two after it cost 1 each.
 	// 5 stages total, well inside the budget, so both later batches ran.
-	if res.LessonsCreated < 2 {
-		t.Errorf("LessonsCreated = %d, want >= 2 — later batches must still be reached", res.LessonsCreated)
+	if res.ProposalsCreated < 2 {
+		t.Errorf("ProposalsCreated = %d, want >= 2 — later batches must still be reached", res.ProposalsCreated)
 	}
 	pressure := readPressure(t, dm)
 	if pressure.ActionablePending != 0 {

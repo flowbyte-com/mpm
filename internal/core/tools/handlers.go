@@ -5432,7 +5432,7 @@ func handleCompactEpistemology(dm mpminternal.CoreDB, ac mpminternal.ActiveConte
 	force := parseBoolDefault(p["force"], false)
 	maxBatches := parseIntDefault(p["max_batches"], 0)
 
-	result, err := dm.CompactEpistemologyDrain(context.Background(), force, maxBatches)
+	result, err := dm.CompactEpistemologyDrain(context.Background(), force, maxBatches, ac)
 	if err != nil {
 		// Mid-drain failure — return the partial aggregate AND the
 		// error. Earlier successful batches are durable; the agent
@@ -5460,6 +5460,7 @@ func compactDrainEnvelope(result *mpminternal.CompactEpistemologyDrainResult) ma
 		"batches_processed":     result.BatchesProcessed,
 		"raw_processed":         result.RawProcessed,
 		"lessons_created":       result.LessonsCreated,
+		"proposals_created":     result.ProposalsCreated,
 		"raw_remaining":         result.RawRemaining,
 		"actionable_pending":    result.ActionablePending,
 		"semantic_stages_spent": result.StagesSpent,
@@ -5469,6 +5470,9 @@ func compactDrainEnvelope(result *mpminternal.CompactEpistemologyDrainResult) ma
 	}
 	if result.SkippedReason != "" {
 		out["skipped_reason"] = result.SkippedReason
+	}
+	if len(result.ProposalIDs) > 0 {
+		out["proposal_ids"] = result.ProposalIDs
 	}
 	if len(result.LessonIDs) > 0 {
 		out["lesson_ids"] = result.LessonIDs

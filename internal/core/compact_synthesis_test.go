@@ -478,7 +478,9 @@ func TestCompactEpistemology_ProviderErrorStillErrors(t *testing.T) {
 	}
 }
 
-// The happy path is unchanged: a real lesson still commits and marks.
+// The happy path is unchanged: a derivation still commits and marks.
+// What changed is WHERE it commits: the synthesis is recorded as a
+// PENDING lesson proposal, not as a trusted lesson.
 func TestCompactEpistemology_LessonStillCommits(t *testing.T) {
 	dm := NewTestDM(t)
 	ids := seedRaw(t, dm, 3)
@@ -491,14 +493,23 @@ func TestCompactEpistemology_LessonStillCommits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompactEpistemology: %v", err)
 	}
-	if result.LessonsCreated != 1 {
-		t.Errorf("LessonsCreated = %d, want 1", result.LessonsCreated)
+	if result.ProposalsCreated != 1 {
+		t.Errorf("ProposalsCreated = %d, want 1", result.ProposalsCreated)
+	}
+	if result.LessonsCreated != 0 {
+		t.Errorf("LessonsCreated = %d, want 0 — the compaction writes no trusted lesson", result.LessonsCreated)
 	}
 	if result.Compacted != 3 || result.RawMarked != 3 {
 		t.Errorf("Compacted = %d, RawMarked = %d, want 3 and 3", result.Compacted, result.RawMarked)
 	}
-	if result.LessonID == "" {
-		t.Error("LessonID is empty, want the committed lesson")
+	if result.ProposalID == "" {
+		t.Error("ProposalID is empty, want the pending proposal")
+	}
+	if n := countLessons(t, dm); n != 0 {
+		t.Errorf("%d trusted lesson(s) exist, want 0 — the derivation must await review", n)
+	}
+	if n := countPendingProposals(t, dm); n != 1 {
+		t.Errorf("%d pending proposal(s), want 1", n)
 	}
 	for _, id := range ids {
 		if memoryCompactedInto(t, dm, id) == "" {
@@ -514,6 +525,16 @@ func countLessons(t *testing.T, dm *DatabaseManager) int {
 	var n int
 	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM lessons`).Scan(&n); err != nil {
 		t.Fatalf("count lessons: %v", err)
+	}
+	return n
+}
+
+// countPendingProposals counts the proposals awaiting operator review.
+func countPendingProposals(t *testing.T, dm *DatabaseManager) int {
+	t.Helper()
+	var n int
+	if err := dm.db.QueryRow(`SELECT COUNT(*) FROM lesson_proposals WHERE status = 'pending'`).Scan(&n); err != nil {
+		t.Fatalf("count pending proposals: %v", err)
 	}
 	return n
 }

@@ -448,7 +448,7 @@ by default**.
 
 | # | Item | Severity | Blocks the RC? | Why |
 |---|---|---|---|---|
-| 1 | **D2-core** — the lesson surface has no pending state. `lessons_base` has no status column, so a row there is **trusted on arrival**. | Surface property, not a writer defect | **No** — **after the correction below** | **CORRECTED (2026-10-30).** This row previously read "No critic path and no agent path writes the lesson surface in this release." **That claim was false at `4f81690f`** and is withdrawn. The critic half was true — the critic's hunts emit `mpm_theories propose`, and `lessons_base` = 0 after one run and after three (§6.1, group 3). The **agent** half was false: `mpm_lessons action=save` — reachable over MCP, over `mpm call`, and through the OpenCode plugin, which forwards the action verbatim — wrote a **trusted** lesson from agent-supplied text, and that lesson was immediately in `lessons_fts`, in `mpm lesson search`, and in the wake context's `recent_lessons`. The boundary is now **enforced**: the agent-reachable lesson write is refused at the execution point (no payload field unlocks it), and the agent's replacement — `mpm_lessons action=propose` — records a **pending proposal in its own table**, outside every trusted retrieval path until an operator promotes it. The lesson surface is therefore operator-only **in fact**, not by documentation. |
+| 1 | **D2-core** — the lesson surface has no pending state. `lessons_base` has no status column, so a row there is **trusted on arrival**. | Surface property, not a writer defect | **No** — **after the correction below** | **CORRECTED (2026-10-30).** This row previously read "No critic path and no agent path writes the lesson surface in this release." **That claim was false at `4f81690f`** and is withdrawn. The critic half was true — the critic's hunts emit `mpm_theories propose`, and `lessons_base` = 0 after one run and after three (§6.1, group 3). The **agent** half was false: `mpm_lessons action=save` — reachable over MCP, over `mpm call`, and through the OpenCode plugin, which forwards the action verbatim — wrote a **trusted** lesson from agent-supplied text, and that lesson was immediately in `lessons_fts`, in `mpm lesson search`, and in the wake context's `recent_lessons`. The boundary is now **enforced**: the agent-reachable lesson write is refused at the execution point (no payload field unlocks it), and the agent's replacement — `mpm_lessons action=propose` — records a **pending proposal in its own table**, outside every trusted retrieval path until an operator promotes it. The **MPM tool surface** can no longer create a trusted lesson. **That is an API-level distinction, not a security boundary** — see §8.3: an agent with shell access, running as the same UID, can still reach `mpm lesson add`, `mpm lesson promote` and the SQLite file directly. |
 | 2 | **D3-a** — the legacy untyped citation path accepts an unresolvable id. | Accepted limitation | **No** | The critic uses the **typed** path on every hunt, and the typed path is verified to reject an unresolvable citation **atomically**. Ruling already in hand: step 1 (infer the type from an unambiguous resolution) approved as the next change — it cannot reject anything accepted today; step 2 (`mpm_decisions` gains `source_type`) approved in principle as its own shared-interface PR; step 3 (rejecting legacy ids) deferred behind a deprecation period. |
 | 3 | **F2** — under contention the critic can **silently lose a finding** to `SQLITE_BUSY` (measured 2–4 of 8 concurrent proposals lost; reproduced under `make test-race`). | The most consequential residual | **No** for the RC; **Yes** for lifting the P2b gate | The critic is **gated**: the automatic path is refused at both the producer and the dispatch gate, and the manual path runs one agent at a time. But this is precisely why the P2b gate stays closed. The candidate fix is validated (`BEGIN IMMEDIATE`: 4/8 lost → 0/8) and deserves its own PR **before** the gate is lifted. |
 | 4 | **D4 residual / F1** — the proposal identity treats the tag set as a **sequence**, so `["critic","alpha"]` and `["alpha","critic"]` are two proposals; the `m5contract` D4 test stays red pending a ruling. | Cosmetic | **No** | The production-path defect (a cycle-varying tag splitting every cycle's proposal) is **closed** — that was D4, and it is what makes the per-observation idempotency hold. What remains is a tag-ordering cosmetic. |
@@ -459,16 +459,41 @@ by default**.
 **Nothing on this list is a trust-boundary violation, and none of them can
 create a trusted lesson, a false citation, or a misattributed artifact.**
 
-**One claim in this report was wrong and is withdrawn.** §8 row 1 said "No
-critic path and no agent path writes the lesson surface in this release". The
-critic half was true; the **agent** half was false — `mpm_lessons
-action=save` created trusted lessons from agent-supplied text. It was
-corrected by enforcement, not by documentation: the agent-reachable write is
-now refused, the agent's replacement is a **pending proposal** in its own
-table, and only an operator's promotion creates a lesson. The
-release-candidate claim "the lesson surface is operator-only" is now true in
-fact. See §8.1 for the corrected contract, and §8.2 for what the correction
-does and does not change.
+**Two claims in this report were wrong and are withdrawn.**
+
+*Claim 1 — withdrawn 2026-10-30.* §8 row 1 said "No critic path and no agent
+path writes the lesson surface in this release". The critic half was true; the
+**agent** half was false — `mpm_lessons action=save` created trusted lessons
+from agent-supplied text. It was corrected by enforcement, not by
+documentation: the agent-reachable write is now refused, the agent's
+replacement is a **pending proposal** in its own table, and only an
+operator's promotion creates a lesson.
+
+*Claim 2 — withdrawn 2026-10-30 (later the same day).* §8.1 then said the
+lesson surface "is operator-only **in fact**, not by documentation", and
+listed `mpm lesson add`, `mpm learn` and `mpm lesson promote` as reachable by
+"**No** — the operator's own command". **That is an API-level distinction,
+not a security boundary.** An OpenCode agent has `bash`, `write` and `edit`,
+and it runs as the same Linux user as the substrate's database owner. It can
+therefore invoke the operator CLI, or write the SQLite file directly, and
+both were **measured** to work (§8.3). The corrected statement is narrower
+and true:
+
+> **The MPM *tool surface* cannot create a trusted lesson, and the
+> compaction path can no longer launder agent text into one. A same-UID
+> agent with shell or filesystem access can still create one — the boundary
+> is a discipline gate on the substrate's own interfaces, not privilege
+> separation.**
+
+Claim 2 also had a second, independent error: it said the compaction path
+"still writes a lesson, directly" and was "deliberately not gated". A
+focused negative test (§8.4) showed that the compaction path **could** carry
+an unsupported assertion into a trusted lesson, and it is now **gated** the
+same way the direct write is.
+
+See §8.1 for the corrected contract, §8.2 for what the correction does and
+does not change, §8.3 for the threat model and the same-UID limitation, and
+§8.4 for the compaction path.
 
 ---
 
@@ -486,10 +511,10 @@ does not.
 |---|---|---|---|
 | `mpm_lessons action=save` (MCP, `mpm call`, the OpenCode plugin) | **Was yes. Now NO — refused at the execution point.** | *Before:* a trusted lesson. *Now:* nothing. | — |
 | `mpm_lessons action=propose` (MCP, `mpm call`, the OpenCode plugin) | Yes | A **pending proposal** in `lesson_proposals` | **Untrusted** until an operator promotes it |
-| `mpm lesson add <content>` (terminal) | No — the operator's own command | A trusted lesson | **Operator-authored** |
-| `mpm learn <content>` (terminal) | No — an alias for `mpm lesson add` | A trusted lesson | **Operator-authored** |
-| `mpm lesson promote <id>` (terminal) | No — the operator's decision | A trusted lesson, from a proposal | **Operator-accepted** |
-| `mpm_memory action=compact` | Yes | A lesson **derived** from existing `collection='memories'` rows by the synthesis LLM | A derivation of already-retrievable content — see §8.2 |
+| `mpm lesson add <content>` (terminal) | **Not through the MPM tool surface.** A same-UID agent with shell access can run it (§8.3) | A trusted lesson | **Operator-authored** *if a human ran it* |
+| `mpm learn <content>` (terminal) | **Not through the MPM tool surface.** Same shell reachability (§8.3) | A trusted lesson | **Operator-authored** *if a human ran it* |
+| `mpm lesson promote <id>` (terminal) | **Not through the MPM tool surface.** Same shell reachability (§8.3) | A trusted lesson, from a proposal | **Operator-accepted** *if a human ran it* |
+| `mpm_system action=compact` (the drain — there is **no** operator CLI for it) | Yes | **Was:** a trusted lesson derived by LLM synthesis from `collection='memories'` rows. **Now:** a **pending proposal** in `lesson_proposals` | **Untrusted** until an operator promotes it (§8.4) |
 | The critic's hunts | The automatic path is gated off | `mpm_theories propose` — a **pending theory** | Untrusted until resolved |
 | `mpm-telemetry observe` | Yes, but it writes nothing | A rendered **observation** | Read-only |
 
@@ -503,10 +528,16 @@ does not.
   identically, because a value the caller supplies is not operator intent.
   This is the same fail-closed shape the repo already uses for the
   operator-only shred (`operatorOnlyShredError`).
-* **The operator's path is genuinely separate.** `mpm lesson add` calls the
-  store directly (`LessonStore.AddLesson` → `DatabaseManager.AddLesson`) and
-  never reaches the tool handler. So does `mpm learn`. Neither is reachable
-  from MCP or `mpm call`.
+* **The operator's path is a different API, not a different *identity*.**
+  `mpm lesson add` calls the store directly (`LessonStore.AddLesson` →
+  `DatabaseManager.AddLesson`) and never reaches the tool handler. So does
+  `mpm learn`. Neither is reachable from MCP or `mpm call` — but **neither is
+  unreachable from an agent**: OpenCode gives the model `bash`, `write` and
+  `edit`, the substrate's database is mode 0600 owned by the same UID the
+  agent runs as, and `mpm lesson add`, `mpm lesson promote` and a direct
+  `INSERT INTO lessons` were each **measured to succeed** from an agent's
+  shell (§8.3). What the separation buys is a *different code path with no
+  agent-facing transition*, not a privilege boundary.
 * **A proposal is not a lesson, and the isolation is structural.** The
   proposal lives in its own table (`lesson_proposals`), which **no trusted
   read path queries** — not `lessons_fts`, not `mpm lesson search`, not
@@ -548,19 +579,24 @@ difference between "capture" and "trust", and it is the whole point.
   property of an **operator-only** surface rather than a property of a
   surface an agent can reach. A future change that gives the lesson table
   its own pending state is still available and still optional.
-* **the compaction path.** `mpm_memory action=compact` still writes a
-  lesson, directly, from an LLM synthesis of existing memories. Its trust
-  profile is different from an agent's freetext: the content is a
-  **derivation** of rows that are already inside the agent's retrieval
-  surface (`collection='memories'`), so the synthesis does not introduce
-  content that was not already retrievable. It was deliberately **not**
-  gated by this change, and it is recorded here so the distinction is
-  explicit rather than accidental.
+* **the substrate's shape.** No existing table is altered, no existing row is
+  read, rewritten or moved. The change is still additive: one table and one
+  index.
 * **the critic.** Its hunts already emitted pending theory proposals; this
   change does not touch them.
 * **the live installation.** Nothing was deployed. The binary, the
   configuration, the database and the scheduler are untouched.
 
+**What it now also changes — the compaction path (§8.4).** The compaction
+drain used to write a trusted lesson directly from an LLM synthesis of
+`collection='memories'` rows. It no longer does: it records a **pending
+proposal**, which an operator promotes exactly like any other proposal. The
+drain's envelope gained `proposals_created` and `proposal_ids`;
+`lessons_created` is now always 0. This is a **behaviour change an operator
+will notice**: the compaction reflex no longer produces lessons on its own,
+it produces review items. See §8.4 for the measurement that forced it.
+
+**It does not change:**
 **Compatibility and rollback.** The schema delta is **one empty table and
 one index**. No existing table is altered, no existing row is read, rewritten
 or moved, and an older binary ignores the table entirely. A rollback leaves
@@ -571,6 +607,37 @@ delta reported as exactly `+ lesson_proposals=0` and
 `+ idx:idx_lesson_proposals_status` — no pre-existing table lost, and no
 pre-existing table's row count changed.
 
+**The rollback guarantee was re-measured, not re-asserted.** The earlier
+checkout-to-bundle rehearsal established rollback compatibility at
+`4f81690f`, *before* this schema change, so the claim was tested again
+against the actual PR #189 schema-initialisation path and the **old
+installed binary** (`g3df72315`, dated 24 October), in a disposable
+workspace and database:
+
+* the new table and index were confirmed present with the expected `CHECK`
+  constraint on `status`;
+* the old binary read the new database with an **empty schema diff** (full
+  `sqlite_master` DDL comparison), an **empty artifact-content diff**, and
+  **no row loss** — the only deltas were the old binary's own attribution
+  rows (`retrieval_metadata`, `system_audit_log`, `tool_invocations`);
+* memories, decisions, directives, lessons, topics and handoffs were all
+  readable by the old binary, and `mpm doctor` reported *"Database integrity
+  ok"*;
+* a **pending** proposal was invisible to the old binary's lesson search
+  (`count: 0`) — the isolation holds across the version boundary — and a
+  **promoted** proposal was visible and searchable, as it should be;
+* the **rollback scenario** (new binary creates a pending proposal → the old
+  binary takes over) left the proposal **surviving**, with its status and
+  content intact, no schema change, and only additive deltas. Re-upgrading
+  promoted it correctly, and the old binary then read the promoted lesson.
+
+**One qualification, and it matters.** Rolling back to the pre-fix binary
+**re-opens the agent write hole**: `mpm call mpm_lessons action=save`
+succeeded again and created a trusted lesson. The *schema* rollback is safe —
+data intact, nothing destroyed — but the *trust boundary* does not survive a
+rollback to a binary that predates it. A rollback is therefore a data-safety
+event, not a security event, and the runbook says so.
+
 **The one thing an operator loses.** An operator's script that used
 `mpm call mpm_lessons --payload '{"action":"save",...}'` to write a trusted
 lesson is refused. The refusal names the replacement (`action=propose`) and
@@ -578,6 +645,196 @@ the operator's own command (`mpm lesson add <content>`). This is the same
 trade the operator-only shred already makes, and it is made for the same
 reason: `mpm call` is an agent-reachable interface, so it cannot be the
 operator boundary.
+
+---
+
+## 8.3 The actual operator/agent trust contract
+
+The correction in §8.1 is enforced on the substrate's **interfaces**. It is
+not privilege separation, and this section says exactly what it is and is
+not — because the release notes must not repeat the claim that was
+withdrawn above.
+
+### The four channels, measured
+
+All four were exercised in a disposable workspace on 2026-10-30 against the
+PR #189 binary. The OpenCode host in use is v2.2.2, whose built-in tool set
+includes `bash`, `write`, `edit`, `read`, `grep`, `glob` and `webfetch`;
+its `opencode.jsonc` declares **no `permission` block**, so there is no
+host-level restriction on shell execution. The substrate's live database is
+mode 0600 owned by the same UID (1000) the agent runs as.
+
+| # | Channel | Reachable by the agent? | Measured result |
+|---|---|---|---|
+| 1 | The MPM **tool surface** (`mpm_lessons`, `mpm call`, MCP, the plugin) | Yes | `action=save` → **REFUSED** at the execution point. The refusal is recorded in `tool_invocations` as `result_status='error'`, so the attempt is visible. |
+| 2 | The **shell** → the operator CLI | Yes | `mpm lesson add "…"` → **succeeded** (`cc7121c21ea4c464`). `mpm lesson promote <id>` on the agent's own proposal → **succeeded** (`94870700916c1887`). |
+| 3 | **Direct filesystem / database** access | Yes | `INSERT INTO lessons …` → **succeeded**; the row was immediately retrievable through `mpm_lessons action=search`. |
+| 4 | **Genuine operator authorization** | **No** | There is none. The substrate cannot distinguish an operator from an agent running as the same UID. |
+
+### What PR #189 enforces, and what it does not
+
+**It enforces:**
+
+* the agent's *tool-surface* lesson write is refused, unconditionally, with
+  no payload field that unlocks it;
+* the agent's replacement writes to a **structurally isolated** pending
+  table that no trusted read path queries;
+* the compaction drain can no longer write a trusted lesson (§8.4);
+* the proposal carries its provenance — session, framework, model — and the
+  promotion is a distinct, operator-invoked transition.
+
+**It does not enforce:**
+
+* anything against an agent that reaches the **shell** or the **database**.
+  Such an agent can create a trusted lesson directly, and can promote its
+  own proposal. Nothing in this PR prevents that, and nothing in this PR
+  claims to;
+* anything against an agent that **strips its own attribution**. The
+  provenance environment variable (`MPM_PROVENANCE_FRAMEWORK`) is set by the
+  OpenCode plugin's shell hook, but the agent owns its environment: with the
+  variable removed, a shell-side lesson write produces an
+  `artifact_provenance` row with an **empty** `framework_name` — identical in
+  shape to an operator's own write. Attribution is therefore *best-effort
+  evidence*, never an authorization;
+* an activity feed for shell-side writes. `mpm_context recent_activity` is
+  built on `tool_invocations`, which the CLI path does not write. A
+  shell-side `mpm lesson add` produced **0** activities. The detection
+  surface that does work is the provenance table itself:
+  `SELECT framework_name, COUNT(*) FROM artifact_provenance WHERE artifact_type='lesson' GROUP BY framework_name`.
+
+### The contract, stated exactly
+
+> **The MPM tool surface cannot create a trusted lesson, and the compaction
+> path cannot launder agent text into one. A same-UID agent with shell or
+> filesystem access can still create one.**
+>
+> The boundary is a **discipline gate on the substrate's own interfaces**:
+> it makes the naive path impossible, makes the attempted path *visible*,
+> and routes the agent's output into a review queue. It is not a privilege
+> boundary, and it is not a substitute for one.
+
+### Bounding the residual risk for a controlled dogfood
+
+Isolation at the same UID would require a privilege split (a dedicated
+service account for the substrate, a read-only handle for the agent, or an
+out-of-process broker) — an architectural change, deliberately **not**
+introduced here and reported separately. For a controlled dogfood the
+residual risk can be bounded operationally:
+
+1. **Detection.** `artifact_provenance.framework_name` distinguishes the
+   plugin-mediated writes from unattributed ones. A daily check for
+   lessons with an empty `framework_name`, and for proposals promoted
+   within the same session that created them, surfaces the patterns this
+   PR makes invisible rather than impossible.
+2. **Review.** The proposal inbox (`mpm lesson proposals`) is the operator's
+   surface. An operator who reviews it before promoting sees the agent's
+   direct proposals; the shell-side bypass does not appear there, which is
+   precisely why the detection query above is needed.
+3. **Scope.** The dogfood's substrate lives in a **disposable workspace**
+   (`~/.mpm-dogfood`, per the runbook), so a same-UID write is contained to
+   that workspace and does not reach the production substrate.
+4. **Blast radius.** A wrong lesson is one row in `lessons_base`. It is
+   reviewable, reversible (`mpm lesson delete`), and its provenance names
+   the session that wrote it.
+
+**This is a real limitation and it is not fixed by this PR.** It is stated
+here because a release note that says "the lesson surface is operator-only"
+would be false, and the release notes must be true.
+
+---
+
+## 8.4 The compaction path — a trust crossing, measured and closed
+
+### The claim that was wrong
+
+§8.2 previously said the compaction path "still writes a lesson, directly,
+from an LLM synthesis of existing memories", and that its content "does not
+introduce content that was not already retrievable". **That reasoning does
+not establish trust**, and the path was not safe:
+
+* the **only** way to invoke the drain is `mpm_system action=compact` — the
+  **agent's own tool surface**. There is no operator CLI for it (`mpm
+  compact` offers only `deferred` and `requeue-deferred`), and the seeded
+  directive that drives the reflex says so explicitly: *"The agent owns
+  this reflex."*
+* the drain's **input population** is `collection='memories'` rows
+  (`memoryIsActionable`), and `mpm_memory action=save` writes exactly that
+  collection.
+
+So the derivation was the **agent's**, produced by a model reading the
+agent's own text, and it was written straight into the trusted table with no
+review — a second way around the boundary §8.1 closes. The agent did not
+even have to write a lesson; it only had to write a memory and let the
+synthesis launder it.
+
+### The negative test
+
+`internal/core/compact_trust_crossing_test.go` measures it:
+
+1. an assertion is introduced through the **realistic** lower-trust path —
+   a memory written through the same call the agent's tool surface makes
+   (`SaveMemoryWithContextAndSnapshot`, `collection='memories'`);
+2. the synthesis seam is stubbed deterministically, so the test measures the
+   **trust boundary**, not the model's behaviour. The stub answers with a
+   claim whose wording appears **nowhere** in the source;
+3. the drain runs.
+
+**Before the correction**, the test failed with three findings:
+
+```
+1 trusted lesson row(s) exist after a derivation that asserted an unsupported claim
+the unsupported assertion is reachable through the TRUSTED search path
+the unsupported assertion was not preserved for review — it was dropped, not quarantined
+```
+
+The unsupported assertion had become a **trusted** lesson, reachable through
+`SearchLessons` (the `lessons_fts` path) — with no independent evidence and
+no operator approval.
+
+### The correction
+
+The drain now records its synthesis as a **pending proposal** in
+`lesson_proposals` — the same review queue the agent's direct proposals use,
+and the same isolation (a table no trusted read path queries). The raw
+memories are still marked `metadata.compacted_into = <proposal id>` in the
+**same transaction**, so the pressure gauge behaves exactly as before and
+the drain does not re-offer the same rows. The proposal's `source_ids`
+carries the raw memory ids, so the operator's promotion credits them
+(`success_count`) and the chain *raw memory → proposal → lesson* is
+complete.
+
+The legitimate path is preserved and tested end-to-end: the agent's
+derivation lands in the review queue, `mpm lesson promote <id>` makes it a
+trusted, retrievable lesson, and the synthesis content is byte-identical to
+what the pre-correction compaction wrote.
+
+The envelope gained `proposals_created` and `proposal_ids`; `lessons_created`
+is now always 0, and the tool description, the seeded directive and the
+runbook were updated to match.
+
+### The mutation control
+
+The verification is not vacuous. Restoring the pre-correction commit path
+(the direct `INSERT INTO lessons`, with the read-back assertion removed)
+makes the negative test fail with exactly the three findings above, and
+makes the shape test fail because no proposal exists to cite. The other
+tests in the file still pass under that mutation — which is what shows the
+failing test is detecting the **trust crossing** and not merely noticing
+that something changed.
+
+### A latent defect the work exposed
+
+The raw-marking `UPDATE` used `json_insert(COALESCE(metadata, '{}'), …)`.
+SQLite's JSON functions treat the JSON literal `null` as a **value**, not an
+object, so `json_insert('null', '$.k', v)` returns `'null'` **unchanged** —
+a silent no-op. A memory row whose `metadata` column holds the literal
+`null` (what `json.Marshal` writes for a nil map) was therefore **never
+marked as folded**: it stayed in the compaction population and was folded
+again on every drain. The marking is now **total** — every metadata shape is
+normalised — and the four shapes are pinned by
+`TestCompactTrustCrossing_TheFoldIsRecordedForEveryMetadataShape`.
+
+---
 
 ## 9. The recommendation
 
@@ -591,15 +848,25 @@ operator boundary.
    default because it changes nothing about what an installation writes.)
 
 **The second condition has been discharged by enforcement, not by
-documentation.** It used to read: *"the release notes must state that the
-lesson surface is operator-only until a pending state exists (D2-core)"*,
-because at `4f81690f` the agent path could write a trusted lesson and no
-pending state existed. The agent-reachable write is now **refused**, and the
-agent's replacement is a **pending proposal** in its own table, so the
-release note is no longer the thing standing between an agent and trusted
-knowledge — the code is. The lesson surface **is** operator-only now, and
-the residual question ("should the lesson table carry its own pending
-state?") is a design question for a later change, not a release condition.
+documentation — with the scope stated correctly.** It used to read: *"the
+release notes must state that the lesson surface is operator-only until a
+pending state exists (D2-core)"*, because at `4f81690f` the agent path could
+write a trusted lesson and no pending state existed. The agent-reachable
+write is now **refused**, the agent's replacement is a **pending proposal**
+in its own table, and the compaction path no longer launders agent text into
+a lesson (§8.4), so the release note is no longer the thing standing
+between an agent and trusted knowledge — the code is.
+
+**What the release note must now say, exactly** (§8.3):
+
+> The MPM **tool surface** cannot create a trusted lesson, and the
+> compaction path cannot launder agent text into one. A **same-UID agent
+> with shell or filesystem access** can still create one. The boundary is a
+> discipline gate on the substrate's interfaces, not privilege separation.
+
+That is a **release-note line**, not a code change, and it is the honest
+form of the claim. The residual design question ("should the lesson table
+carry its own pending state?") remains a question for a later change.
 
 The legacy untyped citation path remains a documented limitation (D3-a) —
 unchanged, and unrelated to the lesson boundary.
@@ -611,10 +878,13 @@ surprise:
 * the lifecycle transport's default is an open **product** decision that
   changes what a default installation writes;
 * ~~the lesson surface still publishes trusted knowledge directly~~ —
-  **this no longer holds.** The agent-reachable lesson write is refused, and
-  the agent's replacement is a pending proposal that no trusted retrieval
-  path reads. The lesson surface publishes trusted knowledge only on an
-  operator's action.
+  **this no longer holds for the tool surface.** The agent-reachable lesson
+  write is refused, the agent's replacement is a pending proposal that no
+  trusted retrieval path reads, and the compaction path now writes a
+  proposal too. What remains is the **same-UID limitation** in §8.3, which
+  is a property of the deployment (one UID holds both the agent and the
+  substrate) and not of this code — it needs privilege separation to close,
+  and that is reported separately rather than smuggled into this PR.
 
 The first is a defect-free product decision that a release note must carry.
 The second was a trust-boundary gap, and it has been closed in the code

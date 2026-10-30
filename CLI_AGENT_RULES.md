@@ -1047,6 +1047,14 @@ Therefore:
 - **Creating a trusted lesson is an OPERATOR action.** `mpm lesson add`
   (and its alias `mpm learn`) from a terminal. Nothing on the agent tool
   surface (MCP, `mpm call`, the OpenCode plugin) may create one.
+- **The boundary is an API boundary, not a privilege boundary.** The
+  terminal commands are *not* reachable through MPM's tool surface, but an
+  agent that has shell or filesystem access, running as the same UID as the
+  substrate's database, can invoke them or write the database directly.
+  This rule governs MPM's own interfaces; it does not claim to separate an
+  operator from an agent with the same OS-level access. Do not describe the
+  lesson surface as "unreachable by an agent" — describe it as
+  "unreachable through the MPM tool surface".
 - **The agent-reachable lesson write MUST be refused at the execution
   point**, not merely absent from a tool description. The refusal MUST be
   unconditional: **no payload field unlocks it** — `operator=true`,
@@ -1066,6 +1074,12 @@ Therefore:
   model — and a promotion MUST record when it was reviewed and which
   lesson it became. The chain *proposal → operator decision → lesson* is
   the provenance record.
+- **The COMPACTION path MUST NOT write a trusted lesson either.** The drain
+  synthesizes from `collection='memories'` rows, which the agent can write,
+  and it is invoked only through the agent's own tool surface
+  (`mpm_system action=compact`). Its synthesis is therefore recorded as a
+  **pending proposal** — the same review queue — and an operator promotes
+  it. A synthesis that never reaches the trusted table without review.
 
 The reasoning: an agent that can write trusted knowledge can convert
 speculation into the substrate's knowledge with no review step. MPM must

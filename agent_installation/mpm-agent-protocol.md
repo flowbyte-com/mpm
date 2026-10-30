@@ -204,6 +204,15 @@ operator decides whether it becomes knowledge. A proposal that is
 never promoted is not a loss — the record is kept, and it can be
 reviewed later.
 
+**The compaction drain follows the same rule.** `mpm_system action=compact`
+synthesizes a lesson from raw memories — and those memories are the
+agent's own writing. The drain therefore records a **pending proposal**,
+not a trusted lesson; `lessons_created` in its envelope is always 0 and
+`proposals_created`/`proposal_ids` carry the result. An operator promotes
+a derived lesson exactly like any other proposal. The agent should expect
+its compaction output to need review, and should not present a proposal as
+established knowledge.
+
 If the agent needs a fact to be *available now* rather than *trusted*,
 write a **memory** (`mpm_memory` action `save`), which carries its own
 confidence and review lifecycle.

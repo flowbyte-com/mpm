@@ -151,8 +151,8 @@ type CoreDB interface {
 	PromoteMemory(memoryID string) (map[string]interface{}, error)
 	PatchMemoryMetadata(memoryID string, patchJSON string) (map[string]interface{}, error)
 	SynthesizeMemoryFor(ctx context.Context, memoryID string) (map[string]interface{}, error)
-	CompactEpistemology(ctx context.Context, force bool) (*CompactEpistemologyResult, error)
-	CompactEpistemologyDrain(ctx context.Context, force bool, maxBatches int) (*CompactEpistemologyDrainResult, error)
+	CompactEpistemology(ctx context.Context, force bool, ac ...ActiveContext) (*CompactEpistemologyResult, error)
+	CompactEpistemologyDrain(ctx context.Context, force bool, maxBatches int, ac ...ActiveContext) (*CompactEpistemologyDrainResult, error)
 
 	// RequeueDeferred and ListDeferred are the operator half of the
 	// deferral lifecycle (compact-refusal design §3.3 R1–R5). They
