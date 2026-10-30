@@ -338,6 +338,39 @@ $ python3 -m pytest scripts/tests/test_install_bundle_paths.py -q
 4 failed, 1 passed
 ```
 
+### 6.1 The real CLI, end to end
+
+The shipped `install.sh`, driven with a disposable `HOME`:
+
+```
+$ HOME="$H" ./install.sh --bundle --prefix "$H/prefix" --data-root "$H/data" --check
+[mpm-install] ===== PREFLIGHT =====
+[mpm-install] prefix:       $H/prefix
+[mpm-install] data root:    $H/data
+[mpm-install] ERROR: the versioned bundle layout requires the install prefix and the data root to be the SAME directory
+[mpm-install] ERROR: the stable paths are written as the relative target 'current/<name>', which resolves inside the
+[mpm-install] install prefix — but the active pointer lives at <data root>/current. With two different
+[mpm-install] directories the stable paths would dangle while the conversion reported success.
+[mpm-install] ERROR:   install prefix: $H/prefix
+[mpm-install] ERROR:   data root:      $H/data
+[mpm-install] ERROR: install with --prefix and --data-root naming the same directory, or install without --bundle
+[mpm-install] ERROR: the versioned bundle layout requires --prefix and --data-root to name the SAME directory.
+Nothing was changed.
+exit=1
+
+$ find "$H"
+$H                       ← nothing was created: no prefix, no data root
+```
+
+And the canonical layout still passes the same gate:
+
+```
+$ HOME="$H" ./install.sh --bundle --check
+[mpm-install] preflight ok
+[mpm-install] check complete (no changes made)
+exit=0
+```
+
 ---
 
 ## 7. Gates
@@ -347,13 +380,13 @@ $ python3 -m pytest scripts/tests/test_install_bundle_paths.py -q
 | `make test-scripts` | **PASS** — see §7.1 |
 | `mpm-lint --gate` | **PASS** (exit 0) — mutex, SQL, fd and import thresholds all within their bounds |
 | `make docs-check` | **PASS** — 13 checks, 0 review items, 0 errors |
-| `shellcheck -S warning` on the two changed shell files | no new findings (the 6 reported are pre-existing, and none are in the changed regions) |
+| `shellcheck -S warning` on the two changed shell files | the same 5 findings appear before and after the change — none of them in the changed regions |
 | `bash -n` on both changed shell files | clean |
 | `make test-race` / `make test` | **not run** — no Go file was touched |
 
 ### 7.1 `make test-scripts`
 
-709 tests collected (floor 50), `OK (skipped=32)`. The floor is deliberately
+709 tests collected (floor 50), `OK (skipped=1)`. The floor is deliberately
 low so ordinary test removal does not trip it.
 
 `scripts/tests/test_runtime_bundle.py` grew from 24 tests to 46, and the new
