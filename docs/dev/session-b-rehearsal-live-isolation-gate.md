@@ -403,11 +403,17 @@ The gate's own suite, on its own: **28 passed**.
 | 2 | **PASS** — 135 assertions, 0 failures | `+1` (obligations), then `+1` (negative) |
 | 3 | **PASS** — 135 assertions, 0 failures | `+2` (obligations), then `+1` (negative) |
 | 4 | **PASS** — 135 assertions, 0 failures | `+1` (obligations), then `+1` (negative) |
+| 5 | **PASS** — 135 assertions, 0 failures | after the fail-closed and same-instrument additions |
+| 6 | **PASS** — 135 assertions, 0 failures | after the unreadable-table fix |
+| 7 | **PASS** — 135 assertions, 0 failures | no operational movement in the window |
+| 8 | **PASS** — 135 assertions, 0 failures | no operational movement in the window |
+| 9 | **PASS** — 135 assertions, 0 failures | no operational movement in the window |
 
-**Four consecutive green rehearsals**, with the production scheduler
-**active** throughout and nothing else touching production.
+**Nine consecutive green rehearsals**, with the production scheduler
+**active** throughout and nothing else touching production. Runs 1–4
+were against the first cut of the gate; runs 5–9 against the final one.
 
-The live database's size across the three repeats:
+The live database's size across the three repeats of the first batch:
 
 ```
   before: 22695936 bytes
@@ -418,6 +424,17 @@ That growth is the exact condition under which the old assertion failed.
 Every run passed, and every run's gate report showed the movement as
 **evidence** — `tool_invocations: rows 23003 -> 23004 (+1)` — with the
 protected artifacts unchanged and the domain state unchanged.
+
+Runs 7–9 show the other half of the behaviour: the scheduler did **not**
+write inside those windows, so there was **no operational movement**,
+and the gate still passed with the protected artifacts and the domain
+state unchanged. The gate does not depend on the scheduler being busy
+to be meaningful, and it does not fail when the scheduler is quiet.
+
+**The live installation was not modified by any of the nine runs.** The
+binary is still dated 24 October, `mpm-scheduler` is still `active` with
+`MainPID=3017` and `NRestarts=0`, and the live database was only ever
+opened read-only, through `file:…?mode=ro`.
 
 ---
 
