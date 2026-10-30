@@ -108,6 +108,40 @@ rb_releases_dir() { printf '%s\n' "$1/releases"; }
 rb_current_link() { printf '%s\n' "$1/current"; }
 rb_staging_dir()  { printf '%s\n' "$1/staging"; }
 
+# ---------- canonical paths ----------
+#
+# rb_canon_path <path>
+#
+# The canonical absolute form of <path>: the components that exist are
+# resolved (so a symlinked home directory compares equal to its
+# target), the rest is normalised lexically, and the path is NOT
+# required to exist.
+#
+# It exists to make one question decidable: "are these two paths the
+# same directory?". Two paths are the same directory if and only if
+# their canonical forms are equal.
+rb_canon_path() {
+    local p="$1" out=""
+    [ -n "$p" ] || return 1
+    if command -v realpath >/dev/null 2>&1; then
+        if out="$(realpath -m -- "$p" 2>/dev/null)" && [ -n "$out" ]; then
+            printf '%s\n' "$out"
+            return 0
+        fi
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        if out="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null)" \
+           && [ -n "$out" ]; then
+            printf '%s\n' "$out"
+            return 0
+        fi
+    fi
+    # Neither resolver is available: compare the paths lexically. This
+    # is weaker (it does not resolve symlinks) but it never invents a
+    # difference that is not there.
+    printf '%s\n' "$p"
+}
+
 # ---------- atomic rename over an existing path ----------
 #
 # rename(2) replaces the destination atomically. `mv -T` is the shell
@@ -512,6 +546,101 @@ rb_restore_pointer() {
 # <data root>/.legacy-layout-paths so the rollback procedure can find
 # them without guessing.
 
+# THE LAYOUT HAS ONE ROOT.
+#
+# The stable paths are written with the RELATIVE target "current/<name>",
+# so they resolve against the directory that holds them — the install
+# prefix. The active pointer lives at <data root>/current. The two only
+# agree when the prefix and the data root are the SAME directory.
+#
+# With two different directories the conversion creates a
+# "current/<name>" symlink that resolves against a `current` that does
+# not exist: a DANGLING symlink that names no binary and no host asset,
+# while the conversion reports success. The pointer swap has already
+# happened by then, so the installation is left pointing at a revision
+# whose stable paths resolve to nothing.
+#
+# This is a REFUSAL, not a repair. Supporting two roots would need a
+# second pointer — one per root — and two pointers are two sources of
+# truth for which revision is active. The documented layout (docs/
+# INSTALL.md §1g), the rehearsal's model (scripts/rehearsal/mpm-upgrade)
+# and the migration plan (§4.3) all describe ONE root, and the
+# conversion's own relative target is written for exactly that.
+
+# rb_layout_paths_compatible <data_root> <prefix>
+#
+# 0 when the two name the same directory; non-zero, with the reason on
+# stderr, when they do not.
+rb_layout_paths_compatible() {
+    local data_root="$1" prefix="$2"
+    local canon_data canon_prefix
+
+    if [ -z "$data_root" ] || [ -z "$prefix" ]; then
+        rb_err "the versioned bundle layout needs both an install prefix and a data root"
+        rb_err "  install prefix: ${prefix:-<empty>}"
+        rb_err "  data root:      ${data_root:-<empty>}"
+        return 1
+    fi
+
+    canon_data="$(rb_canon_path "$data_root")" || return 1
+    canon_prefix="$(rb_canon_path "$prefix")" || return 1
+
+    if [ "$canon_data" != "$canon_prefix" ]; then
+        rb_err "the versioned bundle layout requires the install prefix and the data root to be the SAME directory"
+        rb_err "the stable paths are written as the relative target 'current/<name>', which resolves inside the"
+        rb_err "install prefix — but the active pointer lives at <data root>/current. With two different"
+        rb_err "directories the stable paths would dangle while the conversion reported success."
+        rb_err "  install prefix: $canon_prefix"
+        rb_err "  data root:      $canon_data"
+        rb_err "install with --prefix and --data-root naming the same directory, or install without --bundle"
+        return 1
+    fi
+    return 0
+}
+
+# rb_legacy_path_name <path> <prefix>
+#
+# The name of the preserved directory <path>, or a non-zero return when
+# <path> is not one. A preserved directory is
+#
+#     <prefix>/.<name>.legacy.<pid>
+#
+# where <name> is one of the convertible names.
+#
+# The check is what stops a malformed rollback record from naming an
+# arbitrary path: acting on such an entry would MOVE that path into
+# the install prefix, which is how a corrupted record becomes a
+# destructive one.
+#
+# The result is in RB_LEGACY_NAME.
+rb_legacy_path_name() {
+    local path="$1" prefix="$2"
+    local base dir suffix canon_prefix canon_dir
+    RB_LEGACY_NAME=""
+
+    base="${path##*/}"
+    dir="${path%/*}"
+    [ "$dir" != "$path" ] || dir="."
+
+    case "$base" in
+        .bin.legacy.*|.agent_installation.legacy.*) ;;
+        *) return 1 ;;
+    esac
+    suffix="${base##*.legacy.}"
+    case "$suffix" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    canon_prefix="$(rb_canon_path "$prefix")" || return 1
+    canon_dir="$(rb_canon_path "$dir")" || return 1
+    [ "$canon_dir" = "$canon_prefix" ] || return 1
+
+    RB_LEGACY_NAME="${base#.}"
+    RB_LEGACY_NAME="${RB_LEGACY_NAME%.legacy.*}"
+    [ -n "$RB_LEGACY_NAME" ] || return 1
+    return 0
+}
+
 # rb_convert_layout <data_root> <prefix> <current_target>
 #
 # The third argument is the value `current` holds, so the symlinks are
@@ -520,6 +649,11 @@ rb_convert_layout() {
     local data_root="$1" prefix="$2" target="${3:-}"
     local name p legacy rc=0
     [ -n "$target" ] || { rb_err "no active pointer target — refusing to convert the layout"; return 1; }
+
+    # REFUSE BEFORE ANY FILESYSTEM MUTATION. A conversion that cannot
+    # produce a resolvable stable path must not leave a dangling
+    # symlink behind and call it success.
+    rb_layout_paths_compatible "$data_root" "$prefix" || return 1
 
     for name in bin agent_installation; do
         p="$prefix/$name"
@@ -570,37 +704,156 @@ rb_convert_layout() {
 # path that was already a symlink before the conversion keeps being one
 # — and because the pointer is restored to the previous revision, it
 # resolves into the previous release, which is correct.
+#
+# FAIL CLOSED. The rollback record is the only statement of what was
+# moved aside, so it is read as a statement that can be FALSE:
+#
+#   * A TRUNCATED record — one whose last line has no trailing
+#     newline — must not be read as a shorter list. The dropped entry
+#     is the operator's directory, and a shorter list restores less
+#     while reporting a successful recovery.
+#   * A MALFORMED entry — one that does not name a preserved
+#     directory inside the install prefix — must not be acted on at
+#     all. Acting on it would move an arbitrary path into the install
+#     prefix.
+#   * A MISSING or empty record must not hide conversion material that
+#     is still sitting in the prefix: the conversion can be
+#     interrupted between moving a directory aside and recording it.
+#   * A FAILED revert must not consume the record. The record is the
+#     operator's evidence of what is still unrestored, and the
+#     installer points at it when the rollback does not complete.
+#
+# The function therefore returns 0 only when it can PROVE the layout is
+# back to its pre-conversion shape: every recorded directory is
+# restored, and no preserved directory is left in the prefix.
 rb_revert_layout() {
     local data_root="$1" prefix="$2"
     local record="$data_root/.legacy-layout-paths"
     local legacy name rc=0
-    [ -f "$record" ] || return 0
+    local pending="" pending_tmp
+    RB_LEGACY_NAME=""
 
-    while IFS= read -r legacy; do
-        [ -n "$legacy" ] || continue
-        if [ ! -e "$legacy" ]; then
-            rb_err "the preserved directory $legacy is missing — it cannot be restored"
-            rc=1
-            continue
-        fi
-        name="$(basename "$legacy" | sed 's/^\.//; s/\.legacy\.[0-9]*$//')"
-        if [ -L "$prefix/$name" ]; then
-            if ! rm -f "$prefix/$name"; then
-                rb_err "could not remove the $name symlink at $prefix/$name"
+    if [ -z "$data_root" ] || [ -z "$prefix" ]; then
+        rb_err "the layout rollback needs both an install prefix and a data root"
+        rb_err "  install prefix: ${prefix:-<empty>}"
+        rb_err "  data root:      ${data_root:-<empty>}"
+        return 1
+    fi
+
+    # ---- 1. the recorded entries ----
+    #
+    # `|| [ -n "$legacy" ]` is LOAD-BEARING. `read` alone returns
+    # non-zero at EOF even when it has read a final line that has no
+    # trailing newline, and `while read` drops that line — so a
+    # truncated record would be read as a shorter list, and the
+    # operator's directory would be silently left unrestored while
+    # the rollback reported success.
+    if [ -f "$record" ]; then
+        while IFS= read -r legacy || [ -n "$legacy" ]; do
+            [ -n "$legacy" ] || continue
+
+            # An entry must name a preserved directory INSIDE the
+            # install prefix. A malformed entry is reported and NOT
+            # acted on: moving it would move an arbitrary path.
+            if ! rb_legacy_path_name "$legacy" "$prefix"; then
+                rb_err "the rollback record $record names '$legacy', which is not a preserved directory"
+                rb_err "inside the install prefix — the record is malformed and the entry was NOT acted on"
                 rc=1
+                pending="$pending$legacy
+"
                 continue
             fi
-        fi
-        if mv "$legacy" "$prefix/$name"; then
-            rb_log "  $name restored to its pre-upgrade directory"
-        else
-            rb_err "could not restore $name from $legacy"
-            rc=1
-        fi
-    done < "$record"
+            name="$RB_LEGACY_NAME"
 
-    # The record itself is consumed: a second revert must not try to
-    # restore the same directories again.
-    : > "$record"
+            if [ ! -e "$legacy" ] && [ ! -L "$legacy" ]; then
+                rb_err "the preserved directory $legacy is missing — it cannot be restored"
+                rc=1
+                pending="$pending$legacy
+"
+                continue
+            fi
+
+            if [ -L "$prefix/$name" ]; then
+                if ! rm -f "$prefix/$name"; then
+                    rb_err "could not remove the $name symlink at $prefix/$name"
+                    rc=1
+                    pending="$pending$legacy
+"
+                    continue
+                fi
+            elif [ -e "$prefix/$name" ]; then
+                # Something real is sitting where the conversion put
+                # its symlink. It is not ours to overwrite.
+                rb_err "$prefix/$name is a real directory, not the symlink the conversion created —"
+                rb_err "the preserved $legacy was NOT moved over it. Restore it by hand."
+                rc=1
+                pending="$pending$legacy
+"
+                continue
+            fi
+
+            # `mv -T` is LOAD-BEARING here too. Without it, `mv src dst`
+            # where dst is an existing directory moves src INTO dst
+            # instead of restoring it, so the operator's directory ends
+            # up nested one level deeper and the rollback is reported
+            # as a success.
+            if ! mv -T "$legacy" "$prefix/$name" 2>/dev/null; then
+                if ! rb_rename_over "$legacy" "$prefix/$name"; then
+                    rb_err "could not restore $name from $legacy"
+                    rc=1
+                    pending="$pending$legacy
+"
+                    continue
+                fi
+            fi
+            rb_log "  $name restored to its pre-upgrade directory"
+        done < "$record"
+    fi
+
+    # ---- 2. the material the record did not name ----
+    #
+    # A missing or empty record cannot be taken as proof that nothing
+    # was moved aside: the conversion can be interrupted between
+    # moving a directory aside and recording it. The PREFIX is the
+    # authority on what is still unrestored, so it is checked
+    # directly. A preserved directory that is still there means the
+    # conversion is not fully undone, whatever the record says.
+    for name in bin agent_installation; do
+        for legacy in "$prefix/.${name}.legacy."*; do
+            [ -e "$legacy" ] || [ -L "$legacy" ] || continue
+            rb_err "the preserved directory $legacy is still in the install prefix — the layout conversion"
+            rb_err "is NOT fully undone. It is not named by the rollback record $record, or its restoration failed."
+            rb_err "  restore it by hand:  rm -f $prefix/$name && mv -T $legacy $prefix/$name"
+            rc=1
+            pending="$pending$legacy
+"
+        done
+    done
+
+    # ---- 3. the record ----
+    #
+    # The record is consumed ONLY when the revert fully succeeded: a
+    # second revert must not try to restore the same directories again.
+    # A FAILED revert leaves the operator their evidence — the record
+    # is rewritten to name exactly what is still pending, atomically,
+    # because it is a file another process may read.
+    if [ "$rc" -eq 0 ]; then
+        # The record is consumed ONLY when there is one. A rollback on a
+        # data root that was never converted must not leave behind a
+        # file that says nothing.
+        if [ -f "$record" ]; then
+            : > "$record"
+        fi
+    elif [ -n "$pending" ] || [ -f "$record" ]; then
+        pending_tmp="$record.pending.$$"
+        if printf '%s' "$pending" > "$pending_tmp" 2>/dev/null &&
+           rb_rename_over "$pending_tmp" "$record" 2>/dev/null; then
+            :
+        else
+            rm -f "$pending_tmp" 2>/dev/null || true
+            rb_err "the rollback record $record could not be rewritten; the pending entries are:"
+            printf '%s' "$pending" >&2
+        fi
+    fi
     return "$rc"
 }
