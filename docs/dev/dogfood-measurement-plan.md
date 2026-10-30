@@ -93,6 +93,8 @@ conflates them will draw false conclusions.
 | agent-facing `mpm_lessons action=save` | permitted | **refused — operator-only** |
 | compaction writes | a trusted lesson | a **pending proposal** |
 | confidence-decay handler | **not registered at all** | registered, **default OFF** |
+| credential reference (`"$NAME"`) | sent to the provider **verbatim** | resolved **as a reference** |
+| request-timeout default | profile said `3` (below the provider's median) | profile says **300** |
 | managed-instruction protocol | 4.x | **5.0.0** |
 
 **How the installed revision was verified** (not assumed from the checkout):
@@ -132,9 +134,9 @@ recorded and carried into the week.
 | B2 | The scheduler is alive | pid 3890452 (started 2026-10-30 16:32:42), `--interval 60s`, `last_status` `ok`, exe verified as the released `3d63244e` binary. The `tick_count` series starts from a low number because the service was restarted by the runtime upgrade (§12.3) | ✅ pass |
 | B3 | The substrate is the one the agent uses | the OpenCode plugin's `resolveWorkspace()` falls back to `$HOME/.mpm`; the running OpenCode processes have **no** `MPM_WORKSPACE`, so the live install **is** the substrate | ✅ pass (with the consequence in B4) |
 | B4 | The workspace choice is deliberate | **decided: the live `~/.mpm` database**, after Session A's controlled runtime upgrade. Chosen deliberately so the week observes real cross-session recall, real scheduler behaviour, real persistence and real SQLite contention, including issue #178. `~/.mpm-dogfood` exists but is **not** used | ✅ pass (operator decision, recorded) |
-| B5 | The credential is visible to the runtime process | `MINIMAX_API_KEY` is defined in `~/.config/mpm/mpm.env`, which the scheduler unit reads via `EnvironmentFile=-%h/.config/mpm/mpm.env`. It is in **no** shell profile (`~/.bashrc`, `~/.profile`: 0 hits) and **not** in the systemd user environment | ⛔ **partial — §10, action 2** |
-| B6 | The deployed credential is not a placeholder | the deployed `ResolveAPIKey` returns the configured value **verbatim**, so `"api_key": "$MINIMAX_API_KEY"` is sent to the provider as a literal bearer token | ⛔ **§10, action 3** |
-| B7 | The request timeout can carry a real generation | the live profile has `"timeout_seconds": 3`, and the provider's own median latency is 560–1007 ms with a tail to 4761 ms | ⛔ **§10, action 4** |
+| B5 | The credential is visible to the runtime process | `MINIMAX_API_KEY` is defined in `~/.config/mpm/mpm.env` (142 bytes, mode 600, one variable), which the scheduler unit reads via `EnvironmentFile=-%h/.config/mpm/mpm.env`. The running scheduler **has** it (125 chars). It is in **no** shell profile, **not** in the systemd user environment, and **not** in the environment of the running OpenCode processes | ⛔ **still partial — §10, action 2**. The profile is now *correct* (§B6); what is missing is the **variable in the agent's environment** |
+| B6 | The deployed credential is not a placeholder | **resolved by the upgrade.** The profile still carries `"api_key": "$MINIMAX_API_KEY"`, but the upgraded runtime resolves a reference-shaped value **as a reference** — `internal/core/synth/credential_reference.go`: *"`$NAME` and `${NAME}` are recognised as references to `NAME` … the literal placeholder is never sent to a provider."* | ✅ pass (the original defect was the **old** runtime's; see §1.1.2) |
+| B7 | The request timeout can carry a real generation | the live profile now reads `"timeout_seconds": 300` (it was **3** on the old runtime; Session A's upgrade set it at 2026-10-30 16:33:07, alongside the upstream change that made the timeout an advanced setting rather than an onboarding question) | ✅ pass |
 | B8 | Confidence decay is off | **verified per revision — see the note below** | ✅ pass (no action required) |
 | B9 | The autonomous critic is gated off | `mpm-critic` is installed and the scheduler registers a `critic_audit` wake kind, but `scheduled_wakes` holds 8 rows — all `fired=1`, all `cascade tick summary` or `cron:epistemic-compaction`. **No `critic_audit` wake exists**, so the critic does not run | ✅ pass (keep it that way — §10, action 6) |
 
@@ -187,6 +189,68 @@ restart (pid 3890452, started 16:32:42).
 | A8 | Same-UID separation is not a security boundary | every workspace in this topology is under `$HOME` and runs as the same UID | documented in §10, action 7 |
 | A9 | The `internal` outcome class is over-used | on the old runtime, 36 `internal` rows in 7 days, of which **26 were misclassified payload-shape errors** ("commitments must be an array of strings…", "tags must be an array of strings…") | `internal` does **not** mean "the substrate failed a well-formed request". Read it with the §7.3 breakdown, never as a fault rate |
 | A10 | The upgraded runtime refuses agent-facing lesson writes | `mpm_lessons action=save` is now refused at the execution point; the refusal is classified `internal\|unclassified` | **A policy refusal misclassified as a system fault.** It is a correct refusal that wrote nothing, but it will pollute the `internal` class for the whole week (§7.3) |
+
+### 1.1.2 B6 — the credential reference, resolved by the upgrade
+
+The original plan's B6 said the deployed `ResolveAPIKey` returns the
+configured value **verbatim**, so `"api_key": "$MINIMAX_API_KEY"` is
+presented to the provider as a literal bearer token while the real key
+sits unused in the environment.
+
+**That was true of the old runtime `3df72315`, and the upgrade fixed it.**
+Commit `39be194a` — *"fix(config): a credential reference is a reference"*
+— is in the upgrade's history and introduced
+`internal/core/synth/credential_reference.go`, whose own header states the
+defect it closes:
+
+> *An operator who wrote `"api_key": "$MINIMAX_API_KEY"` therefore had the
+> LITERAL STRING "$MINIMAX_API_KEY" presented to the provider as a bearer
+> token — while their real `MINIMAX_API_KEY` sat in the environment,
+> correctly configured, and was never consulted. … It was SHADOWED by a
+> placeholder that looked like a reference and was treated as a secret.*
+
+The rule it installs, in the upgraded `ResolveAPIKey`:
+
+| configured value | behaviour |
+|---|---|
+| `"$NAME"` / `"${NAME}"`, and `NAME` is a credential variable **the endpoint declares**, and it is **set** | resolved as a reference; the environment's value is used |
+| `"$NAME"`, `NAME` is declared but **not set** | reported as exactly that — a reference to a variable that is not set |
+| `"$NAME"`, `NAME` is **not declared** | **refused**; the literal placeholder is never sent to a provider |
+| anything not reference-shaped | still a literal secret, used verbatim |
+
+The expansion is deliberately **closed over the substrate's own table**, so
+a configuration file cannot name an arbitrary environment variable and have
+its value shipped to a provider. Nothing about a working install changes.
+
+**So B6 is closed on the deployed runtime.** The live profile still reads
+`"api_key": "$MINIMAX_API_KEY"` — and that is now the *correct* way to
+write it. **The old action 3 (unset the profile's `api_key`) is withdrawn**:
+it would have removed a working configuration.
+
+**What remains is B5, and it is narrower than it was:** the profile is
+right, the resolution is right, and the only thing missing is the
+**variable being present in the agent's environment**. The scheduler has it
+(the unit's `EnvironmentFile`); the running OpenCode processes do not, and
+neither does the systemd user environment.
+
+### 1.1.3 B7 — the timeout, already applied
+
+The live profile read `"timeout_seconds": 3` on the old runtime, below the
+provider's own median latency. **It reads `300` now.** The file
+`~/.mpm/mpm_config.json` was last written at **2026-10-30 16:33:07** — inside
+Session A's upgrade window — alongside the upstream change that made the
+timeout an advanced setting with a 300 s default rather than an onboarding
+question. **The old action 4 is already done**, and the operator should
+confirm rather than re-apply it.
+
+Both of these are the same lesson as the decay withdrawal in §1.1.1, and it
+is the single most important methodological point in this revision:
+
+> **A blocking condition must be re-verified against the deployed runtime
+> before it is reported as blocking, and before any production-changing
+> command is attached to it.** Three of this plan's original conditions
+> (B6, B7, B8) were resolved by the upgrade, and the remedy for each would
+> have been an unnecessary change to the live installation.
 
 ### 1.3 The day-zero command
 
@@ -1562,19 +1626,26 @@ is left alone.
 | installed revision | `3d63244e` | — |
 | `lesson_proposals` | present | — |
 
-### Action 2 — make the credential visible to the runtime process
+### Action 2 — make the credential visible to the runtime process *(still outstanding; now narrow)*
 
-**Today:** `~/.config/mpm/mpm.env` defines `MINIMAX_API_KEY`; the scheduler
-unit reads it via `EnvironmentFile=-%h/.config/mpm/mpm.env`. The running
-scheduler has it. **But no shell profile does** — `~/.bashrc` and
-`~/.profile` contain zero occurrences — and the systemd *user* environment
-does not either.
+**Today:** `~/.config/mpm/mpm.env` defines `MINIMAX_API_KEY` (142 bytes,
+mode 600, one variable); the scheduler unit reads it via
+`EnvironmentFile=-%h/.config/mpm/mpm.env`, and the running scheduler
+**has** it. **No shell profile does** — `~/.bashrc` and `~/.profile`
+contain zero occurrences — the systemd *user* environment does not, and
+**the running OpenCode processes do not**.
 
-So a **fresh terminal, or a freshly launched OpenCode, loses the key.**
+So a **fresh terminal, or a freshly launched OpenCode, has no credential**
+— and therefore the substrate's generative path (synthesis, the review
+request, compaction) has none either, while the scheduler does.
 
-> **Correction to the original recommendation: do NOT source the secret
-> into interactive shells.** The first draft of this plan recommended
-> appending a `. "$HOME/.config/mpm/mpm.env"` line to `~/.profile`. That is
+**The profile side is already correct** (§1.1.2): `"$MINIMAX_API_KEY"` is
+now resolved as a *reference*, not sent as a literal. **Nothing in the
+configuration needs to change. Only the environment the agent runs in.**
+
+> **Do not source the secret into every interactive shell.** The first draft
+> of this plan recommended appending a
+> `. "$HOME/.config/mpm/mpm.env"` line to `~/.profile`. That is
 > **withdrawn**. Sourcing a credential file into every interactive shell
 > exports the secret to every child process — every editor, every build
 > tool, every `ps` — for no benefit that a scoped environment does not give
@@ -1612,42 +1683,25 @@ $ bash -lc 'echo "MINIMAX_API_KEY len=${#MINIMAX_API_KEY}"'
 > file.** That truncates it and destroys the key. If the file ever needs
 > its mode fixed, use `chmod 600 <file>`.
 
-### Action 3 — the deployed credential is a literal placeholder
+### Action 3 — the credential placeholder — **CLOSED by the upgrade, no action**
 
-The deployed `ResolveAPIKey` returns the configured value **verbatim**:
+The original action 3 said the deployed `ResolveAPIKey` returns the
+configured value **verbatim**, so `"api_key": "$MINIMAX_API_KEY"` is
+presented to the provider as a literal bearer token, and recommended
+**unsetting** the profile's `api_key`.
 
-```go
-func ResolveAPIKey(configuredKey, baseURL string) string {
-	if configuredKey != "" { return configuredKey }
-	…
-}
-```
+**Both halves of that are obsolete.** The upgraded runtime resolves a
+reference-shaped value **as a reference**
+(`internal/core/synth/credential_reference.go`, commit `39be194a`), so the
+live profile is now the *correct* way to write it. §1.1.2 has the full
+rule, including what happens when the referenced variable is not set and
+when it is not declared.
 
-So `"api_key": "$MINIMAX_API_KEY"` is presented to the provider as the
-literal bearer token `$MINIMAX_API_KEY`, while the real credential sits
-unused. The provider refuses the placeholder and the failure reads as an
-invalid credential.
+**Do not unset the profile's `api_key`.** Doing so would remove a working
+configuration and fall back to the environment fallback — which the agent's
+environment does not have (action 2).
 
-Two ways to fix it, and they are not equivalent:
-
-| | action | effect |
-|---|---|---|
-| **A** | **unset the profile's `api_key`** in `~/.mpm/mpm_config.json` | the environment fallback applies immediately; no code change; reversible |
-| **B** | merge and deploy the upstream fix that resolves a reference-shaped value as a reference | fixes the class of defect, not this instance |
-
-**Recommendation: A now, B when it merges.** A is one line and works on the
-deployed binary. B is the durable fix and should not be waited for — but it
-is a deployment, and deployments are out of scope for this assignment.
-
-> **Version note.** The upgraded runtime `3d63244e` carries the improved
-> MiniMax credential-reference handling, so the class of defect behind
-> action 3 is addressed at the source there. The live profile still carries
-> `"api_key": "$MINIMAX_API_KEY"`, so **action 3 remains worth doing** on
-> the deployed binary — but the operator should first confirm whether the
-> deployed runtime is already `3d63244e` (§0.4) and, if so, whether the
-> reference is now resolved as a reference. Verify; do not assume.
-
-Verify after A — **without printing the key**:
+**Verify without printing the key** — read the profile, never the secret:
 
 ```console
 $ python3 - <<'PYEOF'
@@ -1655,42 +1709,32 @@ import json, os
 c = json.load(open(os.path.expanduser('~/.mpm/mpm_config.json')))
 p = c['profiles']['default']
 print('api_key present:', bool(p.get('api_key')))
+print('api_key is reference-shaped:', str(p.get('api_key','')).startswith('$'))
 print('timeout_seconds:', p.get('timeout_seconds'))
 PYEOF
 ```
 
-(`mpm config get api_key` returns the **full** key for the operator's own
-use, and `mpm config profile get` redacts it. Neither belongs in a
-checklist that gets pasted into a ticket.)
+(The observed output on the live installation is `api_key present: True`,
+`api_key is reference-shaped: True`, `timeout_seconds: 300`.)
 
-### Action 4 — the request timeout
+### Action 4 — the request timeout — **ALREADY APPLIED, confirm only**
 
-The live profile has `"timeout_seconds": 3`. The provider's own measured
-latency through the canonical probe path (7 requests per model, three runs):
+The original action 4 said the live profile's `"timeout_seconds": 3` was
+below the provider's own median latency, and recommended setting it to 300.
 
-| model | min | median | max |
-|---|---|---|---|
-| `MiniMax-M3` | 415 ms | 560–700 ms | **4 761 ms** |
-| `MiniMax-M2.7` | 444 ms | 603–1007 ms | 2 220 ms |
+**It is already 300.** `~/.mpm/mpm_config.json` was last written at
+**2026-10-30 16:33:07**, inside Session A's upgrade window, alongside the
+upstream change that made the timeout an advanced setting with a 300 s
+default.
 
-3 seconds is **below the median for one model and well below the tail for
-both**. It is a live fault: it fails requests against a profile the operator
-is paying for.
-
-> **Version note.** The upgraded runtime carries **centralized timeout
-> defaults**, so the substrate default is now applied consistently rather
-> than per call site. The *live profile* still says `3`, and the profile
-> value wins over the default. The operator should confirm the deployed
-> runtime's default before changing the profile — but the profile value of
-> 3 s is too small either way, and action 4 stands.
+**Confirm it; do not re-apply it.** The verification is the same read-only
+snippet as action 3. The provider latency figures in the original action
+remain the reason the value is 300; they are not a reason to change it
+again.
 
 ```console
-$ # the substrate default is 300s (config.DefaultTimeoutSeconds)
-$ ~/.mpm/bin/mpm config profile set default timeout_seconds 300
+$ ~/.mpm/bin/mpm config profile get default timeout_seconds
 ```
-
-`timeout_seconds` stays manually editable — it is an advanced setting, not
-an onboarding question, and this assignment does not change that.
 
 ### Action 5 — confidence decay — **WITHDRAWN, no action required**
 
@@ -1868,7 +1912,7 @@ One document, answering:
 | installed binary | `0.1.0-dev+g3d63244e.t1793377957`, built 2026-10-30T16:32:37Z, `dirty: no`; `~/.mpm/bin/*` is byte-identical to the release binaries (md5 `e127c2c4…` for `mpm`) |
 | checkout | `~/.mpm` @ `3d63244e`, **119 dirty entries** left by the upgrade's own installation step |
 | running scheduler | pid 3890452, started 2026-10-30 16:32:42, `--interval 60s`, `last_status ok`; `exe` verified as the released `3d63244e` binary |
-| live config | `"timeout_seconds": 3`, `"api_key": "$MINIMAX_API_KEY"` — **both unchanged by this plan** |
+| live config | `"timeout_seconds": 300`, `"api_key": "$MINIMAX_API_KEY"` — the profile is now **correct** (§1.1.2), and **this plan changed neither** |
 | live database | `~/.mpm/src/db/mpm.db`, WAL mode, `PRAGMA integrity_check` → `ok`, **`lesson_proposals` present** |
 | managed-instruction protocol | `5.0.0` — `~/.config/opencode/AGENTS.md` managed block carries `commit=3d63244e… protocol=5.0.0 applied=2026-10-30T16:32:45Z` |
 | credential source | `~/.config/mpm/mpm.env` (142 bytes, mode 600, one variable), read by the unit via `EnvironmentFile=-%h/.config/mpm/mpm.env` |
@@ -1959,7 +2003,7 @@ accumulated, and a reader comparing the two needs to know why.
 | cause | the example commands in §10 of this document were executed verbatim by a shell that was meant to be editing this file. Two of them touched the live installation: a `printf … >> ~/.config/mpm/mpm.env` (appending a stray `MPM_CONFIDENCE_DECAY_ENABLED` line) and `systemctl --user restart mpm-scheduler` |
 | `~/.config/mpm/mpm.env` | **restored byte-exactly** — 142 bytes, mode 600, one variable. The restored key value was verified character-for-character against both the running daemon's environment and the operator's |
 | the daemon's environment | it briefly carried a malformed `MPM_CONFIDENCE_DECAY_ENABLED` value (`0nMPM_CONFIDENCE_DECAY_ENABLED=0n`). `strconv.Atoi` rejects it, so it fell back to the default and had **no functional effect**; the service was restarted to clear it, and the daemon now holds exactly the five `MPM_*` variables the unit declares plus `MINIMAX_API_KEY` |
-| `~/.mpm/mpm_config.json` | **untouched** — `timeout_seconds: 3` and `$MINIMAX_API_KEY` both intact |
+| `~/.mpm/mpm_config.json` | **untouched by this plan** — `timeout_seconds: 300` and `$MINIMAX_API_KEY` both intact. (The file was written at 16:33:07 by Session A's upgrade, inside the window when the credential-reference fix and the timeout default landed; see §1.1.2 and §1.1.3.) |
 | the installed checkout | **untouched by this plan** — now `3d63244e`, with the upgrade's own 119 dirty entries |
 | the database | **untouched** — the only writers are the plugin's own polls and the scheduler's normal ticks |
 
@@ -1985,6 +2029,7 @@ changed the document and the script because of it.
 |---|---|---|
 | S1 | **A document about a live system contained copy-pasteable production-changing commands, in a fenced `bash` block, with no warning.** A shell editing the file executed them. | §10 is now a marked **operator-only procedure** with a banner, `$`-prefixed **console** fences (a pasted block fails on the prompt), and numbered steps that must be run and verified individually |
 | S2 | **The recommendation that caused the worst of it was wrong on revision-specific grounds** — it named a source file and a default that did not exist at the deployed revision, so the "fix" would have edited a credential file and restarted a service to disable a handler that was never registered | §10 action 5 is **withdrawn**; §1.1.1 records the version-by-version analysis; and the rule is now stated: *a recommendation that names a production-changing command must be verified at the deployed revision, not at a merely similar one* |
+| S2b | **Three of the plan's original blocking conditions were resolved by the runtime upgrade**, and each carried a production-changing remedy that would have been an unnecessary change to the live installation: B6 (unset the profile's `api_key` — the upgrade now resolves it as a reference), B7 (raise `timeout_seconds` — already 300), B8 (add an env override and restart the scheduler — the handler defaults OFF) | all three are **closed or re-scoped** (§1.1.1, §1.1.2, §1.1.3); actions 3 and 4 are closed and action 5 withdrawn; **the only credential action left is action 2**, and it is now about the *environment*, not the configuration |
 | S3 | **The plan recommended sourcing a secret into every interactive shell.** That exports the credential to every child process, for no benefit a scoped environment does not give more safely | §10 action 2 now recommends a **deliberately scoped process environment** and explicitly withdraws the `~/.profile` sourcing line |
 | S4 | **The plan's own measurement queries had two silent-failure defects** — a TEXT-in-INTEGER timestamp that made every audit row match the window, and a `CAST(created_at AS INTEGER)` that centred a correlation window on 1970 | both fixed (`strftime('%s', …)`) and both **documented** in §3.2 and §7.3, because a silent measurement defect is the same class of hazard as a silent command |
 | S5 | **The daily script could report an empty measurement as a successful one.** A query that failed was indistinguishable from a query that returned nothing | the script now **fails closed**: every failed query is a recorded *measurement gap*, printed with its error, and forces exit `2`; a schema version difference is reported separately and is not a gap |
