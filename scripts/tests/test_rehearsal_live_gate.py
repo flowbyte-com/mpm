@@ -547,5 +547,84 @@ class TestTheRehearsalWiring(LiveGateFixture):
                           f"{suite} must use the classified gate")
 
 
+class TestTheSuitesFailClosed(LiveGateFixture):
+    """A suite whose gate cannot measure must FAIL, not assert vacuously.
+
+    The gate itself failing closed is not enough: the SUITE must not
+    swallow the failure and proceed to a vacuous assertion.  Both
+    suites are driven here against a disposable, deliberately unreadable
+    stand-in for the live tree — the operator's real installation is
+    never pointed at.
+    """
+
+    # The suite's OWN failure message — printed by reh_fail, not by the
+    # gate.  Asserting on the gate's own output would not prove the
+    # suite reacted to it: the gate prints "could not measure" whether
+    # or not the suite acts on it.
+    SUITE_GUARD_MESSAGE = ("the live-tree snapshot could not be taken "
+                           "— the isolation gate cannot measure")
+
+    def _run_suite(self, suite: str):
+        # A live tree whose database cannot be opened: the path exists
+        # and is a directory.
+        broken_mpm = self._tmp / "broken-mpm"
+        (broken_mpm / "src" / "db").mkdir(parents=True)
+        (broken_mpm / "src" / "db" / "mpm.db").mkdir()
+        oc = self._tmp / "broken-oc"
+        sd = self._tmp / "broken-sd"
+        oc.mkdir()
+        sd.mkdir()
+        work = self._tmp / "reh-work"
+        work.mkdir()
+        env = dict(os.environ)
+        env.update({
+            "REH_WORK": str(work),
+            "REH_REV": "HEAD",
+            "REH_COMMIT": "0" * 40,
+            "EXPECT_COMMIT": "0" * 40,
+            "LIVE_MPM": str(broken_mpm),
+            "LIVE_OC_CONFIG": str(oc),
+            "LIVE_SYSTEMD_USER": str(sd),
+        })
+        return subprocess.run(
+            ["bash", str(REHEARSAL / suite)],
+            capture_output=True, text=True, timeout=300, env=env,
+            cwd=str(REHEARSAL.parent.parent),
+        )
+
+    def _assert_fails_closed(self, suite: str, isolation_assertion: str):
+        r = self._run_suite(suite)
+        out = r.stdout + r.stderr
+
+        # The suite must REPORT the measurement failure in its own
+        # summary.  This is the assertion that distinguishes "the suite
+        # reacted" from "the gate printed something and the suite
+        # carried on regardless".
+        self.assertIn(
+            self.SUITE_GUARD_MESSAGE, out,
+            f"{suite} must report the measurement failure itself:\n{out}",
+        )
+        self.assertIn("failed: 1", out,
+                      f"{suite} must count the measurement failure:\n{out}")
+
+        # And it must NOT have reached a vacuous isolation assertion.
+        self.assertNotIn(
+            isolation_assertion, r.stdout,
+            f"{suite} must not reach a vacuous isolation assertion:\n{out}",
+        )
+
+    def test_the_obligations_suite_fails_when_the_gate_cannot_measure(self):
+        self._assert_fails_closed(
+            "10_obligations.sh",
+            "the live installation was not modified by the migration",
+        )
+
+    def test_the_negative_suite_fails_when_the_gate_cannot_measure(self):
+        self._assert_fails_closed(
+            "20_negative.sh",
+            "the live installation is untouched by the negative tests",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

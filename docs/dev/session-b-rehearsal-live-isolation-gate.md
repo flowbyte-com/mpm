@@ -169,7 +169,7 @@ the domain state, which did not change.
 | `scripts/rehearsal/lib.sh` | `live_snapshot` (the invalid size/mtime rule) **removed**; `live_gate_snapshot` / `live_gate_compare` added |
 | `scripts/rehearsal/10_obligations.sh` | the classified gate replaces *"the live tree's snapshot is unchanged"* |
 | `scripts/rehearsal/20_negative.sh` | the same — and the BEFORE snapshot moved to the **start** of the suite, so the comparison spans the whole suite instead of two adjacent instants |
-| `scripts/tests/test_rehearsal_live_gate.py` | **new** — 22 tests: the negative control, the non-vacuity proofs, the fail-closed cases |
+| `scripts/tests/test_rehearsal_live_gate.py` | **new** — 24 tests: the negative control, the non-vacuity proofs, the fail-closed cases |
 | `scripts/rehearsal/README.md` | the detectors section rewritten to describe the classification |
 
 ---
@@ -255,6 +255,54 @@ that size and mtime are identical — so the old rule would have reported
 (exit 2), and `test_a_missing_live_installation_is_not_a_measurement_failure`
 — nothing installed means nothing to protect, which is a clean
 measurement, not a failure to measure.
+
+### 6.5 And the SUITES fail closed
+
+A gate that cannot measure is not enough: the **suite** must not swallow
+that failure and proceed to a vacuous assertion. Two tests drive the
+actual suite scripts against a disposable, deliberately unreadable
+stand-in for the live tree:
+
+* `test_the_obligations_suite_fails_when_the_gate_cannot_measure`
+* `test_the_negative_suite_fails_when_the_gate_cannot_measure`
+
+Each asserts that the suite **reports the measurement failure in its
+own summary** (`failed: 1`) and that it **never reached** the isolation
+assertion.
+
+**The non-vacuity of these two was demonstrated, not asserted.** The
+guard was removed from both suites — the mutation that turns a
+fail-closed suite into a vacuous one — and the two tests **failed**:
+
+```
+FAILED …::test_the_negative_suite_fails_when_the_gate_cannot_measure
+FAILED …::test_the_obligations_suite_fails_when_the_gate_cannot_measure
+2 failed, 22 deselected
+```
+
+The first draft of these tests asserted only that the suite exited
+non-zero, and it **passed against the mutation** — because the suite
+failed later for an unrelated reason (the simulation was not set up).
+That is the same failure shape as the defect this change fixes: a
+detector that reports success without having looked. The tests were
+rewritten to assert on the suite's **own** failure message, which is
+what distinguishes *"the suite reacted"* from *"the gate printed
+something and the suite carried on regardless"*.
+
+The end-to-end behaviour, measured directly:
+
+```
+$ LIVE_MPM=/tmp/opencode/broken-live/.mpm … bash scripts/rehearsal/10_obligations.sh
+LIVE-GATE: could not measure: cannot open the live database …: disk I/O error
+LIVE-GATE: a gate that cannot measure must not report success.
+  FAIL the live-tree snapshot could not be taken — the isolation gate cannot measure
+== obligations ==
+  passed: 0
+  failed: 1
+rc=1
+```
+
+Both suites behave the same way.
 
 ---
 
