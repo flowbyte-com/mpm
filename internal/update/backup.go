@@ -276,14 +276,14 @@ func verifyRecoveryPoint(path, expectFP string) error {
 		return err
 	}
 	if expectFP == "" {
-		return fmt.Errorf("no pre-update schema fingerprint was recorded with this recovery point, so MPM cannot tell it apart from any other database")
+		return fmt.Errorf("no recorded fingerprint was stored with this recovery point, so MPM cannot tell it apart from any other database")
 	}
 	fp, err := SchemaFingerprint(path)
 	if err != nil {
 		return fmt.Errorf("could not fingerprint the recovery point: %w", err)
 	}
 	if fp != expectFP {
-		return fmt.Errorf("the recovery point's schema %s does not match the pre-update schema %s recorded with it", fp, expectFP)
+		return fmt.Errorf("the recovery point does not match its recorded fingerprint: its schema is %s, the recorded fingerprint is %s", fp, expectFP)
 	}
 	return nil
 }
