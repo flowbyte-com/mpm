@@ -341,6 +341,16 @@ var cliOptionDeferred = map[string]bool{
 	"onboard":        true,
 	"provenance":     true,
 	"challenge list": true,
+
+	// Runtime namespaces. Each one fronts a separate executable, so that
+	// executable's parser is the only authority on its own options: the
+	// router cannot know mpm-telemetry's flags, and a generous guess
+	// here would pass a token the child rejects — or reject one it
+	// accepts. The child rejects an unknown option precisely (and names
+	// it), and the namespace handlers reject an unknown SUBCOMMAND.
+	"telemetry": true,
+	"critic":    true,
+	"scheduler": true,
 }
 
 // cliOptionSubcommandFamilies are the commands whose FIRST token is a

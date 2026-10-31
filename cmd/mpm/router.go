@@ -182,6 +182,15 @@ func NewRouter() *CommandRouter {
 
 		// Drills — behavioural drill execution + compatibility matrix
 		"drills": {Name: "drills", Description: "Behavioural drill execution + compatibility matrix (list|show|run|report)", MinArgs: 0},
+
+		// Runtime namespaces — front doors for the executables MPM ships
+		// beside this one. Each delegates to the SAME runtime bundle's
+		// binary and keeps its direct interface unchanged; see
+		// namespace_cmds.go for the resolution rule and for why a bare
+		// namespace must never start a daemon or run an audit.
+		"telemetry": {Name: "telemetry", Description: "Telemetry sidecar (ping|query|cost|observe|serve|version) — delegates to mpm-telemetry", MinArgs: 0, Help: printTelemetryHelp},
+		"critic":    {Name: "critic", Description: "Audit runner — `critic run [--telemetry-hunt]` audits, `critic version` reports; never audits on its own", MinArgs: 0, Help: printCriticHelp},
+		"scheduler": {Name: "scheduler", Description: "Scheduler service management (status|logs|start|stop|restart|version) — never launches the daemon", MinArgs: 0, Help: printSchedulerHelp},
 	}
 
 	return r
@@ -531,6 +540,12 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleListSkills(args[1:])
 	case "read-skill":
 		return handleReadSkill(args[1:])
+	case "telemetry":
+		return handleTelemetry(args[1:])
+	case "critic":
+		return handleCritic(args[1:])
+	case "scheduler":
+		return handleScheduler(args[1:])
 
 	default:
 		r.unknownCommand(cmdName)
@@ -933,6 +948,7 @@ var commandsWithSubcommandDispatch = map[string]bool{
 	"config":      true, // show|get|set|edit|validate|profile|component|capability
 	"onboard":     true, // report|models|hosts
 	"compact":     true, // deferred|requeue-deferred|help
+	"telemetry":   true, // ping|query|cost|observe|serve|version (delegated)
 }
 
 // subcommandHelpOwners lists the "<family> <subcommand>" paths whose
@@ -1050,7 +1066,22 @@ var subcommandHelpOwners = map[string]bool{
 	"ops milestones": true, "ops broadcast": true,
 	"ops active-sessions": true, "ops confidence": true,
 	"ops resolve-contradictions": true,
-	"ops review": true,
+	"ops review":                 true,
+
+	// telemetry — the namespace forwards the trailing help token to the
+	// sidecar, whose own parser treats a literal "help" as a help
+	// request BEFORE it resolves a workspace, opens telemetry.db or
+	// dials the socket (cmd/mpm-telemetry/main.go, step 3). Delegating
+	// therefore prints the leaf's real page, not a generic one.
+	//
+	// Only the documented subcommands are listed — the FAMILY itself is
+	// deliberately absent (every key here must be a "<family> <sub>"
+	// path), so a bare `mpm telemetry --help` reaches
+	// handleCommandHelp and renders the namespace page plus the
+	// sidecar's own catalogue. A future subcommand that is missing here
+	// falls back to that page: less specific, never unsafe.
+	"telemetry ping": true, "telemetry query": true, "telemetry cost": true,
+	"telemetry observe": true, "telemetry serve": true, "telemetry version": true,
 }
 
 // jsonSubcommandHelpOwners lists the paths whose owner handler must also
