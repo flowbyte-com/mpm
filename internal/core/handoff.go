@@ -221,7 +221,7 @@ func (dm *DatabaseManager) EndSessionV2(sessionID, frameworkSessionID, explicitM
 	//
 	//   3. both empty (rare): INSERT with NULL for both columns.
 	if sessionID != "" {
-		_, err = dm.db.Exec(`
+		_, err = dm.ExecTracked(`
 			INSERT INTO session_handoffs
 				(id, session_id, mpm_session_id, framework_session_id, ended_at, ended_state, summary, commitments, open_questions, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -237,6 +237,7 @@ func (dm *DatabaseManager) EndSessionV2(sessionID, frameworkSessionID, explicitM
 				created_at          = excluded.created_at,
 				read_at             = NULL,
 				read_by             = NULL`,
+			5,
 			newID, sessionID, mpmSessionID, nullHandoffSessionID(frameworkSessionID),
 			now, endedState, summary,
 			string(commitJSON), string(questionJSON), now,
@@ -249,10 +250,11 @@ func (dm *DatabaseManager) EndSessionV2(sessionID, frameworkSessionID, explicitM
 			return nil, fmt.Errorf("EndSessionV2: upsert: %w", err)
 		}
 	} else {
-		_, err = dm.db.Exec(`
+		_, err = dm.ExecTracked(`
 			INSERT INTO session_handoffs
 				(id, session_id, mpm_session_id, framework_session_id, ended_at, ended_state, summary, commitments, open_questions, created_at)
 			VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			5,
 			newID, mpmSessionID, nullHandoffSessionID(frameworkSessionID),
 			now, endedState, summary,
 			string(commitJSON), string(questionJSON), now,

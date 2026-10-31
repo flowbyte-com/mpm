@@ -3156,7 +3156,9 @@ func (s *MemoryStore) BackfillSessionIDs(sessionsJSONPath string) (int, error) {
 		}
 
 		if matchedSID != "" {
-			s.DB.Exec("UPDATE memories SET session_id = ? WHERE id = ?", matchedSID, memID)
+			if _, err := s.execTracked("UPDATE memories SET session_id = ? WHERE id = ?", 5, matchedSID, memID); err != nil {
+				return updated, fmt.Errorf("backfill session_id for memory %s: %w", memID, err)
+			}
 			updated++
 		}
 	}

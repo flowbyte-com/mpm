@@ -180,10 +180,10 @@ func handleDrillsRun(args []string) int {
 	runID := uuid.NewString()
 	sessionID := uuid.NewString()
 	startedAt := time.Now().Unix()
-	if _, err := dm.SQLDB().Exec(`
+	if _, err := dm.ExecTracked(`
 		INSERT INTO drill_runs (id, drill_id, framework, session_id, status, started_at)
 		VALUES (?, ?, ?, ?, 'running', ?)`,
-		runID, drill.ID, drill.Framework, sessionID, startedAt,
+		5, runID, drill.ID, drill.Framework, sessionID, startedAt,
 	); err != nil {
 		return usererror.Error("insert drill_run: %v", err)
 	}
@@ -197,9 +197,9 @@ func handleDrillsRun(args []string) int {
 
 	calls, runErr := dispatchDrillCLI(ctx, dm, *drill, sessionID, compliant)
 	if runErr != nil {
-		_, _ = dm.SQLDB().Exec(`
-			UPDATE drill_runs SET status='error', error_message=?, completed_at=?
-			WHERE id=?`, runErr.Error(), time.Now().Unix(), runID)
+		if uerr := updateDrillRunStatus(dm, runID, "error", runErr.Error(), time.Now().Unix()); uerr != nil {
+			return usererror.Error("drill run failed: %v (and the error verdict was lost: %v)", runErr, uerr)
+		}
 		return usererror.Error("drill run failed: %v", runErr)
 	}
 
@@ -210,11 +210,7 @@ func handleDrillsRun(args []string) int {
 	if !verdict.Passed {
 		status = "failed"
 	}
-	if _, err := dm.SQLDB().Exec(`
-		UPDATE drill_runs SET status=?, verdict=?, completed_at=?, duration_ms=?
-		WHERE id=?`,
-		status, string(verdictJSON), completedAt, (completedAt-startedAt)*1000, runID,
-	); err != nil {
+	if err := updateDrillRunVerdict(dm, runID, status, string(verdictJSON), completedAt, (completedAt-startedAt)*1000); err != nil {
 		return usererror.Error("update drill_run: %v", err)
 	}
 
@@ -228,6 +224,33 @@ func handleDrillsRun(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// updateDrillRunStatus records a terminal error verdict for a drill run.
+// The run row is the only record that the run finished; losing it leaves
+// the run `running` forever, so the write carries the substrate's
+// statement-level retry budget and its failure is returned.
+func updateDrillRunStatus(dm *core.DatabaseManager, runID, status, errorMessage string, completedAt int64) error {
+	_, err := dm.ExecTracked(`
+		UPDATE drill_runs SET status=?, error_message=?, completed_at=?
+		WHERE id=?`, 5, status, errorMessage, completedAt, runID)
+	if err != nil {
+		return fmt.Errorf("update drill_run %s: %w", runID, err)
+	}
+	return nil
+}
+
+// updateDrillRunVerdict records the completed verdict for a drill run.
+// Same durability contract as updateDrillRunStatus: the verdict row is
+// the run's durable outcome.
+func updateDrillRunVerdict(dm *core.DatabaseManager, runID, status, verdictJSON string, completedAt, durationMS int64) error {
+	_, err := dm.ExecTracked(`
+		UPDATE drill_runs SET status=?, verdict=?, completed_at=?, duration_ms=?
+		WHERE id=?`, 5, status, verdictJSON, completedAt, durationMS, runID)
+	if err != nil {
+		return fmt.Errorf("update drill_run %s: %w", runID, err)
+	}
+	return nil
 }
 
 // parseDrillRunFlags extracts --framework, --no-compliant, and

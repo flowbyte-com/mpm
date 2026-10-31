@@ -312,9 +312,10 @@ func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, createdBy 
 	if theoryID != "" {
 		theoryPtr = theoryID
 	}
-	_, err = dm.db.Exec(
+	_, err = dm.ExecTracked(
 		`INSERT INTO scheduled_wakes (id, target_time, reason, theory_id, fired, created_by, metadata)
 		 VALUES (?, ?, ?, ?, 0, ?, ?)`,
+		5,
 		id, absolute, reason, theoryPtr, createdBy, metaJSON,
 	)
 	if err != nil {
