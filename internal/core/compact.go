@@ -8,6 +8,22 @@
 // safety cap is hit, or a batch fails. The 50-item LLM context
 // safeguard (compactBatchSize) is preserved on every batch.
 //
+// TRUST: what the drain writes.
+//
+// The drain records each synthesis as a PENDING LESSON PROPOSAL, not as a
+// trusted lesson. The reason is the trust boundary, not a preference: the
+// raw memories it reads are agent-writable (`collection='memories'` — what
+// `mpm_memory action=save` writes), and the drain is invoked only through
+// the agent's own tool surface (`mpm_system action=compact`; there is no
+// operator CLI for it). A synthesis of the agent's own text is the agent's
+// derivation, so it goes into the same review queue as the agent's direct
+// proposals and an operator promotes it.
+//
+// A proposal lives in `lesson_proposals`, a table no trusted read path
+// queries, so it is invisible to search, to the lesson lists and to the
+// wake context until it is promoted. `lessons_created` is therefore always
+// 0 and `proposals_created` / `proposal_ids` carry the result.
+//
 // Compact semantics:
 //
 //   - force=false (default) — compact RELIEVES pressure. The drain
@@ -67,9 +83,7 @@ package internal
 
 import (
 	"context"
-	"crypto/sha1"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -114,11 +128,28 @@ func (c *CompactLesson) Validate() error {
 // threshold). On error paths, the result is nil and the error
 // carries the reason.
 type CompactEpistemologyResult struct {
-	Compacted      int    `json:"compacted"`
-	LessonsCreated int    `json:"lessons_created"`
-	RawMarked      int    `json:"raw_marked"`
-	LessonID       string `json:"lesson_id,omitempty"`
-	SkippedReason  string `json:"skipped_reason,omitempty"`
+	Compacted int `json:"compacted"`
+	// LessonsCreated is ALWAYS 0.
+	//
+	// The compaction no longer writes a TRUSTED lesson: the synthesis
+	// is recorded as a PENDING lesson proposal, and an operator
+	// promotes it (see commitProposalAndMark). The field is kept, and
+	// kept at zero, so a consumer that reads it sees a stable value
+	// instead of a key that vanished — and so the number of trusted
+	// lessons this path creates stays visible as zero rather than
+	// disappearing from the envelope.
+	LessonsCreated int `json:"lessons_created"`
+	// ProposalsCreated counts the PENDING proposals this batch
+	// produced. One per committed batch.
+	ProposalsCreated int `json:"proposals_created"`
+	RawMarked        int `json:"raw_marked"`
+	// ProposalID is the pending proposal the synthesis was recorded
+	// as. The operator promotes it with `mpm lesson promote <id>`.
+	ProposalID string `json:"proposal_id,omitempty"`
+	// LessonID is retained for wire compatibility and is always empty:
+	// the compaction creates no lesson.
+	LessonID      string `json:"lesson_id,omitempty"`
+	SkippedReason string `json:"skipped_reason,omitempty"`
 	// Deferred is set when the model returned the sanctioned refusal.
 	// The batch was annotated, not compacted: Deferred rows are out of
 	// the selection pool and remain fully retrievable, but they are no
@@ -180,14 +211,21 @@ const compactDrainMaxBatchesHardCap = 8
 //     "max_batches_reached", where the operation completed successfully
 //     but work remains. Callers must inspect stop_reason (not success)
 //     to determine whether the substrate is fully drained.
-//   - BatchesProcessed: count of batches that committed a lesson.
+//   - BatchesProcessed: count of batches that committed a derivation.
 //   - RawProcessed: sum of compacted raw memories across all batches.
-//   - LessonsCreated: equal to BatchesProcessed on success (1 lesson
-//     per batch).
+//   - LessonsCreated: ALWAYS 0. The compaction records its synthesis
+//     as a PENDING lesson proposal; it never writes a trusted lesson.
+//     The field is retained so a consumer reading it sees a stable
+//     zero instead of a missing key.
+//   - ProposalsCreated: equal to BatchesProcessed on success (one
+//     pending proposal per batch). This is what the compaction now
+//     produces.
 //   - RawRemaining: live read of epistemic_pressure_v.raw_count after
 //     the loop ends. Reflects concurrent writes — the canonical source
 //     of truth.
-//   - LessonIDs: lesson IDs created in batch order.
+//   - ProposalIDs: the pending proposal IDs, in batch order. The
+//     operator promotes them with `mpm lesson promote <id>`.
+//   - LessonIDs: retained for wire compatibility; always empty.
 //   - SkippedReason: set only on "no_work" (no_raw_memories) or
 //     "threshold_reached" (below_threshold).
 type CompactEpistemologyDrainResult struct {
@@ -195,7 +233,9 @@ type CompactEpistemologyDrainResult struct {
 	BatchesProcessed int      `json:"batches_processed"`
 	RawProcessed     int      `json:"raw_processed"`
 	LessonsCreated   int      `json:"lessons_created"`
+	ProposalsCreated int      `json:"proposals_created"`
 	RawRemaining     int      `json:"raw_remaining"`
+	ProposalIDs      []string `json:"proposal_ids,omitempty"`
 	LessonIDs        []string `json:"lesson_ids,omitempty"`
 	SkippedReason    string   `json:"skipped_reason,omitempty"`
 	StopReason       string   `json:"stop_reason"`
@@ -271,7 +311,7 @@ var compactSynthesizeFunc = func(ctx context.Context, rawMemories []string) (str
 // CompactEpistemologyDrain instead. CompactEpistemology is exposed
 // for direct use only when the caller genuinely wants exactly one
 // batch (tests, or a future orchestrator that manages its own loop).
-func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool) (*CompactEpistemologyResult, error) {
+func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool, ac ...ActiveContext) (*CompactEpistemologyResult, error) {
 	// 1. Pre-check — read the pressure gauge. Bail out cheaply on no-op.
 	rawCount, threshold, err := dm.compactPreCheck(ctx)
 	if err != nil {
@@ -296,7 +336,7 @@ func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool) 
 	// 3. Run one synthesis stage over this row set. There is no
 	// subdivision at this level: CompactEpistemology is the
 	// exactly-one-batch primitive, and the drain is what subdivides.
-	return dm.compactRowSet(ctx, rawIDs, rawContents, true)
+	return dm.compactRowSet(ctx, rawIDs, rawContents, true, ac...)
 }
 
 // compactRowSet is one semantic stage: synthesize over a specific set
@@ -308,7 +348,7 @@ func (dm *DatabaseManager) CompactEpistemology(ctx context.Context, force bool) 
 // already selected (the refusal split). Selection and execution are
 // therefore separate concerns, which is what makes subdivision
 // possible without re-querying and hoping the same rows come back.
-func (dm *DatabaseManager) compactRowSet(ctx context.Context, ids, contents []string, deferOnRefusal bool) (*CompactEpistemologyResult, error) {
+func (dm *DatabaseManager) compactRowSet(ctx context.Context, ids, contents []string, deferOnRefusal bool, ac ...ActiveContext) (*CompactEpistemologyResult, error) {
 	// Synthesize — call the LLM with strict JSON contract. NO DB
 	// writes have happened yet; any failure here leaves the substrate
 	// untouched.
@@ -357,20 +397,21 @@ func (dm *DatabaseManager) compactRowSet(ctx context.Context, ids, contents []st
 		}, nil
 	}
 
-	// 4. Transaction — INSERT lesson + UPDATE raw memories, atomically.
-	// compacted_into is written in the SAME transaction as the lesson
-	// INSERT, so a row can never claim to be folded into a lesson that
-	// does not exist.
-	lessonID, err := dm.commitLessonAndMark(ctx, lesson, ids)
+	// 4. Transaction — INSERT the pending proposal + UPDATE raw
+	// memories, atomically. compacted_into is written in the SAME
+	// transaction as the proposal INSERT, so a row can never claim to
+	// be folded into a derivation that does not exist.
+	proposalID, err := dm.commitProposalAndMark(ctx, lesson, ids, ac...)
 	if err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 
 	return &CompactEpistemologyResult{
-		Compacted:      len(ids),
-		LessonsCreated: 1,
-		RawMarked:      len(ids),
-		LessonID:       lessonID,
+		Compacted:       len(ids),
+		LessonsCreated:  0,
+		ProposalsCreated: 1,
+		RawMarked:       len(ids),
+		ProposalID:      proposalID,
 	}, nil
 }
 
@@ -467,7 +508,7 @@ func (dm *DatabaseManager) compactRowSet(ctx context.Context, ids, contents []st
 // Each batch stays independently atomic — the per-batch transaction
 // boundary is inside CompactEpistemology. The drain loop holds NO
 // transaction across iterations.
-func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force bool, maxBatches int) (*CompactEpistemologyDrainResult, error) {
+func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force bool, maxBatches int, ac ...ActiveContext) (*CompactEpistemologyDrainResult, error) {
 	if maxBatches <= 0 {
 		maxBatches = compactDrainMaxBatchesDefault
 	}
@@ -546,7 +587,7 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 
 		// Spend one stage on the whole batch.
 		// deferOnRefusal=false: a refusal here may still be split.
-		batch, err := dm.compactRowSet(ctx, ids, contents, false)
+		batch, err := dm.compactRowSet(ctx, ids, contents, false, ac...)
 		stagesUsed++
 		result.StagesSpent = stagesUsed
 		if err != nil {
@@ -599,7 +640,7 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 				{leftIDs, leftContents},
 				{rightIDs, rightContents},
 			} {
-				cres, cerr := dm.compactRowSet(ctx, child.ids, child.contents, true)
+				cres, cerr := dm.compactRowSet(ctx, child.ids, child.contents, true, ac...)
 				stagesUsed++
 				result.StagesSpent = stagesUsed
 				if cerr != nil {
@@ -617,6 +658,10 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 				result.BatchesProcessed++
 				result.RawProcessed += cres.Compacted
 				result.LessonsCreated += cres.LessonsCreated
+				result.ProposalsCreated += cres.ProposalsCreated
+				if cres.ProposalID != "" {
+					result.ProposalIDs = append(result.ProposalIDs, cres.ProposalID)
+				}
 				if cres.LessonID != "" {
 					result.LessonIDs = append(result.LessonIDs, cres.LessonID)
 				}
@@ -629,6 +674,10 @@ func (dm *DatabaseManager) CompactEpistemologyDrain(ctx context.Context, force b
 		result.BatchesProcessed++
 		result.RawProcessed += batch.Compacted
 		result.LessonsCreated += batch.LessonsCreated
+		result.ProposalsCreated += batch.ProposalsCreated
+		if batch.ProposalID != "" {
+			result.ProposalIDs = append(result.ProposalIDs, batch.ProposalID)
+		}
 		if batch.LessonID != "" {
 			result.LessonIDs = append(result.LessonIDs, batch.LessonID)
 		}
@@ -763,27 +812,56 @@ func (dm *DatabaseManager) extractRawBatch(ctx context.Context, limit int) (ids,
 	return ids, contents, nil
 }
 
-// commitLessonAndMark wraps the lesson insert and the raw mark in a
-// single transaction. Returns the new lesson ID on success.
+// commitProposalAndMark wraps the proposal insert and the raw mark in
+// a single transaction. Returns the new proposal ID on success.
 //
-// Lessons table layout (key fields): id TEXT PK, type TEXT (default
-// 'insight'), content TEXT, tags JSON, created TEXT, content_hash
-// TEXT (sha1 of content envelope — used for dedup).
+// WHY A PROPOSAL AND NOT A LESSON
+// ------------------------------
+// The compaction is an AGENT-OWNED action, and its output is derived
+// from AGENT-WRITABLE material:
+//
+//   - the only way to invoke the drain is `mpm_system action=compact`
+//     — the agent's own tool surface. There is no operator CLI for the
+//     drain (`mpm compact` only offers `deferred` and
+//     `requeue-deferred`), and the seeded directive that drives the
+//     reflex says so explicitly: "The agent owns this reflex";
+//   - the drain's input population is `collection='memories'` rows
+//     (memoryIsActionable), and `mpm_memory action=save` writes
+//     exactly that collection.
+//
+// So a synthesis is the AGENT's derivation, produced by a model reading
+// the agent's own text. Writing it straight into `lessons_base` — a
+// table whose rows are TRUSTED ON ARRIVAL — would be a second, silent
+// way around the lesson trust boundary that `mpm_lessons action=save`
+// closes: the agent would not have to write a lesson at all, it would
+// only have to write a memory and let the synthesis launder it.
+//
+// The correction routes the synthesis through the SAME review queue the
+// agent's direct proposals use (`lesson_proposals`, status='pending').
+// The isolation is structural: no trusted read path queries that
+// table, so a pending synthesis is invisible to full-text search, to
+// the wake context and to the lesson lists until an operator promotes
+// it with `mpm lesson promote <id>`.
+//
+// WHAT IS PRESERVED
+// -----------------
+//
+//   - The derivation itself. The proposal's content is the same JSON
+//     envelope {title, body} the lesson write used, byte for byte, so
+//     a promoted lesson reads exactly as it would have before.
+//   - The raw-memory marking. The folded rows are marked
+//     `metadata.compacted_into = <proposal id>` in the SAME
+//     transaction, so the pressure gauge behaves exactly as before and
+//     the drain does not re-offer the same rows forever.
+//   - The audit chain. `lesson_proposals.source_ids` carries the raw
+//     memory ids, so the promotion credits them (success_count) and
+//     the chain "raw memory → proposal → lesson" is complete.
 //
 // The lesson content is stored as a JSON envelope {title, body} so
 // downstream readers can distinguish the title from the prose body
 // without parsing markdown. Tags stored as JSON array, matching the
 // existing lesson shape from save_lesson.
-func (dm *DatabaseManager) commitLessonAndMark(ctx context.Context, lesson *CompactLesson, rawIDs []string) (string, error) {
-	tx, err := dm.db.BeginTx(ctx, nil)
-	if err != nil {
-		return "", fmt.Errorf("begin tx: %w", err)
-	}
-	// Rollback is a no-op after Commit. This defer covers every
-	// return path between BeginTx and the final Commit — if any step
-	// fails, the transaction rolls back atomically.
-	defer func() { _ = tx.Rollback() }()
-
+func (dm *DatabaseManager) commitProposalAndMark(ctx context.Context, lesson *CompactLesson, rawIDs []string, ac ...ActiveContext) (string, error) {
 	envelope := struct {
 		Title string `json:"title"`
 		Body  string `json:"body"`
@@ -801,21 +879,43 @@ func (dm *DatabaseManager) commitLessonAndMark(ctx context.Context, lesson *Comp
 		return "", fmt.Errorf("marshal tags: %w", err)
 	}
 
-	hash := sha1.Sum(envelopeBytes)
-	contentHash := hex.EncodeToString(hash[:])
+	content := string(envelopeBytes)
 
-	// INSERT lesson, RETURNING id. SQLite supports RETURNING since 3.35
-	// (we depend on 3.35+ via FTS5). Lesson id is a random 32-char hex
-	// prefixed with "les-" to match the existing lesson id pattern
-	// (lessons_base.id is TEXT, no length constraint).
-	var lessonID string
-	err = tx.QueryRowContext(ctx, `
-		INSERT INTO lessons (id, type, content, tags, created, content_hash)
-		VALUES ('les-' || lower(hex(randomblob(16))), 'insight', ?, ?, ?, ?)
-		RETURNING id
-	`, string(envelopeBytes), string(tagsJSON), time.Now().UTC().Format(time.RFC3339), contentHash).Scan(&lessonID)
+	// The same content screens a lesson write gets. A proposal is a
+	// candidate for the lesson table, and a payload that would be
+	// blocked at promotion time has no business being stored now
+	// either.
+	if isSensitive, name := isSensitiveContent(content); isSensitive {
+		return "", fmt.Errorf("compaction synthesis blocked: %s detected", name)
+	}
+	if poisoned, reason := dm.scanPoisoned(content); poisoned {
+		return "", fmt.Errorf("compaction synthesis blocked: poison phrase detected: %s", reason)
+	}
+
+	actx := firstActiveContext(ac)
+	proposalID := GenerateID()
+	sourceIDsJSON, _ := MarshalJSON(rawIDs)
+
+	tx, err := dm.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", fmt.Errorf("insert lesson: %w", err)
+		return "", fmt.Errorf("begin tx: %w", err)
+	}
+	// Rollback is a no-op after Commit. This defer covers every
+	// return path between BeginTx and the final Commit — if any step
+	// fails, the transaction rolls back atomically.
+	defer func() { _ = tx.Rollback() }()
+
+	// INSERT the pending proposal. The status is the schema's CHECK
+	// constraint's business, but it is written explicitly here so the
+	// intent is visible at the write site.
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO lesson_proposals
+			(id, type, content, tags, created, status, source_session_id, framework_name, model_name, source_ids)
+		VALUES (?, 'insight', ?, ?, ?, 'pending', ?, ?, ?, ?)
+	`, proposalID, content, string(tagsJSON), time.Now().UTC().Format(time.RFC3339),
+		sourceSessionIDOrNil(actx.SessionID), actx.FrameworkName, actx.Model, sourceIDsJSON)
+	if err != nil {
+		return "", fmt.Errorf("insert lesson proposal: %w", err)
 	}
 
 	// UPDATE all raw memories in one statement. SQLite supports
@@ -823,15 +923,30 @@ func (dm *DatabaseManager) commitLessonAndMark(ctx context.Context, lesson *Comp
 	// with NULL/empty metadata by initializing to '{}' first. The
 	// WHERE clause mirrors the extract filter, ensuring we don't
 	// race against another caller that already marked some of these.
+	//
+	// The metadata normalisation below handles THREE shapes, not two.
+	// `json_insert('null', '$.k', v)` returns 'null' UNCHANGED —
+	// SQLite's json functions treat a JSON null scalar as a value, not
+	// an object, so the insert is a silent no-op. A row whose metadata
+	// is the JSON literal `null` (which is what json.Marshal writes
+	// for a nil map) would therefore never be marked, would stay in
+	// the compaction population, and would be re-offered on every
+	// drain — folding the same rows again and again. Normalising the
+	// literal to '{}' makes the marking total.
 	placeholders := make([]string, 0, len(rawIDs))
-	args := []interface{}{lessonID}
+	args := []interface{}{proposalID}
 	for _, id := range rawIDs {
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
 	updateSQL := fmt.Sprintf(`
 		UPDATE memories SET metadata = json_insert(
-			COALESCE(metadata, '{}'),
+			CASE
+				WHEN metadata IS NULL OR metadata = '' THEN '{}'
+				WHEN NOT json_valid(metadata) THEN metadata
+				WHEN json_type(metadata) = 'null' THEN '{}'
+				ELSE metadata
+			END,
 			'$.compacted_into',
 			?
 		)
@@ -846,7 +961,7 @@ func (dm *DatabaseManager) commitLessonAndMark(ctx context.Context, lesson *Comp
 	}
 	// rowsAffected should equal len(rawIDs). If it's less, a row was
 	// marked or deleted between the SELECT and the UPDATE — concurrent
-	// write. Log but don't fail; the lesson is still created and the
+	// write. Log but don't fail; the proposal is still created and the
 	// remaining rows are still marked.
 	if n, _ := res.RowsAffected(); n < int64(len(rawIDs)) {
 		// Non-fatal — the dominant case is single-writer. This guards
@@ -858,18 +973,25 @@ func (dm *DatabaseManager) commitLessonAndMark(ctx context.Context, lesson *Comp
 		return "", fmt.Errorf("commit: %w", err)
 	}
 
+	// Read-back assertion (Substrate Defense Triad, rule 3): an INSERT
+	// that returns nil does not prove persistence. A proposal that was
+	// not persisted must not be reported as awaiting review.
+	if _, err := dm.GetLessonProposal(proposalID); err != nil {
+		return "", fmt.Errorf("lesson proposal insert read-back failed (commit did not persist): %w", err)
+	}
+
 	// Record the compaction event so wake_context can surface
-	// last_compacted_at on future wakes. Non-fatal: the lesson and
+	// last_compacted_at on future wakes. Non-fatal: the proposal and
 	// raw-mark are already committed, so a write failure here just
 	// means the timestamp won't surface next session. The agent
-	// will still see the lesson via query_lessons / mcp stats; the
+	// will still see the pending proposal via the review queue; the
 	// \"when did I last compact?\" signal is informational, not
 	// load-bearing for correctness.
-	if err := dm.recordCompactionEvent(ctx, lessonID, len(rawIDs)); err != nil {
+	if err := dm.recordCompactionEvent(ctx, proposalID, len(rawIDs)); err != nil {
 		dm.LogAudit(AuditWarn, "compact_epistemology", "record event failed: "+err.Error(), "", AuditContext{})
 	}
 
-	return lessonID, nil
+	return proposalID, nil
 }
 
 // recordCompactionEvent writes a one-line ledger entry to system_config
@@ -880,11 +1002,16 @@ func (dm *DatabaseManager) commitLessonAndMark(ctx context.Context, lesson *Comp
 // Schema: {last_run_at: <RFC3339>, lesson_id: <id>, raw_marked: <count>}.
 // Kept minimal — detailed lesson content is in the lessons table; this
 // is just the \"did compaction happen recently?\" signal.
-func (dm *DatabaseManager) recordCompactionEvent(ctx context.Context, lessonID string, rawMarked int) error {
+func (dm *DatabaseManager) recordCompactionEvent(ctx context.Context, artifactID string, rawMarked int) error {
 	payload, err := json.Marshal(map[string]interface{}{
 		"last_run_at": time.Now().UTC().Format(time.RFC3339),
-		"lesson_id":   lessonID,
-		"raw_marked":  rawMarked,
+		"artifact_id": artifactID,
+		// artifact_kind names what the id refers to. Since the
+		// compaction records its synthesis as a pending proposal, the
+		// id is a lesson_proposals id; the promoted_lesson_id on that
+		// row is the lesson it became.
+		"artifact_kind": "lesson_proposal",
+		"raw_marked":    rawMarked,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)

@@ -14,6 +14,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -50,6 +51,43 @@ func callMPMCapture(t *testing.T, args ...string) (int, map[string]interface{}) 
 		t.Fatalf("decode envelope %q: %v", buf.String(), err)
 	}
 	return exit, envelope
+}
+
+// captureStdoutExit runs fn with stdout captured and returns its exit
+// code. The operator CLI writes its output to stdout, so the capture
+// keeps the test output clean.
+func captureStdoutExit(t *testing.T, fn func() int) int {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	exit := fn()
+	_ = w.Close()
+	os.Stdout = orig
+	_, _ = io.Copy(io.Discard, r)
+	_ = r.Close()
+	return exit
+}
+
+// latestLessonID returns the id of the most recently created lesson in
+// the given workspace. It reads the database the way an external
+// verifier would, so it does not depend on the in-process singleton.
+func latestLessonID(t *testing.T, ws string) string {
+	t.Helper()
+	dm, err := mpminternal.NewDatabaseManager(ws)
+	if err != nil {
+		t.Fatalf("NewDatabaseManager: %v", err)
+	}
+	defer dm.Close()
+	var id string
+	if err := dm.SQLDB().QueryRow(
+		`SELECT id FROM lessons_base ORDER BY created DESC LIMIT 1`).Scan(&id); err != nil {
+		t.Fatalf("read the newest lesson: %v", err)
+	}
+	return id
 }
 
 // TestHandleCall_ShredRefusedAndRowsSurvive is the end-to-end RED/GREEN
@@ -90,14 +128,22 @@ func TestHandleCall_ShredRefusedAndRowsSurvive(t *testing.T) {
 	}
 
 	// Seed and attempt to shred a lesson the same way.
-	exit, savedLesson := callMPMCapture(t, "mpm_lessons", "--payload",
-		`{"action":"save","params":{"fact":"lesson that must survive an agent shred via mpm call","type":"insight"}}`)
+	//
+	// The lesson is seeded through the OPERATOR path (`mpm lesson add`),
+	// because the agent-reachable lesson write is now REFUSED: a lesson
+	// is trusted on arrival, so only an operator may create one. The
+	// shred boundary this test pins is unchanged — an agent still cannot
+	// destroy a lesson that exists.
+	exit = captureStdoutExit(t, func() int {
+		return handleLesson([]string{"add",
+			"lesson that must survive an agent shred via mpm call", "--type", "insight"})
+	})
 	if exit != 0 {
-		t.Fatalf("seed lesson via mpm call: exit %d, envelope %v", exit, savedLesson)
+		t.Fatalf("seed lesson via the operator path: exit %d", exit)
 	}
-	lessonID, _ := savedLesson["id"].(string)
+	lessonID := latestLessonID(t, ws)
 	if lessonID == "" {
-		t.Fatalf("seed lesson returned no id: %v", savedLesson)
+		t.Fatal("seed lesson via the operator path produced no lesson")
 	}
 	exit, envelope := callMPMCapture(t, "mpm_lessons", "--payload",
 		`{"action":"shred","params":{"id":"`+lessonID+`","confirm":true}}`)
