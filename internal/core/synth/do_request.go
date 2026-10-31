@@ -118,6 +118,20 @@ func ResetCallcounter() { requestCallcounter.Store(0) }
 // error for auth / billing / rate-limit failures.
 func (sc *SynthClient) DoLLMRequestWithPlan(ctx context.Context, body map[string]interface{}, plan *Plan, mode AttemptMode) ([]byte, error) {
 	requestCallcounter.Add(1)
+	// A credential that could not be RESOLVED is refused here, at the
+	// wire, before any request is made.
+	//
+	// The alternative — sending the unresolved value and letting the
+	// provider refuse it — is the defect this closes: the provider
+	// answers 401 for a LITERAL PLACEHOLDER, and the operator is told
+	// their credential is invalid when the configuration, not the
+	// credential, is what is wrong. The refusal never reaches the
+	// network, and the message names the actual problem.
+	//
+	// The error carries no secret.
+	if sc.CredentialError != nil {
+		return nil, sc.CredentialError
+	}
 	if plan == nil {
 		plan = NewPerCallPlan()
 	}

@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+
+	"github.com/flowbyte-com/mpm-core/synth"
 )
 
 // classifyFromWire maps the production wire / transport failure signals onto
@@ -36,6 +38,23 @@ func classifyFromWire(err error, class string, httpStatus int, bodyFragment stri
 	// the operator intact.
 	if class == "FailureCredentialRedirectRefused" {
 		return ProbeRedirectRefused
+	}
+	// A credential that could not be RESOLVED is checked next, and for
+	// the same reason.
+	//
+	// The endpoint may be perfectly healthy and the credential
+	// perfectly valid; what is wrong is the CONFIGURATION — a profile
+	// whose api_key names an environment variable this endpoint does not
+	// declare, or declares but has not set. Reporting that as
+	// "unreachable" would send the operator to look at the network,
+	// and reporting it as an authentication failure would send them to
+	// rotate a credential that was never the problem.
+	//
+	// The message carries the reason, so the default rendering shows
+	// it verbatim.
+	var credErr *synth.CredentialError
+	if errors.As(err, &credErr) {
+		return ProbeUnknown
 	}
 	// Transport-level signals first.
 	if err != nil {

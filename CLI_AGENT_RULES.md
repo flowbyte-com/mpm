@@ -399,6 +399,86 @@ runtime. The substrate supplies its own `max_tokens` (currently
 16384 — see `synthInternalMaxTokens` in
 `internal/core/synth/client.go`).
 
+### The request timeout is not an onboarding decision
+
+`timeout_seconds` — the bound on a MODEL REQUEST — is an advanced
+setting. The interactive wizard MUST NOT ask for it.
+
+The number only matters in a failure mode most operators never see,
+and it cannot be chosen sensibly before the operator has watched a
+slow provider. Putting it in front of every user as a default they
+were expected to accept also made a typo (`3` instead of `30`) a live
+fault that failed every request against that profile.
+
+What the wizard MUST do instead:
+
+- a fresh profile is written with the substrate default, so the
+  configuration states what will actually be used;
+- an existing profile KEEPS whatever the operator already configured —
+  an upgrade MUST NOT silently replace a configured value;
+- an existing INVALID value (zero or negative) is replaced by the
+  default, and the replacement is REPORTED.
+
+`timeout_seconds` remains a manually editable field in
+`mpm_config.json` and remains settable from a terminal with
+`mpm config profile set <name> timeout_seconds <value>`. Removing the
+QUESTION must not remove the SETTING.
+
+The default and the validation policy live in ONE place —
+`config.DefaultTimeoutSeconds`, `config.EffectiveTimeoutSeconds` and
+`config.TimeoutSecondsIsValid` in `internal/core/config/timeout.go` —
+and the wizard, the generated configuration and the runtime all resolve
+through that policy, so they cannot disagree. Only a positive value is
+valid: a non-positive value would mean "no timeout at all" to Go's
+`http.Client`, which treats a non-positive `Timeout` as unlimited.
+
+The CONNECTION-VERIFICATION timeout is a different thing and is never
+inherited from the profile. A provider that does not answer a
+verification in time MUST be reported as a timeout, never as an
+invalid credential.
+
+That verification bound is ONE number for every verification surface —
+`probe.ProbeTimeoutForVerification`, 15 seconds — and it is bounded:
+an endpoint that does not answer is reported as a timeout after 12
+seconds. It MUST NOT be shortened below the provider's own observed
+latency: the bound this replaced was 1.5 seconds, while the live
+MiniMax surface's slowest observed call was 4761ms, so a **valid**
+credential was reported as a timeout and the operator was sent to
+rotate a working key. The whole verification is additionally bounded
+by `probe.ProbeTotalBudget` (40 seconds), which MUST exceed the
+per-request bound.
+
+### A credential is a literal secret, and a reference is a reference
+
+A profile's `api_key` is a **literal secret**. It is presented to the
+provider exactly as written. It is NOT a template.
+
+A value shaped like an environment variable — `"$NAME"` or `"${NAME}"` —
+is the one exception, and it is resolved as a **reference**. This
+distinction MUST be communicated: a prompt that asks for "API key"
+without saying what the answers mean leaves the operator to guess
+whether a value will be stored as a secret or read from the
+environment.
+
+Every prompt that asks for a credential MUST print, before it asks:
+
+- an EMPTY answer uses the endpoint's declared environment variable,
+  and the variable is NAMED — an operator cannot act on "the
+  environment variable" without knowing which one it is;
+- a TYPED value is stored as a literal secret and is never expanded;
+- the variable's NAME is a reference to that variable, not a secret.
+
+The expansion is CLOSED over the substrate's own table
+(`synth.APIKeyEnvVars`): a reference resolves only when it names a
+credential variable the endpoint itself declares, and a reference to
+anything else is REFUSED rather than expanded. MPM MUST NOT implement
+arbitrary environment expansion — that would let a configuration file
+name any environment variable and cause its value to be sent to a
+provider.
+
+No secret may appear in a message: not the configured value, not the
+resolved value, and not a name the operator typed.
+
 ### Existing profile compatibility
 
 Existing profiles with branded provider IDs (`provider=openai`,

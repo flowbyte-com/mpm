@@ -39,19 +39,86 @@ const probeMaxTokens = 16
 // fail the non-empty check.
 const probeUserPrompt = "Reply with exactly two words: OK READY"
 
-// ProbeTimeoutForDoctor is the per-probe timeout for Doctor active probes.
-// Longer than the original 6s to absorb cold local-model warm-up (cold
-// Ollama / LM Studio can take 8-10s for first-load model materialisation).
-const ProbeTimeoutForDoctor = 12 * time.Second
+// ProbeTimeoutForVerification is the SINGLE per-request bound for every
+// connection-verification probe.
+//
+// WHY ONE NUMBER
+// --------------
+// Two probes existed with two bounds — 12s for Doctor, 1.5s for the
+// post-save verification — and they disagreed about the same question:
+// "did the endpoint answer?". A bound that is right for one surface is
+// wrong for the other, and two numbers are two chances to be wrong.
+//
+// It is now ONE number, used by both.
+//
+// WHY 15 SECONDS, AND NOT 1.5
+// ---------------------------
+// The post-save verification's bound was 1.5 seconds. That is SHORTER
+// than the provider's own typical latency, so a VALID credential was
+// reported as a timeout. Measured against the live MiniMax
+// Anthropic-compatible surface through this canonical probe path
+// (7 requests per model, three separate runs):
+//
+//	MiniMax-M3     min  415ms   median 560-700ms   max 4761ms
+//	MiniMax-M2.7   min  444ms   median 603-1007ms  max 2220ms
+//
+// The slowest healthy call was 4761ms — THREE TIMES the old 1.5s
+// bound. A slow-but-valid provider was therefore reported as a
+// timeout, and a timeout on a credential surface is what an operator
+// reads as "my credential is wrong". That sends them to fix something
+// that was never broken.
+//
+// The tail is the number that matters, and it is heavy: the median is
+// well under a second, but a minority of calls take three to five
+// seconds. A bound sized to the median would fail half the time.
+//
+// 15 seconds is 3.1x the worst observed call, and 20x the substrate's
+// 300s model-request default. It is BOUNDED: an endpoint that does not
+// answer is reported as a timeout after 15 seconds, and the probe
+// never waits without a deadline.
+//
+// The cost of the generous bound is bounded too. An endpoint that
+// REFUSES the connection fails immediately — the bound is only spent
+// on an endpoint that accepts the connection and then stays silent,
+// which is exactly the case where patience is warranted.
+//
+// 15 seconds also serves the Doctor surface, whose own reason for a
+// long bound survives: a cold local model can take 8-10s to
+// materialise. One number now serves both.
+//
+// WHAT IT IS NOT
+// --------------
+// This is NOT the model-request timeout. `timeout_seconds` is how long
+// the substrate waits for a GENERATION; this is how long a verification
+// waits for an endpoint to answer a tiny connectivity question. They are
+// different knobs, and this bound is never read from the profile — see
+// internal/core/config/timeout.go for the request timeout's own policy.
+//
+// A verification must never wait as long as a generation, and it must
+// never be shortened by an operator who tuned `timeout_seconds` for
+// their generation workload.
+const ProbeTimeoutForVerification = 15 * time.Second
 
-// ProbeTimeoutForConfigSave is a tight per-probe timeout for the post-save
-// probe — the operator's `mpm config profile set/add` command must NOT
-// block visibly on an unreachable endpoint. If the endpoint doesn't
-// answer quickly, we surface timeout as the failure class and return
-// promptly so the operator's CLI returns within ~2s. Real inference
-// health is verified via `mpm doctor`, which uses the longer Doctor
-// deadline above.
-const ProbeTimeoutForConfigSave = 1500 * time.Millisecond
+// ProbeTotalBudget is the ceiling on a WHOLE verification, across every
+// request the probe may make.
+//
+// A verification can make at most TWO requests: the first attempt, and
+// one bounded recovery — a single alternative authentication scheme, or
+// a single transient-transport retry. Each is bounded by
+// ProbeTimeoutForVerification, so the ceiling is two bounds plus the
+// backoff between them.
+//
+// The total budget MUST be larger than the per-request bound, and it
+// must be the OUTER deadline. If the outer deadline were shorter than
+// the per-request bound, the outer one would fire first and the probe
+// would report a bare context deadline instead of the provider's own
+// client timeout — the same failure, wearing a different message, and
+// indistinguishable from it at the surface that renders it.
+//
+// The budget is exported so the call site does not carry its own
+// magic number: the bound and the budget that must exceed it are
+// decided in ONE place.
+const ProbeTotalBudget = 40 * time.Second
 
 // probeGenerative executes a single generative probe against a profile
 // resolved through the live config. It:
@@ -71,7 +138,7 @@ const ProbeTimeoutForConfigSave = 1500 * time.Millisecond
 // `dm` may be nil — the probe is hermetic on the network side and does
 // not touch the database.
 func probeGenerative(ctx context.Context, p *config.Profile, kind ProbeKind) ProbeResult {
-	return probeGenerativeWithTimeout(ctx, p, kind, ProbeTimeoutForDoctor)
+	return probeGenerativeWithTimeout(ctx, p, kind, ProbeTimeoutForVerification)
 }
 
 // probeGenerativeWithTimeout is the variant that lets callers override
