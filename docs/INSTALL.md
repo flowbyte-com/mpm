@@ -185,6 +185,12 @@ row is not a failure.
 ./install.sh --uninstall       # remove artifacts (data preserved)
 ```
 
+> **The two roots are separate in the default layout, and one in the bundle
+> layout.** `--prefix` and `--data-root` may name different directories in the
+> default layout: the binaries go to the prefix and the state to the data root.
+> In the **versioned bundle layout** they must name the **same** directory —
+> see §1g.
+
 > The `--system` flag and `MPM_SYSTEM=1` env form have been removed. MPM
 > is user-space only as of this release. A legacy `/etc/systemd/system/
 > mpm-scheduler.service` left over from a previous install must be
@@ -237,12 +243,34 @@ symlinks into the active bundle and **moves the originals aside** rather
 than deleting them — they are the rollback material, and their locations
 are recorded in `~/.mpm/.legacy-layout-paths`.
 
+**The layout has one root.** The stable paths are written with the
+*relative* target `current/<name>`, so they resolve inside the install
+prefix, while the active pointer lives at `<data root>/current`. The two
+agree only when the install prefix and the data root are the **same**
+directory — which is the default, `~/.mpm` for both. With `--bundle`,
+`--prefix` and `--data-root` naming different directories is **refused
+before anything is created**: the stable paths would resolve against a
+`current` that does not exist, and a conversion that cannot produce a
+resolvable stable path must not report success. The default (non-bundle)
+layout is unaffected — there the split is supported, and the binaries go
+to the prefix while the state goes to the data root.
+
 **A failed promotion rolls back.** If anything fails after the pointer was
 swapped, the previous pointer is restored and the layout conversion is
 undone. That is a **filesystem** rollback: it restores which files are
 where. It is **not** a data rollback — a migration the new binary applied
 to the database is not undone by it. See
 [the migration plan](dev/runtime-migration-plan.md) §4.5.
+
+The rollback reads `.legacy-layout-paths` as a statement that can be
+false, and **fails closed** when it is. A record whose last line has no
+trailing newline is truncated, and it is read as a complete list rather
+than a shorter one — the dropped entry is the operator's directory. A
+record that names something other than a preserved directory inside the
+install prefix is malformed, and it is not acted on at all. A missing
+record does not hide conversion material that is still sitting in the
+prefix. And a rollback that does not complete leaves the record in
+place, naming what is still unrestored, so the operator can read it.
 
 **The schema preflight runs on every install.** Before the build and
 before any promotion, the installer compares the live database's table
