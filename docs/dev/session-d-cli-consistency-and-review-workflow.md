@@ -222,6 +222,109 @@ real breakages during this work (§5).
 
 ---
 
+## 3A. The two corrections — this supersedes §2 and §3 where they differ
+
+> **§3A is the SECOND cut.** Two review-workflow defects were raised
+> against this branch after it went CI-green, and both changed the
+> implementation. They are in **§3A**, and **§3A supersedes §2 and §3**
+> where they differ. The measurements in §1 still hold.
+
+### 3A.1 The review and the weakening were two writes
+
+§2 made the review reachable and honest, and §3 made the CLI's option
+contract truthful. But the *acknowledgment* itself was still two
+separate writes:
+
+```go
+dm.RecordMemoryReview(id, decision, note)   // write 1
+if decision == "weaken" {
+    dm.WeakenMemory(id, 1)                  // write 2
+}
+```
+
+If write 2 failed, write 1 had already landed. The memory had **left
+the doctor's backlog**, and the weight the operator asked to reduce was
+**untouched**. The operator's decision was half applied, and the error
+message named only the half that worked:
+
+> *"review: recorded the review of %s but could not weaken it"*
+
+The reverse order has the mirror defect — the weight reduced and the
+memory still in the backlog, so the next review would ask again.
+
+**THE CORRECTION.** The decision and the mutation are one operator act,
+so they are now **one transaction**:
+
+```go
+dm.RecordMemoryReviewsAndApply(targets, decision, note)
+```
+
+`--ack-all` is atomic as a **unit**: every review and every weakening,
+or none of them. A partially applied batch is never reported as
+complete success, and it is never left behind.
+
+**THE WEIGHT CHANGE IS NOT A SECOND IMPLEMENTATION.** `WeakenMemory` was
+refactored into `weakenMemoryOn(ex memExecer, ...)` and
+`RecordMemoryReview` into `recordMemoryReviewOn(ex memExecer, ...)`.
+Both `*sql.DB` and `*sql.Tx` satisfy `memExecer`, so the **exact same**
+floor (`MAX(weight - ?, 1)`), validation, busy-error mapping and
+read-back assertion run inside the transaction and outside it. The
+atomic path and the standalone path are one implementation and cannot
+drift apart.
+
+### 3A.2 The self-maintenance path used a SECOND definition of eligibility
+
+§2 established ONE canonical rule — `internal/core/review.go`'s
+`reviewCandidateQuery`, with the review clock
+`COALESCE(reviewed_at, last_accessed_at, created_at)` — and moved the
+doctor, the dashboard and the CLI onto it. But one path was left behind:
+
+```go
+forReview, err := s.SpacedReinforcementReview(14, 100)
+stats.ForReview = len(forReview)
+```
+
+That was wrong three ways at once:
+
+| | the OLD rule | the CANONICAL rule |
+|---|---|---|
+| a never-accessed memory | due **immediately**, however new | due only once it is itself older than the window |
+| a memory the operator **reviewed** | still counted — the `memory_reviews` ledger is ignored | not due — an operator's review is the strongest signal |
+| the count | the length of a **100-candidate sample** | the **total** |
+
+And a fourth: the hard-coded `14` was a second copy of the window the
+canonical constant already holds.
+
+**THE CORRECTION.** `RunSelfMaintenance` now calls
+`CountMemoriesDueForReview(ReviewDueAfterDays)` — the same query the
+operator-facing surfaces use, with the total rather than a capped
+slice. There is now **one** definition of review eligibility in the
+substrate. The legacy `SpacedReinforcementReview` function is kept for
+the surfaces that ask for a *list* rather than a count; its only
+active production caller of the old *rule* was this path.
+
+### 3A.3 The evidence
+
+The corrections are pinned by eleven tests, and each one was run
+against the **pre-fix** code to prove it pins the defect rather than
+merely describing the fix.
+
+| test | on the pre-fix code (`4b420452`) |
+|---|---|
+| `TestReviewWeakenIsAtomic_AFailedWeakeningLeavesNoReview` | **FAILS** — *"the review was recorded even though the weakening failed: 1 review row(s)"* |
+| `TestReviewAckAllIsAtomic_AFailureLeavesNothingApplied` | **FAILS** — *"the batch left 2 review row(s) behind after a failure"*; *"batch-a changed weight even though the batch failed: 7 -> 6"* |
+| `TestSelfMaintenanceReviewCount_MatchesTheCanonicalRule` | **FAILS** — *"reported 2 memories due for review; the canonical rule says 1"* |
+| `TestSelfMaintenanceReviewCount_AReviewedMemoryIsNotDue` | **FAILS** — *"counted a REVIEWED memory: 1; the canonical rule says 0"* |
+| `TestSelfMaintenanceReviewCount_IsTheTotalNotASample` | **FAILS** — *"reported 100 memories due for review; the backlog is 150"* |
+
+The remaining six pass on both — they are regression guards for
+behaviour that was already correct (a `keep` changes nothing, a
+successful weakening records both halves, SQLite contention leaves
+nothing behind, a failed operation recovers, a successful batch records
+every review, and the maintenance path agrees with the doctor).
+
+---
+
 ## 4. What was NOT changed (and why)
 
 | Item | State |
